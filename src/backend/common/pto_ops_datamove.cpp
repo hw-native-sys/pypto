@@ -906,6 +906,7 @@ static void EmitTreshapeView(codegen::PTOCodegen& codegen, const ir::ExprPtr& sr
     result_target = codegen.NewNamedTemp(temp_prefix);
     codegen.SetCurrentResultBuf(result_target);
     codegen.RegisterTileBufType(result_target, result_type);
+    codegen.RegisterTileViewName(result_target);
   }
   std::ostringstream oss;
   oss << result_target << " = pto.treshape " << src;
@@ -1080,6 +1081,7 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     }
     codegen.Emit(oss.str());
     codegen.RegisterTileBufType(view_ssa, view_type);
+    codegen.RegisterTileViewName(view_ssa);
 
     // Lazy materialization fallback: a few downstream ops (e.g. pto.tcolexpandmul)
     // cannot consume a subview SSA directly because their hardware lowering
@@ -1338,6 +1340,33 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     if (tile_buf_type.empty()) {
       tile_buf_type = codegen.GetCurrentResultTileBufTypeStringFromTileType();
     }
+
+    // `pto.set_validshape` mutates the operand's `valid_row` / `valid_col`
+    // operands. A *view* — the `pto.subview` a tile.slice lowers to, or a
+    // `pto.treshape` — has none: it carries its valid extent in its own type, so
+    // ptoas rejects the runtime op against one ("expects source tile_buf to have
+    // dynamic validShape (?, ?)" / "requires a locally bound tile source"). Every
+    // other handle (an alloc, an `scf.if` result, a cross-core pop slot) takes the
+    // runtime op unchanged.
+    //
+    // Ask whether the operand IS a view, tracked at the two emission sites above.
+    // The rendered valid dims cannot answer it in either direction: a tile.slice
+    // given a runtime `valid_shape` renders `v_row=?, v_col=?` just as an
+    // alloc-backed handle does.
+    //
+    // Reject rather than re-view. A narrowing could be re-expressed as another
+    // `pto.treshape`, but only for a compile-time constant extent, and it would
+    // give this one operation two different aliasing semantics: mutating the
+    // shared handle for an alloc (every holder observes the narrowing) versus
+    // binding a fresh view for a slice (only later uses do). Diverging on operand
+    // provenance is exactly the trap that silently shifted DeepSeek-V4-Flash
+    // decode_csa numerics while this path was being developed. A view's extent is
+    // already first-class at the slice, so point there instead.
+    CHECK_SPAN(!codegen.IsTileViewName(tile_buf), op->span_)
+        << "pl.set_validshape cannot narrow a tile view (a slice or reshape result): a view carries "
+           "its valid extent in its type, not in the runtime operands this lowers to. Narrow at the "
+           "slice itself -- pl.tile.slice(tile, shape, offset, valid_shape=[...]), which also accepts "
+           "runtime extents -- or call pl.set_validshape on the source tile before taking the view";
 
     auto emit_index_arg = [&](const ir::ExprPtr& arg) -> std::string {
       if (auto var = ir::As<ir::Var>(arg)) {

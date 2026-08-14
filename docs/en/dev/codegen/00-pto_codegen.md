@@ -139,6 +139,7 @@ print(pto_code)
 | `tile.store(tile, [row, col], tensor)` | `pto.partition_view` + `pto.tstore` |
 | `tile.slice(tile, [h, w], [row, col][, valid_shape=...])` | `pto.subview` (zero-copy view; `valid [...]` clause emitted only when `valid_shape` is supplied) |
 | `tile.assemble(target, source, [row, col])` | (optional) `pto.tmov target -> dst` + `pto.subview dst[row, col] sizes [src.rows, src.cols]` + `pto.tmov src -> dst_view` |
+| `tile.set_validshape(tile, vr, vc)` | `pto.set_validshape`; a view operand is rejected (see below) |
 | `tile.mul(lhs, rhs)` | `pto.tmul` |
 | `tile.add(a, b, c)` | `pto.taddc` (3-operand add) |
 | `tile.adds(tile, scalar)` | `pto.tadds` (tile + scalar) |
@@ -164,6 +165,18 @@ when buffer reuse did not collapse `target` and the destination buffer; in
 that case it preserves any data outside the insertion window.  The
 trailing `pto.tmov src → dst_view` is the actual data write into the
 sub-window carved out by `pto.subview`.
+
+**`tile.set_validshape` lowering details.**  `pto.set_validshape` mutates the
+operand's `valid_row` / `valid_col` operands, so the operand must be a handle
+that has them: an alloc, an `scf.if` result, a cross-core pop slot.  A **view** —
+the `pto.subview` a `tile.slice` lowers to, or a `pto.treshape` — carries its
+valid extent in its own type instead, so ptoas rejects the op against one; PyPTO
+therefore rejects it first, with a message pointing at the slice.  View-ness is
+tracked at those emission sites rather than inferred from the rendered dims: a
+slice given a runtime `valid_shape` renders `v_row=?, v_col=?` exactly as an
+alloc-backed handle does.  To narrow a view, pass `valid_shape=` to the slice
+(it lands in `pto.subview`'s `valid [...]` clause and accepts runtime extents),
+or call `set_validshape` on the source tile before taking the view.
 
 ### Cross-Core Operations → PTO Instructions
 

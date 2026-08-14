@@ -1506,8 +1506,10 @@ def set_validshape(input, valid_rows, valid_cols):
     """Update valid-shape metadata without data movement, dispatched by input type.
 
     .. note::
-        Internal API — intended for compiler-generated code. End users should
-        prefer ``pl.load(..., valid_shape=...)`` plus ``pl.tile.fillpad``.
+        Prefer expressing the extent at its source where possible —
+        ``pl.load(..., valid_shape=...)`` or a slice's ``valid_shape=``. A tile
+        view (slice / reshape result) is rejected: it carries its valid extent in
+        its type, so there are no runtime operands to update.
     """
     if isinstance(input, Tensor):
         return _tensor.set_validshape(input, valid_rows, valid_cols)

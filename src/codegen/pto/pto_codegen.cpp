@@ -1824,6 +1824,12 @@ std::string PTOCodegen::GetSSATileBufType(const std::string& ssa_name) const {
   return it != fs_.ssa_to_tile_buf_type.end() ? it->second : std::string{};
 }
 
+void PTOCodegen::RegisterTileViewName(const std::string& ssa_name) { fs_.tile_view_names.insert(ssa_name); }
+
+bool PTOCodegen::IsTileViewName(const std::string& ssa_name) const {
+  return fs_.tile_view_names.count(ssa_name) > 0;
+}
+
 void PTOCodegen::RegisterSubviewMaterialization(const std::string& subview_ssa,
                                                 const SubviewMaterializationInfo& info) {
   fs_.subview_materializations[subview_ssa] = info;

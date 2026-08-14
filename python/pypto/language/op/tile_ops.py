@@ -2067,8 +2067,9 @@ def set_validshape(tile: Tile, valid_rows: IntLike, valid_cols: IntLike) -> Tile
     """Update valid-shape metadata of a tile without data movement.
 
     .. note::
-        Internal API — this op is intended for compiler-generated code only
-        and should not be exposed to end users in future releases.
+        The operand must not be a view (a ``pl.tile.slice`` or reshape result): a
+        view carries its valid extent in its type, so there is nothing to update.
+        Narrow at the slice with ``valid_shape=`` instead.
 
     Args:
         tile: Input tile (must be 2D)

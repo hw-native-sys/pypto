@@ -791,7 +791,7 @@ TypePtr DeduceTensorSetValidShapeType(const std::vector<ExprPtr>& args,
                                       std::make_optional(std::move(tensor_view)));
 }
 
-// NOTE: Internal op for compiler-generated code only; should not be exposed to end users in future releases.
+// Public: reachable from the DSL as `pl.set_validshape` / `pl.tensor.set_validshape`.
 // The result aliases the input's storage, so it inherits the input's memory
 // space — the same relation `tile.set_validshape` already declares. Without it,
 // ConvertTensorToTileOps cannot propagate a consumer's memory-space requirement
@@ -802,7 +802,7 @@ TypePtr DeduceTensorSetValidShapeType(const std::vector<ExprPtr>& args,
 // AIC/AIV pair (issue #2227).
 REGISTER_OP("tensor.set_validshape")
     .set_op_category("TensorOp")
-    .set_description("Update valid-shape metadata of a tensor without data movement (internal)")
+    .set_description("Update valid-shape metadata of a tensor without data movement")
     .add_argument("tensor", "Input tensor (TensorType, 2D)")
     .add_argument("valid_rows", "Number of valid rows (ScalarType INDEX/INT64/UINT64)")
     .add_argument("valid_cols", "Number of valid columns (ScalarType INDEX/INT64/UINT64)")

@@ -538,8 +538,9 @@ def set_validshape(tensor: Tensor, valid_rows: IntLike, valid_cols: IntLike) -> 
     """Update valid-shape metadata of a tensor without data movement.
 
     .. note::
-        Internal API — this op is intended for compiler-generated code only
-        and should not be exposed to end users in future releases.
+        Prefer expressing the extent at its source where possible —
+        ``pl.load(..., valid_shape=...)`` or a slice's ``valid_shape=`` — and use
+        this to pin an extent the type deducer cannot infer.
 
     Args:
         tensor: Input tensor (must be 2D)

@@ -137,6 +137,7 @@ print(pto_code)
 | `tile.store(tile, [row, col], tensor)` | `pto.partition_view` + `pto.tstore` |
 | `tile.slice(tile, [h, w], [row, col][, valid_shape=...])` | `pto.subview`（零拷贝视图；仅在传入 `valid_shape` 时输出 `valid [...]` 子句） |
 | `tile.assemble(target, source, [row, col])` | （可选）`pto.tmov target -> dst` + `pto.subview dst[row, col] sizes [src.rows, src.cols]` + `pto.tmov src -> dst_view` |
+| `tile.set_validshape(tile, vr, vc)` | 发 `pto.set_validshape`；操作数是视图时报错（见下） |
 | `tile.mul(lhs, rhs)` | `pto.tmul` |
 | `tile.add(a, b, c)` | `pto.taddc` (三操作数加法) |
 | `tile.adds(tile, scalar)` | `pto.tadds` (Tile + 标量) |
@@ -159,6 +160,16 @@ print(pto_code)
 `target` 与目标缓冲合并时才会发出，用于保留写入窗口外的数据；末尾的
 `pto.tmov src → dst_view` 才是真正写入由 `pto.subview` 切出的子窗口的数据
 搬运。
+
+**`tile.set_validshape` 下沉细节。** `pto.set_validshape` 修改的是操作数的
+`valid_row` / `valid_col` 操作数，因此操作数必须是拥有它们的 handle：alloc、
+`scf.if` 结果、跨核 pop slot。而**视图**——`tile.slice` 下沉出的 `pto.subview`，
+或 `pto.treshape`——把有效范围存在自身类型里，ptoas 会拒绝对它执行这条指令，所以
+PyPTO 提前报错，并在信息里指向切片。视图身份在这两个发射点被记录，而不是从渲染出
+的维度推断：带运行时 `valid_shape` 的切片渲染成 `v_row=?, v_col=?`，与由 alloc
+承载的 handle 完全一样。要收窄视图，请给切片传 `valid_shape=`（它会落到
+`pto.subview` 的 `valid [...]` 子句，并且支持运行时范围），或在取视图之前对源
+tile 调用 `set_validshape`。
 
 ### 跨核操作到 PTO 指令
 

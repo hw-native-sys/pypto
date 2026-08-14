@@ -2482,6 +2482,68 @@ class TestSetValidShapeCodegen:
             f"Expected subsequent narrowed uses to resolve to the source tile SSA, got:\n{store_line}"
         )
 
+    def test_set_validshape_on_a_slice_is_rejected(self):
+        """A view operand has no valid_row / valid_col operands to update.
+
+        `tile.slice` lowers to a `pto.subview`, which carries its valid extent in
+        its own type. ptoas rejects a runtime `pto.set_validshape` against it
+        ("expects source tile_buf to have dynamic validShape (?, ?)"), so PyPTO
+        must reject it first with a message that names the alternative instead of
+        letting the failure surface in the assembler.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[32, 8], pl.FP32],
+                dst: pl.Out[pl.Tensor[[8, 8], pl.FP32]],
+            ) -> pl.Tensor[[8, 8], pl.FP32]:
+                packed: pl.Tile[[32, 8], pl.FP32] = pl.load(
+                    src, [0, 0], [32, 8], target_memory=pl.MemorySpace.Vec
+                )
+                blk: pl.Tile[[8, 8], pl.FP32] = packed[8:16, 0:8]
+                narrowed: pl.Tile[[8, 8], pl.FP32] = pl.tile.set_validshape(blk, 8, 4)
+                padded: pl.Tile[[8, 8], pl.FP32] = pl.tile.fillpad(narrowed, pad_value=pl.PadValue.zero)
+                return pl.store(padded, [0, 0], dst)
+
+        with pytest.raises(ValueError, match="cannot narrow a tile view"):
+            self._generate_mlir(Prog)
+
+    def test_set_validshape_rejects_a_dynamic_valid_slice_by_view_provenance(self):
+        """A view is recognised by provenance, not by its rendered valid dims.
+
+        `tile.slice` given a runtime `valid_shape` emits a `pto.subview` typed
+        `v_row=?, v_col=?` — the same rendering an alloc-backed handle uses. It is
+        still a view with no operands to update, so it must be rejected too;
+        reading the type tokens instead would emit a `pto.set_validshape` that
+        ptoas refuses with "requires a locally bound tile source".
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[32, 8], pl.FP32],
+                slice_rows: pl.Scalar[pl.INDEX],
+                slice_cols: pl.Scalar[pl.INDEX],
+                dst: pl.Out[pl.Tensor[[8, 8], pl.FP32]],
+            ) -> pl.Tensor[[8, 8], pl.FP32]:
+                packed: pl.Tile[[32, 8], pl.FP32] = pl.load(
+                    src, [0, 0], [32, 8], target_memory=pl.MemorySpace.Vec
+                )
+                blk: pl.Tile[[8, 8], pl.FP32] = pl.tile.slice(
+                    packed, [8, 8], [8, 0], valid_shape=[slice_rows, slice_cols]
+                )
+                narrowed: pl.Tile[[8, 8], pl.FP32] = pl.tile.set_validshape(blk, 8, 4)
+                padded: pl.Tile[[8, 8], pl.FP32] = pl.tile.fillpad(narrowed, pad_value=pl.PadValue.zero)
+                return pl.store(padded, [0, 0], dst)
+
+        with pytest.raises(ValueError, match="cannot narrow a tile view"):
+            self._generate_mlir(Prog)
+
 
 class TestMrgSortCodegen:
     """Tests for mrgsort format1 code generation with constant and variable block_len."""

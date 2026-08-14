@@ -426,6 +426,20 @@ class PTOCodegen : public CodegenBase {
   void SetCurrentResultBuf(const std::string& buf);
   void RegisterTileBufType(const std::string& ssa_name, const std::string& type_string);
   std::string GetSSATileBufType(const std::string& ssa_name) const;
+  /// Record `ssa_name` as a tile *view* — the result of a `pto.subview` or a
+  /// `pto.treshape`, which reinterprets another handle's bytes.
+  void RegisterTileViewName(const std::string& ssa_name);
+  /// Whether `ssa_name` was emitted as a tile view.
+  ///
+  /// A view carries its valid extent in its own type and has no `valid_row` /
+  /// `valid_col` operands, so `pto.set_validshape` cannot mutate one and ptoas
+  /// rejects the attempt. Every other tile handle — an alloc, an `scf.if` result,
+  /// a cross-core pop slot — does accept it.
+  ///
+  /// View-ness has to be tracked, not inferred from the rendered valid dims: a
+  /// `tile.slice` given a runtime `valid_shape` renders `v_row=?, v_col=?`, the
+  /// same way an alloc-backed handle does.
+  bool IsTileViewName(const std::string& ssa_name) const;
   struct SubviewMaterializationInfo {
     std::string source_ssa;
     std::string source_type;
@@ -899,6 +913,8 @@ class PTOCodegen : public CodegenBase {
     std::vector<ExtraAllocTile> extra_alloc_tiles;
     std::map<std::string, std::string> ssa_to_tile_buf_type;
     std::map<std::string, SubviewMaterializationInfo> subview_materializations;
+    /// SSA names emitted as tile views (`pto.subview` / `pto.treshape`).
+    std::set<std::string> tile_view_names;
 
     /// Eligible multi-buffer regions, keyed by the allocation's base Ptr.
     std::map<const ir::Var*, MultiBufferRegion> multi_buffer_regions;
@@ -988,6 +1004,7 @@ class PTOCodegen : public CodegenBase {
       extra_alloc_tiles.clear();
       ssa_to_tile_buf_type.clear();
       subview_materializations.clear();
+      tile_view_names.clear();
 
       temp_counter = 0;
       used_ssa_names.clear();
