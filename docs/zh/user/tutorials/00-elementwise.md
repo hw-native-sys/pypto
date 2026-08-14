@@ -148,6 +148,16 @@ python examples/beginner/02_elementwise.py
 | **tile 形状被拒** | 窗口超出片上内存所能容纳 | 分块 —— 第 3 步 |
 | **多次运行结果不同** | 两个任务触碰同一缓冲区却无任何东西定序 | 见 [依赖模型](../tasks/00-model.md) |
 
+## 同一形状的其他例子
+
+三个同伴各只变一件事，四个都用同样的方式运行：
+
+| 示例 | 变的是 |
+| ---- | ------ |
+| `examples/beginner/03_scalar_ops.py` | 用标量操作数替代第二个 tile |
+| `examples/beginner/04_activation.py` | 用 `relu` / SiLU 替代 `add` |
+| `examples/beginner/06_concat.py` | 两个 tile 写进同一个输出的互不相交列区间 |
+
 ## 下一步
 
 [规约与 softmax](01-reduction-softmax.md) —— 一个输出元素依赖于整行的场合，tile 词汇就不够用了。

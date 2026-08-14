@@ -153,6 +153,21 @@ for what the pass does, [ExpandMixedKernel](../../dev/passes/21-expand_mixed_ker
 | **The producer stalls after a while** | A popped slot was never `tfree`d | Match every pop with a `tfree` |
 | **Split rejected on a scope** | The body mixes split and plain full-width vector ops | Use the explicit `pl.split_aiv` region form |
 
+## The same shape in a real model
+
+`examples/models/qwen3_jit/` is a `@pl.jit` decode path split one file per module, and its
+`kernels/projection.py` is this page's pattern at model scale — a matmul and the vector work
+that consumes it, inside one scope.
+
+| File | Module |
+| ---- | ------ |
+| `qwen3_decode.py` | The decode entry that composes the rest |
+| `config.py` | Shapes and dtypes the kernels are specialised on |
+| `kernels/projection.py` | Mixed cube + vector projection |
+| `kernels/attention.py` | Attention |
+| `kernels/mlp.py` | MLP |
+| `kernels/rmsnorm.py` | RMSNorm |
+
 ## Next
 
 [Shaping the task graph](04-task-graph.md) — from inside one kernel to the order between

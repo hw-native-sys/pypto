@@ -214,6 +214,13 @@ not defined or consumed anywhere in this repository. See `pypto-lib`'s own
 documentation for current defaults. `pypto.runtime.benchmark()` (this
 repo's own harness) is documented separately in the performance guide.
 
+## Worked example
+
+`examples/runtime/distributed_callback.py` — a HOST-level `SubWorker` whose body is `...`,
+so it runs as a pure-Python callback in the forked orchestrator process. That is the shape
+to reach for when the logic cannot be written at compile time: a sampling closure over live
+model state, a host-side metric collector, a result inspector.
+
 ## See Also
 
 - [00-model](00-model.md) — Quickstart and model vocabulary

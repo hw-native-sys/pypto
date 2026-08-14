@@ -77,6 +77,10 @@ Size the grid from the device rather than a literal when you can:
 These are the only spellings that stay at full occupancy across devices — which matters on
 its own, and is a hard requirement for the barrier below.
 
+`examples/models/09_paged_attention_spmd.py` is the same idea at model scale: each block
+takes a subset of the batch through a stride loop, so the batch dimension is parallelised
+across hardware blocks by one dispatch.
+
 **Cost:** every block runs the same program. Divergent work needs a different structure,
 and blocks that finish at different times leave their cores idle until the whole grid
 retires.

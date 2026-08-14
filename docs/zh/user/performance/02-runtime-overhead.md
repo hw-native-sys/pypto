@@ -62,6 +62,8 @@ with pl.spmd(num_blocks, deps=[prev_tid]) as tid:
 
 这是**唯一**能跨设备保持满占用的写法 —— 这件事本身就重要，而且是下面那个屏障的硬性前提。
 
+`examples/models/09_paged_attention_spmd.py` 是同一个思路在模型规模上的样子：每个 block 用一个 stride 循环取走一部分 batch，于是 batch 维靠一次派发就并行到了各个硬件 block 上。
+
 **代价：** 每个 block 跑同一个程序。有分支差异的工作需要别的结构；先跑完的 block 会让自己的核空着，直到整个 grid 退休。
 
 **怎么确认：** `deps.json` 里 N 个节点塌缩成一个；泳道图上一个任务同时占据多条核泳道。点击其中一个 block 时插件会高亮同一 SPMD 的全部 block。

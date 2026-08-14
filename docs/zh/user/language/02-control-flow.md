@@ -152,6 +152,14 @@ result = pl.add(result, 1.0)      # fine; the parser produces two bindings
 | **`pl.parallel` 下出现竞态** | 迭代其实并不独立 | 改用 `pl.range`，或消除跨迭代依赖 |
 | **`SSAViolationError`** | 在 `strict_ssa=True` 下重绑 | 换用不同名字，或去掉 `strict_ssa` |
 
+## 配套示例
+
+| 示例 | 展示 |
+| ---- | ---- |
+| `examples/beginner/02_elementwise.py`（`chunked_add`） | 对 tile 分块的朴素 `pl.range` |
+| `examples/intermediate/04_matmul_acc.py` | 用 `init_values` 跨迭代携带累加器 |
+| `examples/models/03_flash_attention.py` | 循环携带状态 + 嵌套 `if` / `pl.yield_` —— 完整形态 |
+
 ## See Also
 
 - [类型](00-types.md) —— 携带值到底是什么。

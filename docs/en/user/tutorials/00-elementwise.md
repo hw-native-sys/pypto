@@ -173,6 +173,16 @@ python examples/beginner/02_elementwise.py
 | **Tile shape rejected** | The window exceeds what on-chip memory holds | Chunk it — step 3 |
 | **Results differ between runs** | Two tasks touching one buffer with nothing ordering them | See [The dependency model](../tasks/00-model.md) |
 
+## More of the same shape
+
+Three companions vary one thing each, and all four run the same way:
+
+| Example | Varies |
+| ------- | ------ |
+| `examples/beginner/03_scalar_ops.py` | A scalar operand instead of a second tile |
+| `examples/beginner/04_activation.py` | `relu` / SiLU in place of `add` |
+| `examples/beginner/06_concat.py` | Two tiles written into disjoint column ranges of one output |
+
 ## Next
 
 [Reduction and softmax](01-reduction-softmax.md) — where the result of one tile depends on

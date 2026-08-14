@@ -213,6 +213,21 @@ tutorial at [distributed/00-model.md](../distributed/00-model.md).
 | Remote Load | `pld.tile.remote_load` | — | — | — | Any (tile) | Tile-level cross-rank load. |
 | Remote Store | `pld.tile.remote_store` | — | — | — | Any (tile) | Tile-level cross-rank store. |
 
+## Worked examples
+
+One runnable file per family, for when the table entry is not enough:
+
+| Family | Example |
+| ------ | ------- |
+| Elementwise arithmetic | `examples/beginner/02_elementwise.py` |
+| Scalar operands | `examples/beginner/03_scalar_ops.py` |
+| Activations | `examples/beginner/04_activation.py` |
+| Matmul | `examples/beginner/05_matmul.py` |
+| Concatenation / assemble | `examples/beginner/06_concat.py`, `examples/intermediate/05_assemble.py` |
+| Reductions | `examples/intermediate/02_softmax.py`, `examples/intermediate/03_normalization.py` |
+| Cross-core transfer | `examples/advanced/03_mixed_kernel.py` |
+| Tasks and dependencies | `examples/intermediate/07_task_graph.py` |
+
 ## See Also
 
 - [Choosing a Namespace](00-dispatch.md) — which of these spellings to use.

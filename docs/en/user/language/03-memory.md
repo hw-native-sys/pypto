@@ -172,6 +172,14 @@ covering how to drive them is not written yet.
 | **`pl.create_tensor` inside an InCore function fails** | Tensor allocation is control-plane work | Allocate on the control plane, or take a `pl.Out[...]` parameter |
 | **On-chip buffer exhaustion** | Too much resident at once | Shrink tiles, or shrink the cross-core ring with `pl.cross_core_slot(slot_num=N)` |
 
+## Worked examples
+
+| Example | Shows |
+| ------- | ----- |
+| `examples/intermediate/05_assemble.py` | Writing a tile into a target at an offset, without a GM round-trip |
+| `examples/intermediate/01_fused_linear.py` | An intermediate kept on chip across a cube and a vector op |
+| `examples/runtime/multi_program_kv_cache.py` | A device-resident buffer shared across programs |
+
 ## See Also
 
 - [Types](00-types.md) — `Tensor` versus `Tile`, and what a dtype's `get_byte()` is for.

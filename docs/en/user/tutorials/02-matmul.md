@@ -129,6 +129,15 @@ parallelism is worth more than reproducibility.
 | **Split-K output is too large by roughly a factor** | The output was not zeroed before the atomic loop | Zero-init in its own scope first |
 | **Accumulator dtype rejected** | `matmul_acc` requires the accumulator's dtype | Create it with `pl.matmul(..., out_dtype=pl.FP32)` |
 
+## Before and after this page
+
+| Example | Where it sits |
+| ------- | ------------- |
+| `examples/beginner/05_matmul.py` | One 64x64 matmul in one shot — the cube with nothing else going on |
+| `examples/intermediate/04_matmul_acc.py` | K-dimension tiling with an accumulator |
+| `examples/advanced/01_split_k.py` | The split-K form this page ends on |
+| `examples/advanced/02_auto_tile_matmul.py` | Handing the L0 tiling decision to the compiler |
+
 ## Next
 
 [Mixed kernels](03-mixed-kernel.md) — everything so far used the cube *or* the vector

@@ -269,6 +269,11 @@ A hand-written C++ kernel can be called like any other function. See
 | **`auto_scope=False` rejected** | Used on `.incore` / `.opaque` | Put it on the entry or on an `.inline` helper |
 | **`self` missing from a `@pl.program` method** | Every method needs it | Add `self`; it is stripped from the IR |
 
+## Worked example
+
+`examples/utils/cross_function_calls.py` — `@pl.jit.inline` helpers auto-discovered as
+deps of a `@pl.jit` entry and spliced at the call site.
+
 ## See Also
 
 - [Control Flow](02-control-flow.md) — loops and conditionals inside these bodies.

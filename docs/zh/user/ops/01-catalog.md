@@ -200,6 +200,21 @@ push 与 pop 必须**配对**，且每次 pop 都必须有对应的 `tfree`。�
 | Remote Load | `pld.tile.remote_load` | — | — | — | 任意（tile） | Tile 级跨 rank 加载。 |
 | Remote Store | `pld.tile.remote_store` | — | — | — | 任意（tile） | Tile 级跨 rank 写入。 |
 
+## 配套示例
+
+每类算子一个可运行文件，供表格条目不够用时查阅：
+
+| 类别 | 示例 |
+| ---- | ---- |
+| 逐元素算术 | `examples/beginner/02_elementwise.py` |
+| 标量操作数 | `examples/beginner/03_scalar_ops.py` |
+| 激活函数 | `examples/beginner/04_activation.py` |
+| Matmul | `examples/beginner/05_matmul.py` |
+| 拼接 / assemble | `examples/beginner/06_concat.py`、`examples/intermediate/05_assemble.py` |
+| 规约 | `examples/intermediate/02_softmax.py`、`examples/intermediate/03_normalization.py` |
+| 跨核搬运 | `examples/advanced/03_mixed_kernel.py` |
+| 任务与依赖 | `examples/intermediate/07_task_graph.py` |
+
 ## See Also
 
 - [选择命名空间](00-dispatch.md) —— 这些拼法该用哪一个。

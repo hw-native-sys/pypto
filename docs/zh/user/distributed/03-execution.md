@@ -199,6 +199,12 @@ worker 复用其芯片进程和通信设置——没有 fork 开销。`compiled_
 `pypto.runtime.benchmark()`（本仓库自己的基准测试工具）在性能指南中
 单独说明。
 
+## 配套示例
+
+`examples/runtime/distributed_callback.py` —— 函数体写成 `...` 的 HOST 级 `SubWorker`，于是它作为
+纯 Python 回调运行在 fork 出来的编排进程里。当逻辑无法在编译期写出来时就用这个形态：需要读取实时模型
+状态的采样闭包、host 侧指标收集器、结果检查器。
+
 ## 相关链接
 
 - [00-model](00-model.md) — 快速开始和模型词汇

@@ -134,6 +134,14 @@ out, _ = pl.submit(self.consumer, data, out, deps=[tids])
 | **消费者只等到了循环的最后一个生产者** | 复用了一个 TaskId 而没有收集 | 收进 `pl.TASK_ID` 的 `pl.array` 并把数组传入 |
 | **auto 作用域里显式边似乎被忽略** | 并没有 —— 等待集合是并集 | 去别处找**缺失**的边，而不是被丢弃的边 |
 
+## 配套示例
+
+| 示例 | 展示 |
+| ---- | ---- |
+| `examples/intermediate/07_task_graph.py` | 一条推断出的边与一条声明的边并排对照 |
+| `examples/models/02_vector_dag.py` | 三个 InCore kernel 由一个入口连成 DAG |
+| `examples/utils/phase_fence_dep_compression.py` | 四个扇出阶段，每一级用上一级的整个 TaskId 数组设门 |
+
 ## See Also
 
 - [运行时作用域](01-scopes.md) —— 自动跟踪在哪里开、在哪里关。

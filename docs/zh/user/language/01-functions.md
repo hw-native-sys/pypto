@@ -214,6 +214,11 @@ print("artifacts in:", compiled.output_dir)
 | **`auto_scope=False` 被拒绝** | 用在了 `.incore` / `.opaque` 上 | 放到入口或 `.inline` 辅助函数上 |
 | **`@pl.program` 方法缺 `self`** | 每个方法都需要 | 补上 `self`；它会从 IR 中剥离 |
 
+## 配套示例
+
+`examples/utils/cross_function_calls.py` —— `@pl.jit.inline` 辅助函数被自动发现为 `@pl.jit`
+入口的依赖，并在调用点展开。
+
 ## See Also
 
 - [控制流](02-control-flow.md) —— 这些函数体里的循环与条件。

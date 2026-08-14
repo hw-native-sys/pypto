@@ -123,6 +123,21 @@ tile that crosses the cube/vector boundary
 | **生产者跑一阵后卡住** | 弹出的槽从未 `tfree` | 让每次 pop 都配一次 `tfree` |
 | **作用域上的 split 被拒** | 区域体混合了 split 与普通全宽 vector 算子 | 改用显式的 `pl.split_aiv` 区域形式 |
 
+## 真实模型里的同一形状
+
+`examples/models/qwen3_jit/` 是一条按模块拆成一文件一模块的 `@pl.jit` decode 路径，其中
+`kernels/projection.py` 就是本页这个模式在模型规模上的样子 —— 一个 matmul 和消费它的 vector
+工作，放在同一个作用域里。
+
+| 文件 | 模块 |
+| ---- | ---- |
+| `qwen3_decode.py` | 组合其余部分的 decode 入口 |
+| `config.py` | 各 kernel 特化所依据的形状与 dtype |
+| `kernels/projection.py` | cube + vector 混合的 projection |
+| `kernels/attention.py` | Attention |
+| `kernels/mlp.py` | MLP |
+| `kernels/rmsnorm.py` | RMSNorm |
+
 ## 下一步
 
 [塑形任务图](04-task-graph.md) —— 从一个 kernel 内部，走到 kernel 之间的顺序。

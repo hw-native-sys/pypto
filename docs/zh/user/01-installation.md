@@ -149,14 +149,71 @@ PYPTO_PROG_BUILD_DIR=/scratch/pypto-out python my_kernel.py
 
 `examples/` 按难度组织，是了解 PyPTO 惯用写法最快的途径。
 
-| 路径 | 内容 |
+**`examples/beginner/`** —— 一个文件一个概念。
+
+| 文件 | 展示 |
 | ---- | ---- |
-| `examples/beginner/` | 单 kernel 基础，按难度编号：hello world、逐元素、标量运算、激活函数、矩阵乘、拼接 |
-| `examples/intermediate/` | 真实 kernel 模式，按难度编号：融合线性层、softmax、归一化、矩阵乘累加、assemble、动态 valid_shape |
-| `examples/advanced/` | 性能与底层技巧：split-K、编译器驱动的分块 |
-| `examples/models/` | 多 kernel 模型，按难度编号：FFN、paged attention、LLaMA |
-| `examples/utils/` | 解析、跨函数调用、错误处理 |
-| `examples/runtime/` | 派发、显式 worker、分布式回调、多程序 KV cache |
+| `01_hello_world.py` | 最小的完整程序 |
+| `02_elementwise.py` | tile 加 / 乘，以及对分块的循环 |
+| `03_scalar_ops.py` | 标量操作数 |
+| `04_activation.py` | `relu`、SiLU |
+| `05_matmul.py` | cube 上一次算完的 64x64 matmul |
+| `06_concat.py` | 两个 tile 写进互不相交的列区间 |
+
+**`examples/intermediate/`** —— 真实 kernel 模式。
+
+| 文件 | 展示 |
+| ---- | ---- |
+| `01_fused_linear.py` | cube matmul + vector bias-add + relu |
+| `02_softmax.py` | 按行 softmax |
+| `03_normalization.py` | RMSNorm、LayerNorm |
+| `04_matmul_acc.py` | K 维分块 + 累加器 |
+| `05_assemble.py` | 按偏移把 tile 写进目标 |
+| `06_dyn_valid_shape.py` | 运行时收窄的有效范围 |
+| `07_task_graph.py` | 一条推断的边与一条声明的边 |
+
+**`examples/advanced/`** —— 性能技巧。
+
+| 文件 | 展示 |
+| ---- | ---- |
+| `01_split_k.py` | 切分规约维 |
+| `02_auto_tile_matmul.py` | 编译器驱动的 L0 分块 |
+| `03_mixed_kernel.py` | cube 与 vector 同作用域，三种 split 模式 |
+
+**`examples/models/`** —— 多 kernel 模型。
+
+| 文件 | 展示 |
+| ---- | ---- |
+| `01_ffn.py` | 一个 FFN 模块 |
+| `02_vector_dag.py` | 三个 InCore kernel 连成 DAG |
+| `03_flash_attention.py` | 循环携带状态、嵌套 `if` / `pl.yield_` |
+| `04_paged_attention.py` | paged attention，在线 softmax，4 kernel 流水 |
+| `05_paged_attention_batch.py` | batch 循环挪进 kernel 内部 |
+| `06_paged_attention_dynamic.py` | `pl.dynamic()` 形状 |
+| `07_paged_attention_multi_config.py` | unroll 分组 + 由 `pl.tensor.dim()` 得到的形状 |
+| `08_llama_mini.py` | 一个完整的小型 LLaMA 风格模型 |
+| `09_paged_attention_spmd.py` | batch 维分布到 SPMD block 上 |
+| `qwen3_jit/` | 按模块拆成多个 kernel 文件的 `@pl.jit` decode 路径 |
+
+**`examples/utils/`** —— 只用前端。
+
+| 文件 | 展示 |
+| ---- | ---- |
+| `cross_function_calls.py` | `@pl.jit.inline` 辅助函数在调用点展开 |
+| `error_handling.py` | 裸重绑定的代价，以及它怎么暴露出来 |
+| `parse_from_text.py` | 从字符串或文件 `pl.parse()` / `pl.loads()` |
+| `phase_fence_dep_compression.py` | 扇出阶段之间的整数组 TaskId 栅栏 |
+
+**`examples/runtime/`** —— host 侧模式。
+
+| 文件 | 展示 |
+| ---- | ---- |
+| `explicit_dispatch.py` | 注册一次，多次派发 |
+| `multi_program_kv_cache.py` | 跨程序共享的常驻 buffer |
+| `distributed_callback.py` | 作为 Python 回调的 HOST `SubWorker` |
+
+**`examples/distributed/`** —— 每个集合通信 / 原语一个文件，在 [分布式](distributed/index.md)
+里逐页讲解。
 
 **这些例子多数会派发到硬件，而不只是编译。** `beginner/01_hello_world.py`、
 `intermediate/02_softmax.py`、`models/01_ffn.py` 最后都以 `config=RunConfig()` 调用各自的

@@ -163,6 +163,14 @@ like any other. See [Control Flow](../language/02-control-flow.md).
 | **A consumer only waits on the last producer of a loop** | One TaskId was reused instead of collected | Collect into a `pl.array` of `pl.TASK_ID` and pass the array |
 | **Explicit edge seems ignored in auto scope** | It is not — the wait set is the union | Look for a *missing* edge elsewhere, not a discarded one |
 
+## Worked examples
+
+| Example | Shows |
+| ------- | ----- |
+| `examples/intermediate/07_task_graph.py` | One inferred edge and one declared edge, side by side |
+| `examples/models/02_vector_dag.py` | Three InCore kernels wired into a DAG from one entry |
+| `examples/utils/phase_fence_dep_compression.py` | Four fan-out stages, each gating on the previous stage's whole TaskId array |
+
 ## See Also
 
 - [Runtime scopes](01-scopes.md) — where auto tracking is on or off.

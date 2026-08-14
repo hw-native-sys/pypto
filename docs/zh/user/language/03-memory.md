@@ -142,6 +142,14 @@ m = pl.row_max(t)                              # pad value decides what the tail
 | **InCore 函数内 `pl.create_tensor` 失败** | 张量分配是控制面的事 | 在控制面分配，或改为接收 `pl.Out[...]` 参数 |
 | **片上缓冲区耗尽** | 同时常驻的东西太多 | 缩小 tile，或用 `pl.cross_core_slot(slot_num=N)` 缩小跨核环 |
 
+## 配套示例
+
+| 示例 | 展示 |
+| ---- | ---- |
+| `examples/intermediate/05_assemble.py` | 按偏移把 tile 写进目标，不经过 GM 往返 |
+| `examples/intermediate/01_fused_linear.py` | 一个中间结果跨 cube 与 vector 操作留在片上 |
+| `examples/runtime/multi_program_kv_cache.py` | 跨多个程序共享的设备常驻 buffer |
+
 ## See Also
 
 - [类型](00-types.md) —— `Tensor` 与 `Tile` 的区别，以及 dtype 的 `get_byte()` 有什么用。
