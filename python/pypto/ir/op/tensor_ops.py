@@ -1632,18 +1632,20 @@ def abs(input: Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tensor.abs", [input], {}, actual_span)
 
 
-def recip(input: Expr, span: Span | None = None) -> Call:
+def recip(input: Expr, span: Span | None = None, *, high_precision: bool = False) -> Call:
     """Element-wise reciprocal (1/x) operation.
 
     Args:
         input: Input tensor
         span: Optional source span for debugging (auto-captured if not provided)
+        high_precision: Whether to select PTOAS's high-precision reciprocal mode (FP16/FP32 only)
 
     Returns:
         Call expression for element-wise reciprocal
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tensor.recip", [input], {}, actual_span)
+    kwargs: dict[str, Any] = {"high_precision": True} if high_precision else {}
+    return _ir_core.create_op_call("tensor.recip", [input], kwargs, actual_span)
 
 
 def sqrt(input: Expr, span: Span | None = None) -> Call:

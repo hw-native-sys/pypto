@@ -83,7 +83,6 @@ static bool RequiresRowMajorLayout(std::string_view op_name) {
       "tile.abs",
       "tile.exp",
       "tile.sqrt",
-      "tile.recip",
       "tile.not",
       "tile.prelu",
       "tile.relu",
@@ -265,7 +264,7 @@ static std::string MakeModalCodegenPTO(const std::string& pto_op_name, size_t ar
 
 // Emit the default PTO form without an explicit precision attribute, or append
 // the exact PTOAS enum attribute after outs(...) for high-precision mode.
-// Unlike cmp/cvt attributes, the tdiv/tlog assembly formats place their
+// Unlike cmp/cvt attributes, precision-op assembly formats place their
 // attr-dict after the complete ins()/outs() clause.
 static std::string MakePrecisionCodegenPTO(const std::string& pto_op_name, size_t arity,
                                            const char* attr_kind, const CallPtr& op,
@@ -612,7 +611,6 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.exp",             "pto.texp",             1},
     {"tile.sqrt",            "pto.tsqrt",            1},
     // tile.rsqrt is registered with a custom codegen handler below (supports 1 or 2 args).
-    {"tile.recip",           "pto.trecip",           1},
     {"tile.neg",             "pto.tneg",             1},
     {"tile.not",             "pto.tnot",             1},
     {"tile.relu",            "pto.trelu",            1},
@@ -756,6 +754,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
   };
   register_precision_op("tile.div", "pto.tdiv", 2, "div_precision");
   register_precision_op("tile.log", "pto.tlog", 1, "log_precision");
+  register_precision_op("tile.recip", "pto.trecip", 1, "recip_precision");
 
   // tile.row_expand_add follows the PTOAS overloads with and without tmp.
   // Its row-sensitive layout contract is validated by the IR op: the generic

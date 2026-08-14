@@ -82,6 +82,11 @@ TypePtr DeduceTensorRecipType(const std::vector<ExprPtr>& args,
       << "tensor.recip requires first argument to be a TensorType or DistributedTensorType, but got "
       << args[0]->GetType()->TypeName();
 
+  CHECK(!GetKwargOr<bool>(kwargs, "high_precision", false) || tensor_type->dtype_ == DataType::FP16 ||
+        tensor_type->dtype_ == DataType::FP32)
+      << "The operator tensor.recip supports high_precision only for FP16 or FP32 because the PTOAS "
+         "high-precision template does not implement other dtypes";
+
   // Reciprocal (1/x) always produces floating-point output
   DataType out_dtype = tensor_type->dtype_;
   if (!out_dtype.IsFloat()) {
@@ -293,6 +298,7 @@ REGISTER_OP("tensor.recip")
     .set_op_category("TensorOp")
     .set_description("Element-wise reciprocal (1/x) operation")
     .add_argument("input", "Input tensor (TensorType)")
+    .set_attr<bool>("high_precision")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorRecipType(args, kwargs);

@@ -628,9 +628,9 @@ class TestRsqrtHighPrecisionCodegen:
 class TestB01PrecisionAndRowExpandAddCodegen:
     """Exact PTOAS forms added for the first op batch."""
 
-    def _generate_mlir(self, program_cls) -> str:
+    def _generate_mlir(self, program_cls, backend_type=BackendType.Ascend910B) -> str:
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(backend_type)
 
         optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program_cls)
         funcs = list(optimized.functions.values())
@@ -702,6 +702,39 @@ class TestB01PrecisionAndRowExpandAddCodegen:
 
         log_line = self._op_line(self._generate_mlir(LogProg), "pto.tlog")
         assert strip_loc(log_line).endswith("{precisionType = #pto<log_precision high_precision>}")
+
+    def test_trecip_default_omits_and_high_precision_appends_exact_attr_on_a5(self):
+        @pl.program
+        class DefaultProg:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                result: pl.Tensor[[16, 16], pl.FP32] = pl.recip(src)
+                return result
+
+        @pl.program
+        class HighPrecisionProg:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                result: pl.Tensor[[16, 16], pl.FP32] = pl.recip(src, high_precision=True)
+                return result
+
+        backend_type = BackendType.Ascend950
+        default_line = self._op_line(self._generate_mlir(DefaultProg, backend_type), "pto.trecip")
+        high_precision_line = self._op_line(
+            self._generate_mlir(HighPrecisionProg, backend_type), "pto.trecip"
+        )
+        assert "precisionType" not in default_line
+        assert strip_loc(high_precision_line).endswith(
+            "{precisionType = #pto<recip_precision high_precision>}"
+        )
 
     def test_trowexpandadd_emits_two_and_three_operand_forms(self):
         @pl.program

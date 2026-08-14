@@ -39,7 +39,7 @@ See [Memory and Data Movement](../language/03-memory.md) for which moves are leg
 | Operator | Reach | What it does |
 | -------- | ----- | ------------ |
 | `add` `sub` `mul` `div` | `pl.` | Binary arithmetic; a Python number on the right selects the scalar-operand form |
-| `neg` `abs` `recip` | `pl.` | Unary negate, absolute value, reciprocal |
+| `neg` `abs` `recip` | `pl.` | Unary negate, absolute value, reciprocal. For FP16/FP32 reciprocal, `high_precision=True` selects the slower, higher-precision PTO path on A5 |
 | `rem` `rems` `fmod` `fmods` | `pl.` | Remainder and floating-point modulo, tensor and scalar forms |
 | `addc` `subc` `addsc` `subsc` | `pl.` (t) | Three-input add / subtract with carry operand |
 | `part_add` `part_mul` `part_max` `part_min` | `pl.` | Partial (segmented) arithmetic |

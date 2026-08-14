@@ -1118,16 +1118,17 @@ def rsqrt(tile: Tile, tmp: Tile | None = None) -> Tile:
     return Tile(expr=call_expr)
 
 
-def recip(tile: Tile) -> Tile:
+def recip(tile: Tile, high_precision: bool = False) -> Tile:
     """Element-wise reciprocal.
 
     Args:
         tile: Input tile
+        high_precision: Whether to select PTOAS's high-precision reciprocal mode (FP16/FP32 only)
 
     Returns:
         Tile wrapping the recip operation
     """
-    call_expr = _ir_ops.recip(tile.unwrap())
+    call_expr = _ir_ops.recip(tile.unwrap(), high_precision=high_precision)
     return Tile(expr=call_expr)
 
 

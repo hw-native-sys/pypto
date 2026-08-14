@@ -1196,10 +1196,16 @@ class TestConvertTensorToTileOps:
                 lambda ib, ins: ib.let("z", tensor_ops.log(ins[0], high_precision=True)),
                 "tile.log",
             ),
+            (
+                "recip",
+                [("x", [64], DataType.FP32)],
+                lambda ib, ins: ib.let("z", tensor_ops.recip(ins[0], high_precision=True)),
+                "tile.recip",
+            ),
         ],
     )
     def test_precision_kwargs_survive_tensor_to_tile_conversion(self, op_name, in_specs, body, tile_op_name):
-        """Non-broadcast tdiv and tlog conversions preserve high_precision."""
+        """Non-broadcast precision-op conversions preserve high_precision."""
         before = _make_before(
             in_specs=in_specs,
             out_shape=[64],

@@ -566,12 +566,17 @@ def abs(input: T) -> T:
     raise TypeError(f"pl.abs: expected Tensor or Tile, got {type(input).__name__}")
 
 
-def recip(input: T) -> T:
-    """Element-wise reciprocal (1/x), dispatched by input type."""
+def recip(input: T, high_precision: bool = False) -> T:
+    """Element-wise reciprocal (1/x), dispatched by input type.
+
+    Args:
+        input: Input tensor or tile
+        high_precision: Whether to select PTOAS's high-precision reciprocal mode (FP16/FP32 only)
+    """
     if isinstance(input, Tensor):
-        return _tensor.recip(input)
+        return _tensor.recip(input, high_precision=high_precision)
     if isinstance(input, Tile):
-        return _tile.recip(input)
+        return _tile.recip(input, high_precision=high_precision)
     raise TypeError(f"pl.recip: expected Tensor or Tile, got {type(input).__name__}")
 
 

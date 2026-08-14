@@ -1058,22 +1058,26 @@ def test_tensor_abs_int_dtype():
 # =============================================================================
 
 
-def test_tensor_recip():
-    """Test tensor.recip operation."""
+@pytest.mark.parametrize("dtype", [DataType.FP16, DataType.FP32])
+@pytest.mark.parametrize("high_precision", [False, True])
+def test_tensor_recip_contract_and_precision(dtype, high_precision):
+    """Both reciprocal precision modes preserve each supported float dtype."""
     span = ir.Span.unknown()
     dim64 = ir.ConstInt(64, DataType.INT32, span)
     dim128 = ir.ConstInt(128, DataType.INT32, span)
-    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
+    tensor_type = ir.TensorType([dim64, dim128], dtype)
     tensor_var = ir.Var("t", tensor_type, span)
 
-    call = ir.op.tensor.recip(tensor_var)
+    call = ir.op.tensor.recip(tensor_var, high_precision=high_precision)
 
     assert isinstance(call, ir.Call)
     assert call.op.name == ir.get_op("tensor.recip").name
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
-    assert result_type.dtype == DataType.FP16
+    assert result_type.dtype == dtype
     assert len(result_type.shape) == 2
+    expected_kwargs = {"high_precision": True} if high_precision else {}
+    assert dict(call.kwargs) == expected_kwargs
 
 
 def test_tensor_recip_int_promotes_to_fp32():
@@ -1088,6 +1092,16 @@ def test_tensor_recip_int_promotes_to_fp32():
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP32
+
+
+@pytest.mark.parametrize("dtype", [DataType.INT32, DataType.BF16])
+def test_tensor_recip_rejects_unsupported_high_precision_dtype(dtype):
+    """The PTOAS high-precision reciprocal template only supports FP16 and FP32 inputs."""
+    span = ir.Span.unknown()
+    tensor_var = ir.Var("t", ir.TensorType([64, 128], dtype), span)
+
+    with pytest.raises(ValueError, match=r"high_precision only for FP16 or FP32"):
+        ir.op.tensor.recip(tensor_var, high_precision=True)
 
 
 def test_tensor_sqrt():
@@ -1664,6 +1678,7 @@ def test_tensor_precision_apis_keep_positional_span_compatibility():
     calls = (
         tensor.div(lhs, rhs, span),
         tensor.log(lhs, span),
+        tensor.recip(lhs, span),
     )
 
     assert all(call.span.filename == "tensor_precision_compat.py" for call in calls)

@@ -35,7 +35,7 @@
 | 算子 | 可达 | 作用 |
 | ---- | ---- | ---- |
 | `add` `sub` `mul` `div` | `pl.` | 二元算术；右侧给 Python 数字会选中标量操作数形式 |
-| `neg` `abs` `recip` | `pl.` | 取负、绝对值、倒数 |
+| `neg` `abs` `recip` | `pl.` | 取负、绝对值、倒数；FP16/FP32 倒数设置 `high_precision=True` 时会在 A5 上选择速度较慢、精度较高的 PTO 路径 |
 | `rem` `rems` `fmod` `fmods` | `pl.` | 求余与浮点取模，张量与标量形式 |
 | `addc` `subc` `addsc` `subsc` | `pl.` (t) | 带进位操作数的三输入加 / 减 |
 | `part_add` `part_mul` `part_max` `part_min` | `pl.` | 分段算术 |

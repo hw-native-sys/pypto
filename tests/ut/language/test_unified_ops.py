@@ -186,15 +186,16 @@ class TestUnifiedTensorDispatch:
 
         ir.assert_structural_equal(unified, explicit)
 
-    def test_recip(self):
+    @pytest.mark.parametrize("high_precision", [False, True])
+    def test_recip(self, high_precision):
         @pl.function
         def unified(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            c: pl.Tensor[[64], pl.FP32] = pl.recip(a)
+            c: pl.Tensor[[64], pl.FP32] = pl.recip(a, high_precision=high_precision)
             return c
 
         @pl.function
         def explicit(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            c: pl.Tensor[[64], pl.FP32] = pl.tensor.recip(a)
+            c: pl.Tensor[[64], pl.FP32] = pl.tensor.recip(a, high_precision=high_precision)
             return c
 
         ir.assert_structural_equal(unified, explicit)
@@ -561,13 +562,14 @@ class TestUnifiedBlockDispatch:
 
         ir.assert_structural_equal(unified, explicit)
 
-    def test_recip(self):
+    @pytest.mark.parametrize("high_precision", [False, True])
+    def test_recip(self, high_precision):
         @pl.function
         def unified(
             t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
         ) -> pl.Tensor[[64, 64], pl.FP32]:
             a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
-            b: pl.Tile[[64, 64], pl.FP32] = pl.recip(a)
+            b: pl.Tile[[64, 64], pl.FP32] = pl.recip(a, high_precision=high_precision)
             result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
             return result
 
@@ -576,7 +578,7 @@ class TestUnifiedBlockDispatch:
             t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
         ) -> pl.Tensor[[64, 64], pl.FP32]:
             a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
-            b: pl.Tile[[64, 64], pl.FP32] = pl.tile.recip(a)
+            b: pl.Tile[[64, 64], pl.FP32] = pl.tile.recip(a, high_precision=high_precision)
             result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
             return result
 

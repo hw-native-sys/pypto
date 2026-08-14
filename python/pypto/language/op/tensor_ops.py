@@ -1728,17 +1728,18 @@ def abs(input: Tensor) -> Tensor:
     return Tensor(expr=call_expr)
 
 
-def recip(input: Tensor) -> Tensor:
+def recip(input: Tensor, high_precision: bool = False) -> Tensor:
     """Element-wise reciprocal (1/x) operation.
 
     Args:
         input: Input tensor
+        high_precision: Whether to select PTOAS's high-precision reciprocal mode (FP16/FP32 only)
 
     Returns:
         Tensor wrapping the recip operation
     """
     input_expr = input.unwrap()
-    call_expr = _ir_ops.recip(input_expr)
+    call_expr = _ir_ops.recip(input_expr, high_precision=high_precision)
     return Tensor(expr=call_expr)
 
 

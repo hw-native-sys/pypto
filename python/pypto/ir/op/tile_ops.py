@@ -1645,18 +1645,20 @@ def cos(tile: Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tile.cos", [tile], {}, actual_span)
 
 
-def recip(tile: Expr, span: Span | None = None) -> Call:
+def recip(tile: Expr, span: Span | None = None, *, high_precision: bool = False) -> Call:
     """Element-wise reciprocal (1/x) of a tile.
 
     Args:
         tile: Input tile (TileType)
         span: Optional source span for debugging (auto-captured if not provided)
+        high_precision: Whether to select PTOAS's high-precision reciprocal mode (FP16/FP32 only)
 
     Returns:
         Call expression for element-wise reciprocal
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.recip", [tile], {}, actual_span)
+    kwargs: dict[str, Any] = {"high_precision": True} if high_precision else {}
+    return _ir_core.create_op_call("tile.recip", [tile], kwargs, actual_span)
 
 
 def sqrt(tile: Expr, span: Span | None = None) -> Call:
