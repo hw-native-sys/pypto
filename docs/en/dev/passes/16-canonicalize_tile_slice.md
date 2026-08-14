@@ -1,6 +1,6 @@
 # CanonicalizeTileSlice Pass
 
-Lowers a `tile.slice` into the canonical `tile.extract` form so that movement is unified on `pto.textract` — both Mat-resident slices (folded into matmul / `tile.extract` consumers) and Vec slices whose lazy materialization would corrupt their source (materialized for the `tile.col_expand_*` family, issues #1640 and #2010).
+Lowers a `tile.slice` into the canonical `tile.extract` form so that movement is unified on `pto.textract` — Mat-resident slices (folded into matmul / `tile.extract` consumers), Vec slices whose lazy materialization would corrupt their source (materialized for the `tile.col_expand_*` family, issues #1640 and #2010), and unaligned Vec subviews (issue #1789).
 
 ## Overview
 
@@ -16,6 +16,14 @@ The pass also canonicalizes a **Vec** `tile.slice` consumed by the `tile.col_exp
 | The destination **layout** matches | The slice's buffer is dense (row pitch = slice cols) while the source window is strided (row pitch = source cols). These coincide only for a **contiguous** window: a single row, or one spanning every column. A column slice of a multi-row tile (`t[:, a:b]`) repacks strided → dense on top of its own source and destroys it — only row 0 survives, because its dense destination happens to equal its source address (#2010). |
 
 When either condition fails, the operand is replaced by a fresh `tile.extract(..., target_memory=Vec)`, whose result gets its own non-inherited allocation. `tile.extract` is registered `not_inplace_safe()`, so [`MemoryReuse`](33-memory_reuse.md) cannot place that fresh buffer back onto the source either. A slice whose materialization *is* an identity copy is left untouched, so it keeps sharing the source buffer rather than paying for a duplicate allocation.
+
+Independently, PTO vector instructions require tile operand base addresses to be 32-byte aligned. A zero-copy Vec slice starts at
+
+```text
+base + (off_row * base_cols + off_col) * storage_bits
+```
+
+so an FP32 column slice at `[:, 1:2]` starts only 4 bytes past an aligned allocation. Feeding that subview directly to an ordinary vector op such as `tile.muls` can hang the device (#1789). The pass therefore replaces an unaligned Vec slice operand with a fresh `tile.extract(..., target_memory=Vec)`. The new allocation is aligned; provably aligned slices remain zero-copy. For dynamic offsets, a row offset is provably safe only when the base row stride is a multiple of 32 bytes, while a dynamic column offset is materialized conservatively.
 
 **Pipeline position**: After [`AutoTileMatmulL0`](15-auto_tile_matmul_l0.md) (so the per-iter `tile.extract`s that read the batch-page slices already exist), before [`InferTileMemorySpace`](17-infer_tile_memory_space.md).
 
@@ -43,12 +51,13 @@ program_canon = passes.canonicalize_tile_slice()(program)
 
 For each InCore-typed function, in three phases:
 
-1. **Collect** — index every `AssignStmt` whose value is a Mat-resident `tile.slice(src, shape, offset)` (canonical 3-argument form). A slice whose `src` is itself a Mat slice is peeled, accumulating the offset, so each entry resolves to a non-slice base tile plus a total `(off_row, off_col)`. Slices carrying `valid_shape` / `drop_dims` (4–5 arguments) are not plain windows and are skipped.
+1. **Collect** — index every `AssignStmt` whose value is a `tile.slice(src, shape, offset)` in canonical 3-argument form. A slice whose `src` is itself a recorded slice is peeled, accumulating the offset, so each entry resolves to a non-slice base tile plus a total `(off_row, off_col)`. Slices carrying `valid_shape` / `drop_dims` (4–5 arguments) are not plain windows and are skipped.
 
 2. **Rewrite consumers** — for each slice:
-   - **`tile.extract(slice, ir, ic, shape)`** (Mat slices only) → `tile.extract(base, ir + off_row, ic + off_col, shape)`. The extract reads the slice's source directly; the index add is constant-folded when both terms are `ConstInt`.
+   - **`tile.extract(slice, ir, ic, shape)`** → `tile.extract(base, ir + off_row, ic + off_col, shape)`. The extract reads the slice's source directly; the index add is constant-folded when both terms are `ConstInt`.
    - **`tile.matmul` / `tile.matmul_acc` / `tile.matmul_bias` operand** (Mat slices only) → the operand is replaced by a fresh `tile.extract(base, off_row, off_col, slice_shape, target_memory=Left|Right)` — `Left` for the lhs operand, `Right` for the rhs. (The `tile.matmul_acc` accumulator operand is `Acc`-resident and never a Mat slice.)
    - **`tile.col_expand_*` operand** (Vec slices only) → when the lazy `pto.textract` would not be an identity copy — a dynamic offset, or a window that is not contiguous in the base tile (more than one row *and* narrower than the base) — the operand is replaced by a fresh `tile.extract(base, off_row, off_col, slice_shape, target_memory=Vec)`. Both operands are checked. Contiguous const-offset windows are left untouched.
+   - **Ordinary call operand** (Vec slices only) → compute `(off_row * base_cols + off_col) * storage_bits mod 256`. If the result is nonzero or cannot be proved, replace the operand by a fresh `tile.extract(base, off_row, off_col, slice_shape, target_memory=Vec)`. `tile.slice` itself is skipped so chained views can be peeled, and `tile.extract` uses the direct folding rule above.
 
 3. **Drop dead slices** — a `tile.slice` whose result no longer has any use is removed. A chained slice only becomes dead once the slice consuming it is dropped, so this iterates to a fixpoint (bounded by the slice count). A slice still used at the end had a consumer this pass does not canonicalize; it is left intact — no regression versus the pre-pass IR.
 
@@ -139,6 +148,25 @@ scaled: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.col_expand_mul(hi_ext, 
 
 Without the rewrite, `hi` allocates a dense `[16, 64]` buffer at `t + 256 B` — inside `t` — and the lazy `pto.textract` repacks `t`'s strided columns into it, overwriting `t` as it reads it. Only row 0 comes back correct, which is why the same construct is harmless on a single-row tile.
 
+### Unaligned Vec column slice (#1789)
+
+Column 1 of an FP32 tile begins four bytes past its aligned source allocation, so it cannot be used directly by `tile.muls`:
+
+```python
+head:   pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.slice(local, [16, 1], [0, 1])
+scaled: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.muls(head, 0.5)
+```
+
+The pass gives the vector operation an aligned, independently allocated tile:
+
+```python
+head_ext: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.extract(
+    local, 0, 1, shape=[16, 1], target_memory=pl.Mem.Vec)
+scaled:   pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.muls(head_ext, 0.5)
+```
+
+By contrast, FP32 column 8 is 32 bytes from the source base and remains a zero-copy slice. A dynamic row offset also remains zero-copy when the source row stride is 32-byte aligned.
+
 ## Implementation
 
 **Header**: `include/pypto/ir/transforms/passes.h`
@@ -168,9 +196,11 @@ Without the rewrite, `hi` allocates a dense `[16, 64]` buffer at `t + 256 B` —
 | Dynamic-offset Vec `tile.slice` (3-arg) feeding a `tile.col_expand_*` op | Replaced by `tile.extract(target_memory=Vec)`; slice dropped (#1640 — the address falls back to the bare source base) |
 | Static-offset **non-contiguous** Vec `tile.slice` (multi-row *and* narrower than its base, e.g. `t[:, a:b]`) feeding a `tile.col_expand_*` op | Replaced by `tile.extract(target_memory=Vec)`; slice dropped (#2010 — the dense repack would run on top of its own live source) |
 | Static-offset **contiguous** Vec `tile.slice` (single row, or full source width) feeding a `tile.col_expand_*` op | Untouched (the lazy textract is a safe identity copy; keeps sharing the source buffer) |
+| Vec `tile.slice` feeding an ordinary call, inherited address not provably 32-byte aligned | Replaced by `tile.extract(target_memory=Vec)`; slice dropped (#1789) |
+| Vec `tile.slice` feeding an ordinary call, inherited address provably 32-byte aligned | Untouched; keeps the zero-copy subview |
 | Chained Mat `tile.slice` (slice of a slice) | Peeled; offsets accumulated |
 | `tile.slice` with `valid_shape` / `drop_dims` | Skipped (not a plain window). If such a slice *also* fails either identity-copy condition above — a dynamic offset (e.g. a rank-reducing `t[i]`) or a non-contiguous window — while feeding a col-expand op, codegen rejects it with an `INTERNAL_CHECK` rather than emitting the source-corrupting materialization |
-| Other Vec/Left/Right/Acc-resident `tile.slice` | Untouched (no matching consumer) |
+| Other Left/Right/Acc-resident `tile.slice` | Untouched (no matching consumer) |
 | Functions with no canonical `tile.slice` | Returned unchanged |
 
 ## See also

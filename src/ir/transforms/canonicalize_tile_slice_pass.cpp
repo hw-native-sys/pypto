@@ -12,9 +12,10 @@
 /// CanonicalizeTileSlice
 /// ---------------------
 /// Lowers a ``tile.slice`` into the canonical ``tile.extract`` form so that
-/// movement is unified on ``pto.textract`` — both Mat-resident slices (folded
-/// into matmul / ``tile.extract`` consumers) and dynamic-offset Vec slices
-/// (materialized for ``tile.col_expand_mul`` / ``tile.col_expand_add``, #1640).
+/// movement is unified on ``pto.textract`` — Mat-resident slices (folded into
+/// matmul / ``tile.extract`` consumers), Vec slices that need materialization
+/// for ``tile.col_expand_*`` (#1640, #2010), and Vec slices whose byte address
+/// is not provably 32-byte aligned (#1789).
 ///
 /// A ``tile.slice`` whose result tile is ``Mem.Mat`` is a legal high-level
 /// "sub-window of a Mat tile" construct — ``FlattenTileNdTo2D`` emits one per
@@ -66,6 +67,16 @@
 /// its own non-inherited allocation — which removes the aliasing.  An
 /// identity-copy slice is left untouched so it keeps sharing the source buffer.
 ///
+/// Finally, PTO vector instructions require their tile operands' base addresses
+/// to be 32-byte aligned.  A zero-copy Vec subview inherits
+/// ``base + (row * base_cols + col) * storage_bits``; a column slice such as
+/// ``fp32_tile[:, 1:2]`` therefore starts four bytes past an aligned allocation.
+/// For every ordinary consumer of such a slice, this pass inserts a fresh Vec
+/// ``tile.extract``.  The extract result has its own aligned allocation, while
+/// slices whose offset is provably aligned remain zero-copy.  Dynamic offsets
+/// are handled conservatively: a dynamic row is provably safe only when the
+/// base row stride is aligned, and a dynamic column is not provably safe.
+///
 /// After all consumers are rewritten the now-dead ``tile.slice`` is dropped.
 /// Chained slices (a slice of a slice) are peeled, accumulating the offset.
 ///
@@ -75,6 +86,7 @@
 
 #include <any>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -93,6 +105,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/storage_size.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
@@ -194,9 +207,9 @@ class SliceCollector : public IRVisitor {
   }
 };
 
-/// Phase 2 — rewrite `tile.extract` / matmul (Mat slices) and
-/// `tile.col_expand_mul` / `tile.col_expand_add` (Vec slices) consumers so they
-/// no longer reference a canonicalizable `tile.slice`.
+/// Phase 2 — rewrite canonicalizable `tile.slice` consumers: Mat slices are
+/// folded into `tile.extract` / matmul, hazardous col-expand operands get fresh
+/// storage, and unaligned Vec operands are materialized before ordinary ops.
 class CanonicalizeMutator : public IRMutator {
  public:
   explicit CanonicalizeMutator(const std::unordered_map<const Var*, SliceInfo>& slices) : slices_(slices) {}
@@ -216,6 +229,11 @@ class CanonicalizeMutator : public IRMutator {
           continue;
         }
         if (auto rewrite = TryRewriteColExpand(assign)) {
+          for (auto& s : *rewrite) out.push_back(std::move(s));
+          changed = true;
+          continue;
+        }
+        if (auto rewrite = TryMaterializeUnalignedVecOperands(assign)) {
           for (auto& s : *rewrite) out.push_back(std::move(s));
           changed = true;
           continue;
@@ -240,7 +258,7 @@ class CanonicalizeMutator : public IRMutator {
     auto src = AsVarLike(call->args_[0]);
     if (!src) return base;
     auto it = slices_.find(src.get());
-    if (it == slices_.end() || !it->second.is_mat) return base;
+    if (it == slices_.end()) return base;
 
     // extract(slice(base, _, [or, oc]), ir, ic, shape)
     //   -> extract(base, ir + or, ic + oc, shape)
@@ -269,7 +287,7 @@ class CanonicalizeMutator : public IRMutator {
   }
 
   /// Build `var = tile.extract(base, off_row, off_col, slice_shape,
-  /// target_memory=target)` for a matmul operand that was a Mat slice.  The
+  /// target_memory=target)` for a slice operand that needs materialization. The
   /// slice's result tile shape is forwarded as the extract shape — passing the
   /// existing shape expressions through (rather than extracting int64 values
   /// and rebuilding ConstInts) keeps the path safe under future symbolic dims.
@@ -277,7 +295,7 @@ class CanonicalizeMutator : public IRMutator {
                                     const Span& span) {
     auto slice_tile = As<TileType>(slice_var->GetType());
     INTERNAL_CHECK(slice_tile && slice_tile->shape_.size() == 2)
-        << "CanonicalizeTileSlice: matmul-operand slice must have a 2-D TileType result";
+        << "CanonicalizeTileSlice: materialized slice must have a 2-D TileType result";
     auto shape_tuple = std::make_shared<MakeTuple>(slice_tile->shape_, span);
     std::vector<ExprPtr> args = {info.base, info.off_row, info.off_col, shape_tuple};
     std::vector<std::pair<std::string, std::any>> kwargs = {{"target_memory", target}};
@@ -439,6 +457,112 @@ class CanonicalizeMutator : public IRMutator {
     return out;
   }
 
+  static constexpr int64_t kVecOperandAlignmentBits = 32 * 8;
+
+  /// Normalize an integer into [0, modulus), including negative offsets.
+  static int64_t PositiveModulo(int64_t value, int64_t modulus) {
+    int64_t result = value % modulus;
+    return result < 0 ? result + modulus : result;
+  }
+
+  /// Return the slice base-address offset modulo the 32-byte Vec operand
+  /// alignment, in bits, when it can be proved statically.  The root tile's
+  /// allocation is aligned; the slice adds
+  /// `(row * base_cols + col) * storage_bits`.
+  ///
+  /// A dynamic row is still safe when the source row stride is a multiple of
+  /// the alignment.  A dynamic column cannot be proved aligned.  Calculating
+  /// entirely modulo 256 avoids overflow for large static shapes and also
+  /// handles packed sub-byte dtypes correctly.
+  static std::optional<int64_t> VecSliceAddressModulo(const SliceInfo& info) {
+    auto base_tile = info.base ? As<TileType>(info.base->GetType()) : nullptr;
+    if (!base_tile || base_tile->shape_.size() != 2) return std::nullopt;
+
+    const int64_t storage_bits = static_cast<int64_t>(storage_size::GetStorageBitWidth(base_tile->dtype_));
+    if (storage_bits <= 0) return std::nullopt;
+
+    // Root allocations use the -1 planning sentinel and are aligned. Preserve
+    // a concrete MemRef byte offset when one is already known; a symbolic base
+    // offset makes the inherited address unprovable.
+    int64_t base_bits = 0;
+    if (base_tile->memref_.has_value()) {
+      auto byte_offset = As<ConstInt>((*base_tile->memref_)->byte_offset_);
+      if (!byte_offset) return std::nullopt;
+      if (byte_offset->value_ >= 0) {
+        base_bits = PositiveModulo(byte_offset->value_, 32) * 8;
+      }
+    }
+
+    auto col = As<ConstInt>(info.off_col);
+    if (!col) return std::nullopt;
+    const int64_t col_bits =
+        PositiveModulo(col->value_, kVecOperandAlignmentBits) * storage_bits % kVecOperandAlignmentBits;
+
+    auto row = As<ConstInt>(info.off_row);
+    if (row && row->value_ == 0) return (base_bits + col_bits) % kVecOperandAlignmentBits;
+
+    auto base_cols = As<ConstInt>(base_tile->shape_[1]);
+    if (!base_cols) return std::nullopt;
+    const int64_t row_stride_bits =
+        PositiveModulo(base_cols->value_, kVecOperandAlignmentBits) * storage_bits % kVecOperandAlignmentBits;
+    if (!row) {
+      return row_stride_bits == 0 ? std::optional<int64_t>((base_bits + col_bits) % kVecOperandAlignmentBits)
+                                  : std::nullopt;
+    }
+
+    const int64_t row_bits =
+        PositiveModulo(row->value_, kVecOperandAlignmentBits) * row_stride_bits % kVecOperandAlignmentBits;
+    return (base_bits + row_bits + col_bits) % kVecOperandAlignmentBits;
+  }
+
+  static bool IsVecOrUnassigned(const SliceInfo& info) {
+    return !info.memory_space.has_value() || *info.memory_space == MemorySpace::Vec;
+  }
+
+  /// True unless the Vec slice's inherited base address can be proved 32-byte
+  /// aligned.  Unknown shape/offset cases are materialized conservatively.
+  static bool NeedsAlignedVecMaterialization(const SliceInfo& info) {
+    if (!IsVecOrUnassigned(info)) return false;
+    auto address_modulo = VecSliceAddressModulo(info);
+    return !address_modulo.has_value() || *address_modulo != 0;
+  }
+
+  /// Materialize every unaligned Vec slice operand of an ordinary call through
+  /// a fresh Vec `tile.extract`.  This is deliberately consumer-independent:
+  /// the alignment contract belongs to PTO vector operands, not to one
+  /// elementwise opcode. `tile.slice` is only another view and remains peeled;
+  /// `tile.extract` has its own direct slice-folding rewrite above.
+  std::optional<std::vector<StmtPtr>> TryMaterializeUnalignedVecOperands(const AssignStmtPtr& assign) {
+    auto call = As<Call>(assign->value_);
+    if (!call || !call->op_ || IsOp(call, "tile.slice") || IsOp(call, "tile.extract")) {
+      return std::nullopt;
+    }
+
+    const Span& sp = call->span_;
+    std::vector<StmtPtr> extracts;
+    std::vector<ExprPtr> new_args = call->args_;
+    bool rewrote = false;
+    for (size_t i = 0; i < call->args_.size(); ++i) {
+      auto operand = AsVarLike(call->args_[i]);
+      if (!operand) continue;
+      auto it = slices_.find(operand.get());
+      if (it == slices_.end() || !NeedsAlignedVecMaterialization(it->second)) continue;
+      auto extract = BuildOperandExtract(operand, it->second, MemorySpace::Vec, sp);
+      extracts.push_back(extract);
+      new_args[i] = extract->var_;
+      rewrote = true;
+    }
+    if (!rewrote) return std::nullopt;
+
+    auto& reg = OpRegistry::GetInstance();
+    auto new_call = reg.Create(call->op_->name_, new_args, call->kwargs_, sp);
+    auto new_assign = MutableCopy(assign);
+    new_assign->value_ = new_call;
+    std::vector<StmtPtr> out = std::move(extracts);
+    out.push_back(new_assign);
+    return out;
+  }
+
   const std::unordered_map<const Var*, SliceInfo>& slices_;
 };
 
@@ -496,8 +620,7 @@ Pass CanonicalizeTileSlice() {
     collector.VisitStmt(func->body_);
     if (collector.slices.empty()) return func;
 
-    // Phase 2 — fold each slice into its tile.extract / matmul / col_expand_mul
-    // consumers.
+    // Phase 2 — fold or materialize canonical slice consumers.
     CanonicalizeMutator mutator(collector.slices);
     auto new_body = mutator.VisitStmt(func->body_);
 

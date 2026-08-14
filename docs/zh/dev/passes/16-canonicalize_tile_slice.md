@@ -1,6 +1,6 @@
 # CanonicalizeTileSlice Pass
 
-将 `tile.slice` 下沉 (lower) 为规范的 `tile.extract` 形式，使搬运统一走 `pto.textract`——既包括 Mat-resident 切片（折叠进 matmul / `tile.extract` 消费者），也包括那些惰性实例化会破坏源 tile 的 Vec 切片（为 `tile.col_expand_*` 系列实例化，issue #1640、#2010）。
+将 `tile.slice` 下沉 (lower) 为规范的 `tile.extract` 形式，使搬运统一走 `pto.textract`——既包括 Mat-resident 切片（折叠进 matmul / `tile.extract` 消费者），也包括那些惰性实例化会破坏源 tile 的 Vec 切片（为 `tile.col_expand_*` 系列实例化，issue #1640、#2010），以及地址未对齐的 Vec 子视图（issue #1789）。
 
 ## 概览
 
@@ -16,6 +16,14 @@ PTO ISA 支持 Mat 上的 `pto.subview` 作为零拷贝别名（无数据搬运�
 | 目标**布局**一致 | slice 缓冲区是稠密的（行间距 = slice 列数），而源窗口是跨步的（行间距 = 源列数）。二者只有在窗口**连续**时才相同：单行，或覆盖全部列。多行 tile 的列切片（`t[:, a:b]`）会在自己仍然存活的源上做 跨步 → 稠密 的重排并将其摧毁——只有第 0 行幸存，因为它的稠密目标地址恰好等于其源地址（#2010）。 |
 
 只要任一条件不成立，该操作数就会被替换为新的 `tile.extract(..., target_memory=Vec)`，其结果获得独立、非继承的分配。`tile.extract` 注册为 `not_inplace_safe()`，因此 [`MemoryReuse`](33-memory_reuse.md) 也不会把这块新缓冲区重新放回源 tile 上。若实例化本身就是恒等拷贝，则该 slice 保持原样——它继续共享源缓冲区，而不必付出一份重复分配的代价。
+
+此外，PTO 向量指令要求 tile 操作数的基址按 32 字节对齐。零拷贝 Vec slice 的起始地址为
+
+```text
+base + (off_row * base_cols + off_col) * storage_bits
+```
+
+因此 FP32 的列切片 `[:, 1:2]` 只比对齐的源分配多 4 字节。把这个 subview 直接喂给 `tile.muls` 等普通向量算子可能导致设备卡死（#1789）。本 pass 会将地址未对齐的 Vec slice 操作数替换为新的 `tile.extract(..., target_memory=Vec)`；新分配满足对齐要求，而可证明对齐的 slice 仍保持零拷贝。对于动态偏移，只有当源行跨度是 32 字节的倍数时才能证明动态行偏移安全；动态列偏移则保守地实例化。
 
 **Pipeline 位置**：紧跟在 [`AutoTileMatmulL0`](15-auto_tile_matmul_l0.md) 之后（此时读取 batch-page slice 的逐迭代 `tile.extract` 已经存在），先于 [`InferTileMemorySpace`](17-infer_tile_memory_space.md)。
 
@@ -43,12 +51,13 @@ program_canon = passes.canonicalize_tile_slice()(program)
 
 对每个 InCore 类型的 function，分三个阶段：
 
-1. **收集 (Collect)** —— 索引每个 value 为 Mat-resident `tile.slice(src, shape, offset)`（规范 3 参数形式）的 `AssignStmt`。若某 slice 的 `src` 本身又是一个 Mat slice，则进行剥离 (peel) 并累加偏移，使每个条目最终解析为一个非 slice 的 base tile 加上总偏移 `(off_row, off_col)`。带有 `valid_shape` / `drop_dims` 的 slice（4–5 参数）不是普通窗口，跳过。
+1. **收集 (Collect)** —— 索引每个 value 为规范 3 参数形式 `tile.slice(src, shape, offset)` 的 `AssignStmt`。若某 slice 的 `src` 本身又是一个已记录的 slice，则进行剥离 (peel) 并累加偏移，使每个条目最终解析为一个非 slice 的 base tile 加上总偏移 `(off_row, off_col)`。带有 `valid_shape` / `drop_dims` 的 slice（4–5 参数）不是普通窗口，跳过。
 
 2. **改写消费者 (Rewrite consumers)** —— 对每个 slice：
-   - **`tile.extract(slice, ir, ic, shape)`**（仅 Mat slice） → `tile.extract(base, ir + off_row, ic + off_col, shape)`。extract 直接读取 slice 的源 tile；当两个加数都是 `ConstInt` 时对索引加法做常量折叠。
+   - **`tile.extract(slice, ir, ic, shape)`** → `tile.extract(base, ir + off_row, ic + off_col, shape)`。extract 直接读取 slice 的源 tile；当两个加数都是 `ConstInt` 时对索引加法做常量折叠。
    - **`tile.matmul` / `tile.matmul_acc` / `tile.matmul_bias` 的操作数**（仅 Mat slice） → 该操作数被替换为一个新的 `tile.extract(base, off_row, off_col, slice_shape, target_memory=Left|Right)`——lhs 操作数用 `Left`，rhs 操作数用 `Right`。（`tile.matmul_acc` 的累加器操作数位于 `Acc`，永远不会是 Mat slice。）
    - **`tile.col_expand_*` 的操作数**（仅 Vec slice） → 当惰性 `pto.textract` 不是恒等拷贝时——即偏移是动态的，或窗口在基 tile 中不连续（行数大于 1 *且* 比基 tile 窄）——该操作数被替换为一个新的 `tile.extract(base, off_row, off_col, slice_shape, target_memory=Vec)`。两个操作数都会检查。常量偏移且窗口连续的 slice 保持原样。
+   - **普通 call 的操作数**（仅 Vec slice） → 计算 `(off_row * base_cols + off_col) * storage_bits mod 256`。若结果非零或无法证明，则把操作数替换为新的 `tile.extract(base, off_row, off_col, slice_shape, target_memory=Vec)`。`tile.slice` 自身会被跳过，以便剥离链式视图；`tile.extract` 使用上面的直接折叠规则。
 
 3. **删除死 slice (Drop dead slices)** —— 结果不再被任何使用者引用的 `tile.slice` 被删除。链式 slice（slice 的 slice）只有在消费它的那个 slice 被删除后才会变死，因此该步骤迭代至不动点（迭代次数以 slice 数量为上界）。结束时仍被使用的 slice，说明其消费者不被本 pass 规范化——保持原样，相对 pass 前的 IR 无回退。
 
@@ -139,6 +148,25 @@ scaled: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.col_expand_mul(hi_ext, 
 
 若不做这次改写，`hi` 会在 `t + 256 B`（即 `t` 内部）分配一块稠密的 `[16, 64]` 缓冲区，惰性 `pto.textract` 一边读 `t` 一边把它的跨步列重排进去，从而覆盖掉 `t` 本身。最终只有第 0 行是正确的——这也正是同样的写法在单行 tile 上无害的原因。
 
+### 未对齐的 Vec 列切片（#1789）
+
+FP32 tile 的第 1 列只比对齐的源分配多 4 字节，因此不能直接供 `tile.muls` 使用：
+
+```python
+head:   pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.slice(local, [16, 1], [0, 1])
+scaled: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.muls(head, 0.5)
+```
+
+本 pass 会给向量操作提供一块对齐且独立分配的 tile：
+
+```python
+head_ext: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.extract(
+    local, 0, 1, shape=[16, 1], target_memory=pl.Mem.Vec)
+scaled:   pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.muls(head_ext, 0.5)
+```
+
+作为边界情况，FP32 的第 8 列距源基址恰好 32 字节，因此仍保持零拷贝。当源行跨度按 32 字节对齐时，动态行偏移也可保持零拷贝。
+
 ## 实现
 
 **头文件**：`include/pypto/ir/transforms/passes.h`
@@ -168,9 +196,11 @@ scaled: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.col_expand_mul(hi_ext, 
 | 喂给 `tile.col_expand_*` 的动态偏移 Vec `tile.slice`（3 参数） | 替换为 `tile.extract(target_memory=Vec)`；删除 slice（#1640——地址退化到裸源基址） |
 | 喂给 `tile.col_expand_*` 的常量偏移**非连续** Vec `tile.slice`（多行 *且* 比基 tile 窄，如 `t[:, a:b]`） | 替换为 `tile.extract(target_memory=Vec)`；删除 slice（#2010——稠密重排会写在自己仍然存活的源上） |
 | 喂给 `tile.col_expand_*` 的常量偏移**连续** Vec `tile.slice`（单行，或覆盖源的全部列） | 保持原样（惰性 textract 是安全的恒等拷贝；继续共享源缓冲区） |
+| 喂给普通 call、继承地址无法证明按 32 字节对齐的 Vec `tile.slice` | 替换为 `tile.extract(target_memory=Vec)`；删除 slice（#1789） |
+| 喂给普通 call、继承地址可证明按 32 字节对齐的 Vec `tile.slice` | 保持原样；继续使用零拷贝 subview |
 | 链式 Mat `tile.slice`（slice 的 slice） | 剥离；累加偏移 |
 | 带 `valid_shape` / `drop_dims` 的 `tile.slice` | 跳过（不是普通窗口）。若这样的 slice 同时不满足上述任一恒等拷贝条件——动态偏移（例如降秩的 `t[i]`）或非连续窗口——并喂给 col-expand op，codegen 会以 `INTERNAL_CHECK` 直接报错，而不是生成会破坏源 tile 的代码 |
-| 其他位于 Vec/Left/Right/Acc 的 `tile.slice` | 不处理（无匹配的消费者） |
+| 其他位于 Left/Right/Acc 的 `tile.slice` | 不处理（无匹配的消费者） |
 | 不含规范 `tile.slice` 的 function | 原样返回 |
 
 ## 参见

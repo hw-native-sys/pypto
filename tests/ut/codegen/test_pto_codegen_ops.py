@@ -1564,6 +1564,57 @@ class TestTileSliceCodegen:
         assert "sizes [16, 16]" in line, f"sizes attribute must be [16, 16], got:\n{line}"
         assert "rows=16, cols=16" in line, f"result tile_buf must carry rows=16, cols=16, got:\n{line}"
 
+    def test_unaligned_vec_column_slice_into_muls_uses_aligned_extract(self):
+        """Regression for #1789: an FP32 column subview at offset 1 starts four
+        bytes past its source allocation and must not feed ``pto.tmuls``
+        directly. The pass materializes it into a fresh aligned tile first."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[16, 8], pl.FP32],
+                dst: pl.Tensor[[16, 1], pl.FP32],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                local: pl.Tile[[16, 8], pl.FP32] = pl.load(src, [0, 0], [16, 8])
+                head: pl.Tile[[16, 1], pl.FP32] = pl.tile.slice(local, [16, 1], [0, 1])
+                scaled: pl.Tile[[16, 1], pl.FP32] = pl.tile.muls(head, 0.5)
+                return pl.store(scaled, [0, 0], dst)
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.subview" not in mlir, (
+            f"unaligned Vec slice must be canonicalized to tile.extract, got:\n{mlir}"
+        )
+        textract_lines = [line.strip() for line in mlir.splitlines() if "pto.textract" in line]
+        tmuls_lines = [line.strip() for line in mlir.splitlines() if "pto.tmuls" in line]
+        assert len(textract_lines) == 1 and len(tmuls_lines) == 1, (
+            f"expected one aligned extract followed by one tmuls, got:\n{mlir}"
+        )
+
+        textract_out = textract_lines[0].split("outs(", 1)[1].split(":", 1)[0].strip()
+        tmuls_in = tmuls_lines[0].split("ins(", 1)[1].split(":", 1)[0].split(",", 1)[0].strip()
+        assert mlir.index("pto.textract") < mlir.index("pto.tmuls"), (
+            f"the aligned extract must precede pto.tmuls, got:\n{mlir}"
+        )
+
+        # Layout resolution may insert a row-major conversion between textract
+        # and tmuls. Both the materialized tile and the final tmuls operand must
+        # therefore have independent, aligned allocations; direct SSA identity
+        # is not required.
+        for value in (textract_out, tmuls_in):
+            alloc_line = next(
+                (line for line in mlir.splitlines() if line.strip().startswith(f"{value} = pto.alloc_tile")),
+                None,
+            )
+            assert alloc_line is not None, f"{value} must have its own allocation, got:\n{mlir}"
+            address = alloc_line.split("addr = ", 1)[1].split()[0]
+            constant = re.fullmatch(r"%c(-?\d+)_i64", address)
+            assert constant is not None, f"expected a static allocation address, got: {alloc_line}"
+            assert int(constant.group(1)) % 32 == 0, (
+                f"Vec operand address must be 32-byte aligned: {alloc_line}"
+            )
+
     @pytest.mark.parametrize(
         "op_name, pto_op",
         [
@@ -1975,15 +2026,19 @@ class TestTileSliceCodegen:
                 return pl.store(sliced, [0, 0], dst)
 
         mlir = self._generate_mlir(Prog)
-        subview_lines = [line for line in mlir.splitlines() if "pto.subview" in line]
-        assert subview_lines, "no pto.subview line emitted"
-        result_type = subview_lines[0].split("->", 1)[-1]
-        assert "v_row=16" in result_type and "v_col=16" in result_type, (
-            f"Source valid [32,32] >= slice size [16,16] with dynamic offset must yield "
-            f"static v_row=16, v_col=16 in result tile_buf type, got:\n{subview_lines[0]}"
+        # A dynamic column cannot be proved aligned, so #1789 canonicalization
+        # materializes this slice. Its inferred static valid shape must survive
+        # on the fresh allocation.
+        assert "pto.subview" not in mlir, f"dynamic unaligned slice must be materialized, got:\n{mlir}"
+        textract_lines = [line.strip() for line in mlir.splitlines() if "pto.textract" in line]
+        assert len(textract_lines) == 1, f"expected one pto.textract, got:\n{mlir}"
+        textract_out = textract_lines[0].split("outs(", 1)[1].split(":", 1)[0].strip()
+        alloc_line = next(
+            line for line in mlir.splitlines() if line.strip().startswith(f"{textract_out} = pto.alloc_tile")
         )
-        assert "v_row=?" not in result_type and "v_col=?" not in result_type, (
-            f"v_row/v_col must not be dynamic ('?') when source valid >= slice size, got:\n{subview_lines[0]}"
+        assert "valid_row = %c16_index" in alloc_line and "valid_col = %c16_index" in alloc_line, (
+            f"Source valid [32,32] >= slice size [16,16] must preserve static valid [16,16], got:\n"
+            f"{alloc_line}"
         )
 
     def test_tile_slice_preserves_non_sentinel_parent_valid_shape(self):
@@ -2010,12 +2065,19 @@ class TestTileSliceCodegen:
                 return pl.store(sliced, [0, 0], dst)
 
         mlir = self._generate_mlir(Prog)
-        subview_lines = [line for line in mlir.splitlines() if "pto.subview" in line]
-        assert subview_lines, f"no pto.subview line emitted; got:\n{mlir}"
-        result_type = subview_lines[0].split("->", 1)[-1]
-        assert "v_row=6" in result_type and "v_col=6" in result_type, (
-            "Parent narrow valid [12, 12] with offset [6, 6] and sizes [8, 8] must yield "
-            f"v_row=6, v_col=6 (min(size, valid - offset)) on the subview result; got:\n{subview_lines[0]}"
+        # Offset [6,6] is not 32-byte aligned, so #1789 canonicalization
+        # materializes the slice. The narrow valid extent must be preserved on
+        # that fresh allocation.
+        assert "pto.subview" not in mlir, f"unaligned slice must be materialized, got:\n{mlir}"
+        textract_lines = [line.strip() for line in mlir.splitlines() if "pto.textract" in line]
+        assert len(textract_lines) == 1, f"expected one pto.textract, got:\n{mlir}"
+        textract_out = textract_lines[0].split("outs(", 1)[1].split(":", 1)[0].strip()
+        alloc_line = next(
+            line for line in mlir.splitlines() if line.strip().startswith(f"{textract_out} = pto.alloc_tile")
+        )
+        assert "valid_row = %c6_index" in alloc_line and "valid_col = %c6_index" in alloc_line, (
+            "Parent narrow valid [12, 12] with offset [6, 6] and sizes [8, 8] must preserve "
+            f"valid [6,6] (min(size, valid - offset)) on the materialized result; got:\n{alloc_line}"
         )
 
     def test_tile_slice_with_zero_valid_sentinel_parent_does_not_emit_zero_result_valid(self):
@@ -3880,7 +3942,7 @@ class TestB03TriAndGatherCodegen:
         )
 
     @pytest.mark.parametrize(
-        ("dtype", "output_cols", "column", "accepted"),
+        ("dtype", "output_cols", "column", "aligned"),
         [
             (pl.UINT8, 256, 31, False),
             (pl.UINT8, 256, 32, True),
@@ -3890,7 +3952,7 @@ class TestB03TriAndGatherCodegen:
             (pl.FP32, 64, 8, True),
         ],
     )
-    def test_tgatherb_requires_32_byte_aligned_source_subview(self, dtype, output_cols, column, accepted):
+    def test_tgatherb_materializes_unaligned_source_subview(self, dtype, output_cols, column, aligned):
         @pl.program
         class Prog:
             @pl.function(type=pl.FunctionType.InCore)
@@ -3906,13 +3968,16 @@ class TestB03TriAndGatherCodegen:
                 gathered: pl.Tile[[8, output_cols], dtype] = pl.tile.gatherb(src_view, offset_tile)
                 pl.store(gathered, [0, 0], out)
 
-        if accepted:
-            assert "pto.tgatherb" in self._generate_mlir(Prog)
+        mlir = self._generate_mlir(Prog)
+        assert "pto.tgatherb" in mlir
+        if aligned:
+            assert "pto.subview" in mlir
+            assert "pto.textract" not in mlir
         else:
-            with pytest.raises(ValueError, match="32-byte aligned"):
-                self._generate_mlir(Prog)
+            assert "pto.subview" not in mlir
+            assert "pto.textract" in mlir
 
-    def test_tgatherb_rejects_dynamic_column_subview_alignment(self):
+    def test_tgatherb_materializes_dynamic_column_subview_alignment(self):
         @pl.program
         class Prog:
             @pl.function(type=pl.FunctionType.InCore)
@@ -3929,8 +3994,10 @@ class TestB03TriAndGatherCodegen:
                 gathered: pl.Tile[[8, 128], pl.FP16] = pl.tile.gatherb(src_view, offset_tile)
                 pl.store(gathered, [0, 0], out)
 
-        with pytest.raises(ValueError, match="provably 32-byte aligned"):
-            self._generate_mlir(Prog)
+        mlir = self._generate_mlir(Prog)
+        assert "pto.tgatherb" in mlir
+        assert "pto.subview" not in mlir
+        assert "pto.textract" in mlir
 
     @pytest.mark.parametrize(
         ("dtype", "output_cols"),
@@ -3971,7 +4038,7 @@ class TestB03TriAndGatherCodegen:
             (pl.FP32, 64),
         ],
     )
-    def test_tgatherb_rejects_dynamic_row_subview_with_unaligned_stride(self, dtype, output_cols):
+    def test_tgatherb_materializes_dynamic_row_subview_with_unaligned_stride(self, dtype, output_cols):
         @pl.program
         class Prog:
             @pl.function(type=pl.FunctionType.InCore)
@@ -3988,10 +4055,12 @@ class TestB03TriAndGatherCodegen:
                 gathered: pl.Tile[[8, output_cols], dtype] = pl.tile.gatherb(src_view, offset_tile)
                 pl.store(gathered, [0, 0], out)
 
-        with pytest.raises(ValueError, match="provably 32-byte aligned"):
-            self._generate_mlir(Prog)
+        mlir = self._generate_mlir(Prog)
+        assert "pto.tgatherb" in mlir
+        assert "pto.subview" not in mlir
+        assert "pto.textract" in mlir
 
-    def test_tgatherb_rejects_nested_dynamic_column_subview_alignment(self):
+    def test_tgatherb_materializes_nested_dynamic_column_subview_alignment(self):
         @pl.program
         class Prog:
             @pl.function(type=pl.FunctionType.InCore)
@@ -4009,8 +4078,10 @@ class TestB03TriAndGatherCodegen:
                 gathered: pl.Tile[[8, 128], pl.FP16] = pl.tile.gatherb(inner, offset_tile)
                 pl.store(gathered, [0, 0], out)
 
-        with pytest.raises(ValueError, match="provably 32-byte aligned"):
-            self._generate_mlir(Prog)
+        mlir = self._generate_mlir(Prog)
+        assert "pto.tgatherb" in mlir
+        assert "pto.subview" not in mlir
+        assert "pto.textract" in mlir
 
     def test_tgatherb_accepts_nested_static_offsets_with_aligned_total(self):
         @pl.program
