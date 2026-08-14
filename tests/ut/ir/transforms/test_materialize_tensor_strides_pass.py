@@ -24,10 +24,10 @@ Tests follow the Before/Expected ``@pl.program`` pattern: the pass runs on
 ``Before``.
 """
 
+import re
 from collections.abc import Sequence
 from typing import cast
 
-import pypto
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
@@ -318,16 +318,19 @@ def test_strided_dn_subview_unchanged():
 
 
 # ============================================================================
-# NZ on TensorType is left untouched (verifier rejects it; pass doesn't crash)
+# NZ on TensorType is rejected by the pass itself
 # ============================================================================
+#
+# NZ is a fractal, tile-only layout with no logical-stride representation, so
+# a TensorType carrying it is invalid IR. The pass rejects it directly instead
+# of leaving the slot untouched for the paired TensorViewCanonical verifier:
+# delegating meant the malformed slot survived silently whenever verification
+# was disabled (``PYPTO_VERIFY_LEVEL=none``), even though the pass declares
+# TensorViewCanonical as produced. The rejection is a CHECK, so it surfaces as
+# a ValueError at every verification level.
 
 
-def test_nz_on_tensor_rejected_by_paired_verifier():
-    # NZ on a TensorType is invalid IR. The pass leaves the slot untouched
-    # rather than CHECK-failing inside BuildLogicalStridesFromLayout — but
-    # because the pass produces TensorViewCanonical, PassPipeline runs the
-    # paired verifier, which surfaces the bug as a thrown VerificationError
-    # (pypto.Error on the Python side).
+def test_nz_on_tensor_rejected_by_pass():
     @pl.program
     class Before:
         @pl.function
@@ -337,11 +340,15 @@ def test_nz_on_tensor_rejected_by_paired_verifier():
         ):
             pl.const(0, pl.INT64)
 
-    with pytest.raises(pypto.Error, match="NZ layout"):
+    with pytest.raises(ValueError, match="NZ layout") as excinfo:
         _materialize(Before)
+    # The pass threads the carrying node's Span into CHECK_SPAN so the message
+    # points at the offending annotation. Assert the location is present, not
+    # just the text — otherwise dropping the span would go unnoticed.
+    assert re.search(r"\[[^]\s]+:\d+:\d+\]", str(excinfo.value)), str(excinfo.value)
 
 
-def test_nz_on_distributed_tensor_rejected_by_paired_verifier():
+def test_nz_on_distributed_tensor_rejected_by_pass():
     @pl.program
     class Before:
         @pl.function
@@ -351,8 +358,42 @@ def test_nz_on_distributed_tensor_rejected_by_paired_verifier():
         ):
             pl.const(0, pl.INT64)
 
-    with pytest.raises(pypto.Error, match="NZ layout"):
+    with pytest.raises(ValueError, match="NZ layout"):
         _materialize(Before)
+
+
+def test_nz_with_explicit_stride_rejected_by_pass():
+    # An explicit stride does not make NZ valid on a TensorType. The check runs
+    # before the "already explicit, nothing to materialize" short-circuit, so
+    # this slot cannot slip through the pass claiming TensorViewCanonical.
+    @pl.program
+    class Before:
+        @pl.function
+        def f(
+            self,
+            x: pl.Tensor[[8, 16], pl.FP32, pl.TensorView(stride=[16, 1], layout=pl.TensorLayout.NZ)],
+        ):
+            pl.const(0, pl.INT64)
+
+    with pytest.raises(ValueError, match="NZ layout"):
+        _materialize(Before)
+
+
+def test_nz_rejected_under_verification_disabled():
+    # Regression guard for the delegation bug: with no VerificationInstrument
+    # installed, nothing but the pass itself can reject the invalid slot.
+    @pl.program
+    class Before:
+        @pl.function
+        def f(
+            self,
+            x: pl.Tensor[[8, 16], pl.FP32, pl.TensorView(stride=[], layout=pl.TensorLayout.NZ)],
+        ):
+            pl.const(0, pl.INT64)
+
+    with _passes.PassContext([], _passes.VerificationLevel.NONE):
+        with pytest.raises(ValueError, match="NZ layout"):
+            _materialize(Before)
 
 
 # ============================================================================

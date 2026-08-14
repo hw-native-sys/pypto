@@ -1939,8 +1939,8 @@ class TestAutoTileMatmulL0MNTiling:
     def test_system_k_split_shapes_emit_k_only_loop(self, planner, M, K, N, tile_k):
         """Structural contract for the FP32 system-test matrix.
 
-        Every shape must remain a K-only split under both planners: one K
-        pipeline, at least one matmul_acc, and no M/N grid loop.
+        Shapes remain K-only unless PTOAS's expanded design space finds a
+        strictly cheaper full-K one-dimensional dbC schedule.
         """
         _backend.reset_for_testing()
         _backend.set_backend_type(BackendType.Ascend910B)
@@ -1967,6 +1967,17 @@ class TestAutoTileMatmulL0MNTiling:
         with passes.PassContext([], memory_planner=planner):
             After = passes.auto_tile_matmul_l0()(Before)
         printed = ir.python_print(After)
+        if planner == passes.MemoryPlanner.PTOAS and (M, K, N) == (64, 256, 256):
+            assert printed.count("pl.range(") == 1
+            assert printed.count("pl.pipeline(") == 1
+            assert "pl.range(0, 64, 64," in printed
+            assert "pl.pipeline(0, 256, 32," in printed
+            assert "[64, 256], target_memory=pl.Mem.Left" in printed
+            assert "[256, 32], target_memory=pl.Mem.Right" in printed
+            assert "pipeline_double_buffer_c" in printed
+            assert "pl.tile.matmul_acc(" not in printed
+            _assert_ssa_valid(After, "test_system_full_k_one_dimensional_ptoas")
+            return
         assert printed.count("pl.pipeline(") == 1
         assert "pl.range(" not in printed
         assert f"pl.pipeline(0, {K}, {tile_k}," in printed
@@ -1988,12 +1999,12 @@ class TestAutoTileMatmulL0MNTiling:
             ),
             (
                 passes.MemoryPlanner.PTOAS,
+                64,
                 384,
-                256,
-                128,
-                128,
-                "pl.range(0, 384, 128,",
-                "pl.pipeline(0, 128, 64,",
+                288,
+                64,
+                "pl.range(0, 64, 64,",
+                "pl.pipeline(0, 288, 32,",
                 True,
             ),
         ],
@@ -2059,7 +2070,7 @@ class TestAutoTileMatmulL0MNTiling:
                 passes.MemoryPlanner.PTOAS,
                 64,
                 80,
-                288,
+                256,
                 256,
                 "pl.range(0, 256, 256,",
                 "pl.pipeline(0, 64, 32,",
@@ -2115,6 +2126,7 @@ class TestAutoTileMatmulL0MNTiling:
         ("planner", "pypto_dbc"),
         [
             (passes.MemoryPlanner.PYPTO, True),
+            (passes.MemoryPlanner.DSA_RP, False),
             (passes.MemoryPlanner.PTOAS, False),
         ],
     )
@@ -2123,9 +2135,9 @@ class TestAutoTileMatmulL0MNTiling:
         [
             (160, 160, 80, 128),
             (144, 144, 48, 128),
-            (256, 256, 64, 128),
+            (256, 256, 32, 256),
             (448, 448, 112, 128),
-            (384, 256, 64, 128),
+            (384, 256, 32, 256),
         ],
     )
     def test_system_dbc_shapes_emit_expected_fp32_tile(self, planner, pypto_dbc, M, N, tile_m, tile_n):
@@ -2363,6 +2375,74 @@ class TestAutoTileMatmulL0MNTiling:
             assert acc_buffer_count() == 2, (
                 "PyPTO + opt-in flag must allocate the dbC=2 ping-pong (two co-live L0C accumulators)"
             )
+
+    @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+    @pytest.mark.parametrize(
+        ("M", "N", "held_memory"),
+        [
+            (16, 256, "pl.Mem.Left"),
+            (256, 16, "pl.Mem.Right"),
+        ],
+    )
+    def test_dbc_one_dimensional_grid_allocates_two_accumulators(self, planner, M, N, held_memory):
+        """Both in-tree planners realize 1x2 and 2x1 dbC with two L0C buffers.
+
+        The singleton axis is outer and holds its operand; the two-tile axis is
+        the inner loop carrying ``pipeline_double_buffer_c``. PYPTO requires
+        its legacy opt-in; DSA_RP enables dbC automatically and ignores it.
+        """
+        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+
+        K = 128
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.BF16],
+                rhs: pl.Tensor[[K, N], pl.BF16],
+                out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                result = pl.tile.matmul(lhs_mat, rhs_mat)
+                out = pl.tile.store(result, [0, 0], out)
+                return out
+
+        pypto_opt_in = planner == passes.MemoryPlanner.PYPTO
+        with passes.PassContext([], memory_planner=planner, enable_pypto_l0c_double_buffer=pypto_opt_in):
+            tiled = passes.auto_tile_matmul_l0()(Before)
+            optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+
+        if planner == passes.MemoryPlanner.DSA_RP:
+            with passes.PassContext([], memory_planner=planner, enable_pypto_l0c_double_buffer=True):
+                explicit_tiled = passes.auto_tile_matmul_l0()(Before)
+                explicit_optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+            ir.assert_structural_equal(tiled, explicit_tiled)
+            ir.assert_structural_equal(optimized, explicit_optimized)
+
+        tiled_lines = ir.python_print(tiled).splitlines()
+        outer_i = next(i for i, line in enumerate(tiled_lines) if "pl.pipeline(0, 16, 16," in line)
+        inner_i = next(i for i, line in enumerate(tiled_lines) if "pl.pipeline(0, 256, 128," in line)
+        assert outer_i < inner_i
+        held_region = "\n".join(tiled_lines[outer_i + 1 : inner_i])
+        assert "pl.tile.extract(" in held_region
+        assert f"target_memory={held_memory}" in held_region
+        assert "pipeline_double_buffer_c" not in tiled_lines[outer_i]
+        assert "pipeline_double_buffer_c" in tiled_lines[inner_i]
+
+        acc_buffers = {
+            line.strip().split(":")[0]
+            for line in ir.python_print(optimized).splitlines()
+            if "tile.alloc(pl.Mem.Acc" in line
+        }
+        assert len(acc_buffers) == 2, (
+            f"{planner} must preserve exactly two co-live L0C accumulators for {M}x{N}, "
+            f"got {sorted(acc_buffers)}"
+        )
 
     @pytest.mark.parametrize(
         ("M", "N"),
@@ -3625,20 +3705,30 @@ class TestAutoTileMatmulL0MatScratch:
         rel_err = ((out - expected).norm() / expected.norm()).item()
         assert rel_err < 5e-2, f"split-K Mat-scratch chained bf16 rel_err {rel_err:.3e} exceeds 5e-2"
 
-    def test_chained_mat_scratch_producer_forced_output_stationary(self):
-        """#1908 guard: a chained Mat-scratch producer whose geometry standalone picks
-        B-stationary (128×512×128) is forced OUTPUT-STATIONARY when its result is consumed
-        on-chip. The Mat-scratch offset-packing path can't yet pack an A/B-stationary
-        producer's monolithic single-buffered L0 panel against the consumer's
-        double-buffered operands (#1908), so the pass re-chooses OS (always legal) rather
-        than emit the unpackable A/B-stationary schedule. This exact shape is B-stationary
-        standalone (``test_b_stationary_single_buffers_held_operand`` mirror) — as a
-        chained producer it must not be.
+    @pytest.mark.parametrize(
+        ("planner", "pypto_opt_in", "operand_stationary", "double_buffer_c"),
+        [
+            (passes.MemoryPlanner.PYPTO, False, False, False),
+            (passes.MemoryPlanner.DSA_RP, False, True, True),
+        ],
+    )
+    def test_chained_mat_scratch_stationarity_matches_planner(
+        self, planner, pypto_opt_in, operand_stationary, double_buffer_c
+    ):
+        """Apply the #1908 guard only to the legacy PyPTO allocator.
+
+        This chained Mat-scratch producer standalone selects B-stationary
+        (128×512×128). PyPTO cannot subdivide its released monolithic L0B
+        panel for the consumer's smaller pipelined buffers, so AutoTile
+        re-chooses OS. DSA_RP places from actual lifetimes and retains the
+        B-stationary choice.
 
         128×512 FP32 output (256 KB) > L0c so the producer is tiled; the 128×512 bf16
         Mat scratch (128 KB) fits Mat/L1, so it reaches the fold (not the capacity gate).
         The consumer [128, 64] fits L0c (no loop), so any Sequential ``pl.range`` in the
         emitted kernel would be the producer's A/B-stationary held-operand loop."""
+        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+
         _backend.reset_for_testing()
         _backend.set_backend_type(BackendType.Ascend910B)
 
@@ -3658,22 +3748,31 @@ class TestAutoTileMatmulL0MatScratch:
                 out = pl.assemble(out, d, [0, 0])
                 return out
 
-        After = passes.auto_tile_matmul_l0()(_lower_to_tile_ops(Before))
+        with passes.PassContext([], memory_planner=planner, enable_pypto_l0c_double_buffer=pypto_opt_in):
+            After = passes.auto_tile_matmul_l0()(_lower_to_tile_ops(Before))
+            allocated = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+
         printed = ir.python_print(After)
         assert "tile.create" in printed and "Mem.Mat" in printed, "expected a Mat output scratch"
-        # The guard forces the producer output-stationary: an A/B-stationary schedule
-        # emits a Sequential ``pl.range`` held-operand outer loop, which the Mat-scratch
-        # packing cannot handle yet (#1908). OS emits nested ``pl.pipeline`` instead.
-        assert "pl.range(" not in printed, (
-            "chained Mat-scratch producer must be output-stationary (nested pl.pipeline), "
-            "not A/B-stationary (Sequential pl.range) — the #1908 guard failed"
-        )
-        _assert_ssa_valid(After, "test_mat_scratch_producer_os_guard")
-        # And it must allocate cleanly through the full Default pipeline (the A/B-stationary
-        # producer would overflow at AllocateMemoryAddr — the #1908 packing gap).
-        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+        assert ("pl.range(" in printed) == operand_stationary
+        assert ("pipeline_double_buffer_c" in printed) == double_buffer_c
+        _assert_ssa_valid(After, f"test_mat_scratch_stationarity_{planner}")
 
-        assert PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before) is not None
+        if not operand_stationary:
+            return
+        allocated_text = ir.python_print(allocated)
+        assert "tile.alloc(pl.Mem.Right, 65536)" in allocated_text
+        right_ranges = {
+            (int(offset), int(size))
+            for offset, size in re.findall(
+                r"pl\.MemRef\(mem_right_[^,]+, pl\.const\((\d+), pl\.INT64\), (\d+)\), pl\.Mem\.Right",
+                allocated_text,
+            )
+        }
+        assert right_ranges == {(0, 65536)}, (
+            "DSA_RP should co-place the producer and consumer Right-buffer lifetimes "
+            f"inside one 64 KiB L0B arena, got ranges {sorted(right_ranges)}"
+        )
 
     def test_misaligned_n_mat_scratch_roundtrips(self):
         """A misaligned-N Mat-scratch boundary tail survives print -> parse.

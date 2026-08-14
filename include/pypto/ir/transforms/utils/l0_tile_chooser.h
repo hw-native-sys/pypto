@@ -223,9 +223,9 @@ struct L0TileResult {
   // Whether the chooser chose to double-buffer L0C (two accumulators ping-ponged
   // to overlap the FIXPIPE drain). True only when allow_double_buffer_c was set,
   // the single-L0C optimum already tiles the output (a full [M, N, K] tile that
-  // fits one L0C is left untiled instead), the tile forms a >= 2x2 output grid,
-  // reduces K in one pass (k == K), and the double-buffered wall was strictly
-  // lower.
+  // fits one L0C is left untiled instead), the moving inner loop has at least two
+  // full interior tiles, K reduces in one pass (k == K), and the double-buffered
+  // wall was strictly lower. The stationary outer axis may have one tile.
   //
   // NOTE: the caller must REALIZE this with a genuine two-accumulator schedule
   // (two co-live L0C buffers). A full-K emitter that threads the output as a
@@ -294,8 +294,9 @@ struct L0TileResult {
  *      lower-hidden-load aspect among MAD-bound (m,n)<->(n,m) ties.
  *   4. Pick the global minimum-wall point across all enumerated combinations.
  *      A-stationary / B-stationary require k == K (operand residency). dbC = 2
- *      additionally requires a >= 2x2 grid, k == K, and that the single-L0C
- *      optimum already tiles. The (m, n) grid is bounded by
+ *      additionally requires at least two full tiles on the moving inner axis,
+ *      k == K, and that the single-L0C optimum already tiles. The (m, n) grid
+ *      is bounded by
  *      AlignUp(AlignUp(m, box_align_m), l0c_align_m) *
  *      AlignUp(n, box_align_n) <= C0 and the boxed operand caps, k by K/align_k:
  *      O((C0/align^2) * (K/align_k)) per matmul -- a hardware constant, independent

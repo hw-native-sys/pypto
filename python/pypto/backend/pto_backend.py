@@ -803,6 +803,10 @@ def _generate_kernel_wrapper(
         'extern "C" __aicore__ __attribute__((always_inline)) '
         "void kernel_entry(__gm__ int64_t* args)\n"
         "{\n"
+        "#if !defined(__CPU_SIM) && !defined(__COSTMODEL)\n"
+        "    // Reset AI Core atomic mode inherited from a prior kernel.\n"
+        "    set_atomic_none();\n"
+        "#endif\n\n"
         f"{runtime_subblock_setup}"
         f"{spmd_args_setup}"
         f"{subblock_arg_setup}"
@@ -1276,6 +1280,30 @@ def _run_ptoas_phase(
                 _collect_emit_result(result, unit, prof, result_files, errors)
 
 
+def multi_chip_orch_names(transformed_program: _ir_core.Program) -> list[str]:
+    """Orchestrations this program emits as ``next_levels/<name>/`` sub-builds.
+
+    Empty when the program compiles to a single top-level build -- i.e. the
+    return value doubles as "is this a multi-orch program?".
+
+    Single source of truth for the L2 multi-orch split: :func:`generate`
+    dispatches on it, and ``ir.compile`` hands the same list to
+    :class:`~pypto.ir.compiled_program.CompiledProgram` so its dispatch surface
+    describes the artifacts this codegen just wrote, rather than whatever an
+    earlier compile happened to leave in the output directory.
+
+    Only meaningful for L2-only programs: distributed (L3+) programs also lay
+    out ``next_levels/``, but :func:`generate` routes them to
+    :func:`_generate_with_distributed` before this rule applies.
+    """
+    orch_names = [
+        f.name
+        for f in transformed_program.functions.values()
+        if f.func_type == _ir_core.FunctionType.Orchestration
+    ]
+    return orch_names if len(orch_names) > 1 else []
+
+
 def generate(
     transformed_program: _ir_core.Program,
     output_dir: str,
@@ -1333,12 +1361,7 @@ def generate(
     # self-contained sub-build under ``next_levels/{orch_name}/``.
     # ``_generate_single_chip`` assumes at most one Orchestration; the
     # per-orch split here keeps that invariant.
-    orch_count = sum(
-        1
-        for f in transformed_program.functions.values()
-        if f.func_type == _ir_core.FunctionType.Orchestration
-    )
-    if orch_count > 1:
+    if multi_chip_orch_names(transformed_program):
         return _generate_multi_chip(
             transformed_program,
             output_dir,

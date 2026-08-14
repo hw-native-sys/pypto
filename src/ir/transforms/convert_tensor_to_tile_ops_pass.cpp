@@ -43,6 +43,7 @@
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 #include "pypto/ir/verifier/verifier.h"
 
 namespace pypto {
@@ -652,12 +653,33 @@ class TensorToTileMutator : public TypePropagatingMutator {
   StmtPtr HandleConsumerDrivenLoad(const AssignStmtPtr& op, const CallPtr& call,
                                    const ConsumerSpaceReq& req) {
     const auto& input = call->args_[0];
-    auto tensor_type = As<TensorType>(input->GetType());
+    auto tensor_type = AsTensorTypeLike(input->GetType());
     if (!tensor_type) return nullptr;
 
     const auto& shape_arg = call->args_[1];
     const auto& offset_arg = call->args_[2];
-    ExprPtr valid_shape = (call->args_.size() == 4) ? call->args_[3] : shape_arg;
+    auto shape_type = As<TupleType>(shape_arg->GetType());
+    auto offset_type = As<TupleType>(offset_arg->GetType());
+    INTERNAL_CHECK_SPAN(shape_type && offset_type, call->span_)
+        << "Internal error: tensor.slice shape and offset must be tuples during conversion";
+    auto full_shape = ExtractTupleElements(shape_arg, shape_type->types_.size());
+    auto offsets = ExtractTupleElements(offset_arg, offset_type->types_.size());
+    std::vector<ExprPtr> requested_valid;
+    if (call->args_.size() >= 4) {
+      auto valid_shape_tuple = As<MakeTuple>(call->args_[3]);
+      INTERNAL_CHECK_SPAN(valid_shape_tuple, call->span_)
+          << "Internal error: tensor.slice valid_shape must be a MakeTuple during conversion";
+      requested_valid = valid_shape_tuple->elements_;
+    }
+    auto valid_shape = MakeShapeTuple(
+        InferTensorSliceFullValidShape(*tensor_type, full_shape, offsets, requested_valid,
+                                       GetKwargOr<bool>(call->kwargs_, "clamp", false), call->span_),
+        call->span_);
+    auto drop_dims = ParseSliceDropDims(call->args_.size() == 5 ? call->args_[4] : nullptr, full_shape,
+                                        "tensor.slice conversion");
+    CHECK_SPAN(drop_dims.size() < full_shape.size(), call->span_)
+        << "tensor.slice conversion does not support rank-0 tiles; keep one unit axis or use tensor.read "
+           "for a scalar result";
 
     // The consumer-driven load is always natural; a transposed (b_trans/a_trans)
     // operand gets a zero-copy tile.transpose_view at the matmul site instead.
@@ -668,12 +690,25 @@ class TensorToTileMutator : public TypePropagatingMutator {
                               req.space);
 
     auto tile_name = MakeTileValueName(op->var_->name_hint_);
-    auto tile_var = std::make_shared<Var>(tile_name, load_call->GetType(), op->var_->span_);
+    if (drop_dims.empty()) {
+      auto tile_var = std::make_shared<Var>(tile_name, load_call->GetType(), op->var_->span_);
+      var_remap_[op->var_.get()] = tile_var;
+      auto result = MutableCopy(op);
+      result->var_ = tile_var;
+      result->value_ = load_call;
+      return result;
+    }
+
+    auto loaded_var = std::make_shared<Var>(tile_name + "_full_rank", load_call->GetType(), op->var_->span_);
+    auto reduced_shape = MakeShapeTuple(ApplyDropDims(full_shape, drop_dims), call->span_);
+    auto reshape_call = op_registry_.Create("tile.reshape", {loaded_var, reduced_shape}, {}, call->span_);
+    auto tile_var = std::make_shared<Var>(tile_name, reshape_call->GetType(), op->var_->span_);
     var_remap_[op->var_.get()] = tile_var;
-    auto result = MutableCopy(op);
-    result->var_ = tile_var;
-    result->value_ = load_call;
-    return result;
+    std::vector<StmtPtr> stmts = {
+        std::make_shared<AssignStmt>(loaded_var, load_call, op->span_),
+        std::make_shared<AssignStmt>(tile_var, reshape_call, op->span_),
+    };
+    return SeqStmts::Flatten(std::move(stmts), op->span_);
   }
 
   /// Auto-bridge TensorType args to the memory space required by input_reqs.

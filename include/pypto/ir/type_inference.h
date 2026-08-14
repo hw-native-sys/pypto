@@ -364,6 +364,29 @@ struct WindowReadValidShapeParams {
 std::vector<ExprPtr> InferWindowReadValidShape(const WindowReadValidShapeParams& params);
 
 /**
+ * @brief Derive the full-rank valid region of a tensor.slice window
+ *
+ * This is the shared tensor.slice validity rule used by type deduction and
+ * tensor-to-tile lowering before any ``drop_dims`` axes are erased. When the
+ * slice window uses the source rank, it intersects the requested valid region
+ * with the source validity. Lower-rank reinterpret views retain their explicit
+ * validity because their axes do not map directly to source coordinates.
+ *
+ * @param source_type Source tensor type
+ * @param full_shape Slice window shape before rank reduction
+ * @param offsets Slice window offsets in source coordinates
+ * @param requested_valid Explicit full-rank valid shape; empty means none
+ * @param clamp Whether the slice may clamp a window crossing the source edge
+ * @param span IR source location used in diagnostics
+ * @return Full-rank valid shape before applying ``drop_dims``
+ */
+std::vector<ExprPtr> InferTensorSliceFullValidShape(const TensorType& source_type,
+                                                    const std::vector<ExprPtr>& full_shape,
+                                                    const std::vector<ExprPtr>& offsets,
+                                                    const std::vector<ExprPtr>& requested_valid, bool clamp,
+                                                    const Span& span);
+
+/**
  * @brief Return the effective valid shape of a tensor type
  *
  * Falls back to the physical shape when no explicit valid shape is set, matching

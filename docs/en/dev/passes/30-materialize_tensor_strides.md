@@ -49,11 +49,13 @@ The pass uses an `IRMutator` with a Var-substitution cache, mirroring the patter
      - `VisitExpr_(CallPtr)`: rebuild via `OpRegistry` when registered, falling back to a direct `Call` constructor for `GlobalVar` calls / unregistered ops.
      - `VisitStmt_(AssignStmtPtr)`: rebuild RHS first; if the RHS Call's return type is more specific than the current LHS Var type, sync the Var.
 
-2. **Type rewriting** — `MaterializeType(type)`:
-   - `TensorType` / `DistributedTensorType` with `view.has_value() && view.stride.empty() && layout != NZ`: rebuild with `BuildLogicalStridesFromLayout(shape, layout)` filled in. The distributed wrapper and optional metadata (`memref`, `TensorView.pad`, `window_buffer`) are preserved. Other tensor shapes pass through unchanged (identity preserved).
-   - `TensorType` with `layout == NZ`: untouched (NZ on `TensorType` is invalid IR; the verifier flags it instead of `BuildLogicalStridesFromLayout` `CHECK`-failing).
-   - `TupleType`: recurse into element types; rebuild only if any sub-type changed.
+2. **Type rewriting** — `MaterializeType(type, span)`:
+   - `TensorType` / `DistributedTensorType` with `layout == NZ`: **rejected** with a `CHECK_SPAN` (user-facing `ValueError`), whether or not the stride is explicit. NZ is a fractal, tile-only layout with no logical-stride representation, so a tensor type carrying it is invalid IR — the same judgement `tensor.view`, `CheckCanonicalView` and the `TensorViewCanonical` verifier all make. The `span` argument (the `Var` / `IterArg` / `Call` / `Submit` / param / function node carrying the type) locates the offending annotation in the message.
+   - `TensorType` / `DistributedTensorType` with `view.has_value() && view.stride.empty()`: rebuild with `BuildLogicalStridesFromLayout(shape, layout)` filled in. The distributed wrapper and optional metadata (`memref`, `TensorView.pad`, `window_buffer`) are preserved. Other tensor shapes pass through unchanged (identity preserved).
+   - `TupleType`: recurse into element types (same `span`); rebuild only if any sub-type changed.
    - Anything else: pass through.
+
+The NZ rejection lives in the pass rather than being delegated to the paired verifier. Delegating made the rejection conditional on verification being enabled: under `PYPTO_VERIFY_LEVEL=none` the pass returned the malformed slot untouched while still declaring `TensorViewCanonical` as produced, and the invalid layout only resurfaced downstream as an opaque backend layout mismatch.
 
 The pass is **idempotent**: re-running on already-materialized IR is a no-op, since every type comparison short-circuits on identity and `MutableCopy` is skipped when nothing changed.
 
@@ -61,8 +63,11 @@ The pass is **idempotent**: re-running on already-materialized IR is a no-op, si
 | -------- | ------- |
 | Fill stride with packed canonical | `view.has_value() && view.stride.empty()` and `layout in {ND, DN}` |
 | Identity pass-through | `!view.has_value()` (bare tensor) |
-| Identity pass-through | `view.has_value() && !view.stride.empty()` (already explicit) |
-| Identity pass-through | `view.layout == NZ` on `TensorType` (verifier rejects this separately) |
+| Identity pass-through | `view.has_value() && !view.stride.empty()` and `layout in {ND, DN}` (already explicit) |
+| Reject (`ValueError`) | `view.layout == NZ` on `TensorType` / `DistributedTensorType`, with or without explicit stride (invalid IR — NZ is tile-only) |
+
+The rows are mutually exclusive: the NZ check runs first, so an explicit-stride
+NZ view is rejected rather than passed through.
 
 ## Example
 
@@ -100,13 +105,15 @@ See `BuildLogicalStridesFromLayout` in [`tensor_view_semantics.h`](../../../../i
 | ------ | ------- |
 | `ND` | `stride[n-1] = 1; stride[k] = stride[k+1] * shape[k+1]` for `k = n-2 .. 0` |
 | `DN` (`n ≥ 2`) | `stride[n-2] = 1`; `stride[n-1] = shape[n-2]`; `stride[n-3] = shape[n-2] * shape[n-1]`; `stride[k] = stride[k+1] * shape[k+1]` for `k = n-4 .. 0` |
-| `NZ` | not representable as flat strides (fractal, tile-only) — `BuildLogicalStridesFromLayout` `CHECK`-fails |
+| `NZ` | not representable as flat strides (fractal, tile-only) — rejected by the pass before `BuildLogicalStridesFromLayout` is reached |
 
 `MakeIndexMul` folds `ConstInt * ConstInt` (with `__builtin_mul_overflow` guard so an overflow falls back to a symbolic `Mul` rather than silently wrapping) and the multiplicative identity, so symbolic dims are preserved as `Mul` expressions while static chains collapse to a single `ConstInt`.
 
 ## Verifier interaction
 
 Because the pass declares `produced = {... ∪ TensorViewCanonical}`, `PassPipeline` automatically runs the registry's `TensorViewCanonical` verifier after the pass. The registry default is the **strict-mode** verifier (RFC #1300 §2.4 codegen-entry contract): it rejects `view.has_value() && stride.empty()` since this pass is responsible for materializing those slots. Bare `TensorType` (`!view.has_value()`) is still accepted — implicit ND-packed is canonical by construction. The same verifier is callable directly via `passes.verify_tensor_view_canonical(program, require_materialized=True)`; pass `require_materialized=False` for the weak mode used during the parse-time / early-pass window before materialization runs.
+
+The verifier is a paired check, not the sole enforcement point. Verification is configurable (`PYPTO_VERIFY_LEVEL` / `PassContext`) and may be off, so every invariant the pass claims to produce is established by the pass itself — the NZ rejection above included. The verifier then re-checks it, catching regressions in this pass and in anything downstream that rewrites tensor types.
 
 ## Related
 

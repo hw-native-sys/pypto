@@ -528,9 +528,13 @@ Pass LegalizeTileCast();
  * ``PH-AT-006``.
  *
  * Full-K M/N grids may use output-, A-, or B-stationary loop orders.  L0C
- * double-buffering is enabled under PTOAS and is available as a PyPTO planner
- * opt-in.  Chained Mat-scratch producers remain output-stationary to avoid the
- * allocator offset-packing limitation tracked by issue #1908.
+ * double-buffering is enabled automatically under DSA_RP and PTOAS and is an
+ * opt-in under the legacy PYPTO planner.  Under PYPTO, chained Mat-scratch
+ * producers remain output-stationary to avoid the allocator offset-packing
+ * limitation tracked by issue #1908; some dbC-enabled layouts can still exceed
+ * operand capacity there.
+ * DSA_RP and PTOAS retain operand-stationary choices because their lifetime-aware
+ * placement can subdivide the released operand range.
  *
  * The pass also recognizes a user-authored, static pipeline (stage >= 2, trip
  * count divisible by the stage count) containing exactly one already-L0

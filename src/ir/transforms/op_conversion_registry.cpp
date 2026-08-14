@@ -421,12 +421,33 @@ void OpConversionRegistry::RegisterMemoryOps() {
       "tensor.slice",
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
          const Span& span) -> ConversionResult {
-        INTERNAL_CHECK_SPAN(args.size() == 3 || args.size() == 4, span)
-            << "tensor.slice conversion expects 3 or 4 args (tensor, shape, offset[, valid_shape])";
+        INTERNAL_CHECK_SPAN(args.size() >= 3 && args.size() <= 5, span)
+            << "tensor.slice conversion expects 3-5 args "
+               "(tensor, shape, offset[, valid_shape[, drop_dims]])";
         auto& op_reg = OpRegistry::GetInstance();
         const auto& input = args[0];
         const auto& shape = args[1];
         const auto& offset = args[2];
+        auto shape_type = As<TupleType>(shape->GetType());
+        INTERNAL_CHECK_SPAN(shape_type, span) << "tensor.slice shape must be a tuple";
+        auto full_shape = ExtractTupleElements(shape, shape_type->types_.size());
+        auto offset_type = As<TupleType>(offset->GetType());
+        INTERNAL_CHECK_SPAN(offset_type, span) << "tensor.slice offset must be a tuple";
+        auto offsets = ExtractTupleElements(offset, offset_type->types_.size());
+        auto drop_dims =
+            ParseSliceDropDims(args.size() == 5 ? args[4] : nullptr, full_shape, "tensor.slice conversion");
+        CHECK_SPAN(drop_dims.size() < full_shape.size(), span)
+            << "tensor.slice conversion does not support rank-0 tiles; keep one unit axis or use "
+               "tensor.read for a scalar result";
+        auto reduced_shape = MakeShapeTuple(ApplyDropDims(full_shape, drop_dims), span);
+
+        auto apply_drop_dims = [&](const ExprPtr& value) -> ConversionResult {
+          if (drop_dims.empty()) return ConversionResult{value};
+          auto loaded_var = std::make_shared<Var>("slice_load", value->GetType(), span);
+          std::vector<StmtPtr> prologue = {std::make_shared<AssignStmt>(loaded_var, value, span)};
+          auto reshape_call = op_reg.Create("tile.reshape", {loaded_var, reduced_shape}, {}, span);
+          return ConversionResult{std::move(prologue), reshape_call};
+        };
 
         // Extract pad_value kwarg (if any) to forward to the emitted tile.slice.
         std::vector<std::pair<std::string, std::any>> forward_kwargs;
@@ -451,18 +472,27 @@ void OpConversionRegistry::RegisterMemoryOps() {
           // pad_value on a tensor.slice over a TensorType input, the pad intent is
           // lost here — a follow-up tile.fillpad is the workaround until tile.load
           // grows its own pad_value kwarg.
-          auto valid_shape = (args.size() == 4) ? args[3] : shape;
+          std::vector<ExprPtr> requested_valid;
+          if (args.size() >= 4) {
+            auto valid_shape_tuple = As<MakeTuple>(args[3]);
+            INTERNAL_CHECK_SPAN(valid_shape_tuple, span)
+                << "tensor.slice valid_shape must be a MakeTuple during conversion";
+            requested_valid = valid_shape_tuple->elements_;
+          }
+          auto valid_shape = MakeShapeTuple(
+              InferTensorSliceFullValidShape(*tensor_type, full_shape, offsets, requested_valid,
+                                             GetKwargOr<bool>(kwargs, "clamp", false), span),
+              span);
           std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec}};
           auto load_call = op_reg.Create("tile.load", {input, offset, shape, valid_shape}, load_kwargs, span);
-          return ConversionResult{load_call};
+          return apply_drop_dims(load_call);
         }
 
         if (tile_type) {
-          std::vector<ExprPtr> slice_args = {input, shape, offset};
-          if (args.size() == 4) {
-            slice_args.push_back(args[3]);
-          }
-          auto slice_call = op_reg.Create("tile.slice", slice_args, forward_kwargs, span);
+          // tile.slice natively understands valid_shape and drop_dims. Keep the
+          // full-rank window operands intact so it can validate against the
+          // source tile before reducing the result rank.
+          auto slice_call = op_reg.Create("tile.slice", args, forward_kwargs, span);
           return ConversionResult{slice_call};
         }
 

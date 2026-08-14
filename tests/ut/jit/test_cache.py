@@ -386,23 +386,38 @@ class TestMakeCacheKey:
         ]
         assert len(set(keys)) == len(keys), f"planner must split the cache key, got {keys}"
 
-    def test_dbc_double_buffer_flag_splits_key(self):
-        """The PyPTO dbC=2 opt-in changes the AutoTileMatmulL0/MemoryReuse output,
+    def test_dbc_double_buffer_flag_splits_legacy_pypto_key(self):
+        """The legacy-PyPTO dbC=2 opt-in changes AutoTileMatmulL0/MemoryReuse output,
         so a kernel compiled with it off must not reuse that artifact when later
         called with it on."""
         key_off = self._make_key(
             param_names=["a"],
             tensor_shapes={"a": (8, 8)},
             tensor_dtypes={"a": DataType.FP32},
+            memory_planner=MemoryPlanner.PYPTO,
             enable_pypto_l0c_double_buffer=False,
         )
         key_on = self._make_key(
             param_names=["a"],
             tensor_shapes={"a": (8, 8)},
             tensor_dtypes={"a": DataType.FP32},
+            memory_planner=MemoryPlanner.PYPTO,
             enable_pypto_l0c_double_buffer=True,
         )
         assert key_off != key_on, "dbC=2 opt-in must split the cache key"
+
+    @pytest.mark.parametrize("planner", [MemoryPlanner.DSA_RP, MemoryPlanner.PTOAS])
+    def test_dbc_double_buffer_flag_does_not_split_automatic_planner_key(self, planner):
+        """DSA_RP and PTOAS enable dbC automatically, so the legacy-PyPTO flag is inert."""
+        kwargs = {
+            "param_names": ["a"],
+            "tensor_shapes": {"a": (8, 8)},
+            "tensor_dtypes": {"a": DataType.FP32},
+            "memory_planner": planner,
+        }
+        key_off = self._make_key(**kwargs, enable_pypto_l0c_double_buffer=False)
+        key_on = self._make_key(**kwargs, enable_pypto_l0c_double_buffer=True)
+        assert key_off == key_on
 
 
 class TestResolveMemoryPlanner:
@@ -422,7 +437,7 @@ class TestResolveMemoryPlanner:
 
 
 class TestResolveEnablePyptoL0cDoubleBuffer:
-    """The dbC=2 opt-in the JIT keys on must match the one ``ir.compile()`` inherits."""
+    """The legacy-PyPTO dbC=2 opt-in must match what ``ir.compile()`` inherits."""
 
     def test_defaults_to_off(self):
         assert _resolve_enable_pypto_l0c_double_buffer() is False

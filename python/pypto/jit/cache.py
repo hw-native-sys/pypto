@@ -29,11 +29,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pypto.pypto_core import DataType
+from pypto.pypto_core.passes import MemoryPlanner
 
 if TYPE_CHECKING:
     from pypto.ir.pass_manager import OptimizationStrategy
     from pypto.pypto_core.ir import TensorLayout
-    from pypto.pypto_core.passes import MemoryPlanner
 
 # Stable PyPTO version stamp included in every cache key so that upgrading
 # PyPTO (which may change the pass pipeline or codegen) automatically
@@ -194,12 +194,11 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
             changes the placement and whether physical addresses are baked
             into the artifact; without it, compiling one kernel under multiple
             planners would hand a later call the wrong artifact.
-        enable_pypto_l0c_double_buffer: Effective dbC=2 (L0C double-buffer) opt-in
-            under the PyPTO-owned planners, resolved from the active
-            ``PassContext``. Included in the key because it changes the
-            AutoTileMatmulL0 output and selected allocation; without it a
-            kernel first compiled with it off would reuse that artifact when
-            later called with it on (and vice versa).
+        enable_pypto_l0c_double_buffer: Effective legacy-PYPTO chooser dbC=2
+            (L0C double-buffer) opt-in resolved from the active ``PassContext``.
+            Included for ``PYPTO`` because it changes AutoTileMatmulL0 output
+            and allocation. Canonicalized to false for ``DSA_RP`` and ``PTOAS``,
+            which enable dbC=2 automatically regardless of this flag.
 
     Returns:
         Hashable CacheKey tuple.
@@ -228,10 +227,14 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
         scalar_infos.append(ScalarCacheInfo(name=name, value=scalar_values[name]))
 
     dist_key = _freeze(distributed_config) if distributed_config is not None else None
+    effective_pypto_dbc = enable_pypto_l0c_double_buffer and memory_planner in (
+        None,
+        MemoryPlanner.PYPTO,
+    )
     compile_opts = (
         ("analyze_auto_scopes_for_deps", analyze_auto_scopes_for_deps),
         ("memory_planner", None if memory_planner is None else str(memory_planner)),
-        ("enable_pypto_l0c_double_buffer", enable_pypto_l0c_double_buffer),
+        ("enable_pypto_l0c_double_buffer", effective_pypto_dbc),
         ("dep_layouts", dep_layouts),
     )
     return (

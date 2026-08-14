@@ -11,6 +11,7 @@
 
 import contextlib
 import ctypes
+import json
 import os
 import sys
 import types
@@ -20,7 +21,17 @@ import pytest
 import torch
 from pypto import DataType, backend, ir
 from pypto.backend import BackendType
-from pypto.ir.compiled_program import CompiledProgram, _build_full_args, _extract_param_infos
+from pypto.ir.compiled_program import (
+    _COMPILED_META_FILENAME,
+    _COMPILED_META_SCHEMA,
+    CompiledProgram,
+    _build_full_args,
+    _extract_param_infos,
+)
+from pypto.ir.distributed_compiled_program import (
+    _DISTRIBUTED_META_FILENAME,
+    DistributedCompiledProgram,
+)
 from pypto.runtime import DeviceTensor, RunConfig
 
 
@@ -75,6 +86,43 @@ def _make_program_with_orchestration(*, has_return: bool = False) -> ir.Program:
 
     orch = ir.Function("orchestrator", params, return_types, body, span, ir.FunctionType.Orchestration)
     return ir.Program([orch], "TestProgram", span)
+
+
+def _make_multi_orch_program() -> ir.Program:
+    """Build a Program with two Orchestrations of deliberately different signatures.
+
+    ``orch_a(a, b, c)`` mirrors :func:`_make_program_with_orchestration`;
+    ``orch_b(x, y)`` is shorter, so a per-sub-build sidecar cannot accidentally
+    pass by carrying the other orchestration's metadata.
+    """
+    span = ir.Span.unknown()
+    tensor_type = ir.TensorType([128, 128], DataType.FP32)
+    body = ir.SeqStmts([], span)
+
+    orch_a = ir.Function(
+        "orch_a",
+        [
+            (ir.Var("a", tensor_type, span), ir.ParamDirection.In),
+            (ir.Var("b", tensor_type, span), ir.ParamDirection.In),
+            (ir.Var("c", tensor_type, span), ir.ParamDirection.Out),
+        ],
+        [],
+        body,
+        span,
+        ir.FunctionType.Orchestration,
+    )
+    orch_b = ir.Function(
+        "orch_b",
+        [
+            (ir.Var("x", tensor_type, span), ir.ParamDirection.In),
+            (ir.Var("y", tensor_type, span), ir.ParamDirection.Out),
+        ],
+        [],
+        body,
+        span,
+        ir.FunctionType.Orchestration,
+    )
+    return ir.Program([orch_a, orch_b], "MultiOrchProgram", span)
 
 
 def _make_program_without_orchestration() -> ir.Program:
@@ -954,6 +1002,506 @@ class TestValidateIr:
             cp.validate_ir(tensors, expected, rtol=1e-3, atol=1e-4)
 
         validator.assert_called_once_with(str(passes_dump), tensors, expected, rtol=1e-3, atol=1e-4)
+
+
+class TestCompiledMetaAndFromDir:
+    """``compiled_meta.json`` + ``CompiledProgram.from_dir`` — replay an
+    already-compiled single-chip build without re-running the pypto compile,
+    so ``benchmark()`` works against a ``runtime_dir`` replay (#2344).
+    """
+
+    def test_compile_persists_compiled_meta(self, tmp_path):
+        """Constructing from live IR writes a compiled_meta.json sidecar."""
+        prog = _make_program_with_orchestration(has_return=True)
+        CompiledProgram(prog, str(tmp_path), platform="a2a3sim")
+
+        meta = json.loads((tmp_path / _COMPILED_META_FILENAME).read_text())
+        assert meta["schema"] == _COMPILED_META_SCHEMA
+        assert [p["name"] for p in meta["params"]] == ["a", "b", "c"]
+        assert [p["direction"] for p in meta["params"]] == ["In", "In", "Out"]
+        assert [p["shape"] for p in meta["params"]] == [[128, 128]] * 3
+        assert {p["dtype"] for p in meta["params"]} == {"fp32"}
+        assert meta["num_return_types"] == 1
+        assert meta["platform"] == "a2a3sim"
+        assert meta["backend_type"] == "Ascend910B"
+
+    def test_from_dir_round_trips_param_metadata(self, tmp_path):
+        """from_dir reconstructs the same param metadata as the live compile."""
+        prog = _make_program_with_orchestration(has_return=True)
+        live = CompiledProgram(prog, str(tmp_path), platform="a2a3sim")
+        reloaded = CompiledProgram.from_dir(tmp_path)
+
+        def _key(cp):
+            infos, _, _ = cp._get_metadata()
+            return [(p.name, p.direction, p.shape, str(p.dtype)) for p in infos]
+
+        assert _key(reloaded) == _key(live)
+        assert reloaded.program is None  # reconstructed from disk, no live IR
+        assert reloaded.platform == "a2a3sim"
+        assert reloaded.backend_type == BackendType.Ascend910B
+        assert reloaded.has_return is live.has_return
+
+    def test_from_dir_output_indices_match_out_params(self, tmp_path):
+        """output_indices are rederived from the persisted directions (c is the lone Out)."""
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path))
+        reloaded = CompiledProgram.from_dir(tmp_path)
+
+        param_infos, output_indices, _ = reloaded._get_metadata()
+        assert output_indices == [2]
+        assert param_infos[2].direction == ir.ParamDirection.Out
+
+    def test_from_dir_dispatches_via_runner(self, tmp_path):
+        """A reconstructed program is callable and reaches execute_compiled."""
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path), platform="a2a3sim")
+        reloaded = CompiledProgram.from_dir(tmp_path)
+        a = torch.zeros(128, 128)
+        b = torch.zeros(128, 128)
+        c = torch.zeros(128, 128)
+
+        with patch("pypto.runtime.runner.execute_compiled") as mock_exec:
+            reloaded(a, b, c)
+
+        mock_exec.assert_called_once()
+        assert mock_exec.call_args.args[0] == tmp_path.resolve()
+        assert list(mock_exec.call_args.args[1]) == [a, b, c]
+        assert mock_exec.call_args.kwargs["platform"] == "a2a3sim"
+
+    def test_from_dir_exposes_benchmark_surface(self, tmp_path):
+        """Every member ``benchmark()``'s L2 branch touches works after from_dir.
+
+        Regression test for #2344: ``benchmark`` needs ``platform`` /
+        ``runtime_name`` / ``runtime_config`` / ``chip_callable`` plus the
+        metadata-derived ``build_orch_args`` / ``build_call_config`` /
+        ``output_indices``, which previously required a live ``Program``.
+        """
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path), platform="a2a3sim")
+        reloaded = CompiledProgram.from_dir(tmp_path, platform="a2a3")
+
+        cc = MagicMock(name="fake_chip")
+        runtime_config = {"aicpu_thread_num": 2, "enable_sdma": True}
+        call_config = MagicMock(name="call_config")
+        args = [torch.zeros(128, 128) for _ in range(3)]
+
+        with _fake_compile_and_assemble((cc, "host_build_graph", runtime_config)):
+            assert reloaded.platform == "a2a3"
+            assert reloaded.runtime_name == "host_build_graph"
+            assert reloaded.runtime_config == runtime_config
+            assert reloaded.chip_callable is cc
+            assert reloaded.output_indices == [2]
+            with patch("pypto.runtime.runner._coerced_to_orch_args") as oa_helper:
+                oa_helper.return_value = "fake_orch_args"
+                orch_args, coerced, return_style = reloaded.build_orch_args(*args)
+            with _fake_call_config(call_config):
+                assert reloaded.build_call_config(RunConfig()) is call_config
+
+        assert orch_args == "fake_orch_args"
+        assert coerced == args
+        assert return_style is False
+
+    def test_from_dir_does_not_clobber_debug_runner(self, tmp_path):
+        """Reloading must preserve a hand-edited debug/run.py (the replay workflow)."""
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path))
+        run_py = tmp_path / "debug" / "run.py"
+        # Asserted rather than skipped: a self-skip would silently disable this
+        # regression check if debug-runner emission ever changed.
+        assert run_py.exists(), "single-orch compile must emit debug/run.py"
+        sentinel = "# hand-edited by the user — must survive from_dir\n"
+        run_py.write_text(sentinel)
+
+        CompiledProgram.from_dir(tmp_path)
+        assert run_py.read_text() == sentinel
+
+    def test_from_dir_does_not_rewrite_meta(self, tmp_path):
+        """The reload path must not rewrite the sidecar it just read."""
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path))
+        meta_path = tmp_path / _COMPILED_META_FILENAME
+        before = meta_path.stat().st_mtime_ns
+
+        CompiledProgram.from_dir(tmp_path)
+        assert meta_path.stat().st_mtime_ns == before
+
+    def test_from_dir_overrides_platform_and_backend(self, tmp_path):
+        """Explicit platform / backend_type override the persisted defaults.
+
+        Both overrides differ from what was persisted (``a2a3sim`` / Ascend910B),
+        so an ignored override cannot pass by coincidence.
+        """
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path), platform="a2a3sim")
+        assert json.loads((tmp_path / _COMPILED_META_FILENAME).read_text())["backend_type"] == "Ascend910B"
+
+        reloaded = CompiledProgram.from_dir(tmp_path, platform="a5sim", backend_type=BackendType.Ascend950)
+        assert reloaded.platform == "a5sim"
+        assert reloaded.backend_type == BackendType.Ascend950
+
+        # Without overrides the persisted pair comes back unchanged.
+        persisted = CompiledProgram.from_dir(tmp_path)
+        assert persisted.platform == "a2a3sim"
+        assert persisted.backend_type == BackendType.Ascend910B
+
+    def test_from_dir_keeps_the_fp4_x2_carrier_shape(self, tmp_path):
+        """Packed FP4 shapes are persisted already converted, so the reload must not re-halve.
+
+        ``_extract_func_param_infos`` stores the runtime x2 carrier shape
+        (logical ``[8, 16]`` -> ``[8, 8]``); applying ``_to_runtime_shape`` again
+        on load would silently halve it a second time.
+        """
+        live = CompiledProgram(_make_fp4_output_program(), str(tmp_path))
+        reloaded = CompiledProgram.from_dir(tmp_path)
+
+        def _shapes(cp):
+            infos, _, _ = cp._get_metadata()
+            return [p.shape for p in infos]
+
+        assert _shapes(live) == [[8, 8], [8, 8]]
+        assert _shapes(reloaded) == _shapes(live)
+
+    def test_from_dir_missing_meta_raises(self, tmp_path):
+        """A directory without compiled_meta.json raises with a recompile hint."""
+        with pytest.raises(FileNotFoundError, match=r"compiled_meta\.json"):
+            CompiledProgram.from_dir(tmp_path)
+
+    def test_from_dir_incompatible_schema_raises(self, tmp_path):
+        """A compiled_meta.json written under a different schema version is rejected."""
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path))
+        meta_path = tmp_path / _COMPILED_META_FILENAME
+        meta = json.loads(meta_path.read_text())
+        meta["schema"] = meta["schema"] + 1  # simulate an incompatible future format
+        meta_path.write_text(json.dumps(meta))
+
+        with pytest.raises(ValueError, match="schema"):
+            CompiledProgram.from_dir(tmp_path)
+
+    def test_multi_orch_parent_writes_no_meta(self, tmp_path):
+        """The multi-orch parent has no single canonical entry, so it gets no sidecar."""
+        for name in ("orch_a", "orch_b"):
+            (tmp_path / "next_levels" / name / "orchestration").mkdir(parents=True)
+        cp = CompiledProgram(_make_multi_orch_program(), str(tmp_path))
+
+        assert cp.orchestration_names  # sanity: multi-orch detected
+        assert not (tmp_path / _COMPILED_META_FILENAME).exists()
+        with pytest.raises(FileNotFoundError, match="multi-orch"):
+            CompiledProgram.from_dir(tmp_path)
+
+    def test_multi_orch_sub_builds_get_their_own_meta(self, tmp_path):
+        """Each next_levels/<name>/ sub-build is independently reloadable.
+
+        The parent's error message points users at the sub-builds, so each one
+        must carry the signature of *its own* orchestration.
+        """
+        for name in ("orch_a", "orch_b"):
+            (tmp_path / "next_levels" / name / "orchestration").mkdir(parents=True)
+        CompiledProgram(_make_multi_orch_program(), str(tmp_path), platform="a2a3sim")
+
+        # orch_a takes (a, b, c); orch_b takes only (x, y) — distinct signatures.
+        reloaded_a = CompiledProgram.from_dir(tmp_path / "next_levels" / "orch_a")
+        reloaded_b = CompiledProgram.from_dir(tmp_path / "next_levels" / "orch_b")
+        assert reloaded_a.param_names == ["a", "b", "c"]
+        assert reloaded_a.output_indices == [2]
+        assert reloaded_b.param_names == ["x", "y"]
+        assert reloaded_b.output_indices == [1]
+        assert reloaded_a.platform == "a2a3sim"
+
+    def test_malformed_meta_raises_value_error(self, tmp_path):
+        """Every malformed payload surfaces as ValueError naming the file, not a raw KeyError."""
+        meta_path = tmp_path / _COMPILED_META_FILENAME
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path))
+        good = json.loads(meta_path.read_text())
+
+        def _param(**overrides):
+            """Serialise ``good`` with its first param entry field-patched."""
+            return json.dumps({**good, "params": [{**good["params"][0], **overrides}]})
+
+        broken = {
+            "not JSON": "{ this is not json",
+            "top-level list": json.dumps([good]),
+            "params not a list": json.dumps({**good, "params": "abc"}),
+            "param entry not an object": json.dumps({**good, "params": ["abc"]}),
+            "param missing a key": json.dumps({**good, "params": [{"name": "a"}]}),
+            "non-string name": _param(name=7),
+            "bad direction": _param(direction="Sideways"),
+            # ``getattr(ParamDirection, "mro")`` resolves to a bound method — a
+            # lax getattr() lookup would accept it as a direction.
+            "direction names an attribute": _param(direction="mro"),
+            "non-string direction": _param(direction=0),
+            "shape not a list": _param(shape="invalid"),
+            "shape holds a non-int": _param(shape=[128, "x"]),
+            # bool is an int subclass; JSON ``true`` is never a dimension.
+            "shape holds a bool": _param(shape=[128, True]),
+            "bad dtype": _param(dtype="fp99"),
+            "non-string dtype": _param(dtype=["fp32"]),
+            "negative return count": json.dumps({**good, "num_return_types": -1}),
+            "non-int return count": json.dumps({**good, "num_return_types": "two"}),
+            "unknown backend": json.dumps({**good, "backend_type": "AscendNope"}),
+            # Same trap as ``direction`` above: ``getattr(BackendType, "mro")``
+            # resolves to a bound method a lax lookup would accept as a backend.
+            "backend names an attribute": json.dumps({**good, "backend_type": "mro"}),
+            "non-string backend": json.dumps({**good, "backend_type": 7}),
+            "non-string platform": json.dumps({**good, "platform": 7}),
+        }
+        for label, payload in broken.items():
+            meta_path.write_text(payload)
+            with pytest.raises(ValueError, match=_COMPILED_META_FILENAME) as excinfo:
+                CompiledProgram.from_dir(tmp_path)
+            assert "ir.compile()" in str(excinfo.value), f"{label}: message lacks a recompile hint"
+
+    def test_unreadable_meta_raises_value_error(self, tmp_path):
+        """An OSError from reading the sidecar is reported like any malformed payload."""
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path))
+        meta_path = tmp_path / _COMPILED_META_FILENAME
+        meta_path.unlink()
+        meta_path.mkdir()  # exists(), but read_text() raises IsADirectoryError
+
+        with pytest.raises(ValueError, match=_COMPILED_META_FILENAME) as excinfo:
+            CompiledProgram.from_dir(tmp_path)
+        assert "ir.compile()" in str(excinfo.value)
+
+    def test_undecodable_meta_raises_value_error(self, tmp_path):
+        """A non-UTF-8 sidecar is bad input, not an internal UnicodeDecodeError."""
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path))
+        (tmp_path / _COMPILED_META_FILENAME).write_bytes(b"\xff\xfe\x00binary")
+
+        with pytest.raises(ValueError, match=_COMPILED_META_FILENAME):
+            CompiledProgram.from_dir(tmp_path)
+
+    def test_from_dir_ignores_stale_next_levels(self, tmp_path):
+        """A sidecar is only written for a single-orch build, so it settles the layout.
+
+        A ``next_levels/`` left by an earlier multi-orch compile into the same
+        directory must not turn the reloaded program into a multi-orch parent:
+        the artifacts the sidecar describes are the top-level ones.
+        """
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path), _sub_chip_names=[])
+        for name in ("orch_a", "orch_b"):
+            (tmp_path / "next_levels" / name / "orchestration").mkdir(parents=True)
+        reloaded = CompiledProgram.from_dir(tmp_path)
+
+        assert reloaded.orchestration_names == []
+        args = (torch.zeros(128, 128), torch.zeros(128, 128), torch.zeros(128, 128))
+        with patch("pypto.runtime.runner.execute_compiled") as mock_exec:
+            reloaded(*args)
+        assert mock_exec.call_args.args[0] == tmp_path.resolve()
+
+    def test_subscript_without_live_ir_raises(self, tmp_path):
+        """Scanned-layout dispatch (no declared layout) must not deref the absent IR."""
+        for name in ("orch_a", "orch_b"):
+            (tmp_path / "next_levels" / name / "orchestration").mkdir(parents=True)
+        cp = CompiledProgram(None, str(tmp_path))  # no _sub_chip_names → on-disk scan
+
+        assert cp.orchestration_names == ["orch_a", "orch_b"]
+        with pytest.raises(RuntimeError, match="live IR"):
+            _ = cp["orch_a"]
+
+    def test_metadata_without_ir_or_sidecar_raises(self, tmp_path):
+        """Constructing with neither live IR nor metadata fails loudly, not with None deref."""
+        cp = CompiledProgram(None, str(tmp_path))
+        with pytest.raises(RuntimeError, match="from_dir"):
+            _ = cp.param_names
+
+
+class TestCompiledMetaOutputDirReuse:
+    """Recompiling into a reused ``output_dir``.
+
+    ``ir.compile`` never clears ``output_dir`` (``makedirs(exist_ok=True)``), so
+    a sidecar left by a previous compile of a *different* program shape would
+    otherwise survive and drive the new artifacts with the old parameter ABI --
+    a mismatch ``from_dir`` cannot detect. The same reuse also leaves the
+    previous compile's ``next_levels/`` in place, so these tests equally pin
+    that the *build layout* comes from the codegen that just ran rather than
+    from whatever the directory happens to contain.
+    """
+
+    def test_recompile_refreshes_meta(self, tmp_path):
+        """A second single-orch compile overwrites the first one's signature."""
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path))
+        CompiledProgram(_make_program_with_inout(), str(tmp_path))
+
+        reloaded = CompiledProgram.from_dir(tmp_path)
+        live = CompiledProgram(_make_program_with_inout(), str(tmp_path))
+        assert reloaded.param_names == live.param_names
+
+    def test_multi_orch_recompile_drops_stale_parent_meta(self, tmp_path):
+        """Single-orch then multi-orch into one dir: the parent markers must go."""
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path), _sub_chip_names=[])
+        (tmp_path / "kernel_config.py").write_text("# emitted by the single-orch compile\n")
+        assert (tmp_path / _COMPILED_META_FILENAME).exists()  # sanity: written by the first compile
+
+        for name in ("orch_a", "orch_b"):
+            (tmp_path / "next_levels" / name / "orchestration").mkdir(parents=True)
+        CompiledProgram(_make_multi_orch_program(), str(tmp_path), _sub_chip_names=["orch_a", "orch_b"])
+
+        assert not (tmp_path / _COMPILED_META_FILENAME).exists()
+        # A multi-orch build writes nothing at the top level, so the previous
+        # build's kernel_config.py would otherwise keep replay() pointed at it.
+        assert not (tmp_path / "kernel_config.py").exists()
+        # The parent must now point users at the sub-builds rather than hand out
+        # the previous program's signature.
+        with pytest.raises(FileNotFoundError, match="multi-orch"):
+            CompiledProgram.from_dir(tmp_path)
+
+    def test_unextractable_recompile_drops_stale_meta(self, tmp_path):
+        """A program with no resolvable signature removes the stale sidecar instead of keeping it."""
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path))
+        CompiledProgram(_make_program_without_orchestration(), str(tmp_path))
+
+        assert not (tmp_path / _COMPILED_META_FILENAME).exists()
+        with pytest.raises(FileNotFoundError, match=r"compiled_meta\.json"):
+            CompiledProgram.from_dir(tmp_path)
+
+    def test_sub_build_without_matching_function_drops_meta(self, tmp_path):
+        """A sub-build the IR has no function for loses its sidecar instead of keeping a stale one."""
+        for name in ("orch_a", "orch_b"):
+            (tmp_path / "next_levels" / name / "orchestration").mkdir(parents=True)
+        names = ["orch_a", "orch_b"]
+        CompiledProgram(_make_multi_orch_program(), str(tmp_path), _sub_chip_names=names)
+        stale = tmp_path / "next_levels" / "orch_b" / _COMPILED_META_FILENAME
+        assert stale.exists()  # sanity: written by the first compile
+
+        # Same layout, but the IR no longer carries orch_b: its build dir must
+        # not keep advertising the signature the previous compile recorded.
+        orch_a = _make_multi_orch_program().get_function("orch_a")
+        assert orch_a is not None
+        only_a = ir.Program([orch_a], "OnlyOrchA", ir.Span.unknown())
+        CompiledProgram(only_a, str(tmp_path), _sub_chip_names=names)
+        assert not stale.exists()
+        assert (tmp_path / "next_levels" / "orch_a" / _COMPILED_META_FILENAME).exists()
+
+    def test_stale_next_levels_does_not_shadow_a_single_orch_build(self, tmp_path):
+        """Multi-orch then single-orch into one dir: the new top-level build wins.
+
+        The layout comes from the codegen that just ran, so the leftover
+        ``next_levels/`` must not classify the second compile as multi-orch --
+        that would hide its top-level artifacts behind the stale sub-builds,
+        delete the sidecar it just wrote, and force dispatch through
+        ``compiled[<name>]`` into the *old* build.
+        """
+        import pypto.language as pl  # noqa: PLC0415
+
+        @pl.program
+        class TwoOrch:
+            @pl.function(type=pl.FunctionType.InCore)
+            def tile_add(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                b: pl.Tensor[[128, 128], pl.FP32],
+                f: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                tf = pl.add(pl.load(a, [0, 0], [128, 128]), pl.load(b, [0, 0], [128, 128]))
+                return pl.store(tf, [0, 0], f)
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def tile_sub(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                b: pl.Tensor[[128, 128], pl.FP32],
+                f: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                tf = pl.sub(pl.load(a, [0, 0], [128, 128]), pl.load(b, [0, 0], [128, 128]))
+                return pl.store(tf, [0, 0], f)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_add(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                b: pl.Tensor[[128, 128], pl.FP32],
+                f: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                return self.tile_add(a, b, f)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_sub(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                b: pl.Tensor[[128, 128], pl.FP32],
+                f: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                return self.tile_sub(a, b, f)
+
+        @pl.program
+        class OneOrch:
+            """Deliberately different signature (x, y, z) from either orch above."""
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def mul_kernel(
+                self,
+                x: pl.Tensor[[64, 64], pl.FP32],
+                y: pl.Tensor[[64, 64], pl.FP32],
+                z: pl.Tensor[[64, 64], pl.FP32],
+            ):
+                tz = pl.tile.mul(pl.tile.load(x, [0, 0], [64, 64]), pl.tile.load(y, [0, 0], [64, 64]))
+                pl.tile.store(tz, offsets=[0, 0], output_tensor=z)
+
+        work_dir = tmp_path / "reused"
+        multi = ir.compile(TwoOrch, output_dir=str(work_dir), dump_passes=False, skip_ptoas=True)
+        assert isinstance(multi, CompiledProgram)  # L2, not the distributed wrapper
+        assert multi.orchestration_names == ["orch_add", "orch_sub"]
+        assert not (work_dir / _COMPILED_META_FILENAME).exists()
+
+        single = ir.compile(OneOrch, output_dir=str(work_dir), dump_passes=False, skip_ptoas=True)
+        assert isinstance(single, CompiledProgram)
+
+        # 1) The second compile owns the top level: its own artifacts, a sidecar
+        #    describing *its* signature, and no multi-orch dispatch surface.
+        assert {p.stem for p in (work_dir / "kernels").rglob("*.pto")} == {"mul_kernel"}
+        assert single.orchestration_names == []
+        assert single.param_names == ["x", "y", "z"]
+        meta = json.loads((work_dir / _COMPILED_META_FILENAME).read_text())
+        assert [p["name"] for p in meta["params"]] == ["x", "y", "z"]
+
+        # 2) Both call paths run the new top-level build, not a stale sub-build.
+        reloaded = CompiledProgram.from_dir(work_dir)
+        assert reloaded.orchestration_names == []
+        assert reloaded.param_names == ["x", "y", "z"]
+        args = (torch.zeros(64, 64), torch.zeros(64, 64), torch.zeros(64, 64))
+        for compiled in (single, reloaded):
+            with patch("pypto.runtime.runner.execute_compiled") as mock_exec:
+                compiled(*args)
+            assert mock_exec.call_args.args[0] == work_dir.resolve()
+
+        # 3) The leftover sub-builds keep their own artifacts *and* their own
+        #    sidecar, so reloading one replays that older build rather than
+        #    describing the new one.
+        stale = CompiledProgram.from_dir(work_dir / "next_levels" / "orch_add")
+        assert stale.param_names == ["a", "b", "f"]
+
+    def test_l2_then_l3_into_one_dir_drops_the_l2_markers(self, tmp_path):
+        """An L2 build's markers must not survive an L3 compile into the same dir.
+
+        ``replay()`` takes the L3 path only when there is **no** top-level
+        ``kernel_config.py``, so an L2 leftover does not just age out — it makes
+        the whole directory replay as the previous single-chip build.
+        """
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path), _sub_chip_names=[])
+        (tmp_path / "kernel_config.py").write_text("# emitted by the L2 compile\n")
+        assert (tmp_path / _COMPILED_META_FILENAME).exists()  # sanity
+
+        DistributedCompiledProgram(_make_program_with_inout(), str(tmp_path))
+
+        assert (tmp_path / _DISTRIBUTED_META_FILENAME).exists()
+        assert not (tmp_path / _COMPILED_META_FILENAME).exists()
+        assert not (tmp_path / "kernel_config.py").exists()  # replay() now resolves L3
+        with pytest.raises(FileNotFoundError, match=r"compiled_meta\.json"):
+            CompiledProgram.from_dir(tmp_path)
+
+    def test_l3_then_l2_into_one_dir_drops_the_l3_markers(self, tmp_path):
+        """The mirror direction: an L3 build's markers must not outlive an L2 compile."""
+        DistributedCompiledProgram(_make_program_with_orchestration(), str(tmp_path))
+        (tmp_path / "orchestration").mkdir(exist_ok=True)
+        (tmp_path / "orchestration" / "host_orch.py").write_text("# emitted by the L3 compile\n")
+        assert (tmp_path / _DISTRIBUTED_META_FILENAME).exists()  # sanity
+
+        CompiledProgram(_make_program_with_inout(), str(tmp_path), _sub_chip_names=[])
+
+        assert not (tmp_path / _DISTRIBUTED_META_FILENAME).exists()
+        assert not (tmp_path / "orchestration" / "host_orch.py").exists()
+        with pytest.raises(FileNotFoundError, match=r"distributed_meta\.json"):
+            DistributedCompiledProgram.from_dir(tmp_path)
+        # ...and the directory now reloads as the L2 program just compiled.
+        assert CompiledProgram.from_dir(tmp_path).param_names == ["a", "acc", "out"]
+
+    def test_no_temp_files_left_behind(self, tmp_path):
+        """The atomic write leaves no ``.tmp`` residue next to the sidecar."""
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path))
+        assert not list(tmp_path.glob("*.tmp"))
 
 
 if __name__ == "__main__":

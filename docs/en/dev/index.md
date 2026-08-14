@@ -26,6 +26,7 @@ PyPTO programs, start with the [User Manual](../user/index.md).
 | [Error Handling](02-error-handling.md) | `CHECK` vs `INTERNAL_CHECK`, PyPTO exception types, IR source locations in failures |
 | [Logging](03-logging.md) | The two independent logging subsystems and which one a message came from |
 | [Runtime DFX Flags](03-runtime-dfx.md) | The five runtime diagnostic sub-features exposed through `RunConfig` |
+| [Replaying an Existing `build_output`](03-runtime-replay.md) | Re-run, edit, and re-measure a compiled build directory without recompiling |
 | [Simulator Trace Cleaning](04-simulator-trace-cleaning.md) | Converting MindStudio Insight binary dumps into readable traces |
 | [Per-Task Ring Sizing](05-runtime-ring-sizing.md) | The three ring-size overrides on `RunConfig` and when to tune them |
 | [Persistent L3 execution](06-persistent-l3.md) | Reusing one worker across prepared distributed programs |

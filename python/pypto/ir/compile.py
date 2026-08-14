@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from pypto.backend import BackendType
-from pypto.backend.pto_backend import PartialCodegenError, generate
+from pypto.backend.pto_backend import PartialCodegenError, generate, multi_chip_orch_names
 from pypto.compile_profiling import CompileProfiler, get_active_profiler
 from pypto.pypto_core import backend as _backend_core
 from pypto.pypto_core import ir as _ir_core
@@ -248,11 +248,11 @@ def compile(  # noqa: PLR0913
             semantics-required aliasing (loop-carried accumulators, in-place ops)
             is preserved as a shared ``tile_buf`` handle that ptoas keeps as one
             buffer.
-        enable_pypto_l0c_double_buffer: Opt in to dbC=2 (L0C double-buffering)
-            under the PyPTO-owned ``PYPTO`` and ``DSA_RP`` planners
-            (experimental, default off). ``None`` inherits the setting from an
-            active outer ``PassContext`` (else ``False``); has no effect under
-            ``PTOAS``, which already emits dbC=2 unconditionally.
+        enable_pypto_l0c_double_buffer: Opt the legacy ``PYPTO`` planner in to
+            chooser-emitted dbC=2 (L0C double-buffering; experimental, default
+            off). ``None`` inherits the setting from an active outer
+            ``PassContext`` (else ``False``). It has no effect under ``DSA_RP``
+            or ``PTOAS``, which enable chooser dbC=2 automatically.
         profiling: If True, enable compile profiling that records per-stage
             wall-clock timings.  Results are written to ``output_dir/report/``.
         platform: Target execution platform.  One of ``"a2a3sim"``,
@@ -386,9 +386,14 @@ def compile(  # noqa: PLR0913
             distributed_config=distributed_config,
         )
 
+    # Hand over the layout codegen just produced instead of letting
+    # CompiledProgram re-derive it from the directory: a reused ``output_dir``
+    # may still hold a ``next_levels/`` from an earlier multi-orch compile, and
+    # a disk scan would mistake this build for that one.
     return CompiledProgram(
         program,
         output_dir,
         backend_type=effective_backend_type,
         platform=platform,
+        _sub_chip_names=multi_chip_orch_names(transformed_program),
     )

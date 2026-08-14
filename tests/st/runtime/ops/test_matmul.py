@@ -83,16 +83,25 @@ def _choose_a2a3_l0(
     cfg.bytes_a, cfg.bytes_b, cfg.bytes_c = bytes_a, bytes_b, 4
     cfg.allow_a_stationary = True
     cfg.allow_b_stationary = True
-    cfg.allow_double_buffer_c = planner == MemoryPlanner.PTOAS
+    cfg.allow_double_buffer_c = planner != MemoryPlanner.PYPTO
     cfg.allow_k_boundary = True
     return _core_passes.l0_tile_chooser.choose_l0_tile(cfg)
 
 
-def _printed_through_auto_tile(program: Any, planner: MemoryPlanner) -> str:
+def _printed_through_auto_tile(
+    program: Any,
+    planner: MemoryPlanner,
+    *,
+    enable_pypto_l0c_double_buffer: bool = False,
+) -> str:
     """Run the production tensor-to-tile prefix through AutoTile for structural checks."""
     _backend.reset_for_testing()
     _backend.set_backend_type(BackendType.Ascend910B)
-    with passes.PassContext([], memory_planner=planner):
+    with passes.PassContext(
+        [],
+        memory_planner=planner,
+        enable_pypto_l0c_double_buffer=enable_pypto_l0c_double_buffer,
+    ):
         for make_pass in (
             passes.inline_functions,
             passes.unroll_loops,
@@ -592,8 +601,9 @@ class TestMatmulAutoL0AStationary(PTOTestCase):
 
     The held A panel is single-buffered in L0A while B streams double-buffered.
     The emitted schedule is a sequential outer M loop and pipelined inner N
-    loop. PyPTO and PTOAS use different shapes because PTOAS also searches
-    dbC=2 design points.
+    loop. Legacy PYPTO uses a single accumulator by default; DSA_RP and PTOAS
+    search dbC=2 design points automatically and therefore use a different
+    regression shape.
     """
 
     __test__ = False
@@ -678,10 +688,16 @@ class TestChainedMatmulMatScratch(PTOTestCase):
         n: int = 64,
         *,
         memory_planner: MemoryPlanner | None = None,
+        enable_pypto_l0c_double_buffer: bool | None = None,
         platform: str | None = None,
         config=None,
     ):
-        super().__init__(config, platform=platform, memory_planner=memory_planner)
+        super().__init__(
+            config,
+            platform=platform,
+            memory_planner=memory_planner,
+            enable_pypto_l0c_double_buffer=enable_pypto_l0c_double_buffer,
+        )
         self.M = m
         self.K = k
         self.NMID = nmid
@@ -760,8 +776,9 @@ class TestMatmulAutoL0BStationary(PTOTestCase):
 
     The held B panel is single-buffered in L0B while A streams double-buffered.
     The emitted schedule is a sequential outer N loop and pipelined inner M
-    loop. PyPTO and PTOAS use different shapes because PTOAS also searches
-    dbC=2 design points.
+    loop. Legacy PYPTO uses a single accumulator by default; DSA_RP and PTOAS
+    search dbC=2 design points automatically and therefore use a different
+    regression shape.
     """
 
     __test__ = False
@@ -975,8 +992,8 @@ class TestMatmulOuterPipelinedBF16(PTOTestCase):
     def __init__(
         self,
         m: int = 16,
-        k_chunk: int = 128,
-        n: int = 256,
+        k_chunk: int = 192,
+        n: int = 128,
         num_chunks: int = 8,
         *,
         memory_planner: MemoryPlanner | None = None,
@@ -1272,7 +1289,7 @@ _TRANSPOSE_SHAPES = [(64, 64, 64), (128, 64, 128), (64, 128, 64), (32, 64, 32)]
 _AUTOL0_K_SPLIT_SHAPES = [
     (16, 128, 128, 64),
     (64, 192, 128, 64),
-    (64, 256, 256, 32),
+    (64, 384, 256, 32),
     (128, 384, 64, 64),
 ]
 # Tolerance for AutoL0 K-split: HW reduces K chunks in a different order than
@@ -1564,6 +1581,7 @@ class TestMatmulOperations:
             f"expected K-only tile {(m, n, l0_k)} under {planner}, got {(choice.m, choice.n, choice.k)}"
         )
         assert choice.stationarity == _core_passes.l0_tile_chooser.Stationarity.OutputStationary
+        assert not choice.double_buffer_c
         assert choice.k < k, "the system case must exercise a real K split"
         cfg = RunConfig(platform=platform, rtol=_AUTOL0_RTOL, atol=_AUTOL0_ATOL)
         result = test_runner.run(
@@ -1621,8 +1639,8 @@ class TestMatmulOperations:
         "planner,m,k,n,expected_tile",
         [
             pytest.param(MemoryPlanner.PYPTO, 256, 128, 544, (256, 128, 128), id="pypto"),
-            pytest.param(MemoryPlanner.DSA_RP, 256, 128, 544, (256, 128, 128), id="dsa_rp"),
-            pytest.param(MemoryPlanner.PTOAS, 384, 256, 128, (128, 64, 256), id="ptoas"),
+            pytest.param(MemoryPlanner.DSA_RP, 48, 352, 96, (48, 32, 352), id="dsa_rp"),
+            pytest.param(MemoryPlanner.PTOAS, 48, 352, 96, (48, 32, 352), id="ptoas"),
         ],
     )
     def test_matmul_autol0_a_stationary(self, test_runner, platform, planner, m, k, n, expected_tile):
@@ -1630,6 +1648,7 @@ class TestMatmulOperations:
         choice = _choose_a2a3_l0(m, k, n, planner=planner, bytes_a=2, bytes_b=2)
         assert (choice.m, choice.n, choice.k) == expected_tile
         assert choice.stationarity == _core_passes.l0_tile_chooser.Stationarity.AStationary
+        assert choice.double_buffer_c == (planner != MemoryPlanner.PYPTO)
         cfg = RunConfig(platform=platform, rtol=2e-3, atol=2e-3)
         result = test_runner.run(
             TestMatmulAutoL0AStationary(
@@ -1664,12 +1683,38 @@ class TestMatmulOperations:
 
     @pytest.mark.platforms("a2a3", "a2a3sim")
     @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_chained_matmul_mat_scratch_issue_1908_dsa_rp_dbc(self, test_runner, platform):
+        """DSA_RP combines dbC with the operand-stationary #1908 layout.
+
+        The producer's held 64 KiB L0B panel precedes the consumer's two
+        smaller pipelined L0B buffers. DSA_RP must retain the chooser-selected
+        operand-stationary schedule, preserve dbC, and execute correctly.
+        """
+        planner = MemoryPlanner.DSA_RP
+        case = TestChainedMatmulMatScratch(
+            m=128,
+            k=128,
+            nmid=512,
+            n=64,
+            memory_planner=planner,
+            platform=platform,
+            config=RunConfig(platform=platform, rtol=2e-2, atol=2e-2),
+        )
+        printed = _printed_through_auto_tile(case.get_program(), planner)
+        assert "pl.range(" in printed
+        assert "pipeline_double_buffer_c" in printed
+
+        result = test_runner.run(case)
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.platforms("a2a3", "a2a3sim")
+    @pytest.mark.parametrize("platform", PLATFORMS)
     @pytest.mark.parametrize(
         "planner,m,k,n,expected_tile",
         [
             pytest.param(MemoryPlanner.PYPTO, 192, 64, 512, (64, 512, 64), id="pypto"),
-            pytest.param(MemoryPlanner.DSA_RP, 192, 64, 512, (64, 512, 64), id="dsa_rp"),
-            pytest.param(MemoryPlanner.PTOAS, 64, 80, 288, (32, 256, 80), id="ptoas"),
+            pytest.param(MemoryPlanner.DSA_RP, 64, 80, 256, (32, 256, 80), id="dsa_rp"),
+            pytest.param(MemoryPlanner.PTOAS, 64, 80, 256, (32, 256, 80), id="ptoas"),
         ],
     )
     def test_matmul_autol0_b_stationary(self, test_runner, platform, planner, m, k, n, expected_tile):
@@ -1677,6 +1722,7 @@ class TestMatmulOperations:
         choice = _choose_a2a3_l0(m, k, n, planner=planner, bytes_a=2, bytes_b=2)
         assert (choice.m, choice.n, choice.k) == expected_tile
         assert choice.stationarity == _core_passes.l0_tile_chooser.Stationarity.BStationary
+        assert choice.double_buffer_c == (planner != MemoryPlanner.PYPTO)
         cfg = RunConfig(platform=platform, rtol=2e-3, atol=2e-3)
         result = test_runner.run(
             TestMatmulAutoL0BStationary(
@@ -1741,6 +1787,7 @@ class TestMatmulOperations:
             bytes_a=2,
             bytes_b=2,
         )
+        assert not choice.double_buffer_c, "the nested-pipeline case must retain a K-only inner split"
         assert choice.k < case.K_CHUNK, "the inner per-chunk matmul must be K-tiled"
         printed = _printed_through_auto_tile(case.get_program(), planner)
         outer_pipeline = f"pl.pipeline({case.NUM_CHUNKS}, stage=2"

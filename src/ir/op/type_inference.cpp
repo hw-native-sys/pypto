@@ -685,6 +685,34 @@ std::vector<ExprPtr> InferWindowReadValidShape(const WindowReadValidShapeParams&
   return result;
 }
 
+std::vector<ExprPtr> InferTensorSliceFullValidShape(const TensorType& source_type,
+                                                    const std::vector<ExprPtr>& full_shape,
+                                                    const std::vector<ExprPtr>& offsets,
+                                                    const std::vector<ExprPtr>& requested_valid, bool clamp,
+                                                    const Span& span) {
+  if (full_shape.size() == source_type.shape_.size() && offsets.size() == full_shape.size()) {
+    return InferWindowReadValidShape({
+        /*source_physical=*/source_type.shape_,
+        /*source_valid=*/GetEffectiveTensorValidShape(source_type),
+        /*offsets=*/offsets,
+        /*window=*/full_shape,
+        /*requested_valid=*/requested_valid,
+        /*kind=*/WindowReadKind::kClampedWindow,
+        /*clamp=*/clamp,
+        /*op_name=*/"tensor.slice",
+        /*bounds_remedy=*/
+        "Pass clamp=True -- pl.slice(x, shape, offset, clamp=True) -- to narrow the valid region to "
+        "the source edge instead",
+        /*span=*/span,
+    });
+  }
+
+  CHECK_SPAN(requested_valid.empty() || requested_valid.size() == full_shape.size(), span)
+      << "tensor.slice requires valid_shape to have the same rank as shape, but got valid_shape rank "
+      << requested_valid.size() << " and shape rank " << full_shape.size();
+  return requested_valid.empty() ? full_shape : requested_valid;
+}
+
 void ValidateDropDimsValidExtents(const std::vector<int64_t>& drop_dims,
                                   const std::vector<ExprPtr>& valid_shape, const std::string& op_name,
                                   const Span& span) {

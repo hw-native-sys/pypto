@@ -298,7 +298,7 @@ void BindPass(nb::module_& m) {
            nb::arg("enable_pypto_l0c_double_buffer") = false,
            "Create a PassContext with instruments, verification level, diagnostic phase gate, "
            "optional disabled diagnostic checks, memory planner selection, and the experimental "
-           "PyPTO-planner L0C double-buffer (dbC=2) opt-in")
+           "legacy-PyPTO chooser-emitted L0C double-buffer (dbC=2) opt-in")
       .def("__enter__",
            [](PassContext& self) -> PassContext& {
              self.EnterContext();
@@ -315,7 +315,8 @@ void BindPass(nb::module_& m) {
       .def("get_memory_planner", &PassContext::GetMemoryPlanner,
            "Get the memory planner selection for this context")
       .def("get_enable_pypto_l0c_double_buffer", &PassContext::GetEnablePyptoL0cDoubleBuffer,
-           "Whether L0C double-buffering (dbC=2) is enabled under the PyPTO memory planner")
+           "Whether chooser-emitted L0C double-buffering (dbC=2) is enabled under the legacy PyPTO "
+           "memory planner")
       .def_static("current", &PassContext::Current, nb::rv_policy::reference,
                   "Get the currently active context, or None if no context is active");
 
@@ -491,8 +492,9 @@ void BindPass(nb::module_& m) {
              "tail. Plain tile.matmul may also use an M/N grid with direct-GM placement or an\n"
              "on-chip Mat scratch for chained matmul consumers; compatible f32->bf16/f16 rint\n"
              "casts fold into the FIXPIPE writeback. Full-K grids support output-, A-, and\n"
-             "B-stationary schedules. dbC=2 is enabled under PTOAS and available as a PyPTO\n"
-             "planner opt-in. Under PyPTO, a canonical already-L0 stationary-panel pipeline\n"
+             "B-stationary schedules. dbC=2 is enabled automatically under DSA_RP and PTOAS\n"
+             "and available as a legacy-PyPTO opt-in. Under PyPTO, a canonical already-L0 stationary-panel "
+             "pipeline\n"
              "may automatically use two L0C slots when its post-lowering Acc footprint fits.\n"
              "Mat-resident tile.matmul_bias is supported with accumulator-typed bias, bias-once K\n"
              "reduction, and bias-capacity-bounded N-window reloads followed by Mat-to-Bias moves. Other\n"

@@ -250,11 +250,12 @@ class PassContext {
    * @param memory_planner Who plans on-chip buffer memory (default: PyPTO).
    *        DsaRP replaces MemoryReuse with in-tree capacity-constrained DSA-RP.
    *        PtoAS skips PyPTO address allocation so ptoas PlanMemory owns it.
-   * @param enable_pypto_l0c_double_buffer Opt in to L0C double-buffering (dbC=2)
-   *        under PyPTO-owned planners (PyPTO or DsaRP; default: false,
-   *        experimental). No effect under PtoAS, which already emits dbC=2.
-   *        When true, AutoTileMatmulL0 emits two co-live L0C accumulators;
-   *        the selected PyPTO allocator preserves the ping-pong.
+   * @param enable_pypto_l0c_double_buffer Opt the legacy PyPTO planner in to
+   *        chooser-emitted L0C double-buffering (dbC=2; default: false,
+   *        experimental). No effect under DsaRP or PtoAS, which enable chooser
+   *        dbC=2 automatically. When true, AutoTileMatmulL0 may emit two co-live
+   *        L0C accumulators and the legacy PyPTO allocator preserves the
+   *        ping-pong where capacity permits.
    */
   explicit PassContext(std::vector<PassInstrumentPtr> instruments,
                        VerificationLevel verification_level = VerificationLevel::Basic,
@@ -320,8 +321,9 @@ class PassContext {
   [[nodiscard]] MemoryPlanner GetMemoryPlanner() const;
 
   /**
-   * @brief Whether L0C double-buffering (dbC=2) is enabled under the PyPTO memory
-   *        planner. Off by default (experimental). No effect under PtoAS.
+   * @brief Whether chooser-emitted L0C double-buffering (dbC=2) is enabled under
+   *        the legacy PyPTO planner. Off by default (experimental). No effect
+   *        under DsaRP or PtoAS.
    */
   [[nodiscard]] bool GetEnablePyptoL0cDoubleBuffer() const;
 

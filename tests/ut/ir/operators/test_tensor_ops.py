@@ -2310,6 +2310,14 @@ def test_tensor_slice_drop_dims_rejects_out_of_range():
         ir.op.tensor.slice(tensor_var, [1, 64], [0, 0], drop_dims=[2])
 
 
+def test_tensor_slice_drop_dims_rejects_rank_zero_result():
+    """drop_dims cannot create a rank-zero runtime tensor."""
+    span = ir.Span.unknown()
+    tensor_var = ir.Var("t", ir.TensorType([1, 1], DataType.FP32), span)
+    with pytest.raises(ValueError, match="cannot erase every dimension"):
+        ir.op.tensor.slice(tensor_var, [1, 1], [0, 0], drop_dims=[0, 1])
+
+
 def test_tensor_slice_empty_drop_dims_is_backward_compatible():
     """drop_dims=None / [] keeps the legacy 3-arg result type (no tensor_view)."""
     span = ir.Span.unknown()

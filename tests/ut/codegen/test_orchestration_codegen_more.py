@@ -352,6 +352,62 @@ class TestOrchestrationMore:
         assert "uint32_t chunk_offsets[2] = {0, 0};" in code
         assert "Tensor chunk = ext_data.view(chunk_shapes, chunk_offsets);" in code
 
+    def test_tensor_slice_with_drop_dims(self):
+        """A scalar-indexed tensor slice emits a view followed by rank reduction."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class DropDimSliceProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_slice(
+                self,
+                data: pl.Tensor[[3, 64, 16], pl.FP32],
+            ) -> pl.Tensor[[3, 16], pl.FP32]:
+                chunk = data[:, 1, :]
+                return chunk
+
+        code = _generate_orch_code(DropDimSliceProgram)
+
+        assert "Tensor chunk_view = ext_data.view(chunk_shapes, chunk_offsets);" in code
+        assert "chunk.ndims = 2;" in code
+        assert "chunk.shapes[0] = chunk_view.shapes[0];" in code
+        assert "chunk.strides[0] = chunk_view.strides[0];" in code
+        assert "chunk.shapes[1] = chunk_view.shapes[2];" in code
+        assert "chunk.strides[1] = chunk_view.strides[2];" in code
+        assert "bool chunk_empty = chunk_view.numel() == 0;" in code
+        assert "if (chunk_empty) chunk.shapes[0] = 0;" in code
+        assert "chunk.is_contiguous = chunk_empty || chunk_contiguous;" in code
+
+    def test_tensor_slice_drop_dims_preserves_dynamic_empty_view(self):
+        """An out-of-bounds scalar index remains empty after its axis is removed."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class DynamicDropDimSliceProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_slice(
+                self,
+                data: pl.Tensor[[3, 64, 16], pl.FP32],
+                index: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[3, 16], pl.FP32]:
+                chunk = data[:, index, :]
+                return chunk
+
+        code = _generate_orch_code(DynamicDropDimSliceProgram)
+
+        assert "uint32_t chunk_offsets[3] = {0, static_cast<uint32_t>(index), 0};" in code
+        assert (
+            "(chunk_offsets[1] >= ext_data.shapes[1] ? 0u : "
+            "std::min<uint32_t>(1, ext_data.shapes[1] - chunk_offsets[1]))" in code
+        )
+        empty_capture = code.index("bool chunk_empty = chunk_view.numel() == 0;")
+        rank_reduction = code.index("chunk.ndims = 2;")
+        assert empty_capture < rank_reduction
+        assert "if (chunk_empty) chunk.shapes[0] = 0;" in code
+        assert "chunk.is_contiguous = chunk_empty || chunk_contiguous;" in code
+
     def test_tensor_reshape_external_input(self):
         """tensor.reshape on an external orchestration input emits Tensor::reshape on ext_<name>."""
         backend.reset_for_testing()

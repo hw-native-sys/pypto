@@ -244,6 +244,20 @@ bool OSHoldsHoldA(int m, int n, const L0TileConfig& cfg) {
   return held_a <= held_b;
 }
 
+// Mirror BuildFullKPipelined's loop orientation. The held/stationary operand is
+// emitted in the outer loop; the other output axis is the moving inner loop that
+// carries the dbC marker. Keeping this decision shared with the roofline's
+// bandwidth-weighted OS hoist ensures eligibility is checked against the loop
+// orientation the pass actually emits.
+bool PipelinedRowsOuter(int m, int n, const L0TileConfig& cfg, Stationarity stat) {
+  return stat == Stationarity::kAStationary ||
+         (stat == Stationarity::kOutputStationary && OSHoldsHoldA(m, n, cfg));
+}
+
+int64_t PipelinedInnerFullTiles(int m, int n, const L0TileConfig& cfg, Stationarity stat) {
+  return PipelinedRowsOuter(m, n, cfg, stat) ? cfg.N / n : cfg.M / m;
+}
+
 // L1->L0 load cost (cycles). The MTE1 pipe is shared, so A and B loads serialize;
 // each is weighted by its port bandwidth (the 2:1 L0A/L0B asymmetry). The reload
 // counts depend on the stationarity / reuse route. The full-K emitter
@@ -429,9 +443,11 @@ std::optional<Candidate> MakeCandidate(int m, int n, int k, const L0TileConfig& 
 // is a true exhaustive search over the regime's tile shapes, not (m, n) with a
 // largest-k shortcut.
 //
-// require_2d: only tiles forming a >= 2x2 output grid are considered -- L0C
-//   double-buffering overlaps drains in the inner pipelined loop, which needs
-//   >= 2 tiles on each axis.
+// require_inner_pair: only tiles with at least two full interior iterations on
+//   the moving inner axis are considered. BuildFullKPipelined attaches the dbC
+//   marker to that loop only, so the stationary outer axis may have one tile.
+//   Use floor division here: a peeled partial-boundary tile is emitted outside
+//   the pipeline and cannot provide the second ping/pong stage.
 // require_full_k: only tiles that reduce K in a single pass (k == K) are
 //   considered -- needed for the operand-stationary routes (A/B held across K)
 //   and for the dbC=2 ping-pong (realized only by the full-K pipelined emitter).
@@ -443,7 +459,7 @@ std::optional<Candidate> MakeCandidate(int m, int n, int k, const L0TileConfig& 
 // runs once per matmul op (matmul ops are O(N)), so the pass stays linear in
 // the IR.
 std::optional<Candidate> EnumerateBest(const L0TileConfig& cfg, const Regime& regime, int64_t A0, int64_t B0,
-                                       int64_t C0, bool require_2d, bool require_full_k) {
+                                       int64_t C0, bool require_inner_pair, bool require_full_k) {
   const int64_t m_hi = cfg.allow_padding ? AlignUp(static_cast<int64_t>(cfg.M), cfg.align_m) : cfg.M;
   int64_t n_hi = cfg.allow_padding ? AlignUp(static_cast<int64_t>(cfg.N), cfg.align_n) : cfg.N;
   if (cfg.max_n > 0) n_hi = std::min<int64_t>(n_hi, cfg.max_n);
@@ -464,10 +480,12 @@ std::optional<Candidate> EnumerateBest(const L0TileConfig& cfg, const Regime& re
     // n >= min_n must fit the physical accumulator footprint; once it cannot,
     // no larger m can either.
     if (physical_m > C0 / static_cast<int64_t>(*boxed_min_n)) break;
-    if (require_2d && CeilDiv(static_cast<int64_t>(cfg.M), m) < 2) continue;
     const int64_t n_max = std::min<int64_t>(n_hi, C0 / physical_m);
     for (int64_t n = cfg.min_n; n <= n_max; n += cfg.align_n) {
-      if (require_2d && CeilDiv(static_cast<int64_t>(cfg.N), n) < 2) continue;
+      if (require_inner_pair &&
+          PipelinedInnerFullTiles(static_cast<int>(m), static_cast<int>(n), cfg, regime.stat) < 2) {
+        continue;
+      }
       for (const int k : EnumerateLegalKs(static_cast<int>(m), static_cast<int>(n), cfg, A0, B0)) {
         if (require_full_k && k != cfg.K) continue;
         auto c = MakeCandidate(static_cast<int>(m), static_cast<int>(n), k, cfg, C0, regime);
@@ -577,7 +595,8 @@ L0TileResult ChooseL0Tile(const L0TileConfig& cfg) {
   //    aspect m:n = bytes_b*BW_A : bytes_a*BW_B = 2:1 for BF16 trades against the
   //    per-tile MAD head and ceil waste), so we score every legal tile.
   std::optional<Candidate> best =
-      EnumerateBest(cfg, base_regime, A0, B0, C0_base, /*require_2d=*/false, /*require_full_k=*/false);
+      EnumerateBest(cfg, base_regime, A0, B0, C0_base, /*require_inner_pair=*/false,
+                    /*require_full_k=*/false);
   CHECK(best) << "ChooseL0Tile: no legal (m, n, k) tile found for M=" << cfg.M << ", N=" << cfg.N
               << ", K=" << cfg.K << ". This indicates the hardware capacity is below the configured "
               << "minimum tile shape; check L0a/L0b/L0c bytes and min_m/min_n/min_k.";
@@ -607,10 +626,11 @@ L0TileResult ChooseL0Tile(const L0TileConfig& cfg) {
           continue;  // can't fit the physical minimum tile
         }
         // Operand-stationary pins an operand across K (k == K); dbC=2 needs the
-        // full-K emitter (k == K) and a >= 2x2 grid for the ping-pong.
+        // full-K emitter and at least two full iterations of its moving inner
+        // loop. The stationary outer axis may contain a single tile.
         const bool require_full_k = !is_os || r.dbc;
-        const bool require_2d = r.dbc;
-        auto cand = EnumerateBest(cfg, r, a0, b0, c0, require_2d, require_full_k);
+        const bool require_inner_pair = r.dbc;
+        auto cand = EnumerateBest(cfg, r, a0, b0, c0, require_inner_pair, require_full_k);
         // Cross-regime tie policy: a non-baseline regime is adopted only on a
         // STRICTLY lower wall, so an equal-wall A/B-stationary or dbC=2 candidate
         // never displaces the already-scored output-stationary baseline. This is

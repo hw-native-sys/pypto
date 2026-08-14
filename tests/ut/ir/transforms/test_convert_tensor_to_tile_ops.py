@@ -280,6 +280,16 @@ def _find_calls_to(func: ir.Function, op_name: str) -> list[ir.Call]:
     return finder.found
 
 
+def _tuple_int_values(expr: ir.Expr) -> list[int]:
+    """Return the static integer elements of a tuple expression."""
+    assert isinstance(expr, ir.MakeTuple)
+    values: list[int] = []
+    for element in expr.elements:
+        assert isinstance(element, ir.ConstInt)
+        values.append(element.value)
+    return values
+
+
 class _CallCounter(ir.IRVisitor):
     """Count Calls whose callee ``Op`` name appears in ``op_names``."""
 
@@ -541,6 +551,28 @@ class TestConvertTensorToTileOps:
         after = passes.convert_tensor_to_tile_ops()(before)
 
         ir.assert_structural_equal(after, before)
+
+    def test_tensor_slice_drop_dims_lowers_to_tile(self):
+        """Rank reduction preserves source validity and emits a separate reshape."""
+        ib = IRBuilder()
+        with ib.function("kernel", type=ir.FunctionType.InCore) as f:
+            source_view = ir.TensorView(valid_shape=[3, 12], layout=ir.TensorLayout.ND)
+            x = f.param(
+                "x",
+                ir.TensorType([3, 64], DataType.FP32, memref=None, tensor_view=source_view),
+            )
+            sliced = ib.let("sliced", tensor_ops.slice(x, [1, 64], [1, 0], drop_dims=[0]))
+            f.return_type(sliced.type)
+            ib.return_stmt(sliced)
+        before = ir.Program([f.get_result()], "TensorSliceDropDims", ir.Span.unknown())
+
+        after = passes.convert_tensor_to_tile_ops()(before)
+        text = ir.python_print(after)
+
+        assert "pl.tile.load(x, [1, 0], [1, 64], [1, 12]" in text
+        assert "pl.tile.reshape(" in text
+        assert ", [64])" in text
+        assert "pl.tile.reshape(pl.tile.load(" not in text
 
     def test_tensor_view_rejects_input_converted_to_tile(self):
         """A GM view cannot consume a producer that pass 12 lowers to Tile."""
@@ -3142,6 +3174,52 @@ class TestSliceMatmulConversion:
             preload=False,
         )
         _assert_convert_equal(before, expected)
+
+    def test_rank_reducing_slice_then_matmul_preserves_valid_shape(self):
+        """Consumer-driven Mat loads keep 5-arg validity and lower drop_dims."""
+        ib = IRBuilder()
+        with ib.function("kernel", type=ir.FunctionType.InCore) as f:
+            a = f.param("a", ir.TensorType([16, 64], DataType.BF16))
+            b = f.param("b", ir.TensorType([2, 64, 32], DataType.BF16))
+            b_slice = ib.let(
+                "b_slice",
+                tensor_ops.slice(
+                    b,
+                    [1, 64, 32],
+                    [1, 0, 0],
+                    valid_shape=[1, 64, 16],
+                    drop_dims=[0],
+                ),
+            )
+            result = ib.let("result", tensor_ops.matmul(a, b_slice))
+            f.return_type(result.type)
+            ib.return_stmt(result)
+        before = ir.Program([f.get_result()], "RankReducingSliceMatmul", ir.Span.unknown())
+
+        after = passes.convert_tensor_to_tile_ops()(before)
+        kernel = after.get_function("kernel")
+        assert kernel is not None
+
+        b_load = next(
+            load
+            for load in _find_calls_to(kernel, "tile.load")
+            if isinstance(load.args[0], ir.Var) and load.args[0].name_hint == "b"
+        )
+        assert _tuple_int_values(b_load.args[3]) == [1, 64, 16]
+        assert isinstance(b_load.type, ir.TileType)
+        assert b_load.type.memory_space == MemorySpace.Mat
+        assert dict(b_load.attrs).get(_MAT_BRIDGE_ATTR) is True
+
+        reshapes = _find_calls_to(kernel, "tile.reshape")
+        assert len(reshapes) == 1
+        reshape = reshapes[0]
+        assert isinstance(reshape.args[0], ir.Var)
+        assert _tuple_int_values(reshape.args[1]) == [64, 32]
+
+        matmul = _find_calls_to(kernel, "tile.matmul")
+        assert len(matmul) == 1
+        assert isinstance(matmul[0].args[1], ir.Var)
+        assert matmul[0].args[1].name_hint == "b_slice__tile"
 
     def test_slice_alias_then_matmul_routes_load_to_mat(self):
         """tensor.slice → SSA alias → tensor.matmul emits tile.load(Mat).

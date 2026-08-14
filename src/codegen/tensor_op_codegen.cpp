@@ -278,10 +278,11 @@ REGISTER_ORCHESTRATION_OP(tensor_write, ("tensor.write")) {
 }
 
 REGISTER_ORCHESTRATION_OP(tensor_slice, ("tensor.slice")) {
-  // tensor.slice(input, shape_tuple, offset_tuple[, valid_shape_tuple]) -> Generate array variables and call
-  // .view()
-  CHECK(op->args_.size() == 3 || op->args_.size() == 4)
-      << "tensor.slice requires 3 or 4 arguments (input, shape, offset[, valid_shape])";
+  // tensor.slice(input, shape_tuple, offset_tuple[, valid_shape_tuple[, drop_dims_tuple]])
+  // -> Generate a runtime view and, for rank-reducing scalar indices, reshape away
+  // the statically-unit axes recorded in drop_dims.
+  CHECK(op->args_.size() >= 3 && op->args_.size() <= 5)
+      << "tensor.slice requires 3 to 5 arguments (input, shape, offset[, valid_shape[, drop_dims]])";
 
   std::string input_name = codegen.TryGetVarName(op->args_[0]);
   CHECK(!input_name.empty()) << "tensor.slice input must be a variable";
@@ -333,6 +334,19 @@ REGISTER_ORCHESTRATION_OP(tensor_slice, ("tensor.slice")) {
     runtime_offsets.push_back("(" + logical_offset_var + " / 2)");
   }
 
+  std::vector<bool> drop_dims(ndim, false);
+  if (op->args_.size() == 5) {
+    auto drop_dims_tuple = As<MakeTuple>(op->args_[4]);
+    CHECK(drop_dims_tuple) << "tensor.slice drop_dims must be MakeTuple";
+    for (const auto& dim_expr : drop_dims_tuple->elements_) {
+      auto dim = As<ConstInt>(dim_expr);
+      CHECK(dim) << "tensor.slice drop_dims entries must be ConstInt";
+      CHECK(dim->value_ >= 0 && static_cast<size_t>(dim->value_) < ndim)
+          << "tensor.slice drop_dims entry out of range: " << dim->value_;
+      drop_dims[static_cast<size_t>(dim->value_)] = true;
+    }
+  }
+
   // Generate offset array (emitted first so the shape clamp below can read it).
   oss << "uint32_t " << result_var << "_offsets[" << ndim << "] = {";
   for (size_t i = 0; i < ndim; ++i) {
@@ -363,16 +377,50 @@ REGISTER_ORCHESTRATION_OP(tensor_slice, ("tensor.slice")) {
   }
   oss << "};\n";
 
-  if (op->args_.size() == 4) {
+  if (op->args_.size() >= 4) {
     auto valid_shape_tuple = As<MakeTuple>(op->args_[3]);
     CHECK(valid_shape_tuple) << "tensor.slice valid_shape must be MakeTuple";
-    CHECK(valid_shape_tuple->elements_.size() == ndim)
+    CHECK(valid_shape_tuple->elements_.empty() || valid_shape_tuple->elements_.size() == ndim)
         << "tensor.slice valid_shape must have same rank as shape";
   }
 
   // Runtime tensor views use shape+offset; valid_shape only affects IR metadata.
-  oss << "Tensor " << result_var << " = " << ext_input_name << ".view(" << result_var << "_shapes, "
-      << result_var << "_offsets);";
+  size_t drop_count = 0;
+  for (bool drop : drop_dims) drop_count += drop ? 1 : 0;
+  if (drop_count == 0) {
+    oss << "Tensor " << result_var << " = " << ext_input_name << ".view(" << result_var << "_shapes, "
+        << result_var << "_offsets);";
+  } else {
+    oss << "Tensor " << result_var << "_view = " << ext_input_name << ".view(" << result_var << "_shapes, "
+        << result_var << "_offsets);\n";
+    // A dynamically out-of-bounds scalar index clamps its dropped axis to
+    // zero. Preserve that full-view emptiness before removing the axis: the
+    // runtime intentionally leaves an empty view at the parent start offset
+    // with zero extent, so reviving non-zero shapes after rank reduction would
+    // make numel(), extent_elem(), and the address footprint disagree.
+    oss << "bool " << result_var << "_empty = " << result_var << "_view.numel() == 0;\n";
+    oss << "Tensor " << result_var << " = " << result_var << "_view;\n";
+    oss << result_var << ".ndims = " << (ndim - drop_count) << ";\n";
+    size_t dst_dim = 0;
+    for (size_t i = 0; i < ndim; ++i) {
+      if (drop_dims[i]) continue;
+      oss << result_var << ".shapes[" << dst_dim << "] = " << result_var << "_view.shapes[" << i << "];\n";
+      oss << result_var << ".strides[" << dst_dim << "] = " << result_var << "_view.strides[" << i << "];\n";
+      ++dst_dim;
+    }
+    // Tensor slice type deduction rejects dropping every axis, so shapes[0]
+    // always names a retained dimension. A zero there keeps numel() and the
+    // copied zero extent consistent without changing any non-empty view.
+    oss << "if (" << result_var << "_empty) " << result_var << ".shapes[0] = 0;\n";
+    oss << "uint64_t " << result_var << "_expected_stride = 1;\n";
+    oss << "bool " << result_var << "_contiguous = true;\n";
+    oss << "for (int32_t i = static_cast<int32_t>(" << result_var << ".ndims) - 1; i >= 0; --i) {\n";
+    oss << "  " << result_var << "_contiguous = " << result_var << "_contiguous && (" << result_var
+        << ".strides[i] == " << result_var << "_expected_stride);\n";
+    oss << "  " << result_var << "_expected_stride *= " << result_var << ".shapes[i];\n";
+    oss << "}\n";
+    oss << result_var << ".is_contiguous = " << result_var << "_empty || " << result_var << "_contiguous;";
+  }
   return oss.str();
 }
 

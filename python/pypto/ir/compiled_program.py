@@ -19,6 +19,7 @@ torch tensors::
 """
 
 import ctypes
+import json
 import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -48,6 +49,42 @@ from pypto.runtime.device_tensor import DeviceTensor, StackedDeviceTensor
 # Scalar params accept Python primitives or ctypes scalars (which are
 # coerced to the correct ctypes type internally).
 CallArg = torch.Tensor | DeviceTensor | StackedDeviceTensor | int | float | bool | ctypes._SimpleCData
+
+# Filename of the small JSON sidecar persisted alongside the build artifacts so
+# a single-orchestration program can be reconstructed (``from_dir``) without the
+# live IR -- the L2 counterpart of ``distributed_meta.json``. Bump
+# ``_COMPILED_META_SCHEMA`` on any incompatible format change.
+#
+# Both sidecars embed the same ``_param_info_to_dict`` payload but version it
+# independently, so a change to *that* shared format must bump this schema AND
+# ``distributed_compiled_program._META_SCHEMA``.
+_COMPILED_META_FILENAME = "compiled_meta.json"
+_COMPILED_META_SCHEMA = 1
+
+# The L3 counterpart, kept here so both names sit next to the marker table below;
+# ``distributed_compiled_program`` re-exports it and owns its schema constant.
+_DISTRIBUTED_META_FILENAME = "distributed_meta.json"
+
+# What a consumer reads to decide which *kind* of build a directory holds:
+#
+#   L2 single-chip -- top-level ``kernel_config.py``   (+ ``compiled_meta.json``)
+#   L3 distributed -- ``orchestration/host_orch.py``   (+ ``distributed_meta.json``)
+#
+# ``replay()`` takes the L3 path exactly when there is no top-level
+# ``kernel_config.py`` *and* ``host_orch.py`` is present (see
+# ``runtime/debug/replay.py``). ``ir.compile`` never clears ``output_dir``, so a
+# marker an earlier compile of the *other* kind left behind does not merely go
+# stale -- it re-points the whole directory at that older build: an L2 leftover
+# makes a fresh L3 build replay as L2, and an L3 leftover keeps
+# ``DistributedCompiledProgram.from_dir`` loadable on top of L2 artifacts. Every
+# fresh compile therefore drops the markers its own kind does not write (see
+# :func:`_drop_foreign_build_markers`).
+_BUILD_KIND_MARKERS = (
+    _COMPILED_META_FILENAME,
+    _DISTRIBUTED_META_FILENAME,
+    "kernel_config.py",
+    "orchestration/host_orch.py",
+)
 
 # IR DataType -> torch.dtype mapping.
 # Keyed by string because nanobind DataType instances are not singletons,
@@ -185,13 +222,206 @@ def _param_info_to_dict(info: _ParamInfo) -> dict[str, Any]:
 
 
 def _param_info_from_dict(d: dict[str, Any]) -> _ParamInfo:
-    """Reconstruct a :class:`_ParamInfo` from :func:`_param_info_to_dict` output."""
+    """Reconstruct a :class:`_ParamInfo` from :func:`_param_info_to_dict` output.
+
+    Every field is validated here rather than trusted: the sidecars this parses
+    live in a user-supplied build directory, so a hand-edited or version-skewed
+    value must fail at load time with an actionable :class:`ValueError` instead
+    of surfacing much later as an unrelated ``TypeError`` from output
+    allocation or shape handling.
+
+    Raises:
+        KeyError: A required field is absent.
+        ValueError: A field is present but not a valid value for its slot.
+    """
+    name = d["name"]
+    if not isinstance(name, str):
+        raise ValueError(f"'name' must be a string, got {name!r}")
+
+    # Strict enum-member lookup, not getattr(): ``getattr(ParamDirection, "mro")``
+    # resolves to a bound method and would sail through as a bogus direction.
+    raw_direction = d["direction"]
+    direction = ParamDirection.__members__.get(raw_direction) if isinstance(raw_direction, str) else None
+    if direction is None:
+        raise ValueError(
+            f"'direction' must be one of {sorted(ParamDirection.__members__)}, got {raw_direction!r}"
+        )
+
+    # ``bool`` is an ``int`` subclass; a JSON ``true`` is never a dimension.
+    shape = d["shape"]
+    if shape is not None:
+        is_dim_list = isinstance(shape, list) and all(
+            isinstance(dim, int) and not isinstance(dim, bool) for dim in shape
+        )
+        if not is_dim_list:
+            raise ValueError(f"'shape' must be null or a list of ints, got {shape!r}")
+
+    raw_dtype = d["dtype"]
+    if not isinstance(raw_dtype, str):
+        raise ValueError(f"'dtype' must be a string, got {raw_dtype!r}")
+
     return _ParamInfo(
-        name=d["name"],
-        direction=getattr(ParamDirection, d["direction"]),
-        shape=d["shape"],
-        dtype=_datatype_from_string(d["dtype"]),
+        name=name,
+        direction=direction,
+        shape=shape,
+        dtype=_datatype_from_string(raw_dtype),
     )
+
+
+def _remove_meta(output_dir: Path, filename: str = _COMPILED_META_FILENAME) -> None:
+    """Drop ``<output_dir>/<filename>`` if present.
+
+    ``ir.compile`` never clears ``output_dir`` (``os.makedirs(exist_ok=True)``),
+    so recompiling a *different* program shape into a reused directory can leave
+    a sidecar describing the previous one. Every fresh-compile path that does
+    not overwrite the sidecar must therefore remove it: a stale signature would
+    drive the new artifacts with the old parameter ABI, which
+    :meth:`CompiledProgram.from_dir` has no way to detect.
+
+    Shared with the L3 ``distributed_meta.json``, which carries the same
+    contract; *filename* selects which sidecar to drop.
+    """
+    (output_dir / filename).unlink(missing_ok=True)
+
+
+def _drop_foreign_build_markers(output_dir: Path, keep: Sequence[str]) -> None:
+    """Delete every build-kind marker in *output_dir* that this compile does not write.
+
+    *keep* names the markers the current build owns (see
+    :data:`_BUILD_KIND_MARKERS`); everything else is necessarily a leftover of a
+    compile of a different kind into the same reused directory, and leaving it
+    behind silently redirects consumers to that older build rather than merely
+    aging out:
+
+    - an L2 build's top-level ``kernel_config.py`` makes ``replay()`` treat a
+      later L3 build as single-chip and run the stale L2 artifacts;
+    - an L3 build's ``distributed_meta.json`` / ``host_orch.py`` keep
+      ``DistributedCompiledProgram.from_dir`` (and the L3 replay path) loadable
+      on a directory whose top level is now an L2 build.
+
+    Only markers are removed, never artifact trees: whatever a consumer reaches
+    for afterwards is either this build's or absent, so a stale directory fails
+    loudly instead of running the wrong program.
+    """
+    for marker in _BUILD_KIND_MARKERS:
+        if marker not in keep:
+            (output_dir / marker).unlink(missing_ok=True)
+
+
+def _write_meta_atomically(target: Path, meta: dict[str, Any]) -> None:
+    """Serialise *meta* to *target* via a temp file and :func:`os.replace`.
+
+    Atomic so a reader never observes a half-written sidecar, and so a crash
+    mid-write leaves the previous file intact rather than a truncated one — a
+    truncated sidecar is exactly the input the loaders must otherwise reject.
+    The temp name carries the writing pid, so concurrent compiles into one
+    directory cannot clobber each other's intermediate file.
+
+    Shared by the L2 ``compiled_meta.json`` and L3 ``distributed_meta.json``
+    writers.
+    """
+    tmp = target.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(meta, indent=2))
+    os.replace(tmp, target)
+
+
+def _meta_error(filename: str, meta_path: Path, detail: str) -> ValueError:
+    """Build the shared "this sidecar is not loadable" error.
+
+    One message shape for both sidecars: name the file, say what is wrong, and
+    point at the recompile that regenerates it.
+    """
+    return ValueError(
+        f"Invalid {filename} in {meta_path}: {detail}. The metadata was "
+        f"written by a different pypto version or hand-edited — recompile via "
+        f"ir.compile() to refresh."
+    )
+
+
+def _load_meta(meta_path: Path, *, filename: str, schema: int) -> dict[str, Any]:
+    """Read and fully validate the fields the L2 and L3 sidecars share.
+
+    Every malformed-payload failure surfaces as a single :class:`ValueError`
+    naming *meta_path* and the recompile fix, rather than leaking whichever
+    ``JSONDecodeError`` / ``KeyError`` / ``AttributeError`` / ``TypeError`` the
+    offending field happened to raise. A build directory is user-supplied
+    input, so a hand-edited or truncated sidecar must fail like bad input, not
+    like an internal error.
+
+    Args:
+        meta_path: The sidecar to read.
+        filename: Its bare filename, for error messages.
+        schema: The schema version this build understands. The two sidecars
+            version independently, so each caller passes its own.
+
+    Returns:
+        ``{"param_infos", "num_return_types", "platform", "backend_type"}``
+        already converted to their runtime types, plus ``"raw"`` — the parsed
+        JSON object, so a caller can validate the fields only its own sidecar
+        carries (e.g. the L3 ``distributed_config``).
+
+    Raises:
+        ValueError: the file is not readable as the expected schema.
+    """
+
+    def _bad(detail: str) -> ValueError:
+        return _meta_error(filename, meta_path, detail)
+
+    try:
+        raw_text = meta_path.read_text()
+    except OSError as exc:  # unreadable / vanished / replaced by a directory
+        raise _bad(f"cannot be read ({exc})") from exc
+    except UnicodeDecodeError as exc:  # binary or mis-encoded file
+        raise _bad(f"is not valid UTF-8 text ({exc})") from exc
+    try:
+        meta = json.loads(raw_text)
+    except ValueError as exc:  # JSONDecodeError is a ValueError subclass
+        raise _bad(f"not valid JSON ({exc})") from exc
+    if not isinstance(meta, dict):
+        raise _bad(f"expected a JSON object, got {type(meta).__name__}")
+
+    found_schema = meta.get("schema")
+    if found_schema != schema:
+        raise ValueError(
+            f"Incompatible {filename} schema {found_schema!r} (expected "
+            f"{schema}) in {meta_path}. The metadata was written by a "
+            f"different pypto version — recompile via ir.compile() to refresh."
+        )
+
+    raw_params = meta.get("params")
+    if not isinstance(raw_params, list):
+        raise _bad(f"'params' must be a list, got {type(raw_params).__name__}")
+    param_infos: list[_ParamInfo] = []
+    for i, entry in enumerate(raw_params):
+        if not isinstance(entry, dict):
+            raise _bad(f"params[{i}] must be an object, got {type(entry).__name__}")
+        try:
+            param_infos.append(_param_info_from_dict(entry))
+        except (KeyError, AttributeError, TypeError, ValueError) as exc:
+            raise _bad(f"params[{i}] is malformed ({exc})") from exc
+
+    num_return_types = meta.get("num_return_types", 0)
+    if not isinstance(num_return_types, int) or isinstance(num_return_types, bool) or num_return_types < 0:
+        raise _bad(f"'num_return_types' must be a non-negative integer, got {num_return_types!r}")
+
+    # Strict enum-member lookup, not getattr(): ``getattr(BackendType, "mro")``
+    # resolves to a bound method and would sail through as a bogus backend.
+    raw_backend = meta.get("backend_type", "Ascend910B")
+    backend_type = BackendType.__members__.get(raw_backend) if isinstance(raw_backend, str) else None
+    if backend_type is None:
+        raise _bad(f"'backend_type' must be one of {sorted(BackendType.__members__)}, got {raw_backend!r}")
+
+    platform = meta.get("platform")
+    if platform is not None and not isinstance(platform, str):
+        raise _bad(f"'platform' must be a string or absent, got {type(platform).__name__}")
+
+    return {
+        "param_infos": param_infos,
+        "num_return_types": num_return_types,
+        "platform": platform,
+        "backend_type": backend_type,
+        "raw": meta,
+    }
 
 
 def _extract_func_param_infos(func: Function) -> tuple[list[_ParamInfo], list[int], list[Any]]:
@@ -615,20 +845,29 @@ class CompiledProgram(_RuntimeFacade):
 
     def __init__(
         self,
-        program: Program,
+        program: Program | None,
         output_dir: str,
         *,
         backend_type: BackendType = BackendType.Ascend910B,
         platform: str | None = None,
+        _param_infos: list[_ParamInfo] | None = None,
+        _output_indices: list[int] | None = None,
+        _return_types: list[Any] | None = None,
+        _sub_chip_names: Sequence[str] | None = None,
     ) -> None:
+        # ``program`` is ``None`` on the :meth:`from_dir` reload path: param
+        # metadata is supplied pre-derived via the ``_param_infos`` /
+        # ``_output_indices`` / ``_return_types`` kwargs (read back from
+        # ``compiled_meta.json``), and the runtime artefacts are assembled from
+        # the on-disk ``kernel_config.py`` -- so no live IR is needed.
         self._program = program
         self._output_dir = Path(output_dir).resolve()
         self._backend_type = backend_type
         self._platform = platform or _default_platform(backend_type)
-        # Lazy metadata -- extracted on first call
-        self._param_infos: list[_ParamInfo] | None = None
-        self._output_indices: list[int] | None = None
-        self._return_types: list[Any] | None = None
+        # Lazy metadata -- extracted on first call, or supplied by from_dir()
+        self._param_infos = _param_infos
+        self._output_indices = _output_indices
+        self._return_types = _return_types
 
         # Lazy runtime artefacts -- compiled-and-assembled on first access
         # of chip_callable / runtime_name / runtime_config (or via load()).
@@ -637,34 +876,229 @@ class CompiledProgram(_RuntimeFacade):
         self._runtime_config: dict[str, Any] | None = None
 
         # Multi-orch (L2-only) programs emit each Orchestration as a
-        # self-contained sub-build under ``next_levels/<name>/``. Detect
-        # those sub-dirs eagerly so ``__call__`` can error early and
-        # ``__getitem__`` / ``__getattr__`` can dispatch by orch name.
-        # The marker is ``orchestration/`` (always present after
-        # codegen) rather than ``kernel_config.py`` (only present after
-        # ptoas) so the dispatch surface works for inspection in
-        # ``skip_ptoas=True`` builds — actually calling a sub-callable
-        # without ``kernel_config.py`` fails cleanly inside
-        # ``execute_compiled`` with a ``FileNotFoundError``.
-        #
-        # Skip detection for distributed (L3+) builds: those also lay
-        # out ``next_levels/<chip_task>/`` but expose a single canonical
-        # entry point via ``orchestration/host_orch.py`` and must be
-        # invoked through ``CompiledProgram.__call__`` directly, not
-        # via subscript dispatch.
-        self._sub_chip_dirs: dict[str, Path] = {}
-        has_host_orch = (self._output_dir / "orchestration" / "host_orch.py").is_file()
+        # self-contained sub-build under ``next_levels/<name>/``. Bind those
+        # sub-dirs eagerly so ``__call__`` can error early and ``__getitem__``
+        # / ``__getattr__`` can dispatch by orch name.
+        self._sub_chip_dirs = self._resolve_sub_chip_dirs(_sub_chip_names)
+
+        # Only the fresh-compile path (live IR) writes artifacts: the reload
+        # path must not clobber a user's hand-edited debug/run.py, nor rewrite
+        # the sidecar it just read.
+        if program is not None:
+            if self._sub_chip_dirs:
+                # Multi-orch: the parent has no single canonical signature, but
+                # each next_levels/<name>/ IS a complete single-orch build dir,
+                # so give each one its own sidecar. That makes the per-sub-build
+                # reload the parent's error message points at actually work.
+                # The debug runner stays parent-less for the same reason as
+                # before: one script per sub-build, from its own pipeline.
+                #
+                # This build writes no top-level marker at all, so every one it
+                # finds there -- its own stale parent sidecar included -- belongs
+                # to an earlier compile into this reused directory and would
+                # otherwise keep pointing consumers at that build.
+                _drop_foreign_build_markers(self._output_dir, keep=())
+                self._persist_sub_chip_metadata()
+            else:
+                _drop_foreign_build_markers(
+                    self._output_dir, keep=(_COMPILED_META_FILENAME, "kernel_config.py")
+                )
+                self._persist_metadata()
+                _write_debug_runner(self._output_dir, self._platform, self._get_metadata)
+
+    def _resolve_sub_chip_dirs(self, sub_chip_names: Sequence[str] | None) -> dict[str, Path]:
+        """Bind each L2 orchestration name to its ``next_levels/<name>/`` sub-build.
+
+        *sub_chip_names* is the layout the caller's codegen just emitted --
+        ``ir.compile`` passes
+        :func:`~pypto.backend.pto_backend.multi_chip_orch_names` of the program it
+        compiled, and :meth:`from_dir` passes ``[]`` because a top-level
+        ``compiled_meta.json`` is only ever written for a single-orch build. It is
+        authoritative *including when empty*: an empty list states "this build's one
+        orchestration lives at the top level".
+
+        That declaration is what makes recompiling into a reused ``output_dir``
+        correct. ``ir.compile`` never clears the directory, so a ``next_levels/``
+        left by an earlier multi-orch compile of a *different* program outlives it;
+        deciding the layout by scanning for that directory would classify the new
+        single-orch build as multi-orch, hide its own top-level artifacts behind the
+        stale sub-builds, and delete the sidecar it just wrote. Sub-builds are not
+        touched by a single-chip codegen, so a leftover one keeps its own artifacts
+        *and* its matching sidecar -- stale as a pair, never mismatched.
+
+        ``None`` means the caller declared no layout (a direct construction outside
+        ``ir.compile``), leaving the on-disk scan as the only evidence of where the
+        artifacts were written. The marker is ``orchestration/`` (always present
+        after codegen) rather than ``kernel_config.py`` (only present after ptoas)
+        so the dispatch surface is inspectable in ``skip_ptoas=True`` builds --
+        calling a sub-callable without ``kernel_config.py`` then fails cleanly
+        inside ``execute_compiled`` with a ``FileNotFoundError``. Distributed (L3+)
+        builds are excluded: they also lay out ``next_levels/<chip_task>/`` but
+        expose a single canonical entry point via ``orchestration/host_orch.py`` and
+        must be invoked through :meth:`__call__` directly, not by subscript.
+        """
         next_levels = self._output_dir / "next_levels"
+        if sub_chip_names is not None:
+            return {name: next_levels / name for name in sub_chip_names}
+
+        sub_chip_dirs: dict[str, Path] = {}
+        has_host_orch = (self._output_dir / "orchestration" / "host_orch.py").is_file()
         if next_levels.is_dir() and not has_host_orch:
             for child in sorted(next_levels.iterdir()):
                 if child.is_dir() and (child / "orchestration").is_dir():
-                    self._sub_chip_dirs[child.name] = child
+                    sub_chip_dirs[child.name] = child
+        return sub_chip_dirs
 
-        # Debug runner only makes sense when there's a single canonical entry
-        # point; multi-orch programs have one sub-build (and one debug script)
-        # per orch, emitted by each sub-build's own pipeline.
-        if not self._sub_chip_dirs:
-            _write_debug_runner(self._output_dir, self._platform, self._get_metadata)
+    def _write_meta(
+        self,
+        output_dir: Path,
+        param_infos: list[_ParamInfo],
+        return_types: list[Any],
+    ) -> None:
+        """Write one ``compiled_meta.json`` describing a single orchestration.
+
+        Written atomically (see :func:`_write_meta_atomically`).
+        """
+        meta = {
+            "schema": _COMPILED_META_SCHEMA,
+            "params": [_param_info_to_dict(p) for p in param_infos],
+            "num_return_types": len(return_types),
+            "platform": self._platform,
+            "backend_type": self._backend_type.name,
+        }
+        _write_meta_atomically(output_dir / _COMPILED_META_FILENAME, meta)
+
+    def _persist_metadata(self) -> None:
+        """Write ``<output_dir>/compiled_meta.json`` for :meth:`from_dir`.
+
+        Captures exactly what the dispatch path reads from the IR -- the
+        orchestration param metadata (names, directions, shapes, dtypes) plus
+        the return-type count -- alongside the platform / backend. Runtime
+        artefacts (``chip_callable`` / ``runtime_name`` / ``runtime_config``)
+        need no persistence: ``compile_and_assemble`` already rederives them
+        from the generated ``kernel_config.py``.
+
+        Best-effort: a program without a resolvable orchestration signature
+        emits nothing (mirrors :func:`_write_debug_runner`) *and* deletes any
+        sidecar a previous compile into this directory left behind, so
+        :meth:`from_dir` reports the missing file with a recompile hint instead
+        of handing out a signature that no longer describes these artifacts.
+        """
+        try:
+            param_infos, _, return_types = self._get_metadata()
+        except (ValueError, TypeError):
+            _remove_meta(self._output_dir)
+            return
+        self._write_meta(self._output_dir, param_infos, return_types)
+
+    def _persist_sub_chip_metadata(self) -> None:
+        """Write one sidecar per ``next_levels/<name>/`` sub-build.
+
+        Each sub-build is dispatched on its own (``compiled[<name>]``, or a
+        direct ``CompiledProgram.from_dir(next_levels/<name>)``), so each needs
+        the signature of *its* orchestration rather than the parent's. Only the
+        sub-builds this compile emitted are visited (see
+        :meth:`_resolve_sub_chip_dirs`), which is what keeps every sidecar
+        describing the artifacts sitting next to it.
+
+        Same best-effort contract as :meth:`_persist_metadata`: a sub-build the
+        IR carries no matching function for, or whose signature cannot be
+        extracted, emits no sidecar and drops whatever an earlier compile left
+        in that directory, rather than failing the compile.
+        """
+        assert self._program is not None
+        for name, sub_dir in self._sub_chip_dirs.items():
+            func = self._program.get_function(name)
+            if func is None:
+                _remove_meta(sub_dir)
+                continue
+            try:
+                param_infos, _, return_types = _extract_func_param_infos(func)
+            except (ValueError, TypeError):
+                _remove_meta(sub_dir)
+                continue
+            self._write_meta(sub_dir, param_infos, return_types)
+
+    @classmethod
+    def from_dir(
+        cls,
+        output_dir: str | os.PathLike[str],
+        *,
+        platform: str | None = None,
+        backend_type: BackendType | None = None,
+    ) -> "CompiledProgram":
+        """Reconstruct a single-chip program from an existing ``build_output/`` dir.
+
+        Rebuilds param metadata from ``compiled_meta.json`` (written at compile
+        time) so the program is callable **and benchmarkable** without re-running
+        the pypto compile -- the L2 counterpart of
+        :meth:`~pypto.ir.distributed_compiled_program.DistributedCompiledProgram.from_dir`
+        and the basis of the ``runtime_dir`` replay workflow (edit the generated
+        orchestration cpp / ``.pto``, then re-measure)::
+
+            from pypto.ir import CompiledProgram
+            from pypto.runtime import benchmark
+
+            compiled = CompiledProgram.from_dir(work_dir, platform="a2a3")
+            stats = benchmark(compiled, args, rounds=100)
+
+        Args:
+            output_dir: A build directory produced by a prior ``ir.compile`` of a
+                single-orchestration (L2) program. Must contain
+                ``compiled_meta.json``.
+            platform: Override the persisted platform (e.g. swap ``a2a3sim`` ->
+                ``a2a3`` to replay on hardware). ``None`` keeps the persisted
+                value.
+            backend_type: Override the persisted codegen backend. ``None`` keeps
+                the persisted value.
+
+        Returns:
+            A :class:`CompiledProgram` whose ``__call__`` and runtime-artefact
+            accessors behave exactly like the freshly-compiled object.
+            :attr:`program` is ``None`` -- the IR itself is not persisted, so
+            :meth:`validate_ir` still reads the directory's ``passes_dump/``
+            rather than the live program. Always a single-orchestration program:
+            the sidecar is only ever written for one, so a ``next_levels/`` an
+            earlier multi-orch compile left in the same directory is ignored
+            rather than mistaken for this build's dispatch surface.
+
+        Raises:
+            FileNotFoundError: ``compiled_meta.json`` is absent -- the directory
+                predates this feature, is a distributed (L3+) build, or is the
+                *parent* of a multi-orch build (each ``next_levels/<name>/``
+                sub-build carries its own sidecar; reload one of those).
+            ValueError: ``compiled_meta.json`` is unreadable, malformed, or
+                records a ``schema`` version incompatible with this pypto build.
+        """
+        meta_path = Path(output_dir).resolve() / _COMPILED_META_FILENAME
+        if not meta_path.exists():
+            raise FileNotFoundError(
+                f"{meta_path} not found — cannot reconstruct a compiled program from this "
+                f"directory. It predates the single-chip replay feature, is a distributed "
+                f"(L3+) build (use DistributedCompiledProgram.from_dir), or is the parent of "
+                f"a multi-orch build (each next_levels/<name>/ sub-build has its own sidecar "
+                f"— reload one of those). Recompile via ir.compile() to refresh."
+            )
+        meta = _load_meta(meta_path, filename=_COMPILED_META_FILENAME, schema=_COMPILED_META_SCHEMA)
+        param_infos = meta["param_infos"]
+        output_indices = [i for i, p in enumerate(param_infos) if p.direction == ParamDirection.Out]
+        # ``return_types`` contents are never inspected at runtime — only the
+        # count matters (has_return = len(...) > 0), so placeholders suffice.
+        return_types: list[Any] = [None] * meta["num_return_types"]
+        bt = backend_type or meta["backend_type"]
+        # A top-level sidecar is written only for a single-orch build, so it
+        # settles the layout: dispatch through this object, not through a
+        # ``next_levels/`` an earlier multi-orch compile may have left here.
+        return cls(
+            None,
+            str(output_dir),
+            backend_type=bt,
+            platform=platform or meta.get("platform"),
+            _param_infos=param_infos,
+            _output_indices=output_indices,
+            _return_types=return_types,
+            _sub_chip_names=[],
+        )
 
     # --- Properties -----------------------------------------------------------
 
@@ -674,8 +1108,12 @@ class CompiledProgram(_RuntimeFacade):
         return self._output_dir
 
     @property
-    def program(self) -> Program:
-        """The original IR Program (pre-optimization passes)."""
+    def program(self) -> Program | None:
+        """The original IR Program (pre-optimization passes).
+
+        ``None`` for a program reconstructed via :meth:`from_dir` -- the IR is
+        not persisted alongside the build artifacts.
+        """
         return self._program
 
     @property
@@ -849,6 +1287,13 @@ class CompiledProgram(_RuntimeFacade):
     def _get_metadata(self) -> tuple[list[_ParamInfo], list[int], list[Any]]:
         """Return (param_infos, output_indices, return_types), extracting on first call."""
         if self._param_infos is None:
+            if self._program is None:
+                # Reload path with no pre-filled metadata — should not happen
+                # (``from_dir`` always supplies it); guard rather than deref None.
+                raise RuntimeError(
+                    "CompiledProgram has neither live IR nor persisted param metadata; "
+                    "reconstruct via CompiledProgram.from_dir()."
+                )
             self._param_infos, self._output_indices, self._return_types = _extract_param_infos(self._program)
         return self._param_infos, self._output_indices, self._return_types  # type: ignore[return-value]
 
@@ -885,6 +1330,12 @@ class CompiledProgram(_RuntimeFacade):
             raise KeyError(
                 f"No orchestration {name!r} under {self._output_dir / 'next_levels'}. "
                 f"Available: {sorted(self._sub_chip_dirs)}"
+            )
+        if self._program is None:
+            raise RuntimeError(
+                f"Multi-orch dispatch needs live IR; this CompiledProgram for {self._output_dir} "
+                f"has none. Reload next_levels/{name}/ directly via CompiledProgram.from_dir(), "
+                f"or recompile via ir.compile()."
             )
         func = self._program.get_function(name)
         if func is None:

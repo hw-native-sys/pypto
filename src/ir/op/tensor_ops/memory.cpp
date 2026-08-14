@@ -208,6 +208,9 @@ TypePtr DeduceTensorSliceType(const std::vector<ExprPtr>& args,
   // against the full pre-reduction shape (each must be a static unit dim).
   const ExprPtr drop_dims_arg = args.size() == 5 ? args[4] : nullptr;
   const std::vector<int64_t> drop_dims = ParseSliceDropDims(drop_dims_arg, full_shape, "tensor.slice");
+  CHECK_SPAN(drop_dims.size() < full_shape.size(), args[0]->span_)
+      << "tensor.slice drop_dims cannot erase every dimension; keep one unit axis or use tensor.read "
+         "for a scalar result";
   const std::vector<ExprPtr> new_shape = ApplyDropDims(full_shape, drop_dims);
 
   // Optional pad_value kwarg. Absent means "not overridden": the source's pad
@@ -246,28 +249,9 @@ TypePtr DeduceTensorSliceType(const std::vector<ExprPtr>& args,
   // OptimizeOrchTensors materializes as strides (e.g. a 2D window over a 3D
   // parent); that form is not a plain rectangle, so it keeps the validity it was
   // given rather than being intersected against the wrong axes.
-  std::vector<ExprPtr> full_valid;
-  if (full_shape.size() == tensor_type->shape_.size() && offsets.size() == full_shape.size()) {
-    full_valid = InferWindowReadValidShape({
-        /*source_physical=*/tensor_type->shape_,
-        /*source_valid=*/GetEffectiveTensorValidShape(*tensor_type),
-        /*offsets=*/offsets,
-        /*window=*/full_shape,
-        /*requested_valid=*/requested_valid,
-        /*kind=*/WindowReadKind::kClampedWindow,
-        /*clamp=*/GetKwargOr<bool>(kwargs, "clamp", false),
-        /*op_name=*/"tensor.slice",
-        /*bounds_remedy=*/
-        "Pass clamp=True -- pl.slice(x, shape, offset, clamp=True) -- to narrow the valid region to "
-        "the source edge instead",
-        /*span=*/args[0]->span_,
-    });
-  } else {
-    CHECK_SPAN(requested_valid.empty() || requested_valid.size() == full_shape.size(), args[0]->span_)
-        << "tensor.slice requires valid_shape to have the same rank as shape, but got valid_shape rank "
-        << requested_valid.size() << " and shape rank " << full_shape.size();
-    full_valid = requested_valid.empty() ? full_shape : requested_valid;
-  }
+  const std::vector<ExprPtr> full_valid =
+      InferTensorSliceFullValidShape(*tensor_type, full_shape, offsets, requested_valid,
+                                     GetKwargOr<bool>(kwargs, "clamp", false), args[0]->span_);
   ValidateDropDimsValidExtents(drop_dims, full_valid, "tensor.slice", args[0]->span_);
   const std::vector<ExprPtr> valid_shape = ApplyDropDims(full_valid, drop_dims);
 
