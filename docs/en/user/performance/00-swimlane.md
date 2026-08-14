@@ -64,8 +64,11 @@ and an onboard run when the timing itself is the question.
 ### The IDE plugin
 
 [PyPTO Toolkit](https://github.com/hw-native-sys/pypto-tools) is a VS Code extension that
-renders these files directly. Right-click the swimlane JSON in the explorer and choose
-**`PyPTO Toolkit: 打开文件`**.
+renders these files directly. Right-click the swimlane JSON in the explorer and choose the
+extension's **open-file** action.
+
+> The extension's menus and panels are localised in Chinese; the labels quoted below in
+> English are the actions, not the literal strings you will see.
 
 What you get, depending on the collection level:
 
@@ -78,14 +81,14 @@ What you get, depending on the collection level:
 The parts worth knowing on day one:
 
 - **Click a task** for its detail panel. With a sibling `deps.json` in the same directory,
-  the tasks it depends on are drawn in too; the *任务连线层级* setting bounds how many
-  levels of dependency are drawn at once.
+  the tasks it depends on are drawn in too; a dependency-depth setting bounds how many
+  levels are drawn at once.
 - **Selecting an SPMD task highlights all of its blocks**, since they share one
   `func_name` and `task_id`. On a dependency path only the first is drawn, so the view is
   not buried under edges.
 - **Search** by `func_name` or `task_id` in the search box.
-- **性能统计** (top right) opens a report; clicking an entry jumps to that task on the
-  timeline.
+- **The performance report** (top right) lists the findings; clicking an entry jumps to
+  that task on the timeline.
 - **Observation lines** — click on the second axis to drop a timestamped ruler, and
   ALT+drag to measure a span by hand.
 - The same extension opens a `passes_dump` folder as an **IR trace**, filtered to the
