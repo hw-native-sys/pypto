@@ -1593,6 +1593,22 @@ class TestGenerateKernelWrapper:
         assert "#include <pto/pto-inst.hpp>" in wrapper
         assert '#include "tensor.h"' in wrapper
 
+    def test_clears_atomic_mode_before_argument_unpacking(self):
+        func = _make_func("my_kernel", [("a", "tensor"), ("s", "scalar"), ("out", "tensor")])
+        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
+        entry = wrapper[wrapper.index("void kernel_entry(__gm__ int64_t* args)") :]
+
+        assert "AscendC::" not in wrapper
+        assert "kernel_operator_common_intf.h" not in wrapper
+        assert entry.count("set_atomic_none();") == 1
+        assert (
+            "#if !defined(__CPU_SIM) && !defined(__COSTMODEL)\n"
+            "    // Reset AI Core atomic mode inherited from a prior kernel.\n"
+            "    set_atomic_none();\n"
+            "#endif"
+        ) in entry
+        assert entry.index("set_atomic_none();") < entry.index("// Unpack tensor: a")
+
     def test_contains_forward_call(self):
         func = _make_func("my_kernel", [("a", "tensor"), ("s", "scalar"), ("out", "tensor")])
         wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
@@ -1648,7 +1664,7 @@ class TestGenerateKernelWrapper:
 
         wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
         assert "PYPTO_FIXED_SUBBLOCK_ID" not in wrapper
-        assert wrapper.count("#if !defined(__CPU_SIM)") == 2
+        assert wrapper.count("#if !defined(__CPU_SIM)\n") == 2
         assert '#if !defined(__CPU_SIM)\n#include "intrinsic.h"' in wrapper
         assert "[[block_local]] static int32_t pypto_runtime_subblock_id;" in wrapper
         assert '#include "intrinsic.h"' in wrapper

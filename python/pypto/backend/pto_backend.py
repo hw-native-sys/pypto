@@ -803,6 +803,10 @@ def _generate_kernel_wrapper(
         'extern "C" __aicore__ __attribute__((always_inline)) '
         "void kernel_entry(__gm__ int64_t* args)\n"
         "{\n"
+        "#if !defined(__CPU_SIM) && !defined(__COSTMODEL)\n"
+        "    // Reset AI Core atomic mode inherited from a prior kernel.\n"
+        "    set_atomic_none();\n"
+        "#endif\n\n"
         f"{runtime_subblock_setup}"
         f"{spmd_args_setup}"
         f"{subblock_arg_setup}"
