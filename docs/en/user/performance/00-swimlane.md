@@ -38,7 +38,7 @@ Both land under the run's output directory:
 
 ```text
 <work_dir>/dfx_outputs/
-  l2_swimlane_records.json     per-task start / end / dispatch / finish
+  l2_swimlane_records.json     per-task start / end (dispatch / finish need level 2)
   deps.json                    task dependency edges
   merged_swimlane_*.json       onboard only — the joined trace
 ```
@@ -46,6 +46,27 @@ Both land under the run's output directory:
 `deps.json` is the reason for the second flag: successor edges are deliberately **not**
 recorded in the swimlane record itself, to keep the device hot path clean. The join happens
 afterwards, on the host.
+
+### Collection is levelled, and `RunConfig` requests the lowest level
+
+The runtime collects at one of four levels, each adding to the one below:
+
+| Level | Adds |
+| ----- | ---- |
+| 1 `AICORE_TIMING` | AICore per-task start / end |
+| 2 `AICPU_TIMING` | + AICPU-stamped dispatch / finish |
+| 3 `SCHED_PHASES` | + scheduler main-loop phase records |
+| 4 `ORCH_PHASES` | + orchestrator phase records |
+
+Each level is a real guard in the collectors, not a verbosity setting: at level 1 the
+dispatch and finish timestamps are **never stamped**, so no post-processing can recover
+them.
+
+> **`RunConfig.enable_l2_swimlane` is a `bool`, and `True` requests level 1.** The runtime's
+> own harness flag takes a level and defaults a bare `--enable-l2-swimlane` to **4**, so the
+> same-named switch means "everything" there and "AICore timing only" from PyPTO. Levels
+> 2–4 are currently not reachable through `RunConfig`; for those, drive the run from the
+> runtime harness. Anything below that needs the dispatch gap or a scheduler lane says so.
 
 ### Two things that will mislead you if you do not know them
 
@@ -72,11 +93,11 @@ extension's **open-file** action.
 
 What you get, depending on the collection level:
 
-| View | Shows |
-| ---- | ----- |
-| Worker View | Per-core task bars — the main picture |
-| Scheduler View | The scheduler's own timeline |
-| AICPU Scheduler / AICPU Orchestrator | Per-iteration scheduler phase breakdown |
+| View | Shows | Needs level |
+| ---- | ----- | ----------- |
+| Worker View | Per-core task bars — the main picture | 1 |
+| Scheduler View | The scheduler's own timeline | 3 |
+| AICPU Scheduler / AICPU Orchestrator | Per-iteration scheduler phase breakdown | 3 / 4 |
 
 The parts worth knowing on day one:
 
@@ -119,10 +140,15 @@ dispatch ──────► start ──────► end ─────�
    │               │             │            │
    AICPU wrote     core began    kernel       AICPU observed
    the descriptor  the kernel    done         completion
+   └── level 2 ──┘ └──── level 1 ────┘ └── level 2 ──┘
 
 [dispatch, start]  = pickup latency (~0.8 µs per switch)
 [start, end]       = the kernel — the only span page 04 can shrink
 ```
+
+Level 1 — what `RunConfig` gives you — carries `start` and `end`. That is enough to read bar
+widths and the gaps *between* bars, which is what the rest of this chapter asks of it. The
+`[dispatch, start]` split needs level 2.
 
 **Read the gaps, not the bars.** A chip whose bars are narrow and whose gaps are wide is
 not a kernel problem; it is a granularity or dispatch problem, and pages
@@ -138,6 +164,9 @@ work the scheduler had not placed yet?*
 python -m simpler_setup.tools.sched_overhead_analysis \
     --l2-swimlane-records-json <records>.json --deps-json <deps>.json
 ```
+
+This one needs a **level ≥ 3** capture for its scheduler-loop parts, so drive that run from
+the runtime harness rather than `RunConfig`.
 
 It reports per-engine and system-wide overhead as a share of the makespan, the pickup-cost
 distribution, the AICPU scheduler-loop budget, and a critical-path attribution splitting

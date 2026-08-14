@@ -36,12 +36,27 @@ cfg = RunConfig(
 
 ```text
 <work_dir>/dfx_outputs/
-  l2_swimlane_records.json     逐任务 start / end / dispatch / finish
+  l2_swimlane_records.json     逐任务 start / end（dispatch / finish 需等级 2）
   deps.json                    任务依赖边
   merged_swimlane_*.json       仅上板 —— join 之后的 trace
 ```
 
 第二个开关的意义在于：后继边被**刻意不**记录进泳道图记录本身，以保持设备侧热路径干净。join 是事后在 host 上做的。
+
+### 采集是分级的，而 `RunConfig` 请求的是最低那一级
+
+运行时按四个等级采集，每一级在下一级之上追加：
+
+| 等级 | 追加 |
+| ---- | ---- |
+| 1 `AICORE_TIMING` | AICore 逐任务 start / end |
+| 2 `AICPU_TIMING` | + AICPU 打点的 dispatch / finish |
+| 3 `SCHED_PHASES` | + 调度器主循环阶段记录 |
+| 4 `ORCH_PHASES` | + 编排器阶段记录 |
+
+每一级在采集器里都是实打实的门禁，不是啰嗦程度设置：等级 1 下 dispatch 与 finish 时间戳**根本不会被打**，任何后处理都恢复不出来。
+
+> **`RunConfig.enable_l2_swimlane` 是 `bool`，`True` 请求的是等级 1。** 运行时自己的 harness 开关接受等级，且裸写 `--enable-l2-swimlane` 默认为 **4** —— 于是同名开关在那边意味着「全都要」，从 PyPTO 过去却只是「只要 AICore 计时」。等级 2–4 目前经由 `RunConfig` 拿不到；要用它们就从运行时 harness 驱动这次运行。下文凡是需要 dispatch 间隙或调度器泳道的地方都会注明。
 
 ### 不知道就会被误导的两件事
 
@@ -57,11 +72,11 @@ cfg = RunConfig(
 
 视图数量取决于采集等级：
 
-| 视图 | 显示 |
-| ---- | ---- |
-| Worker View | 逐核任务条 —— 主画面 |
-| Scheduler View | 调度器自身的时间线 |
-| AICPU Scheduler / AICPU Orchestrator | 逐迭代的调度器阶段拆解 |
+| 视图 | 显示 | 需要等级 |
+| ---- | ---- | -------- |
+| Worker View | 逐核任务条 —— 主画面 | 1 |
+| Scheduler View | 调度器自身的时间线 | 3 |
+| AICPU Scheduler / AICPU Orchestrator | 逐迭代的调度器阶段拆解 | 3 / 4 |
 
 第一天就值得知道的几件事：
 
@@ -92,10 +107,13 @@ dispatch ──────► start ──────► end ─────�
    │               │             │            │
    AICPU 写下      核开始跑      kernel       AICPU 观察到
    描述符          kernel        跑完         完成
+   └── 等级 2 ──┘ └──── 等级 1 ────┘ └── 等级 2 ──┘
 
 [dispatch, start]  = 取件延迟（每次切换约 0.8 µs）
 [start, end]       = kernel 本身 —— 04 页唯一能压缩的那一段
 ```
+
+等级 1 —— 也就是 `RunConfig` 给你的那一级 —— 带的是 `start` 与 `end`。这足够读条宽以及条**之间**的间隙，而本章其余部分对它的要求正是这些。要拆出 `[dispatch, start]` 才需要等级 2。
 
 **读间隙，不是读条。** 条窄、隙宽的芯片不是 kernel 问题，而是粒度或派发问题，该去 [01](01-task-granularity.md) 与 [02](02-runtime-overhead.md) 两页。
 
@@ -109,6 +127,8 @@ python -m simpler_setup.tools.sched_overhead_analysis \
 ```
 
 它给出逐引擎与全系统的开销占 makespan 的比例、取件代价分布、AICPU 调度循环预算，以及把关键路径拆成「计算」与「调度器注入」两部分的归因。同样这些数字可以用 `swimlane_converter --overhead` 叠加成时间线上的 counter 轨。
+
+它的调度循环部分需要**等级 ≥ 3** 的采集，所以那次运行要从运行时 harness 驱动，而不是 `RunConfig`。
 
 那份报告里有两个定义值得记住，因为它们把真问题和假问题分开了：
 
