@@ -340,9 +340,15 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
       if (RegionBodyHasExplicitBoundary(reg->body_)) {
         ValidateMixedExplicitRegion(region_stmts, reg->span_);
         ValidateTransposeSplitHazard(region_stmts, rdim, reg->span_);
-        // Unchanged apart from the placement stamp: the body is already
-        // half-width, but it is still region-placed, so pass 21 must be told.
-        for (auto& s : StampRegionPlacement(region_stmts)) result.push_back(s);
+        // The body is already half-width, but the boundary op's split-axis valid
+        // extent is still the deducer's lane-agnostic ceil-div guess. This region
+        // is where it can be repaired: the author's own aiv_id is in scope, so
+        // the lane's true extent is materializable (see
+        // split_axis::LocalizeExplicitBoundaryValid). A fully-valid split axis is
+        // returned untouched, so the common case is a no-op walk.
+        auto localized = split_axis::LocalizeExplicitBoundaryValid(region_stmts, rdim, reg->span_);
+        // Still region-placed, so pass 21 must be told.
+        for (auto& s : StampRegionPlacement(localized)) result.push_back(s);
         continue;
       }
 
@@ -398,7 +404,14 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
           // is also the C->V move's destination. Going through Create is what keeps
           // this AUTO path's IR identical to the explicit pl.aiv_shard form lowered
           // by ConvertTensorToTileOps: both get the space from the same declaration.
-          auto half_type = shard->GetType();
+          // The deducer can only ceil-halve the split-axis valid extent, because an
+          // op's type function does not know the lane. Here subblock_idx IS in
+          // scope, so give the result the lane's true extent — the same repair
+          // the explicit-region arm applies through
+          // LocalizeExplicitBoundaryValid. A fully-valid split axis is returned
+          // unchanged, so the common case keeps the deducer's exact type.
+          auto half_type = split_axis::LocalizeShardValidForLane(shard->GetType(), call->args_[0]->GetType(),
+                                                                 split_dim, subblock_idx);
           auto new_var = std::make_shared<Var>(assign->var_->name_hint_, half_type, assign->var_->span_);
           auto shard_typed =
               std::make_shared<Call>(shard->op_, shard->args_, shard->kwargs_, half_type, shard->span_);

@@ -315,6 +315,50 @@ as an internal assertion in PTO codegen (`SplitAivScopeStmt reached PTO codegen`
 (`split_axis_utils`); it is **not** called for `None` (the region path branches on
 `None` first — there is no axis to derive).
 
+## Partially-valid operands across the boundary
+
+A crossing value whose `valid_shape` is short of its physical box is a kernel's
+ragged tail. The Cube→Vector FIFO pins the transported **column** extent to the
+physical one and leaves the **row** extent free (derivation and ISA references:
+[PTO codegen](../codegen/00-pto_codegen.md)). A narrowing on the *split axis* is
+what makes an extent per-lane — lane `L` holds `clamp(V - L*half, 0, half)` — so
+which mode is ragged decides which field has to carry it:
+
+The table is the **shard's** (Cube→Vector) contract; `aic_gather` follows the
+geometric rule at the end of this section instead.
+
+| Ragged axis | Mode | Extent is | Carrier | Status |
+| ----------- | ---- | --------- | ------- | ------ |
+| rows (split axis) | `UpDown` | per-lane | TPOP `valid_row` operand (free field) | **supported** |
+| cols (non-split) | `UpDown` | shared, static | full-box transport + static `pto.treshape` | supported |
+| rows (non-split) | `LeftRight` | shared, static | TPOP `valid_row` operand | supported |
+| cols (split axis) | `LeftRight` | per-lane | none | **rejected** |
+| cols, runtime-valued | either | shared, dynamic | none (`treshape` takes no operands) | **rejected** |
+| rows per-lane **and** cols narrowed | `UpDown` | both | none (`treshape` rewrites both axes) | **rejected** |
+
+`ReshapeSplitAxis` can only ceil-halve the split-axis extent (the lane index is
+not part of an op's type function). `LocalizeExplicitBoundaryValid` repairs that
+guess here, where the region's `aiv_id` is in scope, and carries the per-lane
+extent to consumers that pass `valid_shape` through; one that reshapes the
+logical rectangle is rejected with its span. The AUTO arm applies the same *extent* repair through
+`LocalizeShardValidForLane`, but not the store guard below — its consumers are
+rebuilt by the halving walk rather than by this one.
+
+- **An empty lane's store is guarded.** A lane the ragged extent does not reach
+  has extent `0`, and a zero-row `TSTORE` is outside pto-isa's contract
+  (`TSTORE_IMPL` asserts `GetValidRow() > 0`). The store gets a runtime
+  `extent > 0` guard; `tpop` and `tfree` stay **unconditional** — both lanes
+  occupy a slot and both must release it.
+- **The gather is limited by geometry, not the DMA.** A V2C pop lands in an NZ
+  Mat tile (`TLoadGm2L1Nd2nz`), which reads no valid extent at all. What limits
+  `aic_gather` is placement: lane `l` sits at offset `l*half`, so the joined data
+  `[0, v0) ∪ [half, half + v1)` is a rectangle only when the bands abut. That
+  rule is enforced **in this pass**, not in the deducer, which runs before the
+  per-lane extents exist and could only judge the join on its own ceil-div guess.
+  A gather fed by a localized shard is typed exactly — the bands always abut, so
+  the joined extent is the pre-shard `V` — and only a partial that both lanes
+  share is rejected.
+
 ## Algorithm
 
 `LowerFunction` rewrites one mixed `InCore` function:

@@ -283,6 +283,44 @@ attrs，因此 [`ExpandMixedKernel`](21-expand_mixed_kernel.md) 凭该标记跳�
 `SplitDimension(mode)` 对 `UpDown` 返回 `0`，对 `LeftRight` 返回 `1`
 （`split_axis_utils`）；对 `None` **不调用**（区域路径先对 `None` 分支——无轴可推导）。
 
+## 跨边界的部分有效（partially-valid）操作数
+
+`valid_shape` 不足物理 box 的跨界值，正是 kernel 的 ragged 尾部。Cube→Vector FIFO
+把传输的**列** extent 钉死为物理值，而**行** extent 是自由的（推导与 ISA 依据见
+[PTO codegen](../codegen/00-pto_codegen.md)）。**切分轴**上的收窄会让 extent 变成逐
+lane 的——lane `L` 持有 `clamp(V - L*half, 0, half)`——因此哪种模式 ragged，就决定了
+由哪个字段来承载：
+
+下表是 **shard**（Cube→Vector）的契约；`aic_gather` 遵循本节末尾的几何规则。
+
+| 收窄的轴 | 模式 | extent 性质 | 载体 | 状态 |
+| -------- | ---- | ----------- | ---- | ---- |
+| 行（切分轴） | `UpDown` | 逐 lane | TPOP `valid_row` 操作数（自由字段） | **支持** |
+| 列（非切分轴） | `UpDown` | 两 lane 相同、静态 | 整 box 传输 + 静态 `pto.treshape` | 支持 |
+| 行（非切分轴） | `LeftRight` | 两 lane 相同、静态 | TPOP `valid_row` 操作数 | 支持 |
+| 列（切分轴） | `LeftRight` | 逐 lane | 无 | **拒绝** |
+| 列为运行期值 | 任意 | 两 lane 相同、动态 | 无（`treshape` 不带操作数） | **拒绝** |
+| 行逐 lane **且**列收窄 | `UpDown` | 两者 | 无（`treshape` 会同时重写两个轴） | **拒绝** |
+
+`ReshapeSplitAxis` 只能对切分轴做 ceil 折半，因为 lane 索引不属于 op 的类型函数。
+`LocalizeExplicitBoundaryValid` 在本 pass 修正该猜测——区域自身的
+`aiv_id = tile.get_subblock_idx()` 在作用域内——并把逐 lane extent 传给那些原样透传
+`valid_shape` 的消费者；若消费者会改变逻辑矩形（reduction、slice），则连同 span 一并
+报错。AUTO 分支通过 `LocalizeShardValidForLane` 施加同样的 *extent* 修正，但不含下面的
+store 保护——它的消费者由折半遍历重建，而非本遍历。
+
+- **空 lane 的 store 被保护。** ragged extent 覆盖不到的 lane，其 extent 为 `0`，而
+  零行 `TSTORE` 超出 pto-isa 契约（`TSTORE_IMPL` 断言 `GetValidRow() > 0`）。store
+  被加上运行时 `extent > 0` 判断；`tpop` 与 `tfree` 保持**无条件**——两个 lane 都占用
+  槽位且都必须释放。
+- **gather 的限制源自几何而非 DMA。** V2C 的 pop 落到 NZ Mat tile
+  （`TLoadGm2L1Nd2nz`），不读取任何 valid extent。真正限制 `aic_gather` 的是摆放：
+  lane `l` 位于偏移 `l*half`，拼合后的数据是 `[0, v0) ∪ [half, half + v1)`——只有两段
+  相邻时才是矩形。该规则在**本 pass** 而非类型推导中执行：推导发生在逐 lane extent 存在
+  之前，只能依据自己的 ceil 猜测来判断。由 localized shard 供给的 gather 会被精确定型
+  ——两段必然相邻，拼合 extent 即 shard 前的 `V`——只有两个 lane 共享的部分 extent 才会
+  被拒绝。
+
 ## 算法
 
 `LowerFunction` 改写一个混合 `InCore` 函数：

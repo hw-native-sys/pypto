@@ -159,6 +159,52 @@ def test_c2v_boundary_becomes_aiv_shard_and_vector_region_is_halved():
     ir.assert_structural_equal(_lower(Before), Expected)
 
 
+def test_auto_c2v_boundary_localizes_a_ragged_split_axis():
+    """A ragged split axis gets the LANE's extent on the AUTO path too.
+
+    ``ReshapeSplitAxis`` can only ceil-halve the split-axis valid extent, because
+    an op's type function does not know the lane. Here ``subblock_idx`` is in
+    scope, so ``LocalizeShardValidForLane`` replaces that guess with the truth —
+    lane 0 holds 100 of its 64-row half (clamped to 64), lane 1 holds 36 —
+    instead of giving BOTH lanes ``ceil(100 / 2) = 50``.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            qk: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat, pl.TileView(valid_shape=[100, 128])],
+            out_0: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            popped = pl.tile.move(qk, target_memory=pl.Mem.Vec)
+            out_store = pl.tile.store(popped, [0, 0], out_0)
+            return out_store
+
+    @pl.program
+    class Expected:
+        @pl.function(
+            type=pl.FunctionType.InCore,
+            attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": True},
+        )
+        def split_auto(
+            qk: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat, pl.TileView(valid_shape=[100, 128])],
+            out_0: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            subblock_idx = pl.tile.get_subblock_idx()
+            popped: pl.Tile[
+                [64, 128],
+                pl.FP32,
+                pl.Mem.Vec,
+                pl.TileView(
+                    valid_shape=[pl.min(pl.max(100, subblock_idx * 64) - subblock_idx * 64, 64), 128]
+                ),
+            ] = pl.tile.aiv_shard(qk, split=1)
+            out_store = pl.tile.store(popped, [0 + subblock_idx * 64, 0], out_0)
+            return out_store
+
+    ir.assert_structural_equal(_lower(Before), Expected)
+
+
 def test_store_offset_at_nonzero_base_localizes_additively():
     """AdjustOffsets ADDS ``subblock_idx * half`` on the split axis rather than
     overwriting the offset: a store at base row 16 becomes ``16 + subblock_idx * 64``.

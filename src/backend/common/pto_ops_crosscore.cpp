@@ -263,10 +263,21 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
   std::string result_type = codegen.GetCurrentResultTileBufTypeString();
   auto [logical_row, logical_col] = codegen.GetCurrentResultTpopValidShapeOperands();
 
-  // PTO's no-split Cube->Vector FIFO copies the physical Acc box. Give TPOP
-  // that same full-box extent, then restore the logical result shape before
-  // any vector consumer sees it. Keep a statically empty replay empty: the
-  // dual-AIV no-split path uses such a replay only to balance the pipe.
+  // PTO's Cube->Vector FIFO copies the physical consumer box, at EVERY split.
+  // pto-isa builds the GM slot view from the popped tile's compile-time
+  // rows/cols and the producer's box row pitch (a2a3 TPush.hpp
+  // popVecTileFromGMFiFo: gmValidR/gmValidC = ConsM/ConsN, gmStrideR = ProdN),
+  // then strides that view with the tile's RUNTIME validCol (TLoadGm2ubNd2nd:
+  // lenBurst = validCol, but gmGap = gStride3 - gShape4). A narrowed validCol
+  // therefore collapses the GM gap to zero and the pop reads one contiguous
+  // run instead of one box row per burst -- silently, since the matching
+  // PTO_ASSERT(validCol == gShape4) is compiled out in release builds. Give
+  // TPOP the full-box extent, mirroring the producer-side widening in
+  // EmitTpushTransportValidShape, then restore the logical result shape before
+  // any vector consumer sees it. Keep a statically empty pop empty: the
+  // dual-AIV no-split path uses such a replay only to balance the pipe, and a
+  // split lane whose localized valid extent is statically 0 must likewise
+  // move nothing.
   auto result_tile_type = codegen.GetCurrentResultTileType();
   bool statically_empty = false;
   bool has_static_logical_shape = false;
@@ -281,10 +292,16 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
       }
     }
   }
-  const bool use_full_box = std::string_view(target) == "aic" && split == 0 && !logical_row.empty() &&
-                            !logical_col.empty() && has_static_logical_shape && !statically_empty &&
-                            result_tile_type && result_tile_type->GetMemorySpace() == ir::MemorySpace::Vec &&
-                            result_tile_type->shape_.size() >= 2;
+  // The physical box must be static too, not just the logical extent: the
+  // treshape below rebuilds the logical type from ConstInt dims, and a split
+  // tile CAN carry a dynamic physical extent (ReshapeSplitAxis lowers a dynamic
+  // split axis to floordiv(dim, 2)). Without this the pop would reach that
+  // INTERNAL_CHECK instead of falling back to the direct-TPOP path.
+  const bool use_full_box =
+      std::string_view(target) == "aic" && !logical_row.empty() && !logical_col.empty() &&
+      has_static_logical_shape && !statically_empty && result_tile_type &&
+      result_tile_type->GetMemorySpace() == ir::MemorySpace::Vec && result_tile_type->shape_.size() >= 2 &&
+      As<ir::ConstInt>(result_tile_type->shape_[0]) && As<ir::ConstInt>(result_tile_type->shape_[1]);
   std::string transport_row = logical_row;
   std::string transport_col = logical_col;
   if (use_full_box) {

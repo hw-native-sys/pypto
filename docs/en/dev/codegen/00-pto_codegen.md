@@ -202,11 +202,18 @@ or call `set_validshape` on the source tile before taking the view.
 - If the pushed tile was allocated with dynamic `valid_row` / `valid_col` operands or updated by
   `tile.set_validshape`, `tpush` emits the same tile handle after its runtime valid shape has been
   updated. For split `tpush`, codegen temporarily uses the full physical transport box, then restores
-  the producer tile's logical valid shape; consumer-side dynamic tpop operands carry the logical
-  extents used by compute and store. A partial no-split Acc-to-Vec transfer also uses the full physical
-  box for both TPUSH and TPOP, because the Cube-to-Vector FIFO is physically box-strided, and restores
-  the logical valid shape immediately on each side of the transport.
-- When a tpop result `TileView.valid_shape` differs from the physical tile shape, PTO codegen emits PTOAS frontend operands as `%buf = pto.tpop_from_*(%valid_row, %valid_col) {[id = I, ]split = N} -> !pto.tile_buf<..., v_row=?, v_col=?, ...>`. This covers dynamic expressions and static non-full shapes such as `[0, 0]`; the operands carry the logical extents used by compute and store.
+  the producer tile's logical valid shape.
+- The Cube-to-Vector FIFO is physically box-strided at **every** split: the ISA builds the GM slot
+  view from the popped tile's compile-time rows/cols and the producer's box row pitch, then strides
+  that view with the tile's *runtime* `valid_col`. A partial valid shape on TPOP therefore collapses
+  the GM row gap and makes the consumer read one contiguous run instead of one box row per burst —
+  silent corruption of the *valid* region, since the ISA's matching assertion is compiled out in
+  release builds. So a partial Acc-to-Vec transfer uses the full physical box for both TPUSH and
+  TPOP, whether the transfer is no-split or `split = 1` / `split = 2`, and restores the logical valid
+  shape immediately on each side of the transport — on the consumer side through a metadata-only
+  `pto.treshape` (a frontend tpop result is not a locally bound PTOAS tile, so `pto.set_validshape`
+  cannot restore it in place).
+- When a tpop result `TileView.valid_shape` differs from the physical tile shape, PTO codegen emits PTOAS frontend operands as `%buf = pto.tpop_from_*(%valid_row, %valid_col) {[id = I, ]split = N} -> !pto.tile_buf<..., v_row=?, v_col=?, ...>`. This covers dynamic expressions and static non-full shapes such as `[0, 0]`; the operands carry the logical extents used by compute and store. The full-box Cube-to-Vector transport above overrides this for a statically-shaped, non-empty partial pop, because `pto.treshape` carries no valid-row/valid-col operands and so can only restore *static* logical extents.
 - For split consumers, `SplitVectorKernel` localizes those dynamic tpop
   valid-shape operands per subblock (for example global `[8, 16]` becomes
   `[8, 16]` then `[0, 16]` under up/down split of a `[16, 16]` tile).

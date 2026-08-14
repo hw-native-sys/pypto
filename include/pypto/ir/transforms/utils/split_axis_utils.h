@@ -19,7 +19,9 @@
 
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
@@ -165,6 +167,60 @@ std::vector<StmtPtr> ProcessStmts(const std::vector<StmtPtr>& stmts, SplitMode m
                                   int split_dim, std::unordered_map<const Var*, TileInfo>& tile_vars,
                                   bool is_aiv, const ExprPtr& subblock_idx,
                                   std::unordered_map<const Var*, VarPtr>& var_replacements);
+
+/**
+ * @brief Give each explicit-boundary ``tile.aiv_shard`` its TRUE per-lane valid
+ *        extent on the split axis, and carry that extent to its consumers.
+ *
+ * ``ReshapeSplitAxis`` (the op deducer) can only halve the split-axis valid
+ * extent with a ceil-div, because the lane index is not part of an op's type
+ * function. When the operand's split-axis extent does not cover its physical
+ * box, that guess is wrong for BOTH lanes: lane L holds
+ * ``clamp(V - L * half, 0, half)``, so a ``[16, 256]`` accumulator valid to 5
+ * rows must give lane 0 five rows and lane 1 none, not ``ceil(5 / 2) = 3`` each.
+ *
+ * A ``pl.split_aiv`` region body is the one place that guess can be repaired:
+ * the region's own ``aiv_id = tile.get_subblock_idx()`` binding is in scope, so
+ * the per-lane extent is materializable as an expression. The extent is then
+ * propagated to every consumer that passes it through unchanged, because the
+ * store is what finally reads it — and PTOAS offers no way to re-narrow a popped
+ * tile after the fact (``pto.set_validshape`` needs a locally bound source,
+ * which a frontend tpop result is not).
+ *
+ * Only the split axis is touched, and only when the operand is genuinely
+ * partial there; a fully-valid operand keeps the deducer's exact ``half``.
+ * A consumer that TRANSFORMS the extent (a reduction, a slice) rather than
+ * passing it through is reported as a user-facing limitation with its span.
+ *
+ * The walk descends into nested control flow, so a shard / consumer / store
+ * inside a loop or a branch is repaired exactly like a top-level one.
+ *
+ * @param stmts The region body statements (already half-width).
+ * @param split_dim The partitioned tile dimension (see SplitDimension).
+ * @param region_span Span of the enclosing region, for diagnostics.
+ * @return The rewritten statement list (input order preserved).
+ */
+std::vector<StmtPtr> LocalizeExplicitBoundaryValid(const std::vector<StmtPtr>& stmts, int split_dim,
+                                                   const Span& region_span);
+
+/**
+ * @brief Replace a shard result type's split-axis valid extent with the lane's own.
+ *
+ * ``ReshapeSplitAxis`` halves that extent with a ceil-div because an op's type
+ * function does not know the lane; wherever a subblock index IS in scope, this
+ * restores the truth ``clamp(V - idx * half, 0, half)``. Returns @p shard_type
+ * unchanged when the operand's split axis is fully valid (both lanes then hold
+ * exactly ``half``, which the deducer already produced) or when either type is
+ * not a rank-covering TileType.
+ *
+ * @param shard_type The deduced per-lane (halved) tile type.
+ * @param operand_type The pre-split tile type the shard reads.
+ * @param split_dim The partitioned tile dimension (see SplitDimension).
+ * @param subblock_idx The per-lane index expr; null leaves the type unchanged.
+ * @return The retyped shard type, or @p shard_type when no repair applies.
+ */
+TypePtr LocalizeShardValidForLane(const TypePtr& shard_type, const TypePtr& operand_type, int split_dim,
+                                  const ExprPtr& subblock_idx);
 
 }  // namespace split_axis
 }  // namespace ir

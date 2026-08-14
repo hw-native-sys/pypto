@@ -226,6 +226,98 @@ def test_aic_gather_doubles_split_axis():
     assert left_right.type.shape == [16, 128]
 
 
+def _tile(shape, valid=None, dtype=DataType.FP32):
+    """A 2D tile type, optionally with a partial valid_shape."""
+    view = ir.TileView(valid_shape=valid) if valid is not None else None
+    return ir.TileType(shape, dtype, None, view)
+
+
+def test_shard_allows_ragged_split_axis_when_columns_are_full():
+    """A per-lane ROW extent is carried by the boundary, so UP_DOWN raggedness is legal.
+
+    The deducer still reports the lane-agnostic ceil-div here; the true per-lane
+    extent is materialized later by LowerAutoVectorSplit, which is the only place
+    the subblock index is in scope.
+    """
+    span = ir.Span.unknown()
+    tile_var = ir.Var("t", _tile([16, 128], [5, 128]), span)
+
+    shard = ir.create_op_call("tile.aiv_shard", [tile_var], {"split": 1}, span)
+    assert isinstance(shard.type, ir.TileType)
+    assert shard.type.shape == [8, 128]
+
+
+def test_shard_rejects_ragged_split_axis_on_left_right():
+    """LEFT_RIGHT makes the COLUMN extent per-lane, and the FIFO pins that field."""
+    span = ir.Span.unknown()
+    tile_var = ir.Var("t", _tile([16, 128], [16, 32]), span)
+
+    with pytest.raises(ValueError, match="LEFT_RIGHT splits the column axis"):
+        ir.create_op_call("tile.aiv_shard", [tile_var], {"split": 2}, span)
+
+
+def test_shard_rejects_ragged_row_with_narrowed_columns():
+    """A per-lane row extent and a narrowed column extent cannot both be carried.
+
+    The row rides on the TPOP valid_row operand; the narrowed column can only be
+    restored by the static pto.treshape, which rebuilds both axes at once.
+    """
+    span = ir.Span.unknown()
+    tile_var = ir.Var("t", _tile([16, 128], [5, 32]), span)
+
+    with pytest.raises(ValueError, match="per-lane row extent"):
+        ir.create_op_call("tile.aiv_shard", [tile_var], {"split": 1}, span)
+
+
+def test_shard_rejects_runtime_valued_narrow_columns():
+    """pto.treshape carries no operands, so a runtime column extent has no carrier."""
+    span = ir.Span.unknown()
+    valid_col = ir.Var("valid_col", ir.ScalarType(DataType.INDEX), span)
+    tile_var = ir.Var("t", _tile([16, 128], [16, valid_col]), span)
+
+    with pytest.raises(ValueError, match="is a runtime value narrower than the physical box"):
+        ir.create_op_call("tile.aiv_shard", [tile_var], {"split": 1}, span)
+
+
+def test_shard_allows_static_narrow_columns():
+    """A static column narrowing is restorable by treshape after a full-box transport."""
+    span = ir.Span.unknown()
+    tile_var = ir.Var("t", _tile([16, 128], [16, 32]), span)
+
+    shard = ir.create_op_call("tile.aiv_shard", [tile_var], {"split": 1}, span)
+    assert isinstance(shard.type, ir.TileType)
+    assert shard.type.shape == [8, 128]
+
+
+def test_gather_defers_the_band_rule_to_lowering():
+    """The deducer does NOT judge whether the two lanes' bands abut.
+
+    It runs before the per-lane extents exist, so the only extent it can see is
+    its own lane-agnostic ceil-div guess. Judging the join on that both
+    misreports the numbers and rejects shapes that are representable once the
+    lanes are localized, so LowerAutoVectorSplit owns the rule (and types the
+    join exactly) instead. Guarded here so the check does not drift back.
+    """
+    span = ir.Span.unknown()
+    tile_var = ir.Var("t", _tile([8, 128], [5, 128]), span)
+
+    gathered = ir.create_op_call("tile.aic_gather", [tile_var], {"split": 1}, span)
+    assert isinstance(gathered.type, ir.TileType)
+    assert gathered.type.shape == [16, 128]
+
+
+def test_gather_allows_a_lane_dependent_split_axis():
+    """A lane-dependent extent is the compiler's own clamp: lane 0 saturates, so the
+    bands abut and the re-joined region is a rectangle. It must not be rejected."""
+    span = ir.Span.unknown()
+    lane_rows = ir.Var("lane_rows", ir.ScalarType(DataType.INDEX), span)
+    tile_var = ir.Var("t", _tile([8, 128], [lane_rows, 128]), span)
+
+    gathered = ir.create_op_call("tile.aic_gather", [tile_var], {"split": 1}, span)
+    assert isinstance(gathered.type, ir.TileType)
+    assert gathered.type.shape == [16, 128]
+
+
 def test_split_reshape_rejects_non_2d_tile():
     """aiv_shard / aic_gather require a 2D tile."""
     span = ir.Span.unknown()

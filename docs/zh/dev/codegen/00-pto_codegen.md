@@ -195,11 +195,17 @@ tile 调用 `set_validshape`。
 - 如果被 push 的 tile 通过动态 `valid_row` / `valid_col` operand 分配，或经
   `tile.set_validshape` 更新，`tpush` 会发射已经更新运行时 valid shape 的同一个
   tile handle。对于 split `tpush`，codegen 会临时使用完整物理传输 box，随后恢复
-  producer tile 的逻辑 valid shape；消费侧动态 tpop operand 仍携带后续计算和 store
-  使用的逻辑范围。部分有效的无切分 Acc-to-Vec 传输也会让 TPUSH 和 TPOP 使用完整物理
-  box，因为 Cube-to-Vector FIFO 按物理 box stride 搬运；传输两侧随后立即恢复逻辑
-  valid shape。
-- 当 tpop 结果的 `TileView.valid_shape` 与物理 tile shape 不一致时，PTO codegen 会生成 PTOAS 前端操作数：`%buf = pto.tpop_from_*(%valid_row, %valid_col) {[id = I, ]split = N} -> !pto.tile_buf<..., v_row=?, v_col=?, ...>`。这同时覆盖动态表达式和 `[0, 0]` 这类静态非满形状；operand 携带后续计算和 store 使用的逻辑范围。
+  producer tile 的逻辑 valid shape。
+- Cube-to-Vector FIFO 在**任意** split 下都按物理 box stride 搬运：ISA 用被弹出
+  tile 的编译期 rows/cols 以及 producer 的 box 行间距构造 GM 槽位视图，再用该 tile
+  的*运行时* `valid_col` 去 stride 这个视图。因此 TPOP 上的部分 valid shape 会让 GM
+  行间隙塌缩为 0，消费侧读到的是一段连续数据而不是每次一行 box——这会静默破坏
+  *有效*区域的数据，因为 ISA 中对应的断言在 release 构建里被编译掉了。所以部分有效的
+  Acc-to-Vec 传输在无切分以及 `split = 1` / `split = 2` 下，TPUSH 和 TPOP 都使用完整
+  物理 box，并在传输两侧立即恢复逻辑 valid shape——消费侧通过纯元数据的
+  `pto.treshape` 恢复（前端 tpop 结果不是 PTOAS 的本地绑定 tile，`pto.set_validshape`
+  无法就地修改它）。
+- 当 tpop 结果的 `TileView.valid_shape` 与物理 tile shape 不一致时，PTO codegen 会生成 PTOAS 前端操作数：`%buf = pto.tpop_from_*(%valid_row, %valid_col) {[id = I, ]split = N} -> !pto.tile_buf<..., v_row=?, v_col=?, ...>`。这同时覆盖动态表达式和 `[0, 0]` 这类静态非满形状；operand 携带后续计算和 store 使用的逻辑范围。对于静态形状、非空的部分 pop，上述 Cube-to-Vector 完整 box 传输优先，因为 `pto.treshape` 不带 valid-row/valid-col operand，只能恢复*静态*逻辑范围。
 - 对于 split consumer，`SplitVectorKernel` 会按 subblock 本地化这些动态
   tpop valid-shape operand（例如 `[16, 16]` tile 做上下切分时，全局
   `[8, 16]` 会变成 `[8, 16]` 和 `[0, 16]`）。

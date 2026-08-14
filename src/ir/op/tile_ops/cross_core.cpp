@@ -26,6 +26,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
@@ -126,6 +127,153 @@ SplitReshaped ReshapeSplitAxis(std::vector<ExprPtr> shape, std::vector<ExprPtr> 
   return {std::move(shape), std::move(valid)};
 }
 
+// ============================================================================
+// Which partial valid_shapes the AIC/AIV boundary can actually carry
+// ============================================================================
+//
+// THE SHARD (Cube -> Vector). The C2V FIFO transports a physically box-strided
+// slot. pto-isa builds the GM slot view from the popped tile's COMPILE-TIME
+// rows/cols and the producer's box row pitch, then strides that view with the
+// tile's RUNTIME validCol (a2a3 tload_common.hpp TLoadGm2ubNd2nd:
+// lenBurst = validCol, but gmGap = gStride3 - gShape4). Requiring
+// "GM advance per burst == one producer-box row" gives
+//
+//     validCol * s + (ProdN - ConsN) * s == ProdN * s   =>   validCol == ConsN
+//
+// where ProdN cancels -- so the requirement is the SAME for UP_DOWN and
+// LEFT_RIGHT. The row field is free in both: the DMA always moves
+// nBurst == gShape3 == the physical row count, whatever validRow says.
+//
+// This derivation is the Vec/UB pop's, and does NOT carry over to the gather:
+// a V2C pop lands in an NZ Mat tile through TLoadGm2L1Nd2nz, which takes its
+// nValue/dValue from the GM tensor shape and reads neither validRow nor
+// validCol. The gather is constrained by geometry instead (see below).
+//
+// That leaves exactly one carrier for a narrowed COLUMN extent: transport the
+// full box and rebuild the logical extents afterwards with pto.treshape
+// (MakeTpopCodegenPTO in src/backend/common/pto_ops_crosscore.cpp). treshape
+// takes no operands, so it can only restore COMPILE-TIME STATIC extents, and it
+// rebuilds BOTH axes from one target type. Hence, per axis of the popped tile:
+//
+//   column full              -> rides the transport unchanged; the row field is
+//                               then free (static OR per-lane)
+//   column static narrowing  -> full-box transport + treshape, but only if the
+//                               row extent is static too
+//   column per-lane          -> no carrier  (LEFT_RIGHT narrows the split axis)
+//   column runtime-valued    -> no carrier
+//
+// A split-axis narrowing is what makes an extent per-lane: lane L holds
+// clamp(V - L*half, 0, half), so the two lanes differ whenever V < the physical
+// extent. On the shard (AIC -> AIV) that per-lane value is legal on the row
+// field and is materialized by LowerAutoVectorSplit.
+//
+// THE GATHER (Vector -> Cube) is limited by geometry, not by the DMA. Every V2C
+// transport places lane l at offset l*half, never compacted, so the gathered
+// real data is [0, v0) union [half, half + v1) -- a rectangle only when the two
+// bands abut (v0 == half) or lane 1 is empty (v1 == 0). Under the correct
+// per-lane extents that always holds and the gathered extent is v0 + v1 == V,
+// which is exactly what a shard-then-gather round trip must report. What has no
+// rectangle is a HAND-AUTHORED partial that both lanes share (v < half on each):
+// the deducer's 2*v would then claim the hole between the bands as real data.
+// Only that provable case is rejected here; a lane-dependent extent is the
+// compiler's own localized clamp and is left alone.
+//
+// Docs: docs/en/dev/codegen/00-pto_codegen.md,
+//       docs/en/dev/passes/20-lower_auto_vector_split.md
+bool IsFullExtent(const ExprPtr& valid_dim, const ExprPtr& dim) {
+  return ProveValidExtentEqual(valid_dim, dim) == ProofResult::kTrue;
+}
+
+std::string DescribeExtent(const ExprPtr& valid_dim, const ExprPtr& dim) {
+  return PythonPrint(valid_dim) + " of " + PythonPrint(dim);
+}
+
+// `split_axis` is 0 (UP_DOWN), 1 (LEFT_RIGHT), or -1 for the shape-preserving
+// split=0 crossing, which has no split axis and therefore no per-lane extent.
+void CheckSplitBoundaryCarriesValid(const std::string& op_name, const std::vector<ExprPtr>& shape,
+                                    const std::vector<ExprPtr>& valid, int split_axis, bool halve,
+                                    const Span& span) {
+  if (shape.size() != 2 || valid.size() != 2) {
+    return;
+  }
+  // (1) The gather is exempt from the column contract at EVERY split, including
+  // the shape-preserving split=0 crossing: a V2C pop lands in an NZ Mat tile
+  // through TLoadGm2L1Nd2nz, which reads neither validRow nor validCol, and it
+  // never takes the pto.treshape path (use_full_box is gated on the C2V pop).
+  //
+  // Its own rule — that the two lanes' bands must abut — is NOT checked here.
+  // This deducer runs before the per-lane extents exist, so the only extent it
+  // can see is its own lane-agnostic ceil-div guess; judging the join on that
+  // both misreports the extents and rejects shapes that are representable once
+  // the lanes are localized. LowerAutoVectorSplit owns that rule instead, where
+  // the true extents are known (split_axis_utils.cpp).
+  if (!halve) {
+    return;
+  }
+
+  // (2) The column field is the contested one. A full column extent needs no
+  // restore at all, which also leaves the row field free.
+  if (IsFullExtent(valid[1], shape[1])) {
+    return;
+  }
+
+  // (3) LEFT_RIGHT narrows the split axis, so the column extent is per-lane.
+  const bool column_is_per_lane = (split_axis == 1);
+  CHECK_SPAN(!column_is_per_lane, span)
+      << op_name << ": LEFT_RIGHT splits the column axis, but this tile's valid column extent ("
+      << DescribeExtent(valid[1], shape[1])
+      << ") does not cover the full box, so the two AIV lanes would hold different amounts of real "
+         "data. A per-lane column extent cannot cross this boundary: the Cube<->Vector FIFO pins the "
+         "transported column extent to the physical one, and the only way to restore a narrower "
+         "extent afterwards (pto.treshape) is compile-time static and so cannot express a per-lane "
+         "value.\n"
+      << "Author one of these instead:\n"
+      << "  * split the row axis: mode=pl.SplitMode.UP_DOWN (a per-lane ROW extent IS carried)\n"
+      << "  * make the columns fully valid before the crossing and let the padding be don't-care at "
+         "the store:\n"
+      << "        acc = pl.set_validshape(acc, <valid_rows>, " << PythonPrint(shape[1]) << ")\n"
+      << "        out[..., c0 : c0 + <half>] = shard   # c0 = aiv_id * <half>\n"
+      << "  * keep the ragged column tail in its own matmul outside the pl.split_aiv region";
+
+  // (4) The narrowed column extent must be rebuilt after the full-box transport,
+  // and pto.treshape can only rebuild static extents -- on BOTH axes at once.
+  const bool column_is_static = static_cast<bool>(As<ConstInt>(valid[1]));
+  CHECK_SPAN(column_is_static, span)
+      << op_name << ": this tile's valid column extent (" << DescribeExtent(valid[1], shape[1])
+      << ") is a runtime value narrower than the physical box. A narrowed column extent has to be "
+         "rebuilt after the boundary's full-box transport, and the only rebuild available "
+         "(pto.treshape) is compile-time static.\n"
+      << "Fix: make the columns fully valid before the crossing --\n"
+      << "        acc = pl.set_validshape(acc, <valid_rows>, " << PythonPrint(shape[1]) << ")\n"
+      << "    and store the full column box; the padded columns are don't-care.";
+
+  // A row extent that is per-lane (split-axis narrowing on an UP_DOWN shard) or
+  // runtime-valued cannot survive the static treshape that the narrowed column
+  // extent forces, because treshape rewrites both axes from one target type.
+  const bool row_is_per_lane = (split_axis == 0) && !IsFullExtent(valid[0], shape[0]);
+  const bool row_is_static = static_cast<bool>(As<ConstInt>(valid[0]));
+  CHECK_SPAN(!row_is_per_lane, span)
+      << op_name << ": UP_DOWN split with BOTH a per-lane row extent (" << DescribeExtent(valid[0], shape[0])
+      << ", so the lanes hold different row counts) and a "
+      << "narrowed column extent (" << DescribeExtent(valid[1], shape[1]) << ") is not supported. "
+      << "The per-lane row extent rides on the TPOP valid_row operand, but the narrowed column "
+         "extent can only be restored by pto.treshape, which rebuilds BOTH axes from one static "
+         "type and would overwrite that per-lane row.\n"
+      << "Fix: widen the columns before the crossing and store the full column box --\n"
+      << "        acc = pl.set_validshape(acc, " << PythonPrint(valid[0]) << ", " << PythonPrint(shape[1])
+      << ")\n"
+      << "        out[r0 : r0 + <half>, 0 : " << PythonPrint(shape[1]) << "] = shard";
+  CHECK_SPAN(row_is_static, span)
+      << op_name << ": this tile's valid row extent (" << DescribeExtent(valid[0], shape[0])
+      << ") is a runtime value and its valid column extent (" << DescribeExtent(valid[1], shape[1])
+      << ") is narrower than the physical box. The narrowed column extent forces a full-box "
+         "transport whose logical extents are rebuilt by the static pto.treshape, which cannot "
+         "express a runtime row extent.\n"
+      << "Fix: make the columns fully valid before the crossing --\n"
+      << "        acc = pl.set_validshape(acc, <valid_rows>, " << PythonPrint(shape[1]) << ")\n"
+      << "    and store the full column box; the padded columns are don't-care.";
+}
+
 // Deducer for the tile-level split-axis reshape ops tile.aiv_shard (full ->
 // half) and tile.aic_gather (half -> full). The single positional tile argument
 // is reshaped along the split axis selected by the "split" int attr.
@@ -156,6 +304,9 @@ TypePtr DeduceSplitReshape(const std::vector<ExprPtr>& args,
     // re-attached downstream.
     TileView no_split_view;
     no_split_view.valid_shape = GetValidShape(tile_type);
+    // No split axis, but the column field is still pinned by the FIFO transport.
+    CheckSplitBoundaryCarriesValid(op_name, tile_type->shape_, no_split_view.valid_shape,
+                                   /*split_axis=*/-1, halve, args[0]->span_);
     return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt,
                                       std::move(no_split_view));
   }
@@ -164,6 +315,8 @@ TypePtr DeduceSplitReshape(const std::vector<ExprPtr>& args,
       << op_name << " requires a 2D tile, but got rank " << tile_type->shape_.size();
 
   const size_t axis = (split == 1) ? 0 : 1;
+  CheckSplitBoundaryCarriesValid(op_name, tile_type->shape_, GetValidShape(tile_type), static_cast<int>(axis),
+                                 halve, args[0]->span_);
   auto reshaped =
       ReshapeSplitAxis(tile_type->shape_, GetValidShape(tile_type), axis, halve, op_name, args[0]->span_);
 
@@ -223,6 +376,10 @@ TypePtr DeduceSplitReshapeTensor(const std::vector<ExprPtr>& args,
   std::vector<ExprPtr> valid = (tensor_type->tensor_view_ && !tensor_type->tensor_view_->valid_shape.empty())
                                    ? tensor_type->tensor_view_->valid_shape
                                    : tensor_type->shape_;
+  // Same boundary contract as the tile form this lowers to (pass 10), checked
+  // here so the diagnostic carries the author's own @pl.jit span.
+  CheckSplitBoundaryCarriesValid(op_name, tensor_type->shape_, valid, static_cast<int>(axis), halve,
+                                 args[0]->span_);
   auto reshaped =
       ReshapeSplitAxis(tensor_type->shape_, std::move(valid), axis, halve, op_name, args[0]->span_);
 
