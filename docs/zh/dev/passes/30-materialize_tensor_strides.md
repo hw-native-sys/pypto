@@ -49,11 +49,13 @@ Pass 使用带 Var 替换缓存的 `IRMutator`，结构与 `InferTileMemorySpace
      - `VisitExpr_(CallPtr)`：注册 op 走 `OpRegistry` 重建；`GlobalVar` 调用 / 未注册 op 走直接 `Call` 构造路径。
      - `VisitStmt_(AssignStmtPtr)`：先重建 RHS；若 RHS Call 的返回类型比 LHS Var 当前类型更显式（已物化），同步 LHS Var。
 
-2. **类型重写** —— `MaterializeType(type)`：
-   - `TensorType` / `DistributedTensorType` 满足 `view.has_value() && view.stride.empty() && layout != NZ`：用 `BuildLogicalStridesFromLayout(shape, layout)` 重建，并保留 distributed wrapper 与可选元数据（`memref`、`TensorView.pad`、`window_buffer`）。其他 tensor 形态原样返回（保持指针身份）。
-   - `TensorType` 且 `layout == NZ`：原样返回（NZ 在 `TensorType` 上属于非法 IR；交由 verifier 报错而非在这里 `BuildLogicalStridesFromLayout` `CHECK`-fail）。
-   - `TupleType`：递归处理元素类型；任一子类型变化时重建。
+2. **类型重写** —— `MaterializeType(type, span)`：
+   - `TensorType` / `DistributedTensorType` 且 `layout == NZ`：无论 stride 是否显式，一律用 `CHECK_SPAN` **拒绝**（用户可见的 `ValueError`）。NZ 是分形、仅 tile 使用的 layout，无法用 logical stride 表达，因此携带它的 tensor 类型属于非法 IR —— `tensor.view`、`CheckCanonicalView` 与 `TensorViewCanonical` verifier 的判定与此一致。`span` 参数（携带该类型的 `Var` / `IterArg` / `Call` / `Submit` / 形参 / 函数节点）用于在报错信息中定位出问题的标注。
+   - `TensorType` / `DistributedTensorType` 满足 `view.has_value() && view.stride.empty()`：用 `BuildLogicalStridesFromLayout(shape, layout)` 重建，并保留 distributed wrapper 与可选元数据（`memref`、`TensorView.pad`、`window_buffer`）。其他 tensor 形态原样返回（保持指针身份）。
+   - `TupleType`：递归处理元素类型（沿用同一个 `span`）；任一子类型变化时重建。
    - 其它：原样返回。
+
+NZ 的拒绝逻辑放在 pass 内部，而不是交给配对的 verifier。交给 verifier 会让这条拒绝取决于验证是否开启：在 `PYPTO_VERIFY_LEVEL=none` 下，pass 会原样返回这个非法槽位，却仍然声明产出 `TensorViewCanonical`，非法 layout 只会在下游以晦涩的后端 layout mismatch 形式重新冒出来。
 
 Pass **幂等** —— 在已物化的 IR 上重跑等于无操作（类型比较走指针身份就短路；无变化时 `MutableCopy` 也被跳过）。
 
@@ -62,7 +64,7 @@ Pass **幂等** —— 在已物化的 IR 上重跑等于无操作（类型比�
 | 用 packed canonical 填入 stride | `view.has_value() && view.stride.empty()` 且 `layout in {ND, DN}` |
 | 原样直通 | `!view.has_value()`（裸 tensor） |
 | 原样直通 | `view.has_value() && !view.stride.empty()`（已显式） |
-| 原样直通 | `view.layout == NZ`（由 verifier 单独拒绝） |
+| 拒绝（`ValueError`） | `TensorType` / `DistributedTensorType` 上 `view.layout == NZ`（非法 IR —— NZ 仅 tile 使用） |
 
 ## 示例
 
@@ -100,13 +102,15 @@ ND 情况下公式退化为标准行主序 packed stride。
 | ------ | ---- |
 | `ND` | `stride[n-1] = 1; stride[k] = stride[k+1] * shape[k+1]`，`k = n-2 .. 0` |
 | `DN`（`n ≥ 2`） | `stride[n-2] = 1`；`stride[n-1] = shape[n-2]`；`stride[n-3] = shape[n-2] * shape[n-1]`；`stride[k] = stride[k+1] * shape[k+1]`，`k = n-4 .. 0` |
-| `NZ` | 无法用 flat stride 表达（分形，仅 tile 使用）—— `BuildLogicalStridesFromLayout` `CHECK`-fail |
+| `NZ` | 无法用 flat stride 表达（分形，仅 tile 使用）—— 在到达 `BuildLogicalStridesFromLayout` 之前就被本 Pass 拒绝 |
 
 `MakeIndexMul` 对 `ConstInt * ConstInt` 做常量折叠（带 `__builtin_mul_overflow` 守卫，溢出时回退到符号 `Mul` 而不是静默 wrap），并消除 `× 1` 单位元；这样符号维保留为 `Mul` 表达式，静态常量链折叠为单个 `ConstInt`。
 
 ## 与 verifier 的协同
 
 由于 Pass 声明 `produced = {... ∪ TensorViewCanonical}`，`PassPipeline` 在 Pass 完成后自动调用 registry 中的 `TensorViewCanonical` verifier。registry 默认是**严格模式** verifier（RFC #1300 §2.4 codegen 入口契约）：它拒绝 `view.has_value() && stride.empty()` —— 因为本 Pass 就是负责物化这些 stride 的。裸 `TensorType`（`!view.has_value()`）仍然接受 —— 隐式 ND-packed 自然 canonical。同一 verifier 也可通过 `passes.verify_tensor_view_canonical(program, require_materialized=True)` 显式调用；传 `require_materialized=False` 切换到弱模式（用于物化之前的解析期 / 前期 pass 窗口）。
+
+verifier 是配对复核，而不是唯一的强制点。验证本身可配置（`PYPTO_VERIFY_LEVEL` / `PassContext`），随时可能关闭，因此 Pass 声明产出的每条不变量都由 Pass 自己建立 —— 上面的 NZ 拒绝也在其中。verifier 随后再复核一遍，用于捕捉本 Pass 以及下游任何改写 tensor 类型的代码引入的回归。
 
 ## 相关
 

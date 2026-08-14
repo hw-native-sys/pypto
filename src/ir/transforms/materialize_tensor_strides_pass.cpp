@@ -37,12 +37,13 @@
 #include <utility>
 #include <vector>
 
-#include "pypto/core/logging.h"  // INTERNAL_CHECK; transitively pulls in error.h
+#include "pypto/core/logging.h"  // CHECK_SPAN / INTERNAL_CHECK; transitively pulls in error.h
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/pass_properties.h"
@@ -56,13 +57,38 @@ namespace ir {
 
 namespace {
 
+/// Reject an NZ view carried by a tensor-like type.
+///
+/// NZ is a fractal, tile-only layout with no logical-stride representation, so
+/// a TensorType / DistributedTensorType carrying it is invalid IR — the same
+/// judgement ``tensor.view``, ``CheckCanonicalView`` and the
+/// ``TensorViewCanonical`` verifier all make. Rejecting it here rather than
+/// passing it through keeps the pass honest about the ``TensorViewCanonical``
+/// property it declares as produced: delegating the rejection to the verifier
+/// means the malformed slot survives whenever verification is disabled
+/// (``PYPTO_VERIFY_LEVEL=none``), only to resurface much later as an opaque
+/// backend layout mismatch.
+///
+/// This is a user error, not a pass invariant: nothing in the pipeline mints
+/// an NZ TensorType, but a ``pl.Tensor[..., pl.NZ]`` annotation survives
+/// parsing, so the message names the authoring fix.
+void CheckNoNzOnTensorType(const TensorView& view, const Span& span) {
+  CHECK_SPAN(view.layout != TensorLayout::NZ, span)
+      << "MaterializeTensorStrides: NZ layout is tile-only and not allowed on a tensor type. "
+      << "Annotate the tensor as pl.ND or pl.DN, and produce NZ on a Tile instead.";
+}
+
 /// Rewrite a TensorType (or recursively a TupleType containing TensorTypes)
 /// so that any ``view.has_value() && view.stride.empty()`` slot is filled
 /// with a packed canonical stride per ``BuildLogicalStridesFromLayout``.
 ///
 /// Returns the input TypePtr unchanged when no rewrite is needed (so callers
 /// can identity-compare to skip downstream Var/Call rebuilds).
-TypePtr MaterializeType(const TypePtr& type) {
+///
+/// ``span`` locates the IR node carrying the type (Var / IterArg / Call /
+/// Submit / function param / function return) and is only read when the type
+/// is rejected.
+TypePtr MaterializeType(const TypePtr& type, const Span& span) {
   if (!type) return type;
 
   if (auto dist_type = As<DistributedTensorType>(type)) {
@@ -70,10 +96,10 @@ TypePtr MaterializeType(const TypePtr& type) {
       return type;
     }
     const TensorView& view = *dist_type->tensor_view_;
+    // Checked before the stride short-circuit below, mirroring the verifier's
+    // ordering: an NZ view is invalid whether or not its stride is explicit.
+    CheckNoNzOnTensorType(view, span);
     if (!view.stride.empty()) {
-      return type;
-    }
-    if (view.layout == TensorLayout::NZ) {
       return type;
     }
     auto materialized_stride =
@@ -90,13 +116,9 @@ TypePtr MaterializeType(const TypePtr& type) {
       return type;
     }
     const TensorView& view = *tensor_type->tensor_view_;
+    CheckNoNzOnTensorType(view, span);
     if (!view.stride.empty()) {
       // Already explicit.
-      return type;
-    }
-    if (view.layout == TensorLayout::NZ) {
-      // NZ on TensorType is rejected by the verifier; do not attempt to
-      // materialize because BuildLogicalStridesFromLayout would CHECK-fail.
       return type;
     }
     auto materialized_stride =
@@ -111,7 +133,7 @@ TypePtr MaterializeType(const TypePtr& type) {
     new_elems.reserve(tuple_type->types_.size());
     bool changed = false;
     for (const auto& sub : tuple_type->types_) {
-      auto new_sub = MaterializeType(sub);
+      auto new_sub = MaterializeType(sub, span);
       if (new_sub.get() != sub.get()) changed = true;
       new_elems.push_back(std::move(new_sub));
     }
@@ -139,7 +161,7 @@ class MaterializeTensorStridesMutator : public IRMutator {
     if (it != var_cache_.end()) {
       return it->second;
     }
-    auto new_type = MaterializeType(op->GetType());
+    auto new_type = MaterializeType(op->GetType(), op->span_);
     if (new_type.get() == op->GetType().get()) {
       var_cache_[op] = op;
       return op;
@@ -155,7 +177,7 @@ class MaterializeTensorStridesMutator : public IRMutator {
       return it->second;
     }
     auto new_init = IRMutator::VisitExpr(op->initValue_);
-    auto new_type = MaterializeType(op->GetType());
+    auto new_type = MaterializeType(op->GetType(), op->span_);
     bool init_changed = new_init.get() != op->initValue_.get();
     bool type_changed = new_type.get() != op->GetType().get();
     if (!init_changed && !type_changed) {
@@ -181,7 +203,7 @@ class MaterializeTensorStridesMutator : public IRMutator {
       new_args.push_back(std::move(new_arg));
     }
 
-    auto new_return_type = MaterializeType(op->GetType());
+    auto new_return_type = MaterializeType(op->GetType(), op->span_);
     bool type_changed = new_return_type.get() != op->GetType().get();
 
     // ``manual_dep_edges`` / ``compiler_manual_dep_edges`` carry VarPtrs that
@@ -257,7 +279,7 @@ class MaterializeTensorStridesMutator : public IRMutator {
     auto base = IRMutator::VisitExpr_(op);
     auto submit = As<Submit>(base);
     if (!submit) return base;
-    auto new_return_type = MaterializeType(submit->GetType());
+    auto new_return_type = MaterializeType(submit->GetType(), submit->span_);
     if (new_return_type.get() == submit->GetType().get()) return submit;
     // MaterializeType recurses the TupleType, materializing each leading
     // return TensorType and leaving the trailing Scalar[TASK_ID] untouched.
@@ -315,7 +337,7 @@ FunctionPtr TransformFunction(const FunctionPtr& func) {
   new_params.reserve(func->params_.size());
   std::unordered_map<VarPtr, VarPtr> param_substitutions;
   for (const auto& old_param : func->params_) {
-    auto new_type = MaterializeType(old_param->GetType());
+    auto new_type = MaterializeType(old_param->GetType(), old_param->span_);
     if (new_type.get() == old_param->GetType().get()) {
       new_params.push_back(old_param);
       continue;
@@ -331,7 +353,7 @@ FunctionPtr TransformFunction(const FunctionPtr& func) {
   std::vector<TypePtr> new_return_types;
   new_return_types.reserve(func->return_types_.size());
   for (const auto& rt : func->return_types_) {
-    auto new_rt = MaterializeType(rt);
+    auto new_rt = MaterializeType(rt, func->span_);
     if (new_rt.get() != rt.get()) returns_changed = true;
     new_return_types.push_back(std::move(new_rt));
   }
