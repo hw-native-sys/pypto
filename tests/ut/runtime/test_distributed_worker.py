@@ -43,11 +43,13 @@ from pypto.runtime.bench import (
 )
 from pypto.runtime.distributed_runner import (
     DistributedRunHandle,
+    DistributedRunIdentity,
     DistributedWorker,
     _assemble_chip_callables,
     _clear_dfx_dispatch_dirs,
     _collect_l3_swimlane,
     _construct_worker,
+    _emit_pipeline_span,
     _make_call_config,
     _reset_dfx_dispatch_state,
     _submit_chip,
@@ -84,11 +86,13 @@ class _ControlledNativeHandle:
         self,
         error: BaseException | None = None,
         on_result: Callable[[], None] | None = None,
+        run_id: int | None = None,
     ) -> None:
         self._terminal = threading.Event()
         self.result_started = threading.Event()
         self.error = error
         self._on_result = on_result
+        self._run_id = run_id
 
     @property
     def done(self) -> bool:
@@ -178,6 +182,91 @@ class TestSetupOnce:
 
 
 class TestAsyncDispatchHandle:
+    def test_pipeline_span_uses_shared_strace_identity_grammar(self):
+        emitted: list[tuple[Any, ...]] = []
+        task_interface = SimpleNamespace(
+            HOST_STRACE_ENABLED=True,
+            _host_span_sink_available=lambda: True,
+            _emit_host_span=lambda *args: emitted.append(args),
+        )
+        identity = DistributedRunIdentity(dispatch_id=5, frame_id=1, simpler_run_id=83)
+
+        with patch.dict(sys.modules, {"_task_interface": task_interface}):
+            _emit_pipeline_span("pypto_pipeline.submit", identity, 100, 25)
+
+        assert emitted == [
+            (
+                "pypto_pipeline.submit",
+                83,
+                0,
+                0,
+                100,
+                25,
+                "run_id=83 dispatch_id=0 slot_id=0 generation=0 pypto_dispatch_id=5 pypto_frame_id=1",
+            )
+        ]
+
+    def test_pipeline_span_failure_does_not_escape(self):
+        task_interface = SimpleNamespace(
+            HOST_STRACE_ENABLED=True,
+            _host_span_sink_available=lambda: True,
+            _emit_host_span=MagicMock(side_effect=RuntimeError("trace sink failed")),
+        )
+
+        with patch.dict(sys.modules, {"_task_interface": task_interface}):
+            _emit_pipeline_span(
+                "pypto_pipeline.submit",
+                DistributedRunIdentity(dispatch_id=1, frame_id=0, simpler_run_id=2),
+                100,
+                25,
+            )
+
+    def test_handle_exposes_stable_dispatch_to_simpler_identity(self, patched_setup):
+        m = patched_setup
+        compiled = _fake_compiled([_param("a", [16, 16])], [])
+        native = _ControlledNativeHandle(run_id=41)
+        m["submit_dispatch"].return_value = native
+        rt = DistributedWorker(compiled)
+
+        handle = rt.submit(compiled, DeviceTensor(0x1000, (16, 16), torch.float32))
+
+        assert handle.identity == DistributedRunIdentity(dispatch_id=1, frame_id=0, simpler_run_id=41)
+        native.complete()
+        handle.result()
+        assert handle.identity == DistributedRunIdentity(dispatch_id=1, frame_id=0, simpler_run_id=41)
+        rt.close()
+
+    def test_submit_acceptance_and_completion_share_trace_identity(self, patched_setup):
+        m = patched_setup
+        compiled = _fake_compiled([_param("a", [16, 16])], [])
+        native = _ControlledNativeHandle(run_id=73)
+        m["submit_dispatch"].return_value = native
+        spans: list[tuple[str, DistributedRunIdentity, int, int]] = []
+        rt = DistributedWorker(compiled)
+
+        def record_span(
+            name: str,
+            identity: DistributedRunIdentity,
+            timestamp_ns: int,
+            duration_ns: int,
+        ) -> None:
+            spans.append((name, identity, timestamp_ns, duration_ns))
+
+        with patch("pypto.runtime.distributed_runner._emit_pipeline_span", side_effect=record_span):
+            handle = rt.submit(compiled, DeviceTensor(0x1000, (16, 16), torch.float32))
+            native.complete()
+            handle.result()
+
+        identity = DistributedRunIdentity(dispatch_id=1, frame_id=0, simpler_run_id=73)
+        assert [span[0] for span in spans] == [
+            "pypto_pipeline.native_acceptance",
+            "pypto_pipeline.submit",
+            "pypto_pipeline.result_completion",
+        ]
+        assert all(span[1] == identity for span in spans)
+        assert all(span[2] > 0 and span[3] >= 0 for span in spans)
+        rt.close()
+
     def test_submit_returns_handle_and_retires_frame_on_result(self, patched_setup):
         m = patched_setup
         compiled = _fake_compiled([_param("a", [16, 16])], [])
@@ -403,9 +492,10 @@ class TestAsyncDispatchHandle:
     def test_interrupted_native_handle_publication_keeps_frame_until_close(self, patched_setup):
         m = patched_setup
         compiled = _fake_compiled([_param("a", [16, 16])], [])
-        native = _ControlledNativeHandle()
+        native = _ControlledNativeHandle(run_id=91)
         m["worker"]._accepted_run_handles = set()
         m["worker"]._hierarchical_start_cv = threading.Condition()
+        spans: list[tuple[str, DistributedRunIdentity, int, int]] = []
 
         def interrupt_after_acceptance(*_args):
             with m["worker"]._hierarchical_start_cv:
@@ -415,11 +505,29 @@ class TestAsyncDispatchHandle:
         m["submit_dispatch"].side_effect = interrupt_after_acceptance
         rt = DistributedWorker(compiled)
 
-        with pytest.raises(KeyboardInterrupt, match="after native acceptance"):
+        def record_span(
+            name: str,
+            identity: DistributedRunIdentity,
+            timestamp_ns: int,
+            duration_ns: int,
+        ) -> None:
+            spans.append((name, identity, timestamp_ns, duration_ns))
+
+        with (
+            patch("pypto.runtime.distributed_runner._emit_pipeline_span", side_effect=record_span),
+            pytest.raises(KeyboardInterrupt, match="after native acceptance"),
+        ):
             rt.submit(compiled, DeviceTensor(0x1000, (16, 16), torch.float32))
 
         assert len(rt._active_dispatch_handles) == 1
         assert sum(frame.in_use for frame in rt._dispatch_frames) == 1
+        assert [span[0] for span in spans] == [
+            "pypto_pipeline.native_acceptance",
+            "pypto_pipeline.submit",
+        ]
+        assert all(
+            span[1] == DistributedRunIdentity(dispatch_id=1, frame_id=0, simpler_run_id=91) for span in spans
+        )
         closer = threading.Thread(target=rt.close)
         closer.start()
         assert native.result_started.wait(timeout=2)
