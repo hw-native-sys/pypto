@@ -20,6 +20,7 @@
 #include <any>
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -45,9 +46,36 @@ static bool IsTSubsDataType(DataType dtype) {
          dtype == DataType::FP16 || dtype == DataType::FP32 || dtype == DataType::BF16;
 }
 
+/// Return the shared effective valid region for two identically shaped operands.
+///
+/// This deliberately does not infer a region through broadcasting or intersect
+/// different regions: those cases need axis-aware mapping before Tensor-to-Tile
+/// lowering. Exact-shape operands with provably equal regions need no mapping,
+/// and every element-wise result cell is valid iff the corresponding input cells
+/// are valid.
+static std::optional<std::vector<ExprPtr>> GetMatchingElementwiseValidShape(
+    const std::shared_ptr<const TensorType>& lhs, const std::shared_ptr<const TensorType>& rhs) {
+  if (lhs->shape_.size() != rhs->shape_.size()) return std::nullopt;
+  for (size_t i = 0; i < lhs->shape_.size(); ++i) {
+    if (!DimensionsEqual(lhs->shape_[i], rhs->shape_[i])) return std::nullopt;
+  }
+
+  auto lhs_valid_shape = GetValidShape(lhs);
+  auto rhs_valid_shape = GetValidShape(rhs);
+  INTERNAL_CHECK(lhs_valid_shape.size() == rhs_valid_shape.size())
+      << "Internal error: identically shaped tensors have different valid_shape ranks";
+  for (size_t i = 0; i < lhs_valid_shape.size(); ++i) {
+    if (ProveValidExtentEqual(lhs_valid_shape[i], rhs_valid_shape[i]) != ProofResult::kTrue) {
+      return std::nullopt;
+    }
+  }
+  return lhs_valid_shape;
+}
+
 TypePtr DeduceTensorOpElementwiseBinaryType(const std::vector<ExprPtr>& args,
                                             const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                            const std::string& op_name) {
+                                            const std::string& op_name,
+                                            bool preserve_matching_valid_shape = true) {
   CHECK(args.size() == 2) << "The operator " << op_name << " requires exactly 2 arguments, but got "
                           << args.size();
 
@@ -74,12 +102,19 @@ TypePtr DeduceTensorOpElementwiseBinaryType(const std::vector<ExprPtr>& args,
                                   << FormatShape(tensor_type1->shape_) << " and "
                                   << FormatShape(tensor_type2->shape_);
 
+  if (preserve_matching_valid_shape) {
+    if (auto valid_shape = GetMatchingElementwiseValidShape(tensor_type1, tensor_type2)) {
+      return MakeFreshTensorType(broadcast_result.shape, *result_dtype, std::move(*valid_shape));
+    }
+  }
+
   return std::make_shared<TensorType>(broadcast_result.shape, *result_dtype);
 }
 
 TypePtr DeduceTensorOpElementwiseScalarType(const std::vector<ExprPtr>& args,
                                             const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                            const std::string& op_name, bool preserve_lhs_dtype = false) {
+                                            const std::string& op_name, bool preserve_lhs_dtype = false,
+                                            bool preserve_valid_shape = true) {
   CHECK(args.size() == 2) << "The operator " << op_name << " requires exactly 2 arguments, but got "
                           << args.size();
 
@@ -93,16 +128,18 @@ TypePtr DeduceTensorOpElementwiseScalarType(const std::vector<ExprPtr>& args,
                       << " requires second argument to be a ScalarType, but got "
                       << args[1]->GetType()->TypeName();
 
-  if (preserve_lhs_dtype) {
-    return MakeFreshTensorType(tensor_type1->shape_, tensor_type1->dtype_, GetValidShape(tensor_type1));
+  DataType result_dtype = tensor_type1->dtype_;
+  if (!preserve_lhs_dtype) {
+    auto promoted_dtype = PromoteDataTypes(tensor_type1->dtype_, scalar_type2->dtype_);
+    CHECK(promoted_dtype) << "The operator " << op_name << " requires compatible data types, but got "
+                          << args[0]->GetType()->TypeName() << " and " << args[1]->GetType()->TypeName();
+    result_dtype = *promoted_dtype;
   }
 
-  // TensorType + ScalarType - result is TensorType with same shape as first argument
-  auto result_dtype = PromoteDataTypes(tensor_type1->dtype_, scalar_type2->dtype_);
-  CHECK(result_dtype) << "The operator " << op_name << " requires compatible data types, but got "
-                      << args[0]->GetType()->TypeName() << " and " << args[1]->GetType()->TypeName();
-
-  return MakeFreshTensorType(tensor_type1->shape_, *result_dtype, GetValidShape(tensor_type1));
+  if (preserve_valid_shape) {
+    return MakeFreshTensorType(tensor_type1->shape_, result_dtype, GetValidShape(tensor_type1));
+  }
+  return std::make_shared<TensorType>(tensor_type1->shape_, result_dtype);
 }
 
 // Bitwise and shift ops have no row/col-expand tile counterpart (there is no
@@ -131,7 +168,8 @@ static void CheckBitwiseShapesMatch(const std::shared_ptr<const TensorType>& lhs
 // shift count does not participate in the result type.
 TypePtr DeduceTensorOpBitwiseBinaryType(const std::vector<ExprPtr>& args,
                                         const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                        const std::string& op_name, bool preserve_lhs_dtype) {
+                                        const std::string& op_name, bool preserve_lhs_dtype,
+                                        bool preserve_matching_valid_shape = true) {
   CHECK(args.size() == 2) << "The operator " << op_name << " requires exactly 2 arguments, but got "
                           << args.size();
 
@@ -153,13 +191,20 @@ TypePtr DeduceTensorOpBitwiseBinaryType(const std::vector<ExprPtr>& args,
 
   CheckBitwiseShapesMatch(tensor_type1, tensor_type2, op_name);
 
-  if (preserve_lhs_dtype) {
-    return std::make_shared<TensorType>(tensor_type1->shape_, tensor_type1->dtype_);
+  DataType result_dtype = tensor_type1->dtype_;
+  if (!preserve_lhs_dtype) {
+    auto promoted_dtype = PromoteDataTypes(tensor_type1->dtype_, tensor_type2->dtype_);
+    CHECK(promoted_dtype) << "The operator " << op_name << " requires compatible data types, but got "
+                          << tensor_type1->dtype_.ToString() << " and " << tensor_type2->dtype_.ToString();
+    result_dtype = *promoted_dtype;
   }
-  auto result_dtype = PromoteDataTypes(tensor_type1->dtype_, tensor_type2->dtype_);
-  CHECK(result_dtype) << "The operator " << op_name << " requires compatible data types, but got "
-                      << tensor_type1->dtype_.ToString() << " and " << tensor_type2->dtype_.ToString();
-  return std::make_shared<TensorType>(tensor_type1->shape_, *result_dtype);
+
+  if (preserve_matching_valid_shape) {
+    if (auto valid_shape = GetMatchingElementwiseValidShape(tensor_type1, tensor_type2)) {
+      return MakeFreshTensorType(tensor_type1->shape_, result_dtype, std::move(*valid_shape));
+    }
+  }
+  return std::make_shared<TensorType>(tensor_type1->shape_, result_dtype);
 }
 
 // Tensor-scalar bitwise/shift ops. Mirrors DeduceTileOpIntScalarBinaryType: the
@@ -177,8 +222,9 @@ TypePtr DeduceTensorOpBitwiseBinaryType(const std::vector<ExprPtr>& args,
 // a constant caught here would otherwise reach the hardware as garbage.
 TypePtr DeduceTensorOpBitwiseScalarType(const std::vector<ExprPtr>& args,
                                         const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                        const std::string& op_name, bool is_shift = false) {
-  auto result_type = DeduceTensorOpElementwiseScalarType(args, kwargs, op_name, true);
+                                        const std::string& op_name, bool is_shift = false,
+                                        bool preserve_valid_shape = true) {
+  auto result_type = DeduceTensorOpElementwiseScalarType(args, kwargs, op_name, true, preserve_valid_shape);
   auto tensor_type = AsTensorTypeLike(args[0]->GetType());  // accepts a window (issue #1694)
   auto scalar_type = As<ScalarType>(args[1]->GetType());
   CHECK(tensor_type->dtype_.IsInt()) << "The operator " << op_name
@@ -312,7 +358,7 @@ REGISTER_OP("tensor.part_add")
     .add_argument("src1", "Second source tensor (TensorType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTensorOpElementwiseBinaryType(args, kwargs, "tensor.part_add");
+      return DeduceTensorOpElementwiseBinaryType(args, kwargs, "tensor.part_add", false);
     });
 
 REGISTER_OP("tensor.part_mul")
@@ -322,7 +368,7 @@ REGISTER_OP("tensor.part_mul")
     .add_argument("src1", "Second source tensor (TensorType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTensorOpElementwiseBinaryType(args, kwargs, "tensor.part_mul");
+      return DeduceTensorOpElementwiseBinaryType(args, kwargs, "tensor.part_mul", false);
     });
 
 REGISTER_OP("tensor.part_max")
@@ -332,7 +378,7 @@ REGISTER_OP("tensor.part_max")
     .add_argument("src1", "Second source tensor (TensorType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTensorOpElementwiseBinaryType(args, kwargs, "tensor.part_max");
+      return DeduceTensorOpElementwiseBinaryType(args, kwargs, "tensor.part_max", false);
     });
 
 REGISTER_OP("tensor.part_min")
@@ -342,7 +388,7 @@ REGISTER_OP("tensor.part_min")
     .add_argument("src1", "Second source tensor (TensorType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTensorOpElementwiseBinaryType(args, kwargs, "tensor.part_min");
+      return DeduceTensorOpElementwiseBinaryType(args, kwargs, "tensor.part_min", false);
     });
 
 REGISTER_OP("tensor.fmod")
@@ -406,9 +452,9 @@ REGISTER_OP("tensor.cmp")
       CHECK(args.size() == 2) << "The operator tensor.cmp requires exactly 2 arguments, but got "
                               << args.size();
       if (AsTensorTypeLike(args[1]->GetType())) {  // window operand routes to binary path (issue #1694)
-        return DeduceTensorOpElementwiseBinaryType(args, kwargs, "tensor.cmp");
+        return DeduceTensorOpElementwiseBinaryType(args, kwargs, "tensor.cmp", false);
       }
-      return DeduceTensorOpElementwiseScalarType(args, kwargs, "tensor.cmp");
+      return DeduceTensorOpElementwiseScalarType(args, kwargs, "tensor.cmp", false, false);
     });
 
 // ============================================================================
@@ -491,7 +537,7 @@ REGISTER_OP("tensor.xor")
     .add_argument("rhs", "Right-hand side tensor (TensorType, integer dtype)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTensorOpBitwiseBinaryType(args, kwargs, "tensor.xor", false);
+      return DeduceTensorOpBitwiseBinaryType(args, kwargs, "tensor.xor", false, false);
     });
 
 REGISTER_OP("tensor.xors")
@@ -501,7 +547,7 @@ REGISTER_OP("tensor.xors")
     .add_argument("rhs", "Right-hand side scalar (ScalarType, integer dtype)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTensorOpBitwiseScalarType(args, kwargs, "tensor.xors");
+      return DeduceTensorOpBitwiseScalarType(args, kwargs, "tensor.xors", false, false);
     });
 
 // Shifts keep the lhs element type: the shift count never widens the result.

@@ -127,6 +127,25 @@ class AssembleScalarElementwiseDstEqValidProgram:
         return output
 
 
+@pl.program
+class AssembleBinaryElementwiseDstEqValidProgram:
+    """A binary result keeps the matching valid_shape of both operands."""
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        lhs: pl.Tensor[[SRC_ROWS, SRC_COLS_STATIC], pl.FP32],
+        rhs: pl.Tensor[[SRC_ROWS, SRC_COLS_STATIC], pl.FP32],
+        output: pl.Out[pl.Tensor[[SRC_ROWS, SRC_COLS_VALID], pl.FP32]],
+    ) -> pl.Tensor[[SRC_ROWS, SRC_COLS_VALID], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            lhs_narrow = pl.set_validshape(lhs, SRC_ROWS, SRC_COLS_VALID)
+            rhs_narrow = pl.set_validshape(rhs, SRC_ROWS, SRC_COLS_VALID)
+            summed = pl.add(lhs_narrow, rhs_narrow)
+            output = pl.assemble(output, summed, [0, 0])
+        return output
+
+
 def _make_src() -> torch.Tensor:
     """Build the source tensor.
 
@@ -199,6 +218,31 @@ class _AssembleNarrowValidTestCase(PTOTestCase):
 
     def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
         tensors["output"][:] = self._expected_fn(self._src)
+
+
+class _AssembleBinaryNarrowValidTestCase(PTOTestCase):
+    """Runtime fixture for two equally narrowed Tensor operands."""
+
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
+        self._lhs = _make_src()
+        self._rhs = _make_src() * 0.5
+
+    def get_name(self) -> str:
+        return "assemble_binary_elementwise_dst_eq_valid"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("lhs", [SRC_ROWS, SRC_COLS_STATIC], DataType.FP32, init_value=self._lhs),
+            TensorSpec("rhs", [SRC_ROWS, SRC_COLS_STATIC], DataType.FP32, init_value=self._rhs),
+            TensorSpec("output", [SRC_ROWS, SRC_COLS_VALID], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return AssembleBinaryElementwiseDstEqValidProgram
+
+    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
+        tensors["output"][:] = self._lhs[:, :SRC_COLS_VALID] + self._rhs[:, :SRC_COLS_VALID]
 
 
 class TestAssembleNarrowValidShape:
@@ -277,6 +321,11 @@ class TestAssembleNarrowValidShape:
                 platform=platform,
             )
         )
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", ONBOARD_PLATFORMS)
+    def test_assemble_binary_elementwise_dst_eq_valid(self, test_runner, platform):
+        result = test_runner.run(_AssembleBinaryNarrowValidTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 

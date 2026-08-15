@@ -343,6 +343,14 @@ Tensor-scalar 逐元素计算会创建新存储，但不能把 padding 凭空变
 与 padding 元数据。这与已有的 Tile-scalar 规则一致，确保 ragged tail 经
 Tensor-to-Tile 下降后仍保持窄有效区。
 
+对于普通 Tensor-tensor 算术算子（`add`、`sub`、`mul`、`div`、`fmod`、
+`maximum` 和 `minimum`），当两个操作数的物理 shape 相同，且其 effective
+`valid_shape` 可证明相等时，结果同样保留该有效区域。`and`、`or`、`shl` 和
+`shr` 也采用这条 exact-region 规则。它不需要映射广播轴，并与相应 Tile
+结果契约一致；结果仍是新存储，因此不会继承别名、layout、stride 或 padding
+元数据。比较、XOR、`part_*`、广播、不同有效区域，以及直接使用 distributed
+window 的操作数不在这条规则范围内，因为它们当前的下降或合并契约需要单独处理。
+
 `pl.reinterpret_view(data, dtype, *, shape=None)` 会根据输入分派到等价的 `pl.tensor` 或 `pl.tile` 算子，并保持返回类型种类不变。它是覆盖完全相同字节的零拷贝视图，因此 `dtype` 必须不同，且仅支持有/无符号 8/16/32/64 位整数、FP16、BF16 与 FP32。省略 `shape` 时，ND/row-major 缩放最后一轴，DN/col-major 按源/目标字节宽度比例缩放倒数第二轴。显式 shape 必须字节数相等；除非能证明它与自动推导 shape 等价，否则必须完全静态。部分有效的 `valid_shape` 只能使用与自动推导结果等价的 shape。零值/null padding 元数据会保留，依赖 dtype 的 max/min padding 则会清除。初始可执行路径支持 packed ND in-core tensor 及 packed、flat（`none_box`）row/col-major tile；DN tensor 可做类型推导但 Tensor-to-Tile 下降会拒绝，编排层 tensor 暂不支持。
 
 **示例：**

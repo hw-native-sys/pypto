@@ -369,6 +369,17 @@ effective `valid_shape` while dropping source alias, layout, stride, and padding
 metadata. This matches the existing Tile-scalar rule and keeps a ragged tail
 narrow through Tensor-to-Tile lowering.
 
+The ordinary arithmetic Tensor-tensor operators (`add`, `sub`, `mul`, `div`,
+`fmod`, `maximum`, and `minimum`) also preserve the effective `valid_shape`
+when both operands have identical physical shapes and their effective valid
+regions are provably equal. The same exact-region rule applies to `and`, `or`,
+`shl`, and `shr`. It needs no broadcast-axis mapping and agrees with the
+corresponding Tile result contract; the result remains fresh storage and
+therefore inherits no alias, layout, stride, or padding metadata. Comparison,
+XOR, `part_*`, broadcasting, different valid regions, and direct distributed
+window operands are not covered by this rule because their current lowering or
+combination contracts require separate handling.
+
 `pl.reinterpret_view(data, dtype, *, shape=None)` dispatches to the equivalent `pl.tensor` or `pl.tile` operator and returns the same kind. It is a zero-copy view over exactly the same bytes, so `dtype` must differ and be one of signed/unsigned 8/16/32/64-bit integers, FP16, BF16, or FP32. With no `shape`, ND/row-major scales the last axis and DN/col-major scales the penultimate axis by the source/target byte-width ratio. An explicit shape must be byte-equivalent and fully static unless it is provably identical to the auto-inferred shape; a partial `valid_shape` only permits that auto-equivalent shape. Zero/null padding metadata is preserved, while dtype-dependent max/min padding is cleared. The initial executable path supports packed ND in-core tensors and packed flat (`none_box`) row/col-major tiles; DN tensor inference is available but Tensor-to-Tile lowering rejects it, and orchestration tensors are unsupported.
 
 **Example:**
