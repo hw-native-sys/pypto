@@ -120,7 +120,7 @@ DDR ──────────► Vec ────────────�
 
 ```python
 t = pl.load(x, [off, 0], [128, 128])
-t = pl.set_validshape(t, [rows_left, 128])     # only `rows_left` rows are real
+t = pl.set_validshape(t, rows_left, 128)       # only `rows_left` rows are real
 m = pl.row_max(t)                              # pad value decides what the tail contributes
 ```
 

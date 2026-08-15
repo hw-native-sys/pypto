@@ -461,6 +461,21 @@ def test_tensor_unary_preserves_symbolic_valid_shape():
     assert valid[1] == vlen  # the symbolic extent is carried through unchanged
 
 
+@pytest.mark.parametrize("op_name", ["adds", "subs", "muls", "divs", "maximum", "minimum"])
+def test_tensor_scalar_elementwise_preserves_partial_valid_shape(op_name):
+    """Fresh scalar-elementwise results keep content validity, not source alias metadata."""
+    partial = _partial_tensor_var([32, 256], [28, 250])
+
+    result_type = getattr(ir.op.tensor, op_name)(partial, 1.0).type
+
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.tensor_view is not None
+    assert _const_int_values(result_type.tensor_view.valid_shape) == [28, 250]
+    assert result_type.tensor_view.stride == []
+    assert result_type.tensor_view.layout == ir.TensorLayout.ND
+    assert result_type.tensor_view.pad == ir.PadValue.null
+
+
 def test_tensor_cast_preserves_valid_shape_and_changes_dtype():
     """tensor.cast changes only the element type; the valid region is untouched."""
     call = ir.op.tensor.cast(_partial_tensor_var([64, 128], [64, 40]), target_type=DataType.FP16)
@@ -4841,6 +4856,23 @@ def test_tensor_bitwise_scalar(builder_name, op_name):
     # re-stamped to the tensor's dtype rather than promoting the result.
     assert result_type.dtype == DataType.INT16
     assert _const_int_values(result_type.shape) == [64, 128]
+
+
+@pytest.mark.parametrize(("builder_name", "op_name"), _BITWISE_SCALAR_OPS)
+def test_tensor_bitwise_scalar_preserves_partial_valid_shape(builder_name, op_name):
+    """The dtype-preserving scalar path must also keep content validity."""
+    span = ir.Span.unknown()
+    view = ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=[60, 120])
+    lhs = ir.Var("lhs", ir.TensorType([64, 128], DataType.INT16, tensor_view=view), span)
+
+    call = getattr(ir.op.tensor, builder_name)(lhs, 4)
+
+    assert call.op.name == op_name
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.INT16
+    assert result_type.tensor_view is not None
+    assert _const_int_values(result_type.tensor_view.valid_shape) == [60, 120]
 
 
 @pytest.mark.parametrize(("builder_name", "expected_op"), _BITWISE_SCALAR_DISPATCH)

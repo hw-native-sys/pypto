@@ -110,6 +110,23 @@ class AssembleSubscriptDstEqValidProgram:
         return output
 
 
+@pl.program
+class AssembleScalarElementwiseDstEqValidProgram:
+    """A scalar element-wise result keeps the narrowed source valid_shape."""
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        src: pl.Tensor[[SRC_ROWS, SRC_COLS_STATIC], pl.FP32],
+        output: pl.Out[pl.Tensor[[SRC_ROWS, SRC_COLS_VALID], pl.FP32]],
+    ) -> pl.Tensor[[SRC_ROWS, SRC_COLS_VALID], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            narrowed = pl.set_validshape(src, SRC_ROWS, SRC_COLS_VALID)
+            incremented = pl.add(narrowed, 1.0)
+            output = pl.assemble(output, incremented, [0, 0])
+        return output
+
+
 def _make_src() -> torch.Tensor:
     """Build the source tensor.
 
@@ -140,6 +157,10 @@ def _expected_dst_eq_valid(src: torch.Tensor) -> torch.Tensor:
     region. If the runtime wrote ``static_shape`` cells, it would OOB the target.
     """
     return src[:, :SRC_COLS_VALID].clone()
+
+
+def _expected_scalar_elementwise(src: torch.Tensor) -> torch.Tensor:
+    return src[:, :SRC_COLS_VALID] + 1.0
 
 
 class _AssembleNarrowValidTestCase(PTOTestCase):
@@ -240,6 +261,19 @@ class TestAssembleNarrowValidShape:
                 AssembleSubscriptDstEqValidProgram,
                 [SRC_ROWS, SRC_COLS_VALID],
                 _expected_dst_eq_valid,
+                platform=platform,
+            )
+        )
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", ONBOARD_PLATFORMS)
+    def test_assemble_scalar_elementwise_dst_eq_valid(self, test_runner, platform):
+        result = test_runner.run(
+            _AssembleNarrowValidTestCase(
+                "assemble_scalar_elementwise_dst_eq_valid",
+                AssembleScalarElementwiseDstEqValidProgram,
+                [SRC_ROWS, SRC_COLS_VALID],
+                _expected_scalar_elementwise,
                 platform=platform,
             )
         )

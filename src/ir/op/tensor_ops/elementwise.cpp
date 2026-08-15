@@ -94,7 +94,7 @@ TypePtr DeduceTensorOpElementwiseScalarType(const std::vector<ExprPtr>& args,
                       << args[1]->GetType()->TypeName();
 
   if (preserve_lhs_dtype) {
-    return std::make_shared<TensorType>(tensor_type1->shape_, tensor_type1->dtype_);
+    return MakeFreshTensorType(tensor_type1->shape_, tensor_type1->dtype_, GetValidShape(tensor_type1));
   }
 
   // TensorType + ScalarType - result is TensorType with same shape as first argument
@@ -102,7 +102,7 @@ TypePtr DeduceTensorOpElementwiseScalarType(const std::vector<ExprPtr>& args,
   CHECK(result_dtype) << "The operator " << op_name << " requires compatible data types, but got "
                       << args[0]->GetType()->TypeName() << " and " << args[1]->GetType()->TypeName();
 
-  return std::make_shared<TensorType>(tensor_type1->shape_, *result_dtype);
+  return MakeFreshTensorType(tensor_type1->shape_, *result_dtype, GetValidShape(tensor_type1));
 }
 
 // Bitwise and shift ops have no row/col-expand tile counterpart (there is no
