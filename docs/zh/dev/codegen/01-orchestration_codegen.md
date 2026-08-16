@@ -717,4 +717,4 @@ phase `N+1` 中的每个 task 都会等待 phase `N` 的**全部** `N_BRANCHES` 
 
 - [PTO 代码生成](00-pto_codegen.md) — PTO 后端的 MLIR 生成
 - [Pass 管理器](../passes/00-pass_manager.md) — 代码生成前应用的 IR 优化 Pass
-- [Python syntax: 手工依赖原语](../language/00-python_syntax.md#手工依赖原语) — 表层语法及语义
+- [Python syntax: 手工依赖原语](../language/02-manual_dependencies.md#手工依赖原语) — 表层语法及语义

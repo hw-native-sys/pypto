@@ -250,7 +250,7 @@ chapter, which is not written yet — for now see
 ### External C++ kernels
 
 A hand-written C++ kernel can be called like any other function. See
-[Integrating Hand-Written C++ Kernels](../../dev/language/01-external-kernels.md).
+[Integrating Hand-Written C++ Kernels](../../dev/language/04-external-kernels.md).
 
 ## Edge Cases
 
@@ -280,4 +280,4 @@ deps of a `@pl.jit` entry and spliced at the call site.
 - [Scopes and Placement](04-scopes.md) — `pl.at` and the other placement scopes.
 - [Quickstart](../02-quickstart.md) — the same decorators in a worked example.
 - [InlineFunctions](../../dev/passes/01-inline_functions.md) — how `Inline` bodies are spliced.
-- [Integrating Hand-Written C++ Kernels](../../dev/language/01-external-kernels.md) — calling external kernels.
+- [Integrating Hand-Written C++ Kernels](../../dev/language/04-external-kernels.md) — calling external kernels.

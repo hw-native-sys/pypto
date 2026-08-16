@@ -198,7 +198,7 @@ print("artifacts in:", compiled.output_dir)
 
 ### 外部 C++ kernel
 
-手写的 C++ kernel 可以像普通函数一样被调用。见 [集成手写 C++ Kernel](../../dev/language/01-external-kernels.md)。
+手写的 C++ kernel 可以像普通函数一样被调用。见 [集成手写 C++ Kernel](../../dev/language/04-external-kernels.md)。
 
 ## 边界情况
 
@@ -225,4 +225,4 @@ print("artifacts in:", compiled.output_dir)
 - [作用域与放置](04-scopes.md) —— `pl.at` 与其余放置作用域。
 - [快速上手](../02-quickstart.md) —— 同样的装饰器在一个完整例子里的用法。
 - [InlineFunctions](../../dev/passes/01-inline_functions.md) —— `Inline` 体如何被拼接。
-- [集成手写 C++ Kernel](../../dev/language/01-external-kernels.md) —— 调用外部 kernel。
+- [集成手写 C++ Kernel](../../dev/language/04-external-kernels.md) —— 调用外部 kernel。

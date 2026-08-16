@@ -62,7 +62,7 @@
 | 控制流：循环、携带值、条件、while | [控制流](language/02-control-flow.md) |
 | 多函数 program 与跨函数调用 | [快速上手](02-quickstart.md) |
 | `@pl.jit` 全家族（`.incore`、`.inline`、`.opaque`、`.host`） | [快速上手](02-quickstart.md)、[函数与程序](language/01-functions.md) |
-| 手写 C++ kernel 接入 | [外部 Kernel](../dev/language/01-external-kernels.md) |
+| 手写 C++ kernel 接入 | [外部 Kernel](../dev/language/04-external-kernels.md) |
 | 设备常驻张量、显式派发、性能基准 | [在设备上运行](00-getting_started.md) |
 | 分布式（多卡）程序与集合通信 | [分布式编程](distributed/index.md) |
 | 对照 PyTorch 参考实现做精度定位 | [Torch Codegen 调试指南](03-torch_codegen_debug.md) |
@@ -80,7 +80,7 @@
 | 混合 kernel（AIC + AIV 同一函数） | [LowerAutoVectorSplit](../dev/passes/20-lower_auto_vector_split.md)、[ExpandMixedKernel](../dev/passes/21-expand_mixed_kernel.md)、[TPUSH/TPOP](../reference/pto-isa/01-tpush_tpop.md) |
 | 性能提示与诊断 | [诊断](../dev/passes/92-diagnostics.md)、[编译性能剖析](../dev/01-compile-profiling.md) |
 | 运行时 DFX 开关、ring sizing、memory map | [运行时 DFX](../dev/03-runtime-dfx.md)、[逐任务 Ring Sizing](../dev/05-runtime-ring-sizing.md)、[内存图](../dev/07-memory-map.md) |
-| 外部 C++ kernel | [集成手写 C++ Kernel](../dev/language/01-external-kernels.md) |
+| 外部 C++ kernel | [集成手写 C++ Kernel](../dev/language/04-external-kernels.md) |
 
 ## 另请参阅
 

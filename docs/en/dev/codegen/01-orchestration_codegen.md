@@ -767,4 +767,4 @@ Every task in phase `N+1` waits for **all** `N_BRANCHES` tasks of phase `N`.
 
 - [PTO Codegen](00-pto_codegen.md) — MLIR generation for PTO backend
 - [Pass Manager](../passes/00-pass_manager.md) — IR optimization passes applied before codegen
-- [Python syntax: manual dependency primitives](../language/00-python_syntax.md#manual-dependency-primitives) — the user-facing surface form
+- [Python syntax: manual dependency primitives](../language/02-manual_dependencies.md#manual-dependency-primitives) — the user-facing surface form
