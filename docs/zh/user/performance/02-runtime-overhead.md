@@ -108,13 +108,15 @@ with pl.spmd(pl.system.available_aiv_count()):
 | `mode="hard"`（默认） | FFTS 屏障 | `core_type` 的**全部**物理核 | 无 |
 | `mode="soft"` | GM 轮询计数 | 任意（`used_cores` 个参与者） | `gm_workspace`、`used_cores` |
 
+两种 mode 都只同步到达：它们不会等待前序 `TSTORE`，也不会让业务数据的 cache 保持一致。通过 GM 从 producer 向 consumer 交接可能跨多条 cache line 的数据时，请保守地在 `syncall` 之前使用全 GM `pl.system.cacheinvalid()` + `pl.system.fence()`，然后在 consumer 读之前再次调用 `pl.system.cacheinvalid()`。tensor-region overload 当前只使 view 基地址所在的那一条 cache line 失效。
+
 **代价，而且很锋利。** 部分发射下的硬 `syncall` 会在设备上**死锁**（错误 507018）。PyPTO 在编译期就拒绝它 —— `HardSyncallOccupancy` 校验器 —— 这正是 grid 必须用 `available_aiv_count()` / `available_cluster_count()` 来定，而不是写一个恰好在今天这台设备上对得上的字面量的原因。如果你无法保证满占用，就用 `mode="soft"`：它轮询一块共享 GM workspace，因此能在部分占用下工作，代价换成了 GM 流量。
 
 ```python
 # 软屏障：部分占用下也能用
 pl.system.syncall(mode="soft", core_type="mix",
-                  gm_workspace=ws,     # 共享的、零初始化的 INT32 GM tensor，
-                  used_cores=n)        # 至少 used_cores * 8 个元素
+                  gm_workspace=ws,     # 独占且零初始化的 16 元素 INT32 GM tensor
+                  used_cores=n)
 ```
 
 **怎么确认：** 泳道图上 AICPU 调度器那条泳道里，原本夹在两半工作之间的那次往返消失了，两个任务变成一个。

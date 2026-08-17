@@ -1084,6 +1084,7 @@ class TestCompiledMetaAndFromDir:
         cc = MagicMock(name="fake_chip")
         runtime_config = {"aicpu_thread_num": 2, "enable_sdma": True}
         call_config = MagicMock(name="call_config")
+        worker = MagicMock(name="worker")
         args = [torch.zeros(128, 128) for _ in range(3)]
 
         with _fake_compile_and_assemble((cc, "host_build_graph", runtime_config)):
@@ -1094,7 +1095,8 @@ class TestCompiledMetaAndFromDir:
             assert reloaded.output_indices == [2]
             with patch("pypto.runtime.runner._coerced_to_orch_args") as oa_helper:
                 oa_helper.return_value = "fake_orch_args"
-                orch_args, coerced, return_style = reloaded.build_orch_args(*args)
+                orch_args, coerced, return_style = reloaded.build_orch_args(*args, worker=worker)
+                oa_helper.assert_called_once_with(args, worker)
             with _fake_call_config(call_config):
                 assert reloaded.build_call_config(RunConfig()) is call_config
 

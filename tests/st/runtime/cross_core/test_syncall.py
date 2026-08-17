@@ -144,12 +144,12 @@ class SPMDSyncAllProgram:
 
 
 class SPMDSyncAllTestCase(PTOTestCase):
-    """SPMD add + aiv_only syncall: 4 blocks, each processes [128, 128] of [512, 128]."""
+    """SPMD add + aiv_only syncall: 48 blocks, each processes [128, 128] of [6144, 128]."""
 
     __test__ = False
 
     def get_name(self) -> str:
-        return "spmd_syncall_aiv_512x128"
+        return "spmd_syncall_aiv_6144x128"
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default

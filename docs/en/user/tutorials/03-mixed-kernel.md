@@ -137,9 +137,12 @@ does not error — it leaks a ring slot, and the producer stalls once the ring f
 
 **The explicit form also makes cross-lane ordering yours.** A boundary operator orders only
 the value it carries. Nothing orders a cube-lane write against a vector-lane read of the
-same GM buffer, so a `pl.system.syncall(core_type="mix")` belongs between those phases. The
-`pl.split` path above does not need one — the compiler inserts the transfers, and the
-result is checked against torch. See
+same GM buffer. Publish and fence the producer's writes, place a
+cross-core `pl.system.syncall` between those phases, then invalidate the consumer's cache
+before it reads; the barrier alone only synchronizes arrival. Use the soft form when the
+launch may have partial occupancy, and use whole-GM cache maintenance when the buffer may
+span multiple cache lines. The `pl.split` path above does not need this sequence — the
+compiler inserts the transfers, and the result is checked against torch. See
 [Scopes and Placement](../language/04-scopes.md) for the rules.
 
 Reach for the explicit form when `pl.split` cannot express the shape: per-lane addressing,

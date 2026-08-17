@@ -249,19 +249,21 @@ def cacheinvalid(
     *,
     span: Span | None = None,
 ) -> Call:
-    """Invalidate cache lines: a tensor sub-region, or the whole GM address space.
+    """Invalidate one addressed cache line, or the whole GM address space.
 
     Two forms selected by arity:
 
     - No arguments: invalidate the entire GM address space; lowers to
       ``pto.cmo.cacheinvalid all #pto.address_space<gm>``.
-    - ``(tensor, shapes, offsets)``: invalidate one tensor sub-region. Both
-      ``shapes`` and ``offsets`` are N-D and match the tensor rank. Every region
-      size — a single element included — lowers to ``pto.partition_view`` +
+    - ``(tensor, shapes, offsets)``: locate a tensor sub-region and invalidate
+      only the cache line containing that view's base address. Both ``shapes``
+      and ``offsets`` are N-D and match the tensor rank. Every region size — a
+      single element included — lowers to ``pto.partition_view`` +
       ``pto.cmo.cacheinvalid %payload_view single_cache_line : !pto.partition_tensor_view<...>``.
+      ``shapes`` does not make the operation walk every cache line in the region.
 
     Args:
-        tensor: Target tensor whose sub-region is invalidated; omit for whole-GM
+        tensor: Target tensor whose view base addresses the cache line; omit for whole-GM
         shapes: Per-dimension region sizes; length must equal the tensor rank
         offsets: Per-dimension start offsets; length must equal the tensor rank
         span: Optional source span for debugging (auto-captured if not provided)
@@ -318,6 +320,10 @@ def syncall(*, core_type: str = "mix", span: Span | None = None) -> Call:
     past this point before any participant may proceed. Lowers to
     ``pto.syncall() mode = #pto.sync_all_mode<hard>``.
 
+    This is an arrival barrier only: it neither waits for preceding data
+    instructions nor publishes or invalidates business-data cache lines.
+    Cross-core GM handoff requires explicit cache maintenance and a GM fence.
+
     .. warning::
         The hard/FFTS form waits for **all** physical cores of the participant
         set to arrive. The kernel must therefore be launched at full occupancy
@@ -355,6 +361,10 @@ def syncall_soft(
     works at partial occupancy. All participant sets use the same operand ABI:
     ``[gm_workspace]`` when the launch determines the participant count, or
     ``[gm_workspace, used_cores]`` when it is explicit.
+
+    This is an arrival barrier only: it neither waits for preceding data
+    instructions nor publishes or invalidates business-data cache lines.
+    Cross-core GM handoff requires explicit cache maintenance and a GM fence.
 
     Args:
         core_type: Participant set, one of "aiv_only", "aic_only", or "mix".

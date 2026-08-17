@@ -124,7 +124,7 @@ CoreAffinity ClassifyIntrinsicCallAffinity(const CallPtr& call) {
   // the hard and soft forms): a "mix" barrier rendezvouses both cube and vector
   // cores, so it is SHARED (duplicated onto both lanes by ExpandMixedKernel);
   // "aic_only" runs on cube, "aiv_only" on vector. The hard form has no operands
-  // and the v0.55 soft form starts with a GM tensor, so either would otherwise
+  // and the soft form starts with a GM tensor, so either would otherwise
   // fall through to SHARED for every core_type. Classifying by core_type keeps
   // aiv_only/aic_only on their own lane in a mixed kernel.
   if (IsOp(op, "system.syncall")) {

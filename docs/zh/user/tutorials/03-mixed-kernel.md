@@ -114,7 +114,7 @@ tile that crosses the cube/vector boundary
 
 **每次 push 必须与一次 pop 配对，每次 pop 必须与一次 `tfree` 配对。** 漏掉 `tfree` 不会报错 —— 它泄漏一个环槽，等环满了生产者就卡住。
 
-**显式写法还把跨 lane 的定序也交给了你。** 边界算子只为它所搬运的那一个值定序；没有任何东西会为 cube lane 的写与 vector lane 对**同一块 GM 缓冲区**的读定序，所以这两个阶段之间需要一个 `pl.system.syncall(core_type="mix")`。上面的 `pl.split` 路径不需要 —— 传输由编译器插入，结果也与 torch 对拍过。规则见 [作用域与放置](../language/04-scopes.md)。
+**显式写法还把跨 lane 的定序也交给了你。** 边界算子只为它所搬运的那一个值定序；没有任何东西会为 cube lane 的写与 vector lane 对**同一块 GM 缓冲区**的读定序。先发布 producer 的写并执行 fence，再在两个阶段之间放置跨核 `pl.system.syncall`，最后在 consumer 读之前使其 cache 失效；barrier 本身只同步到达。可能部分占用时使用 soft 形式，buffer 可能跨多条 cache line 时使用全 GM cache 维护。上面的 `pl.split` 路径不需要这组序列 —— 传输由编译器插入，结果也与 torch 对拍过。规则见 [作用域与放置](../language/04-scopes.md)。
 
 当 `pl.split` 表达不了所需形状时才动用显式形式：逐通道寻址、只有某一个通道算得出的 gather、或者一个混合了 split 与非 split 工作的区域。`tests/st/codegen/dsl/test_split_aiv_gather_row_codegen.py` 是一个实例。其余情况留在 `pl.split` 上 —— 它插入的是同样的算子，而且配对不会错。
 

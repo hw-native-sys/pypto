@@ -1163,7 +1163,7 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
     return;
   }
 
-  // PTOAS v0.55 gives every system.syncall soft form the same operands:
+  // The current PTO-ISA gives every system.syncall soft form the same operands:
   // [gm_workspace] or [gm_workspace, used_cores]. Print them through the
   // high-level keyword-only DSL surface so the program round-trips.
   if (IsOp(op, "system.syncall") && (op->args_.size() == 1 || op->args_.size() == 2)) {

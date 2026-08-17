@@ -80,7 +80,7 @@ class TestOrchestrationMore:
         code = _generate_orch_code(Fp4SliceProgram)
         assert "uint32_t chunk_offsets[2] = {0, 4};" in code
         assert "std::min<uint32_t>(4, ext_data.shapes[1] - chunk_offsets[1])" in code
-        assert "Tensor chunk = ext_data.view(chunk_shapes, chunk_offsets);" in code
+        assert "ChipTensor chunk = ext_data.view(chunk_shapes, chunk_offsets);" in code
 
     def test_fp4_slice_dynamic_offset_checks_alignment_before_conversion(self):
         """Dynamic packed-axis offsets are checked before conversion to carrier units."""
@@ -139,9 +139,9 @@ class TestOrchestrationMore:
 
         code = _generate_orch_code(Fp4ShapeViewProgram)
         assert "uint32_t reshaped_shapes[2] = {4, 16};" in code
-        assert "Tensor reshaped = ext_data.reshape(reshaped_shapes, 2);" in code
+        assert "ChipTensor reshaped = ext_data.reshape(reshaped_shapes, 2);" in code
         assert "uint32_t viewed_shapes[2] = {2, 32};" in code
-        assert "Tensor viewed = reshaped.reshape(viewed_shapes, 2);" in code
+        assert "ChipTensor viewed = reshaped.reshape(viewed_shapes, 2);" in code
 
     def test_fp4_transpose_keeps_packed_axis_fixed(self):
         """Swapping non-packed axes is representable; moving the packed axis is not."""
@@ -159,7 +159,7 @@ class TestOrchestrationMore:
                 return transposed
 
         code = _generate_orch_code(Fp4NonPackedTransposeProgram)
-        assert "Tensor transposed = ext_data.transpose(0, 1);" in code
+        assert "ChipTensor transposed = ext_data.transpose(0, 1);" in code
 
         @pl.program
         class Fp4PackedTransposeProgram:
@@ -369,7 +369,7 @@ class TestOrchestrationMore:
 
         code = _generate_orch_code(DropDimSliceProgram)
 
-        assert "Tensor chunk_view = ext_data.view(chunk_shapes, chunk_offsets);" in code
+        assert "ChipTensor chunk_view = ext_data.view(chunk_shapes, chunk_offsets);" in code
         assert "chunk.ndims = 2;" in code
         assert "chunk.shapes[0] = chunk_view.shapes[0];" in code
         assert "chunk.strides[0] = chunk_view.strides[0];" in code

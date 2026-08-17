@@ -22,6 +22,7 @@ run everywhere without ``simpler``.
 
 import os
 import struct
+import sys
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -158,6 +159,26 @@ def test_parse_no_markers_returns_empty(span_root):
     assert stats.device_wall_us == []
     assert stats.host_wall_us == []
     assert stats.invocations == []
+
+
+def test_parse_ignores_l3_host_scheduling_spans(span_root, monkeypatch):
+    """L3/L4 host-scheduler markers must not form a bogus benchmark lane."""
+    lines = [_strace_line(0, "l3.dispatch", 900_000, pid=99, hid="0")]
+    lines += _launch_lines(0, span_root, host_us=50, device_us=5, pid=100)
+
+    stats = _parse_stats_from_strace("\n".join(lines), rounds=1, warmup=0)
+
+    assert stats.host_wall_us == [50.0]
+    assert stats.device_wall_us == [5.0]
+    assert len(stats.invocations) == 1
+
+    # Older compatible runtimes predate the helper. PyPTO still filters the
+    # namespace locally instead of failing import or selecting the bogus lane.
+    strace_timing = sys.modules["simpler_setup.tools.strace_timing"]
+    monkeypatch.delattr(strace_timing, "legacy_spans", raising=False)
+    fallback_stats = _parse_stats_from_strace("\n".join(lines), rounds=1, warmup=0)
+    assert fallback_stats.host_wall_us == [50.0]
+    assert fallback_stats.device_wall_us == [5.0]
 
 
 def test_parse_populates_full_span_tree_and_format(span_root):
@@ -374,13 +395,14 @@ def test_parse_l3_keeps_dispatch_missing_one_device_marker(span_root):
     assert len(stats.rounds_dispatches[0][100]) == 1
 
 
-def test_parse_l3_recovers_interleaved_records_on_one_line(span_root):
+def test_parse_l3_recovers_interleaved_records_on_one_line(span_root, monkeypatch):
     """Two ``[STRACE]`` records mashed onto one physical line are both recovered.
 
     L3 forks one chip worker per rank sharing the capture fd; concurrent writes
     can interleave two complete records onto a single physical line. The parser
-    must re-split on the ``[STRACE]`` marker and recover both — dropping the
-    second record would zero that (round, rank).
+    must recover both records — dropping the second would zero that (round,
+    rank). PyPTO normalizes the records before calling the runtime parser so
+    this also works with older compatible parser implementations.
     """
     lines = _launch_lines(0, span_root, host_us=100, device_us=10, pid=100)
     lines += _launch_lines(1, span_root, host_us=300, device_us=30, pid=100)
@@ -389,10 +411,23 @@ def test_parse_l3_recovers_interleaved_records_on_one_line(span_root):
     # other record keeps its own line.
     mashed = "\n".join([lines[0], f"{lines[1]} {lines[2]}", lines[3]])
 
+    # Model the pre-#1210 parser, which yielded only the first record from each
+    # physical line. The production normalization must split the mashed line
+    # before this parser sees it.
+    strace_timing = sys.modules["simpler_setup.tools.strace_timing"]
+    parse_all = strace_timing.parse_spans
+
+    def parse_first_per_line(raw_lines):
+        for raw_line in raw_lines:
+            for span in parse_all([raw_line]):
+                yield span
+                break
+
+    monkeypatch.setattr(strace_timing, "parse_spans", parse_first_per_line)
+
     stats = _parse_stats_from_strace(mashed, rounds=2, warmup=0, distributed=True)
 
-    # Both invocations survive. Without the re-split, the second record on the
-    # mashed line is dropped, so inv1's host span reads 0 for round1.
+    # Both invocations survive after marker normalization.
     assert stats.fallback_flattened is False
     assert stats.per_rank("device") == {100: [10.0, 30.0]}
     assert stats.per_rank("host") == {100: [100.0, 300.0]}

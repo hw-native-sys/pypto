@@ -3614,7 +3614,7 @@ class TestSyncAllCodegen:
         assert line, f"soft pto.syncall not found in MLIR:\n{mlir}"
         assert "mode = #pto.sync_all_mode<soft>" in line, f"soft mode missing:\n{line}"
         assert "core_type = #pto.sync_core_type<aiv_only>" in line, f"core_type missing:\n{line}"
-        # PTOAS v0.55 takes only gm partition_view + optional used_cores.
+        # The current PTO-ISA takes only gm partition_view + optional used_cores.
         assert "partition_tensor_view<16xi32>" in line, f"gm partition_view missing:\n{line}"
         assert "tile_buf" not in line, f"legacy scratch operand still emitted:\n{line}"
         assert line.split(" : ", 1)[0].count(",") == 1, f"unexpected soft operand count:\n{line}"
@@ -3624,7 +3624,7 @@ class TestSyncAllCodegen:
         )
 
     def test_syncall_soft_omits_launch_derived_participant_count(self):
-        """used_cores=0 emits the canonical single-operand v0.55 form."""
+        """used_cores=0 emits the canonical single-operand soft form."""
 
         @pl.program
         class Prog:
@@ -3641,7 +3641,7 @@ class TestSyncAllCodegen:
         assert "mode = #pto.sync_all_mode<soft>" in line, f"soft mode missing:\n{line}"
 
     def test_syncall_soft_accepts_dynamic_participant_count(self):
-        """An INT32 scalar lowers as the optional v0.55 used_cores operand."""
+        """An INT32 scalar lowers as the optional soft used_cores operand."""
 
         @pl.program
         class Prog:

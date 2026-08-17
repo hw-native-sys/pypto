@@ -619,7 +619,7 @@ void RegisterCrossCoreOps(Backend& backend, const std::unordered_set<std::string
     }
 
     CHECK(mode == "soft") << "system.syncall: mode must be hard|soft, got " << mode;
-    // PTOAS v0.55 uses one soft operand ABI for every participant set:
+    // The current PTO-ISA uses one soft operand ABI for every participant set:
     // [gm_workspace] or [gm_workspace, used_cores]. Omitting used_cores asks
     // PTO-ISA to derive the participant count from the launch configuration.
     CHECK(op->args_.size() == 1 || op->args_.size() == 2)

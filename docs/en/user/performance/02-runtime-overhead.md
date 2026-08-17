@@ -138,6 +138,13 @@ Two modes, and the choice is not stylistic:
 | `mode="hard"` (default) | FFTS barrier | **All** physical cores of `core_type` | None |
 | `mode="soft"` | GM-polling counter | Any (`used_cores` participants) | `gm_workspace`, `used_cores` |
 
+Both modes synchronize arrival only: they do not wait for a preceding `TSTORE` or make
+business data cache-coherent. For a GM producer-to-consumer handoff that may span multiple
+cache lines, conservatively use whole-GM `pl.system.cacheinvalid()` +
+`pl.system.fence()` before `syncall`, then call `pl.system.cacheinvalid()` again on the
+consumer before its read. The tensor-region overload currently invalidates only the cache
+line containing the view's base address.
+
 **Cost, and it is a sharp one.** A hard `syncall` under a partial launch **deadlocks on
 device** (error 507018). PyPTO rejects that at compile time — the `HardSyncallOccupancy`
 verifier — which is why the grid must be sized with `available_aiv_count()` /
@@ -148,8 +155,8 @@ it works at partial occupancy and costs GM traffic instead.
 ```python
 # Soft barrier: works at partial occupancy
 pl.system.syncall(mode="soft", core_type="mix",
-                  gm_workspace=ws,     # shared zero-init INT32 GM tensor,
-                  used_cores=n)        # at least used_cores * 8 elements
+                  gm_workspace=ws,     # exclusive zero-init 16-element INT32 GM tensor
+                  used_cores=n)
 ```
 
 **How to confirm:** the AICPU scheduler lane in the swimlane loses the round-trip that used

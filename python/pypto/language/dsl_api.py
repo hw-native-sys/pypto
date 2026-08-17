@@ -1064,8 +1064,9 @@ def split_aiv(n: int, *, mode: ir.SplitMode) -> SplitAivContext:
     itself: a cube ``tile.store`` whose GM tensor a vector ``tile.load`` reads
     back, when the two share an origin and the load is in or under the store's
     body. Everything else — a comm op reading the buffer, a consumer in a
-    sibling body — needs an explicit ``pl.system.syncall(core_type="mix")`` and
-    remains the author's responsibility.
+    sibling body — needs explicit producer-side cache publication and a GM
+    fence, a cross-core ``pl.system.syncall``, and consumer-side invalidation.
+    That sequence remains the author's responsibility.
 
     The region survives parse -> SSA -> ResolveBackendOpLayouts as a structural
     node (printer emits ``for aiv_id in pl.split_aiv(...):`` so parse->print->parse

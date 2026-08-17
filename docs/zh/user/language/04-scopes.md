@@ -165,7 +165,12 @@ push，依然会把它自己 tile 中的内容发出去。因此从 `mode=NONE` 
 **GM 上的数据流不在此规则覆盖范围内。** 上述规则针对的是跨区域边界的 *tile* 值。GM
 tensor 不属于任何一条 lane，因此没有任何边界算子能表达经由它的跨越 —— `pld.tensor.put`
 的签名本身就收 GM tensor。AIC 与 AIV 异步运行，所以为 cube lane 的写与 vector lane 对同一
-块 GM 缓冲区的读定序，仍然由你负责：在两个阶段之间加 `pl.system.syncall(core_type="mix")`。
+块 GM 缓冲区的读定序，仍然由你负责。`ExpandMixedKernel` 只会自动处理一种窄特例：唯一的 cube
+`tile.store` producer 与同 origin 的 vector `tile.load` 位于同一 body 或嵌套 body。其余 GM 交接——包括
+V->C、通信算子和 sibling body——都需要你处理。`syncall` 本身只对齐到达：在 barrier 前发布 producer
+的 cache line 并执行 GM fence，然后在 consumer 读之前使其 cache 失效。对于可能跨多条 cache line
+的 buffer，请使用保守的全 GM `pl.system.cacheinvalid()` 形式；tensor-region overload 当前只覆盖
+view 基地址所在的那一条 cache line。
 
 ### 把跨 rank 通信算子写进区域
 
@@ -233,9 +238,25 @@ for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):
 ### 跨 lane 的定序同样由你负责
 
 AIC 与 AIV **异步**运行。边界算子只为它所搬运的那一个值定序 —— 这正是这次传输的含义 ——
-但没有任何东西能为 cube lane 的写与 vector lane 对同一块 **GM 缓冲区**的读定序：请在这
-两个阶段之间加 `pl.system.syncall(core_type="mix")`。区域只决定工作放在哪条 lane 上，
-并不为两条 lane 之间定序。
+但没有任何东西能为 cube lane 的写与 vector lane 对同一块 **GM 缓冲区**的读定序。先发布 producer
+的 cache line 并执行 GM fence，再在阶段之间放置跨核 barrier，最后在 consumer 读之前使其 cache
+失效；barrier 本身只同步到达。区域只决定工作放在哪条 lane 上，并不为两条 lane 之间定序。
+
+下面的保守序列使用全 GM cache 维护和 soft barrier，因此对跨多条 cache line 的 buffer 与部分占用都
+安全。`sync_ws` 是独占且已清零的 16 元素 `INT32` GM tensor；`participant_count` 是参与同步的 AIC 与
+AIV 核总数。
+
+```python
+pl.system.cacheinvalid()  # 发布 producer 的全部 cache line
+pl.system.fence()         # 等待它们对 GM 可见
+pl.system.syncall(
+    mode="soft",
+    core_type="mix",
+    gm_workspace=sync_ws,
+    used_cores=participant_count,
+)                         # 只同步到达
+pl.system.cacheinvalid()  # consumer 读之前使 cache 失效
+```
 
 ## 边界情况
 
@@ -253,7 +274,7 @@ AIC 与 AIV **异步**运行。边界算子只为它所搬运的那一个值定�
 | **`'x' is defined inside a pl.split_aiv region but ... reads it on the CUBE lane outside`** | 未写明的 V->C 跨越（离开区域） | 在区域内 gather：`x = pl.aic_gather(x)` |
 | **cube 随机读到其中一条 lane 的值** | 从 `mode=NONE` 区域向外的 V->C 跨越 —— 两条 lane 都 push、共用一个槽位、无仲裁，**不会有诊断** | 只 gather lane-uniform 的值；若两条 lane 持有不同的半块，请改用数据并行区域 |
 | **对端的信号计数器读到的值是应有值的两倍** | 两条 AIV lane 都执行了同一条 `pld.system.notify` —— **不会有诊断** | 按 `aiv_id` 分片该 notify，或用 `if aiv_id == 0:` 限定 |
-| **某个 rank 的 `pld.system.wait` 返回后读到过期数据** | 要么是上面的重复 notify，要么是 cube 与 vector 阶段之间缺少 `pl.system.syncall(core_type="mix")` | 分片该 notify；补上屏障 |
+| **某个 rank 的 `pld.system.wait` 返回后读到过期数据** | 要么是上面的重复 notify，要么是 cube 与 vector 阶段之间的 cache 发布 / fence / barrier / 失效序列不完整 | 分片该 notify；补全 GM 交接序列 |
 
 ## See Also
 

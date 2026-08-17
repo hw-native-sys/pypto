@@ -130,6 +130,14 @@ def syncall(
       cache line and polls until all participants arrive. Supported for every
       ``core_type`` ("aiv_only", "aic_only", "mix").
 
+    Both modes synchronize arrival only. They do not wait for preceding data
+    instructions or publish/invalidate business-data cache lines. For a
+    cross-core GM handoff that may span multiple cache lines, conservatively
+    call whole-GM ``pl.system.cacheinvalid()`` and ``pl.system.fence()`` before
+    the barrier, then call ``pl.system.cacheinvalid()`` again on the consumer
+    before it reads. The tensor-region overload covers only the cache line
+    containing the view's base address.
+
     Soft-mode arguments:
 
     Args:
@@ -215,19 +223,21 @@ def cacheinvalid(
     *,
     span: Span | None = None,
 ) -> Call:
-    """Invalidate cache lines: a tensor sub-region, or the whole GM address space.
+    """Invalidate one addressed cache line, or the whole GM address space.
 
     Two forms selected by arity:
 
     - No arguments: invalidate the entire GM address space; lowers to
       ``pto.cmo.cacheinvalid all #pto.address_space<gm>``.
-    - ``(tensor, shapes, offsets)``: invalidate one tensor sub-region; lowers to
+    - ``(tensor, shapes, offsets)``: locate a tensor sub-region and invalidate
+      only the cache line containing that view's base address; lowers to
       ``pto.partition_view`` +
       ``pto.cmo.cacheinvalid %payload_view single_cache_line : !pto.partition_tensor_view<...>``
-      for every region size, a single element included.
+      for every region size, a single element included. ``shapes`` does not
+      make the operation walk every cache line in the region.
 
     Args:
-        tensor: Target tensor whose sub-region is invalidated; omit for whole-GM.
+        tensor: Target tensor whose view base addresses the cache line; omit for whole-GM.
         shapes: Per-dimension region sizes; length must equal the tensor rank.
         offsets: Per-dimension start offsets; length must equal the tensor rank.
         span: Optional source span for debugging (auto-captured if not provided).
