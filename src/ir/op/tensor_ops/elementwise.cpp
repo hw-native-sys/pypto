@@ -55,6 +55,11 @@ static bool IsTSubsDataType(DataType dtype) {
 /// are valid.
 static std::optional<std::vector<ExprPtr>> GetMatchingElementwiseValidShape(
     const std::shared_ptr<const TensorType>& lhs, const std::shared_ptr<const TensorType>& rhs) {
+  // Direct distributed windows require a separate lowering contract.  AsTensorTypeLike
+  // deliberately accepts them, so recover the exact ObjectKind here before propagating
+  // metadata that is currently supported only for plain TensorType operands.
+  if (!As<TensorType>(lhs) || !As<TensorType>(rhs)) return std::nullopt;
+
   if (lhs->shape_.size() != rhs->shape_.size()) return std::nullopt;
   for (size_t i = 0; i < lhs->shape_.size(); ++i) {
     if (!DimensionsEqual(lhs->shape_[i], rhs->shape_[i])) return std::nullopt;
@@ -136,7 +141,7 @@ TypePtr DeduceTensorOpElementwiseScalarType(const std::vector<ExprPtr>& args,
     result_dtype = *promoted_dtype;
   }
 
-  if (preserve_valid_shape) {
+  if (preserve_valid_shape && As<TensorType>(args[0]->GetType())) {
     return MakeFreshTensorType(tensor_type1->shape_, result_dtype, GetValidShape(tensor_type1));
   }
   return std::make_shared<TensorType>(tensor_type1->shape_, result_dtype);

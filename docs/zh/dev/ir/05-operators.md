@@ -338,10 +338,13 @@ UINT32 + INT32 → INT32 (signed precedence)
 
 `tensor.view` 是只修改元数据的零拷贝 shape/layout 重新解释操作。它注册为 `TensorOp`，并在 `ConvertTensorToTileOps` 中作为 passthrough 处理；PTO in-core codegen 会将其降级为基于原始 base pointer 的 `pto.make_tensor_view`。目标 rank 至少为 1（DN 至少为 2）；编排层仅支持 ND shape 重新解释，且不能同时改变 layout。对部分有效的源张量进行 shape 重新解释时，仅支持把 packed ND 的 leading dimensions 折叠为 2D，或把连续前缀线性折叠为 `[1, product(shape)]`；两种形式都必须显式提供目标 `valid_shape`，并会保留源张量类型及其底层元数据。
 
-Tensor-scalar 逐元素计算会创建新存储，但不能把 padding 凭空变成有效数据。因此
-结果保留 Tensor 操作数的 effective `valid_shape`，同时丢弃源别名、layout、stride
-与 padding 元数据。这与已有的 Tile-scalar 规则一致，确保 ragged tail 经
-Tensor-to-Tile 下降后仍保持窄有效区。
+对于普通 `TensorType` 操作数，已支持的 Tensor-scalar 算术算子（`adds`、
+`subs`、`muls`、`divs`、`fmods` 以及 scalar `maximum` 或 `minimum`）和
+位运算/移位算子（`ands`、`ors`、`shls` 和 `shrs`）会创建新存储，但不能
+把 padding 凭空变成有效数据。因此结果保留 Tensor 操作数的 effective
+`valid_shape`，同时丢弃源别名、layout、stride 与 padding 元数据。这与已有的
+Tile-scalar 规则一致，确保 ragged tail 经 Tensor-to-Tile 下降后仍保持窄有效区。
+Scalar 比较与 XOR（`cmp` 和 `xors`）仍不在此规则的支持范围内。
 
 对于普通 Tensor-tensor 算术算子（`add`、`sub`、`mul`、`div`、`fmod`、
 `maximum` 和 `minimum`），当两个操作数的物理 shape 相同，且其 effective

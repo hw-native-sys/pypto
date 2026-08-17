@@ -363,11 +363,14 @@ UINT32 + INT32 → INT32 (signed precedence)
 
 `tensor.view` is a metadata-only zero-copy shape/layout reinterpret. It is registered as a `TensorOp` passthrough in `ConvertTensorToTileOps`; PTO in-core codegen lowers it to `pto.make_tensor_view` over the original base pointer. Targets require rank at least 1 (DN requires rank at least 2); orchestration shape reinterpret is ND-only and cannot also change layout. Shape reinterpretation of a partially valid source is limited to either a packed ND leading-dimension collapse to 2D or a contiguous-prefix linear collapse to `[1, product(shape)]`; both require an explicit target `valid_shape`. These forms preserve the source tensor kind and backing metadata.
 
-Tensor-scalar element-wise computation creates fresh storage but cannot create
-valid data in padding. Its result therefore preserves the tensor operand's
-effective `valid_shape` while dropping source alias, layout, stride, and padding
-metadata. This matches the existing Tile-scalar rule and keeps a ragged tail
-narrow through Tensor-to-Tile lowering.
+For plain `TensorType` operands, the supported Tensor-scalar arithmetic
+operators (`adds`, `subs`, `muls`, `divs`, `fmods`, and scalar `maximum` or
+`minimum`) and bitwise/shift operators (`ands`, `ors`, `shls`, and `shrs`)
+create fresh storage but cannot create valid data in padding. Their results
+therefore preserve the tensor operand's effective `valid_shape` while dropping
+source alias, layout, stride, and padding metadata. This matches the existing
+Tile-scalar rule and keeps a ragged tail narrow through Tensor-to-Tile lowering.
+Scalar comparison and XOR (`cmp` and `xors`) remain excluded.
 
 The ordinary arithmetic Tensor-tensor operators (`add`, `sub`, `mul`, `div`,
 `fmod`, `maximum`, and `minimum`) also preserve the effective `valid_shape`

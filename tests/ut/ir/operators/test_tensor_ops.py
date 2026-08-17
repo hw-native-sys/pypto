@@ -556,6 +556,34 @@ def test_tensor_cmp_does_not_claim_partial_valid_shape_before_lowering_support(r
     assert result_type.tensor_view is None
 
 
+@pytest.mark.parametrize("op_name", ["adds", "ands", "shls"])
+def test_tensor_scalar_elementwise_does_not_preserve_distributed_valid_shape(op_name):
+    """Direct distributed windows need a separate valid-shape lowering contract."""
+    window = _partial_distributed_tensor_var([32, 256], [28, 250], dtype=DataType.INT32)
+
+    result_type = getattr(ir.op.tensor, op_name)(window, 1).type
+
+    assert isinstance(result_type, ir.TensorType)
+    assert not isinstance(result_type, ir.DistributedTensorType)
+    assert result_type.tensor_view is None
+
+
+@pytest.mark.parametrize("op_name", ["add", "and_", "shl"])
+@pytest.mark.parametrize("distributed_side", ["lhs", "rhs"])
+def test_tensor_binary_elementwise_does_not_preserve_distributed_valid_shape(op_name, distributed_side):
+    """Matching distributed windows remain excluded for arithmetic, bitwise, and shift ops."""
+    make_lhs = _partial_distributed_tensor_var if distributed_side == "lhs" else _partial_tensor_var
+    make_rhs = _partial_distributed_tensor_var if distributed_side == "rhs" else _partial_tensor_var
+    lhs = make_lhs([32, 256], [28, 250], name="lhs", dtype=DataType.INT32)
+    rhs = make_rhs([32, 256], [28, 250], name="rhs", dtype=DataType.INT32)
+
+    result_type = getattr(ir.op.tensor, op_name)(lhs, rhs).type
+
+    assert isinstance(result_type, ir.TensorType)
+    assert not isinstance(result_type, ir.DistributedTensorType)
+    assert result_type.tensor_view is None
+
+
 def test_tensor_cast_preserves_valid_shape_and_changes_dtype():
     """tensor.cast changes only the element type; the valid region is untouched."""
     call = ir.op.tensor.cast(_partial_tensor_var([64, 128], [64, 40]), target_type=DataType.FP16)
@@ -2556,6 +2584,13 @@ def _partial_tensor_var(shape, valid_shape, pad=ir.PadValue.null, name="t", dtyp
     span = ir.Span.unknown()
     view = ir.TensorView(stride=[], layout=ir.TensorLayout.ND, valid_shape=valid_shape, pad=pad)
     return ir.Var(name, ir.TensorType(shape, dtype, tensor_view=view), span)
+
+
+def _partial_distributed_tensor_var(shape, valid_shape, name="t", dtype=DataType.FP32):
+    """Build a direct distributed-window Var with a partial valid region."""
+    span = ir.Span.unknown()
+    view = ir.TensorView(stride=[], layout=ir.TensorLayout.ND, valid_shape=valid_shape)
+    return ir.Var(name, ir.DistributedTensorType(shape, dtype, None, view), span)
 
 
 def _valid_of(result_type):
