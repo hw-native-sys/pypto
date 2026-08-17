@@ -632,9 +632,14 @@ static std::string MakeDeferWaitCodegenPTO(const CallPtr& op, codegen::CodegenBa
     layout = dist_type->tensor_view_->layout;
     strides = dist_type->tensor_view_->stride;
   }
+  // The layout gate precedes the stride-source choice. `MaterializeTensorStrides`
+  // fills every empty stride slot before codegen, so an NZ signal normally
+  // arrives here carrying explicit strides; gating inside the `strides.empty()`
+  // branch below would let it through and flatten the fractal coordinate as a
+  // plain row-major `sum(offset[i] * stride[i])`.
+  CHECK_SPAN(layout != ir::TensorLayout::NZ, op->span_)
+      << "pld.system.defer_wait does not support an NZ signal TensorView; use an ND/DN INT32 signal";
   if (strides.empty()) {
-    CHECK_SPAN(layout != ir::TensorLayout::NZ, op->span_)
-        << "pld.system.defer_wait does not support an NZ signal TensorView; use an ND/DN INT32 signal";
     strides = ir::tensor_view_semantics::BuildLogicalStridesFromLayout(dist_type->shape_, layout);
   }
   INTERNAL_CHECK_SPAN(strides.size() == rank, op->span_)

@@ -320,6 +320,45 @@ def test_defer_wait_rejects_slice_alias_without_encoded_logical_origin():
         _generate_mlir(P)
 
 
+@pytest.mark.parametrize(
+    "view",
+    [
+        pytest.param(
+            pl.TensorView(stride=[16, 1], layout=pl.TensorLayout.NZ),
+            id="explicit-strides",
+        ),
+        pytest.param(
+            pl.TensorView(valid_shape=[16, 16], layout=pl.TensorLayout.NZ),
+            id="synthesized-strides",
+        ),
+    ],
+)
+def test_defer_wait_rejects_nz_signal_from_either_stride_source(view):
+    """The layout gate precedes the stride-source choice.
+
+    MaterializeTensorStrides fills empty stride slots before codegen, so an NZ
+    signal normally arrives carrying explicit strides. Gating the rejection on
+    an empty stride vector would flatten the fractal coordinate as a plain
+    row-major sum and register the condition on a wrong address.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, signal: pld.DistributedTensor[[16, 16], pl.INT32, view], row: pl.Scalar[pl.INT32]):
+            with pl.at(level=pl.Level.CORE_GROUP, name_hint="kernel"):
+                pld.system.defer_wait(signal, offsets=[row, 0], expected=1, cmp=pld.WaitCmp.Ge)
+
+    # Run without pass verification. The autouse verification fixture makes an
+    # earlier property verifier reject an NZ signal during MaterializeTensorStrides,
+    # which would mask the guard under test; a default (unverified) compile
+    # reaches lowering and is exactly where the wrong address would be registered.
+    with _core_passes.PassContext([]), pytest.raises(
+        ValueError, match="does not support an NZ signal TensorView"
+    ):
+        _generate_outlined_waiter_mlir(P)
+
+
 def test_remote_load_ragged_tail_partitions_only_valid_extent():
     """A fixed physical remote tile must not read beyond its valid tail."""
 
