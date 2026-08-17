@@ -833,6 +833,197 @@ bool StmtUsesVar(const StmtPtr& stmt, const Var* target) {
   return collector.var_uses.count(target) > 0;
 }
 
+struct FullTensorScalarUpdateCandidate {
+  size_t assemble_index;
+  VarPtr target;
+  VarPtr staging;
+  AssignStmtPtr full_stmt;
+  AssignStmtPtr assemble_stmt;
+  bool safe = true;
+  size_t scalar_write_count = 0;
+};
+
+bool IsZeroOffsetTuple(const ExprPtr& expr, size_t rank) {
+  auto offsets = As<MakeTuple>(expr);
+  if (!offsets || offsets->elements_.size() != rank) return false;
+  return std::all_of(offsets->elements_.begin(), offsets->elements_.end(), [](const ExprPtr& offset) {
+    auto value = As<ConstInt>(offset);
+    return value && value->value_ == 0;
+  });
+}
+
+/** @brief Analyze all full-init candidates in one O(N) traversal. */
+class StagedScalarUseAnalyzer : public IRVisitor {
+ public:
+  explicit StagedScalarUseAnalyzer(std::vector<FullTensorScalarUpdateCandidate>* candidates)
+      : candidates_(candidates) {
+    for (size_t i = 0; i < candidates_->size(); ++i) {
+      const auto& candidate = (*candidates_)[i];
+      candidate_by_target_[candidate.target.get()] = i;
+      candidate_by_staging_[candidate.staging.get()] = i;
+      definition_stmts_.insert(candidate.full_stmt.get());
+      definition_stmts_.insert(candidate.assemble_stmt.get());
+    }
+  }
+
+ protected:
+  void VisitVarLike_(const VarPtr& op) override {
+    auto target_it = candidate_by_target_.find(op.get());
+    if (target_it != candidate_by_target_.end()) {
+      (*candidates_)[target_it->second].safe = false;
+    }
+    auto staging_it = candidate_by_staging_.find(op.get());
+    if (staging_it != candidate_by_staging_.end()) {
+      (*candidates_)[staging_it->second].safe = false;
+    }
+  }
+
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (definition_stmts_.count(op.get()) > 0) return;
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitExpr_(const CallPtr& op) override {
+    if (IsOp(op, "tensor.write") && op->args_.size() == 3) {
+      auto target = AsVarLike(op->args_[0]);
+      auto it = target ? candidate_by_target_.find(target.get()) : candidate_by_target_.end();
+      if (it != candidate_by_target_.end()) {
+        ++(*candidates_)[it->second].scalar_write_count;
+        VisitExpr(op->args_[1]);
+        VisitExpr(op->args_[2]);
+        return;
+      }
+    }
+    IRVisitor::VisitExpr_(op);
+  }
+
+  void VisitStmt_(const ReturnStmtPtr& op) override {
+    for (const auto& value : op->value_) {
+      auto var = AsVarLike(value);
+      if (var && candidate_by_target_.count(var.get()) > 0) continue;
+      VisitExpr(value);
+    }
+  }
+
+ private:
+  std::vector<FullTensorScalarUpdateCandidate>* candidates_;
+  std::unordered_map<const Var*, size_t> candidate_by_target_;
+  std::unordered_map<const Var*, size_t> candidate_by_staging_;
+  std::unordered_set<const Stmt*> definition_stmts_;
+};
+
+class StagedScalarWriteRewriter : public IRMutator {
+ public:
+  explicit StagedScalarWriteRewriter(std::unordered_map<const Var*, VarPtr> staging_by_target)
+      : staging_by_target_(std::move(staging_by_target)) {}
+
+ protected:
+  ExprPtr VisitExpr_(const CallPtr& op) override {
+    auto visited = As<Call>(IRMutator::VisitExpr_(op));
+    if (!visited || !IsOp(visited, "tensor.write") || visited->args_.empty()) return visited;
+
+    auto target = AsVarLike(visited->args_[0]);
+    auto it = target ? staging_by_target_.find(target.get()) : staging_by_target_.end();
+    if (it == staging_by_target_.end()) return visited;
+
+    auto rewritten = MutableCopy(visited);
+    rewritten->args_[0] = it->second;
+    return rewritten;
+  }
+
+ private:
+  std::unordered_map<const Var*, VarPtr> staging_by_target_;
+};
+
+/**
+ * @brief Stage full-tensor initialization plus scalar overrides in one local tensor.
+ *
+ * Rewrites this safe subset:
+ *
+ *   staging = tensor.full(full_shape, value)
+ *   updated = tensor.assemble(gm, staging, zeros)
+ *   ... tensor.write(updated, dynamic_indices, value) ...
+ *
+ * into local writes followed by one final tensor.assemble. This preserves the
+ * source semantics while ensuring all GM traffic uses MTE3.
+ */
+StmtPtr CanonicalizeFullTensorScalarUpdates(const StmtPtr& body, const std::vector<VarPtr>& params) {
+  auto stmts = FlattenToStmts(body);
+  if (stmts.size() < 3 || !As<ReturnStmt>(stmts.back())) return body;
+
+  std::unordered_set<const Var*> param_set;
+  for (const auto& param : params) {
+    param_set.insert(param.get());
+  }
+
+  std::vector<FullTensorScalarUpdateCandidate> candidates;
+  std::unordered_set<const Var*> used_targets;
+  std::unordered_set<const Var*> used_staging;
+  for (size_t i = 1; i + 1 < stmts.size(); ++i) {
+    auto staging_assign = As<AssignStmt>(stmts[i - 1]);
+    auto staging_call = staging_assign ? As<Call>(staging_assign->value_) : nullptr;
+    auto assemble_stmt = As<AssignStmt>(stmts[i]);
+    auto assemble = assemble_stmt ? As<Call>(assemble_stmt->value_) : nullptr;
+    if (!staging_assign || !staging_call || !IsOp(staging_call, "tensor.full") || !assemble ||
+        !IsOp(assemble, "tensor.assemble") || assemble->args_.size() != 3) {
+      continue;
+    }
+
+    auto destination = AsVarLike(assemble->args_[0]);
+    auto target = assemble_stmt->var_;
+    auto staging = AsVarLike(assemble->args_[1]);
+    auto target_type = target ? As<TensorType>(target->GetType()) : nullptr;
+    auto destination_type = destination ? As<TensorType>(destination->GetType()) : nullptr;
+    auto staging_type = staging ? As<TensorType>(staging->GetType()) : nullptr;
+    if (!destination || !target || !staging || staging.get() != staging_assign->var_.get() ||
+        param_set.count(destination.get()) == 0 || target.get() == staging.get() || !target_type ||
+        !destination_type || !staging_type || target_type->dtype_ != destination_type->dtype_ ||
+        target_type->dtype_ != staging_type->dtype_ || target_type->tensor_view_.has_value() ||
+        destination_type->tensor_view_.has_value() || staging_type->tensor_view_.has_value() ||
+        !AreExprVectorsEqual(target_type->shape_, destination_type->shape_) ||
+        !AreExprVectorsEqual(target_type->shape_, staging_type->shape_) ||
+        !IsZeroOffsetTuple(assemble->args_[2], target_type->shape_.size()) ||
+        used_targets.count(target.get()) > 0 || used_staging.count(staging.get()) > 0) {
+      continue;
+    }
+
+    candidates.push_back({i, target, staging, staging_assign, assemble_stmt});
+    used_targets.insert(target.get());
+    used_staging.insert(staging.get());
+  }
+  if (candidates.empty()) return body;
+
+  StagedScalarUseAnalyzer analyzer(&candidates);
+  analyzer.VisitStmt(body);
+
+  std::vector<FullTensorScalarUpdateCandidate> accepted;
+  for (const auto& candidate : candidates) {
+    if (candidate.safe && candidate.scalar_write_count > 0) accepted.push_back(candidate);
+  }
+  if (accepted.empty()) return body;
+
+  std::unordered_map<const Var*, VarPtr> staging_by_target;
+  std::unordered_set<size_t> removed_assemble_indices;
+  for (const auto& candidate : accepted) {
+    staging_by_target[candidate.target.get()] = candidate.staging;
+    removed_assemble_indices.insert(candidate.assemble_index);
+  }
+  StagedScalarWriteRewriter rewriter(std::move(staging_by_target));
+
+  std::vector<StmtPtr> rewritten;
+  rewritten.reserve(stmts.size());
+  for (size_t i = 0; i + 1 < stmts.size(); ++i) {
+    if (removed_assemble_indices.count(i) == 0) {
+      rewritten.push_back(rewriter.VisitStmt(stmts[i]));
+    }
+  }
+  for (const auto& candidate : accepted) {
+    rewritten.push_back(candidate.assemble_stmt);
+  }
+  rewritten.push_back(rewriter.VisitStmt(stmts.back()));
+  return SeqStmts::Flatten(std::move(rewritten), body->span_);
+}
+
 /**
  * @brief Rewrite a constant contiguous scalar-fill loop into one tensor.full + tensor.assemble.
  *
@@ -1809,8 +2000,9 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   // lines instead of the `def` line.
   const auto& span = func->span_;
 
+  auto staged_body = CanonicalizeFullTensorScalarUpdates(func->body_, func->params_);
   ConstantScalarFillLoopCanonicalizer scalar_fill_canonicalizer;
-  auto canonical_body = scalar_fill_canonicalizer.VisitStmt(func->body_);
+  auto canonical_body = scalar_fill_canonicalizer.VisitStmt(staged_body);
 
   // Pre-scan: collect consumer memory space requirements (e.g. tensor.slice → tensor.matmul
   // needs Mat-space loads).  Driven by InputSpaceReq metadata in OpConversionRegistry.

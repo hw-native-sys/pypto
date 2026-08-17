@@ -66,6 +66,14 @@ alignment. This keeps full-block fallback fills on the MTE3 path instead of
 rejecting them as mixed stores. Dynamic values, non-canonicalizable partial
 updates, unaligned regions, and strided scalar loops remain on the D-cache path.
 
+The pass also stages a full-tensor `tensor.full` initialization followed only by
+scalar updates to that tensor. The scalar updates are redirected to the local
+tile, and one `tile.store` writes the completed value to GM at function exit.
+This supports dynamic sparse-map construction without mixing MTE3 and D-cache
+stores. The rewrite requires a zero-offset, full-shape initialization backed by
+a private `tensor.full` result; partial initialization, aliases, additional DMA
+stores, or other uses of the GM target remain rejected.
+
 The check follows assignment aliases and loop/branch carries. It is deliberately
 conservative: it rejects mixed store paths to one GM tensor even when source
 offsets appear disjoint, because the compiler does not yet prove cache-line
@@ -73,8 +81,8 @@ separation across symbolic views and control flow. Mixed paths to distinct GM
 tensors remain valid.
 
 ```python
-# Rejected: the assignment becomes MTE3 TSTORE, then pl.write uses D-cache.
-output[0:1, 0:32] = pl.full([1, 32], dtype=pl.INT32, value=-1)
+# Rejected: a partial assignment becomes MTE3 TSTORE, then pl.write uses D-cache.
+output[0:1, 0:16] = pl.full([1, 16], dtype=pl.INT32, value=-1)
 for i in pl.range(4):
     pl.write(output, [0, i], pl.cast(i, pl.INT32))
 

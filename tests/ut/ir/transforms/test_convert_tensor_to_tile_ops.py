@@ -3053,14 +3053,64 @@ class TestGmLocalTensorConversion:
             @pl.function(type=pl.FunctionType.InCore)
             def main_incore_0(
                 self,
-                dst: pl.Tensor[[32], pl.INT32],
+                dst: pl.Tensor[[64], pl.INT32],
                 val: pl.Scalar[pl.INT32],
-            ) -> pl.Tensor[[32], pl.INT32]:
+            ) -> pl.Tensor[[64], pl.INT32]:
                 fill = pl.full([32], dtype=pl.INT32, value=-1)
                 dst[0:32] = fill
                 for i in pl.range(4):
                     pl.tensor.write(dst, [i], val)
                 return dst
+
+        with pytest.raises(ValueError, match="mixes MTE3 and scalar stores"):
+            passes.convert_tensor_to_tile_ops()(Before)
+
+    def test_full_tensor_init_and_dynamic_scalar_updates_use_bulk_stores(self):
+        """Full GM initializations and later scalar overrides are staged in UB."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                dst_pos: pl.Tensor[[1, 32], pl.INT32],
+                dst_index: pl.Tensor[[1, 32], pl.INT32],
+                values: pl.Tensor[[32], pl.INT32],
+                count: pl.Scalar[pl.INDEX],
+            ) -> pl.Scalar[pl.INDEX]:
+                pos_fill = pl.full([1, 32], dtype=pl.INT32, value=0)
+                dst_pos[0:1, 0:32] = pos_fill
+                index_fill = pl.full([1, 32], dtype=pl.INT32, value=-1)
+                dst_index[0:1, 0:32] = index_fill
+                for i in pl.range(32):
+                    if i < count:
+                        value = pl.tensor.read(values, [i])
+                        pl.tensor.write(dst_pos, [0, i], value)
+                        pl.tensor.write(dst_index, [0, i], pl.cast(i, pl.INT32))
+                return count
+
+        after = passes.convert_tensor_to_tile_ops()(Before)
+        kernel = _require_function(after, "main_incore_0")
+        assert len(_find_calls_to(kernel, "tile.store")) == 2
+        assert len(_find_calls_to(kernel, "tile.full")) == 2
+        assert len(_find_calls_to(kernel, "tile.write")) == 2
+        assert _find_first_call_to(kernel, "tensor.write") is None
+
+    def test_full_tensor_init_with_intervening_read_remains_rejected(self):
+        """A GM read makes delaying the initial bulk store observable."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                dst: pl.Tensor[[32], pl.INT32],
+            ) -> pl.Scalar[pl.INT32]:
+                fill = pl.full([32], dtype=pl.INT32, value=-1)
+                dst[0:32] = fill
+                old = pl.tensor.read(dst, [0])
+                pl.tensor.write(dst, [1], old)
+                return old
 
         with pytest.raises(ValueError, match="mixes MTE3 and scalar stores"):
             passes.convert_tensor_to_tile_ops()(Before)

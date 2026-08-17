@@ -63,14 +63,21 @@ cache-line 一致性。因此本 pass 会拒绝该组合，而不是生成可能
 block 的回退填充会统一走 MTE3 路径，而不会被当作混合存储拒绝。动态值、无法
 规范化的局部更新、未对齐区域和跨步标量循环仍走 D-cache 路径。
 
+对于先用 `tensor.full` 初始化完整张量、之后只对该张量执行标量更新的模式，本
+pass 也会进行片上暂存：标量更新会改写到本地 tile，函数退出前再通过一次
+`tile.store` 将完整结果写入 GM。这样可以支持动态稀疏映射构造，同时避免混用
+MTE3 与 D-cache 存储路径。该改写要求初始化从零 offset 覆盖完整 shape，且使用
+私有的 `tensor.full` 结果；局部初始化、别名、额外 DMA 存储或 GM 目标的其他
+用途仍会被拒绝。
+
 检查会跟踪赋值别名以及循环 / 分支携带值。该限制有意保持保守：即使源码中的
 offset 看似不相交，只要两种存储路径写入同一个 GM 张量也会被拒绝，因为编译器
 目前还不能跨符号 view 与控制流证明 cache-line 分离。写入不同 GM 张量的混合
 路径仍然合法。
 
 ```python
-# 拒绝：切片赋值生成 MTE3 TSTORE，随后 pl.write 走 D-cache。
-output[0:1, 0:32] = pl.full([1, 32], dtype=pl.INT32, value=-1)
+# 拒绝：局部切片赋值生成 MTE3 TSTORE，随后 pl.write 走 D-cache。
+output[0:1, 0:16] = pl.full([1, 16], dtype=pl.INT32, value=-1)
 for i in pl.range(4):
     pl.write(output, [0, i], pl.cast(i, pl.INT32))
 
