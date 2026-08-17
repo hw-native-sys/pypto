@@ -98,15 +98,6 @@ class DeviceTensor:
         object.__setattr__(self, "dtype", dtype)
         object.__setattr__(self, "buffer", buffer)
 
-    @classmethod
-    def from_buffer(cls, buffer: Any, shape: Sequence[int], dtype: torch.dtype) -> DeviceTensor:
-        """Build a tensor while retaining its owning simpler ``Buffer``."""
-        try:
-            data_ptr = int(buffer.base)
-        except (AttributeError, TypeError, ValueError) as e:
-            raise TypeError("buffer must be a simpler Buffer with an integer base") from e
-        return cls(data_ptr, shape, dtype, buffer=buffer)
-
     @property
     def nbytes(self) -> int:
         """Total bytes referenced by this handle."""

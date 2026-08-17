@@ -95,21 +95,23 @@ REGISTER_OP("system.fence")
 //     (`pto.cmo.cacheinvalid all #pto.address_space<gm>`). Used as the coarse
 //     data-before-signal release marker before a bare barrier notify, and on the
 //     consume side after a wait before the next cacheable GM read.
-//   - (tensor, shapes, offsets): invalidate one tensor sub-region. Codegen emits
-//     one shape-independent form — `pto.partition_view` + `pto.cmo.cacheinvalid
+//   - (tensor, shapes, offsets): locate a tensor sub-region, then invalidate only
+//     the cache line containing that view's base address. Codegen emits one
+//     shape-independent form — `pto.partition_view` + `pto.cmo.cacheinvalid
 //     %view single_cache_line` — for every region size, a single element
-//     included. A raw `!pto.ptr` operand is rejected by ptoas outright, so there
-//     is no scalar/ptr variant to dispatch to.
+//     included. `shapes` does not make the operation walk the region. A raw
+//     `!pto.ptr` operand is rejected by ptoas outright, so there is no scalar/ptr
+//     variant to dispatch to.
 // Variadic arity (0 or 3): the three arguments below describe ONLY the region
 // form; omitting all of them selects the whole-GM form. The registry does not
 // enforce argument count.
 REGISTER_OP("system.cacheinvalid")
     .set_description(
-        "Invalidate cache lines: whole GM when called with no args, else a tensor sub-region "
-        "(always lowered through a partition view, a single-element region included)")
+        "Invalidate whole GM when called with no args, else the cache line containing a tensor-view base "
+        "(always lowered through a partition view; shapes do not cause a range walk)")
     .set_op_category("SyncOp")
-    .add_argument("tensor", "Region form: target tensor whose sub-region is invalidated")
-    .add_argument("shapes", "Region form: per-dimension region sizes (N-D tuple matching tensor rank)")
+    .add_argument("tensor", "Region form: target tensor whose view base addresses the cache line")
+    .add_argument("shapes", "Region form: per-dimension view sizes (does not request a cache-line range)")
     .add_argument("offsets", "Region form: per-dimension start offsets (N-D tuple matching tensor rank)")
     .f_deduce_type(DeduceUnknownType);
 

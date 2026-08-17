@@ -814,7 +814,6 @@ class TestPerCallValidation:
         rt.release_inherited_host_tensor_refs()
 
         assert rt._inherited_host_tensors == ()
-        assert not rt._inherited_host_storage_ptrs
         rt.alloc_tensor(weight.shape, weight.dtype, init=weight)
         patched_setup["worker"].copy_to.assert_called_once()
         rt.close()
@@ -1227,7 +1226,6 @@ class TestLifecycle:
         assert rt._closed is True
         assert rt._close_complete is False
         assert rt._inherited_host_tensors == ()
-        assert not rt._inherited_host_storage_ptrs
         with pytest.raises(RuntimeError, match="after close"):
             rt(DeviceTensor(0x1000, (16, 16), torch.float32))
 

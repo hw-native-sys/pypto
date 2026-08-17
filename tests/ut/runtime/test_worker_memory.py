@@ -191,7 +191,7 @@ class TestAllocTensor:
 
     def test_foreign_tensor_is_rejected_before_wire_conversion(self, fake_simpler_worker, worker):
         foreign_buffer = FakeBuffer(0x9200)
-        foreign = DeviceTensor.from_buffer(foreign_buffer, (4,), torch.float32)
+        foreign = DeviceTensor(foreign_buffer.base, (4,), torch.float32, buffer=foreign_buffer)
 
         from pypto.runtime.tensor_arg import make_tensor_arg  # noqa: PLC0415
 

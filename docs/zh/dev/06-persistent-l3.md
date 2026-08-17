@@ -55,7 +55,7 @@ data 状态；如果两者都没有，复用陈旧状态可能导致错误结果
 `Worker.run()` fence 返回后再释放，因此 staging 内存峰值是这些不同大小之和。
 reset copy 会计入每次重复请求的 host 开销。
 
-这种整 buffer staging 是 Simpler 7a Buffer ABI 的限制：`copy_to` 根据源 `Buffer`
+这种整 buffer staging 是当前 Simpler Buffer API 的限制：`copy_to` 根据源 `Buffer`
 决定拷贝长度，同时不提供目标 offset 或公开的 Buffer subview。PyPTO 生成的 domain
 会由具名 buffer 完整覆盖 window；如果 artifact 含有未命名的 window 空隙，reset
 会直接拒绝，因为当前 Buffer API 无法将该空隙恢复为 fresh-window 状态。

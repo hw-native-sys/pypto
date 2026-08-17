@@ -47,7 +47,7 @@ def test_device_tensor_derives_wire_tensor_from_retained_buffer():
             return MagicMock(name="wire_tensor")
 
     buffer = FakeBuffer()
-    dt = DeviceTensor.from_buffer(buffer, (8, 16), torch.float16)
+    dt = DeviceTensor(buffer.base, (8, 16), torch.float16, buffer=buffer)
     worker = MagicMock(name="worker")
     owner = MagicMock(name="pypto_owner")
 
@@ -77,7 +77,8 @@ def test_retained_buffer_is_rejected_without_pypto_owner_binding():
 
     from pypto.runtime.tensor_arg import make_tensor_arg  # noqa: PLC0415
 
-    dt = DeviceTensor.from_buffer(FakeBuffer(), (4,), torch.float32)
+    buffer = FakeBuffer()
+    dt = DeviceTensor(buffer.base, (4,), torch.float32, buffer=buffer)
     with pytest.raises(TypeError, match="one-shot or raw simpler Worker"):
         make_tensor_arg(MagicMock(name="unbound_worker"), dt)
 
@@ -95,7 +96,8 @@ def test_owner_liveness_failure_prevents_wire_tensor_creation():
     owner = MagicMock(name="pypto_owner")
     owner._require_owned_resident_tensor.side_effect = ValueError("not a live allocation")
     bind_tensor_arg_owner(worker, owner)
-    dt = DeviceTensor.from_buffer(FakeBuffer(), (4,), torch.float32)
+    buffer = FakeBuffer()
+    dt = DeviceTensor(buffer.base, (4,), torch.float32, buffer=buffer)
 
     with pytest.raises(ValueError, match="not a live allocation"):
         make_tensor_arg(worker, dt)
@@ -114,7 +116,8 @@ def test_stale_raw_backend_is_rejected_before_owner_validation():
     owner = MagicMock(name="pypto_owner")
     bind_tensor_arg_owner(old_worker, owner)
     owner._tensor_arg_worker = MagicMock(name="replacement_worker")
-    dt = DeviceTensor.from_buffer(FakeBuffer(), (4,), torch.float32)
+    buffer = FakeBuffer()
+    dt = DeviceTensor(buffer.base, (4,), torch.float32, buffer=buffer)
 
     with pytest.raises(ValueError, match="stale simpler Worker backend"):
         make_tensor_arg(old_worker, dt)

@@ -88,7 +88,7 @@ def test_host_tensor_uses_worker_aware_tensor_helper(task_args_fixture):
 def test_device_tensor_uses_retained_buffer_tensor(task_args_fixture):
     task_args, raw_worker = task_args_fixture
     buffer = FakeBuffer(0xABCD)
-    device_tensor = DeviceTensor.from_buffer(buffer, (8, 16), torch.float16)
+    device_tensor = DeviceTensor(buffer.base, (8, 16), torch.float16, buffer=buffer)
 
     from pypto.runtime.runner import _coerced_to_orch_args  # noqa: PLC0415
     from pypto.runtime.tensor_arg import bind_tensor_arg_owner  # noqa: PLC0415

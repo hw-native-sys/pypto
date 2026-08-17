@@ -1509,7 +1509,6 @@ class DistributedWorker(Worker):
                     f"got device={tensor.device} shape={tuple(tensor.shape)}."
                 )
         self._inherited_host_tensors = inherited
-        self._inherited_host_storage_ptrs = {tensor.untyped_storage().data_ptr() for tensor in inherited}
         self._persistent = bool(persistent)
         self._reset_persistent_windows = reset_persistent_windows
         self._persistent_error: BaseException | None = None
@@ -2314,7 +2313,6 @@ class DistributedWorker(Worker):
         """
         self._require_open("release_inherited_host_tensor_refs")
         self._inherited_host_tensors = ()
-        self._inherited_host_storage_ptrs.clear()
 
     def copy_stacked_from(self, stacked: StackedDeviceTensor, host: torch.Tensor) -> None:
         """Read every shard of *stacked* back to *host* (D2H) — the read-back
@@ -2628,7 +2626,6 @@ class DistributedWorker(Worker):
                 self._close_complete = True
             finally:
                 self._inherited_host_tensors = ()
-                self._inherited_host_storage_ptrs.clear()
                 self._persistent_domains_by_program.clear()
                 if self._close_complete:
                     self._device_buffers.clear()

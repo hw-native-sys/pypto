@@ -55,8 +55,8 @@ def _build_argspec_orch_args(args_spec: list[dict]):
     inputs route the same graph); device-resident tensors are rebuilt as zeros;
     scalars are reconstructed exactly.
 
-    Returns ``(orch_args, keepalive)``. The tensors/scalars stay unmaterialized
-    until ``execute_on_device`` has selected their owning Worker.
+    The tensors/scalars stay unmaterialized until ``execute_on_device`` has
+    selected their owning Worker.
     """
     coerced: list = []
     for entry in args_spec:
@@ -71,14 +71,11 @@ def _build_argspec_orch_args(args_spec: list[dict]):
             coerced.append(ctype(entry["value"]))
         else:
             raise ValueError(f"Unknown arg spec kind: {kind!r}")
-    return coerced, coerced
+    return coerced
 
 
 def _build_golden_orch_args(golden_path: Path):
-    """Regenerate orch args from ``golden.py``'s ``generate_inputs`` (faithful).
-
-    Returns ``(orch_args, keepalive)`` — see :func:`_build_argspec_orch_args`.
-    """
+    """Regenerate ordered args from ``golden.py``'s ``generate_inputs``."""
     from .device_runner import build_orch_args_from_inputs  # noqa: PLC0415
     from .runner import _load_golden_module  # noqa: PLC0415
 
@@ -86,8 +83,8 @@ def _build_golden_orch_args(golden_path: Path):
 
     result = golden_module.generate_inputs({"name": "Default"})
     output_names = set(getattr(golden_module, "__outputs__", []))
-    orch_args, all_tensors, inputs, outputs = build_orch_args_from_inputs(result, output_names)
-    return orch_args, (all_tensors, inputs, outputs)
+    orch_args, _, _, _ = build_orch_args_from_inputs(result, output_names)
+    return orch_args
 
 
 def main(argv: list[str]) -> int:
@@ -114,13 +111,11 @@ def main(argv: list[str]) -> int:
     enable_sdma = bool(runtime_config.get("enable_sdma", False))
 
     if spec["mode"] == "golden":
-        orch_args, _keepalive = _build_golden_orch_args(Path(spec["golden_path"]))
+        orch_args = _build_golden_orch_args(Path(spec["golden_path"]))
     elif spec["mode"] == "argspec":
-        orch_args, _keepalive = _build_argspec_orch_args(spec["args"])
+        orch_args = _build_argspec_orch_args(spec["args"])
     else:
         raise ValueError(f"Unknown spec mode: {spec['mode']!r}")
-    # Keep backing tensors referenced through Worker-owned TaskArgs creation
-    # and the device run.
 
     # A caller-supplied aicpu_thread_num takes precedence; fall back to the
     # value baked into kernel_config.py so the captured graph matches the

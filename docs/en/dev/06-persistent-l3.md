@@ -65,7 +65,7 @@ remain live until the `Worker.run()` fence returns, so peak staging memory is
 the sum of those distinct sizes. The reset copies are part of each repeated
 request's host overhead.
 
-This whole-buffer staging is required by the Simpler 7a Buffer ABI: `copy_to`
+This whole-buffer staging is required by the current Simpler Buffer API: `copy_to`
 derives the transfer length from the source `Buffer` and exposes neither a
 destination offset nor a public Buffer subview. Generated PyPTO domains cover
 their windows exactly with named buffers. Reset rejects artifacts with unnamed

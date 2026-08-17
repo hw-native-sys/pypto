@@ -49,9 +49,9 @@ def device_tensor_to_chip_tensor(dt: DeviceTensor) -> ChipTensor:
     return ChipTensor.make(data=dt.data_ptr, shapes=dt.shape, dtype=dt_enum, child_memory=True)
 
 
-# Compatibility aliases for existing imports. New internal call sites use the
-# explicit chip-scoped names so they cannot be confused with the worker-aware,
-# address-free helper in :mod:`pypto.runtime.tensor_arg`.
+# Explicit chip-scoped names distinguish these helpers from the worker-aware,
+# address-free helper in :mod:`pypto.runtime.tensor_arg`; aliases preserve
+# existing imports.
 device_tensor_to_tensor = device_tensor_to_chip_tensor
 make_tensor_arg = make_chip_tensor_arg
 

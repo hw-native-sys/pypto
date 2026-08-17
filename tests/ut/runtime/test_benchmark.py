@@ -411,9 +411,9 @@ def test_parse_l3_recovers_interleaved_records_on_one_line(span_root, monkeypatc
     # other record keeps its own line.
     mashed = "\n".join([lines[0], f"{lines[1]} {lines[2]}", lines[3]])
 
-    # Model the pre-#1210 parser, which yielded only the first record from each
-    # physical line. The production normalization must split the mashed line
-    # before this parser sees it.
+    # Model the parser before Simpler c9ccaf65 (#1691), which yielded only the
+    # first record from each physical line. The production normalization must
+    # split the mashed line before this parser sees it.
     strace_timing = sys.modules["simpler_setup.tools.strace_timing"]
     parse_all = strace_timing.parse_spans
 
