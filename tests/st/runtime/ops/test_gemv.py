@@ -283,6 +283,7 @@ class GemvTestCase(PTOTestCase):
         valid_k = VALID_K if self._narrow in ("K", "KN") else k
         valid_n = VALID_N if self._narrow in ("N", "KN") else n
         acc_phase = self._acc_phase
+        st_phase = "final" if acc_phase == "final" else "unspecified"
         a_valid = [1, valid_k]
         b_valid = [valid_k, valid_n]
 
@@ -312,7 +313,8 @@ class GemvTestCase(PTOTestCase):
                         target_memory=pl.MemorySpace.Mat,
                         clamp=True,
                     )
-                    out = pl.store(pl.tile.gemv(tile_a, tile_b, acc_phase=acc_phase), [0, 0], out)
+                    result = pl.tile.gemv(tile_a, tile_b, acc_phase=acc_phase)
+                    out = pl.store(result, [0, 0], out, st_phase=st_phase)
                     return out
 
                 @pl.function(type=pl.FunctionType.Orchestration)
@@ -355,7 +357,7 @@ class GemvTestCase(PTOTestCase):
                     clamp=True,
                 )
                 result = pl.tile.gemv_bias(tile_a, tile_b, tile_bias, acc_phase=acc_phase)
-                out = pl.store(result, [0, 0], out)
+                out = pl.store(result, [0, 0], out, st_phase=st_phase)
                 return out
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -562,7 +564,7 @@ class GemvAccTestCase(PTOTestCase):
                     clamp=True,
                 )
                 acc = pl.tile.gemv_acc(acc, a1, b1, acc_phase=last_phase)
-                out = pl.store(acc, [0, 0], out)
+                out = pl.store(acc, [0, 0], out, st_phase=last_phase)
                 return out
 
             @pl.function(type=pl.FunctionType.Orchestration)

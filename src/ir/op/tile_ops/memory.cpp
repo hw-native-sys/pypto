@@ -335,6 +335,11 @@ TypePtr DeduceTileStoreType(const std::vector<ExprPtr>& args,
         << dt.ToString();
   }
 
+  const std::string st_phase = GetKwarg<std::string>(kwargs, "st_phase", "unspecified");
+  CHECK(st_phase == "unspecified" || st_phase == "partial" || st_phase == "final")
+      << "The operator " << op_name
+      << " requires st_phase to be one of {unspecified, partial, final}, but got " << st_phase;
+
   // ---- Valid-region union -------------------------------------------------
   // A store writes into the destination tensor, so the tensor it returns holds
   // what that tensor already held plus the region just written.
@@ -1087,6 +1092,7 @@ REGISTER_OP("tile.store")
                   "Optional ND partition shape (TupleType). "
                   "Injected by FlattenTileNdTo2D for ND tensors.")
     .set_attr<int>("atomic")
+    .set_attr<std::string>("st_phase")
     .set_input_memory(0, {MemorySpace::Vec, MemorySpace::Acc})
     .set_output_reuses_input(2)
     .f_deduce_type([](const std::vector<ExprPtr>& args,

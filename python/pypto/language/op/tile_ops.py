@@ -429,6 +429,7 @@ def store(
     shapes: Sequence[IntLike] | None = None,
     *,
     atomic: AtomicType = AtomicType.None_,
+    st_phase: str = "unspecified",
 ) -> _TensorT:
     """Copy data from tile back to tensor.
 
@@ -448,6 +449,10 @@ def store(
             fp32 / bf16 / fp16 / int32 / int16 / int8. bf16 atomic-add is
             available on the Ascend910B (A2/A3) profile; it is not supported on
             A5, where an fp32 accumulator + cast is required instead.
+        st_phase: Unit-flag-aware store phase: ``"unspecified"`` (default),
+            ``"partial"``, or ``"final"``. A phase-aware accumulator producer
+            that finishes with ``acc_phase="final"`` must be consumed by a
+            store with ``st_phase="final"`` so the unit flag is cleared.
 
     Returns:
         Tensor wrapping the store operation
@@ -459,11 +464,18 @@ def store(
         >>> result = store(tile, [0, 0, 0], tensor)
         >>> # atomic-add store (split-K)
         >>> result = store(partial, [0, 0], out, atomic=pl.AtomicType.Add)
+        >>> # clear the unit flag after a final phased accumulation
+        >>> result = store(acc, [0, 0], out, st_phase="final")
     """
     normalized_offsets = _normalize_intlike(offsets)
     normalized_shapes = _normalize_intlike(shapes) if shapes is not None else None
     call_expr = _ir_ops.store(
-        tile.unwrap(), normalized_offsets, output_tensor.unwrap(), normalized_shapes, atomic=int(atomic)
+        tile.unwrap(),
+        normalized_offsets,
+        output_tensor.unwrap(),
+        normalized_shapes,
+        atomic=int(atomic),
+        st_phase=st_phase,
     )
     return output_tensor.__class__(expr=call_expr)
 

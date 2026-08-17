@@ -276,6 +276,7 @@ def store(
     span: Span | None = None,
     *,
     atomic: int = 0,
+    st_phase: str = "unspecified",
 ) -> Call:
     """Copy data from unified buffer (tile) to tensor.
 
@@ -289,6 +290,9 @@ def store(
         atomic: ``AtomicType`` underlying int — 0 (``kNone``, plain overwrite) or
             1 (``kAdd``, atomic-add into global memory). The kwarg is omitted
             entirely when 0 so non-atomic stores are unchanged.
+        st_phase: Unit-flag-aware store phase: ``"unspecified"`` (default),
+            ``"partial"``, or ``"final"``. The kwarg is omitted entirely for
+            the default so existing stores remain unchanged.
 
     Returns:
         Call expression that returns the output tensor
@@ -301,6 +305,8 @@ def store(
         args = [tile, offsets_tuple, output_tensor]
 
     kwargs: dict[str, Any] = {"atomic": atomic} if atomic else {}
+    if st_phase != "unspecified":
+        kwargs["st_phase"] = st_phase
     return _ir_core.create_op_call("tile.store", args, kwargs, actual_span)
 
 

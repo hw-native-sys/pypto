@@ -225,9 +225,16 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
   }
   tstore_line << ") outs(" << partition_view << " : " << partition_type << ")";
 
-  // Optional atomic-add combine mode (split-K accumulation into GM). The attr
-  // is emitted only for atomic_add — a plain store omits it so non-atomic
-  // codegen stays byte-identical (pto.tstore's atomicType defaults to none).
+  std::vector<std::string> attrs;
+
+  const std::string st_phase = op->GetKwarg<std::string>("st_phase", "unspecified");
+  INTERNAL_CHECK_SPAN(st_phase == "unspecified" || st_phase == "partial" || st_phase == "final", op->span_)
+      << "tile.store st_phase must be one of {unspecified, partial, final}, got " << st_phase;
+  if (st_phase != "unspecified") {
+    attrs.push_back("stPhase = #pto<st_phase " + st_phase + ">");
+  }
+
+  // Optional atomic-add combine mode (split-K accumulation into GM).
   const int atomic_int = op->GetKwarg<int>("atomic", 0);
   INTERNAL_CHECK_SPAN(atomic_int == static_cast<int>(ir::AtomicType::kNone) ||
                           atomic_int == static_cast<int>(ir::AtomicType::kAdd),
@@ -237,7 +244,18 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
     // Destination-dtype legality (notably bf16, which only the A2/A3 store pipe
     // combines) is checked by the AtomicAddDtypeValid property verifier at
     // pipeline input, where the error still carries the user's own span.
-    tstore_line << " {atomicType = #pto<atomic_type atomic_add>}";
+    attrs.emplace_back("atomicType = #pto<atomic_type atomic_add>");
+  }
+
+  // Default-valued attributes are omitted so ordinary stores keep their
+  // byte-identical PTO form. PTOAS expects all present attributes in one dict.
+  if (!attrs.empty()) {
+    tstore_line << " {";
+    for (size_t i = 0; i < attrs.size(); ++i) {
+      if (i != 0) tstore_line << ", ";
+      tstore_line << attrs[i];
+    }
+    tstore_line << "}";
   }
   codegen.Emit(tstore_line.str());
 

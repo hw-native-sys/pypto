@@ -250,6 +250,12 @@ output shape `[1, N]`; its valid N may be wider when the physical N matches.
 `"unspecified"` (the default), `"partial"`, or `"final"`. Use `"partial"`
 while more K chunks remain and `"final"` for the last chunk.
 
+On a unit-flag-aware path, the final accumulator producer must be paired with
+`pl.store(..., st_phase="final")`. The final producer sets the unit flag and the
+final store checks and clears it; a plain store intentionally keeps the default
+unspecified behavior. `st_phase` also accepts `"partial"` for lower-level
+check-only store protocols.
+
 ## Python Usage
 
 ```python

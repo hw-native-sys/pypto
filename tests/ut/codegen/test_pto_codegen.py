@@ -417,7 +417,7 @@ def test_pto_codegen_gemv_family_uses_exact_ops_and_single_row_mat_layout():
             partial = pl.tile.gemv(lhs, rhs, acc_phase="partial")
             out = pl.store(partial, [0, 0], out)
             final = pl.tile.gemv(lhs, rhs, acc_phase="final")
-            out = pl.store(final, [0, 0], out)
+            out = pl.store(final, [0, 0], out, st_phase="final")
             return out
 
         @pl.function(type=pl.FunctionType.InCore)
@@ -434,7 +434,7 @@ def test_pto_codegen_gemv_family_uses_exact_ops_and_single_row_mat_layout():
             partial = pl.tile.gemv_bias(lhs, rhs, bias_tile, acc_phase="partial")
             out = pl.store(partial, [0, 0], out)
             final = pl.tile.gemv_bias(lhs, rhs, bias_tile, acc_phase="final")
-            out = pl.store(final, [0, 0], out)
+            out = pl.store(final, [0, 0], out, st_phase="final")
             return out
 
         @pl.function(type=pl.FunctionType.InCore)
@@ -451,7 +451,7 @@ def test_pto_codegen_gemv_family_uses_exact_ops_and_single_row_mat_layout():
             rhs1 = pl.load(b, [128, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
             result = pl.tile.gemv_acc(result, lhs1, rhs1, acc_phase="partial")
             result = pl.tile.gemv_acc(result, lhs1, rhs1, acc_phase="final")
-            out = pl.store(result, [0, 0], out)
+            out = pl.store(result, [0, 0], out, st_phase="final")
             return out
 
     mlir_code = _generate_default_mlir(GemvCodegenProgram)
@@ -464,6 +464,9 @@ def test_pto_codegen_gemv_family_uses_exact_ops_and_single_row_mat_layout():
         for phase in ("partial", "final"):
             attr = f"{{accPhase = #pto<acc_phase {phase}>}}"
             assert any(attr in line for line in op_lines)
+
+    tstore_lines = [line for line in mlir_code.splitlines() if "pto.tstore" in line]
+    assert sum("{stPhase = #pto<st_phase final>}" in line for line in tstore_lines) == 3
 
     row_mat_allocs = [
         line for line in _get_alloc_tile_lines(mlir_code) if "loc=mat" in line and "rows=1," in line

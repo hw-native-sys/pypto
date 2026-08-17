@@ -226,6 +226,11 @@ rhs 的逻辑 K 必须覆盖 lhs 的逻辑 K。支持的 dtype 三元组为
 `"unspecified"`（默认值）、`"partial"` 或 `"final"`。后续仍有 K 分块时
 使用 `"partial"`，最后一个分块使用 `"final"`。
 
+在使用 unit flag 的路径上，最后一个累加生产者必须与
+`pl.store(..., st_phase="final")` 配对。final 生产者负责置位，final store
+负责检查并清位；普通 store 则有意保留默认的 unspecified 行为。对于更底层的
+check-only store 协议，`st_phase` 同样接受 `"partial"`。
+
 ## Python 用法
 
 ```python
