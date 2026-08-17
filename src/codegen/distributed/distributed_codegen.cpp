@@ -1043,10 +1043,16 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
   // Empty string means no ``device=`` was set — comm-less L3 dispatch path.
   std::string rank_expr = ResolveRankExpr(call);
 
-  // Set when any arg is a DistributedTensor, i.e. this dispatch touches a comm
-  // window and therefore participates in the per-rank comm ordering chain
-  // emitted by VisitStmt_(CommDomainScopeStmtPtr).
-  bool touches_comm_window = false;
+  // Every comm domain whose window buffers this dispatch references, in first-reference
+  // order and deduplicated. One ordering token is appended per domain below.
+  //
+  // Keyed on each buffer's OWNING scope (``ScopeForWindowBuffer``), not on the innermost
+  // lexical scope: a dispatch nested inside an inner domain may consume an outer domain's
+  // buffer, and this path — unlike the builtin-collective emitter, which asserts all its
+  // window args share one scope — places no such restriction on user kernels. Attaching the
+  // WAW edge to the lexically-innermost scope would then chain the dispatch into a domain it
+  // does not actually touch while leaving the domain it *does* touch unordered.
+  std::vector<ir::CommDomainScopeStmtPtr> comm_arg_scopes;
 
   // Build TaskArgs from callee's parameter directions
   emitter_.EmitLine(ta_var + " = TaskArgs()");
@@ -1087,8 +1093,13 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
       if (i < callee->param_directions_.size()) {
         tag = ParamDirectionToTensorArgType(callee->param_directions_[i]);
       }
-      touches_comm_window = true;
-      const std::string handle_var = HandleVarForScope(ScopeForWindowBuffer(window_buffer));
+      const auto owning_scope = ScopeForWindowBuffer(window_buffer);
+      if (std::none_of(
+              comm_arg_scopes.begin(), comm_arg_scopes.end(),
+              [&](const ir::CommDomainScopeStmtPtr& seen) { return seen.get() == owning_scope.get(); })) {
+        comm_arg_scopes.push_back(owning_scope);
+      }
+      const std::string handle_var = HandleVarForScope(owning_scope);
       emitter_.EmitLine(ta_var + ".add_tensor(" + handle_var + "[" + rank_expr + "].buffers[\"" + name +
                         "\"].tensor(shapes=" + shape + ", dtype=" + dtype_enum + "), " + tag + ")");
       continue;
@@ -1167,10 +1178,12 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
   // expected_arg_count`, so an extra arg is accepted and the generated
   // orchestration entry simply does not index it. That is what keeps this fix
   // host-side only — no chip .cpp regeneration, no `expected_arg_count` change.
-  if (!is_sub && touches_comm_window && !rank_expr.empty() && !comm_domain_stack_.empty()) {
-    const std::string ord_key = HandleVarForScope(comm_domain_stack_.back()) + "_ord";
-    emitter_.EmitLine(ta_var + ".add_tensor(make_tensor_arg(tensors[\"" + ord_key + "\"][" + rank_expr +
-                      ", 0:1]), TensorArgType.INOUT)");
+  if (!is_sub && !rank_expr.empty()) {
+    for (const auto& scope : comm_arg_scopes) {
+      const std::string ord_key = HandleVarForScope(scope) + "_ord";
+      emitter_.EmitLine(ta_var + ".add_tensor(make_tensor_arg(orch._worker, tensors[\"" + ord_key + "\"][" +
+                        rank_expr + "]), TensorArgType.INOUT)");
+    }
   }
 
   for (const auto& line : scalar_lines) {
@@ -1436,11 +1449,20 @@ void DistributedCodegen::EmitAllocIntermediatesFunction(const ir::FunctionPtr& h
   // comm dispatches a WAW chain in program order. It costs no parallelism: a
   // worker executes one task at a time regardless, so it constrains ORDER, not
   // concurrency.
+  //
+  // One SEPARATE allocation per rank, held in a list -- not rows of a single tensor. The
+  // runtime memoizes a host-tensor handle by its storage base and keys dependencies on that
+  // identity, so every view of one storage collapses into a single dependency node
+  // (``Worker.make_tensor_arg``: "every ref over the same storage shares one canonical
+  // identity and dependencies key on it"). Slicing one tensor per rank would therefore chain
+  // ALL ranks into one order, not each rank into its own -- and a program whose ranks must be
+  // in flight together, such as a barrier, cannot make progress under that.
   std::vector<ir::CommDomainScopeStmtPtr> comm_scopes;
   if (host_orch) CollectCommDomainScopes(host_orch->body_, &comm_scopes);
   for (const auto& scope : comm_scopes) {
     emitter_.EmitLine("tensors[\"" + HandleVarForScope(scope) +
-                      "_ord\"] = torch.zeros((max(world_size, 1), 1), dtype=torch.int32).share_memory_()");
+                      "_ord\"] = [torch.zeros((1,), dtype=torch.int32).share_memory_() "
+                      "for _ in range(max(world_size, 1))]");
   }
 
   if (hoisted_allocs_.empty() && comm_scopes.empty()) {

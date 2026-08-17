@@ -182,6 +182,16 @@ void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const Call
         << "Internal error: unsupported builtin tensor collective arg type at index " << i;
   }
 
+  // Per-rank comm ordering token, appended as the LAST TENSOR (before the scalars, which
+  // TaskArgs requires). Builtin collectives submit through their own submit_next_level, so
+  // without this they sit outside the ordering chain that EmitCallToWorker builds: a rank
+  // mixing a builtin barrier/collective with a custom comm kernel — or issuing builtins
+  // across separate dispatches — would still let a waiting dispatch be routed ahead of its
+  // producer, which is the deadlock this token exists to prevent. All window args here are
+  // checked above to share one comm domain, so a single token is enough.
+  codegen.Emit(ta_var + ".add_tensor(make_tensor_arg(orch._worker, tensors[\"" + *handle_var + "_ord\"][" +
+               rank_expr + "]), TensorArgType.INOUT)");
+
   codegen.Emit(ta_var + ".add_scalar(" + *handle_var + "[" + rank_expr + "].domain_size)");
   codegen.Emit(ta_var + ".add_scalar(" + *handle_var + "[" + rank_expr + "].device_ctx)");
   if (core_num.has_value()) {

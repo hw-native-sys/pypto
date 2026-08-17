@@ -33,6 +33,7 @@ cross-process data race.
 ST coverage: P=2 and P=4 (skips when fewer devices are available).
 """
 
+import re
 import sys
 
 import pypto.language as pl
@@ -248,6 +249,42 @@ class TestL3HostTensorAllGather:
         variant_dir = compiled.output_dir / "next_levels" / "builtin.tensor.allgather__fp32"
         assert variant_dir.is_dir()
         assert (variant_dir / "kernel_config.py").is_file()
+
+        # The builtin collective must join the per-rank comm ordering chain. It submits via
+        # its own orch.submit_next_level in EmitBuiltinWindowCollectiveDispatch rather than
+        # the custom-kernel path, so without the ordering token it would sit outside the
+        # chain -- and a rank mixing a builtin collective with a custom comm kernel (exactly
+        # this program: publish_orch -> allgather -> consume_orch) could then have a waiting
+        # dispatch routed ahead of its producer and deadlock.
+        orch_src = (compiled.output_dir / "orchestration" / "host_orch.py").read_text()
+        # One separate allocation per rank, not rows of a single tensor. The runtime keys a
+        # host tensor's dependencies on its storage base, so every view of one storage fuses
+        # into a single node -- rows of one tensor would collapse the per-rank chains into one
+        # global order, which a program whose ranks must be in flight together cannot satisfy.
+        assert re.search(r'_ord"\] = \[torch\.zeros\(.*for _ in range\(', orch_src), (
+            "comm ordering token is not a per-rank list of separate allocations"
+        )
+        submits = [
+            line
+            for line in orch_src.splitlines()
+            if "_submit_chip(" in line or "orch.submit_next_level(" in line
+        ]
+        assert any("builtin.tensor.allgather" in line for line in submits), submits
+        for submit in submits:
+            ta_var = re.search(r"(_ta_\d+)", submit).group(1)
+            token_lines = [
+                line.strip()
+                for line in orch_src.splitlines()
+                if line.strip().startswith(f"{ta_var}.add_tensor(") and '_ord"][' in line
+            ]
+            assert token_lines, f"dispatch without an ordering token: {submit.strip()}"
+            # The token goes through the same make_tensor_arg(worker, tensor) form as every
+            # other host tensor arg. Asserting the form, not just the presence, is what
+            # separates "no token" from "token emitted as an uncallable line".
+            for token in token_lines:
+                assert "make_tensor_arg(orch._worker, " in token, (
+                    f"ordering token is not a well-formed make_tensor_arg call: {token}"
+                )
 
         inputs = _make_rank_inputs(n_ranks)
         outputs = torch.zeros((n_ranks, 1, n_ranks, SIZE), dtype=torch.float32)
