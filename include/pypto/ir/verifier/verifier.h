@@ -111,6 +111,22 @@ PropertyVerifierPtr CreateAccToGmStoreValidPropertyVerifier();
 PropertyVerifierPtr CreateAtomicAddDtypeValidPropertyVerifier();
 
 /**
+ * @brief Factory for the final accumulator/store phase-pairing verifier
+ *
+ * Checks the bidirectional unit-flag contract between ``tile.gemv``,
+ * ``tile.gemv_acc`` and ``tile.gemv_bias`` calls carrying
+ * ``acc_phase="final"`` and ``tile.store(..., st_phase="final")``. A final
+ * producer must be consumed exactly once, using that exact SSA value (or a
+ * plain SSA alias), in the same straight-line control-flow region; a final
+ * store must have a live matching producer. Listed in
+ * ``GetStructuralProperties()``, so it is verified at pipeline input on the
+ * user's own IR.
+ *
+ * @return Shared pointer to AccStorePhaseValid PropertyVerifier
+ */
+PropertyVerifierPtr CreateAccStorePhaseValidPropertyVerifier();
+
+/**
  * @brief Factory function for creating NormalizedStmtStructure property verifier
  * @return Shared pointer to NormalizedStmtStructure PropertyVerifier
  */

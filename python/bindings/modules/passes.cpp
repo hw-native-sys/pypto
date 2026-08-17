@@ -126,7 +126,11 @@ void BindPass(nb::module_& m) {
              "Every atomic-add write into GM (tile.store / tensor.assemble / pld.tensor.put / "
              "pld.tile.put / pld.tensor.remote_store / pld.tile.remote_store) targets a dtype the "
              "backend store pipe can combine; a bf16 destination requires the Ascend910B (A2/A3) "
-             "profile");
+             "profile")
+      .value("AccStorePhaseValid", IRProperty::AccStorePhaseValid,
+             "Every tile.gemv/tile.gemv_acc/tile.gemv_bias with acc_phase='final' is paired in the "
+             "same straight-line region with exactly one tile.store of that value using "
+             "st_phase='final', and every final store has such a live producer");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");
