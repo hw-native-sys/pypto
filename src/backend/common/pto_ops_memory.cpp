@@ -16,6 +16,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -37,6 +38,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 #include "src/backend/common/pto_ops_internal.h"
@@ -62,6 +64,117 @@ using pto_ops_detail::GetDimStrings;
 using pto_ops_detail::GetIndexOffsetCodes;
 using pto_ops_detail::GetSizeCodes;
 using pto_ops_detail::MakePartitionTensorViewType;
+
+namespace {
+
+struct MxPhysicalView {
+  std::string tensor_view;
+  std::string tensor_view_type;
+  std::vector<std::string> partition_dims;
+  std::vector<std::string> offset_codes;
+  std::vector<std::string> size_codes;
+};
+
+int64_t GetStaticAlignedMxValue(const ExprPtr& expr, int64_t alignment, int64_t minimum,
+                                std::string_view name, const ir::Span& span) {
+  auto value = As<ir::ConstInt>(expr);
+  INTERNAL_CHECK_SPAN(value, span) << "MX rank-5 tensor view requires static " << name;
+  INTERNAL_CHECK_SPAN(value->value_ >= minimum && value->value_ % alignment == 0, span)
+      << "MX rank-5 tensor view requires " << name << " >= " << minimum << " and divisible by " << alignment
+      << ", got " << value->value_;
+  return value->value_;
+}
+
+int64_t CheckedMxMultiply(int64_t lhs, int64_t rhs, std::string_view name, const ir::Span& span) {
+  INTERNAL_CHECK_SPAN(lhs >= 0 && rhs >= 0 && (rhs == 0 || lhs <= std::numeric_limits<int64_t>::max() / rhs),
+                      span)
+      << "MX rank-5 tensor view " << name << " overflows int64";
+  return lhs * rhs;
+}
+
+// PTO-ISA represents packed MX scale tensors with a physical rank-5
+// GlobalTensor.  Keep PyPTO's public coordinates logical and 2-D, but expose
+// the packed box order to PTOAS at the tile.load boundary:
+//
+//   MX_A_ZZ [M, G] -> [1, M/16, G/2, 16, 2]
+//   MX_B_NN [G, N] -> [1, N/16, G/2, 16, 2]
+//
+// The physical view is row-major.  Its strides are therefore exactly the
+// PTO-ISA BaseShape2D strides for the corresponding MX layout.
+MxPhysicalView EmitMxPhysicalView(const CallPtr& op, const ir::VarPtr& tensor,
+                                  const ir::TensorTypePtr& tensor_type, const ir::MakeTuplePtr& offsets,
+                                  const ir::MakeTuplePtr& valid_shape, std::string_view pto_layout,
+                                  codegen::PTOCodegen& codegen) {
+  INTERNAL_CHECK_SPAN(tensor_type->shape_.size() == 2, op->span_)
+      << "MX rank-5 tensor view requires a logical rank-2 tensor";
+  INTERNAL_CHECK_SPAN(offsets->elements_.size() == 2 && valid_shape->elements_.size() == 2, op->span_)
+      << "MX rank-5 tensor view requires rank-2 offsets and valid_shape";
+
+  const bool is_a = pto_layout == "mx_a_zz";
+  INTERNAL_CHECK_SPAN(is_a || pto_layout == "mx_b_nn", op->span_)
+      << "Unsupported MX layout for rank-5 tensor view: " << pto_layout;
+
+  const size_t block_axis = is_a ? 0 : 1;
+  const size_t group_axis = is_a ? 1 : 0;
+  const int64_t block_extent =
+      GetStaticAlignedMxValue(tensor_type->shape_[block_axis], 16, 16, "tensor block dimension", op->span_);
+  const int64_t group_extent =
+      GetStaticAlignedMxValue(tensor_type->shape_[group_axis], 2, 2, "tensor group dimension", op->span_);
+  const int64_t block_size =
+      GetStaticAlignedMxValue(valid_shape->elements_[block_axis], 16, 16, "load block size", op->span_);
+  const int64_t group_size =
+      GetStaticAlignedMxValue(valid_shape->elements_[group_axis], 2, 2, "load group size", op->span_);
+  const int64_t block_offset =
+      GetStaticAlignedMxValue(offsets->elements_[block_axis], 16, 0, "load block offset", op->span_);
+  const int64_t group_offset =
+      GetStaticAlignedMxValue(offsets->elements_[group_axis], 2, 0, "load group offset", op->span_);
+
+  const std::vector<int64_t> physical_shape = {1, block_extent / 16, group_extent / 2, 16, 2};
+  const std::vector<int64_t> physical_strides = {
+      CheckedMxMultiply(block_extent, group_extent, "outer stride", op->span_),
+      CheckedMxMultiply(group_extent, 16, "block stride", op->span_),
+      32,
+      2,
+      1,
+  };
+  const std::vector<int64_t> physical_offsets = {0, block_offset / 16, group_offset / 2, 0, 0};
+  const std::vector<int64_t> physical_sizes = {1, block_size / 16, group_size / 2, 16, 2};
+
+  auto emit_constants = [&](const std::vector<int64_t>& values) {
+    std::vector<std::string> result;
+    result.reserve(values.size());
+    for (int64_t value : values) result.push_back(codegen.GetOrEmitConstant(value, DataType::INDEX));
+    return result;
+  };
+  const std::vector<std::string> shape_codes = emit_constants(physical_shape);
+  const std::vector<std::string> stride_codes = emit_constants(physical_strides);
+
+  std::string tensor_view = codegen.NewNamedTemp(tensor->name_hint_ + "_mx5d_view");
+  std::ostringstream view_line;
+  view_line << tensor_view << " = pto.make_tensor_view " << codegen.GetTensorBasePtr(tensor) << ", shape = [";
+  for (size_t i = 0; i < shape_codes.size(); ++i) {
+    if (i > 0) view_line << ", ";
+    view_line << shape_codes[i];
+  }
+  view_line << "], strides = [";
+  for (size_t i = 0; i < stride_codes.size(); ++i) {
+    if (i > 0) view_line << ", ";
+    view_line << stride_codes[i];
+  }
+  view_line << "] {layout = #pto.layout<" << pto_layout << ">} : !pto.tensor_view<?x?x?x?x?x"
+            << codegen.GetTypeString(tensor_type->dtype_) << ">";
+  codegen.Emit(view_line.str());
+
+  MxPhysicalView result;
+  result.tensor_view = std::move(tensor_view);
+  result.tensor_view_type = "!pto.tensor_view<?x?x?x?x?x" + codegen.GetTypeString(tensor_type->dtype_) + ">";
+  for (int64_t dim : physical_sizes) result.partition_dims.push_back(std::to_string(dim));
+  result.offset_codes = emit_constants(physical_offsets);
+  result.size_codes = emit_constants(physical_sizes);
+  return result;
+}
+
+}  // namespace
 
 // Helper function for StoreFP
 static std::string MakeStoreFPCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
@@ -107,12 +220,10 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   INTERNAL_CHECK_SPAN(!shapes_tuple->elements_.empty(), op->span_)
       << "tile.load shapes tuple must have at least one element";
 
-  std::string tensor_view = codegen.GetOrCreateTensorView(tensor);
   std::string dtype_str = codegen.GetTypeString(tensor_type->dtype_);
   std::string tile_buf = codegen.GetCurrentResultTarget();
   INTERNAL_CHECK_SPAN(!tile_buf.empty(), op->span_) << "tile.load requires assignment target (tile_buf)";
 
-  std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
   std::string tile_buf_type = codegen.GetCurrentResultTileBufTypeString();
 
   // PTOAS needs the MX layout on tload in addition to the source TensorView.
@@ -130,9 +241,27 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   // canonical coordinates (matching the source TensorType's shape). There is
   // no implicit dn_swap here — earlier passes ensure all coordinate systems
   // match before codegen.
-  std::vector<std::string> partition_dims = GetDimStrings(valid_shape_tuple->elements_);
-  std::vector<std::string> offset_codes = GetIndexOffsetCodes(offsets_tuple->elements_, codegen);
-  std::vector<std::string> size_codes = GetSizeCodes(valid_shape_tuple->elements_, codegen);
+  std::vector<std::string> partition_dims;
+  std::vector<std::string> offset_codes;
+  std::vector<std::string> size_codes;
+
+  std::string tensor_view;
+  std::string tensor_view_type;
+  if (is_mx_load) {
+    auto physical =
+        EmitMxPhysicalView(op, tensor, tensor_type, offsets_tuple, valid_shape_tuple, pto_layout, codegen);
+    tensor_view = std::move(physical.tensor_view);
+    tensor_view_type = std::move(physical.tensor_view_type);
+    partition_dims = std::move(physical.partition_dims);
+    offset_codes = std::move(physical.offset_codes);
+    size_codes = std::move(physical.size_codes);
+  } else {
+    partition_dims = GetDimStrings(valid_shape_tuple->elements_);
+    offset_codes = GetIndexOffsetCodes(offsets_tuple->elements_, codegen);
+    size_codes = GetSizeCodes(valid_shape_tuple->elements_, codegen);
+    tensor_view = codegen.GetOrCreateTensorView(tensor);
+    tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
+  }
 
   std::string partition_type = MakePartitionTensorViewType(partition_dims, dtype_str);
   std::string partition_view = EmitPartitionViewPTO(tensor->name_hint_, tensor_view, tensor_view_type,
@@ -836,13 +965,14 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
   // same physical buffer. A compiler pass may prepend a view at the top of an
   // InCore body to bridge layouts or reshape the logical tensor.
   //
-  // Codegen lowers this to a fresh ``pto.make_tensor_view`` bound to the
-  // input's underlying buffer (the function parameter SSA), using the LHS's
-  // own ``(shape, stride, layout)`` from its TensorType. Downstream
-  // ``tile.load`` lookups via ``GetOrCreateTensorView`` find the LHS through
-  // the ``RegisterTensorView`` call below. The LHS also aliases the input base
-  // pointer and CommContext so later tensor or distributed ops address the
-  // original storage.
+  // Codegen normally lowers this to a fresh ``pto.make_tensor_view`` bound to
+  // the input's underlying buffer (the function parameter SSA), using the
+  // LHS's own ``(shape, stride, layout)`` from its TensorType. ND-to-MX scale
+  // aliases are the exception: the logical MX tensor is rank 2, while PTOAS
+  // requires the physical rank-5 view emitted by ``tile.load``. Emitting the
+  // logical view here would therefore be both unused and invalid. The LHS
+  // always aliases the input base pointer and CommContext so later tensor or
+  // distributed ops address the original storage.
   reg("tensor.view", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
     auto& codegen = AsPto(codegen_base);
     INTERNAL_CHECK_SPAN(op->args_.size() >= 1 && op->args_.size() <= 3, op->span_)
@@ -867,16 +997,32 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
         << "Internal error: tensor.view output stride rank " << view.stride.size()
         << " does not match shape rank " << rank;
 
-    // The result SSA name (auto-allocated by VisitStmt_(AssignStmt) for the
-    // backend-dispatched RHS Call) doubles as the tensor_view SSA name —
-    // register it in tensor_to_view so downstream tile.load lookups resolve.
     std::string result_buf = codegen.GetCurrentResultTarget();
     INTERNAL_CHECK_SPAN(!result_buf.empty(), op->span_) << "Internal error: result buf must be set";
     std::string input_base_ptr = codegen.GetTensorBasePtr(input_var);
-    codegen.RegisterTensorView(lhs_var, result_buf);
-    codegen.RegisterVarToMlir(lhs_var, result_buf);
     codegen.RegisterBasePtr(lhs_var, input_base_ptr);
     codegen.RegisterCommCtxFor(lhs_var, codegen.GetCommCtxSSAFor(input_var.get()));
+
+    auto input_type = ir::AsTensorTypeLike(input_var->GetType());
+    INTERNAL_CHECK_SPAN(input_type, op->span_)
+        << "tensor.view input must be TensorType or DistributedTensorType";
+    const ir::TensorLayout input_layout =
+        input_type->tensor_view_.has_value() ? input_type->tensor_view_->layout : ir::TensorLayout::ND;
+    const bool aliases_nd_backing_to_mx =
+        input_layout == ir::TensorLayout::ND && ir::IsMxTensorLayout(view.layout);
+    if (aliases_nd_backing_to_mx) {
+      // Keep the logical alias bound to the raw pointer. MX tile.load bypasses
+      // GetOrCreateTensorView and materializes the required rank-5 view from
+      // this base pointer in EmitMxPhysicalView.
+      codegen.RegisterVarToMlir(lhs_var, input_base_ptr);
+      return std::string("");
+    }
+
+    // The result SSA name (auto-allocated by VisitStmt_(AssignStmt) for the
+    // backend-dispatched RHS Call) doubles as the tensor_view SSA name —
+    // register it in tensor_to_view so ordinary tile.load lookups resolve.
+    codegen.RegisterTensorView(lhs_var, result_buf);
+    codegen.RegisterVarToMlir(lhs_var, result_buf);
 
     // Materialize shape and stride SSA names.
     auto emit_dim = [&](const ir::ExprPtr& dim) -> std::string {

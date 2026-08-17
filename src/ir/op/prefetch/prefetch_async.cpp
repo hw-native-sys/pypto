@@ -94,6 +94,8 @@ void CheckFlatContiguous1DSource(const std::string& op_name, const ExprPtr& src)
   auto tensor_type = AsTensorTypeLike(src->GetType());
   CHECK(tensor_type) << op_name << " expects src to be a GM Tensor (prefetch reads global memory), got "
                      << src->GetType()->TypeName();
+  CHECK_SPAN(!tensor_type->tensor_view_ || !IsMxTensorLayout(tensor_type->tensor_view_->layout), src->span_)
+      << op_name << " does not support MX-layout source tensors";
 
   const auto& shape = tensor_type->shape_;
   CHECK(!shape.empty()) << op_name << " expects src to have rank >= 1, got a rank-0 tensor";

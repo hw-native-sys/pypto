@@ -1239,6 +1239,24 @@ class TestPreprocessPtoasOutput:
 
         assert _preprocess_ptoas_output(source) == "static __aicore__ void kernel() {\n  TSTORE(v3);\n}\n"
 
+    def test_restores_grouped_mx_tquant_name_for_pinned_pto_isa(self):
+        source = (
+            "AICORE void kernel() {\n"
+            "  TQUANT<1, pto::MxQuantAlg::OcpMxFp8E4M3>(dst, src, exp, max, scaling);\n"
+            "  TQUANT<0, MxQuantAlg::OcpMxFp4E2M1>(dst4, src4, exp4, max4, scaling4);\n"
+            "}\n"
+        )
+
+        result = _preprocess_ptoas_output(source)
+
+        assert "TQuant<1, pto::MxQuantAlg::OcpMxFp8E4M3>" in result
+        assert "TQuant<0, MxQuantAlg::OcpMxFp4E2M1>" in result
+
+    def test_preserves_legacy_non_mx_tquant_name(self):
+        source = "AICORE void kernel() {\n  TQUANT<QuantMode::F322F16>(dst, src, scale);\n}\n"
+
+        assert "TQUANT<QuantMode::F322F16>" in _preprocess_ptoas_output(source)
+
     def test_restores_mgather_wrapper_operands(self):
         result = _preprocess_ptoas_output(
             "AICORE void kernel() {\n"

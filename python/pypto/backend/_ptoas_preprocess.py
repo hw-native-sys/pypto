@@ -29,6 +29,7 @@ _PTOAS_MGATHER_CALL_RE = re.compile(
     r"(?:\s*,\s*(?P<scratch>[A-Za-z_]\w*))?"
     r"(?P<suffix>\);)"
 )
+_PTOAS_GROUPED_MX_TQUANT_RE = re.compile(r"\bTQUANT(?=\s*<\s*[01]\s*,\s*(?:pto::)?MxQuantAlg::)")
 
 
 def _restore_mgather_wrapper_operands(content: str) -> str:
@@ -125,6 +126,11 @@ def preprocess_ptoas_output(content: str) -> str:
         filtered.append(line)
 
     result = _restore_mgather_wrapper_operands("".join(filtered))
+    # Official PTOAS v0.58 emits the grouped MX overload as uppercase TQUANT,
+    # while the pto-isa revision pinned by the runtime submodule exposes that
+    # overload as TQuant (legacy non-MX overloads remain uppercase). Keep the
+    # compatibility rewrite specific to the group-axis + MxQuantAlg signature.
+    result = _PTOAS_GROUPED_MX_TQUANT_RE.sub("TQuant", result)
     result = re.sub(
         r'(?:extern\s*"C"\s*)?(?:__global__\s+)?AICORE\s+void',
         "static __aicore__ void",

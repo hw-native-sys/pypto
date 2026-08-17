@@ -620,6 +620,42 @@ class TestOrchestrationMore:
         with pytest.raises(ValueError, match="cannot combine shape reinterpret"):
             _generate_orch_code(program)
 
+    @pytest.mark.parametrize(
+        ("layout", "mx_shape", "mx_to_nd"),
+        [
+            pytest.param(ir.TensorLayout.MX_A_ZZ, [32, 4], True, id="a-to-nd"),
+            pytest.param(ir.TensorLayout.MX_A_ZZ, [32, 4], False, id="nd-to-a"),
+            pytest.param(ir.TensorLayout.MX_B_NN, [4, 32], True, id="b-to-nd"),
+            pytest.param(ir.TensorLayout.MX_B_NN, [4, 32], False, id="nd-to-b"),
+        ],
+    )
+    def test_tensor_view_nd_mx_shaped_alias_emits_no_reshape(self, layout, mx_shape, mx_to_nd):
+        """Orchestration keeps complete ND/MX scale aliases on one runtime tensor."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+
+        source_shape = mx_shape if mx_to_nd else [1, 128]
+        source_layout = layout if mx_to_nd else ir.TensorLayout.ND
+        source_view = None if source_layout == ir.TensorLayout.ND else ir.TensorView([], source_layout)
+        source_type = ir.TensorType(source_shape, DataType.FP8E8M0, tensor_view=source_view)
+        target_shape = [1, 128] if mx_to_nd else mx_shape
+        target_layout = ir.TensorLayout.ND if mx_to_nd else layout
+        target_view = None if target_layout == ir.TensorLayout.ND else ir.TensorView([], target_layout)
+        target_type = ir.TensorType(target_shape, DataType.FP8E8M0, tensor_view=target_view)
+
+        ib = IRBuilder()
+        with ib.function("orch_nd_mx_alias", type=ir.FunctionType.Orchestration) as f:
+            scale = f.param("scale", source_type)
+            f.return_type(target_type)
+            viewed = ib.let("viewed", tensor_ops.view(scale, target_shape, layout=target_layout))
+            ib.return_stmt(viewed)
+        program = ir.Program([f.get_result()], "test_nd_mx_alias", ir.Span.unknown())
+
+        code = _generate_orch_code(program)
+
+        assert "Tensor viewed = ext_scale;" in code
+        assert ".reshape(" not in code
+
     def test_tensor_view_shape_reinterpret_rejects_dn_source(self):
         """Shape-only tensor.view on a DN source cannot lower to runtime reshape.
 

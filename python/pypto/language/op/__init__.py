@@ -104,6 +104,9 @@ from .tile_ops import (
     subsc,
     tri,
 )
+from .tile_ops import (
+    quant_mx as quant_mx,
+)
 
 # Unified dispatch (overlapping ops). Imported AFTER tile_ops so the
 # unified versions override any same-named imports above (e.g. ``abs``) —
@@ -301,6 +304,8 @@ __all__ = [
     "sel",
     "sels",
     "tri",
+    # MX quantization
+    "quant_mx",
     # Promoted tensor-only
     "arange",
     "create_tensor",

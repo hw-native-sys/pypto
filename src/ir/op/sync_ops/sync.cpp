@@ -14,7 +14,9 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/type.h"
 
@@ -111,7 +113,21 @@ REGISTER_OP("system.cacheinvalid")
     .add_argument("tensor", "Region form: target tensor whose sub-region is invalidated")
     .add_argument("shapes", "Region form: per-dimension region sizes (N-D tuple matching tensor rank)")
     .add_argument("offsets", "Region form: per-dimension start offsets (N-D tuple matching tensor rank)")
-    .f_deduce_type(DeduceUnknownType);
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) -> TypePtr {
+      CHECK(kwargs.empty()) << "system.cacheinvalid takes no kwargs";
+      CHECK(args.empty() || args.size() == 3)
+          << "system.cacheinvalid requires either no arguments or (tensor, shapes, offsets), but got "
+          << args.size();
+      if (!args.empty()) {
+        auto tensor_type = AsTensorTypeLike(args[0]->GetType());
+        CHECK(tensor_type) << "system.cacheinvalid region form requires a tensor as its first argument";
+        CHECK_SPAN(!tensor_type->tensor_view_ || !IsMxTensorLayout(tensor_type->tensor_view_->layout),
+                   args[0]->span_)
+            << "system.cacheinvalid does not support MX-layout tensors";
+      }
+      return GetUnknownType();
+    });
 
 // Register system.syncall (Cross-core all-participant barrier). Models
 // pto::SYNCALL with two modes selected by the `mode` attribute:

@@ -392,7 +392,8 @@ class PTOCodegen : public CodegenBase {
    * uses this to eagerly allocate DPS dst/cdst tiles bound by downstream
    * `dst = tuple_var[i]` AssignStmts before they are visited.
    */
-  void EmitAllocTileForVar(const ir::VarPtr& tile_var, const std::shared_ptr<const ir::TileType>& tile_type);
+  void EmitAllocTileForVar(const ir::VarPtr& tile_var, const std::shared_ptr<const ir::TileType>& tile_type,
+                           bool static_valid_type = false);
 
   /**
    * @brief Resolve the DPS element vars of a tuple-returning op call

@@ -1782,6 +1782,63 @@ def not_(tile: Expr, span: Span | None = None) -> Call:
 
 
 # ============================================================================
+# MX Quantization Operations
+# ============================================================================
+
+
+def tquant_mx(
+    src: Expr,
+    *,
+    layout: TensorLayout,
+    dtype: DataType = DataType.FP8E4M3FN,
+    span: Span | None = None,
+) -> Call:
+    """MX block-32 dynamic quantization returning quantized data and scale."""
+    actual_span = _get_span_or_capture(span)
+    kwargs: dict[str, Any] = {"dtype": dtype, "layout": layout}
+    return _ir_core.create_op_call("tile.tquant_mx", [src], kwargs, actual_span)
+
+
+def tquant_mx_dps(
+    src: Expr,
+    max_scratch: Expr,
+    scaling_scratch: Expr,
+    dst: Expr,
+    exp: Expr,
+    *,
+    dtype: DataType = DataType.FP8E4M3FN,
+    group_axis: int = 1,
+    span: Span | None = None,
+) -> Call:
+    """Build the compiler-internal, side-effecting DPS form of MX quantization."""
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call(
+        "tile.tquant_mx_dps",
+        [src, max_scratch, scaling_scratch, dst, exp],
+        {"dtype": dtype, "group_axis": group_axis},
+        actual_span,
+    )
+
+
+def tmov_x2zz_dps(
+    src: Expr,
+    tmp: Expr,
+    dst: Expr,
+    *,
+    group_axis: int = 1,
+    span: Span | None = None,
+) -> Call:
+    """Build the compiler-internal, side-effecting exponent X-to-ZZ move."""
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call(
+        "tile.tmov_x2zz_dps",
+        [src, tmp, dst],
+        {"group_axis": group_axis},
+        actual_span,
+    )
+
+
+# ============================================================================
 # Matrix Operations
 # ============================================================================
 

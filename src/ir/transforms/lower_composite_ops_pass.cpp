@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -32,6 +33,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
@@ -265,6 +267,13 @@ class LoweringBuilder {
     auto var = std::make_shared<Var>(MakeTempName(qualifier), expr->GetType(), span);
     stmts_.push_back(std::make_shared<AssignStmt>(var, expr, span));
     return var;
+  }
+
+  /// Append a side-effecting expression without manufacturing an unused SSA
+  /// result. This is used by destination-passing ops whose output buffers are
+  /// explicit operands.
+  void EmitEval(const ExprPtr& expr, const Span& span) {
+    stmts_.push_back(std::make_shared<EvalStmt>(expr, span));
   }
 
   // Primitive op builders -- type deduction is delegated to OpRegistry so the
@@ -819,6 +828,170 @@ ExprPtr LowerSinRule(const CallPtr& call, const std::vector<ExprPtr>& args, Lowe
 ExprPtr LowerCosRule(const CallPtr& call, const std::vector<ExprPtr>& args, LoweringBuilder& builder) {
   ValidateTrigArgs(args, call->span_, "tile.cos");
   return LowerSinCos(args[0], /*is_cos=*/true, builder, call->span_);
+}
+
+// ============================================================================
+// ``tile.tquant_mx`` lowering — grouped TQUANT + exponent X-to-ZZ.
+//
+// PR 1197 adds group-axis selection to PTOAS TQUANT and the non-scaling
+// third-operand X-to-ZZ form of TMOV. Public MX_A_ZZ maps to axis1. MX_B_NN
+// transposes [N,K] to [K,N] first and maps to axis0.
+ExprPtr LowerTileTQuantMxRule(const CallPtr& call, const std::vector<ExprPtr>& args, LoweringBuilder& b) {
+  const auto& span = call->span_;
+  auto& reg = OpRegistry::GetInstance();
+  auto src = args[0];
+  const TensorLayout layout = call->GetKwarg<TensorLayout>("layout");
+  const bool packed_b = layout == TensorLayout::MX_B_NN;
+  const int group_axis = packed_b ? 0 : 1;
+
+  if (packed_b) {
+    auto axis0 = std::make_shared<ConstInt>(0, DataType::INDEX, span);
+    auto axis1 = std::make_shared<ConstInt>(1, DataType::INDEX, span);
+    src = b.Bind("tq_src_kn", reg.Create("tile.transpose", {src, axis0, axis1}, {}, span), span);
+  }
+
+  auto src_tile = As<TileType>(src->GetType());
+  INTERNAL_CHECK_SPAN(src_tile && src_tile->shape_.size() == 2, span)
+      << "Internal error: tile.tquant_mx lowering requires a 2D source tile";
+  auto rows_const = As<ConstInt>(src_tile->shape_[0]);
+  auto cols_const = As<ConstInt>(src_tile->shape_[1]);
+  INTERNAL_CHECK_SPAN(rows_const && cols_const, span)
+      << "Internal error: tile.tquant_mx lowering requires static source shapes";
+  const int64_t rows = rows_const->value_;
+  const int64_t cols = cols_const->value_;
+  INTERNAL_CHECK_SPAN(rows > 0 && cols > 0, span)
+      << "Internal error: tile.tquant_mx lowering requires positive source dimensions";
+  INTERNAL_CHECK_SPAN((group_axis == 1 && cols % 32 == 0) || (group_axis == 0 && rows % 32 == 0), span)
+      << "Internal error: tile.tquant_mx source is not divisible by its group axis";
+  const int64_t group_rows = group_axis == 0 ? rows / 32 : rows;
+  const int64_t group_cols = group_axis == 0 ? cols : cols / 32;
+  INTERNAL_CHECK_SPAN(group_rows <= std::numeric_limits<int64_t>::max() / group_cols, span)
+      << "Internal error: tile.tquant_mx scale-group count overflows int64";
+  const int64_t groups = group_rows * group_cols;
+
+  auto make_dim = [&](int64_t value) { return std::make_shared<ConstInt>(value, DataType::INDEX, span); };
+  auto make_shape = [&](int64_t dim0, int64_t dim1) {
+    return std::make_shared<MakeTuple>(std::vector<ExprPtr>{make_dim(dim0), make_dim(dim1)}, span);
+  };
+  auto bind_typed_create = [&](const std::string& name, int64_t physical_rows, int64_t physical_cols,
+                               int64_t valid_rows, int64_t valid_cols, DataType dtype, TileLayout slayout,
+                               int64_t fractal = 512, TileLayout blayout = TileLayout::row_major) {
+    auto shape = make_shape(physical_rows, physical_cols);
+    std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", dtype},
+                                                                   {"target_memory", MemorySpace::Vec}};
+    auto created = As<Call>(reg.Create("tile.create", {shape}, create_kwargs, span));
+    INTERNAL_CHECK_SPAN(created, span) << "Internal error: tile.create did not produce a Call";
+    TileView view;
+    view.valid_shape = {make_dim(valid_rows), make_dim(valid_cols)};
+    view.blayout = blayout;
+    view.slayout = slayout;
+    view.fractal = fractal;
+    auto type =
+        std::make_shared<TileType>(std::vector<ExprPtr>{make_dim(physical_rows), make_dim(physical_cols)},
+                                   dtype, std::nullopt, view, MemorySpace::Vec);
+    auto typed_create =
+        std::make_shared<Call>(created->op_, created->args_, created->kwargs_, created->attrs_, type, span);
+    return b.Bind(name, typed_create, span);
+  };
+
+  // Axis1 uses the legacy-flat exponent branch so FP32, FP16, and BF16 all
+  // remain supported by the pinned PTO-ISA. Axis0 uses canonical [M/32,N].
+  const int64_t aux_rows = group_axis == 0 ? group_rows : 1;
+  const int64_t aux_cols = group_axis == 0 ? group_cols : groups;
+  auto max_tile = bind_typed_create("tq_max", aux_rows, aux_cols, aux_rows, aux_cols, src_tile->dtype_,
+                                    TileLayout::none_box);
+
+  int64_t scaling_physical_cols = aux_cols;
+  if (group_axis == 1) {
+    // PTOAS grouped-TQUANT scratch sizing and FP32 unroll thresholds.
+    constexpr int64_t kFp32ScaleAlignment = 64;
+    constexpr int64_t kFp16ScaleAlignment = 128;
+    constexpr int64_t kFp32UnrollMinElements = 1024;
+    constexpr int64_t kFp32UnrollMultiple = 256;
+    const int64_t align = src_tile->dtype_ == DataType::FP32 ? kFp32ScaleAlignment : kFp16ScaleAlignment;
+    int64_t scale_elements = groups;
+    INTERNAL_CHECK_SPAN(rows <= std::numeric_limits<int64_t>::max() / cols, span)
+        << "Internal error: tile.tquant_mx source element count overflows int64";
+    const int64_t source_elements = rows * cols;
+    const bool unroll = src_tile->dtype_ == DataType::FP32 && source_elements > kFp32UnrollMinElements &&
+                        source_elements % kFp32UnrollMultiple == 0;
+    INTERNAL_CHECK_SPAN(!unroll || scale_elements <= std::numeric_limits<int64_t>::max() / 2, span)
+        << "Internal error: tile.tquant_mx unrolled scale scratch size overflows int64";
+    if (unroll) scale_elements *= 2;
+    INTERNAL_CHECK_SPAN(scale_elements <= std::numeric_limits<int64_t>::max() - (align - 1), span)
+        << "Internal error: tile.tquant_mx aligned scale scratch size overflows int64";
+    scaling_physical_cols = (scale_elements + align - 1) / align * align;
+  }
+  auto scaling_tile = bind_typed_create("tq_scaling", aux_rows, scaling_physical_cols, aux_rows, aux_cols,
+                                        src_tile->dtype_, TileLayout::none_box);
+
+  auto public_types = As<TupleType>(call->GetType());
+  INTERNAL_CHECK_SPAN(public_types && public_types->types_.size() == 2, span)
+      << "Internal error: tile.tquant_mx must return exactly two tile types";
+  auto public_dst_type = As<TileType>(public_types->types_[0]);
+  auto public_exp_type = As<TileType>(public_types->types_[1]);
+  INTERNAL_CHECK_SPAN(public_dst_type && public_exp_type, span)
+      << "Internal error: tile.tquant_mx result elements must be tiles";
+  const bool is_fp4 = public_dst_type->dtype_ == DataType::FP4;
+  const DataType dps_dst_dtype = is_fp4 ? DataType::FP4 : DataType::INT8;
+  auto raw_dst = bind_typed_create("tq_dst", rows, cols, rows, cols, dps_dst_dtype, TileLayout::none_box);
+  auto raw_exp = bind_typed_create("tq_exp", aux_rows, aux_cols, aux_rows, aux_cols, DataType::UINT8,
+                                   TileLayout::none_box, tile_view_semantics::kMXScaleFractal);
+
+  // Emit the side-effecting internal DPS form. Keeping it as an EvalStmt makes
+  // the write to the explicit output buffers survive dead-code elimination
+  // even when the public tuple binding itself is unused.
+  DataType dtype = call->GetKwarg<DataType>("dtype", DataType::FP8E4M3FN);
+  auto dps = reg.Create("tile.tquant_mx_dps", {src, max_tile, scaling_tile, raw_dst, raw_exp},
+                        {{"dtype", dtype}, {"group_axis", group_axis}}, span);
+  b.EmitEval(dps, span);
+
+  // MXFP8 uses PTOAS's raw INT8 destination and exposes a zero-copy FP8 alias.
+  // MXFP4 must remain a native packed FP4 destination so PTOAS sees
+  // !pto.f4E2M1x2; no additional view or data movement is needed.
+  ExprPtr dst_tile = raw_dst;
+  if (!is_fp4) {
+    dst_tile =
+        b.Bind("tq_quant",
+               reg.Create("tile.reinterpret_view", {raw_dst}, {{"dtype", DataType::FP8E4M3FN}}, span), span);
+  }
+  int64_t zz_physical_rows = group_rows;
+  int64_t zz_physical_cols = group_cols;
+  int64_t tmp_bytes = 1;
+  if (group_axis == 1) {
+    INTERNAL_CHECK_SPAN(group_rows <= std::numeric_limits<int64_t>::max() - 15, span)
+        << "Internal error: tile.tquant_mx padded exponent rows overflow int64";
+    const int64_t row_blocks = (group_rows + 15) / 16;
+    INTERNAL_CHECK_SPAN(row_blocks <= std::numeric_limits<int64_t>::max() / 16, span)
+        << "Internal error: tile.tquant_mx padded exponent rows overflow int64";
+    zz_physical_rows = row_blocks * 16;
+    INTERNAL_CHECK_SPAN(row_blocks <= (std::numeric_limits<int64_t>::max() - 64) / group_cols, span)
+        << "Internal error: tile.tquant_mx exponent temporary size overflows int64";
+    tmp_bytes = 64 + row_blocks * group_cols;
+  }
+  auto zz_exp =
+      bind_typed_create("tq_exp_zz", zz_physical_rows, zz_physical_cols, group_rows, group_cols,
+                        DataType::UINT8, TileLayout::row_major, tile_view_semantics::kMXScaleFractal);
+  INTERNAL_CHECK_SPAN(tmp_bytes <= std::numeric_limits<int64_t>::max() - 31, span)
+      << "Internal error: tile.tquant_mx aligned exponent temporary size overflows int64";
+  const int64_t tmp_physical_bytes = (tmp_bytes + 31) / 32 * 32;
+  auto x2zz_tmp = bind_typed_create("tq_x2zz_tmp", 1, tmp_physical_bytes, 1, tmp_physical_bytes,
+                                    DataType::UINT8, TileLayout::none_box);
+  auto x2zz =
+      reg.Create("tile.tmov_x2zz_dps", {raw_exp, x2zz_tmp, zz_exp}, {{"group_axis", group_axis}}, span);
+  b.EmitEval(x2zz, span);
+  ExprPtr exp_tile = b.Bind(
+      "tq_scale", reg.Create("tile.reinterpret_view", {zz_exp}, {{"dtype", DataType::FP8E8M0}}, span), span);
+  if (group_axis == 0) {
+    exp_tile = b.Bind("tq_scale_nn",
+                      reg.Create("tile.move", {exp_tile},
+                                 {{"target_memory", MemorySpace::Vec},
+                                  {"blayout", TileLayout::col_major},
+                                  {"slayout", TileLayout::col_major}},
+                                 span),
+                      span);
+  }
+  return std::make_shared<MakeTuple>(std::vector<ExprPtr>{dst_tile, exp_tile}, span);
 }
 
 // ============================================================================
@@ -2195,10 +2368,10 @@ ExprPtr LowerTensorAllToAllVRule(const CallPtr& call, const std::vector<ExprPtr>
 // total credit count it issued so the signal returns to all-zero after the
 // call.
 //
-// Today the rules are ``tile.sin`` / ``tile.cos`` and ``pld.tensor.*``
-// distributed collectives. Host-level allreduce is skipped here and lowered
-// later by LowerHostTensorCollectives. The pass is idempotent provided each
-// rule emits only ops not listed here.
+// Today the rules are ``tile.sin`` / ``tile.cos``, ``tile.tquant_mx``, and
+// ``pld.tensor.*`` distributed collectives. Host-level allreduce is skipped here
+// and lowered later by LowerHostTensorCollectives. The pass is idempotent
+// provided each rule emits only ops not listed here.
 //
 // When the table grows past a handful of entries — or a rule wants its own
 // translation unit — promote this back to a standalone registry under
@@ -2208,6 +2381,9 @@ CompositeLoweringFn LookupCompositeRule(const std::string& op_name) {
   static const std::unordered_map<std::string, CompositeLoweringFn> kRules = {
       {"tile.sin", &LowerSinRule},
       {"tile.cos", &LowerCosRule},
+      // tile.tquant_mx → tile.tquant_mx_dps: materialize source-dtype scratch as IR-level tiles
+      // so the memory planner addresses them; codegen emits pto.tquant.mx.
+      {"tile.tquant_mx", &LowerTileTQuantMxRule},
       {"pld.tensor.allreduce", &LowerTensorAllReduceRule},
       {"pld.tensor.allgather", &LowerTensorAllGatherRule},
       {"pld.tensor.reduce_scatter", &LowerTensorReduceScatterRule},
@@ -2238,10 +2414,33 @@ class LowerCompositeOpsMutator : public IRMutator {
   explicit LowerCompositeOpsMutator(bool skip_host_collectives = false)
       : skip_host_collectives_(skip_host_collectives) {}
 
+  ExprPtr VisitExpr_(const TupleGetItemExprPtr& op) override {
+    auto tuple = VisitExpr(op->tuple_);
+    if (auto values = As<MakeTuple>(tuple)) {
+      INTERNAL_CHECK_SPAN(op->index_ >= 0 && static_cast<size_t>(op->index_) < values->elements_.size(),
+                          op->span_)
+          << "Tuple index out of range: " << op->index_;
+      return values->elements_[static_cast<size_t>(op->index_)];
+    }
+    if (tuple.get() != op->tuple_.get()) {
+      return std::make_shared<TupleGetItemExpr>(tuple, op->index_, op->span_);
+    }
+    return IRMutator::VisitExpr_(op);
+  }
+
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     auto call = As<Call>(op->value_);
     if (!call) {
-      return IRMutator::VisitStmt_(op);
+      auto visited = IRMutator::VisitStmt_(op);
+      auto assign = As<AssignStmt>(visited);
+      if (assign && As<MakeTuple>(assign->value_)) {
+        // A composite tuple can flow through ordinary SSA aliases before a
+        // projection (for example ``alias = pair; value = alias[0]``).
+        // Keep this propagation generic instead of maintaining per-op alias
+        // state: subsequent TupleGetItem visits resolve through var_remap_.
+        var_remap_[op->var_.get()] = assign->value_;
+      }
+      return visited;
     }
     CompositeLoweringFn rule = LookupRule(call);
     if (!rule) {
@@ -2254,6 +2453,7 @@ class LowerCompositeOpsMutator : public IRMutator {
 
     LoweringBuilder builder(op->var_->name_hint_, temp_counter_);
     ExprPtr result = rule(call, visited_args, builder);
+    if (As<MakeTuple>(result)) var_remap_[op->var_.get()] = result;
 
     auto stmts = builder.TakeStmts();
     // Bind the final result to the original target Var (preserves uses

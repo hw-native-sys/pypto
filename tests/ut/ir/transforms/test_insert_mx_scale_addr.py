@@ -390,6 +390,37 @@ class TestInsertMxScaleAddr:
         events = self._collect_mx_binding_events(after)
         assert [event[0] for event in events] == ["then", "bind", "bind", "matmul"]
 
+    @pytest.mark.parametrize(
+        "func_type",
+        [ir.FunctionType.AIC, ir.FunctionType.AIV],
+        ids=["aic", "aiv"],
+    )
+    def test_incore_variants_get_bindings(self, func_type):
+        """AIC/AIV mixed-kernel bodies must receive tget_scale_addr, not only InCore."""
+        span = ir.Span.unknown()
+
+        def tile(name, shape, dtype, space):
+            return ir.Var(name, ir.TileType(shape, dtype, memory_space=space), span)
+
+        lhs = tile("lhs", [16, 64], ir.DataType.FP8E4M3FN, ir.MemorySpace.Left)
+        lhs_scale = tile("lhs_scale", [16, 2], ir.DataType.FP8E8M0, ir.MemorySpace.LeftScale)
+        rhs = tile("rhs", [64, 32], ir.DataType.FP8E4M3FN, ir.MemorySpace.Right)
+        rhs_scale = tile("rhs_scale", [2, 32], ir.DataType.FP8E8M0, ir.MemorySpace.RightScale)
+        mx_call = ir.op.tile.matmul_mx(lhs, lhs_scale, rhs, rhs_scale, span)
+        assert isinstance(mx_call.type, ir.TileType)
+        c = ir.Var("c", mx_call.type, span)
+        body = ir.AssignStmt(c, mx_call, span)
+        func = ir.Function("kernel", [lhs, lhs_scale, rhs, rhs_scale], [], body, span, func_type)
+        program = ir.Program([func], "incore_variant_mx", span)
+
+        after = passes.insert_mx_scale_addr()(program)
+        tgets = self._collect_calls(after, "tile.tget_scale_addr")
+        matmuls = self._collect_calls(after, "tile.matmul_mx")
+        assert len(tgets) == 2
+        assert len(matmuls) == 1
+        assert matmuls[0].args[1].name_hint.endswith("_bound")
+        assert matmuls[0].args[3].name_hint.endswith("_bound")
+
     def test_iter_arg_data_and_scale_tiles_are_accepted(self):
         """pl.range init_values carrying data/scale tiles must not InternalError."""
 

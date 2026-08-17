@@ -38,6 +38,7 @@
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/type.h"
@@ -170,6 +171,25 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
           tile_view_semantics::ShapeExprListsEquivalent(source_view.stride, packed_stride))
         << "The operator " << op_name
         << " of an MX-layout tensor only supports packed 2D sources; strided sources are not supported";
+    const bool is_mx_a = source_view.layout == TensorLayout::MX_A_ZZ;
+    const size_t block_axis = is_mx_a ? 0 : 1;
+    const size_t group_axis = is_mx_a ? 1 : 0;
+    const std::string layout_name = TensorLayoutToString(source_view.layout);
+    auto check_static_aligned = [&](const ExprPtr& expr, int64_t alignment, int64_t minimum, const char* name,
+                                    const Span& span) {
+      auto value = As<ConstInt>(expr);
+      CHECK_SPAN(value, span) << "The operator " << op_name << " of an " << layout_name
+                              << " tensor requires static " << name;
+      CHECK_SPAN(value->value_ >= minimum && value->value_ % alignment == 0, span)
+          << "The operator " << op_name << " of an " << layout_name << " tensor requires " << name
+          << " >= " << minimum << " and divisible by " << alignment << ", but got " << value->value_;
+    };
+    check_static_aligned(tensor_type->shape_[block_axis], 16, 16, "tensor block dimension", args[0]->span_);
+    check_static_aligned(tensor_type->shape_[group_axis], 2, 2, "tensor group dimension", args[0]->span_);
+    check_static_aligned(valid_shape_tuple->elements_[block_axis], 16, 16, "load block size", args[3]->span_);
+    check_static_aligned(valid_shape_tuple->elements_[group_axis], 2, 2, "load group size", args[3]->span_);
+    check_static_aligned(offsets_tuple->elements_[block_axis], 16, 0, "load block offset", args[1]->span_);
+    check_static_aligned(offsets_tuple->elements_[group_axis], 2, 0, "load group offset", args[1]->span_);
     // MX cube scale loads are Mat-only (TLoadMxCube*) and require the caller to
     // spell the target explicitly. The public load interface keeps its ordinary
     // Vec default, so an omitted target fails instead of being silently changed.
@@ -299,6 +319,9 @@ TypePtr DeduceTileStoreType(const std::vector<ExprPtr>& args,
       << "The operator " << op_name
       << " requires third argument to be a TensorType or DistributedTensorType, but got "
       << args[2]->GetType()->TypeName();
+  CHECK_SPAN(!output_tensor_type->tensor_view_ || !IsMxTensorLayout(output_tensor_type->tensor_view_->layout),
+             args[2]->span_)
+      << "The operator " << op_name << " does not support MX-layout output tensors";
 
   // Optional fourth argument (when 4 args total) must be a shapes tuple
   MakeTuplePtr shapes_tuple;
@@ -436,8 +459,10 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
   // Where the destination's layout coincides with the space-agnostic one (Vec
   // and the other flat spaces) that double canonicalization was a no-op, so
   // those keep the source's blayout/slayout: a Mat->Vec move deliberately
-  // carries the source's layout today.  fractal is never inherited -- it is the
-  // destination buffer's boxing granularity.  See
+  // carries the source's layout today.  fractal normally comes from the
+  // destination buffer's boxing granularity; the Vec-to-Vec MX-scale reorder
+  // below is the one exception because it must keep the 32-byte scale boxes.
+  // See
   // docs/en/dev/ir/05-operators.md "Result view of tile.move".
   const auto dst_layout = tile_view_semantics::GetImplicitTileLayout(input_shape, space);
   const bool destination_dictates_layout =
@@ -471,6 +496,23 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
   }
   tile_view.blayout = requested_blayout;
   tile_view.slayout = requested_slayout;
+
+  // TQUANT produces its exponent bytes as row/row/32 and the MX_B_NN path
+  // materializes col/col/32 with a Vec-to-Vec TMOV.  Vec's ordinary implicit
+  // fractal is 512, so retaining the source's MX-scale marker here keeps the
+  // moved result type consistent with the physical 32-byte scale boxes.  Keep
+  // this exception deliberately narrow: byte-valued scale payloads, complete
+  // row/row or col/col layouts, and a Vec destination.
+  const bool source_is_complete_box =
+      source_view.blayout == source_view.slayout && source_view.blayout != TileLayout::none_box;
+  const bool destination_is_complete_box =
+      requested_blayout == requested_slayout && requested_blayout != TileLayout::none_box;
+  const bool is_mx_scale_payload =
+      tile_type->dtype_ == DataType::UINT8 || tile_type->dtype_ == DataType::FP8E8M0;
+  if (space == MemorySpace::Vec && source_view.fractal == tile_view_semantics::kMXScaleFractal &&
+      source_is_complete_box && destination_is_complete_box && is_mx_scale_payload) {
+    tile_view.fractal = tile_view_semantics::kMXScaleFractal;
+  }
 
   // Keep original shape
   std::vector<ExprPtr> output_shape = input_shape;
@@ -1141,6 +1183,9 @@ TypePtr DeduceTileMscatterType(const std::vector<ExprPtr>& args,
   CHECK(tensor_type) << "The operator " << op_name
                      << " requires third argument to be a TensorType or DistributedTensorType, but got "
                      << args[2]->GetType()->TypeName();
+  CHECK_SPAN(!tensor_type->tensor_view_ || !IsMxTensorLayout(tensor_type->tensor_view_->layout),
+             args[2]->span_)
+      << "The operator " << op_name << " does not support MX-layout output tensors";
   CHECK(!tensor_type->shape_.empty())
       << "The operator " << op_name
       << " requires output_tensor to have at least 1 dimension (scalar not supported)";
@@ -1241,6 +1286,8 @@ TypePtr DeduceTileMgatherType(const std::vector<ExprPtr>& args,
   std::vector<ExprPtr> output_valid_shape;
   TileView tile_view;
   if (target_memory == MemorySpace::Vec) {
+    CHECK_SPAN(!mem_type->tensor_view_ || !IsMxTensorLayout(mem_type->tensor_view_->layout), args[0]->span_)
+        << "The operator " << op_name << " with Vec output does not support MX-layout source tensors";
     CHECK(args.size() == 2) << "The operator " << op_name << " permits scratch only for Mat elem mode";
     auto idx_type = As<TileType>(args[1]->GetType());
     CHECK(idx_type) << "The operator " << op_name

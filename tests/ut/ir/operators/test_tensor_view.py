@@ -224,6 +224,46 @@ def test_nz_target_rejected():
         ir.op.tensor.view(src, layout=ir.TensorLayout.NZ)
 
 
+@pytest.mark.parametrize(
+    ("source_layout", "source_shape", "target_layout", "target_shape"),
+    [
+        pytest.param(ir.TensorLayout.MX_A_ZZ, [32, 4], ir.TensorLayout.ND, [1, 128], id="a-to-nd"),
+        pytest.param(ir.TensorLayout.ND, [1, 128], ir.TensorLayout.MX_A_ZZ, [32, 4], id="nd-to-a"),
+        pytest.param(ir.TensorLayout.MX_B_NN, [4, 32], ir.TensorLayout.ND, [1, 128], id="b-to-nd"),
+        pytest.param(ir.TensorLayout.ND, [1, 128], ir.TensorLayout.MX_B_NN, [4, 32], id="nd-to-b"),
+    ],
+)
+def test_shaped_nd_mx_backing_view_is_allowed(source_layout, source_shape, target_layout, target_shape):
+    """FP8E8M0 storage may alias packed ND and either complete MX scale layout."""
+    source_view = None if source_layout == ir.TensorLayout.ND else ir.TensorView([], source_layout)
+    src = _tensor_var(source_shape, dtype=DataType.FP8E8M0, view=source_view)
+
+    call = ir.op.tensor.view(src, target_shape, layout=target_layout)
+
+    out = call.type
+    assert isinstance(out, ir.TensorType)
+    assert _values_of(out.shape) == target_shape
+    view = _result_view(call)
+    assert view is not None
+    assert view.layout == target_layout
+
+
+def test_mx_a_backing_view_rejects_non_scale_dtype():
+    """The MX_A_ZZ backing alias is limited to E8M0 scale storage."""
+    src = _tensor_var([1, 128], dtype=DataType.FP32)
+
+    with pytest.raises(ValueError, match="does not support MX layouts except shaped ND/MX_A_ZZ/MX_B_NN"):
+        ir.op.tensor.view(src, [32, 4], layout=ir.TensorLayout.MX_A_ZZ)
+
+
+def test_mx_a_backing_view_requires_explicit_shape():
+    """An MX_A_ZZ layout flip without a backing shape remains unsupported."""
+    src = _tensor_var([1, 128], dtype=DataType.FP8E8M0)
+
+    with pytest.raises(ValueError, match="does not support MX layouts except shaped ND/MX_A_ZZ/MX_B_NN"):
+        ir.op.tensor.view(src, layout=ir.TensorLayout.MX_A_ZZ)
+
+
 def test_cross_layout_flip_below_rank_2_rejected():
     """ND ↔ DN flip needs at least 2 dims to swap; 1D is rejected."""
     src = _tensor_var([8])

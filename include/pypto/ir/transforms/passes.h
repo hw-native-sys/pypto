@@ -646,6 +646,9 @@ Pass InferTileMemorySpace();
  * immediately before each ``tile.matmul_mx`` / ``_acc`` / ``_bias`` and rewrites
  * the matmul to consume the bound scale SSA values.
  *
+ * Applies to all InCore-variant functions (``InCore``, ``AIC``, ``AIV``), including
+ * mixed-kernel cube/vector bodies written directly as AIC/AIV.
+ *
  * Bindings are not reused across consumers because tget mutates a shared
  * physical scale buffer whose aliases cannot be represented by SSA identity.
  * The pass therefore inserts a fresh binding at every consumer even when its
@@ -765,11 +768,12 @@ Pass Simplify();
  *
  * Lowering rules live in a file-local dispatch table inside
  * ``src/ir/transforms/lower_composite_ops_pass.cpp``. Today the pass handles
- * ``tile.sin`` / ``tile.cos`` and explicit-signal InCore
- * ``pld.tensor.allreduce``; host-level allreduce is skipped and lowered later
- * by ``LowerHostTensorCollectives``. Future composite ops (softmax, gelu,
- * layernorm, ...) are added by appending a rule function + one dispatch-table
- * row, without touching the mutator.
+ * ``tile.sin`` / ``tile.cos``, packed ``tile.tquant_mx``, and explicit-signal
+ * InCore ``pld.tensor.allreduce``; host-level allreduce is skipped and lowered
+ * later by ``LowerHostTensorCollectives``. Future single-result composite ops
+ * (softmax, gelu, layernorm, ...) are added by appending a rule function + one
+ * dispatch-table row. Multi-result rules may also need projection remapping in
+ * the mutator, as ``tile.tquant_mx`` does.
  *
  * FP32-only for the trig rules — non-FP32 inputs are rejected at
  * op-construction time by the op deducer, never reaching this pass.

@@ -1039,11 +1039,18 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
         continue;
       }
       if (fs_.ffts_workspace_vars.count(var.get()) > 0) continue;
+      // MX tensors require a packed rank-5 physical view. The MX tile.load
+      // codegen materializes it together with the logical-to-physical window
+      // mapping; a generic rank-N parameter view would be unused and cannot
+      // represent that physical contract.
+      const bool is_mx_tensor =
+          tensor_type->tensor_view_.has_value() && IsMxTensorLayout(tensor_type->tensor_view_->layout);
+      RegisterBasePtr(var, GetVarName(var));
+      if (is_mx_tensor) continue;
       std::string tensor_view = NewNamedTemp(var->name_hint_ + "_view");
       BindTensorView(var, tensor_view);
       // Remember the base pointer so mid-body pl.read/pl.write resolve to !pto.ptr
       // even after a slice-assign rebinds the var to its tensor_view.
-      RegisterBasePtr(var, GetVarName(var));
 
       for (const auto& j : tensor_type->shape_) {
         if (As<ir::ConstInt>(j)) {
@@ -1154,6 +1161,11 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
   for (const auto& param : func->params_) {
     auto tensor_type = ir::AsTensorTypeLike(param->GetType());
     if (!tensor_type) continue;
+    // MX tile.load owns its packed rank-5 view; no generic parameter view is
+    // registered for these tensors.
+    if (tensor_type->tensor_view_.has_value() && IsMxTensorLayout(tensor_type->tensor_view_->layout)) {
+      continue;
+    }
     // Core-group outlining keeps the complete public signature on both the
     // AIC and AIV functions.  Do not materialize a view for a tensor that the
     // outlined body does not reference: PTOAS cannot infer a non-ND layout for
@@ -1651,7 +1663,8 @@ void PTOCodegen::EmitMultiBufferRegionAllocs() {
 }
 
 void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
-                                     const std::shared_ptr<const ir::TileType>& tile_type) {
+                                     const std::shared_ptr<const ir::TileType>& tile_type,
+                                     bool static_valid_type) {
   auto var_key = GetVarKey(tile_var);
   if (!fs_.emitted_tile_alloc_vars.insert(var_key).second) {
     return;
@@ -1679,6 +1692,13 @@ void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
   }
 
   AllocTileFields fields = ComputeAllocTileFields(tile_type);
+  if (static_valid_type) {
+    INTERNAL_CHECK_SPAN(!HasDynamicTileValidShape(tile_type), tile_var->span_)
+        << "Internal error: a static-valid tile allocation cannot carry a dynamic valid_shape";
+    fields.type_str = GetViewTileBufTypeStringFromTileType(tile_type);
+    fields.valid_row_ssa.clear();
+    fields.valid_col_ssa.clear();
+  }
 
   std::ostringstream line;
   line << tile_buf << " = pto.alloc_tile";
@@ -1980,7 +2000,8 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
 
   if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
     if (!is_set_validshape && !alias_scatter_result_to_input) {
-      EmitAllocTileForVar(op->var_, tile_type);
+      const bool static_valid_type = ir::IsOp(call, "tile.create") && tile_type->dtype_ == DataType::FP4;
+      EmitAllocTileForVar(op->var_, tile_type, static_valid_type);
     }
   }
 
@@ -2431,13 +2452,24 @@ std::string PTOCodegen::GetViewTileBufTypeStringFromTileType(
   // valid_shape is statically known.
   const auto view = ir::tile_view_semantics::GetEffectiveTileView(*tile_type);
   const auto& valid = view.valid_shape;
+  const bool packed_fp4_vec = tile_type->dtype_ == DataType::FP4 && *memory_space == ir::MemorySpace::Vec;
+  const size_t packed_dim = view.blayout == ir::TileLayout::col_major ? 0 : 1;
+  auto physical_valid = [&](int64_t value, size_t dim) {
+    if (packed_fp4_vec && dim == packed_dim) {
+      CHECK(value > 0 && value % 2 == 0) << "FP4 Vec view valid_shape packed dimension must be a positive "
+                                            "even logical extent for PTOAS, got "
+                                         << value;
+      return value / 2;
+    }
+    return value;
+  };
   if (valid.size() == 1) {
     // Match ComputeAllocTileFields / ExtractTileTypeInfo: a 1-D valid_shape
     // maps to rows=1, cols=shape[0]. Without this a 1-D reshape view keeps the
     // dynamic zero-valid extent and its consumers become silent no-ops.
     if (auto v_col = As<ir::ConstInt>(valid[0])) {
       c.v_row = 1;
-      c.v_col = v_col->value_;
+      c.v_col = physical_valid(v_col->value_, 1);
       c.v_row_dynamic = false;
       c.v_col_dynamic = false;
     }
@@ -2445,8 +2477,8 @@ std::string PTOCodegen::GetViewTileBufTypeStringFromTileType(
     auto v_row = As<ir::ConstInt>(valid[0]);
     auto v_col = As<ir::ConstInt>(valid[1]);
     if (v_row && v_col) {
-      c.v_row = v_row->value_;
-      c.v_col = v_col->value_;
+      c.v_row = physical_valid(v_row->value_, 0);
+      c.v_col = physical_valid(v_col->value_, 1);
       c.v_row_dynamic = false;
       c.v_col_dynamic = false;
     }
