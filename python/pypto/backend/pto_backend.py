@@ -268,6 +268,27 @@ _DEFERRED_COMPLETION_ADAPTER = """\
 // ABI precondition: supported Simpler dispatchers provide kernel_entry with a
 // valid LocalContext whose AsyncCtx owns a live deferred-completion slab.
 // get_async_ctx intentionally follows that scheduler ABI directly.
+//
+// Provenance: every construct below except the address arithmetic and the
+// `expected` range check is runtime policy owned by
+// `runtime/src/{arch}/runtime/{rt}/runtime/pto_async_kernel_api.h` and its
+// siblings — AsyncCtx decoding, the slab-validity predicate, the PTO2_ERROR_*
+// codes, and the flush discipline. That header's public surface is
+// get_async_ctx / async_ctx_is_deferred / register_completion_condition /
+// send_notification / save_expected_notification_counter; the `pto2::detail`
+// calls on the error paths are deliberate, because no public entry point can
+// publish an arbitrary error code and the writeback is mandatory for the
+// scheduler to observe it.
+//
+// The __has_include guard on that header only proves it exists, not that it
+// still matches. This static_assert is the sole automatic drift detector, and
+// it anchors kMaxDeferredConditionsPerWaiter in
+// include/pypto/ir/transforms/utils/scope_outline_utils.h, which bounds the
+// same budget at compile time without access to any runtime header.
+static_assert(MAX_COMPLETIONS_PER_TASK == 64,
+    "PyPTO's DeferredWaitContractValidator hard-codes 64 conditions per waiter; "
+    "update kMaxDeferredConditionsPerWaiter in scope_outline_utils.h to match");
+
 static __aicore__ void pypto_register_counter_completion(
     __gm__ int64_t* raw_args,
     __gm__ int32_t* counter_base,
@@ -336,18 +357,17 @@ static __aicore__ void pypto_register_counter_completion(
         return;
     }
 
-    CompletionToken token{
-        base + offset * kElementBytes,
-        static_cast<uint32_t>(expected),
-        COMPLETION_ENGINE_SDMA,
-        COMPLETION_TYPE_COUNTER,
-        0,
-    };
-    if (!register_completion_condition(ctx, token) &&
-        (ctx.completion_error_code == nullptr || *ctx.completion_error_code == PTO2_ERROR_NONE)) {
-        pto2::detail::defer_error(ctx, PTO2_ERROR_ASYNC_REGISTRATION_FAILED);
-    }
-    pto2::detail::defer_flush(ctx);
+    // Token construction, registration, and writeback are exactly the runtime's
+    // public helper, so call it rather than restating its five token fields.
+    // Its only failure is slab overflow, which it records itself as
+    // ASYNC_WAIT_OVERFLOW — the accurate code, where REGISTRATION_FAILED
+    // belongs to the mailbox drain layer. The other two rejections
+    // register_completion_condition can make (invalid token, null slab
+    // pointers) are already excluded above.
+    save_expected_notification_counter(
+        ctx,
+        reinterpret_cast<volatile __gm__ void*>(base + offset * kElementBytes),
+        static_cast<uint32_t>(expected));
 }
 
 """

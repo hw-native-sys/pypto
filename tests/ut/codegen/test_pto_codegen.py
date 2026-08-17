@@ -1679,8 +1679,14 @@ class TestGenerateKernelWrapper:
             "static_cast<uint32_t>(expected)"
         )
         assert "PTO2_ERROR_ASYNC_COMPLETION_INVALID" in wrapper
-        assert "register_completion_condition(ctx, token)" in wrapper
-        assert "PTO2_ERROR_ASYNC_REGISTRATION_FAILED" in wrapper
+        # Registration + writeback delegates to the runtime's public helper
+        # rather than restating its token fields. Its only failure is slab
+        # overflow, which it records itself as ASYNC_WAIT_OVERFLOW, so the
+        # adapter must not also publish REGISTRATION_FAILED.
+        assert "save_expected_notification_counter(" in wrapper
+        assert "PTO2_ERROR_ASYNC_REGISTRATION_FAILED" not in wrapper
+        # The only automatic detector for runtime capacity drift.
+        assert "static_assert(MAX_COMPLETIONS_PER_TASK == 64," in wrapper
         assert "pto2::detail::defer_flush(ctx);" in wrapper
         assert ") + signal_tensor->start_offset;" in wrapper
         assert "deferred_kernel(signal, expected, args);" in wrapper
