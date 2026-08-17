@@ -353,8 +353,9 @@ def test_defer_wait_rejects_nz_signal_from_either_stride_source(view):
     # earlier property verifier reject an NZ signal during MaterializeTensorStrides,
     # which would mask the guard under test; a default (unverified) compile
     # reaches lowering and is exactly where the wrong address would be registered.
-    with _core_passes.PassContext([]), pytest.raises(
-        ValueError, match="does not support an NZ signal TensorView"
+    with (
+        _core_passes.PassContext([]),
+        pytest.raises(ValueError, match="does not support an NZ signal TensorView"),
     ):
         _generate_outlined_waiter_mlir(P)
 

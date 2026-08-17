@@ -1316,7 +1316,7 @@ class TestOutlineSubmitTaskId:
                     carried = payload
                     for src in pl.range(4):
                         pld.system.defer_wait(signal, offsets=[src, 0], expected=1, cmp=pld.WaitCmp.Ge)
-                        carried = carried
+                        carried = carried  # noqa: PLW0127  # intentional tensor carry under test
                     _ = carried
 
         with pytest.raises(ValueError, match="cannot create or update payload tensors"):
