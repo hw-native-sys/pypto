@@ -18,11 +18,13 @@ compiler-managed form and a hand-managed one.
 Kernels:
   single_buffer  — the baseline: load, compute, store, repeat
   pipelined      — pl.pipeline(stage=2): the compiler replicates the body
-  explicit_slots — pl.MemRef("ub", slots=2)[i % 2]: you write the rotation
+  explicit_slots — pl.MemRef("ub", slots=2)[i % 2]: the buffer rotation by hand
 
 Concepts introduced:
   - pl.pipeline(n, stage=k) and what "stage" costs in on-chip buffers
   - pl.MemRef(name, slots=N) with an index expression per iteration
+  - The difference between the two: pl.pipeline is a *schedule*, slots are
+    *placement* — see the note on explicit_slots
   - Why the explicit form keeps ONE slot live per iteration (see the PTOAS note)
 
 Run:  python examples/advanced/07_double_buffer.py
@@ -77,13 +79,23 @@ def pipelined(a: pl.Tensor, out: pl.Out[pl.Tensor]):
 
 @pl.jit
 def explicit_slots(a: pl.Tensor, out: pl.Out[pl.Tensor]):
-    """Hand-managed double buffering: two slots of one allocation, picked by index.
+    """Two slots of one allocation, picked by an index expression.
 
     ``pl.MemRef("ub", slots=2)`` reserves two equally-sized slots in a single
     allocation; ``[i % 2]`` picks one per iteration. Use the inline spelling
     rather than binding the declaration to a Python variable — ``@pl.jit``
     re-parses generated source in a fresh module namespace where such a variable
     does not exist.
+
+    **This is placement, not a schedule — the two are not interchangeable.**
+    ``pl.pipeline`` restructures the loop so a load and a compute from different
+    iterations are in flight together. Alternating slots only removes the
+    same-buffer hazard that would stop them overlapping; the loop is still an
+    ordinary sequential ``pl.range``, and whether the MTE2 and vector pipes
+    actually overlap is a question for the L0 trace, not something this spelling
+    guarantees. It is the storage form a hand-rolled rotation needs — and the one
+    ``LowerPipelineToSlots`` rotates a ``pl.pipeline`` body through under
+    ``memory_planner=PTOAS``.
 
     Note the shape this is written in: **one slot live per iteration**. Two
     co-live slots work under the default ``PYPTO`` planner but are rejected at

@@ -28,15 +28,10 @@ Concepts introduced:
 Run:  python examples/advanced/05_runtime_overhead.py
       python examples/advanced/05_runtime_overhead.py --mode soft_barrier
 
-      The soft_barrier mode needs a ptoas that accepts PyPTO's current soft-syncall
-      operands (verified on 0.54):
-
-        PTOAS_ROOT=/usr/local/ptoas/0.54 python examples/advanced/05_runtime_overhead.py \
-            --mode soft_barrier
-
-      Newer ptoas takes only gm_workspace + used_cores and rejects the scratch
-      tiles PyPTO still emits, with
-      "expects soft syncall to have gm_workspace and optional used_cores".
+      The soft_barrier mode needs the pto-isa the repo pins in runtime/pto_isa.pin:
+      the cacheinvalid path emits dcci(..., cache_line_t::SINGLE_CACHE_LINE), and an
+      older pto-isa has no cache_line_t, so the kernel C++ compile fails rather
+      than the run.
 Docs: docs/en/user/performance/02-runtime-overhead.md
 Next: examples/advanced/03_mixed_kernel.py — the fourth knob on that page
 """
@@ -115,7 +110,7 @@ def _phased_add(a: pl.Tensor, ws: pl.Tensor, out: pl.Out[pl.Tensor]):
     ``used_cores * 8`` elements, and it has to be a **kernel parameter** so every
     block polls the same buffer.
 
-    See the module docstring for the ptoas version this mode currently needs.
+    See the module docstring for the pto-isa this mode currently needs.
     """
     offset = pl.tile.get_block_idx() * TILE_ROWS
     t = pl.load(a, [offset, 0], [TILE_ROWS, COLS])

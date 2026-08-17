@@ -149,8 +149,9 @@ cache lines, conservatively use whole-GM `pl.system.cacheinvalid()` +
 consumer before its read. The tensor-region overload currently invalidates only the cache
 line containing the view's base address.
 
-**Run it:** `python examples/advanced/05_runtime_overhead.py --mode soft_barrier` — that mode currently needs a ptoas accepting PyPTO's soft-syncall operands
-(verified on 0.54; newer ptoas takes only `gm_workspace` + `used_cores`).
+**Run it:** `python examples/advanced/05_runtime_overhead.py --mode soft_barrier` — it needs
+the pto-isa pinned in `runtime/pto_isa.pin`, since the cacheinvalid path emits
+`cache_line_t::SINGLE_CACHE_LINE`.
 
 **Cost, and it is a sharp one.** A hard `syncall` under a partial launch **deadlocks on
 device** (error 507018). PyPTO rejects that at compile time — the `HardSyncallOccupancy`

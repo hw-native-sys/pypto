@@ -16,8 +16,8 @@ only in how the work is cut into tasks — so the task count is the variable and
 the answer is the control.
 
 Kernels:
-  many_small_tasks  — one task per 64x64 tile (the staircase in a swimlane)
-  larger_tiles      — same shape of code, 128x128 tiles: 1/4 the tasks   (a)
+  many_small_tasks  — four tasks, one per 64x128 tile (a swimlane staircase)
+  larger_tiles      — the same rows in 128x128 tiles: two tasks           (a)
   loop_inside       — one task, the chunk loop moved inside it            (b)
   merged_chain      — add-then-exp as ONE task instead of two             (c)
 
@@ -47,7 +47,7 @@ LARGE = 128  # tile rows after (a)
 
 @pl.jit
 def many_small_tasks(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
-    """``ROWS // SMALL`` tasks, one per tile — the shape to avoid.
+    """Four tasks, one per ``[64, 128]`` tile — the shape to avoid.
 
     ``pl.unroll`` is unrolled at compile time, so each iteration emits its own
     ``pl.at`` block and therefore its own dispatch.
@@ -62,10 +62,12 @@ def many_small_tasks(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
 
 @pl.jit
 def larger_tiles(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
-    """(a) Same structure, twice the rows per tile — half the tasks.
+    """(a) Same structure, twice the rows per tile — two tasks instead of four.
 
-    Nothing moved; the tile simply covers more elements. The cost is on-chip
-    footprint, which grows with the tile area.
+    Only the row count grows here (``COLS`` is already the full width), so this
+    is a 2x reduction. Scaling both axes of a tile scales the task count by the
+    same factor in each — and the on-chip footprint with it, which is why the
+    cost below is quadratic in a 2D tile rather than linear.
     """
     for i in pl.unroll(ROWS // LARGE):
         with pl.at(level=pl.Level.CORE_GROUP, name_hint="large"):

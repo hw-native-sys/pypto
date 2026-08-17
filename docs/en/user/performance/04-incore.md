@@ -46,8 +46,12 @@ instead of alternating with them.
 
 ### With explicit slots
 
-The hand-managed form, for when you want the rotation to be exactly what you wrote —
-typically because the natural staging does not match what `pl.pipeline` replicates.
+The hand-managed *placement*, for when you want the rotation to be exactly what you wrote —
+typically because the natural staging does not match what `pl.pipeline` replicates. Note what
+this is not: `pl.pipeline` restructures the loop into a schedule, whereas slots only remove
+the same-buffer hazard that would prevent an overlap. The loop stays sequential, so confirm
+any overlap in the [L0 trace](#the-l0-instruction-trace) rather than assuming the spelling
+bought it.
 `pl.MemRef("name", slots=N)` reserves `N` equally-sized slots of one allocation, and an
 ordinary index expression picks one per iteration:
 

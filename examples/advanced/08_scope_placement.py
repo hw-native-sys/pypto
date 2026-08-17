@@ -22,7 +22,7 @@ the placement back to you.
 
 Kernels:
   auto_placement   — the default: compiler-inserted scopes
-  manual_placement — auto_scope=False, scopes placed by phase
+  manual_placement — auto_scope=False, the two phases put on different rings
 
 Concepts introduced:
   - ring_idx = min(scope_depth, 3), and why depth 3+ all collapse onto ring 3
@@ -68,23 +68,30 @@ def auto_placement(a: pl.Tensor, out: pl.Out[pl.Tensor]):
 
 @pl.jit(auto_scope=False)
 def manual_placement(a: pl.Tensor, out: pl.Out[pl.Tensor]):
-    """Placement by hand: the two phases get their own rings.
+    """Placement by hand: the two phases land on different rings.
 
     With ``auto_scope=False`` the compiler inserts **nothing**, so every scope
-    here is one you wrote — including the ones it used to add for free. Phase 1's
-    tasks are reclaimed on ring 1 without waiting on phase 2's.
+    here is one you wrote — including the ones it used to add for free.
+
+    The depths are the whole point. Phase 1 sits directly in the outer scope;
+    phase 2 is wrapped one level deeper, so the two phases sit at different
+    depths and therefore on different rings. Two *sibling* scopes would not do
+    this — ``ring_idx`` is a function of depth alone, so same-depth siblings land
+    on the same ring however many of them there are.
+
+    Confirm it rather than taking the comment's word: ``--scope-stats`` writes a
+    record per scope, and this shape reports rings 0, 1 and 2 in use.
 
     This is a placement decision only. An AUTO ``pl.scope()`` keeps automatic
     dependency tracking on, so rebalancing rings does not change dependency
     semantics — ``pl.manual_scope()`` would, and that is a different subject.
     """
-    with pl.scope():  # depth 0 -> ring 0
-        with pl.scope():  # depth 1 -> ring 1
-            for i in pl.range(N):
-                with pl.at(level=pl.Level.CORE_GROUP, name_hint="phase1"):
-                    t = pl.load(a, [i * TR, 0], [TR, TC])
-                    pl.store(pl.mul(t, 2.0), [i * TR, 0], out)
-        with pl.scope():  # depth 1 again -> also ring 1, reclaimed separately
+    with pl.scope():  # depth 0 — phase 1's tasks live here, on ring 0
+        for i in pl.range(N):
+            with pl.at(level=pl.Level.CORE_GROUP, name_hint="phase1"):
+                t = pl.load(a, [i * TR, 0], [TR, TC])
+                pl.store(pl.mul(t, 2.0), [i * TR, 0], out)
+        with pl.scope():  # depth 1 — phase 2 moves to ring 1, reclaimed apart
             with pl.at(level=pl.Level.CORE_GROUP, name_hint="phase2"):
                 for i in pl.range(N):
                     t = pl.load(out, [i * TR, 0], [TR, TC])

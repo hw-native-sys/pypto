@@ -35,7 +35,7 @@ fit (... B per stage, ... B free) — stages 2 apart share storage and serialize
 
 ### 用显式 slot
 
-手工管理的形式，适用于你希望轮转严格按你写的来 —— 通常是因为自然的暂存结构与 `pl.pipeline` 复制出来的不一致。`pl.MemRef("name", slots=N)` 在一块分配里预留 `N` 个等大的槽，用一个普通索引表达式按迭代挑一个：
+手工管理的**放置**方式，适用于你希望轮转严格按你写的来 —— 通常是因为自然的暂存结构与 `pl.pipeline` 复制出来的不一致。注意它不是什么：`pl.pipeline` 把循环重构成一个调度，而 slot 只是消掉了会阻止重叠的同缓冲冲突。循环本身仍是顺序的，所以重叠与否要去 [L0 trace](#l0-指令级-trace) 里确认，而不是假定换个写法就买到了。`pl.MemRef("name", slots=N)` 在一块分配里预留 `N` 个等大的槽，用一个普通索引表达式按迭代挑一个：
 
 ```python
 for i in pl.range(NT):

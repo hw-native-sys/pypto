@@ -15,8 +15,10 @@ lookup is an *overlap* test over buffer addresses. Iterations that write disjoin
 regions of one buffer look like a collision to it, so it chains them — correct,
 but slower than it needs to be.
 
-All five kernels below write the same disjoint row bands of one output and
-produce the same answer. They differ only in how they tell the runtime so.
+All five kernels below compute the same answer over the same disjoint row
+bands, and differ only in how they tell the runtime the bands do not collide.
+(``tensor_claim`` routes through a scratch tensor to have something it can
+declare ``manual_dep`` on; the others write the output directly.)
 
 Kernels:
   serialized     — the baseline: a WAW chain the runtime cannot rule out

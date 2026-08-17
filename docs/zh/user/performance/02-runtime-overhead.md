@@ -114,7 +114,7 @@ with pl.spmd(pl.system.available_aiv_count()):
 
 两种 mode 都只同步到达：它们不会等待前序 `TSTORE`，也不会让业务数据的 cache 保持一致。通过 GM 从 producer 向 consumer 交接可能跨多条 cache line 的数据时，请保守地在 `syncall` 之前使用全 GM `pl.system.cacheinvalid()` + `pl.system.fence()`，然后在 consumer 读之前再次调用 `pl.system.cacheinvalid()`。tensor-region overload 当前只使 view 基地址所在的那一条 cache line 失效。
 
-**跑一下：** `python examples/advanced/05_runtime_overhead.py --mode soft_barrier` —— 该模式目前需要一个接受 PyPTO 当前 soft-syncall 操作数的 ptoas（在 0.54 上验证过；更新的 ptoas 只收 `gm_workspace` + `used_cores`）。
+**跑一下：** `python examples/advanced/05_runtime_overhead.py --mode soft_barrier` —— 它需要 `runtime/pto_isa.pin` 所钉的 pto-isa，因为 cacheinvalid 路径会发出 `cache_line_t::SINGLE_CACHE_LINE`。
 
 **代价，而且很锋利。** 部分发射下的硬 `syncall` 会在设备上**死锁**（错误 507018）。PyPTO 在编译期就拒绝它 —— `HardSyncallOccupancy` 校验器 —— 这正是 grid 必须用 `available_aiv_count()` / `available_cluster_count()` 来定，而不是写一个恰好在今天这台设备上对得上的字面量的原因。如果你无法保证满占用，就用 `mode="soft"`：它轮询一块共享 GM workspace，因此能在部分占用下工作，代价换成了 GM 流量。
 
