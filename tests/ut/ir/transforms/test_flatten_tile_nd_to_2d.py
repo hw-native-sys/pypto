@@ -2184,7 +2184,15 @@ class TestFlattenTileNdTo2DBatchMatmul:
                     "out_tile",
                     ir.Call(bmm_op, [lhs_tile, rhs_tile], ir.TileType(out_shape, DataType.FP32), span),
                 )
-                out_r = ib.let("out_0", tile_ops.store(out_tile, [0] * len(out_shape), out_p))
+                out_r = ib.let(
+                    "out_0",
+                    tile_ops.store(
+                        out_tile,
+                        [0] * len(out_shape),
+                        out_p,
+                        st_phase="final",
+                    ),
+                )
                 ib.return_stmt(out_r)
             prog.add_function(f.get_result())
 
@@ -2239,6 +2247,7 @@ class TestFlattenTileNdTo2DBatchMatmul:
         assert [self._tuple_const_values(call.args[3]) for call in store_calls] == case[
             "expected_store_shapes"
         ]
+        assert [call.kwargs for call in store_calls] == [{"st_phase": "final"}] * len(store_calls)
 
     def test_batch_matmul_a_trans_view_unrolls_per_batch_column_slice(self):
         """An a_trans lhs (natural load + ``tile.transpose_view``) unrolls per batch via

@@ -490,6 +490,12 @@ acc = pl.tile.set_validshape(acc_raw, 1, N)  # then gemv_acc(..., init_cond=(k0 
 Before `init_cond`, the peel did this implicitly — a straight-line `pl.tile.gemv`
 mints a correctly typed accumulator, at the cost of a phi between the branches.
 
+On a unit-flag-aware path, the final accumulator producer must be paired with
+`pl.store(..., st_phase="final")`. The final producer sets the unit flag and the
+final store checks and clears it; a plain store intentionally keeps the default
+unspecified behavior. `st_phase` also accepts `"partial"` for lower-level
+check-only store protocols.
+
 ## Python Usage
 
 ```python

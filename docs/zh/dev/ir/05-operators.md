@@ -427,6 +427,11 @@ acc = pl.tile.set_validshape(acc_raw, 1, N)  # 随后 gemv_acc(..., init_cond=(k
 在 `init_cond` 之前，这一步是由剥离的首个 K 步隐式完成的 —— 一条直线展开的
 `pl.tile.gemv` 会铸造出类型正确的累加器，代价是两个分支之间的一个 phi。
 
+在使用 unit flag 的路径上，最后一个累加生产者必须与
+`pl.store(..., st_phase="final")` 配对。final 生产者负责置位，final store
+负责检查并清位；普通 store 则有意保留默认的 unspecified 行为。对于更底层的
+check-only store 协议，`st_phase` 同样接受 `"partial"`。
+
 ## Python 用法
 
 ```python

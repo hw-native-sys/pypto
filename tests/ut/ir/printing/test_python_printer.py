@@ -922,6 +922,10 @@ def test_python_print_atomic_kwarg_uses_enum_form():
     assert "atomic=pl.AtomicType.None_" in none_result
     assert "atomic=0" not in none_result
 
+    phase_call = ir.Call(store_op, [tile, offsets_tuple, out], {"st_phase": "final"}, span)
+    phase_result = phase_call.as_python()
+    assert 'st_phase="final"' in phase_result
+
 
 def test_python_print_while_stmt_natural():
     """Test natural while loop printing (no iter_args)."""

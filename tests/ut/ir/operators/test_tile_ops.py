@@ -7220,6 +7220,40 @@ class TestWriteValidRegionUnion:
         assert isinstance(result_type, ir.TensorType)
         assert result_type.tensor_view is None
 
+    def test_store_phase_kwargs_keep_default_ir_and_positional_span(self):
+        """Only explicit phases materialize, without displacing the legacy span slot."""
+        span = ir.Span("store_phase_compat.py", 7, 3, 7, 21)
+        out = ir.Var("out", ir.TensorType([64, 128], DataType.FP32), span)
+        src = self._partial_tile([16, 128], [12, 128], name="src")
+
+        default_call = tile.store(src, [8, 0], out)
+        final_call = tile.store(src, [8, 0], out, None, span, st_phase="final")
+        combined_call = tile.store(
+            src,
+            [8, 0],
+            out,
+            atomic=int(ir.AtomicType.Add),
+            st_phase="partial",
+        )
+
+        assert dict(default_call.kwargs) == {}
+        assert dict(final_call.kwargs) == {"st_phase": "final"}
+        assert final_call.span.filename == "store_phase_compat.py"
+        assert final_call.span.begin_line == 7
+        assert dict(combined_call.kwargs) == {
+            "atomic": int(ir.AtomicType.Add),
+            "st_phase": "partial",
+        }
+
+    def test_store_rejects_unknown_phase(self):
+        """Reject phase spellings that PTOAS cannot lower."""
+        span = ir.Span.unknown()
+        out = ir.Var("out", ir.TensorType([64, 128], DataType.FP32), span)
+        src = self._partial_tile([16, 128], [12, 128], name="src")
+
+        with pytest.raises(ValueError, match=r"st_phase.*\{unspecified, partial, final\}"):
+            tile.store(src, [8, 0], out, st_phase="last")
+
     def test_store_unions_into_a_partially_valid_destination(self):
         """A store appends to the destination's valid region."""
         out = self._partial_tensor([64, 128], [20, 128])
