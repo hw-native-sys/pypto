@@ -191,8 +191,9 @@ def _run_ptoas(
 ) -> None:
     """Run the ptoas tool to compile a .pto file to C++.
 
-    Locates ptoas via the PTOAS_ROOT env var (``$PTOAS_ROOT/ptoas``, falling back
-    to ``$PTOAS_ROOT/bin/ptoas`` for the v0.51+ layout) or PATH fallback.
+    Locates ptoas via the PTOAS_ROOT env var, probing ``$PTOAS_ROOT/ptoas``
+    (pre-v0.51 launcher), ``$PTOAS_ROOT/ptoas.sh`` (v0.55+ bundled-CPython
+    launcher) then ``$PTOAS_ROOT/bin/ptoas``, or PATH fallback.
 
     Args:
         pto_path: Path to the input .pto file

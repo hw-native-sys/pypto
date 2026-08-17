@@ -12,20 +12,18 @@
 import os
 import shutil
 
-# Probed in order under $PTOAS_ROOT — the release tarball layout changed at
-# v0.51 and the two entries are NOT interchangeable:
+# Probed in order under $PTOAS_ROOT — launcher first, the three entries are NOT
+# interchangeable:
 #
-# - up to v0.50, `<root>/ptoas` is a shell launcher that exports
-#   `LD_LIBRARY_PATH=<root>/lib` before exec'ing `<root>/bin/ptoas`. That bare
-#   binary has no RUNPATH, so invoking it directly dies with
-#   "libMLIR*.so: cannot open shared object file". The launcher must win.
-# - from v0.51, `<root>/ptoas` is a Python package *directory* (not executable),
-#   and `<root>/bin/ptoas` links self-sufficiently — so the probe falls through
-#   to it.
-#
-# Hence launcher-first: it is correct on both layouts, whereas `bin/ptoas`-first
-# silently breaks every pre-v0.51 toolchain.
-PTOAS_RELATIVE_PATHS = ("ptoas", "bin/ptoas")
+# - up to v0.50, `<root>/ptoas` is a shell launcher exporting
+#   `LD_LIBRARY_PATH=<root>/lib`; the bare `<root>/bin/ptoas` has no RUNPATH and
+#   dies with "libMLIR*.so: cannot open shared object file".
+# - from v0.51, `<root>/ptoas` is a Python package *directory* (not executable)
+#   and `<root>/bin/ptoas` links self-sufficiently.
+# - from v0.55 the release bundles its own CPython and only `<root>/ptoas.sh`
+#   selects it; `<root>/bin/ptoas` runs under the caller's `env python3` and
+#   fails with "this ptoas compiler archive requires CPython <x.y>".
+PTOAS_RELATIVE_PATHS = ("ptoas", "ptoas.sh", "bin/ptoas")
 
 
 def find_ptoas_binary() -> str | None:
