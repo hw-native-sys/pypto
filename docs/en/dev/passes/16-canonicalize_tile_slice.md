@@ -51,7 +51,7 @@ program_canon = passes.canonicalize_tile_slice()(program)
 
 For each InCore-typed function, in three phases:
 
-1. **Collect** — index every `AssignStmt` whose value is a `tile.slice(src, shape, offset)` in canonical 3-argument form. A slice whose `src` is itself a recorded slice is peeled, accumulating the offset, so each entry resolves to a non-slice base tile plus a total `(off_row, off_col)`. Slices carrying `valid_shape` / `drop_dims` (4–5 arguments) are not plain windows and are skipped.
+1. **Collect** — index every `AssignStmt` whose value is a `tile.slice(src, shape, offset)` in canonical 3-argument form. A slice whose `src` is itself a recorded slice is peeled, accumulating the offset, so each entry resolves to a non-slice base tile plus a total `(off_row, off_col)`. Direct `ConstInt` SSA definitions and their plain aliases are resolved before this analysis, so a literal offset does not become artificially dynamic after `ConvertToSSA`. Slices carrying `valid_shape` / `drop_dims` (4–5 arguments) are not plain windows and are skipped.
 
 2. **Rewrite consumers** — for each slice:
    - **`tile.extract(slice, ir, ic, shape)`** → `tile.extract(base, ir + off_row, ic + off_col, shape)`. The extract reads the slice's source directly; the index add is constant-folded when both terms are `ConstInt`.

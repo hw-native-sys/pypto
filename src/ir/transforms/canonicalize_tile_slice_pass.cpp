@@ -155,12 +155,22 @@ struct SliceInfo {
   bool is_mat;       ///< memory_space == Mem.Mat (drives the matmul/extract rewrite).
 };
 
+/// Resolve a scalar Var that is known to be a direct ConstInt SSA definition.
+ExprPtr ResolveKnownConstInt(const ExprPtr& expr,
+                             const std::unordered_map<const Var*, ExprPtr>& known_consts) {
+  auto var = AsVarLike(expr);
+  if (!var) return expr;
+  auto it = known_consts.find(var.get());
+  return it == known_consts.end() ? expr : it->second;
+}
+
 /// If `assign` is `var = tile.slice(src, shape, [off_row, off_col])`, return the
 /// peeled base/offset.  `known` holds slices collected so far; a slice whose
 /// source is itself a recorded slice is peeled through it (offsets summed), so
 /// `base` is always a non-slice tile.
 std::optional<SliceInfo> ParseCanonicalSlice(const AssignStmtPtr& assign,
-                                             const std::unordered_map<const Var*, SliceInfo>& known) {
+                                             const std::unordered_map<const Var*, SliceInfo>& known,
+                                             const std::unordered_map<const Var*, ExprPtr>& known_consts) {
   if (!assign || !assign->var_) return std::nullopt;
   auto call = As<Call>(assign->value_);
   if (!call || !call->op_ || !IsOp(call, "tile.slice")) return std::nullopt;
@@ -179,8 +189,8 @@ std::optional<SliceInfo> ParseCanonicalSlice(const AssignStmtPtr& assign,
   auto slice_tile = As<TileType>(assign->var_->GetType());
   std::optional<MemorySpace> memory_space = slice_tile ? slice_tile->GetMemorySpace() : std::nullopt;
   bool is_mat = IsMatTile(assign->var_->GetType());
-  ExprPtr off_row = offset->elements_[0];
-  ExprPtr off_col = offset->elements_[1];
+  ExprPtr off_row = ResolveKnownConstInt(offset->elements_[0], known_consts);
+  ExprPtr off_col = ResolveKnownConstInt(offset->elements_[1], known_consts);
   VarPtr base = src;
   // Peel a chained slice: src itself may be a slice we already recorded.
   auto it = known.find(src.get());
@@ -201,10 +211,25 @@ class SliceCollector : public IRVisitor {
 
  protected:
   void VisitStmt_(const AssignStmtPtr& op) override {
-    if (auto info = ParseCanonicalSlice(op, slices)) {
+    if (op && op->var_) {
+      if (As<ConstInt>(op->value_)) {
+        known_consts_.emplace(op->var_.get(), op->value_);
+      } else if (auto source = AsVarLike(op->value_)) {
+        auto it = known_consts_.find(source.get());
+        if (it != known_consts_.end()) known_consts_.emplace(op->var_.get(), it->second);
+      }
+    }
+    if (auto info = ParseCanonicalSlice(op, slices, known_consts_)) {
       slices.emplace(op->var_.get(), *info);
     }
   }
+
+ private:
+  // Convert direct ConstInt SSA definitions (and their plain aliases) back to
+  // constants before alignment analysis. ConvertToSSA commonly introduces
+  // such Vars for literal slice offsets; treating them as dynamic causes
+  // unnecessary Vec-to-Vec extracts even when the address is provably aligned.
+  std::unordered_map<const Var*, ExprPtr> known_consts_;
 };
 
 /// Phase 2 — rewrite canonicalizable `tile.slice` consumers: Mat slices are
