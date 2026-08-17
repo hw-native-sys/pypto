@@ -36,14 +36,14 @@ cfg = RunConfig(
 
 ```text
 <work_dir>/dfx_outputs/
-  l2_swimlane_records.json     逐任务 start / end（dispatch / finish 需等级 2）
+  chip_swimlane_records.json   逐任务时序及调度器/编排器阶段（等级 4）
   deps.json                    任务依赖边
   merged_swimlane_*.json       仅上板 —— join 之后的 trace
 ```
 
 第二个开关的意义在于：后继边被**刻意不**记录进泳道图记录本身，以保持设备侧热路径干净。join 是事后在 host 上做的。
 
-### 采集是分级的，而 `RunConfig` 请求的是最低那一级
+### 采集是分级的，而 `RunConfig` 请求完整采集
 
 运行时按四个等级采集，每一级在下一级之上追加：
 
@@ -56,13 +56,13 @@ cfg = RunConfig(
 
 每一级在采集器里都是实打实的门禁，不是啰嗦程度设置：等级 1 下 dispatch 与 finish 时间戳**根本不会被打**，任何后处理都恢复不出来。
 
-> **`RunConfig.enable_l2_swimlane` 是 `bool`，`True` 请求的是等级 1。** 运行时自己的 harness 开关接受等级，且裸写 `--enable-l2-swimlane` 默认为 **4** —— 于是同名开关在那边意味着「全都要」，从 PyPTO 过去却只是「只要 AICore 计时」。等级 2–4 目前经由 `RunConfig` 拿不到；要用它们就从运行时 harness 驱动这次运行。下文凡是需要 dispatch 间隙或调度器泳道的地方都会注明。
+> **`RunConfig.enable_l2_swimlane` 保留了旧的 `bool` 兼容命名。`True` 会映射到 Simpler 的 `enable_chip_swimlane` 等级 4（完整采集），`False` 映射为 0。** 类型约定下的 `RunConfig` 不暴露等级 1–3；需要较低采集等级时，请使用运行时 harness 的 `--enable-chip-swimlane <1|2|3>`。
 
 ### 不知道就会被误导的两件事
 
 **上板时，这个开关会把你的负载跑两遍。** 转换器需要一张只有 `deps.json` 才携带的任务图，而采集本身会扰动计时 —— 所以 PyPTO 先跑一遍 dep_gen 抓图，再关掉 dep_gen 跑一遍干净的计时。**永远不要从开了泳道图的上板运行里读墙上时间**，那个数字要用另一次普通运行去取。
 
-**在模拟器上你能拿到记录，但拿不到 merged trace。** `*sim` 平台保持单遍，只产出 `l2_swimlane_records.json` —— 模拟器还没有提供转换器需要的任务元数据。用模拟器看调度的**形状**，计时本身的问题用上板运行去看。
+**在模拟器上你能拿到记录，但拿不到 merged trace。** `*sim` 平台保持单遍，只产出 `chip_swimlane_records.json` —— 模拟器还没有提供转换器需要的任务元数据。用模拟器看调度的**形状**，计时本身的问题用上板运行去看。
 
 ## 打开
 
@@ -86,8 +86,6 @@ cfg = RunConfig(
 - **性能统计**（右上角）打开报告；点击其中的条目会跳到时间线上对应的任务。
 - **观测线** —— 在二段轴上点击可放下一条带时间戳的标尺，ALT+拖动可手动测距。
 - 同一个插件还能把 `passes_dump` 目录作为 **IR trace** 打开，并按「是否真的改了东西」过滤 pass。那是编译期视图而非计时视图，但它是「编译器到底对我的 kernel 做了什么」的另一半。
-
-> **要预期到的一个命名差异。** 插件文档里这个文件叫 `chip_swimlane_records*.json`；本仓库所 pin 的运行时写出的是 `l2_swimlane_records.json`。如果右键菜单没有提供打开你的文件，先查这个差异。
 
 ### Perfetto
 
@@ -113,7 +111,7 @@ dispatch ──────► start ──────► end ─────�
 [start, end]       = kernel 本身 —— 04 页唯一能压缩的那一段
 ```
 
-等级 1 —— 也就是 `RunConfig` 给你的那一级 —— 带的是 `start` 与 `end`。这足够读条宽以及条**之间**的间隙，而本章其余部分对它的要求正是这些。要拆出 `[dispatch, start]` 才需要等级 2。
+等级 4 —— 也就是 `RunConfig` 给你的那一级 —— 包含全部四个时间戳以及调度器和编排器阶段。`[start, end]` 仍是任务的 AICore 执行时间；拆分 `[dispatch, start]` 至少需要等级 2，因此这里同样可以看到。
 
 **读间隙，不是读条。** 条窄、隙宽的芯片不是 kernel 问题，而是粒度或派发问题，该去 [01](01-task-granularity.md) 与 [02](02-runtime-overhead.md) 两页。
 
@@ -123,12 +121,12 @@ dispatch ──────► start ──────► end ─────�
 
 ```bash
 python -m simpler_setup.tools.sched_overhead_analysis \
-    --l2-swimlane-records-json <records>.json --deps-json <deps>.json
+    --chip-swimlane-records-json <records>.json --deps-json <deps>.json
 ```
 
 它给出逐引擎与全系统的开销占 makespan 的比例、取件代价分布、AICPU 调度循环预算，以及把关键路径拆成「计算」与「调度器注入」两部分的归因。同样这些数字可以用 `swimlane_converter --overhead` 叠加成时间线上的 counter 轨。
 
-它的调度循环部分需要**等级 ≥ 3** 的采集，所以那次运行要从运行时 harness 驱动，而不是 `RunConfig`。
+它的调度循环部分需要**等级 ≥ 3** 的采集。`RunConfig` 的完整等级 4 采集满足这个要求；只有在通过 `--enable-chip-swimlane <level>` 选择其他采集等级时才需要运行时 harness。
 
 那份报告里有两个定义值得记住，因为它们把真问题和假问题分开了：
 

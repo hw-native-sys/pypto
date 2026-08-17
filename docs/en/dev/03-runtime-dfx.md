@@ -331,7 +331,7 @@ documented above applies unchanged on that path.
 
 ## Related
 
-- Simpler's runtime-side reference: `runtime/docs/dfx/{l2-swimlane,
-  args-dump,pmu-profiling,dep_gen,scope-stats}.md`.
+- Simpler's runtime-side reference: `runtime/docs/dfx/{chip-swimlane-profiling,
+  args-dump,pmu-profiling,dep-gen,scope-stats}.md`.
 - Compile-time profiling (orthogonal, single PyPTO process):
   [01-compile-profiling.md](01-compile-profiling.md).

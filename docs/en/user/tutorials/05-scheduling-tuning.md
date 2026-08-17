@@ -18,7 +18,7 @@ observations.
 | Question | Flag | Output |
 | -------- | ---- | ------ |
 | What shape is the graph? | `enable_dep_gen=True` | `<work_dir>/dfx_outputs/deps.json` |
-| Did tasks actually overlap? | `enable_l2_swimlane=True` | `<work_dir>/dfx_outputs/l2_swimlane_records.json` |
+| Did tasks actually overlap? | `enable_l2_swimlane=True` | `<work_dir>/dfx_outputs/chip_swimlane_records.json` |
 | Are runtime rings near full? | `enable_scope_stats=True` | `<work_dir>/dfx_outputs/scope_stats/scope_stats.jsonl` |
 | Which pipe is the bottleneck? | `enable_pmu=2` | `<work_dir>/dfx_outputs/pmu.csv` |
 
@@ -58,7 +58,7 @@ kernel(a, b, out, config=RunConfig(platform="a2a3sim", enable_l2_swimlane=True))
 ```
 
 > **Simulator caveat:** on `*sim` platforms this is single-pass and emits only
-> `l2_swimlane_records.json`. The merged `merged_swimlane_*.json` view is intentionally
+> `chip_swimlane_records.json`. The merged `merged_swimlane_*.json` view is intentionally
 > skipped, because the simulator does not yet ship the task metadata the converter needs.
 > On an onboard platform the same flag runs the workload **twice** — a dep_gen pass to
 > capture the graph, then a clean timing pass — since collection perturbs timing.

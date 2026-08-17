@@ -296,7 +296,7 @@ python runtime/tools/scope_stats_plot.py \
 
 ## 相关文档
 
-- Simpler runtime 侧参考：`runtime/docs/dfx/{l2-swimlane,
-  args-dump,pmu-profiling,dep_gen,scope-stats}.md`。
+- Simpler runtime 侧参考：`runtime/docs/dfx/{chip-swimlane-profiling,
+  args-dump,pmu-profiling,dep-gen,scope-stats}.md`。
 - 编译期 profiling（正交、单 PyPTO 进程）：
   [01-compile-profiling.md](01-compile-profiling.md)。

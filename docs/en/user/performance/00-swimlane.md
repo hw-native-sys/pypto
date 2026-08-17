@@ -38,7 +38,7 @@ Both land under the run's output directory:
 
 ```text
 <work_dir>/dfx_outputs/
-  l2_swimlane_records.json     per-task start / end (dispatch / finish need level 2)
+  chip_swimlane_records.json   per-task timing plus scheduler/orchestrator phases (level 4)
   deps.json                    task dependency edges
   merged_swimlane_*.json       onboard only — the joined trace
 ```
@@ -47,7 +47,7 @@ Both land under the run's output directory:
 recorded in the swimlane record itself, to keep the device hot path clean. The join happens
 afterwards, on the host.
 
-### Collection is levelled, and `RunConfig` requests the lowest level
+### Collection is levelled, and `RunConfig` requests full collection
 
 The runtime collects at one of four levels, each adding to the one below:
 
@@ -62,11 +62,10 @@ Each level is a real guard in the collectors, not a verbosity setting: at level 
 dispatch and finish timestamps are **never stamped**, so no post-processing can recover
 them.
 
-> **`RunConfig.enable_l2_swimlane` is a `bool`, and `True` requests level 1.** The runtime's
-> own harness flag takes a level and defaults a bare `--enable-l2-swimlane` to **4**, so the
-> same-named switch means "everything" there and "AICore timing only" from PyPTO. Levels
-> 2–4 are currently not reachable through `RunConfig`; for those, drive the run from the
-> runtime harness. Anything below that needs the dispatch gap or a scheduler lane says so.
+> **`RunConfig.enable_l2_swimlane` remains a `bool` compatibility spelling. `True` maps to
+> Simpler's `enable_chip_swimlane` level 4 (full collection); `False` maps to 0.** The typed
+> `RunConfig` API does not expose levels 1–3; use the runtime harness's
+> `--enable-chip-swimlane <1|2|3>` when a lower collection level is required.
 
 ### Two things that will mislead you if you do not know them
 
@@ -76,7 +75,7 @@ for the graph, then a clean pass with dep_gen off for the timing. **Never read w
 from a swimlane-enabled onboard run**; use a separate plain run for that number.
 
 **On the simulator you get the records but not the merged trace.** `*sim` platforms stay
-single-pass and emit only `l2_swimlane_records.json` — the simulator does not yet ship the
+single-pass and emit only `chip_swimlane_records.json` — the simulator does not yet ship the
 task metadata the converter needs. Use the simulator to see the *shape* of the schedule,
 and an onboard run when the timing itself is the question.
 
@@ -116,11 +115,6 @@ The parts worth knowing on day one:
   passes that actually changed something. That is a compile-time view, not a timing one,
   but it is the other half of "what did the compiler do to my kernel".
 
-> **A naming difference to expect.** The plugin's documentation names the file
-> `chip_swimlane_records*.json`; the runtime pinned in this repository writes
-> `l2_swimlane_records.json`. If the right-click action does not offer your file, that
-> difference is the first thing to check.
-
 ### Perfetto
 
 The runtime also converts the records into a Chrome Trace Event JSON that loads in
@@ -146,9 +140,9 @@ dispatch ──────► start ──────► end ─────�
 [start, end]       = the kernel — the only span page 04 can shrink
 ```
 
-Level 1 — what `RunConfig` gives you — carries `start` and `end`. That is enough to read bar
-widths and the gaps *between* bars, which is what the rest of this chapter asks of it. The
-`[dispatch, start]` split needs level 2.
+Level 4 — what `RunConfig` gives you — includes all four timestamps plus scheduler and
+orchestrator phases. The `[start, end]` interval remains the task's AICore execution time;
+the `[dispatch, start]` split requires at least level 2 and is therefore present as well.
 
 **Read the gaps, not the bars.** A chip whose bars are narrow and whose gaps are wide is
 not a kernel problem; it is a granularity or dispatch problem, and pages
@@ -162,11 +156,12 @@ work the scheduler had not placed yet?*
 
 ```bash
 python -m simpler_setup.tools.sched_overhead_analysis \
-    --l2-swimlane-records-json <records>.json --deps-json <deps>.json
+    --chip-swimlane-records-json <records>.json --deps-json <deps>.json
 ```
 
-This one needs a **level ≥ 3** capture for its scheduler-loop parts, so drive that run from
-the runtime harness rather than `RunConfig`.
+This one needs a **level ≥ 3** capture for its scheduler-loop parts. `RunConfig`'s full
+level-4 capture satisfies that requirement; use the runtime harness's
+`--enable-chip-swimlane <level>` only when selecting a different collection level.
 
 It reports per-engine and system-wide overhead as a share of the makespan, the pickup-cost
 distribution, the AICPU scheduler-loop budget, and a critical-path attribution splitting
