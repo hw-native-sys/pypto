@@ -1288,8 +1288,10 @@ def execute_distributed(
 
     # Pre-fork: allocate HOST-level intermediate tensors so the POSIX
     # shared-memory mappings exist before w.init() forks child processes.
+    # ``world_size`` sizes the per-rank comm ordering tokens, which must exist
+    # pre-fork like every other host-side intermediate.
     if alloc_fn is not None:
-        alloc_fn(tensors)
+        alloc_fn(tensors, world_size=len(dc.device_ids))
 
     sub_worker_fns = _load_sub_worker_fns(output_dir)
     # The one-shot path cannot supply callbacks; if the program declares any
@@ -1578,7 +1580,7 @@ class DistributedWorker(Worker):
                 for _frame in self._dispatch_frames:
                     base_tensors: dict[str, Any] = {}
                     if alloc_fn is not None:
-                        alloc_fn(base_tensors)
+                        alloc_fn(base_tensors, world_size=len(prog._distributed_config.device_ids))
                     base_tensor_frames.append(base_tensors)
                 self._states[prog] = {
                     "entry_fn": entry_fn,

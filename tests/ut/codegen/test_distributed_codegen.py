@@ -551,7 +551,7 @@ class TestDistributedCodegen:
         cg = codegen.DistributedCodegen()
         code = cg.generate(program)
 
-        alloc_idx = code.find("def _alloc_intermediates(tensors):")
+        alloc_idx = code.find("def _alloc_intermediates(tensors, world_size=1):")
         host_idx = code.find("def host_orch(")
         assert alloc_idx >= 0, f"Missing _alloc_intermediates in:\n{code}"
         assert host_idx >= 0, f"Missing host_orch in:\n{code}"
@@ -600,9 +600,9 @@ class TestDistributedCodegen:
         cg = codegen.DistributedCodegen()
         code = cg.generate(program)
 
-        assert "def _alloc_intermediates(tensors):" in code
+        assert "def _alloc_intermediates(tensors, world_size=1):" in code
         # Body is just `pass` since there are no allocations to hoist.
-        alloc_idx = code.find("def _alloc_intermediates(tensors):")
+        alloc_idx = code.find("def _alloc_intermediates(tensors, world_size=1):")
         host_idx = code.find("def host_orch(")
         alloc_block = code[alloc_idx:host_idx]
         assert "    pass" in alloc_block
