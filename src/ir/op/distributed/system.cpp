@@ -242,6 +242,16 @@ REGISTER_OP("pld.system.wait")
 // ============================================================================
 // pld.system.defer_wait — register a task-completion condition without blocking
 // ============================================================================
+//
+// Core placement: undeclared, and unlike `notify` it needs no `set_no_duplicate()`.
+// The lane guarantee comes from the waiter contract instead of from the flag:
+// `ScopeOutliner` admits a registration only inside a dedicated task-level
+// `pl.at(CORE_GROUP)` scope, and `ExpandMixedKernel` then rejects any waiter
+// whose rolled-up affinity is CUBE or MIXED. A waiter therefore converts
+// directly to a pure-AIV function and is never duplicated onto the cube lane,
+// so the premature-release hazard that pins `notify` to VECTOR cannot arise
+// here. `LowerAutoVectorSplit` reads `no_duplicate` only to keep a region's
+// comm ops off the cube lane, which is already guaranteed.
 
 REGISTER_OP("pld.system.defer_wait")
     .set_description(
