@@ -42,8 +42,8 @@ Coverage:
   full-shape; single-row ``[5,0]``; full-width multi-row ``[16,0]``);
 * Vec operand alignment — materialization for unaligned or unprovable call
   operands in ``AssignStmt`` and ``EvalStmt``, plus plain aliases and loop
-  carries; provably aligned static, constant-SSA, and dynamic-row slices stay
-  zero-copy;
+  carries; provably aligned static, constant-SSA, dynamic-row, and dynamic
+  known-multiple slices stay zero-copy;
 * no-op cases — no Mat slice, and safe Vec-resident slices left untouched.
 """
 
@@ -899,6 +899,33 @@ class TestUnalignedVecSlice:
                 return out
 
         ir.assert_structural_equal(_run_pass(Before), Expected)
+
+    def test_dynamic_column_with_aligned_ssa_multiple_left_untouched(self):
+        """A dynamic INT32 column known to be a multiple of 32 is aligned.
+
+        This mirrors ``prefill_csa/rope_cs``. Materializing this store would
+        also be illegal on A2/A3 because TEXTRACT does not support INT32.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 64], pl.INT32],
+                out: pl.Out[pl.Tensor[[16, 64], pl.INT32]],
+                block_idx: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[16, 64], pl.INT32]:
+                local: pl.Tile[[16, 64], pl.INT32, pl.Mem.Vec] = pl.tile.load(
+                    x, [0, 0], [16, 64], target_memory=pl.Mem.Vec
+                )
+                block_base: pl.Scalar[pl.INDEX] = block_idx * 16
+                col_off: pl.Scalar[pl.INDEX] = block_base * 2
+                half: pl.Tile[[16, 32], pl.INT32, pl.Mem.Vec] = pl.tile.slice(local, [16, 32], [0, col_off])
+                out = pl.store(half, [0, col_off], out)
+                return out
+
+        ir.assert_structural_equal(_run_pass(Before), Before)
 
     def test_dynamic_column_into_muls_materialized(self):
         """A dynamic column cannot be proved aligned and is materialized."""

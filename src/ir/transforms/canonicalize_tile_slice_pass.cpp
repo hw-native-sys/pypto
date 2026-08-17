@@ -73,9 +73,11 @@
 /// ``fp32_tile[:, 1:2]`` therefore starts four bytes past an aligned allocation.
 /// For every ordinary consumer of such a slice, this pass inserts a fresh Vec
 /// ``tile.extract``.  The extract result has its own aligned allocation, while
-/// slices whose offset is provably aligned remain zero-copy.  Dynamic offsets
-/// are handled conservatively: a dynamic row is provably safe only when the
-/// base row stride is aligned, and a dynamic column is not provably safe.
+/// slices whose offset is provably aligned remain zero-copy. Dynamic offsets
+/// are handled conservatively, but scalar SSA arithmetic can prove alignment:
+/// a dynamic row is safe when its known multiple times the base row stride is
+/// aligned, and a dynamic column is safe when its known multiple times the
+/// element storage width is aligned.
 ///
 /// After all consumers are rewritten the now-dead ``tile.slice`` is dropped.
 /// Chained slices (a slice of a slice) are peeled, accumulating the offset.
@@ -88,6 +90,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -164,6 +167,38 @@ ExprPtr ResolveKnownConstInt(const ExprPtr& expr,
   return it == known_consts.end() ? expr : it->second;
 }
 
+/// Return a divisor of every possible value of `expr`, capped to the 256-bit
+/// Vec alignment modulus. Unknown expressions are conservatively divisible by
+/// one. Following scalar SSA definitions lets expressions such as
+/// `block_idx * 32` prove an aligned column offset without pretending the
+/// runtime value itself is constant.
+int64_t KnownMultipleModuloAlignment(const ExprPtr& expr,
+                                     const std::unordered_map<const Var*, ExprPtr>& scalar_defs,
+                                     std::unordered_set<const Var*>& visiting) {
+  constexpr int64_t modulus = 256;
+  if (auto value = As<ConstInt>(expr)) {
+    int64_t residue = value->value_ % modulus;
+    if (residue < 0) residue += modulus;
+    return std::gcd(residue, modulus);
+  }
+  if (auto var = AsVarLike(expr)) {
+    auto it = scalar_defs.find(var.get());
+    if (it == scalar_defs.end() || !visiting.insert(var.get()).second) return 1;
+    int64_t multiple = KnownMultipleModuloAlignment(it->second, scalar_defs, visiting);
+    visiting.erase(var.get());
+    return multiple;
+  }
+  auto binary_multiple = [&](const BinaryExprPtr& binary, bool multiply) {
+    int64_t lhs = KnownMultipleModuloAlignment(binary->left_, scalar_defs, visiting);
+    int64_t rhs = KnownMultipleModuloAlignment(binary->right_, scalar_defs, visiting);
+    return multiply ? std::gcd(lhs * rhs, modulus) : std::gcd(lhs, rhs);
+  };
+  if (auto add = As<Add>(expr)) return binary_multiple(add, false);
+  if (auto sub = As<Sub>(expr)) return binary_multiple(sub, false);
+  if (auto mul = As<Mul>(expr)) return binary_multiple(mul, true);
+  return 1;
+}
+
 /// If `assign` is `var = tile.slice(src, shape, [off_row, off_col])`, return the
 /// peeled base/offset.  `known` holds slices collected so far; a slice whose
 /// source is itself a recorded slice is peeled through it (offsets summed), so
@@ -208,10 +243,12 @@ std::optional<SliceInfo> ParseCanonicalSlice(const AssignStmtPtr& assign,
 class SliceCollector : public IRVisitor {
  public:
   std::unordered_map<const Var*, SliceInfo> slices;
+  std::unordered_map<const Var*, ExprPtr> scalar_defs;
 
  protected:
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (op && op->var_) {
+      if (As<ScalarType>(op->var_->GetType())) scalar_defs.emplace(op->var_.get(), op->value_);
       if (As<ConstInt>(op->value_)) {
         known_consts_.emplace(op->var_.get(), op->value_);
       } else if (auto source = AsVarLike(op->value_)) {
@@ -237,7 +274,9 @@ class SliceCollector : public IRVisitor {
 /// storage, and unaligned Vec operands are materialized before ordinary ops.
 class CanonicalizeMutator : public IRMutator {
  public:
-  explicit CanonicalizeMutator(const std::unordered_map<const Var*, SliceInfo>& slices) : slices_(slices) {}
+  CanonicalizeMutator(const std::unordered_map<const Var*, SliceInfo>& slices,
+                      const std::unordered_map<const Var*, ExprPtr>& scalar_defs)
+      : slices_(slices), scalar_defs_(scalar_defs) {}
 
  protected:
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
@@ -522,11 +561,12 @@ class CanonicalizeMutator : public IRMutator {
   /// allocation is aligned; the slice adds
   /// `(row * base_cols + col) * storage_bits`.
   ///
-  /// A dynamic row is still safe when the source row stride is a multiple of
-  /// the alignment.  A dynamic column cannot be proved aligned.  Calculating
-  /// entirely modulo 256 avoids overflow for large static shapes and also
-  /// handles packed sub-byte dtypes correctly.
-  static std::optional<int64_t> VecSliceAddressModulo(const SliceInfo& info) {
+  /// Dynamic offsets remain safe when their scalar SSA expressions have a
+  /// known multiple that makes the corresponding row/column bit offset a
+  /// multiple of the alignment. Calculating entirely modulo 256 avoids
+  /// overflow for large static shapes and also handles packed sub-byte dtypes
+  /// correctly.
+  std::optional<int64_t> VecSliceAddressModulo(const SliceInfo& info) const {
     auto base_tile = info.base ? As<TileType>(info.base->GetType()) : nullptr;
     if (!base_tile || base_tile->shape_.size() != 2) return std::nullopt;
 
@@ -546,9 +586,15 @@ class CanonicalizeMutator : public IRMutator {
     }
 
     auto col = As<ConstInt>(info.off_col);
-    if (!col) return std::nullopt;
-    const int64_t col_bits =
-        PositiveModulo(col->value_, kVecOperandAlignmentBits) * storage_bits % kVecOperandAlignmentBits;
+    int64_t col_bits = 0;
+    if (col) {
+      col_bits =
+          PositiveModulo(col->value_, kVecOperandAlignmentBits) * storage_bits % kVecOperandAlignmentBits;
+    } else {
+      std::unordered_set<const Var*> visiting;
+      const int64_t col_multiple = KnownMultipleModuloAlignment(info.off_col, scalar_defs_, visiting);
+      if (col_multiple * storage_bits % kVecOperandAlignmentBits != 0) return std::nullopt;
+    }
 
     auto row = As<ConstInt>(info.off_row);
     if (row && row->value_ == 0) return (base_bits + col_bits) % kVecOperandAlignmentBits;
@@ -558,8 +604,11 @@ class CanonicalizeMutator : public IRMutator {
     const int64_t row_stride_bits =
         PositiveModulo(base_cols->value_, kVecOperandAlignmentBits) * storage_bits % kVecOperandAlignmentBits;
     if (!row) {
-      return row_stride_bits == 0 ? std::optional<int64_t>((base_bits + col_bits) % kVecOperandAlignmentBits)
-                                  : std::nullopt;
+      std::unordered_set<const Var*> visiting;
+      const int64_t row_multiple = KnownMultipleModuloAlignment(info.off_row, scalar_defs_, visiting);
+      return row_multiple * row_stride_bits % kVecOperandAlignmentBits == 0
+                 ? std::optional<int64_t>((base_bits + col_bits) % kVecOperandAlignmentBits)
+                 : std::nullopt;
     }
 
     const int64_t row_bits =
@@ -575,7 +624,7 @@ class CanonicalizeMutator : public IRMutator {
 
   /// True unless the Vec slice's inherited base address can be proved 32-byte
   /// aligned.  Unknown shape/offset cases are materialized conservatively.
-  static bool NeedsAlignedVecMaterialization(const SliceInfo& info) {
+  bool NeedsAlignedVecMaterialization(const SliceInfo& info) const {
     if (!IsVecOrUnassigned(info)) return false;
     auto address_modulo = VecSliceAddressModulo(info);
     return !address_modulo.has_value() || *address_modulo != 0;
@@ -651,6 +700,7 @@ class CanonicalizeMutator : public IRMutator {
   }
 
   const std::unordered_map<const Var*, SliceInfo>& slices_;
+  const std::unordered_map<const Var*, ExprPtr>& scalar_defs_;
 };
 
 /// Phase 3a — collect every Var *used* (referenced on a statement's RHS).  An
@@ -708,7 +758,7 @@ Pass CanonicalizeTileSlice() {
     if (collector.slices.empty()) return func;
 
     // Phase 2 — fold or materialize canonical slice consumers.
-    CanonicalizeMutator mutator(collector.slices);
+    CanonicalizeMutator mutator(collector.slices, collector.scalar_defs);
     auto new_body = mutator.VisitStmt(func->body_);
 
     // Phase 3 — drop the slice defs that no longer have any use.  A chained

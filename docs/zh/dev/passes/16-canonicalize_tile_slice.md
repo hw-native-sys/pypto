@@ -23,7 +23,7 @@ PTO ISA 支持 Mat 上的 `pto.subview` 作为零拷贝别名（无数据搬运�
 base + (off_row * base_cols + off_col) * storage_bits
 ```
 
-因此 FP32 的列切片 `[:, 1:2]` 只比对齐的源分配多 4 字节。把这个 subview 直接喂给 `tile.muls` 等普通向量算子可能导致设备卡死（#1789）。本 pass 会将地址未对齐的 Vec slice 操作数替换为新的 `tile.extract(..., target_memory=Vec)`；新分配满足对齐要求，而可证明对齐的 slice 仍保持零拷贝。对于动态偏移，只有当源行跨度是 32 字节的倍数时才能证明动态行偏移安全；动态列偏移则保守地实例化。
+因此 FP32 的列切片 `[:, 1:2]` 只比对齐的源分配多 4 字节。把这个 subview 直接喂给 `tile.muls` 等普通向量算子可能导致设备卡死（#1789）。本 pass 会将地址未对齐的 Vec slice 操作数替换为新的 `tile.extract(..., target_memory=Vec)`；新分配满足对齐要求，而可证明对齐的 slice 仍保持零拷贝。对于动态偏移，若标量 SSA 算术能证明其已知倍数产生的行或列位移满足 32 字节对齐，也会保持零拷贝。
 
 **Pipeline 位置**：紧跟在 [`AutoTileMatmulL0`](15-auto_tile_matmul_l0.md) 之后（此时读取 batch-page slice 的逐迭代 `tile.extract` 已经存在），先于 [`InferTileMemorySpace`](17-infer_tile_memory_space.md)。
 
@@ -51,13 +51,13 @@ program_canon = passes.canonicalize_tile_slice()(program)
 
 对每个 InCore 类型的 function，分三个阶段：
 
-1. **收集 (Collect)** —— 索引每个 value 为规范 3 参数形式 `tile.slice(src, shape, offset)` 的 `AssignStmt`。若某 slice 的 `src` 本身又是一个已记录的 slice，则进行剥离 (peel) 并累加偏移，使每个条目最终解析为一个非 slice 的 base tile 加上总偏移 `(off_row, off_col)`。分析前会解析直接的 `ConstInt` SSA 定义及其普通别名，避免字面量偏移在 `ConvertToSSA` 后被误判为动态值。带有 `valid_shape` / `drop_dims` 的 slice（4–5 参数）不是普通窗口，跳过。
+1. **收集 (Collect)** —— 索引每个 value 为规范 3 参数形式 `tile.slice(src, shape, offset)` 的 `AssignStmt`。若某 slice 的 `src` 本身又是一个已记录的 slice，则进行剥离 (peel) 并累加偏移，使每个条目最终解析为一个非 slice 的 base tile 加上总偏移 `(off_row, off_col)`。分析前会解析直接的 `ConstInt` SSA 定义及其普通别名，避免字面量偏移在 `ConvertToSSA` 后被误判为动态值；同时保留标量 SSA 定义用于模对齐证明，例如 `block_idx * 32` 虽是动态值，但可静态确定其为 32 个元素的倍数。带有 `valid_shape` / `drop_dims` 的 slice（4–5 参数）不是普通窗口，跳过。
 
 2. **改写消费者 (Rewrite consumers)** —— 对每个 slice：
    - **`tile.extract(slice, ir, ic, shape)`** → `tile.extract(base, ir + off_row, ic + off_col, shape)`。extract 直接读取 slice 的源 tile；当两个加数都是 `ConstInt` 时对索引加法做常量折叠。
    - **`tile.matmul` / `tile.matmul_acc` / `tile.matmul_bias` 的操作数**（仅 Mat slice） → 该操作数被替换为一个新的 `tile.extract(base, off_row, off_col, slice_shape, target_memory=Left|Right)`——lhs 操作数用 `Left`，rhs 操作数用 `Right`。（`tile.matmul_acc` 的累加器操作数位于 `Acc`，永远不会是 Mat slice。）
    - **`tile.col_expand_*` 的操作数**（仅 Vec slice） → 当惰性 `pto.textract` 不是恒等拷贝时——即偏移是动态的，或窗口在基 tile 中不连续（行数大于 1 *且* 比基 tile 窄）——该操作数被替换为一个新的 `tile.extract(base, off_row, off_col, slice_shape, target_memory=Vec)`。两个操作数都会检查。常量偏移且窗口连续的 slice 保持原样。
-   - **普通 call 的操作数**（仅 Vec slice，位于 `AssignStmt` 或 `EvalStmt` 中） → 计算 `(base_byte_offset * 8 + (off_row * base_cols + off_col) * storage_bits) mod 256`。取模前会计入已知的具体 MemRef 字节偏移；内存规划哨兵值按对齐的根分配处理，而非常量基址偏移无法在静态证明。若结果非零或无法证明，则把操作数替换为新的 `tile.extract(base, off_row, off_col, slice_shape, target_memory=Vec)`。`tile.slice` 自身会被跳过，以便剥离链式视图；`tile.extract` 使用上面的直接折叠规则。
+   - **普通 call 的操作数**（仅 Vec slice，位于 `AssignStmt` 或 `EvalStmt` 中） → 计算 `(base_byte_offset * 8 + (off_row * base_cols + off_col) * storage_bits) mod 256`。取模前会计入已知的具体 MemRef 字节偏移；内存规划哨兵值按对齐的根分配处理，而非常量基址偏移无法在静态证明。分析会沿普通别名、加减法及乘法追踪标量 SSA 定义，以证明动态倍数仍满足对齐。若结果非零或无法证明，则把操作数替换为新的 `tile.extract(base, off_row, off_col, slice_shape, target_memory=Vec)`。`tile.slice` 自身会被跳过，以便剥离链式视图；`tile.extract` 使用上面的直接折叠规则。
    - **SSA 逃逸 (SSA escape)**（仅 Vec slice） → 未对齐 slice 经过普通别名赋值时，在别名定义处进行物化。未对齐的循环初始值在进入循环前物化，并通过其 `IterArg` 替换；由 `yield` 携带的未对齐值则在 yield 前物化。这样别名和循环携带的 SSA 身份无法绕过普通 call 的查找。
 
 3. **删除死 slice (Drop dead slices)** —— 结果不再被任何使用者引用的 `tile.slice` 被删除。链式 slice（slice 的 slice）只有在消费它的那个 slice 被删除后才会变死，因此该步骤迭代至不动点（迭代次数以 slice 数量为上界）。结束时仍被使用的 slice，说明其消费者不被本 pass 规范化——保持原样，相对 pass 前的 IR 无回退。
