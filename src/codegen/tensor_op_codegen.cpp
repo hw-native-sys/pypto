@@ -391,8 +391,8 @@ REGISTER_ORCHESTRATION_OP(tensor_slice, ("tensor.slice")) {
     oss << "ChipTensor " << result_var << " = " << ext_input_name << ".view(" << result_var << "_shapes, "
         << result_var << "_offsets);";
   } else {
-    oss << "ChipTensor " << result_var << "_view = " << ext_input_name << ".view(" << result_var << "_shapes, "
-        << result_var << "_offsets);\n";
+    oss << "ChipTensor " << result_var << "_view = " << ext_input_name << ".view(" << result_var
+        << "_shapes, " << result_var << "_offsets);\n";
     // A dynamically out-of-bounds scalar index clamps its dropped axis to
     // zero. Preserve that full-view emptiness before removing the axis: the
     // runtime intentionally leaves an empty view at the parent start offset
