@@ -448,6 +448,31 @@ def _load_orch_entry(output_dir: Path) -> tuple[Any, Any]:
     return entry_fn, alloc_fn
 
 
+def _call_alloc_intermediates(alloc_fn: Any, tensors: dict[str, Any], world_size: int) -> None:
+    """Invoke the generated ``_alloc_intermediates``, passing ``world_size`` only if it
+    accepts it.
+
+    Codegen emits ``_alloc_intermediates(tensors, world_size=1)`` so it can size the
+    per-rank comm ordering tokens, but the one-argument form must keep working: a
+    ``build_output/`` directory produced by an older pypto is replayable via
+    :meth:`DistributedCompiledProgram.from_dir`, and callers may inject their own
+    allocator. Probing the signature (rather than catching :class:`TypeError` around the
+    call) keeps a ``TypeError`` raised *inside* the allocator from being mistaken for a
+    signature mismatch and silently retried.
+    """
+    try:
+        params = inspect.signature(alloc_fn).parameters
+    except (TypeError, ValueError):  # builtin / C callable with no introspectable signature
+        params = {}
+    takes_world_size = "world_size" in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+    if takes_world_size:
+        alloc_fn(tensors, world_size=world_size)
+    else:
+        alloc_fn(tensors)
+
+
 def _load_sub_worker_fns(output_dir: Path) -> dict[str, Any]:
     """Load SubWorker callables from ``sub_workers/*.py`` (keyed by file stem)."""
     sub_worker_fns: dict[str, Any] = {}
@@ -1291,7 +1316,7 @@ def execute_distributed(
     # ``world_size`` sizes the per-rank comm ordering tokens, which must exist
     # pre-fork like every other host-side intermediate.
     if alloc_fn is not None:
-        alloc_fn(tensors, world_size=len(dc.device_ids))
+        _call_alloc_intermediates(alloc_fn, tensors, len(dc.device_ids))
 
     sub_worker_fns = _load_sub_worker_fns(output_dir)
     # The one-shot path cannot supply callbacks; if the program declares any
@@ -1580,7 +1605,9 @@ class DistributedWorker(Worker):
                 for _frame in self._dispatch_frames:
                     base_tensors: dict[str, Any] = {}
                     if alloc_fn is not None:
-                        alloc_fn(base_tensors, world_size=len(prog._distributed_config.device_ids))
+                        _call_alloc_intermediates(
+                            alloc_fn, base_tensors, len(prog._distributed_config.device_ids)
+                        )
                     base_tensor_frames.append(base_tensors)
                 self._states[prog] = {
                     "entry_fn": entry_fn,

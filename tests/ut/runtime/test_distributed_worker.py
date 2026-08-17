@@ -1664,6 +1664,38 @@ class TestLoadOrchEntry:
         assert entry_fn.__name__ == "host_orch"
         assert alloc_fn is not None and alloc_fn.__name__ == "_alloc_intermediates"
 
+    def test_alloc_intermediates_accepts_both_signatures(self, tmp_path):
+        """The runtime must call a one-arg allocator without ``world_size``.
+
+        Codegen emits ``_alloc_intermediates(tensors, world_size=1)`` so it can size the
+        per-rank comm ordering tokens, but a ``build_output/`` produced by an older pypto
+        is still replayable via ``from_dir``, and callers may inject their own allocator.
+        Both shapes must work.
+        """
+        from pypto.runtime.distributed_runner import (  # noqa: PLC0415
+            _call_alloc_intermediates,
+        )
+
+        seen: dict[str, object] = {}
+
+        def old_style(tensors):
+            seen["old"] = True
+
+        def new_style(tensors, world_size=1):
+            seen["new"] = world_size
+
+        _call_alloc_intermediates(old_style, {}, 4)
+        _call_alloc_intermediates(new_style, {}, 4)
+        assert seen == {"old": True, "new": 4}
+
+        # A TypeError raised *inside* the allocator must propagate, not be mistaken for a
+        # signature mismatch and retried with fewer arguments.
+        def boom(tensors, world_size=1):
+            raise TypeError("inner failure")
+
+        with pytest.raises(TypeError, match="inner failure"):
+            _call_alloc_intermediates(boom, {}, 4)
+
     def test_no_marker_raises(self, tmp_path):
         from pypto.runtime.distributed_runner import _load_orch_entry  # noqa: PLC0415
 
