@@ -619,7 +619,10 @@ satisfies. One task may register at most 64 conditions, independent of the sched
 The scope outliner requires a dedicated top-level single-block pure-AIV `pl.at(CORE_GROUP)`
 waiter with no predicate or `allow_early_resolve=True`.
 Pure scalar work may occur between registrations, but `tensor.read`,
-payload/cache operations, and other communication cannot. A terminal waiter with no
+payload/cache operations, and other communication cannot. Scalars carried across
+a branch merge or a loop iteration are such bookkeeping — the SSA phi / iter_arg
+yields `ConvertToSSA` inserts for them are accepted, and a loop that registers no
+condition is allowed and needs no statically known trip count. A terminal waiter with no
 continuation may be submitted fire-and-forget and need not capture a TaskId. An
 unmarked direct `@pl.jit.incore` / AIV use is rejected because it bypasses the
 validated single-block task launch and runtime `AsyncCtx` contract. Programmatically

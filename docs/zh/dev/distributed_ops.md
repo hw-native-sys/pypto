@@ -543,7 +543,9 @@ NZ layout 与零维 signal 都会被拒绝。storage 是 INT32，但按无符号
 Scope outliner 要求 waiter 是专用、顶层、单 block 的 pure-AIV `pl.at(CORE_GROUP)`，
 不能带 predicate 或 `allow_early_resolve=True`。registration 之间可执行纯标量
 bookkeeping/control flow；一旦开始 registration，不能再执行 `tensor.read`、payload/cache
-操作或其他通信。没有 continuation 的末端 waiter 可以 fire-and-forget，无需捕获 TaskId。
+操作或其他通信。跨分支合并或跨循环迭代传递的标量同属 bookkeeping —— `ConvertToSSA`
+为它们插入的 phi / iter_arg yield 会被接受；不注册任何条件的循环也允许存在，且无需静态
+可知的 trip count。没有 continuation 的末端 waiter 可以 fire-and-forget，无需捕获 TaskId。
 未标记而直接从 `@pl.jit.incore` / AIV 使用仍会被拒绝，因为它绕过了已验证的 single-block
 task launch 与 runtime `AsyncCtx` 契约。以编程方式构造且携带内部 waiter marker 的 IR，只有
 在完整 waiter body 与 orchestration call-site 契约重新验证通过后才会被接受。

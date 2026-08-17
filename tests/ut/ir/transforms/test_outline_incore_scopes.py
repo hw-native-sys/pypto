@@ -1219,6 +1219,109 @@ class TestOutlineSubmitTaskId:
         with pytest.raises(ValueError, match="loop may execute tensor reads.*after registering"):
             passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
 
+    def test_deferred_wait_accepts_phi_carried_scalar_threshold(self):
+        """A branch-merged scalar is SSA bookkeeping, not continuation work."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                signal: pld.DistributedTensor[[4, 1], pl.INT32],
+                my_rank: pl.Scalar[pl.INT32],
+                low: pl.Scalar[pl.INT32],
+                high: pl.Scalar[pl.INT32],
+            ):
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="waiter"):
+                    if my_rank == 0:
+                        wanted = low
+                    else:
+                        wanted = high
+                    pld.system.defer_wait(signal, offsets=[0, 0], expected=wanted, cmp=pld.WaitCmp.Ge)
+
+        after = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+        waiter = after.get_function("waiter")
+        assert waiter is not None
+        assert waiter.attrs["deferred_completion_waiter"] is True
+
+    def test_deferred_wait_accepts_iter_arg_carried_scalar_threshold(self):
+        """A threshold advanced across iterations rides an iter_arg yield."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                signal: pld.DistributedTensor[[4, 1], pl.INT32],
+                epoch: pl.Scalar[pl.INT32],
+                step: pl.Scalar[pl.INT32],
+            ):
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="waiter"):
+                    wanted = epoch
+                    for src in pl.range(4):
+                        pld.system.defer_wait(
+                            signal,
+                            offsets=[src, 0],
+                            expected=wanted,
+                            cmp=pld.WaitCmp.Ge,
+                        )
+                        wanted = wanted + step
+
+        after = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+        waiter = after.get_function("waiter")
+        assert waiter is not None
+        assert waiter.attrs["deferred_completion_waiter"] is True
+
+    def test_deferred_wait_accepts_pure_scalar_loop_that_registers_nothing(self):
+        """A loop contributing zero conditions needs no registration of its own."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                signal: pld.DistributedTensor[[8, 1], pl.INT32],
+                my_rank: pl.Scalar[pl.INT32],
+                epoch: pl.Scalar[pl.INT32],
+            ):
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="waiter"):
+                    coord = my_rank
+                    for _ in pl.range(3):
+                        coord = coord + my_rank
+                    pld.system.defer_wait(signal, offsets=[coord, 0], expected=epoch, cmp=pld.WaitCmp.Ge)
+
+        after = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+        waiter = after.get_function("waiter")
+        assert waiter is not None
+        assert waiter.attrs["deferred_completion_waiter"] is True
+
+    def test_deferred_wait_rejects_tensor_carried_across_iterations(self):
+        """Accepting scalar yields must not open a path for carrying tensor state.
+
+        The refusal comes from the AssignStmt tensor guard, which fires on the
+        binding that would define the carry -- before SSA can turn it into a
+        yield. ValidateScalarExpr's tensor-type guard on the yield itself is
+        therefore defence in depth, unreachable from the DSL today.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                signal: pld.DistributedTensor[[4, 1], pl.INT32],
+                payload: pl.Tensor[[4], pl.INT32],
+            ):
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    carried = payload
+                    for src in pl.range(4):
+                        pld.system.defer_wait(signal, offsets=[src, 0], expected=1, cmp=pld.WaitCmp.Ge)
+                        carried = carried
+                    _ = carried
+
+        with pytest.raises(ValueError, match="cannot create or update payload tensors"):
+            passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+
     def test_deferred_wait_accepts_exactly_64_static_conditions(self):
         """The runtime capacity is inclusive: 64 conditions are supported."""
 

@@ -129,6 +129,24 @@ class PostStoreAliasCollector : public IRVisitor {
 }
 
 /**
+ * @brief Per-waiter completion-condition budget.
+ *
+ * Must match the runtime's ``MAX_COMPLETIONS_PER_TASK``
+ * (``runtime/src/{arch}/runtime/{rt}/runtime/aicore_completion_mailbox_types.h``).
+ * PyPTO's C++ never includes a runtime header, so the two cannot be linked
+ * directly; the generated adapter in ``pto_backend.py`` carries a
+ * ``static_assert`` against the real constant to catch drift at kernel-compile
+ * time.
+ *
+ * Exceeding the budget on device is not a hang: the AIV writes
+ * ``ASYNC_WAIT_OVERFLOW`` into the completion slab and the scheduler surfaces it
+ * as ``sched_error_code=102`` while aborting the run. This compile-time bound
+ * exists for attribution — a span-anchored error naming the offending
+ * ``pl.at`` scope — not to avoid a worse device-side failure.
+ */
+inline constexpr int64_t kMaxDeferredConditionsPerWaiter = 64;
+
+/**
  * @brief Validate the dedicated deferred-waiter kernel body contract.
  *
  * A waiter may use scalar expressions and sequential scalar control flow to
@@ -138,7 +156,7 @@ class PostStoreAliasCollector : public IRVisitor {
  * registration upper bound is proved statically. Conditional registration
  * (the common ``if peer != rank`` form) may execute zero times; Simpler accepts
  * that as an already-complete waiter. Loops with an unknown trip count are
- * rejected because they cannot prove the runtime's 64-condition limit.
+ * rejected because they cannot prove the per-waiter condition budget.
  */
 class DeferredWaitContractValidator {
  public:
@@ -162,9 +180,9 @@ class DeferredWaitContractValidator {
     auto result = validator.ValidateStmt(body);
     INTERNAL_CHECK_SPAN(result.has_deferred_wait, span)
         << "Internal error: deferred-wait finder/validator disagreement";
-    CHECK_SPAN(result.static_max_count <= 64, span)
-        << "deferred waiter supports at most 64 conditions, but may statically register "
-        << result.static_max_count;
+    CHECK_SPAN(result.static_max_count <= kMaxDeferredConditionsPerWaiter, span)
+        << "deferred waiter supports at most " << kMaxDeferredConditionsPerWaiter
+        << " conditions, but may statically register " << result.static_max_count;
     return result;
   }
 
@@ -213,21 +231,25 @@ class DeferredWaitContractValidator {
       static_cast<void>(ValidateScalarExpr(loop->stop_, stmt->span_, /*allow_tensor_read=*/false));
       static_cast<void>(ValidateScalarExpr(loop->step_, stmt->span_, /*allow_tensor_read=*/false));
       auto body_result = ValidateStmt(loop->body_);
-      CHECK_SPAN(body_result.has_deferred_wait, stmt->span_)
-          << "deferred waiter loop must register at least one pld.system.defer_wait condition";
+      // A loop that registers nothing contributes nothing to the budget, so it
+      // needs no statically known trip count. Returning before the arithmetic
+      // below also keeps `trip_count` out of the divisor when it is unknown.
+      if (!body_result.has_deferred_wait) return body_result;
       auto trip_count = transform_utils::EvalConstTripCount(loop);
       CHECK_SPAN(trip_count > 0, stmt->span_)
           << "deferred waiter registration loop must have a statically known positive trip count "
-             "so the 64-condition limit can be proved";
+             "so the per-waiter condition budget can be proved";
       CHECK_SPAN(trip_count == 1 || body_result.safe_after_registration, stmt->span_)
           << "deferred waiter loop may execute tensor reads or continuation work after registering its "
              "first condition; loop bodies may contain only pure scalar bookkeeping, control flow, "
              "and defer_wait registrations";
       // Saturate just above the supported limit rather than multiplying
-      // unchecked: enormous constant bounds must fail the <=64 contract, not
+      // unchecked: enormous constant bounds must fail the budget contract, not
       // wrap int64_t and accidentally pass it.
       body_result.static_max_count =
-          body_result.static_max_count > 64 / trip_count ? 65 : body_result.static_max_count * trip_count;
+          body_result.static_max_count > kMaxDeferredConditionsPerWaiter / trip_count
+              ? kMaxDeferredConditionsPerWaiter + 1
+              : body_result.static_max_count * trip_count;
       return body_result;
     }
     if (auto branch = As<IfStmt>(stmt)) {
@@ -240,6 +262,21 @@ class DeferredWaitContractValidator {
       result.safe_after_registration =
           then_result.safe_after_registration && else_result.safe_after_registration;
       return result;
+    }
+    if (auto yield = As<YieldStmt>(stmt)) {
+      // SSA carries, not user-written statements: ConvertToSSA emits a yield
+      // for a scalar that crosses a branch merge (phi), a loop iteration
+      // (iter_arg), or that escapes the loop defining it. They are bookkeeping,
+      // so they neither register a condition nor count against the budget.
+      // ``allow_tensor_read=false`` keeps a carry from smuggling in a memory
+      // read, and ValidateScalarExpr's tensor-type guard rejects a tile carry
+      // with its own message.
+      for (const auto& value : yield->value_) {
+        static_cast<void>(ValidateScalarExpr(value, stmt->span_, /*allow_tensor_read=*/false));
+      }
+      // Every carry that survives the loop above is pure scalar, so it remains
+      // safe to execute after an earlier registration.
+      return Result{false, 0, true};
     }
     CHECK_SPAN(false, stmt ? stmt->span_ : span_)
         << "deferred waiter body supports only scalar assignments/control flow and "
