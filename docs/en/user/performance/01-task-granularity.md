@@ -54,6 +54,9 @@ with pl.at(level=pl.Level.CORE_GROUP):
     pl.store(pl.add(tile_a, tile_b), [0, 0], c)
 ```
 
+**Run it:** `python examples/advanced/04_task_granularity.py --mode larger_tiles` — compare against `--mode many_small_tasks`, which does the same work in four
+tasks instead of two.
+
 **Cost:** on-chip buffer footprint, quadratically in a 2D tile. A tile that no longer fits
 alongside its co-residents pushes the allocator into either failing or giving up a
 pipeline stage — see [Memory](05-memory.md).
@@ -86,6 +89,8 @@ with pl.at(level=pl.Level.CORE_GROUP):
 
 `examples/beginner/02_elementwise.py` (`chunked_add`) is this pattern end to end.
 
+**Run it:** `python examples/advanced/04_task_granularity.py --mode loop_inside` — `--mode many_small_tasks` is the four-dispatch form it replaces.
+
 **Cost:** the chunks are now strictly ordered within one core. If they were independent and
 you had cores to spare, you have traded parallelism for dispatch savings — which is the
 wrong trade when cores are idle. It also makes the loop a candidate for
@@ -115,6 +120,8 @@ with pl.at(level=pl.Level.CORE_GROUP):
     s = pl.add(pl.load(a, [0, 0], [TR, TC]), pl.load(b, [0, 0], [TR, TC]))
     pl.store(pl.exp(s), [0, 0], out)
 ```
+
+**Run it:** `python examples/advanced/04_task_granularity.py --mode merged_chain` — `--mode two_tasks_via_gm` is the same chain before merging.
 
 **Cost:** the merged task holds every intermediate live at once.
 

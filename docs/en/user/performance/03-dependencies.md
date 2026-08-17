@@ -62,9 +62,19 @@ it:
 | One tensor, its whole lifetime | `pl.create_tensor(..., manual_dep=True)` |
 | Every task in a region | `with pl.manual_scope():` |
 
+**Run them:** `examples/advanced/06_dependencies.py` has all five as modes over the same
+work — `serialized` (the chain), `narrow_claim`, `tensor_claim`, `region_claim` and
+`sliced` — plus `--dep-gen`, so the edges each one removes can be compared directly.
+
 Prefer the narrowest one that works. Each is an assertion the compiler **cannot check** —
 if those regions do overlap after all, you have not fixed a serialization, you have created
 an intermittent race that reproduces on someone else's machine.
+
+> **`manual_dep` removes the edges you wanted too.** It is the tensor's whole lifetime, so
+> a later consumer of that tensor loses its RAW edges on the writers as well — the example's
+> `tensor_claim` mode has to hand the consumer a `pl.array` of the writers' TaskIds through
+> `deps=`. Without it the run comes back *partly* correct, which is the intermittent shape
+> this section is warning about.
 
 **There is a fourth option, and it is the only one that needs no assertion.** Slice the
 output in the orchestration and pass each slice to its InCore function, so the tasks no

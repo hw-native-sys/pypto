@@ -46,7 +46,11 @@ for i in pl.range(N):
 | 一个 tensor，其整个生命期 | `pl.create_tensor(..., manual_dep=True)` |
 | 一个区域内的每个任务 | `with pl.manual_scope():` |
 
+**跑一下：** `examples/advanced/06_dependencies.py` 把这五种都做成了同一份工作的模式 —— `serialized`（那条链）、`narrow_claim`、`tensor_claim`、`region_claim` 与 `sliced` —— 并带 `--dep-gen`，于是每一种各自消掉了哪些边可以直接对照。
+
 优先选能用的最窄那个。每一个都是编译器**无法检验**的断言 —— 如果那些区域其实是相交的，你修掉的不是串行化，而是造出了一个在别人机器上才复现的偶发竞态。
+
+> **`manual_dep` 会把你想要的那些边一并抹掉。** 它作用于该张量的整个生命期，所以之后读这个张量的消费者也会失去它对那些写者的 RAW 边 —— 示例里的 `tensor_claim` 模式必须通过 `deps=` 把写者的 TaskId `pl.array` 交给消费者。不加的话，跑出来的结果是**部分**正确的，正是本节警告的那种偶发形态。
 
 **还有第四种办法，而且它是唯一不需要断言的。** 在编排里把输出切开，把每一片分别传给对应的 InCore 函数，让这些任务干脆不再共享一块 buffer：
 

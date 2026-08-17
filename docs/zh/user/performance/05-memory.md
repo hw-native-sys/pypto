@@ -78,6 +78,8 @@ def orch(self, a, out):
 
 `@pl.jit`、`@pl.jit.host`、`@pl.jit.inline` 接受 `auto_scope=False`；`.incore` 与 `.opaque` 拒绝它 —— 它们被外提成独立 kernel，没有可供作用域存在的编排函数体。
 
+**跑一下：** `python examples/advanced/08_scope_placement.py --mode manual_placement` —— `--mode auto_placement` 是同样的活交给编译器放置的版本。
+
 **代价：** 带上 `auto_scope=False` 之后该 pass **什么都不插**，于是这个函数里每一个作用域都归你放 —— 包括那些编译器原本免费加的。这是一个纯放置决策：AUTO 作用域仍然保持自动依赖跟踪开启，所以再平衡环并不改变你的依赖语义。（`MANUAL` 模式会改，那是[另一章](../tasks/01-scopes.md)的事。）
 
 **怎么确认：** 见下面的 scope stats。峰值应该分散到各个环，而不是堆在一个上。
@@ -126,6 +128,8 @@ cfg = RunConfig(
 ```
 
 字段留空（默认 `None`）会回落到运行时的 `PTO2_RING_*` 环境变量或它的编译期默认值，所以你也可以不改源码来做实验。
+
+**跑一下：** `python examples/advanced/08_scope_placement.py --size-rings` —— 以及先用 `--scope-stats` 度量。
 
 **代价：** 内存，而且算术是按环算的 —— 你以为「就整体大一点」的那个标量，会被应用四次。给环加尺寸也是**第二顺位**的修法：一个因为某个作用域里塞了上千个任务而溢出的任务窗口，拆成两个作用域比把它撑大更好。运行时失败时自己就是这么说的 —— *「raise `ring_task_window`（`PTO2_RING_TASK_WINDOW`）or split the scope」*。
 

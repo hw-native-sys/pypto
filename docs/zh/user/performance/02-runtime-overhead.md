@@ -64,6 +64,8 @@ with pl.spmd(num_blocks, deps=[prev_tid]) as tid:
 
 `examples/models/09_paged_attention_spmd.py` 是同一个思路在模型规模上的样子：每个 block 用一个 stride 循环取走一部分 batch，于是 batch 维靠一次派发就并行到了各个硬件 block 上。
 
+**跑一下：** `python examples/advanced/05_runtime_overhead.py --mode spmd_blocks` —— `--mode per_block_tasks` 是同样四个 block 走四次派发的形式。
+
 **代价：** 每个 block 跑同一个程序。有分支差异的工作需要别的结构；先跑完的 block 会让自己的核空着，直到整个 grid 退休。
 
 **怎么确认：** `deps.json` 里 N 个节点塌缩成一个；泳道图上一个任务同时占据多条核泳道。点击其中一个 block 时插件会高亮同一 SPMD 的全部 block。
@@ -82,6 +84,8 @@ with pl.at(level=pl.Level.CORE_GROUP, allow_early_resolve=True) as tid:
 调度器于是可以在这个任务**完成之前**就把它的消费者预置到空闲核上，等它一结束就用门铃放行。
 
 `pl.at`、`pl.submit`、`pl.spmd`、`pl.spmd_submit` 上都有，而且它是纯调度提示 —— 不影响结果。
+
+**跑一下：** `python examples/advanced/05_runtime_overhead.py --mode early_resolve`。
 
 **代价：** 对正确性基本为零，但要注意决定它是否起作用的那条规则：一个消费者只有在它的**所有**生产者都被标记（或已经完成）时才会预置。给一个三生产者的消费者只标一个，什么都买不到。这也是它通常被整条链地施加的原因 —— 比如 `models/qwen3_14b/decode_fwd.py` 里，decode 路径上几乎每个任务都带着它。
 
@@ -109,6 +113,8 @@ with pl.spmd(pl.system.available_aiv_count()):
 | `mode="soft"` | GM 轮询计数 | 任意（`used_cores` 个参与者） | `gm_workspace`、`used_cores` |
 
 两种 mode 都只同步到达：它们不会等待前序 `TSTORE`，也不会让业务数据的 cache 保持一致。通过 GM 从 producer 向 consumer 交接可能跨多条 cache line 的数据时，请保守地在 `syncall` 之前使用全 GM `pl.system.cacheinvalid()` + `pl.system.fence()`，然后在 consumer 读之前再次调用 `pl.system.cacheinvalid()`。tensor-region overload 当前只使 view 基地址所在的那一条 cache line 失效。
+
+**跑一下：** `python examples/advanced/05_runtime_overhead.py --mode soft_barrier` —— 该模式目前需要一个接受 PyPTO 当前 soft-syncall 操作数的 ptoas（在 0.54 上验证过；更新的 ptoas 只收 `gm_workspace` + `used_cores`）。
 
 **代价，而且很锋利。** 部分发射下的硬 `syncall` 会在设备上**死锁**（错误 507018）。PyPTO 在编译期就拒绝它 —— `HardSyncallOccupancy` 校验器 —— 这正是 grid 必须用 `available_aiv_count()` / `available_cluster_count()` 来定，而不是写一个恰好在今天这台设备上对得上的字面量的原因。如果你无法保证满占用，就用 `mode="soft"`：它轮询一块共享 GM workspace，因此能在部分占用下工作，代价换成了 GM 流量。
 

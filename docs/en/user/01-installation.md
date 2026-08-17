@@ -188,6 +188,11 @@ PYPTO_PROG_BUILD_DIR=/scratch/pypto-out python my_kernel.py
 | `01_split_k.py` | Splitting the reduction dimension |
 | `02_auto_tile_matmul.py` | Compiler-driven L0 tiling |
 | `03_mixed_kernel.py` | Cube and vector in one scope, three split modes |
+| `04_task_granularity.py` | The same work as many small tasks, then as few large ones |
+| `05_runtime_overhead.py` | SPMD fan-out, `allow_early_resolve`, in-kernel `syncall` |
+| `06_dependencies.py` | Four ways to break a false serialization, and their costs |
+| `07_double_buffer.py` | `pl.pipeline` vs. explicit `pl.MemRef` slots |
+| `08_scope_placement.py` | Scope depth picks the runtime ring |
 
 **`examples/models/`** — multi-kernel models.
 

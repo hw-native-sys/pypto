@@ -20,6 +20,8 @@ for i in pl.pipeline(NT, stage=2):
 
 外层循环于是以 `stage * step` 为步长推进，尾部有一次 tail dispatch 覆盖不能被 `stage` 整除的余数。深度通常取 2–4。
 
+**跑一下：** `python examples/advanced/07_double_buffer.py --mode pipelined` —— `--mode single_buffer` 是没有流水的基线。
+
 **代价：** 循环体所暂存的每一块 buffer 都要有 `stage` 份同时存活。这是片上内存耗尽最常见的单一原因，而编译器会明说，不会悄悄少给：
 
 ```text
@@ -44,6 +46,8 @@ for i in pl.range(NT):
 ```
 
 用内联的 `pl.MemRef("name", slots=2)` 写法，不要把声明绑到一个 Python 变量上 —— `@pl.jit` 会在一个全新的模块命名空间里重新解析生成的源码，那里没有这个变量。
+
+**跑一下：** `python examples/advanced/07_double_buffer.py --mode explicit_slots`。
 
 **代价，而且取决于内存规划器：**
 

@@ -43,6 +43,8 @@ with pl.at(level=pl.Level.CORE_GROUP):
     pl.store(pl.add(tile_a, tile_b), [0, 0], c)
 ```
 
+**跑一下：** `python examples/advanced/04_task_granularity.py --mode larger_tiles` —— 与 `--mode many_small_tasks` 对照，后者把同样的活切成四个任务而不是两个。
+
 **代价：** 片上缓冲占用，对 2D tile 是平方增长。一个再也放不下同居者的 tile，会把分配器逼到要么失败、要么让出一级流水 —— 见 [内存](05-memory.md)。
 
 **怎么确认：** 泳道图上条更宽**并且**隙按比例更窄。同时看 `report/perf_hints.log`：如果之前 PH001 在标你的 load，更宽的最内维应该让那些行消失。
@@ -70,6 +72,8 @@ with pl.at(level=pl.Level.CORE_GROUP):
 
 `examples/beginner/02_elementwise.py`（`chunked_add`）就是这个模式的完整版本。
 
+**跑一下：** `python examples/advanced/04_task_granularity.py --mode loop_inside` —— `--mode many_small_tasks` 就是它替换掉的四次派发形式。
+
 **代价：** 这些块现在在一个核内被严格定序了。如果它们本来互相独立、而你又有空核，你就是拿并行度换了派发开销 —— 核在空转时这笔交易是亏的。不过它也让这个循环成为 [double buffer](04-incore.md) 的候选，而收益通常从那里回来。
 
 **怎么确认：** `deps.json` 里那 `N` 个节点塌缩成一个 —— 任务数减少 `N - 1` —— 泳道图上原来的阶梯变成一根宽条。
@@ -93,6 +97,8 @@ with pl.at(level=pl.Level.CORE_GROUP):
     s = pl.add(pl.load(a, [0, 0], [TR, TC]), pl.load(b, [0, 0], [TR, TC]))
     pl.store(pl.exp(s), [0, 0], out)
 ```
+
+**跑一下：** `python examples/advanced/04_task_granularity.py --mode merged_chain` —— `--mode two_tasks_via_gm` 是合并之前的同一条链。
 
 **代价：** 合并后的任务要同时持有每一个中间结果。
 

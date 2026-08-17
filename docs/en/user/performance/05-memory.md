@@ -97,6 +97,8 @@ def orch(self, a, out):
 `.opaque` reject it, since they are outlined into standalone kernels with no orchestration
 body for a scope to live in.
 
+**Run it:** `python examples/advanced/08_scope_placement.py --mode manual_placement` — `--mode auto_placement` is the same work under compiler placement.
+
 **Cost:** with `auto_scope=False` the pass inserts **nothing**, so every scope in the
 function is now yours to place — including the ones the compiler was adding for free. This
 is a placement decision only: an AUTO scope keeps auto dependency tracking on, so
@@ -159,6 +161,8 @@ cfg = RunConfig(
 
 Leaving a field `None` (the default) defers to the runtime's `PTO2_RING_*` environment
 variables or its compile-time default, so you can also experiment without touching source.
+
+**Run it:** `python examples/advanced/08_scope_placement.py --size-rings` — and `--scope-stats` to measure first.
 
 **Cost:** memory, and the arithmetic is per ring — a scalar you meant as "just make it
 bigger" is applied four times. Sizing the rings is also the *second* fix: a task window

@@ -26,6 +26,8 @@ for i in pl.pipeline(NT, stage=2):
 The outer loop then advances in strides of `stage * step`, with a tail dispatch covering a
 trip count that is not divisible by `stage`. Depths of 2–4 are the usual range.
 
+**Run it:** `python examples/advanced/07_double_buffer.py --mode pipelined` — `--mode single_buffer` is the un-pipelined baseline.
+
 **Cost:** `stage` copies of every buffer the body stages, live at once. This is the single
 most common way to run out of on-chip memory, and the compiler tells you when it happens
 rather than silently under-delivering:
@@ -60,6 +62,8 @@ for i in pl.range(NT):
 Use the inline `pl.MemRef("name", slots=2)` spelling rather than a Python variable holding
 the declaration — `@pl.jit` re-parses generated source in a fresh module namespace, where
 such a variable is not in scope.
+
+**Run it:** `python examples/advanced/07_double_buffer.py --mode explicit_slots`.
 
 **Cost, and it is planner-dependent:**
 

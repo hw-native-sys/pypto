@@ -13,6 +13,11 @@ Advanced examples — performance and low-level techniques.
   01_split_k.py          — split-K matmul (parallel K reduction, atomic-add)
   02_auto_tile_matmul.py — compiler-driven L0 matmul tiling (DDR/Mat-scratch x full-K/split-K)
   03_mixed_kernel.py     — cube and vector in one scope via pl.split (vs. two scopes)
+  04_task_granularity.py — bigger tiles, loop-inside-pl.at, merged producer/consumer
+  05_runtime_overhead.py — SPMD fan-out, allow_early_resolve, in-kernel soft syncall
+  06_dependencies.py     — no_dep_args / manual_dep / manual_scope / output slicing
+  07_double_buffer.py    — pl.pipeline(stage=) vs. explicit pl.MemRef slots
+  08_scope_placement.py  — scope depth picks the runtime ring; auto_scope=False
 """
 
 import importlib
@@ -22,6 +27,11 @@ _ALIASES = {
     "split_k": "01_split_k",
     "auto_tile_matmul": "02_auto_tile_matmul",
     "mixed_kernel": "03_mixed_kernel",
+    "task_granularity": "04_task_granularity",
+    "runtime_overhead": "05_runtime_overhead",
+    "dependencies": "06_dependencies",
+    "double_buffer": "07_double_buffer",
+    "scope_placement": "08_scope_placement",
 }
 
 for _alias, _numbered in _ALIASES.items():

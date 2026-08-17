@@ -81,6 +81,8 @@ its own, and is a hard requirement for the barrier below.
 takes a subset of the batch through a stride loop, so the batch dimension is parallelised
 across hardware blocks by one dispatch.
 
+**Run it:** `python examples/advanced/05_runtime_overhead.py --mode spmd_blocks` — `--mode per_block_tasks` is the same four blocks as four dispatches.
+
 **Cost:** every block runs the same program. Divergent work needs a different structure,
 and blocks that finish at different times leave their cores idle until the whole grid
 retires.
@@ -106,6 +108,8 @@ completes, releasing them with a doorbell the instant it finishes.
 
 It is available on `pl.at`, `pl.submit`, `pl.spmd`, and `pl.spmd_submit`, and it is a pure
 scheduling hint — no effect on results.
+
+**Run it:** `python examples/advanced/05_runtime_overhead.py --mode early_resolve`.
 
 **Cost:** effectively none for correctness, but note the rule that decides whether it does
 anything: a consumer only pre-stages once **all** of its producers are flagged (or already
@@ -144,6 +148,9 @@ cache lines, conservatively use whole-GM `pl.system.cacheinvalid()` +
 `pl.system.fence()` before `syncall`, then call `pl.system.cacheinvalid()` again on the
 consumer before its read. The tensor-region overload currently invalidates only the cache
 line containing the view's base address.
+
+**Run it:** `python examples/advanced/05_runtime_overhead.py --mode soft_barrier` — that mode currently needs a ptoas accepting PyPTO's soft-syncall operands
+(verified on 0.54; newer ptoas takes only `gm_workspace` + `used_cores`).
 
 **Cost, and it is a sharp one.** A hard `syncall` under a partial launch **deadlocks on
 device** (error 507018). PyPTO rejects that at compile time — the `HardSyncallOccupancy`
