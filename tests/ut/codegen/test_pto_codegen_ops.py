@@ -3624,7 +3624,30 @@ class TestTileStoreAttrsCodegen:
         atomic=pl.AtomicType.None_,
         st_phase="unspecified",
     ) -> str:
-        """Generate one fp32 vector store with the requested optional attributes."""
+        """Generate one fp32 store with the requested optional attributes.
+
+        A final store is paired with a final GEMV producer: unlike the partial
+        and unspecified attribute spelling tests, a standalone final store is
+        an invalid unit-flag protocol and AccStorePhaseValid rejects it.
+        """
+
+        if st_phase == "final":
+
+            @pl.program
+            class FinalProg:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs_gm: pl.Tensor[[1, 128], pl.FP32],
+                    rhs_gm: pl.Tensor[[128, 64], pl.FP32],
+                    out: pl.Tensor[[1, 64], pl.FP32],
+                ):
+                    lhs = pl.load(lhs_gm, [0, 0], [1, 128], target_memory=pl.MemorySpace.Mat)
+                    rhs = pl.load(rhs_gm, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
+                    result = pl.tile.gemv(lhs, rhs, acc_phase="final")
+                    pl.store(result, [0, 0], out, atomic=atomic, st_phase="final")
+
+            return self._generate_mlir(FinalProg)
 
         @pl.program
         class Prog:

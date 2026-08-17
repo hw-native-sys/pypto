@@ -117,7 +117,12 @@ enum class IRProperty : uint64_t {
                                     ///< scalars have been hoisted to the call sites, its signature
                                     ///< fits the runtime's tensor/direction/return limits, and no
                                     ///< call site launches it in a form the runtime cannot cache
-  kCount                            ///< Sentinel (must be last)
+  AccStorePhaseValid,  ///< Every final phased GEMV producer is paired in the same straight-line region with
+                       ///< exactly one final tile.store of that value, and every final tile.store has such a
+                       ///< live producer. Decidable on the user's own IR, so it is a structural property
+                       ///< verified at pipeline input; a mismatch can leave the A2/A3 accumulator unit flag
+                       ///< set or wait forever on an unset flag, stalling device execution
+  kCount               ///< Sentinel (must be last)
 };
 
 static_assert(
@@ -252,7 +257,7 @@ enum class VerificationLevel {
  * AivSplitValid, TileMemoryInferred, HardSyncallOccupancyValid,
  * IterArgCarryClassified, RuntimeScopesMaterialized,
  * DistTensorCtxMaterialized, GraphBoundaryLegalized, AccToGmStoreValid,
- * AccCompactValid, AtomicAddDtypeValid} —
+ * AccCompactValid, AtomicAddDtypeValid, AccStorePhaseValid} —
  * lightweight checks that catch the most common IR errors.
  */
 const IRPropertySet& GetVerifiedProperties();
@@ -264,7 +269,7 @@ const IRPropertySet& GetVerifiedProperties();
  * in per-pass PassProperties. Returns {TypeChecked, BreakContinueValid,
  * NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore,
  * InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly,
- * AtomicAddDtypeValid}.
+ * AtomicAddDtypeValid, AccStorePhaseValid}.
  */
 const IRPropertySet& GetStructuralProperties();
 

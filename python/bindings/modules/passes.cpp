@@ -141,7 +141,11 @@ void BindPass(nb::module_& m) {
       .value("GraphBoundaryLegalized", IRProperty::GraphBoundaryLegalized,
              "Every FunctionType::Graph function satisfies the host_build_graph boundary contract: "
              "derived boundary scalars hoisted to the call sites, a signature within the runtime's "
-             "tensor/direction/return limits, and no call site the runtime could not cache");
+             "tensor/direction/return limits, and no call site the runtime could not cache")
+      .value("AccStorePhaseValid", IRProperty::AccStorePhaseValid,
+             "Every tile.gemv/tile.gemv_acc/tile.gemv_bias with acc_phase='final' is paired in the "
+             "same straight-line region with exactly one tile.store of that value using "
+             "st_phase='final', and every final store has such a live producer");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");

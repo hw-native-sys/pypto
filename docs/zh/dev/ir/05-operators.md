@@ -430,7 +430,9 @@ acc = pl.tile.set_validshape(acc_raw, 1, N)  # 随后 gemv_acc(..., init_cond=(k
 在使用 unit flag 的路径上，最后一个累加生产者必须与
 `pl.store(..., st_phase="final")` 配对。final 生产者负责置位，final store
 负责检查并清位；普通 store 则有意保留默认的 unspecified 行为。对于更底层的
-check-only store 协议，`st_phase` 同样接受 `"partial"`。
+check-only store 协议，`st_phase` 同样接受 `"partial"`。编译器会双向校验
+该配对：应绑定 final 生产者的结果，并在同一个直线控制流区域内存储这个精确值。
+缺失或错配的配对会在代码生成前被拒绝，因为它原本会导致设备静默挂死。
 
 ## Python 用法
 
