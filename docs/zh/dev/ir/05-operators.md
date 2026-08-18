@@ -223,15 +223,17 @@ rhs 的逻辑 K 必须覆盖 lhs 的逻辑 K。支持的 dtype 三元组为
 `[1, N]`；物理 N 一致时，bias 的 valid N 可以更宽。
 
 `tile.gemv`、`tile.gemv_acc` 和 `tile.gemv_bias` 的 `acc_phase` 可设为
-`"unspecified"`（默认值）、`"partial"` 或 `"final"`。后续仍有 K 分块时
-使用 `"partial"`，最后一个分块使用 `"final"`。
+`pl.AccPhase.Unspecified`（默认值）、`pl.AccPhase.Partial` 或
+`pl.AccPhase.Final`。后续仍有 K 分块时使用 `Partial`，最后一个分块使用
+`Final`。
 
 在使用 unit flag 的路径上，最后一个累加生产者必须与
-`pl.store(..., st_phase="final")` 配对。final 生产者负责置位，final store
-负责检查并清位；普通 store 则有意保留默认的 unspecified 行为。对于更底层的
-check-only store 协议，`st_phase` 同样接受 `"partial"`。编译器会双向校验
-该配对：应绑定 final 生产者的结果，并在同一个直线控制流区域内存储这个精确值。
-缺失或错配的配对会在代码生成前被拒绝，因为它原本会导致设备静默挂死。
+`pl.store(..., st_phase=pl.STPhase.Final)` 配对。final 生产者负责置位，final
+store 负责检查并清位；普通 store 则有意保留默认的
+`pl.STPhase.Unspecified` 行为。对于更底层的 check-only store 协议，
+`st_phase` 同样接受 `pl.STPhase.Partial`。编译器会双向校验该配对：应绑定
+final 生产者的结果，并在同一个直线控制流区域内存储这个精确值。缺失或错配的
+配对会在代码生成前被拒绝，因为它原本会导致设备静默挂死。
 
 ## Python 用法
 

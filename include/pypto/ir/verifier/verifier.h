@@ -115,10 +115,11 @@ PropertyVerifierPtr CreateAtomicAddDtypeValidPropertyVerifier();
  *
  * Checks the bidirectional unit-flag contract between ``tile.gemv``,
  * ``tile.gemv_acc`` and ``tile.gemv_bias`` calls carrying
- * ``acc_phase="final"`` and ``tile.store(..., st_phase="final")``. A final
- * producer must be consumed exactly once, using that exact SSA value (or a
- * plain SSA alias), in the same straight-line control-flow region; a final
- * store must have a live matching producer. Listed in
+ * ``acc_phase=pl.AccPhase.Final`` and
+ * ``tile.store(..., st_phase=pl.STPhase.Final)``. A final producer must be
+ * consumed exactly once, using that exact SSA value (or a plain SSA alias), in
+ * the same straight-line control-flow region; a final store must have a live
+ * matching producer. Listed in
  * ``GetStructuralProperties()``, so it is verified at pipeline input on the
  * user's own IR.
  *

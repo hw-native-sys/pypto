@@ -126,6 +126,15 @@
 | `gemv` `gemv_acc` `gemv_bias` | `pl.` (t) | 矩阵-向量形式 |
 | `matmul_mx` `matmul_mx_acc` `matmul_mx_bias` | `pl.` (t) | A5 MX 块缩放矩阵乘 —— 进入算子的两块 data tile 必须为 FP8E4M3FN；支持的 FP4 输入形式仅为 FP4×FP8，且左侧 FP4 必须先显式 cast 为 FP8；不支持原生 FP4×FP4 |
 
+分阶段 GEMV 累加通过 `pl.AccPhase` 选择生产者阶段。以 `pl.AccPhase.Final`
+结束的生产者必须与使用 `pl.STPhase.Final` 的 store 配对：
+
+```python
+partial = pl.tile.gemv(lhs0, rhs0, acc_phase=pl.AccPhase.Partial)
+final = pl.tile.gemv_acc(partial, lhs1, rhs1, acc_phase=pl.AccPhase.Final)
+pl.store(final, [0, 0], output, st_phase=pl.STPhase.Final)
+```
+
 ## Gather、Scatter、排序
 
 | 算子 | 可达 | 作用 |

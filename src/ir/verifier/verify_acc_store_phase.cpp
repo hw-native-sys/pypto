@@ -13,8 +13,8 @@
  * @file verify_acc_store_phase.cpp
  * @brief Verify the final accumulator-producer / final-store unit-flag protocol.
  *
- * On A2/A3, ``acc_phase="final"`` lowers to a producer-side
- * check-and-set. The matching ``st_phase="final"`` store performs the
+ * On A2/A3, ``acc_phase=pl.AccPhase.Final`` lowers to a producer-side
+ * check-and-set. The matching ``st_phase=pl.STPhase.Final`` store performs the
  * consumer-side check-and-clear. Omitting either side is not a benign metadata
  * mismatch: the device can wait forever on an unset flag, or leave a set flag
  * behind and stall a later accumulator producer.
@@ -54,6 +54,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/phase.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
@@ -78,7 +79,8 @@ bool IsPhasedAccumulatorProducer(const CallPtr& call) {
 
 bool IsFinalAccumulatorProducer(const CallPtr& call) {
   return IsPhasedAccumulatorProducer(call) &&
-         call->GetKwarg<std::string>("acc_phase", "unspecified") == "final";
+         call->GetKwarg<int>("acc_phase", static_cast<int>(AccPhase::kUnspecified)) ==
+             static_cast<int>(AccPhase::kFinal);
 }
 
 /**
@@ -244,14 +246,15 @@ class AccStorePhaseVisitor : public IRVisitor {
   }
 
   void CheckStore(const CallPtr& store, const std::optional<TokenId>& source_token) {
-    const std::string st_phase = store->GetKwarg<std::string>("st_phase", "unspecified");
-    if (st_phase == "final") {
+    const int st_phase = store->GetKwarg<int>("st_phase", static_cast<int>(STPhase::kUnspecified));
+    if (st_phase == static_cast<int>(STPhase::kFinal)) {
       if (!source_token.has_value()) {
         diagnostics_.emplace_back(
             DiagnosticSeverity::Error, "AccStorePhaseValid", /*error_code=*/1,
-            "tile.store(..., st_phase=\"final\") in function '" + func_name_ +
+            "tile.store(..., st_phase=pl.STPhase.Final) in function '" + func_name_ +
                 "' must consume the exact SSA value produced by tile.gemv, tile.gemv_acc, or "
-                "tile.gemv_bias with acc_phase=\"final\" in the same straight-line region. A final store "
+                "tile.gemv_bias with acc_phase=pl.AccPhase.Final in the same straight-line region. A final "
+                "store "
                 "without a matching producer waits on a unit flag that was never set and can stall device "
                 "execution.",
             store->span_);
@@ -260,7 +263,7 @@ class AccStorePhaseVisitor : public IRVisitor {
       if (pending_.erase(*source_token) == 0) {
         diagnostics_.emplace_back(
             DiagnosticSeverity::Error, "AccStorePhaseValid", /*error_code=*/2,
-            "tile.store(..., st_phase=\"final\") in function '" + func_name_ +
+            "tile.store(..., st_phase=pl.STPhase.Final) in function '" + func_name_ +
                 "' does not have a live matching final accumulator producer in this straight-line region. "
                 "The producer may already have been consumed, or the value crossed a control-flow boundary; "
                 "either case makes the unit-flag clear ambiguous and can stall device execution.",
@@ -275,8 +278,10 @@ class AccStorePhaseVisitor : public IRVisitor {
       diagnostics_.emplace_back(
           DiagnosticSeverity::Error, "AccStorePhaseValid", /*error_code=*/3,
           "final accumulator producer '" + producer.op_name + "' in function '" + func_name_ +
-              "' is consumed by tile.store with st_phase=\"" + st_phase +
-              "\". Use st_phase=\"final\" so the store performs check-and-clear; otherwise the producer's "
+              "' is consumed by tile.store with st_phase=pl.STPhase." +
+              STPhaseToString(static_cast<STPhase>(st_phase)) +
+              ". Use st_phase=pl.STPhase.Final so the store performs check-and-clear; otherwise the "
+              "producer's "
               "unit flag remains set and a later accumulator operation can stall.",
           store->span_);
     }
@@ -305,9 +310,11 @@ class AccStorePhaseVisitor : public IRVisitor {
       diagnostics_.emplace_back(
           DiagnosticSeverity::Error, "AccStorePhaseValid", /*error_code=*/4,
           "final accumulator producer '" + producer.op_name + "' in function '" + func_name_ +
-              "' must be consumed exactly once by tile.store(..., st_phase=\"final\") using that SSA value " +
+              "' must be consumed exactly once by tile.store(..., st_phase=pl.STPhase.Final) using that SSA "
+              "value " +
               description +
-              ". acc_phase=\"final\" performs check-and-set; leaving it uncleared can stall a later device "
+              ". acc_phase=pl.AccPhase.Final performs check-and-set; leaving it uncleared can stall a later "
+              "device "
               "operation.",
           producer.span);
     }

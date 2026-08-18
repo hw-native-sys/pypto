@@ -247,17 +247,19 @@ the same output dtype for `bias`. The bias valid shape must cover the logical
 output shape `[1, N]`; its valid N may be wider when the physical N matches.
 
 `tile.gemv`, `tile.gemv_acc`, and `tile.gemv_bias` accept `acc_phase` as
-`"unspecified"` (the default), `"partial"`, or `"final"`. Use `"partial"`
-while more K chunks remain and `"final"` for the last chunk.
+`pl.AccPhase.Unspecified` (the default), `pl.AccPhase.Partial`, or
+`pl.AccPhase.Final`. Use `Partial` while more K chunks remain and `Final` for
+the last chunk.
 
 On a unit-flag-aware path, the final accumulator producer must be paired with
-`pl.store(..., st_phase="final")`. The final producer sets the unit flag and the
-final store checks and clears it; a plain store intentionally keeps the default
-unspecified behavior. `st_phase` also accepts `"partial"` for lower-level
-check-only store protocols. Compilation verifies this pairing in both
-directions: bind the final producer's result and store that exact value in the
-same straight-line control-flow region. A missing or mismatched pair is rejected
-before code generation because it can otherwise stall device execution.
+`pl.store(..., st_phase=pl.STPhase.Final)`. The final producer sets the unit flag
+and the final store checks and clears it; a plain store intentionally keeps the
+default `pl.STPhase.Unspecified` behavior. `st_phase` also accepts
+`pl.STPhase.Partial` for lower-level check-only store protocols. Compilation
+verifies this pairing in both directions: bind the final producer's result and
+store that exact value in the same straight-line control-flow region. A missing
+or mismatched pair is rejected before code generation because it can otherwise
+stall device execution.
 
 ## Python Usage
 

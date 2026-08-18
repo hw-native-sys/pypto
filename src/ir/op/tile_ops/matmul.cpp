@@ -31,6 +31,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/phase.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/printer.h"
@@ -272,10 +273,11 @@ namespace {
 
 void ValidateGemvAccPhase(const std::vector<std::pair<std::string, std::any>>& kwargs,
                           const std::string& op_name) {
-  const auto acc_phase = GetKwargOr<std::string>(kwargs, "acc_phase", "unspecified");
-  CHECK(acc_phase == "unspecified" || acc_phase == "partial" || acc_phase == "final")
-      << "The operator " << op_name
-      << " requires acc_phase to be one of {unspecified, partial, final}, but got " << acc_phase;
+  const int acc_phase = GetKwargOr<int>(kwargs, "acc_phase", static_cast<int>(AccPhase::kUnspecified));
+  CHECK(IsValidAccPhase(acc_phase)) << "The operator " << op_name
+                                    << " requires acc_phase to be AccPhase.Unspecified, AccPhase.Partial, "
+                                       "or AccPhase.Final, but got int "
+                                    << acc_phase;
 }
 
 DataType ValidateGemvInputDtypes(const TileTypePtr& lhs_type, const TileTypePtr& rhs_type,
@@ -452,7 +454,7 @@ REGISTER_OP("tile.gemv")
     .set_description("General Matrix-Vector multiplication: C[1,N] = A[1,K] @ B[K,N]")
     .add_argument("lhs", "Row vector tile (TileType, 2D [1, K])")
     .add_argument("rhs", "Right-hand side tile (TileType, 2D [K, N])")
-    .set_attr<std::string>("acc_phase")
+    .set_attr<int>("acc_phase")
     .set_input_memory(0, MemorySpace::Left)
     .set_input_memory(1, MemorySpace::Right)
     .set_output_memory(MemorySpace::Acc)
@@ -468,7 +470,7 @@ REGISTER_OP("tile.gemv_acc")
     .add_argument("acc", "Accumulator tile (TileType, 2D [1, N])")
     .add_argument("lhs", "Row vector tile (TileType, 2D [1, K])")
     .add_argument("rhs", "Right-hand side tile (TileType, 2D [K, N])")
-    .set_attr<std::string>("acc_phase")
+    .set_attr<int>("acc_phase")
     .set_input_memory(0, MemorySpace::Acc)
     .set_input_memory(1, MemorySpace::Left)
     .set_input_memory(2, MemorySpace::Right)
@@ -486,7 +488,7 @@ REGISTER_OP("tile.gemv_bias")
     .add_argument("lhs", "Row vector tile (TileType, 2D [1, K])")
     .add_argument("rhs", "Right-hand side tile (TileType, 2D [K, N])")
     .add_argument("bias", "Accumulator-typed bias tile (TileType, [1, N])")
-    .set_attr<std::string>("acc_phase")
+    .set_attr<int>("acc_phase")
     .set_input_memory(0, MemorySpace::Left)
     .set_input_memory(1, MemorySpace::Right)
     .set_input_memory(2, MemorySpace::Bias)

@@ -134,6 +134,15 @@ tile depend on the pad value; see
 | `gemv` `gemv_acc` `gemv_bias` | `pl.` (t) | Matrix-vector forms |
 | `matmul_mx` `matmul_mx_acc` `matmul_mx_bias` | `pl.` (t) | A5 MX block-scale multiply — data tiles reaching the op must be FP8E4M3FN; the supported FP4-input form is FP4×FP8, with the FP4 lhs explicitly cast to FP8 first; native FP4×FP4 is unsupported |
 
+For phased GEMV accumulation, select producer phases with `pl.AccPhase`. A producer
+ending with `pl.AccPhase.Final` must be paired with a store using `pl.STPhase.Final`:
+
+```python
+partial = pl.tile.gemv(lhs0, rhs0, acc_phase=pl.AccPhase.Partial)
+final = pl.tile.gemv_acc(partial, lhs1, rhs1, acc_phase=pl.AccPhase.Final)
+pl.store(final, [0, 0], output, st_phase=pl.STPhase.Final)
+```
+
 ## Gather, scatter, sort
 
 | Operator | Reach | What it does |

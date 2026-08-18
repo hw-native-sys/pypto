@@ -41,6 +41,7 @@ from pypto.ir import TensorView, TileView
 from pypto.jit import JITFunction, jit
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import (
+    AccPhase,
     AtomicType,
     CompactMode,
     ForKind,
@@ -52,6 +53,7 @@ from pypto.pypto_core.ir import (
     PtrType,
     Role,
     SplitMode,
+    STPhase,
     TensorLayout,
     TileLayout,
 )
@@ -492,11 +494,13 @@ __all__ = [
     "sort32",
     "FunctionType",
     "ForKind",
+    "AccPhase",
     "AtomicType",
     "Level",
     "MemRef",
     "Role",
     "SplitMode",
+    "STPhase",
     "Mem",
     "MemRefType",
     "MemorySpace",

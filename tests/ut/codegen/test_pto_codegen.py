@@ -414,10 +414,10 @@ def test_pto_codegen_gemv_family_uses_exact_ops_and_single_row_mat_layout():
         ) -> pl.Tensor[[1, 64], pl.FP32]:
             lhs = pl.load(a, [0, 0], [1, 128], target_memory=pl.MemorySpace.Mat)
             rhs = pl.load(b, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
-            partial = pl.tile.gemv(lhs, rhs, acc_phase="partial")
+            partial = pl.tile.gemv(lhs, rhs, acc_phase=pl.AccPhase.Partial)
             out = pl.store(partial, [0, 0], out)
-            final = pl.tile.gemv(lhs, rhs, acc_phase="final")
-            out = pl.store(final, [0, 0], out, st_phase="final")
+            final = pl.tile.gemv(lhs, rhs, acc_phase=pl.AccPhase.Final)
+            out = pl.store(final, [0, 0], out, st_phase=pl.STPhase.Final)
             return out
 
         @pl.function(type=pl.FunctionType.InCore)
@@ -431,10 +431,10 @@ def test_pto_codegen_gemv_family_uses_exact_ops_and_single_row_mat_layout():
             lhs = pl.load(a, [0, 0], [1, 128], target_memory=pl.MemorySpace.Mat)
             rhs = pl.load(b, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
             bias_tile = pl.load(bias, [0, 0], [1, 64], target_memory=pl.MemorySpace.Mat)
-            partial = pl.tile.gemv_bias(lhs, rhs, bias_tile, acc_phase="partial")
+            partial = pl.tile.gemv_bias(lhs, rhs, bias_tile, acc_phase=pl.AccPhase.Partial)
             out = pl.store(partial, [0, 0], out)
-            final = pl.tile.gemv_bias(lhs, rhs, bias_tile, acc_phase="final")
-            out = pl.store(final, [0, 0], out, st_phase="final")
+            final = pl.tile.gemv_bias(lhs, rhs, bias_tile, acc_phase=pl.AccPhase.Final)
+            out = pl.store(final, [0, 0], out, st_phase=pl.STPhase.Final)
             return out
 
         @pl.function(type=pl.FunctionType.InCore)
@@ -449,9 +449,9 @@ def test_pto_codegen_gemv_family_uses_exact_ops_and_single_row_mat_layout():
             result = pl.tile.gemv(lhs0, rhs0)
             lhs1 = pl.load(a, [0, 128], [1, 128], target_memory=pl.MemorySpace.Mat)
             rhs1 = pl.load(b, [128, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
-            result = pl.tile.gemv_acc(result, lhs1, rhs1, acc_phase="partial")
-            result = pl.tile.gemv_acc(result, lhs1, rhs1, acc_phase="final")
-            out = pl.store(result, [0, 0], out, st_phase="final")
+            result = pl.tile.gemv_acc(result, lhs1, rhs1, acc_phase=pl.AccPhase.Partial)
+            result = pl.tile.gemv_acc(result, lhs1, rhs1, acc_phase=pl.AccPhase.Final)
+            out = pl.store(result, [0, 0], out, st_phase=pl.STPhase.Final)
             return out
 
     mlir_code = _generate_default_mlir(GemvCodegenProgram)

@@ -34,6 +34,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/phase.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
@@ -175,11 +176,12 @@ static std::string MakeNaryCodegenPTO(const std::string& pto_op_name, size_t ari
 }
 
 static std::string GemvAccPhaseAttr(const CallPtr& op) {
-  const auto acc_phase = op->GetKwarg<std::string>("acc_phase", "unspecified");
-  CHECK(acc_phase == "unspecified" || acc_phase == "partial" || acc_phase == "final")
-      << "GEMV acc_phase must be one of {unspecified, partial, final}, but got " << acc_phase;
-  if (acc_phase == "unspecified") return "";
-  return " {accPhase = #pto<acc_phase " + acc_phase + ">}";
+  const int acc_phase = op->GetKwarg<int>("acc_phase", static_cast<int>(ir::AccPhase::kUnspecified));
+  INTERNAL_CHECK_SPAN(ir::IsValidAccPhase(acc_phase), op->span_)
+      << "GEMV acc_phase must encode AccPhase::kUnspecified, kPartial, or kFinal, got " << acc_phase;
+  if (acc_phase == static_cast<int>(ir::AccPhase::kUnspecified)) return "";
+  return " {accPhase = #pto<acc_phase " + ir::AccPhaseToPTOString(static_cast<ir::AccPhase>(acc_phase)) +
+         ">}";
 }
 
 static std::string MakeGemvCodegenPTO(const std::string& pto_op_name, size_t arity, const CallPtr& op,

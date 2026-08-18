@@ -36,6 +36,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/phase.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
@@ -227,11 +228,12 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
 
   std::vector<std::string> attrs;
 
-  const std::string st_phase = op->GetKwarg<std::string>("st_phase", "unspecified");
-  INTERNAL_CHECK_SPAN(st_phase == "unspecified" || st_phase == "partial" || st_phase == "final", op->span_)
-      << "tile.store st_phase must be one of {unspecified, partial, final}, got " << st_phase;
-  if (st_phase != "unspecified") {
-    attrs.push_back("stPhase = #pto<st_phase " + st_phase + ">");
+  const int st_phase = op->GetKwarg<int>("st_phase", static_cast<int>(ir::STPhase::kUnspecified));
+  INTERNAL_CHECK_SPAN(ir::IsValidSTPhase(st_phase), op->span_)
+      << "tile.store st_phase must encode STPhase::kUnspecified, kPartial, or kFinal, got " << st_phase;
+  if (st_phase != static_cast<int>(ir::STPhase::kUnspecified)) {
+    attrs.push_back("stPhase = #pto<st_phase " + ir::STPhaseToPTOString(static_cast<ir::STPhase>(st_phase)) +
+                    ">");
   }
 
   // Optional atomic-add combine mode (split-K accumulation into GM).

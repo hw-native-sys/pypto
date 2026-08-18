@@ -128,9 +128,10 @@ void BindPass(nb::module_& m) {
              "backend store pipe can combine; a bf16 destination requires the Ascend910B (A2/A3) "
              "profile")
       .value("AccStorePhaseValid", IRProperty::AccStorePhaseValid,
-             "Every tile.gemv/tile.gemv_acc/tile.gemv_bias with acc_phase='final' is paired in the "
+             "Every tile.gemv/tile.gemv_acc/tile.gemv_bias with acc_phase=AccPhase.Final is paired in "
+             "the "
              "same straight-line region with exactly one tile.store of that value using "
-             "st_phase='final', and every final store has such a live producer");
+             "st_phase=STPhase.Final, and every final store has such a live producer");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");
