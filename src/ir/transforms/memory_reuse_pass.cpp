@@ -3083,8 +3083,9 @@ class NormalizeIdentityCopyBuffersMutator : public IRMutator {
 FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
   INTERNAL_CHECK(func) << "MaterializeSemanticAliases cannot run on null function";
 
-  // Orchestration functions submit tasks and never hold TileType variables.
-  if (func->func_type_ == FunctionType::Orchestration) return func;
+  // Orchestration bodies submit tasks and never hold TileType variables; a
+  // Graph body is orchestration too, so it is skipped for the same reason.
+  if (IsOrchestrationLike(func->func_type_)) return func;
 
   StmtPtr new_body = func->body_;
   TopDownRetargeter retargeter;
@@ -3140,9 +3141,10 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
 FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   INTERNAL_CHECK(func) << "MemoryReusePass cannot run on null function";
 
-  // Orchestration functions submit tasks and never hold TileType variables,
-  // so there is nothing for memory reuse to do — skip them silently.
-  if (func->func_type_ == FunctionType::Orchestration) return func;
+  // Orchestration bodies submit tasks and never hold TileType variables, so
+  // there is nothing for memory reuse to do — skip them silently. A Graph body
+  // is orchestration too.
+  if (IsOrchestrationLike(func->func_type_)) return func;
 
   // Step 0 (semantic must-alias retarget) now runs in the preceding
   // MaterializeSemanticAliases pass, so the body here is already retargeted.
