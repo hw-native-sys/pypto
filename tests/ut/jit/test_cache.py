@@ -16,7 +16,11 @@ from pypto.jit.cache import (
     compute_source_hash,
     make_cache_key,
 )
-from pypto.jit.decorator import _resolve_enable_pypto_l0c_double_buffer, _resolve_memory_planner
+from pypto.jit.decorator import (
+    _resolve_enable_pypto_l0c_double_buffer,
+    _resolve_memory_planner,
+    _resolve_runtime,
+)
 from pypto.pypto_core import DataType, ir, passes
 from pypto.pypto_core.passes import MemoryPlanner
 from pypto.runtime import RunConfig
@@ -66,6 +70,7 @@ class TestMakeCacheKey:
         enable_pypto_l0c_double_buffer=False,
         tensor_layouts=None,
         dep_layouts=(),
+        runtime=passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
     ):
         return make_cache_key(
             source_hash=source_hash,
@@ -82,6 +87,7 @@ class TestMakeCacheKey:
             enable_pypto_l0c_double_buffer=enable_pypto_l0c_double_buffer,
             tensor_layouts=tensor_layouts,
             dep_layouts=dep_layouts,
+            runtime=runtime,
         )
 
     def test_basic_key_structure(self):
@@ -105,6 +111,7 @@ class TestMakeCacheKey:
             ("memory_planner", None),
             ("enable_pypto_l0c_double_buffer", False),
             ("dep_layouts", ()),
+            ("runtime", "tensormap_and_ringbuffer"),
         )
 
     def test_tensor_shape_in_key(self):
@@ -419,6 +426,32 @@ class TestMakeCacheKey:
         key_off = self._make_key(**kwargs, enable_pypto_l0c_double_buffer=False)
         key_on = self._make_key(**kwargs, enable_pypto_l0c_double_buffer=True)
         assert key_off == key_on
+
+    def test_runtime_splits_key(self):
+        """The runtime is baked into the artifact's ``kernel_config.py`` and decides
+        which worker can bind it, so a ``host_build_graph`` call must not reuse a
+        ``tensormap_and_ringbuffer`` artifact."""
+        kwargs = {
+            "param_names": ["a"],
+            "tensor_shapes": {"a": (8, 8)},
+            "tensor_dtypes": {"a": DataType.FP32},
+        }
+        key_tmrb = self._make_key(**kwargs, runtime=passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER)
+        key_hbg = self._make_key(**kwargs, runtime=passes.RuntimeKind.HOST_BUILD_GRAPH)
+        assert key_tmrb != key_hbg, "runtime must split the cache key"
+
+
+class TestResolveRuntime:
+    """The runtime the JIT keys on must match the one ``ir.compile()`` will use."""
+
+    def test_defaults_to_tensormap_and_ringbuffer(self):
+        assert _resolve_runtime() == passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
+
+    def test_reads_the_active_pass_context(self):
+        # The runtime is PassContext-only — RunConfig does not carry it — so the
+        # context is the sole source the cache key can consult.
+        with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+            assert _resolve_runtime() == passes.RuntimeKind.HOST_BUILD_GRAPH
 
 
 class TestResolveMemoryPlanner:

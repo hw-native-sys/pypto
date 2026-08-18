@@ -685,8 +685,22 @@ output_dir/
 
 | 键 | 何时写入 | 备注 |
 | -- | -------- | ---- |
-| `runtime` | 总是 | 目前为 `"tensormap_and_ringbuffer"`。 |
+| `runtime` | 总是 | `"tensormap_and_ringbuffer"`（默认）或 `"host_build_graph"` —— 由 `ir.compile(runtime=...)`（或把调用包在 `PassContext([], runtime=...)` 中）选定的 `RuntimeKind` 所对应的线上名字。 |
 | `aicpu_thread_num` | 总是 (`0`) | `0` 选择 runtime 的架构默认值（a2a3：4；a5：5），调用方也可显式覆盖。 |
+
+runtime 由 `PassContext` 以 `ir::RuntimeKind` 携带，而不是仅作为 codegen 参数，
+这样需要针对特定 runtime 做合法化的 pass 可以 switch `PassContext::GetRuntime()`
+而不是比较字符串。之所以用枚举而非名字：这是一个封闭集合 —— `runtime/src/<arch>/
+runtime/` 下每个实现对应一个枚举值 —— 于是拼错是编译错误，而不是一个要到很晚才以
+晦涩 CCEC 报错（找不到 include 目录）浮现的取值。
+
+线上名字只在两处跨越 ABI 边界：写 `kernel_config.py` 时用 `ir::RuntimeKindToName`，
+读回时用 `ir::RuntimeKindFromName`。两者都以
+`passes.runtime_kind_to_name` / `passes.runtime_kind_from_name` 暴露给 Python。
+
+runtime 同时是 `@pl.jit` 缓存键的一个维度：`host_build_graph` 的调用不能复用为
+`tensormap_and_ringbuffer` 编译出的产物 —— 后者 `kernel_config.py` 里写的
+runtime 没有任何匹配的 worker 会绑定。
 
 ### 参数解包
 

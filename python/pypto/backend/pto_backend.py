@@ -938,6 +938,7 @@ def _generate_config_file(
     func_name_to_external_source: dict[str, str] | None = None,
     func_name_to_external_include_dirs: dict[str, tuple[str, ...]] | None = None,
     enable_sdma: bool = False,
+    runtime: _passes.RuntimeKind = _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
 ) -> str:
     """Generate kernel_config.py content.
 
@@ -966,7 +967,13 @@ def _generate_config_file(
 
     ``enable_sdma`` records that at least one emitted kernel consumes the
     runtime-owned SDMA workspace.
+
+    ``runtime`` selects the Simpler runtime ABI. Its wire name is written to
+    ``RUNTIME_CONFIG["runtime"]`` — the value ``CompiledProgram.runtime_name``
+    reports and the one the ``ChipWorker`` reuse lookup matches against, so a
+    program compiled for one runtime never binds to a worker running another.
     """
+    runtime_name = _passes.runtime_kind_to_name(runtime)
     func_name_to_signature = func_name_to_signature or {}
     func_name_to_external_source = func_name_to_external_source or {}
     func_name_to_external_include_dirs = func_name_to_external_include_dirs or {}
@@ -975,7 +982,7 @@ def _generate_config_file(
 
     runtime_lines = [
         "RUNTIME_CONFIG = {",
-        '\t"runtime": "tensormap_and_ringbuffer",',
+        f'\t"runtime": "{runtime_name}",',
         '\t"aicpu_thread_num": 0,',
     ]
     if enable_sdma:
@@ -994,7 +1001,7 @@ def _generate_config_file(
 
     lines = [
         *header,
-        "# Runtime configuration for tensormap_and_ringbuffer.",
+        f"# Runtime configuration for {runtime_name}.",
         "# AICPU thread count 0 selects the runtime's architecture default (a2a3: 4; a5: 5).",
         *runtime_lines,
         "ORCHESTRATION = {",
@@ -1479,6 +1486,7 @@ def generate(
     memory_planner: _passes.MemoryPlanner | None = None,
     emit_source_loc: bool | None = None,
     dump_ptoas_passes: bool = False,
+    runtime: _passes.RuntimeKind | None = None,
 ) -> dict[str, str]:
     """Generate all PTO backend output files (kernels + orchestration + config).
 
@@ -1504,6 +1512,9 @@ def generate(
         dump_ptoas_passes: When True, dump full-module IR after every ptoas pass
             under ``<output_dir>/ptoas_passes/<codegen-unit>/``. Has no effect
             when ``skip_ptoas=True``.
+        runtime: Simpler runtime ABI to target; its wire name is written to
+            ``RUNTIME_CONFIG["runtime"]`` in the generated ``kernel_config.py``.
+            None uses ``RuntimeKind.TENSORMAP_AND_RINGBUFFER``.
 
     Returns:
         Dict mapping relative file paths to their content.
@@ -1512,6 +1523,8 @@ def generate(
         memory_planner = _passes.MemoryPlanner.PYPTO
     if emit_source_loc is None:
         emit_source_loc = emit_source_loc_default()
+    if runtime is None:
+        runtime = _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
 
     # Check for distributed functions (level >= HOST = Linqu level 3)
     has_distributed = any(
@@ -1527,6 +1540,7 @@ def generate(
             memory_planner=memory_planner,
             emit_source_loc=emit_source_loc,
             dump_ptoas_passes=dump_ptoas_passes,
+            runtime=runtime,
         )
 
     # L2-only program with multiple Orchestrations: emit each as a
@@ -1541,6 +1555,7 @@ def generate(
             memory_planner=memory_planner,
             emit_source_loc=emit_source_loc,
             dump_ptoas_passes=dump_ptoas_passes,
+            runtime=runtime,
         )
 
     return _generate_single_chip(
@@ -1550,6 +1565,7 @@ def generate(
         memory_planner=memory_planner,
         emit_source_loc=emit_source_loc,
         dump_ptoas_passes=dump_ptoas_passes,
+        runtime=runtime,
     )
 
 
@@ -1561,6 +1577,7 @@ def _generate_with_distributed(
     memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
     emit_source_loc: bool = True,
     dump_ptoas_passes: bool = False,
+    runtime: _passes.RuntimeKind = _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
 ) -> dict[str, str]:
     """Generate artifacts for a distributed (L3+) program.
 
@@ -1579,7 +1596,7 @@ def _generate_with_distributed(
     cg = _codegen_core.DistributedCodegen()
     orch_code = cg.generate(transformed_program)
     result_files["orchestration/host_orch.py"] = orch_code
-    result_files.update(_materialize_builtin_next_levels(cg.get_builtin_next_level_specs()))
+    result_files.update(_materialize_builtin_next_levels(cg.get_builtin_next_level_specs(), runtime))
 
     # 2. Each chip-level Orchestration → next_levels/{name}/...
     for func in transformed_program.functions.values():
@@ -1594,6 +1611,7 @@ def _generate_with_distributed(
                 memory_planner=memory_planner,
                 emit_source_loc=emit_source_loc,
                 dump_ptoas_passes=dump_ptoas_passes,
+                runtime=runtime,
             )
             for path, content in chip_files.items():
                 result_files[f"next_levels/{func.name}/{path}"] = content
@@ -1652,8 +1670,16 @@ def _builtin_template_output_path(template_name: str, variables: dict[str, str])
     return template_name
 
 
-def _materialize_builtin_next_levels(specs: list[Any]) -> dict[str, str]:
-    """Render builtin chip-callable templates into the distributed ``next_levels`` layout."""
+def _materialize_builtin_next_levels(
+    specs: list[Any], runtime: _passes.RuntimeKind = _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
+) -> dict[str, str]:
+    """Render builtin chip-callable templates into the distributed ``next_levels`` layout.
+
+    ``runtime`` must match the one every other chip sub-build was compiled for:
+    ``_assemble_chip_callables`` rejects a ``next_levels/`` tree whose members
+    disagree, since all chip-level tasks in one distributed build share a
+    single runtime.
+    """
     result_files: dict[str, str] = {}
     for spec in specs:
         template_root = _resolve_builtin_template_dir(spec.template_dir)
@@ -1666,6 +1692,7 @@ def _materialize_builtin_next_levels(specs: list[Any]) -> dict[str, str]:
             "entry": spec.entry_symbol,
             "kernel_name": spec.entry_symbol + "_kernel",
             "template_package": spec.template_dir[1:],
+            "runtime": _passes.runtime_kind_to_name(runtime),
         }
         variables.update(spec.template_vars)
         for template in sorted(templates_dir.iterdir(), key=lambda item: item.name):
@@ -1785,6 +1812,7 @@ def _generate_multi_chip(
     memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
     emit_source_loc: bool = True,
     dump_ptoas_passes: bool = False,
+    runtime: _passes.RuntimeKind = _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
 ) -> dict[str, str]:
     """Generate artifacts for an L2-only program with multiple Orchestrations.
 
@@ -1809,6 +1837,7 @@ def _generate_multi_chip(
             memory_planner=memory_planner,
             emit_source_loc=emit_source_loc,
             dump_ptoas_passes=dump_ptoas_passes,
+            runtime=runtime,
         )
         for path, content in chip_files.items():
             result_files[f"next_levels/{func.name}/{path}"] = content
@@ -1823,6 +1852,7 @@ def _generate_single_chip(
     memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
     emit_source_loc: bool = True,
     dump_ptoas_passes: bool = False,
+    runtime: _passes.RuntimeKind = _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
 ) -> dict[str, str]:
     """Generate artifacts for a single-chip (L0-L2) program.
 
@@ -1971,6 +2001,7 @@ def _generate_single_chip(
                     func_name_to_external_source,
                     func_name_to_external_include_dirs,
                     enable_sdma=any(_uses_sdma_workspace(func) for func in emitted_incore_funcs),
+                    runtime=runtime,
                 )
         except Exception as e:
             logger.error("Failed to generate orchestration '%s': %s", orch_func.name, e)

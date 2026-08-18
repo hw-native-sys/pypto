@@ -47,6 +47,8 @@ import weakref
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
+from pypto.pypto_core.passes import RuntimeKind, runtime_kind_to_name
+
 from .runner import RunConfig
 from .runtime_base import Worker
 
@@ -97,8 +99,9 @@ _ACTIVE_WORKERS: contextvars.ContextVar[tuple[ChipWorker, ...]] = contextvars.Co
 # the value ``CompiledProgram.runtime_name`` reports and the one the reuse
 # lookup in ``device_runner.execute_on_device`` searches for, so a
 # default-constructed ``with ChipWorker():`` bind-matches a freshly compiled
-# program instead of silently falling through to a one-shot worker.
-_DEFAULT_RUNTIME = "tensormap_and_ringbuffer"
+# program instead of silently falling through to a one-shot worker. Derived from
+# the RuntimeKind enum that compilation selects, so the two cannot drift apart.
+_DEFAULT_RUNTIME = runtime_kind_to_name(RuntimeKind.TENSORMAP_AND_RINGBUFFER)
 
 
 def _close_simpler_worker_best_effort(impl: Any) -> None:

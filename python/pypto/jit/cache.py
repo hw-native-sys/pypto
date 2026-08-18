@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pypto.pypto_core import DataType
-from pypto.pypto_core.passes import MemoryPlanner
+from pypto.pypto_core.passes import MemoryPlanner, RuntimeKind, runtime_kind_to_name
 
 if TYPE_CHECKING:
     from pypto.ir.pass_manager import OptimizationStrategy
@@ -147,6 +147,7 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
     enable_pypto_l0c_double_buffer: bool = False,
     tensor_layouts: dict[str, "TensorLayout | None"] | None = None,
     dep_layouts: tuple[tuple[str, str, str], ...] = (),
+    runtime: RuntimeKind = RuntimeKind.TENSORMAP_AND_RINGBUFFER,
 ) -> CacheKey:
     """Build a cache key for a JIT call site.
 
@@ -203,6 +204,11 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
             Included for ``PYPTO`` because it changes AutoTileMatmulL0 output
             and allocation. Canonicalized to false for ``DSA_RP`` and ``PTOAS``,
             which enable dbC=2 automatically regardless of this flag.
+        runtime: Effective Simpler runtime ABI resolved from the active
+            ``PassContext``. Included in the key because it is baked into the
+            artifact's ``kernel_config.py`` and decides which worker can bind
+            the program; without it a ``host_build_graph`` call would silently
+            reuse a ``tensormap_and_ringbuffer`` artifact.
 
     Returns:
         Hashable CacheKey tuple.
@@ -241,6 +247,7 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
         ("memory_planner", None if memory_planner is None else str(memory_planner)),
         ("enable_pypto_l0c_double_buffer", effective_pypto_dbc),
         ("dep_layouts", dep_layouts),
+        ("runtime", runtime_kind_to_name(runtime)),
     )
     return (
         source_hash,

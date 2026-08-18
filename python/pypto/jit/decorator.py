@@ -1511,6 +1511,20 @@ def _resolve_enable_pypto_l0c_double_buffer() -> bool:
     return ctx.get_enable_pypto_l0c_double_buffer() if ctx is not None else False
 
 
+def _resolve_runtime() -> _passes.RuntimeKind:
+    """Resolve the target Simpler runtime ABI for the cache key.
+
+    Like ``_resolve_enable_pypto_l0c_double_buffer``, the runtime is selected by
+    wrapping a call in ``with PassContext([], runtime=...)``, which
+    ``ir.compile()`` inherits. ``RunConfig`` does not carry it, so the active
+    context is the only source. Keying on it stops a ``host_build_graph`` call
+    from reusing an artifact compiled for ``tensormap_and_ringbuffer``, whose
+    ``kernel_config.py`` names a runtime no matching worker would bind.
+    """
+    ctx = _passes.PassContext.current()
+    return ctx.get_runtime() if ctx is not None else _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
+
+
 # ---------------------------------------------------------------------------
 
 
@@ -2092,6 +2106,7 @@ class JITFunction:
             dump_ptoas_passes=dump_ptoas_passes,
             memory_planner=memory_planner,
             enable_pypto_l0c_double_buffer=_resolve_enable_pypto_l0c_double_buffer(),
+            runtime=_resolve_runtime(),
         )
 
         # L1 cache lookup

@@ -981,6 +981,59 @@ def test_backend_materializes_builtin_next_level_files(tmp_path):
     assert "base += static_cast<int64_t>(active_blocks) * kTileCount" in kernel_cpp
 
 
+@pytest.mark.parametrize(
+    "runtime",
+    [passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER, passes.RuntimeKind.HOST_BUILD_GRAPH],
+)
+def test_every_next_level_reports_the_selected_runtime(tmp_path, runtime):
+    """All chip sub-builds in one distributed program must name the same runtime.
+
+    The builtin collectives are materialized from templates rather than by the
+    orchestration codegen, so they are a second, easily-missed place where the
+    runtime name is written. ``_assemble_chip_callables`` rejects a
+    ``next_levels/`` tree whose members disagree, which would make every
+    distributed program using a collective unrunnable under a non-default
+    runtime.
+    """
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(self, data: pld.DistributedTensor[[SIZE], pl.FP32]):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            data_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(pld.world_size() * pl.INT32.get_byte())
+            data = pld.window(data_buf, [SIZE], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [pld.world_size()], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(data, device=r)
+            pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
+            return 0
+
+    program = passes.materialize_comm_domain_scopes()(Prog)
+    program = passes.lower_host_tensor_collectives()(program)
+    program = passes.materialize_dist_tensor_ctx()(program)
+    program = _finalize_chip_program_for_generate(program)
+    files = pto_backend.generate(program, str(tmp_path), skip_ptoas=True, runtime=runtime)
+
+    configs = {
+        path: text
+        for path, text in files.items()
+        if path.startswith("next_levels/") and path.endswith("/kernel_config.py")
+    }
+    # Both a user chip Orchestration and a template-materialized builtin, so the
+    # test would still pass vacuously if either side were missing.
+    # Both a user chip Orchestration and a template-materialized builtin, so the
+    # test would still pass vacuously if either side were missing.
+    assert len(configs) >= 2, f"expected a user chip and a builtin config, got {sorted(configs)}"
+    name = passes.runtime_kind_to_name(runtime)
+    for path, text in configs.items():
+        assert f'"runtime": "{name}"' in text, f"{path} does not report runtime {name!r}"
+
+
 @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
 def test_backend_950_materializes_allreduce_with_core_num_launch(tmp_path, ascend_backend):
     @pl.program

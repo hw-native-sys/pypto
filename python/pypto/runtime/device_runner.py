@@ -47,6 +47,7 @@ from typing import Any
 import torch
 
 from pypto._external_source import kernel_binary_cache_path
+from pypto.pypto_core.passes import RuntimeKind, runtime_kind_to_name
 
 from ._binary_cache import (
     BinaryCacheContext,
@@ -548,7 +549,7 @@ def _compile_and_assemble_locked(
     runtime_config = getattr(kernel_config, "RUNTIME_CONFIG", {})
     # Default to the runtime that ``pto_backend`` bakes into every generated
     # ``kernel_config.py``; only legacy / hand-written configs omit the key.
-    runtime_name = runtime_config.get("runtime", "tensormap_and_ringbuffer")
+    runtime_name = runtime_config.get("runtime", runtime_kind_to_name(RuntimeKind.TENSORMAP_AND_RINGBUFFER))
 
     # Resolve the pinned PTO-ISA checkout (raises with an actionable message
     # when the pin cannot be honoured).

@@ -57,6 +57,7 @@ class _PassPipelineResult(NamedTuple):
     transformed_program: _ir_core.Program
     memory_planner: _passes.MemoryPlanner
     backend_type: BackendType
+    runtime: _passes.RuntimeKind
 
 
 def _select_backend(*, backend_type: BackendType, platform: str | None) -> BackendType:
@@ -72,6 +73,7 @@ def _validate_pass_context_conflicts(
     verification_level: _passes.VerificationLevel | None,
     diagnostic_phase: _passes.DiagnosticPhase | None,
     memory_planner: _passes.MemoryPlanner | None,
+    runtime: _passes.RuntimeKind | None = None,
 ) -> _passes.PassContext | None:
     """Reject explicit pass settings that conflict with an active context."""
     outer = _passes.PassContext.current()
@@ -90,6 +92,11 @@ def _validate_pass_context_conflicts(
             f"{operation}() was called with memory_planner while a PassContext is already active. "
             "Set the memory planner on the existing PassContext instead."
         )
+    if runtime is not None and outer is not None:
+        raise RuntimeError(
+            f"{operation}() was called with runtime while a PassContext is already active. "
+            "Set the runtime on the existing PassContext instead."
+        )
     return outer
 
 
@@ -105,6 +112,7 @@ def _run_pass_pipeline(  # noqa: PLR0913
     disabled_diagnostics: _passes.DiagnosticCheckSet | None = None,
     memory_planner: _passes.MemoryPlanner | None = None,
     enable_pypto_l0c_double_buffer: bool | None = None,
+    runtime: _passes.RuntimeKind | None = None,
     analyze_auto_scopes_for_deps: bool = False,
     extra_instruments: tuple[_passes.PassInstrument, ...] = (),
     inherit_outer_report_instruments: bool = True,
@@ -118,6 +126,7 @@ def _run_pass_pipeline(  # noqa: PLR0913
         verification_level=verification_level,
         diagnostic_phase=diagnostic_phase,
         memory_planner=memory_planner,
+        runtime=runtime,
     )
 
     default_disabled = _passes.DiagnosticCheckSet()
@@ -142,6 +151,7 @@ def _run_pass_pipeline(  # noqa: PLR0913
             if enable_pypto_l0c_double_buffer is not None
             else outer.get_enable_pypto_l0c_double_buffer()
         )
+        rt = runtime if runtime is not None else outer.get_runtime()
     else:
         instruments = list(extra_instruments)
         vlevel = (
@@ -151,7 +161,8 @@ def _run_pass_pipeline(  # noqa: PLR0913
         disabled = disabled_diagnostics if disabled_diagnostics is not None else default_disabled
         mplan = memory_planner if memory_planner is not None else _passes.MemoryPlanner.PYPTO
         dbc_flag = enable_pypto_l0c_double_buffer if enable_pypto_l0c_double_buffer is not None else False
-    ctx = _passes.PassContext(instruments, vlevel, dphase, disabled, mplan, dbc_flag)
+        rt = runtime if runtime is not None else _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
+    ctx = _passes.PassContext(instruments, vlevel, dphase, disabled, mplan, dbc_flag, rt)
 
     if mplan == _passes.MemoryPlanner.PTOAS:
         logger.warning(
@@ -177,7 +188,7 @@ def _run_pass_pipeline(  # noqa: PLR0913
                 output_dir=passes_dump_dir,
             )
 
-    return _PassPipelineResult(transformed_program, mplan, effective_backend_type)
+    return _PassPipelineResult(transformed_program, mplan, effective_backend_type, rt)
 
 
 def compile(  # noqa: PLR0913
@@ -198,6 +209,9 @@ def compile(  # noqa: PLR0913
     analyze_auto_scopes_for_deps: bool = False,
     emit_source_loc: bool | None = None,
     dump_ptoas_passes: bool = False,
+    # Appended, not inserted: every parameter above is positional, so slotting a
+    # new one in the middle would silently rebind existing positional callers.
+    runtime: _passes.RuntimeKind | None = None,
 ) -> "CompiledProgram | DistributedCompiledProgram":
     """Compile a Program through passes and codegen.
 
@@ -274,6 +288,15 @@ def compile(  # noqa: PLR0913
             behavior unless explicitly enabled. User-written manual scopes are
             skipped: they do not get compiler deps or automatic
             NoDep/OutputExisting direction rewrites.
+        runtime: Simpler runtime ABI to target.
+            ``RuntimeKind.TENSORMAP_AND_RINGBUFFER`` (default) builds the task
+            graph on the AICPU and derives dependencies through the TensorMap;
+            ``RuntimeKind.HOST_BUILD_GRAPH`` builds the whole graph on the host
+            up front, which is what Graph Execution (record once, replay)
+            requires. ``None`` inherits the setting from an active outer
+            ``PassContext``. Its wire name is written to
+            ``RUNTIME_CONFIG["runtime"]`` in the generated ``kernel_config.py``
+            and is what a ``ChipWorker`` must match to bind the program.
 
     Returns:
         A :class:`CompiledProgram` that wraps the output directory and can
@@ -305,6 +328,7 @@ def compile(  # noqa: PLR0913
         verification_level=verification_level,
         diagnostic_phase=diagnostic_phase,
         memory_planner=memory_planner,
+        runtime=runtime,
     )
 
     # --- Compile profiling ---------------------------------------------------
@@ -336,6 +360,7 @@ def compile(  # noqa: PLR0913
             disabled_diagnostics=disabled_diagnostics,
             memory_planner=memory_planner,
             enable_pypto_l0c_double_buffer=enable_pypto_l0c_double_buffer,
+            runtime=runtime,
             analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
             extra_instruments=(report_instrument,),
             dump_passes=dump_passes,
@@ -344,6 +369,7 @@ def compile(  # noqa: PLR0913
         transformed_program = pipeline.transformed_program
         mplan = pipeline.memory_planner
         effective_backend_type = pipeline.backend_type
+        effective_runtime = pipeline.runtime
 
         # Codegen target selection is owned by the per-backend BackendHandler;
         # any value of the ``BackendType`` enum is a valid PTO codegen target.
@@ -356,6 +382,7 @@ def compile(  # noqa: PLR0913
                     memory_planner=mplan,
                     emit_source_loc=emit_source_loc,
                     dump_ptoas_passes=dump_ptoas_passes,
+                    runtime=effective_runtime,
                 )
         except PartialCodegenError as exc:
             _write_files(exc.files, output_dir)

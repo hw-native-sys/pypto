@@ -277,20 +277,51 @@ std::string DiagnosticInstrument::GetName() const { return "DiagnosticInstrument
 
 // PassContext
 
+/// The wire name of each runtime kind, in enumerator order. Single table so a
+/// new runtime cannot be added to one direction and forgotten in the other.
+constexpr std::pair<RuntimeKind, const char*> kRuntimeNames[] = {
+    {RuntimeKind::TensorMapAndRingBuffer, "tensormap_and_ringbuffer"},
+    {RuntimeKind::HostBuildGraph, "host_build_graph"},
+};
+
+std::string RuntimeKindToName(RuntimeKind kind) {
+  for (const auto& [candidate, name] : kRuntimeNames) {
+    if (candidate == kind) return name;
+  }
+  INTERNAL_UNREACHABLE << "Internal error: unhandled RuntimeKind value " << static_cast<int>(kind);
+}
+
+RuntimeKind RuntimeKindFromName(const std::string& name) {
+  for (const auto& [kind, candidate] : kRuntimeNames) {
+    if (name == candidate) return kind;
+  }
+  std::ostringstream supported;
+  for (size_t i = 0; i < std::size(kRuntimeNames); ++i) {
+    if (i != 0) supported << ", ";
+    supported << kRuntimeNames[i].second;
+  }
+  CHECK(false) << "Unknown runtime '" << name << "': expected one of " << supported.str();
+  return kDefaultRuntimeKind;  // unreachable; CHECK throws
+}
+
 PassContext::PassContext(std::vector<PassInstrumentPtr> instruments, VerificationLevel verification_level,
                          DiagnosticPhase diagnostic_phase, DiagnosticCheckSet disabled_diagnostics,
-                         MemoryPlanner memory_planner, bool enable_pypto_l0c_double_buffer)
+                         MemoryPlanner memory_planner, bool enable_pypto_l0c_double_buffer,
+                         RuntimeKind runtime)
     : instruments_(std::move(instruments)),
       verification_level_(verification_level),
       diagnostic_phase_(diagnostic_phase),
       disabled_diagnostics_(disabled_diagnostics),
       memory_planner_(memory_planner),
       enable_pypto_l0c_double_buffer_(enable_pypto_l0c_double_buffer),
+      runtime_(runtime),
       previous_(nullptr) {}
 
 VerificationLevel PassContext::GetVerificationLevel() const { return verification_level_; }
 
 MemoryPlanner PassContext::GetMemoryPlanner() const { return memory_planner_; }
+
+RuntimeKind PassContext::GetRuntime() const { return runtime_; }
 
 bool PassContext::GetEnablePyptoL0cDoubleBuffer() const { return enable_pypto_l0c_double_buffer_; }
 

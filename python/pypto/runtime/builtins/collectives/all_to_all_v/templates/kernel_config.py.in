@@ -6,7 +6,7 @@ from simpler.task_interface import ArgDirection as _D
 _ROOT_DIR = Path(__file__).parent
 
 RUNTIME_CONFIG = {
-    "runtime": "tensormap_and_ringbuffer",
+    "runtime": "{{runtime}}",
     "aicpu_thread_num": 0,
 }
 

@@ -713,8 +713,25 @@ The orchestration codegen generates identical orchestration C++ code using the P
 
 | Key | When emitted | Notes |
 | --- | ------------ | ----- |
-| `runtime` | Always | Currently `"tensormap_and_ringbuffer"`. |
+| `runtime` | Always | `"tensormap_and_ringbuffer"` (default) or `"host_build_graph"` — the wire name of the `RuntimeKind` selected by `ir.compile(runtime=...)`, or by wrapping the call in `PassContext([], runtime=...)`. |
 | `aicpu_thread_num` | Always (`0`) | `0` selects the runtime's architecture default (a2a3: 4; a5: 5); callers may explicitly override it. |
+
+The runtime is carried by `PassContext` as an `ir::RuntimeKind`, not by a
+codegen-only argument, so passes that must legalize IR for a specific runtime
+switch on `PassContext::GetRuntime()` rather than comparing strings. It is an
+enum rather than a name because the set is closed — one enumerator per
+implementation under `runtime/src/<arch>/runtime/` — so a typo is a compile
+error instead of a value that surfaces much later as an opaque CCEC error about
+a nonexistent include directory.
+
+The wire name crosses the ABI boundary in exactly one place each way:
+`ir::RuntimeKindToName` when writing `kernel_config.py`, and
+`ir::RuntimeKindFromName` when reading one back. Both are re-exported to Python
+as `passes.runtime_kind_to_name` / `passes.runtime_kind_from_name`.
+
+The runtime is also part of the `@pl.jit` cache key, so a `host_build_graph`
+call cannot reuse an artifact compiled for `tensormap_and_ringbuffer`, whose
+`kernel_config.py` names a runtime no matching worker would bind.
 
 ### Argument Unpacking
 
