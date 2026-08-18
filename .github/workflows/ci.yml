@@ -63,6 +63,7 @@ jobs:
       pull-requests: read
     outputs:
       docs_only: ${{ steps.classify.outputs.docs_only }}
+      docs_changed: ${{ steps.classify.outputs.docs_changed }}
     steps:
       - name: Classify changed paths
         id: classify
@@ -78,6 +79,7 @@ jobs:
           # list; everything else runs the full pipeline.
           if [ "$EVENT_NAME" != 'pull_request' ]; then
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "docs_changed=true" >> "$GITHUB_OUTPUT"
             echo "event '$EVENT_NAME' is not a pull request -> full pipeline"
             exit 0
           fi
@@ -89,6 +91,7 @@ jobs:
           # see the note on that job.
           fail_open() {
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "docs_changed=true" >> "$GITHUB_OUTPUT"
             echo "$1 -> full pipeline"
             exit 0
           }
@@ -133,28 +136,42 @@ jobs:
           # test result:
           #   docs/**    the documentation tree, including docs/requirements.txt
           #              (only the docs.yml toolchain reads it)
-          #   **/*.md    prose anywhere -- README, .claude/ rules, docs pages. No
-          #              test reads a markdown file; the lint scripts that do
-          #              (check_docs_nav / check_docs_en_zh_parity) run in
-          #              `pre-commit`, which stays ungated.
+          #   **/*.md    prose anywhere -- README, .claude/ rules, docs pages.
+          #
+          # `docs_only` means "no build, no device tests". It does NOT mean the
+          # change is inert: the user manual carries runnable code blocks that
+          # `tests/docs/run_doc_examples.py` extracts and executes, so a doc edit
+          # can break a real check. `docs_changed` below gates the `docs-examples`
+          # job, which runs those blocks on the paths this fast path skips.
+          # The markdown lint scripts (check_docs_nav / check_docs_en_zh_parity)
+          # run in `pre-commit`, which stays ungated.
           #   mkdocs.yml site config, consumed only by docs.yml
           # `case` globs are not path-aware, so `*.md` matches at any depth.
+          # One full pass, no early exit: `docs_only` and `docs_changed` are
+          # independent questions, and short-circuiting on the first
+          # non-documentation path would answer the second by file order alone.
           docs_only=true
+          docs_changed=false
           while IFS="$(printf '\t')" read -r new_path old_path; do
             for f in "$new_path" "$old_path"; do
               [ -n "$f" ] || continue
               case "$f" in
+                docs/*) docs_changed=true ;;
+              esac
+              case "$f" in
                 docs/*|*.md|mkdocs.yml) ;;
                 *)
-                  echo "non-documentation change: $f -> full pipeline"
+                  if [ "$docs_only" = 'true' ]; then
+                    echo "non-documentation change: $f -> full pipeline"
+                  fi
                   docs_only=false
-                  break 2
                   ;;
               esac
             done
           done <<< "$files"
 
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+          echo "docs_changed=$docs_changed" >> "$GITHUB_OUTPUT"
           if [ "$docs_only" = 'true' ]; then
             echo "all $expected changed paths are documentation:"
             printf '%s\n' "$files" | cut -f1 | sed 's/^/  /'
@@ -420,6 +437,54 @@ jobs:
     - name: Skipped (documentation-only change)
       if: needs.changes.outputs.docs_only == 'true'
       run: echo "Every changed path is documentation — no build, no tests."
+
+  docs-examples:
+    # The user manual's runnable code blocks, on the path examples-tests cannot
+    # cover. That job is skipped for a documentation-only change -- which is
+    # exactly when the blocks themselves are being edited -- so without this the
+    # gate would never fire on the PRs that can break it.
+    #
+    # Gated on docs_changed rather than !docs_only: a code-only PR gets the same
+    # blocks run inside examples-tests, against the code it changed.
+    needs: [changes, toolchain, pre-commit]
+    if: needs.changes.outputs.docs_changed == 'true'
+    permissions:
+      contents: read
+    runs-on: [self-hosted, linux, arm64, cpu]
+    defaults:
+      run:
+        working-directory: docs-checkout
+    env:
+      PTOAS_ROOT: ${{ github.workspace }}/docs-checkout/ptoas-bin
+      PTO_ISA_ROOT: ${{ github.workspace }}/docs-checkout/pto-isa
+      PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
+      PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
+      CMAKE_BUILD_PARALLEL_LEVEL: 16
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CCACHE_MAXSIZE: 30G
+      CCACHE_UMASK: '000'
+    steps:
+      - name: Fetch composite action definitions
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/actions
+          clean: false
+          persist-credentials: false
+
+      - name: Setup CI job
+        uses: ./.github/actions/setup-ci-job
+        with:
+          checkout-path: docs-checkout
+          needs-device: 'false'
+          pip-cache-name: pip-docs
+          pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+
+      - name: Run the user manual's runnable code blocks
+        run: |
+          source activate.sh
+          set -e
+          python tests/docs/run_doc_examples.py --pages docs/en/user --check-parity -p a2a3sim
 
   examples-tests:
     # The distributed examples ladder (doc-plan 02) — every example must compile
