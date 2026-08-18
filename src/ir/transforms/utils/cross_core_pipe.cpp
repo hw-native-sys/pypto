@@ -294,7 +294,10 @@ AutomaticPipeSetup BuildAutomaticPipeSetup(const std::string& func_name, const s
     INTERNAL_CHECK_SPAN(slot_num_override.value() > 0, span)
         << "Cross-core slot_num override must be positive: " << slot_num_override.value();
   }
-  const int effective_slot_num = slot_num_override.value_or(kDefaultAutoPipeSlotNum);
+  // EXPERIMENT (do not merge): restore the pre-#2378 ring depth (PTOAS's own
+  // dir_mask derivation, 8 unidirectional / 4 bidirectional) to test whether the
+  // shallow 2-slot default is what stalls the A5 mixed kernel on board.
+  const int effective_slot_num = slot_num_override.value_or(GetPtoasImplicitSlotNum(dir_mask));
   // Bound-check the slot size before multiplying so an oversized inferred size
   // can't overflow the int64 buffer_size computation.
   const int64_t slot_size_i64 = common_slot_size.value();
