@@ -482,7 +482,7 @@ void CheckGraphSignature(const FunctionPtr& func) {
       << ". Pack several of them into one larger tensor and slice it inside the region.";
 }
 
-/// Rejects a Graph returning anything other than one of its own parameters.
+/// Rejects a Graph that returns a value the caller could consume.
 ///
 /// `return c` where `c` is an InOut parameter is the DSL's spelling for writing
 /// in place, and lowers to an alias rather than a value — that is fine. A
@@ -638,7 +638,29 @@ class CallSiteExtender : public IRMutator {
                                     submit->sync_start_, submit->allow_early_resolve_, submit->predicate_);
   }
 
+  /// Splice any bindings synthesised while rewriting this statement's
+  /// expression in ahead of it.
+  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+    pending_prefix_.clear();
+    auto stmt = IRMutator::VisitStmt_(op);
+    return WithPrefix(std::move(stmt), op->span_);
+  }
+
+  StmtPtr VisitStmt_(const EvalStmtPtr& op) override {
+    pending_prefix_.clear();
+    auto stmt = IRMutator::VisitStmt_(op);
+    return WithPrefix(std::move(stmt), op->span_);
+  }
+
  private:
+  [[nodiscard]] StmtPtr WithPrefix(StmtPtr stmt, const Span& span) {
+    if (pending_prefix_.empty()) return stmt;
+    std::vector<StmtPtr> stmts = std::move(pending_prefix_);
+    pending_prefix_.clear();
+    stmts.push_back(std::move(stmt));
+    return SeqStmts::Flatten(std::move(stmts), span);
+  }
+
   [[nodiscard]] const GraphPlan* LookupPlan(const OpPtr& op) const {
     auto gvar = As<GlobalVar>(op);
     if (!gvar || !program_) return nullptr;
@@ -647,8 +669,14 @@ class CallSiteExtender : public IRMutator {
   }
 
   /// Rebuild each hoisted expression against this call site's actual arguments.
+  ///
+  /// Each rebuilt value is bound to a fresh local rather than inlined into the
+  /// argument list: orchestration codegen accepts only a Var or a literal as an
+  /// argument, so an inline `i * 5120` would fail there. The binding statements
+  /// accumulate in `pending_prefix_` and the statement overrides splice them in
+  /// immediately before the call.
   [[nodiscard]] std::vector<ExprPtr> AppendHoistedArgs(const GraphPlan& plan, const OpPtr& callee_op,
-                                                       const std::vector<ExprPtr>& old_args) const {
+                                                       const std::vector<ExprPtr>& old_args) {
     auto gvar = As<GlobalVar>(callee_op);
     auto callee = program_->GetFunction(gvar->name_);
     INTERNAL_CHECK(callee) << "Internal error: planned Graph '" << plan.name << "' not found in program";
@@ -661,14 +689,17 @@ class CallSiteExtender : public IRMutator {
     args.reserve(args.size() + plan.hoisted.size());
     for (const auto& h : plan.hoisted) {
       auto value = SubstituteAtCallSite(h.value, binding);
-      args.push_back(value);
+      auto local = std::make_shared<Var>(h.param->name_hint_ + "__graph_arg" + std::to_string(next_local_++),
+                                         h.param->GetType(), h.param->span_);
+      pending_prefix_.push_back(std::make_shared<AssignStmt>(local, value, h.param->span_));
+      args.push_back(local);
       // A later hoist may be defined in terms of this one (`base = idx * 128`
       // then `end = base + 128`). The expressions were captured from the body,
-      // where `base` is a local whose definition Step A erases — so without
-      // binding it here the call site would name a variable that no longer
-      // exists anywhere. `plan.hoisted` is in definition order, so one forward
-      // pass suffices.
-      binding[h.original.get()] = value;
+      // where `base` is a local whose definition Step A erases, so bind the name
+      // to the slot just emitted — otherwise the call site would reference a
+      // variable that no longer exists anywhere. `plan.hoisted` is in definition
+      // order, so one forward pass suffices.
+      binding[h.original.get()] = local;
     }
     return args;
   }
@@ -682,6 +713,8 @@ class CallSiteExtender : public IRMutator {
 
   ProgramPtr program_;
   const std::unordered_map<std::string, GraphPlan>& plans_;
+  std::vector<StmtPtr> pending_prefix_;
+  int next_local_ = 0;
 };
 
 [[nodiscard]] ProgramPtr TransformProgram(const ProgramPtr& program) {

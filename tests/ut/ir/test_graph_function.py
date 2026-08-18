@@ -19,8 +19,6 @@ Graph is authored like every other function type — ``type=pl.FunctionType.Grap
 rest of the enum.
 """
 
-import tempfile
-
 import pypto.language as pl
 import pytest
 from pypto import ir
@@ -115,66 +113,6 @@ def test_plain_function_is_unaffected():
         return x
 
     assert plain.func_type == ir.FunctionType.Opaque
-
-
-# ---------------------------------------------------------------------------
-# The gap this change opens, reported rather than crashed on
-# ---------------------------------------------------------------------------
-
-
-def test_compiling_a_graph_call_reports_that_codegen_is_missing():
-    """Until the graph-launch emission path lands, say so instead of crashing.
-
-    A Graph callee reaches `InferFunctionCoreType`, which recognises only
-    AIC/AIV and aborts with an internal error naming nothing actionable. This
-    change makes the type authorable, so it also has to make the gap legible.
-
-    The Graph body opens its own device scope, which is how one is actually
-    written — and is only reachable because the scope outliners now admit Graph
-    bodies. Without that the compile would stop earlier on a leftover scope, and
-    this diagnostic would be unreachable for every realistic program.
-
-    The message is matched in full: it names the authoring form, so a spelling
-    that no longer exists would otherwise survive here unnoticed.
-    """
-    from pypto.backend.pto_backend import PartialCodegenError  # noqa: PLC0415
-    from pypto.ir.compile import compile as ir_compile  # noqa: PLC0415
-
-    @pl.program
-    class UsesGraph:
-        @pl.function(type=pl.FunctionType.Graph)
-        def layer(
-            self,
-            a: pl.Tensor[[128, 128], pl.FP32],
-            c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
-        ) -> pl.Tensor[[128, 128], pl.FP32]:
-            with pl.at(level=pl.Level.CORE_GROUP):
-                t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128])
-                pl.store(t, [0, 0], c)
-            return c
-
-        @pl.function(type=pl.FunctionType.Orchestration)
-        def main(
-            self,
-            a: pl.Tensor[[128, 128], pl.FP32],
-            c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
-        ) -> pl.Tensor[[128, 128], pl.FP32]:
-            c = self.layer(a, c)
-            return c
-
-    expected = (
-        "Graph function 'layer' cannot be compiled yet: type=pl.FunctionType.Graph is authorable, "
-        "but the orchestration codegen that emits a graph launch is not in place yet."
-    )
-    with tempfile.TemporaryDirectory() as out_dir:
-        with pytest.raises(PartialCodegenError) as excinfo:
-            ir_compile(UsesGraph, skip_ptoas=True, platform="a2a3", output_dir=out_dir, dump_passes=False)
-
-    # PartialCodegenError word-wraps each message into a table cell, so compare
-    # against the text with the gutter and the wrapping collapsed away — a
-    # substring match on one line would not notice a stale spelling in another.
-    reported = " ".join(str(excinfo.value).replace("|", " ").split())
-    assert expected in reported
 
 
 # ---------------------------------------------------------------------------

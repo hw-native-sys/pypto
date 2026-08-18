@@ -220,7 +220,13 @@ class TestBoundaryLegality:
         with pytest.raises(ValueError, match="empty boundary"):
             _legalize(Before)
 
-    def test_graph_returning_a_value_is_rejected(self):
+    def test_graph_returning_a_computed_value_is_rejected(self):
+        """A return that aliases an InOut parameter is fine; a computed one is not.
+
+        ``rt_submit_graph`` yields a valid task id only on a cache hit, so a
+        graph cannot hand a computed value back to its caller.
+        """
+
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.Graph)
