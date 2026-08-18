@@ -973,8 +973,15 @@ void DistributedCodegen::VisitExpr_(const ir::CallPtr& op) {
     return;
   }
 
+  const std::string& op_name = op->op_->name_;
+  const bool is_unhandled_tensor_or_tile_op =
+      op_name.rfind("tensor.", 0) == 0 || op_name.rfind("tile.", 0) == 0;
+  CHECK_SPAN(!is_unhandled_tensor_or_tile_op, op->span_)
+      << "DistributedCodegen does not support op '" << op_name << "' in function '" << current_func_->name_
+      << "'. Move this operation into a lower-level function or add a registered HOST-orchestrator lowering.";
+
   // Regular op call
-  current_expr_value_ = op->op_->name_ + "(" + FormatArgs(op->args_) + ")";
+  current_expr_value_ = op_name + "(" + FormatArgs(op->args_) + ")";
 }
 
 void DistributedCodegen::VisitExpr_(const ir::VarPtr& op) {

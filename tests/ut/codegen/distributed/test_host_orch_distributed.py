@@ -89,6 +89,58 @@ def _lower_host_collectives(program):
 
 
 # ---------------------------------------------------------------------------
+# HOST tensor op lowering and rejection
+# ---------------------------------------------------------------------------
+
+
+def test_host_orch_tensor_assemble_emits_tensor_dict_slice_write():
+    @pl.program
+    class Prog:
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self, out: pl.Tensor[[8, 32], pl.FP32]) -> pl.Tensor[[8, 32], pl.FP32]:
+            tmp = pl.create_tensor([4, 16], dtype=pl.FP32)
+            out = pl.assemble(out, tmp, [3, 7])
+            return out
+
+    code = _lower(Prog, convert_to_ssa=True)
+
+    assert re.search(
+        r'tensors\["out__ssa_v0"\]\[3:3 \+ 4, 7:7 \+ 16\] = '
+        r'tensors\["tmp__ssa_v0"\]\[0:4, 0:16\]',
+        code,
+    ), code
+    assert re.search(r'tensors\["out__ssa_v1"\] = tensors\["out__ssa_v0"\]', code), code
+    assert "tensor.assemble(" not in code
+    compile(code, "<host_orch>", "exec")
+
+
+def test_host_orch_atomic_tensor_assemble_is_rejected():
+    @pl.program
+    class Prog:
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self, out: pl.Tensor[[8], pl.FP32]) -> pl.Tensor[[8], pl.FP32]:
+            tmp = pl.create_tensor([8], dtype=pl.FP32)
+            out = pl.assemble(out, tmp, [0], atomic=pl.AtomicType.Add)
+            return out
+
+    with pytest.raises(ValueError, match="only supported inside an InCore function"):
+        _lower(Prog, convert_to_ssa=True)
+
+
+def test_host_orch_unhandled_tensor_op_is_rejected():
+    @pl.program
+    class Prog:
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self) -> pl.Tensor[[8, 32], pl.FP32]:
+            tmp = pl.create_tensor([256], dtype=pl.FP32)
+            reshaped = pl.reshape(tmp, [8, 32])
+            return reshaped
+
+    with pytest.raises(ValueError, match=r"does not support op 'tensor\.reshape'.*host_orch"):
+        _lower(Prog, convert_to_ssa=True)
+
+
+# ---------------------------------------------------------------------------
 # Positive: DistributedTensor formals + device= → with orch.allocate_domain
 # + Buffer.tensor + add_scalar(ctx) + worker= + world_size lowering
 # ---------------------------------------------------------------------------
