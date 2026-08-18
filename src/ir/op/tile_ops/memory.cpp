@@ -422,10 +422,9 @@ TypePtr DeduceTileStoreType(const std::vector<ExprPtr>& args,
   }
 
   const int st_phase = GetKwarg<int>(kwargs, "st_phase", static_cast<int>(STPhase::kUnspecified));
-  CHECK(IsValidSTPhase(st_phase)) << "The operator " << op_name
-                                  << " requires st_phase to be STPhase.Unspecified, STPhase.Partial, "
-                                     "or STPhase.Final, but got int "
-                                  << st_phase;
+  CHECK(IsValidSTPhase(st_phase))
+      << "The operator " << op_name
+      << " requires st_phase to be STPhase.Unspecified or STPhase.Final, but got int " << st_phase;
 
   // ---- Valid-region union -------------------------------------------------
   // A store writes into the destination tensor, so the tensor it returns holds

@@ -328,9 +328,9 @@ def store(
             1 (``kAdd``, atomic-add into global memory). The kwarg is omitted
             entirely when 0 so non-atomic stores are unchanged.
         st_phase: Unit-flag-aware store phase. ``STPhase.Unspecified`` (default)
-            preserves ordinary stores; ``STPhase.Partial`` checks the flag;
-            ``STPhase.Final`` checks and clears it. The kwarg is omitted entirely
-            for the default so existing stores remain unchanged.
+            preserves ordinary stores; ``STPhase.Final`` checks and clears the
+            flag published by a final phased accumulator producer. The kwarg is
+            omitted entirely for the default so existing stores remain unchanged.
 
     Returns:
         Call expression that returns the output tensor

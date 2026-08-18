@@ -494,12 +494,12 @@ mints a correctly typed accumulator, at the cost of a phi between the branches.
 On a unit-flag-aware path, the final accumulator producer must be paired with
 `pl.store(..., st_phase=pl.STPhase.Final)`. The final producer sets the unit flag
 and the final store checks and clears it; a plain store intentionally keeps the
-default `pl.STPhase.Unspecified` behavior. `st_phase` also accepts
-`pl.STPhase.Partial` for lower-level check-only store protocols. Compilation
-verifies this pairing in both directions: bind the final producer's result and
-store that exact value in the same straight-line control-flow region. A missing
-or mismatched pair is rejected before code generation because it can otherwise
-stall device execution.
+default `pl.STPhase.Unspecified` behavior. PyPTO does not expose PTO-ISA's
+check-only store phase because that phase requires an ordered multi-consumer
+lifecycle. Compilation verifies the supported final pairing in both directions:
+bind the final producer's result and store that exact value in the same
+straight-line control-flow region. A missing or mismatched pair is rejected
+before code generation because it can otherwise stall device execution.
 
 ## Python Usage
 

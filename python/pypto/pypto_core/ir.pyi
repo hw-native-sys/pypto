@@ -2370,14 +2370,11 @@ class AccPhase(enum.IntEnum):
 class STPhase(enum.IntEnum):
     """Consumer-side unit-flag phase for ``tile.store``.
 
-    Stored as ``int`` in op kwargs. The values match PTO-ISA's ``STPhase`` ABI.
+    Stored as ``int`` in op kwargs. Supported values use PTO-ISA's ``STPhase`` ABI.
     """
 
     Unspecified = 0
     """Do not use the unit-flag protocol."""
-
-    Partial = 2
-    """Check the unit flag without clearing it."""
 
     Final = 3
     """Check and clear the unit flag."""

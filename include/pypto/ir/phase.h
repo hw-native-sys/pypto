@@ -22,12 +22,14 @@ namespace ir {
 // AccPhase selects the producer-side unit-flag behavior of phased accumulator
 // operations such as tile.gemv. STPhase selects the matching consumer-side
 // behavior of tile.store. Keep these as distinct types: the producer and store
-// protocols are not interchangeable even though PTO-ISA currently assigns the
-// same wire values to their members.
+// protocols are not interchangeable even where PTO-ISA assigns the same wire
+// values.
 //
-// The integer values are part of the IR ABI and intentionally match PTO-ISA:
-// unspecified = no unit-flag protocol, partial = check-only, final = producer
-// check-and-set / store check-and-clear.
+// The integer values are part of the IR ABI and intentionally match PTO-ISA.
+// AccPhase exposes the full producer protocol: unspecified = off, partial =
+// check-only, and final = check-and-set. PyPTO deliberately limits STPhase to
+// unspecified = off and final = check-and-clear. PTO-ISA's check-only store
+// phase requires an ordered multi-consumer lifecycle that PyPTO does not expose.
 enum class AccPhase : int {
   kUnspecified = 0x0,
   kPartial = 0x2,
@@ -36,7 +38,6 @@ enum class AccPhase : int {
 
 enum class STPhase : int {
   kUnspecified = 0x0,
-  kPartial = 0x2,
   kFinal = 0x3,
 };
 
@@ -74,14 +75,16 @@ inline std::string PhaseValueToPTOString(int value, const std::string& enum_name
 
 inline bool IsValidAccPhase(int value) { return detail::IsValidPhaseValue(value); }
 
-inline bool IsValidSTPhase(int value) { return detail::IsValidPhaseValue(value); }
+inline bool IsValidSTPhase(int value) { return value == 0x0 || value == 0x3; }
 
 inline std::string AccPhaseToString(AccPhase phase) {
   return detail::PhaseValueToPythonMember(static_cast<int>(phase), "AccPhase");
 }
 
 inline std::string STPhaseToString(STPhase phase) {
-  return detail::PhaseValueToPythonMember(static_cast<int>(phase), "STPhase");
+  const int value = static_cast<int>(phase);
+  if (!IsValidSTPhase(value)) throw pypto::TypeError("Unknown STPhase: " + std::to_string(value));
+  return detail::PhaseValueToPythonMember(value, "STPhase");
 }
 
 inline std::string AccPhaseToPTOString(AccPhase phase) {
@@ -89,7 +92,9 @@ inline std::string AccPhaseToPTOString(AccPhase phase) {
 }
 
 inline std::string STPhaseToPTOString(STPhase phase) {
-  return detail::PhaseValueToPTOString(static_cast<int>(phase), "STPhase");
+  const int value = static_cast<int>(phase);
+  if (!IsValidSTPhase(value)) throw pypto::TypeError("Unknown STPhase: " + std::to_string(value));
+  return detail::PhaseValueToPTOString(value, "STPhase");
 }
 
 }  // namespace ir

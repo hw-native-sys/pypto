@@ -2592,8 +2592,8 @@ class TestTileMatMulOps:
         assert int(ir.AccPhase.Partial) == 2
         assert int(ir.AccPhase.Final) == 3
         assert int(ir.STPhase.Unspecified) == 0
-        assert int(ir.STPhase.Partial) == 2
         assert int(ir.STPhase.Final) == 3
+        assert not hasattr(ir.STPhase, "Partial")
         assert dict(default_call.kwargs) == {"acc_phase": int(ir.AccPhase.Unspecified)}
         assert dict(partial_call.kwargs) == {"acc_phase": int(ir.AccPhase.Partial)}
 
@@ -7266,7 +7266,7 @@ class TestWriteValidRegionUnion:
             [8, 0],
             out,
             atomic=int(ir.AtomicType.Add),
-            st_phase=ir.STPhase.Partial,
+            st_phase=ir.STPhase.Final,
         )
 
         assert dict(default_call.kwargs) == {}
@@ -7275,8 +7275,22 @@ class TestWriteValidRegionUnion:
         assert final_call.span.begin_line == 7
         assert dict(combined_call.kwargs) == {
             "atomic": int(ir.AtomicType.Add),
-            "st_phase": int(ir.STPhase.Partial),
+            "st_phase": int(ir.STPhase.Final),
         }
+
+    def test_store_rejects_unsupported_check_only_phase(self):
+        """PTO-ISA's check-only store phase is outside PyPTO's public protocol."""
+        span = ir.Span.unknown()
+        out = ir.Var("out", ir.TensorType([64, 128], DataType.FP32), span)
+        src = self._partial_tile([16, 128], [12, 128], name="src")
+
+        with pytest.raises(ValueError, match="STPhase.Unspecified or STPhase.Final"):
+            tile.store(
+                src,
+                [8, 0],
+                out,
+                st_phase=2,  # pyright: ignore[reportArgumentType]
+            )
 
     def test_store_rejects_string_phase(self):
         """String phase spellings are no longer accepted by the enum API."""
