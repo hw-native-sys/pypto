@@ -47,7 +47,10 @@ final `Simplify` — and before
 [`InsertCommFence`](48-insert_comm_fence.md). Running after every rewriting
 transform means none of them has to reason about the inserted scope wrappers.
 
-**Scope**: only `Orchestration` functions are modified. InCore / AIC / AIV /
+**Scope**: orchestration bodies — `Orchestration` and `Graph` — are modified.
+A Graph body is orchestration too, and codegen emits `SIMPLER_SCOPE` solely from
+`RuntimeScopeStmt`, so skipping it would yield a scope-less Graph function.
+InCore / AIC / AIV /
 Group / Spmd bodies are never scope-wrapped by codegen, so they are returned
 unchanged.
 

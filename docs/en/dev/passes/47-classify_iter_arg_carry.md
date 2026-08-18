@@ -1,6 +1,7 @@
 # ClassifyIterArgCarry Pass
 
-Classifies every `ForStmt` iter_arg in an Orchestration function as a **trivial
+Classifies every `ForStmt` iter_arg in an orchestration body — `Orchestration`
+or `Graph`, both of which codegen lowers into carry variables — as a **trivial
 alias** or a **rebind carry**, and sizes `Scalar[TASK_ID]` fence arrays inside a
 `pl.manual_scope`. The plan is stamped onto `ForStmt.attrs_` so the orchestration
 codegen reads it instead of re-deriving it.

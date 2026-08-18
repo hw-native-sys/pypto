@@ -301,7 +301,12 @@ class GraphBodyChecker : public IRVisitor {
   GraphBodyChecker(ProgramPtr program, FunctionPtr func, std::vector<Diagnostic>& diagnostics)
       : program_(std::move(program)), func_(std::move(func)), diagnostics_(diagnostics) {
     for (const auto& param : func_->params_) {
-      if (As<ScalarType>(param->GetType()) != nullptr) scalar_params_.insert(param.get());
+      if (As<ScalarType>(param->GetType()) != nullptr) {
+        scalar_params_.insert(param.get());
+      } else {
+        tensor_params_.insert(param.get());
+        tensor_root_.insert(param.get());  // a parameter is its own boundary root
+      }
     }
   }
 
@@ -312,6 +317,7 @@ class GraphBodyChecker : public IRVisitor {
     IRVisitor::VisitExpr_(op);
     CheckAllocation(op);
     CheckLaunchSpec(alloc_batching::EffectiveCoreNum(op, Callee(op->op_)), op->span_);
+    CheckBoundaryView(op);
     if (!IsTaskLaunch(op)) return;
     count_ = SatAdd(count_, 1);
     CheckArity(op->op_, op->args_.size(), /*is_submit=*/false, op->span_);
@@ -370,8 +376,17 @@ class GraphBodyChecker : public IRVisitor {
 
   /// An allocation outside any statement list — a loop body that is a single
   /// assign, say — is a batch of one.
+  /// Boundary provenance: a parameter is its own root, an alias inherits one.
+  void TrackTensorAlias(const AssignStmtPtr& op) {
+    auto var = AsVarLike(op->var_);
+    if (!var || As<ScalarType>(var->GetType()) != nullptr) return;
+    auto aliased = AsVarLike(op->value_);
+    if (aliased && tensor_root_.count(aliased.get()) != 0) tensor_root_.insert(var.get());
+  }
+
   void VisitStmt_(const AssignStmtPtr& op) override {
     IRVisitor::VisitStmt_(op);
+    TrackTensorAlias(op);
     auto call = As<Call>(op->value_);
     if (call && IsAllocation(call) && batched_.count(op.get()) == 0) count_ = SatAdd(count_, 1);
   }
@@ -448,6 +463,29 @@ class GraphBodyChecker : public IRVisitor {
         span);
   }
 
+  /// Step B's post-condition: no view of a boundary tensor survives in the body.
+  ///
+  /// Stated as "none left" rather than by re-deriving which views were
+  /// hoistable, so it holds whatever the pass's collection rule becomes. Both
+  /// ways of leaving one behind are silent at runtime: recording classifies it
+  /// as a `BOUNDARY_VIEW` and `graph_rebind_tensor` patches only the buffer
+  /// address, keeping the offset *and* the shape/strides recorded on the first
+  /// call. A view whose offset or extent differs on a later call therefore
+  /// replays call one's window against call two's buffer.
+  void CheckBoundaryView(const CallPtr& op) {
+    if (!IsOp(op, "tensor.slice") && !IsOp(op, "tensor.view")) return;
+    if (op->args_.empty()) return;
+    auto source = AsVarLike(op->args_[0]);
+    // Through aliases, not just direct parameters: `alias = w; slice(alias, ...)`
+    // is a boundary view too, and checking only the immediate source lets it
+    // verify clean while the recording freezes the first call's offset.
+    if (!source || tensor_root_.count(source.get()) == 0) return;
+    Report("takes a view of boundary tensor '" + source->name_hint_ +
+               "' inside the region; replay patches the boundary address but keeps the offset and "
+               "shape recorded on the first call, so the view must be taken at the call site.",
+           op->span_);
+  }
+
   void Report(const std::string& message, const Span& span) {
     diagnostics_.emplace_back(DiagnosticSeverity::Error, "GraphBoundaryLegalized", 0,
                               "Graph function '" + func_->name_ + "' " + message, span);
@@ -516,6 +554,9 @@ class GraphBodyChecker : public IRVisitor {
   FunctionPtr func_;
   std::vector<Diagnostic>& diagnostics_;
   std::unordered_set<const Var*> scalar_params_;
+  std::unordered_set<const Var*> tensor_params_;
+  /// Tensor vars that derive from a boundary parameter, directly or by alias.
+  std::unordered_set<const Var*> tensor_root_;
   size_t count_ = 0;
   std::unordered_set<const Stmt*> batched_;
 };

@@ -61,10 +61,82 @@ naming the variable and explaining why the value cannot be reconstructed.
 New parameters are **appended**, not prepended: `CoreTaskArgs` requires every
 tensor argument to precede every scalar one.
 
+## Step B — derived slices of a boundary tensor
+
+Replay patches a boundary tensor's **address**. A view taken *inside* the region
+is re-derived from whatever the recording froze, so it must be taken at the call
+site instead:
+
+```python
+wl = pl.tensor.slice(w, [128, 128], [layer_idx * 128, 0])   # inside the region
+```
+
+Step B moves that slice out and passes the result in as an additional boundary
+tensor. Each slice site becomes its own parameter with its own fixed shape,
+which is what the runtime's `BOUNDARY_VIEW` classification requires — it matches
+on same-buffer plus offset, with the shape playing no part, so a view whose shape
+varied between calls could not be classified at all.
+
+The hoisted statements are emitted **scalars first, then tensors**, because a
+slice's offset is typically a Step A scalar and the binding has to precede its
+use. The *parameter* order is the reverse — tensors before scalars — which is
+what `CoreTaskArgs` requires. A view of a region-local tensor stays put.
+
+**A view of a hoisted view is hoisted too.** Once `wl` moves out it is a boundary
+parameter, so `wr = slice(wl, ...)` is in exactly the position `wl` was. The body
+is SSA in definition order, so one forward pass reaches the whole chain — a view
+can only name a source defined before it. Leaving `wr` behind is silent:
+`graph_rebind_tensor` patches the buffer address from `wl` but keeps the offset
+recorded on the first call.
+
+**A hoisted view must have a compile-time-constant shape.** Replay copies a
+view's `shapes` and `strides` straight from the recorded template and patches
+only `buffer_addr` and `start_offset`, so an extent read from a boundary scalar
+would apply the first call's shape to a later call's buffer. A view of a
+boundary tensor whose operands the call site cannot recompute is rejected for the
+same reason, rather than left in place.
+
+**A varying offset is fine, and that is not obvious.** Codegen clamps a runtime
+view to `min(declared, source.shapes[i] - offset[i])`, so the *actual* shape is
+offset-dependent even when the IR extent is constant. It does not reach replay
+because a hoisted view is passed as its **own** boundary tensor rather than
+re-derived in the region: `graph_tensor_from_boundary` tries `BOUNDARY_EXACT`
+across all boundary tensors before any `BOUNDARY_VIEW`, and a node consuming the
+view matches the view itself, so `graph_rebind_tensor` replaces the whole
+`GraphTensor` — `shapes`, `strides` and `extent_elem` included. The frozen-shape
+behaviour belongs to `BOUNDARY_VIEW`, which is the in-region case this step
+hoists out. Requiring the offset to be provably in bounds would reject the
+motivating case, a per-layer `layer_idx * 5120`.
+
+## Step C — allocations inside the region
+
+`pl.create_tensor` **is allowed** in the region, subject to one rule: its shape
+must be a compile-time constant.
+
+Codegen lowers it into a batched `alloc_tensors`, and the runtime records that as
+a kernel-less node — the same shape `submit_dummy_task` records — so it does not
+poison the recording. It does count toward the node limit, and one under a
+runtime loop or branch is a topology that varies between calls; both are Step D's
+concern.
+
+What recording cannot reproduce is a *shape* read from a boundary scalar. The
+extent is copied into the node and the buffer's address derived from it, and
+replay never re-runs the body, so a later call with a larger extent is handed the
+first call's buffer — a wrong address layout rather than a fallback. Step D
+rejects that, and `tensor.full` outright, which orchestration codegen has no
+lowering for.
+
+Hoisting a region-local allocation to a boundary parameter is *not* done: it
+would add a second `InOut` parameter, and the return-alias mapping requires the
+callee's `ReturnStmt` to name a parameter directly in order to disambiguate which
+one a tensor return aliases — an invariant a synthesised parameter does not
+satisfy. Automating it needs that mapping reworked first.
+
 ## Step D — boundary legality
 
 | Check | Why |
 | ----- | --- |
+| The compilation targets `host_build_graph` | `GraphTaskArgs` and `rt_submit_graph` exist only in that runtime's orchestration API, and codegen emits them unconditionally, so a Graph built against the default `tensormap_and_ringbuffer` yields orchestration C++ that names undeclared symbols. Reported here, against the function the user wrote, rather than as a C++ error in generated code |
 | At least one tensor parameter | A graph with an empty boundary has nothing to patch on replay; the runtime refuses to cache it |
 | At most 128 tensor parameters | `GRAPH_MAX_TENSOR_ARGS` — the boundary is a fixed-size `GraphTaskArgs` |
 | At most 64 scalar parameters | `GRAPH_MAX_SCALAR_ARGS`. Checked after Step A, which *adds* scalar parameters, so a signature that fit before hoisting can stop fitting after |
@@ -103,9 +175,9 @@ that property.
 
 ## Not yet handled
 
-Derived *tensor slices* of a boundary tensor are handled separately. An
-allocation inside the region is allowed here, subject to the constant-shape rule
-above; hoisting one to the call site is a later change.
+Automatically hoisting a region-local allocation to a boundary parameter — one
+is allowed in place, subject to the constant-shape rule above — and packing a
+boundary of more than 128 tensors into a scratch arena.
 
 ## See also
 

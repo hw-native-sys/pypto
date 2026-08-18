@@ -2,7 +2,7 @@
 
 PyPTO 在 IR 之上运行的全部变换，编号与其在默认流水线中的位置一致。
 
-pass 文档按编号组织，因此从头读到尾就是按执行顺序走完整条编译流水。`01`–`46` 是流水线
+pass 文档按编号组织，因此从头读到尾就是按执行顺序走完整条编译流水。`01`–`49` 是流水线
 pass；`91` 及以后保留给"在多个位置运行的 pass"以及"根本不是流水线 pass 的基础设施"。
 
 ## 框架
@@ -62,7 +62,7 @@ pass；`91` 及以后保留给"在多个位置运行的 pass"以及"根本不是
 | 45 | [LegalizeGraphBoundary](45-legalize_graph_boundary.md) | 把 `Graph` 函数体内派生的边界标量外提到调用点，并拒绝 `host_build_graph` runtime 无法录制的边界 |
 | 46 | [MaterializeRuntimeScopes](46-materialize_runtime_scopes.md) | 插入 AUTO `RuntimeScopeStmt` 使编排 codegen 能 1:1 发射 `SIMPLER_SCOPE` |
 | 47 | [ClassifyIterArgCarry](47-classify_iter_arg_carry.md) | 把编排层 `ForStmt` 的每个 iter_arg 分类为平凡别名或需物化的重绑定携带 |
-| 48 | [InsertCommFence](48-insert_comm_fence.md) | 在每个发布性写入与释放它的 `pld.system.notify` 之间插入整张 tensor 的 `system.cacheinvalid` + GM `system.fence` |
+| 48 | [InsertCommFence](48-insert_comm_fence.md) | 为每个发布性写入打标记（本地：region `system.cacheinvalid` + `system.fence`；远端写：仅 fence；opaque 写：whole-GM），并为每个 wait 插入 whole-GM `system.cacheinvalid`；notify 本身不加任何标记 |
 | 49 | [MaterializeValidShapeSymbols](49-materialize_valid_shape_symbols.md) | 将设备 kernel 中无法绑定的 `valid_shape` 符号转换为前置的 `Scalar[INDEX]` 参数，并传入调用方的实际有效范围 |
 
 ## 默认流水线之外

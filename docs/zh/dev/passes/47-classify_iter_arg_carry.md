@@ -27,7 +27,10 @@ count；若一个 `Sequential` 循环把该数组穿过内层 `pl.parallel` 向�
 [`MaterializeRuntimeScopes`](46-materialize_runtime_scopes.md) 之后、
 [`InsertCommFence`](48-insert_comm_fence.md) 之前运行。跑得这么靠后意味着被分类
 的 IR 与 codegen 实际降级的 IR 完全一致 —— `InsertCommFence` 只会追加 InCore 的
-fence 算子，不会改动 Orchestration `ForStmt` 的 iter_arg。
+fence 算子，不会改动编排体的 `ForStmt` iter_arg。
+
+**作用范围**：编排体，即 `Orchestration` 与 `Graph` —— 两者的循环携带状态
+codegen 都会降级成 carry 变量／TaskId 数组。
 
 ## 别名等价类（alias class）
 

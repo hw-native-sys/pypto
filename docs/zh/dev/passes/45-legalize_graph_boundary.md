@@ -53,10 +53,65 @@ self.layer(cur, wq_view(i), i, i * 5120)     # 算术搬到了这里
 
 新形参是**追加**而不是前置的：`CoreTaskArgs` 要求所有张量实参排在所有标量实参之前。
 
+## Step B —— 边界张量的派生切片
+
+回放 patch 的是边界张量的**地址**。在区域**内部**取的 view 会从录制时冻结下来的
+东西重新推导，所以必须改到调用点去取：
+
+```python
+wl = pl.tensor.slice(w, [128, 128], [layer_idx * 128, 0])   # 在区域内部
+```
+
+Step B 把这个切片搬出去，把结果作为一个新的边界张量传进来。每个切片点各自成为一个
+形参、各自带固定形状 —— 这正是 runtime 的 `BOUNDARY_VIEW` 分类所要求的：它按
+「同 buffer + 偏移」匹配，形状根本不参与，所以一个形状逐次变化的 view 压根无法被
+分类。
+
+外提出来的语句按**先标量、后张量**发射，因为切片的偏移通常就是 Step A 的标量，绑定
+必须先于使用。而**形参**顺序恰好相反 —— 张量在前、标量在后 —— 这是 `CoreTaskArgs`
+的要求。对区域局部张量取的 view 保持原样。
+
+**对已外提 view 再取的 view 同样会被外提。** `wl` 搬出去之后它就是一个边界形参，于是
+`wr = slice(wl, ...)` 所处的位置和当初的 `wl` 完全一样。函数体是按定义顺序的 SSA，所以
+一次前向遍历就能走完整条链 —— 一个 view 只能引用在它之前定义的源。把 `wr` 留在原地是
+静默的：`graph_rebind_tensor` 会用 `wl` patch buffer 地址，但保留第一次调用时录下的偏移。
+
+**被外提的 view 形状必须是编译期常量。** 回放直接从录制模板里抄 view 的 `shapes` 和
+`strides`，只 patch `buffer_addr` 和 `start_offset`，所以从边界标量读出来的 extent 会把
+第一次调用的形状套到后续调用的 buffer 上。对边界张量取的、调用点无法重算其操作数的
+view，出于同样的原因会被拒绝，而不是留在原地。
+
+**偏移逐次变化是安全的，但这一点并不显然。** codegen 会把运行时 view 钳制成
+`min(declared, source.shapes[i] - offset[i])`，所以即使 IR extent 是常量，**实际**形状
+也随偏移变化。它传不到 replay，是因为被外提的 view 是作为**自己独立的**边界张量传入的，
+而不是在区域内重新推导：`graph_tensor_from_boundary` 会先对所有边界张量试
+`BOUNDARY_EXACT`、再试 `BOUNDARY_VIEW`，消费该 view 的节点会命中 view 自身，于是
+`graph_rebind_tensor` 整个替换 `GraphTensor`——`shapes`、`strides`、`extent_elem` 全含。
+冻结形状是 `BOUNDARY_VIEW` 的行为，也就是本步骤要外提掉的"区域内取 view"那一类。
+若要求偏移可证明在界内，则会把主用例（逐层的 `layer_idx * 5120`）一并拒掉。
+
+## Step C —— 区域内的分配
+
+区域内**允许** `pl.create_tensor`，但有一条约束：它的 shape 必须是编译期常量。
+
+codegen 会把它降级成批量 `alloc_tensors`，runtime 把这个记成一个无 kernel 的节点
+（和 `submit_dummy_task` 记录的形状相同），所以并不会毒化录制。但它会计入节点上限；
+放在运行时循环或分支里则意味着拓扑随调用变化——这两点都归 Step D 管。
+
+录制无法复现的是从边界标量读出来的 **shape**：extent 会被抄进节点、缓冲区地址由它
+推出，而回放不会重新执行函数体，所以后续调用即使 extent 更大，拿到的仍是第一次调用
+的 buffer —— 这是错误的地址布局，不是 fallback。Step D 会拒绝这种写法，也会直接拒绝
+`tensor.full`（orchestration codegen 根本没有它的降级路径）。
+
+区域局部分配**不会**被自动外提成边界形参：那会新增第二个 `InOut` 形参，而返回值别名
+映射要求被调方的 `ReturnStmt` 直接指名某个形参，才能确定张量返回值别名到哪一个 ——
+合成出来的形参不满足这个不变量。要自动化，得先把那套映射改造掉。
+
 ## Step D —— 边界合法性
 
 | 检查 | 原因 |
 | ---- | ---- |
+| 编译目标必须是 `host_build_graph` | `GraphTaskArgs` 与 `rt_submit_graph` 只存在于该 runtime 的 orchestration API，而 codegen 无条件发射它们；因此在默认的 `tensormap_and_ringbuffer` 下编译 Graph，产物会引用未声明的符号。在这里报错、指向用户自己写的函数，而不是让它变成生成代码里的 C++ 编译错误 |
 | 至少 1 个张量形参 | 空边界的 graph 回放时无处可 patch，runtime 拒绝缓存 |
 | 至多 128 个张量形参 | `GRAPH_MAX_TENSOR_ARGS` —— 边界是定长的 `GraphTaskArgs` |
 | 至多 64 个标量形参 | `GRAPH_MAX_SCALAR_ARGS`。在 Step A 之后检查：Step A 会**新增**标量形参，所以上提前放得下的签名，上提后可能放不下 |
@@ -93,8 +148,8 @@ attr；紧随其后的 `MaterializeRuntimeScopes` 要求该属性。
 
 ## 尚未处理
 
-对边界张量的派生**切片**另行处理。区域内的分配在这里是允许的，受上面的常量
-shape 规则约束；把它外提到调用点是后续的改动。
+把区域内的局部分配自动外提为边界形参——分配本身是允许的，受上面的常量 shape
+规则约束——以及把超过 128 个张量的边界自动打包进 scratch arena。
 
 ## 另见
 

@@ -30,7 +30,7 @@ from pypto.ir.printer import python_print
 
 
 def _legalize(program: ir.Program) -> ir.Program:
-    with passes.PassContext([]):
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
         return passes.legalize_graph_boundary()(passes.convert_to_ssa()(program))
 
 
@@ -47,7 +47,7 @@ def _legalize_outlined(program: ir.Program) -> ir.Program:
     so a check written against the pre-outlining shape can reject the entire
     feature while ``_legalize`` still passes.
     """
-    with passes.PassContext([]):
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
         ssa = passes.convert_to_ssa()(program)
         return passes.legalize_graph_boundary()(passes.outline_incore_scopes()(ssa))
 
@@ -318,9 +318,57 @@ class TestDerivedScalarHoisting:
                 return c
 
         ssa = passes.convert_to_ssa()(Before)
-        with passes.PassContext([]):
+        with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
             After = passes.legalize_graph_boundary()(ssa)
         ir.assert_structural_equal(ssa, After)
+
+
+class TestRuntimeGate:
+    """A Graph only exists under `host_build_graph`.
+
+    Codegen emits `GraphTaskArgs` and `rt_submit_graph` unconditionally, and the
+    `tensormap_and_ringbuffer` orchestration API declares neither, so compiling a
+    Graph against the default runtime yields orchestration C++ that names
+    undeclared symbols. Every other test here sets the runtime explicitly, which
+    is exactly why the default path had no coverage.
+    """
+
+    @staticmethod
+    def _program():
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Graph)
+            def layer(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128])
+                    pl.store(t, [0, 0], c)
+                return c
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                c = self.layer(a, c)
+                return c
+
+        return Before
+
+    def test_graph_under_the_default_runtime_is_rejected(self):
+        program = self._program()
+        with passes.PassContext([]):  # default: tensormap_and_ringbuffer
+            ssa = passes.convert_to_ssa()(program)
+            outlined = passes.outline_incore_scopes()(ssa)
+            with pytest.raises(ValueError, match="requires the host_build_graph runtime"):
+                passes.legalize_graph_boundary()(outlined)
+
+    def test_graph_under_host_build_graph_is_accepted(self):
+        _legalize_outlined(self._program())
 
 
 class TestLaunchSpec:
@@ -442,6 +490,363 @@ class TestLaunchSpec:
                 return c
 
         _legalize_outlined(Before)
+
+
+# ---------------------------------------------------------------------------
+# Step B — derived slices of a boundary tensor are taken at the call site
+# ---------------------------------------------------------------------------
+
+
+def _tensor_param_names(func: ir.Function) -> list[str]:
+    return [
+        re.sub(r"__ssa_v\d+$", "", p.name_hint) for p in func.params if not isinstance(p.type, ir.ScalarType)
+    ]
+
+
+class TestDerivedSliceHoisting:
+    def test_slice_of_a_boundary_tensor_becomes_a_parameter(self):
+        """Replay patches a boundary tensor's address, not a view derived inside.
+
+        A view taken in the region is re-derived from whatever the recording
+        froze, so it has to be taken at the call site and passed in.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Graph)
+            def layer(
+                self,
+                w: pl.Tensor[[512, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+                layer_idx: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                base = layer_idx * 128
+                wl: pl.Tensor[[128, 128], pl.FP32] = pl.tensor.slice(w, [128, 128], [base, 0])
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(wl, [0, 0], [128, 128])
+                    pl.store(t, [0, 0], c)
+                return c
+
+            @pl.function
+            def main(
+                self,
+                w: pl.Tensor[[512, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                for i in pl.range(4):
+                    c = self.layer(w, c, i)
+                return c
+
+        layer = _graph_func(_legalize_outlined(Before), "layer")
+        assert "wl" in _tensor_param_names(layer)
+        # Within the appended parameters, tensors precede scalars. IR order as a
+        # whole need not be tensors-first — codegen's stable reorder produces the
+        # tensors-before-scalars `CoreTaskArgs` order the runtime requires, and
+        # the graph body's `args.tensor(i)` / `args.scalar(k)` indices are
+        # assigned by counting each kind separately, so they agree either way.
+        appended = [isinstance(p.type, ir.ScalarType) for p in layer.params[3:]]
+        assert appended == sorted(appended), f"appended tensors must come first, got {appended}"
+
+    def test_a_bare_alias_of_a_scalar_parameter_is_not_rejected(self):
+        """A pass-through already has a slot; there is nothing to reconstruct.
+
+        Step A classifies `alias = layer_idx` as a pass-through rather than a
+        hoist, so the assignment survives the rewrite. `ConvertToSSA` produces
+        this shape routinely (`layer_idx__ssa_v1 = layer_idx`), so treating the
+        survivor as unhoistable rejects ordinary correct programs.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Graph)
+            def layer(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+                layer_idx: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                alias = layer_idx
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [alias, 0], [128, 128])
+                    pl.store(t, [0, 0], c)
+                return c
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                for i in pl.range(4):
+                    c = self.layer(a, c, i)
+                return c
+
+        _legalize_outlined(Before)
+
+    def test_a_region_local_slice_is_left_alone(self):
+        """Only a view *of a boundary tensor* has to move out.
+
+        A view of a tensor the region allocated is re-derived from that tensor,
+        which the recording owns, so it is replay-stable where it stands.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Graph)
+            def layer(
+                self,
+                w: pl.Tensor[[512, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                local: pl.Tensor[[256, 128], pl.FP32] = pl.create_tensor([256, 128], pl.FP32)
+                lv: pl.Tensor[[128, 128], pl.FP32] = pl.tensor.slice(local, [128, 128], [0, 0])
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(lv, [0, 0], [128, 128])
+                    pl.store(t, [0, 0], c)
+                return c
+
+            @pl.function
+            def main(
+                self,
+                w: pl.Tensor[[512, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                c = self.layer(w, c)
+                return c
+
+        layer = _graph_func(_legalize_outlined(Before), "layer")
+        # `lv` is derived from a region-local tensor, so it stays put.
+        assert _tensor_param_names(layer) == ["w", "c"]
+
+    def test_slice_of_a_local_tensor_is_left_alone(self):
+        """Only views *of a boundary tensor* need hoisting."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Graph)
+            def layer(
+                self,
+                w: pl.Tensor[[512, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(w, [0, 0], [128, 128])
+                    pl.store(t, [0, 0], c)
+                return c
+
+            @pl.function
+            def main(
+                self,
+                w: pl.Tensor[[512, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                c = self.layer(w, c)
+                return c
+
+        layer = _graph_func(_legalize_outlined(Before), "layer")
+        assert _tensor_param_names(layer) == ["w", "c"]
+
+    def test_a_view_of_a_hoisted_view_is_hoisted_too(self):
+        """Once `wl` moves out it is a boundary tensor, so `wr` is one too.
+
+        Leaving `wr` behind is silent: recording classifies it as a view of
+        `wl` and freezes the offset computed on the first call, so replay
+        patches `wl`'s address but keeps call one's window.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Graph)
+            def layer(
+                self,
+                w: pl.Tensor[[512, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+                layer_idx: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                base = layer_idx * 128
+                wl: pl.Tensor[[256, 128], pl.FP32] = pl.tensor.slice(w, [256, 128], [base, 0])
+                wr: pl.Tensor[[128, 128], pl.FP32] = pl.tensor.slice(wl, [128, 128], [base, 0])
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(wr, [0, 0], [128, 128])
+                    pl.store(t, [0, 0], c)
+                return c
+
+            @pl.function
+            def main(
+                self,
+                w: pl.Tensor[[512, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                for i in pl.range(2):
+                    c = self.layer(w, c, i)
+                return c
+
+        layer = _graph_func(_legalize_outlined(Before), "layer")
+        names = _tensor_param_names(layer)
+        assert "wl" in names and "wr" in names, names
+
+    def test_a_view_through_a_tensor_alias_is_hoisted(self):
+        """Provenance follows a bare tensor alias.
+
+        `alias = w` then `slice(alias, ...)`: the immediate source is neither an
+        original parameter nor a collected view, so without provenance the view
+        stays in the region and the recording freezes the first call's offset.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Graph)
+            def layer(
+                self,
+                w: pl.Tensor[[512, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+                layer_idx: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                alias = w
+                wl: pl.Tensor[[128, 128], pl.FP32] = pl.tensor.slice(alias, [128, 128], [layer_idx * 128, 0])
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(wl, [0, 0], [128, 128])
+                    pl.store(t, [0, 0], c)
+                return c
+
+            @pl.function
+            def main(
+                self,
+                w: pl.Tensor[[512, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                for i in pl.range(4):
+                    c = self.layer(w, c, i)
+                return c
+
+        After = _legalize_outlined(Before)
+        layer = _graph_func(After, "layer")
+        assert "wl" in _tensor_param_names(layer), _tensor_param_names(layer)
+
+        # The caller must name only things it has. `alias` exists solely inside
+        # the Graph, so a leftover reference is printed `__FREE_VAR` — asserting
+        # on the parameter list alone would not catch it, which is how this got
+        # through the first time.
+        caller = python_print(_graph_func(After, "main"))
+        assert "__FREE_VAR" not in caller, caller
+        assert "alias" not in caller, caller
+        assert "pl.tensor.slice(w" in caller, caller
+
+    def test_an_alias_of_a_hoisted_view_resolves_at_the_call_site(self):
+        """An alias may name an earlier *hoisted view*, not just a parameter.
+
+        That is why the call site replays hoists and aliases in one definition
+        order rather than binding scalars then tensors: `mid` is only bound once
+        `wl`'s own hoist has run.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Graph)
+            def layer(
+                self,
+                w: pl.Tensor[[512, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+                layer_idx: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                wl: pl.Tensor[[256, 128], pl.FP32] = pl.tensor.slice(w, [256, 128], [layer_idx * 128, 0])
+                mid = wl
+                inner: pl.Tensor[[128, 128], pl.FP32] = pl.tensor.slice(mid, [128, 128], [0, 0])
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(inner, [0, 0], [128, 128])
+                    pl.store(t, [0, 0], c)
+                return c
+
+            @pl.function
+            def main(
+                self,
+                w: pl.Tensor[[512, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                for i in pl.range(2):
+                    c = self.layer(w, c, i)
+                return c
+
+        After = _legalize_outlined(Before)
+        names = _tensor_param_names(_graph_func(After, "layer"))
+        assert "wl" in names and "inner" in names, names
+        caller = python_print(_graph_func(After, "main"))
+        assert "__FREE_VAR" not in caller, caller
+        assert "mid" not in caller, caller
+
+    def test_a_hoisted_view_takes_its_roots_direction(self):
+        """A view of an `InOut` tensor is `InOut`, not `In`.
+
+        Declared `In`, codegen emits `add_input(view)` and the graph launch is
+        never registered as a writer of that buffer, so a consumer downstream can
+        be ordered against the pre-write contents.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Graph)
+            def layer(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                out: pl.InOut[pl.Tensor[[512, 128], pl.FP32]],
+                layer_idx: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                ov: pl.Tensor[[128, 128], pl.FP32] = pl.tensor.slice(out, [128, 128], [layer_idx * 128, 0])
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128])
+                    pl.store(t, [0, 0], ov)
+                return out
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                out: pl.InOut[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                for i in pl.range(4):
+                    out = self.layer(a, out, i)
+                return out
+
+        layer = _graph_func(_legalize_outlined(Before), "layer")
+        # Index over *all* params: `param_directions` is parallel to `params`,
+        # while `_tensor_param_names` drops the scalars.
+        idx = [re.sub(r"__ssa_v\d+$", "", p.name_hint) for p in layer.params].index("ov")
+        assert layer.param_directions[idx] == ir.ParamDirection.InOut, layer.param_directions[idx]
+
+    def test_a_view_with_a_non_constant_shape_is_rejected(self):
+        """`graph_rebind_tensor` patches a view's address, never its shape.
+
+        The recorded template's `shapes`/`strides` are replayed as-is, so an
+        extent read from a boundary scalar would apply call one's shape to a
+        later call's buffer.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Graph)
+            def layer(
+                self,
+                w: pl.Tensor[[512, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+                rows: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                wl: pl.Tensor[[128, 128], pl.FP32] = pl.tensor.slice(w, [rows, 128], [0, 0])
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(wl, [0, 0], [128, 128])
+                    pl.store(t, [0, 0], c)
+                return c
+
+            @pl.function
+            def main(
+                self,
+                w: pl.Tensor[[512, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                c = self.layer(w, c, 128)
+                return c
+
+        with pytest.raises(ValueError, match="shape is not a compile-time constant"):
+            _legalize_outlined(Before)
 
 
 # ---------------------------------------------------------------------------

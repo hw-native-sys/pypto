@@ -116,7 +116,7 @@ window 参数、别名（`dv = pl.tensor.view(win); remote_store(dv)`）、循�
 它在 Default 流水线中运行于所有会重排语句的 pass
 （`SkewCrossCorePipeline`、`LowerPipelineLoops`、`CanonicalizeIOOrder` ...）之后。插入的
 op 无操作数、无依赖边，若更早插入可能被挪离其 notify/wait；放在这里可让它们在 codegen 前
-保持相邻。它之前的 pass 只改动 Orchestration 函数，因此本 pass 看到的 InCore IR 正是
+保持相邻。它之前的 pass 只改动编排体（`Orchestration` 与 `Graph`），因此本 pass 看到的 InCore IR 正是
 codegen 最终降级的 IR。
 
 ## 本 pass 标记哪些写

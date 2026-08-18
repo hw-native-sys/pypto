@@ -37,7 +37,7 @@ def _verify(prog):
     # task launch. Verifying the pre-outlining shape would ask the body checks
     # about a topology that does not exist yet: every Graph would read as
     # launching zero tasks.
-    with passes.PassContext([]):
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
         prog = passes.outline_incore_scopes()(passes.convert_to_ssa()(prog))
     props = passes.IRPropertySet()
     props.insert(passes.IRProperty.GraphBoundaryLegalized)

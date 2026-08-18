@@ -513,7 +513,8 @@ The PTO-oriented tile stage of `Default` is:
 34. [`LegalizeGraphBoundary`](45-legalize_graph_boundary.md) (hoists values a Graph body derives from its boundary scalars to the call sites, and rejects the boundaries the host_build_graph runtime cannot record; no-op for programs with no Graph function)
 35. [`MaterializeRuntimeScopes`](46-materialize_runtime_scopes.md) (inserts AUTO RuntimeScopeStmt so orchestration codegen emits SIMPLER_SCOPE 1:1)
 36. [`ClassifyIterArgCarry`](47-classify_iter_arg_carry.md) (stamps each ForStmt iter_arg as trivial alias / rebind carry, and sizes manual-scope TaskId fence arrays)
-37. [`InsertCommFence`](48-insert_comm_fence.md) (inserts a whole-tensor system.cacheinvalid + GM system.fence between each publishing write and the pld.system.notify that releases it; runs dead last so the inserted ops stay adjacent to their notify through codegen)
+37. [`InsertCommFence`](48-insert_comm_fence.md) (inserts a whole-tensor system.cacheinvalid + GM system.fence between each publishing write and the pld.system.notify that releases it; runs after every statement-reordering pass so the inserted ops stay adjacent to their notify through codegen)
+38. [`MaterializeValidShapeSymbols`](49-materialize_valid_shape_symbols.md) (runs dead last; turns each device-kernel valid_shape symbol the kernel cannot bind into a leading Scalar[INDEX] param fed from the call site's actual valid extent)
 
 [`ResolveBackendOpLayouts`](20-resolve_backend_op_layouts.md) repairs
 backend-constrained elementwise tile ops using registered layout metadata.

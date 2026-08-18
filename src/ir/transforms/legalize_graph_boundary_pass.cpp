@@ -61,6 +61,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/alloc_batching.h"
@@ -91,34 +92,47 @@ constexpr size_t kMaxGraphNodes = 1024;      ///< GRAPH_MAX_NODES, common/host_b
 /// True when `type` is a scalar, i.e. a candidate boundary scalar.
 [[nodiscard]] bool IsScalarType(const TypePtr& type) { return As<ScalarType>(type) != nullptr; }
 
+/// True when `expr` is built entirely from literals. Defined below, next to the
+/// other replay-invariance helpers; declared here for the Step B shape check.
+[[nodiscard]] bool IsLiteralScalarExpr(const ExprPtr& expr);
+
 // ---------------------------------------------------------------------------
 // Step A — hoisting derived boundary scalars
 // ---------------------------------------------------------------------------
 
-/// One scalar value the body derives and the call sites must supply instead.
-struct HoistedScalar {
-  VarPtr param;     ///< Fresh Scalar parameter appended to the Graph signature.
-  VarPtr original;  ///< Body variable it replaces.
-  ExprPtr value;    ///< Defining expression, in terms of the Graph's own params.
+/// One value the body computes that the call sites must supply instead.
+///
+/// The same record serves all three hoisting steps, because they differ only in
+/// what is being moved and how the resulting parameter is declared:
+///
+/// | Step | What moves | Parameter direction |
+/// | ---- | ---------- | ------------------- |
+/// | A | a scalar derived from scalar params | In |
+/// | B | a slice/view of a boundary tensor | In |
+/// | C | a `tensor.create` the region allocates | InOut |
+struct HoistedValue {
+  VarPtr param;              ///< Fresh parameter appended to the Graph signature.
+  VarPtr original;           ///< Body variable it replaces.
+  ExprPtr value;             ///< Defining expression, in terms of the Graph's own params.
+  ParamDirection direction;  ///< How the new parameter is declared.
+  bool is_tensor;            ///< Tensor params must precede scalar ones.
 };
 
-/// What Step A decided for one Graph function.
+/// What the hoisting steps decided for one Graph function.
 struct GraphPlan {
   std::string name;
-  std::vector<HoistedScalar> hoisted;
-  /// Body variables that were hoisted, for erasing their now-dead definitions.
-  std::unordered_set<const Var*> hoisted_vars;
+  std::vector<HoistedValue> hoisted;
   /// `alias = <var>` bindings, in definition order, alias -> what it names.
   ///
   /// Not hoisted — a bare reference names something that already has a binding —
   /// but a hoisted expression may still be written in terms of one, and the call
   /// site has no such name. Kept in definition order and interleaved with the
-  /// hoists when the call site builds its substitution: an alias may name a
-  /// *derived* value rather than a parameter (`base = idx * 128; alias = base;
-  /// end = alias + 1`), and that value is only bound once its own hoist runs.
+  /// scalar hoists at the call site: an alias may name a *derived* value rather
+  /// than a parameter (`base = idx * 128; alias = base; end = alias + 1`), and
+  /// that value is only bound once its own hoist runs.
   std::vector<std::pair<const Var*, VarPtr>> passthrough;
-  /// Position in the body for every hoisted and aliased variable, so the two
-  /// lists above can be merged back into definition order.
+  /// Position in the body of every hoisted and aliased variable, so the two
+  /// lists can be merged back into definition order.
   std::unordered_map<const Var*, size_t> definition_index;
 };
 
@@ -132,7 +146,11 @@ class DerivedScalarCollector : public IRVisitor {
  public:
   explicit DerivedScalarCollector(const FunctionPtr& func) : func_(func) {
     for (const auto& param : func->params_) {
-      if (IsScalarType(param->GetType())) scalar_params_.insert(param.get());
+      if (IsScalarType(param->GetType())) {
+        scalar_params_.insert(param.get());
+      } else {
+        tensor_params_.insert(param.get());
+      }
     }
   }
 
@@ -149,61 +167,189 @@ class DerivedScalarCollector : public IRVisitor {
     return definition_index_;
   }
 
+  /// Step B: slices/views of a boundary tensor, in definition order.
+  [[nodiscard]] const std::vector<std::pair<VarPtr, ExprPtr>>& slices() const { return slices_; }
+
+  /// Boundary tensor parameter each hoisted view ultimately derives from.
+  ///
+  /// A view can never carry wider access than the tensor it views, so the root's
+  /// direction is what the hoisted parameter must be declared with — see
+  /// `BuildPlan`.
+  [[nodiscard]] const std::unordered_map<const Var*, const Var*>& tensor_root() const { return tensor_root_; }
+
+  /// Step C: tensors the region allocates for itself, in definition order.
+  [[nodiscard]] const std::vector<std::pair<VarPtr, ExprPtr>>& creates() const { return creates_; }
+
  protected:
   void VisitStmt_(const AssignStmtPtr& op) override {
     IRVisitor::VisitStmt_(op);
     auto var = AsVarLike(op->var_);
-    if (!var || !IsScalarType(var->GetType())) return;
-    if (!IsDerivable(op->value_)) return;
-    // A bare parameter reference is already a pass-through; only a *computed*
-    // value needs hoisting.
-    if (auto aliased = AsVarLike(op->value_)) {
-      passthrough_.insert(var.get());
-      // Record what it names, in definition order. Resolution happens at the
-      // call site, where what it names may itself be a hoist not yet bound.
+    if (!var) return;
+
+    if (IsScalarType(var->GetType())) {
+      if (!IsDerivable(op->value_)) return;
+      // A bare parameter reference is already a pass-through; only a *computed*
+      // value needs hoisting.
+      if (auto aliased = AsVarLike(op->value_)) {
+        passthrough_.insert(var.get());
+        // Record what it names, in definition order. Resolution happens at the
+        // call site, where what it names may itself be a hoist not yet bound.
+        definition_index_[var.get()] = next_definition_++;
+        passthrough_order_.emplace_back(var.get(), aliased);
+        return;
+      }
+      derived_vars_.insert(var.get());
       definition_index_[var.get()] = next_definition_++;
-      passthrough_order_.emplace_back(var.get(), aliased);
+      derived_.emplace_back(var, op->value_);
       return;
     }
-    derived_vars_.insert(var.get());
+
+    // A bare tensor alias inherits its source's provenance. Without this,
+    // `alias = w; wl = slice(alias, ...)` leaves `wl` in the region: its source
+    // is neither an original parameter nor a collected view, so Step B skips it
+    // and the recording freezes the first call's offset.
+    if (auto aliased = AsVarLike(op->value_)) {
+      auto root = RootBoundaryTensor(aliased);
+      if (root != nullptr) {
+        tensor_root_[var.get()] = root;
+        // Recorded like a scalar pass-through: the call site has no name for a
+        // Graph-local alias, so a hoisted view written in terms of one must be
+        // able to resolve it back to whatever the caller passed. Definition order
+        // matters because the alias may name an earlier hoisted view.
+        definition_index_[var.get()] = next_definition_++;
+        passthrough_order_.emplace_back(var.get(), aliased);
+      }
+      return;
+    }
+
+    auto call = As<Call>(op->value_);
+    if (!call) return;
+
+    // Step C: an allocation inside the region. Codegen lowers `tensor.create`
+    // into a batched `alloc_tensors`, and a bare `alloc_tensors` anywhere in a
+    // recorded region poisons the recording outright.
+    if (IsOp(call, "tensor.create") || IsOp(call, "tensor.full")) {
+      creates_.emplace_back(var, op->value_);
+      return;
+    }
+
+    // Step B: a slice or view of a boundary tensor. Replay patches a boundary
+    // tensor's address, but a view taken *inside* the region is re-derived from
+    // whatever the recording froze, so it must be taken at the call site.
+    if (!IsOp(call, "tensor.slice") && !IsOp(call, "tensor.view")) return;
+    if (call->args_.empty()) return;
+    auto source = AsVarLike(call->args_[0]);
+    // A view of a hoisted view is a boundary view too. Once `s1 = slice(w, ...)`
+    // moves out, `s1` is a boundary parameter, so `s2 = slice(s1, ...)` is in
+    // exactly the position `s1` was and has to move out with it. The body is SSA
+    // in definition order, so one forward pass reaches the whole chain — a view
+    // can only name a source defined before it.
+    const Var* root = source ? RootBoundaryTensor(source) : nullptr;
+    if (root == nullptr) return;
+    // Every non-source operand must be reconstructible at the call site.
+    //
+    // Rejected rather than skipped: leaving such a view in the region is the
+    // silent path. Recording classifies it as a view of its boundary source and
+    // freezes the offset it computed on the first call; replay patches the
+    // source's address but never re-runs the body, so every later call reads the
+    // first call's offset from the right buffer.
+    for (size_t i = 1; i < call->args_.size(); ++i) {
+      CHECK_SPAN(IsDerivable(call->args_[i]), call->span_)
+          << "Graph function '" << func_->name_ << "' derives '" << var->name_hint_
+          << "' from boundary tensor '" << source->name_hint_
+          << "' using a value the call site cannot recompute. Replay patches the boundary tensor's "
+             "address but keeps the offset recorded on the first call, so the view would silently "
+             "address the first call's window. Take the view at the call site and pass it in.";
+    }
+    // The recording stores a view's shape and strides in the node template and
+    // patches only the buffer address and start offset (`graph_rebind_tensor`).
+    // A shape built from a boundary scalar is therefore frozen at the first
+    // call's value and replayed against a later call's buffer.
+    if (auto viewed = As<TensorType>(call->GetType())) {
+      for (const auto& extent : viewed->shape_) {
+        CHECK_SPAN(IsLiteralScalarExpr(extent), call->span_)
+            << "Graph function '" << func_->name_ << "' takes a view '" << var->name_hint_
+            << "' of boundary tensor '" << source->name_hint_
+            << "' whose shape is not a compile-time constant. Recording freezes a view's shape and "
+               "strides into the node and replay patches only its address, so a later call with a "
+               "different extent would replay the first call's shape. Give the view a fixed shape — "
+               "a varying offset is fine — or take it at the call site.";
+      }
+    }
+    slice_vars_.insert(var.get());
+    tensor_root_[var.get()] = root;
     definition_index_[var.get()] = next_definition_++;
-    derived_.emplace_back(var, op->value_);
+    slices_.emplace_back(var, op->value_);
   }
 
  private:
-  /// True when every leaf of `expr` is a scalar parameter, an already-derived
-  /// scalar, or a constant, and every interior node is scalar arithmetic.
+  /// The boundary tensor parameter @p var derives from, or null.
   ///
-  /// Scalar arithmetic is not `Call`: `a * b` is a `Mul` node. All ~28 operator
-  /// nodes derive from `BinaryExpr` / `UnaryExpr`, so a `dynamic_pointer_cast`
-  /// to those bases covers the whole family at once. (`As<T>` would not: it
-  /// matches one exact ObjectKind, and each operator has its own.)
+  /// A parameter is its own root; an alias or a collected view inherits one.
+  [[nodiscard]] const Var* RootBoundaryTensor(const VarPtr& var) const {
+    if (!var) return nullptr;
+    if (tensor_params_.count(var.get()) != 0) return var.get();
+    auto it = tensor_root_.find(var.get());
+    return it == tensor_root_.end() ? nullptr : it->second;
+  }
+
+  /// True when `expr` can be recomputed at a call site.
+  ///
+  /// That holds when it contains no call — a call could read a task output, a
+  /// tensor, or runtime state, none of which the caller can reproduce — and
+  /// every variable it names is a scalar parameter or an already-derived
+  /// scalar, which the caller does supply.
+  ///
+  /// Implemented as a generic walk rather than a hand-written recursion over
+  /// node kinds: an operand is often a list or tuple (a slice's shape and offset
+  /// vectors, for instance), and enumerating every container kind would silently
+  /// treat the ones it missed as non-derivable.
   [[nodiscard]] bool IsDerivable(const ExprPtr& expr) const {
     if (!expr) return false;
-    if (As<ConstInt>(expr) || As<ConstFloat>(expr) || As<ConstBool>(expr)) return true;
-    if (auto var = AsVarLike(expr)) {
-      return scalar_params_.count(var.get()) != 0 || derived_vars_.count(var.get()) != 0 ||
-             passthrough_.count(var.get()) != 0;
-    }
-    if (auto bin = std::dynamic_pointer_cast<const BinaryExpr>(expr)) {
-      return IsDerivable(bin->left_) && IsDerivable(bin->right_);
-    }
-    if (auto un = std::dynamic_pointer_cast<const UnaryExpr>(expr)) {
-      return IsDerivable(un->operand_);
-    }
-    // Anything else — a tensor read, a task output, a runtime query — has no
-    // meaning at the call site.
-    return false;
+
+    class Checker : public IRVisitor {
+     public:
+      Checker(const std::unordered_set<const Var*>& scalar_params,
+              const std::unordered_set<const Var*>& derived, const std::unordered_set<const Var*>& through)
+          : scalar_params_(scalar_params), derived_(derived), through_(through) {}
+      bool derivable = true;
+
+     protected:
+      void VisitExpr_(const CallPtr& op) override { derivable = false; }
+      void VisitExpr_(const SubmitPtr& op) override { derivable = false; }
+      void VisitVarLike_(const VarPtr& op) override {
+        if (scalar_params_.count(op.get()) == 0 && derived_.count(op.get()) == 0 &&
+            through_.count(op.get()) == 0) {
+          derivable = false;
+        }
+      }
+
+     private:
+      const std::unordered_set<const Var*>& scalar_params_;
+      const std::unordered_set<const Var*>& derived_;
+      const std::unordered_set<const Var*>& through_;
+    };
+
+    Checker checker(scalar_params_, derived_vars_, passthrough_);
+    checker.VisitExpr(expr);
+    return checker.derivable;
   }
 
   FunctionPtr func_;
   std::unordered_set<const Var*> scalar_params_;
+  std::unordered_set<const Var*> tensor_params_;
   std::unordered_set<const Var*> derived_vars_;
   std::unordered_set<const Var*> passthrough_;
   std::vector<std::pair<const Var*, VarPtr>> passthrough_order_;
   std::unordered_map<const Var*, size_t> definition_index_;
   size_t next_definition_ = 0;
   std::vector<std::pair<VarPtr, ExprPtr>> derived_;
+  /// Vars already collected as boundary views, so a view *of* one is collected too.
+  std::unordered_set<const Var*> slice_vars_;
+  /// Body tensor var -> the boundary parameter it derives from (alias or view).
+  std::unordered_map<const Var*, const Var*> tensor_root_;
+  std::vector<std::pair<VarPtr, ExprPtr>> slices_;
+  std::vector<std::pair<VarPtr, ExprPtr>> creates_;
 };
 
 /// True when @p expr is built only from literals.
@@ -237,6 +383,27 @@ class UnhoistableScalarChecker : public IRVisitor {
   }
 
  protected:
+  /// A bare copy of something that already has a slot keeps that slot.
+  ///
+  /// Step A classifies `alias = <scalar param>` as a *pass-through* rather than a
+  /// hoist — there is nothing to compute at the call site — so the assignment
+  /// survives the rewrite. Rejecting it here would contradict that: the value is
+  /// trivially reconstructible, it *is* a parameter. `ConvertToSSA` produces this
+  /// shape routinely (`layer_idx__ssa_v1 = layer_idx`), so refusing it rejects
+  /// ordinary correct programs. Chains are followed, since an alias may name an
+  /// earlier alias.
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    IRVisitor::VisitStmt_(op);
+    auto var = AsVarLike(op->var_);
+    if (!var || !IsScalarType(var->GetType())) return;
+    auto aliased = AsVarLike(op->value_);
+    if (!aliased) return;
+    if (scalar_params_.count(aliased.get()) != 0 || hoistable_.count(aliased.get()) != 0 ||
+        passthrough_.count(aliased.get()) != 0) {
+      passthrough_.insert(var.get());
+    }
+  }
+
   void VisitExpr_(const CallPtr& op) override {
     IRVisitor::VisitExpr_(op);
     CheckArgs(op->args_, op->span_);
@@ -248,7 +415,7 @@ class UnhoistableScalarChecker : public IRVisitor {
   }
 
  private:
-  void CheckArgs(const std::vector<ExprPtr>& args, const Span& span) const {
+  void CheckArgs(const std::vector<ExprPtr>& args, const Span& span) const {  // NOLINT(readability-*)
     for (const auto& arg : args) {
       if (!arg || !IsScalarType(arg->GetType())) continue;
       auto var = AsVarLike(arg);
@@ -268,7 +435,10 @@ class UnhoistableScalarChecker : public IRVisitor {
                "to the call site automatically.";
         continue;
       }
-      if (scalar_params_.count(var.get()) != 0 || hoistable_.count(var.get()) != 0) continue;
+      if (scalar_params_.count(var.get()) != 0 || hoistable_.count(var.get()) != 0 ||
+          passthrough_.count(var.get()) != 0) {
+        continue;
+      }
       CHECK_SPAN(false, span)
           << "Graph function '" << func_->name_ << "' passes scalar '" << var->name_hint_
           << "' to a task, but its value cannot be reconstructed at the call site. Under "
@@ -284,13 +454,15 @@ class UnhoistableScalarChecker : public IRVisitor {
   FunctionPtr func_;
   const std::unordered_set<const Var*>& hoistable_;
   std::unordered_set<const Var*> scalar_params_;
+  /// Vars that are a bare copy of a parameter (or of another such copy).
+  std::unordered_set<const Var*> passthrough_;
 };
 
 /// Replaces hoisted body variables with their new parameters and erases the
-/// assignments that used to compute them.
-class HoistedScalarRewriter : public IRMutator {
+/// assignments that used to compute them — the value now arrives as an argument.
+class HoistedValueRewriter : public IRMutator {
  public:
-  explicit HoistedScalarRewriter(const GraphPlan& plan) {
+  explicit HoistedValueRewriter(const GraphPlan& plan) {
     for (const auto& h : plan.hoisted) replacement_[h.original.get()] = h.param;
   }
 
@@ -344,11 +516,12 @@ class ExprSubstituter : public IRMutator {
                                                const StmtPtr& new_body) {
   std::vector<VarPtr> params = func->params_;
   std::vector<ParamDirection> dirs = func->param_directions_;
-  // Appended, not prepended: `CoreTaskArgs` requires every tensor argument to
-  // precede every scalar one, and these are scalars.
+  // Appended, not prepended, and tensors before scalars within the appended
+  // group — `CoreTaskArgs` requires every tensor argument to precede every
+  // scalar one. BuildPlan already orders `hoisted` that way.
   for (const auto& h : plan.hoisted) {
     params.push_back(h.param);
-    dirs.push_back(ParamDirection::In);
+    dirs.push_back(h.direction);
   }
   return std::make_shared<Function>(func->name_, std::move(params), std::move(dirs), func->return_types_,
                                     new_body, func->span_, func->func_type_, func->level_, func->role_,
@@ -842,7 +1015,10 @@ class GraphCallSiteChecker : public IRVisitor {
 // Driver
 // ---------------------------------------------------------------------------
 
-/// Builds the Step A plan for one Graph function, or an empty plan.
+/// Builds the hoisting plan for one Graph function, or an empty plan.
+///
+/// Tensors are appended before scalars so the resulting signature keeps
+/// `CoreTaskArgs`' tensor-before-scalar ordering, which the runtime enforces.
 [[nodiscard]] GraphPlan BuildPlan(const FunctionPtr& func) {
   GraphPlan plan;
   plan.name = func->name_;
@@ -851,10 +1027,37 @@ class GraphCallSiteChecker : public IRVisitor {
   DerivedScalarCollector collector(func);
   collector.VisitStmt(func->body_);
 
-  for (const auto& [var, value] : collector.derived()) {
+  auto add = [&plan](const VarPtr& var, const ExprPtr& value, ParamDirection dir, bool is_tensor) {
     auto param = std::make_shared<Var>(var->name_hint_, var->GetType(), var->span_);
-    plan.hoisted.push_back(HoistedScalar{param, var, value});
-    plan.hoisted_vars.insert(var.get());
+    plan.hoisted.push_back(HoistedValue{param, var, value, dir, is_tensor});
+  };
+
+  // Step B: a hoisted view takes the direction of the boundary tensor it views.
+  //
+  // Not unconditionally `In`: a region may store *through* a view back into the
+  // parameter it came from. Declared `In`, codegen emits `add_input(view)`, the
+  // graph launch is never registered as a writer of that buffer, and a consumer
+  // downstream can be scheduled against the pre-write contents. A view cannot
+  // carry wider access than the tensor it views, so the root's own direction is
+  // both sufficient and never an under-declaration.
+  const auto& roots = collector.tensor_root();
+  std::unordered_map<const Var*, ParamDirection> param_direction;
+  for (size_t i = 0; i < func->params_.size(); ++i) {
+    param_direction[func->params_[i].get()] =
+        i < func->param_directions_.size() ? func->param_directions_[i] : ParamDirection::In;
+  }
+  for (const auto& [var, value] : collector.slices()) {
+    ParamDirection dir = ParamDirection::In;
+    auto root = roots.find(var.get());
+    if (root != roots.end()) {
+      auto it = param_direction.find(root->second);
+      if (it != param_direction.end()) dir = it->second;
+    }
+    add(var, value, dir, /*is_tensor=*/true);
+  }
+  // Step A: scalars last, after every tensor.
+  for (const auto& [var, value] : collector.derived()) {
+    add(var, value, ParamDirection::In, /*is_tensor=*/false);
   }
   plan.passthrough = collector.passthrough();
   plan.definition_index = collector.definition_index();
@@ -878,8 +1081,8 @@ class CallSiteExtender : public IRMutator {
     auto new_args = AppendHoistedArgs(*plan, call->op_, call->args_);
     auto attrs = call->attrs_;
     if (call->HasArgDirections()) {
-      attrs = WithArgDirectionsAttr(std::move(attrs),
-                                    AppendScalarDirections(call->GetArgDirections(), plan->hoisted.size()));
+      attrs =
+          WithArgDirectionsAttr(std::move(attrs), AppendHoistedDirections(call->GetArgDirections(), *plan));
     }
     return std::make_shared<Call>(call->op_, std::move(new_args), call->kwargs_, std::move(attrs),
                                   call->GetType(), call->span_);
@@ -895,8 +1098,8 @@ class CallSiteExtender : public IRMutator {
     auto new_args = AppendHoistedArgs(*plan, submit->op_, submit->args_);
     auto attrs = submit->attrs_;
     if (submit->HasArgDirections()) {
-      attrs = WithArgDirectionsAttr(std::move(attrs),
-                                    AppendScalarDirections(submit->GetArgDirections(), plan->hoisted.size()));
+      attrs =
+          WithArgDirectionsAttr(std::move(attrs), AppendHoistedDirections(submit->GetArgDirections(), *plan));
     }
     return std::make_shared<Submit>(submit->op_, std::move(new_args), submit->deps_, submit->kwargs_,
                                     std::move(attrs), submit->GetType(), submit->span_, submit->core_num_,
@@ -946,25 +1149,30 @@ class CallSiteExtender : public IRMutator {
     auto callee = program_->GetFunction(gvar->name_);
     INTERNAL_CHECK(callee) << "Internal error: planned Graph '" << plan.name << "' not found in program";
 
-    std::unordered_map<const Var*, ExprPtr> binding;
+    std::unordered_map<const Var*, ExprPtr> binding;  // extended per hoist below
     const size_t bound = std::min(old_args.size(), callee->params_.size());
     for (size_t i = 0; i < bound; ++i) binding[callee->params_[i].get()] = old_args[i];
 
-    // Aliases and hoists interleave in the body, and either can name the other:
+    // Replay every hoist and every alias in **definition order**.
     //
-    //     base  = idx * 128      // hoisted
-    //     alias = base           // alias of a *hoisted* value, not of a param
-    //     end   = alias + 1      // hoisted, written through the alias
+    // The body is SSA, so definition order is dependency order: a slice's offset
+    // scalar is defined before the slice, an alias before whatever reads it.
+    // Binding in that one order therefore satisfies every cross-reference —
+    // scalar naming an earlier alias, tensor alias naming an earlier hoisted
+    // view, hoisted view whose offset is an earlier hoisted scalar:
     //
-    // So both are replayed in one pass over definition order. Resolving aliases
-    // up front would look `base` up before its own hoist had bound it, and leave
-    // `alias` — a name only the Graph has — in the caller's argument.
-    std::vector<ExprPtr> args = old_args;
-    args.reserve(args.size() + plan.hoisted.size());
-
-    size_t next_hoist = 0;
-    size_t next_alias = 0;
-    auto emit_hoist = [&](const HoistedScalar& h) {
+    //     base  = idx * 128        // hoisted scalar
+    //     alias = w                // alias of a tensor *parameter*
+    //     wl    = slice(alias, base)   // hoisted view, reads both
+    //
+    // Splitting this into "scalars, then tensors" left `alias` unbound when the
+    // tensor phase substituted `wl`, so the caller kept a name only the Graph
+    // has and the printer marked it `__FREE_VAR`.
+    //
+    // Parameter order is unaffected: `plan.hoisted` still lists tensors before
+    // scalars, and the argument append below walks that list, not this one.
+    std::unordered_map<const Var*, ExprPtr> local_for;
+    auto bind = [&](const HoistedValue& h) {
       auto value = SubstituteAtCallSite(h.value, binding);
       // Bound to a local, not spliced in as an expression: codegen emits a
       // boundary scalar as `const uint64_t&` into the argument slot, so the
@@ -972,34 +1180,68 @@ class CallSiteExtender : public IRMutator {
       auto local = std::make_shared<Var>(h.param->name_hint_ + "__graph_arg" + std::to_string(next_local_++),
                                          h.param->GetType(), h.param->span_);
       pending_prefix_.push_back(std::make_shared<AssignStmt>(local, value, h.param->span_));
-      args.push_back(local);
+      local_for[h.param.get()] = local;
+      // A later hoist may reference this one: the expressions were captured
+      // from the original body, where these were locals rather than parameters.
       binding[h.original.get()] = local;
     };
-    auto emit_alias = [&](const std::pair<const Var*, VarPtr>& a) {
+    auto bind_alias = [&](const std::pair<const Var*, VarPtr>& a) {
       auto it = binding.find(a.second.get());
       if (it != binding.end()) binding[a.first] = it->second;
     };
 
-    // Definition order is recovered from each entry's position in the body,
-    // which both vectors preserve; merge them by that order.
-    while (next_hoist < plan.hoisted.size() || next_alias < plan.passthrough.size()) {
-      const bool take_alias = next_hoist == plan.hoisted.size() ||
-                              (next_alias < plan.passthrough.size() &&
-                               plan.definition_index.at(plan.passthrough[next_alias].first) <
-                                   plan.definition_index.at(plan.hoisted[next_hoist].original.get()));
+    auto position = [&plan](const Var* var) {
+      auto it = plan.definition_index.find(var);
+      // A hoist the collector never indexed sorts last; it cannot be named by
+      // anything, so any position after the indexed ones is correct.
+      return it == plan.definition_index.end() ? std::numeric_limits<size_t>::max() : it->second;
+    };
+    // `plan.hoisted` is in *parameter* order (tensors before scalars), which is
+    // not definition order, so the replay walks its own sorted view of it.
+    std::vector<const HoistedValue*> by_definition;
+    by_definition.reserve(plan.hoisted.size());
+    for (const auto& h : plan.hoisted) by_definition.push_back(&h);
+    std::stable_sort(by_definition.begin(), by_definition.end(),
+                     [&position](const HoistedValue* a, const HoistedValue* b) {
+                       return position(a->original.get()) < position(b->original.get());
+                     });
+
+    size_t next_hoist = 0;
+    size_t next_alias = 0;
+    while (next_hoist < by_definition.size() || next_alias < plan.passthrough.size()) {
+      const bool alias_is_next =
+          next_alias < plan.passthrough.size() &&
+          position(plan.passthrough[next_alias].first) < position(by_definition[next_hoist]->original.get());
+      const bool take_alias = next_hoist == by_definition.size() || alias_is_next;
       if (take_alias) {
-        emit_alias(plan.passthrough[next_alias++]);
+        bind_alias(plan.passthrough[next_alias++]);
       } else {
-        emit_hoist(plan.hoisted[next_hoist++]);
+        bind(*by_definition[next_hoist++]);
       }
+    }
+
+    std::vector<ExprPtr> args = old_args;
+    args.reserve(args.size() + plan.hoisted.size());
+    for (const auto& h : plan.hoisted) {
+      args.push_back(local_for.at(h.param.get()));
     }
     return args;
   }
 
-  [[nodiscard]] static std::vector<ArgDirection> AppendScalarDirections(
-      const std::vector<ArgDirection>& old_dirs, size_t count) {
+  /// Mirror the hoisted parameters' directions onto the call's direction attr,
+  /// in the same order `AppendHoistedArgs` appends the arguments.
+  [[nodiscard]] static std::vector<ArgDirection> AppendHoistedDirections(
+      const std::vector<ArgDirection>& old_dirs, const GraphPlan& plan) {
     std::vector<ArgDirection> dirs = old_dirs;
-    dirs.insert(dirs.end(), count, ArgDirection::Scalar);
+    for (const auto& h : plan.hoisted) {
+      if (!h.is_tensor) {
+        dirs.push_back(ArgDirection::Scalar);
+      } else if (h.direction == ParamDirection::InOut) {
+        dirs.push_back(ArgDirection::InOut);
+      } else {
+        dirs.push_back(ArgDirection::Input);
+      }
+    }
     return dirs;
   }
 
@@ -1020,6 +1262,27 @@ class CallSiteExtender : public IRMutator {
     }
   }
   if (!has_graph) return program;
+
+  // A Graph only exists under host_build_graph. Codegen emits `GraphTaskArgs`
+  // and `rt_submit_graph` unconditionally, and the tensormap_and_ringbuffer
+  // `orchestration_api.h` declares neither — so compiling a Graph against the
+  // default runtime produces orchestration C++ that names undeclared symbols and
+  // fails in the C++ compiler, pointing at generated code rather than at the
+  // cause. Reported here instead, where the function the user wrote can be named.
+  const auto* ctx = PassContext::Current();
+  const RuntimeKind runtime = ctx != nullptr ? ctx->GetRuntime() : kDefaultRuntimeKind;
+  if (runtime != RuntimeKind::HostBuildGraph) {
+    for (const auto& [gvar, func] : program->functions_) {
+      if (!func || func->func_type_ != FunctionType::Graph) continue;
+      CHECK_SPAN(false, func->span_)
+          << "Graph function '" << func->name_ << "' requires the host_build_graph runtime, but this "
+          << "compilation targets '" << RuntimeKindToName(runtime)
+          << "'. `rt_submit_graph` and `GraphTaskArgs` exist only in that runtime's "
+             "orchestration API, so the generated orchestration would not compile. Pass "
+             "`runtime=RuntimeKind.HOST_BUILD_GRAPH` to `ir.compile` (or set it on the enclosing "
+             "`PassContext`), or drop `type=pl.FunctionType.Graph` from the function.";
+    }
+  }
 
   // Step D, part 1: whole-function properties, before anything is rewritten so
   // diagnostics name the user's own signature.
@@ -1065,7 +1328,7 @@ class CallSiteExtender : public IRMutator {
       rewritten[gvar] = func;
       continue;
     }
-    HoistedScalarRewriter rewriter(it->second);
+    HoistedValueRewriter rewriter(it->second);
     rewritten[gvar] = ExtendGraphSignature(func, it->second, rewriter.VisitStmt(func->body_));
   }
   auto with_signatures = std::make_shared<Program>(std::move(rewritten), program->name_, program->span_);

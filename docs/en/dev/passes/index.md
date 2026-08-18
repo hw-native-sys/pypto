@@ -4,7 +4,7 @@ Every transformation PyPTO runs over the IR, numbered to match its position in t
 default pipeline.
 
 Pass documentation is numbered so that reading it front to back walks the
-compilation pipeline in execution order. `01`–`46` are pipeline passes; `91`+ is
+compilation pipeline in execution order. `01`–`49` are pipeline passes; `91`+ is
 reserved for passes that run at several positions and for infrastructure that is not
 a pipeline pass at all.
 
@@ -65,7 +65,7 @@ a pipeline pass at all.
 | 45 | [LegalizeGraphBoundary](45-legalize_graph_boundary.md) | Hoists the boundary scalars a `Graph` body derives out to its call sites, and rejects boundaries the `host_build_graph` runtime could not record |
 | 46 | [MaterializeRuntimeScopes](46-materialize_runtime_scopes.md) | Inserts AUTO `RuntimeScopeStmt` nodes so orchestration codegen emits `SIMPLER_SCOPE` 1:1 |
 | 47 | [ClassifyIterArgCarry](47-classify_iter_arg_carry.md) | Classifies each orchestration `ForStmt` iter_arg as a trivial alias or a materialised rebind carry |
-| 48 | [InsertCommFence](48-insert_comm_fence.md) | Inserts a whole-tensor `system.cacheinvalid` + GM `system.fence` between each publishing write and the `pld.system.notify` that releases it |
+| 48 | [InsertCommFence](48-insert_comm_fence.md) | Marks each publishing write (region `system.cacheinvalid` + `system.fence` locally, fence only for a remote write, whole-GM for an opaque one) and each wait (whole-GM `system.cacheinvalid`); the notify itself gets no marker |
 | 49 | [MaterializeValidShapeSymbols](49-materialize_valid_shape_symbols.md) | Turns each device-kernel `valid_shape` symbol the kernel cannot bind into a leading `Scalar[INDEX]` parameter, fed the caller's actual valid extent |
 
 ## Outside the default pipeline

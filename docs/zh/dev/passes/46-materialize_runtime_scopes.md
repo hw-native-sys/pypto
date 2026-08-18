@@ -42,7 +42,9 @@ parser 直接物化进 IR。这是控制 scope 粒度（ring 隔离）、MANUAL 
 [`InsertCommFence`](48-insert_comm_fence.md) 之前。跑在所有改写型 transform
 之后意味着它们都无需处理被插入的 scope 包裹。
 
-**作用范围**：仅修改 `Orchestration` 函数。InCore / AIC / AIV / Group / Spmd
+**作用范围**：修改编排体，即 `Orchestration` 与 `Graph`。Graph 体同样是编排代码，
+而 codegen 只依据 `RuntimeScopeStmt` 发射 `SIMPLER_SCOPE`，跳过它会得到一个没有
+scope 的 Graph 函数。InCore / AIC / AIV / Group / Spmd
 的函数体从不会被 codegen 包裹 scope，因此原样返回。
 
 ## API
