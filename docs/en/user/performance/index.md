@@ -70,3 +70,4 @@ Two cheap checks come before any of this, and both are already done for you:
 
 - [Tuning the schedule](../tutorials/05-scheduling-tuning.md) — the same ground as a
   hands-on walkthrough.
+- [Precision](../precision/index.md) — the equivalent treatment for "the result is wrong".

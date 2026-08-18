@@ -259,3 +259,4 @@ signature is now a contract you maintain by hand.
 ## See also
 
 - [Memory](05-memory.md) — where the buffers that double buffering needs come from.
+- [Precision](../precision/index.md) — for when an algorithmic change moves the numbers.

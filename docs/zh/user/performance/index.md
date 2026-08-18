@@ -54,3 +54,4 @@ host              编排                  AICore
 ## 参见
 
 - [调度调优](../tutorials/05-scheduling-tuning.md) —— 同样的内容，以动手教程的形式。
+- [精度](../precision/index.md) —— 对「结果错」的同类处理。

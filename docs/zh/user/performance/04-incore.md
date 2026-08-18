@@ -200,3 +200,4 @@ def my_kernel(x: pl.Tensor[[128, 128], pl.FP16], out: pl.Out[pl.Tensor[[128, 128
 ## 参见
 
 - [内存](05-memory.md) —— double buffer 需要的那些 buffer 从哪来。
+- [精度](../precision/index.md) —— 当算法改动动了数值时。
