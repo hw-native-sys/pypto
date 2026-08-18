@@ -175,6 +175,8 @@ class TestDistributedCodegen:
 
         assert "for " in code
         assert "in range(" in code
+        assert "submit_sub" in code
+        assert 'sub_ids["worker"]' in code
 
     def test_python_imports(self):
         """Generated code contains required Python imports."""

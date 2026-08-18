@@ -114,6 +114,45 @@ def test_host_orch_tensor_assemble_emits_tensor_dict_slice_write():
     compile(code, "<host_orch>", "exec")
 
 
+def test_host_orch_tensor_assemble_right_aligns_lower_rank_source():
+    @pl.program
+    class Prog:
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self, out: pl.Tensor[[2, 8, 32], pl.FP32]) -> pl.Tensor[[2, 8, 32], pl.FP32]:
+            tmp = pl.create_tensor([4, 16], dtype=pl.FP32)
+            out = pl.assemble(out, tmp, [1, 3, 7])
+            return out
+
+    code = _lower(Prog, convert_to_ssa=True)
+
+    assert re.search(
+        r'tensors\["out__ssa_v0"\]\[1:1 \+ 1, 3:3 \+ 4, 7:7 \+ 16\] = '
+        r'tensors\["tmp__ssa_v0"\]\[0:4, 0:16\]',
+        code,
+    ), code
+    compile(code, "<host_orch>", "exec")
+
+
+def test_host_orch_tensor_assemble_uses_source_valid_shape():
+    @pl.program
+    class Prog:
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self, out: pl.Tensor[[8, 32], pl.FP32]) -> pl.Tensor[[8, 32], pl.FP32]:
+            tmp = pl.create_tensor([4, 16], dtype=pl.FP32)
+            narrowed = pl.slice(tmp, [4, 16], [0, 0], valid_shape=[3, 9])
+            out = pl.assemble(out, narrowed, [2, 5])
+            return out
+
+    code = _lower(Prog, convert_to_ssa=True)
+
+    assert re.search(
+        r'tensors\["out__ssa_v0"\]\[2:2 \+ 3, 5:5 \+ 9\] = '
+        r'tensors\["narrowed__ssa_v0"\]\[0:3, 0:9\]',
+        code,
+    ), code
+    compile(code, "<host_orch>", "exec")
+
+
 def test_host_orch_atomic_tensor_assemble_is_rejected():
     @pl.program
     class Prog:

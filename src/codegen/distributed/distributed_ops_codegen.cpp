@@ -502,32 +502,43 @@ REGISTER_DISTRIBUTED_OP(tensor_assemble, "tensor.assemble") {
 
   auto offset_tuple = As<MakeTuple>(op->args_[2]);
   INTERNAL_CHECK_SPAN(offset_tuple, op->span_) << "Internal error: tensor.assemble offset must be MakeTuple";
-  CHECK_SPAN(offset_tuple->elements_.size() == target_type->shape_.size() &&
-                 source_type->shape_.size() == target_type->shape_.size(),
-             op->span_)
-      << "tensor.assemble in a HOST orchestrator requires target, source, and offset to have the same rank";
+  const size_t target_rank = target_type->shape_.size();
+  const size_t source_rank = source_type->shape_.size();
+  CHECK_SPAN(offset_tuple->elements_.size() == target_rank, op->span_)
+      << "tensor.assemble in a HOST orchestrator requires offset rank to match target rank";
+  CHECK_SPAN(source_rank <= target_rank, op->span_)
+      << "tensor.assemble in a HOST orchestrator requires source rank not to exceed target rank";
 
   const std::vector<ExprPtr> source_valid_shape = ir::GetValidShape(source_type);
+  const size_t leading_target_rank = target_rank - source_rank;
   std::ostringstream target_indices;
   std::ostringstream source_indices;
-  for (size_t i = 0; i < source_valid_shape.size(); ++i) {
+  for (size_t i = 0; i < target_rank; ++i) {
     if (i > 0) {
       target_indices << ", ";
-      source_indices << ", ";
     }
     const std::string offset_i = codegen.GetExprAsCode(offset_tuple->elements_[i]);
-    const std::string extent_i = codegen.GetExprAsCode(source_valid_shape[i]);
+    const std::string extent_i =
+        i < leading_target_rank ? "1" : codegen.GetExprAsCode(source_valid_shape[i - leading_target_rank]);
     auto offset_const = As<ConstInt>(offset_tuple->elements_[i]);
     if (offset_const && offset_const->value_ == 0) {
       target_indices << "0:" << extent_i;
     } else {
       target_indices << offset_i << ":" << offset_i << " + " << extent_i;
     }
-    source_indices << "0:" << extent_i;
+  }
+  for (size_t i = 0; i < source_rank; ++i) {
+    if (i > 0) {
+      source_indices << ", ";
+    }
+    source_indices << "0:" << codegen.GetExprAsCode(source_valid_shape[i]);
   }
 
-  codegen.Emit("tensors[\"" + target_name + "\"][" + target_indices.str() + "] = tensors[\"" + source_name +
-               "\"][" + source_indices.str() + "]");
+  std::string source_expr = "tensors[\"" + source_name + "\"]";
+  if (source_rank > 0) {
+    source_expr += "[" + source_indices.str() + "]";
+  }
+  codegen.Emit("tensors[\"" + target_name + "\"][" + target_indices.str() + "] = " + source_expr);
   if (lhs != target_name) {
     codegen.Emit("tensors[\"" + lhs + "\"] = tensors[\"" + target_name + "\"]");
   }
