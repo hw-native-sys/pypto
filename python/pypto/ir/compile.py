@@ -197,6 +197,7 @@ def compile(  # noqa: PLR0913
     distributed_config: Any = None,
     analyze_auto_scopes_for_deps: bool = False,
     emit_source_loc: bool | None = None,
+    dump_ptoas_passes: bool = False,
 ) -> "CompiledProgram | DistributedCompiledProgram":
     """Compile a Program through passes and codegen.
 
@@ -218,6 +219,10 @@ def compile(  # noqa: PLR0913
             (``True`` -> ``CONCISE``, ``False`` -> ``NONE``). ``EXPLICIT`` makes
             each dump self-describing for tile layouts and distributed window
             buffers (issue #2088). Default: ``True`` (``CONCISE``).
+        dump_ptoas_passes: When True, dump full-module intermediate IR after
+            every ptoas pass under
+            ``<output_dir>/ptoas_passes/<codegen-unit>/``. Default: False.
+            Has no effect when ``skip_ptoas=True``.
         backend_type: Backend type for passes and codegen (default: Ascend910B)
         skip_ptoas: Skip the ptoas compilation step and emit raw MLIR (.pto) files
             instead of compiled C++ kernel wrappers.
@@ -350,6 +355,7 @@ def compile(  # noqa: PLR0913
                     skip_ptoas=skip_ptoas,
                     memory_planner=mplan,
                     emit_source_loc=emit_source_loc,
+                    dump_ptoas_passes=dump_ptoas_passes,
                 )
         except PartialCodegenError as exc:
             _write_files(exc.files, output_dir)

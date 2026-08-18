@@ -33,6 +33,31 @@ ir.compile(
 以及连续编号的 `NN_after_PassName.py` 快照。转储级别和 Pass 流水线行为详见
 [Pass 管理器文档](passes/00-pass_manager.md)。
 
+## 转储 ptoas Pass IR
+
+PyPTO 也可以暴露 ptoas 的 MLIR Pass 转储。它与 `dump_passes` 是两个独立开关，
+因为它观察的是 PTO codegen 之后的后端流水线：
+
+```python
+ir.compile(
+    MyProgram,
+    output_dir="build/my_program",
+    dump_ptoas_passes=True,
+)
+```
+
+JIT 和 runtime 调用方也可以通过 `RunConfig(dump_ptoas_passes=True)` 使用该
+选项。PyPTO 会让 ptoas 在每个 Pass 后转储完整 module IR，并把每个 codegen
+单元写入独立目录：
+
+```text
+build/my_program/ptoas_passes/<kernel-or-group>/
+```
+
+独立目录可以避免并行 ptoas 调用互相覆盖。目录内的文件名和组织方式由
+ptoas/MLIR 决定。`skip_ptoas=True` 时不会运行 ptoas Pass 流水线，因此该选项
+不产生任何转储。
+
 ## 生成报告
 
 使用转储目录运行已安装的命令：

@@ -89,9 +89,9 @@ class RunConfig:
     When passed to :meth:`pypto.jit.decorator.JITFunction.lower`, only
     ``platform``, ``strategy``, diagnostics, dependency analysis, and
     ``memory_planner`` affect pass execution. Runtime and artifact fields such
-    as ``device_id``, ``dump_passes``, ``save_kernels_dir``, and
-    ``compile_profiling`` are ignored; ``lower()`` does not execute or write
-    compilation artifacts.
+    as ``device_id``, ``dump_passes``, ``dump_ptoas_passes``,
+    ``save_kernels_dir``, and ``compile_profiling`` are ignored; ``lower()``
+    does not execute or write compilation artifacts.
 
     Attributes:
         platform: Target execution platform — ``"a2a3sim"`` / ``"a2a3"``
@@ -105,6 +105,10 @@ class RunConfig:
             (``NONE`` / ``CONCISE`` / ``EXPLICIT``) or a ``bool``
             (``True`` -> ``CONCISE``, ``False`` -> ``NONE``). ``EXPLICIT`` resolves
             implicit tile layouts and distributed window buffers in the dump.
+        dump_ptoas_passes: If ``True``, dump full-module intermediate IR after
+            every ptoas pass under
+            ``<output_dir>/ptoas_passes/<codegen-unit>/``. Has no effect when
+            ptoas is unavailable and compilation stops at raw ``.pto`` output.
         save_kernels: If ``True``, retain generated artefacts after execution.
             When ``False`` (default), a temporary directory is used and cleaned up.
         save_kernels_dir: Directory to save generated artefacts when *save_kernels*
@@ -264,6 +268,7 @@ class RunConfig:
     distributed_config: "DistributedConfig | None" = None
     analyze_auto_scopes_for_deps: bool = False
     memory_planner: MemoryPlanner | None = None
+    dump_ptoas_passes: bool = False
 
     def __post_init__(self) -> None:
         if self.platform not in ("a2a3sim", "a2a3", "a5sim", "a5"):
@@ -415,6 +420,7 @@ def compile_program(  # noqa: PLR0913
     strategy: OptimizationStrategy,
     backend_type: BackendType,
     dump_passes: bool | PassDumpLevel = False,
+    dump_ptoas_passes: bool = False,
     diagnostic_phase: DiagnosticPhase | None = None,
     disabled_diagnostics: DiagnosticCheckSet | None = None,
     profiling: bool = False,
@@ -434,6 +440,8 @@ def compile_program(  # noqa: PLR0913
         backend_type: Code-generation backend.
         dump_passes: Per-pass IR dump control — a :class:`~pypto.ir.PassDumpLevel`
             or a ``bool`` (``True`` -> ``CONCISE``, ``False`` -> ``NONE``).
+        dump_ptoas_passes: If ``True``, dump intermediate IR after every ptoas
+            pass under ``<work_dir>/ptoas_passes/<codegen-unit>/``.
         diagnostic_phase: Override the diagnostic phase gate for compilation.
         disabled_diagnostics: Set of diagnostic checks to disable.
         profiling: If ``True``, enable compile profiling.
@@ -451,6 +459,7 @@ def compile_program(  # noqa: PLR0913
         output_dir=str(work_dir),
         strategy=strategy,
         dump_passes=dump_passes,
+        dump_ptoas_passes=dump_ptoas_passes,
         backend_type=backend_type,
         diagnostic_phase=diagnostic_phase,
         disabled_diagnostics=disabled_diagnostics,
@@ -504,6 +513,7 @@ def run(
         strategy=config.strategy,
         backend_type=config.backend_type,
         dump_passes=config.dump_passes,
+        dump_ptoas_passes=config.dump_ptoas_passes,
         diagnostic_phase=config.diagnostic_phase,
         disabled_diagnostics=config.disabled_diagnostics,
         platform=config.platform,

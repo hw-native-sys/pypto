@@ -97,12 +97,14 @@ def test_compile_preserves_dump_and_report_artifacts(tmp_path):
         output_dir=str(output_dir),
         dump_passes=True,
         skip_ptoas=True,
+        dump_ptoas_passes=True,
     )
 
     passes_dump = output_dir / "passes_dump"
     assert (passes_dump / "00_frontend.py").is_file()
     assert list(passes_dump.glob("*_after_*.py"))
     assert (output_dir / "report").is_dir()
+    assert not (output_dir / "ptoas_passes").exists()
 
 
 def test_compile_owned_profiler_writes_nested_pass_and_codegen_stages(tmp_path):

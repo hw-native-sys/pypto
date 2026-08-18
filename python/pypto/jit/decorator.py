@@ -1452,6 +1452,7 @@ def _run_config_compile_kwargs(run_config: Any) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "strategy": run_config.strategy,
         "dump_passes": run_config.dump_passes,
+        "dump_ptoas_passes": run_config.dump_ptoas_passes,
         "profiling": run_config.compile_profiling,
         "diagnostic_phase": run_config.diagnostic_phase,
         "disabled_diagnostics": run_config.disabled_diagnostics,

@@ -34,6 +34,31 @@ Both forms create `build/my_program/passes_dump/`, containing
 See the [pass manager documentation](passes/00-pass_manager.md) for dump levels
 and pass-pipeline behavior.
 
+## Dump ptoas pass IR
+
+PyPTO can also expose ptoas's MLIR pass dumps. This is a separate switch from
+`dump_passes` because it observes the backend pipeline after PTO codegen:
+
+```python
+ir.compile(
+    MyProgram,
+    output_dir="build/my_program",
+    dump_ptoas_passes=True,
+)
+```
+
+The same option is available to JIT and runtime callers through
+`RunConfig(dump_ptoas_passes=True)`. PyPTO invokes ptoas with full-module IR
+printing after every pass and writes each codegen unit to its own directory:
+
+```text
+build/my_program/ptoas_passes/<kernel-or-group>/
+```
+
+Per-unit directories keep parallel ptoas invocations from colliding. The files
+inside are named and organized by ptoas/MLIR. This option has no effect with
+`skip_ptoas=True`, because no ptoas pass pipeline runs in that mode.
+
 ## Generate a report
 
 Run the installed command with the dump directory:

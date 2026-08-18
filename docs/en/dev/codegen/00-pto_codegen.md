@@ -690,6 +690,8 @@ When the program contains an Orchestration function, the PTO backend generates t
 ```text
 output_dir/
 ├── passes_dump/                     # IR after each pass
+├── ptoas_passes/                    # Optional ptoas IR after each pass
+│   └── <func_name>/                 # ptoas/MLIR-managed dump tree
 ├── ptoas/                           # Intermediates
 │   ├── <func_name>.pto              # MLIR from PTOCodegen
 │   └── <func_name>.cpp              # C++ from ptoas
@@ -699,6 +701,9 @@ output_dir/
 │   └── <orch_func_name>.cpp         # PTO2 runtime orchestration code
 └── kernel_config.py                 # Runtime/orchestration/kernel config
 ```
+
+`ptoas_passes/` is emitted only when `ir.compile(...,
+dump_ptoas_passes=True)` or `RunConfig(dump_ptoas_passes=True)` is used.
 
 The orchestration codegen generates identical orchestration C++ code using the PTO2 runtime API (`rt_submit_task`, `make_tensor_external`, etc.).
 

@@ -662,6 +662,8 @@ InCore Function -> PTOCodegen -> .pto -> ptoas -> .cpp -> kernel_wrapper -> kern
 ```text
 output_dir/
 ├── passes_dump/                     # IR after each pass
+├── ptoas_passes/                    # 可选：每个 ptoas Pass 后的 IR
+│   └── <func_name>/                 # 由 ptoas/MLIR 管理的转储树
 ├── ptoas/                           # Intermediates
 │   ├── <func_name>.pto              # MLIR from PTOCodegen
 │   └── <func_name>.cpp              # C++ from ptoas
@@ -671,6 +673,9 @@ output_dir/
 │   └── <orch_func_name>.cpp         # PTO2 runtime orchestration code
 └── kernel_config.py                 # Runtime/orchestration/kernel config
 ```
+
+仅当使用 `ir.compile(..., dump_ptoas_passes=True)` 或
+`RunConfig(dump_ptoas_passes=True)` 时才会生成 `ptoas_passes/`。
 
 编排代码生成使用 PTO2 运行时 API (`rt_submit_task`, `make_tensor_external` 等) 生成编排 C++ 代码。
 

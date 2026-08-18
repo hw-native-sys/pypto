@@ -2266,6 +2266,7 @@ class TestCompileKwargForwarding:
         cfg = RunConfig(
             strategy=OptimizationStrategy.Default,
             dump_passes=True,
+            dump_ptoas_passes=True,
             compile_profiling=True,
             save_kernels_dir=str(artifacts_dir),
             analyze_auto_scopes_for_deps=True,
@@ -2273,6 +2274,7 @@ class TestCompileKwargForwarding:
         kwargs = _run_config_compile_kwargs(cfg)
         assert kwargs["strategy"] == OptimizationStrategy.Default
         assert kwargs["dump_passes"] is True
+        assert kwargs["dump_ptoas_passes"] is True
         assert kwargs["profiling"] is True  # mapped from RunConfig.compile_profiling
         assert kwargs["output_dir"] == str(artifacts_dir)  # from RunConfig.save_kernels_dir
         assert kwargs["analyze_auto_scopes_for_deps"] is True

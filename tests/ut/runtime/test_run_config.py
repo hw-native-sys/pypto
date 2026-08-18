@@ -49,6 +49,11 @@ class TestRunConfigPlatformResolution:
 
         assert cfg.analyze_auto_scopes_for_deps is False
 
+    def test_ptoas_pass_dump_defaults_off(self):
+        cfg = RunConfig(platform="a5")
+
+        assert cfg.dump_ptoas_passes is False
+
 
 class TestRunConfigDfxFlags:
     """Verify the five DFX flags are independent and propagate correctly."""
@@ -560,6 +565,25 @@ class TestRunConfigCompileForwarding:
 
         assert captured["memory_planner"] == MemoryPlanner.DSA_RP
 
+    def test_run_forwards_ptoas_pass_dump(self, monkeypatch):
+        captured: dict = {}
+
+        class FakeCompiled:
+            def __call__(self, *_args, **_kwargs):
+                return None
+
+        def fake_compile(_program, **kwargs):
+            captured.update(kwargs)
+            return FakeCompiled()
+
+        import pypto.ir as ir_mod  # noqa: PLC0415
+
+        monkeypatch.setattr(ir_mod, "compile", fake_compile)
+
+        run(object(), config=RunConfig(platform="a2a3sim", dump_ptoas_passes=True))
+
+        assert captured["dump_ptoas_passes"] is True
+
     def test_execute_compiled_accepts_auto_scope_deps_switch(self, tmp_path, monkeypatch):
         captured: dict = {}
 
@@ -639,9 +663,11 @@ class TestRunConfigCompileForwarding:
             strategy=RunConfig().strategy,
             backend_type=BackendType.Ascend910B,
             analyze_auto_scopes_for_deps=True,
+            dump_ptoas_passes=True,
         )
 
         assert captured["analyze_auto_scopes_for_deps"] is True
+        assert captured["dump_ptoas_passes"] is True
 
 
 # ``execute_on_device`` lives in ``device_runner`` which eagerly imports the
