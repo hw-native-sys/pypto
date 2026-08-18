@@ -157,6 +157,24 @@ cfg = RunConfig(platform="a2a3sim", enable_dump_args=1)
 
 > **致命陷阱：** 在大负载上做全量 dump（`enable_dump_args=2`）会把主机侧收集器打满（约 42 MB/s 的排空速率），并让 AICPU 被 STARS op-execute 超时杀掉。优先用等级 `1` 加上对具体张量的 `pl.dump_tag`。
 
+### 当你想看的那个值不是张量
+
+dump 只够得着**本来就是张量**的东西。而真正能定案的那个值，往往是 InCore 函数内部的中间结果 —— 最终 store 之前的累加器、融合链里走完一步的 tile —— 它们从不落到 GM，因此也无法被 tag。
+
+给它一个去处：给 kernel 加一个临时的 `pl.Out` 参数，把中间结果 store 进去，再经编排一路带出来。
+
+```python
+@pl.jit.incore
+def fused(x: pl.Tensor, out: pl.Out[pl.Tensor],
+          probe: pl.Out[pl.Tensor]):        # 临时的，只为这次排查
+    acc = pl.add(pl.load(x, [0, 0], [64, 128]), 1.0)
+    probe = pl.store(acc, [0, 0], probe)    # 这个中间结果现在可被检视
+    out = pl.store(pl.exp(acc), [0, 0], out)
+    return out, probe
+```
+
+这是一次调试改动，不是设计：多出来的参数要付一次 GM 往返，还会改变依赖图，所以问题答完就把它拿掉。它换来的是把中间结果与你的 host 参考直接对比 —— 这通常能一次运行就把「输出错了」变成「错在这一步」。
+
 ## 边界情况
 
 | 症状 | 可能原因 | 步骤 |
