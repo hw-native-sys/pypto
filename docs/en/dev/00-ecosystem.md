@@ -135,13 +135,19 @@ Defines the tile-level instruction set for the target hardware. Provides C++ hea
 
 **Interface:** C++ header library defining the instruction API. Downstream consumers `#include` pto-isa headers; the hardware vendor provides the target-specific implementations that back these headers.
 
-PyPTO's managed checkout under `build_output/_deps/pto-isa` uses the commit in
-`runtime/pto_isa.pin`, matching the runtime submodule's build. To change the
-revision, update the runtime-side pin. Source checkouts read the submodule pin;
-installed environments read the same pin packaged with `simpler_setup`. If the
-pin file is unavailable, PyPTO falls back to the pto-isa remote's default branch
-tip. A caller-provided `PTO_ISA_ROOT` is used as-is and remains under the
-caller's control.
+`runtime/pto_isa.pin` is the single source of truth for the revision, and
+simpler owns the only resolver (`simpler_setup.pto_isa.ensure_pto_isa_root`):
+it manages one checkout under the runtime's `build/pto-isa`, reuses it only when
+that tree is clean and already at the pin, re-clones it otherwise, and verifies
+`HEAD` before returning. PyPTO delegates to it rather than resolving the pin
+itself — a second resolver could hand the kernel compiler an off-pin tree, and
+the compiler skips its own revision re-check precisely because the resolver
+already guaranteed the pin. To change the revision, update the runtime-side pin.
+
+`PTO_ISA_ROOT` is *exported* with the resolved path so downstream consumers that
+build extern CCE kernels can find the ISA headers, but it is never *read*: an
+ambient value is not the pin. Code that needs the headers should call
+`pypto.runtime.pto_isa_include_dir()` instead of reading the variable.
 
 ### simpler — Task Runtime
 

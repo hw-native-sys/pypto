@@ -32,7 +32,6 @@ Run on hardware via ``task-submit`` (one chip)::
 
     task-submit --device auto --device-num 1 --run 'cd <repo> && \
         export PYTHONPATH=<repo>/python:$PYTHONPATH && \
-        export PTO_ISA_ROOT=/path/to/pto-isa && \
         python -m pytest tests/st/distributed/test_l3_explicit_dispatch_onboard.py \
         -v --platform a2a3 --device $TASK_DEVICE'
 

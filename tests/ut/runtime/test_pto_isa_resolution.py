@@ -7,125 +7,94 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Regression tests for device-runner diagnostics and PTO-ISA resolution."""
+"""Regression tests for PTO-ISA resolution and device-runner diagnostics."""
 
-import logging
 import sys
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from pypto.runtime import pto_isa
 
-_RUNTIME_PIN = "83d01313d9bfc247c4b7c8bcf969d1019f0d106f"
+
+@pytest.fixture
+def fake_simpler_pto_isa(monkeypatch, tmp_path):
+    """Stand in for ``simpler_setup.pto_isa`` and count resolver calls."""
+    pto_isa._resolve_pinned_pto_isa_root.cache_clear()
+
+    pinned_root = tmp_path / "managed" / "pto-isa"
+    (pinned_root / "include").mkdir(parents=True)
+
+    resolve = Mock(return_value=str(pinned_root))
+    module = ModuleType("simpler_setup.pto_isa")
+    setattr(module, "ensure_pto_isa_root", resolve)
+    package = ModuleType("simpler_setup")
+    setattr(package, "__path__", [])
+    monkeypatch.setitem(sys.modules, "simpler_setup", package)
+    monkeypatch.setitem(sys.modules, "simpler_setup.pto_isa", module)
+
+    yield SimpleNamespace(root=pinned_root, resolve=resolve)
+
+    pto_isa._resolve_pinned_pto_isa_root.cache_clear()
 
 
-def _configure_existing_clone(device_runner, monkeypatch, tmp_path):
-    clone_path = tmp_path / "pto-isa"
-    (clone_path / "include").mkdir(parents=True)
+def test_resolution_delegates_to_simpler_and_exports_env(monkeypatch, fake_simpler_pto_isa):
+    """The pinned checkout comes from Simpler; PyPTO only exports the result."""
     monkeypatch.delenv("PTO_ISA_ROOT", raising=False)
-    monkeypatch.setattr(device_runner, "_get_pto_isa_clone_path", lambda: clone_path)
-    return clone_path
+
+    resolved = pto_isa.ensure_pto_isa_root()
+
+    assert resolved == str(fake_simpler_pto_isa.root.resolve())
+    assert pto_isa.os.environ["PTO_ISA_ROOT"] == resolved
+    fake_simpler_pto_isa.resolve.assert_called_once()
 
 
-def test_installed_layout_reads_pin_from_runtime_package(device_runner, monkeypatch, tmp_path):
-    installed_pin = tmp_path / "simpler_setup" / "_assets" / "pto_isa.pin"
-    installed_pin.parent.mkdir(parents=True)
-    installed_pin.write_text(f"{_RUNTIME_PIN}\n", encoding="utf-8")
-    source_pin = tmp_path / "site-packages" / "runtime" / "pto_isa.pin"
-    monkeypatch.setattr(device_runner, "_PTO_ISA_PIN_PATH", source_pin)
+def test_ambient_environment_root_is_ignored(monkeypatch, fake_simpler_pto_isa, tmp_path):
+    """An exported PTO_ISA_ROOT is not the pin — it must never win."""
+    stale_root = tmp_path / "stale-off-pin-pto-isa"
+    stale_root.mkdir()
+    monkeypatch.setenv("PTO_ISA_ROOT", str(stale_root))
 
-    runtime_package = ModuleType("simpler_setup")
-    setattr(runtime_package, "__path__", [])
-    runtime_environment = ModuleType("simpler_setup.environment")
-    setattr(runtime_environment, "PROJECT_ROOT", installed_pin.parent)
-    monkeypatch.setitem(sys.modules, "simpler_setup", runtime_package)
-    monkeypatch.setitem(sys.modules, "simpler_setup.environment", runtime_environment)
+    resolved = pto_isa.ensure_pto_isa_root()
 
-    assert device_runner._read_runtime_pto_isa_pin() == _RUNTIME_PIN
+    assert resolved == str(fake_simpler_pto_isa.root.resolve())
+    assert pto_isa.os.environ["PTO_ISA_ROOT"] == resolved
+    fake_simpler_pto_isa.resolve.assert_called_once()
 
 
-def test_default_revision_uses_runtime_pin(device_runner, monkeypatch, tmp_path):
-    clone_path = _configure_existing_clone(device_runner, monkeypatch, tmp_path)
-    pin_path = tmp_path / "pto_isa.pin"
-    pin_path.write_text(f"{_RUNTIME_PIN}\n")
-    monkeypatch.setattr(device_runner, "_PTO_ISA_PIN_PATH", pin_path)
-    checkout = Mock()
-    update_latest = Mock()
-    monkeypatch.setattr(device_runner, "_checkout_pto_isa_commit", checkout)
-    monkeypatch.setattr(device_runner, "_update_pto_isa_to_latest", update_latest)
+def test_include_dir_is_derived_from_the_pinned_root(fake_simpler_pto_isa):
+    include_dir = pto_isa.pto_isa_include_dir()
 
-    assert device_runner.ensure_pto_isa_root() == str(clone_path.resolve())
-
-    checkout.assert_called_once_with(clone_path, _RUNTIME_PIN)
-    update_latest.assert_not_called()
+    assert include_dir == fake_simpler_pto_isa.root.resolve() / "include"
+    assert include_dir.is_dir()
 
 
-def test_environment_root_is_used_without_checkout(device_runner, monkeypatch, tmp_path):
-    pto_isa_root = tmp_path / "external-pto-isa"
-    monkeypatch.setenv("PTO_ISA_ROOT", str(pto_isa_root))
-    checkout = Mock()
-    read_pin = Mock()
-    monkeypatch.setattr(device_runner, "_checkout_pto_isa_commit", checkout)
-    monkeypatch.setattr(device_runner, "_read_runtime_pto_isa_pin", read_pin)
+def test_resolution_is_cached_per_process(fake_simpler_pto_isa):
+    """The delegate takes a file lock, so repeated compiles must not re-enter it."""
+    first = pto_isa.ensure_pto_isa_root()
+    second = pto_isa.ensure_pto_isa_root()
 
-    assert device_runner.ensure_pto_isa_root() == str(pto_isa_root)
-
-    checkout.assert_not_called()
-    read_pin.assert_not_called()
+    assert first == second
+    fake_simpler_pto_isa.resolve.assert_called_once()
 
 
-def test_fresh_clone_checks_out_runtime_pin(device_runner, monkeypatch, tmp_path):
-    clone_path = tmp_path / "pto-isa"
-    pin_path = tmp_path / "pto_isa.pin"
-    pin_path.write_text(f"{_RUNTIME_PIN}\n")
+def test_unresolvable_pin_raises_instead_of_returning_a_root(monkeypatch):
+    """A failure must surface Simpler's diagnostic, not a silently unpinned path."""
+    pto_isa._resolve_pinned_pto_isa_root.cache_clear()
     monkeypatch.delenv("PTO_ISA_ROOT", raising=False)
-    monkeypatch.setattr(device_runner, "_PTO_ISA_PIN_PATH", pin_path)
-    monkeypatch.setattr(device_runner, "_get_pto_isa_clone_path", lambda: clone_path)
 
-    def clone(*_args):
-        (clone_path / "include").mkdir(parents=True)
-        return True
+    module = ModuleType("simpler_setup.pto_isa")
+    setattr(module, "ensure_pto_isa_root", Mock(side_effect=OSError("PTO-ISA not available.")))
+    package = ModuleType("simpler_setup")
+    setattr(package, "__path__", [])
+    monkeypatch.setitem(sys.modules, "simpler_setup", package)
+    monkeypatch.setitem(sys.modules, "simpler_setup.pto_isa", module)
 
-    monkeypatch.setattr(device_runner, "_clone_pto_isa", clone)
-    checkout = Mock()
-    monkeypatch.setattr(device_runner, "_checkout_pto_isa_commit", checkout)
+    with pytest.raises(OSError, match="PTO-ISA not available"):
+        pto_isa.ensure_pto_isa_root()
 
-    assert device_runner.ensure_pto_isa_root() == str(clone_path.resolve())
-
-    checkout.assert_called_once_with(clone_path, _RUNTIME_PIN)
-
-
-def test_checkout_failure_does_not_return_unpinned_managed_clone(device_runner, monkeypatch, tmp_path):
-    _configure_existing_clone(device_runner, monkeypatch, tmp_path)
-    pin_path = tmp_path / "pto_isa.pin"
-    pin_path.write_text(f"{_RUNTIME_PIN}\n", encoding="utf-8")
-    monkeypatch.setattr(device_runner, "_PTO_ISA_PIN_PATH", pin_path)
-    monkeypatch.setattr(device_runner, "_checkout_pto_isa_commit", Mock(return_value=False))
-
-    assert device_runner.ensure_pto_isa_root() is None
-    assert "PTO_ISA_ROOT" not in device_runner.os.environ
-
-
-@pytest.mark.parametrize("pin_contents", [None, ""])
-def test_unavailable_runtime_pin_falls_back_to_latest(
-    device_runner, monkeypatch, tmp_path, caplog, pin_contents
-):
-    clone_path = _configure_existing_clone(device_runner, monkeypatch, tmp_path)
-    pin_path = tmp_path / "pto_isa.pin"
-    if pin_contents is not None:
-        pin_path.write_text(pin_contents)
-    monkeypatch.setattr(device_runner, "_PTO_ISA_PIN_PATH", pin_path)
-    checkout = Mock()
-    update_latest = Mock()
-    monkeypatch.setattr(device_runner, "_checkout_pto_isa_commit", checkout)
-    monkeypatch.setattr(device_runner, "_update_pto_isa_to_latest", update_latest)
-
-    with caplog.at_level(logging.WARNING):
-        device_runner.ensure_pto_isa_root()
-
-    checkout.assert_not_called()
-    update_latest.assert_called_once_with(clone_path)
-    assert "falling back to the latest remote HEAD" in caplog.text
+    assert "PTO_ISA_ROOT" not in pto_isa.os.environ
+    pto_isa._resolve_pinned_pto_isa_root.cache_clear()
 
 
 def _write_raw_pto(work_dir):

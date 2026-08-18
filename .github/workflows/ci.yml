@@ -441,7 +441,6 @@ jobs:
         working-directory: examples-checkout
     env:
       PTOAS_ROOT: ${{ github.workspace }}/examples-checkout/ptoas-bin
-      PTO_ISA_ROOT: ${{ github.workspace }}/examples-checkout/pto-isa
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
       PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
       CMAKE_BUILD_PARALLEL_LEVEL: 16
@@ -546,8 +545,9 @@ jobs:
       run:
         working-directory: codegen-checkout
     env:
-      # No PTOAS_ROOT / PTO_ISA_ROOT: install-toolchain:false means setup-ci-job
-      # never assembles or clones pto-isa, so codegen-only needs neither.
+      # No PTOAS_ROOT: install-toolchain:false means setup-ci-job never
+      # assembles, so codegen-only needs no ptoas. pto-isa is resolved by
+      # simpler from runtime/pto_isa.pin, which this job never installs.
       CMAKE_BUILD_PARALLEL_LEVEL: 16
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
@@ -640,7 +640,6 @@ jobs:
         working-directory: st-checkout
     env:
       PTOAS_ROOT: ${{ github.workspace }}/st-checkout/ptoas-bin
-      PTO_ISA_ROOT: ${{ github.workspace }}/st-checkout/pto-isa
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
       PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
       CMAKE_BUILD_PARALLEL_LEVEL: 16
@@ -759,7 +758,6 @@ jobs:
         working-directory: st-direct-checkout
     env:
       PTOAS_ROOT: ${{ github.workspace }}/st-direct-checkout/ptoas-bin
-      PTO_ISA_ROOT: ${{ github.workspace }}/st-direct-checkout/pto-isa
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
       PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
       CMAKE_BUILD_PARALLEL_LEVEL: 16
@@ -903,7 +901,6 @@ jobs:
         working-directory: dist-checkout
     env:
       PTOAS_ROOT: ${{ github.workspace }}/dist-checkout/ptoas-bin
-      PTO_ISA_ROOT: ${{ github.workspace }}/dist-checkout/pto-isa
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
       PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
       CMAKE_BUILD_PARALLEL_LEVEL: 16
@@ -988,7 +985,6 @@ jobs:
         working-directory: lib-checkout
     env:
       PTOAS_ROOT: ${{ github.workspace }}/lib-checkout/ptoas-bin
-      PTO_ISA_ROOT: ${{ github.workspace }}/lib-checkout/pto-isa
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
       PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
       CMAKE_BUILD_PARALLEL_LEVEL: 16

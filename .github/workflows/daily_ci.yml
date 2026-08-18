@@ -41,7 +41,6 @@ jobs:
         shell: bash -leo pipefail {0}
     env:
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
-      PTO_ISA_ROOT: ${{ github.workspace }}/pto-isa
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
       PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
     steps:
@@ -135,7 +134,6 @@ jobs:
         working-directory: perf-checkout
     env:
       PTOAS_ROOT: ${{ github.workspace }}/perf-checkout/ptoas-bin
-      PTO_ISA_ROOT: ${{ github.workspace }}/perf-checkout/pto-isa
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
       PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
       CMAKE_BUILD_PARALLEL_LEVEL: 16

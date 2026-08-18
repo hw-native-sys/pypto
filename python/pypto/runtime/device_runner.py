@@ -16,15 +16,15 @@ implementations of:
   assemble into ``ChipCallable``, locate runtime binaries.
 - :func:`execute_on_device`: Run a ``ChipCallable`` on device via ``ChipWorker``.
 - :func:`validate_golden`: Compare actual outputs against golden reference.
-- :func:`ensure_pto_isa_root`: Manage PTO-ISA repository (clone/checkout).
 
 These functions keep orchestration in PyPTO while relying on the installed
 runtime packages for two integration surfaces:
 
 - ``simpler`` provides the ``_task_interface`` nanobind C++ module.
 - ``simpler_setup`` provides the kernel compiler plus packaged runtime sources,
-  binaries, and ``pto_isa.pin`` for non-source installs. In a source checkout,
-  those assets come from the ``runtime/`` git submodule instead.
+  binaries, and ``pto_isa.pin`` for non-source installs, and owns the only
+  PTO-ISA resolver. In a source checkout, those assets come from the
+  ``runtime/`` git submodule instead.
 """
 
 from __future__ import annotations
@@ -56,6 +56,7 @@ from ._binary_cache import (
 )
 from .elf_parser import elf_build_id_64, extract_text_section
 from .kernel_compiler import KernelCompiler
+from .pto_isa import ensure_pto_isa_root
 from .task_interface import (
     CallConfig,  # pyright: ignore[reportAttributeAccessIssue]
     ChipCallable,  # pyright: ignore[reportAttributeAccessIssue]
@@ -125,54 +126,6 @@ def _kernel_cache_file(
         runtime_name=runtime_name,
         include_dirs=include_dirs,
     )
-
-
-# ---------------------------------------------------------------------------
-# PTO-ISA management
-# ---------------------------------------------------------------------------
-
-_PTO_ISA_HTTPS = "https://github.com/hw-native-sys/pto-isa.git"
-_PTO_ISA_SSH = "git@github.com:hw-native-sys/pto-isa.git"
-_PTO_ISA_HTTPS_FALLBACK = "https://gitcode.com/luohuan40/pto-isa.git"
-_PTO_ISA_SSH_FALLBACK = "git@gitcode.com:luohuan40/pto-isa.git"
-_PTO_ISA_PRIMARY_CLONE_TIMEOUT = 60
-_PTO_ISA_FALLBACK_CLONE_TIMEOUT = 300
-_PROJECT_ROOT = Path(__file__).parents[3]
-_PTO_ISA_PIN_PATH = _PROJECT_ROOT / "runtime" / "pto_isa.pin"
-
-
-def _get_pto_isa_clone_path() -> Path:
-    """Return the default path where PTO-ISA is cloned."""
-    return _PROJECT_ROOT / "build_output" / "_deps" / "pto-isa"
-
-
-def _get_runtime_pto_isa_pin_path() -> Path:
-    """Locate the runtime pin in a source checkout or installed runtime package."""
-    if _PTO_ISA_PIN_PATH.parent.is_dir():
-        return _PTO_ISA_PIN_PATH
-
-    try:
-        runtime_root = getattr(import_module("simpler_setup.environment"), "PROJECT_ROOT")
-    except (ImportError, AttributeError):
-        return _PTO_ISA_PIN_PATH
-    return Path(runtime_root) / "pto_isa.pin"
-
-
-def _read_runtime_pto_isa_pin() -> str | None:
-    """Return the runtime's pinned PTO-ISA commit, or ``None`` when unavailable."""
-    pin_path = _get_runtime_pto_isa_pin_path()
-    try:
-        commit = pin_path.read_text(encoding="utf-8").strip()
-    except OSError as e:
-        logger.warning(
-            f"Failed to read runtime PTO-ISA pin at {pin_path}: {e}; falling back to the latest remote HEAD"
-        )
-        return None
-
-    if not commit:
-        logger.warning(f"Runtime PTO-ISA pin at {pin_path} is empty; falling back to the latest remote HEAD")
-        return None
-    return commit
 
 
 def _clean_git_revision(repo_root: Path) -> tuple[bool, str | None]:
@@ -254,175 +207,14 @@ def _current_binary_context(
     )
 
 
-def _clone_pto_isa(clone_path: Path, primary_url: str, fallback_url: str) -> bool:
-    """Clone pto-isa, trying *primary_url* first with a short timeout.
+# ---------------------------------------------------------------------------
+# PTO-ISA management
+# ---------------------------------------------------------------------------
 
-    Returns:
-        ``True`` if the clone succeeded (based on return code), ``False`` otherwise.
-    """
-    clone_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        result = subprocess.run(
-            ["git", "clone", primary_url, str(clone_path)],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=_PTO_ISA_PRIMARY_CLONE_TIMEOUT,
-        )
-        if result.returncode == 0:
-            return True
-    except subprocess.TimeoutExpired:
-        logger.warning(
-            f"Cloning pto-isa from {primary_url} timed out after "
-            f"{_PTO_ISA_PRIMARY_CLONE_TIMEOUT}s; falling back to {fallback_url}"
-        )
-    except Exception as e:
-        logger.warning(f"Cloning pto-isa from {primary_url} failed: {e}; falling back to {fallback_url}")
-
-    # Clean up any partial clone before retrying with the fallback.
-    if clone_path.exists():
-        shutil.rmtree(clone_path, ignore_errors=True)
-    try:
-        result = subprocess.run(
-            ["git", "clone", fallback_url, str(clone_path)],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=_PTO_ISA_FALLBACK_CLONE_TIMEOUT,
-        )
-        if result.returncode != 0:
-            logger.warning(f"Failed to clone pto-isa:\n{result.stderr}")
-            return False
-    except Exception as e:
-        logger.warning(f"Failed to clone pto-isa: {e}")
-        return False
-    return True
-
-
-def ensure_pto_isa_root(clone_protocol: str = "https") -> str | None:
-    """Ensure ``PTO_ISA_ROOT`` is available, either from env or by cloning.
-
-    Args:
-        clone_protocol: ``"https"`` or ``"ssh"``.
-
-    Returns:
-        PTO-ISA root path if successful, ``None`` otherwise.
-    """
-    existing_root = os.environ.get("PTO_ISA_ROOT")
-    if existing_root:
-        return existing_root
-
-    resolved_commit = _read_runtime_pto_isa_pin()
-    clone_path = _get_pto_isa_clone_path()
-    include_dir = clone_path / "include"
-
-    if not (clone_path.exists() and include_dir.exists() and include_dir.is_dir()):
-        if clone_protocol == "https":
-            primary_url, fallback_url = _PTO_ISA_HTTPS, _PTO_ISA_HTTPS_FALLBACK
-        else:
-            primary_url, fallback_url = _PTO_ISA_SSH, _PTO_ISA_SSH_FALLBACK
-        if not _clone_pto_isa(clone_path, primary_url, fallback_url):
-            return None
-        if resolved_commit and not _checkout_pto_isa_commit(clone_path, resolved_commit):
-            return None
-    elif resolved_commit:
-        if not _checkout_pto_isa_commit(clone_path, resolved_commit):
-            return None
-    else:
-        _update_pto_isa_to_latest(clone_path)
-
-    if not include_dir.exists():
-        return None
-
-    resolved = str(clone_path.resolve())
-    os.environ["PTO_ISA_ROOT"] = resolved
-    return resolved
-
-
-def _checkout_pto_isa_commit(clone_path: Path, commit: str) -> bool:
-    """Checkout *commit* and verify that the managed clone resolves to it."""
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-            cwd=str(clone_path),
-            timeout=5,
-        )
-        current = result.stdout.strip()
-        target = subprocess.run(
-            ["git", "rev-parse", f"{commit}^{{commit}}"],
-            check=False,
-            capture_output=True,
-            text=True,
-            cwd=str(clone_path),
-            timeout=5,
-        )
-        target_revision = target.stdout.strip() if target.returncode == 0 else ""
-        if not target_revision or current != target_revision:
-            subprocess.run(
-                ["git", "fetch", "origin"],
-                capture_output=True,
-                text=True,
-                cwd=str(clone_path),
-                timeout=30,
-                check=True,
-            )
-            subprocess.run(
-                ["git", "checkout", commit],
-                capture_output=True,
-                text=True,
-                cwd=str(clone_path),
-                timeout=30,
-                check=True,
-            )
-            target_revision = subprocess.run(
-                ["git", "rev-parse", f"{commit}^{{commit}}"],
-                check=True,
-                capture_output=True,
-                text=True,
-                cwd=str(clone_path),
-                timeout=5,
-            ).stdout.strip()
-        checked_out = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-            cwd=str(clone_path),
-            timeout=5,
-        ).stdout.strip()
-        if checked_out != target_revision:
-            logger.warning(f"Failed to verify pto-isa commit {commit}: HEAD is {checked_out or 'unknown'}")
-            return False
-        return True
-    except (OSError, subprocess.SubprocessError) as e:
-        logger.warning(f"Failed to checkout pto-isa commit {commit}: {e}")
-        return False
-
-
-def _update_pto_isa_to_latest(clone_path: Path) -> None:
-    """Fetch and reset existing clone to the remote default branch."""
-    try:
-        subprocess.run(
-            ["git", "fetch", "origin"],
-            capture_output=True,
-            text=True,
-            cwd=str(clone_path),
-            timeout=30,
-            check=True,
-        )
-        subprocess.run(
-            ["git", "reset", "--hard", "origin/HEAD"],
-            capture_output=True,
-            text=True,
-            cwd=str(clone_path),
-            timeout=30,
-            check=True,
-        )
-    except Exception as e:
-        logger.warning(f"Failed to update pto-isa to latest: {e}")
+# Re-exported from ``.pto_isa`` so this module keeps its historical entry point
+# and so tests can monkey-patch the name used by ``_compile_and_assemble_locked``
+# below. The implementation lives there because resolving the pin must not
+# require the Simpler-backed ``task_interface`` extension this module imports.
 
 
 # ---------------------------------------------------------------------------
@@ -758,14 +550,9 @@ def _compile_and_assemble_locked(
     # ``kernel_config.py``; only legacy / hand-written configs omit the key.
     runtime_name = runtime_config.get("runtime", "tensormap_and_ringbuffer")
 
-    # Ensure PTO-ISA root
-    pto_isa_root = ensure_pto_isa_root(clone_protocol="https")
-    if pto_isa_root is None:
-        raise OSError(
-            "PTO_ISA_ROOT could not be resolved.\n"
-            "Please set it to the PTO-ISA root directory, e.g.:\n"
-            "  export PTO_ISA_ROOT=/path/to/pto-isa"
-        )
+    # Resolve the pinned PTO-ISA checkout (raises with an actionable message
+    # when the pin cannot be honoured).
+    pto_isa_root = ensure_pto_isa_root()
 
     # Create compiler
     compiler = KernelCompiler(platform=platform)

@@ -4,16 +4,15 @@ description: >-
   `codegen-tests`) and the on-device ones (ci.yml `system-tests`,
   `system-tests-direct`, `dist-system-tests`, `pypto-lib-model`; daily_ci.yml
   `qwen3-perf`). All of them run directly on the host, as the same user, through
-  this one action: resilient submodule checkout into a per-job dir, ptoas +
-  pto-isa install, a per-job conda venv + activate.sh, and a from-source
+  this one action: resilient submodule checkout into a per-job dir, a ptoas
+  install, a per-job conda venv + activate.sh, and a from-source
   build/install of pypto (+ simpler). No container: the CPU jobs used to run in
   `localhost:5000/ci-py310` as root, which forced a root/ci-runner umask split on
   the shared ccache — running them on the host as ci-runner retires that.
 
   The device jobs differ from the CPU ones in two inputs: `needs-device` (gate the
-  npu-smi check + CANN set_env.sh) and `install-toolchain` (gate ptoas download +
-  pto-isa clone + the simpler build — the `--codegen-only` job needs none of
-  them).
+  npu-smi check + CANN set_env.sh) and `install-toolchain` (gate the ptoas
+  download + the simpler build — the `--codegen-only` job needs neither).
 
   Each host describes its own layout in the runner's `.env` (the file in the
   runner application's root dir, which the runner service loads into every job it
@@ -44,7 +43,7 @@ description: >-
   is tempted to find an interpreter on its own; conda is the wrong answer, and
   the right one is to move the step after the bootstrap instead.
 
-  The calling job must define PTOAS_ROOT, PTO_ISA_ROOT, PTOAS_VERSION,
+  The calling job must define PTOAS_ROOT, PTOAS_VERSION,
   PTOAS_SHA256, the CMAKE_* and the non-path CCACHE_* (MAXSIZE / UMASK) environment
   variables; they are read from the job environment here. CCACHE_NAMESPACE and
   every cache path (CCACHE_DIR, PIP_CACHE_DIR, PTOAS_CACHE_DIR, UV_CACHE_DIR) are
@@ -82,18 +81,22 @@ inputs:
     default: 'false'
   install-toolchain:
     description: >-
-      When 'true' (the default) download ptoas, clone the pinned pto-isa, and
-      build+install simpler (./runtime) — everything the codegen -> device path
-      needs. The `--codegen-only` job passes 'false': it never assembles, never
-      touches pto-isa and never runs simpler, so it only needs the pypto build.
+      When 'true' (the default) download ptoas and build+install simpler
+      (./runtime) — everything the codegen -> device path needs. Simpler's own
+      installer resolves the pinned pto-isa checkout (runtime/pto_isa.pin is the
+      single source of truth), so this action never clones it. The
+      `--codegen-only` job passes 'false': it never assembles, never touches
+      pto-isa and never runs simpler, so it only needs the pypto build.
     required: false
     default: 'true'
   pto-isa-commit:
     description: >-
-      pto-isa commit to pin (needs.toolchain.outputs.pto_isa_commit). Required
-      when install-toolchain is 'true' (it selects both the pto-isa checkout and
-      the ccache namespace). Leave empty for the codegen-only job, which pins
-      nothing and keeps ccache in the default namespace.
+      Pinned pto-isa commit (needs.toolchain.outputs.pto_isa_commit, read from
+      runtime/pto_isa.pin). Required when install-toolchain is 'true' — it
+      namespaces ccache so an ISA bump forces a real recompile. It does not
+      select the checkout: simpler resolves that from the pin itself. Leave
+      empty for the codegen-only job, which pins nothing and keeps ccache in the
+      default namespace.
     required: false
     default: ''
   toolchain:
@@ -279,16 +282,6 @@ runs:
       if: ${{ inputs.pto-isa-commit != '' }}
       shell: bash
       run: echo "CCACHE_NAMESPACE=pto-isa-${{ inputs.pto-isa-commit }}" >> "$GITHUB_ENV"
-
-    - name: Clone pto-isa
-      if: ${{ inputs.install-toolchain == 'true' }}
-      shell: bash
-      run: |
-        rm -rf "$PTO_ISA_ROOT"
-        timeout 60 git clone https://github.com/hw-native-sys/pto-isa.git "$PTO_ISA_ROOT" \
-          || { rm -rf "$PTO_ISA_ROOT"; timeout 300 git clone https://gitcode.com/luohuan40/pto-isa.git "$PTO_ISA_ROOT"; }
-        cd "$PTO_ISA_ROOT"
-        git checkout ${{ inputs.pto-isa-commit }}
 
     - name: Bootstrap conda + per-job venv + write activate.sh
       if: ${{ inputs.toolchain == 'conda' }}
