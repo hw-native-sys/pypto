@@ -33,10 +33,12 @@
  * boundary. This makes zero-iteration loops, one-sided branches, and later
  * outlining safe without a path-exponential analysis.
  *
- * ``AccStorePhaseValid`` is structural and runs at pipeline input. The visitor
- * therefore handles both the author-facing pre-SSA form (including rebindings
- * and an immediately nested ``store(gemv(..., final), ..., final)``) and the
- * normalized three-address form seen by later verification instrumentation.
+ * ``AccStorePhaseValid`` runs immediately after InlineFunctions, so a final
+ * producer returned by an Inline helper is checked in the same function and
+ * region as its consuming store. The visitor handles both the resulting
+ * pre-SSA form (including rebindings and an immediately nested
+ * ``store(gemv(..., final), ..., final)``) and the normalized three-address form
+ * seen by later verification instrumentation.
  * Complexity is O(N log P), where N is the IR size and P the number of live
  * final producers (normally zero or one).
  */

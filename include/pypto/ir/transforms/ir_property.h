@@ -103,9 +103,10 @@ enum class IRProperty : uint64_t {
                                     ///< verified at pipeline input
   AccStorePhaseValid,  ///< Every final phased GEMV producer is paired in the same straight-line region with
                        ///< exactly one final tile.store of that value, and every final tile.store has such a
-                       ///< live producer. Decidable on the user's own IR, so it is a structural property
-                       ///< verified at pipeline input; a mismatch can leave the A2/A3 accumulator unit flag
-                       ///< set or wait forever on an unset flag, stalling device execution
+                       ///< live producer. Verified after InlineFunctions so a producer returned by an Inline
+                       ///< helper can be paired with its caller's store; a mismatch can leave the A2/A3
+                       ///< accumulator unit flag set or wait forever on an unset flag, stalling device
+                       ///< execution
   kCount               ///< Sentinel (must be last)
 };
 

@@ -185,7 +185,7 @@ const IRPropertySet& GetStructuralProperties() {
                                    IRProperty::OutParamNotShadowed, IRProperty::NoNestedInCore,
                                    IRProperty::InOutUseValid,       IRProperty::PipelineLoopValid,
                                    IRProperty::ArrayNotEscaped,     IRProperty::ManualDepsOnSubmitOnly,
-                                   IRProperty::AtomicAddDtypeValid, IRProperty::AccStorePhaseValid};
+                                   IRProperty::AtomicAddDtypeValid};
   return props;
 }
 

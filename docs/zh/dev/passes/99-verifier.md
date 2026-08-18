@@ -15,7 +15,7 @@
 
 - **可插拔规则系统**：可通过自定义验证规则进行扩展
 - **基于属性的验证**：选择性属性集——精确验证所需内容
-- **结构性属性 (Structural Properties)**：TypeChecked、BreakContinueValid、NoRedundantBlocks、UseAfterDef、OutParamNotShadowed、NoNestedInCore、InOutUseValid、PipelineLoopValid、ArrayNotEscaped、ManualDepsOnSubmitOnly、AtomicAddDtypeValid 和 AccStorePhaseValid 由 `VerificationInstrument` 在每个 Pass 执行前后验证；在流水线启动时，`PassPipeline` 仅验证与 `GetVerifiedProperties()` 共有的轻量子集
+- **结构性属性 (Structural Properties)**：TypeChecked、BreakContinueValid、NoRedundantBlocks、UseAfterDef、OutParamNotShadowed、NoNestedInCore、InOutUseValid、PipelineLoopValid、ArrayNotEscaped、ManualDepsOnSubmitOnly 和 AtomicAddDtypeValid 由 `VerificationInstrument` 在每个 Pass 执行前后验证；在流水线启动时，`PassPipeline` 仅验证与 `GetVerifiedProperties()` 共有的轻量子集
 - **双重验证模式**：收集诊断信息或在首个错误时抛出异常
 - **Pass 集成**：可作为优化流水线中的 Pass 使用
 - **全面的诊断信息**：收集所有问题及源码位置
@@ -26,10 +26,10 @@
 
 | 类别 | 示例 | 行为 |
 | ---- | ---- | ---- |
-| **结构性** | TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly, AtomicAddDtypeValid, AccStorePhaseValid | 始终为真。由 `VerificationInstrument` 在每个 Pass 执行前后验证；与 `GetVerifiedProperties()` 共有的子集还会在流水线启动时验证。不在 PassProperties 中声明。 |
+| **结构性** | TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly, AtomicAddDtypeValid | 始终为真。由 `VerificationInstrument` 在每个 Pass 执行前后验证；与 `GetVerifiedProperties()` 共有的子集还会在流水线启动时验证。不在 PassProperties 中声明。 |
 | **流水线** | SSAForm, NoNestedCalls, HasMemRefs, ... | 由 Pass 产生/失效。按 Pass 声明的契约验证。 |
 
-`GetStructuralProperties()` 返回 `{TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly, AtomicAddDtypeValid, AccStorePhaseValid}`。这些由 `VerificationInstrument` **在每个 Pass 执行前后验证**。在**流水线启动时**，`PassPipeline::Run()` 仅额外验证与 `GetVerifiedProperties()` 共有的轻量子集（`GetStructuralProperties().Intersection(GetVerifiedProperties())`）——因此例如 `ArrayNotEscaped` 会在每个 Pass 前后验证，但不会在流水线启动时验证。由于没有 Pass 在 `required`/`produced`/`invalidated` 中声明它们，`VerificationInstrument` 将它们与 Pass 声明的属性合并，确保没有 Pass 破坏这些基本不变量。
+`GetStructuralProperties()` 返回 `{TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly, AtomicAddDtypeValid}`。这些由 `VerificationInstrument` **在每个 Pass 执行前后验证**。在**流水线启动时**，`PassPipeline::Run()` 仅额外验证与 `GetVerifiedProperties()` 共有的轻量子集（`GetStructuralProperties().Intersection(GetVerifiedProperties())`）——因此例如 `ArrayNotEscaped` 会在每个 Pass 前后验证，但不会在流水线启动时验证。由于没有 Pass 在 `required`/`produced`/`invalidated` 中声明它们，`VerificationInstrument` 将它们与 Pass 声明的属性合并，确保没有 Pass 破坏这些基本不变量。
 
 ### 验证规则系统
 
@@ -86,7 +86,7 @@
 | **AccToGmStoreValid** | AccToGmStoreValid | 每个源 tile 位于 **Acc** 的 `tile.store`，其目标 GM tensor 的 dtype 必须是 cube fix-pipe 能够收窄到的类型：Ascend910B 与 Ascend950 均为 `INT32/FP32/FP16/BF16`（`BackendHandler::SupportsAccToGmDtype`，与 pto-isa 非量化分支的 `CheckAcc2gm` 白名单以及 ptoas `pto.tstore` 的 "acc tstore dst element type" 规则一致；该钩子仍按后端区分，因为两个集合是各自 pin 目标的独立事实）。`INT8`/`INT16` 目标会被拒绝。**由** `InferTileMemorySpace` **产生**并列入 `GetVerifiedProperties()`，因此 `PassPipeline` 在该 pass 之后立即自动验证。这个位置是关键的：合法性取决于 tile 的**内存空间**，而非用户可见的 dtype，因此无法更早判定——同一段 DSL 程序，当 matmul 结果经由 Vec（显式 `pl.cast` 在向量单元中收窄）时合法，留在 Acc 时则非法。缺少此检查时程序会一路走到 ptoas，由后者在 `pto.tstore` 校验阶段针对生成的 `.pto` 中某一行报错；而且这样一个 store 往往还会连带触发另一个看似无关的算子（int8 零初始化会下降为同样非法 dtype 的 `pto.texpands`），于是这个迟到的诊断只报出两个症状，从不指出根因。当后端未配置（无可校验的依据）或 tile 内存空间尚未解析时跳过。**修复方式**：先经向量单元收窄——用 `pl.cast` 将 matmul 结果转为目标 dtype 后再存储——或者累加到 `INT32`/`FP32` tensor 后再转换。 |
 | **AtomicAddDtypeValid** | AtomicAddDtypeValid | 每个写入全局内存的原子加操作，其目标 dtype 必须是后端 store 流水能够合并的类型。该校验在一处覆盖全部原子写入点：`tile.store`、`tensor.assemble`、`pld.tensor.put`、`pld.tile.put`、`pld.tensor.remote_store` 和 `pld.tile.remote_store`。只有 `bf16` 因后端而异——pto-isa 将其下降为 `SetAtomicAdd<bfloat16_t>` -> `set_atomic_bf16`，Ascend910B（A2/A3）支持而 Ascend950（A5）不支持（`BackendHandler::SupportsBf16AtomicAdd`）；其余硬件原子加 dtype（`FP32/FP16/INT32/INT16/INT8`）在所有后端均可用，由各算子 deducer 以后端无关的方式把关。远程 put 路径与本地 store 是**同一套机制**而非并行机制：pto-isa 的 comm `TPut` 通过 VEC 暂存 tile 流式传输，并用 `TSTORE_IMPL<..., AtomicAdd>` 落盘每个分块，而 `remote_store` 直接发射 `pto.tstore`，因此一个判定式即可管住全部写入点；而 ptoas 自身没有原子 dtype 规则（`TPutOp::verify` 只检查元素类型一致性与 shape），缺少此检查时程序会一路走到生成代码中的 pto-isa `static_assert`，而那段代码并非用户所写。列入 **`GetStructuralProperties()`**，且不由任何 Pass 产生：这里不依赖任何下降结果（atomic kwarg 与目标 dtype 在用户自己的 IR 中即已存在），因此 `PassPipeline` 在 `pipeline_input` 阶段验证，错误携带原始 `Span`。当后端未配置（无可校验的依据）时跳过。**修复方式**：累加到 `FP32` tensor，在归约完成后再转换为 `bf16`。 |
 
-| **AccStorePhaseValid** | AccStorePhaseValid | 校验 A2/A3 unit flag 的双向配对协议。每个带 `acc_phase=pl.AccPhase.Final` 的 `tile.gemv`、`tile.gemv_acc` 或 `tile.gemv_bias`，都必须由 `tile.store(..., st_phase=pl.STPhase.Final)` 对同一个 SSA 值（允许普通 SSA 别名）恰好消费一次；反向地，每个 final store 也必须有一个仍未消费的 final 生产者。配对必须位于同一个直线控制流区域：分支或循环体内部完整配对是合法的，但 obligation 不得跨越 if/loop/scope 边界，否则单边分支或零次循环会使 flag 状态取决于执行路径。生产者 final 下降为 check-and-set，store final 下降为 check-and-clear；漏掉 store 会遗留置位并让后续生产者卡住，缺少生产者的 final store 则会永久等待从未置位的 flag。该属性列入 **`GetStructuralProperties()`** 与 `GetVerifiedProperties()`，因此 `PassPipeline` 会在 `pipeline_input` 阶段、任何下降或内存规划之前校验带用户源码 Span 的 IR；`VerificationInstrument` 也会确保后续 Pass 维持该不变量。**修复方式**：绑定 final GEMV 的结果，并在同一直线区域内用 `pl.store(result, ..., st_phase=pl.STPhase.Final)` 排空同一个值。 |
+| **AccStorePhaseValid** | AccStorePhaseValid | 校验 A2/A3 unit flag 的双向配对协议。每个带 `acc_phase=pl.AccPhase.Final` 的 `tile.gemv`、`tile.gemv_acc` 或 `tile.gemv_bias`，都必须由 `tile.store(..., st_phase=pl.STPhase.Final)` 对同一个 SSA 值（允许普通 SSA 别名）恰好消费一次；反向地，每个 final store 也必须有一个仍未消费的 final 生产者。配对必须位于同一个直线控制流区域：分支或循环体内部完整配对是合法的，但 obligation 不得跨越 if/loop/scope 边界，否则单边分支或零次循环会使 flag 状态取决于执行路径。生产者 final 下降为 check-and-set，store final 下降为 check-and-clear；漏掉 store 会遗留置位并让后续生产者卡住，缺少生产者的 final store 则会永久等待从未置位的 flag。该属性**由** `InlineFunctions` **产生**并列入 `GetVerifiedProperties()`，因此 `PassPipeline` 会在 Inline helper 展开后立即校验；这样 helper 返回的 final accumulator 值可以由调用方存储，同时保留带源码 Span 的诊断。**修复方式**：绑定 final GEMV 的结果，并在同一直线区域内用 `pl.store(result, ..., st_phase=pl.STPhase.Final)` 排空同一个值。 |
 
 ### SSAVerify
 
@@ -177,7 +177,7 @@
 
 | 函数 | 返回值 | 描述 |
 | ---- | ------ | ---- |
-| `GetStructuralProperties()` | `{TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly, AtomicAddDtypeValid, AccStorePhaseValid}` | 由 `VerificationInstrument` 在每个 Pass 执行前后验证的不变量（与 `GetVerifiedProperties()` 共有的子集还会在流水线启动时验证） |
+| `GetStructuralProperties()` | `{TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly, AtomicAddDtypeValid}` | 由 `VerificationInstrument` 在每个 Pass 执行前后验证的不变量（与 `GetVerifiedProperties()` 共有的子集还会在流水线启动时验证） |
 | `GetDefaultVerifyProperties()` | `{SSAForm, TypeChecked, NoNestedCalls, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, TileTypeCoherence, ArrayNotEscaped}` | `run_verifier()` 的默认属性集 |
 | `GetVerifiedProperties()` | `{SSAForm, TypeChecked, MixedKernelExpanded, AllocatedMemoryAddr, BreakContinueValid, NoRedundantBlocks, InOutUseValid, CallDirectionsResolved, ManualDepsOnSubmitOnly, ReturnParamsExplicit, AivSplitValid, HardSyncallOccupancyValid, IterArgCarryClassified, RuntimeScopesMaterialized, AccToGmStoreValid, AtomicAddDtypeValid, AccStorePhaseValid}` | `PassPipeline` 自动验证的轻量级属性集 |
 
