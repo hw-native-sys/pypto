@@ -463,7 +463,7 @@ func_orch = ir.Function("orchestrator", params, return_types, body, span, ir.Fun
 | 字段 | 类型 | 说明 |
 | ---- | ---- | ---- |
 | `name_` | string | 函数名称 |
-| `func_type_` | FunctionType | 函数类型（Opaque、Orchestration、InCore、AIC、AIV、Group 或 Spmd） |
+| `func_type_` | FunctionType | 函数类型（见下方 FunctionType 表格） |
 | `params_` | list[VarPtr] | 参数变量 (DefField) |
 | `param_directions_` | list[ParamDirection] | 参数方向，与 params_ 长度相同 |
 | `return_types_` | list[TypePtr] | 返回类型 |
@@ -536,8 +536,19 @@ def sample(logits: pl.Tensor[[B, V], pl.FP32]) -> pl.Tensor[[B], pl.INT32]:
 | `AIV` | Vector 核心内核（特化的 InCore） |
 | `Group` | AIC + AIV 内核的协调调度组 |
 | `Spmd` | SPMD 数据并行调度封装 |
+| `Inline` | 在每个调用点整体替换函数体；由 `InlineFunctions` 在其它 pass 之前消除 |
+| `Graph` | 可调用的编排片段，由 `host_build_graph` runtime 录制一次、之后回放 |
 
 `IsInCoreType(type)` / `ir.is_incore_type(type)` 对 `InCore`、`AIC` 和 `AIV` 返回 `True`。
+
+`IsOrchestrationLike(type)` 对 `Orchestration` 和 `Graph` 返回 `True`。两者的函数体
+都是编排代码，所以「因为它编排任务而处理该函数」的 pass 必须用这个谓词，而不是
+`== FunctionType::Orchestration` —— 后者会静默跳过 Graph 函数体。例外是那些含义为
+「唯一的编译入口」的代码，它们保持严格比较：Graph 是被入口调用的，它本身永远不是
+入口。
+
+Graph 函数和其它编排体一样派生出 `{Level::CHIP, Role::Orchestrator}`，因此仅凭
+level 和 role 也无法再区分出入口。
 
 ## Program 节点
 

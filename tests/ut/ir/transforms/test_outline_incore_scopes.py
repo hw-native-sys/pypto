@@ -3068,5 +3068,64 @@ class TestPromotionFoldsParamDimReads:
         assert len(self._dim_reads(self._main_stmts(After))) == 1
 
 
+class TestGraphFunctionTypeIsPreserved:
+    """A Graph body is scanned for InCore scopes without losing its identity.
+
+    The promotion that turns an Opaque body into Orchestration once it has been
+    outlined is an unconditional overwrite of ``func_type_``. That was safe only
+    while the pass admitted exactly Opaque and Orchestration; admitting Graph
+    without guarding the promotion would erase the marker silently, leaving a
+    function indistinguishable from a plain Orchestration entry downstream.
+    """
+
+    @staticmethod
+    def _outline(program):
+        with passes.PassContext([]):
+            return passes.outline_incore_scopes()(passes.convert_to_ssa()(program))
+
+    def test_graph_with_incore_scope_is_outlined_and_stays_graph(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Graph)
+            def layer(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+        After = self._outline(Before)
+
+        layer = After.get_function("layer")
+        assert layer is not None
+        assert layer.func_type == ir.FunctionType.Graph, "outlining must not overwrite the Graph marker"
+        # The scope really was outlined, so this does not pass by being skipped.
+        assert After.get_function("layer_incore_0") is not None
+
+    def test_graph_without_incore_scope_stays_graph(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Graph)
+            def layer(self, x: pl.Scalar[pl.INT32]) -> pl.Scalar[pl.INT32]:
+                return x
+
+        layer = self._outline(Before).get_function("layer")
+        assert layer is not None
+        assert layer.func_type == ir.FunctionType.Graph
+
+    def test_opaque_promotion_still_works(self):
+        """Guarding the promotion must not disable it for the Opaque case."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Opaque)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+        main = self._outline(Before).get_function("main")
+        assert main is not None
+        assert main.func_type == ir.FunctionType.Orchestration
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -43,6 +43,28 @@ def aicore_kernel(x: pl.INT64) -> pl.INT64:
 
 未指定类型时, 函数默认为 `Opaque`。
 
+### Graph 片段
+
+`pl.FunctionType.Graph` 把函数标记为可录制的编排片段。在 `host_build_graph`
+runtime 下，每个调用点变成一次 task launch：runtime 在第一次调用时录制、之后回放，
+于是 N 次调用只付一次建图代价，而不是 N 次：
+
+```python
+@pl.program
+class Decoder:
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(self, cur, normed, next_hidden, wq, layer_base: pl.Scalar[pl.INDEX]):
+        ...
+
+    @pl.function
+    def decode(self, cur, normed, next_hidden, wq):
+        for i in pl.range(40):
+            self.layer(cur, normed, next_hidden, wq, i * 5120)
+```
+
+一个 Graph 函数就是一份被录制的拓扑：runtime 用生成的 C++ 函数地址来标识这份录制，
+因此不存在需要命名、也不需要保证唯一的 cache key。
+
 ### 参数方向
 
 参数可以使用包装类型指定 `In` (默认)、`Out` 或 `InOut` 方向:

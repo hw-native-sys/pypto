@@ -48,6 +48,11 @@ namespace ir {
  * - Spmd: SPMD data-parallel dispatch wrapper
  * - Inline: Whole-body substitution at every call site by the InlineFunctions
  *   pass. Eliminated from the program before any other pass runs.
+ * - Graph: A callable orchestration fragment. Its body is orchestration code,
+ *   but each call site is a single task launch that the host_build_graph
+ *   runtime records once and replays thereafter. The runtime identifies the
+ *   recording by the address of the emitted C++ function, so one Graph
+ *   function is one recorded topology with no key to keep in sync.
  */
 enum class FunctionType : uint8_t {
   Opaque = 0,         ///< Default: unspecified function type
@@ -57,7 +62,8 @@ enum class FunctionType : uint8_t {
   AIV = 4,            ///< Vector core kernel (specialized InCore)
   Group = 5,          ///< Co-scheduled group of AIC + AIV kernels
   Spmd = 6,           ///< SPMD data-parallel dispatch
-  Inline = 7          ///< Whole-body substitution at every call site
+  Inline = 7,         ///< Whole-body substitution at every call site
+  Graph = 8           ///< Recordable/replayable orchestration fragment
 };
 
 /**
@@ -258,6 +264,8 @@ inline std::string FunctionTypeToString(FunctionType type) {
       return "Spmd";
     case FunctionType::Inline:
       return "Inline";
+    case FunctionType::Graph:
+      return "Graph";
   }
   throw pypto::TypeError("Unknown FunctionType");
 }
@@ -270,6 +278,8 @@ inline std::string FunctionTypeToString(FunctionType type) {
 inline Level FunctionTypeToLevel(FunctionType type) {
   switch (type) {
     case FunctionType::Orchestration:
+    case FunctionType::Graph:
+      // A Graph body is chip-level orchestration; only its call site differs.
       return Level::CHIP;
     case FunctionType::InCore:
       return Level::CHIP_DIE;
@@ -303,6 +313,23 @@ inline bool IsWrapperType(FunctionType type) {
 }
 
 /**
+ * @brief Check if a FunctionType has an orchestration body (Orchestration or Graph)
+ *
+ * Orchestration and Graph bodies are both host/AICPU task-orchestration code, so
+ * every pass that processes a function *because it orchestrates tasks* must
+ * accept both. Prefer this over `== FunctionType::Orchestration`, which silently
+ * skips Graph bodies and produces a program missing whatever that pass
+ * contributes.
+ *
+ * The exception is code that means "the single compilation entry point" rather
+ * than "an orchestration body" — that must stay a strict comparison, since a
+ * Graph is called by the entry, never the entry itself.
+ */
+inline bool IsOrchestrationLike(FunctionType type) {
+  return type == FunctionType::Orchestration || type == FunctionType::Graph;
+}
+
+/**
  * @brief Convert string to FunctionType
  * @param str String representation
  * @return FunctionType enum value
@@ -325,6 +352,8 @@ inline FunctionType StringToFunctionType(const std::string& str) {
     return FunctionType::Spmd;
   } else if (str == "Inline") {
     return FunctionType::Inline;
+  } else if (str == "Graph") {
+    return FunctionType::Graph;
   } else {
     throw pypto::TypeError("Unknown FunctionType: " + str);
   }
@@ -430,10 +459,13 @@ class Function : public IRNode {
     CHECK(params_.size() == param_directions_.size())
         << "params and param_directions must have same size, got " << params_.size() << " vs "
         << param_directions_.size();
-    if (IsInCoreType(func_type_) || func_type_ == FunctionType::Group ||
-        func_type_ == FunctionType::Orchestration) {
+    if (IsInCoreType(func_type_) || func_type_ == FunctionType::Group || IsOrchestrationLike(func_type_)) {
       Level derived_level = FunctionTypeToLevel(func_type_);
-      Role derived_role = (func_type_ == FunctionType::Orchestration) ? Role::Orchestrator : Role::SubWorker;
+      // A Graph body orchestrates tasks, so it is an Orchestrator like any other
+      // orchestration body. Code that must single out the compilation *entry*
+      // therefore cannot key on the role alone — see IsChipOrch in
+      // materialize_comm_domain_scopes_pass.cpp, which excludes Graph explicitly.
+      Role derived_role = IsOrchestrationLike(func_type_) ? Role::Orchestrator : Role::SubWorker;
       if (level_.has_value()) {
         CHECK(*level_ == derived_level)
             << "Function '" << name_ << "' has func_type=" << FunctionTypeToString(func_type_)
@@ -479,10 +511,10 @@ class Function : public IRNode {
   }
 
  public:
-  std::string name_;            // Function name
-  FunctionType func_type_;      // Function type (Opaque, Orchestration, InCore, AIC, AIV, or Group)
-  std::optional<Level> level_;  // Hierarchy level (nullopt = infer from func_type)
-  std::optional<Role> role_;    // Function role (nullopt = default per level)
+  std::string name_;                                     // Function name
+  FunctionType func_type_;                               // Function type (see the FunctionType enum)
+  std::optional<Level> level_;                           // Hierarchy level (nullopt = infer from func_type)
+  std::optional<Role> role_;                             // Function role (nullopt = default per level)
   std::vector<std::pair<std::string, std::any>> attrs_;  // Function-level attributes (key-value metadata)
   bool requires_runtime_binding_ = false;  // SubWorker with abstract (`...`) body: impl bound at runtime
   std::vector<VarPtr> params_;             // Parameter variables
@@ -535,6 +567,16 @@ class Function : public IRNode {
 };
 
 using FunctionPtr = std::shared_ptr<const Function>;
+
+/**
+ * @brief Null-safe overload of IsOrchestrationLike for a function handle
+ *
+ * A null handle is not orchestration-like, so callers that already hold a
+ * possibly-null FunctionPtr need no separate guard.
+ */
+inline bool IsOrchestrationLike(const FunctionPtr& func) {
+  return func != nullptr && IsOrchestrationLike(func->func_type_);
+}
 
 }  // namespace ir
 }  // namespace pypto

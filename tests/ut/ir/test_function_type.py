@@ -25,8 +25,13 @@ def test_function_type_enum():
         ir.FunctionType.AIV,
         ir.FunctionType.Group,
         ir.FunctionType.Spmd,
+        ir.FunctionType.Inline,
+        ir.FunctionType.Graph,
     ]
     assert len(all_types) == len(set(all_types))
+    # Distinctness alone cannot notice a member missing from the list above, so
+    # pin the count against the enum itself.
+    assert len(all_types) == len(ir.FunctionType.__members__)
 
 
 def test_function_constructor_with_type():
@@ -240,6 +245,7 @@ def test_function_type_serialization():
 
     non_opaque_types = [
         ir.FunctionType.Orchestration,
+        ir.FunctionType.Graph,
         ir.FunctionType.InCore,
         ir.FunctionType.AIC,
         ir.FunctionType.AIV,

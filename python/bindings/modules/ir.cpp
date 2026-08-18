@@ -1671,6 +1671,7 @@ void BindIR(nb::module_& m) {
       .value("Group", FunctionType::Group, "Co-scheduled group of AIC + AIV kernels")
       .value("Spmd", FunctionType::Spmd, "SPMD data-parallel dispatch")
       .value("Inline", FunctionType::Inline, "Whole-body substitution at every call site")
+      .value("Graph", FunctionType::Graph, "Recordable/replayable orchestration fragment")
       .export_values();
 
   // Level enum — hierarchy level in the Linqu machine model

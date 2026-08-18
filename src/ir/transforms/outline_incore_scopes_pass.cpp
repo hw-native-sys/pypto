@@ -198,10 +198,10 @@ Pass OutlineIncoreScopes() {
     }
 
     for (const auto& [gvar, func] : program->functions_) {
-      // Process Opaque and Orchestration functions; other function types
-      // (InCore/Group/Spmd) are already outlined or not expected to carry
-      // InCore scopes.
-      if (func->func_type_ != FunctionType::Opaque && func->func_type_ != FunctionType::Orchestration) {
+      // Process Opaque and orchestration-like (Orchestration / Graph) bodies;
+      // other function types (InCore/Group/Spmd) are already outlined or not
+      // expected to carry InCore scopes.
+      if (func->func_type_ != FunctionType::Opaque && !IsOrchestrationLike(func->func_type_)) {
         new_functions.push_back(func);
         continue;
       }
@@ -242,12 +242,21 @@ Pass OutlineIncoreScopes() {
 
       // Create new function with transformed body.
       // If any InCore scopes were outlined, promote Opaque -> Orchestration.
+      //
+      // The promotion must be conditional on the source type being Opaque. This
+      // expression is an unconditional overwrite, and was only correct while the
+      // gate above admitted exactly {Opaque, Orchestration}; now that Graph is
+      // admitted too, an unguarded write would silently erase the Graph marker
+      // of any Graph function whose body carries an InCore scope, leaving it
+      // indistinguishable from a plain Orchestration entry downstream.
       const auto& outlined = outliner.GetOutlinedFunctions();
-      FunctionType new_func_type = outlined.empty() ? func->func_type_ : FunctionType::Orchestration;
+      FunctionType new_func_type = (outlined.empty() || func->func_type_ != FunctionType::Opaque)
+                                       ? func->func_type_
+                                       : FunctionType::Orchestration;
       auto new_func = MutableCopy(func);
       new_func->body_ = new_body;
       new_func->func_type_ = new_func_type;
-      if (new_func_type == FunctionType::Orchestration) {
+      if (IsOrchestrationLike(new_func_type)) {
         new_func->level_ = FunctionTypeToLevel(new_func_type);
         new_func->role_ = Role::Orchestrator;
       }
@@ -317,8 +326,9 @@ class SplitIncoreOrchPropertyVerifierImpl : public PropertyVerifier {
           diagnostics, "SplitIncoreOrch",
           "InCore ScopeStmt found in non-InCore function (should have been outlined)");
       verifier.VisitStmt(func->body_);
-      // Also check Orchestration functions for leaked compute tensor ops
-      if (func->func_type_ == FunctionType::Orchestration) {
+      // Also check orchestration bodies for leaked compute tensor ops — the
+      // same leak invariant applies to a Graph body.
+      if (IsOrchestrationLike(func->func_type_)) {
         OrchComputeTensorOpVerifier compute_verifier(diagnostics);
         compute_verifier.VisitStmt(func->body_);
       }

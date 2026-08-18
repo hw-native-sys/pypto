@@ -253,8 +253,10 @@ Pass OutlineClusterScopes() {
     }
 
     for (const auto& [gvar, func] : program->functions_) {
-      // Only process Opaque and Orchestration functions (Group functions are already outlined)
-      if (func->func_type_ != FunctionType::Opaque && func->func_type_ != FunctionType::Orchestration) {
+      // Only process Opaque and orchestration-like (Orchestration / Graph)
+      // bodies; Group functions are already outlined. A Cluster or Spmd scope
+      // left un-outlined inside a Graph body makes the verifier below fail.
+      if (func->func_type_ != FunctionType::Opaque && !IsOrchestrationLike(func->func_type_)) {
         new_functions.push_back(func);
         continue;
       }

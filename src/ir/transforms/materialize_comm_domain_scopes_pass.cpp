@@ -485,6 +485,11 @@ class DispatchAnalyzer : public IRVisitor {
 
 [[nodiscard]] bool IsChipOrch(const FunctionPtr& func) {
   if (!func || !func->level_.has_value() || *func->level_ != Level::CHIP) return false;
+  // A Graph function carries {CHIP, Orchestrator} exactly like a chip entry, so
+  // the role disjunct below matches it even though its func_type_ does not. It
+  // is a task launched *by* a chip entry, never a host dispatch target, so
+  // exclude it explicitly — narrowing the func_type_ term alone would not help.
+  if (func->func_type_ == FunctionType::Graph) return false;
   return func->func_type_ == FunctionType::Orchestration ||
          (func->role_.has_value() && *func->role_ == Role::Orchestrator);
 }

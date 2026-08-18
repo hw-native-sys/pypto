@@ -3261,6 +3261,15 @@ class OrchestrationStmtCodegen : public CodegenBase {
       return;
     }
 
+    // A Graph is a task launch, not a kernel, so it has no core type. Its
+    // emission path lands with the rest of Graph Execution; until then, say so
+    // here rather than letting InferFunctionCoreType below abort with an
+    // internal "expects AIC or AIV" error that names nothing actionable.
+    CHECK_SPAN(callee_func->func_type_ != FunctionType::Graph, call->span_)
+        << "Graph function '" << callee_name
+        << "' cannot be compiled yet: type=pl.FunctionType.Graph is authorable, but the orchestration "
+           "codegen that emits a graph launch is not in place yet.";
+
     CoreType core_type = InferFunctionCoreType(callee_func);
     (*func_name_to_core_type_)[callee_name] = core_type;
 

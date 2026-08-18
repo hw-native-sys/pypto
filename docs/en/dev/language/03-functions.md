@@ -44,6 +44,30 @@ def aicore_kernel(x: pl.INT64) -> pl.INT64:
 
 When no type is specified, functions default to `Opaque`.
 
+### Graph Fragments
+
+`pl.FunctionType.Graph` marks a function as a recordable orchestration fragment.
+Under the `host_build_graph` runtime each call site becomes one task launch that
+the runtime records on the first call and replays afterwards, so N calls cost one
+graph build instead of N:
+
+```python
+@pl.program
+class Decoder:
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(self, cur, normed, next_hidden, wq, layer_base: pl.Scalar[pl.INDEX]):
+        ...
+
+    @pl.function
+    def decode(self, cur, normed, next_hidden, wq):
+        for i in pl.range(40):
+            self.layer(cur, normed, next_hidden, wq, i * 5120)
+```
+
+One Graph function is one recorded topology: the runtime identifies the recording
+by the address of the emitted C++ function, so there is no cache key to name or
+keep unique.
+
 ### Parameter Directions
 
 Parameters can have `In` (default), `Out`, or `InOut` directions using wrapper types:

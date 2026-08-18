@@ -836,6 +836,9 @@ class FunctionType(enum.Enum):
     - Spmd: SPMD data-parallel dispatch
     - Inline: Whole-body substitution at every call site by the
       InlineFunctions pass (eliminated before any other pass runs)
+    - Graph: A callable orchestration fragment. Its body is orchestration
+      code, but each call site is a single task launch that the
+      host_build_graph runtime records once and replays thereafter.
     """
 
     Opaque = ...
@@ -861,6 +864,9 @@ class FunctionType(enum.Enum):
 
     Inline = ...
     """Whole-body substitution at every call site."""
+
+    Graph = ...
+    """Recordable/replayable orchestration fragment."""
 
 class Level(enum.Enum):
     """Hierarchy level in the Linqu machine model.

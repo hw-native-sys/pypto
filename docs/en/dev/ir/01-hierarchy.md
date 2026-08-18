@@ -509,7 +509,7 @@ func_orch = ir.Function("orchestrator", params, return_types, body, span, ir.Fun
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `name_` | string | Function name |
-| `func_type_` | FunctionType | Function type (Opaque, Orchestration, InCore, AIC, AIV, Group, or Spmd) |
+| `func_type_` | FunctionType | Function type (see the FunctionType table below) |
 | `params_` | list[VarPtr] | Parameter variables (DefField) |
 | `param_directions_` | list[ParamDirection] | Parameter directions, same length as params_ |
 | `return_types_` | list[TypePtr] | Return types |
@@ -587,8 +587,20 @@ Consequences:
 | `AIV` | Vector core kernel (specialized InCore) |
 | `Group` | Co-scheduled group of AIC + AIV kernels |
 | `Spmd` | SPMD data-parallel dispatch wrapper |
+| `Inline` | Whole-body substitution at every call site; eliminated by `InlineFunctions` before any other pass |
+| `Graph` | Callable orchestration fragment, recorded once and replayed by the `host_build_graph` runtime |
 
 `IsInCoreType(type)` / `ir.is_incore_type(type)` returns `True` for `InCore`, `AIC`, and `AIV`.
+
+`IsOrchestrationLike(type)` returns `True` for `Orchestration` and `Graph`. Both
+have orchestration bodies, so a pass that processes a function *because it
+orchestrates tasks* must use this rather than `== FunctionType::Orchestration`,
+which silently skips Graph bodies. The exception is code that means "the single
+compilation entry point" — that stays a strict comparison, since a Graph is
+called by the entry and is never the entry itself.
+
+A Graph function derives `{Level::CHIP, Role::Orchestrator}` like any other
+orchestration body, so level and role alone no longer identify the entry either.
 
 ## Program Node
 
