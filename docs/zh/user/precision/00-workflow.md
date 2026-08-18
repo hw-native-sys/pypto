@@ -49,8 +49,11 @@
 
 **多跳 cast 值得说准确，因为它太容易被赖上。** 在 A5 上 `INT32→FP16` 会展开成 `INT32→FP32→FP16`。这条链与它所替代的那个参考**逐位相同** —— 参考指的是一个假想的、单步完成且采用相同舍入模式与相同溢出行为的 `INT32→FP16`。理由分两半：
 
-- **`|x| ≤ 65504`**（FP16 可表示的范围）：这样的 `x` 远小于 `2^24`，在 FP32 里是精确的。FP32 那一跳不舍入，唯一发生的舍入就是最后一跳 —— 与单步参考所做的舍入相同。
-- **`|x| > 65504`**：链式与单步参考都会在 FP16 上溢出，给出同样的饱和结果。`|x| > 2^24` 时 FP32 那一跳**确实**会舍入，但被舍入的值本就远在 FP16 范围之外，因此改变不了结果。
+- **`|x| ≤ 65504`**（FP16 最大的有限值）：这样的 `x` 远小于 `2^24`，在 FP32 里是精确的。FP32 那一跳不舍入，唯一发生的舍入就是最后一跳 —— 与单步参考所做的舍入相同。
+- **`65504 < |x| < 65520`**：这一段**不会**溢出。在就近舍入下它们落到最大的有限 FP16 值 `65504`，因为 `65520` 正是它与该格式本应有的下一个值之间的中点。两种形式的舍入方式相同。
+- **`|x| ≥ 65520`**：链式与单步参考都会溢出到无穷。`|x| > 2^24` 时 FP32 那一跳**确实**会舍入，但被舍入的值本就远在 FP16 范围之外，因此改变不了结果。
+
+中间那一段最值得记住：FP16 的「溢出」始于 `65520`，而不是 `65504`。
 
 只有当某个中间类型无法精确表示**确实落在目标范围内**的源值时，链式转换才会引入真正的差异。请去 [LegalizeTileCast](../../dev/passes/14-legalize_tile_cast.md) 查你这条链属于哪一类，而不是假定那一跳就是元凶。
 
@@ -78,9 +81,10 @@ def to_fp16(x: pl.Tensor[[ROWS, COLS], pl.INT32], out: pl.Out[pl.Tensor[[ROWS, C
 
 
 values = torch.zeros(ROWS, COLS, dtype=torch.int32)
-values[0, :4] = torch.tensor([0, 1, 2048, 65504])          # exact in FP16
-values[0, 4:8] = torch.tensor([65505, 70000, 1 << 20, 1 << 24])  # past FP16's range
-values[0, 8:12] = torch.tensor([(1 << 24) + 1, 1 << 25, -65504, -70000])  # past 2^24, and negatives
+values[0, :4] = torch.tensor([0, 1, 2048, 65504])            # exact in FP16
+values[0, 4:8] = torch.tensor([65505, 65519, 65520, 70000])  # the boundary: 65519 -> 65504, 65520 -> inf
+values[0, 8:12] = torch.tensor([1 << 20, 1 << 24, (1 << 24) + 1, 1 << 25])   # past 2^24
+values[0, 12:16] = torch.tensor([-65504, -65519, -65520, -70000])            # the same boundary, negative
 
 out = torch.zeros(ROWS, COLS, dtype=torch.float16)
 to_fp16(values, out, config=CFG)
@@ -132,6 +136,12 @@ assert "def " in src and "torch" in src                       # it is executable
 
 `CompiledProgram.validate_ir` 逐 pass 做这件对比。于是二分是机械的：**第一个 IR 不再吻合的 pass** 就是引入差异的那个。用 `ir.compile(dump_passes=PassDumpLevel.EXPLICIT)` dump 出它前后的 IR，读那两份。
 
+> **把你的容差传进去。** `validate_ir` 默认 `rtol=5e-2, atol=5e-2` —— 那是它自己的默认值，不是你在第 1 步定下的那个，而且比多数参考应有的宽松得多。放任不管的话，只要回退小于该值它就报告「对上了」，二分给你的边界便不是真正的边界：
+>
+> ```python
+> compiled.validate_ir(..., rtol=RTOL, atol=ATOL)   # 第 1 步定下的容差
+> ```
+
 这一步定位的是**语义**改变。它看不见只在设备上才出现的差异 —— 那要靠第 5 步。
 
 ## 第 5 步：是哪个张量错了
@@ -139,7 +149,7 @@ assert "def " in src and "torch" in src                       # it is executable
 当每个 pass 的 IR 都对、而设备结果不对时，去比对真实数据：
 
 ```python
-t = pl.dump_tag(t)       # 标记你关心的张量
+pl.dump_tag(t)       # 标记你关心的张量
 cfg = RunConfig(platform="a2a3sim", enable_dump_args=1)
 ```
 

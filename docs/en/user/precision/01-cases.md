@@ -89,7 +89,7 @@ because the passes are not the problem.
 **Step 5.** Mark the suspect tensors and compare actual values:
 
 ```python
-t = pl.dump_tag(t)
+pl.dump_tag(t)
 cfg = RunConfig(platform="a2a3sim", enable_dump_args=1)
 ```
 

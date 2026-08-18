@@ -158,24 +158,30 @@ view = pl.TensorView(stride=[1024, 1], layout=pl.TensorLayout.ND, valid_shape=[1
 <!-- doctest: run -->
 ```python
 N = pl.dynamic("N")
+TILE = 32                       # the physical tile the kernel moves per call
 
 
 @pl.jit.incore
 def rows(x: pl.Tensor[[N, 64], pl.FP32], out: pl.Out[pl.Tensor[[N, 64], pl.FP32]]):
-    out = pl.store(pl.mul(pl.load(x, [0, 0], [32, 64]), 2.0), [0, 0], out)
+    out = pl.store(pl.mul(pl.load(x, [0, 0], [TILE, 64]), 2.0), [0, 0], out)
     return out
 
 
 @pl.jit
-def drive(x: pl.Tensor[[32, 64], pl.FP32], out: pl.Out[pl.Tensor[[32, 64], pl.FP32]]):
-    return rows(x, out)
+def drive(x: pl.Tensor[[N, 64], pl.FP32], out: pl.Out[pl.Tensor[[N, 64], pl.FP32]]):
+    return rows(x, out)         # the entry is dynamic too, so both extents share it
 
 
-x = torch.randn(32, 64, dtype=torch.float32)
-out = torch.zeros(32, 64, dtype=torch.float32)
-drive(x, out, config=CFG)
-torch.testing.assert_close(out, x * 2.0, rtol=1e-4, atol=1e-4)
+# Two extents through one program: the dynamic dim collapses to None in the JIT
+# cache key, so the second call is not a recompile.
+for extent in (TILE, 3 * TILE):
+    x = torch.randn(extent, 64, dtype=torch.float32)
+    out = torch.zeros(extent, 64, dtype=torch.float32)
+    drive(x, out, config=CFG)
+    torch.testing.assert_close(out[:TILE], x[:TILE] * 2.0, rtol=1e-4, atol=1e-4)
 ```
+
+入口必须保持 dynamic 才成立。给它一个具体形状会把程序钉死在一个 extent 上；而在 dynamic 形状的张量上做编排级运算（而不是交给 InCore kernel）会更早失败 —— 失败在 `InitMemRef`，它需要常量维。上面这个 kernel 搬的是固定的 `TILE`；要覆盖更大输入的全部，用 [控制流](02-control-flow.md) 里的分块循环。
 
 同一个 `DynVar` 对象在多处注解中使用时指的是同一维 —— 复用这个对象，不要在表示同一个值时再造一个同名的。
 

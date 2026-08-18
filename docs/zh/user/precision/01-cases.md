@@ -60,7 +60,7 @@
 **第 5 步。** 标记可疑张量并比对真实数值：
 
 ```python
-t = pl.dump_tag(t)
+pl.dump_tag(t)
 cfg = RunConfig(platform="a2a3sim", enable_dump_args=1)
 ```
 

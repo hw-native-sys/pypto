@@ -213,24 +213,34 @@ one compiled program serves every size that axis takes: dynamic dimensions colla
 <!-- doctest: run -->
 ```python
 N = pl.dynamic("N")
+TILE = 32                       # the physical tile the kernel moves per call
 
 
 @pl.jit.incore
 def rows(x: pl.Tensor[[N, 64], pl.FP32], out: pl.Out[pl.Tensor[[N, 64], pl.FP32]]):
-    out = pl.store(pl.mul(pl.load(x, [0, 0], [32, 64]), 2.0), [0, 0], out)
+    out = pl.store(pl.mul(pl.load(x, [0, 0], [TILE, 64]), 2.0), [0, 0], out)
     return out
 
 
 @pl.jit
-def drive(x: pl.Tensor[[32, 64], pl.FP32], out: pl.Out[pl.Tensor[[32, 64], pl.FP32]]):
-    return rows(x, out)
+def drive(x: pl.Tensor[[N, 64], pl.FP32], out: pl.Out[pl.Tensor[[N, 64], pl.FP32]]):
+    return rows(x, out)         # the entry is dynamic too, so both extents share it
 
 
-x = torch.randn(32, 64, dtype=torch.float32)
-out = torch.zeros(32, 64, dtype=torch.float32)
-drive(x, out, config=CFG)
-torch.testing.assert_close(out, x * 2.0, rtol=1e-4, atol=1e-4)
+# Two extents through one program: the dynamic dim collapses to None in the JIT
+# cache key, so the second call is not a recompile.
+for extent in (TILE, 3 * TILE):
+    x = torch.randn(extent, 64, dtype=torch.float32)
+    out = torch.zeros(extent, 64, dtype=torch.float32)
+    drive(x, out, config=CFG)
+    torch.testing.assert_close(out[:TILE], x[:TILE] * 2.0, rtol=1e-4, atol=1e-4)
 ```
+
+The entry has to stay dynamic for that to hold. Giving it a concrete shape pins the program
+to one extent, and doing orchestration-level work on a dynamic-shaped tensor (rather than
+handing it to an InCore kernel) fails earlier still, in `InitMemRef`, which needs a constant
+dim. The kernel above moves a fixed `TILE`; covering the whole of a larger input is the
+chunking loop from [Control Flow](02-control-flow.md).
 
 The same `DynVar` object used in several annotations refers to the same dimension — reuse
 the object, do not create a second one with the same name if you mean the same value.

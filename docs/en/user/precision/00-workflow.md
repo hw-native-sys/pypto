@@ -59,12 +59,18 @@ bisecting anything.
 reference it is standing in for — a hypothetical single-step `INT32→FP16` under the same
 rounding mode and the same overflow behaviour. The argument has two halves:
 
-- **`|x| ≤ 65504`** (representable range of FP16): such an `x` is well under `2^24`, so it is
-  exact in FP32. The FP32 hop does not round, and the single rounding that occurs is the
-  final hop — the same rounding the one-step reference would perform.
-- **`|x| > 65504`**: both the chain and the one-step reference overflow FP16 and produce the
-  same saturated result. The FP32 hop *does* round for `|x| > 2^24`, but only among values
-  that are already far outside FP16's range, so that rounding cannot change the outcome.
+- **`|x| ≤ 65504`** (largest finite FP16): such an `x` is well under `2^24`, so it is exact
+  in FP32. The FP32 hop does not round, and the single rounding that occurs is the final
+  hop — the same rounding the one-step reference would perform.
+- **`65504 < |x| < 65520`**: these do *not* overflow. Under round-to-nearest they land on
+  the largest finite FP16, `65504`, because `65520` is the midpoint between it and the next
+  value the format would have had. Both forms round the same way.
+- **`|x| ≥ 65520`**: both the chain and the one-step reference overflow to infinity. The
+  FP32 hop *does* round for `|x| > 2^24`, but only among values already far outside FP16's
+  range, so that rounding cannot change the outcome.
+
+The middle case is the one worth remembering: FP16 "overflow" starts at `65520`, not at
+`65504`.
 
 A chain introduces a real difference only when an intermediate type cannot exactly represent
 source values that *are* in the destination's range. Check
@@ -98,9 +104,10 @@ def to_fp16(x: pl.Tensor[[ROWS, COLS], pl.INT32], out: pl.Out[pl.Tensor[[ROWS, C
 
 
 values = torch.zeros(ROWS, COLS, dtype=torch.int32)
-values[0, :4] = torch.tensor([0, 1, 2048, 65504])          # exact in FP16
-values[0, 4:8] = torch.tensor([65505, 70000, 1 << 20, 1 << 24])  # past FP16's range
-values[0, 8:12] = torch.tensor([(1 << 24) + 1, 1 << 25, -65504, -70000])  # past 2^24, and negatives
+values[0, :4] = torch.tensor([0, 1, 2048, 65504])            # exact in FP16
+values[0, 4:8] = torch.tensor([65505, 65519, 65520, 70000])  # the boundary: 65519 -> 65504, 65520 -> inf
+values[0, 8:12] = torch.tensor([1 << 20, 1 << 24, (1 << 24) + 1, 1 << 25])   # past 2^24
+values[0, 12:16] = torch.tensor([-65504, -65519, -65520, -70000])            # the same boundary, negative
 
 out = torch.zeros(ROWS, COLS, dtype=torch.float16)
 to_fp16(values, out, config=CFG)
@@ -162,6 +169,15 @@ mechanical: the first pass whose IR stops matching is the one that introduced th
 difference. Dump the IR either side of it with
 `ir.compile(dump_passes=PassDumpLevel.EXPLICIT)` and read the two.
 
+> **Pass it your tolerance.** `validate_ir` defaults to `rtol=5e-2, atol=5e-2` — its own
+> defaults, not the ones you settled on in step 1, and far looser than most references
+> deserve. Left alone it reports a pass as matching whenever the regression is smaller than
+> that, and the bisection then hands you a boundary that is not the real one:
+>
+> ```python
+> compiled.validate_ir(..., rtol=RTOL, atol=ATOL)   # the tolerance from step 1
+> ```
+
 This locates a *semantic* change. It cannot see a difference that only appears on device —
 for that, step 5.
 
@@ -170,7 +186,7 @@ for that, step 5.
 When the IR is right at every pass but the device result is not, compare actual data:
 
 ```python
-t = pl.dump_tag(t)       # mark the tensors you care about
+pl.dump_tag(t)       # mark the tensors you care about
 cfg = RunConfig(platform="a2a3sim", enable_dump_args=1)
 ```
 
@@ -180,6 +196,30 @@ them with `python -m simpler_setup.tools.dump_viewer`.
 > **Fatal pitfall:** a full dump (`enable_dump_args=2`) on a large workload can saturate the
 > host-side collector (~42 MB/s drain) and get the AICPU killed by a STARS op-execute
 > timeout. Prefer level `1` plus `pl.dump_tag` on the specific tensors you are chasing.
+
+### When the value you want is not a tensor
+
+Dumping only reaches things that *are* tensors. The value that would settle the question is
+often an intermediate inside an InCore function — an accumulator before the final store, a
+tile after one step of a fused chain — which never reaches GM and so cannot be tagged.
+
+Give it somewhere to go: add a temporary `pl.Out` parameter to the kernel, store the
+intermediate into it, and thread it out through the orchestration.
+
+```python
+@pl.jit.incore
+def fused(x: pl.Tensor, out: pl.Out[pl.Tensor],
+          probe: pl.Out[pl.Tensor]):        # temporary, for this investigation only
+    acc = pl.add(pl.load(x, [0, 0], [64, 128]), 1.0)
+    probe = pl.store(acc, [0, 0], probe)    # the intermediate, now inspectable
+    out = pl.store(pl.exp(acc), [0, 0], out)
+    return out, probe
+```
+
+It is a debugging edit, not a design: the extra parameter costs a GM round trip and changes
+the dependency graph, so take it out once the question is answered. What it buys is a direct
+comparison of the intermediate against your host reference — which usually converts "the
+output is wrong" into "this step is wrong" in one run.
 
 ## Edge Cases
 
