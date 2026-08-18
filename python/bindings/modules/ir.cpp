@@ -1477,7 +1477,6 @@ void BindIR(nb::module_& m) {
 
   nb::enum_<STPhase>(ir, "STPhase", nb::is_arithmetic(), "Consumer-side unit-flag phase for tile.store")
       .value("Unspecified", STPhase::kUnspecified, "Do not use the unit-flag protocol")
-      .value("Partial", STPhase::kPartial, "Check the unit flag without clearing it")
       .value("Final", STPhase::kFinal, "Check and clear the unit flag");
 
   nb::enum_<ReduceOp>(ir, "ReduceOp", nb::is_arithmetic(),

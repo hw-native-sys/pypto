@@ -3207,9 +3207,9 @@ class TestTileStoreAttrsCodegen:
     ) -> str:
         """Generate one fp32 store with the requested optional attributes.
 
-        A final store is paired with a final GEMV producer: unlike the partial
-        and unspecified attribute spelling tests, a standalone final store is
-        an invalid unit-flag protocol and AccStorePhaseValid rejects it.
+        A final store is paired with a final GEMV producer: unlike an
+        unspecified store, a standalone final store is an invalid unit-flag
+        protocol and AccStorePhaseValid rejects it.
         """
 
         if st_phase == pl.STPhase.Final:
@@ -3297,18 +3297,14 @@ class TestTileStoreAttrsCodegen:
             f"plain store must not emit optional attributes, got:\n{tstore_lines}"
         )
 
-    @pytest.mark.parametrize(
-        ("st_phase", "pto_phase"),
-        [(pl.STPhase.Partial, "partial"), (pl.STPhase.Final, "final")],
-    )
-    def test_store_phase_emits_st_phase(self, st_phase, pto_phase):
-        """Explicit store phases map to the exact PTO stPhase attribute."""
-        mlir = self._generate_fp32_store(st_phase=st_phase)
+    def test_final_store_phase_emits_st_phase(self):
+        """The supported final store phase maps to the exact PTO attribute."""
+        mlir = self._generate_fp32_store(st_phase=pl.STPhase.Final)
         tstore_lines = [line.strip() for line in mlir.splitlines() if "pto.tstore" in line]
-        expected = f"{{stPhase = #pto<st_phase {pto_phase}>}}"
+        expected = "{stPhase = #pto<st_phase final>}"
         assert tstore_lines, f"no pto.tstore line emitted:\n{mlir}"
         assert all(expected in line for line in tstore_lines), (
-            f"expected {pto_phase} stPhase on every pto.tstore, got:\n{tstore_lines}"
+            f"expected final stPhase on every pto.tstore, got:\n{tstore_lines}"
         )
 
     def test_store_phase_and_atomic_share_one_attr_dict(self):

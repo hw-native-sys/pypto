@@ -230,7 +230,7 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
 
   const int st_phase = op->GetKwarg<int>("st_phase", static_cast<int>(ir::STPhase::kUnspecified));
   INTERNAL_CHECK_SPAN(ir::IsValidSTPhase(st_phase), op->span_)
-      << "tile.store st_phase must encode STPhase::kUnspecified, kPartial, or kFinal, got " << st_phase;
+      << "tile.store st_phase must encode STPhase::kUnspecified or kFinal, got " << st_phase;
   if (st_phase != static_cast<int>(ir::STPhase::kUnspecified)) {
     attrs.push_back("stPhase = #pto<st_phase " + ir::STPhaseToPTOString(static_cast<ir::STPhase>(st_phase)) +
                     ">");
