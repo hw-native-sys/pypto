@@ -150,7 +150,7 @@ a per-launch timing object. The runtime emits per-run host/device timing as
 `[STRACE]` log markers (simpler PR #1177, on by default under
 `SIMPLER_DFX`); parse them with simpler's `strace_timing` /
 `device_log_timing` tools rather than reading a return value. For per-task
-device timing, enable the L2 swimlane DFX (`RunConfig(enable_l2_swimlane=True)`)
+device timing, enable the L2 swimlane DFX (`RunConfig(enable_chip_swimlane=True)`)
 and read `chip_swimlane_records.json`.
 
 ### Benchmarking (`benchmark`)

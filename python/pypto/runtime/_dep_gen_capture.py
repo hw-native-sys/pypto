@@ -9,7 +9,7 @@
 
 """Subprocess entry point that captures a dep_gen ``deps.json`` for swimlane.
 
-When ``enable_l2_swimlane`` is requested on an onboard platform, the swimlane
+When ``enable_chip_swimlane`` is requested on an onboard platform, the swimlane
 converter needs a task graph that only a dep_gen run produces. dep_gen and
 swimlane cannot share one in-process run: the runtime's per-run finalize does
 not reliably reclaim the SVM host-register mappings the DFX collectors allocate,

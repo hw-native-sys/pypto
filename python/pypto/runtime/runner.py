@@ -24,12 +24,14 @@ Typical usage::
     compiled = run(MyProgram, a, b, c, config=RunConfig(platform="a2a3sim"))
 """
 
+import functools
 import importlib.util
 import json
 import shlex
 import subprocess
 import sys
 import uuid
+import warnings
 from collections.abc import Callable
 from ctypes import _SimpleCData
 from dataclasses import dataclass, field, replace
@@ -76,9 +78,8 @@ def _load_golden_from_data_dir(out_dir: Path, output_names: set[str]) -> dict[st
 # per-ring RunConfig override (list/tuple) must supply exactly this many entries.
 _RING_DEPTH = 4
 
-# Simpler's Worker/Chip/Core naming migration renamed the runtime swimlane
-# artifact.  Keep the legacy ``enable_l2_swimlane`` spelling at PyPTO's public
-# boundary, but use the current Simpler artifact contract internally.
+# Artifact name from Simpler's Worker/Chip/Core naming migration (formerly
+# ``l2_swimlane_records.json``).
 _CHIP_SWIMLANE_RECORDS_NAME = "chip_swimlane_records.json"
 
 # Chip-swimlane collection is *levelled*, not a toggle: each level is a real
@@ -102,6 +103,14 @@ _SWIMLANE_CLI_HELP = (
     f"Chip swimlane collection level. Bare flag = {_SWIMLANE_FULL_LEVEL} (full); "
     "1=AICore timing, 2=+AICPU dispatch/finish, 3=+scheduler phases, "
     "4=+orchestrator phases; absent = 0 (off)."
+)
+
+
+_SWIMLANE_ALIAS_DEPRECATION = (
+    "RunConfig.enable_l2_swimlane is deprecated; use enable_chip_swimlane instead. "
+    "Same values and semantics — Simpler renamed the L2 layer to 'chip', and the "
+    "runtime artifact is chip_swimlane_records.json. The alias will be removed in "
+    "a future release."
 )
 
 
@@ -172,7 +181,7 @@ class RunConfig:
             ``build_output/<program_name>_<timestamp>``.
         codegen_only: If ``True``, stop after code generation without executing
             on device.  Useful for validating compilation output.
-        enable_l2_swimlane: Chip swimlane collection **level** — per-task
+        enable_chip_swimlane: Chip swimlane collection **level** — per-task
             timing records written into
             ``<work_dir>/dfx_outputs/chip_swimlane_records.json``. Mirrors the
             runtime harness's ``--enable-chip-swimlane PERF_LEVEL``; each level
@@ -192,6 +201,9 @@ class RunConfig:
               full level, matching the runtime harness's bare
               ``--enable-chip-swimlane``.
 
+            The former spelling ``enable_l2_swimlane`` still works (constructor
+            keyword and attribute) but emits a ``DeprecationWarning``.
+
             On onboard platforms, ``swimlane_converter`` then produces
             ``merged_swimlane_*.json`` alongside the records. Because the converter joins
             the timing against a task graph that only ``deps.json`` carries,
@@ -207,8 +219,7 @@ class RunConfig:
             and only emit ``chip_swimlane_records.json`` — the merged swimlane file
             is intentionally skipped because the simulator does not yet ship the
             task metadata the converter needs. Mirrors runtime's
-            ``enable_chip_swimlane`` field. The PyPTO option retains its legacy
-            spelling for source compatibility.
+            ``CallConfig.enable_chip_swimlane`` field.
         enable_dump_args: Per-task argument dump **level** written into
             ``<work_dir>/dfx_outputs/args_dump/``. Inspect with
             ``python -m simpler_setup.tools.dump_viewer``. Mirrors
@@ -323,8 +334,10 @@ class RunConfig:
     save_kernels_dir: str | None = None
     codegen_only: bool = False
     # 0=off, 1=AICore timing, 2=+dispatch/finish, 3=+sched phases, 4=+orch
-    # phases. ``True`` normalizes to 4 (full), ``False`` to 0.
-    enable_l2_swimlane: int | bool = 0
+    # phases. ``True`` normalizes to 4 (full), ``False`` to 0. The former
+    # spelling ``enable_l2_swimlane`` is still accepted; see the deprecation
+    # shim installed just below the class.
+    enable_chip_swimlane: int | bool = 0
     enable_dump_args: int = 0  # 0=off, 1=partial (dump_tag-marked), 2=full
     enable_pmu: int = 0
     enable_dep_gen: bool = False
@@ -367,7 +380,9 @@ class RunConfig:
 
         # Chip swimlane is levelled; normalize ``bool``/int to an explicit
         # level before ``any_dfx_enabled()`` and the CLI round-trip read it.
-        self.enable_l2_swimlane = _normalize_swimlane_level(self.enable_l2_swimlane, "enable_l2_swimlane")
+        self.enable_chip_swimlane = _normalize_swimlane_level(
+            self.enable_chip_swimlane, "enable_chip_swimlane"
+        )
 
         # Any DFX flag requires kernel artefacts to be retained so the
         # ``<work_dir>/dfx_outputs/`` directory survives the run.
@@ -443,12 +458,67 @@ class RunConfig:
         independent toggles that share an output directory.
         """
         return (
-            self.enable_l2_swimlane > 0
+            self.enable_chip_swimlane > 0
             or self.enable_dump_args > 0
             or self.enable_pmu > 0
             or self.enable_dep_gen
             or self.enable_scope_stats
         )
+
+    @property
+    def enable_l2_swimlane(self) -> int:
+        """Deprecated alias for :attr:`enable_chip_swimlane`.
+
+        Reading is intentionally silent: ``dataclasses.replace()`` and existing
+        callers go through here, and warning on every read would make
+        ``replace(cfg, ...)`` noisy without pointing at a name the caller chose.
+        Assigning, and the constructor keyword, do warn.
+        """
+        return self.enable_chip_swimlane
+
+    @enable_l2_swimlane.setter
+    def enable_l2_swimlane(self, value: int | bool) -> None:
+        warnings.warn(_SWIMLANE_ALIAS_DEPRECATION, DeprecationWarning, stacklevel=2)
+        self.enable_chip_swimlane = _normalize_swimlane_level(value, "enable_l2_swimlane")
+
+
+# ---------------------------------------------------------------------------
+# Deprecated ``enable_l2_swimlane`` spelling
+# ---------------------------------------------------------------------------
+# Simpler's Worker/Chip/Core naming migration renamed the L2 layer to "chip"
+# (``L2Swimlane*`` -> ``ChipSwimlane*``, ``l2_swimlane_records.json`` ->
+# ``chip_swimlane_records.json``). ``RunConfig`` follows that contract, but the
+# old spelling stays usable for one release.
+#
+# The alias is deliberately **not** a dataclass field. ``dataclasses.replace()``
+# re-supplies every field from the existing instance, so an alias field (or an
+# ``InitVar``) would arrive alongside the canonical one on every ``replace``
+# call and there is no way to tell "the caller typed the old name" from "replace
+# echoed the old value back". That ambiguity resolves either into spurious
+# warnings or — worse — into ``replace(cfg, enable_chip_swimlane=N)`` being
+# silently overridden by the stale alias. Keeping the alias off the field list
+# leaves ``replace``, ``fields()``, ``asdict()`` and ``repr()`` clean, and routes
+# the old name through an ``__init__`` wrapper plus a property instead.
+
+_RUN_CONFIG_INIT = RunConfig.__init__
+
+
+@functools.wraps(_RUN_CONFIG_INIT)
+def _run_config_init(self: RunConfig, *args: Any, **kwargs: Any) -> None:
+    """``RunConfig.__init__`` that also accepts the deprecated alias."""
+    alias = kwargs.pop("enable_l2_swimlane", None)
+    if alias is not None:
+        warnings.warn(_SWIMLANE_ALIAS_DEPRECATION, DeprecationWarning, stacklevel=2)
+        if "enable_chip_swimlane" in kwargs:
+            raise ValueError(
+                "RunConfig received both enable_chip_swimlane and the deprecated "
+                "enable_l2_swimlane; pass only enable_chip_swimlane."
+            )
+        kwargs["enable_chip_swimlane"] = alias
+    _RUN_CONFIG_INIT(self, *args, **kwargs)
+
+
+RunConfig.__init__ = _run_config_init  # type: ignore[method-assign]
 
 
 @dataclass
@@ -612,14 +682,13 @@ class _DfxOpts:
     """Bundle of runtime DFX toggles passed through the execute pipeline.
 
     Each field maps to a ``CallConfig`` member on the runtime side. The public
-    ``enable_l2_swimlane`` field maps to ``enable_chip_swimlane`` and carries a
-    collection level (see :func:`_normalize_swimlane_level`); the other names
-    are unchanged. ``any()`` answers whether the runtime needs an
-    ``output_prefix``.
+    ``enable_chip_swimlane`` field carries a collection level (see
+    :func:`_normalize_swimlane_level`). ``any()`` answers whether the runtime
+    needs an ``output_prefix``.
     """
 
     # Collection level (0=off .. 4=full); ``__post_init__`` normalizes a bool.
-    enable_l2_swimlane: int | bool = 0
+    enable_chip_swimlane: int | bool = 0
     enable_dump_args: int = 0  # 0=off, 1=partial, 2=full
     enable_pmu: int = 0
     enable_dep_gen: bool = False
@@ -631,13 +700,13 @@ class _DfxOpts:
         # level ``RunConfig`` produces. ``_dfx_to_cli`` stringifies this field.
         object.__setattr__(
             self,
-            "enable_l2_swimlane",
-            _normalize_swimlane_level(self.enable_l2_swimlane, "enable_l2_swimlane"),
+            "enable_chip_swimlane",
+            _normalize_swimlane_level(self.enable_chip_swimlane, "enable_chip_swimlane"),
         )
 
     def any(self) -> bool:
         return (
-            self.enable_l2_swimlane > 0
+            self.enable_chip_swimlane > 0
             or self.enable_dump_args > 0
             or self.enable_pmu > 0
             or self.enable_dep_gen
@@ -647,7 +716,7 @@ class _DfxOpts:
     @classmethod
     def from_run_config(cls, cfg: "RunConfig") -> "_DfxOpts":
         return cls(
-            enable_l2_swimlane=cfg.enable_l2_swimlane,
+            enable_chip_swimlane=cfg.enable_chip_swimlane,
             enable_dump_args=cfg.enable_dump_args,
             enable_pmu=cfg.enable_pmu,
             enable_dep_gen=cfg.enable_dep_gen,
@@ -695,7 +764,7 @@ def _execute_dfx_passes(
         dfx: The DFX toggles the caller requested.
         platform: Target execution platform (used only to detect ``*sim``).
     """
-    if not dfx.enable_l2_swimlane or platform.endswith("sim"):
+    if not dfx.enable_chip_swimlane or platform.endswith("sim"):
         run_pass(dfx)
         return
 
@@ -929,12 +998,9 @@ def _build_call_config(
     if at is not None:
         cfg.aicpu_thread_num = at
 
-    # ``enable_l2_swimlane`` is PyPTO's compatibility spelling. Simpler renamed
-    # the CallConfig member as part of its Worker/Chip/Core naming migration.
-    # The value is already a normalized collection level (0-4), so it lands on
-    # the runtime's ``int32_t`` field verbatim rather than through the setter's
-    # bool shortcut.
-    cfg.enable_chip_swimlane = run_config.enable_l2_swimlane
+    # Already a normalized collection level (0-4), so it lands on the runtime's
+    # ``int32_t`` field verbatim rather than through the setter's bool shortcut.
+    cfg.enable_chip_swimlane = run_config.enable_chip_swimlane
     cfg.enable_dump_args = run_config.enable_dump_args
     cfg.enable_pmu = run_config.enable_pmu
     cfg.enable_dep_gen = run_config.enable_dep_gen
@@ -1021,7 +1087,7 @@ def _execute_on_device(
             device_id,
             enable_sdma=enable_sdma,
             output_prefix=str(dfx_dir) if dfx_dir is not None else None,
-            enable_l2_swimlane=pass_dfx.enable_l2_swimlane,
+            enable_chip_swimlane=pass_dfx.enable_chip_swimlane,
             enable_dump_args=pass_dfx.enable_dump_args,
             enable_pmu=pass_dfx.enable_pmu,
             enable_dep_gen=pass_dfx.enable_dep_gen,
@@ -1125,11 +1191,11 @@ def _collect_dfx_artifacts(
     # ``--func-names``. Written whenever swimlane or dep_gen is enabled (the two
     # consumers); harmless no-op when no kernel names are available.
     name_map_path: Path | None = None
-    if dfx.enable_l2_swimlane or dfx.enable_dep_gen:
+    if dfx.enable_chip_swimlane or dfx.enable_dep_gen:
         name_map_path = _write_name_map(dfx_dir.parent, dfx_dir)
 
     chip_swimlane_records = dfx_dir / _CHIP_SWIMLANE_RECORDS_NAME
-    if dfx.enable_l2_swimlane and chip_swimlane_records.exists():
+    if dfx.enable_chip_swimlane and chip_swimlane_records.exists():
         # Swimlane conversion is onboard-only — the simulator produces
         # ``chip_swimlane_records.json`` but does not yet ship the matching
         # task metadata the converter expects.
@@ -1452,7 +1518,7 @@ def execute_compiled(  # noqa: PLR0913
             aicpu_thread_num=effective_aicpu_thread_num,
             enable_sdma=enable_sdma,
             output_prefix=str(dfx_dir) if dfx_dir is not None else None,
-            enable_l2_swimlane=pass_dfx.enable_l2_swimlane,
+            enable_chip_swimlane=pass_dfx.enable_chip_swimlane,
             enable_dump_args=pass_dfx.enable_dump_args,
             enable_pmu=pass_dfx.enable_pmu,
             enable_dep_gen=pass_dfx.enable_dep_gen,

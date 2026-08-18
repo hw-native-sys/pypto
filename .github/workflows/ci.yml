@@ -849,7 +849,7 @@ jobs:
         run: |
           source activate.sh
           task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 600 \
-            --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest tests/st/runtime/framework_and_models/test_perf_swimlane.py -v --device=\$TASK_DEVICE --platform=a2a3 --enable-l2-swimlane --forked"
+            --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest tests/st/runtime/framework_and_models/test_perf_swimlane.py -v --device=\$TASK_DEVICE --platform=a2a3 --enable-chip-swimlane --forked"
 
       - name: Test dump-args output
         run: |

@@ -3,15 +3,15 @@
 PyPTO exposes Simpler's five runtime diagnostic sub-features as independent
 toggles on [`RunConfig`](../../../python/pypto/runtime/runner.py). Each
 toggle maps to a field on Simpler's `CallConfig` and to the matching pytest
-flag in `tests/st/conftest.py`. PyPTO retains the public
-`enable_l2_swimlane` spelling for compatibility while mapping it to Simpler's
-renamed `enable_chip_swimlane` member.
+flag in `tests/st/conftest.py`. Field names match Simpler's; the former
+`enable_l2_swimlane` / `--enable-l2-swimlane` spellings still work and are
+covered under [Deprecated aliases](#deprecated-aliases).
 
 ## Flag matrix
 
 | `RunConfig` field | pytest flag | `CallConfig` member | Artefact under `dfx_outputs/` | Post-run converter |
 | ----------------- | ----------- | ------------------- | ----------------------------- | ------------------ |
-| `enable_l2_swimlane: int` | `--enable-l2-swimlane [PERF_LEVEL]` (bare = `4`) | `enable_chip_swimlane` (`0` off .. `4` full) | `chip_swimlane_records.json` | `swimlane_converter` → `merged_swimlane_*.json` |
+| `enable_chip_swimlane: int` | `--enable-chip-swimlane` (= `4`) / `--chip-swimlane-level N` | `enable_chip_swimlane` (`0` off .. `4` full) | `chip_swimlane_records.json` | `swimlane_converter` → `merged_swimlane_*.json` |
 | `enable_dump_args: int` | `--dump-args [LEVEL]` (bare = `1`) | `enable_dump_args` (`0` off, `1` partial, `2` full) | `args_dump/{args_dump.json,bin}` | `dump_viewer` (manual) |
 | `enable_pmu: int` | `--enable-pmu [N]` (bare = `2`) | `enable_pmu` (`0` off, `>0` event type) | `pmu.csv` | — |
 | `enable_dep_gen: bool` | `--enable-dep-gen` | `enable_dep_gen` | `deps.json` | `deps_viewer` (manual) |
@@ -23,7 +23,7 @@ so the `<work_dir>/dfx_outputs/` directory survives the run.
 
 ### Swimlane collection levels
 
-`enable_l2_swimlane` is a **level**, not a toggle. Each level is a real guard
+`enable_chip_swimlane` is a **level**, not a toggle. Each level is a real guard
 in the runtime collectors, so a lower level never stamps the data a higher one
 does and no post-processing recovers it:
 
@@ -35,9 +35,16 @@ does and no post-processing recovers it:
 | `3` | + scheduler main-loop phase records | `simpler_setup.tools.sched_overhead_analysis`, the Toolkit plugin's Scheduler View |
 | `4` / `True` | + orchestrator phase records | the Toolkit plugin's AICPU Orchestrator view |
 
-`True` requests level `4`, matching the bare `--enable-l2-swimlane` and the
-runtime harness's bare `--enable-chip-swimlane`. An out-of-range level raises
-`ValueError` from `RunConfig`.
+`True` requests level `4` — the same thing the bare `--enable-chip-swimlane`
+flag requests, in PyPTO and in the runtime harness alike. An out-of-range level
+raises `ValueError` from `RunConfig`.
+
+On the pytest surface the bare flag and the level are **two** options
+(`--enable-chip-swimlane` and `--chip-swimlane-level N`) rather than one
+optional-valued option. An optional-valued flag swallows the following token, so
+`pytest --enable-chip-swimlane tests/st/runtime/` would fail with
+`invalid int value: 'tests/st/runtime/'`. Splitting them keeps the bare flag
+order-independent.
 
 ## Output contract
 
@@ -94,7 +101,7 @@ dependency arrows. But dep_gen collection has high overhead that perturbs the
 very timing the swimlane measures. The two captures therefore come from separate
 runs (Simpler's documented "capture the graph once, time many times" workflow).
 
-For **onboard L2**, enabling `enable_l2_swimlane` runs the kernel twice,
+For **onboard L2**, enabling `enable_chip_swimlane` runs the kernel twice,
 transparently:
 
 1. **Graph pass** — dep_gen only, producing `deps.json`. Runs in a **separate
@@ -147,7 +154,7 @@ run(
     MyProgram, a, b, c,
     config=RunConfig(
         platform="a2a3sim",
-        enable_l2_swimlane=4,        # full swimlane -> chip_swimlane_records.json
+        enable_chip_swimlane=4,        # full swimlane -> chip_swimlane_records.json
                                      # (True is the same level 4; use 1-3 for less)
         enable_dep_gen=True,         # produces deps.json (render with deps_viewer on demand)
         enable_pmu=4,                # PMU event = MEMORY
@@ -160,11 +167,11 @@ run(
 ```bash
 # Bare flag = level 4 (full)
 pytest tests/st/runtime/framework_and_models/test_perf_swimlane.py \
-    --platform a2a3sim --enable-l2-swimlane
+    --platform a2a3sim --enable-chip-swimlane
 
 # AICore timing only — the cheapest capture
 pytest tests/st/runtime/ \
-    --platform a2a3sim --enable-l2-swimlane 1 --enable-dep-gen
+    --platform a2a3sim --chip-swimlane-level 1 --enable-dep-gen
 ```
 
 ## Selective tensor dump
@@ -296,7 +303,7 @@ By default the swimlane / dependency-graph tools label tasks by numeric
 id (`task(rXtY)` / `func_<id>(...)`). To recover real kernel names
 (`matmul(rXtY)`), a name map must sit next to the records. Simpler's own
 SceneTest harness writes this file; pypto does not use SceneTest, so when
-`enable_l2_swimlane` or `enable_dep_gen` is set the runner synthesises
+`enable_chip_swimlane` or `enable_dep_gen` is set the runner synthesises
 `<work_dir>/dfx_outputs/name_map_<case>.json` from the `func_id` / `name`
 fields already in `kernel_config.py`. It is consumed automatically:
 `swimlane_converter` is invoked with `--func-names <name_map>`, and
@@ -335,12 +342,33 @@ this hint at the end of every scope-stats-enabled run.
 
 ## Deprecated aliases
 
-`RunConfig.runtime_profiling` and the pytest flag `--runtime-profiling`
-were the original way to opt into L2 swimlane capture before the four
-DFX features became independently controllable. They are kept as
-aliases for `enable_l2_swimlane` / `--enable-l2-swimlane` so existing
-scripts keep working; both paths emit a `DeprecationWarning` and will
-be removed in a future release. Migrate to the new names.
+`RunConfig.enable_l2_swimlane` and the pytest flag `--enable-l2-swimlane`
+are the former spellings of `enable_chip_swimlane` /
+`--enable-chip-swimlane`. Simpler's Worker/Chip/Core naming migration
+renamed the L2 layer to "chip" (`L2Swimlane*` -> `ChipSwimlane*`,
+`l2_swimlane_records.json` -> `chip_swimlane_records.json`), and PyPTO now
+follows that contract.
+
+Both old spellings keep working and emit a `DeprecationWarning`; they will
+be removed in a future release. Values and semantics are unchanged, so
+migration is a rename:
+
+```python
+RunConfig(enable_l2_swimlane=True)    # deprecated
+RunConfig(enable_chip_swimlane=4)     # same capture
+```
+
+Details worth knowing:
+
+- `enable_l2_swimlane` is **not** a dataclass field — it is a constructor
+  keyword plus a property. That keeps `dataclasses.replace(cfg,
+  enable_chip_swimlane=N)` unambiguous; an alias field would be re-supplied
+  by `replace()` from the old instance and could silently override the value
+  you just passed.
+- Reading `cfg.enable_l2_swimlane` is silent (it returns the canonical
+  level). Passing the old constructor keyword, or assigning to the
+  attribute, warns.
+- Passing both spellings at once raises `ValueError`.
 
 ## Replaying an existing build_output
 

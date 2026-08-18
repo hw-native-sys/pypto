@@ -140,7 +140,7 @@ def test_replay_forwards_dfx_flags(tmp_path: Path) -> None:
     work_dir = _make_build_output(tmp_path)
     config = RunConfig(
         platform="a2a3sim",
-        enable_l2_swimlane=True,
+        enable_chip_swimlane=True,
         enable_pmu=2,
         enable_dump_args=True,
         enable_dep_gen=True,
@@ -149,7 +149,7 @@ def test_replay_forwards_dfx_flags(tmp_path: Path) -> None:
     with patch.object(replay_module, "execute_compiled") as ec:
         replay(work_dir, config=config)
     dfx = ec.call_args.kwargs["dfx"]
-    assert dfx.enable_l2_swimlane == 4  # True normalizes to the full level
+    assert dfx.enable_chip_swimlane == 4  # True normalizes to the full level
     assert dfx.enable_pmu == 2
     assert dfx.enable_dump_args is True
     assert dfx.enable_dep_gen is True
@@ -396,13 +396,14 @@ def test_cli_invokes_replay_with_dfx_flags(tmp_path: Path) -> None:
     assert captured["validate"] is False
     cfg = captured["config"]
     assert cfg.enable_pmu == 2
-    assert cfg.enable_l2_swimlane == 4  # bare --swimlane = full level
+    assert cfg.enable_chip_swimlane == 4  # bare --swimlane = full level
     assert cfg.enable_scope_stats is True
     assert cfg.device_id == 5
 
 
 def test_cli_swimlane_accepts_explicit_level(tmp_path: Path) -> None:
-    # Regression (issue #2385): --swimlane takes an optional collection level.
+    # Regression (issue #2385): --swimlane-level requests a specific level;
+    # --swimlane stays valueless so it cannot eat the work_dir positional.
     work_dir = _make_build_output(tmp_path)
     captured: dict = {}
 
@@ -413,9 +414,9 @@ def test_cli_swimlane_accepts_explicit_level(tmp_path: Path) -> None:
         patch.object(replay_module, "replay", side_effect=fake_replay),
         patch.object(replay_module, "_load_named_inputs_from_golden", return_value=[("a", torch.zeros(1))]),
     ):
-        rc = _main([str(work_dir), "--swimlane", "2", "--device-id", "5"])
+        rc = _main([str(work_dir), "--swimlane-level", "2", "--device-id", "5"])
     assert rc == 0
-    assert captured["config"].enable_l2_swimlane == 2
+    assert captured["config"].enable_chip_swimlane == 2
 
 
 def test_cli_no_recompile_flag(tmp_path: Path) -> None:

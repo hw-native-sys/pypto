@@ -842,7 +842,7 @@ class TestCompiledProgramExtraction:
 
             cp.build_call_config(
                 RunConfig(
-                    enable_l2_swimlane=True,
+                    enable_chip_swimlane=True,
                     enable_dump_args=True,
                     enable_pmu=2,
                     enable_dep_gen=True,

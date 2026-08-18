@@ -21,6 +21,7 @@ import shutil
 import sys
 import tempfile
 import textwrap
+import warnings
 from collections import Counter
 from contextlib import nullcontext
 from datetime import datetime
@@ -82,6 +83,28 @@ def setup_simpler_dependency(request):
     for path in [get_simpler_python_path(), get_simpler_scripts_path()]:
         if path.exists() and str(path) not in sys.path:
             sys.path.insert(0, str(path))
+
+
+def _resolve_swimlane_option(config: pytest.Config) -> int:
+    """Return the requested chip-swimlane collection level.
+
+    Precedence: an explicit ``--chip-swimlane-level N`` wins, then the bare
+    ``--enable-chip-swimlane`` (full level), then the deprecated bare
+    ``--enable-l2-swimlane`` (same level, with a warning). Absent means off.
+    """
+    level: int | None = config.getoption("--chip-swimlane-level")
+    if level is not None:
+        return level
+    if config.getoption("--enable-chip-swimlane"):
+        return _SWIMLANE_FULL_LEVEL
+    if config.getoption("enable_l2_swimlane_deprecated"):
+        warnings.warn(
+            "--enable-l2-swimlane is deprecated; use --enable-chip-swimlane (or --chip-swimlane-level N).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return _SWIMLANE_FULL_LEVEL
+    return 0
 
 
 def pytest_addoption(parser):
@@ -226,24 +249,44 @@ def pytest_addoption(parser):
     )
     # ── DFX (Design For X) toggles ────────────────────────────────────────
     # Each maps to the same-named field on ``RunConfig`` and to the corresponding
-    # runtime ``CallConfig`` member. The public PyPTO swimlane spelling remains
-    # ``enable_l2_swimlane`` for compatibility and maps to Simpler's renamed
-    # ``enable_chip_swimlane`` member.
+    # runtime ``CallConfig`` member.
+    #
+    # The bare enable flag and the level-valued form are deliberately two
+    # options. An ``nargs="?"`` option greedily eats the next non-dash token, so
+    # a single option would turn the conventional
+    # ``pytest --enable-chip-swimlane tests/st/runtime/`` into
+    # "invalid int value: 'tests/st/runtime/'" — the flag used to be
+    # ``store_true`` and that ordering has always worked. Keeping the bare flag
+    # valueless makes it order-independent again.
     parser.addoption(
-        "--enable-l2-swimlane",
-        nargs="?",
+        "--enable-chip-swimlane",
+        action="store_const",
         const=_SWIMLANE_FULL_LEVEL,
         default=0,
-        type=int,
-        choices=range(_SWIMLANE_MAX_LEVEL + 1),
-        metavar="PERF_LEVEL",
-        help=_SWIMLANE_CLI_HELP + " Records are written into "
-        "<work_dir>/dfx_outputs/chip_swimlane_records.json. The bare flag matches the runtime "
-        "harness's bare --enable-chip-swimlane. "
+        help=f"Enable chip swimlane capture at the full level ({_SWIMLANE_FULL_LEVEL}), matching the "
+        "runtime harness's bare --enable-chip-swimlane. Use --chip-swimlane-level N for a lower "
+        "level. Records are written into <work_dir>/dfx_outputs/chip_swimlane_records.json. "
         "On onboard platforms, also render merged_swimlane_*.json and run the kernel twice: a dep_gen "
         "pass to capture deps.json (the converter's task graph) then a clean swimlane pass, since "
         "dep_gen collection perturbs the timing. Simulator platforms emit only the records (the merged "
         "swimlane is skipped).",
+    )
+    parser.addoption(
+        "--chip-swimlane-level",
+        default=None,
+        type=int,
+        choices=range(_SWIMLANE_MAX_LEVEL + 1),
+        metavar="PERF_LEVEL",
+        help=_SWIMLANE_CLI_HELP + " Takes precedence over --enable-chip-swimlane.",
+    )
+    # Deprecated spelling, kept because CI and existing scripts still pass it.
+    # Valueless like the original ``store_true`` form it replaces.
+    parser.addoption(
+        "--enable-l2-swimlane",
+        dest="enable_l2_swimlane_deprecated",
+        action="store_true",
+        default=False,
+        help="Deprecated alias for --enable-chip-swimlane.",
     )
     parser.addoption(
         "--dump-args",
@@ -464,7 +507,7 @@ def test_config(request) -> RunConfig:
         save_kernels_dir=save_kernels_dir,
         dump_passes=request.config.getoption("--dump-passes"),
         codegen_only=request.config.getoption("--codegen-only"),
-        enable_l2_swimlane=request.config.getoption("--enable-l2-swimlane"),
+        enable_chip_swimlane=_resolve_swimlane_option(request.config),
         enable_dump_args=request.config.getoption("--dump-args"),
         enable_pmu=request.config.getoption("--enable-pmu"),
         enable_dep_gen=request.config.getoption("--enable-dep-gen"),
@@ -844,7 +887,7 @@ def pytest_collection_finish(session: pytest.Session) -> None:
 
     dump_passes: bool = session.config.getoption("--dump-passes")
     codegen_only: bool = session.config.getoption("--codegen-only")
-    enable_l2_swimlane: int = session.config.getoption("--enable-l2-swimlane")
+    enable_chip_swimlane: int = _resolve_swimlane_option(session.config)
     enable_dump_args: int = session.config.getoption("--dump-args")
     enable_pmu: int = session.config.getoption("--enable-pmu")
     enable_dep_gen: bool = session.config.getoption("--enable-dep-gen")
@@ -912,7 +955,7 @@ def pytest_collection_finish(session: pytest.Session) -> None:
             pypto_log_level=pypto_log_level,
             compile_workers=max_workers,
             device_pool=device_pool,
-            enable_l2_swimlane=enable_l2_swimlane,
+            enable_chip_swimlane=enable_chip_swimlane,
             enable_dump_args=enable_dump_args,
             enable_pmu=enable_pmu,
             enable_dep_gen=enable_dep_gen,

@@ -411,7 +411,7 @@ class DistributedCompiledProgram:
         ring-sizing overrides (``ring_task_window`` / ``ring_heap`` /
         ``ring_dep_pool``) size this dispatch's runtime ring buffers, and its
         runtime-diagnostic DFX flags (``enable_dump_args`` / ``enable_pmu`` /
-        ``enable_dep_gen`` / ``enable_scope_stats`` / ``enable_l2_swimlane``) are
+        ``enable_dep_gen`` / ``enable_scope_stats`` / ``enable_chip_swimlane``) are
         written per dispatch under ``<output_dir>/dfx_outputs/rank{r}/d{k}/``
         (``d{k}`` is the card's k-th dispatch, so multiple dispatches to one card
         keep separate artifacts). Onboard swimlane runs a dep-gen-only graph

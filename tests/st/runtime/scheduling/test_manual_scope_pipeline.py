@@ -47,9 +47,9 @@ How to run
 
     # On real hardware, with profiling enabled:
     pytest tests/st/runtime/scheduling/test_manual_scope_pipeline.py \\
-        --enable-l2-swimlane --platform=a2a3
+        --enable-chip-swimlane --platform=a2a3
 
-    # Without --enable-l2-swimlane, the swimlane assertions skip and only
+    # Without --enable-chip-swimlane, the swimlane assertions skip and only
     # numerical correctness is checked.
 """
 
@@ -197,15 +197,15 @@ class TestManualScopePipeline:
 
 
 # ---------------------------------------------------------------------------
-# Swimlane validation — only when --enable-l2-swimlane is enabled.
+# Swimlane validation — only when --enable-chip-swimlane is enabled.
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="module")
 def manual_scope_swimlane_file(test_runner) -> Path:
     """Run the pipeline once with profiling and return the swimlane JSON."""
-    if not test_runner.config.enable_l2_swimlane:
-        pytest.skip("pass --enable-l2-swimlane to validate the manual_scope swimlane")
+    if not test_runner.config.enable_chip_swimlane:
+        pytest.skip("pass --enable-chip-swimlane to validate the manual_scope swimlane")
 
     before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/chip_swimlane_records.json"))
     result = test_runner.run(_ManualScopePipelinePTO())
@@ -498,8 +498,8 @@ class TestPhaseFenceAuto:
 
 @pytest.fixture(scope="module")
 def phase_fence_swimlane_file(test_runner) -> Path:
-    if not test_runner.config.enable_l2_swimlane:
-        pytest.skip("pass --enable-l2-swimlane to validate the phase-fence swimlane")
+    if not test_runner.config.enable_chip_swimlane:
+        pytest.skip("pass --enable-chip-swimlane to validate the phase-fence swimlane")
     before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/chip_swimlane_records.json"))
     result = test_runner.run(_PhaseFenceManualScopePTO())
     assert result.passed, f"phase-fence manual_scope failed: {result.error}"
@@ -516,8 +516,8 @@ def phase_fence_swimlane_data(phase_fence_swimlane_file: Path) -> dict:
 
 @pytest.fixture(scope="module")
 def phase_fence_auto_swimlane_file(test_runner) -> Path:
-    if not test_runner.config.enable_l2_swimlane:
-        pytest.skip("pass --enable-l2-swimlane to validate the auto phase-fence swimlane")
+    if not test_runner.config.enable_chip_swimlane:
+        pytest.skip("pass --enable-chip-swimlane to validate the auto phase-fence swimlane")
     before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/chip_swimlane_records.json"))
     result = test_runner.run(_PhaseFenceAutoPTO())
     assert result.passed, f"phase-fence auto failed: {result.error}"
@@ -718,8 +718,8 @@ class TestBranchChainManualScope:
 
 @pytest.fixture(scope="module")
 def branch_chain_swimlane_file(test_runner) -> Path:
-    if not test_runner.config.enable_l2_swimlane:
-        pytest.skip("pass --enable-l2-swimlane to validate the branch-chain swimlane")
+    if not test_runner.config.enable_chip_swimlane:
+        pytest.skip("pass --enable-chip-swimlane to validate the branch-chain swimlane")
     before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/chip_swimlane_records.json"))
     result = test_runner.run(_BranchChainManualScopePTO())
     assert result.passed, f"branch-chain manual_scope failed: {result.error}"
@@ -940,8 +940,8 @@ class _OriginalKVProjOuterParallelPTO(PTOTestCase):
 @pytest.fixture(scope="module")
 def original_kv_proj_swimlane_file(test_runner) -> Path:
     """Run the original kv_proj case once and return the generated swimlane JSON."""
-    if not test_runner.config.enable_l2_swimlane:
-        pytest.skip("pass --enable-l2-swimlane to validate the original kv_proj swimlane")
+    if not test_runner.config.enable_chip_swimlane:
+        pytest.skip("pass --enable-chip-swimlane to validate the original kv_proj swimlane")
 
     before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/chip_swimlane_records.json"))
     result = test_runner.run(_OriginalKVProjOuterParallelPTO())

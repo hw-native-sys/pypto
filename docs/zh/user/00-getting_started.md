@@ -132,7 +132,7 @@ compiled = prefill_fwd.compile()
 runtime 以 `[STRACE]` 日志标记的形式输出每次运行的 host/device 计时（simpler
 PR #1177，在 `SIMPLER_DFX` 下默认开启）；用 simpler 的 `strace_timing` /
 `device_log_timing` 工具解析这些标记，而不是读取返回值。需要 per-task 的 device
-计时时，开启 L2 swimlane DFX（`RunConfig(enable_l2_swimlane=True)`）并读取
+计时时，开启 L2 swimlane DFX（`RunConfig(enable_chip_swimlane=True)`）并读取
 `chip_swimlane_records.json`。
 
 ### 性能基准（`benchmark`）

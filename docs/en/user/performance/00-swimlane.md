@@ -28,7 +28,7 @@ from pypto.runtime import ChipWorker, RunConfig
 
 cfg = RunConfig(
     platform="a2a3",
-    enable_l2_swimlane=4,      # per-task timing, full collection
+    enable_chip_swimlane=4,      # per-task timing, full collection
     enable_dep_gen=True,       # the task DAG the timing is joined against
     save_kernels=True,         # keep the output directory
 )
@@ -62,17 +62,16 @@ Each level is a real guard in the collectors, not a verbosity setting: at level 
 dispatch and finish timestamps are **never stamped**, so no post-processing can recover
 them.
 
-`RunConfig.enable_l2_swimlane` **is** that level — pass any of `0`-`4` to request it:
+`RunConfig.enable_chip_swimlane` **is** that level — pass any of `0`-`4` to request it:
 
 ```python
-cfg = RunConfig(platform="a2a3", enable_l2_swimlane=3,  # sched phases and below
+cfg = RunConfig(platform="a2a3", enable_chip_swimlane=3,  # sched phases and below
                 enable_dep_gen=True, save_kernels=True)
 ```
 
-`True` is accepted for source compatibility and means level `4` (full), matching the bare
-`--enable-l2-swimlane` and the runtime harness's bare `--enable-chip-swimlane`; `False`
-means `0`. Higher levels collect more and therefore perturb timing more, so drop to the
-lowest level that answers your question.
+`True` is accepted for source compatibility and means level `4` (full) — the same thing the
+bare `--enable-chip-swimlane` flag requests; `False` means `0`. Higher levels collect more
+and therefore perturb timing more, so drop to the lowest level that answers your question.
 
 ### Two things that will mislead you if you do not know them
 
@@ -167,7 +166,7 @@ python -m simpler_setup.tools.sched_overhead_analysis \
 ```
 
 This one needs a **level ≥ 3** capture for its scheduler-loop parts —
-`RunConfig(enable_l2_swimlane=3)` or the default full level `4`.
+`RunConfig(enable_chip_swimlane=3)` or the default full level `4`.
 
 It reports per-engine and system-wide overhead as a share of the makespan, the pickup-cost
 distribution, the AICPU scheduler-loop budget, and a critical-path attribution splitting

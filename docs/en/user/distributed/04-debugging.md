@@ -57,7 +57,7 @@ SIMPLER_DEVICE_STRACE_ENABLE=0 python script.py
 
 ### Distributed DFX Entry Points
 
-- **L2 swimlane:** `RunConfig(enable_l2_swimlane=True)` — enables per-task timing
+- **L2 swimlane:** `RunConfig(enable_chip_swimlane=True)` — enables per-task timing
   inside the worker, propagates through L3 orchestration. Writes
   `dfx_outputs/chip_swimlane_records.json` (onboard: merged into
   `merged_swimlane_*.json` alongside the dependency graph below).

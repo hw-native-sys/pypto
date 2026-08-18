@@ -20,7 +20,7 @@ replay(
     config=RunConfig(
         platform="a2a3sim",
         enable_pmu=2,
-        enable_l2_swimlane=True,
+        enable_chip_swimlane=True,
     ),
 )
 ```

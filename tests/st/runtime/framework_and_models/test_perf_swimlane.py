@@ -12,9 +12,9 @@
 Runs matmul 64x64x64 (PTO backend) with profiling and validates the
 generated chip_swimlane_records.json in build_output/<run_dir>/dfx_outputs/.
 
-Requires ``--enable-l2-swimlane`` to be set; pass ``--platform=a2a3`` (or
+Requires ``--enable-chip-swimlane`` to be set; pass ``--platform=a2a3`` (or
 ``a5``) to switch the target.  All tests in this file are skipped
-automatically when ``--enable-l2-swimlane`` is not passed.
+automatically when ``--enable-chip-swimlane`` is not passed.
 """
 
 from pathlib import Path
@@ -88,10 +88,10 @@ def swimlane_file(test_runner) -> Path:
     """Run matmul once with profiling and return the generated swimlane file.
 
     Skips the entire test session (all dependent tests) when
-    --enable-l2-swimlane is not passed.
+    --enable-chip-swimlane is not passed.
     """
-    if not test_runner.config.enable_l2_swimlane:
-        pytest.skip("pass --enable-l2-swimlane to run swimlane tests")
+    if not test_runner.config.enable_chip_swimlane:
+        pytest.skip("pass --enable-chip-swimlane to run swimlane tests")
 
     before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/chip_swimlane_records.json"))
 

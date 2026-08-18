@@ -15,7 +15,7 @@
 | 问题 | 开关 | 产物 |
 | ---- | ---- | ---- |
 | 图长成什么样？ | `enable_dep_gen=True` | `<work_dir>/dfx_outputs/deps.json` |
-| 任务真的重叠了吗？ | `enable_l2_swimlane=True` | `<work_dir>/dfx_outputs/chip_swimlane_records.json` |
+| 任务真的重叠了吗？ | `enable_chip_swimlane=True` | `<work_dir>/dfx_outputs/chip_swimlane_records.json` |
 | 运行时的环是否接近满？ | `enable_scope_stats=True` | `<work_dir>/dfx_outputs/scope_stats/scope_stats.jsonl` |
 | 哪条 pipe 是瓶颈？ | `enable_pmu=2` | `<work_dir>/dfx_outputs/pmu.csv` |
 
@@ -47,7 +47,7 @@ viewer 默认输出文本，要图视图得传 `--format html`。
 一张并行的图并不保证并行的执行。swimlane 给出逐任务时序：
 
 ```python
-kernel(a, b, out, config=RunConfig(platform="a2a3sim", enable_l2_swimlane=True))
+kernel(a, b, out, config=RunConfig(platform="a2a3sim", enable_chip_swimlane=True))
 ```
 
 > **模拟器注意事项：** 在 `*sim` 平台上这是单趟的，只产出 `chip_swimlane_records.json`。合并后的 `merged_swimlane_*.json` 视图会被**有意跳过**，因为模拟器尚未提供转换器所需的任务元数据。在真机平台上同一个开关会把负载**跑两遍** —— 先一趟 dep_gen 采集图，再一趟干净的计时 —— 因为采集会扰动时序。

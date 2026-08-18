@@ -36,7 +36,7 @@ Python::
     replay(
         "build_output/_jit_xxx/",
         a, b, c,
-        config=RunConfig(platform="a2a3sim", enable_pmu=2, enable_l2_swimlane=True),
+        config=RunConfig(platform="a2a3sim", enable_pmu=2, enable_chip_swimlane=4),
     )
 """
 
@@ -320,15 +320,24 @@ def _main(
     parser.add_argument("--platform", default=default_platform, help="Target execution platform")
     parser.add_argument("--device-id", type=int, default=0, help="Hardware device index")
     parser.add_argument("--pmu", type=int, default=0, metavar="LEVEL", help="PMU level")
+    # Two options, not one optional-valued option: this parser has a positional
+    # ``work_dir``, and an ``nargs="?"`` flag would eat it in
+    # ``replay --swimlane build_output/x``.
     parser.add_argument(
         "--swimlane",
-        nargs="?",
+        action="store_const",
         const=_SWIMLANE_FULL_LEVEL,
         default=0,
+        help=f"Enable chip swimlane capture at the full level ({_SWIMLANE_FULL_LEVEL}). "
+        "Use --swimlane-level N for a lower level.",
+    )
+    parser.add_argument(
+        "--swimlane-level",
+        default=None,
         type=int,
         choices=range(_SWIMLANE_MAX_LEVEL + 1),
         metavar="LEVEL",
-        help=_SWIMLANE_CLI_HELP,
+        help=_SWIMLANE_CLI_HELP + " Takes precedence over --swimlane.",
     )
     parser.add_argument(
         "--dump-args",
@@ -400,7 +409,7 @@ def _main(
         platform=args.platform,
         device_id=args.device_id,
         enable_pmu=args.pmu,
-        enable_l2_swimlane=args.swimlane,
+        enable_chip_swimlane=(args.swimlane_level if args.swimlane_level is not None else args.swimlane),
         enable_dump_args=args.dump_args,
         enable_dep_gen=args.dep_gen,
         enable_scope_stats=args.scope_stats,

@@ -9,6 +9,7 @@
 
 """Unit tests for ``pypto.runtime.runner.RunConfig`` and DFX plumbing."""
 
+import dataclasses
 import sys
 import types
 from unittest.mock import MagicMock, patch
@@ -37,8 +38,8 @@ class TestRunConfigPlatformResolution:
         assert cfg.platform == platform
         assert cfg.backend_type == expected_backend
 
-    def test_enable_l2_swimlane_forces_save_kernels(self):
-        cfg = RunConfig(platform="a5", enable_l2_swimlane=True)
+    def test_enable_chip_swimlane_forces_save_kernels(self):
+        cfg = RunConfig(platform="a5", enable_chip_swimlane=True)
 
         assert cfg.platform == "a5"
         assert cfg.backend_type == BackendType.Ascend950
@@ -56,7 +57,7 @@ class TestRunConfigDfxFlags:
     @pytest.mark.parametrize(
         "kwargs",
         [
-            {"enable_l2_swimlane": True},
+            {"enable_chip_swimlane": True},
             {"enable_dump_args": True},
             {"enable_pmu": 2},
             {"enable_dep_gen": True},
@@ -103,44 +104,44 @@ class TestRunConfigDfxFlags:
         assert RunConfig(platform="a5", enable_dump_args=False).enable_dump_args == 0
         assert RunConfig(platform="a5", enable_dump_args=True).any_dfx_enabled() is True
 
-    def test_l2_swimlane_level_is_reachable(self):
+    def test_chip_swimlane_level_is_reachable(self):
         # Regression (issue #2385): every collection level the runtime supports
         # must be requestable from RunConfig, not just "on" == full.
-        assert RunConfig(platform="a5", enable_l2_swimlane=0).enable_l2_swimlane == 0
+        assert RunConfig(platform="a5", enable_chip_swimlane=0).enable_chip_swimlane == 0
         for level in (1, 2, 3, 4):
-            cfg = RunConfig(platform="a5", enable_l2_swimlane=level)
-            assert cfg.enable_l2_swimlane == level
+            cfg = RunConfig(platform="a5", enable_chip_swimlane=level)
+            assert cfg.enable_chip_swimlane == level
             assert cfg.any_dfx_enabled() is True
             assert cfg.save_kernels is True
 
-    def test_l2_swimlane_bool_maps_to_full_level(self):
+    def test_chip_swimlane_bool_maps_to_full_level(self):
         # ``True`` means the runtime's bare-flag level 4, matching the
         # CallConfig setter and the runtime harness's --enable-chip-swimlane.
-        assert RunConfig(platform="a5", enable_l2_swimlane=True).enable_l2_swimlane == 4
-        assert RunConfig(platform="a5", enable_l2_swimlane=False).enable_l2_swimlane == 0
-        assert RunConfig(platform="a5", enable_l2_swimlane=False).any_dfx_enabled() is False
+        assert RunConfig(platform="a5", enable_chip_swimlane=True).enable_chip_swimlane == 4
+        assert RunConfig(platform="a5", enable_chip_swimlane=False).enable_chip_swimlane == 0
+        assert RunConfig(platform="a5", enable_chip_swimlane=False).any_dfx_enabled() is False
 
     @pytest.mark.parametrize("bad", [-1, 5, 99])
-    def test_l2_swimlane_rejects_out_of_range_level(self, bad):
+    def test_chip_swimlane_rejects_out_of_range_level(self, bad):
         with pytest.raises(ValueError, match="collection level in"):
-            RunConfig(platform="a5", enable_l2_swimlane=bad)
+            RunConfig(platform="a5", enable_chip_swimlane=bad)
 
-    def test_l2_swimlane_rejects_non_int(self):
-        with pytest.raises(TypeError, match="enable_l2_swimlane"):
-            RunConfig(platform="a5", enable_l2_swimlane="full")  # pyright: ignore[reportArgumentType]
+    def test_chip_swimlane_rejects_non_int(self):
+        with pytest.raises(TypeError, match="enable_chip_swimlane"):
+            RunConfig(platform="a5", enable_chip_swimlane="full")  # pyright: ignore[reportArgumentType]
 
     def test_dfx_opts_normalizes_swimlane_bool(self):
         # _DfxOpts is constructed directly by the harness and by the CLI, so it
         # normalizes too — _dfx_to_cli stringifies this field.
-        assert _DfxOpts(enable_l2_swimlane=True).enable_l2_swimlane == 4
-        assert _DfxOpts(enable_l2_swimlane=2).enable_l2_swimlane == 2
-        assert _DfxOpts(enable_l2_swimlane=0).any() is False
+        assert _DfxOpts(enable_chip_swimlane=True).enable_chip_swimlane == 4
+        assert _DfxOpts(enable_chip_swimlane=2).enable_chip_swimlane == 2
+        assert _DfxOpts(enable_chip_swimlane=0).any() is False
 
     def test_dfx_flags_are_independent(self):
         # Enabling one flag must not implicitly enable another.
         cfg = RunConfig(platform="a5", enable_dep_gen=True)
         assert cfg.enable_dep_gen is True
-        assert cfg.enable_l2_swimlane == 0
+        assert cfg.enable_chip_swimlane == 0
         assert cfg.enable_dump_args == 0
         assert cfg.enable_pmu == 0
         assert cfg.enable_scope_stats is False
@@ -152,7 +153,7 @@ class TestRunConfigDfxFlags:
         assert cfg.enable_scope_stats is True
         assert cfg.any_dfx_enabled() is True
         assert cfg.save_kernels is True
-        assert cfg.enable_l2_swimlane == 0
+        assert cfg.enable_chip_swimlane == 0
         assert cfg.enable_dump_args == 0
         assert cfg.enable_pmu == 0
         assert cfg.enable_dep_gen is False
@@ -160,14 +161,14 @@ class TestRunConfigDfxFlags:
     def test_dfx_opts_from_run_config_carries_all_five(self):
         cfg = RunConfig(
             platform="a5",
-            enable_l2_swimlane=True,
+            enable_chip_swimlane=True,
             enable_dump_args=2,
             enable_pmu=2,
             enable_dep_gen=True,
             enable_scope_stats=True,
         )
         opts = _DfxOpts.from_run_config(cfg)
-        assert opts.enable_l2_swimlane == 4  # True normalizes to the full level
+        assert opts.enable_chip_swimlane == 4  # True normalizes to the full level
         assert opts.enable_dump_args == 2
         assert opts.enable_pmu == 2
         assert opts.enable_dep_gen is True
@@ -180,6 +181,74 @@ class TestRunConfigDfxFlags:
 
     def test_dfx_opts_any_false_when_all_off(self):
         assert _DfxOpts().any() is False
+
+
+class TestSwimlaneAliasDeprecation:
+    """``enable_l2_swimlane`` is the deprecated spelling of ``enable_chip_swimlane``.
+
+    The alias is deliberately not a dataclass field, so ``dataclasses.replace``
+    keeps working on the canonical name — that is the property most of these
+    tests pin down.
+    """
+
+    def test_deprecated_kwarg_maps_and_warns(self):
+        with pytest.warns(DeprecationWarning, match="enable_l2_swimlane is deprecated"):
+            cfg = RunConfig(platform="a5", enable_l2_swimlane=2)
+        assert cfg.enable_chip_swimlane == 2
+
+    def test_deprecated_kwarg_still_normalizes_bool(self):
+        with pytest.warns(DeprecationWarning):
+            assert RunConfig(platform="a5", enable_l2_swimlane=True).enable_chip_swimlane == 4
+        with pytest.warns(DeprecationWarning):
+            assert RunConfig(platform="a5", enable_l2_swimlane=False).enable_chip_swimlane == 0
+
+    def test_alias_read_returns_canonical_without_warning(self, recwarn):
+        # Reads stay silent on purpose: dataclasses.replace() goes through this
+        # property, so warning here would fire on unrelated replace() calls.
+        cfg = RunConfig(platform="a5", enable_chip_swimlane=3)
+        assert cfg.enable_l2_swimlane == 3
+        assert not [w for w in recwarn if issubclass(w.category, DeprecationWarning)]
+
+    def test_alias_assignment_warns_and_writes_through(self):
+        cfg = RunConfig(platform="a5")
+        with pytest.warns(DeprecationWarning, match="enable_l2_swimlane is deprecated"):
+            cfg.enable_l2_swimlane = 2
+        assert cfg.enable_chip_swimlane == 2
+
+    def test_alias_assignment_normalizes_and_validates(self):
+        cfg = RunConfig(platform="a5")
+        with pytest.warns(DeprecationWarning):
+            cfg.enable_l2_swimlane = True
+        assert cfg.enable_chip_swimlane == 4
+        with pytest.raises(ValueError, match="collection level in"), pytest.warns(DeprecationWarning):
+            cfg.enable_l2_swimlane = 9
+
+    def test_both_spellings_is_an_error(self):
+        with (
+            pytest.raises(ValueError, match="pass only enable_chip_swimlane"),
+            pytest.warns(DeprecationWarning),
+        ):
+            RunConfig(platform="a5", enable_chip_swimlane=1, enable_l2_swimlane=3)
+
+    def test_canonical_name_does_not_warn(self, recwarn):
+        cfg = RunConfig(platform="a5", enable_chip_swimlane=2)
+        assert cfg.enable_chip_swimlane == 2
+        assert not [w for w in recwarn if issubclass(w.category, DeprecationWarning)]
+
+    def test_replace_on_canonical_name_is_silent_and_wins(self, recwarn):
+        # Regression guard for the alias design: an alias *field* (or InitVar)
+        # would be re-supplied by replace() from the old instance and could
+        # silently override the value the caller just passed.
+        cfg = RunConfig(platform="a5", enable_chip_swimlane=4)
+        assert dataclasses.replace(cfg, enable_chip_swimlane=1).enable_chip_swimlane == 1
+        assert dataclasses.replace(cfg, enable_chip_swimlane=0).enable_chip_swimlane == 0
+        assert dataclasses.replace(cfg, enable_dep_gen=True).enable_chip_swimlane == 4
+        assert not [w for w in recwarn if issubclass(w.category, DeprecationWarning)]
+
+    def test_alias_is_not_a_dataclass_field(self):
+        names = {f.name for f in dataclasses.fields(RunConfig)}
+        assert "enable_chip_swimlane" in names
+        assert "enable_l2_swimlane" not in names
 
 
 class TestRunConfigRingSizing:
@@ -481,7 +550,7 @@ class TestMakeCallConfigDfx:
 
     The runtime-diagnostic flags (``enable_dump_args`` / ``enable_pmu`` /
     ``enable_dep_gen`` / ``enable_scope_stats`` / public
-    ``enable_l2_swimlane``) are transcribed onto the shared ``CallConfig`` and
+    ``enable_chip_swimlane``) are transcribed onto the shared ``CallConfig`` and
     their artifacts rooted at ``dfx_base``. The public swimlane option maps to
     Simpler's ``enable_chip_swimlane`` and additionally co-enables ``dep_gen``
     so the converter has a task graph.
@@ -515,7 +584,7 @@ class TestMakeCallConfigDfx:
         dfx_base = tmp_path / "dfx_outputs"
         # User asks for swimlane only; dep_gen is auto-enabled because the
         # converter needs deps.json to resolve task arrows / kernel names.
-        run_config = RunConfig(platform="a2a3sim", enable_l2_swimlane=True)
+        run_config = RunConfig(platform="a2a3sim", enable_chip_swimlane=True)
         cfg = _make_dist_call_config_with_fake(
             DistributedConfig(), run_config, monkeypatch, dfx_base=dfx_base
         )
@@ -704,14 +773,14 @@ class TestExecuteOnDeviceDfxValidation:
                 runtime_name="tensormap_and_ringbuffer",
                 device_id=0,
                 output_prefix=None,
-                enable_l2_swimlane=True,
+                enable_chip_swimlane=True,
             )
 
     def test_dfx_without_output_prefix_raises_for_each_flag(self):
         from pypto.runtime.device_runner import execute_on_device  # noqa: PLC0415
 
         for flag in [
-            {"enable_l2_swimlane": True},
+            {"enable_chip_swimlane": True},
             {"enable_dump_args": True},
             {"enable_pmu": 2},
             {"enable_dep_gen": True},
@@ -751,7 +820,7 @@ class TestExecuteOnDeviceDfxValidation:
             assert worker.run.called
             assert worker.close.called
 
-    def test_public_l2_option_maps_to_simpler_chip_field(self, tmp_path):
+    def test_public_option_maps_to_simpler_chip_field(self, tmp_path):
         """The compatibility option must populate Simpler's renamed member."""
         from pypto.runtime import device_runner  # noqa: PLC0415
 
@@ -765,7 +834,7 @@ class TestExecuteOnDeviceDfxValidation:
                     runtime_name="tensormap_and_ringbuffer",
                     device_id=0,
                     output_prefix=str(tmp_path),
-                    enable_l2_swimlane=True,
+                    enable_chip_swimlane=True,
                 )
 
         call_config = worker.init.call_args.kwargs["prewarm_config"]

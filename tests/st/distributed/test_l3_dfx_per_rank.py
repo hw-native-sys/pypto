@@ -27,7 +27,7 @@ This exercises the driver wiring (``_make_call_config`` setting the DFX flags +
 base ``output_prefix``) and the codegen wiring (``_submit_chip`` appending the
 ``/rank{worker}/d{k}`` suffix per dispatch).
 
-``enable_l2_swimlane`` is also covered: on L3 it co-enables dep_gen and emits
+``enable_chip_swimlane`` is also covered: on L3 it co-enables dep_gen and emits
 ``rank{r}/d{k}/chip_swimlane_records.json`` + ``rank{r}/d{k}/deps.json`` per
 dispatch; onboard it is additionally converted to
 ``rank{r}/d{k}/merged_swimlane_*.json`` (conversion is skipped on the simulator,
@@ -162,7 +162,7 @@ class TestL3DfxPerRank:
         outputs = torch.zeros((n_ranks, ROWS, COLS), dtype=torch.float32)
 
         # User asks for swimlane only; dep_gen is co-enabled by the driver.
-        run_config = RunConfig(platform=test_config.platform, enable_l2_swimlane=True)
+        run_config = RunConfig(platform=test_config.platform, enable_chip_swimlane=True)
         compiled(inputs, outputs, config=run_config)
 
         assert torch.allclose(outputs, inputs + 1.0)

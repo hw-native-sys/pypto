@@ -648,11 +648,11 @@ def _make_call_config(
     applies its own ``PTO2_RING_*`` env var / compile-time fallback.
 
     DFX diagnostics (``enable_dump_args`` / ``enable_pmu`` / ``enable_dep_gen``
-    / ``enable_scope_stats`` / ``enable_l2_swimlane``) are likewise read from
+    / ``enable_scope_stats`` / ``enable_chip_swimlane``) are likewise read from
     *run_config* and written to the shared ``config`` the host_orch chip dispatch
     forwards to every ``orch.submit_next_level``; their artifacts land under
     *dfx_base* (``<output_dir>/dfx_outputs``). By default,
-    ``enable_l2_swimlane`` co-enables dep_gen so a single dispatch still has the
+    ``enable_chip_swimlane`` co-enables dep_gen so a single dispatch still has the
     task graph needed by the converter. Onboard L3 callers use a two-pass
     graph/timing protocol and set *co_enable_swimlane_dep_gen* false while
     building the clean timing pass.
@@ -698,17 +698,15 @@ def _make_call_config(
             # records) and set ``co_enable_swimlane_dep_gen=False`` on the timing
             # pass so dep_gen does not perturb it. Simulator and direct
             # single-pass builders keep the default co-enable behavior.
-            # ``enable_l2_swimlane`` is a collection level (0-4), so the
+            # ``enable_chip_swimlane`` is a collection level (0-4), so the
             # ``or``/``and`` chain can yield an int; the
             # ``CallConfig.enable_dep_gen`` pybind setter only accepts ``bool``.
             # Wrap in ``bool(...)`` to avoid a TypeError.
             call_config.enable_dep_gen = bool(
-                dfx.enable_dep_gen or (co_enable_swimlane_dep_gen and dfx.enable_l2_swimlane)
+                dfx.enable_dep_gen or (co_enable_swimlane_dep_gen and dfx.enable_chip_swimlane)
             )
             call_config.enable_scope_stats = dfx.enable_scope_stats
-            # PyPTO keeps ``enable_l2_swimlane`` as a public compatibility
-            # spelling; Simpler's current CallConfig member is chip-scoped.
-            call_config.enable_chip_swimlane = dfx.enable_l2_swimlane
+            call_config.enable_chip_swimlane = dfx.enable_chip_swimlane
             # Base dir shared by every chip; ``_submit_chip`` namespaces it per
             # dispatch (``<dfx_base>/rank{worker}/d{k}``) so per-dispatch
             # artifacts (pmu.csv, deps.json, chip_swimlane_records.json, ...) don't
@@ -750,7 +748,7 @@ def _run_l3_swimlane_two_pass(
     print("[swimlane] run 1/2: capturing the per-dispatch task graph (deps.json); its timing is discarded.")
     deps_cfg = dataclasses.replace(
         config,
-        enable_l2_swimlane=0,
+        enable_chip_swimlane=0,
         enable_dep_gen=True,
         enable_pmu=0,
         enable_scope_stats=False,
@@ -1245,11 +1243,11 @@ def execute_distributed(
             ``ring_dep_pool``, each a scalar or a per-ring list of 4 ints) size
             this dispatch's runtime ring buffers, and its
             runtime-diagnostic DFX flags (``enable_dump_args`` / ``enable_pmu``
-            / ``enable_dep_gen`` / ``enable_scope_stats`` / ``enable_l2_swimlane``)
+            / ``enable_dep_gen`` / ``enable_scope_stats`` / ``enable_chip_swimlane``)
             are written per dispatch under
             ``<output_dir>/dfx_outputs/rank{r}/d{k}/`` (``d{k}`` is the card's
             k-th dispatch, so multiple — even different — chip programs on one
-            card keep separate artifacts). Onboard, ``enable_l2_swimlane`` runs a
+            card keep separate artifacts). Onboard, ``enable_chip_swimlane`` runs a
             clean two-pass dispatch (pass 1 dep_gen → ``deps.json``, pass 2
             swimlane → records with unperturbed timing) and additionally produces
             ``merged_swimlane_*.json`` per dispatch. The remaining compile-side
@@ -1336,7 +1334,7 @@ def execute_distributed(
                 _close_local_worker(w)
 
     dfx_base = output_dir / "dfx_outputs"
-    swimlane = config is not None and config.enable_l2_swimlane > 0
+    swimlane = config is not None and config.enable_chip_swimlane > 0
 
     # Scope DFX artifacts to this run: drop any stale ``rank*/d{k}`` dirs from an
     # earlier (possibly larger) run before the first dispatch writes new ones.
@@ -1346,7 +1344,7 @@ def execute_distributed(
         if _DfxOpts.from_run_config(config).any():
             _clear_dfx_dispatch_dirs(dfx_base)
 
-    if config is not None and config.enable_l2_swimlane > 0 and not compiled.platform.endswith("sim"):
+    if config is not None and config.enable_chip_swimlane > 0 and not compiled.platform.endswith("sim"):
         # Two-pass for clean timing, mirroring the L2 swimlane workflow: dep_gen
         # collection perturbs timing, so the per-dispatch task graph and the kept
         # timing come from separate dispatches.
@@ -1394,7 +1392,7 @@ def execute_distributed_compiled(
             ``__call__``. Its per-task ring-sizing overrides size this dispatch's
             runtime ring buffers, and its runtime-diagnostic DFX flags
             (``enable_dump_args`` / ``enable_pmu`` / ``enable_dep_gen`` /
-            ``enable_scope_stats`` / ``enable_l2_swimlane``) are written per
+            ``enable_scope_stats`` / ``enable_chip_swimlane``) are written per
             dispatch under ``<output_dir>/dfx_outputs/rank{r}/d{k}/``. Other
             compile-side fields are not consumed on the dispatch path.
         platform: Override the persisted platform (e.g. ``a2a3sim`` → ``a2a3``).
@@ -2382,7 +2380,7 @@ class DistributedWorker(Worker):
         dispatch's runtime ring buffers without
         touching the prepared program's shared config, so consecutive dispatches
         can use different ring sizes. Its runtime DFX fields are also applied per
-        dispatch. On onboard L3, ``enable_l2_swimlane`` executes the workload
+        dispatch. On onboard L3, ``enable_chip_swimlane`` executes the workload
         twice on the same prepared worker: first with dep-gen only, then with
         swimlane enabled and dep-gen disabled. Mutable host/resident arguments
         are not restored between those profiling passes and can therefore be
@@ -2498,7 +2496,7 @@ class DistributedWorker(Worker):
                 return DistributedRunHandle._completed(self)
 
             postprocess: Callable[[], None] | None = None
-            if config is not None and config.enable_l2_swimlane > 0:
+            if config is not None and config.enable_chip_swimlane > 0:
 
                 def collect_swimlane() -> None:
                     _collect_l3_swimlane(compiled.output_dir, compiled.platform)
@@ -2530,7 +2528,7 @@ class DistributedWorker(Worker):
             return _make_call_config(compiled._distributed_config), None, False
 
         dfx_base = compiled.output_dir / "dfx_outputs"
-        two_pass_swimlane = config.enable_l2_swimlane > 0 and not compiled.platform.endswith("sim")
+        two_pass_swimlane = config.enable_chip_swimlane > 0 and not compiled.platform.endswith("sim")
         call_config = None
         if not two_pass_swimlane:
             call_config = _make_call_config(compiled._distributed_config, config, dfx_base=dfx_base)
@@ -2692,7 +2690,7 @@ class DistributedWorker(Worker):
         ring sizing and runtime DFX fields apply without touching the prepared
         program's shared config. In a multi-program worker each program can
         therefore use its own ring sizes and diagnostics. On onboard L3,
-        ``enable_l2_swimlane`` executes a dep-gen graph pass followed by a
+        ``enable_chip_swimlane`` executes a dep-gen graph pass followed by a
         dep-gen-disabled timing pass; mutable arguments are not restored between
         them. ``None`` snapshots the program's baseline for this dispatch.
         """
