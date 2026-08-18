@@ -101,6 +101,7 @@ class TestMakeCacheKey:
         assert dist_part is None  # single-chip default
         assert compile_opts == (
             ("analyze_auto_scopes_for_deps", False),
+            ("dump_ptoas_passes", False),
             ("memory_planner", None),
             ("enable_pypto_l0c_double_buffer", False),
             ("dep_layouts", ()),
