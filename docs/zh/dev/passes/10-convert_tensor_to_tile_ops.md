@@ -47,7 +47,7 @@ program_tiled = convert_pass(program)
 
 4. **插入 tile.store（出口存储）**：对每个从 `TensorType` 转换为 `TileType` 的返回值，添加 `Out` 参数并插入 `tile.store(tile, zeros, out_param)`。如果返回值来自 `tile.assemble` 循环，则将循环重写为直接使用 `tile.store`（转换时 assemble-loop 重写；与 `OptimizeOrchTensors` 模式 3 不同，该模式处理跨函数优化）。
 
-5. **升级被写入参数的方向（direction）**：通过别名溯源分析（`AnalyzeCallAccess`）把每次读/写归属到其来源参数，再把被写入的 `In` 参数升级为 `Out`（只写）或 `InOut`（既读又写）。识别为写目标的 op：`tile.store`、`tensor.write`、`tensor.assemble`、`pld.tile.remote_store`、`pld.tile.put` / `pld.tile.get`、`pld.system.notify`（其 `target` 信号窗口）、`system.syncall`（workspace），以及复合集合通信 `pld.tensor.allreduce` / `allgather` / `reduce_scatter` / `barrier` / `broadcast` / `all_to_all(_v)` —— 由于本 pass 运行在 `LowerCompositeOps` 之前，这些 op 的 signal / target 操作数在此直接标记为读+写。其余 op 的实参一律只计为读。用户已显式声明为 `Out` / `InOut` 的参数保持不变。
+5. **升级被写入参数的方向（direction）**：通过别名溯源分析（`AnalyzeCallAccess`）把每次读/写归属到其来源参数，再把被写入的 `In` 参数升级为 `Out`（只写）或 `InOut`（既读又写）。识别为写目标的 op：`tile.store`、`tensor.write`、`tensor.assemble`、`pld.tile.remote_store`、`pld.tile.put` / `pld.tile.get`、`pld.system.notify`（`NotifyOp.Set` 使其 `target` 为只写，`NotifyOp.AtomicAdd` 使其为读+写）、`system.syncall`（workspace），以及复合集合通信 `pld.tensor.allreduce` / `allgather` / `reduce_scatter` / `barrier` / `broadcast` / `all_to_all(_v)` —— 由于本 pass 运行在 `LowerCompositeOps` 之前，这些 op 的 signal / target 操作数在此直接标记为读+写。其余 op 的实参一律只计为读。用户已显式声明为 `Out` / `InOut` 的参数保持不变。
 
 ### GM 存储一致性限制
 

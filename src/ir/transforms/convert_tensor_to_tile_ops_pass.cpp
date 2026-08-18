@@ -25,6 +25,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/comm.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -1482,18 +1483,21 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
 
   if (IsOp(call, "pld.system.notify")) {
     // pld.system.notify(target, peer, offsets, value, *, op): target (args_[0])
-    // is the cross-rank write target; peer/offsets/value are reads. Mirrors the
-    // pld.tile.put/get handling above — a signal window touched only by notify
-    // becomes Out, and a companion pld.system.wait on the same window adds the
-    // read side (fall-through branch below) so it surfaces as InOut.
-    // Write-only holds for both NotifyOp values: the accumulate half of
-    // NotifyOp::kAtomicAdd runs atomically on the *peer* rank's slot, so this
-    // rank's kernel never reads the local buffer and needs no local RAW edge.
+    // is always written; peer/offsets/value are reads. NotifyOp::kAtomicAdd is
+    // additionally a read-modify-write of the target slot, so its distributed
+    // target dependency must be preserved even when the slot belongs to a peer
+    // rank. NotifyOp::kSet remains write-only.
     for (size_t i = 1; i < call->args_.size(); ++i) {
       MarkAccess(CollectReferencedOrigins(call->args_[i], origin_map), has_read);
     }
     if (auto write_target = GetWriteTargetExpr(call)) {
-      MarkAccess(GetAliasOrigins(write_target, origin_map), has_write);
+      auto origins = GetAliasOrigins(write_target, origin_map);
+      const auto notify_op =
+          static_cast<NotifyOp>(call->GetKwarg<int>("op", static_cast<int>(NotifyOp::kAtomicAdd)));
+      if (notify_op == NotifyOp::kAtomicAdd) {
+        MarkAccess(origins, has_read);
+      }
+      MarkAccess(origins, has_write);
     }
     return;
   }
