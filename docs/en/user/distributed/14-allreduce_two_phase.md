@@ -43,9 +43,9 @@ OK
 
 ## Walkthrough
 
-Same class-form factory as step 08, now with **two** windows (`data` for the
-staged inputs, `result` for the reduced chunks) and a **two-row signal**
-(`[2, nr]` — one row per barrier round):
+Same class-form factory as step 08, now with **two** windows (`data`
+for the staged inputs, `result` for the reduced chunks) and a **two-row
+signal** (`[2, nr]` — one row per barrier round):
 
 ```python
 # Phase 1 — stage this rank's slice into its window slot.

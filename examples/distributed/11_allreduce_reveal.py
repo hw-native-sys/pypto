@@ -103,7 +103,7 @@ def build_reveal_allreduce(nr: int, mode: str):
             """Host orchestrator: shared data + signal windows, one dispatch per rank."""
             data_buf = pld.alloc_window_buffer([1, SIZE], dtype=pl.FP32)
             signal_buf = pld.alloc_window_buffer([sig_rows, sig_cols], dtype=pl.INT32)
-            for r in pl.range(nr):
+            for r in pl.range(pld.world_size()):
                 data = pld.window(data_buf, [1, SIZE], dtype=pl.FP32)
                 signal = pld.window(signal_buf, [sig_rows, sig_cols], dtype=pl.INT32)
                 self.per_rank(x[r], y[r], data, signal, device=r)

@@ -38,9 +38,14 @@ OK
 
 程序由**rank 数量工厂**构建：`build_mesh_allreduce(nr)` 把 `nr` 折叠进一个
 `@pl.program` 类，于是 barrier 信号 `[nr, 1]`（每 rank 一个单元）是编译期
-形状，而同一份源码通过 `-d` 服务任意 world 大小。这是窗口形状依赖 world 大小时
-的文档化模式——见 `01-collectives.md` Ring Mode；ST 测试也使用同样的
-class-form 工厂。
+形状，而同一份源码通过 `-d` 服务任意 world 大小。
+
+步骤 01-07 使用 `@pl.jit` 系列；这里改用 class form 是**必需的，而非风格
+选择**。`@pl.program` / `@pl.function` 在装饰时捕获*定义处*帧的局部变量，
+因此工厂的 `nr` 在签名与 HOST 编排体内（`alloc_window_buffer([nr, 1], ...)`）
+都能解析；而 `@pl.jit.host` 会在该帧消失之后才重新特化为 `@pl.function`，
+其函数体中引用的闭包 `nr` 便无法解析。`tests/st/distributed/` 中每个按 rank
+参数化的集合通信都使用同样的 class-form 工厂。
 
 kernel 是每个手工集合通信共有的四阶段：
 
@@ -50,17 +55,17 @@ local = pl.load(x, [0, 0], [1, SIZE])
 data = pl.store(local, [0, 0], data)
 
 # Phase 2 — barrier：通知所有对端，等待所有对端槽位。
-for peer in pl.range(nr):
+for peer in pl.range(nranks):
     if peer != my_rank:
         pld.system.notify(signal, peer=peer, offsets=[my_rank, 0],
                           value=1, op=pld.NotifyOp.AtomicAdd)
-for src in pl.range(nr):
+for src in pl.range(nranks):
     if src != my_rank:
         pld.system.wait(signal, offsets=[src, 0], expected=1, cmp=pld.WaitCmp.Ge)
 
 # Phase 3 — 累加：从自己的 slice 开始，加上每个对端的 slice。
 acc = pl.load(data, [0, 0], [1, SIZE])
-for peer in pl.range(nr):
+for peer in pl.range(nranks):
     if peer != my_rank:
         recv = pld.tile.remote_load(data, peer=peer, offsets=[0, 0], shape=[1, SIZE])
         acc = pl.add(acc, recv)

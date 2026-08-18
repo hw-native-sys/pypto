@@ -40,8 +40,8 @@ OK
 
 ## 走读（Walkthrough）
 
-与步骤 08 相同的 class-form 工厂，现在有**两个**窗口（`data` 存 staging 的
-输入，`result` 存归约后的块）和一个**两行信号**（`[2, nr]`——每轮 barrier
+与步骤 08 相同的 class-form 工厂，现在有**两个**窗口（`data` 存 staging
+的输入，`result` 存归约后的块）和一个**两行信号**（`[2, nr]`——每轮 barrier
 一行）：
 
 ```python

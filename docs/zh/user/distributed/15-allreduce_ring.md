@@ -58,11 +58,11 @@ for s in pl.range(nranks - 1):
     # 等待左邻居第 s 轮的块（信号第 s 行），然后：
     pld.system.wait(signal, offsets=[s, left], expected=1, cmp=pld.WaitCmp.Ge)
     recv = pld.tile.remote_load(scratch, peer=left,
-                                offsets=[0, left_send_idx * chunk_elems],
+                                offsets=[0, left_send_idx * chunk],
                                 shape=[1, chunk])
-    acc = pl.load(scratch, [0, recv_add_idx * chunk_elems], [1, chunk])
+    acc = pl.load(scratch, [0, recv_add_idx * chunk], [1, chunk])
     acc = pl.add(acc, recv)
-    scratch = pl.store(acc, [0, recv_add_idx * chunk_elems], scratch)
+    scratch = pl.store(acc, [0, recv_add_idx * chunk], scratch)
     # 该 store 为下一轮准备好发送：通知右邻居（第 s+1 行）。
     pld.system.notify(signal, peer=right, offsets=[s + 1, my_rank],
                       value=1, op=pld.NotifyOp.AtomicAdd)

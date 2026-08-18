@@ -59,10 +59,13 @@ y = pl.store(recv, [0, 0], y)
   takes `[nr, 1]`; ring takes `[2*(nr-1), nr]` — exactly the row-per-round
   signal step 10 taught. The factory folds both `nr` and `mode` in, so one
   source builds either variant (the class-form pattern from steps 08-10).
-- **What the builtin accepts (read this twice):** `pld.tensor.allreduce` takes
-  the full `ReduceOp` family (`Sum`/`Max`/`Min`/`Prod`) and `FP16`/`FP32` in
-  **both** modes — the mesh and ring ST suites run every operator and `FP16`
-  through the real pipelines.
+- **What the builtin accepts (read this twice):** `pld.tensor.allreduce` — the
+  **InCore composite** lowering used here — takes the full `ReduceOp` family
+  (`Sum`/`Max`/`Min`/`Prod`) and `FP16`/`FP32` in **both** modes — the mesh and
+  ring ST suites run every operator and `FP16` through the real pipelines.
+  A narrower `Sum`+`FP32`-only contract exists, but only on the separate
+  **HOST builtin** ring path (`builtin.tensor.allreduce_ring`, not used by
+  this tutorial) — see `01-collectives.md` §AllReduce.
 
 ### The IR diff (the teaching artifact)
 

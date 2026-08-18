@@ -23,9 +23,15 @@ Concepts introduced:
   - the ``@pl.program`` class form + factory: the barrier signal is a per-rank
     row matrix ``[nr, 1]`` and window shapes must be statically known, so a
     rank-count factory builds a ``@pl.program`` class with ``nr`` folded in as
-    a compile-time constant — the documented way to keep "one source, any P"
-    when a window shape depends on the world size (see 01-collectives.md Ring
-    Mode; the ST tests use this same class-form factory)
+    a compile-time constant — the way to keep "one source, any P" when a
+    window shape depends on the world size. Steps 01-07 use the ``@pl.jit``
+    family; the switch here is required, not stylistic: ``@pl.program`` /
+    ``@pl.function`` capture the *defining* frame's locals at decoration time
+    (so the factory's ``nr`` resolves inside the HOST orchestrator body),
+    while ``@pl.jit.host`` re-specializes into ``@pl.function`` later, after
+    that frame is gone — a closure ``nr`` referenced in its body then fails to
+    resolve. Every rank-parametrized collective in ``tests/st/distributed/``
+    uses this same class-form factory for the same reason.
 
 This is the simplest of the three all-reduces (steps 08-10): one barrier, then
 every rank reads every peer. Its O(P) traffic is why the two-phase and ring
@@ -53,6 +59,11 @@ def build_mesh_allreduce(nr: int):
     a per-rank row matrix ``[nr, 1]`` and window shapes must be statically
     known: ``nr`` as a closure constant becomes a compile-time shape, so the
     same source serves any world size (pick it with ``-d``).
+
+    The class form is what makes that closure constant reachable: the
+    ``@pl.program`` decorator snapshots this factory frame's locals when it
+    runs, so ``nr`` resolves both in the signatures below and inside the HOST
+    orchestrator body (``alloc_window_buffer([nr, 1], ...)``).
     """
 
     @pl.program
@@ -68,6 +79,7 @@ def build_mesh_allreduce(nr: int):
             """Chip kernel: four-phase mesh allreduce — stage, barrier, accumulate, stage-out."""
             ctx = pld.get_comm_ctx(data)
             my_rank = pld.rank(ctx)
+            nranks = pld.nranks(ctx)
 
             # Phase 1 — stage this rank's slice into its window slot.
             local = pl.load(x, [0, 0], [1, SIZE])
@@ -77,7 +89,7 @@ def build_mesh_allreduce(nr: int):
             # Each rank owns a dedicated row (offsets=[my_rank, 0]);
             # AtomicAdd/Ge(1) means the wait only passes once every peer has
             # staged its slice.
-            for peer in pl.range(nr):
+            for peer in pl.range(nranks):
                 if peer != my_rank:
                     pld.system.notify(
                         signal,
@@ -86,7 +98,7 @@ def build_mesh_allreduce(nr: int):
                         value=1,
                         op=pld.NotifyOp.AtomicAdd,
                     )
-            for src in pl.range(nr):
+            for src in pl.range(nranks):
                 if src != my_rank:
                     pld.system.wait(
                         signal,
@@ -97,7 +109,7 @@ def build_mesh_allreduce(nr: int):
 
             # Phase 3 — accumulate: start from our own slice, add every peer's slice.
             acc = pl.load(data, [0, 0], [1, SIZE])
-            for peer in pl.range(nr):
+            for peer in pl.range(nranks):
                 if peer != my_rank:
                     recv = pld.tile.remote_load(data, peer=peer, offsets=[0, 0], shape=[1, SIZE])
                     acc = pl.add(acc, recv)

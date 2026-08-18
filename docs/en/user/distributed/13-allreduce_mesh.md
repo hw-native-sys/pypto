@@ -43,9 +43,16 @@ OK
 The program is built by a **rank-count factory**: `build_mesh_allreduce(nr)`
 folds `nr` into a `@pl.program` class, so the barrier signal `[nr, 1]` (one
 cell per rank) is a compile-time shape while the same source serves any world
-size via `-d`. This is the documented pattern for collectives whose window
-shapes depend on the world size — see `01-collectives.md` Ring Mode; the ST
-tests use the same class-form factory.
+size via `-d`.
+
+Steps 01-07 use the `@pl.jit` family, and the switch to the class form here is
+**required, not stylistic**. `@pl.program` / `@pl.function` snapshot the
+*defining* frame's locals at decoration time, so the factory's `nr` resolves
+both in the signatures and inside the HOST orchestrator body
+(`alloc_window_buffer([nr, 1], ...)`). `@pl.jit.host` re-specializes into
+`@pl.function` later, after that frame is gone, so a closure `nr` referenced in
+its body fails to resolve. Every rank-parametrized collective in
+`tests/st/distributed/` uses this same class-form factory.
 
 The kernel is the four phases every hand-rolled collective shares:
 
@@ -55,17 +62,17 @@ local = pl.load(x, [0, 0], [1, SIZE])
 data = pl.store(local, [0, 0], data)
 
 # Phase 2 — barrier: notify every peer, wait on every peer slot.
-for peer in pl.range(nr):
+for peer in pl.range(nranks):
     if peer != my_rank:
         pld.system.notify(signal, peer=peer, offsets=[my_rank, 0],
                           value=1, op=pld.NotifyOp.AtomicAdd)
-for src in pl.range(nr):
+for src in pl.range(nranks):
     if src != my_rank:
         pld.system.wait(signal, offsets=[src, 0], expected=1, cmp=pld.WaitCmp.Ge)
 
 # Phase 3 — accumulate: start from our own slice, add every peer's slice.
 acc = pl.load(data, [0, 0], [1, SIZE])
-for peer in pl.range(nr):
+for peer in pl.range(nranks):
     if peer != my_rank:
         recv = pld.tile.remote_load(data, peer=peer, offsets=[0, 0], shape=[1, SIZE])
         acc = pl.add(acc, recv)

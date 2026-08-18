@@ -63,12 +63,11 @@ def build_ring_allreduce(nr: int):
             y: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
             scratch: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
             signal: pl.InOut[pld.DistributedTensor[[total_rounds, nr], pl.INT32]],
-            chunk_elems: pl.Scalar[pl.INDEX],
         ) -> pl.Tensor[[1, SIZE], pl.FP32]:
             """Monolithic ring allreduce: stage-in, RS loop, AG loop, stage-out.
 
             ``scratch`` holds ``nr`` chunks laid out flat in ``[1, SIZE]``;
-            chunk *c* starts at offset ``c * chunk_elems``. The signal carries
+            chunk *c* starts at offset ``c * chunk``. The signal carries
             ``2*(nr-1)`` rows, one per round, and is a neighbour-ready
             handshake: notify the *right* neighbour after a store, wait on the
             *left* neighbour before a ``remote_load`` (payload reads the left
@@ -85,8 +84,8 @@ def build_ring_allreduce(nr: int):
             # Phase 1 — stage-in: copy each local input chunk into scratch,
             # then tell the right neighbour the ring is ready (signal row 0).
             for c in pl.range(nranks):
-                src_tile = pl.load(x, [0, c * chunk_elems], [1, chunk])
-                scratch = pl.store(src_tile, [0, c * chunk_elems], scratch)
+                src_tile = pl.load(x, [0, c * chunk], [1, chunk])
+                scratch = pl.store(src_tile, [0, c * chunk], scratch)
             pld.system.notify(
                 signal,
                 peer=right,
@@ -116,12 +115,12 @@ def build_ring_allreduce(nr: int):
                 recv = pld.tile.remote_load(
                     scratch,
                     peer=left,
-                    offsets=[0, left_send_idx * chunk_elems],
+                    offsets=[0, left_send_idx * chunk],
                     shape=[1, chunk],
                 )
-                acc = pl.load(scratch, [0, recv_add_idx * chunk_elems], [1, chunk])
+                acc = pl.load(scratch, [0, recv_add_idx * chunk], [1, chunk])
                 acc = pl.add(acc, recv)
-                scratch = pl.store(acc, [0, recv_add_idx * chunk_elems], scratch)
+                scratch = pl.store(acc, [0, recv_add_idx * chunk], scratch)
 
                 # The store above stages the right neighbour's round-(rs_round+1)
                 # send: signal it on the next row.
@@ -152,10 +151,10 @@ def build_ring_allreduce(nr: int):
                 recv = pld.tile.remote_load(
                     scratch,
                     peer=left,
-                    offsets=[0, left_send_idx * chunk_elems],
+                    offsets=[0, left_send_idx * chunk],
                     shape=[1, chunk],
                 )
-                scratch = pl.store(recv, [0, recv_idx * chunk_elems], scratch)
+                scratch = pl.store(recv, [0, recv_idx * chunk], scratch)
 
                 # Pass the completion on to the right neighbour — except after
                 # the final round, whose row would exceed the signal's
@@ -171,8 +170,8 @@ def build_ring_allreduce(nr: int):
 
             # Phase 4 — stage-out: write the concatenated chunks to the output.
             for c in pl.range(nranks):
-                src_tile = pl.load(scratch, [0, c * chunk_elems], [1, chunk])
-                y = pl.store(src_tile, [0, c * chunk_elems], y)
+                src_tile = pl.load(scratch, [0, c * chunk], [1, chunk])
+                y = pl.store(src_tile, [0, c * chunk], y)
 
             return y
 
@@ -183,10 +182,9 @@ def build_ring_allreduce(nr: int):
             y: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
             scratch: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
             signal: pl.InOut[pld.DistributedTensor[[total_rounds, nr], pl.INT32]],
-            chunk_elems: pl.Scalar[pl.INDEX],
         ) -> pl.Tensor[[1, SIZE], pl.FP32]:
             """Per-device orchestration: one incore call, on this device."""
-            return self.ring_step(x, y, scratch, signal, chunk_elems)
+            return self.ring_step(x, y, scratch, signal)
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def ring_allreduce(
@@ -197,11 +195,10 @@ def build_ring_allreduce(nr: int):
             """Host orchestrator: shared scratch + signal windows, one dispatch per rank."""
             scratch_buf = pld.alloc_window_buffer([1, SIZE], dtype=pl.FP32)
             signal_buf = pld.alloc_window_buffer([total_rounds, nr], dtype=pl.INT32)
-            chunk_elems = SIZE // nr
-            for r in pl.range(nr):
+            for r in pl.range(pld.world_size()):
                 scratch = pld.window(scratch_buf, [1, SIZE], dtype=pl.FP32)
                 signal = pld.window(signal_buf, [total_rounds, nr], dtype=pl.INT32)
-                self.per_rank(x[r], y[r], scratch, signal, chunk_elems, device=r)
+                self.per_rank(x[r], y[r], scratch, signal, device=r)
             return y
 
     return RingAllreduce

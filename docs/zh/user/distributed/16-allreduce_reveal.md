@@ -55,9 +55,13 @@ y = pl.store(recv, [0, 0], y)
 - **信号是你的，其形状告诉你处于哪种模式。** mesh 用 `[nr, 1]`；ring 用
   `[2*(nr-1), nr]`——正是步骤 10 教过的每轮一行信号。工厂把 `nr` 与 `mode`
   都折叠进来，于是一份源码可构建任一变体（步骤 08-10 的 class-form 模式）。
-- **内置原语接受什么（请读两遍）：** `pld.tensor.allreduce` 在**两种模式**下
-  都接受完整 `ReduceOp` 家族（`Sum`/`Max`/`Min`/`Prod`）与 `FP16`/`FP32`——
-  mesh 与 ring 的 ST 套件都把每个算符与 `FP16` 跑过真实流水线。
+- **内置原语接受什么（请读两遍）：** `pld.tensor.allreduce`——这里用到的
+  **InCore composite** lowering——在**两种模式**下都接受完整 `ReduceOp`
+  家族（`Sum`/`Max`/`Min`/`Prod`）与 `FP16`/`FP32`——mesh 与 ring 的 ST 套件
+  都把每个算符与 `FP16` 跑过真实流水线。另有一条更窄的
+  `Sum`+`FP32`-only 契约，但仅存在于本教程未使用的独立 **HOST builtin**
+  ring 路径（`builtin.tensor.allreduce_ring`）——参见
+  `01-collectives.md` §AllReduce。
 
 ### IR diff（教学工件）
 

@@ -64,11 +64,11 @@ for s in pl.range(nranks - 1):
     # Wait for the left neighbour's round-s chunk (signal row s), then:
     pld.system.wait(signal, offsets=[s, left], expected=1, cmp=pld.WaitCmp.Ge)
     recv = pld.tile.remote_load(scratch, peer=left,
-                                offsets=[0, left_send_idx * chunk_elems],
+                                offsets=[0, left_send_idx * chunk],
                                 shape=[1, chunk])
-    acc = pl.load(scratch, [0, recv_add_idx * chunk_elems], [1, chunk])
+    acc = pl.load(scratch, [0, recv_add_idx * chunk], [1, chunk])
     acc = pl.add(acc, recv)
-    scratch = pl.store(acc, [0, recv_add_idx * chunk_elems], scratch)
+    scratch = pl.store(acc, [0, recv_add_idx * chunk], scratch)
     # The store stages next round's send: signal the right neighbour (row s+1).
     pld.system.notify(signal, peer=right, offsets=[s + 1, my_rank],
                       value=1, op=pld.NotifyOp.AtomicAdd)
