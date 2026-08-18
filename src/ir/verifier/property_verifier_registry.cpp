@@ -75,9 +75,9 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   // it sits in GetStructuralProperties() and fires at pipeline input rather than
   // after a particular pass.
   Register(IRProperty::AtomicAddDtypeValid, CreateAtomicAddDtypeValidPropertyVerifier);
-  // AccStorePhaseValid: the final producer/store unit-flag contract is decidable
-  // on the user's own IR, including immediately nested calls and pre-SSA
-  // rebindings. It sits in GetStructuralProperties() and fires at pipeline input.
+  // AccStorePhaseValid: the final producer/store unit-flag contract is verified
+  // after InlineFunctions, so a final producer returned by an Inline helper is
+  // analyzed in the same function and region as its consuming store.
   Register(IRProperty::AccStorePhaseValid, CreateAccStorePhaseValidPropertyVerifier);
   Register(IRProperty::InlineFunctionsEliminated, CreateInlineFunctionsEliminatedPropertyVerifier);
   Register(IRProperty::OrchestrationReferencesResolved,

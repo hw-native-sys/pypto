@@ -11,8 +11,8 @@
 On A2/A3, ``acc_phase=pl.AccPhase.Final`` is producer-side check-and-set and
 ``st_phase=pl.STPhase.Final`` is consumer-side check-and-clear. Either missing side can
 stall the device rather than producing a normal runtime error, so
-``AccStorePhaseValid`` rejects the mismatch at pipeline input, on the user's
-own source-spanned IR.
+``AccStorePhaseValid`` rejects the mismatch immediately after Inline helpers
+are expanded, while the IR still carries the user's source spans.
 """
 
 import pypto
@@ -171,6 +171,32 @@ def _pair_inside_if_program():
     return Prog
 
 
+def _inline_final_producer_program():
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Inline)
+        def final_gemv(
+            self,
+            a: pl.Tensor[[1, 128], pl.FP32],
+            b: pl.Tensor[[128, 64], pl.FP32],
+        ) -> pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc, pl.TileView(valid_shape=[1, 64])]:
+            lhs = pl.load(a, [0, 0], [1, 128], target_memory=pl.MemorySpace.Mat)
+            rhs = pl.load(b, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
+            return pl.tile.gemv(lhs, rhs, acc_phase=pl.AccPhase.Final)
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[1, 128], pl.FP32],
+            b: pl.Tensor[[128, 64], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+        ):
+            result = self.final_gemv(a, b)
+            out = pl.store(result, [0, 0], out, st_phase=pl.STPhase.Final)
+
+    return Prog
+
+
 def test_matching_final_gemv_and_store_are_accepted():
     assert _verify(_gemv_program()) == []
 
@@ -226,7 +252,21 @@ def test_balanced_pair_inside_a_branch_is_accepted():
     assert _verify(_pair_inside_if_program()) == []
 
 
-def test_default_pipeline_rejects_mismatch_at_pipeline_input():
+def test_phase_property_is_produced_after_inline_not_structural():
+    assert not passes.get_structural_properties().contains(passes.IRProperty.AccStorePhaseValid)
+    assert passes.inline_functions().get_produced_properties().contains(passes.IRProperty.AccStorePhaseValid)
+
+
+def test_default_pipeline_accepts_pair_joined_by_inline_expansion():
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+    try:
+        PassManager.get_strategy(OptimizationStrategy.Default).run_passes(_inline_final_producer_program())
+    finally:
+        backend.reset_for_testing()
+
+
+def test_default_pipeline_rejects_mismatch_after_inline_functions():
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend910B)
     try:
