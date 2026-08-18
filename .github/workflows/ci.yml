@@ -498,6 +498,21 @@ jobs:
           echo "=== examples/distributed/07_dynamic_rank_count.py -d 0,1,2,3 ==="
           python examples/distributed/07_dynamic_rank_count.py -p a2a3sim -d 0,1,2,3
 
+      # The teaching ladders. These carry the manual's beginner/intermediate/
+      # advanced/utils citations, so leaving them unrun let the pages point at
+      # code nothing checked — the gap that let a silent no-write kernel sit in
+      # the docs. They default to a2a3sim and need no arguments.
+      - name: Run the teaching examples on the simulator
+        run: |
+          source activate.sh
+          set -e
+          for ex in examples/beginner/*.py examples/intermediate/*.py \
+                    examples/advanced/*.py examples/utils/*.py; do
+            case "$ex" in */__init__.py) continue ;; esac
+            echo "=== $ex ==="
+            python "$ex"
+          done
+
       # The user manual's runnable blocks. Teaching code that is never executed
       # rots silently — a kernel can compile, run, write nothing, and still read
       # correctly on the page — so the manual itself is executed here.

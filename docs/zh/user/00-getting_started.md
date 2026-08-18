@@ -23,19 +23,47 @@
 一个 `DeviceTensor` 句柄；`CompiledProgram` 接受它替代 `torch.Tensor` 入参。runtime
 把这块 buffer 视为已经驻留在 device 上，对该入参跳过 H2D 与 D2H 拷贝。
 
+<!-- doctest: setup -->
 ```python
+import pypto.language as pl
 import torch
 from pypto import ir
 from pypto.runtime import ChipWorker, RunConfig
 
-compiled = ir.compile(MyKernel)
+ROWS, COLS = 128, 128
+PLATFORM = "__PLATFORM__"
 
-with ChipWorker(config=RunConfig(platform="a2a3sim")) as w:
-    weight = w.alloc_tensor((1024, 4096), torch.float16, init=host_weight)
-    for batch in batches:
-        out = torch.empty(batch.shape[0], 4096, dtype=torch.float16)
-        compiled(batch, weight, out)
-    w.free_tensor(weight)
+
+@pl.jit
+def add_kernel(a: pl.Tensor, b: pl.Tensor, out: pl.Out[pl.Tensor]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        ta = pl.load(a, [0, 0], [ROWS, COLS])
+        tb = pl.load(b, [0, 0], [ROWS, COLS])
+        pl.store(pl.add(ta, tb), [0, 0], out)
+    return out
+
+
+torch.manual_seed(0)
+A = torch.randn(ROWS, COLS, dtype=torch.float32)
+B = torch.randn(ROWS, COLS, dtype=torch.float32)
+
+# A DeviceTensor carries no shape/dtype for the @pl.jit specializer to read, so
+# the resident-weight pattern below runs a *compiled* program rather than the
+# jit entry directly.
+compiled = ir.compile(add_kernel.lower(A, B, torch.zeros(ROWS, COLS)), platform=PLATFORM)
+```
+
+<!-- doctest: run -->
+```python
+cfg = RunConfig(platform=PLATFORM)
+
+with ChipWorker(config=cfg) as w:
+    resident = w.alloc_tensor((ROWS, COLS), torch.float32, init=B)  # stays on device
+    for _ in range(3):                                              # three "batches"
+        out = torch.zeros(ROWS, COLS, dtype=torch.float32)
+        w.run(compiled, A, resident, out)
+        torch.testing.assert_close(out, A + B, rtol=1e-4, atol=1e-4)
+    w.free_tensor(resident)
 ```
 
 ### 注意事项
@@ -53,15 +81,17 @@ with ChipWorker(config=RunConfig(platform="a2a3sim")) as w:
 对象本身被藏起来了 —— 库代码需要把 worker 传来传去，或者常驻服务想预注册多个 kernel
 时，应该显式地驱动 dispatch：
 
+<!-- doctest: run -->
 ```python
-worker = ChipWorker(config=RunConfig(platform="a2a3sim"))
+worker = ChipWorker(config=RunConfig(platform=PLATFORM))
 try:
-    out = worker.run(compiled, a, b)                 # 单次
-    handle = worker.register(compiled)               # 预注册
-    for _ in range(1000):                            # 热循环，无 cid lookup
-        handle(a, b, out)
+    handle = worker.register(compiled)               # eager registration
+    out = torch.zeros(ROWS, COLS, dtype=torch.float32)
+    for _ in range(3):                               # hot loop, no cid lookup
+        handle(A, B, out)
+    torch.testing.assert_close(out, A + B, rtol=1e-4, atol=1e-4)
 finally:
-    worker.close()                                   # cid + DeviceTensor 统一释放
+    worker.close()                                   # cids + DeviceTensors released
 ```
 
 `worker.register(compiled)` 立即触发 `compile_and_assemble` + simpler `register`，

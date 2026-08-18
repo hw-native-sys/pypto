@@ -28,19 +28,47 @@ memory and returns a `DeviceTensor` handle that `CompiledProgram` accepts in
 place of a `torch.Tensor`. The runtime treats the buffer as already resident
 and skips both H2D and D2H copies for that argument.
 
+<!-- doctest: setup -->
 ```python
+import pypto.language as pl
 import torch
 from pypto import ir
 from pypto.runtime import ChipWorker, RunConfig
 
-compiled = ir.compile(MyKernel)
+ROWS, COLS = 128, 128
+PLATFORM = "__PLATFORM__"
 
-with ChipWorker(config=RunConfig(platform="a2a3sim")) as w:
-    weight = w.alloc_tensor((1024, 4096), torch.float16, init=host_weight)
-    for batch in batches:
-        out = torch.empty(batch.shape[0], 4096, dtype=torch.float16)
-        compiled(batch, weight, out)
-    w.free_tensor(weight)
+
+@pl.jit
+def add_kernel(a: pl.Tensor, b: pl.Tensor, out: pl.Out[pl.Tensor]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        ta = pl.load(a, [0, 0], [ROWS, COLS])
+        tb = pl.load(b, [0, 0], [ROWS, COLS])
+        pl.store(pl.add(ta, tb), [0, 0], out)
+    return out
+
+
+torch.manual_seed(0)
+A = torch.randn(ROWS, COLS, dtype=torch.float32)
+B = torch.randn(ROWS, COLS, dtype=torch.float32)
+
+# A DeviceTensor carries no shape/dtype for the @pl.jit specializer to read, so
+# the resident-weight pattern below runs a *compiled* program rather than the
+# jit entry directly.
+compiled = ir.compile(add_kernel.lower(A, B, torch.zeros(ROWS, COLS)), platform=PLATFORM)
+```
+
+<!-- doctest: run -->
+```python
+cfg = RunConfig(platform=PLATFORM)
+
+with ChipWorker(config=cfg) as w:
+    resident = w.alloc_tensor((ROWS, COLS), torch.float32, init=B)  # stays on device
+    for _ in range(3):                                              # three "batches"
+        out = torch.zeros(ROWS, COLS, dtype=torch.float32)
+        w.run(compiled, A, resident, out)
+        torch.testing.assert_close(out, A + B, rtol=1e-4, atol=1e-4)
+    w.free_tensor(resident)
 ```
 
 ### Caveats
@@ -61,13 +89,15 @@ worker hidden — library code that needs to pass the worker around, or a
 serving runtime that wants to pre-register many kernels, should drive
 dispatch explicitly:
 
+<!-- doctest: run -->
 ```python
-worker = ChipWorker(config=RunConfig(platform="a2a3sim"))
+worker = ChipWorker(config=RunConfig(platform=PLATFORM))
 try:
-    out = worker.run(compiled, a, b)                 # one-shot
     handle = worker.register(compiled)               # eager registration
-    for _ in range(1000):                            # hot loop, no cid lookup
-        handle(a, b, out)
+    out = torch.zeros(ROWS, COLS, dtype=torch.float32)
+    for _ in range(3):                               # hot loop, no cid lookup
+        handle(A, B, out)
+    torch.testing.assert_close(out, A + B, rtol=1e-4, atol=1e-4)
 finally:
     worker.close()                                   # cids + DeviceTensors released
 ```

@@ -34,9 +34,20 @@ import torch
 
 ## Quickstart: element-wise add
 
+<!-- doctest: setup -->
 ```python
 import pypto.language as pl
+import torch
+from pypto.runtime import RunConfig
 
+CFG = RunConfig(platform="__PLATFORM__")
+torch.manual_seed(0)
+A = torch.randn(128, 128, dtype=torch.float32)
+B = torch.randn(128, 128, dtype=torch.float32)
+```
+
+<!-- doctest: run -->
+```python
 @pl.jit
 def add(
     a: pl.Tensor[[128, 128], pl.FP32],
@@ -47,8 +58,13 @@ def add(
         out[:] = pl.add(a, b)
     return out
 
+
 compiled = add.compile()
 print(f"Generated code in: {compiled.output_dir}")
+
+out = torch.zeros(128, 128, dtype=torch.float32)
+add(A, B, out, config=CFG)
+torch.testing.assert_close(out, A + B, rtol=1e-4, atol=1e-4)
 ```
 
 | Line | What it does |
@@ -82,6 +98,7 @@ after. Every tensor parameter has a direction — `In` by default, or an explici
 Intermediate values are ordinary Python names. They need no annotation, and no buffer is
 declared for them — the compiler allocates whatever the chain requires:
 
+<!-- doctest: run -->
 ```python
 @pl.jit
 def add_then_square(
@@ -93,6 +110,11 @@ def add_then_square(
         s = pl.add(a, b)
         out[:] = pl.mul(s, s)
     return out
+
+
+out = torch.zeros(128, 128, dtype=torch.float32)
+add_then_square(A, B, out, config=CFG)
+torch.testing.assert_close(out, (A + B) * (A + B), rtol=1e-4, atol=1e-4)
 ```
 
 Write shapes and dtypes inline in the annotations. A module-level alias
