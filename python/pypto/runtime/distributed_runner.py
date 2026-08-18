@@ -1508,6 +1508,24 @@ class DistributedWorker(Worker):
                     f"got device={tensor.device} shape={tuple(tensor.shape)}."
                 )
         self._inherited_host_tensors = inherited
+        # `copy_to` / `copy_from` stage through a simpler-owned shm Buffer so an ordinary
+        # post-fork tensor is a legal endpoint. That relaxation costs one full copy of the
+        # payload, which a fork-inherited range does not need: it is present in every child
+        # at the same virtual address and can be named in place. Record the classification
+        # here, where the tensors are still in hand — MAP_SHARED (`FORK_SHM`) may serve as
+        # an output, MAP_PRIVATE (`FORK_COW`) is read-only because a child's write would
+        # split the page into a copy the parent never sees — as (start, end, is_shared)
+        # spans that a bare address can be resolved against later.
+        self._inherited_host_spans: tuple[tuple[int, int, bool], ...] = tuple(
+            (
+                tensor.data_ptr(),
+                tensor.data_ptr() + tensor.numel() * tensor.element_size(),
+                bool(tensor.is_shared()),
+            )
+            for tensor in inherited
+        )
+        self._buffer_owner_id: bytes | None = None
+        self._buffer_id_seq = 0
         self._persistent = bool(persistent)
         self._reset_persistent_windows = reset_persistent_windows
         self._persistent_error: BaseException | None = None
@@ -2162,12 +2180,69 @@ class DistributedWorker(Worker):
             return 0
         return int(self._w.committed_device_memory(worker_id))
 
+    def _next_buffer_identity(self) -> tuple[bytes, int]:
+        """Mint the ``(owner_instance_id, buffer_id)`` pair a named host range needs."""
+        from simpler.buffer import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
+            mint_owner_instance_id,
+        )
+
+        owner = self._buffer_owner_id
+        if owner is None:
+            owner = mint_owner_instance_id()
+            self._buffer_owner_id = owner
+        self._buffer_id_seq += 1
+        return owner, self._buffer_id_seq
+
+    def _named_host_buffer(self, host_ptr: int, nbytes: int, *, api: str, writing: bool) -> Any:
+        """Name a fork-inherited host range in place, or return ``None`` to stage it.
+
+        Only memory registered through ``inherited_host_tensors`` can be named: it predates
+        the fork, so every child holds it at the same virtual address and the copy needs no
+        staging buffer and no host-side memcpy. Anything else — in particular a tensor
+        allocated after ``prepare`` — has no mapping in the child and must go through shm,
+        which is what the caller falls back to.
+
+        Each range is wrapped on its own rather than offset into a whole-tensor Buffer,
+        because a Buffer carries no offset: a shard's address is interior to its stacked
+        tensor, so per-range wrapping is what keeps one shard's copy from moving the whole
+        stack.
+        """
+        from simpler.buffer import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
+            AccessMode,
+            BackendKind,
+            wrap_fork_inherited,
+        )
+
+        end = host_ptr + nbytes
+        for start, stop, is_shared in self._inherited_host_spans:
+            if host_ptr < start or end > stop:
+                continue
+            if writing and not is_shared:
+                # A COW range cannot receive data: the child's write splits the page into a
+                # private copy the parent never reads back. Staging is still correct here,
+                # so fall through rather than refusing the copy.
+                return None
+            owner, buffer_id = self._next_buffer_identity()
+            return wrap_fork_inherited(
+                host_ptr,
+                nbytes,
+                owner,
+                buffer_id,
+                access=AccessMode.READWRITE if is_shared else AccessMode.READ,
+                backend_kind=BackendKind.FORK_SHM if is_shared else BackendKind.FORK_COW,
+            )
+        return None
+
     def copy_to(self, dst_dev_ptr: int, src_host_ptr: int, nbytes: int, *, worker_id: int = 0) -> None:
         """H2D copy: ``nbytes`` from host *src_host_ptr* to device *dst_dev_ptr*."""
         self._require_open("copy_to")
         dst = self._device_buffer(dst_dev_ptr, worker_id, "copy_to")
         if not isinstance(nbytes, int) or nbytes <= 0:
             raise ValueError(f"nbytes must be a positive int, got {nbytes!r}")
+        src = self._named_host_buffer(int(src_host_ptr), int(nbytes), api="copy_to", writing=False)
+        if src is not None:
+            self._w.copy_to(dst, src)
+            return
         host = self._w.create_buffer(nbytes)
         try:
             ctypes.memmove(int(host.base), src_host_ptr, nbytes)
@@ -2181,6 +2256,10 @@ class DistributedWorker(Worker):
         src = self._device_buffer(src_dev_ptr, worker_id, "copy_from")
         if not isinstance(nbytes, int) or nbytes <= 0:
             raise ValueError(f"nbytes must be a positive int, got {nbytes!r}")
+        dst = self._named_host_buffer(int(dst_host_ptr), int(nbytes), api="copy_from", writing=True)
+        if dst is not None:
+            self._w.copy_from(dst, src)
+            return
         host = self._w.create_buffer(nbytes)
         try:
             self._w.copy_from(host, src)
@@ -2312,6 +2391,9 @@ class DistributedWorker(Worker):
         """
         self._require_open("release_inherited_host_tensor_refs")
         self._inherited_host_tensors = ()
+        # No later copy may name these ranges: the parent has dropped its references, so a
+        # copy after this point stages rather than wrapping memory nobody vouches for.
+        self._inherited_host_spans = ()
 
     def copy_stacked_from(self, stacked: StackedDeviceTensor, host: torch.Tensor) -> None:
         """Read every shard of *stacked* back to *host* (D2H) — the read-back
@@ -2625,6 +2707,7 @@ class DistributedWorker(Worker):
                 self._close_complete = True
             finally:
                 self._inherited_host_tensors = ()
+                self._inherited_host_spans = ()
                 self._persistent_domains_by_program.clear()
                 if self._close_complete:
                     self._device_buffers.clear()
