@@ -2431,6 +2431,39 @@ class TestCompileKwargForwarding:
         assert first != second
         assert third == first
 
+    def test_resolve_compiled_splits_cache_on_ptoas_pass_dump(self, monkeypatch):
+        """Enabling ptoas pass dumps cannot reuse an artifact compiled without them."""
+        torch = pytest.importorskip("torch")
+
+        @jit
+        def cfg_kernel(a: pl.Tensor[[128, 128], pl.FP32], c: pl.Out[pl.Tensor[[128, 128], pl.FP32]]):
+            c = a
+            return c
+
+        compile_calls = {"n": 0}
+
+        def fake_compile(*_args, **_kwargs):
+            compile_calls["n"] += 1
+            return f"compiled-{compile_calls['n']}"
+
+        monkeypatch.setattr(cfg_kernel, "_compile", fake_compile)
+
+        a = torch.randn(128, 128)
+        c = torch.empty(128, 128)
+
+        def resolve(dump_ptoas_passes):
+            cfg = RunConfig(dump_ptoas_passes=dump_ptoas_passes)
+            return cfg_kernel._resolve_compiled((a, c), {"config": cfg})[0]
+
+        first = resolve(False)
+        second = resolve(True)
+        third = resolve(False)
+
+        assert compile_calls["n"] == 2
+        assert len(cfg_kernel._cache) == 2
+        assert first != second
+        assert third == first
+
     def test_compile_forwards_run_config_kwargs(self, monkeypatch):
         """_compile forwards ir_compile_kwargs verbatim to ir.compile()."""
         # `pypto.ir.compile` the attribute is the re-exported function, so

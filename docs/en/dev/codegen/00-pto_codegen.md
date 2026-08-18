@@ -691,7 +691,7 @@ When the program contains an Orchestration function, the PTO backend generates t
 output_dir/
 ├── passes_dump/                     # IR after each pass
 ├── ptoas_passes/                    # Optional ptoas IR after each pass
-│   └── <func_name>/                 # ptoas/MLIR-managed dump tree
+│   └── <kernel-or-group>/            # ptoas/MLIR-managed dump tree
 ├── ptoas/                           # Intermediates
 │   ├── <func_name>.pto              # MLIR from PTOCodegen
 │   └── <func_name>.cpp              # C++ from ptoas

@@ -663,7 +663,7 @@ InCore Function -> PTOCodegen -> .pto -> ptoas -> .cpp -> kernel_wrapper -> kern
 output_dir/
 ├── passes_dump/                     # IR after each pass
 ├── ptoas_passes/                    # 可选：每个 ptoas Pass 后的 IR
-│   └── <func_name>/                 # 由 ptoas/MLIR 管理的转储树
+│   └── <kernel-or-group>/            # 由 ptoas/MLIR 管理的转储树
 ├── ptoas/                           # Intermediates
 │   ├── <func_name>.pto              # MLIR from PTOCodegen
 │   └── <func_name>.cpp              # C++ from ptoas

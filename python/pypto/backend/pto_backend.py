@@ -1099,13 +1099,16 @@ def _emit_single_function_output(
         result_files[kernel_rel] = pto_code
         return
 
-    ptoas_cpp = _compile_pto_module(
-        pto_code,
-        func.name,
-        output_dir,
-        memory_planner=memory_planner,
-        dump_ptoas_passes=dump_ptoas_passes,
-    )
+    if dump_ptoas_passes:
+        ptoas_cpp = _compile_pto_module(
+            pto_code,
+            func.name,
+            output_dir,
+            memory_planner,
+            dump_ptoas_passes=True,
+        )
+    else:
+        ptoas_cpp = _compile_pto_module(pto_code, func.name, output_dir, memory_planner)
     result_files[kernel_rel] = _generate_kernel_wrapper(func, ptoas_cpp)
 
 
@@ -1124,13 +1127,16 @@ def _emit_group_output(
         result_files[os.path.join("kernels", f"{group_name}.pto")] = pto_code
         return
 
-    ptoas_cpp = _compile_pto_module(
-        pto_code,
-        group_name,
-        output_dir,
-        memory_planner=memory_planner,
-        dump_ptoas_passes=dump_ptoas_passes,
-    )
+    if dump_ptoas_passes:
+        ptoas_cpp = _compile_pto_module(
+            pto_code,
+            group_name,
+            output_dir,
+            memory_planner,
+            dump_ptoas_passes=True,
+        )
+    else:
+        ptoas_cpp = _compile_pto_module(pto_code, group_name, output_dir, memory_planner)
     group_uses_spmd = any(_uses_spmd_block_ops(f) for f in members)
     for func in members:
         result_files[_get_kernel_output_path(func, "cpp")] = _generate_kernel_wrapper(
