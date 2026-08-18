@@ -158,6 +158,7 @@ const IRPropertySet& GetVerifiedProperties() {
                                    IRProperty::IterArgCarryClassified,
                                    IRProperty::RuntimeScopesMaterialized,
                                    IRProperty::DistTensorCtxMaterialized,
+                                   IRProperty::GraphBoundaryLegalized,
                                    IRProperty::AccToGmStoreValid,
                                    IRProperty::AtomicAddDtypeValid};
   return props;
