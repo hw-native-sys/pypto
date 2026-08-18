@@ -41,6 +41,7 @@ from pypto.ir import TensorView, TileView
 from pypto.jit import JITFunction, jit
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import (
+    AccPhase,
     AtomicType,
     CachePolicy,
     CompactMode,
@@ -52,6 +53,7 @@ from pypto.pypto_core.ir import (
     PipeType,
     Role,
     SplitMode,
+    STPhase,
     TensorLayout,
     TileLayout,
 )
@@ -510,6 +512,7 @@ __all__ = [
     "get_subblock_idx",
     "FunctionType",
     "ForKind",
+    "AccPhase",
     "AtomicType",
     "CachePolicy",
     "KernelType",
@@ -518,6 +521,7 @@ __all__ = [
     "MemRef",
     "Role",
     "SplitMode",
+    "STPhase",
     "Mem",
     "MemRefType",
     "MemorySpace",

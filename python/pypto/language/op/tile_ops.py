@@ -176,12 +176,14 @@ from pypto.ir.utils import (
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import (
+    AccPhase,
     AtomicType,
     CachePolicy,
     Expr,
     MemorySpace,
     PadValue,
     Span,
+    STPhase,
     TileLayout,
 )
 
@@ -471,7 +473,7 @@ def store(
     shapes: Sequence[IntLike] | None = None,
     *,
     atomic: AtomicType = AtomicType.None_,
-    st_phase: str = "unspecified",
+    st_phase: STPhase = STPhase.Unspecified,
 ) -> _TensorT:
     """Copy data from tile back to tensor.
 
@@ -493,10 +495,9 @@ def store(
             fp32 / bf16 / fp16 / int32 / int16 / int8. bf16 atomic-add is
             available on the Ascend910B (A2/A3) profile; it is not supported on
             A5, where an fp32 accumulator + cast is required instead.
-        st_phase: Unit-flag-aware store phase: ``"unspecified"`` (default),
-            ``"partial"``, or ``"final"``. A phase-aware accumulator producer
-            that finishes with ``acc_phase="final"`` must be consumed by a
-            store with ``st_phase="final"`` so the unit flag is cleared.
+        st_phase: Consumer-side unit-flag phase. A producer that finishes with
+            ``acc_phase=pl.AccPhase.Final`` must be consumed by a store with
+            ``st_phase=pl.STPhase.Final`` so the unit flag is cleared.
 
     Returns:
         Tensor wrapping the store operation
@@ -509,7 +510,7 @@ def store(
         >>> # atomic-add store (split-K)
         >>> result = store(partial, [0, 0], out, atomic=pl.AtomicType.Add)
         >>> # clear the unit flag after a final phased accumulation
-        >>> result = store(acc, [0, 0], out, st_phase="final")
+        >>> result = store(acc, [0, 0], out, st_phase=pl.STPhase.Final)
     """
     normalized_offsets = _normalize_intlike(offsets)
     normalized_shapes = _normalize_intlike(shapes) if shapes is not None else None
@@ -1584,7 +1585,7 @@ def matmul_mx_bias(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile, bias:
     return Tile(expr=call_expr)
 
 
-def gemv(lhs: Tile, rhs: Tile, acc_phase: str = "unspecified") -> Tile:
+def gemv(lhs: Tile, rhs: Tile, acc_phase: AccPhase = AccPhase.Unspecified) -> Tile:
     """General Matrix-Vector multiplication: C[1,N] = A[1,K] @ B[K,N].
 
     ``lhs`` must have exactly one physical and logical row. The rhs logical K
@@ -1594,7 +1595,8 @@ def gemv(lhs: Tile, rhs: Tile, acc_phase: str = "unspecified") -> Tile:
     Args:
         lhs: Row vector tile [1, K]
         rhs: Right-hand side tile [K, N]
-        acc_phase: Accumulation phase: ``"unspecified"``, ``"partial"``, or ``"final"``
+        acc_phase: Producer-side unit-flag phase. Use ``pl.AccPhase.Partial``
+            for intermediate chunks and ``pl.AccPhase.Final`` for the last chunk.
 
     Returns:
         Tile wrapping the gemv operation
@@ -1607,7 +1609,7 @@ def gemv_acc(
     acc: Tile,
     lhs: Tile,
     rhs: Tile,
-    acc_phase: str = "unspecified",
+    acc_phase: AccPhase = AccPhase.Unspecified,
     *,
     init_cond: BoolLike | None = None,
 ) -> Tile:
@@ -1637,7 +1639,8 @@ def gemv_acc(
         acc: Accumulator tile [1, N]
         lhs: Row vector tile [1, K]
         rhs: Right-hand side tile [K, N]
-        acc_phase: Accumulation phase: ``"unspecified"``, ``"partial"``, or ``"final"``
+        acc_phase: Producer-side unit-flag phase. Use ``pl.AccPhase.Partial``
+            for intermediate chunks and ``pl.AccPhase.Final`` for the last chunk.
         init_cond: Optional predicate selecting overwrite over accumulate
 
     Returns:
@@ -1653,7 +1656,12 @@ def gemv_acc(
     return Tile(expr=call_expr)
 
 
-def gemv_bias(lhs: Tile, rhs: Tile, bias: Tile, acc_phase: str = "unspecified") -> Tile:
+def gemv_bias(
+    lhs: Tile,
+    rhs: Tile,
+    bias: Tile,
+    acc_phase: AccPhase = AccPhase.Unspecified,
+) -> Tile:
     """GEMV with bias add: C[1,N] = A[1,K] @ B[K,N] + bias[1,N].
 
     ``bias`` must use the GEMV output dtype and its valid shape must cover the
@@ -1665,7 +1673,8 @@ def gemv_bias(lhs: Tile, rhs: Tile, bias: Tile, acc_phase: str = "unspecified") 
         rhs: Right-hand side tile [K, N]
         bias: Bias tile [1, N] with the accumulator dtype (FP32 for
             floating-point matrix operands, INT32 for integer matrix operands)
-        acc_phase: Accumulation phase: ``"unspecified"``, ``"partial"``, or ``"final"``
+        acc_phase: Producer-side unit-flag phase. Use ``pl.AccPhase.Partial``
+            for intermediate chunks and ``pl.AccPhase.Final`` for the last chunk.
 
     Returns:
         Tile wrapping the gemv_bias operation

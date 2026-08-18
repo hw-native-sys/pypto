@@ -890,8 +890,8 @@ def test_python_print_tile_load_store():
     assert "target_memory=pl.Mem.Vec" in load_kwargs_result
 
 
-def test_python_print_atomic_kwarg_uses_enum_form():
-    """``atomic`` kwarg prints as ``pl.AtomicType.<Name>``, not the raw int.
+def test_python_print_typed_int_kwargs_use_enum_form():
+    """Typed integer kwargs print as public enums, not raw integer payloads.
 
     The DSL signature is ``atomic: AtomicType``; storage is ``int`` (the DSL
     casts before stashing on kwargs_). The printer must restore the enum form
@@ -922,9 +922,26 @@ def test_python_print_atomic_kwarg_uses_enum_form():
     assert "atomic=pl.AtomicType.None_" in none_result
     assert "atomic=0" not in none_result
 
-    phase_call = ir.Call(store_op, [tile, offsets_tuple, out], {"st_phase": "final"}, span)
-    phase_result = phase_call.as_python()
-    assert 'st_phase="final"' in phase_result
+    store_phase_call = ir.Call(
+        store_op,
+        [tile, offsets_tuple, out],
+        {"st_phase": int(ir.STPhase.Final)},
+        span,
+    )
+    store_phase_result = store_phase_call.as_python()
+    assert "st_phase=pl.STPhase.Final" in store_phase_result
+    assert "st_phase=3" not in store_phase_result
+
+    gemv_op = ir.Op("tile.gemv")
+    acc_phase_call = ir.Call(
+        gemv_op,
+        [tile, tile],
+        {"acc_phase": int(ir.AccPhase.Partial)},
+        span,
+    )
+    acc_phase_result = acc_phase_call.as_python()
+    assert "acc_phase=pl.AccPhase.Partial" in acc_phase_result
+    assert "acc_phase=2" not in acc_phase_result
 
 
 def test_python_print_while_stmt_natural():

@@ -2577,6 +2577,39 @@ class TestTileMatMulOps:
         ir_str = str(Program)
         assert "tile.gemv" in ir_str
 
+    def test_tile_gemv_phase_enums_use_pto_isa_values(self):
+        """Phase enums are distinct typed APIs with PTO-ISA-compatible payloads."""
+        span = ir.Span.unknown()
+        lhs = ir.Var("lhs", ir.TileType([1, 128], DataType.FP32), span)
+        rhs = ir.Var("rhs", ir.TileType([128, 64], DataType.FP32), span)
+
+        default_call = tile.gemv(lhs, rhs)
+        partial_call = tile.gemv(lhs, rhs, acc_phase=ir.AccPhase.Partial)
+
+        assert pl.AccPhase is ir.AccPhase
+        assert pl.STPhase is ir.STPhase
+        assert int(ir.AccPhase.Unspecified) == 0
+        assert int(ir.AccPhase.Partial) == 2
+        assert int(ir.AccPhase.Final) == 3
+        assert int(ir.STPhase.Unspecified) == 0
+        assert int(ir.STPhase.Partial) == 2
+        assert int(ir.STPhase.Final) == 3
+        assert dict(default_call.kwargs) == {"acc_phase": int(ir.AccPhase.Unspecified)}
+        assert dict(partial_call.kwargs) == {"acc_phase": int(ir.AccPhase.Partial)}
+
+    def test_tile_gemv_rejects_string_phase(self):
+        """String phase spellings are no longer accepted by the enum API."""
+        span = ir.Span.unknown()
+        lhs = ir.Var("lhs", ir.TileType([1, 128], DataType.FP32), span)
+        rhs = ir.Var("rhs", ir.TileType([128, 64], DataType.FP32), span)
+
+        with pytest.raises(ValueError, match="invalid literal for int"):
+            tile.gemv(
+                lhs,
+                rhs,
+                acc_phase="partial",  # pyright: ignore[reportArgumentType]
+            )
+
     def test_tile_gemv_acc(self):
         """Test tile.gemv_acc operator - GEMV with accumulation."""
 
@@ -7227,32 +7260,37 @@ class TestWriteValidRegionUnion:
         src = self._partial_tile([16, 128], [12, 128], name="src")
 
         default_call = tile.store(src, [8, 0], out)
-        final_call = tile.store(src, [8, 0], out, None, span, st_phase="final")
+        final_call = tile.store(src, [8, 0], out, None, span, st_phase=ir.STPhase.Final)
         combined_call = tile.store(
             src,
             [8, 0],
             out,
             atomic=int(ir.AtomicType.Add),
-            st_phase="partial",
+            st_phase=ir.STPhase.Partial,
         )
 
         assert dict(default_call.kwargs) == {}
-        assert dict(final_call.kwargs) == {"st_phase": "final"}
+        assert dict(final_call.kwargs) == {"st_phase": int(ir.STPhase.Final)}
         assert final_call.span.filename == "store_phase_compat.py"
         assert final_call.span.begin_line == 7
         assert dict(combined_call.kwargs) == {
             "atomic": int(ir.AtomicType.Add),
-            "st_phase": "partial",
+            "st_phase": int(ir.STPhase.Partial),
         }
 
-    def test_store_rejects_unknown_phase(self):
-        """Reject phase spellings that PTOAS cannot lower."""
+    def test_store_rejects_string_phase(self):
+        """String phase spellings are no longer accepted by the enum API."""
         span = ir.Span.unknown()
         out = ir.Var("out", ir.TensorType([64, 128], DataType.FP32), span)
         src = self._partial_tile([16, 128], [12, 128], name="src")
 
-        with pytest.raises(ValueError, match=r"st_phase.*\{unspecified, partial, final\}"):
-            tile.store(src, [8, 0], out, st_phase="last")
+        with pytest.raises(ValueError, match="invalid literal for int"):
+            tile.store(
+                src,
+                [8, 0],
+                out,
+                st_phase="final",  # pyright: ignore[reportArgumentType]
+            )
 
     def test_store_unions_into_a_partially_valid_destination(self):
         """A store appends to the destination's valid region."""

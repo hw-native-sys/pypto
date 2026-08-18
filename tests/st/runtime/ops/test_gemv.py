@@ -237,7 +237,7 @@ class GemvTestCase(PTOTestCase):
         bias=False,
         narrow=None,
         ab_dtype=DataType.FP32,
-        acc_phase="unspecified",
+        acc_phase=pl.AccPhase.Unspecified,
         config=None,
     ):
         super().__init__(config)
@@ -248,7 +248,7 @@ class GemvTestCase(PTOTestCase):
     def get_name(self) -> str:
         op = "gemv_bias" if self._bias else "gemv"
         narrowed = f"_n{self._narrow}" if self._narrow else ""
-        phase = f"_{self._acc_phase}" if self._acc_phase != "unspecified" else ""
+        phase = f"_{self._acc_phase.name.lower()}" if self._acc_phase != pl.AccPhase.Unspecified else ""
         return f"tile_{op}_1x{self._k}x{self._n}_{self._ab.value}{narrowed}{phase}"
 
     def define_tensors(self) -> list[TensorSpec]:
@@ -283,7 +283,7 @@ class GemvTestCase(PTOTestCase):
         valid_k = VALID_K if self._narrow in ("K", "KN") else k
         valid_n = VALID_N if self._narrow in ("N", "KN") else n
         acc_phase = self._acc_phase
-        st_phase = "final" if acc_phase == "final" else "unspecified"
+        st_phase = pl.STPhase.Final if acc_phase == pl.AccPhase.Final else pl.STPhase.Unspecified
         a_valid = [1, valid_k]
         b_valid = [valid_k, valid_n]
 
@@ -431,7 +431,7 @@ class TestGemv:
     )
     @pytest.mark.platforms("a2a3")
     def test_tile_gemv_final_phase(self, test_runner):
-        result = test_runner.run(GemvTestCase(k=128, n=64, acc_phase="final", config=_cfg()))
+        result = test_runner.run(GemvTestCase(k=128, n=64, acc_phase=pl.AccPhase.Final, config=_cfg()))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.platforms("a2a3")
@@ -470,7 +470,9 @@ class TestGemvBias:
     )
     @pytest.mark.platforms("a2a3")
     def test_tile_gemv_bias_final_phase(self, test_runner):
-        result = test_runner.run(GemvTestCase(k=128, n=64, bias=True, acc_phase="final", config=_cfg()))
+        result = test_runner.run(
+            GemvTestCase(k=128, n=64, bias=True, acc_phase=pl.AccPhase.Final, config=_cfg())
+        )
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.platforms("a2a3")
@@ -535,8 +537,9 @@ class GemvAccTestCase(PTOTestCase):
         out_dt = pl.INT32 if self._ab == DataType.INT8 else pl.FP32
         valid_k = VALID_K if self._narrow in ("K", "KN") else k_chunk
         valid_n = VALID_N if self._narrow in ("N", "KN") else n
-        first_phase = "partial" if self._phased else "unspecified"
-        last_phase = "final" if self._phased else "unspecified"
+        first_phase = pl.AccPhase.Partial if self._phased else pl.AccPhase.Unspecified
+        last_phase = pl.AccPhase.Final if self._phased else pl.AccPhase.Unspecified
+        store_phase = pl.STPhase.Final if self._phased else pl.STPhase.Unspecified
         a_valid = [1, valid_k]
         b_valid = [valid_k, valid_n]
 
@@ -576,7 +579,7 @@ class GemvAccTestCase(PTOTestCase):
                     clamp=True,
                 )
                 acc = pl.tile.gemv_acc(acc, a1, b1, acc_phase=last_phase)
-                out = pl.store(acc, [0, 0], out, st_phase=last_phase)
+                out = pl.store(acc, [0, 0], out, st_phase=store_phase)
                 return out
 
             @pl.function(type=pl.FunctionType.Orchestration)

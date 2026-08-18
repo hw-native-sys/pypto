@@ -3622,7 +3622,7 @@ class TestTileStoreAttrsCodegen:
         self,
         *,
         atomic=pl.AtomicType.None_,
-        st_phase="unspecified",
+        st_phase=pl.STPhase.Unspecified,
     ) -> str:
         """Generate one fp32 store with the requested optional attributes.
 
@@ -3631,7 +3631,7 @@ class TestTileStoreAttrsCodegen:
         an invalid unit-flag protocol and AccStorePhaseValid rejects it.
         """
 
-        if st_phase == "final":
+        if st_phase == pl.STPhase.Final:
 
             @pl.program
             class FinalProg:
@@ -3644,8 +3644,8 @@ class TestTileStoreAttrsCodegen:
                 ):
                     lhs = pl.load(lhs_gm, [0, 0], [1, 128], target_memory=pl.MemorySpace.Mat)
                     rhs = pl.load(rhs_gm, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
-                    result = pl.tile.gemv(lhs, rhs, acc_phase="final")
-                    pl.store(result, [0, 0], out, atomic=atomic, st_phase="final")
+                    result = pl.tile.gemv(lhs, rhs, acc_phase=pl.AccPhase.Final)
+                    pl.store(result, [0, 0], out, atomic=atomic, st_phase=pl.STPhase.Final)
 
             return self._generate_mlir(FinalProg)
 
@@ -3716,20 +3716,23 @@ class TestTileStoreAttrsCodegen:
             f"plain store must not emit optional attributes, got:\n{tstore_lines}"
         )
 
-    @pytest.mark.parametrize("st_phase", ["partial", "final"])
-    def test_store_phase_emits_st_phase(self, st_phase):
+    @pytest.mark.parametrize(
+        ("st_phase", "pto_phase"),
+        [(pl.STPhase.Partial, "partial"), (pl.STPhase.Final, "final")],
+    )
+    def test_store_phase_emits_st_phase(self, st_phase, pto_phase):
         """Explicit store phases map to the exact PTO stPhase attribute."""
         mlir = self._generate_fp32_store(st_phase=st_phase)
         tstore_lines = [line.strip() for line in mlir.splitlines() if "pto.tstore" in line]
-        expected = f"{{stPhase = #pto<st_phase {st_phase}>}}"
+        expected = f"{{stPhase = #pto<st_phase {pto_phase}>}}"
         assert tstore_lines, f"no pto.tstore line emitted:\n{mlir}"
         assert all(expected in line for line in tstore_lines), (
-            f"expected {st_phase} stPhase on every pto.tstore, got:\n{tstore_lines}"
+            f"expected {pto_phase} stPhase on every pto.tstore, got:\n{tstore_lines}"
         )
 
     def test_store_phase_and_atomic_share_one_attr_dict(self):
         """PTOAS receives stPhase and atomicType in the same attribute dictionary."""
-        mlir = self._generate_fp32_store(atomic=pl.AtomicType.Add, st_phase="final")
+        mlir = self._generate_fp32_store(atomic=pl.AtomicType.Add, st_phase=pl.STPhase.Final)
         tstore_lines = [line.strip() for line in mlir.splitlines() if "pto.tstore" in line]
         expected = "{stPhase = #pto<st_phase final>, atomicType = #pto<atomic_type atomic_add>}"
         assert tstore_lines, f"no pto.tstore line emitted:\n{mlir}"

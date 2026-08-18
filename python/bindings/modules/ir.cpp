@@ -40,6 +40,7 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/phase.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/reflection/field_visitor.h"
@@ -138,6 +139,12 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
     } else if (nb::isinstance<AtomicType>(item.second)) {
       // Cast enum to int for storage — pld.tensor.put reads as int
       kwargs.emplace_back(key, static_cast<int>(nb::cast<AtomicType>(item.second)));
+    } else if (nb::isinstance<AccPhase>(item.second)) {
+      // Cast enum to int for storage — tile.gemv-family ops read as int
+      kwargs.emplace_back(key, static_cast<int>(nb::cast<AccPhase>(item.second)));
+    } else if (nb::isinstance<STPhase>(item.second)) {
+      // Cast enum to int for storage — tile.store reads as int
+      kwargs.emplace_back(key, static_cast<int>(nb::cast<STPhase>(item.second)));
     } else if (nb::isinstance<PadValue>(item.second)) {
       kwargs.emplace_back(key, nb::cast<PadValue>(item.second));
     } else if (nb::isinstance<ArgDirection>(item.second)) {
@@ -1637,6 +1644,17 @@ void BindIR(nb::module_& m) {
       "Combine mode for global-memory writes — pld.tensor.put (TPUT) and tile.store (TSTORE)")
       .value("None_", AtomicType::kNone, "Plain store — overwrite the destination")
       .value("Add", AtomicType::kAdd, "Atomically add the source data into the destination");
+
+  nb::enum_<AccPhase>(ir, "AccPhase", nb::is_arithmetic(),
+                      "Producer-side unit-flag phase for GEMV accumulator operations")
+      .value("Unspecified", AccPhase::kUnspecified, "Do not use the unit-flag protocol")
+      .value("Partial", AccPhase::kPartial, "Check the unit flag without setting it")
+      .value("Final", AccPhase::kFinal, "Check and set the unit flag");
+
+  nb::enum_<STPhase>(ir, "STPhase", nb::is_arithmetic(), "Consumer-side unit-flag phase for tile.store")
+      .value("Unspecified", STPhase::kUnspecified, "Do not use the unit-flag protocol")
+      .value("Partial", STPhase::kPartial, "Check the unit flag without clearing it")
+      .value("Final", STPhase::kFinal, "Check and clear the unit flag");
 
   nb::enum_<ReduceOp>(ir, "ReduceOp", nb::is_arithmetic(),
                       "Reduction operator for collective reductions (pld.tensor.allreduce, ...)")
