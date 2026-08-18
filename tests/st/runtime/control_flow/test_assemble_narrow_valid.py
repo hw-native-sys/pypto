@@ -41,13 +41,21 @@ PAD_SENTINEL = -1000.0  # marks "static-but-invalid" cells of the source
 
 @pl.program
 class AssembleDirectNarrowValidProgram:
-    """Write via direct ``pl.assemble`` — source has narrow valid_shape."""
+    """Write via direct ``pl.assemble`` — source has narrow valid_shape.
+
+    ``output`` is ``InOut``, not ``Out``: this program fills only the
+    ``[T_OFFSET_ROW.., 0:SRC_COLS_VALID]`` slot while the golden requires every
+    other cell to be zero. Those cells come from the caller's buffer, so the
+    program does depend on the incoming contents. A pure ``Out`` tensor promises
+    nothing there — the runtime skips host->device staging for it (``add_output``
+    rather than ``add_inout``), and the untouched cells read allocator garbage.
+    """
 
     @pl.function(type=pl.FunctionType.Opaque)
     def main(
         self,
         src: pl.Tensor[[SRC_ROWS, SRC_COLS_STATIC], pl.FP32],
-        output: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+        output: pl.InOut[pl.Tensor[[M, N], pl.FP32]],
     ) -> pl.Tensor[[M, N], pl.FP32]:
         with pl.at(level=pl.Level.CORE_GROUP):
             narrowed = pl.set_validshape(src, SRC_ROWS, SRC_COLS_VALID)
@@ -57,13 +65,18 @@ class AssembleDirectNarrowValidProgram:
 
 @pl.program
 class AssembleSubscriptNarrowValidProgram:
-    """Write via subscript-write sugar — semantically equivalent to the direct path."""
+    """Write via subscript-write sugar — semantically equivalent to the direct path.
+
+    ``output`` is ``InOut`` for the same reason as
+    ``AssembleDirectNarrowValidProgram``: the golden requires a zero tail that
+    this program never writes, so the incoming buffer must reach the device.
+    """
 
     @pl.function(type=pl.FunctionType.Opaque)
     def main(
         self,
         src: pl.Tensor[[SRC_ROWS, SRC_COLS_STATIC], pl.FP32],
-        output: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+        output: pl.InOut[pl.Tensor[[M, N], pl.FP32]],
     ) -> pl.Tensor[[M, N], pl.FP32]:
         with pl.at(level=pl.Level.CORE_GROUP):
             narrowed = pl.set_validshape(src, SRC_ROWS, SRC_COLS_VALID)
@@ -210,7 +223,11 @@ class _AssembleNarrowValidTestCase(PTOTestCase):
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("src", [SRC_ROWS, SRC_COLS_STATIC], DataType.FP32, init_value=self._src),
-            TensorSpec("output", self._output_shape, DataType.FP32, is_output=True),
+            # Zeros are explicit, not incidental: the narrow-write goldens expect
+            # every cell this program does not fill to be zero, and those cells
+            # are supplied by the caller. The harness seeds an ``InOut`` tensor
+            # with random data unless an ``init_value`` says otherwise.
+            TensorSpec("output", self._output_shape, DataType.FP32, is_output=True, init_value=0.0),
         ]
 
     def get_program(self) -> Any:

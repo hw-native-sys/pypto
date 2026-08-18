@@ -371,14 +371,14 @@ class TestOutlineClusterScopes:
             def main_incore_0(
                 self,
                 a: pl.Tensor[[512, 128], pl.FP32],
-                out: pl.InOut[pl.Tensor[[512, 128], pl.FP32]],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
             ) -> pl.Tensor[[512, 128], pl.FP32]:
                 i = pl.tile.get_block_idx()
                 offset = i * 128
                 tile_a: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
                 out_store = pl.store(tile_a, [offset, 0], out)
                 # The outline pass keeps the post-store SSA alias but returns
-                # the InOut param itself (param-identity returns, #1702).
+                # the write param itself (param-identity returns, #1702).
                 out_final: pl.Tensor[[512, 128], pl.FP32] = out_store
                 return out
 
@@ -386,7 +386,7 @@ class TestOutlineClusterScopes:
             def main_spmd_0(
                 self,
                 a: pl.Tensor[[512, 128], pl.FP32],
-                out: pl.InOut[pl.Tensor[[512, 128], pl.FP32]],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
             ) -> pl.Tensor[[512, 128], pl.FP32]:
                 out_call = self.main_incore_0(a, out)
                 return out
@@ -432,14 +432,14 @@ class TestOutlineClusterScopes:
             def q_proj(
                 self,
                 a: pl.Tensor[[512, 128], pl.FP32],
-                out: pl.InOut[pl.Tensor[[512, 128], pl.FP32]],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
             ) -> pl.Tensor[[512, 128], pl.FP32]:
                 i = pl.tile.get_block_idx()
                 offset = i * 128
                 tile_a: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
                 out_store = pl.store(tile_a, [offset, 0], out)
                 # The outline pass keeps the post-store SSA alias but returns
-                # the InOut param itself (param-identity returns, #1702).
+                # the write param itself (param-identity returns, #1702).
                 out_final: pl.Tensor[[512, 128], pl.FP32] = out_store
                 return out
 
@@ -447,7 +447,7 @@ class TestOutlineClusterScopes:
             def q_proj_spmd(
                 self,
                 a: pl.Tensor[[512, 128], pl.FP32],
-                out: pl.InOut[pl.Tensor[[512, 128], pl.FP32]],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
             ) -> pl.Tensor[[512, 128], pl.FP32]:
                 out_call = self.q_proj(a, out)
                 return out
@@ -467,12 +467,14 @@ class TestOutlineClusterScopes:
         After = passes.outline_cluster_scopes()(After)
         ir.assert_structural_equal(After, Expected)
 
-    def test_outline_spmd_for_loop_marks_assemble_dest_as_inout(self):
+    def test_outline_spmd_for_loop_marks_assemble_dest_as_written(self):
         """`for n0 in pl.spmd(N): out = pl.assemble(out, slice, [n0, ...])`
-        must make `out` an InOut parameter on both the outlined InCore and
-        Spmd wrapper. Without this, the orchestration codegen later drops the
-        SSA-result alias for the inout call and emits a use of an undeclared
-        ``out__ssa_vN`` C++ identifier.
+        must lift `out` off ``In`` on both the outlined InCore and Spmd
+        wrapper. Without this, the orchestration codegen later drops the
+        SSA-result alias for the call and emits a use of an undeclared
+        ``out__ssa_vN`` C++ identifier. The body only writes ``out`` — the
+        assemble destination slot is its sole use — so the direction is ``Out``
+        rather than ``InOut`` (issue #2415).
         """
 
         @pl.program
@@ -491,13 +493,14 @@ class TestOutlineClusterScopes:
 
         @pl.program
         class Expected:
-            # `out` is the assemble destination, so it becomes InOut on both
-            # the outlined InCore kernel and the Spmd wrapper; `a` stays In.
+            # `out` is the assemble destination and the body never reads it, so
+            # it becomes Out on both the outlined InCore kernel and the Spmd
+            # wrapper; `a` stays In.
             @pl.function(type=pl.FunctionType.InCore)
             def main_incore_0(
                 self,
                 a: pl.Tensor[[512, 128], pl.FP32],
-                out: pl.InOut[pl.Tensor[[512, 128], pl.FP32]],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
             ) -> pl.Tensor[[512, 128], pl.FP32]:
                 n0 = pl.tile.get_block_idx()
                 offset = n0 * 128
@@ -509,7 +512,7 @@ class TestOutlineClusterScopes:
             def main_spmd_0(
                 self,
                 a: pl.Tensor[[512, 128], pl.FP32],
-                out: pl.InOut[pl.Tensor[[512, 128], pl.FP32]],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
             ) -> pl.Tensor[[512, 128], pl.FP32]:
                 out_call = self.main_incore_0(a, out)
                 return out
@@ -682,17 +685,67 @@ class TestOutlineClusterScopes:
         After = passes.outline_cluster_scopes()(Before)
         ir.assert_structural_equal(After, Expected)
 
-    def test_cluster_store_target_becomes_inout(self):
+    def test_cluster_callee_out_slot_does_not_demote_inout(self):
+        """Step 3 merges an inner callee's direction; it never overwrites.
+
+        The cluster pass is the only outline pass constructed with a ``program``,
+        so it is the only one that runs ``InferParamDirections`` Step 3 — merging
+        directions from ``GlobalVar`` calls in the scope body. Each source of
+        evidence is a lower bound, so the merge must follow ``In < Out < InOut``.
+        A plain assignment would let a callee that declares its slot ``Out``
+        erase the read this body really performs, dropping a genuine RAW
+        dependency on ``buf``'s incoming contents.
+
+        Here the body loads ``buf`` (a read), stores into it (a write), and then
+        hands the same capture to ``helper``, whose slot is ``Out``.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def helper(
+                self,
+                src: pl.Tensor[[16, 128], pl.FP32],
+                dst: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                t: pl.Tile[[16, 128], pl.FP32] = pl.load(src, [0, 0], [16, 128])
+                dst = pl.store(t, [0, 0], dst)
+                return dst
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[16, 128], pl.FP32],
+                buf: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                with pl.cluster():
+                    back: pl.Tile[[16, 128], pl.FP32] = pl.load(buf, [0, 0], [16, 128])
+                    keep: pl.Tile[[16, 128], pl.FP32] = pl.exp(back)
+                    pl.store(keep, [0, 0], buf)
+                    res = self.helper(x, buf)
+                return res
+
+        After = passes.outline_cluster_scopes()(passes.convert_to_ssa()(Before))
+
+        outlined = After.get_function("main_cluster_0")
+        assert outlined is not None, f"main_cluster_0 missing from {list(After.functions)}"
+        buf_idx = next(i for i, p in enumerate(outlined.params) if p.name_hint.startswith("buf"))
+        assert outlined.param_directions[buf_idx] == ir.ParamDirection.InOut, (
+            f"expected InOut at outlined callee param {buf_idx}, got {list(outlined.param_directions)}"
+        )
+
+    def test_cluster_store_target_becomes_out(self):
         """A Cluster scope that writes an external tensor via ``pl.store`` marks
-        that tensor as an ``InOut`` parameter on the outlined Group function.
+        that tensor as an ``Out`` parameter on the outlined Group function.
 
         Semantics: ScopeOutliner treats tile.store targets as side-effect
-        outputs (scope_outline_utils.h:560-571) and InferParamDirections Step 1
-        upgrades the corresponding param to ``InOut``
-        (scope_outline_utils.h:1118-1123). The store result is captured into a
-        fresh ``_store`` SSA var, but the Group returns the InOut param itself
-        (param-identity returns, #1702); the call site re-binds the external
-        tensor to that return value (``buf`` -> ``buf2``). Mirrors the
+        outputs and InferParamDirections Step 1 lifts the corresponding param
+        off ``In``. The body never reads ``buf`` — the store target slot is its
+        sole use — so the direction is ``Out``, not ``InOut`` (issue #2415).
+        The store result is captured into a fresh ``_store`` SSA var, but the
+        Group returns the write param itself (param-identity returns, #1702);
+        the call site re-binds the external tensor to that return value
+        (``buf`` -> ``buf2``). Mirrors the
         InCore-pass store-only case, but the parent here is NOT promoted — the
         cluster pass leaves the caller's function type unchanged.
         """
@@ -710,12 +763,13 @@ class TestOutlineClusterScopes:
 
         @pl.program
         class Expected:
-            # buf is a tile.store target, so it becomes InOut on the Group; the
-            # store result lands in a fresh buf_store var, but the Group
-            # returns the InOut param itself (param-identity returns, #1702).
+            # buf is a tile.store target the body never reads, so it becomes Out
+            # on the Group; the store result lands in a fresh buf_store var, but
+            # the Group returns the Out param itself (param-identity returns,
+            # #1702).
             @pl.function(type=pl.FunctionType.Group)
             def main_cluster_0(
-                self, buf: pl.InOut[pl.Tensor[[16, 128], pl.FP32]]
+                self, buf: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 tile = pl.tile.full([16, 128], dtype=pl.FP32, value=0.0)
                 buf_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(tile, [0, 0], buf)

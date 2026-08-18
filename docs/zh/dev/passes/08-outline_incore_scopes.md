@@ -87,12 +87,12 @@ with pl.at(level=pl.Level.CORE_GROUP):
 ```
 
 `c` 同时出现在 `var_uses` 与 `var_defs` 中，集合差会把它从参数表中剔除，导致
-外提函数体内的读取变成自由变量。将其视为 live-in 后，它成为 `InOut` 参数，而
+外提函数体内的使用变成自由变量。将其视为 live-in 后，它成为写方向参数，而
 `tile.store` 的结果绑定到一个独立的 Var（`c__store`），因此外提函数体永远不会
 重新绑定自身的参数：
 
 ```python
-def main_incore_0(a: Tensor[[128, 128], FP32], c: InOut[Tensor[[128, 128], FP32]]):
+def main_incore_0(a: Tensor[[128, 128], FP32], c: Out[Tensor[[128, 128], FP32]]):
     c__store = pl.tile.store(..., c)
     return c                       # 返回参数——store 就地经由它写回
 ```
@@ -103,8 +103,38 @@ IR 上。若被捕获变量是被 `tile.store` 之外的方式重新绑定，则
 构造的前提下表达，此时会抛出内部错误并提示先运行 `ConvertToSSA`。
 
 「绑定到独立 Var」是 InCore / Cluster / Spmd 的行为。Hierarchy 作用域会完全跳过
-store 目标导出（该缓冲区已经通过 InOut 参数对调用方可见），因此其函数体保留原有的
+store 目标导出（该缓冲区已经通过写方向参数对调用方可见），因此其函数体保留原有的
 重新绑定——被捕获变量仍然会成为参数，而这正是此前出问题的部分。
+
+**写方向：除非函数体读取，否则为 `Out`**：作用域写入的被捕获 tensor——`tile.store`
+的目标或 `tensor.assemble` 的目的操作数——会被 `InferParamDirections` 从 `In`
+提升。具体得到哪个写方向，取决于函数体是否**同时读取**它。这两个写操作都是**就地**
+更新目的操作数的一个子区域：未被写到的区域既不会被 load 也不会被重新 store，因此
+出现在该目的槽位并不会把数据带入作用域，不算读取。只出现在目的槽位的参数因此是
+`Out`；其它任何使用——喂给 `tensor.slice`、计算算子，或作为被调函数的 `In`/`InOut`
+实参——都会使其成为 `InOut`。SSA 下写后状态会绑定到一个新 Var，读取**该别名**同样算读：
+它指向同一块 buffer，而对作用域从未写过的区域的读取确实需要入参内容。无法识别的使用一律
+按读取处理，因此该推导只会偏向 `InOut`。
+
+两个键除外：`dump_vars` 与 `arg_direction_overrides_vars` 只是把张量作为**记账**引用
+（dump 标记、`NoDep` 退出），并不访问其内容。
+
+每一个证据来源——读取扫描、store 目标集合、assemble 扫描，以及每个内层被调函数声明的
+槽位——都只是访问集合的**下界**，因此它们按 `In < Out < InOut` 合并，而不是互相覆盖。
+直接赋值会让一个把槽位声明为 `Out` 的被调函数抹掉函数体真实发生的读取。
+
+**Hierarchy 作用域是例外。** `OutlineScope` 对 `ScopeKind::Hierarchy` 有意保持
+`store_output_set` 为空（无需显式返回输出，buffer 已对调用方可见），因此被 Hierarchy
+作用域捕获的 `tile.store` 目标根本不会进入上述规则，其参数仍为 `In`。这一点早于写方向
+规则存在，本次也未改变。
+
+对函数体从不读取的参数声明 `InOut` 并不是一种安全的保守近似。该方向会传播到
+`DistributedCodegen::EmitCallToWorker`，后者按**被调函数**的方向为每个 rank 的
+chip dispatch 实参打标签，于是一个错误的 `InOut` 会把同一个 `pl.Out` tensor 上
+互不相交的各 rank 切片变成跨 rank 写依赖（issue #2415）。而只写参数真正需要的
+定序不会因此丢失：[`DeriveCallDirections`](37-derive_call_directions.md) 会重新
+推导**调用点**方向——在顺序执行的外层循环内、在同一 root 的前序写者之后，或该
+root 是外层函数的 `InOut` 形参时，把被调函数的 `Out` 重新提升为 `InOut`。
 
 **参数化显式返回**：只要某个 tensor 输出是经由参数回写
 的，外提函数就返回自身的参数而非 SSA 结果变量——store 目标输出直接返回对应

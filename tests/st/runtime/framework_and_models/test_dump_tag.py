@@ -271,9 +271,17 @@ class TestDumpTagManifest:
             f"{manifest_path}: selective dump should retain entries from a single kernel, "
             f"found {len(task_ids)} task_ids={sorted(task_ids)}"
         )
+        # Both tagged values must appear, which shows up as two distinct roles:
+        # ``a`` is read by kernel1 (input) and ``intermediate`` is written by it.
+        # ``intermediate`` is reported ``output`` because its only use inside
+        # kernel1 is the ``pl.store`` target — it is write-only there, and the
+        # value kernel2 later consumes is a distinct rebound Var. It read
+        # ``inout`` while the outliner declared every write-only capture
+        # ``InOut``; the dump is unchanged either way, since a write-only value
+        # is captured ``after_completion``, which is the state worth inspecting.
         roles = {e["role"] for e in entries}
         assert "input" in roles, f"{manifest_path}: missing role=input entries; have {sorted(roles)}"
-        assert "inout" in roles, f"{manifest_path}: missing role=inout entries; have {sorted(roles)}"
+        assert "output" in roles, f"{manifest_path}: missing role=output entries; have {sorted(roles)}"
 
 
 # ===========================================================================
