@@ -101,6 +101,11 @@ enum class IRProperty : uint64_t {
                                     ///< store pipe can combine (BackendHandler::SupportsBf16AtomicAdd).
                                     ///< Decidable on the user's own IR, so it is a structural property
                                     ///< verified at pipeline input
+  GraphBoundaryLegalized,           ///< Every FunctionType::Graph function satisfies the
+                                    ///< host_build_graph boundary contract: its derived boundary
+                                    ///< scalars have been hoisted to the call sites, its signature
+                                    ///< fits the runtime's tensor/direction/return limits, and no
+                                    ///< call site launches it in a form the runtime cannot cache
   kCount                            ///< Sentinel (must be last)
 };
 

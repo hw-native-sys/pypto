@@ -36,8 +36,8 @@ parser 直接物化进 IR。这是控制 scope 粒度（ring 隔离）、MANUAL 
 默认模式由编译器决定放置）。
 
 **何时使用**：在 `Default` 策略中紧跟最终的 `Simplify` 之后运行，位于
-[`ClassifyIterArgCarry`](45-classify_iter_arg_carry.md) 与
-[`InsertCommFence`](46-insert_comm_fence.md) 之前。跑在所有改写型 transform
+[`ClassifyIterArgCarry`](46-classify_iter_arg_carry.md) 与
+[`InsertCommFence`](47-insert_comm_fence.md) 之前。跑在所有改写型 transform
 之后意味着它们都无需处理被插入的 scope 包裹。
 
 **作用范围**：仅修改 `Orchestration` 函数。InCore / AIC / AIV / Group / Spmd

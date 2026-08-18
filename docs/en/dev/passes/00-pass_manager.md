@@ -432,9 +432,9 @@ The PTO-oriented tile stage of `Default` is:
 31. [`LowerHostTensorCollectives`](42-lower_host_tensor_collectives.md) (host-level tensor collectives -> internal builtin chip dispatches)
 32. [`MaterializeDistTensorCtx`](43-materialize_dist_tensor_ctx.md) (explicit CommCtx params/args for DistributedTensor params)
 33. `Simplify`
-34. [`MaterializeRuntimeScopes`](44-materialize_runtime_scopes.md) (inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1)
-35. [`ClassifyIterArgCarry`](45-classify_iter_arg_carry.md) (stamps each ForStmt iter_arg as trivial alias / rebind carry, and sizes manual-scope TaskId fence arrays)
-36. [`InsertCommFence`](46-insert_comm_fence.md) (inserts a whole-tensor system.cacheinvalid + GM system.fence between each publishing write and the pld.system.notify that releases it; runs dead last so the inserted ops stay adjacent to their notify through codegen)
+34. [`MaterializeRuntimeScopes`](45-materialize_runtime_scopes.md) (inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1)
+35. [`ClassifyIterArgCarry`](46-classify_iter_arg_carry.md) (stamps each ForStmt iter_arg as trivial alias / rebind carry, and sizes manual-scope TaskId fence arrays)
+36. [`InsertCommFence`](47-insert_comm_fence.md) (inserts a whole-tensor system.cacheinvalid + GM system.fence between each publishing write and the pld.system.notify that releases it; runs dead last so the inserted ops stay adjacent to their notify through codegen)
 
 [`ResolveBackendOpLayouts`](19-resolve_backend_op_layouts.md) repairs
 backend-constrained elementwise tile ops using registered layout metadata.
