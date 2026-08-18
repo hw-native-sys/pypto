@@ -73,8 +73,8 @@ compile(program, memory_planner=passes.MemoryPlanner.DSA_RP)
 每个片上内存空间都是独立的固定容量 arena。强制别名物化后的每个分配身份成为一个
 buffer，带有字节大小、对齐和保守的半开生命周期。问题包含：
 
-- 生命周期干涉、预留范围、语义 no-alias、目标 hazard、不兼容的 Vec ND/NZ
-  存储布局和请求的流水线 stage 分离等**硬约束**；作者声明的 `pl.MemRef`
+- 生命周期干涉、预留范围、语义 no-alias、目标 hazard 和请求的流水线 stage
+  分离等**硬约束**；作者声明的 `pl.MemRef`
   分配还会与同一内存空间中的其他所有分配建立硬分离。多 slot 声明会作为覆盖完整
   声明范围的单个 buffer 放置，同时每个成员保留其常量或运行时选择的 slot 偏移；
 - 对生命周期兼容的物理复用，如果内置 recognizer 将其识别为跨 pipe WAR 或 WAW

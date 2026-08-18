@@ -29,7 +29,6 @@ enum class AllocationSeparationReason : uint8_t {
   PipelineStage,
   TargetHazard,
   SemanticNoAlias,
-  StorageLayout,
   DeclaredAllocation,
 };
 

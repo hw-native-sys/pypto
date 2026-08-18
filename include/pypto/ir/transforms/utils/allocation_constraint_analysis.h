@@ -38,7 +38,6 @@ using AllocationForbidAliasMap = std::map<const Var*, std::vector<VarPtr>>;
 struct AllocationConstraintAnalysis {
   std::map<const Var*, uint64_t> declared_allocation_sizes;
   std::set<const Var*> declared_allocation_bases;
-  std::map<const Var*, bool> vec_nz_layout_class;
   AllocationHazardInputs target_hazard_inputs;
   AllocationForbidAliasMap forbid_alias;
   bool needs_load_tpop_hazard_guard = false;

@@ -82,8 +82,8 @@ post-alias allocation identity becomes one buffer with byte size, alignment,
 and a conservative half-open lifetime. The problem has:
 
 - **hard constraints** for lifetime interference, reserved ranges, semantic
-  no-alias rules, target hazards, incompatible Vec ND/NZ storage layouts, and
-  requested pipeline-stage separation. Author-declared `pl.MemRef` allocations
+  no-alias rules, target hazards, and requested pipeline-stage separation.
+  Author-declared `pl.MemRef` allocations
   are also hard-separated from every other allocation in their memory space.
   A multi-slot declaration is placed as one buffer covering its full declared
   extent, while each member retains its constant or runtime-selected slot offset;

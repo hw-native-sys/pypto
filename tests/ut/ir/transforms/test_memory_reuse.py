@@ -18,7 +18,7 @@ This aligns MemRef objects consistently: if two tiles share a MemRef in
 
 import pypto.language as pl
 import pytest
-from pypto import DataType, InternalError, backend, ir, passes
+from pypto import DataType, InternalError, backend, ir, passes, testing
 from pypto.backend import BackendType
 from pypto.ir.op import tile
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
@@ -3720,14 +3720,12 @@ class TestL0CrossShapeReuse:
         )
 
 
-class TestStorageLayoutReuseGate:
-    """Vec ND↔NZ tiles must not share a MemRef; other layout diffs may.
+class TestStorageLayoutReuse:
+    """Disjoint tiles may reuse storage across TileView representations.
 
-    A5 V→C inserts an ND→NZ ``*_nz`` adapt before tpush (NZ: col_major blayout).
-    Colocating that NZ tile with the ND source at one Vec address makes even a
-    kept ``pto.tmov`` an in-place layout rewrite that silently mis-transfers.
-    Gate only Vec ND↔NZ — same-family fractal quirks and non-Vec spaces stay
-    eligible for reuse (#1788).
+    The tile.move ``not_inplace_safe`` constraint precisely separates a move
+    from its source. Unrelated ND and NZ values therefore need no global layout
+    gate and remain eligible for ordinary lifetime-based reuse.
     """
 
     @staticmethod
@@ -3760,32 +3758,29 @@ class TestStorageLayoutReuseGate:
 
         return Before
 
-    def test_nd_and_nz_vec_tiles_do_not_reuse(self):
-        """Disjoint-lifetime ND and NZ Vec tiles of equal size keep separate buffers."""
+    def test_nd_and_nz_vec_tiles_can_reuse(self):
+        """Disjoint-lifetime ND and NZ Vec tiles of equal size share a buffer."""
 
         Before = self._build_nd_nz_program()
         After = _run_pipeline(Before)
         bases = _collect_tile_memref_bases(After)
         assert "tile_nd" in bases and "tile_nz" in bases, f"missing tiles in {bases}"
-        assert bases["tile_nd"] != bases["tile_nz"], (
-            f"ND and NZ Vec tiles must not share a MemRef; both bound to {bases['tile_nd']}"
+        assert bases["tile_nd"] == bases["tile_nz"], (
+            "unrelated ND and NZ Vec tiles should share a lifetime-compatible MemRef; "
+            f"got {bases['tile_nd']} vs {bases['tile_nz']}"
         )
 
-    def test_dsa_rp_nd_and_nz_vec_tiles_do_not_overlap(self):
-        """DSA-RP exports the ND/NZ restriction as an unrelaxable hard edge."""
+    def test_dsa_rp_nd_and_nz_vec_tiles_have_no_layout_separation(self, ascend_backend):
+        """DSA-RP does not add a hard edge solely for ND/NZ representations."""
 
         Before = self._build_nd_nz_program()
-        with passes.PassContext([], memory_planner=passes.MemoryPlanner.DSA_RP):
-            After = passes.allocate_memory_addr()(
-                passes.materialize_semantic_aliases()(passes.init_mem_ref()(Before))
-            )
-
-        ranges = _collect_allocated_tile_ranges(After)
-        nd_offset, nd_size = ranges["tile_nd"]
-        nz_offset, nz_size = ranges["tile_nz"]
-        assert nd_offset + nd_size <= nz_offset or nz_offset + nz_size <= nd_offset, (
-            f"DSA-RP must physically separate ND {ranges['tile_nd']} and NZ {ranges['tile_nz']} Vec tiles"
-        )
+        initialized = passes.init_mem_ref()(Before)
+        function = next(iter(initialized.functions.values()))
+        edges = {
+            (edge["first_name"], edge["second_name"], edge["cost"])
+            for edge in testing.recognize_dsa_reuse_penalties(function)
+        }
+        assert ("tile_nd", "tile_nz", 1) in edges
 
     def test_same_nz_family_different_fractal_vec_tiles_can_reuse(self):
         """Same NZ family (col_major) with fractal-only difference may coalesce."""
