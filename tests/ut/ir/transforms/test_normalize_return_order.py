@@ -99,6 +99,102 @@ class TestNormalizeReturnOrder:
         After = _run_normalize(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_if_phi_returns_reordered_and_call_projections_remapped(self):
+        """IfStmt phi values retain their Out-param identity through normalization (#2392).
+
+        ``b`` is deliberately declared before ``a`` while the IfStmt yields
+        ``(a, b)``.  Both branches preserve that semantic identity, so the
+        pass must trace each phi back to its parameter, canonicalize and
+        reorder the kernel return to parameter order ``(b, a)``, then remap
+        the caller's tuple projections in lockstep.
+
+        Different element types make a crossed mapping visible instead of
+        allowing it to hide behind two structurally identical tensor types.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                cond: pl.Scalar[pl.INT32],
+                b: pl.Out[pl.Tensor[[16], pl.FP32]],
+                a: pl.Out[pl.Tensor[[16], pl.INT32]],
+            ) -> tuple[pl.Tensor[[16], pl.INT32], pl.Tensor[[16], pl.FP32]]:
+                if cond > 0:
+                    a_phi, b_phi = pl.yield_(a, b)
+                else:
+                    a_phi, b_phi = pl.yield_(a, b)
+                return a_phi, b_phi
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                cond: pl.Scalar[pl.INT32],
+                b: pl.Out[pl.Tensor[[16], pl.FP32]],
+                a: pl.Out[pl.Tensor[[16], pl.INT32]],
+            ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.INT32]]:
+                ret: tuple[pl.Tensor[[16], pl.INT32], pl.Tensor[[16], pl.FP32]] = self.kernel(cond, b, a)
+                a_result: pl.Tensor[[16], pl.INT32] = ret[0]
+                b_result: pl.Tensor[[16], pl.FP32] = ret[1]
+                return b_result, a_result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                cond: pl.Scalar[pl.INT32],
+                b: pl.Out[pl.Tensor[[16], pl.FP32]],
+                a: pl.Out[pl.Tensor[[16], pl.INT32]],
+            ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.INT32]]:
+                if cond > 0:
+                    a_phi, b_phi = pl.yield_(a, b)  # noqa: F841
+                else:
+                    a_phi, b_phi = pl.yield_(a, b)  # noqa: F841
+                return b, a
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                cond: pl.Scalar[pl.INT32],
+                b: pl.Out[pl.Tensor[[16], pl.FP32]],
+                a: pl.Out[pl.Tensor[[16], pl.INT32]],
+            ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.INT32]]:
+                ret: tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.INT32]] = self.kernel(cond, b, a)
+                a_result: pl.Tensor[[16], pl.INT32] = ret[1]
+                b_result: pl.Tensor[[16], pl.FP32] = ret[0]
+                return b_result, a_result
+
+        After = _run_normalize(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_if_phi_with_conflicting_branch_roots_stays_unmapped(self):
+        """A phi is not attributed when its branches come from different params.
+
+        Each result can refer to either output at runtime, so assigning either
+        phi a fixed return-to-param identity would be an unsafe guess.  The
+        pass must conservatively leave the function unchanged.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                cond: pl.Scalar[pl.INT32],
+                first: pl.Out[pl.Tensor[[16], pl.FP32]],
+                second: pl.Out[pl.Tensor[[16], pl.FP32]],
+            ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.FP32]]:
+                if cond > 0:
+                    result_0, result_1 = pl.yield_(first, second)
+                else:
+                    result_0, result_1 = pl.yield_(second, first)
+                return result_0, result_1
+
+        After = _run_normalize(Before)
+        ir.assert_structural_equal(After, Before)
+
     def test_already_ordered_noop(self):
         """Two Out params with returns already in Out-param order → only
         return values canonicalized to the param Vars; call sites unchanged."""
@@ -508,6 +604,156 @@ class TestNormalizeReturnOrder:
         ir.assert_structural_equal(After, Expected)
 
 
+class TestNormalizeReturnOrderStepBSafety:
+    """Step B rejects uses that cannot be remapped element-wise before rewriting."""
+
+    def test_tuple_alias_is_rejected_before_callee_permutation(self):
+        """A whole-tuple alias is rejected before it can change the caller contract."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                b: pl.Out[pl.Tensor[[16], pl.FP32]],
+                a: pl.Out[pl.Tensor[[16], pl.INT32]],
+            ) -> tuple[pl.Tensor[[16], pl.INT32], pl.Tensor[[16], pl.FP32]]:
+                a_alias: pl.Tensor[[16], pl.INT32] = a
+                b_alias: pl.Tensor[[16], pl.FP32] = b
+                return a_alias, b_alias
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                b: pl.Out[pl.Tensor[[16], pl.FP32]],
+                a: pl.Out[pl.Tensor[[16], pl.INT32]],
+            ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.INT32]]:
+                direct: pl.Tuple[pl.Tensor[[16], pl.INT32], pl.Tensor[[16], pl.FP32]] = self.kernel(b, a)
+                alias: pl.Tuple[pl.Tensor[[16], pl.INT32], pl.Tensor[[16], pl.FP32]] = direct
+                a_result: pl.Tensor[[16], pl.INT32] = alias[0]
+                b_result: pl.Tensor[[16], pl.FP32] = alias[1]
+                return b_result, a_result
+
+        snapshot = pl.parse_program(Before.as_python())
+        with pytest.raises(ValueError, match="used as a whole tuple"):
+            _run_normalize(Before)
+        ir.assert_structural_equal(Before, snapshot)
+
+    def test_incore_caller_is_rejected_with_actionable_hint(self):
+        """Direct projections cannot be remapped inside an InCore caller."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def callee(
+                self,
+                b: pl.Out[pl.Tensor[[16], pl.FP32]],
+                a: pl.Out[pl.Tensor[[16], pl.INT32]],
+            ) -> tuple[pl.Tensor[[16], pl.INT32], pl.Tensor[[16], pl.FP32]]:
+                a_alias: pl.Tensor[[16], pl.INT32] = a
+                b_alias: pl.Tensor[[16], pl.FP32] = b
+                return a_alias, b_alias
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def caller(
+                self,
+                b: pl.Out[pl.Tensor[[16], pl.FP32]],
+                a: pl.Out[pl.Tensor[[16], pl.INT32]],
+            ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.INT32]]:
+                result: pl.Tuple[pl.Tensor[[16], pl.INT32], pl.Tensor[[16], pl.FP32]] = self.callee(b, a)
+                a_result: pl.Tensor[[16], pl.INT32] = result[0]
+                b_result: pl.Tensor[[16], pl.FP32] = result[1]
+                return b_result, a_result
+
+        with pytest.raises(ValueError) as exc_info:
+            _run_normalize(Before)
+
+        message = str(exc_info.value)
+        assert "called from an InCore body" in message
+        assert "non-InCore caller" in message
+
+    def test_if_phi_tuple_flow_is_rejected_before_callee_permutation(self):
+        """Yielding a call tuple through an If phi is rejected before reordering."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                b: pl.Out[pl.Tensor[[16], pl.FP32]],
+                a: pl.Out[pl.Tensor[[16], pl.INT32]],
+            ) -> tuple[pl.Tensor[[16], pl.INT32], pl.Tensor[[16], pl.FP32]]:
+                a_alias: pl.Tensor[[16], pl.INT32] = a
+                b_alias: pl.Tensor[[16], pl.FP32] = b
+                return a_alias, b_alias
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                cond: pl.Scalar[pl.INT32],
+                b: pl.Out[pl.Tensor[[16], pl.FP32]],
+                a: pl.Out[pl.Tensor[[16], pl.INT32]],
+            ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.INT32]]:
+                if cond > 0:
+                    then_result: pl.Tuple[pl.Tensor[[16], pl.INT32], pl.Tensor[[16], pl.FP32]] = self.kernel(
+                        b, a
+                    )
+                    selected: pl.Tuple[pl.Tensor[[16], pl.INT32], pl.Tensor[[16], pl.FP32]] = pl.yield_(
+                        then_result  # pyright: ignore[reportArgumentType]
+                    )
+                else:
+                    else_result: pl.Tuple[pl.Tensor[[16], pl.INT32], pl.Tensor[[16], pl.FP32]] = self.kernel(
+                        b, a
+                    )
+                    selected: pl.Tuple[pl.Tensor[[16], pl.INT32], pl.Tensor[[16], pl.FP32]] = pl.yield_(
+                        else_result  # pyright: ignore[reportArgumentType]
+                    )
+                a_result: pl.Tensor[[16], pl.INT32] = selected[0]
+                b_result: pl.Tensor[[16], pl.FP32] = selected[1]
+                return b_result, a_result
+
+        with pytest.raises(ValueError, match="used as a whole tuple"):
+            _run_normalize(Before)
+
+    def test_group_whole_tuple_forward_is_rejected_before_reorder(self):
+        """A wrapper cannot forward a tuple whose callee needs reordering."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                b: pl.Out[pl.Tensor[[16], pl.FP32]],
+                a: pl.Out[pl.Tensor[[16], pl.INT32]],
+            ) -> tuple[pl.Tensor[[16], pl.INT32], pl.Tensor[[16], pl.FP32]]:
+                a_alias: pl.Tensor[[16], pl.INT32] = a
+                b_alias: pl.Tensor[[16], pl.FP32] = b
+                return a_alias, b_alias
+
+            @pl.function(type=pl.FunctionType.Group)
+            def wrapper(
+                self,
+                b: pl.Out[pl.Tensor[[16], pl.FP32]],
+                a: pl.Out[pl.Tensor[[16], pl.INT32]],
+            ) -> pl.Tuple[pl.Tensor[[16], pl.INT32], pl.Tensor[[16], pl.FP32]]:
+                packed: pl.Tuple[pl.Tensor[[16], pl.INT32], pl.Tensor[[16], pl.FP32]] = self.kernel(b, a)
+                return packed
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                b: pl.Out[pl.Tensor[[16], pl.FP32]],
+                a: pl.Out[pl.Tensor[[16], pl.INT32]],
+            ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.INT32]]:
+                wrapped: pl.Tuple[pl.Tensor[[16], pl.INT32], pl.Tensor[[16], pl.FP32]] = self.wrapper(b, a)
+                a_result: pl.Tensor[[16], pl.INT32] = wrapped[0]
+                b_result: pl.Tensor[[16], pl.FP32] = wrapped[1]
+                return b_result, a_result
+
+        with pytest.raises(ValueError, match="used as a whole tuple"):
+            _run_normalize(Before)
+
+
 class TestNormalizeReturnOrderSubmit:
     """Step B must remap ``TupleGetItemExpr`` indices on a ``pl.submit`` result
     just as it does for a plain ``self.kernel(...)`` Call.
@@ -519,7 +765,7 @@ class TestNormalizeReturnOrderSubmit:
     ``[2]``. When Step A reorders the InCore kernel's returns, those
     projection indices must be permuted in lockstep so the same physical
     output buffer still flows into the same name (doc
-    ``24-normalize_return_order.md`` §"Step B"; pass principle in
+    ``25-normalize_return_order.md`` §"Step B"; pass principle in
     ``.claude/rules/pass-submit-awareness.md``).
     """
 
@@ -604,6 +850,71 @@ class TestNormalizeReturnOrderSubmit:
                     b: pl.Tensor[[16], pl.FP32] = _submit_tmp[0]
                     tid: pl.Scalar[pl.TASK_ID] = _submit_tmp[2]  # noqa: F841
                 return (a, b)
+
+        After = _run_normalize_direct(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_submit_distinct_result_types_reordered_before_task_id(self):
+        """Submit result types follow the kernel permutation; TASK_ID stays last.
+
+        Unlike the same-dtype case above, swapping these two tensor results
+        requires updating both the Submit expression and its result Var from
+        ``Tuple[INT32, FP32, TASK_ID]`` to
+        ``Tuple[FP32, INT32, TASK_ID]``.  The task ID is submit metadata, not a
+        kernel return, so it remains at index 2 while only indices 0 and 1 are
+        permuted.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                b: pl.Out[pl.Tensor[[16], pl.FP32]],
+                a: pl.Out[pl.Tensor[[16], pl.INT32]],
+            ) -> tuple[pl.Tensor[[16], pl.INT32], pl.Tensor[[16], pl.FP32]]:
+                a_alias: pl.Tensor[[16], pl.INT32] = a
+                b_alias: pl.Tensor[[16], pl.FP32] = b
+                return a_alias, b_alias
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                b: pl.Out[pl.Tensor[[16], pl.FP32]],
+                a: pl.Out[pl.Tensor[[16], pl.INT32]],
+            ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.INT32]]:
+                with pl.manual_scope():
+                    (a_result, b_result), tid = pl.submit(self.kernel, b, a)  # noqa: F841
+                return b_result, a_result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                b: pl.Out[pl.Tensor[[16], pl.FP32]],
+                a: pl.Out[pl.Tensor[[16], pl.INT32]],
+            ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.INT32]]:
+                a_alias: pl.Tensor[[16], pl.INT32] = a  # noqa: F841
+                b_alias: pl.Tensor[[16], pl.FP32] = b  # noqa: F841
+                return b, a
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                b: pl.Out[pl.Tensor[[16], pl.FP32]],
+                a: pl.Out[pl.Tensor[[16], pl.INT32]],
+            ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.INT32]]:
+                with pl.manual_scope():
+                    _submit_tmp: pl.Tuple[
+                        pl.Tensor[[16], pl.FP32],
+                        pl.Tensor[[16], pl.INT32],
+                        pl.Scalar[pl.TASK_ID],
+                    ] = pl.submit(self.kernel, b, a)
+                    a_result: pl.Tensor[[16], pl.INT32] = _submit_tmp[1]
+                    b_result: pl.Tensor[[16], pl.FP32] = _submit_tmp[0]
+                    tid: pl.Scalar[pl.TASK_ID] = _submit_tmp[2]  # noqa: F841
+                return b_result, a_result
 
         After = _run_normalize_direct(Before)
         ir.assert_structural_equal(After, Expected)

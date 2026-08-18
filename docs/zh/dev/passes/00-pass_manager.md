@@ -78,7 +78,7 @@ struct PassProperties {
 | ResolveBackendOpLayouts | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D, NormalizedStmtStructure | — |
 | LowerAutoVectorSplit | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D, TileMemoryInferred, NormalizedStmtStructure | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D, TileMemoryInferred, NormalizedStmtStructure | — |
 | ExpandMixedKernel | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | SSAForm, MixedKernelExpanded | — |
-| NormalizeReturnOrder | SplitIncoreOrch, IncoreTileOps | — | — |
+| NormalizeReturnOrder | SplitIncoreOrch, IncoreTileOps | ReturnParamsExplicit | — |
 | InitMemRef | TypeChecked, SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D | HasMemRefs | SSAForm |
 | MaterializeSemanticAliases | SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
 | MemoryReuse | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
@@ -412,7 +412,7 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 11. [`InjectGMPipeBuffer`](22-inject_gm_pipe_buffer.md)
 12. [`SplitVectorKernel`](23-split_vector_kernel.md)（仅为 split_aiv 函数打属性 + 处理无拆分双 AIV 路径）
 13. [`StampTfreeSplit`](24-stamp_tfree_split.md)（把每个跨核 tpop 的 split/pipe-id 复制到与之配对的 tfree 算子上）
-14. `NormalizeReturnOrder`
+14. [`NormalizeReturnOrder`](25-normalize_return_order.md)
 15. [`SkewCrossCorePipeline`](26-skew_cross_core_pipeline.md)（cube/vector 跨核软流水 skew；紧接在 LowerPipelineLoops 之前运行）
 16. [`LowerPipelineToSlots`](27-lower_pipeline_to_slots.md)（把合格的 `pl.pipeline` 循环体改为轮转一个分配的多个 slot，而不是复制；自门控于 `memory_planner=PTOAS`，未处理的循环原样留给 `LowerPipelineLoops`）
 17. [`LowerPipelineLoops`](28-lower_pipeline_loops.md)
@@ -444,9 +444,13 @@ backend 注册的 layout 元数据修复受约束的逐元素 tile 操作。对�
 
 [`NormalizeReturnOrder`](25-normalize_return_order.md) 对 InCore 函数的 `ReturnStmt::value_` 重新排序，使
 `return[i]` 对应声明顺序中第 i 个 `Out`/`InOut` 参数，并同步更新调用点的
-`TupleGetItemExpr` 索引。这样编排代码生成可以直接通过
-`out_indices[i]` 查找输出参数，而不需要追踪 `tile.store`/yield 链。该 pass
-放在 `InitMemRef` 之前，在所有核函数拆分之后、内存分配之前执行。
+call/submit 结果 tuple 类型、绑定 Var 与 `TupleGetItemExpr` 索引（同时保留
+Submit 尾部 TASK_ID）。预检（preflight）要求候选结果必须被直接绑定，且只能在
+非 InCore 调用方中通过元素投影使用；whole-tuple 别名、控制流携带、返回值与调用
+参数需要本 pass 尚未构造的逆置换适配器，因此会被拒绝。这样既为按位置消费的下游
+逻辑提供规范的 InCore tuple，也让编排代码生成无需追踪 `tile.store`/yield 链即可
+读取显式的「返回位置 → 参数」映射。该 pass 放在 `InitMemRef` 之前，在所有核函数
+拆分之后、内存分配之前执行。
 
 `Simplify` 执行算术恒等式折叠（`x + 0 → x`、`x * 1 → x`）、常量表达式求值、
 基于循环变量边界与 if 分支条件的范围感知重写，以及通过单赋值绑定的标量

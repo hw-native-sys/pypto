@@ -1,10 +1,10 @@
 # NormalizeReturnOrder Pass
 
 将每个 InCore 函数的返回 tuple 重新排序，使 `return[i]` 对应声明顺序中的第
-i 个 `Out`/`InOut` 参数，并相应地重映射非 InCore 调用方中的
-`TupleGetItemExpr` 索引。该 Pass 完成后，编排（orchestration）代码生成可以通
-过位置直接映射 `out_indices[i]`，无需追踪 `tile.store` / `ForStmt` yield
-链。
+i 个 `Out`/`InOut` 参数，并相应地同步非 InCore 调用方中的结果
+`TupleType`、绑定 `Var` 和 `TupleGetItemExpr` 索引。该 Pass 完成后，按位置消费
+结果的下游逻辑会看到规范的 InCore tuple；编排（orchestration）代码生成则可直接
+读取显式的「返回位置 → 参数」映射，无需追踪 `tile.store` / `ForStmt` yield 链。
 
 ## 概述
 
@@ -25,19 +25,25 @@ i 个 `Out`/`InOut` 参数，并相应地重映射非 InCore 调用方中的
    `ReturnStmt::value_` 与声明的 `Out`/`InOut` 参数顺序一致的置换，然后同步
    重写返回值与 `Function::return_types_`。
 3. **Step B（调用端索引重映射）** —— 对每个非 InCore 函数（Orchestration /
-   Group / Spmd / opaque），重写所有 `TupleGetItemExpr.index_`，前提是它的
-   tuple 操作数来源于 Step A 中被重排序的函数调用结果。新索引为
-   `permutation[old_index]`，因此调用结果上的观察者仍然把同名 SSA 变量绑
-   定到同一物理输出。
+   Group / Spmd / opaque），对每个调用 Step A 中已重排序函数的 `Call` /
+   `Submit`，同步置换其结果 `TupleType`、创建匹配的绑定 `Var` 并按身份重映射
+   所有使用，随后重写该结果上的所有 `TupleGetItemExpr.index_`。新索引为
+   `permutation[old_index]`，因此观察者仍然把同名 SSA 变量绑定到同一物理输
+   出。`Submit` 只置换被调函数返回值前缀；尾部 `Scalar[TASK_ID]` 保持原位。
+   应用置换前，Pass 会验证候选被调函数在程序内的每个结果都只通过直接元素投影
+   消费；whole-tuple 别名、控制流携带、返回值或调用参数会被拒绝，避免静默改变
+   其契约。
 
-对于返回顺序已经与 `Out`/`InOut` 参数声明顺序匹配的函数，本 Pass 是
-**no-op**；对于不含 InCore 函数的程序也是 no-op。
+恒等置换会跳过该被调函数的 Step A 与 Step B，但 Step A0 仍可能把可追踪的返回
+别名替换成参数 Var。只有不含 `InCore`、`Group` 与 `Spmd` 函数的程序才是完整
+no-op。
 
-**流水线位置**: `Default` 策略中 #20 —— 位于 `SplitVectorKernel`（#19）之
-后、`LowerPipelineLoops`（#21）之前。这样既保证所有 kernel 拆分 / tile 结构
-决策仍基于原始返回顺序完成，又确保下游 tile 级 Pass（`LowerPipelineLoops`、
-`CanonicalizeIOOrder`、`InitMemRef`、`MemoryReuse`、`AllocateMemoryAddr`）
-以及最终的 PTO 编排代码生成都能看到规范化后的顺序。
+**流水线位置**: `Default` 策略中 #25 —— 位于 `StampTfreeSplit`（#24）之后，
+`SkewCrossCorePipeline`（#26）、`LowerPipelineToSlots`（#27）与
+`LowerPipelineLoops`（#28）之前。这样既保证所有 kernel 拆分 / tile 结构决策仍
+基于原始返回顺序完成，又确保下游 tile 级 Pass（`CanonicalizeIOOrder`、
+`InitMemRef`、`MemoryReuse`、`AllocateMemoryAddr`）以及最终的 PTO 编排代码生成
+都能看到规范化后的顺序。
 
 ## API
 
@@ -71,9 +77,10 @@ InCore/Group/Spmd 函数中属于参数回写的 tensor 返回值都以指针同
 ### Step A0 —— 把返回值规范化为参数引用
 
 对每个 `InCore` / `Group` / `Spmd` 函数，`CanonicalizeReturnValues` 调用
-`return_lineage::ReturnedParamIndices`（可追踪 Var 到 Var 别名、循环携带、
-builtin 回写、tuple 调用的 `TupleGetItem`，以及 Group/Spmd 包装函数调用），
-把每个可追踪到参数的 tensor 返回值替换为参数 `Var` 本身。无法追踪的值
+`return_lineage::ReturnedParamIndices`（可追踪 Var 到 Var 别名、循环携带、分支
+值解析到同一参数的 tensor `IfStmt` 合流、builtin 回写、tuple 调用的
+`TupleGetItem`，以及 Group/Spmd 包装函数调用），把每个可追踪到参数的 tensor
+返回值替换为参数 `Var` 本身。无法追踪的值
 （kernel 内部分配的输出）和标量保留原表达式。
 
 **正是这一步让"返回 → 参数"映射无需分析即可读出。** 它运行之后，返回位置 `j`
@@ -108,11 +115,12 @@ builtin 回写、tuple 调用的 `TupleGetItem`，以及 Group/Spmd 包装函数
 
 `ComputeReturnPermutation` 把映射变为 `permutation[old_index] = new_index`，
 其中 `new_index` 是匹配参数在 `CollectOutIndices(func)` 中的位置。出现以下
-任一情况都返回空置换（对该函数即为 no-op）：
+四种情况之一时返回空置换（跳过 Step A，但保留 Step A0 已完成的规范化）：
 
-- 函数体不含 `ReturnStmt`（开放 IR），或不含任何 Out/InOut 参数。
+- 函数体不含非空 `ReturnStmt`（开放 IR），或不含任何 Out/InOut 参数。
 - `out_indices.size() > ret_to_param.size()` —— 声明的输出参数数量多于返回
   值数量，分析不完整，不能构造越界置换。
+- 候选置换不是双射（目标重复、存在空洞或目标越界）。
 - 计算出的置换是恒等置换（已规范）。
 
 当置换非空时，`ReorderReturns` 通过 `MutableCopy` 克隆出新的 `Function`，
@@ -120,22 +128,34 @@ builtin 回写、tuple 调用的 `TupleGetItem`，以及 Group/Spmd 包装函数
 `value_[permutation[i]] = old_value_[i]` 的版本，并同步置换
 `Function::return_types_`，使类型列表与值列表始终对齐。
 
-### Step B —— 重映射调用端的 `TupleGetItemExpr`
+### Step B —— 同步调用端 tuple 类型与投影
 
-对（Step A 已重写后的）程序中的每个非 InCore 函数，
-`TupleIndexPermutationMutator` 单次 SSA 遍历做两件事：
+改写前，Pass 先只读扫描每个候选调用结果的绑定，并验证其所有使用都是非 InCore
+调用方中的 `TupleGetItemExpr(binding, index)`。若候选调用是嵌套调用、位于 InCore
+调用方，或其结果以 whole tuple 形式逃逸（经别名、`YieldStmt`/循环携带、
+`ReturnStmt` 或调用参数），Pass 会在改动任何函数前报告带源码位置的错误。支持
+这些形式需要显式构造逆置换 tuple 适配器；直接原地改变 tuple 顺序会在元素类型
+相同时造成无提示的语义变化。
 
-- 对每个 RHS 是 `Call(GlobalVar)`、且被调函数在 Step A 中被重排序的
-  `AssignStmt`，把 `assign.var → permutation_ref` 记入
-  `reordered_tuple_vars_` 映射。
-- 一旦该 `Var` 被重新赋值（赋给非重排序函数的调用、非 Call 表达式等），立即
-  移除其条目，避免基于身份的查找读到失效绑定。
+原子预检通过后，`TupleIndexPermutationMutator` 对每个非 InCore 函数执行一次
+SSA 遍历：
+
+- 对每个调用 Step A 中已重排序函数的 `Call(GlobalVar)` /
+  `Submit(GlobalVar)`，按同一置换重建其结果 `TupleType`。对于 `Submit`，只移动
+  前 `N = permutation.size()` 个元素；校验并保留末尾 `Scalar[TASK_ID]`，同时
+  保留 `deps_`、attrs、kwargs、launch 字段与 predicate。
+- 对有赋值目标的 call/submit 结果，创建带新 tuple 类型的绑定 `Var`，在 mutator
+  的身份重映射中记录 `old_var → new_var`，并在 `reordered_tuple_vars_` 中记录
+  `new_var → permutation_ref`。此后的所有使用都会指向同一个、类型正确的 tuple
+  定义。
+- 在记录同一 `Var` 的新定义前，先清理旧的身份重映射与追踪状态。RHS 会先被访问，
+  因此 RHS 中的使用会看到前一个完整定义；随后新定义才替换旧的追踪状态。
 - 对每个 `TupleGetItemExpr(tuple_var, k)`，若 `tuple_var` 在该映射中，把索
   引重写为 `permutation[k]`。
 
-由于 Step A 重写函数签名与 Step B 重写调用端索引在同一次 Pass 调用中完成，
-出口程序状态自洽：每个 tuple 元素仍然绑定到同一个物理输出 buffer，只是用
-新的下标访问。
+由于 Step A 重写函数签名与 Step B 重写调用端结果类型、绑定 Var 和索引在同一
+次 Pass 调用中完成，出口程序保持类型自洽：每个 tuple 元素仍然绑定到同一个
+物理输出 buffer，只是用新的下标访问。
 
 ## 约束
 
@@ -143,9 +163,11 @@ builtin 回写、tuple 调用的 `TupleGetItem`，以及 Group/Spmd 包装函数
 | ---- | ---- |
 | Step A 仅重写 `InCore` 函数 | 其他函数类型（`Orchestration` / `Group` / `Spmd` / opaque）遵循用户声明的返回形态；它们的调用端在 Step B 中被重映射。`Group`/`Spmd` 的返回值在 Step A0 中仍会被规范化为参数引用，但不会被重排 |
 | Step A0 不改动 kernel 内部分配的输出与标量 | 只有参数回写必须显式化；没有参数血缘的返回值没有可引用的参数 |
-| `out_indices.size() > ret_to_param.size()` 时跳过 | 不完整分析不能产生越界置换 —— 保留原状，让 verifier 捕获不一致 |
-| 恒等置换 ⇒ 不重写 | 避免不必要的 `Function` 克隆，使 Pass 幂等 |
-| Step B 仅改写 `VisitExpr` 后 tuple 操作数仍为已记录 `Var` 的 `TupleGetItemExpr` | Mutator 保留 `Var` 节点身份，因此操作数指针在 `reordered_tuple_vars_` 中仍是有效的查找键；即便未来某次改写返回新节点，查找 post-visit 的指针也能保证正确性 |
+| `out_indices.size() > ret_to_param.size()` 时跳过 Step A | 不完整分析不能产生越界置换；保留 Step A0 已完成的参数引用规范化 |
+| 恒等置换 ⇒ 不执行 Step-A 重排 | 避免不必要的重排克隆，同时保留 Step A0 已完成的参数引用规范化 |
+| 被重排序调用的结果必须在非 InCore 调用方中仅通过直接 `TupleGetItemExpr` 投影消费 | Whole-tuple 别名、控制流携带、返回、参数及 InCore 调用点无法在本地安全重映射；Pass 会在任何函数被修改前拒绝这些形式 |
+| Step B 追踪新类型绑定 `Var`，而不是改写前的定义 | 身份重映射会在投影查找前把所有使用指向新的 tuple 定义；每个新定义都会替换之前的追踪状态，避免失效绑定 |
+| `Submit` 只置换被调函数返回值前缀 | 尾部 `Scalar[TASK_ID]` 属于任务启动语义，而不是被调函数返回值，必须保持最终 tuple 下标不变 |
 
 ## 示例
 
@@ -201,16 +223,17 @@ class Module:
         return (a, b)
 ```
 
-同一条 SSA 赋值（`a = ...`）仍然绑定到 `pl.store(a_tile, ..., out_a)` 的输
-出；变化的只是 tuple 访问路径。`InOut` 参数的处理方式相同。
+同一组 SSA 赋值仍绑定到原来的物理输出：`a` 仍对应为 `out_b` 产生的值，`b`
+仍对应为 `out_a` 产生的值；变化的只是 tuple 访问路径。`InOut` 参数的处理方式
+相同。
 
-完整用例参见
+代表性用例参见
 `tests/ut/ir/transforms/test_normalize_return_order.py`：
 
 - `test_swapped_returns_reordered` —— 上文展示的两个 Out 参数案例
-- `test_already_ordered_noop` —— 已规范的 IR 保持不变
+- `test_already_ordered_noop` —— Step A 跳过恒等置换，Step A0 仍规范化参数回写
 - `test_single_return_noop` —— 单个 Out 参数无需置换
-- `test_non_incore_unchanged` —— 不含 InCore 函数的程序为 no-op
+- `test_non_incore_unchanged` —— 该纯 Orchestration 测试程序保持 no-op
 - `test_three_returns_scrambled` —— 三元置换
 - `test_2d_tensor_reorder` —— 2 维 tensor / 多维 offset
 - `test_inout_param_reorder` —— `InOut` 参数同样参与重排
@@ -236,8 +259,11 @@ Pass NormalizeReturnOrder();
   `permutation[old_index] = new_index`；不需重写或分析不完整时返回空。
 - `ReorderReturns` —— 基于 `MutableCopy(func)` 构造新的 `Function`，置换
   `ReturnStmt::value_` 与 `Function::return_types_`。
-- `TupleIndexPermutationMutator` —— Step B 改写器：跟踪调用结果变量，并
-  重写 `TupleGetItemExpr` 索引。
+- `FindUnsafeReturnPermutations` —— 在 Step A 前预检每个候选调用结果的使用，
+  并报告不受支持的 whole-tuple 或 InCore 调用方形式。
+- `TupleIndexPermutationMutator` —— Step B 改写器：置换 `Call` / `Submit`
+  结果 tuple 类型，按身份重映射其绑定 Var，并在保留 `Submit` TASK_ID 尾部的
+  同时重写 `TupleGetItemExpr` 索引。
 
 **属性**: `include/pypto/ir/transforms/pass_properties.h`
 
@@ -252,16 +278,20 @@ inline const PassProperties kNormalizeReturnOrderProperties{
 ```cpp
 passes.def("normalize_return_order", &pass::NormalizeReturnOrder,
            "Create a return order normalization pass\n\n"
-           "Reorders return tuple values in InCore functions so that return[i]\n"
-           "corresponds to the i-th Out/InOut parameter in declaration order,\n"
-           "and updates TupleGetItemExpr indices at call sites accordingly.");
+           "Canonicalizes tensor param-writeback returns and reorders InCore return tuples\n"
+           "to Out/InOut parameter order. Reordered Call/Submit results must be directly\n"
+           "bound and used only through TupleGetItem projections in non-InCore callers.");
 ```
 
 **类型存根**: `python/pypto/pypto_core/passes.pyi`
 
 ```python
 def normalize_return_order() -> Pass:
-    """Create a return order normalization pass."""
+    """Create a return-order normalization pass.
+
+    Reordered Call/Submit results must be directly bound and used only through
+    tuple-element projections in non-InCore callers.
+    """
 ```
 
 **测试**: `tests/ut/ir/transforms/test_normalize_return_order.py`
@@ -278,5 +308,5 @@ def normalize_return_order() -> Pass:
 - [`DeriveCallDirections`](37-derive_call_directions.md) —— 后续基于本
   Pass 规范化的返回形态分析调用签名
 - [PTO 代码生成总览](../codegen/00-pto_codegen.md) 与
-  [编排代码生成](../codegen/01-orchestration_codegen.md) —— 直接消费规范
-  化后的 `return[i] ↔ out_indices[i]` 映射
+  [编排代码生成](../codegen/01-orchestration_codegen.md) —— 消费显式的
+  「返回位置 → 参数」映射
