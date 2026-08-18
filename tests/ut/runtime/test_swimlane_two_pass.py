@@ -53,8 +53,18 @@ def test_onboard_swimlane_captures_deps_then_times_in_process():
     assert captures == 1
     assert len(seen) == 1
     timing = seen[0]
-    assert timing.enable_l2_swimlane is True
+    assert timing.enable_l2_swimlane == 4  # True normalizes to the full level
     assert timing.enable_dep_gen is False  # dep_gen forced off on the timing pass
+
+
+def test_onboard_swimlane_preserves_requested_level():
+    # Regression (issue #2385): the two-pass split must carry the requested
+    # collection level through to the timing pass, not re-derive an on/off flag.
+    seen, captures = _drive(_DfxOpts(enable_l2_swimlane=2), "a2a3")
+    assert captures == 1
+    assert len(seen) == 1
+    assert seen[0].enable_l2_swimlane == 2
+    assert seen[0].enable_dep_gen is False
 
 
 def test_onboard_swimlane_with_explicit_dep_gen_still_one_capture():
@@ -63,7 +73,7 @@ def test_onboard_swimlane_with_explicit_dep_gen_still_one_capture():
     seen, captures = _drive(_DfxOpts(enable_l2_swimlane=True, enable_dep_gen=True), "a2a3")
     assert captures == 1
     assert len(seen) == 1
-    assert seen[0].enable_l2_swimlane is True and seen[0].enable_dep_gen is False
+    assert seen[0].enable_l2_swimlane == 4 and seen[0].enable_dep_gen is False
 
 
 def test_onboard_swimlane_timing_dfx_ride_the_in_process_pass():
@@ -89,7 +99,7 @@ def test_only_dep_gen_is_single_pass_no_capture():
     assert captures == 0
     assert len(seen) == 1
     assert seen[0].enable_dep_gen is True
-    assert seen[0].enable_l2_swimlane is False
+    assert seen[0].enable_l2_swimlane == 0
 
 
 def test_no_dfx_is_single_pass_no_capture():
@@ -104,7 +114,7 @@ def test_sim_swimlane_stays_single_pass_no_capture():
     seen, captures = _drive(_DfxOpts(enable_l2_swimlane=True), "a2a3sim")
     assert captures == 0
     assert len(seen) == 1
-    assert seen[0].enable_l2_swimlane is True
+    assert seen[0].enable_l2_swimlane == 4
 
 
 def test_build_args_spec_host_tensor_saves_real_data(tmp_path):

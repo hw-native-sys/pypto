@@ -26,7 +26,7 @@ from pypto.runtime import ChipWorker, RunConfig
 
 cfg = RunConfig(
     platform="a2a3",
-    enable_l2_swimlane=True,   # 逐任务计时
+    enable_l2_swimlane=4,      # 逐任务计时，完整采集
     enable_dep_gen=True,       # 计时所要 join 的任务 DAG
     save_kernels=True,         # 保留输出目录
 )
@@ -43,7 +43,7 @@ cfg = RunConfig(
 
 第二个开关的意义在于：后继边被**刻意不**记录进泳道图记录本身，以保持设备侧热路径干净。join 是事后在 host 上做的。
 
-### 采集是分级的，而 `RunConfig` 请求完整采集
+### 采集是分级的
 
 运行时按四个等级采集，每一级在下一级之上追加：
 
@@ -56,7 +56,16 @@ cfg = RunConfig(
 
 每一级在采集器里都是实打实的门禁，不是啰嗦程度设置：等级 1 下 dispatch 与 finish 时间戳**根本不会被打**，任何后处理都恢复不出来。
 
-> **`RunConfig.enable_l2_swimlane` 保留了旧的 `bool` 兼容命名。`True` 会映射到 Simpler 的 `enable_chip_swimlane` 等级 4（完整采集），`False` 映射为 0。** 类型约定下的 `RunConfig` 不暴露等级 1–3；需要较低采集等级时，请使用运行时 harness 的 `--enable-chip-swimlane <1|2|3>`。
+`RunConfig.enable_l2_swimlane` **就是**这个等级，直接传 `0`-`4` 即可：
+
+```python
+cfg = RunConfig(platform="a2a3", enable_l2_swimlane=3,  # 调度器阶段及以下
+                enable_dep_gen=True, save_kernels=True)
+```
+
+为保持调用方兼容，仍接受 `True`，它表示等级 `4`（完整采集），与裸 `--enable-l2-swimlane`
+以及 runtime harness 的裸 `--enable-chip-swimlane` 一致；`False` 表示 `0`。等级越高采集越多、
+对计时的扰动也越大，所以请用能回答你问题的最低等级。
 
 ### 不知道就会被误导的两件事
 
@@ -126,7 +135,7 @@ python -m simpler_setup.tools.sched_overhead_analysis \
 
 它给出逐引擎与全系统的开销占 makespan 的比例、取件代价分布、AICPU 调度循环预算，以及把关键路径拆成「计算」与「调度器注入」两部分的归因。同样这些数字可以用 `swimlane_converter --overhead` 叠加成时间线上的 counter 轨。
 
-它的调度循环部分需要**等级 ≥ 3** 的采集。`RunConfig` 的完整等级 4 采集满足这个要求；只有在通过 `--enable-chip-swimlane <level>` 选择其他采集等级时才需要运行时 harness。
+它的调度循环部分需要**等级 ≥ 3** 的采集 —— `RunConfig(enable_l2_swimlane=3)`，或默认的完整等级 `4`。
 
 那份报告里有两个定义值得记住，因为它们把真问题和假问题分开了：
 

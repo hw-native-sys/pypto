@@ -458,7 +458,9 @@ def _dfx_to_cli(dfx: "_DfxOpts") -> list[str]:
     """
     argv: list[str] = []
     if dfx.enable_l2_swimlane:
-        argv.append("--enable-l2-swimlane")
+        # Levelled, not a toggle — pass the level explicitly so a level 1-3
+        # capture is not silently promoted to the bare flag's level 4.
+        argv += ["--enable-l2-swimlane", str(dfx.enable_l2_swimlane)]
     if dfx.enable_dump_args:
         argv += ["--dump-args", str(dfx.enable_dump_args)]
     if dfx.enable_pmu:
@@ -990,7 +992,7 @@ def start_pipeline(  # noqa: PLR0913
     compile_workers: int,
     device_pool: "queue.Queue[int]",
     analyze_auto_scopes_for_deps: bool = False,
-    enable_l2_swimlane: bool = False,
+    enable_l2_swimlane: int = 0,
     enable_dump_args: int = 0,
     enable_pmu: int = 0,
     enable_dep_gen: bool = False,

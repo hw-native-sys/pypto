@@ -569,7 +569,7 @@ class TestPreparedSwimlaneTwoPass:
 
         run_config = RunConfig(
             platform="a2a3",
-            enable_l2_swimlane=1,  # pyright: ignore[reportArgumentType]
+            enable_l2_swimlane=1,  # AICore-timing level, not just "on"
             enable_pmu=3,
             enable_scope_stats=True,
             enable_dump_args=2,
@@ -597,7 +597,7 @@ class TestPreparedSwimlaneTwoPass:
         assert m["make_call_config"].call_count == 2
         deps_build, timing_build = m["make_call_config"].call_args_list
         deps_config = deps_build.args[1]
-        assert deps_config.enable_l2_swimlane is False
+        assert deps_config.enable_l2_swimlane == 0
         assert deps_config.enable_dep_gen is True
         assert deps_config.enable_pmu == 0
         assert deps_config.enable_scope_stats is False
@@ -630,7 +630,7 @@ class TestPreparedSwimlaneTwoPass:
         m["make_call_config"].return_value = call_config
         run_config = RunConfig(
             platform="a2a3sim",
-            enable_l2_swimlane=1,  # pyright: ignore[reportArgumentType]
+            enable_l2_swimlane=1,  # AICore-timing level, not just "on"
         )
         with patch("pypto.runtime.distributed_runner._collect_l3_swimlane") as collect:
             rt(_resident(rt, (16, 16)), config=run_config)
@@ -2421,7 +2421,7 @@ class _BoolStrictCallConfig:
 
     The real ``CallConfig.enable_dep_gen`` pybind overload accepts only ``bool``
     and raises ``TypeError`` on an ``int`` — exactly the crash issue #1952
-    reproduces when the int ``enable_l2_swimlane`` CLI flag (0/1/2) leaks through
+    reproduces when the int ``enable_l2_swimlane`` collection level (0-4) leaks through
     the ``and``/``or`` chain unwrapped. ``bool`` is a subclass of ``int``, so
     ``isinstance(value, bool)`` matches the pybind behavior (rejects ``1``/``0``).
     """
@@ -2469,20 +2469,16 @@ def fake_simpler_task_interface(monkeypatch):
 class TestMakeCallConfigDepGenType:
     """``_make_call_config`` must assign a ``bool`` to ``enable_dep_gen``.
 
-    Regression for issue #1952: ``enable_l2_swimlane`` is an int (0/1/2), so the
+    Regression for issue #1952: ``enable_l2_swimlane`` is a collection level
+    (0-4), so the
     ``dfx.enable_dep_gen or (co_enable_swimlane_dep_gen and dfx.enable_l2_swimlane)``
     chain can yield an int, which the ``bool``-only pybind setter rejects.
     """
 
-    # The pypto-lib CLI wires ``--enable-l2-swimlane`` as ``type=int,
-    # choices=(0, 1, 2)``, so ``RunConfig`` receives an ``int`` here even though
-    # the field is annotated ``bool`` — that int is precisely the crash trigger
-    # under test, hence the deliberate ``pyright: ignore[reportArgumentType]``.
-
     def test_int_swimlane_flag_yields_bool_dep_gen(self, tmp_path, fake_simpler_task_interface):
         # ``--enable-l2-swimlane 1`` reaches RunConfig as the int ``1``; the
         # co-enable path must still hand ``enable_dep_gen`` a genuine ``bool``.
-        run_config = RunConfig(enable_l2_swimlane=1)  # pyright: ignore[reportArgumentType]
+        run_config = RunConfig(enable_l2_swimlane=1)
         cfg = _make_call_config(DistributedConfig(), run_config, dfx_base=tmp_path / "dfx")
         assert cfg.enable_dep_gen is True
         assert cfg.enable_chip_swimlane == 1
@@ -2490,12 +2486,12 @@ class TestMakeCallConfigDepGenType:
     def test_int_zero_swimlane_yields_bool_false_dep_gen(self, tmp_path, fake_simpler_task_interface):
         # Another DFX flag opens the block while swimlane is the int ``0``; the
         # ``and``/``or`` chain would otherwise assign int ``0`` and still crash.
-        run_config = RunConfig(enable_dump_args=1, enable_l2_swimlane=0)  # pyright: ignore[reportArgumentType]
+        run_config = RunConfig(enable_dump_args=1, enable_l2_swimlane=0)
         cfg = _make_call_config(DistributedConfig(), run_config, dfx_base=tmp_path / "dfx")
         assert cfg.enable_dep_gen is False
 
     def test_clean_timing_suppresses_implicit_dep_gen(self, tmp_path, fake_simpler_task_interface):
-        run_config = RunConfig(enable_l2_swimlane=1)  # pyright: ignore[reportArgumentType]
+        run_config = RunConfig(enable_l2_swimlane=1)
         cfg = _make_call_config(
             DistributedConfig(),
             run_config,
@@ -2506,7 +2502,7 @@ class TestMakeCallConfigDepGenType:
 
     def test_explicit_dep_gen_still_wins_when_co_enable_is_off(self, tmp_path, fake_simpler_task_interface):
         run_config = RunConfig(
-            enable_l2_swimlane=1,  # pyright: ignore[reportArgumentType]
+            enable_l2_swimlane=1,  # AICore-timing level, not just "on"
             enable_dep_gen=True,
         )
         cfg = _make_call_config(

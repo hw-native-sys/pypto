@@ -54,7 +54,14 @@ import torch
 from pypto.runtime._binary_cache import binary_context_lock, invalidate_binary_context
 from pypto.runtime.debug.pto_rebuild import rebuild_kernel_cpp_from_pto
 from pypto.runtime.device_tensor import DeviceTensor
-from pypto.runtime.runner import RunConfig, _DfxOpts, execute_compiled
+from pypto.runtime.runner import (
+    _SWIMLANE_CLI_HELP,
+    _SWIMLANE_FULL_LEVEL,
+    _SWIMLANE_MAX_LEVEL,
+    RunConfig,
+    _DfxOpts,
+    execute_compiled,
+)
 
 __all__ = ["replay", "invalidate_binary_cache"]
 
@@ -313,7 +320,16 @@ def _main(
     parser.add_argument("--platform", default=default_platform, help="Target execution platform")
     parser.add_argument("--device-id", type=int, default=0, help="Hardware device index")
     parser.add_argument("--pmu", type=int, default=0, metavar="LEVEL", help="PMU level")
-    parser.add_argument("--swimlane", action="store_true", help="Enable L2 swimlane capture")
+    parser.add_argument(
+        "--swimlane",
+        nargs="?",
+        const=_SWIMLANE_FULL_LEVEL,
+        default=0,
+        type=int,
+        choices=range(_SWIMLANE_MAX_LEVEL + 1),
+        metavar="LEVEL",
+        help=_SWIMLANE_CLI_HELP,
+    )
     parser.add_argument(
         "--dump-args",
         nargs="?",

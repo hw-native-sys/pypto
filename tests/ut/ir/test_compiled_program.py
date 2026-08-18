@@ -850,7 +850,7 @@ class TestCompiledProgramExtraction:
                 dfx_dir=tmp_path / "dfx",
             )
 
-        assert fake_call_config.enable_chip_swimlane is True
+        assert fake_call_config.enable_chip_swimlane == 4  # True normalizes to the full level
         assert fake_call_config.enable_dump_args is True
         assert fake_call_config.enable_pmu == 2
         assert fake_call_config.enable_dep_gen is True

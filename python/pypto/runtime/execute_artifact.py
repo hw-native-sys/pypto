@@ -46,7 +46,13 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-from pypto.runtime.runner import _DfxOpts, _execute_on_device
+from pypto.runtime.runner import (
+    _SWIMLANE_CLI_HELP,
+    _SWIMLANE_FULL_LEVEL,
+    _SWIMLANE_MAX_LEVEL,
+    _DfxOpts,
+    _execute_on_device,
+)
 
 __all__ = ["ArtifactSetupError", "execute_artifact_dir", "execute_batch_manifest", "main"]
 
@@ -358,7 +364,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device-id", type=int, required=True, help="Hardware device index")
     # DFX toggles — names mirror tests/st/conftest.py so the harness round-trip
     # (_dfx_to_cli) is symmetric.
-    parser.add_argument("--enable-l2-swimlane", action="store_true", help="Capture L2 swimlane records")
+    parser.add_argument(
+        "--enable-l2-swimlane",
+        nargs="?",
+        const=_SWIMLANE_FULL_LEVEL,
+        default=0,
+        type=int,
+        choices=range(_SWIMLANE_MAX_LEVEL + 1),
+        metavar="LEVEL",
+        help=_SWIMLANE_CLI_HELP,
+    )
     parser.add_argument(
         "--dump-args",
         type=int,

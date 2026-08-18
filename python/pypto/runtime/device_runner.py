@@ -896,7 +896,7 @@ def execute_on_device(  # noqa: PLR0913
     aicpu_thread_num: int | None = None,
     enable_sdma: bool = False,
     output_prefix: str | None = None,
-    enable_l2_swimlane: bool = False,
+    enable_l2_swimlane: int | bool = 0,
     enable_dump_args: int = 0,
     enable_pmu: int = 0,
     enable_dep_gen: bool = False,
@@ -935,8 +935,12 @@ def execute_on_device(  # noqa: PLR0913
             whenever any ``enable_*`` DFX flag is set — Simpler's
             ``CallConfig::validate()`` would otherwise reject the call.
             Passing it with all flags off creates no artefacts.
-        enable_l2_swimlane: Capture per-task chip perf records
-            (``chip_swimlane_records.json``). This public PyPTO compatibility
+        enable_l2_swimlane: Chip swimlane collection **level** for the
+            per-task perf records (``chip_swimlane_records.json``). ``0`` off;
+            ``1`` AICore timing; ``2`` plus AICPU dispatch / finish; ``3`` plus
+            scheduler phases; ``4`` plus orchestrator phases. ``True`` requests
+            the full level (``4``), matching the runtime harness's bare
+            ``--enable-chip-swimlane``. This public PyPTO compatibility
             spelling maps to Simpler's ``enable_chip_swimlane`` field.
         enable_dump_args: Per-task argument dump level into
             ``<output_prefix>/args_dump/``. ``0`` off; ``1`` partial
@@ -973,8 +977,18 @@ def execute_on_device(  # noqa: PLR0913
             f"L3 execution is not yet exposed at the pypto user-API layer."
         )
 
+    from .runner import _normalize_swimlane_level  # noqa: PLC0415
+
+    # Validate the level here too, so both entry points reject an out-of-range
+    # request identically instead of letting the CallConfig setter clamp it.
+    enable_l2_swimlane = _normalize_swimlane_level(enable_l2_swimlane, "enable_l2_swimlane")
+
     any_dfx = (
-        enable_l2_swimlane or enable_dump_args > 0 or enable_pmu > 0 or enable_dep_gen or enable_scope_stats
+        enable_l2_swimlane > 0
+        or enable_dump_args > 0
+        or enable_pmu > 0
+        or enable_dep_gen
+        or enable_scope_stats
     )
     if any_dfx and not output_prefix:
         raise ValueError(

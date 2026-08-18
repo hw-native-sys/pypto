@@ -10,7 +10,7 @@ flag。为保持调用方兼容，PyPTO 保留公开名称 `enable_l2_swimlane`�
 
 | `RunConfig` 字段 | pytest flag | `CallConfig` 成员 | `dfx_outputs/` 下产物 | 后处理工具 |
 | ---------------- | ----------- | ----------------- | --------------------- | ---------- |
-| `enable_l2_swimlane: bool` | `--enable-l2-swimlane` | `enable_chip_swimlane` | `chip_swimlane_records.json` | `swimlane_converter` → `merged_swimlane_*.json` |
+| `enable_l2_swimlane: int` | `--enable-l2-swimlane [PERF_LEVEL]`（裸 flag = `4`） | `enable_chip_swimlane`（`0` 关 .. `4` 全量） | `chip_swimlane_records.json` | `swimlane_converter` → `merged_swimlane_*.json` |
 | `enable_dump_args: int` | `--dump-args [LEVEL]`（裸 flag = `1`） | `enable_dump_args`（`0` 关，`1` 部分，`2` 全量） | `args_dump/{args_dump.json,bin}` | `dump_viewer`（手动） |
 | `enable_pmu: int` | `--enable-pmu [N]`（裸 flag = `2`） | `enable_pmu`（`0` 关，`>0` 事件类型） | `pmu.csv` | — |
 | `enable_dep_gen: bool` | `--enable-dep-gen` | `enable_dep_gen` | `deps.json` | `deps_viewer`（手动） |
@@ -19,6 +19,22 @@ flag。为保持调用方兼容，PyPTO 保留公开名称 `enable_l2_swimlane`�
 五个开关**完全正交**，可任意组合。任一开启时自动将
 `RunConfig.save_kernels` 强制设为 `True`，确保 `<work_dir>/dfx_outputs/`
 目录在 run 结束后保留。
+
+### Swimlane 采集等级
+
+`enable_l2_swimlane` 是**等级**而非开关。每个等级在 runtime 采集器里都是真实的
+判断分支，低等级不会打点高等级才有的数据，事后也无法通过后处理补回：
+
+| 等级 | 新增内容 | 解锁能力 |
+| ---- | -------- | -------- |
+| `0` / `False` | — | 关闭采集 |
+| `1` | AICore 逐任务 start / end + task record buffer | 逐任务泳道 |
+| `2` | + AICPU 打点的 dispatch / finish | `[dispatch, start]` 取任务间隙 |
+| `3` | + scheduler 主循环 phase 记录 | `simpler_setup.tools.sched_overhead_analysis`、Toolkit 插件的 Scheduler View |
+| `4` / `True` | + orchestrator phase 记录 | Toolkit 插件的 AICPU Orchestrator 视图 |
+
+`True` 请求等级 `4`，与裸 `--enable-l2-swimlane` 以及 runtime harness 的裸
+`--enable-chip-swimlane` 一致。超出范围的等级由 `RunConfig` 抛 `ValueError`。
 
 ## 产物契约
 
@@ -110,7 +126,8 @@ run(
     MyProgram, a, b, c,
     config=RunConfig(
         platform="a2a3sim",
-        enable_l2_swimlane=True,     # 生成 chip_swimlane_records.json
+        enable_l2_swimlane=4,        # 全量 swimlane -> chip_swimlane_records.json
+                                     # （True 等价于等级 4；需要更轻量时用 1-3）
         enable_dep_gen=True,         # 生成 deps.json（按需用 deps_viewer 渲染 HTML）
         enable_pmu=4,                # PMU 事件 = MEMORY
     ),
@@ -120,11 +137,13 @@ run(
 ### 从 pytest
 
 ```bash
+# 裸 flag = 等级 4（全量）
 pytest tests/st/runtime/framework_and_models/test_perf_swimlane.py \
     --platform a2a3sim --enable-l2-swimlane
 
+# 仅 AICore 计时——最轻量的采集
 pytest tests/st/runtime/ \
-    --platform a2a3sim --enable-l2-swimlane --enable-dep-gen
+    --platform a2a3sim --enable-l2-swimlane 1 --enable-dep-gen
 ```
 
 ## 选择性张量 Dump

@@ -698,9 +698,10 @@ def _make_call_config(
             # records) and set ``co_enable_swimlane_dep_gen=False`` on the timing
             # pass so dep_gen does not perturb it. Simulator and direct
             # single-pass builders keep the default co-enable behavior.
-            # ``enable_l2_swimlane`` is an int (0/1/2), so the ``or``/``and`` chain
-            # can yield an int; the ``CallConfig.enable_dep_gen`` pybind setter
-            # only accepts ``bool``. Wrap in ``bool(...)`` to avoid a TypeError.
+            # ``enable_l2_swimlane`` is a collection level (0-4), so the
+            # ``or``/``and`` chain can yield an int; the
+            # ``CallConfig.enable_dep_gen`` pybind setter only accepts ``bool``.
+            # Wrap in ``bool(...)`` to avoid a TypeError.
             call_config.enable_dep_gen = bool(
                 dfx.enable_dep_gen or (co_enable_swimlane_dep_gen and dfx.enable_l2_swimlane)
             )
@@ -749,7 +750,7 @@ def _run_l3_swimlane_two_pass(
     print("[swimlane] run 1/2: capturing the per-dispatch task graph (deps.json); its timing is discarded.")
     deps_cfg = dataclasses.replace(
         config,
-        enable_l2_swimlane=False,
+        enable_l2_swimlane=0,
         enable_dep_gen=True,
         enable_pmu=0,
         enable_scope_stats=False,
@@ -1335,7 +1336,7 @@ def execute_distributed(
                 _close_local_worker(w)
 
     dfx_base = output_dir / "dfx_outputs"
-    swimlane = config is not None and config.enable_l2_swimlane
+    swimlane = config is not None and config.enable_l2_swimlane > 0
 
     # Scope DFX artifacts to this run: drop any stale ``rank*/d{k}`` dirs from an
     # earlier (possibly larger) run before the first dispatch writes new ones.
@@ -1345,7 +1346,7 @@ def execute_distributed(
         if _DfxOpts.from_run_config(config).any():
             _clear_dfx_dispatch_dirs(dfx_base)
 
-    if config is not None and config.enable_l2_swimlane and not compiled.platform.endswith("sim"):
+    if config is not None and config.enable_l2_swimlane > 0 and not compiled.platform.endswith("sim"):
         # Two-pass for clean timing, mirroring the L2 swimlane workflow: dep_gen
         # collection perturbs timing, so the per-dispatch task graph and the kept
         # timing come from separate dispatches.
@@ -2497,7 +2498,7 @@ class DistributedWorker(Worker):
                 return DistributedRunHandle._completed(self)
 
             postprocess: Callable[[], None] | None = None
-            if config is not None and config.enable_l2_swimlane:
+            if config is not None and config.enable_l2_swimlane > 0:
 
                 def collect_swimlane() -> None:
                     _collect_l3_swimlane(compiled.output_dir, compiled.platform)
@@ -2529,7 +2530,7 @@ class DistributedWorker(Worker):
             return _make_call_config(compiled._distributed_config), None, False
 
         dfx_base = compiled.output_dir / "dfx_outputs"
-        two_pass_swimlane = bool(config.enable_l2_swimlane) and not compiled.platform.endswith("sim")
+        two_pass_swimlane = config.enable_l2_swimlane > 0 and not compiled.platform.endswith("sim")
         call_config = None
         if not two_pass_swimlane:
             call_config = _make_call_config(compiled._distributed_config, config, dfx_base=dfx_base)

@@ -100,7 +100,8 @@ CLI flags (forwarded to ``pypto.runtime.debug.replay._main``)
   --platform PLAT          target platform (default: {default_platform})
   --device-id N            hardware device index (default: 0)
   --pmu LEVEL              enable PMU profiling at LEVEL
-  --swimlane               enable L2 swimlane capture
+  --swimlane [LEVEL]       chip swimlane capture (bare=4 full, 1=AICore timing,
+                           2=+dispatch/finish, 3=+sched phases, 4=+orch phases)
   --dump-args [LEVEL]      dump per-task arguments to disk (bare=1 partial, 2 full)
   --dep-gen                enable dep_gen profiling
   --no-recompile           skip forced cpp-edit invalidation; compatibility checks may rebuild

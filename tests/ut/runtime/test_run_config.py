@@ -103,11 +103,44 @@ class TestRunConfigDfxFlags:
         assert RunConfig(platform="a5", enable_dump_args=False).enable_dump_args == 0
         assert RunConfig(platform="a5", enable_dump_args=True).any_dfx_enabled() is True
 
+    def test_l2_swimlane_level_is_reachable(self):
+        # Regression (issue #2385): every collection level the runtime supports
+        # must be requestable from RunConfig, not just "on" == full.
+        assert RunConfig(platform="a5", enable_l2_swimlane=0).enable_l2_swimlane == 0
+        for level in (1, 2, 3, 4):
+            cfg = RunConfig(platform="a5", enable_l2_swimlane=level)
+            assert cfg.enable_l2_swimlane == level
+            assert cfg.any_dfx_enabled() is True
+            assert cfg.save_kernels is True
+
+    def test_l2_swimlane_bool_maps_to_full_level(self):
+        # ``True`` means the runtime's bare-flag level 4, matching the
+        # CallConfig setter and the runtime harness's --enable-chip-swimlane.
+        assert RunConfig(platform="a5", enable_l2_swimlane=True).enable_l2_swimlane == 4
+        assert RunConfig(platform="a5", enable_l2_swimlane=False).enable_l2_swimlane == 0
+        assert RunConfig(platform="a5", enable_l2_swimlane=False).any_dfx_enabled() is False
+
+    @pytest.mark.parametrize("bad", [-1, 5, 99])
+    def test_l2_swimlane_rejects_out_of_range_level(self, bad):
+        with pytest.raises(ValueError, match="collection level in"):
+            RunConfig(platform="a5", enable_l2_swimlane=bad)
+
+    def test_l2_swimlane_rejects_non_int(self):
+        with pytest.raises(TypeError, match="enable_l2_swimlane"):
+            RunConfig(platform="a5", enable_l2_swimlane="full")  # pyright: ignore[reportArgumentType]
+
+    def test_dfx_opts_normalizes_swimlane_bool(self):
+        # _DfxOpts is constructed directly by the harness and by the CLI, so it
+        # normalizes too — _dfx_to_cli stringifies this field.
+        assert _DfxOpts(enable_l2_swimlane=True).enable_l2_swimlane == 4
+        assert _DfxOpts(enable_l2_swimlane=2).enable_l2_swimlane == 2
+        assert _DfxOpts(enable_l2_swimlane=0).any() is False
+
     def test_dfx_flags_are_independent(self):
         # Enabling one flag must not implicitly enable another.
         cfg = RunConfig(platform="a5", enable_dep_gen=True)
         assert cfg.enable_dep_gen is True
-        assert cfg.enable_l2_swimlane is False
+        assert cfg.enable_l2_swimlane == 0
         assert cfg.enable_dump_args == 0
         assert cfg.enable_pmu == 0
         assert cfg.enable_scope_stats is False
@@ -119,7 +152,7 @@ class TestRunConfigDfxFlags:
         assert cfg.enable_scope_stats is True
         assert cfg.any_dfx_enabled() is True
         assert cfg.save_kernels is True
-        assert cfg.enable_l2_swimlane is False
+        assert cfg.enable_l2_swimlane == 0
         assert cfg.enable_dump_args == 0
         assert cfg.enable_pmu == 0
         assert cfg.enable_dep_gen is False
@@ -134,7 +167,7 @@ class TestRunConfigDfxFlags:
             enable_scope_stats=True,
         )
         opts = _DfxOpts.from_run_config(cfg)
-        assert opts.enable_l2_swimlane is True
+        assert opts.enable_l2_swimlane == 4  # True normalizes to the full level
         assert opts.enable_dump_args == 2
         assert opts.enable_pmu == 2
         assert opts.enable_dep_gen is True
@@ -486,7 +519,7 @@ class TestMakeCallConfigDfx:
         cfg = _make_dist_call_config_with_fake(
             DistributedConfig(), run_config, monkeypatch, dfx_base=dfx_base
         )
-        assert cfg.enable_chip_swimlane is True
+        assert cfg.enable_chip_swimlane == 4  # True normalizes to the full level
         assert cfg.enable_dep_gen is True  # co-enabled
         assert cfg.output_prefix == str(dfx_base)
 

@@ -54,7 +54,12 @@ from harness.core.test_runner import (  # noqa: E402
 from pypto import LogLevel  # noqa: E402
 from pypto.pypto_core import _clear_thread_log_level, _set_thread_log_level  # noqa: E402
 from pypto.pypto_core.passes import MemoryPlanner  # noqa: E402
-from pypto.runtime.runner import RunConfig  # noqa: E402
+from pypto.runtime.runner import (  # noqa: E402
+    _SWIMLANE_CLI_HELP,
+    _SWIMLANE_FULL_LEVEL,
+    _SWIMLANE_MAX_LEVEL,
+    RunConfig,
+)
 
 # Temp directories created for pre-compilation (when --save-kernels is not set).
 # Cleaned up in pytest_sessionfinish.
@@ -226,9 +231,15 @@ def pytest_addoption(parser):
     # ``enable_chip_swimlane`` member.
     parser.addoption(
         "--enable-l2-swimlane",
-        action="store_true",
-        default=False,
-        help="Capture per-task chip perf records into <work_dir>/dfx_outputs/chip_swimlane_records.json. "
+        nargs="?",
+        const=_SWIMLANE_FULL_LEVEL,
+        default=0,
+        type=int,
+        choices=range(_SWIMLANE_MAX_LEVEL + 1),
+        metavar="PERF_LEVEL",
+        help=_SWIMLANE_CLI_HELP + " Records are written into "
+        "<work_dir>/dfx_outputs/chip_swimlane_records.json. The bare flag matches the runtime "
+        "harness's bare --enable-chip-swimlane. "
         "On onboard platforms, also render merged_swimlane_*.json and run the kernel twice: a dep_gen "
         "pass to capture deps.json (the converter's task graph) then a clean swimlane pass, since "
         "dep_gen collection perturbs the timing. Simulator platforms emit only the records (the merged "
@@ -833,7 +844,7 @@ def pytest_collection_finish(session: pytest.Session) -> None:
 
     dump_passes: bool = session.config.getoption("--dump-passes")
     codegen_only: bool = session.config.getoption("--codegen-only")
-    enable_l2_swimlane: bool = session.config.getoption("--enable-l2-swimlane")
+    enable_l2_swimlane: int = session.config.getoption("--enable-l2-swimlane")
     enable_dump_args: int = session.config.getoption("--dump-args")
     enable_pmu: int = session.config.getoption("--enable-pmu")
     enable_dep_gen: bool = session.config.getoption("--enable-dep-gen")

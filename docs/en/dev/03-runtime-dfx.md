@@ -11,7 +11,7 @@ renamed `enable_chip_swimlane` member.
 
 | `RunConfig` field | pytest flag | `CallConfig` member | Artefact under `dfx_outputs/` | Post-run converter |
 | ----------------- | ----------- | ------------------- | ----------------------------- | ------------------ |
-| `enable_l2_swimlane: bool` | `--enable-l2-swimlane` | `enable_chip_swimlane` | `chip_swimlane_records.json` | `swimlane_converter` → `merged_swimlane_*.json` |
+| `enable_l2_swimlane: int` | `--enable-l2-swimlane [PERF_LEVEL]` (bare = `4`) | `enable_chip_swimlane` (`0` off .. `4` full) | `chip_swimlane_records.json` | `swimlane_converter` → `merged_swimlane_*.json` |
 | `enable_dump_args: int` | `--dump-args [LEVEL]` (bare = `1`) | `enable_dump_args` (`0` off, `1` partial, `2` full) | `args_dump/{args_dump.json,bin}` | `dump_viewer` (manual) |
 | `enable_pmu: int` | `--enable-pmu [N]` (bare = `2`) | `enable_pmu` (`0` off, `>0` event type) | `pmu.csv` | — |
 | `enable_dep_gen: bool` | `--enable-dep-gen` | `enable_dep_gen` | `deps.json` | `deps_viewer` (manual) |
@@ -20,6 +20,24 @@ renamed `enable_chip_swimlane` member.
 The five flags are **fully independent** and may be combined in any
 subset. Enabling *any* of them auto-forces `RunConfig.save_kernels=True`
 so the `<work_dir>/dfx_outputs/` directory survives the run.
+
+### Swimlane collection levels
+
+`enable_l2_swimlane` is a **level**, not a toggle. Each level is a real guard
+in the runtime collectors, so a lower level never stamps the data a higher one
+does and no post-processing recovers it:
+
+| Level | Adds | Unlocks |
+| ----- | ---- | ------- |
+| `0` / `False` | — | collection off |
+| `1` | AICore per-task start / end + task record buffer | per-task lanes |
+| `2` | + AICPU-stamped dispatch / finish | the `[dispatch, start]` pickup gap |
+| `3` | + scheduler main-loop phase records | `simpler_setup.tools.sched_overhead_analysis`, the Toolkit plugin's Scheduler View |
+| `4` / `True` | + orchestrator phase records | the Toolkit plugin's AICPU Orchestrator view |
+
+`True` requests level `4`, matching the bare `--enable-l2-swimlane` and the
+runtime harness's bare `--enable-chip-swimlane`. An out-of-range level raises
+`ValueError` from `RunConfig`.
 
 ## Output contract
 
@@ -129,7 +147,8 @@ run(
     MyProgram, a, b, c,
     config=RunConfig(
         platform="a2a3sim",
-        enable_l2_swimlane=True,     # produces chip_swimlane_records.json
+        enable_l2_swimlane=4,        # full swimlane -> chip_swimlane_records.json
+                                     # (True is the same level 4; use 1-3 for less)
         enable_dep_gen=True,         # produces deps.json (render with deps_viewer on demand)
         enable_pmu=4,                # PMU event = MEMORY
     ),
@@ -139,11 +158,13 @@ run(
 ### From pytest
 
 ```bash
+# Bare flag = level 4 (full)
 pytest tests/st/runtime/framework_and_models/test_perf_swimlane.py \
     --platform a2a3sim --enable-l2-swimlane
 
+# AICore timing only — the cheapest capture
 pytest tests/st/runtime/ \
-    --platform a2a3sim --enable-l2-swimlane --enable-dep-gen
+    --platform a2a3sim --enable-l2-swimlane 1 --enable-dep-gen
 ```
 
 ## Selective tensor dump

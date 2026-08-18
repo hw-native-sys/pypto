@@ -28,6 +28,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 from pypto.pypto_core.passes import MemoryPlanner
+from pypto.runtime import execute_artifact
 from pypto.runtime.runner import RunConfig, _DfxOpts
 
 _ST_DIR = Path(__file__).resolve().parents[2] / "st"
@@ -170,12 +171,24 @@ def test_dfx_to_cli_emits_only_enabled_flags():
     argv = test_runner._dfx_to_cli(dfx)
     assert argv == [
         "--enable-l2-swimlane",
+        "4",
         "--dump-args",
         "2",
         "--enable-pmu",
         "5",
         "--enable-dep-gen",
     ]
+
+
+def test_dfx_to_cli_round_trips_the_swimlane_level():
+    # Regression (issue #2385): a level 1-3 capture must survive the harness ->
+    # execute_artifact CLI hop instead of being flattened to the bare flag.
+    for level in (1, 2, 3, 4):
+        argv = test_runner._dfx_to_cli(_DfxOpts(enable_l2_swimlane=level))
+        assert argv == ["--enable-l2-swimlane", str(level)]
+        # ``--device-id`` is the parser's only required argument.
+        parsed = execute_artifact._build_parser().parse_args([*argv, "--device-id", "0"])
+        assert parsed.enable_l2_swimlane == level
 
 
 # ---------------------------------------------------------------------------
