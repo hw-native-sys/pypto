@@ -18,10 +18,20 @@ Shape 默认是静态的，在解析期检查。`pl.dynamic()` 让某一维退�
 
 ## Quickstart：读懂一个签名
 
+<!-- doctest: setup -->
 ```python
 import pypto.language as pl
+import torch
+from pypto.runtime import RunConfig
 
+CFG = RunConfig(platform="__PLATFORM__")
+torch.manual_seed(0)
+```
+
+<!-- doctest: run -->
+```python
 M = pl.dynamic("M")                       # an axis whose extent varies at run time
+
 
 @pl.jit.incore
 def scale_rows(
@@ -30,7 +40,33 @@ def scale_rows(
     out: pl.Out[pl.Tensor[[M, 128], pl.FP32]],          # write-only, DDR
     factor: pl.Scalar[pl.FP32],                         # scalar, passed by value
 ):
-    ...
+    tx = pl.load(x, [0, 0], [64, 128])
+    scaled = pl.mul(pl.cast(tx, pl.FP32), factor)
+    acc = pl.store(pl.add(pl.load(acc, [0, 0], [64, 128]), scaled), [0, 0], acc)
+    out = pl.store(scaled, [0, 0], out)
+    return acc, out
+
+
+@pl.jit
+def apply_scale(
+    x: pl.Tensor[[64, 128], pl.FP16],
+    acc: pl.InOut[pl.Tensor[[64, 128], pl.FP32]],
+    out: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+):
+    acc, out = scale_rows(x, acc, out, 2.0)             # the dynamic axis binds to 64 here
+    return acc, out
+
+
+x = torch.randn(64, 128, dtype=torch.float16)
+acc = torch.randn(64, 128, dtype=torch.float32)
+out = torch.zeros(64, 128, dtype=torch.float32)
+acc_before = acc.clone()
+
+apply_scale(x, acc, out, config=CFG)
+
+scaled = x.float() * 2.0
+torch.testing.assert_close(out, scaled, rtol=1e-2, atol=1e-2)               # Out was written
+torch.testing.assert_close(acc, acc_before + scaled, rtol=1e-2, atol=1e-2)  # InOut was read *and* written
 ```
 
 | 元素 | 读作 |
@@ -119,12 +155,26 @@ view = pl.TensorView(stride=[1024, 1], layout=pl.TensorLayout.ND, valid_shape=[1
 
 `pl.dynamic(name)` 用来标注**编译时未知、且每次启动都可能不同**的轴 —— 随请求变化的 batch、解码过程中不断增长的序列长度。该维的尺寸成为运行期的值，因此一份编译产物服务这个轴的所有取值：动态维在 JIT 缓存 key 里折叠为 `None`，尺寸变化不会触发重编译。
 
+<!-- doctest: run -->
 ```python
-M = pl.dynamic("M")
+N = pl.dynamic("N")
+
 
 @pl.jit.incore
-def rows(x: pl.Tensor[[M, 64], pl.FP32], out: pl.Out[pl.Tensor[[M, 64], pl.FP32]]):
-    ...
+def rows(x: pl.Tensor[[N, 64], pl.FP32], out: pl.Out[pl.Tensor[[N, 64], pl.FP32]]):
+    out = pl.store(pl.mul(pl.load(x, [0, 0], [32, 64]), 2.0), [0, 0], out)
+    return out
+
+
+@pl.jit
+def drive(x: pl.Tensor[[32, 64], pl.FP32], out: pl.Out[pl.Tensor[[32, 64], pl.FP32]]):
+    return rows(x, out)
+
+
+x = torch.randn(32, 64, dtype=torch.float32)
+out = torch.zeros(32, 64, dtype=torch.float32)
+drive(x, out, config=CFG)
+torch.testing.assert_close(out, x * 2.0, rtol=1e-4, atol=1e-4)
 ```
 
 同一个 `DynVar` 对象在多处注解中使用时指的是同一维 —— 复用这个对象，不要在表示同一个值时再造一个同名的。

@@ -30,10 +30,20 @@ out of that, at the cost of everything the compiler could have concluded from kn
 
 ## Quickstart: reading a signature
 
+<!-- doctest: setup -->
 ```python
 import pypto.language as pl
+import torch
+from pypto.runtime import RunConfig
 
+CFG = RunConfig(platform="__PLATFORM__")
+torch.manual_seed(0)
+```
+
+<!-- doctest: run -->
+```python
 M = pl.dynamic("M")                       # an axis whose extent varies at run time
+
 
 @pl.jit.incore
 def scale_rows(
@@ -42,7 +52,33 @@ def scale_rows(
     out: pl.Out[pl.Tensor[[M, 128], pl.FP32]],          # write-only, DDR
     factor: pl.Scalar[pl.FP32],                         # scalar, passed by value
 ):
-    ...
+    tx = pl.load(x, [0, 0], [64, 128])
+    scaled = pl.mul(pl.cast(tx, pl.FP32), factor)
+    acc = pl.store(pl.add(pl.load(acc, [0, 0], [64, 128]), scaled), [0, 0], acc)
+    out = pl.store(scaled, [0, 0], out)
+    return acc, out
+
+
+@pl.jit
+def apply_scale(
+    x: pl.Tensor[[64, 128], pl.FP16],
+    acc: pl.InOut[pl.Tensor[[64, 128], pl.FP32]],
+    out: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+):
+    acc, out = scale_rows(x, acc, out, 2.0)             # the dynamic axis binds to 64 here
+    return acc, out
+
+
+x = torch.randn(64, 128, dtype=torch.float16)
+acc = torch.randn(64, 128, dtype=torch.float32)
+out = torch.zeros(64, 128, dtype=torch.float32)
+acc_before = acc.clone()
+
+apply_scale(x, acc, out, config=CFG)
+
+scaled = x.float() * 2.0
+torch.testing.assert_close(out, scaled, rtol=1e-2, atol=1e-2)               # Out was written
+torch.testing.assert_close(acc, acc_before + scaled, rtol=1e-2, atol=1e-2)  # InOut was read *and* written
 ```
 
 | Element | Reads as |
@@ -174,12 +210,26 @@ sequence length that grows as decoding proceeds. The extent becomes a run-time v
 one compiled program serves every size that axis takes: dynamic dimensions collapse to
 `None` in the JIT cache key, and changing the extent does not trigger a recompile.
 
+<!-- doctest: run -->
 ```python
-M = pl.dynamic("M")
+N = pl.dynamic("N")
+
 
 @pl.jit.incore
-def rows(x: pl.Tensor[[M, 64], pl.FP32], out: pl.Out[pl.Tensor[[M, 64], pl.FP32]]):
-    ...
+def rows(x: pl.Tensor[[N, 64], pl.FP32], out: pl.Out[pl.Tensor[[N, 64], pl.FP32]]):
+    out = pl.store(pl.mul(pl.load(x, [0, 0], [32, 64]), 2.0), [0, 0], out)
+    return out
+
+
+@pl.jit
+def drive(x: pl.Tensor[[32, 64], pl.FP32], out: pl.Out[pl.Tensor[[32, 64], pl.FP32]]):
+    return rows(x, out)
+
+
+x = torch.randn(32, 64, dtype=torch.float32)
+out = torch.zeros(32, 64, dtype=torch.float32)
+drive(x, out, config=CFG)
+torch.testing.assert_close(out, x * 2.0, rtol=1e-4, atol=1e-4)
 ```
 
 The same `DynVar` object used in several annotations refers to the same dimension — reuse

@@ -28,6 +28,54 @@ with pl.at(level=pl.Level.CORE_GROUP, no_dep_args=[shared]) as tid:   # one tens
     ...
 ```
 
+三种里有两种可以从 `@pl.jit` 入口直接写出来，作用在四次迭代、各写输出的互不相交行带上：
+
+<!-- doctest: setup -->
+```python
+import pypto.language as pl
+import torch
+from pypto.runtime import RunConfig
+
+N, TILE, COLS = 4, 64, 128
+ROWS = N * TILE
+CFG = RunConfig(platform="__PLATFORM__")
+torch.manual_seed(0)
+A = torch.randn(ROWS, COLS, dtype=torch.float32)
+
+
+def check(kernel):
+    out = torch.zeros(ROWS, COLS, dtype=torch.float32)
+    kernel(A, out, config=CFG)
+    torch.testing.assert_close(out, A * 2.0, rtol=1e-4, atol=1e-4)
+```
+
+<!-- doctest: run -->
+```python
+@pl.jit
+def narrow(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+    for i in pl.range(N):
+        with pl.at(level=pl.Level.CORE_GROUP, no_dep_args=[out]):   # one tensor, one task
+            t = pl.load(a, [i * TILE, 0], [TILE, COLS])
+            pl.store(pl.mul(t, 2.0), [i * TILE, 0], out)
+    return out
+
+
+@pl.jit
+def region(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+    with pl.manual_scope():                                          # whole region
+        for i in pl.range(N):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                t = pl.load(a, [i * TILE, 0], [TILE, COLS])
+                pl.store(pl.mul(t, 2.0), [i * TILE, 0], out)
+    return out
+
+
+check(narrow)
+check(region)
+```
+
+这里两种都算对，是因为那些行带确实互不相交。这既是要点也是危险：两种构造都不做检验，所以换成真正重叠的区域，这条断言在运气好的那一天照样会过。
+
 | 构造 | 退出范围 | 可用于 |
 | ---- | -------- | ------ |
 | `with pl.manual_scope():` | 区域内每一个任务 | `@pl.jit`、`@pl.function` |

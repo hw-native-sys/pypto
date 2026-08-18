@@ -23,9 +23,20 @@
 
 ## Quickstart：把一个区域标记为设备工作
 
+<!-- doctest: setup -->
 ```python
 import pypto.language as pl
+import torch
+from pypto.runtime import RunConfig
 
+CFG = RunConfig(platform="__PLATFORM__")
+torch.manual_seed(0)
+X = torch.randn(256, 128, dtype=torch.float32)
+Y = torch.randn(256, 128, dtype=torch.float32)
+```
+
+<!-- doctest: run -->
+```python
 @pl.jit
 def scale(
     x: pl.Tensor[[256, 128], pl.FP32],
@@ -34,6 +45,11 @@ def scale(
     with pl.at(level=pl.Level.CORE_GROUP):
         out[:] = pl.mul(x, 2.0)
     return out
+
+
+out = torch.zeros(256, 128, dtype=torch.float32)
+scale(X, out, config=CFG)
+torch.testing.assert_close(out, X * 2.0, rtol=1e-4, atol=1e-4)
 ```
 
 | 元素 | 作用 |
@@ -84,6 +100,31 @@ for i in pl.spmd(4):
     off = i * 128
     out = pl.store(pl.add(pl.load(a, [off, 0], [128, 128]),
                           pl.load(b, [off, 0], [128, 128])), [off, 0], out)
+```
+
+`@pl.jit` 入口能直接写的是循环形式：
+
+<!-- doctest: run -->
+```python
+@pl.jit
+def spmd_add(
+    a: pl.Tensor[[256, 128], pl.FP32],
+    b: pl.Tensor[[256, 128], pl.FP32],
+    out: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+):
+    for i in pl.spmd(2):                    # `i` binds the block index
+        off = i * 128
+        out = pl.store(
+            pl.add(pl.load(a, [off, 0], [128, 128]), pl.load(b, [off, 0], [128, 128])),
+            [off, 0],
+            out,
+        )
+    return out
+
+
+out = torch.zeros(256, 128, dtype=torch.float32)
+spmd_add(X, Y, out, config=CFG)
+torch.testing.assert_close(out, X + Y, rtol=1e-4, atol=1e-4)
 ```
 
 一个既不读 block 索引、也不派发 kernel 的 `with pl.spmd(n):` 体会被拒绝 —— 那样每个 block 都在做完全相同的工作。
