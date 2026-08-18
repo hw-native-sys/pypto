@@ -2086,20 +2086,25 @@ def set_validshape(tile: Tile, valid_rows: IntLike, valid_cols: IntLike) -> Tile
     return Tile(expr=call_expr)
 
 
-def rem(lhs: Tile, rhs: Tile, tmp: Tile) -> Tile:
+def rem(lhs: Tile, rhs: Tile, tmp: Tile, high_precision: bool = False) -> Tile:
     """Element-wise remainder (modulo) of two tiles.
 
     Computes lhs % rhs element-wise. Maps to the TREM hardware intrinsic.
+    On A2/A3, every INT32 input element must be in ``[-2**24, 2**24]``.
 
     Args:
         lhs: Left-hand side tile
         rhs: Right-hand side tile
-        tmp: Temporary tile (same shape/dtype) required by the hardware
+        tmp: Same-dtype scratch tile whose physical and valid capacity
+            provably provides two rows and covers the dividend columns on
+            A2/A3. It must not overlap either source there.
+        high_precision: Whether to select PTOAS's high-precision TREM mode.
+            This mode is defined only for FP32 and is ignored by A2/A3 hardware.
 
     Returns:
         Tile wrapping the rem operation
     """
-    call_expr = _ir_ops.rem(lhs.unwrap(), rhs.unwrap(), tmp.unwrap())
+    call_expr = _ir_ops.rem(lhs.unwrap(), rhs.unwrap(), tmp.unwrap(), high_precision=high_precision)
     return Tile(expr=call_expr)
 
 
@@ -2107,11 +2112,15 @@ def rems(lhs: Tile, rhs: int | float | Expr | Scalar, tmp: Tile) -> Tile:
     """Element-wise remainder (modulo) of tile and scalar.
 
     Computes lhs % rhs element-wise. Maps to the TREMS hardware intrinsic.
+    On A2/A3, source valid extents must be provably positive and every INT32
+    source element and scalar must be in ``[-2**24, 2**24]``.
 
     Args:
         lhs: Tile
         rhs: Scalar value
-        tmp: Temporary tile (same shape/dtype) required by the hardware
+        tmp: Same-dtype scratch tile whose physical and valid capacity
+            provably provides one row and covers the dividend columns on
+            A2/A3. It must not overlap the dividend there.
 
     Returns:
         Tile wrapping the rems operation
@@ -2189,28 +2198,31 @@ def part_min(src0: Tile, src1: Tile) -> Tile:
     return Tile(expr=call_expr)
 
 
-def fmod(lhs: Tile, rhs: Tile) -> Tile:
-    """Element-wise floating-point remainder of two tiles.
+def fmod(lhs: Tile, rhs: Tile, high_precision: bool = False) -> Tile:
+    """Element-wise truncating remainder of two tiles.
 
-    Computes the IEEE-style remainder of lhs / rhs element-wise (matching
-    ``torch.fmod``). Maps to the TFMOD hardware intrinsic.
+    Computes the truncating remainder of lhs / rhs element-wise, matching
+    ``torch.fmod`` with the result taking the dividend sign. Maps to TFMOD.
 
     Args:
         lhs: Left-hand side tile
         rhs: Right-hand side tile
+        high_precision: Whether to select PTOAS's high-precision TFMOD mode.
+            This mode is defined only for FP32.
 
     Returns:
         Tile wrapping the fmod operation
     """
-    call_expr = _ir_ops.fmod(lhs.unwrap(), rhs.unwrap())
+    call_expr = _ir_ops.fmod(lhs.unwrap(), rhs.unwrap(), high_precision=high_precision)
     return Tile(expr=call_expr)
 
 
 def fmods(lhs: Tile, rhs: int | float | Expr | Scalar) -> Tile:
-    """Element-wise floating-point remainder of tile and scalar.
+    """Element-wise truncating remainder of tile and scalar.
 
-    Computes the IEEE-style remainder of lhs / rhs element-wise (matching
-    ``torch.fmod``). Maps to the TFMODS hardware intrinsic.
+    Computes the truncating remainder of lhs / rhs element-wise, matching
+    ``torch.fmod`` with the result taking the dividend sign. Maps to TFMODS.
+    A2/A3 requires every source valid extent to be provably positive.
 
     Args:
         lhs: Tile

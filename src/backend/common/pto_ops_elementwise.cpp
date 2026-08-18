@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -98,6 +99,7 @@ static bool RequiresRowMajorLayout(std::string_view op_name) {
       "tile.sels",
       // Gather operands and result are linearly addressed.
       "tile.gatherb",
+      "tile.rems",
       // Ternary scalar ops (Tile x Scalar x Tile)
       "tile.addsc",
       "tile.subsc",
@@ -265,8 +267,8 @@ static std::string MakeModalCodegenPTO(const std::string& pto_op_name, size_t ar
 
 // Emit the default PTO form without an explicit precision attribute, or append
 // the exact PTOAS enum attribute after outs(...) for high-precision mode.
-// Unlike cmp/cvt attributes, the tdiv/tlog assembly formats place their
-// attr-dict after the complete ins()/outs() clause.
+// Unlike cmp/cvt attributes, precision-backed arithmetic assembly formats place
+// their attr-dict after the complete ins()/outs() clause.
 static std::string MakePrecisionCodegenPTO(const std::string& pto_op_name, size_t arity,
                                            const char* attr_kind, const CallPtr& op,
                                            codegen::CodegenBase& codegen_base) {
@@ -281,6 +283,101 @@ static std::string MakePrecisionCodegenPTO(const std::string& pto_op_name, size_
   }
   codegen.Emit(code);
   return "";
+}
+
+static std::string MakeRemainderCodegenPTO(const std::string& pto_op_name, size_t arity,
+                                           const char* precision_attr_kind, const CallPtr& op,
+                                           codegen::CodegenBase& codegen_base) {
+  auto& codegen = AsPto(codegen_base);
+  CheckArity(op, pto_op_name, arity);
+  auto src_type = As<ir::TileType>(op->args_[0]->GetType());
+  INTERNAL_CHECK_SPAN(src_type, op->span_)
+      << "Internal error: " << op->op_->name_ << " first argument must be a TileType";
+
+  const bool is_a5 = codegen.GetBackendHandler()->GetPtoTargetArch() == "a5";
+  if (!is_a5) {
+    const bool is_floor_remainder = pto_op_name == "pto.trem" || pto_op_name == "pto.trems";
+    const bool is_scalar_remainder = pto_op_name == "pto.trems" || pto_op_name == "pto.tfmods";
+    const bool supported = is_floor_remainder
+                               ? (src_type->dtype_ == DataType::INT32 || src_type->dtype_ == DataType::FP32)
+                               : src_type->dtype_ == DataType::FP32;
+    CHECK_SPAN(supported, op->span_)
+        << op->op_->name_ << " with dtype " << src_type->dtype_.ToString()
+        << " is not supported on A2/A3; tile.rem/tile.rems support INT32 or FP32, while "
+           "tile.fmod/tile.fmods support FP32 only";
+
+    const auto src_valid_shape = ir::GetValidShape(src_type);
+    if (is_scalar_remainder) {
+      const auto one = std::make_shared<ir::ConstInt>(1, DataType::INDEX, op->span_);
+      for (size_t i = 0; i < src_valid_shape.size(); ++i) {
+        CHECK_SPAN(ir::ProveValidExtentLessEqual(one, src_valid_shape[i]) == ir::ProofResult::kTrue,
+                   op->span_)
+            << op->op_->name_
+            << " on A2/A3 requires every source valid_shape extent to be provably positive, but got "
+            << ir::FormatShape(src_valid_shape);
+      }
+    }
+
+    if (pto_op_name == "pto.trems" && src_type->dtype_ == DataType::INT32) {
+      constexpr int64_t kA2A3Int32RemainderLimit = int64_t{1} << 24;
+      if (auto scalar = As<ir::ConstInt>(op->args_[1])) {
+        CHECK_SPAN(scalar->value_ >= -kA2A3Int32RemainderLimit && scalar->value_ <= kA2A3Int32RemainderLimit,
+                   op->args_[1]->span_)
+            << "tile.rems on A2/A3 requires an INT32 scalar in [-2^24, 2^24], but got " << scalar->value_;
+      }
+    }
+
+    if (is_floor_remainder) {
+      const size_t tmp_index = op->args_.size() - 1;
+      auto tmp_type = As<ir::TileType>(op->args_[tmp_index]->GetType());
+      INTERNAL_CHECK_SPAN(tmp_type, op->span_)
+          << "Internal error: " << op->op_->name_ << " tmp argument must be a TileType";
+      const auto tmp_valid_shape = ir::GetValidShape(tmp_type);
+      INTERNAL_CHECK_SPAN(src_type->shape_.size() == 2 && src_valid_shape.size() == 2 &&
+                              tmp_type->shape_.size() == 2 && tmp_valid_shape.size() == 2,
+                          op->span_)
+          << "Internal error: A2/A3 remainder source and tmp must be 2D";
+
+      const int64_t required_rows = pto_op_name == "pto.trem" ? 2 : 1;
+      const auto required_row_expr =
+          std::make_shared<ir::ConstInt>(required_rows, DataType::INDEX, op->span_);
+      CHECK_SPAN(
+          ir::ProveValidExtentLessEqual(required_row_expr, tmp_type->shape_[0]) == ir::ProofResult::kTrue,
+          op->args_[tmp_index]->span_)
+          << op->op_->name_ << " on A2/A3 requires tmp physical rows >= " << required_rows;
+      CHECK_SPAN(
+          ir::ProveValidExtentLessEqual(src_type->shape_[1], tmp_type->shape_[1]) == ir::ProofResult::kTrue,
+          op->args_[tmp_index]->span_)
+          << op->op_->name_ << " on A2/A3 requires tmp physical columns to cover all source columns";
+      CHECK_SPAN(
+          ir::ProveValidExtentLessEqual(required_row_expr, tmp_valid_shape[0]) == ir::ProofResult::kTrue,
+          op->args_[tmp_index]->span_)
+          << op->op_->name_ << " on A2/A3 requires tmp valid rows >= " << required_rows;
+      CHECK_SPAN(
+          ir::ProveValidExtentLessEqual(src_valid_shape[1], tmp_valid_shape[1]) == ir::ProofResult::kTrue,
+          op->args_[tmp_index]->span_)
+          << op->op_->name_
+          << " on A2/A3 requires tmp valid columns to provably cover the source valid columns";
+
+      const auto tmp_memref = tmp_type->memref_.value_or(nullptr);
+      INTERNAL_CHECK_SPAN(tmp_memref, op->span_)
+          << "Internal error: " << op->op_->name_ << " tmp must carry a MemRef before PTO codegen";
+      const size_t source_count = pto_op_name == "pto.trem" ? 2 : 1;
+      for (size_t i = 0; i < source_count; ++i) {
+        auto source_type = As<ir::TileType>(op->args_[i]->GetType());
+        const auto source_memref = source_type ? source_type->memref_.value_or(nullptr) : nullptr;
+        INTERNAL_CHECK_SPAN(source_memref, op->span_)
+            << "Internal error: " << op->op_->name_ << " source must carry a MemRef before PTO codegen";
+        CHECK_SPAN(!ir::MemRef::MayAlias(tmp_memref, source_memref), op->span_)
+            << op->op_->name_ << " on A2/A3 requires tmp not to overlap source operand " << i;
+      }
+    }
+  }
+
+  if (precision_attr_kind != nullptr) {
+    return MakePrecisionCodegenPTO(pto_op_name, arity, precision_attr_kind, op, codegen_base);
+  }
+  return MakeNaryCodegenPTO(pto_op_name, arity, op, codegen_base);
 }
 
 // Helper function for full op
@@ -591,13 +688,11 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.add",             "pto.tadd",             2},
     {"tile.sub",             "pto.tsub",             2},
     {"tile.mul",             "pto.tmul",             2},
-    {"tile.rem",             "pto.trem",             3},  // src0, src1, tmp
     // Tile x Tile partial-combine operations
     {"tile.part_add",        "pto.tpartadd",         2},
     {"tile.part_mul",        "pto.tpartmul",         2},
     {"tile.part_max",        "pto.tpartmax",         2},
     {"tile.part_min",        "pto.tpartmin",         2},
-    {"tile.fmod",            "pto.tfmod",            2},
     // Tile x Tile bitwise operations
     {"tile.and",             "pto.tand",             2},
     {"tile.or",              "pto.tor",              2},
@@ -624,8 +719,6 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.subs",            "pto.tsubs",            2},
     {"tile.muls",            "pto.tmuls",            2},
     {"tile.divs",            "pto.tdivs",            2},
-    {"tile.rems",            "pto.trems",            3},  // src0, scalar, tmp
-    {"tile.fmods",           "pto.tfmods",           2},
     {"tile.ands",            "pto.tands",            2, 1},
     {"tile.ors",             "pto.tors",             2, 1},
     {"tile.xors",            "pto.txors",            3, 1},  // src0, scalar, tmp
@@ -715,6 +808,30 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
       }
       reg_entry.set_output_layout(ir::TileLayout::row_major);
     }
+  }
+
+  struct RemainderOpEntry {
+    const char* op_name;
+    const char* pto_op_name;
+    size_t arity;
+    const char* precision_attr_kind;
+  };
+  static constexpr RemainderOpEntry kRemainderOps[] = {
+      {"tile.rem", "pto.trem", 3, "rem_precision"},
+      {"tile.rems", "pto.trems", 3, nullptr},
+      {"tile.fmod", "pto.tfmod", 2, "fmod_precision"},
+      {"tile.fmods", "pto.tfmods", 2, nullptr},
+  };
+  for (const auto& entry : kRemainderOps) {
+    if (exclude_ops.count(entry.op_name) > 0) continue;
+    auto reg_entry = backend.RegisterOp(entry.op_name);
+    reg_entry.f_codegen([entry](const CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeRemainderCodegenPTO(entry.pto_op_name, entry.arity, entry.precision_attr_kind, op, codegen);
+    });
+    for (size_t i = 0; i < entry.arity; ++i) {
+      reg_entry.set_input_layout(i, ir::TileLayout::row_major);
+    }
+    reg_entry.set_output_layout(ir::TileLayout::row_major);
   }
 
   if (exclude_ops.count("tile.sels") == 0) {
