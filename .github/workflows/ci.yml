@@ -498,6 +498,15 @@ jobs:
           echo "=== examples/distributed/07_dynamic_rank_count.py -d 0,1,2,3 ==="
           python examples/distributed/07_dynamic_rank_count.py -p a2a3sim -d 0,1,2,3
 
+      # The user manual's runnable blocks. Teaching code that is never executed
+      # rots silently — a kernel can compile, run, write nothing, and still read
+      # correctly on the page — so the manual itself is executed here.
+      - name: Run the user manual's runnable code blocks
+        run: |
+          source activate.sh
+          set -e
+          python tests/docs/run_doc_examples.py --pages docs/en/user --check-parity -p a2a3sim
+
   codegen-tests:
     # Codegen-only: verifies IR → kernel/orch C++ generation without going
     # on-board. --codegen-only skips assembly (ptoas), pto-isa, simpler and

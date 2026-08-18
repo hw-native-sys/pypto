@@ -4,6 +4,28 @@
 
 > **前置**：前面几页。如果条与条之间的间隙仍然是主要开销，本页为时过早。
 
+下面这些 kernel 每次 CI 都会被执行，所以它们是真货而不是草图。它们共用这段准备：
+
+<!-- doctest: setup -->
+```python
+import pypto.language as pl
+import torch
+from pypto.runtime import RunConfig
+
+NT, TR, TC = 8, 64, 128          # tiles in the loop, tile rows, tile cols
+ROWS = NT * TR
+CFG = RunConfig(platform="__PLATFORM__")
+
+torch.manual_seed(0)
+A = torch.randn(ROWS, TC, dtype=torch.float32)
+
+
+def check(kernel):
+    out = torch.zeros(ROWS, TC, dtype=torch.float32)
+    kernel(A, out, config=CFG)
+    torch.testing.assert_close(out, torch.exp(A), rtol=1e-4, atol=1e-4)
+```
+
 ## Double buffer
 
 **何时适用：** kernel 内的一个循环在 load → 计算 → store 之间交替，而核卡在搬运上，因为只有一块 buffer 可以载入。
@@ -12,15 +34,31 @@
 
 编译器托管的形式。它把循环体在每次外层迭代里复制 `stage` 份，使第 `i+1` 次迭代的 load 与第 `i` 次的计算重叠：
 
+<!-- doctest: run -->
 ```python
-for i in pl.pipeline(NT, stage=2):
-    tile = pl.load(a, [i * TR, 0], [TR, TC])
-    pl.store(pl.exp(tile), [i * TR, 0], out)
+@pl.jit
+def single_buffer(a: pl.Tensor, out: pl.Out[pl.Tensor]):     # the baseline
+    with pl.at(level=pl.Level.CORE_GROUP):
+        for i in pl.range(NT):
+            tile = pl.load(a, [i * TR, 0], [TR, TC])
+            pl.store(pl.exp(tile), [i * TR, 0], out)
+    return out
+
+
+@pl.jit
+def pipelined(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        for i in pl.pipeline(NT, stage=2):
+            tile = pl.load(a, [i * TR, 0], [TR, TC])
+            pl.store(pl.exp(tile), [i * TR, 0], out)
+    return out
+
+
+check(single_buffer)
+check(pipelined)
 ```
 
 外层循环于是以 `stage * step` 为步长推进，尾部有一次 tail dispatch 覆盖不能被 `stage` 整除的余数。深度通常取 2–4。
-
-**跑一下：** `python examples/advanced/07_double_buffer.py --mode pipelined` —— `--mode single_buffer` 是没有流水的基线。
 
 **代价：** 循环体所暂存的每一块 buffer 都要有 `stage` 份同时存活。这是片上内存耗尽最常见的单一原因，而编译器会明说，不会悄悄少给：
 
@@ -37,17 +75,23 @@ fit (... B per stage, ... B free) — stages 2 apart share storage and serialize
 
 手工管理的**放置**方式，适用于你希望轮转严格按你写的来 —— 通常是因为自然的暂存结构与 `pl.pipeline` 复制出来的不一致。注意它不是什么：`pl.pipeline` 把循环重构成一个调度，而 slot 只是消掉了会阻止重叠的同缓冲冲突。循环本身仍是顺序的，所以重叠与否要去 [L0 trace](#l0-指令级-trace) 里确认，而不是假定换个写法就买到了。`pl.MemRef("name", slots=N)` 在一块分配里预留 `N` 个等大的槽，用一个普通索引表达式按迭代挑一个：
 
+<!-- doctest: run -->
 ```python
-for i in pl.range(NT):
-    lo: pl.Tile[[TR, TC], pl.FP32, pl.MemRef("ub", slots=2)[i % 2], pl.Mem.Vec] = pl.load(
-        a, [i * TR, 0], [TR, TC], target_memory=pl.Mem.Vec
-    )
-    ...
+@pl.jit
+def explicit_slots(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        for i in pl.range(NT):
+            tile: pl.Tile[[TR, TC], pl.FP32, pl.MemRef("ub", slots=2)[i % 2], pl.Mem.Vec] = pl.load(
+                a, [i * TR, 0], [TR, TC], target_memory=pl.Mem.Vec
+            )
+            pl.store(pl.exp(tile), [i * TR, 0], out)
+    return out
+
+
+check(explicit_slots)
 ```
 
 用内联的 `pl.MemRef("name", slots=2)` 写法，不要把声明绑到一个 Python 变量上 —— `@pl.jit` 会在一个全新的模块命名空间里重新解析生成的源码，那里没有这个变量。
-
-**跑一下：** `python examples/advanced/07_double_buffer.py --mode explicit_slots`。
 
 **代价，而且取决于内存规划器：**
 

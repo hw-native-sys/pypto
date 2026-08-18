@@ -15,6 +15,26 @@
 | [`allow_early_resolve`](#让消费者提前预置) | 关键路径上的取件延迟 |
 | [kernel 内 `syncall`](#在-kernel-内部同步) | 每个同步点一次 AICPU 往返 |
 
+下面这些 kernel 每次 CI 都会被执行，所以它们是真货而不是草图。它们共用这段准备：
+
+<!-- doctest: setup -->
+```python
+import pypto.language as pl
+import torch
+from pypto.runtime import RunConfig
+
+BLOCKS, TILE_ROWS, COLS = 4, 64, 128
+ROWS = BLOCKS * TILE_ROWS
+CFG = RunConfig(platform="__PLATFORM__")
+
+torch.manual_seed(0)
+A = torch.randn(ROWS, COLS, dtype=torch.float32)
+B = torch.randn(ROWS, COLS, dtype=torch.float32)
+
+def fresh(rows=ROWS):
+    return torch.zeros(rows, COLS, dtype=torch.float32)
+```
+
 ## 构建 mix kernel
 
 **何时适用：** 一个 cube 操作喂给一个 vector 操作。不管的话它们是两个任务：cube 任务跑完写 GM，vector 任务再被派发去把它读回来。
@@ -42,15 +62,31 @@ with pl.at(
 
 **怎么做：** 一次派发，由运行时扇出。每个 block 读自己的索引。
 
-```python
-# 循环形式 —— 索引替你绑定，函数体自动外提
-for i in pl.spmd(num_blocks):
-    tile = pl.load(x, [i * TILE, 0], [TILE, COLS])
-    pl.store(pl.exp(tile), [i * TILE, 0], out)
+下面两种写法算的是同一件事；前者付 `BLOCKS` 次派发，后者只付一次：
 
-# 带 TaskId 捕获，后续任务可以依赖整个 grid
-with pl.spmd(num_blocks, deps=[prev_tid]) as tid:
-    ...
+<!-- doctest: run -->
+```python
+@pl.jit
+def per_block_tasks(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+    for i in pl.unroll(BLOCKS):                     # BLOCKS dispatches
+        with pl.at(level=pl.Level.CORE_GROUP):
+            ta = pl.load(a, [i * TILE_ROWS, 0], [TILE_ROWS, COLS])
+            tb = pl.load(b, [i * TILE_ROWS, 0], [TILE_ROWS, COLS])
+            pl.store(pl.add(ta, tb), [i * TILE_ROWS, 0], c)
+    return c
+
+@pl.jit
+def spmd_blocks(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+    for i in pl.spmd(BLOCKS):                       # one dispatch, BLOCKS blocks
+        ta = pl.load(a, [i * TILE_ROWS, 0], [TILE_ROWS, COLS])
+        tb = pl.load(b, [i * TILE_ROWS, 0], [TILE_ROWS, COLS])
+        pl.store(pl.add(ta, tb), [i * TILE_ROWS, 0], c)
+    return c
+
+for kernel in (per_block_tasks, spmd_blocks):
+    c = fresh()
+    kernel(A, B, c, config=CFG)
+    torch.testing.assert_close(c, A + B, rtol=1e-4, atol=1e-4)
 ```
 
 能用设备查询就别写字面量：
@@ -64,8 +100,6 @@ with pl.spmd(num_blocks, deps=[prev_tid]) as tid:
 
 `examples/models/09_paged_attention_spmd.py` 是同一个思路在模型规模上的样子：每个 block 用一个 stride 循环取走一部分 batch，于是 batch 维靠一次派发就并行到了各个硬件 block 上。
 
-**跑一下：** `python examples/advanced/05_runtime_overhead.py --mode spmd_blocks` —— `--mode per_block_tasks` 是同样四个 block 走四次派发的形式。
-
 **代价：** 每个 block 跑同一个程序。有分支差异的工作需要别的结构；先跑完的 block 会让自己的核空着，直到整个 grid 退休。
 
 **怎么确认：** `deps.json` 里 N 个节点塌缩成一个；泳道图上一个任务同时占据多条核泳道。点击其中一个 block 时插件会高亮同一 SPMD 的全部 block。
@@ -76,16 +110,25 @@ with pl.spmd(num_blocks, deps=[prev_tid]) as tid:
 
 **怎么做：** 给**生产者**打标记。
 
+<!-- doctest: run -->
 ```python
-with pl.at(level=pl.Level.CORE_GROUP, allow_early_resolve=True) as tid:
-    ...
+@pl.jit
+def early_resolve(a: pl.Tensor, b: pl.Tensor, scratch: pl.Out[pl.Tensor], out: pl.Out[pl.Tensor]):
+    with pl.at(level=pl.Level.CORE_GROUP, allow_early_resolve=True):
+        s = pl.add(pl.load(a, [0, 0], [TILE_ROWS, COLS]), pl.load(b, [0, 0], [TILE_ROWS, COLS]))
+        pl.store(s, [0, 0], scratch)
+    with pl.at(level=pl.Level.CORE_GROUP):
+        pl.store(pl.exp(pl.load(scratch, [0, 0], [TILE_ROWS, COLS])), [0, 0], out)
+    return scratch, out
+
+scratch, out = fresh(TILE_ROWS), fresh(TILE_ROWS)
+early_resolve(A[:TILE_ROWS], B[:TILE_ROWS], scratch, out, config=CFG)
+torch.testing.assert_close(out, torch.exp(A[:TILE_ROWS] + B[:TILE_ROWS]), rtol=1e-4, atol=1e-4)
 ```
 
 调度器于是可以在这个任务**完成之前**就把它的消费者预置到空闲核上，等它一结束就用门铃放行。
 
 `pl.at`、`pl.submit`、`pl.spmd`、`pl.spmd_submit` 上都有，而且它是纯调度提示 —— 不影响结果。
-
-**跑一下：** `python examples/advanced/05_runtime_overhead.py --mode early_resolve`。
 
 **代价：** 对正确性基本为零，但要注意决定它是否起作用的那条规则：一个消费者只有在它的**所有**生产者都被标记（或已经完成）时才会预置。给一个三生产者的消费者只标一个，什么都买不到。这也是它通常被整条链地施加的原因 —— 比如 `models/qwen3_14b/decode_fwd.py` 里，decode 路径上几乎每个任务都带着它。
 

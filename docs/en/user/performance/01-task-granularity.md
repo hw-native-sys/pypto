@@ -33,6 +33,27 @@ you — go to [Tuning the InCore function](04-incore.md).
 
 Three ways, in rough order of how often they apply.
 
+The kernels below are executed on every CI run, so they are the real thing rather than a
+sketch. They share this setup:
+
+<!-- doctest: setup -->
+```python
+import pypto.language as pl
+import torch
+from pypto.runtime import RunConfig
+
+ROWS, COLS = 256, 128
+SMALL, LARGE = 64, 128          # tile rows before and after (a)
+CFG = RunConfig(platform="__PLATFORM__")
+
+torch.manual_seed(0)
+A = torch.randn(ROWS, COLS, dtype=torch.float32)
+B = torch.randn(ROWS, COLS, dtype=torch.float32)
+
+def fresh():
+    return torch.zeros(ROWS, COLS, dtype=torch.float32)
+```
+
 ### a. Larger tiling
 
 **When it applies:** the kernel is doing a fixed amount of work per task and the tiles are
@@ -40,22 +61,46 @@ small enough that the transfer is inefficient too.
 
 **How:** raise the tile shape the task works on.
 
-```python
-# Before — one task per 64x64 tile
-with pl.at(level=pl.Level.CORE_GROUP):
-    tile_a = pl.load(a, [0, 0], [64, 64])
-    tile_b = pl.load(b, [0, 0], [64, 64])
-    pl.store(pl.add(tile_a, tile_b), [0, 0], c)
+Before — four tasks, one per `[64, 128]` tile. `pl.unroll` is unrolled at compile time, so
+each iteration emits its own `pl.at` block and therefore its own dispatch:
 
-# After — one task covering 4x the elements
-with pl.at(level=pl.Level.CORE_GROUP):
-    tile_a = pl.load(a, [0, 0], [128, 128])
-    tile_b = pl.load(b, [0, 0], [128, 128])
-    pl.store(pl.add(tile_a, tile_b), [0, 0], c)
+<!-- doctest: run -->
+```python
+@pl.jit
+def many_small_tasks(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+    for i in pl.unroll(ROWS // SMALL):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            ta = pl.load(a, [i * SMALL, 0], [SMALL, COLS])
+            tb = pl.load(b, [i * SMALL, 0], [SMALL, COLS])
+            pl.store(pl.add(ta, tb), [i * SMALL, 0], c)
+    return c
+
+c = fresh()
+many_small_tasks(A, B, c, config=CFG)
+torch.testing.assert_close(c, A + B, rtol=1e-4, atol=1e-4)
 ```
 
-**Run it:** `python examples/advanced/04_task_granularity.py --mode larger_tiles` — compare against `--mode many_small_tasks`, which does the same work in four
-tasks instead of two.
+After — the same rows in `[128, 128]` tiles, so two tasks instead of four. Nothing moved;
+the tile simply covers more elements:
+
+<!-- doctest: run -->
+```python
+@pl.jit
+def larger_tiles(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+    for i in pl.unroll(ROWS // LARGE):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            ta = pl.load(a, [i * LARGE, 0], [LARGE, COLS])
+            tb = pl.load(b, [i * LARGE, 0], [LARGE, COLS])
+            pl.store(pl.add(ta, tb), [i * LARGE, 0], c)
+    return c
+
+c = fresh()
+larger_tiles(A, B, c, config=CFG)
+torch.testing.assert_close(c, A + B, rtol=1e-4, atol=1e-4)
+```
+
+Only the row axis grows here, since `COLS` is already the full width — hence 2x. Scaling
+both axes scales the task count by the factor in each, and the footprint with it.
 
 **Cost:** on-chip buffer footprint, quadratically in a 2D tile. A tile that no longer fits
 alongside its co-residents pushes the allocator into either failing or giving up a
@@ -72,24 +117,28 @@ dimension should make those lines disappear.
 
 **How:** move the loop inside. The tile shape stays the same; only the offset moves.
 
-```python
-# Before — N tasks, one per chunk
-for i in range(ROWS // TILE_ROWS):
-    with pl.at(level=pl.Level.CORE_GROUP):
-        tile_a = pl.load(a, [i * TILE_ROWS, 0], [TILE_ROWS, COLS])
-        ...
+`pl.range` is a device-side loop, so the whole thing is one dispatch. The tiles keep their
+size; only the offset moves — contrast `many_small_tasks` above, which is this same work as
+four dispatches:
 
-# After — one task, N iterations inside it
-with pl.at(level=pl.Level.CORE_GROUP):
-    for i in pl.range(ROWS // TILE_ROWS):
-        tile_a = pl.load(a, [i * TILE_ROWS, 0], [TILE_ROWS, COLS])
-        tile_b = pl.load(b, [i * TILE_ROWS, 0], [TILE_ROWS, COLS])
-        pl.store(pl.add(tile_a, tile_b), [i * TILE_ROWS, 0], c)
+<!-- doctest: run -->
+```python
+@pl.jit
+def loop_inside(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        for i in pl.range(ROWS // SMALL):
+            ta = pl.load(a, [i * SMALL, 0], [SMALL, COLS])
+            tb = pl.load(b, [i * SMALL, 0], [SMALL, COLS])
+            pl.store(pl.add(ta, tb), [i * SMALL, 0], c)
+    return c
+
+c = fresh()
+loop_inside(A, B, c, config=CFG)
+torch.testing.assert_close(c, A + B, rtol=1e-4, atol=1e-4)
 ```
 
-`examples/beginner/02_elementwise.py` (`chunked_add`) is this pattern end to end.
-
-**Run it:** `python examples/advanced/04_task_granularity.py --mode loop_inside` — `--mode many_small_tasks` is the four-dispatch form it replaces.
+`examples/beginner/02_elementwise.py` (`chunked_add`) is the same pattern as a standalone
+example.
 
 **Cost:** the chunks are now strictly ordered within one core. If they were independent and
 you had cores to spare, you have traded parallelism for dispatch savings — which is the
@@ -107,21 +156,35 @@ data that could have stayed on-chip.
 **How:** put the operations in one `pl.at` block, so the intermediate never round-trips
 through GM.
 
+Before — two tasks, and `s` round-trips through GM; after — one task, `s` stays on chip:
+
+<!-- doctest: run -->
 ```python
-# Before — two tasks, and `s` goes out to GM and back
-with pl.at(level=pl.Level.CORE_GROUP):
-    s = pl.add(pl.load(a, [0, 0], [TR, TC]), pl.load(b, [0, 0], [TR, TC]))
-    pl.store(s, [0, 0], scratch)
-with pl.at(level=pl.Level.CORE_GROUP):
-    pl.store(pl.exp(pl.load(scratch, [0, 0], [TR, TC])), [0, 0], out)
+@pl.jit
+def two_tasks_via_gm(a: pl.Tensor, b: pl.Tensor, scratch: pl.Out[pl.Tensor], out: pl.Out[pl.Tensor]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        s = pl.add(pl.load(a, [0, 0], [LARGE, COLS]), pl.load(b, [0, 0], [LARGE, COLS]))
+        pl.store(s, [0, 0], scratch)
+    with pl.at(level=pl.Level.CORE_GROUP):
+        pl.store(pl.exp(pl.load(scratch, [0, 0], [LARGE, COLS])), [0, 0], out)
+    return scratch, out
 
-# After — one task, `s` stays on chip
-with pl.at(level=pl.Level.CORE_GROUP):
-    s = pl.add(pl.load(a, [0, 0], [TR, TC]), pl.load(b, [0, 0], [TR, TC]))
-    pl.store(pl.exp(s), [0, 0], out)
+@pl.jit
+def merged_chain(a: pl.Tensor, b: pl.Tensor, out: pl.Out[pl.Tensor]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        s = pl.add(pl.load(a, [0, 0], [LARGE, COLS]), pl.load(b, [0, 0], [LARGE, COLS]))
+        pl.store(pl.exp(s), [0, 0], out)
+    return out
+
+expected = torch.exp(A[:LARGE] + B[:LARGE])
+scratch, out = torch.zeros(LARGE, COLS), torch.zeros(LARGE, COLS)
+two_tasks_via_gm(A[:LARGE], B[:LARGE], scratch, out, config=CFG)
+torch.testing.assert_close(out, expected, rtol=1e-4, atol=1e-4)
+
+out = torch.zeros(LARGE, COLS)
+merged_chain(A[:LARGE], B[:LARGE], out, config=CFG)
+torch.testing.assert_close(out, expected, rtol=1e-4, atol=1e-4)
 ```
-
-**Run it:** `python examples/advanced/04_task_granularity.py --mode merged_chain` — `--mode two_tasks_via_gm` is the same chain before merging.
 
 **Cost:** the merged task holds every intermediate live at once.
 

@@ -22,16 +22,46 @@
 
 循环种类叠在这之上：`pl.range` 是串行，`pl.parallel` 断言各次迭代互相独立。`pl.parallel` 是**断言而不是请求** —— 它不会移除上面那些边，它承诺的是你没有制造出会起作用的边。
 
+下面这些 kernel 每次 CI 都会被执行，所以它们是真货而不是草图。它们共用这段准备：
+
+<!-- doctest: setup -->
+```python
+import pypto.language as pl
+import torch
+from pypto.runtime import RunConfig
+
+N, TILE_ROWS, COLS = 4, 64, 128
+ROWS = N * TILE_ROWS
+CFG = RunConfig(platform="__PLATFORM__")
+
+torch.manual_seed(0)
+A = torch.randn(ROWS, COLS, dtype=torch.float32)
+
+
+def check(kernel):
+    out = torch.zeros(ROWS, COLS, dtype=torch.float32)
+    kernel(A, out, config=CFG)
+    torch.testing.assert_close(out, A * 2.0, rtol=1e-4, atol=1e-4)
+```
+
 ## 你没要的串行化
 
 ### 累加链
 
 最常见的一种。一个串行循环，各次迭代写同一块 buffer，就产生一条 WAW 链，每次迭代一条边 —— 而这是**正确的**：这些写确实落在同一个地方。
 
+<!-- doctest: run -->
 ```python
-for i in pl.range(N):
-    with pl.at(level=pl.Level.CORE_GROUP):   # 每次迭代都写 `acc`
-        ...                                  # → 对第 i-1 次迭代连一条 WAW 边
+@pl.jit
+def serialized(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+    for i in pl.range(N):
+        with pl.at(level=pl.Level.CORE_GROUP):   # writes `out` every iteration
+            t = pl.load(a, [i * TILE_ROWS, 0], [TILE_ROWS, COLS])
+            pl.store(pl.mul(t, 2.0), [i * TILE_ROWS, 0], out)   # -> WAW edge on i-1
+    return out
+
+
+check(serialized)
 ```
 
 它成为性能问题，是在各次迭代写的是那块 buffer 的**互不相交区域**、只是看上去撞在一起的时候。生产者查找是对 buffer 地址做**重叠**判定；一个它无法证明不相交的区域，会被当作重叠。
@@ -46,7 +76,59 @@ for i in pl.range(N):
 | 一个 tensor，其整个生命期 | `pl.create_tensor(..., manual_dep=True)` |
 | 一个区域内的每个任务 | `with pl.manual_scope():` |
 
-**跑一下：** `examples/advanced/06_dependencies.py` 把这五种都做成了同一份工作的模式 —— `serialized`（那条链）、`narrow_claim`、`tensor_claim`、`region_claim` 与 `sliced` —— 并带 `--dep-gen`，于是每一种各自消掉了哪些边可以直接对照。
+最窄的两种，作用在同一份工作上：
+
+<!-- doctest: run -->
+```python
+@pl.jit
+def narrow_claim(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+    for i in pl.range(N):
+        with pl.at(level=pl.Level.CORE_GROUP, no_dep_args=[out]):
+            t = pl.load(a, [i * TILE_ROWS, 0], [TILE_ROWS, COLS])
+            pl.store(pl.mul(t, 2.0), [i * TILE_ROWS, 0], out)
+    return out
+
+
+@pl.jit
+def region_claim(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+    with pl.manual_scope():                       # nothing is inferred in here
+        for i in pl.range(N):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                t = pl.load(a, [i * TILE_ROWS, 0], [TILE_ROWS, COLS])
+                pl.store(pl.mul(t, 2.0), [i * TILE_ROWS, 0], out)
+    return out
+
+
+check(narrow_claim)
+check(region_claim)
+```
+
+`manual_dep=True` 是中间那一档，它有一处锋利的地方值得完整看一遍：
+
+<!-- doctest: run -->
+```python
+@pl.jit
+def tensor_claim(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+    scratch = pl.create_tensor([ROWS, COLS], pl.FP32, manual_dep=True)
+    writers = pl.array.create(N, pl.TASK_ID)
+    for i in pl.range(N):
+        with pl.at(level=pl.Level.CORE_GROUP) as tid:
+            t = pl.load(a, [i * TILE_ROWS, 0], [TILE_ROWS, COLS])
+            pl.store(pl.mul(t, 2.0), [i * TILE_ROWS, 0], scratch)
+        writers[i] = tid
+    # deps= is REQUIRED here: manual_dep dropped the consumer's RAW edges too,
+    # so without it this task reads bands that have not been written yet.
+    with pl.at(level=pl.Level.CORE_GROUP, deps=[writers]):
+        for i in pl.range(N):
+            t = pl.load(scratch, [i * TILE_ROWS, 0], [TILE_ROWS, COLS])
+            pl.store(t, [i * TILE_ROWS, 0], out)
+    return out
+
+
+check(tensor_claim)
+```
+
+> **`manual_dep` 会把你想要的那些边一并抹掉。** 它覆盖该张量的整个生命期，所以之后的消费者也会失去它对写者的 RAW 边 —— 这正是上面那个 `deps=` 的原因。去掉那一行不会响亮地失败，而是返回一个**部分**正确的结果，也就是本节警告的那种偶发形态。
 
 优先选能用的最窄那个。每一个都是编译器**无法检验**的断言 —— 如果那些区域其实是相交的，你修掉的不是串行化，而是造出了一个在别人机器上才复现的偶发竞态。
 

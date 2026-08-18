@@ -17,6 +17,24 @@ or no dispatch at all where a barrier will do.
 | [`allow_early_resolve`](#let-consumers-pre-stage) | The pickup latency on the critical path |
 | [In-kernel `syncall`](#synchronize-inside-the-kernel) | An AICPU round-trip per synchronization point |
 
+<!-- doctest: setup -->
+```python
+import pypto.language as pl
+import torch
+from pypto.runtime import RunConfig
+
+BLOCKS, TILE_ROWS, COLS = 4, 64, 128
+ROWS = BLOCKS * TILE_ROWS
+CFG = RunConfig(platform="__PLATFORM__")
+
+torch.manual_seed(0)
+A = torch.randn(ROWS, COLS, dtype=torch.float32)
+B = torch.randn(ROWS, COLS, dtype=torch.float32)
+
+def fresh(rows=ROWS):
+    return torch.zeros(rows, COLS, dtype=torch.float32)
+```
+
 ## Build a mixed kernel
 
 **When it applies:** a cube operation feeds a vector operation. Left alone these are two
@@ -81,7 +99,32 @@ its own, and is a hard requirement for the barrier below.
 takes a subset of the batch through a stride loop, so the batch dimension is parallelised
 across hardware blocks by one dispatch.
 
-**Run it:** `python examples/advanced/05_runtime_overhead.py --mode spmd_blocks` — `--mode per_block_tasks` is the same four blocks as four dispatches.
+Both forms below compute the same thing; the first pays `BLOCKS` dispatches, the second one:
+
+<!-- doctest: run -->
+```python
+@pl.jit
+def per_block_tasks(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+    for i in pl.unroll(BLOCKS):                     # BLOCKS dispatches
+        with pl.at(level=pl.Level.CORE_GROUP):
+            ta = pl.load(a, [i * TILE_ROWS, 0], [TILE_ROWS, COLS])
+            tb = pl.load(b, [i * TILE_ROWS, 0], [TILE_ROWS, COLS])
+            pl.store(pl.add(ta, tb), [i * TILE_ROWS, 0], c)
+    return c
+
+@pl.jit
+def spmd_blocks(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+    for i in pl.spmd(BLOCKS):                       # one dispatch, BLOCKS blocks
+        ta = pl.load(a, [i * TILE_ROWS, 0], [TILE_ROWS, COLS])
+        tb = pl.load(b, [i * TILE_ROWS, 0], [TILE_ROWS, COLS])
+        pl.store(pl.add(ta, tb), [i * TILE_ROWS, 0], c)
+    return c
+
+for kernel in (per_block_tasks, spmd_blocks):
+    c = fresh()
+    kernel(A, B, c, config=CFG)
+    torch.testing.assert_close(c, A + B, rtol=1e-4, atol=1e-4)
+```
 
 **Cost:** every block runs the same program. Divergent work needs a different structure,
 and blocks that finish at different times leave their cores idle until the whole grid
@@ -98,9 +141,20 @@ waiting through its own pickup latency after its producer ends.
 
 **How:** flag the **producer**.
 
+<!-- doctest: run -->
 ```python
-with pl.at(level=pl.Level.CORE_GROUP, allow_early_resolve=True) as tid:
-    ...
+@pl.jit
+def early_resolve(a: pl.Tensor, b: pl.Tensor, scratch: pl.Out[pl.Tensor], out: pl.Out[pl.Tensor]):
+    with pl.at(level=pl.Level.CORE_GROUP, allow_early_resolve=True):
+        s = pl.add(pl.load(a, [0, 0], [TILE_ROWS, COLS]), pl.load(b, [0, 0], [TILE_ROWS, COLS]))
+        pl.store(s, [0, 0], scratch)
+    with pl.at(level=pl.Level.CORE_GROUP):
+        pl.store(pl.exp(pl.load(scratch, [0, 0], [TILE_ROWS, COLS])), [0, 0], out)
+    return scratch, out
+
+scratch, out = fresh(TILE_ROWS), fresh(TILE_ROWS)
+early_resolve(A[:TILE_ROWS], B[:TILE_ROWS], scratch, out, config=CFG)
+torch.testing.assert_close(out, torch.exp(A[:TILE_ROWS] + B[:TILE_ROWS]), rtol=1e-4, atol=1e-4)
 ```
 
 The scheduler may then pre-stage that task's consumers onto idle cores *before* it
@@ -108,8 +162,6 @@ completes, releasing them with a doorbell the instant it finishes.
 
 It is available on `pl.at`, `pl.submit`, `pl.spmd`, and `pl.spmd_submit`, and it is a pure
 scheduling hint — no effect on results.
-
-**Run it:** `python examples/advanced/05_runtime_overhead.py --mode early_resolve`.
 
 **Cost:** effectively none for correctness, but note the rule that decides whether it does
 anything: a consumer only pre-stages once **all** of its producers are flagged (or already

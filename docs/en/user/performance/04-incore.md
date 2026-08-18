@@ -7,6 +7,26 @@ kernel in PyPTO at all.
 > **Prerequisites:** the previous pages. If the gaps between bars are still the dominant
 > cost, this page is premature.
 
+<!-- doctest: setup -->
+```python
+import pypto.language as pl
+import torch
+from pypto.runtime import RunConfig
+
+NT, TR, TC = 8, 64, 128          # tiles in the loop, tile rows, tile cols
+ROWS = NT * TR
+CFG = RunConfig(platform="__PLATFORM__")
+
+torch.manual_seed(0)
+A = torch.randn(ROWS, TC, dtype=torch.float32)
+
+
+def check(kernel):
+    out = torch.zeros(ROWS, TC, dtype=torch.float32)
+    kernel(A, out, config=CFG)
+    torch.testing.assert_close(out, torch.exp(A), rtol=1e-4, atol=1e-4)
+```
+
 ## Double buffering
 
 **When it applies:** a loop inside the kernel alternates load → compute → store, and the
@@ -17,16 +37,32 @@ core stalls on the transfer because there is only one buffer to load into.
 The compiler-managed form. It replicates the loop body `stage` times per outer iteration so
 that iteration `i+1`'s load overlaps iteration `i`'s compute:
 
+<!-- doctest: run -->
 ```python
-for i in pl.pipeline(NT, stage=2):
-    tile = pl.load(a, [i * TR, 0], [TR, TC])
-    pl.store(pl.exp(tile), [i * TR, 0], out)
+@pl.jit
+def single_buffer(a: pl.Tensor, out: pl.Out[pl.Tensor]):     # the baseline
+    with pl.at(level=pl.Level.CORE_GROUP):
+        for i in pl.range(NT):
+            tile = pl.load(a, [i * TR, 0], [TR, TC])
+            pl.store(pl.exp(tile), [i * TR, 0], out)
+    return out
+
+
+@pl.jit
+def pipelined(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        for i in pl.pipeline(NT, stage=2):
+            tile = pl.load(a, [i * TR, 0], [TR, TC])
+            pl.store(pl.exp(tile), [i * TR, 0], out)
+    return out
+
+
+check(single_buffer)
+check(pipelined)
 ```
 
 The outer loop then advances in strides of `stage * step`, with a tail dispatch covering a
 trip count that is not divisible by `stage`. Depths of 2–4 are the usual range.
-
-**Run it:** `python examples/advanced/07_double_buffer.py --mode pipelined` — `--mode single_buffer` is the un-pipelined baseline.
 
 **Cost:** `stage` copies of every buffer the body stages, live at once. This is the single
 most common way to run out of on-chip memory, and the compiler tells you when it happens
@@ -55,19 +91,25 @@ bought it.
 `pl.MemRef("name", slots=N)` reserves `N` equally-sized slots of one allocation, and an
 ordinary index expression picks one per iteration:
 
+<!-- doctest: run -->
 ```python
-for i in pl.range(NT):
-    lo: pl.Tile[[TR, TC], pl.FP32, pl.MemRef("ub", slots=2)[i % 2], pl.Mem.Vec] = pl.load(
-        a, [i * TR, 0], [TR, TC], target_memory=pl.Mem.Vec
-    )
-    ...
+@pl.jit
+def explicit_slots(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        for i in pl.range(NT):
+            tile: pl.Tile[[TR, TC], pl.FP32, pl.MemRef("ub", slots=2)[i % 2], pl.Mem.Vec] = pl.load(
+                a, [i * TR, 0], [TR, TC], target_memory=pl.Mem.Vec
+            )
+            pl.store(pl.exp(tile), [i * TR, 0], out)
+    return out
+
+
+check(explicit_slots)
 ```
 
 Use the inline `pl.MemRef("name", slots=2)` spelling rather than a Python variable holding
 the declaration — `@pl.jit` re-parses generated source in a fresh module namespace, where
 such a variable is not in scope.
-
-**Run it:** `python examples/advanced/07_double_buffer.py --mode explicit_slots`.
 
 **Cost, and it is planner-dependent:**
 

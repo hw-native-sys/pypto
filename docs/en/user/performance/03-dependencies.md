@@ -30,6 +30,26 @@ Loop kinds sit on top of this: `pl.range` is sequential, `pl.parallel` asserts t
 iterations are independent. `pl.parallel` is an **assertion, not a request** — it does not
 remove the edges above, it promises you have not created any that matter.
 
+<!-- doctest: setup -->
+```python
+import pypto.language as pl
+import torch
+from pypto.runtime import RunConfig
+
+N, TILE_ROWS, COLS = 4, 64, 128
+ROWS = N * TILE_ROWS
+CFG = RunConfig(platform="__PLATFORM__")
+
+torch.manual_seed(0)
+A = torch.randn(ROWS, COLS, dtype=torch.float32)
+
+
+def check(kernel):
+    out = torch.zeros(ROWS, COLS, dtype=torch.float32)
+    kernel(A, out, config=CFG)
+    torch.testing.assert_close(out, A * 2.0, rtol=1e-4, atol=1e-4)
+```
+
 ## Serialization you did not ask for
 
 ### The accumulator chain
@@ -38,10 +58,18 @@ The most common one. A sequential loop whose iterations write the same buffer pr
 WAW chain, one edge per iteration, and that is *correct* — the writes really do land in one
 place.
 
+<!-- doctest: run -->
 ```python
-for i in pl.range(N):
-    with pl.at(level=pl.Level.CORE_GROUP):   # writes `acc` every iteration
-        ...                                  # → WAW edge on iteration i-1
+@pl.jit
+def serialized(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+    for i in pl.range(N):
+        with pl.at(level=pl.Level.CORE_GROUP):   # writes `out` every iteration
+            t = pl.load(a, [i * TILE_ROWS, 0], [TILE_ROWS, COLS])
+            pl.store(pl.mul(t, 2.0), [i * TILE_ROWS, 0], out)   # -> WAW edge on i-1
+    return out
+
+
+check(serialized)
 ```
 
 It becomes a performance bug when the iterations write **disjoint regions** of that buffer
@@ -62,19 +90,66 @@ it:
 | One tensor, its whole lifetime | `pl.create_tensor(..., manual_dep=True)` |
 | Every task in a region | `with pl.manual_scope():` |
 
-**Run them:** `examples/advanced/06_dependencies.py` has all five as modes over the same
-work — `serialized` (the chain), `narrow_claim`, `tensor_claim`, `region_claim` and
-`sliced` — plus `--dep-gen`, so the edges each one removes can be compared directly.
+The narrowest two, over that same work:
+
+<!-- doctest: run -->
+```python
+@pl.jit
+def narrow_claim(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+    for i in pl.range(N):
+        with pl.at(level=pl.Level.CORE_GROUP, no_dep_args=[out]):
+            t = pl.load(a, [i * TILE_ROWS, 0], [TILE_ROWS, COLS])
+            pl.store(pl.mul(t, 2.0), [i * TILE_ROWS, 0], out)
+    return out
+
+
+@pl.jit
+def region_claim(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+    with pl.manual_scope():                       # nothing is inferred in here
+        for i in pl.range(N):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                t = pl.load(a, [i * TILE_ROWS, 0], [TILE_ROWS, COLS])
+                pl.store(pl.mul(t, 2.0), [i * TILE_ROWS, 0], out)
+    return out
+
+
+check(narrow_claim)
+check(region_claim)
+```
+
+`manual_dep=True` is the middle one, and it has a sharp edge worth seeing in full:
+
+<!-- doctest: run -->
+```python
+@pl.jit
+def tensor_claim(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+    scratch = pl.create_tensor([ROWS, COLS], pl.FP32, manual_dep=True)
+    writers = pl.array.create(N, pl.TASK_ID)
+    for i in pl.range(N):
+        with pl.at(level=pl.Level.CORE_GROUP) as tid:
+            t = pl.load(a, [i * TILE_ROWS, 0], [TILE_ROWS, COLS])
+            pl.store(pl.mul(t, 2.0), [i * TILE_ROWS, 0], scratch)
+        writers[i] = tid
+    # deps= is REQUIRED here: manual_dep dropped the consumer's RAW edges too,
+    # so without it this task reads bands that have not been written yet.
+    with pl.at(level=pl.Level.CORE_GROUP, deps=[writers]):
+        for i in pl.range(N):
+            t = pl.load(scratch, [i * TILE_ROWS, 0], [TILE_ROWS, COLS])
+            pl.store(t, [i * TILE_ROWS, 0], out)
+    return out
+
+
+check(tensor_claim)
+```
+
+> **`manual_dep` removes the edges you wanted too.** It covers the tensor's whole lifetime,
+> so a later consumer loses its RAW edges on the writers as well — hence the `deps=` above.
+> Dropping that line does not fail loudly; it returns a *partly* correct answer, which is
+> the intermittent shape this section is warning about.
 
 Prefer the narrowest one that works. Each is an assertion the compiler **cannot check** —
 if those regions do overlap after all, you have not fixed a serialization, you have created
 an intermittent race that reproduces on someone else's machine.
-
-> **`manual_dep` removes the edges you wanted too.** It is the tensor's whole lifetime, so
-> a later consumer of that tensor loses its RAW edges on the writers as well — the example's
-> `tensor_claim` mode has to hand the consumer a `pl.array` of the writers' TaskIds through
-> `deps=`. Without it the run comes back *partly* correct, which is the intermittent shape
-> this section is warning about.
 
 **There is a fourth option, and it is the only one that needs no assertion.** Slice the
 output in the orchestration and pass each slice to its InCore function, so the tasks no

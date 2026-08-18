@@ -179,11 +179,6 @@ PYPTO_PROG_BUILD_DIR=/scratch/pypto-out python my_kernel.py
 | `01_split_k.py` | 切分规约维 |
 | `02_auto_tile_matmul.py` | 编译器驱动的 L0 分块 |
 | `03_mixed_kernel.py` | cube 与 vector 同作用域，三种 split 模式 |
-| `04_task_granularity.py` | 同样的活，先切成很多小任务，再合成少数大任务 |
-| `05_runtime_overhead.py` | SPMD 扇出、`allow_early_resolve`、kernel 内 `syncall` |
-| `06_dependencies.py` | 打破伪串行的四种办法，以及各自的代价 |
-| `07_double_buffer.py` | `pl.pipeline` 与显式 `pl.MemRef` slot 的对比 |
-| `08_scope_placement.py` | 作用域深度决定落在哪个运行时 ring |
 
 **`examples/models/`** —— 多 kernel 模型。
 

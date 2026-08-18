@@ -23,27 +23,69 @@
 
 三种办法，大致按适用频率排列。
 
+下面这些 kernel 每次 CI 都会被执行，所以它们是真货而不是草图。它们共用这段准备：
+
+<!-- doctest: setup -->
+```python
+import pypto.language as pl
+import torch
+from pypto.runtime import RunConfig
+
+ROWS, COLS = 256, 128
+SMALL, LARGE = 64, 128          # tile rows before and after (a)
+CFG = RunConfig(platform="__PLATFORM__")
+
+torch.manual_seed(0)
+A = torch.randn(ROWS, COLS, dtype=torch.float32)
+B = torch.randn(ROWS, COLS, dtype=torch.float32)
+
+def fresh():
+    return torch.zeros(ROWS, COLS, dtype=torch.float32)
+```
+
 ### a. 更大的 tiling
 
 **何时适用：** kernel 每个任务干的活是固定的，而 tile 小到连搬运也不划算。
 
 **怎么做：** 提高任务处理的 tile 形状。
 
-```python
-# 之前 —— 每个 64x64 tile 一个任务
-with pl.at(level=pl.Level.CORE_GROUP):
-    tile_a = pl.load(a, [0, 0], [64, 64])
-    tile_b = pl.load(b, [0, 0], [64, 64])
-    pl.store(pl.add(tile_a, tile_b), [0, 0], c)
+改前 —— 四个任务，每个处理一块 `[64, 128]`。`pl.unroll` 在编译期展开，所以每次迭代各自产生一个 `pl.at` 块、也就是各自一次派发：
 
-# 之后 —— 一个任务覆盖 4 倍元素
-with pl.at(level=pl.Level.CORE_GROUP):
-    tile_a = pl.load(a, [0, 0], [128, 128])
-    tile_b = pl.load(b, [0, 0], [128, 128])
-    pl.store(pl.add(tile_a, tile_b), [0, 0], c)
+<!-- doctest: run -->
+```python
+@pl.jit
+def many_small_tasks(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+    for i in pl.unroll(ROWS // SMALL):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            ta = pl.load(a, [i * SMALL, 0], [SMALL, COLS])
+            tb = pl.load(b, [i * SMALL, 0], [SMALL, COLS])
+            pl.store(pl.add(ta, tb), [i * SMALL, 0], c)
+    return c
+
+c = fresh()
+many_small_tasks(A, B, c, config=CFG)
+torch.testing.assert_close(c, A + B, rtol=1e-4, atol=1e-4)
 ```
 
-**跑一下：** `python examples/advanced/04_task_granularity.py --mode larger_tiles` —— 与 `--mode many_small_tasks` 对照，后者把同样的活切成四个任务而不是两个。
+改后 —— 同样这些行改用 `[128, 128]` 的 tile，于是两个任务而不是四个。什么都没挪，只是 tile 覆盖的元素更多：
+
+<!-- doctest: run -->
+```python
+@pl.jit
+def larger_tiles(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+    for i in pl.unroll(ROWS // LARGE):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            ta = pl.load(a, [i * LARGE, 0], [LARGE, COLS])
+            tb = pl.load(b, [i * LARGE, 0], [LARGE, COLS])
+            pl.store(pl.add(ta, tb), [i * LARGE, 0], c)
+    return c
+
+c = fresh()
+larger_tiles(A, B, c, config=CFG)
+torch.testing.assert_close(c, A + B, rtol=1e-4, atol=1e-4)
+```
+
+这里只有行轴在放大（`COLS` 已经是满宽），所以是 2 倍。两个轴一起放大，任务数就按各自的倍数缩减，片上占用也随之上去。
 
 **代价：** 片上缓冲占用，对 2D tile 是平方增长。一个再也放不下同居者的 tile，会把分配器逼到要么失败、要么让出一级流水 —— 见 [内存](05-memory.md)。
 
@@ -55,24 +97,25 @@ with pl.at(level=pl.Level.CORE_GROUP):
 
 **怎么做：** 把循环挪进去。tile 形状不变，只有偏移在动。
 
-```python
-# 之前 —— N 个任务，每块一个
-for i in range(ROWS // TILE_ROWS):
-    with pl.at(level=pl.Level.CORE_GROUP):
-        tile_a = pl.load(a, [i * TILE_ROWS, 0], [TILE_ROWS, COLS])
-        ...
+`pl.range` 是设备侧循环，所以整体只有一次派发。tile 尺寸不变，动的只是偏移 —— 与上面的 `many_small_tasks` 对照，那是同样的活拆成四次派发：
 
-# 之后 —— 一个任务，里面 N 次迭代
-with pl.at(level=pl.Level.CORE_GROUP):
-    for i in pl.range(ROWS // TILE_ROWS):
-        tile_a = pl.load(a, [i * TILE_ROWS, 0], [TILE_ROWS, COLS])
-        tile_b = pl.load(b, [i * TILE_ROWS, 0], [TILE_ROWS, COLS])
-        pl.store(pl.add(tile_a, tile_b), [i * TILE_ROWS, 0], c)
+<!-- doctest: run -->
+```python
+@pl.jit
+def loop_inside(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        for i in pl.range(ROWS // SMALL):
+            ta = pl.load(a, [i * SMALL, 0], [SMALL, COLS])
+            tb = pl.load(b, [i * SMALL, 0], [SMALL, COLS])
+            pl.store(pl.add(ta, tb), [i * SMALL, 0], c)
+    return c
+
+c = fresh()
+loop_inside(A, B, c, config=CFG)
+torch.testing.assert_close(c, A + B, rtol=1e-4, atol=1e-4)
 ```
 
 `examples/beginner/02_elementwise.py`（`chunked_add`）就是这个模式的完整版本。
-
-**跑一下：** `python examples/advanced/04_task_granularity.py --mode loop_inside` —— `--mode many_small_tasks` 就是它替换掉的四次派发形式。
 
 **代价：** 这些块现在在一个核内被严格定序了。如果它们本来互相独立、而你又有空核，你就是拿并行度换了派发开销 —— 核在空转时这笔交易是亏的。不过它也让这个循环成为 [double buffer](04-incore.md) 的候选，而收益通常从那里回来。
 
@@ -84,21 +127,35 @@ with pl.at(level=pl.Level.CORE_GROUP):
 
 **怎么做：** 把这些操作放进同一个 `pl.at` 块，中间结果就不再往返 GM。
 
+改前 —— 两个任务，`s` 要经 GM 往返一趟；改后 —— 一个任务，`s` 始终留在片上：
+
+<!-- doctest: run -->
 ```python
-# 之前 —— 两个任务，`s` 出 GM 再回来
-with pl.at(level=pl.Level.CORE_GROUP):
-    s = pl.add(pl.load(a, [0, 0], [TR, TC]), pl.load(b, [0, 0], [TR, TC]))
-    pl.store(s, [0, 0], scratch)
-with pl.at(level=pl.Level.CORE_GROUP):
-    pl.store(pl.exp(pl.load(scratch, [0, 0], [TR, TC])), [0, 0], out)
+@pl.jit
+def two_tasks_via_gm(a: pl.Tensor, b: pl.Tensor, scratch: pl.Out[pl.Tensor], out: pl.Out[pl.Tensor]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        s = pl.add(pl.load(a, [0, 0], [LARGE, COLS]), pl.load(b, [0, 0], [LARGE, COLS]))
+        pl.store(s, [0, 0], scratch)
+    with pl.at(level=pl.Level.CORE_GROUP):
+        pl.store(pl.exp(pl.load(scratch, [0, 0], [LARGE, COLS])), [0, 0], out)
+    return scratch, out
 
-# 之后 —— 一个任务，`s` 留在片上
-with pl.at(level=pl.Level.CORE_GROUP):
-    s = pl.add(pl.load(a, [0, 0], [TR, TC]), pl.load(b, [0, 0], [TR, TC]))
-    pl.store(pl.exp(s), [0, 0], out)
+@pl.jit
+def merged_chain(a: pl.Tensor, b: pl.Tensor, out: pl.Out[pl.Tensor]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        s = pl.add(pl.load(a, [0, 0], [LARGE, COLS]), pl.load(b, [0, 0], [LARGE, COLS]))
+        pl.store(pl.exp(s), [0, 0], out)
+    return out
+
+expected = torch.exp(A[:LARGE] + B[:LARGE])
+scratch, out = torch.zeros(LARGE, COLS), torch.zeros(LARGE, COLS)
+two_tasks_via_gm(A[:LARGE], B[:LARGE], scratch, out, config=CFG)
+torch.testing.assert_close(out, expected, rtol=1e-4, atol=1e-4)
+
+out = torch.zeros(LARGE, COLS)
+merged_chain(A[:LARGE], B[:LARGE], out, config=CFG)
+torch.testing.assert_close(out, expected, rtol=1e-4, atol=1e-4)
 ```
-
-**跑一下：** `python examples/advanced/04_task_granularity.py --mode merged_chain` —— `--mode two_tasks_via_gm` 是合并之前的同一条链。
 
 **代价：** 合并后的任务要同时持有每一个中间结果。
 
