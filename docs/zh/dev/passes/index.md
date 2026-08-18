@@ -39,7 +39,7 @@ pass；`91` 及以后保留给"在多个位置运行的 pass"以及"根本不是
 | 22 | [InjectGMPipeBuffer](22-inject_gm_pipe_buffer.md) | 为经 GM 路由的跨核 pipe 注入 `__gm_pipe_buffer` workspace（Ascend910B） |
 | 23 | [SplitVectorKernel](23-split_vector_kernel.md) | 标记 split 属性并处理不拆分的双 AIV 路径 |
 | 24 | [StampTfreeSplit](24-stamp_tfree_split.md) | 把每个跨核 tpop 的 split 与 pipe id 复制到与之配对的 tfree 上 |
-| 25 | [NormalizeReturnOrder](25-normalize_return_order.md) | 把每个 InCore 函数的返回元组重排为规范顺序 |
+| 25 | [NormalizeReturnOrder](25-normalize_return_order.md) | 规范化参数回写返回值，并重排符合条件的 InCore 返回 tuple |
 | 26 | [SkewCrossCorePipeline](26-skew_cross_core_pipeline.md) | 对混合 cube/vector 循环做软流水，使两个核重叠执行 |
 | 27 | [LowerPipelineToSlots](27-lower_pipeline_to_slots.md) | 把 `pl.pipeline` 循环体改为轮转一个分配的多个 slot，而不是复制（`memory_planner=PTOAS`） |
 | 28 | [LowerPipelineLoops](28-lower_pipeline_loops.md) | 把 `pl.pipeline(N, stage=F)` 的循环体复制 `F` 份以启用乒乓缓冲 |

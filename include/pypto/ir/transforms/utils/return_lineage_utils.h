@@ -28,10 +28,11 @@ namespace return_lineage {
 /// Trace the first value of @p func's topmost ReturnStmt back to a Param.
 ///
 /// Follows SSA rebinds (var-to-var assigns, For/While iter args and
-/// return_vars), builtin writeback ops (``tensor.assemble``, ``tile.store``,
-/// ``tensor.set_validshape``), TupleGetItem of a user-call result, and
-/// user calls (single- and tuple-result) — recursing into callees with
-/// memoization and a cycle guard. Group/Spmd wrappers with no top-level
+/// return_vars), tensor IfStmt merges whose branch values resolve to the same
+/// param, builtin writeback ops (``tensor.assemble``, ``tile.store``,
+/// ``tensor.set_validshape``), TupleGetItem of a user-call result, and user
+/// calls (single- and tuple-result) — recursing into callees with memoization
+/// and a cycle guard. Group/Spmd wrappers with no top-level
 /// ReturnStmt resolve through their unique returning inner call; a wrapper that
 /// *does* return, but returns the forwarded tuple of a multi-result inner call
 /// (``result = self.inner(...); return result``), is expanded position-by-
@@ -58,13 +59,14 @@ std::vector<std::optional<size_t>> ReturnedParamIndices(const FunctionPtr& func,
 /// `func->params_[i]` by pointer identity. No SSA walk, no callee recursion, no
 /// `Program`.
 ///
-/// Every consumer at or after `NormalizeReturnOrder` — orchestration codegen,
-/// `ClassifyIterArgCarry` — must use this rather than `ReturnedParamIndices`:
-/// it is a 1-to-1 read of the IR, so it cannot silently disagree with what the
-/// IR actually says. Reserve `ReturnedParamIndices` for callers that run
-/// *before* the property is established (`ExpandMixedKernel`, the scope
-/// outliner), for `NormalizeReturnOrder` itself, and for the property verifier,
-/// which must re-derive independently to have anything to check.
+/// Consumers that need the exact return-position -> param map at or after
+/// `NormalizeReturnOrder` — including orchestration codegen and
+/// `ClassifyIterArgCarry` — use this rather than `ReturnedParamIndices`: it is a
+/// 1-to-1 read of the IR, so it cannot silently disagree with what the IR
+/// actually says. Reserve `ReturnedParamIndices` for callers that run *before*
+/// the property is established (`ExpandMixedKernel`, the scope outliner), for
+/// `NormalizeReturnOrder` itself, and for the property verifier, which must
+/// re-derive independently to have anything to check.
 ///
 /// Scalar return positions are never canonicalized, so they resolve here only
 /// when the value literally *is* a scalar param. That is deliberate: propagating

@@ -1564,6 +1564,43 @@ class TestManualScopeSubmit:
 
 
 class TestDeadIfReturnVarsDCE:
+    def test_drops_empty_synthetic_else_with_dead_phi(self):
+        """Pruning the only synthetic else yield also removes the else branch.
+
+        ConvertToSSA creates an else that yields the pre-if value when a
+        source-level if has no else.  Once the unused phi is pruned, keeping an
+        engaged empty else would print as ``else: pass`` and reparse as no
+        else, breaking structural round-trip verification.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, cond: pl.Scalar[pl.BOOL], out: pl.Tensor[[1], pl.INDEX]):
+                value: pl.Scalar[pl.INDEX] = 0
+                if cond:
+                    value = 1
+                    pl.tensor.write(out, [0], value)
+
+        ssa_form = passes.convert_to_ssa()(Before)
+        ssa_func = next(iter(ssa_form.functions.values()))
+        ssa_if_stmts = [s for s in ir.flatten_to_stmts(ssa_func.body) if isinstance(s, ir.IfStmt)]
+        assert len(ssa_if_stmts) == 1
+        ssa_if = ssa_if_stmts[0]
+        assert len(ssa_if.return_vars) == 1
+        assert ssa_if.else_body is not None
+        ssa_else_stmts = ir.flatten_to_stmts(ssa_if.else_body)
+        assert len(ssa_else_stmts) == 1
+        assert isinstance(ssa_else_stmts[0], ir.YieldStmt)
+        assert len(ssa_else_stmts[0].value) == 1
+
+        after = passes.simplify()(ssa_form)
+        func_after = next(iter(after.functions.values()))
+        if_stmts = [s for s in ir.flatten_to_stmts(func_after.body) if isinstance(s, ir.IfStmt)]
+        assert len(if_stmts) == 1
+        assert len(if_stmts[0].return_vars) == 0
+        assert if_stmts[0].else_body is None
+
     def test_drops_dead_scalar_phi_from_unused_if_else_rebind(self):
         """Issue #1603 minimal repro: a Scalar[INDEX] rebound in both arms of
         an if/else with no downstream use. After convert_to_ssa() + simplify()

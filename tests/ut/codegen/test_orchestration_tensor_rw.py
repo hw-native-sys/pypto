@@ -22,6 +22,55 @@ from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import ir
 
+_LOOP_CARRIED_OUT_SRC = """
+import pypto.language as pl
+
+
+@pl.program
+class LoopCarriedOutProgram:
+    @pl.function(type=pl.FunctionType.Inline, auto_scope=False)
+    def write_two(
+        self,
+        n: pl.Scalar[pl.INT32],
+        x: pl.Tensor[[32, 512], pl.FP32],
+        b: pl.Out[pl.Tensor[[32, 512], pl.FP32]],
+        a: pl.Out[pl.Tensor[[32, 512], pl.INT32]],
+    ) -> tuple[
+        pl.Tensor[[32, 512], pl.FP32],
+        pl.Tensor[[32, 512], pl.INT32],
+    ]:
+        rows: pl.Scalar[pl.INDEX] = pl.tensor.dim(x, 0)
+        for i in pl.range(n):
+            with pl.spmd(16, name_hint="repro_out_write"):
+                row: pl.Scalar[pl.INDEX] = i * 16 + pl.tile.get_block_idx()
+                if row < rows:
+                    src: pl.Tensor[[1, 512], pl.FP32] = x[row : row + 1, :]
+                    b[row : row + 1, :] = pl.add(
+                        src,
+                        pl.full([1, 512], dtype=pl.FP32, value=1.0),
+                    )
+                    a[row : row + 1, :] = pl.cast(
+                        src,
+                        target_type=pl.INT32,
+                        mode="rint",
+                    )
+        return b, a
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        n: pl.Scalar[pl.INT32],
+        x: pl.Tensor[[32, 512], pl.FP32],
+        b: pl.Out[pl.Tensor[[32, 512], pl.FP32]],
+        a: pl.Out[pl.Tensor[[32, 512], pl.INT32]],
+    ) -> tuple[
+        pl.Tensor[[32, 512], pl.FP32],
+        pl.Tensor[[32, 512], pl.INT32],
+    ]:
+        b, a = self.write_two(n, x, b, a)
+        return b, a
+"""
+
 
 class TestTensorReadWriteOffsetCodegen:
     """Tests verifying that multi-dimensional indices are correctly converted to flat offsets in codegen."""
@@ -204,6 +253,56 @@ class TestTensorReadWriteOffsetCodegen:
 
         assert "params_t0.add_input(ext_x)" in code
         assert "params_t0.add_inout(ext_acc)" in code
+
+    def test_inline_spmd_loop_carried_out_handles_keep_identity(self):
+        """Loop-carried Out handles must not cross-wire after an IfStmt merge (#2392)."""
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        program = pl.parse_program(_LOOP_CARRIED_OUT_SRC)
+        transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+        code = _generate_orch_code(transformed)
+
+        # Canaries: keep the trigger's two independently materialized loop carries, and keep
+        # their deliberately reverse-lexical task parameter order (b: FP32, then a: INT32).
+        carry_decl_re = re.compile(
+            r"^\s*(?:Tensor|ChipTensor)\s+(?P<name>(?P<base>[ab])__rv[A-Za-z0-9_]*)"
+            r"\s*=\s*ext_(?P=base)\s*;\s*$",
+            re.MULTILINE,
+        )
+        carry_names = {match["base"]: match["name"] for match in carry_decl_re.finditer(code)}
+        assert carry_names.keys() == {"a", "b"}, (
+            "the #2392 canary requires distinct a/b loop carries initialized from their own "
+            f"external outputs, got {carry_names}:\n{code}"
+        )
+
+        task_inouts = re.findall(
+            r"params_t\d+\.add_inout\((?P<base>[ab])__rv[A-Za-z0-9_]*\);",
+            code,
+        )
+        assert task_inouts == ["b", "a"], (
+            "the repro must submit b (FP32) before a (INT32), matching write_two's declared "
+            f"output parameter order; got {task_inouts}:\n{code}"
+        )
+
+        # Check every direct update of either carry, rather than only the exact adjacent swap
+        # originally reported. This also catches cross-wires whose SSA suffixes or spacing change.
+        carry_update_re = re.compile(
+            r"^\s*(?P<lhs>(?P<lhs_base>[ab])__rv[A-Za-z0-9_]*)\s*=\s*"
+            r"(?P<rhs>[A-Za-z_][A-Za-z0-9_]*)\s*;\s*$",
+            re.MULTILINE,
+        )
+        cross_wires = []
+        for match in carry_update_re.finditer(code):
+            rhs_base = re.match(r"(?P<base>[ab])(?:__|$)", match["rhs"])
+            if rhs_base and rhs_base["base"] != match["lhs_base"]:
+                cross_wires.append(match.group(0).strip())
+
+        assert not cross_wires, (
+            "loop-carried output handles were updated from the other output; this routes FP32 "
+            f"and INT32 buffers under the wrong names: {cross_wires}\n{code}"
+        )
 
     def test_mixed_loop_carried_and_full_tuple_return(self):
         """ForStmt yield + tile.store outputs in same kernel get correct return-to-param mapping.

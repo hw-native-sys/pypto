@@ -15,6 +15,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -26,6 +27,7 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
+#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
@@ -38,6 +40,17 @@ namespace {
 
 // Sentinel meaning "no matching parameter found".
 static constexpr int kNoParam = -1;
+
+using ReturnPermutationMap = std::unordered_map<std::string, std::vector<int>>;
+
+const std::vector<int>* FindReturnPermutation(const ReturnPermutationMap& permutations,
+                                              const OpPtr& callee_op) {
+  auto global_var = As<GlobalVar>(callee_op);
+  if (!global_var) return nullptr;
+  auto it = permutations.find(global_var->name_);
+  if (it == permutations.end() || it->second.empty()) return nullptr;
+  return &it->second;
+}
 
 // Build a mapping from each return value index to the parameter index it
 // corresponds to.  This replicates the analysis that was previously inlined
@@ -320,45 +333,281 @@ FunctionPtr ReorderReturns(const FunctionPtr& func, const std::vector<int>& perm
   return new_func;
 }
 
-// Mutator that applies return-order permutations to TupleGetItemExpr indices
-// in orchestration / opaque functions that call reordered InCore functions.
+// Step B can preserve a caller's logical tuple contract only when every use of
+// a reordered call result is an element projection.  In that form we can
+// permute the physical result type and rewrite each TupleGetItem index in
+// lockstep.  A whole-tuple escape (alias, yield/carry, return, call argument,
+// etc.) would require materializing an inverse-permutation adapter; silently
+// changing the tuple's type/order instead is incorrect, especially when two
+// elements have the same type.  Reject that unsupported shape explicitly
+// instead of emitting type-inconsistent IR or silently cross-wiring outputs.
+class CallResultBindingCollector : public IRVisitor {
+ public:
+  explicit CallResultBindingCollector(const ReturnPermutationMap& permutations)
+      : permutations_(permutations) {}
+
+  std::unordered_map<const Var*, std::unordered_set<std::string>> bindings;
+  std::unordered_set<const Expr*> directly_bound_calls;
+
+ protected:
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (op->var_) {
+      if (auto call = As<Call>(op->value_)) {
+        RecordBinding(op->var_.get(), call->op_, call.get());
+      } else if (auto submit = As<Submit>(op->value_)) {
+        RecordBinding(op->var_.get(), submit->op_, submit.get());
+      }
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  void RecordBinding(const Var* var, const OpPtr& callee_op, const Expr* call_expr) {
+    auto global_var = As<GlobalVar>(callee_op);
+    if (!global_var || !FindReturnPermutation(permutations_, callee_op)) return;
+    bindings[var].insert(global_var->name_);
+    directly_bound_calls.insert(call_expr);
+  }
+
+  const ReturnPermutationMap& permutations_;
+};
+
+struct UnsafeCallResultUse {
+  UnsafeCallResultUse(std::string caller_in, std::string callee_in, std::string reason_in,
+                      std::string suggestion_in, Span span_in)
+      : caller(std::move(caller_in)),
+        callee(std::move(callee_in)),
+        reason(std::move(reason_in)),
+        suggestion(std::move(suggestion_in)),
+        span(std::move(span_in)) {}
+
+  std::string caller;
+  std::string callee;
+  std::string reason;
+  std::string suggestion;
+  Span span;
+};
+
+class UnsupportedCallResultUseCollector : public IRVisitor {
+ public:
+  UnsupportedCallResultUseCollector(
+      const ReturnPermutationMap& permutations,
+      const std::unordered_map<const Var*, std::unordered_set<std::string>>& bindings,
+      const std::unordered_set<const Expr*>& directly_bound_calls, bool allow_direct_projections,
+      std::string caller_name)
+      : permutations_(permutations),
+        bindings_(bindings),
+        directly_bound_calls_(directly_bound_calls),
+        allow_direct_projections_(allow_direct_projections),
+        caller_name_(std::move(caller_name)) {}
+
+  void VisitExpr(const ExprPtr& expr) override {
+    const Span* previous_use_span = current_use_span_;
+    // A Var node carries its binding/definition span. Keep the enclosing
+    // expression or statement span so diagnostics identify this occurrence.
+    if (expr && !AsVarLike(expr)) current_use_span_ = &expr->span_;
+    IRVisitor::VisitExpr(expr);
+    current_use_span_ = previous_use_span;
+  }
+
+  void VisitStmt(const StmtPtr& stmt) override {
+    const Span* previous_use_span = current_use_span_;
+    if (stmt) current_use_span_ = &stmt->span_;
+    IRVisitor::VisitStmt(stmt);
+    current_use_span_ = previous_use_span;
+  }
+
+  std::unordered_set<std::string> unsafe_callees;
+  std::optional<UnsafeCallResultUse> first_unsafe_use;
+
+ protected:
+  // The LHS is a definition, not a use.  Visiting it through the base visitor
+  // would incorrectly classify the direct call binding itself as an escape.
+  void VisitStmt_(const AssignStmtPtr& op) override { VisitExpr(op->value_); }
+
+  void VisitExpr_(const TupleGetItemExprPtr& op) override {
+    if (allow_direct_projections_) {
+      if (auto tuple_var = AsVarLike(op->tuple_); tuple_var && bindings_.count(tuple_var.get())) {
+        // This is precisely the supported use: Step B rewrites its index.
+        return;
+      }
+    }
+    IRVisitor::VisitExpr_(op);
+  }
+
+  void VisitVarLike_(const VarPtr& op) override {
+    auto it = bindings_.find(op.get());
+    if (it != bindings_.end()) {
+      std::vector<std::string> callees(it->second.begin(), it->second.end());
+      std::sort(callees.begin(), callees.end());
+      for (const auto& callee : callees) {
+        const Span& use_span =
+            current_use_span_ && current_use_span_->is_valid() ? *current_use_span_ : op->span_;
+        RecordUnsafe(callee, use_span, "result binding '" + op->name_hint_ + "' is used as a whole tuple",
+                     "Destructure the result directly and use only its projected elements; do not alias, "
+                     "yield/carry, return, or pass the whole tuple as an argument");
+      }
+    }
+    IRVisitor::VisitVarLike_(op);
+  }
+
+  void VisitExpr_(const CallPtr& op) override {
+    RecordUnsupportedCall(op->op_, op.get());
+    IRVisitor::VisitExpr_(op);
+  }
+
+  void VisitExpr_(const SubmitPtr& op) override {
+    RecordUnsupportedCall(op->op_, op.get());
+    IRVisitor::VisitExpr_(op);
+  }
+
+ private:
+  void RecordUnsupportedCall(const OpPtr& callee_op, const Expr* call_expr) {
+    auto global_var = As<GlobalVar>(callee_op);
+    if (!global_var || !FindReturnPermutation(permutations_, callee_op)) return;
+    if (!allow_direct_projections_) {
+      RecordUnsafe(global_var->name_, call_expr->span_, "the reordered callee is called from an InCore body",
+                   "Move the call to a non-InCore caller, or make the callee return Out/InOut tensors in "
+                   "parameter order");
+    } else if (!directly_bound_calls_.count(call_expr)) {
+      RecordUnsafe(
+          global_var->name_, call_expr->span_, "the call result is not directly assigned to a tuple binding",
+          "Assign the call result directly to a tuple binding, then use only TupleGetItem projections "
+          "from that binding");
+    }
+  }
+
+  void RecordUnsafe(const std::string& callee, const Span& span, std::string reason, std::string suggestion) {
+    unsafe_callees.insert(callee);
+    if (!first_unsafe_use) {
+      first_unsafe_use.emplace(caller_name_, callee, std::move(reason), std::move(suggestion), span);
+    }
+  }
+
+  const ReturnPermutationMap& permutations_;
+  const std::unordered_map<const Var*, std::unordered_set<std::string>>& bindings_;
+  const std::unordered_set<const Expr*>& directly_bound_calls_;
+  bool allow_direct_projections_;
+  std::string caller_name_;
+  const Span* current_use_span_ = nullptr;
+};
+
+struct ReturnPermutationSafetyReport {
+  std::unordered_set<std::string> unsafe_callees;
+  std::optional<UnsafeCallResultUse> first_unsafe_use;
+};
+
+ReturnPermutationSafetyReport FindUnsafeReturnPermutations(const std::vector<FunctionPtr>& functions,
+                                                           const ReturnPermutationMap& permutations) {
+  ReturnPermutationSafetyReport report;
+  for (const auto& func : functions) {
+    if (!func || !func->body_) continue;
+
+    CallResultBindingCollector binding_collector(permutations);
+    binding_collector.VisitStmt(func->body_);
+
+    // Step B intentionally skips InCore bodies.  Therefore even a direct
+    // projection there is unsupported and rejects the callee permutation.
+    const bool allow_direct_projections = !IsInCoreType(func->func_type_);
+    UnsupportedCallResultUseCollector use_collector(permutations, binding_collector.bindings,
+                                                    binding_collector.directly_bound_calls,
+                                                    allow_direct_projections, func->name_);
+    use_collector.VisitStmt(func->body_);
+    report.unsafe_callees.insert(use_collector.unsafe_callees.begin(), use_collector.unsafe_callees.end());
+    if (!report.first_unsafe_use && use_collector.first_unsafe_use) {
+      report.first_unsafe_use.emplace(std::move(*use_collector.first_unsafe_use));
+    }
+  }
+  return report;
+}
+
+// Permute a reordered callee's result tuple at its call site. Submit carries one
+// extra TASK_ID element at the tail; it is not a callee return and stays fixed.
+TypePtr PermuteCallLikeResultType(const TypePtr& type, const std::vector<int>& permutation, bool is_submit,
+                                  const Span& span) {
+  auto tuple_type = As<TupleType>(type);
+  INTERNAL_CHECK_SPAN(tuple_type, span)
+      << "Internal error: NormalizeReturnOrder call to a reordered multi-return function has non-tuple "
+         "result type";
+
+  const size_t tail_size = is_submit ? 1 : 0;
+  INTERNAL_CHECK_SPAN(tuple_type->types_.size() == permutation.size() + tail_size, span)
+      << "Internal error: NormalizeReturnOrder call result arity does not match return permutation";
+  if (is_submit) {
+    auto task_id_type = As<ScalarType>(tuple_type->types_.back());
+    INTERNAL_CHECK_SPAN(task_id_type && task_id_type->dtype_ == DataType::TASK_ID, span)
+        << "Internal error: NormalizeReturnOrder Submit result must end with Scalar[TASK_ID]";
+  }
+
+  std::vector<TypePtr> new_types = tuple_type->types_;
+  for (size_t old_index = 0; old_index < permutation.size(); ++old_index) {
+    const int new_index = permutation[old_index];
+    INTERNAL_CHECK_SPAN(new_index >= 0 && new_index < static_cast<int>(permutation.size()), span)
+        << "Internal error: NormalizeReturnOrder call result permutation index out of range";
+    new_types[static_cast<size_t>(new_index)] = tuple_type->types_[old_index];
+  }
+  return std::make_shared<TupleType>(std::move(new_types));
+}
+
+// Mutator that applies return-order permutations to call/submit result types,
+// their binding Vars, and TupleGetItemExpr indices in orchestration / opaque
+// functions that call reordered InCore functions.
 class TupleIndexPermutationMutator : public IRMutator {
  public:
-  explicit TupleIndexPermutationMutator(const std::unordered_map<std::string, std::vector<int>>& permutations)
+  explicit TupleIndexPermutationMutator(const ReturnPermutationMap& permutations)
       : permutations_(permutations) {}
 
  protected:
+  ExprPtr VisitExpr_(const CallPtr& op) override {
+    auto base = IRMutator::VisitExpr_(op);
+    auto call = As<Call>(base);
+    INTERNAL_CHECK_SPAN(call, op->span_)
+        << "Internal error: NormalizeReturnOrder Call mutated to a non-Call expression";
+    const auto* permutation = FindReturnPermutation(permutations_, call->op_);
+    if (!permutation) return call;
+
+    auto new_type =
+        PermuteCallLikeResultType(call->GetType(), *permutation, /*is_submit=*/false, call->span_);
+    return std::make_shared<Call>(call->op_, call->args_, call->kwargs_, call->attrs_, std::move(new_type),
+                                  call->span_);
+  }
+
+  ExprPtr VisitExpr_(const SubmitPtr& op) override {
+    auto base = IRMutator::VisitExpr_(op);
+    auto submit = As<Submit>(base);
+    INTERNAL_CHECK_SPAN(submit, op->span_)
+        << "Internal error: NormalizeReturnOrder Submit mutated to a non-Submit expression";
+    const auto* permutation = FindReturnPermutation(permutations_, submit->op_);
+    if (!permutation) return submit;
+
+    auto new_type =
+        PermuteCallLikeResultType(submit->GetType(), *permutation, /*is_submit=*/true, submit->span_);
+    return std::make_shared<Submit>(submit->op_, submit->args_, submit->deps_, submit->kwargs_,
+                                    submit->attrs_, std::move(new_type), submit->span_, submit->core_num_,
+                                    submit->sync_start_, submit->allow_early_resolve_, submit->predicate_);
+  }
+
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     auto new_value = VisitExpr(op->value_);
 
     if (op->var_) {
-      // Both Call and Submit (pl.submit inside pl.manual_scope) launch a callee
-      // whose Out-param return order may have been reordered in Step A; the
-      // result tuple's TupleGetItem indices must be remapped the same way.
-      // Submit is a sibling ObjectKind of Call, so As<Call> alone misses it
-      // (see .claude/rules/pass-submit-awareness.md).
-      OpPtr callee_op;
+      const std::vector<int>* permutation = nullptr;
       if (auto call = As<Call>(new_value)) {
-        callee_op = call->op_;
+        permutation = FindReturnPermutation(permutations_, call->op_);
       } else if (auto submit = As<Submit>(new_value)) {
-        callee_op = submit->op_;
+        permutation = FindReturnPermutation(permutations_, submit->op_);
       }
-      // Track call/submit results to reordered functions so we can remap
-      // TupleGetItemExpr indices on those results later. A Submit's trailing
-      // Scalar[TASK_ID] tuple element is never permuted: the permutation only
-      // covers the callee's return values, and the index_ < perm.size() bound
-      // in VisitExpr_(TupleGetItemExpr) skips it.
-      if (auto global_var = std::dynamic_pointer_cast<const GlobalVar>(callee_op)) {
-        auto perm_it = permutations_.find(global_var->name_);
-        if (perm_it != permutations_.end() && !perm_it->second.empty()) {
-          reordered_tuple_vars_[op->var_.get()] = &perm_it->second;
-        } else {
-          // Reassigned to a non-reordered call: remove stale entry.
-          reordered_tuple_vars_.erase(op->var_.get());
-        }
-      } else {
-        // Non-call/submit assignment (or non-GlobalVar callee): stale mapping.
-        reordered_tuple_vars_.erase(op->var_.get());
+
+      // Visit the RHS before clearing the old binding so a reassignment such
+      // as `result = consume(result)` still sees the previous tuple Var. The
+      // new definition below then replaces (or removes) that identity mapping
+      // for all subsequent uses.
+      ForgetBinding(op->var_);
+      if (permutation) {
+        auto new_var = std::make_shared<Var>(op->var_->name_hint_, new_value->GetType(), op->var_->span_);
+        var_remap_[op->var_.get()] = new_var;
+        reordered_tuple_vars_[new_var.get()] = permutation;
+        return std::make_shared<AssignStmt>(new_var, new_value, op->span_);
       }
     }
 
@@ -391,7 +640,17 @@ class TupleIndexPermutationMutator : public IRMutator {
   }
 
  private:
-  const std::unordered_map<std::string, std::vector<int>>& permutations_;
+  void ForgetBinding(const VarPtr& var) {
+    reordered_tuple_vars_.erase(var.get());
+    auto remap_it = var_remap_.find(var.get());
+    if (remap_it == var_remap_.end()) return;
+    if (auto remapped_var = AsVarLike(remap_it->second)) {
+      reordered_tuple_vars_.erase(remapped_var.get());
+    }
+    var_remap_.erase(remap_it);
+  }
+
+  const ReturnPermutationMap& permutations_;
   std::unordered_map<const Var*, const std::vector<int>*> reordered_tuple_vars_;
 };
 
@@ -401,9 +660,11 @@ namespace pass {
 
 Pass NormalizeReturnOrder() {
   auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
-    // Step A: Analyze InCore functions and compute permutations.
-    std::unordered_map<std::string, std::vector<int>> permutations;
-    std::vector<FunctionPtr> functions;
+    // Step A0: canonicalize tensor returns, then compute candidate InCore
+    // permutations without applying them yet.  The intervening safety scan
+    // verifies that every program-local caller can be remapped element-wise.
+    ReturnPermutationMap candidate_permutations;
+    std::vector<FunctionPtr> canonical_functions;
     bool modified = false;
 
     for (const auto& [gvar, func] : program->functions_) {
@@ -418,13 +679,35 @@ Pass NormalizeReturnOrder() {
         std::vector<int> perm;
         if (IsInCoreType(current->func_type_)) perm = ComputeReturnPermutation(current);
         if (!perm.empty()) {
-          auto new_func = ReorderReturns(current, perm);
-          permutations[current->name_] = std::move(perm);
-          functions.push_back(new_func);
-          modified = true;
-        } else {
-          functions.push_back(current);
+          candidate_permutations[current->name_] = std::move(perm);
         }
+        canonical_functions.push_back(current);
+      } else {
+        canonical_functions.push_back(func);
+      }
+    }
+
+    auto safety_report = FindUnsafeReturnPermutations(canonical_functions, candidate_permutations);
+    if (!safety_report.unsafe_callees.empty()) {
+      const auto* first = safety_report.first_unsafe_use ? &*safety_report.first_unsafe_use : nullptr;
+      INTERNAL_CHECK_SPAN(first, program->span_)
+          << "Internal error: unsafe return permutations were found without an offending use";
+      CHECK_SPAN(false, first->span) << "NormalizeReturnOrder cannot safely reorder return values of callee '"
+                                     << first->callee << "' in caller '" << first->caller
+                                     << "': " << first->reason << ". " << first->suggestion;
+    }
+    ReturnPermutationMap permutations = std::move(candidate_permutations);
+
+    // Every surviving call result is observed element-wise, so Step B can
+    // update its tuple type and projection indices without changing the
+    // caller's logical output identities.
+    std::vector<FunctionPtr> functions;
+    functions.reserve(canonical_functions.size());
+    for (const auto& func : canonical_functions) {
+      auto perm_it = permutations.find(func->name_);
+      if (perm_it != permutations.end()) {
+        functions.push_back(ReorderReturns(func, perm_it->second));
+        modified = true;
       } else {
         functions.push_back(func);
       }
