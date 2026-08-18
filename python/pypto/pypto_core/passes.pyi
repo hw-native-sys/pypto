@@ -383,7 +383,11 @@ def fold_no_op_reshape() -> Pass:
     """Fold no-op tile.reshape assignments into Var-to-Var assignments."""
 
 def normalize_return_order() -> Pass:
-    """Create a return order normalization pass."""
+    """Create a return-order normalization pass.
+
+    Reordered Call/Submit results must be directly bound and used only through
+    tuple-element projections in non-InCore callers.
+    """
 
 class VerificationError:
     """Unified verification error information."""

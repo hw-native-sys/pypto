@@ -43,7 +43,7 @@ a pipeline pass at all.
 | 23 | [InjectGMPipeBuffer](23-inject_gm_pipe_buffer.md) | Injects the `__gm_pipe_buffer` workspace for GM-routed cross-core pipes (Ascend910B) |
 | 24 | [SplitVectorKernel](24-split_vector_kernel.md) | Stamps split attributes and handles the no-split dual-AIV path |
 | 25 | [StampTfreeSplit](25-stamp_tfree_split.md) | Copies each cross-core tpop's split and pipe id onto its matching tfree op |
-| 26 | [NormalizeReturnOrder](26-normalize_return_order.md) | Reorders every InCore function's return tuple into the canonical order |
+| 26 | [NormalizeReturnOrder](26-normalize_return_order.md) | Canonicalizes param-writeback returns and reorders eligible InCore return tuples |
 | 27 | [SkewCrossCorePipeline](27-skew_cross_core_pipeline.md) | Software-pipelines mixed cube/vector loops so the two cores overlap |
 | 28 | [LowerPipelineToSlots](28-lower_pipeline_to_slots.md) | Rotates a `pl.pipeline` body through the slots of one allocation instead of replicating it (`memory_planner=PTOAS`) |
 | 29 | [LowerPipelineLoops](29-lower_pipeline_loops.md) | Replicates `pl.pipeline(N, stage=F)` bodies `F` times to enable ping-pong buffering |
