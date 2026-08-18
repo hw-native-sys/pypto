@@ -53,6 +53,40 @@ self.layer(cur, wq_view(i), i, i * 5120)     # 算术搬到了这里
 
 新形参是**追加**而不是前置的：`CoreTaskArgs` 要求所有张量实参排在所有标量实参之前。
 
+## Step B —— 边界张量的派生切片
+
+回放 patch 的是边界张量的**地址**。在区域**内部**取的 view 会从录制时冻结下来的
+东西重新推导，所以必须改到调用点去取：
+
+```python
+wl = pl.tensor.slice(w, [128, 128], [layer_idx * 128, 0])   # 在区域内部
+```
+
+Step B 把这个切片搬出去，把结果作为一个新的边界张量传进来。每个切片点各自成为一个
+形参、各自带固定形状 —— 这正是 runtime 的 `BOUNDARY_VIEW` 分类所要求的：它按
+「同 buffer + 偏移」匹配，形状根本不参与，所以一个形状逐次变化的 view 压根无法被
+分类。
+
+外提出来的语句按**先标量、后张量**发射，因为切片的偏移通常就是 Step A 的标量，绑定
+必须先于使用。而**形参**顺序恰好相反 —— 张量在前、标量在后 —— 这是 `CoreTaskArgs`
+的要求。只有对边界**形参**的切片会被外提；对区域局部张量取的 view 保持原样。
+
+## Step C —— 区域内的分配
+
+codegen 会把 `pl.create_tensor` 降级成批量 `alloc_tensors`，而被录制区域内任何一个
+裸的 `alloc_tensors` 都会让 runtime 判定该录制 unsupported。本 pass 对此**报错**，
+而不是把分配外提：
+
+> Graph function 'layer' allocates a tensor inside the region. […] Allocate it in
+> the caller and pass it in as a `pl.InOut` parameter instead.
+
+自动外提会新增第二个 `InOut` 形参，而返回值别名映射要求被调方的 `ReturnStmt` 直接
+指名某个形参，才能确定张量返回值别名到哪一个 —— 合成出来的形参不满足这个不变量。
+要自动化，得先把那套映射改造掉。
+
+注意只有**裸的** `alloc_tensors` 会毒化录制；逐任务的 `add_output(TensorCreateInfo)`
+是合法的，runtime 自己的 graph 系统测试就是这么分配的。
+
 ## Step D —— 边界合法性
 
 | 检查 | 原因 |
@@ -87,8 +121,8 @@ attr；紧随其后的 `MaterializeRuntimeScopes` 要求该属性。
 
 ## 尚未处理
 
-对边界张量的派生**切片**，以及 Graph 函数体内的 `tensor.create`，另行处理 ——
-区域内一个裸的 `alloc_tensors` 调用会直接毒化整份录制。
+把区域内的局部分配自动外提为边界形参（见 Step C），以及把超过 32 个张量的边界
+自动打包进 scratch arena。
 
 ## 另见
 

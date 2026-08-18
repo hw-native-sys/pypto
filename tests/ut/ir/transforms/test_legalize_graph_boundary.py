@@ -201,6 +201,134 @@ class TestDerivedScalarHoisting:
 
 
 # ---------------------------------------------------------------------------
+# Step B — derived slices of a boundary tensor are taken at the call site
+# ---------------------------------------------------------------------------
+
+
+def _tensor_param_names(func: ir.Function) -> list[str]:
+    return [
+        re.sub(r"__ssa_v\d+$", "", p.name_hint) for p in func.params if not isinstance(p.type, ir.ScalarType)
+    ]
+
+
+class TestDerivedSliceHoisting:
+    def test_slice_of_a_boundary_tensor_becomes_a_parameter(self):
+        """Replay patches a boundary tensor's address, not a view derived inside.
+
+        A view taken in the region is re-derived from whatever the recording
+        froze, so it has to be taken at the call site and passed in.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Graph)
+            def layer(
+                self,
+                w: pl.Tensor[[512, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+                layer_idx: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                base = layer_idx * 128
+                wl: pl.Tensor[[128, 128], pl.FP32] = pl.tensor.slice(w, [128, 128], [base, 0])
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(wl, [0, 0], [128, 128])
+                    pl.store(t, [0, 0], c)
+                return c
+
+            @pl.function
+            def main(
+                self,
+                w: pl.Tensor[[512, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                for i in pl.range(4):
+                    c = self.layer(w, c, i)
+                return c
+
+        layer = _graph_func(_legalize(Before), "layer")
+        assert "wl" in _tensor_param_names(layer)
+        # Within the appended parameters, tensors precede scalars. IR order as a
+        # whole need not be tensors-first — codegen's stable reorder produces the
+        # tensors-before-scalars `CoreTaskArgs` order the runtime requires, and
+        # the graph body's `args.tensor(i)` / `args.scalar(k)` indices are
+        # assigned by counting each kind separately, so they agree either way.
+        appended = [isinstance(p.type, ir.ScalarType) for p in layer.params[3:]]
+        assert appended == sorted(appended), f"appended tensors must come first, got {appended}"
+
+    def test_slice_of_a_local_tensor_is_left_alone(self):
+        """Only views *of a boundary tensor* need hoisting."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Graph)
+            def layer(
+                self,
+                w: pl.Tensor[[512, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(w, [0, 0], [128, 128])
+                    pl.store(t, [0, 0], c)
+                return c
+
+            @pl.function
+            def main(
+                self,
+                w: pl.Tensor[[512, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                c = self.layer(w, c)
+                return c
+
+        layer = _graph_func(_legalize(Before), "layer")
+        assert _tensor_param_names(layer) == ["w", "c"]
+
+
+# ---------------------------------------------------------------------------
+# Step C — allocations inside the region
+# ---------------------------------------------------------------------------
+
+
+class TestRegionAllocation:
+    def test_tensor_create_inside_a_graph_is_rejected(self):
+        """A bare ``alloc_tensors`` in the region poisons the recording.
+
+        The runtime declares it unsupported *silently*, so the graph would run
+        as ordinary tasks and the speedup would simply not appear — which no
+        numerical test can detect.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Graph)
+            def layer(
+                self,
+                w: pl.Tensor[[128, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                tmp = pl.create_tensor([128, 128], dtype=pl.FP32)
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(w, [0, 0], [128, 128])
+                    pl.store(t, [0, 0], tmp)
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    t2: pl.Tile[[128, 128], pl.FP32] = pl.load(tmp, [0, 0], [128, 128])
+                    pl.store(t2, [0, 0], c)
+                return c
+
+            @pl.function
+            def main(
+                self,
+                w: pl.Tensor[[128, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                c = self.layer(w, c)
+                return c
+
+        with pytest.raises(ValueError, match="allocates a tensor inside the region"):
+            _legalize(Before)
+
+
+# ---------------------------------------------------------------------------
 # Step D — boundaries the runtime could not cache
 # ---------------------------------------------------------------------------
 

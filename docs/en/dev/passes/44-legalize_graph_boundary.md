@@ -61,6 +61,48 @@ naming the variable and explaining why the value cannot be reconstructed.
 New parameters are **appended**, not prepended: `CoreTaskArgs` requires every
 tensor argument to precede every scalar one.
 
+## Step B — derived slices of a boundary tensor
+
+Replay patches a boundary tensor's **address**. A view taken *inside* the region
+is re-derived from whatever the recording froze, so it must be taken at the call
+site instead:
+
+```python
+wl = pl.tensor.slice(w, [128, 128], [layer_idx * 128, 0])   # inside the region
+```
+
+Step B moves that slice out and passes the result in as an additional boundary
+tensor. Each slice site becomes its own parameter with its own fixed shape,
+which is what the runtime's `BOUNDARY_VIEW` classification requires — it matches
+on same-buffer plus offset, with the shape playing no part, so a view whose shape
+varied between calls could not be classified at all.
+
+The hoisted statements are emitted **scalars first, then tensors**, because a
+slice's offset is typically a Step A scalar and the binding has to precede its
+use. The *parameter* order is the reverse — tensors before scalars — which is
+what `CoreTaskArgs` requires. Only slices of a boundary *parameter* are hoisted;
+a view of a region-local tensor stays put.
+
+## Step C — allocations inside the region
+
+Codegen lowers `pl.create_tensor` into a batched `alloc_tensors`, and a bare
+`alloc_tensors` anywhere in a recorded region makes the runtime declare the
+recording unsupported. This pass **reports** that rather than hoisting the
+allocation:
+
+> Graph function 'layer' allocates a tensor inside the region. […] Allocate it in
+> the caller and pass it in as a `pl.InOut` parameter instead.
+
+Hoisting it automatically would add a second `InOut` parameter, and the
+return-alias mapping requires the callee's `ReturnStmt` to name a parameter
+directly in order to disambiguate which one a tensor return aliases — an
+invariant a synthesised parameter does not satisfy. Automating this needs that
+mapping reworked first.
+
+Note that only a *bare* `alloc_tensors` poisons the recording; a per-task
+`add_output(TensorCreateInfo)` is legal, which is why the runtime's own graph
+system test allocates that way.
+
 ## Step D — boundary legality
 
 | Check | Why |
@@ -97,9 +139,8 @@ that property.
 
 ## Not yet handled
 
-Derived *tensor slices* of a boundary tensor, and `tensor.create` inside a Graph
-body, are handled separately — a bare `alloc_tensors` call inside the region
-poisons the recording outright.
+Automatically hoisting a region-local allocation to a boundary parameter (see
+Step C), and packing a boundary of more than 32 tensors into a scratch arena.
 
 ## See also
 
