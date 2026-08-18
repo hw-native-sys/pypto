@@ -48,6 +48,7 @@ from _pto_loc_common import strip_loc
 from pypto import DataType, backend, codegen, ir, passes
 from pypto.backend import BackendType
 from pypto.ir.builder import IRBuilder
+from pypto.ir.instruments import make_roundtrip_instrument
 from pypto.ir.op.distributed import system_ops as dist_system
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
@@ -1788,12 +1789,12 @@ def test_split_aiv_region_keeps_notify_off_the_cube_lane():
     function, ABSENT from the AIC one. With the stamp neutered the notify
     appears in both, and the second assertion fails.
 
-    Property verification stays ON; only the ambient print->parse roundtrip
-    instrument is dropped, for a pre-existing asymmetry that has nothing to do
-    with placement: the printer re-synthesises scope wrappers around a lowered
-    region, so print->parse is not structurally equal here. Suppressing the
-    whole context would also drop verification, which is the part that must keep
-    running.
+    Property verification AND the print->parse roundtrip instrument both stay
+    on. The roundtrip used to be dropped here: the parser re-synthesised an
+    InCore wrapper around a region after pass 8 had outlined the scope away, so
+    print->parse was not structurally equal for any program carrying a
+    ``pl.split_aiv`` region. The parser now emits such a region bare inside an
+    InCore function, so this path is back under full roundtrip coverage.
     """
 
     @pl.program
@@ -1827,10 +1828,11 @@ def test_split_aiv_region_keeps_notify_off_the_cube_lane():
                     )
             return out
 
-    verify_only: list[passes.PassInstrument] = [
-        passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)
+    verify_and_roundtrip: list[passes.PassInstrument] = [
+        passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER),
+        make_roundtrip_instrument(),
     ]
-    with passes.PassContext(verify_only):
+    with passes.PassContext(verify_and_roundtrip):
         optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(P)
 
     lanes = {

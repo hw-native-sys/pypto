@@ -5029,21 +5029,34 @@ class ASTParser:
         # with ``aiv_id = pl.tile.get_subblock_idx()`` and carries the requested
         # SplitMode on the node; LowerAutoVectorSplit (pass 20) consumes it.
         #
-        # FLATTEN: when already inside a CORE_GROUP InCore scope — directly or
-        # through an intervening pl.range/pl.pipeline/if — emit the region in
-        # place; it nests inside the open context. OutlineIncoreScopes outlines the
-        # enclosing core function and the nested region survives.
-        if self._is_inside_scope(ir.ScopeKind.InCore):
+        # FLATTEN: when the region is ALREADY in a core context, emit it in place.
+        # The wrapper below exists only to give OutlineIncoreScopes something to
+        # outline, so it is meaningless once we are core-side. Two ways to be:
+        #   1. Inside an open CORE_GROUP InCore scope (directly, or through an
+        #      intervening pl.range/pl.pipeline/if): the region nests in the open
+        #      context and survives the enclosing function's outlining.
+        #   2. The enclosing FUNCTION is already InCore, so no scope is open and
+        #      the open-scope test alone reads False.
+        #
+        # Arm 2 is what makes print -> parse a fixed point: after outlining, the
+        # region is bare at the top of an InCore ``*_incore_0``, and reparsing that
+        # printed form must rebuild it bare. Emitting what the syntax means is the
+        # parser's job; whether a region is ALLOWED in this function is a placement
+        # rule, enforced by AivSplitValid check (h) — which keys on the ``split_aiv``
+        # attr OutlineIncoreScopes stamps, so a hand-authored InCore function (no
+        # such attr) is still rejected while the outlined one is accepted.
+        if self._is_inside_scope(ir.ScopeKind.InCore) or self._func_type == ir.FunctionType.InCore:
             self._emit_split_aiv_region(stmt, loop_var_name, split_mode)
             return
 
-        # Bare top-level form (no enclosing InCore): a top-level split_aiv must
-        # live inside a core function, so synthesize an InCore wrapper first and
-        # nest the region inside it (keeps it eligible for OutlineIncoreScopes —
-        # else the region would have no enclosing InCore to outline). Merge any
-        # forward-sticky pl.dump_tag tensors onto the wrapper (mirrors the other
-        # InCore-creating paths); the split mode + split_aiv marker ride the
-        # nested SplitAivScopeStmt region node, not the InCore wrapper.
+        # Bare top-level form (no enclosing InCore scope, and the function is not
+        # itself InCore — e.g. a plain ``@pl.function`` / ``@pl.jit`` Opaque body):
+        # a top-level split_aiv must live inside a core function, so synthesize an
+        # InCore wrapper first and nest the region inside it (keeps it eligible for
+        # OutlineIncoreScopes — else the region would have no enclosing InCore to
+        # outline). Merge any forward-sticky pl.dump_tag tensors onto the wrapper
+        # (mirrors the other InCore-creating paths); the split mode + split_aiv
+        # marker ride the nested SplitAivScopeStmt region node, not the wrapper.
         span = self.span_tracker.get_span(stmt)
         incore_attrs = self._merge_forward_sticky_dump(None, ir.ScopeKind.InCore)
         with self.builder.scope(ir.ScopeKind.InCore, span, attrs=incore_attrs):

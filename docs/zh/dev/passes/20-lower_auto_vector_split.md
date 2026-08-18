@@ -69,6 +69,14 @@ result = passes.lower_auto_vector_split()(program)
 （未拆分）的行为。若在此处对其下降，剥离后它将只带 `split_aiv` 而无 `split` 模式，
 `SplitVectorKernel` 会因此报错。
 
+**函数体中仍存在 `ScopeStmt` 的混合函数会被拒绝**，理由与下文的区域路径相同：整函数折半同样
+不跨越 scope 边界。汇总亲和性会**穿过** scope 计算（scope 的亲和性即其函数体的亲和性），因此本
+pass 能区分「被 scope 包裹的混合函数」与「纯向量函数」，只拒绝前者——纯向量函数体仍按原样透传，
+不会报错。该情况通常不可达：本路径所依据的函数级 `split` 属性由 `OutlineIncoreScopes` 写入，而它
+在同一步就消费掉了 scope；之所以校验而非假定，是因为另一种失败方式是静默的。在加入该校验之前，
+`RollupAffinity` 根本没有 `ScopeStmt` 分支，于是任何被 scope 包裹的函数都汇总为 `SHARED`、被判定
+为非混合，从而**完全未拆分地透传且没有任何诊断**。
+
 ## 显式 `SplitAivScopeStmt` 区域路径
 
 除上述 AUTO 整函数路径外，函数体仍携带一个或多个 `SplitAivScopeStmt` 区域的
@@ -246,24 +254,33 @@ pass 运行时每个区域都必须已不被 scope 包裹——通常由
 [`OutlineIncoreScopes`](08-outline_incore_scopes.md)（pass 8）保证，它会把外围的 `InCore`
 scope 提取为独立函数。
 
-该保证存在一个缺口，故本 pass 选择强制校验而非假定成立：pass 8 只对 `Opaque` /
-`Orchestration` 函数提取 scope，而解析器无论外围函数类型如何，都会把顶层的
-`for aiv_id in pl.split_aiv(...)` 包进一个 `InCore` scope。因此直接声明为
-`pl.FunctionType.InCore` 时，到达此处的区域仍被 scope 包裹：
+pass 8 只对 `Opaque` / `Orchestration` 函数提取 scope，因此声明为
+`pl.FunctionType.InCore` 的函数内部的 scope 会原封不动到达本 pass。该 scope 必须是
+**用户手写的**：解析器不会在那里自行添加——InCore 函数中的顶层区域被裸露地发出，这样打印出来
+的 `*_incore_0` 才能重新解析回同样的 IR；而在这类函数中书写区域本身，也会被更早的
+[`AivSplitValid`](99-verifier.md) 检查 (h) 拒绝：
 
 ```python
 @pl.function(type=pl.FunctionType.InCore)   # pass 8 会跳过该函数
 def f(self, a: pl.Tensor[[128, 128], pl.FP32],
       c: pl.Out[pl.Tensor[[128, 128], pl.FP32]]) -> pl.Tensor[[128, 128], pl.FP32]:
-    for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):   # 被包进 InCore scope
-        base = aiv_id * 64
-        c = pl.store(pl.exp(pl.load(a, [base, 0], [64, 128])), [base, 0], c)
+    with pl.at(level=pl.Level.CORE_GROUP):                   # 不会被提取
+        for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+            base = aiv_id * 64
+            c = pl.store(pl.exp(pl.load(a, [base, 0], [64, 128])), [base, 0], c)
     return c
 ```
 
 下降完成后，`LowerExplicitRegionFunction` 会重新扫描函数体，对任何存活下来的区域抛出
-`ValueError`，并把源位置指向 `pl.split_aiv` 那一行。修复方式：改用普通的 `@pl.function` /
-`@pl.jit`（Opaque）让 pass 8 提取该 scope，或把区域移出外围 scope。
+`ValueError`，并把源位置指向 `pl.split_aiv` 那一行。修复方式：删掉这层多余的 scope，或改用
+普通的 `@pl.function` / `@pl.jit`（Opaque）让 pass 8 提取它。
+
+该重新扫描还会拒绝**其他任何**存活下来的 `ScopeStmt`，以覆盖对称情形：scope 嵌套在区域体
+*内部*。此时区域本身已被消费，故上一条检查会通过——但内层遍历（`LowerStmts`、
+`CheckNoCubeTileHalved`、`ScanRegionHalfWidth`）会跨过该 scope 而不进入，其中的向量算子会以
+全宽被拼接出去，导致两条 AIV lane 都计算整块 tile。该情形从 DSL 不可达（pass 8 会把区域内的
+`with pl.at(...)` 提取为独立函数，检查 (h) 又会拒绝在非提取器产生的 InCore 函数中书写区域），
+因此它守护的是绕过 pass 8 的 IR——手工构造的，或反序列化的 `.pto`。
 
 该守卫也正是 `split_aiv_region_validated` 标记可信的依据：只有当每个区域都确实被消费后才写入
 attrs，因此 [`ExpandMixedKernel`](21-expand_mixed_kernel.md) 凭该标记跳过自身的 func-mode

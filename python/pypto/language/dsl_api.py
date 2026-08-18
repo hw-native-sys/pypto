@@ -959,10 +959,17 @@ def split_aiv(n: int, *, mode: ir.SplitMode) -> SplitAivContext:
     region carrying the requested ``SplitMode``. Because it is a structural node
     (not a whole-InCore-scope flag), it is **nestable**: the region may appear
     inside a ``pl.range`` / ``pl.pipeline`` loop or an ``if``, and sibling regions
-    may carry **different** modes (multi-mode), each lowered independently. A
-    top-level ``for aiv_id in pl.split_aiv(...)`` is wrapped in an enclosing
-    ``InCore`` scope so OutlineIncoreScopes can outline it. The loop variable
-    binds the AIV lane index (equivalent to ``pl.tile.get_subblock_idx()``).
+    may carry **different** modes (multi-mode), each lowered independently. The
+    loop variable binds the AIV lane index (equivalent to
+    ``pl.tile.get_subblock_idx()``).
+
+    A top-level ``for aiv_id in pl.split_aiv(...)`` is wrapped in an enclosing
+    ``InCore`` scope so OutlineIncoreScopes can outline it — unless the region is
+    already in a core context (an open ``pl.at(level=CORE_GROUP)`` scope, or a
+    function declared ``pl.FunctionType.InCore``), where it is emitted in place.
+    A region is CORE_GROUP-level, so **authoring** one directly in an
+    ``InCore`` function is rejected by the ``AivSplitValid`` verifier; write it
+    in a plain ``@pl.function`` / ``@pl.jit`` (Opaque) body instead.
 
     Two dispatch modes:
 

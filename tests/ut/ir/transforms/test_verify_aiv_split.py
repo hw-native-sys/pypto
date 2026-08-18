@@ -89,7 +89,15 @@ def _errors(program) -> list:
 
 
 def _program(body: ir.Stmt, func_type=ir.FunctionType.AIV) -> ir.Program:
-    """Wrap a body statement in a minimal function + program."""
+    """Wrap a body statement in a minimal function + program.
+
+    An ``InCore`` function is stamped ``split_aiv`` to match what
+    ``OutlineIncoreScopes`` puts on a function it mints from a region-bearing
+    CORE_GROUP scope. Check (h) reads that attr as the region's provenance — a
+    region in an InCore function is legal exactly when the outliner produced the
+    function — so hand-built IR standing in for a post-outlining kernel has to
+    carry it, or it models a shape the pipeline never emits.
+    """
     span = ir.Span.unknown()
     data = ir.Var("data", _tile([16, 128]), span)
     out_0 = ir.Var("out_0", ir.TensorType([16, 128], FP32), span)
@@ -100,6 +108,7 @@ def _program(body: ir.Stmt, func_type=ir.FunctionType.AIV) -> ir.Program:
         body,
         span,
         func_type,
+        attrs={"split_aiv": True} if func_type == ir.FunctionType.InCore else None,
     )
     return ir.Program([func], "test_aiv_split", span)
 
@@ -978,6 +987,116 @@ def test_crossing_checks_inert_without_a_region():
     )
 
     assert _errors(program) == []
+
+
+# ---------------------------------------------------------------------------
+# Check (h) — placement: pl.split_aiv is a CORE_GROUP-level construct.
+#
+# It may be opened inside a CORE_GROUP scope (`pl.at(level=...)`) or at the top
+# of an Opaque function (which the parser wraps into exactly such a scope). It
+# may NOT be authored inside a function already declared FunctionType.InCore.
+#
+# The check keys on PROVENANCE, not shape: a region reaches an InCore function
+# legitimately only when OutlineIncoreScopes lifted the enclosing scope into it,
+# which the outliner records with the `split_aiv` attr. Keying on shape instead
+# ("region nested in a surviving InCore scope") would silently stop rejecting
+# anything now that the parser emits a top-level region bare in an InCore body.
+# ---------------------------------------------------------------------------
+
+_PLACEMENT_MSG = "CORE_GROUP-level region"
+
+
+def test_region_in_incore_function_without_provenance_fails():
+    """(h) A region hand-authored in an InCore function is rejected.
+
+    The function carries no `split_aiv` attr, so it is not one the outliner
+    produced — exactly the authoring form the placement rule forbids.
+    """
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def core(
+            self,
+            a: pl.Tensor[[512, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+        ) -> pl.Tensor[[512, 128], pl.FP32]:
+            for _ in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+                out = pl.store(pl.exp(pl.load(a, [0, 0], [128, 128])), [0, 0], out)
+            return out
+
+    # The parser leaves the region bare — no wrapper to lean on, which is why
+    # the check cannot be shape-based.
+    assert "pl.at(" not in ir.python_print(Prog)
+    errs = _errors(Prog)
+    assert len(errs) == 1, errs
+    assert _PLACEMENT_MSG in errs[0].message, errs[0].message
+
+
+def test_region_in_incore_function_under_author_scope_fails():
+    """(h) The same rejection when the author writes the CORE_GROUP scope out."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def core(
+            self,
+            a: pl.Tensor[[512, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+        ) -> pl.Tensor[[512, 128], pl.FP32]:
+            with pl.at(level=pl.Level.CORE_GROUP):
+                for _ in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+                    out = pl.store(pl.exp(pl.load(a, [0, 0], [128, 128])), [0, 0], out)
+            return out
+
+    errs = _errors(Prog)
+    assert len(errs) == 1, errs
+    assert _PLACEMENT_MSG in errs[0].message, errs[0].message
+
+
+def test_region_in_opaque_function_passes():
+    """(h) The canonical authoring form — Opaque function — is accepted."""
+
+    @pl.program
+    class Prog:
+        @pl.function
+        def main(
+            self,
+            a: pl.Tensor[[512, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+        ) -> pl.Tensor[[512, 128], pl.FP32]:
+            for _ in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+                out = pl.store(pl.exp(pl.load(a, [0, 0], [128, 128])), [0, 0], out)
+            return out
+
+    assert _errors(Prog) == []
+
+
+def test_outlined_incore_function_passes():
+    """(h) The post-pass-8 shape is accepted: InCore function, but NO scope left.
+
+    Boundary partner to the rejection above — same InCore function type, and the
+    only difference is that OutlineIncoreScopes consumed the scope. This is what
+    keeps the check from firing on the compiler's own output.
+    """
+
+    @pl.program
+    class Prog:
+        @pl.function
+        def main(
+            self,
+            a: pl.Tensor[[512, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+        ) -> pl.Tensor[[512, 128], pl.FP32]:
+            for _ in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+                out = pl.store(pl.exp(pl.load(a, [0, 0], [128, 128])), [0, 0], out)
+            return out
+
+    with passes.PassContext([]):
+        outlined = passes.outline_incore_scopes()(Prog)
+    incore = [f for f in outlined.functions.values() if f.func_type == ir.FunctionType.InCore]
+    assert len(incore) == 1, "pass 8 should have produced one InCore function"
+    assert _errors(outlined) == []
 
 
 if __name__ == "__main__":
