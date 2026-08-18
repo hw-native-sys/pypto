@@ -599,6 +599,64 @@ class RegionAllocationChecker : public IRVisitor {
   FunctionPtr func_;
 };
 
+/// Rejects a launch whose core count replay cannot reproduce.
+///
+/// Recording stores the launch spec into the node — `logical_block_num =
+/// block_num` — and replay copies it straight back (`slot.logical_block_num =
+/// source.logical_block_num`). Only boundary tensors and boundary *scalar slots*
+/// are refreshed; the block count is not. A `core_num` read from a boundary
+/// scalar is therefore frozen at the first call's value, so a later call asking
+/// for more blocks silently schedules the first call's number and leaves the
+/// rest of the work undone.
+///
+/// The effective core count is resolved the way codegen resolves it — the launch
+/// carries it for a direct `pl.spmd_submit`, the callee for a scope-based
+/// `pl.spmd` or Group wrapper — so the two agree on what is being checked.
+class LaunchSpecChecker : public IRVisitor {
+ public:
+  LaunchSpecChecker(FunctionPtr func, ProgramPtr program)
+      : func_(std::move(func)), program_(std::move(program)) {}
+
+ protected:
+  void VisitExpr_(const CallPtr& op) override {
+    IRVisitor::VisitExpr_(op);
+    Check(alloc_batching::EffectiveCoreNum(op, Callee(op->op_)), op->span_);
+  }
+
+  void VisitExpr_(const SubmitPtr& op) override {
+    IRVisitor::VisitExpr_(op);
+    // `core_num_` is the Submit's own field; the wrapper attr is the fallback,
+    // matching SubmitToCallView's surfacing of kAttrCoreNum.
+    ExprPtr core_num = op->core_num_.value_or(nullptr);
+    if (!core_num) {
+      auto callee = Callee(op->op_);
+      if (callee) core_num = callee->GetAttr<ExprPtr>(kAttrCoreNum, nullptr);
+    }
+    Check(core_num, op->span_);
+  }
+
+ private:
+  [[nodiscard]] FunctionPtr Callee(const OpPtr& callee_op) const {
+    auto gvar = As<GlobalVar>(callee_op);
+    if (!gvar || !program_) return nullptr;
+    return program_->GetFunction(gvar->name_);
+  }
+
+  void Check(const ExprPtr& core_num, const Span& span) const {
+    if (!core_num || IsLiteralScalarExpr(core_num)) return;
+    CHECK_SPAN(false, span)
+        << "Graph function '" << func_->name_
+        << "' launches a task whose core_num is not a compile-time constant. Recording copies the "
+           "launch spec into the node and replay restores it unchanged — only boundary tensors and "
+           "scalars are patched — so the first call's block count would be replayed for every later "
+           "call, leaving the rest of the work unexecuted. Use a constant core_num inside the Graph, "
+           "or move the launch to the call site.";
+  }
+
+  FunctionPtr func_;
+  ProgramPtr program_;
+};
+
 void CheckRegionAllocations(const FunctionPtr& func) {
   RegionAllocationChecker checker(func);
   checker.VisitStmt(func->body_);
@@ -643,9 +701,14 @@ class NestedGraphChecker : public IRVisitor {
 void CheckGraphSignature(const FunctionPtr& func) {
   size_t tensor_params = 0;
   size_t scalar_params = 0;
+  // `param_directions_` is not guaranteed to be as long as `params_` at every
+  // point in the pipeline — `window_externalization` guards the same access —
+  // and a Graph reaches this check before the pass that would normalise it. A
+  // missing entry is not a legality violation to report, so treat it as the
+  // default `In` rather than reading out of bounds.
   for (size_t i = 0; i < func->params_.size(); ++i) {
     const auto& param = func->params_[i];
-    const auto dir = func->param_directions_[i];
+    const auto dir = i < func->param_directions_.size() ? func->param_directions_[i] : ParamDirection::In;
     if (IsScalarType(param->GetType())) {
       CHECK_SPAN(dir == ParamDirection::In, param->span_)
           << "Graph function '" << func->name_ << "' declares scalar parameter '" << param->name_hint_
@@ -682,7 +745,7 @@ void CheckGraphSignature(const FunctionPtr& func) {
          "the call site and pass fewer, or split the region.";
 }
 
-/// Rejects a Graph returning anything other than one of its own parameters.
+/// Rejects a Graph that returns a value the caller could consume.
 ///
 /// `return c` where `c` is an InOut parameter is the DSL's spelling for writing
 /// in place, and lowers to an alias rather than a value — that is fine. A
@@ -840,7 +903,29 @@ class CallSiteExtender : public IRMutator {
                                     submit->sync_start_, submit->allow_early_resolve_, submit->predicate_);
   }
 
+  /// Splice any bindings synthesised while rewriting this statement's
+  /// expression in ahead of it.
+  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+    pending_prefix_.clear();
+    auto stmt = IRMutator::VisitStmt_(op);
+    return WithPrefix(std::move(stmt), op->span_);
+  }
+
+  StmtPtr VisitStmt_(const EvalStmtPtr& op) override {
+    pending_prefix_.clear();
+    auto stmt = IRMutator::VisitStmt_(op);
+    return WithPrefix(std::move(stmt), op->span_);
+  }
+
  private:
+  [[nodiscard]] StmtPtr WithPrefix(StmtPtr stmt, const Span& span) {
+    if (pending_prefix_.empty()) return stmt;
+    std::vector<StmtPtr> stmts = std::move(pending_prefix_);
+    pending_prefix_.clear();
+    stmts.push_back(std::move(stmt));
+    return SeqStmts::Flatten(std::move(stmts), span);
+  }
+
   [[nodiscard]] const GraphPlan* LookupPlan(const OpPtr& op) const {
     auto gvar = As<GlobalVar>(op);
     if (!gvar || !program_) return nullptr;
@@ -849,8 +934,14 @@ class CallSiteExtender : public IRMutator {
   }
 
   /// Rebuild each hoisted expression against this call site's actual arguments.
+  ///
+  /// Each rebuilt value is bound to a fresh local rather than inlined into the
+  /// argument list: orchestration codegen accepts only a Var or a literal as an
+  /// argument, so an inline `i * 5120` would fail there. The binding statements
+  /// accumulate in `pending_prefix_` and the statement overrides splice them in
+  /// immediately before the call.
   [[nodiscard]] std::vector<ExprPtr> AppendHoistedArgs(const GraphPlan& plan, const OpPtr& callee_op,
-                                                       const std::vector<ExprPtr>& old_args) const {
+                                                       const std::vector<ExprPtr>& old_args) {
     auto gvar = As<GlobalVar>(callee_op);
     auto callee = program_->GetFunction(gvar->name_);
     INTERNAL_CHECK(callee) << "Internal error: planned Graph '" << plan.name << "' not found in program";
@@ -875,8 +966,14 @@ class CallSiteExtender : public IRMutator {
     size_t next_alias = 0;
     auto emit_hoist = [&](const HoistedScalar& h) {
       auto value = SubstituteAtCallSite(h.value, binding);
-      args.push_back(value);
-      binding[h.original.get()] = value;
+      // Bound to a local, not spliced in as an expression: codegen emits a
+      // boundary scalar as `const uint64_t&` into the argument slot, so the
+      // value needs an addressable home at the call site.
+      auto local = std::make_shared<Var>(h.param->name_hint_ + "__graph_arg" + std::to_string(next_local_++),
+                                         h.param->GetType(), h.param->span_);
+      pending_prefix_.push_back(std::make_shared<AssignStmt>(local, value, h.param->span_));
+      args.push_back(local);
+      binding[h.original.get()] = local;
     };
     auto emit_alias = [&](const std::pair<const Var*, VarPtr>& a) {
       auto it = binding.find(a.second.get());
@@ -908,6 +1005,8 @@ class CallSiteExtender : public IRMutator {
 
   ProgramPtr program_;
   const std::unordered_map<std::string, GraphPlan>& plans_;
+  std::vector<StmtPtr> pending_prefix_;
+  int next_local_ = 0;
 };
 
 [[nodiscard]] ProgramPtr TransformProgram(const ProgramPtr& program) {
@@ -930,6 +1029,9 @@ class CallSiteExtender : public IRMutator {
     if (!func->body_) continue;
 
     CheckRegionAllocations(func);
+
+    LaunchSpecChecker launch_spec(func, program);
+    launch_spec.VisitStmt(func->body_);
 
     NestedGraphChecker nested(func, program);
     nested.VisitStmt(func->body_);
@@ -985,6 +1087,11 @@ class CallSiteExtender : public IRMutator {
       std::unordered_set<const Var*> hoistable;  // all hoistable values are now params
       UnhoistableScalarChecker checker(func, hoistable);
       checker.VisitStmt(func->body_);
+      // Also after the rewrite: Step A turns a derived scalar into a parameter,
+      // which does not make it replay-stable as a *launch spec* — only as an
+      // argument.
+      LaunchSpecChecker launch_spec(func, result);
+      launch_spec.VisitStmt(func->body_);
       continue;
     }
     GraphCallSiteChecker call_checker(func, result);

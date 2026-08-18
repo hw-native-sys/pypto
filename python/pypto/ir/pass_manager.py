@@ -537,6 +537,7 @@ class PassManager:
         # *during* pass execution) whenever the pipeline dumps IR.
         mplan = ctx.get_memory_planner() if ctx else passes.MemoryPlanner.PYPTO
         dbc_flag = ctx.get_enable_pypto_l0c_double_buffer() if ctx else False
+        runtime = ctx.get_runtime() if ctx else passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
         outer_phase = ctx.get_diagnostic_phase() if ctx else passes.get_default_diagnostic_phase()
         if outer_phase == passes.DiagnosticPhase.POST_PASS:
             inner_phase = passes.DiagnosticPhase.PRE_PIPELINE
@@ -544,7 +545,7 @@ class PassManager:
             inner_phase = outer_phase
 
         with passes.PassContext(
-            [*outer_instruments, *extra_instruments], level, inner_phase, disabled, mplan, dbc_flag
+            [*outer_instruments, *extra_instruments], level, inner_phase, disabled, mplan, dbc_flag, runtime
         ):
             try:
                 return self._pipeline.run(input_ir)
@@ -576,10 +577,12 @@ class PassManager:
         ctx = passes.PassContext.current()
         outer_instruments = list(ctx.get_instruments()) if ctx else []
         level = ctx.get_verification_level() if ctx else passes.get_default_verification_level()
-        # Propagate the outer memory planner + legacy-PYPTO dbC=2 opt-in (see run_passes)
-        # so profiling doesn't silently reset them and disable planner-gated behaviour.
+        # Propagate the outer memory planner, the legacy-PYPTO dbC=2 opt-in and the
+        # runtime ABI (see run_passes) so profiling doesn't silently reset them and
+        # disable planner- or runtime-gated behaviour.
         mplan = ctx.get_memory_planner() if ctx else passes.MemoryPlanner.PYPTO
         dbc_flag = ctx.get_enable_pypto_l0c_double_buffer() if ctx else False
+        runtime = ctx.get_runtime() if ctx else passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
         dphase = ctx.get_diagnostic_phase() if ctx else passes.get_default_diagnostic_phase()
         if ctx:
             disabled = ctx.get_disabled_diagnostics()
@@ -588,7 +591,7 @@ class PassManager:
             disabled.insert(passes.DiagnosticCheck.UnusedControlFlowResult)
 
         with passes.PassContext(
-            [*outer_instruments, timing_instrument], level, dphase, disabled, mplan, dbc_flag
+            [*outer_instruments, timing_instrument], level, dphase, disabled, mplan, dbc_flag, runtime
         ):
             try:
                 return self._pipeline.run(input_ir)

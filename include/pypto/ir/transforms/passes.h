@@ -279,9 +279,13 @@ Pass MaterializeValidShapeSymbols();
  *
  * Also rejects, at compile time, the boundary shapes the runtime would decline
  * to cache — an oversized or empty tensor boundary, runtime-allocated outputs,
- * return values, nested graphs, and call sites carrying explicit dependencies or
- * a dispatch predicate. Almost all of those degrade to a silent non-graph
- * fallback at runtime, which no numerical test can detect.
+ * a *computed* return value, nested graphs, and call sites carrying explicit
+ * dependencies or a dispatch predicate. Returning a parameter is allowed:
+ * `return c` for an `InOut` parameter is the DSL's spelling for writing in place
+ * and lowers to an alias, so only a genuinely new value is refused —
+ * `rt_submit_graph` yields a valid task id solely on a cache hit, so nothing may
+ * depend on a graph call's result. Almost all of those degrade to a silent
+ * non-graph fallback at runtime, which no numerical test can detect.
  *
  * @return Program-level pass
  */

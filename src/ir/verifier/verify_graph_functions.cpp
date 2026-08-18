@@ -227,9 +227,12 @@ void VerifySignature(const FunctionPtr& func, std::vector<Diagnostic>& diagnosti
 
   size_t tensor_params = 0;
   size_t scalar_params = 0;
+  // `param_directions_` may be shorter than `params_` at some points in the
+  // pipeline, so a missing entry reads as the default `In` rather than out of
+  // bounds — matching the guard in `window_externalization`.
   for (size_t i = 0; i < func->params_.size(); ++i) {
     const auto& param = func->params_[i];
-    const auto dir = func->param_directions_[i];
+    const auto dir = i < func->param_directions_.size() ? func->param_directions_[i] : ParamDirection::In;
     if (As<ScalarType>(param->GetType()) != nullptr) {
       if (dir != ParamDirection::In) {
         report("declares scalar parameter '" + param->name_hint_ +
@@ -238,6 +241,18 @@ void VerifySignature(const FunctionPtr& func, std::vector<Diagnostic>& diagnosti
                param->span_);
       }
       ++scalar_params;
+      continue;
+    }
+    // Only a tensor is a tensor boundary. `GenerateGraphFunctions` binds a
+    // parameter through `args.tensor(i).ref()` when `AsTensorTypeLike` holds and
+    // through `args.scalar(k)` otherwise, so counting every non-scalar as a
+    // tensor would let a Tile, Tuple or pointer-like parameter verify as a
+    // boundary tensor and then take the scalar ABI in codegen.
+    if (!AsTensorTypeLike(param->GetType())) {
+      report("declares parameter '" + param->name_hint_ +
+                 "' as neither a tensor nor a scalar. A Graph boundary carries only tensors and "
+                 "scalars; codegen would bind this one through the scalar argument slot.",
+             param->span_);
       continue;
     }
     ++tensor_params;
@@ -296,6 +311,7 @@ class GraphBodyChecker : public IRVisitor {
   void VisitExpr_(const CallPtr& op) override {
     IRVisitor::VisitExpr_(op);
     CheckAllocation(op);
+    CheckLaunchSpec(alloc_batching::EffectiveCoreNum(op, Callee(op->op_)), op->span_);
     if (!IsTaskLaunch(op)) return;
     count_ = SatAdd(count_, 1);
     CheckArity(op->op_, op->args_.size(), /*is_submit=*/false, op->span_);
@@ -304,6 +320,12 @@ class GraphBodyChecker : public IRVisitor {
 
   void VisitExpr_(const SubmitPtr& op) override {
     IRVisitor::VisitExpr_(op);
+    ExprPtr submit_core_num = op->core_num_.value_or(nullptr);
+    if (!submit_core_num) {
+      auto callee = Callee(op->op_);
+      if (callee) submit_core_num = callee->GetAttr<ExprPtr>(kAttrCoreNum, nullptr);
+    }
+    CheckLaunchSpec(submit_core_num, op->span_);
     count_ = SatAdd(count_, 1);
     CheckArity(op->op_, op->args_.size(), /*is_submit=*/true, op->span_);
     CheckScalarArgs(op->args_, op->span_);
@@ -406,6 +428,26 @@ class GraphBodyChecker : public IRVisitor {
     }
   }
 
+  [[nodiscard]] FunctionPtr Callee(const OpPtr& callee_op) const {
+    auto gvar = As<GlobalVar>(callee_op);
+    if (!gvar || !program_) return nullptr;
+    return program_->GetFunction(gvar->name_);
+  }
+
+  /// A launch spec is frozen into the recorded node, not patched on replay.
+  ///
+  /// Replay restores `slot.logical_block_num = source.logical_block_num` from the
+  /// Definition and refreshes only boundary tensors and scalar slots, so a
+  /// `core_num` reading a boundary scalar replays the first call's block count
+  /// and silently leaves the rest of the work unscheduled.
+  void CheckLaunchSpec(const ExprPtr& core_num, const Span& span) {
+    if (!core_num || IsLiteralScalarExpr(core_num)) return;
+    Report(
+        "launches a task whose core_num is not a compile-time constant; recording freezes the launch "
+        "spec into the node and replay restores it unchanged.",
+        span);
+  }
+
   void Report(const std::string& message, const Span& span) {
     diagnostics_.emplace_back(DiagnosticSeverity::Error, "GraphBoundaryLegalized", 0,
                               "Graph function '" + func_->name_ + "' " + message, span);
@@ -435,7 +477,9 @@ class GraphBodyChecker : public IRVisitor {
     // lets it through here and fails much later, as an INTERNAL_CHECK in
     // codegen's direction handling.
     for (size_t i = argc; i < params; ++i) {
-      if (callee->param_directions_[i] == ParamDirection::Out) continue;
+      if (i < callee->param_directions_.size() && callee->param_directions_[i] == ParamDirection::Out) {
+        continue;
+      }
       Report("launches '" + callee->name_ + "' without supplying '" + callee->params_[i]->name_hint_ +
                  "', which is not an Out parameter. A Submit may omit only a runtime-allocated Out "
                  "tail.",

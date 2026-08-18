@@ -323,6 +323,127 @@ class TestDerivedScalarHoisting:
         ir.assert_structural_equal(ssa, After)
 
 
+class TestLaunchSpec:
+    """`core_num` is frozen into the recorded node, not patched on replay.
+
+    Recording stores `logical_block_num = block_num` and replay copies it back
+    from the Definition (`slot.logical_block_num = source.logical_block_num`);
+    only boundary tensors and scalar slots are refreshed. A `core_num` read from
+    a boundary scalar therefore replays call one's block count for every later
+    call — the rest of the blocks are never scheduled, with no diagnostic.
+    """
+
+    def test_core_num_from_a_boundary_scalar_is_rejected(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                x: pl.Tensor[[128, 128], pl.FP32],
+                o: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                t: pl.Tile[[128, 128], pl.FP32] = pl.load(x, [0, 0], [128, 128])
+                o = pl.store(t, [0, 0], o)
+                return o
+
+            @pl.function(type=pl.FunctionType.Graph)
+            def layer(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+                blocks: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                with pl.manual_scope():
+                    c, _ = pl.spmd_submit(self.kernel, a, c, core_num=blocks)
+                return c
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                c = self.layer(a, c, 4)
+                return c
+
+        with pytest.raises(ValueError, match="core_num is not a compile-time constant"):
+            _legalize_outlined(Before)
+
+    def test_core_num_derived_from_a_boundary_scalar_is_rejected(self):
+        """Step A would hoist `blocks * 2` into a parameter, which makes it a
+        replay-patchable *argument* but not a replay-patchable *launch spec*."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                x: pl.Tensor[[128, 128], pl.FP32],
+                o: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                t: pl.Tile[[128, 128], pl.FP32] = pl.load(x, [0, 0], [128, 128])
+                o = pl.store(t, [0, 0], o)
+                return o
+
+            @pl.function(type=pl.FunctionType.Graph)
+            def layer(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+                blocks: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                with pl.manual_scope():
+                    c, _ = pl.spmd_submit(self.kernel, a, c, core_num=blocks * 2)
+                return c
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                c = self.layer(a, c, 4)
+                return c
+
+        with pytest.raises(ValueError, match="core_num is not a compile-time constant"):
+            _legalize_outlined(Before)
+
+    def test_constant_core_num_is_accepted(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                x: pl.Tensor[[128, 128], pl.FP32],
+                o: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                t: pl.Tile[[128, 128], pl.FP32] = pl.load(x, [0, 0], [128, 128])
+                o = pl.store(t, [0, 0], o)
+                return o
+
+            @pl.function(type=pl.FunctionType.Graph)
+            def layer(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+                blocks: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                with pl.manual_scope():
+                    c, _ = pl.spmd_submit(self.kernel, a, c, core_num=4)
+                return c
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                c = self.layer(a, c, 4)
+                return c
+
+        _legalize_outlined(Before)
+
+
 # ---------------------------------------------------------------------------
 # Step D — boundaries the runtime could not cache
 # ---------------------------------------------------------------------------
@@ -343,7 +464,13 @@ class TestBoundaryLegality:
         with pytest.raises(ValueError, match="empty boundary"):
             _legalize(Before)
 
-    def test_graph_returning_a_value_is_rejected(self):
+    def test_graph_returning_a_computed_value_is_rejected(self):
+        """A return that aliases an InOut parameter is fine; a computed one is not.
+
+        ``rt_submit_graph`` yields a valid task id only on a cache hit, so a
+        graph cannot hand a computed value back to its caller.
+        """
+
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.Graph)
