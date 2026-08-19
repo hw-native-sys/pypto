@@ -132,14 +132,14 @@ a, tid = pl.spmd_submit(self.k1, x, core_num=8)
 
 `timing_slot=N` (`N` is an integer literal from `0` through `15`) tags one task
 for device timing. The runtime emits one span for each slot: from the earliest
-dispatch to the latest completion among all tasks tagged with that slot. Tag the
-all-gather and GEMM tasks with the same slot to measure their combined device
-region, while leaving warmup and an alignment barrier untagged:
+dispatch to the latest completion among all tasks tagged with that slot. Tag two
+related tasks with the same slot to measure their combined device region, while
+leaving warmup and an alignment barrier untagged:
 
 ```python
-_, barrier_tid = pl.submit(self.all_rank_barrier, signal)
-gathered, _ = pl.spmd_submit(self.gather, x, core_num=N, deps=[barrier_tid], timing_slot=0)
-out, _ = pl.spmd_submit(self.gemm, gathered, w, core_num=N, deps=[barrier_tid], timing_slot=0)
+_, barrier_tid = pl.submit(self.warmup_barrier, signal)
+mid, _ = pl.spmd_submit(self.stage_a, x, core_num=N, deps=[barrier_tid], timing_slot=0)
+out, _ = pl.spmd_submit(self.stage_b, mid, w, core_num=N, deps=[barrier_tid], timing_slot=0)
 ```
 
 The resulting trace span is named
