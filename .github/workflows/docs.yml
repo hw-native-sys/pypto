@@ -20,7 +20,6 @@ name: Docs
 on:
   push:
     branches: [ "main" ]
-  pull_request:
   # Republish without a code change, and exercise the deploy path on demand.
   workflow_dispatch:
 
