@@ -88,6 +88,142 @@ The `run_verifier()` utility creates a standalone `Pass` for ad-hoc use in custo
 | **TileMemoryInferred** | TileMemoryInferred | Every `TileType` variable **bound by an `AssignStmt`** carries a resolved `memory_space_`, **and** every constrained argument of a `Call` (in an `AssignStmt` or `EvalStmt`) sits in a space the op's registered `input_constraints` allow (`set_input_memory`). The visitor walks those two statement kinds only, so `ForStmt` `iter_args_` / `return_vars_` and `IfStmt` `return_vars_` annotations are **not** checked. The second half is the load-bearing one: an op whose declared input space is violated has no legal lowering, and the symptom always surfaces far downstream. `tile.cast` requires `Vec`; fed an `Acc` operand it leaves the cube→vector cut with no boundary `tile.move`, so `ExpandMixedKernel` splits the kernel with the cast referencing a var defined only on the cube half — the failure then lands 11+ passes later as an illegal `Acc->Acc tile.move` in `MemoryReuse` or as `no MLIR mapping for MemRef base` in PTO codegen, neither of which names the offending op. The verifier reads the `TileType` annotation directly rather than the analyzer's `var_memory_` map, so it stays honest about spaces the analyzer failed to record. **Produced by** `InferTileMemorySpace` and listed in `GetVerifiedProperties()`, so `PassPipeline` auto-verifies it right after that pass. **Fix**: the pass inserts the required `tile.move` itself; a failure here is a compiler bug in `InferTileMemorySpace`, not an authoring error. |
 | **AtomicAddDtypeValid** | AtomicAddDtypeValid | Every atomic-add write into global memory targets a destination dtype the backend's store pipe can combine. Covers every atomic site in one place: `tile.store`, `tensor.assemble`, `pld.tensor.put`, `pld.tile.put`, `pld.tensor.remote_store` and `pld.tile.remote_store`. Only `bf16` varies by backend — pto-isa lowers it to `SetAtomicAdd<bfloat16_t>` -> `set_atomic_bf16`, honoured on Ascend910B (A2/A3) and not on Ascend950 (A5) (`BackendHandler::SupportsBf16AtomicAdd`); the remaining hardware atomic-add dtypes (`FP32/FP16/INT32/INT16/INT8`) are accepted everywhere and gated backend-neutrally in the op deducers. The remote-put path is the *same* mechanism as the local store, not a parallel one: pto-isa's comm `TPut` streams the transfer through its VEC staging tile and lands each chunk with `TSTORE_IMPL<..., AtomicAdd>`, and `remote_store` emits a `pto.tstore` directly, so one predicate governs every site — and ptoas carries no atomic dtype rule of its own (`TPutOp::verify` checks element-type agreement and shapes only), so without this check the program reaches a pto-isa `static_assert` in generated code the user never wrote. Listed in **`GetStructuralProperties()`**, not produced by any pass: nothing here depends on lowering (the atomic kwarg and the destination dtype are present in the user's own IR), so `PassPipeline` verifies it at `pipeline_input` and the error carries the original `Span`. Skipped when the backend is unconfigured (nothing to verify against). **Fix**: accumulate into an `FP32` tensor and cast to `bf16` after the reduction. |
 
+### InParamWritten
+
+**Warning**: `DiagnosticCheck::InParamWritten` — a parameter declared `In` is
+written by its own function body.
+
+This is a **warning, not an `IRProperty`**, and the distinction is load-bearing
+rather than cosmetic. See "Why it is not a property" below.
+
+**What it proves, and what it does not.** Every pass that derives directions
+builds a set of "which argument does this call write", and it reads that set
+from each operator's registry declaration (`set_arg_effect`, see
+[Operators](../ir/05-operators.md#argument-effects)) plus each callee's own
+`param_directions_`. This check reads the *same two declarations* and reports
+where they contradict a parameter's own `In`. That makes it a consistency check
+over the declared write semantics — not an independent discovery of them.
+
+The distinction matters, because the failure that motivated the work is the
+*missing* declaration: an operator that never declared its effects reads as a
+pure consumer, its write disappears, the parameter stays `In`, no RAW edge is
+emitted against it, and the symptom surfaces on device as a race or a scheduler
+deadlock rather than at compile time. `pld.system.notify` shipped that way
+(#2391) and `tile.mscatter` was still in that state when this check was written.
+**This verifier cannot catch that class.** For an operator with no declared
+effect, `CallWriteTargets` returns nothing and the check is silent — it is
+reading the very declaration that is absent.
+
+Nor is the gap closed elsewhere, and it is worth being exact about how far the
+registry gate reaches. `ValidateArgEffects` fires on two shapes only:
+
+- an operator that declares `set_output_reuses_input(N)` without classifying
+  argument `N`, and
+- an operator that declares a write channel while writing through no argument.
+
+An operator with **neither** — no reuse contract, no write channel — trips
+neither gate. `pld.system.notify` is exactly that shape: drop its
+`set_arg_effect` and it passes registration *and* this verifier, silently, just
+as it did in #2391. The original production failure class is therefore **not**
+universally closed by these two checks together; what they cover is an operator
+that has already said something about itself and said it incompletely.
+
+What this check does buy: once `tile.mscatter` and `pld.system.notify` carry
+declarations, it stops a caller from re-declaring their destination `In`, and it
+covers every cross-function call, where the callee's own signature is the
+declaration and no registry entry is involved.
+
+**How it runs.** Registered as `DiagnosticCheck::InParamWritten`, a **warning**
+at `DiagnosticPhase::PostPipeline`. It is reachable only through the diagnostic
+registry, which is what makes it a warning:
+
+```python
+checks = passes.DiagnosticCheckSet()
+checks.insert(passes.DiagnosticCheck.InParamWritten)
+diagnostics = passes.DiagnosticCheckRegistry.run_checks(
+    checks, passes.DiagnosticPhase.POST_PIPELINE, program
+)
+```
+
+**Why it is not a property.** A property is a claim the compiler can stand
+behind, and this one cannot be. The check has to run after `DeriveCallDirections`
+(pass 37) — a wrapper's signature legitimately reads `In` until then — and
+`InitMemRef` (pass 31) declares `.invalidated = {IRProperty::SSAForm}` with
+nothing re-establishing it. **No pipeline position is both after pass 37 and in
+SSA form.** The buffer lineage below has no merging at a join, which is exact
+only when each name has one definition, so on the IR it actually receives it can
+both miss a write and attribute one to a buffer the write reaches on no path:
+
+- a view built inside a branch leaks its lineage past the join, so a write after
+  the branch may be blamed on a buffer only the taken path names; and
+- `BufferRootCollector` scans the whole body up front, so a rebound name carries
+  one final mapping that is applied to earlier writes too.
+
+Both shapes are pinned in `tests/ut/ir/verifier/test_in_param_written.py`, the
+first as a strict `xfail` so that fixing it fails the test. A report is a signal
+to go and look; silence proves nothing. Making this sound means a real
+control-flow dataflow analysis with join merging and candidate-set lineage —
+separate work, and a fourth alias model in a tree that already has three.
+
+Three choices are load-bearing:
+
+- **On the finished program, not after one pass.** A Group/Spmd wrapper forwards
+  its parameters to an inner kernel, and its own signature legitimately reads
+  `In` for a parameter that kernel writes until `DeriveCallDirections` phase 0
+  materialises the effective directions back into the IR. The invariant only
+  holds once the pipeline is done.
+- **Orchestration functions are skipped.** Their directions are the user's
+  declaration and their parameters are the host ABI — a pure `Out` parameter is
+  auto-allocated by the host in return-style calls, so flipping one is a
+  migration the user makes, not an inference the compiler completes.
+- **A warning, not an error.** It never invents a write, but it does report
+  programs that compile and run today; the promotion path is the `IRProperty`
+  above, once the report is empty.
+
+**Zero-copy views are followed.** A write through a view of a parameter is a
+write to the parameter:
+
+```python
+view = pl.tile.slice(acc, [8, 128], [0, 0])   # acc declared In
+view = pl.tile.assemble(view, src, [0, 0])    # writes acc's buffer
+```
+
+Two shared declarations decide what a value names, and neither is a list kept
+here: `ResultAliasedArgIndex` (the operator returns the argument it updated —
+`tensor.assemble`, `tensor.write`, the collectives) and
+`op_predicates::IsBufferAliasingViewOp`, which reads
+`OutputMemoryInheritsInput() && IsInplaceSafe()` — the zero-copy views, which
+update nothing and so declare no reuse contract. `tile.transpose` falls out of
+the second by its own `not_inplace_safe()` registration: it permutes into a fresh
+buffer, so its output is not an alias of its input, and any future inherit-input
+op registered the same way is excluded without an edit here.
+
+`tensor.slice` is one of those views, so a store into a slice of a parameter *is*
+reported — even though `BufferRootCollector` deliberately maps it to a fresh
+root. The chain is resolved inside the verifier rather than in that collector,
+which three other passes share; widening what counts as an alias for all of them
+is a separate change.
+
+**SSA is a precondition.** The lineage is a single environment with no merging
+at a join, which is sound exactly when each name has one definition — and
+`PostPipeline` guarantees that. On pre-SSA input it is unsound in both
+directions: a branch that re-points a name leaks its lineage past the join
+(blaming a buffer the write does not reach when the branch is not taken), and a
+plain `t = buf1; ...; t = buf2` gives `BufferRootCollector` one final mapping for
+two different buffers. A direct caller must convert first.
+
+Lineage is *not* carried across a phi (`return_vars_` / `iter_args_`), so a view
+write after a branch or loop under-reports — the safe direction. The source is
+resolved when the binding is recorded, so a lookup is a single map read and the
+walk stays linear in the body.
+
+**Fix**: declare the parameter `pl.Out` (written, never read) or `pl.InOut`
+(read and written). Adding `.set_arg_effect(...)` is *not* the fix for a report
+from this check — a builtin appears here only because its effect is already
+declared, and a cross-function writer is a user function with no `REGISTER_OP`
+block. A missing effect is the registry gap described above, which this check
+cannot see.
+
 ### SSAVerify
 
 **Error types** (`ssa::ErrorType`):

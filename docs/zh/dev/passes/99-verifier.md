@@ -88,6 +88,112 @@
 | **TileMemoryInferred** | TileMemoryInferred | 每个**由 `AssignStmt` 绑定的** `TileType` 变量都已解析出 `memory_space_`，**并且** `Call`（位于 `AssignStmt` 或 `EvalStmt` 中）的每个受约束实参所在的空间都在该算子注册的 `input_constraints`（`set_input_memory`）允许范围内。该访问器只遍历这两类语句，因此 `ForStmt` 的 `iter_args_` / `return_vars_` 以及 `IfStmt` 的 `return_vars_` 标注**不在**检查范围内。后者才是关键：违反声明输入空间的算子没有合法下降路径，症状总是出现在很远的下游。`tile.cast` 要求 `Vec`；若喂入 `Acc` 实参，cube→vector 的切分点就没有边界 `tile.move`，于是 `ExpandMixedKernel` 切分出的 kernel 中，cast 引用了只在 cube 侧定义的变量——失败要到 11 个以上 pass 之后才浮现：或是 `MemoryReuse` 中非法的 `Acc->Acc tile.move`，或是 PTO codegen 的 `no MLIR mapping for MemRef base`，两者都不会指出真正出错的算子。该校验器直接读取 `TileType` 标注，而非分析阶段的 `var_memory_` 映射，因此对分析阶段漏记的空间依然如实报告。**由** `InferTileMemorySpace` **产生**并列入 `GetVerifiedProperties()`，故 `PassPipeline` 在该 pass 之后立即自动验证。**修复方式**：该 pass 会自行插入所需的 `tile.move`；此处报错属于 `InferTileMemorySpace` 的编译器缺陷，而非用户编写错误。 |
 | **AtomicAddDtypeValid** | AtomicAddDtypeValid | 每个写入全局内存的原子加操作，其目标 dtype 必须是后端 store 流水能够合并的类型。该校验在一处覆盖全部原子写入点：`tile.store`、`tensor.assemble`、`pld.tensor.put`、`pld.tile.put`、`pld.tensor.remote_store` 和 `pld.tile.remote_store`。只有 `bf16` 因后端而异——pto-isa 将其下降为 `SetAtomicAdd<bfloat16_t>` -> `set_atomic_bf16`，Ascend910B（A2/A3）支持而 Ascend950（A5）不支持（`BackendHandler::SupportsBf16AtomicAdd`）；其余硬件原子加 dtype（`FP32/FP16/INT32/INT16/INT8`）在所有后端均可用，由各算子 deducer 以后端无关的方式把关。远程 put 路径与本地 store 是**同一套机制**而非并行机制：pto-isa 的 comm `TPut` 通过 VEC 暂存 tile 流式传输，并用 `TSTORE_IMPL<..., AtomicAdd>` 落盘每个分块，而 `remote_store` 直接发射 `pto.tstore`，因此一个判定式即可管住全部写入点；而 ptoas 自身没有原子 dtype 规则（`TPutOp::verify` 只检查元素类型一致性与 shape），缺少此检查时程序会一路走到生成代码中的 pto-isa `static_assert`，而那段代码并非用户所写。列入 **`GetStructuralProperties()`**，且不由任何 Pass 产生：这里不依赖任何下降结果（atomic kwarg 与目标 dtype 在用户自己的 IR 中即已存在），因此 `PassPipeline` 在 `pipeline_input` 阶段验证，错误携带原始 `Span`。当后端未配置（无可校验的依据）时跳过。**修复方式**：累加到 `FP32` tensor，在归约完成后再转换为 `bf16`。 |
 
+### InParamWritten
+
+**警告**：`DiagnosticCheck::InParamWritten` —— 声明为 `In` 的参数被其所在函数体写入。
+
+这是一个**警告，而非 `IRProperty`**，这个区分是实质性的而非措辞问题。见下文"为何不是属性"。
+
+**它证明什么，不证明什么。** 每个推导方向的 pass 都要构建一份"这次调用写哪个实参"
+的集合，而该集合来自算子在注册表上的声明（`set_arg_effect`，参见
+[算子](../ir/05-operators.md#参数效应argument-effects)）以及各被调函数自身的
+`param_directions_`。本检查读取的是**同样这两份声明**，报告它们与参数自身 `In` 声明
+相矛盾之处。因此它是一道**针对已声明写语义的一致性检查**，而不是对写语义的独立发现。
+
+这个区分很重要，因为催生这项工作的故障恰恰是**声明缺失**：从未声明效应的算子会被读成
+纯消费者，它的写入消失，参数停留在 `In`，不会对它发出 RAW 边，症状不在编译期暴露，而是
+在设备上表现为竞争或调度死锁。`pld.system.notify` 就是这样上线的（#2391），而
+`tile.mscatter` 在本检查写下时仍处于同样状态。**本校验器无法发现这一类问题。** 对于没有
+声明效应的算子，`CallWriteTargets` 返回空集，检查保持沉默——它读的正是那份缺失的声明。
+
+这个缺口在别处也没有被堵住，注册表门禁到底覆盖多远需要说准。`ValidateArgEffects` 只对
+两种形态开火：
+
+- 声明了 `set_output_reuses_input(N)` 却没有对实参 `N` 分类的算子；
+- 声明了 write channel 却不通过任何实参写入的算子。
+
+**两者皆无**的算子——既无复用契约、也无 write channel——两道门都不碰。`pld.system.notify`
+正是这种形态：去掉它的 `set_arg_effect`，它会同时静默通过注册门禁**和**本校验器，与 #2391
+当时一模一样。因此这两项检查合起来**并未**普遍封住最初那类生产故障；它们覆盖的是"已经
+对自己有所声明、但声明不完整"的算子。
+
+本检查真正带来的是：`tile.mscatter` 与 `pld.system.notify` 补上声明之后，它阻止调用方把
+目标参数重新声明为 `In`；并且它覆盖全部跨函数调用——那里被调函数自身的签名就是声明，
+不涉及任何注册表条目。
+
+**运行方式。** 注册为 `DiagnosticCheck::InParamWritten`，在
+`DiagnosticPhase::PostPipeline` 上作为**警告**运行。
+它只能经诊断注册表触达——这正是它作为警告的体现：
+
+```python
+checks = passes.DiagnosticCheckSet()
+checks.insert(passes.DiagnosticCheck.InParamWritten)
+diagnostics = passes.DiagnosticCheckRegistry.run_checks(
+    checks, passes.DiagnosticPhase.POST_PIPELINE, program
+)
+```
+
+**为何不是属性。** 属性是编译器可以担保的论断，而这一条担保不了。该检查必须在
+`DeriveCallDirections`（pass 37）之后运行——在那之前 wrapper 的签名读作 `In` 是合法的；
+而 `InitMemRef`（pass 31）声明了 `.invalidated = {IRProperty::SSAForm}`，此后无人重建。
+**流水线中不存在既在 pass 37 之后、又处于 SSA 形式的位置。** 下文的 buffer lineage 在汇合点
+不做合并，其精确性只在"每个名字一个定义"时成立，因此在它实际收到的 IR 上，两个方向都可能出错：
+
+- 分支内建立的 view 会把 lineage 泄漏过汇合点，分支之后的写入可能被归咎于只有该路径才命名的
+  buffer；
+- `BufferRootCollector` 预先扫描整个函数体，重新绑定的名字只有一份最终映射，却也被套用到更早的
+  写入上。
+
+两种形态都钉在 `tests/ut/ir/verifier/test_in_param_written.py` 里，第一种是 strict `xfail`，
+一旦修好该测试就会失败。**报告是"去看一眼"的信号，沉默则什么都不证明。** 要让它健全，需要
+真正的控制流数据流分析（汇合点合并 + 候选集 lineage）——那是另一项工作，也是这棵已有三套别名
+模型的树里的第四套。
+
+三个关键取舍：
+
+- **作用于完成后的程序，而非某个 pass 之后。** Group/Spmd wrapper 把参数转发给内层
+  kernel，在 `DeriveCallDirections` 的 phase 0 把有效方向写回 IR 之前，它自己的签名对
+  内层 kernel 会写的参数读作 `In` 是合法的。该不变量只在流水线跑完后成立。
+- **跳过 Orchestration 函数。** 它们的方向是用户的声明，其参数就是 host ABI——纯 `Out`
+  参数会在 return 风格调用中由 host 自动分配，因此翻转它是用户要做的迁移，而不是编译器
+  要补完的推导。
+- **是警告而非错误。** 它不会凭空造出写入，但确实会报告今天可以正常编译运行的程序；
+  升级路径就是上面的 `IRProperty`——等报告清零之后。
+
+**零拷贝 view 会被追溯。** 经参数的 view 写入，就是对该参数的写入：
+
+```python
+view = pl.tile.slice(acc, [8, 128], [0, 0])   # acc 声明为 In
+view = pl.tile.assemble(view, src, [0, 0])    # 写的是 acc 的 buffer
+```
+
+判定一个值指向哪块 buffer 的是两份共享声明，都不是本地维护的清单：`ResultAliasedArgIndex`
+（算子返回它更新过的那个实参——`tensor.assemble`、`tensor.write`、各集合通信），以及
+`op_predicates::IsBufferAliasingViewOp`，后者读取 `OutputMemoryInheritsInput() &&
+IsInplaceSafe()`——即零拷贝 view，它们不更新任何东西，因此也不声明复用契约。
+`tile.transpose` 凭自身的 `not_inplace_safe()` 注册被第二个判据排除：它把数据置换进一块
+全新 buffer，输出并不别名输入；日后任何以同样方式注册的 inherit-input 算子也会被自动
+排除，无需改动此处。
+
+`tensor.slice` 正属于这类 view，因此写入参数的某个 slice **会**被报告——尽管
+`BufferRootCollector` 有意把它映射为全新 root。该链在校验器内部解析而非改动那份共享分析，
+因为另有三个 pass 共用它，为它们一并放宽"何为别名"是另一项改动。
+
+**SSA 是前置条件。** lineage 是单一环境、在汇合点不做合并，其正确性恰好依赖"每个名字只有
+一个定义"——而 `PostPipeline` 保证了这一点。在 SSA 之前的 IR 上它两个方向都不成立：分支中
+重新指向某个名字会把 lineage 泄漏过汇合点（分支未走时，写入根本到不了那块 buffer，却被
+归咎于它）；而普通的 `t = buf1; ...; t = buf2` 会让 `BufferRootCollector` 用同一份最终映射
+覆盖两块不同 buffer。直接调用方必须先做转换。
+
+lineage **不**跨 phi（`return_vars_` / `iter_args_`）传递，因此分支或循环之后经 view 的写入
+会漏报——这是安全的方向。来源在记录绑定时即已解析，因此查表只需一次读取，遍历对函数体
+保持线性。
+
+**修复**：把该参数声明为 `pl.Out`（只写不读）或 `pl.InOut`（既读又写）。对本检查报出的
+问题，补 `.set_arg_effect(...)` **不是**修复手段——builtin 能出现在这里正是因为它的效应
+已经声明，而跨函数写入方是用户函数，根本没有 `REGISTER_OP` 块。缺失效应属于上文所述的
+注册表缺口，本检查看不见它。
+
 ### SSAVerify
 
 **错误类型** (`ssa::ErrorType`)：

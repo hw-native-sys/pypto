@@ -44,6 +44,9 @@ enum class DiagnosticCheck : uint32_t {
   // --- Warnings (appended; values are stable across releases) -------------
   OutParamWriteDropped = 3,
   ScalarWriteLineShared = 4,
+  /// A parameter declared `In` that its own function body writes (see
+  /// CreateInParamWrittenWarningVerifier).
+  InParamWritten = 5,
   kCount
 };
 

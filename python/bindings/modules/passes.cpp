@@ -220,7 +220,10 @@ void BindPass(nb::module_& m) {
       .value("OutParamWriteDropped", DiagnosticCheck::OutParamWriteDropped,
              "Rebinding an Out/InOut parameter drops the caller's write")
       .value("ScalarWriteLineShared", DiagnosticCheck::ScalarWriteLineShared,
-             "pl.write from concurrent task instances may share a 64-byte cache line");
+             "pl.write from concurrent task instances may share a 64-byte cache line")
+      .value("InParamWritten", DiagnosticCheck::InParamWritten,
+             "A parameter declared In that its own function body writes. The write is invisible to "
+             "dependency analysis, so nothing is ordered against it");
 
   // Bind DiagnosticCheckSet
   auto diagnostic_check_set =
