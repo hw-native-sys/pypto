@@ -928,24 +928,53 @@ class TestCrossCore:
         result = test_runner.run(BidirectSpmdNoSplitTest(backend_type=backend_type))
         assert result.passed, f"Cross-core bidirect spmd no-split failed: {result.error}"
 
-    def test_multiple_pipes_nosplit(self, test_runner, backend_type, platform):
+    def test_multiple_pipes_nosplit(self, request, test_runner, backend_type, platform):
         """Explicit multiple pipe ids: compile through full pipeline and verify correctness."""
         if platform == "a5":
             # Compiles and runs, but every output element is wrong on 950
             # silicon -- and only there: the same case passes under a5sim, so
             # the simulator does not model whatever the two concurrent pipes
-            # hit on board. Kept xfail (not skip) so a fix shows up as XPASS.
-            pytest.xfail("950 board: explicit multi-pipe produces wrong results (passes on a5sim)")
+            # hit on board.
+            #
+            # Marked, not raised: `pytest.xfail(...)` aborts before the body and
+            # can never report XPASS, so it would freeze this verdict instead of
+            # re-checking it. The marker lets the case run every time, so a
+            # backend fix surfaces on its own.
+            #
+            # Not strict: the verdict rests on a single on-board observation,
+            # and this board has since been shown to produce non-deterministic
+            # results for a mixed kernel. A strict marker would turn any lucky
+            # pass into a red job; XPASS in the summary is signal enough.
+            request.node.add_marker(
+                pytest.mark.xfail(
+                    reason="950 board: explicit multi-pipe produces wrong results (passes on a5sim)",
+                    strict=False,
+                )
+            )
         result = test_runner.run(MultiPipeNoSplitTest(backend_type=backend_type))
         assert result.passed, f"Cross-core explicit multi-pipe no-split failed: {result.error}"
 
-    def test_explicit_slot_num(self, test_runner, backend_type, platform):
+    def test_explicit_slot_num(self, request, test_runner, backend_type, platform):
         """Explicit slot_num / local_slot_num: compile through full pipeline and verify correctness."""
         if platform in ("a5sim", "a5"):
             # Not a sim-only gap: ptoas rejects the `local_slot_num` operand on
             # pto.{aic,aiv}_initialize_pipe for the 950 frontend pipe lowering,
-            # so this never reaches the device on either a5 target.
-            pytest.xfail("950 backend: ptoas rejects local_slot_num on {aic,aiv}_initialize_pipe")
+            # so this never reaches the device on either a5 target:
+            #   error: 'pto.aic_initialize_pipe' op 'local_slot_num' is only
+            #          supported for a2/a3 frontend pipe lowering
+            #
+            # Marked, not raised: `pytest.xfail(...)` aborts before the body and
+            # can never report XPASS, so it would freeze this verdict instead of
+            # re-checking it. Strict, because the failure is a deterministic
+            # compile-time rejection that costs seconds and never reaches a
+            # card -- if ptoas starts accepting the operand, this must go red so
+            # the marker is removed rather than silently kept.
+            request.node.add_marker(
+                pytest.mark.xfail(
+                    reason="950 backend: ptoas rejects local_slot_num on {aic,aiv}_initialize_pipe",
+                    strict=True,
+                )
+            )
         result = test_runner.run(ExplicitSlotNumTest(backend_type=backend_type))
         assert result.passed, f"Cross-core explicit slot_num failed: {result.error}"
 
