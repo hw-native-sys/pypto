@@ -40,14 +40,21 @@ data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum, core_num=4)
 - 2(P-1) steps: reduce-scatter + allgather
 - O(N/P) remote traffic per step — each rank reads one neighbour
 - Signal shape: `[2 × (NR − 1), NR]`
-- Requires compile-time-known NR — use a factory function pattern: an
-  outer Python function takes `nr`/`size`, derives `total_rounds =
-  2 * (nr - 1)`, and defines the `@pl.jit` functions inside its own body
-  so `[total_rounds, nr]` becomes a compile-time constant (the specializer
-  folds the closure constants into the generated program). See
+- Requires compile-time-known NR — use a factory function pattern **with the
+  `@pl.program` class form**: an outer Python function takes `nr`/`size`,
+  derives `total_rounds = 2 * (nr - 1)`, and defines the `@pl.program` class
+  inside its own body, so `[total_rounds, nr]` becomes a compile-time
+  constant. `@pl.program` / `@pl.function` snapshot the defining frame's
+  locals at decoration time, which is what makes those closure constants
+  resolve.
+- The `@pl.jit` family does **not** work for this: its constant folding reads
+  only the function's module globals (`__globals__`), never `__closure__`
+  (`python/pypto/jit/specializer.py`), so a factory closure constant
+  referenced in a HOST orchestrator body fails to resolve with
+  `Undefined variable`. See
   `collectives/test_l3_tensor_allreduce_ring_intrinsic.py` in [Runnable
-  Examples](#runnable-examples) — that test currently uses the equivalent
-  `@pl.program` class form.
+  Examples](#runnable-examples), which uses the `@pl.program` class form for
+  exactly this reason.
 - Best for large messages (>16 KiB) and high bandwidth
 
 | Aspect | Mesh | Ring |

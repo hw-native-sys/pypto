@@ -37,12 +37,17 @@ data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum, core_num=4)
 - 2(P-1) 步：reduce-scatter + allgather
 - 每步 O(N/P) 远程流量——每个 rank 读取一个邻居
 - Signal 形状：`[2 × (NR − 1), NR]`
-- 要求编译时已知 NR——使用工厂函数模式：外层 Python 函数接收 `nr`/`size`，
-  推导出 `total_rounds = 2 * (nr - 1)`，并在自己的函数体内定义
-  `@pl.jit` 函数，使 `[total_rounds, nr]` 成为编译期常量（specializer 会把
-  闭包常量折叠进生成的程序）。参见下方"可运行示例"一节中的
-  `collectives/test_l3_tensor_allreduce_ring_intrinsic.py`——该测试当前
-  使用等价的 `@pl.program` 类形式。
+- 要求编译时已知 NR——使用工厂函数模式，且必须搭配 **`@pl.program` 类形式**：
+  外层 Python 函数接收 `nr`/`size`，推导出 `total_rounds = 2 * (nr - 1)`，
+  并在自己的函数体内定义 `@pl.program` 类，使 `[total_rounds, nr]` 成为
+  编译期常量。`@pl.program` / `@pl.function` 会在装饰时捕获*定义处*帧的
+  局部变量，这正是那些闭包常量能够解析的原因。
+- `@pl.jit` 系列在这里**不可用**：它的常量折叠只读取函数的模块全局
+  （`__globals__`），从不读取 `__closure__`
+  （`python/pypto/jit/specializer.py`），因此在 HOST 编排体内引用的工厂
+  闭包常量会以 `Undefined variable` 失败。参见下方"可运行示例"一节中的
+  `collectives/test_l3_tensor_allreduce_ring_intrinsic.py`——该测试正是
+  出于这个原因使用 `@pl.program` 类形式。
 - 最适合大消息（>16 KiB）和高带宽
 
 | 方面 | Mesh | Ring |
