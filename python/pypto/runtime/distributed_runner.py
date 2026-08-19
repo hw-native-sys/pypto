@@ -1510,12 +1510,11 @@ class DistributedWorker(Worker):
         self._inherited_host_tensors = inherited
         # `copy_to` / `copy_from` stage through a simpler-owned shm Buffer so an ordinary
         # post-fork tensor is a legal endpoint. That relaxation costs one full copy of the
-        # payload, which a fork-inherited range does not need: it is present in every child
-        # at the same virtual address and can be named in place. Record the classification
-        # here, where the tensors are still in hand — MAP_SHARED (`FORK_SHM`) may serve as
-        # an output, MAP_PRIVATE (`FORK_COW`) is read-only because a child's write would
-        # split the page into a copy the parent never sees — as (start, end, is_shared)
-        # spans that a bare address can be resolved against later.
+        # payload, which a fork-inherited MAP_SHARED range does not need: parent and child
+        # see the same pages, so it can be named in place. Whether a range is MAP_SHARED is
+        # the caller's to know and cannot be inferred from an address, so record it here,
+        # where the tensors are still in hand, as (start, end, is_shared) spans. A
+        # MAP_PRIVATE range is deliberately left to staging — see `_named_host_buffer`.
         self._inherited_host_spans: tuple[tuple[int, int, bool], ...] = tuple(
             (
                 tensor.data_ptr(),
@@ -2193,14 +2192,20 @@ class DistributedWorker(Worker):
         self._buffer_id_seq += 1
         return owner, self._buffer_id_seq
 
-    def _named_host_buffer(self, host_ptr: int, nbytes: int, *, api: str, writing: bool) -> Any:
-        """Name a fork-inherited host range in place, or return ``None`` to stage it.
+    def _named_host_buffer(self, host_ptr: int, nbytes: int) -> Any:
+        """Name a fork-inherited MAP_SHARED host range in place, or ``None`` to stage it.
 
-        Only memory registered through ``inherited_host_tensors`` can be named: it predates
-        the fork, so every child holds it at the same virtual address and the copy needs no
-        staging buffer and no host-side memcpy. Anything else — in particular a tensor
-        allocated after ``prepare`` — has no mapping in the child and must go through shm,
-        which is what the caller falls back to.
+        Only memory registered through ``inherited_host_tensors`` can be named at all: it
+        predates the fork, so every child holds it at the same virtual address and the copy
+        needs no staging buffer and no host-side memcpy. A tensor allocated after
+        ``prepare`` has no mapping in the child, so the caller stages it.
+
+        **Shared mappings only, deliberately.** A ``MAP_PRIVATE`` range is inherited too,
+        but copy-on-write means the child keeps reading its pre-fork snapshot: a parent that
+        registers a tensor and then writes to it would upload the old bytes. Staging is not
+        merely a fallback there — it is the correct behaviour, because its ``memmove`` runs
+        in the parent and therefore reads the current contents. Naming a private range would
+        trade one memcpy for a silent staleness bug, so ``FORK_COW`` is not used here.
 
         Each range is wrapped on its own rather than offset into a whole-tensor Buffer,
         because a Buffer carries no offset: a shard's address is interior to its stacked
@@ -2215,21 +2220,16 @@ class DistributedWorker(Worker):
 
         end = host_ptr + nbytes
         for start, stop, is_shared in self._inherited_host_spans:
-            if host_ptr < start or end > stop:
+            if host_ptr < start or end > stop or not is_shared:
                 continue
-            if writing and not is_shared:
-                # A COW range cannot receive data: the child's write splits the page into a
-                # private copy the parent never reads back. Staging is still correct here,
-                # so fall through rather than refusing the copy.
-                return None
             owner, buffer_id = self._next_buffer_identity()
             return wrap_fork_inherited(
                 host_ptr,
                 nbytes,
                 owner,
                 buffer_id,
-                access=AccessMode.READWRITE if is_shared else AccessMode.READ,
-                backend_kind=BackendKind.FORK_SHM if is_shared else BackendKind.FORK_COW,
+                access=AccessMode.READWRITE,
+                backend_kind=BackendKind.FORK_SHM,
             )
         return None
 
@@ -2239,7 +2239,7 @@ class DistributedWorker(Worker):
         dst = self._device_buffer(dst_dev_ptr, worker_id, "copy_to")
         if not isinstance(nbytes, int) or nbytes <= 0:
             raise ValueError(f"nbytes must be a positive int, got {nbytes!r}")
-        src = self._named_host_buffer(int(src_host_ptr), int(nbytes), api="copy_to", writing=False)
+        src = self._named_host_buffer(int(src_host_ptr), int(nbytes))
         if src is not None:
             self._w.copy_to(dst, src)
             return
@@ -2256,7 +2256,7 @@ class DistributedWorker(Worker):
         src = self._device_buffer(src_dev_ptr, worker_id, "copy_from")
         if not isinstance(nbytes, int) or nbytes <= 0:
             raise ValueError(f"nbytes must be a positive int, got {nbytes!r}")
-        dst = self._named_host_buffer(int(dst_host_ptr), int(nbytes), api="copy_from", writing=True)
+        dst = self._named_host_buffer(int(dst_host_ptr), int(nbytes))
         if dst is not None:
             self._w.copy_from(dst, src)
             return

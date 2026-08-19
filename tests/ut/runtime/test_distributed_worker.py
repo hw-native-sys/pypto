@@ -109,6 +109,18 @@ class _ControlledNativeHandle:
             raise self.error
 
 
+class _NamedHostRange:
+    """What ``wrap_fork_inherited`` returns: a host range named in place, never copied."""
+
+    def __init__(self, data_ptr, nbytes, owner, buffer_id, *, access=None, backend_kind=None) -> None:
+        self.base = data_ptr
+        self.nbytes = nbytes
+        self.owner = owner
+        self.buffer_id = buffer_id
+        self.access = access
+        self.backend_kind = backend_kind
+
+
 class _FakeBuffer:
     def __init__(self, base: int, nbytes: int, *, host: bool = False, owner_worker_id: int = 0) -> None:
         self.nbytes = nbytes
@@ -132,6 +144,20 @@ def patched_setup():
     task_interface = ModuleType("simpler.task_interface")
     setattr(task_interface, "DataType", SimpleNamespace(UINT8=object()))
     setattr(simpler, "task_interface", task_interface)
+    # `simpler.buffer` is the zero-copy naming path: a test can tell a named range from a
+    # staged copy by which of these two the worker was handed.
+    buffer_mod = ModuleType("simpler.buffer")
+    setattr(buffer_mod, "AccessMode", SimpleNamespace(READ="READ", READWRITE="READWRITE"))
+    setattr(buffer_mod, "BackendKind", SimpleNamespace(FORK_SHM="FORK_SHM", FORK_COW="FORK_COW"))
+    setattr(buffer_mod, "mint_owner_instance_id", lambda: b"owner-id")
+    setattr(
+        buffer_mod,
+        "wrap_fork_inherited",
+        lambda data_ptr, nbytes, owner, buffer_id, **kwargs: _NamedHostRange(
+            data_ptr, nbytes, owner, buffer_id, **kwargs
+        ),
+    )
+    setattr(simpler, "buffer", buffer_mod)
 
     worker = MagicMock(name="Worker(level=3)")
     worker.chip_contexts = []
@@ -149,6 +175,7 @@ def patched_setup():
             {
                 "simpler": simpler,
                 "simpler.task_interface": task_interface,
+                "simpler.buffer": buffer_mod,
             },
         ),
         patch(f"{mod}._assemble_chip_callables", return_value=chip_callables) as assemble,
@@ -3225,6 +3252,114 @@ class TestPersistentDistributedWorker:
         assert len(errors) == 1
         assert isinstance(errors[0], RuntimeError)
         assert str(errors[0]) == "persistent dispatch failed before cleanup"
+        rt.close()
+
+
+class TestNamedInheritedHostRanges:
+    """The zero-copy H2D/D2H path and, more importantly, where it must NOT engage.
+
+    Staging a copy through shm costs a full host-side memcpy of the payload, which a
+    fork-inherited MAP_SHARED range does not need. The boundary matters more than the
+    optimisation: a MAP_PRIVATE range is inherited too, but copy-on-write freezes the
+    child's view at fork, so naming one would upload stale bytes the moment the parent
+    writes. These tests pin that boundary.
+    """
+
+    @staticmethod
+    def _dev(rt):
+        return _resident(rt, (4, 4))
+
+    def test_copy_to_names_a_contained_shared_range(self, patched_setup):
+        host = torch.zeros(4, 4, dtype=torch.float32).share_memory_()
+        rt = DistributedWorker(_fake_compiled([_param("a", [4, 4])], []), inherited_host_tensors=[host])
+        dev = self._dev(rt)
+        nbytes = host.numel() * host.element_size()
+        patched_setup["worker"].create_buffer.reset_mock()
+
+        rt.copy_to(dev.data_ptr, host.data_ptr(), nbytes)
+
+        named = patched_setup["worker"].copy_to.call_args.args[1]
+        assert isinstance(named, _NamedHostRange)
+        assert (named.base, named.nbytes) == (host.data_ptr(), nbytes)
+        assert (named.backend_kind, named.access) == ("FORK_SHM", "READWRITE")
+        # The point of naming it: no staging buffer is created at all.
+        patched_setup["worker"].create_buffer.assert_not_called()
+        rt.close()
+
+    def test_copy_to_stages_a_private_inherited_range(self, patched_setup):
+        # MAP_PRIVATE: the child's pages are frozen at fork, so a named range would upload
+        # whatever was there before a later parent write. Staging reads the parent's current
+        # contents instead, which is why it stays the correct path here.
+        host = torch.zeros(4, 4, dtype=torch.float32)
+        rt = DistributedWorker(_fake_compiled([_param("a", [4, 4])], []), inherited_host_tensors=[host])
+        dev = self._dev(rt)
+        nbytes = host.numel() * host.element_size()
+        host.fill_(1.0)
+
+        rt.copy_to(dev.data_ptr, host.data_ptr(), nbytes)
+
+        staged = patched_setup["worker"].copy_to.call_args.args[1]
+        assert not isinstance(staged, _NamedHostRange)
+        assert ctypes.string_at(staged.base, nbytes) == ctypes.string_at(host.data_ptr(), nbytes)
+        rt.close()
+
+    def test_copy_to_stages_a_partially_overlapping_range(self, patched_setup):
+        host = torch.zeros(8, dtype=torch.float32).share_memory_()
+        rt = DistributedWorker(_fake_compiled([_param("a", [4, 4])], []), inherited_host_tensors=[host])
+        dev = self._dev(rt)
+        nbytes = host.numel() * host.element_size()
+        patched_setup["worker"].create_buffer.reset_mock()
+
+        # Starts inside the span but runs past its end: naming it would hand the child a
+        # Buffer longer than the mapping it vouches for.
+        rt.copy_to(dev.data_ptr, host.data_ptr() + 4, nbytes)
+
+        assert not isinstance(patched_setup["worker"].copy_to.call_args.args[1], _NamedHostRange)
+        patched_setup["worker"].create_buffer.assert_called_once()
+        rt.close()
+
+    def test_copy_from_names_a_shared_range(self, patched_setup):
+        host = torch.zeros(4, 4, dtype=torch.float32).share_memory_()
+        rt = DistributedWorker(_fake_compiled([_param("a", [4, 4])], []), inherited_host_tensors=[host])
+        dev = self._dev(rt)
+        nbytes = host.numel() * host.element_size()
+        patched_setup["worker"].create_buffer.reset_mock()
+
+        rt.copy_from(host.data_ptr(), dev.data_ptr, nbytes)
+
+        named = patched_setup["worker"].copy_from.call_args.args[0]
+        assert isinstance(named, _NamedHostRange)
+        assert named.backend_kind == "FORK_SHM"
+        patched_setup["worker"].create_buffer.assert_not_called()
+        rt.close()
+
+    def test_releasing_inherited_refs_sends_later_copies_back_to_staging(self, patched_setup):
+        host = torch.zeros(4, 4, dtype=torch.float32).share_memory_()
+        rt = DistributedWorker(_fake_compiled([_param("a", [4, 4])], []), inherited_host_tensors=[host])
+        dev = self._dev(rt)
+        nbytes = host.numel() * host.element_size()
+
+        rt.release_inherited_host_tensor_refs()
+        rt.copy_to(dev.data_ptr, host.data_ptr(), nbytes)
+
+        # The parent has dropped its references, so nobody vouches for the mapping anymore.
+        assert not isinstance(patched_setup["worker"].copy_to.call_args.args[1], _NamedHostRange)
+        rt.close()
+
+    def test_named_ranges_get_distinct_buffer_ids(self, patched_setup):
+        host = torch.zeros(4, 4, dtype=torch.float32).share_memory_()
+        rt = DistributedWorker(_fake_compiled([_param("a", [4, 4])], []), inherited_host_tensors=[host])
+        dev = self._dev(rt)
+        nbytes = host.numel() * host.element_size()
+
+        rt.copy_to(dev.data_ptr, host.data_ptr(), nbytes)
+        first = patched_setup["worker"].copy_to.call_args.args[1]
+        rt.copy_to(dev.data_ptr, host.data_ptr(), nbytes)
+        second = patched_setup["worker"].copy_to.call_args.args[1]
+
+        # A Buffer identity is what a consumer keys on; two live names must not collide.
+        assert first.owner == second.owner
+        assert first.buffer_id != second.buffer_id
         rt.close()
 
 
