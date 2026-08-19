@@ -89,7 +89,6 @@ jobs:
         with:
           checkout-path: daily-a5-checkout
           needs-device: 'true'
-          npu-check-timeout: '3600'
           pip-cache-name: pip-daily-a5
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
           # Python and GCC come from the pypto-toolchain bundle, like every
