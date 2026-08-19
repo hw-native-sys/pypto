@@ -1194,18 +1194,20 @@ jobs:
     # profile in the SIMULATOR. This job is the first per-PR run of the mixed /
     # cross-core path on real A5 silicon.
     #
-    # Scope — the two suites already validated on the a5 profile elsewhere, so a
-    # red result here means a regression and not an unvalidated combination:
-    #   - cross_core/test_cross_core.py            V<->C tpush/tpop over all three
-    #                                              split modes (UP_DOWN /
-    #                                              LEFT_RIGHT / none), multi-pipe,
-    #                                              explicit slot_num (arch-aware
-    #                                              sizing), bidirectional-in-spmd.
-    #                                              Runs on a5sim in the job below.
-    #   - test_qwen3_decode_scope3_mixed.py        the real mixed-kernel model
-    #                                              scope (out-proj + residual +
-    #                                              RMSNorm + MLP). Runs on a5 in
-    #                                              daily_ci.yml `a5-system-tests`.
+    # Scope — cross_core/test_cross_core.py, already validated on the a5 profile
+    # elsewhere (it runs on a5sim in the job below), so a red result here means a
+    # regression and not an unvalidated combination: V<->C tpush/tpop over all
+    # three split modes (UP_DOWN / LEFT_RIGHT / none), multi-pipe, explicit
+    # slot_num (arch-aware sizing), bidirectional-in-spmd.
+    #
+    # test_qwen3_decode_scope3_mixed.py is deliberately NOT here. It stalls on
+    # board under --platform=a5 — PTO2 scheduler timeout, sub_class=S1
+    # running-stalled, always inside the oproj_block mixed kernel, at a different
+    # task index and core on every run. It is not a regression this job can gate
+    # on: an on-board bisect over 71020585..e5aa8131 came back red at every point
+    # INCLUDING 71020585 itself, the commit that passed here on 2026-08-13 on this
+    # same runner and card, so no source change explains it. Restore this case
+    # once the stall is understood.
     # Two cross_core cases are xfail under --platform=a5 — the first on-board run
     # of this job is what found them, and neither is a mixed-kernel regression
     # this job should gate on until it is fixed:
@@ -1287,8 +1289,8 @@ jobs:
       - name: Test mixed-kernel system tests (A5, on board)
         timeout-minutes: 60
         # Mechanism B: one task-submit card session wrapping a single pytest run
-        # (no precompile pipeline), executed in-process on the borrowed card. Both
-        # suites are parametrized over the platform ids, so --platform=a5 selects
+        # (no precompile pipeline), executed in-process on the borrowed card. The
+        # suite is parametrized over the platform ids, so --platform=a5 selects
         # exactly the a5 variants and deselects the a2a3-marked ones.
         # --forked isolates each case's device init, as the daily a5 job does.
         run: |
@@ -1298,7 +1300,6 @@ jobs:
           task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 3600 \
             --run "cd $GITHUB_WORKSPACE/a5-checkout && source activate.sh && python -m pytest \
               tests/st/runtime/cross_core/test_cross_core.py \
-              tests/st/runtime/framework_and_models/test_qwen3_decode_scope3_mixed.py \
               -v --forked --platform=a5 --device=\$TASK_DEVICE"
 
       - name: Kill orphaned task-submit tasks
