@@ -1,0 +1,77 @@
+# Throwaway experiment workflow (do not merge).
+#
+# ONE job, nothing in front of it: the qwen3 scope-3 mixed-kernel ST case on
+# real A5 silicon. No lint / unit-test / docs gate, no toolchain lead job, and
+# ci.yml + docs.yml have their pull_request triggers removed on this branch so
+# nothing else is scheduled and nothing else competes for the shared NPU pool.
+#
+# The three toolchain values below are normally supplied by ci.yml's `toolchain`
+# job, which exists to keep them out of workflow files. They are inlined here on
+# purpose: this branch is a single-shot bisect probe that is never merged, and
+# the lead job would otherwise be a second job. The values are exactly the ones
+# pinned AT THIS BASE COMMIT (1eb0a861):
+#   toolchain/versions.env  -> PTOAS_VERSION=v0.57
+#                              PTOAS_SHA256_AARCH64=4858c837e12b1b588f281207c95916dc20968a7cdc656aadd549a87658a06692
+#   runtime pin -> pto_isa.pin = 83d01313d9bfc247c4b7c8bcf969d1019f0d106f
+name: a5-experiment
+
+on:
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+concurrency:
+  group: a5-exp-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  a5-qwen3-mixed:
+    permissions:
+      contents: read
+    runs-on: [self-hosted, linux, arm64, npu-a5]
+    defaults:
+      run:
+        working-directory: a5-checkout
+    env:
+      PTOAS_ROOT: ${{ github.workspace }}/a5-checkout/ptoas-bin
+      PTO_ISA_ROOT: ${{ github.workspace }}/a5-checkout/pto-isa
+      PTOAS_VERSION: v0.57
+      PTOAS_SHA256: 4858c837e12b1b588f281207c95916dc20968a7cdc656aadd549a87658a06692
+      CMAKE_BUILD_PARALLEL_LEVEL: 16
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CCACHE_MAXSIZE: 30G
+      CCACHE_UMASK: '000'
+    steps:
+      - name: Fetch composite action definitions
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/actions
+          clean: false
+          persist-credentials: false
+
+      - name: Setup CI job
+        uses: ./.github/actions/setup-ci-job
+        with:
+          checkout-path: a5-checkout
+          needs-device: 'true'
+          pip-cache-name: pip-a5
+          pto-isa-commit: 83d01313d9bfc247c4b7c8bcf969d1019f0d106f
+          toolchain: bundle
+
+      - name: Test qwen3 scope-3 mixed kernel (A5, on board)
+        timeout-minutes: 60
+        run: |
+          source activate.sh
+          echo "[device] DEVICE_ID=$DEVICE_ID"
+          test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
+          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 3600 \
+            --run "cd $GITHUB_WORKSPACE/a5-checkout && source activate.sh && python -m pytest \
+              tests/st/runtime/framework_and_models/test_qwen3_decode_scope3_mixed.py \
+              -v --forked --platform=a5 --device=\$TASK_DEVICE"
+
+      - name: Kill orphaned task-submit tasks
+        if: always()
+        uses: ./.github/actions/kill-orphaned-tasks
+        with:
+          checkout-path: a5-checkout
