@@ -21,9 +21,12 @@ sites. This pass makes the ctx flow explicit in IR instead:
    forward the caller's materialized ctx parameter. Return positions are
    matched to the callee's returned parameters, so mixed or reordered return
    tuples do not fall back to positional tail alignment. Tensor aliases carried
-   through `ForStmt` / `WhileStmt` are tracked as well. Otherwise, bind
+   through `ForStmt` / `WhileStmt` are tracked as well. In host orchestration
+   only, if the lineage cannot be resolved, bind
    `pld.system.get_comm_ctx(dist)` immediately before the call and pass that
-   result.
+   result. Chip orchestration and device functions must resolve an explicit
+   context; an unresolved argument is diagnosed instead of synthesizing a
+   device-side query.
 3. In chip orchestration and device functions, replace every
    `pld.system.get_comm_ctx(dist)` with the resolved explicit `CommCtxType` SSA
    value. Host orchestration keeps the op because host codegen resolves it from

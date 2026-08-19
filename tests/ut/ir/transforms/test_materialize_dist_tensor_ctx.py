@@ -357,7 +357,8 @@ def test_materialized_local_comm_ctx_name_avoids_existing_local():
             span,
         ),
         span,
-        ir.FunctionType.Orchestration,
+        level=ir.Level.HOST,
+        role=ir.Role.Orchestrator,
     )
 
     result = passes.materialize_dist_tensor_ctx()(
@@ -594,7 +595,7 @@ def test_device_get_comm_ctx_is_replaced_by_materialized_context():
     assert len(_collect_calls(host.body, "pld.system.get_comm_ctx")) == 1
 
 
-def test_unsupported_expression_context_rejects_synthesized_prefix():
+def test_device_call_without_materialized_context_rejects_synthesized_prefix():
     span = _span()
     data_ty = _dist_ty()
     bool_ty = ir.ScalarType(DataType.BOOL)
@@ -644,7 +645,7 @@ def test_unsupported_expression_context_rejects_synthesized_prefix():
         ir.SeqStmts(
             [
                 ir.AssignStmt(local_data, producer_call, span),
-                ir.IfStmt(predicate_call, ir.ReturnStmt(span), None, [], span),
+                ir.EvalStmt(predicate_call, span),
             ],
             span,
         ),
@@ -653,7 +654,7 @@ def test_unsupported_expression_context_rejects_synthesized_prefix():
     )
 
     program = ir.Program([producer, predicate, main], "unsupported_prefix_context", span)
-    with pytest.raises(RuntimeError, match="cannot synthesize get_comm_ctx prefix"):
+    with pytest.raises(RuntimeError, match="device-side call argument has no materialized CommCtx"):
         passes.materialize_dist_tensor_ctx()(program)
 
 

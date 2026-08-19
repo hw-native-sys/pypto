@@ -533,11 +533,13 @@ class MaterializeDistTensorCtxMutator : public IRMutator {
   ExprPtr GetCtxForArg(const ExprPtr& arg, const Span& span) {
     if (!IsDistTensor(arg)) return nullptr;
     if (auto ctx = LookupExistingCtx(arg)) return ctx;
-    // This is the pass's legacy call-boundary fallback.  Explicit
-    // user-written get_comm_ctx calls are handled in VisitExpr_(CallPtr) and
-    // are mandatory aliases on device code; a call argument that still has no
-    // lineage can retain the old prefix synthesis so existing host/opaque
-    // orchestration IR remains diagnosable by its downstream codegen.
+    // Only host orchestration can recover a context through the runtime query.
+    // Chip orchestration and device functions must carry an explicit context
+    // SSA value; leaving a synthesized get_comm_ctx in those functions would
+    // give device codegen an operation with no runtime representation.
+    INTERNAL_CHECK_SPAN(IsHostOrch(current_func_), span)
+        << "MaterializeDistTensorCtx: device-side call argument has no materialized CommCtx for its "
+           "DistributedTensor";
     INTERNAL_CHECK_SPAN(can_emit_prefix_, span)
         << "MaterializeDistTensorCtx: cannot synthesize get_comm_ctx prefix in this expression context";
     std::string base_name = "dist";
