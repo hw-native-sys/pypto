@@ -69,9 +69,14 @@ Ascend950（a5）——硬件跨核 pipe 直接按 fractal 布局传输数据：
 | 方向 | Push/Pop TileView (blayout, slayout) | 名称 |
 | ---- | ------------------------------------ | ---- |
 | Vec->Left | col_major, row_major | NZ |
-| Vec->Right | row_major, col_major | ZN |
+| Vec->Right | col_major, row_major | NZ |
 | Vec->Mat | 需要显式在move中设置，否则同src | — |
 | Mat/Acc->Vec | 需要显式在move中设置，否则同src | — |
+
+`Vec->Right` 在边界上按 NZ 传输，而不是 Right 操作数最终的 ZN：a5 通过
+`TINSERT_IMPL<TInsertMode::NZ>` 把 Vec tile 插入 Mat FIFO，因此桥接 tile 必须保持
+NZ。ZN 属于 cube 侧在 pop 之后所做的 `Mat → Right` `tile.move`，比本表描述的边界晚
+一步——与下面 a2a3 表格中写明的拆分相同。
 
 Ascend910B（a2a3）——跨核传输经过 GM → Mat，Mat 仅支持 NZ 布局。因此 Left 和 Right 目标在传输边界统一使用 NZ，最终的 Left/Right 布局由后续 `Mat → Left/Right` `tile.move`（MTE1）处理：
 
@@ -83,6 +88,32 @@ Ascend910B（a2a3）——跨核传输经过 GM → Mat，Mat 仅支持 NZ 布�
 | Mat/Acc->Vec | 保持原始布局 | — |
 
 在两种后端上，AIV 推送侧（V→C）都会在 `tpush_to_aic` 前插入一个 `tile.move` 将源 tile 转换为所需的 fractal 布局。`tile.move` 辅助函数（`CreateMove`）在结果类型携带 TileView 时会传播 `blayout`/`slayout` kwargs。
+
+### 手写 pipe 同样获得该适配
+
+上述规则描述的是边界移动路径，它只能看到本 pass 在展开 InCore 函数时构建的 pipe。完全手写的
+pipe（`pl.reserve_buffer`、`pl.{aic,aiv}_initialize_pipe` 与 `pl.tpush_to_aic`）不会经过该
+路径。在 `RequiresVtoCFractalAdapt()` 成立的后端上，这样的推送会把裸 ND tile 送进一个被 cube
+按 fractal 解释的 FIFO，导致弹出 tile 的每个元素都错位。
+
+`AdaptManualVtoCPush` 负责补上这个缺口。它作为本 pass 的最后一个阶段运行，遍历本 pass **产出**
+的每一个 AIV 函数，而不是它收到的那些。这个区别很关键：`tile.tpush_to_aic` 声明的 affinity 是
+`CoreAffinity::VECTOR`，因此手写推送合法地出现在 InCore 体内，而这样的函数体正是在本 pass 中才
+变成 AIV 函数 —— 纯向量体经由非混合转换成为 AIV，混合体则把该语句带进展开后的 AIV 半边；两者都
+发生在逐函数循环之后，所以更早的钩子仍会漏掉那条裸 ND 推送。
+
+三条性质保证这次扫描既省又安全：
+
+- **固定边界，无需跨函数分析。** 适配器取 cube 侧传输内存
+  `GetBoundaryTpopMemory(CoreSide::AIC)`，而不是到对端函数里定位匹配的 `tpop`。这是精确而非
+  近似的，因为 `BuildCrossCoreTransferView` 把 `Mat`、`Left`、`Right` 映射到同一个 fractal
+  视图：无论消费者弹到哪里，它期望的布局都正是这里产出的那个。
+- **幂等，且尊重作者的手写。** 源 tile 已经携带边界视图的推送会被跳过。重复运行本 pass 不会叠加，
+  手工完成该 move 的程序保留自己的写法，边界移动路径已适配过的推送也不会被再插一次。
+- **后端按需查询。** `RequiresVtoCFractalAdapt()` 在 mutator 内部、遇到第一条 V→C 推送时才读取，
+  因此没有手写推送的程序无需配置后端即可走过该阶段。
+
+重写后的推送保留原调用的 kwargs —— 丢掉 `id` 会让多 pipe 程序坍缩到同一个 FIFO 上。
 
 ### 经 GM 中转的跨核依赖
 

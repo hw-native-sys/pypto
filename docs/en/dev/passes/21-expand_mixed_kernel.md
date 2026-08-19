@@ -97,9 +97,15 @@ Ascend950 (a5) — hardware cross-core pipe carries data in fractal layout:
 | Direction | Push/Pop TileView (blayout, slayout) | Name |
 | --------- | ------------------------------------ | ---- |
 | Vec→Left | col_major, row_major | NZ |
-| Vec→Right | row_major, col_major | ZN |
+| Vec→Right | col_major, row_major | NZ |
 | Vec→Mat | must be explicitly set in move | — |
 | Mat/Acc→Vec | must be explicitly set in move | — |
+
+`Vec→Right` crosses as NZ, not as the ZN a Right operand ends up in: a5 inserts
+the Vec tile into the Mat FIFO through `TINSERT_IMPL<TInsertMode::NZ>`, so the
+bridge tile has to stay NZ. The ZN view belongs to the `Mat → Right` `tile.move`
+the cube side makes after the pop, which is one step later than this table
+describes — the same split the a2a3 table below spells out.
 
 Ascend910B (a2a3) — cross-core transfer goes through GM → Mat, and Mat only supports the NZ layout. Both Left and Right destinations use NZ at the transfer boundary; the final Left/Right layout is resolved by the subsequent `Mat → Left/Right` `tile.move` (MTE1):
 
@@ -111,6 +117,41 @@ Ascend910B (a2a3) — cross-core transfer goes through GM → Mat, and Mat only 
 | Mat/Acc→Vec | preserve original | — |
 
 On both backends, the AIV push side (V→C) inserts a `tile.move` before `tpush_to_aic` to convert the source tile into the required fractal layout. The `tile.move` helper (`CreateMove`) propagates `blayout`/`slayout` kwargs when the result type carries a TileView.
+
+### Hand-written pipes get the same adapter
+
+The rule above describes the boundary-move path, which only sees the pipes this pass
+builds while expanding an InCore function. A pipe authored directly (`pl.reserve_buffer`,
+`pl.{aic,aiv}_initialize_pipe` and `pl.tpush_to_aic`, written out by hand) never reaches
+it. On a backend where `RequiresVtoCFractalAdapt()` holds, such a push would ship a bare
+ND tile into a FIFO the cube reads as fractal, scattering every element of the popped
+tile.
+
+`AdaptManualVtoCPush` closes that gap. It runs as the pass's final phase, over **every**
+AIV function the pass emits — not over the functions it was handed. That distinction
+matters: `tile.tpush_to_aic` declares `CoreAffinity::VECTOR`, so a hand-written push is
+legal inside an InCore body, and such a body only becomes an AIV function during this
+pass. A pure-vector body reaches AIV through the non-mixed conversion, and a mixed body
+carries the statement into its expanded AIV half; both happen after the per-function loop,
+so an earlier hook would still leave the bare ND push behind.
+
+Three properties keep the sweep cheap and safe:
+
+- **One fixed boundary, no cross-function analysis.** The adapter asks for the cube-side
+  transfer memory, `GetBoundaryTpopMemory(CoreSide::AIC)`, instead of locating the
+  matching `tpop` in the peer function. That is exact rather than approximate because
+  `BuildCrossCoreTransferView` maps `Mat`, `Left` and `Right` onto the same fractal view:
+  wherever the consumer pops to, the layout it expects is the one this produces.
+- **Idempotent, and it defers to the author.** A push whose source already carries the
+  boundary view is left alone. Re-running the pass adds nothing, a program that stages
+  the move by hand keeps its own, and the pushes the boundary-move path already adapted
+  are not touched twice.
+- **The backend is consulted lazily.** `RequiresVtoCFractalAdapt()` is read inside the
+  mutator, on the first V→C push it meets, so a program with no hand-written push does
+  not need a configured backend to walk past this phase.
+
+The rewritten push preserves the original call's kwargs — dropping `id` would collapse a
+multi-pipe program onto a single FIFO.
 
 ### GM-mediated cross-lane dependencies
 

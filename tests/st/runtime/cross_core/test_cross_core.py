@@ -928,42 +928,8 @@ class TestCrossCore:
         result = test_runner.run(BidirectSpmdNoSplitTest(backend_type=backend_type))
         assert result.passed, f"Cross-core bidirect spmd no-split failed: {result.error}"
 
-    def test_multiple_pipes_nosplit(self, request, test_runner, backend_type, platform):
+    def test_multiple_pipes_nosplit(self, test_runner, backend_type):
         """Explicit multiple pipe ids: compile through full pipeline and verify correctness."""
-        if platform == "a5":
-            # Every output element is wrong on 950 silicon -- and only there;
-            # the case passes on a5sim and on a2a3.
-            #
-            # Cause: 950's on-chip cross-core boundary expects a fractal layout,
-            # so the AIV producer must adapt the tile before tpush (Left -> NZ,
-            # Right -> ZN). That adapter is inserted by ExpandMixedKernel, which
-            # is the only place BackendHandler::RequiresVtoCFractalAdapt() is
-            # consulted -- so it covers automatically built cube<->vector pipes
-            # and not a hand-written pl.tpush_to_aic like this one. Compiled for
-            # a5, this program pushes a bare ND tile
-            # (blayout=row_major, slayout=none_box) where the automatic path
-            # emits a pto.tmov into blayout=col_major, slayout=row_major first.
-            # The cube then reads those bytes as fractal, which scrambles every
-            # element rather than perturbing it -- matching what the board
-            # reports. a5sim does not model the on-chip FIFO layout, so it
-            # cannot see this. On 910B the adapter is not needed at all
-            # (RequiresVtoCFractalAdapt() is false: push/pop goes ub -> gm ->
-            # mat, which takes ND directly), so a2a3 keeps passing.
-            #
-            # Marked, not raised: `pytest.xfail(...)` aborts before the body and
-            # can never report XPASS, so it would freeze this verdict instead of
-            # re-checking it. Strict, because a layout mismatch is deterministic
-            # -- a scrambled matmul cannot pass by luck -- so an XPASS means the
-            # adapter now reaches manual pipes and the marker must come out.
-            request.node.add_marker(
-                pytest.mark.xfail(
-                    reason=(
-                        "950 board: manual pl.tpush_to_aic gets no V->C fractal adapter "
-                        "(ExpandMixedKernel is the only consumer of RequiresVtoCFractalAdapt)"
-                    ),
-                    strict=True,
-                )
-            )
         result = test_runner.run(MultiPipeNoSplitTest(backend_type=backend_type))
         assert result.passed, f"Cross-core explicit multi-pipe no-split failed: {result.error}"
 
