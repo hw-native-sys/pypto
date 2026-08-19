@@ -40,19 +40,26 @@ OK
 
 ## Walkthrough
 
-The program is built by a **rank-count factory**: `build_mesh_allreduce(nr)`
-folds `nr` into a `@pl.program` class, so the barrier signal `[nr, 1]` (one
-cell per rank) is a compile-time shape while the same source serves any world
-size via `-d`.
+The rank count is never a compile-time constant here. It is
+`NR = pl.dynamic("NR")` in the annotations and `pld.world_size()` in the host
+body, so one module-level `@pl.program` serves any world size picked with `-d`
+— no rank-count factory. This mirrors
+`tests/st/distributed/collectives/test_l3_allreduce.py`, the system test for
+this same collective.
 
 Steps 01-07 use the `@pl.jit` family, and the switch to the class form here is
-**required, not stylistic**. `@pl.program` / `@pl.function` snapshot the
-*defining* frame's locals at decoration time, so the factory's `nr` resolves
-both in the signatures and inside the HOST orchestrator body
-(`alloc_window_buffer([nr, 1], ...)`). `@pl.jit.host` re-specializes into
-`@pl.function` later, after that frame is gone, so a closure `nr` referenced in
-its body fails to resolve. Every rank-parametrized collective in
-`tests/st/distributed/` uses this same class-form factory.
+**required, not stylistic** — but the reason is the *dynamic* signal shape, not
+a compile-time one. `signal` is a window shaped `[pld.world_size(), 1]`, and
+`@pl.jit` must statically infer shape and dtype for every parameter it forwards
+to a dependency; it rejects this one with `missing inferred tensor metadata for
+parameter 'signal'`. `@pl.program` carries no such requirement. (`@pl.jit` is
+fine with distributed tensors as such — steps 03, 05, 06 and 07 all pass them
+— it is specifically a runtime-sized window dim it cannot type.)
+
+Steps 09 and 10 switch for a stronger reason: their chunk size `SIZE // nr` is
+a **tile shape**, and tile shapes must be known when the kernel is compiled, so
+those genuinely need a compile-time rank count and a factory. A signal row
+count is not a tile shape, which is why it can stay dynamic here.
 
 The kernel is the four phases every hand-rolled collective shares:
 
@@ -106,7 +113,7 @@ is exactly why the two-phase and ring variants exist.
 | Sum includes zeros at some ranks | Barrier missing/incorrect; read raced the store | Barrier (notify all / wait all) before Phase 3 |
 | Wrong result only at P=4 | P=2 hides the race (single peer) | Run P≥4; check the barrier covers every peer |
 | Same result on every rank but ≠ torch sum | Reduction order differs (not a bug) | Compare with a tolerance (the example already does) |
-| Compile error about a dynamic window shape | A `[nr, 1]` shape escaped the factory | Build via `build_mesh_allreduce(nr)` — `nr` must be a closure constant |
+| `missing inferred tensor metadata for parameter 'signal'` | The kernel was written with `@pl.jit`, which cannot type a window whose dim is `pld.world_size()` | Use the `@pl.program` class form (as here); `@pl.jit` needs every dep parameter statically shaped |
 | Golden fails with a huge diff | Slices summed in the wrong place (e.g. own slice counted twice) | Stage once; accumulate from your own slice, then peers |
 
 ## See also

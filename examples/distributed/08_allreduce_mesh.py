@@ -20,18 +20,21 @@ Concepts introduced:
     -> accumulate -> stage-out
   - the barrier before any remote read: the ``notify``/``wait`` handshake from
     step 04 guarantees no rank reads a peer that has not staged yet
-  - the ``@pl.program`` class form + factory: the barrier signal is a per-rank
-    row matrix ``[nr, 1]`` and window shapes must be statically known, so a
-    rank-count factory builds a ``@pl.program`` class with ``nr`` folded in as
-    a compile-time constant — the way to keep "one source, any P" when a
-    window shape depends on the world size. Steps 01-07 use the ``@pl.jit``
-    family; the switch here is required, not stylistic: ``@pl.program`` /
-    ``@pl.function`` capture the *defining* frame's locals at decoration time
-    (so the factory's ``nr`` resolves inside the HOST orchestrator body),
-    while ``@pl.jit.host`` re-specializes into ``@pl.function`` later, after
-    that frame is gone — a closure ``nr`` referenced in its body then fails to
-    resolve. Every rank-parametrized collective in ``tests/st/distributed/``
-    uses this same class-form factory for the same reason.
+  - a rank count that stays *dynamic*: the barrier signal is a per-rank row
+    matrix, but its row count never becomes a compile-time constant. It is
+    ``NR = pl.dynamic("NR")`` in the annotations and ``pld.world_size()`` in
+    the host body, so one source serves any P — picked at run time with ``-d``,
+    with no rank-count factory. This mirrors
+    ``tests/st/distributed/collectives/test_l3_allreduce.py`` exactly.
+  - why this step leaves the ``@pl.jit`` family of steps 01-07: ``signal`` is a
+    window whose shape is the runtime expression ``[pld.world_size(), 1]``, and
+    ``@pl.jit`` must infer a static shape/dtype for every parameter it passes
+    to a dep — it rejects this one with "missing inferred tensor metadata for
+    parameter 'signal'". The ``@pl.program`` class form has no such
+    requirement, so the switch is forced by the *dynamic* signal shape, not by
+    a compile-time one. Steps 09 and 10 go further and do need a genuine
+    compile-time rank count, because their chunk size ``SIZE // nr`` is a
+    **tile shape**; a signal row count is not.
 
 This is the simplest of the three all-reduces (steps 08-10): one barrier, then
 every rank reads every peer. Its O(P) traffic is why the two-phase and ring
@@ -50,100 +53,85 @@ from pypto import ir
 from pypto.ir.distributed_compiled_program import DistributedConfig
 
 SIZE = 64
+NR = pl.dynamic("NR")
 
 
-def build_mesh_allreduce(nr: int):
-    """Build the mesh-allreduce program for a compile-time rank count ``nr``.
+@pl.program
+class MeshAllreduce:
+    @pl.function(type=pl.FunctionType.InCore)
+    def reduce_step(
+        self,
+        x: pl.Tensor[[1, SIZE], pl.FP32],
+        y: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+        data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+        signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+    ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+        """Chip kernel: four-phase mesh allreduce — stage, barrier, accumulate, stage-out."""
+        ctx = pld.get_comm_ctx(data)
+        my_rank = pld.rank(ctx)
+        nranks = pld.nranks(ctx)
 
-    A factory rather than a module-level program because the barrier signal is
-    a per-rank row matrix ``[nr, 1]`` and window shapes must be statically
-    known: ``nr`` as a closure constant becomes a compile-time shape, so the
-    same source serves any world size (pick it with ``-d``).
+        # Phase 1 — stage this rank's slice into its window slot.
+        local = pl.load(x, [0, 0], [1, SIZE])
+        data = pl.store(local, [0, 0], data)
 
-    The class form is what makes that closure constant reachable: the
-    ``@pl.program`` decorator snapshots this factory frame's locals when it
-    runs, so ``nr`` resolves both in the signatures below and inside the HOST
-    orchestrator body (``alloc_window_buffer([nr, 1], ...)``).
-    """
+        # Phase 2 — barrier: notify every peer, wait on every peer slot.
+        # Each rank owns a dedicated row (offsets=[my_rank, 0]);
+        # AtomicAdd/Ge(1) means the wait only passes once every peer has
+        # staged its slice.
+        for peer in pl.range(nranks):
+            if peer != my_rank:
+                pld.system.notify(
+                    signal,
+                    peer=peer,
+                    offsets=[my_rank, 0],
+                    value=1,
+                    op=pld.NotifyOp.AtomicAdd,
+                )
+        for src in pl.range(nranks):
+            if src != my_rank:
+                pld.system.wait(
+                    signal,
+                    offsets=[src, 0],
+                    expected=1,
+                    cmp=pld.WaitCmp.Ge,
+                )
 
-    @pl.program
-    class MeshAllreduce:
-        @pl.function(type=pl.FunctionType.InCore)
-        def reduce_step(
-            self,
-            x: pl.Tensor[[1, SIZE], pl.FP32],
-            y: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
-            data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
-            signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
-        ) -> pl.Tensor[[1, SIZE], pl.FP32]:
-            """Chip kernel: four-phase mesh allreduce — stage, barrier, accumulate, stage-out."""
-            ctx = pld.get_comm_ctx(data)
-            my_rank = pld.rank(ctx)
-            nranks = pld.nranks(ctx)
+        # Phase 3 — accumulate: start from our own slice, add every peer's slice.
+        acc = pl.load(data, [0, 0], [1, SIZE])
+        for peer in pl.range(nranks):
+            if peer != my_rank:
+                recv = pld.tile.remote_load(data, peer=peer, offsets=[0, 0], shape=[1, SIZE])
+                acc = pl.add(acc, recv)
 
-            # Phase 1 — stage this rank's slice into its window slot.
-            local = pl.load(x, [0, 0], [1, SIZE])
-            data = pl.store(local, [0, 0], data)
+        # Phase 4 — stage-out: the accumulated result is this rank's output.
+        return pl.store(acc, [0, 0], y)
 
-            # Phase 2 — barrier: notify every peer, wait on every peer slot.
-            # Each rank owns a dedicated row (offsets=[my_rank, 0]);
-            # AtomicAdd/Ge(1) means the wait only passes once every peer has
-            # staged its slice.
-            for peer in pl.range(nranks):
-                if peer != my_rank:
-                    pld.system.notify(
-                        signal,
-                        peer=peer,
-                        offsets=[my_rank, 0],
-                        value=1,
-                        op=pld.NotifyOp.AtomicAdd,
-                    )
-            for src in pl.range(nranks):
-                if src != my_rank:
-                    pld.system.wait(
-                        signal,
-                        offsets=[src, 0],
-                        expected=1,
-                        cmp=pld.WaitCmp.Ge,
-                    )
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def per_rank(
+        self,
+        x: pl.Tensor[[1, SIZE], pl.FP32],
+        y: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+        data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+        signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+    ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+        """Per-device orchestration: one incore call, on this device."""
+        return self.reduce_step(x, y, data, signal)
 
-            # Phase 3 — accumulate: start from our own slice, add every peer's slice.
-            acc = pl.load(data, [0, 0], [1, SIZE])
-            for peer in pl.range(nranks):
-                if peer != my_rank:
-                    recv = pld.tile.remote_load(data, peer=peer, offsets=[0, 0], shape=[1, SIZE])
-                    acc = pl.add(acc, recv)
-
-            # Phase 4 — stage-out: the accumulated result is this rank's output.
-            return pl.store(acc, [0, 0], y)
-
-        @pl.function(type=pl.FunctionType.Orchestration)
-        def per_rank(
-            self,
-            x: pl.Tensor[[1, SIZE], pl.FP32],
-            y: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
-            data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
-            signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
-        ) -> pl.Tensor[[1, SIZE], pl.FP32]:
-            """Per-device orchestration: one incore call, on this device."""
-            return self.reduce_step(x, y, data, signal)
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def mesh_allreduce(
-            self,
-            x: pl.Tensor[[nr, 1, SIZE], pl.FP32],
-            y: pl.Out[pl.Tensor[[nr, 1, SIZE], pl.FP32]],
-        ) -> pl.Tensor[[nr, 1, SIZE], pl.FP32]:
-            """Host orchestrator: one shared data window + one shared signal window, one dispatch per rank."""
-            data_buf = pld.alloc_window_buffer([1, SIZE], dtype=pl.FP32)
-            signal_buf = pld.alloc_window_buffer([nr, 1], dtype=pl.INT32)
-            for r in pl.range(pld.world_size()):
-                data = pld.window(data_buf, [1, SIZE], dtype=pl.FP32)
-                signal = pld.window(signal_buf, [nr, 1], dtype=pl.INT32)
-                self.per_rank(x[r], y[r], data, signal, device=r)
-            return y
-
-    return MeshAllreduce
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def mesh_allreduce(
+        self,
+        x: pl.Tensor[[NR, 1, SIZE], pl.FP32],
+        y: pl.Out[pl.Tensor[[NR, 1, SIZE], pl.FP32]],
+    ) -> pl.Tensor[[NR, 1, SIZE], pl.FP32]:
+        """Host orchestrator: one shared data window + one shared signal window, one dispatch per rank."""
+        data_buf = pld.alloc_window_buffer([1, SIZE], dtype=pl.FP32)
+        signal_buf = pld.alloc_window_buffer(pld.world_size() * pl.INT32.get_byte())
+        for r in pl.range(pld.world_size()):
+            data = pld.window(data_buf, [1, SIZE], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [pld.world_size(), 1], dtype=pl.INT32)
+            self.per_rank(x[r], y[r], data, signal, device=r)
+        return y
 
 
 def expected_allreduce(inputs: torch.Tensor) -> torch.Tensor:
@@ -176,13 +164,12 @@ def main() -> int:
         raise SystemExit(f"need at least 2 devices, got {device_ids}")
 
     nr = len(device_ids)
-    program = build_mesh_allreduce(nr)
 
     x = torch.randn((nr, 1, SIZE), dtype=torch.float32)
     y = torch.zeros((nr, 1, SIZE), dtype=torch.float32)
 
     compiled = ir.compile(
-        program,
+        MeshAllreduce,
         platform=args.platform,
         distributed_config=DistributedConfig(
             device_ids=device_ids,

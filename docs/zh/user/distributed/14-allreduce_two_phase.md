@@ -40,9 +40,11 @@ OK
 
 ## 走读（Walkthrough）
 
-与步骤 08 相同的 class-form 工厂，现在有**两个**窗口（`data` 存 staging
-的输入，`result` 存归约后的块）和一个**两行信号**（`[2, nr]`——每轮 barrier
-一行）：
+与步骤 08 相同的 `@pl.program` class form，但这里多了一个 **rank 数量
+工厂**——步骤 08 并不需要它。工厂的作用是把 `nr` 变成编译期常量，而本步骤
+是第一个真正需要它的：块大小 `SIZE // nr` 是 **tile 形状**，而 tile 形状
+必须在 kernel 编译时已知。此外现在有**两个**窗口（`data` 存 staging 的输入，
+`result` 存归约后的块）和一个**两行信号**（`[2, nr]`——每轮 barrier 一行）：
 
 ```python
 # Phase 1 — 把本 rank 的 slice 放入自己的窗口槽位。

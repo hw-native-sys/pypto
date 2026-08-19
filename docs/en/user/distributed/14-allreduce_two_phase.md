@@ -43,9 +43,13 @@ OK
 
 ## Walkthrough
 
-Same class-form factory as step 08, now with **two** windows (`data`
-for the staged inputs, `result` for the reduced chunks) and a **two-row
-signal** (`[2, nr]` — one row per barrier round):
+Same `@pl.program` class form as step 08, but now with a **rank-count
+factory** — step 08 needed none. The factory is what makes `nr` a compile-time
+constant, and this step is the first that requires one: the chunk size
+`SIZE // nr` is a **tile shape**, and tile shapes must be known when the kernel
+is compiled. There are also **two** windows now (`data` for the staged inputs,
+`result` for the reduced chunks) and a **two-row signal** (`[2, nr]` — one row
+per barrier round):
 
 ```python
 # Phase 1 — stage this rank's slice into its window slot.
