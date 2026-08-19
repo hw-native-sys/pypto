@@ -20,9 +20,16 @@ sites. This pass makes the ctx flow explicit in IR instead:
    If the distributed tensor arg is a caller parameter or an SSA alias of one,
    forward the caller's materialized ctx parameter. Return positions are
    matched to the callee's returned parameters, so mixed or reordered return
-   tuples do not fall back to positional tail alignment. Tensor aliases carried
-   through `ForStmt` / `WhileStmt` are tracked as well. In host orchestration
-   only, if the lineage cannot be resolved, bind
+   tuples do not fall back to positional tail alignment. This holds for `Submit`
+   too: its result positions are the callee's return positions (the trailing
+   `Scalar[TASK_ID]` has no ctx). Builtin ops that bind a fresh SSA var to a
+   DistributedTensor that already exists forward that value's ctx — both
+   output-side writebacks (`tile.store`, `tensor.assemble`,
+   `tensor.set_validshape`) and zero-copy buffer-aliasing views (`tensor.view`,
+   `tile.slice`, `tensor.reshape`, ...), whose result type propagates
+   `DistributedTensorType::window_buffer_` from `args[0]`.
+   Tensor aliases carried through `ForStmt` / `WhileStmt` are tracked as well.
+   In host orchestration only, if the lineage cannot be resolved, bind
    `pld.system.get_comm_ctx(dist)` immediately before the call and pass that
    result. Chip orchestration and device functions must resolve an explicit
    context; an unresolved argument is diagnosed instead of synthesizing a
@@ -39,6 +46,20 @@ This pass does not add `CommCtxType` values to `IfStmt` return variables or
 branch yields. DistributedTensor `if` lowering keeps the existing requirement
 that both branches refer to the same backing/context; dynamic context merges
 remain outside this change (issue #2027).
+
+A loop carry is subject to the same one-context rule. The carry is seeded from
+its init value before the body is walked, so a self-carry
+(`data = self.comm(data)`) resolves; the value yielded back into the carry is
+then checked against that seed, and rebinding the carry to a *different*
+DistributedTensor inside the loop is diagnosed rather than silently taking the
+init value's context. A yield whose lineage this pass cannot trace at all leaves
+the seed in place.
+
+The pass produces `IRProperty::DistTensorCtxMaterialized`: no
+`pld.system.get_comm_ctx` survives outside host orchestration. The pass enforces
+this for every function it rewrites, and the property verifier checks it
+independently — which also covers Programs the pass returns untouched because no
+function declares a `DistributedTensorType` parameter.
 
 The pass runs after `LowerHostTensorCollectives` and before the final
 `Simplify`. At that point host window buffers have already been materialized by

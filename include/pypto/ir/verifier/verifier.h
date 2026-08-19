@@ -483,6 +483,22 @@ PropertyVerifierPtr CreateTensorViewCanonicalPropertyVerifier(bool require_mater
 PropertyVerifierPtr CreateCommDomainScopesMaterializedPropertyVerifier();
 
 /**
+ * @brief Factory function for creating DistTensorCtxMaterialized property verifier
+ *
+ * Flags every ``pld.system.get_comm_ctx`` call left in a function that is not
+ * host orchestration. Host codegen resolves the query from the window's
+ * per-rank runtime context, so it is legitimate there; device and
+ * chip-orchestration codegen have no runtime representation for it, and
+ * ``MaterializeDistTensorCtx`` must have replaced it with the explicit
+ * ``CommCtxType`` parameter. The pass enforces this by construction for every
+ * function it rewrites, but a Program with no DistributedTensor parameter at
+ * all is returned untouched; the verifier catches that independently.
+ *
+ * @return Shared pointer to DistTensorCtxMaterialized PropertyVerifier
+ */
+PropertyVerifierPtr CreateDistTensorCtxMaterializedPropertyVerifier();
+
+/**
  * @brief Factory function for creating AssignTypeSymmetry property verifier
  *
  * Verifies that every ``AssignStmt(var, value)`` satisfies

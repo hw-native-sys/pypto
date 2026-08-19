@@ -51,7 +51,7 @@ inline const PassProperties kLowerHostTensorCollectivesProperties{
 
 inline const PassProperties kMaterializeDistTensorCtxProperties{
     .required = {IRProperty::CommDomainScopesMaterialized},
-    .produced = {IRProperty::CommDomainScopesMaterialized}};
+    .produced = {IRProperty::CommDomainScopesMaterialized, IRProperty::DistTensorCtxMaterialized}};
 
 // -- MaterializeValidShapeSymbols pass (runs last) ---------------------------
 //    Prepends a Scalar[INDEX] parameter per device-kernel valid_shape symbol that

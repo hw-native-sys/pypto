@@ -19,6 +19,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -32,8 +33,10 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/verifier/verifier.h"
 
 namespace pypto {
 namespace ir {
@@ -155,6 +158,81 @@ class LocalNameCollector : public IRVisitor {
   return dirs;
 }
 
+/// Index of the argument whose communication context @p call inherits.
+///
+/// Two builtin families bind a fresh SSA var to a DistributedTensor that
+/// already exists, so the result keeps the original's window — and with it its
+/// context:
+///   - output-side writebacks (`tile.store`, `tensor.assemble`, ...), which
+///     write into an existing tensor and return it;
+///   - zero-copy buffer-aliasing views (`tensor.view`, `tile.slice`,
+///     `tensor.reshape`, ...), whose deduced result type propagates
+///     `DistributedTensorType::window_buffer_` straight from `args[0]`.
+///
+/// Neither reaches the callee-return machinery below: their op is an `Op`, not
+/// a `GlobalVar`, so without this the context would look unresolvable.
+[[nodiscard]] std::optional<size_t> CtxInheritingArgIndex(const CallPtr& call) {
+  if (!call || !call->op_) return std::nullopt;
+  if (auto writeback = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size())) {
+    return writeback;
+  }
+  if (op_predicates::IsBufferAliasingViewOp(call->op_->name_) && !call->args_.empty()) {
+    return 0;
+  }
+  return std::nullopt;
+}
+
+/// Describe a DistributedTensor value for a user-facing diagnostic.
+[[nodiscard]] std::string DescribeDistValue(const ExprPtr& expr) {
+  if (auto var = AsVarLike(expr)) return "'" + var->name_hint_ + "'";
+  return "a DistributedTensor value";
+}
+
+/// Map each result position of a `Call` / `Submit` to the caller-side CommCtx
+/// of the callee parameter that result writes back.
+///
+/// `Call` and `Submit` share one result-position map: a `Submit`'s type is
+/// `TupleType([*<callee returns>, Scalar[TASK_ID]])`, so the trailing TASK_ID
+/// simply falls off the end of the returned vector.  Positions that write back
+/// a *runtime-allocated* Out param — one the caller never passed, per the
+/// `Submit` args-prefix invariant (`pass-submit-awareness.md` rule 5) — have no
+/// caller-side argument and resolve to null.
+///
+/// @param lookup_arg_ctx resolves the ctx of one caller-side argument
+/// @return one entry per callee return position (null = unresolved)
+template <typename LookupArgCtx>
+[[nodiscard]] std::vector<VarPtr> ResolveResultCtxs(
+    const ExprPtr& expr, const ProgramPtr& program,
+    const std::unordered_map<std::string, FunctionCtxPlan>& plans, const LookupArgCtx& lookup_arg_ctx) {
+  OpPtr op;
+  const std::vector<ExprPtr>* args = nullptr;
+  if (auto call = As<Call>(expr)) {
+    op = call->op_;
+    args = &call->args_;
+  } else if (auto submit = As<Submit>(expr)) {
+    op = submit->op_;
+    args = &submit->args_;
+  } else {
+    return {};
+  }
+
+  auto gvar = As<GlobalVar>(op);
+  if (!gvar || !program) return {};
+  auto callee = program->GetFunction(gvar->name_);
+  if (!callee) return {};
+  auto plan_it = plans.find(callee->name_);
+  if (plan_it == plans.end()) return {};
+
+  std::vector<VarPtr> result(plan_it->second.returned_param_indices.size());
+  for (size_t result_idx = 0; result_idx < result.size(); ++result_idx) {
+    const auto& param_idx = plan_it->second.returned_param_indices[result_idx];
+    if (!param_idx || *param_idx >= args->size() || *param_idx >= callee->params_.size()) continue;
+    if (!As<DistributedTensorType>(callee->params_[*param_idx]->GetType())) continue;
+    result[result_idx] = lookup_arg_ctx((*args)[*param_idx]);
+  }
+  return result;
+}
+
 class DistParamAliasCollector : public IRVisitor {
  public:
   DistParamAliasCollector(ProgramPtr program, const std::unordered_map<std::string, FunctionCtxPlan>* plans,
@@ -206,11 +284,13 @@ class DistParamAliasCollector : public IRVisitor {
   void VisitStmt_(const ForStmtPtr& op) override {
     RecordLoopCarries(op->iter_args_, op->return_vars_);
     IRVisitor::VisitStmt_(op);
+    ValidateLoopCarries(op->iter_args_, op->body_, op->span_);
   }
 
   void VisitStmt_(const WhileStmtPtr& op) override {
     RecordLoopCarries(op->iter_args_, op->return_vars_);
     IRVisitor::VisitStmt_(op);
+    ValidateLoopCarries(op->iter_args_, op->body_, op->span_);
   }
 
  private:
@@ -238,11 +318,14 @@ class DistParamAliasCollector : public IRVisitor {
       return index < returned_ctxs.size() ? returned_ctxs[index] : nullptr;
     }
 
-    if (As<Call>(expr)) {
-      auto returned_ctxs = ReturnedCtxs(expr);
-      if (returned_ctxs.size() == 1) return returned_ctxs[0];
+    if (auto call = As<Call>(expr)) {
+      if (auto inherited = CtxInheritingArgIndex(call)) {
+        return LookupCtx(call->args_[*inherited]);
+      }
     }
-    return nullptr;
+
+    auto returned_ctxs = ReturnedCtxs(expr);
+    return returned_ctxs.size() == 1 ? returned_ctxs[0] : nullptr;
   }
 
   std::vector<VarPtr> ReturnedCtxs(const ExprPtr& expr) const {
@@ -250,27 +333,38 @@ class DistParamAliasCollector : public IRVisitor {
       auto it = tuple_to_ctx.find(tuple_var.get());
       return it == tuple_to_ctx.end() ? std::vector<VarPtr>{} : it->second;
     }
+    if (!plans_) return {};
+    return ResolveResultCtxs(expr, program_, *plans_, [this](const ExprPtr& arg) { return LookupCtx(arg); });
+  }
 
-    // Submit results contain runtime-created outputs and TASK_ID values, so
-    // their positions are not the callee's flat return positions.  Keep the
-    // existing get_comm_ctx fallback for Submit until it has an explicit
-    // result-position map.
-    auto call = As<Call>(expr);
-    auto gvar = call ? As<GlobalVar>(call->op_) : nullptr;
-    if (!gvar || !program_ || !plans_) return {};
-    auto callee = program_->GetFunction(gvar->name_);
-    if (!callee) return {};
-    auto plan_it = plans_->find(callee->name_);
-    if (plan_it == plans_->end()) return {};
-
-    std::vector<VarPtr> result(plan_it->second.returned_param_indices.size());
-    for (size_t result_idx = 0; result_idx < result.size(); ++result_idx) {
-      const auto& param_idx = plan_it->second.returned_param_indices[result_idx];
-      if (!param_idx || *param_idx >= call->args_.size() || *param_idx >= callee->params_.size()) continue;
-      if (!As<DistributedTensorType>(callee->params_[*param_idx]->GetType())) continue;
-      result[result_idx] = LookupCtx(call->args_[*param_idx]);
+  /// A loop carry is seeded from its init value *before* the body is visited so
+  /// a self-carry (`data = self.comm(data)`) can resolve at all.  That seed is
+  /// only sound while the value yielded back into the carry still names the
+  /// same context: a loop that rebinds the carry to a different
+  /// DistributedTensor would take its data pointer from one allocation and its
+  /// communication context from another — the same unsupported program the
+  /// `IfStmt` merge above diagnoses.
+  ///
+  /// A yield this pass cannot trace at all leaves the seed in place; that value
+  /// came from an op with no modelled ctx lineage, and rejecting it here would
+  /// turn programs that compile today into hard errors.
+  void ValidateLoopCarries(const std::vector<IterArgPtr>& iter_args, const StmtPtr& body, const Span& span) {
+    auto yield = FindBranchYield(body);
+    if (!yield) return;
+    for (size_t i = 0; i < iter_args.size() && i < yield->value_.size(); ++i) {
+      const auto& iter_arg = iter_args[i];
+      if (!iter_arg) continue;
+      auto seeded = alias_to_ctx.find(iter_arg.get());
+      if (seeded == alias_to_ctx.end()) continue;
+      auto yield_ctx = LookupCtx(yield->value_[i]);
+      if (!yield_ctx) continue;
+      CHECK_SPAN(yield_ctx.get() == seeded->second.get(), span)
+          << "Rebinding loop-carried DistributedTensor '" << iter_arg->name_hint_
+          << "' to a different DistributedTensor inside the loop is not supported: it would enter the "
+             "loop with the communication context of its initial value and leave with another. Carry a "
+             "single DistributedTensor through the loop, and vary the data read from it instead (see "
+             "GitHub issue #2027).";
     }
-    return result;
   }
 
   void RecordLoopCarries(const std::vector<IterArgPtr>& iter_args, const std::vector<VarPtr>& return_vars) {
@@ -403,9 +497,13 @@ class MaterializeDistTensorCtxMutator : public IRMutator {
       if (IsHostOrch(current_func_)) return call;
 
       auto ctx = LookupExistingCtx(call->args_[0]);
-      INTERNAL_CHECK_SPAN(ctx, call->span_)
-          << "MaterializeDistTensorCtx: device-side get_comm_ctx has no materialized CommCtx for its "
-             "DistributedTensor argument";
+      CHECK_SPAN(ctx, call->span_)
+          << "Cannot resolve pld.system.get_comm_ctx(" << DescribeDistValue(call->args_[0]) << ") in '"
+          << (current_func_ ? current_func_->name_ : std::string("<unknown>"))
+          << "'. Outside host orchestration the query has no runtime representation, so the context must "
+             "be reachable from a parameter of this function. Take "
+          << DescribeDistValue(call->args_[0])
+          << " as a parameter (or return it from a callee that does) instead of producing it locally.";
       // get_comm_ctx is an IR-level query, but it has no device-side runtime
       // representation.  Replace it with the explicit context SSA value so
       // PTO/InCore codegen never has to rediscover a tensor-to-context edge.
@@ -481,21 +579,9 @@ class MaterializeDistTensorCtxMutator : public IRMutator {
     return program_->GetFunction(gvar->name_);
   }
 
-  std::vector<VarPtr> LookupReturnedCtxs(const CallPtr& call) const {
-    if (!call || !program_) return {};
-    auto callee = ResolveCallee(call->op_);
-    if (!callee) return {};
-    auto plan_it = plans_.find(callee->name_);
-    if (plan_it == plans_.end()) return {};
-
-    std::vector<VarPtr> result(plan_it->second.returned_param_indices.size());
-    for (size_t result_idx = 0; result_idx < result.size(); ++result_idx) {
-      const auto& param_idx = plan_it->second.returned_param_indices[result_idx];
-      if (!param_idx || *param_idx >= call->args_.size() || *param_idx >= callee->params_.size()) continue;
-      if (!As<DistributedTensorType>(callee->params_[*param_idx]->GetType())) continue;
-      result[result_idx] = LookupExistingCtx(call->args_[*param_idx]);
-    }
-    return result;
+  std::vector<VarPtr> LookupReturnedCtxs(const ExprPtr& call_like) const {
+    return ResolveResultCtxs(call_like, program_, plans_,
+                             [this](const ExprPtr& arg) { return LookupExistingCtx(arg); });
   }
 
   VarPtr LookupExistingCtx(const ExprPtr& arg) const {
@@ -509,25 +595,24 @@ class MaterializeDistTensorCtxMutator : public IRMutator {
     }
 
     if (auto get_item = As<TupleGetItemExpr>(arg); get_item && get_item->index_ >= 0) {
+      const auto index = static_cast<size_t>(get_item->index_);
       if (auto tuple_var = AsVarLike(get_item->tuple_)) {
         auto tuple_it = current_tuple_to_ctx_.find(tuple_var.get());
         if (tuple_it == current_tuple_to_ctx_.end()) return nullptr;
-        const auto index = static_cast<size_t>(get_item->index_);
         return index < tuple_it->second.size() ? tuple_it->second[index] : nullptr;
       }
-      if (auto tuple_call = As<Call>(get_item->tuple_)) {
-        auto returned_ctxs = LookupReturnedCtxs(tuple_call);
-        const auto index = static_cast<size_t>(get_item->index_);
-        return index < returned_ctxs.size() ? returned_ctxs[index] : nullptr;
-      }
-      return nullptr;
+      auto returned_ctxs = LookupReturnedCtxs(get_item->tuple_);
+      return index < returned_ctxs.size() ? returned_ctxs[index] : nullptr;
     }
 
     if (auto call = As<Call>(arg)) {
-      auto returned_ctxs = LookupReturnedCtxs(call);
-      return returned_ctxs.size() == 1 ? returned_ctxs[0] : nullptr;
+      if (auto inherited = CtxInheritingArgIndex(call)) {
+        return LookupExistingCtx(call->args_[*inherited]);
+      }
     }
-    return nullptr;
+
+    auto returned_ctxs = LookupReturnedCtxs(arg);
+    return returned_ctxs.size() == 1 ? returned_ctxs[0] : nullptr;
   }
 
   ExprPtr GetCtxForArg(const ExprPtr& arg, const Span& span) {
@@ -537,9 +622,14 @@ class MaterializeDistTensorCtxMutator : public IRMutator {
     // Chip orchestration and device functions must carry an explicit context
     // SSA value; leaving a synthesized get_comm_ctx in those functions would
     // give device codegen an operation with no runtime representation.
-    INTERNAL_CHECK_SPAN(IsHostOrch(current_func_), span)
-        << "MaterializeDistTensorCtx: device-side call argument has no materialized CommCtx for its "
-           "DistributedTensor";
+    CHECK_SPAN(IsHostOrch(current_func_), span)
+        << "Cannot determine the communication context of DistributedTensor " << DescribeDistValue(arg)
+        << " passed from '" << (current_func_ ? current_func_->name_ : std::string("<unknown>"))
+        << "'. Only host orchestration can query a context at runtime; a chip-orchestration or device "
+           "function must reach its DistributedTensor from one of its own parameters. Take "
+        << DescribeDistValue(arg)
+        << " as a parameter of this function (or return it from a callee that does) instead of producing "
+           "it locally.";
     INTERNAL_CHECK_SPAN(can_emit_prefix_, span)
         << "MaterializeDistTensorCtx: cannot synthesize get_comm_ctx prefix in this expression context";
     std::string base_name = "dist";
@@ -616,7 +706,61 @@ class MaterializeDistTensorCtxMutator : public IRMutator {
   return mutator.VisitProgram(with_signatures);
 }
 
+// ============================================================================
+// DistTensorCtxMaterialized property verifier
+// ============================================================================
+
+/// Flags every `pld.system.get_comm_ctx` left outside host orchestration.
+///
+/// The pass eliminates the query by construction, but only for functions it
+/// visits: a Program in which no function declares a DistributedTensor
+/// parameter is returned untouched, and a context that never traces back to a
+/// parameter cannot be resolved at all. Either way the query would reach device
+/// codegen, which has no runtime representation for it. Checking the invariant
+/// independently turns that into a diagnostic instead of unusable generated
+/// code.
+class GetCommCtxCallChecker : public IRVisitor {
+ public:
+  GetCommCtxCallChecker(std::vector<Diagnostic>& diagnostics, std::string func_name)
+      : diagnostics_(diagnostics), func_name_(std::move(func_name)) {}
+
+ protected:
+  void VisitExpr_(const CallPtr& op) override {
+    IRVisitor::VisitExpr_(op);
+    if (!op || !op->op_ || !IsOp(op, "pld.system.get_comm_ctx")) return;
+    diagnostics_.emplace_back(
+        DiagnosticSeverity::Error, "DistTensorCtxMaterialized", 0,
+        "Function '" + func_name_ +
+            "' still calls pld.system.get_comm_ctx. Only host orchestration may query a communication "
+            "context at runtime; everywhere else MaterializeDistTensorCtx must have replaced it with the "
+            "explicit CommCtx parameter, and device codegen cannot lower the query.",
+        op->span_);
+  }
+
+ private:
+  std::vector<Diagnostic>& diagnostics_;
+  std::string func_name_;
+};
+
+class DistTensorCtxMaterializedPropertyVerifierImpl : public PropertyVerifier {
+ public:
+  [[nodiscard]] std::string GetName() const override { return "DistTensorCtxMaterialized"; }
+
+  void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
+    if (!program) return;
+    for (const auto& [gv, func] : program->functions_) {
+      if (!func || !func->body_ || IsHostOrch(func)) continue;
+      GetCommCtxCallChecker checker(diagnostics, func->name_);
+      checker.VisitStmt(func->body_);
+    }
+  }
+};
+
 }  // namespace
+
+PropertyVerifierPtr CreateDistTensorCtxMaterializedPropertyVerifier() {
+  return std::make_shared<DistTensorCtxMaterializedPropertyVerifierImpl>();
+}
 
 namespace pass {
 

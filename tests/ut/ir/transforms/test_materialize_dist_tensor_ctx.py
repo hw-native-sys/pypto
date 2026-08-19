@@ -528,6 +528,128 @@ def test_loop_carried_returned_distributed_tensors_reuse_contexts():
     assert list(comm_calls[1].args[-2:]) == list(main.params[-2:])
 
 
+def test_buffer_aliasing_view_inherits_source_context():
+    """A zero-copy view keeps the source window, so it keeps the source ctx."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume(self, data: pld.DistributedTensor[[2, 2], pl.FP32]):
+            pld.system.wait(data, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Eq)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, data: pl.InOut[pld.DistributedTensor[[4], pl.FP32]]):
+            view = pl.tensor.view(data, [2, 2])
+            self.consume(view)
+
+    result = _apply(P)
+    main = _get_func(result, "main")
+    consume_calls = _collect_calls(main.body, "consume")
+
+    assert _collect_calls(main.body, "pld.system.get_comm_ctx") == []
+    assert len(consume_calls) == 1
+    assert consume_calls[0].args[-1] is main.params[-1]
+
+
+def test_loop_rebinding_carry_to_another_distributed_tensor_is_rejected():
+    """A carry seeded from its init must still yield back the same context."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def pick(self, data: pld.DistributedTensor[[4], pl.FP32]) -> pld.DistributedTensor[[4], pl.FP32]:
+            return data
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume(self, data: pld.DistributedTensor[[4], pl.FP32]):
+            pld.system.wait(data, offsets=[0], expected=1, cmp=pld.WaitCmp.Eq)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            first: pl.InOut[pld.DistributedTensor[[4], pl.FP32]],
+            second: pl.InOut[pld.DistributedTensor[[4], pl.FP32]],
+        ):
+            data = first
+            for _step in pl.range(2):
+                self.consume(data)
+                # Rebinds the carry to `second`: it would enter the loop with
+                # `first`'s context and leave with `second`'s.
+                data = self.pick(second)
+            self.consume(data)
+
+    with pytest.raises(ValueError, match="Rebinding loop-carried DistributedTensor"):
+        _apply(passes.convert_to_ssa()(P))
+
+
+def test_submit_result_forwards_returned_param_ctx():
+    """A Submit result position maps back to the arg it writes back, like Call."""
+
+    span = _span()
+    data_ty = _dist_ty()
+    submit_ty = ir.TupleType([data_ty, ir.ScalarType(DataType.TASK_ID)])
+
+    stage_data = ir.Var("data", data_ty, span)
+    stage = ir.Function(
+        "stage",
+        [(stage_data, ir.ParamDirection.InOut)],
+        [data_ty],
+        ir.ReturnStmt([stage_data], span),
+        span,
+        ir.FunctionType.InCore,
+    )
+
+    consume_data = ir.Var("data", data_ty, span)
+    consume = ir.Function(
+        "consume",
+        [(consume_data, ir.ParamDirection.In)],
+        [],
+        ir.ReturnStmt(span),
+        span,
+        ir.FunctionType.InCore,
+    )
+
+    main_data = ir.Var("data", data_ty, span)
+    submit_result = ir.Var("submit_result", submit_ty, span)
+    produced = ir.Var("produced", data_ty, span)
+    submit = ir.Submit(
+        ir.GlobalVar("stage"),
+        [main_data],
+        [],
+        {},
+        {"arg_directions": [ir.ArgDirection.InOut]},
+        submit_ty,
+        span,
+    )
+    consume_call = _call_with_dirs("consume", [produced], span)
+    main = ir.Function(
+        "main",
+        [(main_data, ir.ParamDirection.InOut)],
+        [],
+        ir.SeqStmts(
+            [
+                ir.AssignStmt(submit_result, submit, span),
+                ir.AssignStmt(produced, ir.TupleGetItemExpr(submit_result, 0, span), span),
+                ir.EvalStmt(consume_call, span),
+                ir.ReturnStmt(span),
+            ],
+            span,
+        ),
+        span,
+        ir.FunctionType.Orchestration,
+    )
+
+    result = passes.materialize_dist_tensor_ctx()(ir.Program([stage, consume, main], "submit_ctx", span))
+    main_after = _get_func(result, "main")
+
+    # `main` is device-side, so the ctx must come from its own parameter rather
+    # than a synthesized runtime query.
+    assert _collect_calls(main_after.body, "pld.system.get_comm_ctx") == []
+    consume_after = _collect_calls(main_after.body, "consume")
+    assert len(consume_after) == 1
+    assert consume_after[0].args[-1] is main_after.params[-1]
+
+
 def test_distributed_if_keeps_current_no_context_yield_behavior():
     @pl.program
     class P:
@@ -654,7 +776,9 @@ def test_device_call_without_materialized_context_rejects_synthesized_prefix():
     )
 
     program = ir.Program([producer, predicate, main], "unsupported_prefix_context", span)
-    with pytest.raises(RuntimeError, match="device-side call argument has no materialized CommCtx"):
+    # A user-facing limitation, not an internal invariant: the message must name
+    # the tensor and the function, and say what to change.
+    with pytest.raises(ValueError, match="Cannot determine the communication context"):
         passes.materialize_dist_tensor_ctx()(program)
 
 

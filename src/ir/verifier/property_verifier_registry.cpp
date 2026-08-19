@@ -90,6 +90,7 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   Register(IRProperty::TensorViewCanonical,
            []() { return CreateTensorViewCanonicalPropertyVerifier(/*require_materialized=*/true); });
   Register(IRProperty::CommDomainScopesMaterialized, CreateCommDomainScopesMaterializedPropertyVerifier);
+  Register(IRProperty::DistTensorCtxMaterialized, CreateDistTensorCtxMaterializedPropertyVerifier);
   // AssignTypeSymmetry (#1285): every AssignStmt(var, value) must satisfy
   // structural_equal(var->GetType(), value->GetType()). Registered so callers
   // can run it on demand via PropertyVerifierRegistry::verify; not yet promoted

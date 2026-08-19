@@ -12,6 +12,8 @@
 #ifndef PYPTO_IR_TRANSFORMS_UTILS_OP_PREDICATES_H_
 #define PYPTO_IR_TRANSFORMS_UTILS_OP_PREDICATES_H_
 
+#include <cstddef>
+#include <optional>
 #include <string>
 
 #include "pypto/ir/expr.h"
@@ -19,6 +21,22 @@
 namespace pypto {
 namespace ir {
 namespace op_predicates {
+
+/// Index of the argument a builtin *output-side* op binds its result to.
+///
+/// These ops do not allocate: they bind a fresh SSA var to a buffer an existing
+/// value already names, so the result inherits that argument's identity — and
+/// with it anything derived from identity, such as which function parameter a
+/// value traces back to or which communication context a DistributedTensor
+/// belongs to.
+///
+///   `tensor.assemble(target, tile, offset)`  -> `args[0]`
+///   `tensor.set_validshape(target, ...)`     -> `args[0]`
+///   `tile.store(value, indices, target)`     -> `args[2]`
+///
+/// @return the aliased argument index, or nullopt when @p op is not one of
+///         these ops or @p arg_count is too small for it
+[[nodiscard]] std::optional<size_t> BuiltinWritebackArgIndex(const OpPtr& op, size_t arg_count);
 
 /// True if the Call targets a tpop op (tile.tpop_from_aic / tile.tpop_from_aiv).
 /// Decided by the registry's CrossCoreRole, not by op-name string matching.

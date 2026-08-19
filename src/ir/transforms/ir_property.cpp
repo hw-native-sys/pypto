@@ -83,6 +83,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "ArrayNotEscaped";
     case IRProperty::CommDomainScopesMaterialized:
       return "CommDomainScopesMaterialized";
+    case IRProperty::DistTensorCtxMaterialized:
+      return "DistTensorCtxMaterialized";
     case IRProperty::RuntimeScopesMaterialized:
       return "RuntimeScopesMaterialized";
     case IRProperty::AssignTypeSymmetry:

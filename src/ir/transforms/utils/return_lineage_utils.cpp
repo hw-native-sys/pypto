@@ -149,21 +149,31 @@ const Var* TraceVar(const Var* var, const BodyIndexCollector& index,
 
     if (auto call = AsCallOrSubmitView(value)) {
       const std::string& op_name = call->op_->name_;
-      // Builtin output-side ops bind a fresh SSA var to an existing buffer.
-      // tensor.assemble(target, tile, offset) / tensor.set_validshape(target, ...)
-      // alias args[0]; tile.store(value, indices, target) aliases args[2].
-      if (IsOp(call, "tensor.assemble") || IsOp(call, "tensor.set_validshape")) {
-        auto arg_var = !call->args_.empty() ? AsVarLike(call->args_[0]) : nullptr;
+      // Builtin output-side ops bind a fresh SSA var to an existing buffer, so
+      // the result inherits that argument's param lineage.
+      if (auto aliased = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size())) {
+        auto arg_var = AsVarLike(call->args_[*aliased]);
         if (!arg_var) return nullptr;
         var = arg_var.get();
         continue;
       }
-      if (IsOp(call, "tile.store")) {
-        auto arg_var = call->args_.size() >= 3 ? AsVarLike(call->args_[2]) : nullptr;
-        if (!arg_var) return nullptr;
-        var = arg_var.get();
-        continue;
-      }
+      // Any other builtin stops the walk — including buffer-aliasing views
+      // (`tensor.view`, `tile.slice`, ...). A view lands in its source's buffer
+      // but carries a different shape / tensor_view, so `NormalizeReturnOrder`
+      // cannot use it: rewriting `return view(p, [1, 17])` to `return p` would
+      // return the wrong shape.
+      //
+      // Consumers must not read that stop as "this value is unrelated to any
+      // param". Two of them care about different things than the rewrite does,
+      // and views are imprecise for both:
+      //   - `ReturnParamsExplicit` treats a nullopt position as a fresh
+      //     kernel-allocated tensor. A view-shaped writeback is not fresh — it
+      //     already lives in the param's buffer.
+      //   - identity lineage (which comm domain a DistributedTensor belongs to)
+      //     *does* follow views, because the view propagates `window_buffer_`
+      //     verbatim; `MaterializeDistTensorCtx` layers that on top of this walk.
+      // Splitting writeback lineage from identity lineage would fix both; until
+      // then, downstream buffer identity is recovered by the MemRef layer.
       if (!IsBuiltinOp(op_name)) {
         // Single-result user call: continue from the arg the callee returns.
         auto callee = program ? program->GetFunction(op_name) : nullptr;

@@ -11,7 +11,9 @@
 
 #include "pypto/ir/transforms/utils/op_predicates.h"
 
+#include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "pypto/ir/core_affinity_kind.h"
@@ -67,6 +69,18 @@ bool OutputInheritsSourceBuffer(const std::string& op_name) {
   // directly — otherwise a transpose output, which does own its buffer, could
   // not be bound to a declared allocation.
   return IsBufferAliasingViewOp(op_name) || entry.GetOutputReusesInputArg().has_value();
+}
+
+std::optional<size_t> BuiltinWritebackArgIndex(const OpPtr& op, size_t arg_count) {
+  if (!op) return std::nullopt;
+  std::optional<size_t> aliased_idx;
+  if (IsOp(op, "tile.store")) {
+    aliased_idx = 2;
+  } else if (IsOp(op, "tensor.assemble") || IsOp(op, "tensor.set_validshape")) {
+    aliased_idx = 0;
+  }
+  if (!aliased_idx || *aliased_idx >= arg_count) return std::nullopt;
+  return aliased_idx;
 }
 
 bool IsBuiltinOp(const std::string& op_name) {
