@@ -104,6 +104,12 @@ enum class IRProperty : uint64_t {
                                     ///< store pipe can combine (BackendHandler::SupportsBf16AtomicAdd).
                                     ///< Decidable on the user's own IR, so it is a structural property
                                     ///< verified at pipeline input
+  ParamDirectionsSound,             ///< No parameter declared `In` is written by its function's body.
+                                    ///< Direction inference derives the write set from each operator's
+                                    ///< declared argument effects; an operator that never declared them
+                                    ///< reads as a pure consumer, so its write silently vanishes and the
+                                    ///< dependency it needs is never emitted. This turns that into a
+                                    ///< compile error naming the parameter and the call that writes it
   kCount                            ///< Sentinel (must be last)
 };
 

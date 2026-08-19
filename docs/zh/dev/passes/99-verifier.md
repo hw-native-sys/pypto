@@ -87,6 +87,46 @@
 | **TileMemoryInferred** | TileMemoryInferred | 每个**由 `AssignStmt` 绑定的** `TileType` 变量都已解析出 `memory_space_`，**并且** `Call`（位于 `AssignStmt` 或 `EvalStmt` 中）的每个受约束实参所在的空间都在该算子注册的 `input_constraints`（`set_input_memory`）允许范围内。该访问器只遍历这两类语句，因此 `ForStmt` 的 `iter_args_` / `return_vars_` 以及 `IfStmt` 的 `return_vars_` 标注**不在**检查范围内。后者才是关键：违反声明输入空间的算子没有合法下降路径，症状总是出现在很远的下游。`tile.cast` 要求 `Vec`；若喂入 `Acc` 实参，cube→vector 的切分点就没有边界 `tile.move`，于是 `ExpandMixedKernel` 切分出的 kernel 中，cast 引用了只在 cube 侧定义的变量——失败要到 11 个以上 pass 之后才浮现：或是 `MemoryReuse` 中非法的 `Acc->Acc tile.move`，或是 PTO codegen 的 `no MLIR mapping for MemRef base`，两者都不会指出真正出错的算子。该校验器直接读取 `TileType` 标注，而非分析阶段的 `var_memory_` 映射，因此对分析阶段漏记的空间依然如实报告。**由** `InferTileMemorySpace` **产生**并列入 `GetVerifiedProperties()`，故 `PassPipeline` 在该 pass 之后立即自动验证。**修复方式**：该 pass 会自行插入所需的 `tile.move`；此处报错属于 `InferTileMemorySpace` 的编译器缺陷，而非用户编写错误。 |
 | **AtomicAddDtypeValid** | AtomicAddDtypeValid | 每个写入全局内存的原子加操作，其目标 dtype 必须是后端 store 流水能够合并的类型。该校验在一处覆盖全部原子写入点：`tile.store`、`tensor.assemble`、`pld.tensor.put`、`pld.tile.put`、`pld.tensor.remote_store` 和 `pld.tile.remote_store`。只有 `bf16` 因后端而异——pto-isa 将其下降为 `SetAtomicAdd<bfloat16_t>` -> `set_atomic_bf16`，Ascend910B（A2/A3）支持而 Ascend950（A5）不支持（`BackendHandler::SupportsBf16AtomicAdd`）；其余硬件原子加 dtype（`FP32/FP16/INT32/INT16/INT8`）在所有后端均可用，由各算子 deducer 以后端无关的方式把关。远程 put 路径与本地 store 是**同一套机制**而非并行机制：pto-isa 的 comm `TPut` 通过 VEC 暂存 tile 流式传输，并用 `TSTORE_IMPL<..., AtomicAdd>` 落盘每个分块，而 `remote_store` 直接发射 `pto.tstore`，因此一个判定式即可管住全部写入点；而 ptoas 自身没有原子 dtype 规则（`TPutOp::verify` 只检查元素类型一致性与 shape），缺少此检查时程序会一路走到生成代码中的 pto-isa `static_assert`，而那段代码并非用户所写。列入 **`GetStructuralProperties()`**，且不由任何 Pass 产生：这里不依赖任何下降结果（atomic kwarg 与目标 dtype 在用户自己的 IR 中即已存在），因此 `PassPipeline` 在 `pipeline_input` 阶段验证，错误携带原始 `Span`。当后端未配置（无可校验的依据）时跳过。**修复方式**：累加到 `FP32` tensor，在归约完成后再转换为 `bf16`。 |
 
+### ParamDirectionsSound
+
+**属性**：`ParamDirectionsSound` —— 任何声明为 `In` 的参数都不应被其所在函数体写入。
+
+这是方向推导一直缺失的那道防线。每个推导方向的 pass 都要构建一份"这次调用写哪个实参"
+的集合，而该集合来自算子在注册表上的声明（`set_arg_effect`，参见
+[算子](../ir/05-operators.md#参数效应argument-effects)）以及各被调函数自身的
+`param_directions_`。从未声明效应的算子会被读成纯消费者：它的写入消失，参数停留在
+`In`，不会对它发出 RAW 边，故障不在编译期暴露，而是在设备上表现为竞争或调度死锁。
+`pld.system.notify` 就是这样上线的（#2391），而 `tile.mscatter` 在本检查写下时仍处于
+同样状态。
+
+**运行方式。** 注册为 `DiagnosticCheck::ParamDirectionsUnsound`，在
+`DiagnosticPhase::PostPipeline` 上作为**警告**运行；同时以 `IRProperty` 形式提供给需要
+让它致命的调用方：
+
+```python
+props = passes.IRPropertySet()
+props.insert(passes.IRProperty.ParamDirectionsSound)
+diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
+```
+
+三个关键取舍：
+
+- **作用于完成后的程序，而非某个 pass 之后。** Group/Spmd wrapper 把参数转发给内层
+  kernel，在 `DeriveCallDirections` 的 phase 0 把有效方向写回 IR 之前，它自己的签名对
+  内层 kernel 会写的参数读作 `In` 是合法的。该不变量只在流水线跑完后成立。
+- **跳过 Orchestration 函数。** 它们的方向是用户的声明，其参数就是 host ABI——纯 `Out`
+  参数会在 return 风格调用中由 host 自动分配，因此翻转它是用户要做的迁移，而不是编译器
+  要补完的推导。
+- **是警告而非错误。** 它不会凭空造出写入，但确实会报告今天可以正常编译运行的程序；
+  升级路径就是上面的 `IRProperty`——等报告清零之后。
+
+**已知边界**：写入通过 `BufferRootCollector` 归属到参数，而它把 `tensor.slice` 当作全新
+的 root 而非其来源的别名。写入参数的某个 slice 不会被报告。这是漏报，对该形态维持了今天
+的行为；误报则会拒绝正确的程序。
+
+**修复**：如果算子确实写该实参，就在它的 `REGISTER_OP` 块里用 `.set_arg_effect(...)`
+声明，让方向推导看得见；如果该参数确实是输出，就声明为 `pl.Out` 或 `pl.InOut`。
+
 ### SSAVerify
 
 **错误类型** (`ssa::ErrorType`)：
