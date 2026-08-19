@@ -128,7 +128,7 @@ m = pl.row_max(t)                              # pad value decides what the tail
 
 ### 让数据留在片上
 
-为循环的每一块 tile 重复加载同一个操作数，是最常见的可避免开销。当操作数是循环不变量时把 load 提到循环外；对在 K 轴循环中被反复使用的矩阵乘操作数，优先让它常驻 `Mat`。编译器在这里做与不做什么 —— 缓冲区复用、地址分配 —— 由 [MemoryReuse](../../dev/passes/33-memory_reuse.md) 与 [AllocateMemoryAddr](../../dev/passes/34-allocate_memory_addr.md) 决定；讲如何驾驭它们的性能章节尚未编写。
+为循环的每一块 tile 重复加载同一个操作数，是最常见的可避免开销。当操作数是循环不变量时把 load 提到循环外；对在 K 轴循环中被反复使用的矩阵乘操作数，优先让它常驻 `Mat`。编译器在这里做与不做什么 —— 缓冲区复用、地址分配 —— 由 [MemoryReuse](../../dev/passes/33-memory_reuse.md) 与 [AllocateMemoryAddr](../../dev/passes/34-allocate_memory_addr.md) 决定；如何驾驭它们见 [内存](../performance/05-memory.md)。
 
 ## 边界情况
 

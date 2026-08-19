@@ -207,9 +207,20 @@ nav:
           - en/user/ops/index.md
           - en/user/ops/00-dispatch.md
           - en/user/ops/01-catalog.md
-      - en/user/01-language_guide.md
       - en/user/00-getting_started.md
-      - en/user/03-torch_codegen_debug.md
+      - Execution:
+          - en/user/execution/index.md
+          - en/user/execution/00-compile.md
+          - en/user/execution/01-run.md
+      - Tools:
+          - en/user/tools/index.md
+          - en/user/tools/00-debugging.md
+          - en/user/tools/01-torch-codegen.md
+          - en/user/tools/02-memory-map.md
+      - Appendix:
+          - en/user/appendix/index.md
+          - en/user/appendix/00-feature-matrix.md
+          - en/user/appendix/01-faq.md
       - Distributed:
           - en/user/distributed/index.md
           - en/user/distributed/00-model.md

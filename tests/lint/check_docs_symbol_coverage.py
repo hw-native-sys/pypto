@@ -52,22 +52,10 @@ NOT_SYMBOLS = {
 # Symbols whose home chapter is not written yet. Each entry names the batch that
 # retires it. Remove entries as those chapters land — a stale entry silently
 # weakens the gate.
-DEFERRED = {
-    # B3 tutorials / B5 performance — the prefetch surface has no guide yet.
-    "AsyncEvent": "B6 execution",
-    "AsyncSession": "B6 execution",
-    "PrefetchAsyncContext": "B6 execution",
-    # B6 tools — text parsing / serialization round-trip.
-    "loads_program": "B6 tools",
-    "parse_program": "B6 tools",
-    # B6 execution — IR-level types surfaced mainly in printed IR.
-    "MemRefType": "B6 execution",
-    "PtrType": "B6 execution",
-    "TileView": "B6 execution",
-    "CompactMode": "B6 execution",
-    "TileLayout": "B6 execution",
-    "PipeType": "B6 execution",
-}
+# Every documentable symbol now has a home in the manual. An entry here means a
+# symbol is exported but its chapter is not written; it must name the batch that
+# will reclaim it, so the exemption cannot quietly become permanent.
+DEFERRED: dict[str, str] = {}
 
 _CODE_FENCE = re.compile(r"```.*?```", re.DOTALL)
 _INLINE_CODE = re.compile(r"`[^`\n]+`")

@@ -16,7 +16,7 @@
 
 ### 我有 kernel，但数值不对
 
-[Torch Codegen 调试指南](03-torch_codegen_debug.md) →
+[Torch Codegen 调试指南](tools/01-torch-codegen.md) →
 [编程模型 § 执行模型](03-programming-model.md)
 
 把 IR lower 成 PyTorch 脚本，逐张量对拍。如果结果是**每次运行都不一样**而不是稳定地错，
@@ -29,7 +29,7 @@
 [运行时 DFX](../dev/03-runtime-dfx.md)
 
 在动手测量之前，先看编译产物里的 `report/perf_hints.log` —— 编译器可能已经告诉你了。
-性能专章尚未编写，其内容当前的位置见下表。
+性能专章见 [性能](performance/index.md)。
 
 ### 我想跨多个设备运行
 
@@ -48,9 +48,9 @@
 | [编程模型](03-programming-model.md) | 张量 / Tile / Block 三层、控制面与执行面、pass 流水线、内存层次、执行模型 |
 | [语言指南](language/index.md) | 完整语言，一页一个主题：类型、函数、控制流、内存、作用域与任务、编译期指令 |
 | [算子](ops/index.md) | 在 `pl.*`、`pl.tensor.*`、`pl.tile.*` 之间取舍，以及算子目录 |
-| [编译程序](01-language_guide.md) | `ir.compile()` 与 `JITFunction.compile()`，以及检视结果 |
+| [编译程序](execution/00-compile.md) | `ir.compile()` 与 `JITFunction.compile()`，以及检视结果 |
 | [在设备上运行](00-getting_started.md) | 常驻设备张量、显式派发、性能基准、分布式执行 |
-| [Torch Codegen 调试指南](03-torch_codegen_debug.md) | 从 IR 生成 PyTorch 参考实现，用于定位精度问题 |
+| [Torch Codegen 调试指南](tools/01-torch-codegen.md) | 从 IR 生成 PyTorch 参考实现，用于定位精度问题 |
 | [分布式编程](distributed/index.md) | 跨 rank 程序的对称内存模型、集合通信、底层原语、执行与调试 |
 
 ## PyPTO 提供了什么
@@ -65,7 +65,7 @@
 | 手写 C++ kernel 接入 | [外部 Kernel](../dev/language/04-external-kernels.md) |
 | 设备常驻张量、显式派发、性能基准 | [在设备上运行](00-getting_started.md) |
 | 分布式（多卡）程序与集合通信 | [分布式编程](distributed/index.md) |
-| 对照 PyTorch 参考实现做精度定位 | [Torch Codegen 调试指南](03-torch_codegen_debug.md) |
+| 对照 PyTorch 参考实现做精度定位 | [Torch Codegen 调试指南](tools/01-torch-codegen.md) |
 | 编译期诊断与性能提示 | [诊断](../dev/passes/92-diagnostics.md) |
 | 运行时 DFX：swimlane、PMU、依赖图、scope stats | [运行时 DFX](../dev/03-runtime-dfx.md) |
 | 片上内存图可视化 | [内存图](../dev/07-memory-map.md) |

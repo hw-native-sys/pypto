@@ -154,8 +154,8 @@ Hoist the load out of the loop when the operand is loop-invariant, and prefer `M
 residency for a matmul operand reused across the K loop. What the compiler will and will
 not do here — buffer reuse, address assignment — is decided by
 [MemoryReuse](../../dev/passes/33-memory_reuse.md) and
-[AllocateMemoryAddr](../../dev/passes/34-allocate_memory_addr.md); the performance chapter
-covering how to drive them is not written yet.
+[AllocateMemoryAddr](../../dev/passes/34-allocate_memory_addr.md); [Memory](../performance/05-memory.md)
+covers how to drive them.
 
 ## Edge Cases
 

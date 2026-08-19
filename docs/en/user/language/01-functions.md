@@ -243,9 +243,8 @@ specialization key returns the identical instance.
 post-pass `ir.Program`, with no code generation, no `ptoas`, no artifacts, and no cache
 write. Use it to read lowered IR; use `compile()` when codegen itself is what you want to
 check. Both accept `config=RunConfig(...)`, but `lower()` ignores the runtime and artifact
-fields. Details of the compile options and the runtime surface belong to the execution
-chapter, which is not written yet — for now see
-[Compiling a Program](../01-language_guide.md).
+fields. Compile options are in [Compiling](../execution/00-compile.md) and the runtime surface in
+[Running](../execution/01-run.md).
 
 ### External C++ kernels
 

@@ -18,7 +18,7 @@ will be looking up operators constantly at first.
 
 ### I have a kernel and the numbers are wrong
 
-[Torch Codegen Debug Guide](03-torch_codegen_debug.md) →
+[Torch Codegen Debug Guide](tools/01-torch-codegen.md) →
 [Programming Model § execution model](03-programming-model.md#the-execution-model)
 
 Lower the IR to a PyTorch script and compare tensor by tensor. If the result changes
@@ -33,8 +33,8 @@ constrain execution order.
 [Runtime DFX](../dev/03-runtime-dfx.md)
 
 Check `report/perf_hints.log` from your compile output before measuring anything — the
-compiler may already have told you. The dedicated performance chapter is not written yet;
-see the table below for where its material currently lives.
+compiler may already have told you. [Performance](performance/index.md) is the dedicated
+chapter.
 
 ### I want to run across multiple devices
 
@@ -54,9 +54,9 @@ cross-rank overlap.
 | [Programming Model](03-programming-model.md) | Tensor / Tile / Block levels, control vs. execution plane, the pass pipeline, memory hierarchy, execution model |
 | [Language Guide](language/index.md) | The full language, one topic per page: types, functions, control flow, memory, scopes and tasks, directives |
 | [Operations](ops/index.md) | Choosing between the `pl.*`, `pl.tensor.*`, and `pl.tile.*` namespaces, plus the operator catalog |
-| [Compiling a Program](01-language_guide.md) | `ir.compile()` and `JITFunction.compile()`, and inspecting the result |
+| [Compiling a Program](execution/00-compile.md) | `ir.compile()` and `JITFunction.compile()`, and inspecting the result |
 | [Running on Device](00-getting_started.md) | Resident device tensors, explicit dispatch, benchmarking, distributed execution |
-| [Torch Codegen Debug Guide](03-torch_codegen_debug.md) | Generating a PyTorch reference implementation from the IR to isolate accuracy problems |
+| [Torch Codegen Debug Guide](tools/01-torch-codegen.md) | Generating a PyTorch reference implementation from the IR to isolate accuracy problems |
 | [Distributed Programming](distributed/index.md) | Symmetric-memory model, collectives, primitives, execution, and debugging for cross-rank programs |
 
 ## What PyPTO gives you
@@ -71,7 +71,7 @@ cross-rank overlap.
 | Hand-written C++ kernel integration | [External Kernels](../dev/language/04-external-kernels.md) |
 | Device-resident tensors, explicit dispatch, benchmarking | [Running on Device](00-getting_started.md) |
 | Distributed (multi-card) programs and collectives | [Distributed Programming](distributed/index.md) |
-| Accuracy debugging against a PyTorch reference | [Torch Codegen Debug Guide](03-torch_codegen_debug.md) |
+| Accuracy debugging against a PyTorch reference | [Torch Codegen Debug Guide](tools/01-torch-codegen.md) |
 | Compile-time diagnostics and performance hints | [Diagnostics](../dev/passes/92-diagnostics.md) |
 | Runtime DFX: swimlane, PMU, dependency graph, scope stats | [Runtime DFX](../dev/03-runtime-dfx.md) |
 | On-chip memory map visualization | [Memory Map](../dev/07-memory-map.md) |

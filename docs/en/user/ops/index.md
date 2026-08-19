@@ -20,8 +20,8 @@ drift from it within a release. The catalog exists to answer "what is there, and
 it called", not "what are its arguments".
 
 For "how do I use this operator to do something useful", the answer is a worked example,
-not a table. The tutorials chapter is not written yet; until it lands, `examples/beginner/`
-and `examples/intermediate/` in the repository are the closest thing.
+not a table — see [Tutorials](../tutorials/index.md), or `examples/beginner/` and
+`examples/intermediate/` in the repository.
 
 ## See Also
 
