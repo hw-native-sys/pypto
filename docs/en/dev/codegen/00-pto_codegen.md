@@ -143,7 +143,18 @@ print(pto_code)
 | `tile.mul(lhs, rhs)` | `pto.tmul` |
 | `tile.add(a, b, c)` | `pto.taddc` (3-operand add) |
 | `tile.adds(tile, scalar)` | `pto.tadds` (tile + scalar) |
-| `tile.fillpad_expand(src, shape)` | `pto.tfillpad_expand ins(%src) outs(%dst)` (the `shape` tuple is type-deduction only; the larger `dst` and its pad come from the result type) |
+| `tile.fillpad_expand(src, shape)` | `pto.tfillpad ins(%src) outs(%dst)` (PTOAS v0.58 uses the ordinary `tfillpad` opcode; PyPTO adapts its generated `TFILLPAD<pto::TFillPadMode::Expand>` call to pinned PTOISA's `TFILLPAD_EXPAND`; the `shape` tuple is type-deduction only) |
+
+PTOAS v0.58 has several A2/A3-only explicit-workspace contracts that codegen
+validates before emitting PTO IR: `tile.sel` uses a 4-byte-element scratch tile
+of at least 32 bytes (canonical `UINT32 [1, 8]`), `tile.sels` needs capacity for
+one complete physical source row, and `tile.row_expand_add(..., tmp)` needs at
+least 8192 bytes. Binary `tile.col_sum` and A2/A3 `tile.prelu` also require a
+static valid-shape PTO type; codegen emits a metadata-only `pto.treshape` alias
+when the valid shape is static and gives a direct diagnostic when it is dynamic.
+On A2/A3, tensor scatter derives flattened row offsets from a padded linear CI
+tile and elementwise arithmetic. This avoids the incorrect PTOISA f51c92f
+short-CI/column-broadcast sequence and its implicit 8 KiB workspace.
 
 **`tile.slice` / `tile.assemble` lowering details.**  Both ops are lowered
 through `pto.subview`, which is a pure view alias of the source tile (no

@@ -16,6 +16,8 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -36,6 +38,7 @@
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 #include "src/backend/common/pto_ops_internal.h"
@@ -103,6 +106,67 @@ static bool RequiresRowMajorLayout(std::string_view op_name) {
       "tile.subsc",
   };
   return kRowMajorOps.count(op_name) > 0;
+}
+
+// Return the physical byte capacity when every tile extent is static. Scratch
+// constraints are checked here, before PTOAS sees an undersized workspace and
+// reports an opaque verifier or template-instantiation error.
+static std::optional<int64_t> TryGetStaticTileCapacityBytes(
+    const std::shared_ptr<const ir::TileType>& tile_type) {
+  int64_t elements = 1;
+  for (const auto& extent : tile_type->shape_) {
+    auto value = As<ir::ConstInt>(extent);
+    if (!value || value->value_ < 0 ||
+        (value->value_ != 0 && elements > std::numeric_limits<int64_t>::max() / value->value_)) {
+      return std::nullopt;
+    }
+    elements *= value->value_;
+  }
+  const int64_t element_bytes = static_cast<int64_t>(tile_type->dtype_.GetByte());
+  if (element_bytes <= 0 ||
+      (elements != 0 && elements > std::numeric_limits<int64_t>::max() / element_bytes)) {
+    return std::nullopt;
+  }
+  return elements * element_bytes;
+}
+
+static int64_t RequireStaticTileCapacityBytes(const std::shared_ptr<const ir::TileType>& tile_type,
+                                              const ir::Span& span, std::string_view description) {
+  auto bytes = TryGetStaticTileCapacityBytes(tile_type);
+  CHECK_SPAN(bytes.has_value(), span) << description << " requires a statically sized scratch tile";
+  return *bytes;
+}
+
+static void RequireStaticValidShape(const std::shared_ptr<const ir::TileType>& tile_type,
+                                    const ir::Span& span, std::string_view op_name,
+                                    bool suggest_sequential = false) {
+  const auto valid_shape = ir::GetValidShape(tile_type);
+  CHECK_SPAN(!valid_shape.empty(), span) << op_name << " requires a non-empty valid shape for PTOAS v0.58";
+  for (const auto& extent : valid_shape) {
+    CHECK_SPAN(As<ir::ConstInt>(extent), span)
+        << op_name << " requires a statically known valid shape for PTOAS v0.58"
+        << (suggest_sequential ? "; use the one-argument sequential form for a dynamic valid shape" : "");
+  }
+}
+
+// PTOAS v0.58 requires a static-valid tile_buf type on a few explicit-tmp
+// overloads. Materialize a metadata-only view over the same storage, preserving
+// the source SSA's exact definition type on the treshape input.
+static std::pair<std::string, std::string> MaterializeStaticValidAlias(
+    codegen::PTOCodegen& codegen, const std::string& source, const std::string& source_type,
+    const std::shared_ptr<const ir::TileType>& tile_type, const ir::Span& span, std::string_view op_name,
+    std::string_view temp_prefix, bool suggest_sequential = false) {
+  RequireStaticValidShape(tile_type, span, op_name, suggest_sequential);
+
+  const std::string static_type = codegen.GetViewTileBufTypeStringFromTileType(tile_type);
+  if (source_type == static_type) return {source, static_type};
+
+  const std::string alias = codegen.NewNamedTemp(std::string(temp_prefix));
+  codegen.RegisterTileBufType(alias, static_type);
+  codegen.RegisterTileViewName(alias);
+  codegen.RegisterStaticAliasSource(alias, source);
+  codegen.Emit(alias + " = pto.treshape " + source + " : " + source_type + " -> " + static_type);
+  return {alias, static_type};
 }
 
 // Helper function for N-ary operations (unary, binary, ternary, etc.)
@@ -193,6 +257,20 @@ static std::string MakeGemvCodegenPTO(const std::string& pto_op_name, size_t ari
 static std::string MakeTileSelCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
   CheckArity(op, "pto.tsel", 4);
+  if (codegen.GetBackendHandler()->GetPtoTargetArch() == "a5") {
+    codegen.Emit("pto.tsel " + GenerateInsOutsClause(op, codegen));
+    return "";
+  }
+  auto tmp_type = As<ir::TileType>(op->args_[3]->GetType());
+  INTERNAL_CHECK_SPAN(tmp_type, op->args_[3]->span_) << "Internal error: tile.sel tmp must be a TileType";
+  CHECK_SPAN(tmp_type->dtype_.GetByte() == 4, op->args_[3]->span_)
+      << "tile.sel on A2/A3 requires a 4-byte-element tmp scratch tile "
+         "(canonical UINT32 [1, 8]), but got "
+      << tmp_type->dtype_.ToString();
+  const int64_t tmp_bytes =
+      RequireStaticTileCapacityBytes(tmp_type, op->args_[3]->span_, "tile.sel on A2/A3");
+  CHECK_SPAN(tmp_bytes >= 32, op->args_[3]->span_)
+      << "tile.sel on A2/A3 requires tmp scratch capacity >= 32 bytes, but got " << tmp_bytes;
   codegen.Emit("pto.tsel " + GenerateInsOutsClause(op, codegen));
   return "";
 }
@@ -224,7 +302,7 @@ static std::string MakeTileTransposeCodegenPTO(const CallPtr& op, codegen::Codeg
 //   tile.col_expand -> pto.tcolexpand: emits the column vector (args_[1]); args_[0]
 //                      (target) is kept only for shape/type inference.
 //   tile.row_expand -> pto.trowexpand: emits the row vector (args_[1]); ditto.
-//   tile.fillpad_expand -> pto.tfillpad_expand: emits the source tile (args_[0]);
+//   tile.fillpad_expand -> pto.tfillpad: emits the source tile (args_[0]);
 //                      args_[1] (shape tuple) is type-deduction only. The pad value
 //                      and dst extents ride on the result tile-buf type.
 struct SingleOperandOp {
@@ -261,6 +339,28 @@ static std::string MakeModalCodegenPTO(const std::string& pto_op_name, size_t ar
       std::string("{") + attr_key + " = #pto<" + attr_kind + " " + modes.at(mode) + ">}";
   codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen, config_attr));
   return "";
+}
+
+// PTOAS v0.58 verifies explicit tcvt tmp against src capacity and dst
+// valid_shape. alloc_tile types keep v_row=?, v_col=?, so bake a static-valid
+// dst view the same way tprelu / tcolsum do.
+static std::string MakeTcvtCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = AsPto(codegen_base);
+  CHECK(op->args_.size() == 1 || op->args_.size() == 2)
+      << "tile.cast requires 1 or 2 arguments (src[, tmp]), but got " << op->args_.size();
+  if (op->args_.size() == 2 && codegen.GetBackendHandler()->GetPtoTargetArch() == "a2a3") {
+    auto dst_var = codegen.GetCurrentResultVar();
+    INTERNAL_CHECK_SPAN(dst_var, op->span_) << "Internal error: tile.cast requires an assignment target";
+    auto dst_type = As<ir::TileType>(dst_var->GetType());
+    INTERNAL_CHECK_SPAN(dst_type, op->span_) << "Internal error: tile.cast result must be a TileType";
+    const std::string dst = codegen.GetCurrentResultTarget();
+    const std::string dst_type_string = codegen.GetCurrentResultTileBufTypeString();
+    auto static_dst = MaterializeStaticValidAlias(codegen, dst, dst_type_string, dst_type, op->span_,
+                                                  "tile.cast on A2/A3", "tcvt_static_dst");
+    codegen.SetCurrentResultBuf(static_dst.first);
+  }
+  return MakeModalCodegenPTO("pto.tcvt", op->args_.size(), "mode", round_modes, "Round", "rmode",
+                             "round_mode", op, codegen);
 }
 
 // Emit the default PTO form without an explicit precision attribute, or append
@@ -308,18 +408,29 @@ static std::string MakeAssignCodegenPTO(const std::string& pto_op_name, const Ca
 static std::string MakeCiCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
                                     codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
-  CHECK(op->args_.size() == 2) << "Operation:[" << pto_op_name
-                               << "] requires 2 arguments (start, shape), but got " << op->args_.size();
+  CHECK(op->args_.size() == 2 || op->args_.size() == 3)
+      << "Operation:[" << pto_op_name << "] requires 2 or 3 arguments (start, shape[, tmp]), but got "
+      << op->args_.size();
   bool descending = op->GetKwarg<bool>("descending");
   std::string src = codegen.GetExprAsCode(op->args_[0]);
   std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+  std::string tmp;
+  std::string tmp_type;
+  if (op->args_.size() == 3) {
+    tmp = codegen.GetExprAsCode(op->args_[2]);
+    tmp_type = codegen.GetExprTypeAnnotation(op->args_[2]);
+  }
   std::string config_attr = descending ? "{descending = true}" : "{descending = false}";
   std::string dst = codegen.GetCurrentResultTarget();
   std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
   std::ostringstream oss;
   oss << pto_op_name << " ins(" << src;
-  if (!src_type.empty()) {
+  if (!tmp.empty()) {
+    oss << ", " << tmp;
+  }
+  if (!src_type.empty() || !tmp_type.empty()) {
     oss << " : " << src_type;
+    if (!tmp.empty()) oss << ", " << tmp_type;
   }
   oss << ") outs(" << dst;
   if (!dst_type.empty()) {
@@ -486,6 +597,17 @@ static std::string MakeSelsCodegenPTO(const CallPtr& op, codegen::CodegenBase& c
   CHECK_SPAN(!ir::MemRef::MayAlias(regions[0].second, regions[3].second), op->span_)
       << "tile.sels requires mask and dst to use non-overlapping memory regions";
   if (!is_a5) {
+    const int64_t src_bytes =
+        RequireStaticTileCapacityBytes(src_type, op->args_[1]->span_, "tile.sels on A2/A3 src");
+    auto src_rows = As<ir::ConstInt>(src_type->shape_[0]);
+    CHECK_SPAN(src_rows && src_rows->value_ > 0, op->args_[1]->span_)
+        << "tile.sels on A2/A3 requires a positive static source row count";
+    const int64_t required_tmp_bytes = src_bytes / src_rows->value_;
+    const int64_t tmp_bytes =
+        RequireStaticTileCapacityBytes(tmp_type, op->args_[2]->span_, "tile.sels on A2/A3");
+    CHECK_SPAN(tmp_bytes >= required_tmp_bytes, op->args_[2]->span_)
+        << "tile.sels on A2/A3 requires tmp scratch capacity >= one full source physical row ("
+        << required_tmp_bytes << " bytes), but got " << tmp_bytes;
     for (const size_t other : {size_t{0}, size_t{1}}) {
       CHECK_SPAN(!ir::MemRef::MayAlias(regions[2].second, regions[other].second), op->span_)
           << "tile.sels on A2/A3 requires tmp not to overlap mask or src, but tmp overlaps "
@@ -527,6 +649,8 @@ static std::string MakePreluCodegenPTO(const CallPtr& op, codegen::CodegenBase& 
                  {codegen.GetExprAsCode(op->args_[2]), codegen.GetExprTypeAnnotation(op->args_[2])}});
     return "";
   }
+
+  RequireStaticValidShape(dst_type, op->span_, "tile.prelu on A2/A3");
 
   CHECK_SPAN(tmp_type->dtype_ == DataType::UINT8, op->args_[2]->span_)
       << "tile.prelu on A2/A3 requires UINT8 tmp scratch, but got " << tmp_type->dtype_.ToString();
@@ -571,6 +695,11 @@ static std::string MakePreluCodegenPTO(const CallPtr& op, codegen::CodegenBase& 
     }
   }
 
+  const std::string dst = codegen.GetCurrentResultTarget();
+  const std::string dst_type_string = codegen.GetCurrentResultTileBufTypeString();
+  auto static_dst = MaterializeStaticValidAlias(codegen, dst, dst_type_string, dst_type, op->span_,
+                                                "tile.prelu on A2/A3", "prelu_static_dst");
+  codegen.SetCurrentResultBuf(static_dst.first);
   EmitInsOuts(codegen, "pto.tprelu",
               {{codegen.GetExprAsCode(op->args_[0]), codegen.GetExprTypeAnnotation(op->args_[0])},
                {codegen.GetExprAsCode(op->args_[1]), codegen.GetExprTypeAnnotation(op->args_[1])},
@@ -765,6 +894,17 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
     reg_entry.f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       const size_t arity = op->args_.size();
       CHECK(arity == 2 || arity == 3) << "tile.row_expand_add requires 2 or 3 arguments, but got " << arity;
+      auto& pto_codegen = AsPto(codegen);
+      if (arity == 3 && pto_codegen.GetBackendHandler()->GetPtoTargetArch() != "a5") {
+        auto tmp_type = As<ir::TileType>(op->args_[2]->GetType());
+        INTERNAL_CHECK_SPAN(tmp_type, op->args_[2]->span_)
+            << "Internal error: tile.row_expand_add tmp must be a TileType";
+        const int64_t tmp_bytes =
+            RequireStaticTileCapacityBytes(tmp_type, op->args_[2]->span_, "tile.row_expand_add on A2/A3");
+        CHECK_SPAN(tmp_bytes >= 8192, op->args_[2]->span_)
+            << "tile.row_expand_add on A2/A3 requires tmp scratch capacity >= 8192 bytes, but got "
+            << tmp_bytes;
+      }
       return MakeNaryCodegenPTO("pto.trowexpandadd", arity, op, codegen);
     });
   }
@@ -846,7 +986,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
     return MakeSingleOperandCodegenPTO({"tile.row_expand", "pto.trowexpand", 1, ""}, op, codegen);
   });
   reg("tile.fillpad_expand", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-    return MakeSingleOperandCodegenPTO({"tile.fillpad_expand", "pto.tfillpad_expand", 0, " (src, shape)"}, op,
+    return MakeSingleOperandCodegenPTO({"tile.fillpad_expand", "pto.tfillpad", 0, " (src, shape)"}, op,
                                        codegen);
   });
 
@@ -860,10 +1000,10 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
   if (exclude_ops.count("tile.cast") == 0) {
     backend.RegisterOp("tile.cast")
         .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-          return MakeModalCodegenPTO("pto.tcvt", 1, "mode", round_modes, "Round", "rmode", "round_mode", op,
-                                     codegen);
+          return MakeTcvtCodegenPTO(op, codegen);
         })
         .set_input_layout(0, ir::TileLayout::row_major)
+        .set_input_layout(1, ir::TileLayout::row_major)
         .set_output_layout(ir::TileLayout::row_major);
   }
 
@@ -890,8 +1030,25 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
           auto& codegen = AsPto(codegen_base);
           CHECK(op->args_.size() == 1 || op->args_.size() == 2)
               << "tile.col_sum requires 1 or 2 arguments, but got " << op->args_.size();
-          std::string config_attr = op->args_.size() == 2 ? " {isBinary = true}" : "";
-          codegen.Emit("pto.tcolsum " + GenerateInsOutsClause(op, codegen, config_attr));
+          if (op->args_.size() == 1) {
+            codegen.Emit("pto.tcolsum " + GenerateInsOutsClause(op, codegen));
+            return std::string("");
+          }
+
+          auto src_type = As<ir::TileType>(op->args_[0]->GetType());
+          INTERNAL_CHECK_SPAN(src_type, op->args_[0]->span_)
+              << "Internal error: tile.col_sum source must be a TileType";
+          auto [src, static_src_type] = MaterializeStaticValidAlias(
+              codegen, codegen.GetExprAsCode(op->args_[0]), codegen.GetExprTypeAnnotation(op->args_[0]),
+              src_type, op->args_[0]->span_, "binary tile.col_sum", "col_sum_static_src", true);
+          const std::string tmp = codegen.GetExprAsCode(op->args_[1]);
+          const std::string tmp_type = codegen.GetExprTypeAnnotation(op->args_[1]);
+          const std::string dst = codegen.GetCurrentResultTarget();
+          const std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
+          std::ostringstream oss;
+          oss << "pto.tcolsum ins(" << src << ", " << tmp << " {isBinary = true} : " << static_src_type
+              << ", " << tmp_type << ") outs(" << dst << " : " << dst_type << ")";
+          codegen.Emit(oss.str());
           return std::string("");
         });
   }

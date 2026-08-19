@@ -684,6 +684,8 @@ def ci(
     dtype: DataType = DataType.INT32,
     descending: bool = False,
     span: Span | None = None,
+    *,
+    tmp: Expr | None = None,
 ) -> Call:
     """Generate a contiguous integer sequence into a tile (pto.tci).
 
@@ -702,6 +704,7 @@ def ci(
         dtype: Destination dtype. Must be one of {INT16, INT32}.
         descending: If True, generate a descending sequence.
         span: Optional source span for debugging (auto-captured if not provided).
+        tmp: Optional A2/A3 PTOAS scratch tile. Normally compiler-generated.
 
     Returns:
         Call expression that returns a TileType with the generated sequence.
@@ -716,7 +719,10 @@ def ci(
         start_expr = ConstInt(start, dtype, actual_span)
     shape_tuple = _to_make_tuple(shape, actual_span)
     kwargs: dict[str, Any] = {"dtype": dtype, "descending": descending}
-    return _ir_core.create_op_call("tile.ci", [start_expr, shape_tuple], kwargs, actual_span)
+    args = [start_expr, shape_tuple]
+    if tmp is not None:
+        args.append(tmp)
+    return _ir_core.create_op_call("tile.ci", args, kwargs, actual_span)
 
 
 arange = ci
@@ -1695,6 +1701,8 @@ def cast(
     target_type: int | DataType,
     mode: str | int = "round",
     span: Span | None = None,
+    *,
+    tmp: Expr | None = None,
 ) -> Call:
     """Cast tile to target data type (element-wise).
 
@@ -1704,6 +1712,8 @@ def cast(
         mode: Rounding mode — string name ("none", "rint", "round", "floor",
               "ceil", "trunc", "odd") or int (0–6)
         span: Optional source span for debugging (auto-captured if not provided)
+        tmp: Optional A2/A3 PTOAS scratch tile for non-saturating narrowing
+            conversions (FP32→INT16, FP16→INT16/INT8). Normally compiler-generated.
 
     Returns:
         Call expression for element-wise cast to target dtype
@@ -1716,7 +1726,8 @@ def cast(
 
     actual_span = _get_span_or_capture(span)
     kwargs: dict[str, Any] = {"target_type": target_type, "mode": mode_val}
-    return _ir_core.create_op_call("tile.cast", [tile], kwargs, actual_span)
+    args: list[Expr] = [tile] if tmp is None else [tile, tmp]
+    return _ir_core.create_op_call("tile.cast", args, kwargs, actual_span)
 
 
 def log(tile: Expr, span: Span | None = None, *, high_precision: bool = False) -> Call:
@@ -3082,7 +3093,7 @@ def tpop_from_aiv(
 # ============================================================================
 
 
-def sort32(src: Expr, idx: Expr, span: Span | None = None) -> Call:
+def sort32(src: Expr, idx: Expr, span: Span | None = None, *, tmp: Expr | None = None) -> Call:
     """Sort fixed 32-element blocks with explicit index tile.
 
     Sorts 32-element blocks in src and permutes idx accordingly.
@@ -3092,12 +3103,16 @@ def sort32(src: Expr, idx: Expr, span: Span | None = None) -> Call:
         src: Input value tile (TileType, FP16 or FP32, Vec memory)
         idx: Input index tile (TileType, Vec memory) with sequential offsets
         span: Optional source span for debugging
+        tmp: Optional A2/A3 PTOAS scratch tile. Normally compiler-generated.
 
     Returns:
         Call expression returning sorted tile with doubled last dimension
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.sort32", [src, idx], {}, actual_span)
+    args = [src, idx]
+    if tmp is not None:
+        args.append(tmp)
+    return _ir_core.create_op_call("tile.sort32", args, {}, actual_span)
 
 
 # ============================================================================

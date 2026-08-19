@@ -1932,6 +1932,15 @@ std::string PTOCodegen::GetSSATileBufType(const std::string& ssa_name) const {
 
 void PTOCodegen::RegisterTileViewName(const std::string& ssa_name) { fs_.tile_view_names.insert(ssa_name); }
 
+void PTOCodegen::RegisterStaticAliasSource(const std::string& alias, const std::string& source) {
+  fs_.static_alias_sources[alias] = source;
+}
+
+std::string PTOCodegen::GetStaticAliasSource(const std::string& alias) const {
+  auto it = fs_.static_alias_sources.find(alias);
+  return it != fs_.static_alias_sources.end() ? it->second : std::string();
+}
+
 bool PTOCodegen::IsTileViewName(const std::string& ssa_name) const {
   return fs_.tile_view_names.count(ssa_name) > 0;
 }

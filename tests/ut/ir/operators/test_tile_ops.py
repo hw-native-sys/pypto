@@ -672,6 +672,24 @@ class TestTileUnaryOps:
         call = tile.cast(src_var, DataType.INT16)
         assert dict(call.kwargs)["mode"] == 2
 
+    def test_tile_cast_accepts_optional_tmp(self):
+        """tile.cast may carry a compiler-generated scratch operand for A2/A3 tcvt."""
+        span = ir.Span.unknown()
+        src_type = ir.TileType(
+            [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(16, DataType.INT32, span)],
+            DataType.FP16,
+        )
+        src_var = ir.Var("src", src_type, span)
+        tmp_type = ir.TileType(
+            [ir.ConstInt(1, DataType.INT32, span), ir.ConstInt(160, DataType.INT32, span)],
+            DataType.INT8,
+        )
+        tmp_var = ir.Var("tcvt_tmp", tmp_type, span)
+        call = tile.cast(src_var, DataType.INT8, tmp=tmp_var)
+        assert len(call.args) == 2
+        assert call.args[1] is tmp_var
+        assert _tile_result_dtype(call) == DataType.INT8
+
     def test_tile_rsqrt_preserves_input_valid_shape(self):
         """tile.rsqrt must propagate the source TileView's valid_shape (issue #1370)."""
         sliced = self._make_sliced_tile_with_valid_shape()
@@ -5789,6 +5807,12 @@ class TestTileCiOp:
         call = tile.ci(10, [1, 16], dtype=DataType.INT32, descending=True)
         assert "descending=True" in str(call)
 
+    def test_tile_ci_accepts_explicit_tmp(self):
+        tmp = tile.create([1, 192], DataType.FP32)
+        call = tile.ci(0, [1, 32], dtype=DataType.INT32, tmp=tmp)
+        assert len(call.args) == 3
+        assert "tmp=" in str(call)
+
     def test_tile_ci_rejects_float_dtype(self):
         with pytest.raises(ValueError, match=r"INT16.*INT32.*UINT16.*UINT32"):
             tile.ci(0, [1, 32], dtype=DataType.FP32)
@@ -5814,6 +5838,18 @@ class TestTileCiOp:
 
     def test_tile_arange_alias_is_ci(self):
         assert pl.tile.arange is pl.tile.ci
+
+
+class TestTileSort32Op:
+    """Tests for tile.sort32 scratch operands."""
+
+    def test_tile_sort32_accepts_explicit_tmp(self):
+        span = ir.Span.unknown()
+        src = ir.Var("src", ir.TileType(_const_dims(span, 1, 64), DataType.FP32), span)
+        idx = ir.Var("idx", ir.TileType(_const_dims(span, 1, 64), DataType.UINT32), span)
+        tmp = ir.Var("tmp", ir.TileType(_const_dims(span, 1, 64), DataType.FP32), span)
+        call = tile.sort32(src, idx, tmp=tmp)
+        assert len(call.args) == 3
 
 
 class TestTileRandomOp:

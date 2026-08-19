@@ -113,6 +113,7 @@ class TileSelsTestCase(PTOTestCase):
         self._scalar = scalar
         self._tmp_dtype = tmp_dtype or (dtype if platform == "a2a3" else DataType.UINT8)
         self._minimal_tmp = minimal_tmp
+        self._platform = platform
 
     def get_name(self) -> str:
         valid = self._valid_shape or (self._m, self._n)
@@ -148,8 +149,14 @@ class TileSelsTestCase(PTOTestCase):
         scalar = self._scalar
         mask_cols = ((n + 7) // 8 + 31) // 32 * 32
         tmp_dtype = _PL_DT[self._tmp_dtype]
-        aligned_minimum_cols = 32 // _DTYPE_BYTES[self._tmp_dtype]
-        tmp_rows, tmp_cols = (1, aligned_minimum_cols) if self._minimal_tmp else (1, 32)
+        if self._platform == "a2a3":
+            # PTOAS v0.58 uses tmp as a typed SrcTile workspace and requires at
+            # least one complete physical source row. Keep the canonical test
+            # representation identical to src.
+            tmp_rows, tmp_cols = (1, n)
+        else:
+            aligned_minimum_cols = 32 // _DTYPE_BYTES[self._tmp_dtype]
+            tmp_rows, tmp_cols = (1, aligned_minimum_cols) if self._minimal_tmp else (1, 32)
 
         @pl.program
         class SelsProgram:
@@ -245,7 +252,7 @@ class TileSelsMaskCarrierTestCase(PTOTestCase):
         src_dtype = _PL_DT[self._src_dtype]
         scalar = self._scalar
         tmp_dtype = src_dtype if self._platform == "a2a3" else pl.UINT8
-        tmp_cols = 32 // (_DTYPE_BYTES[self._src_dtype] if self._platform == "a2a3" else 1)
+        tmp_cols = 16 if self._platform == "a2a3" else 32
 
         @pl.program
         class SelsMaskProgram:

@@ -1,6 +1,6 @@
 # FlattenTileNdTo2D Pass
 
-将 InCore 函数中的 ND Tile 操作（3D+）展平为 2D，合并除最后一个维度外的所有维度。
+将 InCore 函数中的 ND Tile 操作（3D+）展平为 2D，合并除最后一个维度外的所有维度，并在内存规划前物化目标架构要求的 scratch tile。
 
 ## 概述
 
@@ -55,6 +55,8 @@ program_2d = flatten_pass(program)
 | `tile.create`/`tile.full`（>2D） | 直接使用展平的 2D 形状重建 |
 | `tile.assemble`（>2D 目标） | 用与 `tile.load` 折叠 tensor-rank 偏移相同的行主序折叠，把 ND 偏移折进展平后的 `(row, col)` 空间（`row = ((o0*d1 + o1)*d2 + o2)*… + o[k-2]`，`col = o[k-1]`）；Tile 操作数本身由其定义处的算子展平。要求 source、target 与 offset 具有相同 rank，且写入区域能折叠为连续的行区间（`IsRowMajorCollapseContiguous`），否则在前置条件阶段报错。若不折叠，偏移会以 ND rank 残留在 2D Tile 上，而 codegen 只按位置读取 `elements[0]`/`elements[1]` 并忽略其余元素，从而静默地写到错误地址 |
 | `tile.transpose` | `pto.ttrans` scratch 物化的唯一归属。进入时为 3-arg（input, axis1, axis2）。**2D**：创建一块 scratch tile（shape = 源页，位于输入所在 memory），产出 codegen-ready 的 4-arg `tile.transpose(in, a1, a2, scratch)`。**>2D**（末两轴交换）：展开为逐 batch 的 2D transpose，每个都是 4-arg 形态，scratch 从扁平 `[batch*A, B]` 池中切片，再 assemble 进合并后的 2D 输出。交换 batch 轴属用户错误 |
+| `tile.ci`（A2/A3） | 当 PTOAS 跳过 PlanMemory 时物化所需 workspace：32-bit 目标使用 FP32 `[1, 192]`，16-bit 目标使用 FP32 `[1, 448]`。A5 保持无 scratch 形式 |
+| `tile.sort32`（A2/A3） | 物化同 shape、同 dtype 的 Vec scratch tile。Buffer-mode PTOAS 在 tile 类型中以动态形式表示 `valid_col`，因此即使分配时的 valid width 是静态 32 对齐值也需要显式形式。A5 保持无 scratch 形式 |
 | `tile.batch_matmul` | 展开为逐 batch 的 2D `tile.matmul`，处理 batch broadcast。b_trans/a_trans 操作数以一个零拷贝 `tile.transpose_view`（覆盖在自然 load 之上）出现（不再 transpose-at-load、不搬数据）；tile 级算子本身无 transpose 语义。每个操作数处理方式一致（见下方操作数处理） |
 | `tile.batch_matmul_acc` | 展开为逐 batch 的 2D `tile.matmul_acc`，按 batch 索引切分（已展平的）累加器。累加器上的内存空间决策（Vec/Acc 来回搬运、上游 `tile.create` 的可重定向生产者改写、TileView 刷新）交由 `InferTileMemorySpace`（pass 17）负责 —— 本 pass 不再发射任何 `tile.move` |
 | 其他 Tile 操作（>2D） | 替换变量，使用 2D 类型重新创建 |

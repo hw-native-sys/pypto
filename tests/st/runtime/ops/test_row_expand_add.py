@@ -98,6 +98,7 @@ class TileRowExpandAddCase(PTOTestCase):
         self.packed_row_vector = packed_row_vector
         self.tmp_shape = tmp_shape
         self.tmp_dtype = tmp_dtype
+        self._platform = platform
 
     @property
     def row_vector_cols(self) -> int:
@@ -111,13 +112,18 @@ class TileRowExpandAddCase(PTOTestCase):
         carrier = "packed" if self.packed_row_vector else "column"
         tmp_kind = ""
         if self.use_tmp and (self.tmp_shape is not None or self.tmp_dtype is not None):
-            tmp_shape = self.tmp_shape or (self.m, self.n)
+            tmp_shape = self.tmp_shape or self._default_tmp_shape()
             tmp_dtype = self.tmp_dtype or self.dtype
             tmp_kind = f"_tmp_{tmp_dtype.value}_{tmp_shape[0]}x{tmp_shape[1]}"
         return (
             f"tile_row_expand_add_{self.dtype.value}_{self.m}x{self.n}"
             f"_v{valid[0]}x{valid[1]}_{carrier}_{signature}{tmp_kind}"
         )
+
+    def _default_tmp_shape(self) -> tuple[int, int]:
+        if self._platform == "a2a3":
+            return (1, 8192 // self.dtype.torch_dtype.itemsize)
+        return (self.m, self.n)
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -149,7 +155,7 @@ class TileRowExpandAddCase(PTOTestCase):
         valid_rows = valid_shape[0]
         use_tmp = self.use_tmp
         row_cols = self.row_vector_cols
-        tmp_m, tmp_n = self.tmp_shape or (m, n)
+        tmp_m, tmp_n = self.tmp_shape or self._default_tmp_shape()
         tmp_dtype = _PL_DT[self.tmp_dtype or self.dtype]
 
         if use_tmp:

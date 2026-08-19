@@ -11,7 +11,7 @@
 
 import pypto.language as pl
 import pytest
-from pypto import backend, ir, passes
+from pypto import DataType, backend, ir, passes
 from pypto.backend import BackendType
 
 _TILE_CAST = ir.get_op("tile.cast").name
@@ -149,6 +149,142 @@ def test_a2a3_int32_to_fp16_stays_native():
     after = _run(Before, BackendType.Ascend910B)
     pairs = _cast_pairs(after)
     assert pairs == [("int32", "fp16")], pairs
+    assert all(len(call.args) == 1 for call in _cast_calls(after))
+
+
+def _cast_calls(prog) -> list:
+    found: list = []
+
+    class _Collector(ir.IRVisitor):
+        def visit_call(self, op: ir.Call) -> None:
+            if op.op.name == _TILE_CAST:
+                found.append(op)
+            super().visit_call(op)
+
+    _Collector().visit_program(prog)
+    return found
+
+
+def _cast_tmp_shape(call) -> tuple[int, int] | None:
+    if len(call.args) < 2:
+        return None
+    tmp_ty = call.args[1].type
+    assert isinstance(tmp_ty, ir.TileType)
+    assert tmp_ty.dtype == DataType.INT8
+    rows, cols = tmp_ty.shape
+    assert isinstance(rows, ir.ConstInt) and isinstance(cols, ir.ConstInt)
+    return (rows.value, cols.value)
+
+
+def test_a2a3_fp16_to_int8_materializes_tcvt_scratch():
+    """PTOAS v0.58 requires explicit tmp for non-saturating FP16→INT8 on A2/A3."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[16, 16], pl.FP16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.INT8]],
+        ) -> pl.Tensor[[16, 16], pl.INT8]:
+            t: pl.Tile[[16, 16], pl.FP16] = pl.load(x, [0, 0], [16, 16])
+            c: pl.Tile[[16, 16], pl.INT8] = pl.tile.cast(t, target_type=pl.INT8, mode="round")
+            out_t: pl.Tensor[[16, 16], pl.INT8] = pl.store(c, [0, 0], out)
+            return out_t
+
+        @pl.function
+        def main(self, x: pl.Tensor[[16, 16], pl.FP16]) -> pl.Tensor[[16, 16], pl.INT8]:
+            o: pl.Tensor[[16, 16], pl.INT8] = pl.create_tensor([16, 16], dtype=pl.INT8)
+            return self.kernel(x, o)
+
+    after = _run(Before, BackendType.Ascend910B)
+    casts = _cast_calls(after)
+    assert _cast_pairs(after) == [("fp16", "int8")]
+    assert len(casts) == 1
+    assert _cast_tmp_shape(casts[0]) == (1, 160)
+    printed = after.as_python()
+    assert "tmp=" in printed
+
+
+def test_a2a3_fp32_to_int8_scratch_is_on_the_narrowing_hop():
+    """FP32→INT8 legalizes to FP32→FP16→INT8; only the FP16→INT8 hop needs tmp."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[16, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 16], pl.INT8]],
+        ) -> pl.Tensor[[16, 16], pl.INT8]:
+            t: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+            c: pl.Tile[[16, 16], pl.INT8] = pl.tile.cast(t, target_type=pl.INT8, mode="round")
+            out_t: pl.Tensor[[16, 16], pl.INT8] = pl.store(c, [0, 0], out)
+            return out_t
+
+        @pl.function
+        def main(self, x: pl.Tensor[[16, 16], pl.FP32]) -> pl.Tensor[[16, 16], pl.INT8]:
+            o: pl.Tensor[[16, 16], pl.INT8] = pl.create_tensor([16, 16], dtype=pl.INT8)
+            return self.kernel(x, o)
+
+    after = _run(Before, BackendType.Ascend910B)
+    casts = _cast_calls(after)
+    assert _cast_pairs(after) == [("fp32", "fp16"), ("fp16", "int8")]
+    assert _cast_tmp_shape(casts[0]) is None
+    assert _cast_tmp_shape(casts[1]) == (1, 160)
+
+
+def test_a2a3_fp32_to_int16_materializes_tcvt_scratch():
+    """FP32→INT16 is native on A2/A3 but still needs the NonSatTorch tmp."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[16, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 16], pl.INT16]],
+        ) -> pl.Tensor[[16, 16], pl.INT16]:
+            t: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+            c: pl.Tile[[16, 16], pl.INT16] = pl.tile.cast(t, target_type=pl.INT16, mode="round")
+            out_t: pl.Tensor[[16, 16], pl.INT16] = pl.store(c, [0, 0], out)
+            return out_t
+
+        @pl.function
+        def main(self, x: pl.Tensor[[16, 16], pl.FP32]) -> pl.Tensor[[16, 16], pl.INT16]:
+            o: pl.Tensor[[16, 16], pl.INT16] = pl.create_tensor([16, 16], dtype=pl.INT16)
+            return self.kernel(x, o)
+
+    after = _run(Before, BackendType.Ascend910B)
+    casts = _cast_calls(after)
+    assert _cast_pairs(after) == [("fp32", "int16")]
+    assert _cast_tmp_shape(casts[0]) == (1, 1024)
+
+
+def test_a5_fp16_to_int8_keeps_no_scratch_form():
+    """A5 tcvt tmp overload is unused; leave the 1-arg form."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[16, 16], pl.FP16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.INT8]],
+        ) -> pl.Tensor[[16, 16], pl.INT8]:
+            t: pl.Tile[[16, 16], pl.FP16] = pl.load(x, [0, 0], [16, 16])
+            c: pl.Tile[[16, 16], pl.INT8] = pl.tile.cast(t, target_type=pl.INT8, mode="round")
+            out_t: pl.Tensor[[16, 16], pl.INT8] = pl.store(c, [0, 0], out)
+            return out_t
+
+        @pl.function
+        def main(self, x: pl.Tensor[[16, 16], pl.FP16]) -> pl.Tensor[[16, 16], pl.INT8]:
+            o: pl.Tensor[[16, 16], pl.INT8] = pl.create_tensor([16, 16], dtype=pl.INT8)
+            return self.kernel(x, o)
+
+    after = _run(Before, BackendType.Ascend950)
+    assert _cast_pairs(after) == [("fp16", "int8")]
+    ir.assert_structural_equal(after, Before)
 
 
 def test_a5_fp16_to_bf16_via_fp32():

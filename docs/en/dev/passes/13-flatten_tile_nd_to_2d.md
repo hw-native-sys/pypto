@@ -1,6 +1,7 @@
 # FlattenTileNdTo2D Pass
 
-Flattens ND tile operations (3D+) to 2D in InCore functions by merging all dimensions except the last.
+Flattens ND tile operations (3D+) to 2D in InCore functions by merging all dimensions except the last,
+and materializes target-required scratch tiles before memory planning.
 
 ## Overview
 
@@ -56,6 +57,8 @@ Per-statement handling:
 | `tile.create`/`tile.full` (>2D) | Rebuild with flattened 2D shape directly |
 | `tile.assemble` (>2D target) | Fold the ND offset into the flattened `(row, col)` space with the same row-major collapse `tile.load` applies to its tensor-rank offsets (`row = ((o0*d1 + o1)*d2 + o2)*… + o[k-2]`, `col = o[k-1]`); the tile operands themselves are flattened by their defining ops. Requires source, target and offset to share one rank, and the written region to collapse to a contiguous row band (`IsRowMajorCollapseContiguous`) — both rejected in the precondition phase otherwise. Without the fold the offset would keep its ND rank on a 2D tile, and codegen (which reads `elements[0]`/`elements[1]` positionally and ignores the rest) would silently place the write at the wrong address |
 | `tile.transpose` | Sole owner of `pto.ttrans` scratch materialization. Arrives 3-arg (input, axis1, axis2). **2D**: create one scratch tile (shape = SOURCE page, in the input's memory space) and emit the codegen-ready 4-arg `tile.transpose(in, a1, a2, scratch)`. **>2D** (last-two-axes swap): unroll into per-batch 2D transposes, each a 4-arg form with scratch sliced from a flat `[batch*A, B]` pool, assembled into the merged 2D output. A batch-axis swap is a user error |
+| `tile.ci` (A2/A3) | Materialize the PTOAS workspace required when PlanMemory is skipped: FP32 `[1, 192]` for a 32-bit destination or FP32 `[1, 448]` for a 16-bit destination. A5 keeps the no-scratch form |
+| `tile.sort32` (A2/A3) | Materialize a same-shape, same-dtype Vec scratch tile. Buffer-mode PTOAS represents `valid_col` dynamically in the tile type, so the explicit form is required even when the allocated valid width is a statically 32-aligned value. A5 keeps the no-scratch form |
 | `tile.batch_matmul` | Expand to per-batch 2D `tile.matmul`, honoring batch broadcast. A b_trans/a_trans operand arrives as a zero-copy `tile.transpose_view` over a natural load (no transpose-at-load, no copy); the tile-level op carries no transpose semantic. Each operand is handled identically (see operand handling below) |
 | `tile.batch_matmul_acc` | Expand to per-batch 2D `tile.matmul_acc`, slicing the (already-flattened) accumulator per batch index. Memory-space decisions on the accumulator (Vec/Acc round-trips, retargetable producer promotion of an upstream `tile.create`, TileView refresh) are deferred to `InferTileMemorySpace` (pass 17) — flatten emits no inline `tile.move` |
 | Other tile ops (>2D) | Substitute vars, re-create with 2D types |

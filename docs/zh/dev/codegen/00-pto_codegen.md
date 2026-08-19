@@ -141,7 +141,17 @@ print(pto_code)
 | `tile.mul(lhs, rhs)` | `pto.tmul` |
 | `tile.add(a, b, c)` | `pto.taddc` (三操作数加法) |
 | `tile.adds(tile, scalar)` | `pto.tadds` (Tile + 标量) |
-| `tile.fillpad_expand(src, shape)` | `pto.tfillpad_expand ins(%src) outs(%dst)`（`shape` 元组仅用于类型推导；更大的 `dst` 及其 pad 来自结果类型） |
+| `tile.fillpad_expand(src, shape)` | `pto.tfillpad ins(%src) outs(%dst)`（PTOAS v0.58 使用普通 `tfillpad` opcode；PyPTO 将其生成的 `TFILLPAD<pto::TFillPadMode::Expand>` 调用适配为固定 PTOISA 的 `TFILLPAD_EXPAND`；`shape` 元组仅用于类型推导） |
+
+PTOAS v0.58 在 A2/A3 的若干显式 workspace 路径上有额外约束，codegen
+会在生成 PTO IR 前检查：`tile.sel` 的 scratch 元素宽度必须为 4 字节且容量
+至少 32 字节（规范形式为 `UINT32 [1, 8]`）；`tile.sels` 至少容纳一整行
+物理 source；`tile.row_expand_add(..., tmp)` 至少需要 8192 字节。binary
+`tile.col_sum` 和 A2/A3 `tile.prelu` 还要求静态 valid-shape PTO 类型；valid
+shape 静态时 codegen 会生成零拷贝 `pto.treshape` 别名，动态时则直接给出明确诊断。
+A2/A3 的 tensor scatter 通过补齐后的线性 CI tile 和逐元素算术生成扁平行偏移，
+从而避开 PTOISA f51c92f 中错误的短 CI/列广播组合路径及其隐式使用的
+8 KiB workspace。
 
 **`tile.slice` / `tile.assemble` 下沉细节。** 两个 op 都通过 `pto.subview`
 下沉，它是源 tile 的纯视图别名（不搬数据，也不会额外发 `pto.alloc_tile`）。

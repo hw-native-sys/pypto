@@ -15,7 +15,8 @@ from typing import cast
 import pypto
 import pypto.language as pl
 import pytest
-from pypto import DataType, ir, passes
+from pypto import DataType, backend, ir, passes
+from pypto.backend import BackendType
 from pypto.ir import IRBuilder
 from pypto.ir.op import tensor as tensor_ops
 from pypto.ir.op import tile as tile_ops
@@ -33,6 +34,8 @@ _OP_TILE_MATMUL = ir.get_op("tile.matmul").name
 _OP_TILE_MATMUL_ACC = ir.get_op("tile.matmul_acc").name
 _OP_TILE_RESHAPE = ir.get_op("tile.reshape").name
 _OP_TILE_STORE = ir.get_op("tile.store").name
+_OP_TILE_CI = ir.get_op("tile.ci").name
+_OP_TILE_SORT32 = ir.get_op("tile.sort32").name
 
 # ----------------------------------------------------------------------------
 # Helpers
@@ -3390,6 +3393,79 @@ class TestFlattenTileNdTo2DStandaloneTranspose:
 
         with pytest.raises(ValueError, match=r"only last-two-axes tile\.transpose"):
             passes.flatten_tile_nd_to_2d()(Before)
+
+
+class TestFlattenTileNdTo2DPtoasScratch:
+    """Target-specific PTOAS workspaces are materialized before InitMemRef."""
+
+    @staticmethod
+    def _program(*, dynamic_valid_col: bool, ci_dtype: DataType = DataType.INT32) -> ir.Program:
+        span = ir.Span.unknown()
+        ib = IRBuilder()
+        with ib.function("scratch_kernel", type=ir.FunctionType.InCore) as f:
+            src = f.param("src", ir.TensorType([1, 64], DataType.FP32))
+            idx = f.param("idx", ir.TensorType([1, 64], DataType.UINT32))
+            valid_col = f.param("valid_col", ir.ScalarType(DataType.INDEX))
+            valid_shape = [1, valid_col] if dynamic_valid_col else [1, 64]
+            src_tile = ib.let("src_tile", tile_ops.load(src, [0, 0], [1, 64], valid_shape))
+            idx_tile = ib.let("idx_tile", tile_ops.load(idx, [0, 0], [1, 64], valid_shape))
+            ib.let("sequence", tile_ops.ci(0, [1, 64], dtype=ci_dtype))
+            sorted_tile = ib.let("sorted_tile", tile_ops.sort32(src_tile, idx_tile))
+            f.return_type(sorted_tile.type)
+            ib.return_stmt(sorted_tile)
+        return ir.Program([f.get_result()], "scratch_program", span)
+
+    @staticmethod
+    def _calls(program: ir.Program) -> list[ir.Call]:
+        func = program.get_function("scratch_kernel")
+        assert func is not None
+        body = cast(ir.SeqStmts, func.body)
+        return [
+            stmt.value
+            for stmt in body.stmts
+            if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call)
+        ]
+
+    def test_a2a3_materializes_tci_and_dynamic_sort32_scratch(self):
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        calls = self._calls(passes.flatten_tile_nd_to_2d()(self._program(dynamic_valid_col=True)))
+
+        ci = next(call for call in calls if call.op.name == _OP_TILE_CI)
+        sort32 = next(call for call in calls if call.op.name == _OP_TILE_SORT32)
+        assert len(ci.args) == 3
+        assert len(sort32.args) == 3
+        ci_tmp = cast(ir.TileType, ci.args[2].type)
+        sort_tmp = cast(ir.TileType, sort32.args[2].type)
+        assert ci_tmp.shape == [1, 192]
+        assert ci_tmp.dtype == DataType.FP32
+        assert sort_tmp.shape == [1, 64]
+        assert sort_tmp.dtype == DataType.FP32
+
+    def test_a2a3_aligned_sort32_also_materializes_scratch(self):
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        calls = self._calls(passes.flatten_tile_nd_to_2d()(self._program(dynamic_valid_col=False)))
+        sort32 = next(call for call in calls if call.op.name == _OP_TILE_SORT32)
+        assert len(sort32.args) == 3
+
+    def test_a2a3_materializes_16bit_tci_scratch(self):
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        calls = self._calls(
+            passes.flatten_tile_nd_to_2d()(self._program(dynamic_valid_col=False, ci_dtype=DataType.INT16))
+        )
+        ci = next(call for call in calls if call.op.name == _OP_TILE_CI)
+        ci_tmp = cast(ir.TileType, ci.args[2].type)
+        assert ci_tmp.shape == [1, 448]
+        assert ci_tmp.dtype == DataType.FP32
+
+    def test_a5_keeps_no_scratch_forms(self):
+        calls = self._calls(passes.flatten_tile_nd_to_2d()(self._program(dynamic_valid_col=True)))
+        ci = next(call for call in calls if call.op.name == _OP_TILE_CI)
+        sort32 = next(call for call in calls if call.op.name == _OP_TILE_SORT32)
+        assert len(ci.args) == 2
+        assert len(sort32.args) == 2
 
 
 def _collect_def_use(fn) -> tuple[set[int], set[int], list[tuple[ir.Var, str]]]:
