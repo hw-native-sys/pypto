@@ -931,50 +931,54 @@ class TestCrossCore:
     def test_multiple_pipes_nosplit(self, request, test_runner, backend_type, platform):
         """Explicit multiple pipe ids: compile through full pipeline and verify correctness."""
         if platform == "a5":
-            # Compiles and runs, but every output element is wrong on 950
-            # silicon -- and only there: the same case passes under a5sim, so
-            # the simulator does not model whatever the two concurrent pipes
-            # hit on board.
+            # Every output element is wrong on 950 silicon -- and only there;
+            # the case passes on a5sim and on a2a3.
+            #
+            # Cause: 950's on-chip cross-core boundary expects a fractal layout,
+            # so the AIV producer must adapt the tile before tpush (Left -> NZ,
+            # Right -> ZN). That adapter is inserted by ExpandMixedKernel, which
+            # is the only place BackendHandler::RequiresVtoCFractalAdapt() is
+            # consulted -- so it covers automatically built cube<->vector pipes
+            # and not a hand-written pl.tpush_to_aic like this one. Compiled for
+            # a5, this program pushes a bare ND tile
+            # (blayout=row_major, slayout=none_box) where the automatic path
+            # emits a pto.tmov into blayout=col_major, slayout=row_major first.
+            # The cube then reads those bytes as fractal, which scrambles every
+            # element rather than perturbing it -- matching what the board
+            # reports. a5sim does not model the on-chip FIFO layout, so it
+            # cannot see this. On 910B the adapter is not needed at all
+            # (RequiresVtoCFractalAdapt() is false: push/pop goes ub -> gm ->
+            # mat, which takes ND directly), so a2a3 keeps passing.
             #
             # Marked, not raised: `pytest.xfail(...)` aborts before the body and
             # can never report XPASS, so it would freeze this verdict instead of
-            # re-checking it. The marker lets the case run every time, so a
-            # backend fix surfaces on its own.
-            #
-            # Not strict: the verdict rests on a single on-board observation,
-            # and this board has since been shown to produce non-deterministic
-            # results for a mixed kernel. A strict marker would turn any lucky
-            # pass into a red job; XPASS in the summary is signal enough.
+            # re-checking it. Strict, because a layout mismatch is deterministic
+            # -- a scrambled matmul cannot pass by luck -- so an XPASS means the
+            # adapter now reaches manual pipes and the marker must come out.
             request.node.add_marker(
                 pytest.mark.xfail(
-                    reason="950 board: explicit multi-pipe produces wrong results (passes on a5sim)",
-                    strict=False,
+                    reason=(
+                        "950 board: manual pl.tpush_to_aic gets no V->C fractal adapter "
+                        "(ExpandMixedKernel is the only consumer of RequiresVtoCFractalAdapt)"
+                    ),
+                    strict=True,
                 )
             )
         result = test_runner.run(MultiPipeNoSplitTest(backend_type=backend_type))
         assert result.passed, f"Cross-core explicit multi-pipe no-split failed: {result.error}"
 
-    def test_explicit_slot_num(self, request, test_runner, backend_type, platform):
+    # `local_slot_num` on pto.{aic,aiv}_initialize_pipe is an a2/a3-only operand,
+    # not an unimplemented 950 feature: ptoas rejects it outright for the 950
+    # frontend pipe lowering, whatever its value --
+    #   error: 'pto.aic_initialize_pipe' op 'local_slot_num' is only supported
+    #          for a2/a3 frontend pipe lowering
+    # so the whole manual pl.{aic,aiv}_initialize_pipe route this case exercises
+    # is a2/a3-only by design. Deselected rather than xfail-ed: xfail says "this
+    # ought to work and does not", which would keep a permanent platform
+    # limitation on the report as if it were a defect awaiting a fix.
+    @pytest.mark.platforms("a2a3", "a2a3sim")
+    def test_explicit_slot_num(self, test_runner, backend_type):
         """Explicit slot_num / local_slot_num: compile through full pipeline and verify correctness."""
-        if platform in ("a5sim", "a5"):
-            # Not a sim-only gap: ptoas rejects the `local_slot_num` operand on
-            # pto.{aic,aiv}_initialize_pipe for the 950 frontend pipe lowering,
-            # so this never reaches the device on either a5 target:
-            #   error: 'pto.aic_initialize_pipe' op 'local_slot_num' is only
-            #          supported for a2/a3 frontend pipe lowering
-            #
-            # Marked, not raised: `pytest.xfail(...)` aborts before the body and
-            # can never report XPASS, so it would freeze this verdict instead of
-            # re-checking it. Strict, because the failure is a deterministic
-            # compile-time rejection that costs seconds and never reaches a
-            # card -- if ptoas starts accepting the operand, this must go red so
-            # the marker is removed rather than silently kept.
-            request.node.add_marker(
-                pytest.mark.xfail(
-                    reason="950 backend: ptoas rejects local_slot_num on {aic,aiv}_initialize_pipe",
-                    strict=True,
-                )
-            )
         result = test_runner.run(ExplicitSlotNumTest(backend_type=backend_type))
         assert result.passed, f"Cross-core explicit slot_num failed: {result.error}"
 
