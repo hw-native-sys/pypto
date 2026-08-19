@@ -2259,6 +2259,9 @@ class DistributedWorker(Worker):
             raise TypeError(
                 f"alloc_stacked_tensor(host=...) expects a torch.Tensor, got {type(host).__name__}"
             )
+        # Ahead of every upload on purpose: `alloc_tensor` re-checks the host in
+        # `_prepare_init`, but only after its own device malloc, so N concurrent shards
+        # would each commit device memory before any of them surfaced this ValueError.
         self._require_copy_host_tensor(host, "alloc_stacked_tensor(host=...)")
         if host.ndim < 2:
             raise ValueError(
@@ -2279,12 +2282,6 @@ class DistributedWorker(Worker):
         for w in ids:
             if not 0 <= w < world:
                 raise ValueError(f"worker id {w} out of range [0, {world}) (world_size from device_ids)")
-
-        # Validate the stacked host before uploading anything: `alloc_tensor` only
-        # checks the host endpoint in `_prepare_init`, which runs after its device
-        # malloc, so N concurrent shards would each commit device memory first and
-        # surface an allocator failure instead of this ValueError.
-        self._require_copy_host_tensor(host, "alloc_stacked_tensor(host=...)")
 
         shards: list[DeviceTensor] = []
         try:
