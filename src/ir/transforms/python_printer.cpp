@@ -44,6 +44,7 @@
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/phase.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
@@ -1311,6 +1312,10 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
         // form on print to keep the output type-correct for static checkers
         // and round-trippable through the parser (pl.AtomicType is exposed).
         stream_ << prefix_ << ".AtomicType." << AtomicTypeToString(static_cast<AtomicType>(int_val));
+      } else if (key == "acc_phase") {
+        stream_ << prefix_ << ".AccPhase." << AccPhaseToString(static_cast<AccPhase>(int_val));
+      } else if (key == "st_phase") {
+        stream_ << prefix_ << ".STPhase." << STPhaseToString(static_cast<STPhase>(int_val));
       } else {
         stream_ << int_val;
       }

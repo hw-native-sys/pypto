@@ -26,7 +26,12 @@ namespace pass {
 
 // -- Inline-function elimination pass (runs first, before everything) ---------
 
-inline const PassProperties kInlineFunctionsProperties{.produced = {IRProperty::InlineFunctionsEliminated}};
+// AccStorePhaseValid is first decidable after Inline helpers have been spliced
+// into their call sites. A helper may return a final phased accumulator value
+// that the caller immediately consumes with a final store; checking each
+// function separately before inlining would reject that legal pair.
+inline const PassProperties kInlineFunctionsProperties{
+    .produced = {IRProperty::InlineFunctionsEliminated, IRProperty::AccStorePhaseValid}};
 
 // -- SynthesizeAllReduceSignals and MaterializeCommDomainScopes passes (run
 //    late in the pipeline, after phase-fence expansion and immediately before

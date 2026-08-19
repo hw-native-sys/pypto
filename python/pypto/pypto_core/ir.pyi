@@ -2324,6 +2324,33 @@ class AtomicType(enum.IntEnum):
     Add = 1
     """Atomically add the source data into the destination."""
 
+class AccPhase(enum.IntEnum):
+    """Producer-side unit-flag phase for GEMV accumulator operations.
+
+    Stored as ``int`` in op kwargs. The values match PTO-ISA's ``AccPhase`` ABI.
+    """
+
+    Unspecified = 0
+    """Do not use the unit-flag protocol."""
+
+    Partial = 2
+    """Check the unit flag without setting it."""
+
+    Final = 3
+    """Check and set the unit flag."""
+
+class STPhase(enum.IntEnum):
+    """Consumer-side unit-flag phase for ``tile.store``.
+
+    Stored as ``int`` in op kwargs. Supported values use PTO-ISA's ``STPhase`` ABI.
+    """
+
+    Unspecified = 0
+    """Do not use the unit-flag protocol."""
+
+    Final = 3
+    """Check and clear the unit flag."""
+
 class ReduceOp(enum.IntEnum):
     """Reduction operator for collective reductions — ``pld.tensor.allreduce`` and friends.
 

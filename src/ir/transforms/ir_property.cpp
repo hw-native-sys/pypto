@@ -103,6 +103,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "AccToGmStoreValid";
     case IRProperty::AtomicAddDtypeValid:
       return "AtomicAddDtypeValid";
+    case IRProperty::AccStorePhaseValid:
+      return "AccStorePhaseValid";
     default:
       return "Unknown";
   }
@@ -153,7 +155,8 @@ const IRPropertySet& GetVerifiedProperties() {
                                    IRProperty::IterArgCarryClassified,
                                    IRProperty::RuntimeScopesMaterialized,
                                    IRProperty::AccToGmStoreValid,
-                                   IRProperty::AtomicAddDtypeValid};
+                                   IRProperty::AtomicAddDtypeValid,
+                                   IRProperty::AccStorePhaseValid};
   return props;
 }
 

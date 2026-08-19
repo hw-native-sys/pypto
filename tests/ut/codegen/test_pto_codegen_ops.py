@@ -3236,8 +3236,8 @@ class TestTileMoveAddressValidation:
             self._generate_mlir(program)
 
 
-class TestTileStoreAtomicCodegen:
-    """Tests for tile.store atomic-add codegen (pto.tstore atomicType attr)."""
+class TestTileStoreAttrsCodegen:
+    """Tests for optional tile.store phase and atomic PTO attributes."""
 
     def _generate_mlir(self, program_cls) -> str:
         """Run PassManager and PTOCodegen on the given program, return MLIR string."""
@@ -3252,6 +3252,46 @@ class TestTileStoreAtomicCodegen:
         target = next((f for f in funcs if ir.is_incore_type(f.func_type)), funcs[0])
         single = ir.Program([target], target.name, optimized.span)
         return codegen_instance.generate(single)
+
+    def _generate_fp32_store(
+        self,
+        *,
+        atomic=pl.AtomicType.None_,
+        st_phase=pl.STPhase.Unspecified,
+    ) -> str:
+        """Generate one fp32 store with the requested optional attributes.
+
+        A final store is paired with a final GEMV producer: unlike an
+        unspecified store, a standalone final store is an invalid unit-flag
+        protocol and AccStorePhaseValid rejects it.
+        """
+
+        if st_phase == pl.STPhase.Final:
+
+            @pl.program
+            class FinalProg:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs_gm: pl.Tensor[[1, 128], pl.FP32],
+                    rhs_gm: pl.Tensor[[128, 64], pl.FP32],
+                    out: pl.Tensor[[1, 64], pl.FP32],
+                ):
+                    lhs = pl.load(lhs_gm, [0, 0], [1, 128], target_memory=pl.MemorySpace.Mat)
+                    rhs = pl.load(rhs_gm, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
+                    result = pl.tile.gemv(lhs, rhs, acc_phase=pl.AccPhase.Final)
+                    pl.store(result, [0, 0], out, atomic=atomic, st_phase=pl.STPhase.Final)
+
+            return self._generate_mlir(FinalProg)
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, x: pl.Tensor[[16, 16], pl.FP32], out: pl.Tensor[[16, 16], pl.FP32]):
+                t = pl.load(x, [0, 0], [16, 16])
+                pl.store(t, [0, 0], out, atomic=atomic, st_phase=st_phase)
+
+        return self._generate_mlir(Prog)
 
     # -- Vector (AIV) atomic-add store: one hardware atomic-add dtype per test. --
     # Every hardware atomic-add dtype (set_atomic_{f32,f16,bf16,s32,s16,s8}) is a
@@ -3302,21 +3342,33 @@ class TestTileStoreAtomicCodegen:
         """int8 vector (AIV) atomic-add store (set_atomic_s8); 32 cols for row alignment."""
         self._assert_vec_atomic_store(pl.INT8, "i8", cols=32)
 
-    def test_plain_store_omits_atomic_type(self):
-        """A plain pl.store emits no atomicType attribute (byte-identical codegen)."""
-
-        @pl.program
-        class Prog:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(self, x: pl.Tensor[[16, 16], pl.FP32], out: pl.Tensor[[16, 16], pl.FP32]):
-                t = pl.load(x, [0, 0], [16, 16])
-                pl.store(t, [0, 0], out)
-
-        mlir = self._generate_mlir(Prog)
+    def test_plain_store_omits_optional_attrs(self):
+        """A plain pl.store keeps byte-identical attribute-free codegen."""
+        mlir = self._generate_fp32_store()
         tstore_lines = [line.strip() for line in mlir.splitlines() if "pto.tstore" in line]
         assert tstore_lines, f"no pto.tstore line emitted:\n{mlir}"
-        assert all("atomicType" not in line for line in tstore_lines), (
-            f"plain store must not emit atomicType, got:\n{tstore_lines}"
+        assert all("stPhase" not in line and "atomicType" not in line for line in tstore_lines), (
+            f"plain store must not emit optional attributes, got:\n{tstore_lines}"
+        )
+
+    def test_final_store_phase_emits_st_phase(self):
+        """The supported final store phase maps to the exact PTO attribute."""
+        mlir = self._generate_fp32_store(st_phase=pl.STPhase.Final)
+        tstore_lines = [line.strip() for line in mlir.splitlines() if "pto.tstore" in line]
+        expected = "{stPhase = #pto<st_phase final>}"
+        assert tstore_lines, f"no pto.tstore line emitted:\n{mlir}"
+        assert all(expected in line for line in tstore_lines), (
+            f"expected final stPhase on every pto.tstore, got:\n{tstore_lines}"
+        )
+
+    def test_store_phase_and_atomic_share_one_attr_dict(self):
+        """PTOAS receives stPhase and atomicType in the same attribute dictionary."""
+        mlir = self._generate_fp32_store(atomic=pl.AtomicType.Add, st_phase=pl.STPhase.Final)
+        tstore_lines = [line.strip() for line in mlir.splitlines() if "pto.tstore" in line]
+        expected = "{stPhase = #pto<st_phase final>, atomicType = #pto<atomic_type atomic_add>}"
+        assert tstore_lines, f"no pto.tstore line emitted:\n{mlir}"
+        assert all(expected in line for line in tstore_lines), (
+            f"expected one combined store attribute dictionary, got:\n{tstore_lines}"
         )
 
     def test_atomic_add_bf16_rejected_on_ascend950(self):
