@@ -350,7 +350,7 @@ require the full 3-segment namespace.
 ## Runnable Examples
 
 The [tutorials](05-tutorials.md) teach each primitive by hand before
-any builtin is revealed (steps 03–07 ship; 08–16 are planned):
+any builtin is revealed (all steps 03–16 ship):
 
 | Primitive | Tutorial step |
 | --------- | ------------- |

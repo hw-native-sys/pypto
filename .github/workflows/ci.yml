@@ -487,7 +487,7 @@ jobs:
           python tests/docs/run_doc_examples.py --pages docs/en/user --check-parity -p a2a3sim
 
   examples-tests:
-    # The distributed examples ladder (doc-plan 02) — every example must compile
+    # The distributed examples ladder — every example must compile
     # AND run with a passing golden on the simulator (a2a3sim), so the teaching
     # material cannot silently rot.
     #
@@ -561,6 +561,50 @@ jobs:
           python examples/distributed/07_dynamic_rank_count.py -p a2a3sim -d 0,1,2
           echo "=== examples/distributed/07_dynamic_rank_count.py -d 0,1,2,3 ==="
           python examples/distributed/07_dynamic_rank_count.py -p a2a3sim -d 0,1,2,3
+          # Steps 08-11: the all-reduce comparisons are only observable
+          # at P=4 (P=2 collapses mesh/two-phase/ring into the same exchange); the
+          # reveal runs both modes.
+          echo "=== examples/distributed/08_allreduce_mesh.py -d 0,1,2,3 ==="
+          python examples/distributed/08_allreduce_mesh.py -p a2a3sim -d 0,1,2,3
+          echo "=== examples/distributed/09_allreduce_two_phase.py -d 0,1,2,3 ==="
+          python examples/distributed/09_allreduce_two_phase.py -p a2a3sim -d 0,1,2,3
+          echo "=== examples/distributed/10_allreduce_ring.py -d 0,1,2,3 ==="
+          python examples/distributed/10_allreduce_ring.py -p a2a3sim -d 0,1,2,3
+          echo "=== examples/distributed/11_allreduce_reveal.py -d 0,1,2,3 ==="
+          python examples/distributed/11_allreduce_reveal.py -p a2a3sim -d 0,1,2,3
+          echo "=== examples/distributed/11_allreduce_reveal.py --mode ring -d 0,1,2,3 ==="
+          python examples/distributed/11_allreduce_reveal.py -p a2a3sim -d 0,1,2,3 --mode ring
+          # Steps 12-15: the collective zoo — every documented invocation must
+          # be CI-validated. P=2 default ran in the loop above; add the P=2
+          # builtin reveal and the P=4 legs (both modes; the per-rank patterns
+          # are most distinct at P=4).
+          echo "=== examples/distributed/12_broadcast.py --mode builtin -d 0,1 ==="
+          python examples/distributed/12_broadcast.py -p a2a3sim -d 0,1 --mode builtin
+          echo "=== examples/distributed/12_broadcast.py -d 0,1,2,3 ==="
+          python examples/distributed/12_broadcast.py -p a2a3sim -d 0,1,2,3
+          echo "=== examples/distributed/12_broadcast.py --mode builtin -d 0,1,2,3 ==="
+          python examples/distributed/12_broadcast.py -p a2a3sim -d 0,1,2,3 --mode builtin
+          echo "=== examples/distributed/13_allgather.py --mode builtin -d 0,1 ==="
+          python examples/distributed/13_allgather.py -p a2a3sim -d 0,1 --mode builtin
+          echo "=== examples/distributed/13_allgather.py -d 0,1,2,3 ==="
+          python examples/distributed/13_allgather.py -p a2a3sim -d 0,1,2,3
+          echo "=== examples/distributed/13_allgather.py --mode builtin -d 0,1,2,3 ==="
+          python examples/distributed/13_allgather.py -p a2a3sim -d 0,1,2,3 --mode builtin
+          echo "=== examples/distributed/14_reduce_scatter.py --mode builtin -d 0,1 ==="
+          python examples/distributed/14_reduce_scatter.py -p a2a3sim -d 0,1 --mode builtin
+          echo "=== examples/distributed/14_reduce_scatter.py -d 0,1,2,3 ==="
+          python examples/distributed/14_reduce_scatter.py -p a2a3sim -d 0,1,2,3
+          echo "=== examples/distributed/14_reduce_scatter.py --mode builtin -d 0,1,2,3 ==="
+          python examples/distributed/14_reduce_scatter.py -p a2a3sim -d 0,1,2,3 --mode builtin
+          echo "=== examples/distributed/15_all_to_all.py --mode builtin -d 0,1 ==="
+          python examples/distributed/15_all_to_all.py -p a2a3sim -d 0,1 --mode builtin
+          echo "=== examples/distributed/15_all_to_all.py -d 0,1,2,3 ==="
+          python examples/distributed/15_all_to_all.py -p a2a3sim -d 0,1,2,3
+          echo "=== examples/distributed/15_all_to_all.py --mode builtin -d 0,1,2,3 ==="
+          python examples/distributed/15_all_to_all.py -p a2a3sim -d 0,1,2,3 --mode builtin
+          # Step 16: the composition capstone at P=4.
+          echo "=== examples/distributed/16_putting_it_together.py -d 0,1,2,3 ==="
+          python examples/distributed/16_putting_it_together.py -p a2a3sim -d 0,1,2,3
 
       # The teaching ladders. These carry the manual's beginner/intermediate/
       # advanced/utils citations, so leaving them unrun let the pages point at

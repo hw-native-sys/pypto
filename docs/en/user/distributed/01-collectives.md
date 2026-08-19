@@ -225,11 +225,11 @@ build each collective by hand before the builtin is revealed:
 | Collective | Tutorial step | Hand-rolled first? |
 | ---------- | ------------- | ------------------ |
 | barrier | [09-barrier](09-barrier.md) | yes (step 04, then reveal) |
-| allreduce | planned — steps 08–11 | yes (mesh, two-phase, ring, then reveal) |
-| broadcast | planned — step 12 | yes |
-| allgather | planned — step 13 | yes |
-| reduce_scatter | planned — step 14 | yes |
-| all_to_all | planned — step 15 | yes |
+| allreduce | [13-allreduce_mesh](13-allreduce_mesh.md) · [14-allreduce_two_phase](14-allreduce_two_phase.md) · [15-allreduce_ring](15-allreduce_ring.md) · [16-allreduce_reveal](16-allreduce_reveal.md) | yes (steps 08–11) |
+| broadcast | [17-broadcast](17-broadcast.md) | yes (step 12, then reveal) |
+| allgather | [18-allgather](18-allgather.md) | yes (step 13, then reveal) |
+| reduce_scatter | [19-reduce_scatter](19-reduce_scatter.md) | yes (step 14, then reveal) |
+| all_to_all | [20-all_to_all](20-all_to_all.md) | yes (step 15, then reveal) |
 
 | Collective | InCore hand-rolled | InCore composite | HOST builtin |
 | ---------- | ------------------ | ---------------- | ------------ |

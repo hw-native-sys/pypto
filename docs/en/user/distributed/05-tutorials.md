@@ -1,14 +1,15 @@
 # Distributed Tutorials
 
 The `pld` vocabulary taught step by step: a sixteen-step tutorial series, one
-concept per program. Seven runnable examples ship now — from "hello rank"
-through point-to-point moves and the dynamic rank count; steps 08–16 (the
-collectives) are planned.
+concept per program. All sixteen runnable examples ship — from "hello rank"
+through point-to-point moves, the dynamic rank count, all-reduce three ways
+plus its reveal, the rest of the collective zoo, and a compose kernel.
 
 > **Prerequisites:** the [Distributed Programming](../distributed/index.md)
 > chapter — read it once for the vocabulary, then come back here to build the
-> same ideas by hand. Hardware: two devices for steps 01–06, three or more for
-> step 07 (any rank count), four for the collective comparisons in steps 08–16.
+> same ideas by hand. Hardware: two devices for steps 01–06, any count ≥ 2 for
+> step 07 (three or more to see the ring differ from P=2), four for the
+> collective comparisons in steps 08–15.
 
 ## The idea
 
@@ -27,7 +28,10 @@ idea from the primitives before a builtin replaces it:
   source compiles for any P — the mechanism the P=4 collectives build on.
 - Steps 08–11 build **all-reduce three ways** (mesh, two-phase, ring) and then
   reveal `pld.tensor.allreduce`.
-- Steps 12–15 cover the remaining collectives; step 16 composes three of them.
+- Steps 12–15 cover the **remaining collectives** (broadcast, allgather,
+  reduce_scatter, all_to_all), each hand-rolled then revealed.
+- Step 16 **composes** `broadcast` + `allreduce` + `allgather` in one kernel —
+  the capstone.
 
 > **Reveal discipline:** the walkthrough pages do not introduce a builtin
 > (`pld.tensor.barrier`, `pld.tensor.allreduce`, …) before the step that
@@ -41,11 +45,12 @@ idea from the primitives before a builtin replaces it:
 > a pointer, not required knowledge: you can read the later step to meet the
 > idea properly.
 
-## Suggested reading order
+## Suggested reading orderAll 16 steps
 
+ship together
 Read the steps in order — **01 → 02 → 03 → 04 → 05 → 06 → 07 → 08 → 09 → 10 →
-11 → 12 → 13 → 14 → 15 → 16**. Every page repeats this block. Steps 08–16 are
-planned; 01–07 ship in the first PR (below).
+11 → 12 → 13 → 14 → 15 → 16**. Every page repeats this block. Steps 01–11 ship
+now; 12–16 remain planned.
 
 ## The 16 steps
 
@@ -58,18 +63,17 @@ planned; 01–07 ship in the first PR (below).
 | 05 | `05_remote_load_store.py` | Tile-level RMA: `remote_load`/`remote_store`; one-step ring shift | ✅ shipped |
 | 06 | `06_put_get.py` | Tensor-level p2p: `put`/`get`; push vs pull | ✅ shipped |
 | 07 | `07_dynamic_rank_count.py` | Dynamic rank count: `pl.dynamic("NR")`; one source, any P | ✅ shipped |
-| 08 | `08_allreduce_mesh.py` | All-reduce v1 (mesh): every rank reads every peer, sums locally | planned |
-| 09 | `09_allreduce_two_phase.py` | All-reduce v2: reduce-scatter + all-gather | planned |
-| 10 | `10_allreduce_ring.py` | All-reduce v3 (ring): chunked around the ring | planned |
-| 11 | `11_allreduce_reveal.py` | **The reveal**: `pld.tensor.allreduce` (mesh + ring); diff the IR | planned |
-| 12 | `12_broadcast.py` | One-to-all; reveal `pld.tensor.broadcast` | planned |
-| 13 | `13_allgather.py` | All-to-all slices; reveal `pld.tensor.allgather` | planned |
-| 14 | `14_reduce_scatter.py` | All-to-chunks; reveal `pld.tensor.reduce_scatter` | planned |
-| 15 | `15_all_to_all.py` | Personalized exchange; reveal `pld.tensor.all_to_all` | planned |
-| 16 | `16_putting_it_together.py` | Compose `broadcast` + `allreduce` + `allgather` in one kernel | planned |
+| 08 | `08_allreduce_mesh.py` | All-reduce v1 (mesh): every rank reads every peer, sums locally | ✅ shipped |
+| 09 | `09_allreduce_two_phase.py` | All-reduce v2: reduce-scatter + all-gather | ✅ shipped |
+| 10 | `10_allreduce_ring.py` | All-reduce v3 (ring): chunked around the ring | ✅ shipped |
+| 11 | `11_allreduce_reveal.py` | **The reveal**: `pld.tensor.allreduce` (mesh + ring); diff the IR | ✅ shipped |
+| 12 | `12_broadcast.py` | One-to-all; reveal `pld.tensor.broadcast` | ✅ shipped |
+| 13 | `13_allgather.py` | All-to-all slices; reveal `pld.tensor.allgather` | ✅ shipped |
+| 14 | `14_reduce_scatter.py` | All-to-chunks; reveal `pld.tensor.reduce_scatter` | ✅ shipped |
+| 15 | `15_all_to_all.py` | Personalized exchange; reveal `pld.tensor.all_to_all` | ✅ shipped |
+| 16 | `16_putting_it_together.py` | Compose `broadcast` + `allreduce` + `allgather` in one kernel | ✅ shipped |
 
-Steps 08–16 are **planned** — they arrive in later PRs. The walkthroughs below
-(06–12) cover steps 01–07, which ship together.
+All 16 steps ship together. The walkthroughs below (06–21) cover steps 01–16.
 
 ## The abstractions map
 
