@@ -269,7 +269,12 @@ runs:
     - name: Check NPU
       if: ${{ inputs.needs-device == 'true' }}
       shell: bash
-      run: npu-smi info
+      # EXPERIMENT BRANCH: the npu-a5 pool cannot init dcmi outside a card
+      # session, so a bare `npu-smi info` fails with -8005. Borrow the card the
+      # job was assigned and run the probe inside it.
+      run: |
+        task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 120 \
+          --run "cd $GITHUB_WORKSPACE/${{ inputs.checkout-path }} && npu-smi info"
 
     - name: Scope ccache to pto-isa version
       # Namespace ccache by the pinned pto-isa commit so an ISA bump forces a real
@@ -431,6 +436,18 @@ runs:
         # env snapshot may not carry the workspace path.
         _PYPTO_ENV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
         source "$_PYPTO_ENV_DIR/venv/bin/activate"
+        # Put the venv's own site-packages at the FRONT of PYTHONPATH. CANN's
+        # set_env.sh (sourced above on device jobs) prepends its site-packages,
+        # and every PYTHONPATH entry is searched before the venv's -- so CANN
+        # >= 9.2.0, which ships an unrelated package of its own named `pypto`
+        # (0.2.1, pybind11-based), otherwise shadows the one this job just
+        # built. Only the npu-a5 pool hits it; the a2a3 pool is on CANN 9.0.0.
+        # Prepend unconditionally: activate.sh is sourced more than once per
+        # job and each source re-runs set_env.sh, which re-prepends CANN's dir.
+        _PYPTO_SITE="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])' 2>/dev/null)"
+        if [ -n "$_PYPTO_SITE" ]; then
+          export PYTHONPATH="$_PYPTO_SITE${PYTHONPATH:+:$PYTHONPATH}"
+        fi
         EOF
         if [ "$UNSET_RING" = "true" ]; then
           printf '%s\n' 'unset PTO2_RING_HEAP PTO2_RING_TASK_WINDOW PTO2_RING_DEP_POOL' >> activate.sh

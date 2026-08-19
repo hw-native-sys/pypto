@@ -17,10 +17,11 @@ name: Docs
 # The site is a build artifact and is never committed; the markdown under `docs/`
 # stays the single source of truth.
 
+# EXPERIMENT BRANCH: pull_request trigger removed so this branch schedules
+# exactly one job (a5-exp.yml).
 on:
   push:
     branches: [ "main" ]
-  pull_request:
   # Republish without a code change, and exercise the deploy path on demand.
   workflow_dispatch:
 

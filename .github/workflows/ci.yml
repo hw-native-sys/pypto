@@ -1,9 +1,9 @@
 name: CI
 
+# EXPERIMENT BRANCH: the pull_request trigger is removed so the full matrix
+# never runs here -- a5-exp.yml carries the single A5 job this branch exists for.
 on:
   push:
-    branches: [ "main" ]
-  pull_request:
     branches: [ "main" ]
   workflow_dispatch:
 
