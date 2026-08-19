@@ -14,8 +14,8 @@ Covers four orthogonal pieces of the host_orch emit:
 1. Programs with at least one comm domain wrap the body in
    ``with orch.allocate_domain(name=..., workers=..., window_size=...,
    buffers=[CommBufferSpec(...)]) as __comm_d0:``.
-2. DistributedTensor formal → ``add_tensor(Tensor.make(data=__comm_d0[<r>]
-   .buffer_ptrs["<name>"], shapes=..., dtype=..., child_memory=True), ...)``.
+2. DistributedTensor formal → ``add_tensor(__comm_d0[<r>]
+   .buffers["<name>"].tensor(shapes=..., dtype=...), ...)``.
 3. Explicit CommCtx scalar:
    ``add_scalar(__comm_d0[<r>].device_ctx)`` placed AFTER all tensor adds,
    in IR-arg order (matching the materialized incore function signature).
@@ -89,8 +89,99 @@ def _lower_host_collectives(program):
 
 
 # ---------------------------------------------------------------------------
+# HOST tensor op lowering and rejection
+# ---------------------------------------------------------------------------
+
+
+def test_host_orch_tensor_assemble_emits_tensor_dict_slice_write():
+    @pl.program
+    class Prog:
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self, out: pl.Tensor[[8, 32], pl.FP32]) -> pl.Tensor[[8, 32], pl.FP32]:
+            tmp = pl.create_tensor([4, 16], dtype=pl.FP32)
+            out = pl.assemble(out, tmp, [3, 7])
+            return out
+
+    code = _lower(Prog, convert_to_ssa=True)
+
+    assert re.search(
+        r'tensors\["out__ssa_v0"\]\[3:3 \+ 4, 7:7 \+ 16\] = '
+        r'tensors\["tmp__ssa_v0"\]\[0:4, 0:16\]',
+        code,
+    ), code
+    assert re.search(r'tensors\["out__ssa_v1"\] = tensors\["out__ssa_v0"\]', code), code
+    assert "tensor.assemble(" not in code
+    compile(code, "<host_orch>", "exec")
+
+
+def test_host_orch_tensor_assemble_right_aligns_lower_rank_source():
+    @pl.program
+    class Prog:
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self, out: pl.Tensor[[2, 8, 32], pl.FP32]) -> pl.Tensor[[2, 8, 32], pl.FP32]:
+            tmp = pl.create_tensor([4, 16], dtype=pl.FP32)
+            out = pl.assemble(out, tmp, [1, 3, 7])
+            return out
+
+    code = _lower(Prog, convert_to_ssa=True)
+
+    assert re.search(
+        r'tensors\["out__ssa_v0"\]\[1:1 \+ 1, 3:3 \+ 4, 7:7 \+ 16\] = '
+        r'tensors\["tmp__ssa_v0"\]\[0:4, 0:16\]',
+        code,
+    ), code
+    compile(code, "<host_orch>", "exec")
+
+
+def test_host_orch_tensor_assemble_uses_source_valid_shape():
+    @pl.program
+    class Prog:
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self, out: pl.Tensor[[8, 32], pl.FP32]) -> pl.Tensor[[8, 32], pl.FP32]:
+            tmp = pl.create_tensor([4, 16], dtype=pl.FP32)
+            narrowed = pl.slice(tmp, [4, 16], [0, 0], valid_shape=[3, 9])
+            out = pl.assemble(out, narrowed, [2, 5])
+            return out
+
+    code = _lower(Prog, convert_to_ssa=True)
+
+    assert re.search(
+        r'tensors\["out__ssa_v0"\]\[2:2 \+ 3, 5:5 \+ 9\] = '
+        r'tensors\["narrowed__ssa_v0"\]\[0:3, 0:9\]',
+        code,
+    ), code
+    compile(code, "<host_orch>", "exec")
+
+
+def test_host_orch_atomic_tensor_assemble_is_rejected():
+    @pl.program
+    class Prog:
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self, out: pl.Tensor[[8], pl.FP32]) -> pl.Tensor[[8], pl.FP32]:
+            tmp = pl.create_tensor([8], dtype=pl.FP32)
+            out = pl.assemble(out, tmp, [0], atomic=pl.AtomicType.Add)
+            return out
+
+    with pytest.raises(ValueError, match="only supported inside an InCore function"):
+        _lower(Prog, convert_to_ssa=True)
+
+
+def test_host_orch_unhandled_tensor_op_is_rejected():
+    @pl.program
+    class Prog:
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self) -> pl.Tensor[[8, 32], pl.FP32]:
+            tmp = pl.create_tensor([256], dtype=pl.FP32)
+            reshaped = pl.reshape(tmp, [8, 32])
+            return reshaped
+
+    with pytest.raises(ValueError, match=r"does not support op 'tensor\.reshape'.*host_orch"):
+        _lower(Prog, convert_to_ssa=True)
+
+
+# ---------------------------------------------------------------------------
 # Positive: DistributedTensor formals + device= → with orch.allocate_domain
-# + Tensor.make + add_scalar(ctx) + worker= + world_size lowering
+# + Buffer.tensor + add_scalar(ctx) + worker= + world_size lowering
 # ---------------------------------------------------------------------------
 
 
@@ -127,15 +218,15 @@ def test_dist_tensor_formal_emits_continuous_tensor_make():
 
     # for r in range(..., world_size, ...):  ← world_size lowering in loop bound.
     assert re.search(r"for \w+ in range\(.*\bworld_size\b.*\):", code), code
-    # Tensor.make for the DistributedTensor formal — keyed on
+    # Buffer.tensor for the DistributedTensor formal — keyed on
     # the alloc op's LHS name_hint (``data_buf``).
     assert re.search(
-        r'Tensor\.make\(data=__comm_d0\[\w+\]\.buffer_ptrs\["data_buf"\],'
-        r" shapes=\(64,\), dtype=DataType\.FLOAT32, child_memory=True\)",
+        r'__comm_d0\[\w+\]\.buffers\["data_buf"\]\.tensor\('
+        r"shapes=\(64,\), dtype=DataType\.FLOAT32\)",
         code,
     ), code
     # Trailing per-DistributedTensor ctx scalar — same rank index as
-    # the Tensor.make above.
+    # the Buffer.tensor above.
     assert re.search(r"\.add_scalar\(__comm_d0\[\w+\]\.device_ctx\)", code), code
     assert "pld.system.get_comm_ctx" not in code, code
     # ``device=r`` → rank-pinned dispatch routes through ``_submit_chip`` (which
@@ -168,10 +259,10 @@ def test_two_dist_tensor_formals_emit_two_explicit_ctx_scalars():
 
     code = _lower(Prog)
 
-    # Two Tensor.make lines — one per DistributedTensor formal.
+    # Two Buffer.tensor lines — one per DistributedTensor formal.
     cont_makes = re.findall(
-        r'Tensor\.make\(data=__comm_d0\[\w+\]\.buffer_ptrs\["([^"]+)"\],'
-        r" shapes=(\([^)]*\)), dtype=DataType\.([A-Z0-9]+),",
+        r'__comm_d0\[\w+\]\.buffers\["([^"]+)"\]\.tensor\('
+        r"shapes=(\([^)]*\)), dtype=DataType\.([A-Z0-9]+)\)",
         code,
     )
     assert len(cont_makes) == 2, code
@@ -240,7 +331,7 @@ def test_const_device_kwarg_renders_literal_worker():
 
     code = _lower(Prog)
     assert re.search(r"_submit_chip\(orch, callables\[\"chip_orch\"\],.*config, 0\)", code), code
-    assert "__comm_d0[0].buffer_ptrs" in code, code
+    assert "__comm_d0[0].buffers" in code, code
     assert "__comm_d0[0].device_ctx" in code, code
 
 
@@ -289,7 +380,7 @@ def test_comm_group_program_emits_domain_provider_with_block():
     # All buffer / device_ctx lookups go through the handle; the legacy
     # ``contexts`` parameter must not appear anywhere.
     assert "contexts[" not in code, code
-    assert re.search(r"__comm_d0\[\w+\]\.buffer_ptrs", code), code
+    assert re.search(r"__comm_d0\[\w+\]\.buffers", code), code
 
 
 def test_comm_buffer_specs_align_each_physical_allocation():
@@ -364,10 +455,10 @@ def test_comm_less_dispatch_routes_through_submit_chip_unplaced():
     code = _lower(Prog)
     # The dispatch shape stays intact; the comm-less path routes through
     # ``_submit_chip(..., None)`` and emits no wrapper, no ctx-scalar /
-    # Tensor.make / handle subscript, and no ``worker=`` kwarg.
+    # Buffer.tensor / handle subscript, and no ``worker=`` kwarg.
     assert re.search(r"_submit_chip\(orch, callables\[\"chip_orch\"\],.*config, None\)", code), code
     assert "worker=" not in code, code
-    assert "Tensor.make" not in code, code
+    assert ".buffers[" not in code, code
     assert "__comm_d0[" not in code, code
     assert "allocate_domain" not in code, code
     assert "with orch" not in code, code
@@ -514,14 +605,14 @@ def test_two_groups_emit_nested_allocate_domain():
     assert d1_indent > d0_indent, (d0_line, d1_line)
 
     # Each dispatch's DistributedTensor arg routes through the right handle.
-    # group A dispatches: Tensor.make(... __comm_d0[...].buffer_ptrs["buf_a"] ...)
+    # group A dispatches: __comm_d0[...].buffers["buf_a"].tensor(...)
     # and add_scalar(__comm_d0[...].device_ctx).
     assert re.search(
-        r'Tensor\.make\(data=__comm_d0\[\w+\]\.buffer_ptrs\["buf_a"\],',
+        r'__comm_d0\[\w+\]\.buffers\["buf_a"\]\.tensor\(',
         code,
     ), code
     assert re.search(
-        r'Tensor\.make\(data=__comm_d1\[\w+\]\.buffer_ptrs\["buf_b"\],',
+        r'__comm_d1\[\w+\]\.buffers\["buf_b"\]\.tensor\(',
         code,
     ), code
     # The trailing per-tensor ctx scalar uses the matching handle too.
@@ -561,10 +652,10 @@ def test_two_groups_handle_routing_is_per_dispatch_not_state_bleed():
 
     code = _lower(Prog)
 
-    # Each dispatch site emits one Tensor.make line; the handle
+    # Each dispatch site emits one Buffer.tensor line; the handle
     # prefix uniquely identifies the group.
     cont_makes = re.findall(
-        r'Tensor\.make\(data=(__comm_d\d+)\[\w+\]\.buffer_ptrs\["([^"]+)"\],',
+        r'(__comm_d\d+)\[\w+\]\.buffers\["([^"]+)"\]\.tensor\(',
         code,
     )
     assert cont_makes == [
@@ -787,9 +878,9 @@ def test_implicit_host_allreduce_builtin_codegen_materializes_signal():
     generated, cg = _lower_host_collectives(Prog)
 
     assert 'callables["builtin.tensor.allreduce__sum__fp32"]' in generated, generated
-    assert 'buffer_ptrs["__allreduce_signal_buf_0"]' in generated, generated
-    assert 'buffer_ptrs["data_buf"]' in generated, generated
-    assert 'buffer_ptrs["signal_buf"]' not in generated, generated
+    assert 'buffers["__allreduce_signal_buf_0"]' in generated, generated
+    assert 'buffers["data_buf"]' in generated, generated
+    assert 'buffers["signal_buf"]' not in generated, generated
     assert "orch.submit_next_level" in generated, generated
     assert ".add_scalar(__comm_d0[" in generated and "].domain_size)" in generated, generated
     assert "data = data" not in generated, generated
@@ -888,6 +979,59 @@ def test_backend_materializes_builtin_next_level_files(tmp_path):
     assert "get_block_num(args)" in kernel_cpp
     assert "signal_tensor->ndims == 1 ? 1" in kernel_cpp
     assert "base += static_cast<int64_t>(active_blocks) * kTileCount" in kernel_cpp
+
+
+@pytest.mark.parametrize(
+    "runtime",
+    [passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER, passes.RuntimeKind.HOST_BUILD_GRAPH],
+)
+def test_every_next_level_reports_the_selected_runtime(tmp_path, runtime):
+    """All chip sub-builds in one distributed program must name the same runtime.
+
+    The builtin collectives are materialized from templates rather than by the
+    orchestration codegen, so they are a second, easily-missed place where the
+    runtime name is written. ``_assemble_chip_callables`` rejects a
+    ``next_levels/`` tree whose members disagree, which would make every
+    distributed program using a collective unrunnable under a non-default
+    runtime.
+    """
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(self, data: pld.DistributedTensor[[SIZE], pl.FP32]):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            data_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(pld.world_size() * pl.INT32.get_byte())
+            data = pld.window(data_buf, [SIZE], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [pld.world_size()], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(data, device=r)
+            pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
+            return 0
+
+    program = passes.materialize_comm_domain_scopes()(Prog)
+    program = passes.lower_host_tensor_collectives()(program)
+    program = passes.materialize_dist_tensor_ctx()(program)
+    program = _finalize_chip_program_for_generate(program)
+    files = pto_backend.generate(program, str(tmp_path), skip_ptoas=True, runtime=runtime)
+
+    configs = {
+        path: text
+        for path, text in files.items()
+        if path.startswith("next_levels/") and path.endswith("/kernel_config.py")
+    }
+    # Both a user chip Orchestration and a template-materialized builtin, so the
+    # test would still pass vacuously if either side were missing.
+    # Both a user chip Orchestration and a template-materialized builtin, so the
+    # test would still pass vacuously if either side were missing.
+    assert len(configs) >= 2, f"expected a user chip and a builtin config, got {sorted(configs)}"
+    name = passes.runtime_kind_to_name(runtime)
+    for path, text in configs.items():
+        assert f'"runtime": "{name}"' in text, f"{path} does not report runtime {name!r}"
 
 
 @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)

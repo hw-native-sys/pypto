@@ -25,8 +25,10 @@ After the MemRef-mirror redesign:
 from importlib import resources
 from typing import Any, cast
 
+import pypto
 import pytest
 from pypto import DataType, ir
+from pypto.ir.op.distributed import system_ops as dist_system_ops
 from pypto.ir.op.distributed import tensor_ops as dist_tensor_ops
 from pypto.ir.op.distributed import tile_ops as dist_tile_ops
 from pypto.language.distributed.op import tensor_ops as dsl_tensor_ops
@@ -1379,6 +1381,110 @@ def test_wait_rejects_plain_tensor_signal():
         )
 
 
+def test_defer_wait_builder_returns_unknown_type():
+    """Deferred wait uses the public IR builder and remains side-effect-only."""
+    span = ir.Span.unknown()
+    signal = _make_distributed_tensor_var("signal", [4], DataType.INT32, span)
+
+    call = dist_system_ops.defer_wait(signal, [0], 1, ir.WaitCmp.Ge, span=span)
+
+    assert call.op.name == ir.get_op("pld.system.defer_wait").name
+    assert isinstance(call.type, ir.UnknownType)
+    assert isinstance(call.args[1], ir.MakeTuple)
+    assert call.kwargs["cmp"] == int(ir.WaitCmp.Ge)
+
+
+def test_defer_wait_accepts_index_offsets_and_expected():
+    """INDEX values from loop induction variables are valid counter coordinates and thresholds."""
+    span = ir.Span.unknown()
+    signal = _make_distributed_tensor_var("signal", [4], DataType.INT32, span)
+    offset = ir.Var("offset", ir.ScalarType(DataType.INDEX), span)
+    expected = ir.Var("expected", ir.ScalarType(DataType.INDEX), span)
+
+    call = dist_system_ops.defer_wait(signal, [offset], expected, ir.WaitCmp.Ge, span=span)
+
+    assert isinstance(call.type, ir.UnknownType)
+    offsets = call.args[1]
+    assert isinstance(offsets, ir.MakeTuple)
+    assert offsets.elements[0] is offset
+    assert call.args[2] is expected
+
+
+def test_defer_wait_rejects_eq_comparison():
+    """Deferred completion v1 supports only monotonic greater-or-equal counters."""
+    span = ir.Span.unknown()
+    signal = _make_distributed_tensor_var("signal", [4], DataType.INT32, span)
+
+    with pytest.raises(ValueError, match=r"only supports WaitCmp\.Ge"):
+        dist_system_ops.defer_wait(signal, [0], 1, ir.WaitCmp.Eq, span=span)
+
+
+def test_defer_wait_rejects_rank_zero_signal():
+    """The backend needs at least one signal dimension to derive an element address."""
+    span = ir.Span.unknown()
+    signal = _make_distributed_tensor_var("signal", [], DataType.INT32, span)
+
+    with pytest.raises(ValueError, match="signal rank must be at least 1"):
+        dist_system_ops.defer_wait(signal, [], 1, ir.WaitCmp.Ge, span=span)
+
+
+def test_defer_wait_rejects_float_offset():
+    """Every signal coordinate must be integer/index typed, not merely scalar typed."""
+    span = ir.Span.unknown()
+    signal = _make_distributed_tensor_var("signal", [4], DataType.INT32, span)
+    offset = ir.ConstFloat(0.0, DataType.FP32, span)
+
+    with pytest.raises(ValueError, match="offset 0 must be an integer or index scalar"):
+        dist_system_ops.defer_wait(signal, [offset], 1, ir.WaitCmp.Ge, span=span)
+
+
+def test_defer_wait_rejects_float_expected():
+    """The runtime counter threshold accepts integer and INDEX scalars only."""
+    span = ir.Span.unknown()
+    signal = _make_distributed_tensor_var("signal", [4], DataType.INT32, span)
+    expected = ir.ConstFloat(1.0, DataType.FP32, span)
+
+    with pytest.raises(ValueError, match="expected must be an integer or index scalar"):
+        dist_system_ops.defer_wait(signal, [0], expected, ir.WaitCmp.Ge, span=span)
+
+
+@pytest.mark.parametrize(
+    ("expected", "dtype"),
+    [
+        (-1, DataType.INT64),
+        (2**31, DataType.INT64),
+        (-1, DataType.INDEX),
+        (2**31, DataType.INDEX),
+    ],
+)
+def test_defer_wait_rejects_out_of_range_constant_expected(expected: int, dtype: DataType):
+    """Statically known thresholds must fit the runtime's safe counter range."""
+    span = ir.Span.unknown()
+    signal = _make_distributed_tensor_var("signal", [4], DataType.INT32, span)
+    expected_expr = ir.ConstInt(expected, dtype, span)
+
+    with pytest.raises(ValueError, match=r"expected must be in \[0, INT32_MAX\]"):
+        dist_system_ops.defer_wait(signal, [0], expected_expr, ir.WaitCmp.Ge, span=span)
+
+
+def test_defer_wait_rejects_non_int32_signal():
+    """Runtime deferred counters are backed by INT32 signal slots."""
+    span = ir.Span.unknown()
+    signal = _make_distributed_tensor_var("signal", [4], DataType.FP32, span)
+
+    with pytest.raises(ValueError, match="signal dtype must be INT32"):
+        dist_system_ops.defer_wait(signal, [0], 1, ir.WaitCmp.Ge, span=span)
+
+
+def test_defer_wait_rejects_plain_tensor_signal():
+    """Deferred completion requires a window-bound DistributedTensor signal."""
+    span = ir.Span.unknown()
+    plain = ir.Var("x", ir.TensorType([ir.ConstInt(4, DataType.INT64, span)], DataType.INT32), span)
+
+    with pytest.raises(ValueError, match="DistributedTensor"):
+        dist_system_ops.defer_wait(plain, [0], 1, ir.WaitCmp.Ge, span=span)
+
+
 # ---------------------------------------------------------------------------
 # pld.tensor.put op (synchronous cross-rank bulk write — TPUT)
 # ---------------------------------------------------------------------------
@@ -1709,7 +1815,9 @@ def test_tile_put_rejects_stage_larger_than_transfer():
     # 128 cols > 64 transfer cols.
     stage = _make_tile_var("stage", [16, 128], DataType.FP16, span)
 
-    with pytest.raises(ValueError, match="must fit within"):
+    # InternalError, not ValueError: pld.tile.put is materialised by ConvertTensorToTileOps
+    # and its staging tile is compiler-created, so an oversized stage is a pass bug.
+    with pytest.raises(pypto.InternalError, match="must fit within"):
         dist_tile_ops.put(dst, peer, src, stage, atomic=ir.AtomicType.None_, span=span)
 
 
@@ -2064,7 +2172,8 @@ def test_tile_get_rejects_stage_larger_than_transfer():
     # 32 rows > 16 transfer rows.
     stage = _make_tile_var("stage", [32, 64], DataType.FP16, span)
 
-    with pytest.raises(ValueError, match="must fit within"):
+    # InternalError, not ValueError: see the put sibling above.
+    with pytest.raises(pypto.InternalError, match="must fit within"):
         dist_tile_ops.get(dst, peer, src, stage, span=span)
 
 

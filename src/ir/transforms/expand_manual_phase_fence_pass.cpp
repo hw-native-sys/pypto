@@ -34,6 +34,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -66,28 +67,9 @@ struct LoopBodyDepIndex {
   std::unordered_set<const Var*> updated_arrays;
 };
 
-struct TripCountInfo {
-  bool known = false;
-  int64_t count = 0;
-};
-
 using ArrayAliasSet = std::unordered_set<const Var*>;
 using ArrayAliasMap = std::unordered_map<const Var*, std::shared_ptr<ArrayAliasSet>>;
 using NestedLoopSummaryCollector = std::function<void(const ForStmtPtr&, LoopBodyDepIndex*, bool)>;
-
-static std::optional<int64_t> EvalConstInt(const ExprPtr& expr) {
-  if (auto ci = As<ConstInt>(expr)) return ci->value_;
-  return std::nullopt;
-}
-
-static TripCountInfo EvalConstTripCount(const ForStmtPtr& for_stmt) {
-  auto start = EvalConstInt(for_stmt->start_);
-  auto stop = EvalConstInt(for_stmt->stop_);
-  auto step = EvalConstInt(for_stmt->step_);
-  if (!start || !stop || !step || *step <= 0) return TripCountInfo{};
-  int64_t trip = (*stop - *start + *step - 1) / *step;
-  return TripCountInfo{true, trip > 0 ? trip : 0};
-}
 
 static bool IsTaskIdArrayVar(const VarPtr& var) {
   if (!var) return false;
@@ -367,12 +349,12 @@ class ManualPhaseFenceMutator : public IRMutator {
     const auto& summary = GetLoopSummary(for_stmt);
     MergeLoopSafetyInfo(index, summary);
     if (!include_consumers) return;
-    const auto trip_count = EvalConstTripCount(for_stmt);
-    if (!trip_count.known || trip_count.count <= 0) return;
+    const auto trip_count = transform_utils::EvalConstTripCount(for_stmt);
+    if (!trip_count.has_value() || *trip_count <= 0) return;
     for (const Var* key : summary.dep_array_order) {
       auto it = summary.dep_arrays.find(key);
       if (it == summary.dep_arrays.end()) continue;
-      MergeDepArrayInfo(index, key, it->second, trip_count.count);
+      MergeDepArrayInfo(index, key, it->second, *trip_count);
     }
   }
 
@@ -418,9 +400,11 @@ class ManualPhaseFenceMutator : public IRMutator {
     };
 
     const bool is_parallel = for_stmt->kind_ == ForKind::Parallel;
-    const auto trip_count = EvalConstTripCount(for_stmt);
-    if (is_parallel && (!trip_count.known || trip_count.count <= 0)) return decisions;
-    if (for_stmt->kind_ == ForKind::Sequential && trip_count.known && trip_count.count <= 0) return decisions;
+    const auto trip_count = transform_utils::EvalConstTripCount(for_stmt);
+    if (is_parallel && (!trip_count.has_value() || *trip_count <= 0)) return decisions;
+    if (for_stmt->kind_ == ForKind::Sequential && trip_count.has_value() && *trip_count <= 0) {
+      return decisions;
+    }
 
     for (const auto& iter_arg : for_stmt->iter_args_) {
       if (iter_arg) current_iter_args.insert(iter_arg.get());
@@ -437,7 +421,7 @@ class ManualPhaseFenceMutator : public IRMutator {
         continue;
       }
       int64_t consumers = info.consumer_count;
-      if (trip_count.known && trip_count.count > 0) consumers *= trip_count.count;
+      if (trip_count.has_value() && *trip_count > 0) consumers *= *trip_count;
       try_add(dep_array, dep_array, consumers, info.consumers);
     }
 

@@ -73,7 +73,7 @@ class TestOrchestration:
             extern "C" {
 
             __attribute__((visibility("default")))
-            PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs& orch_args) {
+            PTO2OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs& orch_args) {
                 (void)orch_args;
                 return PTO2OrchestrationConfig{
                     .expected_arg_count = 3,
@@ -81,27 +81,27 @@ class TestOrchestration:
             }
 
             __attribute__((visibility("default")))
-            void aicpu_orchestration_entry(const L2TaskArgs& orch_args) {
+            void aicpu_orchestration_entry(const ChipTaskArgs& orch_args) {
                 // External tensors
-                const Tensor& ext_a = orch_args.tensor(0).ref();
-                const Tensor& ext_b = orch_args.tensor(1).ref();
-                const Tensor& ext_d = orch_args.tensor(2).ref();
+                const ChipTensor& ext_a = orch_args.tensor(0).ref();
+                const ChipTensor& ext_b = orch_args.tensor(1).ref();
+                const ChipTensor& ext_d = orch_args.tensor(2).ref();
 
                 PTO2_SCOPE() {
                     uint32_t c_ci_shapes[2] = {16, 16};
                     TensorCreateInfo c_ci(c_ci_shapes, 2, DataType::FLOAT32);
                     TaskOutputTensors alloc_0 = alloc_tensors(c_ci);
-                    const Tensor& c = alloc_0.get_ref(0);
+                    const ChipTensor& c = alloc_0.get_ref(0);
 
                     // Task 0: kernel_add
-                    L0TaskArgs params_t0;
+                    CoreTaskArgs params_t0;
                     params_t0.add_input(ext_a);
                     params_t0.add_input(ext_b);
                     params_t0.add_output(c);
                     rt_submit_aiv_task(0, params_t0);
 
                     // Task 1: kernel_add
-                    L0TaskArgs params_t1;
+                    CoreTaskArgs params_t1;
                     params_t1.add_input(c);
                     params_t1.add_input(ext_b);
                     params_t1.add_output(ext_d);
@@ -522,7 +522,7 @@ class TestOrchestration:
             extern "C" {
 
             __attribute__((visibility("default")))
-            PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs& orch_args) {
+            PTO2OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs& orch_args) {
                 (void)orch_args;
                 return PTO2OrchestrationConfig{
                     .expected_arg_count = 3,
@@ -530,11 +530,11 @@ class TestOrchestration:
             }
 
             __attribute__((visibility("default")))
-            void aicpu_orchestration_entry(const L2TaskArgs& orch_args) {
+            void aicpu_orchestration_entry(const ChipTaskArgs& orch_args) {
                 // External tensors
-                const Tensor& ext_a = orch_args.tensor(0).ref();
-                const Tensor& ext_b = orch_args.tensor(1).ref();
-                const Tensor& ext_f = orch_args.tensor(2).ref();
+                const ChipTensor& ext_a = orch_args.tensor(0).ref();
+                const ChipTensor& ext_b = orch_args.tensor(1).ref();
+                const ChipTensor& ext_f = orch_args.tensor(2).ref();
 
                 PTO2_SCOPE() {
                     uint32_t c_ci_shapes[2] = {16, 16};
@@ -546,41 +546,41 @@ class TestOrchestration:
                     uint32_t g_ci_shapes[2] = {16, 16};
                     TensorCreateInfo g_ci(g_ci_shapes, 2, DataType::FLOAT32);
                     TaskOutputTensors alloc_0 = alloc_tensors(c_ci, d_ci, e_ci, g_ci);
-                    const Tensor& c = alloc_0.get_ref(0);
-                    const Tensor& d = alloc_0.get_ref(1);
-                    const Tensor& e = alloc_0.get_ref(2);
-                    const Tensor& g = alloc_0.get_ref(3);
+                    const ChipTensor& c = alloc_0.get_ref(0);
+                    const ChipTensor& d = alloc_0.get_ref(1);
+                    const ChipTensor& e = alloc_0.get_ref(2);
+                    const ChipTensor& g = alloc_0.get_ref(3);
 
                     // Task 0: kernel_add
-                    L0TaskArgs params_t0;
+                    CoreTaskArgs params_t0;
                     params_t0.add_input(ext_a);
                     params_t0.add_input(ext_b);
                     params_t0.add_output(c);
                     rt_submit_aiv_task(0, params_t0);
 
                     // Task 1: kernel_add_scalar
-                    L0TaskArgs params_t1;
+                    CoreTaskArgs params_t1;
                     params_t1.add_input(c);
                     params_t1.add_output(d);
                     params_t1.add_scalar(to_u64(1.000000f));
                     rt_submit_aiv_task(1, params_t1);
 
                     // Task 2: kernel_add_scalar
-                    L0TaskArgs params_t2;
+                    CoreTaskArgs params_t2;
                     params_t2.add_input(c);
                     params_t2.add_output(e);
                     params_t2.add_scalar(to_u64(2.000000f));
                     rt_submit_aiv_task(1, params_t2);
 
                     // Task 3: kernel_mul
-                    L0TaskArgs params_t3;
+                    CoreTaskArgs params_t3;
                     params_t3.add_input(d);
                     params_t3.add_input(e);
                     params_t3.add_output(g);
                     rt_submit_aiv_task(2, params_t3);
 
                     // Task 4: kernel_add
-                    L0TaskArgs params_t4;
+                    CoreTaskArgs params_t4;
                     params_t4.add_input(g);
                     params_t4.add_input(c);
                     params_t4.add_output(ext_f);
@@ -773,13 +773,13 @@ class TestOrchestration:
 
         # All orch params are external tensors:
         # mij=0, lij=1, oi_new=2, mi_in=3, li_in=4, oi_in=5, dst_in=6, final=7
-        assert "const Tensor& ext_mi_in = orch_args.tensor(3).ref()" in code
-        assert "const Tensor& ext_li_in = orch_args.tensor(4).ref()" in code
-        assert "const Tensor& ext_oi_in = orch_args.tensor(5).ref()" in code
-        assert "const Tensor& ext_dst_in = orch_args.tensor(6).ref()" in code
+        assert "const ChipTensor& ext_mi_in = orch_args.tensor(3).ref()" in code
+        assert "const ChipTensor& ext_li_in = orch_args.tensor(4).ref()" in code
+        assert "const ChipTensor& ext_oi_in = orch_args.tensor(5).ref()" in code
+        assert "const ChipTensor& ext_dst_in = orch_args.tensor(6).ref()" in code
 
         # Final return tensor is external
-        assert "const Tensor& ext_final = orch_args.tensor(7).ref()" in code
+        assert "const ChipTensor& ext_final = orch_args.tensor(7).ref()" in code
 
         # Two tasks: online_update + kernel_add
         assert code.count("rt_submit_aiv_task") == 2
@@ -864,7 +864,7 @@ class TestOrchestration:
         assert "params_t0.add_inout(ext_inout_t)" in code
 
         # Each tuple result is the in-place arg it writes, so it remaps to that
-        # arg (no per-output ``const Tensor&`` alias is minted). The consumer
+        # arg (no per-output ``const ChipTensor&`` alias is minted). The consumer
         # ``combine`` reads ta/tb/tc — each result mapped to its OWN arg, NOT
         # shifted onto inout_t (issue #1573).
         ia = code.index("params_t1.add_input(ext_ta)")
@@ -874,7 +874,7 @@ class TestOrchestration:
         # The scrambled (shifted-by-one) mapping must NOT appear: combine must
         # not read inout_t, and no const-ref output alias is emitted.
         assert "add_input(ext_inout_t)" not in code
-        assert all(f"const Tensor& o{i}" not in code for i in (1, 2, 3)), code
+        assert all(f"const ChipTensor& o{i}" not in code for i in (1, 2, 3)), code
 
     @staticmethod
     def _manual_cross_scope_code(create_inside: bool) -> str:
@@ -951,22 +951,22 @@ class TestOrchestration:
         manual_open = code.index("PTO2_SCOPE(PTO2ScopeMode::MANUAL)")
         manual_close = code.index("}", manual_open)
         # The buffer AND the alloc handle backing it are declared in the
-        # enclosing scope, ahead of the block — if only ``const Tensor& buf`` were
+        # enclosing scope, ahead of the block — if only ``const ChipTensor& buf`` were
         # hoisted while ``TaskOutputTensors alloc_0 = ...`` stayed inside, ``buf``
         # would reference an out-of-scope handle and the .cpp would not compile.
         assert code.index("TaskOutputTensors alloc_") < manual_open, code
         assert code.index("alloc_tensors(") < manual_open, code
-        decl = code.index("const Tensor& buf = ")
+        decl = code.index("const ChipTensor& buf = ")
         assert decl < manual_open, code
         # The after-scope consumer reads ``buf`` directly — no const-ref alias
         # is minted for the producer's SSA output.
         assert "add_input(buf)" in code[manual_close:], code
-        assert "const Tensor& buf__" not in code, code
+        assert "const ChipTensor& buf__" not in code, code
 
     def test_manual_scope_tensor_created_before_read_after(self):
         """Regression for #1697: a tensor created BEFORE a ``pl.manual_scope``,
         written by a submit inside it, and read by a task after it. The output
-        previously minted ``const Tensor& buf__ssa_v1 = buf;`` at the deep block
+        previously minted ``const ChipTensor& buf__ssa_v1 = buf;`` at the deep block
         indent; the after-scope ``add_input(buf__ssa_v1)`` then named an
         out-of-scope identifier and the orchestration ``.cpp`` failed to compile.
         The output is now remapped to read ``buf`` directly."""
@@ -991,11 +991,11 @@ class TestOrchestration:
         ``fresh_carry`` selects which lowering shape the loop carry takes:
           * False — the carry threads the before-scope tensor in place, so the
             post-loop ``score = score_rv`` rebind lowers to a catch-all
-            ``Tensor score__ssa_v1 = score;`` copy emitted at the deep block
+            ``ChipTensor score__ssa_v1 = score;`` copy emitted at the deep block
             indent; the after-scope ``pl.reshape`` reader then named the
             out-of-scope ``score__ssa_v1``.
           * True — the loop yields a freshly created tensor each iteration
-            (``is_rebind``), so codegen mints a mutable carry ``Tensor acc_rv =
+            (``is_rebind``), so codegen mints a mutable carry ``ChipTensor acc_rv =
             acc;`` *inside* the block AND a chained ``acc__ssa_v1 = acc_rv;``
             post-loop copy. The after-scope kernel read named the out-of-scope
             chain. The carry decl is now hoisted out and the copy collapses.
@@ -1082,7 +1082,7 @@ class TestOrchestration:
         (a method-receiver use the old ``add_*``-only scope checker missed).
 
         The post-loop ``score = score_rv`` rebind lowered to a catch-all
-        ``Tensor score__ssa_v1 = score;`` copy at the deep block indent; the
+        ``ChipTensor score__ssa_v1 = score;`` copy at the deep block indent; the
         after-scope ``score_flat = score__ssa_v1.reshape(...)`` then named an
         out-of-scope identifier and the ``.cpp`` failed to C++-compile. The copy
         is now collapsed onto the enclosing ``score``."""
@@ -1100,8 +1100,8 @@ class TestOrchestration:
         ``pl.manual_scope`` (the loop yields a freshly created tensor each
         iteration, so OptimizeOrchTensors Pattern-5 externalizes the windowed
         write) read by a kernel after the scope. Codegen minted a mutable carry
-        ``Tensor acc_rv = acc;`` inside the block plus a chained
-        ``Tensor acc__ssa_v1 = acc_rv;`` post-loop copy; the after-scope
+        ``ChipTensor acc_rv = acc;`` inside the block plus a chained
+        ``ChipTensor acc__ssa_v1 = acc_rv;`` post-loop copy; the after-scope
         ``add_input`` named the out-of-scope chain.
 
         The carry decl is now hoisted to the enclosing scope and the chained copy
@@ -1111,12 +1111,12 @@ class TestOrchestration:
         # The windowed externalization actually fired (exercises Pattern-5).
         assert "produce__windowed" in code, code
         manual_open = code.index("PTO2_SCOPE(PTO2ScopeMode::MANUAL)")
-        # The mutable carry for ``acc`` (``Tensor acc_rv = acc;``) is hoisted AHEAD
+        # The mutable carry for ``acc`` (``ChipTensor acc_rv = acc;``) is hoisted AHEAD
         # of the manual block header (declared in the enclosing scope). Anchor the
         # match to the ``acc`` carry initialised from ``acc`` so an unrelated
         # ``_rv`` temp emitted earlier can't be picked by mistake.
         carry_decls = list(
-            re.finditer(r"^\s*Tensor\s+(acc\w*_rv\w*)\s*=\s*acc;", code[:manual_open], flags=re.MULTILINE)
+            re.finditer(r"^\s*ChipTensor\s+(acc\w*_rv\w*)\s*=\s*acc;", code[:manual_open], flags=re.MULTILINE)
         )
         assert len(carry_decls) == 1, code[:manual_open]
         carry_name = carry_decls[0].group(1)
@@ -1127,7 +1127,7 @@ class TestOrchestration:
 
     def test_manual_scope_loop_carry_not_hoisted_outside_manual(self):
         """Negative control for #1713: an identical loop carry NOT inside a
-        ``pl.manual_scope`` keeps its in-place ``Tensor <carry> = <init>;`` decl
+        ``pl.manual_scope`` keeps its in-place ``ChipTensor <carry> = <init>;`` decl
         (the hoist is gated on a manual-scope body). Guards against the hoist
         firing in ordinary AUTO-scope codegen."""
         backend.reset_for_testing()
@@ -1177,10 +1177,10 @@ class TestOrchestration:
         code = _generate_orch_code(NoManualScopeProgram)
         assert _out_of_scope_tensor_refs(code) == [], code
         # No manual scope present -> no hoist machinery engaged; the mutable carry
-        # decl stays in place (a `Tensor <carry> = <init>;` exists) and is
+        # decl stays in place (a `ChipTensor <carry> = <init>;` exists) and is
         # reassigned in the loop.
         assert "PTO2_SCOPE(PTO2ScopeMode::MANUAL)" not in code, code
-        assert re.search(r"^\s*Tensor\s+\w*_rv\w*\s*=\s*\w+;", code, flags=re.MULTILINE), code
+        assert re.search(r"^\s*ChipTensor\s+\w*_rv\w*\s*=\s*\w+;", code, flags=re.MULTILINE), code
 
     def test_manual_scope_windowed_submit_read_after_reshape(self):
         """Regression for #1713 (the issue's headline shape): a tensor created
@@ -1189,7 +1189,7 @@ class TestOrchestration:
         Pattern-5 externalizes it into ``produce__windowed`` + ``score.view(...)``
         + ``tensor.assemble``), and read AFTER the scope via ``pl.reshape``.
 
-        The assemble result's SSA rebind lowered to ``Tensor score__ssa_v1 =
+        The assemble result's SSA rebind lowered to ``ChipTensor score__ssa_v1 =
         score;`` at the deep block indent; the after-scope ``score__ssa_v1.reshape
         (...)`` named an out-of-scope identifier (``'<name>__ssa_v<N>' was not
         declared in this scope``). The copy now collapses onto the enclosing
@@ -1262,7 +1262,7 @@ class TestOrchestration:
         carry taken INSIDE the loop body (a deeper indent than the manual-scope
         body) must NOT collapse onto the hoisted carry — otherwise a reader of
         the copy placed before the loop's yield rebind would alias the carry's
-        later value. The copy keeps a distinct ``Tensor snap = <carry>;`` decl.
+        later value. The copy keeps a distinct ``ChipTensor snap = <carry>;`` decl.
 
         (The post-loop ``acc = acc_rv`` rebind, at the manual-scope body indent,
         still collapses — exercised by the other #1713 tests; this guards the
@@ -1334,17 +1334,17 @@ class TestOrchestration:
             if f.func_type == ir.FunctionType.Orchestration and f.name == "main"
         )
         assert _out_of_scope_tensor_refs(code) == [], code
-        # The in-loop snapshot is materialised as its own ``Tensor snap = ...;``
+        # The in-loop snapshot is materialised as its own ``ChipTensor snap = ...;``
         # value and read as ``add_input(snap)`` — NOT collapsed onto the carry,
         # so the later ``<carry> = ...;`` yield rebind cannot change what the
         # snapshot reader sees.
-        assert re.search(r"^\s*Tensor\s+snap\s*=\s*\w+;", code, flags=re.MULTILINE), code
+        assert re.search(r"^\s*ChipTensor\s+snap\s*=\s*\w+;", code, flags=re.MULTILINE), code
         assert "add_input(snap)" in code, code
 
     def test_manual_scope_ifstmt_phi_read_after(self):
         """Regression for #1713 (IfStmt phi sibling of the loop-carry hoist): an
         ``if`` inside a ``pl.manual_scope`` that conditionally rewrites a tensor
-        produces a phi placeholder ``Tensor <buf>__phi_v<N> = <init>;`` at the
+        produces a phi placeholder ``ChipTensor <buf>__phi_v<N> = <init>;`` at the
         block indent (reassigned in each branch); a task after the scope reading
         the phi then named an out-of-scope identifier.
 
@@ -1399,15 +1399,15 @@ class TestOrchestration:
             for f in program.functions.values()
             if f.func_type == ir.FunctionType.Orchestration and f.name == "main"
         )
-        # The IfStmt actually produced a Tensor phi placeholder (exercises the path).
-        assert re.search(r"Tensor\s+\w+__phi_v\d+\s*=", code), code
+        # The IfStmt actually produced a ChipTensor phi placeholder (exercises the path).
+        assert re.search(r"ChipTensor\s+\w+__phi_v\d+\s*=", code), code
         # No identifier names an out-of-scope name (including the after-scope read).
         assert _out_of_scope_tensor_refs(code) == [], code
         # The phi decl is hoisted AHEAD of the manual block header; the branch
         # ``<phi> = ...;`` merges stay inside the block (resolving through the
         # enclosing frame).
         manual_open = code.index("PTO2_SCOPE(PTO2ScopeMode::MANUAL)")
-        phi_decl = re.search(r"^\s*Tensor\s+(\w+__phi_v\d+)\s*=", code[:manual_open], flags=re.MULTILINE)
+        phi_decl = re.search(r"^\s*ChipTensor\s+(\w+__phi_v\d+)\s*=", code[:manual_open], flags=re.MULTILINE)
         assert phi_decl, code[:manual_open]
         phi_name = phi_decl.group(1)
         # The after-scope consumer reads the hoisted phi directly (in scope).
@@ -1442,11 +1442,11 @@ class TestOrchestration:
 
         code = _generate_orch_code(TensorCreateProgram)
 
-        # tensor.create generates TensorCreateInfo; const Tensor& binding emitted at submit site
+        # tensor.create generates TensorCreateInfo; const ChipTensor& binding emitted at submit site
         # FP16 = DataType::FLOAT16
         assert "uint32_t buf_ci_shapes[2] = {32, 32};" in code
         assert "TensorCreateInfo buf_ci(buf_ci_shapes, 2, DataType::FLOAT16)" in code
-        assert "const Tensor& buf = " in code
+        assert "const ChipTensor& buf = " in code
         assert "make_tensor_external(nullptr, buf_ci_shapes, 2, DataType::FLOAT16)" not in code
 
     def test_tensor_create_with_manual_dep(self):
@@ -1560,7 +1560,7 @@ class TestOrchestration:
             extern "C" {
 
             __attribute__((visibility("default")))
-            PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs& orch_args) {
+            PTO2OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs& orch_args) {
                 (void)orch_args;
                 return PTO2OrchestrationConfig{
                     .expected_arg_count = 7,
@@ -1568,20 +1568,20 @@ class TestOrchestration:
             }
 
             __attribute__((visibility("default")))
-            void aicpu_orchestration_entry(const L2TaskArgs& orch_args) {
+            void aicpu_orchestration_entry(const ChipTaskArgs& orch_args) {
                 // External tensors
-                const Tensor& ext_mij = orch_args.tensor(0).ref();
-                const Tensor& ext_lij = orch_args.tensor(1).ref();
-                const Tensor& ext_oi_new = orch_args.tensor(2).ref();
-                const Tensor& ext_mi = orch_args.tensor(3).ref();
-                const Tensor& ext_li = orch_args.tensor(4).ref();
-                const Tensor& ext_oi = orch_args.tensor(5).ref();
-                const Tensor& ext_dst = orch_args.tensor(6).ref();
+                const ChipTensor& ext_mij = orch_args.tensor(0).ref();
+                const ChipTensor& ext_lij = orch_args.tensor(1).ref();
+                const ChipTensor& ext_oi_new = orch_args.tensor(2).ref();
+                const ChipTensor& ext_mi = orch_args.tensor(3).ref();
+                const ChipTensor& ext_li = orch_args.tensor(4).ref();
+                const ChipTensor& ext_oi = orch_args.tensor(5).ref();
+                const ChipTensor& ext_dst = orch_args.tensor(6).ref();
 
                 PTO2_SCOPE() {
 
                     // Task 0: online_update
-                    L0TaskArgs params_t0;
+                    CoreTaskArgs params_t0;
                     params_t0.add_input(ext_mij);
                     params_t0.add_input(ext_lij);
                     params_t0.add_input(ext_oi_new);

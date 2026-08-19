@@ -383,5 +383,51 @@ def test_split_none_func_attr_is_not_printed():
     assert 'pl.func_attr({"split": pl.SplitMode.UP_DOWN})' in ir.python_print(ir.Program([real], "P", span))
 
 
+def test_roundtrip_after_outlining():
+    """The OUTLINED form round-trips — a region bare at the top of an InCore func.
+
+    This is the shape ``OutlineIncoreScopes`` produces: the scope is consumed and
+    the region sits directly in the ``*_incore_0`` body, which the printer emits
+    as a top-level ``for ... in pl.split_aiv(...)`` inside a function declared
+    ``pl.FunctionType.InCore``.
+
+    It regressed when the parser decided whether to synthesize an InCore wrapper
+    from an open-*scope* test rather than the enclosing function's type: no scope
+    is open here, so reparsing re-wrapped the region and structural equality
+    failed with ``InCoreScopeStmt != SplitAivScopeStmt``. print -> parse was then
+    not a fixpoint after pass 8 for ANY program carrying a region, which broke
+    the roundtrip instrument for every such test and made a pass dump taken at
+    that point non-reparseable.
+    """
+    from pypto.pypto_core import passes  # noqa: PLC0415
+
+    @pl.program
+    class Prog:
+        @pl.function
+        def main(
+            self,
+            a: pl.Tensor[[512, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+        ) -> pl.Tensor[[512, 128], pl.FP32]:
+            for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                offset = aiv_id * 128
+                t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
+                out = pl.store(t, [offset, 0], out)
+            return out
+
+    with passes.PassContext([]):
+        outlined = passes.outline_incore_scopes()(Prog)
+
+    incore = [f for f in outlined.functions.values() if f.func_type == ir.FunctionType.InCore]
+    assert len(incore) == 1, "pass 8 should have produced one InCore function"
+    # The scope is gone and the region is bare — exactly the shape whose reparse
+    # used to re-synthesize a wrapper.
+    assert _count_descendants(incore[0].body, ir.InCoreScopeStmt) == 0
+    assert _count_descendants(incore[0].body, ir.SplitAivScopeStmt) == 1
+
+    reparsed = pl.parse_program(ir.python_print(outlined))
+    ir.assert_structural_equal(outlined, reparsed)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

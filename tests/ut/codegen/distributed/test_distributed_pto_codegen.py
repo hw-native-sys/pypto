@@ -10,7 +10,7 @@
 """PTO codegen tests for distributed N6 ops.
 
 Covers the InCore PTO codegen for ``pld.tile.remote_load``,
-``pld.system.notify`` and ``pld.system.wait``:
+``pld.system.notify``, ``pld.system.wait`` and ``pld.system.defer_wait``:
 
 - MaterializeDistTensorCtx adds one explicit CommContext IR parameter per
   ``DistributedTensor`` IR param; PTO codegen lowers each one to
@@ -48,8 +48,10 @@ from _pto_loc_common import strip_loc
 from pypto import DataType, backend, codegen, ir, passes
 from pypto.backend import BackendType
 from pypto.ir.builder import IRBuilder
+from pypto.ir.instruments import make_roundtrip_instrument
 from pypto.ir.op.distributed import system_ops as dist_system
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
+from pypto.pypto_core import passes as _core_passes
 
 
 @pytest.fixture(autouse=True)
@@ -64,6 +66,27 @@ def _generate_mlir(program_cls) -> str:
     pm = PassManager.get_strategy(OptimizationStrategy.Default)
     optimized = pm.run_passes(program_cls)
     return codegen.PTOCodegen().generate(optimized)
+
+
+def _generate_outlined_waiter_mlir(program_cls) -> str:
+    """Run production waiter outlining before the fully instrumented pipeline.
+
+    Default orders hierarchy outlining before InCore outlining.  These focused
+    fixtures have no outer hierarchy, so a verification instrument would inspect
+    the still-nested distributed op too early.  Production programs reach the
+    same state after their enclosing hierarchy is outlined; make that validated
+    waiter + orchestration call-site state explicit here.
+    """
+    outlined = passes.outline_incore_scopes()(passes.convert_to_ssa()(program_cls))
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
+    optimized = pm.run_passes(outlined)
+    incore = [
+        func
+        for func in optimized.functions.values()
+        if func.func_type not in (pl.FunctionType.Orchestration, pl.FunctionType.Group)
+    ]
+    assert len(incore) == 1, f"expected one waiter kernel, got {[func.name for func in incore]}"
+    return codegen.PTOCodegen().generate(ir.Program(incore, incore[0].name, optimized.span))
 
 
 def test_ctx_arg_materialized_per_distributed_tensor():
@@ -96,6 +119,206 @@ def test_ctx_arg_materialized_per_distributed_tensor():
     # body uses bind to %argK references). Two DistributedTensors → two ptr
     # declarations.
     assert header.count("!pto.ptr<i64>") == 2, header
+
+
+def test_defer_wait_registers_strided_counter_without_blocking_twait():
+    """defer_wait forwards AsyncCtx ABI data and the exact logical element offset."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            signal: pld.DistributedTensor[
+                [4, 8],
+                pl.INT32,
+                pl.TensorView(stride=[16, 1], layout=pl.TensorLayout.ND),
+            ],
+            row: pl.Scalar[pl.INT32],
+            expected: pl.Scalar[pl.INT32],
+        ):
+            with pl.at(level=pl.Level.CORE_GROUP, name_hint="kernel"):
+                pld.system.defer_wait(
+                    signal,
+                    offsets=[row, 2],
+                    expected=expected,
+                    cmp=pld.WaitCmp.Ge,
+                )
+
+    mlir = _generate_outlined_waiter_mlir(P)
+    funcs = _split_module(mlir)
+    kernel = funcs["kernel"]
+    header = kernel.splitlines()[0]
+
+    assert "%__pypto_deferred_raw_args: !pto.ptr<i64>" in header, header
+    assert "pto.comm.twait" not in kernel
+    assert "arith.muli" in kernel
+    assert "%c16_index" in kernel
+    assert kernel.count("arith.cmpi slt") == 2
+    assert kernel.count("arith.cmpi sge") == 2
+    assert "arith.select" in kernel
+    assert "%cn1_index" in kernel
+    assert "arith.index_cast" in kernel and "index to i64" in kernel
+    assert "arith.extsi" in kernel and ": i32 to i64" in kernel
+    assert ("func.call @pypto_register_counter_completion(%__pypto_deferred_raw_args, %arg0, ") in kernel
+    assert ") : (!pto.ptr<i64>, !pto.ptr<i32>, i64, i64) -> ()" in kernel
+    assert (
+        mlir.count(
+            "func.func private @pypto_register_counter_completion(!pto.ptr<i64>, !pto.ptr<i32>, i64, i64)"
+        )
+        == 1
+    )
+
+
+def test_defer_wait_rejects_kernel_name_reserved_for_runtime_adapter():
+    """Fail before emitting two MLIR functions with the same adapter symbol."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, signal: pld.DistributedTensor[[1], pl.INT32]):
+            with pl.at(
+                level=pl.Level.CORE_GROUP,
+                name_hint="pypto_register_counter_completion",
+            ):
+                pld.system.defer_wait(
+                    signal,
+                    offsets=[0],
+                    expected=1,
+                    cmp=pld.WaitCmp.Ge,
+                )
+
+    with pytest.raises(ValueError, match="reserved for PyPTO's deferred-completion runtime adapter"):
+        _generate_outlined_waiter_mlir(P)
+
+
+def test_defer_wait_preserves_wide_dynamic_expected_for_runtime_range_check():
+    """A dynamic i64 expected value reaches the checked adapter without truncation."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            signal: pld.DistributedTensor[[8], pl.INT32],
+            expected: pl.Scalar[pl.INT64],
+        ):
+            with pl.at(level=pl.Level.CORE_GROUP, name_hint="kernel"):
+                pld.system.defer_wait(signal, offsets=[0], expected=expected, cmp=pld.WaitCmp.Ge)
+
+    kernel = _split_module(_generate_outlined_waiter_mlir(P))["kernel"]
+    assert "arith.trunci" not in kernel
+    assert re.search(
+        r"func\.call @pypto_register_counter_completion\("
+        r"%__pypto_deferred_raw_args, %arg0, %[A-Za-z0-9_.$]+, %arg1\)",
+        kernel,
+    )
+
+
+def test_defer_wait_zero_extends_unsigned_offset_before_index_cast():
+    """Unsigned coordinates keep their value when the source high bit is set."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            signal: pld.DistributedTensor[[256], pl.INT32],
+            offset: pl.Scalar[pl.UINT8],
+        ):
+            with pl.at(level=pl.Level.CORE_GROUP, name_hint="kernel"):
+                pld.system.defer_wait(
+                    signal,
+                    offsets=[offset],
+                    expected=1,
+                    cmp=pld.WaitCmp.Ge,
+                )
+
+    mlir = _generate_outlined_waiter_mlir(P)
+    kernel = _split_module(mlir)["kernel"]
+    assert "builtin.unrealized_conversion_cast" in kernel
+    assert ": ui8 to i8" in kernel
+    assert "arith.extui" in kernel and ": i8 to i64" in kernel
+    assert "arith.index_cast" in kernel and ": i64 to index" in kernel
+    assert "arith.index_cast" not in kernel.split(": ui8 to i8", 1)[0]
+
+
+def test_defer_wait_zero_extends_unsigned_expected_before_runtime_range_check():
+    """UINT32 values above INT32_MAX must not wrap negative before the adapter."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            signal: pld.DistributedTensor[[8], pl.INT32],
+            expected: pl.Scalar[pl.UINT32],
+        ):
+            with pl.at(level=pl.Level.CORE_GROUP, name_hint="kernel"):
+                pld.system.defer_wait(signal, offsets=[0], expected=expected, cmp=pld.WaitCmp.Ge)
+
+    kernel = _split_module(_generate_outlined_waiter_mlir(P))["kernel"]
+    assert "builtin.unrealized_conversion_cast" in kernel and ": ui32 to i32" in kernel
+    assert "arith.extui" in kernel and ": i32 to i64" in kernel
+    assert "arith.trunci" not in kernel
+
+
+def test_defer_wait_guards_dynamic_offsets_against_runtime_valid_shape():
+    """Each dynamic coordinate is checked against zero and the logical valid extent."""
+    valid_rows = pl.dynamic("DEFER_VALID_ROWS")
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            signal: pld.DistributedTensor[
+                [8, 4],
+                pl.INT32,
+                pl.TensorView(
+                    valid_shape=[valid_rows, 4],
+                    stride=[4, 1],
+                    layout=pl.TensorLayout.ND,
+                ),
+            ],
+            row: pl.Scalar[pl.INT32],
+        ):
+            with pl.at(level=pl.Level.CORE_GROUP, name_hint="kernel"):
+                pld.system.defer_wait(signal, offsets=[row, 0], expected=1, cmp=pld.WaitCmp.Ge)
+
+    # A type-only DynVar currently has no module-level declaration in printed
+    # IR, so use the normal structural verifier without RoundtripInstrument.
+    ctx = _core_passes.PassContext(
+        [_core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)]
+    )
+    with ctx:
+        kernel = _split_module(_generate_outlined_waiter_mlir(P))["kernel"]
+    assert re.search(r"arith\.cmpi slt, %[A-Za-z0-9_.$]+, %c0_index : index", kernel)
+    # The type-only valid_shape symbol is materialized as a dynamic index
+    # parameter; the upper-bound check must use it instead of physical shape 8.
+    assert re.search(r"arith\.cmpi sge, %[A-Za-z0-9_.$]+, %arg1 : index", kernel)
+    assert "arith.select" in kernel and "%cn1_index" in kernel
+
+
+def test_defer_wait_rejects_slice_alias_without_encoded_logical_origin():
+    """A slice must not silently register an address relative to its parent base."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, signal: pld.DistributedTensor[[8], pl.INT32]):
+            pl.func_attr({"deferred_completion_waiter": True})
+            sub = pl.tensor.slice(signal, [4], [2])
+            pld.system.defer_wait(sub, offsets=[0], expected=1, cmp=pld.WaitCmp.Ge)
+
+    # ConvertTensorToTileOps turns the sliced alias into a Tile. Disable the
+    # print/parse round-trip instrument to verify the pass itself fails closed
+    # while rebuilding the op, before malformed IR can reach PTO lowering.
+    ctx = _core_passes.PassContext(
+        [_core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)]
+    )
+    with ctx, pytest.raises(ValueError, match=r"signal must be a DistributedTensor.*got TileType"):
+        _generate_mlir(P)
 
 
 def test_remote_load_ragged_tail_partitions_only_valid_extent():
@@ -546,6 +769,32 @@ def test_remote_store_emits_tstore_with_partition_view_pattern():
     assert kernel.count("pto.load_scalar") >= 3, kernel
     assert "pto.addptr" in kernel, kernel
     assert "pto.make_tensor_view" in kernel, kernel
+
+
+def test_remote_store_materializes_unaligned_slice_source():
+    """An EvalStmt remote_store receives a fresh aligned tile instead of an
+    FP32 column subview whose base is only four bytes past its source."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            src: pl.Tensor[[16, 8], pl.FP32],
+            data: pld.DistributedTensor[[16, 1], pl.FP32],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            local = pl.tile.load(src, [0, 0], [16, 8], target_memory=pl.Mem.Vec)
+            head = pl.tile.slice(local, [16, 1], [0, 1])
+            pld.tile.remote_store(head, target=data, peer=peer, offsets=[0, 0])
+
+    mlir = _generate_mlir(P)
+    funcs = _split_module(mlir)
+    kernel = funcs["kernel"]
+    assert "pto.subview" not in kernel, kernel
+    assert kernel.count("pto.textract") == 1, kernel
+    assert kernel.count("pto.tstore") == 1, kernel
+    assert kernel.index("pto.textract") < kernel.index("pto.tstore"), kernel
 
 
 def test_remote_store_accepts_nd_tile_with_unit_leading_dims():
@@ -1762,12 +2011,12 @@ def test_split_aiv_region_keeps_notify_off_the_cube_lane():
     function, ABSENT from the AIC one. With the stamp neutered the notify
     appears in both, and the second assertion fails.
 
-    Property verification stays ON; only the ambient print->parse roundtrip
-    instrument is dropped, for a pre-existing asymmetry that has nothing to do
-    with placement: the printer re-synthesises scope wrappers around a lowered
-    region, so print->parse is not structurally equal here. Suppressing the
-    whole context would also drop verification, which is the part that must keep
-    running.
+    Property verification AND the print->parse roundtrip instrument both stay
+    on. The roundtrip used to be dropped here: the parser re-synthesised an
+    InCore wrapper around a region after pass 8 had outlined the scope away, so
+    print->parse was not structurally equal for any program carrying a
+    ``pl.split_aiv`` region. The parser now emits such a region bare inside an
+    InCore function, so this path is back under full roundtrip coverage.
     """
 
     @pl.program
@@ -1801,10 +2050,11 @@ def test_split_aiv_region_keeps_notify_off_the_cube_lane():
                     )
             return out
 
-    verify_only: list[passes.PassInstrument] = [
-        passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)
+    verify_and_roundtrip: list[passes.PassInstrument] = [
+        passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER),
+        make_roundtrip_instrument(),
     ]
-    with passes.PassContext(verify_only):
+    with passes.PassContext(verify_and_roundtrip):
         optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(P)
 
     lanes = {

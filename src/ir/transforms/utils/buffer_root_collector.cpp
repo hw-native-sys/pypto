@@ -73,7 +73,7 @@ void BufferRootCollector::VisitStmt_(const ForStmtPtr& for_stmt) {
   auto init_roots = InitializeLoopCarryRoots(for_stmt->iter_args_);
   IRVisitor::VisitStmt_(for_stmt);
   RecordLoopReturnRoots(for_stmt->body_, for_stmt->return_vars_, init_roots,
-                        transform_utils::EvalConstTripCount(for_stmt) > 0);
+                        transform_utils::EvalConstTripCount(for_stmt).value_or(0) > 0);
 }
 
 void BufferRootCollector::VisitStmt_(const WhileStmtPtr& while_stmt) {

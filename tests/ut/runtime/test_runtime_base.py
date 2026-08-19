@@ -19,6 +19,15 @@ import torch
 from pypto.runtime import ChipWorker, DeviceTensor, Worker
 
 
+class FakeBuffer:
+    def __init__(self, base: int, nbytes: int) -> None:
+        self.base = base
+        self.nbytes = nbytes
+
+    def tensor(self, shapes, dtype):
+        return shapes, dtype
+
+
 class FakeHandle(Worker):
     """Dict-backed Worker that records every primitive call.
 
@@ -31,6 +40,7 @@ class FakeHandle(Worker):
         self.ready = True
         self._next_ptr = 0x1000
         self.live: dict[int, int] = {}  # ptr -> nbytes
+        self.buffers: dict[tuple[int, int], FakeBuffer] = {}
         self.uploads: list[tuple[int, int, int]] = []
         self.freed: list[int] = []
         self.free_calls: list[tuple[int, int]] = []  # (ptr, worker_id)
@@ -40,12 +50,14 @@ class FakeHandle(Worker):
         ptr = self._next_ptr
         self._next_ptr += 0x1000
         self.live[ptr] = nbytes
+        self.buffers[(worker_id, ptr)] = FakeBuffer(ptr, nbytes)
         return ptr
 
     def free(self, ptr: int, *, worker_id: int = 0) -> None:
         self.freed.append(ptr)
         self.free_calls.append((ptr, worker_id))
         self.live.pop(ptr, None)
+        self.buffers.pop((worker_id, ptr), None)
 
     def copy_to(self, dst_dev_ptr: int, src_host_ptr: int, nbytes: int, *, worker_id: int = 0) -> None:
         if self.fail_copy:
@@ -66,12 +78,16 @@ class FakeHandle(Worker):
         if not self.ready:
             raise RuntimeError(f"FakeHandle.{op}() not ready")
 
+    def _buffer_for_ptr(self, ptr: int, *, worker_id: int = 0):
+        return self.buffers[(worker_id, ptr)]
+
 
 def test_alloc_tensor_without_init_allocates_only():
     h = FakeHandle()
     t = h.alloc_tensor((4,), torch.float32)
     assert isinstance(t, DeviceTensor)
     assert t.shape == (4,) and t.dtype == torch.float32
+    assert t.buffer is h.buffers[(0, t.data_ptr)]
     assert h.live == {t.data_ptr: 16}  # 4 * float32(4 bytes)
     assert h.uploads == []  # no init -> no H2D copy
 
@@ -118,7 +134,7 @@ def test_close_owned_tensors_frees_leaked():
     # Only b is leaked; _close_owned_tensors should free it.
     h._close_owned_tensors()
     assert b.data_ptr in h.freed
-    assert h._owned_tensors == set()
+    assert h._owned_tensors == {}
 
 
 def test_close_owned_tensors_swallows_free_errors():
@@ -131,7 +147,7 @@ def test_close_owned_tensors_swallows_free_errors():
     h.free = failing_free  # type: ignore[method-assign]
     # Must NOT raise; the failure is logged-and-swallowed so close() can complete.
     h._close_owned_tensors()
-    assert h._owned_tensors == set()
+    assert h._owned_tensors == {}
 
 
 def test_default_prepare_init_makes_contiguous_cpu_copy():
@@ -201,13 +217,51 @@ def test_free_tensor_genuine_double_free_is_still_noop():
     assert h.freed == [t.data_ptr]  # freed exactly once
 
 
+def test_pointer_reuse_old_tensor_cannot_free_new_allocation():
+    """Allocation identity, not only the raw address, controls free_tensor."""
+    h = FakeHandle()
+    old = h.alloc_tensor((4,), torch.float32)
+    h.free_tensor(old)
+
+    # Model an allocator reusing the just-freed device address.
+    h._next_ptr = old.data_ptr
+    new = h.alloc_tensor((4,), torch.float32)
+    assert new.data_ptr == old.data_ptr
+    assert new == old
+    assert new is not old
+    assert new.buffer is not old.buffer
+
+    free_calls_before = list(h.free_calls)
+    with pytest.raises(ValueError, match="stale DeviceTensor"):
+        h.free_tensor(old)
+    assert h.free_calls == free_calls_before
+    assert h._owned_tensors[(0, new.data_ptr)] is new
+    assert h.buffers[(0, new.data_ptr)] is new.buffer
+
+    h.free_tensor(new)
+
+
+def test_free_tensor_failure_remains_owned_and_can_retry():
+    h = FakeHandle()
+    t = h.alloc_tensor((4,), torch.float32)
+    original_free = h.free
+    h.free = lambda _ptr, *, worker_id=0: (_ for _ in ()).throw(RuntimeError("admission failed"))  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="admission failed"):
+        h.free_tensor(t)
+    assert (0, t.data_ptr) in h._owned_tensors
+
+    h.free = original_free  # type: ignore[method-assign]
+    h.free_tensor(t)
+    assert (0, t.data_ptr) not in h._owned_tensors
+
+
 def test_close_frees_multi_worker_tensors_against_their_workers():
     """_close_owned_tensors releases each leaked buffer against its own worker."""
     h = FakeHandle()
     a = h.alloc_tensor((4,), torch.float32, worker_id=0)
     b = h.alloc_tensor((4,), torch.float32, worker_id=2)
     h._close_owned_tensors()
-    assert h._owned_tensors == set()
+    assert h._owned_tensors == {}
     assert (a.data_ptr, 0) in h.free_calls
     assert (b.data_ptr, 2) in h.free_calls
 

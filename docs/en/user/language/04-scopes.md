@@ -31,9 +31,20 @@ each task touches. That machinery, and the interfaces for steering it by hand, a
 
 ## Quickstart: mark a region as device work
 
+<!-- doctest: setup -->
 ```python
 import pypto.language as pl
+import torch
+from pypto.runtime import RunConfig
 
+CFG = RunConfig(platform="__PLATFORM__")
+torch.manual_seed(0)
+X = torch.randn(256, 128, dtype=torch.float32)
+Y = torch.randn(256, 128, dtype=torch.float32)
+```
+
+<!-- doctest: run -->
+```python
 @pl.jit
 def scale(
     x: pl.Tensor[[256, 128], pl.FP32],
@@ -42,6 +53,11 @@ def scale(
     with pl.at(level=pl.Level.CORE_GROUP):
         out[:] = pl.mul(x, 2.0)
     return out
+
+
+out = torch.zeros(256, 128, dtype=torch.float32)
+scale(X, out, config=CFG)
+torch.testing.assert_close(out, X * 2.0, rtol=1e-4, atol=1e-4)
 ```
 
 | Element | What it does |
@@ -79,8 +95,9 @@ with pl.at(level=pl.Level.CORE_GROUP,
     ...
 ```
 
-Omitting `cross_core_slot` keeps the default ring depth: 8 slots when one direction is
-active, 4 per direction when both are.
+Omitting `cross_core_slot` keeps the default ring depth of 2 slots per active direction —
+enough to double-buffer the handoff while leaving on-chip room for the tiles themselves.
+Raise it when the producing core should be able to run further ahead.
 
 ### SPMD
 
@@ -88,15 +105,35 @@ active, 4 per direction when both are.
 reads the block index:
 
 ```python
-# Dispatch form — the body launches a kernel defined elsewhere.
+# Dispatch form — the body launches a kernel defined elsewhere. `self.kernel`
+# means this form needs @pl.program; from @pl.jit, use the loop form below.
 with pl.spmd(4):
     out = self.kernel(a, b, out)
+```
 
-# Loop form — the body is auto-outlined and `i` binds the block index.
-for i in pl.spmd(4):
-    off = i * 128
-    out = pl.store(pl.add(pl.load(a, [off, 0], [128, 128]),
-                          pl.load(b, [off, 0], [128, 128])), [off, 0], out)
+The loop form is the one a `@pl.jit` entry can write directly:
+
+<!-- doctest: run -->
+```python
+@pl.jit
+def spmd_add(
+    a: pl.Tensor[[256, 128], pl.FP32],
+    b: pl.Tensor[[256, 128], pl.FP32],
+    out: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+):
+    for i in pl.spmd(2):                    # `i` binds the block index
+        off = i * 128
+        out = pl.store(
+            pl.add(pl.load(a, [off, 0], [128, 128]), pl.load(b, [off, 0], [128, 128])),
+            [off, 0],
+            out,
+        )
+    return out
+
+
+out = torch.zeros(256, 128, dtype=torch.float32)
+spmd_add(X, Y, out, config=CFG)
+torch.testing.assert_close(out, X + Y, rtol=1e-4, atol=1e-4)
 ```
 
 A `with pl.spmd(n):` body that neither reads the block index nor dispatches a kernel is
@@ -191,8 +228,14 @@ The compiler does not check any of this.
 **GM traffic is not covered by any of this.** These rules are about *tile* values crossing
 a region edge. A GM tensor belongs to no lane, so no boundary op can express a crossing
 through one — `pld.tensor.put` takes a GM tensor by signature. AIC and AIV run
-asynchronously, so ordering a cube-lane write against a vector-lane read of the same GM
-buffer stays yours: put a `pl.system.syncall(core_type="mix")` between the phases.
+asynchronously. `ExpandMixedKernel` handles one narrow C->V case automatically: a unique
+cube `tile.store` producer whose same-origin vector `tile.load` is in the same body or a
+nested body. Every other GM handoff — including V->C, communication ops, and sibling bodies
+— stays yours. `syncall` alone only aligns arrival: publish the producer's cache lines and
+issue a GM fence before the barrier, then invalidate the consumer's cache before it reads.
+For a buffer that may span multiple cache lines, use the conservative whole-GM
+`pl.system.cacheinvalid()` form; the tensor-region overload currently covers only the cache
+line containing the view's base address.
 
 ### Put cross-rank comm ops in a region
 
@@ -270,9 +313,27 @@ reached the call's arguments. Getting this right is the author's job.
 
 AIC and AIV run **asynchronously**. A boundary op orders the one value it carries — that
 is what the transfer is — but nothing orders a cube-lane write against a vector-lane read
-of the same **GM buffer**. Put a `pl.system.syncall(core_type="mix")` between those two
-phases. A region places work on a lane; it does not sequence the two lanes against each
-other.
+of the same **GM buffer**. Publish the producer's cache lines and issue a GM fence, place a
+cross-core barrier between the phases, then invalidate the consumer's cache before it
+reads. The barrier by itself synchronizes arrival only. A region places work on a lane; it
+does not sequence the two lanes against each other.
+
+The conservative sequence below uses whole-GM cache maintenance and the soft barrier, so
+it is safe for multi-cache-line buffers and partial occupancy. `sync_ws` is an exclusive,
+zero-initialized 16-element `INT32` GM tensor, and `participant_count` is the total number
+of participating AIC and AIV cores.
+
+```python
+pl.system.cacheinvalid()  # publish all producer cache lines
+pl.system.fence()         # wait until they are visible in GM
+pl.system.syncall(
+    mode="soft",
+    core_type="mix",
+    gm_workspace=sync_ws,
+    used_cores=participant_count,
+)                         # synchronize arrival only
+pl.system.cacheinvalid()  # consumer invalidates before reading
+```
 
 ## Edge Cases
 
@@ -291,7 +352,7 @@ other.
 | **`'x' is defined inside a pl.split_aiv region but ... reads it on the CUBE lane outside`** | An unnamed V->C crossing out of a region | Gather it inside the region: `x = pl.aic_gather(x)` |
 | **The cube reads one lane's value at random** | A V->C crossing out of a `mode=NONE` region — both lanes push, one shared slot, no arbitration, **not diagnosed** | Gather only a lane-uniform value; use a data-parallel region if the lanes hold different halves |
 | **A peer's signal counter reads twice what it should** | Both AIV lanes ran the same `pld.system.notify` — **not diagnosed** | Shard the notify by `aiv_id`, or guard it with `if aiv_id == 0:` |
-| **A rank reads stale data after its `pld.system.wait` returns** | Either the double-notify above, or a missing `pl.system.syncall(core_type="mix")` between the cube and vector phases | Shard the notify; add the barrier |
+| **A rank reads stale data after its `pld.system.wait` returns** | Either the double-notify above, or an incomplete cache-publication/fence/barrier/invalidation sequence between the cube and vector phases | Shard the notify; add the full GM handoff sequence |
 
 ## See Also
 

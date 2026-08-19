@@ -17,6 +17,9 @@ Tests cover:
 - Error cases
 """
 
+import sys
+
+import pypto
 import pytest
 from pypto import DataType, ir
 from pypto.pypto_core import testing
@@ -906,6 +909,82 @@ class TestNoDuplicateOps:
     def test_no_duplicate_rejects_unknown_op(self):
         with pytest.raises(ValueError):
             testing.is_no_duplicate_op("pld.system.not_an_op")
+
+
+class TestDeduceTypeExceptionPassthrough:
+    """`OpRegistry::CreateImpl` must not flatten deduction failures to ValueError.
+
+    Every op Call is built through that one funnel. It appends the IR span to the
+    message, and used to do so by catching `const std::exception&` and rethrowing a
+    fresh `ValueError` - which collapsed InternalError / TypeError / IndexError into
+    one class and replaced the stack trace of the real throw site with its own.
+    """
+
+    @staticmethod
+    def _arg():
+        return ir.ConstInt(1, DataType.INT32, ir.Span.unknown())
+
+    def test_internal_error_is_not_flattened(self):
+        """An INTERNAL_CHECK inside type deduction stays an InternalError."""
+        with pytest.raises(pypto.InternalError):
+            ir.create_op_call("test.deduce_raises_internal", [self._arg()], ir.Span.unknown())
+
+    def test_internal_error_is_not_a_value_error(self):
+        """Guards the specific regression: InternalError must not be catchable as ValueError."""
+        with pytest.raises(pypto.InternalError) as exc_info:
+            ir.create_op_call("test.deduce_raises_internal", [self._arg()], ir.Span.unknown())
+        assert not isinstance(exc_info.value, ValueError)
+
+    @pytest.mark.skipif(
+        sys.platform == "darwin", reason="libbacktrace cannot symbolize an MH_BUNDLE on macOS"
+    )
+    def test_internal_error_keeps_original_throw_site(self):
+        """The trace still reaches the deduction function that actually threw.
+
+        Constructing a fresh exception in the registry's catch block would root the trace
+        at the catch instead, losing every frame below it - so the presence of the
+        deduction site is what distinguishes a preserved trace from a rebuilt one.
+        (`op_registry.cpp` appears either way: it is a genuine caller frame.)
+        """
+        with pytest.raises(pypto.InternalError) as exc_info:
+            ir.create_op_call("test.deduce_raises_internal", [self._arg()], ir.Span.unknown())
+        assert "src/ir/op/testing.cpp" in str(exc_info.value)
+
+    def test_span_is_still_appended(self):
+        """Preserving the type must not cost the IR location the funnel adds."""
+        span = ir.Span("kernel.py", 12, 15)
+        with pytest.raises(pypto.InternalError) as exc_info:
+            ir.create_op_call("test.deduce_raises_internal", [self._arg()], span)
+        assert "kernel.py:12:15" in str(exc_info.value)
+
+    def test_unknown_span_appends_no_location(self):
+        """An unknown span adds nothing - not a rendered placeholder.
+
+        `Span.unknown()` stringifies to ":-1:-1", so a merely-substring assertion would
+        stay green if the guard in LocationSuffix were dropped. Comparing the two messages
+        for exact equality pins the behaviour in both directions instead: the located one
+        must differ by the suffix and nothing else. Uses the TypeError op because it is
+        user-class, so neither message carries a traceback that would need filtering.
+        """
+        with pytest.raises(TypeError) as unknown_info:
+            ir.create_op_call("test.deduce_raises_type", [self._arg()], ir.Span.unknown())
+        with pytest.raises(TypeError) as located_info:
+            ir.create_op_call("test.deduce_raises_type", [self._arg()], ir.Span("kernel.py", 12, 15))
+
+        unknown_message = str(unknown_info.value)
+        assert unknown_message == "test.deduce_raises_type always fails"
+        assert str(located_info.value) == f"{unknown_message} at kernel.py:12:15"
+
+    def test_type_error_is_not_flattened(self):
+        """The user-error half of the contract: TypeError stays a TypeError."""
+        with pytest.raises(TypeError) as exc_info:
+            ir.create_op_call("test.deduce_raises_type", [self._arg()], ir.Span.unknown())
+        assert not isinstance(exc_info.value, ValueError)
+
+    def test_value_error_still_surfaces_as_value_error(self):
+        """The common case is unchanged: a CHECK in deduction stays a ValueError."""
+        with pytest.raises(ValueError):
+            ir.create_op_call("tile.cast", [self._arg()], ir.Span.unknown())
 
 
 if __name__ == "__main__":

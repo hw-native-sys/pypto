@@ -421,6 +421,12 @@ class TestGemv:
         result = test_runner.run(GemvTestCase(k=512, n=64, ab_dtype=DataType.INT8, config=_cfg()))
         assert result.passed, f"Test failed: {result.error}"
 
+    @pytest.mark.skip(
+        reason="Issue #2428: GEMV with acc_phase='final' intermittently hangs on device "
+        "(SCHEDULER_TIMEOUT sub_class=S1:running-stalled), which poisons the shared chip-run "
+        "lane and fails every remaining artifact in the ST batch. Temporarily skipped to "
+        "unblock CI; re-enable once the hang is root-caused."
+    )
     @pytest.mark.platforms("a2a3")
     def test_tile_gemv_final_phase(self, test_runner):
         result = test_runner.run(GemvTestCase(k=128, n=64, acc_phase="final", config=_cfg()))
@@ -454,6 +460,12 @@ class TestGemvBias:
         result = test_runner.run(GemvTestCase(k=k, n=64, bias=True, ab_dtype=ab_dtype, config=_cfg()))
         assert result.passed, f"Test failed: {result.error}"
 
+    @pytest.mark.skip(
+        reason="Issue #2428: GEMV with acc_phase='final' intermittently hangs on device "
+        "(SCHEDULER_TIMEOUT sub_class=S1:running-stalled), which poisons the shared chip-run "
+        "lane and fails every remaining artifact in the ST batch. Temporarily skipped to "
+        "unblock CI; re-enable once the hang is root-caused."
+    )
     @pytest.mark.platforms("a2a3")
     def test_tile_gemv_bias_final_phase(self, test_runner):
         result = test_runner.run(GemvTestCase(k=128, n=64, bias=True, acc_phase="final", config=_cfg()))
@@ -618,6 +630,12 @@ class TestGemvAcc:
         result = test_runner.run(GemvAccTestCase(k_chunk=k_chunk, n=64, ab_dtype=ab_dtype, config=_cfg()))
         assert result.passed, f"Test failed: {result.error}"
 
+    @pytest.mark.skip(
+        reason="Issue #2428: GEMV with acc_phase='final' intermittently hangs on device "
+        "(SCHEDULER_TIMEOUT sub_class=S1:running-stalled), which poisons the shared chip-run "
+        "lane and fails every remaining artifact in the ST batch. Temporarily skipped to "
+        "unblock CI; re-enable once the hang is root-caused."
+    )
     @pytest.mark.platforms("a2a3")
     def test_tile_gemv_acc_partial_final_phases(self, test_runner):
         result = test_runner.run(GemvAccTestCase(n=64, phased=True, config=_cfg()))

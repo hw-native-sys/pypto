@@ -209,7 +209,15 @@ def has_partial_valid_region(expr: _ir.Expr) -> bool:
 # code, never the call site a user-facing warning should name. Without the
 # separator a sibling like ``<parent>/pypto_kernels/k.py`` would prefix-match
 # ``<parent>/pypto`` and a real user frame would be skipped.
-_PYPTO_PACKAGE_PREFIX = f"{Path(__file__).resolve().parent.parent}{os.sep}"
+#
+# Normalized with ``abspath``, never ``resolve()``: this is compared against
+# frames' ``co_filename``, which keeps the spelling the import used and does
+# *not* follow symlinks. Resolving only this side makes the two disagree
+# whenever the package is reached through a symlinked path -- every library
+# frame then reads as user code, the walk below stops at 1, and the warning
+# names its own line. ``abspath`` normalizes without following links, so both
+# sides stay in the spelling the import system recorded.
+_PYPTO_PACKAGE_PREFIX = f"{Path(os.path.abspath(__file__)).parent.parent}{os.sep}"
 
 
 def caller_warning_stacklevel() -> int:

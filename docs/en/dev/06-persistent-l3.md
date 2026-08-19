@@ -57,10 +57,20 @@ before reuse or use a protocol such as epochs that safely manages all retained
 signal and data state. Reusing stale state without either mechanism can produce
 incorrect results or deadlock.
 
-With the default reset enabled, PyPTO synchronously zeros every local window
-before reuse. A 1 MiB read-only host chunk is allocated before the chip workers
-fork and is copied repeatedly for larger windows. The reset copy is part of
-each repeated request's host overhead.
+With the default reset enabled, PyPTO synchronously zeros every named local
+buffer before reuse. For each reset request, it creates one zero-filled
+POSIX-shared-memory host `Buffer` per distinct named-buffer size and reuses that
+staging `Buffer` across all matching domains and workers. The staging buffers
+remain live until the `Worker.run()` fence returns, so peak staging memory is
+the sum of those distinct sizes. The reset copies are part of each repeated
+request's host overhead.
+
+This whole-buffer staging is required by the current Simpler Buffer API: `copy_to`
+derives the transfer length from the source `Buffer` and exposes neither a
+destination offset nor a public Buffer subview. Generated PyPTO domains cover
+their windows exactly with named buffers. Reset rejects artifacts with unnamed
+window slack because the Buffer API cannot restore that slack to fresh-window
+state.
 
 ## Multiple compiled programs
 

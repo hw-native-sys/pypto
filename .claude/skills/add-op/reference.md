@@ -13,6 +13,35 @@ Complete file paths, code templates, and conventions for adding operators.
 #include "pypto/ir/expr.h"            // ExprPtr, CallPtr
 ```
 
+### REGISTER_OP Template
+
+```cpp
+#include "pypto/ir/op_registry.h"
+
+REGISTER_OP("tile.<op_name>")
+    .set_op_category("TileOp")
+    .set_description("<human-readable description>")
+    .add_argument("<arg1>", "<arg1 description>")
+    .add_argument("<arg2>", "<arg2 description>")
+    // kwargs if needed:
+    .set_attr<bool>("some_flag")
+    // memory spaces (required for all TileOps):
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    // physical execution-memory contract (required for executable TileOps):
+    .functional_execution_memory_access()
+    // type deduction:
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      // Validate args, compute output shape/dtype, return TypePtr
+      return std::make_shared<TileType>(output_shape, output_dtype);
+    });
+```
+
+Tensor ops use the same fluent chain with `.set_op_category("TensorOp")`, no
+memory-space calls, and a `TensorType` result from `f_deduce_type`.
+
 ### Tile Op — Memory Space Reference
 
 | MemorySpace | Usage |
@@ -367,7 +396,7 @@ Add to the appropriate category table (TensorOp or TileOp section).
 ### Codegen Docs
 
 - PTO: `docs/en/dev/codegen/00-pto_codegen.md`
-- Orchestration: `docs/en/dev/codegen/02-orchestration_codegen.md`
+- Orchestration: `docs/en/dev/codegen/01-orchestration_codegen.md`
 
 ### Pass Docs (if conversion changes are significant)
 
@@ -418,3 +447,25 @@ python3 -m pytest tests/ut/ -n "$PYPTO_TEST_JOBS" -v
 # Pre-commit checks
 pre-commit run --all-files
 ```
+
+---
+
+## 11. File Locations by Layer
+
+| Layer | Tile Op | Tensor Op |
+| ----- | ------- | --------- |
+| C++ registration | `src/ir/op/tile_ops/*.cpp` | `src/ir/op/tensor_ops/*.cpp` |
+| Python IR | `python/pypto/ir/op/tile_ops.py` | `python/pypto/ir/op/tensor_ops.py` |
+| Python DSL | `python/pypto/language/op/tile_ops.py` | `python/pypto/language/op/tensor_ops.py` |
+| Conversion | — | `src/ir/transforms/op_conversion_registry.cpp` |
+| PTO codegen | `src/backend/common/pto_ops_common.cpp` | — |
+| Orchestration codegen | — | `src/codegen/tensor_op_codegen.cpp` |
+| Tile op UT | `tests/ut/ir/operators/test_tile_ops.py` | — |
+| Tensor op UT | — | `tests/ut/ir/operators/test_tensor_ops.py` |
+| Conversion UT | — | `tests/ut/ir/transforms/test_convert_tensor_to_tile_ops.py` |
+| Codegen UT | `tests/ut/codegen/test_pto_codegen_ops.py` | `tests/ut/codegen/test_orchestration_codegen.py` |
+| ST | `tests/st/codegen/` | `tests/st/codegen/` |
+| Docs (en) | `docs/en/dev/ir/05-operators.md` | `docs/en/dev/ir/05-operators.md` |
+| Docs (zh) | `docs/zh/dev/ir/05-operators.md` | `docs/zh/dev/ir/05-operators.md` |
+| Codegen docs | `docs/en/dev/codegen/00-pto_codegen.md` | `docs/en/dev/codegen/01-orchestration_codegen.md` |
+| CMake | `CMakeLists.txt` (line ~98–116) | `CMakeLists.txt` (line ~109–116) |

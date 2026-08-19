@@ -120,7 +120,7 @@ DDR ──────────► Vec ────────────�
 
 ```python
 t = pl.load(x, [off, 0], [128, 128])
-t = pl.set_validshape(t, [rows_left, 128])     # only `rows_left` rows are real
+t = pl.set_validshape(t, rows_left, 128)       # only `rows_left` rows are real
 m = pl.row_max(t)                              # pad value decides what the tail contributes
 ```
 
@@ -128,7 +128,7 @@ m = pl.row_max(t)                              # pad value decides what the tail
 
 ### 让数据留在片上
 
-为循环的每一块 tile 重复加载同一个操作数，是最常见的可避免开销。当操作数是循环不变量时把 load 提到循环外；对在 K 轴循环中被反复使用的矩阵乘操作数，优先让它常驻 `Mat`。编译器在这里做与不做什么 —— 缓冲区复用、地址分配 —— 由 [MemoryReuse](../../dev/passes/33-memory_reuse.md) 与 [AllocateMemoryAddr](../../dev/passes/34-allocate_memory_addr.md) 决定；讲如何驾驭它们的性能章节尚未编写。
+为循环的每一块 tile 重复加载同一个操作数，是最常见的可避免开销。当操作数是循环不变量时把 load 提到循环外；对在 K 轴循环中被反复使用的矩阵乘操作数，优先让它常驻 `Mat`。编译器在这里做与不做什么 —— 缓冲区复用、地址分配 —— 由 [MemoryReuse](../../dev/passes/33-memory_reuse.md) 与 [AllocateMemoryAddr](../../dev/passes/34-allocate_memory_addr.md) 决定；如何驾驭它们见 [内存](../performance/05-memory.md)。
 
 ## 边界情况
 
@@ -141,6 +141,14 @@ m = pl.row_max(t)                              # pad value decides what the tail
 | **只有最后一块 tile 的规约结果不对** | 填充值参与了规约 | 用 `pl.set_validshape`，并选对 `PadValue` |
 | **InCore 函数内 `pl.create_tensor` 失败** | 张量分配是控制面的事 | 在控制面分配，或改为接收 `pl.Out[...]` 参数 |
 | **片上缓冲区耗尽** | 同时常驻的东西太多 | 缩小 tile，或用 `pl.cross_core_slot(slot_num=N)` 缩小跨核环 |
+
+## 配套示例
+
+| 示例 | 展示 |
+| ---- | ---- |
+| `examples/intermediate/05_assemble.py` | 按偏移把 tile 写进目标，不经过 GM 往返 |
+| `examples/intermediate/01_fused_linear.py` | 一个中间结果跨 cube 与 vector 操作留在片上 |
+| `examples/runtime/multi_program_kv_cache.py` | 跨多个程序共享的设备常驻 buffer |
 
 ## See Also
 

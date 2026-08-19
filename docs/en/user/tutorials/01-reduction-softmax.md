@@ -151,6 +151,12 @@ block is partial.
 | **Vector buffer exceeded** | Each reduction's scratch is full-width | Reduce the tile, or reuse one scratch across non-overlapping reductions |
 | **`row_expand_*` shape mismatch** | Applying a `[N, 1]` vector with plain `pl.sub` | Use the `row_expand_*` member for that operation |
 
+## The same reduction, one layer up
+
+`examples/intermediate/03_normalization.py` builds RMSNorm and LayerNorm out of the row
+reduction this page introduces — RMSNorm needs the sum of squares, LayerNorm the mean and
+the variance, and neither needs the running-max trick softmax does.
+
 ## Next
 
 [Tiled matmul](02-matmul.md) — the first operator that runs on the cube unit, and the first

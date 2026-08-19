@@ -41,7 +41,7 @@ AICORE inline __gm__ T *CommRemotePtr(__gm__ CommContext *ctx, __gm__ T *local_p
 }  // namespace
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
-  __gm__ Tensor *signal_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
+  __gm__ ChipTensor *signal_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
   int nranks = static_cast<int>(args[1]);
   __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[2]);
 
@@ -55,21 +55,37 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
 
   int my_rank = static_cast<int>(comm_ctx->rankId);
 
-  // NOTE: This barrier is single-use per signal buffer — NotifyOp::Set writes
-  // a constant 1 and TWAIT checks >= 1.  After the first barrier, signal slots
-  // stay satisfied.  The caller must provide a fresh (zero-initialised) signal
-  // buffer for each barrier call (pld.alloc_window_buffer satisfies this).
+  // Self-clearing credit barrier: NotifyOp::AtomicAdd writes a constant 1 into
+  // each peer's cell in my memory and TWAIT checks >= 1. The epilogue below
+  // restores every cell to 0, so one signal buffer is reusable across calls
+  // (the InCore credit-barrier protocol).
 
   for (int peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
     __gm__ int32_t *remote_signal = CommRemotePtr(comm_ctx, signal_base + my_rank, peer);
     pto::comm::Signal sig(remote_signal);
-    pto::comm::TNOTIFY(sig, static_cast<int32_t>(1), pto::comm::NotifyOp::Set);
+    pto::comm::TNOTIFY(sig, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
   }
   for (int peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
     pto::comm::Signal sig(signal_base + peer);
     pto::comm::TWAIT(sig, static_cast<int32_t>(1), pto::comm::WaitCmp::GE);
+  }
+
+  // Self-clearing epilogue: each peer's AtomicAdd(+1) left its cell satisfied;
+  // a local self-notify restores every cell to 0 so the signal is reusable
+  // across calls.
+  //
+  // AtomicAdd(-1), not Set(0): the reset must stay commutative with a fast
+  // peer's next-call +1. A peer that has already cleared its own cells may
+  // re-enter this kernel and notify us again while we are still here; Set(0)
+  // would wipe that in-flight credit and deadlock the peer's following wait,
+  // whereas the subtraction commutes with it. Exactly one credit per peer cell
+  // arrives per call, so -1 restores zero.
+  for (int peer = 0; peer < nranks; ++peer) {
+    if (peer == my_rank) continue;
+    pto::comm::Signal self_sig(signal_base + peer);
+    pto::comm::TNOTIFY(self_sig, static_cast<int32_t>(-1), pto::comm::NotifyOp::AtomicAdd);
   }
   pipe_barrier(PIPE_ALL);
 }

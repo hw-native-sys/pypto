@@ -4,10 +4,10 @@
 
 | File class | Limit | Why |
 | ---------- | ----- | --- |
-| `docs/**.md` | ≤500 lines | Read by humans on demand; scannability |
+| `docs/**.md` | ≤1000 lines | Read by humans on demand; scannability |
 | `.claude/rules/*.md` | ≤200 lines **per file** and **≤2500 lines total** across the directory | Always-on context |
 | `.claude/skills/*/SKILL.md` | ≤200 lines | Entry point — must be actionable at a glance |
-| `.claude/skills/**` supporting files (`reference.md`, templates, scripts) | ≤500 lines | Loaded on demand, like docs |
+| `.claude/skills/**` supporting files (`reference.md`, templates, scripts) | ≤500 lines | Loaded on demand, but read end-to-end mid-task |
 
 **The aggregate budget is the binding constraint for rules.** Every file in
 `.claude/rules/` is injected into the system prompt of *every* session, so the
@@ -26,12 +26,14 @@ per-file count while leaving the aggregate unchanged.
 **Skills are load-on-demand, so only the entry point is tightly capped.** Keep
 `SKILL.md` under 200 lines and push detail (full API tables, long worked
 examples, step-by-step recipes) into sibling reference files that the skill
-links to — the 500-line docs limit governs those. A `SKILL.md` over the cap is a
-signal to move content into a reference file, not to request an exception.
+links to — those carry their own ≤500 limit (tighter than `docs/`, since a
+reference file is read start-to-finish mid-task). A `SKILL.md` over the cap is a
+signal to move content into a reference file, not to request an exception. When
+the reference file has no headroom either, add a second one split by topic.
 
 ## When to Split vs Condense
 
-### Split Files (>700 lines)
+### Split Files (>1000 lines — over the limit)
 
 **For very large files, split into focused components:**
 
@@ -48,10 +50,10 @@ docs/en/dev/passes/
 
 - File has multiple distinct topics
 - Each section could standalone
-- >700 lines even after condensing
+- >1000 lines even after condensing
 - Natural breaking points exist
 
-### Condense Files (500-700 lines)
+### Condense Files (800-1000 lines — approaching the limit)
 
 **For moderately large files, condense content:**
 

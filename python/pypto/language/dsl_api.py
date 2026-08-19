@@ -959,10 +959,17 @@ def split_aiv(n: int, *, mode: ir.SplitMode) -> SplitAivContext:
     region carrying the requested ``SplitMode``. Because it is a structural node
     (not a whole-InCore-scope flag), it is **nestable**: the region may appear
     inside a ``pl.range`` / ``pl.pipeline`` loop or an ``if``, and sibling regions
-    may carry **different** modes (multi-mode), each lowered independently. A
-    top-level ``for aiv_id in pl.split_aiv(...)`` is wrapped in an enclosing
-    ``InCore`` scope so OutlineIncoreScopes can outline it. The loop variable
-    binds the AIV lane index (equivalent to ``pl.tile.get_subblock_idx()``).
+    may carry **different** modes (multi-mode), each lowered independently. The
+    loop variable binds the AIV lane index (equivalent to
+    ``pl.tile.get_subblock_idx()``).
+
+    A top-level ``for aiv_id in pl.split_aiv(...)`` is wrapped in an enclosing
+    ``InCore`` scope so OutlineIncoreScopes can outline it — unless the region is
+    already in a core context (an open ``pl.at(level=CORE_GROUP)`` scope, or a
+    function declared ``pl.FunctionType.InCore``), where it is emitted in place.
+    A region is CORE_GROUP-level, so **authoring** one directly in an
+    ``InCore`` function is rejected by the ``AivSplitValid`` verifier; write it
+    in a plain ``@pl.function`` / ``@pl.jit`` (Opaque) body instead.
 
     Two dispatch modes:
 
@@ -1064,8 +1071,9 @@ def split_aiv(n: int, *, mode: ir.SplitMode) -> SplitAivContext:
     itself: a cube ``tile.store`` whose GM tensor a vector ``tile.load`` reads
     back, when the two share an origin and the load is in or under the store's
     body. Everything else — a comm op reading the buffer, a consumer in a
-    sibling body — needs an explicit ``pl.system.syncall(core_type="mix")`` and
-    remains the author's responsibility.
+    sibling body — needs explicit producer-side cache publication and a GM
+    fence, a cross-core ``pl.system.syncall``, and consumer-side invalidation.
+    That sequence remains the author's responsibility.
 
     The region survives parse -> SSA -> ResolveBackendOpLayouts as a structural
     node (printer emits ``for aiv_id in pl.split_aiv(...):`` so parse->print->parse

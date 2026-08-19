@@ -115,7 +115,7 @@ def run_with_callback() -> None:
 
     def inspect_result(args) -> None:
         # Real implementation: read the computed tensor and stash a summary.
-        f = _tensor_from_continuous(args.tensor(0))
+        f = _tensor_from_continuous(args[0])
         observed[0] = float(f.reshape(-1)[0].item())
 
     with compiled.prepare(callbacks={"inspect_result": inspect_result}) as rt:

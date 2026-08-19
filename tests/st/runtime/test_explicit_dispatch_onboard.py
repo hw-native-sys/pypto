@@ -51,8 +51,7 @@ import pypto.language as pl
 import pytest
 import torch
 from pypto import ir
-from pypto.runtime import ChipWorker, Worker
-from pypto.runtime.device_runner import ensure_pto_isa_root
+from pypto.runtime import ChipWorker, Worker, ensure_pto_isa_root
 from pypto.runtime.runner import RunConfig
 
 # Compiled programs default to the tensormap_and_ringbuffer runtime; the
@@ -110,17 +109,16 @@ class BackwardMulProgram:
 
 @pytest.fixture(autouse=True)
 def _pto_isa_root(test_config):
-    """Resolve PTO_ISA_ROOT before any on-board runtime build.
+    """Resolve the pinned pto-isa checkout before any on-board runtime build.
 
     Compiling the tensormap_and_ringbuffer runtime for real silicon needs the
     PTO ISA sources. The PTOTestCase harness resolves this once up front; tests
-    here drive ChipWorker directly, so mirror that bootstrap. Honors an existing
-    PTO_ISA_ROOT env var and otherwise auto-clones (same as the harness). The
-    simulator build does not need it, so skip the resolution for ``*sim``.
+    here drive ChipWorker directly, so mirror that bootstrap. The simulator
+    build does not need it, so skip the resolution for ``*sim``.
     """
     if str(test_config.platform).endswith("sim"):
         return
-    ensure_pto_isa_root(clone_protocol="https")
+    ensure_pto_isa_root()
 
 
 @pytest.fixture

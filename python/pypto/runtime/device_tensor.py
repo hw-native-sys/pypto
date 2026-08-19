@@ -9,12 +9,16 @@
 
 """User-facing handle to worker-resident device memory.
 
-A :class:`DeviceTensor` is an opaque ``(data_ptr, shape, dtype)`` triple bound
-to a specific :class:`~pypto.runtime.Worker`'s address space.  Pass it to
+A :class:`DeviceTensor` exposes an opaque ``(data_ptr, shape, dtype)`` triple
+bound to a specific :class:`~pypto.runtime.Worker`'s address space. Tensors
+allocated by a Worker also retain simpler's owning ``Buffer`` handle; the
+address-free distributed wire ABI derives its ``Tensor`` descriptor from that
+handle instead of transporting the process-local pointer. Pass it to
 :class:`~pypto.ir.compiled_program.CompiledProgram` in place of a
 ``torch.Tensor`` to skip the host→device copy on entry and the device→host
-copy on exit — the runtime treats the underlying buffer as already resident
-on the worker (``Tensor.child_memory == 1``).
+copy on exit. Public L2 and distributed dispatch both derive an address-free
+wire ``Tensor`` from the retained owner ``Buffer``. The direct ``ChipTensor``
+adapter remains available only as a low-level compatibility helper.
 
 Lifetime is **caller-managed**: every :meth:`~pypto.runtime.Worker.malloc`
 (or :meth:`~pypto.runtime.Worker.alloc_tensor`) must be paired with a
@@ -29,7 +33,8 @@ read the data back must do so explicitly via
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 import torch
 
@@ -42,13 +47,27 @@ class DeviceTensor:
         data_ptr: Device pointer in the owning Worker's address space.
         shape: Logical tensor shape (all dimensions positive).
         dtype: Element ``torch.dtype``.
+        buffer: Optional simpler ``Buffer`` retained for address-free wire
+            dispatch. It is populated by :meth:`Worker.alloc_tensor`; a
+            manually constructed raw-pointer tensor can be used only with
+            low-level direct-chip compatibility helpers. All public
+            ``Worker.run`` paths require :meth:`Worker.alloc_tensor` and its
+            retained owner ``Buffer``.
     """
 
     data_ptr: int
     shape: tuple[int, ...]
     dtype: torch.dtype
+    buffer: Any | None = field(default=None, repr=False, compare=False, hash=False)
 
-    def __init__(self, data_ptr: int, shape: Sequence[int], dtype: torch.dtype) -> None:
+    def __init__(
+        self,
+        data_ptr: int,
+        shape: Sequence[int],
+        dtype: torch.dtype,
+        *,
+        buffer: Any | None = None,
+    ) -> None:
         # bool is an int subclass — exclude it explicitly so True/False can't pose as a pointer or dim.
         if isinstance(data_ptr, bool) or not isinstance(data_ptr, int) or data_ptr <= 0:
             raise ValueError(f"DeviceTensor.data_ptr must be a positive int, got {data_ptr!r}")
@@ -63,9 +82,21 @@ class DeviceTensor:
         shape_t = raw_shape
         if not isinstance(dtype, torch.dtype):
             raise TypeError(f"DeviceTensor.dtype must be torch.dtype, got {type(dtype).__name__}")
+        if buffer is not None:
+            try:
+                buffer_base = int(buffer.base)
+            except (AttributeError, TypeError, ValueError) as e:
+                raise TypeError("DeviceTensor.buffer must be a simpler Buffer with an integer base") from e
+            if buffer_base != data_ptr:
+                raise ValueError(
+                    f"DeviceTensor.buffer.base (0x{buffer_base:x}) does not match data_ptr (0x{data_ptr:x})"
+                )
+            if not callable(getattr(buffer, "tensor", None)):
+                raise TypeError("DeviceTensor.buffer must provide buffer.tensor(shapes, dtype)")
         object.__setattr__(self, "data_ptr", data_ptr)
         object.__setattr__(self, "shape", shape_t)
         object.__setattr__(self, "dtype", dtype)
+        object.__setattr__(self, "buffer", buffer)
 
     @property
     def nbytes(self) -> int:
@@ -89,7 +120,7 @@ class StackedDeviceTensor:
     parameter that the orchestrator slices along its leading dimension and
     dispatches per rank (``for r in range(world_size): child(x[r], device=...)``).
     Indexing ``obj[i, ...]`` returns shard ``i``'s :class:`DeviceTensor`, so the
-    generated ``host_orch`` wraps it as ``child_memory=True`` and the runtime
+    generated ``host_orch`` derives a wire Tensor from its retained Buffer and
     skips the per-dispatch H2D upload — the shards are uploaded once (e.g. via
     :meth:`~pypto.runtime.distributed_runner.DistributedWorker.alloc_stacked_tensor`)
     and reused across dispatches.
@@ -225,6 +256,7 @@ def alloc_device_tensor(
     malloc: Callable[[int], int],
     copy_to: Callable[[int, int, int], None],
     free: Callable[[int], None],
+    buffer_for_ptr: Callable[[int], Any | None] | None = None,
     shape: Sequence[int],
     dtype: torch.dtype,
     init: torch.Tensor | None = None,
@@ -239,9 +271,8 @@ def alloc_device_tensor(
 
     When *init* is provided its dtype and shape must match exactly. The host
     buffer actually uploaded is ``init_prep(init)``: the default makes a
-    defensive contiguous CPU copy (L2), while L3 overrides it to *reject* a copy
-    and require ``init`` already be shared memory (the upload runs in a forked
-    child that can only see host memory inherited at fork). If any step after
+    defensive contiguous CPU copy. L3 accepts an ordinary CPU-contiguous tensor
+    and stages it through a runtime-owned shared Buffer. If any step after
     ``malloc`` raises, the allocation is rolled back via ``free`` before the
     exception propagates so callers never observe a leaked pointer.
 
@@ -249,6 +280,11 @@ def alloc_device_tensor(
         malloc: ``malloc(nbytes) -> device_ptr``.
         copy_to: ``copy_to(dst_dev_ptr, src_host_ptr, nbytes) -> None`` (H2D).
         free: ``free(device_ptr) -> None`` (rollback on failure).
+        buffer_for_ptr: Resolve the pointer to its owning simpler ``Buffer``.
+            Real runtime Workers provide this so the resulting tensor can be
+            packed into address-free wire ``TaskArgs``. A custom Worker that
+            omits it can still expose raw-pointer memory operations, but its
+            resulting ``DeviceTensor`` cannot be dispatched.
         shape: Logical tensor shape (all dimensions positive).
         dtype: Element ``torch.dtype``.
         init: Optional host tensor to upload into the buffer.
@@ -286,7 +322,8 @@ def alloc_device_tensor(
                 )
             host = (init_prep or default_init_prep)(init)
             copy_to(ptr, host.data_ptr(), nbytes)
-        return DeviceTensor(ptr, shape_t, dtype)
+        buffer = buffer_for_ptr(ptr) if buffer_for_ptr is not None else None
+        return DeviceTensor(ptr, shape_t, dtype, buffer=buffer)
     except Exception:
         free(ptr)
         raise

@@ -199,9 +199,62 @@ class Error : public std::runtime_error {
    */
   [[nodiscard]] std::string GetFullMessage() const;
 
+  /**
+   * @brief Rethrow this error as its own concrete type with a replacement message
+   *
+   * Lets an intermediate frame augment the message (e.g. append an IR span) without
+   * flattening the exception type or discarding the stack trace captured at the
+   * original throw site. Catching `const Error&` and constructing a fresh exception
+   * would do both, erasing the CHECK / INTERNAL_CHECK distinction for everything
+   * below the catch.
+   *
+   * Every direct subclass must override this - see PYPTO_ERROR_RETHROW_SUPPORT. This
+   * base implementation covers a plain `Error`.
+   *
+   * @param message Replacement message for the rethrown exception
+   */
+  [[noreturn]] virtual void RethrowWithMessage(const std::string& message) const {
+    throw Error(message, stack_trace_);
+  }
+
+ protected:
+  /**
+   * @brief Constructs an Error adopting an existing stack trace
+   *
+   * Used by RethrowWithMessage so the reported frames stay those of the original
+   * throw. Deliberately not PYPTO_ALWAYS_INLINE: nothing is captured here.
+   *
+   * @param message Error message describing what went wrong
+   * @param stack_trace Stack frames captured at the original throw site
+   */
+  Error(const std::string& message, std::vector<StackFrame> stack_trace)
+      : std::runtime_error(message), stack_trace_(std::move(stack_trace)) {}
+
  private:
   std::vector<StackFrame> stack_trace_;  ///< Captured stack frames at error creation
 };
+
+/**
+ * @brief Give an Error subclass typed, trace-preserving rethrow
+ *
+ * Defines the trace-adopting constructor and the RethrowWithMessage override that
+ * together let an intermediate frame restate the message without changing the
+ * exception type or losing the original stack trace. A subclass that omits this
+ * silently downgrades to a plain `Error` on rethrow.
+ *
+ * Expands to a `public:` section, so place it last in the class body.
+ *
+ * @param ClassName Name of the Error subclass being defined
+ */
+#define PYPTO_ERROR_RETHROW_SUPPORT(ClassName)                                      \
+ protected:                                                                         \
+  ClassName(const std::string& message, std::vector<StackFrame> stack_trace)        \
+      : Error(message, std::move(stack_trace)) {}                                   \
+                                                                                    \
+ public:                                                                            \
+  [[noreturn]] void RethrowWithMessage(const std::string& message) const override { \
+    throw ClassName(message, GetStackTrace());                                      \
+  }
 
 /**
  * @brief Exception raised when a function receives an argument of correct type but inappropriate value
@@ -216,6 +269,8 @@ class Error : public std::runtime_error {
 class ValueError : public Error {
  public:
   PYPTO_ALWAYS_INLINE explicit ValueError(const std::string& message) : Error(message) {}
+
+  PYPTO_ERROR_RETHROW_SUPPORT(ValueError)
 };
 
 /**
@@ -231,6 +286,8 @@ class ValueError : public Error {
 class TypeError : public Error {
  public:
   PYPTO_ALWAYS_INLINE explicit TypeError(const std::string& message) : Error(message) {}
+
+  PYPTO_ERROR_RETHROW_SUPPORT(TypeError)
 };
 
 /**
@@ -247,6 +304,8 @@ class TypeError : public Error {
 class RuntimeError : public Error {
  public:
   PYPTO_ALWAYS_INLINE explicit RuntimeError(const std::string& message) : Error(message) {}
+
+  PYPTO_ERROR_RETHROW_SUPPORT(RuntimeError)
 };
 
 /**
@@ -262,6 +321,8 @@ class RuntimeError : public Error {
 class NotImplementedError : public Error {
  public:
   PYPTO_ALWAYS_INLINE explicit NotImplementedError(const std::string& message) : Error(message) {}
+
+  PYPTO_ERROR_RETHROW_SUPPORT(NotImplementedError)
 };
 
 /**
@@ -277,6 +338,8 @@ class NotImplementedError : public Error {
 class IndexError : public Error {
  public:
   PYPTO_ALWAYS_INLINE explicit IndexError(const std::string& message) : Error(message) {}
+
+  PYPTO_ERROR_RETHROW_SUPPORT(IndexError)
 };
 
 /**
@@ -292,6 +355,8 @@ class IndexError : public Error {
 class AssertionError : public Error {
  public:
   PYPTO_ALWAYS_INLINE explicit AssertionError(const std::string& message) : Error(message) {}
+
+  PYPTO_ERROR_RETHROW_SUPPORT(AssertionError)
 };
 
 /**
@@ -311,6 +376,8 @@ class AssertionError : public Error {
 class InternalError : public Error {
  public:
   PYPTO_ALWAYS_INLINE explicit InternalError(const std::string& message) : Error(message) {}
+
+  PYPTO_ERROR_RETHROW_SUPPORT(InternalError)
 };
 
 /**
@@ -402,6 +469,30 @@ class VerificationError : public Error {
    * @return Const reference to vector of diagnostics
    */
   [[nodiscard]] const std::vector<Diagnostic>& GetDiagnostics() const { return diagnostics_; }
+
+  /**
+   * @brief Rethrow as a VerificationError with a replacement message
+   *
+   * Hand-written rather than PYPTO_ERROR_RETHROW_SUPPORT: the diagnostics carry the
+   * per-issue detail that makes this exception useful, so they must survive the
+   * rethrow alongside the stack trace.
+   *
+   * @param message Replacement report for the rethrown exception
+   */
+  [[noreturn]] void RethrowWithMessage(const std::string& message) const override {
+    throw VerificationError(message, diagnostics_, GetStackTrace());
+  }
+
+ protected:
+  /**
+   * @brief Constructs a VerificationError adopting an existing stack trace
+   * @param report Formatted verification report
+   * @param diagnostics Vector of all diagnostics (errors and warnings)
+   * @param stack_trace Stack frames captured at the original throw site
+   */
+  VerificationError(const std::string& report, std::vector<Diagnostic> diagnostics,
+                    std::vector<StackFrame> stack_trace)
+      : Error(report, std::move(stack_trace)), diagnostics_(std::move(diagnostics)) {}
 
  private:
   std::vector<Diagnostic> diagnostics_;  ///< All diagnostics (errors and warnings)

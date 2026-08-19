@@ -1059,7 +1059,7 @@ class TestSplitVectorKernelStandaloneSetValidshape:
                     [8, 128],
                     pl.FP32,
                     pl.MemorySpace.Vec,
-                    pl.TileView(valid_shape=[pl.max(pl.min(5 - subblock_idx * 8, 8), 0), 64]),
+                    pl.TileView(valid_shape=[pl.min(pl.max(5, subblock_idx * 8) - subblock_idx * 8, 8), 64]),
                 ] = pl.tile.set_validshape(z_vec, 5, 64)
                 out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(
                     narrowed, [0 + subblock_idx * 8, 0], out_0

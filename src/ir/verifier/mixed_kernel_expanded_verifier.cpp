@@ -102,7 +102,7 @@ void VerifySingleInitializePipeCall(const CallPtr& call, const std::string& func
       // 4 bidirectional); validate local_slot_num against that effective value.
       const int effective_slot_num = call->HasKwarg("slot_num")
                                          ? call->GetKwarg<int>("slot_num", 0)
-                                         : cross_core_pipe::GetSlotNumForDirMask(dir_mask);
+                                         : cross_core_pipe::GetPtoasImplicitSlotNum(dir_mask);
       if (local_slot_num > effective_slot_num) {
         diagnostics.emplace_back(DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
                                  "Function '" + func_name + "': '" + op_name + "' 'local_slot_num' (" +

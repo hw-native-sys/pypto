@@ -74,6 +74,23 @@ class TestDeviceTensorConstruction:
         with pytest.raises(TypeError, match="must contain ints"):
             DeviceTensor(0x100, [3.7, 4], torch.float32)  # type: ignore[list-item]
 
+    def test_buffer_handle_is_retained(self):
+        class FakeBuffer:
+            base = 0x1234
+
+            def tensor(self, shapes, dtype):
+                return (shapes, dtype)
+
+        buffer = FakeBuffer()
+        tensor = DeviceTensor(buffer.base, (2, 4), torch.float32, buffer=buffer)
+        assert tensor.data_ptr == 0x1234
+        assert tensor.buffer is buffer
+
+    def test_buffer_base_must_match_pointer(self):
+        buffer = type("FakeBuffer", (), {"base": 0x200, "tensor": lambda *_args: None})()
+        with pytest.raises(ValueError, match="does not match"):
+            DeviceTensor(0x100, (4,), torch.float32, buffer=buffer)
+
 
 class TestDeviceTensorImmutability:
     def test_frozen_data_ptr(self):

@@ -53,6 +53,9 @@ def raise_internal_error(message: str) -> NoReturn:
 def raise_internal_error_with_span(message: str, filename: str, line: int, col: int) -> NoReturn:
     """Raise an InternalError with IR source span for testing"""
 
+def rethrow_with_message(kind: str, original: str, replacement: str) -> NoReturn:
+    """Raise `kind` and rethrow it via Error::RethrowWithMessage for testing"""
+
 def recognize_dsa_reuse_penalties(function: Function) -> list[DsaReusePenaltyEdge]:
     """Return recognized DSA-RP edges without running placement."""
 

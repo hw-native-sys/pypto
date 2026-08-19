@@ -32,7 +32,9 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
@@ -132,10 +134,15 @@ ExprPtr LocalizeValidDimForSplit(const ExprPtr& valid_dim, const ExprPtr& origin
   }
 
   auto span = valid_dim->span_;
-  auto zero = MakeConstLike(valid_dim, 0, span);
   auto subblock_offset = MakeMul(subblock_idx, half_dim_size, span);
-  auto remaining = MakeSub(valid_dim, subblock_offset, span);
-  return MakeMax(MakeMin(remaining, half_dim_size, span), zero, span);
+  // Saturating subtract, NOT `max(valid - offset, 0)`: a valid extent can carry
+  // an UNSIGNED dtype (tile.set_validshape accepts UINT64), where `valid -
+  // offset` wraps to a huge value for the lane the extent does not reach and the
+  // clamp would then hand that lane a FULL half instead of nothing. Clamping the
+  // minuend first is correct for both signednesses.
+  auto reached = MakeMax(valid_dim, subblock_offset, span);
+  auto remaining = MakeSub(reached, subblock_offset, span);
+  return MakeMin(remaining, half_dim_size, span);
 }
 
 // Whether a tile.set_validshape split-axis operand must be localized to the
@@ -957,6 +964,436 @@ SubblockInjectionResult InjectSubblockIdxIntoStmts(const std::vector<StmtPtr>& r
   auto assign_stmt = std::make_shared<AssignStmt>(subblock_idx_var, subblock_call, span);
   body_stmts.insert(body_stmts.begin(), assign_stmt);
   return {subblock_idx_var, std::move(body_stmts), std::move(names)};
+}
+
+namespace {
+
+CallPtr AsCall(const ExprPtr& expr) { return std::dynamic_pointer_cast<const Call>(expr); }
+
+// Replace one axis of a TileType's valid_shape, preserving everything else about
+// the type (layout, memref, memory space) — the localization is metadata-only.
+TypePtr WithValidDim(const std::shared_ptr<const TileType>& tt, int dim, const ExprPtr& valid_dim) {
+  TileView tv = tile_view_semantics::GetEffectiveTileView(*tt);
+  INTERNAL_CHECK(dim >= 0 && dim < static_cast<int>(tv.valid_shape.size()))
+      << "Internal error: split dim " << dim << " out of range for a rank-" << tv.valid_shape.size()
+      << " valid_shape";
+  tv.valid_shape[dim] = valid_dim;
+  return std::make_shared<TileType>(tt->shape_, tt->dtype_, tt->memref_, std::move(tv), tt->memory_space_);
+}
+
+// A consumer PASSES THROUGH the split-axis extent when its result is the same
+// physical box as the operand and carries the operand's own (pre-localization)
+// valid extents — an elementwise op, a cast, a move. A consumer that reshapes
+// the logical rectangle (a reduction, a slice, an extract) reports a different
+// valid_shape, and rewriting its split-axis extent to the lane's would be a lie
+// about what it computes; those are rejected by the caller instead.
+bool PassesThroughValidShape(const std::shared_ptr<const TileType>& operand_before,
+                             const std::shared_ptr<const TileType>& result) {
+  if (!operand_before || !result) return false;
+  if (!tile_view_semantics::ShapeExprListsEquivalent(operand_before->shape_, result->shape_)) {
+    return false;
+  }
+  return tile_view_semantics::ShapeExprListsEquivalent(
+      tile_view_semantics::GetEffectiveTileView(*operand_before).valid_shape,
+      tile_view_semantics::GetEffectiveTileView(*result).valid_shape);
+}
+
+bool IsProvablyPositive(const ExprPtr& extent) {
+  auto c = std::dynamic_pointer_cast<const ConstInt>(extent);
+  return c != nullptr && c->value_ > 0;
+}
+
+// What a tracked (localized) var carries: the per-lane extent now on its split
+// axis, plus the type it had BEFORE localization, which is what a consumer's
+// deduced valid_shape is compared against to decide pass-through.
+struct LocalizedTile {
+  ExprPtr lane_extent;                     ///< clamp(V - idx*half, 0, half)
+  ExprPtr joined_extent;                   ///< V, the pre-shard extent a gather restores
+  std::shared_ptr<const TileType> before;  ///< the type before localization
+};
+
+}  // namespace
+
+TypePtr LocalizeShardValidForLane(const TypePtr& shard_type, const TypePtr& operand_type, int split_dim,
+                                  const ExprPtr& subblock_idx) {
+  auto shard = std::dynamic_pointer_cast<const TileType>(shard_type);
+  auto operand = std::dynamic_pointer_cast<const TileType>(operand_type);
+  if (!shard || !operand || !subblock_idx || split_dim < 0 ||
+      split_dim >= static_cast<int>(shard->shape_.size()) ||
+      split_dim >= static_cast<int>(operand->shape_.size())) {
+    return shard_type;
+  }
+  const auto operand_valid = tile_view_semantics::GetEffectiveTileView(*operand).valid_shape;
+  // A fully-valid split axis needs no repair: both lanes hold `half`, which is
+  // exactly what ReshapeSplitAxis already produced.
+  if (static_cast<int>(operand_valid.size()) <= split_dim ||
+      AreExprsEqual(operand_valid[split_dim], operand->shape_[split_dim])) {
+    return shard_type;
+  }
+  auto lane_extent = LocalizeValidDimForSplit(operand_valid[split_dim], operand->shape_[split_dim],
+                                              shard->shape_[split_dim], subblock_idx);
+  return WithValidDim(shard, split_dim, lane_extent);
+}
+
+namespace {
+
+/// Mutable state threaded through the (recursive) localization walk.
+struct LocalizeState {
+  std::unordered_map<const Var*, LocalizedTile> tracked;
+  std::unordered_map<const Var*, VarPtr> replacements;
+  ExprPtr lane_index;                                  ///< the region's aiv_id, resolved lazily
+  std::unordered_set<const Var*> chained_store_dests;  ///< region-wide, indexed once
+};
+
+std::vector<StmtPtr> LocalizeStmts(const std::vector<StmtPtr>& stmts, int split_dim, const Span& span,
+                                   LocalizeState& state);
+
+/// Recurse into a nested body, preserving its statement kind.
+StmtPtr LocalizeNestedBody(const StmtPtr& body, int split_dim, const Span& span, LocalizeState& state) {
+  if (!body) return body;
+  auto inner = LocalizeStmts(transform_utils::FlattenToStmts(body), split_dim, span, state);
+  if (inner.size() == 1) return inner[0];
+  return std::make_shared<SeqStmts>(inner, body->span_);
+}
+
+/// Whether another ``tile.store`` in this body writes THROUGH `var`, i.e. takes
+/// it as its destination tensor (arg 2) — a chained store.
+///
+/// This is the one read that makes the empty-lane guard unsafe, because it
+/// orders two stores against each other: skipping the first would leave the
+/// second writing through a tensor version that was never produced. Every other
+/// read of a store's SSA result is benign. It is a destination-passing alias of
+/// a tensor the region does not own, so a phi that carries it out of a branch,
+/// or the enclosing function threading it to a return, still denotes the SAME
+/// buffer — an empty lane that stored nothing leaves exactly the value any
+/// reader must see, and ExpandMixedKernel drops the alias from the AIV half.
+/// Indexed ONCE over the whole region, recursively: a chained store nested in a
+/// branch or a loop orders against an outer store just as a sibling one does, so
+/// a sibling-only scan would miss it and wrongly allow the empty-lane guard.
+/// Building the index up front also keeps the walk linear in the region size
+/// instead of quadratic in its store count (see `.claude/rules/pass-complexity.md`).
+///
+/// A store's own destination is an operand, never its SSA result, so a store can
+/// never place its own result in this set; no self-exclusion is needed.
+void CollectChainedStoreDestinations(const std::vector<StmtPtr>& stmts, std::unordered_set<const Var*>* out) {
+  for (const auto& s : stmts) {
+    if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(s)) {
+      CollectChainedStoreDestinations(transform_utils::FlattenToStmts(for_stmt->body_), out);
+      continue;
+    }
+    if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(s)) {
+      CollectChainedStoreDestinations(transform_utils::FlattenToStmts(while_stmt->body_), out);
+      continue;
+    }
+    if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(s)) {
+      CollectChainedStoreDestinations(transform_utils::FlattenToStmts(if_stmt->then_body_), out);
+      if (if_stmt->else_body_.has_value()) {
+        CollectChainedStoreDestinations(transform_utils::FlattenToStmts(*if_stmt->else_body_), out);
+      }
+      continue;
+    }
+    if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(s)) {
+      CollectChainedStoreDestinations(seq->stmts_, out);
+      continue;
+    }
+    auto assign = std::dynamic_pointer_cast<const AssignStmt>(s);
+    auto call = assign ? AsCall(assign->value_) : nullptr;
+    if (!call || !IsOp(call, "tile.store") || call->args_.size() < 3) continue;
+    if (auto dest = AsVarLike(call->args_[2])) out->insert(dest.get());
+  }
+}
+
+/// A loop carry seeded by a localized (per-lane) tile would need its `IterArg`
+/// and the paired return var retyped to the lane's extent. Those are separate
+/// SSA definitions that this walk does not rebuild, so the carry would keep the
+/// deducer's lane-agnostic type while its init value carries the lane's — the
+/// silent-wrong-data shape this pass exists to remove. Refuse it explicitly
+/// instead, naming the authoring that avoids it.
+void RejectLocalizedCarry(const std::vector<IterArgPtr>& iter_args, const char* loop_form, const Span& span,
+                          const LocalizeState& state) {
+  for (const auto& iter_arg : iter_args) {
+    if (!iter_arg) continue;
+    auto init = AsVarLike(iter_arg->initValue_);
+    if (!init) continue;
+    auto replaced = state.replacements.find(init.get());
+    const Var* key = (replaced != state.replacements.end()) ? replaced->second.get() : init.get();
+    auto it = state.tracked.find(key);
+    if (it == state.tracked.end()) continue;
+    CHECK_SPAN(false, span)
+        << "pl.split_aiv: carrying a per-lane cross-core value across a " << loop_form
+        << " boundary is not supported. '" << iter_arg->name_hint_
+        << "' is seeded by a value whose split-axis extent differs per lane ("
+        << PythonPrint(it->second.lane_extent)
+        << "), but a loop carry is a separate binding that would keep the lane-agnostic extent.\n"
+        << "Author one of these instead:\n"
+        << "  * keep the shard and everything that consumes it inside the loop body\n"
+        << "  * make the split axis fully valid before the crossing (pl.set_validshape to the full "
+           "extent) and treat the padding as don't-care\n"
+        << "  * store the per-lane shard before the loop and reload it inside";
+  }
+}
+
+std::vector<StmtPtr> LocalizeStmts(const std::vector<StmtPtr>& stmts, int split_dim, const Span& span,
+                                   LocalizeState& state) {
+  std::vector<StmtPtr> result;
+  result.reserve(stmts.size());
+
+  for (const auto& stmt : stmts) {
+    // --- Control flow: the repair must reach as deep as the region does. ------
+    // A shard, a consumer or a store nested in a loop or a branch is ordinary
+    // authoring (a per-lane tail stored under `if`, a shard inside `pl.range`),
+    // and a flat walk would leave it on the deducer's lane-agnostic ceil(V/2).
+    if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+      auto new_body = LocalizeNestedBody(for_stmt->body_, split_dim, span, state);
+      RejectLocalizedCarry(for_stmt->iter_args_, "pl.range", for_stmt->span_, state);
+      result.push_back(new_body == for_stmt->body_
+                           ? stmt
+                           : loop_repair::RebuildForStmt(for_stmt, for_stmt->iter_args_, new_body,
+                                                         for_stmt->return_vars_));
+      continue;
+    }
+    if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
+      auto new_body = LocalizeNestedBody(while_stmt->body_, split_dim, span, state);
+      RejectLocalizedCarry(while_stmt->iter_args_, "pl.while_", while_stmt->span_, state);
+      if (new_body == while_stmt->body_) {
+        result.push_back(stmt);
+      } else {
+        auto new_while = MutableCopy(while_stmt);
+        new_while->body_ = new_body;
+        result.push_back(new_while);
+      }
+      continue;
+    }
+    if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+      auto new_then = LocalizeNestedBody(if_stmt->then_body_, split_dim, span, state);
+      std::optional<StmtPtr> new_else = if_stmt->else_body_;
+      if (if_stmt->else_body_.has_value()) {
+        new_else = LocalizeNestedBody(*if_stmt->else_body_, split_dim, span, state);
+      }
+      result.push_back(std::make_shared<IfStmt>(if_stmt->condition_, new_then, new_else,
+                                                if_stmt->return_vars_, if_stmt->span_));
+      continue;
+    }
+    if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(stmt)) {
+      for (auto& s : LocalizeStmts(seq->stmts_, split_dim, span, state)) result.push_back(s);
+      continue;
+    }
+
+    auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt);
+    auto call = assign ? AsCall(assign->value_) : nullptr;
+    if (!assign || !call || !call->op_) {
+      result.push_back(stmt);
+      continue;
+    }
+
+    if (IsOp(call, "tile.get_subblock_idx")) {
+      state.lane_index = assign->var_;
+      result.push_back(stmt);
+      continue;
+    }
+
+    // --- The boundary itself: repair the deducer's ceil-div guess. -----------
+    if (IsOp(call, "tile.aiv_shard") && !call->args_.empty()) {
+      auto operand = std::dynamic_pointer_cast<const TileType>(call->args_[0]->GetType());
+      auto shard = std::dynamic_pointer_cast<const TileType>(call->GetType());
+      if (!operand || !shard || split_dim < 0 || split_dim >= static_cast<int>(shard->shape_.size())) {
+        result.push_back(stmt);
+        continue;
+      }
+      const auto operand_valid = tile_view_semantics::GetEffectiveTileView(*operand).valid_shape;
+      // A fully-valid split axis needs no repair: both lanes hold `half`, which
+      // is exactly what ReshapeSplitAxis already produced.
+      if (static_cast<int>(operand_valid.size()) <= split_dim ||
+          AreExprsEqual(operand_valid[split_dim], operand->shape_[split_dim])) {
+        result.push_back(stmt);
+        continue;
+      }
+      INTERNAL_CHECK_SPAN(state.lane_index, call->span_)
+          << "Internal error: a pl.split_aiv region with a partially-valid split axis has no "
+             "tile.get_subblock_idx binding, so the per-lane extent cannot be materialized";
+      auto new_type = LocalizeShardValidForLane(shard, operand, split_dim, state.lane_index);
+      auto lane_extent =
+          tile_view_semantics::GetEffectiveTileView(*std::dynamic_pointer_cast<const TileType>(new_type))
+              .valid_shape[split_dim];
+      auto new_var = std::make_shared<Var>(assign->var_->name_hint_, new_type, assign->var_->span_);
+      auto new_call = std::make_shared<Call>(call->op_, call->args_, call->kwargs_, new_type, call->span_);
+      state.replacements[assign->var_.get()] = new_var;
+      state.tracked[new_var.get()] = LocalizedTile{lane_extent, operand_valid[split_dim], shard};
+      result.push_back(std::make_shared<AssignStmt>(new_var, new_call, assign->span_));
+      continue;
+    }
+
+    // --- Consumers: carry the per-lane extent, or say why we cannot. ---------
+    const LocalizedTile* source = nullptr;
+    for (const auto& arg : call->args_) {
+      auto arg_var = AsVarLike(arg);
+      if (!arg_var) continue;
+      auto replaced = state.replacements.find(arg_var.get());
+      const Var* key = (replaced != state.replacements.end()) ? replaced->second.get() : arg_var.get();
+      auto it = state.tracked.find(key);
+      if (it != state.tracked.end()) {
+        source = &it->second;
+        break;
+      }
+    }
+    // tile.aic_gather is the region's EXIT: it re-joins the two lanes' bands and
+    // hands a FULL tile back to the cube. This is the one place the join can be
+    // typed correctly, because it is the only place the lanes' TRUE extents are
+    // known.
+    //
+    // Under the per-lane clamp the bands always abut, so the joined extent is
+    // exactly the pre-shard V:
+    //
+    //   V >  half : lane 0 saturates to half, lane 1 holds V - half
+    //               -> [0, half) U [half, V) = [0, V)
+    //   V <= half : lane 0 holds V, lane 1 is empty
+    //               -> [0, V) U {} = [0, V)
+    //
+    // The deducer cannot compute that. It runs before the lanes exist and can
+    // only double its own lane-agnostic guess (2 * ceil(V / 2)), which claims
+    // the hole between the bands as real data. So restore V here.
+    if (IsOp(call, "tile.aic_gather")) {
+      auto gathered = std::dynamic_pointer_cast<const TileType>(call->GetType());
+      if (source != nullptr && gathered && split_dim < static_cast<int>(gathered->shape_.size())) {
+        auto joined_type = WithValidDim(gathered, split_dim, source->joined_extent);
+        auto new_var = std::make_shared<Var>(assign->var_->name_hint_, joined_type, assign->var_->span_);
+        auto new_call =
+            std::make_shared<Call>(call->op_, call->args_, call->kwargs_, joined_type, call->span_);
+        state.replacements[assign->var_.get()] = new_var;
+        // The result is a FULL tile again, so it leaves the per-lane dataflow.
+        result.push_back(std::make_shared<AssignStmt>(new_var, new_call, assign->span_));
+        continue;
+      }
+      // Nothing localized this operand, so a provable partial is one the author
+      // gave BOTH lanes: the bands do not abut and no valid_shape describes the
+      // union. This is the check the deducer used to make on a value it could
+      // not see the truth of.
+      auto operand = call->args_.empty()
+                         ? nullptr
+                         : std::dynamic_pointer_cast<const TileType>(call->args_[0]->GetType());
+      if (operand && split_dim < static_cast<int>(operand->shape_.size())) {
+        const auto operand_valid = tile_view_semantics::GetEffectiveTileView(*operand).valid_shape;
+        auto valid_const = split_dim < static_cast<int>(operand_valid.size())
+                               ? std::dynamic_pointer_cast<const ConstInt>(operand_valid[split_dim])
+                               : nullptr;
+        auto half_const = std::dynamic_pointer_cast<const ConstInt>(operand->shape_[split_dim]);
+        const bool provably_partial = valid_const && half_const && valid_const->value_ < half_const->value_;
+        const char* axis_name = (split_dim == 0) ? "row" : "column";
+        CHECK_SPAN(!provably_partial, call->span_)
+            << "pl.split_aiv: tile.aic_gather re-joins the two lanes positionally, but each lane's "
+               "valid "
+            << axis_name << " extent (" << valid_const->value_ << " of " << half_const->value_
+            << ") covers only part of its half, so the lanes contribute the disjoint bands [0, "
+            << valid_const->value_ << ") and [" << half_const->value_ << ", "
+            << (half_const->value_ + valid_const->value_)
+            << ") of the re-joined tile. No valid_shape describes that union.\n"
+            << "Author one of these instead:\n"
+            << "  * make each lane's half fully valid before the gather -- pl.fillpad(v) to fill the "
+               "padding with data, or pl.set_validshape(v, <full half extent>, ...) to declare it "
+               "data -- so the bands abut\n"
+            << "  * let the shard's own per-lane extent flow into the gather instead of overriding "
+               "it: a shard-then-gather round trip re-joins exactly the pre-shard extent";
+      }
+      result.push_back(stmt);
+      continue;
+    }
+    if (source == nullptr) {
+      result.push_back(stmt);
+      continue;
+    }
+
+    auto consumer_result = std::dynamic_pointer_cast<const TileType>(call->GetType());
+    if (!consumer_result) {
+      // Not a tile result (tile.store returns a Tensor, system.tfree returns
+      // nothing): the op reads the extent but does not carry it onward, which is
+      // exactly where the per-lane extent is meant to land.
+      //
+      // The store is the one consumer that must not see an EMPTY lane. When the
+      // ragged extent does not reach the second lane (V <= half) that lane's
+      // extent is 0, and a zero-row store is outside pto-isa's contract:
+      // TSTORE_IMPL asserts ``src.GetValidRow() > 0 && src.GetValidCol() > 0``
+      // (npu/a2a3/TStore.hpp) and PTOAS's PartitionViewOp rejects a statically
+      // non-positive size. A release build compiles the assert out and the DMA
+      // moves nothing, but a debug / CPU-sim / CA-model build traps. So guard
+      // the store on a non-empty lane. The tpop and the tfree stay
+      // UNCONDITIONAL: both lanes must still pop and free the slot or the pipe
+      // desynchronizes.
+      if (IsOp(call, "tile.store") && !IsProvablyPositive(source->lane_extent)) {
+        // The guard can be a plain IfStmt because a store's SSA result is a
+        // destination-passing alias (see CollectChainedStoreDestinations). Only a
+        // CHAINED store makes that unsafe — skipping the first store would leave
+        // the second writing through a tensor version that was never produced —
+        // and guarding it would need a return-carrying if (a phi over stored /
+        // not-stored). Report that shape instead of emitting an unguarded
+        // zero-row store.
+        CHECK_SPAN(state.chained_store_dests.count(assign->var_.get()) == 0, call->span_)
+            << "pl.split_aiv: a store whose result feeds another store cannot be guarded against an "
+               "empty lane. The split axis is only partially valid, so one lane's extent can be 0 at "
+               "runtime ("
+            << PythonPrint(source->lane_extent) << "), and a zero-row store is outside the ISA contract.\n"
+            << "Author one of these instead:\n"
+            << "  * write the per-lane shard to its destination with a single subscript assignment "
+               "inside the region\n"
+            << "  * make the split axis fully valid before the crossing (pl.set_validshape to the "
+               "full extent) so every lane is non-empty";
+        auto zero = std::make_shared<ConstInt>(0, GetScalarDtype(source->lane_extent), call->span_);
+        auto non_empty = MakeGt(source->lane_extent, zero, call->span_);
+        result.push_back(
+            std::make_shared<IfStmt>(non_empty, stmt, std::nullopt, std::vector<VarPtr>{}, call->span_));
+        continue;
+      }
+      result.push_back(stmt);
+      continue;
+    }
+
+    // A consumer that WIDENS the logical region back to the whole physical box
+    // (a set_validshape to the full extent) deliberately drops the per-lane
+    // extent — the author is declaring the padding to be data. Nothing to carry.
+    if (tile_view_semantics::ShapeExprListsEquivalent(
+            tile_view_semantics::GetEffectiveTileView(*consumer_result).valid_shape,
+            consumer_result->shape_)) {
+      result.push_back(stmt);
+      continue;
+    }
+    CHECK_SPAN(PassesThroughValidShape(source->before, consumer_result), call->span_)
+        << "pl.split_aiv: '" << call->op_->name_
+        << "' reshapes the logical valid region of a per-lane cross-core value, which is not "
+           "supported. The shard's split-axis extent differs per lane ("
+        << PythonPrint(source->lane_extent)
+        << "), and that extent can only be carried by ops that pass the valid_shape through "
+           "unchanged — the boundary offers no way to re-narrow a popped tile afterwards.\n"
+        << "Author one of these instead:\n"
+        << "  * do the reshaping compute on the CUBE side, before pl.aiv_shard\n"
+        << "  * make the split axis fully valid before the crossing "
+           "(pl.set_validshape to the full extent) and treat the padding as don't-care\n"
+        << "  * store the per-lane shard first, and reshape in a later kernel";
+    auto new_type = WithValidDim(consumer_result, split_dim, source->lane_extent);
+    auto new_var = std::make_shared<Var>(assign->var_->name_hint_, new_type, assign->var_->span_);
+    auto new_call = std::make_shared<Call>(call->op_, call->args_, call->kwargs_, new_type, call->span_);
+    state.replacements[assign->var_.get()] = new_var;
+    state.tracked[new_var.get()] = LocalizedTile{source->lane_extent, source->joined_extent, consumer_result};
+    result.push_back(std::make_shared<AssignStmt>(new_var, new_call, assign->span_));
+  }
+
+  return result;
+}
+
+}  // namespace
+
+std::vector<StmtPtr> LocalizeExplicitBoundaryValid(const std::vector<StmtPtr>& stmts, int split_dim,
+                                                   const Span& region_span) {
+  LocalizeState state;
+  CollectChainedStoreDestinations(stmts, &state.chained_store_dests);
+  auto result = LocalizeStmts(stmts, split_dim, region_span, state);
+
+  if (state.replacements.empty()) {
+    return result;
+  }
+  // One final substitution re-points every downstream use (including the ones
+  // inside nested control flow) at the retyped vars, mirroring how the AUTO
+  // halving path finishes in ProcessStmts.
+  StmtPtr body = (result.size() == 1) ? result[0] : std::make_shared<SeqStmts>(result, region_span);
+  return transform_utils::FlattenToStmts(transform_utils::Substitute(body, state.replacements));
 }
 
 namespace {

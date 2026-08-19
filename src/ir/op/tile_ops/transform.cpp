@@ -982,10 +982,11 @@ TypePtr DeduceTileSetValidShapeType(const std::vector<ExprPtr>& args,
   return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
 }
 
-// NOTE: Internal op for compiler-generated code only; should not be exposed to end users in future releases.
+// Public: reachable from the DSL as `pl.set_validshape` / `pl.tile.set_validshape`, and used
+// directly by kernels to pin a valid extent the type deducer cannot infer.
 REGISTER_OP("tile.set_validshape")
     .set_op_category("TileOp")
-    .set_description("Update valid-shape metadata of a tile without data movement (internal)")
+    .set_description("Update valid-shape metadata of a tile without data movement")
     .add_argument("tile", "Input tile (TileType, 2D)")
     .add_argument("valid_rows", "Number of valid rows (ScalarType INDEX/INT64/UINT64)")
     .add_argument("valid_cols", "Number of valid columns (ScalarType INDEX/INT64/UINT64)")

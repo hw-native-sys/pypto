@@ -390,15 +390,104 @@ class TestConciseErrorMessage:
         assert concise_error_message(exc) == "user message"
 
     def test_strips_check_failed_at_start(self):
-        """Test stripping when Check failed: is the entire message."""
+        """A check that fired with no ``<<`` payload reports the fallback, never an empty string."""
         msg = "Check failed: dim > 0 at src/foo.cpp:42"
         exc = ValueError(msg)
-        assert concise_error_message(exc) == "Internal backend check failed"
+        result = concise_error_message(exc)
+        assert result
+        assert "Check failed" not in result
+        assert "PTO_BACKTRACE=1" in result
+
+    def test_message_less_check_does_not_return_empty(self):
+        """The shape a real message-less CHECK produces: FatalLogger always emits the newline.
+
+        ``CHECK(cond);`` with no ``<<`` puts the tail at offset 1, so truncating at the
+        newline leaves nothing -- which would render as an empty bold ``Error:`` header.
+        """
+        msg = (
+            "\nCheck failed: lhs_scale_type && lhs_scale_type->shape_.size() == 2 at "
+            "/home/u/pypto/src/ir/op/tile_ops/matmul_mx.cpp:202 at kernel.py:9:3"
+        )
+        exc = ValueError(msg)
+        result = concise_error_message(exc)
+        assert result
+        assert "Check failed" not in result
+        assert ".cpp" not in result
+
+    def test_check_span_message_keeps_its_payload(self):
+        """CHECK_SPAN puts its IR span before the newline, so the payload must survive."""
+        msg = (
+            "The operator tile.slice requires a 2D operand [kernel.py:9:3]"
+            "\nCheck failed: x at f.cpp:1 at kernel.py:9:3"
+        )
+        exc = ValueError(msg)
+        result = concise_error_message(exc)
+        assert "The operator tile.slice requires a 2D operand" in result
+        assert "Check failed" not in result
+        assert "f.cpp" not in result
+
+    def test_trailing_span_is_kept_by_default(self):
+        """``strip_trailing_span`` is opt-in: callers that raise without a ``span=`` keep it.
+
+        ``decorator.py``'s parse-function wrappers are those callers -- the inline location
+        is the only one their ``ParserError`` can offer the user.
+        """
+        msg = "The operator tile.row_max requires a 2D operand [kernel.py:9:3]\nCheck failed: x at f.cpp:1"
+        assert concise_error_message(ValueError(msg)).endswith("[kernel.py:9:3]")
+
+    def test_strip_trailing_span_removes_the_inline_location(self):
+        """Opted in, the ``CHECK_SPAN`` location leaves the header; the payload stays whole."""
+        msg = (
+            "The operator tile.row_max requires a 2D operand [/abs/path/kernel.py:9:3]"
+            "\nCheck failed: x at /abs/path/src/ir/op/tile_ops/reduction.cpp:88"
+        )
+        result = concise_error_message(ValueError(msg), strip_trailing_span=True)
+        assert result == "The operator tile.row_max requires a 2D operand"
+
+    def test_strip_trailing_span_accepts_the_negative_column_sentinel(self):
+        """``Span`` renders an unknown column as ``-1``; that form must strip too."""
+        msg = "Bad operand [/abs/path/kernel.py:9:-1]\nCheck failed: x at f.cpp:1"
+        result = concise_error_message(ValueError(msg), strip_trailing_span=True)
+        assert result == "Bad operand"
+
+    def test_strip_trailing_span_leaves_a_plain_python_message_alone(self):
+        """No ``Check failed:`` tail means no ``FatalLogger`` span -- so nothing to strip.
+
+        Guards the one way this could corrupt a message: a pure-Python error whose text
+        happens to end in bracketed colon-separated integers (an extended slice, say).
+        """
+        exc = ValueError("step must divide the extent, got a[0:64:3]")
+        assert (
+            concise_error_message(exc, strip_trailing_span=True)
+            == "step must divide the extent, got a[0:64:3]"
+        )
+
+    def test_strip_trailing_span_on_message_less_check_reports_the_fallback(self):
+        """A payload that is *only* a span strips to empty -- which must not render bare."""
+        msg = " [/abs/path/kernel.py:9:3]\nCheck failed: tmp_type at f.cpp:88"
+        result = concise_error_message(ValueError(msg), strip_trailing_span=True)
+        assert result
+        assert "kernel.py" not in result
+        assert "PTO_BACKTRACE=1" in result
 
     def test_empty_message(self):
         """Test with empty exception message."""
         exc = ValueError("")
         assert concise_error_message(exc) == ""
+
+    def test_empty_message_with_traceback_is_not_called_a_check(self):
+        """Only a stripped check tail earns the fallback -- an empty message keeps its own.
+
+        ``GetFullMessage()`` always appends a traceback block (or the "no stack trace"
+        note), so a bare ``pypto::ValueError("")`` under ``PTO_BACKTRACE=1`` also strips
+        to empty. Naming that a silent backend check would report a check that never ran
+        and tell the user to enable a flag they already have on.
+        """
+        with_trace = ValueError("\n\nC++ Traceback (most recent call last):\n  frame0")
+        assert concise_error_message(with_trace) == ""
+
+        no_symbols = ValueError("\n\nNo stack trace available. \n(Tip: Build with Debug)")
+        assert concise_error_message(no_symbols) == ""
 
 
 if __name__ == "__main__":

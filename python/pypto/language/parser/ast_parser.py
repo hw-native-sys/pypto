@@ -35,6 +35,7 @@ from pypto.pypto_core import arith as _arith
 
 from ._dsl_invoker import invoke_dsl
 from .diagnostics import (
+    BUG_CLASS_EXCEPTIONS,
     InvalidOperationError,
     ParserError,
     ParserSyntaxError,
@@ -1213,7 +1214,9 @@ class ASTParser:
         try:
             self.builder.add_function_attrs(attrs)
         except ValueError as exc:
-            raise ParserSyntaxError(str(exc), span=span, hint=None) from exc
+            # The duplicate-key rejection is a C++ ``CHECK`` in IRBuilder::AddFunctionAttrs,
+            # so strip FatalLogger's implementation-facing tail before it reaches the header.
+            raise ParserSyntaxError(concise_error_message(exc), span=span, hint=None) from exc
 
     def _parse_func_attr_value(self, key: str, value_node: ast.expr) -> Any:
         """Reconstruct one ``pl.func_attr`` value from its Python AST node.
@@ -5032,21 +5035,34 @@ class ASTParser:
         # with ``aiv_id = pl.tile.get_subblock_idx()`` and carries the requested
         # SplitMode on the node; LowerAutoVectorSplit (pass 20) consumes it.
         #
-        # FLATTEN: when already inside a CORE_GROUP InCore scope — directly or
-        # through an intervening pl.range/pl.pipeline/if — emit the region in
-        # place; it nests inside the open context. OutlineIncoreScopes outlines the
-        # enclosing core function and the nested region survives.
-        if self._is_inside_scope(ir.ScopeKind.InCore):
+        # FLATTEN: when the region is ALREADY in a core context, emit it in place.
+        # The wrapper below exists only to give OutlineIncoreScopes something to
+        # outline, so it is meaningless once we are core-side. Two ways to be:
+        #   1. Inside an open CORE_GROUP InCore scope (directly, or through an
+        #      intervening pl.range/pl.pipeline/if): the region nests in the open
+        #      context and survives the enclosing function's outlining.
+        #   2. The enclosing FUNCTION is already InCore, so no scope is open and
+        #      the open-scope test alone reads False.
+        #
+        # Arm 2 is what makes print -> parse a fixed point: after outlining, the
+        # region is bare at the top of an InCore ``*_incore_0``, and reparsing that
+        # printed form must rebuild it bare. Emitting what the syntax means is the
+        # parser's job; whether a region is ALLOWED in this function is a placement
+        # rule, enforced by AivSplitValid check (h) — which keys on the ``split_aiv``
+        # attr OutlineIncoreScopes stamps, so a hand-authored InCore function (no
+        # such attr) is still rejected while the outlined one is accepted.
+        if self._is_inside_scope(ir.ScopeKind.InCore) or self._func_type == ir.FunctionType.InCore:
             self._emit_split_aiv_region(stmt, loop_var_name, split_mode)
             return
 
-        # Bare top-level form (no enclosing InCore): a top-level split_aiv must
-        # live inside a core function, so synthesize an InCore wrapper first and
-        # nest the region inside it (keeps it eligible for OutlineIncoreScopes —
-        # else the region would have no enclosing InCore to outline). Merge any
-        # forward-sticky pl.dump_tag tensors onto the wrapper (mirrors the other
-        # InCore-creating paths); the split mode + split_aiv marker ride the
-        # nested SplitAivScopeStmt region node, not the InCore wrapper.
+        # Bare top-level form (no enclosing InCore scope, and the function is not
+        # itself InCore — e.g. a plain ``@pl.function`` / ``@pl.jit`` Opaque body):
+        # a top-level split_aiv must live inside a core function, so synthesize an
+        # InCore wrapper first and nest the region inside it (keeps it eligible for
+        # OutlineIncoreScopes — else the region would have no enclosing InCore to
+        # outline). Merge any forward-sticky pl.dump_tag tensors onto the wrapper
+        # (mirrors the other InCore-creating paths); the split mode + split_aiv
+        # marker ride the nested SplitAivScopeStmt region node, not the wrapper.
         span = self.span_tracker.get_span(stmt)
         incore_attrs = self._merge_forward_sticky_dump(None, ir.ScopeKind.InCore)
         with self.builder.scope(ir.ScopeKind.InCore, span, attrs=incore_attrs):
@@ -8277,6 +8293,9 @@ class ASTParser:
             return self._attach_op_attrs(invoke_dsl(op_func, args, kwargs, span), attrs)
         except ParserError:
             raise
+        except BUG_CLASS_EXCEPTIONS:
+            # Compiler bug, not a bad kernel - surface it with its type and trace intact.
+            raise
         except (TypeError, ValueError) as e:
             # Wrapper may have prefixed its message (``pl.<op>:`` from
             # ``_raise_type_dispatch_error`` or ``pl.<module>.<op>:``) or raised
@@ -8284,14 +8303,31 @@ class ASTParser:
             # rounding mode ...")``). Make sure the surfaced error always names
             # the op so users can locate the bad call. When any operand was a
             # Scalar, append a hint pointing at Python operators.
-            msg = str(e)
+            #
+            # Sanitize first: most ops type-check in C++, and a ``CHECK`` throws
+            # ``pypto::ValueError`` -- so backend op-validation failures land *here*, not
+            # in the ``except Exception`` branch below. Their message still carries
+            # FatalLogger's "Check failed: <C++ expr> at <absolute path>.cpp:<line>" tail,
+            # which the renderer would splice into the bold ``Error:`` header ahead of the
+            # ``-->`` source arrow. It stays reachable through ``__cause__`` under
+            # PTO_BACKTRACE=1. A pure-Python ValueError has no tail, so this is a no-op.
+            # ``strip_trailing_span`` additionally drops the ``[<file>:<line>:<col>]`` a
+            # ``CHECK_SPAN`` leaves in the payload: we raise with ``span=`` below, so the
+            # arrow and snippet locate the call anyway, and the inline copy is an absolute
+            # path in the middle of the header (often naming an operand's *definition*,
+            # not the call, which reads as a contradiction against the arrow).
+            msg = concise_error_message(e, strip_trailing_span=True)
             if not msg.startswith(f"pl.{op_name}") and not msg.startswith(f"{module_name}.{op_name}"):
                 msg = f"{module_name} operation '{op_name}': {msg}"
             hint = self._scalar_operand_hint(args, kwargs)
             raise InvalidOperationError(msg, span=span, hint=hint) from e
         except Exception as e:
+            # ``span=`` below gives the renderer its ``-->`` arrow, so strip the inline
+            # ``[<file>:<line>:<col>]`` a ``CHECK_SPAN`` leaves in the payload rather than
+            # printing an absolute path inside the bold ``Error:`` header.
             raise InvalidOperationError(
-                f"Error in {module_name} operation '{op_name}': {concise_error_message(e)}",
+                f"Error in {module_name} operation '{op_name}': "
+                f"{concise_error_message(e, strip_trailing_span=True)}",
                 span=span,
             ) from e
 
@@ -8437,9 +8473,16 @@ class ASTParser:
             return self._attach_op_attrs(op_func(*args, **kwargs, span=span), attrs)
         except ParserError:
             raise
+        except BUG_CLASS_EXCEPTIONS:
+            # Compiler bug, not a bad kernel - surface it with its type and trace intact.
+            raise
         except Exception as e:
+            # ``span=`` below gives the renderer its ``-->`` arrow, so strip the inline
+            # ``[<file>:<line>:<col>]`` a ``CHECK_SPAN`` leaves in the payload rather than
+            # printing an absolute path inside the bold ``Error:`` header.
             raise InvalidOperationError(
-                f"Error in {module_name} operation '{op_name}': {concise_error_message(e)}",
+                f"Error in {module_name} operation '{op_name}': "
+                f"{concise_error_message(e, strip_trailing_span=True)}",
                 span=span,
             ) from e
 
@@ -8751,6 +8794,11 @@ class ASTParser:
             value = self.expr_evaluator.eval_expr(attr)
             if isinstance(value, ir.MemorySpace):
                 return ir.ConstInt(value.value, DataType.INDEX, self.span_tracker.get_span(attr))
+        except BUG_CLASS_EXCEPTIONS:
+            # This eval is speculative, so its failure is normally not worth reporting - but a
+            # failed internal invariant is, and swallowing it here would replace the diagnostic
+            # with the unrelated "standalone attribute access" error raised below.
+            raise
         except Exception:
             pass
         # This might be accessing a DataType enum or similar

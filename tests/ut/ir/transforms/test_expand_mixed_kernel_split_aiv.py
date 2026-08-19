@@ -123,7 +123,11 @@ def test_aiv_shard_folds_into_cube_to_vector_boundary():
                 name="split_aiv_c2v_slot_buffer", peer_func="split_aiv_aiv"
             )
             pl.system.aic_initialize_pipe(
-                split_aiv_c2v_slot_buffer_import, pl.const(0, pl.INT32), dir_mask=1, slot_size=65536
+                split_aiv_c2v_slot_buffer_import,
+                pl.const(0, pl.INT32),
+                dir_mask=1,
+                slot_size=65536,
+                slot_num=2,
             )
             pl.tile.tpush_to_aiv(qk, split=1)
 
@@ -139,10 +143,10 @@ def test_aiv_shard_folds_into_cube_to_vector_boundary():
             out_0: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
         ) -> pl.Tensor[[64, 128], pl.FP32]:
             split_aiv_c2v_slot_buffer: pl.Scalar[pl.INT32] = pl.system.reserve_buffer(
-                name="split_aiv_c2v_slot_buffer", size=524288, base=-1
+                name="split_aiv_c2v_slot_buffer", size=131072, base=-1
             )
             pl.system.aiv_initialize_pipe(
-                split_aiv_c2v_slot_buffer, pl.const(0, pl.INT32), dir_mask=1, slot_size=65536
+                split_aiv_c2v_slot_buffer, pl.const(0, pl.INT32), dir_mask=1, slot_size=65536, slot_num=2
             )
             # AIV: pops the HALF tile [64,128] in Vec (identity / non-NZ view), split == 1.
             half: pl.Tile[[64, 128], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=1)
@@ -243,13 +247,17 @@ def test_aic_gather_folds_into_vector_to_cube_boundary():
             out_0: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
         ):
             split_aiv_v2c_slot_buffer: pl.Scalar[pl.INT32] = pl.system.reserve_buffer(
-                name="split_aiv_v2c_slot_buffer", size=262144, base=-1
+                name="split_aiv_v2c_slot_buffer", size=131072, base=-1
             )
             split_aiv_c2v_slot_buffer_import: pl.Scalar[pl.INT32] = pl.system.import_peer_buffer(
                 name="split_aiv_c2v_slot_buffer", peer_func="split_aiv_aiv"
             )
             pl.system.aic_initialize_pipe(
-                split_aiv_c2v_slot_buffer_import, split_aiv_v2c_slot_buffer, dir_mask=3, slot_size=65536
+                split_aiv_c2v_slot_buffer_import,
+                split_aiv_v2c_slot_buffer,
+                dir_mask=3,
+                slot_size=65536,
+                slot_num=2,
             )
             # AIC: V->C pop yields the FULL tile [128,128] in Mat. The Mat default
             # effective tile_view is NZ (col_major), so no explicit view is needed.
@@ -279,10 +287,14 @@ def test_aic_gather_folds_into_vector_to_cube_boundary():
                 name="split_aiv_v2c_slot_buffer", peer_func="split_aiv_aic"
             )
             split_aiv_c2v_slot_buffer: pl.Scalar[pl.INT32] = pl.system.reserve_buffer(
-                name="split_aiv_c2v_slot_buffer", size=262144, base=-1
+                name="split_aiv_c2v_slot_buffer", size=131072, base=-1
             )
             pl.system.aiv_initialize_pipe(
-                split_aiv_c2v_slot_buffer, split_aiv_v2c_slot_buffer_import, dir_mask=3, slot_size=65536
+                split_aiv_c2v_slot_buffer,
+                split_aiv_v2c_slot_buffer_import,
+                dir_mask=3,
+                slot_size=65536,
+                slot_num=2,
             )
             half2: pl.Tile[[64, 128], pl.FP32, pl.Mem.Vec] = pl.tile.add(a, a)
             # Push-side fractal adapter: move the HALF [64,128] into Vec with an

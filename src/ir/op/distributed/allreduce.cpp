@@ -21,8 +21,10 @@
  * UB-sized reduce/barrier/store chunks in
  * ``src/ir/transforms/lower_composite_ops_pass.cpp``; host-level allreduce is
  * lowered later by ``LowerHostTensorCollectives``.
- * Explicit signal buffers are single-shot: callers issuing multiple allreduces
- * must provide a fresh signal for each call.
+ * The ``signal`` buffer is self-clearing: each lowering restores the barrier
+ * cells to zero before the call returns (the InCore credit-barrier protocol;
+ * the host builtins carry the matching epilogue), so one signal is reusable
+ * across back-to-back calls and, on the InCore rail, inside for/while loops.
  *
  * IR signature:
  *

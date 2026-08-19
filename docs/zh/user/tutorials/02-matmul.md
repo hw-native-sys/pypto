@@ -107,6 +107,15 @@ for ks in pl.parallel(SPLITS):
 | **split-K 输出大了约一个倍数** | 原子循环前没清零输出 | 先在独立作用域里零初始化 |
 | **累加器 dtype 被拒** | `matmul_acc` 要求累加器的 dtype | 用 `pl.matmul(..., out_dtype=pl.FP32)` 创建它 |
 
+## 本页前后的例子
+
+| 示例 | 位置 |
+| ---- | ---- |
+| `examples/beginner/05_matmul.py` | 一次算完的 64x64 matmul —— cube 之外什么都不做 |
+| `examples/intermediate/04_matmul_acc.py` | K 维分块 + 累加器 |
+| `examples/advanced/01_split_k.py` | 本页收尾的 split-K 形式 |
+| `examples/advanced/02_auto_tile_matmul.py` | 把 L0 tiling 决策交给编译器 |
+
 ## 下一步
 
 [混合 kernel](03-mixed-kernel.md) —— 到目前为止都只用了 cube **或** vector 单元。现在两者同时。

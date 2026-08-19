@@ -536,7 +536,8 @@ static std::string GetFlatOffsetSSA(const ir::MakeTuplePtr& indices_tuple,
 // Helper function for tile.read (indices -> flat offset -> pto.tgetval)
 static std::string MakeTileReadCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
-  CHECK(op->args_.size() == 2) << "tile.read requires 2 arguments, but got " << op->args_.size();
+  INTERNAL_CHECK_SPAN(op->args_.size() == 2, op->span_)
+      << "tile.read requires 2 arguments, but got " << op->args_.size();
 
   auto tile_type = As<ir::TileType>(op->args_[0]->GetType());
   INTERNAL_CHECK_SPAN(tile_type, op->span_) << "tile.read first argument must be TileType";
@@ -566,7 +567,8 @@ static std::string MakeTileReadCodegenPTO(const CallPtr& op, codegen::CodegenBas
 // Helper function for tile.write (indices -> flat offset -> pto.tsetval)
 static std::string MakeTileWriteCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
-  CHECK(op->args_.size() == 3) << "tile.write requires 3 arguments, but got " << op->args_.size();
+  INTERNAL_CHECK_SPAN(op->args_.size() == 3, op->span_)
+      << "tile.write requires 3 arguments, but got " << op->args_.size();
 
   auto tile_type = As<ir::TileType>(op->args_[0]->GetType());
   INTERNAL_CHECK_SPAN(tile_type, op->span_) << "tile.write first argument must be TileType";
@@ -599,7 +601,8 @@ static std::string MakeTileWriteCodegenPTO(const CallPtr& op, codegen::CodegenBa
 
 static std::string MakeTensorReadCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
-  CHECK(op->args_.size() == 2) << "tensor.read requires 2 arguments, but got " << op->args_.size();
+  INTERNAL_CHECK_SPAN(op->args_.size() == 2, op->span_)
+      << "tensor.read requires 2 arguments, but got " << op->args_.size();
 
   auto tensor_type_ptr = AsTensorTypeLike(op->args_[0]->GetType());
   INTERNAL_CHECK_SPAN(tensor_type_ptr, op->span_) << "tensor.read first argument must be TensorType";
@@ -635,7 +638,8 @@ static std::string MakeTensorReadCodegenPTO(const CallPtr& op, codegen::CodegenB
 
 static std::string MakeTensorWriteCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
-  CHECK(op->args_.size() == 3) << "tensor.write requires 3 arguments, but got " << op->args_.size();
+  INTERNAL_CHECK_SPAN(op->args_.size() == 3, op->span_)
+      << "tensor.write requires 3 arguments, but got " << op->args_.size();
 
   auto tensor_type_ptr = AsTensorTypeLike(op->args_[0]->GetType());
   INTERNAL_CHECK_SPAN(tensor_type_ptr, op->span_) << "tensor.write first argument must be TensorType";
@@ -678,7 +682,8 @@ static std::string MakeTensorWriteCodegenPTO(const CallPtr& op, codegen::Codegen
 
 static std::string MakeTensorDimCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
-  CHECK(op->args_.size() == 2) << "tensor.dim requires 2 arguments, but got " << op->args_.size();
+  INTERNAL_CHECK_SPAN(op->args_.size() == 2, op->span_)
+      << "tensor.dim requires 2 arguments, but got " << op->args_.size();
   auto input_tensor = ir::As<ir::TensorType>(op->args_[0]->GetType());
   CHECK(input_tensor) << "tensor.dim need TensorType for first arg, but got "
                       << op->args_[0]->GetType()->TypeName();
@@ -752,7 +757,7 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
   // pto.local_array_set mutates the same `pto.declare_local_array` storage.
   reg("array.create", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
     auto& codegen = AsPto(codegen_base);
-    CHECK(op->args_.size() == 1) << "array.create requires 1 argument (extent)";
+    INTERNAL_CHECK_SPAN(op->args_.size() == 1, op->span_) << "array.create requires 1 argument (extent)";
     auto array_type = ir::As<ir::ArrayType>(op->GetType());
     CHECK(array_type) << "array.create must return ArrayType";
     std::string result = codegen.GetCurrentResultTarget();
@@ -764,7 +769,8 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
 
   reg("array.get_element", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
     auto& codegen = AsPto(codegen_base);
-    CHECK(op->args_.size() == 2) << "array.get_element requires 2 arguments (array, index)";
+    INTERNAL_CHECK_SPAN(op->args_.size() == 2, op->span_)
+        << "array.get_element requires 2 arguments (array, index)";
     auto array_type = ir::As<ir::ArrayType>(op->args_[0]->GetType());
     CHECK(array_type) << "array.get_element first argument must be an ArrayType";
     std::string result = codegen.GetCurrentResultTarget();
@@ -779,7 +785,8 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
 
   reg("array.update_element", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
     auto& codegen = AsPto(codegen_base);
-    CHECK(op->args_.size() == 3) << "array.update_element requires 3 arguments (array, index, value)";
+    INTERNAL_CHECK_SPAN(op->args_.size() == 3, op->span_)
+        << "array.update_element requires 3 arguments (array, index, value)";
     auto array_type = ir::As<ir::ArrayType>(op->args_[0]->GetType());
     CHECK(array_type) << "array.update_element first argument must be an ArrayType";
     // arr resolves to the input array's SSA; the AssignStmt dispatch has already
@@ -805,7 +812,8 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
   auto reg_spmd_identity_op = [&](const char* tile_op, std::string (codegen::PTOCodegen::*getter)() const) {
     reg(tile_op, [tile_op, getter](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
       auto& codegen = AsPto(codegen_base);
-      CHECK(op->args_.empty()) << tile_op << " takes no arguments, got " << op->args_.size();
+      INTERNAL_CHECK_SPAN(op->args_.empty(), op->span_)
+          << tile_op << " takes no arguments, got " << op->args_.size();
       std::string result = codegen.GetCurrentResultTarget();
       INTERNAL_CHECK_SPAN(!result.empty(), op->span_) << tile_op << " requires assignment target";
       std::string arg_ssa = (codegen.*getter)();

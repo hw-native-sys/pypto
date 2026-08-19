@@ -1664,5 +1664,107 @@ class TestSubNodeComparison:
         assert "body" not in path  # SeqStmts field name suppressed
 
 
+class TestWindowBufferIdentity:
+    """``WindowBuffer`` must fold Var identity on the equality side too.
+
+    ``WindowBuffer`` is a ``Var`` subclass with its own ``ObjectKind``, so the
+    precise-match ``As<Var>`` arm in ``Equal`` never saw it and it fell through
+    to plain field comparison, while ``HashNode`` listed it alongside
+    ``MemRef`` / ``IterArg`` / ``Var`` in the identity fold. The two sides
+    disagreed about whether the node carries identity, which broke the
+    equal-implies-equal-hash guarantee and left the buffer's identity
+    unchecked between its definition and its uses.
+    """
+
+    @staticmethod
+    def _span() -> ir.Span:
+        return ir.Span.unknown()
+
+    def _buffer(self, base: ir.Var, size: int) -> ir.WindowBuffer:
+        return ir.WindowBuffer(
+            base, ir.ConstInt(size, DataType.INDEX, self._span()), False, False, self._span()
+        )
+
+    def test_field_identical_buffers_fold_identity_on_both_sides(self):
+        """Two distinct buffers sharing every field are not interchangeable.
+
+        They differ in ``UniqueId``, which the hash folds in, so equality must
+        fold it in too -- otherwise they compare equal yet hash apart.
+        """
+        base = ir.Var("win", ir.PtrType(), self._span())
+        first, second = self._buffer(base, 4096), self._buffer(base, 4096)
+
+        assert not ir.structural_equal(first, second)
+        assert ir.structural_hash(first) != ir.structural_hash(second)
+
+    def test_buffer_is_equal_to_itself_and_hashes_stably(self):
+        buffer = self._buffer(ir.Var("win", ir.PtrType(), self._span()), 4096)
+        assert ir.structural_equal(buffer, buffer)
+        assert ir.structural_hash(buffer) == ir.structural_hash(buffer)
+
+    def test_enclosing_scopes_fold_buffer_identity(self):
+        """The same gap at container level, which is what a hash-keyed cache hits."""
+        base = ir.Var("win", ir.PtrType(), self._span())
+
+        def scope() -> ir.CommDomainScopeStmt:
+            return ir.CommDomainScopeStmt(
+                [0, 1],
+                [self._buffer(base, 4096)],
+                "d0",
+                body=ir.BreakStmt(self._span()),
+                span=self._span(),
+            )
+
+        lhs, rhs = scope(), scope()
+        assert not ir.structural_equal(lhs, rhs)
+        assert ir.structural_hash(lhs) != ir.structural_hash(rhs)
+
+    def test_size_mismatch_still_reports_the_field_path(self):
+        """Field names must survive the hand-written identity arm.
+
+        The arm bypasses the ``EQUAL_DISPATCH`` reflection visitor, which is
+        what pushes ``size`` onto the mismatch path. Comparing the fields by
+        hand instead would degrade ``assert_structural_equal``'s diagnostic to
+        a bare ``value``, dropping the very location the API promises.
+        """
+        base = ir.Var("win", ir.PtrType(), self._span())
+        first, second = self._buffer(base, 4096), self._buffer(base, 8192)
+
+        with pytest.raises(ValueError) as exc_info:
+            ir.assert_structural_equal(first, second, enable_auto_mapping=True)
+        assert "size.value" in str(exc_info.value).split("\n")[0]
+
+    def test_a_slot_and_its_type_back_reference_are_cross_checked(self):
+        """A buffer's identity must tie its definition to its uses.
+
+        ``CommDomainScopeStmt::slots_`` defines the buffers;
+        ``DistributedTensorType::window_buffer_`` refers back to one of them.
+        While ``WindowBuffer`` never reached ``EqualVar`` it was never entered
+        into the variable bijection, so nothing checked that the two sides pick
+        the *same* slot -- and ``EqualVar`` alone cannot tell two buffers apart,
+        since ``WindowBufferType`` is a field-less singleton.
+        """
+
+        def scope(pick_second_slot: bool) -> ir.CommDomainScopeStmt:
+            base = ir.Var("win", ir.PtrType(), self._span())
+            slots = [self._buffer(base, 4096), self._buffer(base, 8192)]
+            bound = slots[1] if pick_second_slot else slots[0]
+            tensor = ir.DistributedTensorType(
+                [ir.ConstInt(64, DataType.INDEX, self._span())], DataType.FP32, bound
+            )
+            return ir.CommDomainScopeStmt(
+                [0, 1],
+                slots,
+                "d0",
+                body=ir.EvalStmt(ir.Var("dt", tensor, self._span()), self._span()),
+                span=self._span(),
+            )
+
+        # Same slot list; the tensor is bound to a different allocation in each.
+        assert not ir.structural_equal(scope(False), scope(True), enable_auto_mapping=True)
+        # ... and binding the same slot still matches.
+        assert ir.structural_equal(scope(False), scope(False), enable_auto_mapping=True)
+
+
 if __name__ == "__main__":
     pytest.main(["-v", __file__])

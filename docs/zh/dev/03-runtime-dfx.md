@@ -1,15 +1,16 @@
 # 运行时 DFX（Design For X）开关
 
 PyPTO 将 Simpler 的五项运行时诊断子功能以独立开关的形式暴露在
-[`RunConfig`](../../../python/pypto/runtime/runner.py) 上。每个开关都
-1:1 映射到 Simpler 的 `CallConfig` 字段，以及 `tests/st/conftest.py` 中
-对应的 pytest flag，保持两侧命名一致。
+[`RunConfig`](../../../python/pypto/runtime/runner.py) 上。每个开关都映射到
+Simpler 的 `CallConfig` 字段，以及 `tests/st/conftest.py` 中对应的 pytest
+flag。字段名与 Simpler 保持一致；旧拼写 `enable_l2_swimlane` /
+`--enable-l2-swimlane` 仍可用，见[已弃用别名](#已弃用别名)。
 
 ## 开关映射表
 
 | `RunConfig` 字段 | pytest flag | `CallConfig` 成员 | `dfx_outputs/` 下产物 | 后处理工具 |
 | ---------------- | ----------- | ----------------- | --------------------- | ---------- |
-| `enable_l2_swimlane: bool` | `--enable-l2-swimlane` | `enable_l2_swimlane` | `l2_swimlane_records.json` | `swimlane_converter` → `merged_swimlane_*.json` |
+| `enable_chip_swimlane: int` | `--enable-chip-swimlane`（= `4`）/ `--chip-swimlane-level N` | `enable_chip_swimlane`（`0` 关 .. `4` 全量） | `chip_swimlane_records.json` | `swimlane_converter` → `merged_swimlane_*.json` |
 | `enable_dump_args: int` | `--dump-args [LEVEL]`（裸 flag = `1`） | `enable_dump_args`（`0` 关，`1` 部分，`2` 全量） | `args_dump/{args_dump.json,bin}` | `dump_viewer`（手动） |
 | `enable_pmu: int` | `--enable-pmu [N]`（裸 flag = `2`） | `enable_pmu`（`0` 关，`>0` 事件类型） | `pmu.csv` | — |
 | `enable_dep_gen: bool` | `--enable-dep-gen` | `enable_dep_gen` | `deps.json` | `deps_viewer`（手动） |
@@ -18,6 +19,27 @@ PyPTO 将 Simpler 的五项运行时诊断子功能以独立开关的形式暴�
 五个开关**完全正交**，可任意组合。任一开启时自动将
 `RunConfig.save_kernels` 强制设为 `True`，确保 `<work_dir>/dfx_outputs/`
 目录在 run 结束后保留。
+
+### Swimlane 采集等级
+
+`enable_chip_swimlane` 是**等级**而非开关。每个等级在 runtime 采集器里都是真实的
+判断分支，低等级不会打点高等级才有的数据，事后也无法通过后处理补回：
+
+| 等级 | 新增内容 | 解锁能力 |
+| ---- | -------- | -------- |
+| `0` / `False` | — | 关闭采集 |
+| `1` | AICore 逐任务 start / end + task record buffer | 逐任务泳道 |
+| `2` | + AICPU 打点的 dispatch / finish | `[dispatch, start]` 取任务间隙 |
+| `3` | + scheduler 主循环 phase 记录 | `simpler_setup.tools.sched_overhead_analysis`、Toolkit 插件的 Scheduler View |
+| `4` / `True` | + orchestrator phase 记录 | Toolkit 插件的 AICPU Orchestrator 视图 |
+
+`True` 请求等级 `4` —— 与裸 `--enable-chip-swimlane` 请求的是同一件事，PyPTO
+与 runtime harness 皆然。超出范围的等级由 `RunConfig` 抛 `ValueError`。
+
+在 pytest 侧，裸 flag 与等级是**两个**选项（`--enable-chip-swimlane` 与
+`--chip-swimlane-level N`），而不是一个可选带值的选项。可选带值的 flag 会吞掉
+后面那个 token，`pytest --enable-chip-swimlane tests/st/runtime/` 会报
+`invalid int value: 'tests/st/runtime/'`。拆成两个选项后，裸 flag 与参数顺序无关。
 
 ## 产物契约
 
@@ -66,7 +88,7 @@ join——device 热路径不再记录 per-task fanout，因此没有 dep_gen �
 耗时。所以这两份抓取来自两次独立运行（这正是 Simpler 文档描述的“抓一次图、计多次
 时”工作流）。
 
-于是在 **onboard L2** 平台上开启 `enable_l2_swimlane` 会透明地把 kernel 跑两遍：
+于是在 **onboard L2** 平台上开启 `enable_chip_swimlane` 会透明地把 kernel 跑两遍：
 
 1. **抓图趟** —— 仅开 dep_gen，产出 `deps.json`，在**独立子进程**里运行
    （`python -m pypto.runtime._dep_gen_capture`）。这是必须的、不只是为了整洁：
@@ -75,7 +97,7 @@ join——device 热路径不再记录 per-task fanout，因此没有 dep_gen �
    退出时操作系统会彻底回收这些状态。抓图是 best-effort——子进程失败时只打印告警、
    计时趟照常运行（泳道退化成匿名 `task(rXtY)`）。
 2. **计时趟** —— 开泳道（以及 PMU / args-dump / scope-stats 等其它对时序敏感的
-   DFX），强制关闭 dep_gen，产出耗时干净的 `l2_swimlane_records.json`，这一趟的耗时
+   DFX），强制关闭 dep_gen，产出耗时干净的 `chip_swimlane_records.json`，这一趟的耗时
    才会被上报，在本进程内运行。
 
 两趟写入同一个 `dfx_outputs/`，因此 `swimlane_converter` 会自动把同目录的
@@ -109,7 +131,8 @@ run(
     MyProgram, a, b, c,
     config=RunConfig(
         platform="a2a3sim",
-        enable_l2_swimlane=True,     # 生成 l2_swimlane_records.json
+        enable_chip_swimlane=4,        # 全量 swimlane -> chip_swimlane_records.json
+                                     # （True 等价于等级 4；需要更轻量时用 1-3）
         enable_dep_gen=True,         # 生成 deps.json（按需用 deps_viewer 渲染 HTML）
         enable_pmu=4,                # PMU 事件 = MEMORY
     ),
@@ -119,11 +142,13 @@ run(
 ### 从 pytest
 
 ```bash
+# 裸 flag = 等级 4（全量）
 pytest tests/st/runtime/framework_and_models/test_perf_swimlane.py \
-    --platform a2a3sim --enable-l2-swimlane
+    --platform a2a3sim --enable-chip-swimlane
 
+# 仅 AICore 计时——最轻量的采集
 pytest tests/st/runtime/ \
-    --platform a2a3sim --enable-l2-swimlane --enable-dep-gen
+    --platform a2a3sim --chip-swimlane-level 1 --enable-dep-gen
 ```
 
 ## 选择性张量 Dump
@@ -242,7 +267,7 @@ twopi`。`dot` 是默认值，在 ~500 节点以内 DAG 风格最清晰；更大
 默认情况下，swimlane / 依赖图工具用数字 id 标注任务（`task(rXtY)` /
 `func_<id>(...)`）。要恢复真实 kernel 名称（`matmul(rXtY)`），records
 旁边必须有一份 name map。Simpler 自带的 SceneTest harness 会写这个文件；
-pypto 不使用 SceneTest，因此当开启 `enable_l2_swimlane` 或
+pypto 不使用 SceneTest，因此当开启 `enable_chip_swimlane` 或
 `enable_dep_gen` 时，runner 会从 `kernel_config.py` 已有的 `func_id` /
 `name` 字段合成 `<work_dir>/dfx_outputs/name_map_<case>.json`。它会被自动
 消费：`swimlane_converter` 通过 `--func-names <name_map>` 调用，
@@ -280,11 +305,29 @@ python runtime/tools/scope_stats_plot.py \
 
 ## 已弃用别名
 
-`RunConfig.runtime_profiling` 与 pytest flag `--runtime-profiling` 是
-四项 DFX 独立化之前唯一启用 L2 swimlane 采集的入口，现作为
-`enable_l2_swimlane` / `--enable-l2-swimlane` 的别名暂时保留，以兼容
-仍在使用它们的外部脚本。两条路径都会发出 `DeprecationWarning`，并将
-在未来版本中移除，请尽快迁移到新名称。
+`RunConfig.enable_l2_swimlane` 与 pytest flag `--enable-l2-swimlane` 是
+`enable_chip_swimlane` / `--enable-chip-swimlane` 的旧拼写。Simpler 的
+Worker/Chip/Core 命名迁移把 L2 这一层改名为 "chip"（`L2Swimlane*` ->
+`ChipSwimlane*`，`l2_swimlane_records.json` ->
+`chip_swimlane_records.json`），PyPTO 现在遵循该契约。
+
+两个旧拼写仍可用，并会发出 `DeprecationWarning`，将在未来版本中移除。
+取值与语义完全不变，迁移就是改个名字：
+
+```python
+RunConfig(enable_l2_swimlane=True)    # 已弃用
+RunConfig(enable_chip_swimlane=4)     # 等价采集
+```
+
+几个值得知道的细节：
+
+- `enable_l2_swimlane` **不是** dataclass 字段，而是构造参数 + property。
+  这样 `dataclasses.replace(cfg, enable_chip_swimlane=N)` 才不会有歧义；
+  若把别名做成字段，`replace()` 会从旧实例把它一并传回，可能静默覆盖你刚
+  传入的值。
+- 读取 `cfg.enable_l2_swimlane` 不告警（返回规范字段的等级）。使用旧构造
+  参数、或对该属性赋值，才会告警。
+- 同时传入两种拼写会抛 `ValueError`。
 
 ## 重放已有的 build_output
 
@@ -295,7 +338,7 @@ python runtime/tools/scope_stats_plot.py \
 
 ## 相关文档
 
-- Simpler runtime 侧参考：`runtime/docs/dfx/{l2-swimlane,
-  args-dump,pmu-profiling,dep_gen,scope-stats}.md`。
+- Simpler runtime 侧参考：`runtime/docs/dfx/{chip-swimlane-profiling,
+  args-dump,pmu-profiling,dep-gen,scope-stats}.md`。
 - 编译期 profiling（正交、单 PyPTO 进程）：
   [01-compile-profiling.md](01-compile-profiling.md)。

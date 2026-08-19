@@ -42,9 +42,9 @@ program_2d = flatten_pass(program)
 
 For each InCore function (InCore, AIC, AIV):
 
-1. **Validate preconditions**: Check static physical shapes, last-axis reduction, no `tile.read`/`tile.write`/`tile.slice` on >2D
+1. **Validate preconditions**: Check static physical shapes, last-axis reduction, no `tile.read`/`tile.write`/`tile.slice` on >2D, and no >2D `tile.assemble` whose written region fails to collapse contiguously
 2. **Transform statements**: Walk function body and convert >2D tile ops to 2D, preserving any dynamic `valid_shape` (see [Dynamic valid_shape](#dynamic-tile-dimensions-issue-1578))
-3. **Verify postconditions**: The `TileOps2D` property verifier independently checks that the rewritten InCore IR contains only supported tile ranks and codegen-ready transpose forms
+3. **Verify postconditions**: The `TileOps2D` property verifier independently checks that the rewritten InCore IR contains only supported tile ranks, 2D `tile.assemble` offsets, and codegen-ready transpose forms
 
 Per-statement handling:
 
@@ -54,6 +54,7 @@ Per-statement handling:
 | `tile.store` (rank>2 tensor) | Inject the original tensor-rank partition `shapes` as an extra 4th operand in the transformed IR so backend codegen can reconstruct the `partition_view`; the DSL source is unchanged. If the tile operand itself is still rank>2 (e.g. a user-written `tile.reshape` to 3D feeding `pl.assemble` into an N-D tensor view), insert a `tile.reshape` to flatten the tile operand to 2D first — the codegen requires a 2D tile while the original tile shape still flows through as the `shapes` partition operand |
 | `tile.store` (2D tensor) | Pass through unchanged |
 | `tile.create`/`tile.full` (>2D) | Rebuild with flattened 2D shape directly |
+| `tile.assemble` (>2D target) | Fold the ND offset into the flattened `(row, col)` space with the same row-major collapse `tile.load` applies to its tensor-rank offsets (`row = ((o0*d1 + o1)*d2 + o2)*… + o[k-2]`, `col = o[k-1]`); the tile operands themselves are flattened by their defining ops. Requires source, target and offset to share one rank, and the written region to collapse to a contiguous row band (`IsRowMajorCollapseContiguous`) — both rejected in the precondition phase otherwise. Without the fold the offset would keep its ND rank on a 2D tile, and codegen (which reads `elements[0]`/`elements[1]` positionally and ignores the rest) would silently place the write at the wrong address |
 | `tile.transpose` | Sole owner of `pto.ttrans` scratch materialization. Arrives 3-arg (input, axis1, axis2). **2D**: create one scratch tile (shape = SOURCE page, in the input's memory space) and emit the codegen-ready 4-arg `tile.transpose(in, a1, a2, scratch)`. **>2D** (last-two-axes swap): unroll into per-batch 2D transposes, each a 4-arg form with scratch sliced from a flat `[batch*A, B]` pool, assembled into the merged 2D output. A batch-axis swap is a user error |
 | `tile.batch_matmul` | Expand to per-batch 2D `tile.matmul`, honoring batch broadcast. A b_trans/a_trans operand arrives as a zero-copy `tile.transpose_view` over a natural load (no transpose-at-load, no copy); the tile-level op carries no transpose semantic. Each operand is handled identically (see operand handling below) |
 | `tile.batch_matmul_acc` | Expand to per-batch 2D `tile.matmul_acc`, slicing the (already-flattened) accumulator per batch index. Memory-space decisions on the accumulator (Vec/Acc round-trips, retargetable producer promotion of an upstream `tile.create`, TileView refresh) are deferred to `InferTileMemorySpace` (pass 17) — flatten emits no inline `tile.move` |

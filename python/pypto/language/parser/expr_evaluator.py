@@ -16,7 +16,7 @@ from pypto.pypto_core import DataType, ir
 
 from ..typing.dynamic import DynVar
 from ..typing.scalar import Scalar
-from .diagnostics import ParserTypeError
+from .diagnostics import BUG_CLASS_EXCEPTIONS, ParserTypeError
 
 if TYPE_CHECKING:
     from .span_tracker import SpanTracker
@@ -88,6 +88,11 @@ class ExprEvaluator:
             # builtins (open, __import__, exec) but does not prevent calling methods on
             # objects the user placed in scope, which is by design.
             return eval(code, {"__builtins__": _SAFE_BUILTINS}, dict(self.closure_vars))  # noqa: S307
+        except BUG_CLASS_EXCEPTIONS:
+            # Compiler bug, not an unevaluatable expression - surface it with its type and
+            # trace intact. try_eval_expr only swallows ParserTypeError, so this propagates
+            # there too rather than silently falling through to another resolution strategy.
+            raise
         except NameError as e:
             raise ParserTypeError(
                 f"Cannot resolve expression '{expr_str}': {e}",

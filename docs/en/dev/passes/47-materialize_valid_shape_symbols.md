@@ -22,7 +22,7 @@ def softmax_prepare(
 
 `VALID` is neither a physical tensor dimension — those the kernel wrapper
 recovers from the runtime tensor's `shapes[]` — nor a scalar parameter. The
-runtime `Tensor` carries no valid extent (see `runtime/src/common/task_interface/tensor.h`),
+runtime `ChipTensor` carries no valid extent (see `runtime/src/common/task_interface/tensor.h`),
 so the value has to arrive as an argument. Before this pass existed, PTO codegen
 logged `Variable VALID not found in MLIR mapping` and kept going, emitting an
 operand-less `%0 = arith.minsi , %c128_index : index` that surfaced much later as

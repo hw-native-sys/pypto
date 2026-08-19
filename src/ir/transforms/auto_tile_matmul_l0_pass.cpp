@@ -2515,7 +2515,7 @@ bool IsPipelineAccumulatorProfitable(const PipelineAccumulatorCandidate& candida
 std::optional<PipelineAccumulatorCandidate> AnalyzePipelineAccumulator(
     const ForStmtPtr& loop, const MemoryAllocatorPolicy& policy, const backend::BackendHandler* handler) {
   const int stages = loop ? loop->GetAttr<int>(kPipelineStagesAttr, 0) : 0;
-  const int64_t trip_count = loop ? transform_utils::EvalConstTripCount(loop) : -1;
+  const int64_t trip_count = loop ? transform_utils::EvalConstTripCount(loop).value_or(0) : -1;
   if (!loop || loop->kind_ != ForKind::Pipeline || loop->HasAttr(kPipelineOverlapStoresAttr) ||
       loop->HasAttr(kPipelineDoubleBufferCAttr) || stages < 2 || trip_count < stages ||
       trip_count % stages != 0) {

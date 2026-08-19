@@ -64,7 +64,7 @@ params_t21.set_dependencies(params_t21_deps, params_t21_deps_count);
 修复后：
 
 ```cpp
-L0TaskArgs params_phase_fence_barrier_0;
+CoreTaskArgs params_phase_fence_barrier_0;
 PTO2TaskId params_phase_fence_barrier_0_deps[80];
 params_phase_fence_barrier_0.set_dependencies(...);
 TaskOutputTensors phase_fence_barrier_0_outs =

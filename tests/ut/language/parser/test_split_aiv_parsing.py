@@ -15,6 +15,13 @@ body begins with ``aiv_id = pl.tile.get_subblock_idx()`` (the AIV lane index). A
 bare top-level region is wrapped in a synthesized ``InCoreScopeStmt`` so it stays
 eligible for ``OutlineIncoreScopes``; the region may also nest inside an existing
 InCore scope (directly or through an intervening ``pl.range`` / ``if``).
+
+The wrapper is emitted only when the region is not already in a core context.
+Inside a function declared ``pl.FunctionType.InCore`` it is skipped: that
+function IS the core function, so there is nothing to outline a wrapper into —
+and emitting the region bare is what lets a printed ``*_incore_0`` reparse to
+the same IR. Whether a region is *allowed* in such a function is a placement
+rule, enforced by AivSplitValid check (h), not by the parser.
 """
 
 import pypto.language as pl
@@ -179,6 +186,43 @@ class TestSplitAivBuildsNode:
         # The synthesized InCore wrapper itself carries no split / split_aiv attr.
         assert incore.split == ir.SplitMode.NONE
         assert "split_aiv" not in incore.attrs
+
+    def test_incore_function_gets_no_wrapper(self):
+        """In a function already declared ``InCore``, NO wrapper is synthesized.
+
+        Counterpart to ``test_top_level_wrapped_in_incore``: identical body, but
+        the enclosing function is already the core function, so the region is
+        emitted bare — which is what makes printing an outlined function and
+        reparsing it rebuild the same IR. Whether a region is *allowed* here is a
+        separate placement rule, enforced by AivSplitValid check (h).
+        """
+
+        @pl.program
+        class TestProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
+                    offset = aiv_id * 128
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
+                    out = pl.store(t, [offset, 0], out)
+                return out
+
+        main_func = list(TestProgram.functions.values())[0]
+
+        assert _count_descendants(main_func.body, ir.InCoreScopeStmt) == 0
+        region = _unique_descendant(main_func.body, ir.SplitAivScopeStmt)
+        assert region.split == ir.SplitMode.LEFT_RIGHT
+        assert region.count == 2
+        # The region still binds the lane index as its first body statement.
+        first_stmt = _first_body_stmt(region)
+        assert isinstance(first_stmt, ir.AssignStmt)
+        assert isinstance(first_stmt.value, ir.Call)
+        assert first_stmt.value.op.name == _OP_TILE_GET_SUBBLOCK_IDX
+        assert first_stmt.var.name_hint == "aiv_id"
 
     def test_builds_node_none_mode(self):
         """``mode=pl.SplitMode.NONE`` builds a task-parallel region: split is

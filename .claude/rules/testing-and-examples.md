@@ -133,7 +133,7 @@ difficulty tiers for the teaching kernels, category folders for everything else:
 
 - `examples/beginner/` - Language basics, one concept per file (01_hello_world.py through 06_concat.py)
 - `examples/intermediate/` - Real-kernel patterns (01_fused_linear.py through 06_dyn_valid_shape.py)
-- `examples/advanced/` - Performance and low-level techniques (01_split_k.py, 02_auto_tile_matmul.py)
+- `examples/advanced/` - Performance and low-level techniques (01_split_k.py, 02_auto_tile_matmul.py, 03_mixed_kernel.py)
 - `examples/models/` - Multi-kernel model examples, numbered by difficulty (01_ffn.py through 09_paged_attention_spmd.py)
 - `examples/runtime/` - Host/runtime patterns (dispatch, distributed callbacks, KV cache)
 - `examples/utils/` - Parsing, cross-function calls, error handling

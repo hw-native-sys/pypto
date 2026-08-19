@@ -90,8 +90,8 @@ AICORE inline void RoundBarrier(__gm__ CommContext *ctx, __gm__ int32_t *signal_
 }  // namespace
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
-  __gm__ Tensor *data_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
-  __gm__ Tensor *signal_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
+  __gm__ ChipTensor *data_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
+  __gm__ ChipTensor *signal_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
   int nranks = static_cast<int>(args[2]);
   __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[3]);
 
@@ -267,6 +267,20 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // reused by the next host statement, and corrupt the slow right-hand peer's
   // final TLOAD.
   RoundBarrier(comm_ctx, signal_base + round * signal_cols, my_rank, nranks);
+
+  // Self-clearing epilogue: restore every used barrier row to 0 so the signal is
+  // reusable across calls (the InCore credit-barrier protocol). Each row hosted
+  // exactly one RoundBarrier, whose notify gave every peer's cell in my memory a
+  // single +1; undo it with a local self-notify (TNOTIFY on a local address is the
+  // same st_atomic the remote path uses) so the next call's Ge(1) waits actually
+  // synchronize instead of passing on stale credits.
+  for (int r = 0; r < expected_rounds; ++r) {
+    for (int peer = 0; peer < nranks; ++peer) {
+      if (peer == my_rank) continue;
+      pto::comm::Signal self_sig(signal_base + static_cast<size_t>(r) * signal_cols + peer);
+      pto::comm::TNOTIFY(self_sig, static_cast<int32_t>(-1), pto::comm::NotifyOp::AtomicAdd);
+    }
+  }
 
   pipe_barrier(PIPE_ALL);
 }

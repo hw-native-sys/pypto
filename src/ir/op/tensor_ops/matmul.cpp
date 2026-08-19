@@ -212,8 +212,10 @@ REGISTER_OP("tensor.matmul")
 
 TypePtr DeduceTensorMatMulAccType(const std::vector<ExprPtr>& args,
                                   const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  CHECK(args.size() == 3) << "tensor.matmul_acc requires exactly 3 arguments (acc, lhs, rhs), but got "
-                          << args.size();
+  CHECK(args.size() == 3 || args.size() == 4)
+      << "tensor.matmul_acc requires 3 arguments (acc, lhs, rhs) or 4 with the optional init_cond "
+      << "predicate, but got " << args.size();
+  CheckMatmulInitCond(args, 3, "tensor.matmul_acc");
 
   auto acc_type = As<TensorType>(args[0]->GetType());
   auto lhs_type = As<TensorType>(args[1]->GetType());
@@ -311,6 +313,9 @@ REGISTER_OP("tensor.matmul_acc")
     .add_argument("acc", "Accumulator tensor (TensorType)")
     .add_argument("lhs", "Left-hand side tensor (TensorType)")
     .add_argument("rhs", "Right-hand side tensor (TensorType)")
+    .add_argument("init_cond",
+                  "Optional BOOL scalar; where it holds the accumulator is overwritten with "
+                  "lhs @ rhs instead of accumulated into (the split-K `k == 0` step)")
     .set_attr<bool>("a_trans")
     .set_attr<bool>("b_trans")
     .f_deduce_type([](const std::vector<ExprPtr>& args,

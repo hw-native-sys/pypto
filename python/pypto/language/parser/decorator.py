@@ -25,7 +25,7 @@ from pypto.pypto_core import ir
 
 from .ast_parser import ASTParser
 from .comment_extractor import extract_line_comments
-from .diagnostics import ParserError, ParserSyntaxError, concise_error_message
+from .diagnostics import BUG_CLASS_EXCEPTIONS, ParserError, ParserSyntaxError, concise_error_message
 from .enum_utils import FUNCTION_TYPE_MAP, LEVEL_MAP, ROLE_MAP, SPLIT_MODE_MAP, extract_enum_value
 from .source_lookup import get_class_source_lines
 
@@ -1038,6 +1038,9 @@ def function(
             except ParserError:
                 # Re-raise ParserError as-is, it already has source lines
                 raise
+            except BUG_CLASS_EXCEPTIONS:
+                # Compiler bug, not a bad kernel - surface it with its type and trace intact.
+                raise
             except Exception as e:
                 # Wrap unexpected exceptions as ParserError
                 raise ParserSyntaxError(
@@ -1335,6 +1338,9 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
                         hint="Check for Python syntax errors in your function definition",
                     ) from e
                 except ParserError:
+                    raise
+                except BUG_CLASS_EXCEPTIONS:
+                    # Compiler bug, not a bad kernel - surface it with its type and trace intact.
                     raise
                 except Exception as e:
                     raise ParserSyntaxError(

@@ -16,7 +16,7 @@ import types
 
 from pypto.pypto_core import ir
 
-from .diagnostics.exceptions import ParserError, ParserSyntaxError
+from .diagnostics.exceptions import BUG_CLASS_EXCEPTIONS, ParserError, ParserSyntaxError
 from .enum_utils import FUNCTION_TYPE_MAP, LEVEL_MAP, ROLE_MAP
 from .span_tracker import active_source_map, ast_column_to_span_column
 
@@ -261,6 +261,9 @@ def parse(
         exec(compiled_code, exec_ns)
     except ParserError:
         # Re-raise ParserError as-is, it already has source lines
+        raise
+    except BUG_CLASS_EXCEPTIONS:
+        # Compiler bug, not a bad kernel - surface it with its type and trace intact.
         raise
     except Exception as e:
         # Convert exec-time errors to ParserSyntaxError with source location when possible.

@@ -151,6 +151,51 @@ exact physical M/N/K box compatibility while allowing the accumulator's valid
 M/N rectangle and the rhs valid K extent to contain the smaller rectangle PTO
 computes from lhs M/K and rhs N.
 
+#### Conditional accumulator initialization (`init_cond`)
+
+`tile.matmul_acc` and `tensor.matmul_acc` take an optional fourth operand,
+`init_cond`: a BOOL scalar that selects, per execution, whether the accumulator
+is *overwritten* with `lhs @ rhs` or accumulated into. It is the split-K
+`k == 0` idiom, and it removes the need either to zero the accumulator or to
+peel the first K step:
+
+```python
+acc = pl.tile.create([16, N], pl.INT32, target_memory=pl.Mem.Acc)
+for k0 in pl.pipeline(0, K, K_TILE, stage=2):
+    ...
+    acc = pl.tile.matmul_acc(acc, a_left, b_right, init_cond=(k0 == 0))
+```
+
+The predicate is a positional operand rather than a registry kwarg because it
+may be loop-dependent; kwargs carry only compile-time constants. Registering it
+as an operand also means it participates in the use-def chain like any other
+SSA value.
+
+Lowering depends on whether the predicate is known at compile time:
+
+| `init_cond` | Emitted |
+| ----------- | ------- |
+| absent, or literal `False` | `pto.tmatmul.acc ins(dst, lhs, rhs) outs(dst)` |
+| literal `True` | `pto.tmatmul ins(lhs, rhs) outs(dst)` |
+| runtime predicate | `scf.if cond { pto.tmatmul } else { pto.tmatmul.acc }` |
+
+The ISA carries this as bit 63 (`cmatrixInit`) of the MAD's Xt register, so the
+hardware needs no branch; `pto.tmatmul` and `pto.tmatmul.acc` are distinct ops
+with no init operand, hence the branch. Because `matmul_acc` is in place
+(`set_output_reuses_input(0)`), both arms write the same buffer and the `scf.if`
+yields no value — no phi is materialized on the Acc tile.
+
+Two limitations, both diagnosed rather than silently dropped:
+
+- **Rank > 2 is rejected.** The batched form expands into several
+  `tile.matmul_acc` calls inside `FlattenTileNdTo2D`, which has no place to
+  thread a per-call predicate. Loop over the batch dimension instead.
+- **`AutoTileMatmulL0` does not tile a predicated call.** That pass matches on a
+  3-operand `tile.matmul_acc`, so a 4-operand one opts out and is left as
+  written — which is what a hand-managed split-K wants. An oversized predicated
+  accumulate is therefore the author's responsibility, exactly as an oversized
+  unpredicated `tile.matmul_acc` already is.
+
 At the tile layer, `tile.batch_matmul` provides batched semantics for
 `TileType` operands. It accepts rank >= 2 tiles, broadcasts the leading batch
 dimensions, and keeps the same operand-only interface style as `tile.matmul`.
@@ -359,9 +404,29 @@ UINT32 + INT32 → INT32 (signed precedence)
 **Location**: `src/ir/op/tensor_ops/`
 **Python API**: `from pypto.ir.op import tensor`
 
-**Operations:** `tensor.add/sub/mul/div` (element-wise with full N-D broadcasting), `tensor.maximum/minimum` (element-wise max/min; rhs may be tensor or scalar — `ConvertTensorToTileOps` dispatches to `tile.maximum/minimum` or `tile.maximums/minimums` based on the rhs operand type), `tensor.set_validshape` (internal, update valid-shape metadata without data movement — compiler-generated only), `tensor.sort32` / `tensor.mrgsort_format1` / `tensor.mrgsort_format2` (sorting; tensor-level counterparts of `tile.sort32` / `tile.mrgsort` — converted to tile ops by `ConvertTensorToTileOps`), `tensor.gather` (per-dim indexing; MVP supports rank-2 inputs with `dim=-1`, lowered by `ConvertTensorToTileOps` with a backend-specific strategy — on A5 (Ascend950) a last-dim gather becomes a single full-tile `tile.gather` over flat element offsets `flat[i, j] = i * src_cols + index[i, j]`, first materializing a strided tile source (e.g. a `tile.slice` view) into a contiguous tile so the flat index addresses it correctly; on A2A3 (Ascend910B) it keeps the legacy per-row `tile.gather` loop where the column index equals the flat index within each 1-row slice), `tensor.gather_mask` (mask-pattern gather; tensor-level counterpart of `tile.gather_mask`, with optional same-bit-width `output_dtype` — see [Mask patterns](#mask-patterns)), `tensor.scatter` (column scatter; the column-wise inverse of `tensor.gather`, MVP supports rank-2 inputs with `dim=-1` — `out[b, index[b, k]] = src[b, k]`, `index` same shape as `src` — and lowers to `tile.scatter` via `ConvertTensorToTileOps`), `tensor.scatter_mask` (mask-pattern row-scatter; tensor-level counterpart of `tile.scatter_mask`, expands a compact `input` tensor into the mask-marked columns of `dst` — see [Mask patterns](#mask-patterns)), `tensor.ci` / `tensor.arange` (contiguous integer sequence generation; lowers to `tile.ci`; also exposed at top level as `pl.arange`), `tensor.and/ands/or/ors/xor/xors/not/shl/shls/shr/shrs` (integer-only bitwise and shift ops. These are the registered *IR* names; the Python spellings for the three whose leaf is a Python keyword carry a trailing underscore -- `tensor.and_`, `tensor.or_`, `tensor.not_` -- and the printer emits that form so IR round-trips as valid Python; tensor-level counterparts of the matching `tile.*` ops. Both operands of a tensor-tensor form must have the same shape — there is no `tile.row_expand_and`, so broadcasting is rejected at type deduction rather than failing later in the pass. `tensor.not` is int16/uint16 only, matching `tile.not`/TNOT. Shifts keep the lhs element type; `and`/`or`/`xor` promote across integer widths, as their tile counterparts do. `ConvertTensorToTileOps` lowers nine of them 1:1, and synthesizes the `pto.txor` scratch operand for `tensor.xor`/`tensor.xors` so tensor-level callers never supply a `tmp`)
+**Operations:** `tensor.add/sub/mul/div` (element-wise with full N-D broadcasting), `tensor.maximum/minimum` (element-wise max/min; rhs may be tensor or scalar — `ConvertTensorToTileOps` dispatches to `tile.maximum/minimum` or `tile.maximums/minimums` based on the rhs operand type), `tensor.set_validshape` (update valid-shape metadata without data movement; also reachable as `pl.set_validshape`), `tensor.sort32` / `tensor.mrgsort_format1` / `tensor.mrgsort_format2` (sorting; tensor-level counterparts of `tile.sort32` / `tile.mrgsort` — converted to tile ops by `ConvertTensorToTileOps`), `tensor.gather` (per-dim indexing; MVP supports rank-2 inputs with `dim=-1`, lowered by `ConvertTensorToTileOps` with a backend-specific strategy — on A5 (Ascend950) a last-dim gather becomes a single full-tile `tile.gather` over flat element offsets `flat[i, j] = i * src_cols + index[i, j]`, first materializing a strided tile source (e.g. a `tile.slice` view) into a contiguous tile so the flat index addresses it correctly; on A2A3 (Ascend910B) it keeps the legacy per-row `tile.gather` loop where the column index equals the flat index within each 1-row slice), `tensor.gather_mask` (mask-pattern gather; tensor-level counterpart of `tile.gather_mask`, with optional same-bit-width `output_dtype` — see [Mask patterns](#mask-patterns)), `tensor.scatter` (column scatter; the column-wise inverse of `tensor.gather`, MVP supports rank-2 inputs with `dim=-1` — `out[b, index[b, k]] = src[b, k]`, `index` same shape as `src` — and lowers to `tile.scatter` via `ConvertTensorToTileOps`), `tensor.scatter_mask` (mask-pattern row-scatter; tensor-level counterpart of `tile.scatter_mask`, expands a compact `input` tensor into the mask-marked columns of `dst` — see [Mask patterns](#mask-patterns)), `tensor.ci` / `tensor.arange` (contiguous integer sequence generation; lowers to `tile.ci`; also exposed at top level as `pl.arange`), `tensor.and/ands/or/ors/xor/xors/not/shl/shls/shr/shrs` (integer-only bitwise and shift ops. These are the registered *IR* names; the Python spellings for the three whose leaf is a Python keyword carry a trailing underscore -- `tensor.and_`, `tensor.or_`, `tensor.not_` -- and the printer emits that form so IR round-trips as valid Python; tensor-level counterparts of the matching `tile.*` ops. Both operands of a tensor-tensor form must have the same shape — there is no `tile.row_expand_and`, so broadcasting is rejected at type deduction rather than failing later in the pass. `tensor.not` is int16/uint16 only, matching `tile.not`/TNOT. Shifts keep the lhs element type; `and`/`or`/`xor` promote across integer widths, as their tile counterparts do. `ConvertTensorToTileOps` lowers nine of them 1:1, and synthesizes the `pto.txor` scratch operand for `tensor.xor`/`tensor.xors` so tensor-level callers never supply a `tmp`)
 
 `tensor.view` is a metadata-only zero-copy shape/layout reinterpret. It is registered as a `TensorOp` passthrough in `ConvertTensorToTileOps`; PTO in-core codegen lowers it to `pto.make_tensor_view` over the original base pointer. Targets require rank at least 1 (DN requires rank at least 2); orchestration shape reinterpret is ND-only and cannot also change layout. Shape reinterpretation of a partially valid source is limited to either a packed ND leading-dimension collapse to 2D or a contiguous-prefix linear collapse to `[1, product(shape)]`; both require an explicit target `valid_shape`. These forms preserve the source tensor kind and backing metadata.
+
+For plain `TensorType` operands, the supported Tensor-scalar arithmetic
+operators (`adds`, `subs`, `muls`, `divs`, `fmods`, and scalar `maximum` or
+`minimum`) and bitwise/shift operators (`ands`, `ors`, `shls`, and `shrs`)
+create fresh storage but cannot create valid data in padding. Their results
+therefore preserve the tensor operand's effective `valid_shape` while dropping
+source alias, layout, stride, and padding metadata. This matches the existing
+Tile-scalar rule and keeps a ragged tail narrow through Tensor-to-Tile lowering.
+Scalar comparison and XOR (`cmp` and `xors`) remain excluded.
+
+The ordinary arithmetic Tensor-tensor operators (`add`, `sub`, `mul`, `div`,
+`fmod`, `maximum`, and `minimum`) also preserve the effective `valid_shape`
+when both operands have identical physical shapes and their effective valid
+regions are provably equal. The same exact-region rule applies to `and`, `or`,
+`shl`, and `shr`. It needs no broadcast-axis mapping and agrees with the
+corresponding Tile result contract; the result remains fresh storage and
+therefore inherits no alias, layout, stride, or padding metadata. Comparison,
+XOR, `part_*`, broadcasting, different valid regions, and direct distributed
+window operands are not covered by this rule because their current lowering or
+combination contracts require separate handling.
 
 `pl.reinterpret_view(data, dtype, *, shape=None)` dispatches to the equivalent `pl.tensor` or `pl.tile` operator and returns the same kind. It is a zero-copy view over exactly the same bytes, so `dtype` must differ and be one of signed/unsigned 8/16/32/64-bit integers, FP16, BF16, or FP32. With no `shape`, ND/row-major scales the last axis and DN/col-major scales the penultimate axis by the source/target byte-width ratio. An explicit shape must be byte-equivalent and fully static unless it is provably identical to the auto-inferred shape; a partial `valid_shape` only permits that auto-equivalent shape. Zero/null padding metadata is preserved, while dtype-dependent max/min padding is cleared. The initial executable path supports packed ND in-core tensors and packed flat (`none_box`) row/col-major tiles; DN tensor inference is available but Tensor-to-Tile lowering rejects it, and orchestration tensors are unsupported.
 
@@ -436,6 +501,11 @@ contract in [Types](02-types.md#tiletype)), so a result view matching the
 destination's implicit view collapses to `nullopt` — the same per-space view
 [`InferTileMemorySpace`](../passes/17-infer_tile_memory_space.md) refreshes a
 retyped tile to.
+
+`tile.move` is not in-place safe: within one memory space, its source and result
+must resolve to distinct addresses. The PyPTO and DSA-RP planners enforce this
+constraint, and baked-address PTO codegen reports an error if an explicit
+MemRef binding or hand-built IR still presents a same-address move.
 
 ### Reshape and the valid region
 
@@ -515,7 +585,7 @@ with ib.function("tile_computation") as f:
 | `system.bar_v` | Vector barrier (lowers to `pto.barrier <PIPE_V>`) | None |
 | `system.bar_m` | Matrix barrier (lowers to `pto.barrier <PIPE_M>`) | None |
 | `system.fence` | Memory barrier over global memory (lowers to `pto.fence.barrier_all #pto.fence_scope<gm>`) | None |
-| `system.cacheinvalid` | Invalidate the cache lines backing a tensor sub-region. Args: `tensor`, `shapes` (N-D), `offsets` (N-D). Every region size — a single element included — lowers to `pto.partition_view` + `pto.cmo.cacheinvalid %payload_view single_cache_line : !pto.partition_tensor_view<...>` | None |
+| `system.cacheinvalid` | Invalidate the cache line containing a tensor sub-region's base address. Args: `tensor`, `shapes` (N-D), `offsets` (N-D). Every region size — a single element included — lowers to `pto.partition_view` + `pto.cmo.cacheinvalid %payload_view single_cache_line : !pto.partition_tensor_view<...>`; `shapes` does not make it walk every cache line. The no-argument form invalidates all GM. | None |
 | `system.syncall` | Cross-core all-participant barrier (`pto::SYNCALL`). `mode="hard"` (FFTS, no operands) or `mode="soft"` (GM-polling, operands) | `core_type` (`"aiv_only"` \| `"aic_only"` \| `"mix"`), `mode` (`"hard"` \| `"soft"`) |
 | `system.sync_src` | Set sync flag | `set_pipe`, `wait_pipe`, `event_id` |
 | `system.sync_dst` | Wait sync flag | `set_pipe`, `wait_pipe`, `event_id` |
@@ -524,15 +594,13 @@ with ib.function("tile_computation") as f:
 | `system.available_cluster_count` | This run's MIX cluster (= AIC) count, read from the device. Result `Scalar[INT32]` | None |
 | `system.available_aiv_count` | This run's standalone AIV core count, read from the device. Result `Scalar[INT32]` | None |
 
-`system.syncall` has two modes. The **hard** form (`mode="hard"`, default) emits an FFTS barrier that waits for **all** physical cores of the selected `core_type`; the kernel must be launched at full occupancy (one block per physical core) **and with `sync_start=True`** (so all blocks are co-resident — a non-sync_start launch may dispatch blocks in waves and deadlock the barrier), or it deadlocks (AICore error 507018). The **soft** form (`mode="soft"`) polls a shared GM workspace and so works at **partial** occupancy. `gm_workspace` is a shared, zero-initialized GM `INT32` tensor with `used_cores * 8` slots (pass it as a kernel parameter so all blocks share one buffer); the scratch tile(s) are compiler-synthesized local staging buffers; `used_cores` is the participant count. Soft mode is supported for every `core_type`, with operands that vary by participant set:
+`system.syncall` has two modes. The **hard** form (`mode="hard"`, default) emits an FFTS barrier that waits for **all** physical cores of the selected `core_type`; the kernel must be launched at full occupancy (one block per physical core) **and with `sync_start=True`** (so all blocks are co-resident — a non-sync_start launch may dispatch blocks in waves and deadlock the barrier), or it deadlocks (AICore error 507018). The **soft** form (`mode="soft"`) polls a shared GM workspace and so works at **partial** occupancy. `gm_workspace` is a shared, zero-initialized GM `INT32` tensor containing at least 16 elements (64 bytes). Pass it as a kernel parameter so all blocks share one buffer; it must occupy an exclusive cache line and be zero-initialized before its first use.
 
-- `aiv_only`: `[gm_workspace, ub_scratch, used_cores]` — one UB (Vec) staging tile.
-- `aic_only`: `[gm_workspace, l1_scratch, used_cores]` — one flat L1 (Mat, `slayout=none_box`) staging tile.
-- `mix`: `[gm_workspace, ub_scratch, l1_scratch, used_cores]` — both a UB and a flat L1 tile. The barrier rendezvouses AIC + AIV cores, so `used_cores` is the *total* participant count (AIC blocks + AIV subblocks). The op is duplicated onto both the cube and vector lanes; each lane uses its own tile (the other is dead), matching pto-isa's soft-mix lowering.
+The current PTO-ISA uses the same soft operand ABI for every `core_type`: `[gm_workspace]` derives the participant count from the device launch configuration, while `[gm_workspace, used_cores]` supplies it explicitly as a Python integer in the INT32 range or an `INT32` scalar. The high-level DSL requires `used_cores` to make that choice explicit: pass a positive count for the two-operand form, or explicitly pass `0` for the one-operand form. For `mix`, an explicit count is the total number of AIC and AIV participants. Runtimes whose logical grid differs from the device launch registers must use a positive explicit count; this includes the currently pinned Simpler runtime. No UB/L1 scratch tile is required.
 
-The flat L1 staging tile is created via `pl.tile.create(..., target_memory=pl.Mem.Mat, flat_layout=True)`, which keeps the contiguous `slayout=none_box` layout (a normal boxed NZ Mat tile would mis-place the 8-int32 counter slots).
+Both modes guarantee barrier arrival only. They do not wait for preceding data instructions such as `TSTORE`, and they do not publish or invalidate business-data cache lines. For a cross-core GM handoff that may span multiple cache lines, conservatively publish the producer's writes with whole-GM `system.cacheinvalid()` and `system.fence` before the barrier, then use whole-GM `system.cacheinvalid()` on the consumer before it reads. The tensor-region form invalidates only the cache line containing the view's base address.
 
-The unified `mode=` keyword API (`mode="hard"` / `mode="soft"`) is the **DSL** surface (`pl.system.syncall`). The Python IR helpers under `pypto.ir.op.system` are split instead: `syncall(core_type=...)` builds the hard form and `syncall_soft(core_type, args)` builds the soft form.
+The unified `mode=` keyword API (`mode="hard"` / `mode="soft"`) is the **DSL** surface (`pl.system.syncall`). The Python IR helpers under `pypto.ir.op.system` are split instead: `syncall(core_type=...)` builds the hard form and `syncall_soft(core_type, gm_workspace, used_cores=None)` builds the soft form.
 
 `system.available_cluster_count` / `system.available_aiv_count` are the SPMD **launch-shape queries**: pass one as `pl.spmd(...)`'s `core_num` so the launch sizes itself on the device the run lands on. Orchestration codegen lowers them to `rt_available_cluster_count()` / `rt_available_aiv_count()`. Use the cluster count for a mixed (AIC+AIV) or cube-only kernel — one block per core-group — and the AIV count for a vector-only kernel. This is the only launch width that stays at full occupancy across devices, which the hard `system.syncall` requires; the `HardSyncallOccupancy` verifier accepts these widths without a count comparison and rejects the query for the *other* core type. Pass the call inline (`pl.spmd(pl.system.available_cluster_count())`) rather than binding it to a name first — a name reaches the outlined `Spmd` wrapper as a variable defined in the caller, which the IR printer cannot re-parse. Source: `src/ir/op/sync_ops/launch.cpp`.
 

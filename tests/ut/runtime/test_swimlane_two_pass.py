@@ -9,7 +9,7 @@
 
 """Unit tests for the two-pass L2 swimlane execution protocol.
 
-Enabling ``enable_l2_swimlane`` on an onboard platform captures the dep_gen task
+Enabling ``enable_chip_swimlane`` on an onboard platform captures the dep_gen task
 graph (``deps.json``) in a subprocess, then runs a clean-timing swimlane pass
 in-process — the two cannot share one process because the runtime leaks SVM
 host-register mappings between DFX runs. These tests drive
@@ -48,29 +48,39 @@ def _drive(dfx: _DfxOpts, platform: str) -> tuple[list[_DfxOpts], int]:
 
 
 def test_onboard_swimlane_captures_deps_then_times_in_process():
-    seen, captures = _drive(_DfxOpts(enable_l2_swimlane=True), "a2a3")
+    seen, captures = _drive(_DfxOpts(enable_chip_swimlane=True), "a2a3")
     # deps captured once (subprocess), one in-process timing pass.
     assert captures == 1
     assert len(seen) == 1
     timing = seen[0]
-    assert timing.enable_l2_swimlane is True
+    assert timing.enable_chip_swimlane == 4  # True normalizes to the full level
     assert timing.enable_dep_gen is False  # dep_gen forced off on the timing pass
+
+
+def test_onboard_swimlane_preserves_requested_level():
+    # Regression (issue #2385): the two-pass split must carry the requested
+    # collection level through to the timing pass, not re-derive an on/off flag.
+    seen, captures = _drive(_DfxOpts(enable_chip_swimlane=2), "a2a3")
+    assert captures == 1
+    assert len(seen) == 1
+    assert seen[0].enable_chip_swimlane == 2
+    assert seen[0].enable_dep_gen is False
 
 
 def test_onboard_swimlane_with_explicit_dep_gen_still_one_capture():
     # An explicit --enable-dep-gen alongside swimlane must NOT add an in-process
     # dep_gen run: the subprocess capture already produced deps.json.
-    seen, captures = _drive(_DfxOpts(enable_l2_swimlane=True, enable_dep_gen=True), "a2a3")
+    seen, captures = _drive(_DfxOpts(enable_chip_swimlane=True, enable_dep_gen=True), "a2a3")
     assert captures == 1
     assert len(seen) == 1
-    assert seen[0].enable_l2_swimlane is True and seen[0].enable_dep_gen is False
+    assert seen[0].enable_chip_swimlane == 4 and seen[0].enable_dep_gen is False
 
 
 def test_onboard_swimlane_timing_dfx_ride_the_in_process_pass():
     # PMU / args-dump / scope-stats are timing-sensitive: they ride the clean
     # in-process timing pass (the subprocess capture is dep_gen-only).
     dfx = _DfxOpts(
-        enable_l2_swimlane=True,
+        enable_chip_swimlane=True,
         enable_pmu=2,
         enable_dump_args=1,
         enable_scope_stats=True,
@@ -89,7 +99,7 @@ def test_only_dep_gen_is_single_pass_no_capture():
     assert captures == 0
     assert len(seen) == 1
     assert seen[0].enable_dep_gen is True
-    assert seen[0].enable_l2_swimlane is False
+    assert seen[0].enable_chip_swimlane == 0
 
 
 def test_no_dfx_is_single_pass_no_capture():
@@ -101,10 +111,10 @@ def test_no_dfx_is_single_pass_no_capture():
 
 def test_sim_swimlane_stays_single_pass_no_capture():
     # Simulator skips swimlane conversion anyway, so no capture / second run.
-    seen, captures = _drive(_DfxOpts(enable_l2_swimlane=True), "a2a3sim")
+    seen, captures = _drive(_DfxOpts(enable_chip_swimlane=True), "a2a3sim")
     assert captures == 0
     assert len(seen) == 1
-    assert seen[0].enable_l2_swimlane is True
+    assert seen[0].enable_chip_swimlane == 4
 
 
 def test_build_args_spec_host_tensor_saves_real_data(tmp_path):
@@ -139,7 +149,7 @@ def _converter_argv(monkeypatch, work_dir: Path, swimlane_dir: Path) -> list[str
     monkeypatch.setattr(_runner.importlib.util, "find_spec", lambda name: object())
     argv: list[list[str]] = []
     monkeypatch.setattr(_runner.subprocess, "run", lambda cmd, check: argv.append(cmd))
-    records = swimlane_dir / "l2_swimlane_records.json"
+    records = swimlane_dir / "chip_swimlane_records.json"
     records.write_text("{}", encoding="utf-8")
     _generate_swimlane(work_dir, swimlane_dir, records)
     assert len(argv) == 1

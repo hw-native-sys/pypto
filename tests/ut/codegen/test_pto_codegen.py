@@ -22,6 +22,7 @@ Tests verify:
 import re
 
 import pypto.language as pl
+import pypto.language.distributed as pld
 import pytest
 from pypto import DataType, backend, codegen, ir
 from pypto.backend import BackendType, pto_backend
@@ -37,6 +38,7 @@ from pypto.backend.pto_backend import (
 )
 from pypto.ir import OptimizationStrategy, PassManager
 from pypto.ir.builder import IRBuilder
+from pypto.ir.op import tensor as tensor_ops
 from pypto.ir.op import tile
 
 PTOCodegen = codegen.PTOCodegen
@@ -878,35 +880,41 @@ def test_pto_codegen_iter_arg_alias_resolves_store_view():
     assert len(partition_lines) >= 2, f"Expected load + store partition_view, got: {partition_lines}"
 
 
-def test_pto_codegen_mixed_slice_assign_and_write_keeps_ptr():
-    """Mixing slice-assign (view) with pl.write (ptr) on one tensor must not clash.
+def test_pto_codegen_lowered_mixed_store_keeps_ptr():
+    """Low-level mixed stores keep distinct tensor-view and pointer SSA values.
 
     Regression for #1493: slice-assign lowers to `pto.make_tensor_view`/`tstore`
     (a `!pto.tensor_view`) while pl.write lowers to `store_scalar` (a `!pto.ptr`).
     Both must not bind to the same SSA name, or ptoas rejects one value typed two
     ways. The base pointer must flow through to store_scalar, not the view SSA.
+
+    ConvertTensorToTileOps rejects this source-level combination for memory
+    coherence (#2005), so this codegen-only invariant is tested on already
+    lowered IR and intentionally bypasses the default pipeline.
     """
-    T = 768
+    tensor_type = ir.TensorType([32, 1], DataType.FP32)
+    ib = IRBuilder()
+    with ib.function("mixed_store", type=ir.FunctionType.InCore) as f:
+        out = f.param("out", tensor_type)
+        f.return_type(tensor_type)
+        src = ib.let("src", tile.load(out, [0, 0], [32, 1]))
+        stored = ib.let("stored", tile.store(src, [0, 0], out))
+        val = ib.let("val", tensor_ops.read(out, [0, 0]))
+        result = ib.let("result", tensor_ops.write(stored, [0, 0], val))
+        ib.return_stmt(result)
 
-    @pl.program
-    class MixedAccess:
-        @pl.function
-        def main(self, out: pl.Out[pl.Tensor[[T, 1], pl.FP32]]):
-            buf = pl.create_tensor([T, 1], dtype=pl.FP32)
-            with pl.at(level=pl.Level.CORE_GROUP, name_hint="repro"):
-                buf[:, :] = pl.full([T, 1], dtype=pl.FP32, value=0.0)
-                for r in pl.range(T):
-                    val: pl.Scalar[pl.FP32] = pl.read(out, [r, 0])
-                    pl.write(buf, [r, 0], val)
-            out[:, :] = buf
+    mlir = _generate_mlir(ir.Program([f.get_result()], "mixed_store", ir.Span.unknown()))
 
-    prog = _run_default_passes(MixedAccess)
-    aiv = [f for f in prog.functions.values() if f.func_type == ir.FunctionType.AIV]
-    sub = ir.Program(aiv, "m", aiv[0].span)
-    mlir = _generate_mlir(sub)
-
-    # The view path stays a tensor_view; the element write resolves to the ptr.
-    store_scalar = _single_line(_get_mlir_lines(mlir), "pto.store_scalar")
+    # The bulk path partitions a tensor_view for tstore; the scalar path uses the ptr.
+    lines = _get_mlir_lines(mlir)
+    tstore = _single_line(lines, "pto.tstore")
+    assert "!pto.partition_tensor_view" in tstore
+    tstore_view_match = re.search(r"outs\((%\w+) : !pto\.partition_tensor_view", tstore)
+    assert tstore_view_match, f"Expected tstore partition view operand, got: {tstore}"
+    partition_view = _single_line(lines, f"{tstore_view_match.group(1)} = pto.partition_view")
+    assert "!pto.tensor_view" in partition_view
+    assert "!pto.partition_tensor_view" in partition_view
+    store_scalar = _single_line(lines, "pto.store_scalar")
     assert "_view[" not in store_scalar, f"store_scalar must use ptr, not view: {store_scalar}"
     assert "!pto.ptr<f32>" in store_scalar
 
@@ -1227,6 +1235,13 @@ class TestPreprocessPtoasOutput:
         result = _preprocess_ptoas_output(SAMPLE_PTOAS_OUTPUT)
         assert "ptoas_bitcast" in result
 
+    def test_renames_only_standalone_ptoas_tensor_type(self):
+        source = "Tensor value; GlobalTensor<float> global; TensorView view; ChipTensor ready;\n"
+
+        assert _preprocess_ptoas_output(source) == (
+            "ChipTensor value; GlobalTensor<float> global; TensorView view; ChipTensor ready;\n"
+        )
+
     def test_mgather_preprocess_fast_path_preserves_unrelated_content(self):
         source = "AICORE void kernel() {\n  TSTORE(v3);\n}\n"
 
@@ -1324,17 +1339,17 @@ class TestGenerateArgUnpacking:
     def test_tensor_only(self):
         func = _make_func("test_fn", [("a", "tensor"), ("b", "tensor"), ("out", "tensor")])
         code, names = _generate_arg_unpacking(func)
-        assert "reinterpret_cast<__gm__ Tensor*>(args[0])" in code
-        assert "reinterpret_cast<__gm__ Tensor*>(args[1])" in code
-        assert "reinterpret_cast<__gm__ Tensor*>(args[2])" in code
+        assert "reinterpret_cast<__gm__ ChipTensor*>(args[0])" in code
+        assert "reinterpret_cast<__gm__ ChipTensor*>(args[1])" in code
+        assert "reinterpret_cast<__gm__ ChipTensor*>(args[2])" in code
         assert names == ["a", "b", "out"]
 
     def test_mixed_tensor_scalar(self):
         func = _make_func("test_fn", [("input", "tensor"), ("scale", "scalar"), ("output", "tensor")])
         code, names = _generate_arg_unpacking(func)
         # Tensors-first: input=args[0], output=args[1], scale=args[2]
-        assert "reinterpret_cast<__gm__ Tensor*>(args[0])" in code
-        assert "reinterpret_cast<__gm__ Tensor*>(args[1])" in code
+        assert "reinterpret_cast<__gm__ ChipTensor*>(args[0])" in code
+        assert "reinterpret_cast<__gm__ ChipTensor*>(args[1])" in code
         assert "scale_conv.u64 = args[2];" in code
         assert "float scale = scale_conv.val;" in code
         assert names == ["input", "output", "scale"]
@@ -1614,6 +1629,67 @@ class TestGenerateKernelWrapper:
         wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
         # Tensors-first: a=arg0, out=arg1, s=arg2
         assert "my_kernel(a, out, s);" in wrapper
+
+    def test_defer_wait_wrapper_forwards_raw_args_through_checked_adapter(self):
+        @pl.program
+        class DeferredWrapperProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def deferred_kernel(
+                self,
+                signal: pld.DistributedTensor[[4, 8], pl.INT32],
+                expected: pl.Scalar[pl.INT32],
+            ):
+                # Backend-only fixture: outlining a validated ``pl.at`` waiter
+                # scope stamps this internal marker in production pipelines.
+                pl.func_attr({"deferred_completion_waiter": True})
+                pld.system.defer_wait(
+                    signal,
+                    offsets=[1, 2],
+                    expected=expected,
+                    cmp=pld.WaitCmp.Ge,
+                )
+
+        func = DeferredWrapperProgram.get_function("deferred_kernel")
+        assert func is not None
+        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
+
+        assert '#include "pto_async_kernel_api.h"' in wrapper
+        assert '#if !__has_include("pto_async_kernel_api.h")' in wrapper
+        assert "requires a Simpler runtime that provides pto_async_kernel_api.h" in wrapper
+        assert "static __aicore__ void pypto_register_counter_completion(" in wrapper
+        assert "AsyncCtx ctx = get_async_ctx(raw_args);" in wrapper
+        assert "if (!async_ctx_is_deferred(ctx))" in wrapper
+        assert "const bool slab_is_valid =" in wrapper
+        assert "ctx.completion_count != nullptr" in wrapper
+        assert "ctx.completion_error_code != nullptr" in wrapper
+        assert "ctx.completion_entries != nullptr" in wrapper
+        assert "ctx.completion_capacity > 0" in wrapper
+        assert "ctx.completion_capacity <= static_cast<uint32_t>(MAX_COMPLETIONS_PER_TASK)" in wrapper
+        assert (
+            wrapper.index("if (!async_ctx_is_deferred(ctx))")
+            < wrapper.index("const bool slab_is_valid =")
+            < wrapper.index("expected < 0 || expected > kMaxExpected")
+        )
+        assert wrapper.count("*ctx.completion_count = 0;") == 2
+        assert "*ctx.completion_error_code = PTO2_ERROR_ASYNC_COMPLETION_INVALID;" in wrapper
+        assert "ctx.task_token.raw = 0;" in wrapper
+        assert "__builtin_trap();" in wrapper and "trap();" in wrapper
+        assert "expected < 0 || expected > kMaxExpected" in wrapper
+        assert wrapper.index("expected < 0 || expected > kMaxExpected") < wrapper.index(
+            "static_cast<uint32_t>(expected)"
+        )
+        assert "PTO2_ERROR_ASYNC_COMPLETION_INVALID" in wrapper
+        # Registration + writeback delegates to the runtime's public helper
+        # rather than restating its token fields. Its only failure is slab
+        # overflow, which it records itself as ASYNC_WAIT_OVERFLOW, so the
+        # adapter must not also publish REGISTRATION_FAILED.
+        assert "save_expected_notification_counter(" in wrapper
+        assert "PTO2_ERROR_ASYNC_REGISTRATION_FAILED" not in wrapper
+        # The only automatic detector for runtime capacity drift.
+        assert "static_assert(MAX_COMPLETIONS_PER_TASK == 64," in wrapper
+        assert "pto2::detail::defer_flush(ctx);" in wrapper
+        assert ") + signal_tensor->start_offset;" in wrapper
+        assert "deferred_kernel(signal, expected, args);" in wrapper
 
     def test_ptoas_code_made_static(self):
         func = _make_func("my_kernel", [("a", "tensor"), ("s", "scalar"), ("out", "tensor")])

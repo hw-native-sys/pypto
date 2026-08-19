@@ -123,7 +123,7 @@ int BuildDirMask(const CrossCorePipeMetadata& metadata) {
   return dir_mask;
 }
 
-int GetSlotNumForDirMask(int dir_mask) {
+int GetPtoasImplicitSlotNum(int dir_mask) {
   return dir_mask == (core_affinity::kDirMaskC2V | core_affinity::kDirMaskV2C) ? 4 : 8;
 }
 
@@ -175,17 +175,16 @@ CallPtr CreateImportPeerBuffer(const std::string& buffer_name, const std::string
 }
 
 CallPtr CreateInitializePipe(core_affinity::CoreSide side, int dir_mask, int slot_size_bytes,
-                             const ExprPtr& c2v_consumer_buf, const ExprPtr& v2c_consumer_buf,
-                             std::optional<int> slot_num, const Span& span) {
+                             const ExprPtr& c2v_consumer_buf, const ExprPtr& v2c_consumer_buf, int slot_num,
+                             const Span& span) {
   INTERNAL_CHECK_SPAN(slot_size_bytes >= 0 && slot_size_bytes <= std::numeric_limits<int>::max(), span)
       << "Cross-core slot_size out of range: " << slot_size_bytes;
+  INTERNAL_CHECK_SPAN(slot_num > 0, span) << "Cross-core slot_num must be positive: " << slot_num;
+  // Always emitted: the reserved buffer is sized for exactly this depth, so leaving the clause off
+  // would let PTOAS index its own implicit ring depth past the end of that buffer.
   std::vector<std::pair<std::string, std::any>> kwargs = {{"dir_mask", std::any(dir_mask)},
-                                                          {"slot_size", std::any(slot_size_bytes)}};
-  if (slot_num.has_value()) {
-    INTERNAL_CHECK_SPAN(slot_num.value() > 0, span)
-        << "Cross-core slot_num override must be positive: " << slot_num.value();
-    kwargs.emplace_back("slot_num", std::any(slot_num.value()));
-  }
+                                                          {"slot_size", std::any(slot_size_bytes)},
+                                                          {"slot_num", std::any(slot_num)}};
   const std::string op_name = core_side_ops::InitializePipeOp(side);
   return CreateSystemOpCall(op_name, {c2v_consumer_buf, v2c_consumer_buf}, kwargs, span);
 }
@@ -287,16 +286,15 @@ AutomaticPipeSetup BuildAutomaticPipeSetup(const std::string& func_name, const s
     return {};
   }
 
-  // Ring depth: pl.split(mode, slot_num=N) override, else the PTOAS-matching
-  // default (8 unidirectional / 4 bidirectional). The reserved buffer and the
-  // emitted initialize_pipe slot_num attribute both use this value, so PTOAS
-  // and the auto-reserved buffer stay consistent on a3 (local footprint =
-  // slot_num when local_slot_num is omitted) and a5 (footprint = slot_num).
+  // Ring depth: pl.cross_core_slot(slot_num=N) override, else kDefaultAutoPipeSlotNum. The reserved
+  // buffer and the emitted initialize_pipe slot_num attribute both use this value, and the attribute
+  // is always emitted — so the buffer and the depth PTOAS indexes stay consistent on a3 (local
+  // footprint = slot_num when local_slot_num is omitted) and a5 (footprint = slot_num).
   if (slot_num_override.has_value()) {
     INTERNAL_CHECK_SPAN(slot_num_override.value() > 0, span)
         << "Cross-core slot_num override must be positive: " << slot_num_override.value();
   }
-  const int effective_slot_num = slot_num_override.value_or(GetSlotNumForDirMask(dir_mask));
+  const int effective_slot_num = slot_num_override.value_or(kDefaultAutoPipeSlotNum);
   // Bound-check the slot size before multiplying so an oversized inferred size
   // can't overflow the int64 buffer_size computation.
   const int64_t slot_size_i64 = common_slot_size.value();
@@ -345,11 +343,11 @@ AutomaticPipeSetup BuildAutomaticPipeSetup(const std::string& func_name, const s
 
   setup.aic_stmts.push_back(
       std::make_shared<EvalStmt>(CreateInitializePipe(core_affinity::CoreSide::AIC, dir_mask, slot_size_bytes,
-                                                      aic_c2v_arg, aic_v2c_arg, slot_num_override, span),
+                                                      aic_c2v_arg, aic_v2c_arg, effective_slot_num, span),
                                  span));
   setup.aiv_stmts.push_back(
       std::make_shared<EvalStmt>(CreateInitializePipe(core_affinity::CoreSide::AIV, dir_mask, slot_size_bytes,
-                                                      aiv_c2v_arg, aiv_v2c_arg, slot_num_override, span),
+                                                      aiv_c2v_arg, aiv_v2c_arg, effective_slot_num, span),
                                  span));
 
   return setup;

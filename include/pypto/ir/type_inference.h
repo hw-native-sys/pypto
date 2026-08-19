@@ -257,6 +257,22 @@ void CheckGatherRowOperands(const std::vector<ExprPtr>& args,
                             const std::string& op_name);
 
 /**
+ * @brief Validate the optional ``init_cond`` operand of an accumulating matmul
+ *
+ * ``matmul_acc(acc, lhs, rhs, init_cond)`` overwrites ``acc`` with ``lhs @ rhs``
+ * on the steps where ``init_cond`` holds and accumulates into it otherwise. The
+ * predicate is an ordinary SSA value rather than a kwarg because it may be
+ * loop-dependent (the split-K ``k == 0`` idiom); registry kwargs only carry
+ * compile-time constants.
+ *
+ * @param args Operand list; the operand at @p index is validated when present
+ * @param index Position of ``init_cond``. Nothing is checked when the operand
+ *              list is shorter, since the predicate is optional.
+ * @param op_name Operator name used in diagnostics
+ */
+void CheckMatmulInitCond(const std::vector<ExprPtr>& args, size_t index, const std::string& op_name);
+
+/**
  * @brief Read the elements of a tuple-typed operand
  *
  * A ``MakeTuple`` operand yields its elements directly, which preserves the
@@ -285,7 +301,7 @@ enum class WindowReadKind {
   ///
   /// ``tensor.slice``: PTO codegen emits the view shape already clamped to
   /// ``min(shape, parent - offset)``, because the strided-Tensor runtime enforces
-  /// ``offset + shape <= parent`` in ``Tensor::view``. A padded fixed-width window
+  /// ``offset + shape <= parent`` in ``ChipTensor::view``. A padded fixed-width window
   /// with an explicit ``valid_shape`` naming the real extent is the standard idiom.
   ///
   /// ``tile.load``: the DMA fetches only the valid extent, so the destination tile

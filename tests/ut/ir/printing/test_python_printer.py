@@ -620,6 +620,36 @@ def test_python_print_distributed_tensor_explicit_layout_surfaces_window_buffer(
     assert explicit_plain != explicit_wb
 
 
+def test_python_print_var_subclasses_reach_the_expression_printer():
+    """Every Var subclass must print as an Expr, not as the unsupported sentinel.
+
+    ``IRPythonPrinter::Print`` gates its expression arm on ``As<Expr>(node)``,
+    which consults the ``KindTrait<Expr>::kinds`` array. A Var subclass carrying
+    its own ``ObjectKind`` but missing from that array falls straight through to
+    ``"<unsupported IRNode type>"`` even though the printer has a working
+    ``VisitExpr_`` overload for it. That is exactly what happened to
+    ``WindowBuffer``: the overload at ``python_printer.cpp`` printed the
+    inherited name hint, but ``Print`` never reached it.
+    """
+    span = ir.Span.unknown()
+    index_ty = ir.ScalarType(DataType.INDEX)
+    unsupported = "<unsupported IRNode type>"
+
+    nodes = {
+        "Var": ir.Var("v", index_ty, span),
+        "IterArg": ir.IterArg("acc", index_ty, ir.ConstInt(0, DataType.INDEX, span), span),
+        "MemRef": ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INDEX, span), 256, 0),
+        "WindowBuffer": ir.WindowBuffer(
+            ir.Var("wbuf", ir.PtrType(), span), ir.ConstInt(4096, DataType.INT32, span), span=span
+        ),
+    }
+    for name, node in nodes.items():
+        assert python_print(node, format=False) != unsupported, f"{name} did not reach the Expr printer"
+
+    # WindowBuffer prints through the name hint inherited from its base Ptr Var.
+    assert python_print(nodes["WindowBuffer"], format=False) == "wbuf"
+
+
 def test_python_print_all_scalar_types():
     """Test all scalar type annotations."""
     span = ir.Span.unknown()

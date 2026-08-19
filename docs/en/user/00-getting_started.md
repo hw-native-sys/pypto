@@ -11,7 +11,7 @@ distributed programs.
 > | Section | Destination |
 > | ------- | ----------- |
 > | Resident device tensors, explicit dispatch, compiling from a signature | `execution/01-run.md` |
-> | Per-launch timing, `benchmark` | `performance/00-methodology.md` |
+> | Per-launch timing, `benchmark` | `performance/06-host.md` |
 > | Distributed (L3+) execution | `distributed/03-execution.md` |
 >
 > Nothing here is deprecated — only the address is temporary.
@@ -28,19 +28,47 @@ memory and returns a `DeviceTensor` handle that `CompiledProgram` accepts in
 place of a `torch.Tensor`. The runtime treats the buffer as already resident
 and skips both H2D and D2H copies for that argument.
 
+<!-- doctest: setup -->
 ```python
+import pypto.language as pl
 import torch
 from pypto import ir
 from pypto.runtime import ChipWorker, RunConfig
 
-compiled = ir.compile(MyKernel)
+ROWS, COLS = 128, 128
+PLATFORM = "__PLATFORM__"
 
-with ChipWorker(config=RunConfig(platform="a2a3sim")) as w:
-    weight = w.alloc_tensor((1024, 4096), torch.float16, init=host_weight)
-    for batch in batches:
-        out = torch.empty(batch.shape[0], 4096, dtype=torch.float16)
-        compiled(batch, weight, out)
-    w.free_tensor(weight)
+
+@pl.jit
+def add_kernel(a: pl.Tensor, b: pl.Tensor, out: pl.Out[pl.Tensor]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        ta = pl.load(a, [0, 0], [ROWS, COLS])
+        tb = pl.load(b, [0, 0], [ROWS, COLS])
+        pl.store(pl.add(ta, tb), [0, 0], out)
+    return out
+
+
+torch.manual_seed(0)
+A = torch.randn(ROWS, COLS, dtype=torch.float32)
+B = torch.randn(ROWS, COLS, dtype=torch.float32)
+
+# A DeviceTensor carries no shape/dtype for the @pl.jit specializer to read, so
+# the resident-weight pattern below runs a *compiled* program rather than the
+# jit entry directly.
+compiled = ir.compile(add_kernel.lower(A, B, torch.zeros(ROWS, COLS)), platform=PLATFORM)
+```
+
+<!-- doctest: run -->
+```python
+cfg = RunConfig(platform=PLATFORM)
+
+with ChipWorker(config=cfg) as w:
+    resident = w.alloc_tensor((ROWS, COLS), torch.float32, init=B)  # stays on device
+    for _ in range(3):                                              # three "batches"
+        out = torch.zeros(ROWS, COLS, dtype=torch.float32)
+        w.run(compiled, A, resident, out)
+        torch.testing.assert_close(out, A + B, rtol=1e-4, atol=1e-4)
+    w.free_tensor(resident)
 ```
 
 ### Caveats
@@ -61,13 +89,15 @@ worker hidden — library code that needs to pass the worker around, or a
 serving runtime that wants to pre-register many kernels, should drive
 dispatch explicitly:
 
+<!-- doctest: run -->
 ```python
-worker = ChipWorker(config=RunConfig(platform="a2a3sim"))
+worker = ChipWorker(config=RunConfig(platform=PLATFORM))
 try:
-    out = worker.run(compiled, a, b)                 # one-shot
     handle = worker.register(compiled)               # eager registration
-    for _ in range(1000):                            # hot loop, no cid lookup
-        handle(a, b, out)
+    out = torch.zeros(ROWS, COLS, dtype=torch.float32)
+    for _ in range(3):                               # hot loop, no cid lookup
+        handle(A, B, out)
+    torch.testing.assert_close(out, A + B, rtol=1e-4, atol=1e-4)
 finally:
     worker.close()                                   # cids + DeviceTensors released
 ```
@@ -150,8 +180,8 @@ a per-launch timing object. The runtime emits per-run host/device timing as
 `[STRACE]` log markers (simpler PR #1177, on by default under
 `SIMPLER_DFX`); parse them with simpler's `strace_timing` /
 `device_log_timing` tools rather than reading a return value. For per-task
-device timing, enable the L2 swimlane DFX (`RunConfig(enable_l2_swimlane=True)`)
-and read `l2_swimlane_records.json`.
+device timing, enable the L2 swimlane DFX (`RunConfig(enable_chip_swimlane=True)`)
+and read `chip_swimlane_records.json`.
 
 ### Benchmarking (`benchmark`)
 
@@ -217,9 +247,10 @@ run concurrently) or sit in a different clock domain (`runner_run` host wall vs
 `device_wall` on-NPU), so child durations need not sum to the parent. Drill into
 raw spans via `stats.invocations[i].by_name()[<name>].dur_us`.
 
-`benchmark` also accepts an L3 `DistributedCompiledProgram` (opened via
-`compiled.prepare()`): pass shared-memory host tensors (or `DeviceTensor`s) and
-omit `platform=` / `device_id=` (the device set is fixed at compile time via
+`benchmark` also accepts an L3 `DistributedCompiledProgram` and opens its own
+prepared worker. Pass shared-memory host tensors; an externally allocated
+resident tensor belongs to a different worker and is not accepted. Omit
+`platform=` / `device_id=` (the device set is fixed at compile time via
 `distributed_config`). L3 has no single DAG-level device wall, so timing is
 folded from the per-rank chip-child markers into per-round samples — the headline
 `device_wall_us[k]` is the max across ranks of each rank's summed dispatch device
@@ -339,19 +370,20 @@ The guide includes a **line-by-line walkthrough, ring allreduce trade-offs,
 notify/wait handshake patterns, and a debugging table**. The full chapter is
 at [distributed/index.md](distributed/index.md).
 
-L3+ distributed programs returned by `ir.compile` (a `DistributedCompiledProgram`)
-accept `DeviceTensor` arguments the same way as `CompiledProgram`: pass a
-worker-resident buffer in place of a `torch.Tensor` and the runtime skips H2D/D2H
-for that argument. This is the recommended way to keep large static weights
-resident across the many dispatches of a generate loop.
+L3+ resident tensors must be allocated by the same prepared
+`DistributedWorker` that dispatches them: use its `alloc_tensor` for a
+`DeviceTensor` or its `alloc_stacked_tensor` for a `StackedDeviceTensor`.
+These APIs retain the Simpler owner `Buffer` on every tensor or shard, as
+required by the address-free wire ABI; a manually built raw-pointer tensor
+cannot safely cross that boundary. One-shot `compiled(...)` calls accept host
+`torch.Tensor` parameters only and reject both resident types.
 
 ```python
 import torch
-from pypto.runtime import DeviceTensor
-
 compiled = ir.compile(MyDistributedProgram)   # returns DistributedCompiledProgram
-weight = DeviceTensor(dev_ptr, (1024, 4096), torch.float16)   # caller-managed buffer
-compiled(x, weight, out)                       # weight: no H2D/D2H copy
+with compiled.prepare() as rt:
+    weight = rt.alloc_tensor((1024, 4096), torch.float16, init=host_weight)
+    rt(x, weight, out)                         # weight: no per-dispatch H2D/D2H
 ```
 
 #### Reusing setup across dispatches (`prepare()`)
@@ -362,13 +394,15 @@ dispatches the same program many times (e.g. a generate loop), call
 `compiled.prepare()` once to get a `DistributedWorker` handle that runs setup
 once and dispatches many times on the same worker.
 
-Per-call IO buffers are **shared-memory host tensors allocated before `prepare()`** and reused in
-place, so child writes are visible to the parent. Large static weights may remain ordinary contiguous
-CPU tensors when registered through `DistributedWorker(..., inherited_host_tensors=[...])` before
-fork. Registration retains their storage only as a read-only H2D source for `rt.alloc_tensor` and
-`rt.alloc_stacked_tensor`; registered tensors cannot be passed directly to a dispatch. Call
-`release_inherited_host_tensor_refs()` after the final upload to drop the runtime's parent-process
-references. Existing forked child mappings remain until the worker closes.
+Per-call dispatch IO buffers are **shared-memory host tensors allocated before
+`prepare()`** and reused in place, so child writes are visible to the parent.
+Explicit resident uploads and copy-backs through `rt.alloc_tensor(init=...)`,
+`rt.alloc_stacked_tensor(...)`, `rt.copy_to(...)`, `rt.copy_from(...)`, and
+`rt.copy_stacked_from(...)` stage through runtime-owned shared memory. Their
+host `torch.Tensor` endpoints only need to be CPU-contiguous and may be created
+after `prepare()`; they do not need `.share_memory_()`, pre-fork allocation, or
+`inherited_host_tensors`. The low-level `copy_to`/`copy_from` methods take the
+host tensor's `.data_ptr()` plus a byte count.
 
 ```python
 from pypto.runtime import DistributedWorker
@@ -378,12 +412,11 @@ compiled = ir.compile(MyDistributedProgram)
 # shared-memory host buffers — allocated BEFORE prepare()
 host_x = torch.zeros((seq, 4096), dtype=torch.float16).share_memory_()
 host_out = torch.zeros((seq, 4096), dtype=torch.float16).share_memory_()
-host_weight = load_weight().contiguous()           # immutable ordinary CPU tensor
 
-with DistributedWorker(compiled, inherited_host_tensors=[host_weight]) as rt:
+with DistributedWorker(compiled) as rt:
+    # Explicit upload source may be an ordinary tensor created after prepare().
+    host_weight = load_weight().contiguous()
     weight = rt.alloc_tensor(host_weight.shape, host_weight.dtype, init=host_weight)
-    rt.release_inherited_host_tensor_refs()      # drop the runtime's parent-process Host reference
-    del host_weight                              # drop the caller's final parent-process reference
     for step in generate_steps:
         host_x.copy_(next_input(step))          # refresh input in place
         rt(host_x, weight, host_out)            # host shm IO + resident weight
@@ -402,14 +435,12 @@ each shard **once** and keep it resident on its card, build a
 `StackedDeviceTensor` with `rt.alloc_stacked_tensor`:
 
 ```python
-host_w = load_weight().contiguous()              # [B, N, M], B == world_size
 host_a = torch.zeros((B, N, M), dtype=...).share_memory_()
 host_out = torch.zeros((B, N, M), dtype=...).share_memory_()
 
-with DistributedWorker(compiled, inherited_host_tensors=[host_w]) as rt:
+with DistributedWorker(compiled) as rt:
+    host_w = load_weight().contiguous()          # post-prepare ordinary CPU tensor
     w = rt.alloc_stacked_tensor(host_w)          # shard i uploaded to card i, once
-    rt.release_inherited_host_tensor_refs()
-    del host_w
     for step in steps:
         host_a.copy_(next_input(step))
         rt(host_a, w, host_out)                  # x[r] resolves to the resident shard r
@@ -418,7 +449,8 @@ with DistributedWorker(compiled, inherited_host_tensors=[host_w]) as rt:
 ```
 
 Internally each shard `host_w[i]` becomes a worker-resident `DeviceTensor`, so the
-generated `x[r]` indexing skips the H2D upload (`child_memory`). Shards are
+generated `x[r]` indexing derives a wire Tensor from the retained Buffer and
+skips the H2D upload. Shards are
 auto-freed on `close()` if not released earlier via `free_stacked_tensor`.
 
 Like a single `DeviceTensor`, a `StackedDeviceTensor` is never copied back
@@ -426,10 +458,10 @@ automatically. To read the current device contents of every shard back to the
 host in one call — e.g. a resident KV cache at the end of a step — use
 `rt.copy_stacked_from(w, host_out)`, the read-back symmetric of
 `alloc_stacked_tensor`. `host_out` is filled in place (`host_out[i]` receives
-shard `i`) and must be a CPU, contiguous, **shared-memory**
-`[B, *tail]` tensor matching the stack's shape and dtype, allocated before
-`prepare()` (call `.share_memory_()`): the D2H copy runs in the forked chip worker,
-which can only write host memory it inherited at fork.
+shard `i`) and must be a CPU-contiguous `[B, *tail]` tensor matching the
+stack's shape and dtype. It may be allocated after `prepare()` because the D2H
+operation stages through a runtime-owned shared Buffer; `.share_memory_()` and
+`inherited_host_tensors` are not required.
 
 The leading dimension is the shard dimension and `B` must equal the number of
 cards the program dispatches to. By default shard `i` lands on worker `i`

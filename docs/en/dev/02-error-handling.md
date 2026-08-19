@@ -67,6 +67,60 @@ stricter — it rejects anything other than `0` or `1` — so stick to those two
 path — `libbacktrace`, `nanobind`, libc, the C++ standard library, and the `error.h` / `logging.h`
 throw sites (`kFileNameFilter` in `src/core/backtrace.cpp`).
 
+### Augmenting an error without flattening it
+
+An intermediate frame often wants to add context to an error already in flight — the op registry
+appends the IR span to every type-deduction failure, so a message thrown deep inside a deduction
+function still names the offending DSL line. Catching `const Error&` and constructing a fresh
+exception does that, but at two costs: the concrete type collapses to whatever the catcher throws,
+and the stack trace captured at the original throw is replaced by the catcher's own.
+
+Use `Error::RethrowWithMessage` instead. It is virtual and every subclass overrides it, so the
+exception rethrows as its own type carrying the frames of the original throw:
+
+```cpp
+try {
+  result_type = deduce_type_fn(args, kwargs);
+} catch (const Error& e) {
+  // Concrete type and original trace survive; only the message changes.
+  e.RethrowWithMessage(std::string(e.what()) + LocationSuffix(span));
+} catch (const std::exception& e) {
+  // Non-PyPTO exceptions carry no PyPTO trace to keep.
+  throw ValueError(std::string(e.what()) + LocationSuffix(span));
+}
+```
+
+Catching `const std::exception&` alone is the trap: `InternalError`, `TypeError` and `IndexError`
+all derive from `Error : std::runtime_error`, so a single handler that rethrows `ValueError`
+silently flattens every one of them — erasing the `CHECK` / `INTERNAL_CHECK` distinction for
+everything below the catch, and defeating the ordered translator chain in
+`python/bindings/modules/error.cpp` before it can run.
+
+**Adding a new `Error` subclass?** End the class body with `PYPTO_ERROR_RETHROW_SUPPORT(YourError)`,
+which defines the trace-adopting constructor and the override. A subclass that omits it still
+compiles, but rethrows as a plain `Error`. A subclass carrying extra state needs a hand-written
+override so that state survives too — `VerificationError` is the worked example.
+
+The Python parser has the mirror-image trap. Its handlers wrap stray exceptions as source-located
+`ParserError`s, which would re-hide an `InternalError` the moment it escaped C++. Every broad
+`except Exception` on the parse path therefore re-raises `BUG_CLASS_EXCEPTIONS`
+(`python/pypto/language/parser/diagnostics/exceptions.py`) first:
+
+```python
+except ParserError:
+    raise
+except BUG_CLASS_EXCEPTIONS:
+    # Compiler bug, not a bad kernel - surface it with its type and trace intact.
+    raise
+except Exception as e:
+    raise InvalidOperationError(...) from e
+```
+
+This covers speculative evaluations too, where the broad handler *swallows* rather than
+wraps (`try: ... except Exception: pass`, then fall through to another strategy). Those
+are the worse case: a swallowed `InternalError` is replaced by whatever unrelated error
+the fall-through path raises next.
+
 ### Platform support for stack traces
 
 `3rdparty/libbacktrace` tracks upstream [ianlancetaylor/libbacktrace](https://github.com/ianlancetaylor/libbacktrace).
@@ -94,6 +148,30 @@ CHECK_SPAN(shape.size() == 2, span) << "tensor.matmul: only 2D inputs are suppor
 ```
 
 The `span` argument follows the same safety rule as `INTERNAL_CHECK_SPAN`: it is evaluated only on failure, but unconditionally evaluated there. The span source must therefore be safe to dereference at the failure point (typically a local `Span` variable or a sibling IR node known non-null).
+
+#### The `Check failed:` tail is stripped before it reaches DSL users
+
+`FatalLogger::~FatalLogger` appends `\nCheck failed: <expr> at <file>:<line>` to **every** check message, `CHECK` included. That tail names a C++ expression and an absolute build-machine path — useful when debugging PyPTO, noise for someone whose kernel is simply invalid. Since the renderer splices the whole message into its bold `Error:` header, an unstripped tail lands between the header and the `-->` arrow pointing at the user's own source.
+
+The DSL parser therefore routes a user-facing backend exception through `concise_error_message()` (`python/pypto/language/parser/diagnostics/exceptions.py`) before wrapping it in a `ParserError`. The raw text stays reachable via `PTO_BACKTRACE=1`, which prints the Python traceback carrying the original exception as `__cause__`.
+
+Two consequences for op authors:
+
+- **Always give `CHECK` a `<<` message.** Once the tail is stripped, a bare `CHECK(cond);` has nothing left to say, and the user gets a generic "backend check reported no message" placeholder instead of an actionable error.
+- **Do not hand-roll `throw pypto::ValueError(...)` to dodge the tail.** That workaround predates the parser-side strip and is no longer needed for DSL-reachable checks.
+
+#### A `CHECK_SPAN` location is stripped too, but only where the arrow replaces it
+
+`FatalLogger` writes the `*_SPAN` macros' `[<file>:<line>:<column>]` location *before* that newline, so it is part of the payload and survives the tail strip — an absolute path in the middle of the bold header. Worse, it need not agree with the `-->` arrow underneath: the check's span is whatever IR node it was handed, often an *operand's definition*, while the arrow is the call site.
+
+`concise_error_message(exc, strip_trailing_span=True)` drops it. The parameter is opt-in because removing the location is only safe when the caller has a better place to show one:
+
+| Call site | `strip_trailing_span` | Why |
+| --------- | --------------------- | --- |
+| `_dispatch_op` / `_dispatch_ir_builder_op` (`ast_parser.py`) | `True` | Raises with `span=` — the renderer's arrow and code snippet locate the failing call |
+| Parse-function wrappers (`decorator.py`) | `False` (default) | Raises with no `span=`, so the inline location is the only one the user would get |
+
+The strip is gated on the `Check failed:` tail actually having been removed. Only `FatalLogger` emits the inline location, and it always emits the tail alongside — so a pure-Python message that happens to end in bracketed colon-separated integers (an extended slice, say) is never touched.
 
 ### Internal invariant checks — `INTERNAL_CHECK_SPAN`
 
@@ -237,6 +315,39 @@ CHECK_SPAN(args.size() == 2, span) << "tensor.matmul requires 2 args";
 ### Inside passes: CHECK vs INTERNAL_CHECK
 
 Passes operate on IR that has already been verified by earlier passes. A failed invariant inside a pass therefore almost always indicates a **compiler bug**, not a user error — use `INTERNAL_CHECK_SPAN` / `INTERNAL_UNREACHABLE_SPAN`. Reserve `CHECK_SPAN` for genuine user-facing limitations that the user can work around (e.g. "4D scatter_update is not yet lowered — use 2D"). If you're unsure, ask: *would the message read "this is a PyPTO bug, please report" or "please change your code"?*
+
+### Inside codegen and backend emitters
+
+The same reasoning applies with less room for doubt. `src/codegen` and `src/backend` run *after*
+the whole pass pipeline, so an invariant that fails there cannot have come from user input:
+
+| Class | Verdict | Why |
+| ----- | ------- | --- |
+| Argument count (`op->args_.size() == N`) | `INTERNAL_CHECK_SPAN` | Arity is fixed by the op definition and enforced by the registry's deduce-type function at IR-construction time |
+| Result of an `As<T>()` downcast | `INTERNAL_CHECK_SPAN` | The operand type was settled during type deduction and re-checked by the verifier |
+| Codegen-internal bookkeeping (SSA names, offset maps) | `INTERNAL_CHECK` | Populated by codegen itself; no user-reachable input |
+| Unsupported dtype x backend, unsupported feature combination | `CHECK_SPAN` | The user chose the dtype and the backend; the message should name the remedy |
+| A user-supplied kwarg's value (e.g. `tensor.create`'s `init_value`) | `CHECK_SPAN` | No upstream pass constrains it |
+
+The table is the policy, not a description of the current tree: the argument-count sweep is done,
+but roughly 34 post-`As<T>()` checks in these two directories are still `CHECK`. That sweep needs
+per-site judgment — several sit beside tests that assert `ValueError` — so it was left for a
+follow-up rather than done mechanically, and the lint below deliberately does not flag them.
+
+`op` is a `const ir::CallPtr&` in every emitter registration macro, so `op->span_` is in scope and
+the `_SPAN` form is almost always available — it attaches the IR source location these sites would
+otherwise lack.
+
+**One deliberate exception.** `ChooseL0Tile` (`src/ir/transforms/utils/l0_tile_chooser.cpp`) raises
+its rejections as `CHECK`s on purpose: `AutoTileMatmulL0` catches `pypto::ValueError` specifically
+in order to emit perf hint PH-AT-005 and leave the matmul untouched. Because `InternalError` is a
+*sibling* of `ValueError` rather than a subclass, converting those checks would turn a graceful
+skip into an uncaught abort.
+
+These sites are unreachable from Python by construction, so no runtime test can hold the
+classification in place. `tests/lint/check_emitter_check_classification.py` (wired into
+`.pre-commit-config.yaml`) is the guard: it rejects a `CHECK` in either tree whose message says
+"Internal error", and a `CHECK` on a call's argument count.
 
 ## Related
 

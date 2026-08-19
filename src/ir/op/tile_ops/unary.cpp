@@ -225,12 +225,19 @@ REGISTER_OP("tile.recip")
     .functional_execution_memory_access()
     .set_description("Reciprocal (1/x) of a tile (element-wise)")
     .add_argument("tile", "Input tile (TileType)")
+    .set_attr<bool>("high_precision")
     .set_input_memory(0, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     .not_inplace_safe()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileUnaryType(args, kwargs, "tile.recip");
+      auto result_type = DeduceTileUnaryType(args, kwargs, "tile.recip");
+      auto tile_type = As<TileType>(args[0]->GetType());
+      CHECK(!GetKwargOr<bool>(kwargs, "high_precision", false) || tile_type->dtype_ == DataType::FP16 ||
+            tile_type->dtype_ == DataType::FP32)
+          << "The operator tile.recip supports high_precision only for FP16 or FP32 because the PTOAS "
+             "high-precision template does not implement other dtypes";
+      return result_type;
     });
 
 REGISTER_OP("tile.sqrt")

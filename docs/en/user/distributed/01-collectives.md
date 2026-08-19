@@ -108,8 +108,8 @@ Cross-rank barrier — blocks until all ranks arrive.
 signal = pld.tensor.barrier(signal)
 ```
 
-Uses `Set(1)` + `Ge(1)` on the signal. Single-shot; allocate a fresh buffer
-before the next barrier.
+Uses a self-clearing credit barrier (`AtomicAdd(+1)` / `Ge(1)` with a reset
+epilogue), so one signal buffer is reusable across back-to-back calls.
 
 ## Broadcast
 

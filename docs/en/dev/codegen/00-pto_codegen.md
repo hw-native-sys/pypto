@@ -139,6 +139,7 @@ print(pto_code)
 | `tile.store(tile, [row, col], tensor)` | `pto.partition_view` + `pto.tstore` |
 | `tile.slice(tile, [h, w], [row, col][, valid_shape=...])` | `pto.subview` (zero-copy view; `valid [...]` clause emitted only when `valid_shape` is supplied) |
 | `tile.assemble(target, source, [row, col])` | (optional) `pto.tmov target -> dst` + `pto.subview dst[row, col] sizes [src.rows, src.cols]` + `pto.tmov src -> dst_view` |
+| `tile.set_validshape(tile, vr, vc)` | `pto.set_validshape`; a view operand is rejected (see below) |
 | `tile.mul(lhs, rhs)` | `pto.tmul` |
 | `tile.add(a, b, c)` | `pto.taddc` (3-operand add) |
 | `tile.adds(tile, scalar)` | `pto.tadds` (tile + scalar) |
@@ -165,6 +166,18 @@ that case it preserves any data outside the insertion window.  The
 trailing `pto.tmov src → dst_view` is the actual data write into the
 sub-window carved out by `pto.subview`.
 
+**`tile.set_validshape` lowering details.**  `pto.set_validshape` mutates the
+operand's `valid_row` / `valid_col` operands, so the operand must be a handle
+that has them: an alloc, an `scf.if` result, a cross-core pop slot.  A **view** —
+the `pto.subview` a `tile.slice` lowers to, or a `pto.treshape` — carries its
+valid extent in its own type instead, so ptoas rejects the op against one; PyPTO
+therefore rejects it first, with a message pointing at the slice.  View-ness is
+tracked at those emission sites rather than inferred from the rendered dims: a
+slice given a runtime `valid_shape` renders `v_row=?, v_col=?` exactly as an
+alloc-backed handle does.  To narrow a view, pass `valid_shape=` to the slice
+(it lands in `pto.subview`'s `valid [...]` clause and accepts runtime extents),
+or call `set_validshape` on the source tile before taking the view.
+
 ### Cross-Core Operations → PTO Instructions
 
 | PyPTO Operation | Generated PTO-ISA | Description |
@@ -180,7 +193,7 @@ sub-window carved out by `pto.subview`.
 | `system.reserve_buffer(...)` | `%name = pto.reserve_buffer {name = "N", size = S, location = #pto.address_space<loc>, auto = false, base = B} -> i32` | Reserve buffer (`auto = true`, `base` omitted under `memory_planner=PTOAS`) |
 | `system.import_peer_buffer(...)` | `%name = pto.import_reserved_buffer {name = "N", peer_func = @F} -> i32` | Import peer buffer |
 | `system.syncall(core_type=C)` | `pto.syncall() mode = #pto.sync_all_mode<hard>, core_type = #pto.sync_core_type<C>` | Cross-core all-participant barrier (hard/FFTS form) |
-| `system.syncall(mode="soft", core_type="aiv_only", gm_workspace=ws, used_cores=N)` | `pto.syncall(%gm_pview, %scratch, %used : !pto.partition_tensor_view<...xi32>, !pto.tile_buf<loc=vec, ...i32>, i32) mode = #pto.sync_all_mode<soft>, core_type = #pto.sync_core_type<aiv_only>` | Soft/GM-polling barrier (partial occupancy; `gm_workspace` lowers to a `pto.partition_view`, scratch tile is compiler-synthesized) |
+| `system.syncall(mode="soft", core_type=C, gm_workspace=ws, used_cores=N)` | `pto.syncall(%gm_pview[, %used] : !pto.partition_tensor_view<...xi32>[, i32]) mode = #pto.sync_all_mode<soft>, core_type = #pto.sync_core_type<C>` | Current PTO-ISA soft/GM-polling barrier (partial occupancy; at least 64-byte GM workspace; explicit `N=0` derives the count from device launch registers and omits `%used`) |
 
 **Notes:**
 
@@ -189,11 +202,18 @@ sub-window carved out by `pto.subview`.
 - If the pushed tile was allocated with dynamic `valid_row` / `valid_col` operands or updated by
   `tile.set_validshape`, `tpush` emits the same tile handle after its runtime valid shape has been
   updated. For split `tpush`, codegen temporarily uses the full physical transport box, then restores
-  the producer tile's logical valid shape; consumer-side dynamic tpop operands carry the logical
-  extents used by compute and store. A partial no-split Acc-to-Vec transfer also uses the full physical
-  box for both TPUSH and TPOP, because the Cube-to-Vector FIFO is physically box-strided, and restores
-  the logical valid shape immediately on each side of the transport.
-- When a tpop result `TileView.valid_shape` differs from the physical tile shape, PTO codegen emits PTOAS frontend operands as `%buf = pto.tpop_from_*(%valid_row, %valid_col) {[id = I, ]split = N} -> !pto.tile_buf<..., v_row=?, v_col=?, ...>`. This covers dynamic expressions and static non-full shapes such as `[0, 0]`; the operands carry the logical extents used by compute and store.
+  the producer tile's logical valid shape.
+- The Cube-to-Vector FIFO is physically box-strided at **every** split: the ISA builds the GM slot
+  view from the popped tile's compile-time rows/cols and the producer's box row pitch, then strides
+  that view with the tile's *runtime* `valid_col`. A partial valid shape on TPOP therefore collapses
+  the GM row gap and makes the consumer read one contiguous run instead of one box row per burst —
+  silent corruption of the *valid* region, since the ISA's matching assertion is compiled out in
+  release builds. So a partial Acc-to-Vec transfer uses the full physical box for both TPUSH and
+  TPOP, whether the transfer is no-split or `split = 1` / `split = 2`, and restores the logical valid
+  shape immediately on each side of the transport — on the consumer side through a metadata-only
+  `pto.treshape` (a frontend tpop result is not a locally bound PTOAS tile, so `pto.set_validshape`
+  cannot restore it in place).
+- When a tpop result `TileView.valid_shape` differs from the physical tile shape, PTO codegen emits PTOAS frontend operands as `%buf = pto.tpop_from_*(%valid_row, %valid_col) {[id = I, ]split = N} -> !pto.tile_buf<..., v_row=?, v_col=?, ...>`. This covers dynamic expressions and static non-full shapes such as `[0, 0]`; the operands carry the logical extents used by compute and store. The full-box Cube-to-Vector transport above overrides this for a statically-shaped, non-empty partial pop, because `pto.treshape` carries no valid-row/valid-col operands and so can only restore *static* logical extents.
 - For split consumers, `SplitVectorKernel` localizes those dynamic tpop
   valid-shape operands per subblock (for example global `[8, 16]` becomes
   `[8, 16]` then `[0, 16]` under up/down split of a `[16, 16]` tile).
@@ -670,6 +690,8 @@ When the program contains an Orchestration function, the PTO backend generates t
 ```text
 output_dir/
 ├── passes_dump/                     # IR after each pass
+├── ptoas_passes/                    # Optional ptoas IR after each pass
+│   └── <kernel-or-group>/            # ptoas/MLIR-managed dump tree
 ├── ptoas/                           # Intermediates
 │   ├── <func_name>.pto              # MLIR from PTOCodegen
 │   └── <func_name>.cpp              # C++ from ptoas
@@ -680,6 +702,9 @@ output_dir/
 └── kernel_config.py                 # Runtime/orchestration/kernel config
 ```
 
+`ptoas_passes/` is emitted only when `ir.compile(...,
+dump_ptoas_passes=True)` or `RunConfig(dump_ptoas_passes=True)` is used.
+
 The orchestration codegen generates identical orchestration C++ code using the PTO2 runtime API (`rt_submit_task`, `make_tensor_external`, etc.).
 
 ### Runtime configuration (`kernel_config.py`)
@@ -688,8 +713,25 @@ The orchestration codegen generates identical orchestration C++ code using the P
 
 | Key | When emitted | Notes |
 | --- | ------------ | ----- |
-| `runtime` | Always | Currently `"tensormap_and_ringbuffer"`. |
+| `runtime` | Always | `"tensormap_and_ringbuffer"` (default) or `"host_build_graph"` — the wire name of the `RuntimeKind` selected by `ir.compile(runtime=...)`, or by wrapping the call in `PassContext([], runtime=...)`. |
 | `aicpu_thread_num` | Always (`0`) | `0` selects the runtime's architecture default (a2a3: 4; a5: 5); callers may explicitly override it. |
+
+The runtime is carried by `PassContext` as an `ir::RuntimeKind`, not by a
+codegen-only argument, so passes that must legalize IR for a specific runtime
+switch on `PassContext::GetRuntime()` rather than comparing strings. It is an
+enum rather than a name because the set is closed — one enumerator per
+implementation under `runtime/src/<arch>/runtime/` — so a typo is a compile
+error instead of a value that surfaces much later as an opaque CCEC error about
+a nonexistent include directory.
+
+The wire name crosses the ABI boundary in exactly one place each way:
+`ir::RuntimeKindToName` when writing `kernel_config.py`, and
+`ir::RuntimeKindFromName` when reading one back. Both are re-exported to Python
+as `passes.runtime_kind_to_name` / `passes.runtime_kind_from_name`.
+
+The runtime is also part of the `@pl.jit` cache key, so a `host_build_graph`
+call cannot reuse an artifact compiled for `tensormap_and_ringbuffer`, whose
+`kernel_config.py` names a runtime no matching worker would bind.
 
 ### Argument Unpacking
 
@@ -697,7 +739,7 @@ The wrapper unpacks `int64_t* args` following the standard convention:
 
 | Parameter Type | Unpacking Pattern |
 | -------------- | ----------------- |
-| `TensorType` | `Tensor*` → `buffer.addr` → typed pointer |
+| `TensorType` | `ChipTensor*` → `buffer.addr` → typed pointer |
 | `ScalarType` | `uint64_t` → union decode → typed value |
 
 ### SPMD Identity Parameters

@@ -100,7 +100,7 @@ from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import PadValue
 
-from ..typing import IntLike, Scalar, Tensor, Tile
+from ..typing import BoolLike, IntLike, Scalar, Tensor, Tile
 from . import tensor_ops as _tensor
 from . import tile_ops as _tile
 
@@ -566,12 +566,17 @@ def abs(input: T) -> T:
     raise TypeError(f"pl.abs: expected Tensor or Tile, got {type(input).__name__}")
 
 
-def recip(input: T) -> T:
-    """Element-wise reciprocal (1/x), dispatched by input type."""
+def recip(input: T, high_precision: bool = False) -> T:
+    """Element-wise reciprocal (1/x), dispatched by input type.
+
+    Args:
+        input: Input tensor or tile
+        high_precision: Whether to select PTOAS's high-precision reciprocal mode (FP16/FP32 only)
+    """
     if isinstance(input, Tensor):
-        return _tensor.recip(input)
+        return _tensor.recip(input, high_precision=high_precision)
     if isinstance(input, Tile):
-        return _tile.recip(input)
+        return _tile.recip(input, high_precision=high_precision)
     raise TypeError(f"pl.recip: expected Tensor or Tile, got {type(input).__name__}")
 
 
@@ -1000,6 +1005,7 @@ def matmul_acc(
     rhs: Tensor,
     a_trans: bool = ...,
     b_trans: bool = ...,
+    init_cond: BoolLike | None = ...,
 ) -> Tensor: ...
 @overload
 def matmul_acc(
@@ -1008,6 +1014,7 @@ def matmul_acc(
     rhs: Tile,
     a_trans: Literal[False] = ...,
     b_trans: Literal[False] = ...,
+    init_cond: BoolLike | None = ...,
 ) -> Tile: ...
 
 
@@ -1017,6 +1024,7 @@ def matmul_acc(
     rhs: T,
     a_trans: bool = False,
     b_trans: bool = False,
+    init_cond: BoolLike | None = None,
 ) -> T:
     """Matrix multiplication with accumulation, dispatched by input type.
 
@@ -1025,20 +1033,25 @@ def matmul_acc(
     flag — so passing either with Tile operands raises rather than being
     dropped.
 
+    ``init_cond`` makes the accumulator's initial value conditional: on the steps
+    where it holds, ``acc`` is overwritten with ``lhs @ rhs`` rather than
+    accumulated into, which is the split-K ``k == 0`` idiom. It applies to 2D
+    operands only.
+
     For Tensor inputs with rank > 2 on any of acc/lhs/rhs, the call is lowered
     to ``tile.batch_matmul_acc`` (with batch broadcasting on lhs/rhs vs the
     fixed acc batch) by ``ConvertTensorToTileOps`` and then unrolled to
     per-batch ``tile.matmul_acc`` by ``FlattenTileNdTo2D``.
     """
     if isinstance(acc, Tensor) and isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
-        return _tensor.matmul_acc(acc, lhs, rhs, a_trans, b_trans)
+        return _tensor.matmul_acc(acc, lhs, rhs, a_trans, b_trans, init_cond)
     if isinstance(acc, Tile) and isinstance(lhs, Tile) and isinstance(rhs, Tile):
         _reject_tile_unsupported(
             "matmul_acc",
             a_trans=(a_trans, _TILE_TRANSPOSE_REMEDY),
             b_trans=(b_trans, _TILE_TRANSPOSE_REMEDY),
         )
-        return _tile.matmul_acc(acc, lhs, rhs)
+        return _tile.matmul_acc(acc, lhs, rhs, init_cond)
     _raise_type_dispatch_error("matmul_acc", acc, lhs, rhs)
 
 
@@ -1506,8 +1519,10 @@ def set_validshape(input, valid_rows, valid_cols):
     """Update valid-shape metadata without data movement, dispatched by input type.
 
     .. note::
-        Internal API — intended for compiler-generated code. End users should
-        prefer ``pl.load(..., valid_shape=...)`` plus ``pl.tile.fillpad``.
+        Prefer expressing the extent at its source where possible —
+        ``pl.load(..., valid_shape=...)`` or a slice's ``valid_shape=``. A tile
+        view (slice / reshape result) is rejected: it carries its valid extent in
+        its type, so there are no runtime operands to update.
     """
     if isinstance(input, Tensor):
         return _tensor.set_validshape(input, valid_rows, valid_cols)

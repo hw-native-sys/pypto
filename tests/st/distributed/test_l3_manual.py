@@ -127,7 +127,7 @@ class TestL3Manual:
         expected = torch.full((128, 128), 5.0, dtype=torch.float32)
 
         def verify(args) -> None:
-            f_view = _tensor_from_continuous(args.tensor(0))
+            f_view = _tensor_from_continuous(args[0])
             if not torch.allclose(f_view, expected, rtol=1e-5, atol=1e-5):
                 raise AssertionError(
                     f"manual SubWorker verify failed: max diff = {(f_view - expected).abs().max().item()}"
@@ -167,13 +167,13 @@ class TestL3Manual:
         def orch_fn(orch, _unused_args, _unused_cfg) -> None:
             del _unused_args, _unused_cfg  # required by simpler's orch_fn signature
             chip_ta = TaskArgs()
-            chip_ta.add_tensor(make_tensor_arg(a), TensorArgType.INPUT)
-            chip_ta.add_tensor(make_tensor_arg(b), TensorArgType.INPUT)
-            chip_ta.add_tensor(make_tensor_arg(f), TensorArgType.OUTPUT_EXISTING)
+            chip_ta.add_tensor(make_tensor_arg(w, a), TensorArgType.INPUT)
+            chip_ta.add_tensor(make_tensor_arg(w, b), TensorArgType.INPUT)
+            chip_ta.add_tensor(make_tensor_arg(w, f), TensorArgType.OUTPUT_EXISTING)
             orch.submit_next_level(chip_cid, chip_ta, call_config, worker=0)
 
             verify_ta = TaskArgs()
-            verify_ta.add_tensor(make_tensor_arg(f), TensorArgType.INPUT)
+            verify_ta.add_tensor(make_tensor_arg(w, f), TensorArgType.INPUT)
             orch.submit_sub(verify_cid, verify_ta)
 
         try:

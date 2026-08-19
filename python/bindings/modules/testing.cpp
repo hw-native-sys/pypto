@@ -104,6 +104,47 @@ namespace python {
 }
 
 /**
+ * @brief Throw the PyPTO exception named by `kind`
+ *
+ * Sole throw site for `rethrow_with_message` below, so tests can assert that the
+ * reported stack trace still names this function after the rethrow.
+ *
+ * @param kind Exception class name, e.g. "InternalError"
+ * @param message Error message to include in the exception
+ */
+[[noreturn]] void RaiseByKind(const std::string& kind, const std::string& message) {
+  if (kind == "ValueError") throw pypto::ValueError(message);
+  if (kind == "TypeError") throw pypto::TypeError(message);
+  if (kind == "RuntimeError") throw pypto::RuntimeError(message);
+  if (kind == "NotImplementedError") throw pypto::NotImplementedError(message);
+  if (kind == "IndexError") throw pypto::IndexError(message);
+  if (kind == "AssertionError") throw pypto::AssertionError(message);
+  if (kind == "InternalError") throw pypto::InternalError(message);
+  if (kind == "Error") throw pypto::Error(message);
+  throw pypto::ValueError("Unknown exception kind for testing: " + kind);
+}
+
+/**
+ * @brief Raise `kind`, then route it through Error::RethrowWithMessage
+ *
+ * Exercises the trace-preserving typed rethrow that OpRegistry::CreateImpl depends on:
+ * the exception reaching Python must keep the concrete type and the frames captured at
+ * the original throw inside RaiseByKind, while carrying the replacement message.
+ *
+ * @param kind Exception class name to raise
+ * @param original Message given to the original exception
+ * @param replacement Message the rethrown exception should carry instead
+ */
+[[noreturn]] void rethrow_with_message(const std::string& kind, const std::string& original,
+                                       const std::string& replacement) {
+  try {
+    RaiseByKind(kind, original);
+  } catch (const pypto::Error& e) {
+    e.RethrowWithMessage(replacement);
+  }
+}
+
+/**
  * @brief Return DSA-RP recognizer output without running placement.
  *
  * This intentionally lives in the internal testing module: production callers
@@ -249,6 +290,10 @@ void BindTesting(nb::module_& m) {
   testing.def("raise_internal_error_with_span", &raise_internal_error_with_span, nb::arg("message"),
               nb::arg("filename"), nb::arg("line"), nb::arg("col"),
               "Raise an InternalError with IR source span for testing");
+
+  testing.def("rethrow_with_message", &rethrow_with_message, nb::arg("kind"), nb::arg("original"),
+              nb::arg("replacement"),
+              "Raise `kind` and rethrow it via Error::RethrowWithMessage for testing");
 
   testing.def("recognize_dsa_reuse_penalties", &RecognizeDsaReusePenaltiesForTesting, nb::arg("function"),
               "Return recognized DSA-RP edges without running placement");

@@ -22,6 +22,15 @@ import torch
 from pypto.runtime import ChipWorker, RunConfig
 
 
+class FakeBuffer:
+    def __init__(self, base: int, nbytes: int) -> None:
+        self.base = base
+        self.nbytes = nbytes
+
+    def tensor(self, shapes, dtype):
+        return shapes, dtype
+
+
 @pytest.fixture
 def fake_simpler_worker():
     """Patch ``simpler.worker.Worker`` so ChipWorker construction does no I/O."""
@@ -34,9 +43,9 @@ def fake_simpler_worker():
         # Deterministic malloc: incrementing pointer.
         ptr_state = {"next": 0x1000}
 
-        def fake_malloc(nbytes, _wid):
+        def fake_malloc(nbytes):
             ptr_state["next"] += 0x1000
-            return ptr_state["next"]
+            return FakeBuffer(ptr_state["next"], nbytes)
 
         instance.malloc.side_effect = fake_malloc
         cls.return_value = instance
@@ -56,7 +65,7 @@ def test_free_tensor_exits_owned_set(fake_simpler_worker):
     t = w.alloc_tensor((4,), torch.float32)
     w.free_tensor(t)
     assert (0, t.data_ptr) not in w._owned_tensors
-    fake_simpler_worker.free.assert_called_with(t.data_ptr, 0)
+    assert fake_simpler_worker.free.call_args.args[0] is t.buffer
     w.close()
 
 
@@ -68,7 +77,7 @@ def test_close_auto_frees_leaked_tensors(fake_simpler_worker):
     fake_simpler_worker.free.reset_mock()
     w.close()
     # close() must have invoked free for the leaked ptr.
-    freed_ptrs = [call.args[0] for call in fake_simpler_worker.free.call_args_list]
+    freed_ptrs = [call.args[0].base for call in fake_simpler_worker.free.call_args_list]
     assert t.data_ptr in freed_ptrs
 
 
@@ -106,7 +115,7 @@ def test_explicit_free_tensor_then_close_does_not_double_free(fake_simpler_worke
     w.close()
     # No additional free for the already-released ptr.
     for call in fake_simpler_worker.free.call_args_list:
-        assert call.args[0] != t.data_ptr
+        assert call.args[0].base != t.data_ptr
 
 
 def test_close_auto_free_swallows_errors(fake_simpler_worker):

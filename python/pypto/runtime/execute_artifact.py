@@ -43,10 +43,17 @@ Exit contract (the harness relies on it; ``task-submit`` propagates it verbatim)
 import argparse
 import json
 import traceback
+import warnings
 from pathlib import Path
 from typing import Any
 
-from pypto.runtime.runner import _DfxOpts, _execute_on_device
+from pypto.runtime.runner import (
+    _SWIMLANE_CLI_HELP,
+    _SWIMLANE_FULL_LEVEL,
+    _SWIMLANE_MAX_LEVEL,
+    _DfxOpts,
+    _execute_on_device,
+)
 
 __all__ = ["ArtifactSetupError", "execute_artifact_dir", "execute_batch_manifest", "main"]
 
@@ -257,7 +264,7 @@ def execute_batch_manifest(
     # execution (each _execute_on_device opens + closes its own worker) so the
     # dep-gen child owns the device first, preserving the two-pass design.
     first_platform = str(entries[0]["platform"])
-    if dfx.enable_l2_swimlane and not first_platform.endswith("sim"):
+    if dfx.enable_chip_swimlane and not first_platform.endswith("sim"):
         for entry in entries:
             _run_and_mark(entry)
         return all_ok
@@ -358,7 +365,29 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device-id", type=int, required=True, help="Hardware device index")
     # DFX toggles — names mirror tests/st/conftest.py so the harness round-trip
     # (_dfx_to_cli) is symmetric.
-    parser.add_argument("--enable-l2-swimlane", action="store_true", help="Capture L2 swimlane records")
+    parser.add_argument(
+        "--enable-chip-swimlane",
+        nargs="?",
+        const=_SWIMLANE_FULL_LEVEL,
+        default=0,
+        type=int,
+        choices=range(_SWIMLANE_MAX_LEVEL + 1),
+        metavar="LEVEL",
+        help=_SWIMLANE_CLI_HELP,
+    )
+    # Deprecated spelling. Separate dest so ``main`` can tell it was used and
+    # warn; ``default=None`` distinguishes "absent" from an explicit ``0``.
+    parser.add_argument(
+        "--enable-l2-swimlane",
+        dest="enable_l2_swimlane_deprecated",
+        nargs="?",
+        const=_SWIMLANE_FULL_LEVEL,
+        default=None,
+        type=int,
+        choices=range(_SWIMLANE_MAX_LEVEL + 1),
+        metavar="LEVEL",
+        help="Deprecated alias for --enable-chip-swimlane.",
+    )
     parser.add_argument(
         "--dump-args",
         type=int,
@@ -381,6 +410,28 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _resolve_swimlane_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Fold the deprecated ``--enable-l2-swimlane`` into the canonical level.
+
+    Returns the requested collection level, warning when the old flag supplied
+    it and erroring when both flags disagree.
+    """
+    deprecated = args.enable_l2_swimlane_deprecated
+    if deprecated is None:
+        return args.enable_chip_swimlane
+    warnings.warn(
+        "--enable-l2-swimlane is deprecated; use --enable-chip-swimlane.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    if args.enable_chip_swimlane and args.enable_chip_swimlane != deprecated:
+        parser.error(
+            f"--enable-chip-swimlane {args.enable_chip_swimlane} conflicts with the "
+            f"deprecated --enable-l2-swimlane {deprecated}; pass only the former."
+        )
+    return deprecated
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry: run one artifact, print the result marker, return exit code.
 
@@ -391,7 +442,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     dfx = _DfxOpts(
-        enable_l2_swimlane=args.enable_l2_swimlane,
+        enable_chip_swimlane=_resolve_swimlane_args(parser, args),
         enable_dump_args=args.dump_args,
         enable_pmu=args.enable_pmu,
         enable_dep_gen=args.enable_dep_gen,

@@ -20,7 +20,9 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/tile_conversion_utils.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 #include "src/ir/transforms/flatten_tile_nd_to_2d/internal.h"
 
 namespace pypto {
@@ -63,6 +65,41 @@ class PreconditionAnalysis : public IRVisitor {
     }
   }
 
+  /// A >2D tile.assemble is flattened by folding its ND offset into the merged
+  /// row axis. That fold is meaningful only when the offset names a point in the
+  /// target's own ND coordinate space, and expressible as a single 2D insert only
+  /// when the written region collapses to one contiguous row band.
+  static void CheckNdAssemble(const CallPtr& call) {
+    if (call->args_.size() != 3) return;
+    auto target_type = As<TileType>(call->args_[0]->GetType());
+    if (!IsNdTile(target_type)) return;
+
+    auto source_type = As<TileType>(call->args_[1]->GetType());
+    auto offset_tuple = As<MakeTuple>(call->args_[2]);
+    CHECK_SPAN(source_type && offset_tuple, call->span_)
+        << "FlattenTileNdTo2D: tile.assemble requires a tile source and a literal offset tuple";
+
+    const size_t rank = target_type->shape_.size();
+    CHECK_SPAN(offset_tuple->elements_.size() == rank, call->span_)
+        << "FlattenTileNdTo2D: tile.assemble into a " << rank << "D tile has a rank-"
+        << offset_tuple->elements_.size() << " offset. The offset names a point in the target's "
+        << "own coordinate space, so it needs exactly one index per target dimension.";
+
+    CHECK_SPAN(source_type->shape_.size() == rank, call->span_)
+        << "FlattenTileNdTo2D: tile.assemble into a " << rank << "D tile has a rank-"
+        << source_type->shape_.size() << " source " << FormatShape(source_type->shape_)
+        << ". Reshape the source to the target rank (pl.tile.reshape) before assembling.";
+
+    CHECK_SPAN(tile_conversion_utils::IsRowMajorCollapseContiguous(source_type->shape_, target_type->shape_),
+               call->span_)
+        << "FlattenTileNdTo2D: tile.assemble writes a " << FormatShape(source_type->shape_)
+        << " region into a " << FormatShape(target_type->shape_)
+        << " tile, which does not collapse to a contiguous row band when the tile is flattened "
+        << "to 2D (hardware tiles are always 2D). Every dimension below the outermost partial "
+        << "one must be written in full. Fix by looping over the outer dimension and assembling "
+        << "one contiguous page per iteration.";
+  }
+
   void CheckCall(const CallPtr& call) {
     if (!call || !call->op_ || As<GlobalVar>(call->op_)) return;
 
@@ -79,6 +116,10 @@ class PreconditionAnalysis : public IRVisitor {
         auto input_tile = As<TileType>(call->args_[0]->GetType());
         CHECK(!IsNdTile(input_tile)) << "FlattenTileNdTo2D: " << name << " is not supported on >2D tiles";
       }
+    }
+
+    if (IsOp(call, "tile.assemble")) {
+      CheckNdAssemble(call);
     }
   }
 };

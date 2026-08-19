@@ -274,6 +274,37 @@ bool EqualWithFields(const NodePtr& lhs_op, const NodePtr& rhs_op) {
 }
 ```
 
+### Type 的比较是手写的，而非基于反射
+
+`Expr` 和 `Stmt` 走上面的反射访问器，**`Type` 不走**。四条彼此独立的 if/else
+分支链各自重新描述了"这个 Type 有哪些字段"，而它们之间没有任何关联：
+
+| 分支链 (ladder) | 位置 |
+| --------------- | ---- |
+| `EqualType` | `src/ir/transforms/structural_equal.cpp` |
+| `HashType` | `src/ir/transforms/structural_hash.cpp` |
+| `SerializeType` | `src/ir/serialization/serializer.cpp` |
+| `DeserializeType` | `src/ir/serialization/deserializer.cpp` |
+
+**新增一个 Type 意味着要同时修改这四处。** 只加到其中三处的 Type 能通过编译、
+能通过序列化往返、比较行为也正确 —— 直到用户第一次写 `hash(t)` 或把该 Type 放进
+`set`，才会撞上 `HashType` 末尾的 `INTERNAL_CHECK(false)`。这会破坏上文
+"相等的节点哈希值也相等"的保证：`structural_equal` 接受的输入，
+`structural_hash` 却拒绝。
+
+有两类分发陷阱需要在各条分支链之间保持一致：
+
+- **子类 kind。** `As<T>()` 是精确的 `ObjectKind` 匹配，因此
+  `As<TensorType>(dt)` 对 `DistributedTensorType` 按设计返回 `nullptr`
+  （见 `include/pypto/ir/kind_traits.h`）。共用同一分支时必须显式列出两个 kind
+  并使用 `static_pointer_cast` —— 参见 `.claude/rules/ir-kind-traits.md`。
+- **仅子类持有的字段。** `DistributedTensorType::window_buffer_` 在
+  `TensorType` 上没有对应字段；共用分支必须在 kind 判断的保护下对它做哈希与比较。
+
+`tests/ut/ir/transforms/test_hash.py::TestHashTypeLadderParity` 会遍历每一个
+可由 Python 构造的 Type，当某个 Type 在 `HashType` 中缺失时测试失败。每新增一个
+Type，都要在那里补上对应的工厂函数。
+
 ## 总结
 
 **关键要点：**

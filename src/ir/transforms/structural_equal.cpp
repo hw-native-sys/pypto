@@ -785,6 +785,7 @@ class StructuralEqualImpl {
   bool EqualVar(const VarPtr& lhs, const VarPtr& rhs);
   bool EqualMemRef(const MemRefPtr& lhs, const MemRefPtr& rhs);
   bool EqualIterArg(const IterArgPtr& lhs, const IterArgPtr& rhs);
+  bool EqualWindowBuffer(const WindowBufferPtr& lhs, const WindowBufferPtr& rhs);
   bool EqualType(const TypePtr& lhs, const TypePtr& rhs);
   bool IsLoopVarFieldContext() const {
     return !field_name_stack_.empty() && field_name_stack_.back() == "loop_var";
@@ -941,6 +942,12 @@ bool StructuralEqualImpl<AssertMode>::Equal(const IRNodePtr& lhs, const IRNodePt
     return result;
   }
 
+  // Check WindowBuffer before Var (WindowBuffer inherits from Var)
+  if (auto lhs_wb = As<WindowBuffer>(lhs)) {
+    bool result = EqualWindowBuffer(lhs_wb, std::static_pointer_cast<const WindowBuffer>(rhs));
+    return result;
+  }
+
   if (auto lhs_var = As<Var>(lhs)) {
     bool result = EqualVar(lhs_var, std::static_pointer_cast<const Var>(rhs));
     return result;
@@ -979,7 +986,6 @@ bool StructuralEqualImpl<AssertMode>::Equal(const IRNodePtr& lhs, const IRNodePt
   EQUAL_DISPATCH(InlineStmt)
   EQUAL_DISPATCH(Function)
   EQUAL_DISPATCH_TRANSPARENT(Program)
-  EQUAL_DISPATCH(WindowBuffer)
 
   throw pypto::TypeError("Unknown IR node type in StructuralEqualImpl::Equal: " + lhs->TypeName());
 }
@@ -1380,7 +1386,6 @@ bool StructuralEqualImpl<AssertMode>::EqualMemRef(const MemRefPtr& lhs, const Me
   if (!EqualVar(lhs, rhs)) {
     return false;
   }
-
   // 2. Then, compare MemRef-specific fields: base_, byte_offset_, size_
   if (!EqualVar(lhs->base_, rhs->base_)) {
     if constexpr (AssertMode) {
@@ -1471,6 +1476,34 @@ bool StructuralEqualImpl<AssertMode>::EqualIterArg(const IterArgPtr& lhs, const 
   }
 
   return true;
+}
+
+template <bool AssertMode>
+bool StructuralEqualImpl<AssertMode>::EqualWindowBuffer(const WindowBufferPtr& lhs,
+                                                        const WindowBufferPtr& rhs) {
+  // 1. Compare as Var (variable mapping / identity), mirroring EqualMemRef and
+  //    EqualIterArg. Without this the hash side's WindowBuffer identity fold
+  //    (structural_hash.cpp) has no equality counterpart, so two field-identical
+  //    buffers compare equal yet hash apart.
+  if (!EqualVar(lhs, rhs)) {
+    return false;
+  }
+
+  // 2. Remaining fields (base_, size_, the staging flags) through the reflection
+  //    visitor, exactly as the generic EQUAL_DISPATCH(WindowBuffer) path did
+  //    before this arm existed. Comparing them by hand here would drop the field
+  //    name from the mismatch path -- assert_structural_equal would report a bare
+  //    `value` instead of `size.value` -- and would silently skip any field added
+  //    to WindowBuffer later. The transparent_depth_ save/reset and the
+  //    node_type_stack_ push mirror EQUAL_DISPATCH so field names are recorded
+  //    even when this node is reached from inside a SeqStmts / Program.
+  node_type_stack_.emplace_back("WindowBuffer");
+  int saved_depth = transparent_depth_;
+  transparent_depth_ = 0;
+  bool result = EqualWithFields(lhs, rhs);
+  transparent_depth_ = saved_depth;
+  node_type_stack_.pop_back();
+  return result;
 }
 
 // Explicit template instantiations

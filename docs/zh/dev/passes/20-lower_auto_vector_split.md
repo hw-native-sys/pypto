@@ -69,6 +69,14 @@ result = passes.lower_auto_vector_split()(program)
 （未拆分）的行为。若在此处对其下降，剥离后它将只带 `split_aiv` 而无 `split` 模式，
 `SplitVectorKernel` 会因此报错。
 
+**函数体中仍存在 `ScopeStmt` 的混合函数会被拒绝**，理由与下文的区域路径相同：整函数折半同样
+不跨越 scope 边界。汇总亲和性会**穿过** scope 计算（scope 的亲和性即其函数体的亲和性），因此本
+pass 能区分「被 scope 包裹的混合函数」与「纯向量函数」，只拒绝前者——纯向量函数体仍按原样透传，
+不会报错。该情况通常不可达：本路径所依据的函数级 `split` 属性由 `OutlineIncoreScopes` 写入，而它
+在同一步就消费掉了 scope；之所以校验而非假定，是因为另一种失败方式是静默的。在加入该校验之前，
+`RollupAffinity` 根本没有 `ScopeStmt` 分支，于是任何被 scope 包裹的函数都汇总为 `SHARED`、被判定
+为非混合，从而**完全未拆分地透传且没有任何诊断**。
+
 ## 显式 `SplitAivScopeStmt` 区域路径
 
 除上述 AUTO 整函数路径外，函数体仍携带一个或多个 `SplitAivScopeStmt` 区域的
@@ -212,8 +220,8 @@ core affinity）同样会落到 cube lane 上，而它可能在向量 lane 的 T
 把重组后的 tile 交给 cube。
 
 ```python
-with pl.at(level=pl.Level.CORE_GROUP, name_hint="sparse_kv", allow_early_resolve=True,
-           optimizations=[pl.cross_core_slot(slot_num=2)]):     # see the ring note below
+with pl.at(level=pl.Level.CORE_GROUP, name_hint="sparse_kv",
+           allow_early_resolve=True):                           # see the ring note below
     for aiv in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
         ub = pl.full([64, 512], dtype=pl.BF16, value=0.0)       # per-lane HALF extent
         for k in pl.range(64):
@@ -229,12 +237,11 @@ with pl.at(level=pl.Level.CORE_GROUP, name_hint="sparse_kv", allow_early_resolve
   本身不会加入 half-width 数据流。gather 是凭其由 lane 派生的 `src_offset` 被接受的；该校验
   证明的是**意图**而非**范围**，所以此处若写成全 extent 的累加器，gather 回来就会变成
   `2 x FULL` 并在下游产生形状不匹配。
-- **设置跨核 ring 的大小。** V2C ring 会在消费侧核的内存中预留 `slot_size x slot_num` 字节
+- **留意跨核 ring 的开销。** V2C ring 会在消费侧核的内存中预留 `slot_size x slot_num` 字节
   （V2C 为 L1，C2V 为 UB），其中 `slot_size` 是消费方弹出的**完整** tile——此处为
-  `128 x 512 x 2 = 131072`——而 `slot_num` 对单向流水默认取 **8**，相当于在 512 KB 的 L1 中
-  占用 1 MB，故默认深度无法表达这种形状；用 `pl.cross_core_slot(slot_num=N)` 调低即可，每次
-  调用只 push 一次的 kernel 至多需要 2。若省略，`AllocateMemoryAddr` 会报告溢出并指出被预留
-  的字节数。
+  `128 x 512 x 2 = 131072`——而 `slot_num` 默认取 **2**，相当于在 512 KB 的 L1 中占用
+  256 KB；每次调用只 push 一次的 kernel 无需超过该深度。`pl.cross_core_slot(slot_num=N)`
+  可双向调整该值；若调得过大，`AllocateMemoryAddr` 会报告溢出并指出被预留的字节数。
 
 `pl.aiv_shard` 在这里**不能**替代半 extent 的 `pl.full`：它是 C→V 传输，要求操作数位于
 `Acc`（cube 产出），因此无法对 vector lane 自己产生的值做切分。
@@ -247,24 +254,33 @@ pass 运行时每个区域都必须已不被 scope 包裹——通常由
 [`OutlineIncoreScopes`](08-outline_incore_scopes.md)（pass 8）保证，它会把外围的 `InCore`
 scope 提取为独立函数。
 
-该保证存在一个缺口，故本 pass 选择强制校验而非假定成立：pass 8 只对 `Opaque` /
-`Orchestration` 函数提取 scope，而解析器无论外围函数类型如何，都会把顶层的
-`for aiv_id in pl.split_aiv(...)` 包进一个 `InCore` scope。因此直接声明为
-`pl.FunctionType.InCore` 时，到达此处的区域仍被 scope 包裹：
+pass 8 只对 `Opaque` / `Orchestration` 函数提取 scope，因此声明为
+`pl.FunctionType.InCore` 的函数内部的 scope 会原封不动到达本 pass。该 scope 必须是
+**用户手写的**：解析器不会在那里自行添加——InCore 函数中的顶层区域被裸露地发出，这样打印出来
+的 `*_incore_0` 才能重新解析回同样的 IR；而在这类函数中书写区域本身，也会被更早的
+[`AivSplitValid`](99-verifier.md) 检查 (h) 拒绝：
 
 ```python
 @pl.function(type=pl.FunctionType.InCore)   # pass 8 会跳过该函数
 def f(self, a: pl.Tensor[[128, 128], pl.FP32],
       c: pl.Out[pl.Tensor[[128, 128], pl.FP32]]) -> pl.Tensor[[128, 128], pl.FP32]:
-    for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):   # 被包进 InCore scope
-        base = aiv_id * 64
-        c = pl.store(pl.exp(pl.load(a, [base, 0], [64, 128])), [base, 0], c)
+    with pl.at(level=pl.Level.CORE_GROUP):                   # 不会被提取
+        for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+            base = aiv_id * 64
+            c = pl.store(pl.exp(pl.load(a, [base, 0], [64, 128])), [base, 0], c)
     return c
 ```
 
 下降完成后，`LowerExplicitRegionFunction` 会重新扫描函数体，对任何存活下来的区域抛出
-`ValueError`，并把源位置指向 `pl.split_aiv` 那一行。修复方式：改用普通的 `@pl.function` /
-`@pl.jit`（Opaque）让 pass 8 提取该 scope，或把区域移出外围 scope。
+`ValueError`，并把源位置指向 `pl.split_aiv` 那一行。修复方式：删掉这层多余的 scope，或改用
+普通的 `@pl.function` / `@pl.jit`（Opaque）让 pass 8 提取它。
+
+该重新扫描还会拒绝**其他任何**存活下来的 `ScopeStmt`，以覆盖对称情形：scope 嵌套在区域体
+*内部*。此时区域本身已被消费，故上一条检查会通过——但内层遍历（`LowerStmts`、
+`CheckNoCubeTileHalved`、`ScanRegionHalfWidth`）会跨过该 scope 而不进入，其中的向量算子会以
+全宽被拼接出去，导致两条 AIV lane 都计算整块 tile。该情形从 DSL 不可达（pass 8 会把区域内的
+`with pl.at(...)` 提取为独立函数，检查 (h) 又会拒绝在非提取器产生的 InCore 函数中书写区域），
+因此它守护的是绕过 pass 8 的 IR——手工构造的，或反序列化的 `.pto`。
 
 该守卫也正是 `split_aiv_region_validated` 标记可信的依据：只有当每个区域都确实被消费后才写入
 attrs，因此 [`ExpandMixedKernel`](21-expand_mixed_kernel.md) 凭该标记跳过自身的 func-mode
@@ -282,6 +298,44 @@ attrs，因此 [`ExpandMixedKernel`](21-expand_mixed_kernel.md) 凭该标记跳�
 
 `SplitDimension(mode)` 对 `UpDown` 返回 `0`，对 `LeftRight` 返回 `1`
 （`split_axis_utils`）；对 `None` **不调用**（区域路径先对 `None` 分支——无轴可推导）。
+
+## 跨边界的部分有效（partially-valid）操作数
+
+`valid_shape` 不足物理 box 的跨界值，正是 kernel 的 ragged 尾部。Cube→Vector FIFO
+把传输的**列** extent 钉死为物理值，而**行** extent 是自由的（推导与 ISA 依据见
+[PTO codegen](../codegen/00-pto_codegen.md)）。**切分轴**上的收窄会让 extent 变成逐
+lane 的——lane `L` 持有 `clamp(V - L*half, 0, half)`——因此哪种模式 ragged，就决定了
+由哪个字段来承载：
+
+下表是 **shard**（Cube→Vector）的契约；`aic_gather` 遵循本节末尾的几何规则。
+
+| 收窄的轴 | 模式 | extent 性质 | 载体 | 状态 |
+| -------- | ---- | ----------- | ---- | ---- |
+| 行（切分轴） | `UpDown` | 逐 lane | TPOP `valid_row` 操作数（自由字段） | **支持** |
+| 列（非切分轴） | `UpDown` | 两 lane 相同、静态 | 整 box 传输 + 静态 `pto.treshape` | 支持 |
+| 行（非切分轴） | `LeftRight` | 两 lane 相同、静态 | TPOP `valid_row` 操作数 | 支持 |
+| 列（切分轴） | `LeftRight` | 逐 lane | 无 | **拒绝** |
+| 列为运行期值 | 任意 | 两 lane 相同、动态 | 无（`treshape` 不带操作数） | **拒绝** |
+| 行逐 lane **且**列收窄 | `UpDown` | 两者 | 无（`treshape` 会同时重写两个轴） | **拒绝** |
+
+`ReshapeSplitAxis` 只能对切分轴做 ceil 折半，因为 lane 索引不属于 op 的类型函数。
+`LocalizeExplicitBoundaryValid` 在本 pass 修正该猜测——区域自身的
+`aiv_id = tile.get_subblock_idx()` 在作用域内——并把逐 lane extent 传给那些原样透传
+`valid_shape` 的消费者；若消费者会改变逻辑矩形（reduction、slice），则连同 span 一并
+报错。AUTO 分支通过 `LocalizeShardValidForLane` 施加同样的 *extent* 修正，但不含下面的
+store 保护——它的消费者由折半遍历重建，而非本遍历。
+
+- **空 lane 的 store 被保护。** ragged extent 覆盖不到的 lane，其 extent 为 `0`，而
+  零行 `TSTORE` 超出 pto-isa 契约（`TSTORE_IMPL` 断言 `GetValidRow() > 0`）。store
+  被加上运行时 `extent > 0` 判断；`tpop` 与 `tfree` 保持**无条件**——两个 lane 都占用
+  槽位且都必须释放。
+- **gather 的限制源自几何而非 DMA。** V2C 的 pop 落到 NZ Mat tile
+  （`TLoadGm2L1Nd2nz`），不读取任何 valid extent。真正限制 `aic_gather` 的是摆放：
+  lane `l` 位于偏移 `l*half`，拼合后的数据是 `[0, v0) ∪ [half, half + v1)`——只有两段
+  相邻时才是矩形。该规则在**本 pass** 而非类型推导中执行：推导发生在逐 lane extent 存在
+  之前，只能依据自己的 ceil 猜测来判断。由 localized shard 供给的 gather 会被精确定型
+  ——两段必然相邻，拼合 extent 即 shard 前的 `V`——只有两个 lane 共享的部分 extent 才会
+  被拒绝。
 
 ## 算法
 

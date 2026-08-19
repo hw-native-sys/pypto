@@ -12,7 +12,7 @@ rank 上。
 | **Signal cell 永不达到期望值** | 错误 `NotifyOp` | 多参与者屏障用 `AtomicAdd`；1:1 交换用 `Set`。 |
 | **编译时形状不匹配** | `NR` 未使用 `pl.dynamic` | 将运行时维度包裹在 `pl.dynamic("NR")` 中。 |
 | **派发时抛出 `TypeError`** | IO buffer 在 `prepare()` 前未调用 `.share_memory_()`——fork 出的子进程看不到 fork 之后分配的 buffer | 在 `prepare()` 之前对每个传给 worker 的 host tensor 调用 `.share_memory_()`。 |
-| **循环内 allreduce 被拒绝** | Signal 协议无法每轮注入新 buffer | 在循环外每次调用分配新 signal buffer。 |
+| **循环内 allreduce 被拒绝** | HOST 轨*省略 signal* 的 allreduce 在动态 `for`/`while` 内被拒绝：signal 合成无法为每次迭代分配新 signal | 显式传入 signal buffer（自清理、可跨迭代复用），或将调用提到循环外。 |
 
 ## 致命陷阱
 
@@ -49,8 +49,8 @@ SIMPLER_DEVICE_STRACE_ENABLE=0 python script.py
 
 ### 分布式 DFX 入口点
 
-- **L2 swimlane：** `RunConfig(enable_l2_swimlane=True)`——在 worker 内部启用
-  逐任务计时，并透传到 L3 编排。写入 `dfx_outputs/l2_swimlane_records.json`
+- **L2 swimlane：** `RunConfig(enable_chip_swimlane=True)`——在 worker 内部启用
+  逐任务计时，并透传到 L3 编排。写入 `dfx_outputs/chip_swimlane_records.json`
   （onboard 场景会与下面的依赖图合并为 `merged_swimlane_*.json`）。
 - **Scope 统计：** `RunConfig(enable_scope_stats=True)`——写入
   `dfx_outputs/scope_stats/scope_stats.jsonl`，包含 task_window、heap 和

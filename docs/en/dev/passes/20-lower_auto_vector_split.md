@@ -76,6 +76,18 @@ its `split` attr exactly as before. Were it lowered here, it would carry
 `split_aiv` without a `split` mode after that strip, and `SplitVectorKernel` would
 reject it.
 
+**A mixed function whose body still carries a `ScopeStmt` is rejected**, on the
+same rule as the region path below: whole-function halving does not cross a scope
+boundary either. The rolled-up affinity is computed *through* the scope (a scope's
+affinity is its body's), so the pass can tell a mixed scope-bodied function from a
+pure-vector one and reject only the former — a pure-vector body is still passed
+through, not failed. Normally unreachable, since the function-level `split` attr
+this path keys on is written by `OutlineIncoreScopes`, which consumes the scope in
+the same step; it is checked rather than assumed because the alternative failure
+is silent. Before the check, `RollupAffinity` had no `ScopeStmt` arm at all, so any
+scope-bodied function rolled up `SHARED`, read as not-mixed, and was passed through
+**completely unsplit with no diagnostic**.
+
 ## Explicit `SplitAivScopeStmt` region path
 
 In addition to the AUTO whole-function path above, an `InCore` function whose body
@@ -236,8 +248,8 @@ assembles half the tile in UB and `pl.aic_gather` hands the reassembled tile to 
 cube.
 
 ```python
-with pl.at(level=pl.Level.CORE_GROUP, name_hint="sparse_kv", allow_early_resolve=True,
-           optimizations=[pl.cross_core_slot(slot_num=2)]):     # see the ring note below
+with pl.at(level=pl.Level.CORE_GROUP, name_hint="sparse_kv",
+           allow_early_resolve=True):                           # see the ring note below
     for aiv in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
         ub = pl.full([64, 512], dtype=pl.BF16, value=0.0)       # per-lane HALF extent
         for k in pl.range(64):
@@ -254,12 +266,13 @@ Two authoring rules make this work:
   own. The gather is admitted on its lane-derived `src_offset`, and the guard proves
   *intent*, not *extent* — so a full-extent accumulator would be gathered back to
   `2 x FULL` and mismatch downstream.
-- **Size the cross-core ring.** The V2C ring reserves `slot_size x slot_num` bytes
+- **Watch the cross-core ring.** The V2C ring reserves `slot_size x slot_num` bytes
   of the consuming core's memory (L1 for V2C, UB for C2V), where `slot_size` is the
   **full** tile the consumer pops (`128 x 512 x 2 = 131072` here) and `slot_num`
-  defaults to **8** — 1 MB of a 512 KB L1. `pl.cross_core_slot(slot_num=N)` lowers
-  it; a kernel pushing once per invocation needs no more than 2. Omit it and
-  `AllocateMemoryAddr` reports the overflow.
+  defaults to **2** — 256 KB of a 512 KB L1, which a kernel pushing once per
+  invocation does not need to exceed. `pl.cross_core_slot(slot_num=N)` retunes it
+  in either direction; grow it too far and `AllocateMemoryAddr` reports the
+  overflow.
 
 `pl.aiv_shard` is **not** an alternative to the half-extent `pl.full` here: it is
 the C→V transfer and needs an `Acc` operand, so it cannot shard a value the
@@ -274,26 +287,38 @@ region must therefore already be scope-free when this pass runs — normally
 guaranteed by [`OutlineIncoreScopes`](08-outline_incore_scopes.md) (pass 8), which
 lifts the enclosing `InCore` scope into its own function.
 
-That guarantee has a hole, so the pass enforces it: pass 7 only outlines scopes
-out of `Opaque` / `Orchestration` functions, while the parser wraps a top-level
-`for aiv_id in pl.split_aiv(...)` in an `InCore` scope whatever the enclosing
-function's type — so declaring the function `pl.FunctionType.InCore` delivers a
-scope-wrapped region here:
+Pass 8 outlines scopes only out of `Opaque` / `Orchestration` functions, so a
+scope standing inside a function declared `pl.FunctionType.InCore` reaches this
+pass intact. The scope has to be **author-written** — the parser adds none of its
+own there, emitting a top-level region bare so that a printed `*_incore_0`
+reparses to the same IR, and authoring a region in such a function at all is
+rejected earlier by [`AivSplitValid`](99-verifier.md) check (h):
 
 ```python
 @pl.function(type=pl.FunctionType.InCore)   # pass 8 skips this function
 def f(self, a: pl.Tensor[[128, 128], pl.FP32],
       c: pl.Out[pl.Tensor[[128, 128], pl.FP32]]) -> pl.Tensor[[128, 128], pl.FP32]:
-    for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):   # wrapped in an InCore scope
-        base = aiv_id * 64
-        c = pl.store(pl.exp(pl.load(a, [base, 0], [64, 128])), [base, 0], c)
+    with pl.at(level=pl.Level.CORE_GROUP):                   # not outlined
+        for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+            base = aiv_id * 64
+            c = pl.store(pl.exp(pl.load(a, [base, 0], [64, 128])), [base, 0], c)
     return c
 ```
 
 After lowering, `LowerExplicitRegionFunction` re-scans the body and rejects any
-surviving region with a `ValueError` pointing at the `pl.split_aiv` line. Use
-plain `@pl.function` / `@pl.jit` (Opaque) so pass 8 outlines the scope, or move
-the region out of the enclosing scope.
+surviving region with a `ValueError` pointing at the `pl.split_aiv` line. Drop
+the redundant scope, or use plain `@pl.function` / `@pl.jit` (Opaque) so pass 8
+outlines it.
+
+The re-scan then rejects any **other** surviving `ScopeStmt` too, covering the
+mirror case: a scope nested *inside* a region body. There the region itself is
+consumed, so the first check passes — yet the inner walks (`LowerStmts`,
+`CheckNoCubeTileHalved`, `ScanRegionHalfWidth`) step over the scope rather than
+entering it, and the vector ops inside would be spliced out full-width with both
+AIV lanes computing the whole tile. Unreachable from the DSL (pass 8 lifts a
+`with pl.at(...)` inside a region into its own function, and check (h) rejects
+authoring a region in an InCore function the outliner did not produce), so it
+guards IR that skips pass 8 — hand-built, or a deserialized `.pto`.
 
 The guard is also what makes the `split_aiv_region_validated` stamp trustworthy:
 the attrs are written only once every region has actually been consumed, so
@@ -314,6 +339,50 @@ as an internal assertion in PTO codegen (`SplitAivScopeStmt reached PTO codegen`
 `SplitDimension(mode)` returns `0` for `UpDown`, `1` for `LeftRight`
 (`split_axis_utils`); it is **not** called for `None` (the region path branches on
 `None` first — there is no axis to derive).
+
+## Partially-valid operands across the boundary
+
+A crossing value whose `valid_shape` is short of its physical box is a kernel's
+ragged tail. The Cube→Vector FIFO pins the transported **column** extent to the
+physical one and leaves the **row** extent free (derivation and ISA references:
+[PTO codegen](../codegen/00-pto_codegen.md)). A narrowing on the *split axis* is
+what makes an extent per-lane — lane `L` holds `clamp(V - L*half, 0, half)` — so
+which mode is ragged decides which field has to carry it:
+
+The table is the **shard's** (Cube→Vector) contract; `aic_gather` follows the
+geometric rule at the end of this section instead.
+
+| Ragged axis | Mode | Extent is | Carrier | Status |
+| ----------- | ---- | --------- | ------- | ------ |
+| rows (split axis) | `UpDown` | per-lane | TPOP `valid_row` operand (free field) | **supported** |
+| cols (non-split) | `UpDown` | shared, static | full-box transport + static `pto.treshape` | supported |
+| rows (non-split) | `LeftRight` | shared, static | TPOP `valid_row` operand | supported |
+| cols (split axis) | `LeftRight` | per-lane | none | **rejected** |
+| cols, runtime-valued | either | shared, dynamic | none (`treshape` takes no operands) | **rejected** |
+| rows per-lane **and** cols narrowed | `UpDown` | both | none (`treshape` rewrites both axes) | **rejected** |
+
+`ReshapeSplitAxis` can only ceil-halve the split-axis extent (the lane index is
+not part of an op's type function). `LocalizeExplicitBoundaryValid` repairs that
+guess here, where the region's `aiv_id` is in scope, and carries the per-lane
+extent to consumers that pass `valid_shape` through; one that reshapes the
+logical rectangle is rejected with its span. The AUTO arm applies the same *extent* repair through
+`LocalizeShardValidForLane`, but not the store guard below — its consumers are
+rebuilt by the halving walk rather than by this one.
+
+- **An empty lane's store is guarded.** A lane the ragged extent does not reach
+  has extent `0`, and a zero-row `TSTORE` is outside pto-isa's contract
+  (`TSTORE_IMPL` asserts `GetValidRow() > 0`). The store gets a runtime
+  `extent > 0` guard; `tpop` and `tfree` stay **unconditional** — both lanes
+  occupy a slot and both must release it.
+- **The gather is limited by geometry, not the DMA.** A V2C pop lands in an NZ
+  Mat tile (`TLoadGm2L1Nd2nz`), which reads no valid extent at all. What limits
+  `aic_gather` is placement: lane `l` sits at offset `l*half`, so the joined data
+  `[0, v0) ∪ [half, half + v1)` is a rectangle only when the bands abut. That
+  rule is enforced **in this pass**, not in the deducer, which runs before the
+  per-lane extents exist and could only judge the join on its own ceil-div guess.
+  A gather fed by a localized shard is typed exactly — the bands always abut, so
+  the joined extent is the pre-shard `V` — and only a partial that both lanes
+  share is rejected.
 
 ## Algorithm
 

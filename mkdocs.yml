@@ -184,6 +184,19 @@ nav:
           - en/user/tutorials/03-mixed-kernel.md
           - en/user/tutorials/04-task-graph.md
           - en/user/tutorials/05-scheduling-tuning.md
+      - Performance:
+          - en/user/performance/index.md
+          - en/user/performance/00-swimlane.md
+          - en/user/performance/01-task-granularity.md
+          - en/user/performance/02-runtime-overhead.md
+          - en/user/performance/03-dependencies.md
+          - en/user/performance/04-incore.md
+          - en/user/performance/05-memory.md
+          - en/user/performance/06-host.md
+      - Precision:
+          - en/user/precision/index.md
+          - en/user/precision/00-workflow.md
+          - en/user/precision/01-cases.md
       - Tasks and Ordering:
           - en/user/tasks/index.md
           - en/user/tasks/00-model.md
@@ -194,9 +207,20 @@ nav:
           - en/user/ops/index.md
           - en/user/ops/00-dispatch.md
           - en/user/ops/01-catalog.md
-      - en/user/01-language_guide.md
       - en/user/00-getting_started.md
-      - en/user/03-torch_codegen_debug.md
+      - Execution:
+          - en/user/execution/index.md
+          - en/user/execution/00-compile.md
+          - en/user/execution/01-run.md
+      - Tools:
+          - en/user/tools/index.md
+          - en/user/tools/00-debugging.md
+          - en/user/tools/01-torch-codegen.md
+          - en/user/tools/02-memory-map.md
+      - Appendix:
+          - en/user/appendix/index.md
+          - en/user/appendix/00-feature-matrix.md
+          - en/user/appendix/01-faq.md
       - Distributed:
           - en/user/distributed/index.md
           - en/user/distributed/00-model.md
@@ -302,7 +326,10 @@ nav:
       - Language:
           - en/dev/language/index.md
           - en/dev/language/00-python_syntax.md
-          - en/dev/language/01-external-kernels.md
+          - en/dev/language/01-statements.md
+          - en/dev/language/02-manual_dependencies.md
+          - en/dev/language/03-functions.md
+          - en/dev/language/04-external-kernels.md
       - Code Generation:
           - en/dev/codegen/index.md
           - en/dev/codegen/00-pto_codegen.md

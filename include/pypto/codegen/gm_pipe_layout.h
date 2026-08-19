@@ -27,8 +27,10 @@ namespace gm_pipe {
 /// offset *within* that workspace. When they disagree, either the allocation is too small or two
 /// independent pipes overlap — both silent, both corrupting. Keep the rules here, once.
 
-/// Slots per ring, used when `initialize_pipe` carries no explicit `slot_num`.
-/// Mirrors cross_core_pipe.cpp's GetSlotNumForDirMask and PTOAS's own derivation.
+/// Slots per ring, used when `initialize_pipe` carries no explicit `slot_num`. Mirrors PTOAS's own
+/// derivation (`cross_core_pipe::GetPtoasImplicitSlotNum`), so it applies only to hand-written
+/// `pl.system.{aic,aiv}_initialize_pipe` — automatic pipes always carry an explicit `slot_num`
+/// (`cross_core_pipe::kDefaultAutoPipeSlotNum` by default), which takes precedence below.
 /// Returns 0 for a dir_mask that does not describe a GM-backed pipe.
 inline int SlotCountForDirMask(int dir_mask) {
   const int bidirectional = ir::core_affinity::kDirMaskC2V | ir::core_affinity::kDirMaskV2C;

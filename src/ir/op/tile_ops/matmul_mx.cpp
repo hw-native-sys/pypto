@@ -199,7 +199,14 @@ TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
   ExprPtr lhs_scale_k_phys = MxScaleKCeil(k_phys_lhs);
   ExprPtr lhs_scale_k_valid = MxScaleKCeil(k_valid_lhs);
   if (!lhs_scale_k_phys) {
-    CHECK(lhs_scale_type && lhs_scale_type->shape_.size() == 2);
+    // Symbolic lhs K: ceil(K/32) is not computable, so the scale-group count is read off
+    // the declared lhs_scale tile instead. Split so the rank message can name the actual
+    // rank without dereferencing a null scale type.
+    CHECK(lhs_scale_type) << "The operator " << op_name << " requires lhs_scale to be a TileType, but got "
+                          << args[1]->GetType()->TypeName();
+    CHECK(lhs_scale_type->shape_.size() == 2)
+        << "The operator " << op_name << " requires lhs_scale to be 2D, but got "
+        << lhs_scale_type->shape_.size() << " dimensions";
     lhs_scale_k_phys = lhs_scale_type->shape_[1];
   }
   if (!lhs_scale_k_valid) {
@@ -208,7 +215,12 @@ TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
   ExprPtr rhs_scale_k_phys = MxScaleKCeil(k_phys_rhs);
   ExprPtr rhs_scale_k_valid = MxScaleKCeil(k_valid_rhs);
   if (!rhs_scale_k_phys) {
-    CHECK(rhs_scale_type && rhs_scale_type->shape_.size() == 2);
+    // Symbolic rhs K -- see the lhs_scale note above.
+    CHECK(rhs_scale_type) << "The operator " << op_name << " requires rhs_scale to be a TileType, but got "
+                          << args[3]->GetType()->TypeName();
+    CHECK(rhs_scale_type->shape_.size() == 2)
+        << "The operator " << op_name << " requires rhs_scale to be 2D, but got "
+        << rhs_scale_type->shape_.size() << " dimensions";
     rhs_scale_k_phys = rhs_scale_type->shape_[0];
   }
   if (!rhs_scale_k_valid) {

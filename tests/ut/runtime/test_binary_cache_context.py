@@ -239,11 +239,14 @@ def test_non_git_pto_isa_root_does_not_use_pin_as_actual_identity(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
+    """A non-git root has no verifiable revision, so binary reuse must be off.
+
+    The identity has to come from the checkout's own HEAD. Substituting the pin
+    (what the tree is *supposed* to be) would let stale binaries survive.
+    """
     pto_isa_root = tmp_path / "pto-isa"
     pto_isa_root.mkdir()
     monkeypatch.setattr(device_runner, "_runtime_revision", Mock(return_value=_RUNTIME_OLD))
-    read_pin = Mock(return_value=_PTO_ISA)
-    monkeypatch.setattr(device_runner, "_read_runtime_pto_isa_pin", read_pin)
 
     context = device_runner._current_binary_context(
         object(),
@@ -253,7 +256,6 @@ def test_non_git_pto_isa_root_does_not_use_pin_as_actual_identity(
     )
 
     assert context is None
-    read_pin.assert_not_called()
 
 
 def test_installed_runtime_uses_embedded_revision_with_clean_pto_isa(

@@ -4,7 +4,7 @@
 
 PyPTO uses two distinct macros: `CHECK` for user errors, `INTERNAL_CHECK` for internal bugs. When operating on IR and a `Span` is in scope, prefer the `_SPAN` variants (`CHECK_SPAN`, `INTERNAL_CHECK_SPAN`, `UNREACHABLE_SPAN`, `INTERNAL_UNREACHABLE_SPAN`) — they auto-emit IR source location on failure and dramatically improve debuggability for both users and developers.
 
-**Inside passes**: passes operate on IR that earlier passes have already verified. A failed invariant inside a pass therefore almost always indicates a **compiler bug** — use `INTERNAL_CHECK_SPAN`, not `CHECK`. Reserve `CHECK` / `CHECK_SPAN` for documented user-facing limitations (e.g. "feature X not yet supported — use Y").
+**Inside passes, codegen, and backend emitters**: these operate on IR that earlier passes have already verified. A failed invariant there therefore almost always indicates a **compiler bug** — use `INTERNAL_CHECK_SPAN`, not `CHECK`. Reserve `CHECK` / `CHECK_SPAN` for documented user-facing limitations (e.g. "feature X not yet supported — use Y"). In `src/codegen` / `src/backend` specifically, argument-count checks are always internal — `tests/lint/check_emitter_check_classification.py` enforces that, and rejects any `CHECK` whose message claims an internal error. Post-`As<T>()` checks belong to the same class, but that sweep is unfinished and the lint does not detect them.
 
 ## CHECK / CHECK_SPAN - User Input Validation
 
@@ -194,6 +194,6 @@ void InternalHelper(IRNode* node) {
 | **For** | User errors / documented user-facing limitations | Internal bugs (pass invariants, postconditions) |
 | **Raises** | `pypto::ValueError` | `pypto::InternalError` |
 | **Message** | User-friendly | Technical, mark as "Internal error" |
-| **Inside passes** | Rare — only for surfaced limitations | Default |
+| **In passes / codegen / backend** | Rare — only for surfaced limitations | Default |
 
 **Remember:** `CHECK` = user error, `INTERNAL_CHECK` = PyPTO bug. Prefer the `_SPAN` variants whenever an IR `Span` is reachable. Always use PyPTO exceptions!

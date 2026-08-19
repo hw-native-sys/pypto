@@ -23,7 +23,7 @@ window pool 的 rank 子集；整个 world 为默认通信域。
 > 及以上（跨芯片的一切）。完整模型见 simpler 的
 > [层级化 Level Runtime](https://hw-native-sys.github.io/simpler/hierarchical-level-runtime/)。
 
-分布式章节涵盖 L3。L2 内容见[语言指南](../01-language_guide.md)。
+分布式章节涵盖 L3。L2 内容见[编译](../execution/00-compile.md)。
 
 ## 术语表
 

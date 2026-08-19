@@ -102,6 +102,21 @@ class MemoryPlanner(Enum):
     DSA_RP = ...
     PTOAS = ...
 
+class RuntimeKind(Enum):
+    """Which Simpler runtime ABI a compilation targets."""
+
+    TENSORMAP_AND_RINGBUFFER = ...
+    """Task graph built on the AICPU, dependencies auto-derived through the TensorMap."""
+
+    HOST_BUILD_GRAPH = ...
+    """Host CPU builds the whole task graph up front; required for Graph Execution."""
+
+def runtime_kind_to_name(kind: RuntimeKind) -> str:
+    """Wire name written to ``RUNTIME_CONFIG["runtime"]``, e.g. ``"host_build_graph"``."""
+
+def runtime_kind_from_name(name: str) -> RuntimeKind:
+    """Parse a ``RUNTIME_CONFIG["runtime"]`` wire name back into a :class:`RuntimeKind`."""
+
 class DiagnosticPhase(Enum):
     """Controls when DiagnosticInstrument runs registered checks (warnings + perf hints)."""
 
@@ -267,6 +282,7 @@ class PassContext:
         disabled_diagnostics: DiagnosticCheckSet = ...,  # default: {UnusedControlFlowResult}
         memory_planner: MemoryPlanner = MemoryPlanner.PYPTO,
         enable_pypto_l0c_double_buffer: bool = False,
+        runtime: RuntimeKind = RuntimeKind.TENSORMAP_AND_RINGBUFFER,
     ) -> None:
         """Create a PassContext with instruments and pass configuration (incl. memory planner).
 
@@ -274,6 +290,11 @@ class PassContext:
         to chooser-emitted L0C double-buffering (dbC=2; experimental, default
         off). It has no effect under ``DSA_RP`` or ``PTOAS``, which enable
         chooser dbC=2 automatically.
+
+        ``runtime`` selects the target Simpler runtime ABI; its wire name is
+        what lands in ``RUNTIME_CONFIG["runtime"]`` in the generated
+        ``kernel_config.py``. Passes that legalize runtime-specific IR read it
+        from the context.
         """
         ...
 
@@ -298,6 +319,10 @@ class PassContext:
 
     def get_memory_planner(self) -> MemoryPlanner:
         """Get the memory planner selection for this context."""
+        ...
+
+    def get_runtime(self) -> RuntimeKind:
+        """Get the target Simpler runtime ABI for this context."""
         ...
 
     def get_enable_pypto_l0c_double_buffer(self) -> bool:

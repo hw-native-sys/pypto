@@ -460,5 +460,80 @@ class TestSpanInErrors:
         assert "Check failed:" in error_str
 
 
+class TestRethrowWithMessage:
+    """Test `Error::RethrowWithMessage` — typed, trace-preserving message replacement.
+
+    An intermediate frame often wants to add context to an in-flight error (the op registry
+    appends the IR span to every type-deduction failure). Catching `const Error&` and
+    constructing a fresh exception does that at the cost of collapsing the concrete type and
+    replacing the original stack trace with the catcher's own. `RethrowWithMessage` exists so
+    that context can be added without paying either.
+    """
+
+    _EXPECTED_PY_TYPE = {
+        "ValueError": ValueError,
+        "TypeError": TypeError,
+        "RuntimeError": RuntimeError,
+        "NotImplementedError": NotImplementedError,
+        "IndexError": IndexError,
+        "AssertionError": AssertionError,
+        "InternalError": pypto.InternalError,
+        "Error": pypto.Error,
+    }
+
+    @pytest.mark.parametrize("kind", list(_EXPECTED_PY_TYPE))
+    def test_concrete_type_is_preserved(self, kind: str):
+        """Each subclass rethrows as itself, not as its base or as ValueError."""
+        with pytest.raises(self._EXPECTED_PY_TYPE[kind]):
+            testing.rethrow_with_message(kind, "original", "replacement")
+
+    @pytest.mark.parametrize("kind", list(_EXPECTED_PY_TYPE))
+    def test_message_is_replaced(self, kind: str):
+        with pytest.raises(self._EXPECTED_PY_TYPE[kind]) as exc_info:
+            testing.rethrow_with_message(kind, "original", "replacement")
+
+        # Bug-class errors append the traceback, which echoes the source line of each
+        # frame - including `RaiseByKind(kind, original);`. Compare only the message.
+        message = str(exc_info.value).split(_TRACE_HEADER, 1)[0]
+        assert "replacement" in message
+        assert "original" not in message
+
+    @pytest.mark.skipif(_MACOS, reason="macOS cannot symbolize a CPython MH_BUNDLE extension module")
+    @pytest.mark.parametrize("kind", ["InternalError", "AssertionError"])
+    def test_bug_class_keeps_the_original_throw_site(self, kind: str, no_backtrace_env: None):
+        """The trace keeps the frame that threw, below the frame that caught and rethrew.
+
+        Both frames live in the binding module, so their *count* is what discriminates:
+        RaiseByKind and rethrow_with_message contribute one each when the trace is carried
+        over, while constructing a fresh exception in the catch block would leave only the
+        latter - every frame below the catch having already been unwound.
+        """
+        with pytest.raises((pypto.InternalError, AssertionError)) as exc_info:
+            testing.rethrow_with_message(kind, "original", "replacement")
+
+        files = _assert_has_trace(str(exc_info.value))
+        binding_frames = [f for f in files if f.endswith("python/bindings/modules/testing.cpp")]
+        assert len(binding_frames) >= 2, (
+            f"expected both the throw and rethrow frames, got {len(binding_frames)} in: {files}"
+        )
+
+    @pytest.mark.skipif(_MACOS, reason="macOS cannot symbolize a CPython MH_BUNDLE extension module")
+    def test_direct_raise_has_one_frame_at_the_throw_site(self, no_backtrace_env: None):
+        """Baseline for the test above: a plain raise contributes exactly one binding frame."""
+        with pytest.raises(pypto.InternalError) as exc_info:
+            testing.raise_internal_error("invariant broken")
+
+        files = _assert_has_trace(str(exc_info.value))
+        binding_frames = [f for f in files if f.endswith("python/bindings/modules/testing.cpp")]
+        assert len(binding_frames) == 1, f"expected a single binding frame, got: {files}"
+
+    def test_internal_error_is_not_a_value_error(self):
+        """The regression this mechanism exists to prevent."""
+        with pytest.raises(pypto.InternalError) as exc_info:
+            testing.rethrow_with_message("InternalError", "original", "replacement")
+
+        assert not isinstance(exc_info.value, ValueError)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

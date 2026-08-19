@@ -12,12 +12,14 @@
 The release tarball layout changed at v0.51: ``<root>/ptoas`` went from being a
 shell launcher (which exports ``LD_LIBRARY_PATH=<root>/lib`` before exec'ing the
 bare ``<root>/bin/ptoas``) to being a Python package *directory*, leaving the now
-self-sufficient ``<root>/bin/ptoas`` as the only binary.
+self-sufficient ``<root>/bin/ptoas`` as the only binary. It changed again at
+v0.55, which bundles its own CPython behind a new ``<root>/ptoas.sh`` launcher.
 
-Discovery must therefore handle both layouts, must never mistake a *directory*
-named ``ptoas`` for the executable, and must keep launcher-first ordering — on
-pre-v0.51 the bare ``bin/ptoas`` has no RUNPATH and dies on its bundled MLIR
-shared objects.
+Discovery must therefore handle all three layouts, must never mistake a
+*directory* named ``ptoas`` for the executable, and must keep launcher-first
+ordering — on pre-v0.51 the bare ``bin/ptoas`` has no RUNPATH and dies on its
+bundled MLIR shared objects, and on v0.55+ it runs under the caller's interpreter
+instead of the bundled one.
 """
 
 from __future__ import annotations
@@ -75,6 +77,23 @@ def test_package_dir_named_ptoas_is_skipped(tmp_path, monkeypatch):
     (root / "ptoas").mkdir(parents=True)
     (root / "ptoas" / "__init__.py").write_text("")
     expected = _make_executable(root / "bin" / "ptoas")
+    monkeypatch.setenv("PTOAS_ROOT", str(root))
+
+    assert find_ptoas_binary() == str(expected)
+
+
+def test_shell_launcher_wins_on_standalone_layout(tmp_path, monkeypatch):
+    """v0.55+ ships all three entries; ``ptoas.sh`` must win.
+
+    Only ``ptoas.sh`` selects the bundled CPython. ``bin/ptoas`` is a
+    ``#!/usr/bin/env python3`` script and fails with "this ptoas compiler archive
+    requires CPython <x.y>" whenever the caller's interpreter differs.
+    """
+    root = tmp_path / "ptoas-bin"
+    (root / "ptoas").mkdir(parents=True)
+    (root / "ptoas" / "__init__.py").write_text("")
+    expected = _make_executable(root / "ptoas.sh")
+    _make_executable(root / "bin" / "ptoas")
     monkeypatch.setenv("PTOAS_ROOT", str(root))
 
     assert find_ptoas_binary() == str(expected)

@@ -159,6 +159,52 @@ def test_c2v_boundary_becomes_aiv_shard_and_vector_region_is_halved():
     ir.assert_structural_equal(_lower(Before), Expected)
 
 
+def test_auto_c2v_boundary_localizes_a_ragged_split_axis():
+    """A ragged split axis gets the LANE's extent on the AUTO path too.
+
+    ``ReshapeSplitAxis`` can only ceil-halve the split-axis valid extent, because
+    an op's type function does not know the lane. Here ``subblock_idx`` is in
+    scope, so ``LocalizeShardValidForLane`` replaces that guess with the truth —
+    lane 0 holds 100 of its 64-row half (clamped to 64), lane 1 holds 36 —
+    instead of giving BOTH lanes ``ceil(100 / 2) = 50``.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            qk: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat, pl.TileView(valid_shape=[100, 128])],
+            out_0: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            popped = pl.tile.move(qk, target_memory=pl.Mem.Vec)
+            out_store = pl.tile.store(popped, [0, 0], out_0)
+            return out_store
+
+    @pl.program
+    class Expected:
+        @pl.function(
+            type=pl.FunctionType.InCore,
+            attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": True},
+        )
+        def split_auto(
+            qk: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat, pl.TileView(valid_shape=[100, 128])],
+            out_0: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            subblock_idx = pl.tile.get_subblock_idx()
+            popped: pl.Tile[
+                [64, 128],
+                pl.FP32,
+                pl.Mem.Vec,
+                pl.TileView(
+                    valid_shape=[pl.min(pl.max(100, subblock_idx * 64) - subblock_idx * 64, 64), 128]
+                ),
+            ] = pl.tile.aiv_shard(qk, split=1)
+            out_store = pl.tile.store(popped, [0 + subblock_idx * 64, 0], out_0)
+            return out_store
+
+    ir.assert_structural_equal(_lower(Before), Expected)
+
+
 def test_store_offset_at_nonzero_base_localizes_additively():
     """AdjustOffsets ADDS ``subblock_idx * half`` on the split axis rather than
     overwriting the offset: a store at base row 16 becomes ``16 + subblock_idx * 64``.
@@ -1920,6 +1966,80 @@ def test_auto_path_unchanged():
     )
 
 
+# ---------------------------------------------------------------------------
+# AUTO path + a surviving scope: rejected, not silently skipped.
+#
+# The halving walks recurse into for / while / if / seq but deliberately not
+# into a ScopeStmt, so a mixed AUTO function whose body still holds a scope
+# cannot be lowered. `RollupAffinity` used to have no ScopeStmt arm either, so
+# such a function rolled up SHARED, `IsMixedCubeVector` read false, and the
+# function was passed through COMPLETELY UNCHANGED — no split, no diagnostic.
+# The rollup now classifies through the scope, and the pass rejects what it
+# cannot lower, mirroring the explicit region path's guard.
+# ---------------------------------------------------------------------------
+
+
+def test_auto_path_scope_bodied_mixed_is_rejected():
+    """A mixed AUTO ``pl.split`` function behind a scope is rejected."""
+
+    @pl.program
+    class Scoped:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            self,
+            qk: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat],
+            out_0: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            with pl.at(level=pl.Level.CORE_GROUP):
+                popped = pl.tile.move(qk, target_memory=pl.Mem.Vec)
+                y = pl.tile.add(popped, popped)
+                out_store = pl.tile.store(y, [0, 0], out_0)
+            return out_store
+
+    with pytest.raises(ValueError, match=r"body still contains a scope"):
+        _lower(Scoped)
+
+
+def test_auto_path_scope_bodied_pure_vector_still_passes_through():
+    """The guard fires only for MIXED — a pure-vector body is untouched, not rejected.
+
+    Boundary partner to the rejection above, and the reason ``RollupAffinity``
+    had to be taught to classify *through* a scope rather than the pass simply
+    rejecting every scope-bodied split function: a pure-vector ``pl.split`` has
+    no cube/vector boundary to converge, so it is legitimately passed through
+    (ExpandMixedKernel strips its split later). Getting this wrong would turn a
+    silent skip into a spurious hard error.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def pure_vec(
+            self,
+            data: pl.Tensor[[128, 128], pl.FP32],
+            out_0: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            with pl.at(level=pl.Level.CORE_GROUP):
+                t = pl.tile.load(data, [0, 0], [128, 128], target_memory=pl.Mem.Vec)
+                out_store = pl.tile.store(t, [0, 0], out_0)
+            return out_store
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def pure_vec(
+            self,
+            data: pl.Tensor[[128, 128], pl.FP32],
+            out_0: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            with pl.at(level=pl.Level.CORE_GROUP):
+                t = pl.tile.load(data, [0, 0], [128, 128], target_memory=pl.Mem.Vec)
+                out_store = pl.tile.store(t, [0, 0], out_0)
+            return out_store
+
+    ir.assert_structural_equal(_lower(Before), Expected)
+
+
 def test_while_inside_region_halves_vector_op():
     """A WhileStmt *inside* a region body has its vector ops halved: LowerStmts
     recurses into the while (mirroring its for/if arms), so the load is split on
@@ -2375,11 +2495,16 @@ def test_region_rejects_lane_reference_on_non_addressing_op():
 # ``split_aiv_region_validated`` on a function whose region guards never ran.
 #
 # These are the only tests here authored in the ``@pl.program`` DSL, because the
-# DSL is what produces the shape: the parser wraps a top-level
-# ``for aiv_id in pl.split_aiv(...)`` in an InCore ScopeStmt, and
-# OutlineIncoreScopes only outlines scopes out of Opaque / Orchestration
-# functions — so the wrapper survives into a function declared
-# ``pl.FunctionType.InCore``.
+# DSL is what produces the shape: an author-written ``with pl.at(...)`` inside a
+# function declared ``pl.FunctionType.InCore``. OutlineIncoreScopes outlines
+# scopes only out of Opaque / Orchestration functions, so that scope is still
+# standing when this pass runs.
+#
+# The scope must be author-written. The parser emits a top-level region BARE in
+# an InCore function — it has to, so that printing an outlined function and
+# reparsing it rebuilds the same IR — so there is no synthesized wrapper to lean
+# on. Whether a region is ALLOWED in such a function is a separate placement
+# rule, enforced earlier by AivSplitValid check (h).
 # ---------------------------------------------------------------------------
 
 _SCOPE_NESTED_MSG = "nested inside a scope"
@@ -2396,10 +2521,14 @@ def test_scope_nested_region_rejected():
             a: pl.Tensor[[128, 128], pl.FP32],
             c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
         ) -> pl.Tensor[[128, 128], pl.FP32]:
-            # The parser wraps this top-level region in an InCore ScopeStmt.
-            for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):
-                base = aiv_id * 64
-                c = pl.store(pl.exp(pl.load(a, [base, 0], [64, 128])), [base, 0], c)
+            # Author-written scope. It must be explicit: the parser emits a
+            # top-level region BARE inside an InCore function (so that printing
+            # an outlined function and reparsing it rebuilds the same IR), so a
+            # synthesized wrapper is no longer available to produce this shape.
+            with pl.at(level=pl.Level.CORE_GROUP):
+                for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+                    base = aiv_id * 64
+                    c = pl.store(pl.exp(pl.load(a, [base, 0], [64, 128])), [base, 0], c)
             return c
 
     with pytest.raises(ValueError, match=_SCOPE_NESTED_MSG):
@@ -2424,15 +2553,68 @@ def test_scope_nested_region_guards_not_bypassed():
             data: pl.Tensor[[128, 128], pl.FP32],
             out_0: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
         ) -> pl.Tensor[[128, 128], pl.FP32]:
-            qk = pl.matmul(a_left, b_right)
-            for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):  # noqa: B007
-                qk_h = pl.aiv_shard(qk)  # noqa: F841 - explicit boundary
-                t = pl.load(data, [0, 0], [128, 128], target_memory=pl.MemorySpace.Vec)  # full width
-                out_0 = pl.tile.store(t, [0, 0], out_0)
+            with pl.at(level=pl.Level.CORE_GROUP):
+                qk = pl.matmul(a_left, b_right)
+                for _ in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                    _qk_h = pl.aiv_shard(qk)  # explicit boundary
+                    t = pl.load(data, [0, 0], [128, 128], target_memory=pl.MemorySpace.Vec)  # full width
+                    out_0 = pl.tile.store(t, [0, 0], out_0)
             return out_0
 
     with pytest.raises(ValueError, match=_SCOPE_NESTED_MSG):
         _lower(NestedMixed)
+
+
+def test_scope_inside_region_body_is_rejected():
+    """The mirror case: a scope nested INSIDE a region body, not around it.
+
+    The region itself is consumed here, so the surviving-region guard passes —
+    but the inner walks (``LowerStmts`` / ``CheckNoCubeTileHalved`` /
+    ``ScanRegionHalfWidth``) step over a ``ScopeStmt`` rather than entering it,
+    and the vector ops inside would be spliced out FULL-WIDTH with both AIV lanes
+    computing the whole tile, silently. Hand-built because the DSL cannot reach
+    it: ``OutlineIncoreScopes`` lifts a ``with pl.at(...)`` inside a region into
+    its own function, and AivSplitValid check (h) rejects authoring a region in
+    an InCore function the outliner did not produce. This guards IR that skips
+    pass 8 — hand-built, or a deserialized ``.pto``.
+    """
+    span = ir.Span.unknown()
+    data = ir.Var("data", _tensor([128, 128]), span)
+    out_0 = ir.Var("out_0", _tensor([128, 128]), span)
+    aiv_call = T.get_subblock_idx(span=span)
+    aiv_id = ir.Var("aiv_id", aiv_call.type, span)
+    load = T.load(data, [0, 0], [128, 128], target_memory=MS.Vec, span=span)
+    t = ir.Var("t", load.type, span)
+    store = T.store(t, [0, 0], out_0, span=span)
+    out_store = ir.Var("out_store", store.type, span)
+
+    inner = ir.SeqStmts([ir.AssignStmt(t, load, span), ir.AssignStmt(out_store, store, span)], span)
+    region = ir.SplitAivScopeStmt(
+        split=ir.SplitMode.UP_DOWN,
+        count=2,
+        body=ir.SeqStmts(
+            [
+                ir.AssignStmt(aiv_id, aiv_call, span),
+                ir.InCoreScopeStmt(split=ir.SplitMode.NONE, name_hint="", body=inner, span=span),
+            ],
+            span,
+        ),
+        span=span,
+    )
+    # ``split_aiv`` set so AivSplitValid check (h) accepts the function — the
+    # point is the pass guard, not the placement rule.
+    func = ir.Function(
+        "k",
+        [(data, ir.ParamDirection.In), (out_0, ir.ParamDirection.Out)],
+        [out_0.type],
+        ir.SeqStmts([region], span),
+        span,
+        ir.FunctionType.InCore,
+        attrs={"split_aiv": True},
+    )
+
+    with pytest.raises(ValueError, match=r"a scope survives inside a pl\.split_aiv region body"):
+        _lower(ir.Program([func], "p", span))
 
 
 def test_outlined_region_still_lowers_and_stamps():

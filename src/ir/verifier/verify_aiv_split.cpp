@@ -20,6 +20,7 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
@@ -35,6 +36,13 @@ namespace pypto {
 namespace ir {
 
 namespace {
+
+/// Function attr recording that ``OutlineIncoreScopes`` minted this InCore
+/// function by outlining a CORE_GROUP scope that held ``pl.split_aiv`` regions.
+/// Written in ``scope_outline_utils.cpp`` and re-stamped by ``LowerAutoVectorSplit``;
+/// read here as the provenance signal for check (h). Kept as a literal for the
+/// same reason both producers do — it is a plain attr key, not an operator name.
+constexpr const char* kSplitAivAttr = "split_aiv";
 
 /// Everything that differs between the two split-axis boundary ops: the memory
 /// space each side must carry, plus the direction-specific diagnostic wording.
@@ -284,11 +292,46 @@ class FunctionSplitFactScanner : public IRVisitor {
 // no op_, so no SubmitPtr override is needed (see pass-submit-awareness.md).
 class SplitAivStructuralVerifier : public IRVisitor {
  public:
-  SplitAivStructuralVerifier(std::vector<Diagnostic>& diagnostics, const FunctionSplitFacts& facts)
-      : diagnostics_(diagnostics), facts_(facts) {}
+  SplitAivStructuralVerifier(std::vector<Diagnostic>& diagnostics, const FunctionSplitFacts& facts,
+                             bool func_is_incore, bool func_from_outlining)
+      : diagnostics_(diagnostics),
+        facts_(facts),
+        func_is_incore_(func_is_incore),
+        func_from_outlining_(func_from_outlining) {}
 
+  // (h) PLACEMENT — a CORE_GROUP-level region must not be authored inside a
+  // function that is already a core function.
+  //
+  // A region inside a `FunctionType::InCore` function is legal in exactly one
+  // case: that function is the one OutlineIncoreScopes MADE by outlining a scope
+  // that held the region. The IR records that provenance directly — the outliner
+  // stamps `split_aiv` on every function it mints from a region-bearing scope
+  // (`scope_outline_utils.cpp`, and LowerAutoVectorSplit re-stamps it) — so the
+  // check is "InCore function carrying a region, but not one the outliner
+  // produced".
+  //
+  // Provenance rather than shape is what makes this survive the parser emitting
+  // the region BARE in an InCore function (which it must, so that printing an
+  // outlined function and reparsing it rebuilds the same IR). A shape-based test
+  // — "region nested in a surviving InCore scope" — worked only while the parser
+  // wrapped every top-level region, and would silently stop rejecting anything
+  // once it stopped.
+  //
+  // Reporting here rather than at LowerAutoVectorSplit (pass 20) puts the
+  // diagnostic 12 passes closer to the source; that pass keeps its own guard as
+  // the backstop for a region behind a scope the lowering walks cannot enter.
   void VisitStmt_(const SplitAivScopeStmtPtr& op) override {
     INTERNAL_CHECK_SPAN(op->body_, op->span_) << "Internal error: SplitAivScopeStmt has null body";
+    if (func_is_incore_ && !func_from_outlining_) {
+      Err(op->span_,
+          "'pl.split_aiv' opens a CORE_GROUP-level region, so it cannot be authored inside a "
+          "function declared 'pl.FunctionType.InCore' — that function is already a core function. "
+          "A region reaches an InCore function only when OutlineIncoreScopes lifted the enclosing "
+          "CORE_GROUP scope into it, and that pass processes only Opaque / Orchestration functions. "
+          "Declare the enclosing function with plain @pl.function / @pl.jit (Opaque), or open the "
+          "region inside a 'with pl.at(level=pl.Level.CORE_GROUP):' scope in such a function, and "
+          "let pass 8 outline it.");
+    }
     int prev_split_dim = cur_split_dim_;
     ++depth_;
     // A task-parallel (None) region has NO split axis — both lanes run the full
@@ -517,8 +560,10 @@ class SplitAivStructuralVerifier : public IRVisitor {
   /// outlives it, and `defs` is one entry per binding, too big to copy per
   /// function for no gain.
   const FunctionSplitFacts& facts_;
-  int depth_ = 0;           ///< Region nesting depth (>0 means inside a split_aiv region).
-  int cur_split_dim_ = -1;  ///< Split axis of the innermost enclosing region (-1 outside any region).
+  int depth_ = 0;                ///< Region nesting depth (>0 means inside a split_aiv region).
+  int cur_split_dim_ = -1;       ///< Split axis of the innermost enclosing region (-1 outside any region).
+  bool func_is_incore_ = false;  ///< Enclosing function is FunctionType::InCore, for check (h).
+  bool func_from_outlining_ = false;  ///< It carries the outliner's ``split_aiv`` stamp, for check (h).
 };
 
 }  // namespace
@@ -544,7 +589,9 @@ class AivSplitValidPropertyVerifierImpl : public PropertyVerifier {
       // the body can still establish.
       FunctionSplitFactScanner scanner;
       scanner.VisitStmt(func->body_);
-      SplitAivStructuralVerifier verifier(diagnostics, scanner.facts());
+      SplitAivStructuralVerifier verifier(
+          diagnostics, scanner.facts(), func->func_type_ == FunctionType::InCore,
+          func->HasAttr(kSplitAivAttr) && func->GetAttr<bool>(kSplitAivAttr, false));
       verifier.VisitStmt(func->body_);
     }
   }

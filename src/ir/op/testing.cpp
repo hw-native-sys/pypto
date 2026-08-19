@@ -23,8 +23,11 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/error.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
@@ -44,6 +47,31 @@ REGISTER_OP("test.op")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return args[0]->GetType();
+    });
+
+// Type deduction that fails an internal invariant. Used exclusively to verify that
+// OpRegistry::CreateImpl surfaces the concrete exception type (InternalError) and the
+// stack trace of the real throw site, rather than flattening both into a ValueError
+// raised from the registry itself.
+REGISTER_OP("test.deduce_raises_internal")
+    .set_op_category("TestOp")
+    .set_description("Test-only op whose type deduction fails an internal invariant")
+    .add_argument("x", "Input")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) -> TypePtr {
+      INTERNAL_CHECK(false) << "Internal error: test.deduce_raises_internal always fails";
+      return nullptr;
+    });
+
+// Sibling of the above for the user-error half of the same contract: a TypeError raised
+// during deduction must reach the caller as a TypeError, not a ValueError.
+REGISTER_OP("test.deduce_raises_type")
+    .set_op_category("TestOp")
+    .set_description("Test-only op whose type deduction raises TypeError")
+    .add_argument("x", "Input")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) -> TypePtr {
+      throw TypeError("test.deduce_raises_type always fails");
     });
 
 // Used exclusively to test the "missing conversion" error path in ConvertTensorToTileOps.

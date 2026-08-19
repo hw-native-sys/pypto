@@ -1119,11 +1119,22 @@ void OpConversionRegistry::RegisterMatmulOps() {
       [rank_of](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
                 const Span& span) -> ConversionResult {
         (void)kwargs;
-        INTERNAL_CHECK_SPAN(args.size() == 3, span)
-            << "tensor.matmul_acc conversion expects 3 args (acc, lhs, rhs)";
+        INTERNAL_CHECK_SPAN(args.size() == 3 || args.size() == 4, span)
+            << "tensor.matmul_acc conversion expects 3 args (acc, lhs, rhs) or 4 with init_cond";
         const bool nd = rank_of(args[0]) > 2 || rank_of(args[1]) > 2 || rank_of(args[2]) > 2;
         const std::string out_op = nd ? "tile.batch_matmul_acc" : "tile.matmul_acc";
-        return ConversionResult{OpRegistry::GetInstance().Create(out_op, {args[0], args[1], args[2]}, span)};
+        std::vector<ExprPtr> out_args = {args[0], args[1], args[2]};
+        if (args.size() == 4) {
+          // The batched form expands into several tile.matmul_acc calls inside
+          // FlattenTileNdTo2D, which has no place to thread a per-call
+          // predicate; only the 2D path carries init_cond.
+          CHECK_SPAN(!nd, span)
+              << "tensor.matmul_acc does not support init_cond on operands of rank > 2 (got acc rank "
+              << rank_of(args[0]) << ", lhs rank " << rank_of(args[1]) << ", rhs rank " << rank_of(args[2])
+              << "). Loop over the batch dimension and accumulate with 2D operands instead.";
+          out_args.push_back(args[3]);
+        }
+        return ConversionResult{OpRegistry::GetInstance().Create(out_op, out_args, span)};
       },
       {{1, {MemorySpace::Mat, "a_trans"}}, {2, {MemorySpace::Mat, "b_trans"}}});
 }

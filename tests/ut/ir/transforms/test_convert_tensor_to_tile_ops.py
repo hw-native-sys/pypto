@@ -1196,10 +1196,16 @@ class TestConvertTensorToTileOps:
                 lambda ib, ins: ib.let("z", tensor_ops.log(ins[0], high_precision=True)),
                 "tile.log",
             ),
+            (
+                "recip",
+                [("x", [64], DataType.FP32)],
+                lambda ib, ins: ib.let("z", tensor_ops.recip(ins[0], high_precision=True)),
+                "tile.recip",
+            ),
         ],
     )
     def test_precision_kwargs_survive_tensor_to_tile_conversion(self, op_name, in_specs, body, tile_op_name):
-        """Non-broadcast tdiv and tlog conversions preserve high_precision."""
+        """Non-broadcast precision-op conversions preserve high_precision."""
         before = _make_before(
             in_specs=in_specs,
             out_shape=[64],
@@ -3045,6 +3051,213 @@ class TestGmLocalTensorConversion:
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_mixed_tile_and_scalar_store_to_same_gm_tensor_rejected(self):
+        """DMA and scalar stores to one GM tensor have no coherence guarantee."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                dst: pl.Tensor[[64], pl.INT32],
+                val: pl.Scalar[pl.INT32],
+            ) -> pl.Tensor[[64], pl.INT32]:
+                fill = pl.full([32], dtype=pl.INT32, value=-1)
+                dst[0:32] = fill
+                for i in pl.range(4):
+                    pl.tensor.write(dst, [i], val)
+                return dst
+
+        with pytest.raises(ValueError, match="mixes MTE3 and scalar stores"):
+            passes.convert_tensor_to_tile_ops()(Before)
+
+    def test_full_tensor_init_and_dynamic_scalar_updates_use_bulk_stores(self):
+        """Full GM initializations and later scalar overrides are staged in UB."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                dst_pos: pl.Tensor[[1, 32], pl.INT32],
+                dst_index: pl.Tensor[[1, 32], pl.INT32],
+                values: pl.Tensor[[32], pl.INT32],
+                count: pl.Scalar[pl.INDEX],
+            ) -> pl.Scalar[pl.INDEX]:
+                pos_fill = pl.full([1, 32], dtype=pl.INT32, value=0)
+                dst_pos[0:1, 0:32] = pos_fill
+                index_fill = pl.full([1, 32], dtype=pl.INT32, value=-1)
+                dst_index[0:1, 0:32] = index_fill
+                for i in pl.range(32):
+                    if i < count:
+                        value = pl.tensor.read(values, [i])
+                        pl.tensor.write(dst_pos, [0, i], value)
+                        pl.tensor.write(dst_index, [0, i], pl.cast(i, pl.INT32))
+                return count
+
+        after = passes.convert_tensor_to_tile_ops()(Before)
+        kernel = _require_function(after, "main_incore_0")
+        assert len(_find_calls_to(kernel, "tile.store")) == 2
+        assert len(_find_calls_to(kernel, "tile.full")) == 2
+        assert len(_find_calls_to(kernel, "tile.write")) == 2
+        assert _find_first_call_to(kernel, "tensor.write") is None
+
+    def test_full_tensor_init_with_intervening_read_remains_rejected(self):
+        """A GM read makes delaying the initial bulk store observable."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                dst: pl.Tensor[[32], pl.INT32],
+            ) -> pl.Scalar[pl.INT32]:
+                fill = pl.full([32], dtype=pl.INT32, value=-1)
+                dst[0:32] = fill
+                old = pl.tensor.read(dst, [0])
+                pl.tensor.write(dst, [1], old)
+                return old
+
+        with pytest.raises(ValueError, match="mixes MTE3 and scalar stores"):
+            passes.convert_tensor_to_tile_ops()(Before)
+
+    def test_constant_scalar_fill_loop_uses_bulk_store(self):
+        """A contiguous constant GM fill uses MTE3 instead of scalar D-cache stores."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                dst: pl.Tensor[[16, 1], pl.FP32],
+                aux: pl.Tensor[[16, 1], pl.FP32],
+                valid: pl.Scalar[pl.INT32],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                if valid > 0:
+                    fill = pl.full([16, 1], dtype=pl.FP32, value=1.0)
+                    aux_fill = pl.full([16, 1], dtype=pl.FP32, value=2.0)
+                    dst[0:16, 0:1] = fill
+                    aux[0:16, 0:1] = aux_fill
+                else:
+                    for i in pl.range(16):
+                        pl.tensor.write(dst, [i, 0], pl.const(0.0, pl.FP32))
+                        pl.tensor.write(aux, [i, 0], pl.const(-1.0, pl.FP32))
+                return dst
+
+        after = passes.convert_tensor_to_tile_ops()(Before)
+        kernel = _require_function(after, "main_incore_0")
+        assert len(_find_calls_to(kernel, "tile.store")) == 4
+        assert len(_find_calls_to(kernel, "tile.full")) == 4
+        assert len(_find_calls_to(kernel, "tile.reshape")) == 2
+        assert _find_first_call_to(kernel, "tensor.write") is None
+
+    def test_unaligned_constant_scalar_fill_loop_still_rejected(self):
+        """A constant fill smaller than one MTE3 row stays on the scalar path."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self, dst: pl.Tensor[[16, 1], pl.FP32], valid: pl.Scalar[pl.INT32]
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                if valid > 0:
+                    fill = pl.full([16, 1], dtype=pl.FP32, value=1.0)
+                    dst[0:16, 0:1] = fill
+                else:
+                    for i in pl.range(4):
+                        pl.tensor.write(dst, [i, 0], pl.const(0.0, pl.FP32))
+                return dst
+
+        with pytest.raises(ValueError, match="mixes MTE3 and scalar stores"):
+            passes.convert_tensor_to_tile_ops()(Before)
+
+    def test_shifted_multi_write_fill_loop_still_rejected(self):
+        """Bulk rewriting must not reorder overlapping scalar write patterns."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self, dst: pl.Tensor[[17, 1], pl.FP32], valid: pl.Scalar[pl.INT32]
+            ) -> pl.Tensor[[17, 1], pl.FP32]:
+                if valid > 0:
+                    fill = pl.full([16, 1], dtype=pl.FP32, value=1.0)
+                    dst[0:16, 0:1] = fill
+                else:
+                    for i in pl.range(16):
+                        pl.tensor.write(dst, [i, 0], pl.const(0.0, pl.FP32))
+                        pl.tensor.write(dst, [i + 1, 0], pl.const(-1.0, pl.FP32))
+                return dst
+
+        with pytest.raises(ValueError, match="mixes MTE3 and scalar stores"):
+            passes.convert_tensor_to_tile_ops()(Before)
+
+    def test_tile_and_scalar_stores_to_distinct_gm_tensors_allowed(self):
+        """The coherence restriction is per underlying GM tensor."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                dma_dst: pl.Tensor[[32], pl.INT32],
+                scalar_dst: pl.Tensor[[32], pl.INT32],
+                val: pl.Scalar[pl.INT32],
+            ) -> pl.Tensor[[32], pl.INT32]:
+                fill = pl.full([32], dtype=pl.INT32, value=-1)
+                dma_dst[0:32] = fill
+                pl.tensor.write(scalar_dst, [0], val)
+                return dma_dst
+
+        passes.convert_tensor_to_tile_ops()(Before)
+
+    def test_mixed_store_through_tensor_view_rejected(self):
+        """A GM tensor.view preserves the parameter's store identity."""
+        tensor_type = ir.TensorType([32], DataType.INT32)
+        ib = IRBuilder()
+        with ib.function("view_alias", type=ir.FunctionType.InCore) as f:
+            dst = f.param("dst", tensor_type)
+            val = f.param("val", ir.ScalarType(DataType.INT32))
+            f.return_type(tensor_type)
+            viewed = ib.let("viewed", tensor_ops.view(dst, [32]))
+            src = ib.let("src", tile_ops.load(dst, [0], [32]))
+            stored = ib.let("stored", tile_ops.store(src, [0], viewed))
+            ib.let("scalar_stored", tensor_ops.write(dst, [0], val))
+            ib.return_stmt(stored)
+        program = ir.Program([f.get_result()], "ViewAliasMixedStores", ir.Span.unknown())
+
+        with pytest.raises(ValueError, match="mixes MTE3 and scalar stores"):
+            passes.convert_tensor_to_tile_ops()(program)
+
+    @pytest.mark.parametrize("loop_kind", ["for", "while"])
+    def test_mixed_store_through_loop_carried_alias_rejected(self, loop_kind: str):
+        """Later loop iterations inherit tensor origins yielded by the body."""
+        tensor_type = ir.TensorType([32], DataType.INT32)
+        ib = IRBuilder()
+        with ib.function(f"{loop_kind}_alias", type=ir.FunctionType.InCore) as f:
+            dma_dst = f.param("dma_dst", tensor_type)
+            scalar_dst = f.param("scalar_dst", tensor_type)
+            val = f.param("val", ir.ScalarType(DataType.INT32))
+            f.return_type(tensor_type)
+            src = ib.let("src", tile_ops.load(dma_dst, [0], [32]))
+            loop_var = ib.var("i", ir.ScalarType(DataType.INDEX))
+            loop_context = (
+                ib.for_loop(loop_var, 0, 2, 1)
+                if loop_kind == "for"
+                else ib.while_loop(ir.ConstBool(True, ir.Span.unknown()))
+            )
+            with loop_context as loop:
+                carried = loop.iter_arg("carried", dma_dst)
+                final = loop.return_var("final")
+                ib.let("stored", tile_ops.store(src, [0], carried))
+                ib.emit(ir.YieldStmt([scalar_dst], ir.Span.unknown()))
+            ib.let("scalar_stored", tensor_ops.write(scalar_dst, [0], val))
+            ib.return_stmt(final)
+        program = ir.Program([f.get_result()], f"{loop_kind.title()}AliasMixedStores", ir.Span.unknown())
+
+        with pytest.raises(ValueError, match="mixes MTE3 and scalar stores"):
+            passes.convert_tensor_to_tile_ops()(program)
+
     def test_local_tensor_write_to_tile_write(self):
         """tensor.write to a local_tensor (result of tensor.add) converts to tile.write."""
 
@@ -4884,6 +5097,26 @@ class TestWindowSliceIncoreConversion:
     # Composite intrinsic param-direction upgrade tests
     # ------------------------------------------------------------------
 
+    def test_soft_syncall_upgrades_workspace_to_inout(self):
+        """The GM counter workspace is both read and written by soft syncall."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, workspace: pl.Tensor[[16], pl.INT32]):
+                pl.system.syncall(mode="soft", core_type="aiv_only", gm_workspace=workspace, used_cores=0)
+                return  # noqa: PLR1711  (DSL return terminator)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, workspace: pl.InOut[pl.Tensor[[16], pl.INT32]]):
+                pl.system.syncall(mode="soft", core_type="aiv_only", gm_workspace=workspace, used_cores=0)
+                return  # noqa: PLR1711  (DSL return terminator)
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
     def test_barrier_upgrades_signal_to_inout(self):
         """``pld.tensor.barrier(signal)`` upgrades ``signal`` from In to InOut.
 
@@ -4912,6 +5145,79 @@ class TestWindowSliceIncoreConversion:
             ) -> pld.DistributedTensor[[nr, 1], pl.INT32]:
                 signal = pld.tensor.barrier(signal)
                 return signal
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_notify_atomic_add_upgrades_signal_to_inout(self):
+        """An AtomicAdd notify upgrades ``signal`` from In to InOut.
+
+        AtomicAdd reads the target slot's prior value before writing the sum,
+        so the target has a producer dependency even when the slot is on a peer
+        rank."""
+        nr = 2
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                signal: pld.DistributedTensor[[nr, 1], pl.INT32],
+                peer: pl.Scalar[pl.INT32],
+                tag: pl.Scalar[pl.INT32],
+            ):
+                pld.system.notify(
+                    target=signal, peer=peer, offsets=[0, 0], value=tag, op=pld.NotifyOp.AtomicAdd
+                )
+                return  # noqa: PLR1711  (DSL return terminator)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+                peer: pl.Scalar[pl.INT32],
+                tag: pl.Scalar[pl.INT32],
+            ):
+                pld.system.notify(
+                    target=signal, peer=peer, offsets=[0, 0], value=tag, op=pld.NotifyOp.AtomicAdd
+                )
+                return  # noqa: PLR1711  (DSL return terminator)
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_notify_set_upgrades_signal_to_out(self):
+        """A Set notify upgrades ``signal`` from In to Out.
+
+        Set overwrites the peer slot without reading its prior value, so a
+        notify-only target remains write-only."""
+        nr = 2
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                signal: pld.DistributedTensor[[nr, 1], pl.INT32],
+                peer: pl.Scalar[pl.INT32],
+                tag: pl.Scalar[pl.INT32],
+            ):
+                pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=tag, op=pld.NotifyOp.Set)
+                return  # noqa: PLR1711  (DSL return terminator)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                signal: pl.Out[pld.DistributedTensor[[nr, 1], pl.INT32]],
+                peer: pl.Scalar[pl.INT32],
+                tag: pl.Scalar[pl.INT32],
+            ):
+                pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=tag, op=pld.NotifyOp.Set)
+                return  # noqa: PLR1711  (DSL return terminator)
 
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
@@ -5061,6 +5367,17 @@ class TestWindowSliceIncoreConversion:
         ir.assert_structural_equal(After, Expected)
 
 
+def _incore_only(program: ir.Program) -> ir.Program:
+    """The program's single InCore function, as a one-function Program.
+
+    Expected covers that function only; the Orchestration caller pass 8 mints
+    alongside it is OutlineIncoreScopes' output, not this pass's.
+    """
+    incore = [f for f in program.functions.values() if f.func_type == ir.FunctionType.InCore]
+    assert len(incore) == 1, f"expected exactly one InCore function, got {len(incore)}"
+    return ir.Program([incore[0]], program.name, program.span)
+
+
 class TestConvertCrossCoreSplitOps:
     """ConvertTensorToTileOps lowers the high-level split-axis ops
     ``tensor.aiv_shard`` / ``tensor.aic_gather`` (emitted by ``pl.aiv_shard`` /
@@ -5069,33 +5386,57 @@ class TestConvertCrossCoreSplitOps:
     the tile deducer drops so the result is byte-identical to the AUTO
     ``pl.split`` path (LowerAutoVectorSplit).
 
-    Each Before is an InCore function running ``pl.aiv_shard`` / ``pl.aic_gather``
-    on a high-level Tensor inside a ``for aiv_id in pl.split_aiv(...)`` region — the
-    shape that reaches this pass (pass 10), before LowerAutoVectorSplit (pass 20)
-    erases the region. The shard operand is a cube ``pl.matmul`` result (Acc tile
-    after conversion); the gather operand is a Vec vector-compute result
-    (``pl.exp`` → Vec tile). Inside a ``split_aiv`` region the printer suppresses
-    the redundant ``split=`` kwarg on the split ops (the parser re-stamps it from
-    the region mode), so each Expected writes ``pl.tile.aiv_shard(x)`` /
-    ``pl.tile.aic_gather(x)`` without ``split=``.
+    Each Before is authored the way a user writes one — a plain ``@pl.function``
+    (Opaque) holding a ``pl.at(level=CORE_GROUP)`` scope — and the pass input is
+    then **derived by running OutlineIncoreScopes** (pass 8). That is what makes
+    the input the shape this pass really sees at pass 10: an InCore function
+    whose region is *bare*, with the scope already consumed. Hand-writing the
+    InCore function with a ``pl.at`` still around the region (as these tests
+    once did) describes IR the pipeline never produces, and AivSplitValid check
+    (h) now rejects it — ``pl.split_aiv`` is CORE_GROUP-level and must not be
+    authored inside a core function.
+
+    The shard operand is a cube ``pl.matmul`` result (Acc tile after
+    conversion); the gather operand is a Vec vector-compute result (``pl.exp`` →
+    Vec tile). The shard's ``pl.matmul`` sits OUTSIDE the region: each AIV lane
+    holds only half the tile, so a cube op inside a data-parallel region cannot
+    be vector-split (rejected by AivSplitValid check (a)). Inside a ``split_aiv``
+    region the printer suppresses the redundant ``split=`` kwarg on the split ops
+    (the parser re-stamps it from the region mode), so each Expected writes
+    ``pl.tile.aiv_shard(x)`` / ``pl.tile.aic_gather(x)`` without ``split=``.
+
+    Expected covers the InCore function only (see :func:`_incore_only`); the
+    Orchestration caller pass 8 mints alongside it is OutlineIncoreScopes'
+    output, not this pass's.
     """
 
     @staticmethod
+    def _outline(source: ir.Program) -> ir.Program:
+        """Derive this pass's input by running OutlineIncoreScopes (pass 8)."""
+        return passes.outline_incore_scopes()(source)
+
+    @classmethod
+    def _convert(cls, source: ir.Program) -> ir.Program:
+        """Outline (pass 8), then run the pass under test (pass 10).
+
+        Runs under the ambient conftest context — property verification *and*
+        the print->parse roundtrip instrument. Both stay on deliberately: the
+        input here is the real post-pass-8 shape, an InCore function whose
+        region is bare, and that shape round-trips.
+        """
+        return passes.convert_tensor_to_tile_ops()(cls._outline(source))
+
+    @staticmethod
     def _parse_split_kernel(op: str, mode: str, out_shape: list[int]) -> ir.Program:
-        """Parse an InCore kernel running ``pl.aiv_shard`` / ``pl.aic_gather`` on a
-        high-level Tensor inside a ``pl.split_aiv`` region.
+        """Parse an Opaque kernel running ``pl.aiv_shard`` / ``pl.aic_gather`` on a
+        high-level Tensor inside a ``pl.split_aiv`` region, then outline it.
 
         ``op`` is ``"aiv_shard"`` or ``"aic_gather"``; ``mode`` is the
         ``pl.SplitMode`` name (``UP_DOWN`` / ``LEFT_RIGHT``); ``out_shape`` is the
         function's Tensor return shape. The producer mirrors the realistic boundary
         each op sees: a cube ``pl.matmul`` for the shard, a Vec ``pl.exp`` for the
-        gather.
-
-        The shard's ``pl.matmul`` is emitted OUTSIDE the region: each AIV lane holds
-        only half the tile, so a cube op inside a data-parallel region cannot be
-        vector-split (rejected by AivSplitValid check (a)). Producing the full cube
-        tile first and sharding it inside the region is the authoring shape real
-        kernels use. The gather's ``pl.exp`` is a vector op and belongs inside.
+        gather. The returned program is post-pass-8, so the InCore function is
+        named ``main_incore_0`` and its region is bare.
         """
         if op == "aiv_shard":
             params = "a: pl.Tensor[[128, 128], pl.FP32], b: pl.Tensor[[128, 128], pl.FP32]"
@@ -5110,8 +5451,8 @@ class TestConvertCrossCoreSplitOps:
             "import pypto.language as pl\n\n\n"
             "@pl.program\n"
             "class Before:\n"
-            "    @pl.function(type=pl.FunctionType.InCore)\n"
-            f"    def main_incore_0(self, {params}) -> pl.Tensor[{out_shape}, pl.FP32]:\n"
+            "    @pl.function\n"
+            f"    def main(self, {params}) -> pl.Tensor[{out_shape}, pl.FP32]:\n"
             "        with pl.at(level=pl.Level.CORE_GROUP):\n"
             f"{pre_region_line}"
             f"            for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.{mode}):\n"
@@ -5120,7 +5461,7 @@ class TestConvertCrossCoreSplitOps:
         )
         parsed = parse(text)
         assert isinstance(parsed, ir.Program)
-        return parsed
+        return TestConvertCrossCoreSplitOps._outline(parsed)
 
     def _find_split_op(self, program: ir.Program, tile_op_name: str) -> ir.Call:
         call = _find_first_call_to(_require_function(program, "main_incore_0"), tile_op_name)
@@ -5139,9 +5480,9 @@ class TestConvertCrossCoreSplitOps:
         """
 
         @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
+        class Source:
+            @pl.function
+            def main(
                 self, a: pl.Tensor[[128, 128], pl.FP32], b: pl.Tensor[[128, 128], pl.FP32]
             ) -> pl.Tensor[[64, 128], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP):
@@ -5160,22 +5501,22 @@ class TestConvertCrossCoreSplitOps:
                 b: pl.Tensor[[128, 128], pl.FP32],
                 ret0__out: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
             ) -> pl.Tensor[[64, 128], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP):
-                    a_mat: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.load(
-                        a, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Mat
-                    )
-                    b_mat: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.load(
-                        b, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Mat
-                    )
-                    qk__tile: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(a_mat, b_mat)
-                    for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
-                        # split= suppressed inside the region; re-stamped from the mode.
-                        res__tile: pl.Tile[[64, 128], pl.FP32, pl.Mem.Vec] = pl.tile.aiv_shard(qk__tile)
+                pl.func_attr({"split_aiv": True, "split": pl.SplitMode.UP_DOWN})
+                a_mat: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.load(
+                    a, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Mat
+                )
+                b_mat: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.load(
+                    b, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Mat
+                )
+                qk__tile: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(a_mat, b_mat)
+                # split= suppressed inside the region; re-stamped from the mode.
+                for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                    res__tile: pl.Tile[[64, 128], pl.FP32, pl.Mem.Vec] = pl.tile.aiv_shard(qk__tile)
                 ret0__store: pl.Tensor[[64, 128], pl.FP32] = pl.tile.store(res__tile, [0, 0], ret0__out)
                 return ret0__store
 
-        After = passes.convert_tensor_to_tile_ops()(Before)
-        _assert_convert_output_equal(After, Expected)
+        After = self._convert(Source)
+        _assert_convert_output_equal(_incore_only(After), _incore_only(Expected))
 
     def test_aiv_shard_left_right_lowers_to_tile_aiv_shard(self):
         """``pl.aiv_shard(cube_tensor)`` in a LEFT_RIGHT ``split_aiv`` region lowers to
@@ -5183,9 +5524,9 @@ class TestConvertCrossCoreSplitOps:
         memory re-attached."""
 
         @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
+        class Source:
+            @pl.function
+            def main(
                 self, a: pl.Tensor[[128, 128], pl.FP32], b: pl.Tensor[[128, 128], pl.FP32]
             ) -> pl.Tensor[[128, 64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP):
@@ -5204,21 +5545,21 @@ class TestConvertCrossCoreSplitOps:
                 b: pl.Tensor[[128, 128], pl.FP32],
                 ret0__out: pl.Out[pl.Tensor[[128, 64], pl.FP32]],
             ) -> pl.Tensor[[128, 64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP):
-                    a_mat: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.load(
-                        a, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Mat
-                    )
-                    b_mat: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.load(
-                        b, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Mat
-                    )
-                    qk__tile: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(a_mat, b_mat)
-                    for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
-                        res__tile: pl.Tile[[128, 64], pl.FP32, pl.Mem.Vec] = pl.tile.aiv_shard(qk__tile)
+                pl.func_attr({"split_aiv": True, "split": pl.SplitMode.LEFT_RIGHT})
+                a_mat: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.load(
+                    a, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Mat
+                )
+                b_mat: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.load(
+                    b, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Mat
+                )
+                qk__tile: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(a_mat, b_mat)
+                for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
+                    res__tile: pl.Tile[[128, 64], pl.FP32, pl.Mem.Vec] = pl.tile.aiv_shard(qk__tile)
                 ret0__store: pl.Tensor[[128, 64], pl.FP32] = pl.tile.store(res__tile, [0, 0], ret0__out)
                 return ret0__store
 
-        After = passes.convert_tensor_to_tile_ops()(Before)
-        _assert_convert_output_equal(After, Expected)
+        After = self._convert(Source)
+        _assert_convert_output_equal(_incore_only(After), _incore_only(Expected))
 
     def test_aic_gather_up_down_lowers_to_tile_aic_gather(self):
         """``pl.aic_gather(vec_tensor)`` in an UP_DOWN ``split_aiv`` region lowers to
@@ -5229,9 +5570,9 @@ class TestConvertCrossCoreSplitOps:
         vector-produced half to AIC, where ExpandMixedKernel pops it into Mat."""
 
         @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(self, x: pl.Tensor[[128, 128], pl.FP32]) -> pl.Tensor[[256, 128], pl.FP32]:
+        class Source:
+            @pl.function
+            def main(self, x: pl.Tensor[[128, 128], pl.FP32]) -> pl.Tensor[[256, 128], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP):
                     for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
                         h = pl.exp(x)
@@ -5246,18 +5587,18 @@ class TestConvertCrossCoreSplitOps:
                 x: pl.Tensor[[128, 128], pl.FP32],
                 ret0__out: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
             ) -> pl.Tensor[[256, 128], pl.FP32]:
+                pl.func_attr({"split_aiv": True, "split": pl.SplitMode.UP_DOWN})
                 x__tile: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.tile.load(
                     x, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Vec
                 )
-                with pl.at(level=pl.Level.CORE_GROUP):
-                    for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
-                        h__tile: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.tile.exp(x__tile)
-                        res__tile: pl.Tile[[256, 128], pl.FP32, pl.Mem.Mat] = pl.tile.aic_gather(h__tile)
+                for _ in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                    h__tile: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.tile.exp(x__tile)
+                    res__tile: pl.Tile[[256, 128], pl.FP32, pl.Mem.Mat] = pl.tile.aic_gather(h__tile)
                 ret0__store: pl.Tensor[[256, 128], pl.FP32] = pl.tile.store(res__tile, [0, 0], ret0__out)
                 return ret0__store
 
-        After = passes.convert_tensor_to_tile_ops()(Before)
-        ir.assert_structural_equal(After, Expected)
+        After = self._convert(Source)
+        ir.assert_structural_equal(_incore_only(After), _incore_only(Expected))
 
     def test_aic_gather_left_right_lowers_to_tile_aic_gather(self):
         """``pl.aic_gather(vec_tensor)`` in a LEFT_RIGHT ``split_aiv`` region lowers to
@@ -5265,9 +5606,9 @@ class TestConvertCrossCoreSplitOps:
         memory re-attached (the consuming cube lane's space)."""
 
         @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(self, x: pl.Tensor[[128, 128], pl.FP32]) -> pl.Tensor[[128, 256], pl.FP32]:
+        class Source:
+            @pl.function
+            def main(self, x: pl.Tensor[[128, 128], pl.FP32]) -> pl.Tensor[[128, 256], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP):
                     for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
                         h = pl.exp(x)
@@ -5282,18 +5623,18 @@ class TestConvertCrossCoreSplitOps:
                 x: pl.Tensor[[128, 128], pl.FP32],
                 ret0__out: pl.Out[pl.Tensor[[128, 256], pl.FP32]],
             ) -> pl.Tensor[[128, 256], pl.FP32]:
+                pl.func_attr({"split_aiv": True, "split": pl.SplitMode.LEFT_RIGHT})
                 x__tile: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.tile.load(
                     x, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Vec
                 )
-                with pl.at(level=pl.Level.CORE_GROUP):
-                    for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
-                        h__tile: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.tile.exp(x__tile)
-                        res__tile: pl.Tile[[128, 256], pl.FP32, pl.Mem.Mat] = pl.tile.aic_gather(h__tile)
+                for _ in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
+                    h__tile: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.tile.exp(x__tile)
+                    res__tile: pl.Tile[[128, 256], pl.FP32, pl.Mem.Mat] = pl.tile.aic_gather(h__tile)
                 ret0__store: pl.Tensor[[128, 256], pl.FP32] = pl.tile.store(res__tile, [0, 0], ret0__out)
                 return ret0__store
 
-        After = passes.convert_tensor_to_tile_ops()(Before)
-        ir.assert_structural_equal(After, Expected)
+        After = self._convert(Source)
+        ir.assert_structural_equal(_incore_only(After), _incore_only(Expected))
 
     def test_explicit_shard_type_matches_auto_path(self):
         """AUTO oracle: the ``tile.aiv_shard`` result type produced by the explicit

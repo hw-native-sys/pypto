@@ -140,7 +140,7 @@ The padding value matters for reductions, and the failure is silent:
 
 ```python
 t = pl.load(x, [off, 0], [128, 128])
-t = pl.set_validshape(t, [rows_left, 128])     # only `rows_left` rows are real
+t = pl.set_validshape(t, rows_left, 128)       # only `rows_left` rows are real
 m = pl.row_max(t)                              # pad value decides what the tail contributes
 ```
 
@@ -154,8 +154,8 @@ Hoist the load out of the loop when the operand is loop-invariant, and prefer `M
 residency for a matmul operand reused across the K loop. What the compiler will and will
 not do here — buffer reuse, address assignment — is decided by
 [MemoryReuse](../../dev/passes/33-memory_reuse.md) and
-[AllocateMemoryAddr](../../dev/passes/34-allocate_memory_addr.md); the performance chapter
-covering how to drive them is not written yet.
+[AllocateMemoryAddr](../../dev/passes/34-allocate_memory_addr.md); [Memory](../performance/05-memory.md)
+covers how to drive them.
 
 ## Edge Cases
 
@@ -171,6 +171,14 @@ covering how to drive them is not written yet.
 | **Reduction result wrong only for the last tile** | Padding participates in the reduction | `pl.set_validshape`, and pick the right `PadValue` |
 | **`pl.create_tensor` inside an InCore function fails** | Tensor allocation is control-plane work | Allocate on the control plane, or take a `pl.Out[...]` parameter |
 | **On-chip buffer exhaustion** | Too much resident at once | Shrink tiles, or shrink the cross-core ring with `pl.cross_core_slot(slot_num=N)` |
+
+## Worked examples
+
+| Example | Shows |
+| ------- | ----- |
+| `examples/intermediate/05_assemble.py` | Writing a tile into a target at an offset, without a GM round-trip |
+| `examples/intermediate/01_fused_linear.py` | An intermediate kept on chip across a cube and a vector op |
+| `examples/runtime/multi_program_kv_cache.py` | A device-resident buffer shared across programs |
 
 ## See Also
 

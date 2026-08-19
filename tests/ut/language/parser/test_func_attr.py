@@ -201,6 +201,29 @@ class TestParserRejections:
                     pl.func_attr({"split": pl.SplitMode.LEFT_RIGHT})
                     out[0:64] = x[0:64]
 
+    def test_duplicate_key_error_does_not_leak_builder_check_tail(self):
+        """The duplicate-key CHECK lives in C++; its FatalLogger tail must not reach the user.
+
+        ``IRBuilder::AddFunctionAttrs`` rejects the second key with a ``CHECK``, whose message
+        carries "Check failed: <C++ expr> at <absolute path>/builder.cpp:<line>". The parser
+        strips that tail so it does not render inside the bold ``Error:`` header.
+        """
+        with pytest.raises(ParserSyntaxError) as exc_info:
+
+            @pl.program
+            class P:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(self, x: pl.Tensor[[64], pl.FP32], out: pl.Out[pl.Tensor[[64], pl.FP32]]):
+                    pl.func_attr({"split": pl.SplitMode.UP_DOWN})
+                    pl.func_attr({"split": pl.SplitMode.LEFT_RIGHT})
+                    out[0:64] = x[0:64]
+
+        message = exc_info.value.message
+        assert "Check failed" not in message
+        assert "builder.cpp" not in message
+        # The actionable half must survive the strip.
+        assert "Each attribute may be declared only once." in message
+
     def test_rejects_duplicate_key_within_one_call(self):
         with pytest.raises((ParserSyntaxError, ValueError), match="[Dd]uplicate.*windowize"):
             pl.parse_program(_source('pl.func_attr({"windowize": True, "windowize": False})'))

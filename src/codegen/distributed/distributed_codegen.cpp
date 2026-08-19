@@ -250,15 +250,14 @@ std::vector<ir::FunctionPtr> DistributedCodegen::SortFunctionsByRoleAndLevel() c
 
 void DistributedCodegen::EmitImports() {
   emitter_.EmitLine("import torch");
-  // The unified strided ``Tensor`` + ``DataType`` are used by DistributedTensor
-  // formal emission (host_orch wraps per-rank window-bound regions via
-  // ``Tensor.make(..., child_memory=True)``).
+  // ``DataType`` is used when a comm-domain Buffer constructs its address-free
+  // wire Tensor view.
   // ``CommBufferSpec`` is the spec list passed to ``orch.allocate_domain``
   // inside host_orch when the program declares at least one comm domain;
   // harmless to import for comm-less L3 programs.
   emitter_.EmitLine(
       "from simpler.task_interface import "
-      "CallConfig, CommBufferSpec, DataType, TaskArgs, Tensor, TensorArgType");
+      "CallConfig, CommBufferSpec, DataType, TaskArgs, TensorArgType");
   emitter_.EmitLine("from pypto.runtime.tensor_arg import make_tensor_arg");
   // ``_submit_chip`` resolves a comm-less dispatch's chip and namespaces the
   // per-dispatch DFX ``output_prefix`` (``<base>/rank{worker}/d{k}``); the
@@ -974,8 +973,15 @@ void DistributedCodegen::VisitExpr_(const ir::CallPtr& op) {
     return;
   }
 
+  const std::string& op_name = op->op_->name_;
+  const bool is_unhandled_tensor_or_tile_op =
+      op_name.rfind("tensor.", 0) == 0 || op_name.rfind("tile.", 0) == 0;
+  CHECK_SPAN(!is_unhandled_tensor_or_tile_op, op->span_)
+      << "DistributedCodegen does not support op '" << op_name << "' in function '" << current_func_->name_
+      << "'. Move this operation into a lower-level function or add a registered HOST-orchestrator lowering.";
+
   // Regular op call
-  current_expr_value_ = op->op_->name_ + "(" + FormatArgs(op->args_) + ")";
+  current_expr_value_ = op_name + "(" + FormatArgs(op->args_) + ")";
 }
 
 void DistributedCodegen::VisitExpr_(const ir::VarPtr& op) {
@@ -1045,10 +1051,10 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
     std::string arg_str = current_expr_value_;
     current_expr_value_ = "";
 
-    // N7: DistributedTensorType formals route through Tensor.make
-    // with ``child_memory=True``. ``As<DistributedTensorType>`` is strict
-    // ObjectKind match, so this branch fires only for DistributedTensor —
-    // plain TensorType falls through to the existing make_tensor_arg path.
+    // DistributedTensorType formals derive an address-free wire Tensor from
+    // the owning comm-domain Buffer. ``As<DistributedTensorType>`` is strict
+    // ObjectKind match, so plain TensorType falls through to the worker-aware
+    // make_tensor_arg path.
     if (auto dist_type = ir::As<ir::DistributedTensorType>(call->args_[i]->GetType())) {
       INTERNAL_CHECK_SPAN(!rank_expr.empty(), call->span_)
           << "Call passing DistributedTensor args must carry device= attr "
@@ -1064,9 +1070,8 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
         tag = ParamDirectionToTensorArgType(callee->param_directions_[i]);
       }
       const std::string handle_var = HandleVarForScope(ScopeForWindowBuffer(window_buffer));
-      emitter_.EmitLine(ta_var + ".add_tensor(Tensor.make(data=" + handle_var + "[" + rank_expr +
-                        "].buffer_ptrs[\"" + name + "\"], shapes=" + shape + ", dtype=" + dtype_enum +
-                        ", child_memory=True), " + tag + ")");
+      emitter_.EmitLine(ta_var + ".add_tensor(" + handle_var + "[" + rank_expr + "].buffers[\"" + name +
+                        "\"].tensor(shapes=" + shape + ", dtype=" + dtype_enum + "), " + tag + ")");
       continue;
     }
 
@@ -1076,7 +1081,8 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
       if (i < callee->param_directions_.size()) {
         tag = ParamDirectionToTensorArgType(callee->param_directions_[i]);
       }
-      emitter_.EmitLine(ta_var + ".add_tensor(make_tensor_arg(tensors[\"" + arg_str + "\"]), " + tag + ")");
+      emitter_.EmitLine(ta_var + ".add_tensor(make_tensor_arg(orch._worker, tensors[\"" + arg_str + "\"]), " +
+                        tag + ")");
       continue;
     }
 
@@ -1129,7 +1135,7 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
       emitter_.EmitLine("if \"" + target + "\" not in tensors:");
       emitter_.EmitLine("    tensors[\"" + target + "\"] = torch.zeros(" + shape + ", dtype=torch." +
                         torch_dtype + ").share_memory_()");
-      emitter_.EmitLine(ta_var + ".add_tensor(make_tensor_arg(tensors[\"" + target +
+      emitter_.EmitLine(ta_var + ".add_tensor(make_tensor_arg(orch._worker, tensors[\"" + target +
                         "\"]), TensorArgType.OUTPUT_EXISTING)");
     }
   }
@@ -1379,7 +1385,7 @@ std::string DistributedCodegen::DataTypeToPythonDType(const DataType& dtype) {
 std::string DistributedCodegen::DataTypeToSimplerEnum(const DataType& dtype) {
   // ``simpler.task_interface.DataType`` exposes the C-style enum names
   // (FLOAT16 / FLOAT32 / BFLOAT16 / INT* / UINT* / BOOL). Map PyPTO's
-  // dtype tags to those names so emitted ``Tensor.make(..., dtype=DataType.<X>)``
+  // dtype tags to those names so emitted ``buffer.tensor(..., dtype=DataType.<X>)``
   // matches at runtime.
   if (dtype == DataType::FP16) return "FLOAT16";
   if (dtype == DataType::FP32) return "FLOAT32";

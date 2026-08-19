@@ -12,8 +12,8 @@
 
 编排代码生成器（Orchestration Codegen）生成 PTO2 运行时 C++ 代码，用于管理昇腾硬件上的任务图执行。[PTO 代码生成](00-pto_codegen.md)产生 InCore 核函数代码（Tile 级计算），而编排代码生成器产生主机侧代码，负责：
 
-- 将设备内存指针（通过 `ChipStorageTaskArgs`）封装为 `Tensor` 对象
-- 构建 `Arg` 对象，调用 `add_input`/`add_output`/`add_inout`/`add_scalar` 对参数分类（manual scope 的依赖边通过一个 `set_dependencies` 栈数组单独发出——见 [Manual Scope 与 TaskId 降级](#manual-scope-与-taskid-降级)）
+- 从 `ChipTaskArgs` 借用设备侧描述符作为 `ChipTensor` 引用
+- 构建 `CoreTaskArgs` 对象，调用 `add_input`/`add_output`/`add_inout`/`add_scalar` 对参数分类（manual scope 的依赖边通过一个 `set_dependencies` 栈数组单独发出——见 [Manual Scope 与 TaskId 降级](#manual-scope-与-taskid-降级)）
 - 通过 `rt_submit_*_task` 向 AIC（CUBE）或 AIV（VECTOR）核心提交任务
 - 处理控制流（循环、条件分支），使用 `PTO2_SCOPE`
 
@@ -80,29 +80,29 @@ REGISTER_ORCHESTRATION_OP("tensor.slice", TensorSliceHandler);
 
 ```cpp
 // 阶段 2：配置函数 — 返回期望的参数数量
-PTO2OrchestrationConfig aicpu_orchestration_config(const ChipStorageTaskArgs& orch_args) {
+PTO2OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs& orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{ .expected_arg_count = 3 };
 }
 
 // 阶段 3：入口函数签名
-void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args) {
+void aicpu_orchestration_entry(const ChipTaskArgs& orch_args) {
 ```
 
 ### 阶段 4–5：张量设置
 
 ```cpp
-// 阶段 4：外部张量 — 所有布局统一调用 from_tensor_arg()
-Tensor ext_a = from_tensor_arg(orch_args.tensor(0));
-Tensor ext_b = from_tensor_arg(orch_args.tensor(1));
-Tensor ext_dn = from_tensor_arg(orch_args.tensor(2));
+// 阶段 4：外部张量 — 借用设备侧描述符
+const ChipTensor& ext_a = orch_args.tensor(0).ref();
+const ChipTensor& ext_b = orch_args.tensor(1).ref();
+const ChipTensor& ext_dn = orch_args.tensor(2).ref();
 
 // 阶段 5：内部张量（来自 pl.create_tensor — 仅中间变量）
 // 同一 scope 中的所有 tensor.create 批量合并为一条 alloc_tensors 调用
 uint32_t tmp_ci_shapes[2] = {16, 16};
 TensorCreateInfo tmp_ci(tmp_ci_shapes, 2, DataType::FLOAT32);
 TaskOutputTensors alloc_0 = alloc_tensors(tmp_ci);
-const Tensor& tmp = alloc_0.get_ref(0);
+const ChipTensor& tmp = alloc_0.get_ref(0);
 ```
 
 ### 阶段 6–8：任务提交与控制流
@@ -115,10 +115,10 @@ pass 会向 IR 中插入显式的 AUTO `RuntimeScopeStmt` 节点（函数体以�
 
 ```cpp
 PTO2_SCOPE() {
-    Arg params_t0;
+    CoreTaskArgs params_t0;
     params_t0.add_input(ext_a);
     params_t0.add_input(ext_b);
-    params_t0.add_output(tmp);               // 预分配张量使用 add_output(const Tensor&)
+    params_t0.add_output(tmp);               // 预分配张量使用 add_output(const ChipTensor&)
     rt_submit_aiv_task(0, params_t0);
 
     // ForStmt 示例 — 普通 for 循环，不嵌套独立的 PTO2_SCOPE
@@ -134,10 +134,10 @@ PTO2_SCOPE() {
 
 | 类型 | 来源 | C++ 构造方式 | 命名 |
 | ---- | ---- | ------------ | ---- |
-| 外部（ND/DN） | 函数参数（`In`/`Out`/`InOut`） | `from_tensor_arg(orch_args.tensor(N))` | `ext_<name>` |
+| 外部（ND/DN） | 函数参数（`In`/`Out`/`InOut`） | `orch_args.tensor(N).ref()` | `ext_<name>` |
 | 内部 | 函数体中的 `pl.create_tensor(...)` | `TensorCreateInfo var_ci(...)` + scope 入口处 `alloc_tensors(...)` | `<name>`（无前缀） |
 
-外部张量封装从主机通过 `ChipStorageTaskArgs` 传入的设备内存指针。内部张量在 scope 入口处通过 `alloc_tensors()` 预分配——同一 scope（函数体、for 循环体、if 分支体）中的所有 `tensor.create` 被批量合并为一条 `alloc_tensors` 调用。预分配的张量随后通过 `add_output(const Tensor&)` (OUTPUT_EXISTING 重载) 传递给核函数。
+外部张量借用通过 `ChipTaskArgs` 传入的设备侧描述符。内部张量在 scope 入口处通过 `alloc_tensors()` 预分配——同一 scope（函数体、for 循环体、if 分支体）中的所有 `tensor.create` 被批量合并为一条 `alloc_tensors` 调用。预分配的张量随后通过 `add_output(const ChipTensor&)`（OUTPUT_EXISTING 重载）传递给核函数。
 
 ### 参数方向
 
@@ -151,11 +151,11 @@ PTO2_SCOPE() {
 | `InOut` | `pl.InOut[pl.Tensor[...]]` | `params.add_inout(ext_x)` | 读写 |
 | Scalar | `pl.Scalar[...]` | `params.add_scalar(value)` | 标量常量（独立 scalar 槽位） |
 
-来自 `tensor.create` 的内部张量在 scope 入口通过 `alloc_tensors()` 预分配。传递给核函数时，使用 `add_output(const Tensor&)` 触发 OUTPUT_EXISTING 重载——运行时复用预分配的缓冲区，而非分配新的。
+来自 `tensor.create` 的内部张量在 scope 入口通过 `alloc_tensors()` 预分配。传递给核函数时，使用 `add_output(const ChipTensor&)` 触发 OUTPUT_EXISTING 重载——运行时复用预分配的缓冲区，而非分配新的。
 
 ### 标量参数编码
 
-标量参数占用 `ChipStorageTaskArgs` 的 scalar 槽位（从 0 开始独立索引，与张量槽位分离）。
+标量参数占用 `ChipTaskArgs` 的 scalar 槽位（从 0 开始独立索引，与张量槽位分离）。
 浮点标量使用 `to_u64(f)` 进行位转换，其他整数/bool 标量强制转换为 `(uint64_t)`。
 接收端使用联合体（union）进行类型双关，将 `uint64_t` 重新解释为目标 C 类型：
 
@@ -168,7 +168,7 @@ float scale = scale_conv.val;
 ### 输出别名（emit 名重映射）
 
 kernel/submit 的输出就是它原地写入的 `Out`/`InOut` 参数——即*同一物理张量*。因此当
-结果 Var 的名字与该参数不同时，代码生成器**不**再生成 `const Tensor& result =
+结果 Var 的名字与该参数不同时，代码生成器**不**再生成 `const ChipTensor& result =
 ext_output;` 这样的重命名，而是把结果 Var 的 emit 名重映射到源，下游所有引用都直接
 解析到源名。（这正是 `tensor.assemble` 采用的策略，现统一应用。）
 
@@ -180,11 +180,11 @@ consumer = self.kernel_use(result)
 
 ```cpp
 // 生成的 C++ —— result 被重映射到 ext_output，消费者直接读取它
-Arg params_t0;
+CoreTaskArgs params_t0;
 params_t0.add_output(ext_output);
 rt_submit_aiv_task(0, params_t0);
 
-Arg params_t1;
+CoreTaskArgs params_t1;
 params_t1.add_input(ext_output);  // result -> ext_output（无别名声明）
 ```
 
@@ -204,7 +204,7 @@ IR 层，只服务于在该属性建立**之前**运行的那些 pass。
 不参与重映射的情形：phi/循环 carry 的重赋值（它重新绑定外层 `if`/循环所拥有的左值）
 保留 `<name> = <src>;` 形式；源在读取者的 C++ 作用域中无效的张量（manual scope 局部
 的源——见下文*跨作用域张量与 `manual_scope`*）保留声明路径；绑定到
-`task_<n>_outs.get_ref(k)` 的运行时分配输出同样保留其 `const Tensor&` 绑定。
+`task_<n>_outs.get_ref(k)` 的运行时分配输出同样保留其 `const ChipTensor&` 绑定。
 
 ### 核心类型推断
 
@@ -214,6 +214,20 @@ IR 层，只服务于在该属性建立**之前**运行的那些 pass。
 | ----------- | -------- | -------- |
 | `Left`、`Right`、`Acc`、`Mat` | CUBE (AIC) | `rt_submit_aic_task` |
 | `Vec`（默认） | VECTOR (AIV) | `rt_submit_aiv_task` |
+
+**例外 —— 双 AIV 核函数。** 带 `dual_aiv_dispatch` 标记的 AIV 核函数（即任何 `split_aiv`
+核函数，参见 [`SplitVectorKernel`](../passes/23-split_vector_kernel.md)）必须在一个 cluster 的
+**两个**向量核上同时运行 —— `pl.split_aiv` 区域通过 `aiv_id` 给每条 lane 分派互不相交的工作。
+而 `rt_submit_aiv_task` 只填 AIV0 槽位，运行时会把它调度为 *AIV 形状*的任务 —— 每个 block 一个
+AIV 核：第二条 lane 根本不会启动，而唯一启动的那条读到的 `get_sub_block_id()`，运行时明确说明在
+单 AIV 任务下**没有意义**。该值由调度器按每个核在其 cluster 中的固定位置写入，因此 `aiv_id` 拿到的
+是这个物理位置，而不是逐 block 的 lane 编号。
+因此这类核函数一律改用双 lane 的 `MixedKernels` + `rt_submit_task` 提交（参见
+[Group 函数（混合核）](#group-函数混合核)），无论走哪条分派路径（直接调用、`Spmd` 包装器，
+还是纯 AIV 的 `Group`）。两个激活的 AIV 槽位使其成为 MIX 形状的任务，于是调度器把同一个 cluster
+的两条 lane 放在相同的 `block_idx` 下，并分别赋予 `sub_block_id` 0 和 1；该 cluster 的 AIC 核心
+闲置不用。普通（不带 `dual_aiv_dispatch`）的向量核函数仍走 `rt_submit_aiv_task`，在相互独立的
+AIV 核心上分派。
 
 ### 元组处理
 
@@ -226,7 +240,7 @@ pij, mij, lij = self.kernel_softmax(sij, scale, pij, mij, lij)
 
 ```cpp
 // 生成的 C++ — 先张量后标量
-Arg params_t0;
+CoreTaskArgs params_t0;
 params_t0.add_input(ext_sij);
 params_t0.add_inout(ext_pij);
 params_t0.add_inout(ext_mij);
@@ -241,22 +255,32 @@ rt_submit_aiv_task(0, params_t0);
 
 ```cpp
 // Group: mixed_kernel (AIC + AIV)
-Arg params_t0;
+CoreTaskArgs params_t0;
 // ... add_input / add_inout / add_scalar 调用 ...
 MixedKernels mixed_0 = {aic_id, aiv_id, INVALID_KERNEL_ID};
 rt_submit_task(mixed_0, params_t0);
 ```
 
+三个槽位依次是 `{aic_kernel_id, aiv0_kernel_id, aiv1_kernel_id}`，`INVALID_KERNEL_ID` 表示该槽位
+未激活。当 AIV 函数带有 `dual_aiv_dispatch` 时，AIV1 槽位重复填入同一个 AIV kernel id —— 于是两条
+向量 lane 都会运行：
+
+| 核函数 | `MixedKernels` |
+| ------ | -------------- |
+| 混合核，单条 AIV lane | `{aic_id, aiv_id, INVALID_KERNEL_ID}` |
+| 混合核，`dual_aiv_dispatch` | `{aic_id, aiv_id, aiv_id}` |
+| 纯向量核，`dual_aiv_dispatch` | `{INVALID_KERNEL_ID, aiv_id, aiv_id}` |
+
 ## 操作映射
 
 | IR 操作 | C++ 代码生成 | 描述 |
 | ------- | ------------ | ---- |
-| `tensor.create` | `TensorCreateInfo var_ci(...)` + `alloc_tensors(...)` | scope 级批量分配；`const Tensor& var = alloc_N.get_ref(i)` |
+| `tensor.create` | `TensorCreateInfo var_ci(...)` + `alloc_tensors(...)` | scope 级批量分配；`const ChipTensor& var = alloc_N.get_ref(i)` |
 | `tensor.read` | `*reinterpret_cast<T*>(arg_ptr + offset)` | 从主机张量读取标量 |
-| `tensor.slice` | `make_tensor_external(ptr + byte_offset, ...)` | 创建现有张量的视图 |
-| `tensor.transpose` | `Tensor xt = ext_x.transpose(axis1, axis2)` | 零拷贝交换两个维度的元数据（lower 到运行时 `Tensor::transpose`） |
+| `tensor.slice` | `ChipTensor xs = ext_x.view(shapes, offsets)` | 创建现有张量的元数据视图 |
+| `tensor.transpose` | `ChipTensor xt = ext_x.transpose(axis1, axis2)` | 零拷贝交换两个维度的元数据（lower 到运行时 `ChipTensor::transpose`） |
 | `tensor.dim`（静态） | `int64_t d0 = 16` | 编译时常量维度值 |
-| `tensor.dim`（动态） | `int64_t d0 = (int64_t)orch_args.tensor(N).ref().shapes[axis]` | 从 ChipStorageTaskArgs 获取运行时维度。在编排（Orchestration）函数体内，解析器会将其折叠为已声明的 extent —— 见下文 |
+| `tensor.dim`（动态） | `int64_t d0 = (int64_t)orch_args.tensor(N).ref().shapes[axis]` | 从 ChipTaskArgs 获取运行时维度。在编排（Orchestration）函数体内，解析器会将其折叠为已声明的 extent —— 见下文 |
 
 ### 动态维度符号（Dynamic-dim symbols）
 
@@ -308,33 +332,33 @@ def orch_basic(
 
 extern "C" {
 
-PTO2OrchestrationConfig aicpu_orchestration_config(const ChipStorageTaskArgs& orch_args) {
+PTO2OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs& orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{ .expected_arg_count = 3 };
 }
 
-void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args) {
-    // 外部张量（来自 ChipStorageTaskArgs）
-    Tensor ext_a = from_tensor_arg(orch_args.tensor(0));
-    Tensor ext_b = from_tensor_arg(orch_args.tensor(1));
-    Tensor ext_d = from_tensor_arg(orch_args.tensor(2));
+void aicpu_orchestration_entry(const ChipTaskArgs& orch_args) {
+    // 外部张量（来自 ChipTaskArgs）
+    const ChipTensor& ext_a = orch_args.tensor(0).ref();
+    const ChipTensor& ext_b = orch_args.tensor(1).ref();
+    const ChipTensor& ext_d = orch_args.tensor(2).ref();
 
     PTO2_SCOPE() {
         // 内部张量 — 在 scope 入口通过 alloc_tensors 预分配
         uint32_t c_ci_shapes[2] = {16, 16};
         TensorCreateInfo c_ci(c_ci_shapes, 2, DataType::FLOAT32);
         TaskOutputTensors alloc_0 = alloc_tensors(c_ci);
-        const Tensor& c = alloc_0.get_ref(0);
+        const ChipTensor& c = alloc_0.get_ref(0);
 
         // 任务 0: kernel_add (a + b → c)
-        Arg params_t0;
+        CoreTaskArgs params_t0;
         params_t0.add_input(ext_a);
         params_t0.add_input(ext_b);
         params_t0.add_output(c);
         rt_submit_aiv_task(0, params_t0);
 
         // 任务 1: kernel_add (c + b → d)
-        Arg params_t1;
+        CoreTaskArgs params_t1;
         params_t1.add_input(c);
         params_t1.add_input(ext_b);
         params_t1.add_output(ext_d);
@@ -382,9 +406,9 @@ for i in pl.range(0, 4):
 
 ```cpp
 // 生成的 C++（位于顶层 PTO2_SCOPE 内部）
-Tensor acc = ext_acc;  // 迭代参数初始化
+ChipTensor acc = ext_acc;  // 迭代参数初始化
 for (int64_t i = 0; i < 4; i += 1) {
-    Arg params_t0;
+    CoreTaskArgs params_t0;
     // ... add_input / add_inout 调用 ...
     rt_submit_aiv_task(0, params_t0);
 }
@@ -413,13 +437,13 @@ else:
 // 生成的 C++
 if (condition) {
     PTO2_SCOPE() {
-        Arg params_t0;
+        CoreTaskArgs params_t0;
         // ... add_input / add_inout 调用 ...
         rt_submit_aiv_task(0, params_t0);
     }
 } else {
     PTO2_SCOPE() {
-        Arg params_t1;
+        CoreTaskArgs params_t1;
         // ... add_input / add_inout 调用 ...
         rt_submit_aiv_task(1, params_t1);
     }
@@ -445,11 +469,11 @@ orch_code = files["orchestration/orch_func_name.cpp"]
 
 `with pl.manual_scope():` 区域被降级为 `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`
 代码块，区域内 runtime 的 auto OverlapMap 关闭。每个 task 的 params 始终
-声明为普通的 `Arg <task_var>;`。orchestration codegen 把所需的依赖边
+声明为普通的 `CoreTaskArgs <task_var>;`。orchestration codegen 把所需的依赖边
 物化为一个定长栈数组加一次 `set_dependencies` 调用：
 
 ```cpp
-Arg params_t1;
+CoreTaskArgs params_t1;
 params_t1.add_input(...);
 // ...
 PTO2TaskId params_t1_deps[K];          // K = 精确的 dep 边数
@@ -465,7 +489,7 @@ params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);
 不加守卫（issue #1966）。完整的分类见 [TaskId 的来源](#taskid-的来源)。
 
 不再有 `params.add_dep(...)` 调用，也没有 16 条依赖上限——runtime 的
-`Arg::set_dependencies` 原语没有上限，栈数组按精确数量定长。用户依赖来自
+`CoreTaskArgs::set_dependencies` 原语没有上限，栈数组按精确数量定长。用户依赖来自
 parser：parser 把用户的 `pl.submit(..., deps=[tid1, tid2])` kwarg 写入类型化的
 `Submit::deps_` 字段；codegen 通过临时的 `SubmitToCallView` 读取它们——该 view
 把 `deps_` 合成为 `attrs["manual_dep_edges"]`。普通 `Call` 携带
@@ -561,7 +585,7 @@ body 内捕获 TaskId、却在循环之后依赖它。修复方式是把消费�
 有效*（在块之前保留，或为已提升的块内缓冲——即非作用域局部）为判据：
 
 - **输出重映射（remap）。** 一个由调用方分配、且别名为外层作用域源的 kernel/submit
-  输出，*不*单独生成 `const Tensor&` 声明——其 emit 名被重映射到源，于是所有引用
+  输出，*不*单独生成 `const ChipTensor&` 声明——其 emit 名被重映射到源，于是所有引用
   （块内与块后）都直接解析到外层名字。这正是 `tensor.assemble` 已采用的策略；由于该
   输出与其源是同一物理张量（原地写），共享名字恰好正确。phi/循环 carry 的重赋值被排除
   ——它重新绑定的是外层 `if`/循环所拥有的左值。
@@ -573,7 +597,7 @@ body 内捕获 TaskId、却在循环之后依赖它。修复方式是把消费�
   原位）。
 
 二者结合后，无论张量在块之前还是块内部创建、并在块后被读取，都会解析到外层作用域中唯一的
-`const Tensor& buf = ...;`——块后 task 只需 `add_input(buf)`，不再产生任何按 SSA 版本
+`const ChipTensor& buf = ...;`——块后 task 只需 `add_input(buf)`，不再产生任何按 SSA 版本
 的别名。
 
 ### `pl.parallel` TaskId iter_arg 的 array carry
@@ -640,7 +664,7 @@ loop-carried `init_values` / `pl.yield_` 在 parallel body 之后传回。这里
   动态 trip count 在 codegen 时被拒绝，提示 "statically-known trip count"。
 
 dep 栈数组按精确依赖数定长（对数组 carry 为 `N` 个槽），不再对 trip count
-超过 16 设上限——runtime 原语 `Arg::set_dependencies(ptr, count)` 同样
+超过 16 设上限——runtime 原语 `CoreTaskArgs::set_dependencies(ptr, count)` 同样
 没有上限。
 
 ### 示例
@@ -669,7 +693,7 @@ PTO2_SCOPE(PTO2ScopeMode::MANUAL) {
             out__rv_v4__tid[i] = out__rv_v2__tid[i];           // 按槽位拷贝
         for (int64_t branch = 0; branch < N_BRANCHES; branch += 1) {
             int64_t row = ...;
-            Arg params_t0; /* ... */
+            CoreTaskArgs params_t0; /* ... */
             PTO2TaskId params_t0_deps[N_BRANCHES];             // 按数组 carry N 定长
             uint32_t params_t0_deps_count = 0;
             for (int64_t k = 0; k < N_BRANCHES; ++k) {         // 多依赖 fanout
@@ -693,4 +717,4 @@ phase `N+1` 中的每个 task 都会等待 phase `N` 的**全部** `N_BRANCHES` 
 
 - [PTO 代码生成](00-pto_codegen.md) — PTO 后端的 MLIR 生成
 - [Pass 管理器](../passes/00-pass_manager.md) — 代码生成前应用的 IR 优化 Pass
-- [Python syntax: 手工依赖原语](../language/00-python_syntax.md#手工依赖原语) — 表层语法及语义
+- [Python syntax: 手工依赖原语](../language/02-manual_dependencies.md#手工依赖原语) — 表层语法及语义

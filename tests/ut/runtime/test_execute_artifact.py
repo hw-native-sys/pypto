@@ -99,7 +99,7 @@ def test_dfx_flags_parsed_into_dfx_opts(tmp_path):
         rc = main(
             _argv(
                 tmp_path,
-                "--enable-l2-swimlane",
+                "--enable-chip-swimlane",
                 "--dump-args",
                 "2",
                 "--enable-pmu",
@@ -111,7 +111,7 @@ def test_dfx_flags_parsed_into_dfx_opts(tmp_path):
     assert rc == 0
     _, kwargs = run.call_args
     assert kwargs["dfx"] == _DfxOpts(
-        enable_l2_swimlane=True,
+        enable_chip_swimlane=True,
         enable_dump_args=2,
         enable_pmu=5,
         enable_dep_gen=True,

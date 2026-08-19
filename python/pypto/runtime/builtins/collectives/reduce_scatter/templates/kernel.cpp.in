@@ -10,30 +10,92 @@
  */
 
 // Generated from {{template_package}}.
-
 #include <cstdint>
-#include <pto/pto-inst.hpp>
-
-#include "platform_comm/comm_context.h"
-#include "pto/comm/comm_types.hpp"
-#include "pto/comm/pto_comm_inst.hpp"
-#include "tensor.h"
 
 #ifndef __gm__
 #define __gm__
 #endif
 
 #ifndef __aicore__
+#if defined(__CPU_SIM)
+#define __aicore__
+#else
 #define __aicore__ [aicore]
 #endif
+#endif
+
+#include <pto/pto-inst.hpp>
+#include "tensor.h"
+#include "platform_comm/comm_context.h"
+
+
+#if defined(__CPU_SIM)
+// PTOAS v0.50+ emits cache_line_t::ENTIRE_DATA_CACHE / SINGLE_CACHE_LINE as
+// scoped identifiers, but the pto-isa cpu_stub.hpp defines them as bare macros
+// (#define ENTIRE_DATA_CACHE 0) — which breaks cache_line_t::ENTIRE_DATA_CACHE
+// into cache_line_t::0. Undefine the macros and provide proper namespace-scoped
+// constexpr constants. The same headers also #define dcci/dsb as macros that
+// would expand our own inlines, so undefine + redefine all of them here.
+#include <atomic>
+
+// Forward-declare the overloads so the undefs below don't break chained includes.
+namespace pypto_sim_detail {
+    template <typename... Args>
+    static inline void sim_dcci(Args...);  // defined after the undefs
+    static inline void sim_dsb(int kind);  // ditto
+}
+
+// Undefine conflicting macros from pto-isa cpu_stub.hpp / inner_kernel.h
+// so our namespace-scoped constants and inline functions are used instead.
+#undef ENTIRE_DATA_CACHE
+#undef SINGLE_CACHE_LINE
+#undef DSB_DDR
+#undef dcci
+#undef dsb
+#undef CACHELINE_OUT
+
+namespace cache_line_t {
+    constexpr int ENTIRE_DATA_CACHE = 0;
+    constexpr int SINGLE_CACHE_LINE = 0;
+    constexpr int CACHELINE_OUT     = 0;
+}
+typedef int mem_dsb_t;
+#define DSB_DDR 0
+
+static inline void dcci(...) {
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+}
+static inline void dsb(mem_dsb_t) {
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+}
+#endif  // __CPU_SIM
+
+using namespace pto;
 
 namespace {
 
+// UB tile width, in elements. Only the tile has to fit in UB, not the row, so
+// SIZE is unconstrained.
 static constexpr int64_t kTileCount = 256;
 static constexpr int kMaxSupportedRanks = 16;
 
+// UB addresses of the two tiles. 64KB apart, so they never overlap at any
+// supported tile width.
+static constexpr uint64_t kAccTileAddr = 0x0;
+static constexpr uint64_t kRecvTileAddr = 0x10000;
+
+// One UB-wide slice of one tensor row.
+using RowShape = Shape<1, 1, 1, 1, -1>;
+using RowStride = Stride<-1, -1, -1, -1, -1>;
+using RowSlice = GlobalTensor<{{dtype_cpp}}, RowShape, RowStride, Layout::ND>;
+
+using DataTile = Tile<TileType::Vec, {{dtype_cpp}}, 1, kTileCount, BLayout::RowMajor, -1, -1,
+                      SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>;
+
+// The same object inside `pe`'s window: byte offsets are identical across
+// windows, so rebasing the local pointer is enough.
 template <typename T>
-AICORE inline __gm__ T *CommRemotePtr(__gm__ CommContext *ctx, __gm__ T *local_ptr, int pe) {
+static __aicore__ inline __gm__ T *CommRemotePtr(__gm__ CommContext *ctx, __gm__ T *local_ptr, int pe) {
   uint64_t local_base = ctx->windowsIn[ctx->rankId];
   uint64_t offset = reinterpret_cast<uint64_t>(local_ptr) - local_base;
   return reinterpret_cast<__gm__ T *>(ctx->windowsIn[pe] + offset);
@@ -42,21 +104,24 @@ AICORE inline __gm__ T *CommRemotePtr(__gm__ CommContext *ctx, __gm__ T *local_p
 }  // namespace
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
-  __gm__ Tensor *target_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
-  __gm__ Tensor *signal_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
+  __gm__ ChipTensor *target_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
+  __gm__ ChipTensor *signal_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
   int nranks = static_cast<int>(args[2]);
   __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[3]);
 
-  if (nranks <= 0 || nranks > kMaxSupportedRanks) {
+  if (nranks <= 0 || nranks > kMaxSupportedRanks || target_tensor->ndims < 2) {
     pipe_barrier(PIPE_ALL);
     return;
   }
 
-  int my_rank = static_cast<int>(comm_ctx->rankId);
-
-  int64_t numel = 1;
-  for (uint32_t dim = 0; dim < target_tensor->ndims; ++dim) {
-    numel *= static_cast<int64_t>(target_tensor->shapes[dim]);
+  // Derive the row length from the tensor's own trailing dim rather than
+  // numel / nranks: target is [NR, SIZE] with NR carried as a dynamic dim, and
+  // the caller's NR is not guaranteed to equal the runtime rank count.
+  const int64_t rows = static_cast<int64_t>(target_tensor->shapes[0]);
+  const int64_t row_elems = static_cast<int64_t>(target_tensor->shapes[target_tensor->ndims - 1]);
+  if (rows < nranks || row_elems <= 0) {
+    pipe_barrier(PIPE_ALL);
+    return;
   }
 
   __gm__ {{dtype_cpp}} *target =
@@ -64,91 +129,109 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   __gm__ int32_t *signal_base =
       reinterpret_cast<__gm__ int32_t *>(signal_tensor->buffer.addr) + signal_tensor->start_offset;
 
-  if (numel <= 0) {
+#if defined(__DAV_VEC__)
+  set_mask_norm();
+  set_vector_mask(-1, -1);
+
+  // Seed the two events the tile loop consumes on its first iteration: the
+  // store->load dependency across tiles, and the add->load dependency across
+  // peers. Both are drained after the epilogue.
+  set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+  set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+
+  const int64_t my_rank = static_cast<int64_t>(comm_ctx->rankId);
+  __gm__ {{dtype_cpp}} *my_row = target + my_rank * row_elems;
+
+  // Phase 1: ready barrier — publish that this rank's input rows are written,
+  // and wait until every peer's are too, before any remote read starts.
+  for (int64_t peer = 0; peer < nranks; ++peer) {
+    if (peer == my_rank) continue;
+    pto::comm::Signal cell(CommRemotePtr(comm_ctx, signal_base + my_rank, peer));
     pipe_barrier(PIPE_ALL);
-    return;
+    pto::comm::TNOTIFY(cell, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
   }
-
-  // Phase 1: notify all peers we are ready to be read, then wait for all peers.
-  // CommRemotePtr offsets are relative to target (offset 0 from each rank's window
-  // base), matching the allreduce kernel so the same comm window layout applies.
-  for (int peer = 0; peer < nranks; ++peer) {
+  for (int64_t peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
-    __gm__ int32_t *remote_signal = CommRemotePtr(comm_ctx, signal_base + my_rank, peer);
-    pto::comm::Signal sig(remote_signal);
-    pto::comm::TNOTIFY(sig, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
+    pto::comm::Signal cell(signal_base + peer);
+    pto::comm::TWAIT(cell, static_cast<int32_t>(1), pto::comm::WaitCmp::GE);
+    dcci((__gm__ void *)0, cache_line_t::ENTIRE_DATA_CACHE);
   }
-  for (int peer = 0; peer < nranks; ++peer) {
-    if (peer == my_rank) continue;
-    pto::comm::Signal sig(signal_base + peer);
-    pto::comm::TWAIT(sig, static_cast<int32_t>(1), pto::comm::WaitCmp::GE);
-  }
-  pipe_barrier(PIPE_ALL);
 
-  using ShapeDyn = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
-  using StrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
-  using Global = pto::GlobalTensor<{{dtype_cpp}}, ShapeDyn, StrideDyn, pto::Layout::ND>;
-  using TileData = pto::Tile<pto::TileType::Vec, {{dtype_cpp}}, 1, kTileCount, pto::BLayout::RowMajor, -1, -1>;
+  // Phase 2: UB-tile this rank's OWN row and reduce it across every peer.
+  // Rank r reads row r from each peer and writes only row r of its own window;
+  // no peer ever reads row r there, so reads and writes are region-disjoint
+  // across ranks. That is why the store can stay inside the tile loop and the
+  // read-complete barrier below runs once for the whole row — the credit total
+  // is a constant 2 no matter how many tiles the row splits into.
+  for (int64_t off = 0; off < row_elems; off += kTileCount) {
+    const int64_t remaining = row_elems - off;
+    const int64_t chunk = remaining < kTileCount ? remaining : kTileCount;
 
-  TileData acc_tile(1, kTileCount);
-  TileData recv_tile(1, kTileCount);
-  TASSIGN(acc_tile, 0x0);
-  TASSIGN(recv_tile, 0x10000);
+    RowSlice my_slice(my_row + off, RowShape(1, 1, 1, 1, chunk),
+                      RowStride(row_elems, row_elems, row_elems, row_elems, 1));
+    DataTile acc(1, chunk);
+    TASSIGN(acc, kAccTileAddr);
 
-  // Accumulate the full tensor from all remote ranks (same CommRemotePtr pattern as
-  // allreduce: target + base, offset 0 from each rank's window base). Each rank
-  // stores the full reduced result locally; consume_step picks its own chunk.
-  // read_done_expected starts at 2: phase-1 contributes 1, each tile loop iteration
-  // adds 1 more via the per-tile secondary sync below.
-  int32_t read_done_expected = 2;
-  for (int64_t base = 0; base < numel; base += kTileCount) {
-    int64_t chunk64 = numel - base;
-    if (chunk64 > kTileCount) chunk64 = kTileCount;
-    int chunk = static_cast<int>(chunk64);
+    wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+    TLOAD(acc, my_slice);
+    set_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
 
-    ShapeDyn shape(1, 1, 1, 1, chunk);
-    StrideDyn stride(chunk, chunk, chunk, chunk, 1);
-
-    Global target_g(target + base, shape, stride);
-    TLOAD(acc_tile, target_g);
-    set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
-    wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
-
-    for (int peer = 0; peer < nranks; ++peer) {
+    for (int64_t peer = 0; peer < nranks; ++peer) {
       if (peer == my_rank) continue;
-      __gm__ {{dtype_cpp}} *remote_data = CommRemotePtr(comm_ctx, target + base, peer);
-      Global remote_g(remote_data, shape, stride);
-      TLOAD(recv_tile, remote_g);
-      set_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);
-      wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);
-      TADD(acc_tile, acc_tile, recv_tile);
-      set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+      DataTile recv(1, chunk);
+      TASSIGN(recv, kRecvTileAddr);
+      RowSlice peer_slice(CommRemotePtr(comm_ctx, my_row + off, peer), RowShape(1, 1, 1, 1, chunk),
+                          RowStride(row_elems, row_elems, row_elems, row_elems, 1));
       wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+      TLOAD(recv, peer_slice);
+      set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+      wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+      TADD(acc, acc, recv);
+      set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
     }
 
-    // Phase 2 (per tile): notify peers we finished reading their tile, then wait.
-    // This prevents any rank from overwriting its local tile before all peers have
-    // read it — identical to the allreduce per-tile secondary sync.
-    for (int peer = 0; peer < nranks; ++peer) {
-      if (peer == my_rank) continue;
-      __gm__ int32_t *remote_signal = CommRemotePtr(comm_ctx, signal_base + my_rank, peer);
-      pto::comm::Signal sig(remote_signal);
-      pto::comm::TNOTIFY(sig, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
-    }
-    for (int peer = 0; peer < nranks; ++peer) {
-      if (peer == my_rank) continue;
-      pto::comm::Signal sig(signal_base + peer);
-      pto::comm::TWAIT(sig, read_done_expected, pto::comm::WaitCmp::GE);
-    }
-    ++read_done_expected;
-    pipe_barrier(PIPE_ALL);
-
+    // The store waits on both the accumulate chain and this tile's own-row load.
     set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
     wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-    TSTORE(target_g, acc_tile);
+    wait_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
+    TSTORE(my_slice, acc);
+    // Order this store ahead of the next tile's load of the same row.
     set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
-    wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+    dcci((__gm__ void *)(my_row + off), cache_line_t::SINGLE_CACHE_LINE);
+    pipe_barrier(PIPE_ALL);
+    dsb(DSB_DDR);
   }
+
+  // Phase 3: read-complete barrier — no rank may return, and let the host reuse
+  // this window, until every peer has finished reading from it.
+  for (int64_t peer = 0; peer < nranks; ++peer) {
+    if (peer == my_rank) continue;
+    pto::comm::Signal cell(CommRemotePtr(comm_ctx, signal_base + my_rank, peer));
+    pipe_barrier(PIPE_ALL);
+    pto::comm::TNOTIFY(cell, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
+  }
+  for (int64_t peer = 0; peer < nranks; ++peer) {
+    if (peer == my_rank) continue;
+    pto::comm::Signal cell(signal_base + peer);
+    pto::comm::TWAIT(cell, static_cast<int32_t>(2), pto::comm::WaitCmp::GE);
+    dcci((__gm__ void *)0, cache_line_t::ENTIRE_DATA_CACHE);
+  }
+
+  // Self-clearing epilogue: exactly two credits per peer cell this call (ready +
+  // read-complete), independent of SIZE. AtomicAdd keeps the reset commutative
+  // with a fast peer's next-call +1, so no in-flight credit can be lost; a
+  // Set(0) here would wipe it and deadlock that peer's following wait.
+  for (int64_t peer = 0; peer < nranks; ++peer) {
+    if (peer == my_rank) continue;
+    pto::comm::Signal cell(signal_base + peer);
+    pipe_barrier(PIPE_ALL);
+    pto::comm::TNOTIFY(cell, static_cast<int32_t>(-2), pto::comm::NotifyOp::AtomicAdd);
+  }
+
+  // Drain the two events seeded at entry.
+  wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+  wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+#endif  // __DAV_VEC__
 
   pipe_barrier(PIPE_ALL);
 }

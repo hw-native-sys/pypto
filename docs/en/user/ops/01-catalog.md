@@ -39,7 +39,7 @@ See [Memory and Data Movement](../language/03-memory.md) for which moves are leg
 | Operator | Reach | What it does |
 | -------- | ----- | ------------ |
 | `add` `sub` `mul` `div` | `pl.` | Binary arithmetic; a Python number on the right selects the scalar-operand form |
-| `neg` `abs` `recip` | `pl.` | Unary negate, absolute value, reciprocal |
+| `neg` `abs` `recip` | `pl.` | Unary negate, absolute value, reciprocal. For FP16/FP32 reciprocal, `high_precision=True` selects the slower, higher-precision PTO path on A5 |
 | `rem` `rems` `fmod` `fmods` | `pl.` | Remainder and floating-point modulo, tensor and scalar forms |
 | `addc` `subc` `addsc` `subsc` | `pl.` (t) | Three-input add / subtract with carry operand |
 | `part_add` `part_mul` `part_max` `part_min` | `pl.` | Partial (segmented) arithmetic |
@@ -177,6 +177,7 @@ Push and pop must be **paired**, and each pop must be matched by a `tfree`. The 
 | Operator | Reach | What it does |
 | -------- | ----- | ------------ |
 | `submit` `spmd_submit` | `pl.` | Dispatch a kernel and capture its producer TaskId |
+| `deps=` | `pl.at`, captured inline `pl.spmd` | Add strict TaskId dependencies; deferred waiters use this same dependency path |
 | `no_dep` | `pl.` | Exclude one argument of one task from dependency tracking |
 | `dump_tag` | `pl.` | Mark a tensor for selective dump |
 
@@ -210,8 +211,24 @@ tutorial at [distributed/00-model.md](../distributed/00-model.md).
 | Get | `pld.tensor.get` | — | — | — | All GM dtypes | `src` must be window-bound. Supports chunked + pipelined staging. |
 | Notify | `pld.system.notify` | `AtomicAdd` / `Set` | — | — | — | Side-effect-only signal deposit. |
 | Wait | `pld.system.wait` | `Eq` / `Ge` | — | — | — | Side-effect-only signal block. |
+| Deferred Wait | `pld.system.defer_wait` | `Ge` only | — | — | INT32 signal | Register a monotonic counter condition without spinning the AIV; Simpler keeps the ordinary waiter TaskId incomplete and later work uses ordinary `deps=[wait_tid]`. |
 | Remote Load | `pld.tile.remote_load` | — | — | — | Any (tile) | Tile-level cross-rank load. |
 | Remote Store | `pld.tile.remote_store` | — | — | — | Any (tile) | Tile-level cross-rank store. |
+
+## Worked examples
+
+One runnable file per family, for when the table entry is not enough:
+
+| Family | Example |
+| ------ | ------- |
+| Elementwise arithmetic | `examples/beginner/02_elementwise.py` |
+| Scalar operands | `examples/beginner/03_scalar_ops.py` |
+| Activations | `examples/beginner/04_activation.py` |
+| Matmul | `examples/beginner/05_matmul.py` |
+| Concatenation / assemble | `examples/beginner/06_concat.py`, `examples/intermediate/05_assemble.py` |
+| Reductions | `examples/intermediate/02_softmax.py`, `examples/intermediate/03_normalization.py` |
+| Cross-core transfer | `examples/advanced/03_mixed_kernel.py` |
+| Tasks and dependencies | `examples/intermediate/07_task_graph.py` |
 
 ## See Also
 

@@ -33,6 +33,7 @@
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -69,12 +70,7 @@ std::optional<int64_t> TryGetConstInt(const ExprPtr& expr) {
   return std::nullopt;
 }
 
-/// Trip count for a static for-loop range.
-int64_t ComputeStaticTripCount(int64_t start, int64_t stop, int64_t step) {
-  if (step > 0 && start < stop) return (stop - start + step - 1) / step;
-  if (step < 0 && start > stop) return (start - stop + (-step) - 1) / (-step);
-  return 0;
-}
+using transform_utils::ComputeStaticTripCount;
 
 ExprPtr MakeConstIndex(int64_t value, const Span& span) {
   return std::make_shared<ConstInt>(value, DataType::INDEX, span);

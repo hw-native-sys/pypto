@@ -12,7 +12,7 @@ N6 分布式算子族为 Python DSL 提供了对硬件跨 rank（cross-rank）�
 TPUT/TGET 在该侧只需要一段可读/可写的*本地* GM 区域。窗口绑定的一侧
 （`put.dst`、`get.src`）仍然必须是 `DistributedTensor`。
 
-共有**十四个算子**和**四个 ABI 枚举**：
+共有**十五个算子**和**四个 ABI 枚举**：
 
 | 算子 | 方向 | 结果 | 硬件 |
 | ---- | ---- | ---- | ---- |
@@ -30,8 +30,9 @@ TPUT/TGET 在该侧只需要一段可读/可写的*本地* GM 区域。窗口绑
 | `pld.tensor.all_to_all_v` | 变长 all-to-all（MPI_Alltoallv）——按每个目标推送完整的 MAX_RECV 行容量块，写入平面 2D 暂存窗口（传输大小是每个目标完整的容量块），同时通过 `pld.system.notify`（Set）把 `min(send_counts[dest], MAX_RECV)` 发布到对端 `recv_counts[my_rank, 0]`，使接收方能跳过超出其计数的行；返回窗口作为结果（与对称 `all_to_all` 相同的窗口即结果模式） | `DistributedTensorType`（与 target 相同） | composite / HOST builtin |
 | `pld.system.notify` | 给 peer 的槽位发信号 | `Unknown`（副作用） | TNOTIFY |
 | `pld.system.wait` | 在自身槽位上阻塞 | `Unknown`（副作用） | TWAIT |
+| `pld.system.defer_wait` | 让本任务的逻辑完成等待本地 counter | `Unknown`（副作用） | Simpler completion runtime（无 PTOAS wait op） |
 
-六个仅有副作用（side-effect-only）的算子产生
+七个仅有副作用（side-effect-only）的算子产生
 [`UnknownType`](ir/02-types.md)：它们因跨 rank 副作用而存在，而非为消费者读取的
 SSA 值而存在。
 
@@ -57,8 +58,10 @@ SSA 值而存在。
   tile 由 `ConvertTensorToTileOps` 物化为内部 `pld.tile.get` / `pld.tile.put`,
   不出现在 DSL 表面。因此二者都是 `pld.tensor.alloc_window_buffer` /
   `pld.tensor.window` 的兄弟,而**不是**产出 tile 的 `remote_load` 的兄弟。
-- **`pld.system.notify` / `pld.system.wait`** 驱动按 rank 的信号槽位 —— 纯控制面
-  同步,无数据操作数 —— 因此归入 `pld.system`。
+- **`pld.system.notify` / `pld.system.wait` / `pld.system.defer_wait`** 驱动按
+  rank 的信号槽位 —— 纯控制面同步,无数据操作数 —— 因此归入 `pld.system`。
+  `wait` 阻塞后在原 kernel 内恢复；`defer_wait` 返回并把就绪判断转交给 scheduler
+  TaskId。
 
 ## 混合 kernel 中的核放置
 
@@ -95,12 +98,12 @@ no-duplicate 调用钉在 AIV 通路上；参见 `docs/zh/dev/ir/05-operators.md
 ## ABI 枚举（`include/pypto/ir/comm.h`）
 
 四个枚举是**仅追加（append-only）的 ABI**。它们的底层 `int` 值被序列化为算子的
-kwarg 负载（notify 的 `op`、wait 的 `cmp`、put 的 `atomic`）,并在 codegen 时转
+kwarg 负载（notify 的 `op`、wait/defer_wait 的 `cmp`、put 的 `atomic`）,并在 codegen 时转
 回枚举。新变体只能加在**末尾**,以保证已有 IR 和缓存程序的语义不变。
 
 ```cpp
 enum class NotifyOp : int { kAtomicAdd = 0, kSet = 1 };   // pld.system.notify
-enum class WaitCmp  : int { kEq = 0,        kGe = 1 };     // pld.system.wait
+enum class WaitCmp  : int { kEq = 0,        kGe = 1 };     // pld.system.wait / defer_wait
 enum class AtomicType : int { kNone = 0,    kAdd = 1 };    // pld.tensor.put、remote_store
 enum class ReduceOp : int { kSum = 0, kMax = 1, kMin = 2, kProd = 3 };  // pld.tensor.allreduce
 ```
@@ -110,7 +113,7 @@ enum class ReduceOp : int { kSum = 0, kMax = 1, kMin = 2, kProd = 3 };  // pld.t
 | `NotifyOp` | `kAtomicAdd` | 原子地把 `value` 加到 peer 的信号槽位 |
 | `NotifyOp` | `kSet` | 非原子地把 `value` 存入 peer 的信号槽位 |
 | `WaitCmp` | `kEq` | 阻塞直到 `*signal_slot == expected` |
-| `WaitCmp` | `kGe` | 阻塞直到 `*signal_slot >= expected` |
+| `WaitCmp` | `kGe` | 等待或延迟任务完成，直到 `*signal_slot >= expected` |
 | `AtomicType` | `kNone` | 普通远程写 —— 覆盖 peer 的 dst 切片 |
 | `AtomicType` | `kAdd` | 原子地把源数据加到 peer 的 dst 切片 |
 | `ReduceOp` | `kSum` | 对所有参与 rank 的窗口切片做求和规约 |
@@ -356,7 +359,7 @@ pld.tensor.all_to_all_v(
 
 - `input` — Tensor 或 DistributedTensor `[NR*MAX_RECV, SIZE]`
 - `target` — DistributedTensor `[NR*MAX_RECV, SIZE]`（窗口即结果）
-- `signal` — DistributedTensor INT32 `[NR, 1]`（单次使用的 Set(1)/wait≥1 屏障）
+- `signal` — DistributedTensor INT32 `[NR, 1]`（自清理信用屏障；可在多次调用间复用）
 - `send_counts` — Tensor-like INT32 `[NR]` 或 `[NR, 1]`（运行时每目标行数）
 - `recv_counts` — DistributedTensor INT32 `[NR, 1]`（InOut recvcounts）
 
@@ -521,9 +524,45 @@ pld.system.wait(signal, offsets, expected, *, cmp: int) -> Unknown
 Verifier：`signal` 必须是 `DistributedTensorType`；`expected` 必须是
 `ScalarType`；`offsets` 必须是 rank 等于 signal rank 的 `MakeTuple`。
 
+### `pld.system.defer_wait`（Simpler 延迟完成）
+
+```text
+pld.system.defer_wait(signal, offsets, expected, *, cmp: int) -> Unknown
+```
+
+把本地 counter 条件注册后立即返回，不发出 `pto.comm.twait`。waiter kernel 可以结束并
+释放物理 AIV，但 Simpler 会延迟这个普通 TaskId 的完成，直到所有条件就绪；kernel
+不会被恢复。
+
+V1 只接受直接作为参数传入、绑定 window 的 INT32 `DistributedTensor`，采用 ND/DN
+寻址，offset 与 threshold 为整数/index，且仅支持 `WaitCmp::kGe`。slice/view/SSA alias、
+NZ layout 与零维 signal 都会被拒绝。storage 是 INT32，但按无符号 `>=` 轮询；threshold
+和发布值必须在 `[0, INT32_MAX]` 内单调前进，`-1` 会呈现为 `UINT32_MAX` 并错误满足。
+每个 task 最多注册 64 个条件；scheduler 同时最多跟踪 64 个延迟 task，这是另一限制。
+
+Scope outliner 要求 waiter 是专用、顶层、单 block 的 pure-AIV `pl.at(CORE_GROUP)`，
+不能带 predicate 或 `allow_early_resolve=True`。registration 之间可执行纯标量
+bookkeeping/control flow；一旦开始 registration，不能再执行 `tensor.read`、payload/cache
+操作或其他通信。跨分支合并或跨循环迭代传递的标量同属 bookkeeping —— `ConvertToSSA`
+为它们插入的 phi / iter_arg yield 会被接受；不注册任何条件的循环也允许存在，且无需静态
+可知的 trip count。没有 continuation 的末端 waiter 可以 fire-and-forget，无需捕获 TaskId。
+未标记而直接从 `@pl.jit.incore` / AIV 使用仍会被拒绝，因为它绕过了已验证的 single-block
+task launch 与 runtime `AsyncCtx` 契约。以编程方式构造且携带内部 waiter marker 的 IR，只有
+在完整 waiter body 与 orchestration call-site 契约重新验证通过后才会被接受。
+
+Continuation 继续使用普通 `deps=[wait_tid]`，不引入第二种依赖类型。Simpler 在 counter
+就绪前扣留普通 TaskId fanout，之后正常派发 consumer 并执行标准 task-start cache
+invalidation。producer 仍必须先让 payload 可见再发布 signal；waiter 也必须禁止 early
+resolve，避免 consumer 在 readiness 之前被取得。
+
+Codegen 把经过检查、展平的 offset 与原始 dispatch arguments 传给 wrapper adapter；
+adapter 取得 `AsyncCtx`、注册 counter `CompletionToken`，并 flush 注册或错误状态。旧的
+`pld.system.wait` / `pto.comm.twait` 路径保持不变。完整编程契约与示例见
+[分布式原语指南](../user/distributed/02-primitives.md#延迟完成释放物理核保留逻辑任务)。
+
 ## 共享 codegen 基础设施
 
-六个算子全部经由 `src/backend/common/pto_ops_distributed.cpp` 和
+底层 RMA 与同步算子经由 `src/backend/common/pto_ops_distributed.cpp` 和
 `src/codegen/pto/pto_codegen.cpp` 中的 PTO codegen 辅助函数下降。共享的可复用部件
 —— 使每个算子的下降都不携带专门的 peer 算术 —— 如下：
 
@@ -535,10 +574,12 @@ Verifier：`signal` 必须是 `DistributedTensorType`；`expected` 必须是
 | `ResolveDistTensorBinding` | 把 `DistributedTensor` 实参解析为其 codegen 绑定（类型 + 窗口变量） |
 | `AsTensorTypeLike` | kind-trait 向下转换,在统一读取视图 element/shape 信息处同时接受 `TensorType` 与 `DistributedTensorType` |
 
-本地与远程的拆分是有意的：*本地*操作数（如 `get` 的 `dst`、`put` 的 `src`、`wait` 的 `signal`）
-复用 `EmitMakeTensorViews` 已创建的 tensor view,无 peer 算术；而*远程*操作数
+本地与远程的拆分是有意的：*本地* PTO 操作数（如 `get` 的 `dst`、`put` 的
+`src`、`wait` 的 `signal`）复用 `EmitMakeTensorViews` 已创建的 tensor view,无
+peer 算术；而*远程*操作数
 （如 `remote_load` 的 `target`、`get` 的 `src`、`put` 的 `dst`）则经由
-`EmitCommRemoteView`。
+`EmitCommRemoteView`。`defer_wait` 同样是本地操作，但其 adapter 接收直接参数 base
+与经过检查、展平后的逻辑 element offset，而不是 PTO tensor view。
 
 ## 流水线集成
 
@@ -570,5 +611,8 @@ host_orch 函数体包裹进嵌套的 `CommDomainScopeStmt` 节点（按推断�
   `tests/st/distributed/` 下其他 L3 ST。**Put/Get 端到端权威契约** 已启用：
   `test_l3_put.py`（环形覆写、行偏移 put、原子加 put、分块/流水 transfer ✅）、
   `test_l3_get.py`（环形读、行偏移 get ✅）、以及 `test_l3_remote_store.py`
-  （tile 级子视图 push ✅，以及 tensor 级*计算值* push ✅）。所有测试均采用由 notify/wait 和集体 ST 建立的
+  （tile 级子视图 push ✅，以及 tensor 级*计算值* push ✅）。Deferred completion 由
+  `test_l3_deferred_completion.py` 覆盖：A2/A3 AIV 饱和与退核、counter 已就绪时的
+  注册复用、A5 跨 rank 正确性、持久窗口单调 epoch，以及普通 TaskId 依赖门控。
+  其他通信 ST 采用由 notify/wait 和集体 ST 建立的
   `pld.system.notify` / `pld.system.wait` 握手模式。

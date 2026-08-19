@@ -31,6 +31,57 @@ with pl.at(level=pl.Level.CORE_GROUP, no_dep_args=[shared]) as tid:   # one tens
     ...
 ```
 
+Two of the three are reachable from a `@pl.jit` entry, over four iterations that write
+disjoint row bands of one output:
+
+<!-- doctest: setup -->
+```python
+import pypto.language as pl
+import torch
+from pypto.runtime import RunConfig
+
+N, TILE, COLS = 4, 64, 128
+ROWS = N * TILE
+CFG = RunConfig(platform="__PLATFORM__")
+torch.manual_seed(0)
+A = torch.randn(ROWS, COLS, dtype=torch.float32)
+
+
+def check(kernel):
+    out = torch.zeros(ROWS, COLS, dtype=torch.float32)
+    kernel(A, out, config=CFG)
+    torch.testing.assert_close(out, A * 2.0, rtol=1e-4, atol=1e-4)
+```
+
+<!-- doctest: run -->
+```python
+@pl.jit
+def narrow(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+    for i in pl.range(N):
+        with pl.at(level=pl.Level.CORE_GROUP, no_dep_args=[out]):   # one tensor, one task
+            t = pl.load(a, [i * TILE, 0], [TILE, COLS])
+            pl.store(pl.mul(t, 2.0), [i * TILE, 0], out)
+    return out
+
+
+@pl.jit
+def region(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+    with pl.manual_scope():                                          # whole region
+        for i in pl.range(N):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                t = pl.load(a, [i * TILE, 0], [TILE, COLS])
+                pl.store(pl.mul(t, 2.0), [i * TILE, 0], out)
+    return out
+
+
+check(narrow)
+check(region)
+```
+
+Both produce the right answer here because the bands really are disjoint. That is the
+point and the danger: neither construct checks it, so the same code with overlapping
+regions would still pass this assertion on a good day.
+
 | Construct | Scope of the opt-out | Available in |
 | --------- | -------------------- | ------------ |
 | `with pl.manual_scope():` | Every task in the region | `@pl.jit`, `@pl.function` |

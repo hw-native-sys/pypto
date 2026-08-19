@@ -161,10 +161,8 @@ def create(
             slayout=none_box) L1/cbuf tile — a contiguous byte-staging buffer
             rather than the boxed NZ layout Mat tiles normally carry. Requires
             ``target_memory=Mat`` and is mutually exclusive with ``transpose``.
-            Used for the mix/aic_only soft ``system.syncall`` L1 scratch, whose
-            counter slots must be contiguous. Default ``None`` keeps the
-            canonical layout. Kept keyword-only so it does not shift ``span``'s
-            positional slot for existing callers.
+            Default ``None`` keeps the canonical layout. Kept keyword-only so
+            it does not shift ``span``'s positional slot for existing callers.
 
     Returns:
         Call expression that returns a TileType with the created tile
@@ -1647,18 +1645,20 @@ def cos(tile: Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tile.cos", [tile], {}, actual_span)
 
 
-def recip(tile: Expr, span: Span | None = None) -> Call:
+def recip(tile: Expr, span: Span | None = None, *, high_precision: bool = False) -> Call:
     """Element-wise reciprocal (1/x) of a tile.
 
     Args:
         tile: Input tile (TileType)
         span: Optional source span for debugging (auto-captured if not provided)
+        high_precision: Whether to select PTOAS's high-precision reciprocal mode (FP16/FP32 only)
 
     Returns:
         Call expression for element-wise reciprocal
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.recip", [tile], {}, actual_span)
+    kwargs: dict[str, Any] = {"high_precision": True} if high_precision else {}
+    return _ir_core.create_op_call("tile.recip", [tile], kwargs, actual_span)
 
 
 def sqrt(tile: Expr, span: Span | None = None) -> Call:
@@ -1801,24 +1801,39 @@ def matmul(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tile.matmul", [lhs, rhs], {}, actual_span)
 
 
-def matmul_acc(acc: Expr, lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+def matmul_acc(
+    acc: Expr,
+    lhs: Expr,
+    rhs: Expr,
+    span: Span | None = None,
+    *,
+    init_cond: Expr | None = None,
+) -> Call:
     """Matrix multiplication with accumulation.
 
     Performs matrix multiplication and accumulates the result: acc = acc + lhs @ rhs.
     This is commonly used in loop-based matrix multiplication where results are
     accumulated over the K dimension.
 
+    With ``init_cond``, the accumulator's initial value is conditional: on the
+    steps where the predicate holds, ``acc`` is overwritten with ``lhs @ rhs``
+    instead of accumulated into. This is the split-K ``k == 0`` idiom, and it
+    keeps the accumulator single-def where a hand-written if/else would put a
+    phi on an in-place Acc buffer.
+
     Args:
         acc: Accumulator tile (TileType) to accumulate into
         lhs: Left-hand side tile (TileType)
         rhs: Right-hand side tile (TileType)
         span: Optional source span for debugging (auto-captured if not provided)
+        init_cond: Optional BOOL scalar predicate selecting overwrite over accumulate
 
     Returns:
         Call expression for matrix multiplication with accumulation
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.matmul_acc", [acc, lhs, rhs], {}, actual_span)
+    args = [acc, lhs, rhs] if init_cond is None else [acc, lhs, rhs, init_cond]
+    return _ir_core.create_op_call("tile.matmul_acc", args, {}, actual_span)
 
 
 def matmul_bias(lhs: Expr, rhs: Expr, bias: Expr, span: Span | None = None) -> Call:
@@ -2894,8 +2909,9 @@ def set_validshape(
     """Update valid-shape metadata of a tile without data movement.
 
     .. note::
-        Internal API — this op is intended for compiler-generated code only
-        and should not be exposed to end users in future releases.
+        The operand must not be a view (a ``pl.tile.slice`` or reshape result): a
+        view carries its valid extent in its type, so there is nothing to update.
+        Narrow at the slice with ``valid_shape=`` instead.
 
     Args:
         tile: Input tile expression (must be 2D TileType)

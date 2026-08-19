@@ -173,6 +173,18 @@ void BindPass(nb::module_& m) {
       .value("PTOAS", MemoryPlanner::PtoAS,
              "Skip pypto allocation passes; ptoas PlanMemory allocates (--pto-level=level2)");
 
+  nb::enum_<RuntimeKind>(passes, "RuntimeKind", "Which Simpler runtime ABI a compilation targets")
+      .value("TENSORMAP_AND_RINGBUFFER", RuntimeKind::TensorMapAndRingBuffer,
+             "Task graph built on the AICPU, dependencies auto-derived through the TensorMap "
+             "(default)")
+      .value("HOST_BUILD_GRAPH", RuntimeKind::HostBuildGraph,
+             "Host CPU builds the whole task graph up front; required for Graph Execution");
+
+  passes.def("runtime_kind_to_name", &RuntimeKindToName, nb::arg("kind"),
+             "Wire name written to RUNTIME_CONFIG[\"runtime\"], e.g. \"host_build_graph\"");
+  passes.def("runtime_kind_from_name", &RuntimeKindFromName, nb::arg("name"),
+             "Parse a RUNTIME_CONFIG[\"runtime\"] wire name back into a RuntimeKind");
+
   // Bind DiagnosticPhase enum
   nb::enum_<DiagnosticPhase>(passes, "DiagnosticPhase",
                              "Controls when DiagnosticInstrument runs registered checks "
@@ -290,15 +302,16 @@ void BindPass(nb::module_& m) {
                           "verification and the diagnostic channel (warnings + performance\n"
                           "hints) for PassPipeline.")
       .def(nb::init<std::vector<PassInstrumentPtr>, VerificationLevel, DiagnosticPhase, DiagnosticCheckSet,
-                    MemoryPlanner, bool>(),
+                    MemoryPlanner, bool, RuntimeKind>(),
            nb::arg("instruments"), nb::arg("verification_level") = VerificationLevel::Basic,
            nb::arg("diagnostic_phase") = DiagnosticPhase::PrePipeline,
            nb::arg("disabled_diagnostics") = DiagnosticCheckSet{DiagnosticCheck::UnusedControlFlowResult},
            nb::arg("memory_planner") = MemoryPlanner::PyPTO,
-           nb::arg("enable_pypto_l0c_double_buffer") = false,
+           nb::arg("enable_pypto_l0c_double_buffer") = false, nb::arg("runtime") = kDefaultRuntimeKind,
            "Create a PassContext with instruments, verification level, diagnostic phase gate, "
-           "optional disabled diagnostic checks, memory planner selection, and the experimental "
-           "legacy-PyPTO chooser-emitted L0C double-buffer (dbC=2) opt-in")
+           "optional disabled diagnostic checks, memory planner selection, the experimental "
+           "legacy-PyPTO chooser-emitted L0C double-buffer (dbC=2) opt-in, and the target Simpler "
+           "runtime ABI")
       .def("__enter__",
            [](PassContext& self) -> PassContext& {
              self.EnterContext();
@@ -317,6 +330,7 @@ void BindPass(nb::module_& m) {
       .def("get_enable_pypto_l0c_double_buffer", &PassContext::GetEnablePyptoL0cDoubleBuffer,
            "Whether chooser-emitted L0C double-buffering (dbC=2) is enabled under the legacy PyPTO "
            "memory planner")
+      .def("get_runtime", &PassContext::GetRuntime, "Get the target Simpler runtime ABI for this context")
       .def_static("current", &PassContext::Current, nb::rv_policy::reference,
                   "Get the currently active context, or None if no context is active");
 

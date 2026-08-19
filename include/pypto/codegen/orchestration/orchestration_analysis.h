@@ -67,10 +67,12 @@ inline std::optional<int64_t> EvalConstInt(const ir::ExprPtr& expr) {
   return ir::transform_utils::EvalConstInt(expr);
 }
 /// Return the const trip count of ``for_stmt`` if start/stop/step are all
-/// ``ConstInt`` and step is positive; 0 otherwise. Thin forward to
-/// ``ir::transform_utils::EvalConstTripCount``.
+/// compile-time integers; 0 otherwise. Direction-aware — a descending loop
+/// reports its true trip count. Thin forward to
+/// ``ir::transform_utils::EvalConstTripCount``, collapsing its "not a
+/// compile-time constant" case onto 0 for callers that only threshold-compare.
 inline int64_t EvalConstTripCount(const ir::ForStmtPtr& for_stmt) {
-  return ir::transform_utils::EvalConstTripCount(for_stmt);
+  return ir::transform_utils::EvalConstTripCount(for_stmt).value_or(0);
 }
 
 /// Compute total GM-pipe workspace elements required by a root orchestration

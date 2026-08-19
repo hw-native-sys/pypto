@@ -15,6 +15,7 @@ own a2a3 boundary behaviour without running InjectGMPipeBuffer.
 """
 
 import pypto.language as pl
+import pypto.language.distributed as pld
 import pytest
 from pypto import backend, ir, passes
 from pypto.backend import BackendType
@@ -61,6 +62,191 @@ def _op_name(stmt: ir.Stmt) -> str:
     if call is not None and isinstance(call.op, ir.Op):
         return call.op.name
     return ""
+
+
+def test_direct_incore_defer_wait_requires_task_level_waiter_contract():
+    """A direct InCore helper must not bypass task-level waiter validation."""
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def direct_wait(self, signal: pld.DistributedTensor[[1, 1], pl.INT32]):
+            pld.system.defer_wait(
+                signal,
+                offsets=[0, 0],
+                expected=1,
+                cmp=pld.WaitCmp.Ge,
+            )
+
+    with pytest.raises(ValueError, match="bypasses the deferred-waiter task contract"):
+        _run_pipeline(Program)
+
+
+def test_aiv_defer_wait_requires_task_level_waiter_contract():
+    """A specialized AIV kernel cannot bypass the InCore scope validator."""
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.AIV)
+        def direct_wait(self, signal: pld.DistributedTensor[[1, 1], pl.INT32]):
+            pld.system.defer_wait(
+                signal,
+                offsets=[0, 0],
+                expected=1,
+                cmp=pld.WaitCmp.Ge,
+            )
+
+    with pytest.raises(ValueError, match="bypasses the deferred-waiter task contract"):
+        _run_pipeline(Program)
+
+
+def test_forged_waiter_marker_without_task_level_call_site_is_rejected():
+    """The printable internal attr is not accepted as provenance on its own."""
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def direct_wait(self, signal: pld.DistributedTensor[[1, 1], pl.INT32]):
+            pl.func_attr({"deferred_completion_waiter": True})
+            pld.system.defer_wait(
+                signal,
+                offsets=[0, 0],
+                expected=1,
+                cmp=pld.WaitCmp.Ge,
+            )
+
+    with pytest.raises(ValueError, match="no task-level Orchestration call site"):
+        _run_pipeline(Program)
+
+
+def test_forged_waiter_plain_call_early_resolve_fails_closed():
+    """A plain GlobalVar call cannot smuggle an unsafe early-resolve attr."""
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def waiter(self, signal: pld.DistributedTensor[[1, 1], pl.INT32]):
+            pl.func_attr({"deferred_completion_waiter": True})
+            pld.system.defer_wait(signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, signal: pld.DistributedTensor[[1, 1], pl.INT32]):
+            self.waiter(signal, attrs={"allow_early_resolve": True})
+
+    with pytest.raises(ValueError, match="cannot use allow_early_resolve=True"):
+        _run_pipeline(Program)
+
+
+def test_forged_waiter_plain_call_core_num_fails_closed():
+    """A plain GlobalVar call cannot turn the waiter into an SPMD launch."""
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def waiter(self, signal: pld.DistributedTensor[[1, 1], pl.INT32]):
+            pl.func_attr({"deferred_completion_waiter": True})
+            pld.system.defer_wait(signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, signal: pld.DistributedTensor[[1, 1], pl.INT32]):
+            self.waiter(signal, attrs={"core_num": 2})
+
+    with pytest.raises(ValueError, match="single-block task"):
+        _run_pipeline(Program)
+
+
+def test_forged_waiter_plain_call_predicate_fails_closed():
+    """A printable waiter marker cannot bypass the no-predicate contract."""
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def waiter(self, signal: pld.DistributedTensor[[1, 1], pl.INT32]):
+            pl.func_attr({"deferred_completion_waiter": True})
+            pld.system.defer_wait(signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            signal: pld.DistributedTensor[[1, 1], pl.INT32],
+            gate: pl.Tensor[[1], pl.INT32],
+        ):
+            self.waiter(signal, attrs={"predicate": gate[0] > 0})
+
+    with pytest.raises(ValueError, match="cannot use a dispatch predicate"):
+        _run_pipeline(Program)
+
+
+def test_forged_waiter_plain_call_sync_start_fails_closed():
+    """A printable waiter marker cannot bypass the single-block contract."""
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def waiter(self, signal: pld.DistributedTensor[[1, 1], pl.INT32]):
+            pl.func_attr({"deferred_completion_waiter": True})
+            pld.system.defer_wait(signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, signal: pld.DistributedTensor[[1, 1], pl.INT32]):
+            self.waiter(signal, attrs={"sync_start": True})
+
+    with pytest.raises(ValueError, match="single-block task"):
+        _run_pipeline(Program)
+
+
+def test_valid_waiter_aiv_form_remains_valid_on_expand_rerun():
+    """The audit revalidates the marked AIV form produced by the first run."""
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, signal: pld.DistributedTensor[[1, 1], pl.INT32]):
+            with pl.at(level=pl.Level.CORE_GROUP, name_hint="waiter"):
+                pld.system.defer_wait(
+                    signal,
+                    offsets=[0, 0],
+                    expected=1,
+                    cmp=pld.WaitCmp.Ge,
+                )
+
+    outlined = passes.outline_incore_scopes()(passes.convert_to_ssa()(Program))
+    expanded = passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(outlined))
+    waiter = expanded.get_function("waiter")
+    assert waiter is not None
+    assert waiter.func_type == ir.FunctionType.AIV
+    assert waiter.attrs["deferred_completion_waiter"] is True
+
+    rerun = passes.expand_mixed_kernel()(expanded)
+    rerun_waiter = rerun.get_function("waiter")
+    assert rerun_waiter is not None
+    assert rerun_waiter.func_type == ir.FunctionType.AIV
+
+
+def test_validated_waiter_accepts_trailing_empty_return():
+    """Function normalization may append a no-value return terminator."""
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def waiter(self, signal: pld.DistributedTensor[[1, 1], pl.INT32]):
+            pl.func_attr({"deferred_completion_waiter": True})
+            pld.system.defer_wait(
+                signal,
+                offsets=[0, 0],
+                expected=1,
+                cmp=pld.WaitCmp.Ge,
+            )
+            return  # noqa: PLR1711 - explicit empty terminator is the test subject
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, signal: pld.DistributedTensor[[1, 1], pl.INT32]):
+            self.waiter(signal)
+
+    after = _run_pipeline(Program)
+    waiter = after.get_function("waiter")
+    assert waiter is not None
+    assert waiter.func_type == ir.FunctionType.AIV
 
 
 def test_hand_written_group_members_share_canonical_abi():
@@ -365,7 +551,7 @@ def test_v2c_boundary_uses_nz_layout_on_a2a3():
             out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
         ):
             main_incore_0_v2c_slot_buffer = pl.reserve_buffer(
-                name="main_incore_0_v2c_slot_buffer", size=16384, base=-1
+                name="main_incore_0_v2c_slot_buffer", size=8192, base=-1
             )
             main_incore_0_c2v_slot_buffer_import = pl.import_peer_buffer(
                 name="main_incore_0_c2v_slot_buffer", peer_func="main_incore_0_aiv"
@@ -375,6 +561,7 @@ def test_v2c_boundary_uses_nz_layout_on_a2a3():
                 main_incore_0_v2c_slot_buffer,
                 dir_mask=3,
                 slot_size=4096,
+                slot_num=2,
             )
             x_left_mat: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Mat] = pl.tpop_from_aiv(split=0)
             x_left: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Left] = pl.move(
@@ -402,13 +589,14 @@ def test_v2c_boundary_uses_nz_layout_on_a2a3():
                 name="main_incore_0_v2c_slot_buffer", peer_func="main_incore_0_aic"
             )
             main_incore_0_c2v_slot_buffer = pl.reserve_buffer(
-                name="main_incore_0_c2v_slot_buffer", size=16384, base=-1
+                name="main_incore_0_c2v_slot_buffer", size=8192, base=-1
             )
             pl.aiv_initialize_pipe(
                 main_incore_0_c2v_slot_buffer,
                 main_incore_0_v2c_slot_buffer_import,
                 dir_mask=3,
                 slot_size=4096,
+                slot_num=2,
             )
             x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128])
             pl.tpush_to_aic(x_tile, split=0)
@@ -481,6 +669,7 @@ def test_c2v_boundary_preserves_vec_pop_layout_on_a2a3():
                 pl.const(0, pl.INT32),
                 dir_mask=1,
                 slot_size=4096,
+                slot_num=2,
             )
             x_mat: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Mat] = pl.load(
                 x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
@@ -501,13 +690,14 @@ def test_c2v_boundary_preserves_vec_pop_layout_on_a2a3():
             out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
         ) -> pl.Tensor[[16, 64], pl.FP32]:
             main_incore_0_c2v_slot_buffer = pl.reserve_buffer(
-                name="main_incore_0_c2v_slot_buffer", size=32768, base=-1
+                name="main_incore_0_c2v_slot_buffer", size=8192, base=-1
             )
             pl.aiv_initialize_pipe(
                 main_incore_0_c2v_slot_buffer,
                 pl.const(0, pl.INT32),
                 dir_mask=1,
                 slot_size=4096,
+                slot_num=2,
             )
             z_vec: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=0)
             out_0_store: pl.Tensor[[16, 64], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
@@ -581,6 +771,7 @@ def test_gm_mediated_cross_lane_store_load_gets_handshake_on_a2a3():
                 pl.const(0, pl.INT32),
                 dir_mask=1,
                 slot_size=4096,
+                slot_num=2,
             )
             x_mat: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Mat] = pl.load(
                 x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
@@ -605,12 +796,13 @@ def test_gm_mediated_cross_lane_store_load_gets_handshake_on_a2a3():
             scratch: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
             out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
         ) -> pl.Tensor[[16, 64], pl.FP32]:
-            gm_relay_c2v_slot_buffer = pl.reserve_buffer(name="gm_relay_c2v_slot_buffer", size=32768, base=-1)
+            gm_relay_c2v_slot_buffer = pl.reserve_buffer(name="gm_relay_c2v_slot_buffer", size=8192, base=-1)
             pl.aiv_initialize_pipe(
                 gm_relay_c2v_slot_buffer,
                 pl.const(0, pl.INT32),
                 dir_mask=1,
                 slot_size=4096,
+                slot_num=2,
             )
             sync_tile: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=0)
             pl.tfree_to_aic(sync_tile)
@@ -879,7 +1071,7 @@ def test_split_slot_num_override_sizes_c2v_ring_on_a2a3():
     attr) overrides the hardcoded ring depth on the automatic cube->vector pipe.
 
     Mirrors ``test_c2v_boundary_preserves_vec_pop_layout_on_a2a3`` but with
-    ``slot_num=16`` instead of the default 8: the reserved buffer grows to
+    ``slot_num=16`` instead of the default 2: the reserved buffer grows to
     ``slot_size * 16`` (65536) and both ``initialize_pipe`` calls carry an
     explicit ``slot_num=16`` attribute.
     """

@@ -137,6 +137,7 @@ print(pto_code)
 | `tile.store(tile, [row, col], tensor)` | `pto.partition_view` + `pto.tstore` |
 | `tile.slice(tile, [h, w], [row, col][, valid_shape=...])` | `pto.subview`（零拷贝视图；仅在传入 `valid_shape` 时输出 `valid [...]` 子句） |
 | `tile.assemble(target, source, [row, col])` | （可选）`pto.tmov target -> dst` + `pto.subview dst[row, col] sizes [src.rows, src.cols]` + `pto.tmov src -> dst_view` |
+| `tile.set_validshape(tile, vr, vc)` | 发 `pto.set_validshape`；操作数是视图时报错（见下） |
 | `tile.mul(lhs, rhs)` | `pto.tmul` |
 | `tile.add(a, b, c)` | `pto.taddc` (三操作数加法) |
 | `tile.adds(tile, scalar)` | `pto.tadds` (Tile + 标量) |
@@ -160,6 +161,16 @@ print(pto_code)
 `pto.tmov src → dst_view` 才是真正写入由 `pto.subview` 切出的子窗口的数据
 搬运。
 
+**`tile.set_validshape` 下沉细节。** `pto.set_validshape` 修改的是操作数的
+`valid_row` / `valid_col` 操作数，因此操作数必须是拥有它们的 handle：alloc、
+`scf.if` 结果、跨核 pop slot。而**视图**——`tile.slice` 下沉出的 `pto.subview`，
+或 `pto.treshape`——把有效范围存在自身类型里，ptoas 会拒绝对它执行这条指令，所以
+PyPTO 提前报错，并在信息里指向切片。视图身份在这两个发射点被记录，而不是从渲染出
+的维度推断：带运行时 `valid_shape` 的切片渲染成 `v_row=?, v_col=?`，与由 alloc
+承载的 handle 完全一样。要收窄视图，请给切片传 `valid_shape=`（它会落到
+`pto.subview` 的 `valid [...]` 子句，并且支持运行时范围），或在取视图之前对源
+tile 调用 `set_validshape`。
+
 ### 跨核操作到 PTO 指令
 
 | PyPTO 操作 | 生成的 PTO-ISA | 描述 |
@@ -175,7 +186,7 @@ print(pto_code)
 | `system.reserve_buffer(...)` | `%name = pto.reserve_buffer {name = "N", size = S, location = #pto.address_space<loc>, auto = false, base = B} -> i32` | 预留缓冲区（`memory_planner=PTOAS` 下发射 `auto = true` 且省略 `base`） |
 | `system.import_peer_buffer(...)` | `%name = pto.import_reserved_buffer {name = "N", peer_func = @F} -> i32` | 导入对等缓冲区 |
 | `system.syncall(core_type=C)` | `pto.syncall() mode = #pto.sync_all_mode<hard>, core_type = #pto.sync_core_type<C>` | 跨核全员屏障（hard/FFTS 形态） |
-| `system.syncall(mode="soft", core_type="aiv_only", gm_workspace=ws, used_cores=N)` | `pto.syncall(%gm_pview, %scratch, %used : !pto.partition_tensor_view<...xi32>, !pto.tile_buf<loc=vec, ...i32>, i32) mode = #pto.sync_all_mode<soft>, core_type = #pto.sync_core_type<aiv_only>` | soft/GM 轮询屏障（部分占用即可；`gm_workspace` 下沉为 `pto.partition_view`，scratch tile 由编译器合成） |
+| `system.syncall(mode="soft", core_type=C, gm_workspace=ws, used_cores=N)` | `pto.syncall(%gm_pview[, %used] : !pto.partition_tensor_view<...xi32>[, i32]) mode = #pto.sync_all_mode<soft>, core_type = #pto.sync_core_type<C>` | 当前 PTO-ISA 的 soft/GM 轮询屏障（部分占用即可；GM workspace 至少 64 字节；显式 `N=0` 时从设备启动寄存器推导并省略 `%used`） |
 
 **说明：**
 
@@ -184,11 +195,17 @@ print(pto_code)
 - 如果被 push 的 tile 通过动态 `valid_row` / `valid_col` operand 分配，或经
   `tile.set_validshape` 更新，`tpush` 会发射已经更新运行时 valid shape 的同一个
   tile handle。对于 split `tpush`，codegen 会临时使用完整物理传输 box，随后恢复
-  producer tile 的逻辑 valid shape；消费侧动态 tpop operand 仍携带后续计算和 store
-  使用的逻辑范围。部分有效的无切分 Acc-to-Vec 传输也会让 TPUSH 和 TPOP 使用完整物理
-  box，因为 Cube-to-Vector FIFO 按物理 box stride 搬运；传输两侧随后立即恢复逻辑
-  valid shape。
-- 当 tpop 结果的 `TileView.valid_shape` 与物理 tile shape 不一致时，PTO codegen 会生成 PTOAS 前端操作数：`%buf = pto.tpop_from_*(%valid_row, %valid_col) {[id = I, ]split = N} -> !pto.tile_buf<..., v_row=?, v_col=?, ...>`。这同时覆盖动态表达式和 `[0, 0]` 这类静态非满形状；operand 携带后续计算和 store 使用的逻辑范围。
+  producer tile 的逻辑 valid shape。
+- Cube-to-Vector FIFO 在**任意** split 下都按物理 box stride 搬运：ISA 用被弹出
+  tile 的编译期 rows/cols 以及 producer 的 box 行间距构造 GM 槽位视图，再用该 tile
+  的*运行时* `valid_col` 去 stride 这个视图。因此 TPOP 上的部分 valid shape 会让 GM
+  行间隙塌缩为 0，消费侧读到的是一段连续数据而不是每次一行 box——这会静默破坏
+  *有效*区域的数据，因为 ISA 中对应的断言在 release 构建里被编译掉了。所以部分有效的
+  Acc-to-Vec 传输在无切分以及 `split = 1` / `split = 2` 下，TPUSH 和 TPOP 都使用完整
+  物理 box，并在传输两侧立即恢复逻辑 valid shape——消费侧通过纯元数据的
+  `pto.treshape` 恢复（前端 tpop 结果不是 PTOAS 的本地绑定 tile，`pto.set_validshape`
+  无法就地修改它）。
+- 当 tpop 结果的 `TileView.valid_shape` 与物理 tile shape 不一致时，PTO codegen 会生成 PTOAS 前端操作数：`%buf = pto.tpop_from_*(%valid_row, %valid_col) {[id = I, ]split = N} -> !pto.tile_buf<..., v_row=?, v_col=?, ...>`。这同时覆盖动态表达式和 `[0, 0]` 这类静态非满形状；operand 携带后续计算和 store 使用的逻辑范围。对于静态形状、非空的部分 pop，上述 Cube-to-Vector 完整 box 传输优先，因为 `pto.treshape` 不带 valid-row/valid-col operand，只能恢复*静态*逻辑范围。
 - 对于 split consumer，`SplitVectorKernel` 会按 subblock 本地化这些动态
   tpop valid-shape operand（例如 `[16, 16]` tile 做上下切分时，全局
   `[8, 16]` 会变成 `[8, 16]` 和 `[0, 16]`）。
@@ -645,6 +662,8 @@ InCore Function -> PTOCodegen -> .pto -> ptoas -> .cpp -> kernel_wrapper -> kern
 ```text
 output_dir/
 ├── passes_dump/                     # IR after each pass
+├── ptoas_passes/                    # 可选：每个 ptoas Pass 后的 IR
+│   └── <kernel-or-group>/            # 由 ptoas/MLIR 管理的转储树
 ├── ptoas/                           # Intermediates
 │   ├── <func_name>.pto              # MLIR from PTOCodegen
 │   └── <func_name>.cpp              # C++ from ptoas
@@ -655,6 +674,9 @@ output_dir/
 └── kernel_config.py                 # Runtime/orchestration/kernel config
 ```
 
+仅当使用 `ir.compile(..., dump_ptoas_passes=True)` 或
+`RunConfig(dump_ptoas_passes=True)` 时才会生成 `ptoas_passes/`。
+
 编排代码生成使用 PTO2 运行时 API (`rt_submit_task`, `make_tensor_external` 等) 生成编排 C++ 代码。
 
 ### 运行时配置 (`kernel_config.py`)
@@ -663,8 +685,22 @@ output_dir/
 
 | 键 | 何时写入 | 备注 |
 | -- | -------- | ---- |
-| `runtime` | 总是 | 目前为 `"tensormap_and_ringbuffer"`。 |
+| `runtime` | 总是 | `"tensormap_and_ringbuffer"`（默认）或 `"host_build_graph"` —— 由 `ir.compile(runtime=...)`（或把调用包在 `PassContext([], runtime=...)` 中）选定的 `RuntimeKind` 所对应的线上名字。 |
 | `aicpu_thread_num` | 总是 (`0`) | `0` 选择 runtime 的架构默认值（a2a3：4；a5：5），调用方也可显式覆盖。 |
+
+runtime 由 `PassContext` 以 `ir::RuntimeKind` 携带，而不是仅作为 codegen 参数，
+这样需要针对特定 runtime 做合法化的 pass 可以 switch `PassContext::GetRuntime()`
+而不是比较字符串。之所以用枚举而非名字：这是一个封闭集合 —— `runtime/src/<arch>/
+runtime/` 下每个实现对应一个枚举值 —— 于是拼错是编译错误，而不是一个要到很晚才以
+晦涩 CCEC 报错（找不到 include 目录）浮现的取值。
+
+线上名字只在两处跨越 ABI 边界：写 `kernel_config.py` 时用 `ir::RuntimeKindToName`，
+读回时用 `ir::RuntimeKindFromName`。两者都以
+`passes.runtime_kind_to_name` / `passes.runtime_kind_from_name` 暴露给 Python。
+
+runtime 同时是 `@pl.jit` 缓存键的一个维度：`host_build_graph` 的调用不能复用为
+`tensormap_and_ringbuffer` 编译出的产物 —— 后者 `kernel_config.py` 里写的
+runtime 没有任何匹配的 worker 会绑定。
 
 ### 参数解包
 
@@ -672,7 +708,7 @@ output_dir/
 
 | 参数类型 | 解包模式 |
 | -------- | -------- |
-| `TensorType` | `Tensor*` -> `buffer.addr` -> 带类型指针 |
+| `TensorType` | `ChipTensor*` -> `buffer.addr` -> 带类型指针 |
 | `ScalarType` | `uint64_t` -> 联合体解码 -> 带类型值 |
 
 ### SPMD 身份参数

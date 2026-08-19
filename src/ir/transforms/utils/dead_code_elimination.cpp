@@ -28,8 +28,8 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
-#include "pypto/ir/transforms/utils/scope_outline_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
+#include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -113,7 +113,7 @@ void FindLiveRootsRecursiveImpl(const std::vector<StmtPtr>& stmts, const Removab
                                 std::unordered_set<const Var*>& live) {
   auto collect_expr_refs = [&](const ExprPtr& expr) {
     if (!expr) return;
-    outline_utils::VarDefUseCollector collector;
+    var_collectors::VarDefUseCollector collector;
     collector.VisitExpr(expr);
     live.insert(collector.var_uses.begin(), collector.var_uses.end());
   };
@@ -133,7 +133,7 @@ void FindLiveRootsRecursiveImpl(const std::vector<StmtPtr>& stmts, const Removab
                    std::dynamic_pointer_cast<const ReturnStmt>(stmt) ||
                    std::dynamic_pointer_cast<const YieldStmt>(stmt);
     if (is_leaf && !is_removable(stmt)) {
-      outline_utils::VarDefUseCollector collector;
+      var_collectors::VarDefUseCollector collector;
       collector.VisitStmt(stmt);
       auto all_refs = collector.GetAllVarRefs();
       live.insert(all_refs.begin(), all_refs.end());
@@ -307,10 +307,61 @@ std::vector<StmtPtr> FilterDeadCodeImpl(const std::vector<StmtPtr>& stmts,
   return result;
 }
 
+/// Control-flow binders carry types too, and an SSA binder is not an AssignStmt,
+/// so the per-assign type sweep below never sees it. A loop carry or branch
+/// result whose TileView::valid_shape is a per-lane extent over the region's
+/// subblock index would therefore leave that index looking unused. Seed those
+/// references as live roots.
+void MarkBinderTypeRefsLive(const std::vector<StmtPtr>& stmts, std::unordered_set<const Var*>& live) {
+  auto mark = [&live](const VarPtr& var) {
+    if (!var) {
+      return;
+    }
+    for (const Var* ref : var_collectors::CollectTypeVars(var->GetType())) {
+      live.insert(ref);
+    }
+  };
+  auto mark_all = [&mark](const auto& binders) {
+    for (const auto& binder : binders) {
+      mark(binder);
+    }
+  };
+  for (const auto& stmt : stmts) {
+    if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+      mark_all(for_stmt->iter_args_);
+      mark_all(for_stmt->return_vars_);
+      MarkBinderTypeRefsLive(transform_utils::FlattenToStmts(for_stmt->body_), live);
+      continue;
+    }
+    if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
+      mark_all(while_stmt->iter_args_);
+      mark_all(while_stmt->return_vars_);
+      MarkBinderTypeRefsLive(transform_utils::FlattenToStmts(while_stmt->body_), live);
+      continue;
+    }
+    if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+      mark_all(if_stmt->return_vars_);
+      MarkBinderTypeRefsLive(transform_utils::FlattenToStmts(if_stmt->then_body_), live);
+      if (if_stmt->else_body_.has_value()) {
+        MarkBinderTypeRefsLive(transform_utils::FlattenToStmts(*if_stmt->else_body_), live);
+      }
+      continue;
+    }
+    if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(stmt)) {
+      MarkBinderTypeRefsLive(seq->stmts_, live);
+      continue;
+    }
+    if (auto scope = std::dynamic_pointer_cast<const ScopeStmt>(stmt)) {
+      MarkBinderTypeRefsLive(transform_utils::FlattenToStmts(scope->body_), live);
+    }
+  }
+}
+
 std::vector<StmtPtr> EliminateDeadCodeCore(const std::vector<StmtPtr>& stmts,
                                            const RemovablePredicate& is_removable) {
   std::unordered_set<const Var*> live;
   FindLiveRootsRecursiveImpl(stmts, is_removable, live);
+  MarkBinderTypeRefsLive(stmts, live);
 
   std::vector<std::shared_ptr<const AssignStmt>> all_assigns;
   CollectAllAssignStmts(stmts, all_assigns);
@@ -321,9 +372,19 @@ std::vector<StmtPtr> EliminateDeadCodeCore(const std::vector<StmtPtr>& stmts,
   std::vector<std::unordered_set<const Var*>> assign_uses;
   assign_uses.reserve(all_assigns.size());
   for (const auto& assign : all_assigns) {
-    outline_utils::VarDefUseCollector collector;
+    var_collectors::VarDefUseCollector collector;
     collector.VisitExpr(assign->value_);
-    assign_uses.emplace_back(std::move(collector.var_uses));
+    auto uses = std::move(collector.var_uses);
+    // A Var can also be referenced from a TYPE, not just from an expression: a
+    // tile's valid_shape may be a per-lane extent over the region's subblock
+    // index (split_axis::LocalizeExplicitBoundaryValid). Those are real uses —
+    // the use-after-def verifier already walks type expr fields
+    // (verify_use_after_def.cpp) — so missing them here would delete the
+    // subblock-index binding and leave the type dangling.
+    for (const Var* ref : var_collectors::CollectTypeVars(assign->var_->GetType())) {
+      uses.insert(ref);
+    }
+    assign_uses.emplace_back(std::move(uses));
   }
 
   bool changed = true;
@@ -582,7 +643,7 @@ std::vector<StmtPtr> EliminateDeadIfReturnVars(const std::vector<StmtPtr>& stmts
     // visitor walks ScopeStmt attrs via VisitScopeAttrs and Submit::deps_
     // through Call/Submit traversal, so all known reference channels are
     // covered without extra plumbing.
-    outline_utils::VarDefUseCollector collector;
+    var_collectors::VarDefUseCollector collector;
     for (const auto& s : cur) collector.VisitStmt(s);
 
     bool changed = false;

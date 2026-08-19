@@ -24,7 +24,13 @@ from pypto.language.typing.dynamic import DynVar, dynamic
 from pypto.language.typing.memref import MemRef
 from pypto.language.typing.prefetch_handle import AsyncEvent, AsyncSession, PrefetchAsyncContext
 from pypto.language.typing.ptr import Ptr
-from pypto.language.typing.scalar import RUNTIME, RuntimeScalarMarker, Scalar
+from pypto.language.typing.scalar import (
+    RUNTIME,
+    BoolLike,
+    RuntimeScalarMarker,
+    Scalar,
+    predicate_to_expr,
+)
 from pypto.language.typing.tensor import Tensor
 from pypto.language.typing.tile import Tile
 from pypto.language.typing.tuple import Tuple
@@ -38,6 +44,7 @@ __all__ = [
     "Array",
     "AsyncEvent",
     "AsyncSession",
+    "BoolLike",
     "DynVar",
     "InOut",
     "IntLike",
@@ -51,4 +58,5 @@ __all__ = [
     "Tile",
     "Tuple",
     "dynamic",
+    "predicate_to_expr",
 ]

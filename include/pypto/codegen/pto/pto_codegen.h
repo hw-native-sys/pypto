@@ -426,6 +426,20 @@ class PTOCodegen : public CodegenBase {
   void SetCurrentResultBuf(const std::string& buf);
   void RegisterTileBufType(const std::string& ssa_name, const std::string& type_string);
   std::string GetSSATileBufType(const std::string& ssa_name) const;
+  /// Record `ssa_name` as a tile *view* — the result of a `pto.subview` or a
+  /// `pto.treshape`, which reinterprets another handle's bytes.
+  void RegisterTileViewName(const std::string& ssa_name);
+  /// Whether `ssa_name` was emitted as a tile view.
+  ///
+  /// A view carries its valid extent in its own type and has no `valid_row` /
+  /// `valid_col` operands, so `pto.set_validshape` cannot mutate one and ptoas
+  /// rejects the attempt. Every other tile handle — an alloc, an `scf.if` result,
+  /// a cross-core pop slot — does accept it.
+  ///
+  /// View-ness has to be tracked, not inferred from the rendered valid dims: a
+  /// `tile.slice` given a runtime `valid_shape` renders `v_row=?, v_col=?`, the
+  /// same way an alloc-backed handle does.
+  bool IsTileViewName(const std::string& ssa_name) const;
   struct SubviewMaterializationInfo {
     std::string source_ssa;
     std::string source_type;
@@ -482,6 +496,30 @@ class PTOCodegen : public CodegenBase {
    * argument. Returns empty when the function does not use prefetch.
    */
   [[nodiscard]] std::string GetSdmaWorkspaceArgSSA() const { return fs_.sdma_workspace_arg_ssa; }
+
+  /**
+   * @brief SSA name of the synthetic raw dispatch-args pointer parameter.
+   *
+   * Functions containing ``pld.system.defer_wait`` receive one hidden
+   * ``!pto.ptr<i64>`` parameter after dynamic dimensions and before other
+   * runtime-owned parameters. The kernel wrapper forwards its ``args`` pointer
+   * through this slot so deferred-completion lowering can reach the runtime's
+   * per-task AsyncCtx. Returns empty for functions without deferred waits.
+   */
+  [[nodiscard]] std::string GetDeferredCompletionRawArgsSSA() const {
+    return fs_.deferred_completion_raw_args_ssa;
+  }
+
+  /**
+   * @brief Register the module-level deferred counter-completion adapter.
+   *
+   * ``pld.system.defer_wait`` lowering calls this when it emits the adapter
+   * call. The declaration is emitted once at module scope and implemented by
+   * the generated C++ kernel wrapper.
+   *
+   * @return Stable adapter symbol name.
+   */
+  std::string RegisterDeferredCompletionAdapter();
 
   /**
    * @brief SSA name of the synthetic SPMD block_idx param.
@@ -703,6 +741,9 @@ class PTOCodegen : public CodegenBase {
    */
   void PrepareGMSlotBufferLayout(const ir::ProgramPtr& program);
 
+  /// Emit the external declaration implemented by the generated kernel wrapper.
+  void EmitDeferredCompletionAdapterDeclaration();
+
   /**
    * @brief Build variable identity to MemRef mapping from function body
    */
@@ -899,6 +940,8 @@ class PTOCodegen : public CodegenBase {
     std::vector<ExtraAllocTile> extra_alloc_tiles;
     std::map<std::string, std::string> ssa_to_tile_buf_type;
     std::map<std::string, SubviewMaterializationInfo> subview_materializations;
+    /// SSA names emitted as tile views (`pto.subview` / `pto.treshape`).
+    std::set<std::string> tile_view_names;
 
     /// Eligible multi-buffer regions, keyed by the allocation's base Ptr.
     std::map<const ir::Var*, MultiBufferRegion> multi_buffer_regions;
@@ -946,6 +989,9 @@ class PTOCodegen : public CodegenBase {
     /// Empty when the current function does not use prefetch.make_context.
     std::string sdma_workspace_arg_ssa;
 
+    /// Raw runtime dispatch-args pointer used by deferred completion adapters.
+    std::string deferred_completion_raw_args_ssa;
+
     /// SSA names of the synthetic SPMD block_idx/block_num params, appended at
     /// the func.func signature tail. Empty when the current function does not
     /// use tile.get_block_idx / tile.get_block_num.
@@ -988,6 +1034,7 @@ class PTOCodegen : public CodegenBase {
       extra_alloc_tiles.clear();
       ssa_to_tile_buf_type.clear();
       subview_materializations.clear();
+      tile_view_names.clear();
 
       temp_counter = 0;
       used_ssa_names.clear();
@@ -1013,6 +1060,7 @@ class PTOCodegen : public CodegenBase {
       ffts_workspace_vars.clear();
 
       sdma_workspace_arg_ssa.clear();
+      deferred_completion_raw_args_ssa.clear();
       spmd_block_idx_arg.clear();
       spmd_block_num_arg.clear();
       spmd_subblock_idx_arg.clear();
@@ -1030,6 +1078,9 @@ class PTOCodegen : public CodegenBase {
   std::ostringstream stream_;
   int indent_level_ = 0;
   std::map<std::pair<int, int>, int64_t> gm_slot_buffer_offsets_;
+
+  /// True when the module needs the wrapper-defined counter-completion adapter.
+  bool needs_deferred_completion_adapter_ = false;
 
   const backend::Backend* backend_;  ///< Backend instance for querying op info
 

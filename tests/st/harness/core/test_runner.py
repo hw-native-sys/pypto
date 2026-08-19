@@ -403,8 +403,8 @@ def _fused_compile_task(
         )
         # Codegen-only runs skip assembly: the .so is never loaded by the
         # execute task (see _fused_execute_task) and assembling here would
-        # both waste work and race on PTO_ISA_ROOT (start_pipeline skips
-        # the pre-resolve under codegen_only).
+        # both waste work and force a pto-isa checkout the run never needs
+        # (start_pipeline skips the pre-resolve under codegen_only).
         if _pipeline_ctx.get("codegen_only"):
             return CompileArtifact(
                 work_dir=work_dir,
@@ -457,8 +457,10 @@ def _dfx_to_cli(dfx: "_DfxOpts") -> list[str]:
     ``pypto.runtime.execute_artifact._build_parser``.
     """
     argv: list[str] = []
-    if dfx.enable_l2_swimlane:
-        argv.append("--enable-l2-swimlane")
+    if dfx.enable_chip_swimlane:
+        # Levelled, not a toggle — pass the level explicitly so a level 1-3
+        # capture is not silently promoted to the bare flag's level 4.
+        argv += ["--enable-chip-swimlane", str(dfx.enable_chip_swimlane)]
     if dfx.enable_dump_args:
         argv += ["--dump-args", str(dfx.enable_dump_args)]
     if dfx.enable_pmu:
@@ -990,7 +992,7 @@ def start_pipeline(  # noqa: PLR0913
     compile_workers: int,
     device_pool: "queue.Queue[int]",
     analyze_auto_scopes_for_deps: bool = False,
-    enable_l2_swimlane: bool = False,
+    enable_chip_swimlane: int = 0,
     enable_dump_args: int = 0,
     enable_pmu: int = 0,
     enable_dep_gen: bool = False,
@@ -1020,16 +1022,16 @@ def start_pipeline(  # noqa: PLR0913
 
     _batch_stats.clear()  # fresh per session; read by pytest_terminal_summary
 
-    # Resolve PTO_ISA_ROOT once on the main thread before any compile workers
-    # start.  Otherwise concurrent workers race on `git clone` into the same
-    # path — the first wins, the rest fail with "destination already exists"
-    # and propagate "PTO_ISA_ROOT could not be resolved" as a pre-compilation
-    # error.  Once the env var is set, workers short-circuit via the env-var
-    # branch in ensure_pto_isa_root().
+    # Resolve the pinned pto-isa checkout once on the main thread, before any
+    # compile worker starts.  Correctness no longer depends on this — the
+    # resolver serializes concurrent callers with a file lock — but doing it
+    # here keeps the one-time clone off the critical path and surfaces a
+    # missing/unobtainable pin as a clean session error rather than as N
+    # identical per-test compile failures.
     if not codegen_only:
-        from pypto.runtime.device_runner import ensure_pto_isa_root  # noqa: PLC0415
+        from pypto.runtime import ensure_pto_isa_root  # noqa: PLC0415
 
-        ensure_pto_isa_root(clone_protocol="https")
+        ensure_pto_isa_root()
 
     _device_pool = device_pool
     _pipeline_ctx = {
@@ -1040,7 +1042,7 @@ def start_pipeline(  # noqa: PLR0913
         "analyze_auto_scopes_for_deps": analyze_auto_scopes_for_deps,
         "memory_planner": memory_planner,
         "dfx": _DfxOpts(
-            enable_l2_swimlane=enable_l2_swimlane,
+            enable_chip_swimlane=enable_chip_swimlane,
             enable_dump_args=enable_dump_args,
             enable_pmu=enable_pmu,
             enable_dep_gen=enable_dep_gen,

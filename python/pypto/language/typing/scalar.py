@@ -9,10 +9,10 @@
 
 """Scalar wrapper type for PyPTO Language DSL."""
 
-from typing import Any, cast
+from typing import Any, TypeAlias, cast
 
 from pypto.pypto_core import DataType
-from pypto.pypto_core.ir import Expr
+from pypto.pypto_core.ir import ConstInt, Expr, Span
 
 
 def _validate_scalar_meta_call(args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
@@ -322,4 +322,32 @@ RUNTIME = RuntimeScalarMarker()
 """Singleton :class:`RuntimeScalarMarker` — see the class docstring."""
 
 
-__all__ = ["RUNTIME", "RuntimeScalarMarker", "Scalar"]
+BoolLike: TypeAlias = bool | Scalar | Expr
+"""Type alias for predicate parameters accepting a Python bool, a Scalar, or a raw Expr."""
+
+
+def predicate_to_expr(value: BoolLike | None, span: Span | None = None) -> Expr | None:
+    """Coerce an optional boolean predicate operand to an ``Expr``.
+
+    A Python ``bool`` becomes ``ConstInt(.., BOOL)`` — a compile-time constant an
+    operator's lowering can fold away. A :class:`Scalar` (typically a comparison
+    such as ``k == 0``) is unwrapped to the symbolic expression it carries, which
+    stays a runtime value.
+
+    Args:
+        value: Predicate to coerce, or ``None`` to pass through
+        span: Optional span for a materialized constant
+
+    Returns:
+        The corresponding ``Expr``, or ``None`` when @p value is ``None``
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return ConstInt(int(value), DataType.BOOL, span if span is not None else Span.unknown())
+    if isinstance(value, Scalar):
+        return value.unwrap()
+    return value
+
+
+__all__ = ["RUNTIME", "BoolLike", "RuntimeScalarMarker", "Scalar", "predicate_to_expr"]

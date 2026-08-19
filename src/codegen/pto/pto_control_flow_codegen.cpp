@@ -24,6 +24,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -67,13 +68,13 @@ static std::string JoinPairs(const std::vector<std::string>& lhs, const std::str
 // ========================================================================
 
 void PTOCodegen::VisitStmt_(const EvalStmtPtr& op) {
-  INTERNAL_CHECK_SPAN(op != nullptr, op->span_) << "Internal error: null EvalStmt";
+  INTERNAL_CHECK(op != nullptr) << "Internal error: null EvalStmt";
   INTERNAL_CHECK_SPAN(op->expr_ != nullptr, op->span_) << "Internal error: EvalStmt has null expression";
   VisitExpr(op->expr_);
 }
 
 void PTOCodegen::VisitStmt_(const YieldStmtPtr& op) {
-  INTERNAL_CHECK_SPAN(op != nullptr, op->span_) << "Internal error: null YieldStmt";
+  INTERNAL_CHECK(op != nullptr) << "Internal error: null YieldStmt";
 
   if (op->value_.empty()) {
     return;
@@ -211,7 +212,7 @@ bool IsDefinedInBranch(const ir::Var* var, const StmtPtr& body) {
 }  // namespace
 
 void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
-  INTERNAL_CHECK_SPAN(op != nullptr, op->span_) << "Internal error: null IfStmt";
+  INTERNAL_CHECK(op != nullptr) << "Internal error: null IfStmt";
   INTERNAL_CHECK_SPAN(op->condition_ != nullptr, op->span_) << "Internal error: IfStmt has null condition";
   INTERNAL_CHECK_SPAN(op->then_body_ != nullptr, op->span_) << "Internal error: IfStmt has null then_body";
 
@@ -516,11 +517,11 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
 }
 
 void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
-  INTERNAL_CHECK_SPAN(op != nullptr, op->span_) << "Internal error: null ForStmt";
+  INTERNAL_CHECK(op != nullptr) << "Internal error: null ForStmt";
   INTERNAL_CHECK_SPAN(op->loop_var_ != nullptr, op->span_) << "Internal error: ForStmt has null loop_var";
   INTERNAL_CHECK_SPAN(op->body_ != nullptr, op->span_) << "Internal error: ForStmt has null body";
 
-  CHECK(op->iter_args_.size() == op->return_vars_.size())
+  INTERNAL_CHECK_SPAN(op->iter_args_.size() == op->return_vars_.size(), op->span_)
       << "ForStmt iter_args size (" << op->iter_args_.size() << ") must equal return_vars size ("
       << op->return_vars_.size() << ")";
 
@@ -531,6 +532,40 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
       << "Internal error: ForKind::Pipeline reached codegen — LowerPipelineLoops "
       << "and CanonicalizeIOOrder should have demoted it to Sequential. "
       << "The pipeline is incomplete.";
+
+  // Device loops lower to MLIR ``scf.for``, which iterates lower -> upper bound
+  // and is defined for a positive step only. A descending ``ForStmt`` has no
+  // faithful lowering: emitting it verbatim yields a zero-trip ``scf.for`` that
+  // the assembler folds away, silently discarding the loop body. Surface it as
+  // a user-facing limitation instead of miscompiling.
+  //
+  // This check is permanent, not a workaround pending an assembler fix. The
+  // PTOAS team has confirmed they will not support a non-positive ``scf.for``
+  // step in the foreseeable future; hw-native-sys/PTOAS#1288 will be closed by
+  // adding the missing assertion only (today ptoas silently accepts such a
+  // step — a negative one drops the body, a zero one emits ``i += 0``). So a
+  // descending device loop stays unrepresentable, and this check is the only
+  // thing standing between the user and a silently empty kernel.
+  //
+  // Keep it even once that assertion ships: it fires earlier, names the user's
+  // loop through the ``Span``, and says how to rewrite it, whereas the
+  // assembler can only report against generated ``.pto`` the user never wrote.
+  //
+  // Only a compile-time step is checked. A runtime step that turns out negative
+  // still lowers to the same ill-defined ``scf.for``; proving its sign needs the
+  // arith analyzer. Closing that gap would mean normalizing descending loops to
+  // ascending form here (deriving the induction variable from an ascending
+  // counter), which is the only route to supporting them at all now that the
+  // assembler will not. Orchestration functions emit C++ directly and are
+  // unaffected — they support descending loops natively.
+  if (auto const_step = ir::transform_utils::EvalConstInt(op->step_)) {
+    CHECK_SPAN(*const_step > 0, op->span_)
+        << "loops in device functions must have a positive step, but this loop steps by " << *const_step
+        << ". Device code lowers to MLIR 'scf.for', which only counts upward. "
+           "Rewrite the loop in ascending form and invert the index in the body — "
+           "replace 'for i in pl.range(64, 0, -1)' with 'for t in pl.range(0, 64)' plus "
+           "'i = 64 - t'. Orchestration functions support descending loops directly.";
+  }
 
   // Evaluate loop bounds and ensure they are index-typed for scf.for.
   // EmitCastToIndex is a no-op when the bound is already DataType::INDEX
@@ -696,11 +731,11 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
 }
 
 void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
-  INTERNAL_CHECK_SPAN(op != nullptr, op->span_) << "Internal error: null WhileStmt";
+  INTERNAL_CHECK(op != nullptr) << "Internal error: null WhileStmt";
   INTERNAL_CHECK_SPAN(op->condition_ != nullptr, op->span_) << "Internal error: WhileStmt has null condition";
   INTERNAL_CHECK_SPAN(op->body_ != nullptr, op->span_) << "Internal error: WhileStmt has null body";
 
-  CHECK(op->iter_args_.size() == op->return_vars_.size())
+  INTERNAL_CHECK_SPAN(op->iter_args_.size() == op->return_vars_.size(), op->span_)
       << "WhileStmt iter_args size (" << op->iter_args_.size() << ") must equal return_vars size ("
       << op->return_vars_.size() << ")";
 

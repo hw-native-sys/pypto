@@ -124,6 +124,11 @@ tile = pl.load(a, [0, 0], [64, 64], valid_shape=[64, vlen])
 | **vector 缓冲区超限** | 每次规约的 scratch 都是全宽 | 缩小 tile，或在生命期不重叠的规约间复用一个 scratch |
 | **`row_expand_*` 形状不匹配** | 用普通 `pl.sub` 去作用一个 `[N, 1]` 向量 | 改用该运算对应的 `row_expand_*` 成员 |
 
+## 同一个规约，往上一层
+
+`examples/intermediate/03_normalization.py` 用本页引入的行规约搭出 RMSNorm 与 LayerNorm ——
+RMSNorm 要平方和，LayerNorm 要均值与方差，而两者都不需要 softmax 那个滑动最大值技巧。
+
 ## 下一步
 
 [分块 matmul](02-matmul.md) —— 第一个跑在 cube 单元上的算子，也是第一个需要你考虑数据通路的算子。

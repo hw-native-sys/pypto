@@ -456,6 +456,18 @@ void CheckGatherRowOperands(const std::vector<ExprPtr>& args,
   throw ValueError(msg.str());
 }
 
+void CheckMatmulInitCond(const std::vector<ExprPtr>& args, size_t index, const std::string& op_name) {
+  if (args.size() <= index) return;
+  const auto& cond = args[index];
+  auto scalar_type = As<ScalarType>(cond->GetType());
+  CHECK(scalar_type) << "The operator " << op_name << " requires init_cond to be a boolean scalar, but got "
+                     << cond->GetType()->TypeName();
+  CHECK(scalar_type->dtype_ == DataType::BOOL)
+      << "The operator " << op_name << " requires init_cond to have dtype BOOL, but got "
+      << scalar_type->dtype_.ToString()
+      << ". Write a comparison such as `k == 0` rather than passing the index itself.";
+}
+
 void CheckReductionInputNonEmpty(const std::vector<ExprPtr>& valid, const std::string& op_name,
                                  const Span& span) {
   for (size_t i = 0; i < valid.size(); ++i) {

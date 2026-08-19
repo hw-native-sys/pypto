@@ -245,7 +245,7 @@ class AliasForest {
 
     // Calls with output_existing/inout args (e.g. InCore kernels): the result
     // aliases the Out/InOut arg the callee actually returns, mirroring the
-    // codegen alias ``const Tensor& result = args[out_idx];``. For kernels with
+    // codegen alias ``const ChipTensor& result = args[out_idx];``. For kernels with
     // multiple Out params (e.g. real result + GM scratch passed through pl.spmd
     // mixed dispatch), tracing the ReturnStmt back to its Param avoids aliasing
     // the result to an arbitrary scratch tensor.
@@ -282,7 +282,7 @@ int64_t ResolveArrayCarrySize(const ForStmtPtr& for_stmt, size_t idx) {
   if (idx >= for_stmt->iter_args_.size()) return 0;
   if (!IsTaskIdScalar(for_stmt->iter_args_[idx])) return 0;
   if (for_stmt->kind_ == ForKind::Parallel) {
-    return transform_utils::EvalConstTripCount(for_stmt);
+    return transform_utils::EvalConstTripCount(for_stmt).value_or(0);
   }
   if (for_stmt->kind_ != ForKind::Sequential) return 0;
   auto yield = transform_utils::GetLastYieldStmt(transform_utils::UnwrapAutoScope(for_stmt->body_));

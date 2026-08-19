@@ -35,6 +35,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/type.h"
 #include "src/backend/common/pto_ops_internal.h"
 
@@ -358,7 +359,7 @@ static std::string MakeRemoteLoadCodegenPTO(const CallPtr& op, codegen::CodegenB
 // reshape.
 static std::string MakeRemoteStoreCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
-  CHECK(op->args_.size() == 4)
+  INTERNAL_CHECK_SPAN(op->args_.size() == 4, op->span_)
       << "pld.tile.remote_store requires 4 arguments (src_tile, target, peer, offsets), got "
       << op->args_.size();
 
@@ -459,9 +460,10 @@ static std::string MakeRemoteStoreCodegenPTO(const CallPtr& op, codegen::Codegen
 //   pto.comm.tnotify(<pview>, <value>) {notifyOp = #pto<notify_op (set|atomic_add)>}
 static std::string MakeNotifyCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
-  CHECK(op->args_.size() == 4) << "pld.system.notify requires 4 arguments (target, peer, offsets, "
-                                  "value), got "
-                               << op->args_.size();
+  INTERNAL_CHECK_SPAN(op->args_.size() == 4, op->span_)
+      << "pld.system.notify requires 4 arguments (target, peer, offsets, "
+         "value), got "
+      << op->args_.size();
 
   auto binding = ResolveDistTensorBinding(op->args_[0], codegen, "pld.system.notify");
   auto offsets_tuple = As<ir::MakeTuple>(op->args_[2]);
@@ -519,8 +521,8 @@ static std::string MakeNotifyCodegenPTO(const CallPtr& op, codegen::CodegenBase&
 //   pto.comm.twait(<pview>, <expected>) {cmp = #pto<wait_cmp (eq|ge)>}
 static std::string MakeWaitCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
-  CHECK(op->args_.size() == 3) << "pld.system.wait requires 3 arguments (signal, offsets, expected), got "
-                               << op->args_.size();
+  INTERNAL_CHECK_SPAN(op->args_.size() == 3, op->span_)
+      << "pld.system.wait requires 3 arguments (signal, offsets, expected), got " << op->args_.size();
 
   auto signal_var = AsVarLike(op->args_[0]);
   CHECK(signal_var) << "pld.system.wait signal must be a Var-like expression";
@@ -574,6 +576,204 @@ static std::string MakeWaitCodegenPTO(const CallPtr& op, codegen::CodegenBase& c
   return "";
 }
 
+// pld.system.defer_wait(signal, offsets, expected, *, cmp) — register a local
+// signal slot as this task's deferred completion condition. Unlike wait, this
+// does not emit pto.comm.twait and therefore does not occupy the AIV core while a
+// peer is still producing data. The generated kernel wrapper implements the
+// checked runtime adapter and forwards kernel_entry's raw args so it can reach
+// the scheduler-owned AsyncCtx.
+static std::string MakeDeferWaitCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = AsPto(codegen_base);
+  INTERNAL_CHECK_SPAN(op->args_.size() == 3, op->span_)
+      << "pld.system.defer_wait requires 3 arguments (signal, offsets, expected), got " << op->args_.size();
+
+  auto signal_var = AsVarLike(op->args_[0]);
+  INTERNAL_CHECK_SPAN(signal_var, op->span_) << "pld.system.defer_wait signal must be a Var-like expression";
+  auto dist_type = As<ir::DistributedTensorType>(signal_var->GetType());
+  CHECK_SPAN(dist_type, op->span_)
+      << "pld.system.defer_wait currently supports only a direct DistributedTensor function parameter; "
+         "tensor.slice/tensor.view and other signal aliases are not supported because their logical origin "
+         "is not encoded for deferred-completion lowering (got "
+      << signal_var->GetType()->TypeName() << ")";
+  INTERNAL_CHECK_SPAN(dist_type->dtype_ == DataType::INT32, op->span_)
+      << "pld.system.defer_wait signal dtype must be INT32, got " << dist_type->dtype_.ToString();
+
+  auto offsets_tuple = As<ir::MakeTuple>(op->args_[1]);
+  INTERNAL_CHECK_SPAN(offsets_tuple, op->span_) << "pld.system.defer_wait offsets must be MakeTuple";
+  const size_t rank = dist_type->shape_.size();
+  INTERNAL_CHECK_SPAN(offsets_tuple->elements_.size() == rank, op->span_)
+      << "pld.system.defer_wait offsets rank " << offsets_tuple->elements_.size()
+      << " does not match signal rank " << rank;
+
+  const int cmp_int = op->GetKwarg<int>("cmp", 0);
+  INTERNAL_CHECK_SPAN(cmp_int == static_cast<int>(ir::WaitCmp::kGe), op->span_)
+      << "pld.system.defer_wait only supports WaitCmp::kGe, got " << cmp_int;
+
+  // A direct parameter's wrapper pointer already includes Tensor.start_offset.
+  // TensorView does not carry a logical origin, however, so a tensor.slice (or
+  // any other rebinding whose value SSA differs from its backing pointer) cannot
+  // be flattened correctly here. Reject that shape until the IR represents the
+  // origin explicitly instead of silently registering a counter in another
+  // region of the allocation.
+  const std::string signal_base = codegen.GetTensorBasePtr(signal_var);
+  CHECK_SPAN(signal_base == codegen.GetVarName(signal_var), op->span_)
+      << "pld.system.defer_wait currently supports only a direct DistributedTensor function parameter; "
+         "tensor.slice/tensor.view and SSA-rebound signal aliases do not carry their logical base offset "
+         "into "
+         "the deferred-completion adapter";
+
+  // Compute a flat element offset from the signal's logical strides. The
+  // default pass pipeline materializes explicit TensorView strides; bare ND
+  // tensors remain implicit, so derive their canonical packed stride here.
+  // Passing base + element_offset separately avoids PTOAS's same-function
+  // pto.addptr consumer restriction for external func.call operands.
+  ir::TensorLayout layout = ir::TensorLayout::ND;
+  std::vector<ExprPtr> strides;
+  if (dist_type->tensor_view_.has_value()) {
+    layout = dist_type->tensor_view_->layout;
+    strides = dist_type->tensor_view_->stride;
+  }
+  // NZ is fractal and has no logical-stride representation, so the loop below
+  // would flatten a coordinate that does not exist. `MaterializeTensorStrides`
+  // rejects an NZ view on any tensor-like type as a user error before codegen,
+  // independent of whether its stride is explicit, so reaching here with one is
+  // a compiler bug rather than a bad program.
+  INTERNAL_CHECK_SPAN(layout != ir::TensorLayout::NZ, op->span_)
+      << "Internal error: NZ signal TensorView reached pld.system.defer_wait lowering";
+  if (strides.empty()) {
+    strides = ir::tensor_view_semantics::BuildLogicalStridesFromLayout(dist_type->shape_, layout);
+  }
+  INTERNAL_CHECK_SPAN(strides.size() == rank, op->span_)
+      << "pld.system.defer_wait signal stride rank " << strides.size() << " does not match signal rank "
+      << rank;
+
+  const std::vector<ExprPtr>& bounds =
+      dist_type->tensor_view_.has_value() && !dist_type->tensor_view_->valid_shape.empty()
+          ? dist_type->tensor_view_->valid_shape
+          : dist_type->shape_;
+  INTERNAL_CHECK_SPAN(bounds.size() == rank, op->span_)
+      << "pld.system.defer_wait signal bound rank " << bounds.size() << " does not match signal rank "
+      << rank;
+
+  const std::string zero = codegen.GetOrEmitConstant(static_cast<int64_t>(0), DataType::INDEX);
+  std::string element_offset = zero;
+  std::string any_coordinate_oob;
+  auto emit_coordinate_as_index = [&](const ExprPtr& coordinate) {
+    auto scalar_type = As<ScalarType>(coordinate->GetType());
+    INTERNAL_CHECK_SPAN(scalar_type, op->span_)
+        << "pld.system.defer_wait offset must have ScalarType, got " << coordinate->GetType()->TypeName();
+    std::string value = codegen.GetExprAsCode(coordinate);
+    const DataType dtype = scalar_type->dtype_;
+    if (!dtype.IsUnsignedInt()) {
+      return codegen.EmitCastToIndex(coordinate, value);
+    }
+
+    // MLIR's arith.index_cast accepts signless integers, not PyPTO's uiN
+    // dialect types. More importantly, casting the same-bitwidth iN bridge
+    // directly would sign-extend values with the high bit set (for example,
+    // UINT8 200 would become -56). Preserve unsigned coordinate semantics by
+    // zero-extending to i64 before converting to index. UINT64 cannot be
+    // widened; values above INT64_MAX retain their high bit and are rejected
+    // by the coordinate's negative/OOB guard below.
+    const std::string unsigned_type = codegen.GetTypeString(dtype);
+    const std::string signless_type = unsigned_type.substr(1);  // uiN -> iN
+    std::string signless = codegen.NewTemp();
+    codegen.Emit(signless + " = builtin.unrealized_conversion_cast " + value + " : " + unsigned_type +
+                 " to " + signless_type);
+    if (dtype.GetBit() < 64) {
+      std::string widened = codegen.NewTemp();
+      codegen.Emit(widened + " = arith.extui " + signless + " : " + signless_type + " to i64");
+      signless = std::move(widened);
+    }
+    std::string index = codegen.NewTemp();
+    codegen.Emit(index + " = arith.index_cast " + signless + " : i64 to index");
+    return index;
+  };
+  for (size_t i = 0; i < rank; ++i) {
+    const std::string offset = emit_coordinate_as_index(offsets_tuple->elements_[i]);
+    std::string bound;
+    if (auto constant = As<ir::ConstInt>(bounds[i])) {
+      bound = codegen.GetOrEmitConstant(constant->value_, DataType::INDEX);
+    } else {
+      bound = codegen.EmitCastToIndex(bounds[i], codegen.GetExprAsCode(bounds[i]));
+    }
+    std::string negative = codegen.NewTemp();
+    codegen.Emit(negative + " = arith.cmpi slt, " + offset + ", " + zero + " : index");
+    std::string past_end = codegen.NewTemp();
+    codegen.Emit(past_end + " = arith.cmpi sge, " + offset + ", " + bound + " : index");
+    std::string coordinate_oob = codegen.NewTemp();
+    codegen.Emit(coordinate_oob + " = arith.ori " + negative + ", " + past_end + " : i1");
+    if (any_coordinate_oob.empty()) {
+      any_coordinate_oob = std::move(coordinate_oob);
+    } else {
+      std::string combined_oob = codegen.NewTemp();
+      codegen.Emit(combined_oob + " = arith.ori " + any_coordinate_oob + ", " + coordinate_oob + " : i1");
+      any_coordinate_oob = std::move(combined_oob);
+    }
+
+    std::string stride;
+    if (auto constant = As<ir::ConstInt>(strides[i])) {
+      stride = codegen.GetOrEmitConstant(constant->value_, DataType::INDEX);
+    } else {
+      stride = codegen.EmitCastToIndex(strides[i], codegen.GetExprAsCode(strides[i]));
+    }
+    std::string term = codegen.NewTemp();
+    codegen.Emit(term + " = arith.muli " + offset + ", " + stride + " : index");
+    std::string next = codegen.NewTemp();
+    codegen.Emit(next + " = arith.addi " + element_offset + ", " + term + " : index");
+    element_offset = std::move(next);
+  }
+
+  INTERNAL_CHECK_SPAN(!any_coordinate_oob.empty(), op->span_)
+      << "pld.system.defer_wait signal must have rank >= 1";
+  const std::string invalid_offset = codegen.GetOrEmitConstant(static_cast<int64_t>(-1), DataType::INDEX);
+  std::string checked_element_offset = codegen.NewTemp();
+  codegen.Emit(checked_element_offset + " = arith.select " + any_coordinate_oob + ", " + invalid_offset +
+               ", " + element_offset + " : index");
+  std::string element_offset_i64 = codegen.NewTemp();
+  codegen.Emit(element_offset_i64 + " = arith.index_cast " + checked_element_offset + " : index to i64");
+
+  auto expected_scalar = As<ScalarType>(op->args_[2]->GetType());
+  INTERNAL_CHECK_SPAN(expected_scalar, op->span_)
+      << "pld.system.defer_wait expected must have ScalarType, got " << op->args_[2]->GetType()->TypeName();
+  INTERNAL_CHECK_SPAN(expected_scalar->dtype_.IsInt() || expected_scalar->dtype_ == DataType::INDEX,
+                      op->span_)
+      << "pld.system.defer_wait expected must be integer or index typed";
+  std::string expected_i64 = codegen.GetExprAsCode(op->args_[2]);
+  const DataType expected_dtype = expected_scalar->dtype_;
+  if (expected_dtype == DataType::INDEX) {
+    std::string casted = codegen.NewTemp();
+    codegen.Emit(casted + " = arith.index_cast " + expected_i64 + " : index to i64");
+    expected_i64 = std::move(casted);
+  } else if (expected_dtype == DataType::UINT64) {
+    std::string casted = codegen.NewTemp();
+    codegen.Emit(casted + " = builtin.unrealized_conversion_cast " + expected_i64 + " : ui64 to i64");
+    expected_i64 = std::move(casted);
+  } else if (expected_dtype != DataType::INT64) {
+    std::string source_type = codegen.GetTypeString(expected_dtype);
+    if (expected_dtype.IsUnsignedInt()) {
+      std::string signless = codegen.NewTemp();
+      const std::string signless_type = source_type.substr(1);  // uiN -> iN
+      codegen.Emit(signless + " = builtin.unrealized_conversion_cast " + expected_i64 + " : " + source_type +
+                   " to " + signless_type);
+      expected_i64 = std::move(signless);
+      source_type = signless_type;
+    }
+    std::string casted = codegen.NewTemp();
+    const std::string extension = expected_dtype.IsUnsignedInt() ? "arith.extui" : "arith.extsi";
+    codegen.Emit(casted + " = " + extension + " " + expected_i64 + " : " + source_type + " to i64");
+    expected_i64 = std::move(casted);
+  }
+
+  const std::string raw_args = codegen.GetDeferredCompletionRawArgsSSA();
+  INTERNAL_CHECK_SPAN(!raw_args.empty(), op->span_)
+      << "pld.system.defer_wait requires the hidden raw dispatch-args parameter";
+  const std::string adapter = codegen.RegisterDeferredCompletionAdapter();
+  codegen.Emit("func.call @" + adapter + "(" + raw_args + ", " + signal_base + ", " + element_offset_i64 +
+               ", " + expected_i64 + ") : (!pto.ptr<i64>, !pto.ptr<i32>, i64, i64) -> ()");
+  return "";
+}
+
 // pld.tile.put(dst, peer, src, stage[, dst_offsets, src_offsets, shape],
 //              *, atomic) - synchronous cross-rank bulk write of the local
 // slice `src` into the peer rank's slice of `dst`. `stage` is a VEC scratch
@@ -599,7 +799,7 @@ static std::string MakeWaitCodegenPTO(const CallPtr& op, codegen::CodegenBase& c
 static std::string MakePutCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
   const size_t n = op->args_.size();
-  CHECK(n == 4 || n == 5 || n == 7 || n == 8)
+  INTERNAL_CHECK_SPAN(n == 4 || n == 5 || n == 7 || n == 8, op->span_)
       << "pld.tile.put requires 4/5 (single/double stage, full-slice) or 7/8 (single/double stage, "
          "subregion) arguments (dst, peer, src, stage[, stage2][, dst_offsets, src_offsets, shape]), got "
       << n;
@@ -743,7 +943,7 @@ static std::string MakePutCodegenPTO(const CallPtr& op, codegen::CodegenBase& co
 static std::string MakeGetCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
   const size_t n = op->args_.size();
-  CHECK(n == 4 || n == 5 || n == 7 || n == 8)
+  INTERNAL_CHECK_SPAN(n == 4 || n == 5 || n == 7 || n == 8, op->span_)
       << "pld.tile.get requires 4/5 (single/double stage, full-slice) or 7/8 (single/double stage, "
          "subregion) arguments (dst, peer, src, stage[, stage2][, dst_offsets, src_offsets, shape]), got "
       << n;
@@ -894,6 +1094,9 @@ void RegisterDistributedOps(Backend& backend, const std::unordered_set<std::stri
       [](const ir::CallPtr& op, codegen::CodegenBase& codegen) { return MakeNotifyCodegenPTO(op, codegen); });
   reg("pld.system.wait",
       [](const ir::CallPtr& op, codegen::CodegenBase& codegen) { return MakeWaitCodegenPTO(op, codegen); });
+  reg("pld.system.defer_wait", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeDeferWaitCodegenPTO(op, codegen);
+  });
 
   // Distributed N7 ops — CommContext accessor lowering.
   //
@@ -908,8 +1111,8 @@ void RegisterDistributedOps(Backend& backend, const std::unordered_set<std::stri
   reg("pld.system.get_comm_ctx",
       [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) -> std::string {
         auto& cg = AsPto(codegen_base);
-        CHECK(op->args_.size() == 1) << "pld.system.get_comm_ctx expects exactly 1 argument, got "
-                                     << op->args_.size();
+        INTERNAL_CHECK_SPAN(op->args_.size() == 1, op->span_)
+            << "pld.system.get_comm_ctx expects exactly 1 argument, got " << op->args_.size();
         auto var = ir::AsVarLike(op->args_[0]);
         CHECK(var) << "pld.system.get_comm_ctx expects a Var (DistributedTensor param), got "
                    << op->args_[0]->TypeName();
@@ -929,7 +1132,8 @@ void RegisterDistributedOps(Backend& backend, const std::unordered_set<std::stri
   // (rankId, rankNum) u64 slot via ``pto.load_scalar`` + ``arith.trunci``.
   reg("pld.system.rank", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) -> std::string {
     auto& cg = AsPto(codegen_base);
-    CHECK(op->args_.size() == 1) << "pld.system.rank expects exactly 1 argument, got " << op->args_.size();
+    INTERNAL_CHECK_SPAN(op->args_.size() == 1, op->span_)
+        << "pld.system.rank expects exactly 1 argument, got " << op->args_.size();
     std::string ctx_ssa = cg.GetExprAsCode(op->args_[0]);
     std::string rk_pair = EmitLoadRankPair(cg, ctx_ssa);
     std::string rk = cg.GetCurrentResultTarget();
@@ -944,7 +1148,8 @@ void RegisterDistributedOps(Backend& backend, const std::unordered_set<std::stri
   // i64 right by 32 instead of issuing a second pto.load_scalar.
   reg("pld.system.nranks", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) -> std::string {
     auto& cg = AsPto(codegen_base);
-    CHECK(op->args_.size() == 1) << "pld.system.nranks expects exactly 1 argument, got " << op->args_.size();
+    INTERNAL_CHECK_SPAN(op->args_.size() == 1, op->span_)
+        << "pld.system.nranks expects exactly 1 argument, got " << op->args_.size();
     namespace cl = codegen::distributed::comm_layout;
     static_assert(cl::kRankNumOffset == cl::kRankIdOffset + 4,
                   "pld.system.nranks codegen assumes rankNum sits in the high 32 bits of rankId's i64 slot");

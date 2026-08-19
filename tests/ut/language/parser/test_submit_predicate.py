@@ -332,7 +332,7 @@ def test_signed_integer_operands_accepted(dtype):
 
 
 def test_negative_constant_index_rejected():
-    # L0PredicateOperand::indices is uint32_t — a negative index wraps to a huge
+    # CorePredicateOperand::indices is uint32_t — a negative index wraps to a huge
     # value and yields an out-of-bounds GM address read at the dispatch point.
     with pytest.raises(ParserTypeError, match="index must be non-negative"):
         _program("rc[-1, 0] > 0")

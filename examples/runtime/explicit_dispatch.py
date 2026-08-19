@@ -121,8 +121,8 @@ def mode_b_training_loop(worker: ChipWorker) -> None:
     h = worker.register(compiled)
 
     # Hot loop: per-step input + persistent weight + per-step output.
-    # The weight DeviceTensor has ``child_memory=True`` semantics — no H2D
-    # cost per step.
+    # The DeviceTensor retains its owning simpler Buffer, so each dispatch
+    # passes an address-free wire Tensor without another H2D upload.
     for step in range(5):
         x = torch.full((128, 128), float(step), dtype=torch.float32)
         out = torch.zeros((128, 128), dtype=torch.float32)

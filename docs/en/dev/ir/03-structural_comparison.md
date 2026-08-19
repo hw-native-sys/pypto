@@ -274,6 +274,40 @@ bool EqualWithFields(const NodePtr& lhs_op, const NodePtr& rhs_op) {
 }
 ```
 
+### Types Are Compared by Hand, Not by Reflection
+
+`Expr` and `Stmt` go through the reflection visitor above. **`Type` does not.**
+Four independent if/else ladders each re-encode "what fields does this Type
+have", and nothing links them:
+
+| Ladder | Location |
+| ------ | -------- |
+| `EqualType` | `src/ir/transforms/structural_equal.cpp` |
+| `HashType` | `src/ir/transforms/structural_hash.cpp` |
+| `SerializeType` | `src/ir/serialization/serializer.cpp` |
+| `DeserializeType` | `src/ir/serialization/deserializer.cpp` |
+
+**Adding a Type means editing all four.** A Type added to three of them
+compiles, passes serialization round-trips, and compares correctly — then hits
+`HashType`'s trailing `INTERNAL_CHECK(false)` the first time a user writes
+`hash(t)` or puts the Type in a `set`. That breaks the equal-nodes-hash-equally
+guarantee above, since `structural_equal` accepts what `structural_hash`
+rejects.
+
+Two dispatch hazards to mirror across the ladders:
+
+- **Subclass kinds.** `As<T>()` is a precise `ObjectKind` match, so
+  `As<TensorType>(dt)` returns `nullptr` for a `DistributedTensorType` by
+  design (see `include/pypto/ir/kind_traits.h`). A shared branch must name both
+  kinds explicitly and `static_pointer_cast` — see `.claude/rules/ir-kind-traits.md`.
+- **Subclass-only fields.** `DistributedTensorType::window_buffer_` has no
+  `TensorType` counterpart; a shared branch has to hash and compare it under a
+  kind guard.
+
+`tests/ut/ir/transforms/test_hash.py::TestHashTypeLadderParity` walks every
+Python-constructible Type and fails when one is missing from `HashType`. Add a
+factory there for each new Type.
+
 ## Summary
 
 **Key Takeaways:**

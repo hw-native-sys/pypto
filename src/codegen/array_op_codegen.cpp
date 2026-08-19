@@ -48,7 +48,7 @@ using namespace pypto::ir;  // NOLINT(build/namespaces)
 REGISTER_ORCHESTRATION_OP(array_create, ("array.create")) {
   // array.create(extent) -> ArrayType. Emit a stack-local C-style array
   // declaration: ``dtype name[N] = {0};``.
-  CHECK(op->args_.size() == 1) << "array.create requires 1 argument (extent)";
+  INTERNAL_CHECK_SPAN(op->args_.size() == 1, op->span_) << "array.create requires 1 argument (extent)";
   auto array_type = As<ArrayType>(op->GetType());
   CHECK(array_type) << "array.create must return ArrayType";
 
@@ -85,7 +85,7 @@ REGISTER_ORCHESTRATION_OP(array_create, ("array.create")) {
 
 REGISTER_ORCHESTRATION_OP(array_get_element, ("array.get_element")) {
   // array.get_element(array, index) -> ScalarType. Emit ``dtype tmp = arr[i];``.
-  CHECK(op->args_.size() == 2) << "array.get_element requires 2 arguments";
+  INTERNAL_CHECK_SPAN(op->args_.size() == 2, op->span_) << "array.get_element requires 2 arguments";
 
   std::string array_name = codegen.GenerateExprString(op->args_[0]);
   std::string index_expr = codegen.GenerateExprString(op->args_[1]);
@@ -108,7 +108,7 @@ REGISTER_ORCHESTRATION_OP(array_update_element, ("array.update_element")) {
   // Lowered to an in-place write. The orchestration codegen's AssignStmt
   // dispatch aliases the LHS to the input array's emit name BEFORE invoking
   // this handler, so writes to the result variable land on the same storage.
-  CHECK(op->args_.size() == 3) << "array.update_element requires 3 arguments";
+  INTERNAL_CHECK_SPAN(op->args_.size() == 3, op->span_) << "array.update_element requires 3 arguments";
 
   std::string array_name = codegen.GenerateExprString(op->args_[0]);
   std::string index_expr = codegen.GenerateExprString(op->args_[1]);

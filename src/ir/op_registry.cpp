@@ -33,6 +33,15 @@
 namespace pypto {
 namespace ir {
 
+namespace {
+
+/// Format an IR span as a " at <file>:<line>:<col>" suffix, empty when unknown.
+///
+/// Kept out of line so `Span::to_string()` is only paid on the error path.
+std::string LocationSuffix(const Span& span) { return span.is_valid() ? " at " + span.to_string() : ""; }
+
+}  // namespace
+
 void ValidateKwargs(const std::vector<std::pair<std::string, std::any>>& kwargs,
                     const std::unordered_map<std::string, std::type_index>& allowed_kwargs,
                     const std::string& op_name) {
@@ -159,9 +168,15 @@ CallPtr OpRegistry::CreateImpl(const std::string& op_name, const std::vector<Exp
   TypePtr result_type;
   try {
     result_type = deduce_type_fn(args, kwargs);
+  } catch (const Error& e) {
+    // Append the IR location but keep the concrete exception type and the stack trace
+    // captured at the original throw. Flattening every PyPTO exception to ValueError
+    // here erased the CHECK / INTERNAL_CHECK distinction for all op type deduction.
+    e.RethrowWithMessage(std::string(e.what()) + LocationSuffix(span));
   } catch (const std::exception& e) {
-    std::string location = span.is_valid() ? " at " + span.to_string() : "";
-    throw ValueError(std::string(e.what()) + location);
+    // Non-PyPTO exceptions (e.g. std::bad_any_cast from a wrong-typed kwarg) stay
+    // ValueError: they are reachable from user input and carry no PyPTO trace to keep.
+    throw ValueError(std::string(e.what()) + LocationSuffix(span));
   }
   INTERNAL_CHECK_SPAN(result_type, span) << "Type deduction failed for '" + op_name + "'";
 

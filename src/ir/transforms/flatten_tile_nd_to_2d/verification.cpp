@@ -80,6 +80,31 @@ class TileOps2DVerifier : public IRVisitor {
                                 stmt_span);
     }
 
+    // A flattened tile.assemble indexes a 2D tile, so its offset must be exactly
+    // (row, col). Codegen reads it positionally and ignores anything past index 1
+    // (pto_ops_datamove.cpp), so a leftover ND offset is a silent misplacement
+    // rather than a hard failure — and the TileType scan below cannot see it,
+    // because the offset is a TupleType.
+    if (IsOp(call, "tile.assemble") && call->args_.size() == 3) {
+      auto offset_tuple = As<MakeTuple>(call->args_[2]);
+      if (!offset_tuple) {
+        // A non-literal offset (e.g. a bare Var in hand-built or re-parsed IR)
+        // leaves the (row, col) form unestablished, so it cannot be accepted
+        // either: the verifier has no way to confirm the postcondition.
+        diagnostics_.emplace_back(DiagnosticSeverity::Error, "TileOps2D", 0,
+                                  "tile.assemble in InCore function '" + func_name_ +
+                                      "' has a non-literal offset (expected a 2-element (row, col) "
+                                      "tuple after FlattenTileNdTo2D)",
+                                  stmt_span);
+      } else if (offset_tuple->elements_.size() != 2) {
+        diagnostics_.emplace_back(DiagnosticSeverity::Error, "TileOps2D", 0,
+                                  "tile.assemble in InCore function '" + func_name_ + "' has a rank-" +
+                                      std::to_string(offset_tuple->elements_.size()) +
+                                      " offset (expected 2: row, col after FlattenTileNdTo2D)",
+                                  stmt_span);
+      }
+    }
+
     for (const auto& arg : call->args_) {
       auto arg_tile = As<TileType>(arg->GetType());
       if (arg_tile && arg_tile->shape_.size() > 2) {

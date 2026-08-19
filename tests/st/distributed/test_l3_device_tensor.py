@@ -19,9 +19,9 @@ frames, and the third waits for the oldest frame before reuse.
 Per-call IO uses shared-memory host tensors allocated **before** ``prepare()``
 and reused in place — the forked chip worker reads/writes them through the
 inherited shared mapping, so the output is read straight back from ``host_out``
-(no ``copy_from``). Only the weight is device-resident
-(``Tensor.child_memory=True``). This mirrors the runtime's ``child_memory``
-example while exercising the public asynchronous dispatch contract.
+(no ``copy_from``). Only the weight is device-resident; its retained simpler
+``Buffer`` supplies the address-free wire Tensor for every dispatch while the
+test exercises the public asynchronous dispatch contract.
 
 Computation: ``f = a + b``, with ``b`` resident across both dispatches.
 """
@@ -83,7 +83,9 @@ class TestL3DeviceTensorReuse:
            (otherwise the kernel would compute ``a + 0``).
         2. Two submissions can own distinct mutable IO frames concurrently.
         3. A third submission drains the oldest frame before bounded reuse.
-        4. The resident weight survives every dispatch without re-upload.
+        4. The resident weight's retained Buffer survives every dispatch
+           without re-upload.
+        5. The handle reuses its Worker — setup is not repeated per call.
         """
         if not device_ids:
             pytest.skip("L3 DeviceTensor test needs at least one device")

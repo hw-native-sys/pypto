@@ -35,7 +35,7 @@
 | 算子 | 可达 | 作用 |
 | ---- | ---- | ---- |
 | `add` `sub` `mul` `div` | `pl.` | 二元算术；右侧给 Python 数字会选中标量操作数形式 |
-| `neg` `abs` `recip` | `pl.` | 取负、绝对值、倒数 |
+| `neg` `abs` `recip` | `pl.` | 取负、绝对值、倒数；FP16/FP32 倒数设置 `high_precision=True` 时会在 A5 上选择速度较慢、精度较高的 PTO 路径 |
 | `rem` `rems` `fmod` `fmods` | `pl.` | 求余与浮点取模，张量与标量形式 |
 | `addc` `subc` `addsc` `subsc` | `pl.` (t) | 带进位操作数的三输入加 / 减 |
 | `part_add` `part_mul` `part_max` `part_min` | `pl.` | 分段算术 |
@@ -159,13 +159,14 @@
 | `aiv_shard` `aic_gather` | `pl.` | 在 AIV lane 间分片 / 在 AIC 上聚回 |
 | `AUTO` | `pl.` | 由编译器选择管道参数的哨兵值 |
 
-push 与 pop 必须**配对**，且每次 pop 都必须有对应的 `tfree`。涵盖这部分的教程尚未编写；机制见 [TPUSH/TPOP](../../reference/pto-isa/01-tpush_tpop.md) 与 [ExpandMixedKernel](../../dev/passes/21-expand_mixed_kernel.md)。
+push 与 pop 必须**配对**，且每次 pop 都必须有对应的 `tfree`。用法见 [混合 kernel 教程](../tutorials/03-mixed-kernel.md)；机制见 [TPUSH/TPOP](../../reference/pto-isa/01-tpush_tpop.md) 与 [ExpandMixedKernel](../../dev/passes/21-expand_mixed_kernel.md)。
 
 ## 任务与依赖
 
 | 算子 | 可达 | 作用 |
 | ---- | ---- | ---- |
 | `submit` `spmd_submit` | `pl.` | 派发 kernel 并捕获其生产者 TaskId |
+| `deps=` | `pl.at`、内联捕获形式 `pl.spmd` | 添加严格 TaskId 依赖；deferred waiter 使用同一条依赖路径 |
 | `no_dep` | `pl.` | 让单个任务的单个实参退出依赖跟踪 |
 | `dump_tag` | `pl.` | 标记张量做选择性 dump |
 
@@ -197,8 +198,24 @@ push 与 pop 必须**配对**，且每次 pop 都必须有对应的 `tfree`。�
 | Get | `pld.tensor.get` | — | — | — | 所有 GM dtype | `src` 必须是 window-bound。支持分块和流水线 staging。 |
 | Notify | `pld.system.notify` | `AtomicAdd` / `Set` | — | — | — | 仅副作用的信号投递。 |
 | Wait | `pld.system.wait` | `Eq` / `Ge` | — | — | — | 仅副作用的信号阻塞。 |
+| Deferred Wait | `pld.system.defer_wait` | 仅 `Ge` | — | — | INT32 signal | 注册单调 counter 条件而不让 AIV 自旋；Simpler 保持普通 waiter TaskId 未完成，后续工作使用普通 `deps=[wait_tid]`。 |
 | Remote Load | `pld.tile.remote_load` | — | — | — | 任意（tile） | Tile 级跨 rank 加载。 |
 | Remote Store | `pld.tile.remote_store` | — | — | — | 任意（tile） | Tile 级跨 rank 写入。 |
+
+## 配套示例
+
+每类算子一个可运行文件，供表格条目不够用时查阅：
+
+| 类别 | 示例 |
+| ---- | ---- |
+| 逐元素算术 | `examples/beginner/02_elementwise.py` |
+| 标量操作数 | `examples/beginner/03_scalar_ops.py` |
+| 激活函数 | `examples/beginner/04_activation.py` |
+| Matmul | `examples/beginner/05_matmul.py` |
+| 拼接 / assemble | `examples/beginner/06_concat.py`、`examples/intermediate/05_assemble.py` |
+| 规约 | `examples/intermediate/02_softmax.py`、`examples/intermediate/03_normalization.py` |
+| 跨核搬运 | `examples/advanced/03_mixed_kernel.py` |
+| 任务与依赖 | `examples/intermediate/07_task_graph.py` |
 
 ## See Also
 

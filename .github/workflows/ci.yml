@@ -63,6 +63,7 @@ jobs:
       pull-requests: read
     outputs:
       docs_only: ${{ steps.classify.outputs.docs_only }}
+      docs_changed: ${{ steps.classify.outputs.docs_changed }}
     steps:
       - name: Classify changed paths
         id: classify
@@ -78,6 +79,7 @@ jobs:
           # list; everything else runs the full pipeline.
           if [ "$EVENT_NAME" != 'pull_request' ]; then
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "docs_changed=true" >> "$GITHUB_OUTPUT"
             echo "event '$EVENT_NAME' is not a pull request -> full pipeline"
             exit 0
           fi
@@ -89,6 +91,7 @@ jobs:
           # see the note on that job.
           fail_open() {
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "docs_changed=true" >> "$GITHUB_OUTPUT"
             echo "$1 -> full pipeline"
             exit 0
           }
@@ -133,28 +136,42 @@ jobs:
           # test result:
           #   docs/**    the documentation tree, including docs/requirements.txt
           #              (only the docs.yml toolchain reads it)
-          #   **/*.md    prose anywhere -- README, .claude/ rules, docs pages. No
-          #              test reads a markdown file; the lint scripts that do
-          #              (check_docs_nav / check_docs_en_zh_parity) run in
-          #              `pre-commit`, which stays ungated.
+          #   **/*.md    prose anywhere -- README, .claude/ rules, docs pages.
+          #
+          # `docs_only` means "no build, no device tests". It does NOT mean the
+          # change is inert: the user manual carries runnable code blocks that
+          # `tests/docs/run_doc_examples.py` extracts and executes, so a doc edit
+          # can break a real check. `docs_changed` below gates the `docs-examples`
+          # job, which runs those blocks on the paths this fast path skips.
+          # The markdown lint scripts (check_docs_nav / check_docs_en_zh_parity)
+          # run in `pre-commit`, which stays ungated.
           #   mkdocs.yml site config, consumed only by docs.yml
           # `case` globs are not path-aware, so `*.md` matches at any depth.
+          # One full pass, no early exit: `docs_only` and `docs_changed` are
+          # independent questions, and short-circuiting on the first
+          # non-documentation path would answer the second by file order alone.
           docs_only=true
+          docs_changed=false
           while IFS="$(printf '\t')" read -r new_path old_path; do
             for f in "$new_path" "$old_path"; do
               [ -n "$f" ] || continue
               case "$f" in
+                docs/*) docs_changed=true ;;
+              esac
+              case "$f" in
                 docs/*|*.md|mkdocs.yml) ;;
                 *)
-                  echo "non-documentation change: $f -> full pipeline"
+                  if [ "$docs_only" = 'true' ]; then
+                    echo "non-documentation change: $f -> full pipeline"
+                  fi
                   docs_only=false
-                  break 2
                   ;;
               esac
             done
           done <<< "$files"
 
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+          echo "docs_changed=$docs_changed" >> "$GITHUB_OUTPUT"
           if [ "$docs_only" = 'true' ]; then
             echo "all $expected changed paths are documentation:"
             printf '%s\n' "$files" | cut -f1 | sed 's/^/  /'
@@ -421,6 +438,54 @@ jobs:
       if: needs.changes.outputs.docs_only == 'true'
       run: echo "Every changed path is documentation — no build, no tests."
 
+  docs-examples:
+    # The user manual's runnable code blocks, on the path examples-tests cannot
+    # cover. That job is skipped for a documentation-only change -- which is
+    # exactly when the blocks themselves are being edited -- so without this the
+    # gate would never fire on the PRs that can break it.
+    #
+    # Gated on docs_changed rather than !docs_only: a code-only PR gets the same
+    # blocks run inside examples-tests, against the code it changed.
+    needs: [changes, toolchain, pre-commit]
+    if: needs.changes.outputs.docs_changed == 'true'
+    permissions:
+      contents: read
+    runs-on: [self-hosted, linux, arm64, cpu]
+    defaults:
+      run:
+        working-directory: docs-checkout
+    env:
+      PTOAS_ROOT: ${{ github.workspace }}/docs-checkout/ptoas-bin
+      PTO_ISA_ROOT: ${{ github.workspace }}/docs-checkout/pto-isa
+      PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
+      PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
+      CMAKE_BUILD_PARALLEL_LEVEL: 16
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CCACHE_MAXSIZE: 30G
+      CCACHE_UMASK: '000'
+    steps:
+      - name: Fetch composite action definitions
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/actions
+          clean: false
+          persist-credentials: false
+
+      - name: Setup CI job
+        uses: ./.github/actions/setup-ci-job
+        with:
+          checkout-path: docs-checkout
+          needs-device: 'false'
+          pip-cache-name: pip-docs
+          pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+
+      - name: Run the user manual's runnable code blocks
+        run: |
+          source activate.sh
+          set -e
+          python tests/docs/run_doc_examples.py --pages docs/en/user --check-parity -p a2a3sim
+
   examples-tests:
     # The distributed examples ladder (doc-plan 02) — every example must compile
     # AND run with a passing golden on the simulator (a2a3sim), so the teaching
@@ -441,7 +506,6 @@ jobs:
         working-directory: examples-checkout
     env:
       PTOAS_ROOT: ${{ github.workspace }}/examples-checkout/ptoas-bin
-      PTO_ISA_ROOT: ${{ github.workspace }}/examples-checkout/pto-isa
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
       PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
       CMAKE_BUILD_PARALLEL_LEVEL: 16
@@ -498,6 +562,30 @@ jobs:
           echo "=== examples/distributed/07_dynamic_rank_count.py -d 0,1,2,3 ==="
           python examples/distributed/07_dynamic_rank_count.py -p a2a3sim -d 0,1,2,3
 
+      # The teaching ladders. These carry the manual's beginner/intermediate/
+      # advanced/utils citations, so leaving them unrun let the pages point at
+      # code nothing checked — the gap that let a silent no-write kernel sit in
+      # the docs. They default to a2a3sim and need no arguments.
+      - name: Run the teaching examples on the simulator
+        run: |
+          source activate.sh
+          set -e
+          for ex in examples/beginner/*.py examples/intermediate/*.py \
+                    examples/advanced/*.py examples/utils/*.py; do
+            case "$ex" in */__init__.py) continue ;; esac
+            echo "=== $ex ==="
+            python "$ex"
+          done
+
+      # The user manual's runnable blocks. Teaching code that is never executed
+      # rots silently — a kernel can compile, run, write nothing, and still read
+      # correctly on the page — so the manual itself is executed here.
+      - name: Run the user manual's runnable code blocks
+        run: |
+          source activate.sh
+          set -e
+          python tests/docs/run_doc_examples.py --pages docs/en/user --check-parity -p a2a3sim
+
   codegen-tests:
     # Codegen-only: verifies IR → kernel/orch C++ generation without going
     # on-board. --codegen-only skips assembly (ptoas), pto-isa, simpler and
@@ -522,8 +610,9 @@ jobs:
       run:
         working-directory: codegen-checkout
     env:
-      # No PTOAS_ROOT / PTO_ISA_ROOT: install-toolchain:false means setup-ci-job
-      # never assembles or clones pto-isa, so codegen-only needs neither.
+      # No PTOAS_ROOT: install-toolchain:false means setup-ci-job never
+      # assembles, so codegen-only needs no ptoas. pto-isa is resolved by
+      # simpler from runtime/pto_isa.pin, which this job never installs.
       CMAKE_BUILD_PARALLEL_LEVEL: 16
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
@@ -616,7 +705,6 @@ jobs:
         working-directory: st-checkout
     env:
       PTOAS_ROOT: ${{ github.workspace }}/st-checkout/ptoas-bin
-      PTO_ISA_ROOT: ${{ github.workspace }}/st-checkout/pto-isa
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
       PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
       CMAKE_BUILD_PARALLEL_LEVEL: 16
@@ -735,7 +823,6 @@ jobs:
         working-directory: st-direct-checkout
     env:
       PTOAS_ROOT: ${{ github.workspace }}/st-direct-checkout/ptoas-bin
-      PTO_ISA_ROOT: ${{ github.workspace }}/st-direct-checkout/pto-isa
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
       PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
       CMAKE_BUILD_PARALLEL_LEVEL: 16
@@ -840,7 +927,7 @@ jobs:
         run: |
           source activate.sh
           task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 600 \
-            --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest tests/st/runtime/framework_and_models/test_perf_swimlane.py -v --device=\$TASK_DEVICE --platform=a2a3 --enable-l2-swimlane --forked"
+            --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest tests/st/runtime/framework_and_models/test_perf_swimlane.py -v --device=\$TASK_DEVICE --platform=a2a3 --enable-chip-swimlane --forked"
 
       - name: Test dump-args output
         run: |
@@ -879,7 +966,6 @@ jobs:
         working-directory: dist-checkout
     env:
       PTOAS_ROOT: ${{ github.workspace }}/dist-checkout/ptoas-bin
-      PTO_ISA_ROOT: ${{ github.workspace }}/dist-checkout/pto-isa
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
       PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
       CMAKE_BUILD_PARALLEL_LEVEL: 16
@@ -964,7 +1050,6 @@ jobs:
         working-directory: lib-checkout
     env:
       PTOAS_ROOT: ${{ github.workspace }}/lib-checkout/ptoas-bin
-      PTO_ISA_ROOT: ${{ github.workspace }}/lib-checkout/pto-isa
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
       PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
       CMAKE_BUILD_PARALLEL_LEVEL: 16
@@ -1099,6 +1184,145 @@ jobs:
         uses: ./.github/actions/kill-orphaned-tasks
         with:
           checkout-path: lib-checkout
+
+  mixed-kernel-tests-a5:
+    # A5 (Ascend950) on-board coverage for MIXED KERNELS — InCore scopes holding
+    # both Cube (AIC) and Vector (AIV) work, which ExpandMixedKernel splits into
+    # an AIC + AIV pair wrapped in a Group (docs/en/dev/passes/21-expand_mixed_kernel.md).
+    # Everything else in this workflow exercises that path on a2a3 (910B) only:
+    # `system-tests*` run --platform=a2a3, and `system-tests-a5sim` runs the a5
+    # profile in the SIMULATOR. This job is the first per-PR run of the mixed /
+    # cross-core path on real A5 silicon.
+    #
+    # Scope — cross_core/test_cross_core.py, already validated on the a5 profile
+    # elsewhere (it runs on a5sim in the job below), so a red result here means a
+    # regression and not an unvalidated combination: V<->C tpush/tpop over all
+    # three split modes (UP_DOWN / LEFT_RIGHT / none), multi-pipe, explicit
+    # slot_num (arch-aware sizing), bidirectional-in-spmd.
+    #
+    # test_qwen3_decode_scope3_mixed.py is deliberately NOT here. It stalls on
+    # board under --platform=a5 — PTO2 scheduler timeout, sub_class=S1
+    # running-stalled, always inside the oproj_block mixed kernel, at a different
+    # task index and core on every run. It is not a regression this job can gate
+    # on: an on-board bisect over 71020585..e5aa8131 came back red at every point
+    # INCLUDING 71020585 itself, the commit that passed here on 2026-08-13 on this
+    # same runner and card, so no source change explains it. Restore this case
+    # once the stall is understood.
+    # Two cross_core cases are handled specially under --platform=a5; the first
+    # on-board run of this job is what found them:
+    #   - test_explicit_slot_num       DESELECTED via @pytest.mark.platforms.
+    #                                  `local_slot_num` on
+    #                                  pto.{aic,aiv}_initialize_pipe is an
+    #                                  a2/a3-only operand — ptoas rejects it for
+    #                                  the 950 frontend pipe lowering whatever
+    #                                  its value — so the manual
+    #                                  pl.{aic,aiv}_initialize_pipe route the case
+    #                                  exercises does not exist on this arch. A
+    #                                  platform limitation, not a defect awaiting
+    #                                  a fix, so it is not xfail.
+    #   - test_multiple_pipes_nosplit  XFAIL (strict) — every output element is
+    #                                  wrong on 950 silicon; passes on a5sim and
+    #                                  a2a3. 950 expects a fractal layout at the
+    #                                  cross-core boundary, and the V->C adapter
+    #                                  is inserted only by ExpandMixedKernel (the
+    #                                  sole consumer of RequiresVtoCFractalAdapt),
+    #                                  so a hand-written pl.tpush_to_aic pushes a
+    #                                  bare ND tile the cube then reads as
+    #                                  fractal. Strict because a layout mismatch
+    #                                  is deterministic: an XPASS means the
+    #                                  adapter now reaches manual pipes.
+    # The xfail is attached as a marker rather than raised via pytest.xfail(),
+    # which aborts before the body and could never report XPASS — the case runs
+    # on every job, so a backend fix surfaces here instead of the verdict being
+    # frozen at whatever the first on-board run produced.
+    # Deliberately NOT here: the mixed suites carrying `@pytest.mark.platforms("a2a3")`
+    # (syncall, sync_set_wait, split parity incl. split_aiv, tpush/grouped-tfree
+    # valid-shape, split-reduce parity) — pytest deselects them under --platform=a5,
+    # so listing them would only add collection noise; and test_fused_matmul_scatter.py,
+    # whose test cases hardcode `get_backend_type() -> Ascend910B`, so under
+    # --platform=a5 it would compile for 910B and run on A5 silicon. Widen this
+    # list once those are made arch-agnostic.
+    #
+    # Setup is the standard device-job shape (same composite action / env as
+    # `system-tests`), on the npu-a5 runner pool. That runner must satisfy the
+    # setup-ci-job contract for a bundle job: CI_CACHE_ROOT / CANN_ROOT +
+    # DEVICE_ID in its .env, the pypto-toolchain bundle installed, and
+    # task-submit / npu-smi / ccache / git / curl on PATH. No conda: CONDA_ROOT
+    # is read only on the conda path.
+    # Checkout / install land under ./a5-checkout so they never collide with the
+    # other jobs' trees on a shared self-hosted host.
+    #
+    # Lint gate (see the pre-commit job) — never claim an NPU slot for a tree that
+    # doesn't lint. Docs-only gate (see the `changes` job) — prose cannot break a build.
+    needs: [changes, toolchain, pre-commit, clang-tidy]
+    if: needs.changes.outputs.docs_only != 'true'
+    # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
+    permissions:
+      contents: read
+    runs-on: [self-hosted, linux, arm64, npu-a5]
+    defaults:
+      run:
+        working-directory: a5-checkout
+    env:
+      PTOAS_ROOT: ${{ github.workspace }}/a5-checkout/ptoas-bin
+      PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
+      PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
+      CMAKE_BUILD_PARALLEL_LEVEL: 16
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CCACHE_MAXSIZE: 30G
+      # Shared ci-cache/ccache dir still holds root-owned entries from the
+      # container era; keep the umask that leaves new entries mutually writable.
+      # The cache *paths* and CCACHE_NAMESPACE are derived by setup-ci-job from
+      # the runner config's CI_CACHE_ROOT.
+      CCACHE_UMASK: '000'
+    steps:
+      - name: Fetch composite action definitions
+        # Local `uses: ./.github/actions/...` resolves against $GITHUB_WORKSPACE,
+        # but this job checks the repo out into ./a5-checkout — sparse-fetch just
+        # the action defs at the workspace root first (clean: false leaves sibling
+        # subdir checkouts on this persistent runner untouched).
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/actions
+          clean: false
+          # Bootstrap only fetches the public .github/actions tree; it doesn't
+          # need the token persisted into .git/config afterward (zizmor artipacked).
+          persist-credentials: false
+
+      - name: Setup CI job
+        uses: ./.github/actions/setup-ci-job
+        with:
+          checkout-path: a5-checkout
+          needs-device: 'true'
+          pip-cache-name: pip-a5
+          pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+          # Python and GCC come from the pypto-toolchain bundle, like every
+          # other self-hosted job. The npu-a5 pool is provisioned with the
+          # bundle and carries no conda env, so this is not optional here.
+          toolchain: bundle
+
+      - name: Test mixed-kernel system tests (A5, on board)
+        timeout-minutes: 60
+        # Mechanism B: one task-submit card session wrapping a single pytest run
+        # (no precompile pipeline), executed in-process on the borrowed card. The
+        # suite is parametrized over the platform ids, so --platform=a5 selects
+        # exactly the a5 variants and deselects the a2a3-marked ones.
+        # --forked isolates each case's device init, as the daily a5 job does.
+        run: |
+          source activate.sh
+          echo "[device] DEVICE_ID=$DEVICE_ID"
+          test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
+          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 3600 \
+            --run "cd $GITHUB_WORKSPACE/a5-checkout && source activate.sh && python -m pytest \
+              tests/st/runtime/cross_core/test_cross_core.py \
+              -v --forked --platform=a5 --device=\$TASK_DEVICE"
+
+      - name: Kill orphaned task-submit tasks
+        if: always()
+        uses: ./.github/actions/kill-orphaned-tasks
+        with:
+          checkout-path: a5-checkout
 
   system-tests-a5sim:
     # Lint gate (see the pre-commit job); `toolchain` is ungated and runs

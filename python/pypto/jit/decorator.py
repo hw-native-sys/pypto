@@ -1452,6 +1452,7 @@ def _run_config_compile_kwargs(run_config: Any) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "strategy": run_config.strategy,
         "dump_passes": run_config.dump_passes,
+        "dump_ptoas_passes": run_config.dump_ptoas_passes,
         "profiling": run_config.compile_profiling,
         "diagnostic_phase": run_config.diagnostic_phase,
         "disabled_diagnostics": run_config.disabled_diagnostics,
@@ -1508,6 +1509,20 @@ def _resolve_enable_pypto_l0c_double_buffer() -> bool:
     """
     ctx = _passes.PassContext.current()
     return ctx.get_enable_pypto_l0c_double_buffer() if ctx is not None else False
+
+
+def _resolve_runtime() -> _passes.RuntimeKind:
+    """Resolve the target Simpler runtime ABI for the cache key.
+
+    Like ``_resolve_enable_pypto_l0c_double_buffer``, the runtime is selected by
+    wrapping a call in ``with PassContext([], runtime=...)``, which
+    ``ir.compile()`` inherits. ``RunConfig`` does not carry it, so the active
+    context is the only source. Keying on it stops a ``host_build_graph`` call
+    from reusing an artifact compiled for ``tensormap_and_ringbuffer``, whose
+    ``kernel_config.py`` names a runtime no matching worker would bind.
+    """
+    ctx = _passes.PassContext.current()
+    return ctx.get_runtime() if ctx is not None else _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
 
 
 # ---------------------------------------------------------------------------
@@ -2068,6 +2083,7 @@ class JITFunction:
         analyze_auto_scopes_for_deps = (
             run_config.analyze_auto_scopes_for_deps if run_config is not None else False
         )
+        dump_ptoas_passes = run_config.dump_ptoas_passes if run_config is not None else False
         # The planner decides whether physical addresses are baked into the
         # artifact, so it must split the cache: compiling one kernel under both
         # planners must not hand the second call the first one's artifact.
@@ -2087,8 +2103,10 @@ class JITFunction:
             strategy=strategy,
             distributed_config=distributed_config,
             analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
+            dump_ptoas_passes=dump_ptoas_passes,
             memory_planner=memory_planner,
             enable_pypto_l0c_double_buffer=_resolve_enable_pypto_l0c_double_buffer(),
+            runtime=_resolve_runtime(),
         )
 
         # L1 cache lookup

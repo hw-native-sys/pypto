@@ -46,9 +46,11 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/tile_buf_signature.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
@@ -80,6 +82,11 @@ using ir::YieldStmtPtr;
 namespace transform_utils = ir::transform_utils;
 
 namespace {
+
+// Implemented by the generated kernel wrapper rather than by PTO MLIR. Keep
+// this name reserved in modules that use deferred completion so a user kernel
+// cannot silently collide with the private adapter declaration.
+constexpr const char* kDeferredCompletionAdapterName = "pypto_register_counter_completion";
 
 // Escape a source path for an MLIR `"..."` string literal. A path is an
 // arbitrary OS byte string — on POSIX every byte except `/` and NUL is legal, so
@@ -406,21 +413,75 @@ bool IsInPlaceInput0DpsOp(const ir::OpPtr& op) {
          ir::IsOp(op, "tile.tget_scale_addr");
 }
 
-bool ShouldAliasScatterResultToInput(const AssignStmtPtr& stmt) {
+bool ShareOneMemRefWindow(const std::shared_ptr<const TileType>& lhs,
+                          const std::shared_ptr<const TileType>& rhs) {
+  auto lhs_memref = ir::GetDefinedMemRef(lhs);
+  auto rhs_memref = ir::GetDefinedMemRef(rhs);
+  if (!lhs_memref || !rhs_memref) return false;
+  if (lhs_memref->base_.get() != rhs_memref->base_.get()) return false;
+  // Same base is not enough: two *different* windows of one allocation share it,
+  // and aliasing those would silently redirect the write. Require the same byte
+  // offset and extent too. The offset is an expression (a slice of a loop-carried
+  // tile carries a loop-dependent one), so compare it structurally.
+  if (lhs_memref->size_ != rhs_memref->size_) return false;
+  const auto& lhs_offset = lhs_memref->byte_offset_;
+  const auto& rhs_offset = rhs_memref->byte_offset_;
+  if (!lhs_offset || !rhs_offset) return lhs_offset == rhs_offset;
+  return ir::structural_equal(lhs_offset, rhs_offset);
+}
+
+// Whether `stmt`'s result Var should be bound to the SSA of the operand the call
+// writes in place, instead of getting its own `pto.alloc_tile`.
+//
+// Two arms, deliberately kept apart:
+//
+//   * `IsInPlaceInput0DpsOp` — ops whose in-place-ness is a codegen-lowering fact.
+//     Gated on a shared base memref only, which is the long-standing behaviour.
+//
+//   * the registry (`set_output_reuses_input`) — the declared, op-level truth.
+//     This is what lets `tile.matmul_acc` accumulate directly into its
+//     accumulator operand: when that operand is a `tile.slice` of a larger Acc
+//     tile its SSA is a `pto.subview`, so the MAD writes straight into the
+//     destination window instead of into a private L0C buffer that would then
+//     need an acc->acc `tmov` the ISA cannot express.
+//
+//     This arm additionally requires an identical `TileBufSignature`. One MLIR
+//     SSA value has exactly one type, so aliasing two vars whose tile configs
+//     differ would silently drop one of them — `tile.fillpad_inplace` reuses its
+//     input's buffer but its result carries `pad`, which the input does not.
+//
+// A declared index naming a non-tile argument (`tile.store` / `tile.write`
+// declare index 2, a TensorType) drops out: GetTileTypeWithMemRef returns null.
+bool ShouldAliasResultToInPlaceInput(const AssignStmtPtr& stmt) {
   auto call = As<ir::Call>(stmt->value_);
-  if (!call || !IsInPlaceInput0DpsOp(call->op_) || call->args_.empty()) {
-    return false;
-  }
+  if (!call || !call->op_) return false;
 
   auto result_tile_type = ir::GetTileTypeWithMemRef(stmt->var_->GetType());
-  auto input_tile_type = ir::GetTileTypeWithMemRef(call->args_[0]->GetType());
-  if (!result_tile_type || !input_tile_type) {
-    return false;
+  if (!result_tile_type) return false;
+
+  auto input_tile_type_at = [&](size_t index) -> std::shared_ptr<const TileType> {
+    if (index >= call->args_.size()) return nullptr;
+    return ir::GetTileTypeWithMemRef(call->args_[index]->GetType());
+  };
+
+  // Legacy arm: shared base memref only, exactly as before.
+  if (IsInPlaceInput0DpsOp(call->op_)) {
+    auto input_tile_type = input_tile_type_at(0);
+    if (!input_tile_type) return false;
+    auto result_memref = ir::GetDefinedMemRef(result_tile_type);
+    auto input_memref = ir::GetDefinedMemRef(input_tile_type);
+    return result_memref && input_memref && result_memref->base_.get() == input_memref->base_.get();
   }
 
-  auto result_memref = ir::GetDefinedMemRef(result_tile_type);
-  auto input_memref = ir::GetDefinedMemRef(input_tile_type);
-  return result_memref && input_memref && result_memref->base_.get() == input_memref->base_.get();
+  auto& registry = ir::OpRegistry::GetInstance();
+  if (!registry.IsRegistered(call->op_->name_)) return false;
+  auto declared = registry.GetEntry(call->op_->name_).GetOutputReusesInputArg();
+  if (!declared.has_value()) return false;
+  auto input_tile_type = input_tile_type_at(*declared);
+  if (!input_tile_type) return false;
+  return ShareOneMemRefWindow(result_tile_type, input_tile_type) &&
+         ir::TileBufSignature::FromTileType(*result_tile_type) ==
+             ir::TileBufSignature::FromTileType(*input_tile_type);
 }
 
 // `array.update_element` is SSA-functional in the IR (returns a fresh
@@ -490,6 +551,10 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
   /// pointer to the emitted func.func signature.
   [[nodiscard]] bool UsesSdmaWorkspace() const { return uses_sdma_workspace_; }
 
+  /// Returns true when the visited body registers deferred task completion.
+  /// Drives the hidden raw dispatch-args pointer shared with the kernel wrapper.
+  [[nodiscard]] bool UsesDeferredCompletion() const { return uses_deferred_completion_; }
+
   /// Returns true when the visited body invokes tile.get_block_idx or
   /// tile.get_block_num. Drives PTOCodegen's decision to append two synthetic
   /// i32 params to the emitted func.func signature; the kernel wrapper
@@ -523,6 +588,9 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
       if (!uses_sdma_workspace_ && ir::IsOp(op, "prefetch.make_context")) {
         uses_sdma_workspace_ = true;
       }
+      if (!uses_deferred_completion_ && ir::IsOp(op, "pld.system.defer_wait")) {
+        uses_deferred_completion_ = true;
+      }
       if (!uses_spmd_block_ops_ &&
           (ir::IsOp(op, "tile.get_block_idx") || ir::IsOp(op, "tile.get_block_num"))) {
         uses_spmd_block_ops_ = true;
@@ -545,6 +613,7 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
   std::map<const ir::Var*, std::shared_ptr<const TileType>> memref_tile_types_;
   std::set<uint64_t> iter_arg_ids_;
   bool uses_sdma_workspace_ = false;
+  bool uses_deferred_completion_ = false;
   bool uses_spmd_block_ops_ = false;
   bool uses_subblock_op_ = false;
   std::set<const ir::Var*> ffts_workspace_vars_;
@@ -607,6 +676,7 @@ std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr,
   fs_.body_section.str("");
   fs_.body_section.clear();
   gm_slot_buffer_offsets_.clear();
+  needs_deferred_completion_adapter_ = false;
   PrepareGMSlotBufferLayout(program);
 
   const std::string target_arch = backend_->GetHandler()->GetPtoTargetArch();
@@ -618,6 +688,16 @@ std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr,
         << func->name_ << "' has type " << ir::FunctionTypeToString(func->func_type_);
     GenerateFunction(func);
   }
+
+  if (needs_deferred_completion_adapter_) {
+    for (const auto& [gvar, func] : program->functions_) {
+      CHECK_SPAN(func->name_ != kDeferredCompletionAdapterName, func->span_)
+          << "Function name '" << kDeferredCompletionAdapterName
+          << "' is reserved for PyPTO's deferred-completion runtime adapter";
+    }
+  }
+
+  EmitDeferredCompletionAdapterDeclaration();
 
   stream_ << "}\n";
   return stream_.str();
@@ -750,6 +830,17 @@ std::string PTOCodegen::EmitCommRemoteOffsetInline(const std::string& ctx_ssa, c
   return delems;
 }
 
+std::string PTOCodegen::RegisterDeferredCompletionAdapter() {
+  needs_deferred_completion_adapter_ = true;
+  return kDeferredCompletionAdapterName;
+}
+
+void PTOCodegen::EmitDeferredCompletionAdapterDeclaration() {
+  if (!needs_deferred_completion_adapter_) return;
+  stream_ << "  func.func private @" << kDeferredCompletionAdapterName
+          << "(!pto.ptr<i64>, !pto.ptr<i32>, i64, i64)\n";
+}
+
 void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   fs_.Reset();
   fs_.current_function = func;
@@ -810,11 +901,15 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     collector.VisitStmt(func->body_);
   }
   const bool uses_sdma_workspace = collector.UsesSdmaWorkspace();
+  const bool uses_deferred_completion = collector.UsesDeferredCompletion();
   const bool uses_spmd_params = collector.UsesSpmdBlockOps();
   const bool uses_subblock_param = collector.UsesSubblockOp();
   fs_.ffts_workspace_vars = collector.GetFFTSWorkspaceVars();
   if (uses_sdma_workspace) {
     fs_.used_ssa_names.insert("arg" + std::to_string(func->params_.size() + dyn_vars.size()));
+  }
+  if (uses_deferred_completion) {
+    fs_.used_ssa_names.insert("__pypto_deferred_raw_args");
   }
   if (uses_spmd_params) {
     fs_.used_ssa_names.insert("__pypto_spmd_block_idx");
@@ -968,6 +1063,17 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     std::string arg_name = "%arg" + std::to_string(next_arg_idx++);
     stream_ << ", " << arg_name << ": index";
     BindVarToMlir(dyn_var, arg_name);
+  }
+
+  // Deferred completion registration needs the scheduler-owned AsyncCtx,
+  // which is reachable only from kernel_entry's raw dispatch args. Keep this
+  // hidden ABI before other runtime-owned arguments; the Python wrapper mirrors
+  // the order exactly.
+  if (uses_deferred_completion) {
+    if (!first_param) stream_ << ", ";
+    first_param = false;
+    fs_.deferred_completion_raw_args_ssa = "%__pypto_deferred_raw_args";
+    stream_ << fs_.deferred_completion_raw_args_ssa << ": !pto.ptr<i64>";
   }
 
   // Append the hidden SDMA workspace pointer after user-derived arguments and
@@ -1824,6 +1930,12 @@ std::string PTOCodegen::GetSSATileBufType(const std::string& ssa_name) const {
   return it != fs_.ssa_to_tile_buf_type.end() ? it->second : std::string{};
 }
 
+void PTOCodegen::RegisterTileViewName(const std::string& ssa_name) { fs_.tile_view_names.insert(ssa_name); }
+
+bool PTOCodegen::IsTileViewName(const std::string& ssa_name) const {
+  return fs_.tile_view_names.count(ssa_name) > 0;
+}
+
 void PTOCodegen::RegisterSubviewMaterialization(const std::string& subview_ssa,
                                                 const SubviewMaterializationInfo& info) {
   fs_.subview_materializations[subview_ssa] = info;
@@ -1876,7 +1988,7 @@ std::string PTOCodegen::GetGMSlotBufferSSAForPipe(int pipe_id, int dir_mask) {
   }
 
   auto offset_it = gm_slot_buffer_offsets_.find(key);
-  CHECK(offset_it != gm_slot_buffer_offsets_.end())
+  INTERNAL_CHECK(offset_it != gm_slot_buffer_offsets_.end())
       << "Internal error: missing GM slot buffer offset for frontend pipe id " << pipe_id << " and dir_mask "
       << dir_mask;
   const int64_t byte_offset = offset_it->second;
@@ -1960,7 +2072,7 @@ void PTOCodegen::VisitStmt(const ir::StmtPtr& stmt) {
 void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   auto call = As<ir::Call>(op->value_);
   const bool is_set_validshape = ir::IsOp(call, "tile.set_validshape");
-  const bool alias_scatter_result_to_input = ShouldAliasScatterResultToInput(op);
+  const bool alias_result_to_in_place_input = ShouldAliasResultToInPlaceInput(op);
   const bool alias_array_update_to_input = ShouldAliasArrayUpdateResultToInput(op);
 
   if (ir::IsOp(call, "pld.tile.remote_load")) {
@@ -1973,7 +2085,7 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   }
 
   if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
-    if (!is_set_validshape && !alias_scatter_result_to_input) {
+    if (!is_set_validshape && !alias_result_to_in_place_input) {
       EmitAllocTileForVar(op->var_, tile_type);
     }
   }
@@ -1984,7 +2096,7 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
           op->var_->name_hint_;  // Seed for readable MLIR names when no tile buffer exists.
       std::shared_ptr<const TileType> result_tile_type;
       if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
-        if (alias_scatter_result_to_input) {
+        if (alias_result_to_in_place_input) {
           result_buf = GetExprAsCode(call->args_[0]);
           INTERNAL_CHECK(!result_buf.empty())
               << "Internal error: " << call->op_->name_ << " result must alias the input tile SSA";

@@ -2266,6 +2266,7 @@ class TestCompileKwargForwarding:
         cfg = RunConfig(
             strategy=OptimizationStrategy.Default,
             dump_passes=True,
+            dump_ptoas_passes=True,
             compile_profiling=True,
             save_kernels_dir=str(artifacts_dir),
             analyze_auto_scopes_for_deps=True,
@@ -2273,6 +2274,7 @@ class TestCompileKwargForwarding:
         kwargs = _run_config_compile_kwargs(cfg)
         assert kwargs["strategy"] == OptimizationStrategy.Default
         assert kwargs["dump_passes"] is True
+        assert kwargs["dump_ptoas_passes"] is True
         assert kwargs["profiling"] is True  # mapped from RunConfig.compile_profiling
         assert kwargs["output_dir"] == str(artifacts_dir)  # from RunConfig.save_kernels_dir
         assert kwargs["analyze_auto_scopes_for_deps"] is True
@@ -2418,6 +2420,39 @@ class TestCompileKwargForwarding:
 
         def resolve(enabled):
             cfg = RunConfig(analyze_auto_scopes_for_deps=enabled)
+            return cfg_kernel._resolve_compiled((a, c), {"config": cfg})[0]
+
+        first = resolve(False)
+        second = resolve(True)
+        third = resolve(False)
+
+        assert compile_calls["n"] == 2
+        assert len(cfg_kernel._cache) == 2
+        assert first != second
+        assert third == first
+
+    def test_resolve_compiled_splits_cache_on_ptoas_pass_dump(self, monkeypatch):
+        """Enabling ptoas pass dumps cannot reuse an artifact compiled without them."""
+        torch = pytest.importorskip("torch")
+
+        @jit
+        def cfg_kernel(a: pl.Tensor[[128, 128], pl.FP32], c: pl.Out[pl.Tensor[[128, 128], pl.FP32]]):
+            c = a
+            return c
+
+        compile_calls = {"n": 0}
+
+        def fake_compile(*_args, **_kwargs):
+            compile_calls["n"] += 1
+            return f"compiled-{compile_calls['n']}"
+
+        monkeypatch.setattr(cfg_kernel, "_compile", fake_compile)
+
+        a = torch.randn(128, 128)
+        c = torch.empty(128, 128)
+
+        def resolve(dump_ptoas_passes):
+            cfg = RunConfig(dump_ptoas_passes=dump_ptoas_passes)
             return cfg_kernel._resolve_compiled((a, c), {"config": cfg})[0]
 
         first = resolve(False)

@@ -37,11 +37,8 @@ def device_runner(monkeypatch):
     fake_task_interface = SimpleNamespace(
         CallConfig=object,
         ChipCallable=object,
-        ChipStorageTaskArgs=object,
         CoreCallable=object,
         Worker=object,
-        make_tensor_arg=object,
-        scalar_to_uint64=object,
     )
     monkeypatch.setitem(sys.modules, "pypto.runtime.kernel_compiler", fake_kernel_compiler)
     monkeypatch.setitem(sys.modules, "pypto.runtime.task_interface", fake_task_interface)

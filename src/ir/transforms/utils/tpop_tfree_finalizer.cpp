@@ -36,7 +36,6 @@
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
-#include "pypto/ir/transforms/utils/scope_outline_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 
@@ -105,7 +104,7 @@ bool IsTfreeStmt(const StmtPtr& stmt, VarPtr* tile_var, std::string* op_name) {
 }
 
 std::unordered_set<const Var*> CollectStmtVarRefs(const StmtPtr& stmt) {
-  outline_utils::VarDefUseCollector collector;
+  var_collectors::VarDefUseCollector collector;
   collector.VisitStmt(stmt);
   return collector.GetAllVarRefs();
 }
@@ -121,22 +120,22 @@ std::unordered_set<const Var*> CollectCallArgVarRefs(const StmtPtr& stmt) {
 
   std::unordered_set<const Var*> refs_set;
   for (const auto& arg : call->args_) {
-    outline_utils::VarDefUseCollector collector;
+    var_collectors::VarDefUseCollector collector;
     collector.VisitExpr(arg);
     refs_set.insert(collector.var_uses.begin(), collector.var_uses.end());
   }
   for (const auto& [key, value] : call->kwargs_) {
     (void)key;
     if (value.type() == typeid(ExprPtr)) {
-      outline_utils::VarDefUseCollector collector;
+      var_collectors::VarDefUseCollector collector;
       collector.VisitExpr(std::any_cast<ExprPtr>(value));
       refs_set.insert(collector.var_uses.begin(), collector.var_uses.end());
     } else if (value.type() == typeid(VarPtr)) {
-      outline_utils::VarDefUseCollector collector;
+      var_collectors::VarDefUseCollector collector;
       collector.VisitExpr(std::any_cast<VarPtr>(value));
       refs_set.insert(collector.var_uses.begin(), collector.var_uses.end());
     } else if (value.type() == typeid(IterArgPtr)) {
-      outline_utils::VarDefUseCollector collector;
+      var_collectors::VarDefUseCollector collector;
       collector.VisitExpr(std::any_cast<IterArgPtr>(value));
       refs_set.insert(collector.var_uses.begin(), collector.var_uses.end());
     }

@@ -145,7 +145,6 @@ def _manual_dispatch(compiled, *args, device_id, config=None, call_config=None):
 
     cc = compiled.chip_callable
     rn = compiled.runtime_name
-    orch_args, coerced, return_style = compiled.build_orch_args(*args)
     if call_config is not None:
         cfg = call_config
     else:
@@ -153,6 +152,7 @@ def _manual_dispatch(compiled, *args, device_id, config=None, call_config=None):
     w = SimplerWorker(level=2, device_id=device_id, platform=compiled.platform, runtime=rn)
     w.init()
     try:
+        orch_args, coerced, return_style = compiled.build_orch_args(*args, worker=w)
         cid = w.register(cc)
         w.run(cid, orch_args, cfg)
         w.unregister(cid)

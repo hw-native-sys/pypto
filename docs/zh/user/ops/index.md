@@ -15,7 +15,7 @@
 
 **这里不重复签名。** `pl.__all__` 中几乎每个算子都带 docstring，docstring 就是那份参考 —— 手工维护的签名表在一个版本之内就会与它漂移。目录的作用是回答"有些什么、叫什么名字"，而不是"参数是什么"。
 
-至于"怎么用这个算子做出有用的东西"，答案是一个完整例子而不是一张表。教程章尚未编写；在它落地之前，仓库里的 `examples/beginner/` 与 `examples/intermediate/` 是最接近的东西。
+至于「怎么用这个算子做出有用的东西」，答案是一个完整例子而不是一张表 —— 见 [教程](../tutorials/index.md)，或仓库里的 `examples/beginner/` 与 `examples/intermediate/`。
 
 ## 另请参阅
 

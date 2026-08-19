@@ -187,9 +187,16 @@ class AllReduceSignalSynthesizer : public IRMutator {
     CHECK_SPAN(call->args_.size() == 1 || call->args_.size() == 2, call->span_)
         << "pld.tensor.allreduce expects target[, signal], got " << call->args_.size()
         << " positional arguments";
-    CHECK_SPAN(repeating_scope_depth_ == 0, call->span_)
-        << "pld.tensor.allreduce is not supported inside a for/while loop. "
-           "The signal protocol is single-use and cannot reuse a signal across dynamic invocations.";
+    // Only a *synthesized* signal is loop-bound: the binding this pass inserts
+    // cannot be allocated once per dynamic iteration, and every rank has to land
+    // on the same symmetric window. An explicit signal needs no synthesis, and
+    // the lowered kernel restores its cells to zero before returning, so
+    // carrying one across iterations is safe.
+    CHECK_SPAN(repeating_scope_depth_ == 0 || call->args_.size() == 2, call->span_)
+        << "pld.tensor.allreduce without an explicit signal is not supported inside a for/while "
+           "loop on the HOST rail: the synthesized signal binding cannot be allocated per dynamic "
+           "iteration. Pass an explicit signal buffer — it is self-clearing and reusable across "
+           "iterations — or hoist the call out of the loop.";
   }
 
   struct SignalNames {

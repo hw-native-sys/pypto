@@ -12,6 +12,7 @@
 #ifndef PYPTO_IR_TRANSFORMS_PASS_CONTEXT_H_
 #define PYPTO_IR_TRANSFORMS_PASS_CONTEXT_H_
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -234,6 +235,48 @@ enum class MemoryPlanner {
   DsaRP = 2,  ///< In-tree DSA with automatically recognized reuse penalties.
 };
 
+/**
+ * @brief Which Simpler runtime ABI a compilation targets.
+ *
+ * The two runtimes differ in where the task graph is built, which is what
+ * decides whether an orchestration fragment can be recorded and replayed at
+ * all. Closed set: each enumerator corresponds to one implementation under
+ * `runtime/src/<arch>/runtime/`, and a pass that must legalize IR for a
+ * particular runtime switches on this rather than comparing strings.
+ */
+enum class RuntimeKind : uint8_t {
+  /// Task graph built on the AICPU, dependencies auto-derived through the
+  /// TensorMap. The production runtime, and the default.
+  TensorMapAndRingBuffer = 0,
+  /// Host CPU builds the whole task graph up front, which is what makes Graph
+  /// Execution (record once, replay) possible.
+  HostBuildGraph = 1,
+};
+
+inline constexpr RuntimeKind kDefaultRuntimeKind = RuntimeKind::TensorMapAndRingBuffer;
+
+/**
+ * @brief Wire name for a runtime kind.
+ *
+ * This is the value written to `RUNTIME_CONFIG["runtime"]` in the generated
+ * `kernel_config.py`, the value `CompiledProgram.runtime_name` reports, and the
+ * name used verbatim as a filesystem path component when compiling kernels — so
+ * it is spelled out here rather than derived from the enumerator name.
+ *
+ * @param kind The runtime kind
+ * @return Wire name, e.g. "host_build_graph"
+ */
+[[nodiscard]] std::string RuntimeKindToName(RuntimeKind kind);
+
+/**
+ * @brief Parse a wire name back into a runtime kind.
+ *
+ * @param name Wire name as it appears in `RUNTIME_CONFIG["runtime"]`
+ * @return The matching kind
+ * @throws pypto::ValueError if the name is not one PyPTO can compile for
+ */
+[[nodiscard]] RuntimeKind RuntimeKindFromName(const std::string& name);
+
 class PassContext {
  public:
   /**
@@ -256,13 +299,17 @@ class PassContext {
    *        dbC=2 automatically. When true, AutoTileMatmulL0 may emit two co-live
    *        L0C accumulators and the legacy PyPTO allocator preserves the
    *        ping-pong where capacity permits.
+   * @param runtime Which Simpler runtime ABI to target (default:
+   *        TensorMapAndRingBuffer). Passes that must legalize IR for a specific
+   *        runtime switch on this rather than inspecting codegen options.
    */
   explicit PassContext(std::vector<PassInstrumentPtr> instruments,
                        VerificationLevel verification_level = VerificationLevel::Basic,
                        DiagnosticPhase diagnostic_phase = DiagnosticPhase::PrePipeline,
                        DiagnosticCheckSet disabled_diagnostics = {DiagnosticCheck::UnusedControlFlowResult},
                        MemoryPlanner memory_planner = MemoryPlanner::PyPTO,
-                       bool enable_pypto_l0c_double_buffer = false);
+                       bool enable_pypto_l0c_double_buffer = false,
+                       RuntimeKind runtime = kDefaultRuntimeKind);
 
   /**
    * @brief Push this context onto the thread-local stack
@@ -328,6 +375,13 @@ class PassContext {
   [[nodiscard]] bool GetEnablePyptoL0cDoubleBuffer() const;
 
   /**
+   * @brief Get the target Simpler runtime ABI for this context.
+   *
+   * Passes gate runtime-specific legalization on this value.
+   */
+  [[nodiscard]] RuntimeKind GetRuntime() const;
+
+  /**
    * @brief Get the currently active context (top of thread-local stack)
    * @return Pointer to current context, or nullptr if none
    */
@@ -353,6 +407,7 @@ class PassContext {
   DiagnosticCheckSet disabled_diagnostics_;
   MemoryPlanner memory_planner_;
   bool enable_pypto_l0c_double_buffer_;
+  RuntimeKind runtime_;
   PassContext* previous_;
 
   static thread_local PassContext* current_;

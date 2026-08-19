@@ -11,6 +11,7 @@
 
 from .error_codes import ErrorCategory, ErrorCode, get_error_code
 from .exceptions import (
+    BUG_CLASS_EXCEPTIONS,
     InvalidOperationError,
     ParserError,
     ParserSyntaxError,
@@ -25,6 +26,7 @@ from .renderer import ErrorRenderer
 
 __all__ = [
     # Exceptions
+    "BUG_CLASS_EXCEPTIONS",
     "ParserError",
     "ParserSyntaxError",
     "ParserTypeError",

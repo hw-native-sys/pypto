@@ -159,7 +159,7 @@ def golden(tensors: dict, params: dict | None = None) -> None:
 def main():
     parser = argparse.ArgumentParser(description="Vector DAG example")
     parser.add_argument(
-        "--enable-l2-swimlane",
+        "--enable-chip-swimlane",
         action="store_true",
         default=False,
         help="Enable on-device runtime profiling and generate swimlane JSON",
@@ -174,7 +174,7 @@ def main():
         a,
         b,
         f,
-        config=RunConfig(enable_l2_swimlane=args.enable_l2_swimlane),
+        config=RunConfig(enable_chip_swimlane=args.enable_chip_swimlane),
     )
 
     # Golden validation

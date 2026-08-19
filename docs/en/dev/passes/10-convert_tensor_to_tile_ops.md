@@ -47,6 +47,57 @@ For each `FunctionType::InCore` function:
 
 4. **Insert tile.store (exit stores)**: For each return value converted from `TensorType` to `TileType`, add an `Out` parameter and insert `tile.store(tile, zeros, out_param)`. If the return value comes from a `tile.assemble` loop, the loop is rewritten to use `tile.store` directly (conversion-time assemble-loop rewrite; distinct from `OptimizeOrchTensors` Pattern 3 which handles cross-function optimization).
 
+5. **Upgrade written param directions**: An alias-origin analysis (`AnalyzeCallAccess`) attributes every read/write back to the parameter it originates from, then upgrades each `In` param that is written to `Out` (write-only) or `InOut` (read and written). Write targets recognised: `tile.store`, `tensor.write`, `tensor.assemble`, `pld.tile.remote_store`, `pld.tile.put` / `pld.tile.get`, `pld.system.notify` (`NotifyOp.Set` makes its `target` write-only; `NotifyOp.AtomicAdd` makes it read+write), `system.syncall` (workspace), plus the composite collectives `pld.tensor.allreduce` / `allgather` / `reduce_scatter` / `barrier` / `broadcast` / `all_to_all(_v)`, whose signal and target operands are marked read+write here because this pass runs upstream of `LowerCompositeOps`. Any other op's args count as reads only. Params the user already declared `Out` / `InOut` are left as-is.
+
+### GM Store Coherence Restriction
+
+An InCore function may not combine a bulk store (`tensor.assemble`, lowered to
+`tile.store`) with `tensor.write` on the same underlying GM tensor. The bulk
+store uses MTE3 while the scalar store uses the D-cache path; barriers alone do
+not guarantee cache-line coherence between those paths on A2/A3. The pass
+therefore rejects the combination instead of emitting code that can silently
+lose either the scalar overrides or neighbouring bulk-written bytes.
+
+Before applying the restriction, the pass canonicalizes a simple constant
+scalar-fill loop into `tensor.full` plus `tensor.assemble`, which then lowers to
+`tile.full` plus `tile.store`. The loop must be sequential, zero-based, and
+unit-stride; its body may contain one or more `tensor.write` operations and
+nothing else. Each write must cover a contiguous region with one loop-invariant
+constant value, and the flattened region must satisfy MTE3's 32-byte row
+alignment. This keeps full-block fallback fills on the MTE3 path instead of
+rejecting them as mixed stores. Dynamic values, non-canonicalizable partial
+updates, unaligned regions, and strided scalar loops remain on the D-cache path.
+
+The pass also stages a full-tensor `tensor.full` initialization followed only by
+scalar updates to that tensor. The scalar updates are redirected to the local
+tile, and one `tile.store` writes the completed value to GM at function exit.
+This supports dynamic sparse-map construction without mixing MTE3 and D-cache
+stores. The rewrite requires a zero-offset, full-shape initialization backed by
+a private `tensor.full` result; partial initialization, aliases, additional DMA
+stores, or other uses of the GM target remain rejected.
+
+The check follows assignment aliases and loop/branch carries. It is deliberately
+conservative: it rejects mixed store paths to one GM tensor even when source
+offsets appear disjoint, because the compiler does not yet prove cache-line
+separation across symbolic views and control flow. Mixed paths to distinct GM
+tensors remain valid.
+
+```python
+# Rejected: a partial assignment becomes MTE3 TSTORE, then pl.write uses D-cache.
+output[0:1, 0:16] = pl.full([1, 16], dtype=pl.INT32, value=-1)
+for i in pl.range(4):
+    pl.write(output, [0, i], pl.cast(i, pl.INT32))
+
+# Supported: update the local on-chip value, then issue one GM store.
+staged = pl.full([1, 32], dtype=pl.INT32, value=-1)
+for i in pl.range(4):
+    pl.write(staged, [0, i], pl.cast(i, pl.INT32))
+output[0:1, 0:32] = staged
+```
+
+Using `tensor.write` for every element is also supported when a single bulk
+store is not practical.
+
 ### Phase 2a: Propagate Added Outputs Through Spmd/Group Wrappers
 
 `OutlineClusterScopes` produces Spmd/Group wrappers that are transparent 1:1

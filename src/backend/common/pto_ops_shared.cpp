@@ -75,8 +75,9 @@ codegen::PTOCodegen& AsPto(codegen::CodegenBase& codegen_base) {
 // Validate a call's arity with the canonical "Operation:[<pto_op>] requires N
 // argument(s), but got M" message shared by the simple-op handlers.
 void CheckArity(const CallPtr& op, std::string_view pto_op_name, size_t arity) {
-  CHECK(op->args_.size() == arity) << "Operation:[" << pto_op_name << "] requires " << arity << " argument"
-                                   << (arity != 1 ? "s" : "") << ", but got " << op->args_.size();
+  INTERNAL_CHECK_SPAN(op->args_.size() == arity, op->span_)
+      << "Operation:[" << pto_op_name << "] requires " << arity << " argument" << (arity != 1 ? "s" : "")
+      << ", but got " << op->args_.size();
 }
 
 const std::vector<std::string> cmp_modes = {"eq", "ne", "lt", "le", "gt", "ge"};

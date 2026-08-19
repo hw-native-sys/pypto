@@ -2,13 +2,20 @@
 
 ## Core Rule
 
-**`As<T>()` matches the exact `ObjectKind` only, NOT subclasses.** When you want to treat a base type and its subclass(es) uniformly, use the corresponding `*Like` helper, not `As<Base>()`.
+**For a concrete node type, `As<T>()` matches that exact `ObjectKind` only, NOT subclasses.** When you want to treat a concrete type and its subclass(es) uniformly, use the corresponding `*Like` helper, not `As<Base>()`.
 
 ## Why
 
-PyPTO's IR uses a single `ObjectKind` enum for runtime-type dispatch (see `include/pypto/ir/kind_traits.h`). `As<T>(node)` checks `node->GetKind() == ObjectKind::T` — exact match.
+PyPTO's IR uses a single `ObjectKind` enum for runtime-type dispatch. `KindTrait<T>` (see `include/pypto/ir/kind_traits.h`) comes in two shapes, and `As<T>()` behaves differently for each:
 
-C++ inheritance doesn't help here: `IterArg` is a subclass of `Var`, but `IterArg` has its own `ObjectKind::IterArg`. So `As<Var>(iter_arg_ptr)` returns **null**, even though `iter_arg` IS-A Var.
+| `KindTrait<T>` shape | Applies to | `As<T>()` matches |
+| -------------------- | ---------- | ----------------- |
+| single `kind` member | every concrete node — `Var`, `IterArg`, `MemRef`, `WindowBuffer`, `TensorType`, … | that one kind — exact match, **never** subclasses |
+| `kinds[]` array | the seven base types `Expr`, `Stmt`, `Type`, `BinaryExpr`, `UnaryExpr`, `ScopeStmt`, `ShapedType` (the last is also concrete, and lists its own kind) | any kind listed in the array |
+
+The core rule is about the first row, which is where the bugs are: C++ inheritance doesn't help there. `IterArg` is a subclass of `Var`, but `IterArg` has its own `ObjectKind::IterArg`. So `As<Var>(iter_arg_ptr)` returns **null**, even though `iter_arg` IS-A Var.
+
+`As<Expr>()` / `As<Stmt>()` / `As<Type>()` are the second row: they match whole subtrees by design and are correct as written — do **not** rewrite them into `*Like` helpers. Their arrays are hand-maintained, so a new kind must be appended to the base array too; `static_assert`s in `kind_traits.h` catch only the base-covers-derived case, not enum coverage.
 
 ## The cases that bite
 
@@ -17,7 +24,7 @@ C++ inheritance doesn't help here: `IterArg` is a subclass of `Var`, but `IterAr
 | `ExprPtr` that may be `Var` or `IterArg` | Treat both as `Var` | `AsVarLike(expr)` (returns `VarPtr`) | `As<Var>(expr)` — misses `IterArg` |
 | Visitor override for both `Var` and `IterArg` | Single handler for both | Override `VisitVarLike_` | Override `VisitExpr_(VarPtr)` only — `IterArg` dispatches separately |
 
-`MemRef` is intentionally **excluded** from `AsVarLike` — `MemRef` has scope/storage semantics that don't fit the Var-bound-name model. Use `As<MemRef>()` directly.
+`MemRef` and `WindowBuffer` are intentionally **excluded** from `AsVarLike` — they carry allocation-source / window-slot semantics that don't fit the Var-bound-name model. Use `As<MemRef>()` / `As<WindowBuffer>()` directly. Both are still listed in `KindTrait<Expr>`, so `As<Expr>()` matches them.
 
 ## Examples
 

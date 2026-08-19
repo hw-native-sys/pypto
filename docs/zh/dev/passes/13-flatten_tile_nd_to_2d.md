@@ -41,9 +41,9 @@ program_2d = flatten_pass(program)
 
 对每个 InCore 函数（InCore、AIC、AIV）：
 
-1. **验证前置条件**：检查静态物理形状、最后轴归约、不允许对 >2D 使用 `tile.read`/`tile.write`/`tile.slice`
+1. **验证前置条件**：检查静态物理形状、最后轴归约、不允许对 >2D 使用 `tile.read`/`tile.write`/`tile.slice`，以及不允许写入区域无法连续折叠的 >2D `tile.assemble`
 2. **变换语句**：遍历函数体，将 >2D Tile 操作转换为 2D，并保留动态的 `valid_shape`（见[动态 valid_shape](#动态-tile-维度issue-1578)）
-3. **验证后置条件**：由独立的 `TileOps2D` 属性验证器 (property verifier) 检查改写后的 InCore IR 仅包含受支持的 Tile rank 与 codegen-ready transpose 形态
+3. **验证后置条件**：由独立的 `TileOps2D` 属性验证器 (property verifier) 检查改写后的 InCore IR 仅包含受支持的 Tile rank、2D `tile.assemble` 偏移与 codegen-ready transpose 形态
 
 按语句类型处理：
 
@@ -53,6 +53,7 @@ program_2d = flatten_pass(program)
 | `tile.store`（rank>2 张量） | 在转换后 IR 中注入原始张量 rank 对应的分区 `shapes` 作为额外的第 4 个操作数，供后端 codegen 重建 `partition_view`；DSL 源码不变。若 tile 操作数本身仍是 rank>2(例如用户显式 `tile.reshape` 升到 3D 后再喂给 `pl.assemble` 写入 N-D 张量视图),pass 会先插入一个 `tile.reshape` 把 tile 操作数压回 2D —— codegen 要求 tile 必须是 2D,而原始 tile shape 仍由 `shapes` 分区操作数携带 |
 | `tile.store`（2D 张量） | 直接透传 |
 | `tile.create`/`tile.full`（>2D） | 直接使用展平的 2D 形状重建 |
+| `tile.assemble`（>2D 目标） | 用与 `tile.load` 折叠 tensor-rank 偏移相同的行主序折叠，把 ND 偏移折进展平后的 `(row, col)` 空间（`row = ((o0*d1 + o1)*d2 + o2)*… + o[k-2]`，`col = o[k-1]`）；Tile 操作数本身由其定义处的算子展平。要求 source、target 与 offset 具有相同 rank，且写入区域能折叠为连续的行区间（`IsRowMajorCollapseContiguous`），否则在前置条件阶段报错。若不折叠，偏移会以 ND rank 残留在 2D Tile 上，而 codegen 只按位置读取 `elements[0]`/`elements[1]` 并忽略其余元素，从而静默地写到错误地址 |
 | `tile.transpose` | `pto.ttrans` scratch 物化的唯一归属。进入时为 3-arg（input, axis1, axis2）。**2D**：创建一块 scratch tile（shape = 源页，位于输入所在 memory），产出 codegen-ready 的 4-arg `tile.transpose(in, a1, a2, scratch)`。**>2D**（末两轴交换）：展开为逐 batch 的 2D transpose，每个都是 4-arg 形态，scratch 从扁平 `[batch*A, B]` 池中切片，再 assemble 进合并后的 2D 输出。交换 batch 轴属用户错误 |
 | `tile.batch_matmul` | 展开为逐 batch 的 2D `tile.matmul`，处理 batch broadcast。b_trans/a_trans 操作数以一个零拷贝 `tile.transpose_view`（覆盖在自然 load 之上）出现（不再 transpose-at-load、不搬数据）；tile 级算子本身无 transpose 语义。每个操作数处理方式一致（见下方操作数处理） |
 | `tile.batch_matmul_acc` | 展开为逐 batch 的 2D `tile.matmul_acc`，按 batch 索引切分（已展平的）累加器。累加器上的内存空间决策（Vec/Acc 来回搬运、上游 `tile.create` 的可重定向生产者改写、TileView 刷新）交由 `InferTileMemorySpace`（pass 17）负责 —— 本 pass 不再发射任何 `tile.move` |

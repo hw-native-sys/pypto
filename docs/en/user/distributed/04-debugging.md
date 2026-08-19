@@ -12,7 +12,7 @@ one rank while the cause is on another.
 | **Signal cell never reaches expected value** | Wrong `NotifyOp`: used `Set` instead of `AtomicAdd` for a multi-participant barrier | Use `AtomicAdd` when N ranks contribute to the same slot; use `Set` for 1:1 exchanges. |
 | **Shape mismatch at compile time** | `NR` (world size) used in type annotations without `pl.dynamic` | Wrap runtime-resolved dims in `pl.dynamic("NR")`. The compiler needs the name to bind the runtime value. |
 | **`TypeError` raised at dispatch** | IO buffer not `.share_memory_()` before `prepare()` — the child processes cannot see a buffer allocated after the fork | Call `.share_memory_()` on every host tensor passed to the worker, before `prepare()`. |
-| **Allreduce rejected inside loop** | Signal protocol can't inject a fresh buffer per iteration | Allocate a fresh signal buffer for each allreduce call outside loops; allreduce inside `for`/`while` is currently rejected. |
+| **Allreduce rejected inside loop** | HOST-rail allreduce that *omits* its signal is rejected inside a dynamic `for`/`while`: signal synthesis cannot allocate a fresh signal per iteration | Pass an explicit signal buffer — it is self-clearing and reusable across iterations — or hoist the call out of the loop. |
 
 ## Fatal Pitfalls
 
@@ -57,9 +57,9 @@ SIMPLER_DEVICE_STRACE_ENABLE=0 python script.py
 
 ### Distributed DFX Entry Points
 
-- **L2 swimlane:** `RunConfig(enable_l2_swimlane=True)` — enables per-task timing
+- **L2 swimlane:** `RunConfig(enable_chip_swimlane=True)` — enables per-task timing
   inside the worker, propagates through L3 orchestration. Writes
-  `dfx_outputs/l2_swimlane_records.json` (onboard: merged into
+  `dfx_outputs/chip_swimlane_records.json` (onboard: merged into
   `merged_swimlane_*.json` alongside the dependency graph below).
 - **Scope stats:** `RunConfig(enable_scope_stats=True)` — writes
   `dfx_outputs/scope_stats/scope_stats.jsonl` with task_window, heap, and tensormap watermarks.

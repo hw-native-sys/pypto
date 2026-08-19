@@ -61,7 +61,7 @@ def entry(
 
 子函数依赖（`.incore` / `.inline` / `.opaque`）从入口函数体自动发现 —— 按名字调用即可。`@pl.jit.host` 入口还会额外发现 `@pl.jit`（chip 编排）依赖，因此一个完整的分布式程序无需任何 `@pl.program` 类。
 
-下面这段只展示发现结构 —— kernel 体已省略，它用到的分布式类型属于尚未编写的分布式章节：
+下面这段只展示发现结构 —— kernel 体已省略，它用到的分布式类型见[分布式](../distributed/index.md)：
 
 ```python
 import pypto.language.distributed as pld
@@ -194,11 +194,11 @@ print("artifacts in:", compiled.output_dir)
 
 返回的对象就是 JIT 缓存持有的那个，因此之后用同一特化 key 再调用会拿到完全相同的实例。
 
-`lower(*sample_args)` 比它早停一站：只跑 Pass 并返回 Pass 后的 `ir.Program`，不做代码生成、不调 `ptoas`、不写产物、不写缓存。要读降级后的 IR 就用它；要检查代码生成本身就用 `compile()`。两者都接受 `config=RunConfig(...)`，但 `lower()` 会忽略其中的运行时与产物字段。编译选项与运行时接口属于执行章节，该章尚未编写 —— 目前见 [编译程序](../01-language_guide.md)。
+`lower(*sample_args)` 比它早停一站：只跑 Pass 并返回 Pass 后的 `ir.Program`，不做代码生成、不调 `ptoas`、不写产物、不写缓存。要读降级后的 IR 就用它；要检查代码生成本身就用 `compile()`。两者都接受 `config=RunConfig(...)`，但 `lower()` 会忽略其中的运行时与产物字段。编译选项见 [编译](../execution/00-compile.md)，运行时接口见 [运行](../execution/01-run.md)。
 
 ### 外部 C++ kernel
 
-手写的 C++ kernel 可以像普通函数一样被调用。见 [集成手写 C++ Kernel](../../dev/language/01-external-kernels.md)。
+手写的 C++ kernel 可以像普通函数一样被调用。见 [集成手写 C++ Kernel](../../dev/language/04-external-kernels.md)。
 
 ## 边界情况
 
@@ -214,10 +214,15 @@ print("artifacts in:", compiled.output_dir)
 | **`auto_scope=False` 被拒绝** | 用在了 `.incore` / `.opaque` 上 | 放到入口或 `.inline` 辅助函数上 |
 | **`@pl.program` 方法缺 `self`** | 每个方法都需要 | 补上 `self`；它会从 IR 中剥离 |
 
+## 配套示例
+
+`examples/utils/cross_function_calls.py` —— `@pl.jit.inline` 辅助函数被自动发现为 `@pl.jit`
+入口的依赖，并在调用点展开。
+
 ## See Also
 
 - [控制流](02-control-flow.md) —— 这些函数体里的循环与条件。
 - [作用域与放置](04-scopes.md) —— `pl.at` 与其余放置作用域。
 - [快速上手](../02-quickstart.md) —— 同样的装饰器在一个完整例子里的用法。
 - [InlineFunctions](../../dev/passes/01-inline_functions.md) —— `Inline` 体如何被拼接。
-- [集成手写 C++ Kernel](../../dev/language/01-external-kernels.md) —— 调用外部 kernel。
+- [集成手写 C++ Kernel](../../dev/language/04-external-kernels.md) —— 调用外部 kernel。

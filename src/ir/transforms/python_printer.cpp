@@ -1163,16 +1163,12 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
     return;
   }
 
-  // system.syncall soft form operands:
-  //   aiv_only/aic_only: [gm_workspace, scratch, used_cores]         (3 args)
-  //   mix:               [gm_workspace, ub_scratch, l1_scratch, used_cores] (4 args)
-  // The scratch tile(s) are compiler-synthesized staging buffers, so print the
-  // high-level DSL surface (mode=/core_type=/gm_workspace=/used_cores=/scratch=
-  // [/scratch_l1=]) and let the parser thread the existing scratch(es) back on
-  // reparse instead of re-synthesizing.
-  if (IsOp(op, "system.syncall") && (op->args_.size() == 3 || op->args_.size() == 4)) {
+  // The current PTO-ISA gives every system.syncall soft form the same operands:
+  // [gm_workspace] or [gm_workspace, used_cores]. Print them through the
+  // high-level keyword-only DSL surface so the program round-trips.
+  if (IsOp(op, "system.syncall") && (op->args_.size() == 1 || op->args_.size() == 2)) {
     std::string core_type = "mix";
-    std::string mode = "soft";
+    std::string mode = "hard";
     for (const auto& [key, val] : op->kwargs_) {
       if (key == "core_type") {
         core_type = AnyCast<std::string>(val, "syncall core_type");
@@ -1180,26 +1176,26 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
         mode = AnyCast<std::string>(val, "syncall mode");
       }
     }
-    const size_t used_idx = op->args_.size() - 1;
-    stream_ << "mode=\"" << mode << "\", core_type=\"" << core_type << "\", gm_workspace=";
-    VisitExpr(op->args_[0]);
-    stream_ << ", used_cores=";
-    if (auto ci = As<ConstInt>(op->args_[used_idx])) {
-      stream_ << ci->value_;
-    } else {
-      VisitExpr(op->args_[used_idx]);
+    if (mode == "soft") {
+      stream_ << R"(mode="soft", core_type=")" << core_type << R"(", gm_workspace=)";
+      VisitExpr(op->args_[0]);
+      if (op->args_.size() == 2) {
+        stream_ << ", used_cores=";
+        if (auto ci = As<ConstInt>(op->args_[1])) {
+          stream_ << ci->value_;
+        } else {
+          VisitExpr(op->args_[1]);
+        }
+      } else {
+        // The high-level API requires an explicit participant-count choice so
+        // users do not accidentally select PTO-ISA's runtime-sensitive auto
+        // path. An explicit zero reconstructs this one-operand IR form.
+        stream_ << ", used_cores=0";
+      }
+      print_serialized_attrs(/*need_comma=*/true);
+      stream_ << ")";
+      return;
     }
-    // scratch= is the UB (Vec) tile for aiv_only/mix and the flat L1 (Mat) tile
-    // for aic_only; mix additionally threads its flat L1 tile via scratch_l1=.
-    stream_ << ", scratch=";
-    VisitExpr(op->args_[1]);
-    if (op->args_.size() == 4) {
-      stream_ << ", scratch_l1=";
-      VisitExpr(op->args_[2]);
-    }
-    print_serialized_attrs(/*need_comma=*/true);
-    stream_ << ")";
-    return;
   }
 
   // gather_row's optional 6th operand is keyword-only in the DSL: `transpose`

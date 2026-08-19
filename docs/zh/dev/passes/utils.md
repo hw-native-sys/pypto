@@ -118,7 +118,8 @@ auto used = memref_collectors::CollectUsedBasePtrs(func->body_);
 | ------ | ---- |
 | `transform_utils.h` | `Substitute`、`CollectDefVars`、`FindYieldStmt`、`FlattenToStmts`、`IsComputeTensorOp` |
 | `loop_state_repair.h` | `BuildDefMap`、循环重建辅助函数、`StripDeadIterArgs` |
-| `scope_outline_utils.h` | `VarCollector`、`StoreTargetCollector`、`ScopeOutliner`、`ScopeKindAbsenceVerifier` |
+| `scope_outline_utils.h` | `VarCollector`、`ScopeOutliner`、`ScopeKindAbsenceVerifier` |
+| `deferred_wait_contract.h` | `ContainsDeferredWait`、`DeferredWaitContractValidator`、`kMaxDeferredConditionsPerWaiter` |
 | `auto_name_utils.h` | SSA 名称生成、重命名映射、名称解析 |
 | `parent_stmt_analysis.h` | 父子语句映射 |
 | `dead_code_elimination.h` | 函数内死代码消除 |

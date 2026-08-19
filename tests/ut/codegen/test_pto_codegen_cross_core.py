@@ -458,7 +458,11 @@ class TestCrossCoreTpushTpopCodegen:
         )
 
     def test_slot_num_omitted_by_default(self):
-        """Without explicit knobs, no slot_num/local_slot_num attribute is emitted (PTOAS default)."""
+        """A hand-written init pipe without the knobs emits no slot_num/local_slot_num.
+
+        Only hand-authored setup reaches PTOAS's own dir_mask-derived depth: pipes built by
+        ExpandMixedKernel always carry an explicit slot_num.
+        """
         codes = self._compile_and_generate(CrossCoreTpushTpopProgram)
         assert "slot_num" not in codes["vector_producer"], "Default path must not emit slot_num"
         assert "slot_num" not in codes["cube_consumer"], "Default path must not emit slot_num"
@@ -782,6 +786,110 @@ class TestCrossCoreTpushTpopCodegen:
         assert "pto.set_validshape" not in consumer_code, (
             "a frontend tpop result is not a locally bound PTOAS tile; logical shape "
             f"restoration must use a metadata-only treshape:\n{consumer_code}"
+        )
+
+    def test_split_acc_to_vec_pop_uses_full_box_for_tpop(self):
+        """A split C2V pop transports the full per-lane box, not the logical valid box.
+
+        pto-isa builds the GM slot view of a Cube->Vector pop from the popped
+        tile's compile-time rows/cols and the producer's box row pitch, but
+        strides it with the tile's runtime validCol
+        (``gmGap = gStride3 - gShape4``, ``lenBurst = validCol``). A narrowed
+        validCol therefore collapses the GM gap to zero and the lane reads one
+        contiguous run instead of one box row per burst — silent data loss in
+        the *valid* region, since the matching PTO_ASSERT is compiled out in
+        release. This is the consumer-side counterpart of the producer-side
+        widening already asserted by
+        ``test_split_tpush_uses_full_box_transport_dims``.
+        """
+        span = ir.Span.unknown()
+        zero = ir.ConstInt(0, pl.INDEX, span)
+        rows = ir.ConstInt(16, pl.INDEX, span)
+        cols = ir.ConstInt(32, pl.INDEX, span)
+        half_rows = ir.ConstInt(8, pl.INDEX, span)
+        valid_cols = ir.ConstInt(24, pl.INDEX, span)
+        offsets = ir.MakeTuple([zero, zero], span)
+        shape = ir.MakeTuple([rows, cols], span)
+        valid_shape = ir.MakeTuple([rows, valid_cols], span)
+
+        src = ir.Var("src", ir.TensorType([16, 32], pl.FP32), span)
+        acc_memref = ir.MemRef(ir.MemorySpace.Acc, ir.ConstInt(0, pl.INT64, span), 16 * 32 * 4, 0)
+        acc_type = ir.TileType(
+            [rows, cols],
+            pl.FP32,
+            acc_memref,
+            ir.TileView(valid_shape=[rows, valid_cols]),
+            ir.MemorySpace.Acc,
+        )
+        acc_tile = ir.Var("acc_tile", acc_type, span)
+        load_call = ir.Call(
+            ir.Op("tile.load"),
+            [src, offsets, shape, valid_shape],
+            {"target_memory": ir.MemorySpace.Acc},
+            acc_type,
+            span,
+        )
+        push_call = ir.Call(
+            ir.Op("tile.tpush_to_aiv"),
+            [acc_tile],
+            {"split": 1},
+            ir.UnknownType(),
+            span,
+        )
+        producer = ir.Function(
+            "split_acc_producer",
+            [(src, ir.ParamDirection.In)],
+            [],
+            ir.SeqStmts(
+                [ir.AssignStmt(acc_tile, load_call, span), ir.EvalStmt(push_call, span)],
+                span,
+            ),
+            span,
+            ir.FunctionType.AIC,
+        )
+
+        # Per-lane consumer half of an UP_DOWN split: [8, 32] box, logical [8, 24].
+        vec_type = ir.TileType(
+            [half_rows, cols],
+            pl.FP32,
+            None,
+            ir.TileView(valid_shape=[half_rows, valid_cols]),
+            ir.MemorySpace.Vec,
+        )
+        popped = ir.Var("popped", vec_type, span)
+        pop_call = ir.Call(ir.Op("tile.tpop_from_aic"), [], {"split": 1}, vec_type, span)
+        consumer = ir.Function(
+            "split_vec_consumer",
+            [],
+            [],
+            ir.SeqStmts([ir.AssignStmt(popped, pop_call, span)], span),
+            span,
+            ir.FunctionType.AIV,
+        )
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        mlir_code = codegen.PTOCodegen().generate(
+            ir.Program([producer, consumer], "split_acc_to_vec_program", span)
+        )
+        consumer_code = _extract_func_section(mlir_code, "split_vec_consumer")
+        consumer_lines = [line.strip() for line in consumer_code.splitlines()]
+
+        pop_index = next(i for i, line in enumerate(consumer_lines) if "pto.tpop_from_aic" in line)
+        assert any("pto.treshape" in line for line in consumer_lines), (
+            "a full-box split pop must expose its logical valid shape through pto.treshape:\n" + consumer_code
+        )
+        reshape_index = next(i for i, line in enumerate(consumer_lines) if "pto.treshape" in line)
+        assert "pto.tpop_from_aic(%c8_index, %c32_index) {split = 1}" in consumer_lines[pop_index], (
+            "a split C2V pop must transport the full per-lane box; a narrowed valid_col "
+            f"mis-strides the GM slot read:\n{consumer_code}"
+        )
+        transport = re.search(r"^(%\w+) = pto\.tpop_from_aic", consumer_lines[pop_index])
+        assert transport is not None
+        assert pop_index < reshape_index
+        assert f"pto.treshape {transport.group(1)}" in consumer_lines[reshape_index]
+        assert "rows=8, cols=32, v_row=8, v_col=24" in consumer_lines[reshape_index], (
+            f"the logical per-lane valid shape must be restored by treshape:\n{consumer_code}"
         )
 
     @pytest.mark.parametrize(
@@ -1641,8 +1749,10 @@ class TestExpandMixedKernelCodegen:
         aic_body = _extract_func_section(codes["main_incore_0_aic"], "main_incore_0_aic")
         aiv_body = _extract_func_section(codes["main_incore_0_aiv"], "main_incore_0_aiv")
 
-        assert "pto.aic_initialize_pipe {dir_mask = 3, slot_size = 4096}" in aic_body
-        assert "pto.aiv_initialize_pipe {dir_mask = 3, slot_size = 4096}" in aiv_body
+        # Automatic setup always pins the ring depth explicitly (default 2), so PTOAS cannot
+        # fall back to its own dir_mask-derived depth and overrun the reserved buffer.
+        assert "pto.aic_initialize_pipe {dir_mask = 3, slot_size = 4096, slot_num = 2}" in aic_body
+        assert "pto.aiv_initialize_pipe {dir_mask = 3, slot_size = 4096, slot_num = 2}" in aiv_body
         assert "{id =" not in aic_body
         assert "{id =" not in aiv_body
         assert "pto.tpush_to_aiv" in aic_body and "{split = 0}" in aic_body

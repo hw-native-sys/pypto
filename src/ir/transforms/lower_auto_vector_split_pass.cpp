@@ -340,9 +340,15 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
       if (RegionBodyHasExplicitBoundary(reg->body_)) {
         ValidateMixedExplicitRegion(region_stmts, reg->span_);
         ValidateTransposeSplitHazard(region_stmts, rdim, reg->span_);
-        // Unchanged apart from the placement stamp: the body is already
-        // half-width, but it is still region-placed, so pass 21 must be told.
-        for (auto& s : StampRegionPlacement(region_stmts)) result.push_back(s);
+        // The body is already half-width, but the boundary op's split-axis valid
+        // extent is still the deducer's lane-agnostic ceil-div guess. This region
+        // is where it can be repaired: the author's own aiv_id is in scope, so
+        // the lane's true extent is materializable (see
+        // split_axis::LocalizeExplicitBoundaryValid). A fully-valid split axis is
+        // returned untouched, so the common case is a no-op walk.
+        auto localized = split_axis::LocalizeExplicitBoundaryValid(region_stmts, rdim, reg->span_);
+        // Still region-placed, so pass 21 must be told.
+        for (auto& s : StampRegionPlacement(localized)) result.push_back(s);
         continue;
       }
 
@@ -398,7 +404,14 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
           // is also the C->V move's destination. Going through Create is what keeps
           // this AUTO path's IR identical to the explicit pl.aiv_shard form lowered
           // by ConvertTensorToTileOps: both get the space from the same declaration.
-          auto half_type = shard->GetType();
+          // The deducer can only ceil-halve the split-axis valid extent, because an
+          // op's type function does not know the lane. Here subblock_idx IS in
+          // scope, so give the result the lane's true extent — the same repair
+          // the explicit-region arm applies through
+          // LocalizeExplicitBoundaryValid. A fully-valid split axis is returned
+          // unchanged, so the common case keeps the deducer's exact type.
+          auto half_type = split_axis::LocalizeShardValidForLane(shard->GetType(), call->args_[0]->GetType(),
+                                                                 split_dim, subblock_idx);
           auto new_var = std::make_shared<Var>(assign->var_->name_hint_, half_type, assign->var_->span_);
           auto shard_typed =
               std::make_shared<Call>(shard->op_, shard->args_, shard->kwargs_, half_type, shard->span_);
@@ -953,6 +966,38 @@ SplitAivScopeStmtPtr FindFirstSplitAivScope(const StmtPtr& body) {
 
 bool BodyContainsSplitAivScope(const StmtPtr& body) { return FindFirstSplitAivScope(body) != nullptr; }
 
+// Find the first ``ScopeStmt`` of ANY kind in a body, for the AUTO path's guard
+// below. Like the finder above this is an IRVisitor, so it reaches scopes the
+// hand-rolled lowering walks do not — which is the whole point: it must find
+// exactly what those walks would silently step over.
+class AnyScopeFinder : public IRVisitor {
+ public:
+  ScopeStmtPtr found_;
+
+ protected:
+  void VisitStmt_(const InCoreScopeStmtPtr& op) override { Record(op); }
+  void VisitStmt_(const ClusterScopeStmtPtr& op) override { Record(op); }
+  void VisitStmt_(const HierarchyScopeStmtPtr& op) override { Record(op); }
+  void VisitStmt_(const SpmdScopeStmtPtr& op) override { Record(op); }
+  void VisitStmt_(const SplitAivScopeStmtPtr& op) override { Record(op); }
+  void VisitStmt_(const RuntimeScopeStmtPtr& op) override { Record(op); }
+  void VisitStmt_(const CommDomainScopeStmtPtr& op) override { Record(op); }
+
+ private:
+  template <typename T>
+  void Record(const std::shared_ptr<const T>& op) {
+    if (!found_) found_ = op;
+    IRVisitor::VisitStmt(op->body_);
+  }
+};
+
+ScopeStmtPtr FindFirstScope(const StmtPtr& body) {
+  if (!body) return nullptr;
+  AnyScopeFinder finder;
+  finder.VisitStmt(body);
+  return finder.found_;
+}
+
 // Lower an InCore function that carries explicit ``SplitAivScopeStmt`` regions:
 // halve only the vector compute inside each region (region-local), leave
 // out-of-region compute full-width, drop each scope wrapper, and stamp
@@ -976,13 +1021,12 @@ FunctionPtr LowerExplicitRegionFunction(const FunctionPtr& func) {
       (new_stmts.size() == 1) ? new_stmts[0] : std::make_shared<SeqStmts>(new_stmts, func->span_);
 
   // Every region must have been consumed. A surviving one means it sat behind a
-  // scope the lowering walk does not enter — reachable today because the parser
-  // wraps a top-level ``pl.split_aiv`` in an InCore ScopeStmt while
-  // OutlineIncoreScopes only outlines scopes out of Opaque / Orchestration
-  // functions, so the wrapper reaches this pass intact inside a function the
-  // author declared ``pl.FunctionType.InCore``. Reject it here, pointing at the
-  // region; passing it through would skip every region guard and then fail far
-  // downstream as an internal assertion in PTO codegen.
+  // scope the lowering walk does not enter: OutlineIncoreScopes outlines scopes
+  // only out of Opaque / Orchestration functions, so an author-written scope
+  // inside a function declared ``pl.FunctionType.InCore`` reaches this pass
+  // intact. Reject it here, pointing at the region; passing it through would
+  // skip every region guard and then fail far downstream as an internal
+  // assertion in PTO codegen.
   //
   // Span safety: the check fails exactly when ``survivor`` is non-null, so the
   // dereference in the span argument is only evaluated when it is valid.
@@ -996,6 +1040,30 @@ FunctionPtr LowerExplicitRegionFunction(const FunctionPtr& func) {
          "pass intact. Fix it one of two ways: (1) declare the enclosing function with plain "
          "@pl.function / @pl.jit so the scope is outlined before this pass runs; or (2) move the "
          "pl.split_aiv region out of the enclosing scope.";
+
+  // ... and no scope of any other kind may remain either. The check above proves
+  // no region sat BEHIND a scope; this one covers the mirror case — a scope
+  // nested INSIDE a region body. The region itself is consumed there, so the
+  // check above passes, yet the inner walks (``LowerStmts``,
+  // ``CheckNoCubeTileHalved``, ``ScanRegionHalfWidth``) step over the scope
+  // rather than entering it, and the vector ops inside it are spliced out
+  // FULL-WIDTH — both AIV lanes computing the whole tile, with no diagnostic.
+  //
+  // By this point a region-bearing InCore function should hold no scope at all:
+  // OutlineIncoreScopes lifts every scope it can see into its own function
+  // (a ``with pl.at(...)`` inside a region becomes its own ``*_incore_0``), and
+  // AivSplitValid check (h) rejects authoring a region in an InCore function the
+  // outliner did not produce. So this is unreachable from the DSL and guards IR
+  // that never went through pass 8 — hand-built, or a deserialized ``.pto``.
+  // Cheap to state, and the alternative failure is silent rather than loud.
+  auto scope_survivor = FindFirstScope(new_body);
+  CHECK_SPAN(!scope_survivor, scope_survivor->span_)
+      << "LowerAutoVectorSplit: a scope survives inside a pl.split_aiv region body. Region "
+         "lowering does not cross a scope boundary, so the vector ops inside this scope would be "
+         "emitted full-width and BOTH AIV lanes would compute the whole tile. Every scope must "
+         "already be outlined by the time this pass runs — declare the enclosing function with "
+         "plain @pl.function / @pl.jit (Opaque) so OutlineIncoreScopes lifts it, or drop the "
+         "scope from inside the region.";
 
   auto [cloned_body, clone_map_unused] = DeepClone(new_body);
   (void)clone_map_unused;
@@ -1103,6 +1171,15 @@ CoreAffinity RollupAffinity(const std::vector<StmtPtr>& stmts) {
       }
     } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
       result = RollupAffinity(transform_utils::FlattenToStmts(while_stmt->body_));
+    } else if (auto scope = std::dynamic_pointer_cast<const ScopeStmt>(stmt)) {
+      // A scope's affinity IS its body's — the compute inside it is still this
+      // function's compute. Without this arm a scope fell to the SHARED default
+      // below, so `IsMixedCubeVector` reported false for any scope-bodied
+      // function and the AUTO arm skipped it *silently*. Classifying correctly
+      // is only half the fix: lowering still must not cross a scope boundary,
+      // so a function that now classifies MIXED is rejected by the guard in the
+      // pass rather than half-lowered.
+      result = RollupAffinity(transform_utils::FlattenToStmts(scope->body_));
     } else if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(stmt)) {
       result = RollupAffinity(seq->stmts_);
     }
@@ -1144,12 +1221,35 @@ Pass LowerAutoVectorSplit() {
         changed = true;
         continue;
       }
-      // AUTO whole-function path (unchanged): lower genuinely mixed
-      // (cube<->vector) functions. Pure-vector pl.split functions have no boundary
-      // to converge; ExpandMixedKernel strips their split, so marking them
-      // split_aiv here would desync.
+      // AUTO whole-function path: lower genuinely mixed (cube<->vector)
+      // functions. Pure-vector pl.split functions have no boundary to converge;
+      // ExpandMixedKernel strips their split, so marking them split_aiv here
+      // would desync.
       if (is_incore && mode.has_value() && mode.value() != SplitMode::None &&
           !IsAlreadyExplicitSplitAiv(func) && IsMixedCubeVector(func)) {
+        // Same rule as the explicit region path: the halving walks recurse into
+        // for / while / if / seq but deliberately NOT into a ScopeStmt, whose
+        // outlining and name-visibility semantics whole-function halving must
+        // not reach through. So a mixed AUTO function whose body still carries a
+        // scope cannot be lowered, and saying so is the only safe answer:
+        // passing it through leaves the kernel silently un-split, while lowering
+        // it would stamp `split_aiv` on a body whose in-scope ops were never
+        // halved. Normally unreachable — the function-level `split` attr this
+        // path keys on is written by OutlineIncoreScopes, which consumes the
+        // scope in the same step — but nothing enforces that, which is exactly
+        // why it is checked rather than assumed.
+        //
+        // Span safety: the check fails exactly when `scope` is non-null, so the
+        // dereference in the span argument only runs when it is valid.
+        auto scope = FindFirstScope(func->body_);
+        CHECK_SPAN(!scope, scope->span_)
+            << "LowerAutoVectorSplit: function '" << func->name_
+            << "' declares an AUTO split (optimizations=[pl.split(...)]) and is a mixed "
+               "cube/vector kernel, but its body still contains a scope — whole-function "
+               "halving does not cross a scope boundary, so the split cannot be applied. "
+               "Declare the enclosing function with plain @pl.function / @pl.jit (Opaque) so "
+               "OutlineIncoreScopes lifts the scope before this pass runs, or move the split "
+               "declaration onto the scope itself.";
         new_functions.push_back(LowerFunction(func, mode.value()));
         changed = true;
       } else {

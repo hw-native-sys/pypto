@@ -194,7 +194,7 @@ class TestL3SubWorkerOverride:
         marker = torch.zeros(2, dtype=torch.float32).share_memory_()
 
         def override_verify(args):
-            f = _tensor_from_continuous(args.tensor(0))
+            f = _tensor_from_continuous(args[0])
             marker[0] = 1.0
             marker[1] = float(f.reshape(-1)[0].item())
 

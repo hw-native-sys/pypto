@@ -461,6 +461,129 @@ def test_tensor_unary_preserves_symbolic_valid_shape():
     assert valid[1] == vlen  # the symbolic extent is carried through unchanged
 
 
+@pytest.mark.parametrize("op_name", ["adds", "subs", "muls", "divs", "maximum", "minimum"])
+def test_tensor_scalar_elementwise_preserves_partial_valid_shape(op_name):
+    """Fresh scalar-elementwise results keep content validity, not source alias metadata."""
+    partial = _partial_tensor_var([32, 256], [28, 250])
+
+    result_type = getattr(ir.op.tensor, op_name)(partial, 1.0).type
+
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.tensor_view is not None
+    assert _const_int_values(result_type.tensor_view.valid_shape) == [28, 250]
+    assert result_type.tensor_view.stride == []
+    assert result_type.tensor_view.layout == ir.TensorLayout.ND
+    assert result_type.tensor_view.pad == ir.PadValue.null
+
+
+@pytest.mark.parametrize("op_name", ["add", "sub", "mul", "div", "fmod", "maximum", "minimum"])
+def test_tensor_binary_elementwise_preserves_matching_partial_valid_shape(op_name):
+    """Identically shaped operands with the same real data region keep that region."""
+    lhs = _partial_tensor_var([32, 256], [28, 250], name="lhs")
+    rhs = _partial_tensor_var([32, 256], [28, 250], name="rhs")
+
+    result_type = getattr(ir.op.tensor, op_name)(lhs, rhs).type
+
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.tensor_view is not None
+    assert _const_int_values(result_type.tensor_view.valid_shape) == [28, 250]
+    assert result_type.tensor_view.stride == []
+    assert result_type.tensor_view.layout == ir.TensorLayout.ND
+    assert result_type.tensor_view.pad == ir.PadValue.null
+
+
+def test_tensor_binary_elementwise_preserves_matching_symbolic_valid_shape():
+    """A shared runtime tail extent remains attached to a binary result."""
+    span = ir.Span.unknown()
+    valid_rows = ir.Var("valid_rows", ir.ScalarType(DataType.INDEX), span)
+    shape = [ir.ConstInt(32, DataType.INDEX, span), ir.ConstInt(256, DataType.INDEX, span)]
+
+    def partial(name: str) -> ir.Var:
+        view = ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=[valid_rows, shape[1]])
+        return ir.Var(name, ir.TensorType(shape, DataType.FP32, tensor_view=view), span)
+
+    result_type = ir.op.tensor.add(partial("lhs"), partial("rhs")).type
+
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.tensor_view is not None
+    assert result_type.tensor_view.valid_shape[0] is valid_rows
+    assert isinstance(result_type.tensor_view.valid_shape[1], ir.ConstInt)
+    assert result_type.tensor_view.valid_shape[1].value == 256
+
+
+@pytest.mark.parametrize("case", ["broadcast", "different_valid", "unproven_symbolic"])
+def test_tensor_binary_elementwise_does_not_infer_unproven_valid_shape(case):
+    """Only an exact, provably equal effective region may be propagated."""
+    span = ir.Span.unknown()
+    lhs = _partial_tensor_var([32, 256], [28, 250], name="lhs")
+    if case == "broadcast":
+        rhs = _partial_tensor_var([32, 1], [28, 1], name="rhs")
+    elif case == "different_valid":
+        rhs = _partial_tensor_var([32, 256], [27, 250], name="rhs")
+    else:
+        lhs_rows = ir.Var("lhs_rows", ir.ScalarType(DataType.INDEX), span)
+        rhs_rows = ir.Var("rhs_rows", ir.ScalarType(DataType.INDEX), span)
+        lhs = _partial_tensor_var([32, 256], [lhs_rows, 250], name="lhs")
+        rhs = _partial_tensor_var([32, 256], [rhs_rows, 250], name="rhs")
+
+    result_type = ir.op.tensor.add(lhs, rhs).type
+
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.tensor_view is None
+
+
+@pytest.mark.parametrize("op_name", ["part_add", "part_mul", "part_max", "part_min"])
+def test_tensor_part_ops_keep_their_existing_valid_shape_contract(op_name):
+    """Partial-combine operators need a separate dominance/union rule."""
+    lhs = _partial_tensor_var([32, 256], [28, 250], name="lhs")
+    rhs = _partial_tensor_var([32, 256], [28, 250], name="rhs")
+
+    result_type = getattr(ir.op.tensor, op_name)(lhs, rhs).type
+
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.tensor_view is None
+
+
+@pytest.mark.parametrize("rhs_kind", ["tensor", "scalar"])
+def test_tensor_cmp_does_not_claim_partial_valid_shape_before_lowering_support(rhs_kind):
+    """Comparison lowering currently materializes full one/zero value tiles."""
+    lhs = _partial_tensor_var([32, 256], [28, 250], name="lhs")
+    rhs = _partial_tensor_var([32, 256], [28, 250], name="rhs") if rhs_kind == "tensor" else 0.0
+
+    result_type = ir.op.tensor.cmp(lhs, rhs, cmp_type=0).type
+
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.tensor_view is None
+
+
+@pytest.mark.parametrize("op_name", ["adds", "ands", "shls"])
+def test_tensor_scalar_elementwise_does_not_preserve_distributed_valid_shape(op_name):
+    """Direct distributed windows need a separate valid-shape lowering contract."""
+    window = _partial_distributed_tensor_var([32, 256], [28, 250], dtype=DataType.INT32)
+
+    result_type = getattr(ir.op.tensor, op_name)(window, 1).type
+
+    assert isinstance(result_type, ir.TensorType)
+    assert not isinstance(result_type, ir.DistributedTensorType)
+    assert result_type.tensor_view is None
+
+
+@pytest.mark.parametrize("op_name", ["add", "and_", "shl"])
+@pytest.mark.parametrize("distributed_side", ["lhs", "rhs"])
+def test_tensor_binary_elementwise_does_not_preserve_distributed_valid_shape(op_name, distributed_side):
+    """Matching distributed windows remain excluded for arithmetic, bitwise, and shift ops."""
+    make_lhs = _partial_distributed_tensor_var if distributed_side == "lhs" else _partial_tensor_var
+    make_rhs = _partial_distributed_tensor_var if distributed_side == "rhs" else _partial_tensor_var
+    lhs = make_lhs([32, 256], [28, 250], name="lhs", dtype=DataType.INT32)
+    rhs = make_rhs([32, 256], [28, 250], name="rhs", dtype=DataType.INT32)
+
+    result_type = getattr(ir.op.tensor, op_name)(lhs, rhs).type
+
+    assert isinstance(result_type, ir.TensorType)
+    assert not isinstance(result_type, ir.DistributedTensorType)
+    assert result_type.tensor_view is None
+
+
 def test_tensor_cast_preserves_valid_shape_and_changes_dtype():
     """tensor.cast changes only the element type; the valid region is untouched."""
     call = ir.op.tensor.cast(_partial_tensor_var([64, 128], [64, 40]), target_type=DataType.FP16)
@@ -935,22 +1058,26 @@ def test_tensor_abs_int_dtype():
 # =============================================================================
 
 
-def test_tensor_recip():
-    """Test tensor.recip operation."""
+@pytest.mark.parametrize("dtype", [DataType.FP16, DataType.FP32])
+@pytest.mark.parametrize("high_precision", [False, True])
+def test_tensor_recip_contract_and_precision(dtype, high_precision):
+    """Both reciprocal precision modes preserve each supported float dtype."""
     span = ir.Span.unknown()
     dim64 = ir.ConstInt(64, DataType.INT32, span)
     dim128 = ir.ConstInt(128, DataType.INT32, span)
-    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
+    tensor_type = ir.TensorType([dim64, dim128], dtype)
     tensor_var = ir.Var("t", tensor_type, span)
 
-    call = ir.op.tensor.recip(tensor_var)
+    call = ir.op.tensor.recip(tensor_var, high_precision=high_precision)
 
     assert isinstance(call, ir.Call)
     assert call.op.name == ir.get_op("tensor.recip").name
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
-    assert result_type.dtype == DataType.FP16
+    assert result_type.dtype == dtype
     assert len(result_type.shape) == 2
+    expected_kwargs = {"high_precision": True} if high_precision else {}
+    assert dict(call.kwargs) == expected_kwargs
 
 
 def test_tensor_recip_int_promotes_to_fp32():
@@ -965,6 +1092,16 @@ def test_tensor_recip_int_promotes_to_fp32():
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP32
+
+
+@pytest.mark.parametrize("dtype", [DataType.INT32, DataType.BF16])
+def test_tensor_recip_rejects_unsupported_high_precision_dtype(dtype):
+    """The PTOAS high-precision reciprocal template only supports FP16 and FP32 inputs."""
+    span = ir.Span.unknown()
+    tensor_var = ir.Var("t", ir.TensorType([64, 128], dtype), span)
+
+    with pytest.raises(ValueError, match=r"high_precision only for FP16 or FP32"):
+        ir.op.tensor.recip(tensor_var, high_precision=True)
 
 
 def test_tensor_sqrt():
@@ -1541,6 +1678,7 @@ def test_tensor_precision_apis_keep_positional_span_compatibility():
     calls = (
         tensor.div(lhs, rhs, span),
         tensor.log(lhs, span),
+        tensor.recip(lhs, span),
     )
 
     assert all(call.span.filename == "tensor_precision_compat.py" for call in calls)
@@ -2456,11 +2594,18 @@ def test_tensor_slice_pad_without_valid_shape_warns():
 # ---------------------------------------------------------------------------
 
 
-def _partial_tensor_var(shape, valid_shape, pad=ir.PadValue.null, name="t"):
+def _partial_tensor_var(shape, valid_shape, pad=ir.PadValue.null, name="t", dtype=DataType.FP32):
     """Build a tensor Var whose tensor_view narrows it to `valid_shape`."""
     span = ir.Span.unknown()
     view = ir.TensorView(stride=[], layout=ir.TensorLayout.ND, valid_shape=valid_shape, pad=pad)
-    return ir.Var(name, ir.TensorType(shape, DataType.FP32, tensor_view=view), span)
+    return ir.Var(name, ir.TensorType(shape, dtype, tensor_view=view), span)
+
+
+def _partial_distributed_tensor_var(shape, valid_shape, name="t", dtype=DataType.FP32):
+    """Build a direct distributed-window Var with a partial valid region."""
+    span = ir.Span.unknown()
+    view = ir.TensorView(stride=[], layout=ir.TensorLayout.ND, valid_shape=valid_shape)
+    return ir.Var(name, ir.DistributedTensorType(shape, dtype, None, view), span)
 
 
 def _valid_of(result_type):
@@ -4809,6 +4954,20 @@ _BITWISE_SCALAR_DISPATCH = [
     ("shr", "tensor.shrs"),
 ]
 
+_BITWISE_BINARY_VALID_SHAPE_OPS = [
+    ("and_", "tensor.and"),
+    ("or_", "tensor.or"),
+    ("shl", "tensor.shl"),
+    ("shr", "tensor.shr"),
+]
+
+_BITWISE_SCALAR_VALID_SHAPE_OPS = [
+    ("ands", "tensor.ands"),
+    ("ors", "tensor.ors"),
+    ("shls", "tensor.shls"),
+    ("shrs", "tensor.shrs"),
+]
+
 
 @pytest.mark.parametrize(("builder_name", "op_name"), _BITWISE_BINARY_OPS)
 def test_tensor_bitwise_binary(builder_name, op_name):
@@ -4826,6 +4985,32 @@ def test_tensor_bitwise_binary(builder_name, op_name):
     assert _const_int_values(result_type.shape) == [64, 128]
 
 
+@pytest.mark.parametrize(("builder_name", "op_name"), _BITWISE_BINARY_VALID_SHAPE_OPS)
+def test_tensor_bitwise_binary_preserves_matching_partial_valid_shape(builder_name, op_name):
+    """Exact-shape integer operands keep their shared partial region."""
+    lhs = _partial_tensor_var([64, 128], [60, 120], name="lhs", dtype=DataType.INT32)
+    rhs = _partial_tensor_var([64, 128], [60, 120], name="rhs", dtype=DataType.INT32)
+
+    call = getattr(tensor, builder_name)(lhs, rhs)
+    assert call.op.name == op_name
+    result_type = call.type
+
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.tensor_view is not None
+    assert _const_int_values(result_type.tensor_view.valid_shape) == [60, 120]
+
+
+def test_tensor_xor_does_not_claim_partial_valid_shape_before_scratch_support():
+    """XOR lowering creates a full-valid scratch tile on current backends."""
+    lhs = _partial_tensor_var([64, 128], [60, 120], name="lhs", dtype=DataType.INT32)
+    rhs = _partial_tensor_var([64, 128], [60, 120], name="rhs", dtype=DataType.INT32)
+
+    result_type = tensor.xor(lhs, rhs).type
+
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.tensor_view is None
+
+
 @pytest.mark.parametrize(("builder_name", "op_name"), _BITWISE_SCALAR_OPS)
 def test_tensor_bitwise_scalar(builder_name, op_name):
     """Tensor-scalar bitwise/shift ops preserve the tensor's shape and dtype."""
@@ -4841,6 +5026,33 @@ def test_tensor_bitwise_scalar(builder_name, op_name):
     # re-stamped to the tensor's dtype rather than promoting the result.
     assert result_type.dtype == DataType.INT16
     assert _const_int_values(result_type.shape) == [64, 128]
+
+
+@pytest.mark.parametrize(("builder_name", "op_name"), _BITWISE_SCALAR_VALID_SHAPE_OPS)
+def test_tensor_bitwise_scalar_preserves_partial_valid_shape(builder_name, op_name):
+    """The dtype-preserving scalar path must also keep content validity."""
+    span = ir.Span.unknown()
+    view = ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=[60, 120])
+    lhs = ir.Var("lhs", ir.TensorType([64, 128], DataType.INT16, tensor_view=view), span)
+
+    call = getattr(ir.op.tensor, builder_name)(lhs, 4)
+
+    assert call.op.name == op_name
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.INT16
+    assert result_type.tensor_view is not None
+    assert _const_int_values(result_type.tensor_view.valid_shape) == [60, 120]
+
+
+def test_tensor_xors_does_not_claim_partial_valid_shape_before_scratch_support():
+    """Scalar XOR shares the full-valid automatic scratch limitation."""
+    lhs = _partial_tensor_var([64, 128], [60, 120], name="lhs", dtype=DataType.INT16)
+
+    result_type = ir.op.tensor.xors(lhs, 4).type
+
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.tensor_view is None
 
 
 @pytest.mark.parametrize(("builder_name", "expected_op"), _BITWISE_SCALAR_DISPATCH)

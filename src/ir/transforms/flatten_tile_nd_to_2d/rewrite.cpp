@@ -946,6 +946,54 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       continue;
     }
 
+    // ---- tile.assemble into a >2D target: fold the ND offset into the flattened
+    //      (row, col) space. The target/source tiles are rewritten to 2D by their
+    //      defining ops, but the offset is a literal MakeTuple that no Substitute
+    //      touches, so the generic path below would leave an ND offset on a 2D
+    //      tile — which codegen reads positionally (row = elements[0], col =
+    //      elements[1], the rest ignored) and would place the write at the wrong
+    //      address. Same row-major fold tile.load applies to its tensor-rank
+    //      offsets. ----
+    if (IsOp(call, "tile.assemble")) {
+      // Pre-substitution types are the ND ones the user wrote; the fold is
+      // expressed in that ND coordinate space (cf. the tile.store branch above).
+      auto orig_target_type = As<TileType>(call->args_[0]->GetType());
+      if (IsNdTile(orig_target_type)) {
+        // Substitute the offset tuple too, not just the tile operands: its elements
+        // are index expressions that may reference Vars this pass remapped, and
+        // folding the pre-substitution elements would carry a stale SSA reference
+        // into the rebuilt call. The tile.store branch above substitutes every arg
+        // for the same reason.
+        auto offset_tuple = As<MakeTuple>(Substitute(call->args_[2], ctx.var_map));
+        INTERNAL_CHECK_SPAN(offset_tuple, span)
+            << "Internal error: tile.assemble offset must be a literal tuple";
+        INTERNAL_CHECK_SPAN(offset_tuple->elements_.size() == orig_target_type->shape_.size(), span)
+            << "Internal error: ND tile.assemble offset rank must match the target rank "
+               "(guaranteed by PreconditionAnalysis)";
+
+        std::vector<ExprPtr> new_args = {
+            Substitute(call->args_[0], ctx.var_map),
+            Substitute(call->args_[1], ctx.var_map),
+            std::make_shared<MakeTuple>(
+                std::vector<ExprPtr>{
+                    CollapseLeadingOffsetsToRow(offset_tuple->elements_, orig_target_type->shape_, span),
+                    offset_tuple->elements_.back()},
+                span),
+        };
+
+        auto deduced = op_registry.Create("tile.assemble", new_args, call->kwargs_, span);
+        auto new_call =
+            std::make_shared<Call>(deduced->op_, deduced->args_, deduced->kwargs_, deduced->attrs_,
+                                   WithCarriedMemRef(deduced->GetType(), assign), deduced->span_);
+        auto new_var =
+            std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
+        result.push_back(std::make_shared<AssignStmt>(new_var, new_call, assign->span_));
+        ctx.Insert(assign->var_, new_var);
+        continue;
+      }
+      // Already-2D target: fall through to the generic re-create path below.
+    }
+
     // ---- All other tile ops (including tile.reshape) and non-tile ops: substitute args ----
     {
       std::vector<ExprPtr> new_args;

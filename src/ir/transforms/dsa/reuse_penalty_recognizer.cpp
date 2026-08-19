@@ -33,7 +33,6 @@
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
-#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/dsa/allocation_plan.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
@@ -130,26 +129,6 @@ bool SameAllocation(const VarPtr& first, const VarPtr& second) {
   const auto second_tile = second ? As<TileType>(second->GetType()) : nullptr;
   if (!first_tile || !second_tile || !first_tile->memref_ || !second_tile->memref_) return false;
   return GetDefinedMemRef(first_tile)->base_.get() == GetDefinedMemRef(second_tile)->base_.get();
-}
-
-bool SameAllocationOffset(const VarPtr& first, const VarPtr& second) {
-  const auto first_tile = first ? As<TileType>(first->GetType()) : nullptr;
-  const auto second_tile = second ? As<TileType>(second->GetType()) : nullptr;
-  if (!first_tile || !second_tile || !first_tile->memref_ || !second_tile->memref_) return false;
-  const MemRefPtr first_memref = GetDefinedMemRef(first_tile);
-  const MemRefPtr second_memref = GetDefinedMemRef(second_tile);
-  return first_memref->base_.get() == second_memref->base_.get() &&
-         AreExprsEqual(first_memref->byte_offset_, second_memref->byte_offset_);
-}
-
-bool HasSameEffectiveLayout(const VarPtr& first, const VarPtr& second) {
-  const auto first_tile = first ? As<TileType>(first->GetType()) : nullptr;
-  const auto second_tile = second ? As<TileType>(second->GetType()) : nullptr;
-  if (!first_tile || !second_tile) return false;
-  const TileView first_view = tile_view_semantics::GetEffectiveTileView(*first_tile);
-  const TileView second_view = tile_view_semantics::GetEffectiveTileView(*second_tile);
-  return first_view.blayout == second_view.blayout && first_view.slayout == second_view.slayout &&
-         first_view.fractal == second_view.fractal;
 }
 
 using TupleResultElements = std::unordered_map<const Var*, std::map<int, VarPtr>>;
@@ -303,21 +282,8 @@ class AccessCollector : public IRVisitor {
     return SameAllocation(target_var, result_var);
   }
 
-  static bool IsProvablyElidedTileMove(const CallPtr& call, const std::vector<VarPtr>& results) {
-    if (!IsOp(call, "tile.move") || call->args_.size() != 1 || results.size() != 1) return false;
-    const VarPtr source = AsVarLike(call->args_.front());
-    const VarPtr& destination = results.front();
-    return SameAllocationOffset(source, destination) && HasSameEffectiveLayout(source, destination);
-  }
-
   static ExecutionMemoryAccessEvidence ResolveAccessEvidence(const CallPtr& call,
                                                              const std::vector<VarPtr>& results) {
-    // Codegen aliases this result to its source and emits no pto.tmov. Treat
-    // only semantic same-allocation moves as no-access here: opportunistic
-    // address equality is a placement decision and cannot be assumed while
-    // recognizing candidate edges.
-    if (IsProvablyElidedTileMove(call, results)) return ExecutionMemoryAccessEvidence::NoAccess;
-
     const auto& registry = OpRegistry::GetInstance();
     if (!registry.IsRegistered(call->op_->name_)) return ExecutionMemoryAccessEvidence::Unknown;
 

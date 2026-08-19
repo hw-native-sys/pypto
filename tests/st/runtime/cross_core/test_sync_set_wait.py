@@ -58,9 +58,19 @@ def sync_set_wait_odd_shape(
     weight: pl.Tensor[[K, N], pl.FP32],
     transfer: pl.InOut[pl.Tensor[[CUBE_PHYSICAL_ROWS, K], pl.FP32]],
     ffts_workspace: pl.Tensor[[FFTS_WORKSPACE_ELEMENTS], pl.INT64],
-    output: pl.Out[pl.Tensor[[CUBE_PHYSICAL_ROWS, N], pl.FP32]],
+    output: pl.InOut[pl.Tensor[[CUBE_PHYSICAL_ROWS, N], pl.FP32]],
 ):
-    """Uneven 2/3-row AIV split followed by one AIC consumer."""
+    """Uneven 2/3-row AIV split followed by one AIC consumer.
+
+    ``output`` is ``InOut`` rather than ``Out`` because the kernel fills only the
+    first ``ROWS`` rows of a ``CUBE_PHYSICAL_ROWS``-row tensor while the assertion
+    compares the whole thing against a zero-filled golden. Those trailing rows
+    come from the caller's buffer, so the kernel does depend on the incoming
+    contents. A pure ``Out`` tensor is not staged to the device, which would
+    leave them holding allocator garbage. The sibling
+    ``sync_set_wait_odd_last_axis`` keeps ``Out``: it only ever asserts on
+    ``output[:LR_ROWS]``, the region it actually writes.
+    """
     for _ in pl.spmd(1, name_hint="sync_set_wait"):
         pl.system.set_ffts(ffts_workspace)
         for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):

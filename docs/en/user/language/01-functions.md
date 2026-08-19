@@ -243,14 +243,13 @@ specialization key returns the identical instance.
 post-pass `ir.Program`, with no code generation, no `ptoas`, no artifacts, and no cache
 write. Use it to read lowered IR; use `compile()` when codegen itself is what you want to
 check. Both accept `config=RunConfig(...)`, but `lower()` ignores the runtime and artifact
-fields. Details of the compile options and the runtime surface belong to the execution
-chapter, which is not written yet — for now see
-[Compiling a Program](../01-language_guide.md).
+fields. Compile options are in [Compiling](../execution/00-compile.md) and the runtime surface in
+[Running](../execution/01-run.md).
 
 ### External C++ kernels
 
 A hand-written C++ kernel can be called like any other function. See
-[Integrating Hand-Written C++ Kernels](../../dev/language/01-external-kernels.md).
+[Integrating Hand-Written C++ Kernels](../../dev/language/04-external-kernels.md).
 
 ## Edge Cases
 
@@ -269,10 +268,15 @@ A hand-written C++ kernel can be called like any other function. See
 | **`auto_scope=False` rejected** | Used on `.incore` / `.opaque` | Put it on the entry or on an `.inline` helper |
 | **`self` missing from a `@pl.program` method** | Every method needs it | Add `self`; it is stripped from the IR |
 
+## Worked example
+
+`examples/utils/cross_function_calls.py` — `@pl.jit.inline` helpers auto-discovered as
+deps of a `@pl.jit` entry and spliced at the call site.
+
 ## See Also
 
 - [Control Flow](02-control-flow.md) — loops and conditionals inside these bodies.
 - [Scopes and Placement](04-scopes.md) — `pl.at` and the other placement scopes.
 - [Quickstart](../02-quickstart.md) — the same decorators in a worked example.
 - [InlineFunctions](../../dev/passes/01-inline_functions.md) — how `Inline` bodies are spliced.
-- [Integrating Hand-Written C++ Kernels](../../dev/language/01-external-kernels.md) — calling external kernels.
+- [Integrating Hand-Written C++ Kernels](../../dev/language/04-external-kernels.md) — calling external kernels.

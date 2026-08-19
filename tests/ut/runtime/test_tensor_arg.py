@@ -11,10 +11,10 @@
 orchestration code.
 
 It must:
-- wrap a worker-resident :class:`DeviceTensor` as
-  ``Tensor.make(..., child_memory=True)``;
+- derive an address-free wire ``Tensor`` from a worker-resident
+  :class:`DeviceTensor`'s retained ``Buffer``;
 - pass an already-built ``Tensor`` through unchanged;
-- delegate a host ``torch.Tensor`` to simpler's ``make_tensor_arg``.
+- delegate a host ``torch.Tensor`` to simpler's worker-aware wire helper.
 """
 
 from unittest.mock import MagicMock, patch
@@ -36,57 +36,123 @@ else:
 pytestmark = pytest.mark.skipif(not _has_simpler, reason="make_tensor_arg requires the simpler package")
 
 
-def test_device_tensor_produces_child_memory_true():
-    captured: dict = {"make_calls": []}
+def test_device_tensor_derives_wire_tensor_from_retained_buffer():
+    captured: dict = {"tensor_calls": []}
 
-    def _make(*, data, shapes, dtype, child_memory=False):
-        captured["make_calls"].append(
-            {"data": data, "shapes": tuple(shapes), "dtype": dtype, "child_memory": child_memory}
-        )
-        return MagicMock(name=f"Tensor(0x{data:x})")
+    class FakeBuffer:
+        base = 0xABCD
 
-    dt = DeviceTensor(0xABCD, (8, 16), torch.float16)
+        def tensor(self, *, shapes, dtype):
+            captured["tensor_calls"].append({"shapes": tuple(shapes), "dtype": dtype})
+            return MagicMock(name="wire_tensor")
 
-    with (
-        patch("pypto.runtime.task_interface.Tensor.make", side_effect=_make),
-        patch(
-            "pypto.runtime.task_interface.torch_dtype_to_datatype",
-            side_effect=lambda d: f"<dtype:{d}>",
-        ),
+    buffer = FakeBuffer()
+    dt = DeviceTensor(buffer.base, (8, 16), torch.float16, buffer=buffer)
+    worker = MagicMock(name="worker")
+    owner = MagicMock(name="pypto_owner")
+
+    from pypto.runtime.tensor_arg import bind_tensor_arg_owner, make_tensor_arg  # noqa: PLC0415
+
+    bind_tensor_arg_owner(worker, owner)
+
+    with patch(
+        "pypto.runtime.task_interface.torch_dtype_to_datatype",
+        side_effect=lambda d: f"<dtype:{d}>",
     ):
-        from pypto.runtime.tensor_arg import make_tensor_arg  # noqa: PLC0415
+        make_tensor_arg(worker, dt)
 
-        make_tensor_arg(dt)
-
-    assert len(captured["make_calls"]) == 1
-    call = captured["make_calls"][0]
-    assert call["data"] == 0xABCD
+    owner._require_owned_resident_tensor.assert_called_once_with(dt, "Tensor argument")
+    assert len(captured["tensor_calls"]) == 1
+    call = captured["tensor_calls"][0]
     assert call["shapes"] == (8, 16)
-    assert call["child_memory"] is True
     assert call["dtype"] == "<dtype:torch.float16>"
 
 
-def test_continuous_tensor_passes_through():
-    from pypto.runtime.task_interface import (  # noqa: PLC0415
-        Tensor,  # pyright: ignore[reportAttributeAccessIssue]
-        torch_dtype_to_datatype,  # pyright: ignore[reportAttributeAccessIssue]
-    )
+def test_retained_buffer_is_rejected_without_pypto_owner_binding():
+    class FakeBuffer:
+        base = 0xABCD
+
+        def tensor(self, *, shapes, dtype):
+            raise AssertionError("an unowned Buffer must be rejected before tensor()")
+
     from pypto.runtime.tensor_arg import make_tensor_arg  # noqa: PLC0415
 
-    ct = Tensor.make(0x1000, (4,), torch_dtype_to_datatype(torch.float32), child_memory=True)
-    assert make_tensor_arg(ct) is ct
+    buffer = FakeBuffer()
+    dt = DeviceTensor(buffer.base, (4,), torch.float32, buffer=buffer)
+    with pytest.raises(TypeError, match="one-shot or raw simpler Worker"):
+        make_tensor_arg(MagicMock(name="unbound_worker"), dt)
+
+
+def test_owner_liveness_failure_prevents_wire_tensor_creation():
+    class FakeBuffer:
+        base = 0xABCD
+
+        def tensor(self, *, shapes, dtype):
+            raise AssertionError("a stale Buffer must be rejected before tensor()")
+
+    from pypto.runtime.tensor_arg import bind_tensor_arg_owner, make_tensor_arg  # noqa: PLC0415
+
+    worker = MagicMock(name="worker")
+    owner = MagicMock(name="pypto_owner")
+    owner._require_owned_resident_tensor.side_effect = ValueError("not a live allocation")
+    bind_tensor_arg_owner(worker, owner)
+    buffer = FakeBuffer()
+    dt = DeviceTensor(buffer.base, (4,), torch.float32, buffer=buffer)
+
+    with pytest.raises(ValueError, match="not a live allocation"):
+        make_tensor_arg(worker, dt)
+
+
+def test_stale_raw_backend_is_rejected_before_owner_validation():
+    class FakeBuffer:
+        base = 0xABCD
+
+        def tensor(self, *, shapes, dtype):
+            raise AssertionError("a stale backend must be rejected before tensor()")
+
+    from pypto.runtime.tensor_arg import bind_tensor_arg_owner, make_tensor_arg  # noqa: PLC0415
+
+    old_worker = MagicMock(name="old_worker")
+    owner = MagicMock(name="pypto_owner")
+    bind_tensor_arg_owner(old_worker, owner)
+    owner._tensor_arg_worker = MagicMock(name="replacement_worker")
+    buffer = FakeBuffer()
+    dt = DeviceTensor(buffer.base, (4,), torch.float32, buffer=buffer)
+
+    with pytest.raises(ValueError, match="stale simpler Worker backend"):
+        make_tensor_arg(old_worker, dt)
+    owner._require_owned_resident_tensor.assert_not_called()
+
+
+def test_raw_pointer_device_tensor_is_rejected_for_wire_dispatch():
+    from pypto.runtime.tensor_arg import make_tensor_arg  # noqa: PLC0415
+
+    with pytest.raises(TypeError, match="raw-pointer DeviceTensor"):
+        make_tensor_arg(MagicMock(name="worker"), DeviceTensor(0x1000, (4,), torch.float32))
+
+
+def test_wire_tensor_passes_through():
+    from pypto.runtime.tensor_arg import make_tensor_arg  # noqa: PLC0415
+
+    class FakeWireTensor:
+        pass
+
+    wire = FakeWireTensor()
+    with patch("pypto.runtime.task_interface.Tensor", FakeWireTensor):
+        assert make_tensor_arg(MagicMock(name="worker"), wire) is wire
 
 
 def test_host_tensor_delegates_to_simpler():
     host = torch.zeros(4, 4, dtype=torch.float32)
     sentinel = MagicMock(name="Tensor(host)")
+    worker = MagicMock(name="worker")
 
-    with patch("pypto.runtime.task_interface.make_tensor_arg", return_value=sentinel) as impl:
+    with patch("simpler_setup.torch_interop.make_tensor_arg", return_value=sentinel) as impl:
         from pypto.runtime.tensor_arg import make_tensor_arg  # noqa: PLC0415
 
-        result = make_tensor_arg(host)
+        result = make_tensor_arg(worker, host)
 
-    impl.assert_called_once_with(host)
+    impl.assert_called_once_with(worker, host)
     assert result is sentinel
 
 

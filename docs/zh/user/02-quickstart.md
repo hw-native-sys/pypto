@@ -29,9 +29,20 @@ import torch
 
 ## Quickstart：逐元素加法
 
+<!-- doctest: setup -->
 ```python
 import pypto.language as pl
+import torch
+from pypto.runtime import RunConfig
 
+CFG = RunConfig(platform="__PLATFORM__")
+torch.manual_seed(0)
+A = torch.randn(128, 128, dtype=torch.float32)
+B = torch.randn(128, 128, dtype=torch.float32)
+```
+
+<!-- doctest: run -->
+```python
 @pl.jit
 def add(
     a: pl.Tensor[[128, 128], pl.FP32],
@@ -42,8 +53,13 @@ def add(
         out[:] = pl.add(a, b)
     return out
 
+
 compiled = add.compile()
 print(f"Generated code in: {compiled.output_dir}")
+
+out = torch.zeros(128, 128, dtype=torch.float32)
+add(A, B, out, config=CFG)
+torch.testing.assert_close(out, A + B, rtol=1e-4, atol=1e-4)
 ```
 
 | 行 | 作用 |
@@ -75,6 +91,7 @@ print(f"Generated code in: {compiled.output_dir}")
 中间值就是普通的 Python 名字。它们不需要标注，也不需要为它们声明缓冲区 —— 这条链需要什么，
 编译器就分配什么：
 
+<!-- doctest: run -->
 ```python
 @pl.jit
 def add_then_square(
@@ -86,6 +103,11 @@ def add_then_square(
         s = pl.add(a, b)
         out[:] = pl.mul(s, s)
     return out
+
+
+out = torch.zeros(128, 128, dtype=torch.float32)
+add_then_square(A, B, out, config=CFG)
+torch.testing.assert_close(out, (A + B) * (A + B), rtol=1e-4, atol=1e-4)
 ```
 
 形状与 dtype 要**内联写在标注里**。模块级别名（`T = pl.Tensor[[128, 128], pl.FP32]`）**不行**：

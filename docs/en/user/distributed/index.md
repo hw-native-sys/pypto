@@ -28,7 +28,7 @@ of these same primitives — the `pld.tensor.*` collectives (`allreduce`,
 > for the full model.
 
 The distributed chapter covers L3. L2 is covered in the
-[Language Guide](../01-language_guide.md).
+[Compiling](../execution/00-compile.md).
 
 ## Glossary
 

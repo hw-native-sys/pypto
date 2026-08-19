@@ -33,9 +33,9 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/scalar_expr.h"
-#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 #include "src/backend/common/pto_ops_internal.h"
@@ -83,7 +83,6 @@ static bool RequiresRowMajorLayout(std::string_view op_name) {
       "tile.abs",
       "tile.exp",
       "tile.sqrt",
-      "tile.recip",
       "tile.not",
       "tile.prelu",
       "tile.relu",
@@ -202,8 +201,8 @@ static std::string MakeTileSelCodegenPTO(const CallPtr& op, codegen::CodegenBase
 // address before codegen (required at --pto-level=level3).
 static std::string MakeTileTransposeCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
-  CHECK(op->args_.size() == 4) << "tile.transpose requires 4 arguments (src, axis0, axis1, tmp), got "
-                               << op->args_.size();
+  INTERNAL_CHECK_SPAN(op->args_.size() == 4, op->span_)
+      << "tile.transpose requires 4 arguments (src, axis0, axis1, tmp), got " << op->args_.size();
 
   std::string src_ssa = codegen.GetExprAsCode(op->args_[0]);
   std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
@@ -237,8 +236,8 @@ struct SingleOperandOp {
 static std::string MakeSingleOperandCodegenPTO(const SingleOperandOp& spec, const CallPtr& op,
                                                codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
-  CHECK(op->args_.size() == 2) << spec.ir_name << " requires 2 arguments" << spec.arg_desc << ", got "
-                               << op->args_.size();
+  INTERNAL_CHECK_SPAN(op->args_.size() == 2, op->span_)
+      << spec.ir_name << " requires 2 arguments" << spec.arg_desc << ", got " << op->args_.size();
   const ir::ExprPtr& operand = op->args_[spec.operand_idx];
   EmitInsOuts(codegen, spec.pto_op,
               {{codegen.GetExprAsCode(operand), codegen.GetExprTypeAnnotation(operand)}});
@@ -265,7 +264,7 @@ static std::string MakeModalCodegenPTO(const std::string& pto_op_name, size_t ar
 
 // Emit the default PTO form without an explicit precision attribute, or append
 // the exact PTOAS enum attribute after outs(...) for high-precision mode.
-// Unlike cmp/cvt attributes, the tdiv/tlog assembly formats place their
+// Unlike cmp/cvt attributes, precision-op assembly formats place their
 // attr-dict after the complete ins()/outs() clause.
 static std::string MakePrecisionCodegenPTO(const std::string& pto_op_name, size_t arity,
                                            const char* attr_kind, const CallPtr& op,
@@ -308,8 +307,9 @@ static std::string MakeAssignCodegenPTO(const std::string& pto_op_name, const Ca
 static std::string MakeCiCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
                                     codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
-  CHECK(op->args_.size() == 2) << "Operation:[" << pto_op_name
-                               << "] requires 2 arguments (start, shape), but got " << op->args_.size();
+  INTERNAL_CHECK_SPAN(op->args_.size() == 2, op->span_)
+      << "Operation:[" << pto_op_name << "] requires 2 arguments (start, shape), but got "
+      << op->args_.size();
   bool descending = op->GetKwarg<bool>("descending");
   std::string src = codegen.GetExprAsCode(op->args_[0]);
   std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
@@ -334,7 +334,7 @@ static std::string MakeCiCodegenPTO(const std::string& pto_op_name, const CallPt
 // Shape and optional valid_shape operands are type-only and are not emitted.
 static std::string MakeTriCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
-  CHECK(op->args_.size() == 2 || op->args_.size() == 3)
+  INTERNAL_CHECK_SPAN(op->args_.size() == 2 || op->args_.size() == 3, op->span_)
       << "Operation:[pto.ttri] requires 2 or 3 arguments (diagonal, shape, [valid_shape]), but got "
       << op->args_.size();
   auto result_type = As<ir::TileType>(op->GetType());
@@ -404,7 +404,7 @@ static std::string MakeGatherbCodegenPTO(const CallPtr& op, codegen::CodegenBase
 static std::string MakeRandomCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
                                         codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
-  CHECK(op->args_.size() == 7 || op->args_.size() == 8)
+  INTERNAL_CHECK_SPAN(op->args_.size() == 7 || op->args_.size() == 8, op->span_)
       << "Operation:[" << pto_op_name
       << "] requires 7 or 8 arguments (key0, key1, counter0, counter1, counter2, "
          "counter3, shape, [valid_shape]), but got "
@@ -445,8 +445,8 @@ static std::string MakeRandomCodegenPTO(const std::string& pto_op_name, const Ca
 static std::string MakePrintCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
                                        codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
-  CHECK(op->args_.size() == 1) << "Operation:" << pto_op_name << "] requires 1 argument, but got "
-                               << op->args_.size();
+  INTERNAL_CHECK_SPAN(op->args_.size() == 1, op->span_)
+      << "Operation:" << pto_op_name << "] requires 1 argument, but got " << op->args_.size();
   std::string src = codegen.GetExprAsCode(op->args_[0]);
   codegen.Emit(pto_op_name + " ins(" + src + " | !pto.partition_tensor_view<MxNxdtype>)");
   return "";
@@ -612,7 +612,6 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.exp",             "pto.texp",             1},
     {"tile.sqrt",            "pto.tsqrt",            1},
     // tile.rsqrt is registered with a custom codegen handler below (supports 1 or 2 args).
-    {"tile.recip",           "pto.trecip",           1},
     {"tile.neg",             "pto.tneg",             1},
     {"tile.not",             "pto.tnot",             1},
     {"tile.relu",            "pto.trelu",            1},
@@ -678,7 +677,7 @@ static const SimpleOpEntry kSimpleOps[] = {
     // tile.gemv_acc has custom codegen (in-place accumulation)
     // Data movement/layout operations
     {"tile.concat",          "pto.tconcat",          2},
-    // tile.move has custom codegen (no-op elision for same-space same-address moves)
+    // tile.move has custom codegen (PTOAS same-handle elision and baked-address validation)
     {"tile.move_fp",         "pto.tmov.fp",          2},
     // tile.transpose has custom codegen (MakeTileTransposeCodegenPTO): pto.ttrans needs
     // ins(%src, %tmp : tile_type, tile_type) where %tmp is a scratch workspace tile, NOT
@@ -756,6 +755,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
   };
   register_precision_op("tile.div", "pto.tdiv", 2, "div_precision");
   register_precision_op("tile.log", "pto.tlog", 1, "log_precision");
+  register_precision_op("tile.recip", "pto.trecip", 1, "recip_precision");
 
   // tile.row_expand_add follows the PTOAS overloads with and without tmp.
   // Its row-sensitive layout contract is validated by the IR op: the generic
@@ -764,31 +764,30 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
     auto reg_entry = backend.RegisterOp("tile.row_expand_add");
     reg_entry.f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       const size_t arity = op->args_.size();
-      CHECK(arity == 2 || arity == 3) << "tile.row_expand_add requires 2 or 3 arguments, but got " << arity;
+      INTERNAL_CHECK_SPAN(arity == 2 || arity == 3, op->span_)
+          << "tile.row_expand_add requires 2 or 3 arguments, but got " << arity;
       return MakeNaryCodegenPTO("pto.trowexpandadd", arity, op, codegen);
     });
   }
 
-  // tile.move → pto.tmov with no-op elision.
-  // When MemoryReuse inserts a tile.move between two MemRefs that end up at the
-  // same physical address after AllocateMemoryAddr (e.g. acc→acc at the same Acc
-  // offset), the move is a no-op. Elide it to avoid emitting pto.tmov with
-  // unsupported same-space address pairs (fixes #1310).
+  // tile.move → pto.tmov.
   //
-  // Do NOT elide when TileView layouts, padding, or compact representations
-  // differ (e.g. A5 V→C ND→NZ adapt before tpush_to_aic). MemoryReuse may still
-  // co-locate the converted tile with its source at the same address; eliding
-  // then drops the real representation change and silently preserves the source
-  // format.
+  // tile.move is registered not_inplace_safe(), so the PyPTO and DSA-RP
+  // planners must assign distinct source and destination addresses. Validate
+  // that invariant here as well: explicit MemRef bindings and hand-built IR can
+  // bypass planner-created no-alias constraints, and TMOV does not support an
+  // in-place same-address instruction.
   reg("tile.move", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
     auto& codegen = AsPto(codegen_base);
-    CHECK(op->args_.size() == 1) << "tile.move requires 1 argument, got " << op->args_.size();
+    INTERNAL_CHECK_SPAN(op->args_.size() == 1, op->span_)
+        << "tile.move requires 1 argument, got " << op->args_.size();
 
-    // Under memory_planner=PtoAS there is no baked address: AllocateMemoryAddr is
-    // skipped and every `byte_offset_` is still the -1 sentinel, so the offset
-    // comparison below would see `-1 == -1` and elide EVERY move — including the
-    // loop-carry write-back YieldFixupMutator inserts. There, two vars denote one
-    // buffer exactly when they collapsed onto the same tile_buf handle.
+    // Under memory_planner=PtoAS there is no baked address (AllocateMemoryAddr
+    // and the reuse-packer's not_inplace_safe gate are both skipped). A
+    // redundant loop-carry write-back that YieldFixupMutator inserts collapses
+    // onto a single tile_buf handle, and PTO codegen re-points the producer at
+    // the phi handle (#1956/#1985). Elide only that exact case — src and dst
+    // denote one handle — so we never emit an illegal same-handle pto.tmov.
     if (!codegen.EmitTileAddr()) {
       std::string src_ssa = codegen.GetExprAsCode(op->args_[0]);
       if (!src_ssa.empty() && src_ssa == codegen.GetCurrentResultTarget()) {
@@ -798,32 +797,25 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
       return std::string("");
     }
 
-    auto src_var = AsVarLike(op->args_[0]);
-    auto dst_var = codegen.GetCurrentResultVar();
+    const auto src_var = AsVarLike(op->args_[0]);
+    const auto dst_var = codegen.GetCurrentResultVar();
     if (src_var && dst_var) {
-      auto src_tile = As<ir::TileType>(src_var->GetType());
-      auto dst_tile = As<ir::TileType>(dst_var->GetType());
+      const auto src_tile = As<ir::TileType>(src_var->GetType());
+      const auto dst_tile = As<ir::TileType>(dst_var->GetType());
       if (src_tile && dst_tile && src_tile->memref_.has_value() && dst_tile->memref_.has_value()) {
-        auto src_space = src_tile->GetMemorySpace();
-        auto dst_space = dst_tile->GetMemorySpace();
+        const auto src_space = src_tile->GetMemorySpace();
+        const auto dst_space = dst_tile->GetMemorySpace();
         if (src_space.has_value() && dst_space.has_value() && *src_space == *dst_space) {
-          auto src_offset = As<ir::ConstInt>((*src_tile->memref_)->byte_offset_);
-          auto dst_offset = As<ir::ConstInt>((*dst_tile->memref_)->byte_offset_);
-          if (src_offset && dst_offset && src_offset->value_ == dst_offset->value_) {
-            const auto src_view = ir::tile_view_semantics::GetEffectiveTileView(*src_tile);
-            const auto dst_view = ir::tile_view_semantics::GetEffectiveTileView(*dst_tile);
-            const bool same_representation =
-                src_view.blayout == dst_view.blayout && src_view.slayout == dst_view.slayout &&
-                src_view.fractal == dst_view.fractal && src_view.pad == dst_view.pad &&
-                src_view.compact == dst_view.compact;
-            if (same_representation) {
-              // Alias the destination to the source SSA value so downstream
-              // references use the source's defined buffer, not the destination's
-              // alloc_tile (which would be unwritten after eliding the tmov).
-              codegen.SetCurrentResultBuf(codegen.GetExprAsCode(op->args_[0]));
-              return std::string("");  // no-op: same space, same address, same layout
-            }
-            // Different layout at the same address: keep pto.tmov (ND↔NZ adapt).
+          const ir::MemRefPtr& src_memref = *src_tile->memref_;
+          const ir::MemRefPtr& dst_memref = *dst_tile->memref_;
+          if (src_memref && dst_memref && src_memref->byte_offset_ && dst_memref->byte_offset_ &&
+              ir::AreExprsEqual(src_memref->byte_offset_, dst_memref->byte_offset_)) {
+            const auto const_offset = As<ir::ConstInt>(src_memref->byte_offset_);
+            const std::string address = const_offset ? "byte offset " + std::to_string(const_offset->value_)
+                                                     : "the same symbolic byte offset";
+            CHECK_SPAN(false, op->span_)
+                << "tile.move requires distinct source and destination addresses in "
+                << ir::MemorySpaceToString(*src_space) << ", but both resolve to " << address;
           }
         }
       }
@@ -884,7 +876,8 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
     backend.RegisterOp("tile.rsqrt")
         .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
           size_t arity = op->args_.size();
-          CHECK(arity == 1 || arity == 2) << "tile.rsqrt requires 1 or 2 arguments, but got " << arity;
+          INTERNAL_CHECK_SPAN(arity == 1 || arity == 2, op->span_)
+              << "tile.rsqrt requires 1 or 2 arguments, but got " << arity;
           return MakeNaryCodegenPTO("pto.trsqrt", arity, op, codegen);
         })
         .set_input_layout(0, ir::TileLayout::row_major)
@@ -898,7 +891,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
     backend.RegisterOp("tile.col_sum")
         .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
           auto& codegen = AsPto(codegen_base);
-          CHECK(op->args_.size() == 1 || op->args_.size() == 2)
+          INTERNAL_CHECK_SPAN(op->args_.size() == 1 || op->args_.size() == 2, op->span_)
               << "tile.col_sum requires 1 or 2 arguments, but got " << op->args_.size();
           std::string config_attr = op->args_.size() == 2 ? " {isBinary = true}" : "";
           codegen.Emit("pto.tcolsum " + GenerateInsOutsClause(op, codegen, config_attr));
@@ -969,10 +962,24 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
   // guarantees that the output shares the MemRef of the accumulator input
   // (via set_output_reuses_input), so we use the result buffer (dst) as the
   // accumulator operand instead of the IR-level input arg.
-  auto make_acc_codegen = [](const std::string& pto_op) {
-    return [pto_op](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) -> std::string {
+  //
+  // The optional `init_cond` operand (args_[3]) makes the accumulator's initial
+  // value conditional: where it holds, `dst` is overwritten with `lhs @ rhs`
+  // rather than accumulated into.  The ISA carries this as one bit of the MAD's
+  // Xt register, but the `pto.*` tile ops expose it only as the choice between
+  // the accumulating and the non-accumulating op, so a runtime predicate lowers
+  // to a branch over the two.  No phi is needed: both arms write `dst` in place.
+  // `supports_init_cond` must track the op's own type deduction: `tile.gemv_acc`
+  // still accepts exactly 3 arguments, so accepting a 4th here would only create
+  // an unreachable branch behind a `CHECK` that fires earlier in deduction.
+  auto make_acc_codegen = [](const std::string& pto_op, const std::string& init_pto_op,
+                             bool supports_init_cond) {
+    return [pto_op, init_pto_op, supports_init_cond](const ir::CallPtr& op,
+                                                     codegen::CodegenBase& codegen_base) -> std::string {
       auto& codegen = AsPto(codegen_base);
-      CHECK(op->args_.size() == 3) << pto_op << " requires 3 arguments: acc, lhs, rhs";
+      INTERNAL_CHECK_SPAN(op->args_.size() == 3 || (supports_init_cond && op->args_.size() == 4), op->span_)
+          << pto_op << " requires 3 arguments (acc, lhs, rhs)"
+          << (supports_init_cond ? " or 4 with init_cond" : "") << ", but got " << op->args_.size();
 
       std::string dst = codegen.GetCurrentResultTarget();
       std::string lhs = codegen.GetExprAsCode(op->args_[1]);
@@ -980,24 +987,69 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
       std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
       std::string lhs_type = codegen.GetExprTypeAnnotation(op->args_[1]);
       std::string rhs_type = codegen.GetExprTypeAnnotation(op->args_[2]);
+      const std::string acc_phase = GemvAccPhaseAttr(op);
 
-      std::ostringstream acc_inst;
-      acc_inst << pto_op << " ins(" << dst << ", " << lhs << ", " << rhs;
-      std::vector<std::string> ins_type_parts;
-      for (const auto& t : {dst_type, lhs_type, rhs_type}) {
-        if (!t.empty()) ins_type_parts.push_back(t);
-      }
-      if (!ins_type_parts.empty()) {
-        acc_inst << " : ";
-        for (size_t i = 0; i < ins_type_parts.size(); ++i) {
-          if (i > 0) acc_inst << ", ";
-          acc_inst << ins_type_parts[i];
+      // ins() carries the accumulator only on the accumulating form; the
+      // initializing form reads lhs/rhs alone and writes dst from scratch.
+      auto build = [&](bool initializing) {
+        std::vector<std::string> operands = {lhs, rhs};
+        std::vector<std::string> types = {lhs_type, rhs_type};
+        if (!initializing) {
+          operands.insert(operands.begin(), dst);
+          types.insert(types.begin(), dst_type);
         }
+        std::ostringstream inst;
+        inst << (initializing ? init_pto_op : pto_op) << " ins(";
+        for (size_t i = 0; i < operands.size(); ++i) {
+          if (i > 0) inst << ", ";
+          inst << operands[i];
+        }
+        // Type annotations must be all present or all absent: the `: t0, t1, ...`
+        // clause is positional, so emitting a filtered subset would bind the
+        // remaining types to the wrong operands. Mirrors make_mx_acc_codegen.
+        const bool any_type_present =
+            std::any_of(types.begin(), types.end(), [](const std::string& t) { return !t.empty(); });
+        const bool all_types_present =
+            std::all_of(types.begin(), types.end(), [](const std::string& t) { return !t.empty(); });
+        INTERNAL_CHECK(!any_type_present || all_types_present)
+            << "Internal error: " << (initializing ? init_pto_op : pto_op)
+            << " operand type annotations must all be present or all absent, got a partial set";
+        if (all_types_present) {
+          inst << " : ";
+          for (size_t i = 0; i < types.size(); ++i) {
+            if (i > 0) inst << ", ";
+            inst << types[i];
+          }
+        }
+        inst << ") outs(" << dst;
+        if (!dst_type.empty()) inst << " : " << dst_type;
+        inst << ")" << acc_phase;
+        return inst.str();
+      };
+
+      if (op->args_.size() == 3) {
+        codegen.Emit(build(/*initializing=*/false));
+        return "";
       }
-      acc_inst << ") outs(" << dst;
-      if (!dst_type.empty()) acc_inst << " : " << dst_type;
-      acc_inst << ")" << GemvAccPhaseAttr(op);
-      codegen.Emit(acc_inst.str());
+
+      // A literal predicate picks one arm outright; only a runtime one branches.
+      if (auto init_const = As<ir::ConstInt>(op->args_[3])) {
+        codegen.Emit(build(/*initializing=*/init_const->value_ != 0));
+        return "";
+      }
+
+      // Resolve the condition before opening the region so any instruction its
+      // evaluation emits lands outside (and so dominates) both arms.
+      std::string cond = codegen.GetExprAsCode(op->args_[3]);
+      codegen.EmitStructural("scf.if " + cond + " {");
+      codegen.IncreaseIndent();
+      codegen.Emit(build(/*initializing=*/true));
+      codegen.DecreaseIndent();
+      codegen.EmitStructural("} else {");
+      codegen.IncreaseIndent();
+      codegen.Emit(build(/*initializing=*/false));
+      codegen.DecreaseIndent();
+      codegen.EmitStructural("}");
       return "";
     };
   };
@@ -1007,9 +1059,9 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
   auto make_mx_acc_codegen = [](const std::string& pto_op) {
     return [pto_op](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) -> std::string {
       auto& codegen = AsPto(codegen_base);
-      CHECK(op->args_.size() == 5) << pto_op
-                                   << " requires 5 arguments: acc, lhs, lhs_scale, rhs, rhs_scale, but got "
-                                   << op->args_.size();
+      INTERNAL_CHECK_SPAN(op->args_.size() == 5, op->span_)
+          << pto_op << " requires 5 arguments: acc, lhs, lhs_scale, rhs, rhs_scale, but got "
+          << op->args_.size();
 
       std::string dst = codegen.GetCurrentResultTarget();
       INTERNAL_CHECK(!dst.empty()) << "Internal error: " << pto_op
@@ -1047,11 +1099,11 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
     };
   };
 
-  reg("tile.matmul_acc", make_acc_codegen("pto.tmatmul.acc"));
+  reg("tile.matmul_acc", make_acc_codegen("pto.tmatmul.acc", "pto.tmatmul", /*supports_init_cond=*/true));
   reg("tile.gemv", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeGemvCodegenPTO("pto.tgemv", 2, op, codegen);
   });
-  reg("tile.gemv_acc", make_acc_codegen("pto.tgemv.acc"));
+  reg("tile.gemv_acc", make_acc_codegen("pto.tgemv.acc", "pto.tgemv", /*supports_init_cond=*/false));
   reg("tile.matmul_mx_acc", make_mx_acc_codegen("pto.tmatmul.mx.acc"));
   reg("tile.gemv_bias", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeGemvCodegenPTO("pto.tgemv.bias", 3, op, codegen);

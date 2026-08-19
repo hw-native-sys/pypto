@@ -25,7 +25,7 @@ Concepts introduced:
   - pl.split(pl.SplitMode.UP_DOWN) as a pl.at optimization
   - Why one scope beats two for a cube-then-vector chain
   - UP_DOWN (row axis) vs LEFT_RIGHT (column axis)
-  - pl.cross_core_slot(slot_num=) — sizing the cube/vector ring
+  - pl.cross_core_slot(slot_num=) — retuning the cube/vector ring depth
 
 Run:  python examples/advanced/03_mixed_kernel.py
       python examples/advanced/03_mixed_kernel.py --mode staged
@@ -68,9 +68,10 @@ def mixed_matmul_bias(a: pl.Tensor, b: pl.Tensor, bias: pl.Tensor, out: pl.Out[p
     with pl.at(
         level=pl.Level.CORE_GROUP,
         # The [128,128] FP32 tile that crosses the cube/vector boundary is 64KB.
-        # The C2V ring defaults to 8 slots of it (512KB) — far past the vector
-        # buffer limit, so the depth has to come down with it.
-        optimizations=[pl.split(pl.SplitMode.UP_DOWN), pl.cross_core_slot(slot_num=2)],
+        # The C2V ring defaults to 2 slots of it (128KB), which fits the vector
+        # buffer; pl.cross_core_slot(slot_num=...) buys more cube run-ahead, but
+        # 4 slots (256KB) would already overflow that budget here.
+        optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
         name_hint="mixed_up_down",
     ):
         acc = pl.matmul(a, b, out_dtype=pl.FP32)  # cube (AIC)
@@ -83,7 +84,7 @@ def mixed_matmul_bias_lr(a: pl.Tensor, b: pl.Tensor, bias: pl.Tensor, out: pl.Ou
     """Same as :func:`mixed_matmul_bias`, halved along the column axis."""
     with pl.at(
         level=pl.Level.CORE_GROUP,
-        optimizations=[pl.split(pl.SplitMode.LEFT_RIGHT), pl.cross_core_slot(slot_num=2)],
+        optimizations=[pl.split(pl.SplitMode.LEFT_RIGHT)],
         name_hint="mixed_left_right",
     ):
         acc = pl.matmul(a, b, out_dtype=pl.FP32)

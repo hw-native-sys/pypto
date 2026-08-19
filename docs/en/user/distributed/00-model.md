@@ -7,7 +7,7 @@
 > **DSL form:** this chapter authors programs with `@pl.jit` (plain Python
 > functions). `@pl.program`/`@pl.function` is the equivalent class-based form
 > used by the older tests under `tests/st/distributed/` — see the
-> [Language Guide](../01-language_guide.md) for the full `@pl.jit` family.
+> [Compiling](../execution/00-compile.md) for the full `@pl.jit` family.
 
 ## Quickstart: 2-Rank AllReduce
 

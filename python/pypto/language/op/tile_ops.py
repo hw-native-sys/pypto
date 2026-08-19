@@ -183,7 +183,7 @@ from pypto.pypto_core.ir import (
     TileLayout,
 )
 
-from ..typing import IntLike, Scalar, Tensor, Tile
+from ..typing import BoolLike, IntLike, Scalar, Tensor, Tile, predicate_to_expr
 from .system_ops import (  # noqa: F401
     tpop_from_aic,
     tpop_from_aiv,
@@ -1118,16 +1118,17 @@ def rsqrt(tile: Tile, tmp: Tile | None = None) -> Tile:
     return Tile(expr=call_expr)
 
 
-def recip(tile: Tile) -> Tile:
+def recip(tile: Tile, high_precision: bool = False) -> Tile:
     """Element-wise reciprocal.
 
     Args:
         tile: Input tile
+        high_precision: Whether to select PTOAS's high-precision reciprocal mode (FP16/FP32 only)
 
     Returns:
         Tile wrapping the recip operation
     """
-    call_expr = _ir_ops.recip(tile.unwrap())
+    call_expr = _ir_ops.recip(tile.unwrap(), high_precision=high_precision)
     return Tile(expr=call_expr)
 
 
@@ -1219,18 +1220,33 @@ def batch_matmul(lhs: Tile, rhs: Tile) -> Tile:
     return Tile(expr=call_expr)
 
 
-def matmul_acc(acc: Tile, lhs: Tile, rhs: Tile) -> Tile:
+def matmul_acc(acc: Tile, lhs: Tile, rhs: Tile, init_cond: BoolLike | None = None) -> Tile:
     """Matrix multiplication with accumulation: acc += lhs @ rhs.
+
+    ``init_cond`` makes the accumulator's initial value conditional: on the steps
+    where it holds, ``acc`` is overwritten with ``lhs @ rhs`` rather than
+    accumulated into. This is the split-K idiom, and it removes the need to zero
+    the accumulator or to peel the first K step::
+
+        for k0 in pl.pipeline(0, K, K_TILE):
+            acc_t = pl.tile.slice(acc, [ROW_TILE, N], [t0, 0])
+            pl.tile.matmul_acc(acc_t, a, b, init_cond=(k0 == 0))
+
+    A literal ``True`` / ``False`` selects one form at compile time; a runtime
+    predicate lowers to a branch over the two, with no phi on the accumulator.
 
     Args:
         acc: Accumulator tile
         lhs: Left-hand side tile
         rhs: Right-hand side tile
+        init_cond: Optional predicate selecting overwrite over accumulate
 
     Returns:
         Tile wrapping the matmul_acc operation
     """
-    call_expr = _ir_ops.matmul_acc(acc.unwrap(), lhs.unwrap(), rhs.unwrap())
+    call_expr = _ir_ops.matmul_acc(
+        acc.unwrap(), lhs.unwrap(), rhs.unwrap(), init_cond=predicate_to_expr(init_cond)
+    )
     return Tile(expr=call_expr)
 
 
@@ -2067,8 +2083,9 @@ def set_validshape(tile: Tile, valid_rows: IntLike, valid_cols: IntLike) -> Tile
     """Update valid-shape metadata of a tile without data movement.
 
     .. note::
-        Internal API — this op is intended for compiler-generated code only
-        and should not be exposed to end users in future releases.
+        The operand must not be a view (a ``pl.tile.slice`` or reshape result): a
+        view carries its valid extent in its type, so there is nothing to update.
+        Narrow at the slice with ``valid_shape=`` instead.
 
     Args:
         tile: Input tile (must be 2D)

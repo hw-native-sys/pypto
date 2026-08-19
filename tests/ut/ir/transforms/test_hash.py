@@ -9,8 +9,11 @@
 
 """Unit tests for IR structural hash functionality."""
 
+from collections.abc import Callable
+
 import pytest
 from pypto import DataType, ir
+from pypto.pypto_core import ir as _core_ir
 
 
 class TestStructuralHash:
@@ -315,6 +318,222 @@ class TestTypePyHashEqConsistency:
     def test_type_works_as_dict_key(self):
         d = {ir.ScalarType(DataType.FP32): "fp32"}
         assert d[ir.ScalarType(DataType.FP32)] == "fp32"
+
+
+def _span() -> ir.Span:
+    return ir.Span.unknown()
+
+
+def _dims(*extents: int) -> list[ir.ConstInt]:
+    return [ir.ConstInt(e, DataType.INT64, _span()) for e in extents]
+
+
+# One shared WindowBuffer so the two instances a factory builds stay
+# structurally equal: window_buffer_ is compared by Var identity, not by value.
+_SHARED_WINDOW_BUFFER = ir.WindowBuffer(
+    ir.Var("wb_base", ir.PtrType(), _span()),
+    ir.ConstInt(4096, DataType.INT64, _span()),
+)
+
+# Every Python-constructible Type kind, one factory each. A factory must build a
+# *fresh* instance on every call so the equal-implies-same-hash contract below is
+# checked against two independently-built values.
+_TYPE_FACTORIES: dict[str, Callable[[], ir.Type]] = {
+    "UnknownType": lambda: ir.UnknownType(),
+    "ScalarType": lambda: ir.ScalarType(DataType.FP32),
+    "TensorType": lambda: ir.TensorType([64, 128], DataType.FP32),
+    "TensorType_view": lambda: ir.TensorType(
+        [64, 128],
+        DataType.FP32,
+        tensor_view=ir.TensorView([128, 1], ir.TensorLayout.ND, [32, 64]),
+    ),
+    "DistributedTensorType": lambda: ir.DistributedTensorType([64, 128], DataType.FP32),
+    "DistributedTensorType_window_buffer": lambda: ir.DistributedTensorType(
+        _dims(64, 128), DataType.FP32, _SHARED_WINDOW_BUFFER
+    ),
+    "TileType": lambda: ir.TileType([64, 128], DataType.FP16),
+    "ArrayType": lambda: ir.ArrayType(DataType.INT32, 16),
+    "TupleType": lambda: ir.TupleType([ir.ScalarType(DataType.INT64), ir.ArrayType(DataType.INT32, 8)]),
+    "PtrType": lambda: ir.PtrType(),
+    "WindowBufferType": lambda: ir.WindowBufferType(),
+    "CommCtxType": lambda: ir.CommCtxType(),
+    "PrefetchAsyncContextType": lambda: ir.PrefetchAsyncContextType(),
+    "AsyncEventType": lambda: ir.AsyncEventType(),
+    "AsyncSessionType": lambda: ir.AsyncSessionType(),
+}
+
+# Bound but not instantiable: pure base classes with no nanobind constructor.
+# A new entry here is a deliberate statement that the class carries no fields of
+# its own to hash.
+_ABSTRACT_TYPE_CLASSES = {"ShapedType"}
+
+
+def _bound_type_class_names() -> set[str]:
+    """Every ``Type`` subclass the bindings expose.
+
+    Scans the native module rather than ``pypto.ir``: the latter re-exports via
+    ``import *`` and would silently miss a class the star import skips.
+    """
+    return {
+        name
+        for name in dir(_core_ir)
+        if isinstance(getattr(_core_ir, name), type)
+        and issubclass(getattr(_core_ir, name), _core_ir.Type)
+        and getattr(_core_ir, name) is not _core_ir.Type
+    }
+
+
+class TestHashTypeLadderParity:
+    """``HashType`` must cover every Type kind its sibling ladders cover.
+
+    Four independent if/else ladders encode "what fields does each Type have" —
+    ``EqualType``, ``HashType``, ``SerializeType`` and ``DeserializeType``.
+    Nothing ties them together, so a Type added to three and forgotten in the
+    fourth stays invisible until a user hashes one, where it lands on
+    ``HashType``'s trailing ``INTERNAL_CHECK(false)``. These tests pin the
+    parity so the next omission fails here instead.
+    """
+
+    @pytest.mark.parametrize("kind", sorted(_TYPE_FACTORIES))
+    def test_structural_hash_does_not_raise(self, kind: str):
+        """No Type kind may fall through to ``HashType``'s unhandled branch."""
+        assert isinstance(ir.structural_hash(_TYPE_FACTORIES[kind]()), int)
+
+    @pytest.mark.parametrize("kind", sorted(_TYPE_FACTORIES))
+    def test_structural_equal_implies_equal_hash(self, kind: str):
+        """``__eq__``/``__hash__`` consistency, per Type kind."""
+        make = _TYPE_FACTORIES[kind]
+        lhs, rhs = make(), make()
+        assert ir.structural_equal(lhs, rhs)
+        assert hash(lhs) == hash(rhs)
+        assert lhs in {rhs}
+
+    def test_every_bound_type_class_has_a_factory(self):
+        """Guard the guard: a newly bound Type must be added above.
+
+        Without this, a Type kind added to the bindings and omitted from
+        ``HashType`` would still pass every parametrized case, because nothing
+        would construct it.
+        """
+        covered = {type(make()).__name__ for make in _TYPE_FACTORIES.values()}
+        missing = _bound_type_class_names() - covered - _ABSTRACT_TYPE_CLASSES
+        assert not missing, (
+            f"Type classes with no structural_hash coverage: {sorted(missing)}. "
+            "Add a factory to _TYPE_FACTORIES, and a matching branch to "
+            "HashType in src/ir/transforms/structural_hash.cpp."
+        )
+
+    def test_array_type_is_usable_as_a_dict_key(self):
+        """``ArrayType`` was absent from ``HashType`` entirely."""
+        d = {ir.ArrayType(DataType.INT32, 16): "arr"}
+        assert d[ir.ArrayType(DataType.INT32, 16)] == "arr"
+
+    def test_array_type_extent_participates_in_the_hash(self):
+        assert hash(ir.ArrayType(DataType.INT32, 16)) != hash(ir.ArrayType(DataType.INT32, 32))
+
+    def test_array_type_dtype_participates_in_the_hash(self):
+        assert hash(ir.ArrayType(DataType.INT32, 16)) != hash(ir.ArrayType(DataType.INT64, 16))
+
+    def test_distributed_tensor_type_hashes_apart_from_plain_tensor_type(self):
+        """The two kinds are distinguished only by ``ObjectKind``.
+
+        ``As<TensorType>`` is precise-match, so the ``DistributedTensorType``
+        dispatch has to name the kind explicitly.
+        """
+        tensor = ir.TensorType([64, 128], DataType.FP32)
+        dist = ir.DistributedTensorType([64, 128], DataType.FP32)
+        assert not ir.structural_equal(tensor, dist)
+        assert hash(tensor) != hash(dist)
+
+    def test_distinct_window_buffers_hash_apart(self):
+        """Exercises the window-buffer block, which was unreachable.
+
+        Two same-shape, same-dtype distributed tensors backed by different
+        WindowBuffers are distinct types and must not collide.
+        """
+        first = ir.DistributedTensorType(
+            _dims(64),
+            DataType.FP32,
+            ir.WindowBuffer(ir.Var("a", ir.PtrType(), _span()), ir.ConstInt(64, DataType.INT64, _span())),
+        )
+        second = ir.DistributedTensorType(
+            _dims(64),
+            DataType.FP32,
+            ir.WindowBuffer(ir.Var("b", ir.PtrType(), _span()), ir.ConstInt(64, DataType.INT64, _span())),
+        )
+        assert not ir.structural_equal(first, second)
+        assert hash(first) != hash(second)
+
+    @pytest.mark.parametrize("kind", sorted(_TYPE_FACTORIES))
+    def test_structural_equal_implies_equal_hash_under_auto_mapping(self, kind: str):
+        """The contract must hold in auto-mapping mode too.
+
+        ``EqualType`` compares ``DistributedTensorType::window_buffer_`` with
+        ``EqualVar``, which under auto-mapping accepts any two buffers a
+        consistent bijection allows -- ignoring their fields. So the hash must
+        mix in the buffer's *identity* only; hashing the node would fold in
+        ``size_`` and the staging flags and make equal types hash apart.
+        """
+        make = _TYPE_FACTORIES[kind]
+        lhs, rhs = make(), make()
+        assert ir.structural_equal(lhs, rhs, enable_auto_mapping=True)
+        assert ir.structural_hash(lhs, enable_auto_mapping=True) == ir.structural_hash(
+            rhs, enable_auto_mapping=True
+        )
+
+    def test_auto_mapped_window_buffers_of_different_size_hash_together(self):
+        """Regression: differing buffer fields must not split the hash.
+
+        Under auto-mapping these two types are ``structural_equal`` (EqualVar
+        maps the buffers), so they must hash alike even though the buffers
+        differ in size and staging flags.
+        """
+        first = ir.DistributedTensorType(
+            _dims(64),
+            DataType.FP32,
+            ir.WindowBuffer(ir.Var("a", ir.PtrType(), _span()), ir.ConstInt(64, DataType.INT64, _span())),
+        )
+        second = ir.DistributedTensorType(
+            _dims(64),
+            DataType.FP32,
+            ir.WindowBuffer(
+                ir.Var("b", ir.PtrType(), _span()),
+                ir.ConstInt(4096, DataType.INT64, _span()),
+                True,
+                True,
+                _span(),
+            ),
+        )
+        assert ir.structural_equal(first, second, enable_auto_mapping=True)
+        assert ir.structural_hash(first, enable_auto_mapping=True) == ir.structural_hash(
+            second, enable_auto_mapping=True
+        )
+
+    def test_window_buffer_presence_participates_in_the_hash(self):
+        without = ir.DistributedTensorType(_dims(64), DataType.FP32)
+        with_wb = ir.DistributedTensorType(_dims(64), DataType.FP32, _SHARED_WINDOW_BUFFER)
+        assert not ir.structural_equal(without, with_wb)
+        assert hash(without) != hash(with_wb)
+
+    def test_tensor_view_pad_participates_in_the_hash(self):
+        """``EqualType`` compares ``TensorView::pad``, so ``HashType`` must fold it in.
+
+        The sibling ``TileView`` branch always hashed its own ``pad``; the
+        ``TensorView`` branch stopped at ``layout``. That left the contract
+        intact (a field in equality but not the hash only widens the collision
+        class) but made padded tensor views needlessly collision-prone.
+        """
+
+        def make(pad: ir.PadValue) -> ir.TensorType:
+            return ir.TensorType(
+                [64, 1],
+                DataType.FP32,
+                tensor_view=ir.TensorView([1, 1], ir.TensorLayout.ND, [32, 1], pad),
+            )
+
+        null_pad, zero_pad = make(ir.PadValue.null), make(ir.PadValue.zero)
+        assert not ir.structural_equal(null_pad, zero_pad)
+        assert hash(null_pad) != hash(zero_pad)
 
 
 if __name__ == "__main__":

@@ -209,6 +209,58 @@ def test_manual_scope_parallel_task_id_carry_is_sized():
             assert attrs[f"iter_arg_rebind_{idx}"] is True
 
 
+def test_manual_scope_parallel_descending_task_id_carry_is_sized():
+    """A descending ``pl.parallel`` has a statically-known trip count too.
+
+    Regression: ``EvalConstTripCount`` guarded with ``step <= 0``, so
+    ``pl.parallel(4, 0, -1)`` reported 0 and the pass rejected it with the
+    dynamic-trip-count diagnostic — telling the user to supply a Python int
+    for a bound that already was one. The extent must match the ascending
+    ``pl.parallel(4)`` case, since both loops run 4 times.
+    """
+    rows, cols, tile = 128, 128, 32
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.AIV)
+        def kern(
+            self,
+            x: pl.Tensor[[rows, cols], pl.FP32],
+            out: pl.InOut[pl.Tensor[[rows, cols], pl.FP32]],
+            row: pl.Scalar[pl.INDEX],
+            col: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[rows, cols], pl.FP32]:
+            t: pl.Tile[[tile, tile], pl.FP32] = pl.load(x, [row, col], [tile, tile])
+            r: pl.Tile[[tile, tile], pl.FP32] = pl.add(t, t)
+            return pl.store(r, [row, col], out)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            x: pl.Tensor[[rows, cols], pl.FP32],
+            out: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
+        ) -> pl.Tensor[[rows, cols], pl.FP32]:
+            with pl.manual_scope():
+                prev_tid = None
+                for i in pl.range(4):
+                    row: pl.Scalar[pl.INDEX] = i * tile
+                    for j in pl.parallel(4, 0, -1):
+                        col: pl.Scalar[pl.INDEX] = j * tile
+                        out, prev_tid = pl.submit(self.kern, x, out, row, col, deps=[prev_tid])
+            return out
+
+    transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Prog)
+    loops = _for_stmts(_orch_func(transformed).body)
+    assert len(loops) == 2, [loop.kind for loop in loops]
+    outer, inner = loops
+
+    assert inner.kind == ir.ForKind.Parallel
+    inner_attrs = _carry_attrs(inner)
+    outer_attrs = _carry_attrs(outer)
+    assert any(v == 4 for k, v in inner_attrs.items() if k.startswith("iter_arg_array_size_")), inner_attrs
+    assert any(v == 4 for k, v in outer_attrs.items() if k.startswith("iter_arg_array_size_")), outer_attrs
+
+
 def test_manual_scope_parallel_dynamic_trip_count_rejected():
     """A dynamic ``pl.parallel`` trip count cannot size the fence array, so the
     pass rejects it with a user-facing error instead of silently mis-lowering."""

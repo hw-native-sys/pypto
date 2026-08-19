@@ -24,12 +24,14 @@ Typical usage::
     compiled = run(MyProgram, a, b, c, config=RunConfig(platform="a2a3sim"))
 """
 
+import functools
 import importlib.util
 import json
 import shlex
 import subprocess
 import sys
 import uuid
+import warnings
 from collections.abc import Callable
 from ctypes import _SimpleCData
 from dataclasses import dataclass, field, replace
@@ -76,6 +78,78 @@ def _load_golden_from_data_dir(out_dir: Path, output_names: set[str]) -> dict[st
 # per-ring RunConfig override (list/tuple) must supply exactly this many entries.
 _RING_DEPTH = 4
 
+# Artifact name from Simpler's Worker/Chip/Core naming migration (formerly
+# ``l2_swimlane_records.json``).
+_CHIP_SWIMLANE_RECORDS_NAME = "chip_swimlane_records.json"
+
+# Chip-swimlane collection is *levelled*, not a toggle: each level is a real
+# guard in the runtime collectors, so a lower level never records the data a
+# higher one does (no post-processing recovers it).  Mirrors
+# ``ChipSwimlaneLevel`` and the runtime harness's ``--enable-chip-swimlane``.
+#
+#   0 DISABLED      off
+#   1 AICORE_TIMING AICore per-task start/end + task record buffer
+#   2 AICPU_TIMING  + AICPU-stamped dispatch/finish (the [dispatch, start] gap)
+#   3 SCHED_PHASES  + scheduler main-loop phases (``sched_overhead_analysis``)
+#   4 ORCH_PHASES   + orchestrator phases
+_SWIMLANE_MAX_LEVEL = 4
+# What a bare ``True`` (or a bare CLI flag) requests.  Level 4 matches both the
+# runtime harness's bare ``--enable-chip-swimlane`` and the ``CallConfig``
+# nanobind setter, which already maps a Python ``True`` to 4.
+_SWIMLANE_FULL_LEVEL = 4
+# Shared by every ``--enable-l2-swimlane`` / ``--swimlane`` CLI so the ladder is
+# described once. Callers that need extra prose concatenate onto this.
+_SWIMLANE_CLI_HELP = (
+    f"Chip swimlane collection level. Bare flag = {_SWIMLANE_FULL_LEVEL} (full); "
+    "1=AICore timing, 2=+AICPU dispatch/finish, 3=+scheduler phases, "
+    "4=+orchestrator phases; absent = 0 (off)."
+)
+
+
+_SWIMLANE_ALIAS_DEPRECATION = (
+    "RunConfig.enable_l2_swimlane is deprecated; use enable_chip_swimlane instead. "
+    "Same values and semantics — Simpler renamed the L2 layer to 'chip', and the "
+    "runtime artifact is chip_swimlane_records.json. The alias will be removed in "
+    "a future release."
+)
+
+
+def _normalize_swimlane_level(value: int | bool, source: str) -> int:
+    """Normalize a chip-swimlane request to an explicit collection level.
+
+    ``bool`` is accepted for source compatibility: ``True`` requests full
+    collection (level :data:`_SWIMLANE_FULL_LEVEL`), matching the runtime's
+    bare ``--enable-chip-swimlane`` and its ``CallConfig`` setter; ``False`` is
+    off.  Normalizing here (rather than deferring to the ``CallConfig`` setter)
+    keeps the level readable from Python and lets the harness round-trip it
+    through the ``--enable-l2-swimlane`` CLI without flattening it.
+
+    Args:
+        value: Requested level (``0``-``4``) or ``bool``.
+        source: Name of the option being normalized, used in error messages.
+
+    Returns:
+        The collection level as an ``int`` in ``[0, _SWIMLANE_MAX_LEVEL]``.
+
+    Raises:
+        TypeError: If *value* is neither ``bool`` nor ``int``.
+        ValueError: If *value* is an out-of-range level.
+    """
+    if isinstance(value, bool):
+        return _SWIMLANE_FULL_LEVEL if value else 0
+    if not isinstance(value, int):
+        raise TypeError(
+            f"{source} must be an int collection level (0-{_SWIMLANE_MAX_LEVEL}) or a bool, "
+            f"got {type(value).__name__}"
+        )
+    if not 0 <= value <= _SWIMLANE_MAX_LEVEL:
+        raise ValueError(
+            f"{source} must be a collection level in [0, {_SWIMLANE_MAX_LEVEL}] "
+            f"(0=off, 1=AICore timing, 2=+dispatch/finish, 3=+sched phases, "
+            f"4=+orch phases), got {value}"
+        )
+    return value
+
 
 @dataclass
 class RunConfig:
@@ -84,9 +158,9 @@ class RunConfig:
     When passed to :meth:`pypto.jit.decorator.JITFunction.lower`, only
     ``platform``, ``strategy``, diagnostics, dependency analysis, and
     ``memory_planner`` affect pass execution. Runtime and artifact fields such
-    as ``device_id``, ``dump_passes``, ``save_kernels_dir``, and
-    ``compile_profiling`` are ignored; ``lower()`` does not execute or write
-    compilation artifacts.
+    as ``device_id``, ``dump_passes``, ``dump_ptoas_passes``,
+    ``save_kernels_dir``, and ``compile_profiling`` are ignored; ``lower()``
+    does not execute or write compilation artifacts.
 
     Attributes:
         platform: Target execution platform — ``"a2a3sim"`` / ``"a2a3"``
@@ -100,6 +174,10 @@ class RunConfig:
             (``NONE`` / ``CONCISE`` / ``EXPLICIT``) or a ``bool``
             (``True`` -> ``CONCISE``, ``False`` -> ``NONE``). ``EXPLICIT`` resolves
             implicit tile layouts and distributed window buffers in the dump.
+        dump_ptoas_passes: If ``True``, dump full-module intermediate IR after
+            every ptoas pass under
+            ``<output_dir>/ptoas_passes/<codegen-unit>/``. Has no effect when
+            ptoas is unavailable and compilation stops at raw ``.pto`` output.
         save_kernels: If ``True``, retain generated artefacts after execution.
             When ``False`` (default), a temporary directory is used and cleaned up.
         save_kernels_dir: Directory to save generated artefacts when *save_kernels*
@@ -107,10 +185,31 @@ class RunConfig:
             ``build_output/<program_name>_<timestamp>``.
         codegen_only: If ``True``, stop after code generation without executing
             on device.  Useful for validating compilation output.
-        enable_l2_swimlane: Capture per-task L2 perf records into
-            ``<work_dir>/dfx_outputs/l2_swimlane_records.json``. On onboard
-            platforms, ``swimlane_converter`` then produces
-            ``merged_swimlane_*.json`` alongside it. Because the converter joins
+        enable_chip_swimlane: Chip swimlane collection **level** — per-task
+            timing records written into
+            ``<work_dir>/dfx_outputs/chip_swimlane_records.json``. Mirrors the
+            runtime harness's ``--enable-chip-swimlane PERF_LEVEL``; each level
+            is a real guard in the runtime collectors, so a lower level never
+            stamps the data a higher one does and no post-processing recovers
+            it:
+
+            * ``0`` / ``False`` — off.
+            * ``1`` — AICore per-task start / end plus the task record buffer.
+            * ``2`` — ``1`` plus AICPU-stamped dispatch / finish, which is what
+              makes the ``[dispatch, start]`` pickup gap readable.
+            * ``3`` — ``2`` plus scheduler main-loop phase records, required by
+              ``python -m simpler_setup.tools.sched_overhead_analysis`` and by
+              the PyPTO Toolkit plugin's Scheduler View.
+            * ``4`` / ``True`` — ``3`` plus orchestrator phase records (the
+              Toolkit plugin's AICPU Orchestrator view). ``True`` requests this
+              full level, matching the runtime harness's bare
+              ``--enable-chip-swimlane``.
+
+            The former spelling ``enable_l2_swimlane`` still works (constructor
+            keyword and attribute) but emits a ``DeprecationWarning``.
+
+            On onboard platforms, ``swimlane_converter`` then produces
+            ``merged_swimlane_*.json`` alongside the records. Because the converter joins
             the timing against a task graph that only ``deps.json`` carries,
             enabling this on an onboard platform runs the workload **twice**: a
             first dep_gen pass captures ``deps.json``, then a clean swimlane pass
@@ -121,10 +220,10 @@ class RunConfig:
             worker uses two ``Worker.run()`` fences and keeps resident handles
             alive. Both L3 passes execute the program without restoring mutable
             arguments between them. Simulator platforms (``*sim``) stay single-pass
-            and only emit ``l2_swimlane_records.json`` — the merged swimlane file
+            and only emit ``chip_swimlane_records.json`` — the merged swimlane file
             is intentionally skipped because the simulator does not yet ship the
             task metadata the converter needs. Mirrors runtime's
-            ``--enable-l2-swimlane`` flag.
+            ``CallConfig.enable_chip_swimlane`` field.
         enable_dump_args: Per-task argument dump **level** written into
             ``<work_dir>/dfx_outputs/args_dump/``. Inspect with
             ``python -m simpler_setup.tools.dump_viewer``. Mirrors
@@ -238,7 +337,11 @@ class RunConfig:
     save_kernels: bool = False
     save_kernels_dir: str | None = None
     codegen_only: bool = False
-    enable_l2_swimlane: bool = False
+    # 0=off, 1=AICore timing, 2=+dispatch/finish, 3=+sched phases, 4=+orch
+    # phases. ``True`` normalizes to 4 (full), ``False`` to 0. The former
+    # spelling ``enable_l2_swimlane`` is still accepted; see the deprecation
+    # shim installed just below the class.
+    enable_chip_swimlane: int | bool = 0
     enable_dump_args: int = 0  # 0=off, 1=partial (dump_tag-marked), 2=full
     enable_pmu: int = 0
     enable_dep_gen: bool = False
@@ -258,6 +361,7 @@ class RunConfig:
     distributed_config: "DistributedConfig | None" = None
     analyze_auto_scopes_for_deps: bool = False
     memory_planner: MemoryPlanner | None = None
+    dump_ptoas_passes: bool = False
 
     def __post_init__(self) -> None:
         if self.platform not in ("a2a3sim", "a2a3", "a5sim", "a5"):
@@ -278,6 +382,12 @@ class RunConfig:
         if not self.platform.startswith(expected_arch):
             sim_suffix = "sim" if self.platform.endswith("sim") else ""
             self.platform = f"{expected_arch}{sim_suffix}"
+
+        # Chip swimlane is levelled; normalize ``bool``/int to an explicit
+        # level before ``any_dfx_enabled()`` and the CLI round-trip read it.
+        self.enable_chip_swimlane = _normalize_swimlane_level(
+            self.enable_chip_swimlane, "enable_chip_swimlane"
+        )
 
         # Any DFX flag requires kernel artefacts to be retained so the
         # ``<work_dir>/dfx_outputs/`` directory survives the run.
@@ -349,16 +459,71 @@ class RunConfig:
 
         DFX (Design For X) covers the five runtime diagnostic sub-features
         carried on :class:`~simpler.task_interface.CallConfig`:
-        L2 swimlane, argument dump, PMU, dep_gen and scope_stats. They are
+        chip swimlane, argument dump, PMU, dep_gen and scope_stats. They are
         independent toggles that share an output directory.
         """
         return (
-            self.enable_l2_swimlane
+            self.enable_chip_swimlane > 0
             or self.enable_dump_args > 0
             or self.enable_pmu > 0
             or self.enable_dep_gen
             or self.enable_scope_stats
         )
+
+    @property
+    def enable_l2_swimlane(self) -> int:
+        """Deprecated alias for :attr:`enable_chip_swimlane`.
+
+        Reading is intentionally silent: ``dataclasses.replace()`` and existing
+        callers go through here, and warning on every read would make
+        ``replace(cfg, ...)`` noisy without pointing at a name the caller chose.
+        Assigning, and the constructor keyword, do warn.
+        """
+        return self.enable_chip_swimlane
+
+    @enable_l2_swimlane.setter
+    def enable_l2_swimlane(self, value: int | bool) -> None:
+        warnings.warn(_SWIMLANE_ALIAS_DEPRECATION, DeprecationWarning, stacklevel=2)
+        self.enable_chip_swimlane = _normalize_swimlane_level(value, "enable_l2_swimlane")
+
+
+# ---------------------------------------------------------------------------
+# Deprecated ``enable_l2_swimlane`` spelling
+# ---------------------------------------------------------------------------
+# Simpler's Worker/Chip/Core naming migration renamed the L2 layer to "chip"
+# (``L2Swimlane*`` -> ``ChipSwimlane*``, ``l2_swimlane_records.json`` ->
+# ``chip_swimlane_records.json``). ``RunConfig`` follows that contract, but the
+# old spelling stays usable for one release.
+#
+# The alias is deliberately **not** a dataclass field. ``dataclasses.replace()``
+# re-supplies every field from the existing instance, so an alias field (or an
+# ``InitVar``) would arrive alongside the canonical one on every ``replace``
+# call and there is no way to tell "the caller typed the old name" from "replace
+# echoed the old value back". That ambiguity resolves either into spurious
+# warnings or — worse — into ``replace(cfg, enable_chip_swimlane=N)`` being
+# silently overridden by the stale alias. Keeping the alias off the field list
+# leaves ``replace``, ``fields()``, ``asdict()`` and ``repr()`` clean, and routes
+# the old name through an ``__init__`` wrapper plus a property instead.
+
+_RUN_CONFIG_INIT = RunConfig.__init__
+
+
+@functools.wraps(_RUN_CONFIG_INIT)
+def _run_config_init(self: RunConfig, *args: Any, **kwargs: Any) -> None:
+    """``RunConfig.__init__`` that also accepts the deprecated alias."""
+    alias = kwargs.pop("enable_l2_swimlane", None)
+    if alias is not None:
+        warnings.warn(_SWIMLANE_ALIAS_DEPRECATION, DeprecationWarning, stacklevel=2)
+        if "enable_chip_swimlane" in kwargs:
+            raise ValueError(
+                "RunConfig received both enable_chip_swimlane and the deprecated "
+                "enable_l2_swimlane; pass only enable_chip_swimlane."
+            )
+        kwargs["enable_chip_swimlane"] = alias
+    _RUN_CONFIG_INIT(self, *args, **kwargs)
+
+
+RunConfig.__init__ = _run_config_init  # type: ignore[method-assign]
 
 
 @dataclass
@@ -409,6 +574,7 @@ def compile_program(  # noqa: PLR0913
     strategy: OptimizationStrategy,
     backend_type: BackendType,
     dump_passes: bool | PassDumpLevel = False,
+    dump_ptoas_passes: bool = False,
     diagnostic_phase: DiagnosticPhase | None = None,
     disabled_diagnostics: DiagnosticCheckSet | None = None,
     profiling: bool = False,
@@ -428,6 +594,8 @@ def compile_program(  # noqa: PLR0913
         backend_type: Code-generation backend.
         dump_passes: Per-pass IR dump control — a :class:`~pypto.ir.PassDumpLevel`
             or a ``bool`` (``True`` -> ``CONCISE``, ``False`` -> ``NONE``).
+        dump_ptoas_passes: If ``True``, dump intermediate IR after every ptoas
+            pass under ``<work_dir>/ptoas_passes/<codegen-unit>/``.
         diagnostic_phase: Override the diagnostic phase gate for compilation.
         disabled_diagnostics: Set of diagnostic checks to disable.
         profiling: If ``True``, enable compile profiling.
@@ -445,6 +613,7 @@ def compile_program(  # noqa: PLR0913
         output_dir=str(work_dir),
         strategy=strategy,
         dump_passes=dump_passes,
+        dump_ptoas_passes=dump_ptoas_passes,
         backend_type=backend_type,
         diagnostic_phase=diagnostic_phase,
         disabled_diagnostics=disabled_diagnostics,
@@ -498,6 +667,7 @@ def run(
         strategy=config.strategy,
         backend_type=config.backend_type,
         dump_passes=config.dump_passes,
+        dump_ptoas_passes=config.dump_ptoas_passes,
         diagnostic_phase=config.diagnostic_phase,
         disabled_diagnostics=config.disabled_diagnostics,
         platform=config.platform,
@@ -521,19 +691,32 @@ def run(
 class _DfxOpts:
     """Bundle of runtime DFX toggles passed through the execute pipeline.
 
-    Each field maps to the same-named ``CallConfig`` member on the runtime
-    side. ``any()`` answers whether the runtime needs an ``output_prefix``.
+    Each field maps to a ``CallConfig`` member on the runtime side. The public
+    ``enable_chip_swimlane`` field carries a collection level (see
+    :func:`_normalize_swimlane_level`). ``any()`` answers whether the runtime
+    needs an ``output_prefix``.
     """
 
-    enable_l2_swimlane: bool = False
+    # Collection level (0=off .. 4=full); ``__post_init__`` normalizes a bool.
+    enable_chip_swimlane: int | bool = 0
     enable_dump_args: int = 0  # 0=off, 1=partial, 2=full
     enable_pmu: int = 0
     enable_dep_gen: bool = False
     enable_scope_stats: bool = False
 
+    def __post_init__(self) -> None:
+        # Frozen dataclass: normalize in place so a ``bool`` handed to the
+        # constructor (or to ``dataclasses.replace``) becomes the same explicit
+        # level ``RunConfig`` produces. ``_dfx_to_cli`` stringifies this field.
+        object.__setattr__(
+            self,
+            "enable_chip_swimlane",
+            _normalize_swimlane_level(self.enable_chip_swimlane, "enable_chip_swimlane"),
+        )
+
     def any(self) -> bool:
         return (
-            self.enable_l2_swimlane
+            self.enable_chip_swimlane > 0
             or self.enable_dump_args > 0
             or self.enable_pmu > 0
             or self.enable_dep_gen
@@ -543,7 +726,7 @@ class _DfxOpts:
     @classmethod
     def from_run_config(cls, cfg: "RunConfig") -> "_DfxOpts":
         return cls(
-            enable_l2_swimlane=cfg.enable_l2_swimlane,
+            enable_chip_swimlane=cfg.enable_chip_swimlane,
             enable_dump_args=cfg.enable_dump_args,
             enable_pmu=cfg.enable_pmu,
             enable_dep_gen=cfg.enable_dep_gen,
@@ -573,7 +756,7 @@ def _execute_dfx_passes(
         cap (``halHostRegister`` rc 8). A child process fully reclaims that
         state on exit. Best-effort — a failed capture is logged, not fatal.
       * Timing pass — swimlane (plus any other timing DFX), dep_gen off,
-        producing the clean ``l2_swimlane_records.json``. Runs in-process.
+        producing the clean ``chip_swimlane_records.json``. Runs in-process.
 
     Both passes write into the same ``output_prefix`` (the subprocess is pointed
     at the same ``dfx_outputs/``), so the converter finds ``deps.json`` and the
@@ -591,13 +774,13 @@ def _execute_dfx_passes(
         dfx: The DFX toggles the caller requested.
         platform: Target execution platform (used only to detect ``*sim``).
     """
-    if not dfx.enable_l2_swimlane or platform.endswith("sim"):
+    if not dfx.enable_chip_swimlane or platform.endswith("sim"):
         run_pass(dfx)
         return
 
     # The two passes look like a double run, so announce what each is for.
     print(
-        "[swimlane] L2 swimlane enabled -> running the kernel twice "
+        "[swimlane] chip swimlane enabled -> running the kernel twice "
         "(dep_gen perturbs timing, so the graph and the timing are captured separately):"
     )
 
@@ -722,29 +905,26 @@ def _capture_deps_subprocess(spec: dict, dfx_dir: Path, run_id: str = "") -> Non
 
 def _coerced_to_orch_args(
     coerced: list[torch.Tensor | DeviceTensor | _SimpleCData],
+    worker: Any,
 ) -> Any:
-    """Pack a coerced positional arg list into a simpler ``ChipStorageTaskArgs``.
+    """Pack coerced values into address-free simpler ``TaskArgs``.
 
-    Two-pass dispatch (tensors then scalars) to respect simpler's add-order
-    constraint: ``ChipStorageTaskArgs`` requires all ``add_tensor`` calls to
-    precede any ``add_scalar`` call. Codegen addresses tensors/scalars from
-    independent pools (``orch_args.tensor(i)`` / ``orch_args.scalar(i)``), so
-    cross-pool order is irrelevant for the binary ABI — only within-pool
-    order matters, and we preserve it.
+    Simpler's public ``Worker.run`` accepts ``TaskArgs`` containing wire
+    ``Tensor`` descriptors. The owning Worker is required to assign stable
+    buffer identities and materializes those descriptors into chip PODs at the
+    L2 boundary. Tensors and scalars are added in separate passes because
+    codegen addresses them from independent pools.
 
     Used by both :func:`execute_compiled` and the extraction path on
     :class:`pypto.ir.CompiledProgram` (``build_orch_args``).
     """
-    from .device_runner import (  # noqa: PLC0415
-        ChipStorageTaskArgs,  # pyright: ignore[reportAttributeAccessIssue]
-        make_tensor_arg,  # pyright: ignore[reportAttributeAccessIssue]
+    from .task_interface import (  # noqa: PLC0415
+        TaskArgs,  # pyright: ignore[reportAttributeAccessIssue]
         scalar_to_uint64,  # pyright: ignore[reportAttributeAccessIssue]
     )
-    from .task_interface import (  # noqa: PLC0415
-        device_tensor_to_tensor,  # pyright: ignore[reportAttributeAccessIssue]
-    )
+    from .tensor_arg import make_tensor_arg  # noqa: PLC0415
 
-    orch_args = ChipStorageTaskArgs()
+    orch_args = TaskArgs()
     for i, arg in enumerate(coerced):
         if isinstance(arg, torch.Tensor):
             if not arg.is_contiguous():
@@ -757,11 +937,11 @@ def _coerced_to_orch_args(
                     f"Tensor at position {i} is on {arg.device}, expected CPU. "
                     f"Call .cpu() before packing into orch_args."
                 )
-            orch_args.add_tensor(make_tensor_arg(arg))
+            orch_args.add_tensor(make_tensor_arg(worker, arg))
         elif isinstance(arg, DeviceTensor):
             try:
-                orch_args.add_tensor(device_tensor_to_tensor(arg))
-            except ValueError as e:
+                orch_args.add_tensor(make_tensor_arg(worker, arg))
+            except (TypeError, ValueError) as e:
                 raise ValueError(f"At position {i}: {e}") from e
         elif isinstance(arg, _SimpleCData):
             continue  # handled below
@@ -828,7 +1008,9 @@ def _build_call_config(
     if at is not None:
         cfg.aicpu_thread_num = at
 
-    cfg.enable_l2_swimlane = run_config.enable_l2_swimlane
+    # Already a normalized collection level (0-4), so it lands on the runtime's
+    # ``int32_t`` field verbatim rather than through the setter's bool shortcut.
+    cfg.enable_chip_swimlane = run_config.enable_chip_swimlane
     cfg.enable_dump_args = run_config.enable_dump_args
     cfg.enable_pmu = run_config.enable_pmu
     cfg.enable_dep_gen = run_config.enable_dep_gen
@@ -915,7 +1097,7 @@ def _execute_on_device(
             device_id,
             enable_sdma=enable_sdma,
             output_prefix=str(dfx_dir) if dfx_dir is not None else None,
-            enable_l2_swimlane=pass_dfx.enable_l2_swimlane,
+            enable_chip_swimlane=pass_dfx.enable_chip_swimlane,
             enable_dump_args=pass_dfx.enable_dump_args,
             enable_pmu=pass_dfx.enable_pmu,
             enable_dep_gen=pass_dfx.enable_dep_gen,
@@ -1009,7 +1191,7 @@ def _collect_dfx_artifacts(
     ``CallConfig.output_prefix`` passed at submit). Each branch below is
     independent and skips silently when its artefact is missing — a
     partial DFX run (e.g. only ``enable_dump_args``) must not crash on
-    the swimlane converter looking for ``l2_swimlane_records.json``.
+    the swimlane converter looking for ``chip_swimlane_records.json``.
     """
     # Synthesise the func_id→name map the profiling tools need for readable
     # labels. simpler's SceneTest harness writes this itself; pypto does not
@@ -1019,18 +1201,19 @@ def _collect_dfx_artifacts(
     # ``--func-names``. Written whenever swimlane or dep_gen is enabled (the two
     # consumers); harmless no-op when no kernel names are available.
     name_map_path: Path | None = None
-    if dfx.enable_l2_swimlane or dfx.enable_dep_gen:
+    if dfx.enable_chip_swimlane or dfx.enable_dep_gen:
         name_map_path = _write_name_map(dfx_dir.parent, dfx_dir)
 
-    if dfx.enable_l2_swimlane and (dfx_dir / "l2_swimlane_records.json").exists():
+    chip_swimlane_records = dfx_dir / _CHIP_SWIMLANE_RECORDS_NAME
+    if dfx.enable_chip_swimlane and chip_swimlane_records.exists():
         # Swimlane conversion is onboard-only — the simulator produces
-        # ``l2_swimlane_records.json`` but does not yet ship the matching
+        # ``chip_swimlane_records.json`` but does not yet ship the matching
         # task metadata the converter expects.
         if not platform.endswith("sim"):
             _generate_swimlane(
                 dfx_dir.parent,
                 dfx_dir,
-                dfx_dir / "l2_swimlane_records.json",
+                chip_swimlane_records,
                 func_names=name_map_path,
             )
         else:
@@ -1096,7 +1279,7 @@ def _write_name_map(work_dir: Path, dfx_dir: Path) -> Path | None:
     Args:
         work_dir: Directory containing ``kernel_config.py``.
         dfx_dir: ``dfx_outputs`` directory where the name map is written
-            (alongside ``l2_swimlane_records.json`` / ``deps.json``).
+            (alongside ``chip_swimlane_records.json`` / ``deps.json``).
 
     Returns:
         The written path, or ``None`` when ``kernel_config.py`` is absent or
@@ -1138,14 +1321,14 @@ def _generate_swimlane(
 ) -> None:
     """Run ``python -m simpler_setup.tools.swimlane_converter`` to generate ``merged_swimlane_*.json``.
 
-    Output is written to *swimlane_dir* alongside the input ``l2_swimlane_records_*.json``.
+    Output is written to *swimlane_dir* alongside the input ``chip_swimlane_records.json``.
 
     Args:
         work_dir: Directory containing ``kernel_config.py``. Passed to the
             converter as ``-k`` when the file exists, and omitted when it does
             not (the converter rejects a missing path).
         swimlane_dir: Directory where swimlane JSON files are written.
-        perf_file: Path to the ``l2_swimlane_records_*.json`` file produced by
+        perf_file: Path to the ``chip_swimlane_records.json`` file produced by
             CodeRunner and already moved into *swimlane_dir*.  When ``None``,
             swimlane conversion is skipped.
         func_names: Optional ``name_map_*.json`` (see :func:`_write_name_map`)
@@ -1162,7 +1345,7 @@ def _generate_swimlane(
         return
 
     if perf_file is None:
-        print("No l2_swimlane_records_*.json found, skipping swimlane conversion")
+        print("No chip_swimlane_records.json found, skipping swimlane conversion")
         return
 
     kernel_config_path = work_dir / "kernel_config.py"
@@ -1274,8 +1457,9 @@ def execute_compiled(  # noqa: PLR0913
     (with caching and parallel kernel compilation) and
     :func:`device_runner.execute_on_device` for device dispatch.  Host
     ``torch.Tensor`` outputs in *args* are modified in-place with device
-    results; :class:`DeviceTensor` arguments are passed through to the
-    runtime as ``child_memory=True`` (no H2D upload, no D2H readback).
+    results; :class:`DeviceTensor` arguments retain their owning simpler
+    ``Buffer`` and are packed into address-free ``TaskArgs`` (no H2D upload,
+    no D2H readback).
 
     Args:
         work_dir: Root output directory from :func:`ir.compile`, containing
@@ -1303,7 +1487,7 @@ def execute_compiled(  # noqa: PLR0913
 
     Device results are written back into the host tensors in *args* in
     place; per-run timing is no longer returned — read it from the runtime's
-    ``[STRACE]`` log markers (simpler PR #1177) or the L2 swimlane records.
+    ``[STRACE]`` log markers (simpler PR #1177) or the chip swimlane records.
     """
     del analyze_auto_scopes_for_deps
 
@@ -1327,8 +1511,6 @@ def execute_compiled(  # noqa: PLR0913
         aicpu_thread_num if aicpu_thread_num is not None else runtime_config.get("aicpu_thread_num")
     )
 
-    orch_args = _coerced_to_orch_args(args)
-
     # Snapshot DFX state before execution
     dfx_dir: Path | None = None
     if dfx.any():
@@ -1338,7 +1520,7 @@ def execute_compiled(  # noqa: PLR0913
     def _run_pass(pass_dfx: "_DfxOpts") -> None:
         execute_on_device(
             chip_callable,
-            orch_args,
+            args,
             platform,
             runtime_name,
             device_id,
@@ -1346,7 +1528,7 @@ def execute_compiled(  # noqa: PLR0913
             aicpu_thread_num=effective_aicpu_thread_num,
             enable_sdma=enable_sdma,
             output_prefix=str(dfx_dir) if dfx_dir is not None else None,
-            enable_l2_swimlane=pass_dfx.enable_l2_swimlane,
+            enable_chip_swimlane=pass_dfx.enable_chip_swimlane,
             enable_dump_args=pass_dfx.enable_dump_args,
             enable_pmu=pass_dfx.enable_pmu,
             enable_dep_gen=pass_dfx.enable_dep_gen,

@@ -249,19 +249,21 @@ def cacheinvalid(
     *,
     span: Span | None = None,
 ) -> Call:
-    """Invalidate cache lines: a tensor sub-region, or the whole GM address space.
+    """Invalidate one addressed cache line, or the whole GM address space.
 
     Two forms selected by arity:
 
     - No arguments: invalidate the entire GM address space; lowers to
       ``pto.cmo.cacheinvalid all #pto.address_space<gm>``.
-    - ``(tensor, shapes, offsets)``: invalidate one tensor sub-region. Both
-      ``shapes`` and ``offsets`` are N-D and match the tensor rank. Every region
-      size — a single element included — lowers to ``pto.partition_view`` +
+    - ``(tensor, shapes, offsets)``: locate a tensor sub-region and invalidate
+      only the cache line containing that view's base address. Both ``shapes``
+      and ``offsets`` are N-D and match the tensor rank. Every region size — a
+      single element included — lowers to ``pto.partition_view`` +
       ``pto.cmo.cacheinvalid %payload_view single_cache_line : !pto.partition_tensor_view<...>``.
+      ``shapes`` does not make the operation walk every cache line in the region.
 
     Args:
-        tensor: Target tensor whose sub-region is invalidated; omit for whole-GM
+        tensor: Target tensor whose view base addresses the cache line; omit for whole-GM
         shapes: Per-dimension region sizes; length must equal the tensor rank
         offsets: Per-dimension start offsets; length must equal the tensor rank
         span: Optional source span for debugging (auto-captured if not provided)
@@ -318,6 +320,10 @@ def syncall(*, core_type: str = "mix", span: Span | None = None) -> Call:
     past this point before any participant may proceed. Lowers to
     ``pto.syncall() mode = #pto.sync_all_mode<hard>``.
 
+    This is an arrival barrier only: it neither waits for preceding data
+    instructions nor publishes or invalidates business-data cache lines.
+    Cross-core GM handoff requires explicit cache maintenance and a GM fence.
+
     .. warning::
         The hard/FFTS form waits for **all** physical cores of the participant
         set to arrive. The kernel must therefore be launched at full occupancy
@@ -342,20 +348,31 @@ def syncall(*, core_type: str = "mix", span: Span | None = None) -> Call:
     return _ir_core.create_op_call("system.syncall", [], {"core_type": core_type}, actual_span)
 
 
-def syncall_soft(core_type: str, args: list[Expr], *, span: Span | None = None) -> Call:
+def syncall_soft(
+    core_type: str,
+    gm_workspace: Expr,
+    used_cores: Expr | None = None,
+    *,
+    span: Span | None = None,
+) -> Call:
     """Soft (GM-polling) form of ``system.syncall``.
 
     Unlike the hard/FFTS form, the soft form polls a shared GM workspace and so
-    works at partial occupancy. ``args`` is the positional operand list, already
-    assembled by the DSL layer:
+    works at partial occupancy. All participant sets use the same operand ABI:
+    ``[gm_workspace]`` when the launch determines the participant count, or
+    ``[gm_workspace, used_cores]`` when it is explicit.
 
-    - aiv_only: ``[gm_workspace, ub_scratch, used_cores]``
-    - aic_only: ``[gm_workspace, l1_scratch, used_cores]``
-    - mix: ``[gm_workspace, ub_scratch, l1_scratch, used_cores]``
+    This is an arrival barrier only: it neither waits for preceding data
+    instructions nor publishes or invalidates business-data cache lines.
+    Cross-core GM handoff requires explicit cache maintenance and a GM fence.
 
     Args:
         core_type: Participant set, one of "aiv_only", "aic_only", or "mix".
-        args: Positional operand Exprs (see above).
+        gm_workspace: Shared, zero-initialized GM INT32 workspace with at least
+            16 elements (64 bytes).
+        used_cores: Optional INT32 participant count. Omit to derive it from the
+            device launch configuration. Runtimes with a synthetic logical grid
+            should pass it explicitly.
         span: Optional source span for debugging (auto-captured if not provided).
 
     Returns:
@@ -363,15 +380,22 @@ def syncall_soft(core_type: str, args: list[Expr], *, span: Span | None = None) 
     """
     if core_type not in _SYNCALL_CORE_TYPES:
         raise ValueError(f"soft syncall core_type must be one of {_SYNCALL_CORE_TYPES}, got {core_type!r}")
-    # aiv_only/aic_only carry one scratch tile (3 operands); mix carries both a UB
-    # and a flat L1 scratch (4 operands). Gate the arity here so direct IR callers
-    # cannot build a malformed barrier.
-    expected = 4 if core_type == "mix" else 3
-    if len(args) != expected:
-        raise ValueError(
-            f"soft syncall core_type={core_type!r} requires {expected} operands, got {len(args)}"
-        )
+    if used_cores is not None:
+        used_type = used_cores.type
+        if not isinstance(used_type, ScalarType) or used_type.dtype != DataType.INT32:
+            raise TypeError(f"soft syncall used_cores must be an INT32 scalar, got {used_type}")
+        if isinstance(used_cores, ConstInt):
+            if not 0 <= used_cores.value <= (1 << 31) - 1:
+                raise ValueError(
+                    "soft syncall used_cores must be in the INT32 range "
+                    f"[0, {(1 << 31) - 1}], got {used_cores.value}"
+                )
+            if used_cores.value == 0:
+                used_cores = None
     actual_span = _get_span_or_capture(span, frame_offset=1)
+    args = [gm_workspace]
+    if used_cores is not None:
+        args.append(used_cores)
     return _ir_core.create_op_call(
         "system.syncall", args, {"core_type": core_type, "mode": "soft"}, actual_span
     )

@@ -246,6 +246,7 @@ class TestTileElementwiseOps:
         calls = (
             tile.div(lhs, rhs, span),
             tile.log(lhs, span),
+            tile.recip(lhs, span),
         )
 
         assert all(call.span.filename == "tile_precision_compat.py" for call in calls)
@@ -390,6 +391,29 @@ class TestTileUnaryOps:
         assert call.type.dtype == dtype
         expected_kwargs = {"high_precision": True} if high_precision else {}
         assert dict(call.kwargs) == expected_kwargs
+
+    @pytest.mark.parametrize("dtype", [DataType.FP16, DataType.FP32])
+    @pytest.mark.parametrize("high_precision", [False, True])
+    def test_tile_recip_contract_and_precision(self, dtype, high_precision):
+        """Both reciprocal precision modes preserve each supported float dtype."""
+        span = ir.Span.unknown()
+        src = ir.Var("src", ir.TileType([8, 8], dtype), span)
+
+        call = tile.recip(src, high_precision=high_precision)
+
+        assert isinstance(call.type, ir.TileType)
+        assert call.type.dtype == dtype
+        expected_kwargs = {"high_precision": True} if high_precision else {}
+        assert dict(call.kwargs) == expected_kwargs
+
+    @pytest.mark.parametrize("dtype", [DataType.INT32, DataType.BF16])
+    def test_tile_recip_rejects_unsupported_high_precision_dtype(self, dtype):
+        """The PTOAS high-precision reciprocal template only supports FP16 and FP32 inputs."""
+        span = ir.Span.unknown()
+        src = ir.Var("src", ir.TileType([8, 8], dtype), span)
+
+        with pytest.raises(ValueError, match=r"high_precision only for FP16 or FP32"):
+            tile.recip(src, high_precision=True)
 
     def test_tile_abs(self):
         """Test tile.abs operator - absolute value of all elements."""

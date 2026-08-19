@@ -16,6 +16,8 @@ they produce structurally equal IR.
 
 import os
 import pathlib
+import subprocess
+import sys
 import warnings
 
 import pypto.ir.utils as pypto_ir_utils
@@ -186,15 +188,16 @@ class TestUnifiedTensorDispatch:
 
         ir.assert_structural_equal(unified, explicit)
 
-    def test_recip(self):
+    @pytest.mark.parametrize("high_precision", [False, True])
+    def test_recip(self, high_precision):
         @pl.function
         def unified(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            c: pl.Tensor[[64], pl.FP32] = pl.recip(a)
+            c: pl.Tensor[[64], pl.FP32] = pl.recip(a, high_precision=high_precision)
             return c
 
         @pl.function
         def explicit(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            c: pl.Tensor[[64], pl.FP32] = pl.tensor.recip(a)
+            c: pl.Tensor[[64], pl.FP32] = pl.tensor.recip(a, high_precision=high_precision)
             return c
 
         ir.assert_structural_equal(unified, explicit)
@@ -561,13 +564,14 @@ class TestUnifiedBlockDispatch:
 
         ir.assert_structural_equal(unified, explicit)
 
-    def test_recip(self):
+    @pytest.mark.parametrize("high_precision", [False, True])
+    def test_recip(self, high_precision):
         @pl.function
         def unified(
             t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
         ) -> pl.Tensor[[64, 64], pl.FP32]:
             a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
-            b: pl.Tile[[64, 64], pl.FP32] = pl.recip(a)
+            b: pl.Tile[[64, 64], pl.FP32] = pl.recip(a, high_precision=high_precision)
             result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
             return result
 
@@ -576,7 +580,7 @@ class TestUnifiedBlockDispatch:
             t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
         ) -> pl.Tensor[[64, 64], pl.FP32]:
             a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
-            b: pl.Tile[[64, 64], pl.FP32] = pl.tile.recip(a)
+            b: pl.Tile[[64, 64], pl.FP32] = pl.tile.recip(a, high_precision=high_precision)
             result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
             return result
 
@@ -1686,6 +1690,35 @@ class TestUnifiedOpsCrossPathKwargs:
         assert not ir.structural_equal(unified.unwrap(), pl.tile.col_sum(t).unwrap())
 
 
+# Run in a subprocess with the ``pypto`` package reached through a symlink.
+# ``argv[1]`` is the symlinked sys.path entry the import is expected to use.
+_SYMLINKED_IMPORT_PROBE = """\
+import sys
+import warnings
+
+import pypto
+from pypto import DataType, ir
+from pypto.language.op import unified_ops
+from pypto.language.typing import Tensor
+
+link_root = sys.argv[1]
+# Without this an installed copy or a stray PYTHONPATH would make the whole
+# check vacuous by importing through the real path.
+assert pypto.__file__.startswith(link_root), f"import bypassed the symlink: {pypto.__file__}"
+
+src = Tensor(expr=ir.Var("x", ir.TensorType([16, 32], DataType.FP32), ir.Span.unknown()))
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("default")
+    unified_ops.slice(src, [8, 32], [0, 0], pad_value=ir.PadValue.min)
+    unified_ops.slice(src, [8, 32], [0, 0], pad_value=ir.PadValue.min)
+    unified_ops.slice(src, [8, 32], [0, 0], pad_value=ir.PadValue.min)
+
+assert len(caught) == 3, f"expected one warning per call site, got {len(caught)}"
+blamed = {w.filename for w in caught}
+assert blamed == {__file__}, f"warnings blamed {sorted(blamed)}, not {__file__}"
+"""
+
+
 class TestUnifiedSlicePadValue:
     """``pl.slice`` forwards ``pad_value``, which both dispatch paths honour.
 
@@ -1856,6 +1889,36 @@ class TestUnifiedSlicePadValue:
         # The frame that would call warnings.warn is itself user code, so the
         # level naming it is 1 — not 2, which would name this test instead.
         assert namespace["warn_site"]() == 1
+
+    def test_symlinked_import_path_still_names_the_caller(self, tmp_path):
+        """Reaching PyPTO through a symlink must not break caller attribution.
+
+        ``co_filename`` keeps the spelling the import used, so a package prefix
+        built by resolving symlinks never matches it under a symlinked
+        ``sys.path`` entry. Every library frame then reads as user code, the
+        walk stops at level 1, and ``warnings.warn`` names its own line —
+        collapsing the probe's three call sites onto a single warning.
+
+        Only a real import through a symlink makes ``__file__`` and the sibling
+        frames share the aliased spelling, so this needs a subprocess; an
+        in-process fake frame would not reproduce it.
+        """
+        package_root = pathlib.Path(pypto_ir_utils.__file__).resolve().parent.parent.parent
+        link_root = tmp_path / "linked_python"
+        link_root.symlink_to(package_root, target_is_directory=True)
+
+        script = tmp_path / "user_kernel.py"
+        script.write_text(_SYMLINKED_IMPORT_PROBE)
+
+        result = subprocess.run(
+            [sys.executable, str(script), str(link_root)],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PYTHONPATH": str(link_root)},
+            check=False,
+        )
+
+        assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
 
     def test_pad_value_reaches_the_parser_path_for_tiles(self):
         """The Tile forward is reached dynamically through the parser too."""

@@ -44,9 +44,9 @@ How to run
 
     # On real hardware, with profiling enabled:
     pytest tests/st/runtime/scheduling/test_pl_at_deps_pipeline.py \\
-        --enable-l2-swimlane --platform=a2a3
+        --enable-chip-swimlane --platform=a2a3
 
-    # Without --enable-l2-swimlane, the swimlane assertions skip and only
+    # Without --enable-chip-swimlane, the swimlane assertions skip and only
     # numerical correctness is checked.
 """
 
@@ -184,27 +184,27 @@ class TestPlAtDepsPipeline:
 
 
 # ---------------------------------------------------------------------------
-# Swimlane validation — only when --enable-l2-swimlane is enabled.
+# Swimlane validation — only when --enable-chip-swimlane is enabled.
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="module")
 def pl_at_deps_swimlane_file(test_runner) -> Path:
     """Run the pipeline once with profiling and return the swimlane JSON."""
-    if not test_runner.config.enable_l2_swimlane:
-        pytest.skip("pass --enable-l2-swimlane to validate the pl.at-deps swimlane")
+    if not test_runner.config.enable_chip_swimlane:
+        pytest.skip("pass --enable-chip-swimlane to validate the pl.at-deps swimlane")
 
-    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_swimlane_records.json"))
+    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/chip_swimlane_records.json"))
     result = test_runner.run(_PlAtDepsPipelinePTO())
     assert result.passed, f"pl.at-deps pipeline failed: {result.error}"
 
-    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_swimlane_records.json"))
+    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/chip_swimlane_records.json"))
     candidates = list(after - before)
     if not candidates:
         # Fallback for runners that overwrite an existing path rather than
         # creating a new one. Pick the freshest available file.
         candidates = sorted(after, key=lambda p: p.stat().st_mtime, reverse=True)[:1]
-    assert candidates, "No l2_swimlane_records.json was found for the pl.at-deps run"
+    assert candidates, "No chip_swimlane_records.json was found for the pl.at-deps run"
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
@@ -412,16 +412,16 @@ class TestPhaseFencePlAtDeps:
 
 @pytest.fixture(scope="module")
 def phase_fence_pl_at_swimlane_file(test_runner) -> Path:
-    if not test_runner.config.enable_l2_swimlane:
-        pytest.skip("pass --enable-l2-swimlane to validate the phase-fence pl.at swimlane")
-    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_swimlane_records.json"))
+    if not test_runner.config.enable_chip_swimlane:
+        pytest.skip("pass --enable-chip-swimlane to validate the phase-fence pl.at swimlane")
+    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/chip_swimlane_records.json"))
     result = test_runner.run(_PhaseFencePlAtDepsPTO())
     assert result.passed, f"phase-fence pl.at-deps failed: {result.error}"
-    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_swimlane_records.json"))
+    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/chip_swimlane_records.json"))
     candidates = list(after - before)
     if not candidates:
         candidates = sorted(after, key=lambda p: p.stat().st_mtime, reverse=True)[:1]
-    assert candidates, "No l2_swimlane_records.json found for the phase-fence pl.at run"
+    assert candidates, "No chip_swimlane_records.json found for the phase-fence pl.at run"
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
@@ -601,16 +601,16 @@ class TestBranchChainPlAtDeps:
 
 @pytest.fixture(scope="module")
 def branch_chain_pl_at_swimlane_file(test_runner) -> Path:
-    if not test_runner.config.enable_l2_swimlane:
-        pytest.skip("pass --enable-l2-swimlane to validate the branch-chain pl.at swimlane")
-    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_swimlane_records.json"))
+    if not test_runner.config.enable_chip_swimlane:
+        pytest.skip("pass --enable-chip-swimlane to validate the branch-chain pl.at swimlane")
+    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/chip_swimlane_records.json"))
     result = test_runner.run(_BranchChainPlAtDepsPTO())
     assert result.passed, f"branch-chain pl.at-deps failed: {result.error}"
-    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_swimlane_records.json"))
+    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/chip_swimlane_records.json"))
     candidates = list(after - before)
     if not candidates:
         candidates = sorted(after, key=lambda p: p.stat().st_mtime, reverse=True)[:1]
-    assert candidates, "No l2_swimlane_records.json found for the branch-chain pl.at run"
+    assert candidates, "No chip_swimlane_records.json found for the branch-chain pl.at run"
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 

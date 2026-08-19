@@ -695,6 +695,16 @@ inline std::vector<std::pair<std::string, std::any>> WithArgDirectionOverridesAt
 inline constexpr const char* kAttrManualDepEdges = "manual_dep_edges";
 
 /**
+ * @brief Marks an outlined InCore function as a dedicated deferred waiter.
+ *
+ * Value type: ``bool``. ``ScopeOutliner`` sets this after validating the
+ * waiter-only structural contract. ``ExpandMixedKernel`` uses it for the
+ * final pure-AIV check. A caller captures the ordinary TaskId only when a
+ * later task needs to depend on the deferred completion.
+ */
+inline constexpr const char* kAttrDeferredCompletionWaiter = "deferred_completion_waiter";
+
+/**
  * @brief Reserved attr key marking an internal dependency-only TaskId call.
  *
  * Value type: ``bool``. Written by the manual phase-fence expansion pass on

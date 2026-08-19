@@ -86,6 +86,7 @@ program_optimized = reuse_pass(program)
   | `tile.recip`, `tile.rsqrt` | `not_inplace_safe` | high-precision path reads the input **and** a tmp scratch while writing the output |
   | `tile.row_sum` / `row_max` / `row_min` | `not_inplace_safe` | `TROW*` reads the full input row + tmp scratch while writing the reduced `[M, 1]` output |
   | `tile.mrgsort_format1` | `not_inplace_safe` | merge-sort intrinsic requires `src != dst` |
+  | `tile.move` | `not_inplace_safe` | `TMOV` requires distinct source and destination addresses; baked-address PTO codegen rejects a remaining same-address move rather than silently treating it as a no-op |
   | `tile.fmod`, `tile.fmods` | `not_inplace_safe` | `TFMOD`/`TFMODS` compute `a - trunc(a/b)*b` by overwriting `dst = a/b` first, then re-reading the original `src0` (`a`) for the final subtraction; when `dst == src0` that subtraction sees the already-clobbered quotient and yields `0` for every element |
   | `tile.transpose` | `not_inplace_safe` | `pto.ttrans` is not in-place safe: the a2a3 unaligned scalar path writes `dst` directly from `src` (no tmp staging), so `dst == src` corrupts the data mid-write. The output always gets a fresh buffer (also enforced in InitMemRef, which never inherits the input's buffer for it). |
   | `tile.sel` | `forbid_output_alias(0)` (mask), `(3)` (tmp) | `TSEL` reads the predicate mask + tmp scratch while writing `dst` |

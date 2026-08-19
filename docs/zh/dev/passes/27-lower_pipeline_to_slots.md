@@ -6,7 +6,7 @@
 
 `pl.pipeline(N, stage=F)` 表达的是乒乓缓冲的诉求。[`LowerPipelineLoops`](28-lower_pipeline_loops.md) 用**复制**来兑现：把循环体复制 `F` 份，每份都有全新的定义变量，于是各份的 tile 是彼此独立的 MemRef，`MemoryReuse` 不允许把它们合并。这条路可行，但代价是 `F` 倍的代码量、一套静态/动态余数派发，以及为了隔开各份副本而存在的 `pipeline_membership` 机制。
 
-本 pass 用 ptoas 本来就认识的形式表达同一个意图。`pl.MemRef(name, slots=F)` 的含义正是**"一个分配、F 个等大 slot、本次使用取第 k 个"**（见[Slots](../language/00-python_syntax.md#slots)），而 PTO codegen 恰好把它下降为 `pto.alloc_multi_tile` + `pto.multi_tile_get`。于是循环只保留**一份**循环体，每个按 stage 私有的缓冲变成合成声明的第 `iv % F` 个 slot：
+本 pass 用 ptoas 本来就认识的形式表达同一个意图。`pl.MemRef(name, slots=F)` 的含义正是**"一个分配、F 个等大 slot、本次使用取第 k 个"**（见[槽位](../language/00-python_syntax.md#槽位)），而 PTO codegen 恰好把它下降为 `pto.alloc_multi_tile` + `pto.multi_tile_get`。于是循环只保留**一份**循环体，每个按 stage 私有的缓冲变成合成声明的第 `iv % F` 个 slot：
 
 ```python
 # Before（本 pass 看到的形态）
@@ -137,4 +137,4 @@ scf.for %i = %c0_index to %c4_index step %c1_index {
 - [`SkewCrossCorePipeline`](26-skew_cross_core_pipeline.md) —— 跨核 pipeline 循环上的同构做法
 - [`InitMemRef`](31-init_memref.md) —— 解析合成出来的声明
 - [PTO codegen](../codegen/00-pto_codegen.md) —— 把 slot 下降为 ptoas region
-- [Python 语法：Slots](../language/00-python_syntax.md#slots) —— 同一声明的手写形式
+- [Python 语法：槽位](../language/00-python_syntax.md#槽位) —— 同一声明的手写形式

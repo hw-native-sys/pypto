@@ -130,14 +130,24 @@ def test_per_lane_gather_row_compiles_to_pto():
 
 
 @pl.jit
-def _default_ring_kv_qk(
+def _deep_ring_kv_qk(
     pool: pl.Tensor[[POOL_ROWS, HEAD_DIM], pl.BF16],
     idx: pl.Tensor[[ROWS], pl.INT32],
     q: pl.Tensor[[Q_ROWS, HEAD_DIM], pl.BF16],
     out: pl.Out[pl.Tensor[[Q_ROWS, ROWS], pl.FP32]],
 ):
-    """Same kernel with the default 8-slot ring — 131072 x 8 = 1MB of a 512KB L1."""
-    with pl.at(level=pl.Level.CORE_GROUP, name_hint="default_ring", allow_early_resolve=True):
+    """Same kernel with an explicit 8-slot ring — 131072 x 8 = 1MB of a 512KB L1.
+
+    The depth is stated rather than inherited: the automatic ring defaults to
+    ``cross_core_pipe::kDefaultAutoPipeSlotNum`` (2), which fits here, so only an
+    explicit request overflows L1 and exercises the diagnostic below.
+    """
+    with pl.at(
+        level=pl.Level.CORE_GROUP,
+        name_hint="deep_ring",
+        allow_early_resolve=True,
+        optimizations=[pl.cross_core_slot(slot_num=8)],
+    ):
         for aiv in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
             ub = pl.full([HALF, HEAD_DIM], dtype=pl.BF16, value=0.0)
             for k in pl.range(HALF):
@@ -148,17 +158,16 @@ def _default_ring_kv_qk(
     return out
 
 
-def test_default_ring_depth_reports_the_reserved_bytes():
-    """Without pl.cross_core_slot the 8-slot default ring overflows L1, and the
-    diagnostic must attribute the bytes and name the knob rather than reporting a
-    bare number the author cannot act on.
+def test_oversized_ring_depth_reports_the_reserved_bytes():
+    """An 8-slot ring overflows L1, and the diagnostic must attribute the bytes and
+    name the knob rather than reporting a bare number the author cannot act on.
 
     The reserve-buffer overflow is caught by AllocateMemoryAddresses' in-pass
     ``CHECK`` (``pypto::ValueError`` -> a builtin ``ValueError``), not by the
     ``AllocatedMemoryAddr`` verifier — which is why both carry the same note.
     """
     with pytest.raises(ValueError) as exc:
-        _default_ring_kv_qk.lower(config=RunConfig(platform="a2a3"))
+        _deep_ring_kv_qk.lower(config=RunConfig(platform="a2a3"))
     message = str(exc.value)
     assert "Mat buffer usage (1064960 bytes) exceeds platform limit (524288 bytes)" in message
     assert "The first 1048576 bytes of that space are reserved by system.reserve_buffer" in message

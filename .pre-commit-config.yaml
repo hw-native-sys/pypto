@@ -56,6 +56,13 @@ repos:
           language_version: python3
           pass_filenames: false
 
+        - id: check-emitter-check-classification
+          name: check-emitter-check-classification
+          entry: python tests/lint/check_emitter_check_classification.py
+          language: python
+          language_version: python3
+          pass_filenames: false
+
         - id: check-op-name-literals
           name: check-op-name-literals
           entry: python tests/lint/check_op_name_literals.py

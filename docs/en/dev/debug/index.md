@@ -8,7 +8,7 @@ Tools for narrowing down where a compiled program stops matching its reference.
 
 ## See Also
 
-- [Torch Codegen Debug Guide](../../user/03-torch_codegen_debug.md) — the same tool from a user's perspective.
+- [Torch Codegen Debug Guide](../../user/tools/01-torch-codegen.md) — the same tool from a user's perspective.
 - [Error Handling](../02-error-handling.md) — exception types and IR source locations in failures.
 - [Logging](../03-logging.md) — the two logging subsystems and how to raise their verbosity.
 - [Runtime DFX Flags](../03-runtime-dfx.md) — runtime-side diagnostics, including selective tensor dumps.

@@ -41,8 +41,6 @@ from .compiled_program import (
     _ParamInfo,
     _remove_meta,
     _to_torch_dtype,
-    _validate_device_tensor,
-    _validate_stacked_tensor,
     _write_debug_runner,
     _write_meta_atomically,
 )
@@ -181,7 +179,7 @@ class DistributedCompiledProgram:
     **One-shot dispatch**::
 
         compiled = ir.compile(MyProgram, platform="a2a3", distributed_config=dc)
-        compiled(inputs, outputs)   # blocks until all ranks finish
+        compiled(host_inputs, host_outputs)   # blocks until all ranks finish
 
     **Persistent dispatch** (repeated launches without re-registering)::
 
@@ -406,20 +404,14 @@ class DistributedCompiledProgram:
         self,
         *args: CallArg,
         config: "RunConfig | None" = None,
-    ) -> (
-        torch.Tensor
-        | DeviceTensor
-        | StackedDeviceTensor
-        | tuple[torch.Tensor | DeviceTensor | StackedDeviceTensor, ...]
-        | None
-    ):
+    ) -> torch.Tensor | tuple[torch.Tensor, ...] | None:
         """Execute the distributed program via simpler Worker(level=3).
 
         ``config`` is an optional per-dispatch :class:`RunConfig`; its per-task
         ring-sizing overrides (``ring_task_window`` / ``ring_heap`` /
         ``ring_dep_pool``) size this dispatch's runtime ring buffers, and its
         runtime-diagnostic DFX flags (``enable_dump_args`` / ``enable_pmu`` /
-        ``enable_dep_gen`` / ``enable_scope_stats`` / ``enable_l2_swimlane``) are
+        ``enable_dep_gen`` / ``enable_scope_stats`` / ``enable_chip_swimlane``) are
         written per dispatch under ``<output_dir>/dfx_outputs/rank{r}/d{k}/``
         (``d{k}`` is the card's k-th dispatch, so multiple dispatches to one card
         keep separate artifacts). Onboard swimlane runs a dep-gen-only graph
@@ -427,6 +419,11 @@ class DistributedCompiledProgram:
         ``merged_swimlane_*.json`` per dispatch. Both passes execute the program
         and do not restore mutable arguments between them. Other compile-side
         fields are not consumed on the dispatch path.
+
+        One-shot calls accept host ``torch.Tensor`` arguments only. A resident
+        ``DeviceTensor`` needs the owner ``Buffer`` and provenance of the same
+        live Worker; use :meth:`prepare`, allocate it through the returned
+        ``DistributedWorker``, then call ``worker.run(...)``.
         """
         from pypto.runtime.distributed_runner import execute_distributed  # noqa: PLC0415
 
@@ -435,6 +432,14 @@ class DistributedCompiledProgram:
         n_inputs = n_params - len(output_indices)
         has_return = len(return_types) > 0
         return_style = has_return and len(args) == n_inputs
+
+        if any(isinstance(arg, (DeviceTensor, StackedDeviceTensor)) for arg in args):
+            raise TypeError(
+                "One-shot DistributedCompiledProgram calls cannot accept DeviceTensor or "
+                "StackedDeviceTensor: their Buffer/provenance must belong to the same prepared "
+                "DistributedWorker. Use `with compiled.prepare() as worker:`, allocate with "
+                "`worker.alloc_tensor()` / `worker.alloc_stacked_tensor()`, then call `worker.run(...)`."
+            )
 
         if len(args) == n_params:
             all_args: list[CallArg] = list(args)
@@ -449,25 +454,13 @@ class DistributedCompiledProgram:
                 f"Parameters: {[p.name for p in param_infos]}"
             )
 
-        # Validate and coerce args. Tensor params accept a host ``torch.Tensor``,
-        # a worker-resident ``DeviceTensor``, or a ``StackedDeviceTensor`` whose
-        # per-rank shards are resident (both skip H2D/D2H) — matching the L2
-        # ``CompiledProgram`` and the ``DistributedWorker.run`` calling
-        # conventions.
-        coerced: list[torch.Tensor | DeviceTensor | StackedDeviceTensor] = []
+        # Validate and coerce one-shot host tensor args. Resident tensors are a
+        # prepared-DistributedWorker-only calling convention (guarded above).
+        coerced: list[torch.Tensor] = []
         for info, arg in zip(param_infos, all_args, strict=True):
-            if isinstance(arg, StackedDeviceTensor):
-                _validate_stacked_tensor(arg, info)
-                coerced.append(arg)
-                continue
-            if isinstance(arg, DeviceTensor):
-                _validate_device_tensor(arg, info)
-                coerced.append(arg)
-                continue
             if not isinstance(arg, torch.Tensor):
                 raise TypeError(
-                    f"Distributed programs only support tensor parameters "
-                    f"(torch.Tensor host, DeviceTensor, or StackedDeviceTensor worker-resident). "
+                    f"One-shot distributed programs only support host torch.Tensor parameters. "
                     f"Parameter {info.name!r} got {type(arg).__name__}"
                 )
             coerced.append(arg)
@@ -502,11 +495,12 @@ class DistributedCompiledProgram:
 
         Per-call inputs and outputs are reused-in-place **shared-memory** host
         ``torch.Tensor`` buffers (allocated before ``prepare()``) and/or
-        worker-resident ``DeviceTensor`` / simpler ``Tensor`` arguments.
-        Non-shared host tensors are rejected (the forked chip worker cannot see
-        a buffer allocated after the fork). The convenience host-to-device
-        upload of arbitrary host ``torch.Tensor`` inputs is only available on
-        the one-shot ``compile(...)(*args)`` / ``execute_distributed`` path.
+        worker-resident ``DeviceTensor`` arguments. Non-shared host tensors are
+        rejected as direct dispatch arguments because the forked chip worker
+        cannot see a buffer allocated after the fork. Explicit
+        ``alloc_tensor(init=...)``, ``copy_to`` and ``copy_from`` operations may
+        still use ordinary contiguous CPU tensors: the runtime stages them
+        through an owned POSIX shared-memory ``Buffer``.
 
         Args:
             config: Optional :class:`~pypto.runtime.RunConfig` used **only** to

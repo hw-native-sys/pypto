@@ -14,6 +14,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -148,21 +149,73 @@ inline CallPtr AsCallOrSubmitView(const ExprPtr& expr) {
   return nullptr;
 }
 
-/// Constant-evaluate @p expr if it is a ``ConstInt``; ``nullopt`` otherwise.
+/// Constant-evaluate @p expr if it is a ``ConstInt``, or a ``Neg`` of one;
+/// ``nullopt`` otherwise.
+///
+/// The ``Neg`` case matters for negative literals: the DSL parser folds
+/// ``-1`` to ``ConstInt(-1)`` and ``Simplify`` const-folds ``Neg`` as well, but
+/// IR built through the builder API or parsed from ``.pto`` before the first
+/// ``Simplify`` can still carry ``Neg(ConstInt(1))``. Peeking through it keeps
+/// constant detection independent of how far the pipeline has run.
 inline std::optional<int64_t> EvalConstInt(const ExprPtr& expr) {
   if (auto ci = As<ConstInt>(expr)) return ci->value_;
+  if (auto neg = As<Neg>(expr)) {
+    if (auto inner = As<ConstInt>(neg->operand_)) {
+      // -INT64_MIN is not representable; negating it is UB. No such literal can
+      // be a meaningful loop bound, so report "not a constant" rather than
+      // inventing a value.
+      if (inner->value_ == std::numeric_limits<int64_t>::min()) return std::nullopt;
+      return -inner->value_;
+    }
+  }
   return std::nullopt;
 }
 
+/// Trip count of a loop with compile-time bounds @p start / @p stop / @p step.
+///
+/// Direction-aware: handles ascending (``step > 0``) and descending
+/// (``step < 0``) loops alike, and returns 0 for an empty or zero-step loop.
+/// ``ForStmt::step_`` carries no sign restriction, and ``pl.range(64, 0, -1)``
+/// is valid DSL, so a positive-step-only formula silently mis-answers a loop
+/// whose trip count is perfectly well-defined.
+///
+/// The span and the step magnitude are computed in ``uint64_t``. Signed
+/// arithmetic would be UB at the edges of the range — ``stop - start``
+/// overflows for a full-width span, and ``-step`` overflows at ``INT64_MIN`` —
+/// and UB here would silently corrupt a carry-array size. Unsigned wraparound
+/// is defined and yields the exact magnitude in both directions. A trip count
+/// that does not fit in ``int64_t`` saturates: every caller uses this as a size
+/// or a threshold, so saturating is safe where wrapping negative is not.
+inline int64_t ComputeStaticTripCount(int64_t start, int64_t stop, int64_t step) {
+  const bool ascending = step > 0 && start < stop;
+  const bool descending = step < 0 && start > stop;
+  if (!ascending && !descending) return 0;
+
+  const auto ustart = static_cast<uint64_t>(start);
+  const auto ustop = static_cast<uint64_t>(stop);
+  const auto ustep = static_cast<uint64_t>(step);
+  // Magnitudes: defined under unsigned wraparound even at the range edges.
+  const uint64_t span = ascending ? ustop - ustart : ustart - ustop;
+  const uint64_t magnitude = ascending ? ustep : (0U - ustep);
+
+  const uint64_t trips = (span + magnitude - 1) / magnitude;
+  constexpr auto kMax = static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+  return static_cast<int64_t>(trips > kMax ? kMax : trips);
+}
+
 /// Return the const trip count of @p for_stmt when start/stop/step are all
-/// ``ConstInt`` and step is positive; 0 otherwise.
-inline int64_t EvalConstTripCount(const ForStmtPtr& for_stmt) {
+/// compile-time integers; ``nullopt`` when any bound is not.
+///
+/// The optional is load-bearing: "the bounds are not compile-time constants"
+/// and "the loop provably runs zero times" are different propositions, and
+/// callers that fall back to a dynamic path must not conflate them. Callers
+/// that only threshold-compare can use ``.value_or(0)``.
+inline std::optional<int64_t> EvalConstTripCount(const ForStmtPtr& for_stmt) {
   auto start = EvalConstInt(for_stmt->start_);
   auto stop = EvalConstInt(for_stmt->stop_);
   auto step = EvalConstInt(for_stmt->step_);
-  if (!start || !stop || !step || *step <= 0) return 0;
-  int64_t trip = (*stop - *start + *step - 1) / *step;
-  return trip > 0 ? trip : 0;
+  if (!start || !stop || !step) return std::nullopt;
+  return ComputeStaticTripCount(*start, *stop, *step);
 }
 
 /// Peek through a leading compiler-inserted ``RuntimeScopeStmt`` so structural

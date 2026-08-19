@@ -1043,6 +1043,200 @@ class TestFlattenTileNdTo2DReshapedStore:
 
 
 # ----------------------------------------------------------------------------
+# User-written ND tile.assemble: the offset must be flattened with the tiles
+# ----------------------------------------------------------------------------
+
+
+class TestFlattenTileNdTo2DAssemble:
+    """A user-written >2D ``pl.tile.assemble`` offset folds into ``(row, col)``.
+
+    The tile operands are flattened by their defining ops, but the offset is a
+    literal tuple that no substitution touches. Left at ND rank it would be read
+    positionally by codegen (``row = elements[0]``), silently placing the write
+    at the wrong address, so the pass folds it with the same row-major collapse
+    it applies to ``tile.load``'s tensor-rank offsets.
+    """
+
+    def test_nd_assemble_offset_collapses_to_row(self):
+        """``[2, 0, 0]`` into a ``[4, 8, 16]`` target becomes row ``2*8 = 16``."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[4, 8, 16], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[4, 8, 16], pl.FP32]],
+            ) -> pl.Tensor[[4, 8, 16], pl.FP32]:
+                page: pl.Tile[[1, 8, 16], pl.FP32] = pl.tile.full([1, 8, 16], dtype=pl.FP32, value=1.0)
+                acc: pl.Tile[[4, 8, 16], pl.FP32] = pl.tile.create([4, 8, 16], dtype=pl.FP32)
+                # Write the page into batch slot 2.
+                acc2: pl.Tile[[4, 8, 16], pl.FP32] = pl.tile.assemble(acc, page, [2, 0, 0])
+                out_0: pl.Tensor[[4, 8, 16], pl.FP32] = pl.store(acc2, [0, 0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[4, 8, 16], pl.FP32]) -> pl.Tensor[[4, 8, 16], pl.FP32]:
+                out_0: pl.Tensor[[4, 8, 16], pl.FP32] = pl.create_tensor([4, 8, 16], dtype=pl.FP32)
+                y: pl.Tensor[[4, 8, 16], pl.FP32] = self.main_incore_0(x, out_0)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[4, 8, 16], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[4, 8, 16], pl.FP32]],
+            ) -> pl.Tensor[[4, 8, 16], pl.FP32]:
+                page = pl.tile.full([8, 16], dtype=pl.FP32, value=1.0)
+                acc = pl.tile.create([32, 16], dtype=pl.FP32)
+                # Row-major fold of [2, 0, 0] over the target dims [4, 8, 16]:
+                # row = 2*8 + 0 = 16, col = 0.
+                acc2 = pl.tile.assemble(acc, page, [16, 0])
+                out_store = pl.store(acc2, [0, 0, 0], out_0, shapes=[4, 8, 16])
+                return out_store
+
+            @pl.function
+            def main(self, x: pl.Tensor[[4, 8, 16], pl.FP32]) -> pl.Tensor[[4, 8, 16], pl.FP32]:
+                out_0 = pl.create_tensor([4, 8, 16], dtype=pl.FP32)
+                y = self.main_incore_0(x, out_0)
+                return y
+
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_nd_assemble_zero_offset(self):
+        """A whole-target assemble at ``[0, 0, 0]`` folds to ``[0, 0]``.
+
+        The placement was already accidentally correct here (``0*8 + 0 == 0``);
+        what the fold fixes is the rank, which downstream ``tile.assemble`` type
+        deduction needs to run its bounds check and valid-region union at all.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[4, 8, 16], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[4, 8, 16], pl.FP32]],
+            ) -> pl.Tensor[[4, 8, 16], pl.FP32]:
+                src: pl.Tile[[4, 8, 16], pl.FP32] = pl.tile.full([4, 8, 16], dtype=pl.FP32, value=1.0)
+                tgt: pl.Tile[[4, 8, 16], pl.FP32] = pl.tile.create([4, 8, 16], dtype=pl.FP32)
+                asm: pl.Tile[[4, 8, 16], pl.FP32] = pl.tile.assemble(tgt, src, [0, 0, 0])
+                out_0: pl.Tensor[[4, 8, 16], pl.FP32] = pl.store(asm, [0, 0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[4, 8, 16], pl.FP32]) -> pl.Tensor[[4, 8, 16], pl.FP32]:
+                out_0: pl.Tensor[[4, 8, 16], pl.FP32] = pl.create_tensor([4, 8, 16], dtype=pl.FP32)
+                y: pl.Tensor[[4, 8, 16], pl.FP32] = self.main_incore_0(x, out_0)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[4, 8, 16], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[4, 8, 16], pl.FP32]],
+            ) -> pl.Tensor[[4, 8, 16], pl.FP32]:
+                src = pl.tile.full([32, 16], dtype=pl.FP32, value=1.0)
+                tgt = pl.tile.create([32, 16], dtype=pl.FP32)
+                asm = pl.tile.assemble(tgt, src, [0, 0])
+                out_store = pl.store(asm, [0, 0, 0], out_0, shapes=[4, 8, 16])
+                return out_store
+
+            @pl.function
+            def main(self, x: pl.Tensor[[4, 8, 16], pl.FP32]) -> pl.Tensor[[4, 8, 16], pl.FP32]:
+                out_0 = pl.create_tensor([4, 8, 16], dtype=pl.FP32)
+                y = self.main_incore_0(x, out_0)
+                return y
+
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_2d_assemble_unchanged(self):
+        """An already-2D ``tile.assemble`` keeps the generic re-create path."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[32, 16], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
+            ) -> pl.Tensor[[32, 16], pl.FP32]:
+                page: pl.Tile[[8, 16], pl.FP32] = pl.tile.full([8, 16], dtype=pl.FP32, value=1.0)
+                acc: pl.Tile[[32, 16], pl.FP32] = pl.tile.create([32, 16], dtype=pl.FP32)
+                acc2: pl.Tile[[32, 16], pl.FP32] = pl.tile.assemble(acc, page, [16, 0])
+                out_0: pl.Tensor[[32, 16], pl.FP32] = pl.store(acc2, [0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[32, 16], pl.FP32]) -> pl.Tensor[[32, 16], pl.FP32]:
+                out_0: pl.Tensor[[32, 16], pl.FP32] = pl.create_tensor([32, 16], dtype=pl.FP32)
+                y: pl.Tensor[[32, 16], pl.FP32] = self.main_incore_0(x, out_0)
+                return y
+
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        ir.assert_structural_equal(After, Before)
+
+    def test_nd_assemble_non_contiguous_rejected(self):
+        """A ``[2, 4, 16]`` write into ``[4, 8, 16]`` is two disjoint row strips."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[4, 8, 16], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[4, 8, 16], pl.FP32]],
+            ) -> pl.Tensor[[4, 8, 16], pl.FP32]:
+                part: pl.Tile[[2, 4, 16], pl.FP32] = pl.tile.full([2, 4, 16], dtype=pl.FP32, value=1.0)
+                acc: pl.Tile[[4, 8, 16], pl.FP32] = pl.tile.create([4, 8, 16], dtype=pl.FP32)
+                acc2: pl.Tile[[4, 8, 16], pl.FP32] = pl.tile.assemble(acc, part, [0, 0, 0])
+                out_0: pl.Tensor[[4, 8, 16], pl.FP32] = pl.store(acc2, [0, 0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[4, 8, 16], pl.FP32]) -> pl.Tensor[[4, 8, 16], pl.FP32]:
+                out_0: pl.Tensor[[4, 8, 16], pl.FP32] = pl.create_tensor([4, 8, 16], dtype=pl.FP32)
+                y: pl.Tensor[[4, 8, 16], pl.FP32] = self.main_incore_0(x, out_0)
+                return y
+
+        with pytest.raises(ValueError, match="contiguous row band"):
+            passes.flatten_tile_nd_to_2d()(Before)
+
+    def test_nd_assemble_rank_mismatched_source_rejected(self):
+        """A 2D source into a 3D target has no ND coordinate space to fold in."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[4, 8, 16], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[4, 8, 16], pl.FP32]],
+            ) -> pl.Tensor[[4, 8, 16], pl.FP32]:
+                flat: pl.Tile[[8, 16], pl.FP32] = pl.tile.full([8, 16], dtype=pl.FP32, value=1.0)
+                acc: pl.Tile[[4, 8, 16], pl.FP32] = pl.tile.create([4, 8, 16], dtype=pl.FP32)
+                acc2: pl.Tile[[4, 8, 16], pl.FP32] = pl.tile.assemble(acc, flat, [2, 0, 0])
+                out_0: pl.Tensor[[4, 8, 16], pl.FP32] = pl.store(acc2, [0, 0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[4, 8, 16], pl.FP32]) -> pl.Tensor[[4, 8, 16], pl.FP32]:
+                out_0: pl.Tensor[[4, 8, 16], pl.FP32] = pl.create_tensor([4, 8, 16], dtype=pl.FP32)
+                y: pl.Tensor[[4, 8, 16], pl.FP32] = self.main_incore_0(x, out_0)
+                return y
+
+        with pytest.raises(ValueError, match="rank-2 source"):
+            passes.flatten_tile_nd_to_2d()(Before)
+
+
+# ----------------------------------------------------------------------------
 # Pass property declarations and TileOps2D verifier
 # ----------------------------------------------------------------------------
 
@@ -1085,6 +1279,80 @@ class TestFlattenTileNdTo2DPassProperties:
         props.insert(passes.IRProperty.TileOps2D)
         with pytest.raises(pypto.Error, match="TileOps2D"):
             passes.verify_properties(props, Unflatten, "test_verifier_fails")
+
+    def test_verifier_flags_nd_offset_on_2d_assemble(self):
+        """A 2D ``tile.assemble`` carrying a leftover ND offset is reported.
+
+        Codegen reads the offset positionally (``row = elements[0]``) and ignores
+        anything past index 1, so an unflattened offset is a silent misplacement
+        rather than a hard failure — the verifier has to catch it, and the
+        TileType arg scan cannot, because the offset is a ``TupleType``.
+        """
+        span = ir.Span.unknown()
+        target = ir.Var("target", ir.TileType([32, 16], DataType.FP32), span)
+        source = ir.Var("source", ir.TileType([8, 16], DataType.FP32), span)
+        asm_call = tile_ops.assemble(target, source, [2, 0, 0], span=span)
+        asm = ir.Var("asm", asm_call.type, span)
+        body = ir.SeqStmts(
+            [ir.AssignStmt(asm, asm_call, span), ir.ReturnStmt([asm], span)],
+            span,
+        )
+        func = ir.Function(
+            "nd_offset_assemble",
+            [(target, ir.ParamDirection.In), (source, ir.ParamDirection.In)],
+            [asm_call.type],
+            body,
+            span,
+            ir.FunctionType.InCore,
+        )
+        program = ir.Program([func], "nd_offset_assemble", span)
+        props = passes.IRPropertySet()
+        props.insert(passes.IRProperty.TileOps2D)
+
+        with pytest.raises(pypto.Error, match="TileOps2D"):
+            passes.verify_properties(props, program, "test_nd_offset_assemble")
+
+    def test_verifier_flags_non_literal_assemble_offset(self):
+        """An offset that is not a literal tuple leaves ``(row, col)`` unestablished.
+
+        Type deduction requires a ``MakeTuple`` offset, so this shape only reaches
+        the verifier from hand-built or re-parsed IR — which is exactly what a
+        property verifier exists to check.
+        """
+        span = ir.Span.unknown()
+        target = ir.Var("target", ir.TileType([32, 16], DataType.FP32), span)
+        source = ir.Var("source", ir.TileType([8, 16], DataType.FP32), span)
+        offset = ir.Var("offset", ir.TupleType([ir.ScalarType(DataType.INDEX)] * 2), span)
+        asm_call = ir.Call(
+            ir.get_op("tile.assemble"),
+            [target, source, offset],
+            {},
+            target.type,
+            span,
+        )
+        asm = ir.Var("asm", asm_call.type, span)
+        body = ir.SeqStmts(
+            [ir.AssignStmt(asm, asm_call, span), ir.ReturnStmt([asm], span)],
+            span,
+        )
+        func = ir.Function(
+            "non_literal_offset_assemble",
+            [
+                (target, ir.ParamDirection.In),
+                (source, ir.ParamDirection.In),
+                (offset, ir.ParamDirection.In),
+            ],
+            [asm_call.type],
+            body,
+            span,
+            ir.FunctionType.InCore,
+        )
+        program = ir.Program([func], "non_literal_offset_assemble", span)
+        props = passes.IRPropertySet()
+        props.insert(passes.IRProperty.TileOps2D)
+
+        with pytest.raises(pypto.Error, match="TileOps2D"):
+            passes.verify_properties(props, program, "test_non_literal_offset_assemble")
 
     def test_verifier_allows_rank_raising_reinterpret_view(self):
         """An explicit rank-raising metadata view is exempt, like tile.reshape."""

@@ -122,9 +122,9 @@ class CrossCoreSlot(Optimization):
     ``initialize_pipe`` ``slot_num`` attribute, in whichever directions the
     scope actually uses (cube→vector, vector→cube, or both).
 
-    Omitting the entry keeps the PTOAS-derived default: 8 when one direction is
-    live, 4 per direction when both are. The value is ignored when the outlined
-    scope ends up with no cross-core ops.
+    Omitting the entry keeps the default depth of 2 per live direction — enough
+    to double-buffer the handoff while leaving on-chip room for the tiles. The
+    value is ignored when the outlined scope ends up with no cross-core ops.
 
     Args:
         slot_num: Ring depth. Must be a positive integer.
@@ -146,7 +146,7 @@ def cross_core_slot(*, slot_num: int) -> CrossCoreSlot:
         ValueError: If ``slot_num`` is not a positive integer.
 
     Examples:
-        >>> # Shrink the auto-inserted ring to free buffer space for a larger tile
+        >>> # Deepen the auto-inserted ring so the producing core can run further ahead
         >>> with pl.at(level=pl.Level.CORE_GROUP,
         ...            optimizations=[pl.cross_core_slot(slot_num=4)]):
         ...     ...

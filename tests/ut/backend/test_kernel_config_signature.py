@@ -24,6 +24,7 @@ is checked for syntactic validity with ``compile`` (which does not execute the
 import pytest
 from pypto.backend.pto_backend import _generate_config_file
 from pypto.pypto_core import ir as _ir_core
+from pypto.pypto_core import passes
 
 
 def _base_inputs() -> dict:
@@ -150,6 +151,57 @@ class TestOrchestrationConfigSignature:
         assert '"signature": [_D.INOUT, _D.IN, _D.OUT]' in text
         assert "_D.SCALAR" not in text
         assert _is_valid_python(text)
+
+
+class TestKernelConfigRuntime:
+    """``RUNTIME_CONFIG["runtime"]`` follows the selected runtime ABI."""
+
+    def test_default_runtime_is_tensormap_and_ringbuffer(self) -> None:
+        text = _generate_config_file(**_base_inputs())
+        assert '"runtime": "tensormap_and_ringbuffer"' in text
+        assert "# Runtime configuration for tensormap_and_ringbuffer." in text
+        assert _is_valid_python(text)
+
+    def test_host_build_graph_runtime_is_emitted(self) -> None:
+        text = _generate_config_file(**_base_inputs(), runtime=passes.RuntimeKind.HOST_BUILD_GRAPH)
+        # Both the value the runtime reads and the human-facing header comment
+        # must follow, or the file documents a runtime it does not select.
+        assert '"runtime": "host_build_graph"' in text
+        assert "# Runtime configuration for host_build_graph." in text
+        assert "tensormap_and_ringbuffer" not in text
+        assert _is_valid_python(text)
+
+    def test_runtime_does_not_disturb_other_keys(self) -> None:
+        text = _generate_config_file(
+            **_base_inputs(),
+            orchestration_signature=["IN", "OUT"],
+            runtime=passes.RuntimeKind.HOST_BUILD_GRAPH,
+        )
+        assert '"aicpu_thread_num": 0' in text
+        assert '"signature": [_D.IN, _D.OUT]' in text
+        assert _is_valid_python(text)
+
+
+class TestRuntimeWireNames:
+    """The enum is the compile-time contract; the wire name is the ABI boundary."""
+
+    @pytest.mark.parametrize(
+        ("kind", "name"),
+        [
+            (passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER, "tensormap_and_ringbuffer"),
+            (passes.RuntimeKind.HOST_BUILD_GRAPH, "host_build_graph"),
+        ],
+    )
+    def test_wire_name_round_trips(self, kind, name) -> None:
+        # The name is used verbatim as a filesystem path component when
+        # compiling kernels, so it is spelled out rather than derived from the
+        # enumerator; both directions must agree on that spelling.
+        assert passes.runtime_kind_to_name(kind) == name
+        assert passes.runtime_kind_from_name(name) == kind
+
+    def test_unknown_wire_name_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="Unknown runtime 'ringbuffer'"):
+            passes.runtime_kind_from_name("ringbuffer")
 
 
 if __name__ == "__main__":

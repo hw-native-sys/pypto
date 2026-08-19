@@ -40,7 +40,7 @@ def mixed(
 ):
     with pl.at(
         level=pl.Level.CORE_GROUP,
-        optimizations=[pl.split(pl.SplitMode.UP_DOWN), pl.cross_core_slot(slot_num=2)],
+        optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
         name_hint="mixed",
     ):
         acc = pl.matmul(a, b, out_dtype=pl.FP32)                 # cube (AIC)
@@ -66,30 +66,38 @@ assert torch.allclose(out, a.float() @ b.float() + bias, rtol=1e-2, atol=1e-2)
 
 选哪个由 vector 操作数的形状决定：选那个大到能在两个通道间均分的轴。用 `--mode left_right` 跑配套文件可以对比。
 
-## 第 2 步：环默认装不下
+## 第 2 步：环会花掉你的 vector 预算
 
-上面那个 `pl.cross_core_slot(slot_num=2)` 不是可有可无的装饰。去掉它编译就失败：
+编译器插入的那些传输并非免费。每个跨越边界的 tile 都落在一个环形缓冲里，而这块缓冲是从**消费侧**核的片上内存中划出来的 —— 这里是 UB，因为是 cube 喂给 vector 单元：
+
+| 量 | 值 |
+| -- | -- |
+| 跨越边界的 tile | `[128, 128]` FP32 = 64 KB |
+| 默认环深 | 2 槽 |
+| 环的大小 | 2 × 64 KB = **128 KB** |
+| vector 预算 | **184 KB** |
+
+环是一个整 tile 的队列，所以它的大小随跨越的 tile 而变，与工作量无关。默认的 2 是仍能双缓冲的最浅深度：cube 填一个槽的同时，vector 抽干另一个。
+
+`pl.cross_core_slot(slot_num=N)` 用来重新调整它。更深的环换来更多重叠 —— 生产者在阻塞前能跑得更靠前 —— 所以当两个单元负载不均衡时可以调高它。但预算很紧：在这个 kernel 上 `slot_num=4` 就已经分配不下了。
+
+```python
+with pl.at(
+    level=pl.Level.CORE_GROUP,
+    optimizations=[pl.split(pl.SplitMode.UP_DOWN), pl.cross_core_slot(slot_num=4)],
+    name_hint="mixed",
+):
+```
 
 ```text
-Vec buffer usage (557056 bytes) exceeds platform limit (188416 bytes). The first 524288
+Vec buffer usage (294912 bytes) exceeds platform limit (188416 bytes). The first 262144
 bytes of that space are reserved by system.reserve_buffer, so tiles are allocated above
 them — this is the cross-core pipe ring. Lower its depth with
 optimizations=[pl.cross_core_slot(slot_num=N)] on the enclosing pl.at(...), or shrink the
 tile that crosses the cube/vector boundary
 ```
 
-背后的算术：
-
-| 量 | 值 |
-| -- | -- |
-| 跨越边界的 tile | `[128, 128]` FP32 = 64 KB |
-| 默认环深 | 8 槽 |
-| 环的大小 | 8 × 64 KB = **512 KB** |
-| vector 预算 | **184 KB** |
-
-环是一个整 tile 的队列，所以它的大小随跨越的 tile 而变，与工作量无关。两个杠杆：缩小 tile，或缩短环。`slot_num=2` 得到 128 KB，装得下。
-
-更深的环换来更多重叠 —— 生产者在阻塞前能跑得更靠前。所以这是一个真实的权衡，不是形式：**在装得下的前提下选最大的深度**。
+真遇到时有两个杠杆：缩小 tile，或缩短环。**在装得下的前提下选最大的深度**。
 
 ## 第 3 步：编译器插进去了什么
 
@@ -106,7 +114,7 @@ tile that crosses the cube/vector boundary
 
 **每次 push 必须与一次 pop 配对，每次 pop 必须与一次 `tfree` 配对。** 漏掉 `tfree` 不会报错 —— 它泄漏一个环槽，等环满了生产者就卡住。
 
-**显式写法还把跨 lane 的定序也交给了你。** 边界算子只为它所搬运的那一个值定序；没有任何东西会为 cube lane 的写与 vector lane 对**同一块 GM 缓冲区**的读定序，所以这两个阶段之间需要一个 `pl.system.syncall(core_type="mix")`。上面的 `pl.split` 路径不需要 —— 传输由编译器插入，结果也与 torch 对拍过。规则见 [作用域与放置](../language/04-scopes.md)。
+**显式写法还把跨 lane 的定序也交给了你。** 边界算子只为它所搬运的那一个值定序；没有任何东西会为 cube lane 的写与 vector lane 对**同一块 GM 缓冲区**的读定序。先发布 producer 的写并执行 fence，再在两个阶段之间放置跨核 `pl.system.syncall`，最后在 consumer 读之前使其 cache 失效；barrier 本身只同步到达。可能部分占用时使用 soft 形式，buffer 可能跨多条 cache line 时使用全 GM cache 维护。上面的 `pl.split` 路径不需要这组序列 —— 传输由编译器插入，结果也与 torch 对拍过。规则见 [作用域与放置](../language/04-scopes.md)。
 
 当 `pl.split` 表达不了所需形状时才动用显式形式：逐通道寻址、只有某一个通道算得出的 gather、或者一个混合了 split 与非 split 工作的区域。`tests/st/codegen/dsl/test_split_aiv_gather_row_codegen.py` 是一个实例。其余情况留在 `pl.split` 上 —— 它插入的是同样的算子，而且配对不会错。
 
@@ -118,10 +126,25 @@ tile that crosses the cube/vector boundary
 
 | 症状 | 可能原因 | 修复 |
 | ---- | -------- | ---- |
-| **`Vec buffer usage ... exceeds platform limit`** | 8 槽的默认环装不下 | `pl.cross_core_slot(slot_num=N)`，或缩小跨越的 tile |
+| **`Vec buffer usage ... exceeds platform limit`** | 环加上 tile 超出片上预算 | 调低 `pl.cross_core_slot(slot_num=N)`，或缩小跨越的 tile |
 | **`pl.split` 没带来加速** | 一侧占主导，对半分无从重叠 | 检查这份工作是否真的是 cube 接 vector |
 | **生产者跑一阵后卡住** | 弹出的槽从未 `tfree` | 让每次 pop 都配一次 `tfree` |
 | **作用域上的 split 被拒** | 区域体混合了 split 与普通全宽 vector 算子 | 改用显式的 `pl.split_aiv` 区域形式 |
+
+## 真实模型里的同一形状
+
+`examples/models/qwen3_jit/` 是一条按模块拆成一文件一模块的 `@pl.jit` decode 路径，其中
+`kernels/projection.py` 就是本页这个模式在模型规模上的样子 —— 一个 matmul 和消费它的 vector
+工作，放在同一个作用域里。
+
+| 文件 | 模块 |
+| ---- | ---- |
+| `qwen3_decode.py` | 组合其余部分的 decode 入口 |
+| `config.py` | 各 kernel 特化所依据的形状与 dtype |
+| `kernels/projection.py` | cube + vector 混合的 projection |
+| `kernels/attention.py` | Attention |
+| `kernels/mlp.py` | MLP |
+| `kernels/rmsnorm.py` | RMSNorm |
 
 ## 下一步
 

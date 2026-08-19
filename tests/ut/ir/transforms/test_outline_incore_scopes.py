@@ -11,6 +11,7 @@
 
 import pypto
 import pypto.language as pl
+import pypto.language.distributed as pld
 import pytest
 from pypto import DataType, ir, passes
 from pypto.ir.printer import python_print
@@ -446,7 +447,7 @@ class TestOutlineIncoreScopes:
         class Expected:
             @pl.function(type=pl.FunctionType.InCore)
             def main_incore_0(
-                self, buf: pl.InOut[pl.Tensor[[16, 128], pl.FP32]]
+                self, buf: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 tile = pl.tile.full([16, 128], dtype=pl.FP32, value=0.0)
                 buf_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(tile, [0, 0], buf)
@@ -490,8 +491,8 @@ class TestOutlineIncoreScopes:
             @pl.function(type=pl.FunctionType.InCore)
             def main_incore_0(
                 self,
-                buf_a: pl.InOut[pl.Tensor[[16, 128], pl.FP32]],
-                buf_b: pl.InOut[pl.Tensor[[16, 1], pl.FP32]],
+                buf_a: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+                buf_b: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
             ) -> tuple[pl.Tensor[[16, 1], pl.FP32], pl.Tensor[[16, 128], pl.FP32]]:
                 tile_a = pl.tile.full([16, 128], dtype=pl.FP32, value=0.0)
                 tile_b = pl.tile.full([16, 1], dtype=pl.FP32, value=0.0)
@@ -664,17 +665,20 @@ class TestOutlineIncoreScopes:
         After = passes.outline_incore_scopes()(Before)
         ir.assert_structural_equal(After, Expected)
 
-    def test_outline_assemble_dest_upgraded_to_inout(self):
-        """``tensor.assemble`` destination captured by a scope becomes an InOut param.
+    def test_outline_write_only_assemble_dest_becomes_out(self):
+        """``tensor.assemble`` destination captured by a scope becomes an Out param.
 
         ``tensor.assemble`` is SSA-pure (returns a fresh Tensor), but its first
-        argument is a destination the result aliases. When the destination is a
-        captured outer variable, the outlined function effectively reads and
-        writes the same backing buffer, so ``InferParamDirections`` Step 2
-        (``AssembleDestUpgrader``, scope_outline_utils.h:1129-1153) upgrades that
-        parameter from ``In`` to ``InOut``. The ``src`` argument is only read, so
-        it stays ``In`` — pinning both directions makes the InOut upgrade the
-        load-bearing assertion (``assert_structural_equal`` is direction-aware).
+        argument is a destination the result aliases in place. When the
+        destination is a captured outer variable, the outlined function writes
+        the caller's backing buffer, so ``InferParamDirections`` Step 2
+        (``AssembleDestUpgrader``) lifts that parameter off ``In``. Here the body
+        never reads ``dst`` — the assemble destination slot is the only use — so
+        the direction is ``Out``, not ``InOut`` (issue #2415: a false ``InOut``
+        reaches ``DistributedCodegen`` and manufactures a cross-rank edge). The
+        ``src`` argument is only read, so it stays ``In`` — pinning both
+        directions makes the derived direction the load-bearing assertion
+        (``assert_structural_equal`` is direction-aware).
         """
 
         @pl.program
@@ -691,7 +695,7 @@ class TestOutlineIncoreScopes:
         class Expected:
             @pl.function(type=pl.FunctionType.InCore)
             def main_incore_0(
-                self, dst: pl.InOut[pl.Tensor[[64], pl.FP32]], src: pl.Tensor[[32], pl.FP32]
+                self, dst: pl.Out[pl.Tensor[[64], pl.FP32]], src: pl.Tensor[[32], pl.FP32]
             ) -> pl.Tensor[[64], pl.FP32]:
                 updated: pl.Tensor[[64], pl.FP32] = pl.assemble(dst, src, [0])
                 return dst
@@ -707,6 +711,265 @@ class TestOutlineIncoreScopes:
         Expected = passes.convert_to_ssa()(Expected)
         After = passes.outline_incore_scopes()(Before)
         ir.assert_structural_equal(After, Expected)
+
+    def test_outline_read_assemble_dest_stays_inout(self):
+        """The same scope that also *reads* the destination keeps ``InOut``.
+
+        The write-only case above earns ``Out``; here ``dst`` additionally
+        feeds a ``pl.tensor.slice``, which is a genuine read of the incoming
+        buffer, so the direction must stay ``InOut``. Pairing the two pins the
+        distinction rather than the blanket upgrade that issue #2415 reported.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self, dst: pl.Tensor[[64], pl.FP32], src: pl.Tensor[[32], pl.FP32]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    head: pl.Tensor[[32], pl.FP32] = pl.tensor.slice(dst, [32], [0], [], [])
+                    mixed: pl.Tensor[[32], pl.FP32] = pl.add(head, src)
+                    updated: pl.Tensor[[64], pl.FP32] = pl.assemble(dst, mixed, [0])
+                return updated
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self, dst: pl.InOut[pl.Tensor[[64], pl.FP32]], src: pl.Tensor[[32], pl.FP32]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                head: pl.Tensor[[32], pl.FP32] = pl.tensor.slice(dst, [32], [0], [], [])
+                mixed: pl.Tensor[[32], pl.FP32] = pl.add(head, src)
+                updated: pl.Tensor[[64], pl.FP32] = pl.assemble(dst, mixed, [0])
+                return dst
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self, dst: pl.Tensor[[64], pl.FP32], src: pl.Tensor[[32], pl.FP32]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                updated: pl.Tensor[[64], pl.FP32] = self.main_incore_0(dst, src)
+                return updated
+
+        Before = passes.convert_to_ssa()(Before)
+        Expected = passes.convert_to_ssa()(Expected)
+        After = passes.outline_incore_scopes()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_outline_read_through_post_write_alias_is_inout(self):
+        """A read of the store's SSA result is a read of the destination.
+
+        Under SSA the post-write state binds to a fresh Var (``out_v1 =
+        tile.store(t, off, out_v0)``), which names the *same* backing buffer —
+        the aliasing ``PostStoreAliasCollector`` records for export bookkeeping.
+        Reading that alias over a region the scope never wrote genuinely needs
+        the incoming contents, so the direction must be ``InOut``. Recognising
+        only the original captured Var would derive ``Out`` and drop the
+        dependency on those contents.
+
+        The scope writes rows 0 and 384 and reads row 256, so the read cannot be
+        satisfied by anything the scope itself produced.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128])
+                    out2 = pl.store(t, [0, 0], out)
+                    back: pl.Tile[[128, 128], pl.FP32] = pl.load(out2, [256, 0], [128, 128])
+                    out3 = pl.store(back, [384, 0], out2)
+                return out3
+
+        After = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+
+        outlined = next(f for gv, f in After.functions.items() if gv.name != "main")
+        out_idx = next(i for i, p in enumerate(outlined.params) if p.name_hint.startswith("out"))
+        assert outlined.param_directions[out_idx] == ir.ParamDirection.InOut, (
+            f"expected InOut at outlined callee param {out_idx}, got {list(outlined.param_directions)}"
+        )
+
+    def test_outline_atomic_store_dest_is_inout(self):
+        """An atomic-add store reads its destination, so it stays ``InOut``.
+
+        ``pl.store(t, off, out, atomic=pl.AtomicType.Add)`` is ``out += t``: the
+        accumulator's existing contents are an operand. Treating the store
+        target as a pure overwrite would derive ``Out``, the runtime would skip
+        host->device staging for it, and the accumulation would start from
+        allocator garbage instead of the caller's zeros — NaN for a float
+        accumulator, silently wrong sums for an integer one.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128])
+                    out = pl.store(t, [0, 0], out, atomic=pl.AtomicType.Add)
+                return out
+
+        After = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+
+        outlined = next(f for gv, f in After.functions.items() if gv.name != "main")
+        out_idx = next(i for i, p in enumerate(outlined.params) if p.name_hint.startswith("out"))
+        assert outlined.param_directions[out_idx] == ir.ParamDirection.InOut, (
+            f"expected InOut at outlined callee param {out_idx}, got {list(outlined.param_directions)}"
+        )
+
+    def test_outline_atomic_assemble_dest_is_inout(self):
+        """The ``tensor.assemble`` half of the same rule.
+
+        ``pl.assemble(c, partial, off, atomic=pl.AtomicType.Add)`` is how split-K
+        matmul accumulates each core's partial product into the shared output, so
+        the destination is read there too.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                src: pl.Tensor[[32], pl.FP32],
+                dst: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    dst = pl.assemble(dst, src, [0], atomic=pl.AtomicType.Add)
+                return dst
+
+        After = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+
+        outlined = next(f for gv, f in After.functions.items() if gv.name != "main")
+        dst_idx = next(i for i, p in enumerate(outlined.params) if p.name_hint.startswith("dst"))
+        assert outlined.param_directions[dst_idx] == ir.ParamDirection.InOut, (
+            f"expected InOut at outlined callee param {dst_idx}, got {list(outlined.param_directions)}"
+        )
+
+    def test_outline_bookkeeping_attr_is_not_a_read(self):
+        """``dumps=[out]`` names a tensor without reading it.
+
+        ``dump_vars`` (and ``arg_direction_overrides_vars``) are bookkeeping
+        references, so counting them as reads would promote a write-only capture
+        back to ``InOut`` — re-creating the false cross-rank dependency of issue
+        #2415 for exactly the programs that asked for dump or ``NoDep``
+        treatment. The scope here only stores into ``out``.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, dumps=[out]):
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128])
+                    out = pl.store(t, [0, 0], out)
+                return out
+
+        After = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+
+        outlined = next(f for gv, f in After.functions.items() if gv.name != "main")
+        out_idx = next(i for i, p in enumerate(outlined.params) if p.name_hint.startswith("out"))
+        assert outlined.param_directions[out_idx] == ir.ParamDirection.Out, (
+            f"expected Out at outlined callee param {out_idx}, got {list(outlined.param_directions)}"
+        )
+
+    def test_outline_spmd_assemble_keeps_out_param_out(self):
+        """Regression for issue #2415: a ``pl.Out`` formal stays ``Out``.
+
+        ``for row in pl.spmd(ROWS): dst[row] = src[row]`` lowers to an
+        ``InCoreScopeStmt`` whose body assembles into ``dst`` and reads nothing
+        of it. Before the fix the outlined callee came out ``InOut`` while the
+        caller and the top-level formal both stayed ``pl.Out``. That false read
+        reaches ``DistributedCodegen::EmitCallToWorker``, which tags each
+        per-rank chip dispatch from the callee direction — so two ranks writing
+        *disjoint* rows of one rank-major ``pl.Out`` tensor were given a
+        cross-rank write dependency and the model deadlocked on the first
+        rendezvous.
+
+        This is the issue's minimal case, checked at the level it breaks: the
+        outlined callee's ``param_directions``.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def outline_out_direction(
+                self,
+                src: pl.Tensor[[8, 8], pl.INT32],
+                dst: pl.Out[pl.Tensor[[8, 8], pl.INT32]],
+            ) -> pl.Tensor[[8, 8], pl.INT32]:
+                for row in pl.spmd(8, name_hint="fill_rows"):
+                    t: pl.Tensor[[1, 8], pl.INT32] = pl.tensor.slice(src, [1, 8], [row, 0], [], [])
+                    dst = pl.assemble(dst, t, [row, 0])
+                return dst
+
+        After = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+
+        outlined = next(f for gv, f in After.functions.items() if gv.name == "fill_rows")
+        dst_idx = next(i for i, p in enumerate(outlined.params) if p.name_hint.startswith("dst"))
+        assert outlined.param_directions[dst_idx] == ir.ParamDirection.Out, (
+            f"expected Out at outlined callee param {dst_idx}, got {list(outlined.param_directions)}"
+        )
+        # The caller's own formal is untouched — the point of the bug was that
+        # the two disagreed across the boundary the pass had just introduced.
+        # Resolve the caller's slot on its own params: the outliner orders the
+        # callee signature by capture order, which need not match the caller's.
+        caller = After.get_function("outline_out_direction")
+        assert caller is not None
+        caller_dst_idx = next(i for i, p in enumerate(caller.params) if p.name_hint.startswith("dst"))
+        assert caller.param_directions[caller_dst_idx] == ir.ParamDirection.Out
+
+    def test_out_direction_survives_to_the_chip_formal(self):
+        """Regression for issue #2415, checked where the deadlock came from.
+
+        The outliner's direction does not stay local: ``ConvertTensorToTileOps``
+        propagates a callee ``InOut`` onto the caller's parameter
+        (convert_tensor_to_tile_ops_pass.cpp:2677-2678). So a false ``InOut`` on
+        the outlined InCore kernel rewrites the *chip-level* formal from ``Out``
+        to ``InOut`` — and that formal is exactly what
+        ``DistributedCodegen::EmitCallToWorker`` reads to tag each per-rank chip
+        dispatch, turning disjoint per-rank slices into a cross-rank write
+        dependency.
+
+        Pinning both functions after both passes is what makes this a test of
+        the whole chain rather than of one pass's output.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+            def chip_orch(
+                self,
+                src: pl.Tensor[[8, 128], pl.FP32],
+                dst: pl.Out[pl.Tensor[[8, 128], pl.FP32]],
+            ) -> pl.Tensor[[8, 128], pl.FP32]:
+                for row in pl.spmd(8, name_hint="fill_rows"):
+                    t: pl.Tile[[1, 128], pl.FP32] = pl.load(src, [row, 0], [1, 128])
+                    dst = pl.store(t, [row, 0], dst)
+                return dst
+
+        After = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+        After = passes.convert_tensor_to_tile_ops()(After)
+
+        for name in ("chip_orch", "fill_rows"):
+            func = After.get_function(name)
+            assert func is not None, f"{name} missing from {list(After.functions)}"
+            dst_idx = next(i for i, p in enumerate(func.params) if p.name_hint.startswith("dst"))
+            assert func.param_directions[dst_idx] == ir.ParamDirection.Out, (
+                f"{name}: expected Out at param {dst_idx}, got {list(func.param_directions)}"
+            )
 
     def test_outline_scope_inside_while_captures_iter_arg(self):
         """Scope inside a WhileStmt body captures the loop-carried IterArg, not its init.
@@ -899,6 +1162,536 @@ class TestOutlineSubmitTaskId:
         assert isinstance(tail, ir.ScalarType)
         assert tail.dtype == DataType.TASK_ID
 
+    def test_deferred_wait_does_not_order_later_notify_behind_waiter(self):
+        """Signal control ops stay Input; notify has no waiter dependency.
+
+        The deferred waiter is logically live after its AIV kernel returns, so
+        a spurious waiter -> notifier edge would recreate the physical-core
+        saturation deadlock.  ``defer_wait`` and ``notify`` are side-effect ops
+        with no memory-write specification, hence both outlined signal params
+        derive as Input and a MANUAL scope leaves the later notifier unordered.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                signal: pld.DistributedTensor[[1, 1], pl.INT32],
+                peer: pl.Scalar[pl.INT32],
+                payload: pl.Tensor[[1], pl.INT32],
+            ):
+                with pl.manual_scope():
+                    with pl.at(level=pl.Level.CORE_GROUP, name_hint="deferred_wait") as wait_tid:
+                        pld.system.defer_wait(signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
+                    with pl.at(level=pl.Level.CORE_GROUP, name_hint="notifier"):
+                        pld.system.notify(
+                            signal,
+                            peer=peer,
+                            offsets=[0, 0],
+                            value=1,
+                            op=pld.NotifyOp.Set,
+                        )
+                    with pl.at(
+                        level=pl.Level.CORE_GROUP,
+                        name_hint="consumer",
+                        deps=[wait_tid],
+                    ):
+                        payload_value = pl.read(payload, [0])
+
+        after = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+        after = passes.derive_call_directions()(after)
+        after = passes.auto_derive_task_dependencies(analyze_auto_scopes=True)(after)
+
+        main = after.get_function("main")
+        assert main is not None
+        calls: list[ir.Call | ir.Submit] = []
+
+        class _Collector(ir.IRVisitor):
+            def visit_call(self, op):
+                if isinstance(op.op, ir.GlobalVar):
+                    calls.append(op)
+                super().visit_call(op)
+
+            def visit_submit(self, op):
+                calls.append(op)
+                super().visit_submit(op)
+
+        _Collector().visit_stmt(main.body)
+        assert len(calls) == 3
+        waiter, notifier, consumer = calls
+        assert isinstance(waiter, ir.Submit)
+        assert list(waiter.arg_directions) == [ir.ArgDirection.Input]
+        assert isinstance(notifier, ir.Call)
+        assert list(notifier.arg_directions) == [ir.ArgDirection.Input, ir.ArgDirection.Scalar]
+        assert "manual_dep_edges" not in notifier.attrs
+        assert "compiler_manual_dep_edges" not in notifier.attrs
+        assert isinstance(consumer, ir.Submit)
+        assert len(consumer.deps) == 1
+
+    def test_deferred_wait_rejects_allow_early_resolve(self):
+        """A deferred-completion TaskId cannot also opt into early resolve."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, signal: pld.DistributedTensor[[1, 1], pl.INT32]):
+                with pl.at(
+                    level=pl.Level.CORE_GROUP,
+                    name_hint="deferred_wait",
+                    allow_early_resolve=True,
+                ) as wait_tid:
+                    pld.system.defer_wait(signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
+
+        with pytest.raises(ValueError, match="defer_wait.*cannot use.*allow_early_resolve=True"):
+            passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+
+    def test_terminal_deferred_waiter_needs_no_task_id_capture(self):
+        """A fire-and-forget terminal waiter is a valid ordinary task dispatch."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, signal: pld.DistributedTensor[[1, 1], pl.INT32]):
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="terminal_waiter"):
+                    pld.system.defer_wait(signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
+
+        after = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+        waiter = after.get_function("terminal_waiter")
+        assert waiter is not None
+        assert waiter.attrs["deferred_completion_waiter"] is True
+
+        main = after.get_function("main")
+        assert main is not None
+        calls: list[ir.Call] = []
+
+        class _CallCollector(ir.IRVisitor):
+            def visit_call(self, op):
+                if isinstance(op.op, ir.GlobalVar):
+                    calls.append(op)
+                super().visit_call(op)
+
+        _CallCollector().visit_stmt(main.body)
+        assert len(calls) == 1
+
+    def test_deferred_waiter_rejects_nested_early_resolve_launch(self):
+        """An outer launch must not silently own waiter scheduling semantics."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, signal: pld.DistributedTensor[[1, 1], pl.INT32]):
+                with pl.spmd(1, allow_early_resolve=True):
+                    with pl.at(level=pl.Level.CORE_GROUP, name_hint="nested_waiter"):
+                        pld.system.defer_wait(signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
+
+        with pytest.raises(ValueError, match="defer_wait must be in a task-level.*nesting.*unsupported"):
+            passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+
+    def test_deferred_waiter_rejects_nested_predicated_launch(self):
+        """A predicated outer launch cannot carry a deferred waiter."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                signal: pld.DistributedTensor[[1, 1], pl.INT32],
+                gate: pl.Tensor[[1], pl.INT32],
+            ):
+                with pl.spmd(1, predicate=(gate[0] > 0)):
+                    with pl.at(level=pl.Level.CORE_GROUP, name_hint="nested_waiter"):
+                        pld.system.defer_wait(signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
+
+        with pytest.raises(ValueError, match="defer_wait must be in a task-level.*nesting.*unsupported"):
+            passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+
+    def test_deferred_wait_consumer_may_allow_early_resolve(self):
+        """The hint is producer-side; it does not pre-stage this consumer."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                signal: pld.DistributedTensor[[1, 1], pl.INT32],
+                payload: pl.Tensor[[1], pl.INT32],
+            ):
+                with pl.at(level=pl.Level.CORE_GROUP) as wait_tid:
+                    pld.system.defer_wait(signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
+                with pl.at(
+                    level=pl.Level.CORE_GROUP,
+                    deps=[wait_tid],
+                    allow_early_resolve=True,
+                ):
+                    payload_value = pl.read(payload, [0])
+
+        after = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+        main = after.get_function("main")
+        assert main is not None
+        submits: list[ir.Submit] = []
+
+        class _SubmitCollector(ir.IRVisitor):
+            def visit_submit(self, op):
+                submits.append(op)
+                super().visit_submit(op)
+
+        _SubmitCollector().visit_stmt(main.body)
+        assert len(submits) == 2
+        assert submits[0].allow_early_resolve is False
+        assert submits[1].allow_early_resolve is True
+        assert len(submits[1].deps) == 1
+
+    def test_deferred_waiter_rejects_scalar_returning_helper_call(self):
+        """Scalar bookkeeping cannot hide arbitrary kernel side effects."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def scalar_helper(self, value: pl.Scalar[pl.INT32]) -> pl.Scalar[pl.INT32]:
+                return value
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                signal: pld.DistributedTensor[[1, 1], pl.INT32],
+                expected: pl.Scalar[pl.INT32],
+            ):
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="deferred_wait"):
+                    hidden: pl.Scalar[pl.INT32] = self.scalar_helper(expected)
+                    pld.system.defer_wait(signal, offsets=[0, 0], expected=hidden, cmp=pld.WaitCmp.Ge)
+
+        with pytest.raises(ValueError, match="supports only a pre-registration tensor.read"):
+            passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+
+    def test_deferred_wait_accepts_static_conditional_registration_loop(self):
+        """The MoE waiter is bounded and consumers use ordinary deps unchanged."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                signal: pld.DistributedTensor[[8, 1], pl.INT32],
+                indices: pl.Tensor[[1, 1], pl.INT32],
+                payload: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+                my_rank: pl.Scalar[pl.INT32],
+                epoch: pl.Scalar[pl.INT32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="dispatch_wait") as wait_tid:
+                    idx_anchor = pl.read(indices, [0, 0])
+                    for src in pl.range(8):
+                        if src != my_rank:
+                            pld.system.defer_wait(
+                                signal,
+                                offsets=[src, 0],
+                                expected=epoch,
+                                cmp=pld.WaitCmp.Ge,
+                            )
+                with pl.spmd(
+                    4,
+                    name_hint="dispatch_gather",
+                    deps=[wait_tid],
+                ) as _gather_tid:
+                    block = pl.tile.get_block_idx()
+                    offset = block * 16
+                    value = pl.load(payload, [offset], [16])
+                    out = pl.store(value, [offset], out)
+                return out
+
+        after = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+        waiter = after.get_function("dispatch_wait")
+        consumer = after.get_function("dispatch_gather")
+        assert waiter is not None
+        assert waiter.attrs["deferred_completion_waiter"] is True
+        assert consumer is not None
+
+        calls: list[ir.Call] = []
+
+        class _CallCollector(ir.IRVisitor):
+            def visit_call(self, op):
+                calls.append(op)
+                super().visit_call(op)
+
+        _CallCollector().visit_stmt(consumer.body)
+        assert all(call.op.name != ir.get_op("system.cacheinvalid").name for call in calls)
+
+        after = passes.outline_cluster_scopes()(after)
+        main = after.get_function("main")
+        assert main is not None
+        submits: list[ir.Submit] = []
+
+        class _SubmitCollector(ir.IRVisitor):
+            def visit_submit(self, op):
+                submits.append(op)
+                super().visit_submit(op)
+
+        _SubmitCollector().visit_stmt(main.body)
+        assert len(submits) == 2
+        assert len(submits[1].deps) == 1
+
+    def test_deferred_wait_accepts_pure_scalar_temporary_in_registration_loop(self):
+        """Hoisting pure expected-value arithmetic must not change legality."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                signal: pld.DistributedTensor[[4, 1], pl.INT32],
+                epoch: pl.Scalar[pl.INT32],
+            ):
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="waiter"):
+                    for src in pl.range(4):
+                        wanted = epoch * 4
+                        pld.system.defer_wait(
+                            signal,
+                            offsets=[src, 0],
+                            expected=wanted,
+                            cmp=pld.WaitCmp.Ge,
+                        )
+
+        after = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+        waiter = after.get_function("waiter")
+        assert waiter is not None
+        assert waiter.attrs["deferred_completion_waiter"] is True
+
+    def test_deferred_wait_rejects_tensor_read_in_registration_loop(self):
+        """A later iteration must not read tensor state after registration began."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                signal: pld.DistributedTensor[[2, 1], pl.INT32],
+                expected_values: pl.Tensor[[2], pl.INT32],
+            ):
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    for src in pl.range(2):
+                        wanted = pl.read(expected_values, [src])
+                        pld.system.defer_wait(
+                            signal,
+                            offsets=[src, 0],
+                            expected=wanted,
+                            cmp=pld.WaitCmp.Ge,
+                        )
+
+        with pytest.raises(ValueError, match="loop may execute tensor reads.*after registering"):
+            passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+
+    def test_deferred_wait_accepts_phi_carried_scalar_threshold(self):
+        """A branch-merged scalar is SSA bookkeeping, not continuation work."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                signal: pld.DistributedTensor[[4, 1], pl.INT32],
+                my_rank: pl.Scalar[pl.INT32],
+                low: pl.Scalar[pl.INT32],
+                high: pl.Scalar[pl.INT32],
+            ):
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="waiter"):
+                    if my_rank == 0:
+                        wanted = low
+                    else:
+                        wanted = high
+                    pld.system.defer_wait(signal, offsets=[0, 0], expected=wanted, cmp=pld.WaitCmp.Ge)
+
+        after = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+        waiter = after.get_function("waiter")
+        assert waiter is not None
+        assert waiter.attrs["deferred_completion_waiter"] is True
+
+    def test_deferred_wait_accepts_iter_arg_carried_scalar_threshold(self):
+        """A threshold advanced across iterations rides an iter_arg yield."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                signal: pld.DistributedTensor[[4, 1], pl.INT32],
+                epoch: pl.Scalar[pl.INT32],
+                step: pl.Scalar[pl.INT32],
+            ):
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="waiter"):
+                    wanted = epoch
+                    for src in pl.range(4):
+                        pld.system.defer_wait(
+                            signal,
+                            offsets=[src, 0],
+                            expected=wanted,
+                            cmp=pld.WaitCmp.Ge,
+                        )
+                        wanted = wanted + step
+
+        after = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+        waiter = after.get_function("waiter")
+        assert waiter is not None
+        assert waiter.attrs["deferred_completion_waiter"] is True
+
+    def test_deferred_wait_accepts_pure_scalar_loop_that_registers_nothing(self):
+        """A loop contributing zero conditions needs no registration of its own."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                signal: pld.DistributedTensor[[8, 1], pl.INT32],
+                my_rank: pl.Scalar[pl.INT32],
+                epoch: pl.Scalar[pl.INT32],
+            ):
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="waiter"):
+                    coord = my_rank
+                    for _ in pl.range(3):
+                        coord = coord + my_rank
+                    pld.system.defer_wait(signal, offsets=[coord, 0], expected=epoch, cmp=pld.WaitCmp.Ge)
+
+        after = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+        waiter = after.get_function("waiter")
+        assert waiter is not None
+        assert waiter.attrs["deferred_completion_waiter"] is True
+
+    def test_deferred_wait_rejects_tensor_carried_across_iterations(self):
+        """Accepting scalar yields must not open a path for carrying tensor state.
+
+        The refusal comes from the AssignStmt tensor guard, which fires on the
+        binding that would define the carry -- before SSA can turn it into a
+        yield. ValidateScalarExpr's tensor-type guard on the yield itself is
+        therefore defence in depth, unreachable from the DSL today.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                signal: pld.DistributedTensor[[4, 1], pl.INT32],
+                payload: pl.Tensor[[4], pl.INT32],
+            ):
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    carried = payload
+                    for src in pl.range(4):
+                        pld.system.defer_wait(signal, offsets=[src, 0], expected=1, cmp=pld.WaitCmp.Ge)
+                        carried = carried  # noqa: PLW0127  # intentional tensor carry under test
+                    _ = carried
+
+        with pytest.raises(ValueError, match="cannot create or update payload tensors"):
+            passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+
+    def test_deferred_wait_accepts_exactly_64_static_conditions(self):
+        """The runtime capacity is inclusive: 64 conditions are supported."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, signal: pld.DistributedTensor[[64, 1], pl.INT32]):
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="waiter"):
+                    for src in pl.range(64):
+                        pld.system.defer_wait(
+                            signal,
+                            offsets=[src, 0],
+                            expected=1,
+                            cmp=pld.WaitCmp.Ge,
+                        )
+
+        after = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+        waiter = after.get_function("waiter")
+        assert waiter is not None
+        assert waiter.attrs["deferred_completion_waiter"] is True
+
+    def test_deferred_wait_rejects_more_than_64_static_conditions(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                signal: pld.DistributedTensor[[65, 1], pl.INT32],
+                my_rank: pl.Scalar[pl.INT32],
+            ):
+                with pl.at(level=pl.Level.CORE_GROUP) as wait_tid:
+                    for src in pl.range(65):
+                        if src != my_rank:
+                            pld.system.defer_wait(
+                                signal,
+                                offsets=[src, 0],
+                                expected=1,
+                                cmp=pld.WaitCmp.Ge,
+                            )
+                with pl.at(level=pl.Level.CORE_GROUP, deps=[wait_tid]):
+                    pl.system.cacheinvalid()
+
+        with pytest.raises(ValueError, match="at most 64 conditions"):
+            passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+
+    def test_deferred_wait_rejects_dynamic_registration_loop(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                signal: pld.DistributedTensor[[64, 1], pl.INT32],
+                limit: pl.Scalar[pl.INDEX],
+            ):
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    for src in pl.range(limit):
+                        pld.system.defer_wait(
+                            signal,
+                            offsets=[src, 0],
+                            expected=1,
+                            cmp=pld.WaitCmp.Ge,
+                        )
+
+        with pytest.raises(ValueError, match="statically known positive trip count"):
+            passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+
+    def test_deferred_wait_rejects_zero_trip_registration_loop(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, signal: pld.DistributedTensor[[1, 1], pl.INT32]):
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    for src in pl.range(0):
+                        pld.system.defer_wait(
+                            signal,
+                            offsets=[src, 0],
+                            expected=1,
+                            cmp=pld.WaitCmp.Ge,
+                        )
+
+        with pytest.raises(ValueError, match="statically known positive trip count"):
+            passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+
+    def test_deferred_wait_rejects_nested_tensor_read_after_registration(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                signal: pld.DistributedTensor[[1, 1], pl.INT32],
+                expected_values: pl.Tensor[[1], pl.INT32],
+                my_rank: pl.Scalar[pl.INT32],
+            ):
+                with pl.at(level=pl.Level.CORE_GROUP) as wait_tid:
+                    pld.system.defer_wait(
+                        signal,
+                        offsets=[0, 0],
+                        expected=1,
+                        cmp=pld.WaitCmp.Ge,
+                    )
+                    if my_rank >= 0:
+                        next_expected = pl.read(expected_values, [0])
+                with pl.at(level=pl.Level.CORE_GROUP, deps=[wait_tid]):
+                    pl.system.cacheinvalid()
+
+        with pytest.raises(ValueError, match="cannot execute tensor reads.*after.*registration"):
+            passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+
 
 class TestOutlineSpmdScope:
     """InCore scopes nested inside a ``SpmdScopeStmt`` are outlined, wrapper kept.
@@ -914,10 +1707,10 @@ class TestOutlineSpmdScope:
     def test_outline_inner_incore_keeps_spmd_wrapper(self):
         """The inner InCore body is outlined; the SpmdScope wrapper survives.
 
-        The scope body writes ``out`` via ``tile.store``, so ``out`` is a store
-        target: it becomes an ``InOut`` callee param and the outlined function
-        returns the param itself (param-writeback alias return), mirroring
-        ``test_outline_scope_with_store_only_outputs``.
+        The scope body writes ``out`` via ``tile.store`` and never reads it, so
+        ``out`` is a write-only store target: it becomes an ``Out`` callee param
+        and the outlined function returns the param itself (param-writeback
+        alias return), mirroring ``test_outline_scope_with_store_only_outputs``.
         """
 
         @pl.program
@@ -940,7 +1733,7 @@ class TestOutlineSpmdScope:
             def main_incore_0(
                 self,
                 a: pl.Tensor[[512, 128], pl.FP32],
-                out: pl.InOut[pl.Tensor[[512, 128], pl.FP32]],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
             ) -> pl.Tensor[[512, 128], pl.FP32]:
                 i: pl.Scalar[pl.INDEX] = pl.tile.get_block_idx()
                 offset = i * 128
@@ -1361,7 +2154,7 @@ class TestOutlineNoDepArgs:
     def test_outline_plus_derive_no_dep_on_mutated_capture(self):
         """``pl.at(no_dep_args=[k])`` is legal when the scope body mutates ``k``
         via ``pl.assemble`` — i.e. the synthesised kernel param direction for
-        ``k`` is ``InOut`` rather than ``In``.
+        ``k`` is a write direction rather than ``In``.
 
         Mirrors the qwen3-style paged-KV-cache pattern: ``k_cache`` and
         ``v_cache`` are written at a data-dependent offset inside a parallel
@@ -1381,11 +2174,11 @@ class TestOutlineNoDepArgs:
                 k_cache: pl.Tensor[[64], pl.FP32],
             ) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, no_dep_args=[k_cache]):
-                    # The scope body writes into ``k_cache`` via pl.assemble —
-                    # the outliner infers ``InOut`` for the synthesised
-                    # callee's k_cache param. Without the relaxed Out+NoDep
-                    # rule, the post-pass verifier would reject the resulting
-                    # ``InOut`` (callee) + ``NoDep`` (call-site) combination.
+                    # The scope body writes into ``k_cache`` via pl.assemble
+                    # and never reads it, so the outliner infers ``Out`` for the
+                    # synthesised callee's k_cache param. The relaxed Out+NoDep
+                    # rule is what lets the post-pass verifier accept the
+                    # resulting ``Out`` (callee) + ``NoDep`` (call-site) pair.
                     k_cache = pl.assemble(k_cache, x, [0])
                 return k_cache
 
@@ -1412,29 +2205,27 @@ class TestOutlineNoDepArgs:
 
         dirs = list(call.arg_directions)
         # The marked tensor (k_cache) is forced to NoDep even though the
-        # synthesised callee declares it as InOut (because pl.assemble inside
-        # the body writes into it).
+        # synthesised callee declares it as a write param (because pl.assemble
+        # inside the body writes into it).
         assert dirs[k_cache_idx] == ir.ArgDirection.NoDep, (
             f"expected NoDep at k_cache slot {k_cache_idx}, got {dirs}"
         )
-        # The synthesised callee classifies the mutated capture as InOut
-        # (asserted indirectly via the verifier below, which rejects
-        # NoDep on a callee `In` param if some sibling argument got
-        # re-classified).
 
-        # And the post-pass property verifier must accept the InOut+NoDep
+        # And the post-pass property verifier must accept the Out+NoDep
         # combination on the synthesised Call.
         props = _core_passes.IRPropertySet()
         props.insert(_core_passes.IRProperty.CallDirectionsResolved)
         _core_passes.PropertyVerifierRegistry.verify_or_throw(props, After)
 
         # Assert directly that the synthesised callee declares the marked
-        # param as InOut — this is the load-bearing precondition that makes
-        # this an InOut+NoDep test (rather than the trivial In+NoDep case
-        # covered by ``test_outline_plus_derive_marks_slot_no_dep``).
+        # param as a write direction — this is the load-bearing precondition
+        # that makes this a write+NoDep test (rather than the trivial In+NoDep
+        # case covered by ``test_outline_plus_derive_marks_slot_no_dep``). The
+        # body writes ``k_cache`` and never reads it, so the direction is
+        # ``Out``; issue #2415 is why it is not ``InOut``.
         outlined = next(f for gv, f in After.functions.items() if gv.name != "main")
-        assert outlined.param_directions[k_cache_idx] == ir.ParamDirection.InOut, (
-            f"expected InOut at outlined callee param {k_cache_idx}, got {list(outlined.param_directions)}"
+        assert outlined.param_directions[k_cache_idx] == ir.ParamDirection.Out, (
+            f"expected Out at outlined callee param {k_cache_idx}, got {list(outlined.param_directions)}"
         )
 
     def test_outline_propagates_split_aiv_attr(self):
@@ -1741,7 +2532,7 @@ class TestOutlineNoDepArgs:
                 self,
                 a: pl.Tensor[[512, 128], pl.FP32],
                 b: pl.Tensor[[512, 128], pl.FP32],
-                out: pl.InOut[pl.Tensor[[512, 128], pl.FP32]],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
             ) -> pl.Tensor[[512, 128], pl.FP32]:
                 for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
                     offset: pl.Scalar[pl.INDEX] = aiv_id * 128
@@ -1808,7 +2599,7 @@ class TestOutlineNoDepArgs:
                 self,
                 a: pl.Tensor[[512, 128], pl.FP32],
                 b: pl.Tensor[[512, 128], pl.FP32],
-                out: pl.InOut[pl.Tensor[[512, 128], pl.FP32]],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
             ) -> pl.Tensor[[512, 128], pl.FP32]:
                 for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
                     offset: pl.Scalar[pl.INDEX] = aiv_id * 128
@@ -1910,10 +2701,13 @@ class TestOutlineReboundOutCapture:
     """A captured ``pl.Out`` tensor the scope rebinds under its own name.
 
     ``c = pl.store(t, off, c)`` is what the parser emits before ConvertToSSA
-    splits the read from the write, so ``c`` is one Var that is both read and
-    assigned inside the scope. The outlined function must capture it as an
-    ``InOut`` parameter and bind the store result to a *distinct* Var, so the
-    body neither leaves ``c`` free nor rebinds its own parameter.
+    splits the definition from the use, so ``c`` is one Var that is both stored
+    into and assigned inside the scope. The outlined function must capture it as
+    a write parameter and bind the store result to a *distinct* Var, so the body
+    neither leaves ``c`` free nor rebinds its own parameter. The store target is
+    the only use, so the direction is ``Out`` (issue #2415) — and the same
+    program run through ConvertToSSA first must agree, which
+    ``test_matches_the_convert_to_ssa_prefixed_result`` pins.
 
     These run the pass directly on parser output (no ConvertToSSA) — that is
     precisely the input shape the flow-insensitive ``var_uses \\ var_defs``
@@ -1932,7 +2726,7 @@ class TestOutlineReboundOutCapture:
         assert isinstance(body, ir.SeqStmts), f"expected a SeqStmts body, got {type(body).__name__}"
         return list(body.stmts)
 
-    def test_rebound_out_capture_becomes_inout_param(self):
+    def test_rebound_out_capture_becomes_out_param(self):
         @pl.program
         class Before:
             @pl.function
@@ -1950,7 +2744,7 @@ class TestOutlineReboundOutCapture:
 
         outlined = self._outlined(After)
         assert [p.name_hint for p in outlined.params] == ["a", "c"]
-        assert outlined.param_directions[1] == ir.ParamDirection.InOut
+        assert outlined.param_directions[1] == ir.ParamDirection.Out
 
         # The captured tensor is threaded through the call site, not dropped.
         main = After.get_function("main")

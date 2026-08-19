@@ -16,15 +16,15 @@ implementations of:
   assemble into ``ChipCallable``, locate runtime binaries.
 - :func:`execute_on_device`: Run a ``ChipCallable`` on device via ``ChipWorker``.
 - :func:`validate_golden`: Compare actual outputs against golden reference.
-- :func:`ensure_pto_isa_root`: Manage PTO-ISA repository (clone/checkout).
 
 These functions keep orchestration in PyPTO while relying on the installed
 runtime packages for two integration surfaces:
 
 - ``simpler`` provides the ``_task_interface`` nanobind C++ module.
 - ``simpler_setup`` provides the kernel compiler plus packaged runtime sources,
-  binaries, and ``pto_isa.pin`` for non-source installs. In a source checkout,
-  those assets come from the ``runtime/`` git submodule instead.
+  binaries, and ``pto_isa.pin`` for non-source installs, and owns the only
+  PTO-ISA resolver. In a source checkout, those assets come from the
+  ``runtime/`` git submodule instead.
 """
 
 from __future__ import annotations
@@ -47,6 +47,7 @@ from typing import Any
 import torch
 
 from pypto._external_source import kernel_binary_cache_path
+from pypto.pypto_core.passes import RuntimeKind, runtime_kind_to_name
 
 from ._binary_cache import (
     BinaryCacheContext,
@@ -56,14 +57,12 @@ from ._binary_cache import (
 )
 from .elf_parser import elf_build_id_64, extract_text_section
 from .kernel_compiler import KernelCompiler
+from .pto_isa import ensure_pto_isa_root
 from .task_interface import (
     CallConfig,  # pyright: ignore[reportAttributeAccessIssue]
     ChipCallable,  # pyright: ignore[reportAttributeAccessIssue]
-    ChipStorageTaskArgs,  # pyright: ignore[reportAttributeAccessIssue]
     CoreCallable,  # pyright: ignore[reportAttributeAccessIssue]
     Worker,  # pyright: ignore[reportAttributeAccessIssue]
-    make_tensor_arg,  # pyright: ignore[reportAttributeAccessIssue]
-    scalar_to_uint64,  # pyright: ignore[reportAttributeAccessIssue]
 )
 
 logger = logging.getLogger(__name__)
@@ -128,54 +127,6 @@ def _kernel_cache_file(
         runtime_name=runtime_name,
         include_dirs=include_dirs,
     )
-
-
-# ---------------------------------------------------------------------------
-# PTO-ISA management
-# ---------------------------------------------------------------------------
-
-_PTO_ISA_HTTPS = "https://github.com/hw-native-sys/pto-isa.git"
-_PTO_ISA_SSH = "git@github.com:hw-native-sys/pto-isa.git"
-_PTO_ISA_HTTPS_FALLBACK = "https://gitcode.com/luohuan40/pto-isa.git"
-_PTO_ISA_SSH_FALLBACK = "git@gitcode.com:luohuan40/pto-isa.git"
-_PTO_ISA_PRIMARY_CLONE_TIMEOUT = 60
-_PTO_ISA_FALLBACK_CLONE_TIMEOUT = 300
-_PROJECT_ROOT = Path(__file__).parents[3]
-_PTO_ISA_PIN_PATH = _PROJECT_ROOT / "runtime" / "pto_isa.pin"
-
-
-def _get_pto_isa_clone_path() -> Path:
-    """Return the default path where PTO-ISA is cloned."""
-    return _PROJECT_ROOT / "build_output" / "_deps" / "pto-isa"
-
-
-def _get_runtime_pto_isa_pin_path() -> Path:
-    """Locate the runtime pin in a source checkout or installed runtime package."""
-    if _PTO_ISA_PIN_PATH.parent.is_dir():
-        return _PTO_ISA_PIN_PATH
-
-    try:
-        runtime_root = getattr(import_module("simpler_setup.environment"), "PROJECT_ROOT")
-    except (ImportError, AttributeError):
-        return _PTO_ISA_PIN_PATH
-    return Path(runtime_root) / "pto_isa.pin"
-
-
-def _read_runtime_pto_isa_pin() -> str | None:
-    """Return the runtime's pinned PTO-ISA commit, or ``None`` when unavailable."""
-    pin_path = _get_runtime_pto_isa_pin_path()
-    try:
-        commit = pin_path.read_text(encoding="utf-8").strip()
-    except OSError as e:
-        logger.warning(
-            f"Failed to read runtime PTO-ISA pin at {pin_path}: {e}; falling back to the latest remote HEAD"
-        )
-        return None
-
-    if not commit:
-        logger.warning(f"Runtime PTO-ISA pin at {pin_path} is empty; falling back to the latest remote HEAD")
-        return None
-    return commit
 
 
 def _clean_git_revision(repo_root: Path) -> tuple[bool, str | None]:
@@ -257,175 +208,14 @@ def _current_binary_context(
     )
 
 
-def _clone_pto_isa(clone_path: Path, primary_url: str, fallback_url: str) -> bool:
-    """Clone pto-isa, trying *primary_url* first with a short timeout.
+# ---------------------------------------------------------------------------
+# PTO-ISA management
+# ---------------------------------------------------------------------------
 
-    Returns:
-        ``True`` if the clone succeeded (based on return code), ``False`` otherwise.
-    """
-    clone_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        result = subprocess.run(
-            ["git", "clone", primary_url, str(clone_path)],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=_PTO_ISA_PRIMARY_CLONE_TIMEOUT,
-        )
-        if result.returncode == 0:
-            return True
-    except subprocess.TimeoutExpired:
-        logger.warning(
-            f"Cloning pto-isa from {primary_url} timed out after "
-            f"{_PTO_ISA_PRIMARY_CLONE_TIMEOUT}s; falling back to {fallback_url}"
-        )
-    except Exception as e:
-        logger.warning(f"Cloning pto-isa from {primary_url} failed: {e}; falling back to {fallback_url}")
-
-    # Clean up any partial clone before retrying with the fallback.
-    if clone_path.exists():
-        shutil.rmtree(clone_path, ignore_errors=True)
-    try:
-        result = subprocess.run(
-            ["git", "clone", fallback_url, str(clone_path)],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=_PTO_ISA_FALLBACK_CLONE_TIMEOUT,
-        )
-        if result.returncode != 0:
-            logger.warning(f"Failed to clone pto-isa:\n{result.stderr}")
-            return False
-    except Exception as e:
-        logger.warning(f"Failed to clone pto-isa: {e}")
-        return False
-    return True
-
-
-def ensure_pto_isa_root(clone_protocol: str = "https") -> str | None:
-    """Ensure ``PTO_ISA_ROOT`` is available, either from env or by cloning.
-
-    Args:
-        clone_protocol: ``"https"`` or ``"ssh"``.
-
-    Returns:
-        PTO-ISA root path if successful, ``None`` otherwise.
-    """
-    existing_root = os.environ.get("PTO_ISA_ROOT")
-    if existing_root:
-        return existing_root
-
-    resolved_commit = _read_runtime_pto_isa_pin()
-    clone_path = _get_pto_isa_clone_path()
-    include_dir = clone_path / "include"
-
-    if not (clone_path.exists() and include_dir.exists() and include_dir.is_dir()):
-        if clone_protocol == "https":
-            primary_url, fallback_url = _PTO_ISA_HTTPS, _PTO_ISA_HTTPS_FALLBACK
-        else:
-            primary_url, fallback_url = _PTO_ISA_SSH, _PTO_ISA_SSH_FALLBACK
-        if not _clone_pto_isa(clone_path, primary_url, fallback_url):
-            return None
-        if resolved_commit and not _checkout_pto_isa_commit(clone_path, resolved_commit):
-            return None
-    elif resolved_commit:
-        if not _checkout_pto_isa_commit(clone_path, resolved_commit):
-            return None
-    else:
-        _update_pto_isa_to_latest(clone_path)
-
-    if not include_dir.exists():
-        return None
-
-    resolved = str(clone_path.resolve())
-    os.environ["PTO_ISA_ROOT"] = resolved
-    return resolved
-
-
-def _checkout_pto_isa_commit(clone_path: Path, commit: str) -> bool:
-    """Checkout *commit* and verify that the managed clone resolves to it."""
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-            cwd=str(clone_path),
-            timeout=5,
-        )
-        current = result.stdout.strip()
-        target = subprocess.run(
-            ["git", "rev-parse", f"{commit}^{{commit}}"],
-            check=False,
-            capture_output=True,
-            text=True,
-            cwd=str(clone_path),
-            timeout=5,
-        )
-        target_revision = target.stdout.strip() if target.returncode == 0 else ""
-        if not target_revision or current != target_revision:
-            subprocess.run(
-                ["git", "fetch", "origin"],
-                capture_output=True,
-                text=True,
-                cwd=str(clone_path),
-                timeout=30,
-                check=True,
-            )
-            subprocess.run(
-                ["git", "checkout", commit],
-                capture_output=True,
-                text=True,
-                cwd=str(clone_path),
-                timeout=30,
-                check=True,
-            )
-            target_revision = subprocess.run(
-                ["git", "rev-parse", f"{commit}^{{commit}}"],
-                check=True,
-                capture_output=True,
-                text=True,
-                cwd=str(clone_path),
-                timeout=5,
-            ).stdout.strip()
-        checked_out = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-            cwd=str(clone_path),
-            timeout=5,
-        ).stdout.strip()
-        if checked_out != target_revision:
-            logger.warning(f"Failed to verify pto-isa commit {commit}: HEAD is {checked_out or 'unknown'}")
-            return False
-        return True
-    except (OSError, subprocess.SubprocessError) as e:
-        logger.warning(f"Failed to checkout pto-isa commit {commit}: {e}")
-        return False
-
-
-def _update_pto_isa_to_latest(clone_path: Path) -> None:
-    """Fetch and reset existing clone to the remote default branch."""
-    try:
-        subprocess.run(
-            ["git", "fetch", "origin"],
-            capture_output=True,
-            text=True,
-            cwd=str(clone_path),
-            timeout=30,
-            check=True,
-        )
-        subprocess.run(
-            ["git", "reset", "--hard", "origin/HEAD"],
-            capture_output=True,
-            text=True,
-            cwd=str(clone_path),
-            timeout=30,
-            check=True,
-        )
-    except Exception as e:
-        logger.warning(f"Failed to update pto-isa to latest: {e}")
+# Re-exported from ``.pto_isa`` so this module keeps its historical entry point
+# and so tests can monkey-patch the name used by ``_compile_and_assemble_locked``
+# below. The implementation lives there because resolving the pin must not
+# require the Simpler-backed ``task_interface`` extension this module imports.
 
 
 # ---------------------------------------------------------------------------
@@ -759,16 +549,11 @@ def _compile_and_assemble_locked(
     runtime_config = getattr(kernel_config, "RUNTIME_CONFIG", {})
     # Default to the runtime that ``pto_backend`` bakes into every generated
     # ``kernel_config.py``; only legacy / hand-written configs omit the key.
-    runtime_name = runtime_config.get("runtime", "tensormap_and_ringbuffer")
+    runtime_name = runtime_config.get("runtime", runtime_kind_to_name(RuntimeKind.TENSORMAP_AND_RINGBUFFER))
 
-    # Ensure PTO-ISA root
-    pto_isa_root = ensure_pto_isa_root(clone_protocol="https")
-    if pto_isa_root is None:
-        raise OSError(
-            "PTO_ISA_ROOT could not be resolved.\n"
-            "Please set it to the PTO-ISA root directory, e.g.:\n"
-            "  export PTO_ISA_ROOT=/path/to/pto-isa"
-        )
+    # Resolve the pinned PTO-ISA checkout (raises with an actionable message
+    # when the pin cannot be honoured).
+    pto_isa_root = ensure_pto_isa_root()
 
     # Create compiler
     compiler = KernelCompiler(platform=platform)
@@ -890,7 +675,7 @@ def _compile_and_assemble_locked(
 
 def execute_on_device(  # noqa: PLR0913
     chip_callable: ChipCallable,
-    orch_args: ChipStorageTaskArgs,
+    orch_args: list[Any],
     platform: str,
     runtime_name: str,
     device_id: int,
@@ -899,7 +684,7 @@ def execute_on_device(  # noqa: PLR0913
     aicpu_thread_num: int | None = None,
     enable_sdma: bool = False,
     output_prefix: str | None = None,
-    enable_l2_swimlane: bool = False,
+    enable_chip_swimlane: int | bool = 0,
     enable_dump_args: int = 0,
     enable_pmu: int = 0,
     enable_dep_gen: bool = False,
@@ -917,7 +702,9 @@ def execute_on_device(  # noqa: PLR0913
 
     Args:
         chip_callable: Assembled callable (orchestration + kernels).
-        orch_args: Tensor/scalar arguments.
+        orch_args: Ordered host tensors, worker-owned tensors, and scalar
+            arguments. They are converted to the runtime's address-free
+            ``TaskArgs`` only after the owning Worker is known.
         platform: Target execution platform (e.g. ``"a2a3sim"``).
         runtime_name: Runtime implementation name (e.g. ``"tensormap_and_ringbuffer"``).
         device_id: NPU device index.
@@ -931,14 +718,17 @@ def execute_on_device(  # noqa: PLR0913
             required by prefetch artifacts. Defaults to ``False`` for legacy,
             hand-built, and non-prefetch callables.
         output_prefix: Directory under which the runtime writes diagnostic
-            artifacts (``l2_swimlane_records.json`` / ``args_dump/`` /
+            artifacts (``chip_swimlane_records.json`` / ``args_dump/`` /
             ``pmu.csv`` / ``deps.json`` / ``scope_stats/``). Required
             whenever any ``enable_*`` DFX flag is set — Simpler's
             ``CallConfig::validate()`` would otherwise reject the call.
             Passing it with all flags off creates no artefacts.
-        enable_l2_swimlane: Capture per-task L2 perf records
-            (``l2_swimlane_records.json``). Mirrors runtime's
-            ``--enable-l2-swimlane`` pytest flag.
+        enable_chip_swimlane: Chip swimlane collection **level** for the
+            per-task perf records (``chip_swimlane_records.json``). ``0`` off;
+            ``1`` AICore timing; ``2`` plus AICPU dispatch / finish; ``3`` plus
+            scheduler phases; ``4`` plus orchestrator phases. ``True`` requests
+            the full level (``4``), matching the runtime harness's bare
+            ``--enable-chip-swimlane``.
         enable_dump_args: Per-task argument dump level into
             ``<output_prefix>/args_dump/``. ``0`` off; ``1`` partial
             (only ``pl.dump_tag`` / ``dumps=`` marked tensors); ``2`` full
@@ -962,7 +752,7 @@ def execute_on_device(  # noqa: PLR0913
         ``None``. The dispatch writes device results back into the host
         tensors in *orch_args* in place; per-run timing is no longer
         returned — read it from the runtime's ``[STRACE]`` log markers
-        (simpler PR #1177) or the L2 swimlane records instead.
+        (simpler PR #1177) or the chip swimlane records instead.
 
     Raises:
         ValueError: If ``level != 2`` (L3 not yet exposed), or any DFX flag
@@ -974,13 +764,23 @@ def execute_on_device(  # noqa: PLR0913
             f"L3 execution is not yet exposed at the pypto user-API layer."
         )
 
+    from .runner import _normalize_swimlane_level  # noqa: PLC0415
+
+    # Validate the level here too, so both entry points reject an out-of-range
+    # request identically instead of letting the CallConfig setter clamp it.
+    enable_chip_swimlane = _normalize_swimlane_level(enable_chip_swimlane, "enable_chip_swimlane")
+
     any_dfx = (
-        enable_l2_swimlane or enable_dump_args > 0 or enable_pmu > 0 or enable_dep_gen or enable_scope_stats
+        enable_chip_swimlane > 0
+        or enable_dump_args > 0
+        or enable_pmu > 0
+        or enable_dep_gen
+        or enable_scope_stats
     )
     if any_dfx and not output_prefix:
         raise ValueError(
             "execute_on_device: output_prefix is required when any DFX flag "
-            "(enable_l2_swimlane / enable_dump_args / enable_pmu / enable_dep_gen / "
+            "(enable_chip_swimlane / enable_dump_args / enable_pmu / enable_dep_gen / "
             "enable_scope_stats) is enabled — runtime CallConfig::validate() would "
             "otherwise reject the call."
         )
@@ -990,11 +790,12 @@ def execute_on_device(  # noqa: PLR0913
     cfg = CallConfig()
     if aicpu_thread_num is not None:
         cfg.aicpu_thread_num = aicpu_thread_num
-    # CallConfig nanobind setters: ``enable_l2_swimlane`` / ``enable_dep_gen``
-    # take `bool`; ``enable_pmu`` is a raw ``int32_t`` (0 disabled, >0 event
-    # type); ``enable_dump_args`` is a dump level (0 off, 1 partial, 2 full)
-    # — the setter also accepts a bool (True→1 partial, False→0).
-    cfg.enable_l2_swimlane = enable_l2_swimlane
+    # CallConfig nanobind setters: ``enable_chip_swimlane`` accepts a bool or
+    # level, while ``enable_dep_gen`` takes `bool`; ``enable_pmu`` is a raw
+    # ``int32_t`` (0 disabled, >0 event type); ``enable_dump_args`` is a dump
+    # level (0 off, 1 partial, 2 full) whose setter also accepts a bool
+    # (True→1 partial, False→0).
+    cfg.enable_chip_swimlane = enable_chip_swimlane
     cfg.enable_dump_args = enable_dump_args
     cfg.enable_pmu = enable_pmu
     cfg.enable_dep_gen = enable_dep_gen
@@ -1012,7 +813,10 @@ def execute_on_device(  # noqa: PLR0913
     )
     with _temporary_env(env):
         if active is not None:
-            active._run_chip(chip_callable, orch_args, cfg)
+            from .runner import _coerced_to_orch_args  # noqa: PLC0415
+
+            wire_args = _coerced_to_orch_args(orch_args, active._impl)
+            active._run_chip(chip_callable, wire_args, cfg)
             return
         worker = Worker(
             level=level,
@@ -1026,11 +830,14 @@ def execute_on_device(  # noqa: PLR0913
         # inside the timed dispatch. No-op without a prebuilt arena.
         worker.init(prewarm_config=cfg)
         try:
+            from .runner import _coerced_to_orch_args  # noqa: PLC0415
+
+            wire_args = _coerced_to_orch_args(orch_args, worker)
             # Simpler's L2 ABI now dispatches by callable id (see runtime PR #710);
             # register the callable, run it, then close — close() runs finalize()
             # so explicit unregister is unnecessary here.
             cid = worker.register(chip_callable)
-            worker.run(cid, orch_args, cfg)
+            worker.run(cid, wire_args, cfg)
         finally:
             worker.close()
 
@@ -1096,15 +903,16 @@ def validate_golden(
 # Tensor argument construction
 # ---------------------------------------------------------------------------
 
-# Return type for build_orch_args_from_inputs.
-_OrchArgsTuple = tuple[ChipStorageTaskArgs, dict[str, Any], dict[str, torch.Tensor], dict[str, torch.Tensor]]
+# Return type for build_orch_args_from_inputs. The first element deliberately
+# remains unmaterialized until execute_on_device has selected its owning Worker.
+_OrchArgsTuple = tuple[list[Any], dict[str, Any], dict[str, torch.Tensor], dict[str, torch.Tensor]]
 
 
 def _collect_orch_args(
     items: list[tuple[str, torch.Tensor | ctypes._SimpleCData]],
     is_output: Callable[[str], bool],
 ) -> _OrchArgsTuple:
-    """Shared logic for building ``ChipStorageTaskArgs`` from ``(name, value)`` pairs.
+    """Normalize ordered ``(name, value)`` pairs for worker-owned packing.
 
     Args:
         items: Ordered ``(name, value)`` pairs.  Each value is either a
@@ -1113,9 +921,11 @@ def _collect_orch_args(
             output to be validated.
 
     Returns:
-        ``(orch_args, all_tensors, inputs, outputs)``.
+        ``(orch_args, all_tensors, inputs, outputs)``. ``orch_args`` is an
+        ordered Python list; :func:`execute_on_device` turns it into
+        address-free ``TaskArgs`` after selecting the Worker.
     """
-    orch_args = ChipStorageTaskArgs()
+    orch_args: list[Any] = []
     all_tensors: dict[str, Any] = {}
     inputs: dict[str, torch.Tensor] = {}
     outputs: dict[str, torch.Tensor] = {}
@@ -1123,14 +933,14 @@ def _collect_orch_args(
     for name, val in items:
         if isinstance(val, torch.Tensor):
             val = val.cpu().contiguous()
-            orch_args.add_tensor(make_tensor_arg(val))
+            orch_args.append(val)
             all_tensors[name] = val
             if is_output(name):
                 outputs[name] = val
             else:
                 inputs[name] = val
         elif isinstance(val, ctypes._SimpleCData):
-            orch_args.add_scalar(scalar_to_uint64(val))
+            orch_args.append(val)
             all_tensors[name] = val.value
 
     return orch_args, all_tensors, inputs, outputs
@@ -1140,7 +950,7 @@ def build_orch_args_from_inputs(
     inputs_result: list[tuple[str, Any]],
     output_names: set[str],
 ) -> _OrchArgsTuple:
-    """Build ``ChipStorageTaskArgs`` from pre-generated ``(name, value)`` tuples.
+    """Normalize pre-generated ``(name, value)`` tuples for device dispatch.
 
     This variant is used by the test harness path where inputs come from
     ``golden.py``'s ``generate_inputs()`` function rather than ``TensorSpec``.

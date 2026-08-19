@@ -11,8 +11,8 @@
 
 These tests compile a small L3 program (no device needed, ``skip_ptoas=True``)
 and mock ``execute_distributed`` so the calling convention can be exercised
-without a Worker. The focus is the G1 widening: tensor parameters now accept a
-worker-resident :class:`DeviceTensor` in addition to a host ``torch.Tensor``.
+without a Worker. Resident tensors require a prepared Worker because their
+owner Buffer/provenance cannot belong to a temporary one-shot Worker.
 """
 
 import json
@@ -80,38 +80,35 @@ def compiled(tmp_path) -> DistributedCompiledProgram:
     return prog
 
 
-def test_call_accepts_device_tensor(compiled):
-    """A DeviceTensor input is accepted and passed through to execute_distributed."""
+def test_one_shot_rejects_device_tensor_with_prepare_guidance(compiled):
     a = torch.zeros(128, 128, dtype=torch.float32)
     weight = DeviceTensor(0xABCD0000, (128, 128), torch.float32)  # worker-resident
     out = torch.zeros(128, 128, dtype=torch.float32)
 
     with patch("pypto.runtime.distributed_runner.execute_distributed") as mock_exec:
-        compiled(a, weight, out)
-
-    mock_exec.assert_called_once()
-    coerced = mock_exec.call_args.args[1]
-    assert coerced[1] is weight  # DeviceTensor reached the runner unchanged
+        with pytest.raises(TypeError, match=r"compiled\.prepare.*worker\.alloc_tensor"):
+            compiled(a, weight, out)
+    mock_exec.assert_not_called()
 
 
 def test_call_rejects_non_tensor(compiled):
-    """Non-tensor / non-DeviceTensor args still raise TypeError with guidance."""
+    """One-shot arguments must be host tensors."""
     a = torch.zeros(128, 128, dtype=torch.float32)
     out = torch.zeros(128, 128, dtype=torch.float32)
 
     with patch("pypto.runtime.distributed_runner.execute_distributed"):
-        with pytest.raises(TypeError, match="DeviceTensor"):
+        with pytest.raises(TypeError, match=r"host torch\.Tensor"):
             compiled(a, "not a tensor", out)  # type: ignore[arg-type]
 
 
 def test_call_validates_device_tensor_shape(compiled):
-    """A DeviceTensor with the wrong shape is rejected by _validate_device_tensor."""
+    """Ownership guidance precedes shape validation on the one-shot path."""
     a = torch.zeros(128, 128, dtype=torch.float32)
     bad = DeviceTensor(0xABCD0000, (64, 64), torch.float32)  # wrong shape
     out = torch.zeros(128, 128, dtype=torch.float32)
 
     with patch("pypto.runtime.distributed_runner.execute_distributed"):
-        with pytest.raises(TypeError, match="shape"):
+        with pytest.raises(TypeError, match=r"compiled\.prepare"):
             compiled(a, bad, out)
 
 
@@ -123,19 +120,15 @@ def _stacked(full_shape):
     return StackedDeviceTensor(shards, full_shape, tuple(range(b)))
 
 
-def test_call_accepts_stacked_device_tensor(compiled):
-    """A StackedDeviceTensor is accepted at the one-shot entry (parity with
-    DeviceTensor) and passed through to execute_distributed unchanged."""
+def test_one_shot_rejects_stacked_device_tensor_with_prepare_guidance(compiled):
     a = torch.zeros(128, 128, dtype=torch.float32)
     stacked = _stacked((128, 128))  # per-card resident shards for the [128,128] param
     out = torch.zeros(128, 128, dtype=torch.float32)
 
     with patch("pypto.runtime.distributed_runner.execute_distributed") as mock_exec:
-        compiled(a, stacked, out)
-
-    mock_exec.assert_called_once()
-    coerced = mock_exec.call_args.args[1]
-    assert coerced[1] is stacked  # StackedDeviceTensor reached the runner unchanged
+        with pytest.raises(TypeError, match=r"worker\.alloc_stacked_tensor"):
+            compiled(a, stacked, out)
+    mock_exec.assert_not_called()
 
 
 def test_call_validates_stacked_device_tensor_shape(compiled):
@@ -145,7 +138,7 @@ def test_call_validates_stacked_device_tensor_shape(compiled):
     out = torch.zeros(128, 128, dtype=torch.float32)
 
     with patch("pypto.runtime.distributed_runner.execute_distributed"):
-        with pytest.raises(TypeError, match="shape"):
+        with pytest.raises(TypeError, match=r"compiled\.prepare"):
             compiled(a, bad, out)
 
 

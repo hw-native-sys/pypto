@@ -191,6 +191,14 @@ non-SSA source is normal input, not a compatibility mode.
 | **Race under `pl.parallel`** | Iterations are not actually independent | Use `pl.range`, or remove the cross-iteration dependency |
 | **`SSAViolationError`** | Rebinding under `strict_ssa=True` | Use distinct names, or drop `strict_ssa` |
 
+## Worked examples
+
+| Example | Shows |
+| ------- | ----- |
+| `examples/beginner/02_elementwise.py` (`chunked_add`) | A plain `pl.range` over tile chunks |
+| `examples/intermediate/04_matmul_acc.py` | `init_values` carrying an accumulator across iterations |
+| `examples/models/03_flash_attention.py` | Loop-carried state plus nested `if` / `pl.yield_` — the full form |
+
 ## See Also
 
 - [Types](00-types.md) — what the carried values are.

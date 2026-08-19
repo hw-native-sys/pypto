@@ -90,12 +90,12 @@ with pl.at(level=pl.Level.CORE_GROUP):
 ```
 
 `c` is in both `var_uses` and `var_defs`, so the difference drops it from the
-parameter list and leaves the read dangling in the outlined body. Treating it as
-live-in makes it an `InOut` parameter, and the `tile.store` result binds a
+parameter list and leaves the use dangling in the outlined body. Treating it as
+live-in makes it a write parameter, and the `tile.store` result binds a
 distinct Var (`c__store`) so the outlined body never rebinds its own parameter:
 
 ```python
-def main_incore_0(a: Tensor[[128, 128], FP32], c: InOut[Tensor[[128, 128], FP32]]):
+def main_incore_0(a: Tensor[[128, 128], FP32], c: Out[Tensor[[128, 128], FP32]]):
     c__store = pl.tile.store(..., c)
     return c                       # the param — store writes through it in place
 ```
@@ -108,8 +108,48 @@ construction and is rejected with an internal error naming `ConvertToSSA`.
 
 The distinct result Var is the InCore/Cluster/Spmd outcome. Hierarchy scopes
 skip the store-target export entirely (the buffer is already visible to the
-caller through its InOut parameter), so their body keeps the original rebind —
+caller through its write parameter), so their body keeps the original rebind —
 the capture still becomes a parameter, which is the part that was broken.
+
+**Write direction: `Out` unless the body reads**: a captured tensor the scope
+writes — a `tile.store` target or a `tensor.assemble` destination — is lifted
+off `In` by `InferParamDirections`. Which write direction it earns is decided by
+whether the body also *reads* it. Both write ops update a sub-region of the
+destination **in place**: the untouched region is neither loaded nor re-stored,
+so appearing in that destination slot moves no data into the scope and is not a
+read. A parameter whose only uses are destination slots is therefore `Out`;
+anything else — feeding a `tensor.slice`, a compute op, or a callee's `In`/`InOut`
+param — makes it `InOut`. Under SSA the post-write state binds to a fresh Var, so
+reading *that* alias counts too: the alias names the same buffer, and a read over
+a region the scope never wrote does need the incoming contents. Unrecognised uses
+count as reads, so the inference can only err towards `InOut`.
+
+Two keys are excluded: `dump_vars` and `arg_direction_overrides_vars` name a
+tensor as bookkeeping (dump marking, `NoDep` opt-out) rather than accessing it.
+
+Each source of evidence — the read scan, the store-target set, the assemble scan,
+and each inner callee's declared slot — is a *lower* bound on the accesses, so
+they are merged along `In < Out < InOut` rather than overwriting one another. A
+plain assignment would let a callee that declares its slot `Out` erase a read the
+body really performs.
+
+**Hierarchy scopes are an exception.** `OutlineScope` deliberately leaves
+`store_output_set` empty for `ScopeKind::Hierarchy` (the buffer is already
+visible to the caller without an explicit returned output), so a `tile.store`
+target captured by a Hierarchy scope never reaches the rule above and its
+parameter stays `In`. That predates the write-direction rule and is unchanged
+here.
+
+Claiming `InOut` for a parameter the body never reads is not a safe
+approximation. The direction propagates into
+`DistributedCodegen::EmitCallToWorker`, which tags each per-rank chip dispatch
+argument from the *callee's* direction, so a false `InOut` turns disjoint
+per-rank slices of one `pl.Out` tensor into a cross-rank write dependency
+(issue #2415). Ordering a write-only parameter genuinely needs is not lost:
+[`DeriveCallDirections`](37-derive_call_directions.md) re-derives the
+*call-site* direction and promotes a callee `Out` back to `InOut` under a
+sequential ancestor, behind a prior writer of the same root, or when the root is
+an enclosing `InOut` parameter.
 
 **Param-explicit returns**: the outlined function returns its
 own parameters, not SSA result vars, whenever a tensor output writes through

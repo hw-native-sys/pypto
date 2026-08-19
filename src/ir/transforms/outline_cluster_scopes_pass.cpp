@@ -32,6 +32,7 @@
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/scope_outline_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
+#include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/verifier/verifier.h"
 
 namespace pypto {
@@ -198,7 +199,7 @@ class LaunchSpecStamper : public IRMutator {
   /// actionable message instead of emitting an unbound name.
   static void RejectCalleeBoundCoreNum(const SpmdLaunchSpec& spec, const ExprPtr& translated) {
     if (spec.callee_bound.empty() || !translated) return;
-    outline_utils::VarDefUseCollector uses;
+    var_collectors::VarDefUseCollector uses;
     uses.VisitExpr(translated);
     for (const auto* used : uses.var_uses) {
       CHECK_SPAN(spec.callee_bound.count(used) == 0, spec.group->span_)
@@ -289,7 +290,7 @@ Pass OutlineClusterScopes() {
         for (const auto& param : outlined->params_) {
           if (param) spec.callee_bound.insert(param.get());
         }
-        outline_utils::VarDefUseCollector group_defs;
+        var_collectors::VarDefUseCollector group_defs;
         if (outlined->body_) group_defs.VisitStmt(outlined->body_);
         spec.callee_bound.insert(group_defs.var_defs.begin(), group_defs.var_defs.end());
         group_launch_specs.emplace(outlined->name_, std::move(spec));

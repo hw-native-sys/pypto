@@ -57,6 +57,14 @@ struct AutomaticPipeSetup {
 
 constexpr int kAutoBufferBase = -1;
 
+/// Ring depth an automatically built cross-core pipe gets when the enclosing scope carries no
+/// `pl.cross_core_slot(slot_num=N)`. Deep enough to double-buffer the cube<->vector handoff while
+/// keeping the consumer-side ring (L1 for V2C, UB for C2V) affordable — the full-tile slots make a
+/// deeper default overflow on-chip memory for most real tile shapes. `BuildAutomaticPipeSetup`
+/// always emits this value explicitly on `initialize_pipe`, so it is a pypto policy number and is
+/// deliberately independent of PTOAS's own fallback below.
+constexpr int kDefaultAutoPipeSlotNum = 2;
+
 std::optional<int64_t> TryGetConstIntValue(const ExprPtr& expr);
 std::optional<int64_t> TryGetTileSlotSizeBytes(const TypePtr& type);
 void RecordObservedSlotSize(PipeDirectionMetadata& metadata, int64_t slot_size);
@@ -65,7 +73,11 @@ void MergeDirectionMetadata(PipeDirectionMetadata& dst, const PipeDirectionMetad
 CrossCorePipeMetadata MergeCrossCorePipeMetadata(const CrossCorePipeMetadata& lhs,
                                                  const CrossCorePipeMetadata& rhs);
 int BuildDirMask(const CrossCorePipeMetadata& metadata);
-int GetSlotNumForDirMask(int dir_mask);
+/// Ring depth PTOAS derives itself when `initialize_pipe` carries no `slot_num` clause
+/// (`slotNum = dirMask == 3 ? 4 : 8`). This mirrors PTOAS and must not be retuned as a policy knob:
+/// only hand-written `pl.system.{aic,aiv}_initialize_pipe` still reaches that path, since automatic
+/// pipes always emit an explicit `slot_num`.
+int GetPtoasImplicitSlotNum(int dir_mask);
 std::optional<int64_t> GetCommonSlotSizeBytes(const CrossCorePipeMetadata& metadata);
 std::string BuildPipeBufferName(const std::string& func_name, core_affinity::PipeDirection direction);
 
@@ -76,18 +88,18 @@ CallPtr CreateSystemOpCall(const std::string& op_name, const std::vector<ExprPtr
 CallPtr CreateReserveBuffer(const std::string& buffer_name, int64_t size_bytes, const Span& span);
 CallPtr CreateImportPeerBuffer(const std::string& buffer_name, const std::string& peer_func,
                                const Span& span);
-// `slot_num` overrides the ring depth emitted on the initialize_pipe op when set
-// (otherwise PTOAS derives it from `dir_mask`).
+// `slot_num` is the ring depth emitted on the initialize_pipe op. It is always emitted, so PTOAS
+// never falls back to its own `dir_mask` derivation for a pipe pypto built.
 CallPtr CreateInitializePipe(core_affinity::CoreSide side, int dir_mask, int slot_size_bytes,
-                             const ExprPtr& c2v_consumer_buf, const ExprPtr& v2c_consumer_buf,
-                             std::optional<int> slot_num, const Span& span);
+                             const ExprPtr& c2v_consumer_buf, const ExprPtr& v2c_consumer_buf, int slot_num,
+                             const Span& span);
 
 void CollectCrossCorePipeMetadata(const std::vector<StmtPtr>& stmts, CrossCorePipeMetadata& metadata);
 CrossCorePipeMetadata CollectDominatingPipeSetupMetadata(const std::vector<StmtPtr>& stmts);
 
-// `slot_num_override` (from pl.split(mode, slot_num=N)) overrides the hardcoded
-// ring depth (`GetSlotNumForDirMask`) used to size the reserved buffer and the
-// emitted initialize_pipe `slot_num` attribute. nullopt keeps the default.
+// `slot_num_override` (from pl.cross_core_slot(slot_num=N)) overrides the ring depth used to size
+// the reserved buffer and the emitted initialize_pipe `slot_num` attribute. nullopt selects
+// `kDefaultAutoPipeSlotNum`; either way the attribute is emitted.
 AutomaticPipeSetup BuildAutomaticPipeSetup(const std::string& func_name, const std::string& aic_name,
                                            const std::string& aiv_name, const std::vector<StmtPtr>& aic_stmts,
                                            const std::vector<StmtPtr>& aiv_stmts,
