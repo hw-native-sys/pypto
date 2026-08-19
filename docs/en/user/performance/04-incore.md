@@ -134,7 +134,7 @@ see what a deeper pipeline would have to fit into. Its input is a **pass dump**,
 from pypto.ir import PassDumpLevel
 from pypto.runtime import RunConfig
 
-prog = kernel.lower(*args, config=RunConfig(dump_passes=PassDumpLevel.EXPLICIT))
+compiled = kernel.compile(*args, config=RunConfig(dump_passes=PassDumpLevel.EXPLICIT))
 ```
 
 ```bash

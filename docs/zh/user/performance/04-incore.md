@@ -110,7 +110,7 @@ PTOAS 的这个拒绝是刻意的，在你围绕它做设计之前值得理解�
 from pypto.ir import PassDumpLevel
 from pypto.runtime import RunConfig
 
-prog = kernel.lower(*args, config=RunConfig(dump_passes=PassDumpLevel.EXPLICIT))
+compiled = kernel.compile(*args, config=RunConfig(dump_passes=PassDumpLevel.EXPLICIT))
 ```
 
 ```bash

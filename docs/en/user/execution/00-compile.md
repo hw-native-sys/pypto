@@ -113,8 +113,10 @@ directly needs: `chip_callable`, `runtime_name`, `runtime_config`, `build_orch_a
 `orchestration_names`, `has_return`.
 
 `lower(*args)` goes one step less far: it runs the passes and returns the `Program`,
-writing no artifacts. That is the form the debugging tools take
-([Torch codegen](../tools/01-torch-codegen.md), [memory map](../tools/02-memory-map.md)).
+writing no artifacts — which also means no `passes_dump/`. It is the right form for
+[torch codegen](../tools/01-torch-codegen.md), which wants the IR itself; the
+[memory map](../tools/02-memory-map.md) reads a dump on disk and therefore needs
+`compile()`.
 
 ## Edge Cases
 

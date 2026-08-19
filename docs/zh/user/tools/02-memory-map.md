@@ -16,15 +16,15 @@
 from pypto.ir import PassDumpLevel
 from pypto.runtime import RunConfig
 
-prog = kernel.lower(*args, config=RunConfig(dump_passes=PassDumpLevel.EXPLICIT))
+compiled = kernel.compile(*args, config=RunConfig(dump_passes=PassDumpLevel.EXPLICIT))
 ```
 
 ```bash
-DUMP=path/to/output_dir/passes_dump/NN_after_SomePass.py
+DUMP="$(python -c 'print(compiled.output_dir)')"/passes_dump/NN_after_SomePass.py
 python -m pypto.tools.memory_map "$DUMP" -o map.html
 ```
 
-`EXPLICIT` 是必要的：它会解析出隐式 tile layout 与 window buffer，而工具正需要它们来确定要画多大。
+这里有两点要紧。**要用 `compile()` 而不是 `lower()`** —— `lower()` 只跑 pass 并把 `Program` 交回来，什么都不写，因此不会产出这个工具要读的 `passes_dump/`。以及 **`EXPLICIT`**，它会解析出隐式 tile layout 与 window buffer，那正是工具确定要画多大所需要的。
 
 ## 机制
 

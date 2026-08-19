@@ -20,16 +20,18 @@ Produce a dump, then render it:
 from pypto.ir import PassDumpLevel
 from pypto.runtime import RunConfig
 
-prog = kernel.lower(*args, config=RunConfig(dump_passes=PassDumpLevel.EXPLICIT))
+compiled = kernel.compile(*args, config=RunConfig(dump_passes=PassDumpLevel.EXPLICIT))
 ```
 
 ```bash
-DUMP=path/to/output_dir/passes_dump/NN_after_SomePass.py
+DUMP="$(python -c 'print(compiled.output_dir)')"/passes_dump/NN_after_SomePass.py
 python -m pypto.tools.memory_map "$DUMP" -o map.html
 ```
 
-`EXPLICIT` matters: it resolves implicit tile layouts and window buffers, which is what the
-tool needs to size what it draws.
+Two things matter here. **`compile()`, not `lower()`** — `lower()` runs the passes and hands
+back the `Program` without writing anything, so it produces no `passes_dump/` for this tool
+to read. And **`EXPLICIT`**, which resolves implicit tile layouts and window buffers; that
+is what the tool needs to size what it draws.
 
 ## Mechanics
 

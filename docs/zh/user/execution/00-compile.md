@@ -96,7 +96,7 @@ assert compiled.param_names == ["a", "b", "out"]
 
 它暴露了完整的提取面，这正是直接驱动运行时的 harness 所需要的：`chip_callable`、`runtime_name`、`runtime_config`、`build_orch_args`、`build_call_config`、`output_dir`、`platform`、`output_indices`、`param_names`、`orchestration_names`、`has_return`。
 
-`lower(*args)` 比它早停一站：只跑 pass 并返回 `Program`，不写任何产物。调试工具用的就是这种形式（[Torch codegen](../tools/01-torch-codegen.md)、[内存图](../tools/02-memory-map.md)）。
+`lower(*args)` 比它早停一站：只跑 pass 并返回 `Program`，不写任何产物 —— 也就意味着没有 `passes_dump/`。它适合 [torch codegen](../tools/01-torch-codegen.md)，那里要的就是 IR 本身；而[内存图](../tools/02-memory-map.md)读的是磁盘上的 dump，因此需要 `compile()`。
 
 ## 边界情况
 

@@ -64,11 +64,13 @@ with ChipWorker(config=cfg) as w:
 | `output_dir` | 产物在哪 |
 | `platform` / `backend_type` | 它是为什么构建的；worker 会校验前者 |
 | `param_names` / `output_indices` / `has_return` | 调用形状，供自行绑定实参的 harness 使用 |
-| `program` | 降级后的 IR，用于 `as_python()` 或 torch codegen |
+| `program` | 被编译的那份**未经 pass** 的 IR —— 不是降级后的形态，且经 `from_dir` 重建后为 `None` |
 | `chip_callable` / `runtime_name` / `runtime_config` | 运行时侧的句柄 |
 | `build_orch_args` / `build_call_config` | 显式派发需要的两个构造器 |
 | `validate_ir` | 逐 pass 的语义对比（[精度](../precision/00-workflow.md)） |
 | `from_dir` / `load` | 从已保存的产物目录重建句柄 |
+
+> **`compiled.program` 不是产出那些产物的那份 IR。** 它是送进去时的样子；codegen 实际跑的那份变换后程序并不保留，而经 `from_dir` 重建的句柄根本没有 program。要拿降级后的 IR —— 也就是 pass 真正产出的东西 —— 用 `kernel.lower(*args)`，或者读一份 pass dump。
 
 ### 显式派发
 
@@ -105,13 +107,11 @@ finally:
 | 字段 | 效果 |
 | ---- | ---- |
 | `platform` / `device_id` | 用哪块设备，以及 worker 会接受哪种产物 |
-| `rtol` / `atol` | golden 对比的容差 |
-| `save_kernels` / `save_kernels_dir` | 保留产物目录而不是用临时目录 |
-| `codegen_only` | 生成代码后停下，不执行 |
 | `enable_chip_swimlane` / `enable_dep_gen` / `enable_pmu` / `enable_dump_args` / `enable_scope_stats` | DFX 采集（[性能](../performance/00-swimlane.md)） |
 | `ring_task_window` / `ring_heap` / `ring_dep_pool` | 运行时环的尺寸（[内存](../performance/05-memory.md)） |
 | `aicpu_thread_num` | AICPU 线程数覆盖 |
-| `golden_data_dir` | 复用或固化 golden `.pt` 数据 |
+
+**`RunConfig` 里有些字段属于 harness，不属于派发。** `rtol` / `atol`、`golden_data_dir`、`save_kernels` / `save_kernels_dir` 与 `codegen_only` 是由 `pypto.runtime.run()` 读取的 —— 那条路径会编译、生成 golden 并比对。走 `compiled(...)`、`worker.run(...)` 或注册句柄时，它们不起作用；**尤其是 `codegen_only=True` 在这条路径上并不会阻止派发**，别指望用它来避免一次 launch。
 
 ## 边界情况
 

@@ -72,11 +72,16 @@ both H2D and D2H for that argument.
 | `output_dir` | Where the artifacts are |
 | `platform` / `backend_type` | What it was built for; the worker checks the first |
 | `param_names` / `output_indices` / `has_return` | The call shape, for a harness binding arguments itself |
-| `program` | The lowered IR, for `as_python()` or torch codegen |
+| `program` | The **pre-pass** IR that was compiled — not the lowered form, and `None` after `from_dir` |
 | `chip_callable` / `runtime_name` / `runtime_config` | The runtime-side handles |
 | `build_orch_args` / `build_call_config` | The two builders explicit dispatch needs |
 | `validate_ir` | Per-pass semantic comparison ([Precision](../precision/00-workflow.md)) |
 | `from_dir` / `load` | Rebuild a handle from a saved artifact directory |
+
+> **`compiled.program` is not the IR that produced the artifacts.** It is the program as it
+> went in; the transformed program codegen ran on is not retained, and a handle rebuilt with
+> `from_dir` has no program at all. For the lowered IR — what the passes actually produced —
+> use `kernel.lower(*args)`, or read a pass dump.
 
 ### Explicit dispatch
 
@@ -116,13 +121,16 @@ launch. `close()` releases the registrations and any `DeviceTensor` the caller f
 | Field | Effect |
 | ----- | ------ |
 | `platform` / `device_id` | Which device, and which artifact the worker will accept |
-| `rtol` / `atol` | Tolerance for the golden comparison |
-| `save_kernels` / `save_kernels_dir` | Keep the artifact directory instead of a temporary one |
-| `codegen_only` | Stop after codegen; do not execute |
 | `enable_chip_swimlane` / `enable_dep_gen` / `enable_pmu` / `enable_dump_args` / `enable_scope_stats` | DFX capture ([Performance](../performance/00-swimlane.md)) |
 | `ring_task_window` / `ring_heap` / `ring_dep_pool` | Runtime ring sizing ([Memory](../performance/05-memory.md)) |
 | `aicpu_thread_num` | AICPU thread count override |
-| `golden_data_dir` | Reuse or persist golden `.pt` data |
+
+**Some `RunConfig` fields belong to the harness, not to dispatch.** `rtol` / `atol`,
+`golden_data_dir`, `save_kernels` / `save_kernels_dir` and `codegen_only` are read by
+`pypto.runtime.run()`, which compiles, generates a golden and compares. Going through
+`compiled(...)`, `worker.run(...)` or a registration handle, they do nothing — in
+particular **`codegen_only=True` does not stop a dispatch on this path**, so do not rely on
+it to avoid a launch.
 
 ## Edge Cases
 
