@@ -416,6 +416,11 @@ REGISTER_OP("tensor.expand_clone")
         "Expand tensor by cloning data (not broadcasting). All dimensions must be 1 or match target shape.")
     .add_argument("input", "Input tensor to expand (TensorType)")
     .add_argument("target", "Target tensor defining output shape (TensorType)")
+    // `target` names the output shape *and* receives the expansion: every
+    // conversion branch stores the loaded input into it (directly, or through a
+    // loop-carried alias seeded from it). Nothing is loaded back out of it.
+    .set_arg_effect(1, ArgEffect::Write)
+    .set_write_channel(WriteChannel::Dma)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorExpandCloneType(args, kwargs, "tensor.expand_clone");
