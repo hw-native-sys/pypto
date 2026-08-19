@@ -4428,9 +4428,13 @@ class TestConvertScatterOp:
         assert "tensor.scatter" not in after_src
         assert "pl.tile.scatter(" in after_src
         assert "pl.tile.scatter_mask(" not in after_src
-        # Column index -> flat index: row_base via muls + row-broadcast add.
+        # Column index -> flat index: linear coordinates derive row ids, then
+        # row_base is added elementwise. This avoids the A2/A3 PTOISA short-CI
+        # path and implicit row-expand workspace.
+        assert "tile.divs" in after_src
         assert "tile.muls" in after_src
-        assert "tile.row_expand_add" in after_src
+        assert "tile.add" in after_src
+        assert "tile.row_expand_add" not in after_src
         # Preserve blend (pto.tscatter does not keep unwritten dst elements):
         # values + mask scatters into zeroed bases, then out = sel(mask != 0, values, input).
         # The select avoids a multiply-based blend (pto.tmul rejects bf16/i8).

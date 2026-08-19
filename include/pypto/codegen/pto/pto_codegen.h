@@ -426,6 +426,12 @@ class PTOCodegen : public CodegenBase {
   void SetCurrentResultBuf(const std::string& buf);
   void RegisterTileBufType(const std::string& ssa_name, const std::string& type_string);
   std::string GetSSATileBufType(const std::string& ssa_name) const;
+  /// Record `alias` as a metadata-only `pto.treshape` over `source` (e.g. the
+  /// static-valid dst view MaterializeStaticValidAlias emits), so later ops
+  /// that ptoas cannot lower on a treshape handle can fall back to `source`.
+  void RegisterStaticAliasSource(const std::string& alias, const std::string& source);
+  /// The `source` SSA recorded for a static alias, or "" when `alias` is not one.
+  std::string GetStaticAliasSource(const std::string& alias) const;
   /// Record `ssa_name` as a tile *view* — the result of a `pto.subview` or a
   /// `pto.treshape`, which reinterprets another handle's bytes.
   void RegisterTileViewName(const std::string& ssa_name);
@@ -942,6 +948,8 @@ class PTOCodegen : public CodegenBase {
     std::map<std::string, SubviewMaterializationInfo> subview_materializations;
     /// SSA names emitted as tile views (`pto.subview` / `pto.treshape`).
     std::set<std::string> tile_view_names;
+    /// alias SSA -> the handle its pto.treshape views (static-valid aliases).
+    std::map<std::string, std::string> static_alias_sources;
 
     /// Eligible multi-buffer regions, keyed by the allocation's base Ptr.
     std::map<const ir::Var*, MultiBufferRegion> multi_buffer_regions;

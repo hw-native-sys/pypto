@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <any>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -22,6 +23,8 @@
 #include <vector>
 
 #include "pypto/backend/common/backend.h"
+#include "pypto/backend/common/backend_config.h"
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -83,6 +86,65 @@ TypePtr WithCarriedMemRef(const TypePtr& deduced, const AssignStmtPtr& assign) {
   auto memref = GetTypeMemRef(assign->var_->GetType());
   if (!memref.has_value() || GetTypeMemRef(deduced).has_value()) return deduced;
   return CloneTypeWithMemRef(deduced, memref);
+}
+
+bool IsA2A3TargetArch() {
+  return backend::BackendConfig::IsConfigured() &&
+         backend::BackendConfig::GetBackend()->GetHandler()->GetPtoTargetArch() == "a2a3";
+}
+
+/// Materialize workspaces that A2/A3 PTOAS cannot synthesize when PlanMemory is skipped.
+bool TryMaterializeA2A3PtoasScratch(const AssignStmtPtr& assign, const CallPtr& call, FlattenContext& ctx,
+                                    const OpRegistry& op_registry, const Span& span,
+                                    std::vector<StmtPtr>& result) {
+  if (!IsA2A3TargetArch()) return false;
+
+  ExprPtr tmp_shape;
+  DataType tmp_dtype;
+  std::string tmp_name;
+  std::vector<ExprPtr> args;
+  if (IsOp(call, "tile.ci") && call->args_.size() == 2) {
+    auto result_type = As<TileType>(call->GetType());
+    INTERNAL_CHECK_SPAN(result_type, span)
+        << "Internal error: tile.ci result must be TileType in FlattenTileNdTo2D";
+    const int64_t tmp_cols = result_type->dtype_.GetBit() == 32 ? 192 : 448;
+    tmp_shape = MakeShapeTupleFromInts({1, tmp_cols}, span);
+    tmp_dtype = DataType::FP32;
+    tmp_name = "ci_tmp";
+    args = {Substitute(call->args_[0], ctx.var_map), call->args_[1]};
+  } else if (IsOp(call, "tile.sort32") && call->args_.size() == 2) {
+    auto src = Substitute(call->args_[0], ctx.var_map);
+    auto src_type = As<TileType>(src->GetType());
+    INTERNAL_CHECK_SPAN(src_type, span)
+        << "Internal error: tile.sort32 src must be TileType in FlattenTileNdTo2D";
+    // Buffer-mode PTOAS represents valid_col dynamically in the tile type,
+    // even when alloc_tile receives a constant value. Without PlanMemory,
+    // the verifier therefore requires the explicit form for every sort32.
+    tmp_shape = std::make_shared<MakeTuple>(src_type->shape_, span);
+    tmp_dtype = src_type->dtype_;
+    tmp_name = "sort32_tmp";
+    args = {src, Substitute(call->args_[1], ctx.var_map)};
+  } else {
+    return false;
+  }
+
+  std::vector<std::pair<std::string, std::any>> tmp_kwargs = {
+      {"dtype", tmp_dtype},
+      {"target_memory", MemorySpace::Vec},
+  };
+  auto tmp_create = op_registry.Create("tile.create", {tmp_shape}, tmp_kwargs, span);
+  auto tmp_var = std::make_shared<Var>(tmp_name, tmp_create->GetType(), span);
+  result.push_back(std::make_shared<AssignStmt>(tmp_var, tmp_create, assign->span_));
+
+  args.push_back(tmp_var);
+  auto deduced = op_registry.Create(call->op_->name_, args, call->kwargs_, span);
+  auto carried_type = WithCarriedMemRef(deduced->GetType(), assign);
+  auto new_call = std::make_shared<Call>(deduced->op_, deduced->args_, deduced->kwargs_, deduced->attrs_,
+                                         carried_type, deduced->span_);
+  auto new_var = std::make_shared<Var>(assign->var_->name_hint_, carried_type, assign->var_->span_);
+  result.push_back(std::make_shared<AssignStmt>(new_var, new_call, assign->span_));
+  ctx.Insert(assign->var_, new_var);
+  return true;
 }
 
 /**
@@ -935,6 +997,13 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       }
       // 4-arg 2D transpose: fall through to the generic re-create path below.
     }
+
+    // ---- A2/A3 PTOAS scratch materialization ----
+    // PTOAS v0.58 can synthesize these workspaces only while PlanMemory runs.
+    // PyPTO's own memory-planner path invokes level3 (PlanMemory skipped), so
+    // make the scratch a normal tile.create before InitMemRef. A5 uses different
+    // instruction forms and must keep the semantic no-tmp calls.
+    if (TryMaterializeA2A3PtoasScratch(assign, call, ctx, op_registry, span, result)) continue;
 
     // ---- tile.reshape feeding only tile.batch_matmul: skip (identity) when it is
     //      a safe batch-only reshape that `NormalizeBatchMatmulOperand` peels, so

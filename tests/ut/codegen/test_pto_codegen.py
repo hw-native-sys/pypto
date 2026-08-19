@@ -1242,6 +1242,67 @@ class TestPreprocessPtoasOutput:
             "ChipTensor value; GlobalTensor<float> global; TensorView view; ChipTensor ready;\n"
         )
 
+    def test_restores_v058_fillpad_expand_intrinsic(self):
+        result = _preprocess_ptoas_output(
+            "AICORE void kernel() {\n  TFILLPAD<pto::TFillPadMode::Expand>(dst, src);\n}\n"
+        )
+
+        assert "TFILLPAD_EXPAND(dst, src);" in result
+        assert "TFillPadMode" not in result
+
+    def test_restores_v058_fillpad_inplace_intrinsic(self):
+        result = _preprocess_ptoas_output(
+            "AICORE void kernel() {\n  TFILLPAD<pto::TFillPadMode::InPlace>(dst, src);\n}\n"
+        )
+
+        assert "TFILLPAD_INPLACE(dst, src);" in result
+        assert "TFillPadMode" not in result
+
+    def test_preserves_regular_fillpad_intrinsic(self):
+        source = "AICORE void kernel() {\n  TFILLPAD(dst, src);\n}\n"
+
+        assert "TFILLPAD(dst, src);" in _preprocess_ptoas_output(source)
+
+    def test_restores_mask_norm_after_narrow_tci(self):
+        source = (
+            "AICORE void kernel() {\n"
+            "  TCI<Tile<TileType::Vec, int32_t, 1, 32, BLayout::RowMajor, -1, -1, "
+            "SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>, "
+            "Tile<TileType::Vec, float, 1, 192, BLayout::RowMajor, -1, -1, "
+            "SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>, int32_t, 0>"
+            "(v65, v13, v63);\n"
+            "  TCVT(v67, v65, v8, v7);\n"
+            "}\n"
+        )
+
+        result = _preprocess_ptoas_output(source)
+
+        assert result.count("set_mask_norm();") == 1
+        assert result.count("set_vector_mask(-1, -1);") == 1
+        assert "TCI<" in result
+        assert "TCVT(v67, v65, v8, v7);" in result
+        tci_pos = result.index("TCI<")
+        norm_pos = result.index("set_mask_norm();")
+        tcvt_pos = result.index("TCVT(v67, v65, v8, v7);")
+        assert tci_pos < norm_pos < tcvt_pos
+
+    def test_skips_mask_restore_after_wide_tci(self):
+        source = (
+            "AICORE void kernel() {\n"
+            "  TCI<Tile<TileType::Vec, int32_t, 1, 64, BLayout::RowMajor, -1, -1, "
+            "SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>, "
+            "Tile<TileType::Vec, float, 1, 192, BLayout::RowMajor, -1, -1, "
+            "SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>, int32_t, 0>"
+            "(v34, v13, v32);\n"
+            "  TCVT(v36, v34, v8, v7);\n"
+            "}\n"
+        )
+
+        result = _preprocess_ptoas_output(source)
+
+        assert "set_mask_norm();" not in result
+        assert "set_vector_mask(-1, -1);" not in result
+
     def test_mgather_preprocess_fast_path_preserves_unrelated_content(self):
         source = "AICORE void kernel() {\n  TSTORE(v3);\n}\n"
 

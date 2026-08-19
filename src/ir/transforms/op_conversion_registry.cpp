@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -698,8 +699,8 @@ void OpConversionRegistry::RegisterMemoryOps() {
     ExprPtr zero_s = mask_dt.IsFloat() ? ExprPtr(std::make_shared<ConstFloat>(0.0, mask_dt, span))
                                        : ExprPtr(std::make_shared<ConstInt>(0, mask_dt, span));
     auto pred = emit("tile.cmps", {mask, zero_s}, {{"cmp_type", 1}}, "su_pred");
-    auto tmp = emit("tile.create", {MakeShapeTuple({one, make_idx(32)}, span)},
-                    {{"dtype", DataType(DataType::UINT8)}, {"target_memory", MemorySpace::Vec}}, "su_tmp");
+    auto tmp = emit("tile.create", {MakeShapeTuple({one, make_idx(8)}, span)},
+                    {{"dtype", DataType(DataType::UINT32)}, {"target_memory", MemorySpace::Vec}}, "su_tmp");
     auto out = op_reg.Create("tile.sel", {pred, scattered, args[0], tmp}, span);
     return ConversionResult{std::move(prologue), out};
   };
@@ -2150,14 +2151,16 @@ void OpConversionRegistry::RegisterScatterOps() {
         //   flat_idx = index + row_base   (row-broadcast add)
         auto& op_reg = OpRegistry::GetInstance();
         auto src_rows = As<ConstInt>(src_tile->shape_[0]);
+        auto src_cols = As<ConstInt>(src_tile->shape_[1]);
         // `cols` is the flat-layout column count of the scattered destination.
         // input/output and the inner tile.scatter dst all share this width (S),
         // so reading it off `input` is equivalent to the dst column count used
         // in the `i * dst_cols` flat-index formula above.
         auto dst_cols_c = As<ConstInt>(input_tile->shape_[1]);
-        INTERNAL_CHECK_SPAN(src_rows && dst_cols_c, span)
-            << "tensor.scatter conversion requires static src rows and dst cols for index expansion";
+        INTERNAL_CHECK_SPAN(src_rows && src_cols && dst_cols_c, span)
+            << "tensor.scatter conversion requires static src shape and dst cols for index expansion";
         const int64_t n = src_rows->value_;
+        const int64_t k = src_cols->value_;
         const int64_t cols = dst_cols_c->value_;
         // Build the flat-index arithmetic in the index tile's own dtype so it
         // keeps satisfying the pto.tscatter element-size matching rule (INT32
@@ -2187,13 +2190,18 @@ void OpConversionRegistry::RegisterScatterOps() {
         auto make_idx = [&](int64_t v) -> ExprPtr {
           return std::make_shared<ConstInt>(v, DataType::INDEX, span);
         };
-        auto make_idx_dt = [&](int64_t v) -> ExprPtr {
-          return std::make_shared<ConstInt>(v, idx_dtype, span);
+        // Keep the arithmetic in the hardware index dtype. A2/A3 has no
+        // native INT16 -> INT32 tile cast, while the range check above proves
+        // every INT16 intermediate and final flat index remains representable.
+        const DataType compute_dtype = idx_dtype;
+        auto make_compute = [&](int64_t v) -> ExprPtr {
+          return std::make_shared<ConstInt>(v, compute_dtype, span);
         };
         ExprPtr one = make_idx(1);
         // tile.ci carries both attrs (dtype, descending); supply both so the
         // emitted Call matches the parser-reconstructed one on round-trip.
-        std::vector<std::pair<std::string, std::any>> ci_kw = {{"dtype", idx_dtype}, {"descending", false}};
+        std::vector<std::pair<std::string, std::any>> ci_kw = {{"dtype", compute_dtype},
+                                                               {"descending", false}};
 
         std::vector<StmtPtr> prologue;
         auto emit = [&](const std::string& op_name, const std::vector<ExprPtr>& op_args,
@@ -2210,8 +2218,16 @@ void OpConversionRegistry::RegisterScatterOps() {
           return emit("tile.reshape", {src, MakeShapeTuple(shape, span)}, {}, name);
         };
 
-        // flat_idx[i, j] = i * dst_cols + index[i, j], built from a per-row base
-        // offset broadcast across the columns.
+        // flat_idx[i, j] = i * dst_cols + index[i, j]. Build a full linear
+        // [N, K] coordinate tile and derive the row ids from it, rather than
+        // generating a short [1, N] CI and broadcasting a column vector.
+        //
+        // PTOISA f51c92f's A2/A3 short-CI plus column-broadcast sequence is
+        // incorrect (the scatter N=8 B32 case effectively repeats row id 3 for
+        // the remaining rows). Padding CI to one full repeat (64 B32 or 128
+        // B16 elements) and using elementwise arithmetic avoids both the short
+        // CI path and the implicit 8 KiB workspace used by the column-vector
+        // row_expand_add overload.
         ExprPtr flat_idx;
         if (n == 1) {
           // Single source row: the only row base offset is 0 * dst_cols = 0, so
@@ -2222,14 +2238,24 @@ void OpConversionRegistry::RegisterScatterOps() {
           // is about column vectors, not a 1-row scatter, so skip the arange.
           flat_idx = args[1];
         } else {
-          // row_arange[i] = i  (contiguous arange reshaped to [N, 1]).
-          auto row_flat = emit("tile.ci", {make_idx_dt(0), MakeShapeTuple({one, make_idx(n)}, span)}, ci_kw,
-                               "scatter_ci_rows");
-          auto row_ar = reshape_to(row_flat, {make_idx(n), one}, "scatter_row_arange");
-          // row_base[i] = i * dst_cols  (shape [N, 1]).
-          auto row_base = emit("tile.muls", {row_ar, make_idx_dt(cols)}, {}, "scatter_row_base");
-          // flat_idx[i, j] = index[i, j] + row_base[i]  (row-broadcast add → [N, K]).
-          flat_idx = emit("tile.row_expand_add", {args[1], row_base}, {}, "scatter_flat_idx");
+          INTERNAL_CHECK_SPAN(k > 0 && n <= std::numeric_limits<int64_t>::max() / k, span)
+              << "tensor.scatter conversion: source shape is too large to flatten";
+          const int64_t linear_cols = n * k;
+          const int64_t min_repeat_cols = compute_dtype == DataType::INT16 ? 128 : 64;
+          const int64_t padded_cols = std::max(linear_cols, min_repeat_cols);
+          auto linear = emit("tile.ci", {make_compute(0), MakeShapeTuple({one, make_idx(padded_cols)}, span)},
+                             ci_kw, "scatter_linear_ci");
+          if (padded_cols != linear_cols) {
+            auto linear_shape = MakeShapeTuple({one, make_idx(linear_cols)}, span);
+            auto zero_offsets = MakeShapeTuple({make_idx(0), make_idx(0)}, span);
+            linear = emit("tile.slice", {linear, linear_shape, zero_offsets, linear_shape}, {},
+                          "scatter_linear_slice");
+          }
+          auto linear_2d = reshape_to(linear, {make_idx(n), make_idx(k)}, "scatter_linear_2d");
+          auto row_ids = emit("tile.divs", {linear_2d, make_compute(k)}, {}, "scatter_row_ids");
+          auto row_base = emit("tile.muls", {row_ids, make_compute(cols)}, {}, "scatter_row_base");
+
+          flat_idx = emit("tile.add", {args[1], row_base}, {}, "scatter_flat_idx");
         }
 
         // pto.tscatter only writes the scattered positions and does NOT preserve
@@ -2250,11 +2276,9 @@ void OpConversionRegistry::RegisterScatterOps() {
         // slots, so only a zero base survives to mark the unwritten positions.
         const DataType dt = input_tile->dtype_;
         auto dst_rows_c = As<ConstInt>(input_tile->shape_[0]);
-        auto src_cols_c = As<ConstInt>(src_tile->shape_[1]);
-        INTERNAL_CHECK_SPAN(dst_rows_c && src_cols_c, span)
+        INTERNAL_CHECK_SPAN(dst_rows_c, span)
             << "tensor.scatter conversion requires static dst rows and src cols for the preserve blend";
         const int64_t m = dst_rows_c->value_;
-        const int64_t k = src_cols_c->value_;
 
         // The mask scatter reuses `flat_idx`, so its element size must match
         // `dt` (else the pto.tscatter index-size rule breaks); within that size
@@ -2287,11 +2311,10 @@ void OpConversionRegistry::RegisterScatterOps() {
                                                 : ExprPtr(std::make_shared<ConstInt>(0, mask_dt, span));
         std::vector<std::pair<std::string, std::any>> cmp_kw = {{"cmp_type", 1}};
         auto pred = emit("tile.cmps", {mask, zero_scalar}, cmp_kw, "scatter_pred");
-        // tmp = TSEL scratch tile (UINT8 [1, 32]).
-        std::vector<std::pair<std::string, std::any>> tmp_kw = {{"dtype", DataType(DataType::UINT8)},
+        // tmp = canonical TSEL scratch tile (UINT32 [1, 8], 32 bytes).
+        std::vector<std::pair<std::string, std::any>> tmp_kw = {{"dtype", DataType(DataType::UINT32)},
                                                                 {"target_memory", MemorySpace::Vec}};
-        auto tmp =
-            emit("tile.create", {MakeShapeTuple({one, make_idx(32)}, span)}, tmp_kw, "scatter_sel_tmp");
+        auto tmp = emit("tile.create", {MakeShapeTuple({one, make_idx(8)}, span)}, tmp_kw, "scatter_sel_tmp");
         // out = sel(pred, scattered, input, tmp): scattered @written, input @unwritten.
         auto out_call = op_reg.Create("tile.sel", {pred, scattered, args[0], tmp}, span);
         return ConversionResult{std::move(prologue), out_call};
@@ -2375,9 +2398,9 @@ void OpConversionRegistry::RegisterScatterOps() {
         ExprPtr zero_scalar = mask_dt.IsFloat() ? ExprPtr(std::make_shared<ConstFloat>(0.0, mask_dt, span))
                                                 : ExprPtr(std::make_shared<ConstInt>(0, mask_dt, span));
         auto pred = emit("tile.cmps", {mask, zero_scalar}, {{"cmp_type", 1}}, "scatter_mask_pred");
-        // tmp = TSEL scratch tile (UINT8 [1, 32]).
-        auto tmp = emit("tile.create", {MakeShapeTuple({make_idx(1), make_idx(32)}, span)},
-                        {{"dtype", DataType(DataType::UINT8)}, {"target_memory", MemorySpace::Vec}},
+        // tmp = canonical TSEL scratch tile (UINT32 [1, 8], 32 bytes).
+        auto tmp = emit("tile.create", {MakeShapeTuple({make_idx(1), make_idx(8)}, span)},
+                        {{"dtype", DataType(DataType::UINT32)}, {"target_memory", MemorySpace::Vec}},
                         "scatter_mask_sel_tmp");
         // out = sel(pred, scattered, dst, tmp): scattered @selected, dst @unselected.
         auto out_call = op_reg.Create("tile.sel", {pred, scattered, args[1], tmp}, span);
@@ -2451,9 +2474,9 @@ void OpConversionRegistry::RegisterCmpOps() {
     auto zero_var = make_full(0.0, "cmp_zero");
 
     std::vector<ExprPtr> tmp_shape_dims = {std::make_shared<ConstInt>(1, DataType::INDEX, span),
-                                           std::make_shared<ConstInt>(32, DataType::INDEX, span)};
+                                           std::make_shared<ConstInt>(8, DataType::INDEX, span)};
     auto tmp_shape_tuple = std::make_shared<MakeTuple>(tmp_shape_dims, span);
-    std::vector<std::pair<std::string, std::any>> tmp_kw = {{"dtype", DataType::UINT8},
+    std::vector<std::pair<std::string, std::any>> tmp_kw = {{"dtype", DataType::UINT32},
                                                             {"target_memory", MemorySpace::Vec}};
     auto tmp_call = op_reg.Create("tile.create", {tmp_shape_tuple}, tmp_kw, span);
     auto tmp_var = std::make_shared<Var>("cmp_tmp", tmp_call->GetType(), span);

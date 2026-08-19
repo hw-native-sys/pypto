@@ -524,27 +524,40 @@ static std::string MakeGatherRowCodegenPTO(const CallPtr& op, codegen::CodegenBa
 }
 
 // Helper function for Sort32: emits pto.tsort32
-// PTOAS expects: ins(src, idx : src_type, idx_type) outs(dst : dst_type)
+// PTOAS expects: ins(src, idx[, tmp] : src_type, idx_type[, tmp_type]) outs(dst : dst_type)
 static std::string MakeSort32CodegenPTO(const std::string& pto_op_name, const CallPtr& op,
                                         codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
-  CHECK(op->args_.size() == 2) << "Operation:[" << pto_op_name
-                               << "] requires 2 arguments (src, idx), but got " << op->args_.size();
+  CHECK(op->args_.size() == 2 || op->args_.size() == 3)
+      << "Operation:[" << pto_op_name << "] requires 2 or 3 arguments (src, idx[, tmp]), but got "
+      << op->args_.size();
 
   std::string src = codegen.GetExprAsCode(op->args_[0]);
   std::string idx = codegen.GetExprAsCode(op->args_[1]);
   std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
   std::string idx_type = codegen.GetExprTypeAnnotation(op->args_[1]);
+  std::string tmp;
+  std::string tmp_type;
+  if (op->args_.size() == 3) {
+    tmp = codegen.GetExprAsCode(op->args_[2]);
+    tmp_type = codegen.GetExprTypeAnnotation(op->args_[2]);
+  }
 
   std::string dst = codegen.GetCurrentResultTarget();
   std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
 
   std::ostringstream oss;
   oss << pto_op_name;
-  // ins clause: src, idx
+  // ins clause: src, idx[, tmp]
   oss << " ins(" << src << ", " << idx;
-  if (!src_type.empty() || !idx_type.empty()) {
+  if (!tmp.empty()) {
+    oss << ", " << tmp;
+  }
+  if (!src_type.empty() || !idx_type.empty() || !tmp_type.empty()) {
     oss << " : " << src_type << ", " << idx_type;
+    if (!tmp.empty()) {
+      oss << ", " << tmp_type;
+    }
   }
   // outs clause: dst only (idx is modified in-place by hardware)
   oss << ") outs(" << dst;
@@ -821,8 +834,23 @@ static std::string MakeMrgSortCodegenPTO(const std::string& pto_op_name, const C
 
   std::vector<std::string> srcs, src_types;
   for (size_t i = 0; i < n_srcs; ++i) {
-    srcs.push_back(codegen.GetExprAsCode(op->args_[i]));
-    src_types.push_back(codegen.GetExprTypeAnnotation(op->args_[i]));
+    // PTOAS v0.58 sizes the format2 tmp check from each src's *physical*
+    // capacity: a pto.subview of a wide parent (e.g. the two 1024-wide top-k
+    // halves sliced out of a sorted [1,8192] tile) is measured at the parent's
+    // full cols, so sum(src.cols) balloons past the synthesized tmp and the
+    // verifier rejects the op. Materialize such a view into its own dense
+    // buffer first — a pto.textract identity copy for the const-offset
+    // single-row windows this lowering produces — so the op reads the window's
+    // real cols.
+    srcs.push_back(MaterializeSubviewOperandIfNeeded(op->args_[i], codegen,
+                                                     "mrgsort" + std::to_string(n_srcs) + "_src"));
+    // The materialized SSA keeps ONE type — the materialization target's. Using
+    // the original annotation (a subview type with static v_row/v_col) would
+    // give the same SSA two MLIR types and fail verification.
+    const auto* mat = codegen.GetSubviewMaterialization(codegen.GetExprAsCode(op->args_[i]));
+    src_types.push_back(mat && mat->emitted && !mat->materialize_target_type.empty()
+                            ? mat->materialize_target_type
+                            : codegen.GetExprTypeAnnotation(op->args_[i]));
   }
 
   std::string dst = codegen.GetCurrentResultTarget();
@@ -1035,6 +1063,17 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
 
     std::string src = codegen.GetExprAsCode(op->args_[0]);
     std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+    // PTOAS v0.58's level3 lowering cannot legalize a pto.subview whose base is
+    // a pto.treshape alias (the static-valid dst views MaterializeStaticValidAlias
+    // emits for explicit-tmp overloads). The alias is metadata-only — the exact
+    // same storage as its source — so view the source handle instead.
+    if (std::string alias_source = codegen.GetStaticAliasSource(src); !alias_source.empty()) {
+      std::string source_ssa_type = codegen.GetSSATileBufType(alias_source);
+      if (!source_ssa_type.empty()) {
+        src = alias_source;
+        src_type = source_ssa_type;
+      }
+    }
 
     auto offset_tuple = ir::As<ir::MakeTuple>(op->args_[2]);
     INTERNAL_CHECK_SPAN(offset_tuple, op->span_) << "tile.slice third argument must be a tuple (offset)";

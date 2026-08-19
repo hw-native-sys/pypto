@@ -29,6 +29,30 @@ _PTOAS_MGATHER_CALL_RE = re.compile(
     r"(?:\s*,\s*(?P<scratch>[A-Za-z_]\w*))?"
     r"(?P<suffix>\);)"
 )
+_PTOAS_FILLPAD_MODE_CALL_RE = re.compile(
+    r"\bTFILLPAD\s*<\s*pto::TFillPadMode::(?P<mode>Expand|InPlace)\s*>\s*\("
+)
+_PTOAS_FILLPAD_MODE_INTRINSIC = {
+    "Expand": "TFILLPAD_EXPAND(",
+    "InPlace": "TFILLPAD_INPLACE(",
+}
+# A2/A3 TCI_b32_normal (validCol < 64) ends in count-mode without restoring
+# mask_norm.  The next TCVT tail calls SetContinuousMask(n) which interprets
+# the leftover count as a huge bitmask and UB-OOBs.  Match only the dst tile's
+# static row/col shape on the first Tile<...> inside TCI<...>.
+_TCI_NARROW_DST_COLS_RE = re.compile(r"TCI<[^;]*?Tile<[^,]+,\s*\w+,\s*1,\s*(?P<cols>\d+),")
+_TCI_MASK_RESTORE_THRESHOLD = 64
+# PTO-ISA f51c92f's tmp-path TCI_IMPL dispatches b16/b32 with a *runtime* if,
+# so the b16 arm's TMULS_IMPL(dst, dst, -1) is instantiated for every element
+# type -- and TMULS static-asserts on unsigned. Unsigned destinations therefore
+# cannot take the tmp overload; reroute them to the scalar no-tmp overload,
+# which compiles for unsigned and computes both orders correctly.
+_TCI_UNSIGNED_TMP_CALL_RE = re.compile(
+    r"TCI<(?P<dst_tile>Tile<[^;]*?uint(?:16|32)_t[^;]*?>),\s*"
+    r"(?P<tmp_tile>Tile<[^;]*?>),\s*"
+    r"(?P<elem>uint(?:16|32)_t),\s*(?P<descending>[01])>"
+    r"\((?P<args>[^;]*?)\);"
+)
 
 
 def _restore_mgather_wrapper_operands(content: str) -> str:
@@ -108,6 +132,74 @@ def _restore_mgather_wrapper_operands(content: str) -> str:
     )
 
 
+def _restore_tci_mask_norm_after_narrow_arange(content: str) -> str:
+    """Restore vector mask mode after narrow A2/A3 ``TCI`` (``tile.ci``) calls.
+
+    PTO-ISA ``TCI_b32_normal`` leaves the vector unit in count-mode when
+    ``validCol < 64``.  PTOAS cannot emit ``pto.ub.set_mask_norm`` (the op is
+    marked illegal during lowering), so repair the generated C++ here.
+    """
+    if "TCI<" not in content:
+        return content
+
+    lines = content.splitlines(keepends=True)
+    out: list[str] = []
+    for index, line in enumerate(lines):
+        out.append(line)
+        match = _TCI_NARROW_DST_COLS_RE.search(line)
+        if match is None:
+            continue
+        if int(match.group("cols")) >= _TCI_MASK_RESTORE_THRESHOLD:
+            continue
+        next_line = lines[index + 1].lstrip() if index + 1 < len(lines) else ""
+        if next_line.startswith("set_mask_norm();"):
+            continue
+        indent = line[: len(line) - len(line.lstrip())]
+        out.append(f"{indent}set_mask_norm();\n")
+        out.append(f"{indent}set_vector_mask(-1, -1);\n")
+    return "".join(out)
+
+
+def _restore_fillpad_mode_intrinsics(content: str) -> str:
+    """Adapt PTOAS v0.58's TFillPadMode spelling to the pinned PTO-ISA API.
+
+    TODO: remove this rewrite once the pinned PTO-ISA version is updated to
+    expose ``TFillPadMode``. Until then PTOAS v0.58 emits
+    ``TFILLPAD<pto::TFillPadMode::Expand|InPlace>`` while the current ISA only
+    has ``TFILLPAD_EXPAND`` / ``TFILLPAD_INPLACE`` and no ``TFillPadMode`` enum.
+    Keep the dialect input accepted by PTOAS and repair only these generated
+    intrinsic names before embedding the C++ body.
+    """
+    if "TFillPadMode" not in content:
+        return content
+    return _PTOAS_FILLPAD_MODE_CALL_RE.sub(
+        lambda match: _PTOAS_FILLPAD_MODE_INTRINSIC[match.group("mode")], content
+    )
+
+
+def _reroute_unsigned_tci_tmp_calls(content: str) -> str:
+    """Reroute unsigned tmp-path TCI calls to the scalar no-tmp overload.
+
+    TODO: remove this rewrite once the pinned PTO-ISA version includes the
+    a2a3 TCI tmp fix (descending as 2S-(S+i) on a signed view). Until then the
+    tmp overload does not compile for uint16/uint32 destinations; the scalar
+    overload has no such instantiation and produces the same sequence.
+    """
+    if "TCI<" not in content:
+        return content
+
+    def _drop_tmp_arg(match: re.Match[str]) -> str:
+        args = [arg.strip() for arg in match.group("args").split(",")]
+        if len(args) < 3:  # not the (dst, start, tmp) form; leave untouched
+            return match.group(0)
+        return (
+            f"TCI<{match.group('dst_tile')}, {match.group('elem')}, {match.group('descending')}>"
+            f"({args[0]}, {args[1]});"
+        )
+
+    return _TCI_UNSIGNED_TMP_CALL_RE.sub(_drop_tmp_arg, content)
+
+
 def preprocess_ptoas_output(content: str) -> str:
     """Prepare PTOAS output for embedding in PyPTO kernel wrappers."""
     lines = content.splitlines(keepends=True)
@@ -131,6 +223,9 @@ def preprocess_ptoas_output(content: str) -> str:
     # exact identifier before embedding the body in PyPTO's wrapper; names such
     # as ``GlobalTensor`` are intentionally unaffected by the word boundaries.
     result = re.sub(r"\bTensor\b", "ChipTensor", result)
+    result = _restore_fillpad_mode_intrinsics(result)
+    result = _restore_tci_mask_norm_after_narrow_arange(result)
+    result = _reroute_unsigned_tci_tmp_calls(result)
     result = re.sub(
         r'(?:extern\s*"C"\s*)?(?:__global__\s+)?AICORE\s+void',
         "static __aicore__ void",

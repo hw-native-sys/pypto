@@ -470,7 +470,7 @@ with ib.function("tensor_example") as f:
 | - | `tile.reinterpret_view` | Zero-copy view with a different dtype and the same exact bytes; optional shape uses layout-aware inference (packed flat tiles only) |
 | - | `tile.transpose` | Swap two axes of a tile |
 | - | `tile.set_validshape` | Update valid-shape metadata without data movement |
-| - | `tile.ci` | Generate contiguous integer sequence (start + k / start - k); dtype ∈ {INT16, INT32}; innermost dim != 1 |
+| - | `tile.ci` | Generate contiguous integer sequence (start + k / start - k); dtype ∈ {INT16, INT32}; innermost dim != 1. The compiler supplies the A2/A3 PTOAS scratch operand before memory planning. |
 | - | `tile.tri` | Generate a lower/upper triangular 0/1 mask with an INT32 diagonal offset; supports an optional partial `valid_shape`; maps to `pto.ttri`. |
 | **Reduction** | `tile.row_*` / `tile.col_*` | Direction-specific reduction (`row_sum`/`row_max`/`row_min`/`row_prod` collapse the last axis; `col_*` collapse axis 0). There is no axis-parameterized reduction — the ISA has only direction-specific intrinsics (`pto.trowsum`, `pto.tcolsum`, …) |
 | **Gather** | `tile.gatherb` | Gather 32-byte source blocks. Each UINT32 offset selects one block; each offset column expands to `32 / sizeof(output_dtype)` output elements, and valid shape expands identically. `output_dtype` defaults to the source dtype and may select another supported byte interpretation. Offset rows contain a positive multiple of eight entries. A sliced source must have a byte address provably aligned to 32 bytes; dynamic column offsets are rejected, while dynamic row offsets remain valid when the physical row stride preserves alignment. Maps to `pto.tgatherb`. |

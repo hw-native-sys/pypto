@@ -59,8 +59,9 @@ static T GetKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, c
 TypePtr DeduceTileSort32Type(const std::vector<ExprPtr>& args,
                              const std::vector<std::pair<std::string, std::any>>& kwargs,
                              const std::string& op_name) {
-  CHECK(args.size() == 2) << "The operator " << op_name << " requires 2 arguments (src, idx), but got "
-                          << args.size();
+  CHECK(args.size() == 2 || args.size() == 3)
+      << "The operator " << op_name << " requires 2 or 3 arguments (src, idx[, tmp]), but got "
+      << args.size();
 
   // First arg: src tile (f16 or f32)
   auto src_type = As<TileType>(args[0]->GetType());
@@ -74,6 +75,16 @@ TypePtr DeduceTileSort32Type(const std::vector<ExprPtr>& args,
   auto idx_type = As<TileType>(args[1]->GetType());
   CHECK(idx_type) << "The operator " << op_name << " requires second argument to be a TileType, but got "
                   << args[1]->GetType()->TypeName();
+
+  if (args.size() == 3) {
+    auto tmp_type = As<TileType>(args[2]->GetType());
+    CHECK(tmp_type) << "The operator " << op_name
+                    << " requires optional third argument 'tmp' to be a TileType, but got "
+                    << args[2]->GetType()->TypeName();
+    CHECK(tmp_type->dtype_ == src_type->dtype_)
+        << "The operator " << op_name << " requires tmp dtype to match src dtype ("
+        << src_type->dtype_.ToString() << "), but got " << tmp_type->dtype_.ToString();
+  }
 
   // Build output shape: double the last dimension for value-index pairs
   const auto& input_shape = src_type->shape_;
@@ -106,10 +117,13 @@ REGISTER_OP("tile.sort32")
     .set_description("Sort fixed 32-element blocks (maps to pto.tsort32)")
     .add_argument("src", "Input value tile (TileType, f16 or f32)")
     .add_argument("idx", "Input index tile (TileType)")
+    .add_argument("tmp", "Optional A2/A3 scratch tile (same dtype and capacity as src)")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
+    .set_input_memory(2, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     .not_inplace_safe()
+    .forbid_output_alias(2)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileSort32Type(args, kwargs, "tile.sort32");

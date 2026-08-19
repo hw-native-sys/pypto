@@ -438,7 +438,7 @@ class BlockOperationsTest:
         result_tile: pl.Tile[[16, 32], pl.UINT8] = pl.tile.cmp(lhs_tile, rhs_tile)
         one_tile: pl.Tile[[16, 16], pl.FP32] = pl.tile.full([16, 16], dtype=pl.FP32, value=1.0)
         zero_tile: pl.Tile[[16, 16], pl.FP32] = pl.tile.full([16, 16], dtype=pl.FP32, value=0.0)
-        tmp_tile: pl.Tile[[1, 32], pl.UINT8] = pl.tile.create([1, 32], dtype=pl.UINT8)
+        tmp_tile: pl.Tile[[1, 8], pl.UINT32] = pl.tile.create([1, 8], dtype=pl.UINT32)
         selected_tile: pl.Tile[[16, 16], pl.FP32] = pl.tile.sel(result_tile, one_tile, zero_tile, tmp_tile)
         updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(selected_tile, [0, 0], output)
         return updated_output
@@ -729,8 +729,8 @@ class TestB01PrecisionAndRowExpandAddCodegen:
             ) -> pl.Tensor[[16, 16], pl.FP32]:
                 src_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(src, [0, 0], [16, 16])
                 row_tile: pl.Tile[[16, 1], pl.FP32] = pl.load(row, [0, 0], [16, 1])
-                tmp: pl.Tile[[16, 16], pl.FP32] = pl.tile.create(
-                    [16, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                tmp: pl.Tile[[1, 2048], pl.FP32] = pl.tile.create(
+                    [1, 2048], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )
                 result: pl.Tile[[16, 16], pl.FP32] = pl.tile.row_expand_add(src_tile, row_tile, tmp)
                 return pl.store(result, [0, 0], out)
@@ -739,6 +739,42 @@ class TestB01PrecisionAndRowExpandAddCodegen:
         three_operand_line = self._op_line(self._generate_mlir(WithTmpProg), "pto.trowexpandadd")
         assert self._ins_operand_count(two_operand_line) == 2
         assert self._ins_operand_count(three_operand_line) == 3
+
+    def test_trowexpandadd_a2a3_rejects_tmp_smaller_than_8k(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[16, 16], pl.FP32],
+                row: pl.Tensor[[16, 1], pl.FP32],
+                out: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                src_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(src, [0, 0], [16, 16])
+                row_tile: pl.Tile[[16, 1], pl.FP32] = pl.load(row, [0, 0], [16, 1])
+                tmp: pl.Tile[[1, 2047], pl.FP32] = pl.tile.create([1, 2047], dtype=pl.FP32)
+                result: pl.Tile[[16, 16], pl.FP32] = pl.tile.row_expand_add(src_tile, row_tile, tmp)
+                return pl.store(result, [0, 0], out)
+
+        with pytest.raises(ValueError, match="capacity >= 8192 bytes, but got 8188"):
+            self._generate_mlir(Prog)
+
+    def test_fillpad_expand_emits_v058_tfillpad_opcode(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Tensor[[16, 32], pl.FP32],
+            ) -> pl.Tensor[[16, 32], pl.FP32]:
+                src_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(src, [0, 0], [16, 16])
+                result: pl.Tile[[16, 32], pl.FP32] = pl.tile.fillpad_expand(src_tile, [16, 32])
+                return pl.store(result, [0, 0], out)
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.tfillpad " in mlir
+        assert "pto.tfillpad_expand" not in mlir
 
 
 class TestB02SelectionAndPreluCodegen:
@@ -797,7 +833,7 @@ class TestB02SelectionAndPreluCodegen:
             ) -> pl.Tensor[[16, 16], pl.INT32]:
                 src_tile: pl.Tile[[16, 16], pl.INT32] = pl.load(src, [0, 0], [16, 16])
                 mask: pl.Tile[[16, 32], pl.UINT8] = pl.tile.cmps(src_tile, 0, cmp_type=4)
-                tmp: pl.Tile[[1, 32], pl.UINT8] = pl.tile.create([1, 32], dtype=pl.UINT8)
+                tmp: pl.Tile[[1, 16], pl.INT32] = pl.tile.create([1, 16], dtype=pl.INT32)
                 result: pl.Tile[[16, 16], pl.INT32] = pl.tile.sels(mask, src_tile, tmp, -3)
                 return pl.store(result, [0, 0], out)
 
@@ -812,6 +848,62 @@ class TestB02SelectionAndPreluCodegen:
             self._assert_named_ssas(outs, ["result"])
             assert "i32" in line
 
+    def test_tsel_a2a3_requires_4byte_32byte_scratch(self):
+        @pl.program
+        class WrongWidthProg:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[2, 16], pl.FP32],
+                rhs: pl.Tensor[[2, 16], pl.FP32],
+                out: pl.Tensor[[2, 16], pl.FP32],
+            ) -> pl.Tensor[[2, 16], pl.FP32]:
+                lhs_tile: pl.Tile[[2, 16], pl.FP32] = pl.load(lhs, [0, 0], [2, 16])
+                rhs_tile: pl.Tile[[2, 16], pl.FP32] = pl.load(rhs, [0, 0], [2, 16])
+                mask: pl.Tile[[2, 32], pl.UINT8] = pl.tile.cmp(lhs_tile, rhs_tile)
+                tmp: pl.Tile[[1, 32], pl.UINT8] = pl.tile.create([1, 32], dtype=pl.UINT8)
+                result: pl.Tile[[2, 16], pl.FP32] = pl.tile.sel(mask, lhs_tile, rhs_tile, tmp)
+                return pl.store(result, [0, 0], out)
+
+        @pl.program
+        class UndersizedProg:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[2, 16], pl.FP32],
+                rhs: pl.Tensor[[2, 16], pl.FP32],
+                out: pl.Tensor[[2, 16], pl.FP32],
+            ) -> pl.Tensor[[2, 16], pl.FP32]:
+                lhs_tile: pl.Tile[[2, 16], pl.FP32] = pl.load(lhs, [0, 0], [2, 16])
+                rhs_tile: pl.Tile[[2, 16], pl.FP32] = pl.load(rhs, [0, 0], [2, 16])
+                mask: pl.Tile[[2, 32], pl.UINT8] = pl.tile.cmp(lhs_tile, rhs_tile)
+                tmp: pl.Tile[[1, 7], pl.UINT32] = pl.tile.create([1, 7], dtype=pl.UINT32)
+                result: pl.Tile[[2, 16], pl.FP32] = pl.tile.sel(mask, lhs_tile, rhs_tile, tmp)
+                return pl.store(result, [0, 0], out)
+
+        with pytest.raises(ValueError, match="requires a 4-byte-element tmp scratch"):
+            self._generate_mlir(WrongWidthProg)
+        with pytest.raises(ValueError, match="capacity >= 32 bytes, but got 28"):
+            self._generate_mlir(UndersizedProg)
+
+    def test_tsels_a2a3_requires_one_full_source_row(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[2, 16], pl.INT32],
+                out: pl.Tensor[[2, 16], pl.INT32],
+            ) -> pl.Tensor[[2, 16], pl.INT32]:
+                src_tile: pl.Tile[[2, 16], pl.INT32] = pl.load(src, [0, 0], [2, 16])
+                mask: pl.Tile[[2, 32], pl.UINT8] = pl.tile.cmps(src_tile, 0)
+                tmp: pl.Tile[[1, 15], pl.INT32] = pl.tile.create([1, 15], dtype=pl.INT32)
+                result: pl.Tile[[2, 16], pl.INT32] = pl.tile.sels(mask, src_tile, tmp, -3)
+                return pl.store(result, [0, 0], out)
+
+        with pytest.raises(ValueError, match=r"one full source physical row \(64 bytes\), but got 60"):
+            self._generate_mlir(Prog)
+
     def test_tsels_unsigned_src_emits_signed_bit_compatible_scalar(self):
         @pl.program
         class Prog:
@@ -823,7 +915,7 @@ class TestB02SelectionAndPreluCodegen:
             ) -> pl.Tensor[[16, 16], pl.UINT32]:
                 src_tile: pl.Tile[[16, 16], pl.UINT32] = pl.load(src, [0, 0], [16, 16])
                 mask: pl.Tile[[16, 32], pl.UINT8] = pl.tile.cmps(src_tile, 0, cmp_type=4)
-                tmp: pl.Tile[[1, 32], pl.UINT8] = pl.tile.create([1, 32], dtype=pl.UINT8)
+                tmp: pl.Tile[[1, 16], pl.UINT32] = pl.tile.create([1, 16], dtype=pl.UINT32)
                 result: pl.Tile[[16, 16], pl.UINT32] = pl.tile.sels(mask, src_tile, tmp, 0x8000000B)
                 return pl.store(result, [0, 0], out)
 
@@ -976,12 +1068,43 @@ class TestB02SelectionAndPreluCodegen:
         a3_line = self._op_line(self._generate_mlir(Prog, BackendType.Ascend910B), "pto.tprelu")
         a3_ins, a3_outs = self._ins_outs_ssas(a3_line)
         self._assert_named_ssas(a3_ins, ["src_tile", "slope_tile", "tmp"])
-        self._assert_named_ssas(a3_outs, ["result"])
+        self._assert_named_ssas(a3_outs, ["prelu_static_dst"])
+        a3_mlir = self._generate_mlir(Prog, BackendType.Ascend910B)
+        assert "= pto.treshape %result" in a3_mlir
+        assert "v_row=16, v_col=16" in a3_line
 
         a5_line = self._op_line(self._generate_mlir(Prog, BackendType.Ascend950), "pto.tprelu")
         a5_ins, a5_outs = self._ins_outs_ssas(a5_line)
         self._assert_named_ssas(a5_ins, ["src_tile", "slope_tile", "tmp"])
         self._assert_named_ssas(a5_outs, ["result"])
+
+    def test_tcvt_narrowing_emits_static_dst_valid_on_a2a3(self):
+        """PTOAS v0.58 verifies tcvt tmp against a static dst valid_shape."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[16, 16], pl.FP16],
+                out: pl.Tensor[[16, 16], pl.INT8],
+            ) -> pl.Tensor[[16, 16], pl.INT8]:
+                src_tile: pl.Tile[[16, 16], pl.FP16] = pl.load(src, [0, 0], [16, 16])
+                result: pl.Tile[[16, 16], pl.INT8] = pl.tile.cast(src_tile, target_type=pl.INT8, mode="round")
+                return pl.store(result, [0, 0], out)
+
+        a3_mlir = self._generate_mlir(Prog, BackendType.Ascend910B)
+        a3_line = self._op_line(a3_mlir, "pto.tcvt")
+        assert "tcvt_static_dst" in a3_line
+        assert "result__tcvt_tmp" in a3_line
+        assert "v_row=16, v_col=16" in a3_line
+        assert "= pto.treshape %result" in a3_mlir
+
+        a5_mlir = self._generate_mlir(Prog, BackendType.Ascend950)
+        a5_line = self._op_line(a5_mlir, "pto.tcvt")
+        assert "tcvt_static_dst" not in a5_mlir
+        assert "result__tcvt_tmp" not in a5_line
+        assert "outs(%result" in a5_line
 
     def test_tprelu_signed_scratch_is_a5_only(self):
         """A2/A3 requires UINT8 scratch even though the pinned verifier accepts signed i8."""
@@ -1110,7 +1233,7 @@ class TestB02SelectionAndPreluCodegen:
                 result: pl.Tile[[16, 16], pl.FP32] = pl.tile.prelu(src_tile, slope_tile, tmp)
                 return pl.store(result, [0, 0], out)
 
-        with pytest.raises(ValueError, match="physical rows"):
+        with pytest.raises(ValueError, match="statically known valid shape"):
             self._generate_mlir(Prog, BackendType.Ascend910B)
 
     def test_tprelu_a2a3_rejects_unproven_dynamic_tmp_columns(self):
@@ -1133,7 +1256,7 @@ class TestB02SelectionAndPreluCodegen:
                 result: pl.Tile[[16, 16], pl.FP32] = pl.tile.prelu(src_tile, slope_tile, tmp)
                 return pl.store(result, [0, 0], out)
 
-        with pytest.raises(ValueError, match="valid columns"):
+        with pytest.raises(ValueError, match="statically known valid shape"):
             self._generate_mlir(Prog, BackendType.Ascend910B)
 
 
@@ -2792,6 +2915,31 @@ class TestColReductionCodegen:
         mlir = self._generate_mlir(Prog)
         assert "pto.tcolsum" in mlir, f"Expected pto.tcolsum in codegen output:\n{mlir}"
         assert "isBinary = true" in mlir, f"Expected isBinary = true in codegen output:\n{mlir}"
+        assert "col_sum_static_src" in mlir
+        assert "pto.treshape" in mlir
+        binary_line = next(line for line in mlir.splitlines() if "pto.tcolsum" in line)
+        assert "v_row=16, v_col=16" in binary_line
+
+    def test_col_sum_binary_rejects_dynamic_valid_shape_with_sequential_hint(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                input: pl.Tensor[[16, 16], pl.FP32],
+                output: pl.Tensor[[1, 16], pl.FP32],
+                rows: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[1, 16], pl.FP32]:
+                tile_in: pl.Tile[[16, 16], pl.FP32] = pl.load(input, [0, 0], [16, 16], valid_shape=[rows, 16])
+                tmp_tile: pl.Tile[[16, 16], pl.FP32] = pl.tile.create([16, 16], dtype=pl.FP32)
+                result: pl.Tile[[1, 16], pl.FP32] = pl.tile.col_sum(tile_in, tmp_tile)
+                return pl.store(result, [0, 0], output)
+
+        with pytest.raises(
+            ValueError,
+            match="statically known valid shape.*one-argument sequential form",
+        ):
+            self._generate_mlir(Prog)
 
     def test_col_max_codegen(self):
         """tile.col_max emits pto.tcolmax."""

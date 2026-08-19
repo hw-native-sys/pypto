@@ -17,8 +17,15 @@
  * single instruction into a shortest sequence of native casts. Path search is
  * BFS over the native-conversion table the active BackendHandler supplies via
  * GetTcvtAdjacency(), so this pass holds no per-architecture knowledge of its
- * own. Typical outcome for A5 INT32→FP16 is INT32→FP32→FP16 — same byte-width
- * to float, then resize — which adds no precision loss beyond the final narrow.
+ * own for the cast graph. Typical outcome for A5 INT32→FP16 is INT32→FP32→FP16
+ * — same byte-width to float, then resize — which adds no precision loss beyond
+ * the final narrow.
+ *
+ * After each hop is native, A2/A3 also materializes the optional pto.tcvt tmp
+ * required by PTOAS when PlanMemory is skipped (non-saturating narrowing:
+ * FP32→i16, FP16→i16/i8). This runs here rather than in FlattenTileNdTo2D so
+ * legalized multi-hop casts (e.g. FP32→INT8 → FP32→FP16→INT8) still get a
+ * scratch on the hop that needs it.
  */
 
 #include <algorithm>
@@ -42,7 +49,9 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
@@ -52,6 +61,7 @@
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -232,15 +242,72 @@ std::vector<DataType> FindCastChain(const AdjList& adj, DataType from, DataType 
   return rev;
 }
 
-ExprPtr MakeCast(const ExprPtr& x, DataType to, int mode, const Span& span) {
+ExprPtr MakeCast(const ExprPtr& x, DataType to, int mode, const Span& span, const ExprPtr& tmp = nullptr) {
   std::vector<std::pair<std::string, std::any>> kw = {{"target_type", to}, {"mode", mode}};
-  return OpRegistry::GetInstance().Create("tile.cast", {x}, kw, span);
+  std::vector<ExprPtr> args = {x};
+  if (tmp) args.push_back(tmp);
+  return OpRegistry::GetInstance().Create("tile.cast", args, kw, span);
+}
+
+// PTOAS v0.58 TCvtOp: non-saturating (sat_mode=OFF, the default) narrowing on
+// A2/A3 needs an explicit tmp when PlanMemory is skipped. Matches
+// tcvtNeedsTmp / makeTCvtTmpType in PTOMaterializeImplicitTmp.cpp.
+bool TcvtNeedsA2A3Scratch(DataType src, DataType dst) {
+  if (src == DataType::FP32 && dst == DataType::INT16) return true;
+  // PTOAS uses MLIR Type::isInteger(8/16), which matches signed and unsigned.
+  if (src == DataType::FP16 && (dst == DataType::INT16 || dst == DataType::INT8 || dst == DataType::UINT8)) {
+    return true;
+  }
+  return false;
+}
+
+int64_t CeilDivI64(int64_t num, int64_t den) { return (num + den - 1) / den; }
+
+int64_t TcvtScratchCapacityBytes(const TileTypePtr& src_tile, DataType dst) {
+  const auto src_shape = src_tile->shape_;
+  const auto dst_valid = GetValidShape(src_tile);
+  INTERNAL_CHECK(src_shape.size() == 2 && dst_valid.size() == 2)
+      << "LegalizeTileCast: tcvt scratch requires a 2D tile";
+  auto rows_ci = As<ConstInt>(dst_valid[0]);
+  auto cols_ci = As<ConstInt>(dst_valid[1]);
+  auto src_cols_ci = As<ConstInt>(src_shape[1]);
+  CHECK(rows_ci && cols_ci && src_cols_ci)
+      << "LegalizeTileCast: A2/A3 non-saturating narrowing tcvt requires a static "
+         "src shape and dst valid_shape to size the PTOAS scratch tile";
+  const int64_t rows = rows_ci->value_;
+  const int64_t cols = cols_ci->value_;
+  const int64_t src_cols = src_cols_ci->value_;
+  int64_t bytes = 0;
+  if (src_tile->dtype_ == DataType::FP32) {
+    if (rows > 0 && cols > 0) {
+      const int64_t head = int64_t{4} * 64 * std::min<int64_t>(cols / 64, 255);
+      const int64_t remainder = cols % 64;
+      const int64_t tail = remainder == 0
+                               ? 0
+                               : int64_t{32} * ((std::min<int64_t>(rows, 255) - 1) * (src_cols / 8) +
+                                                CeilDivI64(remainder, 8));
+      bytes = std::max(head, tail);
+    }
+  } else if (src_tile->dtype_ == DataType::FP16 && cols > 0) {
+    const int64_t width = std::min<int64_t>(cols, 64);
+    const int64_t half_to_i16 = 32 * CeilDivI64(width, 8);
+    const int64_t half_to_i8 = std::max(half_to_i16, 128 + 32 * CeilDivI64(width, 16));
+    bytes = (dst == DataType::INT8 || dst == DataType::UINT8) ? half_to_i8 : half_to_i16;
+  }
+  return std::max<int64_t>(32, CeilDivI64(bytes, 32) * 32);
+}
+
+ExprPtr MakeScratchShapeTuple(int64_t bytes, const Span& span) {
+  std::vector<ExprPtr> elems = {std::make_shared<ConstInt>(1, DataType::INDEX, span),
+                                std::make_shared<ConstInt>(bytes, DataType::INDEX, span)};
+  return std::make_shared<MakeTuple>(elems, span);
 }
 
 class LegalizeTileCastMutator : public IRMutator {
  public:
-  LegalizeTileCastMutator(const backend::TcvtAdjacency& table, std::string arch_name)
-      : arch_name_(std::move(arch_name)), adj_(BuildAdj(table)) {}
+  LegalizeTileCastMutator(const backend::TcvtAdjacency& table, std::string arch_name,
+                          bool materialize_scratch)
+      : arch_name_(std::move(arch_name)), adj_(BuildAdj(table)), materialize_scratch_(materialize_scratch) {}
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     auto call = As<Call>(op->value_);
@@ -258,6 +325,9 @@ class LegalizeTileCastMutator : public IRMutator {
     const int mode = call->GetKwarg<int>("mode", kCastModeRound);
 
     if (IsNativeCast(adj_, src, dst)) {
+      if (call->args_.size() == 1 && materialize_scratch_ && TcvtNeedsA2A3Scratch(src, dst)) {
+        return MaterializeCastWithScratch(op, call, dst, mode);
+      }
       return IRMutator::VisitStmt_(op);
     }
 
@@ -270,30 +340,75 @@ class LegalizeTileCastMutator : public IRMutator {
     // chains where the narrow step carries mode="round"). Final hop also keeps it.
     ExprPtr cur = VisitExpr(call->args_[0]);
     std::vector<StmtPtr> stmts;
-    stmts.reserve(chain.size());
+    stmts.reserve(chain.size() * 2);
 
     for (size_t i = 0; i + 1 < chain.size(); ++i) {
-      ExprPtr cast_expr = MakeCast(cur, chain[i], mode, op->span_);
-      const std::string name =
-          auto_name::BuildName(auto_name::GetBaseName(op->var_->name_hint_), "cast_" + chain[i].ToString(),
-                               "tmp", static_cast<int>(temp_counter_++));
-      auto mid_var = std::make_shared<Var>(name, cast_expr->GetType(), op->span_);
-      stmts.push_back(std::make_shared<AssignStmt>(mid_var, cast_expr, op->span_));
-      cur = mid_var;
+      AppendCastHop(stmts, cur, chain[i], mode, op, /*final_assign=*/nullptr);
     }
-
-    auto final_assign = MutableCopy(op);
-    final_assign->value_ = MakeCast(cur, chain.back(), mode, op->span_);
-    stmts.push_back(std::move(final_assign));
+    AppendCastHop(stmts, cur, chain.back(), mode, op, op);
 
     if (stmts.size() == 1) return stmts.front();
     return std::make_shared<SeqStmts>(std::move(stmts), op->span_);
   }
 
  private:
+  void AppendCastHop(std::vector<StmtPtr>& stmts, ExprPtr& cur, DataType hop_dst, int mode,
+                     const AssignStmtPtr& origin, const AssignStmtPtr& final_assign) {
+    auto src_tile = As<TileType>(cur->GetType());
+    INTERNAL_CHECK_SPAN(src_tile, origin->span_) << "tile.cast hop input must be TileType";
+    ExprPtr tmp;
+    if (materialize_scratch_ && TcvtNeedsA2A3Scratch(src_tile->dtype_, hop_dst)) {
+      tmp = CreateScratch(stmts, src_tile, hop_dst, origin);
+    }
+    ExprPtr cast_expr = MakeCast(cur, hop_dst, mode, origin->span_, tmp);
+    if (final_assign) {
+      auto assign = MutableCopy(final_assign);
+      assign->value_ = cast_expr;
+      stmts.push_back(std::move(assign));
+      return;
+    }
+    const std::string name =
+        auto_name::BuildName(auto_name::GetBaseName(origin->var_->name_hint_), "cast_" + hop_dst.ToString(),
+                             "tmp", static_cast<int>(temp_counter_++));
+    auto mid_var = std::make_shared<Var>(name, cast_expr->GetType(), origin->span_);
+    stmts.push_back(std::make_shared<AssignStmt>(mid_var, cast_expr, origin->span_));
+    cur = mid_var;
+  }
+
+  ExprPtr CreateScratch(std::vector<StmtPtr>& stmts, const TileTypePtr& src_tile, DataType dst,
+                        const AssignStmtPtr& origin) {
+    const int64_t bytes = TcvtScratchCapacityBytes(src_tile, dst);
+    const Span& span = origin->span_;
+    std::vector<std::pair<std::string, std::any>> tmp_kwargs = {
+        {"dtype", DataType::INT8},
+        {"target_memory", MemorySpace::Vec},
+    };
+    auto tmp_create = OpRegistry::GetInstance().Create("tile.create", {MakeScratchShapeTuple(bytes, span)},
+                                                       tmp_kwargs, span);
+    const std::string tmp_name = auto_name::BuildName(auto_name::GetBaseName(origin->var_->name_hint_),
+                                                      "tcvt", "tmp", static_cast<int>(scratch_counter_++));
+    auto tmp_var = std::make_shared<Var>(tmp_name, tmp_create->GetType(), span);
+    stmts.push_back(std::make_shared<AssignStmt>(tmp_var, tmp_create, span));
+    return tmp_var;
+  }
+
+  StmtPtr MaterializeCastWithScratch(const AssignStmtPtr& op, const CallPtr& call, DataType dst, int mode) {
+    std::vector<StmtPtr> stmts;
+    ExprPtr src = VisitExpr(call->args_[0]);
+    auto src_after = As<TileType>(src->GetType());
+    INTERNAL_CHECK_SPAN(src_after, op->span_) << "tile.cast input must be TileType";
+    ExprPtr tmp = CreateScratch(stmts, src_after, dst, op);
+    auto assign = MutableCopy(op);
+    assign->value_ = MakeCast(src, dst, mode, op->span_, tmp);
+    stmts.push_back(std::move(assign));
+    return std::make_shared<SeqStmts>(std::move(stmts), op->span_);
+  }
+
   std::string arch_name_;
   AdjList adj_;
+  bool materialize_scratch_ = false;
   std::size_t temp_counter_ = 0;
+  std::size_t scratch_counter_ = 0;
 };
 
 FunctionPtr TransformLegalizeTileCast(const FunctionPtr& func) {
@@ -315,7 +430,9 @@ FunctionPtr TransformLegalizeTileCast(const FunctionPtr& func) {
   if (handler == nullptr) {
     return func;
   }
-  LegalizeTileCastMutator mutator(handler->GetTcvtAdjacency(), handler->GetPtoTargetArch());
+  const bool materialize_scratch = handler->GetPtoTargetArch() == "a2a3";
+  LegalizeTileCastMutator mutator(handler->GetTcvtAdjacency(), handler->GetPtoTargetArch(),
+                                  materialize_scratch);
   return mutator.VisitFunction(func);
 }
 
