@@ -107,7 +107,7 @@ assert compiled.param_names == ["a", "b", "out"]
 | **没有 `passes_dump/`** | `lower()` 不写产物；或 `dump_passes=False` | 改用 `compile()`，或传 `dump_passes=PassDumpLevel.EXPLICIT` |
 | **内存图没东西可画** | `memory_planner=PTOAS` 跳过 `AllocateMemoryAddr`，dump 里没有偏移 | 改用端到端对比 |
 
-> **`verification_level` 是调试杠杆，不是该常年调高的默认值。** 流水跑的是 `BASIC`；`ROUNDTRIP` 会额外重新解析每份 dump，明显更慢。怀疑 IR 畸形时调高，用完调回去。
+> **`verification_level` 是调试杠杆，不是该常年调高的默认值。** 默认是 `BASIC` —— 除非 `PYPTO_VERIFY_LEVEL` 另有指定，因为该参数留 `None` 时会交给它。`ROUNDTRIP` 会额外重新解析每份 dump，明显更慢。怀疑 IR 畸形时调高，用完调回去。
 
 ## 参见
 

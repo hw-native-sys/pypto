@@ -64,13 +64,15 @@ with ChipWorker(config=cfg) as w:
 | `output_dir` | 产物在哪 |
 | `platform` / `backend_type` | 它是为什么构建的；worker 会校验前者 |
 | `param_names` / `output_indices` / `has_return` | 调用形状，供自行绑定实参的 harness 使用 |
-| `program` | 被编译的那份**未经 pass** 的 IR —— 不是降级后的形态，且经 `from_dir` 重建后为 `None` |
+| `program` | 交给 `compile` 的那份 `Program` —— 通常是未经 pass 的，且经 `from_dir` 重建后为 `None` |
 | `chip_callable` / `runtime_name` / `runtime_config` | 运行时侧的句柄 |
 | `build_orch_args` / `build_call_config` | 显式派发需要的两个构造器 |
 | `validate_ir` | 逐 pass 的语义对比（[精度](../precision/00-workflow.md)） |
 | `from_dir` / `load` | 从已保存的产物目录重建句柄 |
 
-> **`compiled.program` 不是产出那些产物的那份 IR。** 它是送进去时的样子；codegen 实际跑的那份变换后程序并不保留，而经 `from_dir` 重建的句柄根本没有 program。要拿降级后的 IR —— 也就是 pass 真正产出的东西 —— 用 `kernel.lower(*args)`，或者读一份 pass dump。
+> **`compiled.program` 不是产出那些产物的那份 IR。** 它是你交给 `compile` 的那个 `Program`，原样存下；codegen 实际跑的那份变换后程序并不保留，而经 `from_dir` 重建的句柄根本没有 program。
+>
+> 在通常的 `ir.compile(MyProgram)` 路径上，那份输入是未经 pass 的 IR。但不必然如此 —— 上面的准备代码编译的是 `add_kernel.lower(...)`，那本身已经降级过，所以**在那里** `compiled.program` 是过了 pass 的。这个属性不对此做任何承诺，它只是把收到的东西交回来。要专门拿降级后的 IR，用 `kernel.lower(*args)` 或读一份 pass dump。
 
 ### 显式派发
 

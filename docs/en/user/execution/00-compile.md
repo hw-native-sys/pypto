@@ -127,9 +127,10 @@ writing no artifacts — which also means no `passes_dump/`. It is the right for
 | **No `passes_dump/`** | `lower()` writes no artifacts; `dump_passes=False` | Use `compile()`, or pass `dump_passes=PassDumpLevel.EXPLICIT` |
 | **Memory map has nothing to draw** | `memory_planner=PTOAS` skips `AllocateMemoryAddr`, so the dump carries no offsets | Compare end to end instead |
 
-> **`verification_level` is a debugging lever, not a default to raise.** `BASIC` is what
-> the pipeline runs with; `ROUNDTRIP` additionally reparses each dump and is markedly
-> slower. Raise it when you suspect malformed IR, and put it back.
+> **`verification_level` is a debugging lever, not a default to raise.** `BASIC` is the
+> default — unless `PYPTO_VERIFY_LEVEL` says otherwise, since the parameter defers to it
+> when left `None`. `ROUNDTRIP` additionally reparses each dump and is markedly slower.
+> Raise it when you suspect malformed IR, and put it back.
 
 ## See Also
 

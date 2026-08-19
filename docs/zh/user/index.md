@@ -49,7 +49,7 @@
 | [语言指南](language/index.md) | 完整语言，一页一个主题：类型、函数、控制流、内存、作用域与任务、编译期指令 |
 | [算子](ops/index.md) | 在 `pl.*`、`pl.tensor.*`、`pl.tile.*` 之间取舍，以及算子目录 |
 | [编译程序](execution/00-compile.md) | `ir.compile()` 与 `JITFunction.compile()`，以及检视结果 |
-| [在设备上运行](00-getting_started.md) | 常驻设备张量、显式派发、性能基准、分布式执行 |
+| [在设备上运行](execution/01-run.md) | 常驻设备张量、显式派发，以及影响派发的 `RunConfig` 字段 |
 | [Torch Codegen 调试指南](tools/01-torch-codegen.md) | 从 IR 生成 PyTorch 参考实现，用于定位精度问题 |
 | [分布式编程](distributed/index.md) | 跨 rank 程序的对称内存模型、集合通信、底层原语、执行与调试 |
 
@@ -63,7 +63,7 @@
 | 多函数 program 与跨函数调用 | [快速上手](02-quickstart.md) |
 | `@pl.jit` 全家族（`.incore`、`.inline`、`.opaque`、`.host`） | [快速上手](02-quickstart.md)、[函数与程序](language/01-functions.md) |
 | 手写 C++ kernel 接入 | [外部 Kernel](../dev/language/04-external-kernels.md) |
-| 设备常驻张量、显式派发、性能基准 | [在设备上运行](00-getting_started.md) |
+| 设备常驻张量、显式派发 | [在设备上运行](execution/01-run.md) |
 | 分布式（多卡）程序与集合通信 | [分布式编程](distributed/index.md) |
 | 对照 PyTorch 参考实现做精度定位 | [Torch Codegen 调试指南](tools/01-torch-codegen.md) |
 | 编译期诊断与性能提示 | [诊断](../dev/passes/92-diagnostics.md) |

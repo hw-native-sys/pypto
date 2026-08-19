@@ -72,16 +72,21 @@ both H2D and D2H for that argument.
 | `output_dir` | Where the artifacts are |
 | `platform` / `backend_type` | What it was built for; the worker checks the first |
 | `param_names` / `output_indices` / `has_return` | The call shape, for a harness binding arguments itself |
-| `program` | The **pre-pass** IR that was compiled — not the lowered form, and `None` after `from_dir` |
+| `program` | The `Program` that was handed to `compile` — usually pre-pass, and `None` after `from_dir` |
 | `chip_callable` / `runtime_name` / `runtime_config` | The runtime-side handles |
 | `build_orch_args` / `build_call_config` | The two builders explicit dispatch needs |
 | `validate_ir` | Per-pass semantic comparison ([Precision](../precision/00-workflow.md)) |
 | `from_dir` / `load` | Rebuild a handle from a saved artifact directory |
 
-> **`compiled.program` is not the IR that produced the artifacts.** It is the program as it
-> went in; the transformed program codegen ran on is not retained, and a handle rebuilt with
-> `from_dir` has no program at all. For the lowered IR — what the passes actually produced —
-> use `kernel.lower(*args)`, or read a pass dump.
+> **`compiled.program` is not the IR that produced the artifacts.** It is whatever
+> `Program` you handed to `compile`, stored as-is; the transformed program codegen ran on is
+> not retained, and a handle rebuilt with `from_dir` has no program at all.
+>
+> On the usual `ir.compile(MyProgram)` path that input is pre-pass IR. It need not be — the
+> setup above compiles `add_kernel.lower(...)`, which is already lowered, so *there*
+> `compiled.program` is post-pass. The property makes no promise either way; it hands back
+> what it was given. For the lowered IR specifically, use `kernel.lower(*args)` or read a
+> pass dump.
 
 ### Explicit dispatch
 

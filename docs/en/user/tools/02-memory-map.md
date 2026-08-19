@@ -23,9 +23,17 @@ from pypto.runtime import RunConfig
 compiled = kernel.compile(*args, config=RunConfig(dump_passes=PassDumpLevel.EXPLICIT))
 ```
 
+`compile()` prints nothing by itself, so have it tell you where the dumps went:
+
+```python
+print(compiled.output_dir)
+```
+
+Then point the tool at that directory:
+
 ```bash
-DUMP="$(python -c 'print(compiled.output_dir)')"/passes_dump/NN_after_SomePass.py
-python -m pypto.tools.memory_map "$DUMP" -o map.html
+OUT=build_output/<program>_<timestamp>          # what the line above printed
+python -m pypto.tools.memory_map "$OUT/passes_dump/NN_after_SomePass.py" -o map.html
 ```
 
 Two things matter here. **`compile()`, not `lower()`** — `lower()` runs the passes and hands

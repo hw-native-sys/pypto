@@ -14,13 +14,13 @@ compiler has usually answered the first before you ask it.
 
 ## The cheap checks first
 
-Two artifacts are written on every compile and cost nothing to read:
+Two things cost nothing to read, and the compiler has already produced both:
 
-- **`report/perf_hints.log`** — what the compiler noticed but did not refuse: transfers
-  below the hardware granularity, a matmul it could not tile, a pipeline depth that did not
-  fit. One summary line also goes to stderr.
-- **The error message itself.** PyPTO distinguishes a user error from an internal one, and
-  the distinction tells you whether to fix your code or file a bug — see
+- **`report/perf_hints.log`**, written on every compile — what the compiler noticed but did
+  not refuse: transfers below the hardware granularity, a matmul it could not tile, a
+  pipeline depth that did not fit. One summary line also goes to stderr.
+- **The error message**, when there is one. PyPTO distinguishes a user error from an
+  internal one, and the distinction tells you whether to fix your code or file a bug — see
   [Debugging](00-debugging.md).
 
 ## See Also

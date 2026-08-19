@@ -55,7 +55,7 @@ cross-rank overlap.
 | [Language Guide](language/index.md) | The full language, one topic per page: types, functions, control flow, memory, scopes and tasks, directives |
 | [Operations](ops/index.md) | Choosing between the `pl.*`, `pl.tensor.*`, and `pl.tile.*` namespaces, plus the operator catalog |
 | [Compiling a Program](execution/00-compile.md) | `ir.compile()` and `JITFunction.compile()`, and inspecting the result |
-| [Running on Device](00-getting_started.md) | Resident device tensors, explicit dispatch, benchmarking, distributed execution |
+| [Running on Device](execution/01-run.md) | Resident device tensors, explicit dispatch, and the `RunConfig` fields that affect dispatch |
 | [Torch Codegen Debug Guide](tools/01-torch-codegen.md) | Generating a PyTorch reference implementation from the IR to isolate accuracy problems |
 | [Distributed Programming](distributed/index.md) | Symmetric-memory model, collectives, primitives, execution, and debugging for cross-rank programs |
 
@@ -69,7 +69,7 @@ cross-rank overlap.
 | Multi-function programs and cross-function calls | [Quickstart](02-quickstart.md) |
 | The full `@pl.jit` family (`.incore`, `.inline`, `.opaque`, `.host`) | [Quickstart](02-quickstart.md), [Functions and Programs](language/01-functions.md) |
 | Hand-written C++ kernel integration | [External Kernels](../dev/language/04-external-kernels.md) |
-| Device-resident tensors, explicit dispatch, benchmarking | [Running on Device](00-getting_started.md) |
+| Device-resident tensors, explicit dispatch | [Running on Device](execution/01-run.md) |
 | Distributed (multi-card) programs and collectives | [Distributed Programming](distributed/index.md) |
 | Accuracy debugging against a PyTorch reference | [Torch Codegen Debug Guide](tools/01-torch-codegen.md) |
 | Compile-time diagnostics and performance hints | [Diagnostics](../dev/passes/92-diagnostics.md) |

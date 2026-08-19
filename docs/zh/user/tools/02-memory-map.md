@@ -19,9 +19,17 @@ from pypto.runtime import RunConfig
 compiled = kernel.compile(*args, config=RunConfig(dump_passes=PassDumpLevel.EXPLICIT))
 ```
 
+`compile()` 自己不打印任何东西，所以让它告诉你 dump 落在哪：
+
+```python
+print(compiled.output_dir)
+```
+
+然后把工具指向那个目录：
+
 ```bash
-DUMP="$(python -c 'print(compiled.output_dir)')"/passes_dump/NN_after_SomePass.py
-python -m pypto.tools.memory_map "$DUMP" -o map.html
+OUT=build_output/<program>_<timestamp>          # 上一行打印出来的路径
+python -m pypto.tools.memory_map "$OUT/passes_dump/NN_after_SomePass.py" -o map.html
 ```
 
 这里有两点要紧。**要用 `compile()` 而不是 `lower()`** —— `lower()` 只跑 pass 并把 `Program` 交回来，什么都不写，因此不会产出这个工具要读的 `passes_dump/`。以及 **`EXPLICIT`**，它会解析出隐式 tile layout 与 window buffer，那正是工具确定要画多大所需要的。
