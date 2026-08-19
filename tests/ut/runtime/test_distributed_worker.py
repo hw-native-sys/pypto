@@ -120,6 +120,19 @@ class _FakeBuffer:
         return shapes, dtype
 
 
+def _alloc_by_worker(worker_mock, buffers):
+    """Make the fake allocator return a buffer chosen by ``worker_id``, not by call order.
+
+    A ``side_effect`` list is consumed in call order, which couples the fixture to the order
+    the shards happen to be uploaded in. Since `alloc_stacked_tensor` uploads the shards
+    concurrently, that order is not defined — and the real
+    ``alloc_child_tensor(worker_id, ...)`` returns the buffer belonging to the worker it is
+    asked about, so keying on the worker is also the more faithful fake.
+    """
+    worker_mock.alloc_child_tensor.side_effect = lambda worker_id, *args, **kwargs: buffers[worker_id]
+    return buffers
+
+
 @pytest.fixture
 def patched_setup():
     """Patch every setup helper so DistributedWorker() does no real work.
@@ -997,8 +1010,8 @@ class TestAllocStackedTensor:
     """``alloc_stacked_tensor`` uploads each leading-dim shard to its worker once."""
 
     def test_identity_uploads_shard_per_worker(self, patched_setup):
-        buffers = [_FakeBuffer(0xA000, 64), _FakeBuffer(0xB000, 64)]
-        patched_setup["worker"].alloc_child_tensor.side_effect = buffers
+        buffers = {0: _FakeBuffer(0xA000, 64), 1: _FakeBuffer(0xB000, 64)}
+        _alloc_by_worker(patched_setup["worker"], buffers)
         rt = DistributedWorker(_compiled_2cards())
         host = torch.arange(2 * 4 * 4, dtype=torch.float32).view(2, 4, 4).share_memory_()
 
@@ -1008,19 +1021,22 @@ class TestAllocStackedTensor:
         assert stacked.worker_ids == (0, 1)
         assert tuple(s.shape for s in stacked.shards) == ((4, 4), (4, 4))
         worker = patched_setup["worker"]
-        # shard 0 -> worker 0, shard 1 -> worker 1.
+        # shard 0 -> worker 0, shard 1 -> worker 1. The pairing is asserted; the order the
+        # two uploads are issued in is not, because they now run concurrently.
         nbytes = 4 * 4 * 4
         allocs = worker.alloc_child_tensor.call_args_list
-        assert [call.args[:2] for call in allocs] == [(0, (nbytes,)), (1, (nbytes,))]
-        assert [call.args[0] for call in worker.copy_to.call_args_list] == buffers
+        assert sorted(call.args[:2] for call in allocs) == [(0, (nbytes,)), (1, (nbytes,))]
+        assert sorted(call.args[0].base for call in worker.copy_to.call_args_list) == sorted(
+            buffer.base for buffer in buffers.values()
+        )
         # Tracked per (worker_id, ptr) for auto-free.
         assert (0, 0xA000) in rt._owned_tensors
         assert (1, 0xB000) in rt._owned_tensors
         rt.close()
 
     def test_registered_inherited_storage_uploads_without_shared_memory(self, patched_setup):
-        buffers = [_FakeBuffer(0xA000, 64), _FakeBuffer(0xB000, 64)]
-        patched_setup["worker"].alloc_child_tensor.side_effect = buffers
+        buffers = {0: _FakeBuffer(0xA000, 64), 1: _FakeBuffer(0xB000, 64)}
+        _alloc_by_worker(patched_setup["worker"], buffers)
         host = torch.arange(2 * 4 * 4, dtype=torch.float32).view(2, 4, 4)
         rt = DistributedWorker(_compiled_2cards(), inherited_host_tensors=[host])
 
@@ -1028,14 +1044,14 @@ class TestAllocStackedTensor:
 
         assert stacked.worker_ids == (0, 1)
         worker = patched_setup["worker"]
-        assert [call.args[0] for call in worker.copy_to.call_args_list] == buffers
+        assert sorted(call.args[0].base for call in worker.copy_to.call_args_list) == sorted(
+            buffer.base for buffer in buffers.values()
+        )
         rt.close()
 
     def test_permuted_worker_ids_place_shards(self, patched_setup):
-        patched_setup["worker"].alloc_child_tensor.side_effect = [
-            _FakeBuffer(0xA000, 64),
-            _FakeBuffer(0xB000, 64),
-        ]
+        buffers = {1: _FakeBuffer(0xA000, 64), 0: _FakeBuffer(0xB000, 64)}
+        _alloc_by_worker(patched_setup["worker"], buffers)
         rt = DistributedWorker(_compiled_2cards())
         host = torch.zeros(2, 4, 4, dtype=torch.float32).share_memory_()
 
@@ -1044,16 +1060,16 @@ class TestAllocStackedTensor:
         assert stacked.worker_ids == (1, 0)
         worker = patched_setup["worker"]
         nbytes = 4 * 4 * 4
-        # shard 0 -> worker 1, shard 1 -> worker 0.
+        # shard 0 -> worker 1, shard 1 -> worker 0: the placement, not the issue order.
         allocs = worker.alloc_child_tensor.call_args_list
-        assert [call.args[:2] for call in allocs] == [(1, (nbytes,)), (0, (nbytes,))]
+        assert sorted(call.args[:2] for call in allocs) == [(0, (nbytes,)), (1, (nbytes,))]
         assert (1, 0xA000) in rt._owned_tensors
         assert (0, 0xB000) in rt._owned_tensors
         rt.close()
 
     def test_free_stacked_tensor_releases_each_shard(self, patched_setup):
-        buffers = [_FakeBuffer(0xA000, 64), _FakeBuffer(0xB000, 64)]
-        patched_setup["worker"].alloc_child_tensor.side_effect = buffers
+        buffers = {1: _FakeBuffer(0xA000, 64), 0: _FakeBuffer(0xB000, 64)}
+        _alloc_by_worker(patched_setup["worker"], buffers)
         rt = DistributedWorker(_compiled_2cards())
         host = torch.zeros(2, 4, 4, dtype=torch.float32).share_memory_()
         stacked = rt.alloc_stacked_tensor(host, worker_ids=[1, 0])
@@ -1062,15 +1078,15 @@ class TestAllocStackedTensor:
         rt.free_stacked_tensor(stacked)
 
         worker = patched_setup["worker"]
-        worker.free.assert_any_call(buffers[0])
         worker.free.assert_any_call(buffers[1])
+        worker.free.assert_any_call(buffers[0])
         assert (1, 0xA000) not in rt._owned_tensors
         assert (0, 0xB000) not in rt._owned_tensors
         rt.close()
 
     def test_close_auto_frees_stacked_shards(self, patched_setup):
-        buffers = [_FakeBuffer(0xA000, 64), _FakeBuffer(0xB000, 64)]
-        patched_setup["worker"].alloc_child_tensor.side_effect = buffers
+        buffers = {0: _FakeBuffer(0xA000, 64), 1: _FakeBuffer(0xB000, 64)}
+        _alloc_by_worker(patched_setup["worker"], buffers)
         rt = DistributedWorker(_compiled_2cards())
         host = torch.zeros(2, 4, 4, dtype=torch.float32).share_memory_()
         rt.alloc_stacked_tensor(host)  # leak — close() must release both shards
