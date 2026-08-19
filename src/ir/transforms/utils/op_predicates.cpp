@@ -71,7 +71,8 @@ bool OutputInheritsSourceBuffer(const std::string& op_name) {
 
 bool IsBuiltinOp(const std::string& op_name) {
   return op_name.rfind("tile.", 0) == 0 || op_name.rfind("tensor.", 0) == 0 ||
-         op_name.rfind("system.", 0) == 0 || op_name.rfind("array.", 0) == 0;
+         op_name.rfind("system.", 0) == 0 || op_name.rfind("array.", 0) == 0 ||
+         op_name == "pld.system.get_comm_ctx";
 }
 
 bool IsPublishingWrite(const CallPtr& call) {

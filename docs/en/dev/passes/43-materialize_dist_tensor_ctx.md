@@ -17,13 +17,25 @@ sites. This pass makes the ctx flow explicit in IR instead:
    `CommCtxType` parameters at the tail of the signature, in distributed-tensor
    parameter order. The appended parameters are `ParamDirection::In`.
 2. For every `Call` / `Submit` to such a function, append matching ctx args.
-   If the distributed tensor arg is a caller parameter, forward the caller's
-   materialized ctx parameter. Otherwise, bind
+   If the distributed tensor arg is a caller parameter or an SSA alias of one,
+   forward the caller's materialized ctx parameter. Return positions are
+   matched to the callee's returned parameters, so mixed or reordered return
+   tuples do not fall back to positional tail alignment. Tensor aliases carried
+   through `ForStmt` / `WhileStmt` are tracked as well. Otherwise, bind
    `pld.system.get_comm_ctx(dist)` immediately before the call and pass that
    result.
-3. If call-site `arg_directions` are already resolved, append matching
+3. In chip orchestration and device functions, replace every
+   `pld.system.get_comm_ctx(dist)` with the resolved explicit `CommCtxType` SSA
+   value. Host orchestration keeps the op because host codegen resolves it from
+   the window's per-rank runtime context.
+4. If call-site `arg_directions` are already resolved, append matching
    `ArgDirection::Scalar` entries so downstream codegen can keep treating ctx as
    ordinary scalar task payload.
+
+This pass does not add `CommCtxType` values to `IfStmt` return variables or
+branch yields. DistributedTensor `if` lowering keeps the existing requirement
+that both branches refer to the same backing/context; dynamic context merges
+remain outside this change (issue #2027).
 
 The pass runs after `LowerHostTensorCollectives` and before the final
 `Simplify`. At that point host window buffers have already been materialized by
@@ -75,6 +87,7 @@ def host_orch(self):
     self.chip_orch(data, data_ctx, device=r)
 ```
 
-The kernel body does not need to change. Existing `pld.system.get_comm_ctx(data)`
-uses in the body become pure aliases to the explicit ctx parameter during
-codegen.
+The kernel body does not need to change. Existing
+`pld.system.get_comm_ctx(data)` uses in a device function are rewritten to the
+explicit ctx parameter by this pass; host-orchestration uses remain runtime
+queries.

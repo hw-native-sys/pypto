@@ -67,13 +67,14 @@ class TestOrchestrationReferencesResolvedVerifier:
         assert "undefined function" in errors[0].message
 
     def test_builtin_calls_are_skipped(self):
-        """Builtin ops (tile.*, tensor.*, system.*) must NOT be flagged as undefined."""
+        """Builtin ops, including the distributed context query, are not undefined callees."""
         span = ir.Span.unknown()
         x = ir.Var("x", ir.TensorType([64], ir.DataType.FP32), span)
         # tensor.print is a builtin — must be ignored by the verifier.
         builtin_call = ir.Call(ir.GlobalVar("tensor.print"), [x], ir.TupleType([]), span)
+        get_ctx_call = ir.Call(ir.GlobalVar("pld.system.get_comm_ctx"), [x], ir.CommCtxType.get(), span)
         body = ir.SeqStmts(
-            [ir.EvalStmt(builtin_call, span), ir.ReturnStmt([], span)],
+            [ir.EvalStmt(builtin_call, span), ir.EvalStmt(get_ctx_call, span), ir.ReturnStmt([], span)],
             span,
         )
         orch = ir.Function("orch_main", [x], [], body, span, type=ir.FunctionType.Orchestration)
