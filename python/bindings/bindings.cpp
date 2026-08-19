@@ -71,4 +71,8 @@ NB_MODULE(pypto_core, m) {
 
   // Validate that all tile.* ops have memory specs — fails at import time if any are missing
   pypto::ir::OpRegistry::GetInstance().ValidateTileOps();
+
+  // Validate that every in-place op declared what it does to the slot it updates —
+  // an undeclared writer reads as a pure consumer and its dependency edge vanishes
+  pypto::ir::OpRegistry::GetInstance().ValidateArgEffects();
 }

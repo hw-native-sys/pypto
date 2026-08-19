@@ -662,6 +662,9 @@ REGISTER_OP("tile.assemble")
     .add_argument("target", "Target tile (TileType)")
     .add_argument("source", "Source tile to write (TileType)")
     .add_argument("offset", "Offset dimensions (TupleType of ScalarType(INT64/UINT64/INDEX))")
+    // Rewrites the offset sub-region of `target` and passes the rest through to
+    // the result, so the prior content is read. Tile-local, hence no channel.
+    .set_arg_effect(0, ArgEffect::ReadWrite)
     .set_output_memory_inherit_input()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
@@ -874,6 +877,8 @@ REGISTER_OP("tile.scatter_update")
     .set_input_memory(2, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     .set_output_reuses_input(0)
+    // DPS: the indexed rows are rewritten, every other row passes through.
+    .set_arg_effect(0, ArgEffect::ReadWrite)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileScatterUpdateType(args, kwargs);

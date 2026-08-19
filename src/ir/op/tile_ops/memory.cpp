@@ -976,6 +976,11 @@ REGISTER_OP("tile.write")
     .add_argument("tile", "Destination tile (TileType)")
     .add_argument("indices", "Index dimensions (TupleType of ScalarType)")
     .add_argument("value", "Scalar value to write (ScalarType)")
+    // Rewrites one element and passes every other element of the tile through
+    // to the result, so the prior content is read. No write channel: this is a
+    // tile-local write, not one of the GM store paths the mixed-store
+    // diagnostic orders against each other.
+    .set_arg_effect(0, ArgEffect::ReadWrite)
     .set_input_memory(0, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
@@ -1087,6 +1092,18 @@ REGISTER_OP("tile.store")
     .set_attr<int>("atomic")
     .set_input_memory(0, {MemorySpace::Vec, MemorySpace::Acc})
     .set_output_reuses_input(2)
+    // A plain store overwrites the region it lands on: the untouched remainder
+    // is neither loaded nor re-stored, so nothing moves *into* the kernel and
+    // the destination is a pure write. An atomic store is not an overwrite at
+    // all — `out += x` reads the accumulator it adds to.
+    .set_arg_effect(2,
+                    [](const std::vector<std::pair<std::string, std::any>>& kwargs) {
+                      return GetIntKwarg(kwargs, "atomic", static_cast<int>(AtomicType::kNone)) ==
+                                     static_cast<int>(AtomicType::kNone)
+                                 ? ArgEffect::Write
+                                 : ArgEffect::ReadWrite;
+                    })
+    .set_write_channel(WriteChannel::Dma)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileStoreType(args, kwargs, "tile.store");
@@ -1163,6 +1180,10 @@ REGISTER_OP("tile.mscatter")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_reuses_input(2)
+    // Scatters `src` into the indexed cells of `output_tensor` without reading
+    // any of it — the same pure-write destination contract as tile.store.
+    .set_arg_effect(2, ArgEffect::Write)
+    .set_write_channel(WriteChannel::Dma)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileMscatterType(args, kwargs, "tile.mscatter");
@@ -1381,6 +1402,21 @@ REGISTER_OP("tile.mgather")
     .set_attr<MemorySpace>("target_memory")
     .set_output_memory_from_kwarg("target_memory", MemorySpace::Vec)
     .not_inplace_safe()
+    // Argument 2 is the GM `scratch` tensor only in Mat *elem* mode, where the
+    // gathered elements are staged through it. In Mat row mode that position
+    // holds `valid_shape`, and in Vec mode it is absent — declaring an
+    // unconditional write there would claim a tuple operand is a written
+    // buffer and could promote a read-only parameter to an output.
+    .set_arg_effect(2,
+                    [](const std::vector<std::pair<std::string, std::any>>& kwargs) {
+                      const bool mat_output =
+                          GetMemorySpaceKwarg(kwargs, "target_memory", MemorySpace::Vec) == MemorySpace::Mat;
+                      const bool elem_mode =
+                          GetIntKwarg(kwargs, "coalesce", static_cast<int>(MgatherCoalesceMode::kRow)) ==
+                          static_cast<int>(MgatherCoalesceMode::kElem);
+                      return mat_output && elem_mode ? ArgEffect::Write : ArgEffect::Read;
+                    })
+    .set_write_channel(WriteChannel::Dma)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileMgatherType(args, kwargs, "tile.mgather");

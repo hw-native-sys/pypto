@@ -21,10 +21,12 @@
 #ifndef PYPTO_IR_OP_REGISTRY_H_
 #define PYPTO_IR_OP_REGISTRY_H_
 
+#include <algorithm>
 #include <any>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
@@ -90,6 +92,133 @@ enum class ExecutionMemoryAccessEvidence : uint8_t {
   Unknown,
   Functional,
   NoAccess,
+};
+
+/**
+ * @brief What executing an operation does to the buffer one argument names.
+ *
+ * This is an *effect* declaration, not a type. It answers the single question
+ * every direction and dependency analysis asks: does running this call read
+ * from, or write to, the memory this argument names?
+ *
+ * `Read` is the default for an argument the operator does not name, because
+ * the overwhelming majority of operators are functional — they consume their
+ * operands and produce a fresh SSA result. An operator that instead updates an
+ * operand in place must say so: a missing `Write` is not a conservative
+ * approximation, it silently erases a real dependency edge (the writer looks
+ * like a pure reader, so nothing is ordered against it).
+ */
+enum class ArgEffect : uint8_t {
+  Read = 0,       ///< Read, never written.
+  Write = 1,      ///< Overwritten without being read first (a destination operand).
+  ReadWrite = 2,  ///< Read *and* written — accumulate, atomic update, partial in-place rewrite.
+};
+
+/// Merge two independent observations of one argument's effect. Each is a lower
+/// bound on the accesses, so the merge is a union along Read < {Write} < ReadWrite.
+[[nodiscard]] inline ArgEffect MergeArgEffect(ArgEffect lhs, ArgEffect rhs) {
+  if (lhs == rhs) return lhs;
+  return ArgEffect::ReadWrite;
+}
+
+[[nodiscard]] inline bool ArgEffectReads(ArgEffect effect) { return effect != ArgEffect::Write; }
+[[nodiscard]] inline bool ArgEffectWrites(ArgEffect effect) { return effect != ArgEffect::Read; }
+
+[[nodiscard]] inline std::string ArgEffectToString(ArgEffect effect) {
+  switch (effect) {
+    case ArgEffect::Read:
+      return "Read";
+    case ArgEffect::Write:
+      return "Write";
+    case ArgEffect::ReadWrite:
+      return "ReadWrite";
+  }
+  return "Unknown";
+}
+
+/// Read an integer-valued kwarg out of a call's kwargs, or `fallback` when the
+/// call does not carry it. Effect resolvers use this to branch on the enum-backed
+/// int kwargs (`atomic`, `op`, ...) that decide whether a destination operand is
+/// overwritten or accumulated into.
+[[nodiscard]] inline int GetIntKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                     const std::string& key, int fallback) {
+  for (const auto& [k, v] : kwargs) {
+    if (k == key) return AnyCast<int>(v, key);
+  }
+  return fallback;
+}
+
+/// MemorySpace-valued counterpart of GetIntKwarg. A memory-space kwarg is stored
+/// as a `MemorySpace`, not as an int (see `ConvertKwargsDict`), so it needs its
+/// own accessor — `tile.mgather` selects which operand is its GM scratch from
+/// `target_memory`.
+[[nodiscard]] inline MemorySpace GetMemorySpaceKwarg(
+    const std::vector<std::pair<std::string, std::any>>& kwargs, const std::string& key,
+    MemorySpace fallback) {
+  for (const auto& [k, v] : kwargs) {
+    if (k == key) return AnyCast<MemorySpace>(v, key);
+  }
+  return fallback;
+}
+
+/// String-valued counterpart of GetIntKwarg, for the kwargs that select an
+/// operator mode by name (`system.syncall`'s hard/soft form).
+[[nodiscard]] inline std::string GetStringKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                                const std::string& key, const std::string& fallback) {
+  for (const auto& [k, v] : kwargs) {
+    if (k == key) return AnyCast<std::string>(v, key);
+  }
+  return fallback;
+}
+
+/**
+ * @brief The hardware path an operation's writes travel.
+ *
+ * PyPTO cannot order an MTE3 (DMA) store against a scalar D-cache write to the
+ * same GM tensor, so a function that mixes both on one buffer is rejected. The
+ * channel is a property of the operator's lowering, declared once here rather
+ * than re-derived by the diagnostic.
+ */
+enum class WriteChannel : uint8_t {
+  Dma,     ///< MTE3 / DMA store path (tile.store, tensor.assemble, cross-rank put/get).
+  Scalar,  ///< Scalar D-cache write path (tensor.write).
+};
+
+/**
+ * @brief Per-argument execution effects declared by one operator.
+ *
+ * Absent (`std::nullopt` on the entry) means *nobody has classified this
+ * operator yet* — which is deliberately distinct from "declared read-only", so
+ * an analysis can refuse to guess instead of defaulting an unclassified writer
+ * to read-only.
+ */
+struct OpArgEffectSpec {
+  /// Effect resolved from the call's kwargs, for arguments whose effect is not
+  /// fixed by the operator alone (an atomic store reads its destination; a
+  /// `NotifyOp::kAtomicAdd` accumulates into the peer slot).
+  using Resolver = std::function<ArgEffect(const std::vector<std::pair<std::string, std::any>>& kwargs)>;
+
+  /// Effect per positional argument index. Indices past the end are `Read`.
+  std::vector<ArgEffect> per_arg;
+
+  /// Kwarg-dependent effects, keyed by argument index. Overrides `per_arg`.
+  std::map<size_t, Resolver> kwarg_dependent;
+
+  /// Which path this operator's writes take. Set only for operators that write.
+  std::optional<WriteChannel> write_channel;
+
+  /// Argument indices a registration named explicitly. `per_arg` cannot answer
+  /// this on its own: it is resized to *cover* the highest declared index, so a
+  /// slot nobody named is indistinguishable there from one declared `Read`.
+  /// Validation needs the difference — an operator that classified the wrong
+  /// argument has not classified the one it updates in place.
+  std::set<size_t> declared_args;
+
+  /// True only when a registration called `no_arg_writes()`, which is a verdict
+  /// about every argument at once. The spec's mere existence cannot stand in for
+  /// this: `set_write_channel()` creates it too, and an operator that declared
+  /// only a channel has classified nothing.
+  bool declared_no_writes = false;
 };
 
 /**
@@ -556,6 +685,106 @@ class OpRegistryEntry {
     return cross_core_role_;
   }
 
+  /// Declare what executing this operator does to positional argument
+  /// `arg_index`. Every argument the operator does not name is `Read`; calling
+  /// this at all marks the operator *classified*, so a later analysis can tell
+  /// "reads everything" apart from "nobody looked yet".
+  ///
+  /// Declare the argument that carries the destination, not the one that
+  /// carries the data: `tile.store(tile, offsets, output_tensor)` writes
+  /// argument 2.
+  inline OpRegistryEntry& set_arg_effect(size_t arg_index, ArgEffect effect) {
+    auto& effects = EnsureArgEffects();
+    CHECK(!effects.declared_no_writes) << "Operator '" << name_ << "' names argument " << arg_index
+                                       << " after declaring no_arg_writes(); the two are contradictory";
+    if (effects.per_arg.size() <= arg_index) {
+      effects.per_arg.resize(arg_index + 1, ArgEffect::Read);
+    }
+    effects.per_arg[arg_index] = effect;
+    effects.declared_args.insert(arg_index);
+    return *this;
+  }
+
+  /// Declare an argument whose effect the operator alone does not fix, because
+  /// a kwarg decides it — an atomic `tile.store` reads the accumulator it adds
+  /// into, while a plain one overwrites it. The resolver sees the call's kwargs
+  /// and must return the effect for that call.
+  inline OpRegistryEntry& set_arg_effect(size_t arg_index, OpArgEffectSpec::Resolver resolver) {
+    CHECK(resolver) << "Operator '" << name_ << "' argument " << arg_index
+                    << " was given a null effect resolver";
+    auto& effects = EnsureArgEffects();
+    CHECK(!effects.declared_no_writes) << "Operator '" << name_ << "' names argument " << arg_index
+                                       << " after declaring no_arg_writes(); the two are contradictory";
+    effects.kwarg_dependent[arg_index] = std::move(resolver);
+    effects.declared_args.insert(arg_index);
+    return *this;
+  }
+
+  /// Declare that this operator writes through none of its arguments. Use it to
+  /// classify an operator whose name or side-effect-only signature would
+  /// otherwise leave a reader wondering — `pld.system.wait` polls a signal it
+  /// never writes.
+  inline OpRegistryEntry& no_arg_writes() {
+    auto& effects = EnsureArgEffects();
+    CHECK(effects.declared_args.empty())
+        << "Operator '" << name_
+        << "' declares no_arg_writes() after naming an argument; the two are contradictory";
+    effects.declared_no_writes = true;
+    return *this;
+  }
+
+  /// Declare which hardware path this operator's writes take. Required for an
+  /// operator that writes a GM tensor, so the mixed-store diagnostic can tell
+  /// an MTE3 store from a scalar one without re-listing operators.
+  inline OpRegistryEntry& set_write_channel(WriteChannel channel) {
+    auto& effects = EnsureArgEffects();
+    CHECK(!effects.write_channel.has_value()) << "Operator '" << name_ << "' write channel is already set";
+    effects.write_channel = channel;
+    return *this;
+  }
+
+  /// True when this operator declared its per-argument effects. False means the
+  /// operator has never been classified — an analysis that needs the answer must
+  /// say so loudly rather than assume read-only.
+  [[nodiscard]] bool HasDeclaredArgEffects() const { return arg_effects_.has_value(); }
+
+  /// True when the registration reached a verdict about argument `arg_index` in
+  /// particular: it named that argument, or it declared with `no_arg_writes()`
+  /// that the operator writes through none of them. An operator that named some
+  /// *other* argument — or that only set a write channel, which creates the spec
+  /// as a side effect — has not decided about this one, and reading the resulting
+  /// `Read` as a decision is what this distinguishes.
+  [[nodiscard]] bool HasDeclaredArgEffect(size_t arg_index) const {
+    if (!arg_effects_.has_value()) return false;
+    if (arg_effects_->declared_no_writes) return true;
+    return arg_effects_->declared_args.count(arg_index) > 0;
+  }
+
+  /// The effect on positional argument `arg_index` for a call carrying `kwargs`.
+  /// `Read` for any argument the operator did not name.
+  [[nodiscard]] ArgEffect GetArgEffect(size_t arg_index,
+                                       const std::vector<std::pair<std::string, std::any>>& kwargs) const {
+    if (!arg_effects_.has_value()) return ArgEffect::Read;
+    auto resolver = arg_effects_->kwarg_dependent.find(arg_index);
+    if (resolver != arg_effects_->kwarg_dependent.end()) return resolver->second(kwargs);
+    if (arg_index >= arg_effects_->per_arg.size()) return ArgEffect::Read;
+    return arg_effects_->per_arg[arg_index];
+  }
+
+  /// True when this operator writes through at least one argument under some
+  /// kwargs. Cheap pre-filter for analyses that only care about writers.
+  [[nodiscard]] bool WritesAnyArg() const {
+    if (!arg_effects_.has_value()) return false;
+    if (!arg_effects_->kwarg_dependent.empty()) return true;
+    return std::any_of(arg_effects_->per_arg.begin(), arg_effects_->per_arg.end(), ArgEffectWrites);
+  }
+
+  /// The hardware path this operator's writes take, or nullopt when it declared
+  /// none (either it writes nothing, or its writes are not GM stores).
+  [[nodiscard]] std::optional<WriteChannel> GetWriteChannel() const {
+    return arg_effects_.has_value() ? arg_effects_->write_channel : std::nullopt;
+  }
+
   inline OpRegistryEntry& set_internal_only(bool value = true) {
     internal_only_ = value;
     return *this;
@@ -576,6 +805,15 @@ class OpRegistryEntry {
     if (!memory_spec_.has_value()) {
       memory_spec_ = OpMemorySpaceSpec{};
     }
+  }
+
+  /// The effect spec, creating it when this is the operator's first declaration.
+  /// Returns a reference rather than leaving callers to dereference the optional:
+  /// engagement is obvious here and provable to a reader (and to clang-tidy's
+  /// unchecked-optional-access analysis) only at this one site.
+  OpArgEffectSpec& EnsureArgEffects() {
+    if (!arg_effects_.has_value()) return arg_effects_.emplace();
+    return *arg_effects_;
   }
 
   /**
@@ -603,6 +841,7 @@ class OpRegistryEntry {
                                       const std::vector<std::pair<std::string, std::any>>&)>>
       deduce_type_;                               ///< Type deduction function
   std::optional<OpMemorySpaceSpec> memory_spec_;  ///< Memory space specification
+  std::optional<OpArgEffectSpec> arg_effects_;    ///< Per-argument execution effects; nullopt = unclassified
   bool is_inplace_safe_{true};  ///< Whether the op supports in-place execution (src == dst buffer)
   ExecutionMemoryAccessEvidence execution_memory_access_evidence_{ExecutionMemoryAccessEvidence::Unknown};
   std::set<size_t> forbid_output_alias_args_;  ///< Input args whose buffer the output must not reuse
@@ -753,6 +992,27 @@ class OpRegistry {
    * @throws ValueError listing all tile ops missing a memory spec
    */
   void ValidateTileOps() const;
+
+  /**
+   * @brief Validate that every operator which updates an argument in place has
+   *        declared its per-argument effects.
+   *
+   * An operator declaring `set_output_reuses_input(N)` writes through argument
+   * N — that is what reusing the buffer means. Direction inference, dependency
+   * analysis and the parameter-direction verifier all read those effects, and
+   * an undeclared operator reads as a pure consumer: the write vanishes, no
+   * dependency edge is emitted, and the failure surfaces on device as a race
+   * or a deadlock rather than at compile time.
+   *
+   * Classification, not a particular answer, is what is required: an operator
+   * whose in-place slot is metadata rather than data may declare it `Read` (via
+   * `no_arg_writes()`), which records that a human decided.
+   *
+   * Call at module init to catch an unclassified operator at import time.
+   *
+   * @throws ValueError listing every in-place operator with undeclared effects
+   */
+  void ValidateArgEffects() const;
 
  private:
   OpRegistry() = default;

@@ -93,6 +93,9 @@ REGISTER_OP("tile.gather_row")
                   "May be a runtime Scalar[INDEX]; defaults to shapes.")
     .set_attr<bool>("transpose")
     .set_output_reuses_input(0)
+    // DPS: loads one GM row into a sub-region of `dst`; the rest of the
+    // accumulator tile passes through, so the prior content is read.
+    .set_arg_effect(0, ArgEffect::ReadWrite)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileGatherRowType(args, kwargs, "tile.gather_row");

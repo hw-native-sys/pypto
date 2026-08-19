@@ -133,6 +133,14 @@ REGISTER_OP("system.syncall")
     .add_argument("used_cores", "Soft form: optional participant core count (i32; omitted = auto)")
     .set_attr<std::string>("core_type")
     .set_attr<std::string>("mode")
+    // Soft form: every core writes its arrival counter into `gm_workspace` and
+    // polls it, so the workspace is read and written. The hard form is an FFTS
+    // barrier that touches no workspace at all.
+    .set_arg_effect(0,
+                    [](const std::vector<std::pair<std::string, std::any>>& kwargs) {
+                      return GetStringKwarg(kwargs, "mode", "hard") == "soft" ? ArgEffect::ReadWrite
+                                                                              : ArgEffect::Read;
+                    })
     .f_deduce_type(DeduceUnknownType);
 
 }  // namespace ir

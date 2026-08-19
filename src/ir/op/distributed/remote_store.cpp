@@ -76,6 +76,7 @@
 
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/comm.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
@@ -249,6 +250,16 @@ REGISTER_OP("pld.tile.remote_store")
     // InferTileMemorySpace pull a producer into a legal space instead of letting
     // an illegal one reach codegen.
     .set_input_memory(0, {MemorySpace::Vec, MemorySpace::Acc})
+    // A plain push overwrites the region it lands on; an atomic one accumulates
+    // into it, and accumulating reads the slot first.
+    .set_arg_effect(1,
+                    [](const std::vector<std::pair<std::string, std::any>>& kwargs) {
+                      return GetIntKwarg(kwargs, "atomic", static_cast<int>(AtomicType::kNone)) ==
+                                     static_cast<int>(AtomicType::kNone)
+                                 ? ArgEffect::Write
+                                 : ArgEffect::ReadWrite;
+                    })
+    .set_write_channel(WriteChannel::Dma)
     .f_deduce_type(DeduceRemoteStoreType);
 
 // ============================================================================
@@ -270,6 +281,16 @@ REGISTER_OP("pld.tensor.remote_store")
     .add_argument("offsets", "Offsets in target tensor coordinates (MakeTuple of scalars)")
     .set_attr<int>("atomic")
     .no_memory_spec()
+    // A plain push overwrites the region it lands on; an atomic one accumulates
+    // into it, and accumulating reads the slot first.
+    .set_arg_effect(1,
+                    [](const std::vector<std::pair<std::string, std::any>>& kwargs) {
+                      return GetIntKwarg(kwargs, "atomic", static_cast<int>(AtomicType::kNone)) ==
+                                     static_cast<int>(AtomicType::kNone)
+                                 ? ArgEffect::Write
+                                 : ArgEffect::ReadWrite;
+                    })
+    .set_write_channel(WriteChannel::Dma)
     .f_deduce_type(DeduceTensorRemoteStoreType);
 
 }  // namespace ir

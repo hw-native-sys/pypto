@@ -221,6 +221,17 @@ REGISTER_OP("pld.system.notify")
     .set_attr<int>("op")
     .set_no_duplicate()
     .no_memory_spec()
+    // TNOTIFY deposits `value` into the peer rank's slot of `target`. The set
+    // form overwrites the slot; the atomic-add form (the default) accumulates
+    // into it, which reads it. Without this the notifying task looks like a
+    // pure reader of the signal and the waiter carries no dependency on it.
+    .set_arg_effect(0,
+                    [](const std::vector<std::pair<std::string, std::any>>& kwargs) {
+                      return static_cast<NotifyOp>(GetIntKwarg(
+                                 kwargs, "op", static_cast<int>(NotifyOp::kAtomicAdd))) == NotifyOp::kSet
+                                 ? ArgEffect::Write
+                                 : ArgEffect::ReadWrite;
+                    })
     .f_deduce_type(DeduceNotifyType);
 
 // ============================================================================
@@ -237,6 +248,9 @@ REGISTER_OP("pld.system.wait")
     .add_argument("expected", "Scalar threshold value")
     .set_attr<int>("cmp")
     .no_memory_spec()
+    // Polls the local slot of `signal` until it satisfies the threshold; it
+    // never writes the signal, only the matching notify does.
+    .no_arg_writes()
     .f_deduce_type(DeduceWaitType);
 
 // ============================================================================
@@ -264,6 +278,8 @@ REGISTER_OP("pld.system.defer_wait")
     .add_argument("expected", "Integer or index scalar threshold value")
     .set_attr<int>("cmp")
     .no_memory_spec()
+    // Registers a completion condition on `signal`; a read, like wait.
+    .no_arg_writes()
     .f_deduce_type(DeduceDeferWaitType);
 
 }  // namespace ir

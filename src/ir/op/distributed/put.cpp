@@ -78,6 +78,7 @@
 
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/comm.h"
 #include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
@@ -251,6 +252,16 @@ REGISTER_OP("pld.tensor.put")
     .set_attr<bool>("pipeline")
     .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
     .no_memory_spec()
+    // A plain push overwrites the region it lands on; an atomic one accumulates
+    // into it, and accumulating reads the slot first.
+    .set_arg_effect(0,
+                    [](const std::vector<std::pair<std::string, std::any>>& kwargs) {
+                      return GetIntKwarg(kwargs, "atomic", static_cast<int>(AtomicType::kNone)) ==
+                                     static_cast<int>(AtomicType::kNone)
+                                 ? ArgEffect::Write
+                                 : ArgEffect::ReadWrite;
+                    })
+    .set_write_channel(WriteChannel::Dma)
     .f_deduce_type(DeducePutType);
 
 // ============================================================================
@@ -280,6 +291,16 @@ REGISTER_OP("pld.tile.put")
     .set_attr<int>("atomic")
     .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
     .no_memory_spec()
+    // A plain push overwrites the region it lands on; an atomic one accumulates
+    // into it, and accumulating reads the slot first.
+    .set_arg_effect(0,
+                    [](const std::vector<std::pair<std::string, std::any>>& kwargs) {
+                      return GetIntKwarg(kwargs, "atomic", static_cast<int>(AtomicType::kNone)) ==
+                                     static_cast<int>(AtomicType::kNone)
+                                 ? ArgEffect::Write
+                                 : ArgEffect::ReadWrite;
+                    })
+    .set_write_channel(WriteChannel::Dma)
     .f_deduce_type(DeducePutTileType);
 
 }  // namespace ir

@@ -3147,6 +3147,91 @@ def get_op_memory_spec(op_name: str) -> dict[str, Any] | None:
         * ``None`` — no resolver registered for this op.
     """
 
+class ArgEffect(enum.Enum):
+    """What executing an operator does to the buffer one argument names."""
+
+    Read = ...
+    """Read, never written. The default for an argument the operator does not name."""
+
+    Write = ...
+    """Overwritten without being read first (a destination operand)."""
+
+    ReadWrite = ...
+    """Read and written — accumulate, atomic update, partial in-place rewrite."""
+
+class WriteChannel(enum.Enum):
+    """The hardware path an operator's writes travel."""
+
+    Dma = ...
+    """MTE3 / DMA store path (tile.store, tensor.assemble, cross-rank put/get)."""
+
+    Scalar = ...
+    """Scalar D-cache write path (tensor.write)."""
+
+def get_op_arg_effect(op_name: str, arg_index: int, **kwargs: Any) -> ArgEffect:
+    """Effect an operator has on one positional argument.
+
+    Args:
+        op_name: Name of the operator
+        arg_index: Positional argument index
+        **kwargs: The kwargs a call would carry, for operators whose effect
+            depends on one (an atomic ``tile.store`` reads the accumulator it
+            adds into; ``pld.system.notify`` accumulates unless ``op`` selects
+            the set form)
+
+    Returns:
+        The declared effect, or ``ArgEffect.Read`` for an argument the operator
+        did not name
+
+    Raises:
+        Exception: If operator is not registered
+    """
+
+def op_has_declared_arg_effects(op_name: str) -> bool:
+    """Whether an operator declared its per-argument effects.
+
+    Args:
+        op_name: Name of the operator
+
+    Returns:
+        False when the operator was never classified — distinct from a
+        declared read-only operator, so an analysis can refuse to guess
+
+    Raises:
+        Exception: If operator is not registered
+    """
+
+def op_has_declared_arg_effect(op_name: str, arg_index: int) -> bool:
+    """Whether the registration reached a verdict about one argument.
+
+    Args:
+        op_name: Name of the operator
+        arg_index: Positional argument index
+
+    Returns:
+        True when the operator named this argument, or declared with
+        ``no_arg_writes()`` that it writes through none of them. False when it
+        classified only *other* arguments — the resulting ``Read`` for this one
+        is a default, not a decision.
+
+    Raises:
+        Exception: If operator is not registered
+    """
+
+def get_op_write_channel(op_name: str) -> WriteChannel | None:
+    """The hardware path an operator's writes travel.
+
+    Args:
+        op_name: Name of the operator
+
+    Returns:
+        The declared channel, or None when the operator declared none (it
+        writes nothing, or its writes are not GM stores)
+
+    Raises:
+        Exception: If operator is not registered
+    """
+
 # ========== Op Conversion Registry ==========
 
 def register_op_conversion(from_op: str, to_op: str) -> None:

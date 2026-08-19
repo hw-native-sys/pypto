@@ -303,6 +303,8 @@ REGISTER_OP("tile.batch_matmul_acc")
     .set_input_memory(2, MemorySpace::Right)
     .set_output_memory(MemorySpace::Acc)
     .set_output_reuses_input(0)
+    // Accumulates into `acc`, same as tile.matmul_acc.
+    .set_arg_effect(0, ArgEffect::ReadWrite)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileBatchMatMulAccType(args, kwargs, "tile.batch_matmul_acc");

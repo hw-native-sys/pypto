@@ -118,6 +118,11 @@ REGISTER_OP("system.set_ffts")
     .set_description("Declare the A3 FFTS setup operand for explicit cross-core synchronization")
     .set_op_category("CrossCoreOp")
     .add_argument("workspace", "One-dimensional INT64 FFTS workspace")
+    // Hands the workspace *pointer* to the FFTS unit (`pto.set_ffts %ws :
+    // !pto.ptr<i64>`) — it declares where the hardware's scratch lives rather
+    // than moving any data itself. The FFTS unit writes that region on its own
+    // schedule, which no PyPTO dependency edge models or could usefully order.
+    .no_arg_writes()
     .f_deduce_type(DeduceSetFFTSType);
 
 REGISTER_OP("system.sync_set")

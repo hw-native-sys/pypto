@@ -817,6 +817,11 @@ REGISTER_OP("tensor.set_validshape")
     // a lineage walk that cannot see the aliasing reports the result as a fresh
     // kernel allocation.
     .set_output_reuses_input(0)
+    // The in-place slot is metadata, not data: this op rebinds the valid extent
+    // and moves nothing, so no dependency edge should order against it. A
+    // verdict on record — the gate requires one, and "writes nothing" is the
+    // honest answer rather than an omission.
+    .no_arg_writes()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorSetValidShapeType(args, kwargs);

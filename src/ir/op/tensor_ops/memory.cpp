@@ -571,6 +571,16 @@ REGISTER_OP("tensor.assemble")
     // buffer, not a new allocation. Declaring it here keeps param/buffer lineage
     // analyses off a hardcoded op list.
     .set_output_reuses_input(0)
+    // A plain push overwrites the region it lands on; an atomic one accumulates
+    // into it, and accumulating reads the slot first.
+    .set_arg_effect(0,
+                    [](const std::vector<std::pair<std::string, std::any>>& kwargs) {
+                      return GetIntKwarg(kwargs, "atomic", static_cast<int>(AtomicType::kNone)) ==
+                                     static_cast<int>(AtomicType::kNone)
+                                 ? ArgEffect::Write
+                                 : ArgEffect::ReadWrite;
+                    })
+    .set_write_channel(WriteChannel::Dma)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorAssembleType(args, kwargs);
@@ -869,6 +879,11 @@ REGISTER_OP("tensor.write")
     .add_argument("tensor", "Destination tensor (TensorType)")
     .add_argument("indices", "Index dimensions (TupleType of ScalarType)")
     .add_argument("value", "Value to write (ScalarType)")
+    // Writes one element of `tensor` through the scalar D-cache path. The
+    // channel matters: PyPTO cannot order a scalar write against an MTE3
+    // store to the same GM tensor, and rejects a function that mixes them.
+    .set_arg_effect(0, ArgEffect::Write)
+    .set_write_channel(WriteChannel::Scalar)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorWriteType(args, kwargs);

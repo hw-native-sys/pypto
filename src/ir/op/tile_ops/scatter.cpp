@@ -196,6 +196,9 @@ REGISTER_OP("tile.scatter")
     .set_input_memory(2, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     .set_output_reuses_input(0)
+    // DPS: rewrites the indexed positions of `dst` and passes every other
+    // position through, so the prior content reaches the result — a read.
+    .set_arg_effect(0, ArgEffect::ReadWrite)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileScatterType(args, kwargs, "tile.scatter");
@@ -290,6 +293,8 @@ REGISTER_OP("tile.scatter_mask")
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     .set_output_reuses_input(0)
+    // DPS: mask-selected columns are rewritten, the rest pass through.
+    .set_arg_effect(0, ArgEffect::ReadWrite)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileScatterMaskType(args, kwargs, "tile.scatter_mask");

@@ -1315,6 +1315,8 @@ REGISTER_OP("tile.fillpad_inplace")
     .set_input_memory(0, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     .set_output_reuses_input(0)
+    // Rewrites only the padding elements; the data region passes through.
+    .set_arg_effect(0, ArgEffect::ReadWrite)
     .set_attr<PadValue>("pad_value")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {

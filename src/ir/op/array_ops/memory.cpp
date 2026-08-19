@@ -154,6 +154,9 @@ REGISTER_OP("array.update_element")
     .add_argument("array", "Source array (ArrayType)")
     .add_argument("index", "Element index (ScalarType, integer)")
     .add_argument("value", "Replacement value (ScalarType, dtype must match array)")
+    // Replaces one element and passes every other element of `array` through
+    // to the result, so the prior content is read.
+    .set_arg_effect(0, ArgEffect::ReadWrite)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceArrayUpdateElementType(args, kwargs);

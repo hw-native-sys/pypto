@@ -824,6 +824,56 @@ void BindIR(nb::module_& m) {
       },
       nb::arg("op_name"), "Get memory space specification for a registered operator");
 
+  nb::enum_<ArgEffect>(ir, "ArgEffect", "What executing an operator does to the buffer one argument names")
+      .value("Read", ArgEffect::Read, "Read, never written")
+      .value("Write", ArgEffect::Write, "Overwritten without being read first")
+      .value("ReadWrite", ArgEffect::ReadWrite, "Read and written (accumulate, atomic, in-place update)");
+
+  nb::enum_<WriteChannel>(ir, "WriteChannel", "The hardware path an operator's writes travel")
+      .value("Dma", WriteChannel::Dma, "MTE3 / DMA store path")
+      .value("Scalar", WriteChannel::Scalar, "Scalar D-cache write path");
+
+  ir.def(
+      "get_op_arg_effect",
+      [](const std::string& op_name, size_t arg_index, nb::kwargs kwargs) -> ArgEffect {
+        const auto& entry = OpRegistry::GetInstance().GetEntry(op_name);
+        // The same conversion every other kwarg-taking binding uses. Rolling a
+        // local int/str pair here rejected the enum-valued kwargs an operator
+        // legitimately carries — `tile.mgather`'s `target_memory` is a
+        // `MemorySpace`, and it is exactly what that operator's effect resolver
+        // reads.
+        nb::dict kwargs_dict;
+        for (auto [key, value] : kwargs) {
+          kwargs_dict[key] = value;
+        }
+        return entry.GetArgEffect(arg_index, ConvertKwargsDict(kwargs_dict));
+      },
+      nb::arg("op_name"), nb::arg("arg_index"), nb::arg("kwargs"),
+      "Effect an operator has on one positional argument, for a call carrying the given kwargs");
+
+  ir.def(
+      "op_has_declared_arg_effects",
+      [](const std::string& op_name) {
+        return OpRegistry::GetInstance().GetEntry(op_name).HasDeclaredArgEffects();
+      },
+      nb::arg("op_name"), "Whether an operator declared its per-argument effects (False = never classified)");
+
+  ir.def(
+      "op_has_declared_arg_effect",
+      [](const std::string& op_name, size_t arg_index) {
+        return OpRegistry::GetInstance().GetEntry(op_name).HasDeclaredArgEffect(arg_index);
+      },
+      nb::arg("op_name"), nb::arg("arg_index"),
+      "Whether the registration reached a verdict about this argument in particular");
+
+  ir.def(
+      "get_op_write_channel",
+      [](const std::string& op_name) -> nb::object {
+        auto channel = OpRegistry::GetInstance().GetEntry(op_name).GetWriteChannel();
+        return channel.has_value() ? nb::cast(*channel) : nb::none();
+      },
+      nb::arg("op_name"), "The hardware path an operator's writes travel, or None when it declared none");
+
   // Var - const shared_ptr
   auto var_class = nb::class_<Var, Expr>(ir, "Var", "Variable reference expression");
 

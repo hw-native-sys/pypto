@@ -140,6 +140,10 @@ REGISTER_OP("pld.tensor.allreduce")
     .set_attr<std::string>("mode")
     .set_attr<int>("core_num")
     .no_memory_spec()
+    // Composite collective — target is reduced in place per chunk; signal is written by notify and read by
+    // wait.
+    .set_arg_effect(0, ArgEffect::ReadWrite)
+    .set_arg_effect(1, ArgEffect::ReadWrite)
     .f_deduce_type(DeduceTensorAllReduceType);
 
 }  // namespace ir

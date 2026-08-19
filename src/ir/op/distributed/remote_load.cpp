@@ -252,6 +252,8 @@ REGISTER_OP("pld.tile.remote_load")
     .add_argument("valid_shape", "Optional valid tile extent for ragged tails (MakeTuple of scalars)")
     .set_attr<bool>("allow_physical_tail_padding")
     .no_memory_spec()
+    // Pulls a peer's window into a fresh SSA tile: every operand is a read.
+    .no_arg_writes()
     .f_deduce_type(DeduceRemoteLoadType);
 
 }  // namespace ir

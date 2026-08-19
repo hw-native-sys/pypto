@@ -223,6 +223,9 @@ REGISTER_OP("pld.tensor.get")
     .set_attr<bool>("pipeline")
     .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
     .no_memory_spec()
+    // TGET lands the pulled bytes in the local destination `dst`.
+    .set_arg_effect(0, ArgEffect::Write)
+    .set_write_channel(WriteChannel::Dma)
     .f_deduce_type(DeduceGetType);
 
 // ============================================================================
@@ -250,6 +253,9 @@ REGISTER_OP("pld.tile.get")
     .add_argument("shape", "Optional per-dim transfer shape (MakeTuple); present only in the subregion form")
     .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
     .no_memory_spec()
+    // TGET lands the pulled bytes in the local destination `dst`.
+    .set_arg_effect(0, ArgEffect::Write)
+    .set_write_channel(WriteChannel::Dma)
     .f_deduce_type(DeduceGetTileType);
 
 }  // namespace ir
