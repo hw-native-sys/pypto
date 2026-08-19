@@ -11,6 +11,7 @@
 
 #include <any>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -25,6 +26,7 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/type.h"
@@ -41,8 +43,14 @@ TypePtr DeduceUnknownType(const std::vector<ExprPtr>& args,
 }
 
 // Read the required "split" int attr shared by the split-axis reshape ops
-// (reuses the tpush/tpop encoding: 0 = NONE/no split axis, 1 = UP_DOWN/axis0,
-// 2 = LEFT_RIGHT/axis1).
+// (0 = NONE/no split axis, 1 = UP_DOWN/axis0, 2 = LEFT_RIGHT/axis1).
+//
+// These two ops carry the AUTHORED MODE, not the pto-isa split code: the odd
+// codes (kSplitUpDownOdd / kSplitLeftRightOdd, see include/pypto/ir/stmt.h)
+// describe how the two lanes' RUNTIME extents relate, which is a property of
+// the transport rather than of the author's choice of axis. ExpandMixedKernel
+// derives the code from this mode plus the boundary tile's extents when it
+// mints the tpush / tpop pair (split_axis::ShardSplitCode).
 //
 // 0 is the task-parallel (``mode=pl.SplitMode.NONE``) region: both AIV lanes run
 // the full body, so there is no axis to halve — the op still marks the AIC/AIV
@@ -60,10 +68,33 @@ int ReadSplitAttr(const std::vector<std::pair<std::string, std::any>>& kwargs, c
       << op_name << " requires a 'split' attr (0 = NONE/no split axis, 1 = UP_DOWN/axis0, "
       << "2 = LEFT_RIGHT/axis1)";
   const int split = *split_opt;
-  CHECK_SPAN(split == 0 || split == 1 || split == 2, span)
+  CHECK_SPAN(split == kSplitNone || split == kSplitUpDown || split == kSplitLeftRight, span)
       << op_name << " split must be 0 (NONE/no split axis), 1 (UP_DOWN/axis0) or 2 (LEFT_RIGHT/axis1), "
       << "but got " << split;
   return split;
+}
+
+// The optional "lane_stride" attr: how far apart the two AIV lanes' data sits on
+// the split axis. Absent (the common case) means the default box partition,
+// where the stride is the tile's own physical half. LowerAutoVectorSplit stamps
+// it when it rebalances a ragged boundary across the lanes, and ExpandMixedKernel
+// reads it back to pick the transport's pto-isa split code — so it is the
+// compiler's own bookkeeping, never something an author writes.
+void CheckLaneStrideAttr(const std::vector<std::pair<std::string, std::any>>& kwargs,
+                         const ExprPtr& split_axis_extent, const std::string& op_name, const Span& span) {
+  for (const auto& [key, value] : kwargs) {
+    if (key != "lane_stride") continue;
+    const int stride = AnyCast<int>(value, "kwarg key: lane_stride");
+    CHECK_SPAN(stride > 0, span) << op_name << ": 'lane_stride' must be a positive partition stride, but got "
+                                 << stride;
+    if (auto extent = As<ConstInt>(split_axis_extent)) {
+      const int64_t box_half = (extent->value_ + 1) / 2;
+      CHECK_SPAN(stride <= box_half, span)
+          << op_name << ": 'lane_stride' " << stride << " exceeds the per-lane physical half " << box_half
+          << " of a " << extent->value_ << "-wide split axis";
+    }
+    return;
+  }
 }
 
 // Shared split-axis reshape core for both the tile ops (tile.aiv_shard /
@@ -71,18 +102,21 @@ int ReadSplitAttr(const std::vector<std::pair<std::string, std::any>>& kwargs, c
 // Halves (shard, `halve` = true) or doubles (gather, `halve` = false) the
 // split-axis extent of `shape` and `valid`.
 //
-// Static (ConstInt) extents are halved/doubled directly; for the halving
-// direction a static split-axis extent must be even. Dynamic (non-ConstInt)
-// extents are reshaped symbolically (floordiv(dim, 2) on shard, dim * 2 on
-// gather) so the result type reflects the shard/gather along the split axis
-// rather than an identity reshape.
+// The physical half is the CEIL half, which is what makes an ODD split axis
+// representable: 2k+1 gives BOTH lanes a (k+1)-cell box, and the raggedness is
+// carried by the per-lane valid extent that LowerAutoVectorSplit materializes
+// once the lane index is in scope (lane 0 fills k+1, lane 1 fills k). That is
+// pto-isa's TILE_UP_DOWN_ODD / TILE_LEFT_RIGHT_ODD contract, which
+// ExpandMixedKernel selects when it mints the transport ops
+// (split_axis::ShardSplitCode). An even extent is unaffected: ceil(2k/2) == k.
 //
-// The even-extent requirement applies to the PHYSICAL split-axis extent only;
-// the per-lane valid_shape is reshaped with ceil-div on halve (floordiv(dim + 1,
-// 2), keeping valid <= physical) since the true per-lane valid region is
-// localized later at lowering time, which knows the subblock (lane) index. This
-// avoids rejecting an input whose physical extent is even but whose partial
-// valid_shape happens to be odd.
+// Dynamic (non-ConstInt) extents are reshaped symbolically (floordiv(dim, 2) on
+// shard, dim * 2 on gather) so the result type reflects the shard/gather along
+// the split axis rather than an identity reshape.
+//
+// The per-lane valid_shape is reshaped with ceil-div on halve (floordiv(dim + 1,
+// 2), keeping valid <= physical), since the true per-lane valid region is
+// localized later at lowering time.
 struct SplitReshaped {
   std::vector<ExprPtr> shape;
   std::vector<ExprPtr> valid;
@@ -91,16 +125,12 @@ struct SplitReshaped {
 SplitReshaped ReshapeSplitAxis(std::vector<ExprPtr> shape, std::vector<ExprPtr> valid, size_t axis,
                                bool halve, const std::string& op_name, const Span& span) {
   if (auto c = As<ConstInt>(shape[axis])) {
-    if (halve) {
-      CHECK_SPAN(c->value_ % 2 == 0, span)
-          << op_name << ": split-axis static extent " << c->value_ << " must be even to shard in half";
-      shape[axis] = std::make_shared<ConstInt>(c->value_ / 2, c->dtype(), shape[axis]->span_);
-    } else {
-      shape[axis] = std::make_shared<ConstInt>(c->value_ * 2, c->dtype(), shape[axis]->span_);
-    }
+    // Ceil half: exact for an even extent, lane 1's spare cell for an odd one.
+    const int64_t reshaped = halve ? (c->value_ + 1) / 2 : c->value_ * 2;
+    shape[axis] = std::make_shared<ConstInt>(reshaped, c->dtype(), shape[axis]->span_);
   } else {
-    // Dynamic split-axis extent: symbolic half / double. Per-lane evenness is
-    // resolved at lowering time, which knows the subblock index.
+    // Dynamic split-axis extent: symbolic half / double. The per-lane extents
+    // are resolved at lowering time, which knows the subblock index.
     auto two = std::make_shared<ConstInt>(2, GetScalarDtype(shape[axis]), shape[axis]->span_);
     shape[axis] = halve ? MakeFloorDiv(shape[axis], two, shape[axis]->span_)
                         : MakeMul(shape[axis], two, shape[axis]->span_);
@@ -314,7 +344,8 @@ TypePtr DeduceSplitReshape(const std::vector<ExprPtr>& args,
   CHECK_SPAN(tile_type->shape_.size() == 2, args[0]->span_)
       << op_name << " requires a 2D tile, but got rank " << tile_type->shape_.size();
 
-  const size_t axis = (split == 1) ? 0 : 1;
+  const size_t axis = static_cast<size_t>(SplitAxisFromSplitCode(split));
+  CheckLaneStrideAttr(kwargs, tile_type->shape_[axis], op_name, args[0]->span_);
   CheckSplitBoundaryCarriesValid(op_name, tile_type->shape_, GetValidShape(tile_type), static_cast<int>(axis),
                                  halve, args[0]->span_);
   auto reshaped =
@@ -369,7 +400,7 @@ TypePtr DeduceSplitReshapeTensor(const std::vector<ExprPtr>& args,
       << ". Reshape the operand to 2D (pl.reshape) before the shard / gather so the "
          "UP_DOWN / LEFT_RIGHT split axis is unambiguous.";
 
-  const size_t axis = (split == 1) ? 0 : 1;
+  const size_t axis = static_cast<size_t>(SplitAxisFromSplitCode(split));
 
   // Valid shape: TensorView::valid_shape if set, otherwise the static shape
   // (mirrors GetValidShape for tiles).
@@ -418,6 +449,9 @@ REGISTER_OP("tile.tpush_to_aiv")
     .set_cross_core_role(core_affinity::CrossCoreRole::TPush)
     .add_argument("tile", "Tile data to transfer")
     .set_attr<int>("split")
+    // Optional partition stride (see tile.aiv_shard); consumed by the torch
+    // reference runtime, ignored by PTO codegen.
+    .set_attr<int>("lane_stride")
     .set_attr<int>("id")
     .no_memory_spec()
     .f_deduce_type(DeduceUnknownType);
@@ -442,6 +476,9 @@ REGISTER_OP("tile.tpop_from_aic")
     .set_cross_core_role(core_affinity::CrossCoreRole::TPop)
     .no_argument()
     .set_attr<int>("split")
+    // Optional partition stride (see tile.aiv_shard); consumed by the torch
+    // reference runtime, ignored by PTO codegen.
+    .set_attr<int>("lane_stride")
     .set_attr<int>("id")
     .no_memory_spec()
     .f_deduce_type(DeduceUnknownType);
@@ -498,6 +535,9 @@ REGISTER_OP("tile.aiv_shard")
         "shape (split=0)")
     .add_argument("tile", "Tile data to shard (TileType, 2D)")
     .set_attr<int>("split")
+    // Optional; stamped by LowerAutoVectorSplit when it balances a ragged
+    // boundary across the two lanes (see CheckLaneStrideAttr).
+    .set_attr<int>("lane_stride")
     .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {

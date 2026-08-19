@@ -203,20 +203,36 @@ or call `set_validshape` on the source tile before taking the view.
   `tile.set_validshape`, `tpush` emits the same tile handle after its runtime valid shape has been
   updated. For split `tpush`, codegen temporarily uses the full physical transport box, then restores
   the producer tile's logical valid shape.
-- The Cube-to-Vector FIFO is physically box-strided at **every** split: the ISA builds the GM slot
-  view from the popped tile's compile-time rows/cols and the producer's box row pitch, then strides
-  that view with the tile's *runtime* `valid_col`. A partial valid shape on TPOP therefore collapses
-  the GM row gap and makes the consumer read one contiguous run instead of one box row per burst —
-  silent corruption of the *valid* region, since the ISA's matching assertion is compiled out in
-  release builds. So a partial Acc-to-Vec transfer uses the full physical box for both TPUSH and
-  TPOP, whether the transfer is no-split or `split = 1` / `split = 2`, and restores the logical valid
-  shape immediately on each side of the transport — on the consumer side through a metadata-only
-  `pto.treshape` (a frontend tpop result is not a locally bound PTOAS tile, so `pto.set_validshape`
-  cannot restore it in place).
+- `split` is pto-isa's `TileSplitAxis`, printed verbatim. `0` = no split, `1` / `2` = up-down /
+  left-right, and `3` / `4` = the same two axes over an **odd** extent:
+
+  | Code | pto-isa | Lane 0 | Lane 1 | Lane 1's band starts at |
+  | ---- | ------- | ------ | ------ | ----------------------- |
+  | 0 | `TILE_NO_SPLIT` | whole tile | (single reader) | — |
+  | 1 / 2 | `TILE_UP_DOWN` / `TILE_LEFT_RIGHT` | `e0` | `e1` | `e1 * pitch` |
+  | 3 / 4 | `TILE_UP_DOWN_ODD` / `TILE_LEFT_RIGHT_ODD` | `e0` | `e1` | `(e1 + 1) * pitch` |
+
+  `eL` is lane `L`'s **runtime** valid extent on the split axis — the ISA reads it off the popped
+  tile (`popVecTileFromGMFiFo`), so the even codes require `e0 == e1` and the odd ones
+  `e0 == e1 + 1`. [LowerAutoVectorSplit](../passes/20-lower_auto_vector_split.md) materializes those
+  extents and [ExpandMixedKernel](../passes/21-expand_mixed_kernel.md) picks the matching code.
+- The Cube-to-Vector FIFO carries a compacted rectangle: the producer stores its `valid_row` x
+  `valid_col` block at a `valid_col` row pitch, and each consumer lane reads its band back with the
+  same pitch (`gmStrideR = valid_col`, doubled for the left-right codes). A partial valid shape on
+  one side of the transport and not the other therefore mis-strides the pop — silent corruption of
+  the *valid* region, since the ISA's matching assertion is compiled out in release builds. So a
+  partial Acc-to-Vec transfer uses the full physical box for both TPUSH and TPOP, whether the
+  transfer is no-split or split, and restores the logical valid shape immediately on each side of the
+  transport — on the consumer side through a metadata-only `pto.treshape` (a frontend tpop result is
+  not a locally bound PTOAS tile, so `pto.set_validshape` cannot restore it in place). The split-axis
+  extent is the exception: it stays per-lane on the TPOP operands, because that is what tells the ISA
+  where lane 1's band begins.
 - When a tpop result `TileView.valid_shape` differs from the physical tile shape, PTO codegen emits PTOAS frontend operands as `%buf = pto.tpop_from_*(%valid_row, %valid_col) {[id = I, ]split = N} -> !pto.tile_buf<..., v_row=?, v_col=?, ...>`. This covers dynamic expressions and static non-full shapes such as `[0, 0]`; the operands carry the logical extents used by compute and store. The full-box Cube-to-Vector transport above overrides this for a statically-shaped, non-empty partial pop, because `pto.treshape` carries no valid-row/valid-col operands and so can only restore *static* logical extents.
-- For split consumers, `SplitVectorKernel` localizes those dynamic tpop
+- For split consumers, `LowerAutoVectorSplit` localizes those dynamic tpop
   valid-shape operands per subblock (for example global `[8, 16]` becomes
-  `[8, 16]` then `[0, 16]` under up/down split of a `[16, 16]` tile).
+  `[8, 16]` then `[0, 16]` under up/down split of a `[16, 16]` tile). An odd
+  split axis reaches the operands the same way — a `[17, 128]` tile pops
+  `[9, 128]` on lane 0 and `[8, 128]` on lane 1 under `split = 3`.
 - `system.tfree_*` derives `split` from its tile argument, so the frontend must free the exact SSA value produced by `tile.tpop_*`, even though the PTO instruction itself does not take the tile as an explicit operand
 - `ExpandMixedKernel` now auto-generates consumer-side `system.tfree_*` after split-generated `tile.tpop_*`, preserving `tpop -> direct users -> tfree -> next tpop`
 - `reserve_buffer` and `import_reserved_buffer` return `i32` SSA values; `initialize_pipe` references them as operands

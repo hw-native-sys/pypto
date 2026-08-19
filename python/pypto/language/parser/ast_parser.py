@@ -6272,9 +6272,17 @@ class ASTParser:
         # attr on the lowered op, never a SplitMode literal); any other kwarg is
         # rejected as well.
         explicit_split: ast.expr | None = None
+        explicit_lane_stride: ast.expr | None = None
         for kw in call.keywords:
             if kw.arg == "split":
                 explicit_split = cast("ast.expr", kw.value)
+                continue
+            if kw.arg == "lane_stride":
+                # Compiler bookkeeping stamped by LowerAutoVectorSplit when it
+                # balances a ragged boundary across the two AIV lanes; it only
+                # ever appears alongside an explicit ``split=`` in the printed
+                # outlined form, and is accepted here so that round-trips.
+                explicit_lane_stride = cast("ast.expr", kw.value)
                 continue
             if kw.arg == "mode":
                 raise ParserSyntaxError(
@@ -6350,9 +6358,28 @@ class ASTParser:
                     span=span,
                     hint=hint,
                 )
-            return ir.create_op_call(
-                f"{op_ns}.{op_name}", [operand_expr], {"split": int(explicit_split.value)}, span
-            )
+            kwargs: dict[str, Any] = {"split": int(explicit_split.value)}
+            if explicit_lane_stride is not None:
+                if op_name == "aic_gather":
+                    raise ParserSyntaxError(
+                        "pl.aic_gather() does not take a lane_stride= argument: only the Cube -> "
+                        "Vector shard is ever rebalanced onto a ragged boundary's valid region, so "
+                        "the gather always re-joins the lanes on the box partition",
+                        span=span,
+                        hint=hint,
+                    )
+                if not (
+                    isinstance(explicit_lane_stride, ast.Constant)
+                    and isinstance(explicit_lane_stride.value, int)
+                ):
+                    raise ParserSyntaxError(
+                        f"pl.{op_name}(..., lane_stride=N) requires an integer partition stride, got "
+                        f"'{ast.unparse(explicit_lane_stride)}'",
+                        span=span,
+                        hint=hint,
+                    )
+                kwargs["lane_stride"] = int(explicit_lane_stride.value)
+            return ir.create_op_call(f"{op_ns}.{op_name}", [operand_expr], kwargs, span)
 
         # High-level scoped form — inherit the mode from the enclosing scope.
         # This is the only path that emits the tensor form (region-only).
@@ -6361,6 +6388,14 @@ class ASTParser:
                 f"pl.{op_name}() must be used inside a 'for ... in pl.split_aiv(...)' loop "
                 "(or pass an explicit integer 'split=' in the outlined form); it otherwise "
                 "inherits the split mode from that scope",
+                span=span,
+                hint=hint,
+            )
+        if explicit_lane_stride is not None:
+            raise ParserSyntaxError(
+                f"pl.{op_name}() does not take a lane_stride= argument inside a "
+                "'for ... in pl.split_aiv(...)' loop — the partition follows the region's own "
+                "per-lane offsets",
                 span=span,
                 hint=hint,
             )

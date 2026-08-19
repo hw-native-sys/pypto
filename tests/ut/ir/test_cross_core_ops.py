@@ -330,7 +330,7 @@ def test_split_reshape_rejects_non_2d_tile():
 
 
 def test_split_reshape_rejects_bad_split_attr():
-    """split must be 0, 1 or 2 — anything else is rejected."""
+    """split names the authored MODE — 0, 1 or 2; the pto-isa codes live on tpush/tpop."""
     span = ir.Span.unknown()
     tile_var = ir.Var("t", ir.TileType([16, 128], DataType.FP32), span)
 
@@ -389,13 +389,20 @@ def test_split_reshape_at_split_zero_skips_even_extent_guard():
     assert result.shape == [15, 128]
 
 
-def test_aiv_shard_rejects_odd_split_axis():
-    """aiv_shard requires the static split-axis extent to be even."""
+def test_aiv_shard_shards_an_odd_split_axis_to_the_ceil_half():
+    """An odd split axis shards to the CEIL half — both lanes get the same box.
+
+    pto-isa's TILE_UP_DOWN_ODD gives lane 0 ``rows / 2 + 1`` and lane 1
+    ``rows / 2``. A type function does not know the lane, so the deduced box is
+    the ceil half for both and the raggedness is carried by the per-lane valid
+    extent that LowerAutoVectorSplit materializes.
+    """
     span = ir.Span.unknown()
     tile_var = ir.Var("t", ir.TileType([15, 128], DataType.FP32), span)
 
-    with pytest.raises(ValueError, match="must be even"):
-        ir.create_op_call("tile.aiv_shard", [tile_var], {"split": 1}, span)
+    sharded = ir.create_op_call("tile.aiv_shard", [tile_var], {"split": 1}, span)
+    assert isinstance(sharded.type, ir.TileType)
+    assert sharded.type.shape == [8, 128]  # ceil(15 / 2)
 
 
 def test_aiv_shard_allows_even_physical_with_odd_valid_shape():
@@ -544,7 +551,7 @@ def test_tensor_split_reshape_rejects_distributed_tensor():
 
 
 def test_tensor_split_reshape_rejects_bad_split_attr():
-    """split must be 0, 1 or 2 — anything else is rejected."""
+    """split names the authored MODE — 0, 1 or 2; the pto-isa codes live on tpush/tpop."""
     span = ir.Span.unknown()
     tensor_var = ir.Var("t", ir.TensorType([16, 128], DataType.FP32), span)
 
@@ -585,13 +592,14 @@ def test_tensor_split_reshape_at_split_zero_allows_non_2d():
     assert result.shape == [2, 16, 128]
 
 
-def test_tensor_aiv_shard_rejects_odd_split_axis():
-    """tensor.aiv_shard requires the static split-axis extent to be even."""
+def test_tensor_aiv_shard_shards_an_odd_split_axis_to_the_ceil_half():
+    """Tensor mirror of the tile deducer: an odd axis shards to the ceil half."""
     span = ir.Span.unknown()
     tensor_var = ir.Var("t", ir.TensorType([15, 128], DataType.FP32), span)
 
-    with pytest.raises(ValueError, match="must be even"):
-        ir.create_op_call("tensor.aiv_shard", [tensor_var], {"split": 1}, span)
+    sharded = ir.create_op_call("tensor.aiv_shard", [tensor_var], {"split": 1}, span)
+    assert isinstance(sharded.type, ir.TensorType)
+    assert sharded.type.shape == [8, 128]  # ceil(15 / 2)
 
 
 def test_tensor_aiv_shard_allows_even_physical_with_odd_valid_shape():

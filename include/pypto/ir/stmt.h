@@ -122,6 +122,86 @@ inline SplitMode StringToSplitMode(const std::string& str) {
 }
 
 /**
+ * @brief ISA split codes carried by the ``split`` attr of the cross-core ops.
+ *
+ * The attr on the TRANSPORT ops — ``tile.tpush_*`` / ``tile.tpop_*`` /
+ * ``system.tfree_*`` — mirrors pto-isa's ``TileSplitAxis`` 1:1, because PTO
+ * codegen prints it verbatim as ``{split = N}``. (The boundary ops
+ * ``tile.aiv_shard`` / ``tile.aic_gather`` carry the authored ``SplitMode``
+ * instead — 0/1/2 only; ExpandMixedKernel derives the code from it.)
+ *
+ * | Code | pto-isa                 | Lane 0            | Lane 1            |
+ * | ---- | ----------------------- | ----------------- | ----------------- |
+ * | 0    | ``TILE_NO_SPLIT``       | whole tile        | (single reader)   |
+ * | 1    | ``TILE_UP_DOWN``        | rows ``[0, N/2)`` | rows ``[N/2, N)`` |
+ * | 2    | ``TILE_LEFT_RIGHT``     | cols ``[0, N/2)`` | cols ``[N/2, N)`` |
+ * | 3    | ``TILE_UP_DOWN_ODD``    | ``N/2 + 1`` rows  | ``N/2`` rows      |
+ * | 4    | ``TILE_LEFT_RIGHT_ODD`` | ``N/2 + 1`` cols  | ``N/2`` cols      |
+ *
+ * ``SplitMode`` names the axis the author picked; the ODD codes additionally
+ * encode that the two lanes' extents differ by one, so they have no
+ * ``SplitMode`` spelling. Codes 3/4 are legal only on the C2V (Cube -> Vector)
+ * shard direction: pto-isa's V2C producer (``pushVec2GMFiFo``) offsets lane 1
+ * by lane 1's own extent and so has no odd form. See
+ * ``split_axis::ShardSplitCode`` for how a boundary's code is chosen.
+ */
+constexpr int kSplitNone = 0;
+constexpr int kSplitUpDown = 1;
+constexpr int kSplitLeftRight = 2;
+constexpr int kSplitUpDownOdd = 3;
+constexpr int kSplitLeftRightOdd = 4;
+constexpr int kSplitCodeMax = kSplitLeftRightOdd;
+
+/// @brief Whether @p code is one of the two odd (ragged-lane) split codes.
+[[nodiscard]] inline bool IsOddSplitCode(int code) {
+  return code == kSplitUpDownOdd || code == kSplitLeftRightOdd;
+}
+
+/// @brief Whether @p code is a split code the IR (and pto-isa) understands.
+[[nodiscard]] inline bool IsValidSplitCode(int code) { return code >= kSplitNone && code <= kSplitCodeMax; }
+
+/**
+ * @brief The split code for @p mode over a split axis of the given parity.
+ * @param mode The authored split mode (``None`` always yields ``kSplitNone``).
+ * @param odd_extent Whether the PRE-split split-axis extent is statically odd.
+ */
+[[nodiscard]] inline int SplitCodeFor(SplitMode mode, bool odd_extent) {
+  switch (mode) {
+    case SplitMode::None:
+      return kSplitNone;
+    case SplitMode::UpDown:
+      return odd_extent ? kSplitUpDownOdd : kSplitUpDown;
+    case SplitMode::LeftRight:
+      return odd_extent ? kSplitLeftRightOdd : kSplitLeftRight;
+  }
+  throw pypto::TypeError("Unknown SplitMode");
+}
+
+/**
+ * @brief The authored mode behind a split code (both odd codes normalize to
+ *        their even sibling — parity is not part of the authored mode).
+ */
+[[nodiscard]] inline SplitMode SplitModeFromSplitCode(int code) {
+  switch (code) {
+    case kSplitNone:
+      return SplitMode::None;
+    case kSplitUpDown:
+    case kSplitUpDownOdd:
+      return SplitMode::UpDown;
+    case kSplitLeftRight:
+    case kSplitLeftRightOdd:
+      return SplitMode::LeftRight;
+    default:
+      throw pypto::ValueError("Unknown cross-core split code: " + std::to_string(code));
+  }
+}
+
+/// @brief The tile dimension a split code partitions (0 = rows, 1 = columns).
+[[nodiscard]] inline int SplitAxisFromSplitCode(int code) {
+  return (code == kSplitUpDown || code == kSplitUpDownOdd) ? 0 : 1;
+}
+
+/**
  * @brief Convert ForKind to string
  * @param kind The for loop kind
  * @return String representation ("Sequential", "Parallel", "Unroll", or "Pipeline")

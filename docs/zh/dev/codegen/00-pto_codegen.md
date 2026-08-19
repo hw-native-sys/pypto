@@ -196,19 +196,34 @@ tile 调用 `set_validshape`。
   `tile.set_validshape` 更新，`tpush` 会发射已经更新运行时 valid shape 的同一个
   tile handle。对于 split `tpush`，codegen 会临时使用完整物理传输 box，随后恢复
   producer tile 的逻辑 valid shape。
-- Cube-to-Vector FIFO 在**任意** split 下都按物理 box stride 搬运：ISA 用被弹出
-  tile 的编译期 rows/cols 以及 producer 的 box 行间距构造 GM 槽位视图，再用该 tile
-  的*运行时* `valid_col` 去 stride 这个视图。因此 TPOP 上的部分 valid shape 会让 GM
-  行间隙塌缩为 0，消费侧读到的是一段连续数据而不是每次一行 box——这会静默破坏
-  *有效*区域的数据，因为 ISA 中对应的断言在 release 构建里被编译掉了。所以部分有效的
-  Acc-to-Vec 传输在无切分以及 `split = 1` / `split = 2` 下，TPUSH 和 TPOP 都使用完整
-  物理 box，并在传输两侧立即恢复逻辑 valid shape——消费侧通过纯元数据的
-  `pto.treshape` 恢复（前端 tpop 结果不是 PTOAS 的本地绑定 tile，`pto.set_validshape`
-  无法就地修改它）。
+- `split` 就是 pto-isa 的 `TileSplitAxis`，原样打印。`0` = 不切分，`1` / `2` = 上下 /
+  左右，`3` / `4` = 同样两个轴、但 extent 为**奇数**：
+
+  | Code | pto-isa | Lane 0 | Lane 1 | Lane 1 的数据段起点 |
+  | ---- | ------- | ------ | ------ | ------------------- |
+  | 0 | `TILE_NO_SPLIT` | 整块 tile | （单一读者） | — |
+  | 1 / 2 | `TILE_UP_DOWN` / `TILE_LEFT_RIGHT` | `e0` | `e1` | `e1 * pitch` |
+  | 3 / 4 | `TILE_UP_DOWN_ODD` / `TILE_LEFT_RIGHT_ODD` | `e0` | `e1` | `(e1 + 1) * pitch` |
+
+  `eL` 是 lane `L` 在切分轴上的**运行时** valid extent——ISA 直接从被弹出的 tile 上读取
+  （`popVecTileFromGMFiFo`），因此偶数 code 要求 `e0 == e1`，奇数 code 要求
+  `e0 == e1 + 1`。这些 extent 由
+  [LowerAutoVectorSplit](../passes/20-lower_auto_vector_split.md) 物化，
+  [ExpandMixedKernel](../passes/21-expand_mixed_kernel.md) 选择匹配的 code。
+- Cube-to-Vector FIFO 搬运的是紧凑矩形：producer 以 `valid_col` 为行间距写入
+  `valid_row` x `valid_col` 数据块，每个消费 lane 再以相同间距读回自己的数据段
+  （`gmStrideR = valid_col`，左右切分的 code 下加倍）。因此若传输两侧的 valid shape
+  不一致，pop 的 stride 就会错位——这会静默破坏*有效*区域的数据，因为 ISA 中对应的
+  断言在 release 构建里被编译掉了。所以部分有效的 Acc-to-Vec 传输无论是否切分，
+  TPUSH 和 TPOP 都使用完整物理 box，并在传输两侧立即恢复逻辑 valid shape——消费侧
+  通过纯元数据的 `pto.treshape` 恢复（前端 tpop 结果不是 PTOAS 的本地绑定 tile，
+  `pto.set_validshape` 无法就地修改它）。唯一的例外是切分轴上的 extent：它必须保持
+  逐 lane 的值并留在 TPOP 操作数上，因为 ISA 正是靠它定位 lane 1 的数据段起点。
 - 当 tpop 结果的 `TileView.valid_shape` 与物理 tile shape 不一致时，PTO codegen 会生成 PTOAS 前端操作数：`%buf = pto.tpop_from_*(%valid_row, %valid_col) {[id = I, ]split = N} -> !pto.tile_buf<..., v_row=?, v_col=?, ...>`。这同时覆盖动态表达式和 `[0, 0]` 这类静态非满形状；operand 携带后续计算和 store 使用的逻辑范围。对于静态形状、非空的部分 pop，上述 Cube-to-Vector 完整 box 传输优先，因为 `pto.treshape` 不带 valid-row/valid-col operand，只能恢复*静态*逻辑范围。
-- 对于 split consumer，`SplitVectorKernel` 会按 subblock 本地化这些动态
+- 对于 split consumer，`LowerAutoVectorSplit` 会按 subblock 本地化这些动态
   tpop valid-shape operand（例如 `[16, 16]` tile 做上下切分时，全局
-  `[8, 16]` 会变成 `[8, 16]` 和 `[0, 16]`）。
+  `[8, 16]` 会变成 `[8, 16]` 和 `[0, 16]`）。奇数切分轴走同一条路径——`[17, 128]`
+  的 tile 在 `split = 3` 下，lane 0 弹出 `[9, 128]`，lane 1 弹出 `[8, 128]`。
 - `system.tfree_*` 的 `split` 来自其 tile 参数，因此前端必须释放由 `tile.tpop_*` 产生的那个确切 SSA 值，即使 PTO 指令本身并不显式接收该 tile 作为操作数
 - `ExpandMixedKernel` 现在会在 split 生成的消费侧 `tile.tpop_*` 之后自动补 `system.tfree_*`，保持 `tpop -> direct users -> tfree -> next tpop`
 - `reserve_buffer` 和 `import_reserved_buffer` 返回 `i32` SSA 值；`initialize_pipe` 以操作数引用这些值

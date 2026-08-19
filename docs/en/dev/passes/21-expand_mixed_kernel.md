@@ -266,6 +266,10 @@ Phase 2 — Expand each InCore function F:
   4. Build AIC body: keep CUBE + SHARED stmts, prune VECTOR, recurse into MIXED loops
      - For boundary move (Cube→Vector): emit tpush_to_aiv(source_tile)
      - For boundary move (Vector→Cube): emit dest_var = tpop_from_aiv() with fractal TileView
+  4a. For an op-driven boundary (tile.aiv_shard / tile.aic_gather), derive the
+      pto-isa split CODE for the tpush/tpop pair from the op's authored MODE plus
+      the full-width tile's extents (BoundaryTransportSplitCode ->
+      split_axis::ShardSplitCode / GatherSplitCode) — see "The split code" below
   5. Build AIV body: symmetric (keep VECTOR + SHARED, prune CUBE)
      - For boundary move (Cube→Vector): emit dest_var = tpop_from_aic() with fractal TileView
      - For boundary move (Vector→Cube): emit tile.move to adapt fractal layout, then tpush_to_aic(adapted_tile)
@@ -343,6 +347,32 @@ emitted as a bare `EvalStmt` and the wrapper returns the matching Group
 params directly (e.g. `return out_0`), keeping the `ReturnParamsExplicit`
 invariant. Only when some position is not a param writeback does it fall back
 to the legacy `result = aiv_call(); return result` form.
+
+## The split code
+
+`tile.aiv_shard` / `tile.aic_gather` carry the authored **mode** (`0` / `1` / `2`);
+the transport pair this pass mints carries pto-isa's `TileSplitAxis` **code**
+(`0`..`4`), which additionally says how the two AIV lanes' *runtime* extents
+relate — that is how the consumer finds lane 1's band inside the FIFO slot:
+
+| Code | pto-isa | Lane 1's band starts at | Requires |
+| ---- | ------- | ----------------------- | -------- |
+| 1 / 2 | `TILE_UP_DOWN` / `TILE_LEFT_RIGHT` | `e1 * pitch` | `e0 == e1` |
+| 3 / 4 | `TILE_UP_DOWN_ODD` / `TILE_LEFT_RIGHT_ODD` | `(e1 + 1) * pitch` | `e0 == e1 + 1` |
+
+`BoundaryTransportSplitCode` reads the lane extents `eL = clamp(V - L*S, 0, S)`
+off the FULL-width tile — the shard's operand (Cube→Vector) or the gather's result
+(Vector→Cube). `S` is the partition stride: the tile's physical half, or the
+balanced `lane_stride=S` attr when
+[LowerAutoVectorSplit](20-lower_auto_vector_split.md) rebalanced a ragged
+boundary. So an odd split axis (an odd physical box, an odd valid extent inside
+an even one, or a rebalanced odd valid region) takes the odd code, an empty
+lane 1 keeps the even one, and a ragged extent pto-isa cannot place — only
+reachable on the box partition — is rejected with the extents that would work.
+Both lane bodies run the same derivation on the same inputs, so the AIC and AIV
+sides always agree. The Vector→Cube gather has no odd form (pto-isa's vector-side
+producer offsets lane 1 by lane 1's own extent), so it is even-only. Full
+derivation: [LowerAutoVectorSplit](20-lower_auto_vector_split.md).
 
 ## Example 1: InCore without existing Group caller
 

@@ -299,6 +299,36 @@ attrs，因此 [`ExpandMixedKernel`](21-expand_mixed_kernel.md) 凭该标记跳�
 `SplitDimension(mode)` 对 `UpDown` 返回 `0`，对 `LeftRight` 返回 `1`
 （`split_axis_utils`）；对 `None` **不调用**（区域路径先对 `None` 分支——无轴可推导）。
 
+### split 模式与 pto-isa split code
+
+`SplitMode` 描述的是作者选的轴。真正下发到设备的 `split` 属性含义更窄——它是 pto-isa
+的 `TileSplitAxis`，还要说明两个 lane 的**运行时** extent 之间的关系，因为消费侧正是
+靠它在 FIFO 槽位中定位 lane 1 的数据段（`popVecTileFromGMFiFo`）：
+
+| Code | pto-isa | Lane 1 的数据段起点 | 要求 |
+| ---- | ------- | ------------------- | ---- |
+| 0 | `TILE_NO_SPLIT` | — | 单一读者 |
+| 1 / 2 | `TILE_UP_DOWN` / `TILE_LEFT_RIGHT` | `e1 * pitch` | `e0 == e1` |
+| 3 / 4 | `TILE_UP_DOWN_ODD` / `TILE_LEFT_RIGHT_ODD` | `(e1 + 1) * pitch` | `e0 == e1 + 1` |
+
+这两套词汇分别落在不同的算子上：
+
+- **`tile.aiv_shard` / `tile.aic_gather` 携带 MODE**（`0` / `1` / `2`）。本 pass 只
+  盖 `int(mode)`——作者选的轴，仅此而已。
+- **`tile.tpush_*` / `tile.tpop_*` / `system.tfree_*` 携带 CODE**（`0`..`4`），由
+  [ExpandMixedKernel](21-expand_mixed_kernel.md) 在把边界折叠成传输对时，根据该 mode
+  与全宽 tile 的 extent 推导（`split_axis::ShardSplitCode`）。PTO codegen 原样打印为
+  `{split = N}`。
+
+奇数切分轴有两种来源，折半逻辑对二者完全一致：`ComputeHalfDimSize` 让**两个** lane 都
+拿到 **ceil** 折半作为物理 box，参差不齐的部分由逐 lane 的 valid extent 承载。
+
+| 边界 tile | Lane box | Lane extent | Code |
+| --------- | -------- | ----------- | ---- |
+| `[17, 128]`，全有效 | `[9, 128]` | 9 / 8 | 3 |
+| `[16, 128]`，valid `[15, 128]` | `[8, 128]` | 8 / 7 | 3 |
+| `[16, 128]`，全有效 | `[8, 128]` | 8 / 8 | 1 |
+
 ## 跨边界的部分有效（partially-valid）操作数
 
 `valid_shape` 不足物理 box 的跨界值，正是 kernel 的 ragged 尾部。Cube→Vector FIFO
@@ -311,11 +341,12 @@ lane 的——lane `L` 持有 `clamp(V - L*half, 0, half)`——因此哪种模�
 
 | 收窄的轴 | 模式 | extent 性质 | 载体 | 状态 |
 | -------- | ---- | ----------- | ---- | ---- |
-| 行（切分轴） | `UpDown` | 逐 lane | TPOP `valid_row` 操作数（自由字段） | **支持** |
+| 行（切分轴） | `UpDown` | 逐 lane | TPOP `valid_row` 操作数 | 两个 lane 可摆放时**支持**（见下） |
 | 列（非切分轴） | `UpDown` | 两 lane 相同、静态 | 整 box 传输 + 静态 `pto.treshape` | 支持 |
 | 行（非切分轴） | `LeftRight` | 两 lane 相同、静态 | TPOP `valid_row` 操作数 | 支持 |
 | 列（切分轴） | `LeftRight` | 逐 lane | 无 | **拒绝** |
 | 列为运行期值 | 任意 | 两 lane 相同、动态 | 无（`treshape` 不带操作数） | **拒绝** |
+| 行为运行期值 | `UpDown` | 逐 lane、动态 | TPOP `valid_row` 操作数、偶数 code | 支持（见下方说明） |
 | 行逐 lane **且**列收窄 | `UpDown` | 两者 | 无（`treshape` 会同时重写两个轴） | **拒绝** |
 
 `ReshapeSplitAxis` 只能对切分轴做 ceil 折半，因为 lane 索引不属于 op 的类型函数。
@@ -325,6 +356,22 @@ lane 的——lane `L` 持有 `clamp(V - L*half, 0, half)`——因此哪种模�
 报错。AUTO 分支通过 `LocalizeShardValidForLane` 施加同样的 *extent* 修正，但不含下面的
 store 保护——它的消费者由折半遍历重建，而非本遍历。
 
+- **两个 lane 的 extent 必须可摆放。** 切分轴上的 extent 并不是自由字段：pto-isa 根据
+  被弹出 tile 自身的 valid extent 推导 lane 1 的数据段起点——`TILE_UP_DOWN` 下是 `e1`，
+  `_ODD` 模式下是 `e1 + 1`。因此可摆放的形态只有三种：`e0 == e1`（偶数 code）、
+  `e0 == e1 + 1`（奇数 code），以及 `e1 == 0`（lane 1 不弹出任何数据，其数据段永远不会
+  被解引用，偶数 code 依然精确）。box 分区对 ragged 边界并不保证这一点——16 行 box 上
+  `V = 13` 会得到 8 与 5——这正是下文均分分区要解决的问题；均分不适用时，
+  `ShardSplitCode` 会报错并给出可行的取值。
+- **运行期的切分轴 valid extent 沿用偶数 code。** split code 是编译期属性，而两个 lane
+  需要哪一个看起来取决于它们的**运行期** extent：16 宽的轴上 valid 15 会让两 lane 变成 8 与 7。
+  该路径发偶数 code，这也是设备实测接受的行为——
+  `tests/st/runtime/cross_core/test_cross_core_split_parity.py` 在 a2a3 上对
+  `VC = 1, 7, 8, 9, 15` 逐元素比对 `output[:VR, :VC]` 并通过，且仅把 golden 在 lane 1 的列上
+  扰动即会失败，说明该校验确实覆盖了这段数据。而按 pto-isa 的 pop 源码推理会得出 lane 1 落位
+  错误；究竟哪一种才是契约，已在
+  [pto-isa#263](https://github.com/hw-native-sys/pto-isa/issues/263) 上向属主提问。在有答复之前，
+  编码遵循实测行为。
 - **空 lane 的 store 被保护。** ragged extent 覆盖不到的 lane，其 extent 为 `0`，而
   零行 `TSTORE` 超出 pto-isa 契约（`TSTORE_IMPL` 断言 `GetValidRow() > 0`）。store
   被加上运行时 `extent > 0` 判断；`tpop` 与 `tfree` 保持**无条件**——两个 lane 都占用
@@ -335,22 +382,70 @@ store 保护——它的消费者由折半遍历重建，而非本遍历。
   相邻时才是矩形。该规则在**本 pass** 而非类型推导中执行：推导发生在逐 lane extent 存在
   之前，只能依据自己的 ceil 猜测来判断。由 localized shard 供给的 gather 会被精确定型
   ——两段必然相邻，拼合 extent 即 shard 前的 `V`——只有两个 lane 共享的部分 extent 才会
-  被拒绝。
+  被拒绝。同样的几何原因决定了 gather **没有奇数形态**：`GatherSplitCode` 始终返回偶数
+  code，并拒绝两个 lane extent 不等的边界（请改为补齐该轴，再在 cube 侧收窄结果）。
+
+## 把 ragged 边界在两个 lane 之间均分
+
+切分会把切分轴分给两个 lane：lane `L` 拥有 `[L*S, L*S + S)`。可选的分区有两种，只有
+边界 tile 是 ragged 时二者才不同：
+
+| 分区 | `S` | `[16, …]` box、valid 为 13 时的 lane extent | 可摆放？ |
+| ---- | --- | ------------------------------------------- | -------- |
+| box（默认） | `ceil(box / 2)` = 8 | 8 与 5 | 否 |
+| **valid**（均分） | `ceil(V / 2)` = 7 | 7 与 6 | 是——`TILE_UP_DOWN_ODD` |
+
+box 分区是通用的：无论 tile 的 valid extent 如何都成立，所以它是默认选择。它做不到的
+是让两个 lane 相差不超过 1，而这恰恰是传输的硬要求（见上文可摆放规则）。改为均分
+**valid** 区域后，`e0 - e1 ∈ {0, 1}` 由构造保证——并且真实工作量也被平均分配，而不是把
+余数全丢给 lane 1。
+
+`split_axis::ResolveLaneStride` 在改写函数体之前扫描一遍，只有在既必要又安全时才返回
+均分步长：
+
+- 至少有一个 Cube→Vector 边界，且所有边界在切分轴上的静态 `(box, valid)` 一致，并且
+  `ceil(V / 2) < ceil(box / 2)`（否则 box 分区本身已经是均分的）；
+- 没有 Vector→Cube 边界（gather 按各自的 extent 位置拼接两个 lane，只有 extent 相等时
+  两段才相邻）；
+- 函数体内其他切分轴上的 tile 全都派生自该边界——独立来源的 tile（`tile.load`、
+  生成类算子）跨越**整个** box，而均分分区覆盖不到。
+
+其余情况一律保持 box 分区。选定的步长会贯穿整个折半流程——偏移（`AdjustOffsets`）、
+逐 lane 的 valid extent（`LocalizeValidDimForSplit`）、shard 自身的类型
+（`LocalizeShardValidForLane`）——而物理 box 仍是 `ceil(box / 2)`，因此缓冲区和槽位大小
+不变。步长以 `lane_stride=S` 盖在边界算子上，供
+[ExpandMixedKernel](21-expand_mixed_kernel.md) 用同一分区推导传输 code。在均分的函数体里
+若出现迁移切分轴的 `tile.reshape`，会被拒绝：迁移后的轴带着自己的 half，无法表达按另一
+条轴的 valid 做的均分。
+
+```python
+# 16 行 box 里有 13 行有效，UP_DOWN。lane 0 取第 0-6 行，lane 1 取第 7-12 行。
+popped: pl.Tile[[8, 128], pl.FP32, pl.Mem.Vec,
+                pl.TileView(valid_shape=[pl.min(pl.max(13, aiv_id * 7) - aiv_id * 7, 7), 128])
+               ] = pl.tile.aiv_shard(qk, split=1, lane_stride=7)
+out_store = pl.tile.store(popped, [0 + aiv_id * 7, 0], out_0)
+```
+
+显式 `pl.split_aiv` 区域永远不做均分：那里的逐 lane 偏移是作者自己写的
+（`out[aiv_id * HALF : ...]`），编译器不能用与区域索引方式不同的分区去切数据。
 
 ## 算法
 
 `LowerFunction` 改写一个混合 `InCore` 函数：
 
 ```text
-1. split_dim = SplitDimension(mode); split_int = int(mode)。
+1. split_dim = SplitDimension(mode)；边界算子携带 int(mode)。
 2. InjectSubblockIdx(func, is_aiv=true) 在函数体顶部插入
        subblock_idx = tile.get_subblock_idx()
    （若 'subblock_idx' 已占用则取新名）。
+2a. ResolveLaneStride(body, split_dim) 选择分区：对于只有一个 ragged 跨界的
+    函数体取均分的 ceil(V / 2)，否则为 null（box 分区）。它会贯穿下面每一处
+    偏移与逐 lane extent。
 3. LowerStmts 遍历扁平函数体：
 
    边界 tile.move（ClassifyMoveDirection）：
      CUBE_TO_VECTOR —— 将 move 替换为
-         tile.aiv_shard(full_cube_tile, split=int(mode))   -> 半
+         tile.aiv_shard(full_cube_tile, split=int(mode)[, lane_stride=S])  -> 半
        推导出的半类型已经带有消费侧 lane 内存（Vec）：切分推导器让 memory_space
        保持为空，由 OpRegistry::Create 用 tile.aiv_shard 的 set_output_memory
        声明填充，与显式形式同源。将结果 var 连同其半尺寸种入 tile_vars，并记录

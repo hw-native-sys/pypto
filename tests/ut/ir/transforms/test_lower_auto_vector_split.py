@@ -165,15 +165,21 @@ def test_auto_c2v_boundary_localizes_a_ragged_split_axis():
     ``ReshapeSplitAxis`` can only ceil-halve the split-axis valid extent, because
     an op's type function does not know the lane. Here ``subblock_idx`` is in
     scope, so ``LocalizeShardValidForLane`` replaces that guess with the truth —
-    lane 0 holds 100 of its 64-row half (clamped to 64), lane 1 holds 36 —
-    instead of giving BOTH lanes ``ceil(100 / 2) = 50``.
+    lane 0 holds 64 of the 127 valid rows, lane 1 the remaining 63 — instead of
+    giving BOTH lanes ``ceil(127 / 2) = 64``.
+
+    The valid extent is 127 of a 128-row box, so the two lanes differ by exactly
+    one. The boundary op still carries the authored MODE (``split=1``); the
+    pto-isa code that expresses "lane 1 is one shorter" (3 =
+    ``TILE_UP_DOWN_ODD``) is picked downstream, when ExpandMixedKernel mints the
+    tpush / tpop pair — see ``split_axis::ShardSplitCode``.
     """
 
     @pl.program
     class Before:
         @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
         def split_auto(
-            qk: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat, pl.TileView(valid_shape=[100, 128])],
+            qk: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat, pl.TileView(valid_shape=[127, 128])],
             out_0: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
         ) -> pl.Tensor[[128, 128], pl.FP32]:
             popped = pl.tile.move(qk, target_memory=pl.Mem.Vec)
@@ -187,7 +193,7 @@ def test_auto_c2v_boundary_localizes_a_ragged_split_axis():
             attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": True},
         )
         def split_auto(
-            qk: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat, pl.TileView(valid_shape=[100, 128])],
+            qk: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat, pl.TileView(valid_shape=[127, 128])],
             out_0: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
         ) -> pl.Tensor[[128, 128], pl.FP32]:
             subblock_idx = pl.tile.get_subblock_idx()
@@ -196,7 +202,7 @@ def test_auto_c2v_boundary_localizes_a_ragged_split_axis():
                 pl.FP32,
                 pl.Mem.Vec,
                 pl.TileView(
-                    valid_shape=[pl.min(pl.max(100, subblock_idx * 64) - subblock_idx * 64, 64), 128]
+                    valid_shape=[pl.min(pl.max(127, subblock_idx * 64) - subblock_idx * 64, 64), 128]
                 ),
             ] = pl.tile.aiv_shard(qk, split=1)
             out_store = pl.tile.store(popped, [0 + subblock_idx * 64, 0], out_0)
@@ -292,6 +298,249 @@ def test_vector_load_halved_and_offset_localized():
             seed_vec = pl.tile.aiv_shard(cube_seed, split=1)  # noqa: F841
             prev = pl.tile.load(data, [0 + subblock_idx * 64, 0], [64, 128], target_memory=pl.Mem.Vec)
             out_store = pl.tile.store(prev, [0 + subblock_idx * 64, 0], out_0)
+            return out_store
+
+    ir.assert_structural_equal(_lower(Before), Expected)
+
+
+def test_ragged_boundary_is_rebalanced_across_the_two_lanes():
+    """A ragged C->V boundary partitions its VALID region, not the box.
+
+    The box partition gives lane 0 all 8 rows of its half and lane 1 the
+    remaining 5 — extents pto-isa cannot place, since it puts lane 1's FIFO band
+    at its own extent (or one past it). Balancing the 13 valid rows instead
+    gives 7 and 6: placeable under ``TILE_UP_DOWN_ODD``, and the work is split
+    evenly. The physical box stays the box half (8); only the partition stride
+    changes, and it rides to ExpandMixedKernel on the ``lane_stride`` attr.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            qk: pl.Tile[[16, 128], pl.FP32, pl.Mem.Mat, pl.TileView(valid_shape=[13, 128])],
+            out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            popped = pl.tile.move(qk, target_memory=pl.Mem.Vec)
+            out_store = pl.tile.store(popped, [0, 0], out_0)
+            return out_store
+
+    @pl.program
+    class Expected:
+        @pl.function(
+            type=pl.FunctionType.InCore,
+            attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": True},
+        )
+        def split_auto(
+            qk: pl.Tile[[16, 128], pl.FP32, pl.Mem.Mat, pl.TileView(valid_shape=[13, 128])],
+            out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            subblock_idx = pl.tile.get_subblock_idx()
+            popped: pl.Tile[
+                [8, 128],
+                pl.FP32,
+                pl.Mem.Vec,
+                pl.TileView(valid_shape=[pl.min(pl.max(13, subblock_idx * 7) - subblock_idx * 7, 7), 128]),
+            ] = pl.tile.aiv_shard(qk, split=1, lane_stride=7)
+            out_store = pl.tile.store(popped, [0 + subblock_idx * 7, 0], out_0)
+            return out_store
+
+    ir.assert_structural_equal(_lower(Before), Expected)
+
+
+def test_empty_boundary_keeps_the_box_partition():
+    """A boundary with nothing valid has no partition to balance.
+
+    ``ceil(0 / 2)`` is 0, and a zero stride is not a legal partition — the
+    boundary op's own attr check rejects it. An empty crossing therefore keeps
+    the box partition, where both lanes are empty and the even code is exact.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            qk: pl.Tile[[16, 128], pl.FP32, pl.Mem.Mat, pl.TileView(valid_shape=[0, 128])],
+            out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            popped = pl.tile.move(qk, target_memory=pl.Mem.Vec)
+            out_store = pl.tile.store(popped, [0, 0], out_0)
+            return out_store
+
+    @pl.program
+    class Expected:
+        @pl.function(
+            type=pl.FunctionType.InCore,
+            attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": True},
+        )
+        def split_auto(
+            qk: pl.Tile[[16, 128], pl.FP32, pl.Mem.Mat, pl.TileView(valid_shape=[0, 128])],
+            out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            subblock_idx = pl.tile.get_subblock_idx()
+            popped: pl.Tile[
+                [8, 128],
+                pl.FP32,
+                pl.Mem.Vec,
+                pl.TileView(valid_shape=[pl.min(pl.max(0, subblock_idx * 8) - subblock_idx * 8, 8), 128]),
+            ] = pl.tile.aiv_shard(qk, split=1)
+            out_store = pl.tile.store(popped, [0 + subblock_idx * 8, 0], out_0)
+            return out_store
+
+    ir.assert_structural_equal(_lower(Before), Expected)
+
+
+def test_rebalance_is_declined_when_a_value_is_split_independently():
+    """A body that also splits its own value keeps the universal box partition.
+
+    The balanced partition covers only the boundary's 13 valid rows, so a
+    ``tile.load`` spanning all 16 would lose row 15 and double-cover row 7. Both
+    tiles therefore stay on the box partition (offsets ``idx * 8``), and it is
+    ExpandMixedKernel that reports the unplaceable lane extents.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            qk: pl.Tile[[16, 128], pl.FP32, pl.Mem.Mat, pl.TileView(valid_shape=[13, 128])],
+            data: pl.Tensor[[16, 128], pl.FP32],
+            out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            popped = pl.tile.move(qk, target_memory=pl.Mem.Vec)  # noqa: F841
+            prev = pl.tile.load(data, [0, 0], [16, 128], target_memory=pl.Mem.Vec)
+            out_store = pl.tile.store(prev, [0, 0], out_0)
+            return out_store
+
+    @pl.program
+    class Expected:
+        @pl.function(
+            type=pl.FunctionType.InCore,
+            attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": True},
+        )
+        def split_auto(
+            qk: pl.Tile[[16, 128], pl.FP32, pl.Mem.Mat, pl.TileView(valid_shape=[13, 128])],
+            data: pl.Tensor[[16, 128], pl.FP32],
+            out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            subblock_idx = pl.tile.get_subblock_idx()
+            popped: pl.Tile[  # noqa: F841
+                [8, 128],
+                pl.FP32,
+                pl.Mem.Vec,
+                pl.TileView(valid_shape=[pl.min(pl.max(13, subblock_idx * 8) - subblock_idx * 8, 8), 128]),
+            ] = pl.tile.aiv_shard(qk, split=1)
+            prev = pl.tile.load(data, [0 + subblock_idx * 8, 0], [8, 128], target_memory=pl.Mem.Vec)
+            out_store = pl.tile.store(prev, [0 + subblock_idx * 8, 0], out_0)
+            return out_store
+
+    ir.assert_structural_equal(_lower(Before), Expected)
+
+
+def test_vector_load_on_an_odd_split_axis_takes_the_ceil_half():
+    """An ODD split axis halves to the CEIL box, with the lane's own valid extent.
+
+    A `[15, 32]` tile cannot be cut into two equal boxes, so both lanes get the
+    ceil half (`8`) and the per-lane valid extent carries the difference: lane 0
+    fills all 8 rows, lane 1 only 7. The store offsets follow the box
+    (`idx * 8`), so the two lanes' rows stay contiguous in the output.
+
+    This tile never crosses the AIC/AIV boundary, so no pto-isa split code is
+    involved — the ceil halving alone makes an odd extent representable.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            cube_seed: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat],
+            data: pl.Tensor[[15, 32], pl.FP32],
+            out_0: pl.Out[pl.Tensor[[15, 32], pl.FP32]],
+        ) -> pl.Tensor[[15, 32], pl.FP32]:
+            seed_vec = pl.tile.move(cube_seed, target_memory=pl.Mem.Vec)  # noqa: F841
+            prev = pl.tile.load(data, [0, 0], [15, 32], target_memory=pl.Mem.Vec)
+            out_store = pl.tile.store(prev, [0, 0], out_0)
+            return out_store
+
+    @pl.program
+    class Expected:
+        @pl.function(
+            type=pl.FunctionType.InCore,
+            attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": True},
+        )
+        def split_auto(
+            cube_seed: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat],
+            data: pl.Tensor[[15, 32], pl.FP32],
+            out_0: pl.Out[pl.Tensor[[15, 32], pl.FP32]],
+        ) -> pl.Tensor[[15, 32], pl.FP32]:
+            subblock_idx = pl.tile.get_subblock_idx()
+            seed_vec = pl.tile.aiv_shard(cube_seed, split=1)  # noqa: F841
+            prev: pl.Tile[
+                [8, 32],
+                pl.FP32,
+                pl.Mem.Vec,
+                pl.TileView(valid_shape=[pl.min(pl.max(15, subblock_idx * 8) - subblock_idx * 8, 8), 32]),
+            ] = pl.tile.load(
+                data,
+                [0 + subblock_idx * 8, 0],
+                [8, 32],
+                [pl.min(pl.max(15, subblock_idx * 8) - subblock_idx * 8, 8), 32],
+                target_memory=pl.Mem.Vec,
+            )
+            out_store = pl.tile.store(prev, [0 + subblock_idx * 8, 0], out_0)
+            return out_store
+
+    ir.assert_structural_equal(_lower(Before), Expected)
+
+
+def test_vector_load_on_an_odd_split_axis_left_right():
+    """The dim-1 mirror: an odd COLUMN axis also halves to the ceil box.
+
+    A `[32, 15]` tile gives both lanes an 8-column box; lane 0 fills all 8 and
+    lane 1 only 7, and the column offsets follow the box (`idx * 8`). Pinning
+    the LEFT_RIGHT side separately keeps a dim-1 regression from hiding behind
+    the UP_DOWN cases.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.LEFT_RIGHT})
+        def split_auto(
+            cube_seed: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat],
+            data: pl.Tensor[[32, 15], pl.FP32],
+            out_0: pl.Out[pl.Tensor[[32, 15], pl.FP32]],
+        ) -> pl.Tensor[[32, 15], pl.FP32]:
+            seed_vec = pl.tile.move(cube_seed, target_memory=pl.Mem.Vec)  # noqa: F841
+            prev = pl.tile.load(data, [0, 0], [32, 15], target_memory=pl.Mem.Vec)
+            out_store = pl.tile.store(prev, [0, 0], out_0)
+            return out_store
+
+    @pl.program
+    class Expected:
+        @pl.function(
+            type=pl.FunctionType.InCore,
+            attrs={"split": pl.SplitMode.LEFT_RIGHT, "split_aiv": True},
+        )
+        def split_auto(
+            cube_seed: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat],
+            data: pl.Tensor[[32, 15], pl.FP32],
+            out_0: pl.Out[pl.Tensor[[32, 15], pl.FP32]],
+        ) -> pl.Tensor[[32, 15], pl.FP32]:
+            subblock_idx = pl.tile.get_subblock_idx()
+            seed_vec = pl.tile.aiv_shard(cube_seed, split=2)  # noqa: F841
+            prev: pl.Tile[
+                [32, 8],
+                pl.FP32,
+                pl.Mem.Vec,
+                pl.TileView(valid_shape=[32, pl.min(pl.max(15, subblock_idx * 8) - subblock_idx * 8, 8)]),
+            ] = pl.tile.load(
+                data,
+                [0, 0 + subblock_idx * 8],
+                [32, 8],
+                [32, pl.min(pl.max(15, subblock_idx * 8) - subblock_idx * 8, 8)],
+                target_memory=pl.Mem.Vec,
+            )
+            out_store = pl.tile.store(prev, [0, 0 + subblock_idx * 8], out_0)
             return out_store
 
     ir.assert_structural_equal(_lower(Before), Expected)

@@ -35,6 +35,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/type.h"
@@ -223,9 +224,14 @@ static std::string MakeTpushCodegenPTO(const char* target, const CallPtr& op,
   INTERNAL_CHECK_SPAN(tile, op->span_) << op_name << " first argument must be a Var or IterArg";
 
   const int split = op->GetKwarg<int>("split", -1);
-  CHECK(split >= 0 && split <= 2) << op_name
-                                  << " requires 'split' attribute (0=none, 1=up-down, 2=left-right), got "
-                                  << split;
+  CHECK(ir::IsValidSplitCode(split))
+      << op_name
+      << " requires 'split' attribute (0=none, 1=up-down, 2=left-right, 3=up-down/odd, "
+         "4=left-right/odd), got "
+      << split;
+  CHECK(!(ir::IsOddSplitCode(split) && std::string_view(target) == "aic"))
+      << op_name << ": pto-isa has no odd split for the Vector -> Cube direction (split = " << split
+      << "). Only the Cube -> Vector shard splits an odd axis.";
 
   std::string tile_buf = codegen.GetExprAsCode(op->args_[0]);
   std::string tile_type = codegen.GetExprTypeAnnotation(op->args_[0]);
@@ -257,9 +263,14 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
       << op_name << " takes no arguments, got " << op->args_.size();
 
   const int split = op->GetKwarg<int>("split", 0);
-  CHECK(split >= 0 && split <= 2) << op_name
-                                  << " requires 'split' attribute (0=none, 1=up-down, 2=left-right), got "
-                                  << split;
+  CHECK(ir::IsValidSplitCode(split))
+      << op_name
+      << " requires 'split' attribute (0=none, 1=up-down, 2=left-right, 3=up-down/odd, "
+         "4=left-right/odd), got "
+      << split;
+  CHECK(!(ir::IsOddSplitCode(split) && std::string_view(target) == "aiv"))
+      << op_name << ": pto-isa has no odd split for the Vector -> Cube direction (split = " << split
+      << "). Only the Cube -> Vector shard splits an odd axis.";
 
   std::string result_buf = codegen.GetCurrentResultTarget();
   INTERNAL_CHECK_SPAN(!result_buf.empty(), op->span_) << op_name << " requires assignment target (tile_buf)";
@@ -300,11 +311,25 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
   // tile CAN carry a dynamic physical extent (ReshapeSplitAxis lowers a dynamic
   // split axis to floordiv(dim, 2)). Without this the pop would reach that
   // INTERNAL_CHECK instead of falling back to the direct-TPOP path.
+  // An ODD split is the one case that must NOT take the full-box path: the two
+  // lanes pop different extents (ceil / floor), and pto-isa derives lane 1's
+  // slot offset from the popped tile's own RUNTIME valid extents
+  // (TILE_UP_DOWN_ODD: subAIVOffset = subBlockId * (validRow + subBlockId) *
+  // validCol). Widening either lane to the box would place lane 1 one cell past
+  // the producer's band. Such a tile carries a per-lane (non-static) valid
+  // extent anyway, so this only makes the requirement explicit.
   const bool use_full_box =
-      std::string_view(target) == "aic" && !logical_row.empty() && !logical_col.empty() &&
-      has_static_logical_shape && !statically_empty && result_tile_type &&
+      std::string_view(target) == "aic" && !ir::IsOddSplitCode(split) && !logical_row.empty() &&
+      !logical_col.empty() && has_static_logical_shape && !statically_empty && result_tile_type &&
       result_tile_type->GetMemorySpace() == ir::MemorySpace::Vec && result_tile_type->shape_.size() >= 2 &&
       As<ir::ConstInt>(result_tile_type->shape_[0]) && As<ir::ConstInt>(result_tile_type->shape_[1]);
+  // PTOAS enforces the same contract from the other side ("expects odd C2V
+  // split tpop to provide per-sub-core valid_row and valid_col operands"), so
+  // fail here with the op's own span rather than in the assembler.
+  INTERNAL_CHECK_SPAN(!ir::IsOddSplitCode(split) || (!logical_row.empty() && !logical_col.empty()), op->span_)
+      << "Internal error: " << op_name
+      << " with an odd split must carry per-lane valid_row / valid_col operands; the split-axis "
+         "localization in LowerAutoVectorSplit produces them";
   std::string transport_row = logical_row;
   std::string transport_col = logical_col;
   if (use_full_box) {

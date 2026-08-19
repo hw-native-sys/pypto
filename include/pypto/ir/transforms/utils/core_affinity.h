@@ -82,10 +82,16 @@ struct CVBoundaryMove {
   // op already encodes the half/full shape in result_type and the cross-core
   // fractal/post-move behaviour differs (see ExpandMixedKernel's boundary arm).
   bool op_driven = false;
-  // Split axis carried by the originating op (1 = UP_DOWN/axis0,
-  // 2 = LEFT_RIGHT/axis1). Stamped onto the generated tpush/tpop. 0 for
-  // tile.move boundaries (split assigned later by SplitVectorKernel).
+  // Split MODE carried by the originating op (1 = UP_DOWN/axis0,
+  // 2 = LEFT_RIGHT/axis1); 0 for tile.move boundaries (split assigned later by
+  // SplitVectorKernel). The pto-isa split CODE stamped onto the generated
+  // tpush/tpop is derived from this mode plus the boundary tile's extents —
+  // see split_axis::ShardSplitCode / GatherSplitCode.
   int split = 0;
+  // Partition stride the halving used, from the originating op's optional
+  // `lane_stride` attr (see split_axis::ResolveLaneStride). 0 = the default box
+  // partition, where the stride is the tile's own physical half.
+  int lane_stride = 0;
 };
 
 }  // namespace core_affinity

@@ -839,6 +839,69 @@ def test_cross_core_split_merge_preserves_region_attrs():
     assert getattr(merged, "_pypto_full_shape", None) == (2, 4)
 
 
+def test_cross_core_rebalanced_split_slices_at_the_box_but_starts_at_the_stride():
+    """`lane_stride` moves lane 1's START; the slice WIDTH stays the physical box.
+
+    A ragged boundary rebalanced onto its valid region (16-row box, 13 valid,
+    stride 7) gives both lanes the compiler's 8-row box — lane 0 rows 0-7 and
+    lane 1 rows 7-14 — with per-lane valid extents 7 and 6. Cutting at the
+    stride instead would hand the lanes 7- and 9-row payloads that no longer
+    match the tile types the IR carries.
+    """
+    ns: dict[str, Any] = {}
+    exec(torch_codegen_module._PREAMBLE, ns)  # noqa: S102
+
+    rt = ns["_cross_core_rt"]
+    set_lane = ns["_set_subblock_idx"]
+
+    tile = torch.arange(16 * 2, dtype=torch.float32).reshape(16, 2)
+    setattr(tile, "_pypto_valid_shape", (13, 2))
+    setattr(tile, "_pypto_full_shape", (16, 2))
+
+    rt.push_to_aiv(tile, 3, 7)
+    set_lane(0)
+    lane0 = rt.pop_from_aic(3)
+    set_lane(1)
+    lane1 = rt.pop_from_aic(3)
+
+    assert tuple(lane0.shape) == (8, 2)
+    assert tuple(lane1.shape) == (8, 2)
+    # Lane 1 begins at the stride, not at the box half.
+    assert torch.equal(lane0, tile[0:8])
+    assert torch.equal(lane1, tile[7:15])
+    # clamp(13 - lane * 7, 0, 7) -> 7 and 6.
+    assert getattr(lane0, "_pypto_valid_shape", None) == (7, 2)
+    assert getattr(lane1, "_pypto_valid_shape", None) == (6, 2)
+
+
+def test_cross_core_odd_split_rejects_lanes_that_are_not_one_apart():
+    """The _ODD codes exist to say "lane 1 is one cell shorter" — enforce it."""
+    ns: dict[str, Any] = {}
+    exec(torch_codegen_module._PREAMBLE, ns)  # noqa: S102
+
+    rt = ns["_cross_core_rt"]
+    tile = torch.zeros(16, 2, dtype=torch.float32)
+    setattr(tile, "_pypto_valid_shape", (13, 2))
+
+    # Box partition (stride 8) over 13 valid rows gives 8 and 5.
+    with pytest.raises(ValueError, match="lanes one cell apart"):
+        rt.push_to_aiv(tile, 3)
+
+
+def test_cross_core_vector_to_cube_rejects_the_odd_codes():
+    """pto-isa has no odd Vector -> Cube transport, so the runtime refuses it."""
+    ns: dict[str, Any] = {}
+    exec(torch_codegen_module._PREAMBLE, ns)  # noqa: S102
+
+    rt = ns["_cross_core_rt"]
+    tile = torch.zeros(8, 2, dtype=torch.float32)
+
+    with pytest.raises(ValueError, match="Unsupported odd split mode for push_to_aic"):
+        rt.push_to_aic(tile, 3)
+    with pytest.raises(ValueError, match="Unsupported odd split mode for pop_from_aiv"):
+        rt.pop_from_aiv(4)
+
+
 def test_cross_core_no_split_dual_dispatch_runtime_pipe_pairing():
     """No-split dual-dispatch runtime should broadcast AIC->AIV and pair AIV->AIC traffic."""
     ns: dict[str, Any] = {}

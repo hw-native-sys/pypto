@@ -340,6 +340,38 @@ as an internal assertion in PTO codegen (`SplitAivScopeStmt reached PTO codegen`
 (`split_axis_utils`); it is **not** called for `None` (the region path branches on
 `None` first — there is no axis to derive).
 
+### Split mode vs pto-isa split code
+
+`SplitMode` names the axis the author picked. The `split` attr that reaches the
+device names something narrower — pto-isa's `TileSplitAxis`, which also says how
+the two lanes' **runtime** extents relate, because that is how the consumer finds
+lane 1's band inside the FIFO slot (`popVecTileFromGMFiFo`):
+
+| Code | pto-isa | Lane 1's band starts at | Requires |
+| ---- | ------- | ----------------------- | -------- |
+| 0 | `TILE_NO_SPLIT` | — | single reader |
+| 1 / 2 | `TILE_UP_DOWN` / `TILE_LEFT_RIGHT` | `e1 * pitch` | `e0 == e1` |
+| 3 / 4 | `TILE_UP_DOWN_ODD` / `TILE_LEFT_RIGHT_ODD` | `(e1 + 1) * pitch` | `e0 == e1 + 1` |
+
+The two vocabularies live on different ops:
+
+- **`tile.aiv_shard` / `tile.aic_gather` carry the MODE** (`0` / `1` / `2`). This
+  pass stamps `int(mode)` — the author's axis, nothing more.
+- **`tile.tpush_*` / `tile.tpop_*` / `system.tfree_*` carry the CODE** (`0`..`4`),
+  chosen by [ExpandMixedKernel](21-expand_mixed_kernel.md) from that mode plus the
+  full-width tile's extents (`split_axis::ShardSplitCode`) when it folds the
+  boundary into a transport pair. PTO codegen prints it verbatim as `{split = N}`.
+
+An odd split axis reaches the odd codes in two ways, and the halving treats both
+identically: `ComputeHalfDimSize` gives BOTH lanes the **ceil** half as their
+physical box, and the per-lane valid extent carries the raggedness.
+
+| Boundary tile | Lane boxes | Lane extents | Code |
+| ------------- | ---------- | ------------ | ---- |
+| `[17, 128]`, fully valid | `[9, 128]` | 9 / 8 | 3 |
+| `[16, 128]`, valid `[15, 128]` | `[8, 128]` | 8 / 7 | 3 |
+| `[16, 128]`, fully valid | `[8, 128]` | 8 / 8 | 1 |
+
 ## Partially-valid operands across the boundary
 
 A crossing value whose `valid_shape` is short of its physical box is a kernel's
@@ -354,11 +386,12 @@ geometric rule at the end of this section instead.
 
 | Ragged axis | Mode | Extent is | Carrier | Status |
 | ----------- | ---- | --------- | ------- | ------ |
-| rows (split axis) | `UpDown` | per-lane | TPOP `valid_row` operand (free field) | **supported** |
+| rows (split axis) | `UpDown` | per-lane | TPOP `valid_row` operand | **supported** when the lanes are placeable (below) |
 | cols (non-split) | `UpDown` | shared, static | full-box transport + static `pto.treshape` | supported |
 | rows (non-split) | `LeftRight` | shared, static | TPOP `valid_row` operand | supported |
 | cols (split axis) | `LeftRight` | per-lane | none | **rejected** |
 | cols, runtime-valued | either | shared, dynamic | none (`treshape` takes no operands) | **rejected** |
+| rows, runtime-valued | `UpDown` | per-lane, dynamic | TPOP `valid_row` operand, even code | supported (see the note below) |
 | rows per-lane **and** cols narrowed | `UpDown` | both | none (`treshape` rewrites both axes) | **rejected** |
 
 `ReshapeSplitAxis` can only ceil-halve the split-axis extent (the lane index is
@@ -369,6 +402,26 @@ logical rectangle is rejected with its span. The AUTO arm applies the same *exte
 `LocalizeShardValidForLane`, but not the store guard below — its consumers are
 rebuilt by the halving walk rather than by this one.
 
+- **The two lanes' extents must be placeable.** The split-axis extent is not a
+  free field: pto-isa derives lane 1's band from the popped tile's own valid
+  extent — `e1` cells in (`TILE_UP_DOWN`) or `e1 + 1` (the `_ODD` modes). So the
+  placeable shapes are exactly `e0 == e1` (even code), `e0 == e1 + 1` (odd code)
+  and `e1 == 0` (lane 1 pops nothing, so its band is never dereferenced — the
+  even code stays exact). The box partition does not guarantee that for a ragged
+  boundary — 13 of a 16-row box gives 8 and 5 — which is what the balanced
+  partition below is for. When it does not apply, `ShardSplitCode` reports the
+  extents instead, naming what would work.
+- **A runtime split-axis valid extent keeps the even code.** The split code is a
+  compile-time attr, but which one the lanes need appears to depend on their
+  *runtime* extents: 15 of a 16-wide axis leaves the lanes at 8 and 7. The even
+  code is what this path emits, and what the device is measured to accept —
+  `tests/st/runtime/cross_core/test_cross_core_split_parity.py` compares
+  `output[:VR, :VC]` elementwise for `VC = 1, 7, 8, 9, 15` on a2a3 and passes,
+  and perturbing that golden on lane 1's columns alone does fail it, so the
+  check covers the band in question. Reading pto-isa's pop suggests a mis-placed
+  lane 1 instead; which reading is the contract is asked upstream in
+  [pto-isa#263](https://github.com/hw-native-sys/pto-isa/issues/263). Until that
+  answers, the encoding follows the measured behaviour.
 - **An empty lane's store is guarded.** A lane the ragged extent does not reach
   has extent `0`, and a zero-row `TSTORE` is outside pto-isa's contract
   (`TSTORE_IMPL` asserts `GetValidRow() > 0`). The store gets a runtime
@@ -382,22 +435,79 @@ rebuilt by the halving walk rather than by this one.
   per-lane extents exist and could only judge the join on its own ceil-div guess.
   A gather fed by a localized shard is typed exactly — the bands always abut, so
   the joined extent is the pre-shard `V` — and only a partial that both lanes
-  share is rejected.
+  share is rejected. The same geometry is why the gather has **no odd form**:
+  `GatherSplitCode` always returns an even code and rejects a boundary whose
+  lanes would differ (pad the axis and narrow the cube-side result instead).
+
+## Balancing a ragged boundary across the lanes
+
+The split partitions the split axis between the lanes: lane `L` owns
+`[L*S, L*S + S)` of it. Two partitions are possible, and they differ only when
+the boundary tile is ragged:
+
+| Partition | `S` | Lane extents for a `[16, …]` box valid to 13 | Placeable? |
+| --------- | --- | -------------------------------------------- | ---------- |
+| box (default) | `ceil(box / 2)` = 8 | 8 and 5 | no |
+| **valid** (rebalanced) | `ceil(V / 2)` = 7 | 7 and 6 | yes — `TILE_UP_DOWN_ODD` |
+
+The box partition is universal: it works for every tile in the region whatever
+its valid extent, which is why it is the default. What it cannot do is keep the
+lanes within one cell of each other, and that is exactly what the transport
+needs (see the placeability rule above). Balancing the VALID region instead
+makes `e0 - e1 ∈ {0, 1}` by construction — and splits the real work evenly
+rather than leaving lane 1 the remainder.
+
+`split_axis::ResolveLaneStride` runs over the body before it is rewritten and
+returns the balanced stride only when it is both needed and sound:
+
+- at least one Cube→Vector boundary, all agreeing on the same static
+  `(box, valid)` on the split axis, with `ceil(V / 2) < ceil(box / 2)`
+  (otherwise the box partition already balances);
+- no Vector→Cube boundary (the gather re-joins the lanes positionally at their
+  own extents, which only abut when they are equal);
+- every other split-axis tile in the body derives from that boundary — a tile
+  with an independent origin (a `tile.load`, a generator) spans the FULL box,
+  which the balanced partition would not cover.
+
+Anything else keeps the box partition. The stride then threads through the whole
+halving — offsets (`AdjustOffsets`), per-lane valid extents
+(`LocalizeValidDimForSplit`), the shard's own type
+(`LocalizeShardValidForLane`) — while the physical box stays `ceil(box / 2)`, so
+buffers and slot sizes are unchanged. It is stamped on the boundary op as
+`lane_stride=S` so [ExpandMixedKernel](21-expand_mixed_kernel.md) derives the
+transport code from the same partition. A `tile.reshape` that migrates the split
+axis inside a rebalanced body is rejected: a migrated axis carries its own half,
+which cannot express a partition balanced on another axis.
+
+```python
+# 13 of 16 valid rows, UP_DOWN. Lane 0 takes rows 0-6, lane 1 rows 7-12.
+popped: pl.Tile[[8, 128], pl.FP32, pl.Mem.Vec,
+                pl.TileView(valid_shape=[pl.min(pl.max(13, aiv_id * 7) - aiv_id * 7, 7), 128])
+               ] = pl.tile.aiv_shard(qk, split=1, lane_stride=7)
+out_store = pl.tile.store(popped, [0 + aiv_id * 7, 0], out_0)
+```
+
+Explicit `pl.split_aiv` regions are never rebalanced: their per-lane offsets are
+the author's own (`out[aiv_id * HALF : ...]`), and the compiler must not
+partition the data differently from the way the region indexes it.
 
 ## Algorithm
 
 `LowerFunction` rewrites one mixed `InCore` function:
 
 ```text
-1. split_dim = SplitDimension(mode); split_int = int(mode).
+1. split_dim = SplitDimension(mode); the boundary op carries int(mode).
 2. InjectSubblockIdx(func, is_aiv=true) prepends
        subblock_idx = tile.get_subblock_idx()
    to the body (fresh name if 'subblock_idx' is taken).
+2a. ResolveLaneStride(body, split_dim) picks the partition: the balanced
+    ceil(V / 2) for a body that is one ragged crossing, else null (the box
+    partition). It threads through every offset / per-lane extent below.
 3. LowerStmts walks the flat body:
 
    Boundary tile.move (ClassifyMoveDirection):
      CUBE_TO_VECTOR — replace the move with
-         tile.aiv_shard(full_cube_tile, split=int(mode))   -> HALF
+         tile.aiv_shard(full_cube_tile, split=int(mode)[, lane_stride=S])  -> HALF
        The deduced HALF type already carries the consuming-lane memory
        (Vec): the split deducer leaves memory_space null and
        OpRegistry::Create fills it from tile.aiv_shard's set_output_memory

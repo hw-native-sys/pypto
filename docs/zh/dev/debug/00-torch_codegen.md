@@ -87,18 +87,25 @@ torch_codegen(node: _ir.Program | _ir.Function, check_shapes: bool = False) -> s
 
 ### cross-core 相关映射
 
-- `tile.tpush_to_aiv` -> `_cross_core_rt.push_to_aiv(tile, split)`
+- `tile.tpush_to_aiv` -> `_cross_core_rt.push_to_aiv(tile, split[, lane_stride])`
 - `tile.tpush_to_aic` -> `_cross_core_rt.push_to_aic(tile, split)`
 - `tile.tpop_from_aic` -> `_cross_core_rt.pop_from_aic(split)`
 - `tile.tpop_from_aiv` -> `_cross_core_rt.pop_from_aiv(split)`
 - `tile.get_subblock_idx` -> `_get_subblock_idx()`
 
-`split` 参数统一通过 `_split_mode_to_int()` 归一化为整数：
+`split` 参数统一通过 `_split_mode_to_int()` 归一化为整数，取值即 pto-isa 的
+`TileSplitAxis`：
 
 - `0`: NONE
-- `1`: UP_DOWN
-- `2`: LEFT_RIGHT
+- `1` / `2`: UP_DOWN / LEFT_RIGHT——两个 lane extent 相等
+- `3` / `4`: 同样两个轴、但 extent 为奇数——lane 0 多一格
 - 非法或不可解析取值：抛出 `ValueError`（fail fast）
+
+奇数 code 按 tile 的**运行时** valid extent 校验，而非物理 box：偶数 box 配奇数 valid
+extent（box 16、`valid_shape` 15）正是它们存在的场景。只有
+[LowerAutoVectorSplit](../passes/20-lower_auto_vector_split.md) 对 ragged 边界做了均分时
+才会带上 `lane_stride`，此时运行时按该步长切分而不是按 box 折半。`push_to_aic` /
+`pop_from_aiv` 拒绝奇数 code，与 PTO codegen 一致——pto-isa 没有奇数的 Vector→Cube 传输。
 
 ## Tile/Tensor 边界与有效区语义
 
@@ -156,8 +163,9 @@ Cross-core 的入队/切分/合并路径同样会保留这两个属性，确保�
 
 split 维度定义：
 
-- `split=1`（UP_DOWN）：按 `dim=0` 切分/拼接
-- `split=2`（LEFT_RIGHT）：按 `dim=1` 切分/拼接
+- `split=1`（UP_DOWN）/ `split=3`（UP_DOWN_ODD）：按 `dim=0` 切分/拼接
+- `split=2`（LEFT_RIGHT）/ `split=4`（LEFT_RIGHT_ODD）：按 `dim=1` 切分/拼接
+- `_ODD` code 下 lane 0 取 **ceil** 折半，lane 1 取 floor 折半
 
 ### 同步与超时
 
@@ -229,7 +237,7 @@ split 维度定义：
 主要错误类型：
 
 - `TypeError`：入口 node 类型错误
-- `ValueError`：不支持的 op、非法 split、lane 不合法、split 维度不可二分
+- `ValueError`：不支持的 op、非法 split、lane 不合法、split 维度奇偶性与 split code 不符（`1` / `2` 需要偶数 extent，`3` / `4` 需要奇数）
 - `RuntimeError`：pipe 等待超时、混合核线程失败/超时
 
 并发失败时保留首个线程 traceback，便于快速定位具体函数和 lane。
@@ -238,7 +246,7 @@ split 维度定义：
 
 - `system.*` 操作按 no-op 处理，仅保留语义占位
 - Group 配对依赖命名约定 `<group>_aic/_aiv`
-- `split=1/2` 依赖对应切分维度可被 2 整除
+- `split=1/2` 要求切分维度为偶数；`split=3/4` 要求为奇数
 - Group 返回值固定取 AIV lane0
 - 该运行时为单机 Python 语义模拟，不等价于硬件流水线时序
 

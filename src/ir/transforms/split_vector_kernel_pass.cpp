@@ -84,12 +84,17 @@ bool IsCrossCoreSplitOp(const OpPtr& op) {
          IsOp(op, "tile.tpop_from_aic");
 }
 
+// The AUTHORED mode behind a cross-core op's split attribute. The odd codes
+// (3 / 4) normalize to their even sibling: parity is a property of one tile's
+// split-axis extent, not of the function's split mode, so two pipes of
+// different parity in one function still agree on the mode.
 std::optional<SplitMode> SplitModeFromInt(int split) {
-  if (split == 0) return std::nullopt;
-  if (split == 1) return SplitMode::UpDown;
-  if (split == 2) return SplitMode::LeftRight;
-  throw pypto::ValueError("SplitVectorKernel found invalid cross-core split attribute: " +
-                          std::to_string(split));
+  if (split == kSplitNone) return std::nullopt;
+  if (!IsValidSplitCode(split)) {
+    throw pypto::ValueError("SplitVectorKernel found invalid cross-core split attribute: " +
+                            std::to_string(split));
+  }
+  return SplitModeFromSplitCode(split);
 }
 
 // Infer the split mode from the function body's cross-core pipe ops. All
@@ -496,7 +501,6 @@ std::vector<StmtPtr> BuildNoSplitLane1ReplayStmts(const std::vector<StmtPtr>& st
 // explicit tpush/tpop boundaries (no tile.move -> aiv_shard rewrite needed).
 FunctionPtr ProcessStandaloneSplitFunction(const FunctionPtr& func, SplitMode mode) {
   if (mode == SplitMode::None) return func;
-  int split_int = static_cast<int>(mode);
   int split_dim = SplitDimension(mode);
   bool is_aiv = (func->func_type_ == FunctionType::AIV);
 
@@ -512,7 +516,7 @@ FunctionPtr ProcessStandaloneSplitFunction(const FunctionPtr& func, SplitMode mo
 
   auto injected = InjectSubblockIdx(func, is_aiv);
 
-  auto new_stmts = ProcessStmts(injected.body_stmts, mode, split_int, split_dim, tile_vars, is_aiv,
+  auto new_stmts = ProcessStmts(injected.body_stmts, mode, split_dim, tile_vars, is_aiv,
                                 injected.subblock_idx_expr, var_replacements);
   StmtPtr new_body =
       (new_stmts.size() == 1) ? new_stmts[0] : std::make_shared<SeqStmts>(new_stmts, func->span_);

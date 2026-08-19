@@ -227,6 +227,10 @@ program_expanded = expand_pass(program)
   4. 构建 AIC 函数体：保留 CUBE + SHARED 语句，删除 VECTOR，递归处理 MIXED 循环
      - 对于边界移动（Cube→Vector）：生成 tpush_to_aiv(source_tile)
      - 对于边界移动（Vector→Cube）：生成 dest_var = tpop_from_aiv()，携带 fractal TileView
+  4a. 对由算子驱动的边界（tile.aiv_shard / tile.aic_gather），根据该算子携带的
+      MODE 与全宽 tile 的 extent，推导 tpush/tpop 对使用的 pto-isa split CODE
+      （BoundaryTransportSplitCode -> split_axis::ShardSplitCode / GatherSplitCode）
+      ——见下文“split code”
   5. 构建 AIV 函数体：对称（保留 VECTOR + SHARED，删除 CUBE）
      - 对于边界移动（Cube→Vector）：生成 dest_var = tpop_from_aic()，携带 fractal TileView
      - 对于边界移动（Vector→Cube）：生成 tile.move 适配 fractal 布局，然后 tpush_to_aic(adapted_tile)
@@ -318,6 +322,28 @@ pass 或打印输出。
 直接返回自身参数——AIV 调用作为纯 `EvalStmt` 发出，包装函数直接
 `return out_0`，从而维持 `ReturnParamsExplicit` 不变量。只有当某个返回位置
 不是参数回写时，才回退到旧的 `result = aiv_call(); return result` 形式。
+
+## split code
+
+`tile.aiv_shard` / `tile.aic_gather` 携带作者选择的 **mode**（`0` / `1` / `2`）；本 pass
+生成的传输对携带的是 pto-isa 的 `TileSplitAxis` **code**（`0`..`4`），后者还表达了两个
+AIV lane 的*运行时* extent 之间的关系——消费侧正是靠它在 FIFO 槽位中定位 lane 1 的数据段：
+
+| Code | pto-isa | Lane 1 的数据段起点 | 要求 |
+| ---- | ------- | ------------------- | ---- |
+| 1 / 2 | `TILE_UP_DOWN` / `TILE_LEFT_RIGHT` | `e1 * pitch` | `e0 == e1` |
+| 3 / 4 | `TILE_UP_DOWN_ODD` / `TILE_LEFT_RIGHT_ODD` | `(e1 + 1) * pitch` | `e0 == e1 + 1` |
+
+`BoundaryTransportSplitCode` 从**全宽** tile 上读取 lane extent
+`eL = clamp(V - L*S, 0, S)`——shard 取其操作数（Cube→Vector），gather 取其结果
+（Vector→Cube）。`S` 是分区步长：默认为该 tile 的物理 half；当
+[LowerAutoVectorSplit](20-lower_auto_vector_split.md) 对 ragged 边界做了均分时，则取算子上
+`lane_stride=S` 属性。因此奇数切分轴（奇数物理 box、偶数 box 内的奇数 valid extent，或均分
+后的奇数 valid 区域）会取奇数 code；lane 1 为空时保持偶数 code；pto-isa 无法摆放的 ragged
+extent（只可能出现在 box 分区上）则被拒绝，并给出可行的取值。两侧 lane 的函数体用相同输入执行同一推导，因此 AIC 与 AIV 侧永远一致。
+Vector→Cube 的 gather 没有奇数形态（pto-isa 的向量侧 producer 按 lane 1 自身的 extent
+偏移），因此只使用偶数 code。完整推导见
+[LowerAutoVectorSplit](20-lower_auto_vector_split.md)。
 
 ## 示例 1：InCore 没有已有 Group 调用者
 

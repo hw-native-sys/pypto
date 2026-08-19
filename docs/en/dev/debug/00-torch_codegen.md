@@ -87,18 +87,27 @@ Mappings are registered by category:
 
 ### Cross-core operation mappings
 
-- `tile.tpush_to_aiv` -> `_cross_core_rt.push_to_aiv(tile, split)`
+- `tile.tpush_to_aiv` -> `_cross_core_rt.push_to_aiv(tile, split[, lane_stride])`
 - `tile.tpush_to_aic` -> `_cross_core_rt.push_to_aic(tile, split)`
 - `tile.tpop_from_aic` -> `_cross_core_rt.pop_from_aic(split)`
 - `tile.tpop_from_aiv` -> `_cross_core_rt.pop_from_aiv(split)`
 - `tile.get_subblock_idx` -> `_get_subblock_idx()`
 
-`split` is normalized by `_split_mode_to_int()`:
+`split` is normalized by `_split_mode_to_int()` and carries pto-isa's
+`TileSplitAxis`:
 
 - `0`: NONE
-- `1`: UP_DOWN
-- `2`: LEFT_RIGHT
+- `1` / `2`: UP_DOWN / LEFT_RIGHT — the two lanes hold equal extents
+- `3` / `4`: the same axes over an ODD extent — lane 0 holds one cell more
 - invalid/unparsable values: raise `ValueError` (fail fast)
+
+The odd codes are validated against the tile's RUNTIME valid extent, not its
+physical box: an even box with an odd valid extent (16 with `valid_shape` 15)
+is exactly the case they exist for. `lane_stride` rides along only when
+[LowerAutoVectorSplit](../passes/20-lower_auto_vector_split.md) rebalanced a
+ragged boundary; the runtime then cuts the lanes there instead of at the box
+half. Odd codes are rejected on `push_to_aic` / `pop_from_aiv`, mirroring PTO
+codegen — pto-isa has no odd Vector-to-Cube transport.
 
 ## Tile/Tensor Boundary and Valid-Region Semantics
 
@@ -155,10 +164,11 @@ It also provides:
   - `pop_from_aiv` waits for both lane queues, then consumes a pair and returns lane0 payload
 - `split=1/2`: push enqueues by current lane; pop waits until both lanes are ready, then merges
 
-Split dimension semantics:
+Split dimension semantics (mirroring pto-isa's `TileSplitAxis`):
 
-- `split=1` (UP_DOWN): split/merge on `dim=0`
-- `split=2` (LEFT_RIGHT): split/merge on `dim=1`
+- `split=1` (UP_DOWN) / `split=3` (UP_DOWN_ODD): split/merge on `dim=0`
+- `split=2` (LEFT_RIGHT) / `split=4` (LEFT_RIGHT_ODD): split/merge on `dim=1`
+- the `_ODD` codes take the **ceil** half for lane 0 and the floor half for lane 1
 
 ### Synchronization and timeouts
 
@@ -230,7 +240,7 @@ Dynamic-dimension strategy:
 Main error classes:
 
 - `TypeError`: invalid entry node type
-- `ValueError`: unsupported op, invalid split/lane, non-even split dimension
+- `ValueError`: unsupported op, invalid split/lane, split dimension whose parity contradicts the split code (`1` / `2` need an even extent, `3` / `4` an odd one)
 - `RuntimeError`: pipe wait timeout, mixed-kernel thread failure/timeout
 
 For concurrency failures, codegen reports the first captured thread traceback to improve localization by function and lane.
@@ -239,7 +249,7 @@ For concurrency failures, codegen reports the first captured thread traceback to
 
 - `system.*` ops are emitted as no-ops in debug mode
 - Group pairing relies on `<group>_aic/_aiv` naming convention
-- `split=1/2` requires the split dimension to be divisible by 2
+- `split=1/2` requires an even split dimension; `split=3/4` requires an odd one
 - Group return is fixed to AIV lane0 output
 - Runtime is a Python semantic simulator, not equivalent to hardware pipeline timing
 

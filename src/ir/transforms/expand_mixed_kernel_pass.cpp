@@ -26,6 +26,7 @@
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/any_cast.h"
+#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"
@@ -366,7 +367,8 @@ void CollectCVBoundaryMoves(const std::vector<StmtPtr>& stmts,
                                                     call->args_[0],
                                                     call->GetType(),
                                                     /*op_driven=*/true,
-                                                    call->GetKwarg<int>("split", 0)};
+                                                    call->GetKwarg<int>("split", 0),
+                                                    call->GetKwarg<int>("lane_stride", 0)};
       } else if (call) {
         auto dir = ClassifyMoveDirection(call);
         if (dir != CVDirection::NONE) {
@@ -403,12 +405,44 @@ void CollectCVBoundaryMoves(const std::vector<StmtPtr>& stmts,
 // TPUSH / TPOP creation helpers
 // ============================================================================
 
-std::vector<std::pair<std::string, std::any>> MakeSplitKwargs(int split = 0) {
-  return {{"split", std::any(split)}};
+std::vector<std::pair<std::string, std::any>> MakeSplitKwargs(int split = 0, int lane_stride = 0) {
+  std::vector<std::pair<std::string, std::any>> kwargs{{"split", std::any(split)}};
+  // The partition stride only rides along when a ragged boundary was rebalanced
+  // (see split_axis::ResolveLaneStride). PTO codegen ignores it — it prints only
+  // id and split — but the torch reference runtime needs it to cut the two lanes
+  // where the compiler did.
+  if (lane_stride > 0) {
+    kwargs.emplace_back("lane_stride", std::any(lane_stride));
+  }
+  return kwargs;
 }
 
-CallPtr CreateTpush(const std::string& op_name, const ExprPtr& tile, const Span& span, int split = 0) {
-  return OpRegistry::GetInstance().Create(op_name, {tile}, MakeSplitKwargs(split), span);
+/// The pto-isa split code for an op-driven boundary's tpush / tpop pair.
+///
+/// ``CVBoundaryMove::split`` is the authored MODE (see cross_core.cpp); the code
+/// additionally encodes how the two lanes' runtime extents relate, which only
+/// the FULL-width tile can tell us: the shard's operand (Cube -> Vector) or the
+/// gather's result (Vector -> Cube). Both sides of the pipe run this on the same
+/// inputs, so the AIC and AIV bodies always agree on the code.
+int BoundaryTransportSplitCode(const CVBoundaryMove& bm, const Span& span) {
+  const SplitMode mode = SplitModeFromSplitCode(bm.split);
+  if (mode == SplitMode::None) return kSplitNone;
+  const int split_dim = split_axis::SplitDimension(mode);
+  if (bm.direction == CVDirection::CUBE_TO_VECTOR) {
+    // `lane_stride` is what LowerAutoVectorSplit actually partitioned by: absent
+    // (0) for the default box partition, the balanced stride when it rebalanced
+    // a ragged boundary across the lanes.
+    ExprPtr lane_stride =
+        bm.lane_stride > 0 ? std::make_shared<ConstInt>(bm.lane_stride, DataType::INDEX, span) : nullptr;
+    return split_axis::ShardSplitCode(mode, bm.source_tile->GetType(), split_dim, lane_stride,
+                                      "tile.aiv_shard", span);
+  }
+  return split_axis::GatherSplitCode(mode, bm.result_type, split_dim, "tile.aic_gather", span);
+}
+
+CallPtr CreateTpush(const std::string& op_name, const ExprPtr& tile, const Span& span, int split = 0,
+                    int lane_stride = 0) {
+  return OpRegistry::GetInstance().Create(op_name, {tile}, MakeSplitKwargs(split, lane_stride), span);
 }
 
 CallPtr CreateTpop(const std::string& op_name, const TypePtr& result_type, const Span& span,
@@ -762,7 +796,17 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
         // off this transfer memory rather than the op's result memory — which
         // names the other lane whenever this side is the producer.
         const MemorySpace xfer_ms = GetBoundaryTpopMemory(side);
-        const int op_split = bm.op_driven ? bm.split : 0;
+        // The transport carries the pto-isa split CODE, not the authored mode:
+        // when the two AIV lanes' extents differ by one — an odd physical box,
+        // or an odd valid extent inside an even one — the pair takes the ODD
+        // code, whose lane 1 band sits one cell past its own extent. Derived
+        // from the FULL (cube-side) tile: the shard's operand, the gather's
+        // result.
+        const int op_split = bm.op_driven ? BoundaryTransportSplitCode(bm, stmt->span_) : kSplitNone;
+        // Only the Cube -> Vector direction is ever rebalanced, so only its
+        // transport carries the stride.
+        const int op_lane_stride =
+            (bm.op_driven && bm.direction == CVDirection::CUBE_TO_VECTOR) ? bm.lane_stride : 0;
         if (bm.direction == push_direction) {
           ExprPtr push_source = bm.source_tile;
           // AIV V->C push: insert tile.move (tmov) to adapt the source into
@@ -805,7 +849,7 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
             push_source = tmov_var;
           }
           result.push_back(std::make_shared<EvalStmt>(
-              CreateTpush(push_op, push_source, stmt->span_, op_split), stmt->span_));
+              CreateTpush(push_op, push_source, stmt->span_, op_split, op_lane_stride), stmt->span_));
         } else {
           // Op-driven pop: the half/full shape comes from the op result type and
           // the memory from this side's transfer memory; the explicit follow-on
@@ -863,8 +907,8 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
           tpop_var_remap[tpop_var.get()] = tpop_var;
           // tile.move boundary tpops carry no split kwarg here (assigned later by
           // SplitVectorKernel); op-driven tpops stamp the op's split now.
-          auto pop_kwargs =
-              bm.op_driven ? MakeSplitKwargs(op_split) : std::vector<std::pair<std::string, std::any>>{};
+          auto pop_kwargs = bm.op_driven ? MakeSplitKwargs(op_split, op_lane_stride)
+                                         : std::vector<std::pair<std::string, std::any>>{};
           result.push_back(std::make_shared<AssignStmt>(
               tpop_var, CreateTpop(pop_op, tpop_result_type, stmt->span_, pop_kwargs), stmt->span_));
           if (needs_post_move) {

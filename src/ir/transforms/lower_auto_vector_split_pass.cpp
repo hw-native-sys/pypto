@@ -103,21 +103,17 @@ void CheckNoCubeTileHalved(const std::vector<StmtPtr>& stmts,
 void ValidateTransposeSplitHazard(const std::vector<StmtPtr>& stmts, int split_dim, const Span& region_span);
 void ValidateMixedExplicitRegion(const std::vector<StmtPtr>& stmts, const Span& region_span);
 
-// Half of a split-axis physical extent: ConstInt even -> value/2, dynamic ->
-// floordiv(dim, 2). Mirrors split_axis::ComputeHalfDimSize (anonymous in
-// split_axis_utils.cpp) for the tracked TileInfo extent.
-ExprPtr HalfDimExtent(const ExprPtr& dim_size) {
-  if (auto ci = std::dynamic_pointer_cast<const ConstInt>(dim_size)) {
-    return std::make_shared<ConstInt>(ci->value_ / 2, ci->dtype(), ci->span_);
+// Make a split-kwarg call. On tile.aiv_shard / tile.aic_gather the split int
+// attr is the authored SplitMode, NOT the pto-isa split code; ExpandMixedKernel
+// derives the code from it (see split_axis::ShardSplitCode / GatherSplitCode).
+CallPtr MakeReshapeOpCall(const std::string& op_name, const ExprPtr& source, int split_mode, const Span& span,
+                          const ExprPtr& lane_stride = nullptr) {
+  std::vector<std::pair<std::string, std::any>> kwargs{{"split", std::any(split_mode)}};
+  // Only a rebalanced body stamps the stride; the default box partition leaves
+  // the attr absent so every non-ragged kernel's IR is unchanged.
+  if (auto stride = std::dynamic_pointer_cast<const ConstInt>(lane_stride)) {
+    kwargs.emplace_back("lane_stride", std::any(static_cast<int>(stride->value_)));
   }
-  auto two = std::make_shared<ConstInt>(2, GetScalarDtype(dim_size), dim_size->span_);
-  return MakeFloorDiv(dim_size, two, dim_size->span_);
-}
-
-// Make a split-kwarg call (split int attr is the SplitMode int encoding).
-CallPtr MakeReshapeOpCall(const std::string& op_name, const ExprPtr& source, int split_int,
-                          const Span& span) {
-  std::vector<std::pair<std::string, std::any>> kwargs{{"split", std::any(split_int)}};
   return OpRegistry::GetInstance().Create(op_name, {source}, kwargs, span);
 }
 
@@ -267,11 +263,12 @@ std::unordered_set<std::string> CollectBodyVarNames(const StmtPtr& body) {
 // cube-operand integrity check is a separate post-lowering walk
 // (CheckNoCubeTileHalved) so it observes the FINAL stmts regardless of how a
 // tile was routed.
-std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mode, int split_int,
-                                int split_dim, std::unordered_map<const Var*, TileInfo>& tile_vars,
+std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mode, int split_dim,
+                                std::unordered_map<const Var*, TileInfo>& tile_vars,
                                 const ExprPtr& subblock_idx,
                                 std::unordered_map<const Var*, VarPtr>& var_replacements,
-                                std::unordered_set<std::string>& used_names) {
+                                std::unordered_set<std::string>& used_names,
+                                const ExprPtr& lane_stride = nullptr) {
   std::vector<StmtPtr> result;
   result.reserve(stmts.size());
 
@@ -354,8 +351,8 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
       // with the freshly minted name afterwards so the next sibling skips it.
       auto inj = InjectSubblockIdxIntoStmts(region_stmts, used_names);
       used_names = inj.used_names;
-      auto lowered = LowerStmts(inj.body_stmts, rmode, static_cast<int>(rmode), rdim, r_tile_vars,
-                                inj.subblock_idx_expr, r_var_repl, used_names);
+      auto lowered =
+          LowerStmts(inj.body_stmts, rmode, rdim, r_tile_vars, inj.subblock_idx_expr, r_var_repl, used_names);
 
       // Per-region cube-operand backstop and transpose-hazard check, using THIS
       // region's split_dim and span so diagnostics point at the region.
@@ -391,7 +388,13 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
           // (matmul/Acc result) stays FULL; only the result is halved and tracked.
           INTERNAL_CHECK_SPAN(!call->args_.empty(), call->span_)
               << "Internal error: C->V boundary tile.move must carry a source tile";
-          auto shard = MakeReshapeOpCall("tile.aiv_shard", call->args_[0], split_int, call->span_);
+          // The boundary op carries the authored MODE; ExpandMixedKernel derives
+          // the pto-isa split code (including the odd ones) from it and the
+          // cube tile's extents when it mints the tpush / tpop pair. When the
+          // body was rebalanced onto this boundary's valid region, the stride
+          // rides along so that derivation sees the same partition.
+          auto shard = MakeReshapeOpCall("tile.aiv_shard", call->args_[0], static_cast<int>(mode),
+                                         call->span_, lane_stride);
           // Result: the op's deduced HALF type. The split deducer leaves the memory
           // space null, and OpRegistry::Create fills it from tile.aiv_shard's
           // set_output_memory declaration — Vec, the CONSUMING (vector) lane, which
@@ -405,7 +408,7 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
           // LocalizeExplicitBoundaryValid. A fully-valid split axis is returned
           // unchanged, so the common case keeps the deducer's exact type.
           auto half_type = split_axis::LocalizeShardValidForLane(shard->GetType(), call->args_[0]->GetType(),
-                                                                 split_dim, subblock_idx);
+                                                                 split_dim, subblock_idx, lane_stride);
           auto new_var = std::make_shared<Var>(assign->var_->name_hint_, half_type, assign->var_->span_);
           auto shard_typed =
               std::make_shared<Call>(shard->op_, shard->args_, shard->kwargs_, half_type, shard->span_);
@@ -414,7 +417,7 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
             // Record split_dim too: the V->C arm now gathers along the tracked
             // dim, so a C->V shard result fed straight into a V->C boundary must
             // carry the real dim (LEFT_RIGHT => 1), not the default 0.
-            TileInfo info{HalfDimExtent(tt->shape_[split_dim]), split_dim};
+            TileInfo info{split_axis::ComputeHalfDimSize(tt->shape_[split_dim]), split_dim};
             tile_vars[assign->var_.get()] = info;
             tile_vars[new_var.get()] = info;
           }
@@ -465,9 +468,12 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
               << tracked_split_dim
               << ", but tile.aic_gather reassembles a 2D tile along dim 0 or dim 1 only. Cross to "
               << "the cube side before the op that moved the split axis there.";
-          // SplitMode encoding: dim 0 -> UP_DOWN(1), dim 1 -> LEFT_RIGHT(2), matching
-          // DeduceSplitReshape's `axis = (split == 1) ? 0 : 1`.
-          const int gather_split = tracked_split_dim == 0 ? 1 : 2;
+          // The gather carries the authored MODE for the axis it re-joins (dim 0
+          // -> UP_DOWN, dim 1 -> LEFT_RIGHT); its transport code (always an even
+          // one — the V->C direction has no odd form) is derived downstream by
+          // ExpandMixedKernel.
+          const int gather_split =
+              static_cast<int>(tracked_split_dim == 0 ? SplitMode::UpDown : SplitMode::LeftRight);
           auto gather = MakeReshapeOpCall("tile.aic_gather", src, gather_split, call->span_);
           // Gather result: full shape, with the memory space OpRegistry::Create
           // fills in from tile.aic_gather's set_output_memory declaration — Mat, the
@@ -525,8 +531,8 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
       CoreAffinity aff = ClassifyCallAffinity(leaf_call);
       if (aff == CoreAffinity::VECTOR) {
         // Route this single vector stmt through the shared halving machinery.
-        auto lowered = ProcessStmts({stmt}, mode, split_int, split_dim, tile_vars, /*is_aiv=*/true,
-                                    subblock_idx, var_replacements);
+        auto lowered = ProcessStmts({stmt}, mode, split_dim, tile_vars, /*is_aiv=*/true, subblock_idx,
+                                    var_replacements, lane_stride);
         for (auto& s : lowered) result.push_back(s);
         continue;
       }
@@ -542,8 +548,8 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
     // --- Compound stmts: recurse into the body for vector content. ---
     if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
       auto body = transform_utils::FlattenToStmts(for_stmt->body_);
-      auto new_body =
-          LowerStmts(body, mode, split_int, split_dim, tile_vars, subblock_idx, var_replacements, used_names);
+      auto new_body = LowerStmts(body, mode, split_dim, tile_vars, subblock_idx, var_replacements, used_names,
+                                 lane_stride);
       auto new_for = MutableCopy(for_stmt);
       new_for->body_ = loop_repair::MakeBody(new_body, for_stmt->span_);
       result.push_back(new_for);
@@ -551,13 +557,13 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
     }
     if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
       auto then_body = transform_utils::FlattenToStmts(if_stmt->then_body_);
-      auto new_then = LowerStmts(then_body, mode, split_int, split_dim, tile_vars, subblock_idx,
-                                 var_replacements, used_names);
+      auto new_then = LowerStmts(then_body, mode, split_dim, tile_vars, subblock_idx, var_replacements,
+                                 used_names, lane_stride);
       std::optional<StmtPtr> new_else;
       if (if_stmt->else_body_.has_value()) {
         auto else_body = transform_utils::FlattenToStmts(*if_stmt->else_body_);
-        auto new_else_stmts = LowerStmts(else_body, mode, split_int, split_dim, tile_vars, subblock_idx,
-                                         var_replacements, used_names);
+        auto new_else_stmts = LowerStmts(else_body, mode, split_dim, tile_vars, subblock_idx,
+                                         var_replacements, used_names, lane_stride);
         new_else = loop_repair::MakeBody(new_else_stmts, if_stmt->span_);
       }
       auto new_if = MutableCopy(if_stmt);
@@ -568,8 +574,8 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
     }
     if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
       auto body = transform_utils::FlattenToStmts(while_stmt->body_);
-      auto new_body =
-          LowerStmts(body, mode, split_int, split_dim, tile_vars, subblock_idx, var_replacements, used_names);
+      auto new_body = LowerStmts(body, mode, split_dim, tile_vars, subblock_idx, var_replacements, used_names,
+                                 lane_stride);
       auto new_while = MutableCopy(while_stmt);
       new_while->body_ = loop_repair::MakeBody(new_body, while_stmt->span_);
       result.push_back(new_while);
@@ -890,7 +896,7 @@ std::vector<StmtPtr> LowerExplicitRegions(const std::vector<StmtPtr>& stmts,
       // sibling regions get unique subblock indices.
       std::unordered_map<const Var*, TileInfo> ignored_tile_vars;
       std::unordered_map<const Var*, VarPtr> ignored_var_repl;
-      auto lowered = LowerStmts({stmt}, SplitMode::None, /*split_int=*/0, /*split_dim=*/0, ignored_tile_vars,
+      auto lowered = LowerStmts({stmt}, SplitMode::None, /*split_dim=*/0, ignored_tile_vars,
                                 /*subblock_idx=*/nullptr, ignored_var_repl, used_names);
       for (auto& s : lowered) result.push_back(s);
       continue;
@@ -1094,7 +1100,6 @@ std::vector<std::pair<std::string, std::any>> WithSplitAivAttrs(const FunctionPt
 }
 
 FunctionPtr LowerFunction(const FunctionPtr& func, SplitMode mode) {
-  int split_int = static_cast<int>(mode);
   int split_dim = SplitDimension(mode);
 
   // Inject get_subblock_idx at the top (is_aiv=true => a binding is prepended).
@@ -1108,8 +1113,13 @@ FunctionPtr LowerFunction(const FunctionPtr& func, SplitMode mode) {
   // reserved.
   std::unordered_set<std::string> used_names = injected.used_names;
 
-  auto new_stmts = LowerStmts(injected.body_stmts, mode, split_int, split_dim, tile_vars,
-                              injected.subblock_idx_expr, var_replacements, used_names);
+  // Partition the split axis by the boundary's VALID region when the body is a
+  // single ragged crossing (see split_axis::ResolveLaneStride); null keeps the
+  // universal box partition.
+  auto lane_stride = split_axis::ResolveLaneStride(injected.body_stmts, split_dim);
+
+  auto new_stmts = LowerStmts(injected.body_stmts, mode, split_dim, tile_vars, injected.subblock_idx_expr,
+                              var_replacements, used_names, lane_stride);
 
   // Effective cube-operand backstop: re-walk the rebuilt body and assert no
   // CUBE-affine op operates on a halved tile (see CheckNoCubeTileHalved).

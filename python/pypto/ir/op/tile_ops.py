@@ -2955,17 +2955,29 @@ def _resolve_tpop_type(
     return None
 
 
-def tpush_to_aiv(tile: Expr, *, split: int, id: int | None = None, span: Span | None = None) -> Call:
+def tpush_to_aiv(
+    tile: Expr,
+    *,
+    split: int,
+    lane_stride: int | None = None,
+    id: int | None = None,
+    span: Span | None = None,
+) -> Call:
     """Push tile data from AIC to AIV via cross-core pipe.
 
     Args:
         tile: Tile data to push
-        split: Split mode (0=none, 1=up-down, 2=left-right)
+        split: pto-isa split code (0=none, 1/2=up-down/left-right, 3/4=the same
+            axes over an odd extent)
+        lane_stride: Partition stride carried when a ragged boundary was
+            balanced across the two AIV lanes; omit for the box partition
         id: Optional frontend pipe id. Omit to use PTOAS default id 0.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    kwargs = {"split": split}
+    kwargs: dict[str, Any] = {"split": split}
+    if lane_stride is not None:
+        kwargs["lane_stride"] = lane_stride
     if id is not None:
         kwargs["id"] = id
     return _ir_core.create_op_call("tile.tpush_to_aiv", [tile], kwargs, actual_span)
@@ -2987,7 +2999,7 @@ def tpush_to_aic(tile: Expr, *, split: int, id: int | None = None, span: Span | 
     return _ir_core.create_op_call("tile.tpush_to_aic", [tile], kwargs, actual_span)
 
 
-def aiv_shard(tile: Expr, *, split: int, span: Span | None = None) -> Call:
+def aiv_shard(tile: Expr, *, split: int, lane_stride: int | None = None, span: Span | None = None) -> Call:
     """Cross the AIC -> AIV boundary, halving on the split axis (full -> half).
 
     ``split=1`` / ``2`` halve the named axis. ``split=0`` (a task-parallel
@@ -2997,10 +3009,16 @@ def aiv_shard(tile: Expr, *, split: int, span: Span | None = None) -> Call:
     Args:
         tile: Input tile (TileType; 2D unless split=0)
         split: Split mode (0=no split axis, 1=up-down/axis0, 2=left-right/axis1)
+        lane_stride: Partition stride stamped by LowerAutoVectorSplit when it
+            balances a ragged boundary across the two AIV lanes; omit for the
+            default box partition
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    return _ir_core.create_op_call("tile.aiv_shard", [tile], {"split": split}, actual_span)
+    kwargs: dict[str, Any] = {"split": split}
+    if lane_stride is not None:
+        kwargs["lane_stride"] = lane_stride
+    return _ir_core.create_op_call("tile.aiv_shard", [tile], kwargs, actual_span)
 
 
 def aic_gather(tile: Expr, *, split: int, span: Span | None = None) -> Call:
@@ -3025,6 +3043,7 @@ def tpop_from_aic(
     shape: list[int] | None = None,
     dtype: DataType | None = None,
     split: int = 0,
+    lane_stride: int | None = None,
     id: int | None = None,
     span: Span | None = None,
 ) -> Call:
@@ -3034,13 +3053,18 @@ def tpop_from_aic(
         result_type: Explicit result type (e.g. TileType). Mutually exclusive with shape/dtype.
         shape: Shape of the tile to receive (alternative to result_type).
         dtype: Data type of the tile to receive (alternative to result_type).
-        split: Split mode (0=none, 1=up-down, 2=left-right)
+        split: pto-isa split code (0=none, 1/2=up-down/left-right, 3/4=the same
+            axes over an odd extent)
+        lane_stride: Partition stride carried when a ragged boundary was
+            balanced across the two AIV lanes; omit for the box partition
         id: Optional frontend pipe id. Omit to use PTOAS default id 0.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     resolved_type = _resolve_tpop_type(result_type, shape, dtype, MemorySpace.Vec)
-    kwargs = {"split": split}
+    kwargs: dict[str, Any] = {"split": split}
+    if lane_stride is not None:
+        kwargs["lane_stride"] = lane_stride
     if id is not None:
         kwargs["id"] = id
     if resolved_type is not None:

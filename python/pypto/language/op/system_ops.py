@@ -272,7 +272,14 @@ def cacheinvalid(
     return _ir_ops.cacheinvalid(tensor.unwrap(), shp, off, span=span)
 
 
-def tpush_to_aiv(tile: Tile, *, split: int, id: int | None = None, span: Span | None = None) -> Call:
+def tpush_to_aiv(
+    tile: Tile,
+    *,
+    split: int,
+    lane_stride: int | None = None,
+    id: int | None = None,
+    span: Span | None = None,
+) -> Call:
     """Push tile data from AIC to AIV via cross-core pipe.
 
     The Vector side receives it with [`tpop_from_aic`][pypto.language.system.tpop_from_aic] and releases the
@@ -281,12 +288,15 @@ def tpush_to_aiv(tile: Tile, *, split: int, id: int | None = None, span: Span | 
 
     Args:
         tile: Tile to send. Its Cube-side buffer stays live until the consumer frees the slot.
-        split: Split mode (0=none, 1=up-down, 2=left-right). Selects the axis along
-            which the two AIV lanes divide the tile; 0 sends it whole.
+        split: pto-isa split code (0=none, 1/2=up-down/left-right, 3/4=the same
+            axes over an odd extent). Selects the axis along which the two AIV
+            lanes divide the tile, and how their extents relate; 0 sends it whole.
+        lane_stride: Partition stride carried when a ragged boundary was balanced
+            across the two AIV lanes; omit for the default box partition.
         id: Optional frontend pipe id. Omit to use PTOAS default id 0.
         span: Optional source span
     """
-    return _ir_ops.tpush_to_aiv(tile.unwrap(), split=split, id=id, span=span)
+    return _ir_ops.tpush_to_aiv(tile.unwrap(), split=split, lane_stride=lane_stride, id=id, span=span)
 
 
 def tpush_to_aic(tile: Tile, *, split: int, id: int | None = None, span: Span | None = None) -> Call:
@@ -349,6 +359,7 @@ def tpop_from_aic(
     shape: list[int] | None = None,
     dtype: DataType | None = None,
     split: int = 0,
+    lane_stride: int | None = None,
     id: int | None = None,
     span: Span | None = None,
 ) -> Tile:
@@ -357,11 +368,16 @@ def tpop_from_aic(
     Args:
         shape: Shape of the tile to receive
         dtype: Data type of the tile to receive
-        split: Split mode (0=none, 1=up-down, 2=left-right)
+        split: pto-isa split code (0=none, 1/2=up-down/left-right, 3/4=the same
+            axes over an odd extent)
+        lane_stride: Partition stride carried when a ragged boundary was
+            balanced across the two AIV lanes; omit for the box partition
         id: Optional frontend pipe id. Omit to use PTOAS default id 0.
         span: Optional source span
     """
-    call = _ir_ops.tpop_from_aic(shape=shape, dtype=dtype, split=split, id=id, span=span)
+    call = _ir_ops.tpop_from_aic(
+        shape=shape, dtype=dtype, split=split, lane_stride=lane_stride, id=id, span=span
+    )
     return Tile(expr=call)
 
 

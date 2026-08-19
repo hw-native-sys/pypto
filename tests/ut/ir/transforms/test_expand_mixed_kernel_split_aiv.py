@@ -228,6 +228,148 @@ def _build_aic_gather_program():
     return ir.Program([func], "test_aic_gather", span), half2
 
 
+# ---------------------------------------------------------------------------
+# The pto-isa split CODE the folded transport carries
+# ---------------------------------------------------------------------------
+
+
+def _build_shard_program(box_rows, valid_rows, lane_stride=None):
+    """The same C->V shard over a [box_rows, 128] cube tile valid to `valid_rows`.
+
+    Only the split code is under test here, so the body stops at the shard: its
+    result is stored straight out, at the per-lane box the deducer produced.
+    `lane_stride` is the partition stride LowerAutoVectorSplit stamps when it
+    rebalances a ragged boundary; None leaves the default box partition.
+    """
+    span = ir.Span.unknown()
+    view = ir.TileView(
+        valid_shape=[
+            ir.ConstInt(valid_rows, DataType.INDEX, span),
+            ir.ConstInt(128, DataType.INDEX, span),
+        ]
+    )
+    qk = ir.Var("qk", _tile([box_rows, 128], view, MS.Vec), span)
+    half_rows = (box_rows + 1) // 2
+    out_0 = ir.Var("out_0", ir.TensorType([half_rows, 128], FP32), span)
+
+    shard_kwargs = {} if lane_stride is None else {"lane_stride": lane_stride}
+    shard = T.aiv_shard(qk, split=1, span=span, **shard_kwargs)
+    assert isinstance(shard.type, ir.TileType)
+    half = ir.Var("half", _tile(shard.type.shape, shard.type.tile_view, MS.Vec), span)
+    store = T.store(half, [0, 0], out_0, span=span)
+    out_store = ir.Var("out_store", store.type, span)
+
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(half, shard, span),
+            ir.AssignStmt(out_store, store, span),
+            ir.ReturnStmt([out_store], span),
+        ],
+        span,
+    )
+    func = ir.Function(
+        "split_aiv",
+        [(qk, _IN), (out_0, _OUT)],
+        [out_0.type],
+        body,
+        span,
+        ir.FunctionType.InCore,
+        attrs={"split": ir.SplitMode.UP_DOWN, "split_aiv": True},
+    )
+    return ir.Program([func], "test_shard_split_code", span)
+
+
+@pytest.mark.parametrize(
+    ("box_rows", "valid_rows", "lane_stride", "expected_code", "why"),
+    [
+        (128, 128, None, 1, "both lanes hold 64 rows -> the even code"),
+        (128, 127, None, 3, "lanes hold 64 and 63 -> TILE_UP_DOWN_ODD"),
+        (127, 127, None, 3, "an odd BOX: lanes hold 64 and 63 -> TILE_UP_DOWN_ODD"),
+        (128, 40, None, 1, "lane 1 is empty, so its band is never read -> the even code"),
+        (16, 13, 7, 3, "a rebalanced ragged boundary: lanes hold 7 and 6 -> TILE_UP_DOWN_ODD"),
+        (16, 12, 6, 1, "a rebalanced EVEN valid region: lanes hold 6 and 6 -> the even code"),
+    ],
+)
+def test_folded_transport_carries_the_pto_isa_split_code(
+    box_rows, valid_rows, lane_stride, expected_code, why
+):
+    """The transport code states how the two AIV lanes' RUNTIME extents relate.
+
+    pto-isa builds lane 1's band inside the FIFO slot from the popped tile's own
+    valid extent — at ``e1`` cells for TILE_UP_DOWN / TILE_LEFT_RIGHT, one past
+    it for the _ODD modes. The boundary op only carries the authored mode, so
+    ExpandMixedKernel is where the code is chosen (split_axis::ShardSplitCode).
+    """
+    printed = ir.python_print(_expand(_build_shard_program(box_rows, valid_rows, lane_stride)))
+
+    # The stride rides onto the transport too, so the torch reference runtime
+    # cuts the lanes where the compiler did.
+    stride_attr = "" if lane_stride is None else f", lane_stride={lane_stride}"
+    assert f"pl.tile.tpush_to_aiv(qk, split={expected_code}{stride_attr})" in printed, why
+    assert f"pl.tile.tpop_from_aic(split={expected_code}{stride_attr})" in printed, why
+
+
+def test_folded_transport_carries_the_left_right_odd_code():
+    """The dim-1 mirror: an odd COLUMN axis takes TILE_LEFT_RIGHT_ODD (code 4)."""
+    span = ir.Span.unknown()
+    qk = ir.Var("qk", _tile([128, 15], None, MS.Vec), span)
+    out_0 = ir.Var("out_0", ir.TensorType([128, 8], FP32), span)
+
+    shard = T.aiv_shard(qk, split=2, span=span)
+    assert isinstance(shard.type, ir.TileType)
+    half = ir.Var("half", _tile(shard.type.shape, shard.type.tile_view, MS.Vec), span)
+    store = T.store(half, [0, 0], out_0, span=span)
+    out_store = ir.Var("out_store", store.type, span)
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(half, shard, span),
+            ir.AssignStmt(out_store, store, span),
+            ir.ReturnStmt([out_store], span),
+        ],
+        span,
+    )
+    func = ir.Function(
+        "split_aiv",
+        [(qk, _IN), (out_0, _OUT)],
+        [out_0.type],
+        body,
+        span,
+        ir.FunctionType.InCore,
+        attrs={"split": ir.SplitMode.LEFT_RIGHT, "split_aiv": True},
+    )
+    printed = ir.python_print(_expand(ir.Program([func], "test_lr_split_code", span)))
+
+    assert "pl.tile.tpush_to_aiv(qk, split=4)" in printed, printed
+    assert "pl.tile.tpop_from_aic(split=4)" in printed, printed
+
+
+def test_folded_transport_rejects_lane_extents_pto_isa_cannot_place():
+    """Lanes more than one cell apart have no expressible band pair.
+
+    (A RUNTIME split-axis valid extent keeps the even code instead of being
+    rejected — see the comment on `ShardSplitCode` and pto-isa#263. That path is
+    covered on device by tests/st/runtime/cross_core/test_cross_core_split_parity.py,
+    not here: a hand-built program with a dynamic extent does not satisfy this
+    file's ambient roundtrip instrument.)
+
+    A 100-of-128 extent leaves lane 0 with 64 rows and lane 1 with 36: neither
+    ``e1`` (36) nor ``e1 + 1`` (37) is row 64, so every code would pop the wrong
+    rows. Report it, naming the extents that would work.
+    """
+    with pytest.raises(ValueError, match="leaves the two AIV lanes 64 and 36 cells"):
+        _expand(_build_shard_program(128, 100))
+
+
+def test_folded_transport_stays_on_the_box_partition_without_a_stride():
+    """Without the attr the same tile keeps the box partition — and is rejected.
+
+    13 of a 16-row box gives 8 and 5 on the box partition; only the rebalanced
+    form above is placeable, so the attr is what distinguishes the two.
+    """
+    with pytest.raises(ValueError, match="leaves the two AIV lanes 8 and 5 cells"):
+        _expand(_build_shard_program(16, 13))
+
+
 def test_aic_gather_folds_into_vector_to_cube_boundary():
     program, _ = _build_aic_gather_program()
     after = _expand(program)
