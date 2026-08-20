@@ -24,6 +24,7 @@ import sys
 import threading
 import weakref
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -3346,7 +3347,16 @@ class TestNamedInheritedHostRanges:
         assert not isinstance(patched_setup["worker"].copy_to.call_args.args[1], _NamedHostRange)
         rt.close()
 
-    def test_named_ranges_get_distinct_buffer_ids(self, patched_setup):
+    def test_one_range_keeps_one_identity_across_copies(self, patched_setup):
+        """Re-copying a range must reuse its identity, not mint a new one.
+
+        Two reasons, both in the consumer: ``ImportRegistry.materialize`` refuses a second
+        descriptor for an identity it already handed out, so a fresh id per copy would make the
+        second copy of a range fail outright; and a consumer only drops an entry when the owner
+        releases the Buffer, which the named path never does — so per-copy identities would
+        leave one permanent ``ImportedBuffer`` per copy in every chip child. A per-step D2H
+        read-back would grow that registry for the life of the process.
+        """
         host = torch.zeros(4, 4, dtype=torch.float32).share_memory_()
         rt = DistributedWorker(_fake_compiled([_param("a", [4, 4])], []), inherited_host_tensors=[host])
         dev = self._dev(rt)
@@ -3357,9 +3367,69 @@ class TestNamedInheritedHostRanges:
         rt.copy_to(dev.data_ptr, host.data_ptr(), nbytes)
         second = patched_setup["worker"].copy_to.call_args.args[1]
 
-        # A Buffer identity is what a consumer keys on; two live names must not collide.
+        assert (first.owner, first.buffer_id) == (second.owner, second.buffer_id)
+        rt.close()
+
+    def test_distinct_sub_ranges_get_distinct_identities(self, patched_setup):
+        """Identity is per range, so a sharded upload's halves must not collide on one name."""
+        host = torch.zeros(4, 4, dtype=torch.float32).share_memory_()
+        rt = DistributedWorker(_fake_compiled([_param("a", [4, 4])], []), inherited_host_tensors=[host])
+        dev = self._dev(rt)
+        half = host.numel() * host.element_size() // 2
+
+        rt.copy_to(dev.data_ptr, host.data_ptr(), half)
+        first = patched_setup["worker"].copy_to.call_args.args[1]
+        rt.copy_to(dev.data_ptr, host.data_ptr() + half, half)
+        second = patched_setup["worker"].copy_to.call_args.args[1]
+
         assert first.owner == second.owner
         assert first.buffer_id != second.buffer_id
+        rt.close()
+
+    def test_concurrent_copies_of_distinct_ranges_never_share_an_identity(self, patched_setup):
+        """The configuration `alloc_stacked_tensor` actually creates: one thread per chip.
+
+        Identity minting is not atomic on its own — `+=` is load/add/store and the first-time
+        owner mint is check-then-act — and two ranges landing on one identity is a hard failure
+        in the consumer, not a silent one. A single-threaded test cannot observe that, so this
+        drives the path concurrently and asserts the mapping is still one-to-one.
+        """
+        host = torch.zeros(64, 4, dtype=torch.float32).share_memory_()
+        rt = DistributedWorker(_fake_compiled([_param("a", [4, 4])], []), inherited_host_tensors=[host])
+        row = 4 * host.element_size()
+        rows = 64
+        seen: list[tuple[int, tuple[Any, int]]] = []
+        lock = threading.Lock()
+
+        def _copy(index: int) -> None:
+            offset = host.data_ptr() + index * row
+            named = rt._named_host_buffer(offset, row)
+            with lock:
+                seen.append((offset, (named.owner, named.buffer_id)))
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(_copy, range(rows)))
+
+        identities = [identity for _, identity in seen]
+        assert len(seen) == rows
+        # One identity per range, and no range sharing another's: both directions matter, since
+        # a duplicate id makes the child refuse the import and a missing one breaks reuse.
+        assert len(set(identities)) == rows
+        assert len({offset for offset, _ in seen}) == rows
+        rt.close()
+
+    def test_identity_cache_is_dropped_with_the_ranges_it_names(self, patched_setup):
+        """After the parent releases its references, nothing may keep naming those ranges."""
+        host = torch.zeros(4, 4, dtype=torch.float32).share_memory_()
+        rt = DistributedWorker(_fake_compiled([_param("a", [4, 4])], []), inherited_host_tensors=[host])
+        dev = self._dev(rt)
+        nbytes = host.numel() * host.element_size()
+        rt.copy_to(dev.data_ptr, host.data_ptr(), nbytes)
+        assert rt._named_identities
+
+        rt.release_inherited_host_tensor_refs()
+
+        assert not rt._named_identities
         rt.close()
 
 

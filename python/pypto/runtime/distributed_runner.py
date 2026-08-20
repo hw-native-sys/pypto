@@ -1525,6 +1525,18 @@ class DistributedWorker(Worker):
         )
         self._buffer_owner_id: bytes | None = None
         self._buffer_id_seq = 0
+        # One identity per host *range*, not per copy. Both properties this buys are load
+        # bearing: a consumer's ImportRegistry only drops an entry when the owner releases the
+        # Buffer, which a named copy never does, so minting per copy would leave one permanent
+        # ImportedBuffer per copy in every chip child — unbounded for a per-step D2H read-back.
+        # And re-copying the same range must reuse its identity, because one identity may name
+        # only one backing: `materialize` refuses a second descriptor for an identity it has
+        # already handed out.
+        self._named_identities: dict[tuple[int, int], tuple[bytes, int]] = {}
+        # Minting is not atomic (`+=` is load/add/store, and the lazy owner mint is
+        # check-then-act) while `alloc_stacked_tensor` runs one thread per chip through this
+        # path, so the cache and the counter are guarded together.
+        self._named_identity_mu = threading.Lock()
         self._persistent = bool(persistent)
         self._reset_persistent_windows = reset_persistent_windows
         self._persistent_error: BaseException | None = None
@@ -2179,18 +2191,36 @@ class DistributedWorker(Worker):
             return 0
         return int(self._w.committed_device_memory(worker_id))
 
-    def _next_buffer_identity(self) -> tuple[bytes, int]:
-        """Mint the ``(owner_instance_id, buffer_id)`` pair a named host range needs."""
+    def _buffer_identity_for(self, host_ptr: int, nbytes: int) -> tuple[bytes, int]:
+        """Return the stable ``(owner_instance_id, buffer_id)`` naming this host range.
+
+        Keyed on the range rather than counted per call, so a range copied N times keeps one
+        identity: the consumer's ``ImportRegistry`` refuses a second descriptor for an identity
+        it has already materialized, and it only drops an entry when the owner releases the
+        Buffer — which the named path never does, since it hands out the caller's own mapping.
+        Per-copy identities would therefore both collide on a re-copy and grow a child's
+        registry without bound. Distinct sub-ranges of one registered tensor still get distinct
+        identities, which is what a sharded upload needs.
+
+        Held under a lock because ``alloc_stacked_tensor`` drives this from one thread per chip.
+        """
         from simpler.buffer import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
             mint_owner_instance_id,
         )
 
-        owner = self._buffer_owner_id
-        if owner is None:
-            owner = mint_owner_instance_id()
-            self._buffer_owner_id = owner
-        self._buffer_id_seq += 1
-        return owner, self._buffer_id_seq
+        key = (int(host_ptr), int(nbytes))
+        with self._named_identity_mu:
+            cached = self._named_identities.get(key)
+            if cached is not None:
+                return cached
+            owner = self._buffer_owner_id
+            if owner is None:
+                owner = mint_owner_instance_id()
+                self._buffer_owner_id = owner
+            self._buffer_id_seq += 1
+            identity = (owner, self._buffer_id_seq)
+            self._named_identities[key] = identity
+            return identity
 
     def _named_host_buffer(self, host_ptr: int, nbytes: int) -> Any:
         """Name a fork-inherited MAP_SHARED host range in place, or ``None`` to stage it.
@@ -2222,7 +2252,7 @@ class DistributedWorker(Worker):
         for start, stop, is_shared in self._inherited_host_spans:
             if host_ptr < start or end > stop or not is_shared:
                 continue
-            owner, buffer_id = self._next_buffer_identity()
+            owner, buffer_id = self._buffer_identity_for(host_ptr, nbytes)
             return wrap_fork_inherited(
                 host_ptr,
                 nbytes,
@@ -2394,6 +2424,8 @@ class DistributedWorker(Worker):
         # No later copy may name these ranges: the parent has dropped its references, so a
         # copy after this point stages rather than wrapping memory nobody vouches for.
         self._inherited_host_spans = ()
+        with self._named_identity_mu:
+            self._named_identities.clear()
 
     def copy_stacked_from(self, stacked: StackedDeviceTensor, host: torch.Tensor) -> None:
         """Read every shard of *stacked* back to *host* (D2H) — the read-back
@@ -2708,6 +2740,7 @@ class DistributedWorker(Worker):
             finally:
                 self._inherited_host_tensors = ()
                 self._inherited_host_spans = ()
+                self._named_identities.clear()
                 self._persistent_domains_by_program.clear()
                 if self._close_complete:
                     self._device_buffers.clear()
