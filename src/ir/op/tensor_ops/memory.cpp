@@ -567,6 +567,10 @@ REGISTER_OP("tensor.assemble")
     .add_argument("source", "Source tensor to write (TensorType)")
     .add_argument("offset", "Offset dimensions (TupleType of ScalarType(INT64))")
     .set_attr<int>("atomic")
+    // The result is `target` after the write: a fresh SSA name bound to the same
+    // buffer, not a new allocation. Declaring it here keeps param/buffer lineage
+    // analyses off a hardcoded op list.
+    .set_output_reuses_input(0)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorAssembleType(args, kwargs);

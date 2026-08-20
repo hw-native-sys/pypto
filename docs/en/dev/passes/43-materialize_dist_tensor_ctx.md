@@ -24,10 +24,11 @@ sites. This pass makes the ctx flow explicit in IR instead:
    too: its result positions are the callee's return positions (the trailing
    `Scalar[TASK_ID]` has no ctx). Builtin ops that bind a fresh SSA var to a
    DistributedTensor that already exists forward that value's ctx — both
-   output-side writebacks (`tile.store`, `tensor.assemble`,
-   `tensor.set_validshape`) and zero-copy buffer-aliasing views (`tensor.view`,
-   `tile.slice`, `tensor.reshape`, ...), whose result type propagates
-   `DistributedTensorType::window_buffer_` from `args[0]`.
+   output-side writebacks, which the op declares itself via
+   `set_output_reuses_input(idx)` (`tile.store` -> `args[2]`,
+   `tensor.assemble` -> `args[0]`), and zero-copy buffer-aliasing views
+   (`tensor.view`, `tile.slice`, `tensor.reshape`, ...), whose result type
+   propagates `DistributedTensorType::window_buffer_` from `args[0]`.
    Tensor aliases carried through `ForStmt` / `WhileStmt` are tracked as well.
    In host orchestration only, if the lineage cannot be resolved, bind
    `pld.system.get_comm_ctx(dist)` immediately before the call and pass that

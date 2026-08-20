@@ -28,14 +28,18 @@ namespace op_predicates {
 /// value already names, so the result inherits that argument's identity — and
 /// with it anything derived from identity, such as which function parameter a
 /// value traces back to or which communication context a DistributedTensor
-/// belongs to.
+/// belongs to (`tile.store(value, indices, target)` -> `args[2]`,
+/// `tensor.assemble(target, source, offset)` -> `args[0]`).
 ///
-///   `tensor.assemble(target, tile, offset)`  -> `args[0]`
-///   `tensor.set_validshape(target, ...)`     -> `args[0]`
-///   `tile.store(value, indices, target)`     -> `args[2]`
+/// The op declares this itself via `set_output_reuses_input(idx)`; this is a
+/// registry read, not an op list, so a newly added in-place op is picked up
+/// without touching every lineage analysis. Note the sibling declaration
+/// `set_output_memory_inherit_input()` is a *different* statement — it fixes the
+/// output's memory SPACE, not its buffer, and carries no argument index (see
+/// `IsBufferAliasingViewOp`).
 ///
-/// @return the aliased argument index, or nullopt when @p op is not one of
-///         these ops or @p arg_count is too small for it
+/// @return the aliased argument index, or nullopt when @p op declares no reuse
+///         or @p arg_count is too small for the declared index
 [[nodiscard]] std::optional<size_t> BuiltinWritebackArgIndex(const OpPtr& op, size_t arg_count);
 
 /// True if the Call targets a tpop op (tile.tpop_from_aic / tile.tpop_from_aiv).

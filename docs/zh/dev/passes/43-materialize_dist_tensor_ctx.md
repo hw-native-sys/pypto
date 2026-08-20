@@ -21,9 +21,10 @@ codegen 再用它降低 `pld.system.rank`、`pld.system.nranks`、`notify`、`wa
    `Submit` 同理：它的结果位置就是被调函数的返回位置（末尾的
    `Scalar[TASK_ID]` 没有对应 ctx）。把新 SSA 变量绑定到「已经存在的
    DistributedTensor」的 builtin op 会转发该值的 ctx，包括两类：输出侧写回
-   （`tile.store`、`tensor.assemble`、`tensor.set_validshape`），以及零拷贝
-   buffer-aliasing view（`tensor.view`、`tile.slice`、`tensor.reshape` 等），
-   后者的结果类型直接从 `args[0]` 传播 `DistributedTensorType::window_buffer_`。
+   （由 op 自己通过 `set_output_reuses_input(idx)` 声明，例如 `tile.store`
+   -> `args[2]`、`tensor.assemble` -> `args[0]`），以及零拷贝 buffer-aliasing
+   view（`tensor.view`、`tile.slice`、`tensor.reshape` 等），后者的结果类型
+   直接从 `args[0]` 传播 `DistributedTensorType::window_buffer_`。
    `ForStmt` / `WhileStmt` 携带的 tensor alias 也会被追踪。仅对 host
    orchestration，在无法解析 lineage 时才会在调用前插入
    `pld.system.get_comm_ctx(dist)` 绑定并传递该结果。chip orchestration 和

@@ -73,12 +73,9 @@ bool OutputInheritsSourceBuffer(const std::string& op_name) {
 
 std::optional<size_t> BuiltinWritebackArgIndex(const OpPtr& op, size_t arg_count) {
   if (!op) return std::nullopt;
-  std::optional<size_t> aliased_idx;
-  if (IsOp(op, "tile.store")) {
-    aliased_idx = 2;
-  } else if (IsOp(op, "tensor.assemble") || IsOp(op, "tensor.set_validshape")) {
-    aliased_idx = 0;
-  }
+  auto& registry = OpRegistry::GetInstance();
+  if (!registry.IsRegistered(op->name_)) return std::nullopt;
+  auto aliased_idx = registry.GetEntry(op->name_).GetOutputReusesInputArg();
   if (!aliased_idx || *aliased_idx >= arg_count) return std::nullopt;
   return aliased_idx;
 }
