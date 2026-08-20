@@ -42,6 +42,7 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "pypto/ir/transforms/utils/buffer_root_collector.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/tile_conversion_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -2441,6 +2442,18 @@ Pass ConvertTensorToTileOps() {
             param_idx[func->params_[i].get()] = i;
           }
 
+          // An argument rarely *is* the parameter. `for acc in ...: acc =
+          // kernel(x, acc)` forwards a loop-carried `IterArg` whose value is the
+          // parameter's buffer, and looking the IterArg up in `param_idx` finds
+          // nothing — so the enclosing signature kept declaring `In` for a
+          // buffer the call chain writes. Resolving the argument to its owning
+          // buffer first is what makes the propagation reach through a carry,
+          // and it is the same resolution ParamDirectionsSound uses to decide
+          // which parameter a write lands on.
+          buffer_root::BufferRootCollector roots(program, buffer_root::AmbiguousRootPolicy::kSkip);
+          roots.Initialize(func->params_);
+          roots.VisitStmt(func->body_);
+
           class CallScanner : public IRVisitor {
            public:
             std::vector<CallPtr> calls;
@@ -2462,9 +2475,14 @@ Pass ConvertTensorToTileOps() {
             if (callee_it == func_map.end()) continue;
             const auto& callee = callee_it->second;
             for (size_t ai = 0; ai < call->args_.size() && ai < callee->param_directions_.size(); ++ai) {
-              auto arg_var = As<Var>(call->args_[ai]);
+              // AsVarLike, not As<Var>: an IterArg has its own ObjectKind and
+              // does not match As<Var> (.claude/rules/ir-kind-traits.md).
+              auto arg_var = AsVarLike(call->args_[ai]);
               if (!arg_var) continue;
-              auto pi = param_idx.find(arg_var.get());
+              if (roots.ambiguous_buffer_vars.count(arg_var.get()) > 0) continue;
+              auto root_it = roots.buffer_roots.find(arg_var.get());
+              const Var* arg_root = root_it == roots.buffer_roots.end() ? arg_var.get() : root_it->second;
+              auto pi = param_idx.find(arg_root);
               if (pi == param_idx.end()) continue;
               ParamDirection callee_dir = callee->param_directions_[ai];
               ParamDirection& caller_dir = new_dirs[pi->second];
