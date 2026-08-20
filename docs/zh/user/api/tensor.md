@@ -2,10 +2,8 @@
 
 张量级算子 —— 接受并返回 `pl.Tensor` 值，因此属于编排层，或任何以整张张量为工作单位的地方。见[选择命名空间](../ops/00-dispatch.md)。
 
-## API 正文在英文页
-
-这些条目由源码 docstring 生成，因此内容是英文的。它们**只在英文页渲染一次** —— 同一个符号若在中英两处各注册一次锚点，站内交叉引用就无法确定该指向哪一个，`mkdocs build --strict` 会因此失败。
-
-→ **[`pl.tensor` 的完整 API 参考](../../../user/api/tensor.md)**
-
-上面那一段导语说明了这个命名空间**是什么、何时用**；具体到每个符号的签名、参数与返回值，请看英文页。
+::: pypto.language.tensor
+    options:
+      show_root_heading: false
+      members_order: source
+      filters: ["!^_"]

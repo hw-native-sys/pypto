@@ -10,7 +10,7 @@ Generated from the source docstrings, so it cannot drift from the code.
 | [`pl.system`](system.md) | Synchronization, cache and cross-core primitives |
 | [`pl.array`](array.md) | Fixed-length arrays, mainly for `pl.TASK_ID` fan-in |
 | [`pl.prefetch`](prefetch.md) | Asynchronous GM to L2 prefetch |
-| [`pl.optimizations`](optimizations.md) | The entries `pl.at(..., optimizations=[...])` accepts |
+| [`pl.optimizations`](optimizations.md) | The entries that `pl.at(..., optimizations=[...])` accepts |
 
 ## How to use it
 

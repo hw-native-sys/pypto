@@ -111,12 +111,18 @@ plugins:
             Backend: 后端
             Debug: 调试
             Distributed: 分布式
+  # Both locales render the same API bodies, so every mkdocstrings identifier has
+  # two anchors -- one under `/user/api/`, one under `/zh/user/api/`. Without
+  # `resolve_closest` autorefs cannot pick between them ("Multiple primary URLs
+  # found for ..."), which `--strict` turns into a build failure the moment
+  # anything cross-references the identifier -- the operator catalog does, 142
+  # times per locale. Resolving to the closest anchor is also what a reader wants:
+  # a link on a zh page lands on the zh page.
+  - autorefs:
+      resolve_closest: true
   # Renders API pages from source docstrings. The `pl.*` namespaces are wired
   # into the nav under `en/user/api/`; `pypto.runtime.*` is not rendered yet
-  # (see issue #2120). Bodies are rendered on the English pages only -- an
-  # identifier registered in two locales has no primary URL, which fails
-  # `--strict` as soon as anything cross-references it; the zh pages carry a
-  # Chinese lead-in and link across.
+  # (see issue #2120).
   - mkdocstrings:
       handlers:
         python:

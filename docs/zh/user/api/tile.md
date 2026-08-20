@@ -2,10 +2,8 @@
 
 Tile 级算子 —— 在 InCore 函数内接受并返回 `pl.Tile` 值的那一族。什么时候该用它们而不是 `pl.*` 或 `pl.tensor.*` 的对应物，见[选择命名空间](../ops/00-dispatch.md)。
 
-## API 正文在英文页
-
-这些条目由源码 docstring 生成，因此内容是英文的。它们**只在英文页渲染一次** —— 同一个符号若在中英两处各注册一次锚点，站内交叉引用就无法确定该指向哪一个，`mkdocs build --strict` 会因此失败。
-
-→ **[`pl.tile` 的完整 API 参考](../../../user/api/tile.md)**
-
-上面那一段导语说明了这个命名空间**是什么、何时用**；具体到每个符号的签名、参数与返回值，请看英文页。
+::: pypto.language.tile
+    options:
+      show_root_heading: false
+      members_order: source
+      filters: ["!^_"]

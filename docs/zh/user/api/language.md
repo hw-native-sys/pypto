@@ -2,10 +2,11 @@
 
 直接挂在 `pl` 上的名字 —— 装饰器、类型、控制流构造，以及按类型分派的算子包装。这里的算子按你传进去的东西分派：两个 tile 的 `pl.add` 就是 `pl.tile.add`，两个张量的就是 `pl.tensor.add`。见[选择命名空间](../ops/00-dispatch.md)。
 
-## API 正文在英文页
-
-这些条目由源码 docstring 生成，因此内容是英文的。它们**只在英文页渲染一次** —— 同一个符号若在中英两处各注册一次锚点，站内交叉引用就无法确定该指向哪一个，`mkdocs build --strict` 会因此失败。
-
-→ **[`pl` 的完整 API 参考](../../../user/api/language.md)**
-
-上面那一段导语说明了这个命名空间**是什么、何时用**；具体到每个符号的签名、参数与返回值，请看英文页。
+::: pypto.language
+    options:
+      show_root_heading: false
+      show_submodules: false
+      members_order: alphabetical
+      filters:
+        - "!^_"
+        - "!^(parser|optimizations|adir|array|prefetch|tile|system|tensor)$"
