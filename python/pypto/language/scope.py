@@ -163,6 +163,12 @@ def submit(*args: Any, **kwargs: Any) -> Any:
     pure scheduling optimisation (no effect on results). Pays off on critical
     paths built from many short tasks; harmless otherwise.
 
+    The optional ``timing_slot=N`` kwarg (``N`` is an integer literal in
+    ``0..15``) tags a task for device timing. The runtime emits one device-domain
+    span per slot from the earliest tagged task dispatch to the latest tagged
+    task completion. Tag related target tasks with the same slot to measure them
+    as one region while leaving setup tasks untagged.
+
     The optional ``predicate=(...)`` kwarg attaches a **dispatch predicate** the
     scheduler evaluates at this task's dispatch point — after its dependencies
     are satisfied, so the value is current without an orchestration-time wait.
@@ -222,7 +228,8 @@ def spmd_submit(*args: Any, **kwargs: Any) -> Any:
     ``core_num`` is a **required keyword argument** (a positive integer
     expression) — the positional slots are the kernel's own arguments.
     ``sync_start`` (default ``False``) requires all blocks to launch atomically.
-    ``deps=[...]``, ``allow_early_resolve=True`` and ``predicate=(...)`` work
+    ``deps=[...]``, ``allow_early_resolve=True``, ``timing_slot=N`` and
+    ``predicate=(...)`` work
     exactly as on :func:`submit` (note: a ``sync_start`` task cannot itself be
     block-by-block pre-staged, but it can still be flagged to let its consumers
     pre-stage). The callee may be an InCore / AIC / AIV kernel or a co-scheduled

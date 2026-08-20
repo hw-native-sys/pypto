@@ -81,7 +81,7 @@ with pl.spmd(4, name_hint="stage2", deps=[first]) as second:
 
 ```text
 result, tid = pl.submit(self.kernel, *kernel_args, deps=[...], dumps=[...],
-                        allow_early_resolve=False, predicate=(...))
+                        allow_early_resolve=False, timing_slot=N, predicate=(...))
 ```
 
 被调方之后的位置槽是 kernel 自己的实参；其余都是可选关键字。被调方**必须**写成 `self.<kernel>`，其他任何表达式都是解析错误。
@@ -103,7 +103,19 @@ SPMD 版本：一个编排任务，由运行时在 `core_num` 个逻辑 block �
 a, tid = pl.spmd_submit(self.k1, x, core_num=8)
 ```
 
-`core_num` 是**必需的关键字** —— 位置槽属于 kernel。`sync_start`（默认 `False`）要求所有 block 原子启动。`deps=`、`allow_early_resolve=` 与 `predicate=` 的行为与 `pl.submit` 完全一致。
+`core_num` 是**必需的关键字** —— 位置槽属于 kernel。`sync_start`（默认 `False`）要求所有 block 原子启动。`deps=`、`allow_early_resolve=`、`timing_slot=` 与 `predicate=` 的行为与 `pl.submit` 完全一致。
+
+### Device timing slot
+
+`timing_slot=N`（`N` 必须是 `0` 到 `15` 的整数文本）把一个 task 标记为 device timing 的成员。runtime 对每个 slot 输出一个 span：同 slot 所有 task 的最早 dispatch 到最晚 completion。把两个相关的 task 标到同一个 slot，就可以测量二者合成的 device 区间；warmup 与对齐 barrier 不标记即可排除：
+
+```python
+_, barrier_tid = pl.submit(self.warmup_barrier, signal)
+mid, _ = pl.spmd_submit(self.stage_a, x, core_num=N, deps=[barrier_tid], timing_slot=0)
+out, _ = pl.spmd_submit(self.stage_b, mid, w, core_num=N, deps=[barrier_tid], timing_slot=0)
+```
+
+产生的 trace span 名称为 `simpler_run.runner_run.device_wall.task_slot_0`。slot 只在单个 device 时钟域内有效；L3 汇总应取各 rank duration 的最大值，不能相减不同 device 的时间戳。
 
 ### 用 TaskId 数组做扇入
 
