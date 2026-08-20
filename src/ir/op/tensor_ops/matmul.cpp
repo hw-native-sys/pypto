@@ -120,6 +120,19 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
 
   std::vector<ExprPtr> output_shape;
 
+  // Storage follows the physical M / N above; the logical rectangle follows the
+  // operands' valid M / N, exactly as tile.matmul deduces it (see
+  // DeduceMatmulProductInfo in tile_ops/matmul.cpp). Without this an operand
+  // whose rows are padded for the cube fractal — the tensor-level spelling of
+  // `pl.load(..., valid_shape=...)` — would deduce a fully-valid product and the
+  // logical extent would be lost at the tensor level while the lowered tile
+  // still carries it. Left empty on the paths that have no valid M / N to carry:
+  // the 0D dot product, and the ND path whose tile.batch_matmul counterpart
+  // likewise deduces a fully-valid result.
+  std::vector<ExprPtr> output_valid;
+  const auto lhs_valid = GetValidShape(lhs_type);
+  const auto rhs_valid = GetValidShape(rhs_type);
+
   if (lhs_shape.size() == 1 && rhs_shape.size() == 1) {
     // Vector x vector (dot product): [K] x [K] -> scalar (0D tensor)
     CheckContractionExtents(lhs_shape[0], rhs_shape[0],
@@ -132,6 +145,7 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
     ExprPtr k_lhs = a_trans ? lhs_shape[0] : lhs_shape[1];
     CheckContractionExtents(k_lhs, rhs_shape[0], "tensor.matmul requires matching inner dimensions");
     output_shape = {m_dim};
+    output_valid = {a_trans ? lhs_valid[1] : lhs_valid[0]};
   } else if (lhs_shape.size() == 1 && rhs_shape.size() == 2) {
     // Vector x matrix: [K] x [K, N] -> [N]
     // With b_trans the rhs is stored [N, K], so the contraction axis is dim 1.
@@ -139,6 +153,7 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
     ExprPtr n_dim = b_trans ? rhs_shape[0] : rhs_shape[1];
     CheckContractionExtents(lhs_shape[0], k_rhs, "tensor.matmul requires matching inner dimensions");
     output_shape = {n_dim};
+    output_valid = {b_trans ? rhs_valid[0] : rhs_valid[1]};
   } else if (lhs_shape.size() == 2 && rhs_shape.size() == 2) {
     // 2D x 2D matrix multiplication
     ExprPtr m_dim = a_trans ? lhs_shape[1] : lhs_shape[0];
@@ -150,6 +165,7 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
     CheckContractionExtents(k_lhs, k_rhs, "tensor.matmul requires matching inner dimensions");
 
     output_shape = {m_dim, n_dim};
+    output_valid = {a_trans ? lhs_valid[1] : lhs_valid[0], b_trans ? rhs_valid[0] : rhs_valid[1]};
   } else {
     // For higher-dimensional tensors (both must have at least 2 dimensions),
     // use batched matmul semantics
@@ -185,7 +201,12 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
     output_shape.push_back(n_dim);
   }
 
-  return std::make_shared<TensorType>(output_shape, out_dtype);
+  if (output_valid.empty()) {
+    return std::make_shared<TensorType>(output_shape, out_dtype);
+  }
+  // A valid_shape equal to the physical shape canonicalizes away in the
+  // TensorType constructor, so a fully-valid product still deduces no view.
+  return MakeFreshTensorType(std::move(output_shape), out_dtype, std::move(output_valid));
 }
 
 // ============================================================================
@@ -304,7 +325,17 @@ TypePtr DeduceTensorMatMulAccType(const std::vector<ExprPtr>& args,
     }
   }
 
-  return std::make_shared<TensorType>(acc_shape, result_dtype);
+  // The product is written into the accumulator, so the result carries the
+  // accumulator's valid region — the same rule tile.matmul_acc applies. The ND
+  // form stays fully valid, for the same reason tensor.matmul's does: it lowers
+  // to tile.batch_matmul_acc, whose deducer makes the whole result valid, so a
+  // narrower rectangle advertised here would contradict the tile the conversion
+  // produces and the store would either fail its tile-level check or write the
+  // padded region.
+  if (acc_ndim > 2 || lhs_ndim > 2 || rhs_ndim > 2) {
+    return std::make_shared<TensorType>(acc_shape, result_dtype);
+  }
+  return MakeFreshTensorType(acc_shape, result_dtype, GetValidShape(acc_type));
 }
 
 REGISTER_OP("tensor.matmul_acc")

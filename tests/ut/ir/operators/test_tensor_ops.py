@@ -51,15 +51,15 @@ def _tensor_var(name: str, shape: list[int], dtype: DataType = DataType.FP16) ->
     return ir.Var(name, ir.TensorType(dims, dtype), span)
 
 
+def _const_shape_of(result_type) -> list[int]:
+    """Return a deduced TensorType's shape, requiring every dim static."""
+    assert isinstance(result_type, ir.TensorType)
+    return _const_int_values(result_type.shape)
+
+
 def _const_shape(call: ir.Call) -> list[int]:
     """Return the deduced output shape of a tensor op call, requiring every dim static."""
-    result_type = call.type
-    assert isinstance(result_type, ir.TensorType)
-    dims = []
-    for dim in result_type.shape:
-        assert isinstance(dim, ir.ConstInt)
-        dims.append(dim.value)
-    return dims
+    return _const_shape_of(call.type)
 
 
 def test_tensor_create():
@@ -301,6 +301,139 @@ def test_tensor_matmul_acc_nd_acc_batch_mismatch_fails():
 
     with pytest.raises(ValueError, match="acc batch dim"):
         ir.op.tensor.matmul_acc(acc, lhs, rhs)
+
+
+# ---- valid_shape propagation through matmul (issue #2442) ---------------------------------
+#
+# Storage follows the physical M / N; the logical rectangle follows the operands' valid M / N,
+# the same rule tile.matmul applies. This is what lets a caller pad an operand up to the cube
+# fractal — `pl.slice(q, [16, K], off, valid_shape=[5, K])`, the tensor-level spelling of
+# `pl.load(..., valid_shape=...)` — without the logical extent being lost at the tensor level
+# while the lowered tile still carries it.
+
+
+def test_tensor_matmul_carries_lhs_valid_m():
+    """A row-padded lhs yields a product whose valid M is the lhs's, not the padded M."""
+    lhs = _partial_tensor_var([16, 128], [5, 128], name="lhs", dtype=DataType.BF16)
+    rhs = _tensor_var("rhs", [128, 256], DataType.BF16)
+
+    result_type = ir.op.tensor.matmul(lhs, rhs, out_dtype=DataType.FP32).type
+
+    assert isinstance(result_type, ir.TensorType)
+    assert _const_shape_of(result_type) == [16, 256]
+    assert result_type.tensor_view is not None
+    assert _const_int_values(result_type.tensor_view.valid_shape) == [5, 256]
+
+
+def test_tensor_matmul_carries_rhs_valid_n():
+    """A column-narrowed rhs narrows the product's valid N."""
+    lhs = _tensor_var("lhs", [16, 128], DataType.BF16)
+    rhs = _partial_tensor_var([128, 256], [128, 200], name="rhs", dtype=DataType.BF16)
+
+    result_type = ir.op.tensor.matmul(lhs, rhs, out_dtype=DataType.FP32).type
+
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.tensor_view is not None
+    assert _const_int_values(result_type.tensor_view.valid_shape) == [16, 200]
+
+
+def test_tensor_matmul_valid_dims_follow_transpose_flags():
+    """a_trans / b_trans pick the valid M / N from the same axes as the physical shape."""
+    # lhs is stored [K, M] = [128, 16] with valid [128, 5]; rhs is stored [N, K] = [256, 128].
+    lhs = _partial_tensor_var([128, 16], [128, 5], name="lhs", dtype=DataType.BF16)
+    rhs = _partial_tensor_var([256, 128], [200, 128], name="rhs", dtype=DataType.BF16)
+
+    result_type = ir.op.tensor.matmul(lhs, rhs, out_dtype=DataType.FP32, a_trans=True, b_trans=True).type
+
+    assert isinstance(result_type, ir.TensorType)
+    assert _const_shape_of(result_type) == [16, 256]
+    assert result_type.tensor_view is not None
+    assert _const_int_values(result_type.tensor_view.valid_shape) == [5, 200]
+
+
+def test_tensor_matmul_fully_valid_operands_yield_no_explicit_view():
+    """Fully valid operands still deduce a bare product type — no view churn."""
+    lhs = _tensor_var("lhs", [16, 128], DataType.BF16)
+    rhs = _tensor_var("rhs", [128, 256], DataType.BF16)
+
+    result_type = ir.op.tensor.matmul(lhs, rhs, out_dtype=DataType.FP32).type
+
+    assert isinstance(result_type, ir.TensorType)
+    # Redundant full validity is canonicalized away by the TensorType constructor.
+    assert result_type.tensor_view is None or len(result_type.tensor_view.valid_shape) == 0
+
+
+def test_tensor_matmul_carries_symbolic_valid_m():
+    """A runtime valid extent survives into the product unchanged."""
+    span = ir.Span.unknown()
+    vm = ir.Var("vm", ir.ScalarType(DataType.INDEX), span)
+    view = ir.TensorView([], ir.TensorLayout.ND, valid_shape=[vm, ir.ConstInt(128, DataType.INDEX, span)])
+    lhs_type = ir.TensorType([16, 128], DataType.BF16, None, view)
+    lhs = ir.Var("lhs", lhs_type, span)
+    rhs = _tensor_var("rhs", [128, 256], DataType.BF16)
+
+    result_type = ir.op.tensor.matmul(lhs, rhs, out_dtype=DataType.FP32).type
+
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.tensor_view is not None
+    assert result_type.tensor_view.valid_shape[0] == vm
+
+
+def test_tensor_matmul_mat_vec_carries_valid_m():
+    """The mat-vec form carries the single surviving valid extent."""
+    lhs = _partial_tensor_var([16, 128], [5, 128], name="lhs", dtype=DataType.BF16)
+    rhs = _tensor_var("rhs", [128], DataType.BF16)
+
+    result_type = ir.op.tensor.matmul(lhs, rhs, out_dtype=DataType.FP32).type
+
+    assert isinstance(result_type, ir.TensorType)
+    assert _const_shape_of(result_type) == [16]
+    assert result_type.tensor_view is not None
+    assert _const_int_values(result_type.tensor_view.valid_shape) == [5]
+
+
+def test_tensor_matmul_nd_batch_stays_fully_valid():
+    """The ND path deduces a fully-valid product, matching its tile.batch_matmul lowering."""
+    lhs = _partial_tensor_var([2, 16, 128], [2, 5, 128], name="lhs", dtype=DataType.BF16)
+    rhs = _tensor_var("rhs", [2, 128, 256], DataType.BF16)
+
+    result_type = ir.op.tensor.matmul(lhs, rhs, out_dtype=DataType.FP32).type
+
+    assert isinstance(result_type, ir.TensorType)
+    assert _const_shape_of(result_type) == [2, 16, 256]
+    assert result_type.tensor_view is None or len(result_type.tensor_view.valid_shape) == 0
+
+
+def test_tensor_matmul_acc_carries_acc_valid_shape():
+    """matmul_acc writes into the accumulator, so the result carries the acc's valid region."""
+    acc = _partial_tensor_var([16, 256], [5, 256], name="acc", dtype=DataType.FP32)
+    lhs = _partial_tensor_var([16, 128], [5, 128], name="lhs", dtype=DataType.BF16)
+    rhs = _tensor_var("rhs", [128, 256], DataType.BF16)
+
+    result_type = ir.op.tensor.matmul_acc(acc, lhs, rhs).type
+
+    assert isinstance(result_type, ir.TensorType)
+    assert _const_shape_of(result_type) == [16, 256]
+    assert result_type.tensor_view is not None
+    assert _const_int_values(result_type.tensor_view.valid_shape) == [5, 256]
+
+
+def test_tensor_matmul_acc_nd_batch_stays_fully_valid():
+    """The ND acc path deduces a fully-valid result, matching tile.batch_matmul_acc.
+
+    tile.batch_matmul_acc makes its whole result valid, so advertising the
+    accumulator's narrower rectangle here would contradict the tile the
+    conversion produces.
+    """
+    acc = _partial_tensor_var([2, 16, 256], [2, 5, 256], name="acc", dtype=DataType.FP32)
+    lhs = _partial_tensor_var([2, 16, 128], [2, 5, 128], name="lhs", dtype=DataType.BF16)
+    rhs = _tensor_var("rhs", [2, 128, 256], DataType.BF16)
+
+    result_type = ir.op.tensor.matmul_acc(acc, lhs, rhs).type
+
+    assert isinstance(result_type, ir.TensorType)
+    assert _const_shape_of(result_type) == [2, 16, 256]
+    assert result_type.tensor_view is None or len(result_type.tensor_view.valid_shape) == 0
 
 
 def test_tensor_row_max():

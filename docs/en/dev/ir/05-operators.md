@@ -428,6 +428,19 @@ XOR, `part_*`, broadcasting, different valid regions, and direct distributed
 window operands are not covered by this rule because their current lowering or
 combination contracts require separate handling.
 
+`tensor.matmul` follows the same rule its `tile.matmul` lowering does: the
+result's storage is the physical `[M, N]`, while its effective `valid_shape` is
+`[lhs valid M, rhs valid N]` (each picked from the axis `a_trans` / `b_trans`
+selects for the physical shape). This is what lets a caller pad an operand up to
+the cube fractal — `pl.slice(q, [16, K], off, valid_shape=[5, K])`, the
+tensor-level spelling of `pl.load(..., valid_shape=...)` — and still have the
+logical extent reach the store. The mat-vec and vec-mat forms carry their single
+surviving extent; the 0-D dot product and the ND batched form deduce fully-valid
+results, the latter matching its `tile.batch_matmul` lowering. `tensor.matmul_acc`
+writes into the accumulator, so its result carries the accumulator's valid
+region, as `tile.matmul_acc` does — except in the ND form, which stays fully
+valid to match the `tile.batch_matmul_acc` it lowers to.
+
 `pl.reinterpret_view(data, dtype, *, shape=None)` dispatches to the equivalent `pl.tensor` or `pl.tile` operator and returns the same kind. It is a zero-copy view over exactly the same bytes, so `dtype` must differ and be one of signed/unsigned 8/16/32/64-bit integers, FP16, BF16, or FP32. With no `shape`, ND/row-major scales the last axis and DN/col-major scales the penultimate axis by the source/target byte-width ratio. An explicit shape must be byte-equivalent and fully static unless it is provably identical to the auto-inferred shape; a partial `valid_shape` only permits that auto-equivalent shape. Zero/null padding metadata is preserved, while dtype-dependent max/min padding is cleared. The initial executable path supports packed ND in-core tensors and packed flat (`none_box`) row/col-major tiles; DN tensor inference is available but Tensor-to-Tile lowering rejects it, and orchestration tensors are unsupported.
 
 **Example:**

@@ -714,6 +714,28 @@ class TestTensorSubscriptWrite:
         printed = narrow_write.as_python()
         assert "tensor.assemble" in printed
 
+    def test_tensor_subscript_write_accepts_matmul_narrowed_by_padded_lhs(self):
+        """A row-padded matmul lhs narrows the product, so a 5-row window is accepted.
+
+        Issue #2442: `pl.slice(q, [16, K], off, valid_shape=[5, K])` is the tensor-level
+        spelling of `pl.load(..., valid_shape=...)` — it pads the operand up to the cube
+        fractal while keeping the logical M. The product must carry that logical M, or
+        this write reads as a 16-vs-5 mismatch and the padded form is unusable.
+        """
+
+        @pl.function
+        def padded_matmul_write(
+            out: pl.Tensor[[5, 256], pl.FP32],
+            q: pl.Tensor[[5, 128], pl.BF16],
+            k: pl.Tensor[[128, 256], pl.BF16],
+        ) -> pl.Tensor[[5, 256], pl.FP32]:
+            q_pad = pl.slice(q, [16, 128], [0, 0], valid_shape=[5, 128], clamp=True)
+            out[0:5, :] = pl.matmul(q_pad, k, out_dtype=pl.FP32)
+            return out
+
+        assert isinstance(padded_matmul_write, ir.Function)
+        assert "tensor.assemble" in padded_matmul_write.as_python()
+
     def test_tensor_subscript_write_rejects_static_and_valid_mismatch(self):
         """src.static=[16, 8], valid=[16, 4]; window 6 cols matches neither — still reject."""
 

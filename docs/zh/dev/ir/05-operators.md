@@ -392,6 +392,16 @@ Scalar 比较与 XOR（`cmp` 和 `xors`）仍不在此规则的支持范围内�
 元数据。比较、XOR、`part_*`、广播、不同有效区域，以及直接使用 distributed
 window 的操作数不在这条规则范围内，因为它们当前的下降或合并契约需要单独处理。
 
+`tensor.matmul` 遵循与其下降目标 `tile.matmul` 相同的规则：结果的存储是物理
+`[M, N]`，而其 effective `valid_shape` 是 `[lhs 有效 M, rhs 有效 N]`（各自取自
+`a_trans` / `b_trans` 为物理 shape 选中的同一根轴）。正是这条规则让调用方可以把
+操作数补齐到 cube fractal —— `pl.slice(q, [16, K], off, valid_shape=[5, K])`，即
+`pl.load(..., valid_shape=...)` 的 tensor 级写法 —— 并让逻辑范围一路传到 store。
+mat-vec 与 vec-mat 形式携带其唯一保留的范围；0 维点积和 ND batched 形式推导为完全
+有效的结果，后者与其 `tile.batch_matmul` 下降保持一致。`tensor.matmul_acc` 写入
+累加器，因此结果携带累加器的有效区域，与 `tile.matmul_acc` 一致；但 ND 形式除外
+—— 它保持完全有效，以匹配其下降目标 `tile.batch_matmul_acc`。
+
 `pl.reinterpret_view(data, dtype, *, shape=None)` 会根据输入分派到等价的 `pl.tensor` 或 `pl.tile` 算子，并保持返回类型种类不变。它是覆盖完全相同字节的零拷贝视图，因此 `dtype` 必须不同，且仅支持有/无符号 8/16/32/64 位整数、FP16、BF16 与 FP32。省略 `shape` 时，ND/row-major 缩放最后一轴，DN/col-major 按源/目标字节宽度比例缩放倒数第二轴。显式 shape 必须字节数相等；除非能证明它与自动推导 shape 等价，否则必须完全静态。部分有效的 `valid_shape` 只能使用与自动推导结果等价的 shape。零值/null padding 元数据会保留，依赖 dtype 的 max/min padding 则会清除。初始可执行路径支持 packed ND in-core tensor 及 packed、flat（`none_box`）row/col-major tile；DN tensor 可做类型推导但 Tensor-to-Tile 下降会拒绝，编排层 tensor 暂不支持。
 
 **示例：**
