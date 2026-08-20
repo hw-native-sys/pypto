@@ -789,8 +789,12 @@ def random(
     reproduce the same tile. Maps to ``pto.trandom``.
 
     Args:
-        key0, key1: The two INT32 key words (plain ints or Scalars).
-        counter0, counter1, counter2, counter3: The four INT32 counter words.
+        key0: Low INT32 key word (plain int or Scalar).
+        key1: High INT32 key word (plain int or Scalar).
+        counter0: First INT32 counter word.
+        counter1: Second INT32 counter word.
+        counter2: Third INT32 counter word.
+        counter3: Fourth INT32 counter word.
         shape: Shape of the destination tile (static).
         valid_shape: Optional written region (each dim ``<= shape``); ``pto.trandom``
             only fills the valid rows/cols. Defaults to the full shape.

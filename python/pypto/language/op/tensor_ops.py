@@ -618,8 +618,12 @@ def random(
     reproduce the same tensor. Lowers to ``tile.random`` → ``pto.trandom``.
 
     Args:
-        key0, key1: The two INT32 key words (plain ints or Scalars).
-        counter0, counter1, counter2, counter3: The four INT32 counter words.
+        key0: Low INT32 key word (plain int or Scalar).
+        key1: High INT32 key word (plain int or Scalar).
+        counter0: First INT32 counter word.
+        counter1: Second INT32 counter word.
+        counter2: Third INT32 counter word.
+        counter3: Fourth INT32 counter word.
         shape: Destination tensor shape (static).
         dtype: Destination dtype. One of {INT32, UINT32}. Defaults to UINT32.
         rounds: Cipher round count, 7 or 10. Defaults to 10.
