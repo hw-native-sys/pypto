@@ -13,6 +13,7 @@ executes it on device.
 | New to PyPTO | [Getting Started](user/00-getting_started.md) — install, first program, compile and run |
 | Writing kernels | [Language Guide](user/language/index.md) — types, functions, control flow, memory, scopes |
 | Looking for an operator | [Operations](user/ops/index.md) — the `pl.*` / `pl.tensor.*` / `pl.tile.*` surface |
+| Looking up a signature | [API Reference](api/index.md) — every `pl.*` name, generated from the docstrings |
 | Chasing a wrong result | [Torch Codegen Debug Guide](user/tools/01-torch-codegen.md) — run the IR through PyTorch and compare |
 | Working on the compiler | [Developer documentation](dev/index.md) — IR, passes, code generation |
 | Reading generated code | [PTO ISA reference](reference/index.md) — cluster architecture and instruction semantics |

@@ -1,7 +1,8 @@
 # Catalog
 
-Every operator family, one line each. Signatures live in the docstrings — see
-[Operations](index.md) for why this page does not repeat them.
+Every operator family, one line each. Every name links into the
+[API Reference](../../api/index.md) for its signature — see [Operations](index.md) for why
+this page does not repeat them.
 
 > **Reading the tables:** the **Reach** column gives the shortest spelling that works.
 > `pl.` means the name is available unqualified; `pl.tile.` / `pl.tensor.` mean the

@@ -15,9 +15,11 @@ Two pages, deliberately thin:
 | [Catalog](01-catalog.md) | Every operator family, one line each, with the namespace it is reachable from |
 
 **Signatures are not duplicated here.** Nearly every operator in `pl.__all__` carries a
-docstring, and the docstring is the reference — a hand-maintained signature table would
-drift from it within a release. The catalog exists to answer "what is there, and what is
-it called", not "what are its arguments".
+docstring, and that docstring is the reference — a hand-maintained signature table would
+drift from it within a release. The [API Reference](../../api/index.md) renders those
+docstrings, and every name in the catalog links straight into it. So the catalog answers
+"what is there, and what is it called"; the API reference answers "what are its
+arguments".
 
 For "how do I use this operator to do something useful", the answer is a worked example,
 not a table — see [Tutorials](../tutorials/index.md), or `examples/beginner/` and

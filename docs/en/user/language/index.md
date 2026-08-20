@@ -11,8 +11,9 @@ construct means, and where it fails.
 
 A **guide**, organized by capability — each page covers one part of the language in full,
 including the edge cases. It is not a tutorial: no page builds a complete kernel from
-start to finish. It is also not an API reference: signatures live in
-[Operations](../ops/index.md) and in the docstrings.
+start to finish. It is also not an API reference: for signatures, see the
+[API Reference](../../api/index.md), reached by name through
+[the catalog](../ops/01-catalog.md).
 
 Conventionally, `import pypto.language as pl` — every name on these pages is reached
 through that alias.

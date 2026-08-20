@@ -12,6 +12,7 @@ PyPTO 让你用 Python 编写 NPU kernel 及其编排逻辑，经过多层 IR �
 | 初次接触 PyPTO | [入门指南](user/00-getting_started.md) —— 安装、第一个程序、编译与运行 |
 | 编写 kernel | [语言指南](user/language/index.md) —— 类型、函数、控制流、内存、作用域 |
 | 查找某个算子 | [算子](user/ops/index.md) —— `pl.*` / `pl.tensor.*` / `pl.tile.*` 全貌 |
+| 查某个名字的签名 | [API 参考](api/index.md) —— 全部 `pl.*` 名字，由 docstring 生成 |
 | 排查结果不对 | [Torch Codegen 调试指南](user/tools/01-torch-codegen.md) —— 把 IR 跑在 PyTorch 上对拍 |
 | 参与编译器开发 | [开发者文档](dev/index.md) —— IR、passes、代码生成 |
 | 阅读生成的代码 | [PTO ISA 参考](reference/index.md) —— 集群架构与指令语义 |
