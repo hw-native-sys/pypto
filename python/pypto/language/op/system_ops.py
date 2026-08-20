@@ -317,10 +317,10 @@ def tfree_to_aic(
     Args:
         tile: The tile returned by the matching [`tpop_from_aic`][pypto.language.system.tpop_from_aic].
         span: Optional source span
-        split: Split mode (0=none, 1=up-down, 2=left-right). Leave ``None``: the
-            ``StampTfreeSplit`` pass copies it from the originating ``tpop``. Pass a
-            value only to override that.
-        id: Optional frontend pipe id. Omit to use PTOAS default id 0.
+        split: Leave ``None``. The ``StampTfreeSplit`` pass always takes this from
+            the originating ``tpop``, so a value passed here cannot override it.
+        id: Optional frontend pipe id, inherited from the originating ``tpop`` when
+            omitted. Supplying one that disagrees with the ``tpop`` is rejected.
     """
     return _ir_ops.tfree_to_aic(tile.unwrap(), split=split, id=id, span=span)
 
@@ -336,10 +336,10 @@ def tfree_to_aiv(
     Args:
         tile: The tile returned by the matching [`tpop_from_aiv`][pypto.language.system.tpop_from_aiv].
         span: Optional source span
-        split: Split mode (0=none, 1=up-down, 2=left-right). Leave ``None``: the
-            ``StampTfreeSplit`` pass copies it from the originating ``tpop``. Pass a
-            value only to override that.
-        id: Optional frontend pipe id. Omit to use PTOAS default id 0.
+        split: Leave ``None``. The ``StampTfreeSplit`` pass always takes this from
+            the originating ``tpop``, so a value passed here cannot override it.
+        id: Optional frontend pipe id, inherited from the originating ``tpop`` when
+            omitted. Supplying one that disagrees with the ``tpop`` is rejected.
     """
     return _ir_ops.tfree_to_aiv(tile.unwrap(), split=split, id=id, span=span)
 

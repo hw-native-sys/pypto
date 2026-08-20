@@ -839,8 +839,11 @@ def transpose(input: T, axis1: int, axis2: int) -> T:
 
     Args:
         input: Value to transpose.
-        axis1: First axis to exchange.
-        axis2: Second axis to exchange. Swapping an axis with itself is a no-op.
+        axis1: First axis to exchange. Must be a compile-time constant; negative
+            indexing is supported.
+        axis2: Second axis to exchange. Must differ from ``axis1`` after negative
+            indexing is resolved -- naming the same axis twice is rejected, not
+            treated as a no-op.
     """
     if isinstance(input, Tensor):
         return _tensor.transpose(input, axis1, axis2)

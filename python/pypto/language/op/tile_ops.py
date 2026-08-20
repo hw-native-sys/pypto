@@ -764,7 +764,8 @@ def tri(
             May be a runtime ``Scalar``.
         shape: Shape of the destination tile (static).
         valid_shape: Optional written region (each dim ``<= shape``). Elements
-            outside it are left untouched. Defaults to the full shape.
+            outside it are not written, so their value is whatever the freshly
+            allocated tile holds. Defaults to the full shape.
         dtype: Destination dtype. Defaults to ``INT32``.
         upper: Select the upper triangle instead of the lower.
 

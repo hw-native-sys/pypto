@@ -2136,7 +2136,7 @@ def gather(
     [`pl.tile.gather_compare`][pypto.language.tile.gather_compare]:
         Scalar threshold compare (applied to every row). Returns ``(dst, cdst)`` —
         gathered indices ``[rows, out_cols] INT32`` and per-row match counts
-        ``[rows, 1] count_dtype``.
+        ``[1, rows] count_dtype``.
 
     Args:
         input: Source tensor (FP16/FP32/INT16/INT32).
@@ -2315,7 +2315,7 @@ def gather_row(  # noqa: PLR0913
     ``src_offset`` (block-table lookup, multi-source selection, invalid clamping)
     and the ``dst_offset`` slot itself, so arbitrary gather logic stays in the
     kernel. DMAs ``src`` straight into ``acc`` (``GM -> L1``, no ``tmov``); the
-    returned tile feeds ``pl.matmul`` directly.
+    returned tensor feeds ``pl.matmul`` directly.
 
     Args:
         acc: On-chip accumulator from [`create_l1`][pypto.language.tensor.create_l1] (loop-carried).
