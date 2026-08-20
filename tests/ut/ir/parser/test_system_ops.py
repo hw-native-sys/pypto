@@ -74,6 +74,48 @@ def _find_calls_in_func(func: ir.Function, op_name: str) -> list[ir.Call]:
     return found
 
 
+def test_comm_ctx_param_accepts_wrapper_and_raw_type_spelling():
+    """``pld.CommCtx`` and ``pld.CommCtxType`` name the same parameter type.
+
+    A materialized communication-context parameter should be spelled with the
+    DSL wrapper (mirroring what ``pld.get_comm_ctx`` hands back); the raw IR
+    type name stays accepted for the text the printer emits today.
+    """
+
+    @pl.program
+    class Wrapper:
+        @pl.function
+        def worker(self, data: pld.DistributedTensor[[64], pl.FP32], ctx: pld.CommCtx):
+            pld.system.wait(data, offsets=[0], expected=1, cmp=pld.WaitCmp.Eq)
+
+    @pl.program
+    class RawType:
+        @pl.function
+        def worker(self, data: pld.DistributedTensor[[64], pl.FP32], ctx: pld.CommCtxType):
+            pld.system.wait(data, offsets=[0], expected=1, cmp=pld.WaitCmp.Eq)
+
+    assert isinstance(_get_func(Wrapper, "worker").params[-1].type, ir.CommCtxType)
+    ir.assert_structural_equal(Wrapper, RawType)
+
+
+def test_comm_ctx_param_feeds_rank_like_a_queried_handle():
+    """A materialized ctx parameter is usable wherever a queried handle is.
+
+    This is the shape ``MaterializeDistTensorCtx`` produces, and it only type
+    checks with the wrapper spelling — ``pld.system.rank`` takes a ``CommCtx``.
+    """
+
+    @pl.program
+    class P:
+        @pl.function
+        def worker(self, data: pld.DistributedTensor[[64], pl.FP32], ctx: pld.CommCtx):
+            return pld.system.rank(ctx)
+
+    func = _get_func(P, "worker")
+    assert isinstance(func.params[-1].type, ir.CommCtxType)
+    assert len(_find_calls_in_func(func, "pld.system.rank")) == 1
+
+
 def test_get_comm_ctx_returns_comm_ctx_typed_call():
     """``pld.get_comm_ctx(data)`` parses to a Call of type CommCtxType."""
 

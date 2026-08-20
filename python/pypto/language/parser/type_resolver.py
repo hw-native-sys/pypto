@@ -111,16 +111,24 @@ def _is_pl_yield_call(node: ast.expr) -> bool:
     return isinstance(func, ast.Name) and func.id == "yield_"
 
 
-# Async-prefetch handle annotations -> singleton IR type getter. The printer and
-# user source use exported DSL wrapper names; raw IR type names remain accepted
-# as legacy aliases for previously serialized Python text.
-_OPAQUE_HANDLE_TYPE_GETTERS: dict[str, Callable[[], ir.Type]] = {
+# Singleton marker annotations -> IR type getter. These types carry no subscript
+# payload, so the annotation is a bare name. User source uses the exported DSL
+# wrapper name; raw IR type names remain accepted as legacy aliases for
+# previously serialized Python text.
+#
+# `CommCtx` is the DSL wrapper a materialized communication-context parameter
+# should be spelled with (`ctx: pld.CommCtx`), matching how `pld.get_comm_ctx`
+# hands the value back. The printer still emits the raw `CommCtxType` spelling;
+# aligning it is tracked separately.
+_MARKER_TYPE_GETTERS: dict[str, Callable[[], ir.Type]] = {
     "PrefetchAsyncContextType": ir.PrefetchAsyncContextType.get,
     "PrefetchAsyncContext": ir.PrefetchAsyncContextType.get,
     "AsyncEventType": ir.AsyncEventType.get,
     "AsyncEvent": ir.AsyncEventType.get,
     "AsyncSessionType": ir.AsyncSessionType.get,
     "AsyncSession": ir.AsyncSessionType.get,
+    "CommCtxType": ir.CommCtxType.get,
+    "CommCtx": ir.CommCtxType.get,
 }
 
 
@@ -335,17 +343,12 @@ class TypeResolver:
         if isinstance(type_node, ast.Call):
             return self._resolve_call_type(type_node)
 
-        # Printer round-trip for explicit communication-context parameters.
-        # ``CommCtxType`` is a singleton marker, so it has no subscript payload.
-        if self._is_comm_ctx_type_node(type_node):
-            return ir.CommCtxType.get()
-
-        # Opaque async-prefetch handles — singleton markers with no subscript
-        # payload. Accept the public wrapper spelling printed today and the
-        # legacy raw IR type spelling emitted by older printers.
-        opaque_handle = self._resolve_opaque_handle_type_node(type_node)
-        if opaque_handle is not None:
-            return opaque_handle
+        # Singleton markers with no subscript payload — async-prefetch handles
+        # and the communication context. Accept the public wrapper spelling and
+        # the raw IR type spelling alike.
+        marker_type = self._resolve_marker_type_node(type_node)
+        if marker_type is not None:
+            return marker_type
 
         # Handle attribute access like pl.Tensor
         if isinstance(type_node, ast.Attribute):
@@ -362,19 +365,14 @@ class TypeResolver:
         )
 
     @staticmethod
-    def _is_comm_ctx_type_node(node: ast.expr) -> bool:
-        if isinstance(node, ast.Attribute):
-            return isinstance(node.value, ast.Name) and node.value.id == "pld" and node.attr == "CommCtxType"
-        return isinstance(node, ast.Name) and node.id == "CommCtxType"
-
-    @staticmethod
-    def _resolve_opaque_handle_type_node(node: ast.expr) -> ir.Type | None:
-        """Resolve an async-prefetch handle annotation, or None if not one.
+    def _resolve_marker_type_node(node: ast.expr) -> ir.Type | None:
+        """Resolve a singleton-marker annotation, or None if not one.
 
         Both spellings resolve to the same singleton: the public DSL wrapper
-        name emitted by the printer (``AsyncEvent``) and the legacy raw IR type
-        name (``AsyncEventType``). A module prefix is optional so any import
-        alias (``pl.AsyncEvent``, ``lang.AsyncEvent``) works.
+        name (``AsyncEvent``, ``CommCtx``) and the raw IR type name
+        (``AsyncEventType``, ``CommCtxType``). A module prefix is optional so
+        any import alias (``pl.AsyncEvent``, ``pld.CommCtx``, ``lang.AsyncEvent``)
+        works.
         """
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
             name = node.attr
@@ -382,7 +380,7 @@ class TypeResolver:
             name = node.id
         else:
             return None
-        getter = _OPAQUE_HANDLE_TYPE_GETTERS.get(name)
+        getter = _MARKER_TYPE_GETTERS.get(name)
         return getter() if getter is not None else None
 
     def _resolve_subscript_type(self, subscript_node: ast.Subscript) -> ir.Type:  # noqa: PLR0912

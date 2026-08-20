@@ -449,7 +449,7 @@ def test_returned_mixed_values_use_reordered_distributed_param_contexts():
     """Return positions, rather than a tail heuristic, select each CommCtx."""
 
     @pl.program
-    class P:
+    class Before:
         @pl.function(type=pl.FunctionType.InCore)
         def reorder(
             self,
@@ -480,19 +480,68 @@ def test_returned_mixed_values_use_reordered_distributed_param_contexts():
             self.consume(returned_second)
             self.consume(returned_first)
 
-    result = _apply(passes.convert_to_ssa()(P))
-    main = _get_func(result, "main")
-    consume_calls = _collect_calls(main.body, "consume")
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+        def reorder(
+            self,
+            first: pl.InOut[pld.DistributedTensor[[4], pl.FP32]],
+            marker: pl.Scalar[pl.INT32],
+            second: pl.InOut[pld.DistributedTensor[[4], pl.FP32]],
+            first_ctx: pld.CommCtx,
+            second_ctx: pld.CommCtx,
+        ) -> tuple[
+            pl.Scalar[pl.INT32],
+            pld.DistributedTensor[[4], pl.FP32],
+            pld.DistributedTensor[[4], pl.FP32],
+        ]:
+            return marker, second, first
 
-    assert len(consume_calls) == 2
-    assert _collect_calls(main.body, "pld.system.get_comm_ctx") == []
-    assert consume_calls[0].args[-1] is main.params[-1]
-    assert consume_calls[1].args[-1] is main.params[-2]
+        @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+        def consume(self, data: pld.DistributedTensor[[4], pl.FP32], data_ctx: pld.CommCtx):
+            pld.system.wait(data, offsets=[0], expected=1, cmp=pld.WaitCmp.Eq)
+
+        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+        def main(
+            self,
+            first: pl.InOut[pld.DistributedTensor[[4], pl.FP32]],
+            second: pl.InOut[pld.DistributedTensor[[4], pl.FP32]],
+            marker: pl.Scalar[pl.INT32],
+            first_ctx: pld.CommCtx,
+            second_ctx: pld.CommCtx,
+        ):
+            result = self.reorder(
+                first,
+                marker,
+                second,
+                first_ctx,
+                second_ctx,
+                attrs={
+                    "arg_directions": [
+                        pl.adir.inout,
+                        pl.adir.scalar,
+                        pl.adir.inout,
+                        pl.adir.scalar,
+                        pl.adir.scalar,
+                    ]
+                },
+            )
+            returned_second = result[1]
+            returned_first = result[2]
+            # `reorder` returns (marker, second, first), so position 1 carries
+            # `second`'s context and position 2 carries `first`'s — a tail
+            # heuristic would swap them.
+            self.consume(
+                returned_second, second_ctx, attrs={"arg_directions": [pl.adir.input, pl.adir.scalar]}
+            )
+            self.consume(returned_first, first_ctx, attrs={"arg_directions": [pl.adir.input, pl.adir.scalar]})
+
+    ir.assert_structural_equal(_apply(passes.convert_to_ssa()(Before)), Expected)
 
 
 def test_loop_carried_returned_distributed_tensors_reuse_contexts():
     @pl.program
-    class P:
+    class Before:
         @pl.function(type=pl.FunctionType.InCore)
         def comm(
             self,
@@ -518,21 +567,78 @@ def test_loop_carried_returned_distributed_tensors_reuse_contexts():
             data, signal = self.comm(data, signal)
             return value
 
-    result = _apply(passes.convert_to_ssa()(P))
-    main = _get_func(result, "main")
-    comm_calls = _collect_calls(main.body, "comm")
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+        def comm(
+            self,
+            data: pl.InOut[pld.DistributedTensor[[4], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[2], pl.INT32]],
+            data_ctx: pld.CommCtx,
+            signal_ctx: pld.CommCtx,
+        ) -> tuple[pld.DistributedTensor[[4], pl.FP32], pld.DistributedTensor[[2], pl.INT32]]:
+            return data, signal
 
-    assert len(comm_calls) == 2
-    assert _collect_calls(main.body, "pld.system.get_comm_ctx") == []
-    assert list(comm_calls[0].args[-2:]) == list(main.params[-2:])
-    assert list(comm_calls[1].args[-2:]) == list(main.params[-2:])
+        @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+        def compute(self, value: pl.InOut[pl.Tensor[[4], pl.FP32]]) -> pl.Tensor[[4], pl.FP32]:
+            return value
+
+        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+        def main(
+            self,
+            data: pl.InOut[pld.DistributedTensor[[4], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[2], pl.INT32]],
+            value: pl.InOut[pl.Tensor[[4], pl.FP32]],
+            data_ctx: pld.CommCtx,
+            signal_ctx: pld.CommCtx,
+        ) -> pl.Tensor[[4], pl.FP32]:
+            # Both call sites forward the caller's ctx params: the loop carry is
+            # seeded from them and the yield keeps naming the same windows.
+            for _layer, (data_i, signal_i, value_i) in pl.range(2, init_values=(data, signal, value)):
+                carried = self.comm(
+                    data_i,
+                    signal_i,
+                    data_ctx,
+                    signal_ctx,
+                    attrs={
+                        "arg_directions": [
+                            pl.adir.inout,
+                            pl.adir.inout,
+                            pl.adir.scalar,
+                            pl.adir.scalar,
+                        ]
+                    },
+                )
+                data_next = carried[0]
+                signal_next = carried[1]
+                value_next = self.compute(value_i, attrs={"arg_directions": [pl.adir.inout]})
+                data_out, signal_out, value_out = pl.yield_(data_next, signal_next, value_next)
+            tail = self.comm(
+                data_out,
+                signal_out,
+                data_ctx,
+                signal_ctx,
+                attrs={
+                    "arg_directions": [
+                        pl.adir.inout,
+                        pl.adir.inout,
+                        pl.adir.scalar,
+                        pl.adir.scalar,
+                    ]
+                },
+            )
+            _tail_data = tail[0]
+            _tail_signal = tail[1]
+            return value_out
+
+    ir.assert_structural_equal(_apply(passes.convert_to_ssa()(Before)), Expected)
 
 
 def test_buffer_aliasing_view_inherits_source_context():
-    """A zero-copy view keeps the source window, so it keeps the source ctx."""
+    """A zero-copy view keeps the source window, so it forwards the source ctx."""
 
     @pl.program
-    class P:
+    class Before:
         @pl.function(type=pl.FunctionType.InCore)
         def consume(self, data: pld.DistributedTensor[[2, 2], pl.FP32]):
             pld.system.wait(data, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Eq)
@@ -542,13 +648,24 @@ def test_buffer_aliasing_view_inherits_source_context():
             view = pl.tensor.view(data, [2, 2])
             self.consume(view)
 
-    result = _apply(P)
-    main = _get_func(result, "main")
-    consume_calls = _collect_calls(main.body, "consume")
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+        def consume(self, data: pld.DistributedTensor[[2, 2], pl.FP32], data_ctx: pld.CommCtx):
+            pld.system.wait(data, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Eq)
 
-    assert _collect_calls(main.body, "pld.system.get_comm_ctx") == []
-    assert len(consume_calls) == 1
-    assert consume_calls[0].args[-1] is main.params[-1]
+        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+        def main(
+            self,
+            data: pl.InOut[pld.DistributedTensor[[4], pl.FP32]],
+            data_ctx: pld.CommCtx,
+        ):
+            view = pl.tensor.view(data, [2, 2])
+            # `view` is a fresh Var, but it names `data`'s window, so the call
+            # forwards `data_ctx` rather than querying a context for it.
+            self.consume(view, data_ctx, attrs={"arg_directions": [pl.adir.input, pl.adir.scalar]})
+
+    ir.assert_structural_equal(_apply(Before), Expected)
 
 
 def test_loop_rebinding_carry_to_another_distributed_tensor_is_rejected():
@@ -585,74 +702,59 @@ def test_loop_rebinding_carry_to_another_distributed_tensor_is_rejected():
 def test_submit_result_forwards_returned_param_ctx():
     """A Submit result position maps back to the arg it writes back, like Call."""
 
-    span = _span()
-    data_ty = _dist_ty()
-    submit_ty = ir.TupleType([data_ty, ir.ScalarType(DataType.TASK_ID)])
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def stage(
+            self, data: pl.InOut[pld.DistributedTensor[[4], pl.FP32]]
+        ) -> pld.DistributedTensor[[4], pl.FP32]:
+            return data
 
-    stage_data = ir.Var("data", data_ty, span)
-    stage = ir.Function(
-        "stage",
-        [(stage_data, ir.ParamDirection.InOut)],
-        [data_ty],
-        ir.ReturnStmt([stage_data], span),
-        span,
-        ir.FunctionType.InCore,
-    )
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume(self, data: pld.DistributedTensor[[4], pl.FP32]):
+            pld.system.wait(data, offsets=[0], expected=1, cmp=pld.WaitCmp.Eq)
 
-    consume_data = ir.Var("data", data_ty, span)
-    consume = ir.Function(
-        "consume",
-        [(consume_data, ir.ParamDirection.In)],
-        [],
-        ir.ReturnStmt(span),
-        span,
-        ir.FunctionType.InCore,
-    )
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, data: pl.InOut[pld.DistributedTensor[[4], pl.FP32]]):
+            produced, _tid = pl.submit(self.stage, data)
+            self.consume(produced)
 
-    main_data = ir.Var("data", data_ty, span)
-    submit_result = ir.Var("submit_result", submit_ty, span)
-    produced = ir.Var("produced", data_ty, span)
-    submit = ir.Submit(
-        ir.GlobalVar("stage"),
-        [main_data],
-        [],
-        {},
-        {"arg_directions": [ir.ArgDirection.InOut]},
-        submit_ty,
-        span,
-    )
-    consume_call = _call_with_dirs("consume", [produced], span)
-    main = ir.Function(
-        "main",
-        [(main_data, ir.ParamDirection.InOut)],
-        [],
-        ir.SeqStmts(
-            [
-                ir.AssignStmt(submit_result, submit, span),
-                ir.AssignStmt(produced, ir.TupleGetItemExpr(submit_result, 0, span), span),
-                ir.EvalStmt(consume_call, span),
-                ir.ReturnStmt(span),
-            ],
-            span,
-        ),
-        span,
-        ir.FunctionType.Orchestration,
-    )
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+        def stage(
+            self,
+            data: pl.InOut[pld.DistributedTensor[[4], pl.FP32]],
+            data_ctx: pld.CommCtx,
+        ) -> pld.DistributedTensor[[4], pl.FP32]:
+            return data
 
-    result = passes.materialize_dist_tensor_ctx()(ir.Program([stage, consume, main], "submit_ctx", span))
-    main_after = _get_func(result, "main")
+        @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+        def consume(self, data: pld.DistributedTensor[[4], pl.FP32], data_ctx: pld.CommCtx):
+            pld.system.wait(data, offsets=[0], expected=1, cmp=pld.WaitCmp.Eq)
 
-    # `main` is device-side, so the ctx must come from its own parameter rather
-    # than a synthesized runtime query.
-    assert _collect_calls(main_after.body, "pld.system.get_comm_ctx") == []
-    consume_after = _collect_calls(main_after.body, "consume")
-    assert len(consume_after) == 1
-    assert consume_after[0].args[-1] is main_after.params[-1]
+        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+        def main(
+            self,
+            data: pl.InOut[pld.DistributedTensor[[4], pl.FP32]],
+            data_ctx: pld.CommCtx,
+        ):
+            # The submit gets its ctx arg like any Call, and `produced` — result
+            # position 0, ahead of the trailing TASK_ID — resolves back through
+            # `stage`'s return to `data`, so `consume` reuses the same ctx.
+            produced, _tid = pl.submit(
+                self.stage, data, data_ctx, attrs={"arg_directions": [pl.adir.inout, pl.adir.scalar]}
+            )
+            self.consume(produced, data_ctx, attrs={"arg_directions": [pl.adir.input, pl.adir.scalar]})
+
+    ir.assert_structural_equal(_apply(Before), Expected)
 
 
 def test_distributed_if_keeps_current_no_context_yield_behavior():
+    """The `if` is left alone: no CommCtxType is added to its return vars."""
+
     @pl.program
-    class P:
+    class Before:
         @pl.function(type=pl.FunctionType.InCore)
         def kernel(
             self,
@@ -665,36 +767,31 @@ def test_distributed_if_keeps_current_no_context_yield_behavior():
             ctx = pld.system.get_comm_ctx(result)
             _rank = pld.system.rank(ctx)
 
-    result = _apply(P)
-    kernel = _get_func(result, "kernel")
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+        def kernel(
+            self,
+            data: pld.DistributedTensor[[4], pl.FP32],
+            cond: pl.Scalar[pl.BOOL],
+            data_ctx: pld.CommCtx,
+        ):
+            # `_result` keeps the `if` return var the Before program has; the
+            # pass adds no CommCtxType yield alongside it, and the query below
+            # resolves straight to the materialized parameter. Underscored
+            # because nothing reads it once `get_comm_ctx` is gone.
+            _result = data
+            if cond:
+                _result = data
+            ctx = data_ctx
+            _rank = pld.system.rank(ctx)
 
-    assert _collect_calls(kernel.body, "pld.system.get_comm_ctx") == []
-
-    def collect_if_stmts(stmt: ir.Stmt) -> list[ir.IfStmt]:
-        if isinstance(stmt, ir.IfStmt):
-            result_ifs = [stmt]
-            result_ifs.extend(collect_if_stmts(stmt.then_body))
-            if stmt.else_body is not None:
-                result_ifs.extend(collect_if_stmts(stmt.else_body))
-            return result_ifs
-        if isinstance(stmt, ir.SeqStmts):
-            return [nested for child in stmt.stmts for nested in collect_if_stmts(child)]
-        if isinstance(stmt, ir.ForStmt):
-            return collect_if_stmts(stmt.body)
-        if isinstance(stmt, ir.ScopeStmt):
-            return collect_if_stmts(stmt.body)
-        return []
-
-    if_stmts = collect_if_stmts(kernel.body)
-    assert if_stmts
-    for op in if_stmts:
-        for return_var in op.return_vars:
-            assert not isinstance(return_var.type, ir.CommCtxType)
+    ir.assert_structural_equal(_apply(Before), Expected)
 
 
 def test_device_get_comm_ctx_is_replaced_by_materialized_context():
     @pl.program
-    class P:
+    class Before:
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(self, data: pld.DistributedTensor[[4], pl.FP32]):
             ctx = pld.system.get_comm_ctx(data)
@@ -707,14 +804,24 @@ def test_device_get_comm_ctx_is_replaced_by_materialized_context():
             data = pld.window(buffer, [4], dtype=pl.FP32)
             self.chip_orch(data, device=0)
 
-    result = _apply(P)
-    chip_orch = _get_func(result, "chip_orch")
-    host = _get_func(result, "host")
+    @pl.program
+    class ExpectedChipOrch:
+        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+        def chip_orch(self, data: pld.DistributedTensor[[4], pl.FP32], data_ctx: pld.CommCtx):
+            # The query is gone: `ctx` is now a plain alias of the materialized
+            # parameter, which the final Simplify folds away.
+            ctx = data_ctx
+            _rank = pld.system.rank(ctx)
+            pld.system.wait(data, offsets=[0], expected=1, cmp=pld.WaitCmp.Eq)
 
-    assert _collect_calls(chip_orch.body, "pld.system.get_comm_ctx") == []
-    # Host orchestration retains the runtime query; only device-side IR must
-    # have the query eliminated.
-    assert len(_collect_calls(host.body, "pld.system.get_comm_ctx")) == 1
+    result = _apply(Before)
+    ir.assert_structural_equal(_get_func(result, "chip_orch"), _get_func(ExpectedChipOrch, "chip_orch"))
+
+    # `host` is compared by assertion rather than structurally: its body is
+    # wrapped in a CommDomainScopeStmt by MaterializeCommDomainScopes, and that
+    # node has no DSL surface to spell out in an Expected program.
+    host_queries = _collect_calls(_get_func(result, "host").body, "pld.system.get_comm_ctx")
+    assert len(host_queries) == 1, "host orchestration must keep the runtime query"
 
 
 def test_device_call_without_materialized_context_rejects_synthesized_prefix():
