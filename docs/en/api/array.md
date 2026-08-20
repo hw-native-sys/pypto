@@ -1,7 +1,7 @@
 # `pl.array`
 
 Fixed-length arrays, used mainly to carry a loop's worth of `pl.TASK_ID` values into a
-later `deps=`. See [Declaring an edge](../tasks/02-submit.md).
+later `deps=`. See [Declaring an edge](../user/tasks/02-submit.md).
 
 ::: pypto.language.array
     options:
