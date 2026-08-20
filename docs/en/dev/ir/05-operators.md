@@ -48,6 +48,9 @@ auto dynamic_dim = make_int(kDynamicDim);
 
 ### Argument effects
 
+> The whole chain that consumes these declarations is laid out in
+> [Parameter Direction Inference](08-param-directions.md).
+
 An operator that updates one of its arguments in place must say so. Direction
 inference, dependency analysis and the parameter-direction verifier all ask the
 registry the same question — *does this call write the buffer this argument

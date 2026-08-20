@@ -308,6 +308,7 @@ nav:
           - en/dev/ir/05-operators.md
           - en/dev/ir/06-builder.md
           - en/dev/ir/07-parser.md
+          - en/dev/ir/08-param-directions.md
       - Passes:
           - en/dev/passes/index.md
           - en/dev/passes/00-pass_manager.md

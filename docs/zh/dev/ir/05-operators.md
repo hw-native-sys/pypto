@@ -48,6 +48,9 @@ auto dynamic_dim = make_int(kDynamicDim);
 
 ### 参数效应（Argument effects）
 
+> 消费这些声明的整条链见
+> [参数方向推导](08-param-directions.md)。
+
 原地更新某个参数的算子必须显式声明。方向推导（direction inference）、依赖分析
 （dependency analysis）和参数方向验证器都向注册表询问同一个问题——*这次调用是否
 写入该参数所指的缓冲区？*——而从未回答过的算子会被读成纯消费者：

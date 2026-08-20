@@ -16,6 +16,7 @@ the page covering what you are changing.
 | [Operator System](05-operators.md) | Type-safe operator definitions with automatic type deduction |
 | [IR Builder](06-builder.md) | Constructing IR incrementally — context managers in Python, Begin/End in C++ |
 | [IR Parser](07-parser.md) | Converting Python DSL to IR via `@pl.function` / `@pl.program`, and the SSA properties it enforces |
+| [Parameter Directions](08-param-directions.md) | How `In`/`Out`/`InOut` is inferred — the registry declaration every stage reads, and the four passes that build on it |
 
 ## See Also
 

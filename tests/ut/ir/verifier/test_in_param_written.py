@@ -385,19 +385,14 @@ def test_rebinding_a_view_name_drops_the_stale_lineage():
     assert all("'src1'" not in m for m in messages), messages
 
 
-@pytest.mark.xfail(
-    reason="known limitation: the lineage has no join merging, and the IR here is "
-    "not in SSA form (InitMemRef invalidates SSAForm at pass 31, this runs after "
-    "pass 37). A view built inside a branch leaks past the join.",
-    strict=True,
-)
-def test_branch_local_view_does_not_leak_past_the_join():
-    """Pins the false positive rather than asserting it away.
+def test_may_write_through_a_branch_is_reported():
+    """A write on *some* path is a write.
 
-    When ``cond`` is false the write lands on ``v``'s own buffer, never on
-    ``bufA`` — but the branch's lineage survives the join, so ``bufA`` is
-    blamed. ``strict=True`` so that fixing it fails the test and forces this
-    marker off.
+    On the ``cond > 0`` path ``v`` is a view of ``bufA`` and the assemble writes
+    it, so naming ``bufA`` is the correct may-write answer — not, as an earlier
+    version of this test claimed, a join false positive. The lineage surviving
+    the branch is what makes the union over paths conservative in the right
+    direction here.
     """
 
     @pl.program
@@ -417,7 +412,41 @@ def test_branch_local_view_does_not_leak_past_the_join():
             return v
 
     messages = _messages(Prog)
-    assert all("'bufA'" not in m for m in messages), messages
+    assert any("'bufA'" in m for m in messages), messages
+
+
+@pytest.mark.xfail(
+    reason="known limitation: BufferRootCollector scans the whole body up front, so a "
+    "rebound name carries one final mapping that is applied to earlier writes too. "
+    "Reports the buffer bound last and misses the one actually written.",
+    strict=True,
+)
+def test_a_rebound_name_attributes_the_write_to_the_right_buffer():
+    """The real misattribution, in both directions at once.
+
+    ``t`` names ``buf1`` when the assemble writes it and ``buf2`` only
+    afterwards, but the collector's single final mapping says ``t -> buf2``. So
+    ``buf2`` is reported although nothing writes it, and ``buf1`` is missed
+    although it is written. This is the shape that needs SSA or a per-access
+    environment; ``strict=True`` so fixing it forces the marker off.
+    """
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            buf1: pl.Tile[[16, 128], pl.FP32],
+            buf2: pl.Tile[[16, 128], pl.FP32],
+            patch: pl.Tile[[16, 128], pl.FP32],
+        ) -> pl.Tile[[16, 128], pl.FP32]:
+            t: pl.Tile[[16, 128], pl.FP32] = buf1
+            t = pl.tile.assemble(t, patch, [0, 0])
+            t = buf2
+            return t
+
+    reported = {m.split("'")[1] for m in _messages(Prog)}
+    assert reported == {"buf1"}, reported
 
 
 def test_write_inside_a_branch_is_reported():

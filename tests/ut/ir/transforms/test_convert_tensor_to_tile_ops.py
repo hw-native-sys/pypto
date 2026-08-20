@@ -6386,5 +6386,171 @@ class TestRegistryDrivenParamDirections:
         assert self._directions(Prog)["out"] == ir.ParamDirection.InOut
 
 
+class TestCalleeDirectionPropagationThroughCarries:
+    """Propagating a callee's write onto the caller's own signature.
+
+    The caller's argument is rarely the parameter itself. A loop-carried tensor
+    reaches the call as an ``IterArg`` whose value is the parameter's buffer, so
+    the propagation has to resolve the argument to the buffer it owns before it
+    can decide which parameter the callee's write lands on.
+    """
+
+    def test_loop_carried_arg_upgrades_the_caller_parameter(self):
+        """``for _ in ...: acc = kernel(x, acc)`` writes ``dst`` through a carry.
+
+        The argument is an ``IterArg``, which is neither matched by ``As<Var>``
+        nor present in the caller's parameter map, so the enclosing signature
+        kept declaring ``In`` for a buffer the call chain writes — and every
+        consumer of that signature (dependency analysis, distributed codegen arg
+        tags, the host ABI) was told the buffer is a pure input.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, x: pl.Tensor[[64], pl.FP32], out: pl.Out[pl.Tensor[[64], pl.FP32]]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                ret: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self, x: pl.Tensor[[64], pl.FP32], dst: pl.Tensor[[64], pl.FP32]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                acc = dst
+                for _ in pl.range(4):
+                    acc = self.kernel(x, acc)
+                return acc
+
+        before = passes.convert_to_ssa()(Prog)
+        after = passes.convert_tensor_to_tile_ops()(before)["main"]
+        assert after is not None
+
+        # The whole map, not just the parameter under test: an upgrade that also
+        # flipped `x` would otherwise pass.
+        directions = {
+            p.name_hint.split("__ssa_v")[0]: d for p, d in zip(after.params, after.param_directions)
+        }
+        assert directions == {"x": ir.ParamDirection.In, "dst": ir.ParamDirection.Out}, directions
+
+        # The direction is only meaningful if the body that produced it survived.
+        # An upgrade that dropped the carry, the call or an argument would still
+        # satisfy the map above, so pin the shape the direction was derived from.
+        text = ir.python_print(passes.convert_tensor_to_tile_ops()(before))
+        assert "pl.range(" in text, text
+        assert text.count("self.kernel(") == 1, text
+        assert "def kernel(" in text and "def main(" in text, text
+
+    def test_submitted_arg_upgrades_the_caller_parameter(self):
+        """A task launch forwards its arguments exactly as a plain call does.
+
+        The base visitor does not route ``Submit`` through the ``Call`` handler
+        (`.claude/rules/pass-submit-awareness.md`), so without a dedicated hook
+        an orchestration function that only ever submits kept declaring ``In``
+        for a buffer its tasks write — the dependency edge that buffer needs is
+        then never emitted.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, x: pl.Tensor[[64], pl.FP32], out: pl.Out[pl.Tensor[[64], pl.FP32]]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                ret: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self, x: pl.Tensor[[64], pl.FP32], dst: pl.Tensor[[64], pl.FP32]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.manual_scope():
+                    res, tid = pl.submit(self.kernel, x, dst)
+                return res
+
+        after = passes.convert_tensor_to_tile_ops()(passes.convert_to_ssa()(Prog))["main"]
+        assert after is not None
+        directions = {
+            p.name_hint.split("__ssa_v")[0]: d for p, d in zip(after.params, after.param_directions)
+        }
+        assert directions == {"x": ir.ParamDirection.In, "dst": ir.ParamDirection.Out}, directions
+
+    def test_ambiguous_arg_upgrades_every_candidate_parameter(self):
+        """Control flow can leave a value naming more than one buffer.
+
+        The callee writes whichever ``t`` turned out to be, so both ``a`` and
+        ``b`` may be written and both must be upgraded. Skipping the ambiguous
+        var dropped the dependency for every candidate at once — the direction
+        that fails silently, since an under-declared ``In`` loses the RAW edge
+        and races on device where an over-declared ``Out`` only over-orders.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def writer(
+                self, src: pl.Tensor[[64], pl.FP32], out: pl.Out[pl.Tensor[[64], pl.FP32]]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.load(src, [0], [64])
+                ret: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                src: pl.Tensor[[64], pl.FP32],
+                a: pl.Tensor[[64], pl.FP32],
+                b: pl.Tensor[[64], pl.FP32],
+                cond: pl.Scalar[pl.INT32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                if cond > 0:
+                    t: pl.Tensor[[64], pl.FP32] = a
+                else:
+                    t: pl.Tensor[[64], pl.FP32] = b
+                r: pl.Tensor[[64], pl.FP32] = self.writer(src, t)
+                return r
+
+        after = passes.convert_tensor_to_tile_ops()(passes.convert_to_ssa()(Prog))["main"]
+        assert after is not None
+        directions = {
+            p.name_hint.split("__ssa_v")[0]: d for p, d in zip(after.params, after.param_directions)
+        }
+        assert directions["a"] == ir.ParamDirection.Out, directions
+        assert directions["b"] == ir.ParamDirection.Out, directions
+        # The read-only operand must not be swept up by the widening.
+        assert directions["src"] == ir.ParamDirection.In, directions
+
+    def test_direct_arg_still_upgrades_the_caller_parameter(self):
+        """The un-carried shape keeps working: resolving to a buffer root is a
+        generalisation of the identity lookup, not a replacement for it."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, x: pl.Tensor[[64], pl.FP32], out: pl.Out[pl.Tensor[[64], pl.FP32]]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                ret: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self, x: pl.Tensor[[64], pl.FP32], dst: pl.Tensor[[64], pl.FP32]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                r: pl.Tensor[[64], pl.FP32] = self.kernel(x, dst)
+                return r
+
+        after = passes.convert_tensor_to_tile_ops()(passes.convert_to_ssa()(Prog))["main"]
+        assert after is not None
+        directions = {
+            p.name_hint.split("__ssa_v")[0]: d for p, d in zip(after.params, after.param_directions)
+        }
+        assert directions["dst"] == ir.ParamDirection.Out
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

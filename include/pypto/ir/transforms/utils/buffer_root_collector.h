@@ -70,6 +70,20 @@ class BufferRootCollector : public IRVisitor {
   /// these vars conservatively; aliasing optimizations leave them unmapped.
   std::unordered_set<const Var*> ambiguous_buffer_vars;
 
+  /// Every owning-buffer-root candidate recorded for @p var, empty when the var
+  /// has no lineage. This is what "conservatively" above means in practice: a
+  /// write through an ambiguous var may land on *any* candidate, so a consumer
+  /// deriving dependencies has to account for all of them rather than skip the
+  /// var — skipping drops the dependency for every candidate at once.
+  ///
+  /// `buffer_roots` cannot express this: it holds one root, which is either the
+  /// single unambiguous answer or (under `kFirstOutput`) an arbitrary pick.
+  [[nodiscard]] const std::vector<const Var*>& RootCandidatesOf(const Var* var) const {
+    static const std::vector<const Var*> kNone;
+    auto it = root_candidates_.find(var);
+    return it == root_candidates_.end() ? kNone : it->second;
+  }
+
  protected:
   void VisitStmt_(const IfStmtPtr& if_stmt) override;
   void VisitStmt_(const ForStmtPtr& for_stmt) override;
