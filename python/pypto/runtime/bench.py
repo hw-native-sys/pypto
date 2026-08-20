@@ -33,7 +33,7 @@ module therefore:
    file around the measured region (for L3, also around ``prepare()`` so the
    forked chip-worker processes inherit the redirected fd);
 3. parses the captured markers, reading each launch's on-NPU ``device_wall``
-   and host ``simpler_run`` span.
+   and host ``chip.run`` span.
 
 Because the capture is fd-level, **all** stderr produced during the measured
 loop is diverted into the temp file (not shown live). Warmup/teardown logging
@@ -86,7 +86,7 @@ class TraceSpan:
     Attributes:
         depth: Nesting level; a span at depth ``d`` is a child of the nearest
             enclosing span at depth ``d-1``.
-        name: Dotted span path (e.g. ``simpler_run.runner_run.device_wall``).
+        name: Dotted span path (e.g. ``chip.run.runner_run.device_wall``).
         ts: Start timestamp in nanoseconds (host clock, or device clock when
             :attr:`is_device`).
         dur: Span duration in nanoseconds.
@@ -129,7 +129,7 @@ class TraceInvocation:
     spans: list[TraceSpan] = field(default_factory=list)
 
     def root(self) -> "TraceSpan | None":
-        """The depth-0 span (``simpler_run``), or ``None`` if absent."""
+        """The depth-0 span (``chip.run``), or ``None`` if absent."""
         for s in self.spans:
             if s.depth == 0:
                 return s
@@ -205,7 +205,7 @@ class TraceInvocation:
         indentation alone. Nesting is reconstructed from the dotted span names (a
         span's parent is the span whose name is its longest proper dotted
         prefix), which is robust to the host/device clock-domain split —
-        device-domain spans (``simpler_run.runner_run.device_wall.*``) correctly
+        device-domain spans (``chip.run.runner_run.device_wall.*``) correctly
         nest under their host parent even though they are emitted as a separate
         batch. Siblings are ordered by start timestamp; device-domain spans are
         tagged ``[dev]``.
@@ -283,11 +283,13 @@ class TraceInvocation:
 
 # Per-launch ``[STRACE]`` span names. ``host`` is the whole run wall; ``device``
 # is the on-NPU orchestrator wall; ``orch`` / ``sched`` subdivide it (their union
-# is the "Effective" on-device execution window). The span root was renamed
-# ``run_prepared`` -> ``simpler_run`` in simpler #1210, so the names are sourced
-# at call time from the installed runtime's ``strace_timing._ROUNDS_TABLE_NAMES``
-# via :func:`_span_names` rather than hardcoded — this keeps ``benchmark`` working
-# against both runtime generations. These legacy names are the pre-#1210 fallback.
+# is the "Effective" on-device execution window). The span root has been renamed
+# twice — ``run_prepared`` -> ``simpler_run`` (simpler #1210), then
+# ``simpler_run`` -> ``chip.run`` when #1877/#1893 made every span lead with the
+# word for the level that emitted it — so the names are sourced at call time from
+# the installed runtime's ``strace_timing._ROUNDS_TABLE_NAMES`` via
+# :func:`_span_names` rather than hardcoded. These legacy names are the pre-#1210
+# fallback, used only when that table is absent entirely.
 _LEGACY_SPAN_NAMES = {
     "host": "run_prepared",
     "device": "run_prepared.runner_run.device_wall",
@@ -295,24 +297,64 @@ _LEGACY_SPAN_NAMES = {
     "sched": "run_prepared.runner_run.device_wall.sched",
 }
 
+# PyPTO's span key -> the ``_ROUNDS_TABLE_NAMES`` keys that may carry it, newest
+# generation first. The whole-run entry was keyed ``host`` until simpler #1893
+# renamed it ``run``: the word ``host`` names a *processor*, and the span it
+# labels is the chip's run, so the table stopped spelling it that way. PyPTO
+# keeps ``host`` as its own key (it is the host-side wall, and it is the name
+# :class:`BenchmarkStats` exposes); only the lookup has to know both spellings.
+# ``device`` / ``orch`` / ``sched`` are stable across both generations.
+_RUNTIME_SPAN_KEYS = {
+    "host": ("run", "host"),
+    "device": ("device",),
+    "orch": ("orch",),
+    "sched": ("sched",),
+}
+
+
+# Span families the invocation-keyed views must not consume. They share the
+# ``[STRACE]`` grammar but carry no invocation id, so admitting one groups all of
+# its spans into a single forged invocation. ``l3.`` is the pre-#1877 spelling of
+# the per-task scheduler family; #1893 re-spelled it after the level's topology
+# position (``node``, plus ``network1..3`` for each hop above it), and #1886
+# reserved ``ext.`` for producers outside simpler. Applied on top of simpler's own
+# filter, which keeps spellings it does not recognize — see
+# :func:`_parse_stats_from_strace`.
+_NON_INVOCATION_PREFIXES = ("l3.", "node.", "network1.", "network2.", "network3.", "ext.")
+
 
 @functools.lru_cache(maxsize=1)
 def _span_names() -> dict[str, str]:
     """Resolve the four ``[STRACE]`` span names from the installed runtime.
 
-    Reads ``strace_timing._ROUNDS_TABLE_NAMES`` (added in simpler #1210 alongside
-    the ``run_prepared`` -> ``simpler_run`` root rename). ``_ROUNDS_TABLE_NAMES``
-    is a private symbol absent from pre-#1210 simpler, so fall back to the legacy
-    hardcoded names when it (or one of its keys) is missing.
+    Reads ``strace_timing._ROUNDS_TABLE_NAMES`` (added in simpler #1210), trying
+    each spelling in :data:`_RUNTIME_SPAN_KEYS` so one lookup covers both the
+    ``host``-keyed and the ``run``-keyed generation of the table.
+
+    Resolution is all-or-nothing: a table that answers only some of the four
+    keys is a generation this function does not know, and mixing its names with
+    the legacy ones would silently yield spans that match nothing. Falling back
+    wholesale keeps the failure to "every sample is zero" in one place rather
+    than spreading it across metrics.
     """
     try:
         from simpler_setup.tools.strace_timing import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
             _ROUNDS_TABLE_NAMES,
         )
-
-        return {key: _ROUNDS_TABLE_NAMES[key] for key in _LEGACY_SPAN_NAMES}
-    except (ImportError, AttributeError, TypeError, KeyError):
+    except (ImportError, AttributeError):
         return dict(_LEGACY_SPAN_NAMES)
+
+    resolved: dict[str, str] = {}
+    for key, candidates in _RUNTIME_SPAN_KEYS.items():
+        for candidate in candidates:
+            try:
+                resolved[key] = _ROUNDS_TABLE_NAMES[candidate]
+            except (TypeError, KeyError):
+                continue
+            break
+        else:
+            return dict(_LEGACY_SPAN_NAMES)
+    return resolved
 
 
 # Runtime log level that makes the ``LOG_TIMING`` ``[STRACE]`` markers visible.
@@ -1024,7 +1066,7 @@ def _parse_l3_stats(invocations: Any, stats: BenchmarkStats, *, rounds: int, war
 
     # The capture must begin before ``prepare()`` so forked chip workers inherit
     # its fd, but prepare-time setup can emit unrelated invocation groups such as
-    # ``simpler_prewarm.build``. Only a depth-0 canonical run root identifies an
+    # ``chip.prewarm.build``. Only a depth-0 canonical run root identifies an
     # actual dispatch. Do not filter on ``device_wall`` per invocation: retaining
     # a real run with a missing device marker preserves its round alignment and
     # exposes a zero metric.
@@ -1143,7 +1185,7 @@ def _parse_stats_from_strace(
     invocation per launch), orders by ``inv``, drops the first *warmup*
     invocations, and reads each remaining launch's host (``<root>``) and device
     (``<root>.runner_run.device_wall``) span durations (µs). The ``<root>`` span
-    name is resolved per :func:`_span_names` (``run_prepared`` / ``simpler_run``).
+    name is resolved per :func:`_span_names` (``chip.run`` on current simpler).
 
     L3 (``distributed=True``): prepared swimlane pass sentinels first restrict
     the input to complete dep-gen-disabled timing regions, when present; then
@@ -1173,13 +1215,21 @@ def _parse_stats_from_strace(
     # preserves compatibility with older parsers that consumed one per line.
     lines = log_text.replace("[STRACE]", "\n[STRACE]").splitlines()
     spans = _strace_timing.parse_spans(lines)
-    if hasattr(_strace_timing, "legacy_spans"):
-        spans = _strace_timing.legacy_spans(spans)
-    else:
-        # Simpler versions before L3/L4 tracing do not expose the canonical
-        # filter. They do not normally emit l3.* markers either, but filtering
-        # the namespace locally makes mixed-version log ingestion safe.
-        spans = [span for span in spans if not span.name.startswith("l3.")]
+    # Drop the families that carry no invocation id, so none of them forges a
+    # lane in ``group_invocations`` below. The local prefix filter runs
+    # unconditionally rather than only as a fallback: simpler's own filter
+    # deliberately *keeps* any family it does not recognize (dropping unfamiliar
+    # names silently is how ``chip.prewarm.build`` once vanished from its
+    # tables), so a current simpler passes the pre-#1893 ``l3.`` spelling
+    # through. Then apply simpler's filter too, since it is the authority on the
+    # families its own generation emits — #1877 renamed it ``legacy_spans`` ->
+    # ``invocation_spans``, so try both names before giving up on it.
+    spans = [span for span in spans if not span.name.startswith(_NON_INVOCATION_PREFIXES)]
+    span_filter = getattr(_strace_timing, "invocation_spans", None) or getattr(
+        _strace_timing, "legacy_spans", None
+    )
+    if span_filter is not None:
+        spans = span_filter(spans)
     invocations = _strace_timing.group_invocations(spans)
     if not invocations:
         return stats

@@ -34,8 +34,10 @@ from pypto.runtime.bench import (
     _L3_SWIMLANE_GRAPH_END,
     _L3_SWIMLANE_TIMING_BEGIN,
     _L3_SWIMLANE_TIMING_END,
+    _LEGACY_SPAN_NAMES,
     BenchmarkStats,
     _parse_stats_from_strace,
+    _span_names,
     benchmark,
 )
 from pypto.runtime.elf_parser import elf_build_id_64, fnv1a_64
@@ -43,25 +45,61 @@ from pypto.runtime.elf_parser import elf_build_id_64, fnv1a_64
 
 @pytest.fixture
 def span_root() -> str:
-    """Skip unless the optional ``simpler`` runtime is importable; return its
-    ``[STRACE]`` span root name.
+    """Skip unless the optional ``simpler`` runtime is importable; return the
+    ``[STRACE]`` span root :func:`_parse_stats_from_strace` will look for.
 
-    :func:`_parse_stats_from_strace` lazily imports ``simpler_setup.tools.
-    strace_timing`` (the single source of truth for the ``[STRACE]`` grammar
-    *and* span names) and reads the per-launch span names from its
-    ``_ROUNDS_TABLE_NAMES``. The root was renamed ``run_prepared`` ->
-    ``simpler_run`` in simpler #1210, so the synthetic markers below build their
-    names off this fixture rather than hardcoding a root — keeping the tests
-    working against both runtime generations. Absent on the unit-test CI host,
-    where these parse tests skip.
+    That function lazily imports ``simpler_setup.tools.strace_timing`` (the
+    single source of truth for the ``[STRACE]`` grammar *and* span names), so
+    the synthetic markers below build their names off the same
+    :func:`_span_names` resolution the parser uses rather than hardcoding a
+    root. The root has been renamed twice (``run_prepared`` -> ``simpler_run``
+    in simpler #1210, then ``simpler_run`` -> ``chip.run`` in #1877/#1893), and
+    these tests exercise the parse *logic*, not the spelling — the spelling is
+    what :func:`test_span_names_resolve_from_installed_runtime` guards.
+
+    ``strace_timing`` is absent on the unit-test CI host, where these parse
+    tests skip.
     """
-    mod = pytest.importorskip("simpler_setup.tools.strace_timing")
-    # ``_ROUNDS_TABLE_NAMES`` is a private symbol absent from pre-#1210 simpler;
-    # fall back to the legacy root so the tests stay compatible with both.
-    try:
-        return mod._ROUNDS_TABLE_NAMES["host"]
-    except (AttributeError, TypeError, KeyError):
-        return "run_prepared"
+    pytest.importorskip("simpler_setup.tools.strace_timing")
+    return _span_names()["host"]
+
+
+def test_span_names_resolve_from_installed_runtime():
+    """``_span_names`` must read the installed runtime, not its legacy fallback.
+
+    The span names live in ``strace_timing._ROUNDS_TABLE_NAMES``, whose keys and
+    values both moved when simpler renamed the span ladder (#1877/#1893: the
+    whole-run entry re-keyed ``host`` -> ``run``, every value re-rooted
+    ``simpler_run`` -> ``chip.run``). :func:`_span_names` swallows a lookup miss
+    and returns :data:`_LEGACY_SPAN_NAMES`, which no *table-bearing* runtime
+    emits — so a future rename would leave every ``host_wall_us`` /
+    ``device_wall_us`` sample silently 0.0 rather than raising. The ``span_root``
+    fixture cannot catch that (it would drift to the same fallback and stay
+    green), so assert here that the resolution actually came from the runtime.
+
+    Gated on the table existing. A pre-#1210 simpler has no
+    ``_ROUNDS_TABLE_NAMES`` at all, and there the legacy names are the documented
+    answer rather than drift — asserting against them would fail a configuration
+    :func:`_span_names` still supports. Once the table exists, a fallback can
+    only mean pypto does not know how that table spells its keys, which is
+    exactly what this guards.
+    """
+    strace_timing = pytest.importorskip("simpler_setup.tools.strace_timing")
+    if not hasattr(strace_timing, "_ROUNDS_TABLE_NAMES"):
+        pytest.skip("pre-#1210 simpler has no _ROUNDS_TABLE_NAMES; the legacy fallback is correct there")
+    names = _span_names()
+
+    assert names != _LEGACY_SPAN_NAMES, (
+        "_span_names() fell back to the legacy pre-#1210 names, so the installed "
+        "simpler spells _ROUNDS_TABLE_NAMES differently than pypto expects; "
+        "every benchmark timing sample would parse as 0.0. Teach "
+        "_RUNTIME_SPAN_KEYS the new spelling."
+    )
+    # The three subdivisions all nest under the run root, so the resolved set
+    # must describe one tree — a half-migrated table would not.
+    root = names["host"]
+    for key in ("device", "orch", "sched"):
+        assert names[key].startswith(f"{root}."), f"{key}={names[key]!r} is not nested under {root!r}"
 
 
 def _strace_line(
@@ -161,9 +199,16 @@ def test_parse_no_markers_returns_empty(span_root):
     assert stats.invocations == []
 
 
-def test_parse_ignores_l3_host_scheduling_spans(span_root, monkeypatch):
-    """L3/L4 host-scheduler markers must not form a bogus benchmark lane."""
-    lines = [_strace_line(0, "l3.dispatch", 900_000, pid=99, hid="0")]
+@pytest.mark.parametrize("scheduler_span", ["l3.dispatch", "node.dispatch", "network1.dispatch"])
+def test_parse_ignores_host_scheduling_spans(span_root, monkeypatch, scheduler_span):
+    """Per-task host-scheduler markers must not form a bogus benchmark lane.
+
+    These carry no invocation id, so admitting one groups every such span into a
+    single forged invocation. simpler #1893 re-spelled the family after the
+    emitting level's topology position (``l3.`` -> ``node.``, plus ``network1..3``
+    for the hops above it), so all three spellings are covered.
+    """
+    lines = [_strace_line(0, scheduler_span, 900_000, pid=99, hid="0")]
     lines += _launch_lines(0, span_root, host_us=50, device_us=5, pid=100)
 
     stats = _parse_stats_from_strace("\n".join(lines), rounds=1, warmup=0)
@@ -172,9 +217,12 @@ def test_parse_ignores_l3_host_scheduling_spans(span_root, monkeypatch):
     assert stats.device_wall_us == [5.0]
     assert len(stats.invocations) == 1
 
-    # Older compatible runtimes predate the helper. PyPTO still filters the
-    # namespace locally instead of failing import or selecting the bogus lane.
+    # Older compatible runtimes predate simpler's own filter, and #1877 renamed
+    # it ``legacy_spans`` -> ``invocation_spans``. With neither present PyPTO
+    # still filters the namespaces locally instead of failing import or
+    # selecting the bogus lane.
     strace_timing = sys.modules["simpler_setup.tools.strace_timing"]
+    monkeypatch.delattr(strace_timing, "invocation_spans", raising=False)
     monkeypatch.delattr(strace_timing, "legacy_spans", raising=False)
     fallback_stats = _parse_stats_from_strace("\n".join(lines), rounds=1, warmup=0)
     assert fallback_stats.host_wall_us == [50.0]
@@ -366,7 +414,7 @@ def test_parse_l3_ignores_prepare_time_prewarm_groups(span_root):
         # ``prepare()`` runs before benchmark dispatches while stderr is already
         # captured. Simpler's arena prewarm emits this non-dispatch STRACE group
         # with no canonical run root or device-wall span.
-        lines.append(_strace_line(0, "simpler_prewarm.build", 800_000, pid=pid, hid="0"))
+        lines.append(_strace_line(0, "chip.prewarm.build", 800_000, pid=pid, hid="0"))
         lines += _launch_lines(1, span_root, host_us=99, device_us=99, pid=pid)  # warmup
         lines += _launch_lines(2, span_root, host_us=100, device_us=measured_us[0], pid=pid)
         lines += _launch_lines(3, span_root, host_us=300, device_us=measured_us[1], pid=pid)
@@ -1172,7 +1220,7 @@ def test_benchmark_l3_ignores_prepare_setup_groups(span_root):
         def prepare(self, config: Any = None, **kwargs: Any) -> _FakeDistributedWorker:
             del config, kwargs
             for pid in (100, 101):
-                line = _strace_line(0, "simpler_prewarm.build", 800_000, pid=pid, hid="0")
+                line = _strace_line(0, "chip.prewarm.build", 800_000, pid=pid, hid="0")
                 os.write(2, (line + "\n").encode())
             return self._rt
 
