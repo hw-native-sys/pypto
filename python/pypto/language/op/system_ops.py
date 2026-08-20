@@ -75,7 +75,15 @@ def sync_set(
 ) -> Call:
     """Set a Cube/Vector cross-core event using a static or dynamic event id.
 
-    Set ``core_type`` to ``"aic"`` or ``"aiv"`` inside a mixed InCore kernel.
+    Args:
+        event_id: Event to signal. An int in the user-available range 0-13, or a
+            dynamic ``pl.Scalar[pl.INDEX]``. IDs 14 and 15 are reserved.
+        pipe: Pipe the event is raised on. The matching [`sync_wait`][pypto.language.system.sync_wait] must
+            name the same pipe -- pairing event ids and pipes is the author's responsibility.
+        ffts_mode: Optional FFTS mode, 0, 1 or 2. Accepted by ``sync_set`` only.
+        core_type: ``"aic"`` or ``"aiv"``, to keep the event on the intended lane
+            when a mixed InCore kernel is expanded. Omit in an explicitly typed kernel.
+        span: Optional source span
     """
     event_expr = event_id.unwrap() if isinstance(event_id, Scalar) else event_id
     return _ir_ops.sync_set(event_expr, pipe=pipe, ffts_mode=ffts_mode, core_type=core_type, span=span)
@@ -90,7 +98,12 @@ def sync_wait(
 ) -> Call:
     """Wait for a Cube/Vector cross-core event using a static or dynamic event id.
 
-    Set ``core_type`` to ``"aic"`` or ``"aiv"`` inside a mixed InCore kernel.
+    Args:
+        event_id: Event to wait on -- the one a matching [`sync_set`][pypto.language.system.sync_set] raises.
+        pipe: Pipe the event is awaited on; must match the ``sync_set``.
+        core_type: ``"aic"`` or ``"aiv"``, to keep the wait on the intended lane
+            when a mixed InCore kernel is expanded. Omit in an explicitly typed kernel.
+        span: Optional source span
     """
     event_expr = event_id.unwrap() if isinstance(event_id, Scalar) else event_id
     return _ir_ops.sync_wait(event_expr, pipe=pipe, core_type=core_type, span=span)
@@ -124,7 +137,7 @@ def syncall(
       ``core_type`` (a partial launch deadlocks on device — error 507018). The
       compiler rejects a partial-occupancy hard launch at compile time
       (``HardSyncallOccupancy`` verifier, issue #1935). See
-      :func:`pypto.ir.op.system_ops.syncall`.
+      ``pypto.ir.op.system_ops.syncall``.
     - ``mode="soft"``: GM-polling barrier that works at partial occupancy.
       Each participant updates a shared counter in an exclusive 64-byte GM
       cache line and polls until all participants arrive. Supported for every
@@ -260,26 +273,74 @@ def cacheinvalid(
 
 
 def tpush_to_aiv(tile: Tile, *, split: int, id: int | None = None, span: Span | None = None) -> Call:
-    """Push tile data from AIC to AIV via cross-core pipe."""
+    """Push tile data from AIC to AIV via cross-core pipe.
+
+    The Vector side receives it with [`tpop_from_aic`][pypto.language.system.tpop_from_aic] and releases the
+    slot with [`tfree_to_aic`][pypto.language.system.tfree_to_aic]; ``split`` and ``id`` must match across all
+    three.
+
+    Args:
+        tile: Tile to send. Its Cube-side buffer stays live until the consumer frees the slot.
+        split: Split mode (0=none, 1=up-down, 2=left-right). Selects the axis along
+            which the two AIV lanes divide the tile; 0 sends it whole.
+        id: Optional frontend pipe id. Omit to use PTOAS default id 0.
+        span: Optional source span
+    """
     return _ir_ops.tpush_to_aiv(tile.unwrap(), split=split, id=id, span=span)
 
 
 def tpush_to_aic(tile: Tile, *, split: int, id: int | None = None, span: Span | None = None) -> Call:
-    """Push tile data from AIV to AIC via cross-core pipe."""
+    """Push tile data from AIV to AIC via cross-core pipe.
+
+    The Cube side receives it with [`tpop_from_aiv`][pypto.language.system.tpop_from_aiv] and releases the
+    slot with [`tfree_to_aiv`][pypto.language.system.tfree_to_aiv]; ``split`` and ``id`` must match across all
+    three.
+
+    Args:
+        tile: Tile to send. Its Vector-side buffer stays live until the consumer frees the slot.
+        split: Split mode (0=none, 1=up-down, 2=left-right). Selects the axis along
+            which the two AIV lanes divide the tile; 0 sends it whole.
+        id: Optional frontend pipe id. Omit to use PTOAS default id 0.
+        span: Optional source span
+    """
     return _ir_ops.tpush_to_aic(tile.unwrap(), split=split, id=id, span=span)
 
 
 def tfree_to_aic(
     tile: Tile, span: Span | None = None, *, split: int | None = None, id: int | None = None
 ) -> Call:
-    """Release ring buffer slot back to AIC producer."""
+    """Release ring buffer slot back to AIC producer.
+
+    Call this once the tile from [`tpop_from_aic`][pypto.language.system.tpop_from_aic] has been consumed.
+    Until it runs, the slot stays occupied and the producer blocks once the ring fills.
+
+    Args:
+        tile: The tile returned by the matching [`tpop_from_aic`][pypto.language.system.tpop_from_aic].
+        span: Optional source span
+        split: Split mode (0=none, 1=up-down, 2=left-right). Leave ``None``: the
+            ``StampTfreeSplit`` pass copies it from the originating ``tpop``. Pass a
+            value only to override that.
+        id: Optional frontend pipe id. Omit to use PTOAS default id 0.
+    """
     return _ir_ops.tfree_to_aic(tile.unwrap(), split=split, id=id, span=span)
 
 
 def tfree_to_aiv(
     tile: Tile, span: Span | None = None, *, split: int | None = None, id: int | None = None
 ) -> Call:
-    """Release ring buffer slot back to AIV producer."""
+    """Release ring buffer slot back to AIV producer.
+
+    Call this once the tile from [`tpop_from_aiv`][pypto.language.system.tpop_from_aiv] has been consumed.
+    Until it runs, the slot stays occupied and the producer blocks once the ring fills.
+
+    Args:
+        tile: The tile returned by the matching [`tpop_from_aiv`][pypto.language.system.tpop_from_aiv].
+        span: Optional source span
+        split: Split mode (0=none, 1=up-down, 2=left-right). Leave ``None``: the
+            ``StampTfreeSplit`` pass copies it from the originating ``tpop``. Pass a
+            value only to override that.
+        id: Optional frontend pipe id. Omit to use PTOAS default id 0.
+    """
     return _ir_ops.tfree_to_aiv(tile.unwrap(), split=split, id=id, span=span)
 
 
@@ -383,6 +444,16 @@ def task_dummy(*, deps: Sequence[Scalar | Array | None]) -> Scalar:
     intercepted syntactically and lowered to ``system.task_dummy`` with manual
     dep edges. The body exists so the public DSL name resolves for static
     checkers and imports.
+
+    Args:
+        deps: TaskIds the barrier waits on -- each a ``pl.Scalar[pl.TASK_ID]``
+            returned by ``pl.submit``, or a ``pl.array`` of them for fan-in.
+            ``None`` entries are skipped, so a conditionally-produced TaskId needs
+            no branch at the call site.
+
+    Returns:
+        A ``pl.Scalar[pl.TASK_ID]`` that becomes ready once every dep has. Depend on
+        it instead of listing all of `deps` again at each consumer.
     """
     raise RuntimeError(
         "pl.system.task_dummy is a DSL parser construct and cannot be called directly; "
@@ -424,9 +495,10 @@ def available_cluster_count(*, span: Span | None = None) -> Scalar:
 def available_aiv_count(*, span: Span | None = None) -> Scalar:
     """This run's standalone AIV core count, as reported by the runtime.
 
-    The AIV counterpart of :func:`available_cluster_count` — the ``core_num``
-    of a vector-only ``pl.spmd`` launch. A mixed launch sizes itself on
-    :func:`available_cluster_count` (one block per cluster), not on this.
+    The AIV counterpart of [`available_cluster_count`][pypto.language.system.available_cluster_count] — the
+    ``core_num`` of a vector-only ``pl.spmd`` launch. A mixed launch sizes itself on
+    [`available_cluster_count`][pypto.language.system.available_cluster_count] (one block per cluster), not on
+    this.
 
     Codegen lowers it to the orchestration helper ``rt_available_aiv_count()``.
 

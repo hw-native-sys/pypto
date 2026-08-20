@@ -191,13 +191,13 @@ def _build_tensor_meta(
     dyn_dims: dict[int, DynDim] | None = None,
     layout: _ir.TensorLayout | None = None,
 ) -> TensorMeta:
-    """Build a :class:`TensorMeta` from per-dim extents and a resolved dtype.
+    """Build a ``TensorMeta`` from per-dim extents and a resolved dtype.
 
     ``dyn_dims`` maps ``dim_idx → DynDim`` for dims declared dynamic at this
     parameter (via ``bind_dynamic`` or an annotation-embedded ``pl.dynamic()``).
     The DynDim's ``static_bound`` is filled from the corresponding extent.
-    Shared by the torch-tensor path (:func:`_extract_tensor_meta`, extent = the
-    real tensor dim) and the signature path (:meth:`JITFunction._bind_args_from_signature`,
+    Shared by the torch-tensor path (``_extract_tensor_meta``, extent = the
+    real tensor dim) and the signature path (``JITFunction._bind_args_from_signature``,
     extent = the static annotation dim or a placeholder for dynamic dims).
 
     ``layout`` is the annotation's third slot. It never comes from a runtime
@@ -247,7 +247,7 @@ def _resolve_annotation(annotation: Any, ann_ns: dict[str, Any] | None) -> Any:
     """Resolve one parameter annotation, evaluating the string form if needed.
 
     ``from __future__ import annotations`` in the *user's* module leaves every
-    annotation as a string; ``ann_ns`` (from :func:`_func_name_lookup`) is the
+    annotation as a string; ``ann_ns`` (from ``_func_name_lookup``) is the
     namespace to evaluate it in.
 
     Args:
@@ -517,7 +517,7 @@ def _build_dyndim_map_for_func(
        match but can differ, e.g. ``rows = pl.dynamic("M")``).
 
     ``DynDim.static_bound`` is filled with ``0`` here as a placeholder; the
-    real per-call extent is injected by :func:`_extract_tensor_meta` from the
+    real per-call extent is injected by ``_extract_tensor_meta`` from the
     actual ``torch.Tensor`` argument.
     """
     func_def = _get_func_def(func)
@@ -561,7 +561,7 @@ def _compute_per_func_dyndim_maps(
     """Per JIT function in the dep graph, return ``param → dim_idx → DynDim``.
 
     Each function's map starts from its own declarations
-    (:func:`_build_dyndim_map_for_func`) and is augmented leaf-first with
+    (``_build_dyndim_map_for_func``) and is augmented leaf-first with
     DynDim entries cascaded from every dep it calls: if a dep param
     ``a.dim=0`` is dynamic and the caller passes its arg ``x`` to that
     param, then ``x.dim=0`` is marked dynamic at the caller too. This
@@ -630,8 +630,8 @@ def _build_dynvar_anchor_index(
     """Inverse map ``DynVar name → list of (param, dim_idx) anchor sites``.
 
     Lets ``[M, HIDDEN]`` (where ``M`` is a DynVar bound to a seeded param's
-    dim) resolve via :func:`_extract_local_tensor_metas` to the parent dim's
-    :class:`DynDim`.
+    dim) resolve via ``_extract_local_tensor_metas`` to the parent dim's
+    ``DynDim``.
     """
     anchors: dict[str, list[tuple[str, int]]] = {}
     for pname, meta in seed_meta.items():
@@ -668,16 +668,16 @@ def _scan_dep_io(
     """Return ``dep_name → (param_names, output_param_names)`` for every @pl.jit
     dep called from ``func``'s body.
 
-    Used by :func:`_extract_local_tensor_metas` to propagate metas through
+    Used by ``_extract_local_tensor_metas`` to propagate metas through
     ``v1, ..., vk = dep(args)`` assignments (each ``vi`` inherits the meta of
     the caller arg bound to the i-th output-like parameter).
 
     ``output_param_names`` covers both ``pl.Out[...]`` and ``pl.InOut[...]``
     params — a caller can capture either from ``v = dep(...)`` — and is kept in
     declaration order so it stays aligned with the callee's return order (the
-    positional target<->param zip in :func:`_dep_out_metas`).
+    positional target<->param zip in ``_dep_out_metas``).
 
-    ``caller_func_type`` mirrors :func:`_discover_deps`'s gating: a host
+    ``caller_func_type`` mirrors ``_discover_deps``'s gating: a host
     orchestrator also admits ``orchestration`` deps (its chip orchestrators).
     """
     out: dict[str, tuple[list[str], list[str]]] = {}
@@ -736,7 +736,7 @@ def _fold_int_arith(op: ast.operator, lhs: int, rhs: int) -> int | None:
 
     Used by ``_extract_local_tensor_metas._resolve_shape_elt`` to keep the
     shape-element resolver under the per-function branch limit. Anything
-    involving a :class:`DynDim` operand is rejected upstream — this helper
+    involving a ``DynDim`` operand is rejected upstream — this helper
     only sees ``int·int``.
     """
     if isinstance(op, ast.Add):
@@ -964,7 +964,7 @@ def _extract_local_tensor_metas(
        scalars, and simple int arithmetic over those), dtype from ``dtype=``.
        A shape element that resolves through a dynamic alias — either
        ``tokens = pl.tensor.dim(P, k)`` for a seeded param ``P`` whose dim
-       ``k`` is :class:`DynDim`-bound, or a direct reference to a DynVar
+       ``k`` is ``DynDim``-bound, or a direct reference to a DynVar
        declared in the seed metas — stamps the matching ``DynDim`` onto the
        local's shape so the dynamic chain keeps flowing through subsequent
        deps.
@@ -983,10 +983,10 @@ def _extract_local_tensor_metas(
        ``pl.Out[...]`` parameters — each ``vi`` inherits the meta of the caller
        argument bound to the i-th ``Out`` parameter (the in-place-output
        convention every such kernel follows, and the same heuristic
-       :func:`_infer_return_type` uses on the callee side).
+       ``_infer_return_type`` uses on the callee side).
 
     ``seed_meta`` pre-populates the table with the caller's parameter metas
-    (including any :class:`DynDim` entries those carry) so a ``pl.slice`` of a
+    (including any ``DynDim`` entries those carry) so a ``pl.slice`` of a
     parameter, a dep call passing a parameter through, or a local
     ``pl.create_tensor`` sized off a dynamic dim of a parameter all resolve;
     ``seed_scalars`` lets compile-time-specialized scalar parameters appear
@@ -1006,13 +1006,13 @@ def _extract_local_tensor_metas(
     dynvar_anchors = _build_dynvar_anchor_index(seed_meta or {})
 
     def _resolve_shape_elt(elt: ast.expr) -> ShapeDim | None:
-        """Resolve a shape element to an ``int`` or a :class:`DynDim`.
+        """Resolve a shape element to an ``int`` or a ``DynDim``.
 
         Dynamic resolution paths (added on top of the original static integer
         resolver):
 
         - ``Name`` that's a dim-alias for ``(P, k)`` where ``P`` is a seeded
-          param with a :class:`DynDim` at dim ``k`` → returns that DynDim.
+          param with a ``DynDim`` at dim ``k`` → returns that DynDim.
         - ``Name`` that's a DynVar declared on a seeded param → returns the
           DynDim of the (first) anchor site.
 
@@ -1210,7 +1210,7 @@ def _arg_ref(arg: ast.expr) -> str | _SlicedArg | None:
 
     - ``ast.Name`` → the variable name (``str``).
     - ``ast.Subscript`` of a Name with integer indices (``x[r]``, ``x[r, 0]``)
-      → a :class:`_SlicedArg` recording the base name and how many leading
+      → a ``_SlicedArg`` recording the base name and how many leading
       dims the indexing drops. Slice indices (``x[r:r+1]``) keep their dim and
       are not counted.
     - anything else (literal, attribute, computed expr) → ``None``.
@@ -1237,7 +1237,7 @@ def _extract_call_args_for_dep(
       pairs it with the dep's parameter list by index) and the keyword
       name for a keyword argument.
     - ``arg_ref`` is the caller-side reference: a variable name (``str``), a
-      :class:`_SlicedArg` for a per-rank subscript (``x[r]``), or ``None`` for
+      ``_SlicedArg`` for a per-rank subscript (``x[r]``), or ``None`` for
       other non-``Name`` expressions (literals, attribute access, …).
 
     Mixed calls like ``dep(a, out=out)`` are preserved correctly. Returns
@@ -1272,7 +1272,7 @@ def _build_param_mapping(
     ``_extract_call_args_for_dep``: a list of ``(param_name, arg_ref)``
     pairs where ``param_name is None`` marks a positional argument (paired
     with ``dep_param_names`` by index) and a string is a keyword name. The
-    ``arg_ref`` may be a name (``str``), a :class:`_SlicedArg`, or ``None``.
+    ``arg_ref`` may be a name (``str``), a ``_SlicedArg``, or ``None``.
     Mixed positional + keyword call sites collapse to the same dict.
     """
     mapping: dict[str, str | _SlicedArg | None] = {}
@@ -1308,10 +1308,10 @@ def _resolve_dep_call_metadata(
     ``caller_func``'s body and apply the positional-or-keyword mapping.
     Intermediate tensors produced in the caller — ``pl.create_tensor``,
     ``pl.slice`` views, and the return values of other ``@pl.jit`` deps — are
-    folded into the metadata pool (see :func:`_extract_local_tensor_metas`).
+    folded into the metadata pool (see ``_extract_local_tensor_metas``).
     Falls back to name-based matching when call-site extraction fails.
 
-    ``caller_func_type`` is forwarded to :func:`_extract_local_tensor_metas`
+    ``caller_func_type`` is forwarded to ``_extract_local_tensor_metas``
     so a host orchestrator's body can also recognise chip-orchestrator deps
     when walking ``v = chip_orch(...)`` return-capture assignments.
     """
@@ -1541,9 +1541,9 @@ class JITFunction:
             ``pld.window`` / ``pld.world_size()`` and the per-rank
             ``device=`` dispatch loop. End-to-end runtime dispatch works when
             the caller supplies ``config=RunConfig(distributed_config=...)``:
-            the config is forwarded through :meth:`_compile` → ``ir.compile()``
-            (see :func:`_run_config_compile_kwargs`), which yields a
-            ``DistributedCompiledProgram`` that :meth:`__call__` dispatches
+            the config is forwarded through ``_compile`` → ``ir.compile()``
+            (see ``_run_config_compile_kwargs``), which yields a
+            ``DistributedCompiledProgram`` that ``__call__`` dispatches
             per-rank.
         _level: pl.Level or None.
         _auto_scope: Whether the compiler auto-inserts AUTO runtime scopes
@@ -1609,7 +1609,7 @@ class JITFunction:
         """Synthetic filename for the generated, specialized source.
 
         Statements that survive specialization are remapped to the user's real
-        ``.py`` via the source map (see :meth:`Specializer.source_map`); this
+        ``.py`` via the source map (see ``Specializer.source_map``); this
         ``<jit:name>`` marker is only the fallback identity for synthesized
         statements that have no original location. Naming the kernel here is far
         more navigable than an anonymous ``<string>``. See issue #1612.
@@ -1796,7 +1796,7 @@ class JITFunction:
     ]:
         """Bind *args/**kwargs to param names and classify into tensor/scalar metadata.
 
-        Tensor metas carry :class:`DynDim` entries for every param dim that is
+        Tensor metas carry ``DynDim`` entries for every param dim that is
         either declared dynamic at this function (``bind_dynamic`` / annotation
         ``pl.dynamic()``) **or** cascaded up from a dep's declarations.
         Cascading happens during ``_compute_per_func_dyndim_maps`` so the cache
@@ -1867,16 +1867,15 @@ class JITFunction:
         dict[str, DataType],
         dict[int, dict[str, dict[int, DynDim]]],
     ]:
-        """Derive the same metadata as :meth:`_bind_args`, but from the kernel's
+        """Derive the same metadata as ``_bind_args``, but from the kernel's
         own parameter annotations — no tensor arguments required.
 
-        Used by :meth:`lower` and :meth:`compile` in annotation-driven signature
-        mode. Each tensor parameter's ``pl.Tensor[[...], dtype]`` annotation
-        supplies the shape/dtype contract directly: static dims are annotation
-        integers, while dynamic dims (``pl.dynamic`` / ``bind_dynamic``) are
-        marked dynamic and given a placeholder extent. Dynamic dimensions lower
-        to runtime ``pl.tensor.dim`` reads and, on the compiled path, collapse to
-        ``None`` in the cache key.
+        Used by [`lower`][pypto.language.JITFunction.lower] and
+        [`compile`][pypto.language.JITFunction.compile] in annotation-driven signature mode. Each tensor
+        parameter's ``pl.Tensor[[...], dtype]`` annotation supplies the shape/dtype contract directly: static
+        dims are annotation integers, while dynamic dims (``pl.dynamic`` / ``bind_dynamic``) are marked
+        dynamic and given a placeholder extent. Dynamic dimensions lower to runtime ``pl.tensor.dim`` reads
+        and, on the compiled path, collapse to ``None`` in the cache key.
 
         Scalar parameters carry no value in the signature, so their values must
         come from ``kwargs`` (or a signature default). A literal is specialized
@@ -1993,11 +1992,12 @@ class JITFunction:
     ) -> tuple[_Specialization, Any | None]:
         """Bind signature or sample arguments and consume the ``RunConfig``.
 
-        Shared by :meth:`lower`, :meth:`__call__`, and :meth:`compile`.
+        Shared by [`lower`][pypto.language.JITFunction.lower], ``__call__``, and
+        [`compile`][pypto.language.JITFunction.compile].
 
         When ``allow_signature_mode`` is set and no positional args are given,
         the shape/dtype contract is read from the kernel's own annotations via
-        :meth:`_bind_args_from_signature`. :meth:`__call__` never enables this
+        ``_bind_args_from_signature``. ``__call__`` never enables this
         because on-device dispatch needs real tensors.
 
         Returns:
@@ -2046,7 +2046,7 @@ class JITFunction:
     ) -> tuple[Any, list[Any], Any | None]:
         """Look up or build a specialized CompiledProgram.
 
-        Shared by :meth:`__call__` (which then dispatches) and :meth:`compile`
+        Shared by ``__call__`` (which then dispatches) and [`compile`][pypto.language.JITFunction.compile]
         (which then returns the CompiledProgram). Cache keys include all inputs
         that affect the generated artifact.
 
@@ -2145,7 +2145,7 @@ class JITFunction:
         A ``config=RunConfig(...)`` keyword argument is consumed here rather
         than passed to the decorated function: its compile-side fields
         (``strategy``, ``dump_passes``, diagnostics, ...) are forwarded to
-        ``ir.compile()`` via :func:`_run_config_compile_kwargs`, and its
+        ``ir.compile()`` via ``_run_config_compile_kwargs``, and its
         runtime fields drive on-device execution.  ``strategy`` also takes
         part in the cache key so artifacts compiled under different strategy
         values never share a cache entry.
@@ -2153,7 +2153,7 @@ class JITFunction:
         Args:
             *args: Positional arguments matching the decorated function's params.
             **kwargs: Keyword arguments.  A ``config`` keyword, if present, is
-                a :class:`~pypto.runtime.runner.RunConfig` and is consumed by
+                a ``RunConfig`` and is consumed by
                 the JIT machinery (not forwarded to the decorated function).
 
         Returns:
@@ -2170,17 +2170,17 @@ class JITFunction:
 
     def compile(self, *args: Any, **kwargs: Any) -> Any:
         """Specialize + compile for the shape/dtype combination implied by *args*,
-        and return the underlying :class:`~pypto.ir.compiled_program.CompiledProgram`.
+        and return the underlying ``CompiledProgram``.
 
-        Same specialization / cache pipeline as :meth:`__call__`, minus the
+        Same specialization / cache pipeline as ``__call__``, minus the
         on-device dispatch. Use this when you want to drive execution through
         the runtime worker API directly:
 
-        - :meth:`pypto.runtime.ChipWorker.run` / :meth:`~pypto.runtime.ChipWorker.register`
+        - ``pypto.runtime.ChipWorker.run`` / ``register``
           for explicit L2 dispatch.
-        - :attr:`CompiledProgram.chip_callable` / ``runtime_name`` / ``runtime_config``
+        - ``CompiledProgram.chip_callable`` / ``runtime_name`` / ``runtime_config``
           to drive a hand-constructed ``simpler.worker.Worker``.
-        - :attr:`CompiledProgram.build_orch_args` / ``build_call_config`` to
+        - ``CompiledProgram.build_orch_args`` / ``build_call_config`` to
           assemble the simpler dispatch tuple yourself.
 
         ``config=RunConfig(...)`` is still consumed (and its compile-side
@@ -2190,7 +2190,7 @@ class JITFunction:
         ``RunConfig`` (``device_id``, DFX flags, ...) do not apply here —
         they affect dispatch, not the compiled artefact.
 
-        Subsequent calls (either :meth:`__call__` or :meth:`compile`) with the
+        Subsequent calls (either ``__call__`` or [`compile`][pypto.language.JITFunction.compile]) with the
         same specialization key hit the L1 cache and return the same
         ``CompiledProgram`` instance.
 
@@ -2249,13 +2249,13 @@ class JITFunction:
                 contents are not read. Omit **all** positional args to compile
                 straight from the signature annotations instead.
             **kwargs: Keyword arguments. A ``config`` keyword, if present, is
-                a :class:`~pypto.runtime.runner.RunConfig`. In signature mode,
+                a ``RunConfig``. In signature mode,
                 scalar parameter values are also passed here (by name) — a
                 literal to specialize it, or ``pl.RUNTIME`` to leave it
                 unspecialized.
 
         Returns:
-            The cached :class:`CompiledProgram` for this specialization.
+            The cached ``CompiledProgram`` for this specialization.
         """
         compiled, _ordered_args, _run_config = self._resolve_compiled(args, kwargs, allow_signature_mode=True)
         return compiled
@@ -2277,7 +2277,7 @@ class JITFunction:
                 into the IR) or ``pl.RUNTIME`` (left unspecialized).
 
         Returns:
-            The specialized :class:`ir.Program` after configured passes.
+            The specialized ``ir.Program`` after configured passes.
         """
         import pypto.language as pl  # noqa: PLC0415
         from pypto.ir.compile import _run_pass_pipeline  # noqa: PLC0415
@@ -2332,13 +2332,13 @@ class JITFunction:
         artifacts (orchestration C++, kernel MLIR).
 
         ``per_func_dyn`` is the per-function effective DynDim map computed in
-        :meth:`_bind_args`; reused here so :func:`_resolve_dep_call_metadata`
+        ``_bind_args``; reused here so ``_resolve_dep_call_metadata``
         doesn't re-walk the dep graph on every cache miss.
 
         ``ir_compile_kwargs`` are forwarded verbatim to ``ir.compile()`` —
         compile-side knobs (``strategy``, ``dump_passes``, ``output_dir``,
         ``profiling``, diagnostics, ...) that the JIT caller derives from a
-        ``RunConfig`` via :func:`_run_config_compile_kwargs`.
+        ``RunConfig`` via ``_run_config_compile_kwargs``.
         """
         from pypto.ir.compile import compile as ir_compile  # noqa: PLC0415
 

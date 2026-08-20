@@ -269,19 +269,19 @@ class RuntimeScalarMarker(Scalar):
     annotation-driven signature mode (``compile()`` / ``lower()`` with no
     tensor arguments) needs one value per scalar parameter. Passing a literal
     **specializes** that value into the compiled artifact; passing
-    :data:`RUNTIME` leaves the parameter **unspecialized** — it stays a real
+    [`RUNTIME`][pypto.language.RUNTIME] leaves the parameter **unspecialized** — it stays a real
     ``pl.Scalar`` parameter in the generated program and its value is supplied
     at dispatch, exactly like a ``pl.dynamic`` dimension extent. Unspecialized
     scalars also drop out of the specialization cache key, so one artifact
     serves every runtime value.
 
-    Subclasses :class:`Scalar` so that a type checker accepts it as the default
+    Subclasses [`Scalar`][pypto.language.Scalar] so that a type checker accepts it as the default
     of a scalar parameter — ``n: pl.Scalar[dtype] = pl.RUNTIME`` — for the same
-    reason :class:`~pypto.language.typing.dynamic.DynVar` does: the marker
+    reason ``DynVar`` does: the marker
     stands in wherever a ``Scalar`` is expected. It carries no dtype of its own;
     the parameter's annotation supplies that.
 
-    Use the :data:`RUNTIME` singleton rather than instantiating this class.
+    Use the [`RUNTIME`][pypto.language.RUNTIME] singleton rather than instantiating this class.
 
     Examples:
         >>> import pypto.language as pl
@@ -293,7 +293,7 @@ class RuntimeScalarMarker(Scalar):
     def __init__(self) -> None:
         """Initialize the marker with no dtype and no wrapped expression.
 
-        Bypasses :meth:`Scalar.__init__`, which requires one of the two — this
+        Bypasses ``Scalar.__init__``, which requires one of the two — this
         marker deliberately has neither, and its dtype comes from the annotated
         parameter it defaults.
         """
@@ -319,7 +319,7 @@ class RuntimeScalarMarker(Scalar):
 
 
 RUNTIME = RuntimeScalarMarker()
-"""Singleton :class:`RuntimeScalarMarker` — see the class docstring."""
+"""Singleton ``RuntimeScalarMarker`` — see the class docstring."""
 
 
 BoolLike: TypeAlias = bool | Scalar | Expr
@@ -330,7 +330,7 @@ def predicate_to_expr(value: BoolLike | None, span: Span | None = None) -> Expr 
     """Coerce an optional boolean predicate operand to an ``Expr``.
 
     A Python ``bool`` becomes ``ConstInt(.., BOOL)`` — a compile-time constant an
-    operator's lowering can fold away. A :class:`Scalar` (typically a comparison
+    operator's lowering can fold away. A [`Scalar`][pypto.language.Scalar] (typically a comparison
     such as ``k == 0``) is unwrapped to the symbolic expression it carries, which
     stays a runtime value.
 

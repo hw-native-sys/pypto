@@ -720,7 +720,7 @@ class SpmdContext:
         # decorator parses the function source rather than executing it — but
         # returning ``self`` keeps ``as`` syntactically legal (and ``tid``
         # non-``None`` under static checking) when a script is executed directly
-        # (e.g. for linting), matching :meth:`AtContext.__enter__`.
+        # (e.g. for linting), matching ``AtContext.__enter__``.
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
@@ -920,7 +920,7 @@ class SplitAivContext:
     """Loop iterator for the explicit AIV-split region.
 
     The parser recognizes ``for aiv_id in pl.split_aiv(2, mode=...):`` and builds
-    a first-class :class:`~pypto.pypto_core.ir.SplitAivScopeStmt` region node
+    a first-class ``SplitAivScopeStmt`` region node
     carrying the requested ``SplitMode``. Unlike the legacy whole-InCore-scope
     split, this region is a structural node that may be nested anywhere in an
     InCore body — inside a ``pl.range`` / ``pl.pipeline`` loop or an ``if``. The
@@ -955,7 +955,7 @@ def split_aiv(n: int, *, mode: ir.SplitMode) -> SplitAivContext:
         for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
             ...  # body runs per AIV lane; aiv_id = pl.tile.get_subblock_idx()
 
-    The loop builds a first-class :class:`~pypto.pypto_core.ir.SplitAivScopeStmt`
+    The loop builds a first-class ``SplitAivScopeStmt``
     region carrying the requested ``SplitMode``. Because it is a structural node
     (not a whole-InCore-scope flag), it is **nestable**: the region may appear
     inside a ``pl.range`` / ``pl.pipeline`` loop or an ``if``, and sibling regions

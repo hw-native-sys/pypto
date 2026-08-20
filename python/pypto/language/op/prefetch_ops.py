@@ -9,9 +9,9 @@
 
 """``pl.prefetch.*`` — asynchronous GM->L2 prefetch operations.
 
-A latency-hiding cache hint: :func:`async_prefetch` starts an SDMA-backed pull of
-a global-memory region into L2 while unrelated compute proceeds, and
-:func:`wait` blocks until it lands. The prefetch changes no tensor values, so a
+A latency-hiding cache hint: [`async_prefetch`][pypto.language.prefetch.async_prefetch] starts an SDMA-backed
+pull of a global-memory region into L2 while unrelated compute proceeds, and
+[`wait`][pypto.language.prefetch.wait] blocks until it lands. The prefetch changes no tensor values, so a
 kernel is numerically identical with or without it — only performance differs.
 
 Typical usage::
@@ -56,8 +56,9 @@ def make_context() -> PrefetchAsyncContext:
     context to a hidden runtime-owned SDMA allocation.
 
     Returns:
-        A :class:`PrefetchAsyncContext` handle to pass to :func:`async_prefetch`
-        and :func:`session`.
+        A [`PrefetchAsyncContext`][pypto.language.PrefetchAsyncContext] handle to pass to
+        [`async_prefetch`][pypto.language.prefetch.async_prefetch]
+        and [`session`][pypto.language.prefetch.session].
     """
     return PrefetchAsyncContext(expr=_ir_prefetch.make_context())
 
@@ -68,13 +69,15 @@ def async_prefetch(src: Tensor, ctx: PrefetchAsyncContext) -> AsyncEvent:
     Does not block and does not modify ``src``.
 
     Args:
-        src: A flat contiguous logical-1D GM :class:`pl.Tensor` to pull into L2.
+        src: A flat contiguous logical-1D GM [`pl.Tensor`][pypto.language.Tensor] to pull into L2.
             The op verifier (C++) requires a fully static shape whose dimensions
             are all 1 except the last — e.g. ``[N]`` or ``[1, N]``.
-        ctx: A :class:`PrefetchAsyncContext` from :func:`make_context`.
+        ctx: A [`PrefetchAsyncContext`][pypto.language.PrefetchAsyncContext] from
+            [`make_context`][pypto.language.prefetch.make_context].
 
     Returns:
-        An :class:`AsyncEvent` to pass to :func:`wait` along with the session.
+        An [`AsyncEvent`][pypto.language.AsyncEvent] to pass to [`wait`][pypto.language.prefetch.wait] along
+        with the session.
     """
     return AsyncEvent(expr=_ir_prefetch.async_prefetch(_unwrap(src), _unwrap(ctx)))
 
@@ -83,10 +86,11 @@ def session(ctx: PrefetchAsyncContext) -> AsyncSession:
     """Project the asynchronous session bound to a prefetch context.
 
     Args:
-        ctx: A :class:`PrefetchAsyncContext` from :func:`make_context`.
+        ctx: A [`PrefetchAsyncContext`][pypto.language.PrefetchAsyncContext] from
+            [`make_context`][pypto.language.prefetch.make_context].
 
     Returns:
-        An :class:`AsyncSession` to pass to :func:`wait`.
+        An [`AsyncSession`][pypto.language.AsyncSession] to pass to [`wait`][pypto.language.prefetch.wait].
     """
     return AsyncSession(expr=_ir_prefetch.session(_unwrap(ctx)))
 
@@ -98,11 +102,13 @@ def wait(event: AsyncEvent, session_handle: AsyncSession) -> Scalar:
     data is resident in L2.
 
     Args:
-        event: An :class:`AsyncEvent` from :func:`async_prefetch`.
-        session_handle: The matching :class:`AsyncSession` from :func:`session`.
+        event: An [`AsyncEvent`][pypto.language.AsyncEvent] from
+            [`async_prefetch`][pypto.language.prefetch.async_prefetch].
+        session_handle: The matching [`AsyncSession`][pypto.language.AsyncSession] from
+            [`session`][pypto.language.prefetch.session].
 
     Returns:
-        A ``BOOL`` :class:`Scalar` done flag.
+        A ``BOOL`` [`Scalar`][pypto.language.Scalar] done flag.
     """
     return Scalar(expr=_ir_prefetch.wait(_unwrap(event), _unwrap(session_handle)))
 

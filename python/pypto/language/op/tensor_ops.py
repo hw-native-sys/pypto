@@ -441,7 +441,7 @@ def slice(
             ``None`` means the source's padding mode carries through.
             Accepts ``PadValue.zero`` / ``PadValue.max`` / ``PadValue.min``, or
             the literal sugars ``0``, ``math.inf``, ``-math.inf`` (same
-            spelling as :func:`tensor.fillpad`). Only meaningful when the
+            spelling as [`tensor.fillpad`][pypto.language.tensor.fillpad]). Only meaningful when the
             *effective* valid region is smaller than ``shape`` — which an explicit
             ``valid_shape``, a partially-valid source, or ``clamp=True`` can each
             bring about.
@@ -514,7 +514,7 @@ def fillpad_expand(
 ) -> Tensor:
     """Copy a smaller source tensor into a larger destination tensor, padding the rest.
 
-    Unlike :func:`fillpad` (which keeps the same shape and only fills the invalid
+    Unlike [`fillpad`][pypto.language.tensor.fillpad] (which keeps the same shape and only fills the invalid
     view region), the destination ``shape`` may be larger than the source in
     either dimension. The source's valid region is copied into the top-left of
     the destination and every other element is filled with ``pad_value``.
@@ -1931,7 +1931,7 @@ def view(
     At least one of ``shape`` or ``layout`` must be provided. The result is a
     zero-copy tensor view with canonical strides derived by the IR type deducer.
 
-    See :func:`pypto.ir.op.tensor.view` for full details on validity
+    See [`tensor.view`][pypto.language.tensor.view] for full details on validity
     constraints, error conditions, and the product-preserving shape rule.
 
     Args:
@@ -2120,7 +2120,7 @@ def gather(
     The tensor layer exposes a single unified ``gather``. Based on the arguments
     you pass, it lowers to one of three tile-level ops:
 
-    Index form (``dim`` + ``index``) → :func:`pl.tile.gather`::
+    Index form (``dim`` + ``index``) → [`pl.tile.gather`][pypto.language.tile.gather]::
 
         output[b, k] = input[b, index[b, k]]
 
@@ -2128,11 +2128,12 @@ def gather(
         ``index`` must be an INT32 tensor, or INT16 when ``input`` is a 16-bit
         dtype (FP16/INT16); its shape matches ``input`` on every axis except ``dim``.
 
-    Mask form (``mask_pattern=<int>``) → :func:`pl.tile.gather_mask`:
+    Mask form (``mask_pattern=<int>``) → [`pl.tile.gather_mask`][pypto.language.tile.gather_mask]:
         Selects columns of each row by a fixed hardware mask pattern. Last-dim
         shrinks by 2 (P0101/P1010) or 4 (P0001..P1000), or stays the same for P1111.
 
-    Compare form (``kvalue`` + ``cmp_mode`` + ``out_cols``) → :func:`pl.tile.gather_compare`:
+    Compare form (``kvalue`` + ``cmp_mode`` + ``out_cols``) →
+    [`pl.tile.gather_compare`][pypto.language.tile.gather_compare]:
         Scalar threshold compare (applied to every row). Returns ``(dst, cdst)`` —
         gathered indices ``[rows, out_cols] INT32`` and per-row match counts
         ``[rows, 1] count_dtype``.
@@ -2271,7 +2272,7 @@ def paged_gather(  # noqa: PLR0913
 def create_l1(shape: Sequence[IntLike], dtype: DataType, transpose: bool = False) -> Tensor:
     """Create an on-chip (L1/Mat) accumulator for a kernel-driven paged gather.
 
-    Companion of :func:`gather_row`. Returns a tensor-typed value that composes
+    Companion of [`gather_row`][pypto.language.tensor.gather_row]. Returns a tensor-typed value that composes
     with ``pl.matmul`` / softmax but lowers to an L1 (``MemorySpace.Mat``) tile,
     so a kernel can build a matmul operand directly on-chip — no GM round-trip.
 
@@ -2310,14 +2311,14 @@ def gather_row(  # noqa: PLR0913
     """Gather one GM row into a sub-region of an on-chip accumulator (DPS).
 
     Per-row primitive for a kernel-driven paged gather into L1 — the flexible
-    counterpart to :func:`paged_gather`: the caller computes the physical
+    counterpart to [`paged_gather`][pypto.language.tensor.paged_gather]: the caller computes the physical
     ``src_offset`` (block-table lookup, multi-source selection, invalid clamping)
     and the ``dst_offset`` slot itself, so arbitrary gather logic stays in the
     kernel. DMAs ``src`` straight into ``acc`` (``GM -> L1``, no ``tmov``); the
     returned tile feeds ``pl.matmul`` directly.
 
     Args:
-        acc: On-chip accumulator from :func:`create_l1` (loop-carried).
+        acc: On-chip accumulator from [`create_l1`][pypto.language.tensor.create_l1] (loop-carried).
         src: Source pool in GM.
         dst_offset: ``[row, col]`` slot within ``acc`` to write.
         src_offset: ``[row, col]`` physical offset within the GM ``src``.
@@ -2368,8 +2369,8 @@ def scatter(
     The tensor layer exposes a single unified ``scatter``. Based on the arguments
     you pass, it lowers to one of two tile-level ops:
 
-    Index form (``dim`` + ``index`` + ``src``) → :func:`pl.tile.scatter` — the
-    column-wise inverse of :func:`gather`, so ``index`` has the same shape as
+    Index form (``dim`` + ``index`` + ``src``) → [`pl.tile.scatter`][pypto.language.tile.scatter] — the
+    column-wise inverse of [`gather`][pypto.language.tensor.gather], so ``index`` has the same shape as
     ``src`` (just like gather's index matches its output)::
 
         output = input
@@ -2380,7 +2381,7 @@ def scatter(
         width must match ``input``: 4-byte input → INT32, 2-byte → INT16,
         1-byte → INT16.
 
-    Mask form (``mask_pattern=<int>`` + ``dst``) → :func:`pl.tile.scatter_mask`:
+    Mask form (``mask_pattern=<int>`` + ``dst``) → [`pl.tile.scatter_mask`][pypto.language.tile.scatter_mask]:
         Writes each row of ``input`` into the columns of ``dst`` selected by the
         hardware mask pattern. ``dst.cols`` equals ``input.cols * stride``
         (stride = 2 for P0101/P1010, 4 for P0001..P1000, 1 for P1111).
@@ -2443,6 +2444,13 @@ def alloc(
     The result is a base ``Ptr`` (allocation identity token): the printer
     annotates the assignment target as ``pl.Ptr``, matching the IR design
     where ``tensor.alloc`` Calls carry ``PtrType``.
+
+    Args:
+        memory_space: Space the allocation lives in, as resolved by InferTileMemorySpace.
+        size: Allocation size in bytes.
+
+    Returns:
+        A ``Ptr`` standing for the allocation, carrying no address of its own.
     """
     return PtrType()
 

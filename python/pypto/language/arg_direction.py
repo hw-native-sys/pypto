@@ -9,7 +9,7 @@
 
 """Per-call-site direction markers for PyPTO Language DSL.
 
-These markers attach an explicit :class:`pypto.ir.ArgDirection` to a call
+These markers attach an explicit ``pypto.ir.ArgDirection`` to a call
 argument and are stored on ``ir.Call.attrs['arg_directions']`` (also
 accessible via the ``ir.Call.arg_directions`` shortcut property).
 
@@ -25,12 +25,12 @@ preserve the metadata::
     )
 
 Each ``pl.adir.<name>`` symbol is a direct alias of the matching
-:class:`ir.ArgDirection` enum value — they are not callable. Per-argument
+``ir.ArgDirection`` enum value — they are not callable. Per-argument
 wrapper forms such as ``pl.adir.input(x)`` are intentionally not supported.
 
 The markers correspond 1:1 with the runtime task-submission methods on
 ``PTOParam`` (``add_input`` / ``add_output`` / ``add_inout`` /
-``add_no_dep`` / ``add_scalar``) and with :class:`ir.ArgDirection` enum
+``add_no_dep`` / ``add_scalar``) and with ``ir.ArgDirection`` enum
 values:
 
 ==================== ================================

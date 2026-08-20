@@ -367,10 +367,12 @@ def loads(filepath: str) -> ir.Function | ir.Program:
 def parse_program(code: str, filename: str = "<string>") -> ir.Program:
     """Parse a DSL program from a string.
 
-    .. deprecated::
-        Use :func:`parse` instead, which auto-detects functions and programs.
+    !!! warning "Deprecated"
+        Use [`parse`][pypto.language.parse] instead, which auto-detects functions
+        and programs.
 
-    This is now an alias for :func:`parse` that validates the result is a Program.
+    This is now an alias for [`parse`][pypto.language.parse] that validates the
+    result is a Program.
 
     Args:
         code: Python source code containing a @pl.program decorated class
@@ -395,10 +397,12 @@ def parse_program(code: str, filename: str = "<string>") -> ir.Program:
 def loads_program(filepath: str) -> ir.Program:
     """Load a DSL program from a file.
 
-    .. deprecated::
-        Use :func:`loads` instead, which auto-detects functions and programs.
+    !!! warning "Deprecated"
+        Use [`loads`][pypto.language.loads] instead, which auto-detects functions
+        and programs.
 
-    This is now an alias for :func:`loads` that validates the result is a Program.
+    This is now an alias for [`loads`][pypto.language.loads] that validates the
+    result is a Program.
 
     Args:
         filepath: Path to Python file containing @pl.program decorated class

@@ -37,7 +37,7 @@ class scope:
     By default the compiler inserts AUTO scopes for you (function body + each
     ``for`` / ``if`` body). To place scopes yourself, set
     ``@pl.function(auto_scope=False)`` and use this context manager (and the
-    ``pl.range(..., scope=...)`` sugar). See :class:`ScopeMode` for AUTO vs
+    ``pl.range(..., scope=...)`` sugar). See [`ScopeMode`][pypto.language.ScopeMode] for AUTO vs
     MANUAL.
 
     Usage::
@@ -207,9 +207,9 @@ def spmd_submit(*args: Any, **kwargs: Any) -> Any:
     core_num=N, sync_start=..., deps=[...])`` syntactically and never actually
     calls this body. It is defined only so the name resolves (imports / linters).
 
-    It is the SPMD sibling of :func:`submit`: a single orchestration task that
+    It is the SPMD sibling of [`submit`][pypto.language.submit]: a single orchestration task that
     the runtime fans out across ``core_num`` logical blocks (each kernel reads
-    its block index via ``pl.tile.get_block_idx()``). Like :func:`submit` it
+    its block index via ``pl.tile.get_block_idx()``). Like [`submit`][pypto.language.submit] it
     returns one producer TaskId, so the whole dispatch can be named as a
     dependency of later tasks.
 
@@ -223,12 +223,12 @@ def spmd_submit(*args: Any, **kwargs: Any) -> Any:
     expression) — the positional slots are the kernel's own arguments.
     ``sync_start`` (default ``False``) requires all blocks to launch atomically.
     ``deps=[...]``, ``allow_early_resolve=True`` and ``predicate=(...)`` work
-    exactly as on :func:`submit` (note: a ``sync_start`` task cannot itself be
+    exactly as on [`submit`][pypto.language.submit] (note: a ``sync_start`` task cannot itself be
     block-by-block pre-staged, but it can still be flagged to let its consumers
     pre-stage). The callee may be an InCore / AIC / AIV kernel or a co-scheduled
     Group.
 
-    Like :func:`submit`, it works in both auto and manual scope; its primary use
+    Like [`submit`][pypto.language.submit], it works in both auto and manual scope; its primary use
     is explicit dependency wiring inside ``pl.manual_scope()``.
     """
     raise RuntimeError(

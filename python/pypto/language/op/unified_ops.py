@@ -191,7 +191,7 @@ def _reject_tmp_for_tensor(op_name: str, tmp: Any, param: str = "tmp") -> None:
 def _require_tmp_for_tile(op_name: str, tmp: Tile | None, requirement: str) -> Tile:
     """Guard the Tile path of an op whose Tile form *requires* a scratch operand.
 
-    The mirror image of :func:`_reject_tmp_for_tensor`: tile buffer lifetimes are
+    The mirror image of ``_reject_tmp_for_tensor``: tile buffer lifetimes are
     user-managed, so the operand the Tensor path must omit is the same one the
     Tile path cannot synthesize. Both directions raise ``TypeError`` — this is a
     wrong-arguments-for-this-overload error, the same class CPython raises for a
@@ -278,7 +278,7 @@ def _is_scalar_like(v: object) -> bool:
 def _to_scalar_expr(v: Any) -> _ir_core.Expr:
     """Coerce a scalar-like value to an ``Expr``.
 
-    Caller must have already passed :func:`_is_scalar_like`. ``Scalar`` is
+    Caller must have already passed ``_is_scalar_like``. ``Scalar`` is
     unwrapped, raw ``Expr`` is returned as-is, and Python ``int`` / ``float``
     are materialized as ``ConstInt`` / ``ConstFloat`` with the parser-pinned
     span (or frame-captured fallback).
@@ -386,7 +386,16 @@ def div(
     high_precision: bool = False,
 ) -> Scalar: ...
 def div(lhs, rhs, high_precision: bool = False):
-    """Element-wise division, dispatched by input type."""
+    """Element-wise division, dispatched by input type.
+
+    A scalar ``rhs`` against a Tile dispatches to ``tile.divs``.
+
+    Args:
+        high_precision: Select PTOAS's high-precision divide. Available for
+            Tensor/Tensor and Tile/Tile only -- a scalar divisor has no
+            high-precision form, so passing it there raises rather than silently
+            falling back.
+    """
     if isinstance(lhs, Tensor) and isinstance(rhs, (Tensor, int, float, Scalar, _ir_core.Expr)):
         return _tensor.div(lhs, rhs, high_precision=high_precision)
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
@@ -540,7 +549,12 @@ def exp(input: T) -> T:
 
 
 def log(input: T, high_precision: bool = False) -> T:
-    """Element-wise natural logarithm, dispatched by input type."""
+    """Element-wise natural logarithm, dispatched by input type.
+
+    Args:
+        input: Input tensor or tile.
+        high_precision: Select PTOAS's high-precision logarithm mode.
+    """
     if isinstance(input, Tensor):
         return _tensor.log(input, high_precision=high_precision)
     if isinstance(input, Tile):
@@ -761,7 +775,15 @@ def col_expand_expdif(lhs: T, rhs: T) -> T:
 
 
 def expands(target: Tensor | Tile, scalar: int | float | Scalar) -> Tensor | Tile:
-    """Expand scalar to target shape, dispatched by target type."""
+    """Expand scalar to target shape, dispatched by target type.
+
+    Note the argument order: the value being broadcast is the *second* argument.
+    ``target`` supplies the shape and dtype; it is not read.
+
+    Args:
+        target: Value whose shape the scalar is broadcast to.
+        scalar: Value to broadcast into every element.
+    """
     if isinstance(target, Tensor):
         return _tensor.expands(target, scalar)
     if isinstance(target, Tile):
@@ -813,7 +835,13 @@ def reinterpret_view(
 
 
 def transpose(input: T, axis1: int, axis2: int) -> T:
-    """Transpose operation, dispatched by input type."""
+    """Transpose operation, dispatched by input type.
+
+    Args:
+        input: Value to transpose.
+        axis1: First axis to exchange.
+        axis2: Second axis to exchange. Swapping an axis with itself is a no-op.
+    """
     if isinstance(input, Tensor):
         return _tensor.transpose(input, axis1, axis2)
     if isinstance(input, Tile):
@@ -851,7 +879,7 @@ def slice(
     ``pad_value`` sets the padding mode for elements outside the effective valid
     region, on either path. ``None`` carries the source's mode through. Accepts
     ``PadValue.zero`` / ``PadValue.max`` / ``PadValue.min``, or the literal
-    sugars ``0``, ``math.inf``, ``-math.inf`` (same spelling as :func:`fillpad`).
+    sugars ``0``, ``math.inf``, ``-math.inf`` (same spelling as [`fillpad`][pypto.language.fillpad]).
     It only bites when the valid region is smaller than ``shape`` — which an
     explicit ``valid_shape``, a partially-valid source, or (Tensor-only)
     ``clamp=True`` can each bring about; passing it otherwise warns.
@@ -1029,7 +1057,7 @@ def matmul_acc(
     """Matrix multiplication with accumulation, dispatched by input type.
 
     ``a_trans`` / ``b_trans`` are Tensor-only for the same reason as in
-    :func:`matmul` — at tile level transposition is a type property, not an op
+    [`matmul`][pypto.language.matmul] — at tile level transposition is a type property, not an op
     flag — so passing either with Tile operands raises rather than being
     dropped.
 
@@ -1303,7 +1331,16 @@ def cast(
     target_type: int | DataType,
     mode: str | int = "round",
 ) -> Tensor | Tile | Scalar:
-    """Type casting, dispatched by input type."""
+    """Type casting, dispatched by input type.
+
+    Args:
+        input: Value to convert.
+        target_type: Destination dtype.
+        mode: Rounding mode, as a name or its int code -- ``"none"`` (0),
+            ``"rint"`` (1), ``"round"`` (2, the default), ``"floor"`` (3),
+            ``"ceil"`` (4), ``"trunc"`` (5), ``"odd"`` (6). A ``Scalar`` input
+            supports the default only and raises for any other mode.
+    """
     if isinstance(input, Tensor):
         return _tensor.cast(input, target_type, mode)
     if isinstance(input, Tile):
@@ -1435,7 +1472,7 @@ def xors(lhs: Tile, rhs: int | Scalar, tmp: Tile) -> Tile: ...
 def xors(lhs, rhs, tmp=None):
     """Element-wise bitwise XOR with a scalar, dispatched by input type.
 
-    See :func:`xor` for why only the tile path takes ``tmp``.
+    See [`xor`][pypto.language.xor] for why only the tile path takes ``tmp``.
     """
     if isinstance(lhs, Tensor):
         _reject_tmp_for_tensor("xors", tmp)

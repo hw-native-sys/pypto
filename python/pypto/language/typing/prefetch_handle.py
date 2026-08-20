@@ -10,13 +10,13 @@
 """DSL wrappers for the opaque async-prefetch handles.
 
 Three handle classes back the ``pl.prefetch.*`` surface, each serving the two
-roles :class:`pld.CommCtx` does:
+roles ``pld.CommCtx`` does:
 
 * **Type annotation** — ``ctx: pl.PrefetchAsyncContext = pl.prefetch.make_context()``
-  declares an :class:`ir.PrefetchAsyncContextType`-valued ``Var`` in printed IR.
+  declares an ``ir.PrefetchAsyncContextType``-valued ``Var`` in printed IR.
 * **Value wrapper** — the ``pl.prefetch.*`` wrappers return these classes so
   handles flow through the DSL as typed values instead of raw ``ir.Call``
-  objects. The parser's ``invoke_dsl`` unwraps via :meth:`unwrap` at the
+  objects. The parser's ``invoke_dsl`` unwraps via ``unwrap`` at the
   parser boundary.
 """
 
@@ -35,7 +35,7 @@ class _OpaqueHandle:
         self._expr: Expr | None = expr
 
     def unwrap(self) -> Expr:
-        """Return the wrapped :class:`ir.Expr`.
+        """Return the wrapped ``ir.Expr``.
 
         Raises:
             RuntimeError: If the instance was constructed without an ``expr``
@@ -55,24 +55,26 @@ class _OpaqueHandle:
 class PrefetchAsyncContext(_OpaqueHandle):
     """Handle to an asynchronous GM->L2 prefetch context.
 
-    Produced by :func:`pl.prefetch.make_context`; consumed by
-    :func:`pl.prefetch.async_prefetch` and :func:`pl.prefetch.session`.
+    Produced by [`pl.prefetch.make_context`][pypto.language.prefetch.make_context]; consumed by
+    [`pl.prefetch.async_prefetch`][pypto.language.prefetch.async_prefetch] and
+    [`pl.prefetch.session`][pypto.language.prefetch.session].
     """
 
 
 class AsyncEvent(_OpaqueHandle):
     """Handle to an in-flight asynchronous prefetch completion event.
 
-    Produced by :func:`pl.prefetch.async_prefetch`; consumed by
-    :func:`pl.prefetch.wait` together with the matching :class:`AsyncSession`.
+    Produced by [`pl.prefetch.async_prefetch`][pypto.language.prefetch.async_prefetch]; consumed by
+    [`pl.prefetch.wait`][pypto.language.prefetch.wait] together with the matching
+    [`AsyncSession`][pypto.language.AsyncSession].
     """
 
 
 class AsyncSession(_OpaqueHandle):
-    """Handle to the asynchronous session an :class:`AsyncEvent` belongs to.
+    """Handle to the asynchronous session an [`AsyncEvent`][pypto.language.AsyncEvent] belongs to.
 
-    Produced by :func:`pl.prefetch.session`; consumed by
-    :func:`pl.prefetch.wait`.
+    Produced by [`pl.prefetch.session`][pypto.language.prefetch.session]; consumed by
+    [`pl.prefetch.wait`][pypto.language.prefetch.wait].
     """
 
 

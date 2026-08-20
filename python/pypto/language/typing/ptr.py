@@ -9,16 +9,16 @@
 
 """``pl.Ptr`` — DSL wrapper for an opaque pointer handle.
 
-Single class serving two roles, mirroring :class:`pl.Tensor` /
-:class:`pl.Tile`:
+Single class serving two roles, mirroring [`pl.Tensor`][pypto.language.Tensor] /
+[`pl.Tile`][pypto.language.Tile]:
 
 * **Type annotation** — printed-IR round-trip uses ``buf: pl.Ptr =
   pl.tile.alloc(...)`` / ``buf: pl.Ptr = pld.alloc_window_buffer(...)``
-  to signal that the LHS is an :class:`ir.PtrType`-valued ``Var``.
+  to signal that the LHS is an ``ir.PtrType``-valued ``Var``.
 * **Value wrapper** — DSL ops that return a Ptr-typed result wrap the
-  underlying :class:`ir.Expr` in this class so the DSL surface stays
+  underlying ``ir.Expr`` in this class so the DSL surface stays
   language-level (no raw ``ir.Call`` leaking out of wrappers). The
-  parser's ``invoke_dsl`` unwraps via :meth:`unwrap` at the parser
+  parser's ``invoke_dsl`` unwraps via ``unwrap`` at the parser
   boundary, the same way it handles ``Tensor`` / ``Tile`` / ``Scalar`` /
   ``Array``.
 """
@@ -38,7 +38,7 @@ class Ptr:
         self._expr: Expr | None = expr
 
     def unwrap(self) -> Expr:
-        """Return the wrapped :class:`ir.Expr`.
+        """Return the wrapped ``ir.Expr``.
 
         Raises:
             RuntimeError: If the instance was constructed without an
