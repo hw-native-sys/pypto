@@ -3649,7 +3649,7 @@ class TestDCERegression:
                         q_phi = pl.yield_(q_then)
                     else:
                         q_phi = pl.yield_(q_iter)
-                    p_rv, q_rv = pl.yield_(p_phi, q_phi)  # noqa: F841
+                    p_rv, q_rv = pl.yield_(p_phi, q_phi)
                 return p_rv
 
         After = _expand(Before)
@@ -3686,7 +3686,7 @@ class TestDCERegression:
                         q_phi = pl.yield_(q_iter)
                     else:
                         q_phi = pl.yield_(q_iter)
-                    p_rv, q_rv = pl.yield_(p_phi, q_phi)  # noqa: F841
+                    p_rv, q_rv = pl.yield_(p_phi, q_phi)
 
             @pl.function(type=pl.FunctionType.AIV)
             def main_incore_0_aiv(
@@ -3715,7 +3715,7 @@ class TestDCERegression:
                         # Pre-fix this arm yielded p_iter, so q_phi merged two
                         # different tensors and PTO codegen aborted.
                         q_phi = pl.yield_(q_iter)
-                    p_rv, q_rv = pl.yield_(p_phi, q_phi)  # noqa: F841
+                    p_rv, q_rv = pl.yield_(p_phi, q_phi)
                 return p_rv
 
             @pl.function(type=pl.FunctionType.Group)

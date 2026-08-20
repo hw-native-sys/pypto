@@ -127,35 +127,53 @@ std::shared_ptr<const YieldStmt> TrailingYield(const std::vector<StmtPtr>& stmts
 }
 
 /// Per-slot fallback for one scope's trailing yield: `carriers[i]` is the
-/// enclosing loop's iter_arg that carries yield slot `i`, or null when no carry
-/// backs that slot.
+/// iter_arg that carries yield slot `i`, or null when no carry backs it.
 ///
 /// A loop body's own trailing yield is positionally aligned with the loop's
 /// `iter_args_`, so there `carriers == iter_args`. A nested IfStmt's branch
 /// yields are aligned with that IfStmt's `return_vars_` instead — a different
-/// index space — so their slots must be re-mapped before an iter_arg can stand
-/// in for a dangling value.
-using SlotCarriers = std::vector<IterArgPtr>;
+/// index space — so their fallbacks are derived per IfStmt rather than
+/// inherited positionally.
+using SlotCarriers = std::vector<VarPtr>;
 
-/// Re-map `carriers` (slots of `enclosing_yield`) onto the slots of `if_stmt`'s
-/// branch yields. Branch slot `i` binds `return_vars_[i]`, which the enclosing
-/// yield carries at whatever position that var appears in. Slots whose var the
-/// enclosing yield does not carry stay null: no iter_arg is known to hold that
-/// value, so a dangling yield there is left for StripDanglingIfReturnVars to
-/// drop rather than silently bound to an unrelated carry.
-SlotCarriers MapCarriersToIfSlots(const std::shared_ptr<const IfStmt>& if_stmt,
-                                  const std::shared_ptr<const YieldStmt>& enclosing_yield,
-                                  const SlotCarriers& carriers) {
-  SlotCarriers slots(if_stmt->return_vars_.size(), nullptr);
-  if (!enclosing_yield) return slots;
+/// Fallbacks for one IfStmt's branch yields, read off the branches themselves.
+///
+/// Slot `i` of either branch yield binds `return_vars_[i]`, so the value the
+/// *other* branch gives that same phi is the incoming value a branch whose own
+/// producer was pruned should fall back to. Only an iter_arg qualifies: it is
+/// bound by the enclosing loop header and therefore in scope in both branches,
+/// whereas a branch-local var is not. Two branches naming different iter_args
+/// at one slot leave it null — that phi merges two distinct carries and no
+/// single one stands for it.
+///
+/// Reading the branches keeps the fallback independent of what the loop's
+/// trailing yield happens to name, so an intervening alias between the IfStmt
+/// and that yield does not hide the carry.
+SlotCarriers BranchCarriers(const std::shared_ptr<const IfStmt>& if_stmt,
+                            const std::vector<StmtPtr>& then_stmts,
+                            const std::optional<std::vector<StmtPtr>>& else_stmts) {
+  const size_t num_slots = if_stmt->return_vars_.size();
+  SlotCarriers slots(num_slots, nullptr);
+  std::vector<bool> conflicting(num_slots, false);
 
-  std::unordered_map<const Var*, size_t> slot_of;
-  for (size_t j = 0; j < enclosing_yield->value_.size(); ++j) {
-    if (auto v = AsVarLike(enclosing_yield->value_[j])) slot_of.emplace(v.get(), j);
-  }
-  for (size_t i = 0; i < slots.size(); ++i) {
-    auto it = slot_of.find(if_stmt->return_vars_[i].get());
-    if (it != slot_of.end() && it->second < carriers.size()) slots[i] = carriers[it->second];
+  auto absorb = [&](const std::vector<StmtPtr>& branch_stmts) {
+    const auto yield_stmt = TrailingYield(branch_stmts);
+    if (!yield_stmt) return;
+    for (size_t i = 0; i < num_slots && i < yield_stmt->value_.size(); ++i) {
+      auto iter_arg = As<IterArg>(yield_stmt->value_[i]);
+      if (!iter_arg) continue;
+      if (!slots[i]) {
+        slots[i] = iter_arg;
+      } else if (slots[i].get() != iter_arg.get()) {
+        conflicting[i] = true;
+      }
+    }
+  };
+  absorb(then_stmts);
+  if (else_stmts.has_value()) absorb(*else_stmts);
+
+  for (size_t i = 0; i < num_slots; ++i) {
+    if (conflicting[i]) slots[i] = nullptr;
   }
   return slots;
 }
@@ -183,18 +201,20 @@ StmtPtr ReplaceDanglingYieldValues(const std::shared_ptr<const YieldStmt>& yield
 
 std::vector<StmtPtr> FixDanglingYieldsInScope(const std::vector<StmtPtr>& stmts, const SlotCarriers& carriers,
                                               const std::unordered_set<const Var*>& defined_vars) {
-  const auto trailing = TrailingYield(stmts);
-
   std::vector<StmtPtr> result;
   result.reserve(stmts.size());
   for (const auto& stmt : stmts) {
     if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-      auto branch_carriers = MapCarriersToIfSlots(if_stmt, trailing, carriers);
-      auto new_then =
-          FixDanglingYieldsInScope(FlattenBody(if_stmt->then_body_), branch_carriers, defined_vars);
-      auto new_else = ProcessElseBranch(if_stmt, [&](const std::vector<StmtPtr>& es) {
-        return FixDanglingYieldsInScope(es, branch_carriers, defined_vars);
-      });
+      auto then_stmts = FlattenBody(if_stmt->then_body_);
+      std::optional<std::vector<StmtPtr>> else_stmts;
+      if (if_stmt->else_body_.has_value()) else_stmts = FlattenBody(*if_stmt->else_body_);
+
+      const auto branch_carriers = BranchCarriers(if_stmt, then_stmts, else_stmts);
+      auto new_then = FixDanglingYieldsInScope(then_stmts, branch_carriers, defined_vars);
+      std::optional<std::vector<StmtPtr>> new_else;
+      if (else_stmts.has_value()) {
+        new_else = FixDanglingYieldsInScope(*else_stmts, branch_carriers, defined_vars);
+      }
       result.push_back(RebuildIfStmt(if_stmt, new_then, new_else));
     } else if (auto yield_stmt = std::dynamic_pointer_cast<const YieldStmt>(stmt)) {
       result.push_back(ReplaceDanglingYieldValues(yield_stmt, carriers, defined_vars));
@@ -208,7 +228,7 @@ std::vector<StmtPtr> FixDanglingYieldsInScope(const std::vector<StmtPtr>& stmts,
 std::vector<StmtPtr> FixDanglingLoopBodyYields(const std::vector<StmtPtr>& stmts,
                                                const std::vector<IterArgPtr>& iter_args,
                                                const std::unordered_set<const Var*>& defined_vars) {
-  return FixDanglingYieldsInScope(stmts, iter_args, defined_vars);
+  return FixDanglingYieldsInScope(stmts, SlotCarriers(iter_args.begin(), iter_args.end()), defined_vars);
 }
 
 void PullDefinitionChain(const Var* var_ptr, const std::unordered_map<const Var*, StmtPtr>& def_map,
