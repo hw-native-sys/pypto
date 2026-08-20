@@ -3585,6 +3585,153 @@ class TestDCERegression:
 
         ir.assert_structural_equal(After, Expected)
 
+    def test_two_divergent_branch_yields_keep_their_own_carriers(self):
+        """Regression for issue #2443: one loop, two divergent guards, two carries.
+
+        A software-pipelined kernel runs the producer and the consumer in one
+        body, so its guards are necessarily divergent and write different
+        tensors::
+
+            for i, (p_iter, q_iter) in pl.range(...):
+                if i == 0: p_iter = ...   # produce
+                if i == 1: q_iter = ...   # consume
+
+        Both stores here are Vec-sourced, so AIC prunes them and both branch
+        yields go dangling on that lane. The fallback must resolve each phi
+        through its OWN loop slot -- ``p_phi`` to ``p_iter``, ``q_phi`` to
+        ``q_iter``. Indexing the loop's iter_args by the branch yield's own
+        position instead collapsed every single-value branch yield onto
+        ``iter_args[0]``, unifying two distinct tensors: the ``else`` arms then
+        disagreed with the ``then`` arms on the backing SSA and PTO codegen
+        aborted on the merged in-place return_var.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                w: pl.Tensor[[128, 128], pl.BF16],
+                p_out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+                q_out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                for i, (p_iter, q_iter) in pl.range(4, init_values=(p_out, q_out)):
+                    if i == 0:
+                        x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                        x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                        w_mat = pl.load(w, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                        w_right = pl.move(w_mat, target_memory=pl.MemorySpace.Right)
+                        z = pl.matmul(x_left, w_right)
+                        z_vec = pl.move(
+                            z,
+                            target_memory=pl.MemorySpace.Vec,
+                            blayout=pl.TileLayout.row_major,
+                            slayout=pl.TileLayout.none_box,
+                        )
+                        p_then = pl.store(z_vec, [0, 0], p_iter)
+                        p_phi = pl.yield_(p_then)
+                    else:
+                        p_phi = pl.yield_(p_iter)
+                    if i == 1:
+                        x_mat_1 = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                        x_left_1 = pl.move(x_mat_1, target_memory=pl.MemorySpace.Left)
+                        w_mat_1 = pl.load(w, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                        w_right_1 = pl.move(w_mat_1, target_memory=pl.MemorySpace.Right)
+                        z_1 = pl.matmul(x_left_1, w_right_1)
+                        z_vec_1 = pl.move(
+                            z_1,
+                            target_memory=pl.MemorySpace.Vec,
+                            blayout=pl.TileLayout.row_major,
+                            slayout=pl.TileLayout.none_box,
+                        )
+                        q_then = pl.store(z_vec_1, [0, 0], q_iter)
+                        q_phi = pl.yield_(q_then)
+                    else:
+                        q_phi = pl.yield_(q_iter)
+                    p_rv, q_rv = pl.yield_(p_phi, q_phi)  # noqa: F841
+                return p_rv
+
+        After = _expand(Before)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIC)
+            def main_incore_0_aic(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                w: pl.Tensor[[128, 128], pl.BF16],
+                p_out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+                q_out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ):
+                for i, (p_iter, q_iter) in pl.range(4, init_values=(p_out, q_out)):
+                    if i == 0:
+                        x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                        x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                        w_mat = pl.load(w, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                        w_right = pl.move(w_mat, target_memory=pl.MemorySpace.Right)
+                        z = pl.matmul(x_left, w_right)
+                        pl.tpush_to_aiv(z, split=0)
+                        p_phi = pl.yield_(p_iter)
+                    else:
+                        p_phi = pl.yield_(p_iter)
+                    if i == 1:
+                        x_mat_1 = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                        x_left_1 = pl.move(x_mat_1, target_memory=pl.MemorySpace.Left)
+                        w_mat_1 = pl.load(w, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                        w_right_1 = pl.move(w_mat_1, target_memory=pl.MemorySpace.Right)
+                        z_1 = pl.matmul(x_left_1, w_right_1)
+                        pl.tpush_to_aiv(z_1, split=0)
+                        # The fix: q_phi falls back to q_iter, not to iter_args[0].
+                        q_phi = pl.yield_(q_iter)
+                    else:
+                        q_phi = pl.yield_(q_iter)
+                    p_rv, q_rv = pl.yield_(p_phi, q_phi)  # noqa: F841
+
+            @pl.function(type=pl.FunctionType.AIV)
+            def main_incore_0_aiv(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                w: pl.Tensor[[128, 128], pl.BF16],
+                p_out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+                q_out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                for i, (p_iter, q_iter) in pl.range(4, init_values=(p_out, q_out)):
+                    if i == 0:
+                        z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = (
+                            pl.tpop_from_aic(split=0)
+                        )
+                        p_then = pl.store(z_vec, [0, 0], p_iter)
+                        p_phi = pl.yield_(p_then)
+                    else:
+                        p_phi = pl.yield_(p_iter)
+                    if i == 1:
+                        z_vec_1: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = (
+                            pl.tpop_from_aic(split=0)
+                        )
+                        q_then = pl.store(z_vec_1, [0, 0], q_iter)
+                        q_phi = pl.yield_(q_then)
+                    else:
+                        # Pre-fix this arm yielded p_iter, so q_phi merged two
+                        # different tensors and PTO codegen aborted.
+                        q_phi = pl.yield_(q_iter)
+                    p_rv, q_rv = pl.yield_(p_phi, q_phi)  # noqa: F841
+                return p_rv
+
+            @pl.function(type=pl.FunctionType.Group)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                w: pl.Tensor[[128, 128], pl.BF16],
+                p_out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+                q_out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                self.main_incore_0_aic(x, w, p_out, q_out)
+                self.main_incore_0_aiv(x, w, p_out, q_out)
+                return p_out
+
+        ir.assert_structural_equal(After, Expected)
+
     def test_transient_shared_alias_does_not_keep_dead_iter_arg_alive(self):
         """Dead iter_args should be re-stripped after DCE removes shared-only aliases.
 
