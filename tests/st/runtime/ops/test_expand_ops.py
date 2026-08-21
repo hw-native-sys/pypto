@@ -27,7 +27,6 @@ import pypto.language as pl
 import pytest
 import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 
 M, N = 32, 64
@@ -216,9 +215,6 @@ class _ExpandCase(PTOTestCase):
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [

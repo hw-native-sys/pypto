@@ -82,36 +82,6 @@ def platform_to_backend(platform: str) -> BackendType:
         raise ValueError(f"Unknown platform '{platform}'. Expected one of {ALL_PLATFORM_IDS}.") from exc
 
 
-def arch_mismatch_reason(test_case: "PTOTestCase", resolved_platform: str) -> str | None:
-    """Return why *test_case* cannot run on *resolved_platform*, or None when it can.
-
-    A subclass that redefines :py:meth:`PTOTestCase.get_backend_type` wins over
-    the ``platform`` constructor arg, while the toolchain that assembles and
-    executes the artefact follows the platform.  A case pinned to
-    ``Ascend910B`` would therefore compile 910B code and run it on 950 silicon
-    under ``--platform=a5``.  The runner calls this before compiling and skips
-    the case instead, so a whole file can be added to an a5 guard job without
-    silently testing the wrong architecture.
-
-    Args:
-        test_case: The case about to be compiled.
-        resolved_platform: The platform resolved for it (see ``_resolve_platform``).
-
-    Returns:
-        A user-facing skip reason, or ``None`` when the case matches the platform.
-    """
-    want = platform_to_backend(resolved_platform)
-    got = test_case.get_backend_type()
-    if got is want:
-        return None
-    return (
-        f"{test_case.get_name()} pins get_backend_type()={got.name}, but "
-        f"--platform={resolved_platform} needs {want.name}. Drop the "
-        f"get_backend_type() override to make the case arch-agnostic, or declare "
-        f'the limitation with @pytest.mark.platforms("a2a3", "a2a3sim", reason=...).'
-    )
-
-
 class DataType(Enum):
     """Supported data types for tensors."""
 
@@ -237,7 +207,6 @@ class PTOTestCase(ABC):
         config: RunConfig | None = None,
         *,
         platform: str | None = None,
-        backend_type: BackendType | None = None,
         strategy: OptimizationStrategy | None = None,
         memory_planner: MemoryPlanner | None = None,
         enable_pypto_l0c_double_buffer: bool | None = None,
@@ -251,10 +220,9 @@ class PTOTestCase(ABC):
                 ``get_platform()`` (which defaults to ``None``, deferring to
                 the session-wide ``--platform`` CLI value, currently
                 ``a2a3``).  Pass explicitly to run the same test case on a
-                different platform without subclassing.
-            backend_type: (Legacy) Override the backend type for code
-                generation.  Prefer ``platform``.  If both are given, the
-                value derived from ``platform`` wins.
+                different platform without subclassing.  The platform is the
+                only architecture knob a case has: codegen's backend is derived
+                from it by :func:`platform_to_backend`.
             strategy: Override the optimization strategy.  If None, falls
                 back to the class-level ``get_strategy()`` default (Default).
             memory_planner: Override the on-chip memory planner
@@ -264,7 +232,6 @@ class PTOTestCase(ABC):
         """
         self.config = config or RunConfig()
         self._override_platform = platform
-        self._override_backend = backend_type
         self._override_strategy = strategy
         self._override_memory_planner = memory_planner
         self._override_enable_pypto_l0c_double_buffer = enable_pypto_l0c_double_buffer
@@ -350,37 +317,15 @@ class PTOTestCase(ABC):
         ``platform=`` — the platform matrix is driven by the item's parametrize
         variant instead (see ``pytest_generate_tests`` in ``tests/st/conftest.py``).
         A case that pinned its own platform (constructor arg or a
-        :py:meth:`get_platform` override) is left untouched, and so is one that
-        pinned a backend through the legacy ``backend_type`` constructor arg:
-        binding a platform over that pin would silently win (see
-        :py:meth:`get_backend_type`) and hide an architecture conflict that
-        :func:`arch_mismatch_reason` must report.
+        :py:meth:`get_platform` override) is left untouched.
 
         Args:
             platform: One of :data:`ALL_PLATFORM_IDS`.
         """
         if platform not in ALL_PLATFORM_IDS:
             raise ValueError(f"Unknown platform '{platform}'. Expected one of {ALL_PLATFORM_IDS}.")
-        if self.get_platform() is None and self._override_backend is None:
+        if self.get_platform() is None:
             self._override_platform = platform
-
-    def get_backend_type(self) -> BackendType:
-        """Return the backend type for code generation.
-
-        Resolution order:
-            1. The ``platform`` constructor arg, if set, decides the backend
-               via :data:`_PLATFORM_TO_BACKEND` (preferred path).
-            2. The legacy ``backend_type`` constructor arg, if set.
-            3. ``BackendType.Ascend910B`` as the global default.
-
-        Subclasses may still override this method; the constructor override
-        only applies when the subclass does **not** redefine the method.
-        """
-        if self._override_platform is not None:
-            return platform_to_backend(self._override_platform)
-        if self._override_backend is not None:
-            return self._override_backend
-        return BackendType.Ascend910B
 
     def define_scalars(self) -> list[ScalarSpec]:
         """Define scalar TaskArg parameters for this test.

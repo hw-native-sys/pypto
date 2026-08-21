@@ -28,7 +28,6 @@ import pypto.language as pl
 import pytest
 import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 
 N = 16
@@ -129,9 +128,6 @@ class TileCastColMajorNarrowTestCase(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def compute_expected(self, tensors, params=None) -> None:
         # Reshape round-trip is a no-op on values; the cast only narrows the dtype,
         # so each element keeps its value and position: out[0, k] == a[0, k].
@@ -155,9 +151,6 @@ class TileCastRowMajorNarrowTestCase(PTOTestCase):
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def compute_expected(self, tensors, params=None) -> None:
         tensors["out"][:] = tensors["a"].to(torch.int16)

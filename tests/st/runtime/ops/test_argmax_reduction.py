@@ -44,7 +44,6 @@ import pypto.language as pl
 import pytest
 import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
 
 _PL_DT = {DataType.FP32: pl.FP32, DataType.FP16: pl.FP16}
 _DTYPES = [DataType.FP32, DataType.FP16]
@@ -79,9 +78,6 @@ class _ArgBase(PTOTestCase):
     def get_name(self) -> str:
         v = f"_v{self._valid[0]}x{self._valid[1]}" if self._valid else "_aligned"
         return f"{self.op_name}_{self._m}x{self._n}_{self._dtype.value}{v}"
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def _out_shape(self) -> list[int]:
         return [self._m, 1] if self.reduce_dim == 1 else [1, self._n]

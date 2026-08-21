@@ -85,10 +85,6 @@ not expanded — that fixture is built once and shared by every item in its
 scope, so it cannot hold one artefact per platform. Such a test runs on the
 first `--platform` id its `@pytest.mark.platforms` marker allows.
 
-A test taking `backend_type` (there is no fixture of that name — the matrix
-supplies it) gets it paired with the platform in a single parametrize, so the
-backend a case compiles for and the toolchain it runs on can never disagree.
-
 A single active platform is *not* parametrized, so `--platform=a2a3` keeps the
 plain node ids; naming two or more grows the familiar `[a2a3]` / `[a5]`
 suffixes.
@@ -151,18 +147,18 @@ expression nobody can trace back.
 run the case (the feature does not exist on that arch) and `platform_xfail`
 when it *ought to* and does not yet.
 
-#### Cases that pin an architecture
+#### The platform is the only architecture knob
 
-A `PTOTestCase` subclass that redefines `get_backend_type()` pins its backend,
-while the toolchain that assembles and executes the artefact follows the
-platform — so such a case cannot honour a platform of the other architecture.
-The harness detects this before compiling and **skips** the case with a reason
-naming the conflict, instead of compiling for one architecture and executing on
-the other. Make the case arch-agnostic by dropping the override (the platform
-then decides the backend), or state the limitation with
-`@pytest.mark.platforms(...)` so the variant is never generated. The legacy
-`PTOTestCase(backend_type=...)` constructor argument pins the backend the same
-way and is treated the same.
+A test case has no backend of its own. Codegen's backend is derived from the
+resolved platform (`platform_to_backend`) at every compile site, so an artefact
+can never be built for one architecture and executed on another. There is no
+`get_backend_type()` on `PTOTestCase` and no `backend_type=` constructor
+argument; a case that still defines the former fails loudly rather than being
+quietly ignored.
+
+To say that a case genuinely cannot run on an architecture, restrict its tests
+with `@pytest.mark.platforms(..., reason=...)` — the limitation belongs to the
+test, not to a backend field on the case.
 
 ### Verbose Output
 

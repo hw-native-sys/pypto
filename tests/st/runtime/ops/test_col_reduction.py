@@ -25,7 +25,6 @@ import pypto.language as pl
 import pytest
 import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 
 # =============================================================================
@@ -419,9 +418,6 @@ class ColSum32x64FP32(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("input_tensor", [32, 64], DataType.FP32, init_value=torch.randn),
@@ -441,9 +437,6 @@ class ColSum32x64FP32Sequential(PTOTestCase):
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -465,9 +458,6 @@ class ColSum16x16FP32(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("input_tensor", [16, 16], DataType.FP32, init_value=torch.randn),
@@ -488,9 +478,6 @@ class ColSum8x128FP32(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("input_tensor", [8, 128], DataType.FP32, init_value=torch.randn),
@@ -510,9 +497,6 @@ class ColSum32x64FP16(PTOTestCase):
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -545,9 +529,6 @@ class ColSum16x16FP32Sequential(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("input_tensor", [16, 16], DataType.FP32, init_value=torch.randn),
@@ -568,9 +549,6 @@ class ColSum8x128FP32Sequential(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("input_tensor", [8, 128], DataType.FP32, init_value=torch.randn),
@@ -590,9 +568,6 @@ class ColSum32x64FP16Sequential(PTOTestCase):
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -624,9 +599,6 @@ class ColMax32x64FP32(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("input_tensor", [32, 64], DataType.FP32, init_value=torch.randn),
@@ -646,9 +618,6 @@ class ColMax16x16FP32(PTOTestCase):
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -670,9 +639,6 @@ class ColMax8x128FP32(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("input_tensor", [8, 128], DataType.FP32, init_value=torch.randn),
@@ -692,9 +658,6 @@ class ColMax32x64FP16(PTOTestCase):
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -721,9 +684,6 @@ class ColMin32x64FP32(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("input_tensor", [32, 64], DataType.FP32, init_value=torch.randn),
@@ -743,9 +703,6 @@ class ColMin16x16FP32(PTOTestCase):
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -767,9 +724,6 @@ class ColMin8x128FP32(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("input_tensor", [8, 128], DataType.FP32, init_value=torch.randn),
@@ -789,9 +743,6 @@ class ColMin32x64FP16(PTOTestCase):
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [

@@ -63,7 +63,7 @@ from pypto.runtime.runner import (
 )
 from pypto.runtime.tensor_spec import TensorSpec as RuntimeTensorSpec
 
-from harness.core.harness import PTOTestCase, arch_mismatch_reason
+from harness.core.harness import PTOTestCase, platform_to_backend
 
 # tests/st/harness/core/test_runner.py -> tests/st/ -> project root
 _ST_DIR = Path(__file__).parent.parent.parent
@@ -141,13 +141,6 @@ _MAX_TASK_SUBMIT_INFLIGHT = 512
 # runs concurrently.
 _get_program_lock = threading.Lock()
 
-# Map BackendType to the architecture prefix used by the platform string.
-# "a2a3" covers Ascend 910B; "a5" covers Ascend 950.
-_BACKEND_TO_ARCH: dict[BackendType, str] = {
-    BackendType.Ascend910B: "a2a3",
-    BackendType.Ascend950: "a5",
-}
-
 
 def _cache_key(
     tc: PTOTestCase,
@@ -161,13 +154,13 @@ def _cache_key(
     which toolchain a given artifact was produced for. Resolution order:
 
     1. ``resolved_platform`` (the value returned by :func:`_resolve_platform`
-       for the current session). Callers should pass it whenever they have it
-       so a legacy test case run with ``--platform=a2a3sim`` is keyed to
-       ``a2a3sim`` rather than the backend-derived ``a2a3``.
-    2. ``tc.get_platform()`` for parametrized cases that pinned a platform on
-       the test case itself.
-    3. The backend architecture (``a2a3``/``a5``) as a final fallback for
-       cases that neither set a platform nor receive a resolved one.
+       for the current session). Callers should pass it whenever they have it.
+    2. ``tc.get_platform()``, for a case that pinned a platform itself or was
+       bound to its item's platform by :func:`_bind_item_platform`.
+
+    Raises:
+        ValueError: Neither is available. Keying an artifact without a platform
+            would let two architectures share one compile.
     """
     if not resolved_platform:
         try:
@@ -175,7 +168,7 @@ def _cache_key(
         except AttributeError:
             resolved_platform = None
     if not resolved_platform:
-        resolved_platform = _BACKEND_TO_ARCH.get(tc.get_backend_type(), "unknown")
+        raise ValueError(f"cannot key an artifact for {tc.get_name()}: no platform resolved or bound")
     planner = _resolve_case_memory_planner(tc, session_memory_planner)
     planner_tag = planner.name.lower() if planner is not None else "default"
     return f"{tc.get_name()}@{resolved_platform}@{planner_tag}"
@@ -224,30 +217,31 @@ def _install_backend(backend_type: BackendType) -> None:
     set_backend_type(backend_type)
 
 
-def _bind_and_check_arch(test_case: PTOTestCase, resolved_platform: str) -> str | None:
-    """Bind *resolved_platform* onto *test_case*, then report an arch conflict.
+def _bind_item_platform(test_case: PTOTestCase, resolved_platform: str) -> None:
+    """Bind *resolved_platform* onto *test_case* before it is compiled.
 
-    Binding first is what separates a *pinned* backend from the default one:
-    an unbound case answers ``get_backend_type()`` with the base-class
-    ``Ascend910B`` default, which is not a pin and must not read as a conflict.
-    Once the platform is bound, only a subclass that redefines
-    ``get_backend_type()`` can still disagree with it — and that case genuinely
-    cannot run on this platform.
-
-    Binding also makes the legacy path follow the platform: ``_run_inline`` and
-    ``_compile_for_cache`` take the backend from ``tc.get_backend_type()``, so
-    before this a case that never mentioned a platform compiled for 910B even
-    under ``--platform=a5``.
+    The platform is a case's only architecture knob: every compile site derives
+    codegen's backend from it through :func:`platform_to_backend`, so an
+    artifact can no longer be built for one architecture and executed on
+    another. Binding is also what lets the cache key and the compile-pool
+    grouping tell one matrix variant from the next.
 
     Args:
         test_case: The case about to be compiled (mutated: platform bound).
         resolved_platform: The platform resolved for it.
 
-    Returns:
-        A skip reason when the case pins a conflicting backend, else ``None``.
+    Raises:
+        pytest.UsageError: The case redefines ``get_backend_type``, a knob the
+            harness no longer reads.
     """
+    if getattr(type(test_case), "get_backend_type", None) is not None:
+        raise pytest.UsageError(
+            f"{type(test_case).__name__} defines get_backend_type(), which the harness no "
+            "longer reads: the backend follows the platform. Delete the override, and if the "
+            "case really cannot run on the other architecture say so with "
+            '@pytest.mark.platforms("a2a3", "a2a3sim", reason=...) on its tests.'
+        )
     test_case.bind_platform(resolved_platform)
-    return arch_mismatch_reason(test_case, resolved_platform)
 
 
 def _resolve_platform(config_platform: str, test_case: PTOTestCase | None = None) -> str:
@@ -404,7 +398,7 @@ def _compile_for_cache(
     ``@pl.program`` decorator is not thread-safe; ``compile_program`` writes to
     an isolated directory and runs concurrently.
     """
-    backend_type = test_case.get_backend_type()
+    backend_type = platform_to_backend(_resolve_platform("", test_case))
     with _get_program_lock:
         program = test_case.get_program()
     if program is None:
@@ -449,10 +443,6 @@ class CompileArtifact:
     work_dir: Path
     resolved_platform: str
     error: str | None = None
-    #: Set when the case pins a backend the resolved platform cannot serve; the
-    #: artefact holds nothing and neither the batch submitter nor the execute
-    #: pool may touch it (``TestRunner.run`` turns it into a pytest skip).
-    skip_reason: str | None = None
     runtime_name: str | None = None
     chip_callable: Any | None = None
     enable_sdma: bool = False
@@ -474,12 +464,8 @@ def _fused_compile_task(
     already be set on the main thread before this task is submitted.
     """
     resolved = _resolve_platform(session_platform, tc)
+    _bind_item_platform(tc, resolved)
     work_dir = cache_dir / _cache_key(tc, resolved, session_memory_planner)
-    # A backend-pinned case cannot be compiled for this platform. Report it
-    # instead of burning a compile slot on an artefact ``run()`` will skip.
-    skip_reason = _bind_and_check_arch(tc, resolved)
-    if skip_reason is not None:
-        return CompileArtifact(work_dir=work_dir, resolved_platform=resolved, skip_reason=skip_reason)
     work_dir.mkdir(parents=True, exist_ok=True)
     try:
         _compile_for_cache(
@@ -1045,11 +1031,7 @@ def _batch_submitter(batch_size: int, cache_dir: Path) -> None:
                 artifact = cfut.result()
             except Exception:  # noqa: BLE001 — run() re-raises the compile crash with context
                 continue
-            if (
-                artifact.error is not None
-                or artifact.skip_reason is not None
-                or _pipeline_ctx.get("codegen_only")
-            ):
+            if artifact.error is not None or _pipeline_ctx.get("codegen_only"):
                 continue
             if artifact.resolved_platform.endswith("sim"):
                 continue
@@ -1170,11 +1152,11 @@ def start_pipeline(  # noqa: PLR0913
 
     groups: dict[BackendType, list[PTOTestCase]] = {}
     for tc in test_cases:
-        # Bind before grouping: the group key IS the backend the compile pool
-        # installs globally, and an unbound case answers with the base-class
-        # Ascend910B default rather than the platform it will be built for.
-        tc.bind_platform(_resolve_platform(session_platform, tc))
-        groups.setdefault(tc.get_backend_type(), []).append(tc)
+        # Bind before grouping so each case carries the platform whose backend
+        # the compile pool will install globally for its group.
+        resolved = _resolve_platform(session_platform, tc)
+        _bind_item_platform(tc, resolved)
+        groups.setdefault(platform_to_backend(resolved), []).append(tc)
 
     group_items = list(groups.items())
     for i, (backend_type, group) in enumerate(group_items):
@@ -1336,9 +1318,7 @@ class TestRunner:
             RunResult with pass/fail status and details.
         """
         resolved_platform = _resolve_platform(self.config.platform, test_case)
-        skip_reason = _bind_and_check_arch(test_case, resolved_platform)
-        if skip_reason is not None:
-            pytest.skip(skip_reason)
+        _bind_item_platform(test_case, resolved_platform)
         cache_k = _cache_key(test_case, resolved_platform, self.config.memory_planner)
         cfut = _compile_futures.get(cache_k)
         if cfut is not None:
@@ -1447,7 +1427,7 @@ class TestRunner:
         work_dir, use_temp = _inline_work_dir(self.config, test_name, resolved_platform)
 
         try:
-            backend_type = test_case.get_backend_type()
+            backend_type = platform_to_backend(resolved_platform)
             _install_backend(backend_type)
 
             program = test_case.get_program()

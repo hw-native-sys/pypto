@@ -58,11 +58,6 @@ SLOTNUM_SLOT_NUM = 4
 SLOTNUM_LOCAL_SLOT_NUM = 4
 SLOTNUM_BUFFER_SIZE = SLOTNUM_SLOT_SIZE * SLOTNUM_LOCAL_SLOT_NUM
 
-# ``backend_type`` comes from the system-test platform matrix in
-# tests/st/conftest.py: one variant per active ``--platform`` id, each paired
-# with the platform its cases are built and executed for, so the backend and
-# the toolchain cannot disagree.
-
 
 @pl.program
 class V2CUDProgram:
@@ -833,63 +828,63 @@ class ExplicitSlotNumTest(PTOTestCase):
 class TestCrossCore:
     """Cross-core communication system tests."""
 
-    def test_tpush_tpop_v2c_updown(self, test_runner, backend_type):
+    def test_tpush_tpop_v2c_updown(self, test_runner):
         """V2C updown pipe: compile through full pipeline and verify kernel artifacts."""
-        result = test_runner.run(V2CUDTest(backend_type=backend_type))
+        result = test_runner.run(V2CUDTest())
         assert result.passed, f"Cross-core V2C updown compilation failed: {result.error}"
 
-    def test_tpush_tpop_v2c_leftright(self, test_runner, backend_type):
+    def test_tpush_tpop_v2c_leftright(self, test_runner):
         """V2C left-right pipe: compile through full pipeline and verify kernel artifacts."""
-        result = test_runner.run(V2CLRTest(backend_type=backend_type))
+        result = test_runner.run(V2CLRTest())
         assert result.passed, f"Cross-core V2C left-right compilation failed: {result.error}"
 
-    def test_tpush_tpop_v2c_nosplit(self, test_runner, backend_type):
+    def test_tpush_tpop_v2c_nosplit(self, test_runner):
         """V2C no-split pipe: compile through full pipeline and verify correctness."""
-        result = test_runner.run(V2CNoSplitTest(backend_type=backend_type))
+        result = test_runner.run(V2CNoSplitTest())
         assert result.passed, f"Cross-core V2C no-split compilation failed: {result.error}"
 
-    def test_tpop_c2v_leftright(self, test_runner, backend_type):
+    def test_tpop_c2v_leftright(self, test_runner):
         """C2V left-right pipe: compile through full pipeline and verify correctness."""
-        result = test_runner.run(C2VLRTest(backend_type=backend_type))
+        result = test_runner.run(C2VLRTest())
         assert result.passed, f"Cross-core C2V left-right compilation failed: {result.error}"
 
-    def test_tpop_c2v_updown(self, test_runner, backend_type):
+    def test_tpop_c2v_updown(self, test_runner):
         """C2V updown pipe: compile through full pipeline and verify correctness."""
-        result = test_runner.run(C2VUDTest(backend_type=backend_type))
+        result = test_runner.run(C2VUDTest())
         assert result.passed, f"Cross-core C2V updown compilation failed: {result.error}"
 
-    def test_tpop_c2v_nosplit(self, test_runner, backend_type):
+    def test_tpop_c2v_nosplit(self, test_runner):
         """C2V no-split pipe: compile through full pipeline and verify correctness."""
-        result = test_runner.run(C2VNoSplitTest(backend_type=backend_type))
+        result = test_runner.run(C2VNoSplitTest())
         assert result.passed, f"Cross-core C2V no-split compilation failed: {result.error}"
 
-    def test_tpop_bidirect_updown(self, test_runner, backend_type):
+    def test_tpop_bidirect_updown(self, test_runner):
         """Bidirect updown pipe: compile through full pipeline and verify correctness."""
-        result = test_runner.run(BiDirectUDTest(backend_type=backend_type))
+        result = test_runner.run(BiDirectUDTest())
         assert result.passed, f"Cross-core bidirect updown compilation failed: {result.error}"
 
-    def test_tpop_bidirect_leftright(self, test_runner, backend_type):
+    def test_tpop_bidirect_leftright(self, test_runner):
         """Bidirect left-right pipe: compile through full pipeline and verify correctness."""
-        result = test_runner.run(BiDirectLRTest(backend_type=backend_type))
+        result = test_runner.run(BiDirectLRTest())
         assert result.passed, f"Cross-core bidirect left-right compilation failed: {result.error}"
 
-    def test_tpop_bidirect_nosplit(self, test_runner, backend_type):
+    def test_tpop_bidirect_nosplit(self, test_runner):
         """Bidirect no-split pipe: compile through full pipeline and verify correctness."""
-        result = test_runner.run(BiDirectNoSplitTest(backend_type=backend_type))
+        result = test_runner.run(BiDirectNoSplitTest())
         assert result.passed, f"Cross-core bidirect no-split compilation failed: {result.error}"
 
-    def test_tpop_bidirect_spmd_nosplit(self, test_runner, backend_type):
+    def test_tpop_bidirect_spmd_nosplit(self, test_runner):
         """Bidirect cube<->vec + transpose fused in one no-split pl.spmd scope.
 
         On-board guard for #1761: the secondary-subblock replay of the scope's
         ``tile.transpose`` must not 507018-hang the AICore.
         """
-        result = test_runner.run(BidirectSpmdNoSplitTest(backend_type=backend_type))
+        result = test_runner.run(BidirectSpmdNoSplitTest())
         assert result.passed, f"Cross-core bidirect spmd no-split failed: {result.error}"
 
-    def test_multiple_pipes_nosplit(self, test_runner, backend_type):
+    def test_multiple_pipes_nosplit(self, test_runner):
         """Explicit multiple pipe ids: compile through full pipeline and verify correctness."""
-        result = test_runner.run(MultiPipeNoSplitTest(backend_type=backend_type))
+        result = test_runner.run(MultiPipeNoSplitTest())
         assert result.passed, f"Cross-core explicit multi-pipe no-split failed: {result.error}"
 
     # ptoas rejects the operand outright for the 950 frontend pipe lowering,
@@ -907,9 +902,9 @@ class TestCrossCore:
             "manual pl.{aic,aiv}_initialize_pipe route this case exercises does not exist on 950"
         ),
     )
-    def test_explicit_slot_num(self, test_runner, backend_type):
+    def test_explicit_slot_num(self, test_runner):
         """Explicit slot_num / local_slot_num: compile through full pipeline and verify correctness."""
-        result = test_runner.run(ExplicitSlotNumTest(backend_type=backend_type))
+        result = test_runner.run(ExplicitSlotNumTest())
         assert result.passed, f"Cross-core explicit slot_num failed: {result.error}"
 
 

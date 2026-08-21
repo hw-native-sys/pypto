@@ -404,9 +404,6 @@ def test_fused_compile_records_sdma_capability(tmp_path):
     )
     fake_device_runner = SimpleNamespace(compile_and_assemble=fake_compile_and_assemble)
     tc = Mock()
-    # The compile task refuses to build a case whose pinned backend contradicts
-    # the resolved platform, so the stub must answer with a real BackendType.
-    tc.get_backend_type.return_value = test_runner.BackendType.Ascend910B
 
     with (
         patch.object(test_runner, "_resolve_platform", return_value="a2a3"),

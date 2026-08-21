@@ -28,7 +28,6 @@ import pypto.language as pl
 import pytest
 import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 
 
@@ -251,9 +250,6 @@ class RowProd32x64FP32(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("input_tensor", [32, 64], DataType.FP32, init_value=_prod_init([32, 64])),
@@ -274,9 +270,6 @@ class RowProd16x16FP32(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("input_tensor", [16, 16], DataType.FP32, init_value=_prod_init([16, 16])),
@@ -296,9 +289,6 @@ class RowProd8x128FP32(PTOTestCase):
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -327,9 +317,6 @@ class RowProd32x64FP16(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("input_tensor", [32, 64], DataType.FP16, init_value=_prod_init([32, 64])),
@@ -355,9 +342,6 @@ class ColProd32x64FP32(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("input_tensor", [32, 64], DataType.FP32, init_value=_prod_init([32, 64])),
@@ -378,9 +362,6 @@ class ColProd16x16FP32(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("input_tensor", [16, 16], DataType.FP32, init_value=_prod_init([16, 16])),
@@ -400,9 +381,6 @@ class ColProd8x128FP32(PTOTestCase):
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -429,9 +407,6 @@ class ColProd32x64FP16(PTOTestCase):
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -582,9 +557,6 @@ class RowProdValidCol48FP32(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("input_tensor", [32, 64], DataType.FP32, init_value=_prod_init([32, 64])),
@@ -606,9 +578,6 @@ class RowProdValidCol50FP32(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("input_tensor", [32, 64], DataType.FP32, init_value=_prod_init([32, 64])),
@@ -629,9 +598,6 @@ class ColProdValidRow20FP32(PTOTestCase):
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -719,9 +685,6 @@ class TensorRowProd32x64FP32(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("a", [32, 64], DataType.FP32, init_value=_prod_init([32, 64])),
@@ -741,9 +704,6 @@ class TensorColProd32x64FP32(PTOTestCase):
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [

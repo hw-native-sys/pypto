@@ -43,11 +43,7 @@ from harness.core.environment import (  # noqa: E402
     get_simpler_python_path,
     get_simpler_scripts_path,
 )
-from harness.core.harness import (  # noqa: E402
-    ALL_PLATFORM_IDS,
-    PTOTestCase,
-    platform_to_backend,
-)
+from harness.core.harness import ALL_PLATFORM_IDS, PTOTestCase  # noqa: E402
 from harness.core.test_runner import (  # noqa: E402
     TestRunner,
     _cache_key,
@@ -542,9 +538,8 @@ def _resolve_item_platform(node: pytest.Item | pytest.FixtureRequest, config: py
         1. An explicit ``platform`` parametrize on the test itself.
         2. The value injected by :func:`pytest_generate_tests` (the platform
            matrix), for tests that never mention ``platform``.
-        3. The first ``--platform`` id, matching the legacy single-platform
-           behaviour — this is also what a module-level generator such as
-           ``tests/st/runtime/cross_core/`` resolves its ``backend_type`` from.
+        3. The first ``--platform`` id its ``@pytest.mark.platforms`` marker
+           allows, matching the legacy single-platform behaviour.
 
     Args:
         node: The item (or a request pointing at one) whose platform is wanted.
@@ -751,11 +746,6 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     with its ``@pytest.mark.platforms``, so a case joins a new platform's guard
     job without touching its test body.
 
-    A test taking ``backend_type`` gets it paired with the platform in one
-    parametrize, so the backend it compiles for and the toolchain it runs on
-    can never disagree. That name has no fixture of its own — this is where it
-    comes from — so it is emitted even for a single active platform.
-
     The test must take ``test_runner`` itself. A test that reaches the runner
     through a module- or session-scoped fixture cannot vary per item — that
     fixture is built once and shared — so expanding it would hand every variant
@@ -782,14 +772,6 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     # pytest_collection_modifyitems, which deselects them; parametrizing an
     # empty list would instead leave one item behind marked "empty parameter set".
     allowed = [p for p in cli if item_filter is None or p in item_filter] or cli
-    if "backend_type" in direct:
-        metafunc.parametrize(
-            "_st_platform,backend_type",
-            [(p, platform_to_backend(p)) for p in allowed],
-            ids=list(allowed),
-            indirect=["_st_platform"],
-        )
-        return
     if len(cli) > 1:
         metafunc.parametrize("_st_platform", allowed, ids=list(allowed), indirect=True)
 
@@ -938,6 +920,7 @@ def _collect_test_case_from_item(
     item: pytest.Item,
     seen: dict[str, PTOTestCase],
     session_memory_planner: MemoryPlanner | None,
+    session_platform: str,
 ) -> None:
     """Inspect *item* and add any discovered PTOTestCase instances to *seen*.
 
@@ -1012,10 +995,10 @@ def _collect_test_case_from_item(
             continue
         # Bind the item's platform so each matrix variant compiles its own
         # artefact; without this the variants share one cache key and only the
-        # first platform is ever built.
-        platform = params.get("platform") or params.get("_st_platform")
-        if platform:
-            instance.bind_platform(platform)
+        # first platform is ever built. An item the matrix did not expand runs
+        # on the session platform, which is what the pipeline resolves for it.
+        platform = params.get("platform") or params.get("_st_platform") or session_platform
+        instance.bind_platform(platform)
         seen.setdefault(_cache_key(instance, platform, session_memory_planner), instance)
 
 
@@ -1039,10 +1022,12 @@ def pytest_collection_finish(session: pytest.Session) -> None:
 
     # ── discover PTOTestCase instances ───────────────────────────────────────
     session_memory_planner = _parse_memory_planner(session.config.getoption("--memory-planner"))
+    platform_filter = _parse_platform_filter(session.config.getoption("--platform"))
+    session_platform: str = platform_filter[0] if platform_filter else "a2a3"
     seen: dict[str, PTOTestCase] = {}  # effective cache_key → instance (deduped)
 
     for item in session.items:
-        _collect_test_case_from_item(item, seen, session_memory_planner)
+        _collect_test_case_from_item(item, seen, session_memory_planner, session_platform)
 
     # Read the task-submit / pipeline options *before* the empty-discovery guard:
     # a suite that only creates PTOTestCases dynamically leaves ``seen`` empty yet
@@ -1132,11 +1117,6 @@ def pytest_collection_finish(session: pytest.Session) -> None:
     else:
         cache_dir = Path(tempfile.mkdtemp(prefix="pypto_precompile_"))
         _temp_precompile_dirs.append(cache_dir)
-
-    # ``--platform`` is a CSV allowlist; the per-test value resolved by
-    # ``tc.get_platform()`` overrides this fallback inside the pipeline.
-    platform_filter = _parse_platform_filter(session.config.getoption("--platform"))
-    session_platform: str = platform_filter[0] if platform_filter else "a2a3"
 
     # Build the device pool from --device.  N parallel executes max.
     devices = _parse_device_option(session.config.getoption("--device"))
