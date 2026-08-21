@@ -129,7 +129,12 @@ void BindPass(nb::module_& m) {
              "Every atomic-add write into GM (tile.store / tensor.assemble / pld.tensor.put / "
              "pld.tile.put / pld.tensor.remote_store / pld.tile.remote_store) targets a dtype the "
              "backend store pipe can combine; a bf16 destination requires the Ascend910B (A2/A3) "
-             "profile");
+             "profile")
+      .value("ParamDirectionsSound", IRProperty::ParamDirectionsSound,
+             "No parameter declared In is written by its function's body. Direction inference "
+             "derives its write set from each operator's declared argument effects, so an "
+             "operator that never declared them reads as a pure consumer and its write silently "
+             "vanishes together with the dependency edge it needs");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");
@@ -210,7 +215,10 @@ void BindPass(nb::module_& m) {
       .value("TileInnermostDimGranularity", DiagnosticCheck::TileInnermostDimGranularity,
              "Tile innermost dim below recommended HW memory-access granularity (PH001)")
       .value("OutParamWriteDropped", DiagnosticCheck::OutParamWriteDropped,
-             "Rebinding an Out/InOut parameter drops the caller's write");
+             "Rebinding an Out/InOut parameter drops the caller's write")
+      .value("ParamDirectionsUnsound", DiagnosticCheck::ParamDirectionsUnsound,
+             "A parameter declared In that its own function body writes. The write is invisible to "
+             "dependency analysis, so nothing is ordered against it");
 
   // Bind DiagnosticCheckSet
   auto diagnostic_check_set =

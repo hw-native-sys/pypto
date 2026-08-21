@@ -105,6 +105,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "AccToGmStoreValid";
     case IRProperty::AtomicAddDtypeValid:
       return "AtomicAddDtypeValid";
+    case IRProperty::ParamDirectionsSound:
+      return "ParamDirectionsSound";
     default:
       return "Unknown";
   }

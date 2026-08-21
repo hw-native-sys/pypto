@@ -253,6 +253,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/verify_aiv_split.cpp
     src/ir/verifier/verify_acc_to_gm_store.cpp
     src/ir/verifier/verify_atomic_add_dtype.cpp
+    src/ir/verifier/verify_param_directions_sound.cpp
     src/ir/verifier/verify_ssa_pass.cpp
     src/ir/verifier/verify_no_nested_call_pass.cpp
     src/ir/verifier/verify_no_nested_incore.cpp

@@ -43,6 +43,9 @@ enum class DiagnosticCheck : uint32_t {
   // future: TileShapeBlocksDmaVectorization, PartialPipelineFill, ...
   // --- Warnings (appended; values are stable across releases) -------------
   OutParamWriteDropped = 3,
+  /// A parameter declared `In` that its own function body writes (see
+  /// CreateParamDirectionsSoundPropertyVerifier).
+  ParamDirectionsUnsound = 4,
   kCount
 };
 
