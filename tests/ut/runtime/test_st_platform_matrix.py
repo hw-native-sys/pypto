@@ -71,62 +71,47 @@ class _Case(harness.PTOTestCase):
         pass
 
 
-class _PinnedCase(_Case):
-    """Legacy shape: the subclass hard-pins the backend."""
+class _LeftoverPinCase(_Case):
+    """A case that still carries the removed backend knob."""
 
     def get_name(self) -> str:
-        return "pinned_case"
+        return "leftover_pin_case"
 
     def get_backend_type(self) -> BackendType:
         return BackendType.Ascend910B
 
 
 # ---------------------------------------------------------------------------
-# The guard: pinned backend vs resolved platform
+# The platform is a case's only architecture knob
 # ---------------------------------------------------------------------------
 
 
-def test_unpinned_case_follows_the_platform():
+def test_a_case_carries_no_backend_of_its_own():
+    # Not "the default is 910B" — there is no such accessor to default.
+    assert not hasattr(harness.PTOTestCase, "get_backend_type")
+    with pytest.raises(TypeError):
+        _Case(backend_type=BackendType.Ascend910B)  # pyright: ignore[reportCallIssue]
+
+
+def test_the_backend_is_derived_from_the_bound_platform():
     case = _Case()
-    assert test_runner._bind_and_check_arch(case, "a5") is None
-    # Binding is what makes the compile follow the platform: before it, the
-    # base class answers with the Ascend910B default whatever the platform is.
-    assert case.get_backend_type() is BackendType.Ascend950
+    test_runner._bind_item_platform(case, "a5")
     assert case.get_platform() == "a5"
+    assert harness.platform_to_backend(case.get_platform()) is BackendType.Ascend950
 
 
-def test_pinned_case_is_skipped_on_the_other_arch():
-    reason = test_runner._bind_and_check_arch(_PinnedCase(), "a5")
-    assert reason is not None
-    assert "get_backend_type()=Ascend910B" in reason
-    assert "--platform=a5" in reason
-    # The message must say how to fix it, not just that it broke.
-    assert "platforms(" in reason
-
-
-def test_pinned_case_still_runs_on_its_own_arch():
-    assert test_runner._bind_and_check_arch(_PinnedCase(), "a2a3sim") is None
+def test_a_leftover_backend_override_is_rejected():
+    # Silent dead code otherwise: the harness stopped reading this method, so a
+    # case still defining it would compile for whatever the platform says while
+    # its author believes the override decides.
+    with pytest.raises(pytest.UsageError, match="get_backend_type"):
+        test_runner._bind_item_platform(_LeftoverPinCase(), "a5")
 
 
 def test_bind_platform_never_overrides_an_explicit_pin():
     case = _Case(platform="a2a3sim")
     case.bind_platform("a5")
     assert case.get_platform() == "a2a3sim"
-    assert case.get_backend_type() is BackendType.Ascend910B
-
-
-def test_a_constructor_backend_pin_is_not_overridden():
-    # `PTOTestCase(backend_type=...)` is a pin like a get_backend_type override:
-    # binding a platform over it would win silently and hide the conflict.
-    case = _Case(backend_type=BackendType.Ascend910B)
-    reason = test_runner._bind_and_check_arch(case, "a5")
-    assert reason is not None and "Ascend910B" in reason
-    assert case.get_backend_type() is BackendType.Ascend910B
-
-
-def test_a_matching_constructor_backend_pin_runs():
-    case = _Case(backend_type=BackendType.Ascend910B)
-    assert test_runner._bind_and_check_arch(case, "a2a3sim") is None
 
 
 def test_bind_platform_rejects_an_unknown_id():
@@ -142,6 +127,12 @@ def test_cache_key_separates_the_platform_variants():
     key_a5 = test_runner._cache_key(a5, session_memory_planner=MemoryPlanner.PYPTO)
     assert key_a2a3 != key_a5
     assert key_a2a3.endswith("@a2a3@pypto") and key_a5.endswith("@a5sim@pypto")
+
+
+def test_cache_key_refuses_an_artifact_with_no_platform():
+    # Two architectures sharing one key would share one compile.
+    with pytest.raises(ValueError, match="no platform resolved or bound"):
+        test_runner._cache_key(_Case(), session_memory_planner=MemoryPlanner.PYPTO)
 
 
 # ---------------------------------------------------------------------------
@@ -220,44 +211,6 @@ def test_marker_outside_the_allowlist_leaves_the_item_for_deselection():
 def test_explicitly_parametrized_tests_are_left_alone():
     fixtures = [*_RUNNER_FIXTURES, "platform"]
     assert _generate(_FakeMetafunc("a2a3,a5", fixtures)) == []
-
-
-def test_backend_type_is_paired_with_the_platform():
-    # One parametrize, not two: a separate backend_type axis would let the
-    # backend a case compiles for disagree with the platform it runs on.
-    fixtures = [*_RUNNER_FIXTURES, "backend_type"]
-    calls = _generate(_FakeMetafunc("a2a3,a5sim", fixtures))
-    assert calls == [
-        (
-            "_st_platform,backend_type",
-            [("a2a3", BackendType.Ascend910B), ("a5sim", BackendType.Ascend950)],
-            ["a2a3", "a5sim"],
-            ["_st_platform"],
-        )
-    ]
-
-
-def test_backend_type_is_emitted_even_for_a_single_platform():
-    # Unlike _st_platform, backend_type has no fixture of its own, so skipping
-    # the parametrize would leave the test with no such argument at all.
-    fixtures = [*_RUNNER_FIXTURES, "backend_type"]
-    calls = _generate(_FakeMetafunc("a2a3", fixtures))
-    assert calls == [
-        (
-            "_st_platform,backend_type",
-            [("a2a3", BackendType.Ascend910B)],
-            ["a2a3"],
-            ["_st_platform"],
-        )
-    ]
-
-
-def test_backend_type_respects_the_platforms_marker():
-    fixtures = [*_RUNNER_FIXTURES, "backend_type"]
-    calls = _generate(_FakeMetafunc("a2a3,a5", fixtures, marker_args=["a2a3", "a2a3sim"]))
-    assert calls == [
-        ("_st_platform,backend_type", [("a2a3", BackendType.Ascend910B)], ["a2a3"], ["_st_platform"])
-    ]
 
 
 def test_tests_without_the_runner_are_untouched():

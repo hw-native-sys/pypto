@@ -43,7 +43,6 @@ import pypto.language as pl
 import pytest
 import torch
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 
 # --- Shared init helpers ---
@@ -560,12 +559,6 @@ class GatherA5INT16IndexTestCase(_GatherBaseTestCase):
 
     def get_name(self) -> str:
         return "gather_a5_int16_index"
-
-    def get_backend_type(self) -> BackendType:
-        # INT16 indices are an A5 feature. Pin the backend so the global
-        # ``set_backend_type`` matches the parametrized ``a5`` platform — the
-        # base class otherwise defaults to Ascend910B.
-        return BackendType.Ascend950
 
     def define_tensors(self) -> list[TensorSpec]:
         return [

@@ -28,7 +28,6 @@ from examples.models.paged_attention_dynamic import (
     build_dynamic_paged_attention_program,
 )
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 
 # ---------------------------------------------------------------------------
@@ -80,9 +79,6 @@ class DynamicPagedAttentionTestCase(PTOTestCase):
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def get_program(self) -> Any:
         return build_dynamic_paged_attention_program(

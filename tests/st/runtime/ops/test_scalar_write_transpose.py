@@ -15,7 +15,6 @@ import pypto.language as pl
 import pytest
 import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 
 ROWS = 16
@@ -180,9 +179,6 @@ class _FP32WriteBase(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def compute_expected(self, tensors, params=None):
         expected = torch.full((ROWS, COLS), -1.0, dtype=torch.float32)
         vals = tensors["vals"].reshape(TOPK, ROWS)
@@ -200,9 +196,6 @@ class _INT32WriteBase(PTOTestCase):
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def compute_expected(self, tensors, params=None):
         expected = torch.full((ROWS, COLS), -7, dtype=torch.int32)
