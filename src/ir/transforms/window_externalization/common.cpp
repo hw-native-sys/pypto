@@ -527,17 +527,11 @@ std::optional<AffineForm> ParseAffineInLoop(const ExprPtr& expr, const Var* loop
   return std::nullopt;
 }
 
-std::optional<int64_t> GetConstIntValue(const ExprPtr& expr) {
-  auto ci = As<ConstInt>(expr);
-  if (!ci) return std::nullopt;
-  return ci->value_;
-}
-
 std::optional<int64_t> GetStaticTripCount(const ForStmtPtr& loop) {
   if (!loop) return std::nullopt;
-  auto start = GetConstIntValue(loop->start_);
-  auto stop = GetConstIntValue(loop->stop_);
-  auto step = GetConstIntValue(loop->step_);
+  auto start = transform_utils::EvalConstInt(loop->start_);
+  auto stop = transform_utils::EvalConstInt(loop->stop_);
+  auto step = transform_utils::EvalConstInt(loop->step_);
   if (!start.has_value() || !stop.has_value() || !step.has_value() || *step == 0) return std::nullopt;
   if ((*step > 0 && *stop <= *start) || (*step < 0 && *stop >= *start)) return int64_t{0};
   auto distance = CheckedSub(*stop, *start);
@@ -552,7 +546,7 @@ std::optional<int64_t> GetKnownPositiveTripCount(const ForStmtPtr& loop) {
   auto static_trip_count = GetStaticTripCount(loop);
   if (static_trip_count.has_value()) return static_trip_count;
   if (!loop) return std::nullopt;
-  auto step = GetConstIntValue(loop->step_);
+  auto step = transform_utils::EvalConstInt(loop->step_);
   if (!step.has_value() || *step == 0) return std::nullopt;
 
   auto distance_expr = *step > 0 ? MakeSub(loop->stop_, loop->start_, loop->span_)
@@ -591,7 +585,7 @@ std::optional<ExprPtr> SimplifyWithLoopValue(const ExprPtr& expr, const VarPtr& 
 
 std::optional<ExprPtr> GetLoopValueAtTrip(const ForStmtPtr& loop, int64_t trip_index) {
   if (!loop || trip_index < 0) return std::nullopt;
-  auto step = GetConstIntValue(loop->step_);
+  auto step = transform_utils::EvalConstInt(loop->step_);
   if (!step.has_value()) return std::nullopt;
   auto delta = CheckedMul(trip_index, *step);
   if (!delta.has_value()) return std::nullopt;

@@ -387,6 +387,51 @@ def _detect_nanobind_cmake_dir() -> str | None:
         return None
 
 
+def _would_clobber_cache(build_dir: Path) -> bool:
+    """True when configuring into *build_dir* would destroy an existing CMake cache.
+
+    ``ensure_compile_commands`` configures with its own settings — notably an
+    explicit ``CMAKE_CXX_COMPILER`` — which CMake treats as a cache-invalidating
+    change. Running that against a developer's working tree deletes its cache and,
+    if this configure then fails, leaves the tree unbuildable. A tree that already
+    exports a compile database needs no configure, and an unconfigured directory
+    has no cache to lose; only the in-between case is destructive.
+    """
+    if (build_dir / "compile_commands.json").exists():
+        return False  # ensure_compile_commands returns early — nothing is run
+    return (build_dir / "CMakeCache.txt").exists()
+
+
+def _resolve_build_dir(requested: str | None) -> tuple[Path, str | None]:
+    """Pick the build directory to read compile commands from.
+
+    Returns ``(build_dir, tmp_dir)``, where *tmp_dir* is non-``None`` only when a
+    scratch directory was created and the caller must remove it. A requested
+    directory is honoured unless configuring into it would clobber its cache, in
+    which case a scratch directory is used and the reason is reported.
+    """
+    if not requested:
+        tmp_dir = tempfile.mkdtemp(prefix="pypto-clang-tidy-")
+        _vprint(f"[clang-tidy] Using temp build dir: {tmp_dir}")
+        return Path(tmp_dir), tmp_dir
+
+    build_dir = Path(requested).resolve()
+    if not _would_clobber_cache(build_dir):
+        _vprint(f"[clang-tidy] Using explicit build dir: {build_dir}")
+        return build_dir, None
+
+    print(
+        f"[clang-tidy] {build_dir} is a configured build tree with no "
+        "compile_commands.json. Configuring into it would overwrite its CMake cache "
+        "with this lint's own settings, so a scratch directory is used instead. To "
+        "lint against that tree directly, re-configure it with "
+        "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON.",
+        file=sys.stderr,
+    )
+    tmp_dir = tempfile.mkdtemp(prefix="pypto-clang-tidy-")
+    return Path(tmp_dir), tmp_dir
+
+
 def ensure_compile_commands(build_dir: Path) -> Path:
     """Generate ``compile_commands.json`` via CMake if it doesn't already exist.
 
@@ -698,7 +743,8 @@ def main(argv: list[str] | None = None) -> int:
     Steps:
         1. Verify clang-tidy is installed and check its version.
         2. Collect C/C++ source and header files.
-        3. Resolve build directory (explicit ``-B`` > existing ``./build`` > temp dir).
+        3. Resolve build directory: the explicit ``-B``, or a temp dir when it is
+           omitted -- or when configuring into it would clobber its CMake cache.
         4. Lint header files first (fixes may affect source files).
         5. Lint source files (all enabled checks via compile database).
         6. Re-print version warning at the end (if any).
@@ -756,15 +802,8 @@ def main(argv: list[str] | None = None) -> int:
         print("[clang-tidy] No files to lint.")
         return 0
 
-    # 4. Resolve build directory (temp dir if not provided)
-    tmp_dir = None
-    if args.build_dir:
-        build_dir = Path(args.build_dir).resolve()
-        _vprint(f"[clang-tidy] Using explicit build dir: {build_dir}")
-    else:
-        tmp_dir = tempfile.mkdtemp(prefix="pypto-clang-tidy-")
-        build_dir = Path(tmp_dir)
-        _vprint(f"[clang-tidy] Using temp build dir: {build_dir}")
+    # 4. Resolve build directory
+    build_dir, tmp_dir = _resolve_build_dir(args.build_dir)
 
     have_errors = 0
     try:

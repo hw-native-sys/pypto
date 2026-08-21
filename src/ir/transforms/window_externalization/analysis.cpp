@@ -438,7 +438,7 @@ std::optional<OrderedLoopOffsets> GetOrderedLoopOffsets(const ExprPtr& expr, con
   if (!first_offset.has_value() || !last_offset.has_value()) return std::nullopt;
 
   auto affine = ParseAffineInLoop(expr, loop->loop_var_.get());
-  auto loop_step = GetConstIntValue(loop->step_);
+  auto loop_step = transform_utils::EvalConstInt(loop->step_);
   if (!affine.has_value() || !loop_step.has_value()) return std::nullopt;
   // Only the *sign* of `coeff * step` decides the order, and the operand signs
   // decide the sign on their own -- so read it off them instead of evaluating a
@@ -1260,8 +1260,8 @@ std::optional<CalleeRewriteAnalysis> AnalyzeAggregateWindowLoop(
   }
   if (!loop) return std::nullopt;
 
-  auto stop = GetConstIntValue(loop->stop_);
-  auto step = GetConstIntValue(loop->step_);
+  auto stop = transform_utils::EvalConstInt(loop->stop_);
+  auto step = transform_utils::EvalConstInt(loop->step_);
   if (!stop.has_value() || !step.has_value()) {
     auto known_trip_count = GetKnownPositiveTripCount(loop);
     if (!known_trip_count.has_value() || *known_trip_count <= 0) return std::nullopt;

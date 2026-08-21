@@ -20,7 +20,6 @@
 #include <vector>
 
 #include "pypto/core/dtype.h"
-#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -33,6 +32,7 @@
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/pipeline_loop_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
@@ -43,70 +43,26 @@ using Attrs = std::vector<std::pair<std::string, std::any>>;
 
 namespace {
 
-/// Extract a compile-time integer from a ConstInt or Neg(ConstInt) expression.
-int64_t GetConstIntValue(const ExprPtr& expr, const std::string& what) {
-  if (auto ci = std::dynamic_pointer_cast<const ConstInt>(expr)) {
-    return ci->value_;
-  }
-  if (auto neg = std::dynamic_pointer_cast<const Neg>(expr)) {
-    if (auto inner = std::dynamic_pointer_cast<const ConstInt>(neg->operand_)) {
-      return -inner->value_;
-    }
-  }
-  throw pypto::ValueError("LowerPipelineLoops: " + what + " must be a compile-time integer constant, got " +
-                          expr->TypeName());
-}
-
-/// Non-throwing variant — returns nullopt if `expr` is not a compile-time integer.
-std::optional<int64_t> TryGetConstInt(const ExprPtr& expr) {
-  if (auto ci = std::dynamic_pointer_cast<const ConstInt>(expr)) {
-    return ci->value_;
-  }
-  if (auto neg = std::dynamic_pointer_cast<const Neg>(expr)) {
-    if (auto inner = std::dynamic_pointer_cast<const ConstInt>(neg->operand_)) {
-      return -inner->value_;
-    }
-  }
-  return std::nullopt;
-}
-
 using transform_utils::ComputeStaticTripCount;
+using transform_utils::EvalConstInt;
 
-ExprPtr MakeConstIndex(int64_t value, const Span& span) {
-  return std::make_shared<ConstInt>(value, DataType::INDEX, span);
+// Body-cloning primitives shared with SkewCrossCorePipeline; see
+// `utils/pipeline_loop_utils.h` for why they are not per-pass copies.
+using pipeline_loop::CloneLoopVar;
+using pipeline_loop::InitValueExprs;
+using pipeline_loop::MakeConstIndex;
+using pipeline_loop::MakeFreshIterArg;
+using pipeline_loop::MakeFreshReturnVars;
+using pipeline_loop::MakeFreshVar;
+using pipeline_loop::OffsetIndex;
+using pipeline_loop::ReturnVarsAsExprs;
+using pipeline_loop::SplitBodyYield;
+
+/// Throwing const-int accessor, prefixed with this pass's name.
+int64_t GetConstIntValue(const ExprPtr& expr, const std::string& what) {
+  return pipeline_loop::GetConstIntValue(expr, "LowerPipelineLoops", what);
 }
 
-/// `base + offset_val`, with constant-folding when `base` is a ConstInt.
-/// Emitting the unfolded form trips the round-trip verifier because the
-/// reparser folds `8 + 1` back to `9`.
-ExprPtr OffsetIndex(const ExprPtr& base, int64_t offset_val, const Span& span) {
-  if (offset_val == 0) return base;
-  if (auto ci = std::dynamic_pointer_cast<const ConstInt>(base)) {
-    return MakeConstIndex(ci->value_ + offset_val, span);
-  }
-  return MakeAdd(base, MakeConstIndex(offset_val, span), span);
-}
-
-/// Build a fresh outer loop variable mirroring `original` (same name, same type, same span).
-VarPtr CloneLoopVar(const VarPtr& original) {
-  return std::make_shared<Var>(original->name_hint_, original->GetType(), original->span_);
-}
-
-/// Fresh IterArg mirroring `original`, with `init_value` as the initial value.
-IterArgPtr MakeFreshIterArg(const IterArgPtr& original, const ExprPtr& init_value) {
-  return std::make_shared<IterArg>(original->name_hint_, original->GetType(), init_value, original->span_);
-}
-
-/// Fresh Var mirroring `original` with a suffixed name (for intermediate return_vars).
-VarPtr MakeFreshVar(const VarPtr& original, const std::string& suffix) {
-  return std::make_shared<Var>(original->name_hint_ + suffix, original->GetType(), original->span_);
-}
-
-/// Split a body into (stmts_before_yield, yield_values). If the body ends with a
-/// terminal `YieldStmt` (either standalone or as the final stmt of a top-level
-/// `SeqStmts`), strip it and return its values. Otherwise return the body unchanged
-/// and an empty value list. Always pass through — callers that have no iter_args
-/// simply see an empty yield vector and treat `stmts` as the whole body.
 /// Tag every tile-producing ``Call`` in a cloned pipeline-stage body with one
 /// ``(group, stage)`` pipeline-membership pair. The pair is *appended* to any
 /// membership already present, so a tile inside an already-lowered inner
@@ -144,6 +100,11 @@ VarPtr MakeFreshVar(const VarPtr& original, const std::string& suffix) {
 /// compute/drain chunks; that pass then rotates each replicated group's Acc
 /// membership modulo two before MemoryReuse consumes it. See
 /// `loop_double_buffers_c_` in the tagger.
+///
+/// `SkewCrossCorePipeline::MembershipTagger` stamps the same attr but is NOT a
+/// copy of this one: it keeps cube accumulators tagged and skips the cross-core
+/// `tpop` instead. Both skip sets are load-bearing — see that tagger's comment
+/// before changing either.
 class PipelineMembershipTagger : public IRMutator {
  public:
   PipelineMembershipTagger(int32_t group, int32_t stage, bool loop_double_buffers_c)
@@ -198,22 +159,6 @@ class PipelineMembershipTagger : public IRMutator {
   int32_t stage_;
   bool loop_double_buffers_c_;
 };
-
-std::pair<StmtPtr, std::vector<ExprPtr>> SplitBodyYield(const StmtPtr& body) {
-  if (auto yield = std::dynamic_pointer_cast<const YieldStmt>(body)) {
-    return {std::make_shared<SeqStmts>(std::vector<StmtPtr>{}, body->span_), yield->value_};
-  }
-  auto seq = std::dynamic_pointer_cast<const SeqStmts>(body);
-  if (!seq || seq->stmts_.empty()) {
-    return {body, {}};
-  }
-  auto yield = std::dynamic_pointer_cast<const YieldStmt>(seq->stmts_.back());
-  if (!yield) {
-    return {body, {}};
-  }
-  std::vector<StmtPtr> without(seq->stmts_.begin(), seq->stmts_.end() - 1);
-  return {std::make_shared<SeqStmts>(std::move(without), seq->span_), yield->value_};
-}
 
 /**
  * @brief Mutator that lowers user-written `pl.pipeline(N, stage=F)` loops
@@ -275,8 +220,8 @@ class LowerPipelineMutator : public IRMutator {
     int64_t step = GetConstIntValue(op->step_, "step");
     INTERNAL_CHECK_SPAN(step != 0, op->span_) << "LowerPipelineLoops: step cannot be zero";
 
-    auto start_const = TryGetConstInt(op->start_);
-    auto stop_const = TryGetConstInt(op->stop_);
+    auto start_const = EvalConstInt(op->start_);
+    auto stop_const = EvalConstInt(op->stop_);
     // Cross-core loops are skewed/demoted to Sequential by the earlier
     // SkewCrossCorePipeline pass, so by here only same-core pipeline loops
     // (GM->L1, L1->L0, nested matmul stage loops) remain Pipeline-marked. They
@@ -364,31 +309,6 @@ class LowerPipelineMutator : public IRMutator {
       prev_yields = std::move(cloned_yields);
     }
     return {SeqStmts::Flatten(std::move(clones), sp), std::move(prev_yields)};
-  }
-
-  std::vector<ExprPtr> ReturnVarsAsExprs(const std::vector<VarPtr>& vars) {
-    std::vector<ExprPtr> result;
-    result.reserve(vars.size());
-    for (const auto& v : vars) result.push_back(v);
-    return result;
-  }
-
-  /// Collect `initValue_` expressions from a vector of IterArgs — used when the
-  /// tail runs without a preceding main loop, so its iter_args seed directly
-  /// from the source loop's init values rather than a main-loop return_var.
-  std::vector<ExprPtr> InitValueExprs(const std::vector<IterArgPtr>& iter_args) {
-    std::vector<ExprPtr> result;
-    result.reserve(iter_args.size());
-    for (const auto& ia : iter_args) result.push_back(ia->initValue_);
-    return result;
-  }
-
-  /// Fresh return_vars matching the originals' types, with a suffix applied to names.
-  std::vector<VarPtr> MakeFreshReturnVars(const std::vector<VarPtr>& originals, const std::string& suffix) {
-    std::vector<VarPtr> result;
-    result.reserve(originals.size());
-    for (const auto& v : originals) result.push_back(MakeFreshVar(v, suffix));
-    return result;
   }
 
   /**

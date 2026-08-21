@@ -65,7 +65,12 @@ constexpr int kAutoBufferBase = -1;
 /// deliberately independent of PTOAS's own fallback below.
 constexpr int kDefaultAutoPipeSlotNum = 2;
 
-std::optional<int64_t> TryGetConstIntValue(const ExprPtr& expr);
+/// Compile-time integer value of @p expr, or ``nullopt`` when it is not one
+/// **or is negative**. The non-negative half of the contract is what the name
+/// carries: callers here read tile shape dimensions and slot sizes, where a
+/// negative is nonsense rather than a value to propagate. For the plain
+/// signed reading, use ``transform_utils::EvalConstInt``, which this wraps.
+std::optional<int64_t> TryGetNonNegativeConstInt(const ExprPtr& expr);
 std::optional<int64_t> TryGetTileSlotSizeBytes(const TypePtr& type);
 void RecordObservedSlotSize(PipeDirectionMetadata& metadata, int64_t slot_size);
 void RecordTileSlotSize(PipeDirectionMetadata& metadata, const TypePtr& type);

@@ -154,7 +154,21 @@ std::optional<LinearIndexExpr> ParseLinearIndexExpr(const ExprPtr& expr);
 std::optional<int64_t> ConstantDiffIfSameLinearBase(const ExprPtr& lhs, const ExprPtr& rhs);
 std::optional<AffineForm> ParseAffineInLoop(const ExprPtr& expr, const Var* loop_var);
 
-std::optional<int64_t> GetConstIntValue(const ExprPtr& expr);
+/// Trip count of @p loop when all three bounds are compile-time integers.
+///
+/// Deliberately NOT ``transform_utils::EvalConstTripCount``: this pass needs a
+/// stricter contract than that helper offers. Here ``nullopt`` means "cannot
+/// prove anything about this loop, do not window it", so the two cases where
+/// the shared helper answers with a *value* must answer ``nullopt`` instead:
+///
+///  - A zero step. ``ComputeStaticTripCount`` reports 0 trips; that is a claim
+///    the loop is provably empty, and callers here would rewrite on it.
+///  - Bounds whose span or step magnitude overflows ``int64_t``.
+///    ``ComputeStaticTripCount`` saturates to ``INT64_MAX`` — safe for the
+///    size/threshold callers it was written for, but this pass feeds trip counts
+///    into buffer sizing (see #2477).
+///
+/// The const-int reading itself is shared: both use ``EvalConstInt``.
 std::optional<int64_t> GetStaticTripCount(const ForStmtPtr& loop);
 std::optional<int64_t> GetKnownPositiveTripCount(const ForStmtPtr& loop);
 std::optional<ExprPtr> SimplifyWithLoopBound(const ExprPtr& expr, const VarPtr& loop_var, int64_t value);

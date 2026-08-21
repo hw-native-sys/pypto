@@ -1234,7 +1234,7 @@ class OrchRewriter : public IRMutator {
       }
 
       auto extent_ci = As<ConstInt>(output.window_shape[i]);
-      auto loop_step = GetConstIntValue(loop->step_);
+      auto loop_step = transform_utils::EvalConstInt(loop->step_);
       if (!extent_ci || !loop_step.has_value()) return LoopRegionRole::Unknown;
       if (varying_dim.has_value()) return LoopRegionRole::Unknown;
       if (varying_dims_used && varying_dims_used->count(i)) return LoopRegionRole::Unknown;

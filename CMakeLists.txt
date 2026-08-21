@@ -236,6 +236,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/utils/normalize_stmt_structure.cpp
     src/ir/transforms/utils/op_predicates.cpp
     src/ir/transforms/utils/parent_stmt_analysis.cpp
+    src/ir/transforms/utils/pipeline_loop_utils.cpp
     src/ir/transforms/utils/return_lineage_utils.cpp
     src/ir/transforms/utils/scope_outline_utils.cpp
     src/ir/transforms/utils/split_axis_utils.cpp

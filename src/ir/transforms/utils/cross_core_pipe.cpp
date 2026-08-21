@@ -43,10 +43,10 @@ const auto& FlattenBody = transform_utils::FlattenToStmts;
 
 }  // namespace
 
-std::optional<int64_t> TryGetConstIntValue(const ExprPtr& expr) {
-  auto const_int = std::dynamic_pointer_cast<const ConstInt>(expr);
-  if (!const_int || const_int->value_ < 0) return std::nullopt;
-  return const_int->value_;
+std::optional<int64_t> TryGetNonNegativeConstInt(const ExprPtr& expr) {
+  auto value = transform_utils::EvalConstInt(expr);
+  if (!value.has_value() || *value < 0) return std::nullopt;
+  return value;
 }
 
 std::optional<int64_t> TryGetTileSlotSizeBytes(const TypePtr& type) {
@@ -55,7 +55,7 @@ std::optional<int64_t> TryGetTileSlotSizeBytes(const TypePtr& type) {
 
   int64_t element_count = 1;
   for (const auto& dim : tile_type->shape_) {
-    auto dim_value = TryGetConstIntValue(dim);
+    auto dim_value = TryGetNonNegativeConstInt(dim);
     if (!dim_value.has_value()) return std::nullopt;
     INTERNAL_CHECK(*dim_value == 0 || element_count <= std::numeric_limits<int64_t>::max() / *dim_value)
         << "Tile element count overflow while inferring cross-core slot size";

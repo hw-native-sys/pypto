@@ -28,6 +28,7 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/pipeline_loop_utils.h"
 
 namespace pypto {
 namespace ir {
@@ -38,32 +39,10 @@ namespace {
 /// Prevents excessive memory/CPU usage from large trip counts.
 constexpr int64_t kMaxUnrollIterations = 1024;
 
-/**
- * @brief Extract a compile-time integer value from a ConstInt or Neg(ConstInt) expression.
- *
- * Handles both positive constants (ConstInt) and negative literals (Neg wrapping ConstInt),
- * since the Python parser represents `-1` as `ir.neg(ir.ConstInt(1))`.
- *
- * @param expr Expression to extract from
- * @param what Description for error messages (e.g., "start", "stop", "step")
- * @return int64_t The constant value
- * @throws pypto::ValueError if expression is not a compile-time constant integer
- */
-static int64_t GetConstIntValue(const ExprPtr& expr, const std::string& what) {
-  auto ci = std::dynamic_pointer_cast<const ConstInt>(expr);
-  if (ci) {
-    return ci->value_;
-  }
-  // Handle Neg(ConstInt) for negative literals
-  auto neg = std::dynamic_pointer_cast<const Neg>(expr);
-  if (neg) {
-    auto inner = std::dynamic_pointer_cast<const ConstInt>(neg->operand_);
-    if (inner) {
-      return -inner->value_;
-    }
-  }
-  throw pypto::ValueError("Unroll loop " + what + " must be a compile-time integer constant, got " +
-                          expr->TypeName());
+/// Throwing const-int accessor, prefixed with this pass's name. Shared with the
+/// pipeline loop passes: see `utils/pipeline_loop_utils.h`.
+int64_t GetConstIntValue(const ExprPtr& expr, const std::string& what) {
+  return pipeline_loop::GetConstIntValue(expr, "UnrollLoops", what);
 }
 
 /**
