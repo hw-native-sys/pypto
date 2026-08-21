@@ -13,8 +13,9 @@ Thin subclass of ``ir.MemRef`` that widens the accepted ``base`` and
 ``byte_offset`` parameters so that pyright accepts the ``pl.MemRef(...)``
 forms emitted by the IR printer inside ``@pl.program`` code:
 
-* ``base`` also accepts ``PtrType`` — for ``pl.MemRef(ptr_var, offset, size)``
-  where ``ptr_var`` is annotated as ``pl.Ptr``.
+* ``base`` also accepts the ``pl.Ptr`` wrapper — for
+  ``pl.MemRef(ptr_var, offset, size)`` where ``ptr_var`` is annotated as
+  ``pl.Ptr`` (what ``pl.tile.alloc`` / ``pld.alloc_window_buffer`` return).
 * ``byte_offset`` also accepts ``Scalar`` — the printer renders a non-constant
   offset as a ``Scalar`` arithmetic expression (e.g. ``pos * 128 * 4``), and a
   constant offset as ``pl.const(0, pl.INT64)``, which is statically a ``Scalar``.
@@ -25,7 +26,6 @@ from typing import Any, overload
 from pypto.pypto_core.ir import (
     Expr,
     MemorySpace,
-    PtrType,
     Span,
     Var,
 )
@@ -33,6 +33,7 @@ from pypto.pypto_core.ir import (
     MemRef as _IrMemRef,
 )
 
+from .ptr import Ptr
 from .scalar import Scalar
 
 # A printed MemRef byte offset is either a constant (rendered by the printer as
@@ -43,7 +44,7 @@ _ByteOffset = int | Expr | Scalar
 
 
 class MemRef(_IrMemRef):
-    """DSL-level memory reference accepting PtrType bases and Scalar offsets.
+    """DSL-level memory reference accepting ``pl.Ptr`` bases and Scalar offsets.
 
     Identical to ``ir.MemRef`` at runtime. The overloads only widen what
     pyright accepts so that printed IR — which uses ``pl.Ptr``-annotated
@@ -152,7 +153,7 @@ class MemRef(_IrMemRef):
     @overload
     def __init__(
         self,
-        base: PtrType,
+        base: Ptr,
         byte_offset: _ByteOffset,
         size: int,
         span: Span = ...,

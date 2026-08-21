@@ -1664,16 +1664,19 @@ class ASTParser:
             # Skip annotations the resolver can't handle:
             # - String forward refs (e.g. "SomeType")
             # - pl.UnknownType (emitted by printer for unrepresentable types)
-            # - Singleton marker types (pl.MemRefType / pl.Ptr / pld.WindowBufferType
-            #   / pld.CommCtxType): no shape/dtype to validate; the Var's type is
-            #   fully determined by the RHS-inferred type.
+            # - Singleton marker types the resolver has no entry for
+            #   (pl.MemRefType / pl.Ptr / pld.WindowBufferType): no shape/dtype to
+            #   validate; the Var's type is fully determined by the RHS-inferred
+            #   type. Markers listed in `_MARKER_TYPE_GETTERS` (pl.AsyncEvent,
+            #   pld.CommCtx, ...) resolve normally — for them the kind check is a
+            #   no-op, so they need no entry here under either spelling.
             ann = stmt.annotation
             is_unresolvable = (isinstance(ann, ast.Constant) and isinstance(ann.value, str)) or (
                 isinstance(ann, ast.Attribute)
                 and isinstance(ann.value, ast.Name)
                 and (
                     (ann.value.id == "pl" and ann.attr in ("UnknownType", "MemRefType", "Ptr"))
-                    or (ann.value.id == "pld" and ann.attr in ("WindowBufferType", "CommCtxType"))
+                    or (ann.value.id == "pld" and ann.attr == "WindowBufferType")
                 )
             )
             if is_unresolvable:

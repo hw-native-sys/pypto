@@ -127,9 +127,9 @@ from pypto.ir.op import tensor_ops as _ir_ops
 from pypto.ir.utils import _normalize_expr, caller_warning_stacklevel, has_partial_valid_region
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import AtomicType, Expr, MemorySpace, PadValue, PtrType, TensorLayout
+from pypto.pypto_core.ir import AtomicType, Expr, MemorySpace, PadValue, TensorLayout
 
-from ..typing import BoolLike, IntLike, Scalar, Tensor, predicate_to_expr
+from ..typing import BoolLike, IntLike, Ptr, Scalar, Tensor, predicate_to_expr
 
 # Bound TypeVar lets slice / assemble propagate the caller's concrete tensor
 # class (Tensor or its DistributedTensor subclass) through to the return type.
@@ -2487,7 +2487,7 @@ def scatter(
 def alloc(
     memory_space: MemorySpace,
     size: int,
-) -> PtrType:
+) -> Ptr:
     """Stub for the internal ``tensor.alloc`` IR operation.
 
     This function is never called in user-written DSL code. It is emitted
@@ -2505,7 +2505,7 @@ def alloc(
     Returns:
         A ``Ptr`` standing for the allocation, carrying no address of its own.
     """
-    return PtrType()
+    return Ptr()
 
 
 def get_block_idx() -> Scalar:
