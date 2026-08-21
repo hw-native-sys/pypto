@@ -30,7 +30,6 @@ import pypto.language as pl
 import pytest
 import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
 
 M = 32
 K = 64
@@ -59,50 +58,10 @@ SLOTNUM_SLOT_NUM = 4
 SLOTNUM_LOCAL_SLOT_NUM = 4
 SLOTNUM_BUFFER_SIZE = SLOTNUM_SLOT_SIZE * SLOTNUM_LOCAL_SLOT_NUM
 
-_PLATFORM_TO_BACKEND: dict[str, BackendType] = {
-    "a2a3": BackendType.Ascend910B,
-    "a2a3sim": BackendType.Ascend910B,
-    "a5": BackendType.Ascend950,
-    "a5sim": BackendType.Ascend950,
-}
-_DEFAULT_PLATFORM = "a2a3"
-
-
-def _resolve_platform(config: pytest.Config) -> str:
-    """Resolve the effective platform from the session-wide allowlist."""
-    raw_platform = str(config.getoption("--platform") or "")
-    tokens = [tok.strip() for tok in raw_platform.split(",") if tok.strip()]
-    valid_platforms = tuple(dict.fromkeys(tok for tok in tokens if tok in _PLATFORM_TO_BACKEND))
-    if tokens and not valid_platforms:
-        raise pytest.UsageError(
-            "tests/st/runtime/cross_core/test_cross_core.py "
-            "supports --platform values (a2a3, a2a3sim, a5, or a5sim)"
-        )
-    return valid_platforms[0] if valid_platforms else _DEFAULT_PLATFORM
-
-
-def _resolve_backend_type(config: pytest.Config) -> BackendType:
-    """Resolve backend from the selected platform, defaulting to a2a3."""
-    platform = _resolve_platform(config)
-    try:
-        return _PLATFORM_TO_BACKEND[platform]
-    except KeyError as exc:
-        raise pytest.UsageError(
-            f"Unsupported --platform {platform!r} for tests/st/runtime/cross_core/test_cross_core.py"
-        ) from exc
-
-
-def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
-    """Drive backend selection from the session-wide --platform filter."""
-    if "backend_type" not in metafunc.fixturenames and "platform" not in metafunc.fixturenames:
-        return
-
-    platform = _resolve_platform(metafunc.config)
-    backend_type = _resolve_backend_type(metafunc.config)
-    if "backend_type" in metafunc.fixturenames:
-        metafunc.parametrize("backend_type", [backend_type], ids=[platform])
-    if "platform" in metafunc.fixturenames:
-        metafunc.parametrize("platform", [platform])
+# ``backend_type`` comes from the system-test platform matrix in
+# tests/st/conftest.py: one variant per active ``--platform`` id, each paired
+# with the platform its cases are built and executed for, so the backend and
+# the toolchain cannot disagree.
 
 
 @pl.program

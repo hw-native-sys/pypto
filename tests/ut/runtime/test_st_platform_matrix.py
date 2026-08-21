@@ -23,6 +23,7 @@ unit test.
 
 import importlib
 import importlib.util
+import inspect
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -114,6 +115,20 @@ def test_bind_platform_never_overrides_an_explicit_pin():
     assert case.get_backend_type() is BackendType.Ascend910B
 
 
+def test_a_constructor_backend_pin_is_not_overridden():
+    # `PTOTestCase(backend_type=...)` is a pin like a get_backend_type override:
+    # binding a platform over it would win silently and hide the conflict.
+    case = _Case(backend_type=BackendType.Ascend910B)
+    reason = test_runner._bind_and_check_arch(case, "a5")
+    assert reason is not None and "Ascend910B" in reason
+    assert case.get_backend_type() is BackendType.Ascend910B
+
+
+def test_a_matching_constructor_backend_pin_runs():
+    case = _Case(backend_type=BackendType.Ascend910B)
+    assert test_runner._bind_and_check_arch(case, "a2a3sim") is None
+
+
 def test_bind_platform_rejects_an_unknown_id():
     with pytest.raises(ValueError, match="Unknown platform"):
         _Case().bind_platform("a9")
@@ -134,11 +149,24 @@ def test_cache_key_separates_the_platform_variants():
 # ---------------------------------------------------------------------------
 
 
+def _fn_taking(*argnames: str):
+    """Return a function whose signature requests exactly *argnames*."""
+
+    def _test(*_args, **_kwargs):
+        pass
+
+    _test.__signature__ = inspect.Signature(
+        [inspect.Parameter(name, inspect.Parameter.POSITIONAL_OR_KEYWORD) for name in argnames]
+    )
+    return _test
+
+
 class _FakeMetafunc:
     """Stand-in for ``pytest.Metafunc`` recording a single parametrize call."""
 
-    def __init__(self, platform_option: str, fixturenames: list[str], marker_args=None):
+    def __init__(self, platform_option: str, fixturenames: list[str], marker_args=None, signature=None):
         self.fixturenames = fixturenames
+        self.function = _fn_taking(*(signature if signature is not None else fixturenames))
         self.config = SimpleNamespace(getoption=lambda name: {"--platform": platform_option}[name])
         marker = SimpleNamespace(args=tuple(marker_args), kwargs={}) if marker_args is not None else None
         self.definition = SimpleNamespace(
@@ -148,7 +176,8 @@ class _FakeMetafunc:
         self.calls: list[tuple] = []
 
     def parametrize(self, argname, argvalues, ids=None, indirect=False):
-        self.calls.append((argname, list(argvalues), list(ids or []), indirect))
+        recorded_indirect = list(indirect) if isinstance(indirect, (list, tuple)) else indirect
+        self.calls.append((argname, list(argvalues), list(ids or []), recorded_indirect))
 
 
 _RUNNER_FIXTURES = ["test_runner", "_st_platform", "test_config"]
@@ -175,8 +204,11 @@ def test_expansion_intersects_the_platforms_marker():
     assert calls == [("_st_platform", ["a2a3", "a2a3sim"], ["a2a3", "a2a3sim"], True)]
 
 
-def test_marker_narrowing_to_one_platform_does_not_parametrize():
-    assert _generate(_FakeMetafunc("a2a3,a5", _RUNNER_FIXTURES, marker_args=["a5"])) == []
+def test_marker_narrowing_to_one_platform_still_binds_it():
+    # Without the parametrize the item would carry no platform and fall back to
+    # the first CLI id — a2a3 — which its own marker excludes.
+    calls = _generate(_FakeMetafunc("a2a3,a5", _RUNNER_FIXTURES, marker_args=["a5"]))
+    assert calls == [("_st_platform", ["a5"], ["a5"], True)]
 
 
 def test_marker_outside_the_allowlist_leaves_the_item_for_deselection():
@@ -190,15 +222,57 @@ def test_explicitly_parametrized_tests_are_left_alone():
     assert _generate(_FakeMetafunc("a2a3,a5", fixtures)) == []
 
 
-def test_backend_type_tests_keep_their_own_generator():
-    # tests/st/runtime/cross_core/ drives arch selection from its own
-    # pytest_generate_tests; expanding it here would double-parametrize it.
+def test_backend_type_is_paired_with_the_platform():
+    # One parametrize, not two: a separate backend_type axis would let the
+    # backend a case compiles for disagree with the platform it runs on.
     fixtures = [*_RUNNER_FIXTURES, "backend_type"]
-    assert _generate(_FakeMetafunc("a2a3,a5", fixtures)) == []
+    calls = _generate(_FakeMetafunc("a2a3,a5sim", fixtures))
+    assert calls == [
+        (
+            "_st_platform,backend_type",
+            [("a2a3", BackendType.Ascend910B), ("a5sim", BackendType.Ascend950)],
+            ["a2a3", "a5sim"],
+            ["_st_platform"],
+        )
+    ]
+
+
+def test_backend_type_is_emitted_even_for_a_single_platform():
+    # Unlike _st_platform, backend_type has no fixture of its own, so skipping
+    # the parametrize would leave the test with no such argument at all.
+    fixtures = [*_RUNNER_FIXTURES, "backend_type"]
+    calls = _generate(_FakeMetafunc("a2a3", fixtures))
+    assert calls == [
+        (
+            "_st_platform,backend_type",
+            [("a2a3", BackendType.Ascend910B)],
+            ["a2a3"],
+            ["_st_platform"],
+        )
+    ]
+
+
+def test_backend_type_respects_the_platforms_marker():
+    fixtures = [*_RUNNER_FIXTURES, "backend_type"]
+    calls = _generate(_FakeMetafunc("a2a3,a5", fixtures, marker_args=["a2a3", "a2a3sim"]))
+    assert calls == [
+        ("_st_platform,backend_type", [("a2a3", BackendType.Ascend910B)], ["a2a3"], ["_st_platform"])
+    ]
 
 
 def test_tests_without_the_runner_are_untouched():
     assert _generate(_FakeMetafunc("a2a3,a5", ["tmp_path"])) == []
+
+
+def test_a_runner_reached_through_another_fixture_is_not_expanded():
+    # The runner arrives via a module-scoped fixture, which is built once for
+    # the whole module and so cannot hold one artefact per platform.
+    metafunc = _FakeMetafunc(
+        "a2a3,a5",
+        ["swimlane", "test_runner", "_st_platform", "test_config"],
+        signature=["swimlane"],
+    )
+    assert _generate(metafunc) == []
 
 
 def test_empty_platform_option_expands_over_every_platform():
@@ -216,6 +290,43 @@ def test_a_typo_in_the_platforms_marker_fails_collection():
 def test_an_empty_platforms_marker_fails_collection():
     with pytest.raises(pytest.UsageError, match="no platform ids"):
         _generate(_FakeMetafunc("a2a3,a5", _RUNNER_FIXTURES, marker_args=[]))
+
+
+# ---------------------------------------------------------------------------
+# Per-item platform resolution
+# ---------------------------------------------------------------------------
+
+
+class _FakeNode:
+    """Stand-in for a collected item, for the platform resolver."""
+
+    def __init__(self, params=None, marker_args=None, name="test_fake"):
+        self.name = name
+        self.callspec = SimpleNamespace(params=dict(params or {})) if params is not None else None
+        self._marker = SimpleNamespace(args=tuple(marker_args)) if marker_args is not None else None
+
+    def get_closest_marker(self, name):
+        return self._marker if name == "platforms" else None
+
+
+def _resolve(node, platform_option):
+    config = SimpleNamespace(getoption=lambda name: {"--platform": platform_option}[name])
+    return _load_st_conftest()._resolve_item_platform(node, config)
+
+
+def test_the_parametrized_platform_wins():
+    assert _resolve(_FakeNode(params={"_st_platform": "a5sim"}), "a2a3,a5sim") == "a5sim"
+    assert _resolve(_FakeNode(params={"platform": "a5"}), "a2a3,a5") == "a5"
+
+
+def test_an_unexpanded_item_falls_back_to_the_first_cli_platform():
+    assert _resolve(_FakeNode(), "a5,a2a3") == "a5"
+
+
+def test_the_fallback_honours_the_platforms_marker():
+    # The item is not parametrized (its runner comes from a shared fixture), so
+    # the fallback must not hand it a platform its own marker excludes.
+    assert _resolve(_FakeNode(marker_args=["a5"]), "a2a3,a5") == "a5"
 
 
 # ---------------------------------------------------------------------------

@@ -350,14 +350,18 @@ class PTOTestCase(ABC):
         ``platform=`` — the platform matrix is driven by the item's parametrize
         variant instead (see ``pytest_generate_tests`` in ``tests/st/conftest.py``).
         A case that pinned its own platform (constructor arg or a
-        :py:meth:`get_platform` override) is left untouched.
+        :py:meth:`get_platform` override) is left untouched, and so is one that
+        pinned a backend through the legacy ``backend_type`` constructor arg:
+        binding a platform over that pin would silently win (see
+        :py:meth:`get_backend_type`) and hide an architecture conflict that
+        :func:`arch_mismatch_reason` must report.
 
         Args:
             platform: One of :data:`ALL_PLATFORM_IDS`.
         """
         if platform not in ALL_PLATFORM_IDS:
             raise ValueError(f"Unknown platform '{platform}'. Expected one of {ALL_PLATFORM_IDS}.")
-        if self.get_platform() is None:
+        if self.get_platform() is None and self._override_backend is None:
             self._override_platform = platform
 
     def get_backend_type(self) -> BackendType:

@@ -181,6 +181,23 @@ def _cache_key(
     return f"{tc.get_name()}@{resolved_platform}@{planner_tag}"
 
 
+# The platform of the item pytest is currently setting up or running, published
+# by the system-test ``pytest_runtest_setup`` hook. This is how a per-item
+# platform reaches the session-scoped ``test_runner`` fixture: module- and
+# session-scoped fixtures in the suite request that fixture, so it cannot itself
+# be function-scoped without turning every one of them into a ScopeMismatch.
+_current_item_platform: dict[str, str | None] = {"value": None}
+
+
+def set_current_item_platform(platform: str | None) -> None:
+    """Publish (or, with ``None``, retract) the platform of the running item.
+
+    Args:
+        platform: The item's platform, or ``None`` between items.
+    """
+    _current_item_platform["value"] = platform
+
+
 def _install_backend(backend_type: BackendType) -> None:
     """Install *backend_type* globally for the inline compile that follows.
 
@@ -238,7 +255,8 @@ def _resolve_platform(config_platform: str, test_case: PTOTestCase | None = None
 
     The test-case-level platform (set via the ``platform`` constructor arg or
     overridden in :py:meth:`PTOTestCase.get_platform`) takes precedence over
-    the session-wide ``--platform`` value.  When *test_case* is ``None`` the
+    the platform of the running item, which in turn takes precedence over the
+    session-wide ``--platform`` value.  When *test_case* is ``None`` the
     function preserves the historical behaviour of returning ``config_platform``
     so legacy code paths still work.
     """
@@ -249,6 +267,9 @@ def _resolve_platform(config_platform: str, test_case: PTOTestCase | None = None
             tc_platform = None
         if tc_platform:
             return tc_platform
+    item_platform = _current_item_platform["value"]
+    if item_platform:
+        return item_platform
     return config_platform
 
 

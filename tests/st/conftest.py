@@ -24,7 +24,6 @@ import textwrap
 import warnings
 from collections import Counter
 from contextlib import nullcontext
-from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -44,12 +43,17 @@ from harness.core.environment import (  # noqa: E402
     get_simpler_python_path,
     get_simpler_scripts_path,
 )
-from harness.core.harness import ALL_PLATFORM_IDS, PTOTestCase  # noqa: E402
+from harness.core.harness import (  # noqa: E402
+    ALL_PLATFORM_IDS,
+    PTOTestCase,
+    platform_to_backend,
+)
 from harness.core.test_runner import (  # noqa: E402
     TestRunner,
     _cache_key,
     configure_inline_task_submit,
     execution_summary_lines,
+    set_current_item_platform,
     shutdown_pipeline,
     start_pipeline,
 )
@@ -554,8 +558,15 @@ def _resolve_item_platform(node: pytest.Item | pytest.FixtureRequest, config: py
     resolved = params.get("platform") or params.get("_st_platform")
     if resolved:
         return resolved
-    cli = _parse_platform_filter(config.getoption("--platform"))
-    return cli[0] if cli else "a2a3"
+    cli = list(_parse_platform_filter(config.getoption("--platform")) or ALL_PLATFORM_IDS)
+    marker = node.get_closest_marker("platforms") if hasattr(node, "get_closest_marker") else None
+    if marker is not None:
+        item_filter = _marker_platforms(marker, "platforms", getattr(node, "name", "<item>"))
+        # An item the marker excludes from every active platform is deselected by
+        # pytest_collection_modifyitems; keep the raw first id so this resolver
+        # never has to invent one.
+        cli = [p for p in cli if p in item_filter] or cli
+    return cli[0]
 
 
 def _marker_platforms(marker: pytest.Mark, marker_name: str, test_name: str) -> set[str]:
@@ -586,26 +597,47 @@ def _marker_platforms(marker: pytest.Mark, marker_name: str, test_name: str) -> 
     return set(marker.args)
 
 
-@pytest.fixture
+def _direct_argnames(func: Any) -> set[str]:
+    """Return the fixture names *func* requests in its own signature.
+
+    ``Metafunc.fixturenames`` is the whole closure, so it cannot tell a test
+    that takes ``test_runner`` from one that merely depends on a fixture which
+    does. Only the former can be expanded per platform.
+
+    Args:
+        func: The test function.
+
+    Returns:
+        The parameter names of the function signature.
+    """
+    try:
+        return set(inspect.signature(func).parameters)
+    except (TypeError, ValueError):  # builtins / unsupported callables
+        return set()
+
+
+@pytest.fixture(autouse=True)
 def _st_platform(request) -> str:
-    """Return the platform this item runs on (see :func:`_resolve_item_platform`)."""
+    """Return the platform this item runs on (see :func:`_resolve_item_platform`).
+
+    Autouse so that :func:`pytest_generate_tests` always has this fixture in the
+    closure to parametrize; the platform matrix expands *this* name rather than
+    the test signature, which is what keeps test bodies unchanged.
+    """
     return _resolve_item_platform(request.node, request.config)
 
 
-@pytest.fixture
-def test_runner(test_config, _st_platform) -> TestRunner:
-    """Return a runner bound to this item's platform.
+@pytest.fixture(scope="session")
+def test_runner(test_config) -> TestRunner:
+    """Session-scoped fixture providing a test runner instance.
 
-    Function-scoped rather than session-scoped: one item may run on ``a2a3``
-    and the next on ``a5`` within the same session, and ``RunConfig.platform``
-    is what the runner falls back to for cases that do not pin a platform
-    themselves. The pipeline state a runner consults (compile futures, batches)
-    lives at module level in ``harness.core.test_runner``, so per-item runner
-    instances share it.
+    Deliberately still session-scoped: module- and session-scoped fixtures in
+    the suite request it, and a function-scoped runner makes those a
+    ``ScopeMismatch``. The per-item platform reaches the runner through
+    ``set_current_item_platform`` (published by :func:`pytest_runtest_setup`)
+    rather than through a differently-scoped fixture.
     """
-    if _st_platform == test_config.platform:
-        return TestRunner(test_config)
-    return TestRunner(replace(test_config, platform=_st_platform))
+    return TestRunner(test_config)
 
 
 @pytest.fixture
@@ -714,33 +746,65 @@ def pytest_itemcollected(item):
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     """Expand ``test_runner``-based tests over the active platform allowlist.
 
-    A test that declares ``platform`` itself keeps its own parametrize, and one
-    that requests ``backend_type`` is left to the module-level
-    ``pytest_generate_tests`` that owns its arch selection (see
-    ``tests/st/runtime/cross_core/``). Everything else is expanded over the
-    ``--platform`` allowlist intersected with its ``@pytest.mark.platforms``,
-    so a case joins a new platform's guard job without touching its test body.
+    A test that declares ``platform`` itself keeps its own parametrize.
+    Everything else is expanded over the ``--platform`` allowlist intersected
+    with its ``@pytest.mark.platforms``, so a case joins a new platform's guard
+    job without touching its test body.
 
-    Expansion only happens when more than one platform is active: a plain
+    A test taking ``backend_type`` gets it paired with the platform in one
+    parametrize, so the backend it compiles for and the toolchain it runs on
+    can never disagree. That name has no fixture of its own — this is where it
+    comes from — so it is emitted even for a single active platform.
+
+    The test must take ``test_runner`` itself. A test that reaches the runner
+    through a module- or session-scoped fixture cannot vary per item — that
+    fixture is built once and shared — so expanding it would hand every variant
+    the first platform's artefact. Those items run on the single platform
+    :func:`_resolve_item_platform` picks for them.
+
+    Expansion only happens when the CLI names more than one platform: a plain
     ``--platform=a2a3`` run keeps today's node ids, and only a multi-platform
-    invocation grows the ``[a2a3]`` / ``[a5]`` suffixes.
+    invocation grows the ``[a2a3]`` / ``[a5]`` suffixes. Within such a run a
+    marker that narrows the test to one platform is still parametrized, so the
+    item carries that platform instead of falling back to the first CLI id.
     """
-    if "test_runner" not in metafunc.fixturenames:
+    direct = _direct_argnames(metafunc.function)
+    if "test_runner" not in direct:
         return
-    if "platform" in metafunc.fixturenames or "backend_type" in metafunc.fixturenames:
+    if "platform" in metafunc.fixturenames:
         return
-    cli = _parse_platform_filter(metafunc.config.getoption("--platform")) or ALL_PLATFORM_IDS
+    cli = list(_parse_platform_filter(metafunc.config.getoption("--platform")) or ALL_PLATFORM_IDS)
     marker = metafunc.definition.get_closest_marker("platforms")
     item_filter = (
         _marker_platforms(marker, "platforms", metafunc.definition.name) if marker is not None else None
     )
-    allowed = [p for p in cli if item_filter is None or p in item_filter]
-    if len(allowed) > 1:
+    # A marker that excludes every active platform leaves the variants to
+    # pytest_collection_modifyitems, which deselects them; parametrizing an
+    # empty list would instead leave one item behind marked "empty parameter set".
+    allowed = [p for p in cli if item_filter is None or p in item_filter] or cli
+    if "backend_type" in direct:
+        metafunc.parametrize(
+            "_st_platform,backend_type",
+            [(p, platform_to_backend(p)) for p in allowed],
+            ids=list(allowed),
+            indirect=["_st_platform"],
+        )
+        return
+    if len(cli) > 1:
         metafunc.parametrize("_st_platform", allowed, ids=list(allowed), indirect=True)
 
 
+@pytest.hookimpl(tryfirst=True)
 def pytest_runtest_setup(item: pytest.Item) -> None:
-    """Apply ``@pytest.mark.platform_xfail`` to the platform this item runs on.
+    """Publish this item's platform, then apply ``@pytest.mark.platform_xfail``.
+
+    ``tryfirst`` so the platform is published before pytest's own
+    ``pytest_runtest_setup`` builds this item's fixtures: a module-scoped
+    fixture that calls ``test_runner.run()`` during that setup must compile for
+    the platform of the item that triggered it, not for the session default.
+
+    The xfail half is a platform-conditional expectation, which a plain
+    ``xfail`` cannot spell.
 
     A platform-conditional expectation cannot be spelled with a plain
     ``xfail``, and raising ``pytest.xfail()`` inside the body aborts before the
@@ -754,6 +818,8 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
     Raises:
         pytest.UsageError: The marker names no/unknown platforms, or no reason.
     """
+    set_current_item_platform(_resolve_item_platform(item, item.config))
+
     marker = item.get_closest_marker("platform_xfail")
     if marker is None:
         return
@@ -766,6 +832,11 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
         )
     if _resolve_item_platform(item, item.config) in platforms:
         item.add_marker(pytest.mark.xfail(reason=reason, strict=marker.kwargs.get("strict", True)))
+
+
+def pytest_runtest_teardown(item: pytest.Item) -> None:  # noqa: ARG001
+    """Drop the published platform so it cannot leak into the next item."""
+    set_current_item_platform(None)
 
 
 def pytest_collection_modifyitems(config, items):
