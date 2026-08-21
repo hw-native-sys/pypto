@@ -981,12 +981,6 @@ TypePtr DeduceTileSetValidShapeType(const std::vector<ExprPtr>& args,
   // row_major / fractal=1024, a [M, 1] Vec tile is col_major, ...). Default-
   // constructing a TileView here would pin the raw row_major / none_box /
   // fractal=512 defaults onto an alias of, e.g., an Acc accumulator.
-  // The inherited `compact` is deliberately kept as-is, including for an Acc
-  // alias. This op is metadata-only and may run *after* the buffer was written,
-  // so the stride its readers must use is the one the producing `mad` already
-  // laid the bytes out at — not one derived from the new valid rows. Narrowing
-  // a fully-written accumulator here must therefore leave its non-compact
-  // reading pitch alone.
   TileView tile_view = tile_view_semantics::GetEffectiveTileView(*tile_type);
   tile_view.valid_shape = {args[1], args[2]};
 

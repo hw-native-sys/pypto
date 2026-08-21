@@ -652,29 +652,8 @@ tile_c = pl.mul(tile_a, tile_b)
 | `compact` | `TileView::compact` | `null(0)`, `normal(1)` | `null(0)` |
 
 当 MemRef 没有关联 TileView 时，代码生成器使用上表中的默认值。默认的 null
-`compact` 属性不会输出。有两条路径会自动设置 `normal(1)`：
-
-- 进入 L0A/L0B 的部分 `tile.extract`，使 TEXTRACT 仅传输逻辑 `valid_shape`，
-  而不会把 box 对齐填充当作数据。
-- **有效行数无法证明等于物理行数的 Acc (L0C) tile**，由 `tile.matmul`、
-  `tile.matmul_bias`、`tile.matmul_mx` 的类型推导产生。`mad` 始终以
-  `ceil(validRow/16)*16` 的 N-fractal stride 写出乘积，其中 `validRow` 取自 **lhs**
-  的有效行数；而所有 Acc 读取方在 tile 非 compact 时都按编译期物理 `Rows` 推导
-  stride。缺少该标记时，运行期窄化的累加器读回时使用的 pitch 与写入时不同。只有
-  **行** 维度决定这一点 —— ISA 推导的每个 Acc stride 都只是 `validRow` 的函数，
-  因此仅窄化列维度时保持非 compact 形式。
-
-  compact 只在**确立累加器布局的那一处**盖章，绝不在它的别名上重新推导。
-  `tile.matmul_acc`（以及 `matmul_mx_acc`）**继承**累加器操作数的模式，因为该 op
-  原地复用那块 buffer，而 codegen 只有在两者完整 tile 配置一致时才会做别名。
-  `tile.set_validshape` 同样是继承：它只改元数据，且可能在 buffer **写入之后**才
-  执行，因此读取方必须使用的仍是 `mad` 当初写入时的 pitch —— 若按窄化后的行数重新
-  推导，就会以从未重排过的方式重新解释这些字节。
-
-注意：在 a2a3 与 a5 上，PTO-ISA 的 Acc → L1 读取方（`TExtractAccToMat`、
-`TMovCcToCb`）都没有 `CompactMode` 分支，因此运行期窄化的累加器若经
-`tile.extract` / `tile.move` 进入 L1，仍会按物理 `Rows` pitch 读取。该缺口需要
-PTO-ISA 侧配套修改。
+`compact` 属性不会输出。进入 L0A/L0B 的部分 `tile.extract` 会自动设置
+`normal(1)`，使 TEXTRACT 仅传输逻辑 `valid_shape`，而不会把 box 对齐填充当作数据。
 
 ## 内核包装器生成 (PTO 后端)
 
