@@ -430,6 +430,133 @@ jobs:
           pip-cache-name: pip-prebuild
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
 
+  prebuild-wheels-x86:
+    # prebuild-wheels for the other architecture. Same idea, different
+    # plumbing, because GitHub-hosted runners share no disk: there is nothing
+    # for a flock to coordinate and nothing that survives the job, so the wheels
+    # travel through actions/cache and the consumers take a real `needs:` edge.
+    #
+    # Both x86_64 jobs compiled the extension from scratch on every run — 8m51
+    # and 6m32 on run 32476058579 — and `unit-tests` was the last job in the
+    # workflow to finish, i.e. the critical path was a build the machine next
+    # door had already done. Building once here and installing twice takes that
+    # off the path entirely.
+    #
+    # In the container, not on the runner image, and that direction is not
+    # arbitrary. A wheel built here needs at most GLIBC_2.33 and
+    # GLIBCXX_3.4.29 (measured on the built extension), which ubuntu-24.04's
+    # 2.39 / 3.4.33 satisfy; built the other way round it could pick up symbols
+    # the 22.04 container does not have. The consumers assert the result rather
+    # than trusting it: each imports pypto right after installing, so a wheel
+    # that does not load says so at second five with a message about ABI,
+    # instead of surfacing as a puzzling test error later.
+    #
+    # `toolchain` is deliberately absent from `needs`: nothing here reads a
+    # pinned version. simpler resolves its own pto-isa from
+    # runtime/pto_isa.pin at build time, and no ptoas is installed.
+    needs: [changes, pre-commit]
+    if: needs.changes.outputs.docs_only != 'true'
+    # `packages: read` is not decoration. Declaring a `permissions:` block at
+    # all narrows GITHUB_TOKEN to exactly what it lists, and pulling the job
+    # container is an authenticated ghcr.io read — so `contents: read` alone
+    # fails the job before its first step with `Error response from daemon:
+    # denied`. system-tests-a5sim uses the same image and needs no such line
+    # only because it declares no permissions block and keeps the defaults.
+    permissions:
+      contents: read
+      packages: read
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/hw-native-sys/pypto/github-ci:latest
+    # Named rather than left to the default, which resolved to `sh -e {0}` in
+    # this container on run 32502998994. Every step below is POSIX either way;
+    # saying which shell runs them keeps it that way by choice.
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      cache_key: ${{ steps.key.outputs.cache_key }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      # Content-addressed by the checkout's tree, exactly like the self-hosted
+      # slots: a different tree is a different key, and a rebase or a re-run of
+      # the same tree reuses one. The suffix names what else decides the
+      # artifact — the image the wheels are built in and the debug level — so a
+      # change to either cannot be served the old wheels.
+      - name: Derive the wheel cache key
+        id: key
+        run: |
+          # The workspace belongs to the runner user and this step is root, so
+          # git 2.34 stops at "detected dubious ownership" before it reads
+          # anything. actions/checkout works around this for itself, in a
+          # temporary HOME that no later step inherits, so say it again here.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          tree="$(git rev-parse 'HEAD^{tree}')"
+          echo "cache_key=wheels-x86_64-${tree}-github-ci-g1" >> "$GITHUB_OUTPUT"
+          echo "wheel cache key: wheels-x86_64-${tree}-github-ci-g1"
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-x86_64-prebuild-${{ github.sha }}
+          restore-keys: ccache-x86_64-prebuild-
+
+      - name: Enable ccache
+        run: |
+          # In the image as of the Dockerfile change that landed with this, but
+          # the image is only rebuilt on pushes to main that touch it, so a PR
+          # can still run against an older one and has to install it.
+          if ! command -v ccache >/dev/null; then
+            apt-get update -qq && apt-get install -y -qq --no-install-recommends ccache || true
+          fi
+          # The launcher is exported only once ccache is known to exist: naming
+          # it unconditionally would hand CMake a compiler launcher that is not
+          # on PATH, turning a missing optimisation into a failed build. A
+          # missing ccache is meant to cost time and nothing else.
+          if command -v ccache >/dev/null; then
+            echo "CCACHE_DIR=$HOME/.cache/ccache" >> "$GITHUB_ENV"
+            echo "CMAKE_C_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
+            echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
+            ccache --version | head -1
+          else
+            echo "::warning::ccache unavailable — building without it"
+          fi
+
+      - name: Build the wheels
+        env:
+          # Deliberately small: the dir is tarred into the repo-wide 10 GB cache
+          # quota on every main run, so it holds this build's objects and no more.
+          CCACHE_MAXSIZE: 1G
+        run: |
+          python -m pip install --upgrade pip
+          command -v ccache >/dev/null && ccache -z || true
+          # PYPTO_DEBUG_INFO_LEVEL for pypto only; simpler's CMake has no such
+          # option and would warn about being handed one.
+          SKBUILD_CMAKE_DEFINE=PYPTO_DEBUG_INFO_LEVEL=1 \
+            pip wheel --no-build-isolation --no-deps -w wheelhouse .
+          pip wheel --no-build-isolation --no-deps -w wheelhouse ./runtime
+          command -v ccache >/dev/null && ccache -s || true
+          ls -l wheelhouse
+
+      - name: Publish the wheels
+        uses: actions/cache/save@v4
+        with:
+          path: wheelhouse
+          key: ${{ steps.key.outputs.cache_key }}
+
+      # Main only, for the quota reason on the wheel cache above: a ccache saved
+      # on a PR branch is visible to that branch alone.
+      - name: Save ccache
+        if: github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-x86_64-prebuild-${{ github.sha }}
+
   unit-tests:
     # Lint gate (see the pre-commit job) — don't spend a runner on a tree that
     # doesn't lint.
@@ -453,7 +580,14 @@ jobs:
     # The `if` must tolerate a *skipped* `clang-tidy` (a skipped dependency
     # otherwise skips its dependents, which would reintroduce the bug above),
     # while still refusing to run when lint actually failed.
-    needs: [changes, pre-commit, clang-tidy]
+    #
+    # `prebuild-wheels-x86` is in `needs` for ordering only, and the `if` says
+    # nothing about its result on purpose. A failed prebuild must not skip this
+    # job: a skipped required context counts as satisfied by the ruleset, so
+    # gating on it would let a tree merge with its unit tests never run. The
+    # install step falls back to building in place instead, which is what this
+    # job did before the prebuild existed.
+    needs: [changes, pre-commit, clang-tidy, prebuild-wheels-x86]
     if: >-
       !cancelled()
       && needs.pre-commit.result == 'success'
@@ -488,77 +622,38 @@ jobs:
         cache: pip
         cache-dependency-path: pyproject.toml
 
-    # This job compiled the extension from scratch on every run — 7m46 on run
-    # 32452961616, the largest single build in the workflow and one of the last
-    # things to finish. The self-hosted jobs have had a persistent ccache for a
-    # long time; this one had nothing, purely because a GitHub-hosted runner
-    # keeps no state between runs. actions/cache supplies the state.
-    #
-    # Restore-only here, save at the end and only on main: a cache saved on a PR
-    # branch is visible to that branch alone, so it would consume the repo's
-    # 10 GB quota (LRU-evicted, shared with every other cache) to speed up
-    # nothing but repeat pushes to that one PR. Caches saved on main are what
-    # every PR restores from.
-    - name: Restore ccache
-      if: needs.changes.outputs.docs_only != 'true'
+    # The wheel prebuild-wheels-x86 already built, rather than a second build of
+    # the same tree. Restore-only: this job publishes nothing.
+    - name: Restore the prebuilt wheels
+      if: >-
+        needs.changes.outputs.docs_only != 'true'
+        && needs.prebuild-wheels-x86.outputs.cache_key != ''
       uses: actions/cache/restore@v4
       with:
-        path: ~/.cache/ccache
-        key: ccache-x86_64-unit-${{ github.sha }}
-        restore-keys: ccache-x86_64-unit-
+        path: wheelhouse
+        key: ${{ needs.prebuild-wheels-x86.outputs.cache_key }}
 
-    - name: Enable ccache
-      if: needs.changes.outputs.docs_only != 'true'
-      run: |
-        # Whether ccache is in the runner image is an image detail that can
-        # change under us, and the failure mode of assuming it — a silently
-        # uncached build that is merely slow — is one nobody would notice.
-        # Install it when it is absent instead.
-        if ! command -v ccache >/dev/null; then
-          sudo apt-get update -qq && sudo apt-get install -y -qq ccache
-        fi
-        # Named here rather than in the step's `env:`, where a literal "~" would
-        # reach ccache unexpanded. This is also the path the cache steps above
-        # and below use, so the three cannot drift.
-        echo "CCACHE_DIR=$HOME/.cache/ccache" >> "$GITHUB_ENV"
-        ccache --version | head -1
-
-    # The two steps the docs-only gate actually elides — building the extension
-    # and running the suite. The job itself still runs, so both required matrix
-    # contexts are created and reported green.
+    # The two steps the docs-only gate actually elides — installing the
+    # extension and running the suite. The job itself still runs, so both
+    # required matrix contexts are created and reported green.
     - name: Install project and dependencies
       if: needs.changes.outputs.docs_only != 'true'
-      env:
-        # CMake initialises CMAKE_<LANG>_COMPILER_LAUNCHER from the environment
-        # variable of the same name, which is how the self-hosted jobs wire
-        # ccache in too — so both paths stay one mechanism.
-        CMAKE_C_COMPILER_LAUNCHER: ccache
-        CMAKE_CXX_COMPILER_LAUNCHER: ccache
-        # The cheaper debug level (see PYPTO_DEBUG_INFO_LEVEL in
-        # CMakeLists.txt). This job is the one that would notice if level 1 were
-        # not enough — tests/ut/core/test_error.py fails outright on a Linux
-        # build whose frames stop symbolizing — so running it here is the
-        # standing check on that claim, not a risk taken with it.
-        SKBUILD_CMAKE_DEFINE: PYPTO_DEBUG_INFO_LEVEL=1
-        # Deliberately small. The whole dir is tarred up and pushed into the
-        # repo-wide 10 GB cache quota on every main run, so it is sized to hold
-        # this build's objects and nothing more.
-        CCACHE_MAXSIZE: 1G
       run: |
         python -m pip install --upgrade pip
         pip install torch --index-url https://download.pytorch.org/whl/cpu
-        ccache -z
-        pip install -v .[dev]
-        ccache -s
-
-    - name: Save ccache
-      if: >-
-        needs.changes.outputs.docs_only != 'true'
-        && github.ref == 'refs/heads/main'
-      uses: actions/cache/save@v4
-      with:
-        path: ~/.cache/ccache
-        key: ccache-x86_64-unit-${{ github.sha }}
+        whl="$(ls wheelhouse/pypto-*.whl 2>/dev/null | head -1)"
+        if [ -n "$whl" ]; then
+          echo "installing the prebuilt wheel: $whl"
+          pip install "pypto[dev] @ file://$PWD/$whl"
+        else
+          # Reachable when the prebuild was skipped or its cache entry was
+          # evicted. Slow but correct, and loud about which path it took.
+          echo "::warning::no prebuilt wheel — building in place"
+          pip install -v .[dev]
+        fi
+        # The wheel is built in ubuntu 22.04 and installed here on 24.04, so
+        # assert the ABI holds instead of discovering it through a test error.
+        python -c "import pypto; print('env OK:', pypto.__file__)"
 
     - name: Test unit tests
       if: needs.changes.outputs.docs_only != 'true'
@@ -1458,8 +1553,19 @@ jobs:
     # Lint gate (see the pre-commit job); `toolchain` is ungated and runs
     # alongside it.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
-    needs: [changes, toolchain, pre-commit, clang-tidy]
-    if: needs.changes.outputs.docs_only != 'true'
+    #
+    # The gate is spelled out rather than left implicit because
+    # `prebuild-wheels-x86` joined `needs`: the default "skip when a dependency
+    # failed" would let a failed prebuild skip this job, and a skipped required
+    # context reads as satisfied. Lint still gates it exactly as before; the
+    # prebuild only decides whether the install step has a wheel to use.
+    needs: [changes, toolchain, pre-commit, clang-tidy, prebuild-wheels-x86]
+    if: >-
+      !cancelled()
+      && needs.changes.outputs.docs_only != 'true'
+      && needs.pre-commit.result == 'success'
+      && (needs.clang-tidy.result == 'success' || needs.clang-tidy.result == 'skipped')
+      && needs.toolchain.result == 'success'
     runs-on: ubuntu-latest
     env:
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
@@ -1478,38 +1584,27 @@ jobs:
       # inside ghcr.io/.../github-ci (ubuntu 22.04, gcc-15), unit-tests builds
       # on the runner image, and mixing objects from two toolchains in one
       # namespace is how a compile cache starts serving the wrong ones.
-      - name: Restore ccache
+      # Both wheels come from prebuild-wheels-x86, which runs in this same
+      # image — so unlike the unit-tests job there is not even a container
+      # boundary between building them and installing them.
+      - name: Restore the prebuilt wheels
+        if: needs.prebuild-wheels-x86.outputs.cache_key != ''
         uses: actions/cache/restore@v4
         with:
-          path: ~/.cache/ccache
-          key: ccache-x86_64-a5sim-${{ github.sha }}
-          restore-keys: ccache-x86_64-a5sim-
-
-      - name: Enable ccache
-        run: |
-          # ccache is in the image as of the Dockerfile change that landed with
-          # this, but the image is only rebuilt on pushes to main that touch it,
-          # so a PR can still run against an older one. Install it if missing
-          # instead of silently building uncached.
-          if ! command -v ccache >/dev/null; then
-            apt-get update -qq && apt-get install -y -qq --no-install-recommends ccache
-          fi
-          echo "CCACHE_DIR=$HOME/.cache/ccache" >> "$GITHUB_ENV"
-          ccache --version | head -1
+          path: wheelhouse
+          key: ${{ needs.prebuild-wheels-x86.outputs.cache_key }}
 
       - name: Install project and dependencies
-        env:
-          CMAKE_C_COMPILER_LAUNCHER: ccache
-          CMAKE_CXX_COMPILER_LAUNCHER: ccache
-          CCACHE_MAXSIZE: 1G
-          # See PYPTO_DEBUG_INFO_LEVEL in CMakeLists.txt. Set on this step only:
-          # simpler's CMake has no such option and would warn about it.
-          SKBUILD_CMAKE_DEFINE: PYPTO_DEBUG_INFO_LEVEL=1
         run: |
           python -m pip install --upgrade pip
-          ccache -z
-          pip install -v .[dev]
-          ccache -s
+          whl="$(ls wheelhouse/pypto-*.whl 2>/dev/null | head -1)"
+          if [ -n "$whl" ]; then
+            echo "installing the prebuilt wheel: $whl"
+            pip install "pypto[dev] @ file://$PWD/$whl"
+          else
+            echo "::warning::no prebuilt wheel — building in place"
+            pip install -v .[dev]
+          fi
 
       - name: Cache ptoas environment
         id: cache-ptoas
@@ -1534,22 +1629,17 @@ jobs:
           "$PTOAS_ROOT/bin/ptoas" --version
 
       - name: Install simpler
-        env:
-          CMAKE_C_COMPILER_LAUNCHER: ccache
-          CMAKE_CXX_COMPILER_LAUNCHER: ccache
-          CCACHE_MAXSIZE: 1G
         run: |
-          rm -rf ./runtime/build
-          pip install -v ./runtime
-
-      # Saved after both builds so one entry covers pypto and simpler. Main only,
-      # for the quota reason spelled out on the unit-tests job.
-      - name: Save ccache
-        if: github.ref == 'refs/heads/main'
-        uses: actions/cache/save@v4
-        with:
-          path: ~/.cache/ccache
-          key: ccache-x86_64-a5sim-${{ github.sha }}
+          whl="$(ls wheelhouse/simpler-*.whl 2>/dev/null | head -1)"
+          if [ -n "$whl" ]; then
+            echo "installing the prebuilt wheel: $whl"
+            pip install "simpler @ file://$PWD/$whl"
+          else
+            echo "::warning::no prebuilt wheel — building in place"
+            rm -rf ./runtime/build
+            pip install -v ./runtime
+          fi
+          python -c "import pypto, simpler; print('env OK:', pypto.__file__)"
 
       - name: Test A5 system tests (simulator)
         # TestMscatter is deselected: the a5 simulator compiles incore kernels
