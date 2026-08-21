@@ -933,16 +933,21 @@ class TestCrossCore:
         result = test_runner.run(MultiPipeNoSplitTest(backend_type=backend_type))
         assert result.passed, f"Cross-core explicit multi-pipe no-split failed: {result.error}"
 
-    # `local_slot_num` on pto.{aic,aiv}_initialize_pipe is an a2/a3-only operand,
-    # not an unimplemented 950 feature: ptoas rejects it outright for the 950
-    # frontend pipe lowering, whatever its value --
+    # ptoas rejects the operand outright for the 950 frontend pipe lowering,
+    # whatever its value --
     #   error: 'pto.aic_initialize_pipe' op 'local_slot_num' is only supported
     #          for a2/a3 frontend pipe lowering
-    # so the whole manual pl.{aic,aiv}_initialize_pipe route this case exercises
-    # is a2/a3-only by design. Deselected rather than xfail-ed: xfail says "this
-    # ought to work and does not", which would keep a permanent platform
-    # limitation on the report as if it were a defect awaiting a fix.
-    @pytest.mark.platforms("a2a3", "a2a3sim")
+    # Deselected rather than platform_xfail-ed: xfail says "this ought to work
+    # and does not", which would keep a permanent platform limitation on the
+    # report as if it were a defect awaiting a fix.
+    @pytest.mark.platforms(
+        "a2a3",
+        "a2a3sim",
+        reason=(
+            "local_slot_num on pto.{aic,aiv}_initialize_pipe is an a2/a3-only operand, so the "
+            "manual pl.{aic,aiv}_initialize_pipe route this case exercises does not exist on 950"
+        ),
+    )
     def test_explicit_slot_num(self, test_runner, backend_type):
         """Explicit slot_num / local_slot_num: compile through full pipeline and verify correctness."""
         result = test_runner.run(ExplicitSlotNumTest(backend_type=backend_type))
