@@ -414,9 +414,11 @@ Pass ClassifyIterArgCarry() {
     auto new_functions = program->functions_;
     for (auto& [gvar, func] : new_functions) {
       if (!func || !func->body_) continue;
-      // Only Orchestration functions carry loop-carried runtime state that the
-      // orchestration codegen lowers into carry variables / TaskId arrays.
-      if (func->func_type_ != FunctionType::Orchestration) continue;
+      // Only orchestration bodies carry loop-carried runtime state that the
+      // orchestration codegen lowers into carry variables / TaskId arrays. A
+      // Graph body may contain such loops, and codegen reads the
+      // ``iter_arg_rebind_<i>`` attrs this pass stamps.
+      if (!IsOrchestrationLike(func->func_type_)) continue;
 
       IterArgCarryStamper stamper(program);
       auto new_body = stamper.VisitStmt(func->body_);
