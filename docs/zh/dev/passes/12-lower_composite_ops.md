@@ -188,7 +188,7 @@ sin 与 cos 共用同一组多项式系数：cos 路径只在区间归约阶段�
 
 ## `pld.tensor.*` 分布式集合通信算子
 
-本 Pass 同时降级 `pld.tensor.*` 系列的窗口绑定 (window-bound) 分布式集合通信算子。每个集合通信算子都是一个组合 `Call`，展开为 notify / wait + 数据搬运序列，外加自清理尾声。数据搬运原语因算子而异：`allgather` 使用 `pld.tile.put`（基于 TPUT 的推送，经 VEC staging tile 自动分块），`broadcast` 用 `pld.tile.get` 搬运窗口数据（GM→GM 拷贝），`allreduce` 与 `reduce_scatter` 用 `pld.tile.remote_load` 把 peer chunk 拉进 UB tile。allreduce 根据规约类型选择 `tile.add`、`tile.maximum`、`tile.minimum` 或 `tile.mul`；reduce-scatter 当前仍用 `tile.add`。七条规则共享同一套**自清理信用屏障协议**（`LoweringBuilder::EmitBarrier` + `EmitEpilogueReset`）—— 参见下方[屏障-信号协议](#屏障-信号协议) —— 因此 `signal` buffer 可以在连续调用之间复用，甚至在 `for` / `while` / `if` 内部也可以。
+本 Pass 同时降级 `pld.tensor.*` 系列的窗口绑定 (window-bound) 分布式集合通信算子。每个集合通信算子都是一个组合 `Call`，展开为 notify / wait + 数据搬运序列，外加自清理尾声。数据搬运原语因算子而异：`allgather` 与 ring `allreduce` 使用 `pld.tile.put`（基于 TPUT 的推送，经 VEC staging tile 自动分块），`broadcast` 用 `pld.tile.get` 搬运窗口数据（GM→GM 拷贝），mesh `allreduce` 与 `reduce_scatter` 用 `pld.tile.remote_load` 把 peer chunk 拉进 UB tile。allreduce 根据规约类型选择 `tile.add`、`tile.maximum`、`tile.minimum` 或 `tile.mul`；reduce-scatter 当前仍用 `tile.add`。七条规则共享同一套**自清理信用屏障协议**（`LoweringBuilder::EmitBarrier` + `EmitEpilogueReset`）—— 参见下方[屏障-信号协议](#屏障-信号协议) —— 因此 `signal` buffer 可以在连续调用之间复用，甚至在 `for` / `while` / `if` 内部也可以。
 
 ### 屏障-信号协议
 
@@ -227,16 +227,24 @@ allreduce 仍预留完整 16-KiB tile，又满足 PTO tile 的对齐要求。尾
 过大的 partial 矩形、strided 目标、DN partial view 和无法按 leading-dimension collapse
 表示的 partial 区域会被明确拒绝。
 
-ring 降级在 reduce-scatter 和 allgather 阶段使用同一个 packed 2D 视图。
+ring 降级在 reduce-scatter 和 allgather 阶段使用同一个 packed 2D 视图，并用
+**TPUT 推送**（`pld.tile.put`，非原子）代替远程加载来搬运数据。
 完全有效的目标会变为 `[1, SIZE]`；连续 partial prefix 保留物理 shape
 `[1, product(target.shape)]`，并携带逻辑
 `TensorView.valid_shape=[1, product(target.valid_shape)]`。FP32 保留均衡的
 `floor(i * SIZE / NR)` segment 边界；FP16 把每个内部
 边界向上对齐到 16 个元素并限制在 `SIZE` 内，因此每个非空 segment 和 UB
-subchunk 都从 32 字节对齐地址开始。FP16 的 ragged remote load 可以读取通信域
-预留的对齐物理尾部，然后通过 `tile.set_validshape` 在归约和写回前恢复逻辑范围。
+subchunk 都从 32 字节对齐地址开始。每个 subchunk 中，各 rank 先把接收 slot 的
+**自身值**读入寄存器 tile（该 slot 在左邻居的推送落地前保持稳定 —— 只有自身值），
+随后在 ready generation (2k+1) 上做屏障，再把发送 subchunk 通过 TPUT 推送到
+**右邻居**的同一下标 slot；push-done 屏障 (2k+2) 之后才本地读取、归约并写回接收 slot。
+共享的 VEC staging tile 通过 `tile.set_validshape` 收窄到每次传输的精确
+`valid_cols`，推送传输携带该动态范围 —— PTOAS >= v0.55 接受 `tput` 的动态
+partition-view 形状（hw-native-sys/PTOAS#1069），因此无需填充窗口即可保留
+ragged 与 FP16 尾部。非原子推送 + 本地归约保留了所有 `ReduceOp`
+（Sum/Max/Min/Prod）——只有远端原子 `TPUT<AtomicAdd>` 才只支持 Sum。
 该方案无需在公开 tensor 布局中插入空洞，也能支持非整除输入和 `SIZE < NR`。
-每一轮的每个 subchunk 都使用本调用局部的 ready + read-complete generation 对
+每一轮的每个 subchunk 都使用本调用局部的 ready + push-done generation 对
 做屏障；尾声随后把 `2 * chunk_count`（跨轮统一，因为每轮的 subchunk 循环
 共享相同边界）从 signal 的每一行中减去。
 

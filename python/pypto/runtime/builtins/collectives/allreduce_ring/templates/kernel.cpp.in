@@ -11,7 +11,8 @@
 
 // Generated from {{template_package}}.
 //
-// Host builtin ring allreduce — in-place chunked reduce-scatter + allgather.
+// Host builtin ring allreduce — in-place chunked reduce-scatter + allgather,
+// TPUT push model.
 //
 // ABI (matches mesh host builtins):
 //   tensor(0) = data   window-bound FP32 buffer (InOut)
@@ -23,6 +24,21 @@
 // ring partitions data into NR contiguous chunks of chunk_elems = SIZE // NR
 // and performs RS+AG in-place on those chunk slots. The signal holds one row
 // per ring round (2*(NR-1) rounds) plus a final row for the return barrier.
+//
+// Data movement is PUSH (remote write) via pto::comm::TPUT, mirroring the
+// in-tree allgather / all_to_all host builtins:
+//   * Reduce-scatter: each rank TPUT<AtomicAdd>s its current partial chunk
+//     send_idx = (my_rank - step) % NR into the RIGHT neighbour's slot of the
+//     same index.  The remote atomic-add accumulates the receiver's own value
+//     together with the sender's contribution (Sum only — the host builtin is
+//     ReduceOp::kSum by construction, see entry.cpp.in).
+//   * Allgather: each rank TPUTs (non-atomic) its finalized chunk
+//     send_idx = (my_rank - step + 1) % NR into the right neighbour's slot.
+//   * Ordering: pipe_barrier(PIPE_ALL) around every TPUT (drains the MTE DMA
+//     pipe) and dsb(DSB_DDR) before every TNOTIFY (orders the pushed writes
+//     ahead of the signal) — the exact allgather/all_to_all recipe.  No dcci
+//     cacheline flush is needed: the receiver reads data the sender wrote
+//     remotely via TPUT, never a locally-TSTORE'd cacheline.
 
 #include <cstdint>
 #include <pto/pto-inst.hpp>
@@ -45,6 +61,14 @@ namespace {
 static constexpr int kMaxSupportedRanks = 16;
 static constexpr int64_t kTileCount = 256;
 
+// Barrier selection for this build of the kernel.  RoundBarrier (O(P²)
+// notify-all → wait-all) is the NPU-safe baseline; the O(1) NeighborBarrier
+// (left/right only) is the end state — the same one as simpler #1383.
+// The TPUT push engine is verified on silicon at P=2/4 (both barriers pass);
+// NeighborBarrier is enabled by default since the push model provides the
+// ordering the pull model lacked.
+static constexpr bool kUseNeighborBarrier = true;
+
 template <typename T>
 AICORE inline __gm__ T *CommRemotePtr(__gm__ CommContext *ctx, __gm__ T *local_ptr, int pe) {
   uint64_t local_base = ctx->windowsIn[ctx->rankId];
@@ -54,21 +78,18 @@ AICORE inline __gm__ T *CommRemotePtr(__gm__ CommContext *ctx, __gm__ T *local_p
 
 // Per-round barrier row: AtomicAdd(0→1) / WaitGe(1), single-shot per row.
 //
-// RoundBarrier follows the simpler repo's ring collective pattern
-// (tests/st/worker/collectives/allreduce/kernels/aiv/allreduce_ibing_kernel.cpp):
-// TNOTIFY / TWAIT + pipe_barrier(PIPE_ALL) without dcci / dsb in the barrier
-// itself.  The step body flushes locally-written chunks to DDR with
-// dcci(…, CACHELINE_OUT) before pipe_barrier(PIPE_ALL), so TSTORE results are
-// globally visible when TNOTIFY fires.  TWAIT ensures the peer has also
-// reached the barrier and drained its own MTE pipes.  The trailing
-// pipe_barrier(PIPE_ALL) then drains any in-flight TNOTIFY / TWAIT traffic
-// before the next TLOAD reads the peer's buffer.
-//
-// Future optimisation: once the kernel moves to a TPUT push model, the
-// barrier can be relaxed to O(1) per invocation (NeighborBarrier:
-// left/right only).  TPUT's write pipeline handles the DDR ordering.
+// With the TPUT push model the barrier's job is to make every rank's completed
+// step pushes (a) drained from the MTE pipe (pipe_barrier(PIPE_ALL) after the
+// push loop) and (b) globally visible ahead of the signal (dsb(DSB_DDR) before
+// TNOTIFY).  When a rank's wait completes, all peers' step pushes have landed,
+// so the rank's next-step read of its own slot observes the accumulated data.
+// The trailing pipe_barrier(PIPE_ALL) drains any in-flight TNOTIFY / TWAIT
+// traffic.  This mirrors allgather/all_to_all Phase-2 verbatim (NOT
+// pto.fence.barrier_all — a GM-scope fence does not drain MTE DMA).
 AICORE inline void RoundBarrier(__gm__ CommContext *ctx, __gm__ int32_t *signal_row, int my_rank,
                                 int nranks) {
+  pipe_barrier(PIPE_ALL);
+  dsb(DSB_DDR);
   for (int peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) {
       continue;
@@ -85,6 +106,57 @@ AICORE inline void RoundBarrier(__gm__ CommContext *ctx, __gm__ int32_t *signal_
     pto::comm::TWAIT(sig, static_cast<int32_t>(1), pto::comm::WaitCmp::GE);
   }
   pipe_barrier(PIPE_ALL);
+}
+
+// O(1) per-round barrier: notify/wait the two ring neighbours only.  In the
+// push model each rank's data flows exclusively to its right neighbour and
+// arrives exclusively from its left neighbour, so waiting for the left
+// neighbour's drain is sufficient for the receiver's reads; the left/right
+// notify/wait cycle forms a valid ring barrier.
+//
+// This is the post-NPU-verification swap (see kUseNeighborBarrier).  The
+// pull-model NeighborBarrier failed on silicon (TSTORE + TLOAD do not order);
+// with TPUT the write pipeline provides the ordering — the canonical pattern
+// verified in simpler #1383 at P=2/4.
+AICORE inline void NeighborBarrier(__gm__ CommContext *ctx, __gm__ int32_t *signal_row, int my_rank,
+                                   int nranks) {
+  const int left = (my_rank - 1 + nranks) % nranks;
+  const int right = (my_rank + 1) % nranks;
+
+  pipe_barrier(PIPE_ALL);
+  dsb(DSB_DDR);
+
+  __gm__ int32_t *remote_signal = CommRemotePtr(ctx, signal_row + my_rank, left);
+  pto::comm::Signal sig_left(remote_signal);
+  pto::comm::TNOTIFY(sig_left, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
+
+  remote_signal = CommRemotePtr(ctx, signal_row + my_rank, right);
+  pto::comm::Signal sig_right(remote_signal);
+  pto::comm::TNOTIFY(sig_right, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
+
+  pto::comm::Signal sig_wl(signal_row + left);
+  pto::comm::TWAIT(sig_wl, static_cast<int32_t>(1), pto::comm::WaitCmp::GE);
+
+  pto::comm::Signal sig_wr(signal_row + right);
+  pto::comm::TWAIT(sig_wr, static_cast<int32_t>(1), pto::comm::WaitCmp::GE);
+
+  pipe_barrier(PIPE_ALL);
+}
+
+// StepBarrier dispatches to the ring barrier selected by kUseNeighborBarrier.
+// With the TPUT push engine verified on silicon at P=2/4, the O(1)
+// NeighborBarrier (notify/wait the two ring neighbours only) is the default:
+// the TPUT write pipeline orders the pushed data ahead of the signal.  The
+// O(P²) RoundBarrier remains as a brute-force fallback — it notifies/waits
+// every peer and stays correct on any rail, at the cost of P−1 notifies per
+// round per rank.
+AICORE inline void StepBarrier(__gm__ CommContext *ctx, __gm__ int32_t *signal_row, int my_rank,
+                               int nranks) {
+  if (kUseNeighborBarrier) {
+    NeighborBarrier(ctx, signal_row, my_rank, nranks);
+  } else {
+    RoundBarrier(ctx, signal_row, my_rank, nranks);
+  }
 }
 
 }  // namespace
@@ -141,132 +213,94 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   using TileData = pto::Tile<pto::TileType::Vec, {{dtype_cpp}}, 1, kTileCount, pto::BLayout::RowMajor, -1,
                              -1>;
 
-  TileData chunk_tile(1, kTileCount);
-  TileData recv_tile(1, kTileCount);
   static_assert(sizeof({{dtype_cpp}}) == 4,
                 "builtin.tensor.allreduce_ring currently only supports 4-byte element types");
-  constexpr int kRecvTileInitFill = 0x10000;  // bind-time placeholder; overwritten by TLOAD
-  TASSIGN(chunk_tile, 0x0);
-  TASSIGN(recv_tile, kRecvTileInitFill);
 
+  // Single staging tile for the TPUT push path — the allgather/all_to_all
+  // recipe.  TPUT's single-shot path TLOADs/TSTOREs by Tile::GetValidCol()
+  // (ColMaskInternal), NOT the GlobalTensor shape, so the tile's column mask
+  // is narrowed to each chunk's exact extent below; a 256-col tile with a
+  // shorter transfer would over-read/overwrite adjacent chunk slots.
   const int tile_cols = static_cast<int>(chunk_elems < kTileCount ? chunk_elems : kTileCount);
+  TileData send_tile(1, tile_cols);
+  TASSIGN(send_tile, 0x10000);
 
   int round = 0;
 
-  // Phase 1: reduce-scatter — (NR-1) ring steps.
+  // Phase 1: reduce-scatter — (NR-1) ring steps, TPUT<AtomicAdd> push right.
+  //
+  // Each rank pushes its current partial of chunk send_idx = (my_rank - step)
+  // % NR into the RIGHT neighbour's slot of the same index.  The remote
+  // atomic-add accumulates the receiver's own value with the sender's
+  // contribution, so a chunk's full sum walks the ring and lands in slot
+  // my_rank after the last step.  The per-step barrier (before this loop)
+  // guarantees the left neighbour's previous-step push has landed before this
+  // rank reads its own slot, and that every rank has drained its own pushes.
   for (int step = 1; step < nranks; ++step) {
-    const int recv_add_idx = (my_rank - step - 1 + nranks) % nranks;
-
-    RoundBarrier(comm_ctx, signal_base + round * signal_cols, my_rank, nranks);
+    StepBarrier(comm_ctx, signal_base + round * signal_cols, my_rank, nranks);
     ++round;
 
-    const int left = (my_rank - 1 + nranks) % nranks;
-
-    const int left_send_idx = (left - step + nranks) % nranks;
+    const int right = (my_rank + 1) % nranks;
+    const int send_idx = (my_rank - step + nranks) % nranks;
 
     for (int64_t tile_off = 0; tile_off < chunk_elems; tile_off += tile_cols) {
       int64_t remain64 = chunk_elems - tile_off;
       int tile_elems = static_cast<int>(remain64 < tile_cols ? remain64 : tile_cols);
-
-      chunk_tile.SetValidShape(1, tile_elems);
-      recv_tile.SetValidShape(1, tile_elems);
+      send_tile.ColMaskInternal = tile_elems;
 
       ShapeDyn tile_shape(1, 1, 1, 1, tile_elems);
       StrideDyn tile_stride(tile_elems, tile_elems, tile_elems, tile_elems, 1);
 
-      {
-        __gm__ {{dtype_cpp}} *remote_chunk =
-            CommRemotePtr(comm_ctx, chunks + static_cast<size_t>(left_send_idx * chunk_elems + tile_off), left);
-        Global remote_g(remote_chunk, tile_shape, tile_stride);
-        TLOAD(recv_tile, remote_g);
-        set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
-        wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
-      }
+      __gm__ {{dtype_cpp}} *src_ptr =
+          chunks + static_cast<size_t>(send_idx * chunk_elems + tile_off);
+      __gm__ {{dtype_cpp}} *dst_ptr = CommRemotePtr(comm_ctx, src_ptr, right);
+      Global src_g(src_ptr, tile_shape, tile_stride);
+      Global dst_g(dst_ptr, tile_shape, tile_stride);
 
-      Global acc_g(chunks + static_cast<size_t>(recv_add_idx * chunk_elems + tile_off), tile_shape, tile_stride);
-      TLOAD(chunk_tile, acc_g);
-      set_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);
-      wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);
-      TADD(chunk_tile, chunk_tile, recv_tile);
-      set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-      wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-      TSTORE(acc_g, chunk_tile);
-      set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
-      wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+      pipe_barrier(PIPE_ALL);
+      pto::comm::TPUT<pto::AtomicType::AtomicAdd>(dst_g, src_g, send_tile);
+      pipe_barrier(PIPE_ALL);
     }
-    // Flush written chunk to DDR so peers' AG TLOAD sees fresh data.
-    //
-    // The 16-element stride only covers the whole chunk when chunk_elems is a
-    // multiple of 16 (64 B-aligned chunk base); numel % NR == 0 does not
-    // guarantee that, so an unaligned chunk's trailing cache line is not
-    // flushed here (and in the AG-phase flush below).  Unaligned-chunk flush
-    // and the 32 B transfer alignment are shared mesh/ring work handled
-    // separately.
-    {
-      constexpr int kCacheLineFloats = 16;  // 64 B cache line / 4 B per float
-      for (int64_t off = 0; off < chunk_elems; off += kCacheLineFloats) {
-        dcci(chunks + static_cast<size_t>(recv_add_idx * chunk_elems + off),
-             SINGLE_CACHE_LINE, CACHELINE_OUT);
-      }
-    }
-    pipe_barrier(PIPE_ALL);
   }
 
-  // Phase 2: allgather — (NR-1) ring steps.
+  // Phase 2: allgather — (NR-1) ring steps, TPUT (non-atomic) push right.
+  //
+  // Each rank TPUTs its finalized chunk send_idx = (my_rank - step + 1) % NR
+  // into the right neighbour's slot of the same index (a plain copy — the
+  // chunk value is already the fully reduced sum).  The receiver does nothing
+  // locally; the push performs the store.
   for (int step = 1; step < nranks; ++step) {
-    const int recv_idx = (my_rank - step + nranks) % nranks;
-
-    RoundBarrier(comm_ctx, signal_base + round * signal_cols, my_rank, nranks);
+    StepBarrier(comm_ctx, signal_base + round * signal_cols, my_rank, nranks);
     ++round;
 
-    const int left = (my_rank - 1 + nranks) % nranks;
-
-    const int left_send_idx = (left - step + 1 + nranks) % nranks;
+    const int right = (my_rank + 1) % nranks;
+    const int send_idx = (my_rank - step + 1 + nranks) % nranks;
 
     for (int64_t tile_off = 0; tile_off < chunk_elems; tile_off += tile_cols) {
       int64_t remain64 = chunk_elems - tile_off;
       int tile_elems = static_cast<int>(remain64 < tile_cols ? remain64 : tile_cols);
-
-      recv_tile.SetValidShape(1, tile_elems);
+      send_tile.ColMaskInternal = tile_elems;
 
       ShapeDyn tile_shape(1, 1, 1, 1, tile_elems);
       StrideDyn tile_stride(tile_elems, tile_elems, tile_elems, tile_elems, 1);
 
-      {
-        __gm__ {{dtype_cpp}} *remote_chunk =
-            CommRemotePtr(comm_ctx, chunks + static_cast<size_t>(left_send_idx * chunk_elems + tile_off), left);
-        Global remote_g(remote_chunk, tile_shape, tile_stride);
-        TLOAD(recv_tile, remote_g);
-        set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
-        wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
-      }
+      __gm__ {{dtype_cpp}} *src_ptr =
+          chunks + static_cast<size_t>(send_idx * chunk_elems + tile_off);
+      __gm__ {{dtype_cpp}} *dst_ptr = CommRemotePtr(comm_ctx, src_ptr, right);
+      Global src_g(src_ptr, tile_shape, tile_stride);
+      Global dst_g(dst_ptr, tile_shape, tile_stride);
 
-      Global dst_g(chunks + static_cast<size_t>(recv_idx * chunk_elems + tile_off), tile_shape, tile_stride);
-      set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-      wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-      TSTORE(dst_g, recv_tile);
-      set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
-      wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+      pipe_barrier(PIPE_ALL);
+      pto::comm::TPUT(dst_g, src_g, send_tile);
+      pipe_barrier(PIPE_ALL);
     }
-    // Flush received chunk to DDR so peers' next-round AG TLOAD sees fresh data.
-    {
-      constexpr int kCacheLineFloats = 16;  // 64 B cache line / 4 B per float
-      for (int64_t off = 0; off < chunk_elems; off += kCacheLineFloats) {
-        dcci(chunks + static_cast<size_t>(recv_idx * chunk_elems + off),
-             SINGLE_CACHE_LINE, CACHELINE_OUT);
-      }
-    }
-    pipe_barrier(PIPE_ALL);
   }
 
-  // Final cross-rank barrier: guarantee every rank has finished reading from
-  // all its peers' buffers before any rank returns to the host.  Each round's
-  // RoundBarrier at the top of the step protects the current step's data
-  // motion, but there is nothing that coordinates the last allgather step's
-  // reads.  Without this barrier a fast rank could return, have its buffer
-  // reused by the next host statement, and corrupt the slow right-hand peer's
-  // final TLOAD.
-  RoundBarrier(comm_ctx, signal_base + round * signal_cols, my_rank, nranks);
+  // Final cross-rank barrier: guarantee every rank's last pushes have landed
+  // (and drained) before any rank returns to the host — otherwise a fast rank
+  // could return, have its buffer reused by the next host statement, and
+  // corrupt a slow peer's pending read of the pushed data.
+  StepBarrier(comm_ctx, signal_base + round * signal_cols, my_rank, nranks);
 
   // Self-clearing epilogue: restore every used barrier row to 0 so the signal is
   // reusable across calls (the InCore credit-barrier protocol). Each row hosted
