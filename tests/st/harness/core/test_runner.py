@@ -37,7 +37,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pypto.backend import BackendType, reset_for_testing, set_backend_type
+from pypto.backend import (
+    BackendType,
+    get_backend_type,
+    is_backend_configured,
+    reset_for_testing,
+    set_backend_type,
+)
 from pypto.pypto_core import LogLevel, _set_thread_log_level
 from pypto.pypto_core.passes import MemoryPlanner
 from pypto.runtime import compile_program
@@ -57,7 +63,7 @@ from pypto.runtime.runner import (
 )
 from pypto.runtime.tensor_spec import TensorSpec as RuntimeTensorSpec
 
-from harness.core.harness import PTOTestCase
+from harness.core.harness import PTOTestCase, arch_mismatch_reason
 
 # tests/st/harness/core/test_runner.py -> tests/st/ -> project root
 _ST_DIR = Path(__file__).parent.parent.parent
@@ -173,6 +179,58 @@ def _cache_key(
     planner = _resolve_case_memory_planner(tc, session_memory_planner)
     planner_tag = planner.name.lower() if planner is not None else "default"
     return f"{tc.get_name()}@{resolved_platform}@{planner_tag}"
+
+
+def _install_backend(backend_type: BackendType) -> None:
+    """Install *backend_type* globally for the inline compile that follows.
+
+    ``set_backend_type`` is a process-global one-time setter — idempotent for
+    the same value, an error for a different one — so a session that walks the
+    platform matrix inside one process (no ``--forked``) has to clear the
+    previous backend before installing the next. The inline path is serial on
+    the calling thread, so nothing is compiling across the switch.
+
+    The exception is an inline case running *while the pre-compile pipeline is
+    alive*: its worker threads compile against the installed backend, so
+    clearing it underneath them would race. There the original single-shot
+    error is kept, which is what the pipeline's own per-group draining
+    (see :func:`start_pipeline`) is designed around.
+
+    Args:
+        backend_type: The backend the caller is about to compile for.
+    """
+    if _compile_pools:
+        set_backend_type(backend_type)
+        return
+    if is_backend_configured() and get_backend_type() != backend_type:
+        reset_for_testing()
+    set_backend_type(backend_type)
+
+
+def _bind_and_check_arch(test_case: PTOTestCase, resolved_platform: str) -> str | None:
+    """Bind *resolved_platform* onto *test_case*, then report an arch conflict.
+
+    Binding first is what separates a *pinned* backend from the default one:
+    an unbound case answers ``get_backend_type()`` with the base-class
+    ``Ascend910B`` default, which is not a pin and must not read as a conflict.
+    Once the platform is bound, only a subclass that redefines
+    ``get_backend_type()`` can still disagree with it — and that case genuinely
+    cannot run on this platform.
+
+    Binding also makes the legacy path follow the platform: ``_run_inline`` and
+    ``_compile_for_cache`` take the backend from ``tc.get_backend_type()``, so
+    before this a case that never mentioned a platform compiled for 910B even
+    under ``--platform=a5``.
+
+    Args:
+        test_case: The case about to be compiled (mutated: platform bound).
+        resolved_platform: The platform resolved for it.
+
+    Returns:
+        A skip reason when the case pins a conflicting backend, else ``None``.
+    """
+    test_case.bind_platform(resolved_platform)
+    return arch_mismatch_reason(test_case, resolved_platform)
 
 
 def _resolve_platform(config_platform: str, test_case: PTOTestCase | None = None) -> str:
@@ -370,6 +428,10 @@ class CompileArtifact:
     work_dir: Path
     resolved_platform: str
     error: str | None = None
+    #: Set when the case pins a backend the resolved platform cannot serve; the
+    #: artefact holds nothing and neither the batch submitter nor the execute
+    #: pool may touch it (``TestRunner.run`` turns it into a pytest skip).
+    skip_reason: str | None = None
     runtime_name: str | None = None
     chip_callable: Any | None = None
     enable_sdma: bool = False
@@ -392,6 +454,11 @@ def _fused_compile_task(
     """
     resolved = _resolve_platform(session_platform, tc)
     work_dir = cache_dir / _cache_key(tc, resolved, session_memory_planner)
+    # A backend-pinned case cannot be compiled for this platform. Report it
+    # instead of burning a compile slot on an artefact ``run()`` will skip.
+    skip_reason = _bind_and_check_arch(tc, resolved)
+    if skip_reason is not None:
+        return CompileArtifact(work_dir=work_dir, resolved_platform=resolved, skip_reason=skip_reason)
     work_dir.mkdir(parents=True, exist_ok=True)
     try:
         _compile_for_cache(
@@ -957,7 +1024,11 @@ def _batch_submitter(batch_size: int, cache_dir: Path) -> None:
                 artifact = cfut.result()
             except Exception:  # noqa: BLE001 — run() re-raises the compile crash with context
                 continue
-            if artifact.error is not None or _pipeline_ctx.get("codegen_only"):
+            if (
+                artifact.error is not None
+                or artifact.skip_reason is not None
+                or _pipeline_ctx.get("codegen_only")
+            ):
                 continue
             if artifact.resolved_platform.endswith("sim"):
                 continue
@@ -1078,6 +1149,10 @@ def start_pipeline(  # noqa: PLR0913
 
     groups: dict[BackendType, list[PTOTestCase]] = {}
     for tc in test_cases:
+        # Bind before grouping: the group key IS the backend the compile pool
+        # installs globally, and an unbound case answers with the base-class
+        # Ascend910B default rather than the platform it will be built for.
+        tc.bind_platform(_resolve_platform(session_platform, tc))
         groups.setdefault(tc.get_backend_type(), []).append(tc)
 
     group_items = list(groups.items())
@@ -1240,6 +1315,9 @@ class TestRunner:
             RunResult with pass/fail status and details.
         """
         resolved_platform = _resolve_platform(self.config.platform, test_case)
+        skip_reason = _bind_and_check_arch(test_case, resolved_platform)
+        if skip_reason is not None:
+            pytest.skip(skip_reason)
         cache_k = _cache_key(test_case, resolved_platform, self.config.memory_planner)
         cfut = _compile_futures.get(cache_k)
         if cfut is not None:
@@ -1349,7 +1427,7 @@ class TestRunner:
 
         try:
             backend_type = test_case.get_backend_type()
-            set_backend_type(backend_type)
+            _install_backend(backend_type)
 
             program = test_case.get_program()
             if program is None:

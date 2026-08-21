@@ -82,6 +82,36 @@ def platform_to_backend(platform: str) -> BackendType:
         raise ValueError(f"Unknown platform '{platform}'. Expected one of {ALL_PLATFORM_IDS}.") from exc
 
 
+def arch_mismatch_reason(test_case: "PTOTestCase", resolved_platform: str) -> str | None:
+    """Return why *test_case* cannot run on *resolved_platform*, or None when it can.
+
+    A subclass that redefines :py:meth:`PTOTestCase.get_backend_type` wins over
+    the ``platform`` constructor arg, while the toolchain that assembles and
+    executes the artefact follows the platform.  A case pinned to
+    ``Ascend910B`` would therefore compile 910B code and run it on 950 silicon
+    under ``--platform=a5``.  The runner calls this before compiling and skips
+    the case instead, so a whole file can be added to an a5 guard job without
+    silently testing the wrong architecture.
+
+    Args:
+        test_case: The case about to be compiled.
+        resolved_platform: The platform resolved for it (see ``_resolve_platform``).
+
+    Returns:
+        A user-facing skip reason, or ``None`` when the case matches the platform.
+    """
+    want = platform_to_backend(resolved_platform)
+    got = test_case.get_backend_type()
+    if got is want:
+        return None
+    return (
+        f"{test_case.get_name()} pins get_backend_type()={got.name}, but "
+        f"--platform={resolved_platform} needs {want.name}. Drop the "
+        f"get_backend_type() override to make the case arch-agnostic, or declare "
+        f'the limitation with @pytest.mark.platforms("a2a3", "a2a3sim", reason=...).'
+    )
+
+
 class DataType(Enum):
     """Supported data types for tensors."""
 
@@ -312,6 +342,23 @@ class PTOTestCase(ABC):
         redefine the method.
         """
         return self._override_platform
+
+    def bind_platform(self, platform: str) -> None:
+        """Bind *platform* to this case when it did not pin one itself.
+
+        Called by the harness for cases whose test body does not pass
+        ``platform=`` — the platform matrix is driven by the item's parametrize
+        variant instead (see ``pytest_generate_tests`` in ``tests/st/conftest.py``).
+        A case that pinned its own platform (constructor arg or a
+        :py:meth:`get_platform` override) is left untouched.
+
+        Args:
+            platform: One of :data:`ALL_PLATFORM_IDS`.
+        """
+        if platform not in ALL_PLATFORM_IDS:
+            raise ValueError(f"Unknown platform '{platform}'. Expected one of {ALL_PLATFORM_IDS}.")
+        if self.get_platform() is None:
+            self._override_platform = platform
 
     def get_backend_type(self) -> BackendType:
         """Return the backend type for code generation.
