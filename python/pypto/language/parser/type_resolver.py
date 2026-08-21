@@ -116,10 +116,11 @@ def _is_pl_yield_call(node: ast.expr) -> bool:
 # wrapper name; raw IR type names remain accepted as legacy aliases for
 # previously serialized Python text.
 #
-# `CommCtx` is the DSL wrapper a materialized communication-context parameter
-# should be spelled with (`ctx: pld.CommCtx`), matching how `pld.get_comm_ctx`
-# hands the value back. The printer still emits the raw `CommCtxType` spelling;
-# aligning it is tracked separately.
+# None of the raw names is exported by `pl` / `pld`, so they resolve here but
+# cannot be evaluated as attributes. Python does not evaluate local-variable
+# annotations, so a raw name still works in an `x: pl.AsyncEventType = ...`
+# binding; in a *parameter* annotation it raises AttributeError before the
+# parser ever sees it. Emit the wrapper name — that is what the printer does.
 _MARKER_TYPE_GETTERS: dict[str, Callable[[], ir.Type]] = {
     "PrefetchAsyncContextType": ir.PrefetchAsyncContextType.get,
     "PrefetchAsyncContext": ir.PrefetchAsyncContextType.get,

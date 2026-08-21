@@ -119,12 +119,14 @@ class TestTypeResolver:
             ("pl.PrefetchAsyncContext", ir.PrefetchAsyncContextType),
             ("pl.AsyncEvent", ir.AsyncEventType),
             ("pl.AsyncSession", ir.AsyncSessionType),
+            ("pld.CommCtx", ir.CommCtxType),
             ("pl.PrefetchAsyncContextType", ir.PrefetchAsyncContextType),
             ("pl.AsyncEventType", ir.AsyncEventType),
             ("pl.AsyncSessionType", ir.AsyncSessionType),
+            ("pld.CommCtxType", ir.CommCtxType),
         ],
     )
-    def test_resolve_prefetch_handle_wrapper_and_legacy_type_names(self, annotation, expected_type):
+    def test_resolve_marker_wrapper_and_legacy_type_names(self, annotation, expected_type):
         """Public wrapper names and legacy IR type aliases resolve identically."""
         resolver = _make_resolver()
         node = ast.parse(annotation, mode="eval").body

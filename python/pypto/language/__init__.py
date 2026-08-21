@@ -252,6 +252,7 @@ from .typing import (
     MemRef,
     Out,
     PrefetchAsyncContext,
+    Ptr,
     Scalar,
     Tensor,
     Tile,
@@ -261,9 +262,6 @@ from .typing import (
 
 # Short alias for MemorySpace (pl.Mem.Vec instead of pl.MemorySpace.Vec)
 Mem = MemorySpace
-
-# Alias for PtrType — used in printed IR as type annotation for alloc LHS
-Ptr = PtrType
 
 # Re-export TensorLayout constants for convenience
 ND = TensorLayout.ND
