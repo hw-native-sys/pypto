@@ -47,7 +47,7 @@ def _create_sync_op(
     *,
     set_pipe: PipeType,
     wait_pipe: PipeType,
-    event_id: int,
+    event_id: int | Expr,
     span: Span | None,
 ) -> Call:
     """Create a flag-based synchronization operation.
@@ -56,12 +56,19 @@ def _create_sync_op(
         op_name: Operation name (e.g., "system.sync_src")
         set_pipe: Pipe that sets the flag
         wait_pipe: Pipe that waits on the flag
-        event_id: Event identifier
+        event_id: Event identifier (static int, or dynamic Expr of ScalarType(INDEX))
         span: Optional source span for debugging
     """
     actual_span = _get_span_or_capture(span, frame_offset=2)
-    kwargs = {"set_pipe": set_pipe, "wait_pipe": wait_pipe, "event_id": event_id}
-    return _ir_core.create_op_call(op_name, [], kwargs, actual_span)
+    args: list[Expr] = []
+    kwargs: dict[str, Any] = {"set_pipe": set_pipe, "wait_pipe": wait_pipe}
+    if isinstance(event_id, int) and not isinstance(event_id, bool):
+        kwargs["event_id"] = event_id
+    elif isinstance(event_id, Expr):
+        args.append(event_id)
+    else:
+        raise TypeError(f"{op_name} event_id must be int or Expr, got {type(event_id).__name__}")
+    return _ir_core.create_op_call(op_name, args, kwargs, actual_span)
 
 
 def _create_barrier_op(op_name: str, *, span: Span | None) -> Call:
@@ -79,7 +86,7 @@ def sync_src(
     *,
     set_pipe: PipeType,
     wait_pipe: PipeType,
-    event_id: int,
+    event_id: int | Expr,
     span: Span | None = None,
 ) -> Call:
     """Send a synchronization signal (Set Flag).
@@ -87,7 +94,7 @@ def sync_src(
     Args:
         set_pipe: Pipe that sets the flag
         wait_pipe: Pipe that will wait on the flag
-        event_id: Event identifier
+        event_id: Event identifier (static int, or dynamic Expr of ScalarType(INDEX))
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -102,7 +109,7 @@ def sync_dst(
     *,
     set_pipe: PipeType,
     wait_pipe: PipeType,
-    event_id: int,
+    event_id: int | Expr,
     span: Span | None = None,
 ) -> Call:
     """Wait for a synchronization signal (Wait Flag).
@@ -110,7 +117,7 @@ def sync_dst(
     Args:
         set_pipe: Pipe that sets the flag
         wait_pipe: Pipe that waits on the flag
-        event_id: Event identifier
+        event_id: Event identifier (static int, or dynamic Expr of ScalarType(INDEX))
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
