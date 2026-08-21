@@ -43,16 +43,16 @@ program_tiled = l0_tile_pass(program)
 
 For each `tile.matmul`, `tile.matmul_acc`, or `tile.matmul_bias` in an InCore-typed function:
 
-1. **Filter** — operand layout: `(lhs, rhs)` for `tile.matmul`, `(acc, lhs, rhs)` for `tile.matmul_acc`, and `(lhs, rhs, bias)` for `tile.matmul_bias`. All operands must be `Var`/`IterArg` (via `AsVarLike`) of `TileType` with static 2D shape. Before the residency filter, a static matrix operand already in its final `Left`/`Right` space is rejected when its physical footprint alone exceeds L0A/L0B; this impossible manual allocation cannot be repaired by reuse or planner choice. Individually legal manual L0 operands remain untouched. For automatic tiling, the right (B) operand must be `memory_space == Mat`. Plain/accumulating matmul retains the historical `Mat`-or-`Vec` left operand support; biased matmul deliberately requires both matrix operands in `Mat`. Its bias must be `[1, N]`, resident in `Mat` or `Bias`, and use the accumulator dtype (FP32 for floating-point matrix operands, INT32 for integer matrix operands). A Mat-resident bias additionally requires a backend-supported Mat→Bias dtype pair. Biased M/N/K must satisfy the matrix operands' layout-derived boxed alignment. Other cases are skipped or diagnosed conservatively.
+1. **Filter** — operand layout: `(lhs, rhs)` for `tile.matmul`, `(acc, lhs, rhs)` or `(acc, lhs, rhs, init_cond)` for `tile.matmul_acc`, and `(lhs, rhs, bias)` for `tile.matmul_bias`. Arity 4 is accepted **only** for the accumulate kind — a fresh matmul has no accumulator to predicate and `tile.matmul_bias` carries no `init_cond` operand. All matrix operands must be `Var`/`IterArg` (via `AsVarLike`) of `TileType` with static 2D shape. Before the residency filter, a static matrix operand already in its final `Left`/`Right` space is rejected when its physical footprint alone exceeds L0A/L0B; this impossible manual allocation cannot be repaired by reuse or planner choice. Individually legal manual L0 operands remain untouched. For automatic tiling, the right (B) operand must be `memory_space == Mat`. Plain/accumulating matmul retains the historical `Mat`-or-`Vec` left operand support; biased matmul deliberately requires both matrix operands in `Mat`. Its bias must be `[1, N]`, resident in `Mat` or `Bias`, and use the accumulator dtype (FP32 for floating-point matrix operands, INT32 for integer matrix operands). A Mat-resident bias additionally requires a backend-supported Mat→Bias dtype pair. Biased M/N/K must satisfy the matrix operands' layout-derived boxed alignment. Other cases are skipped or diagnosed conservatively.
 2. **Pick L0 tile shape** — call `utils::ChooseL0Tile(cfg)` with the active `BackendHandler`'s `GetL0{a,b,c}CapacityBytes()`, `GetL0FractalAlignment()` / `GetMinL0TileDim()`, `GetL0cMAlignment(accumulator_dtype)`, and `GetL0CostModel()` (L1↔L0 bandwidths + MAD issue overhead), plus per-operand element width (`bytes_a/b/c`) read from the call's result type. Biased matmul additionally caps candidate N with `GetBiasCapacityBytes() / bytes_c`; this is a hard auxiliary-SRAM limit, not a roofline coefficient. For a Mat-backed bias reconstructed inside a full-K output grid, the same exhaustive search applies schedule-aware caps: B-stationary keeps one Bias slot, A-stationary and output-stationary with N outer use two, and output-stationary with N in the inner pipeline composes both pipeline memberships and uses four. An already-Bias-resident source is defined outside the grid and always consumes one slot. Candidate L0C legality is `AlignUp(AlignUp(m, box_align_m), l0c_align_m) × AlignUp(n, box_align_n) × bytes_c × dbC <= L0C`; the box alignments default to 1 and are set from the canonical split-K operands' effective Mat layouts when that path will physically pad a window. The boxed M/N extents also gate L0A/L0B. The logical work shape and roofline accounting remain `[m, n]`. `c_read = is_matmul_acc` because `tile.matmul_acc` threads the caller's accumulator through the K-loop's iter-arg (γ_C = 2, doubling the C traffic the model charges). The chooser returns `(m, n, k)` plus the chosen design point — an **exhaustive roofline-`wall` minimum**, not a closed form; see [Cost model & design space](#cost-model--design-space-choosel0tile) below.
 3. **Skip if already L0-sized** — `(m, n, k) == (M, N, K)`.
 4. **Skip with `PerfHint` for unsupported regimes**:
    - Sub-byte dtypes (cube path doesn't support them) — `PH-AT-003`.
    - `ChooseL0Tile` rejects the configuration — `PH-AT-005`.
 5. **Build the K-loop** (per output sub-tile — the whole output when K-only, or each `[m, n]` sub-tile when M/N tiling):
-   - `tile.matmul` — iter-arg init is an Acc-resident `tile.create([m, n], dtype, target_memory=Acc)` placeholder; the loop body branches on `ko == 0` between `tile.matmul` (fresh Acc) and `tile.matmul_acc` (accumulating into the iter-arg). The `IfStmt` materializes a phi return_var that the outer yield carries back to the iter-arg.
-   - `tile.matmul_acc` — iter-arg init is the caller's accumulator directly (its type already matches the per-iter `tile.matmul_acc` output); every iteration is uniform `tile.matmul_acc`, so no if-else.
-   - `tile.matmul_bias` — uses the same fresh-accumulator loop as `tile.matmul`, but the first K block is `tile.matmul_bias` and every later block is `tile.matmul_acc`, so bias is added exactly once. For N tiling, the matching window is reconstructed as an independent tensor→Mat `tile.load`, then transferred with `tile.move` to Bias (`pto.tload` + `pto.tmov`). A zero-copy one-row Mat `tile.slice` is not used because its boxed `pto.subview` is not PTOAS-legal.
+   - `tile.matmul` — iter-arg init is the Acc-resident `tile.create([m, n], dtype, target_memory=Acc)` seed; the loop body is one predicated `tile.matmul_acc(c_iter, sa, sb, ko == 0)` whose predicate overwrites the accumulator on the first L0 block and accumulates into it afterwards. Because `tile.matmul_acc` declares `set_output_reuses_input(0)`, the create / call / yield / return_var chain is one L0C buffer by construction. The peeled `if ko == 0` shape this replaces put one logical value on **two** Acc buffers and merged them at a phi — a state no supported target can realize, since nothing reads L0C but the FIXPIPE drain and there is therefore no Acc→Acc copy to reconcile the arms.
+   - `tile.matmul_acc` — iter-arg init is the caller's accumulator directly (its type already matches the per-iter `tile.matmul_acc` output); every iteration is uniform `tile.matmul_acc`. The 3-operand spelling emits no predicate at all, because the caller's accumulator is already live on the first iteration and must never be overwritten. The 4-operand spelling carries the caller's `init_cond`, which means "this is the first K step of the *user's* reduction" — the emitted call ANDs it with the loop's own `ko == 0` ("the first L0 block of that step"), so the accumulator is overwritten only where both hold. A lone straight-line full block (`⌊K/k⌋ == 1`) forwards `init_cond` verbatim: that block *is* the first K block, so composing a statically-true `ko == 0` would only add a foldable node. The peeled partial tail drops the predicate entirely and emits the 3-operand call — it runs at a K offset past every full block, so it is never the first block.
+   - `tile.matmul_bias` — the first K block is **head-peeled** out of the loop: a straight-line `tile.matmul_bias` applies the bias exactly once *and* mints the accumulator, and the loop then runs over the remaining full blocks accumulating into it with plain `tile.matmul_acc`. `tile.matmul_bias` carries no `init_cond` operand, so it cannot use the predicated body a plain `tile.matmul` gets; peeling reaches the same one-buffer chain without a predicate. It deliberately does **not** peel into an `IfStmt`: a phi between the fresh `tile.matmul_bias` and the in-place `tile.matmul_acc` would give one logical value two producers on two L0C buffers, which no target can realize (there is no `Acc`→`Acc` copy) and which `MemoryReuse` can only repair after the fact by rewriting buffer identity. With exactly two full blocks the second is straight-line too, since a 1-trip pipeline loop would be degenerate. The pass therefore generates no accumulator phi at all. For N tiling, the matching window is reconstructed as an independent tensor→Mat `tile.load`, then transferred with `tile.move` to Bias (`pto.tload` + `pto.tmov`). A zero-copy one-row Mat `tile.slice` is not used because its boxed `pto.subview` is not PTOAS-legal.
    - Per-iter operand extracts use `tile.extract(src, idx_row, idx_col, [shape], target_memory=Left|Right)` — the SSA-form fusion of the older `tile.slice` (Mat-resident result) + `tile.mov` (Mat→Left/Right) pair. This eliminates the intermediate Mat-resident slice tile and lowers to `pto.textract` rather than `pto.subview`, sidestepping the latter's `valid_row` codegen mismatch. For an output sub-tile at origin `(mi, ni)` the extracts slice `lhs[mi:mi+m, ko:ko+k]` and `rhs[ko:ko+k, ni:ni+n]`; the K-only case is `mi == ni == 0`, `m == M`, `n == N`.
    - **Vec left operand staging** — when the left (A) operand is `Vec`-resident (PV / `score·V`), a single `tile.move(lhs, target_memory=Mat)` is emitted **before** the K-loop and the per-iter Left extract slices from that staged Mat tile (so the extract source is Mat exactly like the QK path). Keeping the Vec→Mat crossing a `tile.move` lets [`ExpandMixedKernel`](21-expand_mixed_kernel.md) recognise it (`CollectCVBoundaryMoves` only matches `tile.move`) and lower it to the cross-core `tpop_from_aiv` handshake (which lands the data in Mat). Extracting straight from the Vec tile would instead leave the operand a dangling cross-boundary free variable on the cube side.
    - The K-loop is `ForKind::Pipeline` with `pipeline_stages=2`.
@@ -61,7 +61,14 @@ For each `tile.matmul`, `tile.matmul_acc`, or `tile.matmul_bias` in an InCore-ty
 
    For a **fresh `tile.matmul` or `tile.matmul_bias` whose result is consumed by exactly one 2D `tile.store(c, base, out)`**, with that consumer store as the first non-load statement after the matmul, the pass tiles the output into a `ceil(M/m) × ceil(N/n)` grid: for each sub-tile origin `(mi, ni)` it computes the `[m, n]` (partial on the boundary, `min(m, M-mi) × min(n, N-ni)`) sub-tile and emits `tile.store(c_sub, [base_r + mi, base_c + ni], out_prev)`. Biased matmul also reloads the corresponding `[1, n]` bias window from the defining tensor into Mat and moves it to Bias, where the cube broadcasts it over that sub-tile's M rows. Requiring the store to be the first non-load prevents deferred grid emission from crossing an effect. When **K spans ≥ 2 L0 blocks**, each sub-tile is an independent **pipelined K-loop**. When **`k == K`**, the grid is emitted as nested loops over the divisible interior so [`LowerPipelineLoops`](28-lower_pipeline_loops.md) double-buffers the moving operand. The outer loop owns the stationary panel; output-stationary versus A/B-stationary loop order follows the chooser's design point. The L-shaped partial boundary is peeled into straight-line partial tiles, so `m`/`n` need not divide `M`/`N`. The stores chain the output tensor in SSA form; the final store's result replaces the original store downstream.
 
-   A **canonical frontend split-K reduction** is matched as an adjacent `tile.create([M, N])` full-output accumulator placeholder, one pipeline carrying that value through an `if` with `tile.matmul` for the first K block and `tile.matmul_acc` for later blocks, and one 2D output store. The two distinct operands must come from direct per-iteration GM→Mat loads whose static shape and valid shape cover the full rectangular panels; the loop may contain only scalar address calculations besides those loads. The pass moves the output grid outside the source K loop: for each `(mi, ni)`, it creates a legal `[m, n]` Acc, clones the complete K loop, narrows both loads to that output window, completes the full K reduction, then stores the tile. The ordinary call-level AutoTile rewrite subsequently applies any needed inner-K tiling to the narrowed branch matmuls. This ordering is essential: slicing the existing full Acc would still require the impossible `[M, N]` L0C allocation.
+   A **canonical frontend split-K reduction** is matched as an adjacent `tile.create([M, N])` full-output accumulator placeholder, one pipeline carrying that value through the K reduction, and one 2D output store. The reduction itself is accepted in **either source spelling**:
+
+   - **peeled** — an `if` with `tile.matmul` for the first K block and `tile.matmul_acc` for later blocks, merged at the branch's phi;
+   - **predicated** — a single 4-operand `tile.matmul_acc(acc, lhs, rhs, init_cond)` accumulating into the loop's only iter-arg, with no branch and no phi.
+
+   In the predicated spelling `init_cond` must be a split-K seed test: `<x> == 0` where `x` is this loop's own induction variable, or a body-local scalar defined as `<induction variable> * <nonzero constant>` (the `k0 = kb * K_TILE` spelling every peeled kernel already uses for its `if`). Matching the induction variable by identity is what rejects a caller-supplied flag or another loop's variable — neither is evidence that the accumulator is overwritten on the first K block. Such a triplet is left untouched and reported with a `PH-AT-006` hint rather than silently losing M/N tiling.
+
+   The two distinct operands must come from direct per-iteration GM→Mat loads whose static shape and valid shape cover the full rectangular panels; the loop may contain only scalar address calculations besides those loads. The pass moves the output grid outside the source K loop: for each `(mi, ni)`, it creates a legal `[m, n]` Acc, clones the complete K loop, narrows both loads to that output window, completes the full K reduction, then stores the tile. The retiled loop keeps whichever spelling the source used, so both spellings produce the same output grid, the same narrowed loads and the same store chain, differing only in that reduction statement. The ordinary call-level AutoTile rewrite subsequently applies any needed inner-K tiling to the narrowed calls — where it does, the peeled spelling yields two inner K-loops behind the branch while the predicated one yields a single loop whose predicate is `init_cond and ko == 0`. This ordering is essential: slicing the existing full Acc would still require the impossible `[M, N]` L0C allocation.
 
    The following M/N regimes remain **deferred**: an arbitrary standalone `tile.matmul_acc` with a caller-owned accumulator (it does not match the canonical chain above), a `Vec` left operand (PV path), a biased matmul whose already-`Bias`-resident source would need an unsupported Bias-to-Bias N sub-window, a Mat bias that is not a single-use 2D load with only sibling loads before the matmul, and a result consumed on-chip that is **not** consumed entirely as a matmul operand. Treating every non-load statement as a barrier preserves the original bias snapshot across intervening stores or other effects; removing the replaced full load avoids redundant traffic. A result consumed entirely as a matmul operand takes the Mat-scratch placement below.
 
@@ -167,20 +174,15 @@ class After:
         for ko, (c_iter,) in pl.pipeline(0, 256, 64, init_values=(c_l0_init,), stage=2):
             sa = pl.tile.extract(a_mat, 0, ko, [128, 64], target_memory=Left)
             sb = pl.tile.extract(b_mat, ko, 0, [64, 128], target_memory=Right)
-            if ko == 0:
-                c_first = pl.tile.matmul(sa, sb)
-                c_phi = pl.yield_(c_first)
-            else:
-                c_acc = pl.tile.matmul_acc(c_iter, sa, sb)
-                c_phi = pl.yield_(c_acc)
-            c = pl.yield_(c_phi)
+            c_acc = pl.tile.matmul_acc(c_iter, sa, sb, ko == 0)
+            c = pl.yield_(c_acc)
         # c (the yield-LHS) holds the accumulated Acc-typed result.
         ...
 ```
 
 ### `tile.matmul_acc`
 
-The caller's accumulator threads through the iter-arg directly; no if-else is needed:
+The caller's accumulator threads through the iter-arg directly; no `init_cond` predicate is emitted, because that accumulator is already live on the first iteration and must never be overwritten:
 
 ```python
 for ko, (c_iter,) in pl.pipeline(0, K, k, init_values=(acc_init,), stage=2):
@@ -190,6 +192,25 @@ for ko, (c_iter,) in pl.pipeline(0, K, k, init_values=(acc_init,), stage=2):
     c = pl.yield_(c_new)
 # c (the yield-LHS) holds the accumulated Acc-typed result.
 ```
+
+### `tile.matmul_acc` with a caller-supplied `init_cond`
+
+`pl.tile.matmul_acc(acc_init, a_mat, b_mat, init_cond=user_cond)` is the split-K idiom: `user_cond` marks the first K step of the user's own reduction. The pass composes it with the `ko == 0` its K-loop introduces, so the accumulator is overwritten only on the first L0 block of that step:
+
+```python
+for ko, (c_iter,) in pl.pipeline(0, k_full, k, init_values=(acc_init,), stage=2):
+    sa = pl.tile.extract(a_mat, 0, ko, [m, k], target_memory=Left)
+    sb = pl.tile.extract(b_mat, ko, 0, [k, n], target_memory=Right)
+    c_new = pl.tile.matmul_acc(c_iter, sa, sb, user_cond and ko == 0)
+    c_kmain = pl.yield_(c_new)
+# Peeled partial tail (k does not divide K): unpredicated 3-operand form —
+# it runs at K offset k_full > 0, so it is never the first block.
+sat = pl.tile.extract(a_mat, 0, k_full, [m, k_eff], target_memory=Left)
+sbt = pl.tile.extract(b_mat, k_full, 0, [k_eff, n], target_memory=Right)
+c = pl.tile.matmul_acc(c_kmain, sat, sbt)
+```
+
+A literal `True` predicate is composed the same way rather than folded back to `tile.matmul`: folding it would mint a second L0C buffer, and the backend emitter already selects the right instruction for a compile-time predicate — see [`init_cond` in the operator reference](../ir/05-operators.md), which also covers what the emitter does with the `ko == 0` this pass generates once `LowerPipelineLoops` folds it per replica.
 
 ### M/N tiling (output exceeds L0c)
 
@@ -208,13 +229,8 @@ c_t1_init = pl.tile.create([256, 256], dtype=pl.FP32, target_memory=Acc)
 for ko, (c_iter,) in pl.pipeline(0, 512, 32, init_values=(c_t1_init,), stage=2):
     sa = pl.tile.extract(lhs_mat, 256, ko, [256, 32], target_memory=Left)
     sb = pl.tile.extract(rhs_mat, ko, 0, [32, 256], target_memory=Right)
-    if ko == 0:
-        c_first = pl.tile.matmul(sa, sb)
-        c_phi = pl.yield_(c_first)
-    else:
-        c_acc = pl.tile.matmul_acc(c_iter, sa, sb)
-        c_phi = pl.yield_(c_acc)
-    c_t1 = pl.yield_(c_phi)
+    c_t1_acc = pl.tile.matmul_acc(c_iter, sa, sb, ko == 0)
+    c_t1 = pl.yield_(c_t1_acc)
 out_t1 = pl.store(c_t1, [256, 0], out_t0)  # store sub-tile to out[256:512, 0:256]
 ```
 
@@ -289,14 +305,15 @@ Adding a new backend therefore only needs to provide these handler hooks — the
 
 | Op | Action |
 | -- | ------ |
-| `tile.matmul` over static-2D operands (Mat left, or Vec left for PV) + Mat right, output fits L0c | Rewritten to 2-stage pipelined K-loop; a Vec left operand is staged to Mat first |
+| `tile.matmul` over static-2D operands (Mat left, or Vec left for PV) + Mat right, output fits L0c | Rewritten to 2-stage pipelined K-loop (predicated `tile.matmul_acc` body — one Acc buffer, no phi); a Vec left operand is staged to Mat first |
 | `tile.matmul` (plain, Mat left, Mat right) whose output exceeds L0c, consumed by one 2D `tile.store` | M/N-tiled: `ceil(M/m) × ceil(N/n)` grid of sub-tile K-loops, each stored straight to the output (direct-store) |
 | `tile.matmul` (plain) whose output exceeds L0c, consumed *entirely* as a matmul operand (chained matmul), and whose `[M, N]` scratch fits Mat/L1 | M/N-tiled into an L1/**Mat** scratch (per-sub-tile Acc→Mat `tile.assemble`), kept on-chip for the consumer (Mat-scratch) |
 | `tile.matmul` whose output *fits* L0c, downcast via `tile.cast(c, bf16/f16)` whose result is consumed *entirely* as a matmul operand (chained) | Cast-fold: one full-window Acc→Mat `tile.assemble` (cube `pto.tinsert`); the cast is dropped — no Vector `pto.tcvt` round-trip |
 | `tile.matmul_acc` over static-2D operands (Mat left, or Vec left for PV) + Mat right, output fits L0c | Rewritten to 2-stage pipelined K-loop (uniform `matmul_acc` body) |
-| Canonical split-K `create([M,N])` → pipeline (`matmul` first, loop-carried `matmul_acc` later) → one 2D store, physical output exceeds L0c | M/N-tiled outside the K loop; each `[m,n]` tile completes the full K reduction before it is stored |
+| The same call written with a caller-supplied `init_cond` (4 operands) | Also K-tiled: the loop body carries `init_cond and ko == 0`, a lone straight-line full block carries `init_cond` verbatim, and the peeled tail stays 3-operand |
+| Canonical split-K `create([M,N])` → pipeline (either `matmul` first + loop-carried `matmul_acc` later, or one predicated `matmul_acc(acc, lhs, rhs, <loop var> == 0)`) → one 2D store, physical output exceeds L0c | M/N-tiled outside the K loop; each `[m,n]` tile completes the full K reduction before it is stored |
 | `tile.matmul[_acc]` with a Vec **right** operand | Skipped (the B operand must feed L0B from L1) |
-| `tile.matmul_bias` with static Mat matrix operands and a `[1,N]` Mat/Bias source, output fits L0c but K does not | K-tiled; `matmul_bias` initializes each output tile once and later K blocks use `matmul_acc` |
+| `tile.matmul_bias` with static Mat matrix operands and a `[1,N]` Mat/Bias source, output fits L0c but K does not | K-tiled; the first block is a head-peeled straight-line `matmul_bias` that initializes each output tile once, and the loop over the remaining blocks uses `matmul_acc` (no `IfStmt`, one L0C buffer) |
 | `tile.matmul_bias` with static Mat matrix operands and a single-use, full rectangular `[1,N]` Mat bias load separated from the call only by sibling loads, output exceeds L0c, with one direct store or only later matmul-operand uses | M/N-tiled after replacing the full load with per-N tensor→Mat window loads; placed through the same direct-GM or Mat-scratch strategies as fresh `tile.matmul` |
 | `tile.matmul_bias` with a Vec left operand, or an already-Bias-resident source requiring N tiling | Skipped; the new biased path requires native Mat operands and cannot emit Bias-to-Bias sub-window extracts |
 | Already L0-sized matmul (`(m, n, k) == (M, N, K)`) | Untouched |
@@ -313,7 +330,7 @@ The pass emits `PerfHint` diagnostics rather than failing when it declines to re
 | ---- | ------- |
 | `PH-AT-003` | Sub-byte dtype on operand or accumulator |
 | `PH-AT-005` | `ChooseL0Tile` rejected the configuration |
-| `PH-AT-006` | Output exceeds L0c but no supported M/N placement applies — for `tile.matmul_acc`, this specifically means a caller-owned accumulator outside the canonical create/split-K-pipeline/store chain. It also covers a Vec left operand, an already-Bias-resident `tile.matmul_bias` source that would need N sub-windowing, a result consumed on-chip that is not entirely a matmul operand, or a chained-matmul scratch that exceeds Mat/L1 capacity. The canonical split-K case from issue #2232 does not emit this hint. |
+| `PH-AT-006` | Output exceeds L0c but no supported M/N placement applies — for `tile.matmul_acc`, this specifically means a caller-owned accumulator outside the canonical create/split-K-pipeline/store chain, or a 4-operand call inside an otherwise canonical chain whose `init_cond` is not a split-K seed test on the loop's induction variable. It also covers a Vec left operand, an already-Bias-resident `tile.matmul_bias` source that would need N sub-windowing, a result consumed on-chip that is not entirely a matmul operand, or a chained-matmul scratch that exceeds Mat/L1 capacity. The canonical split-K case from issue #2232 does not emit this hint. |
 | `PH-AT-007` | Non-16-aligned `K` — no fractal-aligned K-tiling exists (any peeled tail or whole-K block would have non-fractal cols), so the matmul is left untouched |
 | `PH-AT-008` | `ChooseL0Tile` returned a fallback configuration with a perf hint message |
 | `PH-AT-009` | Backend needs a bf16/f16 on-chip Mat scratch (e.g. Ascend910B) but the oversized chained-matmul intermediate is f32 — cast the matmul result to bf16/f16 before the consumer matmul; left on the deferred path |

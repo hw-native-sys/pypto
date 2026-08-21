@@ -278,6 +278,13 @@ may be loop-dependent; kwargs carry only compile-time constants. Registering it
 as an operand also means it participates in the use-def chain like any other
 SSA value.
 
+Being an operand, it prints positionally at the tile layer —
+`pl.tile.matmul_acc(acc, lhs, rhs, k0 == 0)`. At the tensor layer positional
+slot 4 already belongs to `a_trans`, so the printer emits the predicate as a
+keyword instead —
+`pl.tensor.matmul_acc(acc, lhs, rhs, init_cond=k0 == 0, a_trans=False, b_trans=False)`
+— and the printed call reparses to the same IR.
+
 Lowering depends on whether the predicate is known at compile time:
 
 | `init_cond` | Emitted |
@@ -292,16 +299,49 @@ with no init operand, hence the branch. Because `matmul_acc` is in place
 (`set_output_reuses_input(0)`), both arms write the same buffer and the `scf.if`
 yields no value — no phi is materialized on the Acc tile.
 
-Two limitations, both diagnosed rather than silently dropped:
+"Literal" covers **both** spellings a constant predicate arrives in: a DSL
+`init_cond=True`/`False` reaches the emitter as a BOOL-typed `ConstInt`, while a
+predicate an earlier pass folded reaches it as a `ConstBool` — which is what the
+generated `ko == 0` becomes when [`LowerPipelineLoops`](../passes/28-lower_pipeline_loops.md)
+replicates the K-loop *and* the enclosing loop is eliminated, so each replica's
+index is a literal. Both pick an arm outright, and an emitter that folded only
+one of the two would double the MADs of every K block it missed.
+
+The fold is therefore conditional on the trip count, not universal: at
+`16x512x64` the pipelined loop disappears and the emitted PTO has no `scf.if`,
+while at `16x2048x64` the replica indices stay symbolic (`ko`, `ko + 256`) and
+two `scf.if`s survive. That is not a regression — the peeled `IfStmt` this
+replaced produced the same two branches for those shapes.
+
+The compiler uses the idiom it recommends: `AutoTileMatmulL0` *emits* the
+predicated form for the K-loop of a plain `tile.matmul`, so the `tile.create`
+seed, the loop-carried value and the loop's `return_var` share one L0C buffer
+by construction. `tile.matmul_bias` carries no `init_cond` operand, so it cannot
+use the predicated body; its first K block is *head-peeled* out of the loop
+instead, applying the bias exactly once and minting the accumulator that the
+remaining blocks accumulate into. That reaches the same one-buffer chain without
+a predicate, so the pass no longer generates an accumulator phi at all.
+
+One limitation, diagnosed rather than silently dropped:
 
 - **Rank > 2 is rejected.** The batched form expands into several
   `tile.matmul_acc` calls inside `FlattenTileNdTo2D`, which has no place to
   thread a per-call predicate. Loop over the batch dimension instead.
-- **`AutoTileMatmulL0` does not tile a predicated call.** That pass matches on a
-  3-operand `tile.matmul_acc`, so a 4-operand one opts out and is left as
-  written — which is what a hand-managed split-K wants. An oversized predicated
-  accumulate is therefore the author's responsibility, exactly as an oversized
-  unpredicated `tile.matmul_acc` already is.
+
+An oversized *predicated* `tile.matmul_acc` is K-tiled like the unpredicated
+one: the caller's predicate is ANDed with the emitted loop's own `ko == 0`, and
+the peeled partial tail keeps the unpredicated 3-operand form (it is never the
+first K block).
+
+M/N tiling of an accumulate is available only at *loop* level, and equally for
+both spellings: a `tile.create([M, N])` / split-K `pl.pipeline` / one-2D-store
+triplet is tiled outside its K loop whether the reduction is peeled
+(`if ko == 0: matmul else: matmul_acc`) or predicated
+(`matmul_acc(acc, lhs, rhs, ko == 0)`). Outside that shape — a standalone
+oversized `tile.matmul_acc` on a caller-owned `[M, N]` accumulator, or a
+predicated one whose `init_cond` is not a seed test on the loop's induction
+variable — slicing the accumulator is unsupported and the pass says so with a
+`PH-AT-006` perf hint.
 
 At the tile layer, `tile.batch_matmul` provides batched semantics for
 `TileType` operands. It accepts rank >= 2 tiles, broadcasts the leading batch

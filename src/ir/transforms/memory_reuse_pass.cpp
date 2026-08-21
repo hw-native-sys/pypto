@@ -297,6 +297,33 @@ class TopDownRetargeter {
 
   /// Coalesce peeled loop-carried accumulator if-phis.
   ///
+  /// DIRECTION OF TRAVEL (long horizon — do not act on this without a migration).
+  /// The shape this repairs is the *hand-peeled* split-K idiom:
+  ///
+  ///     if k == 0: acc = tile.matmul(a, b)          // fresh Acc buffer
+  ///     else:      acc = tile.matmul_acc(acc, a, b) // in-place, another buffer
+  ///
+  /// It gives one logical value two producers on two L0C buffers, which the
+  /// machine cannot represent — there is no Acc->Acc copy, so this repair exists
+  /// only to rewrite buffer identity after the fact.  The predicated spelling
+  /// says the same thing on one buffer and needs no repair:
+  ///
+  ///     acc = tile.matmul_acc(acc, a, b, init_cond=(k == 0))
+  ///
+  /// `AutoTileMatmulL0` already *generates* the predicated form (and head-peels
+  /// the bias K-loop, which has no `init_cond` operand), so no compiler-generated
+  /// IR reaches this function any more — every remaining caller is a peel in the
+  /// author's own source.  We keep repairing those: existing kernels written with
+  /// the peel must keep compiling, and pypto-lib alone has 95 such sites.
+  ///
+  /// Retiring this repair is therefore a *long-horizon* intent, not a near-term
+  /// plan.  It would need the source-level migration to land first, and it is
+  /// worth doing eventually because the repair is not sound in general: the
+  /// branch-exclusivity argument below does not cover a post-if read of the
+  /// accumulator that bypasses the phi, where the seed path's data is returned
+  /// with no diagnostic at any layer.  Until then, prefer `init_cond` in new
+  /// code and leave existing peels alone.
+  ///
   /// LowerPipelineLoops peels a stage=2 K-loop into an epilogue IfStmt whose live
   /// branch is an in-place accumulator (matmul_acc, output aliasing input on the
   /// accumulator buffer) and whose dead `if k==0` branch is a fresh matmul seed on a

@@ -218,5 +218,43 @@ def test_non_boolean_init_cond_is_rejected():
         _ = BadInitCond
 
 
+class TestAutoTiledPredicateFolds:
+    """The K-loop `AutoTileMatmulL0` generates must not pay for its predicate.
+
+    The pass emits `tile.matmul_acc(..., init_cond=(ko == 0))`. Once
+    `LowerPipelineLoops` replicates the loop and the enclosing loop is
+    eliminated, each replica's predicate is a compile-time literal — and the
+    emitter must fold it to a single MAD. It reaches codegen as a `ConstBool`
+    (the arithmetic simplifier's product), *not* the BOOL-typed `ConstInt` a
+    DSL-level `init_cond=True` produces, so an emitter that folded only
+    `ConstInt` would silently emit an `scf.if` on a constant and double the MADs
+    of every folded K block.
+    """
+
+    def test_folded_predicate_emits_one_mad_per_block_and_no_branch(self):
+        @pl.program
+        class AutoTiledMatmul:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 512], pl.BF16],
+                rhs: pl.Tensor[[512, 64], pl.BF16],
+                output: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [16, 512], target_memory=pl.MemorySpace.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [512, 64], target_memory=pl.MemorySpace.Mat)
+                out_tile = pl.tile.matmul(lhs_mat, rhs_mat)
+                return pl.store(out_tile, [0, 0], output)
+
+        mlir = _generate_default_mlir(AutoTiledMatmul)
+        assert "scf.if" not in mlir, (
+            "a compile-time-constant init_cond must select one arm outright, not emit a branch\n" + mlir
+        )
+        # One overwrite (the seeding block) and one accumulate — never two of
+        # each, which is what an unfolded predicate would produce.
+        assert mlir.count("pto.tmatmul.acc") == 1, mlir
+        assert mlir.count("pto.tmatmul ") == 1, mlir
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

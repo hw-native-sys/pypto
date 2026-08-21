@@ -245,6 +245,12 @@ for k0 in pl.pipeline(0, K, K_TILE, stage=2):
 该谓词是位置操作数而非 registry kwarg，因为它可能依赖循环变量，而 kwarg 只承载
 编译期常量。作为操作数注册也意味着它像其他 SSA 值一样参与 use-def 链。
 
+既然是操作数，它在 tile 层按位置打印 ——
+`pl.tile.matmul_acc(acc, lhs, rhs, k0 == 0)`。在 tensor 层第 4 个位置槽已经属于
+`a_trans`，因此 printer 改用关键字形式打印该谓词 ——
+`pl.tensor.matmul_acc(acc, lhs, rhs, init_cond=k0 == 0, a_trans=False, b_trans=False)`
+—— 打印结果重新解析后仍是同一份 IR。
+
 降级方式取决于谓词是否在编译期已知：
 
 | `init_cond` | 生成代码 |
@@ -258,14 +264,41 @@ ISA 将该语义承载为 MAD 指令 Xt 寄存器的第 63 位（`cmatrixInit`�
 init 操作数。由于 `matmul_acc` 是原地操作（`set_output_reuses_input(0)`），两个分
 支写入同一缓冲区，`scf.if` 不产生返回值 —— Acc tile 上不会生成 phi。
 
-两项限制，均以显式诊断而非静默丢弃的方式处理：
+「字面量」涵盖常量谓词到达 emitter 时的**两种**形态：DSL 写法 `init_cond=True`/
+`False` 到达时是 BOOL 类型的 `ConstInt`，而被更早的 pass 折叠过的谓词到达时是
+`ConstBool` —— 当 [`LowerPipelineLoops`](../passes/28-lower_pipeline_loops.md)
+复制 K-loop *且*外层循环被消除、每个副本的索引成为字面量时，生成的 `ko == 0` 正是
+这种形态。两者都会直接选定一个分支；若 emitter 只折叠其中一种，未覆盖到的每个 K
+block 都会发出双倍 MAD。
+
+因此该折叠取决于 trip count，并非普遍成立：在 `16x512x64` 下流水循环被完全消除，
+最终 PTO 中没有 `scf.if`；而在 `16x2048x64` 下副本索引仍是符号量（`ko`、
+`ko + 256`），会残留两个 `scf.if`。这不是回退 —— 它所替换的剥离式 `IfStmt` 在这些
+形状下同样产生两个分支。
+
+编译器自己也使用它所推荐的写法：`AutoTileMatmulL0` 对普通 `tile.matmul` 的 K-loop
+直接*生成*带谓词的形式，因此 `tile.create` 种子、循环携带值与循环的 `return_var`
+在构造上共用同一块 L0C buffer。`tile.matmul_bias` 没有 `init_cond` 操作数，无法使用
+带谓词的循环体；因此改为把它的第一个 K block *提到循环之外*（head-peel）：该 block
+恰好只加一次 bias 并铸造出累加器，其余 block 统一累加进去。这样无需谓词也能得到同样
+的单 buffer 链，因此该 pass 不再生成任何累加器 phi。
+
+一项限制，以显式诊断而非静默丢弃的方式处理：
 
 - **拒绝 rank > 2**。批量形式在 `FlattenTileNdTo2D` 中会展开为多次
   `tile.matmul_acc` 调用，无处安放逐调用的谓词。请改为在 batch 维上循环。
-- **`AutoTileMatmulL0` 不对带谓词的调用做 L0 切分**。该 pass 匹配 3 操作数的
-  `tile.matmul_acc`，因此 4 操作数形式会自动跳过并保持原样 —— 这正是手工管理
-  split-K 所期望的。超尺寸的带谓词累加因而由编写者负责，这与超尺寸的无谓词
-  `tile.matmul_acc` 现有行为一致。
+
+超尺寸的*带谓词* `tile.matmul_acc` 与无谓词形式一样会被做 K 切分：调用方的谓词与
+所生成循环自身的 `ko == 0` 做与运算，而剥离出的尾块保持无谓词的 3 操作数形式
+（它永远不是第一个 K block）。
+
+累加形式的 M/N 切分只在*循环*层可用，且两种写法一视同仁：由
+`tile.create([M, N])`、split-K `pl.pipeline` 与单个 2D store 组成的三元组会在其
+K-loop 之外被切分，无论其中的归约是 peel 写法
+（`if ko == 0: matmul else: matmul_acc`）还是谓词写法
+（`matmul_acc(acc, lhs, rhs, ko == 0)`）。不属于该形态时 —— 独立的超尺寸
+`tile.matmul_acc`（累加器由调用方持有），或 `init_cond` 不是对循环归纳变量首块判定的
+带谓词调用 —— 切分累加器不受支持，该 pass 会以 `PH-AT-006` 性能提示明确说明。
 
 在 tile 层，`tile.batch_matmul` 为 `TileType` 操作数提供批量语义。它接受 rank >= 2 的
 tile，广播前导批量维度，并保持与 `tile.matmul` 相同的纯操作数接口风格。如果批量操作数

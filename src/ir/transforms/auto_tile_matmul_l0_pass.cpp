@@ -22,17 +22,25 @@
 /// can alias it onto QK's freed L0B (peak L0B = ``max(QK, PV)`` instead of the
 /// sum).  The K-loop has the shape:
 ///
-///   * ``tile.matmul`` — the loop body branches on the iteration index
-///     (``ko == 0``) so the first iteration uses ``tile.matmul`` (fresh
-///     accumulator) and subsequent iterations use ``tile.matmul_acc``
-///     (accumulating into the iter-arg).  The iter-arg init is an Acc-
-///     resident ``tile.create`` placeholder so the iter-arg / yield /
-///     return_var chain is Acc-typed end-to-end.
+///   * ``tile.matmul`` — the loop body is a single predicated
+///     ``tile.matmul_acc(c_iter, sa, sb, ko == 0)``.  The iter-arg init is an
+///     Acc-resident ``tile.create`` placeholder that the predicate overwrites
+///     on the first L0 block (and accumulates into afterwards), so the
+///     iter-arg / yield / return_var chain is Acc-typed end-to-end and,
+///     because ``tile.matmul_acc`` declares ``set_output_reuses_input(0)``,
+///     lands on one L0C buffer by construction.
 ///   * ``tile.matmul_acc`` — every iteration is ``tile.matmul_acc``; the
 ///     iter-arg init is the caller-provided accumulator directly, so the
-///     chain is uniform and no if-else is needed.
+///     chain is uniform and no if-else is needed.  A caller-supplied
+///     ``init_cond`` (the 4-operand spelling) is threaded through: the loop
+///     body ANDs it with the generated ``ko == 0``, a lone straight-line full
+///     block passes it through unchanged, and the peeled partial tail drops it
+///     (the tail is never the first K block, so the predicate is dead there).
 ///   * ``tile.matmul_bias`` — the first iteration uses ``tile.matmul_bias``;
 ///     subsequent iterations use ``tile.matmul_acc``, so bias is applied once.
+///     This is the only remaining generator of the ``ko == 0`` branch:
+///     ``tile.matmul_bias`` carries no ``init_cond`` operand, so the first K
+///     block has to be peeled to apply the bias exactly once.
 ///
 /// The K-loop is marked ``ForKind::Pipeline`` with ``pipeline_stages=2`` so
 /// the downstream ``LowerPipelineLoops`` pass produces a 2-deep ping-pong
@@ -47,17 +55,12 @@
 /// mismatch.
 ///
 /// Layout for ``tile.matmul``:
-///   c_init = tile.create([m, n], dtype, target_memory=Acc)  // placeholder
+///   c_init = tile.create([m, n], dtype, target_memory=Acc)  // accumulator seed
 ///   for ko in pl.pipeline(0, K, k, init_values=(c_init,), stage=2):
 ///     sa = tile.extract(x_mat, 0, ko, [m, k], target_memory=Left)
 ///     sb = tile.extract(y_mat, ko, 0, [k, n], target_memory=Right)
-///     if ko == 0:
-///       c1 = tile.matmul(sa, sb)             // fresh Acc
-///       c_phi = pl.yield_(c1)                // if's return_var
-///     else:
-///       c2 = tile.matmul_acc(c_iter, sa, sb) // accumulate
-///       c_phi = pl.yield_(c2)
-///     yield c_phi
+///     c = tile.matmul_acc(c_iter, sa, sb, ko == 0)  // overwrite on block 0
+///     yield c
 ///
 /// Layout for ``tile.matmul_acc`` (acc_init is the caller's accumulator):
 ///   for ko in pl.pipeline(0, K, k, init_values=(acc_init,), stage=2):
@@ -65,6 +68,33 @@
 ///     sb = tile.extract(y_mat, ko, 0, [k, n], target_memory=Right)
 ///     c_new = tile.matmul_acc(c_iter, sa, sb)
 ///     yield c_new
+///
+/// Layout for a *predicated* ``tile.matmul_acc(acc_init, x, y, user_cond)``.
+/// ``user_cond`` means "this is the first K step of the user's reduction";
+/// ``ko == 0`` means "the first L0 block of that step".  The accumulator is
+/// overwritten only where both hold:
+///   for ko in pl.pipeline(0, k_full, k, init_values=(acc_init,), stage=2):
+///     sa = tile.extract(x_mat, 0, ko, [m, k], target_memory=Left)
+///     sb = tile.extract(y_mat, ko, 0, [k, n], target_memory=Right)
+///     c_new = tile.matmul_acc(c_iter, sa, sb, user_cond and ko == 0)
+///     yield c_new
+///   // peeled partial tail (k does not divide K): 3-operand, unpredicated —
+///   // it runs at K offset k_full > 0, so it is never the first block.
+///   ct = tile.matmul_acc(c_kmain, sat, sbt)
+///
+/// Layout for ``tile.matmul_bias`` — the one shape that still branches, since
+/// the bias has to be applied on the first K block only:
+///   c_init = tile.create([m, n], dtype, target_memory=Acc)  // placeholder
+///   for ko in pl.pipeline(0, K, k, init_values=(c_init,), stage=2):
+///     sa = tile.extract(x_mat, 0, ko, [m, k], target_memory=Left)
+///     sb = tile.extract(y_mat, ko, 0, [k, n], target_memory=Right)
+///     if ko == 0:
+///       c1 = tile.matmul_bias(sa, sb, bias)  // fresh Acc + bias
+///       c_phi = pl.yield_(c1)                // if's return_var
+///     else:
+///       c2 = tile.matmul_acc(c_iter, sa, sb) // accumulate
+///       c_phi = pl.yield_(c2)
+///     yield c_phi
 ///
 /// A fresh return_var typed identically to the iter-arg replaces the original
 /// matmul's Var; uses of the original Var in the enclosing SeqStmts are
@@ -100,10 +130,15 @@
 ///     single-K-block (``k == K``) per sub-tile.
 ///     The canonical frontend split-K create/pipeline/store form is M/N-tiled
 ///     outside its K loop: each output sub-tile completes the whole source K
-///     reduction before the next one starts. Arbitrary standalone
-///     ``tile.matmul_acc`` (which would need slices of a caller-owned
-///     accumulator), a Vec left operand, or a mixed/non-matmul on-chip consumer
-///     is deferred with a ``PerfHint``.
+///     reduction before the next one starts. Both source spellings of that
+///     form are recognized and tiled identically -- the peeled
+///     ``if ko == 0 { tile.matmul } else { tile.matmul_acc }`` and the
+///     predicated single ``tile.matmul_acc(acc, lhs, rhs, ko == 0)``. The
+///     retiled output keeps whichever spelling the source used; only the two
+///     statements at the tail of the K-loop body differ between them.
+///     Arbitrary standalone ``tile.matmul_acc`` (which would need slices of a
+///     caller-owned accumulator), a Vec left operand, or a mixed/non-matmul
+///     on-chip consumer is deferred with a ``PerfHint``.
 ///   * A compatible f32-to-bf16/f16 ``tile.cast(mode="rint")`` feeding only
 ///     matmul operands is folded into the Acc-to-Mat FIXPIPE writeback.
 ///   * Any 16-aligned K.  When the chosen ``k`` does not divide ``K``
@@ -398,6 +433,11 @@ struct KLoopRewrite {
   bool stage_lhs_to_mat = false;  ///< lhs is Vec-resident: stage Vec→Mat before the K-loop
   VarPtr acc_init = nullptr;      ///< Caller-provided accumulator for matmul_acc;
                                   ///< nullptr for plain matmul (Vec placeholder is built instead).
+  /// Caller's ``init_cond`` predicate from a 4-operand ``tile.matmul_acc``;
+  /// nullptr for the 3-operand spelling and for fresh/bias matmuls.  Composed
+  /// with the generated ``ko == 0`` in the pipelined body, passed through
+  /// unmodified on a lone straight-line full block, and dropped on the tail.
+  ExprPtr init_cond = nullptr;
   int64_t M = 0;
   int64_t N = 0;
   int64_t K = 0;
@@ -479,46 +519,55 @@ VarPtr BuildBiasOperand(std::vector<StmtPtr>& stmts, const VarPtr& bias_src, int
   return bias->var_;
 }
 
-/// Body of the K-loop for a fresh ``tile.matmul`` or ``tile.matmul_bias``:
-/// branches on ``ko == 0`` between a fresh Acc (with the optional bias) and
-/// ``tile.matmul_acc``. The ``IfStmt`` materializes a phi return_var that the
-/// outer yield carries back to the iter-arg.
+/// Body of the pipelined L0 K-loop for a fresh ``tile.matmul``: one predicated
+/// ``tile.matmul_acc(c_iter, sa, sb, ko == 0)``.
+///
+/// The predicate is the MAD's ``cmatrixInit`` bit — the accumulator is
+/// overwritten on the first L0 block and accumulated into afterwards — and
+/// ``set_output_reuses_input(0)`` keeps the whole chain on one L0C buffer by
+/// construction.  The ``if ko == 0`` shape this replaces minted a second Acc
+/// buffer in the then-arm and merged the two at a phi: unrealizable, since
+/// nothing reads L0C but the FIXPIPE drain, so no Acc->Acc copy exists to
+/// reconcile the arms.
+///
+/// ``tile.matmul_bias`` carries no ``init_cond`` operand, so it cannot use this
+/// body; ``BuildKLoopRewrite`` head-peels its first K block instead, which
+/// reaches the same one-buffer chain without a predicate.  No caller therefore
+/// passes a bias operand here.
 StmtPtr BuildMatmulBody(const VarPtr& ko_var, const IterArgPtr& c_iter, const AssignStmtPtr& sa,
-                        const AssignStmtPtr& sb, const VarPtr& bias, const std::string& base,
-                        const Span& sp) {
+                        const AssignStmtPtr& sb, const std::string& base, const Span& sp) {
   auto& reg = OpRegistry::GetInstance();
-
-  // Then-branch: fresh Acc tile, applying the optional bias exactly once.
-  auto c_then_call = bias ? reg.Create("tile.matmul_bias", {sa->var_, sb->var_, bias}, sp)
-                          : reg.Create("tile.matmul", {sa->var_, sb->var_}, sp);
-  auto c_then_var = std::make_shared<Var>(base + "_l0_c_first", c_then_call->GetType(), sp);
-  auto c_then_assign = std::make_shared<AssignStmt>(c_then_var, c_then_call, sp);
-  auto then_yield = std::make_shared<YieldStmt>(std::vector<ExprPtr>{c_then_var}, sp);
-  StmtPtr then_body = SeqStmts::Flatten(std::vector<StmtPtr>{c_then_assign, then_yield}, sp);
-
-  // Else-branch: accumulate into the iter-arg.
-  auto c_else_call = reg.Create("tile.matmul_acc", {ExprPtr(c_iter), sa->var_, sb->var_}, sp);
-  auto c_else_var = std::make_shared<Var>(base + "_l0_c_acc", c_else_call->GetType(), sp);
-  auto c_else_assign = std::make_shared<AssignStmt>(c_else_var, c_else_call, sp);
-  auto else_yield = std::make_shared<YieldStmt>(std::vector<ExprPtr>{c_else_var}, sp);
-  StmtPtr else_body = SeqStmts::Flatten(std::vector<StmtPtr>{c_else_assign, else_yield}, sp);
-
-  auto c_phi = std::make_shared<Var>(base + "_l0_c_phi", c_then_call->GetType(), sp);
-  auto cond = MakeEq(ko_var, MakeIndex(0, sp), sp);
-  auto if_stmt = std::make_shared<IfStmt>(cond, then_body, std::optional<StmtPtr>(else_body),
-                                          std::vector<VarPtr>{c_phi}, sp);
-  auto outer_yield = std::make_shared<YieldStmt>(std::vector<ExprPtr>{c_phi}, sp);
-  return SeqStmts::Flatten(std::vector<StmtPtr>{sa, sb, if_stmt, outer_yield}, sp);
+  auto init_cond = MakeEq(ko_var, MakeIndex(0, sp), sp);
+  auto c_call = reg.Create("tile.matmul_acc", {ExprPtr(c_iter), sa->var_, sb->var_, init_cond}, sp);
+  auto c_var = std::make_shared<Var>(base + "_l0_c_acc", c_call->GetType(), sp);
+  auto c_assign = std::make_shared<AssignStmt>(c_var, c_call, sp);
+  auto body_yield = std::make_shared<YieldStmt>(std::vector<ExprPtr>{c_var}, sp);
+  return SeqStmts::Flatten(std::vector<StmtPtr>{sa, sb, c_assign, body_yield}, sp);
 }
 
 /// Body of the K-loop for ``tile.matmul_acc``: every iteration accumulates
 /// into ``c_iter`` via ``tile.matmul_acc``.  The first iteration's ``c_iter``
 /// is the caller-supplied ``acc_init`` (threaded through ``init_values``), so
-/// no if-else is needed — the accumulator chain is uniform.
+/// no if-else is needed — the accumulator chain stays uniform.  It optionally
+/// carries a predicate: when the caller wrote the 4-operand
+/// ``tile.matmul_acc(acc, a, b, user_cond)``, @p user_init_cond is that
+/// operand and the emitted call ANDs it with the generated ``ko == 0``.
 StmtPtr BuildMatmulAccBody(const IterArgPtr& c_iter, const AssignStmtPtr& sa, const AssignStmtPtr& sb,
-                           const std::string& base, const Span& sp) {
+                           const std::string& base, const Span& sp, const ExprPtr& user_init_cond,
+                           const VarPtr& ko_var) {
   auto& reg = OpRegistry::GetInstance();
-  auto c_call = reg.Create("tile.matmul_acc", {ExprPtr(c_iter), sa->var_, sb->var_}, sp);
+  std::vector<ExprPtr> args{ExprPtr(c_iter), sa->var_, sb->var_};
+  if (user_init_cond) {
+    INTERNAL_CHECK_SPAN(ko_var, sp)
+        << "Internal error: a predicated matmul_acc K-loop body needs its loop variable";
+    // The caller's predicate means "first K step of the user's reduction"; the
+    // generated ``ko == 0`` means "first L0 block of that step".  The
+    // accumulator is overwritten only where both hold.  There is no
+    // pre-existing ``ko == 0`` on this path to compose with — the term is
+    // introduced here.
+    args.push_back(MakeAnd(user_init_cond, MakeEq(ko_var, MakeIndex(0, sp), sp), sp));
+  }
+  auto c_call = reg.Create("tile.matmul_acc", args, sp);
   auto c_var = std::make_shared<Var>(base + "_l0_c_acc", c_call->GetType(), sp);
   auto c_assign = std::make_shared<AssignStmt>(c_var, c_call, sp);
   auto outer_yield = std::make_shared<YieldStmt>(std::vector<ExprPtr>{c_var}, sp);
@@ -531,10 +580,13 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
   const Span sp = r.original->span_;
   const std::string base = r.name_base.empty() ? r.original->var_->name_hint_ : r.name_base;
   const bool is_acc = r.kind == MatmulKind::kAccumulate;
+  const bool is_bias = r.kind == MatmulKind::kBias;
   auto& reg = OpRegistry::GetInstance();
 
   INTERNAL_CHECK_SPAN(is_acc == (r.acc_init != nullptr), sp)
       << "Internal error: matmul kind and accumulator initializer disagree";
+  INTERNAL_CHECK_SPAN(is_acc || r.init_cond == nullptr, sp)
+      << "Internal error: only tile.matmul_acc carries an init_cond predicate";
   INTERNAL_CHECK_SPAN((r.kind == MatmulKind::kBias) == (r.bias_src != nullptr), sp)
       << "Internal error: matmul kind and bias operand disagree";
 
@@ -560,9 +612,13 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
   // fresh Acc-resident ``tile.create`` placeholder that the first iteration's
   // ``tile.matmul`` overwrites (the Nz TileView matches, so iter_arg / yield /
   // return_var stay Acc-typed).
+  //
+  // ``tile.matmul_bias`` is the exception: it has no ``init_cond`` operand, so
+  // its first K block is head-peeled below and *is* the seed — a placeholder
+  // here would be dead.
   ExprPtr loop_init;
   TypePtr loop_iter_type;
-  if (num_full >= 2) {
+  if (num_full >= 2 && !is_bias) {
     if (is_acc) {
       loop_init = r.acc_init;
       loop_iter_type = r.acc_init->GetType();
@@ -597,14 +653,22 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
   // ``ko``, accumulating into ``acc_in`` (``tile.matmul_acc``) or starting fresh
   // (``tile.matmul`` when ``acc_in`` is null).  Used for the single-full-block
   // (num_full == 1) and partial-tail cases; the multi-block case pipelines below.
-  auto emit_block = [&](int64_t ko, int64_t kb, const ExprPtr& acc_in, const std::string& tag) -> VarPtr {
+  // The optional ``init_cond`` predicates the accumulator overwrite and is only
+  // legal alongside ``acc_in`` — it is the caller's predicate, emitted verbatim
+  // (a straight-line block has no loop variable to compose ``ko == 0`` from).
+  auto emit_block = [&](int64_t ko, int64_t kb, const ExprPtr& acc_in, const ExprPtr& init_cond,
+                        const std::string& tag) -> VarPtr {
     auto sa = BuildExtract(lhs_extract_src, {r.m, kb}, mi_off, MakeIndex(ko, sp), MemorySpace::Left,
                            base + "_l0_a" + tag, sp);
     auto sb = BuildExtract(r.rhs_src, {kb, r.n}, MakeIndex(ko, sp), ni_off, MemorySpace::Right,
                            base + "_l0_b" + tag, sp);
     ExprPtr call;
+    INTERNAL_CHECK_SPAN(acc_in || !init_cond, sp)
+        << "Internal error: init_cond on a straight-line block with no accumulator";
     if (acc_in) {
-      call = reg.Create("tile.matmul_acc", {acc_in, sa->var_, sb->var_}, sp);
+      std::vector<ExprPtr> mm_args{acc_in, sa->var_, sb->var_};
+      if (init_cond) mm_args.push_back(init_cond);
+      call = reg.Create("tile.matmul_acc", mm_args, sp);
     } else if (bias_operand) {
       call = reg.Create("tile.matmul_bias", {sa->var_, sb->var_, bias_operand}, sp);
     } else {
@@ -617,27 +681,55 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
     return cvar;
   };
 
-  // --- Full blocks: a pipelined K-loop when there are >= 2 of them, else a
-  //     single straight-line block (a 1-trip pipeline loop would be degenerate).
-  VarPtr main_var;
-  if (num_full >= 2) {
+  // Emit the pipelined K-loop over the full blocks in ``[k_lo, k_full)``,
+  // accumulating into ``seed_init``.  Shared by the ordinary path (all
+  // ``num_full`` blocks, seeded by a placeholder or the caller's accumulator)
+  // and the bias path (the blocks after the peeled first one).
+  auto emit_k_loop = [&](int64_t k_lo, const ExprPtr& seed_init, const ExprPtr& user_cond) -> VarPtr {
     auto ko_var = std::make_shared<Var>(base + "_l0_ko", std::make_shared<ScalarType>(DataType::INDEX), sp);
-    auto c_iter = std::make_shared<IterArg>(base + "_l0_c", loop_iter_type, loop_init, sp);
+    auto iter_type = seed_init->GetType();
+    auto c_iter = std::make_shared<IterArg>(base + "_l0_c", iter_type, seed_init, sp);
     auto sa =
         BuildExtract(lhs_extract_src, {r.m, r.k}, mi_off, ko_var, MemorySpace::Left, base + "_l0_a", sp);
     auto sb = BuildExtract(r.rhs_src, {r.k, r.n}, ko_var, ni_off, MemorySpace::Right, base + "_l0_b", sp);
-    StmtPtr body = is_acc ? BuildMatmulAccBody(c_iter, sa, sb, base, sp)
-                          : BuildMatmulBody(ko_var, c_iter, sa, sb, bias_operand, base, sp);
+    // A fresh ``tile.matmul`` must overwrite its placeholder on the first block;
+    // an accumulate seeded by a real accumulator must not, unless the caller
+    // predicated it.  The bias path passes neither: its seed already holds the
+    // first block's product, so every block here accumulates.
+    StmtPtr body = (k_lo == 0 && r.kind == MatmulKind::kFresh)
+                       ? BuildMatmulBody(ko_var, c_iter, sa, sb, base, sp)
+                       : BuildMatmulAccBody(c_iter, sa, sb, base, sp, user_cond, ko_var);
     std::vector<std::pair<std::string, std::any>> attrs = {{kPipelineStagesAttr, /*pipeline_stages=*/2}};
     // Loop return var: an intermediate when a partial tail follows (named
     // distinctly so round-trip names stay unique), else the final result.
-    auto rv =
-        std::make_shared<Var>(has_tail ? base + "_l0_kmain" : base, loop_iter_type, r.original->var_->span_);
-    auto for_stmt = std::make_shared<ForStmt>(
-        ko_var, MakeIndex(0, sp), MakeIndex(k_full, sp), MakeIndex(r.k, sp), std::vector<IterArgPtr>{c_iter},
-        body, std::vector<VarPtr>{rv}, sp, ForKind::Pipeline, std::move(attrs));
+    auto rv = std::make_shared<Var>(has_tail ? base + "_l0_kmain" : base, iter_type, r.original->var_->span_);
+    auto for_stmt =
+        std::make_shared<ForStmt>(ko_var, MakeIndex(k_lo, sp), MakeIndex(k_full, sp), MakeIndex(r.k, sp),
+                                  std::vector<IterArgPtr>{c_iter}, body, std::vector<VarPtr>{rv}, sp,
+                                  ForKind::Pipeline, std::move(attrs));
     out.push_back(for_stmt);
-    main_var = rv;
+    return rv;
+  };
+
+  // --- Full blocks: a pipelined K-loop when there are >= 2 of them, else a
+  //     single straight-line block (a 1-trip pipeline loop would be degenerate).
+  VarPtr main_var;
+  if (is_bias && num_full >= 2) {
+    // Head-peel the first K block.  ``tile.matmul_bias`` applies the bias
+    // exactly once *and* mints the accumulator, so the remaining blocks
+    // accumulate into it uniformly and the whole chain stays on one L0C buffer.
+    // The alternative — an ``if ko == 0`` phi between ``tile.matmul_bias`` and
+    // ``tile.matmul_acc`` — gives one logical value two producers on two Acc
+    // buffers, which no target can realize (there is no Acc->Acc copy), and
+    // ``tile.matmul_bias`` has no ``init_cond`` operand to predicate instead.
+    auto seed = emit_block(/*ko=*/0, /*kb=*/r.k, /*acc_in=*/nullptr, /*init_cond=*/nullptr, "0");
+    // A 1-trip pipeline loop would be degenerate, so two full blocks means the
+    // second one is straight-line too.
+    main_var = (num_full - 1 >= 2)
+                   ? emit_k_loop(/*k_lo=*/r.k, ExprPtr(seed), /*user_cond=*/nullptr)
+                   : emit_block(/*ko=*/r.k, /*kb=*/r.k, ExprPtr(seed), /*init_cond=*/nullptr, "1");
+  } else if (num_full >= 2) {
+    main_var = emit_k_loop(/*k_lo=*/0, loop_init, is_acc ? r.init_cond : nullptr);
   } else {
     // num_full == 1: a single straight-line full block (k < K checked above, so a
     // partial tail always follows).  This is a correctness guard, not a hot path:
@@ -645,12 +737,20 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
     // dominated (2x the MAD ceil-step of a divisor, and it loses the min-padding
     // tie-break), so num_full is >= 2 in practice.  Kept so the emitter stays
     // correct (no degenerate 1-trip pipeline) if the cost model ever changes.
-    main_var = emit_block(/*ko=*/0, /*kb=*/r.k, is_acc ? ExprPtr(r.acc_init) : nullptr, "0");
+    // The caller's predicate passes through unmodified: this block *is* the
+    // first (and only) full K block, so a generated ``ko == 0`` term would be
+    // statically true and would only add a foldable node.
+    main_var = emit_block(/*ko=*/0, /*kb=*/r.k, is_acc ? ExprPtr(r.acc_init) : nullptr,
+                          /*init_cond=*/is_acc ? r.init_cond : nullptr, "0");
   }
 
   // --- Partial tail: matmul_acc the [m, k_eff] x [k_eff, n] block onto the
-  //     full-blocks accumulator (no-op when k divides K). ---
-  VarPtr result_var = has_tail ? emit_block(k_full, k_eff, ExprPtr(main_var), "t") : main_var;
+  //     full-blocks accumulator (no-op when k divides K).  Never predicated:
+  //     the tail runs at K offset k_full >= r.k > 0, so it is never the first
+  //     block and the caller's predicate is dead by construction there —
+  //     emit the plain 3-operand accumulating call instead of `cond && false`. ---
+  VarPtr result_var =
+      has_tail ? emit_block(k_full, k_eff, ExprPtr(main_var), /*init_cond=*/nullptr, "t") : main_var;
   return RewriteResult{std::move(out), result_var};
 }
 
@@ -666,6 +766,9 @@ struct MatmulTiling {
   CallPtr bias_load;  ///< defining Mat tile.load, required when bias is N-tiled
   AssignStmtPtr bias_load_def;  ///< removable single-use snapshot load for N-window reconstruction
   VarPtr acc_init;              ///< caller-provided accumulator for matmul_acc; null for fresh matmul/bias
+  /// Caller's ``init_cond`` predicate (``tile.matmul_acc`` arity 4); null
+  /// otherwise.  Copied onto ``KLoopRewrite::init_cond`` by ``MakeKLoop``.
+  ExprPtr init_cond = nullptr;
   bool stage_lhs_to_mat = false;
   int64_t M = 0, N = 0, K = 0;
   int64_t m = 0, n = 0, k = 0;
@@ -715,6 +818,7 @@ KLoopRewrite MakeKLoop(const MatmulTiling& t, ExprPtr mi, ExprPtr ni, int64_t m_
   r.bias_load = t.bias_load;
   r.stage_lhs_to_mat = t.stage_lhs_to_mat;
   r.acc_init = t.acc_init;
+  r.init_cond = t.init_cond;
   r.M = t.M;
   r.N = t.N;
   r.K = t.K;
@@ -786,12 +890,15 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   const bool is_bias = kind == MatmulKind::kBias;
   const std::string& op_name = call->op_->name_;
 
-  // Operand layout: (lhs, rhs) for matmul; (acc, lhs, rhs) for matmul_acc;
-  // (lhs, rhs, bias) for matmul_bias.
+  // Operand layout: (lhs, rhs) for matmul; (acc, lhs, rhs[, init_cond]) for
+  // matmul_acc; (lhs, rhs, bias) for matmul_bias.
   // Use ``AsVarLike`` for the operands so IterArg (Var subclass) is accepted —
   // this is the common case for the accumulator inside a pipelined K-loop.
   const size_t expected_arity = kind == MatmulKind::kFresh ? 2u : 3u;
-  if (call->args_.size() != expected_arity) return std::nullopt;
+  // Only the accumulate kind carries init_cond (arity 4); a fresh matmul has no
+  // accumulator to predicate and matmul_bias has no init_cond operand.
+  const bool has_init_cond = is_acc && call->args_.size() == expected_arity + 1u;
+  if (call->args_.size() != expected_arity && !has_init_cond) return std::nullopt;
   const size_t lhs_idx = is_acc ? 1u : 0u;
   auto lhs = AsVarLike(call->args_[lhs_idx]);
   auto rhs = AsVarLike(call->args_[lhs_idx + 1u]);
@@ -1142,6 +1249,11 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   // operand is always Mat (checked above), so it never needs staging.
   t.stage_lhs_to_mat = lhs_tile->GetMemorySpace() == MemorySpace::Vec;
   t.acc_init = acc_var;  // null for fresh matmul/bias, set for tile.matmul_acc
+  // The caller's split-K predicate, composed with the generated ``ko == 0``.
+  // Captured as-is rather than cloned: the emitted ForStmt replaces the
+  // original AssignStmt in the same SeqStmts and uses the predicate exactly
+  // once, so its definition still dominates the new use.
+  t.init_cond = has_init_cond ? call->args_[3] : nullptr;
   t.M = M;
   t.N = N;
   t.K = K;
@@ -1465,6 +1577,22 @@ class CanonicalReadCounter : public IRVisitor {
 ///     yield next
 ///   out = tile.store(loop_result, [base_m, base_n], out)
 ///
+/// or, predicated -- one MAD, one buffer, ``cmatrixInit`` carried as
+/// ``init_cond`` instead of a branch:
+///
+///   init = tile.create([M, N])
+///   for kb, (acc,) in pipeline(..., init_values=(init,)):
+///     lhs = tile.load(A, [mi0, k0], [M, Kb], ...)
+///     rhs = tile.load(B, [k0, ni0], [Kb, N], ...)
+///     next = tile.matmul_acc(acc, lhs, rhs, kb == 0)
+///     yield next
+///   out = tile.store(loop_result, [base_m, base_n], out)
+///
+/// The surrounding triplet (single-use ``tile.create`` init, single-use loop
+/// result feeding one 2D ``tile.store``) and every operand / shape requirement
+/// are identical for both spellings; only the two statements at the tail of the
+/// loop body differ.
+///
 /// The whole loop must move outside the output-tile grid: every [m, n]
 /// accumulator completes all split-K iterations before the next output tile is
 /// started. Merely slicing the matmul_acc call in place would leave the
@@ -1475,12 +1603,31 @@ struct CanonicalSplitKAccMatch {
   AssignStmtPtr store;
   AssignStmtPtr lhs_load;
   AssignStmtPtr rhs_load;
+  /// Peeled form only: the fresh ``tile.matmul`` that seeds the first K block.
+  /// **Null in the predicated form**, where the single 4-operand
+  /// ``tile.matmul_acc`` carries the seed as its ``init_cond`` operand.
   AssignStmtPtr matmul;
+  /// The accumulating call. Peeled: the else-arm 3-operand call. Predicated:
+  /// the loop body's only MAD, and therefore the whole reduction.
   AssignStmtPtr matmul_acc;
+  /// Peeled form only: the ``IfStmt``'s phi ``return_vars_[0]``, which the outer
+  /// yield carries back to the iter-arg. **Null in the predicated form** --
+  /// there is no branch, so there is no merge and no phi definition; the outer
+  /// yield reads ``matmul_acc->var_`` directly.
   VarPtr phi;
   int64_t M = 0;
   int64_t N = 0;
   int64_t K = 0;  ///< K width of one source split-K iteration
+  /// The statement whose operands and result type describe the whole reduction:
+  /// the fresh seed when it exists, otherwise the predicated accumulate. Both
+  /// carry the same [M, K] x [K, N] -> [M, N] geometry and the same result
+  /// dtype, so ``AnalyzeMatmul`` selects the same ``(m, n, k)`` either way.
+  /// ``L0TileConfig::c_read`` is the only chooser input that differs (the acc
+  /// kind reads C), and it feeds only ``EstimateTraffic`` -> the reported
+  /// ``estimated_traffic_bytes``, never a ``Better()`` ranking key. Should
+  /// traffic ever become a ranking key, the two spellings would start picking
+  /// different output grids.
+  [[nodiscard]] const AssignStmtPtr& shape_source() const { return matmul ? matmul : matmul_acc; }
 };
 
 struct CanonicalOutputWindow {
@@ -1504,9 +1651,59 @@ std::optional<std::pair<AssignStmtPtr, YieldStmtPtr>> MatchSingleAssignYield(con
   return std::make_pair(assign, yield);
 }
 
+/// Recognize the split-K seed predicate of a *predicated* canonical loop body:
+/// ``init_cond`` must test this loop's own induction variable against zero.
+///
+/// Matching by pointer identity on ``loop_var`` (rather than by name or by
+/// structure) is what rejects a predicate over some other loop's variable or a
+/// caller-supplied flag: those carry no evidence that the accumulator is
+/// overwritten on the first K block.
+///
+/// Two spellings reach here from the DSL. ``init_cond=(kb == 0)`` names the
+/// induction variable directly. ``init_cond=(k0 == 0)`` -- the spelling every
+/// peeled kernel already uses for its ``if`` condition, and therefore the one a
+/// migration produces -- names a body-local scalar ``k0 = kb * <tile width>``,
+/// which is zero exactly where ``kb`` is. Resolving that single multiply
+/// through ``direct_defs`` is O(1) and keeps the natural migration spelling on
+/// the tiled path.
+[[nodiscard]] bool IsSplitKSeedPredicate(const ExprPtr& init_cond, const VarPtr& loop_var,
+                                         const std::unordered_map<const Var*, AssignStmtPtr>& direct_defs) {
+  auto eq = As<Eq>(init_cond);
+  if (!eq) return false;
+  // ``x == 0`` and ``0 == x`` are the same test; accept either operand order.
+  ExprPtr candidate;
+  if (auto right_zero = As<ConstInt>(eq->right_); right_zero && right_zero->value_ == 0) {
+    candidate = eq->left_;
+  } else if (auto left_zero = As<ConstInt>(eq->left_); left_zero && left_zero->value_ == 0) {
+    candidate = eq->right_;
+  } else {
+    return false;
+  }
+  auto tested = AsVarLike(candidate);
+  if (!tested) return false;
+  if (tested.get() == loop_var.get()) return true;
+
+  auto def = direct_defs.find(tested.get());
+  if (def == direct_defs.end()) return false;
+  auto mul = As<Mul>(def->second->value_);
+  if (!mul) return false;
+  // A nonzero factor makes ``loop_var * factor`` zero exactly where the
+  // induction variable is, in either operand order.
+  auto scaled = AsVarLike(mul->left_);
+  auto factor = As<ConstInt>(mul->right_);
+  if (!scaled || !factor) {
+    scaled = AsVarLike(mul->right_);
+    factor = As<ConstInt>(mul->left_);
+  }
+  return scaled && factor && factor->value_ != 0 && scaled.get() == loop_var.get();
+}
+
+/// ``hints`` is optional: when supplied, an otherwise-canonical *predicated*
+/// triplet whose ``init_cond`` is not a split-K seed test reports a PerfHint
+/// instead of silently losing loop-level M/N tiling.
 std::optional<CanonicalSplitKAccMatch> MatchCanonicalSplitKAcc(
     const AssignStmtPtr& init, const ForStmtPtr& loop, const AssignStmtPtr& store,
-    const std::unordered_map<const Var*, size_t>& use_counts) {
+    const std::unordered_map<const Var*, size_t>& use_counts, std::vector<Diagnostic>* hints = nullptr) {
   if (!init || !loop || !store || loop->kind_ != ForKind::Pipeline || loop->iter_args_.size() != 1 ||
       loop->return_vars_.size() != 1) {
     return std::nullopt;
@@ -1535,49 +1732,93 @@ std::optional<CanonicalSplitKAccMatch> MatchCanonicalSplitKAcc(
 
   auto body = As<SeqStmts>(loop->body_);
   if (!body || body->stmts_.size() < 2) return std::nullopt;
-  const size_t if_pos = body->stmts_.size() - 2;
-  auto if_stmt = As<IfStmt>(body->stmts_[if_pos]);
+  // The reduction tail is either an IfStmt (peeled) or a single AssignStmt
+  // (predicated); the outer yield follows it in both spellings.
+  const size_t tail_pos = body->stmts_.size() - 2;
   auto outer_yield = As<YieldStmt>(body->stmts_.back());
-  if (!if_stmt || !if_stmt->else_body_.has_value() || if_stmt->return_vars_.size() != 1 || !outer_yield ||
-      outer_yield->value_.size() != 1 || outer_yield->value_[0].get() != if_stmt->return_vars_[0].get()) {
-    return std::nullopt;
+  if (!outer_yield || outer_yield->value_.size() != 1) return std::nullopt;
+
+  // Index the body's leading definitions once. The predicated arm resolves its
+  // predicate through this map, and the legality sweep below reuses it.
+  std::unordered_map<const Var*, AssignStmtPtr> direct_defs;
+  for (size_t i = 0; i < tail_pos; ++i) {
+    auto assign = As<AssignStmt>(body->stmts_[i]);
+    if (!assign) return std::nullopt;
+    direct_defs.emplace(assign->var_.get(), assign);
   }
 
-  auto then_mm = MatchSingleAssignYield(if_stmt->then_body_, "tile.matmul");
-  auto else_mm = MatchSingleAssignYield(*if_stmt->else_body_, "tile.matmul_acc");
-  auto then_acc = MatchSingleAssignYield(if_stmt->then_body_, "tile.matmul_acc");
-  auto else_plain = MatchSingleAssignYield(*if_stmt->else_body_, "tile.matmul");
-  AssignStmtPtr matmul;
-  AssignStmtPtr matmul_acc;
-  if (then_mm && else_mm) {
-    matmul = then_mm->first;
-    matmul_acc = else_mm->first;
-  } else if (then_acc && else_plain) {
-    matmul = else_plain->first;
-    matmul_acc = then_acc->first;
+  AssignStmtPtr matmul;      // null in the predicated form
+  AssignStmtPtr matmul_acc;  // the whole reduction in the predicated form
+  VarPtr phi;                // null in the predicated form
+  VarPtr lhs;
+  VarPtr rhs;
+  if (auto if_stmt = As<IfStmt>(body->stmts_[tail_pos])) {
+    // Peeled form: a fresh tile.matmul seeds the first K block and a 3-operand
+    // tile.matmul_acc accumulates the rest, merged at the IfStmt's phi.
+    if (!if_stmt->else_body_.has_value() || if_stmt->return_vars_.size() != 1 ||
+        outer_yield->value_[0].get() != if_stmt->return_vars_[0].get()) {
+      return std::nullopt;
+    }
+    auto then_mm = MatchSingleAssignYield(if_stmt->then_body_, "tile.matmul");
+    auto else_mm = MatchSingleAssignYield(*if_stmt->else_body_, "tile.matmul_acc");
+    auto then_acc = MatchSingleAssignYield(if_stmt->then_body_, "tile.matmul_acc");
+    auto else_plain = MatchSingleAssignYield(*if_stmt->else_body_, "tile.matmul");
+    if (then_mm && else_mm) {
+      matmul = then_mm->first;
+      matmul_acc = else_mm->first;
+    } else if (then_acc && else_plain) {
+      matmul = else_plain->first;
+      matmul_acc = then_acc->first;
+    } else {
+      return std::nullopt;
+    }
+
+    auto mm_call = As<Call>(matmul->value_);
+    auto acc_call = As<Call>(matmul_acc->value_);
+    if (!mm_call || !acc_call || mm_call->args_.size() != 2 || acc_call->args_.size() != 3 ||
+        acc_call->args_[0].get() != loop->iter_args_[0].get() ||
+        mm_call->args_[0].get() != acc_call->args_[1].get() ||
+        mm_call->args_[1].get() != acc_call->args_[2].get()) {
+      return std::nullopt;
+    }
+    phi = if_stmt->return_vars_[0];
+    lhs = AsVarLike(mm_call->args_[0]);
+    rhs = AsVarLike(mm_call->args_[1]);
   } else {
-    return std::nullopt;
+    // Predicated form: the body's last two statements are the single 4-operand
+    // tile.matmul_acc accumulating into the loop's only iter-arg, and the outer
+    // yield of its result. There is no branch, so there is no phi.
+    auto assign = As<AssignStmt>(body->stmts_[tail_pos]);
+    auto acc_call = assign ? As<Call>(assign->value_) : nullptr;
+    if (!assign || !acc_call || !IsOp(acc_call, "tile.matmul_acc") || acc_call->args_.size() != 4 ||
+        outer_yield->value_[0].get() != assign->var_.get() ||
+        acc_call->args_[0].get() != loop->iter_args_[0].get()) {
+      return std::nullopt;
+    }
+    if (!IsSplitKSeedPredicate(acc_call->args_[3], loop->loop_var_, direct_defs)) {
+      // Everything except the predicate matched, so this is an M/N-tiling cliff
+      // rather than an unrelated loop: report it instead of silently declining.
+      if (hints) {
+        hints->emplace_back(
+            DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-006",
+            "predicated split-K tile.matmul_acc: init_cond must test this loop's induction variable "
+            "against 0 to qualify for loop-level M/N tiling; got a different predicate, so the "
+            "reduction is left untouched. That only costs you if its full [M, N] accumulator does "
+            "not fit L0C — the ordinary per-call K-tiling still applies either way.",
+            acc_call->span_);
+      }
+      return std::nullopt;
+    }
+    matmul_acc = assign;
+    lhs = AsVarLike(acc_call->args_[1]);
+    rhs = AsVarLike(acc_call->args_[2]);
   }
-
-  auto mm_call = As<Call>(matmul->value_);
-  auto acc_call = As<Call>(matmul_acc->value_);
-  if (!mm_call || !acc_call || mm_call->args_.size() != 2 || acc_call->args_.size() != 3 ||
-      acc_call->args_[0].get() != loop->iter_args_[0].get() ||
-      mm_call->args_[0].get() != acc_call->args_[1].get() ||
-      mm_call->args_[1].get() != acc_call->args_[2].get()) {
-    return std::nullopt;
-  }
-  auto lhs = AsVarLike(mm_call->args_[0]);
-  auto rhs = AsVarLike(mm_call->args_[1]);
   // One source load cannot simultaneously be narrowed as [m, K] and [K, n].
   // Reject the square self-matmul corner rather than mutate it ambiguously.
   if (!lhs || !rhs || lhs.get() == rhs.get()) return std::nullopt;
 
-  std::unordered_map<const Var*, AssignStmtPtr> direct_defs;
-  for (size_t i = 0; i < if_pos; ++i) {
+  for (size_t i = 0; i < tail_pos; ++i) {
     auto assign = As<AssignStmt>(body->stmts_[i]);
-    if (!assign) return std::nullopt;
-    direct_defs.emplace(assign->var_.get(), assign);
     // Duplicating a source split-K loop per output tile is legal only when all
     // definitions other than the two operand loads are scalar computations.
     // This excludes hidden tile side effects or unrelated loads instead of
@@ -1623,9 +1864,8 @@ std::optional<CanonicalSplitKAccMatch> MatchCanonicalSplitKAcc(
   auto init_n = init_ty && init_ty->shape_.size() == 2 ? As<ConstInt>(init_ty->shape_[1]) : nullptr;
   if (!init_m || !init_n || init_m->value_ != M || init_n->value_ != N) return std::nullopt;
 
-  return CanonicalSplitKAccMatch{
-      init, loop, store, lhs_it->second, rhs_it->second, matmul, matmul_acc, if_stmt->return_vars_[0],
-      M,    N,    K_lhs};
+  return CanonicalSplitKAccMatch{init, loop, store, lhs_it->second, rhs_it->second, matmul, matmul_acc,
+                                 phi,  M,    N,     K_lhs};
 }
 
 std::optional<tile_view_semantics::BoxedTileAlignment> GetCanonicalOutputBoxAlignment(
@@ -1672,7 +1912,10 @@ class CanonicalSplitKRetiler : public IRMutator {
 
     lhs_load_ = cloned(match.lhs_load->var_).get();
     rhs_load_ = cloned(match.rhs_load->var_).get();
-    matmul_ = cloned(match.matmul->var_).get();
+    // Null in the predicated form: there is no fresh seed statement to rebuild.
+    // An AssignStmt's var_ is never null, so the `key != matmul_` test in
+    // VisitStmt_ can never accidentally match a null matmul_.
+    matmul_ = match.matmul ? cloned(match.matmul->var_).get() : nullptr;
     matmul_acc_ = cloned(match.matmul_acc->var_).get();
 
     auto old_iter_var = cloned(match.loop->iter_args_[0]);
@@ -1685,9 +1928,16 @@ class CanonicalSplitKRetiler : public IRMutator {
     auto new_iter = std::make_shared<IterArg>(old_iter->name_hint_ + suffix_, acc_ty, init, old_iter->span_);
     var_remap_[old_iter.get()] = new_iter;
 
-    auto old_phi = cloned(match.phi);
-    auto new_phi = std::make_shared<Var>(old_phi->name_hint_ + suffix_, acc_ty, old_phi->span_);
-    var_remap_[old_phi.get()] = new_phi;
+    // Peeled form only. In the predicated form the value the outer yield reads
+    // is the matmul_acc result itself, and VisitStmt_ already re-creates that
+    // Var with the narrowed call's re-deduced type and registers it in
+    // var_remap_ before the yield is visited (SeqStmts order, pinned by the
+    // matcher), so pre-registering anything here would be dead.
+    if (match.phi) {
+      auto old_phi = cloned(match.phi);
+      auto new_phi = std::make_shared<Var>(old_phi->name_hint_ + suffix_, acc_ty, old_phi->span_);
+      var_remap_[old_phi.get()] = new_phi;
+    }
 
     auto old_return = cloned(match.loop->return_vars_[0]);
     auto new_return = std::make_shared<Var>(old_return->name_hint_ + suffix_, acc_ty, old_return->span_);
@@ -1773,7 +2023,8 @@ std::optional<CanonicalSplitKFold> TryFoldCanonicalSplitKAcc(const CanonicalSpli
   // every physical output window, so chooser capacity cannot admit a logical
   // tile that becomes oversized after padding. The recursively visited
   // narrowed calls independently choose their legal inner K blocking.
-  auto tiling = AnalyzeMatmul(match.matmul, hints, /*force_output_stationary=*/true, output_box_alignment);
+  auto tiling =
+      AnalyzeMatmul(match.shape_source(), hints, /*force_output_stationary=*/true, output_box_alignment);
   if (!tiling || !tiling->needs_mn_tiling()) return std::nullopt;
 
   auto store_call = As<Call>(match.store->value_);
@@ -1785,9 +2036,10 @@ std::optional<CanonicalSplitKFold> TryFoldCanonicalSplitKAcc(const CanonicalSpli
                         store_call->attrs_, match.store->span_);
   std::vector<StmtPtr> stmts;
   VarPtr chain = placer.Init(stmts);
-  auto out_ty = As<TileType>(match.matmul->var_->GetType());
-  INTERNAL_CHECK_SPAN(out_ty, match.matmul->span_)
-      << "Internal error: canonical split-K matmul result lost its TileType";
+  const auto& shape_src = match.shape_source();
+  auto out_ty = As<TileType>(shape_src->var_->GetType());
+  INTERNAL_CHECK_SPAN(out_ty, shape_src->span_)
+      << "Internal error: canonical split-K reduction result lost its TileType";
   const int64_t num_m = (match.M + tiling->m - 1) / tiling->m;
   const int64_t num_n = (match.N + tiling->n - 1) / tiling->n;
   // Output-sensitive expansion: each source statement is cloned once per
@@ -1847,7 +2099,7 @@ StmtPtr RewriteCanonicalSplitKSeq(const SeqStmtsPtr& seq,
       auto third =
           remap.empty() ? seq->stmts_[i + 2] : transform_utils::Substitute(seq->stmts_[i + 2], remap);
       auto match = MatchCanonicalSplitKAcc(As<AssignStmt>(current), As<ForStmt>(next), As<AssignStmt>(third),
-                                           use_counts);
+                                           use_counts, &hints);
       if (match) {
         if (auto fold = TryFoldCanonicalSplitKAcc(*match, hints)) {
           for (auto& stmt : fold->stmts) out.push_back(std::move(stmt));
