@@ -380,6 +380,99 @@ jobs:
           python tests/lint/clang_tidy.py --strict-version --jobs=$(nproc)
         fi
 
+  prebuild-wheels:
+    # Build the pypto and simpler wheels ONCE PER MACHINE, into that host's
+    # wheel cache, so the eight jobs below install them instead of each
+    # rebuilding the same commit. Nothing depends on this job: setup-ci-job's
+    # cache is a flock, so whichever job arrives at a cold key first becomes the
+    # builder and the rest wait on it. Making the consumers `needs:` this one
+    # would turn a helper into a hard gate — a saturated CPU pool would then
+    # stall the whole workflow instead of just leaving the cache cold.
+    #
+    # The point is WHEN it runs, not that it runs. On run 32452961616 the heavy
+    # jobs could not start until 06:10:38 because clang-tidy (in-house cpu,
+    # 5m15) had to finish, and then each spent another ~3 min building. This job
+    # starts as soon as pre-commit is green (06:07:25 on that run) and has the
+    # wheels published before the gate opens, so the consumers install in
+    # seconds and start testing ~3 minutes earlier.
+    #
+    # Gated on pre-commit but deliberately NOT on clang-tidy. The lint gate's
+    # rule is "don't spend a scarce in-house slot on a tree that doesn't lint";
+    # pre-commit is the cheap half of it (GitHub-hosted, ~2 min) and keeps that
+    # promise, while waiting for clang-tidy would consume the entire head start
+    # this job exists to create. Cost of the exception: a tree that passes
+    # pre-commit but fails clang-tidy burns one cpu slot per architecture for
+    # one build — against the seven builds it removes from every green run.
+    #
+    # One leg per architecture, because the cache it fills is the host's own
+    # disk and the self-hosted fleet is no longer one machine. The `cpu` and
+    # `npu` pools each span an aarch64 box (cpu-N / npu-N) and an x86_64 one
+    # (infra024-cpu-x64-N / infra024-npu-a2a3-N), and #2525 dropped the `arm64`
+    # pin from every consumer so a job lands on whichever is free — measured
+    # over eight runs, 43% of cpu-pool jobs and half the npu ones go to the
+    # x86_64 host. A single-arch prebuild would leave that host cold and those
+    # jobs building in place, which is exactly what this removes. Each leg's
+    # cpu runner shares a machine, and therefore a CI_CACHE_ROOT, with that
+    # machine's npu runners, so warming from the cpu pool reaches both.
+    #
+    # `arm64` / `x64` are the labels the runner application applies on its own
+    # (`ARM64` / `X64`); label matching is case-insensitive, and the lowercase
+    # spelling is the one this repo has always used. They are the only thing in
+    # `runs-on` that can distinguish the two machines.
+    #
+    # fail-fast: false — a leg is a cache warm-up, not a check. One host being
+    # unreachable or short of disk must not cancel the other's build, and no
+    # job `needs:` either of them, so neither can gate anything.
+    #
+    # The wheel key already carries the architecture (abi_tag comes from
+    # EXT_SUFFIX), so the two legs cannot collide even if they somehow shared a
+    # cache root: they write different slots.
+    needs: [changes, toolchain, pre-commit]
+    if: needs.changes.outputs.docs_only != 'true'
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64, x64]
+    runs-on: [self-hosted, linux, "${{ matrix.arch }}", cpu]
+    env:
+      PTOAS_ROOT: ${{ github.workspace }}/prebuild-checkout/ptoas-bin
+      PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
+      PTOAS_SHA256_AARCH64: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
+      PTOAS_SHA256_X86_64: ${{ needs.toolchain.outputs.ptoas_sha256_x86_64 }}
+      # Higher than the 16 every other job uses: this one is meant to be the
+      # only pypto build on the box at the time, so it is not sharing cores with
+      # seven siblings the way a build inside a test job is. The same number
+      # serves both legs without measuring the second machine: each host already
+      # runs several runner instances that are each allowed a 16-way build, so
+      # one 48-way build is inside what it is provisioned to absorb.
+      CMAKE_BUILD_PARALLEL_LEVEL: 48
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CCACHE_MAXSIZE: 30G
+      CCACHE_UMASK: '000'
+    steps:
+      - name: Fetch composite action definitions
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/actions
+          clean: false
+          persist-credentials: false
+
+      # The whole job. setup-ci-job builds both wheels and publishes them to
+      # $CI_CACHE_ROOT/wheels as a side effect of installing them, so there is
+      # nothing to run afterwards — and a failure here is a real compile error,
+      # surfaced once and ~5 minutes earlier than the eight jobs would.
+      - name: Setup CI job
+        uses: ./.github/actions/setup-ci-job
+        with:
+          checkout-path: prebuild-checkout
+          needs-device: 'false'
+          toolchain: bundle
+          pip-cache-name: pip-prebuild
+          pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+
   unit-tests:
     # Build inputs come from build-constraints.txt rather than from whatever
     # PyPI offers today. Both variables on purpose: PIP_BUILD_CONSTRAINT is the
@@ -440,16 +533,79 @@ jobs:
       uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
+        # torch's CPU wheel is the heaviest thing this job downloads, so keep
+        # pip's own cache between runs too. cache-dependency-path is explicit
+        # because setup-python's default for pip is **/requirements.txt, and
+        # this repo has none — leaving it out fails the step outright rather
+        # than falling back to something.
+        cache: pip
+        cache-dependency-path: pyproject.toml
+
+    # This job compiled the extension from scratch on every run — 7m46 on run
+    # 32452961616, the largest single build in the workflow and one of the last
+    # things to finish. The self-hosted jobs have had a persistent ccache for a
+    # long time; this one had nothing, purely because a GitHub-hosted runner
+    # keeps no state between runs. actions/cache supplies the state.
+    #
+    # Restore-only here, save at the end and only on main: a cache saved on a PR
+    # branch is visible to that branch alone, so it would consume the repo's
+    # 10 GB quota (LRU-evicted, shared with every other cache) to speed up
+    # nothing but repeat pushes to that one PR. Caches saved on main are what
+    # every PR restores from.
+    - name: Restore ccache
+      if: needs.changes.outputs.docs_only != 'true'
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/.cache/ccache
+        key: ccache-x86_64-unit-${{ github.sha }}
+        restore-keys: ccache-x86_64-unit-
+
+    - name: Enable ccache
+      if: needs.changes.outputs.docs_only != 'true'
+      run: |
+        # Whether ccache is in the runner image is an image detail that can
+        # change under us, and the failure mode of assuming it — a silently
+        # uncached build that is merely slow — is one nobody would notice.
+        # Install it when it is absent instead.
+        if ! command -v ccache >/dev/null; then
+          sudo apt-get update -qq && sudo apt-get install -y -qq ccache
+        fi
+        # Named here rather than in the step's `env:`, where a literal "~" would
+        # reach ccache unexpanded. This is also the path the cache steps above
+        # and below use, so the three cannot drift.
+        echo "CCACHE_DIR=$HOME/.cache/ccache" >> "$GITHUB_ENV"
+        ccache --version | head -1
 
     # The two steps the docs-only gate actually elides — building the extension
     # and running the suite. The job itself still runs, so both required matrix
     # contexts are created and reported green.
     - name: Install project and dependencies
       if: needs.changes.outputs.docs_only != 'true'
+      env:
+        # CMake initialises CMAKE_<LANG>_COMPILER_LAUNCHER from the environment
+        # variable of the same name, which is how the self-hosted jobs wire
+        # ccache in too — so both paths stay one mechanism.
+        CMAKE_C_COMPILER_LAUNCHER: ccache
+        CMAKE_CXX_COMPILER_LAUNCHER: ccache
+        # Deliberately small. The whole dir is tarred up and pushed into the
+        # repo-wide 10 GB cache quota on every main run, so it is sized to hold
+        # this build's objects and nothing more.
+        CCACHE_MAXSIZE: 1G
       run: |
         python -m pip install --upgrade pip
         pip install torch --index-url https://download.pytorch.org/whl/cpu
+        ccache -z
         pip install -v .[dev]
+        ccache -s
+
+    - name: Save ccache
+      if: >-
+        needs.changes.outputs.docs_only != 'true'
+        && github.ref == 'refs/heads/main'
+      uses: actions/cache/save@v4
+      with:
+        path: ~/.cache/ccache
+        key: ccache-x86_64-unit-${{ github.sha }}
 
     - name: Test unit tests
       if: needs.changes.outputs.docs_only != 'true'
@@ -1386,10 +1542,41 @@ jobs:
         with:
           submodules: true
 
+      # Same story as unit-tests: 7m52 of from-scratch compiling on run
+      # 32452961616 because a GitHub-hosted runner keeps nothing between runs.
+      # Kept as a separate cache from that job's on purpose — this one builds
+      # inside ghcr.io/.../github-ci (ubuntu 22.04, gcc-15), unit-tests builds
+      # on the runner image, and mixing objects from two toolchains in one
+      # namespace is how a compile cache starts serving the wrong ones.
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-x86_64-a5sim-${{ github.sha }}
+          restore-keys: ccache-x86_64-a5sim-
+
+      - name: Enable ccache
+        run: |
+          # ccache is in the image as of the Dockerfile change that landed with
+          # this, but the image is only rebuilt on pushes to main that touch it,
+          # so a PR can still run against an older one. Install it if missing
+          # instead of silently building uncached.
+          if ! command -v ccache >/dev/null; then
+            apt-get update -qq && apt-get install -y -qq --no-install-recommends ccache
+          fi
+          echo "CCACHE_DIR=$HOME/.cache/ccache" >> "$GITHUB_ENV"
+          ccache --version | head -1
+
       - name: Install project and dependencies
+        env:
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CCACHE_MAXSIZE: 1G
         run: |
           python -m pip install --upgrade pip
+          ccache -z
           pip install -v .[dev]
+          ccache -s
 
       - name: Cache ptoas environment
         id: cache-ptoas
@@ -1414,9 +1601,22 @@ jobs:
           "$PTOAS_ROOT/bin/ptoas" --version
 
       - name: Install simpler
+        env:
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CCACHE_MAXSIZE: 1G
         run: |
           rm -rf ./runtime/build
           pip install -v ./runtime
+
+      # Saved after both builds so one entry covers pypto and simpler. Main only,
+      # for the quota reason spelled out on the unit-tests job.
+      - name: Save ccache
+        if: github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-x86_64-a5sim-${{ github.sha }}
 
       - name: Test A5 system tests (simulator)
         # TestMscatter is deselected: the a5 simulator compiles incore kernels

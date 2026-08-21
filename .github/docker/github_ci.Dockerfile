@@ -10,7 +10,8 @@ RUN apt-get update && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
       python3.10 python3.10-dev python3.10-venv \
-      gcc-15 g++-15 build-essential git curl ca-certificates && \
+      gcc-15 g++-15 build-essential git curl ca-certificates \
+      ccache && \
     rm -rf /var/lib/apt/lists/*
 
 # Set gcc/g++-15 as default compilers
