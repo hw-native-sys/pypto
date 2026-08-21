@@ -111,24 +111,40 @@ skip the store-target export entirely (the buffer is already visible to the
 caller through its write parameter), so their body keeps the original rebind —
 the capture still becomes a parameter, which is the part that was broken.
 
+**Which operators write** is not decided here. Each operator declares the
+effect it has on every argument (`set_arg_effect`, see
+[Operators](../ir/05-operators.md#argument-effects)), and `InferParamDirections`
+reads that. Before, this pass recognised exactly two writers — `tile.store` and
+`tensor.assemble` — so a scope whose only write to a captured tensor went
+through `tensor.write`, `tensor.expand_clone`, `pld.system.notify`,
+`pld.tile.put` or any other writer left that tensor looking untouched: the
+parameter stayed `In`, the caller got no dependency on the write, and the two
+passes that later re-derive directions disagreed with this one about the same
+call.
+
 **Write direction: `Out` unless the body reads**: a captured tensor the scope
-writes — a `tile.store` target or a `tensor.assemble` destination — is lifted
-off `In` by `InferParamDirections`. Which write direction it earns is decided by
-whether the body also *reads* it. Both write ops update a sub-region of the
-destination **in place**: the untouched region is neither loaded nor re-stored,
-so appearing in that destination slot moves no data into the scope and is not a
-read. A parameter whose only uses are destination slots is therefore `Out`;
-anything else — feeding a `tensor.slice`, a compute op, or a callee's `In`/`InOut`
-param — makes it `InOut`. Under SSA the post-write state binds to a fresh Var, so
-reading *that* alias counts too: the alias names the same buffer, and a read over
-a region the scope never wrote does need the incoming contents. Unrecognised uses
-count as reads, so the inference can only err towards `InOut`.
+writes is lifted off `In` by `InferParamDirections`. Which write direction it
+earns is decided by whether the body also *reads* it. An argument the operator
+declares `Write` updates a sub-region of the destination **in place**: the
+untouched region is neither loaded nor re-stored, so appearing in that
+destination slot moves no data into the scope and is not a read. A parameter
+whose only uses are such slots is therefore `Out`; anything else — feeding a
+`tensor.slice`, a compute op, or a callee's `In`/`InOut` param — makes it
+`InOut`. An argument declared `ReadWrite` stays on the read path, which is how
+an atomic store or assemble (`out += x` reads the accumulator) and an
+`AtomicAdd` notify keep their destination `InOut` while the plain forms do not —
+one rule, stated per operator, rather than a carve-out per pass. Under SSA the
+post-write state binds to a fresh Var, so reading *that* alias counts too: the
+alias names the same buffer, and a read over a region the scope never wrote does
+need the incoming contents. Unrecognised uses count as reads, so the inference
+can only err towards `InOut`.
 
 Two keys are excluded: `dump_vars` and `arg_direction_overrides_vars` name a
 tensor as bookkeeping (dump marking, `NoDep` opt-out) rather than accessing it.
 
-Each source of evidence — the read scan, the store-target set, the assemble scan,
-and each inner callee's declared slot — is a *lower* bound on the accesses, so
+Each source of evidence — the read scan, the store-target set, the body's
+declared writes, and each inner callee's declared slot — is a *lower* bound on
+the accesses, so
 they are merged along `In < Out < InOut` rather than overwriting one another. A
 plain assignment would let a callee that declares its slot `Out` erase a read the
 body really performs.

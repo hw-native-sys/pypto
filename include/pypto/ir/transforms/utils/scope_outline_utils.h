@@ -12,6 +12,7 @@
 #ifndef PYPTO_IR_TRANSFORMS_UTILS_SCOPE_OUTLINE_UTILS_H_
 #define PYPTO_IR_TRANSFORMS_UTILS_SCOPE_OUTLINE_UTILS_H_
 
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <string>
@@ -23,6 +24,7 @@
 #include "pypto/core/error.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
@@ -35,6 +37,27 @@ namespace ir {
 namespace outline_utils {
 
 /** @brief Visitor to build a symbol table mapping variable pointers to their types and Var objects. */
+/// One variable a call writes, and how.
+struct CallWriteTarget {
+  VarPtr var;        ///< the written variable (`Var` or `IterArg`)
+  size_t slot;       ///< the argument index carrying it
+  ArgEffect effect;  ///< `Write` for a pure overwrite, `ReadWrite` for an update
+};
+
+/// Every variable @p call writes through one of its arguments.
+///
+/// Which argument an operator writes is declared once on the registry
+/// (`set_arg_effect`), so a new write operator reaches the outliner's read
+/// analysis and its direction inference together instead of having to be added
+/// to each of them. Before, both matched `tile.store` and `tensor.assemble` by
+/// name, and a scope whose only write to a captured tensor was, say, a
+/// `pld.tile.put` left that tensor looking untouched.
+///
+/// `AsVarLike` rather than `As<Var>`: a loop-carried destination is an `IterArg`
+/// (`for ... : c = pl.store(t, off, c)`), and `As<Var>` does not match it (see
+/// `.claude/rules/ir-kind-traits.md`).
+[[nodiscard]] std::vector<CallWriteTarget> CallWriteTargets(const CallPtr& call);
+
 class VarCollector : public IRVisitor {
  public:
   std::unordered_map<const Var*, TypePtr> var_types;

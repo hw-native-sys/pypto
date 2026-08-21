@@ -665,14 +665,82 @@ class TestOutlineIncoreScopes:
         After = passes.outline_incore_scopes()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    @staticmethod
+    def _outlined_directions(program, callee="main_incore_0"):
+        """Map the outlined callee's parameter names to their derived directions.
+
+        Keys drop the ``__ssa_vN`` suffix ``ConvertToSSA`` appends, so a test can
+        name the parameter as it was written in the source.
+        """
+        after = passes.outline_incore_scopes()(passes.convert_to_ssa()(program))
+        func = after.get_function(callee)
+        assert func is not None, f"{callee} was not outlined"
+        return {p.name_hint.split("__ssa_v")[0]: d for p, d in zip(func.params, func.param_directions)}
+
+    def test_outline_scalar_write_dest_becomes_out(self):
+        """``tensor.write`` writes its destination, so a captured tensor written
+        only through it becomes ``Out``.
+
+        The outliner used to recognise exactly two writers, ``tile.store`` and
+        ``tensor.assemble``. Every other write operator — ``tensor.write`` here
+        — left the captured tensor looking untouched, so the parameter stayed
+        ``In`` and the caller got no dependency on the write. The operator now
+        declares which argument it writes and the outliner reads that.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self, dst: pl.Tensor[[64], pl.FP32], value: pl.Scalar[pl.FP32]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    updated: pl.Tensor[[64], pl.FP32] = pl.write(dst, [0], value)
+                return updated
+
+        assert self._outlined_directions(Before)["dst"] == ir.ParamDirection.Out
+
+    def test_outline_expand_clone_target_becomes_out(self):
+        """``tensor.expand_clone`` stores into its ``target`` on every lowering
+        branch, so a captured target is written, not read."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self, src: pl.Tensor[[1, 1, 32], pl.FP32], dst: pl.Tensor[[1, 8, 32], pl.FP32]
+            ) -> pl.Tensor[[1, 8, 32], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    expanded: pl.Tensor[[1, 8, 32], pl.FP32] = pl.expand_clone(src, dst)
+                return expanded
+
+        directions = self._outlined_directions(Before)
+        assert directions["dst"] == ir.ParamDirection.Out
+        assert directions["src"] == ir.ParamDirection.In
+
+    def test_outline_read_then_write_dest_is_inout(self):
+        """A captured tensor the scope reads *and* writes stays ``InOut``. The
+        write widens the direction; it does not replace the read."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, dst: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    first: pl.Scalar[pl.FP32] = pl.read(dst, [0])
+                    updated: pl.Tensor[[64], pl.FP32] = pl.write(dst, [1], first)
+                return updated
+
+        assert self._outlined_directions(Before)["dst"] == ir.ParamDirection.InOut
+
     def test_outline_write_only_assemble_dest_becomes_out(self):
         """``tensor.assemble`` destination captured by a scope becomes an Out param.
 
         ``tensor.assemble`` is SSA-pure (returns a fresh Tensor), but its first
         argument is a destination the result aliases in place. When the
         destination is a captured outer variable, the outlined function writes
-        the caller's backing buffer, so ``InferParamDirections`` Step 2
-        (``AssembleDestUpgrader``) lifts that parameter off ``In``. Here the body
+        the caller's backing buffer, so ``InferParamDirections`` lifts that
+        parameter off ``In`` from the operator's declared write. Here the body
         never reads ``dst`` — the assemble destination slot is the only use — so
         the direction is ``Out``, not ``InOut`` (issue #2415: a false ``InOut``
         reaches ``DistributedCodegen`` and manufactures a cross-rank edge). The
@@ -1163,13 +1231,21 @@ class TestOutlineSubmitTaskId:
         assert tail.dtype == DataType.TASK_ID
 
     def test_deferred_wait_does_not_order_later_notify_behind_waiter(self):
-        """Signal control ops stay Input; notify has no waiter dependency.
+        """Notify writes its signal, and still carries no waiter dependency.
 
         The deferred waiter is logically live after its AIV kernel returns, so
         a spurious waiter -> notifier edge would recreate the physical-core
-        saturation deadlock.  ``defer_wait`` and ``notify`` are side-effect ops
-        with no memory-write specification, hence both outlined signal params
-        derive as Input and a MANUAL scope leaves the later notifier unordered.
+        saturation deadlock. That edge is what this test guards, and a MANUAL
+        scope leaves the later notifier unordered regardless of direction.
+
+        The directions themselves are not symmetric. ``pld.system.wait`` /
+        ``defer_wait`` poll a signal they never write, so the waiter's parameter
+        is ``Input``. ``pld.system.notify`` deposits a value into the peer's
+        slot — that is the write whose absence dropped the RAW edge a waiter
+        needs and deadlocked the communication card, so the notifier's parameter
+        is ``Out`` and its call site ``OutputExisting``. The operator declares
+        both facts on the registry, so the outliner and ``ConvertTensorToTileOps``
+        read the same answer instead of disagreeing about the same call.
         """
 
         @pl.program
@@ -1223,7 +1299,10 @@ class TestOutlineSubmitTaskId:
         assert isinstance(waiter, ir.Submit)
         assert list(waiter.arg_directions) == [ir.ArgDirection.Input]
         assert isinstance(notifier, ir.Call)
-        assert list(notifier.arg_directions) == [ir.ArgDirection.Input, ir.ArgDirection.Scalar]
+        assert list(notifier.arg_directions) == [
+            ir.ArgDirection.OutputExisting,
+            ir.ArgDirection.Scalar,
+        ]
         assert "manual_dep_edges" not in notifier.attrs
         assert "compiler_manual_dep_edges" not in notifier.attrs
         assert isinstance(consumer, ir.Submit)
