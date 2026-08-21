@@ -5314,11 +5314,18 @@ class TestWindowSliceIncoreConversion:
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
-    def test_allgather_upgrades_target_and_signal_to_inout(self):
+    def test_allgather_writes_target_and_reads_writes_signal(self):
         """``pld.tensor.allgather(local_data, target, signal)`` (push-based 3-arg)
-        upgrades both ``target`` and ``signal`` params to InOut. ``local_data``
-        remains In (read-only). The result is the ``target`` window
-        (window-as-result, DistributedTensor)."""
+        lifts ``target`` to Out and ``signal`` to InOut. ``local_data`` remains In
+        (read-only). The result is the ``target`` window (window-as-result,
+        DistributedTensor).
+
+        The two write differently and earn different directions. The lowering only
+        pushes into ``target`` (``pld.tile.put``) and never loads from it, so no
+        data moves into the kernel through it — that is ``Out``. ``signal`` is
+        written by the notify phase and read by the wait phase, so it is ``InOut``.
+        Declaring ``target`` ``InOut`` would stage the window host->device and
+        assert a dependency on content the collective overwrites in full."""
         SIZE = 16
         nr = 2
 
@@ -5337,7 +5344,8 @@ class TestWindowSliceIncoreConversion:
         After = passes.convert_tensor_to_tile_ops()(Before)
         # After conversion the function has additional params (MemRef for
         # local_data load).  Verify just the
-        # direction inference: target and signal must be InOut; local_data
+        # direction inference: target must be Out (pushed into, never read
+        # back) and signal InOut (notify writes it, wait reads it); local_data
         # (an original plain-Tensor In param) stays In.
         after_fn = After["kernel"]
         assert after_fn is not None
@@ -5347,7 +5355,7 @@ class TestWindowSliceIncoreConversion:
         for i, bp in enumerate(before_fn.params):
             after_dir = after_fn.param_directions[i]
             if bp.name_hint == "target":
-                assert after_dir == ir.ParamDirection.InOut, f"target must be InOut, got {after_dir}"
+                assert after_dir == ir.ParamDirection.Out, f"target must be Out, got {after_dir}"
             elif bp.name_hint == "signal":
                 assert after_dir == ir.ParamDirection.InOut, f"signal must be InOut, got {after_dir}"
             elif bp.name_hint == "local_data":
@@ -5355,10 +5363,13 @@ class TestWindowSliceIncoreConversion:
 
     def test_all_to_all_v_keeps_send_counts_read_only(self):
         """``pld.tensor.all_to_all_v(input, target, signal, send_counts, recv_counts)``
-        upgrades ``target``, ``signal``, and ``recv_counts`` to InOut, while
-        ``input`` and ``send_counts`` stay In: the lowering only *reads* the
-        send counts (``tensor.read``) and *writes* recv_counts via peer notify (Set).
-        """
+        lifts ``target`` and ``recv_counts`` to Out and ``signal`` to InOut, while
+        ``input`` and ``send_counts`` stay In.
+
+        ``recv_counts`` is deposited by a peer notify with ``Set``, which
+        overwrites the slot rather than accumulating into it, so like ``target``
+        it is written without being read. Only ``signal`` is both — notify writes
+        it, wait reads it back."""
         SIZE = 16
         nr = 2
         total = nr * 2
@@ -5386,9 +5397,9 @@ class TestWindowSliceIncoreConversion:
         expected_directions = {
             "inp": ir.ParamDirection.In,
             "counts": ir.ParamDirection.In,
-            "target": ir.ParamDirection.InOut,
+            "target": ir.ParamDirection.Out,
             "signal": ir.ParamDirection.InOut,
-            "recv_counts": ir.ParamDirection.InOut,
+            "recv_counts": ir.ParamDirection.Out,
         }
         for i, bp in enumerate(before_fn.params):
             want = expected_directions.get(bp.name_hint)
@@ -5937,6 +5948,118 @@ class TestSynthesizedOpSpans:
         assert exp_stmt.span.begin_line <= exp_after.span.begin_line
         assert exp_after.span.end_line <= exp_stmt.span.end_line
         assert exp_after.span.begin_line > func.span.begin_line
+
+
+class TestRegistryDrivenParamDirections:
+    """Parameter directions derived from registry-declared argument effects.
+
+    The pass used to carry its own table of write operators whose default arm
+    counted every argument of an unrecognised operator as a read. These pin the
+    operators that table missed, and pin that the operators it did know keep
+    deriving the same directions.
+    """
+
+    @staticmethod
+    def _directions(program, func_name="kernel"):
+        before = program[func_name]
+        after = passes.convert_tensor_to_tile_ops()(program)[func_name]
+        assert before is not None and after is not None
+        return {param.name_hint: after.param_directions[i] for i, param in enumerate(before.params)}
+
+    def test_mscatter_destination_is_out(self):
+        """A GM tensor written only by ``pl.mscatter`` is an output.
+
+        ``tile.mscatter`` was in none of the pass's write tables, so its
+        destination fell through to the read-only default and kept direction
+        ``In`` — no RAW edge against a later reader, and the host treated a
+        written buffer as a pure input."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[16, 16], pl.FP32],
+                idx: pl.Tensor[[16, 16], pl.INT32],
+                out: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                s = pl.load(src, [0, 0], [16, 16])
+                i = pl.load(idx, [0, 0], [16, 16])
+                out = pl.mscatter(s, i, out)
+                return out
+
+        directions = self._directions(Prog)
+        assert directions["out"] == ir.ParamDirection.Out
+        assert directions["src"] == ir.ParamDirection.In
+        assert directions["idx"] == ir.ParamDirection.In
+
+    def test_mscatter_matches_store(self):
+        """The two write operators derive the same direction for structurally
+        identical kernels. They disagreed before: ``pl.store`` yielded ``Out``
+        and ``pl.mscatter`` yielded ``In``."""
+
+        @pl.program
+        class WithStore:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, src: pl.Tensor[[16, 16], pl.FP32], out: pl.Tensor[[16, 16], pl.FP32]
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                s = pl.load(src, [0, 0], [16, 16])
+                out = pl.store(s, [0, 0], out)
+                return out
+
+        @pl.program
+        class WithMscatter:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[16, 16], pl.FP32],
+                idx: pl.Tensor[[16, 16], pl.INT32],
+                out: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                s = pl.load(src, [0, 0], [16, 16])
+                i = pl.load(idx, [0, 0], [16, 16])
+                out = pl.mscatter(s, i, out)
+                return out
+
+        assert self._directions(WithStore)["out"] == ir.ParamDirection.Out
+        assert self._directions(WithMscatter)["out"] == ir.ParamDirection.Out
+
+    def test_read_then_mscatter_is_inout(self):
+        """Scattering into a tensor the kernel also loads keeps it InOut — the
+        write effect widens the direction, it does not replace the read."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                idx: pl.Tensor[[16, 16], pl.INT32],
+                out: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                s = pl.load(out, [0, 0], [16, 16])
+                i = pl.load(idx, [0, 0], [16, 16])
+                out = pl.mscatter(s, i, out)
+                return out
+
+        assert self._directions(Prog)["out"] == ir.ParamDirection.InOut
+
+    def test_atomic_store_destination_is_inout(self):
+        """``out += x`` reads the accumulator it adds into, so the destination
+        is InOut while a plain store leaves it Out. The pass reads that from the
+        operator's kwarg-dependent effect rather than re-deriving it."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, src: pl.Tensor[[16, 16], pl.FP32], out: pl.Tensor[[16, 16], pl.FP32]
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                s = pl.load(src, [0, 0], [16, 16])
+                out = pl.store(s, [0, 0], out, atomic=pl.AtomicType.Add)
+                return out
+
+        assert self._directions(Prog)["out"] == ir.ParamDirection.InOut
 
 
 if __name__ == "__main__":

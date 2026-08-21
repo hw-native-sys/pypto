@@ -107,6 +107,15 @@ enum class ExecutionMemoryAccessEvidence : uint8_t {
  * operand in place must say so: a missing `Write` is not a conservative
  * approximation, it silently erases a real dependency edge (the writer looks
  * like a pure reader, so nothing is ordered against it).
+ *
+ * **`Write` is a dataflow claim, not a coverage claim.** It says *no data is
+ * loaded out of this buffer by this call* — which is what decides whether the
+ * enclosing parameter must be staged host→device and whether a reader needs a
+ * RAW edge. It does **not** say every byte of the destination is redefined:
+ * `tile.store` writes one region and `tile.mscatter` writes scattered cells,
+ * and both are `Write`. An analysis that needs coverage (killing a live range,
+ * proving a WAW) must establish the written *region* separately; treating
+ * `Write` as "fully redefined" would let it discard data the call never touched.
  */
 enum class ArgEffect : uint8_t {
   Read = 0,       ///< Read, never written.
@@ -1107,6 +1116,20 @@ T GetRequiredKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, 
 /// @overload Test a Call's operator (false when `call` or its op is null).
 [[nodiscard]] inline bool IsOp(const CallPtr& call, const std::string& op_name) {
   return call && IsOp(call->op_, op_name);
+}
+
+[[nodiscard]] inline const OpRegistryEntry* LookupOpEntry(const OpPtr& op) {
+  if (!op) return nullptr;
+  // `GlobalVar` derives from `Op`, so a function call reaches here carrying its
+  // *function* name. Looking that up would hand a user function whose name
+  // happens to match a registered operator that operator's effects and reuse
+  // contract — argument 2 of a function named `tile.store` would read as
+  // written and aliased. Kind first, name second
+  // (`.claude/rules/operator-identity-checks.md`).
+  if (std::dynamic_pointer_cast<const GlobalVar>(op)) return nullptr;
+  const auto& registry = OpRegistry::GetInstance();
+  if (!registry.IsRegistered(op->name_)) return nullptr;
+  return &registry.GetEntry(op->name_);
 }
 
 /// @overload Test a Submit's operator (false when `submit` or its op is null).

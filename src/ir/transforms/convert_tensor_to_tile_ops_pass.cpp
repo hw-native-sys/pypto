@@ -25,7 +25,6 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
-#include "pypto/ir/comm.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -43,6 +42,7 @@
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/result_alias_utils.h"
 #include "pypto/ir/transforms/utils/tile_conversion_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
@@ -1249,99 +1249,23 @@ ParamOrigins LookupOrigins(const Var* var, const AliasOriginMap& origin_map) {
 
 ParamOrigins CollectReferencedOrigins(const ExprPtr& expr, const AliasOriginMap& origin_map);
 
-ExprPtr GetCallKwargExpr(const CallPtr& call, const std::string& key) {
-  if (!call || !call->HasKwarg(key)) return nullptr;
-  return call->GetKwarg<ExprPtr>(key, ExprPtr{});
-}
-
-ExprPtr GetWriteTargetExpr(const CallPtr& call) {
-  if (!call) return nullptr;
-
-  if (IsOp(call, "tensor.write") && !call->args_.empty()) {
-    return call->args_[0];
-  }
-  if (IsOp(call, "tile.store")) {
-    if (call->args_.size() >= 3) {
-      return call->args_[2];
-    }
-    return GetCallKwargExpr(call, "output_tensor");
-  }
-  if (IsOp(call, "tensor.assemble") && !call->args_.empty()) {
-    return call->args_[0];
-  }
-  // pld.tile.remote_store(src_tile, target, peer, offsets): the cross-rank write
-  // lands in `target` (args_[1]). Recognising it here lets the enclosing window
-  // param be upgraded from In to Out/InOut so a later reader gets a RAW edge.
-  if (IsOp(call, "pld.tile.remote_store") && call->args_.size() >= 2) {
-    return call->args_[1];
-  }
-  // pld.tile.put(dst, peer, src, stage[, dst_offsets, src_offsets, shape]):
-  //   the HCCL TPUT writes through `dst` (args_[0]).
-  // pld.tile.get(dst, peer, src, stage[, dst_offsets, src_offsets, shape]):
-  //   the HCCL TGET writes the pulled bytes into local `dst` (args_[0]).
-  // Both mirror the remote_store handling above so the enclosing window
-  // param is upgraded from In to Out/InOut and a later reader gets a RAW edge.
-  if ((IsOp(call, "pld.tile.put") || IsOp(call, "pld.tile.get")) && !call->args_.empty()) {
-    return call->args_[0];
-  }
-  // pld.system.notify(target, peer, offsets, value, *, op): the TNOTIFY
-  // deposits `value` into the peer rank's slot of `target` (args_[0]), so the
-  // enclosing window param must be upgraded from In to Out/InOut — otherwise a
-  // later reader of the same signal gets no RAW edge. The op is side-effect-only
-  // (UnknownType result), so this entry only ever feeds AnalyzeCallAccess, never
-  // the result-aliasing path in GetAliasOrigins.
-  if (IsOp(call, "pld.system.notify") && !call->args_.empty()) {
-    return call->args_[0];
-  }
-  // pld.tensor.allreduce(target, signal, *, op): the composite collective
-  // writes the reduced value back into `target` (args_[0]) — the in-place
-  // rebind idiom shared with `pl.store`. `signal` (args_[1]) is also
-  // written (ready and per-chunk notify), but the marker below for
-  // ``pld.tensor.allreduce`` already records both args as InOut; this
-  // entry just identifies the primary data target for any downstream
-  // consumer that walks GetWriteTargetExpr.
-  if (IsOp(call, "pld.tensor.allreduce") && !call->args_.empty()) {
-    return call->args_[0];
-  }
-  // pld.tensor.allgather unified 3-arg API (see DeduceTensorAllGatherType):
-  //   arg[1] (target) is the result window for both HOST and InCore paths.
-  //   local_data (arg[0]) is read-only; signal (arg[2]) is barrier only.
-  if (IsOp(call, "pld.tensor.allgather")) {
-    if (call->args_.size() >= 3) {
-      return call->args_[1];  // target is the write target (window-as-result)
-    }
-  }
-  // pld.tensor.reduce_scatter(target, signal, *, op): writes the reduced
-  // chunk back into target (Phase 4 store).  target (args_[0]) is the
-  // primary write target — same as allreduce.
-  if (IsOp(call, "pld.tensor.reduce_scatter") && !call->args_.empty()) {
-    return call->args_[0];
-  }
-  // pld.tensor.barrier(signal): returns a rebind of signal — the result
-  // aliases signal so that ``sig2 = barrier(sig1)`` propagates origins
-  // through GetAliasOrigins().  The AnalyzeCallAccess handler separately
-  // marks signal read+write for param-direction inference.
-  if (IsOp(call, "pld.tensor.barrier") && !call->args_.empty()) {
-    return call->args_[0];
-  }
-  // pld.tensor.broadcast(target, signal, *, root): writes root's data into
-  // target on every rank via pld.tile.get.  target (args_[0]) is
-  // the primary write target.
-  if (IsOp(call, "pld.tensor.broadcast") && !call->args_.empty()) {
-    return call->args_[0];
-  }
-  // pld.tensor.all_to_all(input, target, signal): 3-arg push-based
-  // window-as-result.  target (args_[1]) receives peers' writes via TPUT.
-  if (IsOp(call, "pld.tensor.all_to_all") && call->args_.size() >= 2) {
-    return call->args_[1];
-  }
-  // pld.tensor.all_to_all_v(input, target, signal, send_counts, recv_counts):
-  // 5-arg variable-size push-based window-as-result.  target (args_[1]) receives
-  // peers' writes; recv_counts (args_[4]) receives per-source valid-row counts;
-  // send_counts is read-only.
-  if (IsOp(call, "pld.tensor.all_to_all_v") && call->args_.size() >= 2) {
-    return call->args_[1];
-  }
+/// The argument whose buffer this call's SSA result names, or null when the
+/// result is a fresh value.
+///
+/// This is the destination-rebind idiom — `c2 = tile.store(t, off, c)`, where
+/// reading `c2` reads `c` — and it is a *narrower* question than "which argument
+/// does this operator write", which the registry now answers (`set_arg_effect`).
+/// The two differ: `tile.mgather` clobbers a GM scratch operand yet returns a
+/// fresh tile, so it writes an argument it does not alias.
+///
+/// An operator declaring `set_output_reuses_input(N)` states exactly this
+/// relation, so that declaration is consulted first. The remaining entries are
+/// the tensor-level and cross-rank operators whose result rebinds a destination
+/// without reusing an on-chip MemRef; unifying them onto one declaration is
+/// follow-up work, and the two sources are kept consistent by the write-effect
+/// check below.
+ExprPtr ResultAliasedDestination(const CallPtr& call) {
+  if (auto index = ResultAliasedArgIndex(call)) return call->args_[*index];
   return nullptr;
 }
 
@@ -1372,7 +1296,7 @@ ParamOrigins GetAliasOrigins(const ExprPtr& expr, const AliasOriginMap& origin_m
   auto call = As<Call>(expr);
   if (!call) return {};
 
-  if (auto write_target = GetWriteTargetExpr(call)) {
+  if (auto write_target = ResultAliasedDestination(call)) {
     return GetAliasOrigins(write_target, origin_map);
   }
   if ((IsOp(call, "tensor.slice") || IsOp(call, "tensor.view")) && !call->args_.empty()) {
@@ -1415,226 +1339,46 @@ ParamOrigins CollectReferencedOrigins(const ExprPtr& expr, const AliasOriginMap&
   return origins;
 }
 
+/// Mark the parameter origins each argument of @p call reads and writes.
+///
+/// Which argument a call writes is a property of the operator, declared once on
+/// the registry (`set_arg_effect`) and read here — this pass used to carry its
+/// own table of twenty operators, whose default arm counted every argument of an
+/// operator it did not recognise as a read. That default is why a GM tensor
+/// written only by `tile.mscatter` kept direction `In`.
+///
+/// Reads resolve through `CollectReferencedOrigins`, since an operand may merely
+/// *mention* a buffer (an offsets tuple built from `tensor.dim`). Writes resolve
+/// through `GetAliasOrigins`, since a destination operand names the buffer
+/// itself. A pure `Write` argument is not marked as a read: a store that lands
+/// on a sub-region never reads the untouched remainder.
 void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, std::vector<bool>& has_read,
                        std::vector<bool>& has_write, std::vector<std::optional<Span>>& dma_store_spans,
                        std::vector<std::optional<Span>>& scalar_store_spans) {
   if (!call) return;
 
-  if (IsOp(call, "tile.load") || IsOp(call, "tensor.read")) {
-    if (!call->args_.empty()) {
-      MarkAccess(GetAliasOrigins(call->args_[0], origin_map), has_read);
-    }
-    for (size_t i = 1; i < call->args_.size(); ++i) {
+  // A call to a user function reaches here with a GlobalVar callee and no
+  // registry entry. Its writes are propagated separately, from the callee's
+  // declared param directions; every operand counts as a read here.
+  const auto* entry = LookupOpEntry(call->op_);
+
+  for (size_t i = 0; i < call->args_.size(); ++i) {
+    const auto effect = entry ? entry->GetArgEffect(i, call->kwargs_) : ArgEffect::Read;
+
+    if (ArgEffectReads(effect)) {
       MarkAccess(CollectReferencedOrigins(call->args_[i], origin_map), has_read);
     }
-    return;
-  }
+    if (!ArgEffectWrites(effect)) continue;
 
-  if (IsOp(call, "tile.store")) {
-    if (!call->args_.empty()) {
-      MarkAccess(CollectReferencedOrigins(call->args_[0], origin_map), has_read);
+    auto origins = GetAliasOrigins(call->args_[i], origin_map);
+    MarkAccess(origins, has_write);
+    // Only a GM store participates in the mixed-channel diagnostic below; an
+    // operator that writes a tile, an array or a signal slot declares no
+    // channel and is skipped.
+    if (auto channel = entry->GetWriteChannel()) {
+      RecordFirstStoreSpan(origins, *channel == WriteChannel::Scalar ? scalar_store_spans : dma_store_spans,
+                           call->span_);
     }
-    for (size_t i = 1; i + 1 < call->args_.size(); ++i) {
-      MarkAccess(CollectReferencedOrigins(call->args_[i], origin_map), has_read);
-    }
-    if (call->args_.size() < 3) {
-      MarkAccess(CollectReferencedOrigins(GetCallKwargExpr(call, "offsets"), origin_map), has_read);
-    }
-    if (auto write_target = GetWriteTargetExpr(call)) {
-      auto origins = GetAliasOrigins(write_target, origin_map);
-      MarkAccess(origins, has_write);
-      RecordFirstStoreSpan(origins, dma_store_spans, call->span_);
-    }
-    return;
-  }
-
-  if (IsOp(call, "pld.tile.remote_store")) {
-    // remote_store(src_tile, target, peer, offsets): src_tile/peer/offsets read,
-    // target (args_[1]) written. Mirrors the tile.store handling above.
-    if (!call->args_.empty()) {
-      MarkAccess(CollectReferencedOrigins(call->args_[0], origin_map), has_read);
-    }
-    for (size_t i = 2; i < call->args_.size(); ++i) {
-      MarkAccess(CollectReferencedOrigins(call->args_[i], origin_map), has_read);
-    }
-    if (auto write_target = GetWriteTargetExpr(call)) {
-      MarkAccess(GetAliasOrigins(write_target, origin_map), has_write);
-    }
-    return;
-  }
-
-  if (IsOp(call, "pld.tile.put") || IsOp(call, "pld.tile.get")) {
-    // pld.tile.put(dst, peer, src, stage[, dst_offsets, src_offsets, shape]):
-    //   dst (args_[0]) is the cross-rank write target; peer/src/stage and any
-    //   subregion offsets are all read.
-    // pld.tile.get(dst, peer, src, stage[, dst_offsets, src_offsets, shape]):
-    //   dst (args_[0]) is the local write target (HCCL TGET lands bytes into
-    //   the local window slot); peer/src/stage and any subregion offsets are
-    //   all read.
-    // Mirrors the pld.tile.remote_store handling above.
-    for (size_t i = 1; i < call->args_.size(); ++i) {
-      MarkAccess(CollectReferencedOrigins(call->args_[i], origin_map), has_read);
-    }
-    if (auto write_target = GetWriteTargetExpr(call)) {
-      MarkAccess(GetAliasOrigins(write_target, origin_map), has_write);
-    }
-    return;
-  }
-
-  if (IsOp(call, "pld.system.notify")) {
-    // pld.system.notify(target, peer, offsets, value, *, op): target (args_[0])
-    // is always written; peer/offsets/value are reads. NotifyOp::kAtomicAdd is
-    // additionally a read-modify-write of the target slot, so its distributed
-    // target dependency must be preserved even when the slot belongs to a peer
-    // rank. NotifyOp::kSet remains write-only.
-    for (size_t i = 1; i < call->args_.size(); ++i) {
-      MarkAccess(CollectReferencedOrigins(call->args_[i], origin_map), has_read);
-    }
-    if (auto write_target = GetWriteTargetExpr(call)) {
-      auto origins = GetAliasOrigins(write_target, origin_map);
-      const auto notify_op =
-          static_cast<NotifyOp>(call->GetKwarg<int>("op", static_cast<int>(NotifyOp::kAtomicAdd)));
-      if (notify_op == NotifyOp::kAtomicAdd) {
-        MarkAccess(origins, has_read);
-      }
-      MarkAccess(origins, has_write);
-    }
-    return;
-  }
-
-  if (IsOp(call, "pld.tensor.allreduce")) {
-    // pld.tensor.allreduce(target, signal, *, op): both target (args_[0])
-    // and signal (args_[1]) are InOut — read AND written across the
-    // ready-plus-per-chunk decomposition (target read and written per chunk;
-    // signal written by notify and read by wait at both barriers).
-    // Marking both args on both sides makes the enclosing window params
-    // surface as InOut without needing LowerCompositeOps to have run yet
-    // (this pass is upstream of LowerCompositeOps).
-    for (size_t i = 0; i < std::min<size_t>(2, call->args_.size()); ++i) {
-      auto origins = CollectReferencedOrigins(call->args_[i], origin_map);
-      MarkAccess(origins, has_read);
-      MarkAccess(origins, has_write);
-    }
-    return;
-  }
-
-  if (IsOp(call, "pld.tensor.allgather")) {
-    // Unified 3-arg InCore (AnalyzeCallAccess only fires for InCore functions).
-    //   arg[0] = local_data — Tensor [1, SIZE] (In, read-only)
-    //   arg[1] = target     — DistributedTensor window (InOut, push target + result)
-    //   arg[2] = signal     — DistributedTensor INT32 barrier (InOut)
-    if (call->args_.size() >= 1) {
-      MarkAccess(CollectReferencedOrigins(call->args_[0], origin_map), has_read);
-    }
-    for (size_t i = 1; i < call->args_.size(); ++i) {
-      auto origins = CollectReferencedOrigins(call->args_[i], origin_map);
-      MarkAccess(origins, has_read);
-      MarkAccess(origins, has_write);
-    }
-    return;
-  }
-
-  if (IsOp(call, "pld.tensor.reduce_scatter")) {
-    // pld.tensor.reduce_scatter(target, signal, *, op): same 5-phase
-    // pattern as allreduce — both target and signal are InOut.
-    for (size_t i = 0; i < std::min<size_t>(2, call->args_.size()); ++i) {
-      auto origins = CollectReferencedOrigins(call->args_[i], origin_map);
-      MarkAccess(origins, has_read);
-      MarkAccess(origins, has_write);
-    }
-    return;
-  }
-
-  if (IsOp(call, "pld.tensor.barrier")) {
-    // pld.tensor.barrier(signal): signal (args_[0]) is InOut.
-    // Written in Phase 1 (notify), read in Phase 2 (wait).
-    if (!call->args_.empty()) {
-      auto origins = CollectReferencedOrigins(call->args_[0], origin_map);
-      MarkAccess(origins, has_read);
-      MarkAccess(origins, has_write);
-    }
-    return;
-  }
-
-  if (IsOp(call, "pld.tensor.broadcast")) {
-    // pld.tensor.broadcast(target, signal, *, root): target (args_[0]) and
-    // signal (args_[1]) are both InOut.  Target is read via pld.tile.get
-    // (non-root reads root's slice), written via pld.tile.get into local
-    // slot.  Signal is written (Phase 2a notify) and read (Phase 2b wait).
-    for (size_t i = 0; i < std::min<size_t>(2, call->args_.size()); ++i) {
-      auto origins = CollectReferencedOrigins(call->args_[i], origin_map);
-      MarkAccess(origins, has_read);
-      MarkAccess(origins, has_write);
-    }
-    return;
-  }
-
-  if (IsOp(call, "pld.tensor.all_to_all") || IsOp(call, "pld.tensor.all_to_all_v")) {
-    // Push-based window-as-result: input (arg[0]) is read-only (Tensor or
-    // DistributedTensor); target (arg[1]) receives peer writes via TPUT and
-    // is returned in-place; signal (arg[2]) is read+written by notify/wait.
-    // all_to_all_v carries two more operands — send_counts (arg[3], read-only
-    // via ``tensor.read``) and recv_counts (arg[4], written by peer count
-    // notify) — so only arg[3] stays read-only among the trailing operands.
-    for (size_t i = 0; i < call->args_.size(); ++i) {
-      auto origins = CollectReferencedOrigins(call->args_[i], origin_map);
-      MarkAccess(origins, has_read);
-      const bool is_write_target = (i == 1 || i == 2 || (IsOp(call, "pld.tensor.all_to_all_v") && i == 4));
-      if (is_write_target) {
-        MarkAccess(origins, has_write);
-      }
-    }
-    return;
-  }
-
-  if (IsOp(call, "tensor.write")) {
-    for (size_t i = 1; i < call->args_.size(); ++i) {
-      MarkAccess(CollectReferencedOrigins(call->args_[i], origin_map), has_read);
-    }
-    if (auto write_target = GetWriteTargetExpr(call)) {
-      auto origins = GetAliasOrigins(write_target, origin_map);
-      MarkAccess(origins, has_write);
-      RecordFirstStoreSpan(origins, scalar_store_spans, call->span_);
-    }
-    return;
-  }
-
-  if (IsOp(call, "tensor.assemble")) {
-    for (size_t i = 1; i < call->args_.size(); ++i) {
-      MarkAccess(CollectReferencedOrigins(call->args_[i], origin_map), has_read);
-    }
-    if (!call->args_.empty()) {
-      auto origins = GetAliasOrigins(call->args_[0], origin_map);
-      MarkAccess(origins, has_write);
-      RecordFirstStoreSpan(origins, dma_store_spans, call->span_);
-    }
-    return;
-  }
-
-  if (IsOp(call, "tensor.slice") || IsOp(call, "tensor.create") || IsOp(call, "tensor.full")) {
-    for (size_t i = 1; i < call->args_.size(); ++i) {
-      MarkAccess(CollectReferencedOrigins(call->args_[i], origin_map), has_read);
-    }
-    return;
-  }
-
-  if (IsOp(call, "system.syncall") && call->GetKwarg<std::string>("mode", "hard") == "soft") {
-    // Soft form: each core writes its arrival counter into gm_workspace
-    // (args_[0]) and polls it, so the workspace is read AND written. The
-    // optional used_cores operand is a read. Marking the write lets dependency
-    // analysis order barriers that reuse one workspace.
-    INTERNAL_CHECK_SPAN(!call->args_.empty(), call->span_)
-        << "Internal error: soft system.syncall is missing gm_workspace";
-    MarkAccess(GetAliasOrigins(call->args_[0], origin_map), has_read);
-    MarkAccess(GetAliasOrigins(call->args_[0], origin_map), has_write);
-    for (size_t i = 1; i < call->args_.size(); ++i) {
-      MarkAccess(CollectReferencedOrigins(call->args_[i], origin_map), has_read);
-    }
-    return;
-  }
-
-  for (const auto& arg : call->args_) {
-    MarkAccess(CollectReferencedOrigins(arg, origin_map), has_read);
   }
 }
 
