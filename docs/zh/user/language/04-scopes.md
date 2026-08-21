@@ -150,7 +150,7 @@ torch.testing.assert_close(out, X + Y, rtol=1e-4, atol=1e-4)
 with pl.at(level=pl.Level.CORE_GROUP):
     for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):
         ...                                    # 阶段 1 —— 通过 aiv_id 分派每 lane 的工作
-    pl.system.syncall(core_type="mix")         # 屏障：写在外面，两核都执行
+    pl.system.syncall(core_type=pl.KernelType.MIX)  # 屏障：写在外面，两核都执行
     mm = pl.matmul(q, k)                       # cube 计算：写在外面，跑在 AIC 上
     for _ in pl.split_aiv(2, mode=pl.SplitMode.NONE):
         out = pl.add(pl.aiv_shard(mm), bias)   # 阶段 2 —— 全宽向量计算
@@ -291,12 +291,22 @@ AIV 核总数。
 pl.system.cacheinvalid()  # 发布 producer 的全部 cache line
 pl.system.fence()         # 等待它们对 GM 可见
 pl.system.syncall(
-    mode="soft",
-    core_type="mix",
+    mode=pl.SyncAllMode.SOFT,
+    core_type=pl.KernelType.MIX,
     gm_workspace=sync_ws,
     used_cores=participant_count,
 )                         # 只同步到达
 pl.system.cacheinvalid()  # consumer 读之前使 cache 失效
+```
+
+如果不需要整体会合这么粗的粒度，`pl.system.sync_set` / `pl.system.sync_wait` 可以发起并等待单个跨核事件。
+在**混合** InCore kernel 中，用 `core_type=pl.KernelType.AIC` 或 `core_type=pl.KernelType.AIV`
+把每个事件操作钉在应当执行它的核通道上；在显式指定类型的 AIC 或 AIV kernel 中通道已经确定，省略该参数即可。
+过去的 `"aic"` / `"aiv"` 字符串仍然可用，但会发出 `DeprecationWarning`。
+
+```python
+pl.system.sync_set(0, pipe=pl.PipeType.MTE3, core_type=pl.KernelType.AIV)   # 在 AIV 上发起
+pl.system.sync_wait(0, pipe=pl.PipeType.MTE2, core_type=pl.KernelType.AIC)    # 在 AIC 上等待
 ```
 
 ## 边界情况

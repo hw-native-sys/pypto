@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <any>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -128,6 +129,33 @@ std::string CastModeToString(int mode) {
     default:
       throw ValueError("Cast round mode must be in range [0, 6], got " + std::to_string(mode));
   }
+}
+
+/// Spell a lowercase IR attr value as its Python enum member name.
+/// ``"soft"`` -> ``"SOFT"``, for the enums whose members are named after the
+/// attr string they lower to.
+std::string AttrValueToEnumMember(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+  return value;
+}
+
+/// Spell a cross-core `core_type` attr as its `pl.KernelType` member.
+///
+/// Both sync families name the same kernel, in their own vocabulary:
+/// `system.syncall` writes a participant set (`"aic_only"` / `"aiv_only"` /
+/// `"mix"`), the event ops pin one kernel (`"aic"` / `"aiv"`). Returns nullptr
+/// for a spelling the op cannot carry, which is a malformed attr.
+const char* CoreTypeToKernelMember(const std::string& value, bool is_syncall) {
+  if (is_syncall) {
+    if (value == "aic_only") return "AIC";
+    if (value == "aiv_only") return "AIV";
+    if (value == "mix") return "MIX";
+    return nullptr;
+  }
+  if (value == "aic") return "AIC";
+  if (value == "aiv") return "AIV";
+  return nullptr;
 }
 
 /// Whether an op's printed DSL spelling needs a trailing underscore.
@@ -1177,7 +1205,11 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
       }
     }
     if (mode == "soft") {
-      stream_ << R"(mode="soft", core_type=")" << core_type << R"(", gm_workspace=)";
+      const char* kernel = CoreTypeToKernelMember(core_type, /*is_syncall=*/true);
+      INTERNAL_CHECK_SPAN(kernel != nullptr, op->span_)
+          << "Internal error: system.syncall core_type must be aic_only|aiv_only|mix, got " << core_type;
+      stream_ << "mode=" << prefix_ << ".SyncAllMode.SOFT, core_type=" << prefix_ << ".KernelType." << kernel
+              << ", gm_workspace=";
       VisitExpr(op->args_[0]);
       if (op->args_.size() == 2) {
         stream_ << ", used_cores=";
@@ -1317,7 +1349,22 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
     } else if (value.type() == typeid(bool)) {
       stream_ << (AnyCast<bool>(value, "printing kwarg: " + key) ? "True" : "False");
     } else if (value.type() == typeid(std::string)) {
-      stream_ << "'" << AnyCast<std::string>(value, "printing kwarg: " + key) << "'";
+      const auto str_val = AnyCast<std::string>(value, "printing kwarg: " + key);
+      // The cross-core sync ops take enum-typed DSL kwargs but store the PTO-ISA
+      // spelling as a string attr. Restore the enum form so the printed call is
+      // type-correct for static checkers and re-parses (the DSL rejects strings).
+      const bool is_syncall = IsOp(op, "system.syncall");
+      const bool is_sync_event = IsOp(op, "system.sync_set") || IsOp(op, "system.sync_wait");
+      if (key == "core_type" && (is_syncall || is_sync_event)) {
+        const char* kernel = CoreTypeToKernelMember(str_val, is_syncall);
+        INTERNAL_CHECK_SPAN(kernel != nullptr, op->span_)
+            << "Internal error: " << op->op_->name_ << " carries an unknown core_type " << str_val;
+        stream_ << prefix_ << ".KernelType." << kernel;
+      } else if (is_syncall && key == "mode") {
+        stream_ << prefix_ << ".SyncAllMode." << AttrValueToEnumMember(str_val);
+      } else {
+        stream_ << "'" << str_val << "'";
+      }
     } else if (value.type() == typeid(double)) {
       stream_ << FormatFloatLiteral(AnyCast<double>(value, "printing kwarg: " + key));
     } else if (value.type() == typeid(float)) {

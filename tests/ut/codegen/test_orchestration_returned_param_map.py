@@ -98,7 +98,7 @@ def _layer_guarded(
                         v_cache, pl.cast(pl.mul(cur_l, 8.0), target_type=pl.BF16), [cache_base + lr0, 0]
                     )
 
-        pl.system.syncall(core_type="mix")
+        pl.system.syncall(core_type=pl.KernelType.MIX)
 
         mm = pl.matmul(pl.slice(q_pad, [ROWS_PER_CORE, HIDDEN], [pr0, 0]), wid, out_dtype=pl.FP32)
         # The second vector phase. Once a function opens ANY pl.split_aiv region
@@ -157,7 +157,7 @@ def _layer_unconditional(
         k_cache = pl.assemble(k_cache, pl.cast(pl.mul(cur_t, 4.0), target_type=pl.BF16), [cache_base + r0, 0])
         v_cache = pl.assemble(v_cache, pl.cast(pl.mul(cur_t, 8.0), target_type=pl.BF16), [cache_base + r0, 0])
 
-        pl.system.syncall(core_type="mix")
+        pl.system.syncall(core_type=pl.KernelType.MIX)
 
         mm = pl.matmul(pl.slice(q_pad, [ROWS_PER_CORE, HIDDEN], [pr0, 0]), wid, out_dtype=pl.FP32)
         k_p = pl.cast(pl.slice(k_cache, [ROWS_PER_CORE, HIDDEN], [cache_base + pr0, 0]), target_type=pl.FP32)

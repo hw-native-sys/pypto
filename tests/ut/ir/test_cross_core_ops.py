@@ -147,7 +147,9 @@ def test_cross_core_sync_static_and_dynamic_event_ids():
     """Cross-core sync accepts either a user event id or a dynamic index operand."""
     span = ir.Span.unknown()
 
-    static_set = system_ops.sync_set(3, pipe=ir.PipeType.FIX, ffts_mode=1, core_type="aiv", span=span)
+    static_set = system_ops.sync_set(
+        3, pipe=ir.PipeType.FIX, ffts_mode=1, core_type=system_ops.KernelType.AIV, span=span
+    )
     assert isinstance(static_set.type, ir.UnknownType)
     assert static_set.args == []
     assert static_set.kwargs == {
@@ -158,18 +160,45 @@ def test_cross_core_sync_static_and_dynamic_event_ids():
     }
 
     event_id = ir.Var("event_id", ir.ScalarType(DataType.INDEX), span)
-    dynamic_wait = system_ops.sync_wait(event_id, pipe=ir.PipeType.MTE3, core_type="aic", span=span)
+    dynamic_wait = system_ops.sync_wait(
+        event_id, pipe=ir.PipeType.MTE3, core_type=system_ops.KernelType.AIC, span=span
+    )
     assert isinstance(dynamic_wait.type, ir.UnknownType)
     assert dynamic_wait.args == [event_id]
     assert "event_id" not in dynamic_wait.kwargs
     assert dynamic_wait.kwargs["core_type"] == "aic"
 
 
-@pytest.mark.parametrize("core_type", ["cube", "vector", "mix"])
+@pytest.mark.parametrize("core_type", ["cube", "vector", "mix", "aic_only"])
 def test_cross_core_sync_rejects_invalid_core_type(core_type):
     """Mixed kernels target explicit events with the public AIC/AIV names."""
     with pytest.raises(ValueError, match="core_type"):
         system_ops.sync_set(0, pipe=ir.PipeType.FIX, core_type=core_type)
+
+
+def test_cross_core_sync_rejects_mix_kernel():
+    """An event pins one kernel; landing in both is spelled by omitting core_type."""
+    with pytest.raises(ValueError, match="Omit core_type"):
+        system_ops.sync_set(0, pipe=ir.PipeType.FIX, core_type=system_ops.KernelType.MIX)
+
+
+def test_cross_core_sync_rejects_non_affinity_core_type():
+    """A value that is neither a KernelType nor a kernel string is a type error."""
+    with pytest.raises(TypeError, match="core_type must be a KernelType member"):
+        system_ops.sync_set(0, pipe=ir.PipeType.FIX, core_type=0)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("spelling", "member"),
+    [("aic", system_ops.KernelType.AIC), ("aiv", system_ops.KernelType.AIV)],
+)
+def test_cross_core_sync_kernel_string_is_deprecated(spelling, member):
+    """The pre-enum string still builds the same call, with a warning."""
+    with pytest.deprecated_call(match=f"KernelType.{member.name}"):
+        deprecated = system_ops.sync_set(0, pipe=ir.PipeType.FIX, core_type=spelling)
+    current = system_ops.sync_set(0, pipe=ir.PipeType.FIX, core_type=member)
+    assert deprecated.kwargs == current.kwargs
+    assert deprecated.kwargs["core_type"] == spelling
 
 
 @pytest.mark.parametrize("event_id", [-1, 14])

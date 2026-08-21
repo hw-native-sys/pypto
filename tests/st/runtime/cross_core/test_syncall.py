@@ -10,7 +10,7 @@
 """
 Runtime test for the cross-core all-participant barrier ``pl.system.syncall``.
 
-``pl.system.syncall(core_type="aiv_only")`` lowers to the hard/FFTS form of
+``pl.system.syncall(core_type=pl.KernelType.AIV)`` lowers to the hard/FFTS form of
 ``pto::SYNCALL``, which issues ``ffts_cross_core_sync(SYNC_AIV_ONLY_ALL)`` and
 waits for *every* AIV core in the FFTS group to arrive. This imposes two hard
 requirements on the launch: (1) **full occupancy** — it must fill **all**
@@ -124,7 +124,7 @@ class SPMDSyncAllProgram:
         tile_a = pl.load(a, [offset, 0], [TILE_ROWS, TILE_COLS])
         tile_b = pl.load(b, [offset, 0], [TILE_ROWS, TILE_COLS])
         # All AIV cores arrive here before any core proceeds to compute.
-        pl.system.syncall(core_type="aiv_only")
+        pl.system.syncall(core_type=pl.KernelType.AIV)
         tile_c = pl.add(tile_a, tile_b)
         out = pl.store(tile_c, [offset, 0], out)
         return out
@@ -187,7 +187,12 @@ class SPMDSyncAllSoftProgram:
         # Simpler currently passes its logical block count through the kernel
         # arguments, while PTO-ISA's implicit-count path reads the raw device
         # launch register. Keep the runtime path explicit until those agree.
-        pl.system.syncall(mode="soft", core_type="aiv_only", gm_workspace=sync_ws, used_cores=SOFT_CORE_NUM)
+        pl.system.syncall(
+            mode=pl.SyncAllMode.SOFT,
+            core_type=pl.KernelType.AIV,
+            gm_workspace=sync_ws,
+            used_cores=SOFT_CORE_NUM,
+        )
         tile_c = pl.add(tile_a, tile_b)
         out = pl.store(tile_c, [offset, 0], out)
         return out
@@ -256,7 +261,12 @@ class SPMDSyncAllMixSoftProgram:
             a_slice = pl.slice(a, [MIX_ROW_TILE, MIX_K], [m0, 0])
             a_add = pl.add(a_slice, 1.0)  # vector produces the matmul operand (V->C)
             # Cross-core barrier across every participating AIC block and AIV subblock.
-            pl.system.syncall(mode="soft", core_type="mix", gm_workspace=sync_ws, used_cores=MIX_USED_CORES)
+            pl.system.syncall(
+                mode=pl.SyncAllMode.SOFT,
+                core_type=pl.KernelType.MIX,
+                gm_workspace=sync_ws,
+                used_cores=MIX_USED_CORES,
+            )
             c_tile = pl.matmul(a_add, b)  # cube
             c_vec = pl.add(c_tile, 1.0)  # vector consumes the matmul result (C->V)
             out = pl.assemble(out, c_vec, [m0, 0])
@@ -313,7 +323,10 @@ class SPMDSyncAllAicSoftProgram:
             a_slice = pl.slice(a, [AIC_ROW_TILE, AIC_K], [m0, 0])
             # Cube-only cross-core barrier across the AIC_CUBE_BLOCKS cube cores.
             pl.system.syncall(
-                mode="soft", core_type="aic_only", gm_workspace=sync_ws, used_cores=AIC_USED_CORES
+                mode=pl.SyncAllMode.SOFT,
+                core_type=pl.KernelType.AIC,
+                gm_workspace=sync_ws,
+                used_cores=AIC_USED_CORES,
             )
             c_tile = pl.matmul(a_slice, b)  # cube
             out = pl.assemble(out, c_tile, [m0, 0])

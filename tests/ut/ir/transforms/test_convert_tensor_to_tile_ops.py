@@ -5104,14 +5104,24 @@ class TestWindowSliceIncoreConversion:
         class Before:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(self, workspace: pl.Tensor[[16], pl.INT32]):
-                pl.system.syncall(mode="soft", core_type="aiv_only", gm_workspace=workspace, used_cores=0)
+                pl.system.syncall(
+                    mode=pl.SyncAllMode.SOFT,
+                    core_type=pl.KernelType.AIV,
+                    gm_workspace=workspace,
+                    used_cores=0,
+                )
                 return  # noqa: PLR1711  (DSL return terminator)
 
         @pl.program
         class Expected:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(self, workspace: pl.InOut[pl.Tensor[[16], pl.INT32]]):
-                pl.system.syncall(mode="soft", core_type="aiv_only", gm_workspace=workspace, used_cores=0)
+                pl.system.syncall(
+                    mode=pl.SyncAllMode.SOFT,
+                    core_type=pl.KernelType.AIV,
+                    gm_workspace=workspace,
+                    used_cores=0,
+                )
                 return  # noqa: PLR1711  (DSL return terminator)
 
         After = passes.convert_tensor_to_tile_ops()(Before)

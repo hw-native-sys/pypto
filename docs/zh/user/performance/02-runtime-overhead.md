@@ -144,7 +144,7 @@ torch.testing.assert_close(out, torch.exp(A[:TILE_ROWS] + B[:TILE_ROWS]), rtol=1
 # 硬屏障（FFTS）：不带操作数，但要求满占用
 with pl.spmd(pl.system.available_aiv_count()):
     ...
-    pl.system.syncall(core_type="aiv_only")
+    pl.system.syncall(core_type=pl.KernelType.AIV)
     ...
 ```
 
@@ -152,18 +152,23 @@ with pl.spmd(pl.system.available_aiv_count()):
 
 | 模式 | 机制 | 占用要求 | 额外参数 |
 | ---- | ---- | -------- | -------- |
-| `mode="hard"`（默认） | FFTS 屏障 | `core_type` 的**全部**物理核 | 无 |
-| `mode="soft"` | GM 轮询计数 | 任意（`used_cores` 个参与者） | `gm_workspace`、`used_cores` |
+| `pl.SyncAllMode.HARD`（默认） | FFTS 屏障 | `core_type` 的**全部**物理核 | 无 |
+| `pl.SyncAllMode.SOFT` | GM 轮询计数 | 任意（`used_cores` 个参与者） | `gm_workspace`、`used_cores` |
+
+`mode` 与 `core_type` 是枚举（`pl.SyncAllMode`、`pl.KernelType`——`MIX` 即两个 kernel 都参与）。
+这两个关键字过去接受的字符串 —— `mode="soft"`、`core_type="mix"` —— 仍然可用，但会发出
+`DeprecationWarning`。
 
 两种 mode 都只同步到达：它们不会等待前序 `TSTORE`，也不会让业务数据的 cache 保持一致。通过 GM 从 producer 向 consumer 交接可能跨多条 cache line 的数据时，请保守地在 `syncall` 之前使用全 GM `pl.system.cacheinvalid()` + `pl.system.fence()`，然后在 consumer 读之前再次调用 `pl.system.cacheinvalid()`。tensor-region overload 当前只使 view 基地址所在的那一条 cache line 失效。
 
 **跑一下：** `python examples/advanced/05_runtime_overhead.py --mode soft_barrier` —— 它需要 `runtime/pto_isa.pin` 所钉的 pto-isa，因为 cacheinvalid 路径会发出 `cache_line_t::SINGLE_CACHE_LINE`。
 
-**代价，而且很锋利。** 部分发射下的硬 `syncall` 会在设备上**死锁**（错误 507018）。PyPTO 在编译期就拒绝它 —— `HardSyncallOccupancy` 校验器 —— 这正是 grid 必须用 `available_aiv_count()` / `available_cluster_count()` 来定，而不是写一个恰好在今天这台设备上对得上的字面量的原因。如果你无法保证满占用，就用 `mode="soft"`：它轮询一块共享 GM workspace，因此能在部分占用下工作，代价换成了 GM 流量。
+**代价，而且很锋利。** 部分发射下的硬 `syncall` 会在设备上**死锁**（错误 507018）。PyPTO 在编译期就拒绝它 —— `HardSyncallOccupancy` 校验器 —— 这正是 grid 必须用 `available_aiv_count()` / `available_cluster_count()` 来定，而不是写一个恰好在今天这台设备上对得上的字面量的原因。如果你无法保证满占用，就用 `mode=pl.SyncAllMode.SOFT`：它轮询一块共享 GM workspace，因此能在部分占用下工作，代价换成了 GM 流量。
 
 ```python
 # 软屏障：部分占用下也能用
-pl.system.syncall(mode="soft", core_type="mix",
+pl.system.syncall(mode=pl.SyncAllMode.SOFT,
+                  core_type=pl.KernelType.MIX,
                   gm_workspace=ws,     # 独占且零初始化的 16 元素 INT32 GM tensor
                   used_cores=n)
 ```
