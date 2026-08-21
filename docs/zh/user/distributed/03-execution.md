@@ -118,6 +118,37 @@ with compiled.prepare() as rt:
 `torch.Tensor` 时只需是 CPU 连续张量，可以是在 `prepare()` 后创建的普通张量；
 无需 `.share_memory_()`、fork 前分配或 `inherited_host_tensors`。
 
+### 跳过 staging 拷贝
+
+staging 需要在 host 侧完整拷贝一份数据；对体积很大的常驻权重，这份拷贝值得省掉。
+当子进程本来就能看到这段内存、且它不会再被写入时，可以直接按地址命名该区间，
+既不需要 staging buffer 也不需要 memcpy：
+
+- 该张量通过 `inherited_host_tensors` 注册，因此在 fork 之前就已存在，每个子进程
+  都在同一地址看到它；**并且**
+- 它要么是共享内存（`.share_memory_()`，即 `torch.is_shared()` 为真），要么由调用方
+  在 `immutable_host_tensors` 中声明。
+
+之所以需要第二种方式，是因为 `is_shared()` 回答的并不是真正相关的问题。它表示
+storage 是否为共享内存分配，而决定安全性的是 fork 之后是否有人写这些字节。用
+`mmap` + `numpy.frombuffer` + `torch.from_numpy` 包装的只读 `MAP_SHARED` 文件映射
+确实是共享的，但 `is_shared()` 仍返回 `False`，于是会被无谓地拷贝一遍。显式声明
+补上了推断看不到的信息。
+
+```python
+weights = map_readonly_shared(path)          # mmap 支撑，is_shared() == False
+with compiled.prepare(
+    inherited_host_tensors=[weights],        # 每个子进程都可见
+    immutable_host_tensors=[weights],        # 且此后不再写入
+) as rt:
+    resident = rt.alloc_stacked_tensor(weights)
+```
+
+`immutable_host_tensors` 只是关于**上传**的承诺。被声明的区间若用作 `copy_from`
+的目标，仍然走 staging：子进程写入 copy-on-write 页会让父进程继续读到旧数据，而
+写只读映射会直接出错——两者都比这项声明想省下的那次拷贝更糟。未声明的张量，或在
+`prepare()` 之后分配的张量，其行为与此前完全一致。
+
 ## One-Shot vs 持久 Worker
 
 ### One-Shot
