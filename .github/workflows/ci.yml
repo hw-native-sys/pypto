@@ -587,6 +587,12 @@ jobs:
         # ccache in too — so both paths stay one mechanism.
         CMAKE_C_COMPILER_LAUNCHER: ccache
         CMAKE_CXX_COMPILER_LAUNCHER: ccache
+        # The cheaper debug level (see PYPTO_DEBUG_INFO_LEVEL in
+        # CMakeLists.txt). This job is the one that would notice if level 1 were
+        # not enough — tests/ut/core/test_error.py fails outright on a Linux
+        # build whose frames stop symbolizing — so running it here is the
+        # standing check on that claim, not a risk taken with it.
+        SKBUILD_CMAKE_DEFINE: PYPTO_DEBUG_INFO_LEVEL=1
         # Deliberately small. The whole dir is tarred up and pushed into the
         # repo-wide 10 GB cache quota on every main run, so it is sized to hold
         # this build's objects and nothing more.
@@ -1572,6 +1578,9 @@ jobs:
           CMAKE_C_COMPILER_LAUNCHER: ccache
           CMAKE_CXX_COMPILER_LAUNCHER: ccache
           CCACHE_MAXSIZE: 1G
+          # See PYPTO_DEBUG_INFO_LEVEL in CMakeLists.txt. Set on this step only:
+          # simpler's CMake has no such option and would warn about it.
+          SKBUILD_CMAKE_DEFINE: PYPTO_DEBUG_INFO_LEVEL=1
         run: |
           python -m pip install --upgrade pip
           ccache -z
