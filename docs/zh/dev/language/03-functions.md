@@ -40,6 +40,7 @@ def aicore_kernel(x: pl.INT64) -> pl.INT64:
 | `pl.FunctionType.AIC` | Cube 核心 | Cube 核心内核（特化的 InCore） |
 | `pl.FunctionType.AIV` | Vector 核心 | Vector 核心内核（特化的 InCore） |
 | `pl.FunctionType.Group` | 多核 | AIC + AIV 内核的协调调度组 |
+| `pl.FunctionType.Graph` | 主机/AICPU | 可录制的编排片段，由 `host_build_graph` runtime 回放（详见下文） |
 
 未指定类型时, 函数默认为 `Opaque`。
 

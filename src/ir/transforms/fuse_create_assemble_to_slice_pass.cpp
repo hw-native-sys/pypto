@@ -374,7 +374,7 @@ ProgramPtr TransformFuseCreateAssembleToSlice(const ProgramPtr& program) {
   new_functions.reserve(program->functions_.size());
 
   for (const auto& [gvar, func] : program->functions_) {
-    if (func->func_type_ != FunctionType::Orchestration) {
+    if (!IsOrchestrationLike(func->func_type_)) {
       new_functions.push_back(func);
       continue;
     }

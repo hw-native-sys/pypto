@@ -236,9 +236,11 @@ class InsertAutoScopeMutator : public IRMutator {
 Pass MaterializeRuntimeScopes() {
   auto pass_func = [](const FunctionPtr& func) -> FunctionPtr {
     if (!func || !func->body_) return func;
-    // Only Orchestration functions are wrapped in SIMPLER_SCOPE blocks by codegen;
-    // InCore/AIC/AIV/Group/Spmd bodies are never scope-wrapped.
-    if (func->func_type_ != FunctionType::Orchestration) return func;
+    // Only orchestration bodies are wrapped in SIMPLER_SCOPE blocks by codegen;
+    // InCore/AIC/AIV/Group/Spmd bodies are never scope-wrapped. A Graph body is
+    // one too — codegen emits SIMPLER_SCOPE solely from RuntimeScopeStmt, so
+    // skipping it would yield a scope-less Graph function.
+    if (!IsOrchestrationLike(func->func_type_)) return func;
 
     // ``@pl.function(auto_scope=False)`` opts out of automatic AUTO-scope
     // insertion: the user places every scope by hand (``with pl.scope()`` /

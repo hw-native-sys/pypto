@@ -51,6 +51,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/alloc_batching.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -2347,10 +2348,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
   // IR may still spell a constant one.
   [[nodiscard]] std::pair<ExprPtr, bool> EffectiveLaunchSpec(const CallPtr& call,
                                                              const FunctionPtr& launch_func) const {
-    ExprPtr core_num = call->GetAttr<ExprPtr>(kAttrCoreNum, nullptr);
+    ExprPtr core_num = alloc_batching::EffectiveCoreNum(call, launch_func);
     bool sync_start = call->GetAttr<bool>(kAttrSyncStart, false);
-    if (!core_num && launch_func) {
-      core_num = launch_func->GetAttr<ExprPtr>(kAttrCoreNum, nullptr);
+    if (!call->GetAttr<ExprPtr>(kAttrCoreNum, nullptr) && launch_func) {
       sync_start = launch_func->GetAttr<bool>(kAttrSyncStart, false);
     }
     return {core_num, sync_start};
@@ -2998,10 +2998,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
   }
 
-  static constexpr size_t kMaxAllocTensorsArgs = 16;
+  static constexpr size_t kMaxAllocTensorsArgs = alloc_batching::kAllocTensorsArgs;
 
   static bool IsInjectedGMPipeCreateVar(const VarPtr& var) {
-    return var && var->name_hint_.rfind("gm_pipe_buffer_", 0) == 0;
+    return alloc_batching::IsInjectedGMPipeCreateVar(var);
   }
 
   int64_t GetGMPipeWorkspaceElements(const FunctionPtr& root_func) {
@@ -3074,22 +3074,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   static bool ExprRefsAnyOf(const ExprPtr& expr, const std::unordered_set<const Var*>& vars) {
-    if (!expr) {
-      return false;
-    }
-    if (auto var = As<Var>(expr)) {
-      return vars.count(var.get()) > 0;
-    }
-    if (auto bin = As<BinaryExpr>(expr)) {
-      return ExprRefsAnyOf(bin->left_, vars) || ExprRefsAnyOf(bin->right_, vars);
-    }
-    if (auto un = As<UnaryExpr>(expr)) {
-      return ExprRefsAnyOf(un->operand_, vars);
-    }
-    if (auto cast_expr = As<Cast>(expr)) {
-      return ExprRefsAnyOf(cast_expr->operand_, vars);
-    }
-    return false;
+    return alloc_batching::ExprRefsAnyOf(expr, vars);
   }
 
   bool ShapeDependsOnLocalVars(const CallPtr& call,

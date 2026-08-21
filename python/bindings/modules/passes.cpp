@@ -137,7 +137,11 @@ void BindPass(nb::module_& m) {
       .value("AccCompactValid", IRProperty::AccCompactValid,
              "Every tile.matmul_acc / tile.matmul_mx_acc accumulates into a CompactMode.normal "
              "buffer when mad's pitch (ceil(lhs validRow/16)*16) differs from the accumulator's "
-             "physical row count, and no tile outside Left/Right/Acc carries a compact mode");
+             "physical row count, and no tile outside Left/Right/Acc carries a compact mode")
+      .value("GraphBoundaryLegalized", IRProperty::GraphBoundaryLegalized,
+             "Every FunctionType::Graph function satisfies the host_build_graph boundary contract: "
+             "derived boundary scalars hoisted to the call sites, a signature within the runtime's "
+             "tensor/direction/return limits, and no call site the runtime could not cache");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");
@@ -601,6 +605,9 @@ void BindPass(nb::module_& m) {
              "Lower host-level pld.tensor.allreduce calls to builtin tensor collective dispatches.");
   passes.def("materialize_dist_tensor_ctx", &pass::MaterializeDistTensorCtx,
              "Materialize CommCtx parameters and arguments for DistributedTensor function parameters.");
+  passes.def("legalize_graph_boundary", &pass::LegalizeGraphBoundary,
+             "Hoist derived boundary scalars out of Graph functions and reject graphs the "
+             "host_build_graph runtime could not record");
   passes.def("materialize_valid_shape_symbols", &pass::MaterializeValidShapeSymbols,
              "Materialize a Scalar[INDEX] parameter per unbindable device-kernel valid_shape symbol.\n\n"
              "A pl.dynamic() symbol named only in a parameter's pl.TensorView(valid_shape=...) is\n"

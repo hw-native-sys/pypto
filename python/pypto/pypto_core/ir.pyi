@@ -3125,6 +3125,21 @@ def is_incore_type(func_type: FunctionType) -> bool:
         True if the type is InCore, AIC, or AIV
     """
 
+def is_orchestration_like(func_type: FunctionType) -> bool:
+    """Check if a FunctionType has an orchestration body (Orchestration or Graph).
+
+    Both are host/AICPU task-orchestration code, so a caller that acts on a
+    function *because it orchestrates tasks* must accept either. Prefer this
+    over ``func_type == FunctionType.Orchestration``, which silently skips
+    Graph bodies.
+
+    Args:
+        func_type: The function type to check
+
+    Returns:
+        True if the type is Orchestration or Graph
+    """
+
 def level_to_linqu_level(level: Level) -> int:
     """Map Level enum value to Linqu hierarchy level number (0-7).
 

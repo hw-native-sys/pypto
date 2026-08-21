@@ -60,6 +60,7 @@ class IRProperty(Enum):
     AccToGmStoreValid = ...
     AtomicAddDtypeValid = ...
     AccCompactValid = ...
+    GraphBoundaryLegalized = ...
 
 class IRPropertySet:
     """A set of IR properties backed by a bitset."""
@@ -731,6 +732,21 @@ def lower_host_tensor_collectives() -> Pass:
 def materialize_dist_tensor_ctx() -> Pass:
     """Materialize CommCtx parameters and arguments for DistributedTensor function parameters."""
 
+def legalize_graph_boundary() -> Pass:
+    """Make every ``FunctionType.Graph`` function legal to record and replay.
+
+    Hoists each boundary scalar a Graph body *derives* out to its call sites.
+    Under ``host_build_graph`` a boundary scalar is tracked by the address of its
+    argument slot, so a value computed inside the region has no slot and would be
+    frozen at its first-call value on every later replay, with no warning.
+
+    Also rejects, at compile time, the boundary shapes the runtime would decline
+    to cache — an oversized or empty tensor boundary, runtime-allocated outputs,
+    return values, nested graphs, and call sites carrying explicit dependencies
+    or a dispatch predicate. Almost all of those degrade to a silent non-graph
+    fallback at runtime, which no numerical test can detect.
+    """
+
 def materialize_valid_shape_symbols() -> Pass:
     """Materialize a Scalar[INDEX] parameter per unbindable device-kernel valid_shape symbol.
 
@@ -1013,6 +1029,7 @@ __all__ = [
     "simplify",
     "lower_composite_ops",
     "materialize_dist_tensor_ctx",
+    "legalize_graph_boundary",
     "materialize_valid_shape_symbols",
     "flatten_call_expr",
     "inline_functions",
