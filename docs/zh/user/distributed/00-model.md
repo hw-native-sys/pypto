@@ -11,6 +11,12 @@
 
 最简单的分布式程序——两个 rank 对各自数据求和，结果相同。
 
+> 这是 **mesh all-reduce** 模式——stage in、barrier、读取每个对端的 slice
+> 并求和——[教程阶梯](05-tutorials.md)中的
+> [mesh allreduce 教程](13-allreduce_mesh.md)逐步构建的正是它。在两个 rank
+> 时所有算法都坍缩为同一次交换；[ring allreduce 教程](15-allreduce_ring.md)
+> 是揭示内置原语之前的最后一个手工步骤。
+
 ```python
 import pypto.language as pl
 import pypto.language.distributed as pld
@@ -198,6 +204,7 @@ InCore kernel (@pl.jit.incore)
 
 ## 相关链接
 
+- [05-tutorials](05-tutorials.md) — 逐步的分布式教程阶梯
 - [01-collectives](01-collectives.md) — 内置集合通信及其语义
 - [02-primitives](02-primitives.md) — 集合通信的底层基础
 - [03-execution](03-execution.md) — DistributedWorker 生命周期和生产模式
