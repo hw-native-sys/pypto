@@ -447,6 +447,32 @@ def _types_match(lhs: ir.Type | None, rhs: ir.Type | None) -> bool:
     return lhs == rhs
 
 
+def _tile_types_differ_only_by_unset_memory_space(lhs: ir.Type | None, rhs: ir.Type | None) -> bool:
+    """Return whether two TileTypes are equal once an unset space is a wildcard.
+
+    ``memory_space=None`` is the IR's "the compiler will place this", not a
+    distinct type. Ops that leave it unset (``pl.load``, ``pl.tile.create``) and
+    ops whose space is fixed by hardware (every vector op, via
+    ``set_output_memory(Vec)``) therefore mix freely in ordinary user code::
+
+        t = pl.load(a, [0, 0], [16, 64])   # unset
+        t = pl.add(t, t)                   # Vec
+
+    Treating that as a type change would reject the most common shape of DSL
+    there is. All other fields still compare exactly.
+
+    Kept separate from ``_types_match``: annotation-vs-inferred comparisons must
+    stay strict, so that a *stated* space which contradicts the producer is
+    still an error.
+    """
+    if not isinstance(lhs, ir.TileType) or not isinstance(rhs, ir.TileType):
+        return False
+    if (lhs.memory_space is None) == (rhs.memory_space is None):
+        return False  # both set or both unset -> plain _types_match already decided
+    unified = ir.TileType(rhs.shape, rhs.dtype, rhs.memref, rhs.tile_view, lhs.memory_space)
+    return _types_match(lhs, unified)
+
+
 def _normalize_inferred_type_for_annotation(
     annotation_type: ir.Type,
     value_expr: ir.Expr,
@@ -1714,11 +1740,19 @@ class ASTParser:
                         inf_tv = value_expr.type.tile_view
                     merged_ms = ann_ms if ann_ms is not None else inf_ms
                     merged_tv = ann_tv if ann_tv is not None else inf_tv
+                    # Build the override whenever the annotation contributes anything
+                    # the raw inferred type does not already carry.  The shape test
+                    # compares against ``value_expr.type`` (the *raw* inferred type),
+                    # not ``normalized_inferred`` — the latter has already adopted the
+                    # annotation's shape for the ND->2D case, so comparing against it
+                    # always matches and the flattened shape would be silently dropped.
+                    # Before memory spaces became optional this was masked: ``merged_ms``
+                    # was never None, so the override was always built.
                     if (
                         resolved.memref is not None
                         or merged_ms is not None
                         or merged_tv is not None
-                        or not _shape_exprs_match(resolved.shape, normalized_inferred.shape)
+                        or not _shape_exprs_match(resolved.shape, value_expr.type.shape)
                     ):
                         override_type = ir.TileType(
                             resolved.shape, resolved.dtype, resolved.memref, merged_tv, merged_ms
@@ -1835,13 +1869,30 @@ class ASTParser:
                 and not isinstance(existing_var.type, ir.UnknownType)
                 and not _types_match(existing_var.type, value_type)
             ):
-                raise ParserTypeError(
-                    f"Cannot reassign '{var_name}' with a different type: "
-                    f"was {ir.python_print_type(existing_var.type)}, "
-                    f"got {ir.python_print_type(value_type)}",
-                    span=span,
-                    hint="Use a different variable name for tensors with different shapes or dtypes",
-                )
+                if not _tile_types_differ_only_by_unset_memory_space(existing_var.type, value_type):
+                    raise ParserTypeError(
+                        f"Cannot reassign '{var_name}' with a different type: "
+                        f"was {ir.python_print_type(existing_var.type)}, "
+                        f"got {ir.python_print_type(value_type)}",
+                        span=span,
+                        hint="Use a different variable name for tensors with different shapes or dtypes",
+                    )
+                # Compatible: one side just has not been placed yet. Keep the
+                # binding on the Var's own type so the AssignStmt stays
+                # symmetric; InferTileMemorySpace resolves both sides together.
+                if (
+                    isinstance(value_expr, ir.Call)
+                    and isinstance(existing_var.type, ir.TileType)
+                    and existing_var.type.memory_space is not None
+                ):
+                    value_expr = ir.Call(
+                        value_expr.op,
+                        value_expr.args,
+                        value_expr.kwargs,
+                        value_expr.attrs,
+                        existing_var.type,
+                        value_expr.span,
+                    )
             self.builder.assign(existing_var, value_expr, span=span)
             return existing_var
         return self.builder.let(var_name, value_expr, type=override_type, span=span)

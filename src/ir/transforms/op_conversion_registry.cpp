@@ -716,14 +716,20 @@ void OpConversionRegistry::RegisterMemoryOps() {
         INTERNAL_CHECK_SPAN(args.size() == 1, span) << "tensor.create conversion expects 1 arg (shape)";
         auto& op_reg = OpRegistry::GetInstance();
 
-        MemorySpace target_mem = MemorySpace::Vec;
+        // No target_memory: `tensor.create` says nothing about where the tile
+        // must live, and this conversion has no consumer context to derive it
+        // from. Stamping Vec here would be an invention, and a load-bearing one
+        // -- a matmul accumulator allocated with `pl.create_tensor` would arrive
+        // at `tile.matmul_acc` in Vec, violating the op's declared Acc operand
+        // constraint. Leaving the space unset lets InferTileMemorySpace (pass 17)
+        // place the tile from actual consumer demand, which resolves the
+        // accumulator to Acc and every vector-fed tile to Vec as before.
         std::vector<std::pair<std::string, std::any>> new_kwargs;
         for (const auto& [key, value] : kwargs) {
           if (key == "dtype") {
             new_kwargs.emplace_back(key, value);
           }
         }
-        new_kwargs.emplace_back("target_memory", target_mem);
 
         auto shape_tuple = As<MakeTuple>(args[0]);
         DataType dtype = GetKwargOr<DataType>(kwargs, "dtype", DataType::FP32);
@@ -742,10 +748,17 @@ void OpConversionRegistry::RegisterMemoryOps() {
             auto tile_bytes = storage_size::StaticStorageBytes(static_cast<uint64_t>(total_elements), dtype);
             const auto* be = backend::GetBackend();
             if (be && tile_bytes.has_value()) {
-              uint64_t mem_size = be->GetMemSize(target_mem);
+              // The destination space is not decided yet (see above), so size the
+              // tile against the largest on-chip buffer: anything over that cannot
+              // fit anywhere and is worth catching early. The exact per-space check
+              // belongs to AllocateMemoryAddr (pass 34), once the space is known.
+              uint64_t mem_size = 0;
+              for (MemorySpace space : {MemorySpace::Vec, MemorySpace::Mat, MemorySpace::Acc}) {
+                mem_size = std::max(mem_size, be->GetMemSize(space));
+              }
               INTERNAL_CHECK_SPAN(mem_size == 0 || *tile_bytes <= mem_size, span)
-                  << "tensor.create: tile size (" << *tile_bytes << " bytes) exceeds buffer capacity ("
-                  << mem_size << " bytes) for memory space " << static_cast<int>(target_mem) << " at "
+                  << "tensor.create: tile size (" << *tile_bytes
+                  << " bytes) exceeds the largest on-chip buffer capacity (" << mem_size << " bytes) at "
                   << span.to_string();
             }
           }

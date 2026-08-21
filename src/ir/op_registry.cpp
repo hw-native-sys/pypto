@@ -28,6 +28,7 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
 
@@ -40,6 +41,109 @@ namespace {
 ///
 /// Kept out of line so `Span::to_string()` is only paid on the error path.
 std::string LocationSuffix(const Span& span) { return span.is_valid() ? " at " + span.to_string() : ""; }
+
+/// Render an allowed-space list as "Acc" / "Vec or Acc" / "Vec, Mat or Acc".
+std::string FormatAllowedSpaces(const std::vector<MemorySpace>& allowed) {
+  std::string out;
+  for (size_t i = 0; i < allowed.size(); ++i) {
+    if (i > 0) out += (i + 1 == allowed.size()) ? " or " : ", ";
+    out += MemorySpaceToString(allowed[i]);
+  }
+  return out;
+}
+
+/// Reject an operand whose explicit memory space no pass can legalize.
+///
+/// Three states, three outcomes:
+///
+///  * **unset** — always legal. `nullopt` is the IR's "not decided yet", and
+///    `InferTileMemorySpace` (pass 17) places the tile from consumer demand.
+///    The `TileMemoryInferred` verifier checks the outcome afterwards.
+///  * **set and allowed** — legal, nothing to do.
+///  * **set, not allowed, but reachable by a `tile.move`** — also legal here.
+///    Pass 17's MoveCollector inserts the move. This is the ordinary case for
+///    `tile.matmul`'s Left/Right operands, reached from Mat by an MTE1 tmov.
+///  * **set, not allowed, and unreachable** — a user error, reported here.
+///
+/// Only the last case is rejected, and the axis is *reachability in the ISA's
+/// move graph*, not aliasing. In practice it fires on `Acc`: nothing writes L0C
+/// except the MAD unit, so no target's SoC memory graph has an inbound
+/// edge to `Acc` on any target. A tile that must be an accumulator therefore has
+/// to be *created* in `Acc` — no copy can put it there afterwards. Without this
+/// check the pass emits a `pto.tmov` into L0C that PTOAS rejects much later,
+/// naming neither the tile nor the line that created it.
+///
+/// Deliberately narrow. `OpRegistry::Create` is not only the user-authoring
+/// path: passes call it constantly on half-rewritten IR, where an operand may
+/// still be the pre-legalization value (a GM tensor awaiting its `tile.load`, an
+/// operand a later phase will bridge). Rejecting every constraint violation here
+/// would reject those transients. So this checks only what *no* later phase can
+/// repair, whatever order they run in:
+///
+///  * A `DDR`-resident operand is skipped outright — GM values reach on-chip by
+///    `tile.load`, a different mechanism from `tile.move`, and always available.
+///  * Otherwise the operand is rejected only when the constraint set contains no
+///    space that any target can move into from where the operand actually is.
+///    Today that means exactly one thing: a constraint of `{Acc}`. Nothing writes
+///    L0C but the MAD unit, so an accumulator must be *created* in `Acc`.
+///
+/// Everything else — a Vec operand needing Left, a Mat operand needing Vec — is
+/// left alone here even when it is also unimplementable, because at construction
+/// time we cannot tell a settled operand from a transient one. Those belong to
+/// `InferTileMemorySpace`'s MoveCollector, which runs on settled IR and knows the
+/// configured target's exact adjacency via `SoC::GetMemoryGraph()`.
+void CheckOperandMemorySpaceReachable(const OpMemorySpaceSpec& spec, const std::string& op_name,
+                                      const std::vector<ExprPtr>& args, const Span& span) {
+  if (spec.input_constraints.empty()) return;
+
+  const size_t n = std::min(spec.input_constraints.size(), args.size());
+  for (size_t idx = 0; idx < n; ++idx) {
+    const auto& allowed = spec.input_constraints[idx];
+    if (allowed.empty() || !args[idx]) continue;
+
+    auto tile_type = As<TileType>(args[idx]->GetType());
+    if (!tile_type) continue;
+    const auto space = tile_type->memory_space_;
+    if (!space.has_value()) continue;          // unset: the compiler will place it
+    if (*space == MemorySpace::DDR) continue;  // reached by tile.load, not tile.move
+    if (std::find(allowed.begin(), allowed.end(), *space) != allowed.end()) continue;
+
+    // Reachable from ANY on-chip space, not just this operand's: that is what
+    // distinguishes "this particular hop is missing" (leave it to pass 17) from
+    // "this destination has no inbound edge at all" (unfixable, reject now).
+    const bool destination_ever_reachable =
+        std::any_of(allowed.begin(), allowed.end(), [](MemorySpace target) {
+          for (MemorySpace from : {MemorySpace::Vec, MemorySpace::Mat, MemorySpace::Acc, MemorySpace::Left,
+                                   MemorySpace::Right, MemorySpace::Bias}) {
+            if (IsTileMoveEverSupported(from, target)) return true;
+          }
+          return false;
+        });
+    if (destination_ever_reachable) continue;
+
+    const std::string wanted = FormatAllowedSpaces(allowed);
+    std::string msg = "The operator " + op_name + " requires argument " + std::to_string(idx) +
+                      " to live in " + wanted + " memory, but it is in " + MemorySpaceToString(*space) +
+                      " memory. No target has any data path into " + wanted +
+                      " memory -- only the matrix unit writes it -- so the compiler " +
+                      "cannot insert a copy to bridge them. The value has to be produced there " +
+                      "in the first place: either by a matmul, or by an allocation that names " +
+                      "the space (target_memory=pl.MemorySpace." + MemorySpaceToString(allowed[0]) +
+                      "), or by an allocation left unset for the compiler to place.";
+    if (allowed.size() == 1 && allowed[0] == MemorySpace::Acc) {
+      // The common way to land here is a zero-initialized accumulator written as
+      // `tile.full`, whose output space is fixed to UB and so can never be it.
+      // Name the replacement, because there is no in-place rewrite of `tile.full`
+      // that would work: `init_cond` removes the need to pre-zero at all.
+      msg +=
+          " Note that `tile.full` fills UB and cannot produce an accumulator. To start an"
+          " accumulation from zero, drop the pre-zeroed tile and pass"
+          " `init_cond=<true on the first step>` to the accumulating op instead -- it overwrites"
+          " on that step rather than accumulating into it.";
+    }
+    throw ValueError(msg + LocationSuffix(span));
+  }
+}
 
 }  // namespace
 
@@ -190,6 +294,9 @@ CallPtr OpRegistry::CreateImpl(const std::string& op_name, const std::vector<Exp
   // that lacks a memory_space. Heterogeneous-output ops should set
   // memory_space_ inside f_deduce_type rather than relying on this fallback.
   const auto& mem_spec = entry.GetMemorySpec();
+  if (mem_spec.has_value()) {
+    CheckOperandMemorySpaceReachable(*mem_spec, op_name, args, span);
+  }
   if (mem_spec.has_value() && mem_spec->deduce_output_memory) {
     auto resolve_memory_space = [&]() -> std::optional<MemorySpace> {
       auto resolved = mem_spec->deduce_output_memory(kwargs);

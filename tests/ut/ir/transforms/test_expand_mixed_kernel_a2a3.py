@@ -598,7 +598,7 @@ def test_v2c_boundary_uses_nz_layout_on_a2a3():
                 slot_size=4096,
                 slot_num=2,
             )
-            x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128])
+            x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128], target_memory=pl.Mem.Vec)
             pl.tpush_to_aic(x_tile, split=0)
             z_vec: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=0)
             out_0_store: pl.Tensor[[16, 64], pl.FP32] = pl.store(z_vec, [0, 0], out_0)

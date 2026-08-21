@@ -138,7 +138,7 @@ def alloc(
 def create(
     shape: Sequence[int | Expr] | _ir_core.MakeTuple,
     dtype: DataType,
-    target_memory: MemorySpace = MemorySpace.Vec,
+    target_memory: MemorySpace | None = None,
     transpose: bool | None = None,
     span: Span | None = None,
     *,
@@ -149,7 +149,10 @@ def create(
     Args:
         shape: Shape of the tile, or a MakeTuple
         dtype: Data type of the tile
-        target_memory: Target memory space (MemorySpace.Vec, .Mat, .Left, .Right)
+        target_memory: Target memory space (MemorySpace.Vec, .Mat, .Left, .Right).
+            ``None`` (the default) leaves the space unset so InferTileMemorySpace
+            places the tile from consumer demand; the kwarg is then omitted from
+            the op entirely.
         transpose: When True, allocate the transposed Mat (ZN) fractal layout
             (blayout=row_major, slayout=col_major) — the layout a matmul ``b_trans``
             B-operand carries, and the only Mat layout a DN-source ``gather_row``
@@ -169,7 +172,9 @@ def create(
     """
     actual_span = _get_span_or_capture(span)
     shape_tuple = _to_make_tuple(shape, actual_span)
-    kwargs: dict[str, Any] = {"dtype": dtype, "target_memory": target_memory}
+    kwargs: dict[str, Any] = {"dtype": dtype}
+    if target_memory is not None:
+        kwargs["target_memory"] = target_memory
     if transpose is not None:
         kwargs["transpose"] = transpose
     if flat_layout is not None:
@@ -185,7 +190,7 @@ def load(
     offsets: Sequence[int | Expr] | _ir_core.MakeTuple,
     shapes: Sequence[int | Expr] | _ir_core.MakeTuple,
     valid_shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
-    target_memory: MemorySpace = MemorySpace.Vec,
+    target_memory: MemorySpace | None = None,
     clamp: bool = False,
     span: Span | None = None,
 ) -> Call:
@@ -208,8 +213,10 @@ def load(
             the actual valid data region differs from the allocated tile size.
             Uses the same coordinate convention as shapes. This is a *request*: it
             narrows the tile, but cannot widen it past what the source has.
-        target_memory: Target memory space (MemorySpace.Vec default, or MemorySpace.Mat).
-            MX-layout tensors require an explicit MemorySpace.Mat.
+        target_memory: Target memory space (MemorySpace.Vec or MemorySpace.Mat).
+            ``None`` (the default) leaves the space unset so InferTileMemorySpace
+            places the tile from consumer demand; the kwarg is then omitted from
+            the op entirely. MX-layout tensors require an explicit MemorySpace.Mat.
         clamp: Sanction a read that runs off the end of the source. By default a
             load asserts that ``offsets + valid_shape`` stays inside the source
             and is rejected when that provably fails; with ``clamp=True`` the
@@ -233,8 +240,9 @@ def load(
             f"(MX scale loads are L1/Mat only); got {target_memory}"
         )
 
-    # Validate target_memory: only Vec and Mat are allowed for load
-    if target_memory not in (MemorySpace.Vec, MemorySpace.Mat):
+    # Validate target_memory: only Vec and Mat are allowed for load. ``None``
+    # leaves the space unset so InferTileMemorySpace places the tile.
+    if target_memory is not None and target_memory not in (MemorySpace.Vec, MemorySpace.Mat):
         raise ValueError(
             f"target_memory for tile.load must be MemorySpace.Vec or MemorySpace.Mat, got {target_memory}"
         )
@@ -245,7 +253,9 @@ def load(
     shapes_tuple = _to_make_tuple(shapes, actual_span)
     _validate_offsets_shapes(offsets_tuple, shapes_tuple)
 
-    kwargs: dict[str, Any] = {"target_memory": target_memory}
+    kwargs: dict[str, Any] = {}
+    if target_memory is not None:
+        kwargs["target_memory"] = target_memory
     if clamp:
         kwargs["clamp"] = True
 

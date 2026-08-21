@@ -130,7 +130,7 @@ class TestBinding:
                 out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 t0: pl.Tile[[64, 64], pl.FP32, pl.MemRef("scratch"), pl.Mem.Vec] = pl.load(
-                    a, [0, 0], [64, 64]
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
                 )
                 t1: pl.Tile[[64, 64], pl.FP32, pl.MemRef("scratch"), pl.Mem.Vec] = pl.exp(t0)
                 return pl.store(t1, [0, 0], out)
@@ -152,7 +152,9 @@ class TestBinding:
                 a: pl.Tensor[[64, 64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                t0: pl.Tile[[64, 64], pl.FP32, pl.MemRef("ping"), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t0: pl.Tile[[64, 64], pl.FP32, pl.MemRef("ping"), pl.Mem.Vec] = pl.load(
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
                 t1: pl.Tile[[64, 64], pl.FP32, pl.MemRef("pong"), pl.Mem.Vec] = pl.exp(t0)
                 return pl.store(t1, [0, 0], out)
 
@@ -210,7 +212,9 @@ class Collide:
                 a: pl.Tensor[[64, 64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                t0: pl.Tile[[64, 64], pl.FP32, ping, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t0: pl.Tile[[64, 64], pl.FP32, ping, pl.Mem.Vec] = pl.load(
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
                 t1: pl.Tile[[64, 64], pl.FP32, pong, pl.Mem.Vec] = pl.exp(t0)
                 t2: pl.Tile[[64, 64], pl.FP32, ping, pl.Mem.Vec] = pl.exp(t1)
                 return pl.store(t2, [0, 0], out)
@@ -233,7 +237,9 @@ class Collide:
                 a: pl.Tensor[[64, 64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                t0: pl.Tile[[64, 64], pl.FP32, slot, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t0: pl.Tile[[64, 64], pl.FP32, slot, pl.Mem.Vec] = pl.load(
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
                 return pl.store(t0, [0, 0], out)
 
         assert _base_names(passes.init_mem_ref()(Before))["t0"] == "l0c_ping"
@@ -280,7 +286,7 @@ class Zero:
                 out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 t0: pl.Tile[[64, 64], pl.FP32, pl.MemRef("scratch"), pl.Mem.Vec] = pl.load(
-                    a, [0, 0], [64, 64]
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
                 )
                 return pl.store(t0, [0, 0], out)
 
@@ -307,7 +313,9 @@ class Zero:
                 a: pl.Tensor[[64, 32], pl.FP32],
                 out: pl.Out[pl.Tensor[[32, 64], pl.FP32]],
             ) -> pl.Tensor[[32, 64], pl.FP32]:
-                t0: pl.Tile[[64, 32], pl.FP32, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 32])
+                t0: pl.Tile[[64, 32], pl.FP32, pl.Mem.Vec] = pl.load(
+                    a, [0, 0], [64, 32], target_memory=pl.Mem.Vec
+                )
                 tr: pl.Tile[[32, 64], pl.FP32, pl.MemRef("trans"), pl.Mem.Vec] = pl.tile.transpose(t0, 0, 1)
                 return pl.store(tr, [0, 0], out)
 
@@ -327,12 +335,12 @@ class Zero:
                 out_small: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
             ) -> tuple[pl.Tensor[[64, 64], pl.FP32], pl.Tensor[[32, 32], pl.FP32]]:
                 big: pl.Tile[[64, 64], pl.FP32, pl.MemRef("scratch"), pl.Mem.Vec] = pl.load(
-                    a, [0, 0], [64, 64]
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
                 )
                 r_big: pl.Tensor[[64, 64], pl.FP32] = pl.store(big, [0, 0], out_big)
                 # `big` is dead by now, so `small` may legally take over the allocation.
                 small: pl.Tile[[32, 32], pl.FP32, pl.MemRef("scratch"), pl.Mem.Vec] = pl.load(
-                    a, [0, 0], [32, 32]
+                    a, [0, 0], [32, 32], target_memory=pl.Mem.Vec
                 )
                 r_small: pl.Tensor[[32, 32], pl.FP32] = pl.store(small, [0, 0], out_small)
                 return r_big, r_small
@@ -355,7 +363,7 @@ class Zero:
                 out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 t0: pl.Tile[[64, 64], pl.FP32, pl.MemRef("scratch"), pl.Mem.Vec] = pl.load(
-                    a, [0, 0], [64, 64]
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
                 )
                 return pl.store(t0, [0, 0], out)
 
@@ -376,7 +384,7 @@ class Zero:
                 out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 t0: pl.Tile[[64, 64], pl.FP32, pl.MemRef("scratch"), pl.Mem.Vec] = pl.load(
-                    a, [0, 0], [64, 64]
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
                 )
                 return pl.store(t0, [0, 0], out)
 
@@ -405,7 +413,9 @@ class TestSlots:
                 a: pl.Tensor[[64, 64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                t0: pl.Tile[[64, 64], pl.FP32, l0c[0], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t0: pl.Tile[[64, 64], pl.FP32, l0c[0], pl.Mem.Vec] = pl.load(
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
                 t1: pl.Tile[[64, 64], pl.FP32, l0c[1], pl.Mem.Vec] = pl.exp(t0)
                 return pl.store(t1, [0, 0], out)
 
@@ -438,9 +448,13 @@ class TestSlots:
                 big_out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
                 small_out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
             ) -> tuple[pl.Tensor[[64, 64], pl.FP32], pl.Tensor[[32, 32], pl.FP32]]:
-                big: pl.Tile[[64, 64], pl.FP32, buf[0], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                big: pl.Tile[[64, 64], pl.FP32, buf[0], pl.Mem.Vec] = pl.load(
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
                 r_big: pl.Tensor[[64, 64], pl.FP32] = pl.store(big, [0, 0], big_out)
-                small: pl.Tile[[32, 32], pl.FP32, buf[1], pl.Mem.Vec] = pl.load(a, [0, 0], [32, 32])
+                small: pl.Tile[[32, 32], pl.FP32, buf[1], pl.Mem.Vec] = pl.load(
+                    a, [0, 0], [32, 32], target_memory=pl.Mem.Vec
+                )
                 r_small: pl.Tensor[[32, 32], pl.FP32] = pl.store(small, [0, 0], small_out)
                 return r_big, r_small
 
@@ -468,7 +482,9 @@ class TestSlots:
             def main(
                 self,
                 a: pl.Tensor[[256, 64], pl.FP32],
-                seed: pl.Tile[[64, 64], pl.FP32],
+                # `main` is not an InCore function, so InferTileMemorySpace never places
+                # this parameter; spell the DDR carry buffer the test is about.
+                seed: pl.Tile[[64, 64], pl.FP32, pl.Mem.DDR],
                 output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 for i, (acc_i,) in pl.range(4, init_values=(seed,)):
@@ -508,7 +524,9 @@ class TestSlots:
                 a: pl.Tensor[[64, 64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                t0: pl.Tile[[64, 64], pl.FP32, scratch, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t0: pl.Tile[[64, 64], pl.FP32, scratch, pl.Mem.Vec] = pl.load(
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
                 return pl.store(t0, [0, 0], out)
 
         memrefs = _tile_memrefs(passes.init_mem_ref()(Before))
@@ -531,7 +549,9 @@ class TestSlots:
                 a: pl.Tensor[[64, 64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                t0: pl.Tile[[64, 64], pl.FP32, l0c[0], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t0: pl.Tile[[64, 64], pl.FP32, l0c[0], pl.Mem.Vec] = pl.load(
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
                 t1: pl.Tile[[64, 64], pl.FP32, l0c[1], pl.Mem.Vec] = pl.exp(t0)
                 t2: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.add(t0, t1)
                 return pl.store(t2, [0, 0], out)
@@ -617,7 +637,9 @@ class TestSlots:
                 a: pl.Tensor[[64, 64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                t0: pl.Tile[[64, 64], pl.FP32, l0c[0], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t0: pl.Tile[[64, 64], pl.FP32, l0c[0], pl.Mem.Vec] = pl.load(
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
                 t1: pl.Tile[[64, 64], pl.FP32, l0c[1], pl.Mem.Vec] = pl.exp(t0)
                 return pl.store(t1, [0, 0], out)
 
@@ -651,7 +673,7 @@ class TestSlots:
                 out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 t0: pl.Tile[[64, 64], pl.FP32, pl.MemRef("buf", slots=2)[0], pl.Mem.Vec] = pl.load(
-                    a, [0, 0], [64, 64]
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
                 )
                 t1: pl.Tile[[64, 64], pl.FP32, pl.MemRef("buf", slots=2)[1], pl.Mem.Vec] = pl.exp(t0)
                 return pl.store(t1, [0, 0], out)
@@ -767,7 +789,9 @@ class TestSlotInvariants:
                 a: pl.Tensor[[64, 64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                t: pl.Tile[[64, 64], pl.FP32, huge[0], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t: pl.Tile[[64, 64], pl.FP32, huge[0], pl.Mem.Vec] = pl.load(
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
                 return pl.store(t, [0, 0], out)
 
         with pytest.raises(ValueError, match="overflows a 64-bit size"):
@@ -869,7 +893,9 @@ class TestSlotRejects:
                     a: pl.Tensor[[64, 64], pl.FP32],
                     out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
                 ) -> pl.Tensor[[64, 64], pl.FP32]:
-                    t: pl.Tile[[64, 64], pl.FP32, l0c[5], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                    t: pl.Tile[[64, 64], pl.FP32, l0c[5], pl.Mem.Vec] = pl.load(
+                        a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                    )
                     return pl.store(t, [0, 0], out)
 
     def test_rejects_disagreeing_slot_counts_with_disjoint_uses(self):
@@ -898,11 +924,11 @@ class TestSlotRejects:
                     o2: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
                 ) -> tuple[pl.Tensor[[64, 64], pl.FP32], pl.Tensor[[64, 64], pl.FP32]]:
                     t0: pl.Tile[[64, 64], pl.FP32, pl.MemRef("buf"), pl.Mem.Vec] = pl.load(
-                        a, [0, 0], [64, 64]
+                        a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
                     )
                     r0: pl.Tensor[[64, 64], pl.FP32] = pl.store(t0, [0, 0], o1)
                     t1: pl.Tile[[64, 64], pl.FP32, pl.MemRef("buf", slots=2)[1], pl.Mem.Vec] = pl.load(
-                        a, [0, 0], [64, 64]
+                        a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
                     )
                     r1: pl.Tensor[[64, 64], pl.FP32] = pl.store(t1, [0, 0], o2)
                     return r0, r1
@@ -930,7 +956,9 @@ class TestSlotRejects:
                     a: pl.Tensor[[64, 64], pl.FP32],
                     out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
                 ) -> pl.Tensor[[64, 64], pl.FP32]:
-                    t: pl.Tile[[64, 64], pl.FP32, scratch[0], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                    t: pl.Tile[[64, 64], pl.FP32, scratch[0], pl.Mem.Vec] = pl.load(
+                        a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                    )
                     return pl.store(t, [0, 0], out)
 
     def test_rejects_two_tiles_co_live_on_one_slot(self, ascend_backend):
@@ -945,7 +973,9 @@ class TestSlotRejects:
                 a: pl.Tensor[[64, 64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                t0: pl.Tile[[64, 64], pl.FP32, l0c[0], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t0: pl.Tile[[64, 64], pl.FP32, l0c[0], pl.Mem.Vec] = pl.load(
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
                 t1: pl.Tile[[64, 64], pl.FP32, l0c[0], pl.Mem.Vec] = pl.exp(t0)
                 t2: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.add(t0, t1)
                 return pl.store(t2, [0, 0], out)
@@ -968,7 +998,9 @@ class TestReuseControl:
                 a: pl.Tensor[[64, 64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                t0: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t0: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.load(
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
                 t1: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.exp(t0)
                 t2: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.exp(t1)
                 return pl.store(t2, [0, 0], out)
@@ -987,7 +1019,9 @@ class TestReuseControl:
                 a: pl.Tensor[[64, 64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                t0: pl.Tile[[64, 64], pl.FP32, pl.MemRef("in_buf"), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t0: pl.Tile[[64, 64], pl.FP32, pl.MemRef("in_buf"), pl.Mem.Vec] = pl.load(
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
                 t1: pl.Tile[[64, 64], pl.FP32, pl.MemRef("mid_buf"), pl.Mem.Vec] = pl.exp(t0)
                 t2: pl.Tile[[64, 64], pl.FP32, pl.MemRef("out_buf"), pl.Mem.Vec] = pl.exp(t1)
                 return pl.store(t2, [0, 0], out)
@@ -1013,7 +1047,9 @@ class TestReuseControl:
                 a: pl.Tensor[[64, 64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                t0: pl.Tile[[64, 64], pl.FP32, pl.MemRef("ping"), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t0: pl.Tile[[64, 64], pl.FP32, pl.MemRef("ping"), pl.Mem.Vec] = pl.load(
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
                 t1: pl.Tile[[64, 64], pl.FP32, pl.MemRef("pong"), pl.Mem.Vec] = pl.exp(t0)
                 t2: pl.Tile[[64, 64], pl.FP32, pl.MemRef("ping"), pl.Mem.Vec] = pl.exp(t1)
                 return pl.store(t2, [0, 0], out)
@@ -1033,7 +1069,9 @@ class TestReuseControl:
                 a: pl.Tensor[[64, 64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                t0: pl.Tile[[64, 64], pl.FP32, pl.MemRef("ping"), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t0: pl.Tile[[64, 64], pl.FP32, pl.MemRef("ping"), pl.Mem.Vec] = pl.load(
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
                 t1: pl.Tile[[64, 64], pl.FP32, pl.MemRef("pong"), pl.Mem.Vec] = pl.exp(t0)
                 t2: pl.Tile[[64, 64], pl.FP32, pl.MemRef("ping"), pl.Mem.Vec] = pl.exp(t1)
                 return pl.store(t2, [0, 0], out)
@@ -1058,7 +1096,9 @@ class TestReuseControl:
                 a: pl.Tensor[[64, 64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                mine: pl.Tile[[64, 64], pl.FP32, pl.MemRef("mine"), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                mine: pl.Tile[[64, 64], pl.FP32, pl.MemRef("mine"), pl.Mem.Vec] = pl.load(
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
                 free0: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.exp(mine)
                 free1: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.exp(free0)
                 return pl.store(free1, [0, 0], out)
@@ -1084,7 +1124,9 @@ class TestReuseControl:
                 a: pl.Tensor[[64, 64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                t0: pl.Tile[[64, 64], pl.FP32, pl.MemRef("in_buf"), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t0: pl.Tile[[64, 64], pl.FP32, pl.MemRef("in_buf"), pl.Mem.Vec] = pl.load(
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
                 t1: pl.Tile[[64, 64], pl.FP32, pl.MemRef("mid_buf"), pl.Mem.Vec] = pl.exp(t0)
                 t2: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.exp(t1)
                 return pl.store(t2, [0, 0], out)
@@ -1135,7 +1177,9 @@ class TestPipeline:
                 a: pl.Tensor[[64, 64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                t0: pl.Tile[[64, 64], pl.FP32, pl.MemRef("ping"), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t0: pl.Tile[[64, 64], pl.FP32, pl.MemRef("ping"), pl.Mem.Vec] = pl.load(
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
                 t1: pl.Tile[[64, 64], pl.FP32, pl.MemRef("pong"), pl.Mem.Vec] = pl.exp(t0)
                 return pl.store(t1, [0, 0], out)
 
@@ -1159,7 +1203,7 @@ class TestPipeline:
                 out: pl.Out[pl.Tensor[[4, 16, 64], pl.FP32]],
             ) -> pl.Tensor[[4, 16, 64], pl.FP32]:
                 t0: pl.Tile[[4, 16, 64], pl.FP32, pl.MemRef("nd_buf"), pl.Mem.Vec] = pl.load(
-                    a, [0, 0, 0], [4, 16, 64]
+                    a, [0, 0, 0], [4, 16, 64], target_memory=pl.Mem.Vec
                 )
                 t1: pl.Tile[[4, 16, 64], pl.FP32, pl.MemRef("nd_buf"), pl.Mem.Vec] = pl.exp(t0)
                 return pl.store(t1, [0, 0, 0], out)
@@ -1242,9 +1286,11 @@ class TestPipeline:
                 out: pl.Out[pl.Tensor[[4, 16, 64], pl.FP32]],
             ) -> pl.Tensor[[4, 16, 64], pl.FP32]:
                 made: pl.Tile[[4, 16, 64], pl.FP32, pl.MemRef("made_buf"), pl.Mem.Vec] = pl.tile.create(
-                    [4, 16, 64], pl.FP32
+                    [4, 16, 64], pl.FP32, target_memory=pl.Mem.Vec
                 )
-                loaded: pl.Tile[[4, 16, 64], pl.FP32, pl.Mem.Vec] = pl.load(a, [0, 0, 0], [4, 16, 64])
+                loaded: pl.Tile[[4, 16, 64], pl.FP32, pl.Mem.Vec] = pl.load(
+                    a, [0, 0, 0], [4, 16, 64], target_memory=pl.Mem.Vec
+                )
                 summed: pl.Tile[[4, 16, 64], pl.FP32, pl.Mem.Vec] = pl.add(made, loaded)
                 return pl.store(summed, [0, 0, 0], out)
 
@@ -1268,7 +1314,9 @@ class TestPipeline:
                 a: pl.Tensor[[64, 64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                t0: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t0: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.load(
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
                 t1: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.exp(t0)
                 return pl.store(t1, [0, 0], out)
 
@@ -1293,7 +1341,9 @@ class TestPipeline:
                 a: pl.Tensor[[64, 64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                t0: pl.Tile[[64, 64], pl.FP32, pl.MemRef("ping"), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t0: pl.Tile[[64, 64], pl.FP32, pl.MemRef("ping"), pl.Mem.Vec] = pl.load(
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
                 t1: pl.Tile[[64, 64], pl.FP32, pl.MemRef("pong"), pl.Mem.Vec] = pl.exp(t0)
                 return pl.store(t1, [0, 0], out)
 
@@ -1377,7 +1427,7 @@ class Collide:
             ) -> pl.Tensor[[256, 64], pl.FP32]:
                 for i, (acc,) in pl.pipeline(0, 256, 64, stage=2, init_values=(out,)):
                     t: pl.Tile[[64, 64], pl.FP32, pl.MemRef("staged"), pl.Mem.Vec] = pl.load(
-                        a, [i, 0], [64, 64]
+                        a, [i, 0], [64, 64], target_memory=pl.Mem.Vec
                     )
                     e: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.exp(t)
                     nxt: pl.Tensor[[256, 64], pl.FP32] = pl.store(e, [i, 0], acc)
@@ -1398,7 +1448,9 @@ class Collide:
                 a: pl.Tensor[[64, 64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                t0: pl.Tile[[64, 64], pl.FP32, pl.MemRef("ping"), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t0: pl.Tile[[64, 64], pl.FP32, pl.MemRef("ping"), pl.Mem.Vec] = pl.load(
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
                 t1: pl.Tile[[64, 64], pl.FP32, pl.MemRef("pong"), pl.Mem.Vec] = pl.exp(t0)
                 # Overwrites `ping` while t0 is still needed by the add below.
                 t2: pl.Tile[[64, 64], pl.FP32, pl.MemRef("ping"), pl.Mem.Vec] = pl.exp(t1)
@@ -1422,7 +1474,7 @@ class Collide:
                 out: pl.Out[pl.Tensor[[64, 64], pl.FP16]],
             ) -> pl.Tensor[[64, 64], pl.FP16]:
                 vec: pl.Tile[[64, 64], pl.FP16, pl.MemRef("shared"), pl.Mem.Vec] = pl.load(
-                    a, [0, 0], [64, 64]
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
                 )
                 mat: pl.Tile[[64, 64], pl.FP16, pl.MemRef("shared"), pl.Mem.Mat] = pl.tile.move(
                     vec, target_memory=pl.Mem.Mat
@@ -1444,7 +1496,9 @@ class Collide:
                 a: pl.Tensor[[64, 64], pl.FP32],
                 out: pl.Out[pl.Tensor[[32, 128], pl.FP32]],
             ) -> pl.Tensor[[32, 128], pl.FP32]:
-                t0: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t0: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.load(
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
                 view: pl.Tile[[32, 128], pl.FP32, pl.MemRef("elsewhere"), pl.Mem.Vec] = pl.reshape(
                     t0, [32, 128]
                 )
@@ -1508,7 +1562,9 @@ class TestLoopCarryRoundtrip:
             def main(
                 self,
                 a: pl.Tensor[[256, 64], pl.FP32],
-                seed: pl.Tile[[64, 64], pl.FP32],
+                # `main` is not an InCore function, so InferTileMemorySpace never places
+                # this parameter; spell the DDR carry buffer the test is about.
+                seed: pl.Tile[[64, 64], pl.FP32, pl.Mem.DDR],
                 output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 for i, (acc_i,) in pl.range(4, init_values=(seed,)):

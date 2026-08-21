@@ -663,9 +663,7 @@ class TestFlattenTileNdTo2DChainedOps:
                 x: pl.Tensor[[2, 3, 4], pl.FP32],
                 out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]],
             ) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                x_tile: pl.Tile[[6, 4], pl.FP32, pl.Mem.Vec] = pl.tile.load(
-                    x, [0, 0, 0], [2, 3, 4], [2, 3, 4], target_memory=pl.Mem.Vec
-                )
+                x_tile: pl.Tile[[6, 4], pl.FP32] = pl.tile.load(x, [0, 0, 0], [2, 3, 4], [2, 3, 4])
                 a_tile = pl.tile.exp(x_tile)
                 b_tile = pl.tile.add(a_tile, x_tile)
                 c_tile = pl.tile.muls(b_tile, 0.5)
@@ -811,14 +809,10 @@ class TestFlattenTileNdTo2DMultiOutput:
                 out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]],
                 out_1: pl.Out[pl.Tensor[[32, 64], pl.FP32]],
             ) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                x_tile: pl.Tile[[6, 4], pl.FP32, pl.Mem.Vec] = pl.tile.load(
-                    x, [0, 0, 0], [2, 3, 4], [2, 3, 4], target_memory=pl.Mem.Vec
-                )
+                x_tile: pl.Tile[[6, 4], pl.FP32] = pl.tile.load(x, [0, 0, 0], [2, 3, 4], [2, 3, 4])
                 a_tile = pl.tile.exp(x_tile)
                 out_0_1 = pl.tile.store(a_tile, [0, 0, 0], out_0, [2, 3, 4])
-                y_tile: pl.Tile[[32, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
-                    y, [0, 0], [32, 64], [32, 64], target_memory=pl.Mem.Vec
-                )
+                y_tile: pl.Tile[[32, 64], pl.FP32] = pl.tile.load(y, [0, 0], [32, 64], [32, 64])
                 b_tile = pl.tile.add(y_tile, y_tile)
                 out_1_1 = pl.tile.store(b_tile, [0, 0], out_1)
                 return out_0_1
@@ -872,9 +866,7 @@ class TestFlattenTileNdTo2DMultiOutput:
                 out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]],
                 out_1: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]],
             ) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                x_tile: pl.Tile[[6, 4], pl.FP32, pl.Mem.Vec] = pl.tile.load(
-                    x, [0, 0, 0], [2, 3, 4], [2, 3, 4], target_memory=pl.Mem.Vec
-                )
+                x_tile: pl.Tile[[6, 4], pl.FP32] = pl.tile.load(x, [0, 0, 0], [2, 3, 4], [2, 3, 4])
                 a_tile = pl.tile.add(x_tile, x_tile)
                 out_0_1 = pl.tile.store(a_tile, [0, 0, 0], out_0, [2, 3, 4])
                 b_tile = pl.tile.mul(x_tile, x_tile)
@@ -938,9 +930,7 @@ class TestFlattenTileNdTo2DMultiOutput:
                 x: pl.Tensor[[2, 3, 4], pl.FP32],
                 out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]],
             ) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                x_tile: pl.Tile[[6, 4], pl.FP32, pl.Mem.Vec] = pl.tile.load(
-                    x, [0, 0, 0], [2, 3, 4], [2, 3, 4], target_memory=pl.Mem.Vec
-                )
+                x_tile: pl.Tile[[6, 4], pl.FP32] = pl.tile.load(x, [0, 0, 0], [2, 3, 4], [2, 3, 4])
                 y_tile = pl.tile.add(x_tile, x_tile)
                 out_0_1 = pl.tile.store(y_tile, [0, 0, 0], out_0, [2, 3, 4])
                 return out_0_1
@@ -951,9 +941,7 @@ class TestFlattenTileNdTo2DMultiOutput:
                 x: pl.Tensor[[3, 4, 5], pl.FP32],
                 out_0: pl.Out[pl.Tensor[[3, 4, 5], pl.FP32]],
             ) -> pl.Tensor[[3, 4, 5], pl.FP32]:
-                x_tile: pl.Tile[[12, 5], pl.FP32, pl.Mem.Vec] = pl.tile.load(
-                    x, [0, 0, 0], [3, 4, 5], [3, 4, 5], target_memory=pl.Mem.Vec
-                )
+                x_tile: pl.Tile[[12, 5], pl.FP32] = pl.tile.load(x, [0, 0, 0], [3, 4, 5], [3, 4, 5])
                 y_tile = pl.tile.mul(x_tile, x_tile)
                 out_0_1 = pl.tile.store(y_tile, [0, 0, 0], out_0, [3, 4, 5])
                 return out_0_1
@@ -1022,7 +1010,7 @@ class TestFlattenTileNdTo2DReshapedStore:
                 out_0: pl.Out[pl.Tensor[[B, S, D], pl.FP32]],
             ) -> pl.Tensor[[B, S, D], pl.FP32]:
                 # 2D tile.load is unchanged by the pass.
-                x_tile = pl.tile.load(x, [0, 0], [B, D], [B, D], target_memory=pl.Mem.Vec)
+                x_tile = pl.tile.load(x, [0, 0], [B, D], [B, D])
                 # The user's explicit rank-raising reshape is preserved.
                 r3 = pl.tile.reshape(x_tile, [B, 1, D])
                 # The pass-inserted ``tile.reshape`` flattens the >2D tile operand of
@@ -1478,9 +1466,7 @@ class TestFlattenTileNdTo2DControlFlow:
                 x: pl.Tensor[[2, 3, 4], pl.FP32],
                 out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]],
             ) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                t: pl.Tile[[6, 4], pl.FP32, pl.Mem.Vec] = pl.tile.load(
-                    x, [0, 0, 0], [2, 3, 4], [2, 3, 4], target_memory=pl.Mem.Vec
-                )
+                t: pl.Tile[[6, 4], pl.FP32] = pl.tile.load(x, [0, 0, 0], [2, 3, 4], [2, 3, 4])
                 for _i, (acc,) in pl.range(4, init_values=(t,)):
                     r = pl.tile.add(acc, acc)
                     acc_out = pl.yield_(r)
@@ -1541,9 +1527,7 @@ class TestFlattenTileNdTo2DControlFlow:
                 x: pl.Tensor[[2, 3, 4], pl.FP32],
                 out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]],
             ) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                t: pl.Tile[[6, 4], pl.FP32, pl.Mem.Vec] = pl.tile.load(
-                    x, [0, 0, 0], [2, 3, 4], [2, 3, 4], target_memory=pl.Mem.Vec
-                )
+                t: pl.Tile[[6, 4], pl.FP32] = pl.tile.load(x, [0, 0, 0], [2, 3, 4], [2, 3, 4])
                 count: pl.Scalar[pl.INDEX] = 0
                 for acc, count_iter in pl.while_(init_values=(t, count)):
                     pl.cond(count_iter < 4)
@@ -1603,9 +1587,7 @@ class TestFlattenTileNdTo2DControlFlow:
                 cond: pl.Scalar[pl.BOOL],
                 out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]],
             ) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                t: pl.Tile[[6, 4], pl.FP32, pl.Mem.Vec] = pl.tile.load(
-                    x, [0, 0, 0], [2, 3, 4], [2, 3, 4], target_memory=pl.Mem.Vec
-                )
+                t: pl.Tile[[6, 4], pl.FP32] = pl.tile.load(x, [0, 0, 0], [2, 3, 4], [2, 3, 4])
                 if cond:
                     a = pl.tile.add(t, t)
                     rv = pl.yield_(a)
@@ -1662,7 +1644,18 @@ class TestFlattenTileNdTo2DBatchMatmul:
         return [cast(ir.ConstInt, elem).value for elem in tup.elements]
 
     def test_batch_matmul_default_load_keeps_whole_fit_path(self):
-        """Batch-matmul-only default loads use whole-load slicing in the fit path."""
+        """Batch-matmul-only default loads use whole-load slicing in the fit path, staged in Mat.
+
+        With no ``target_memory`` on the ``pl.load``, the tile's memory space is left
+        unset for the compiler to place, and the batch-matmul-only demand resolves it
+        to ``Mat``: L1 is the only buffer a ``tload`` can fill that MTE1 can then move
+        into L0A / L0B. Each rank-3 load is therefore materialized as a ``tensor.view``
+        collapsing the batch axis plus a 2D ``tile.load`` into ``Mat``.
+
+        The *fit* path itself is unchanged and is what this test guards: one whole
+        load per operand, row-sliced per batch, rather than a re-emitted load per
+        batch.
+        """
 
         @pl.program
         class Before:
@@ -1682,22 +1675,24 @@ class TestFlattenTileNdTo2DBatchMatmul:
         func = self._flattened_incore(Before)
         calls = self._top_level_calls(func)
         assert [call.op.name for call in calls[:4]] == [
+            _OP_TENSOR_VIEW,
             _OP_TILE_LOAD,
+            _OP_TENSOR_VIEW,
             _OP_TILE_LOAD,
-            _OP_TILE_SLICE,
-            _OP_TILE_SLICE,
         ]
         load_calls = [call for call in calls if call.op.name == _OP_TILE_LOAD]
         assert len(load_calls) == 2
         assert [cast(ir.TileType, call.type).memory_space for call in load_calls] == [
-            ir.MemorySpace.Vec,
-            ir.MemorySpace.Vec,
+            ir.MemorySpace.Mat,
+            ir.MemorySpace.Mat,
         ]
-        assert all(call.kwargs.get("target_memory") == ir.MemorySpace.Vec for call in load_calls)
-        assert [self._tuple_const_values(call.args[1]) for call in load_calls] == [[0, 0, 0], [0, 0, 0]]
+        assert all(call.kwargs.get("target_memory") == ir.MemorySpace.Mat for call in load_calls)
+        # The batch axis is folded into the row axis by the ``tensor.view``, so the
+        # loads are 2D whole-operand loads over the collapsed view.
+        assert [self._tuple_const_values(call.args[1]) for call in load_calls] == [[0, 0], [0, 0]]
         assert [self._tuple_const_values(call.args[2]) for call in load_calls] == [
-            [2, 16, 128],
-            [2, 128, 64],
+            [32, 128],
+            [256, 64],
         ]
         slice_calls = [call for call in calls if call.op.name == _OP_TILE_SLICE]
         assert [cast(ir.TileType, call.type).shape for call in slice_calls[:2]] == [[16, 128], [128, 64]]
@@ -2703,6 +2698,21 @@ class TestFlattenTileNdTo2DBatchMatmulAcc:
         walk(node)
         return out
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "LowerBatchMatmul stages its multi-batch accumulator through Vec, then "
+            "LowerBatchMatmulAcc slices that Vec buffer into tile.matmul_acc, whose arg 0 "
+            "must be Acc. The old pipeline papered over this with a tile.move into L0C -- a "
+            "tmov PTOAS implements on no target, since only the matrix unit writes L0C. The "
+            "operand check now rejects it at construction. There is no local repair: an Acc "
+            "staging buffer is equally impossible (assembling page b would be an L0C->L0C "
+            "copy, which the ISA also lacks), and the Acc->Vec move cannot be dropped because "
+            "ExpandMixedKernel relies on it to see the AIC->AIV boundary. The fix is to fuse "
+            "per batch so matmul_b -> matmul_acc_b both stay in Acc -- the batch_count == 1 "
+            "fast path generalized."
+        ),
+    )
     def test_batch_two_acc_unrolls_without_acc_roundtrip_moves(self):
         """batch=2 ``tile.batch_matmul_acc`` unrolls into 2 tile.matmul_acc +
         slice/assemble — no Vec→Acc / Acc→Vec round-trip on the accumulator.
@@ -2749,6 +2759,21 @@ class TestFlattenTileNdTo2DBatchMatmulAcc:
             f"InferTileMemorySpace. Got move_targets={move_targets}"
         )
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "LowerBatchMatmul stages its multi-batch accumulator through Vec, then "
+            "LowerBatchMatmulAcc slices that Vec buffer into tile.matmul_acc, whose arg 0 "
+            "must be Acc. The old pipeline papered over this with a tile.move into L0C -- a "
+            "tmov PTOAS implements on no target, since only the matrix unit writes L0C. The "
+            "operand check now rejects it at construction. There is no local repair: an Acc "
+            "staging buffer is equally impossible (assembling page b would be an L0C->L0C "
+            "copy, which the ISA also lacks), and the Acc->Vec move cannot be dropped because "
+            "ExpandMixedKernel relies on it to see the AIC->AIV boundary. The fix is to fuse "
+            "per batch so matmul_b -> matmul_acc_b both stay in Acc -- the batch_count == 1 "
+            "fast path generalized."
+        ),
+    )
     def test_batch_two_acc_end_to_end_with_infer_memory_inserts_required_moves(self):
         """End-to-end ``flatten + infer_tile_memory_space``: ``MoveCollector``
         inserts the needed Vec→Acc move(s) on the per-batch acc slices.

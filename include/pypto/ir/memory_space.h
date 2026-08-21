@@ -61,6 +61,44 @@ std::string MemorySpaceToString(MemorySpace space);
  */
 MemorySpace StringToMemorySpace(const std::string& str);
 
+/**
+ * @brief Whether *some* target implements a single-instruction tile move from
+ *        @p src to @p dst.
+ *
+ * The union over every backend of PTOAS's `TMovOp::verify` address-space table.
+ * A pair outside this union is unimplementable everywhere, so IR-level code can
+ * reject it without knowing the target — which matters because type deduction
+ * runs while parsing, before any backend is selected.
+ *
+ * Use this only for that "impossible anywhere" question. Once a backend is
+ * configured, `Backend::GetSoC().GetMemoryGraph()` gives the exact per-target
+ * adjacency (A5 implements Vec -> Mat, A2/A3 does not) -- the same data
+ * `Backend::FindMemPath` walks; passes and codegen want that one.
+ *
+ * The row worth knowing: **no target moves anything into `Acc`.** Only the MAD
+ * unit writes L0C, so an accumulator has to be created in `Acc` — no copy can
+ * put it there afterwards.
+ *
+ * @param src Source memory space
+ * @param dst Destination memory space
+ * @return True when at least one target implements the move
+ */
+[[nodiscard]] bool IsTileMoveEverSupported(MemorySpace src, MemorySpace dst);
+
+/**
+ * @brief Whether @p dst has any inbound edge at all in the move graph.
+ *
+ * The `std::any_of` over every possible source of
+ * @ref IsTileMoveEverSupported. False means the space is unreachable by copy on
+ * every target, so a value that must live there has to be *created* there --
+ * no pass can insert a bridge. Today `Acc` is the only such space: nothing
+ * writes L0C except the MAD unit.
+ *
+ * @param dst Destination memory space
+ * @return True when some target implements some move into @p dst
+ */
+[[nodiscard]] bool IsTileMoveEverPossibleInto(MemorySpace dst);
+
 }  // namespace ir
 }  // namespace pypto
 

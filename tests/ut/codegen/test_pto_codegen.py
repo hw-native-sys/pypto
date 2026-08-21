@@ -96,7 +96,9 @@ def _get_dyn_expr_incore_func():
     with ib.function("dyn_expr_func", type=ir.FunctionType.InCore) as f:
         q = f.param("q", tensor_ty)
         out = f.param("out", tensor_ty)
-        q_tile = ib.let("q_tile", tile.load(q, [0, 0], [16, 128]))
+        # No pass pipeline runs here, so InferTileMemorySpace never places this tile —
+        # pin the space explicitly the way the pass would.
+        q_tile = ib.let("q_tile", tile.load(q, [0, 0], [16, 128], target_memory=ir.MemorySpace.Vec))
         ret = ib.let("ret", tile.store(q_tile, [0, 0], out))
         f.return_type(tensor_ty)
         ib.return_stmt(ret)
@@ -816,7 +818,7 @@ def test_pto_codegen_plain_tensor_alias_resolves_store_view():
     with ib.function("alias_store_func", type=ir.FunctionType.InCore) as f:
         a = f.param("a", ty)
         out = f.param("out", ty)
-        t = ib.let("t", tile.load(a, [0, 0], [16, 64]))
+        t = ib.let("t", tile.load(a, [0, 0], [16, 64], target_memory=ir.MemorySpace.Vec))
         # Plain tensor Var alias (no Call on the RHS) — the post-fold shape.
         out_alias = ib.let("out_alias", out)
         ret = ib.let("ret", tile.store(t, [0, 0], out_alias))
@@ -862,7 +864,7 @@ def test_pto_codegen_iter_arg_alias_resolves_store_view():
         with ib.for_loop(k, 0, 2, 1) as loop:
             out_iter = loop.iter_arg("out_iter", out)  # tensor IterArg, init = param `out`
             out_final = loop.return_var("out_final")
-            t = ib.let("t", tile.load(a, [0, 0], [64, 64]))
+            t = ib.let("t", tile.load(a, [0, 0], [64, 64], target_memory=ir.MemorySpace.Vec))
             # Plain alias whose RHS is the IterArg — the post-fold `__rv = __iter`.
             out_alias = ib.let("out_alias", out_iter)
             ib.let("ret", tile.store(t, [0, 0], out_alias))
@@ -897,7 +899,7 @@ def test_pto_codegen_lowered_mixed_store_keeps_ptr():
     with ib.function("mixed_store", type=ir.FunctionType.InCore) as f:
         out = f.param("out", tensor_type)
         f.return_type(tensor_type)
-        src = ib.let("src", tile.load(out, [0, 0], [32, 1]))
+        src = ib.let("src", tile.load(out, [0, 0], [32, 1], target_memory=ir.MemorySpace.Vec))
         stored = ib.let("stored", tile.store(src, [0, 0], out))
         val = ib.let("val", tensor_ops.read(out, [0, 0]))
         result = ib.let("result", tensor_ops.write(stored, [0, 0], val))
@@ -2991,7 +2993,7 @@ def test_pto_codegen_view_output_uses_physical_stride():
     a_param = ir.Var("a", a_type, span)
     out_param = ir.Var("out", view_tensor_type, span)
 
-    load_call = ir.op.tile.load(a_param, [0, 0], [32, 32])
+    load_call = ir.op.tile.load(a_param, [0, 0], [32, 32], target_memory=ir.MemorySpace.Vec)
     tile_var = ir.Var("t", load_call.type, span)
     store_call = ir.op.tile.store(tile_var, [0, 0], out_param)
     result_var = ir.Var("result", store_call.type, span)
@@ -3045,12 +3047,16 @@ def test_pto_codegen_make_tensor_view_accepts_dynamic_shape_expressions():
 
     inp = ir.Var("inp", dyn_tensor_type, span)
     out = ir.Var("out", dyn_tensor_type, span)
-    tile_type = ir.op.tile.load(inp, [0, 0], [8, 8]).type
+    tile_type = ir.op.tile.load(inp, [0, 0], [8, 8], target_memory=ir.MemorySpace.Vec).type
     tile_var = ir.Var("t", tile_type, span)
     result_var = ir.Var("result", dyn_tensor_type, span)
     body = ir.SeqStmts(
         [
-            ir.AssignStmt(tile_var, ir.op.tile.load(inp, [0, 0], [8, 8]), span),
+            ir.AssignStmt(
+                tile_var,
+                ir.op.tile.load(inp, [0, 0], [8, 8], target_memory=ir.MemorySpace.Vec),
+                span,
+            ),
             ir.AssignStmt(result_var, ir.op.tile.store(tile_var, [0, 0], out), span),
             ir.ReturnStmt([result_var], span),
         ],
@@ -3087,7 +3093,7 @@ def test_pto_codegen_tensor_view_aliases_input_base_ptr():
 
     view_call = ir.op.tensor.view(src, layout=ir.TensorLayout.DN)
     view_var = ir.Var("src_dn", view_call.type, span)
-    tile_call = ir.op.tile.load(view_var, [0, 0], [16, 8])
+    tile_call = ir.op.tile.load(view_var, [0, 0], [16, 8], target_memory=ir.MemorySpace.Vec)
     tile_var = ir.Var("tile", tile_call.type, span)
     # The DN view transposes [8, 16] to [16, 8], so the tile is in DN coordinates.
     # tile.store does no layout conversion (RFC #1300 P7), so the destination is
@@ -3240,7 +3246,7 @@ def test_pto_codegen_tensor_view_shape_and_layout():
 
     view_call = ir.op.tensor.view(src, [4, 8], layout=ir.TensorLayout.DN)
     view_var = ir.Var("src_view", view_call.type, span)
-    tile_call = ir.op.tile.load(view_var, [0, 0], [4, 8])
+    tile_call = ir.op.tile.load(view_var, [0, 0], [4, 8], target_memory=ir.MemorySpace.Vec)
     tile_var = ir.Var("tile", tile_call.type, span)
     store_call = ir.op.tile.store(tile_var, [0, 0], out)
     result_var = ir.Var("result", store_call.type, span)

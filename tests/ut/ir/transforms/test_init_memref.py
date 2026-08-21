@@ -50,8 +50,12 @@ class TestBasic:
                 input_b: pl.Tensor[[64, 64], pl.FP32],
                 output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(input_a, [0, 0], [64, 64])
-                tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(input_b, [0, 0], [64, 64])
+                tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    input_a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
+                tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    input_b, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
                 tile_sum: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(tile_a, tile_b)
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_sum, [0, 0], output)
                 return result
@@ -97,7 +101,9 @@ class TestBasic:
                 input_b: pl.Tensor[[32, 32], pl.FP16],
                 output: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
             ) -> pl.Tensor[[32, 32], pl.FP32]:
-                tile_a_ub: pl.Tile[[32, 32], pl.FP16, pl.MemorySpace.Vec] = pl.load(input_a, [0, 0], [32, 32])
+                tile_a_ub: pl.Tile[[32, 32], pl.FP16, pl.MemorySpace.Vec] = pl.load(
+                    input_a, [0, 0], [32, 32], target_memory=pl.Mem.Vec
+                )
                 tile_b_l1: pl.Tile[[32, 32], pl.FP16, pl.MemorySpace.Mat] = pl.load(
                     input_b, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat
                 )
@@ -256,7 +262,9 @@ class TestMemRefSharing:
                 input_a: pl.Tensor[[64, 64], pl.FP32],
                 output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(input_a, [0, 0], [64, 64])
+                tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    input_a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_a, [0, 0], output)
                 return result
 
@@ -293,7 +301,9 @@ class TestMemRefSharing:
                 input_a: pl.Tensor[[64, 64], pl.FP32],
                 output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(input_a, [0, 0], [64, 64])
+                tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    input_a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
                 reshaped: pl.Tile[[4096, 1], pl.FP32, pl.MemorySpace.Vec] = pl.tile.reshape(tile_a, [4096, 1])
                 flat: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tile.reshape(reshaped, [64, 64])
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(flat, [0, 0], output)
@@ -413,7 +423,9 @@ class TestMemRefSharing:
                 input_b: pl.Tensor[[32, 32], pl.FP16],
                 output: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
             ) -> pl.Tensor[[32, 32], pl.FP32]:
-                tile_a_ub: pl.Tile[[32, 32], pl.FP16, pl.MemorySpace.Vec] = pl.load(input_a, [0, 0], [32, 32])
+                tile_a_ub: pl.Tile[[32, 32], pl.FP16, pl.MemorySpace.Vec] = pl.load(
+                    input_a, [0, 0], [32, 32], target_memory=pl.Mem.Vec
+                )
                 tile_b_l1: pl.Tile[[32, 32], pl.FP16, pl.MemorySpace.Mat] = pl.load(
                     input_b, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat
                 )
@@ -509,7 +521,9 @@ class TestSliceView:
                 out0: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
                 out1: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
             ) -> pl.Tensor[[1, 16], pl.FP32]:
-                tile_a: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(input_a, [0, 0], [8, 16])
+                tile_a: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    input_a, [0, 0], [8, 16], target_memory=pl.Mem.Vec
+                )
                 s0: pl.Tile[[1, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.slice(tile_a, [1, 16], [0, 0])
                 s1: pl.Tile[[1, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.slice(tile_a, [1, 16], [1, 0])
                 r0: pl.Tensor[[1, 16], pl.FP32] = pl.store(s0, [0, 0], out0)
@@ -558,7 +572,7 @@ class TestSliceView:
                 input_a: pl.Tensor[[8, 16], dtype],
                 output: pl.Out[pl.Tensor[[8, 16], dtype]],
             ) -> pl.Tensor[[8, 16], dtype]:
-                tile_a = pl.load(input_a, [0, 0], [8, 16])
+                tile_a = pl.load(input_a, [0, 0], [8, 16], target_memory=pl.Mem.Vec)
                 return pl.store(tile_a, [0, 0], output)
 
         printed = ir.python_print(passes.init_mem_ref()(Before))
@@ -577,7 +591,7 @@ class TestSliceView:
                 input_a: pl.Tensor[[8, 16], pl.FP4],
                 output: pl.Out[pl.Tensor[[1, 16], pl.FP4]],
             ) -> pl.Tensor[[1, 16], pl.FP4]:
-                tile_a = pl.load(input_a, [0, 0], [8, 16])
+                tile_a = pl.load(input_a, [0, 0], [8, 16], target_memory=pl.Mem.Vec)
                 row = pl.tile.slice(tile_a, [1, 16], [1, 0])
                 return pl.store(row, [0, 0], output)
 
@@ -597,7 +611,7 @@ class TestSliceView:
                 input_a: pl.Tensor[[8, 16], pl.FP4],
                 output: pl.Out[pl.Tensor[[1, 14], pl.FP4]],
             ) -> pl.Tensor[[1, 14], pl.FP4]:
-                tile_a = pl.load(input_a, [0, 0], [8, 16])
+                tile_a = pl.load(input_a, [0, 0], [8, 16], target_memory=pl.Mem.Vec)
                 tail = pl.tile.slice(tile_a, [1, 14], [0, 1])
                 return pl.store(tail, [0, 0], output)
 
@@ -625,10 +639,10 @@ class TestYieldMemRef:
                 output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 init_tile: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    input_tensor, [0, 0], [64, 64]
+                    input_tensor, [0, 0], [64, 64], target_memory=pl.Mem.Vec
                 )
                 other_tile: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    input_tensor, [0, 0], [64, 64]
+                    input_tensor, [0, 0], [64, 64], target_memory=pl.Mem.Vec
                 )
                 for _i, (acc,) in pl.range(0, 4, init_values=(init_tile,)):
                     acc_next: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(acc, other_tile)
@@ -693,10 +707,10 @@ class TestYieldMemRef:
                 output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 init_a: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    input_tensor, [0, 0], [64, 64]
+                    input_tensor, [0, 0], [64, 64], target_memory=pl.Mem.Vec
                 )
                 init_b: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    input_tensor, [0, 0], [64, 64]
+                    input_tensor, [0, 0], [64, 64], target_memory=pl.Mem.Vec
                 )
                 for _i, (a, b) in pl.range(0, 4, init_values=(init_a, init_b)):
                     a_next: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(a, b)
@@ -753,12 +767,12 @@ class TestYieldMemRef:
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 if cond < 2:
                     tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                        input_tensor, [0, 0], [64, 64]
+                        input_tensor, [0, 0], [64, 64], target_memory=pl.Mem.Vec
                     )
                     if_result = pl.yield_(tile_a)
                 else:
                     tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                        input_tensor, [0, 0], [64, 64]
+                        input_tensor, [0, 0], [64, 64], target_memory=pl.Mem.Vec
                     )
                     if_result = pl.yield_(tile_b)
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(if_result, [0, 0], output)
@@ -826,7 +840,7 @@ class TestYieldMemRef:
                 output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    input_tensor, [0, 0], [64, 64]
+                    input_tensor, [0, 0], [64, 64], target_memory=pl.Mem.Vec
                 )
                 if cond < 2:
                     alias_a: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = tile_a

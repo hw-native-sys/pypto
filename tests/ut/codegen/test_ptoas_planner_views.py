@@ -204,7 +204,11 @@ class SubviewReshapeProgram:
 
 @pl.program
 class NonzeroSubviewProgram:
-    """A nonzero row slice whose MemRef keeps a relative byte offset."""
+    """A nonzero row slice whose MemRef keeps a relative byte offset.
+
+    Its only consumer runs `init_mem_ref` directly, without `InferTileMemorySpace`,
+    so the load pins its own memory space instead of relying on the pass to place it.
+    """
 
     @pl.function(type=pl.FunctionType.InCore)
     def kernel(
@@ -212,7 +216,7 @@ class NonzeroSubviewProgram:
         x: pl.Tensor[[8, 8], pl.FP32],
         out: pl.Out[pl.Tensor[[2, 8], pl.FP32]],
     ) -> pl.Tensor[[2, 8], pl.FP32]:
-        src: pl.Tile[[8, 8], pl.FP32] = pl.load(x, [0, 0], [8, 8])
+        src: pl.Tile[[8, 8], pl.FP32] = pl.load(x, [0, 0], [8, 8], target_memory=pl.MemorySpace.Vec)
         sub: pl.Tile[[2, 8], pl.FP32] = pl.tile.slice(src, [2, 8], [3, 0])
         return pl.store(sub, [0, 0], out)
 

@@ -198,32 +198,36 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
       tile_view.slayout = TileLayout::row_major;
     }
     tile_view.fractal = tile_view_semantics::kMXScaleFractal;
-  } else if (target_memory_opt.has_value()) {
-    if (*target_memory_opt == MemorySpace::Mat) {
-      tile_view.blayout = TileLayout::col_major;
-      tile_view.slayout = TileLayout::row_major;
-      if (source_is_dn) {
-        std::swap(tile_view.blayout, tile_view.slayout);
-      }
-      // A single-row 2-D Mat operand (cube GEMV lhs / bias) is an ND row
-      // vector, not the NZ fractal used by multi-row matmul operands. PTO-ISA
-      // declares it as Tile<Mat, 1, K, BLayout::RowMajor, ...,
-      // SLayout::NoneBox>; that pair routes the Mat->Left move through the
-      // rows==1 vector path instead of the regular extraction path, whose row
-      // alignment excludes M=1. In a rank-3+ Mat load, shape[0] is a batch
-      // dimension, so keep the canonical NZ view.
-      const auto& shape = shapes_tuple->elements_;
-      if (shape.size() == 2) {
-        const ExprPtr& row_dim = source_is_dn ? shape[1] : shape[0];
-        if (auto rows = As<ConstInt>(row_dim); rows && rows->value_ == 1) {
-          tile_view.blayout = TileLayout::row_major;
-          tile_view.slayout = TileLayout::none_box;
-        }
-      }
-    } else if (auto last_dim = As<ConstInt>(shapes_tuple->elements_.back());
-               last_dim && last_dim->value_ == 1) {
-      tile_view.blayout = TileLayout::col_major;
+  } else if (target_memory_opt.has_value() && *target_memory_opt == MemorySpace::Mat) {
+    tile_view.blayout = TileLayout::col_major;
+    tile_view.slayout = TileLayout::row_major;
+    if (source_is_dn) {
+      std::swap(tile_view.blayout, tile_view.slayout);
     }
+    // A single-row 2-D Mat operand (cube GEMV lhs / bias) is an ND row
+    // vector, not the NZ fractal used by multi-row matmul operands. PTO-ISA
+    // declares it as Tile<Mat, 1, K, BLayout::RowMajor, ...,
+    // SLayout::NoneBox>; that pair routes the Mat->Left move through the
+    // rows==1 vector path instead of the regular extraction path, whose row
+    // alignment excludes M=1. In a rank-3+ Mat load, shape[0] is a batch
+    // dimension, so keep the canonical NZ view.
+    const auto& shape = shapes_tuple->elements_;
+    if (shape.size() == 2) {
+      const ExprPtr& row_dim = source_is_dn ? shape[1] : shape[0];
+      if (auto rows = As<ConstInt>(row_dim); rows && rows->value_ == 1) {
+        tile_view.blayout = TileLayout::row_major;
+        tile_view.slayout = TileLayout::none_box;
+      }
+    }
+    // Column vector: independent of the destination, and in particular still
+    // true when `target_memory` is absent. This arm used to sit inside the
+    // `has_value()` branch, so an unset load of an [N, 1] tile kept the default
+    // row_major -- an explicit claim contradicting InferImplicitTileLayoutFromShape,
+    // which makes it col_major. Because the two disagreed the view could not
+    // canonicalize away, and a downstream row_expand_add read the wrong layout.
+  } else if (auto last_dim = As<ConstInt>(shapes_tuple->elements_.back());
+             last_dim && last_dim->value_ == 1) {
+    tile_view.blayout = TileLayout::col_major;
   }
 
   // Build tile shape from shapes tuple (always in source-tensor coordinates).

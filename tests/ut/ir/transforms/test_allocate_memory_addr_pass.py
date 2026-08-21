@@ -33,7 +33,7 @@ def test_allocate_memory_addr_simple():
             input_a: pl.Tensor[[64, 64], pl.FP32],
             output: pl.Tensor[[64, 64], pl.FP32],
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
             result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], output)
             return result
@@ -75,7 +75,7 @@ def test_allocate_memory_addr_multiple_tiles():
             input_a: pl.Tensor[[64, 64], pl.FP32],
             output: pl.Tensor[[64, 64], pl.FP32],
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
             tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_b, tile_b)
             result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_c, [0, 0], output)
@@ -123,7 +123,7 @@ def test_allocate_memory_addr_resolves_auto_reserve_buffer_before_tiles():
             output: pl.Tensor[[64, 64], pl.FP32],
         ) -> pl.Tensor[[64, 64], pl.FP32]:
             _ = pl.reserve_buffer(name="c2v_slot_buffer", size=4096)
-            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
             result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], output)
             return result
@@ -305,7 +305,7 @@ def test_allocate_memory_addr_allocs_are_prepended_to_body():
             input_a: pl.Tensor[[64, 64], pl.FP32],
             output: pl.Tensor[[64, 64], pl.FP32],
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
             result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], output)
             return result
@@ -348,7 +348,7 @@ def test_allocate_memory_addr_raw_pointer_uniqueness():
             input_a: pl.Tensor[[64, 64], pl.FP32],
             output: pl.Tensor[[64, 64], pl.FP32],
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
             tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_b, tile_b)
             result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_c, [0, 0], output)
@@ -396,7 +396,7 @@ def test_allocated_memory_addr_verifier_passes_after_add_alloc():
             input_a: pl.Tensor[[64, 64], pl.FP32],
             output: pl.Tensor[[64, 64], pl.FP32],
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
             result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], output)
             return result
@@ -445,7 +445,7 @@ def test_memrefs_before_allocate_have_unallocated_addr():
             input_a: pl.Tensor[[64, 64], pl.FP32],
             output: pl.Tensor[[64, 64], pl.FP32],
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
             result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], output)
             return result
@@ -485,7 +485,7 @@ def test_allocated_memory_addr_verifier_via_pipeline():
             input_a: pl.Tensor[[64, 64], pl.FP32],
             output: pl.Tensor[[64, 64], pl.FP32],
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
             result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], output)
             return result
@@ -533,7 +533,9 @@ def test_allocated_memory_addr_verifier_errors_when_vec_exceeds_safe_cap():
             ) -> pl.Tensor[[64, 752], pl.FP32]:
                 # One live Vec tile of 192512 bytes -> Vec high-water exceeds the
                 # 184KB safe cap (but not the 192KB physical size).
-                tile_a: pl.Tile[[64, 752], pl.FP32] = pl.load(input_a, [0, 0], [64, 752])
+                tile_a: pl.Tile[[64, 752], pl.FP32] = pl.load(
+                    input_a, [0, 0], [64, 752], target_memory=pl.Mem.Vec
+                )
                 result: pl.Tensor[[64, 752], pl.FP32] = pl.store(tile_a, [0, 0], output)
                 return result
 
@@ -556,6 +558,12 @@ def _overflowing_mat_program(buffer_name):
     Named ``kernel_aic`` on purpose: ExpandMixedKernel names the cube half
     ``<mixed kernel>_aic`` and BuildAutomaticPipeSetup names its ring
     ``<mixed kernel>_v2c_slot_buffer``, so only that pairing is the real pipe ring.
+
+    The single L1 tile is consumed the only way L1 can be drained — moved into
+    L0A/L0B and multiplied, then stored out of L0C. (``tile.store`` reads Vec or
+    Acc; there is no L1 -> GM path, so the older "store the Mat tile" spelling
+    described a kernel with no hardware form.) L0A/L0B/L0C are separate spaces,
+    so the Mat high-water is still exactly reserve + one tile.
     """
 
     @pl.program
@@ -564,13 +572,20 @@ def _overflowing_mat_program(buffer_name):
         def kernel_aic(
             self,
             input_a: pl.Tensor[[64, 64], pl.BF16],
-            out_0: pl.Out[pl.Tensor[[64, 64], pl.BF16]],
-        ) -> pl.Tensor[[64, 64], pl.BF16]:
+            out_0: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
             _ = pl.reserve_buffer(name=buffer_name, size=524288)
             tile_a: pl.Tile[[64, 64], pl.BF16] = pl.load(
                 input_a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat
             )
-            result: pl.Tensor[[64, 64], pl.BF16] = pl.store(tile_a, [0, 0], out_0)
+            lhs: pl.Tile[[64, 64], pl.BF16, pl.Mem.Left] = pl.tile.move(
+                tile_a, target_memory=pl.MemorySpace.Left
+            )
+            rhs: pl.Tile[[64, 64], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                tile_a, target_memory=pl.MemorySpace.Right
+            )
+            acc: pl.Tile[[64, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lhs, rhs)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(acc, [0, 0], out_0)
             return result
 
     return Before
@@ -656,7 +671,9 @@ def test_overflow_diagnostic_omits_ring_note_for_an_unrelated_space(ascend_backe
         ) -> pl.Tensor[[64, 752], pl.FP32]:
             # Small Mat ring; the overflow is in Vec (192512 > 188416).
             _ = pl.reserve_buffer(name="kernel_v2c_slot_buffer", size=4096)
-            tile_a: pl.Tile[[64, 752], pl.FP32] = pl.load(input_a, [0, 0], [64, 752])
+            tile_a: pl.Tile[[64, 752], pl.FP32] = pl.load(
+                input_a, [0, 0], [64, 752], target_memory=pl.Mem.Vec
+            )
             result: pl.Tensor[[64, 752], pl.FP32] = pl.store(tile_a, [0, 0], out_0)
             return result
 
@@ -685,7 +702,9 @@ def test_allocate_memory_addr_uses_default_policy_without_backend():
                 input_a: pl.Tensor[[64, 64], pl.FP32],
                 output: pl.Tensor[[64, 64], pl.FP32],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(
+                    input_a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
                 tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
                 tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_b, tile_b)
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_c, [0, 0], output)
@@ -756,7 +775,9 @@ def test_allocate_memory_addr_preserves_sibling_slice_offsets():
             out0: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
             out1: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
         ) -> pl.Tensor[[16, 1], pl.FP32]:
-            tile_a: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(input_a, [0, 0], [8, 16])
+            tile_a: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                input_a, [0, 0], [8, 16], target_memory=pl.Mem.Vec
+            )
             # Two sibling slices at rows 0 and 1, each reshaped to a column vector.
             s0: pl.Tile[[1, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.slice(tile_a, [1, 16], [0, 0])
             s1: pl.Tile[[1, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.slice(tile_a, [1, 16], [1, 0])
@@ -812,6 +833,11 @@ def test_allocate_memory_addr_resolves_aic_reserve_buffer_in_mat_space():
     lines 133-155). The Mat tile then starts at current_addr = reserved_end = 4096
     (pass src lines 309-313), and the buffer's base kwarg is rewritten 0 (lines
     230-247). This is the Mat-space dual of the AIV/Vec reserve test above.
+
+    The L1 tile is drained through the cube (L1 -> L0A/L0B -> MAD -> L0C -> GM),
+    which is the only way off L1: ``tile.store`` reads Vec or Acc, so storing the
+    Mat tile directly described a kernel with no hardware form. Those extra
+    buffers live in other spaces and so leave the Mat window untouched.
     """
 
     @pl.program
@@ -820,13 +846,20 @@ def test_allocate_memory_addr_resolves_aic_reserve_buffer_in_mat_space():
         def main(
             self,
             input_a: pl.Tensor[[64, 64], pl.BF16],
-            out_0: pl.Out[pl.Tensor[[64, 64], pl.BF16]],
-        ) -> pl.Tensor[[64, 64], pl.BF16]:
+            out_0: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
             _ = pl.reserve_buffer(name="aic_slot_buffer", size=4096)
             tile_a: pl.Tile[[64, 64], pl.BF16] = pl.load(
                 input_a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat
             )
-            result: pl.Tensor[[64, 64], pl.BF16] = pl.store(tile_a, [0, 0], out_0)
+            lhs: pl.Tile[[64, 64], pl.BF16, pl.Mem.Left] = pl.tile.move(
+                tile_a, target_memory=pl.MemorySpace.Left
+            )
+            rhs: pl.Tile[[64, 64], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                tile_a, target_memory=pl.MemorySpace.Right
+            )
+            acc: pl.Tile[[64, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lhs, rhs)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(acc, [0, 0], out_0)
             return result
 
     @pl.program
@@ -835,16 +868,29 @@ def test_allocate_memory_addr_resolves_aic_reserve_buffer_in_mat_space():
         def main(
             self,
             input_a: pl.Tensor[[64, 64], pl.BF16, pl.MemRef("mem_ddr_0", 0, 8192)],
-            out_0: pl.Out[pl.Tensor[[64, 64], pl.BF16, pl.MemRef("mem_ddr_1", 0, 8192)]],
-        ) -> pl.Tensor[[64, 64], pl.BF16]:
+            out_0: pl.Out[pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)]],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
             mem_mat_2: pl.Ptr = pl.tile.alloc(pl.Mem.Mat, 8192)
+            mem_left_3: pl.Ptr = pl.tile.alloc(pl.Mem.Left, 8192)
+            mem_right_4: pl.Ptr = pl.tile.alloc(pl.Mem.Right, 8192)
+            mem_acc_5: pl.Ptr = pl.tile.alloc(pl.Mem.Acc, 16384)
             _: pl.Scalar[pl.INT32] = pl.system.reserve_buffer(name="aic_slot_buffer", size=4096, base=0)
             # Mat tile is pushed past the 4096-byte reserved Mat window.
             tile_a: pl.Tile[[64, 64], pl.BF16, pl.MemRef(mem_mat_2, 4096, 8192), pl.Mem.Mat] = pl.tile.load(
                 input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Mat
             )
-            result: pl.Tensor[[64, 64], pl.BF16, pl.MemRef("mem_ddr_1", 0, 8192)] = pl.tile.store(
-                tile_a, [0, 0], out_0
+            # The other spaces have no reserved window, so these all start at 0.
+            lhs: pl.Tile[[64, 64], pl.BF16, pl.MemRef(mem_left_3, 0, 8192), pl.Mem.Left] = pl.tile.move(
+                tile_a, target_memory=pl.Mem.Left
+            )
+            rhs: pl.Tile[[64, 64], pl.BF16, pl.MemRef(mem_right_4, 0, 8192), pl.Mem.Right] = pl.tile.move(
+                tile_a, target_memory=pl.Mem.Right
+            )
+            acc: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_acc_5, 0, 16384), pl.Mem.Acc] = pl.tile.matmul(
+                lhs, rhs
+            )
+            result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
+                acc, [0, 0], out_0
             )
             return result
 
@@ -875,7 +921,7 @@ def test_allocate_memory_addr_honors_explicit_reserve_buffer_base():
             output: pl.Tensor[[64, 64], pl.FP32],
         ) -> pl.Tensor[[64, 64], pl.FP32]:
             _ = pl.reserve_buffer(name="explicit_slot_buffer", size=4096, base=8192)
-            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
             result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], output)
             return result
@@ -932,7 +978,7 @@ def test_allocate_memory_addr_skips_non_incore_function():
             input_a: pl.Tensor[[64, 64], pl.FP32],
             output: pl.Tensor[[64, 64], pl.FP32],
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
             result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], output)
             return result

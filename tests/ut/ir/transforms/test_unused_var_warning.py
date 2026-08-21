@@ -100,7 +100,7 @@ def test_no_warning_ptr_used_in_memref_annotation():
             x: pl.Tensor[[64, 64], pl.FP32],
             out: pl.Tensor[[64, 64], pl.FP32],
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(x, [0, 0], [64, 64])
+            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(x, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             tile_b: pl.Tile[[64, 64], pl.FP32] = pl.tile.add(tile_a, tile_a)
             result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(tile_b, [0, 0], out)
             return result

@@ -2053,7 +2053,7 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   // Phase 1: Insert tile.load for each TensorType parameter that is directly consumed
   // by a converted tensor op.  Parameters that are only referenced by non-converted ops
   // (e.g. tile.load, tile.move) already manage their own tile representation and must
-  // NOT get an additional Vec-space load inserted here.
+  // NOT get an additional load inserted here.
   TensorArgsInConvertedOpsCollector collector(conv_registry);
   collector.VisitStmt(canonical_body);
   collector.TraceIterArgInitValues();
@@ -2069,8 +2069,26 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
     const auto& load_span = var->span_;
     auto offsets = MakeZeroOffsets(tensor_type->shape_.size(), load_span);
     auto shapes = MakeShapeTuple(tensor_type->shape_, load_span);
-    std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec}};
-    auto load_call = op_registry.Create("tile.load", {var, offsets, shapes, shapes}, load_kwargs, load_span);
+
+    // Honour the same consumer demand the mutator honours for the loads it
+    // creates (see BridgeInputSpaces): a parameter feeding a matmul goes
+    // straight to Mat rather than landing in Vec and being moved out again.
+    //
+    // With no demand recorded, leave `target_memory` *absent*. It used to be
+    // hard-coded to Vec, which is a guess this pass is not equipped to make --
+    // it sees only the ops it converts, while InferTileMemorySpace (pass 17)
+    // sees the whole function and places the tile from actual consumer demand.
+    // An unset space is the IR's "not decided yet", so stating Vec here would
+    // overwrite a real answer with a default and make pass 17 honour it (it
+    // never overrides a present kwarg).
+    auto entry_req = consumer_collector.GetConsumerReq(var.get());
+    std::vector<std::pair<std::string, std::any>> load_kwargs;
+    if (entry_req.has_value()) {
+      load_kwargs.emplace_back("target_memory", entry_req->space);
+    }
+    auto load_call = MarkCompilerMatBridge(
+        op_registry.Create("tile.load", {var, offsets, shapes, shapes}, load_kwargs, load_span),
+        entry_req.has_value() ? entry_req->space : MemorySpace::Vec);
 
     std::string tile_name = MakeTileValueName(var->name_hint_);
     auto tile_var = std::make_shared<Var>(tile_name, load_call->GetType(), load_span);

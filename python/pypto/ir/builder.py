@@ -157,14 +157,27 @@ class IRBuilder:
             attrs=attrs_list,
         )
         builder_obj = ForLoopBuilder(self)
+        body_ok = False
         try:
             yield builder_obj
+            body_ok = True
         finally:
             end_span = self._capture_call_span() if span is None else span
             combined_span = self._combine_spans(self._begin_spans[ctx_id], end_span)
-            result = self._builder.end_for_loop(combined_span)
-            builder_obj._result = result
-            del self._begin_spans[ctx_id]
+            try:
+                result = self._builder.end_for_loop(combined_span)
+                builder_obj._result = result
+            except Exception:
+                # The body already raised, so the loop was never completed and
+                # end_for_loop's own consistency check (e.g. "N iteration
+                # arguments but 0 return variables") is a symptom of that abort,
+                # not the cause. Letting it escape here would replace the real
+                # diagnostic -- which carries the user's source span -- with a
+                # confusing one about loop structure.
+                if body_ok:
+                    raise
+            finally:
+                del self._begin_spans[ctx_id]
 
     @contextmanager
     def while_loop(
@@ -193,14 +206,23 @@ class IRBuilder:
         condition_expr = _normalize_expr(condition, begin_span)
         self._builder.begin_while_loop(condition_expr, begin_span)
         builder_obj = WhileLoopBuilder(self)
+        body_ok = False
         try:
             yield builder_obj
+            body_ok = True
         finally:
             end_span = self._capture_call_span() if span is None else span
             combined_span = self._combine_spans(self._begin_spans[ctx_id], end_span)
-            result = self._builder.end_while_loop(combined_span)
-            builder_obj._result = result
-            del self._begin_spans[ctx_id]
+            try:
+                result = self._builder.end_while_loop(combined_span)
+                builder_obj._result = result
+            except Exception:
+                # See for_loop: keep the body's diagnostic, not the structural
+                # symptom end_while_loop reports for a loop that never finished.
+                if body_ok:
+                    raise
+            finally:
+                del self._begin_spans[ctx_id]
 
     @contextmanager
     def if_stmt(self, condition: int | ir.Expr, span: ir.Span | None = None) -> Iterator["IfStmtBuilder"]:

@@ -211,7 +211,11 @@ class TestPythonPrinterProgram:
                 x: pl.Tensor[[64, 64], pl.FP32],
                 out: pl.Tensor[[64, 64], pl.FP32],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(x, [0, 0], [64, 64])
+                # This test runs only InitMemRef/AllocateMemoryAddr, never InferTileMemorySpace,
+                # so the load's memory space has to be pinned here.
+                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(
+                    x, [0, 0], [64, 64], target_memory=pl.MemorySpace.Vec
+                )
                 tile_b: pl.Tile[[64, 64], pl.FP32] = pl.tile.add(tile_a, tile_a)
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(tile_b, [0, 0], out)
                 return result

@@ -6,7 +6,7 @@
 
 `FlattenTileNdTo2D` 之后，每个 InCore tile 都拥有静态的 2D shape，但其 `TileType::memory_space_` 仍未设置（或仅在通过 `target_memory` kwarg 显式标注的部分生产者上设置）。PTO-ISA 硬件暴露了多种不同的片上缓冲区——`Vec`（统一缓冲区 / 向量）、`Mat`（L1）、`Left` / `Right`（L0A / L0B 矩阵乘操作数缓冲区）、`Acc`（L0C 累加器）、`Bias`——大多数算子都对其输入和输出可使用的 memory space 施加约束。本 pass 就是这个约束求解器：它沿数据流前向传播 memory space，遵循显式的 `target_memory` kwarg，沿视图链反向传播需求，并在生产者与消费者无法在同一 space 上达成一致时插入 `tile.move`。
 
-本 pass 运行后，InCore 函数中每个 `TileType` 都带有具体的 `memory_space_`，满足 `ExpandMixedKernel`、`InitMemRef` 以及下游 codegen 所要求的 `TileMemoryInferred` IR 属性。
+本 pass 运行后，每个 InCore 变体函数 —— `InCore`、`AIC`、`AIV`，三者皆可由用户编写 —— 中的每个 `TileType` 都带有具体的 `memory_space_`，满足 `ExpandMixedKernel`、`InitMemRef` 以及下游 codegen 所要求的 `TileMemoryInferred` IR 属性。
 
 **前置条件**：
 
@@ -32,7 +32,7 @@ infer_pass = passes.infer_tile_memory_space()
 program_inferred = infer_pass(program)
 ```
 
-本 pass 仅重写 `func_type_ == FunctionType::InCore` 的函数。Orchestration 与 Opaque 函数原样返回。
+本 pass 重写所有 InCore 变体函数 —— 即 `IsInCoreType`：`InCore`、`AIC`、`AIV`。Orchestration 与 Opaque 函数原样返回；若有 tile 从这类函数到达 `InitMemRef`，会作为编写错误报出 —— 非设备函数没有片上缓冲可供放置。
 
 ## 算法
 
@@ -47,7 +47,7 @@ program_inferred = infer_pass(program)
 
 随后在这些边上**反向**传播需求：单次反向序遍历即可达到不动点。这是因为 SSA 中 inherit-input 算子的 `dst` 总在 `src` 之后定义，一次反向扫描即可完成 O(N) 的不动点。当同一变量上两个需求冲突时，非 `Vec` 的需求获胜（`ShouldOverrideDemand`）——`Vec` 是宽松的默认值，应被来自 compute 算子的特化需求覆盖。
 
-正是这一阶段使 `slice(tensor) → fillpad → matmul` 链能把 matmul 的 `Left` / `Right` 需求一直传回 `tile.slice` 的输出，从而让阶段 1 把该生产者直接解析为 `Left` / `Right`，而无需绕道 `Vec`。
+正是这一阶段使 `slice(tensor) → fillpad → matmul` 链能把 matmul 的 `Left` / `Right` 需求一直传回 `tile.slice` 的输出。随后阶段 1 把该生产者解析为 `Mat` —— 即下表中 cube 需求所映射的中转 space —— 再由阶段 2 插入 `Mat -> Left` / `Mat -> Right` 搬运。正是该需求让结果选择 `Mat` 而非 `Vec`；否则操作数会走更长的 GM -> UB -> L1 -> L0 路径。
 
 ### 阶段 1 — 前向分析（`TileMemorySpaceAnalyzer`）
 
@@ -61,7 +61,7 @@ program_inferred = infer_pass(program)
 
 对每个带 `return_vars_` 的 `ForStmt`，访问完函数体后，分析器把每个 yield 变量的 memory space 拷贝到对应的 `return_var_`。同样的 space 还会被强制写到：
 
-- 对应的 `iter_arg_` —— 用于覆盖累加器模式：`tile.create` 保守地默认 `Vec`，但循环体写入了不同 space（如来自 `matmul_acc` 的 `Acc`）。如果不做这一步反向传播，最终的 `tile.store` 读到的是 Vec 类型 tile，会导致 `ExpandMixedKernel` 误判为混合 kernel，进而生成错误的 AIC/AIV IR。
+- 对应的 `iter_arg_` —— 用于覆盖累加器模式：循环体写入了 init 载体尚不具备的 space（如来自 `matmul_acc` 的 `Acc`）。过去这一步是必需的，因为 `tile.create` 默认打上 `Vec`、必须由反向传播覆盖；如今未指定 space 的 `tile.create` 会直接依据需求解析为 `Acc`，反向传播只需覆盖 `AssignStmt` 遍历访问不到的载体。如果不做这一步反向传播，最终的 `tile.store` 读到的是 Vec 类型 tile，会导致 `ExpandMixedKernel` 误判为混合 kernel，进而生成错误的 AIC/AIV IR。
 - `iter_arg_` 下面的 TileType `init_var_` 载体 —— 处理 `IfStmt` 的 `return_var`（永远不会作为 `AssignStmt` 被访问）作为循环 init 的情形。
 
 对每个带 `return_vars_` 的 `IfStmt`，分析器同样从分支 yield 记录每个 TileType phi 的 memory space（以 then 分支为准，else 分支作为兜底，phi 自身的标注作为最后兜底）。这是上述 `ForStmt` 循环携带传播的对偶，同样是关键的一步：若缺失，phi 永远不会进入 `var_memory_`，而所有查表的消费方都会在查不到时静默降级——`InheritFromInput` 会退化到从其他实参继承，阶段 2 的 `CheckInputConstraints` 会直接跳过该实参（**不**排入任何 `tile.move`，于是算子声明的输入空间就被违反了），阶段 3 也会跳过重新标注。暴露该问题的形态是：对 `if`/`else` 累加器 phi 做 `pl.cast` 时，尽管 `tile.cast` 要求 `Vec`，实参却仍停留在 `Acc`，使得 `ExpandMixedKernel` 找不到可下降为 `tpush_to_aiv` / `tpop_from_aic` 对的边界 `tile.move`。这里从 yield 推导而非直接读取 phi 的标注，是因为分支可能在同一轮运行中被重新推断（即上文的累加器模式），此时该标注已经过时。
@@ -75,10 +75,23 @@ program_inferred = infer_pass(program)
 | 已注册但无 `MemorySpec` 的算子 | 若 `Call` 返回类型已设置且非 `DDR`，则使用之；否则 `Vec` |
 | `deduce_output_memory` 返回 `Some(s)` 的已注册算子（如 `tile.matmul → Acc`） | `s` |
 | `output_inherits_input` 算子（如 `tile.slice`、`tile.fillpad`、`tile.reshape`），且解析器返回 `None` | 第一个 tile 输入的 space；否则 `Vec` |
-| `HasRetargetableMemoryKwarg()` 算子（如 `tile.load`、`tile.create`），且解析器返回 `None`（kwarg 缺失） | 阶段 0 的需求若为 `Vec` 或 `Mat` 则使用之；否则继承输入；否则 `Vec` |
+| `HasRetargetableMemoryKwarg()` 算子（如 `tile.load`、`tile.create`），且解析器返回 `None`（kwarg 缺失） | 阶段 0 的需求若为 `Vec` 或 `Mat` 则使用之；cube 操作数需求（`Left`、`Right`、`LeftScale`、`RightScale`、`Bias`）解析为 `Mat`；否则继承输入；否则 `Vec` |
 | `tile.*` 算子，`deduce_output_memory` 返回 `None`，且既非 retargetable 也非 inherit | 继承输入；否则 `Vec` |
 
 对 retargetable 生产者执行 "夹逼到 `{Vec, Mat}`" 是有意为之：面向 DDR 的 `tile.load` 不能直接产出 `Left` / `Right` / `Acc` / `Bias`；即便下游需求是这些 space 之一，生产者也必须停在 `Mat`（或 `Vec`），由阶段 2 插入 `tile.move` 抵达特化 space。
+
+究竟停在两者中的哪一个，由需求决定，而非由某个默认值决定。cube 操作数需求会把生产者解析为 **`Mat`**：L1 是 `tload` 能填充、且 MTE1 随后能搬入 L0A/L0B 的唯一缓冲区 —— `Mat -> Left` / `Mat -> Right` 是 PTOAS（`TMovOp::verify`）唯一实现的搬运对。若改为路由到 `Vec`，不仅要多走 GM -> UB -> L1 -> L0 一条链，更糟的是会把仅供 cube 使用的操作数放到 vector 核上，`ExpandMixedKernel` 随后会将其识别为混合 kernel 并拆分到 AIC/AIV。
+
+`Acc` 单独处理：**任何 target、任何路径都无法把数据搬入 `Acc`**，只有矩阵单元才写 L0C。因此必须作为累加器的 tile 只能在 `Acc` 中*创建*，阶段 2 无法为其架桥。`OpRegistry::Create` 会拒绝*显式* space 无法抵达 `Acc` 约束的操作数，但*未设置* space 的生产者仍会携带该需求到达本 pass，上述夹逼不能把它吞掉。
+
+因此，当需求指向一个没有入边的 space（`IsTileMoveEverPossibleInto`）时，依据生产者已注册的 execution-memory-access 证据分流：
+
+| 生产者 | 证据 | 结果 |
+| ------ | ---- | ---- |
+| `tile.create` | `no_execution_memory_access()` | 直接满足需求 —— 该分配直接诞生在 `Acc` |
+| `tile.load` | `functional_execution_memory_access()` | 面向用户的报错 —— MTE2 只填充 {`Vec`, `Mat`}，从不写 L0C，任何放置都无法满足 |
+
+以注册表的证据而非算子名清单作为判据，意味着后续新增的生产者会按其实际行为自动归类。若改为落到 `Vec` 兜底，阶段 2 会用一条任何 target 都未实现的 `tile.move`（搬入 `Acc`）去 "修复" 该不匹配 —— 这条非法 IR 会一直存活到后端才中止，且报错既不指明 tile 也不指明创建它的源码行。阶段 2 对该情况设有断言（`INTERNAL_CHECK_SPAN`），确保它不会再被静默生成。
 
 阶段 1 **从不**覆盖已有的 `target_memory` kwarg。如果用户写了 `pl.load(..., target_memory=Mat)`，而下游 `matmul` 需要 `Left`，则 load 仍保持 `Mat`，并由后续插入 `tile.move`。
 
@@ -239,4 +252,11 @@ class After:
 | `Orchestration` | 不变 |
 | `Opaque` | 不变 |
 
-本 pass 还断言任何 InCore 函数的参数都不能是 `TileType` —— InCore 参数必须是 `TensorType`。该断言在阶段 1 起始处检查，违反时触发 `CHECK` 失败。
+tile *参数* 在阶段 1 起始处按函数类型分别处理：
+
+| 函数类型 | tile 参数 | 原因 |
+| -------- | --------- | ---- |
+| `InCore` | 拒绝（`INTERNAL_CHECK`） | InCore kernel 由 orchestration 调用，后者只使用 tensor；出现 tile 参数说明前序 pass 生成了非法签名 |
+| `AIC` / `AIV` | 接受，并作为分析的**种子** | 二者是由混合 kernel 调用的 sub-worker，tile 参数正是常规的跨核交接 |
+
+参数的 space 属于签名的一部分 —— 由调用方决定该 tile 位于何处 —— 因此本 pass 从不推断它。`AIC` / `AIV` 的 tile 参数若省略 space，属于用户错误，报错会给出应补充的标注。

@@ -466,20 +466,25 @@ class BlockOperationsTest:
         self,
         lhs: pl.Tensor[[16, 16], pl.FP32],
         rhs: pl.Tensor[[16, 16], pl.FP32],
-        factor: pl.Tensor[[16, 16], pl.FP32],
         output: pl.Tensor[[16, 16], pl.FP32],
     ) -> pl.Tensor[[16, 16], pl.FP32]:
-        """Matmul_acc: output = matmul_acc(factor, lhs, rhs)."""
+        """Matmul_acc: output = matmul_acc(matmul(lhs, rhs), lhs, rhs).
+
+        The accumulator comes from ``tile.matmul``, which lands it in Acc (L0C) by
+        construction. It cannot be loaded from GM: ``tile.matmul_acc``'s first
+        operand is its own output buffer, and nothing but the matrix unit writes
+        L0C -- there is no load or move into it from any other space.
+        """
         lhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(
             lhs, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat
         )
         rhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(
             rhs, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat
         )
-        factor_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(
-            factor, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat
+        acc_tile: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Acc] = pl.tile.matmul(lhs_tile, rhs_tile)
+        result_tile: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Acc] = pl.tile.matmul_acc(
+            acc_tile, lhs_tile, rhs_tile
         )
-        result_tile: pl.Tile[[16, 16], pl.FP32] = pl.tile.matmul_acc(factor_tile, lhs_tile, rhs_tile)
         updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], output)
         return updated_output
 

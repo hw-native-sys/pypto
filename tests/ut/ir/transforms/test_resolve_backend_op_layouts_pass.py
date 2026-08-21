@@ -83,7 +83,9 @@ class TestResolveBackendOpLayouts:
                     [16, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )
                 acc_1: pl.Tile[[16, 1], pl.FP32] = pl.tile.muls(acc_0, 0.0)
-                chunk: pl.Tile[[16, 256], pl.FP32] = pl.load(data, [0, 0], [16, 256])
+                chunk: pl.Tile[[16, 256], pl.FP32] = pl.load(
+                    data, [0, 0], [16, 256], target_memory=pl.MemorySpace.Vec
+                )
                 tmp: pl.Tile[[16, 256], pl.FP32] = pl.tile.create(
                     [16, 256], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )
@@ -106,7 +108,9 @@ class TestResolveBackendOpLayouts:
                 acc_0_rm: pl.Tile[[1, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.reshape(acc_0, [1, 16])
                 acc_1_rm: pl.Tile[[1, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.muls(acc_0_rm, 0.0)
                 acc_1: pl.Tile[[16, 1], pl.FP32, pl.MemorySpace.Vec] = pl.tile.reshape(acc_1_rm, [16, 1])
-                chunk: pl.Tile[[16, 256], pl.FP32, pl.MemorySpace.Vec] = pl.load(data, [0, 0], [16, 256])
+                chunk: pl.Tile[[16, 256], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    data, [0, 0], [16, 256], target_memory=pl.MemorySpace.Vec
+                )
                 tmp: pl.Tile[[16, 256], pl.FP32, pl.MemorySpace.Vec] = pl.tile.create(
                     [16, 256], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )

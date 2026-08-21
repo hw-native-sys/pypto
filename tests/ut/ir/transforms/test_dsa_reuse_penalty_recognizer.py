@@ -96,9 +96,9 @@ def test_dsa_rp_recognizes_cross_pipe_war(ascend_backend):
             input_b: pl.Tensor[[64, 64], pl.FP32],
             output: pl.Tensor[[64, 64], pl.FP32],
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            prior = pl.load(input_a, [0, 0], [64, 64])
+            prior = pl.load(input_a, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             _consumed = pl.add(prior, prior)
-            next_value = pl.load(input_b, [0, 0], [64, 64])
+            next_value = pl.load(input_b, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             return pl.store(next_value, [0, 0], output)
 
     assert _recognized_edges(Before) == {
@@ -122,7 +122,7 @@ def test_dsa_rp_recognizes_cross_pipe_waw(ascend_backend):
             output: pl.Tensor[[64, 64], pl.FP32],
         ) -> pl.Tensor[[64, 64], pl.FP32]:
             _prior = pl.tile.full([64, 64], dtype=pl.FP32, value=0.0)
-            next_value = pl.load(input_b, [0, 0], [64, 64])
+            next_value = pl.load(input_b, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             return pl.store(next_value, [0, 0], output)
 
     assert _recognized_edges(Before) == {("_prior", "next_value", 1)}
@@ -160,7 +160,7 @@ def test_dsa_rp_preserves_not_inplace_safe_semantic_separation():
             input_a: pl.Tensor[[32, 32], pl.FP32],
             output: pl.Tensor[[32, 32], pl.FP32],
         ) -> pl.Tensor[[32, 32], pl.FP32]:
-            source = pl.load(input_a, [0, 0], [32, 32])
+            source = pl.load(input_a, [0, 0], [32, 32], target_memory=pl.Mem.Vec)
             result = pl.recip(source)
             return pl.store(result, [0, 0], output)
 
@@ -179,7 +179,7 @@ def test_dsa_rp_preserves_tile_move_semantic_separation():
             input_a: pl.Tensor[[32, 32], pl.FP32],
             output: pl.Tensor[[32, 32], pl.FP32],
         ) -> pl.Tensor[[32, 32], pl.FP32]:
-            source = pl.load(input_a, [0, 0], [32, 32])
+            source = pl.load(input_a, [0, 0], [32, 32], target_memory=pl.Mem.Vec)
             moved = pl.tile.move(source, target_memory=pl.Mem.Vec)
             return pl.store(moved, [0, 0], output)
 
@@ -199,8 +199,8 @@ def test_dsa_rp_preserves_tuple_result_not_inplace_safe_separation():
             kvalue: pl.Scalar[pl.INT32],
             output: pl.Tensor[[16, 8], pl.INT32],
         ) -> pl.Tensor[[16, 8], pl.INT32]:
-            source = pl.load(source_tensor, [0, 0], [16, 64])
-            temporary = pl.tile.create([16, 64], pl.UINT8)
+            source = pl.load(source_tensor, [0, 0], [16, 64], target_memory=pl.Mem.Vec)
+            temporary = pl.tile.create([16, 64], pl.UINT8, target_memory=pl.Mem.Vec)
             destination, count = pl.tile.gather_compare(
                 source,
                 kvalue,
@@ -229,10 +229,10 @@ def test_dsa_rp_does_not_promote_partial_handoff_endpoint(ascend_backend):
             input_b: pl.Tensor[[64, 64], pl.FP32],
             output: pl.Tensor[[64, 64], pl.FP32],
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            prior = pl.load(input_a, [0, 0], [64, 64])
+            prior = pl.load(input_a, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             upper = prior[0:32, 0:64]
             _consumed = pl.add(upper, upper)
-            next_value = pl.load(input_b, [0, 0], [64, 64])
+            next_value = pl.load(input_b, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             return pl.store(next_value, [0, 0], output)
 
     assert frozenset(("prior", "next_value")) not in _recognized_pairs(Before)
@@ -252,9 +252,9 @@ def test_dsa_rp_vec_to_vec_tile_move_uses_vector_resource(ascend_backend):
             input_b: pl.Tensor[[32, 32], pl.FP32],
             output: pl.Tensor[[32, 32], pl.FP32],
         ) -> pl.Tensor[[32, 32], pl.FP32]:
-            prior = pl.load(input_a, [0, 0], [32, 32])
+            prior = pl.load(input_a, [0, 0], [32, 32], target_memory=pl.Mem.Vec)
             _moved = pl.tile.move(prior, target_memory=pl.Mem.Vec)
-            next_value = pl.load(input_b, [0, 0], [32, 32])
+            next_value = pl.load(input_b, [0, 0], [32, 32], target_memory=pl.Mem.Vec)
             return pl.store(next_value, [0, 0], output)
 
     assert frozenset(("_moved", "next_value")) in _recognized_pairs(Before)
@@ -438,8 +438,8 @@ def test_dsa_rp_tile_create_is_not_an_execution_write():
             input_a: pl.Tensor[[64, 64], pl.FP32],
             output: pl.Tensor[[64, 64], pl.FP32],
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            _declaration = pl.tile.create([64, 64], pl.FP32)
-            actual = pl.load(input_a, [0, 0], [64, 64])
+            _declaration = pl.tile.create([64, 64], pl.FP32, target_memory=pl.Mem.Vec)
+            actual = pl.load(input_a, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             return pl.store(actual, [0, 0], output)
 
     ranges = _tile_ranges(_plan_with_dsa_rp(Before))
@@ -458,10 +458,10 @@ def test_dsa_rp_tile_assemble_is_an_execution_write():
             input_b: pl.Tensor[[64, 64], pl.FP32],
             output: pl.Tensor[[64, 64], pl.FP32],
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            target = pl.tile.create([64, 64], pl.FP32)
-            source = pl.load(source_input, [0, 0], [64, 64])
+            target = pl.tile.create([64, 64], pl.FP32, target_memory=pl.Mem.Vec)
+            source = pl.load(source_input, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             _assembled = pl.tile.assemble(target, source, [0, 0])
-            next_value = pl.load(input_b, [0, 0], [64, 64])
+            next_value = pl.load(input_b, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             return pl.store(next_value, [0, 0], output)
 
     ranges = _tile_ranges(_plan_with_dsa_rp(Before))
@@ -481,10 +481,10 @@ def test_dsa_rp_partial_assemble_poisons_touched_allocations():
             input_b: pl.Tensor[[64, 64], pl.FP32],
             output: pl.Tensor[[64, 64], pl.FP32],
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            target = pl.load(target_input, [0, 0], [64, 64])
-            source = pl.load(source_input, [0, 0], [32, 64])
+            target = pl.load(target_input, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
+            source = pl.load(source_input, [0, 0], [32, 64], target_memory=pl.Mem.Vec)
             _assembled = pl.tile.assemble(target, source, [0, 0])
-            next_value = pl.load(input_b, [0, 0], [64, 64])
+            next_value = pl.load(input_b, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             return pl.store(next_value, [0, 0], output)
 
     ranges = _tile_ranges(_plan_with_dsa_rp(Before))
@@ -505,8 +505,8 @@ def test_dsa_rp_unknown_tuple_operation_poisons_all_results():
             kvalue: pl.Scalar[pl.INT32],
             output: pl.Tensor[[16, 8], pl.INT32],
         ) -> pl.Tensor[[16, 8], pl.INT32]:
-            source = pl.load(source_tensor, [0, 0], [16, 64])
-            temporary = pl.tile.create([16, 64], pl.UINT8)
+            source = pl.load(source_tensor, [0, 0], [16, 64], target_memory=pl.Mem.Vec)
+            temporary = pl.tile.create([16, 64], pl.UINT8, target_memory=pl.Mem.Vec)
             destination, _count = pl.tile.gather_compare(
                 source,
                 kvalue,
@@ -514,8 +514,8 @@ def test_dsa_rp_unknown_tuple_operation_poisons_all_results():
                 cmp_mode="eq",
                 out_cols=8,
             )
-            _next_count = pl.load(next_count_tensor, [0, 0], [1, 16])
-            next_destination = pl.load(next_destination_tensor, [0, 0], [16, 8])
+            _next_count = pl.load(next_count_tensor, [0, 0], [1, 16], target_memory=pl.Mem.Vec)
+            next_destination = pl.load(next_destination_tensor, [0, 0], [16, 8], target_memory=pl.Mem.Vec)
             return pl.store(next_destination, [0, 0], output)
 
     recognized = _recognized_pairs(Before)
@@ -536,9 +536,9 @@ def test_dsa_rp_unknown_mutating_operand_stays_unpenalized():
             value: pl.Scalar[pl.FP32],
             output: pl.Tensor[[64, 64], pl.FP32],
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            prior = pl.load(input_a, [0, 0], [64, 64])
+            prior = pl.load(input_a, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             _written = pl.tile.write(prior, [0, 0], value)
-            next_value = pl.load(input_b, [0, 0], [64, 64])
+            next_value = pl.load(input_b, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             return pl.store(next_value, [0, 0], output)
 
     ranges = _tile_ranges(_plan_with_dsa_rp(Before))
@@ -557,9 +557,9 @@ def test_dsa_rp_scalar_subrange_read_stays_unpenalized():
             input_b: pl.Tensor[[64, 64], pl.FP32],
             output: pl.Tensor[[64, 64], pl.FP32],
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            prior = pl.load(input_a, [0, 0], [64, 64])
+            prior = pl.load(input_a, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             _scalar = pl.tile.read(prior, [0, 0])
-            next_value = pl.load(input_b, [0, 0], [64, 64])
+            next_value = pl.load(input_b, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             return pl.store(next_value, [0, 0], output)
 
     ranges = _tile_ranges(_plan_with_dsa_rp(Before))
@@ -579,9 +579,9 @@ def test_dsa_rp_recognizes_nested_cross_pipe_handoff(ascend_backend):
             output: pl.Tensor[[64, 64], pl.FP32],
         ) -> pl.Tensor[[64, 64], pl.FP32]:
             for _i in pl.range(1):
-                prior = pl.load(input_a, [0, 0], [64, 64])
+                prior = pl.load(input_a, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
                 _consumed = pl.add(prior, prior)
-                _next_value = pl.load(input_b, [0, 0], [64, 64])
+                _next_value = pl.load(input_b, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             result = pl.tile.full([64, 64], dtype=pl.FP32, value=2.0)
             return pl.store(result, [0, 0], output)
 
@@ -626,10 +626,10 @@ def test_dsa_rp_rejects_mutually_exclusive_branch_handoff():
             output: pl.Tensor[[64, 64], pl.FP32],
         ) -> pl.Tensor[[64, 64], pl.FP32]:
             if condition < 1:
-                branch_prior = pl.load(input_a, [0, 0], [64, 64])
+                branch_prior = pl.load(input_a, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
                 _branch_consumed = pl.add(branch_prior, branch_prior)
             else:
-                _branch_next = pl.load(input_b, [0, 0], [64, 64])
+                _branch_next = pl.load(input_b, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             result = pl.tile.full([64, 64], dtype=pl.FP32, value=2.0)
             return pl.store(result, [0, 0], output)
 
@@ -649,9 +649,9 @@ def test_dsa_rp_keeps_logically_ordered_cross_pipe_handoff():
             scratch: pl.Tensor[[64, 64], pl.FP32],
             output: pl.Tensor[[64, 64], pl.FP32],
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            prior = pl.load(input_a, [0, 0], [64, 64])
+            prior = pl.load(input_a, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             updated = pl.store(prior, [0, 0], scratch)
-            next_value = pl.load(updated, [0, 0], [64, 64])
+            next_value = pl.load(updated, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             return pl.store(next_value, [0, 0], output)
 
     ranges = _tile_ranges(_plan_with_dsa_rp(Before))
@@ -668,7 +668,7 @@ def test_no_access_operation_has_no_exact_pipe(ascend_backend):
             self,
             output: pl.Tensor[[16, 16], pl.FP32],
         ) -> pl.Tensor[[16, 16], pl.FP32]:
-            created = pl.tile.create([16, 16], dtype=pl.FP32)
+            created = pl.tile.create([16, 16], dtype=pl.FP32, target_memory=pl.Mem.Vec)
             return pl.store(created, [0, 0], output)
 
     call = _find_call(Before, "tile.create")
@@ -829,10 +829,10 @@ def test_dsa_rp_reinterpret_view_is_metadata_only(consume_view):
             input_b: pl.Tensor[[64, 64], pl.FP32],
             output: pl.Tensor[[64, 64], pl.FP32],
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            prior = pl.load(input_a, [0, 0], [64, 64])
+            prior = pl.load(input_a, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             viewed: pl.Tile[[64, 64], pl.INT32] = pl.tile.reinterpret_view(prior, dtype=pl.INT32)
             _consumed = pl.add(viewed, viewed)
-            next_value = pl.load(input_b, [0, 0], [64, 64])
+            next_value = pl.load(input_b, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             return pl.store(next_value, [0, 0], output)
 
     @pl.program
@@ -844,9 +844,9 @@ def test_dsa_rp_reinterpret_view_is_metadata_only(consume_view):
             input_b: pl.Tensor[[64, 64], pl.FP32],
             output: pl.Tensor[[64, 64], pl.FP32],
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            prior = pl.load(input_a, [0, 0], [64, 64])
+            prior = pl.load(input_a, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             _viewed: pl.Tile[[64, 64], pl.INT32] = pl.tile.reinterpret_view(prior, dtype=pl.INT32)
-            next_value = pl.load(input_b, [0, 0], [64, 64])
+            next_value = pl.load(input_b, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             return pl.store(next_value, [0, 0], output)
 
     program = ConsumeView if consume_view else IgnoreView
@@ -869,12 +869,12 @@ def test_dsa_rp_unit_edges_and_placement_are_deterministic():
             input_d: pl.Tensor[[64, 64], pl.FP32],
             output: pl.Tensor[[64, 64], pl.FP32],
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            prior_a = pl.load(input_a, [0, 0], [64, 64])
+            prior_a = pl.load(input_a, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             _used_a = pl.add(prior_a, prior_a)
-            prior_b = pl.load(input_b, [0, 0], [64, 64])
+            prior_b = pl.load(input_b, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             _used_b = pl.add(prior_b, prior_b)
-            _later_a = pl.load(input_c, [0, 0], [64, 64])
-            later_b = pl.load(input_d, [0, 0], [64, 64])
+            _later_a = pl.load(input_c, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
+            later_b = pl.load(input_d, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             return pl.store(later_b, [0, 0], output)
 
     first = _plan_with_dsa_rp(Before)

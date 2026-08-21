@@ -150,8 +150,22 @@ def _make_expected(
                     load_shape = list(shape if override is None else override)
                     name_override = None if load_names is None else load_names[i]
                     stem = name if name_override is None else name_override
+                    # A shape override means this load replaced a `tensor.slice`,
+                    # so the converter built it from the consumer's declared
+                    # InputSpaceReq and named the space. A plain entry load has
+                    # no such requirement: the converter leaves it unset and
+                    # InferTileMemorySpace places it.
+                    load_space = None if override is None else MemorySpace.Vec
                     tile_vars.append(
-                        ib.let(f"{stem}_tile", tile_ops.load(p, _zeros(len(load_shape)), load_shape))
+                        ib.let(
+                            f"{stem}_tile",
+                            tile_ops.load(
+                                p,
+                                _zeros(len(load_shape)),
+                                load_shape,
+                                target_memory=load_space,
+                            ),
+                        )
                     )
             else:
                 tile_vars = list(in_params)
@@ -918,7 +932,7 @@ class TestConvertTensorToTileOps:
                 dst: pl.Out[pld.DistributedTensor[[16, 64], pl.FP16]],
                 peer: pl.Scalar[pl.INT32],
             ):
-                x_vec: pl.Tile[[16, 64], pl.FP16, pl.Mem.Vec] = pl.tile.load(x, [0, 0], [16, 64], [16, 64])
+                x_vec: pl.Tile[[16, 64], pl.FP16] = pl.tile.load(x, [0, 0], [16, 64], [16, 64])
                 scaled = pl.tile.add(x_vec, x_vec)
                 pld.tile.remote_store(scaled, dst, peer, [0, 0])
                 return  # noqa: PLR1711  (DSL return terminator, not a Python no-op)
@@ -962,7 +976,9 @@ class TestConvertTensorToTileOps:
                 dst: pl.Out[pld.DistributedTensor[[16, 64], pl.FP16]],
                 peer: pl.Scalar[pl.INT32],
             ):
-                x_vec: pl.Tile[[16, 64], pl.FP16, pl.Mem.Vec] = pl.tile.load(x, [0, 0], [16, 64], [16, 64])
+                x_vec: pl.Tile[[16, 64], pl.FP16, pl.Mem.Vec] = pl.tile.load(
+                    x, [0, 0], [16, 64], [16, 64], target_memory=pl.Mem.Vec
+                )
                 pld.tile.remote_store(x_vec, dst, peer, [0, 0])
                 return  # noqa: PLR1711  (DSL return terminator, not a Python no-op)
 
@@ -1074,7 +1090,7 @@ class TestConvertTensorToTileOps:
         in_specs: list[InSpec] = [("x", [64], DataType.FP32)]
 
         def expected_body(ib, tiles):
-            tmp = ib.let("rsqrt_tmp", tile_ops.create([64], DataType.FP32))
+            tmp = ib.let("rsqrt_tmp", tile_ops.create([64], DataType.FP32, target_memory=MemorySpace.Vec))
             return ib.let("y_tile", tile_ops.rsqrt(tiles[0], tmp))
 
         before = _make_before(
@@ -1147,7 +1163,7 @@ class TestConvertTensorToTileOps:
         in_specs: list[InSpec] = [("x", [64], DataType.INT32), *extra_in]
 
         def expected_body(ib, tiles):
-            tmp = ib.let("xor_tmp", tile_ops.create([64], DataType.INT32))
+            tmp = ib.let("xor_tmp", tile_ops.create([64], DataType.INT32, target_memory=MemorySpace.Vec))
             return ib.let("z_tile", tile_call(tiles, tmp))
 
         before = _make_before(
@@ -1452,7 +1468,7 @@ class TestConvertTensorToTileOps:
         """tensor.row_min lowers to an ND tile.row_min with a safe padded scratch tile."""
 
         def expected_body(ib, tiles):
-            tmp = ib.let("tmp_tile", tile_ops.create([32, 128], DataType.FP32))
+            tmp = ib.let("tmp_tile", tile_ops.create([32, 128], DataType.FP32, target_memory=MemorySpace.Vec))
             return ib.let("y_tile", tile_ops.row_min(tiles[0], tmp))
 
         before = _make_before(
@@ -1488,7 +1504,7 @@ class TestConvertTensorToTileOps:
         out_shape = [32, 1] if op_name.startswith("row") else [1, 64]
 
         def expected_body(ib, tiles):
-            tmp = ib.let("tmp_tile", tile_ops.create([32, 64], DataType.FP32))
+            tmp = ib.let("tmp_tile", tile_ops.create([32, 64], DataType.FP32, target_memory=MemorySpace.Vec))
             return ib.let("y_tile", tile_op(tiles[0], tmp))
 
         before = _make_before(
@@ -1516,6 +1532,41 @@ class TestConvertTensorToTileOps:
             tile_op=lambda ts, op=tile_op: op(ts[0], ts[1]),
         )
         _assert_convert_equal(before, expected)
+
+    def test_column_vector_load_layout_does_not_depend_on_target_memory(self):
+        """An [N, 1] tile.load deduces the column-vector layout with or without target_memory.
+
+        The column-vector rule in DeduceTileLoadType used to sit inside the
+        ``target_memory.has_value()`` branch, so a load with the kwarg omitted kept an
+        explicit ``row_major`` claim that contradicts InferImplicitTileLayoutFromShape.
+        Because the two disagreed the view could not canonicalize to ``None``, and the
+        row-major branch of tile.row_expand_add then rejected the operand outright
+        ("requires row-major src1 valid last dimension to be 16").
+
+        This is a dedicated regression: the parametrized ``test_row_expand_family`` above
+        now compares against an ``_make_expected`` helper that spells ``target_memory=Vec``
+        (the converter's Phase-1 preload still stamps it), so it no longer exercises the
+        unset path at all.
+        """
+        span = ir.Span(__file__, 1, 1)
+        rv = ir.Var("rv", ir.TensorType([32, 1], DataType.FP16), span)
+        x = ir.Var("x", ir.TensorType([32, 64], DataType.FP16), span)
+
+        unset = tile_ops.load(rv, [0, 0], [32, 1])
+        vec = tile_ops.load(rv, [0, 0], [32, 1], target_memory=MemorySpace.Vec)
+
+        # Both canonicalize away: the deduced view matches the shape-implied col_major.
+        assert isinstance(unset.type, ir.TileType)
+        assert isinstance(vec.type, ir.TileType)
+        assert unset.type.tile_view is None
+        assert vec.type.tile_view is None
+        assert unset.type.memory_space is None
+        assert vec.type.memory_space == MemorySpace.Vec
+
+        # ... and the unset column vector is accepted as the row_expand_add row operand.
+        row_expanded = tile_ops.row_expand_add(tile_ops.load(x, [0, 0], [32, 64]), unset)
+        assert isinstance(row_expanded.type, ir.TileType)
+        assert row_expanded.type.shape == [32, 64]
 
     @pytest.mark.parametrize(("op_name", "tensor_op", "tile_op"), _COL_EXPAND_OPS)
     def test_col_expand_family(self, op_name, tensor_op, tile_op):
@@ -1614,12 +1665,8 @@ class TestConvertTensorToTileOps:
                 ret0_out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 # add operands load naturally to Vec; the add stays in Vec.
-                b0_vec: pl.Tile[[128, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    b0, [0, 0], [128, 64], [128, 64], target_memory=pl.MemorySpace.Vec
-                )
-                b1_vec: pl.Tile[[128, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    b1, [0, 0], [128, 64], [128, 64], target_memory=pl.MemorySpace.Vec
-                )
+                b0_vec: pl.Tile[[128, 64], pl.FP32] = pl.load(b0, [0, 0], [128, 64], [128, 64])
+                b1_vec: pl.Tile[[128, 64], pl.FP32] = pl.load(b1, [0, 0], [128, 64], [128, 64])
                 bt_vec: pl.Tile[[128, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tile.add(b0_vec, b1_vec)
                 # a loads natural to Mat; the Vec add result is moved to Mat in its
                 # natural shape, then reinterpreted as its transpose via a zero-copy view.
@@ -2141,7 +2188,7 @@ class TestConvertTensorToTileOps:
                 b: pl.Tensor[[1, 32], pl.FP32],
                 ret0__out: pl.Out[pl.Tensor[[1, 64], pl.BF16]],
             ) -> pl.Tensor[[1, 64], pl.BF16]:
-                t__tile = pl.tile.create([1, 64], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+                t__tile = pl.tile.create([1, 64], dtype=pl.FP32)
                 assemble_src = pl.load(a, [0, 0], [1, 32], [1, 32], target_memory=pl.Mem.Vec)
                 t_1__tile = pl.tile.assemble(t__tile, assemble_src, [0, 0])
                 assemble_src_1 = pl.load(b, [0, 0], [1, 32], [1, 32], target_memory=pl.Mem.Vec)
@@ -2328,7 +2375,7 @@ class TestConvertTensorToTileOps:
                 src: pl.Tensor[[1, 4, 8], pl.FP16],
                 target: pl.Out[pl.Tensor[[2, 4, 8], pl.FP16]],
             ) -> pl.Tensor[[2, 4, 8], pl.FP16]:
-                expand_clone_input = pl.load(src, [0, 0, 0], [1, 4, 8])
+                expand_clone_input = pl.load(src, [0, 0, 0], [1, 4, 8], target_memory=pl.Mem.Vec)
                 for i, (expand_clone_acc,) in pl.range(2, init_values=(target,)):
                     expand_clone_d0_store = pl.store(expand_clone_input, [i, 0, 0], expand_clone_acc)
                     expand_clone_d0_result = pl.yield_(expand_clone_d0_store)
@@ -2379,8 +2426,12 @@ class TestConvertTensorToTileOps:
                 target: pl.Out[pl.Tensor[[2, 4, 8], pl.FP16]],
             ) -> pl.Tensor[[2, 4, 8], pl.FP16]:
                 for i, (expand_clone_acc,) in pl.range(2, init_values=(target,)):
-                    expand_clone_d1_input = pl.load(src, [i, 0, 0], [1, 1, 8])
-                    expand_clone_d1_target = pl.tile.create([1, 4, 8], dtype=pl.FP16)
+                    expand_clone_d1_input = pl.load(src, [i, 0, 0], [1, 1, 8], target_memory=pl.Mem.Vec)
+                    expand_clone_d1_target = pl.tile.create(
+                        [1, 4, 8],
+                        dtype=pl.FP16,
+                        target_memory=pl.Mem.Vec,
+                    )
                     expand_clone_d1_col = pl.tile.col_expand(expand_clone_d1_target, expand_clone_d1_input)
                     expand_clone_d1_store = pl.store(expand_clone_d1_col, [i, 0, 0], expand_clone_acc)
                     expand_clone_d1_result = pl.yield_(expand_clone_d1_store)
@@ -2430,8 +2481,8 @@ class TestConvertTensorToTileOps:
                 src: pl.Tensor[[2, 4, 1], pl.FP16],
                 target: pl.Out[pl.Tensor[[2, 4, 8], pl.FP16]],
             ) -> pl.Tensor[[2, 4, 8], pl.FP16]:
-                expand_clone_input = pl.load(src, [0, 0, 0], [2, 4, 1])
-                expand_clone_d2_target = pl.tile.create([2, 4, 8], dtype=pl.FP16)
+                expand_clone_input = pl.load(src, [0, 0, 0], [2, 4, 1], target_memory=pl.Mem.Vec)
+                expand_clone_d2_target = pl.tile.create([2, 4, 8], dtype=pl.FP16, target_memory=pl.Mem.Vec)
                 expand_clone_d2_row = pl.tile.row_expand(expand_clone_d2_target, expand_clone_input)
                 y_tile = pl.store(expand_clone_d2_row, [0, 0, 0], target)
                 return y_tile
@@ -3741,7 +3792,7 @@ class TestTensorFullConversion:
                 x: pl.Tensor[[64], pl.FP32],
                 ret0__out: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                x__tile = pl.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
+                x__tile = pl.load(x, [0], [64], [64])
                 t__tile = pl.tile.full([64], dtype=pl.FP32, value=0.0)
                 y__tile = pl.tile.add(t__tile, x__tile)
                 ret0__store = pl.store(y__tile, [0], ret0__out)
@@ -3783,7 +3834,7 @@ class TestTensorCiConversion:
                 x: pl.Tensor[[1, 32], pl.INT32],
                 ret0__out: pl.Out[pl.Tensor[[1, 32], pl.INT32]],
             ) -> pl.Tensor[[1, 32], pl.INT32]:
-                x__tile = pl.load(x, [0, 0], [1, 32], [1, 32], target_memory=pl.Mem.Vec)
+                x__tile = pl.load(x, [0, 0], [1, 32], [1, 32])
                 idx__tile = pl.tile.ci(pl.const(0, pl.INT32), [1, 32], dtype=pl.INT32, descending=True)
                 y__tile = pl.tile.add(idx__tile, x__tile)
                 ret0__store = pl.store(y__tile, [0, 0], ret0__out)
@@ -3828,7 +3879,7 @@ class TestTensorRandomConversion:
                 x: pl.Tensor[[4, 256], pl.INT32],
                 ret0__out: pl.Out[pl.Tensor[[4, 256], pl.INT32]],
             ) -> pl.Tensor[[4, 256], pl.INT32]:
-                x__tile = pl.load(x, [0, 0], [4, 256], [4, 256], target_memory=pl.Mem.Vec)
+                x__tile = pl.load(x, [0, 0], [4, 256], [4, 256])
                 r__tile = pl.tile.random(1, 2, 3, 4, 5, 6, [4, 256], dtype=pl.INT32, rounds=7)
                 y__tile = pl.tile.add(r__tile, x__tile)
                 ret0__store = pl.store(y__tile, [0, 0], ret0__out)
@@ -3980,11 +4031,11 @@ class TestConvertSortOps:
                 s3: pl.Tensor[[1, 128], pl.FP32],
                 out_0: pl.Out[pl.Tensor[[1, 512], pl.FP32]],
             ) -> pl.Tensor[[1, 512], pl.FP32]:
-                s0_tile = pl.load(s0, [0, 0], [1, 128])
-                s1_tile = pl.load(s1, [0, 0], [1, 128])
-                s2_tile = pl.load(s2, [0, 0], [1, 128])
-                s3_tile = pl.load(s3, [0, 0], [1, 128])
-                mrgsort2_tmp = pl.tile.create([1, 512], dtype=pl.FP32)
+                s0_tile = pl.load(s0, [0, 0], [1, 128], target_memory=pl.Mem.Vec)
+                s1_tile = pl.load(s1, [0, 0], [1, 128], target_memory=pl.Mem.Vec)
+                s2_tile = pl.load(s2, [0, 0], [1, 128], target_memory=pl.Mem.Vec)
+                s3_tile = pl.load(s3, [0, 0], [1, 128], target_memory=pl.Mem.Vec)
+                mrgsort2_tmp = pl.tile.create([1, 512], dtype=pl.FP32, target_memory=pl.Mem.Vec)
                 out_tile = pl.tile.mrgsort(s0_tile, s1_tile, s2_tile, s3_tile, mrgsort2_tmp)
                 out_store = pl.store(out_tile, [0, 0], out_0)
                 return out_store
@@ -4272,7 +4323,7 @@ class TestConvertGatherOp:
                 idx: pl.Tensor[[4, 3], pl.INT32],
                 ret0__out: pl.Out[pl.Tensor[[4, 3], pl.FP32]],
             ) -> pl.Tensor[[4, 3], pl.FP32]:
-                tmp__tile = pl.tile.create([4, 16], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+                tmp__tile = pl.tile.create([4, 16], dtype=pl.FP32)
                 assemble_src = pl.tile.load(src, [0, 0], [4, 16], [4, 16], target_memory=pl.Mem.Vec)
                 tmp_1__tile = pl.tile.assemble(tmp__tile, assemble_src, [0, 0])
                 gather_inp = pl.tile.slice(tmp_1__tile, [4, 16], [0, 0], [4, 16])
@@ -4348,7 +4399,7 @@ class TestConvertGatherOp:
                 idx: pl.Tensor[[4, 8], pl.INT32],
                 ret0__out: pl.Out[pl.Tensor[[4, 8], pl.FP32]],
             ) -> pl.Tensor[[4, 8], pl.FP32]:
-                full__tile = pl.tile.create([4, 16], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+                full__tile = pl.tile.create([4, 16], dtype=pl.FP32)
                 assemble_src = pl.tile.load(src, [0, 0], [4, 16], [4, 16], target_memory=pl.Mem.Vec)
                 full_1__tile = pl.tile.assemble(full__tile, assemble_src, [0, 0])
                 rope__tile = pl.tile.slice(full_1__tile, [4, 8], [0, 8])
@@ -4731,7 +4782,7 @@ class TestSubmitCallSiteUpdate:
                 x: pl.Tensor[[64], pl.FP32],
                 ret0__out: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                x__tile = pl.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
+                x__tile = pl.load(x, [0], [64], [64])
                 y__tile = pl.tile.add(x__tile, x__tile)
                 ret0__store = pl.store(y__tile, [0], ret0__out)
                 return ret0__store
@@ -4773,7 +4824,7 @@ class TestSpmdBlockIdentityConversion:
                 x: pl.Tensor[[64], pl.FP32],
                 ret0__out: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                x__tile = pl.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
+                x__tile = pl.load(x, [0], [64], [64])
                 idx = pl.tile.get_block_idx()
                 y__tile = pl.tile.adds(x__tile, pl.cast(idx, pl.INT32))
                 ret0__store = pl.store(y__tile, [0], ret0__out)
@@ -4811,7 +4862,7 @@ class TestSpmdBlockIdentityConversion:
                 x: pl.Tensor[[64], pl.FP32],
                 ret0__out: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                x__tile = pl.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
+                x__tile = pl.load(x, [0], [64], [64])
                 idx = pl.tile.get_subblock_idx()
                 y__tile = pl.tile.adds(x__tile, pl.cast(idx, pl.INT32))
                 ret0__store = pl.store(y__tile, [0], ret0__out)
@@ -4849,7 +4900,7 @@ class TestSpmdBlockIdentityConversion:
                 x: pl.Tensor[[64], pl.FP32],
                 ret0__out: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                x__tile = pl.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
+                x__tile = pl.load(x, [0], [64], [64])
                 n = pl.tile.get_block_num()
                 y__tile = pl.tile.adds(x__tile, pl.cast(n, pl.INT32))
                 ret0__store = pl.store(y__tile, [0], ret0__out)
@@ -4892,7 +4943,7 @@ class TestSpmdBlockIdentityConversion:
                 x: pl.Tensor[[64], pl.FP32],
                 ret0__out: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                x__tile = pl.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
+                x__tile = pl.load(x, [0], [64], [64])
                 i = pl.tile.get_block_idx()
                 s = pl.tile.get_subblock_idx()
                 n = pl.tile.get_block_num()
@@ -5588,9 +5639,7 @@ class TestConvertCrossCoreSplitOps:
                 ret0__out: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
             ) -> pl.Tensor[[256, 128], pl.FP32]:
                 pl.func_attr({"split_aiv": True, "split": pl.SplitMode.UP_DOWN})
-                x__tile: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.tile.load(
-                    x, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Vec
-                )
+                x__tile: pl.Tile[[128, 128], pl.FP32] = pl.tile.load(x, [0, 0], [128, 128], [128, 128])
                 for _ in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
                     h__tile: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.tile.exp(x__tile)
                     res__tile: pl.Tile[[256, 128], pl.FP32, pl.Mem.Mat] = pl.tile.aic_gather(h__tile)
@@ -5624,9 +5673,7 @@ class TestConvertCrossCoreSplitOps:
                 ret0__out: pl.Out[pl.Tensor[[128, 256], pl.FP32]],
             ) -> pl.Tensor[[128, 256], pl.FP32]:
                 pl.func_attr({"split_aiv": True, "split": pl.SplitMode.LEFT_RIGHT})
-                x__tile: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.tile.load(
-                    x, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Vec
-                )
+                x__tile: pl.Tile[[128, 128], pl.FP32] = pl.tile.load(x, [0, 0], [128, 128], [128, 128])
                 for _ in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
                     h__tile: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.tile.exp(x__tile)
                     res__tile: pl.Tile[[128, 256], pl.FP32, pl.Mem.Mat] = pl.tile.aic_gather(h__tile)

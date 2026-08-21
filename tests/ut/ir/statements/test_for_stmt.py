@@ -779,7 +779,14 @@ class TestForStmtIterArgMutatorRemap:
                     [4], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )
                 for i, (a,) in pl.range(2, init_values=(acc,)):
-                    t: pl.Tile[[4], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.load(x, [0], [4])
+                    # Spelled out so `Before` is already fully placed: this test is about
+                    # IterArg pointer remapping, not about memory-space inference.
+                    t: pl.Tile[[4], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.load(
+                        x,
+                        [0],
+                        [4],
+                        target_memory=pl.Mem.Vec,
+                    )
                     s: pl.Tile[[4], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.add(a, t)
                     r: pl.Tile[[4], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.yield_(s)
                 out: pl.Tensor[[4], pl.FP32] = pl.store(r, [0], out)
@@ -799,7 +806,12 @@ class TestForStmtIterArgMutatorRemap:
                     [4], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )
                 for i, (a,) in pl.range(2, init_values=(acc,)):
-                    t: pl.Tile[[4], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.load(x, [0], [4])
+                    t: pl.Tile[[4], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.load(
+                        x,
+                        [0],
+                        [4],
+                        target_memory=pl.Mem.Vec,
+                    )
                     s: pl.Tile[[4], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.add(a, t)
                     r: pl.Tile[[4], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.yield_(s)
                 out: pl.Tensor[[4], pl.FP32] = pl.store(r, [0], out)

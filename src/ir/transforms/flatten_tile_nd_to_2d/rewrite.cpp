@@ -78,11 +78,36 @@ bool HasKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, const
 /// The MemRef is read from the *assigned Var*, not from the RHS Call: ConvertToSSA
 /// merges it into the Var's type only, and op type deduction leaves the Call's
 /// type MemRef-less. Sourcing it from `call->GetType()` silently matches nothing.
+///
+/// The memory space is carried across for the same reason and from the same
+/// place. Re-deducing a `tile.load` / `tile.create` from args + kwargs yields an
+/// unset space whenever the producer left `target_memory` off (the normal case
+/// now that unset means "the compiler will place it"), while the annotated Var
+/// still holds whatever the author wrote. Dropping it loses a stated fact; worse,
+/// pairing a MemRef with an unset space trips the TileType invariant that the two
+/// must agree (`src/ir/type.cpp` ValidateTileMemorySpaceConsistency), so the pass
+/// throws on perfectly valid DSL. The DSL already refuses a MemRef annotation
+/// without an explicit space, so whenever `memref` is present the Var's space is
+/// too.
 TypePtr WithCarriedMemRef(const TypePtr& deduced, const AssignStmtPtr& assign) {
   if (!assign || !assign->var_) return deduced;
   auto memref = GetTypeMemRef(assign->var_->GetType());
-  if (!memref.has_value() || GetTypeMemRef(deduced).has_value()) return deduced;
-  return CloneTypeWithMemRef(deduced, memref);
+
+  std::optional<MemorySpace> carried_space;
+  if (auto var_tile = As<TileType>(assign->var_->GetType())) {
+    if (auto deduced_tile = As<TileType>(deduced); deduced_tile && !deduced_tile->memory_space_.has_value()) {
+      carried_space = var_tile->memory_space_;
+    }
+  }
+
+  if (!memref.has_value() || GetTypeMemRef(deduced).has_value()) {
+    // No MemRef to merge, but a stated space may still need carrying.
+    if (!carried_space.has_value()) return deduced;
+    auto deduced_tile = As<TileType>(deduced);
+    return std::make_shared<TileType>(deduced_tile->shape_, deduced_tile->dtype_, deduced_tile->memref_,
+                                      deduced_tile->tile_view_, carried_space);
+  }
+  return CloneTypeWithMemRef(deduced, memref, carried_space);
 }
 
 /**

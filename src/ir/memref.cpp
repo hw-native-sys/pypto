@@ -28,6 +28,48 @@
 namespace pypto {
 namespace ir {
 
+bool IsTileMoveEverSupported(MemorySpace src, MemorySpace dst) {
+  // Mirrors PTOAS's `TMovOp::verify` address-space table, unioned over targets.
+  // PTOAS is authoritative; this copy exists so IR-level code can reject an
+  // unimplementable move against the user's own span, and because type
+  // deduction runs while parsing, before a backend is selected.
+  //
+  // Deliberately NOT derived from `SoC::GetMemoryGraph()`. That graph models the
+  // memory hierarchy for `Backend::FindMemPath` (which has no production
+  // callers) and is not a tmov-legality table: it omits `Acc -> Vec` on
+  // Ascend910B, a move this pipeline emits and PTOAS accepts. The two agree on
+  // the row that matters here -- nothing moves into `Acc` -- and
+  // tests/ut/ir/test_memory_space.py pins that agreement.
+  switch (src) {
+    case MemorySpace::Mat:
+      // MTE1 feeds the cube operand and scale buffers. Mat -> Mat is absent:
+      // there is no L1 -> L1 tmov.
+      return dst == MemorySpace::Left || dst == MemorySpace::Right || dst == MemorySpace::Bias ||
+             dst == MemorySpace::LeftScale || dst == MemorySpace::RightScale;
+    case MemorySpace::Vec:
+      // Vec -> Mat is A5-only; included because this is the union over targets.
+      return dst == MemorySpace::Vec || dst == MemorySpace::Mat;
+    case MemorySpace::Acc:
+      // FIXPIPE drains L0C outward only.
+      return dst == MemorySpace::Mat || dst == MemorySpace::Vec;
+    default:
+      return false;
+  }
+  // Note the absent row: nothing has `dst == MemorySpace::Acc`.
+}
+
+bool IsTileMoveEverPossibleInto(MemorySpace dst) {
+  // Every space that can hold a tile is a candidate source; if none of them
+  // reaches `dst`, no pass can ever bridge into it with a `tile.move` and the
+  // value has to be created there instead.
+  for (MemorySpace src :
+       {MemorySpace::Vec, MemorySpace::Mat, MemorySpace::Acc, MemorySpace::Left, MemorySpace::Right,
+        MemorySpace::Bias, MemorySpace::LeftScale, MemorySpace::RightScale}) {
+    if (IsTileMoveEverSupported(src, dst)) return true;
+  }
+  return false;
+}
+
 std::string MemorySpaceToString(MemorySpace space) {
   switch (space) {
     case MemorySpace::DDR:

@@ -299,7 +299,7 @@ def _make_cube_bias_expected(cube_op: str):
                 bias: pl.Tensor[[1, 128], pl.FP32],
                 out_0: pl.Out[pl.Tensor[[1, 128], pl.FP32]],
             ) -> pl.Tensor[[1, 128], pl.FP32]:
-                bias_tile = pl.load(bias, [0, 0], [1, 128])
+                bias_tile = pl.load(bias, [0, 0], [1, 128], target_memory=pl.Mem.Vec)
                 bias_tile_nz = pl.move(
                     bias_tile,
                     target_memory=pl.MemorySpace.Vec,
@@ -356,7 +356,7 @@ def _make_cube_bias_expected(cube_op: str):
                 bias: pl.Tensor[[1, 128], pl.FP32],
                 out_0: pl.Out[pl.Tensor[[1, 128], pl.FP32]],
             ) -> pl.Tensor[[1, 128], pl.FP32]:
-                bias_tile = pl.load(bias, [0, 0], [1, 128])
+                bias_tile = pl.load(bias, [0, 0], [1, 128], target_memory=pl.Mem.Vec)
                 bias_tile_nz = pl.move(
                     bias_tile,
                     target_memory=pl.MemorySpace.Vec,
@@ -831,7 +831,7 @@ def _make_v2c_boundary_program(vec_op: str):
                 y: pl.Tensor[[128, 64], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
             ) -> pl.Tensor[[16, 64], pl.FP32]:
-                x_tile = pl.load(x, [0, 0], [16, 128])
+                x_tile = pl.load(x, [0, 0], [16, 128], target_memory=pl.Mem.Vec)
                 x_sum = pl.add(x_tile, x_tile)
                 x_sum_nz = pl.move(
                     x_sum,
@@ -919,7 +919,7 @@ def _make_v2c_boundary_program(vec_op: str):
                 y: pl.Tensor[[128, 64], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
             ) -> pl.Tensor[[16, 64], pl.FP32]:
-                x_tile = pl.load(x, [0, 0], [16, 128])
+                x_tile = pl.load(x, [0, 0], [16, 128], target_memory=pl.Mem.Vec)
                 x_sub = pl.sub(x_tile, x_tile)
                 x_sub_nz = pl.move(
                     x_sub,
@@ -987,7 +987,7 @@ class TestPassthrough:
                 x: pl.Tensor[[64], pl.FP32],
                 out_0: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                x_tile = pl.load(x, [0], [64])
+                x_tile = pl.load(x, [0], [64], target_memory=pl.Mem.Vec)
                 y_tile = pl.add(x_tile, x_tile)
                 out_0_store = pl.store(y_tile, [0], out_0)
                 return out_0_store
@@ -1076,7 +1076,7 @@ class TestPassthrough:
                 out_0: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
                 for i in pl.range(4):
-                    x_tile = pl.load(x, [0], [64])
+                    x_tile = pl.load(x, [0], [64], target_memory=pl.Mem.Vec)
                     y_tile = pl.add(x_tile, x_tile)
                     out_0 = pl.store(y_tile, [0], out_0)
                 return out_0
@@ -1349,7 +1349,7 @@ class TestCrossCoreBoundaries:
                 y: pl.Tensor[[128, 64], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
             ) -> pl.Tensor[[16, 64], pl.FP32]:
-                x_tile = pl.load(x, [0, 0], [16, 128])
+                x_tile = pl.load(x, [0, 0], [16, 128], target_memory=pl.Mem.Vec)
                 x_tile_nz = pl.move(
                     x_tile,
                     target_memory=pl.MemorySpace.Vec,
@@ -1440,7 +1440,7 @@ class TestCrossCoreBoundaries:
                 y: pl.Tensor[[128, 64], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
             ) -> pl.Tensor[[16, 64], pl.FP32]:
-                y_tile = pl.load(y, [0, 0], [128, 64])
+                y_tile = pl.load(y, [0, 0], [128, 64], target_memory=pl.Mem.Vec)
                 y_tile_nz = pl.move(
                     y_tile,
                     target_memory=pl.MemorySpace.Vec,
@@ -1832,7 +1832,7 @@ class TestMultipleInCore:
                 x: pl.Tensor[[64], pl.FP32],
                 out_0: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                x_tile = pl.load(x, [0], [64])
+                x_tile = pl.load(x, [0], [64], target_memory=pl.Mem.Vec)
                 y_tile = pl.add(x_tile, x_tile)
                 out_0_store = pl.store(y_tile, [0], out_0)
                 return out_0_store
@@ -2219,7 +2219,7 @@ class TestAutoPipeSetup:
                 )
                 c2v = pl.reserve_buffer(name="main_incore_0_c2v_slot_buffer", size=16384)
                 pl.aiv_initialize_pipe(c2v, v2c, dir_mask=3, slot_size=8192, slot_num=2)
-                x_tile = pl.load(x, [0, 0], [16, 128])
+                x_tile = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec)
                 x_sum = pl.add(x_tile, x_tile)
                 x_sum_nz: pl.Tile[
                     [16, 128],
@@ -2738,7 +2738,7 @@ class TestNestedStructures:
                 out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
             ) -> pl.Tensor[[16, 64], pl.FP32]:
                 for i in pl.range(4):
-                    x_tile = pl.load(x, [0, 0], [16, 128])
+                    x_tile = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec)
                     x_sum = pl.add(x_tile, x_tile)
                     x_sum_nz = pl.move(
                         x_sum,
@@ -2992,7 +2992,7 @@ class TestDCERegression:
                 y: pl.Tensor[[128, 128], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_tile = pl.load(x, [0, 0], [16, 128])
+                x_tile = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec)
                 x_fp32 = pl.tile.cast(x_tile, target_type=pl.FP32, mode="round")
                 out_0_store = pl.store(x_fp32, [0, 0], out_0)
                 return out_0_store
@@ -3160,7 +3160,7 @@ class TestDCERegression:
                 acc_0 = pl.tile.create([16, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
                 acc_1 = pl.tile.muls(acc_0, 0.0)
                 for i, (acc_iter,) in pl.range(4, init_values=(acc_1,)):
-                    x_tile = pl.load(x, [0, 0], [16, 128])
+                    x_tile = pl.load(x, [0, 0], [16, 128], target_memory=pl.Mem.Vec)
                     x_sum = pl.add(x_tile, x_tile)
                     x_sum_nz = pl.move(
                         x_sum,
@@ -3252,7 +3252,7 @@ class TestDCERegression:
                 _z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
                     split=0
                 )
-                x_tile = pl.load(x, [0, 0], [16, 128])
+                x_tile = pl.load(x, [0, 0], [16, 128], target_memory=pl.Mem.Vec)
                 x_fp32 = pl.tile.cast(x_tile, target_type=pl.FP32, mode="round")
                 out_0_store = pl.store(x_fp32, [0, 0], out_0)
                 return out_0_store
@@ -3983,23 +3983,32 @@ class TestDCERegression:
 
         _assert_function_equal(After, ExpectedAIC, "main_incore_0_aic")
 
-    def test_nested_loop_vector_init_value_pulled_into_aic(self):
-        """Regression for issue #977: VECTOR init-value defined inside an outer
-        loop must be pulled back into the AIC body for a surviving iter_arg.
+    def test_nested_loop_acc_init_value_reaches_aic_body(self):
+        """Regression for issue #977: an init-value defined inside an outer loop must
+        reach the split AIC body ahead of the inner loop that carries it.
 
-        This is the actual Qwen3Scope1 failure pattern: tile.full creates a
-        Vec-typed zero accumulator inside an outer loop, then an inner loop
-        uses it as init_values for matmul_acc.  BuildCoreBody drops the VECTOR
-        tile.full from AIC, and FixupIterArgInitValues must pull its definition
-        chain from original_def_map -- which requires BuildDefMap to recurse
-        into nested loop bodies.
+        This is the Qwen3Scope1 shape: an outer loop allocates an accumulator,
+        an inner loop takes it through ``init_values`` and accumulates with
+        ``matmul_acc``. If the allocation does not land in the AIC body before the
+        inner loop, the split function references an undefined init value.
 
-        FixupIterArgInitValues rewrites the ``tile.full`` call's deduced type
-        from Vec to Acc so the init value matches the Acc-typed iter_arg. While
-        ``pl.tile.full`` has no ``target_memory`` parameter, the rewritten
-        Acc-typed result is reproducible in the DSL via an explicit
-        ``pl.Tile[..., pl.MemorySpace.Acc]`` annotation, so the full split
-        program is verified structurally.
+        The accumulator was originally a ``pl.tile.full``, i.e. VECTOR-classified:
+        BuildCoreBody dropped it from AIC and ``FixupIterArgInitValues`` pulled its
+        definition chain back out of ``original_def_map`` -- the reason BuildDefMap
+        recurses into nested loop bodies. That shape is no longer constructible:
+        ``tile.full`` has a fixed Vec output space, and no target has a data path
+        into Acc, so a Vec tile can never be a ``matmul_acc`` accumulator. The
+        accumulator is therefore allocated unset and placed in Acc by
+        InferTileMemorySpace. ``tile.create`` is SHARED, so the cube filter now keeps
+        the definition in place instead of dropping it; the nested-loop init-value
+        structure is still verified end to end, but the pull path itself is no longer
+        reachable from the DSL.
+
+        Note this fixture is structural only. ``tile.create`` allocates without
+        initializing, so the accumulator is not zeroed the way the old ``tile.full``
+        one was; a kernel that needs a defined starting value passes
+        ``init_cond=(kb == 0)`` to overwrite on the first step. Nothing here executes
+        the arithmetic -- the assertion compares IR structure.
         """
 
         @pl.program
@@ -4012,7 +4021,7 @@ class TestDCERegression:
                 out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
             ) -> pl.Tensor[[16, 64], pl.FP32]:
                 for ob in pl.range(2):
-                    acc_init = pl.tile.full([16, 64], dtype=pl.FP32, value=0.0)
+                    acc_init = pl.tile.create([16, 64], dtype=pl.FP32)
                     for kb, (acc_iter,) in pl.range(2, init_values=(acc_init,)):
                         x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
                         x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
@@ -4041,8 +4050,8 @@ class TestDCERegression:
                 out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
             ):
                 for ob in pl.range(2):
-                    acc_init: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Acc] = pl.tile.full(
-                        [16, 64], dtype=pl.FP32, value=0.0
+                    acc_init: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Acc] = pl.tile.create(
+                        [16, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Acc
                     )
                     for kb, (acc_iter,) in pl.range(2, init_values=(acc_init,)):
                         x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
@@ -4235,7 +4244,7 @@ class TestManualPipeVtoCFractalAdapt:
             ):
                 v2c_peer = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="manual_aic")
                 pl.aiv_initialize_pipe(pl.const(0, pl.INT32), v2c_peer, dir_mask=2, slot_size=1024, id=1)
-                a_tile = pl.load(a, [0, 0], [16, 16])
+                a_tile = pl.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
                 doubled = pl.add(a_tile, a_tile)
                 doubled_nz = pl.move(
                     doubled,
@@ -4333,7 +4342,7 @@ class TestManualPipeVtoCFractalAdapt:
             ):
                 v2c_peer = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="manual_aic")
                 pl.aiv_initialize_pipe(pl.const(0, pl.INT32), v2c_peer, dir_mask=2, slot_size=1024, id=1)
-                a_tile = pl.load(a, [0, 0], [16, 16])
+                a_tile = pl.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
                 doubled = pl.add(a_tile, a_tile)
                 doubled_nz = pl.move(
                     doubled,
