@@ -54,7 +54,7 @@ DSL 需要知道一个循环究竟是编译期展开、设备侧循环，还是�
 | 限制 | 细节 |
 | ---- | ---- |
 | **PTOAS 下两个 slot 同时存活** | codegen 拒绝：ptoas 只保护一次迭代里的第一个 `multi_tile_get`。该写的形状是一次迭代一个 slot 存活 |
-| **硬 `syncall` 需要满占用** | 部分发射会在设备上死锁（507018）；PyPTO 在编译期就拒绝。部分占用下用 `mode="soft"` |
+| **硬 `syncall` 需要满占用** | 部分发射会在设备上死锁（507018）；PyPTO 在编译期就拒绝。部分占用下用 `mode=pl.SyncAllMode.SOFT` |
 | **ring allreduce 不是加一个参数的事** | 它需要显式的 `[2*(NR-1)+1, NR]` INT32 signal、静态可知的 `src` 形状，以及 `numel(src)` 被 `NR` 整除。见[集合通信](../distributed/01-collectives.md) |
 | **`memory_planner=PTOAS` 与内存图** | 分配 pass 被跳过，pass dump 里没有偏移供工具绘制 |
 | **文档代码块是 backend 相关的** | 手册里的可运行块在 `a2a3sim` 上执行；A5 独有的行为以论证给出而非执行 |

@@ -490,8 +490,8 @@ def test_explicit_sync_core_type_routes_each_event_to_one_lane():
             x: pl.Tensor[[16], pl.FP32],
         ) -> pl.Tensor[[16], pl.FP32]:
             pl.system.set_ffts(workspace)
-            pl.system.sync_set(4, pipe=pl.PipeType.MTE3, ffts_mode=2, core_type="aiv")
-            pl.system.sync_wait(4, pipe=pl.PipeType.MTE2, core_type="aic")
+            pl.system.sync_set(4, pipe=pl.PipeType.MTE3, ffts_mode=2, core_type=pl.KernelType.AIV)
+            pl.system.sync_wait(4, pipe=pl.PipeType.MTE2, core_type=pl.KernelType.AIC)
             return x
 
     after = _run_pipeline(Before)

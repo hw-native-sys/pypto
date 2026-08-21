@@ -166,7 +166,7 @@ every placement decision for vector work, so vector compute has to live inside a
 with pl.at(level=pl.Level.CORE_GROUP):
     for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):
         ...                                    # phase 1 — per-lane work via aiv_id
-    pl.system.syncall(core_type="mix")         # barrier: outside, runs on both
+    pl.system.syncall(core_type=pl.KernelType.MIX)  # barrier: outside, runs on both
     mm = pl.matmul(q, k)                       # cube work: outside, runs on AIC
     for _ in pl.split_aiv(2, mode=pl.SplitMode.NONE):
         out = pl.add(pl.aiv_shard(mm), bias)   # phase 2 — full-width vector work
@@ -327,12 +327,23 @@ of participating AIC and AIV cores.
 pl.system.cacheinvalid()  # publish all producer cache lines
 pl.system.fence()         # wait until they are visible in GM
 pl.system.syncall(
-    mode="soft",
-    core_type="mix",
+    mode=pl.SyncAllMode.SOFT,
+    core_type=pl.KernelType.MIX,
     gm_workspace=sync_ws,
     used_cores=participant_count,
 )                         # synchronize arrival only
 pl.system.cacheinvalid()  # consumer invalidates before reading
+```
+
+For a finer handoff than a whole-barrier rendezvous, `pl.system.sync_set` / `pl.system.sync_wait`
+raise and await a single cross-core event. In a **mixed** InCore kernel, pin each one to the lane
+that must run it with `core_type=pl.KernelType.AIC` or `core_type=pl.KernelType.AIV`; in an
+explicitly typed AIC or AIV kernel the lane is already known, so omit the argument. The old
+`"aic"` / `"aiv"` strings still work and emit a `DeprecationWarning`.
+
+```python
+pl.system.sync_set(0, pipe=pl.PipeType.MTE3, core_type=pl.KernelType.AIV)   # raised on AIV
+pl.system.sync_wait(0, pipe=pl.PipeType.MTE2, core_type=pl.KernelType.AIC)    # awaited on AIC
 ```
 
 ## Edge Cases

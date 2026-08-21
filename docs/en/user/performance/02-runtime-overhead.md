@@ -183,7 +183,7 @@ two tasks with a dependency sends the synchronization out to the AICPU scheduler
 # Hard barrier (FFTS): no operands, but requires FULL occupancy
 with pl.spmd(pl.system.available_aiv_count()):
     ...
-    pl.system.syncall(core_type="aiv_only")
+    pl.system.syncall(core_type=pl.KernelType.AIV)
     ...
 ```
 
@@ -191,8 +191,12 @@ Two modes, and the choice is not stylistic:
 
 | Mode | Mechanism | Occupancy | Extra arguments |
 | ---- | --------- | --------- | --------------- |
-| `mode="hard"` (default) | FFTS barrier | **All** physical cores of `core_type` | None |
-| `mode="soft"` | GM-polling counter | Any (`used_cores` participants) | `gm_workspace`, `used_cores` |
+| `pl.SyncAllMode.HARD` (default) | FFTS barrier | **All** physical cores of `core_type` | None |
+| `pl.SyncAllMode.SOFT` | GM-polling counter | Any (`used_cores` participants) | `gm_workspace`, `used_cores` |
+
+`mode` and `core_type` are enums (`pl.SyncAllMode`, `pl.KernelType` — `MIX` is the
+both-kernel participant set). The strings these keywords used to take — `mode="soft"`,
+`core_type="mix"` — still work and emit a `DeprecationWarning`.
 
 Both modes synchronize arrival only: they do not wait for a preceding `TSTORE` or make
 business data cache-coherent. For a GM producer-to-consumer handoff that may span multiple
@@ -209,12 +213,13 @@ the pto-isa pinned in `runtime/pto_isa.pin`, since the cacheinvalid path emits
 device** (error 507018). PyPTO rejects that at compile time — the `HardSyncallOccupancy`
 verifier — which is why the grid must be sized with `available_aiv_count()` /
 `available_cluster_count()` rather than a literal that happens to match today's device. If
-you cannot guarantee full occupancy, use `mode="soft"`: it polls a shared GM workspace, so
+you cannot guarantee full occupancy, use `mode=pl.SyncAllMode.SOFT`: it polls a shared GM workspace, so
 it works at partial occupancy and costs GM traffic instead.
 
 ```python
 # Soft barrier: works at partial occupancy
-pl.system.syncall(mode="soft", core_type="mix",
+pl.system.syncall(mode=pl.SyncAllMode.SOFT,
+                  core_type=pl.KernelType.MIX,
                   gm_workspace=ws,     # exclusive zero-init 16-element INT32 GM tensor
                   used_cores=n)
 ```

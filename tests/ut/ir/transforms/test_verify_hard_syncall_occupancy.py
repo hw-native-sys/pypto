@@ -63,7 +63,7 @@ def _aiv_program(n: int):
             o = i * TR
             ta = pl.load(a, [o, 0], [TR, TC])
             tb = pl.load(b, [o, 0], [TR, TC])
-            pl.system.syncall(core_type="aiv_only")  # HARD barrier
+            pl.system.syncall(core_type=pl.KernelType.AIV)  # HARD barrier
             out = pl.store(pl.add(ta, tb), [o, 0], out)
             return out
 
@@ -97,7 +97,7 @@ def _aiv_program_no_sync(n: int):
             o = i * TR
             ta = pl.load(a, [o, 0], [TR, TC])
             tb = pl.load(b, [o, 0], [TR, TC])
-            pl.system.syncall(core_type="aiv_only")  # HARD barrier
+            pl.system.syncall(core_type=pl.KernelType.AIV)  # HARD barrier
             out = pl.store(pl.add(ta, tb), [o, 0], out)
             return out
 
@@ -130,7 +130,12 @@ def _soft_program(n: int):
             o = i * TR
             ta = pl.load(a, [o, 0], [TR, TC])
             tb = pl.load(b, [o, 0], [TR, TC])
-            pl.system.syncall(mode="soft", core_type="aiv_only", gm_workspace=ws, used_cores=n)
+            pl.system.syncall(
+                mode=pl.SyncAllMode.SOFT,
+                core_type=pl.KernelType.AIV,
+                gm_workspace=ws,
+                used_cores=n,
+            )
             out = pl.store(pl.add(ta, tb), [o, 0], out)
             return out
 
@@ -170,7 +175,7 @@ def _mixed_program(n: int):
             tcv = pl.move(tc, target_memory=pl.Mem.Vec)
             tbias = pl.load(bias, [0, 0], [M, NN])
             tsum = pl.add(tcv, tbias)
-            pl.system.syncall(core_type="mix")  # HARD mix barrier
+            pl.system.syncall(core_type=pl.KernelType.MIX)  # HARD mix barrier
             out = pl.store(tsum, [0, 0], out)
             return out
 
@@ -211,7 +216,7 @@ def _mixed_program_no_sync(n: int):
             tcv = pl.move(tc, target_memory=pl.Mem.Vec)
             tbias = pl.load(bias, [0, 0], [M, NN])
             tsum = pl.add(tcv, tbias)
-            pl.system.syncall(core_type="mix")  # HARD mix barrier
+            pl.system.syncall(core_type=pl.KernelType.MIX)  # HARD mix barrier
             out = pl.store(tsum, [0, 0], out)
             return out
 
@@ -240,7 +245,7 @@ def _bare_kernel_program():
             self, x: pl.Tensor[[16, 16], pl.FP32], out: pl.Tensor[[16, 16], pl.FP32]
         ) -> pl.Tensor[[16, 16], pl.FP32]:
             tile = pl.load(x, [0, 0], [16, 16])
-            pl.system.syncall(core_type="aiv_only")
+            pl.system.syncall(core_type=pl.KernelType.AIV)
             updated = pl.store(tile, [0, 0], out)
             return updated
 
@@ -270,7 +275,8 @@ def _aiv_default_mix_program_dual_dispatch_false(n: int):
             o = i * TR
             ta = pl.load(a, [o, 0], [TR, TC])
             tb = pl.load(b, [o, 0], [TR, TC])
-            pl.system.syncall()  # default core_type="mix" — no AIC participants in an AIV launch
+            # Default core_type is MIX — no AIC participants in an AIV launch.
+            pl.system.syncall()
             out = pl.store(pl.add(ta, tb), [o, 0], out)
             return out
 
@@ -304,7 +310,8 @@ def _aiv_default_mix_program(n: int):
             o = i * TR
             ta = pl.load(a, [o, 0], [TR, TC])
             tb = pl.load(b, [o, 0], [TR, TC])
-            pl.system.syncall()  # default core_type="mix" — no AIC participants in an AIV launch
+            # Default core_type is MIX — no AIC participants in an AIV launch.
+            pl.system.syncall()
             out = pl.store(pl.add(ta, tb), [o, 0], out)
             return out
 
@@ -338,7 +345,7 @@ def _spmd_submit_program(n: int):
             o = i * TR
             ta = pl.load(a, [o, 0], [TR, TC])
             tb = pl.load(b, [o, 0], [TR, TC])
-            pl.system.syncall(core_type="aiv_only")
+            pl.system.syncall(core_type=pl.KernelType.AIV)
             out = pl.store(pl.add(ta, tb), [o, 0], out)
             return out
 
@@ -372,7 +379,7 @@ def _spmd_submit_program_no_sync(n: int):
             o = i * TR
             ta = pl.load(a, [o, 0], [TR, TC])
             tb = pl.load(b, [o, 0], [TR, TC])
-            pl.system.syncall(core_type="aiv_only")
+            pl.system.syncall(core_type=pl.KernelType.AIV)
             out = pl.store(pl.add(ta, tb), [o, 0], out)
             return out
 
@@ -406,7 +413,7 @@ def _cluster_spmd_program(n: int):
             o = i * TR
             ta = pl.load(a, [o, 0], [TR, TC])
             tb = pl.load(b, [o, 0], [TR, TC])
-            pl.system.syncall(core_type="aiv_only")
+            pl.system.syncall(core_type=pl.KernelType.AIV)
             out = pl.store(pl.add(ta, tb), [o, 0], out)
             return out
 
@@ -441,7 +448,7 @@ def _cluster_spmd_program_no_sync(n: int):
             o = i * TR
             ta = pl.load(a, [o, 0], [TR, TC])
             tb = pl.load(b, [o, 0], [TR, TC])
-            pl.system.syncall(core_type="aiv_only")
+            pl.system.syncall(core_type=pl.KernelType.AIV)
             out = pl.store(pl.add(ta, tb), [o, 0], out)
             return out
 
@@ -484,7 +491,7 @@ def _aiv_query_program():
             o = i * TR
             ta = pl.load(a, [o, 0], [TR, TC])
             tb = pl.load(b, [o, 0], [TR, TC])
-            pl.system.syncall(core_type="aiv_only")  # HARD barrier
+            pl.system.syncall(core_type=pl.KernelType.AIV)  # HARD barrier
             out = pl.store(pl.add(ta, tb), [o, 0], out)
             return out
 
@@ -518,7 +525,7 @@ def _aiv_query_program_no_sync():
             o = i * TR
             ta = pl.load(a, [o, 0], [TR, TC])
             tb = pl.load(b, [o, 0], [TR, TC])
-            pl.system.syncall(core_type="aiv_only")  # HARD barrier
+            pl.system.syncall(core_type=pl.KernelType.AIV)  # HARD barrier
             out = pl.store(pl.add(ta, tb), [o, 0], out)
             return out
 
@@ -552,7 +559,7 @@ def _aiv_wrong_query_program():
             o = i * TR
             ta = pl.load(a, [o, 0], [TR, TC])
             tb = pl.load(b, [o, 0], [TR, TC])
-            pl.system.syncall(core_type="aiv_only")  # HARD barrier
+            pl.system.syncall(core_type=pl.KernelType.AIV)  # HARD barrier
             out = pl.store(pl.add(ta, tb), [o, 0], out)
             return out
 
@@ -592,7 +599,7 @@ def _mixed_query_program():
             tcv = pl.move(tc, target_memory=pl.Mem.Vec)
             tbias = pl.load(bias, [0, 0], [M, NN])
             tsum = pl.add(tcv, tbias)
-            pl.system.syncall(core_type="mix")  # HARD mix barrier
+            pl.system.syncall(core_type=pl.KernelType.MIX)  # HARD mix barrier
             out = pl.store(tsum, [0, 0], out)
             return out
 
@@ -633,7 +640,7 @@ def _mixed_wrong_query_program():
             tcv = pl.move(tc, target_memory=pl.Mem.Vec)
             tbias = pl.load(bias, [0, 0], [M, NN])
             tsum = pl.add(tcv, tbias)
-            pl.system.syncall(core_type="mix")  # HARD mix barrier
+            pl.system.syncall(core_type=pl.KernelType.MIX)  # HARD mix barrier
             out = pl.store(tsum, [0, 0], out)
             return out
 
@@ -673,7 +680,7 @@ class LegacyProg:
         o = i * {tr}
         ta = pl.load(a, [o, 0], [{tr}, {tc}])
         tb = pl.load(b, [o, 0], [{tr}, {tc}])
-        pl.system.syncall(core_type="aiv_only")
+        pl.system.syncall(core_type=pl.KernelType.AIV)
         out = pl.store(pl.add(ta, tb), [o, 0], out)
         return out
 

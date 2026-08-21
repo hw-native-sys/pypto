@@ -9,8 +9,6 @@
 
 """Tests for system operation DSL parsing and round-trip."""
 
-import re
-
 import pypto.language as pl
 import pytest
 from pypto import ir
@@ -280,11 +278,11 @@ class TestSystemOpsParsing:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                pl.system.syncall(core_type="aiv_only")
+                pl.system.syncall(core_type=pl.KernelType.AIV)
                 return x
 
         printed = Before.as_python()
-        assert re.search(r"""pl\.system\.syncall\(core_type=(["'])aiv_only\1\)""", printed)
+        assert "pl.system.syncall(core_type=pl.KernelType.AIV)" in printed
 
         reparsed = pl.parse_program(printed)
         assert isinstance(reparsed, ir.Program)
@@ -301,7 +299,7 @@ class TestSystemOpsParsing:
                 return x
 
         printed = Before.as_python()
-        assert re.search(r"""pl\.system\.syncall\(core_type=(["'])mix\1\)""", printed)
+        assert "pl.system.syncall(core_type=pl.KernelType.MIX)" in printed
 
         reparsed = pl.parse_program(printed)
         assert isinstance(reparsed, ir.Program)
@@ -311,6 +309,32 @@ class TestSystemOpsParsing:
         """syncall rejects an unknown core_type at construction time."""
         with pytest.raises(ValueError, match="core_type"):
             pl.system.syncall(core_type="bogus")
+        with pytest.raises(TypeError, match="core_type must be a KernelType member"):
+            pl.system.syncall(core_type=3)  # type: ignore[arg-type]  # not an enum nor a string
+
+    def test_syncall_string_kwargs_are_deprecated(self):
+        """The pre-enum string spelling still builds the same call, with a warning."""
+        with pytest.deprecated_call(match="KernelType.AIV"):
+            deprecated = pl.system.syncall(core_type="aiv_only")
+        with pytest.deprecated_call(match="SyncAllMode.HARD"):
+            pl.system.syncall(mode="hard")
+        current = pl.system.syncall(core_type=pl.KernelType.AIV)
+        assert deprecated.kwargs == current.kwargs == {"core_type": "aiv_only"}
+
+    def test_sync_event_string_core_type_is_deprecated(self):
+        """sync_set / sync_wait still take the old strings, mapped onto pl.KernelType."""
+        with pytest.deprecated_call(match="KernelType.AIV"):
+            deprecated = pl.system.sync_set(3, pipe=pl.PipeType.MTE3, core_type="aiv")
+        current = pl.system.sync_set(3, pipe=pl.PipeType.MTE3, core_type=pl.KernelType.AIV)
+        assert deprecated.kwargs == current.kwargs
+        with pytest.deprecated_call(match="KernelType.AIC"):
+            pl.system.sync_wait(3, pipe=pl.PipeType.MTE2, core_type="aic")
+        # The syncall participant-set spellings are not the event vocabulary.
+        with pytest.raises(ValueError, match="core_type"):
+            pl.system.sync_wait(3, pipe=pl.PipeType.MTE2, core_type="aiv_only")
+        # An event pins one lane; both lanes is spelled by omitting core_type.
+        with pytest.raises(ValueError, match="Omit core_type"):
+            pl.system.sync_wait(3, pipe=pl.PipeType.MTE2, core_type=pl.KernelType.MIX)
 
     def test_syncall_soft_round_trip(self):
         """Round-trip for the soft (GM-polling) form of pl.system.syncall."""
@@ -326,12 +350,20 @@ class TestSystemOpsParsing:
             ) -> pl.Tensor[[512, 128], pl.FP32]:
                 off = pl.tile.get_block_idx() * 128
                 t = pl.load(x, [off, 0], [128, 128])
-                pl.system.syncall(mode="soft", core_type="aiv_only", gm_workspace=ws, used_cores=4)
+                pl.system.syncall(
+                    mode=pl.SyncAllMode.SOFT,
+                    core_type=pl.KernelType.AIV,
+                    gm_workspace=ws,
+                    used_cores=4,
+                )
                 return pl.store(t, [off, 0], out)
 
         printed = Before.as_python()
         # The high-level surface has no compiler-internal scratch operands.
-        assert 'pl.system.syncall(mode="soft", core_type="aiv_only", gm_workspace=ws, used_cores=4' in printed
+        assert (
+            "pl.system.syncall(mode=pl.SyncAllMode.SOFT, core_type=pl.KernelType.AIV, "
+            "gm_workspace=ws, used_cores=4" in printed
+        )
         assert "scratch" not in printed
 
         reparsed = pl.parse_program(printed)
@@ -345,12 +377,20 @@ class TestSystemOpsParsing:
         class Before:
             @pl.function(type=pl.FunctionType.InCore)
             def main(self, ws: pl.Tensor[[16], pl.INT32]) -> pl.Tensor[[16], pl.INT32]:
-                pl.system.syncall(mode="soft", core_type="mix", gm_workspace=ws, used_cores=0)
+                pl.system.syncall(
+                    mode=pl.SyncAllMode.SOFT,
+                    core_type=pl.KernelType.MIX,
+                    gm_workspace=ws,
+                    used_cores=0,
+                )
                 return ws
 
         printed = Before.as_python()
         syncall_line = next(line for line in printed.splitlines() if "pl.system.syncall" in line)
-        assert 'mode="soft", core_type="mix", gm_workspace=ws, used_cores=0' in syncall_line
+        assert (
+            "mode=pl.SyncAllMode.SOFT, core_type=pl.KernelType.MIX, gm_workspace=ws, used_cores=0"
+            in syncall_line
+        )
 
         reparsed = pl.parse_program(printed)
         assert isinstance(reparsed, ir.Program)
@@ -362,7 +402,7 @@ class TestSystemOpsParsing:
         workspace = ir.Var("ws", ir.TensorType([16], DataType.INT32), span)
         zero = ir.ConstInt(0, DataType.INT32, span)
 
-        call = system_ops.syncall_soft("aiv_only", workspace, zero, span=span)
+        call = system_ops.syncall_soft(system_ops.KernelType.AIV, workspace, zero, span=span)
 
         assert call.args == [workspace]
 
@@ -374,7 +414,7 @@ class TestSystemOpsParsing:
         for invalid_count in (-1, 1 << 31):
             count = ir.ConstInt(invalid_count, DataType.INT32, span)
             with pytest.raises(ValueError, match="INT32 range"):
-                system_ops.syncall_soft("aiv_only", workspace, count, span=span)
+                system_ops.syncall_soft(system_ops.KernelType.AIV, workspace, count, span=span)
 
     def test_syncall_soft_dynamic_participant_count_round_trip(self):
         """An INT32 participant count remains an operand across print/parse."""
@@ -387,7 +427,12 @@ class TestSystemOpsParsing:
                 ws: pl.Tensor[[16], pl.INT32],
                 participants: pl.Scalar[pl.INT32],
             ) -> pl.Tensor[[16], pl.INT32]:
-                pl.system.syncall(mode="soft", core_type="aiv_only", gm_workspace=ws, used_cores=participants)
+                pl.system.syncall(
+                    mode=pl.SyncAllMode.SOFT,
+                    core_type=pl.KernelType.AIV,
+                    gm_workspace=ws,
+                    used_cores=participants,
+                )
                 return ws
 
         printed = Before.as_python()
@@ -404,21 +449,24 @@ class TestSystemOpsParsing:
             pl.system.syncall(mode="bogus")
         # An unknown core_type is rejected.
         with pytest.raises(ValueError, match="core_type"):
-            pl.system.syncall(mode="soft", core_type="bogus_type", used_cores=4)
-        # aiv_only, aic_only, and mix are all supported; each still requires a
+            pl.system.syncall(mode=pl.SyncAllMode.SOFT, core_type="bogus_type", used_cores=4)
+        # CUBE, VECTOR, and SHARED are all supported; each still requires a
         # shared gm_workspace.
-        for ct in ("aiv_only", "aic_only", "mix"):
+        for ct in pl.KernelType:
             with pytest.raises(ValueError, match="gm_workspace"):
-                pl.system.syncall(mode="soft", core_type=ct, used_cores=4)
+                pl.system.syncall(mode=pl.SyncAllMode.SOFT, core_type=ct, used_cores=4)
 
         span = ir.Span.unknown()
         workspace = pl.Tensor(expr=ir.Var("ws", ir.TensorType([16], DataType.INT32), span))
         with pytest.raises(ValueError, match="explicit used_cores"):
-            pl.system.syncall(mode="soft", core_type="aiv_only", gm_workspace=workspace)
+            pl.system.syncall(mode=pl.SyncAllMode.SOFT, core_type=pl.KernelType.AIV, gm_workspace=workspace)
         for invalid_count in (-1, 1 << 31):
             with pytest.raises(ValueError, match="INT32 range"):
                 pl.system.syncall(
-                    mode="soft", core_type="aiv_only", gm_workspace=workspace, used_cores=invalid_count
+                    mode=pl.SyncAllMode.SOFT,
+                    core_type=pl.KernelType.AIV,
+                    gm_workspace=workspace,
+                    used_cores=invalid_count,
                 )
 
     def test_multiple_system_ops_round_trip(self):

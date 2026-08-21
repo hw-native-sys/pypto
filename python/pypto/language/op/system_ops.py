@@ -19,7 +19,13 @@ from typing import overload
 
 from pypto.ir.op import system_ops as _ir_ops
 from pypto.ir.op.system_ops import (
+    _SYNC_EVENT_KERNELS,
+    _SYNC_EVENT_MIX_HINT,
+    _SYNCALL_KERNELS,
     AUTO,
+    KernelType,
+    SyncAllMode,
+    _coerce_enum,
     aic_initialize_pipe,
     aiv_initialize_pipe,
     bar_all,
@@ -37,6 +43,8 @@ from ..typing import Array, IntLike, Scalar, Tensor, Tile
 
 __all__ = [
     "AUTO",
+    "KernelType",
+    "SyncAllMode",
     "sync_src",
     "sync_dst",
     "sync_set",
@@ -65,12 +73,28 @@ __all__ = [
 ]
 
 
+def _kernel_or_none(core_type: KernelType | str | None, op_name: str) -> KernelType | None:
+    """Normalize an optional cross-core kernel keyword, warning on the deprecated string form."""
+    if core_type is None:
+        return None
+    # 4 frames back is the caller of the public wrapper that calls this helper.
+    return _coerce_enum(
+        core_type,
+        KernelType,
+        "core_type",
+        op_name,
+        aliases=_SYNC_EVENT_KERNELS,
+        stacklevel=4,
+        hint=_SYNC_EVENT_MIX_HINT,
+    )
+
+
 def sync_set(
     event_id: IntLike,
     *,
     pipe: PipeType,
     ffts_mode: int | None = None,
-    core_type: str | None = None,
+    core_type: KernelType | str | None = None,
     span: Span | None = None,
 ) -> Call:
     """Set a Cube/Vector cross-core event using a static or dynamic event id.
@@ -81,19 +105,23 @@ def sync_set(
         pipe: Pipe the event is raised on. The matching [`sync_wait`][pypto.language.system.sync_wait] must
             name the same pipe -- pairing event ids and pipes is the author's responsibility.
         ffts_mode: Optional FFTS mode, 0, 1 or 2. Accepted by ``sync_set`` only.
-        core_type: ``"aic"`` or ``"aiv"``, to keep the event on the intended lane
-            when a mixed InCore kernel is expanded. Omit in an explicitly typed kernel.
+        core_type: ``pl.KernelType.AIC`` or ``pl.KernelType.AIV``, to keep the event
+            in the intended kernel when a mixed InCore function is expanded. Omit it
+            to leave the event in both, which is what an explicitly typed kernel
+            wants. The old ``"aic"`` / ``"aiv"`` strings still work but emit a
+            ``DeprecationWarning``.
         span: Optional source span
     """
     event_expr = event_id.unwrap() if isinstance(event_id, Scalar) else event_id
-    return _ir_ops.sync_set(event_expr, pipe=pipe, ffts_mode=ffts_mode, core_type=core_type, span=span)
+    kernel = _kernel_or_none(core_type, "sync_set")
+    return _ir_ops.sync_set(event_expr, pipe=pipe, ffts_mode=ffts_mode, core_type=kernel, span=span)
 
 
 def sync_wait(
     event_id: IntLike,
     *,
     pipe: PipeType,
-    core_type: str | None = None,
+    core_type: KernelType | str | None = None,
     span: Span | None = None,
 ) -> Call:
     """Wait for a Cube/Vector cross-core event using a static or dynamic event id.
@@ -101,12 +129,16 @@ def sync_wait(
     Args:
         event_id: Event to wait on -- the one a matching [`sync_set`][pypto.language.system.sync_set] raises.
         pipe: Pipe the event is awaited on; must match the ``sync_set``.
-        core_type: ``"aic"`` or ``"aiv"``, to keep the wait on the intended lane
-            when a mixed InCore kernel is expanded. Omit in an explicitly typed kernel.
+        core_type: ``pl.KernelType.AIC`` or ``pl.KernelType.AIV``, to keep the wait
+            in the intended kernel when a mixed InCore function is expanded. Omit it
+            to leave the wait in both, which is what an explicitly typed kernel
+            wants. The old ``"aic"`` / ``"aiv"`` strings still work but emit a
+            ``DeprecationWarning``.
         span: Optional source span
     """
     event_expr = event_id.unwrap() if isinstance(event_id, Scalar) else event_id
-    return _ir_ops.sync_wait(event_expr, pipe=pipe, core_type=core_type, span=span)
+    kernel = _kernel_or_none(core_type, "sync_wait")
+    return _ir_ops.sync_wait(event_expr, pipe=pipe, core_type=kernel, span=span)
 
 
 def set_ffts(workspace: Tensor, *, span: Span | None = None) -> Call:
@@ -116,14 +148,13 @@ def set_ffts(workspace: Tensor, *, span: Span | None = None) -> Call:
     return _ir_ops.set_ffts(workspace.unwrap(), span=span)
 
 
-_SYNCALL_SOFT_CORE_TYPES = ("aiv_only", "aic_only", "mix")
 _SYNCALL_MAX_USED_CORES = (1 << 31) - 1
 
 
 def syncall(
     *,
-    core_type: str = "mix",
-    mode: str = "hard",
+    core_type: KernelType | str = KernelType.MIX,
+    mode: SyncAllMode | str = SyncAllMode.HARD,
     gm_workspace: Tensor | None = None,
     used_cores: IntLike | None = None,
     span: Span | None = None,
@@ -132,16 +163,16 @@ def syncall(
 
     Two modes:
 
-    - ``mode="hard"`` (default): FFTS barrier with no operands. Requires the
-      enclosing ``pl.spmd`` launch to fill **all** physical cores of
-      ``core_type`` (a partial launch deadlocks on device — error 507018). The
-      compiler rejects a partial-occupancy hard launch at compile time
+    - ``mode=pl.SyncAllMode.HARD`` (default): FFTS barrier with no operands.
+      Requires the enclosing ``pl.spmd`` launch to fill **all** physical cores
+      of ``core_type`` (a partial launch deadlocks on device — error 507018).
+      The compiler rejects a partial-occupancy hard launch at compile time
       (``HardSyncallOccupancy`` verifier, issue #1935). See
       ``pypto.ir.op.system_ops.syncall``.
-    - ``mode="soft"``: GM-polling barrier that works at partial occupancy.
-      Each participant updates a shared counter in an exclusive 64-byte GM
-      cache line and polls until all participants arrive. Supported for every
-      ``core_type`` ("aiv_only", "aic_only", "mix").
+    - ``mode=pl.SyncAllMode.SOFT``: GM-polling barrier that works at partial
+      occupancy. Each participant updates a shared counter in an exclusive
+      64-byte GM cache line and polls until all participants arrive. Supported
+      for every participant set.
 
     Both modes synchronize arrival only. They do not wait for preceding data
     instructions or publish/invalidate business-data cache lines. For a
@@ -154,9 +185,12 @@ def syncall(
     Soft-mode arguments:
 
     Args:
-        core_type: Participant set, one of "aiv_only", "aic_only", or "mix".
-            For "mix", ``used_cores`` is the *total* AIC + AIV participant count.
-        mode: "hard" or "soft".
+        core_type: Participant set, a [`KernelType`][pypto.language.system.KernelType]
+            member — ``MIX`` rendezvouses both kernels, and then ``used_cores`` is the
+            *total* AIC + AIV participant count. The equivalent string still works but
+            emits a ``DeprecationWarning``.
+        mode: A [`SyncAllMode`][pypto.language.system.SyncAllMode] member. The equivalent
+            string still works but emits a ``DeprecationWarning``.
         gm_workspace: Soft mode only. A shared, zero-initialized GM ``INT32``
             tensor with at least 16 elements (64 bytes), visible to every
             participating block. Pass it as a kernel parameter so all SPMD
@@ -173,22 +207,18 @@ def syncall(
     Returns:
         Call expression for system.syncall.
     """
-    if mode == "hard":
+    barrier_mode = _coerce_enum(mode, SyncAllMode, "mode", "syncall")
+    participants = _coerce_enum(core_type, KernelType, "core_type", "syncall", aliases=_SYNCALL_KERNELS)
+    if barrier_mode is SyncAllMode.HARD:
         # Reject soft-only kwargs so a typo like syncall(gm_workspace=ws) does not
         # silently fall back to the full-occupancy hard barrier (the deadlock path
         # the soft form exists to avoid).
         if gm_workspace is not None or used_cores is not None:
             raise ValueError(
-                "syncall(mode='hard') takes no gm_workspace/used_cores; "
-                "pass mode='soft' to use the GM-polling barrier"
+                "syncall(mode=SyncAllMode.HARD) takes no gm_workspace/used_cores; "
+                "pass mode=SyncAllMode.SOFT to use the GM-polling barrier"
             )
-        return _ir_ops.syncall(core_type=core_type, span=span)
-    if mode != "soft":
-        raise ValueError(f"syncall mode must be 'hard' or 'soft', got {mode!r}")
-    if core_type not in _SYNCALL_SOFT_CORE_TYPES:
-        raise ValueError(
-            f"soft syncall core_type must be one of {_SYNCALL_SOFT_CORE_TYPES}, got {core_type!r}"
-        )
+        return _ir_ops.syncall(core_type=participants, span=span)
     if gm_workspace is None:
         raise ValueError("soft syncall requires gm_workspace (a shared, zero-initialized GM INT32 tensor)")
     if not isinstance(gm_workspace, Tensor):
@@ -216,7 +246,7 @@ def syncall(
             "soft syncall used_cores must be a non-negative Python int or an INT32 scalar, "
             f"got {type(used_cores).__name__}"
         )
-    return _ir_ops.syncall_soft(core_type, gm_workspace.unwrap(), used_expr, span=actual_span)
+    return _ir_ops.syncall_soft(participants, gm_workspace.unwrap(), used_expr, span=actual_span)
 
 
 @overload

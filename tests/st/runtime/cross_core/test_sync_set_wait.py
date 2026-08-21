@@ -95,10 +95,10 @@ def sync_set_wait_odd_shape(
                 V2C_EVENT_ID,
                 pipe=pl.PipeType.MTE3,
                 ffts_mode=2,
-                core_type="aiv",
+                core_type=pl.KernelType.AIV,
             )
 
-        pl.system.sync_wait(V2C_EVENT_ID, pipe=pl.PipeType.MTE2, core_type="aic")
+        pl.system.sync_wait(V2C_EVENT_ID, pipe=pl.PipeType.MTE2, core_type=pl.KernelType.AIC)
         transfer_mat: pl.Tile[
             [CUBE_PHYSICAL_ROWS, K],
             pl.FP32,
@@ -169,10 +169,10 @@ def sync_set_wait_odd_last_axis(
                 LR_EVENT_ID,
                 pipe=pl.PipeType.MTE3,
                 ffts_mode=2,
-                core_type="aiv",
+                core_type=pl.KernelType.AIV,
             )
 
-        pl.system.sync_wait(LR_EVENT_ID, pipe=pl.PipeType.MTE2, core_type="aic")
+        pl.system.sync_wait(LR_EVENT_ID, pipe=pl.PipeType.MTE2, core_type=pl.KernelType.AIC)
         transfer_mat: pl.Tile[
             [LR_CUBE_ROWS, LR_CUBE_COLS],
             pl.FP16,

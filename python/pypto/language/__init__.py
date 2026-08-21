@@ -82,6 +82,8 @@ from .op import tensor_ops as tensor
 from .op import tile_ops as tile
 from .op.system_ops import (
     AUTO,
+    KernelType,
+    SyncAllMode,
     aic_initialize_pipe,
     aiv_initialize_pipe,
     import_peer_buffer,
@@ -500,6 +502,8 @@ __all__ = [
     "FunctionType",
     "ForKind",
     "AtomicType",
+    "KernelType",
+    "SyncAllMode",
     "Level",
     "MemRef",
     "Role",
