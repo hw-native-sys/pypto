@@ -136,6 +136,26 @@ def test_host_dispatch_materializes_comm_ctx_args():
     assert [assign.var.name_hint for assign in ctx_assigns] == ["data_ctx", "signal_ctx"]
 
 
+def _alloc_window_buffer(span: ir.Span) -> ir.Expr:
+    """A window-buffer allocation, the origin of every DistributedTensor."""
+    return ir.create_op_call(
+        "pld.tensor.alloc_window_buffer",
+        [ir.ConstInt(16, DataType.INDEX, span)],
+        {"name": "buf"},
+        span,
+    )
+
+
+def _window(buffer: ir.Var, span: ir.Span) -> ir.Expr:
+    """A fresh DistributedTensor over @p buffer — it inherits no context."""
+    return ir.create_op_call(
+        "pld.tensor.window",
+        [buffer, ir.MakeTuple([ir.ConstInt(4, DataType.INDEX, span)], span)],
+        {"dtype": pl.FP32},
+        span,
+    )
+
+
 def _call_with_dirs(op_name: str, args: list[ir.Expr], span: ir.Span) -> ir.Call:
     return ir.Call(
         ir.GlobalVar(op_name),
@@ -314,22 +334,6 @@ def test_materialized_local_comm_ctx_name_avoids_existing_local():
     scalar_ty = ir.ScalarType(DataType.INDEX)
 
     data = ir.Var("data", data_ty, span)
-    source_data = ir.Var("source_data", data_ty, span)
-    produced_data = ir.Var("produced_data", data_ty, span)
-    producer = ir.Function(
-        "producer",
-        [(source_data, ir.ParamDirection.In)],
-        [data_ty],
-        ir.SeqStmts(
-            [
-                ir.AssignStmt(produced_data, source_data, span),
-                ir.ReturnStmt([produced_data], span),
-            ],
-            span,
-        ),
-        span,
-        ir.FunctionType.InCore,
-    )
     callee = ir.Function(
         "callee",
         [(data, ir.ParamDirection.In)],
@@ -339,19 +343,22 @@ def test_materialized_local_comm_ctx_name_avoids_existing_local():
         ir.FunctionType.InCore,
     )
 
-    main_source_data = ir.Var("source_data", data_ty, span)
+    # A window allocated in the host body: a genuine new DistributedTensor with
+    # no context to inherit, so host orchestration synthesizes the query — and
+    # must not reuse the `data_ctx` name already taken by a local.
+    buffer = ir.Var("buffer", ir.PtrType.get(), span)
     local_data = ir.Var("data", data_ty, span)
     existing_local = ir.Var("data_ctx", scalar_ty, span)
-    producer_call = _call_with_dirs("producer", [main_source_data], span)
     call = _call_with_dirs("callee", [local_data], span)
     main = ir.Function(
         "main",
-        [(main_source_data, ir.ParamDirection.In)],
+        [],
         [],
         ir.SeqStmts(
             [
                 ir.AssignStmt(existing_local, ir.ConstInt(0, DataType.INDEX, span), span),
-                ir.AssignStmt(local_data, producer_call, span),
+                ir.AssignStmt(buffer, _alloc_window_buffer(span), span),
+                ir.AssignStmt(local_data, _window(buffer, span), span),
                 ir.EvalStmt(call, span),
             ],
             span,
@@ -362,7 +369,7 @@ def test_materialized_local_comm_ctx_name_avoids_existing_local():
     )
 
     result = passes.materialize_dist_tensor_ctx()(
-        ir.Program([producer, callee, main], "local_ctx_name_collision", span)
+        ir.Program([callee, main], "local_ctx_name_collision", span)
     )
     main_after = _get_func(result, "main")
     call_after = _collect_calls(main_after.body, "callee")[0]
@@ -829,23 +836,6 @@ def test_device_call_without_materialized_context_rejects_synthesized_prefix():
     data_ty = _dist_ty()
     bool_ty = ir.ScalarType(DataType.BOOL)
 
-    producer_data = ir.Var("data", data_ty, span)
-    produced_data = ir.Var("produced_data", data_ty, span)
-    producer = ir.Function(
-        "producer",
-        [(producer_data, ir.ParamDirection.In)],
-        [data_ty],
-        ir.SeqStmts(
-            [
-                ir.AssignStmt(produced_data, producer_data, span),
-                ir.ReturnStmt([produced_data], span),
-            ],
-            span,
-        ),
-        span,
-        ir.FunctionType.InCore,
-    )
-
     predicate_data = ir.Var("data", data_ty, span)
     predicate = ir.Function(
         "predicate",
@@ -856,9 +846,12 @@ def test_device_call_without_materialized_context_rejects_synthesized_prefix():
         ir.FunctionType.InCore,
     )
 
-    source_data = ir.Var("source_data", data_ty, span)
+    # `local_data` is a window created inside a chip-orchestration function, so
+    # it is a genuine new DistributedTensor rather than a view of a parameter —
+    # there is no context for it to inherit, and outside host orchestration the
+    # pass cannot query one either.
+    buffer = ir.Var("buffer", ir.PtrType.get(), span)
     local_data = ir.Var("local_data", data_ty, span)
-    producer_call = _call_with_dirs("producer", [source_data], span)
     predicate_call = ir.Call(
         ir.GlobalVar("predicate"),
         [local_data],
@@ -869,11 +862,12 @@ def test_device_call_without_materialized_context_rejects_synthesized_prefix():
     )
     main = ir.Function(
         "main",
-        [(source_data, ir.ParamDirection.In)],
+        [],
         [],
         ir.SeqStmts(
             [
-                ir.AssignStmt(local_data, producer_call, span),
+                ir.AssignStmt(buffer, _alloc_window_buffer(span), span),
+                ir.AssignStmt(local_data, _window(buffer, span), span),
                 ir.EvalStmt(predicate_call, span),
             ],
             span,
@@ -882,7 +876,7 @@ def test_device_call_without_materialized_context_rejects_synthesized_prefix():
         ir.FunctionType.Orchestration,
     )
 
-    program = ir.Program([producer, predicate, main], "unsupported_prefix_context", span)
+    program = ir.Program([predicate, main], "unsupported_prefix_context", span)
     # A user-facing limitation, not an internal invariant: the message must name
     # the tensor and the function, and say what to change.
     with pytest.raises(ValueError, match="Cannot determine the communication context"):

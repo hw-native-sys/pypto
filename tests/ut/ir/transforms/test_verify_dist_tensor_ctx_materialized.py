@@ -93,5 +93,18 @@ def test_program_without_get_comm_ctx_passes():
     assert _errors(P) == []
 
 
+def test_property_is_verified_on_the_default_path():
+    """The pipeline only verifies a produced property that is in this set.
+
+    `PassManager.run_passes` intersects each pass's produced properties with
+    `get_verified_properties()`, so a property missing from it is checked only
+    when a test installs a `VerificationInstrument` by hand — which is exactly
+    the case this verifier exists to cover, since `MaterializeDistTensorCtx`
+    returns early (leaving any query in place) when no function in the Program
+    declares a DistributedTensor parameter.
+    """
+    assert passes.get_verified_properties().contains(passes.IRProperty.DistTensorCtxMaterialized)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

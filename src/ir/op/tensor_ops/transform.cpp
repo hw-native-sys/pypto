@@ -807,6 +807,16 @@ REGISTER_OP("tensor.set_validshape")
     .add_argument("valid_rows", "Number of valid rows (ScalarType INDEX/INT64/UINT64)")
     .add_argument("valid_cols", "Number of valid columns (ScalarType INDEX/INT64/UINT64)")
     .set_output_memory_inherit_input()
+    // Metadata-only: no data moves, so the result names the same buffer as the
+    // input. Orthogonal to the space-inheritance above (see
+    // OpRegistryEntry::OutputMemoryInheritsInput).
+    //
+    // ConvertTensorToTileOps rewrites this op to `tile.set_validshape` before
+    // any param-lineage consumer runs, so nothing reads this today. Declared
+    // anyway because it is true, and because the alternative failure is silent:
+    // a lineage walk that cannot see the aliasing reports the result as a fresh
+    // kernel allocation.
+    .set_output_reuses_input(0)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorSetValidShapeType(args, kwargs);

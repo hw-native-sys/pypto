@@ -50,7 +50,13 @@ DistributedTensor 的 if lowering 继续保持 then/else 必须引用同一 back
 本 pass 产出 `IRProperty::DistTensorCtxMaterialized`：host orchestration 之外
 不再存在 `pld.system.get_comm_ctx`。pass 对它改写过的每个函数都保证了这一点，
 property verifier 再独立校验一遍——这也覆盖了「程序里没有任何函数带
-`DistributedTensorType` 参数、pass 原样返回」的情况。
+`DistributedTensorType` 参数、pass 原样返回」的情况。该属性已登记在
+`GetVerifiedProperties()` 中，因此默认 verification level 下流水线就会校验它，
+而不是只在测试手工安装 `VerificationInstrument` 时才生效。
+
+本 pass 要求 `IRProperty::ReturnParamsExplicit`：返回位置映射来自
+`return_lineage::ExplicitReturnedParamIndices`，它是对 `ReturnStmt` 的指针恒等
+读取，只有在 `NormalizeReturnOrder` 规范化之后才有意义。
 
 该 pass 位于 `LowerHostTensorCollectives` 之后、最终 `Simplify` 之前。此时
 host window buffer 已由 `MaterializeCommDomainScopes` 填好，host tensor

@@ -154,6 +154,7 @@ const IRPropertySet& GetVerifiedProperties() {
                                    IRProperty::HardSyncallOccupancyValid,
                                    IRProperty::IterArgCarryClassified,
                                    IRProperty::RuntimeScopesMaterialized,
+                                   IRProperty::DistTensorCtxMaterialized,
                                    IRProperty::AccToGmStoreValid,
                                    IRProperty::AtomicAddDtypeValid};
   return props;

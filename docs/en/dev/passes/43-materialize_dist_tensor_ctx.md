@@ -60,7 +60,14 @@ The pass produces `IRProperty::DistTensorCtxMaterialized`: no
 `pld.system.get_comm_ctx` survives outside host orchestration. The pass enforces
 this for every function it rewrites, and the property verifier checks it
 independently — which also covers Programs the pass returns untouched because no
-function declares a `DistributedTensorType` parameter.
+function declares a `DistributedTensorType` parameter. The property is listed in
+`GetVerifiedProperties()`, so the pipeline checks it on the default verification
+level rather than only when a test installs a `VerificationInstrument`.
+
+It requires `IRProperty::ReturnParamsExplicit`: the return-position map comes
+from `return_lineage::ExplicitReturnedParamIndices`, a pointer-identity read of
+the `ReturnStmt` that is only meaningful once `NormalizeReturnOrder` has
+canonicalized it.
 
 The pass runs after `LowerHostTensorCollectives` and before the final
 `Simplify`. At that point host window buffers have already been materialized by
