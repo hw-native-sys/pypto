@@ -7,5 +7,4 @@ rather than their `pl.*` or `pl.tensor.*` counterparts.
 ::: pypto.language.tile
     options:
       show_root_heading: false
-      members_order: source
       filters: ["!^_"]

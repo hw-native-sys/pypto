@@ -131,7 +131,25 @@ plugins:
             docstring_style: google
             show_source: false
             show_root_heading: true
-            members_order: source
+            # `__all__` in each of these modules is hand-grouped by concept -- create
+            # before read before write, `mul` next to `muls`, the whole fillpad family
+            # together -- so it is the reading order the author already chose. Without
+            # this the page falls back to alphabetical *within kind*, which splits
+            # constants from classes from functions and scatters every family across
+            # 270 entries. `source` is the fallback for class members, where `__all__`
+            # does not apply.
+            members_order: ["__all__", "source"]
+            # Without this, members are bucketed attributes/classes/functions before
+            # `__all__` is applied within each bucket -- which splits exactly the pairs
+            # `__all__` puts side by side (`jit` from `JITFunction`, `function` /
+            # `inline` / `program` from `InlineFunction`). One sequence, author order.
+            group_by_category: false
+            # Default `false` silently drops any member without a docstring -- which was
+            # hiding 34 public `pl.*` names, `jit` and every dtype (`FP16`, `INT32`, ...)
+            # among them. A reader looking one up found nothing at all. Showing the name
+            # and its value beats omitting it; a missing description is a docstring to
+            # write, not a reason to leave the symbol undiscoverable.
+            show_if_no_docstring: true
 
 # Rewrites repo-relative links that escape `docs/` (source files, `.claude/rules`,
 # `examples/`) into GitHub blob URLs at build time. The markdown keeps working

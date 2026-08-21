@@ -7,5 +7,4 @@ orchestration or wherever a whole tensor is the unit of work. See
 ::: pypto.language.tensor
     options:
       show_root_heading: false
-      members_order: source
       filters: ["!^_"]

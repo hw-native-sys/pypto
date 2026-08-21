@@ -5,5 +5,4 @@
 ::: pypto.language.array
     options:
       show_root_heading: false
-      members_order: source
       filters: ["!^_"]

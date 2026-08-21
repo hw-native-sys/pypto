@@ -6,7 +6,6 @@
     options:
       show_root_heading: false
       show_submodules: false
-      members_order: alphabetical
       filters:
         - "!^_"
         - "!^(parser|optimizations|adir|array|prefetch|tile|system|tensor)$"

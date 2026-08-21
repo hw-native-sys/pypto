@@ -6,5 +6,4 @@ The optimization entries a `pl.at(..., optimizations=[...])` list accepts — `p
 ::: pypto.language.optimizations
     options:
       show_root_heading: false
-      members_order: source
       filters: ["!^_"]

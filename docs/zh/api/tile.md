@@ -5,5 +5,4 @@ Tile 级算子 —— 在 InCore 函数内接受并返回 `pl.Tile` 值的那一
 ::: pypto.language.tile
     options:
       show_root_heading: false
-      members_order: source
       filters: ["!^_"]
