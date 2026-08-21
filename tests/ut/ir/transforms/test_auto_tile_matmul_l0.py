@@ -11,11 +11,11 @@
 
 The pass walks Mat-resident ``tile.matmul`` calls, queries
 ``utils::ChooseL0Tile`` against the active backend's L0 capacities, and rewrites
-each call into a K-loop that branches on the loop index: the first iteration
-uses ``tile.matmul`` (fresh accumulator) and subsequent iterations use
-``tile.matmul_acc`` (accumulating into the iter-arg).  The loop is marked
-``ForKind.Pipeline`` with ``pipeline_stages=2`` whenever it has at least two
-iterations.
+each call into a K-loop whose body is a single predicated
+``tile.matmul_acc(c_iter, sa, sb, ko == 0)``: the predicate overwrites the
+accumulator on the first iteration and accumulates into it afterwards, so the
+whole chain stays on one Acc buffer.  The loop is marked ``ForKind.Pipeline``
+with ``pipeline_stages=2`` whenever it has at least two iterations.
 
 The conftest configures the Ascend950 backend, which advertises L0a/L0b = 64KB
 and L0c = 256KB.  Tests rely on those capacities to predict the chooser's
@@ -121,6 +121,44 @@ class TestAutoTileMatmulL0ExplicitL0Diagnostics:
         assert "requiring 131072 bytes" in message
         assert "manually extract a smaller Left tile" in message
 
+    def test_oversized_left_operand_on_predicated_matmul_acc_is_diagnosed(self):
+        """The 4-operand ``tile.matmul_acc`` reaches the same capacity check.
+
+        Accepting arity 4 in ``AnalyzeMatmul`` moved this call past the arity
+        bail that used to short-circuit it, so a predicated call now gets the
+        actionable Left/L0A diagnostic instead of silently surviving AutoTile
+        and failing later in memory planning with a worse message.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[256, 256], pl.FP16],
+                b: pl.Tensor[[256, 64], pl.FP16],
+                first_k: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+            ) -> pl.Tensor[[256, 64], pl.FP32]:
+                a_mat = pl.tile.load(a, [0, 0], [256, 256], target_memory=pl.Mem.Mat)
+                b_mat = pl.tile.load(b, [0, 0], [256, 64], target_memory=pl.Mem.Mat)
+                a_left = pl.tile.extract(a_mat, 0, 0, [256, 256], target_memory=pl.Mem.Left)
+                b_right = pl.tile.extract(b_mat, 0, 0, [256, 64], target_memory=pl.Mem.Right)
+                acc = pl.tile.create([256, 64], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+                result = pl.tile.matmul_acc(acc, a_left, b_right, init_cond=(first_k == 0))
+                out = pl.tile.store(result, [0, 0], out)
+                return out
+
+        with pytest.raises(ValueError) as exc_info:
+            passes.auto_tile_matmul_l0()(Before)
+
+        message = str(exc_info.value)
+        assert "tile.matmul_acc left operand 'a_left'" in message
+        assert "Left (L0A)" in message
+        assert "physical shape [256, 256]" in message
+        assert "requiring 131072 bytes" in message
+        assert "manually extract a smaller Left tile" in message
+
     def test_exact_capacity_manual_operands_remain_untouched(self):
         """Manual L0 scheduling remains valid at the inclusive capacity boundary."""
 
@@ -151,10 +189,10 @@ class TestAutoTileMatmulL0KOnly:
     def test_skinny_gemm_pipelined(self):
         """16×64 @ 2048 BF16 → ChooseL0Tile picks (m=16, n=64, k=256).
 
-        K=2048 → 8 K-iterations → loop runs 8 times with an if-else branching
-        on ``ko == 0`` between ``tile.matmul`` (first iter) and
-        ``tile.matmul_acc`` (later iters).  Loop is Pipeline-marked with
-        ``pipeline_stages=2``."""
+        K=2048 → 8 K-iterations → loop runs 8 times, each iteration a
+        predicated ``tile.matmul_acc`` that overwrites the accumulator on
+        ``ko == 0`` and accumulates into it afterwards.  Loop is
+        Pipeline-marked with ``pipeline_stages=2``."""
 
         @pl.program
         class Before:
@@ -194,7 +232,8 @@ class TestAutoTileMatmulL0KOnly:
                 c_init: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.create(
                     [16, 64], dtype=pl.FP32, target_memory=pl.Mem.Acc
                 )
-                # Full K-loop with ko branching on the first iteration.
+                # Full K-loop; the ko == 0 predicate overwrites the accumulator
+                # on the first iteration and accumulates into it afterwards.
                 for ko, (c_iter,) in pl.pipeline(0, 2048, 256, init_values=(c_init,), stage=2):
                     sa: pl.Tile[[16, 256], pl.BF16, pl.Mem.Left] = pl.tile.extract(
                         lhs_mat, 0, ko, shape=[16, 256], target_memory=pl.Mem.Left
@@ -202,25 +241,84 @@ class TestAutoTileMatmulL0KOnly:
                     sb: pl.Tile[[256, 64], pl.BF16, pl.Mem.Right] = pl.tile.extract(
                         rhs_mat, ko, 0, shape=[256, 64], target_memory=pl.Mem.Right
                     )
-                    if ko == 0:
-                        c_first: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(sa, sb)
-                        c_phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_first)
-                    else:
-                        c_acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(c_iter, sa, sb)
-                        c_phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_acc)
-                    c: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_phi)
+                    c_acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
+                        c_iter, sa, sb, ko == 0
+                    )
+                    c: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_acc)
                 out = pl.store(c, [0, 0], out)
                 return out
 
         After = passes.auto_tile_matmul_l0()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_plain_matmul_k_loop_keeps_one_acc_buffer(self):
+        """The generated fresh K-loop reaches memory planning on ONE L0C buffer.
+
+        This is the property the predicated body buys.  ``tile.matmul_acc``
+        declares ``set_output_reuses_input(0)``, so the ``tile.create`` seed,
+        the per-iteration result, the yield and the loop's ``return_var`` are
+        one Acc allocation by construction — no coalescing repair, and no
+        Acc->Acc ``tile.move`` (which no supported target can even emit).
+
+        Checked on both planners: PYPTO runs MemoryReuse, DSA_RP skips it and
+        leaves MaterializeSemanticAliases as the only aliasing step.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 2048], pl.BF16],
+                rhs: pl.Tensor[[2048, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                lhs_mat: pl.Tile[[16, 2048], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [16, 2048], target_memory=pl.Mem.Mat
+                )
+                rhs_mat: pl.Tile[[2048, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [2048, 64], target_memory=pl.Mem.Mat
+                )
+                c: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lhs_mat, rhs_mat)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        def assert_single_acc_buffer(after: ir.Program, planner: str) -> None:
+            printed = ir.python_print(after)
+            acc_bases = {
+                line.strip().split(":")[0] for line in printed.splitlines() if "tile.alloc(pl.Mem.Acc" in line
+            }
+            assert len(acc_bases) == 1, (
+                f"{planner}: expected ONE Acc allocation for the predicated K-loop, "
+                f"got {len(acc_bases)}: {sorted(acc_bases)}\n{printed}"
+            )
+            assert "tile.move" not in printed, (
+                f"{planner}: an in-place accumulator chain needs no tile.move, and an "
+                f"Acc->Acc copy is not realizable:\n{printed}"
+            )
+
+        tiled = passes.auto_tile_matmul_l0()(Before)
+
+        with passes.PassContext([], passes.VerificationLevel.BASIC):
+            pypto_after = passes.memory_reuse()(
+                passes.materialize_semantic_aliases()(passes.init_mem_ref()(tiled))
+            )
+        assert_single_acc_buffer(pypto_after, "PYPTO")
+
+        with passes.PassContext(
+            [],
+            passes.VerificationLevel.BASIC,
+            memory_planner=passes.MemoryPlanner.DSA_RP,
+        ):
+            dsa_after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(tiled))
+        assert_single_acc_buffer(dsa_after, "DSA_RP")
+
     def test_matmul_acc_pipelined(self):
         """``tile.matmul_acc`` with the same 16×64 @ 2048 BF16 shape rewrites
         into a uniform K-loop: every iteration is ``tile.matmul_acc``, with
-        the iter-arg init = caller's ``acc_init`` (no Vec placeholder, no
-        if-else branch since the accumulator chain is uniform from the
-        first iteration)."""
+        the iter-arg init = caller's ``acc_init`` (no Vec placeholder and no
+        ``init_cond`` predicate, since the caller's accumulator is already
+        live on the first iteration and must never be overwritten)."""
 
         @pl.program
         class Before:
@@ -333,13 +431,10 @@ class TestAutoTileMatmulL0KOnly:
                     sb: pl.Tile[[256, 64], pl.BF16, pl.Mem.Right] = pl.tile.extract(
                         rhs_mat, ko, 0, shape=[256, 64], target_memory=pl.Mem.Right
                     )
-                    if ko == 0:
-                        c_first: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(sa, sb)
-                        c_phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_first)
-                    else:
-                        c_acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(c_iter, sa, sb)
-                        c_phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_acc)
-                    c: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_phi)
+                    c_acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
+                        c_iter, sa, sb, ko == 0
+                    )
+                    c: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_acc)
                 out = pl.store(c, [0, 0], out)
                 return out
 
@@ -356,7 +451,7 @@ class TestAutoTileMatmulL0KOnly:
         per-iter Left extract slices from the staged Mat tile; ``acc_init`` is
         the caller's accumulator threaded into the iter-arg directly.  Because
         ``is_acc`` is true the body is the *uniform* ``matmul_acc`` shape with
-        **no** if-else and **no** ``tile.create`` placeholder (``BuildKLoopRewrite``
+        **no** ``init_cond`` predicate and **no** ``tile.create`` placeholder (``BuildKLoopRewrite``
         lines 325-327, ``BuildMatmulAccBody``).  16×64 @ 2048 BF16 with
         ``c_read=true`` picks (m=16, n=64, k=256) — the same tile the Mat-lhs
         ``test_matmul_acc_pipelined`` case pins."""
@@ -407,7 +502,7 @@ class TestAutoTileMatmulL0KOnly:
                     sb: pl.Tile[[256, 64], pl.BF16, pl.Mem.Right] = pl.tile.extract(
                         rhs_mat, ko, 0, shape=[256, 64], target_memory=pl.Mem.Right
                     )
-                    # Uniform matmul_acc body — no if-else branch.
+                    # Uniform matmul_acc body — no init_cond predicate.
                     c_acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(c_iter, sa, sb)
                     c: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_acc)
                 out = pl.store(c, [0, 0], out)
@@ -427,7 +522,7 @@ class TestAutoTileMatmulL0KOnly:
         ``c1 -> for1.return_var``; the running ``Substitute`` then rewrites the
         two ``pl.store`` uses to the new return_vars.  Each matmul is 16×64 @
         2048 BF16 (plain ``tile.matmul``, ``c_read=false``) → (m=16, n=64,
-        k=256), so each loop is the standard if-else K-loop of
+        k=256), so each loop is the standard predicated K-loop of
         ``test_skinny_gemm_pipelined``."""
 
         @pl.program
@@ -488,13 +583,10 @@ class TestAutoTileMatmulL0KOnly:
                     sb0: pl.Tile[[256, 64], pl.BF16, pl.Mem.Right] = pl.tile.extract(
                         b0, ko0, 0, shape=[256, 64], target_memory=pl.Mem.Right
                     )
-                    if ko0 == 0:
-                        c0_first: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(sa0, sb0)
-                        c0_phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c0_first)
-                    else:
-                        c0_acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(c0_iter, sa0, sb0)
-                        c0_phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c0_acc)
-                    c0: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c0_phi)
+                    c0_acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
+                        c0_iter, sa0, sb0, ko0 == 0
+                    )
+                    c0: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c0_acc)
                 out0 = pl.store(c0, [0, 0], out0)
                 a1: pl.Tile[[16, 2048], pl.BF16, pl.Mem.Mat] = pl.tile.load(
                     lhs1, [0, 0], [16, 2048], target_memory=pl.Mem.Mat
@@ -512,13 +604,10 @@ class TestAutoTileMatmulL0KOnly:
                     sb1: pl.Tile[[256, 64], pl.BF16, pl.Mem.Right] = pl.tile.extract(
                         b1, ko1, 0, shape=[256, 64], target_memory=pl.Mem.Right
                     )
-                    if ko1 == 0:
-                        c1_first: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(sa1, sb1)
-                        c1_phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c1_first)
-                    else:
-                        c1_acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(c1_iter, sa1, sb1)
-                        c1_phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c1_acc)
-                    c1: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c1_phi)
+                    c1_acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
+                        c1_iter, sa1, sb1, ko1 == 0
+                    )
+                    c1: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c1_acc)
                 out1 = pl.store(c1, [0, 0], out1)
                 return out0, out1
 
@@ -647,7 +736,17 @@ class TestAutoTileMatmulL0KOnly:
         ir.assert_structural_equal(After, Before)  # non-aligned K -> untouched
 
     def test_matmul_bias_k_split_applies_bias_once(self):
-        """The first K block applies bias; every later block only accumulates."""
+        """The first K block applies bias; every later block only accumulates.
+
+        ``tile.matmul_bias`` has no ``init_cond`` operand, so it cannot use the
+        predicated body a plain ``tile.matmul`` gets.  The first K block is
+        *head-peeled* out of the loop instead: it applies the bias exactly once
+        and mints the accumulator, and the loop then accumulates into it
+        uniformly.  An ``if ko == 0`` phi between ``tile.matmul_bias`` and
+        ``tile.matmul_acc`` would give one logical value two producers on two
+        L0C buffers, which no target can realize (there is no Acc->Acc copy) --
+        so this test asserts the branch is *absent*.
+        """
         _backend.reset_for_testing()
         _backend.set_backend_type(BackendType.Ascend910B)
 
@@ -672,6 +771,14 @@ class TestAutoTileMatmulL0KOnly:
         printed = ir.python_print(After)
         assert printed.count("pl.tile.matmul_bias(") == 1
         assert "pl.tile.matmul_acc(" in printed
+        assert "if " not in printed, (
+            "the bias first block is head-peeled, not branched: an IfStmt phi would put the "
+            f"accumulator on two L0C buffers\n{printed}"
+        )
+        # The peel is structural: matmul_bias precedes the loop, and the loop
+        # covers the *remaining* full blocks, so K is still covered exactly once.
+        assert printed.index("pl.tile.matmul_bias(") < printed.index("pl.pipeline("), printed
+        assert "pl.pipeline(256, 2048, 256" in printed, printed
         assert printed.count("pl.tile.move(bias_mat, target_memory=pl.Mem.Bias)") == 1
         assert "pl.tile.extract(bias_mat" not in printed
         _assert_ssa_valid(After, "test_matmul_bias_k_split_applies_bias_once")
@@ -836,6 +943,325 @@ def _assert_unchanged_by_pass(before, after):
     prints both ``pl.tile.cast(`` and no ``pl.tile.assemble(``.
     """
     ir.assert_structural_equal(after, _lower_to_tile_ops(before))
+
+
+_TILE_MATMUL_ACC = ir.get_op("tile.matmul_acc").name
+
+
+def _matmul_acc_calls(node) -> list:
+    """Every ``tile.matmul_acc`` Call under ``node``, in visit order.
+
+    Used by the predicated-accumulator tests to count operands per emission
+    site: the tail block must stay 3-operand while the loop body carries the
+    composed predicate as a 4th.
+    """
+    calls: list = []
+
+    class _Collector(ir.IRVisitor):
+        def visit_call(self, call):  # type: ignore[override]
+            if isinstance(call.op, ir.Op) and call.op.name == _TILE_MATMUL_ACC:
+                calls.append(call)
+            super().visit_call(call)
+
+    _Collector().visit_program(node)
+    return calls
+
+
+class TestAutoTileMatmulL0PredicatedAcc:
+    """A caller-written ``init_cond`` is threaded through the K-only emitter.
+
+    ``pl.tile.matmul_acc(acc, a, b, init_cond=...)`` is the split-K idiom: the
+    predicate means "this is the first K step of the *user's* reduction", so on
+    those steps the accumulator is overwritten instead of accumulated into.
+    AutoTileMatmulL0 used to refuse the 4-operand spelling outright, leaving an
+    oversized predicated call untiled.  It now tiles it, composing the caller's
+    predicate with the ``ko == 0`` its own K-loop introduces.
+
+    Per the pass's three emission sites (``BuildKLoopRewrite``):
+
+    * pipelined K-loop (``num_full >= 2``) → ``user_cond and ko == 0``
+    * lone straight-line full block (``num_full == 1``) → ``user_cond`` verbatim
+    * peeled partial tail → no predicate at all (it is never the first block)
+    """
+
+    @staticmethod
+    def _predicated_acc_program(K: int, M: int = 16, N: int = 64):
+        """A predicated ``tile.matmul_acc`` over Mat-resident [M, K] x [K, N]."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.BF16],
+                rhs: pl.Tensor[[K, N], pl.BF16],
+                acc_init: pl.Tile[[M, N], pl.FP32, pl.Mem.Acc],
+                first_k: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul_acc(acc_init, lhs_mat, rhs_mat, init_cond=(first_k == 0))
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        return Before
+
+    def test_predicated_matmul_acc_k_tiled_composes_predicate(self):
+        """16×64 @ 2048 BF16 → (m=16, n=64, k=256), 8 full blocks and no tail.
+
+        The whole point of B1: the call is tiled at all, and the two predicates
+        are ANDed rather than either one being dropped.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 2048], pl.BF16],
+                rhs: pl.Tensor[[2048, 64], pl.BF16],
+                acc_init: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc],
+                first_k: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                lhs_mat: pl.Tile[[16, 2048], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [16, 2048], target_memory=pl.Mem.Mat
+                )
+                rhs_mat: pl.Tile[[2048, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [2048, 64], target_memory=pl.Mem.Mat
+                )
+                c: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
+                    acc_init, lhs_mat, rhs_mat, init_cond=(first_k == 0)
+                )
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 2048], pl.BF16],
+                rhs: pl.Tensor[[2048, 64], pl.BF16],
+                acc_init: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc],
+                first_k: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                lhs_mat: pl.Tile[[16, 2048], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [16, 2048], target_memory=pl.Mem.Mat
+                )
+                rhs_mat: pl.Tile[[2048, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [2048, 64], target_memory=pl.Mem.Mat
+                )
+                # Iter-arg init is the caller's acc_init, exactly as for the
+                # unpredicated 3-operand spelling — only the call gains a 4th
+                # operand.
+                for ko, (c_iter,) in pl.pipeline(0, 2048, 256, init_values=(acc_init,), stage=2):
+                    sa: pl.Tile[[16, 256], pl.BF16, pl.Mem.Left] = pl.tile.extract(
+                        lhs_mat, 0, ko, shape=[16, 256], target_memory=pl.Mem.Left
+                    )
+                    sb: pl.Tile[[256, 64], pl.BF16, pl.Mem.Right] = pl.tile.extract(
+                        rhs_mat, ko, 0, shape=[256, 64], target_memory=pl.Mem.Right
+                    )
+                    c_acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
+                        c_iter, sa, sb, first_k == 0 and ko == 0
+                    )
+                    c: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_acc)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_predicated_matmul_acc_k_boundary_tail_is_unpredicated(self):
+        """K=544 → (k=192): two pipelined full blocks plus a 160-wide tail.
+
+        The tail is the one site where forwarding the predicate would be a
+        correctness bug — it would re-zero the accumulator on the last K block,
+        discarding the full blocks' partial sum.
+        """
+        Before = self._predicated_acc_program(K=544, M=64)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[64, 544], pl.BF16],
+                rhs: pl.Tensor[[544, 64], pl.BF16],
+                acc_init: pl.Tile[[64, 64], pl.FP32, pl.Mem.Acc],
+                first_k: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                lhs_mat: pl.Tile[[64, 544], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [64, 544], target_memory=pl.Mem.Mat
+                )
+                rhs_mat: pl.Tile[[544, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [544, 64], target_memory=pl.Mem.Mat
+                )
+                # Two full 192-wide blocks: the body ANDs the caller's predicate
+                # with the ko == 0 this loop introduces.
+                for ko, (c_iter,) in pl.pipeline(0, 384, 192, init_values=(acc_init,), stage=2):
+                    sa: pl.Tile[[64, 192], pl.BF16, pl.Mem.Left] = pl.tile.extract(
+                        lhs_mat, 0, ko, shape=[64, 192], target_memory=pl.Mem.Left
+                    )
+                    sb: pl.Tile[[192, 64], pl.BF16, pl.Mem.Right] = pl.tile.extract(
+                        rhs_mat, ko, 0, shape=[192, 64], target_memory=pl.Mem.Right
+                    )
+                    c_acc: pl.Tile[[64, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
+                        c_iter, sa, sb, first_k == 0 and ko == 0
+                    )
+                    c_main: pl.Tile[[64, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_acc)
+                # The 160-wide tail runs at K offset 384, so it is never the
+                # first block: it carries no predicate at all.
+                sa_t: pl.Tile[[64, 160], pl.BF16, pl.Mem.Left] = pl.tile.extract(
+                    lhs_mat, 0, 384, shape=[64, 160], target_memory=pl.Mem.Left
+                )
+                sb_t: pl.Tile[[160, 64], pl.BF16, pl.Mem.Right] = pl.tile.extract(
+                    rhs_mat, 384, 0, shape=[160, 64], target_memory=pl.Mem.Right
+                )
+                c_tail: pl.Tile[[64, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(c_main, sa_t, sb_t)
+                out = pl.store(c_tail, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_predicated_matmul_acc_single_full_block_carries_user_cond_unmodified(self):
+        """K=272 → (k=144): one straight-line full block plus a 128-wide tail.
+
+        The lone full block *is* the first K block, so a generated ``ko == 0``
+        term would be statically true; the caller's predicate is forwarded
+        verbatim instead.  The tail behind it still drops the predicate.
+        """
+        Before = self._predicated_acc_program(K=272, M=64)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[64, 272], pl.BF16],
+                rhs: pl.Tensor[[272, 64], pl.BF16],
+                acc_init: pl.Tile[[64, 64], pl.FP32, pl.Mem.Acc],
+                first_k: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                lhs_mat: pl.Tile[[64, 272], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [64, 272], target_memory=pl.Mem.Mat
+                )
+                rhs_mat: pl.Tile[[272, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [272, 64], target_memory=pl.Mem.Mat
+                )
+                # One 144-wide full block, straight-line: no pipeline loop, because
+                # a 1-trip one would be degenerate.  It *is* the first K block, so a
+                # generated ko == 0 term would be statically true — the caller's
+                # predicate is forwarded verbatim.
+                sa_0: pl.Tile[[64, 144], pl.BF16, pl.Mem.Left] = pl.tile.extract(
+                    lhs_mat, 0, 0, shape=[64, 144], target_memory=pl.Mem.Left
+                )
+                sb_0: pl.Tile[[144, 64], pl.BF16, pl.Mem.Right] = pl.tile.extract(
+                    rhs_mat, 0, 0, shape=[144, 64], target_memory=pl.Mem.Right
+                )
+                c_0: pl.Tile[[64, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
+                    acc_init, sa_0, sb_0, first_k == 0
+                )
+                # The 128-wide tail behind it still drops the predicate.
+                sa_t: pl.Tile[[64, 128], pl.BF16, pl.Mem.Left] = pl.tile.extract(
+                    lhs_mat, 0, 144, shape=[64, 128], target_memory=pl.Mem.Left
+                )
+                sb_t: pl.Tile[[128, 64], pl.BF16, pl.Mem.Right] = pl.tile.extract(
+                    rhs_mat, 144, 0, shape=[128, 64], target_memory=pl.Mem.Right
+                )
+                c_tail: pl.Tile[[64, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(c_0, sa_t, sb_t)
+                out = pl.store(c_tail, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_predicated_matmul_acc_tiling_preserves_ssa(self):
+        """The predicate is re-parented into the emitted loop body.
+
+        ``AnalyzeMatmul`` captures the caller's operand expression itself, and
+        the ForStmt that consumes it replaces the original AssignStmt in the
+        same SeqStmts — so the predicate's operands must still dominate their
+        single new use inside the loop.
+        """
+        After = passes.auto_tile_matmul_l0()(self._predicated_acc_program(K=2048))
+        _assert_ssa_valid(After, "test_predicated_matmul_acc_tiling_preserves_ssa")
+
+    def test_predicated_matmul_acc_uses_one_acc_buffer(self):
+        """One logical accumulator lands on one L0C buffer through Default.
+
+        This is what the predicated idiom exists for: no ``if ko == 0`` phi
+        means no second Acc tile to reconcile, and L0C has no Acc→Acc copy that
+        could reconcile one.
+        """
+        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 2048], pl.BF16],
+                rhs: pl.Tensor[[2048, 64], pl.BF16],
+                first_k: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [16, 2048], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [2048, 64], target_memory=pl.Mem.Mat)
+                # InCore parameters must be TensorType, so the accumulator is
+                # created here rather than passed in.
+                acc = pl.tile.create([16, 64], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+                c = pl.tile.matmul_acc(acc, lhs_mat, rhs_mat, init_cond=(first_k == 0))
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        allocated = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+        printed = ir.python_print(allocated)
+
+        acc_allocs = [line for line in printed.splitlines() if "tile.alloc(pl.Mem.Acc" in line]
+        assert len(acc_allocs) == 1, f"one logical accumulator, one L0C buffer; got {acc_allocs}"
+        assert not [
+            line for line in printed.splitlines() if "pl.tile.move(" in line and "pl.Mem.Acc" in line
+        ], "there is no Acc→Acc copy on the machine; the chain must not need one"
+
+    def test_literal_true_init_cond_is_composed_not_folded(self):
+        """A literal ``True`` predicate is composed, never folded to ``tile.matmul``.
+
+        Folding it back to a fresh ``tile.matmul`` would mint a second L0C
+        buffer and reintroduce the divergent accumulator the predicated form
+        exists to remove.  The backend emitter already selects the right
+        instruction for a literal predicate, so there is nothing to gain.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 2048], pl.BF16],
+                rhs: pl.Tensor[[2048, 64], pl.BF16],
+                acc_init: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [16, 2048], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [2048, 64], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul_acc(acc_init, lhs_mat, rhs_mat, init_cond=True)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+
+        printed = ir.python_print(After)
+        assert "pl.tile.matmul(" not in printed, "a true predicate must not become a fresh matmul"
+
+        (body_call,) = _matmul_acc_calls(After)
+        assert len(body_call.args) == 4
+        assert ir.python_print(body_call.args[3]) == "pl.const(1, pl.BOOL) and c_l0_ko == 0"
 
 
 class TestAutoTileMatmulL0MNTiling:
@@ -1265,13 +1691,10 @@ class TestAutoTileMatmulL0MNTiling:
                     b0: pl.Tile[[32, 256], pl.FP32, pl.Mem.Right] = pl.tile.extract(
                         rhs_mat, ko0, 0, shape=[32, 256], target_memory=pl.Mem.Right
                     )
-                    if ko0 == 0:
-                        c0_first: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(a0, b0)
-                        c0_phi: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c0_first)
-                    else:
-                        c0_acc: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(c0_iter, a0, b0)
-                        c0_phi: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c0_acc)
-                    c0: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c0_phi)
+                    c0_acc: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
+                        c0_iter, a0, b0, ko0 == 0
+                    )
+                    c0: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c0_acc)
                 out_t0: pl.Tensor[[512, 512], pl.FP32] = pl.store(c0, [0, 0], out)
                 # Sub-tile (mi=256, ni=0).
                 c1_init: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.create(
@@ -1284,13 +1707,10 @@ class TestAutoTileMatmulL0MNTiling:
                     b1: pl.Tile[[32, 256], pl.FP32, pl.Mem.Right] = pl.tile.extract(
                         rhs_mat, ko1, 0, shape=[32, 256], target_memory=pl.Mem.Right
                     )
-                    if ko1 == 0:
-                        c1_first: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(a1, b1)
-                        c1_phi: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c1_first)
-                    else:
-                        c1_acc: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(c1_iter, a1, b1)
-                        c1_phi: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c1_acc)
-                    c1: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c1_phi)
+                    c1_acc: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
+                        c1_iter, a1, b1, ko1 == 0
+                    )
+                    c1: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c1_acc)
                 out_t1: pl.Tensor[[512, 512], pl.FP32] = pl.store(c1, [256, 0], out_t0)
                 # Sub-tile (mi=0, ni=256).
                 c2_init: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.create(
@@ -1303,13 +1723,10 @@ class TestAutoTileMatmulL0MNTiling:
                     b2: pl.Tile[[32, 256], pl.FP32, pl.Mem.Right] = pl.tile.extract(
                         rhs_mat, ko2, 256, shape=[32, 256], target_memory=pl.Mem.Right
                     )
-                    if ko2 == 0:
-                        c2_first: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(a2, b2)
-                        c2_phi: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c2_first)
-                    else:
-                        c2_acc: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(c2_iter, a2, b2)
-                        c2_phi: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c2_acc)
-                    c2: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c2_phi)
+                    c2_acc: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
+                        c2_iter, a2, b2, ko2 == 0
+                    )
+                    c2: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c2_acc)
                 out_t2: pl.Tensor[[512, 512], pl.FP32] = pl.store(c2, [0, 256], out_t1)
                 # Sub-tile (mi=256, ni=256).
                 c3_init: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.create(
@@ -1322,13 +1739,10 @@ class TestAutoTileMatmulL0MNTiling:
                     b3: pl.Tile[[32, 256], pl.FP32, pl.Mem.Right] = pl.tile.extract(
                         rhs_mat, ko3, 256, shape=[32, 256], target_memory=pl.Mem.Right
                     )
-                    if ko3 == 0:
-                        c3_first: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(a3, b3)
-                        c3_phi: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c3_first)
-                    else:
-                        c3_acc: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(c3_iter, a3, b3)
-                        c3_phi: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c3_acc)
-                    c3: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c3_phi)
+                    c3_acc: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
+                        c3_iter, a3, b3, ko3 == 0
+                    )
+                    c3: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c3_acc)
                 out_t3: pl.Tensor[[512, 512], pl.FP32] = pl.store(c3, [256, 256], out_t2)
                 return out_t3
 
@@ -3387,6 +3801,42 @@ class TestAutoTileMatmulL0Skips:
         After = passes.auto_tile_matmul_l0()(Before)
         ir.assert_structural_equal(After, Before)
 
+    def test_oversized_predicated_matmul_acc_mn_still_deferred(self):
+        """A predicate does not unlock M/N tiling for ``tile.matmul_acc``.
+
+        ``TryFoldMNTiling`` / ``TryFoldMatScratch`` refuse every accumulate
+        tiling, so ``BuildFullKPipelined`` and ``BuildSplitKGrid`` — neither of
+        which threads a predicate — stay unreachable for the accumulate kind.
+        If a refactor ever lets a predicated call reach them, the predicate
+        would be dropped silently; this fails loudly instead.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[512, 512], pl.FP32],
+                rhs: pl.Tensor[[512, 512], pl.FP32],
+                acc_init: pl.Tile[[512, 512], pl.FP32, pl.Mem.Acc],
+                first_k: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[512, 512], pl.FP32]],
+            ) -> pl.Tensor[[512, 512], pl.FP32]:
+                lhs_mat: pl.Tile[[512, 512], pl.FP32, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [512, 512], target_memory=pl.Mem.Mat
+                )
+                rhs_mat: pl.Tile[[512, 512], pl.FP32, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [512, 512], target_memory=pl.Mem.Mat
+                )
+                c: pl.Tile[[512, 512], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
+                    acc_init, lhs_mat, rhs_mat, init_cond=(first_k == 0)
+                )
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        ir.assert_structural_equal(After, Before)
+
     def test_oversized_matmul_no_store_consumer_untouched(self):
         """An oversized plain ``tile.matmul`` whose result is *not* consumed by a
         2D ``tile.store`` cannot use the direct-store M/N fold.  Here the [512,
@@ -3779,8 +4229,10 @@ class TestAutoTileMatmulL0MatScratch:
 
         The 128x272 producer exceeds L0c and is consumed only by the second
         matmul, so AutoTile emits an output-stationary Mat-scratch grid with a
-        partial N boundary. This exact shape previously exposed a printer/parser
-        mismatch in an if/else tail variable.
+        partial N boundary. This exact shape once exposed a printer/parser
+        mismatch on the tail variable back when the consumer K-loop was an
+        if/else; the loop is a single predicated ``tile.matmul_acc`` now, and
+        the roundtrip instrument is what pins the print -> parse property.
         """
         import re  # noqa: PLC0415
 
@@ -3836,11 +4288,15 @@ class TestAutoTileMatmulL0MatScratch:
             re.DOTALL,
         )
         assert tail_extract, "the consumer K-loop must read the completed partial-N scratch variable"
-        if_pos = printed.find("if ", tail_extract.end())
-        else_pos = printed.find("else:", if_pos)
-        assert tail_extract.end() < if_pos < else_pos, (
-            "expected the partial-N scratch variable to feed the consumer's if/else K-loop"
+        left_bind = re.search(
+            rf"(?P<lhs>[A-Za-z_]\w*):[^\n]*=\s*pl\.tile\.extract\(\s*{re.escape(tail_var)},",
+            printed,
         )
+        assert left_bind, "the consumer K-loop's Left extract must bind a variable"
+        assert re.search(
+            rf"pl\.tile\.matmul_acc\([^)\n]*\b{re.escape(left_bind.group('lhs'))}\b[^)\n]*==\s*0\)",
+            printed,
+        ), "expected the partial-N scratch variable to feed the consumer's predicated K-loop"
         assert "pl.tile.cast(" not in printed, "the bf16 downcast must be folded into the Mat scratch"
         _assert_ssa_valid(After, "test_misaligned_n_mat_scratch_roundtrip")
 
@@ -4072,15 +4528,10 @@ class TestAutoTileMatmulL0FitsL0cCastFold:
                     b_sub: pl.Tile[[128, 128], pl.BF16, pl.Mem.Right] = pl.tile.extract(
                         b_mat, ko, 0, shape=[128, 128], target_memory=pl.Mem.Right
                     )
-                    if ko == 0:
-                        c_first: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(a_sub, b_sub)
-                        c_phi: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.yield_(c_first)
-                    else:
-                        c_acc: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
-                            c_iter, a_sub, b_sub
-                        )
-                        c_phi: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.yield_(c_acc)
-                    c: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.yield_(c_phi)
+                    c_acc: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
+                        c_iter, a_sub, b_sub, ko == 0
+                    )
+                    c: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.yield_(c_acc)
                 c_mat: pl.Tile[[128, 128], pl.BF16, pl.Mem.Mat] = pl.tile.create(
                     [128, 128], dtype=pl.BF16, target_memory=pl.Mem.Mat
                 )

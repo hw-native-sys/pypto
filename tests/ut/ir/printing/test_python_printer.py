@@ -1738,6 +1738,51 @@ def test_reinterpret_view_public_api_print_parse_roundtrip():
     assert python_print(reparsed, format=False) == printed
 
 
+def test_matmul_acc_init_cond_print_parse_roundtrip():
+    """``tensor.matmul_acc``'s predicate must print as a keyword argument.
+
+    The IR stores ``init_cond`` as the 4th positional operand, but the Tensor
+    DSL signature is ``matmul_acc(acc, lhs, rhs, a_trans, b_trans, init_cond)``
+    -- ``a_trans`` owns positional slot 4. Printing the predicate positionally
+    re-parses it as a transpose flag and then collides with the printed
+    ``a_trans=`` kwarg. ``tile.matmul_acc`` takes the predicate positionally and
+    must keep printing it that way.
+    """
+    source = textwrap.dedent("""\
+        @pl.program
+        class PredicatedSplitK:
+            @pl.function(type=pl.FunctionType.InCore)
+            def tensor_acc(
+                self,
+                acc: pl.Tensor[[64, 64], pl.FP32],
+                lhs: pl.Tensor[[64, 32], pl.FP16],
+                rhs: pl.Tensor[[32, 64], pl.FP16],
+                k0: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                return pl.tensor.matmul_acc(acc, lhs, rhs, init_cond=k0 == 0)
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def tile_acc(
+                self,
+                acc: pl.Tile[[64, 64], pl.FP32, pl.Mem.Acc],
+                lhs: pl.Tile[[64, 32], pl.FP16, pl.Mem.Mat],
+                rhs: pl.Tile[[32, 64], pl.FP16, pl.Mem.Mat],
+                k0: pl.Scalar[pl.INDEX],
+            ) -> pl.Tile[[64, 64], pl.FP32, pl.Mem.Acc]:
+                return pl.tile.matmul_acc(acc, lhs, rhs, k0 == 0)
+    """)
+
+    program = pl.parse_program(source)
+    printed = python_print(program, format=False)
+
+    assert "pl.tensor.matmul_acc(acc, lhs, rhs, init_cond=k0 == 0, a_trans=False, b_trans=False)" in printed
+    assert "pl.tile.matmul_acc(acc, lhs, rhs, k0 == 0)" in printed
+
+    reparsed = pl.parse_program(printed)
+    ir.assert_structural_equal(program, reparsed)
+    assert python_print(reparsed, format=False) == printed
+
+
 def test_full_special_case_preserves_serialized_attrs():
     """Special full-call printing must not drop pipeline membership."""
     source = textwrap.dedent("""\

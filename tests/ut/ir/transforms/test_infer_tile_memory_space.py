@@ -2682,10 +2682,10 @@ class MarkerOnlyScalarCall:
     def test_tensor_matmul_k_tiled_lhs_panel_loads_once(self):
         """A stationary GM->Mat panel survives AutoTile's K-pipeline fanout.
 
-        AutoTileMatmulL0 emits a K-dependent Left extract whose result feeds
-        both the initial matmul and the accumulating matmul_acc branch. Only
-        the whole-panel GM->Mat load is invariant; the L0 staging remains in
-        the inner pipeline.
+        AutoTileMatmulL0 emits a K-dependent Left extract feeding the single
+        predicated ``matmul_acc`` of the K-loop body. Only the whole-panel
+        GM->Mat load is invariant; the L0 staging remains in the inner
+        pipeline.
         """
         backend.set_backend_type(BackendType.Ascend910B)
 
@@ -2722,7 +2722,8 @@ class MarkerOnlyScalarCall:
         rhs_load = self._line_index(printed, "rhs_n__tile", "tile.load")
         assert len(lhs_loads) == 1
         assert len(lhs_extracts) == 1, "fixture must exercise K-dependent L0 staging"
-        assert len(self._line_indices(printed, "tile.matmul(")) == 1
+        # The K-loop body is one predicated accumulate; no peeled tile.matmul.
+        assert len(self._line_indices(printed, "tile.matmul(")) == 0
         assert len(self._line_indices(printed, "tile.matmul_acc(")) == 1
         assert lhs_loads[0] < loop
         assert all(index > loop for index in lhs_extracts)

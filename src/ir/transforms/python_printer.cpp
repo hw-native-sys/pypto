@@ -1204,6 +1204,13 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   // a shape. Print it as a kwarg so the round-trip matches the Python signature.
   const bool gather_row_kw_valid =
       (IsOp(op, "tile.gather_row") || IsOp(op, "tensor.gather_row")) && op->args_.size() == 6;
+  // tensor.matmul_acc's optional 4th operand is keyword-only in the DSL: the
+  // Tensor-level signature is ``matmul_acc(acc, lhs, rhs, a_trans, b_trans,
+  // init_cond)``, so ``a_trans`` already owns positional slot 4 and printing
+  // the predicate there re-parses as a transpose flag (and then collides with
+  // the printed ``a_trans=`` kwarg). ``tile.matmul_acc`` takes the predicate in
+  // positional slot 4 and needs no such fixup.
+  const bool matmul_acc_kw_init_cond = IsOp(op, "tensor.matmul_acc") && op->args_.size() == 4;
   const bool mgather = IsOp(op, "tile.mgather");
   const int mgather_coalesce = mgather ? op->GetKwarg<int>("coalesce", 0) : 0;
   const bool mgather_kw_scratch = mgather && mgather_coalesce == 1 && op->args_.size() >= 3;
@@ -1213,6 +1220,7 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   // Print positional arguments
   for (size_t i = 0; i < op->args_.size(); ++i) {
     if (gather_row_kw_valid && i == 5) continue;
+    if (matmul_acc_kw_init_cond && i == 3) continue;
     if (mgather && i >= 2) continue;
     if (i > 0) stream_ << ", ";
 
@@ -1235,6 +1243,11 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   if (gather_row_kw_valid) {
     stream_ << ", valid_shape=";
     VisitExpr(op->args_[5]);
+    need_comma = true;
+  }
+  if (matmul_acc_kw_init_cond) {
+    stream_ << ", init_cond=";
+    VisitExpr(op->args_[3]);
     need_comma = true;
   }
   if (mgather_kw_scratch) {

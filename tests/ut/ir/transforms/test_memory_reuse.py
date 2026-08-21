@@ -2655,6 +2655,21 @@ class TestControlFlow:
         ir.assert_structural_equal(After, Expected)
 
 
+def _assert_single_acc_buffer_no_move(after: ir.Program, label: str) -> None:
+    """Assert an accumulator chain landed on ONE Acc allocation with no copy.
+
+    Two Acc bases, or a surviving ``tile.move``, both mean the same thing: one
+    logical accumulator ended up on two L0C buffers, which the hardware cannot
+    realize (nothing reads L0C except the FIXPIPE drain).
+    """
+    printed = ir.python_print(after)
+    acc_bases = {b for b in _collect_tile_memref_bases(after).values() if "acc" in b}
+    assert len(acc_bases) == 1, (
+        f"{label}: expected ONE Acc allocation, got {len(acc_bases)}: {sorted(acc_bases)}\n{printed}"
+    )
+    assert "tile.move" not in printed, f"{label}: an in-place accumulator chain needs no move:\n{printed}"
+
+
 class TestTopDownRetargeter:
     """Tests for the Step-0 top-down retargeter inside MemoryReuse.
 
@@ -3392,9 +3407,152 @@ class TestTopDownRetargeter:
         After = _run_pipeline(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_predicated_pipelined_kloop_uses_one_acc_buffer(self):
+        """The migration target for the peel the sibling test rejects.
 
-class TestMetadata:
-    """Function metadata should survive MemoryReuse rewrites."""
+        Spelling the same stage-2 pipelined split-K reduction as one predicated
+        ``tile.matmul_acc(c_iter, sa, sb, init_cond=(ko == 0))`` keeps the whole
+        accumulator chain (``tile.create`` init + the per-block accumulate + the
+        loop yield) on ONE Acc allocation with no ``tile.move`` -- exactly what
+        the deleted coalescer used to reconstruct after the fact. Runs the real
+        ``lower_pipeline_loops`` under BASIC verification, so this checks legal
+        IR, not just a buffer count.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[176, 192], pl.BF16],
+                rhs: pl.Tensor[[192, 176], pl.BF16],
+                out: pl.Out[pl.Tensor[[176, 176], pl.FP32]],
+            ) -> pl.Tensor[[176, 176], pl.FP32]:
+                lhs_mat: pl.Tile[[176, 192], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [176, 192], target_memory=pl.Mem.Mat
+                )
+                rhs_mat: pl.Tile[[192, 176], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [192, 176], target_memory=pl.Mem.Mat
+                )
+                c_init: pl.Tile[[176, 176], pl.FP32, pl.Mem.Acc] = pl.tile.create(
+                    [176, 176], dtype=pl.FP32, target_memory=pl.Mem.Acc
+                )
+                for ko, (c_iter,) in pl.pipeline(0, 192, 64, init_values=(c_init,), stage=2):
+                    sa: pl.Tile[[176, 64], pl.BF16, pl.Mem.Left] = pl.tile.extract(
+                        lhs_mat, 0, ko, shape=[176, 64], target_memory=pl.Mem.Left
+                    )
+                    sb: pl.Tile[[64, 176], pl.BF16, pl.Mem.Right] = pl.tile.extract(
+                        rhs_mat, ko, 0, shape=[64, 176], target_memory=pl.Mem.Right
+                    )
+                    c_acc: pl.Tile[[176, 176], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
+                        c_iter, sa, sb, init_cond=(ko == 0)
+                    )
+                    c: pl.Tile[[176, 176], pl.FP32, pl.Mem.Acc] = pl.yield_(c_acc)
+                result: pl.Tensor[[176, 176], pl.FP32] = pl.store(c, [0, 0], out)
+                return result
+
+        peeled = passes.init_mem_ref()(passes.lower_pipeline_loops()(Before))
+
+        with passes.PassContext([], passes.VerificationLevel.BASIC):
+            legacy_after = passes.memory_reuse()(passes.materialize_semantic_aliases()(peeled))
+        _assert_single_acc_buffer_no_move(legacy_after, "PYPTO")
+
+        with passes.PassContext(
+            [],
+            passes.VerificationLevel.BASIC,
+            memory_planner=passes.MemoryPlanner.DSA_RP,
+        ):
+            dsa_after = passes.materialize_semantic_aliases()(peeled)
+        _assert_single_acc_buffer_no_move(dsa_after, "DSA_RP")
+
+    def test_peel_inside_a_carrying_loop_still_compiles(self):
+        """The common source spelling of split-K -- an ``if k == 0`` peel *inside*
+        a loop that carries the accumulator -- must keep compiling.
+
+        ``MaterializeSemanticAliases`` propagates the carry's buffer down through
+        the if-phi into BOTH arms, so the two producers land on the accumulator
+        buffer and no divergence ever reaches YieldFixup. This is the shape of
+        every existing peeled kernel, so it is the regression guard that the
+        diagnostic does not fire on code that compiles today.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 192], pl.BF16],
+                rhs: pl.Tensor[[192, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                lhs_mat: pl.Tile[[16, 192], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [16, 192], target_memory=pl.Mem.Mat
+                )
+                rhs_mat: pl.Tile[[192, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [192, 64], target_memory=pl.Mem.Mat
+                )
+                c_init: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.create(
+                    [16, 64], dtype=pl.FP32, target_memory=pl.Mem.Acc
+                )
+                for ko, (c_iter,) in pl.range(0, 192, 64, init_values=(c_init,)):
+                    sa: pl.Tile[[16, 64], pl.BF16, pl.Mem.Left] = pl.tile.extract(
+                        lhs_mat, 0, ko, shape=[16, 64], target_memory=pl.Mem.Left
+                    )
+                    sb: pl.Tile[[64, 64], pl.BF16, pl.Mem.Right] = pl.tile.extract(
+                        rhs_mat, ko, 0, shape=[64, 64], target_memory=pl.Mem.Right
+                    )
+                    if ko == 0:
+                        c_first: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(sa, sb)
+                        c_phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_first)
+                    else:
+                        c_acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(c_iter, sa, sb)
+                        c_phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_acc)
+                    c: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_phi)
+                result: pl.Tensor[[16, 64], pl.FP32] = pl.store(c, [0, 0], out)
+                return result
+
+        _assert_single_acc_buffer_no_move(_run_pipeline(Before), "peel-in-carry")
+
+    def test_predicated_accumulate_inside_a_carrying_loop(self):
+        """The ``init_cond`` spelling of the peel above lowers to the same result.
+
+        Keeps the diagnostic's advice testable rather than aspirational: the form
+        the message recommends must reach one Acc allocation with no ``tile.move``.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 192], pl.BF16],
+                rhs: pl.Tensor[[192, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                lhs_mat: pl.Tile[[16, 192], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [16, 192], target_memory=pl.Mem.Mat
+                )
+                rhs_mat: pl.Tile[[192, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [192, 64], target_memory=pl.Mem.Mat
+                )
+                c_init: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.create(
+                    [16, 64], dtype=pl.FP32, target_memory=pl.Mem.Acc
+                )
+                for ko, (c_iter,) in pl.range(0, 192, 64, init_values=(c_init,)):
+                    sa: pl.Tile[[16, 64], pl.BF16, pl.Mem.Left] = pl.tile.extract(
+                        lhs_mat, 0, ko, shape=[16, 64], target_memory=pl.Mem.Left
+                    )
+                    sb: pl.Tile[[64, 64], pl.BF16, pl.Mem.Right] = pl.tile.extract(
+                        rhs_mat, ko, 0, shape=[64, 64], target_memory=pl.Mem.Right
+                    )
+                    c_acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
+                        c_iter, sa, sb, init_cond=(ko == 0)
+                    )
+                    c: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_acc)
+                result: pl.Tensor[[16, 64], pl.FP32] = pl.store(c, [0, 0], out)
+                return result
+
+        _assert_single_acc_buffer_no_move(_run_pipeline(Before), "init_cond-in-carry")
 
     def test_preserves_split_metadata(self):
         @pl.program
