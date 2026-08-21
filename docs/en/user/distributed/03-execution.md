@@ -132,6 +132,39 @@ When a host endpoint is a `torch.Tensor`, it only needs to be CPU-contiguous;
 it may be an ordinary tensor allocated after `prepare()`. It does not need
 `.share_memory_()`, pre-fork allocation, or `inherited_host_tensors`.
 
+### Skipping the staging copy
+
+Staging costs one full host-side copy of the payload, which for a large resident weight
+is worth avoiding. A range can be named in place instead — no staging buffer, no
+memcpy — when the child can already see it and nothing will change it:
+
+- it was registered through `inherited_host_tensors`, so it predates the fork and every
+  child holds it at the same address; **and**
+- it is either shared memory (`.share_memory_()`, which `torch.is_shared()` reports), or
+  the caller lists it in `immutable_host_tensors`.
+
+The second option exists because `is_shared()` answers a different question than the one
+that matters. It reports whether the storage is a shared-memory allocation; what decides
+safety is whether anything writes those bytes after the fork. A read-only `MAP_SHARED`
+file mapping wrapped with `mmap` + `numpy.frombuffer` + `torch.from_numpy` is genuinely
+shared and still reports `False`, so it would be copied needlessly. Declaring it says what
+inference cannot see.
+
+```python
+weights = map_readonly_shared(path)          # mmap-backed, is_shared() == False
+with compiled.prepare(
+    inherited_host_tensors=[weights],        # visible in every child
+    immutable_host_tensors=[weights],        # and never written after this point
+) as rt:
+    resident = rt.alloc_stacked_tensor(weights)
+```
+
+`immutable_host_tensors` is a promise about **uploads**. A declared range used as a
+`copy_from` destination is still staged: writing a copy-on-write page in the child leaves
+the parent reading the old contents, and writing a read-only mapping faults. Both are
+worse than the copy the declaration was meant to avoid. Anything not declared, or
+allocated after `prepare()`, keeps staging exactly as before.
+
 ## One-Shot vs Persistent Worker
 
 ### One-Shot
