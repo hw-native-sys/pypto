@@ -680,28 +680,9 @@ layout/fractal/pad/compact mode from the associated TileView (when available):
 | `compact` | `TileView::compact` | `null(0)`, `normal(1)` | `null(0)` |
 
 When no TileView is associated with the MemRef, the codegen falls back to the default values listed above.
-The `compact` attribute is omitted for its null default. Two paths set `normal(1)` automatically:
-
-- A partial `tile.extract` into L0A/L0B, so TEXTRACT transfers only the logical `valid_shape` instead
-  of treating box-alignment padding as data.
-- An **Acc (L0C) tile whose valid rows are not provably equal to its physical rows**, as produced by the
-  `tile.matmul`, `tile.matmul_bias`, and `tile.matmul_mx` deducers. `mad` always lays the product out
-  with an N-fractal stride of `ceil(validRow/16)*16` taken from the *lhs* valid rows, while every Acc
-  reader derives its stride from the compile-time physical `Rows` unless the tile is compact. Without
-  the flag a runtime-narrowed accumulator is read back at a different pitch than it was written at.
-  Only the **row** extent decides this — every Acc stride the ISA derives is a function of `validRow`
-  alone, so a narrowed column extent keeps the non-compact form.
-
-  Compact is stamped **only where the accumulator's layout is established**, never re-derived on an
-  alias of it. `tile.matmul_acc` (and `matmul_mx_acc`) *inherit* the accumulator operand's mode,
-  because the op reuses that operand's buffer in place and codegen aliases the two only when their
-  full tile config matches. `tile.set_validshape` likewise inherits: it is metadata-only and may run
-  *after* the buffer was written, so the pitch its readers must use is the one `mad` already wrote at
-  — deriving a new one from the narrowed rows would re-interpret bytes that were never repacked.
-
-Note that the Acc → L1 readers (`TExtractAccToMat`, `TMovCcToCb`) have no `CompactMode` branch in
-PTO-ISA on either a2a3 or a5, so a runtime-narrowed accumulator consumed by `tile.extract` /
-`tile.move` into L1 still reads at the physical `Rows` pitch. That gap needs a matching PTO-ISA change.
+The `compact` attribute is omitted for its null default. A partial `tile.extract` into L0A/L0B sets
+`normal(1)` automatically so TEXTRACT transfers only the logical `valid_shape` instead of treating
+box-alignment padding as data.
 
 ## Kernel Wrapper Generation (PTO Backend)
 

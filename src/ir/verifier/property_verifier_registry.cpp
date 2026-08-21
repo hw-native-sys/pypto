@@ -74,6 +74,11 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   // it sits in GetStructuralProperties() and fires at pipeline input rather than
   // after a particular pass.
   Register(IRProperty::AtomicAddDtypeValid, CreateAtomicAddDtypeValidPropertyVerifier);
+
+  // ParamDirectionsSound: the safety net direction inference never had. A
+  // written parameter left declared In drops its writer's dependency edge, and
+  // that failure only surfaces on device.
+  Register(IRProperty::ParamDirectionsSound, CreateParamDirectionsSoundPropertyVerifier);
   Register(IRProperty::InlineFunctionsEliminated, CreateInlineFunctionsEliminatedPropertyVerifier);
   Register(IRProperty::OrchestrationReferencesResolved,
            CreateOrchestrationReferencesResolvedPropertyVerifier);

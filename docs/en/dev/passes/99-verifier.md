@@ -87,6 +87,56 @@ The `run_verifier()` utility creates a standalone `Pass` for ad-hoc use in custo
 | **TileMemoryInferred** | TileMemoryInferred | Every `TileType` variable **bound by an `AssignStmt`** carries a resolved `memory_space_`, **and** every constrained argument of a `Call` (in an `AssignStmt` or `EvalStmt`) sits in a space the op's registered `input_constraints` allow (`set_input_memory`). The visitor walks those two statement kinds only, so `ForStmt` `iter_args_` / `return_vars_` and `IfStmt` `return_vars_` annotations are **not** checked. The second half is the load-bearing one: an op whose declared input space is violated has no legal lowering, and the symptom always surfaces far downstream. `tile.cast` requires `Vec`; fed an `Acc` operand it leaves the cube→vector cut with no boundary `tile.move`, so `ExpandMixedKernel` splits the kernel with the cast referencing a var defined only on the cube half — the failure then lands 11+ passes later as an illegal `Acc->Acc tile.move` in `MemoryReuse` or as `no MLIR mapping for MemRef base` in PTO codegen, neither of which names the offending op. The verifier reads the `TileType` annotation directly rather than the analyzer's `var_memory_` map, so it stays honest about spaces the analyzer failed to record. **Produced by** `InferTileMemorySpace` and listed in `GetVerifiedProperties()`, so `PassPipeline` auto-verifies it right after that pass. **Fix**: the pass inserts the required `tile.move` itself; a failure here is a compiler bug in `InferTileMemorySpace`, not an authoring error. |
 | **AtomicAddDtypeValid** | AtomicAddDtypeValid | Every atomic-add write into global memory targets a destination dtype the backend's store pipe can combine. Covers every atomic site in one place: `tile.store`, `tensor.assemble`, `pld.tensor.put`, `pld.tile.put`, `pld.tensor.remote_store` and `pld.tile.remote_store`. Only `bf16` varies by backend — pto-isa lowers it to `SetAtomicAdd<bfloat16_t>` -> `set_atomic_bf16`, honoured on Ascend910B (A2/A3) and not on Ascend950 (A5) (`BackendHandler::SupportsBf16AtomicAdd`); the remaining hardware atomic-add dtypes (`FP32/FP16/INT32/INT16/INT8`) are accepted everywhere and gated backend-neutrally in the op deducers. The remote-put path is the *same* mechanism as the local store, not a parallel one: pto-isa's comm `TPut` streams the transfer through its VEC staging tile and lands each chunk with `TSTORE_IMPL<..., AtomicAdd>`, and `remote_store` emits a `pto.tstore` directly, so one predicate governs every site — and ptoas carries no atomic dtype rule of its own (`TPutOp::verify` checks element-type agreement and shapes only), so without this check the program reaches a pto-isa `static_assert` in generated code the user never wrote. Listed in **`GetStructuralProperties()`**, not produced by any pass: nothing here depends on lowering (the atomic kwarg and the destination dtype are present in the user's own IR), so `PassPipeline` verifies it at `pipeline_input` and the error carries the original `Span`. Skipped when the backend is unconfigured (nothing to verify against). **Fix**: accumulate into an `FP32` tensor and cast to `bf16` after the reduction. |
 
+### ParamDirectionsSound
+
+**Property**: `ParamDirectionsSound` — no parameter declared `In` is written by
+its own function body.
+
+This is the check direction inference never had. Every pass that derives
+directions builds a set of "which argument does this call write", and it reads
+that set from each operator's registry declaration (`set_arg_effect`, see
+[Operators](../ir/05-operators.md#argument-effects)) plus each callee's own
+`param_directions_`. An operator that never declared its effects reads as a pure
+consumer: its write disappears, the parameter stays `In`, no RAW edge is emitted
+against it, and the failure surfaces on device as a race or a scheduler deadlock
+rather than at compile time. `pld.system.notify` shipped that way (#2391) and
+`tile.mscatter` was still in that state when this check was written.
+
+**How it runs.** Registered as `DiagnosticCheck::ParamDirectionsUnsound`, a
+**warning** at `DiagnosticPhase::PostPipeline`, and available as an `IRProperty`
+for a caller that wants it fatal:
+
+```python
+props = passes.IRPropertySet()
+props.insert(passes.IRProperty.ParamDirectionsSound)
+diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
+```
+
+Three choices are load-bearing:
+
+- **On the finished program, not after one pass.** A Group/Spmd wrapper forwards
+  its parameters to an inner kernel, and its own signature legitimately reads
+  `In` for a parameter that kernel writes until `DeriveCallDirections` phase 0
+  materialises the effective directions back into the IR. The invariant only
+  holds once the pipeline is done.
+- **Orchestration functions are skipped.** Their directions are the user's
+  declaration and their parameters are the host ABI — a pure `Out` parameter is
+  auto-allocated by the host in return-style calls, so flipping one is a
+  migration the user makes, not an inference the compiler completes.
+- **A warning, not an error.** It never invents a write, but it does report
+  programs that compile and run today; the promotion path is the `IRProperty`
+  above, once the report is empty.
+
+**Known boundary**: the write reaches its parameter through
+`BufferRootCollector`, which treats `tensor.slice` as a fresh root rather than an
+alias of its source. A store into a slice of a parameter is not reported. That
+under-reports, restoring today's behaviour for that shape; over-reporting would
+reject correct programs.
+
+**Fix**: if the operator really does write the argument, declare it with
+`.set_arg_effect(...)` in its `REGISTER_OP` block so direction inference can see
+it. If the parameter really is an output, declare it `pl.Out` or `pl.InOut`.
+
 ### SSAVerify
 
 **Error types** (`ssa::ErrorType`):

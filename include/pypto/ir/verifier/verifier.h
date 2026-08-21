@@ -111,6 +111,18 @@ PropertyVerifierPtr CreateAccToGmStoreValidPropertyVerifier();
 PropertyVerifierPtr CreateAtomicAddDtypeValidPropertyVerifier();
 
 /**
+ * @brief Factory function for creating ParamDirectionsSound property verifier
+ *
+ * Rejects a parameter declared `In` that its own function body writes. Direction
+ * inference derives its write set from each operator's declared argument
+ * effects, so an operator that never declared them reads as a pure consumer and
+ * its write silently vanishes — taking the dependency edge with it.
+ *
+ * @return Shared pointer to ParamDirectionsSound PropertyVerifier
+ */
+PropertyVerifierPtr CreateParamDirectionsSoundPropertyVerifier();
+
+/**
  * @brief Factory function for creating NormalizedStmtStructure property verifier
  * @return Shared pointer to NormalizedStmtStructure PropertyVerifier
  */

@@ -37,6 +37,8 @@ std::string DiagnosticCheckToString(DiagnosticCheck check) {
       return "TileInnermostDimGranularity";
     case DiagnosticCheck::OutParamWriteDropped:
       return "OutParamWriteDropped";
+    case DiagnosticCheck::ParamDirectionsUnsound:
+      return "ParamDirectionsUnsound";
     default:
       return "Unknown";
   }
@@ -87,6 +89,17 @@ DiagnosticCheckRegistry::DiagnosticCheckRegistry() {
   // parameter the user wrote, before ConvertToSSA versions it to `out__ssa_v2`.
   Register(DiagnosticCheck::OutParamWriteDropped, DiagnosticSeverity::Warning, DiagnosticPhase::PrePipeline,
            /*hint_code=*/"", CreateOutParamWriteDroppedWarningVerifier);
+  // Runs on the finished program, not after any one pass: a wrapper's signature
+  // legitimately lags its inner kernel's until DeriveCallDirections materialises
+  // the effective directions, so the invariant only holds once the pipeline is
+  // done. A warning rather than an error because the residual reports are
+  // programs that compile and run today — the failure it names is a dropped
+  // dependency, which is severe but not reproducible from the IR alone. The
+  // check is available as IRProperty::ParamDirectionsSound for a caller that
+  // wants it fatal, which is the promotion path once the report is empty.
+  Register(DiagnosticCheck::ParamDirectionsUnsound, DiagnosticSeverity::Warning,
+           DiagnosticPhase::PostPipeline,
+           /*hint_code=*/"", CreateParamDirectionsSoundPropertyVerifier);
 
   // Performance hints (issue #1180) — run once at the end of the pipeline,
   // after tile shapes and memory layout are fully resolved.
