@@ -3320,6 +3320,71 @@ class TestNamedInheritedHostRanges:
         assert ctypes.string_at(staged.base, nbytes) == ctypes.string_at(host.data_ptr(), nbytes)
         rt.close()
 
+    def test_a_declared_immutable_range_is_named_even_when_not_shared(self, patched_setup):
+        """The case inference cannot reach: safe to name, but `is_shared()` says otherwise.
+
+        A read-only `MAP_SHARED` file mapping wrapped through `mmap` + `from_numpy` is shared at
+        the OS level and reports `is_shared() == False`, so it is staged despite being the single
+        biggest beneficiary of naming. The caller declaring it closes that gap.
+        """
+        host = torch.zeros(4, 4, dtype=torch.float32)  # NOT shared
+        rt = DistributedWorker(
+            _fake_compiled([_param("a", [4, 4])], []),
+            inherited_host_tensors=[host],
+            immutable_host_tensors=[host],
+        )
+        dev = self._dev(rt)
+        nbytes = host.numel() * host.element_size()
+        patched_setup["worker"].create_buffer.reset_mock()
+
+        rt.copy_to(dev.data_ptr, host.data_ptr(), nbytes)
+
+        named = patched_setup["worker"].copy_to.call_args.args[1]
+        assert isinstance(named, _NamedHostRange)
+        assert (named.base, named.nbytes) == (host.data_ptr(), nbytes)
+        patched_setup["worker"].create_buffer.assert_not_called()
+        rt.close()
+
+    def test_declaring_a_range_does_not_name_its_neighbours(self, patched_setup):
+        """The declaration is per range, so an undeclared private tensor still stages."""
+        declared = torch.zeros(4, 4, dtype=torch.float32)
+        other = torch.zeros(4, 4, dtype=torch.float32)
+        rt = DistributedWorker(
+            _fake_compiled([_param("a", [4, 4])], []),
+            inherited_host_tensors=[declared, other],
+            immutable_host_tensors=[declared],
+        )
+        dev = self._dev(rt)
+        nbytes = other.numel() * other.element_size()
+
+        rt.copy_to(dev.data_ptr, other.data_ptr(), nbytes)
+
+        assert not isinstance(patched_setup["worker"].copy_to.call_args.args[1], _NamedHostRange)
+        rt.close()
+
+    def test_a_declared_range_must_still_be_inherited(self, patched_setup):
+        """Declaring immutability says nothing about reachability: a post-fork tensor has no
+        mapping in the child, so it stages regardless of what the caller promises."""
+        host = torch.zeros(4, 4, dtype=torch.float32)
+        rt = DistributedWorker(
+            _fake_compiled([_param("a", [4, 4])], []),
+            immutable_host_tensors=[host],
+        )
+        dev = self._dev(rt)
+        nbytes = host.numel() * host.element_size()
+
+        rt.copy_to(dev.data_ptr, host.data_ptr(), nbytes)
+
+        assert not isinstance(patched_setup["worker"].copy_to.call_args.args[1], _NamedHostRange)
+        rt.close()
+
+    def test_a_non_cpu_declared_tensor_is_rejected(self, patched_setup):
+        with pytest.raises(ValueError, match="immutable_host_tensors must be contiguous CPU"):
+            DistributedWorker(
+                _fake_compiled([_param("a", [4, 4])], []),
+                immutable_host_tensors=[torch.zeros(4, 4).t()],
+            )
+
     def test_copy_to_stages_a_partially_overlapping_range(self, patched_setup):
         host = torch.zeros(8, dtype=torch.float32).share_memory_()
         rt = DistributedWorker(_fake_compiled([_param("a", [4, 4])], []), inherited_host_tensors=[host])
