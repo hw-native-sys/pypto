@@ -2750,10 +2750,16 @@ class YieldFixupMutator : public IRMutator {
     std::vector<VarPtr> new_return_vars = if_stmt->return_vars_;
 
     for (size_t i = 0; i < new_return_vars.size(); ++i) {
+      // AsVarLike, not As<Var>: a branch may yield the enclosing loop's IterArg
+      // unchanged (`if cond: acc = f(acc)` leaves `yield acc_iter` on the other
+      // arm).  IterArg has its own ObjectKind, so As<Var> returns null there and
+      // the arm would silently skip its reconciling move while the phi's
+      // return_var is still patched onto the sibling arm's buffer -- leaving the
+      // phi buffer unwritten on that path and feeding garbage into the carry.
       VarPtr then_var =
-          (then_yield && i < then_yield->value_.size()) ? As<Var>(then_yield->value_[i]) : nullptr;
+          (then_yield && i < then_yield->value_.size()) ? AsVarLike(then_yield->value_[i]) : nullptr;
       VarPtr else_var =
-          (else_yield && i < else_yield->value_.size()) ? As<Var>(else_yield->value_[i]) : nullptr;
+          (else_yield && i < else_yield->value_.size()) ? AsVarLike(else_yield->value_[i]) : nullptr;
 
       auto then_tile = then_var ? GetTileTypeWithMemRef(then_var->GetType()) : nullptr;
       auto else_tile = else_var ? GetTileTypeWithMemRef(else_var->GetType()) : nullptr;

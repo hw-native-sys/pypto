@@ -57,6 +57,51 @@ def _collect_allocated_tile_ranges(program: ir.Program) -> dict[str, tuple[int, 
     return ranges
 
 
+def _assert_if_phi_arms_write_the_phi_buffer(program: ir.Program) -> None:
+    """Assert every arm of every tile-typed if-phi yields into the phi's own buffer.
+
+    An arm whose yield value lives on a different buffer leaves the phi buffer
+    unwritten whenever that arm runs, so whatever consumes the phi -- typically
+    the loop-carry writeback -- reads whatever the buffer happened to hold.
+    """
+
+    def branch_yield(body: ir.Stmt) -> ir.YieldStmt | None:
+        if isinstance(body, ir.YieldStmt):
+            return body
+        if isinstance(body, ir.SeqStmts):
+            return next((s for s in body.stmts if isinstance(s, ir.YieldStmt)), None)
+        return None
+
+    checked = 0
+
+    class _ArmChecker(ir.IRVisitor):
+        def visit_if_stmt(self, op):  # type: ignore[override]
+            nonlocal checked
+            bodies = [op.then_body] + ([] if op.else_body is None else [op.else_body])
+            for body in bodies:
+                yield_stmt = branch_yield(body)
+                if yield_stmt is None:
+                    continue
+                for i, phi in enumerate(op.return_vars):
+                    if i >= len(yield_stmt.value):
+                        continue
+                    arm_value = yield_stmt.value[i]
+                    phi_type, arm_type = phi.type, arm_value.type
+                    if not isinstance(phi_type, ir.TileType) or phi_type.memref is None:
+                        continue
+                    assert isinstance(arm_type, ir.TileType) and arm_type.memref is not None
+                    arm_name = arm_value.name_hint if isinstance(arm_value, ir.Var) else str(arm_value)
+                    assert ir.MemRef.same_allocation(arm_type.memref, phi_type.memref), (
+                        f"if-phi '{phi.name_hint}' has an arm yielding '{arm_name}' from a different buffer"
+                    )
+                    checked += 1
+            super().visit_if_stmt(op)
+
+    for function in program.functions.values():
+        _ArmChecker().visit_stmt(function.body)
+    assert checked, "no tile-typed if-phi arm was checked -- the assertion is vacuous"
+
+
 class TestBasic:
     """Core reuse logic: chain reuse, producer-consumer, size/shape, transitive conflicts."""
 
@@ -1984,6 +2029,193 @@ class TestYieldFixup:
         After = _run_pipeline(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_if_phi_arm_yielding_iter_arg_still_copies_into_the_phi_buffer(self):
+        """Every arm of an if-phi must write the phi's buffer, IterArg arms included.
+
+        ``tile.mrgsort_format1`` is ``.not_inplace_safe()`` and reads
+        ``tile_iter``, so the retargeter declines to place ``merged`` on the
+        carry buffer (see ``test_retargeter_declines_for_not_inplace_safe_op``)
+        and the phi lands on its own ``mem_vec_6``.  The ``else`` arm yields the
+        loop's ``tile_iter`` unchanged -- an ``IterArg``, which has its own
+        ObjectKind and is *not* matched by ``As<Var>``.  Skipping it left
+        ``mem_vec_6`` unwritten whenever the ``else`` arm ran, and the carry
+        writeback below then copied that stale buffer back onto the carry,
+        silently destroying the loop-carried value.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                src_tensor: pl.Tensor[[1, 2048], pl.FP32],
+                idx_tensor: pl.Tensor[[1, 2048], pl.UINT32],
+                val_output: pl.Out[pl.Tensor[[1, 2048], pl.FP32]],
+            ) -> pl.Tensor[[1, 2048], pl.FP32]:
+                src_tile: pl.Tile[[1, 2048], pl.FP32] = pl.load(src_tensor, [0, 0], [1, 2048])
+                idx_tile: pl.Tile[[1, 2048], pl.UINT32] = pl.load(idx_tensor, [0, 0], [1, 2048])
+                sorted_tile: pl.Tile[[1, 4096], pl.FP32] = pl.tile.sort32(src_tile, idx_tile)
+                for i, (tile_iter,) in pl.range(3, init_values=(sorted_tile,)):
+                    if i >= 1:
+                        merged: pl.Tile[[1, 4096], pl.FP32] = pl.tile.mrgsort(tile_iter, block_len=64)
+                        phi = pl.yield_(merged)
+                    else:
+                        phi = pl.yield_(tile_iter)
+                    result = pl.yield_(phi)
+                vals: pl.Tile[[1, 2048], pl.FP32] = pl.tile.gather_mask(
+                    result, mask_pattern=pl.tile.MaskPattern.P0101
+                )
+                out_val: pl.Tensor[[1, 2048], pl.FP32] = pl.store(vals, [0, 0], val_output)
+                return out_val
+
+        # sorted_tile/tile_iter/result live on the carry buffer mem_vec_5; the
+        # phi lives on mem_vec_6.  Both arms write mem_vec_6 -- the then arm
+        # through mrgsort, the else arm through tile_iter_mv -- before phi_mv
+        # copies it back onto the carry.
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                src_tensor: pl.Tensor[[1, 2048], pl.FP32, pl.MemRef("mem_ddr_0", 0, 8192)],
+                idx_tensor: pl.Tensor[[1, 2048], pl.UINT32, pl.MemRef("mem_ddr_1", 0, 8192)],
+                val_output: pl.Out[pl.Tensor[[1, 2048], pl.FP32, pl.MemRef("mem_ddr_2", 0, 8192)]],
+            ) -> pl.Tensor[[1, 2048], pl.FP32]:
+                mem_vec_4: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 8192)
+                mem_vec_5: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                mem_vec_6: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                src_tile: pl.Tile[[1, 2048], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = (
+                    pl.tile.load(src_tensor, [0, 0], [1, 2048], [1, 2048], target_memory=pl.Mem.Vec)
+                )
+                idx_tile: pl.Tile[[1, 2048], pl.UINT32, pl.MemRef(mem_vec_4, 0, 8192), pl.Mem.Vec] = (
+                    pl.tile.load(idx_tensor, [0, 0], [1, 2048], [1, 2048], target_memory=pl.Mem.Vec)
+                )
+                sorted_tile: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
+                    pl.tile.sort32(src_tile, idx_tile)
+                )
+                for i, (tile_iter,) in pl.range(3, init_values=(sorted_tile,)):
+                    if i >= 1:
+                        merged: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = (
+                            pl.tile.mrgsort(tile_iter, block_len=64)
+                        )
+                        phi: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = (
+                            pl.yield_(merged)
+                        )
+                    else:
+                        tile_iter_mv: pl.Tile[
+                            [1, 4096], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec
+                        ] = pl.tile.move(tile_iter, target_memory=pl.Mem.Vec)
+                        phi: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = (
+                            pl.yield_(tile_iter_mv)
+                        )
+                    phi_mv: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
+                        pl.tile.move(phi, target_memory=pl.Mem.Vec)
+                    )
+                    result: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
+                        pl.yield_(phi_mv)
+                    )
+                vals: pl.Tile[[1, 2048], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = (
+                    pl.tile.gather_mask(result, mask_pattern=pl.tile.MaskPattern.P0101)
+                )
+                out_val: pl.Tensor[[1, 2048], pl.FP32, pl.MemRef("mem_ddr_2", 0, 8192)] = pl.tile.store(
+                    vals, [0, 0], val_output
+                )
+                return out_val
+
+        After = _run_pipeline(Before)
+        ir.assert_structural_equal(After, Expected)
+        _assert_if_phi_arms_write_the_phi_buffer(After)
+
+    def test_if_phi_arm_yielding_iter_arg_makes_the_carry_buffer_canonical(self):
+        """Mirror of the test above: the *then* arm is the one yielding the IterArg.
+
+        YieldFixup only ever inserts its reconciling move into the ``else`` arm,
+        so the then arm's buffer is the canonical one.  When that arm yields the
+        carry unchanged the phi lands on the carry buffer itself, the ``else``
+        arm's producer is copied into it, and the loop-carry writeback drops out
+        because the phi already is the carry.  Skipping the IterArg arm instead
+        put the phi on the else arm's buffer and left it unwritten whenever the
+        then arm ran.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                src_tensor: pl.Tensor[[1, 2048], pl.FP32],
+                idx_tensor: pl.Tensor[[1, 2048], pl.UINT32],
+                val_output: pl.Out[pl.Tensor[[1, 2048], pl.FP32]],
+            ) -> pl.Tensor[[1, 2048], pl.FP32]:
+                src_tile: pl.Tile[[1, 2048], pl.FP32] = pl.load(src_tensor, [0, 0], [1, 2048])
+                idx_tile: pl.Tile[[1, 2048], pl.UINT32] = pl.load(idx_tensor, [0, 0], [1, 2048])
+                sorted_tile: pl.Tile[[1, 4096], pl.FP32] = pl.tile.sort32(src_tile, idx_tile)
+                for i, (tile_iter,) in pl.range(3, init_values=(sorted_tile,)):
+                    if i < 1:
+                        phi = pl.yield_(tile_iter)
+                    else:
+                        merged: pl.Tile[[1, 4096], pl.FP32] = pl.tile.mrgsort(tile_iter, block_len=64)
+                        phi = pl.yield_(merged)
+                    result = pl.yield_(phi)
+                vals: pl.Tile[[1, 2048], pl.FP32] = pl.tile.gather_mask(
+                    result, mask_pattern=pl.tile.MaskPattern.P0101
+                )
+                out_val: pl.Tensor[[1, 2048], pl.FP32] = pl.store(vals, [0, 0], val_output)
+                return out_val
+
+        # The phi shares the carry buffer mem_vec_5, so `merged` is copied into
+        # it and no separate carry writeback is emitted before the loop yield.
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                src_tensor: pl.Tensor[[1, 2048], pl.FP32, pl.MemRef("mem_ddr_0", 0, 8192)],
+                idx_tensor: pl.Tensor[[1, 2048], pl.UINT32, pl.MemRef("mem_ddr_1", 0, 8192)],
+                val_output: pl.Out[pl.Tensor[[1, 2048], pl.FP32, pl.MemRef("mem_ddr_2", 0, 8192)]],
+            ) -> pl.Tensor[[1, 2048], pl.FP32]:
+                mem_vec_4: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 8192)
+                mem_vec_5: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                mem_vec_6: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                src_tile: pl.Tile[[1, 2048], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = (
+                    pl.tile.load(src_tensor, [0, 0], [1, 2048], [1, 2048], target_memory=pl.Mem.Vec)
+                )
+                idx_tile: pl.Tile[[1, 2048], pl.UINT32, pl.MemRef(mem_vec_4, 0, 8192), pl.Mem.Vec] = (
+                    pl.tile.load(idx_tensor, [0, 0], [1, 2048], [1, 2048], target_memory=pl.Mem.Vec)
+                )
+                sorted_tile: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
+                    pl.tile.sort32(src_tile, idx_tile)
+                )
+                for i, (tile_iter,) in pl.range(3, init_values=(sorted_tile,)):
+                    if i < 1:
+                        phi: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
+                            pl.yield_(tile_iter)
+                        )
+                    else:
+                        merged: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = (
+                            pl.tile.mrgsort(tile_iter, block_len=64)
+                        )
+                        merged_mv: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
+                            pl.tile.move(merged, target_memory=pl.Mem.Vec)
+                        )
+                        phi: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
+                            pl.yield_(merged_mv)
+                        )
+                    result: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
+                        pl.yield_(phi)
+                    )
+                vals: pl.Tile[[1, 2048], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = (
+                    pl.tile.gather_mask(result, mask_pattern=pl.tile.MaskPattern.P0101)
+                )
+                out_val: pl.Tensor[[1, 2048], pl.FP32, pl.MemRef("mem_ddr_2", 0, 8192)] = pl.tile.store(
+                    vals, [0, 0], val_output
+                )
+                return out_val
+
+        After = _run_pipeline(Before)
+        ir.assert_structural_equal(After, Expected)
+        _assert_if_phi_arms_write_the_phi_buffer(After)
+
     def test_divergent_acc_phi_rejects_acc_to_acc_move(self):
         """YieldFixup must not manufacture an unsupported Acc-to-Acc copy.
 
@@ -3262,6 +3494,11 @@ class TestTopDownRetargeter:
         # retargeted onto mem_vec_2) because the liveness check detects
         # the post-IfStmt read of acc_0.  YieldFixup then inserts a
         # tile.move to unify if_result to the iter_arg buffer at the yield.
+        #
+        # The else arm yields the iter_arg, which lives on mem_vec_2 while the
+        # phi is on mem_vec_3, so it needs its own tile.move into the phi
+        # buffer -- without it mem_vec_3 is unwritten on that path and the
+        # carry writeback below copies stale data back onto acc_0.
         @pl.program
         class Expected:
             @pl.function
@@ -3284,8 +3521,11 @@ class TestTopDownRetargeter:
                             pl.yield_(tile_c)
                         )
                     else:
+                        acc_0_mv: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
+                            pl.tile.move(acc_0, target_memory=pl.Mem.Vec)
+                        )
                         if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
-                            pl.yield_(acc_0)
+                            pl.yield_(acc_0_mv)
                         )
                     _use: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
                         acc_0, [0, 0], output
