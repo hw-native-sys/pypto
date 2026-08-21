@@ -237,6 +237,7 @@ TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
   tile_view.slayout = TileLayout::row_major;
   tile_view.fractal = 1024;
   tile_view.valid_shape = {m_valid, n_valid};
+  StampCompactForNarrowedAccRows(tile_view, output_shape);
   return std::make_shared<TileType>(output_shape, DataType::FP32, std::nullopt, tile_view);
 }
 

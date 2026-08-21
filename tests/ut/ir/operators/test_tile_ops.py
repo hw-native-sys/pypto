@@ -2103,6 +2103,189 @@ class TestTileMatMulOps:
         assert _const_values(matmul_acc_type.shape) == [16, 32]
         assert _valid_of(matmul_acc_type) == [16, 16]
 
+    @staticmethod
+    def _narrowable_matmul_operands(span, lhs_valid_rows):
+        """lhs [64, 128] narrowed to `lhs_valid_rows`, plus a fully valid rhs / bias."""
+
+        def dims(*values):
+            return [ir.ConstInt(value, DataType.INDEX, span) for value in values]
+
+        lhs = ir.Var(
+            "lhs",
+            ir.TileType(
+                dims(64, 128),
+                DataType.INT8,
+                tile_view=ir.TileView(valid_shape=[lhs_valid_rows, ir.ConstInt(128, DataType.INDEX, span)]),
+                memory_space=ir.MemorySpace.Left,
+            ),
+            span,
+        )
+        rhs = ir.Var(
+            "rhs",
+            ir.TileType(
+                dims(128, 256),
+                DataType.INT8,
+                tile_view=ir.TileView(valid_shape=dims(128, 256)),
+                memory_space=ir.MemorySpace.Right,
+            ),
+            span,
+        )
+        bias = ir.Var(
+            "bias",
+            ir.TileType(dims(1, 256), DataType.INT32, tile_view=ir.TileView(valid_shape=dims(1, 256))),
+            span,
+        )
+        return lhs, rhs, bias
+
+    @staticmethod
+    def _compact_of(result_type):
+        """Compact mode of a deduced tile type, narrowing ``Type`` for the checker."""
+        assert isinstance(result_type, ir.TileType)
+        return result_type.get_effective_tile_view().compact
+
+    def test_matmul_family_stamps_compact_for_runtime_narrowed_rows(self):
+        """Issue #2470: a runtime-narrowed L0C must advertise the stride ``mad`` wrote at.
+
+        ``mad`` lays the product out with an N-fractal stride of ceil(M/16)*16,
+        where M is the lhs *valid* rows, while every Acc reader keys off the
+        tile's compile-time physical ``Rows`` unless the tile is compact.  A
+        runtime row count therefore has to stamp compact — the same reasoning
+        that makes a partial ``tile.extract`` into L0A/L0B compact (#2232).
+        """
+        span = ir.Span.unknown()
+        rows = ir.Var("rows", ir.ScalarType(DataType.INDEX), span)
+        lhs, rhs, bias = self._narrowable_matmul_operands(span, rows)
+
+        matmul_type = tile.matmul(lhs, rhs).type
+        assert isinstance(matmul_type, ir.TileType)
+        assert _valid_of(matmul_type) == [rows, 256]
+        assert self._compact_of(matmul_type) == ir.CompactMode.normal
+
+        # The accumulate step reuses the accumulator's storage, so it must reach
+        # the same compact mode or the two views of one L0C buffer disagree.
+        acc = ir.Var("acc", matmul_type, span)
+        assert self._compact_of(tile.matmul_acc(acc, lhs, rhs).type) == ir.CompactMode.normal
+        assert self._compact_of(tile.matmul_bias(lhs, rhs, bias).type) == ir.CompactMode.normal
+
+    def test_matmul_full_rows_stay_noncompact(self):
+        """A fully valid accumulator keeps its historical non-compact form."""
+        span = ir.Span.unknown()
+        lhs, rhs, bias = self._narrowable_matmul_operands(span, ir.ConstInt(64, DataType.INDEX, span))
+
+        matmul_type = tile.matmul(lhs, rhs).type
+        assert self._compact_of(matmul_type) == ir.CompactMode.null
+
+        acc = ir.Var("acc", matmul_type, span)
+        assert self._compact_of(tile.matmul_acc(acc, lhs, rhs).type) == ir.CompactMode.null
+        assert self._compact_of(tile.matmul_bias(lhs, rhs, bias).type) == ir.CompactMode.null
+
+    def test_matmul_narrowed_columns_alone_stay_noncompact(self):
+        """Only the row extent moves the Acc stride, so a narrow N changes nothing.
+
+        Every Acc stride the ISA derives is a function of ``validRow`` alone; a
+        narrowed column extent leaves writer and reader in agreement.
+        """
+        span = ir.Span.unknown()
+
+        def dims(*values):
+            return [ir.ConstInt(value, DataType.INDEX, span) for value in values]
+
+        lhs = ir.Var(
+            "lhs",
+            ir.TileType(
+                dims(64, 128),
+                DataType.INT8,
+                tile_view=ir.TileView(valid_shape=dims(64, 128)),
+                memory_space=ir.MemorySpace.Left,
+            ),
+            span,
+        )
+        rhs = ir.Var(
+            "rhs",
+            ir.TileType(
+                dims(128, 256),
+                DataType.INT8,
+                tile_view=ir.TileView(valid_shape=dims(128, 240)),
+                memory_space=ir.MemorySpace.Right,
+            ),
+            span,
+        )
+
+        matmul_type = tile.matmul(lhs, rhs).type
+        assert _valid_of(matmul_type) == [64, 240]
+        assert self._compact_of(matmul_type) == ir.CompactMode.null
+
+    def test_set_validshape_keeps_the_stride_an_accumulator_was_written_at(self):
+        """Narrowing an already-written accumulator must not re-interpret its bytes.
+
+        ``tile.set_validshape`` is a metadata-only alias that may run *after*
+        the buffer was filled. A full-width ``tile.matmul`` lays L0C out at the
+        physical row pitch, so deriving compact from the *new* valid rows here
+        would make every later reader walk those same bytes at
+        ``ceil(16/16)*16`` instead — silently corrupting them. The op inherits
+        the source's compact mode and nothing else.
+        """
+        span = ir.Span.unknown()
+        lhs, rhs, _ = self._narrowable_matmul_operands(span, ir.ConstInt(64, DataType.INDEX, span))
+        written = tile.matmul(lhs, rhs).type
+        assert self._compact_of(written) == ir.CompactMode.null
+
+        narrowed = tile.set_validshape(ir.Var("acc", written, span), 16, 256).type
+        assert _valid_of(narrowed) == [16, 256]
+        assert self._compact_of(narrowed) == ir.CompactMode.null
+
+    def test_set_validshape_carries_a_compact_accumulator_through(self):
+        """A compact accumulator stays compact when its valid window moves."""
+        span = ir.Span.unknown()
+        rows = ir.Var("rows", ir.ScalarType(DataType.INDEX), span)
+        lhs, rhs, _ = self._narrowable_matmul_operands(span, rows)
+        written = tile.matmul(lhs, rhs).type
+        assert self._compact_of(written) == ir.CompactMode.normal
+
+        narrowed = tile.set_validshape(ir.Var("acc", written, span), rows, 256).type
+        assert self._compact_of(narrowed) == ir.CompactMode.normal
+
+    def test_matmul_acc_inherits_the_accumulator_compact_mode(self):
+        """The in-place result must describe its buffer exactly as the input does.
+
+        ``tile.matmul_acc`` is ``set_output_reuses_input(0)``; codegen only
+        aliases result and accumulator when their ``TileBufSignature`` — compact
+        included — matches, so the result inherits rather than re-derives.
+        """
+        span = ir.Span.unknown()
+        rows = ir.Var("rows", ir.ScalarType(DataType.INDEX), span)
+        lhs, rhs, _ = self._narrowable_matmul_operands(span, rows)
+
+        # A non-compact accumulator stays non-compact even beside a narrowed lhs.
+        plain_acc = ir.TileType(
+            [ir.ConstInt(64, DataType.INDEX, span), ir.ConstInt(256, DataType.INDEX, span)],
+            DataType.INT32,
+            tile_view=ir.TileView(
+                valid_shape=[rows, ir.ConstInt(256, DataType.INDEX, span)],
+            ),
+            memory_space=ir.MemorySpace.Acc,
+        )
+        result = tile.matmul_acc(ir.Var("acc", plain_acc, span), lhs, rhs).type
+        assert self._compact_of(result) == ir.CompactMode.null
+
+    def test_set_validshape_leaves_non_accumulator_tiles_noncompact(self):
+        """A narrowed Vec tile has no L0C stride contract to preserve."""
+        span = ir.Span.unknown()
+        rows = ir.Var("rows", ir.ScalarType(DataType.INDEX), span)
+        vec = ir.Var(
+            "vec",
+            ir.TileType(
+                [ir.ConstInt(64, DataType.INDEX, span), ir.ConstInt(256, DataType.INDEX, span)],
+                DataType.FP32,
+                memory_space=ir.MemorySpace.Vec,
+            ),
+            span,
+        )
+
+        narrowed = tile.set_validshape(vec, rows, 256).type
+        assert _valid_of(narrowed) == [rows, 256]
+        assert self._compact_of(narrowed) == ir.CompactMode.null
+
     def test_matmul_rejects_mismatched_physical_k_with_matching_valid_k(self):
         """Logical K agreement does not make incompatible physical boxes legal."""
         span = ir.Span.unknown()

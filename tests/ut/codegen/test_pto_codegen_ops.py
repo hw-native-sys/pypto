@@ -2640,6 +2640,190 @@ class TestSetValidShapeCodegen:
             self._generate_mlir(Prog)
 
 
+_ACC_M = 64
+_ACC_K = 128
+_ACC_N = 256
+
+# tile.assemble cases keep the accumulator small enough for the 128 KiB L0C arena.
+_ASM_M = 32
+_ASM_K = 128
+_ASM_N = 64
+
+
+@pl.program
+class AssembleNarrowedAccIntoFullWindow:
+    """A compact matmul result assembled into a *non*-narrowed Acc buffer.
+
+    The two windows address L0C at different fractal strides, so the copy is not
+    expressible as a `pto.subview`. Before #2470 both sides read as non-compact
+    and the mismatch was a silent miscompile.
+    """
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        lhs: pl.Tensor[[_ASM_M, _ASM_K], pl.INT8],
+        rhs: pl.Tensor[[_ASM_K, _ASM_N], pl.INT8],
+        valid_rows: pl.Scalar[pl.INDEX],
+        output: pl.Out[pl.Tensor[[_ASM_M, 2 * _ASM_N], pl.INT32]],
+    ) -> pl.Tensor[[_ASM_M, 2 * _ASM_N], pl.INT32]:
+        lhs_tile: pl.Tile[[_ASM_M, _ASM_K], pl.INT8] = pl.load(
+            lhs,
+            [0, 0],
+            [_ASM_M, _ASM_K],
+            valid_shape=[valid_rows, _ASM_K],
+            target_memory=pl.MemorySpace.Mat,
+        )
+        rhs_tile: pl.Tile[[_ASM_K, _ASM_N], pl.INT8] = pl.load(
+            rhs, [0, 0], [_ASM_K, _ASM_N], target_memory=pl.MemorySpace.Mat
+        )
+        part: pl.Tile[[_ASM_M, _ASM_N], pl.INT32] = pl.tile.matmul(lhs_tile, rhs_tile)
+        big: pl.Tile[[_ASM_M, 2 * _ASM_N], pl.INT32] = pl.tile.create(
+            [_ASM_M, 2 * _ASM_N], pl.INT32, target_memory=pl.MemorySpace.Acc
+        )
+        joined: pl.Tile[[_ASM_M, 2 * _ASM_N], pl.INT32] = pl.tile.assemble(big, part, [0, 0])
+        return pl.store(joined, [0, 0], output)
+
+
+@pl.program
+class AssembleFullAccIntoFullWindow:
+    """The remedy the diagnostic names: compute the full tile, no narrowing."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        lhs: pl.Tensor[[_ASM_M, _ASM_K], pl.INT8],
+        rhs: pl.Tensor[[_ASM_K, _ASM_N], pl.INT8],
+        output: pl.Out[pl.Tensor[[_ASM_M, 2 * _ASM_N], pl.INT32]],
+    ) -> pl.Tensor[[_ASM_M, 2 * _ASM_N], pl.INT32]:
+        lhs_tile: pl.Tile[[_ASM_M, _ASM_K], pl.INT8] = pl.load(
+            lhs, [0, 0], [_ASM_M, _ASM_K], target_memory=pl.MemorySpace.Mat
+        )
+        rhs_tile: pl.Tile[[_ASM_K, _ASM_N], pl.INT8] = pl.load(
+            rhs, [0, 0], [_ASM_K, _ASM_N], target_memory=pl.MemorySpace.Mat
+        )
+        part: pl.Tile[[_ASM_M, _ASM_N], pl.INT32] = pl.tile.matmul(lhs_tile, rhs_tile)
+        big: pl.Tile[[_ASM_M, 2 * _ASM_N], pl.INT32] = pl.tile.create(
+            [_ASM_M, 2 * _ASM_N], pl.INT32, target_memory=pl.MemorySpace.Acc
+        )
+        joined: pl.Tile[[_ASM_M, 2 * _ASM_N], pl.INT32] = pl.tile.assemble(big, part, [0, 0])
+        return pl.store(joined, [0, 0], output)
+
+
+@pl.program
+class MatmulAccRuntimeNarrowedRows:
+    """Issue #2470: the matmul's lhs carries a runtime valid row count."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        lhs: pl.Tensor[[_ACC_M, _ACC_K], pl.INT8],
+        rhs: pl.Tensor[[_ACC_K, _ACC_N], pl.INT8],
+        valid_rows: pl.Scalar[pl.INDEX],
+        output: pl.Out[pl.Tensor[[_ACC_M, _ACC_N], pl.INT32]],
+    ) -> pl.Tensor[[_ACC_M, _ACC_N], pl.INT32]:
+        lhs_tile: pl.Tile[[_ACC_M, _ACC_K], pl.INT8] = pl.load(
+            lhs,
+            [0, 0],
+            [_ACC_M, _ACC_K],
+            valid_shape=[valid_rows, _ACC_K],
+            target_memory=pl.MemorySpace.Mat,
+        )
+        rhs_tile: pl.Tile[[_ACC_K, _ACC_N], pl.INT8] = pl.load(
+            rhs, [0, 0], [_ACC_K, _ACC_N], target_memory=pl.MemorySpace.Mat
+        )
+        acc_tile: pl.Tile[[_ACC_M, _ACC_N], pl.INT32] = pl.tile.matmul(lhs_tile, rhs_tile)
+        return pl.store(acc_tile, [0, 0], output)
+
+
+@pl.program
+class MatmulAccFullRows:
+    """The same reduction with no narrowing anywhere -- the control case."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        lhs: pl.Tensor[[_ACC_M, _ACC_K], pl.INT8],
+        rhs: pl.Tensor[[_ACC_K, _ACC_N], pl.INT8],
+        output: pl.Out[pl.Tensor[[_ACC_M, _ACC_N], pl.INT32]],
+    ) -> pl.Tensor[[_ACC_M, _ACC_N], pl.INT32]:
+        lhs_tile: pl.Tile[[_ACC_M, _ACC_K], pl.INT8] = pl.load(
+            lhs, [0, 0], [_ACC_M, _ACC_K], target_memory=pl.MemorySpace.Mat
+        )
+        rhs_tile: pl.Tile[[_ACC_K, _ACC_N], pl.INT8] = pl.load(
+            rhs, [0, 0], [_ACC_K, _ACC_N], target_memory=pl.MemorySpace.Mat
+        )
+        acc_tile: pl.Tile[[_ACC_M, _ACC_N], pl.INT32] = pl.tile.matmul(lhs_tile, rhs_tile)
+        return pl.store(acc_tile, [0, 0], output)
+
+
+class TestMatmulAccCompactCodegen:
+    """Issue #2470: a runtime-narrowed accumulator must reach PTOAS as compact."""
+
+    def _generate_mlir(self, program_cls) -> str:
+        """Run PassManager and PTOCodegen on the given program, return MLIR string."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program_cls)
+        funcs = list(optimized.functions.values())
+        assert funcs, "Program has no functions"
+        single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
+        return codegen.PTOCodegen().generate(single)
+
+    def test_runtime_narrowed_matmul_stores_from_a_compact_accumulator(self):
+        """The store that reads L0C must use the stride ``mad`` wrote it at.
+
+        ``mad`` takes M from the L0A operand's *valid* rows and lays the result
+        out with an N-fractal stride of ceil(M/16)*16.  ``TSTORE`` recovers that
+        stride only for a compact tile; otherwise it walks L0C at the physical
+        ``Rows``, so every N-fractal above the first came back scrambled.
+        """
+        mlir = self._generate_mlir(MatmulAccRuntimeNarrowedRows)
+
+        store_lines = [line for line in mlir.splitlines() if "pto.tstore" in line]
+        assert store_lines, f"expected a pto.tstore for the accumulator, got:\n{mlir}"
+        for line in store_lines:
+            assert re.search(r"!pto\.tile_buf<loc=acc,[^>]*compact=1>", line), (
+                "a runtime-narrowed accumulator must be stored as compact, or TSTORE reads "
+                f"L0C at the physical Rows pitch instead of ceil(validRow/16)*16;\ngot:\n{line}"
+            )
+
+        # The accumulator's own allocation must agree with the store's view, or
+        # one L0C buffer would be declared at two different strides.
+        alloc_lines = [line for line in mlir.splitlines() if "pto.alloc_tile" in line and "loc=acc" in line]
+        assert alloc_lines, f"expected an Acc pto.alloc_tile, got:\n{mlir}"
+        for line in alloc_lines:
+            assert re.search(r"!pto\.tile_buf<loc=acc,[^>]*compact=1>", line), line
+
+    def test_full_width_matmul_accumulator_stays_noncompact(self):
+        """Without narrowing, the emitted accumulator keeps its historical form."""
+        mlir = self._generate_mlir(MatmulAccFullRows)
+
+        assert not re.search(r"!pto\.tile_buf<loc=acc,[^>]*compact=1>", mlir), (
+            f"a fully valid accumulator must not be stamped compact:\n{mlir}"
+        )
+
+    def test_assembling_a_narrowed_accumulator_into_a_full_window_is_rejected(self):
+        """Two Acc windows at different L0C strides cannot share a ``pto.subview``.
+
+        Before the accumulator carried compact this compiled and silently copied
+        at the wrong pitch. Rejecting it is the fix; the message has to name the
+        user's construct and a remedy rather than ``pto.subview``'s invariant.
+        """
+        with pytest.raises(ValueError, match="L0C fractal stride") as excinfo:
+            self._generate_mlir(AssembleNarrowedAccIntoFullWindow)
+
+        assert "Drop the narrowing from the matmul operand" in str(excinfo.value), str(excinfo.value)
+
+    def test_assembling_a_full_accumulator_still_compiles(self):
+        """The remedy the diagnostic names works, and the ordinary case is untouched."""
+        mlir = self._generate_mlir(AssembleFullAccIntoFullWindow)
+
+        assert "pto.subview" in mlir, mlir
+        assert not re.search(r"!pto\.tile_buf<loc=acc,[^>]*compact=1>", mlir), mlir
+
+
 class TestMrgSortCodegen:
     """Tests for mrgsort format1 code generation with constant and variable block_len."""
 

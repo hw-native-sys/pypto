@@ -314,6 +314,24 @@ class TestMatmulMxTypes:
         with pytest.raises(ValueError, match="acc valid rows"):
             ir.op.tile.matmul_mx_acc(acc, *self._mx_operands(span, valid=(8, 64, 16)), span)
 
+    def test_narrowed_rows_stamp_compact_and_full_rows_do_not(self):
+        """Issue #2470: MX shares the L0C stride contract of the plain matmuls.
+
+        ``mad`` takes M from the lhs *valid* rows and lays L0C out at
+        ceil(M/16)*16, while the Acc readers key off the physical ``Rows``
+        unless the tile is compact.  All three MX ops route their output type
+        through the same deducer, so ``matmul_mx`` covers the family.
+        """
+        span = ir.Span.unknown()
+
+        narrowed = ir.op.tile.matmul_mx(*self._mx_operands(span, valid=(8, 64, 16)), span).type
+        assert isinstance(narrowed, ir.TileType)
+        assert narrowed.get_effective_tile_view().compact == ir.CompactMode.normal
+
+        full = ir.op.tile.matmul_mx(*self._mx_operands(span, valid=(16, 64, 32)), span).type
+        assert isinstance(full, ir.TileType)
+        assert full.get_effective_tile_view().compact == ir.CompactMode.null
+
     @pytest.mark.parametrize(
         ("index", "name", "shape", "dtype", "valid_shape"),
         [

@@ -115,6 +115,7 @@ TypePtr DeduceTileMatMulType(const std::vector<ExprPtr>& args,
   tile_view_semantics::SetTileLayout(
       tile_view, tile_view_semantics::GetImplicitTileLayout(geometry.physical_shape, MemorySpace::Acc));
   tile_view.valid_shape = geometry.valid_shape;
+  StampCompactForNarrowedAccRows(tile_view, geometry.physical_shape);
 
   return std::make_shared<TileType>(std::move(geometry.physical_shape), geometry.accumulator_dtype,
                                     std::nullopt, tile_view, MemorySpace::Acc);
@@ -198,6 +199,13 @@ TypePtr DeduceTileMatMulAccType(const std::vector<ExprPtr>& args,
   tile_view_semantics::SetTileLayout(
       tile_view, tile_view_semantics::GetImplicitTileLayout(output_shape, MemorySpace::Acc));
   tile_view.valid_shape = acc_valid;
+  // Inherit the accumulator's compact mode rather than re-deriving it. This op
+  // is `set_output_reuses_input(0)`: the result *is* the accumulator's buffer,
+  // and codegen only aliases the two when their `TileBufSignature` — compact
+  // included — matches, so inheriting keeps that alias legal by construction.
+  // `tile.matmul` is where the accumulator's stride is established, so it is
+  // the only place that derives compact from the valid rows (#2470).
+  tile_view.compact = tile_view_semantics::GetEffectiveTileView(*acc_type).compact;
 
   return std::make_shared<TileType>(output_shape, geometry.accumulator_dtype, std::nullopt, tile_view,
                                     MemorySpace::Acc);
@@ -266,6 +274,7 @@ TypePtr DeduceTileMatMulBiasType(const std::vector<ExprPtr>& args,
   tile_view_semantics::SetTileLayout(
       tile_view, tile_view_semantics::GetImplicitTileLayout(geometry.physical_shape, MemorySpace::Acc));
   tile_view.valid_shape = geometry.valid_shape;
+  StampCompactForNarrowedAccRows(tile_view, geometry.physical_shape);
   return std::make_shared<TileType>(std::move(geometry.physical_shape), geometry.accumulator_dtype,
                                     std::nullopt, tile_view, MemorySpace::Acc);
 }

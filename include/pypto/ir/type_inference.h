@@ -641,6 +641,39 @@ inline void InheritTileViewLayout(TileView& dst, const std::shared_ptr<const Til
   dst.compact = eff.compact;
 }
 
+/**
+ * @brief Stamp PTO's compact mode on an L0C view whose valid rows may be narrower than its
+ *        physical rows
+ *
+ * `mad` lays a matrix product out in L0C with an N-fractal stride of ceil(M/16)*16, where M is
+ * the *valid* row count of the L0A operand (pto-isa `TMatmul.hpp`:
+ * `uint16_t m = aMatrix.GetValidRow()`). Every Acc reader instead derives its stride from the
+ * tile's compile-time physical `Rows` unless the tile is compact, in which case it recomputes
+ * ceil(validRow/16)*16 — exactly the stride `mad` wrote at (`tstore_common.hpp`,
+ * `TStoreAccNz2nd` and siblings). A narrowed accumulator that is not compact is therefore read
+ * back at a different pitch than it was written at, silently scrambling every N-fractal above
+ * the first (issue #2470). This mirrors the L0A/L0B stamping `tile.extract` gained for #2232.
+ *
+ * Only the row extent decides this: every Acc stride the ISA derives is a function of `validRow`
+ * alone, so a narrowed *column* extent leaves writer and reader in agreement and keeps the
+ * historical non-compact form.
+ *
+ * Stamps whenever equality is not *proven*, so an undecidable symbolic extent is treated as
+ * narrowed. That is the safe direction: a compact tile whose valid rows happen to fill the box
+ * recomputes the same stride it would have read from `Rows`.
+ *
+ * @param dst Accumulator TileView to stamp (valid_shape must already be set)
+ * @param physical_shape The accumulator's physical shape
+ */
+inline void StampCompactForNarrowedAccRows(TileView& dst, const std::vector<ExprPtr>& physical_shape) {
+  if (dst.valid_shape.empty() || physical_shape.empty()) {
+    return;
+  }
+  if (ProveValidExtentEqual(dst.valid_shape[0], physical_shape[0]) != ProofResult::kTrue) {
+    dst.compact = CompactMode::normal;
+  }
+}
+
 namespace detail {
 
 /**

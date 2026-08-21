@@ -491,9 +491,21 @@ void CheckSubviewTileCompat(const ir::TileType& source, const ir::TileType& resu
                                         << res_v.fractal << "); pto.subview requires identical fractal";
   CHECK(src_v.pad == res_v.pad)
       << op_name << ": pad mismatch between source and result; pto.subview requires identical pad mode";
+  // An Acc compact mismatch is reachable from ordinary DSL: a matmul whose lhs carries a
+  // narrowed valid row count produces a compact L0C tile (stride ceil(validRow/16)*16), while a
+  // plain `tile.create(target_memory=Acc)` window stays non-compact (stride = physical rows).
+  // The two really do address L0C at different pitches, so the copy is not expressible as a
+  // subview — say so in the user's terms rather than in `pto.subview`'s (#2470).
+  const bool acc_windows =
+      source.GetMemorySpace() == ir::MemorySpace::Acc && result.GetMemorySpace() == ir::MemorySpace::Acc;
   CHECK(src_v.compact == res_v.compact)
-      << op_name
-      << ": compact mismatch between source and result; pto.subview requires identical compact mode";
+      << op_name << ": compact mismatch between source and result; pto.subview requires identical "
+      << "compact mode"
+      << (acc_windows ? "; the two accumulator windows disagree on their L0C fractal stride. A matmul "
+                        "whose lhs carries narrowed valid rows writes L0C at ceil(validRow/16)*16, "
+                        "and no wider full-height accumulator window can view that layout. Drop the "
+                        "narrowing from the matmul operand and compute the full tile."
+                      : "");
   CHECK(src_v.pad == ir::PadValue::null)
       << op_name << ": pto.subview does not support pad_value (" << static_cast<int>(src_v.pad)
       << "); apply tile.fillpad on the result tile instead of carrying a pad on the slice/assemble window";
