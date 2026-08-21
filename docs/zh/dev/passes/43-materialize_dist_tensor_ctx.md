@@ -96,7 +96,7 @@ def host_orch(self):
 After:
 
 ```python
-def chip_orch(self, data, data_ctx: pld.CommCtxType):
+def chip_orch(self, data, data_ctx: pld.CommCtx):
     return self.kernel(data, data_ctx)
 
 def host_orch(self):

@@ -178,12 +178,11 @@ from pypto.pypto_core.ir import (
     Expr,
     MemorySpace,
     PadValue,
-    PtrType,
     Span,
     TileLayout,
 )
 
-from ..typing import BoolLike, IntLike, Scalar, Tensor, Tile, predicate_to_expr
+from ..typing import BoolLike, IntLike, Ptr, Scalar, Tensor, Tile, predicate_to_expr
 from .system_ops import (  # noqa: F401
     tpop_from_aic,
     tpop_from_aiv,
@@ -240,7 +239,7 @@ def alloc(
     size: int,
     *,
     pinned: bool = False,
-) -> PtrType:
+) -> Ptr:
     """Stub for the internal ``tile.alloc`` IR operation.
 
     This function is never called in user-written DSL code.  It is emitted
@@ -260,9 +259,10 @@ def alloc(
             its membership isolated from other allocations.
 
     Returns:
-        Opaque ``PtrType`` sentinel (unused at runtime)
+        Opaque ``Ptr`` sentinel (unused at runtime — the parser intercepts the
+        call in the AST and never invokes this stub)
     """
-    return PtrType()
+    return Ptr()
 
 
 def _unwrap_rhs(rhs: int | float | Expr | Tile | Scalar) -> int | float | Expr:

@@ -758,7 +758,11 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
   }
 
   if (As<CommCtxType>(type)) {
-    return "pld.CommCtxType";
+    // Singleton marker — printed with the public DSL wrapper name, matching the
+    // ``pl.AsyncEvent`` family below. ``pld`` is hardcoded rather than derived
+    // from ``prefix_`` because that prefix aliases only ``pypto.language``; the
+    // text parser injects ``pld`` into the exec namespace itself.
+    return "pld.CommCtx";
   }
 
   // Async-prefetch handle markers — fieldless singletons, rendered as bare
@@ -3000,15 +3004,16 @@ static std::unordered_map<const Var*, std::string> CollectDynVarMapping(const Pr
 }
 
 void IRPythonPrinter::VisitProgram(const ProgramPtr& program) {
-  // Print program header comment
-  stream_ << "# pypto.program: " << (program->name_.empty() ? "Program" : program->name_) << "\n";
-
-  // Print import statement based on prefix
-  if (prefix_ == "pl") {
-    stream_ << "import pypto.language as pl\n\n";
-  } else {
-    stream_ << "from pypto import language as " << prefix_ << "\n\n";
-  }
+  // Render everything below the imports into a scratch buffer first. Whether the
+  // program needs ``import pypto.language.distributed as pld`` is only knowable
+  // once the body exists: every distributed spelling is hardcoded with the
+  // ``pld.`` prefix (types, ops, and the comm-domain comment alike), so a plain
+  // substring search over the rendered body is an exact test. Without the import
+  // the output references an unbound name and is not valid standalone Python --
+  // it only re-parses because the text parser injects ``pld`` into the exec
+  // namespace itself.
+  std::ostringstream body;
+  stream_.swap(body);
 
   // Emit pl.dynamic() declarations for dynamic shape variables used in function signatures.
   // Uses pointer-identity-aware collection so distinct Var* with the same name_hint_
@@ -3052,6 +3057,21 @@ void IRPythonPrinter::VisitProgram(const ProgramPtr& program) {
 
   current_program_ = prev_program;
   DecreaseIndent();
+
+  // Restore the caller's stream and prepend the header + imports the body needs.
+  const std::string body_str = stream_.str();
+  stream_.swap(body);
+
+  stream_ << "# pypto.program: " << (program->name_.empty() ? "Program" : program->name_) << "\n";
+  if (prefix_ == "pl") {
+    stream_ << "import pypto.language as pl\n";
+  } else {
+    stream_ << "from pypto import language as " << prefix_ << "\n";
+  }
+  if (body_str.find("pld.") != std::string::npos) {
+    stream_ << "import pypto.language.distributed as pld\n";
+  }
+  stream_ << "\n" << body_str;
 }
 
 std::string IRPythonPrinter::PrintExprForType(const ExprPtr& expr) {
