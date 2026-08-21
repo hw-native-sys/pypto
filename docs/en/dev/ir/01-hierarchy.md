@@ -515,8 +515,8 @@ func_orch = ir.Function("orchestrator", params, return_types, body, span, ir.Fun
 | `param_directions_` | list[ParamDirection] | Parameter directions, same length as params_ |
 | `return_types_` | list[TypePtr] | Return types |
 | `body_` | StmtPtr | Function body |
-| `level_` | optional[Level] | Hierarchy level (auto-derived from `func_type_` for InCore/AIC/AIV/Group/Orchestration; see below) |
-| `role_` | optional[Role] | Hierarchy role (auto-derived from `func_type_` for InCore/AIC/AIV/Group/Orchestration; see below) |
+| `level_` | optional[Level] | Hierarchy level (auto-derived from `func_type_` for InCore/AIC/AIV/Group/Orchestration/Graph; see below) |
+| `role_` | optional[Role] | Hierarchy role (auto-derived from `func_type_` for InCore/AIC/AIV/Group/Orchestration/Graph; see below) |
 | `attrs_` | list[(str, Any)] | Ordered free-form metadata, exposed as `UsualField` (participates in structural traversal) |
 
 ### Reserved `attrs_` keys
@@ -544,13 +544,14 @@ check: `Call` / `Submit` attrs are declared in `include/pypto/ir/expr.h`
 
 ### Auto-derivation of `level_` / `role_`
 
-For `func_type_` in {`InCore`, `AIC`, `AIV`, `Group`, `Orchestration`}, the
+For `func_type_` in {`InCore`, `AIC`, `AIV`, `Group`, `Orchestration`, `Graph`}, the
 `Function` constructor auto-derives `level_` and `role_` when they are not
 explicitly provided:
 
 | `func_type_` | Derived `level_` | Derived `role_` |
 | ------------ | ---------------- | --------------- |
 | `Orchestration` | `CHIP` | `Orchestrator` |
+| `Graph` | `CHIP` | `Orchestrator` |
 | `InCore` | `CHIP_DIE` | `Worker` |
 | `AIC` | `AIC` | `Worker` |
 | `AIV` | `AIV` | `Worker` |

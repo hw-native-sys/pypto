@@ -76,7 +76,9 @@ class IterArgCarryClassifiedPropertyVerifierImpl : public PropertyVerifier {
     if (!program) return;
     for (const auto& [gv, func] : program->functions_) {
       if (!func || !func->body_) continue;
-      if (func->func_type_ != FunctionType::Orchestration) continue;
+      // A Graph body may carry loop state exactly like any other orchestration
+      // body, and codegen reads the same stamped attrs.
+      if (!IsOrchestrationLike(func->func_type_)) continue;
       CarryPlanChecker checker(diagnostics, func->name_);
       checker.VisitStmt(func->body_);
     }

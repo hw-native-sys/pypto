@@ -394,6 +394,19 @@ PropertyVerifierPtr CreateIterArgCarryClassifiedPropertyVerifier();
 PropertyVerifierPtr CreateRuntimeScopesMaterializedPropertyVerifier();
 
 /**
+ * @brief Create a verifier for the GraphBoundaryLegalized property
+ *
+ * Re-states the boundary contract LegalizeGraphBoundary enforces, so a later
+ * pass that reintroduces a violation is caught. That matters more here than for
+ * a typical property: almost every host_build_graph constraint degrades to a
+ * *silent* non-graph fallback at runtime — the program stays numerically correct
+ * and merely loses the speedup — so this verifier is the automated detector.
+ *
+ * @return Property verifier instance
+ */
+PropertyVerifierPtr CreateGraphBoundaryLegalizedPropertyVerifier();
+
+/**
  * @brief Factory function for creating CallDirectionsResolved property verifier
  *
  * Verifies that every non-builtin ``Call`` in the program carries a fully

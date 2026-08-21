@@ -63,6 +63,15 @@ inline const PassProperties kMaterializeDistTensorCtxProperties{
 //    Signature-and-call rewrite only; touches no structural property.
 inline const PassProperties kMaterializeValidShapeSymbolsProperties{};
 
+// -- LegalizeGraphBoundary pass (runs after the final Simplify) ---------------
+//    Hoists every boundary scalar a Graph body derives out to its call sites and
+//    rejects the graphs the host_build_graph runtime could not record. Rewrites
+//    call arguments and their directions, so it re-declares CallDirectionsResolved
+//    — MaterializeRuntimeScopes, which runs next, requires it.
+inline const PassProperties kLegalizeGraphBoundaryProperties{
+    .required = {IRProperty::SplitIncoreOrch, IRProperty::CallDirectionsResolved},
+    .produced = {IRProperty::GraphBoundaryLegalized, IRProperty::CallDirectionsResolved}};
+
 // -- MaterializeRuntimeScopes pass (runs last, after the final Simplify) ------
 //    Inserts explicit AUTO RuntimeScopeStmt nodes for the orchestration function
 //    body and for/if bodies so codegen emits PTO2_SCOPE 1:1 from the IR.

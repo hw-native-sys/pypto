@@ -489,9 +489,9 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 31. [`LowerHostTensorCollectives`](42-lower_host_tensor_collectives.md)（host-level tensor collectives -> internal builtin chip dispatches）
 32. [`MaterializeDistTensorCtx`](43-materialize_dist_tensor_ctx.md)（为 DistributedTensor 参数显式物化 CommCtx 参数/实参）
 33. `Simplify`
-34. [`MaterializeRuntimeScopes`](44-materialize_runtime_scopes.md)（插入 AUTO RuntimeScopeStmt，使 orchestration codegen 1:1 emit PTO2_SCOPE）
-35. [`ClassifyIterArgCarry`](45-classify_iter_arg_carry.md)（把每个 ForStmt iter_arg 标注为平凡别名 / 重绑定 carry，并为 manual-scope TaskId fence 数组定尺）
-36. [`InsertCommFence`](46-insert_comm_fence.md)（在每个发布性写入与释放它的 pld.system.notify 之间插入整张 tensor 的 system.cacheinvalid + GM system.fence；跑在最后，使插入的 op 一路到 codegen 都紧邻其 notify）
+34. [`MaterializeRuntimeScopes`](45-materialize_runtime_scopes.md)（插入 AUTO RuntimeScopeStmt，使 orchestration codegen 1:1 emit PTO2_SCOPE）
+35. [`ClassifyIterArgCarry`](46-classify_iter_arg_carry.md)（把每个 ForStmt iter_arg 标注为平凡别名 / 重绑定 carry，并为 manual-scope TaskId fence 数组定尺）
+36. [`InsertCommFence`](47-insert_comm_fence.md)（在每个发布性写入与释放它的 pld.system.notify 之间插入整张 tensor 的 system.cacheinvalid + GM system.fence；跑在最后，使插入的 op 一路到 codegen 都紧邻其 notify）
 
 [`ResolveBackendOpLayouts`](19-resolve_backend_op_layouts.md) 会根据
 backend 注册的 layout 元数据修复受约束的逐元素 tile 操作。对于当前 PTO

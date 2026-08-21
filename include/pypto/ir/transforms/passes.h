@@ -267,6 +267,24 @@ Pass MaterializeDistTensorCtx();
 Pass MaterializeValidShapeSymbols();
 
 /**
+ * @brief Make every FunctionType::Graph function legal to record and replay
+ *
+ * Hoists each boundary scalar a Graph body *derives* out to its call sites: the
+ * host_build_graph runtime tracks a boundary scalar by the address of its
+ * argument slot, so a value computed inside the region has no slot and would be
+ * frozen at its first-call value on every later replay, with no warning.
+ *
+ * Also rejects, at compile time, the boundary shapes the runtime would decline
+ * to cache — an oversized or empty tensor boundary, runtime-allocated outputs,
+ * return values, nested graphs, and call sites carrying explicit dependencies or
+ * a dispatch predicate. Almost all of those degrade to a silent non-graph
+ * fallback at runtime, which no numerical test can detect.
+ *
+ * @return Program-level pass
+ */
+Pass LegalizeGraphBoundary();
+
+/**
  * @brief Create a loop unrolling pass
  *
  * Expands ForStmt nodes with ForKind::Unroll into inlined copies of the loop
