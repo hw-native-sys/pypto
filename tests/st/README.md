@@ -74,11 +74,20 @@ pytest tests/st/runtime/ops/test_matmul.py::TestMatmulOperations::test_matmul_sh
 
 ### Platform Selection
 
-Every test that uses the `test_runner` fixture runs on the platforms named
+Every test that takes the `test_runner` fixture runs on the platforms named
 by `--platform`, without declaring anything: the platform matrix expands the
 test over the active allowlist and binds each variant's platform to the case
 it builds. `--platform` accepts a comma-separated subset of `a2a3`, `a5`,
 `a2a3sim`, `a5sim` and defaults to `a2a3` (matching legacy on-NPU CI).
+
+A test that reaches the runner through a module- or session-scoped fixture is
+not expanded — that fixture is built once and shared by every item in its
+scope, so it cannot hold one artefact per platform. Such a test runs on the
+first `--platform` id its `@pytest.mark.platforms` marker allows.
+
+A test taking `backend_type` (there is no fixture of that name — the matrix
+supplies it) gets it paired with the platform in a single parametrize, so the
+backend a case compiles for and the toolchain it runs on can never disagree.
 
 A single active platform is *not* parametrized, so `--platform=a2a3` keeps the
 plain node ids; naming two or more grows the familiar `[a2a3]` / `[a5]`
@@ -151,7 +160,9 @@ The harness detects this before compiling and **skips** the case with a reason
 naming the conflict, instead of compiling for one architecture and executing on
 the other. Make the case arch-agnostic by dropping the override (the platform
 then decides the backend), or state the limitation with
-`@pytest.mark.platforms(...)` so the variant is never generated.
+`@pytest.mark.platforms(...)` so the variant is never generated. The legacy
+`PTOTestCase(backend_type=...)` constructor argument pins the backend the same
+way and is treated the same.
 
 ### Verbose Output
 
@@ -459,7 +470,7 @@ Use pytest markers to categorize or restrict tests:
 # Restrict a test (or a whole class) to a subset of platforms.  The
 # intersection with the --platform CLI filter decides which variants run.
 @pytest.mark.platforms("a5", "a5sim", reason="uses an Ascend 950 only operand")
-def test_ascend950_specific(test_runner, platform):
+def test_ascend950_specific(test_runner):
     ...
 
 # Expect a failure on one platform without dropping the case from the run.
