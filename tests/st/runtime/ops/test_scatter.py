@@ -76,7 +76,6 @@ import pypto.language as pl
 import pytest
 import torch
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 
 # --- Data builders (negative sentinel base, positive distinct values) ---
@@ -432,9 +431,6 @@ class _ScatterBaseTestCase(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def compute_expected(self, tensors, params=None):
         # Ground truth derived from the actual index + values (not a copy of any
         # input): a no-op leaves `base` (all negative) and fails immediately, and
@@ -553,10 +549,6 @@ class _ScatterMaskBaseTestCase(PTOTestCase):
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        # Mask-form pto.tscatter is an A2/A3 feature; A5 (Ascend950) rejects it.
-        return BackendType.Ascend910B
 
     def compute_expected(self, tensors, params=None):
         # Preserve dst's unselected (sentinel) columns; write inp into the

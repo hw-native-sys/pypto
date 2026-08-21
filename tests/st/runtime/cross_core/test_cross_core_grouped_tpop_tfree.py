@@ -36,7 +36,7 @@ from typing import Any
 
 import pytest
 import torch
-from pypto.backend import BackendType
+from harness.core.harness import platform_to_backend
 from pypto.backend.pto_backend import _preprocess_ptoas_output, _run_ptoas
 from pypto.runtime import compile_program
 from pypto.runtime.device_runner import (
@@ -48,30 +48,23 @@ from pypto.runtime.device_runner import (
 
 from tests.st.runtime.cross_core.test_cross_core import V2CUDProgram
 
-_PLATFORM_TO_BACKEND: dict[str, BackendType] = {
-    "a2a3": BackendType.Ascend910B,
-}
 _DEFAULT_PLATFORM = "a2a3"
 _PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
 
-def _resolve_platform(config: pytest.Config) -> str:
-    """Resolve the effective platform from the session-wide allowlist."""
-    raw_platform = str(config.getoption("--platform") or "")
-    tokens = [tok.strip() for tok in raw_platform.split(",") if tok.strip()]
-    if tokens and _DEFAULT_PLATFORM not in tokens:
-        raise pytest.UsageError(
-            "tests/st/runtime/cross_core/test_cross_core_grouped_tpop_tfree.py only supports --platform=a2a3"
-        )
-    return _DEFAULT_PLATFORM
-
-
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
-    """Provide the single effective platform to the standalone runtime regression."""
+    """Parametrize the standalone runtime regression over the requested platforms.
+
+    This case is a2a3-only, which its ``@pytest.mark.platforms("a2a3")`` marker
+    states; the system-test conftest deselects every other id. Emitting the
+    requested ids and letting that filter run keeps a mixed ``--platform`` list
+    working, where rejecting one here aborted the whole collection.
+    """
     if "platform" not in metafunc.fixturenames:
         return
-    platform = _resolve_platform(metafunc.config)
-    metafunc.parametrize("platform", [platform], ids=[platform])
+    raw_platform = str(metafunc.config.getoption("--platform") or "")
+    tokens = [tok.strip() for tok in raw_platform.split(",") if tok.strip()] or [_DEFAULT_PLATFORM]
+    metafunc.parametrize("platform", tokens, ids=tokens)
 
 
 def _load_kernel_config(work_dir: Path) -> Any:
@@ -93,15 +86,6 @@ def _require_ptoas() -> None:
     if os.environ.get("PTOAS_ROOT") or shutil.which("ptoas"):
         return
     pytest.skip("ptoas is unavailable for the consecutive-tpop/consecutive-tfree runtime regression")
-
-
-def _resolve_backend_type(platform: str) -> BackendType:
-    try:
-        return _PLATFORM_TO_BACKEND[platform]
-    except KeyError as exc:
-        raise pytest.UsageError(
-            "tests/st/runtime/cross_core/test_cross_core_grouped_tpop_tfree.py only supports --platform=a2a3"
-        ) from exc
 
 
 _TRAILING_LOC_RE = re.compile(r'\s+loc\("(?:[^"\\]|\\.)*":\d+:\d+\)\s*$')
@@ -211,7 +195,7 @@ class TestCrossCoreGroupedTpopTfree:
         from harness.core.test_runner import _last_device  # noqa: PLC0415
 
         _require_ptoas()
-        backend_type = _resolve_backend_type(platform)
+        backend_type = platform_to_backend(platform)
         device_id = int(os.environ.get("TASK_DEVICE", str(test_config.device_id)))
 
         test_name = "cross_core_v2c_updown_consecutive_tpop_then_tfree"

@@ -36,7 +36,6 @@ import pytest
 import torch
 from examples.models.paged_attention_batch import BuildBatchPagedAttentionProgram
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 
 DEFAULT_SCALE = 1.0
@@ -79,9 +78,6 @@ class BatchQKMatmulTestCase(PTOTestCase):
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         query_rows = self.batch * self.num_heads
@@ -264,9 +260,6 @@ class BatchSoftmaxPrepareTestCase(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def define_tensors(self) -> list[TensorSpec]:
         batch_q_tile = self.batch * self.q_tile
 
@@ -439,9 +432,6 @@ class BatchPVMatmulTestCase(PTOTestCase):
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         key_cache_rows = self.batch * self.block_num * self.block_size

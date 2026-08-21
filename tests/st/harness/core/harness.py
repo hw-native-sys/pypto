@@ -207,7 +207,6 @@ class PTOTestCase(ABC):
         config: RunConfig | None = None,
         *,
         platform: str | None = None,
-        backend_type: BackendType | None = None,
         strategy: OptimizationStrategy | None = None,
         memory_planner: MemoryPlanner | None = None,
         enable_pypto_l0c_double_buffer: bool | None = None,
@@ -221,10 +220,9 @@ class PTOTestCase(ABC):
                 ``get_platform()`` (which defaults to ``None``, deferring to
                 the session-wide ``--platform`` CLI value, currently
                 ``a2a3``).  Pass explicitly to run the same test case on a
-                different platform without subclassing.
-            backend_type: (Legacy) Override the backend type for code
-                generation.  Prefer ``platform``.  If both are given, the
-                value derived from ``platform`` wins.
+                different platform without subclassing.  The platform is the
+                only architecture knob a case has: codegen's backend is derived
+                from it by :func:`platform_to_backend`.
             strategy: Override the optimization strategy.  If None, falls
                 back to the class-level ``get_strategy()`` default (Default).
             memory_planner: Override the on-chip memory planner
@@ -234,7 +232,6 @@ class PTOTestCase(ABC):
         """
         self.config = config or RunConfig()
         self._override_platform = platform
-        self._override_backend = backend_type
         self._override_strategy = strategy
         self._override_memory_planner = memory_planner
         self._override_enable_pypto_l0c_double_buffer = enable_pypto_l0c_double_buffer
@@ -313,23 +310,22 @@ class PTOTestCase(ABC):
         """
         return self._override_platform
 
-    def get_backend_type(self) -> BackendType:
-        """Return the backend type for code generation.
+    def bind_platform(self, platform: str) -> None:
+        """Bind *platform* to this case when it did not pin one itself.
 
-        Resolution order:
-            1. The ``platform`` constructor arg, if set, decides the backend
-               via :data:`_PLATFORM_TO_BACKEND` (preferred path).
-            2. The legacy ``backend_type`` constructor arg, if set.
-            3. ``BackendType.Ascend910B`` as the global default.
+        Called by the harness for cases whose test body does not pass
+        ``platform=`` — the platform matrix is driven by the item's parametrize
+        variant instead (see ``pytest_generate_tests`` in ``tests/st/conftest.py``).
+        A case that pinned its own platform (constructor arg or a
+        :py:meth:`get_platform` override) is left untouched.
 
-        Subclasses may still override this method; the constructor override
-        only applies when the subclass does **not** redefine the method.
+        Args:
+            platform: One of :data:`ALL_PLATFORM_IDS`.
         """
-        if self._override_platform is not None:
-            return platform_to_backend(self._override_platform)
-        if self._override_backend is not None:
-            return self._override_backend
-        return BackendType.Ascend910B
+        if platform not in ALL_PLATFORM_IDS:
+            raise ValueError(f"Unknown platform '{platform}'. Expected one of {ALL_PLATFORM_IDS}.")
+        if self.get_platform() is None:
+            self._override_platform = platform
 
     def define_scalars(self) -> list[ScalarSpec]:
         """Define scalar TaskArg parameters for this test.

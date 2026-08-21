@@ -49,6 +49,7 @@ from harness.core.test_runner import (  # noqa: E402
     _cache_key,
     configure_inline_task_submit,
     execution_summary_lines,
+    set_current_item_platform,
     shutdown_pipeline,
     start_pipeline,
 )
@@ -114,11 +115,13 @@ def pytest_addoption(parser):
         action="store",
         default="a2a3",
         help=(
-            "Comma-separated allowlist of target platforms; each test under "
-            "tests/st/runtime/ is parametrized over a2a3, a5, a2a3sim, a5sim "
-            "and only variants whose id appears here are run "
-            "(default: a2a3, matching legacy CI behaviour). Legacy "
-            "non-parametrized tests inherit this value as their platform."
+            "Comma-separated allowlist of target platforms out of a2a3, a5, "
+            "a2a3sim, a5sim (default: a2a3, matching legacy CI behaviour). "
+            "Every test using the test_runner fixture is expanded over this "
+            "list, intersected with its @pytest.mark.platforms marker; tests "
+            "that parametrize `platform` themselves keep their own list and "
+            "only the variants named here run. A single active platform is not "
+            "parametrized, so node ids stay unsuffixed."
         ),
     )
     parser.addoption(
@@ -528,11 +531,106 @@ def device_ids(request) -> list[int]:
     return _parse_device_option(request.config.getoption("--device"))
 
 
+def _resolve_item_platform(node: pytest.Item | pytest.FixtureRequest, config: pytest.Config) -> str:
+    """Return the platform *node* runs on.
+
+    Resolution order:
+        1. An explicit ``platform`` parametrize on the test itself.
+        2. The value injected by :func:`pytest_generate_tests` (the platform
+           matrix), for tests that never mention ``platform``.
+        3. The first ``--platform`` id its ``@pytest.mark.platforms`` marker
+           allows, matching the legacy single-platform behaviour.
+
+    Args:
+        node: The item (or a request pointing at one) whose platform is wanted.
+        config: The session config, read for the ``--platform`` fallback.
+
+    Returns:
+        One of :data:`ALL_PLATFORM_IDS`.
+    """
+    callspec = getattr(node, "callspec", None)
+    params = callspec.params if callspec else {}
+    resolved = params.get("platform") or params.get("_st_platform")
+    if resolved:
+        return resolved
+    cli = list(_parse_platform_filter(config.getoption("--platform")) or ALL_PLATFORM_IDS)
+    marker = node.get_closest_marker("platforms") if hasattr(node, "get_closest_marker") else None
+    if marker is not None:
+        item_filter = _marker_platforms(marker, "platforms", getattr(node, "name", "<item>"))
+        # An item the marker excludes from every active platform is deselected by
+        # pytest_collection_modifyitems; keep the raw first id so this resolver
+        # never has to invent one.
+        cli = [p for p in cli if p in item_filter] or cli
+    return cli[0]
+
+
+def _marker_platforms(marker: pytest.Mark, marker_name: str, test_name: str) -> set[str]:
+    """Return the platform ids a ``platforms`` / ``platform_xfail`` marker names.
+
+    A typo used to narrow the marker's id set silently: the unknown id matched
+    no platform, so the test was deselected everywhere and looked like it had
+    simply never been written. Fail collection instead.
+
+    Args:
+        marker: The marker to read.
+        marker_name: Its name, for the error message.
+        test_name: The test carrying it, for the error message.
+
+    Returns:
+        The validated platform ids.
+
+    Raises:
+        pytest.UsageError: The marker names no platform, or an unknown one.
+    """
+    unknown = [arg for arg in marker.args if arg not in ALL_PLATFORM_IDS]
+    if not marker.args or unknown:
+        detail = f"unknown platform id(s) {unknown}" if unknown else "no platform ids"
+        raise pytest.UsageError(
+            f"@pytest.mark.{marker_name} on {test_name} has {detail}; "
+            f"expected one or more of: {', '.join(ALL_PLATFORM_IDS)}"
+        )
+    return set(marker.args)
+
+
+def _direct_argnames(func: Any) -> set[str]:
+    """Return the fixture names *func* requests in its own signature.
+
+    ``Metafunc.fixturenames`` is the whole closure, so it cannot tell a test
+    that takes ``test_runner`` from one that merely depends on a fixture which
+    does. Only the former can be expanded per platform.
+
+    Args:
+        func: The test function.
+
+    Returns:
+        The parameter names of the function signature.
+    """
+    try:
+        return set(inspect.signature(func).parameters)
+    except (TypeError, ValueError):  # builtins / unsupported callables
+        return set()
+
+
+@pytest.fixture(autouse=True)
+def _st_platform(request) -> str:
+    """Return the platform this item runs on (see :func:`_resolve_item_platform`).
+
+    Autouse so that :func:`pytest_generate_tests` always has this fixture in the
+    closure to parametrize; the platform matrix expands *this* name rather than
+    the test signature, which is what keeps test bodies unchanged.
+    """
+    return _resolve_item_platform(request.node, request.config)
+
+
 @pytest.fixture(scope="session")
 def test_runner(test_config) -> TestRunner:
     """Session-scoped fixture providing a test runner instance.
 
-    Session scope is used because the same runner can be reused across all tests.
+    Deliberately still session-scoped: module- and session-scoped fixtures in
+    the suite request it, and a function-scoped runner makes those a
+    ``ScopeMismatch``. The per-item platform reaches the runner through
+    ``set_current_item_platform`` (published by :func:`pytest_runtest_setup`)
+    rather than through a differently-scoped fixture.
     """
     return TestRunner(test_config)
 
@@ -562,8 +660,17 @@ def pytest_configure(config):
     """Register custom markers and apply early runtime settings."""
     config.addinivalue_line(
         "markers",
-        "platforms(*ids): restrict the test to the given platform ids "
-        "(intersected with the --platform CLI filter)",
+        "platforms(*ids, reason=...): restrict the test to the given platform ids "
+        "(intersected with the --platform CLI filter). State why in reason= — it "
+        "is the only record of whether the case is limited by the platform or "
+        "waiting on a fix.",
+    )
+    config.addinivalue_line(
+        "markers",
+        "platform_xfail(*ids, reason=..., strict=True): expect failure on the "
+        "given platforms. The case still runs, so an XPASS reports the fix "
+        "instead of freezing the verdict; prefer this over excluding the case "
+        "from a guard job with -k.",
     )
     config.addinivalue_line("markers", "slow: mark test as slow")
     config.addinivalue_line(
@@ -631,6 +738,89 @@ def pytest_itemcollected(item):
         item.add_marker("device_batch")
 
 
+def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
+    """Expand ``test_runner``-based tests over the active platform allowlist.
+
+    A test that declares ``platform`` itself keeps its own parametrize.
+    Everything else is expanded over the ``--platform`` allowlist intersected
+    with its ``@pytest.mark.platforms``, so a case joins a new platform's guard
+    job without touching its test body.
+
+    The test must take ``test_runner`` itself. A test that reaches the runner
+    through a module- or session-scoped fixture cannot vary per item — that
+    fixture is built once and shared — so expanding it would hand every variant
+    the first platform's artefact. Those items run on the single platform
+    :func:`_resolve_item_platform` picks for them.
+
+    Expansion only happens when the CLI names more than one platform: a plain
+    ``--platform=a2a3`` run keeps today's node ids, and only a multi-platform
+    invocation grows the ``[a2a3]`` / ``[a5]`` suffixes. Within such a run a
+    marker that narrows the test to one platform is still parametrized, so the
+    item carries that platform instead of falling back to the first CLI id.
+    """
+    direct = _direct_argnames(metafunc.function)
+    if "test_runner" not in direct:
+        return
+    if "platform" in metafunc.fixturenames:
+        return
+    cli = list(_parse_platform_filter(metafunc.config.getoption("--platform")) or ALL_PLATFORM_IDS)
+    marker = metafunc.definition.get_closest_marker("platforms")
+    item_filter = (
+        _marker_platforms(marker, "platforms", metafunc.definition.name) if marker is not None else None
+    )
+    # A marker that excludes every active platform leaves the variants to
+    # pytest_collection_modifyitems, which deselects them; parametrizing an
+    # empty list would instead leave one item behind marked "empty parameter set".
+    allowed = [p for p in cli if item_filter is None or p in item_filter] or cli
+    if len(cli) > 1:
+        metafunc.parametrize("_st_platform", allowed, ids=list(allowed), indirect=True)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item: pytest.Item) -> None:
+    """Publish this item's platform, then apply ``@pytest.mark.platform_xfail``.
+
+    ``tryfirst`` so the platform is published before pytest's own
+    ``pytest_runtest_setup`` builds this item's fixtures: a module-scoped
+    fixture that calls ``test_runner.run()`` during that setup must compile for
+    the platform of the item that triggered it, not for the session default.
+
+    The xfail half is a platform-conditional expectation, which a plain
+    ``xfail`` cannot spell.
+
+    A platform-conditional expectation cannot be spelled with a plain
+    ``xfail``, and raising ``pytest.xfail()`` inside the body aborts before the
+    test runs, so a later fix can never surface as an XPASS. Attaching the
+    marker here keeps the case running on every platform and reports the fix
+    the moment it lands.
+
+    Args:
+        item: The item about to run.
+
+    Raises:
+        pytest.UsageError: The marker names no/unknown platforms, or no reason.
+    """
+    set_current_item_platform(_resolve_item_platform(item, item.config))
+
+    marker = item.get_closest_marker("platform_xfail")
+    if marker is None:
+        return
+    platforms = _marker_platforms(marker, "platform_xfail", item.name)
+    reason = marker.kwargs.get("reason")
+    if not reason:
+        raise pytest.UsageError(
+            f"@pytest.mark.platform_xfail on {item.name} needs reason=... — an "
+            "unexplained expected failure cannot be told apart from a stale one."
+        )
+    if _resolve_item_platform(item, item.config) in platforms:
+        item.add_marker(pytest.mark.xfail(reason=reason, strict=marker.kwargs.get("strict", True)))
+
+
+def pytest_runtest_teardown(item: pytest.Item) -> None:  # noqa: ARG001
+    """Drop the published platform so it cannot leak into the next item."""
+    set_current_item_platform(None)
+
+
 def pytest_collection_modifyitems(config, items):
     """Deselect items that fall outside the active platform allowlist.
 
@@ -656,14 +846,14 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         item_marker = next(item.iter_markers(name="platforms"), None)
         if item_marker is not None:
-            item_filter = {p for p in item_marker.args if p in canonical}
+            item_filter = _marker_platforms(item_marker, "platforms", item.name)
         else:
             item_filter = canonical
         allowed = cli_filter & item_filter
 
         callspec = getattr(item, "callspec", None)
         params = callspec.params if callspec else {}
-        platform_param = params.get("platform")
+        platform_param = params.get("platform") or params.get("_st_platform")
 
         if platform_param is not None:
             if platform_param in allowed:
@@ -730,6 +920,7 @@ def _collect_test_case_from_item(
     item: pytest.Item,
     seen: dict[str, PTOTestCase],
     session_memory_planner: MemoryPlanner | None,
+    session_platform: str,
 ) -> None:
     """Inspect *item* and add any discovered PTOTestCase instances to *seen*.
 
@@ -802,7 +993,13 @@ def _collect_test_case_from_item(
         except Exception:
             # _Unresolvable arg, or a constructor mismatch — leave for inline.
             continue
-        seen.setdefault(_cache_key(instance, session_memory_planner=session_memory_planner), instance)
+        # Bind the item's platform so each matrix variant compiles its own
+        # artefact; without this the variants share one cache key and only the
+        # first platform is ever built. An item the matrix did not expand runs
+        # on the session platform, which is what the pipeline resolves for it.
+        platform = params.get("platform") or params.get("_st_platform") or session_platform
+        instance.bind_platform(platform)
+        seen.setdefault(_cache_key(instance, platform, session_memory_planner), instance)
 
 
 def pytest_collection_finish(session: pytest.Session) -> None:
@@ -825,10 +1022,12 @@ def pytest_collection_finish(session: pytest.Session) -> None:
 
     # ── discover PTOTestCase instances ───────────────────────────────────────
     session_memory_planner = _parse_memory_planner(session.config.getoption("--memory-planner"))
+    platform_filter = _parse_platform_filter(session.config.getoption("--platform"))
+    session_platform: str = platform_filter[0] if platform_filter else "a2a3"
     seen: dict[str, PTOTestCase] = {}  # effective cache_key → instance (deduped)
 
     for item in session.items:
-        _collect_test_case_from_item(item, seen, session_memory_planner)
+        _collect_test_case_from_item(item, seen, session_memory_planner, session_platform)
 
     # Read the task-submit / pipeline options *before* the empty-discovery guard:
     # a suite that only creates PTOTestCases dynamically leaves ``seen`` empty yet
@@ -918,11 +1117,6 @@ def pytest_collection_finish(session: pytest.Session) -> None:
     else:
         cache_dir = Path(tempfile.mkdtemp(prefix="pypto_precompile_"))
         _temp_precompile_dirs.append(cache_dir)
-
-    # ``--platform`` is a CSV allowlist; the per-test value resolved by
-    # ``tc.get_platform()`` overrides this fallback inside the pipeline.
-    platform_filter = _parse_platform_filter(session.config.getoption("--platform"))
-    session_platform: str = platform_filter[0] if platform_filter else "a2a3"
 
     # Build the device pool from --device.  N parallel executes max.
     devices = _parse_device_option(session.config.getoption("--device"))

@@ -74,11 +74,25 @@ pytest tests/st/runtime/ops/test_matmul.py::TestMatmulOperations::test_matmul_sh
 
 ### Platform Selection
 
-Each runtime test case is automatically parametrized over four target
-platforms: `a2a3`, `a5`, `a2a3sim`, `a5sim`. The `--platform` CLI option acts
-as a **filter** that selects which subset is actually executed (it accepts a
-comma-separated list and defaults to `a2a3` when omitted, matching the
-legacy on-NPU CI behaviour).
+Every test that takes the `test_runner` fixture runs on the platforms named
+by `--platform`, without declaring anything: the platform matrix expands the
+test over the active allowlist and binds each variant's platform to the case
+it builds. `--platform` accepts a comma-separated subset of `a2a3`, `a5`,
+`a2a3sim`, `a5sim` and defaults to `a2a3` (matching legacy on-NPU CI).
+
+A test that reaches the runner through a module- or session-scoped fixture is
+not expanded — that fixture is built once and shared by every item in its
+scope, so it cannot hold one artefact per platform. Such a test runs on the
+first `--platform` id its `@pytest.mark.platforms` marker allows.
+
+A single active platform is *not* parametrized, so `--platform=a2a3` keeps the
+plain node ids; naming two or more grows the familiar `[a2a3]` / `[a5]`
+suffixes.
+
+Keep `--forked` when a run spans both architectures: a single process that
+executes on `a2a3*` and `a5*` simulators through the pre-compile pipeline
+segfaults while cleaning up at session end (pre-existing; every test still
+passes first).
 
 ```bash
 # Default: run a2a3 only (matches legacy CI; requires Ascend 910B hardware)
@@ -102,8 +116,49 @@ pytest tests/st/ -v --forked --platform=a2a3sim,a5sim,a2a3
 
 A test case can additionally restrict itself to a subset of platforms via the
 ``@pytest.mark.platforms(...)`` marker, e.g. ``@pytest.mark.platforms("a5",
-"a5sim")`` to mark a test as Ascend 950 only. The intersection of the CLI
-filter and the per-test whitelist determines which variants actually run.
+"a5sim", reason="...")`` to mark a test as Ascend 950 only. The intersection of
+the CLI filter and the per-test whitelist determines which variants actually
+run. Always pass `reason=` — it is the only record of *why* the case is
+restricted. An unknown platform id in either marker fails collection instead of
+quietly deselecting the test everywhere.
+
+#### Expected failures on one platform
+
+A case that runs everywhere but is known to fail on one platform belongs in
+`@pytest.mark.platform_xfail(...)`, not in a CI `-k` exclusion:
+
+```python
+@pytest.mark.platform_xfail(
+    "a5",
+    reason="950 board: manual pl.tpush_to_aic gets no V->C fractal adapter",
+)
+def test_multiple_pipes(self, test_runner):
+    ...
+```
+
+The case still runs on every platform, so the day the underlying fix lands the
+run reports an XPASS (the marker is strict by default) instead of the verdict
+staying frozen. Pass `strict=False` only for a genuinely flaky failure. This is
+what keeps a guard job's command a plain directory: a newly-evaluated failure
+gets a marker with a reason next to the test, rather than a name in a `-k`
+expression nobody can trace back.
+
+`platforms` vs `platform_xfail`: use `platforms` when the platform *cannot*
+run the case (the feature does not exist on that arch) and `platform_xfail`
+when it *ought to* and does not yet.
+
+#### The platform is the only architecture knob
+
+A test case has no backend of its own. Codegen's backend is derived from the
+resolved platform (`platform_to_backend`) at every compile site, so an artefact
+can never be built for one architecture and executed on another. There is no
+`get_backend_type()` on `PTOTestCase` and no `backend_type=` constructor
+argument; a case that still defines the former fails loudly rather than being
+quietly ignored.
+
+To say that a case genuinely cannot run on an architecture, restrict its tests
+with `@pytest.mark.platforms(..., reason=...)` — the limitation belongs to the
+test, not to a backend field on the case.
 
 ### Verbose Output
 
@@ -399,7 +454,7 @@ Refer to existing tests for more examples:
 The [`conftest.py`](conftest.py) provides useful fixtures:
 
 - `test_config`: Session-scoped `RunConfig` built from CLI options
-- `test_runner`: Session-scoped `TestRunner` (reused across tests, caches compiled binaries)
+- `test_runner`: `TestRunner` bound to this item's platform (the compile cache it consults is process-wide, so per-item instances still share compiled binaries)
 - `optimization_strategy`: Current optimization strategy string from `--strategy`
 - `tensor_shape`: Parameterized fixture yielding standard shapes `(64,64)`, `(128,128)`, `(256,256)`
 
@@ -410,8 +465,13 @@ Use pytest markers to categorize or restrict tests:
 ```python
 # Restrict a test (or a whole class) to a subset of platforms.  The
 # intersection with the --platform CLI filter decides which variants run.
-@pytest.mark.platforms("a5", "a5sim")
-def test_ascend950_specific(test_runner, platform):
+@pytest.mark.platforms("a5", "a5sim", reason="uses an Ascend 950 only operand")
+def test_ascend950_specific(test_runner):
+    ...
+
+# Expect a failure on one platform without dropping the case from the run.
+@pytest.mark.platform_xfail("a5", reason="950 layout mismatch, see #1234")
+def test_runs_everywhere_fails_on_950(test_runner):
     ...
 
 @pytest.mark.slow  # Long-running test
@@ -419,9 +479,11 @@ def test_large_model(test_runner):
     ...
 ```
 
-To make a single test run on every supported platform, parametrize it with
-the canonical ``PLATFORMS`` list and accept a ``platform`` argument that you
-forward to your ``PTOTestCase`` subclass:
+Declaring ``platform`` yourself is only needed when the **test body** uses the
+value — to vary a dtype, a tolerance, or which case class to build. Parametrize
+it with the canonical ``PLATFORMS`` list (or a narrower one) and forward it to
+your ``PTOTestCase`` subclass; an explicit ``platform`` parametrize always wins
+over the automatic expansion:
 
 ```python
 from harness.core.harness import PLATFORMS

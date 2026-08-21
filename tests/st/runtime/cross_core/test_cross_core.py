@@ -30,7 +30,6 @@ import pypto.language as pl
 import pytest
 import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
 
 M = 32
 K = 64
@@ -58,51 +57,6 @@ SLOTNUM_SLOT_SIZE = SLOTNUM_DIM * SLOTNUM_DIM * 4
 SLOTNUM_SLOT_NUM = 4
 SLOTNUM_LOCAL_SLOT_NUM = 4
 SLOTNUM_BUFFER_SIZE = SLOTNUM_SLOT_SIZE * SLOTNUM_LOCAL_SLOT_NUM
-
-_PLATFORM_TO_BACKEND: dict[str, BackendType] = {
-    "a2a3": BackendType.Ascend910B,
-    "a2a3sim": BackendType.Ascend910B,
-    "a5": BackendType.Ascend950,
-    "a5sim": BackendType.Ascend950,
-}
-_DEFAULT_PLATFORM = "a2a3"
-
-
-def _resolve_platform(config: pytest.Config) -> str:
-    """Resolve the effective platform from the session-wide allowlist."""
-    raw_platform = str(config.getoption("--platform") or "")
-    tokens = [tok.strip() for tok in raw_platform.split(",") if tok.strip()]
-    valid_platforms = tuple(dict.fromkeys(tok for tok in tokens if tok in _PLATFORM_TO_BACKEND))
-    if tokens and not valid_platforms:
-        raise pytest.UsageError(
-            "tests/st/runtime/cross_core/test_cross_core.py "
-            "supports --platform values (a2a3, a2a3sim, a5, or a5sim)"
-        )
-    return valid_platforms[0] if valid_platforms else _DEFAULT_PLATFORM
-
-
-def _resolve_backend_type(config: pytest.Config) -> BackendType:
-    """Resolve backend from the selected platform, defaulting to a2a3."""
-    platform = _resolve_platform(config)
-    try:
-        return _PLATFORM_TO_BACKEND[platform]
-    except KeyError as exc:
-        raise pytest.UsageError(
-            f"Unsupported --platform {platform!r} for tests/st/runtime/cross_core/test_cross_core.py"
-        ) from exc
-
-
-def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
-    """Drive backend selection from the session-wide --platform filter."""
-    if "backend_type" not in metafunc.fixturenames and "platform" not in metafunc.fixturenames:
-        return
-
-    platform = _resolve_platform(metafunc.config)
-    backend_type = _resolve_backend_type(metafunc.config)
-    if "backend_type" in metafunc.fixturenames:
-        metafunc.parametrize("backend_type", [backend_type], ids=[platform])
-    if "platform" in metafunc.fixturenames:
-        metafunc.parametrize("platform", [platform])
 
 
 @pl.program
@@ -874,78 +828,83 @@ class ExplicitSlotNumTest(PTOTestCase):
 class TestCrossCore:
     """Cross-core communication system tests."""
 
-    def test_tpush_tpop_v2c_updown(self, test_runner, backend_type):
+    def test_tpush_tpop_v2c_updown(self, test_runner):
         """V2C updown pipe: compile through full pipeline and verify kernel artifacts."""
-        result = test_runner.run(V2CUDTest(backend_type=backend_type))
+        result = test_runner.run(V2CUDTest())
         assert result.passed, f"Cross-core V2C updown compilation failed: {result.error}"
 
-    def test_tpush_tpop_v2c_leftright(self, test_runner, backend_type):
+    def test_tpush_tpop_v2c_leftright(self, test_runner):
         """V2C left-right pipe: compile through full pipeline and verify kernel artifacts."""
-        result = test_runner.run(V2CLRTest(backend_type=backend_type))
+        result = test_runner.run(V2CLRTest())
         assert result.passed, f"Cross-core V2C left-right compilation failed: {result.error}"
 
-    def test_tpush_tpop_v2c_nosplit(self, test_runner, backend_type):
+    def test_tpush_tpop_v2c_nosplit(self, test_runner):
         """V2C no-split pipe: compile through full pipeline and verify correctness."""
-        result = test_runner.run(V2CNoSplitTest(backend_type=backend_type))
+        result = test_runner.run(V2CNoSplitTest())
         assert result.passed, f"Cross-core V2C no-split compilation failed: {result.error}"
 
-    def test_tpop_c2v_leftright(self, test_runner, backend_type):
+    def test_tpop_c2v_leftright(self, test_runner):
         """C2V left-right pipe: compile through full pipeline and verify correctness."""
-        result = test_runner.run(C2VLRTest(backend_type=backend_type))
+        result = test_runner.run(C2VLRTest())
         assert result.passed, f"Cross-core C2V left-right compilation failed: {result.error}"
 
-    def test_tpop_c2v_updown(self, test_runner, backend_type):
+    def test_tpop_c2v_updown(self, test_runner):
         """C2V updown pipe: compile through full pipeline and verify correctness."""
-        result = test_runner.run(C2VUDTest(backend_type=backend_type))
+        result = test_runner.run(C2VUDTest())
         assert result.passed, f"Cross-core C2V updown compilation failed: {result.error}"
 
-    def test_tpop_c2v_nosplit(self, test_runner, backend_type):
+    def test_tpop_c2v_nosplit(self, test_runner):
         """C2V no-split pipe: compile through full pipeline and verify correctness."""
-        result = test_runner.run(C2VNoSplitTest(backend_type=backend_type))
+        result = test_runner.run(C2VNoSplitTest())
         assert result.passed, f"Cross-core C2V no-split compilation failed: {result.error}"
 
-    def test_tpop_bidirect_updown(self, test_runner, backend_type):
+    def test_tpop_bidirect_updown(self, test_runner):
         """Bidirect updown pipe: compile through full pipeline and verify correctness."""
-        result = test_runner.run(BiDirectUDTest(backend_type=backend_type))
+        result = test_runner.run(BiDirectUDTest())
         assert result.passed, f"Cross-core bidirect updown compilation failed: {result.error}"
 
-    def test_tpop_bidirect_leftright(self, test_runner, backend_type):
+    def test_tpop_bidirect_leftright(self, test_runner):
         """Bidirect left-right pipe: compile through full pipeline and verify correctness."""
-        result = test_runner.run(BiDirectLRTest(backend_type=backend_type))
+        result = test_runner.run(BiDirectLRTest())
         assert result.passed, f"Cross-core bidirect left-right compilation failed: {result.error}"
 
-    def test_tpop_bidirect_nosplit(self, test_runner, backend_type):
+    def test_tpop_bidirect_nosplit(self, test_runner):
         """Bidirect no-split pipe: compile through full pipeline and verify correctness."""
-        result = test_runner.run(BiDirectNoSplitTest(backend_type=backend_type))
+        result = test_runner.run(BiDirectNoSplitTest())
         assert result.passed, f"Cross-core bidirect no-split compilation failed: {result.error}"
 
-    def test_tpop_bidirect_spmd_nosplit(self, test_runner, backend_type):
+    def test_tpop_bidirect_spmd_nosplit(self, test_runner):
         """Bidirect cube<->vec + transpose fused in one no-split pl.spmd scope.
 
         On-board guard for #1761: the secondary-subblock replay of the scope's
         ``tile.transpose`` must not 507018-hang the AICore.
         """
-        result = test_runner.run(BidirectSpmdNoSplitTest(backend_type=backend_type))
+        result = test_runner.run(BidirectSpmdNoSplitTest())
         assert result.passed, f"Cross-core bidirect spmd no-split failed: {result.error}"
 
-    def test_multiple_pipes_nosplit(self, test_runner, backend_type):
+    def test_multiple_pipes_nosplit(self, test_runner):
         """Explicit multiple pipe ids: compile through full pipeline and verify correctness."""
-        result = test_runner.run(MultiPipeNoSplitTest(backend_type=backend_type))
+        result = test_runner.run(MultiPipeNoSplitTest())
         assert result.passed, f"Cross-core explicit multi-pipe no-split failed: {result.error}"
 
-    # `local_slot_num` on pto.{aic,aiv}_initialize_pipe is an a2/a3-only operand,
-    # not an unimplemented 950 feature: ptoas rejects it outright for the 950
-    # frontend pipe lowering, whatever its value --
+    # ptoas rejects the operand outright for the 950 frontend pipe lowering,
+    # whatever its value --
     #   error: 'pto.aic_initialize_pipe' op 'local_slot_num' is only supported
     #          for a2/a3 frontend pipe lowering
-    # so the whole manual pl.{aic,aiv}_initialize_pipe route this case exercises
-    # is a2/a3-only by design. Deselected rather than xfail-ed: xfail says "this
-    # ought to work and does not", which would keep a permanent platform
-    # limitation on the report as if it were a defect awaiting a fix.
-    @pytest.mark.platforms("a2a3", "a2a3sim")
-    def test_explicit_slot_num(self, test_runner, backend_type):
+    # Deselected rather than platform_xfail-ed: xfail says "this ought to work
+    # and does not", which would keep a permanent platform limitation on the
+    # report as if it were a defect awaiting a fix.
+    @pytest.mark.platforms(
+        "a2a3",
+        "a2a3sim",
+        reason=(
+            "local_slot_num on pto.{aic,aiv}_initialize_pipe is an a2/a3-only operand, so the "
+            "manual pl.{aic,aiv}_initialize_pipe route this case exercises does not exist on 950"
+        ),
+    )
+    def test_explicit_slot_num(self, test_runner):
         """Explicit slot_num / local_slot_num: compile through full pipeline and verify correctness."""
-        result = test_runner.run(ExplicitSlotNumTest(backend_type=backend_type))
+        result = test_runner.run(ExplicitSlotNumTest())
         assert result.passed, f"Cross-core explicit slot_num failed: {result.error}"
 
 

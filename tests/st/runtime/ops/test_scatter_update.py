@@ -25,7 +25,6 @@ import pypto.language as pl
 import pytest
 import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 
 
@@ -255,9 +254,6 @@ class TileScatterUpdateTestCase(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def compute_expected(self, tensors, params=None):
         input_t = tensors["input_t"].clone()
         index_t = tensors["index_t"]
@@ -296,9 +292,6 @@ class TileScatterUpdateFP16TestCase(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def compute_expected(self, tensors, params=None):
         input_t = tensors["input_t"].clone()
         index_t = tensors["index_t"]
@@ -336,9 +329,6 @@ class TileScatterUpdateDuplicateIndicesTestCase(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def compute_expected(self, tensors, params=None):
         input_t = tensors["input_t"].clone()
         index_t = tensors["index_t"]
@@ -374,9 +364,6 @@ class TileScatterUpdateSingleBatchTestCase(PTOTestCase):
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def compute_expected(self, tensors, params=None):
         input_t = tensors["input_t"].clone()
@@ -415,9 +402,6 @@ class TileScatterUpdateShuffledIndicesTestCase(PTOTestCase):
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def compute_expected(self, tensors, params=None):
         input_t = tensors["input_t"].clone()
@@ -469,9 +453,6 @@ class IndexCastFromTileReadTestCase(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def compute_expected(self, tensors, params=None):
         expected = torch.zeros_like(tensors["dst_t"])
         row = int(tensors["index_t"][0, 0].item())
@@ -508,9 +489,6 @@ class IndexCastToTileInsertTestCase(PTOTestCase):
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def compute_expected(self, tensors, params=None):
         expected = tensors["input_t"].clone()

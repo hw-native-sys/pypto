@@ -21,7 +21,6 @@ from typing import Any
 import pytest
 import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 
 _spmd_module = importlib.import_module("examples.models.09_paged_attention_spmd")
@@ -102,9 +101,6 @@ class PagedAttentionSpmdTestCase(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def get_program(self) -> Any:
         return build_paged_attention_spmd_program(
             batch=self.batch,
@@ -154,9 +150,6 @@ class PTOASTestCaseMixin:
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
 
 class PagedAttentionSpmdPTOASTestCase(PTOASTestCaseMixin, PagedAttentionSpmdTestCase):

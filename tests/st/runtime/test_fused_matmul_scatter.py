@@ -44,7 +44,6 @@ import pypto.language as pl
 import pytest
 import torch
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 
 # Shapes match the issue repro exactly.
@@ -146,9 +145,6 @@ class FusedMatmulScatterTestCase(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("x", [B, H], DataType.BF16, init_value=_make_x),
@@ -188,9 +184,6 @@ class ScatterOnlyTestCase(PTOTestCase):
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
