@@ -1418,6 +1418,11 @@ def _immutable_host_spans(
     """Return ``(start, end)`` for each range the caller declares is never written post-fork."""
     spans: list[tuple[int, int]] = []
     for tensor in tensors or ():
+        if not isinstance(tensor, torch.Tensor):
+            raise TypeError(
+                "DistributedWorker immutable_host_tensors entries must be torch.Tensor objects, "
+                f"got {type(tensor).__name__}."
+            )
         if tensor.device.type != "cpu" or not tensor.is_contiguous():
             raise ValueError(
                 "DistributedWorker immutable_host_tensors must be contiguous CPU tensors; "
@@ -1532,7 +1537,8 @@ class DistributedWorker(Worker):
         # see the same pages, so it can be named in place. Whether a range is MAP_SHARED is
         # the caller's to know and cannot be inferred from an address, so record it here,
         # where the tensors are still in hand, as (start, end, is_shared) spans. A
-        # MAP_PRIVATE range is deliberately left to staging — see `_named_host_buffer`.
+        # MAP_PRIVATE range is staged unless the caller declares it immutable below, and even
+        # then only as an upload source — see `_named_host_buffer`.
         # Ranges the caller *declares* are never written after ``prepare()``. This cannot be
         # inferred: ``torch.is_shared()`` answers "is this storage a shared-memory allocation",
         # while what the copy path needs to know is "will anyone write these bytes after the
@@ -2249,7 +2255,7 @@ class DistributedWorker(Worker):
             self._named_identities[key] = identity
             return identity
 
-    def _named_host_buffer(self, host_ptr: int, nbytes: int) -> Any:
+    def _named_host_buffer(self, host_ptr: int, nbytes: int, *, writing: bool = False) -> Any:
         """Name a fork-inherited MAP_SHARED host range in place, or ``None`` to stage it.
 
         Only memory registered through ``inherited_host_tensors`` can be named at all: it
@@ -2261,6 +2267,10 @@ class DistributedWorker(Worker):
         shared is always safe to name. A range that does not is named only if the caller
         listed it in ``immutable_host_tensors``, promising nothing writes it after
         ``prepare()``.
+
+        The declaration applies to upload sources only: a declared range used as a D2H
+        destination still has to be genuinely shared, since writing a private page in the child
+        leaves the parent reading the old contents and writing a read-only mapping faults.
 
         Both conditions exist because inference alone is wrong in both directions. A
         ``MAP_PRIVATE`` range is inherited too, but copy-on-write means the child keeps
@@ -2283,7 +2293,12 @@ class DistributedWorker(Worker):
         )
 
         end = host_ptr + nbytes
-        declared_immutable = any(
+        # The declaration covers *reads* only. Naming a declared non-shared range as a D2H
+        # destination would contradict the declaration and break either way: a MAP_PRIVATE page
+        # written by the child splits copy-on-write, so the parent keeps seeing the old bytes,
+        # and a read-only file mapping faults outright. Writes therefore still require a range
+        # that is genuinely shared.
+        declared_immutable = not writing and any(
             start <= host_ptr and end <= stop for start, stop in self._immutable_host_spans
         )
         for start, stop, is_shared in self._inherited_host_spans:
@@ -2325,7 +2340,7 @@ class DistributedWorker(Worker):
         src = self._device_buffer(src_dev_ptr, worker_id, "copy_from")
         if not isinstance(nbytes, int) or nbytes <= 0:
             raise ValueError(f"nbytes must be a positive int, got {nbytes!r}")
-        dst = self._named_host_buffer(int(dst_host_ptr), int(nbytes))
+        dst = self._named_host_buffer(int(dst_host_ptr), int(nbytes), writing=True)
         if dst is not None:
             self._w.copy_from(dst, src)
             return

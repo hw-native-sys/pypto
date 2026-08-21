@@ -3345,6 +3345,49 @@ class TestNamedInheritedHostRanges:
         patched_setup["worker"].create_buffer.assert_not_called()
         rt.close()
 
+    def test_a_declared_range_is_not_named_as_a_d2h_destination(self, patched_setup):
+        """The declaration is a promise about reads, so it must not license writes.
+
+        Naming a declared non-shared range as a read-back destination would break either way: a
+        MAP_PRIVATE page written by the child splits copy-on-write, so the parent keeps reading
+        the old bytes, and a read-only file mapping — which is the case this option exists for —
+        faults on the write. Both are silent-or-worse, so D2H still requires a shared range.
+        """
+        host = torch.zeros(4, 4, dtype=torch.float32)  # NOT shared
+        rt = DistributedWorker(
+            _fake_compiled([_param("a", [4, 4])], []),
+            inherited_host_tensors=[host],
+            immutable_host_tensors=[host],
+        )
+        dev = self._dev(rt)
+        nbytes = host.numel() * host.element_size()
+
+        rt.copy_from(host.data_ptr(), dev.data_ptr, nbytes)
+
+        staged = patched_setup["worker"].copy_from.call_args.args[0]
+        assert not isinstance(staged, _NamedHostRange), "a declared range must not receive a D2H"
+        rt.close()
+
+    def test_a_shared_range_is_still_named_as_a_d2h_destination(self, patched_setup):
+        """The direction rule must not regress the case that was already safe."""
+        host = torch.zeros(4, 4, dtype=torch.float32).share_memory_()
+        rt = DistributedWorker(_fake_compiled([_param("a", [4, 4])], []), inherited_host_tensors=[host])
+        dev = self._dev(rt)
+        nbytes = host.numel() * host.element_size()
+
+        rt.copy_from(host.data_ptr(), dev.data_ptr, nbytes)
+
+        assert isinstance(patched_setup["worker"].copy_from.call_args.args[0], _NamedHostRange)
+        rt.close()
+
+    def test_a_non_tensor_declared_entry_is_rejected(self, patched_setup):
+        """Matches how `inherited_host_tensors` rejects them: TypeError, not AttributeError."""
+        with pytest.raises(TypeError, match="immutable_host_tensors entries must be torch.Tensor"):
+            DistributedWorker(
+                _fake_compiled([_param("a", [4, 4])], []),
+                immutable_host_tensors=[None],  # pyright: ignore[reportArgumentType]
+            )
+
     def test_declaring_a_range_does_not_name_its_neighbours(self, patched_setup):
         """The declaration is per range, so an undeclared private tensor still stages."""
         declared = torch.zeros(4, 4, dtype=torch.float32)
