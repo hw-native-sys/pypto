@@ -469,8 +469,8 @@ func_orch = ir.Function("orchestrator", params, return_types, body, span, ir.Fun
 | `param_directions_` | list[ParamDirection] | 参数方向，与 params_ 长度相同 |
 | `return_types_` | list[TypePtr] | 返回类型 |
 | `body_` | StmtPtr | 函数体 |
-| `level_` | optional[Level] | 层次级别（对 InCore/AIC/AIV/Group/Orchestration 自动派生，详见下文） |
-| `role_` | optional[Role] | 层次角色（对 InCore/AIC/AIV/Group/Orchestration 自动派生，详见下文） |
+| `level_` | optional[Level] | 层次级别（对 InCore/AIC/AIV/Group/Orchestration/Graph 自动派生，详见下文） |
+| `role_` | optional[Role] | 层次角色（对 InCore/AIC/AIV/Group/Orchestration/Graph 自动派生，详见下文） |
 | `attrs_` | list[(str, Any)] | 有序的自由形式元数据，以 `UsualField` 暴露（参与结构遍历） |
 
 ### 保留的 `attrs_` 键
@@ -495,12 +495,13 @@ func_orch = ir.Function("orchestrator", params, return_types, body, span, ir.Fun
 
 ### `level_` / `role_` 自动派生
 
-当 `func_type_` 属于 {`InCore`, `AIC`, `AIV`, `Group`, `Orchestration`} 时，
+当 `func_type_` 属于 {`InCore`, `AIC`, `AIV`, `Group`, `Orchestration`, `Graph`} 时，
 `Function` 构造函数会在未显式提供 `level_` / `role_` 时自动派生：
 
 | `func_type_` | 派生的 `level_` | 派生的 `role_` |
 | ------------ | --------------- | -------------- |
 | `Orchestration` | `CHIP` | `Orchestrator` |
+| `Graph` | `CHIP` | `Orchestrator` |
 | `InCore` | `CHIP_DIE` | `Worker` |
 | `AIC` | `AIC` | `Worker` |
 | `AIV` | `AIV` | `Worker` |

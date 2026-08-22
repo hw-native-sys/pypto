@@ -124,7 +124,10 @@ class DeferredWaiterCallSiteValidator : public IRVisitor {
                   const Span& span) {
     auto global = As<GlobalVar>(op);
     INTERNAL_CHECK_SPAN(global, span) << "Internal error: deferred waiter call target is not a GlobalVar";
-    CHECK_SPAN(caller_->func_type_ == FunctionType::Orchestration, span)
+    // Orchestration-like, not strictly Orchestration: this asks "is the caller a
+    // task-level orchestration body", which a Graph body is. Only the single
+    // compilation entry keeps the strict comparison.
+    CHECK_SPAN(IsOrchestrationLike(caller_->func_type_), span)
         << "deferred waiter '" << global->name_
         << "' must be dispatched directly from an Orchestration function via a task-level "
            "pl.at(CORE_GROUP) scope";

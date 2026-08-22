@@ -443,7 +443,7 @@ void InjectGMSlotBufferInPlace(std::vector<FunctionPtr>& functions) {
     for (const auto& caller_name : it->second) {
       auto fit = func_by_name.find(caller_name);
       if (fit == func_by_name.end()) continue;
-      if ((*fit->second)->func_type_ == FunctionType::Orchestration) {
+      if (IsOrchestrationLike((*fit->second)->func_type_)) {
         orch_needs_tensor_create.insert(caller_name);
       } else {
         if (needs_gm_param.insert(caller_name).second) worklist.push_back(caller_name);
@@ -489,7 +489,9 @@ void InjectGMSlotBufferInPlace(std::vector<FunctionPtr>& functions) {
   }
 
   for (auto& func : functions) {
-    if (func->func_type_ != FunctionType::Orchestration) continue;
+    // Must stay in lockstep with the boundary marking above: widening only one
+    // side leaves a caller passing the old arity to a rewritten ``__gm_pipe_buffer``.
+    if (!IsOrchestrationLike(func->func_type_)) continue;
     if (!func->body_) continue;
 
     const std::unordered_set<std::string>& mod_callees = needs_gm_param;

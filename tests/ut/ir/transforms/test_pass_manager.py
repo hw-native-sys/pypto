@@ -64,6 +64,7 @@ TENSOR_OPTIMIZATION_PASSES = [
     "LowerHostTensorCollectives",
     "MaterializeDistTensorCtx",
     "Simplify",
+    "LegalizeGraphBoundary",
     "MaterializeRuntimeScopes",
     "ClassifyIterArgCarry",
     "InsertCommFence",

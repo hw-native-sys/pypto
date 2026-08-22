@@ -1776,12 +1776,17 @@ def _collect_chip_task_functions(
     scopes), preventing redundant compilation and cross-orchestration name
     collisions in ``next_levels/{orch}/`` artifacts.
     """
+    # A Graph fragment belongs to the chip sub-program like any other callee.
+    # Omitting it here does not merely skip the fragment: the walk stops at it,
+    # so every kernel reachable *only* through it disappears from the
+    # sub-program too, and orchestration codegen then fails looking them up.
     chip_func_types = (
         _ir_core.FunctionType.InCore,
         _ir_core.FunctionType.AIC,
         _ir_core.FunctionType.AIV,
         _ir_core.FunctionType.Group,
         _ir_core.FunctionType.Spmd,
+        _ir_core.FunctionType.Graph,
     )
 
     result: list[_ir_core.Function] = [orch_func]
