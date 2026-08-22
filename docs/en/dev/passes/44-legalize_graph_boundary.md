@@ -1,0 +1,148 @@
+# LegalizeGraphBoundary Pass
+
+Makes every `FunctionType::Graph` function legal for the `host_build_graph`
+runtime to record and replay: hoists the boundary scalars a Graph body derives
+out to its call sites, and rejects the boundaries the runtime would decline to
+cache.
+
+## Overview
+
+The `host_build_graph` runtime records a Graph function's task topology on its
+first call and replays that recording afterwards. Replay patches only two
+things: the addresses of the boundary tensors, and the values of the boundary
+scalars. Everything else — node count, shapes, dependency edges, block counts —
+is frozen into the recorded Definition.
+
+That makes two classes of problem possible, and both are silent at runtime:
+
+| Problem | What the runtime does | What this pass does |
+| ------- | --------------------- | ------------------- |
+| A boundary scalar is *derived* inside the region | Classifies it as static data and freezes the first call's value into the recording. No warning, ever. | **Step A** — hoists the computation to the call site |
+| The boundary itself is not cacheable | Declines to cache and silently runs the region as ordinary tasks | **Step D** — rejects it at compile time |
+
+The first produces wrong answers. The second produces correct answers with none
+of the intended speedup — invisible to any numerical test, which is why the
+checks live here rather than being left to a runtime log line.
+
+## Step A — derived boundary scalars
+
+A boundary scalar is tracked by **pointer identity**. During recording the
+runtime anchors the address of each `args.scalar(k)` slot; on replay it re-reads
+those addresses. A value the body computes has no slot:
+
+```python
+@pl.function(type=pl.FunctionType.Graph)
+def layer(self, cur, wq, layer_idx: pl.Scalar[pl.INDEX]):
+    base = layer_idx * 5120          # <- derived: no argument slot
+    ...                              #    frozen at the first call's value
+```
+
+Step A rewrites this so the value arrives as a parameter instead:
+
+```python
+# after the pass, conceptually:
+def layer(self, cur, wq, layer_idx, base):   # base is now a real boundary scalar
+    ...
+
+# and at each call site:
+self.layer(cur, wq_view(i), i, i * 5120)     # the arithmetic moved out here
+```
+
+A value is hoistable when its whole expression tree bottoms out in the Graph's
+own scalar parameters and constants — exactly the set a call site can recompute,
+since it already supplies those parameters. Scalar arithmetic in PyPTO is a
+`BinaryExpr` / `UnaryExpr` node rather than a `Call`, so the check recurses
+through those two base classes and treats everything else as a leaf.
+
+A scalar that reaches a task but is *not* hoistable — because it depends on a
+task output, a tensor read, or a runtime query — is rejected with a message
+naming the variable and explaining why the value cannot be reconstructed.
+
+New parameters are **appended**, not prepended: `CoreTaskArgs` requires every
+tensor argument to precede every scalar one.
+
+## Step B — derived slices of a boundary tensor
+
+Replay patches a boundary tensor's **address**. A view taken *inside* the region
+is re-derived from whatever the recording froze, so it must be taken at the call
+site instead:
+
+```python
+wl = pl.tensor.slice(w, [128, 128], [layer_idx * 128, 0])   # inside the region
+```
+
+Step B moves that slice out and passes the result in as an additional boundary
+tensor. Each slice site becomes its own parameter with its own fixed shape,
+which is what the runtime's `BOUNDARY_VIEW` classification requires — it matches
+on same-buffer plus offset, with the shape playing no part, so a view whose shape
+varied between calls could not be classified at all.
+
+The hoisted statements are emitted **scalars first, then tensors**, because a
+slice's offset is typically a Step A scalar and the binding has to precede its
+use. The *parameter* order is the reverse — tensors before scalars — which is
+what `CoreTaskArgs` requires. Only slices of a boundary *parameter* are hoisted;
+a view of a region-local tensor stays put.
+
+## Step C — allocations inside the region
+
+Codegen lowers `pl.create_tensor` into a batched `alloc_tensors`, and a bare
+`alloc_tensors` anywhere in a recorded region makes the runtime declare the
+recording unsupported. This pass **reports** that rather than hoisting the
+allocation:
+
+> Graph function 'layer' allocates a tensor inside the region. […] Allocate it in
+> the caller and pass it in as a `pl.InOut` parameter instead.
+
+Hoisting it automatically would add a second `InOut` parameter, and the
+return-alias mapping requires the callee's `ReturnStmt` to name a parameter
+directly in order to disambiguate which one a tensor return aliases — an
+invariant a synthesised parameter does not satisfy. Automating this needs that
+mapping reworked first.
+
+Note that only a *bare* `alloc_tensors` poisons the recording; a per-task
+`add_output(TensorCreateInfo)` is legal, which is why the runtime's own graph
+system test allocates that way.
+
+## Step D — boundary legality
+
+| Check | Why |
+| ----- | --- |
+| At least one tensor parameter | A graph with an empty boundary has nothing to patch on replay; the runtime refuses to cache it |
+| At most 32 tensor parameters | The runtime's boundary limit |
+| No `Out` tensor parameter | `Out` means the runtime allocates the buffer; a recorded graph's boundary tensors must already exist so replay can patch their addresses |
+| Scalar parameters are `In` | A boundary scalar is passed by value and replayed from the call site |
+| Returns only its own parameters | `rt_submit_graph` yields a valid task id only on a cache *hit*, so nothing can depend on a graph call's result. `return c` for an `InOut` parameter is the in-place spelling and is fine; a computed value is not |
+| At most 1024 launched tasks | The runtime's per-graph node limit |
+| No Graph calls a Graph | The runtime cannot record a graph from inside one it is already recording |
+| Every parameter supplied at the call site | A `Submit` may normally pass a prefix and let the runtime allocate the tail `Out` params; a Graph has no such tail |
+| No explicit dependencies on the launch | An explicit dependency edge makes the launch uncacheable, so the region would silently run as ordinary tasks |
+| No dispatch predicate on the launch | A predicate on a graph launch is neither honoured nor rejected — the runtime silently zeroes it, so the region would run unconditionally |
+
+## Position in the pipeline
+
+Runs after the final `Simplify` and immediately before
+[`MaterializeRuntimeScopes`](45-materialize_runtime_scopes.md).
+
+That position is forced from both sides. `DeriveCallDirections` and
+`AutoDeriveTaskDependencies` must already have run, so argument directions and
+cross-task edges are known. `MaterializeRuntimeScopes` must not yet have run, so
+no scope wrapper has been placed around the statements Step A moves.
+
+## Pass properties
+
+- **Requires**: `SplitIncoreOrch`, `CallDirectionsResolved`
+- **Produces**: `GraphBoundaryLegalized`, `CallDirectionsResolved`
+
+`CallDirectionsResolved` is re-declared because the pass rewrites call arguments
+and their direction attrs; `MaterializeRuntimeScopes`, which runs next, requires
+that property.
+
+## Not yet handled
+
+Automatically hoisting a region-local allocation to a boundary parameter (see
+Step C), and packing a boundary of more than 32 tensors into a scratch arena.
+
+## See also
+
+- [Pass Manager](00-pass_manager.md) — full pipeline order
+- [MaterializeRuntimeScopes](45-materialize_runtime_scopes.md) — runs immediately after

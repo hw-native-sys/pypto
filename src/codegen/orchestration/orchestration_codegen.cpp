@@ -156,6 +156,17 @@ std::string GenerateScalarUnpack(const std::string& var_name, int scalar_index,
   return oss.str();
 }
 
+/// C++ symbol emitted for a Graph function's recorded body.
+///
+/// The runtime identifies a graph by a bare function pointer
+/// (``rt_graph_function_id`` static_asserts on that), so each Graph function is
+/// emitted once as a named file-scope function rather than inlined as a lambda
+/// at every call site — a lambda would mint one pointer per syntactic
+/// occurrence and burn through the 16-entry Definition cache.
+std::string GraphFunctionSymbol(const std::string& func_name) {
+  return "pypto_graph_" + auto_name::GetCompatibleBaseName(func_name);
+}
+
 std::string GenerateConfigFunction(int expected_arg_count) {
   std::ostringstream oss;
   oss << "__attribute__((visibility(\"default\")))\n";
@@ -273,6 +284,15 @@ class OrchestrationStmtCodegen : public CodegenBase {
         << "Internal error: initial indent must be a non-negative multiple of 4, got " << indent;
     emitter_.SetIndentLevel(indent / 4);
   }
+  /// Prefix every task-arg variable this instance declares.
+  ///
+  /// A Graph function is emitted by a *second* codegen instance whose
+  /// ``task_counter_`` / ``alloc_counter_`` restart at 0. Without a distinct
+  /// prefix, the entry and each graph helper would each declare ``params_t0``
+  /// in the same file — legal C++, since they are separate function scopes, but
+  /// it makes every generated identifier ambiguous to read and to grep.
+  void SetTaskVarPrefix(std::string prefix) { task_var_prefix_ = std::move(prefix); }
+
   void SetEffectiveUses(std::unordered_set<const Var*> uses) { effective_uses_ = std::move(uses); }
   [[nodiscard]] bool NeedsVectorInclude() const { return needs_vector_include_; }
 
@@ -2766,7 +2786,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
   };
 
-  std::string CurrentTaskVarName() const { return "params_t" + std::to_string(task_counter_); }
+  std::string CurrentTaskVarName() const {
+    return task_var_prefix_ + "params_t" + std::to_string(task_counter_);
+  }
 
   TaskDispatchPlan BuildTaskDispatchPlan(const std::string& comment, const CallPtr& call,
                                          std::vector<ParamEntry>&& params, const ExprPtr& launch_core_num,
@@ -3265,14 +3287,14 @@ class OrchestrationStmtCodegen : public CodegenBase {
       return;
     }
 
-    // A Graph is a task launch, not a kernel, so it has no core type. Its
-    // emission path lands with the rest of Graph Execution; until then, say so
-    // here rather than letting InferFunctionCoreType below abort with an
-    // internal "expects AIC or AIV" error that names nothing actionable.
-    CHECK_SPAN(callee_func->func_type_ != FunctionType::Graph, call->span_)
-        << "Graph function '" << callee_name
-        << "' cannot be compiled yet: type=pl.FunctionType.Graph is authorable, but the orchestration "
-           "codegen that emits a graph launch is not in place yet.";
+    // A Graph is a recordable orchestration fragment launched as one task, not
+    // a kernel. It must be intercepted before InferFunctionCoreType, which
+    // recognises only AIC/AIV and hard-fails on anything else. This replaces the
+    // placeholder guard that reported the missing emission path.
+    if (callee_func->func_type_ == FunctionType::Graph) {
+      GenerateGraphCallCode(call, callee_func);
+      return;
+    }
 
     CoreType core_type = InferFunctionCoreType(callee_func);
     (*func_name_to_core_type_)[callee_name] = core_type;
@@ -3289,6 +3311,45 @@ class OrchestrationStmtCodegen : public CodegenBase {
     BuildDirectCallDispatchPlan(call, callee_func, callee_name, core_type, func_id, std::move(params),
                                 capture_plain_task_id)
         .Emit(*this);
+  }
+
+  /// Emit the launch of a Graph function: one task carrying the whole region.
+  ///
+  /// Deliberately unlike every other submit here, in two ways:
+  ///
+  /// * The result is discarded. ``rt_submit_graph`` returns a valid task id only
+  ///   on a cache *hit*; on the recording pass ``graph_begin`` reports an invalid
+  ///   one. Nothing may chain a dependency on it — ordering comes from the
+  ///   boundary tensors' dataflow, which is why LegalizeGraphBoundary rejects a
+  ///   Graph that returns a computed value.
+  /// * The callee gets no kernel id. A Graph has no ``.cpp`` under ``kernels/``,
+  ///   so registering it in ``func_name_to_id_`` would put a phantom entry in
+  ///   ``kernel_config.py``'s KERNELS list pointing at a file that does not
+  ///   exist.
+  ///
+  /// The recording is identified by the emitted function's own address, via the
+  /// ``rt_submit_graph(function, args)`` overload. The ``GRAPH_KEY("...")``
+  /// overload exists for callers needing a name stable across builds, but it
+  /// drops the function pointer from the cache identity, so two functions
+  /// sharing a key silently replay one recording. One Graph function is one
+  /// emitted C++ function here, so the address is already the right identity.
+  void GenerateGraphCallCode(const CallPtr& call, const FunctionPtr& callee_func) {
+    auto params = BuildTaskParams(call, callee_func);
+    const std::string task_var = CurrentTaskVarName();
+
+    EmitBlankLine();
+    EmitIndentedLine("// Graph region: " + callee_func->name_ + " (recorded once, then replayed)");
+    EmitTaskParamsDecl(task_var);
+    for (const auto& p : params) {
+      INTERNAL_CHECK_SPAN(p.direction != ArgDirection::Output, call->span_)
+          << "Internal error: Graph function '" << callee_func->name_
+          << "' has a runtime-allocated output argument; a recorded graph's boundary tensors must "
+             "already exist so replay can patch their addresses.";
+      EmitIndentedLine(task_var + "." + ArgDirectionToMethodName(p.direction) + "(" + p.value + ");");
+    }
+    EmitSelectiveDumpCall(task_var, params);
+    EmitIndentedLine("rt_submit_graph(&" + GraphFunctionSymbol(callee_func->name_) + ", " + task_var + ");");
+    ++task_counter_;
   }
 
   void GenerateSpmdCallCode(const CallPtr& call, const FunctionPtr& spmd_func, bool capture_plain_task_id) {
@@ -4078,6 +4139,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::string current_result_var_;
   std::vector<VarPtr> current_return_vars_;
   int task_counter_ = 0;
+  /// Disambiguates task-arg variables between the entry and each Graph helper,
+  /// whose counters restart at 0. Empty for the entry (preserving its names).
+  std::string task_var_prefix_;
   int phase_fence_barrier_counter_ = 0;
   int alloc_counter_ = 0;
   /// Depth of nested ``RuntimeScopeStmt(manual=true)``. While > 0, the codegen
@@ -4195,6 +4259,104 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::unordered_map<const Function*, std::vector<std::optional<size_t>>> returned_param_indices_cache_;
 };
 
+/// Collect, in deterministic order, the Graph functions this entry launches.
+std::vector<FunctionPtr> CollectReferencedGraphFunctions(const ProgramPtr& program,
+                                                         const FunctionPtr& entry) {
+  class Collector : public IRVisitor {
+   public:
+    explicit Collector(ProgramPtr program) : program_(std::move(program)) {}
+    std::vector<FunctionPtr> found;
+
+   protected:
+    void VisitExpr_(const CallPtr& op) override {
+      IRVisitor::VisitExpr_(op);
+      Record(op->op_);
+    }
+    void VisitExpr_(const SubmitPtr& op) override {
+      IRVisitor::VisitExpr_(op);
+      Record(op->op_);
+    }
+
+   private:
+    void Record(const OpPtr& callee_op) {
+      auto gvar = As<GlobalVar>(callee_op);
+      if (!gvar || !program_) return;
+      auto callee = program_->GetFunction(gvar->name_);
+      if (!callee || callee->func_type_ != FunctionType::Graph) return;
+      if (!seen_.insert(callee->name_).second) return;  // one definition per graph
+      found.push_back(callee);
+    }
+
+    ProgramPtr program_;
+    std::unordered_set<std::string> seen_;
+  };
+
+  Collector collector(program);
+  if (entry->body_) collector.VisitStmt(entry->body_);
+  return collector.found;
+}
+
+/// Emit one named file-scope function per Graph the entry launches.
+///
+/// The body is generated by a *second* codegen instance. Two settings differ
+/// from the entry's and both matter:
+///
+/// * ``param_name_set`` is empty. `GetExternalTensorName` rewrites any name in
+///   that set to ``ext_<name>``, which is right for the entry (whose parameters
+///   arrive through ``orch_args``) and wrong here, where they are ordinary
+///   function parameters bound at the top of the body.
+/// * A task-var prefix, because this instance's counters restart at 0.
+///
+/// Boundary scalars are bound as ``const uint64_t&``, never by value. The
+/// runtime tracks a boundary scalar by the *address* of its argument slot, so
+/// copying it into a local would sever that link and the value would be frozen
+/// into the recording at its first-call value.
+std::string GenerateGraphFunctions(const ProgramPtr& program, const FunctionPtr& entry,
+                                   std::map<std::string, int>* func_name_to_id,
+                                   std::map<std::string, CoreType>* func_name_to_core_type,
+                                   std::map<std::string, std::vector<std::string>>* func_name_to_signature,
+                                   int* next_func_id) {
+  std::ostringstream oss;
+  int graph_index = 0;
+  for (const auto& graph_func : CollectReferencedGraphFunctions(program, entry)) {
+    CodegenEffectiveUseCollector use_collector;
+    use_collector.VisitStmt(graph_func->body_);
+
+    std::unordered_map<const Var*, std::string> emit_name_map;
+    OrchestrationStmtCodegen body_codegen(program, func_name_to_id, func_name_to_core_type,
+                                          func_name_to_signature, next_func_id, std::move(emit_name_map),
+                                          /*param_name_set=*/{}, /*param_name_to_orch_index=*/{},
+                                          /*packed_fp4_axis=*/{}, /*dist_param_to_ctx_param=*/{});
+    body_codegen.SetTaskVarPrefix("g" + std::to_string(graph_index) + "_");
+    body_codegen.SetEffectiveUses(std::move(use_collector.var_uses));
+    body_codegen.PrepareCrossScopeTaskIdHoists(graph_func->body_);
+    body_codegen.SetInitialIndent(4);
+    body_codegen.VisitStmt(graph_func->body_);
+
+    oss << "static void " << GraphFunctionSymbol(graph_func->name_) << "(const CoreTaskArgs& args) {\n";
+
+    int tensor_index = 0;
+    int scalar_index = 0;
+    for (const auto& param : graph_func->params_) {
+      const std::string name = auto_name::GetCompatibleBaseName(param->name_hint_);
+      if (AsTensorTypeLike(param->GetType())) {
+        oss << "    const ChipTensor& " << name << " = args.tensor(" << tensor_index << ").ref();\n";
+        ++tensor_index;
+        continue;
+      }
+      // Reference, not a copy: the runtime anchors this slot's address during
+      // recording and re-reads it on every replay.
+      oss << "    const uint64_t& " << name << " = args.scalar(" << scalar_index << ");\n";
+      ++scalar_index;
+    }
+
+    oss << body_codegen.GetGeneratedCode();
+    oss << "}\n\n";
+    ++graph_index;
+  }
+  return oss.str();
+}
+
 OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const ir::FunctionPtr& func) {
   CHECK(program != nullptr) << "Cannot generate orchestration for null program";
   CHECK(func != nullptr) << "Cannot generate orchestration for null function";
@@ -4297,6 +4459,11 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   oss << "extern \"C\" {\n\n";
 
   oss << GenerateConfigFunction(expected_arg_count);
+
+  // Each Graph function referenced by this entry is emitted once, ahead of the
+  // entry that launches it, so the call site can take its address.
+  oss << GenerateGraphFunctions(program, func, &func_name_to_id, &func_name_to_core_type,
+                                &func_name_to_signature, &next_func_id);
 
   oss << "__attribute__((visibility(\"default\")))\n";
   oss << "void aicpu_orchestration_entry(const ChipTaskArgs& orch_args) {\n";

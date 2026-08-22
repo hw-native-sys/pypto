@@ -19,8 +19,6 @@ Graph is authored like every other function type — ``type=pl.FunctionType.Grap
 rest of the enum.
 """
 
-import tempfile
-
 import pypto.language as pl
 import pytest
 from pypto import ir
@@ -118,66 +116,6 @@ def test_plain_function_is_unaffected():
 
 
 # ---------------------------------------------------------------------------
-# The gap this change opens, reported rather than crashed on
-# ---------------------------------------------------------------------------
-
-
-def test_compiling_a_graph_call_reports_that_codegen_is_missing():
-    """Until the graph-launch emission path lands, say so instead of crashing.
-
-    A Graph callee reaches `InferFunctionCoreType`, which recognises only
-    AIC/AIV and aborts with an internal error naming nothing actionable. This
-    change makes the type authorable, so it also has to make the gap legible.
-
-    The Graph body opens its own device scope, which is how one is actually
-    written — and is only reachable because the scope outliners now admit Graph
-    bodies. Without that the compile would stop earlier on a leftover scope, and
-    this diagnostic would be unreachable for every realistic program.
-
-    The message is matched in full: it names the authoring form, so a spelling
-    that no longer exists would otherwise survive here unnoticed.
-    """
-    from pypto.backend.pto_backend import PartialCodegenError  # noqa: PLC0415
-    from pypto.ir.compile import compile as ir_compile  # noqa: PLC0415
-
-    @pl.program
-    class UsesGraph:
-        @pl.function(type=pl.FunctionType.Graph)
-        def layer(
-            self,
-            a: pl.Tensor[[128, 128], pl.FP32],
-            c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
-        ) -> pl.Tensor[[128, 128], pl.FP32]:
-            with pl.at(level=pl.Level.CORE_GROUP):
-                t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128])
-                pl.store(t, [0, 0], c)
-            return c
-
-        @pl.function(type=pl.FunctionType.Orchestration)
-        def main(
-            self,
-            a: pl.Tensor[[128, 128], pl.FP32],
-            c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
-        ) -> pl.Tensor[[128, 128], pl.FP32]:
-            c = self.layer(a, c)
-            return c
-
-    expected = (
-        "Graph function 'layer' cannot be compiled yet: type=pl.FunctionType.Graph is authorable, "
-        "but the orchestration codegen that emits a graph launch is not in place yet."
-    )
-    with tempfile.TemporaryDirectory() as out_dir:
-        with pytest.raises(PartialCodegenError) as excinfo:
-            ir_compile(UsesGraph, skip_ptoas=True, platform="a2a3", output_dir=out_dir, dump_passes=False)
-
-    # PartialCodegenError word-wraps each message into a table cell, so compare
-    # against the text with the gutter and the wrapping collapsed away — a
-    # substring match on one line would not notice a stale spelling in another.
-    reported = " ".join(str(excinfo.value).replace("|", " ").split())
-    assert expected in reported
-
-
-# ---------------------------------------------------------------------------
 # print -> parse
 # ---------------------------------------------------------------------------
 
@@ -191,6 +129,59 @@ def test_graph_function_roundtrips():
     reparsed = parse_program(python_print(GraphInProgram))
     ir.assert_structural_equal(GraphInProgram, reparsed)
     assert _layer(reparsed).func_type == ir.FunctionType.Graph
+
+
+# ---------------------------------------------------------------------------
+# Parser treatment
+# ---------------------------------------------------------------------------
+
+
+def test_graph_body_folds_tensor_dim_to_the_signature_symbol():
+    """A Graph body gets the same dynamic-extent folding as an Orchestration one.
+
+    `_fold_tensor_dim` rewrites ``pl.tensor.dim(x, 0)`` into the symbol the
+    signature already binds for that extent. Gated strictly on Orchestration, a
+    Graph body instead mints a *second* runtime scalar for the same extent, and
+    a shape built from it disagrees structurally with a callee or tensor type
+    that uses the declared symbol.
+
+    The two programs below are the same body under the two function types; the
+    decorator's `type=` must be a literal, so they cannot share a builder.
+    """
+    N = pl.dynamic("N")
+
+    @pl.program
+    class AsGraph:
+        @pl.function(type=pl.FunctionType.Graph)
+        def layer(
+            self,
+            x: pl.Tensor[[N, 64], pl.FP32],
+            out: pl.InOut[pl.Tensor[[N, 64], pl.FP32]],
+        ) -> pl.Tensor[[N, 64], pl.FP32]:
+            n = pl.tensor.dim(x, 0)
+            for _ in pl.range(n):
+                pass
+            return out
+
+    @pl.program
+    class AsOrchestration:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def layer(
+            self,
+            x: pl.Tensor[[N, 64], pl.FP32],
+            out: pl.InOut[pl.Tensor[[N, 64], pl.FP32]],
+        ) -> pl.Tensor[[N, 64], pl.FP32]:
+            n = pl.tensor.dim(x, 0)
+            for _ in pl.range(n):
+                pass
+            return out
+
+    graph_text = python_print(_layer(AsGraph))
+    assert "pl.tensor.dim" not in graph_text, "the extent symbol was not reused"
+
+    # Same body, same parser output — only the decorator line differs.
+    orch_text = python_print(_layer(AsOrchestration))
+    assert graph_text.split("\n", 1)[1] == orch_text.split("\n", 1)[1]
 
 
 if __name__ == "__main__":

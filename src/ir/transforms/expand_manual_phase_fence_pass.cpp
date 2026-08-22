@@ -464,7 +464,8 @@ ProgramPtr TransformExpandManualPhaseFence(const ProgramPtr& program) {
   bool changed = false;
   for (auto& [gvar, func] : new_functions) {
     if (!func || !func->body_) continue;
-    if (func->func_type_ != FunctionType::Orchestration) continue;
+    // Manual scopes and phase fences occur in Graph bodies too.
+    if (!IsOrchestrationLike(func->func_type_)) continue;
     ManualPhaseFenceMutator mutator;
     auto new_body = mutator.VisitStmt(func->body_);
     if (new_body.get() == func->body_.get()) continue;
