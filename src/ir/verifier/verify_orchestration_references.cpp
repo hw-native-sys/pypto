@@ -19,6 +19,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -38,18 +39,33 @@ class OrchestrationCallTargetChecker : public IRVisitor {
  protected:
   void VisitExpr_(const CallPtr& call) override {
     IRVisitor::VisitExpr_(call);
-    if (!call || !call->op_) return;
-    if (IsBuiltinOp(call->op_->name_)) return;
-    if (program_ && program_->GetFunction(call->op_->name_)) return;
+    if (!call) return;
+    CheckCallee(call->op_, call->span_);
+  }
 
-    std::ostringstream oss;
-    oss << "Orchestration function '" << func_name_ << "' references undefined function '" << call->op_->name_
-        << "'. The Program must contain every callee referenced from orchestration.";
-    diagnostics_.emplace_back(DiagnosticSeverity::Error, "OrchestrationReferencesResolved", 0, oss.str(),
-                              call->span_);
+  // Submit is a sibling call-like kind, and IRVisitor dispatches it through a
+  // separate handler that does not delegate to the Call path — so overriding
+  // only the Call path left every `pl.submit(...)` callee unchecked. That gap
+  // matters most for a Graph body, which is predominantly submits.
+  void VisitExpr_(const SubmitPtr& submit) override {
+    IRVisitor::VisitExpr_(submit);
+    if (!submit) return;
+    CheckCallee(submit->op_, submit->span_);
   }
 
  private:
+  void CheckCallee(const OpPtr& op, const Span& span) const {
+    if (!op) return;
+    if (IsBuiltinOp(op->name_)) return;
+    if (program_ && program_->GetFunction(op->name_)) return;
+
+    std::ostringstream oss;
+    oss << "Function '" << func_name_ << "' references undefined function '" << op->name_
+        << "'. The Program must contain every callee referenced from orchestration.";
+    diagnostics_.emplace_back(DiagnosticSeverity::Error, "OrchestrationReferencesResolved", 0, oss.str(),
+                              span);
+  }
+
   ProgramPtr program_;
   std::vector<Diagnostic>& diagnostics_;
   std::string func_name_;
@@ -63,7 +79,9 @@ class OrchestrationReferencesResolvedPropertyVerifierImpl : public PropertyVerif
     if (!program) return;
     for (const auto& [gv, func] : program->functions_) {
       if (!func || !func->body_) continue;
-      if (func->func_type_ != FunctionType::Orchestration) continue;
+      // A Graph body's callees must be present in the Program for the same
+      // reason an Orchestration body's must.
+      if (!IsOrchestrationLike(func->func_type_)) continue;
       OrchestrationCallTargetChecker checker(program, diagnostics, func->name_);
       checker.VisitStmt(func->body_);
     }

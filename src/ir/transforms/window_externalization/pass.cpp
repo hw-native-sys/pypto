@@ -53,7 +53,10 @@ ProgramPtr Run(const ProgramPtr& program) {
   std::unordered_set<std::string> used_clone_names;
   bool changed = false;
   for (const auto& [_, func] : program->functions_) {
-    if (!func || func->func_type_ != FunctionType::Orchestration) continue;
+    // The clone loop above is not type-gated, so restricting the call-site
+    // rewrite to plain Orchestration would leave a Graph body calling the
+    // original signature while the clone carries the windowed ABI.
+    if (!IsOrchestrationLike(func)) continue;
     auto rewritten = RewriteOrchestrationBody(program, analyses, cloned_funcs, function_lookup,
                                               rewrite_context, func->body_);
     if (rewritten.body.get() == func->body_.get()) continue;

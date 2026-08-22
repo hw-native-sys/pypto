@@ -2265,8 +2265,10 @@ Pass AutoDeriveTaskDependencies(bool analyze_auto_scopes) {
       SubmitTaskIdCollector task_ids;
       task_ids.VisitStmt(func->body_);
 
+      // Dependencies between the tasks inside a Graph body are real dependencies,
+      // so its body is analyzed like any other orchestration body.
       const bool analyze_whole_body_as_auto_scope = analyze_auto_scopes &&
-                                                    func->func_type_ == FunctionType::Orchestration &&
+                                                    IsOrchestrationLike(func->func_type_) &&
                                                     func->GetAttr<bool>(kAttrAutoScope, true);
       AutoDepMutator mutator(program, &storage, &task_ids.task_id_by_expr(), &task_ids.task_id_by_var_id(),
                              &task_ids.task_ids_by_var_id(), &task_ids.task_id_dynamic_slots_by_var_id(),
