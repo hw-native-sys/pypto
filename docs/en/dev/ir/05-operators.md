@@ -303,6 +303,16 @@ Two limitations, both diagnosed rather than silently dropped:
   accumulate is therefore the author's responsibility, exactly as an oversized
   unpredicated `tile.matmul_acc` already is.
 
+`AutoTileMatmulL0` *emits* this form: the K-loop it builds for a plain
+`tile.matmul` is a single `tile.matmul_acc` predicated on `init_cond=(ko == 0)`,
+not an `if ko == 0` over a fresh `tile.matmul` and an in-place accumulate. That
+matters for more than tidiness. The branchy form has two producers of one logical
+value on two different L0C buffers, and every pass downstream must then agree on
+which buffer the phi lives in — with no `Acc`->`Acc` copy available when they
+disagree. A predicated accumulate is in place on both paths, so one buffer is the
+only possibility. `tile.matmul_bias` has no `init_cond` operand, so the bias form
+still branches: its first K step must apply the bias exactly once.
+
 At the tile layer, `tile.batch_matmul` provides batched semantics for
 `TileType` operands. It accepts rank >= 2 tiles, broadcasts the leading batch
 dimensions, and keeps the same operand-only interface style as `tile.matmul`.

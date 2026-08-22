@@ -18,7 +18,7 @@ This aligns MemRef objects consistently: if two tiles share a MemRef in
 
 import pypto.language as pl
 import pytest
-from pypto import DataType, InternalError, backend, ir, passes, testing
+from pypto import DataType, backend, ir, passes, testing
 from pypto.backend import BackendType
 from pypto.ir.op import tile
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
@@ -1987,13 +1987,17 @@ class TestYieldFixup:
     def test_divergent_acc_phi_rejects_acc_to_acc_move(self):
         """YieldFixup must not manufacture an unsupported Acc-to-Acc copy.
 
-        The divergent phi cannot be safely coalesced because one seed is
-        produced before the branch. Reject it before codegen rather than emit a
-        type-correct ``tile.move`` that PTOAS cannot lower for distinct L0C
-        buffers.
+        Nothing reads L0C except the FIXPIPE drain, whose destinations are L1 and
+        GM, so there is no Acc-to-Acc copy on any target. A divergent accumulator
+        is reported with both buffer identities rather than reconciled with a
+        ``tile.move`` no hardware can perform.
         """
-        with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
+        with pytest.raises(ValueError, match="no Acc-to-Acc copy") as excinfo:
             _run_pipeline(_divergent_acc_phi_program())
+        # The report must name both sides so the author can see which two buffers
+        # the accumulator ended up split across.
+        message = str(excinfo.value)
+        assert "mem_acc_5" in message and "mem_acc_6" in message, message
 
 
 class TestControlFlow:
@@ -2819,28 +2823,20 @@ class TestTopDownRetargeter:
             valid_shape = tile_type.get_effective_tile_view().valid_shape
             assert [dim.value for dim in valid_shape if isinstance(dim, ir.ConstInt)] == [16, 16]
 
-    def test_pipelined_kloop_accumulator_coalesces_to_one_acc_buffer(self):
+    def test_pipelined_kloop_accumulator_lands_on_one_acc_buffer(self):
         """A stage-2 pipelined K-loop matmul (as AutoTileMatmulL0 emits) whose
-        L0C accumulator is large (176x176x4 = 121KB, fp32). After
-        LowerPipelineLoops peels it into the multi-if-block shape, MemoryReuse
-        must coalesce the whole accumulator chain (tile.create init + first-block
-        matmul seed + the per-block matmul_acc + the if phis + the loop yield)
-        onto ONE Acc allocation.
+        L0C accumulator is large (176x176x4 = 121KB, fp32) must land on ONE Acc
+        allocation after LowerPipelineLoops peels it into the multi-block shape.
 
-        Regression (fixed by TopDownRetargeter::CoalesceAccumulatorIfPhis): the
-        peeled epilogue if-phi has a live in-place ``matmul_acc`` branch (on the
-        accumulator buffer) and a dead ``if k==0`` fresh-``matmul`` seed branch on
-        a different buffer. YieldFixupMutator used to reconcile them by copying the
-        accumulator onto the seed buffer via an acc->acc ``tile.move`` -- a 2nd
-        co-live 121KB L0C buffer that overflows the 128KB L0C, and an Acc->Acc tmov
-        that ptoas rejects on every target. This reproduced the 512x512x192 bf16
-        compile failure. The fix retargets the seed onto the accumulator buffer so
-        both branches share it and no move is emitted (mad_acc's shared-%dst
-        semantics). Runs the real ``lower_pipeline_loops`` so the peeled SSA shape
-        matches production (hand-authored post-peel IR coalesces fine, so the real
-        pass is required to trigger the gap). Runs with BASIC verification: the
-        coalescing makes the peeled IR round-trip-clean, so the check is on legal
-        IR, not just buffer count.
+        The first K step selects overwrite-vs-accumulate through ``init_cond``
+        rather than an ``if k == 0`` phi over a fresh ``tile.matmul`` and an
+        in-place ``tile.matmul_acc``. A predicated accumulate is in place on both
+        paths (``set_output_reuses_input(0)``), so peeling replicates a chain that
+        never leaves the accumulator buffer: no phi, nothing to reconcile, and no
+        opportunity for a second co-live 121KB L0C buffer that would overflow the
+        128KB L0C. Runs the real ``lower_pipeline_loops`` so the peeled SSA shape
+        matches production, with BASIC verification so the check is on legal IR
+        and not just a buffer count.
         """
 
         @pl.program
@@ -2868,19 +2864,16 @@ class TestTopDownRetargeter:
                     sb: pl.Tile[[64, 176], pl.BF16, pl.Mem.Right] = pl.tile.extract(
                         rhs_mat, ko, 0, shape=[64, 176], target_memory=pl.Mem.Right
                     )
-                    if ko == 0:
-                        c_first: pl.Tile[[176, 176], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(sa, sb)
-                        c_phi: pl.Tile[[176, 176], pl.FP32, pl.Mem.Acc] = pl.yield_(c_first)
-                    else:
-                        c_acc: pl.Tile[[176, 176], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(c_iter, sa, sb)
-                        c_phi: pl.Tile[[176, 176], pl.FP32, pl.Mem.Acc] = pl.yield_(c_acc)
-                    c: pl.Tile[[176, 176], pl.FP32, pl.Mem.Acc] = pl.yield_(c_phi)
+                    c_acc: pl.Tile[[176, 176], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
+                        c_iter, sa, sb, init_cond=(ko == 0)
+                    )
+                    c: pl.Tile[[176, 176], pl.FP32, pl.Mem.Acc] = pl.yield_(c_acc)
                 result: pl.Tensor[[176, 176], pl.FP32] = pl.store(c, [0, 0], out)
                 return result
 
         def assert_coalesced(after: ir.Program, planner: str) -> None:
-            # The whole accumulator chain must coalesce onto ONE Acc allocation. A
-            # phantom acc->acc tile.move (failed coalescing) leaves a 2nd Acc base.
+            # The whole accumulator chain must stay on ONE Acc allocation; a second
+            # Acc base would mean the predicated accumulate stopped being in place.
             acc_bases = {b for b in _collect_tile_memref_bases(after).values() if "acc" in b}
             assert len(acc_bases) == 1, (
                 f"{planner}: expected ONE Acc allocation (accumulator coalesced), "
@@ -2893,8 +2886,8 @@ class TestTopDownRetargeter:
                 f"{ir.python_print(after)}"
             )
 
-        # BASIC verification: the coalescing fix makes the peeled IR round-trip
-        # clean, so this exercises the legality check, not just the buffer count.
+        # BASIC verification: the peeled IR must be round-trip clean, so this
+        # exercises the legality check, not just the buffer count.
         with passes.PassContext([], passes.VerificationLevel.BASIC):
             legacy_after = passes.memory_reuse()(
                 passes.materialize_semantic_aliases()(
@@ -2904,8 +2897,8 @@ class TestTopDownRetargeter:
         assert_coalesced(legacy_after, "PYPTO")
 
         # DSA-RP skips MemoryReuse, so MaterializeSemanticAliases itself must run
-        # the same accumulator coalescing -> yield fixup -> identity-copy
-        # normalization sequence before lifetime analysis.
+        # the same yield fixup -> identity-copy normalization sequence before
+        # lifetime analysis.
         with passes.PassContext(
             [],
             passes.VerificationLevel.BASIC,
@@ -2916,16 +2909,16 @@ class TestTopDownRetargeter:
             )
         assert_coalesced(dsa_after, "DSA_RP")
 
-    def test_accumulator_if_phi_seed_retargets_to_accumulator_buffer(self):
-        """Structural before/after for CoalesceAccumulatorIfPhis on a minimal
-        accumulator if-phi (no loop/peel needed to reproduce).
+    def test_accumulator_if_phi_divergence_is_reported(self):
+        """A minimal accumulator if-phi whose two arms land on different L0C
+        buffers is reported, not silently retargeted onto one of them.
 
         ``then`` is a fresh ``matmul`` seed on its own Acc buffer; ``else`` is an
         in-place ``matmul_acc`` on the accumulator buffer (aliasing ``prev``).
-        Pre-fix, MemoryReuse reconciled them with a phantom Acc->Acc ``tile.move``
-        onto a 2nd Acc buffer. The fix retargets the seed onto the accumulator
-        buffer, so both branches and the phi share ONE Acc allocation and no move
-        is emitted. Pinned structurally.
+        Merging them means writing the seed into ``prev``'s buffer, which is only
+        sound if nothing outside the ``if`` still needs ``prev`` — a property the
+        compiler cannot establish from the branch alone. The author decides, so the
+        report names both buffers instead.
         """
 
         @pl.program
@@ -2954,51 +2947,10 @@ class TestTopDownRetargeter:
                 result: pl.Tensor[[16, 64], pl.FP32] = pl.store(phi, [0, 0], out)
                 return result
 
-        # Both branches' matmul/matmul_acc AND the phi land on mem_acc_5; the seed's
-        # own buffer (mem_acc_6) is retargeted away and its alloc dropped; no tile.move.
-        @pl.program
-        class Expected:
-            @pl.function
-            def main(
-                self,
-                lhs: pl.Tensor[[16, 64], pl.BF16, pl.MemRef("mem_ddr_0", 0, 2048)],
-                rhs: pl.Tensor[[64, 64], pl.BF16, pl.MemRef("mem_ddr_1", 0, 8192)],
-                cond: pl.Scalar[pl.INDEX],
-                out: pl.Out[pl.Tensor[[16, 64], pl.FP32, pl.MemRef("mem_ddr_2", 0, 4096)]],
-            ) -> pl.Tensor[[16, 64], pl.FP32]:
-                mem_mat_3: pl.Ptr = pl.tile.alloc(pl.Mem.Mat, 2048)
-                mem_mat_4: pl.Ptr = pl.tile.alloc(pl.Mem.Mat, 8192)
-                mem_acc_5: pl.Ptr = pl.tile.alloc(pl.Mem.Acc, 4096)
-                sa: pl.Tile[[16, 64], pl.BF16, pl.MemRef(mem_mat_3, 0, 2048), pl.Mem.Mat] = pl.tile.load(
-                    lhs, [0, 0], [16, 64], [16, 64], target_memory=pl.Mem.Mat
-                )
-                sb: pl.Tile[[64, 64], pl.BF16, pl.MemRef(mem_mat_4, 0, 8192), pl.Mem.Mat] = pl.tile.load(
-                    rhs, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Mat
-                )
-                prev: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_5, 0, 4096), pl.Mem.Acc] = pl.tile.matmul(
-                    sa, sb
-                )
-                if cond < 1:
-                    seed: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_5, 0, 4096), pl.Mem.Acc] = (
-                        pl.tile.matmul(sa, sb)
-                    )
-                    phi: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_5, 0, 4096), pl.Mem.Acc] = pl.yield_(
-                        seed
-                    )
-                else:
-                    acc: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_5, 0, 4096), pl.Mem.Acc] = (
-                        pl.tile.matmul_acc(prev, sa, sb)
-                    )
-                    phi: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_5, 0, 4096), pl.Mem.Acc] = pl.yield_(
-                        acc
-                    )
-                result: pl.Tensor[[16, 64], pl.FP32, pl.MemRef("mem_ddr_2", 0, 4096)] = pl.tile.store(
-                    phi, [0, 0], out
-                )
-                return result
-
-        After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        with pytest.raises(ValueError, match="no Acc-to-Acc copy") as excinfo:
+            _run_pipeline(Before)
+        message = str(excinfo.value)
+        assert "mem_acc_5" in message and "mem_acc_6" in message, message
 
     def test_gating_vec_inplace_if_phi_is_not_acc_coalesced(self):
         """Gating: the accumulator coalescer is Acc-scoped. A structurally
@@ -3051,45 +3003,15 @@ class TestTopDownRetargeter:
             f"expected the pre-existing Vec->Vec move (coalescer must skip non-Acc):\n{ir.python_print(After)}"
         )
 
-    def test_pre_if_acc_seed_not_coalesced_onto_accumulator(self):
-        """Branch-locality guard: the accumulator coalescer must only retarget a
-        seed that is defined *inside* the non-accumulator branch.
-
-        Here ``then`` yields ``pre`` — a *pre-if* Acc value (computed before the
-        ``if``, so it runs unconditionally) — and ``else`` accumulates in place
-        into ``prev``. Coalescing would retarget ``pre`` onto ``prev``'s buffer,
-        writing it before the ``if`` and clobbering the accumulator that the else
-        branch reads. Branch exclusivity does NOT hold for a pre-if producer, so
-        the coalescer must skip this phi (leaving it to YieldFixup) and keep
-        ``pre`` and ``prev`` on distinct buffers.
-        """
-        # Branch-locality correctly prevents unsafe coalescing. Because Acc->Acc
-        # tile.move is unsupported, YieldFixup must then fail loudly instead of
-        # emitting invalid IR for this unlowerable control-flow shape.
-        with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
-            _run_pipeline(_divergent_acc_phi_program())
-
-    def test_seed_branch_write_only_clobber_blocks_acc_coalesce(self):
-        """Safety gate for the accumulator-if-phi coalescer's branch-tail
-        liveness scan: a *write* to the accumulator buffer after the seed (with
-        no read) must block coalescing, not just a read.
-
-        The seed branch computes the fresh ``seed`` (its own Acc buffer) and then
-        a *write-only* op ``_clob`` that lands on the accumulator buffer
-        (``mem_acc_5``) — a fresh matmul reading only Mat operands, so it never
-        *reads* ``mem_acc_5``.  If the coalescer retargeted ``seed`` onto
-        ``mem_acc_5`` (as the read-only scan would allow), ``_clob`` — sequenced
-        after ``seed`` — would overwrite the yielded value before the phi is read.
-        The scan must therefore reject a later write of the target base, not only
-        a later read (``SubtreeReadsBase`` alone misses the write-only clobber
-        because the read collector skips the LHS definition of each stmt).
+    def test_divergent_acc_phi_reported_on_fully_lowered_input(self):
+        """The Acc divergence report also fires on already-allocated input.
 
         Authored in fully-lowered form (explicit allocs + MemRefs) and run through
-        ``memory_reuse`` alone: the clobbering alias is a specific buffer layout
-        that only surfaces after allocation, so it cannot be expressed through the
-        high-level ``init_mem_ref`` path (which hands every tile a distinct base).
-        The required safety decline leaves divergent Acc buffers. Because no
-        legal Acc->Acc move exists, YieldFixup must reject this unlowerable shape.
+        ``memory_reuse`` alone, so the phi's two arms are pinned to distinct L0C
+        bases by the input itself rather than by an earlier pass — the shape a
+        hand-managed split-K reaches when its branch arms disagree. ``_clob`` is a
+        write-only op on the accumulator buffer, kept because it makes the arms'
+        buffers unmergeable by any means, not merely inconvenient to merge.
         """
 
         @pl.program
@@ -3143,7 +3065,7 @@ class TestTopDownRetargeter:
                 )
                 return result
 
-        with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
+        with pytest.raises(ValueError, match="no Acc-to-Acc copy"):
             passes.memory_reuse()(Before)
 
     def test_retargeter_declines_when_target_still_live(self):
@@ -3284,8 +3206,16 @@ class TestTopDownRetargeter:
                             pl.yield_(tile_c)
                         )
                     else:
+                        # `acc_0` is the loop's IterArg, on mem_vec_2. The phi lives on
+                        # mem_vec_3, and PYPTO-planner codegen emits no copy of its own
+                        # for a branch arm (it relies on this pass having aliased them),
+                        # so the else path must write mem_vec_3 here or the phi buffer is
+                        # never written on that path.
+                        acc_0_mv: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
+                            pl.tile.move(acc_0, target_memory=pl.Mem.Vec)
+                        )
                         if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
-                            pl.yield_(acc_0)
+                            pl.yield_(acc_0_mv)
                         )
                     _use: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
                         acc_0, [0, 0], output

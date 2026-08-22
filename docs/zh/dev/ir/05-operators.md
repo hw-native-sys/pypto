@@ -267,6 +267,14 @@ init 操作数。由于 `matmul_acc` 是原地操作（`set_output_reuses_input(
   split-K 所期望的。超尺寸的带谓词累加因而由编写者负责，这与超尺寸的无谓词
   `tile.matmul_acc` 现有行为一致。
 
+`AutoTileMatmulL0` 会*生成*这种形式：它为普通 `tile.matmul` 构造的 K 循环体是一条以
+`init_cond=(ko == 0)` 为谓词的 `tile.matmul_acc`，而不是在全新 `tile.matmul` 与原地累加
+之间做 `if ko == 0` 分支。这不只是写法上的整洁：分支形式让同一个逻辑值有两个生产者、
+落在两块不同的 L0C 缓冲上，之后每一个 pass 都必须就 phi 属于哪一块达成一致 —— 而一旦
+不一致，并不存在可用于协调的 `Acc`->`Acc` 拷贝。带谓词的累加在两条路径上都是原地写，
+因此只可能有一块缓冲。`tile.matmul_bias` 没有 `init_cond` 操作数，所以 bias 形式仍然分支：
+它的第一个 K 步必须恰好施加一次 bias。
+
 在 tile 层，`tile.batch_matmul` 为 `TileType` 操作数提供批量语义。它接受 rank >= 2 的
 tile，广播前导批量维度，并保持与 `tile.matmul` 相同的纯操作数接口风格。如果批量操作数
 需要转置语义，可以通过两种等价方式表达：在输入上显式使用 `tile.transpose(...)`，或在

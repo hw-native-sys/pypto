@@ -455,8 +455,12 @@ def test_canonical_split_k_boundary_codegen_uses_box_aligned_physical_width():
         r"valid_col = %c16_index : !pto\.tile_buf<loc=mat, dtype=i8, rows=384, cols=32,",
         pto,
     ), pto
+    # The N=32/valid-16 Acc box may be spelled either on the `alloc_tile` itself or
+    # restored by a following `set_validshape`: the predicated `tile.matmul_acc` the
+    # K-loop now carries has no if-phi handle to hang the declaration off.
     assert re.search(
-        r"valid_col = %c16_index : !pto\.tile_buf<loc=acc, dtype=i32, rows=(128|144), cols=32,",
+        r"(valid_col = %c16_index|set_validshape [^\n]*, %c16_index) : "
+        r"!pto\.tile_buf<loc=acc, dtype=i32, rows=(128|144), cols=32,",
         pto,
     ), pto
     assert re.search(

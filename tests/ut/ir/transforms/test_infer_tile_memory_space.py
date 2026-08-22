@@ -2722,7 +2722,9 @@ class MarkerOnlyScalarCall:
         rhs_load = self._line_index(printed, "rhs_n__tile", "tile.load")
         assert len(lhs_loads) == 1
         assert len(lhs_extracts) == 1, "fixture must exercise K-dependent L0 staging"
-        assert len(self._line_indices(printed, "tile.matmul(")) == 1
+        # AutoTileMatmulL0 emits one predicated `tile.matmul_acc` per K-loop (the
+        # first-step selection rides on `init_cond`), so no fresh `tile.matmul` survives.
+        assert len(self._line_indices(printed, "tile.matmul(")) == 0
         assert len(self._line_indices(printed, "tile.matmul_acc(")) == 1
         assert lhs_loads[0] < loop
         assert all(index > loop for index in lhs_extracts)

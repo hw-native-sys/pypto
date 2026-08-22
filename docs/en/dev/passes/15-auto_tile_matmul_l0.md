@@ -50,7 +50,7 @@ For each `tile.matmul`, `tile.matmul_acc`, or `tile.matmul_bias` in an InCore-ty
    - Sub-byte dtypes (cube path doesn't support them) — `PH-AT-003`.
    - `ChooseL0Tile` rejects the configuration — `PH-AT-005`.
 5. **Build the K-loop** (per output sub-tile — the whole output when K-only, or each `[m, n]` sub-tile when M/N tiling):
-   - `tile.matmul` — iter-arg init is an Acc-resident `tile.create([m, n], dtype, target_memory=Acc)` placeholder; the loop body branches on `ko == 0` between `tile.matmul` (fresh Acc) and `tile.matmul_acc` (accumulating into the iter-arg). The `IfStmt` materializes a phi return_var that the outer yield carries back to the iter-arg.
+   - `tile.matmul` — iter-arg init is an Acc-resident `tile.create([m, n], dtype, target_memory=Acc)` placeholder; the loop body is a single `tile.matmul_acc` predicated on `init_cond=(ko == 0)`, so the first K step overwrites the accumulator and later steps accumulate into it. The backend expands the predicate into the `pto.tmatmul` / `pto.tmatmul.acc` pair, so the selection costs no IR-level control flow. This keeps the body in place on both paths and therefore on one L0C buffer — a branch between a *fresh* `tile.matmul` and an in-place accumulate would put one logical value on two Acc buffers, which nothing downstream can reconcile (there is no `Acc`→`Acc` copy).
    - `tile.matmul_acc` — iter-arg init is the caller's accumulator directly (its type already matches the per-iter `tile.matmul_acc` output); every iteration is uniform `tile.matmul_acc`, so no if-else.
    - `tile.matmul_bias` — uses the same fresh-accumulator loop as `tile.matmul`, but the first K block is `tile.matmul_bias` and every later block is `tile.matmul_acc`, so bias is added exactly once. For N tiling, the matching window is reconstructed as an independent tensor→Mat `tile.load`, then transferred with `tile.move` to Bias (`pto.tload` + `pto.tmov`). A zero-copy one-row Mat `tile.slice` is not used because its boxed `pto.subview` is not PTOAS-legal.
    - Per-iter operand extracts use `tile.extract(src, idx_row, idx_col, [shape], target_memory=Left|Right)` — the SSA-form fusion of the older `tile.slice` (Mat-resident result) + `tile.mov` (Mat→Left/Right) pair. This eliminates the intermediate Mat-resident slice tile and lowers to `pto.textract` rather than `pto.subview`, sidestepping the latter's `valid_row` codegen mismatch. For an output sub-tile at origin `(mi, ni)` the extracts slice `lhs[mi:mi+m, ko:ko+k]` and `rhs[ko:ko+k, ni:ni+n]`; the K-only case is `mi == ni == 0`, `m == M`, `n == N`.
@@ -167,13 +167,8 @@ class After:
         for ko, (c_iter,) in pl.pipeline(0, 256, 64, init_values=(c_l0_init,), stage=2):
             sa = pl.tile.extract(a_mat, 0, ko, [128, 64], target_memory=Left)
             sb = pl.tile.extract(b_mat, ko, 0, [64, 128], target_memory=Right)
-            if ko == 0:
-                c_first = pl.tile.matmul(sa, sb)
-                c_phi = pl.yield_(c_first)
-            else:
-                c_acc = pl.tile.matmul_acc(c_iter, sa, sb)
-                c_phi = pl.yield_(c_acc)
-            c = pl.yield_(c_phi)
+            c_acc = pl.tile.matmul_acc(c_iter, sa, sb, init_cond=(ko == 0))
+            c = pl.yield_(c_acc)
         # c (the yield-LHS) holds the accumulated Acc-typed result.
         ...
 ```
@@ -208,13 +203,8 @@ c_t1_init = pl.tile.create([256, 256], dtype=pl.FP32, target_memory=Acc)
 for ko, (c_iter,) in pl.pipeline(0, 512, 32, init_values=(c_t1_init,), stage=2):
     sa = pl.tile.extract(lhs_mat, 256, ko, [256, 32], target_memory=Left)
     sb = pl.tile.extract(rhs_mat, ko, 0, [32, 256], target_memory=Right)
-    if ko == 0:
-        c_first = pl.tile.matmul(sa, sb)
-        c_phi = pl.yield_(c_first)
-    else:
-        c_acc = pl.tile.matmul_acc(c_iter, sa, sb)
-        c_phi = pl.yield_(c_acc)
-    c_t1 = pl.yield_(c_phi)
+    c_acc = pl.tile.matmul_acc(c_iter, sa, sb, init_cond=(ko == 0))
+    c_t1 = pl.yield_(c_acc)
 out_t1 = pl.store(c_t1, [256, 0], out_t0)  # store sub-tile to out[256:512, 0:256]
 ```
 

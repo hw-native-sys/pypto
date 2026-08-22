@@ -283,6 +283,17 @@ bool IsA5Target() {
 
 bool IsA5Prelu(const CallPtr& call) { return IsOp(call, "tile.prelu") && IsA5Target(); }
 
+/// Human-readable identity of a MemRef for diagnostics: the allocation's name plus
+/// its byte extent, e.g. `mem_acc_3[131072 B]`. Two MemRefs print differently exactly
+/// when they name different allocations, which is what a mismatch report needs to show.
+std::string MemRefLabel(const MemRefPtr& memref) {
+  if (!memref) return "<unbound>";
+  std::ostringstream os;
+  os << (memref->base_ ? memref->base_->name_hint_ : std::string("<no base>")) << "[" << memref->size_
+     << " B]";
+  return os.str();
+}
+
 /// Plans top-down retypes. Produces (old Var -> new Type) map.
 class TopDownRetargeter {
  public:
@@ -292,36 +303,6 @@ class TopDownRetargeter {
     def_v.Run(func_body);
     defs_ = std::move(def_v.defs);
     VisitForStmts(func_body);
-    return std::move(rewrites_);
-  }
-
-  /// Coalesce peeled loop-carried accumulator if-phis.
-  ///
-  /// LowerPipelineLoops peels a stage=2 K-loop into an epilogue IfStmt whose live
-  /// branch is an in-place accumulator (matmul_acc, output aliasing input on the
-  /// accumulator buffer) and whose dead `if k==0` branch is a fresh matmul seed on a
-  /// *different* buffer.  Left alone, YieldFixupMutator reconciles the two by copying
-  /// the accumulator onto the seed's buffer via an Acc->Acc tile.move — both a second
-  /// co-live L0C buffer (overflow) and an op TMovOp::verify rejects on every target
-  /// (there is no legal Acc->Acc tmov pair).  We instead retarget the seed producer
-  /// onto the accumulator buffer so both branches share it and no move is emitted,
-  /// matching mad_acc's shared-%dst in-place semantics.
-  ///
-  /// The seed retype bypasses the *global* dead-at-assign check (the accumulator
-  /// buffer is legitimately live at the post-if phi consumer, which the global
-  /// check would treat as a conflict), but only after `TryCoalesceAccIfPhi`
-  /// verifies the two preconditions branch exclusivity actually needs: (a) the
-  /// seed producer is lexically inside the branch, and (b) a branch-scoped
-  /// liveness scan (`IsTargetDeadAtAssign(..., stop_at=if)`) finds no same-branch
-  /// tail read of the accumulator buffer.  When either fails, that phi is left to
-  /// YieldFixup instead of being coalesced.  Returns the rewrite map (apply via
-  /// RetypeApplier).  A needed-but-declined retarget (after the preconditions
-  /// hold) is a hard error — no legal Acc->Acc move exists to fall back to.
-  std::map<VarPtr, TypePtr> CoalesceAccumulatorIfPhis(const StmtPtr& func_body) {
-    DefMapVisitor def_v;
-    def_v.Run(func_body);
-    defs_ = std::move(def_v.defs);
-    VisitIfPhisForAccumulator(func_body);
     return std::move(rewrites_);
   }
 
@@ -371,116 +352,6 @@ class TopDownRetargeter {
     }
   }
 
-  // Walk the IR; coalesce every accumulator if-phi we encounter.
-  void VisitIfPhisForAccumulator(const StmtPtr& stmt) {
-    if (!stmt) return;
-    if (auto seq = As<SeqStmts>(stmt)) {
-      for (const auto& s : seq->stmts_) VisitIfPhisForAccumulator(s);
-    } else if (auto for_stmt = As<ForStmt>(stmt)) {
-      VisitIfPhisForAccumulator(for_stmt->body_);
-    } else if (auto if_stmt = As<IfStmt>(stmt)) {
-      TryCoalesceAccIfPhi(if_stmt);
-      VisitIfPhisForAccumulator(if_stmt->then_body_);
-      if (if_stmt->else_body_.has_value()) VisitIfPhisForAccumulator(if_stmt->else_body_.value());
-    } else if (auto scope = As<ScopeStmt>(stmt)) {
-      VisitIfPhisForAccumulator(scope->body_);
-    }
-  }
-
-  // True when `var` is produced by an in-place accumulator op: a Call whose op
-  // reuses input `k` (matmul_acc) and whose output MemRef aliases input `k`'s —
-  // i.e. mad_acc's shared %dst.  This branch's buffer is the one we keep; the
-  // other branch's producer is the seed we retarget onto it.
-  bool IsInplaceAccumulatorProducer(const VarPtr& var) {
-    auto it = defs_.find(var);
-    if (it == defs_.end() || it->second.kind != VarDef::kAssign) return false;
-    auto assign = As<AssignStmt>(it->second.assign_stmt);
-    if (!assign) return false;
-    auto call = As<Call>(assign->value_);
-    if (!call || !call->op_) return false;
-    const auto& reg = OpRegistry::GetInstance();
-    if (!reg.IsRegistered(call->op_->name_)) return false;
-    auto reuse_idx = reg.GetEntry(call->op_->name_).GetOutputReusesInputArg();
-    if (!reuse_idx.has_value() || *reuse_idx >= call->args_.size()) return false;
-    auto in_var = AsVarLike(call->args_[*reuse_idx]);
-    if (!in_var) return false;
-    auto out_tile = GetTileTypeWithMemRef(var->GetType());
-    auto in_tile = GetTileTypeWithMemRef(in_var->GetType());
-    if (!out_tile || !in_tile) return false;
-    return MemRef::SameAllocation(GetDefinedMemRef(out_tile), GetDefinedMemRef(in_tile));
-  }
-
-  // For an IfStmt whose branches yield an in-place accumulator on one side and a
-  // fresh seed on the other (a different L0C buffer), retarget the seed onto the
-  // accumulator buffer.  Scoped to Acc — the ISA case with no legal reconciling
-  // move.  A declined retarget is a hard error (see CoalesceAccumulatorIfPhis).
-  void TryCoalesceAccIfPhi(const IfStmtPtr& if_stmt) {
-    if (!if_stmt->else_body_.has_value() || if_stmt->return_vars_.empty()) return;
-    auto then_yield = FindYieldStmt(if_stmt->then_body_);
-    auto else_yield = FindYieldStmt(if_stmt->else_body_.value());
-    if (!then_yield || !else_yield) return;
-
-    for (size_t i = 0; i < if_stmt->return_vars_.size(); ++i) {
-      if (i >= then_yield->value_.size() || i >= else_yield->value_.size()) continue;
-      auto then_var = AsVarLike(then_yield->value_[i]);
-      auto else_var = AsVarLike(else_yield->value_[i]);
-      if (!then_var || !else_var) continue;
-
-      const bool then_acc = IsInplaceAccumulatorProducer(then_var);
-      const bool else_acc = IsInplaceAccumulatorProducer(else_var);
-      if (then_acc == else_acc) continue;  // need exactly one in-place accumulator
-
-      const VarPtr& acc_var = then_acc ? then_var : else_var;
-      const VarPtr& seed_var = then_acc ? else_var : then_var;
-
-      auto acc_tile = GetTileTypeWithMemRef(acc_var->GetType());
-      auto seed_tile = GetTileTypeWithMemRef(seed_var->GetType());
-      if (!acc_tile || !seed_tile) continue;
-      if (acc_tile->GetMemorySpace() != MemorySpace::Acc) continue;  // Acc-only (no legal move)
-
-      auto acc_memref = GetDefinedMemRef(acc_tile);
-      if (MemRef::SameAllocation(acc_memref, GetDefinedMemRef(seed_tile))) continue;  // already shared
-
-      auto seed_def = defs_.find(seed_var);
-      if (seed_def == defs_.end() || seed_def->second.kind != VarDef::kAssign) continue;
-      // The seed must be a Call producer we can retype; a bare-Var / tuple rename
-      // cannot be retargeted. Leave the phi untouched; YieldFixup will reject
-      // the residual Acc mismatch because no legal copy exists.
-      auto seed_assign = As<AssignStmt>(seed_def->second.assign_stmt);
-      if (!seed_assign || !As<Call>(seed_assign->value_)) continue;
-
-      // The `check_liveness=false` bypass below is only sound when branch
-      // exclusivity actually applies, which requires BOTH:
-      //  (a) the seed producer is lexically *inside* this IfStmt's branch — a
-      //      pre-if value yielded through the branch runs unconditionally and
-      //      would clobber the accumulator the sibling in-place branch reads; and
-      //  (b) the accumulator buffer is dead *within the branch* after the seed
-      //      (exclusivity covers only cross-branch and post-if reads, not a
-      //      same-branch tail read between the seed producer and the yield).
-      // When either fails, leave the phi untouched here. YieldFixup will fail
-      // loudly rather than emit an unsupported Acc->Acc move.
-      const auto& seed_anc = seed_def->second.ancestors;
-      const bool in_branch = std::any_of(seed_anc.begin(), seed_anc.end(),
-                                         [&](const StmtPtr& a) { return a.get() == if_stmt.get(); });
-      if (!in_branch) continue;
-      if (!IsTargetDeadAtAssign(seed_def->second, acc_memref->base_.get(), /*stop_at=*/if_stmt.get())) {
-        continue;
-      }
-
-      // Now safe: (a)+(b) plus exclusivity cover every read of acc_memref, so we
-      // bypass the global liveness (which would false-decline on the legitimate
-      // post-if phi consumer). A remaining decline is a genuine "cannot coalesce
-      // this Acc phi" — fail loud, since no legal Acc->Acc move exists.
-      const bool ok = RetargetAssign(seed_var, seed_def->second, acc_memref, acc_tile->GetMemorySpace(),
-                                     /*check_liveness=*/false);
-      INTERNAL_CHECK_SPAN(ok, seed_var->span_)
-          << "Internal error: cannot coalesce L0C accumulator across a peeled if-phi — seed producer '"
-          << seed_var->name_hint_
-          << "' refused retarget onto the accumulator buffer, which would force an illegal "
-             "Acc->Acc tile.move.";
-    }
-  }
-
   /// Current (possibly-rewritten) MemRef base of `var`.
   const Var* CurrentBase(const VarPtr& var) {
     auto it = rewrites_.find(var);
@@ -521,15 +392,8 @@ class TopDownRetargeter {
   }
 
   /// Retype a Var defined by an AssignStmt.
-  ///
-  /// `check_liveness` gates the general dead-at-assign check (IsTargetDeadAtAssign).
-  /// It is true for the normal loop-carry retarget path.  It is set false only by
-  /// CoalesceAccumulatorIfPhis: coalescing an IfStmt phi's two branch yields onto one
-  /// buffer is always safe (the phi is redefined by exactly one branch at runtime, so
-  /// the branches are mutually exclusive and the target's downstream liveness cannot be
-  /// violated by a branch-local producer).  The op-legality checks below still apply.
   bool RetargetAssign(const VarPtr& var, const VarDef& def, const MemRefPtr& target,
-                      std::optional<MemorySpace> target_memory, bool check_liveness = true) {
+                      std::optional<MemorySpace> target_memory) {
     auto assign = As<AssignStmt>(def.assign_stmt);
     INTERNAL_CHECK_SPAN(assign, var->span_) << "Internal error: kAssign VarDef must carry an AssignStmt";
     auto call = As<Call>(assign->value_);
@@ -603,9 +467,8 @@ class TopDownRetargeter {
       if (CallReadsBase(*call, target->base_.get(), read_arg_count)) return false;
     }
 
-    // Unconstrained: check liveness, then plan retype.  (Skipped for if-phi
-    // branch coalescing, where branch exclusivity is a stronger guarantee.)
-    if (check_liveness && !IsTargetDeadAtAssign(def, target->base_.get())) return false;
+    // Unconstrained: check liveness, then plan retype.
+    if (!IsTargetDeadAtAssign(def, target->base_.get())) return false;
     PlanRewrite(var, target, target_memory);
     return true;
   }
@@ -765,15 +628,7 @@ class TopDownRetargeter {
   /// This check does NOT special-case IfStmt siblings: it never scans the other
   /// branch of an enclosing IfStmt.  That is correct — branches are mutually
   /// exclusive — but it is a conservative side effect, not modelled exclusivity.
-  ///
-  /// `stop_at`, when non-null, bounds the walk to a single enclosing scope: the
-  /// walk halts (returns "dead") upon reaching that statement instead of
-  /// continuing into its parent body.  `CoalesceAccumulatorIfPhis` passes the
-  /// enclosing `IfStmt` so the scan covers only the seed's *branch tail* (a
-  /// same-branch read between the seed producer and the yield) while ignoring
-  /// the mutually-exclusive sibling branch and the legitimate post-if phi
-  /// consumers — the reads it must *not* treat as conflicts.
-  bool IsTargetDeadAtAssign(const VarDef& def, const Var* target_base, const Stmt* stop_at = nullptr) {
+  bool IsTargetDeadAtAssign(const VarDef& def, const Var* target_base) {
     if (def.ancestors.empty()) return true;
 
     // `child_on_path` is the direct descendant of the current ancestor that
@@ -795,10 +650,6 @@ class TopDownRetargeter {
           }
         }
       }
-
-      // Branch-scoped boundary: stop at the caller-supplied enclosing statement
-      // (e.g. the accumulator if-phi) rather than walking into its parent body.
-      if (stop_at && anc.get() == stop_at) return true;
 
       // Stop once we've scanned the body of the enclosing ForStmt: the
       // retyped value is consumed by that loop's yield, so anything outside
@@ -2749,11 +2600,16 @@ class YieldFixupMutator : public IRMutator {
     std::vector<StmtPtr> else_move_stmts;
     std::vector<VarPtr> new_return_vars = if_stmt->return_vars_;
 
+    // Arms are read as Var-*like*: `As<Var>` never matches an `IterArg`
+    // (ir-kind-traits.md), so a phi that merely forwards an enclosing loop's carry
+    // used to be skipped entirely — leaving its return_var on the buffer Step 3's
+    // reuse had already retargeted away, and making the ForStmt half below report a
+    // divergent Acc carry that is not in fact divergent.
     for (size_t i = 0; i < new_return_vars.size(); ++i) {
       VarPtr then_var =
-          (then_yield && i < then_yield->value_.size()) ? As<Var>(then_yield->value_[i]) : nullptr;
+          (then_yield && i < then_yield->value_.size()) ? AsVarLike(then_yield->value_[i]) : nullptr;
       VarPtr else_var =
-          (else_yield && i < else_yield->value_.size()) ? As<Var>(else_yield->value_[i]) : nullptr;
+          (else_yield && i < else_yield->value_.size()) ? AsVarLike(else_yield->value_[i]) : nullptr;
 
       auto then_tile = then_var ? GetTileTypeWithMemRef(then_var->GetType()) : nullptr;
       auto else_tile = else_var ? GetTileTypeWithMemRef(else_var->GetType()) : nullptr;
@@ -2821,11 +2677,20 @@ class YieldFixupMutator : public IRMutator {
     auto source_tile = GetTileTypeWithMemRef(source->GetType());
     INTERNAL_CHECK_SPAN(source_tile, source->span_)
         << "Internal error: YieldFixup tile.move source must be a TileType with MemRef";
-    INTERNAL_CHECK_SPAN(
+    // An Acc (L0C) accumulator that reaches a control-flow merge or a loop carry in a
+    // different buffer than the one the merge lands in cannot be reconciled: nothing
+    // reads L0C except the FIXPIPE drain, whose destinations are L1 and GM, so no
+    // Acc->Acc copy exists on any target. Report the two buffers rather than
+    // manufacturing a move the hardware cannot perform.
+    const auto& source_memref = GetDefinedMemRef(source_tile);
+    CHECK_SPAN(
         !(source_tile->GetMemorySpace() == MemorySpace::Acc && target_memory.value() == MemorySpace::Acc),
         source->span_)
-        << "Internal error: MemoryReuse cannot reconcile divergent L0C accumulator buffers with "
-           "tile.move; accumulator control-flow values must be coalesced before YieldFixup.";
+        << "Accumulator (L0C) tiles cannot be moved between buffers: there is no Acc-to-Acc copy "
+           "on this target. '"
+        << source->name_hint_ << "' is bound to " << MemRefLabel(source_memref)
+        << " but the value it flows into is bound to " << MemRefLabel(target_memref)
+        << "; both must name one buffer.";
     auto& op_reg = OpRegistry::GetInstance();
     std::vector<std::pair<std::string, std::any>> kwargs = {
         {"target_memory", std::any(target_memory.value())}};
@@ -3110,18 +2975,10 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
   //
   // PTOAS needs only the ForStmt YieldFixup half: addr-less codegen already
   // re-points a branch-local producer at the if-phi handle. DSA-RP emits
-  // explicit addresses, so it must first coalesce peeled accumulator if-phis,
-  // then materialize both IfStmt and ForStmt fixups, and finally repair bare-Var
-  // identity copies before lifetime analysis and placement.
+  // explicit addresses, so it must materialize both IfStmt and ForStmt fixups,
+  // then repair bare-Var identity copies before lifetime analysis and placement.
   const auto* ctx = PassContext::Current();
   if (ctx != nullptr && ctx->GetMemoryPlanner() == MemoryPlanner::DsaRP) {
-    TopDownRetargeter acc_coalescer;
-    auto acc_rewrites = acc_coalescer.CoalesceAccumulatorIfPhis(new_body);
-    if (!acc_rewrites.empty()) {
-      RetypeApplier applier(std::move(acc_rewrites));
-      new_body = applier.VisitStmt(new_body);
-    }
-
     YieldFixupMutator yield_fixup(/*fixup_if_stmts=*/true);
     new_body = yield_fixup.VisitStmt(new_body);
     new_body = NormalizeIdentityCopyBuffersMutator().VisitStmt(new_body);
@@ -3206,21 +3063,6 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
     // acc->acc tile.move ops (#1352).
     AlignLoopCarriesToInitMutator align;
     new_body = align.VisitStmt(new_body);
-  }
-
-  // Step 3.75: Coalesce peeled loop-carried accumulator if-phis so YieldFixupMutator
-  // does not reconcile them with an illegal Acc->Acc tile.move.  See
-  // TopDownRetargeter::CoalesceAccumulatorIfPhis.  Must run after all ForStmt-carry
-  // coalescing (Steps 0/3/3.5) so the accumulator branch is on its final buffer, and
-  // before YieldFixupMutator (Step 4) so it observes one buffer per phi.  A no-op when
-  // no accumulator if-phi exists (e.g. non-pipelined kernels).
-  {
-    TopDownRetargeter acc_coalescer;
-    auto acc_rewrites = acc_coalescer.CoalesceAccumulatorIfPhis(new_body);
-    if (!acc_rewrites.empty()) {
-      RetypeApplier applier(std::move(acc_rewrites));
-      new_body = applier.VisitStmt(new_body);
-    }
   }
 
   // Step 4: Fix ForStmt/IfStmt yield/return_var MemRef mismatches

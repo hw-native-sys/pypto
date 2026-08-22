@@ -50,7 +50,7 @@ program_tiled = l0_tile_pass(program)
    - 子字节 dtype（cube path 不支持）—— `PH-AT-003`。
    - `ChooseL0Tile` 拒绝该配置 —— `PH-AT-005`。
 5. **构造 K-loop**（针对一个输出子块——K 切分时即整个输出，M/N 切分时为每个 `[m, n]` 子块）：
-   - `tile.matmul` —— iter-arg 初值为 Acc-resident 的 `tile.create([m, n], dtype, target_memory=Acc)` 占位；循环体用 `IfStmt` 在 `ko == 0` 时走 `tile.matmul`（产生新的 Acc），其它迭代走 `tile.matmul_acc`（向 iter-arg 上累加）。`IfStmt` 物化一个 phi 形式的 `return_var`，由外层 yield 写回 iter-arg。
+   - `tile.matmul` —— iter-arg 初值为 Acc-resident 的 `tile.create([m, n], dtype, target_memory=Acc)` 占位；循环体是一条以 `init_cond=(ko == 0)` 为谓词的 `tile.matmul_acc`：第一个 K 步覆盖写累加器，其余迭代在其上累加。后端把该谓词展开为 `pto.tmatmul` / `pto.tmatmul.acc` 二选一，因此这一选择不产生任何 IR 层面的控制流。这样循环体在两条路径上都是原地写、始终只用一块 L0C；若改为在全新 `tile.matmul` 与原地累加之间分支，同一个逻辑值就会落在两块 Acc 缓冲上，而下游无法协调（不存在 `Acc`→`Acc` 拷贝）。
    - `tile.matmul_acc` —— iter-arg 初值就是调用方传入的累加器（其类型已经与每次迭代的 `tile.matmul_acc` 输出一致）；每次迭代统一是 `tile.matmul_acc`，无需 if-else。
    - `tile.matmul_bias` —— 使用与 `tile.matmul` 相同的新累加器循环，但第一个 K block 使用 `tile.matmul_bias`，之后都使用 `tile.matmul_acc`，因此 bias 恰好只加一次。N 切分时，对应窗口从原始 tensor 重新 `tile.load` 到独立 Mat tile，再通过 `tile.move` 传到 Bias（`pto.tload` + `pto.tmov`）。不会使用单行 Mat `tile.slice`，因为其 boxed `pto.subview` 不满足 PTOAS 合法性。
    - 每次迭代的操作数抽取使用 `tile.extract(src, idx_row, idx_col, [shape], target_memory=Left|Right)` —— 这是旧版 `tile.slice`（Mat-resident 中间 tile）+ `tile.mov`（Mat→Left/Right）的 SSA 化合并。这样既消除了 Mat-resident 中间 slice tile，也使得 lower 后是 `pto.textract` 而不是 `pto.subview`，从而绕开后者的 `valid_row` codegen 不一致问题。对于原点为 `(mi, ni)` 的输出子块，抽取的是 `lhs[mi:mi+m, ko:ko+k]` 与 `rhs[ko:ko+k, ni:ni+n]`；K 切分情形即 `mi == ni == 0`、`m == M`、`n == N`。
@@ -155,13 +155,8 @@ class After:
         for ko, (c_iter,) in pl.pipeline(0, 256, 64, init_values=(c_l0_init,), stage=2):
             sa = pl.tile.extract(a_mat, 0, ko, [128, 64], target_memory=Left)
             sb = pl.tile.extract(b_mat, ko, 0, [64, 128], target_memory=Right)
-            if ko == 0:
-                c_first = pl.tile.matmul(sa, sb)
-                c_phi = pl.yield_(c_first)
-            else:
-                c_acc = pl.tile.matmul_acc(c_iter, sa, sb)
-                c_phi = pl.yield_(c_acc)
-            c = pl.yield_(c_phi)
+            c_acc = pl.tile.matmul_acc(c_iter, sa, sb, init_cond=(ko == 0))
+            c = pl.yield_(c_acc)
         # c（即 yield-LHS）持有累加得到的 Acc 类型结果。
         ...
 ```
@@ -196,13 +191,8 @@ c_t1_init = pl.tile.create([256, 256], dtype=pl.FP32, target_memory=Acc)
 for ko, (c_iter,) in pl.pipeline(0, 512, 32, init_values=(c_t1_init,), stage=2):
     sa = pl.tile.extract(lhs_mat, 256, ko, [256, 32], target_memory=Left)
     sb = pl.tile.extract(rhs_mat, ko, 0, [32, 256], target_memory=Right)
-    if ko == 0:
-        c_first = pl.tile.matmul(sa, sb)
-        c_phi = pl.yield_(c_first)
-    else:
-        c_acc = pl.tile.matmul_acc(c_iter, sa, sb)
-        c_phi = pl.yield_(c_acc)
-    c_t1 = pl.yield_(c_phi)
+    c_acc = pl.tile.matmul_acc(c_iter, sa, sb, init_cond=(ko == 0))
+    c_t1 = pl.yield_(c_acc)
 out_t1 = pl.store(c_t1, [256, 0], out_t0)  # 子块 store 到 out[256:512, 0:256]
 ```
 

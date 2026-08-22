@@ -22,12 +22,13 @@
 /// can alias it onto QK's freed L0B (peak L0B = ``max(QK, PV)`` instead of the
 /// sum).  The K-loop has the shape:
 ///
-///   * ``tile.matmul`` — the loop body branches on the iteration index
-///     (``ko == 0``) so the first iteration uses ``tile.matmul`` (fresh
-///     accumulator) and subsequent iterations use ``tile.matmul_acc``
-///     (accumulating into the iter-arg).  The iter-arg init is an Acc-
-///     resident ``tile.create`` placeholder so the iter-arg / yield /
-///     return_var chain is Acc-typed end-to-end.
+///   * ``tile.matmul`` — every iteration is a ``tile.matmul_acc`` predicated on
+///     ``init_cond=(ko == 0)``: the first iteration overwrites the accumulator
+///     with ``lhs @ rhs``, later ones accumulate into it.  The iter-arg init is
+///     an Acc-resident ``tile.create`` placeholder so the iter-arg / yield /
+///     return_var chain is Acc-typed end-to-end.  The predicate keeps the body
+///     in place on both paths, so the chain never splits across two L0C buffers
+///     (there is no ``Acc``->``Acc`` copy to reconcile one if it did).
 ///   * ``tile.matmul_acc`` — every iteration is ``tile.matmul_acc``; the
 ///     iter-arg init is the caller-provided accumulator directly, so the
 ///     chain is uniform and no if-else is needed.
@@ -51,13 +52,13 @@
 ///   for ko in pl.pipeline(0, K, k, init_values=(c_init,), stage=2):
 ///     sa = tile.extract(x_mat, 0, ko, [m, k], target_memory=Left)
 ///     sb = tile.extract(y_mat, ko, 0, [k, n], target_memory=Right)
-///     if ko == 0:
-///       c1 = tile.matmul(sa, sb)             // fresh Acc
-///       c_phi = pl.yield_(c1)                // if's return_var
-///     else:
-///       c2 = tile.matmul_acc(c_iter, sa, sb) // accumulate
-///       c_phi = pl.yield_(c2)
-///     yield c_phi
+///     c_new = tile.matmul_acc(c_iter, sa, sb, init_cond=(ko == 0))
+///     yield c_new
+///
+/// The backend expands ``init_cond`` into the ``pto.tmatmul`` /
+/// ``pto.tmatmul.acc`` pair (a literal predicate picks one arm outright), so the
+/// selection costs no IR-level control flow — see the ``init_cond`` section of
+/// ``docs/en/dev/ir/05-operators.md``.
 ///
 /// Layout for ``tile.matmul_acc`` (acc_init is the caller's accumulator):
 ///   for ko in pl.pipeline(0, K, k, init_values=(acc_init,), stage=2):
@@ -479,18 +480,41 @@ VarPtr BuildBiasOperand(std::vector<StmtPtr>& stmts, const VarPtr& bias_src, int
   return bias->var_;
 }
 
-/// Body of the K-loop for a fresh ``tile.matmul`` or ``tile.matmul_bias``:
-/// branches on ``ko == 0`` between a fresh Acc (with the optional bias) and
-/// ``tile.matmul_acc``. The ``IfStmt`` materializes a phi return_var that the
-/// outer yield carries back to the iter-arg.
+/// Body of the K-loop for a fresh ``tile.matmul`` or ``tile.matmul_bias``.
+///
+/// Without a bias this is a single predicated ``tile.matmul_acc`` whose
+/// ``init_cond`` is ``ko == 0``: on the first K step the accumulator is
+/// overwritten with ``lhs @ rhs``, afterwards it is accumulated into.  The
+/// backend expands the predicate into the ``pto.tmatmul`` / ``pto.tmatmul.acc``
+/// pair (a literal predicate picks one arm outright), so the branch exists only
+/// in the emitted code — never in the IR.
+///
+/// This matters beyond tidiness.  The former shape branched on ``ko == 0``
+/// between a *fresh* Acc tile and an in-place accumulate, which are two
+/// producers of one logical value on two different L0C buffers.  Every pass
+/// downstream then had to agree on which buffer the phi lives in, and there is
+/// no ``Acc``->``Acc`` copy to fall back on when they disagree.  A predicated
+/// accumulate is in place on both paths (``set_output_reuses_input(0)``), so one
+/// buffer is the only possibility and no phi is materialized at all.
+///
+/// ``tile.matmul_bias`` has no ``init_cond`` operand, so the bias form keeps the
+/// ``IfStmt``: its first K step must apply the bias exactly once.
 StmtPtr BuildMatmulBody(const VarPtr& ko_var, const IterArgPtr& c_iter, const AssignStmtPtr& sa,
                         const AssignStmtPtr& sb, const VarPtr& bias, const std::string& base,
                         const Span& sp) {
   auto& reg = OpRegistry::GetInstance();
+  auto init_cond = MakeEq(ko_var, MakeIndex(0, sp), sp);
 
-  // Then-branch: fresh Acc tile, applying the optional bias exactly once.
-  auto c_then_call = bias ? reg.Create("tile.matmul_bias", {sa->var_, sb->var_, bias}, sp)
-                          : reg.Create("tile.matmul", {sa->var_, sb->var_}, sp);
+  if (!bias) {
+    auto c_call = reg.Create("tile.matmul_acc", {ExprPtr(c_iter), sa->var_, sb->var_, init_cond}, sp);
+    auto c_var = std::make_shared<Var>(base + "_l0_c_acc", c_call->GetType(), sp);
+    auto c_assign = std::make_shared<AssignStmt>(c_var, c_call, sp);
+    auto body_yield = std::make_shared<YieldStmt>(std::vector<ExprPtr>{c_var}, sp);
+    return SeqStmts::Flatten(std::vector<StmtPtr>{sa, sb, c_assign, body_yield}, sp);
+  }
+
+  // Then-branch: fresh Acc tile, applying the bias exactly once.
+  auto c_then_call = reg.Create("tile.matmul_bias", {sa->var_, sb->var_, bias}, sp);
   auto c_then_var = std::make_shared<Var>(base + "_l0_c_first", c_then_call->GetType(), sp);
   auto c_then_assign = std::make_shared<AssignStmt>(c_then_var, c_then_call, sp);
   auto then_yield = std::make_shared<YieldStmt>(std::vector<ExprPtr>{c_then_var}, sp);
@@ -504,8 +528,7 @@ StmtPtr BuildMatmulBody(const VarPtr& ko_var, const IterArgPtr& c_iter, const As
   StmtPtr else_body = SeqStmts::Flatten(std::vector<StmtPtr>{c_else_assign, else_yield}, sp);
 
   auto c_phi = std::make_shared<Var>(base + "_l0_c_phi", c_then_call->GetType(), sp);
-  auto cond = MakeEq(ko_var, MakeIndex(0, sp), sp);
-  auto if_stmt = std::make_shared<IfStmt>(cond, then_body, std::optional<StmtPtr>(else_body),
+  auto if_stmt = std::make_shared<IfStmt>(init_cond, then_body, std::optional<StmtPtr>(else_body),
                                           std::vector<VarPtr>{c_phi}, sp);
   auto outer_yield = std::make_shared<YieldStmt>(std::vector<ExprPtr>{c_phi}, sp);
   return SeqStmts::Flatten(std::vector<StmtPtr>{sa, sb, if_stmt, outer_yield}, sp);

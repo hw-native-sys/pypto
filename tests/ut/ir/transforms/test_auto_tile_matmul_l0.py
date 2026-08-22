@@ -202,13 +202,10 @@ class TestAutoTileMatmulL0KOnly:
                     sb: pl.Tile[[256, 64], pl.BF16, pl.Mem.Right] = pl.tile.extract(
                         rhs_mat, ko, 0, shape=[256, 64], target_memory=pl.Mem.Right
                     )
-                    if ko == 0:
-                        c_first: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(sa, sb)
-                        c_phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_first)
-                    else:
-                        c_acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(c_iter, sa, sb)
-                        c_phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_acc)
-                    c: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_phi)
+                    c_acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
+                        c_iter, sa, sb, init_cond=(ko == 0)
+                    )
+                    c: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_acc)
                 out = pl.store(c, [0, 0], out)
                 return out
 
@@ -333,13 +330,10 @@ class TestAutoTileMatmulL0KOnly:
                     sb: pl.Tile[[256, 64], pl.BF16, pl.Mem.Right] = pl.tile.extract(
                         rhs_mat, ko, 0, shape=[256, 64], target_memory=pl.Mem.Right
                     )
-                    if ko == 0:
-                        c_first: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(sa, sb)
-                        c_phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_first)
-                    else:
-                        c_acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(c_iter, sa, sb)
-                        c_phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_acc)
-                    c: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_phi)
+                    c_acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
+                        c_iter, sa, sb, init_cond=(ko == 0)
+                    )
+                    c: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_acc)
                 out = pl.store(c, [0, 0], out)
                 return out
 
@@ -488,13 +482,10 @@ class TestAutoTileMatmulL0KOnly:
                     sb0: pl.Tile[[256, 64], pl.BF16, pl.Mem.Right] = pl.tile.extract(
                         b0, ko0, 0, shape=[256, 64], target_memory=pl.Mem.Right
                     )
-                    if ko0 == 0:
-                        c0_first: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(sa0, sb0)
-                        c0_phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c0_first)
-                    else:
-                        c0_acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(c0_iter, sa0, sb0)
-                        c0_phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c0_acc)
-                    c0: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c0_phi)
+                    c0_acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
+                        c0_iter, sa0, sb0, init_cond=(ko0 == 0)
+                    )
+                    c0: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c0_acc)
                 out0 = pl.store(c0, [0, 0], out0)
                 a1: pl.Tile[[16, 2048], pl.BF16, pl.Mem.Mat] = pl.tile.load(
                     lhs1, [0, 0], [16, 2048], target_memory=pl.Mem.Mat
@@ -512,13 +503,10 @@ class TestAutoTileMatmulL0KOnly:
                     sb1: pl.Tile[[256, 64], pl.BF16, pl.Mem.Right] = pl.tile.extract(
                         b1, ko1, 0, shape=[256, 64], target_memory=pl.Mem.Right
                     )
-                    if ko1 == 0:
-                        c1_first: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(sa1, sb1)
-                        c1_phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c1_first)
-                    else:
-                        c1_acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(c1_iter, sa1, sb1)
-                        c1_phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c1_acc)
-                    c1: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c1_phi)
+                    c1_acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
+                        c1_iter, sa1, sb1, init_cond=(ko1 == 0)
+                    )
+                    c1: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c1_acc)
                 out1 = pl.store(c1, [0, 0], out1)
                 return out0, out1
 
@@ -1265,13 +1253,10 @@ class TestAutoTileMatmulL0MNTiling:
                     b0: pl.Tile[[32, 256], pl.FP32, pl.Mem.Right] = pl.tile.extract(
                         rhs_mat, ko0, 0, shape=[32, 256], target_memory=pl.Mem.Right
                     )
-                    if ko0 == 0:
-                        c0_first: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(a0, b0)
-                        c0_phi: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c0_first)
-                    else:
-                        c0_acc: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(c0_iter, a0, b0)
-                        c0_phi: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c0_acc)
-                    c0: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c0_phi)
+                    c0_acc: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
+                        c0_iter, a0, b0, init_cond=(ko0 == 0)
+                    )
+                    c0: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c0_acc)
                 out_t0: pl.Tensor[[512, 512], pl.FP32] = pl.store(c0, [0, 0], out)
                 # Sub-tile (mi=256, ni=0).
                 c1_init: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.create(
@@ -1284,13 +1269,10 @@ class TestAutoTileMatmulL0MNTiling:
                     b1: pl.Tile[[32, 256], pl.FP32, pl.Mem.Right] = pl.tile.extract(
                         rhs_mat, ko1, 0, shape=[32, 256], target_memory=pl.Mem.Right
                     )
-                    if ko1 == 0:
-                        c1_first: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(a1, b1)
-                        c1_phi: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c1_first)
-                    else:
-                        c1_acc: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(c1_iter, a1, b1)
-                        c1_phi: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c1_acc)
-                    c1: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c1_phi)
+                    c1_acc: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
+                        c1_iter, a1, b1, init_cond=(ko1 == 0)
+                    )
+                    c1: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c1_acc)
                 out_t1: pl.Tensor[[512, 512], pl.FP32] = pl.store(c1, [256, 0], out_t0)
                 # Sub-tile (mi=0, ni=256).
                 c2_init: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.create(
@@ -1303,13 +1285,10 @@ class TestAutoTileMatmulL0MNTiling:
                     b2: pl.Tile[[32, 256], pl.FP32, pl.Mem.Right] = pl.tile.extract(
                         rhs_mat, ko2, 256, shape=[32, 256], target_memory=pl.Mem.Right
                     )
-                    if ko2 == 0:
-                        c2_first: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(a2, b2)
-                        c2_phi: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c2_first)
-                    else:
-                        c2_acc: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(c2_iter, a2, b2)
-                        c2_phi: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c2_acc)
-                    c2: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c2_phi)
+                    c2_acc: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
+                        c2_iter, a2, b2, init_cond=(ko2 == 0)
+                    )
+                    c2: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c2_acc)
                 out_t2: pl.Tensor[[512, 512], pl.FP32] = pl.store(c2, [0, 256], out_t1)
                 # Sub-tile (mi=256, ni=256).
                 c3_init: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.create(
@@ -1322,13 +1301,10 @@ class TestAutoTileMatmulL0MNTiling:
                     b3: pl.Tile[[32, 256], pl.FP32, pl.Mem.Right] = pl.tile.extract(
                         rhs_mat, ko3, 256, shape=[32, 256], target_memory=pl.Mem.Right
                     )
-                    if ko3 == 0:
-                        c3_first: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(a3, b3)
-                        c3_phi: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c3_first)
-                    else:
-                        c3_acc: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(c3_iter, a3, b3)
-                        c3_phi: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c3_acc)
-                    c3: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c3_phi)
+                    c3_acc: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
+                        c3_iter, a3, b3, init_cond=(ko3 == 0)
+                    )
+                    c3: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c3_acc)
                 out_t3: pl.Tensor[[512, 512], pl.FP32] = pl.store(c3, [256, 256], out_t2)
                 return out_t3
 
@@ -3836,10 +3812,12 @@ class TestAutoTileMatmulL0MatScratch:
             re.DOTALL,
         )
         assert tail_extract, "the consumer K-loop must read the completed partial-N scratch variable"
-        if_pos = printed.find("if ", tail_extract.end())
-        else_pos = printed.find("else:", if_pos)
-        assert tail_extract.end() < if_pos < else_pos, (
-            "expected the partial-N scratch variable to feed the consumer's if/else K-loop"
+        # The consumer K-loop accumulates with a predicated `tile.matmul_acc`
+        # (`init_cond=(ko == 0)`), so the first-step selection lives in the operand
+        # rather than in an `if`/`else` around two producers.
+        acc_match = re.search(r"pl\.tile\.matmul_acc\([^\n]*== 0\)", printed[tail_extract.end() :])
+        assert acc_match, (
+            "expected the partial-N scratch variable to feed the consumer's predicated K-loop accumulate"
         )
         assert "pl.tile.cast(" not in printed, "the bf16 downcast must be folded into the Mat scratch"
         _assert_ssa_valid(After, "test_misaligned_n_mat_scratch_roundtrip")
@@ -4072,15 +4050,10 @@ class TestAutoTileMatmulL0FitsL0cCastFold:
                     b_sub: pl.Tile[[128, 128], pl.BF16, pl.Mem.Right] = pl.tile.extract(
                         b_mat, ko, 0, shape=[128, 128], target_memory=pl.Mem.Right
                     )
-                    if ko == 0:
-                        c_first: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(a_sub, b_sub)
-                        c_phi: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.yield_(c_first)
-                    else:
-                        c_acc: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
-                            c_iter, a_sub, b_sub
-                        )
-                        c_phi: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.yield_(c_acc)
-                    c: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.yield_(c_phi)
+                    c_acc: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
+                        c_iter, a_sub, b_sub, init_cond=(ko == 0)
+                    )
+                    c: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.yield_(c_acc)
                 c_mat: pl.Tile[[128, 128], pl.BF16, pl.Mem.Mat] = pl.tile.create(
                     [128, 128], dtype=pl.BF16, target_memory=pl.Mem.Mat
                 )
