@@ -73,7 +73,11 @@ This allows extensible operation codegen without modifying the core visitor.
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#if __has_include("orchestration_api.h")
 #include "orchestration_api.h"
+#else
+#include "pto_orchestration_api.h"
+#endif
 ```
 
 ### Phase 2–3: Entry Points
@@ -340,7 +344,11 @@ def orch_basic(
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#if __has_include("orchestration_api.h")
 #include "orchestration_api.h"
+#else
+#include "pto_orchestration_api.h"
+#endif
 
 extern "C" {
 

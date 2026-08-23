@@ -68,7 +68,11 @@ class TestOrchestration:
             #include <stdint.h>
             #include <stdio.h>
 
+            #if __has_include("orchestration_api.h")
             #include "orchestration_api.h"
+            #else
+            #include "pto_orchestration_api.h"
+            #endif
 
             extern "C" {
 
@@ -517,7 +521,11 @@ class TestOrchestration:
             #include <stdint.h>
             #include <stdio.h>
 
+            #if __has_include("orchestration_api.h")
             #include "orchestration_api.h"
+            #else
+            #include "pto_orchestration_api.h"
+            #endif
 
             extern "C" {
 
@@ -1555,7 +1563,11 @@ class TestOrchestration:
             #include <stdint.h>
             #include <stdio.h>
 
+            #if __has_include("orchestration_api.h")
             #include "orchestration_api.h"
+            #else
+            #include "pto_orchestration_api.h"
+            #endif
 
             extern "C" {
 

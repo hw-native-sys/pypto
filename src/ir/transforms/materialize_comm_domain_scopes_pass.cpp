@@ -538,8 +538,9 @@ class GroupDispatchLoopMarker : public IRMutator {
     GroupDispatchBodyAnalyzer analyzer(chip_orchs_);
     analyzer.VisitStmt(op->body_);
     if (analyzer.has_nested_control || analyzer.has_submit || analyzer.has_other_call ||
-        analyzer.dispatches.size() != 1)
+        analyzer.dispatches.size() != 1) {
       return false;
+    }
     ExprPtr device;
     for (const auto& [key, value] : analyzer.dispatches.front()->attrs_) {
       if (key == kAttrDevice) {
