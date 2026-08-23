@@ -100,14 +100,15 @@ For every host-orchestration function (`Function::level_ == Level::HOST` and
    following are proven: its range is exactly
    `[0, pld.system.world_size())` with unit step, it has no loop-carried state,
    its iteration contains exactly one unconditional chip-orchestration call
-   (plus any number of pure `tensor.slice` views, but no other calls or
-   `Submit` operations), and that
+   (plus any number of pure `tensor.slice` or `pld.tensor.window` views, but no
+   other calls or `Submit` operations), and that
    dispatch's `device=` expression is the loop induction variable.
    Distributed codegen uses this explicit contract to build all per-rank
    `TaskArgs` first and then call `submit_next_level_group` once. This prevents
    argument-construction time from becoming rank-start skew. Loops containing
-   nested control flow, any `Submit`, any non-slice call, multiple dispatches, a partial/static
-   device range, or a different `device=` expression retain ordinary
+   nested control flow, any `Submit`, any call other than the two permitted
+   pure view forms, multiple dispatches, a partial/static device range, or a
+   different `device=` expression retain ordinary
    per-dispatch lowering.
 
 ## Sanity checks

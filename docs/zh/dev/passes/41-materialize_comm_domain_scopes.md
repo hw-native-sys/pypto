@@ -87,11 +87,12 @@ alloc / view / dispatch 点在此时仍然可见。放在较晚阶段还能让�
    才给循环写入 `attrs["group_next_level_dispatch"] = true`：范围严格为
    `[0, pld.system.world_size())`、步长为 1、没有循环携带状态、每次迭代
    恰好包含一次无条件 chip-orchestration 调用（允许任意数量的纯 `tensor.slice`
-   view，但不允许其它调用或 `Submit` 操作），且该 dispatch 的 `device=` 就是循环归纳变量。分布式
+   或 `pld.tensor.window` view，但不允许其它调用或 `Submit` 操作），且该 dispatch 的
+   `device=` 就是循环归纳变量。分布式
    codegen 依据这个显式契约，先构造完所有 rank 的
    `TaskArgs`，再调用一次 `submit_next_level_group`，避免参数构造耗时变成
-   rank 启动偏斜。包含嵌套控制流、`Submit`、非 slice 调用、多个 dispatch、部分/静态设备范围
-   或不同 `device=` 表达式的循环仍保持逐个 dispatch 的原有 lowering。
+   rank 启动偏斜。包含嵌套控制流、`Submit`、上述两种纯 view 以外的调用、多个 dispatch、
+   部分/静态设备范围或不同 `device=` 表达式的循环仍保持逐个 dispatch 的原有 lowering。
 
 ## Sanity 校验
 

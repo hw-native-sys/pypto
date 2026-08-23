@@ -268,6 +268,37 @@ def test_full_rank_dispatch_loop_batches_task_args_before_submit():
     compile(code, "<host_orch>", "exec")
 
 
+def test_allocation_free_full_rank_dispatch_loop_is_grouped():
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            inp: pl.Tensor[[SIZE], pl.FP32],
+            out: pl.Out[pl.Tensor[[SIZE], pl.FP32]],
+        ) -> pl.Tensor[[SIZE], pl.FP32]:
+            return out
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(
+            self,
+            inputs: pl.Tensor[[2, SIZE], pl.FP32],
+            outputs: pl.Out[pl.Tensor[[2, SIZE], pl.FP32]],
+        ) -> pl.Tensor[[2, SIZE], pl.FP32]:
+            for r in pl.range(pld.world_size()):
+                inp_r = inputs[r]
+                out_r = outputs[r]
+                self.chip_orch(inp_r, out_r, device=r)
+            return outputs
+
+    code = _lower(Prog)
+
+    assert "allocate_domain" not in code, code
+    assert '_submit_chip_group(orch, callables["chip_orch"]' in code, code
+    assert '_submit_chip(orch, callables["chip_orch"]' not in code, code
+    compile(code, "<host_orch>", "exec")
+
+
 def test_full_rank_dispatch_loop_allows_per_rank_window_views():
     @pl.program
     class Prog:

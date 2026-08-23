@@ -234,9 +234,10 @@ Pass SynthesizeAllReduceSignals();
  *     domain, inner = last).
  *  6. Mark a ``for rank in range(world_size)`` loop for grouped next-level
  *     publication when its iteration contains exactly one unconditional CHIP
- *     dispatch pinned to ``rank``, optional pure ``tensor.slice`` views, no
- *     other calls or ``Submit`` operations, and carries no loop state. Distributed
- *     codegen consumes this explicit attr; it does not infer the pattern.
+ *     dispatch pinned to ``rank``, optional pure ``tensor.slice`` or
+ *     ``pld.tensor.window`` views, no other calls or ``Submit`` operations,
+ *     and carries no loop state. Distributed codegen consumes this explicit
+ *     attr; it does not infer the pattern.
  *
  * Sanity-checks (``pypto::ValueError`` on failure):
  *  - Every alloc must have at least one ``pld.tensor.window`` materialisation and

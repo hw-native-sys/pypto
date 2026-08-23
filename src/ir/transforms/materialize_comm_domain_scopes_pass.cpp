@@ -612,22 +612,22 @@ FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string,
   AllocAndWindowCollector collector;
   collector.VisitStmt(materialization_body);
 
+  // Group publication also applies to allocation-free HOST orchestrators.
+  // Mark before the comm-domain-only early return so plain Tensor arguments
+  // receive the same full-rank prepare-then-activate contract.
+  GroupDispatchLoopMarker group_marker(chip_orchs, collector.var_defs);
+  materialization_body = group_marker.VisitStmt(materialization_body);
+
   if (collector.allocs.empty()) {
-    // No window-buffer allocations in this host_orch — nothing to do.
-    return func;
+    if (materialization_body.get() == func->body_.get()) return func;
+    auto marked_func = MutableCopy(func);
+    marked_func->body_ = materialization_body;
+    return marked_func;
   }
 
   // Phase 2: record device-descriptor evidence from dispatch sites.
   DispatchAnalyzer analyzer(collector.view_to_window, chip_orchs, collector.var_defs);
   analyzer.VisitStmt(materialization_body);
-
-  // A communication program commonly dispatches the same CHIP orchestrator
-  // once per rank. Building a large TaskArgs and publishing it immediately
-  // starts early ranks tens of milliseconds before late ranks. Preserve the IR
-  // loop but explicitly authorize codegen to publish this proven shape as one
-  // runtime group after all per-rank arguments have been built.
-  GroupDispatchLoopMarker group_marker(chip_orchs, collector.var_defs);
-  materialization_body = group_marker.VisitStmt(materialization_body);
 
   // Host-level collectives do not carry their own device= selector. Their
   // signal buffer is a user-visible window slot, so inherit paired data/target
