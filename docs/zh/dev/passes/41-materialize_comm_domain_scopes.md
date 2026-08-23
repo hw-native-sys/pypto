@@ -79,6 +79,20 @@ alloc / view / dispatch 点在此时仍然可见。放在较晚阶段还能让�
    comm-domain scope 则追加 slot，否则新开一个。`CommDomainScopeStmt wrappers in each host_orch body` 最终
    填充该列表。
 
+8. **包裹 scope**。为每个 comm domain 构造一个嵌套的
+   `CommDomainScopeStmt`；先声明的 domain 在外层。`name_hint_` 使用
+   `"comm_d<n>"`，使 codegen 能直接生成对应的 `__comm_d<n>` handle。
+
+9. **标记全卡 dispatch 循环**。只有在编译器能够证明下列条件全部成立时，
+   才给循环写入 `attrs["group_next_level_dispatch"] = true`：范围严格为
+   `[0, pld.system.world_size())`、步长为 1、没有循环携带状态、每次迭代
+   恰好包含一次无条件 chip-orchestration 调用（允许任意数量的纯 `tensor.slice`
+   view，但不允许其它调用或 `Submit` 操作），且该 dispatch 的 `device=` 就是循环归纳变量。分布式
+   codegen 依据这个显式契约，先构造完所有 rank 的
+   `TaskArgs`，再调用一次 `submit_next_level_group`，避免参数构造耗时变成
+   rank 启动偏斜。包含嵌套控制流、`Submit`、非 slice 调用、多个 dispatch、部分/静态设备范围
+   或不同 `device=` 表达式的循环仍保持逐个 dispatch 的原有 lowering。
+
 ## Sanity 校验
 
 下列情况抛 `pypto::ValueError`（携带 alloc 的 span）：
@@ -110,6 +124,9 @@ pass 运行之后：
 - chip-orchestration 与 InCore 的形参类型 `window_buffer_` 仍是 `nullopt`。
   N7 codegen 在 *host_orch* 的 dispatch 处读取反向引用、再为 chip-orch 显式
   下发对应的 `CommContext` 指针。
+- 每个带 `group_next_level_dispatch = true` 的循环，都已经由编译 pass 证明是
+  “全卡、每 rank 一次 dispatch”的安全形态；codegen 只消费该 attr，不会从
+  循环语法自行猜测是否可以 group。
 
 ## Pass 属性
 

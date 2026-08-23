@@ -53,6 +53,7 @@ from pypto.runtime.distributed_runner import (
     _make_call_config,
     _reset_dfx_dispatch_state,
     _submit_chip,
+    _submit_chip_group,
 )
 from pypto.runtime.runner import RunConfig
 
@@ -2075,6 +2076,7 @@ class _RecordingOrch:
 
     def __init__(self, chip_count: int | None = None) -> None:
         self.calls: list[tuple[Any, int, str]] = []
+        self.group_call: tuple[Any, list[Any], str, list[int]] | None = None
         # ``_submit_chip`` reads/writes this per-card dispatch counter on the
         # orch; declare it so the attribute is known to the type checker.
         self._dfx_dispatch_idx: dict[str, int] = {}
@@ -2088,6 +2090,12 @@ class _RecordingOrch:
     def submit_next_level(self, callable_id: Any, task_args: Any, config: Any, *, worker: int) -> str:
         self.calls.append((callable_id, worker, config.output_prefix))
         return "submitted"
+
+    def submit_next_level_group(
+        self, callable_id: Any, task_args_list: list[Any], config: Any, *, workers: list[int]
+    ) -> str:
+        self.group_call = (callable_id, task_args_list, config.output_prefix, workers)
+        return "group-submitted"
 
 
 class TestSubmitChip:
@@ -2222,6 +2230,41 @@ class TestSubmitChip:
 
         assert orch.calls == [("chip_a", 0, f"{tmp_path}/rank0/d0")]
         assert not (tmp_path / "rank0" / "d0" / "dispatch_program.json").exists()
+
+
+class TestSubmitChipGroup:
+    """Grouped dispatch synchronizes publication without breaking DFX isolation."""
+
+    def test_dfx_off_uses_one_group_submission(self):
+        orch = _RecordingOrch()
+        cfg = _SpyDfxConfig(output_prefix="")
+
+        ret = _submit_chip_group(orch, "chip", ["ta0", "ta1"], cfg, [0, 1])
+
+        assert ret == "group-submitted"
+        assert orch.group_call == ("chip", ["ta0", "ta1"], "", [0, 1])
+        assert orch.calls == []
+
+    def test_dfx_on_preserves_per_member_namespaces(self):
+        orch = _RecordingOrch()
+        cfg = _SpyDfxConfig(output_prefix="/work/dfx_outputs")
+
+        ret = _submit_chip_group(orch, "chip", ["ta0", "ta1"], cfg, [0, 1])
+
+        assert ret == ["submitted", "submitted"]
+        assert orch.calls == [
+            ("chip", 0, "/work/dfx_outputs/rank0/d0"),
+            ("chip", 1, "/work/dfx_outputs/rank1/d0"),
+        ]
+        assert cfg.output_prefix == "/work/dfx_outputs"
+
+    @pytest.mark.parametrize(
+        ("task_args_list", "workers", "message"),
+        [([], [], "at least one"), (["ta0"], [0, 1], "length"), (["ta0", "ta1"], [0, 0], "duplicate")],
+    )
+    def test_rejects_invalid_groups(self, task_args_list, workers, message):
+        with pytest.raises(ValueError, match=message):
+            _submit_chip_group(_RecordingOrch(), "chip", task_args_list, _SpyDfxConfig(), workers)
 
 
 def _write_dfx_dispatch_dirs(dfx: Path, *rels: str) -> None:

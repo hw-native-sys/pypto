@@ -232,6 +232,11 @@ Pass SynthesizeAllReduceSignals();
  *     one comm domain, slots in alloc-source order) and wrap the host_orch
  *     body in nested ``CommDomainScopeStmt`` nodes (outer = first declared
  *     domain, inner = last).
+ *  6. Mark a ``for rank in range(world_size)`` loop for grouped next-level
+ *     publication when its iteration contains exactly one unconditional CHIP
+ *     dispatch pinned to ``rank``, optional pure ``tensor.slice`` views, no
+ *     other calls or ``Submit`` operations, and carries no loop state. Distributed
+ *     codegen consumes this explicit attr; it does not infer the pattern.
  *
  * Sanity-checks (``pypto::ValueError`` on failure):
  *  - Every alloc must have at least one ``pld.tensor.window`` materialisation and

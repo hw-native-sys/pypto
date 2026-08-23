@@ -19,8 +19,9 @@ Covers four orthogonal pieces of the host_orch emit:
 3. Explicit CommCtx scalar:
    ``add_scalar(__comm_d0[<r>].device_ctx)`` placed AFTER all tensor adds,
    in IR-arg order (matching the materialized incore function signature).
-4. dispatch ``device=`` attr → ``_submit_chip(orch, ..., config, <r>)`` (the
-   rank-pinned wrapper that namespaces per-rank DFX ``output_prefix``).
+4. dispatch ``device=`` attr → a rank-pinned submission; compiler-proven
+   full-world loops use ``_submit_chip_group``, while other shapes use
+   ``_submit_chip``.
 
 Plus regressions:
 
@@ -229,9 +230,119 @@ def test_dist_tensor_formal_emits_continuous_tensor_make():
     # the Buffer.tensor above.
     assert re.search(r"\.add_scalar\(__comm_d0\[\w+\]\.device_ctx\)", code), code
     assert "pld.system.get_comm_ctx" not in code, code
-    # ``device=r`` → rank-pinned dispatch routes through ``_submit_chip`` (which
-    # namespaces the per-rank DFX ``output_prefix``), passing the rank last.
-    assert re.search(r"_submit_chip\(orch, callables\[\"chip_orch\"\],.*config, \w+\)", code), code
+    # A full-world one-dispatch loop is published as one group after all ranks'
+    # TaskArgs have been built.
+    assert re.search(r"_group_workers_0\.append\(\w+\)", code), code
+    assert '_submit_chip_group(orch, callables["chip_orch"]' in code, code
+
+
+def test_full_rank_dispatch_loop_batches_task_args_before_submit():
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            data: pld.DistributedTensor[[SIZE], pl.FP32],
+        ) -> pl.Tensor[[SIZE], pl.FP32]:
+            return data  # type: ignore[return-value]
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self) -> pl.Tensor[[SIZE], pl.FP32]:
+            data_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+            data = pld.window(data_buf, [SIZE], dtype=pl.FP32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(data, device=r)
+            return data  # type: ignore[return-value]
+
+    code = _lower(Prog)
+
+    loop_end = code.index("_submit_chip_group(")
+    assert "_group_args_0.append(_ta_0)" in code[:loop_end], code
+    assert "_group_workers_0.append(" in code[:loop_end], code
+    assert re.search(
+        r'_submit_chip_group\(orch, callables\["chip_orch"\], _group_args_0, '
+        r"config, _group_workers_0\)",
+        code[loop_end:],
+    ), code
+    assert '_submit_chip(orch, callables["chip_orch"], _ta_0' not in code, code
+    compile(code, "<host_orch>", "exec")
+
+
+def test_full_rank_dispatch_loop_allows_per_rank_window_views():
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            data: pld.DistributedTensor[[SIZE], pl.FP32],
+        ) -> pl.Tensor[[SIZE], pl.FP32]:
+            return data  # type: ignore[return-value]
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self) -> pl.Tensor[[SIZE], pl.FP32]:
+            data_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+            for r in pl.range(pld.world_size()):
+                data = pld.window(data_buf, [SIZE], dtype=pl.FP32)
+                self.chip_orch(data, device=r)
+            return data  # type: ignore[return-value]
+
+    code = _lower(Prog)
+
+    assert '_submit_chip_group(orch, callables["chip_orch"]' in code, code
+    assert '_submit_chip(orch, callables["chip_orch"]' not in code, code
+    compile(code, "<host_orch>", "exec")
+
+
+def test_multiple_dispatches_in_rank_loop_remain_individual_submissions():
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            data: pld.DistributedTensor[[SIZE], pl.FP32],
+        ) -> pl.Tensor[[SIZE], pl.FP32]:
+            return data  # type: ignore[return-value]
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self) -> pl.Tensor[[SIZE], pl.FP32]:
+            data_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+            data = pld.window(data_buf, [SIZE], dtype=pl.FP32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(data, device=r)
+                self.chip_orch(data, device=r)
+            return data  # type: ignore[return-value]
+
+    code = _lower(Prog)
+
+    assert "_submit_chip_group(" not in code, code
+    assert code.count('_submit_chip(orch, callables["chip_orch"]') == 2, code
+    compile(code, "<host_orch>", "exec")
+
+
+def test_other_call_in_rank_loop_keeps_program_order():
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            data: pld.DistributedTensor[[SIZE], pl.FP32],
+        ) -> pl.Tensor[[SIZE], pl.FP32]:
+            return data  # type: ignore[return-value]
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self) -> pl.Tensor[[SIZE], pl.FP32]:
+            data_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+            data = pld.window(data_buf, [SIZE], dtype=pl.FP32)
+            for r in pl.range(pld.world_size()):
+                _world_size = pld.world_size()
+                self.chip_orch(data, device=r)
+            return data  # type: ignore[return-value]
+
+    code = _lower(Prog)
+
+    assert "_submit_chip_group(" not in code, code
+    assert code.count('_submit_chip(orch, callables["chip_orch"]') == 1, code
+    compile(code, "<host_orch>", "exec")
 
 
 def test_two_dist_tensor_formals_emit_two_explicit_ctx_scalars():

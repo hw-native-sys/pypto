@@ -946,6 +946,41 @@ def _submit_chip(orch: Any, callable_id: Any, task_args: Any, config: Any, worke
         config.output_prefix = base
 
 
+def _submit_chip_group(
+    orch: Any,
+    callable_id: Any,
+    task_args_list: list[Any],
+    config: Any,
+    workers: list[int | None],
+) -> Any:
+    """Publish one full-rank CHIP dispatch after every member is prepared.
+
+    With DFX disabled, ``submit_next_level_group`` makes the members one DAG
+    node and activates their target workers together. With DFX enabled, retain
+    :func:`_submit_chip`'s per-rank/per-dispatch output directories; one shared
+    ``CallConfig`` cannot represent a distinct prefix for every group member,
+    and profiling already intentionally perturbs dispatch timing.
+    """
+    if len(task_args_list) != len(workers):
+        raise ValueError("workers length must match task_args_list length")
+    if not task_args_list:
+        raise ValueError("grouped CHIP dispatch requires at least one member")
+    resolved_workers = [_resolve_chip_worker(orch, worker) for worker in workers]
+    if len(set(resolved_workers)) != len(resolved_workers):
+        raise ValueError("workers must not contain duplicate CHIP worker ids")
+    if not config.output_prefix:
+        return orch.submit_next_level_group(
+            callable_id,
+            task_args_list,
+            config,
+            workers=resolved_workers,
+        )
+    return [
+        _submit_chip(orch, callable_id, task_args, config, worker)
+        for task_args, worker in zip(task_args_list, resolved_workers)
+    ]
+
+
 def _clear_dfx_dispatch_dirs(dfx_base: Path) -> None:
     """Remove stale ``rank*/d{k}`` dispatch dirs before a fresh DFX run.
 

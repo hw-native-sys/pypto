@@ -299,6 +299,11 @@ class DistributedCodegen : public CodegenBase {
   std::set<std::string> declared_vars_;
   bool is_worker_context_{false};
   int task_args_counter_{0};  // Counter for generating unique TaskArgs variable names
+  int group_dispatch_counter_{0};
+  bool group_dispatch_active_{false};
+  std::string group_dispatch_args_var_;
+  std::string group_dispatch_workers_var_;
+  std::string group_dispatch_callee_;
 
   // HOST orchestrator alloc-hoisting state. Populated by
   // CollectHostOrchHoistableAllocs() before EmitFunction() runs on the HOST

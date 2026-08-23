@@ -32,9 +32,11 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
@@ -471,6 +473,88 @@ class DispatchAnalyzer : public IRVisitor {
   int repeating_scope_depth_ = 0;
 };
 
+/// Collect side effects and calls in one loop iteration without looking through
+/// nested control flow. Group publication may reorder the CHIP dispatch after
+/// argument construction, so only pure tensor view construction is allowed
+/// beside one unconditional CHIP dispatch; any Submit is rejected explicitly.
+class GroupDispatchBodyAnalyzer : public IRVisitor {
+ public:
+  explicit GroupDispatchBodyAnalyzer(const std::map<std::string, FunctionPtr>& chip_orchs)
+      : chip_orchs_(chip_orchs) {}
+
+  void VisitStmt_(const ForStmtPtr& /*op*/) override { has_nested_control = true; }
+  void VisitStmt_(const WhileStmtPtr& /*op*/) override { has_nested_control = true; }
+  void VisitStmt_(const IfStmtPtr& /*op*/) override { has_nested_control = true; }
+  void VisitExpr_(const SubmitPtr& /*op*/) override { has_submit = true; }
+
+  void VisitExpr_(const CallPtr& op) override {
+    if (IsChipOrchDispatch(op, chip_orchs_)) {
+      dispatches.push_back(op);
+    } else if (!IsOp(op, "tensor.slice") && !IsOp(op, "pld.tensor.window")) {
+      has_other_call = true;
+    }
+    IRVisitor::VisitExpr_(op);
+  }
+
+  bool has_nested_control{false};
+  bool has_submit{false};
+  bool has_other_call{false};
+  std::vector<CallPtr> dispatches;
+
+ private:
+  const std::map<std::string, FunctionPtr>& chip_orchs_;
+};
+
+/// Mark only compiler-proven full-world rank loops for group publication.
+/// Codegen deliberately does not rediscover this pattern: the pass owns the
+/// semantic proof, and the loop attr is the explicit lowering contract.
+class GroupDispatchLoopMarker : public IRMutator {
+ public:
+  GroupDispatchLoopMarker(const std::map<std::string, FunctionPtr>& chip_orchs,
+                          const std::unordered_map<const Var*, ExprPtr>& var_defs)
+      : chip_orchs_(chip_orchs), var_defs_(var_defs) {}
+
+ protected:
+  StmtPtr VisitStmt_(const ForStmtPtr& op) override {
+    auto rewritten = As<ForStmt>(IRMutator::VisitStmt_(op));
+    INTERNAL_CHECK(rewritten);
+    if (!IsEligible(rewritten) || rewritten->GetAttr<bool>(kGroupNextLevelDispatchAttr, false)) {
+      return rewritten;
+    }
+    auto marked = MutableCopy(rewritten);
+    marked->attrs_.emplace_back(kGroupNextLevelDispatchAttr, true);
+    return marked;
+  }
+
+ private:
+  [[nodiscard]] bool IsEligible(const ForStmtPtr& op) const {
+    if (!op->iter_args_.empty() || !op->return_vars_.empty()) return false;
+    auto start = As<ConstInt>(UnwrapStopExpr(op->start_, var_defs_));
+    auto step = As<ConstInt>(UnwrapStopExpr(op->step_, var_defs_));
+    if (!start || start->value_ != 0 || !step || step->value_ != 1) return false;
+    auto stop = As<Call>(UnwrapStopExpr(op->stop_, var_defs_));
+    if (!stop || !stop->op_ || !IsOp(stop, "pld.system.world_size")) return false;
+
+    GroupDispatchBodyAnalyzer analyzer(chip_orchs_);
+    analyzer.VisitStmt(op->body_);
+    if (analyzer.has_nested_control || analyzer.has_submit || analyzer.has_other_call ||
+        analyzer.dispatches.size() != 1)
+      return false;
+    ExprPtr device;
+    for (const auto& [key, value] : analyzer.dispatches.front()->attrs_) {
+      if (key == kAttrDevice) {
+        if (const auto* expr = std::any_cast<ExprPtr>(&value)) device = *expr;
+        break;
+      }
+    }
+    auto device_var = As<Var>(device);
+    return device_var && device_var.get() == op->loop_var_.get();
+  }
+
+  const std::map<std::string, FunctionPtr>& chip_orchs_;
+  const std::unordered_map<const Var*, ExprPtr>& var_defs_;
+};
+
 /// A host-orchestration function in PyPTO is declared as either
 /// ``@pl.function(type=FunctionType.Orchestration, level=Level.HOST)`` or
 /// (more common in distributed programs) ``@pl.function(level=Level.HOST,
@@ -536,6 +620,14 @@ FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string,
   // Phase 2: record device-descriptor evidence from dispatch sites.
   DispatchAnalyzer analyzer(collector.view_to_window, chip_orchs, collector.var_defs);
   analyzer.VisitStmt(materialization_body);
+
+  // A communication program commonly dispatches the same CHIP orchestrator
+  // once per rank. Building a large TaskArgs and publishing it immediately
+  // starts early ranks tens of milliseconds before late ranks. Preserve the IR
+  // loop but explicitly authorize codegen to publish this proven shape as one
+  // runtime group after all per-rank arguments have been built.
+  GroupDispatchLoopMarker group_marker(chip_orchs, collector.var_defs);
+  materialization_body = group_marker.VisitStmt(materialization_body);
 
   // Host-level collectives do not carry their own device= selector. Their
   // signal buffer is a user-visible window slot, so inherit paired data/target

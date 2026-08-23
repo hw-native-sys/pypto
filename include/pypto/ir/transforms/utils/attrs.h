@@ -201,6 +201,13 @@ inline std::vector<std::pair<std::string, std::any>> StripAttr(
 /// peek through such a scope as if it were AUTO (see ``transform_utils::UnwrapAutoScope``).
 inline constexpr const char* kAttrCompilerAutoManualScopeCandidate = "__compiler_auto_manual_scope_candidate";
 
+/// ``bool`` attr on a HOST-orchestrator ``ForStmt`` whose body is one
+/// rank-pinned CHIP-orchestrator dispatch and whose range is exactly
+/// ``[0, pld.system.world_size())``. ``MaterializeCommDomainScopes`` proves and
+/// stamps this fact; distributed codegen consumes it to build every member's
+/// ``TaskArgs`` before publishing the dispatches as one runtime group.
+inline constexpr const char* kGroupNextLevelDispatchAttr = "group_next_level_dispatch";
+
 // ---------------------------------------------------------------------------
 // ForStmt iter_arg carry classification (produced by ``ClassifyIterArgCarry``)
 // ---------------------------------------------------------------------------

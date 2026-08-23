@@ -39,6 +39,7 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
@@ -262,12 +263,17 @@ void DistributedCodegen::EmitImports() {
   // ``_submit_chip`` resolves a comm-less dispatch's chip and namespaces the
   // per-dispatch DFX ``output_prefix`` (``<base>/rank{worker}/d{k}``); the
   // namespacing half is a no-op when DFX is off.
-  emitter_.EmitLine("from pypto.runtime.distributed_runner import _submit_chip");
+  emitter_.EmitLine("from pypto.runtime.distributed_runner import _submit_chip, _submit_chip_group");
 }
 
 void DistributedCodegen::EmitFunction(const ir::FunctionPtr& func) {
   declared_vars_.clear();
   task_args_counter_ = 0;
+  group_dispatch_counter_ = 0;
+  group_dispatch_active_ = false;
+  group_dispatch_args_var_.clear();
+  group_dispatch_workers_var_.clear();
+  group_dispatch_callee_.clear();
   current_func_ = func;
 
   bool is_sub_worker = func->role_.has_value() && *func->role_ == ir::Role::SubWorker;
@@ -837,6 +843,19 @@ void DistributedCodegen::VisitStmt_(const ir::ForStmtPtr& op) {
   std::string step = current_expr_value_;
   current_expr_value_ = "";
 
+  const bool group_dispatch = op->GetAttr<bool>(ir::kGroupNextLevelDispatchAttr, false);
+  INTERNAL_CHECK_SPAN(!group_dispatch || !group_dispatch_active_, op->span_)
+      << "Nested grouped next-level dispatch loops are not supported";
+  if (group_dispatch) {
+    const std::string suffix = std::to_string(group_dispatch_counter_++);
+    group_dispatch_args_var_ = "_group_args_" + suffix;
+    group_dispatch_workers_var_ = "_group_workers_" + suffix;
+    group_dispatch_callee_.clear();
+    emitter_.EmitLine(group_dispatch_args_var_ + " = []");
+    emitter_.EmitLine(group_dispatch_workers_var_ + " = []");
+    group_dispatch_active_ = true;
+  }
+
   emitter_.EmitLine("for " + loop_var + " in range(" + start + ", " + stop + ", " + step + "):");
   emitter_.IncreaseIndent();
 
@@ -847,6 +866,16 @@ void DistributedCodegen::VisitStmt_(const ir::ForStmtPtr& op) {
   }
 
   emitter_.DecreaseIndent();
+  if (group_dispatch) {
+    group_dispatch_active_ = false;
+    INTERNAL_CHECK_SPAN(!group_dispatch_callee_.empty(), op->span_)
+        << "Grouped next-level dispatch loop emitted no CHIP-orchestrator call";
+    emitter_.EmitLine("_submit_chip_group(orch, callables[\"" + group_dispatch_callee_ + "\"], " +
+                      group_dispatch_args_var_ + ", config, " + group_dispatch_workers_var_ + ")");
+    group_dispatch_args_var_.clear();
+    group_dispatch_workers_var_.clear();
+    group_dispatch_callee_.clear();
+  }
 }
 
 void DistributedCodegen::VisitStmt_(const ir::IfStmtPtr& op) {
@@ -1205,8 +1234,19 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
     // namespacing — see its docstring.
     emitter_.EmitLine("_keep.append(" + ta_var + ")");
     const std::string worker_arg = rank_expr.empty() ? "None" : rank_expr;
-    emitter_.EmitLine("_submit_chip(orch, callables[\"" + callee->name_ + "\"], " + ta_var + ", config, " +
-                      worker_arg + ")");
+    if (group_dispatch_active_) {
+      INTERNAL_CHECK_SPAN(!rank_expr.empty(), call->span_)
+          << "Grouped CHIP dispatch must carry an exact device rank";
+      INTERNAL_CHECK_SPAN(group_dispatch_callee_.empty() || group_dispatch_callee_ == callee->name_,
+                          call->span_)
+          << "Grouped dispatch loop must target exactly one CHIP orchestrator";
+      group_dispatch_callee_ = callee->name_;
+      emitter_.EmitLine(group_dispatch_args_var_ + ".append(" + ta_var + ")");
+      emitter_.EmitLine(group_dispatch_workers_var_ + ".append(" + worker_arg + ")");
+    } else {
+      emitter_.EmitLine("_submit_chip(orch, callables[\"" + callee->name_ + "\"], " + ta_var + ", config, " +
+                        worker_arg + ")");
+    }
   }
 
   // If this call has an assignment target (return value), alias it to the OUT

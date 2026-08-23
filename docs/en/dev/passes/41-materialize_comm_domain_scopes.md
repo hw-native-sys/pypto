@@ -95,6 +95,21 @@ For every host-orchestration function (`Function::level_ == Level::HOST` and
    set to `"comm_d<n>"` so codegen emits the matching `__comm_d<n>` handle
    variable verbatim.
 
+9. **Mark full-world dispatch loops.** Stamp
+   `attrs["group_next_level_dispatch"] = true` on a loop only when all of the
+   following are proven: its range is exactly
+   `[0, pld.system.world_size())` with unit step, it has no loop-carried state,
+   its iteration contains exactly one unconditional chip-orchestration call
+   (plus any number of pure `tensor.slice` views, but no other calls or
+   `Submit` operations), and that
+   dispatch's `device=` expression is the loop induction variable.
+   Distributed codegen uses this explicit contract to build all per-rank
+   `TaskArgs` first and then call `submit_next_level_group` once. This prevents
+   argument-construction time from becoming rank-start skew. Loops containing
+   nested control flow, any `Submit`, any non-slice call, multiple dispatches, a partial/static
+   device range, or a different `device=` expression retain ordinary
+   per-dispatch lowering.
+
 ## Sanity checks
 
 The pass raises `pypto::ValueError` (carrying the alloc's span) if:
@@ -130,6 +145,9 @@ After the pass:
 - Chip-orchestration and InCore parameter types remain `nullopt` on
   `window_buffer_`. N7 codegen reads the back-reference at the *host_orch*
   dispatch site and threads the matching `CommContext` pointer explicitly.
+- Every loop carrying `group_next_level_dispatch = true` is a compiler-proven
+  full-world, one-dispatch-per-rank loop. Codegen consumes the attr but never
+  guesses group eligibility from loop syntax.
 
 ## Pass properties
 
