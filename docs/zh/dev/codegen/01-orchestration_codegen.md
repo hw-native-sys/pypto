@@ -73,7 +73,7 @@ REGISTER_ORCHESTRATION_OP("tensor.slice", TensorSliceHandler);
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
-#include "pto_orchestration_api.h"
+#include "orchestration_api.h"
 ```
 
 ### 阶段 2–3：入口点
@@ -328,7 +328,7 @@ def orch_basic(
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
-#include "pto_orchestration_api.h"
+#include "orchestration_api.h"
 
 extern "C" {
 

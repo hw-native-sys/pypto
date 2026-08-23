@@ -143,7 +143,7 @@ std::string GenerateIncludes(bool include_optional, bool include_vector = false)
     oss << "#include <optional>\n";
   }
   oss << "\n";
-  oss << "#include \"pto_orchestration_api.h\"\n\n";
+  oss << "#include \"orchestration_api.h\"\n\n";
   return oss.str();
 }
 
