@@ -43,6 +43,14 @@ node:
       lane inside one must arrive through a ``tile.aiv_shard`` (C->V).
       (f)/(g) share (e)'s ``tile.load`` / ``tile.store`` carve-out, on both the
       definer and the consumer side.
+  (i) no ``pl.aiv_shard`` / ``pl.aic_gather`` result crosses a loop back-edge —
+      checked at BOTH ends of the carry (the iter_arg's init and the value
+      yielded back into it), since the loop type-checks either way;
+  (j) a boundary result is consumed in the region that produced it. Gated on the
+      data-parallel modes: only they halve the region's tiles and localize its
+      store offsets, so only there does an already-per-lane value get halved and
+      offset twice. A ``mode=NONE`` region rewrites nothing and MAY consume a
+      boundary result from elsewhere — the cross-core comm-kernel shape.
 
 Lane-sharding of once-only side effects (``pld.system.notify``) is deliberately
 NOT a check — see the comment above
@@ -1097,6 +1105,346 @@ def test_outlined_incore_function_passes():
     incore = [f for f in outlined.functions.values() if f.func_type == ir.FunctionType.InCore]
     assert len(incore) == 1, "pass 8 should have produced one InCore function"
     assert _errors(outlined) == []
+
+
+# ---------------------------------------------------------------------------
+# (i) A boundary result carried across a loop back-edge -> Error
+# ---------------------------------------------------------------------------
+
+
+def _shard_of_acc(span, shape=None):
+    """An ``aiv_shard`` of an Acc (cube-produced) operand — the legal spelling.
+
+    Returns ``(assign_stmt, result_var)``. Acc is the only valid operand space
+    for a shard (check (d)), so every fixture below shares this one builder
+    rather than open-coding it and risking an unrelated (d) error in the count.
+    """
+    data = ir.Var("acc", _tile(shape or [16, 128], mem=MS.Acc), span)
+    shard = T.aiv_shard(data, split=int(ir.SplitMode.UP_DOWN.value), span=span)
+    sharded = ir.Var("sh", shard.type, span)
+    return ir.AssignStmt(sharded, shard, span), sharded
+
+
+def _loop(span, iter_args, body_stmts, return_vars=None):
+    """A minimal sequential ForStmt carrying ``iter_args``."""
+    zero = ir.ConstInt(0, DataType.INDEX, span)
+    two = ir.ConstInt(2, DataType.INDEX, span)
+    one = ir.ConstInt(1, DataType.INDEX, span)
+    return ir.ForStmt(
+        ir.Var("i", ir.ScalarType(DataType.INDEX), span),
+        zero,
+        two,
+        one,
+        iter_args,
+        ir.SeqStmts(body_stmts, span),
+        return_vars if return_vars is not None else [],
+        span,
+    )
+
+
+def test_boundary_result_carried_by_iter_arg_fails():
+    """A shard result used as a loop iter_arg's INIT is a back-edge carry."""
+    span = ir.Span.unknown()
+    shard_stmt, sharded = _shard_of_acc(span)
+    region = _region(ir.SplitMode.UP_DOWN, [shard_stmt])
+
+    carry = ir.IterArg("carry", sharded.type, sharded, span)
+    add = T.add(carry, carry, span)
+    inner = ir.Var("inner", add.type, span)
+    # The consumer lives in a mode=NONE region: legal per (j)'s carve-out, and it
+    # keeps the fixture from also tripping (e) (vector op outside every region).
+    loop = _loop(span, [carry], [_region(ir.SplitMode.NONE, [ir.AssignStmt(inner, add, span)])])
+    program = _program(ir.SeqStmts([region, loop], span))
+
+    errors = _errors(program)
+    assert len(errors) == 1
+    assert errors[0].rule_name == "AivSplitValid"
+    assert "across a loop back-edge" in errors[0].message
+    assert "the initial value of" in errors[0].message
+    assert "pl.aiv_shard" in errors[0].message
+    assert "carry" in errors[0].message
+
+
+def test_boundary_result_yielded_into_iter_arg_fails():
+    """The yield end of (i): the init is a plain half-shaped tile, the YIELD is a shard.
+
+    An init-only check would miss this — the loop is seeded with a non-boundary
+    tile of the same (half) shape and fed by the boundary op from iteration 1
+    onwards, which defeats the passes exactly as an init-side carry does.
+    """
+    span = ir.Span.unknown()
+    seed_call = T.full([8, 128], FP32, 0.0, span=span)
+    seed = ir.Var("seed", seed_call.type, span)
+
+    carry = ir.IterArg("carry", seed_call.type, seed, span)
+    add = T.add(carry, carry, span)
+    inner = ir.Var("inner", add.type, span)
+    shard_stmt, sharded = _shard_of_acc(span, shape=[16, 128])
+    region = _region(ir.SplitMode.UP_DOWN, [shard_stmt])
+    loop = _loop(
+        span,
+        [carry],
+        [
+            _region(ir.SplitMode.NONE, [ir.AssignStmt(inner, add, span)]),
+            region,
+            ir.YieldStmt([sharded], span),
+        ],
+        return_vars=[ir.Var("rv", seed_call.type, span)],
+    )
+    seed_region = _region(ir.SplitMode.NONE, [ir.AssignStmt(seed, seed_call, span)])
+    program = _program(ir.SeqStmts([seed_region, loop], span))
+
+    errors = _errors(program)
+    assert len(errors) == 1
+    assert "across a loop back-edge" in errors[0].message
+    assert "yielded back into" in errors[0].message
+
+
+def test_boundary_carry_in_while_loop_fails():
+    """(i) covers WhileStmt iter_args too, not just ForStmt."""
+    span = ir.Span.unknown()
+    shard_stmt, sharded = _shard_of_acc(span)
+    region = _region(ir.SplitMode.UP_DOWN, [shard_stmt])
+
+    carry = ir.IterArg("carry", sharded.type, sharded, span)
+    add = T.add(carry, carry, span)
+    inner = ir.Var("inner", add.type, span)
+    cond = ir.Var("cond", ir.ScalarType(DataType.BOOL), span)
+    loop = ir.WhileStmt(
+        cond,
+        [carry],
+        ir.SeqStmts([_region(ir.SplitMode.NONE, [ir.AssignStmt(inner, add, span)])], span),
+        [],
+        span,
+    )
+    program = _program(ir.SeqStmts([region, loop], span))
+
+    errors = _errors(program)
+    assert len(errors) == 1
+    assert "across a loop back-edge" in errors[0].message
+
+
+def test_ordinary_tile_carried_by_iter_arg_passes():
+    """The negative for (i): a NON-boundary tile carried across a loop is untouched.
+
+    (i) must key on the boundary op, not on "an iter_arg exists in a split_aiv
+    function" — ordinary loop-carried accumulators are the common case.
+    """
+    span = ir.Span.unknown()
+    seed_call = T.full([16, 128], FP32, 0.0, span=span)
+    seed = ir.Var("seed", seed_call.type, span)
+    shard_stmt, _ = _shard_of_acc(span)
+    region = _region(ir.SplitMode.UP_DOWN, [shard_stmt])
+
+    carry = ir.IterArg("carry", seed_call.type, seed, span)
+    add = T.add(carry, carry, span)
+    inner = ir.Var("inner", add.type, span)
+    loop = _loop(span, [carry], [_region(ir.SplitMode.NONE, [ir.AssignStmt(inner, add, span)])])
+    seed_region = _region(ir.SplitMode.NONE, [ir.AssignStmt(seed, seed_call, span)])
+    program = _program(ir.SeqStmts([seed_region, region, loop], span))
+
+    assert _errors(program) == []
+
+
+def test_boundary_produced_and_consumed_in_one_iteration_passes():
+    """The other negative for (i): shard inside the loop body, consumed there.
+
+    This is the form the diagnostic tells the author to move to, so it has to be
+    accepted or the advice is a dead end.
+    """
+    span = ir.Span.unknown()
+    shard_stmt, sharded = _shard_of_acc(span)
+    add = T.add(sharded, sharded, span)
+    inner = ir.Var("inner", add.type, span)
+    region = _region(ir.SplitMode.UP_DOWN, [shard_stmt, ir.AssignStmt(inner, add, span)])
+    loop = _loop(span, [], [region])
+    program = _program(ir.SeqStmts([loop], span))
+
+    assert _errors(program) == []
+
+
+# ---------------------------------------------------------------------------
+# (j) A boundary result consumed in a DIFFERENT data-parallel region -> Error
+# ---------------------------------------------------------------------------
+
+
+def test_boundary_consumed_in_other_up_down_region_fails():
+    """A shard produced in one UP_DOWN region and read in another is double-halved."""
+    span = ir.Span.unknown()
+    shard_stmt, sharded = _shard_of_acc(span)
+    producer = _region(ir.SplitMode.UP_DOWN, [shard_stmt])
+    add = T.add(sharded, sharded, span)
+    res = ir.Var("res", add.type, span)
+    consumer = _region(ir.SplitMode.UP_DOWN, [ir.AssignStmt(res, add, span)])
+    program = _program(ir.SeqStmts([producer, consumer], span))
+
+    errors = _errors(program)
+    assert len(errors) == 1
+    assert errors[0].rule_name == "AivSplitValid"
+    assert "produced in a DIFFERENT pl.split_aiv region" in errors[0].message
+    assert "halved a second time" in errors[0].message
+    assert "pl.aiv_shard" in errors[0].message
+
+
+def test_boundary_consumed_in_other_left_right_region_fails():
+    """(j) is gated on data-parallel, not on UP_DOWN specifically."""
+    span = ir.Span.unknown()
+    shard_stmt, sharded = _shard_of_acc(span)
+    producer = _region(ir.SplitMode.UP_DOWN, [shard_stmt])
+    add = T.add(sharded, sharded, span)
+    res = ir.Var("res", add.type, span)
+    consumer = _region(ir.SplitMode.LEFT_RIGHT, [ir.AssignStmt(res, add, span)])
+    program = _program(ir.SeqStmts([producer, consumer], span))
+
+    errors = _errors(program)
+    assert len(errors) == 1
+    assert "produced in a DIFFERENT pl.split_aiv region" in errors[0].message
+
+
+def test_boundary_consumed_in_none_region_passes():
+    """The carve-out, and the most important negative in this file.
+
+    A ``mode=NONE`` region has no split axis: its body is spliced through with no
+    halving and no offset localization, so an incoming already-per-lane tile is
+    used as-is on each lane. This is the shape the cross-core comm kernels use —
+    if (j) ever starts firing here, the rule has been drawn in the wrong place.
+    """
+    span = ir.Span.unknown()
+    shard_stmt, sharded = _shard_of_acc(span)
+    producer = _region(ir.SplitMode.UP_DOWN, [shard_stmt])
+    add = T.add(sharded, sharded, span)
+    res = ir.Var("res", add.type, span)
+    consumer = _region(ir.SplitMode.NONE, [ir.AssignStmt(res, add, span)])
+    program = _program(ir.SeqStmts([producer, consumer], span))
+
+    assert _errors(program) == []
+
+
+def test_boundary_consumed_in_defining_region_passes():
+    """The plain negative for (j): consumed in the region that produced it."""
+    span = ir.Span.unknown()
+    shard_stmt, sharded = _shard_of_acc(span)
+    add = T.add(sharded, sharded, span)
+    res = ir.Var("res", add.type, span)
+    region = _region(ir.SplitMode.UP_DOWN, [shard_stmt, ir.AssignStmt(res, add, span)])
+    program = _program(ir.SeqStmts([region], span))
+
+    assert _errors(program) == []
+
+
+# ---------------------------------------------------------------------------
+# (i) / (j) at the DSL level.
+#
+# The hand-built fixtures above would all pass even if the checks never fired on
+# real parser output, so these compile the actual authoring shapes. They are also
+# what proves the rejection now lands at OutlineIncoreScopes rather than 12
+# passes later, where the same programs used to surface as a misleading
+# "plain full-width vector op" from LowerAutoVectorSplit or as an INTERNAL error
+# from ExpandMixedKernel naming SSA the author never wrote.
+# ---------------------------------------------------------------------------
+
+
+def test_dsl_shard_carried_across_loop_back_edge_fails():
+    """The software-pipelining shape: shard iteration i+1's value at the end of i."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            a: pl.Tensor[[512, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+        ) -> pl.Tensor[[512, 128], pl.FP32]:
+            for _p in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):  # noqa: B007
+                sh = pl.aiv_shard(a)
+            for _i in pl.range(2):  # noqa: B007
+                for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):  # noqa: B007
+                    e = pl.exp(sh)  # noqa: F841
+                    sh = pl.aiv_shard(a)
+            return out
+
+    # The loop carry only becomes an IterArg at ConvertToSSA (pass 4): as parsed,
+    # `sh` is a plain reassignment and there is no back edge to see. Run SSA first
+    # so the fixture models what the verifier actually meets in the pipeline.
+    with passes.PassContext([]):
+        ssa = passes.convert_to_ssa()(Prog)
+
+    errors = _errors(ssa)
+    assert len(errors) == 1
+    assert "across a loop back-edge" in errors[0].message
+    # The pass-20 message this one displaces was factually wrong about the tile
+    # being full width; make sure it is not what the author sees any more.
+    assert "plain full-width vector op" not in errors[0].message
+
+
+def test_dsl_shard_consumed_in_other_region_fails():
+    """A shard read in a second UP_DOWN region — no loop involved.
+
+    This shape used to reach ptoas as a 'pto.tcvt' shape error, after the region
+    halved the already-per-lane tile a second time and localized its store offset
+    twice.
+    """
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            a: pl.Tensor[[512, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+        ) -> pl.Tensor[[512, 128], pl.FP32]:
+            for _p in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):  # noqa: B007
+                sh = pl.aiv_shard(a)
+            for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):  # noqa: B007
+                e = pl.exp(sh)  # noqa: F841
+            return out
+
+    errors = _errors(Prog)
+    assert len(errors) == 1
+    assert "produced in a DIFFERENT pl.split_aiv region" in errors[0].message
+
+
+def test_dsl_shard_consumed_in_none_region_passes():
+    """The carve-out at the DSL level: a mode=NONE region halves nothing."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            a: pl.Tensor[[512, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+        ) -> pl.Tensor[[512, 128], pl.FP32]:
+            for _p in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):  # noqa: B007
+                sh = pl.aiv_shard(a)
+            for lane in pl.split_aiv(2, mode=pl.SplitMode.NONE):  # noqa: B007
+                e = pl.exp(sh)  # noqa: F841
+            return out
+
+    assert _errors(Prog) == []
+
+
+def test_dsl_shard_produced_and_consumed_in_one_iteration_passes():
+    """The form check (i)'s message tells the author to move to."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            a: pl.Tensor[[512, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+        ) -> pl.Tensor[[512, 128], pl.FP32]:
+            for _i in pl.range(2):  # noqa: B007
+                for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):  # noqa: B007
+                    sh = pl.aiv_shard(a)
+                    e = pl.exp(sh)  # noqa: F841
+            return out
+
+    with passes.PassContext([]):
+        ssa = passes.convert_to_ssa()(Prog)
+
+    assert _errors(ssa) == []
 
 
 if __name__ == "__main__":

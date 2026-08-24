@@ -215,9 +215,19 @@ any of the following holds:
 
 | Accepted | Why |
 | -------- | --- |
-| Consumes a `tile.aiv_shard` result (transitively) | It is in the half-width dataflow by construction. |
+| Consumes a `tile.aiv_shard` result defined in **this** region (transitively) | It is in the half-width dataflow by construction. |
 | A pure generator — `tile.full` / `tile.ci` / `tile.random` (and `tile.create`, which classifies `SHARED` and so was never reportable anyway) | Its result is a function of its attributes only: it reads no tile and no memory, so per-lane replication is correct at whatever extent the author wrote. |
 | An address-carrying op — `tile.load` / `tile.slice` / `tile.extract` / `tile.gather_row` — whose **read address** references the region's `aiv_id` | The author localized it explicitly, e.g. `data[base + aiv_id * HALF : ...]`. Only the read-offset args count (`tile.load` arg 1, `tile.slice` arg 2, `tile.extract` args 1–2, `tile.gather_row` arg 3 = `src_offset`) — a lane reference in a `shape`, a `valid_shape`, or a *destination* slot does not move the window, so it does not admit. |
+
+The scan is seeded **per region** and makes one forward pass in program order, so
+it recognises only a boundary result defined in the region it is scanning. A
+`tile.aiv_shard` result reaching the region from elsewhere — produced in a sibling
+region, or arriving through a loop `iter_arg` on the back edge — is invisible to
+it, and the consumer would be reported as full width even though the value really
+is per-lane. Both shapes are rejected 12 passes earlier by the `AivSplitValid`
+verifier (checks (i) and (j), see [99-verifier.md](99-verifier.md)), which is what
+keeps that false positive off the author's screen; this scan therefore only ever
+meets a same-region dataflow, which is the domain it was written for.
 
 `tile.gather_row` is the DMA case: being DPS it carries **two** offsets, and only
 `src_offset` decides whether the lanes do different work — a lane-derived

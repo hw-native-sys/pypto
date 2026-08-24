@@ -194,6 +194,8 @@ core affinity）同样会落到 cube lane 上，而它可能在向量 lane 的 T
 | 纯生成算子——`tile.full` / `tile.ci` / `tile.random`（以及 `tile.create`，它归类为 `SHARED`，本就不会被报告） | 其结果仅是自身属性的函数：不读取任何 tile、不读取内存，因此无论作者写的是什么 extent，per-lane 复制都是正确的。 |
 | 携带**地址**的算子——`tile.load` / `tile.slice` / `tile.extract` / `tile.gather_row`——且其**读地址**引用了区域的 `aiv_id` | 作者已显式做了 per-lane 定位，例如 `data[base + aiv_id * HALF : ...]`。仅读偏移参数计入（`tile.load` 第 1 个、`tile.slice` 第 2 个、`tile.extract` 第 1–2 个、`tile.gather_row` 第 3 个即 `src_offset`）——出现在 `shape`、`valid_shape` 或**目的**槽位中的 lane 引用并不会移动窗口，因此不予接受。 |
 
+该扫描按**区域**播种，并按程序顺序做一次前向遍历，因此它只能识别在当前扫描区域内定义的边界结果。从别处到达该区域的 `tile.aiv_shard` 结果——在兄弟区域中产生，或经由回边上的循环 `iter_arg` 传入——对它是不可见的，于是消费者会被报成全宽，尽管该值确实是按 lane 的。这两种写法都会被 `AivSplitValid` 验证器提前 12 个 pass 拒绝（检查 (i) 与 (j)，见 [99-verifier.md](99-verifier.md)），这正是让上述误报不会出现在作者面前的原因；因此本扫描实际只会遇到同区域内的数据流，也正是它被设计来处理的范围。
+
 `tile.gather_row` 是其中的 DMA 情形：它是 DPS，因此带有**两个**偏移，而只有 `src_offset`
 决定两个 lane 是否在做不同的工作——`src_offset` 由 lane 派生意味着每个 lane 各自拉取属于
 自己的散列 GM 行（接受）；若只有 `dst_offset` 由 lane 派生，则两个 lane 会把**相同**的行取到
