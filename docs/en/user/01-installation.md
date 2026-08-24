@@ -111,9 +111,20 @@ ran. A traceback here is the real signal — the exact wording of the line is no
 | scikit-build-core | ≥ 0.10 | Build backend; fetched automatically |
 
 The ranges above are what pypto is compatible with. The exact versions CI
-builds against are pinned in `build-constraints.txt` at the repository root;
-pass it as `PIP_CONSTRAINT=$PWD/build-constraints.txt` to reproduce a CI
-build locally.
+builds against are pinned in `build-constraints.txt` at the repository root. To
+reproduce a CI build locally, point pip at it:
+
+```bash
+PIP_BUILD_CONSTRAINT=$PWD/build-constraints.txt \
+PIP_CONSTRAINT=$PWD/build-constraints.txt \
+    pip install -e .
+```
+
+Both variables, because they cover different pip versions:
+`PIP_BUILD_CONSTRAINT` is the one pip applies to build dependencies from 26.2
+on, and `PIP_CONSTRAINT` is what earlier pip honours there. With only the
+latter, a recent pip resolves `[build-system] requires` freely again and the
+build is no longer the one CI validated.
 
 **Install the CPU torch wheel before PyPTO.** `pip install -e .` resolves `torch>=2.0.0`
 to the default wheel, which carries the full CUDA stack — around 2 GB that a PyPTO
