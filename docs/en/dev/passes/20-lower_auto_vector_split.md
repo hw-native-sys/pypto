@@ -413,17 +413,30 @@ rebuilt by the halving walk rather than by this one.
   boundary — 13 of a 16-row box gives 8 and 5 — which is what the balanced
   partition below is for. When it does not apply, `ShardSplitCode` reports the
   extents instead, naming what would work.
-- **A runtime split-axis valid extent keeps the even code.** The split code is a
-  compile-time attr, but which one the lanes need appears to depend on their
-  *runtime* extents: 15 of a 16-wide axis leaves the lanes at 8 and 7. The even
-  code is what this path emits, and what the device is measured to accept —
-  `tests/st/runtime/cross_core/test_cross_core_split_parity.py` compares
-  `output[:VR, :VC]` elementwise for `VC = 1, 7, 8, 9, 15` on a2a3 and passes,
-  and perturbing that golden on lane 1's columns alone does fail it, so the
-  check covers the band in question. Reading pto-isa's pop suggests a mis-placed
-  lane 1 instead; which reading is the contract is asked upstream in
-  [pto-isa#263](https://github.com/hw-native-sys/pto-isa/issues/263). Until that
-  answers, the encoding follows the measured behaviour.
+- **A runtime split-axis valid extent pops the FULL box.** The split code is a
+  compile-time attr, but which one the lanes need depends on their *runtime*
+  extents: 12 of a 16-row axis leaves them at 8 and 4, 16 leaves them at 8 and 8.
+  No code is right for both, so the boundary op does not carry a per-lane extent
+  at all — `LocalizeExplicitBoundaryValid` gives it the full box
+  (`split_axis::WithFullSplitAxisValid`) and moves the lane's extent onto the
+  first consumer. That pairs exactly with the even code: the producer transports
+  the full physical box, so lane 1's band sits at the box half and the even code
+  points there, whatever the extent turns out to be. Confirmed on a2a3 for every
+  extent 1..16 of a 16-row boundary. The [pto-isa
+  pop](https://github.com/hw-native-sys/pto-isa/issues/263) does place lane 1 at
+  the popped tile's own extent, as its source reads — the earlier measurement
+  that suggested otherwise came from a probe whose operands were uniform
+  constants, which makes every row and column of the product identical and any
+  band offset indistinguishable.
+- **The same extent on a hand-written `tile.tpop_from_aic` is still misplaced.**
+  `SplitVectorKernel`'s halving localizes a declared `valid_shape` onto the pop
+  itself, where pto-isa reads it as the band offset. Widening only the pop does
+  not fix that path: its consumers inherit the author's declaration and then
+  write partial destinations out of a full source, which measures worse on
+  device. The xfailing params of
+  `tests/st/runtime/cross_core/test_cross_core_split_parity.py` record the
+  regimes this affects (`half < V < box` on `UP_DOWN`, and any narrowed column
+  extent on `LEFT_RIGHT`, where the pop additionally mis-strides the GM gap).
 - **An empty lane's store is guarded.** A lane the ragged extent does not reach
   has extent `0`, and a zero-row `TSTORE` is outside pto-isa's contract
   (`TSTORE_IMPL` asserts `GetValidRow() > 0`). The store gets a runtime

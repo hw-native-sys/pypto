@@ -365,15 +365,22 @@ store 保护——它的消费者由折半遍历重建，而非本遍历。
   被解引用，偶数 code 依然精确）。box 分区对 ragged 边界并不保证这一点——16 行 box 上
   `V = 13` 会得到 8 与 5——这正是下文均分分区要解决的问题；均分不适用时，
   `ShardSplitCode` 会报错并给出可行的取值。
-- **运行期的切分轴 valid extent 沿用偶数 code。** split code 是编译期属性，而两个 lane
-  需要哪一个看起来取决于它们的**运行期** extent：16 宽的轴上 valid 15 会让两 lane 变成 8 与 7。
-  该路径发偶数 code，这也是设备实测接受的行为——
-  `tests/st/runtime/cross_core/test_cross_core_split_parity.py` 在 a2a3 上对
-  `VC = 1, 7, 8, 9, 15` 逐元素比对 `output[:VR, :VC]` 并通过，且仅把 golden 在 lane 1 的列上
-  扰动即会失败，说明该校验确实覆盖了这段数据。而按 pto-isa 的 pop 源码推理会得出 lane 1 落位
-  错误；究竟哪一种才是契约，已在
-  [pto-isa#263](https://github.com/hw-native-sys/pto-isa/issues/263) 上向属主提问。在有答复之前，
-  编码遵循实测行为。
+- **运行期的切分轴 valid extent 弹出完整 box。** split code 是编译期属性，而两个 lane
+  需要哪一个取决于它们的**运行期** extent：16 行的轴上 valid 12 会让两 lane 变成 8 与 4，
+  valid 16 则是 8 与 8，没有哪个 code 对两者都正确。因此边界算子干脆不携带逐 lane
+  extent——`LocalizeExplicitBoundaryValid` 给它完整 box
+  （`split_axis::WithFullSplitAxisValid`），并把 lane 的 extent 放到第一个消费者上。
+  这与偶数 code 恰好配套：生产者搬运的是完整物理 box，lane 1 的数据段就落在 box 的一半处，
+  偶数 code 正好指向那里，与运行期 extent 无关。已在 a2a3 上对 16 行边界的 1..16 全部
+  extent 验证。[pto-isa 的 pop](https://github.com/hw-native-sys/pto-isa/issues/263)
+  确实按被弹出 tile 自身的 extent 放置 lane 1，与其源码读法一致——此前得出相反结论的实测，
+  其探针两个操作数都是常量，乘积的每一行每一列都相同，落位错误因而无法分辨。
+- **手写 `tile.tpop_from_aic` 上的同类 extent 仍会落位错误。** `SplitVectorKernel` 的折半
+  会把用户声明的 `valid_shape` 局部化到 pop 自身，而 pto-isa 正是从这里读取数据段偏移。
+  仅加宽 pop 并不能修复该路径：其消费者继承作者的声明，随后从完整来源写入部分目标，实测
+  结果更差。`tests/st/runtime/cross_core/test_cross_core_split_parity.py` 中标记 xfail
+  的参数记录了受影响的取值范围（`UP_DOWN` 下 `half < V < box`，以及 `LEFT_RIGHT` 下任何
+  被收窄的列 extent——此时 pop 还会算错 GM 的行间隔）。
 - **空 lane 的 store 被保护。** ragged extent 覆盖不到的 lane，其 extent 为 `0`，而
   零行 `TSTORE` 超出 pto-isa 契约（`TSTORE_IMPL` 断言 `GetValidRow() > 0`）。store
   被加上运行时 `extent > 0` 判断；`tpop` 与 `tfree` 保持**无条件**——两个 lane 都占用

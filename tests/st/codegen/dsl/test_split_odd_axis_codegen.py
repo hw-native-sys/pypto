@@ -128,6 +128,31 @@ def explicit_region_odd_box(
     return out
 
 
+@pl.jit
+def runtime_tail_rows(
+    a: pl.Tensor[[ROWS, K], pl.BF16],
+    w: pl.Tensor[[COLS, K], pl.BF16],
+    vt: pl.Tensor[[1], pl.INDEX],
+    out: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+    """A RUNTIME row extent across the boundary: the lanes cannot be compared.
+
+    ``clamp(v - lane * 8, 0, 8)`` is 8 / 4 for ``v = 12`` and 8 / 8 for ``v = 16``
+    — the compiler cannot tell which, so it cannot pick a code that places lane 1
+    at its extent. The boundary op keeps the FULL box instead, which is where the
+    producer wrote lane 1's rows, and the extent rides on the consumers.
+    """
+    v: pl.Scalar[pl.INDEX] = pl.tensor.read(vt, [0])
+    with pl.at(level=pl.Level.CORE_GROUP, name_hint="runtime_tail"):
+        a_tile = pl.slice(a, [ROWS, K], [0, 0], valid_shape=[v, K])
+        acc = pl.matmul(a_tile, w[0:COLS, 0:K], b_trans=True, out_dtype=pl.FP32)
+        for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+            shard = pl.aiv_shard(acc)
+            scaled = pl.mul(shard, 2.0)
+            out[aiv_id * HALF : aiv_id * HALF + HALF, 0:COLS] = scaled
+    return out
+
+
 def _args(valid_m: int):
     return [
         torch.randn(valid_m, K, dtype=torch.bfloat16),
@@ -262,6 +287,54 @@ def test_explicit_region_odd_box_localizes_the_per_lane_extent():
     # clamp(17 - aiv_id * 9, 0, 9) -> 9 and 8, on a 9-row box.
     assert re.search(r"pl\.const\(17, pl\.INDEX\)[^]]*?pl\.const\(9, pl\.INDEX\)", aiv), aiv
     assert re.search(r"pl\.tile\.store\([^)]*\* 9", aiv), aiv
+
+
+@pytest.fixture(scope="session")
+def runtime_tail_pto(tmp_path_factory) -> str:
+    """Codegen-only .pto for the runtime-extent kernel."""
+    dump_dir = tmp_path_factory.mktemp("split_runtime_tail")
+    cfg = RunConfig(platform="a2a3", codegen_only=True, save_kernels=True, save_kernels_dir=str(dump_dir))
+    error: Exception | None = None
+    try:
+        runtime_tail_rows(
+            torch.randn(ROWS, K, dtype=torch.bfloat16),
+            torch.randn(COLS, K, dtype=torch.bfloat16),
+            torch.tensor([12], dtype=torch.int64),
+            torch.empty(ROWS, COLS, dtype=torch.float32),
+            config=cfg,
+        )
+    except Exception as e:  # noqa: BLE001 - see odd_rows_pto
+        error = e
+    ptos = sorted(dump_dir.rglob("*.pto"))
+    assert ptos, f"codegen emitted no .pto under {dump_dir}; compile raised: {error!r}"
+    return ptos[0].read_text()
+
+
+def test_runtime_extent_pops_the_full_box(runtime_tail_pto):
+    """The per-lane extent must NOT reach the pop.
+
+    pto-isa reads lane 1's band offset off the popped tile's own split-axis
+    extent while the producer transports the full physical box, so a pop
+    declaring ``clamp(v - 8, 0, 8)`` sends lane 1 to row ``v - 8`` — four rows
+    early for ``v = 12``, and silently, since nothing else disagrees. A pop of
+    the full box carries no operands at all and lands on the box half.
+    """
+    aiv = _pto_half(runtime_tail_pto, "aiv")
+
+    assert re.search(r"pto\.tpop_from_aic \{split = 1\}", aiv), aiv
+    assert "pto.tpop_from_aic(" not in aiv, f"the pop must carry no per-lane extent:\n{aiv}"
+
+
+def test_runtime_extent_lands_on_the_first_consumer(runtime_tail_pto):
+    """Widening the pop must not LOSE the extent — it moves one op downstream."""
+    aiv = _pto_half(runtime_tail_pto, "aiv")
+
+    # clamp(v - lane * 8, 0, 8), materialized for the consumer rather than the pop.
+    assert re.search(r"arith\.minsi", aiv), aiv
+    assert re.search(r"arith\.maxsi", aiv), aiv
+    consumer = re.search(r"pto\.alloc_tile[^\n]*valid_row = (%\w+)", aiv)
+    assert consumer, f"no consumer tile carries a computed valid_row:\n{aiv}"
+    assert not consumer.group(1).startswith("%c"), f"consumer extent is a constant:\n{aiv}"
 
 
 if __name__ == "__main__":

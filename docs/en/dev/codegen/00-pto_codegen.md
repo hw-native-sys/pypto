@@ -226,9 +226,12 @@ or call `set_validshape` on the source tile before taking the view.
   transport — on the consumer side through a metadata-only `pto.treshape` (a frontend tpop result is
   not a locally bound PTOAS tile, so `pto.set_validshape` cannot restore it in place). The split-axis
   extent is the exception: it stays per-lane on the TPOP operands, because that is what tells the ISA
-  where lane 1's band begins.
+  where lane 1's band begins — which is also why a per-lane extent the compiler could not verify must
+  never get there. A `pl.split_aiv` boundary whose split-axis extent is a runtime value keeps the FULL
+  box on the popped tile (`split_axis::WithFullSplitAxisValid`) so the even code's band lands on the
+  box half, and carries the lane's own extent on the consumers instead.
 - When a tpop result `TileView.valid_shape` differs from the physical tile shape, PTO codegen emits PTOAS frontend operands as `%buf = pto.tpop_from_*(%valid_row, %valid_col) {[id = I, ]split = N} -> !pto.tile_buf<..., v_row=?, v_col=?, ...>`. This covers dynamic expressions and static non-full shapes such as `[0, 0]`; the operands carry the logical extents used by compute and store. The full-box Cube-to-Vector transport above overrides this for a statically-shaped, non-empty partial pop, because `pto.treshape` carries no valid-row/valid-col operands and so can only restore *static* logical extents.
-- For split consumers, `LowerAutoVectorSplit` localizes those dynamic tpop
+- For split consumers of a hand-written pop, `SplitVectorKernel` localizes those dynamic tpop
   valid-shape operands per subblock (for example global `[8, 16]` becomes
   `[8, 16]` then `[0, 16]` under up/down split of a `[16, 16]` tile). An odd
   split axis reaches the operands the same way — a `[17, 128]` tile pops
