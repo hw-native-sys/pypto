@@ -38,7 +38,7 @@ import pytest
 import torch
 from harness.core.harness import platform_to_backend
 from pypto import ir
-from pypto.backend.pto_backend import _preprocess_ptoas_output, _run_ptoas
+from pypto.backend.pto_backend import _find_ptoas_function, _preprocess_ptoas_output, _run_ptoas
 from pypto.runtime.device_runner import (
     build_orch_args_from_inputs,
     compile_and_assemble,
@@ -161,10 +161,15 @@ def _rewrite_consecutive_tpop_tfree_pto(pto_path: Path) -> None:
     pto_path.write_text(rewritten, encoding="utf-8")
 
 
-def _replace_ptoas_body(wrapper_text: str, new_body: str) -> str:
-    start = wrapper_text.index("// --- ptoas-generated code ---")
-    end = wrapper_text.index("// --- Kernel entry point ---")
-    return f"{wrapper_text[:start]}// --- ptoas-generated code ---\n\n{new_body}\n{wrapper_text[end:]}"
+def _replace_ptoas_function_body(wrapper_text: str, new_ptoas_text: str, func_name: str) -> str:
+    """Replace one rewritten PTOAS function body without disturbing its group peers."""
+    _, _, old_body_start, old_body_end = _find_ptoas_function(func_name, wrapper_text)
+    _, _, new_body_start, new_body_end = _find_ptoas_function(func_name, new_ptoas_text)
+    return (
+        wrapper_text[: old_body_start + 1]
+        + new_ptoas_text[new_body_start + 1 : new_body_end]
+        + wrapper_text[old_body_end:]
+    )
 
 
 def _rebuild_consecutive_tpop_tfree_artifact(work_dir: Path) -> None:
@@ -183,7 +188,16 @@ def _rebuild_consecutive_tpop_tfree_artifact(work_dir: Path) -> None:
     for kernel in kernel_config.KERNELS:
         wrapper_path = Path(kernel["source"])
         wrapper_text = wrapper_path.read_text(encoding="utf-8")
-        wrapper_path.write_text(_replace_ptoas_body(wrapper_text, new_body), encoding="utf-8")
+        lane_forwarding_count = wrapper_text.count("PYPTO_SPLIT_RUNTIME_LANE_ARG(")
+        assert lane_forwarding_count > 2, "Expected split AIV calls to forward the runtime lane"
+        rewritten_wrapper = _replace_ptoas_function_body(wrapper_text, new_body, "main_incore_0_aic")
+        assert rewritten_wrapper.count("PYPTO_SPLIT_RUNTIME_LANE_ARG(") == lane_forwarding_count, (
+            "Reordering the AIC body must preserve split AIV lane forwarding"
+        )
+        wrapper_path.write_text(
+            rewritten_wrapper,
+            encoding="utf-8",
+        )
 
 
 class TestCrossCoreGroupedTpopTfree:
