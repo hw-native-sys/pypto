@@ -387,18 +387,19 @@ def _write_golden_for_test_case(test_case: PTOTestCase, output_path: Path) -> No
 def _compile_for_cache(
     test_case: "PTOTestCase",
     work_dir: Path,
+    resolved_platform: str,
     dump_passes: bool,
     analyze_auto_scopes_for_deps: bool,
     session_memory_planner: MemoryPlanner | None = None,
 ) -> None:
-    """Compile one test case into *work_dir* (called from thread pool).
+    """Compile one test case into *work_dir* for *resolved_platform*.
 
     The backend type MUST already be set by the caller before entering the pool.
     Only ``get_program`` is serialised (via ``_get_program_lock``) because the
     ``@pl.program`` decorator is not thread-safe; ``compile_program`` writes to
     an isolated directory and runs concurrently.
     """
-    backend_type = platform_to_backend(_resolve_platform("", test_case))
+    backend_type = platform_to_backend(resolved_platform)
     with _get_program_lock:
         program = test_case.get_program()
     if program is None:
@@ -471,6 +472,7 @@ def _fused_compile_task(
         _compile_for_cache(
             tc,
             work_dir,
+            resolved,
             dump_passes,
             analyze_auto_scopes_for_deps,
             session_memory_planner,

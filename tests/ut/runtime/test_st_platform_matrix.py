@@ -55,6 +55,19 @@ def _load_st_conftest():
     return module
 
 
+@pytest.fixture(autouse=True)
+def _restore_published_platform():
+    """Keep the module-global item platform from leaking between tests.
+
+    The ``platform_xfail`` tests call the conftest hook that publishes it, and
+    ``_resolve_platform`` reads it as a fallback — so without this a later test
+    in the same worker sees a platform no one set for it.
+    """
+    saved = test_runner._current_item_platform["value"]
+    yield
+    test_runner.set_current_item_platform(saved)
+
+
 class _Case(harness.PTOTestCase):
     """Minimal concrete case: no platform, no backend pin."""
 

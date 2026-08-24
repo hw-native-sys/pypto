@@ -130,6 +130,7 @@ def test_precompile_forwards_session_memory_planner(tmp_path):
         test_runner._compile_for_cache(
             case,
             tmp_path,
+            "a2a3",
             dump_passes=False,
             analyze_auto_scopes_for_deps=False,
             session_memory_planner=MemoryPlanner.DSA_RP,
