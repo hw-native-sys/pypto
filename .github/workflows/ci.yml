@@ -283,6 +283,7 @@ jobs:
     # there.
     env:
       PIP_CONSTRAINT: ${{ github.workspace }}/clang-tidy-checkout/build-constraints.txt
+      PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/clang-tidy-checkout/build-constraints.txt
     # De-containered: runs host-native on the in-house arm64 CPU runner (same
     # infra as before, minus the localhost:5000/ci-py310 image). clang_tidy.py
     # generates compile_commands.json via a CMake configure (needs cmake / ninja /
@@ -381,12 +382,15 @@ jobs:
 
   unit-tests:
     # Build inputs come from build-constraints.txt rather than from whatever
-    # PyPI offers today; pip applies a constraints file to build-dependency
-    # installs too, so this reaches the isolated wheel build below. Declared
-    # per job because this one checks out at the workspace root -- the jobs that
-    # check out into a subdirectory get the path from setup-ci-job instead.
+    # PyPI offers today. Both variables on purpose: PIP_BUILD_CONSTRAINT is the
+    # one pip applies to build dependencies, and PIP_CONSTRAINT is what older
+    # pip honours for them -- this job upgrades pip to the latest release, so it
+    # has to satisfy whichever is in force. Declared per job because this one
+    # checks out at the workspace root; the jobs that check out into a
+    # subdirectory get the path from setup-ci-job instead.
     env:
       PIP_CONSTRAINT: ${{ github.workspace }}/build-constraints.txt
+      PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/build-constraints.txt
     # Lint gate (see the pre-commit job) — don't spend a runner on a tree that
     # doesn't lint.
     #
@@ -1352,8 +1356,9 @@ jobs:
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
       PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_x86_64 }}
-      # Build inputs from build-constraints.txt; see the clang-tidy job.
+      # Build inputs from build-constraints.txt; see the unit-tests job.
       PIP_CONSTRAINT: ${{ github.workspace }}/build-constraints.txt
+      PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/build-constraints.txt
     container:
       image: ghcr.io/hw-native-sys/pypto/github-ci:latest
     steps:

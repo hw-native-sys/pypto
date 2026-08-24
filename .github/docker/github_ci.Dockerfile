@@ -24,10 +24,15 @@ RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1 &
     update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1 && \
     curl -sS https://bootstrap.pypa.io/get-pip.py | python
 
-# Build tools (needed by pip install -e .)
-RUN pip install --no-cache-dir \
+# Build tools (needed by pip install -e .). Versions come from the same
+# build-constraints.txt the workflows use: without it, rebuilding this image
+# would change what every containerised job builds against, with no workflow
+# change to point at.
+COPY build-constraints.txt /tmp/build-constraints.txt
+RUN pip install --no-cache-dir -c /tmp/build-constraints.txt \
       "scikit-build-core>=0.10.0" "nanobind>=2.0.0" \
-      "ninja>=1.11.0" "cmake>=3.15"
+      "ninja>=1.11.0" "cmake>=3.15" && \
+    rm /tmp/build-constraints.txt
 
 # Project runtime + dev dependencies
 RUN pip install --no-cache-dir \
