@@ -110,6 +110,11 @@ ran. A traceback here is the real signal — the exact wording of the line is no
 | nanobind | ≥ 2.0, < 3 | Build-time only; fetched automatically |
 | scikit-build-core | ≥ 0.10 | Build backend; fetched automatically |
 
+The ranges above are what pypto is compatible with. The exact versions CI
+builds against are pinned in `build-constraints.txt` at the repository root;
+pass it as `PIP_CONSTRAINT=$PWD/build-constraints.txt` to reproduce a CI
+build locally.
+
 **Install the CPU torch wheel before PyPTO.** `pip install -e .` resolves `torch>=2.0.0`
 to the default wheel, which carries the full CUDA stack — around 2 GB that a PyPTO
 workflow never uses. Installing `torch` from the CPU index first makes the later resolve

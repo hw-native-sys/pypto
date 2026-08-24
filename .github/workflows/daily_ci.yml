@@ -199,7 +199,7 @@ jobs:
           # on the next bump — or, bare as it was, let a future divergence
           # resolve `torch` from PyPI, whose aarch64 wheel drags in the entire
           # CUDA stack on an Ascend host. One owner for that decision.
-          uv pip install "nanobind<3"
+          uv pip install nanobind  # version from build-constraints.txt (UV_CONSTRAINT)
 
       - name: Run Qwen3-14B decode perf samples (L2 swimlane, 5x)
         id: qwen3_perf_run

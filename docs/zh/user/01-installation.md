@@ -105,6 +105,10 @@ OK
 | nanobind | ≥ 2.0, < 3 | 仅构建期需要，自动获取 |
 | scikit-build-core | ≥ 0.10 | 构建后端，自动获取 |
 
+上表给出的是 pypto 兼容的版本范围。CI 实际构建所用的确切版本固定在仓库根目录的
+`build-constraints.txt` 中；本地复现 CI 构建时传入
+`PIP_CONSTRAINT=$PWD/build-constraints.txt` 即可。
+
 **先装 CPU 版 torch，再装 PyPTO。** `pip install -e .` 会把 `torch>=2.0.0` 解析到默认
 wheel，它携带完整 CUDA 栈 —— 约 2GB，而 PyPTO 的工作流一点也用不到。先从 CPU 索引安装
 `torch`，后续解析就变成空操作。
