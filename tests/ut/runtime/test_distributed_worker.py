@@ -3330,7 +3330,9 @@ class TestNamedInheritedHostRanges:
         named = patched_setup["worker"].copy_to.call_args.args[1]
         assert isinstance(named, _NamedHostRange)
         assert (named.base, named.nbytes) == (host.data_ptr(), nbytes)
-        assert (named.backend_kind, named.access) == ("FORK_SHM", "READWRITE")
+        # READ, not READWRITE as this asserted before: an upload source is only ever read by the
+        # child, and granting write access to a mapping that may be read-only misdescribes it.
+        assert (named.backend_kind, named.access) == ("FORK_SHM", "READ")
         # The point of naming it: no staging buffer is created at all.
         patched_setup["worker"].create_buffer.assert_not_called()
         rt.close()
@@ -3377,13 +3379,12 @@ class TestNamedInheritedHostRanges:
         patched_setup["worker"].create_buffer.assert_not_called()
         rt.close()
 
-    def test_a_declared_range_is_not_named_as_a_d2h_destination(self, patched_setup):
-        """The declaration is a promise about reads, so it must not license writes.
+    def test_a_read_back_into_a_declared_range_is_refused(self, patched_setup):
+        """Writing a range declared immutable is a caller bug, and staging would hide it.
 
-        Naming a declared non-shared range as a read-back destination would break either way: a
-        MAP_PRIVATE page written by the child splits copy-on-write, so the parent keeps reading
-        the old bytes, and a read-only file mapping — which is the case this option exists for —
-        faults on the write. Both are silent-or-worse, so D2H still requires a shared range.
+        Falling back to staging would write the same bytes into the same range, breaking the
+        promise just as thoroughly while looking like it worked — and for the read-only mapping
+        this option exists for, that write faults. Refusing names the mistake instead.
         """
         host = torch.zeros(4, 4, dtype=torch.float32)  # NOT shared
         rt = DistributedWorker(
@@ -3394,14 +3395,55 @@ class TestNamedInheritedHostRanges:
         dev = self._dev(rt)
         nbytes = host.numel() * host.element_size()
 
-        rt.copy_from(host.data_ptr(), dev.data_ptr, nbytes)
-
-        staged = patched_setup["worker"].copy_from.call_args.args[0]
-        assert not isinstance(staged, _NamedHostRange), "a declared range must not receive a D2H"
+        with pytest.raises(ValueError, match="declared through immutable_host_tensors"):
+            rt.copy_from(host.data_ptr(), dev.data_ptr, nbytes)
         rt.close()
 
-    def test_a_shared_range_is_still_named_as_a_d2h_destination(self, patched_setup):
-        """The direction rule must not regress the case that was already safe."""
+    def test_a_shared_range_declared_immutable_is_also_refused_for_read_back(self, patched_setup):
+        """Shared memory makes the write *work*; it does not make it consistent with the promise.
+
+        This is the case a mechanical check would wave through: the bytes land where the parent
+        can see them, so nothing breaks — except the declaration the caller made, which other
+        decisions now rest on.
+        """
+        host = torch.zeros(4, 4, dtype=torch.float32).share_memory_()
+        rt = DistributedWorker(
+            _fake_compiled([_param("a", [4, 4])], []),
+            inherited_host_tensors=[host],
+            immutable_host_tensors=[host],
+        )
+        dev = self._dev(rt)
+        nbytes = host.numel() * host.element_size()
+
+        with pytest.raises(ValueError, match="declared through immutable_host_tensors"):
+            rt.copy_from(host.data_ptr(), dev.data_ptr, nbytes)
+        rt.close()
+
+    def test_a_named_upload_source_is_granted_read_only(self, patched_setup):
+        """An upload source is read by the child and nothing more, so the descriptor says READ.
+
+        Granting READWRITE would tell the ABI a consumer may write memory that, for the
+        read-only file mapping this option targets, faults on a write — the same class of
+        misdeclaration the declaration exists to remove.
+        """
+        host = torch.zeros(4, 4, dtype=torch.float32)
+        rt = DistributedWorker(
+            _fake_compiled([_param("a", [4, 4])], []),
+            inherited_host_tensors=[host],
+            immutable_host_tensors=[host],
+        )
+        dev = self._dev(rt)
+        nbytes = host.numel() * host.element_size()
+
+        rt.copy_to(dev.data_ptr, host.data_ptr(), nbytes)
+
+        named = patched_setup["worker"].copy_to.call_args.args[1]
+        assert isinstance(named, _NamedHostRange)
+        assert (named.backend_kind, named.access) == ("FORK_SHM", "READ")
+        rt.close()
+
+    def test_an_undeclared_shared_range_is_still_named_as_a_d2h_destination(self, patched_setup):
+        """The rules above must not regress the case that was already safe: shared, undeclared."""
         host = torch.zeros(4, 4, dtype=torch.float32).share_memory_()
         rt = DistributedWorker(_fake_compiled([_param("a", [4, 4])], []), inherited_host_tensors=[host])
         dev = self._dev(rt)

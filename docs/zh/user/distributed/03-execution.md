@@ -144,10 +144,13 @@ with compiled.prepare(
     resident = rt.alloc_stacked_tensor(weights)
 ```
 
-`immutable_host_tensors` 只是关于**上传**的承诺。被声明的区间若用作 `copy_from`
-的目标，仍然走 staging：子进程写入 copy-on-write 页会让父进程继续读到旧数据，而
-写只读映射会直接出错——两者都比这项声明想省下的那次拷贝更糟。未声明的张量，或在
+`immutable_host_tensors` 只是关于**上传**的承诺；把被声明的区间用作 `copy_from`
+的目标会直接报错，而不是悄悄退回 staging——staging 会往同一段内存写同样的字节，
+一样违背这项承诺，却看起来一切正常。请读回到未被声明的张量中。未声明的张量，或在
 `prepare()` 之后分配的张量，其行为与此前完全一致。
+
+被命名的上传源只授予 `READ`，只有目标才授予 `READWRITE`。这对只读映射很关键：把它
+描述为可写，等于告诉 runtime 消费者可以写一段写入即出错的内存。
 
 ## One-Shot vs 持久 Worker
 

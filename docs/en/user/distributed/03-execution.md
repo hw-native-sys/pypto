@@ -159,11 +159,15 @@ with compiled.prepare(
     resident = rt.alloc_stacked_tensor(weights)
 ```
 
-`immutable_host_tensors` is a promise about **uploads**. A declared range used as a
-`copy_from` destination is still staged: writing a copy-on-write page in the child leaves
-the parent reading the old contents, and writing a read-only mapping faults. Both are
-worse than the copy the declaration was meant to avoid. Anything not declared, or
-allocated after `prepare()`, keeps staging exactly as before.
+`immutable_host_tensors` is a promise about **uploads**, and reading back into a declared
+range is refused rather than quietly staged — staging would write the same bytes into the
+same range, breaking the promise while looking like it worked. Read back into a tensor you
+did not declare. Anything not declared, or allocated after `prepare()`, keeps staging
+exactly as before.
+
+A named upload source is granted `READ`; only a destination is granted `READWRITE`. That
+matters for a read-only mapping: describing it as writable would tell the runtime a
+consumer may write memory that faults on a write.
 
 ## One-Shot vs Persistent Worker
 

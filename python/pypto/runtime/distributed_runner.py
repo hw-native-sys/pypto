@@ -2297,9 +2297,15 @@ class DistributedWorker(Worker):
         listed it in ``immutable_host_tensors``, promising nothing writes it after
         ``prepare()``.
 
-        The declaration applies to upload sources only: a declared range used as a D2H
-        destination still has to be genuinely shared, since writing a private page in the child
-        leaves the parent reading the old contents and writing a read-only mapping faults.
+        The declaration applies to upload sources only, and a read-back into a declared range
+        is refused rather than quietly staged: staging writes the same bytes, so it would break
+        the promise just as thoroughly while looking like it worked. An undeclared range still
+        has to be genuinely shared to be named as a destination, since writing a private page in
+        the child leaves the parent reading the old contents.
+
+        A named source is granted ``READ`` and only a destination ``READWRITE``. Naming a
+        read-only mapping ``READWRITE`` would tell the ABI a consumer may write memory that
+        faults on a write — the same kind of misdeclaration this option exists to remove.
 
         Both conditions exist because inference alone is wrong in both directions. A
         ``MAP_PRIVATE`` range is inherited too, but copy-on-write means the child keeps
@@ -2322,14 +2328,19 @@ class DistributedWorker(Worker):
         )
 
         end = host_ptr + nbytes
-        # The declaration covers *reads* only. Naming a declared non-shared range as a D2H
-        # destination would contradict the declaration and break either way: a MAP_PRIVATE page
-        # written by the child splits copy-on-write, so the parent keeps seeing the old bytes,
-        # and a read-only file mapping faults outright. Writes therefore still require a range
-        # that is genuinely shared.
-        declared_immutable = not writing and any(
+        declared_immutable = any(
             start <= host_ptr and end <= stop for start, stop in self._immutable_host_spans
         )
+        if writing and declared_immutable:
+            # The caller promised nothing writes this range after prepare(), and a read-back
+            # would do exactly that. Refusing is the only way to honour the promise: staging
+            # writes the same bytes, so silently taking that path would break it just as
+            # thoroughly while looking like it worked.
+            raise ValueError(
+                f"copy_from destination 0x{host_ptr:x}+{nbytes} lies in a range declared through "
+                "immutable_host_tensors, which promises nothing writes it after prepare(); read "
+                "back into a tensor that was not declared immutable."
+            )
         for start, stop, is_shared in self._inherited_host_spans:
             if host_ptr < start or end > stop:
                 continue
@@ -2341,7 +2352,11 @@ class DistributedWorker(Worker):
                 nbytes,
                 owner,
                 buffer_id,
-                access=AccessMode.READWRITE,
+                # A source is read by the child and nothing more, so say so: naming a read-only
+                # mapping READWRITE would tell the ABI the consumer may write memory that faults
+                # on a write, which is the same class of misdeclaration this whole option exists
+                # to remove. FORK_SHM accepts any access, so READ is expressible here.
+                access=AccessMode.READWRITE if writing else AccessMode.READ,
                 backend_kind=BackendKind.FORK_SHM,
             )
         return None
