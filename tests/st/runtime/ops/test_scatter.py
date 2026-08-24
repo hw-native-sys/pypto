@@ -59,7 +59,8 @@ values to repeated targets).
 gather: each compact ``input`` row is written into the mask-selected columns of
 the wider ``dst`` (``dst.cols == input.cols * stride``). The form runs on the
 A2/A3 backend (``BackendType.Ascend910B``); A5 (``Ascend950``) rejects it, so
-those cases are pinned to A2/A3 only. Column selection mirrors gather: P0101
+``TestScatterMaskForm`` carries a ``platforms`` marker restricting it to the
+A2/A3 ids. Column selection mirrors gather: P0101
 hits even columns (``0::2``), P1010 hits odd columns (``1::2``).
 
 The raw ``pto.tscatter`` mask instruction zero-fills the entire ``dst`` before
@@ -535,7 +536,10 @@ class Scatter1RowTestCase(_ScatterBaseTestCase):
 
 
 class _ScatterMaskBaseTestCase(PTOTestCase):
-    """Base for mask-form scatter cases. Pinned to A2/A3 (Ascend910B).
+    """Base for mask-form scatter cases.
+
+    A2/A3 only — the restriction lives on ``TestScatterMaskForm``'s
+    ``platforms`` marker, since a case follows whatever platform it is run on.
 
     Subclasses set ``_start`` (0 for P0101, 1 for P1010) and ``_stride`` (2);
     ``compute_expected`` writes ``inp`` into the ``[start::stride]`` columns of
@@ -672,6 +676,13 @@ class TestScatterIndexForm:
         assert result.passed, f"Test failed: {result.error}"
 
 
+# The mask form is A2/A3 only. That restriction used to ride on a
+# ``get_backend_type`` pin on the case classes; it belongs on the tests, which
+# is what the platform matrix reads. Worth re-checking on silicon: under ptoas
+# 0.57 all four compile *and* pass on a5sim, so the rejection may no longer
+# hold — but a5sim has been wrong about 950 before (it does not model the
+# on-chip layout), so this stays restricted until a board run says otherwise.
+@pytest.mark.platforms("a2a3", "a2a3sim", reason="A5/Ascend950 rejects the pto.tscatter mask form")
 class TestScatterMaskForm:
     """Mask-form row scatter — A2/A3 only (A5/Ascend950 rejects the mask form).
 
