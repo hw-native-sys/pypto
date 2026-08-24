@@ -1286,10 +1286,14 @@ void DistributedCodegen::EmitTreeReduce(const ir::CallPtr& call) {
 namespace {
 
 // Renders `init_value` as a Python literal of the tensor's torch dtype, for the
-// `fill_value` argument of ``torch.full``. Mirrors the chip-side rules in
-// tensor_op_codegen.cpp (finite, whole-number for integer dtypes, within the
-// exactly-representable integer range) so a `pl.create_tensor(init_value=...)`
-// that is accepted by one orchestration level is accepted by the other.
+// `fill_value` argument of ``torch.full``. Applies the chip-side rules from
+// tensor_op_codegen.cpp -- finite, whole-number for integer dtypes, within the
+// exactly-representable integer range -- so a `pl.create_tensor(init_value=...)`
+// accepted at one orchestration level is accepted at the other, plus one rule
+// the chip side does not have: the fill must fit the destination integer width.
+// That is deliberately stricter. The chip side casts out-of-range fills with
+// `static_cast`, so `int8` with 128 silently becomes -128 there; rather than
+// reproduce that, this path rejects the value and says so.
 std::string PythonFillLiteral(double init_value, const DataType& dtype) {
   // Rejected here as well as in the Python front end so an IR built by other
   // means cannot emit `nan`/`inf`, which are not Python literals.
@@ -1322,6 +1326,25 @@ std::string PythonFillLiteral(double init_value, const DataType& dtype) {
       << "tensor.create: init_value " << init_value << " exceeds the exactly-representable integer "
       << "range (+/-2^53); large-magnitude integer fills are not supported. Use init_value=0 or a "
       << "smaller value.";
+
+  // The fill must also fit the DESTINATION width, which the check above does not
+  // imply: `int8` with 128 is exactly representable as a double and still does
+  // not fit an int8 tensor. Left to `torch.full`, the two out-of-range cases
+  // diverge and neither is acceptable -- `torch.full(..., 128, dtype=int8)`
+  // raises deep inside the generated `_alloc_intermediates`, turning a codegen
+  // error into a run-time one, while `torch.full(..., -1, dtype=uint8)` is
+  // accepted and silently yields 255. Reject both here, where the dtype is known
+  // and the message can name it.
+  const auto bits = static_cast<int>(dtype.GetBit());
+  const double min_value = dtype.IsUnsignedInt() ? 0.0 : -std::ldexp(1.0, bits - 1);
+  const double max_value =
+      dtype.IsUnsignedInt() ? std::ldexp(1.0, bits) - 1.0 : std::ldexp(1.0, bits - 1) - 1.0;
+  CHECK(init_value >= min_value && init_value <= max_value)
+      << "tensor.create: init_value " << std::to_string(static_cast<int64_t>(init_value))
+      << " is out of range for dtype " << dtype.ToString() << ", which holds ["
+      << std::to_string(static_cast<int64_t>(min_value)) << ", "
+      << std::to_string(static_cast<int64_t>(max_value)) << "].";
+
   return std::to_string(static_cast<int64_t>(init_value));
 }
 

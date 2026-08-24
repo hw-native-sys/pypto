@@ -576,6 +576,28 @@ class TestDistributedCodegen:
         with pytest.raises(ValueError, match="whole-number init_value"):
             _host_orch_create_code(pl.INT32, init_value=2.5)
 
+    def test_create_tensor_init_value_rejects_narrow_integer_overflow(self):
+        """A fill that does not fit the destination width is a codegen error.
+
+        Exact double representability does not imply the value fits the tensor:
+        128 is a fine double and is not an int8. Left to ``torch.full`` the two
+        out-of-range directions diverge and both are wrong -- an int8 fill of 128
+        raises inside the generated ``_alloc_intermediates`` (a run-time failure
+        from a codegen mistake), while a uint8 fill of -1 is accepted and quietly
+        becomes 255.
+        """
+        with pytest.raises(ValueError, match=r"out of range for dtype int8"):
+            _host_orch_create_code(pl.INT8, init_value=128)
+
+        with pytest.raises(ValueError, match=r"out of range for dtype uint8"):
+            _host_orch_create_code(pl.UINT8, init_value=-1)
+
+    def test_create_tensor_init_value_allows_narrow_integer_extremes(self):
+        """The bounds themselves are inclusive -- int8 holds [-128, 127]."""
+        assert "torch.full((64,), 127, dtype=torch.int8)" in _host_orch_create_code(pl.INT8, init_value=127)
+        assert "torch.full((64,), -128, dtype=torch.int8)" in _host_orch_create_code(pl.INT8, init_value=-128)
+        assert "torch.full((64,), 255, dtype=torch.uint8)" in _host_orch_create_code(pl.UINT8, init_value=255)
+
     def test_create_tensor_init_value_survives_alloc_hoisting(self):
         """The fill must follow the allocation into _alloc_intermediates.
 
