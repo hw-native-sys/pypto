@@ -51,7 +51,14 @@ its own fresh MemRef. This pass closes that gap:
    `iter_arg`'s canonical MemRef as the target and push it onto the yielded value
    and its producer chain (following in-place `output-reuses-input` ops and
    view inputs). `IfStmt` return values are retargeted into both branch yields.
-2. **Apply retype** (`RetypeApplier`): rewrite the collected variable types in
+2. **Normalize peeled accumulator phis**: visit nested `IfStmt` nodes in
+   post-order and recognize both direct in-place accumulator producers and
+   branch-local loops carried by an accumulator seeded outside that branch.
+   When exactly one branch is the accumulator continuation, retarget the other
+   branch's local seed, the phi result, aliases, and nested loop carry onto the
+   same `Acc` allocation. This is allowed only when the seed is local to the
+   branch and the target is dead in the remainder of that branch.
+3. **Apply retype** (`RetypeApplier`): rewrite the collected variable types in
    place so the producer writes directly into the carried buffer.
 
 The pass is a no-op when there is nothing to retarget (`Compute` returns no
@@ -78,3 +85,6 @@ physical address for ptoas `PlanMemory`. See
   behavior of the former single `MemoryReuse` pass.
 - `DSA_RP` and `PTOAS` both skip opportunistic MemRef coalescing here; neither
   may undo a must-alias relation established by this pass.
+- Accumulator-phi normalization runs for every memory planner before lifetime
+  planning. The legacy `PYPTO` path repeats it after opportunistic reuse because
+  reuse can introduce a fresh carry/phi mismatch.

@@ -3707,6 +3707,66 @@ class TestTopDownRetargeter:
             valid_shape = tile_type.get_effective_tile_view().valid_shape
             assert [dim.value for dim in valid_shape if isinstance(dim, ir.ConstInt)] == [16, 16]
 
+    def test_nested_tensor_matmul_acc_join_needs_no_acc_repair_move(self):
+        """Nested outer/inner K loops lower without an illegal Acc repair move."""
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class NestedAccumulator:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                value: pl.Tensor[[128, 64], pl.BF16],
+                gate_weight: pl.Tensor[[64, 128], pl.BF16],
+                up_weight: pl.Tensor[[64, 128], pl.BF16],
+                down_weight: pl.Tensor[[128, 64], pl.BF16],
+                output: pl.Out[pl.Tensor[[128, 64], pl.FP32]],
+            ) -> pl.Tensor[[128, 64], pl.FP32]:
+                for region_index in pl.spmd(
+                    8,
+                    optimizations=[
+                        pl.split(pl.SplitMode.UP_DOWN),
+                        pl.cross_core_slot(slot_num=4),
+                    ],
+                ):
+                    acc_init = pl.tensor.create([16, 64], dtype=pl.FP32, layout=pl.TensorLayout.ND)
+                    for feature, (acc,) in pl.pipeline(0, 128, 64, stage=3, init_values=(acc_init,)):
+                        a_tile = pl.tensor.slice(value, [16, 64], [region_index * 16, 0])
+                        g_tile = pl.tensor.slice(gate_weight, [64, 64], [0, feature])
+                        u_tile = pl.tensor.slice(up_weight, [64, 64], [0, feature])
+                        gate = pl.tensor.matmul(a_tile, g_tile, out_dtype=pl.FP32)
+                        up = pl.tensor.matmul(a_tile, u_tile, out_dtype=pl.FP32)
+                        sigmoid = pl.tensor.recip(pl.tensor.adds(pl.tensor.exp(pl.tensor.neg(gate)), 1.0))
+                        activation = pl.tensor.cast(
+                            pl.tensor.mul(pl.tensor.mul(gate, sigmoid), up),
+                            target_type=pl.BF16,
+                            mode="round",
+                        )
+                        d_tile = pl.tensor.slice(down_weight, [64, 64], [feature, 0])
+                        if feature == 0:
+                            first = pl.tensor.matmul(activation, d_tile, out_dtype=pl.FP32)
+                            next_acc = pl.yield_(first)
+                        else:
+                            later = pl.tensor.matmul_acc(acc, activation, d_tile)
+                            next_acc = pl.yield_(later)
+                        tile = pl.yield_(next_acc)
+                    output = pl.tensor.assemble(output, tile, [region_index * 16, 0])
+                return output
+
+        lowered = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(NestedAccumulator)
+        aic_functions = [
+            function for function in lowered.functions.values() if function.func_type == ir.FunctionType.AIC
+        ]
+        assert len(aic_functions) == 1
+
+        body = aic_functions[0].as_python()
+        assert "pl.tile.matmul_acc(" in body
+        assert not any(
+            "pl.tile.move(" in line and "target_memory=pl.Mem.Acc" in line for line in body.splitlines()
+        )
+
     def test_pipelined_kloop_accumulator_coalesces_to_one_acc_buffer(self):
         """A stage-2 pipelined K-loop matmul (as AutoTileMatmulL0 emits) whose
         L0C accumulator is large (176x176x4 = 121KB, fp32). After
