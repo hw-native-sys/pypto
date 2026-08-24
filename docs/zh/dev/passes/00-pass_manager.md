@@ -74,6 +74,22 @@
 
 基于位集合的高效集合，支持 `Insert`、`Remove`、`Contains`、`ContainsAll`、`Union`、`Difference`、`ToString`。
 
+### 声明新属性 (Property)
+
+一个枚举项需要在四处分别书写，而构建过程不会把它们关联起来：
+
+| 层 | 文件 | 形式 |
+| -- | ---- | ---- |
+| 枚举 | `include/pypto/ir/transforms/ir_property.h` | `MyProperty,` 并附 `///<` 描述 |
+| 名称 | `src/ir/transforms/ir_property.cpp` | `case IRProperty::MyProperty: return "MyProperty";` |
+| 绑定 (Binding) | `python/bindings/modules/passes.cpp` | `.value("MyProperty", IRProperty::MyProperty, "<doc>")` |
+| 类型存根 (Stub) | `python/pypto/pypto_core/passes.pyi` | `MyProperty = ...` |
+
+四处都要添加，且顺序与枚举的声明顺序一致。缺少绑定的属性仍能编译，`str(IRPropertySet)` 也仍能正确打印其名称
+（由上表的 switch 渲染），但只要集合中包含该属性，`IRPropertySet.to_list()` 就会抛出
+`ValueError: <n> is not a valid IRProperty`，该集合的每个 Python 调用方都会随之失败。
+`tests/lint/check_ir_property_parity.py`（一个 pre-commit 钩子）负责保持这四份列表一致。
+
 ### PassProperties
 
 ```cpp

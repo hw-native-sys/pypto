@@ -242,5 +242,44 @@ class TestPassPropertyAccessors:
         assert p.get_produced_properties().empty()
 
 
+class TestIRPropertySetEnumeration:
+    """Every property a C++ set can hold must cast back into the Python enum.
+
+    ``IRPropertySet.to_list()`` casts each set bit to ``IRProperty``; a property the nanobind enum
+    does not declare raises ``ValueError: <n> is not a valid IRProperty``. ``str()`` is built in C++
+    from ``IRPropertyToString`` and keeps rendering the name either way, so such a set looks healthy
+    right up to the moment it is enumerated -- these tests hold the two views against each other.
+    """
+
+    @staticmethod
+    def names_from_str(ps: passes.IRPropertySet) -> list[str]:
+        """Parse ``{A, B}`` into ``["A", "B"]``, preserving the set's bit order."""
+        body = str(ps).strip("{}")
+        return body.split(", ") if body else []
+
+    @pytest.mark.parametrize(
+        "accessor",
+        [
+            passes.get_verified_properties,
+            passes.get_structural_properties,
+            passes.get_default_verify_properties,
+        ],
+        ids=["verified", "structural", "default_verify"],
+    )
+    def test_module_property_sets_enumerate(self, accessor):
+        """Each module-level set enumerates, and agrees with its own string form."""
+        ps = accessor()
+        assert not ps.empty()
+        assert [prop.name for prop in ps.to_list()] == self.names_from_str(ps)
+
+    def test_pass_declared_properties_enumerate(self):
+        """A pass's declared sets enumerate; ExpandMixedKernel produces HardSyncallOccupancyValid."""
+        p = passes.expand_mixed_kernel()
+        produced = p.get_produced_properties()
+        assert produced.contains(passes.IRProperty.HardSyncallOccupancyValid)
+        for ps in (p.get_required_properties(), produced, p.get_invalidated_properties()):
+            assert [prop.name for prop in ps.to_list()] == self.names_from_str(ps)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -59,14 +59,14 @@ void BindPass(nb::module_& m) {
       .value("MixedKernelExpanded", IRProperty::MixedKernelExpanded,
              "Mixed InCore functions split into AIC+AIV")
       .value("ClusterOutlined", IRProperty::ClusterOutlined, "Cluster scopes outlined into Group functions")
-      .value("HierarchyOutlined", IRProperty::HierarchyOutlined,
-             "Hierarchy scopes outlined into level/role functions")
       .value("TileOps2D", IRProperty::TileOps2D, "All tile ops use ≤2D tiles")
       .value("TileMemoryInferred", IRProperty::TileMemoryInferred,
              "TileType memory_space populated in InCore functions")
       .value("BreakContinueValid", IRProperty::BreakContinueValid,
              "Break/continue only in sequential/while loops")
       .value("UseAfterDef", IRProperty::UseAfterDef, "All variable uses are dominated by a definition")
+      .value("HierarchyOutlined", IRProperty::HierarchyOutlined,
+             "Hierarchy scopes outlined into level/role functions")
       .value("StructuredCtrlFlow", IRProperty::StructuredCtrlFlow,
              "No BreakStmt/ContinueStmt — only structured control flow")
       .value("VectorKernelSplit", IRProperty::VectorKernelSplit,
@@ -80,8 +80,6 @@ void BindPass(nb::module_& m) {
              "Bidirectional invariant: ForStmt.kind_ == Pipeline ⇔ has pipeline_stages attr")
       .value("PipelineResolved", IRProperty::PipelineResolved,
              "No ForKind::Pipeline survives; produced by CanonicalizeIOOrder")
-      .value("UnrollResolved", IRProperty::UnrollResolved,
-             "No ForKind::Unroll survives; produced by UnrollLoops")
       .value("CallDirectionsResolved", IRProperty::CallDirectionsResolved,
              "Every non-builtin Call has explicit attrs['arg_directions'] (see Call::GetArgDirections)")
       .value("TileTypeCoherence", IRProperty::TileTypeCoherence,
@@ -114,9 +112,15 @@ void BindPass(nb::module_& m) {
       .value("ReturnParamsExplicit", IRProperty::ReturnParamsExplicit,
              "InCore/Group/Spmd tensor returns reference function params by pointer identity, so the "
              "return->param map is a lookup (#1702)")
+      .value("UnrollResolved", IRProperty::UnrollResolved,
+             "No ForKind::Unroll survives; produced by UnrollLoops")
       .value("AivSplitValid", IRProperty::AivSplitValid,
              "Split-mode AIV/AIC functions (explicit split_aiv marker + non-None split mode) have no "
              "vector reduce op that collapses the split axis (partial-reduction miscompile)")
+      .value("HardSyncallOccupancyValid", IRProperty::HardSyncallOccupancyValid,
+             "Every hard (FFTS) system.syncall is launched at full occupancy: the enclosing pl.spmd fills "
+             "all physical cores of the barrier's core_type. A partial/over launch deadlocks on device "
+             "(507018) -- use mode=\"soft\" for partial occupancy")
       .value("IterArgCarryClassified", IRProperty::IterArgCarryClassified,
              "Every ForStmt with iter_args in an Orchestration function carries an "
              "attrs['iter_arg_rebind_<i>'] classification per slot (plus attrs['iter_arg_array_size_<i>'] "

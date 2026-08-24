@@ -74,6 +74,23 @@ Framework for organizing and executing IR transformation passes on Programs with
 
 Efficient bitset-backed set with `Insert`, `Remove`, `Contains`, `ContainsAll`, `Union`, `Difference`, `ToString`.
 
+### Declaring a New Property
+
+An enumerator is spelled out in four places, and nothing in the build links them:
+
+| Layer | File | Form |
+| ----- | ---- | ---- |
+| Enum | `include/pypto/ir/transforms/ir_property.h` | `MyProperty,` with a `///<` description |
+| Name | `src/ir/transforms/ir_property.cpp` | `case IRProperty::MyProperty: return "MyProperty";` |
+| Binding | `python/bindings/modules/passes.cpp` | `.value("MyProperty", IRProperty::MyProperty, "<doc>")` |
+| Stub | `python/pypto/pypto_core/passes.pyi` | `MyProperty = ...` |
+
+Add it to all four, in the enum's declaration order. A property missing from the binding still
+compiles and still prints correctly from `str(IRPropertySet)` — the switch above renders the name —
+but `IRPropertySet.to_list()` then raises `ValueError: <n> is not a valid IRProperty` for any set
+containing it, and every Python caller of that set fails with it.
+`tests/lint/check_ir_property_parity.py` (a pre-commit hook) holds the four lists together.
+
 ### PassProperties
 
 ```cpp
