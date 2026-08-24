@@ -4159,14 +4159,12 @@ class TestStorageLayoutReuseGate:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
-                inp: pl.Tensor[[64, 64], pl.BF16],
-                out_nd: pl.Out[pl.Tensor[[64, 64], pl.BF16]],
                 out_nz: pl.Out[pl.Tensor[[64, 64], pl.BF16]],
             ) -> pl.Tensor[[64, 64], pl.BF16]:
-                tile_nd: pl.Tile[[64, 64], pl.BF16, pl.Mem.Vec] = pl.tile.load(
-                    inp, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                tile_nd: pl.Tile[[64, 64], pl.BF16, pl.Mem.Vec] = pl.tile.full(
+                    [64, 64], dtype=pl.BF16, value=0.0
                 )
-                _a: pl.Tensor[[64, 64], pl.BF16] = pl.tile.store(tile_nd, [0, 0], out_nd)
+                _consumed: pl.Tile[[64, 64], pl.BF16, pl.Mem.Vec] = pl.tile.add(tile_nd, tile_nd)
                 tile_nz: pl.Tile[
                     [64, 64],
                     pl.BF16,
@@ -4176,25 +4174,37 @@ class TestStorageLayoutReuseGate:
                         slayout=pl.TileLayout.row_major,
                         fractal=1024,
                     ),
-                ] = pl.tile.load(inp, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
+                ] = pl.tile.full([64, 64], dtype=pl.BF16, value=1.0)
                 result: pl.Tensor[[64, 64], pl.BF16] = pl.tile.store(tile_nz, [0, 0], out_nz)
                 return result
 
         return Before
 
-    def test_nd_and_nz_vec_tiles_do_not_reuse(self):
-        """Disjoint-lifetime ND and NZ Vec tiles of equal size keep separate buffers."""
+    @pytest.mark.parametrize(
+        ("ascend_backend", "should_separate"),
+        [(BackendType.Ascend950, True), (BackendType.Ascend910B, False)],
+        indirect=["ascend_backend"],
+    )
+    def test_nd_and_nz_vec_tiles_follow_target_policy(self, ascend_backend, should_separate):
+        """Only A5 separates disjoint-lifetime ND and NZ Vec tiles."""
 
         Before = self._build_nd_nz_program()
         After = _run_pipeline(Before)
         bases = _collect_tile_memref_bases(After)
         assert "tile_nd" in bases and "tile_nz" in bases, f"missing tiles in {bases}"
-        assert bases["tile_nd"] != bases["tile_nz"], (
-            f"ND and NZ Vec tiles must not share a MemRef; both bound to {bases['tile_nd']}"
+        is_separate = bases["tile_nd"] != bases["tile_nz"]
+        assert is_separate is should_separate, (
+            f"{ascend_backend.name} expected separate={should_separate}, "
+            f"got ND {bases['tile_nd']} and NZ {bases['tile_nz']}"
         )
 
-    def test_dsa_rp_nd_and_nz_vec_tiles_do_not_overlap(self, ascend_backend):
-        """DSA-RP exports the ND/NZ restriction as an unrelaxable hard edge."""
+    @pytest.mark.parametrize(
+        ("ascend_backend", "should_separate"),
+        [(BackendType.Ascend950, True), (BackendType.Ascend910B, False)],
+        indirect=["ascend_backend"],
+    )
+    def test_dsa_rp_nd_and_nz_vec_tiles_follow_target_policy(self, ascend_backend, should_separate):
+        """DSA-RP exports the ND/NZ hard edge on A5 and keeps A2/A3 reuse."""
 
         Before = self._build_nd_nz_program()
         with passes.PassContext([], memory_planner=passes.MemoryPlanner.DSA_RP):
@@ -4205,8 +4215,10 @@ class TestStorageLayoutReuseGate:
         ranges = _collect_allocated_tile_ranges(After)
         nd_offset, nd_size = ranges["tile_nd"]
         nz_offset, nz_size = ranges["tile_nz"]
-        assert nd_offset + nd_size <= nz_offset or nz_offset + nz_size <= nd_offset, (
-            f"DSA-RP must physically separate ND {ranges['tile_nd']} and NZ {ranges['tile_nz']} Vec tiles"
+        is_separate = nd_offset + nd_size <= nz_offset or nz_offset + nz_size <= nd_offset
+        assert is_separate is should_separate, (
+            f"{ascend_backend.name} expected separate={should_separate}, "
+            f"got ND {ranges['tile_nd']} and NZ {ranges['tile_nz']}"
         )
 
     def test_same_nz_family_different_fractal_vec_tiles_can_reuse(self):

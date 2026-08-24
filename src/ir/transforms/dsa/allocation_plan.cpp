@@ -114,12 +114,10 @@ AllocationPlan BuildDsaAllocationPlan(const FunctionPtr& func) {
   auto add_disjoint_layout_pairs = [&intervals, &add_separation](std::vector<size_t> earlier,
                                                                  std::vector<size_t> later) {
     std::sort(earlier.begin(), earlier.end(), [&intervals](size_t lhs, size_t rhs) {
-      return std::pair{intervals[lhs].last_use_point, lhs} <
-             std::pair{intervals[rhs].last_use_point, rhs};
+      return std::pair{intervals[lhs].last_use_point, lhs} < std::pair{intervals[rhs].last_use_point, rhs};
     });
     std::sort(later.begin(), later.end(), [&intervals](size_t lhs, size_t rhs) {
-      return std::pair{intervals[lhs].def_point, lhs} <
-             std::pair{intervals[rhs].def_point, rhs};
+      return std::pair{intervals[lhs].def_point, lhs} < std::pair{intervals[rhs].def_point, rhs};
     });
 
     size_t eligible = 0;

@@ -82,8 +82,8 @@ post-alias allocation identity becomes one buffer with byte size, alignment,
 and a conservative half-open lifetime. The problem has:
 
 - **hard constraints** for lifetime interference, reserved ranges, semantic
-  no-alias rules, target hazards, Vec ND/NZ storage-layout separation
-  (`StorageLayout`), and requested pipeline-stage separation.
+  no-alias rules, target hazards, A5 Vec ND/NZ storage-layout separation
+  (`StorageLayout`; not emitted for A2/A3), and requested pipeline-stage separation.
   Author-declared `pl.MemRef` allocations
   are also hard-separated from every other allocation in their memory space.
   A multi-slot declaration is placed as one buffer covering its full declared
@@ -235,8 +235,8 @@ passes.def("allocate_memory_addr", &pass::AllocateMemoryAddr,
 - Tests raw pointer uniqueness for MemRef deduplication
 - Tests default policy behavior without a backend configured
 - Tests the capacity diagnostic attributes reserved cross-core pipe bytes (see below)
-- Tests DSA-RP geometry, capacity, hard constraints (including Vec ND/NZ
-  `StorageLayout` separation), penalty activation, deterministic canonical-greedy
+- Tests DSA-RP geometry, capacity, hard constraints (including A5 Vec ND/NZ
+  `StorageLayout` separation and A2/A3 cross-layout reuse), penalty activation, deterministic canonical-greedy
   placement, and independent validation
 - Tests exact pre-solver recognized-edge sets as well as their final placement geometry
 - Characterizes that canonical-greedy `kNoFit` is a bounded-search result, not an infeasibility proof

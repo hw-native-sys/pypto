@@ -27,7 +27,7 @@
 `MemoryReuse` 在地址分配前先选择共享的 MemRef 身份。`DSA_RP` 则保留这些独立
 身份，并在 `AllocateMemoryAddr` 中结合容量与复用惩罚联合选择地址。二者同时运行
 会在 DSA-RP 评估之前删除候选方案。生命周期干涉、语义 no-alias 规则、目标
-hazard 与 Vec ND/NZ storage-layout 分离等正确性事实，在 DSA-RP 问题中仍然是硬约束。
+hazard 与 A5 Vec ND/NZ storage-layout 分离等正确性事实，在 DSA-RP 问题中仍然是硬约束；A2/A3 继续允许跨 layout 复用。
 
 ## API
 
@@ -99,7 +99,7 @@ program_optimized = reuse_pass(program)
 
 **允许跨 shape / dtype 复用，但 Vec storage layout 除外**：共享同一物理 MemRef 的 tile 通常可以携带**不同**的 shape、dtype 或 `TileView` 属性。PTO codegen 为每个 tile 绑定一条 per-variable 的 `alloc_tile`，因此每个别名都以各自的静态 shape / dtype / layout / `valid_shape` 声明共享基址。
 
-A5 Vec 存储对表示形式敏感：即使生命周期不相交，有效 layout 分属 ND-like 与 NZ-like 的两个 Vec tile 也不得共享物理地址。`MemoryReuse` 通过狭窄的 `AreVecNdNzCompatible` 门槛执行该限制。同一 Vec 表示族内仍允许复用（包括 fractal 不同的情形），非 Vec 内存空间也不受此门槛限制。`DSA_RP` 会把每个跨表示族 pair 以不可放宽的 `StorageLayout` 硬分离传给 `AllocateMemoryAddr`。
+A5 Vec 存储对表示形式敏感：即使生命周期不相交，有效 layout 分属 ND-like 与 NZ-like 的两个 Vec tile 也不得共享物理地址。`MemoryReuse` 通过狭窄的 `AreVecNdNzCompatible` 门槛执行该限制。同一 Vec 表示族内仍允许复用（包括 fractal 不同的情形），非 Vec 内存空间和 A2/A3 也不受此门槛限制。在 A5 上，`DSA_RP` 会把每个跨表示族 pair 以不可放宽的 `StorageLayout` 硬分离传给 `AllocateMemoryAddr`。
 
 除此之外仍允许例如：
 
@@ -260,7 +260,7 @@ passes.def("memory_reuse", &pass::MemoryReuse, "Memory reuse optimization");
 - 测试内存空间隔离
 - 测试字节大小兼容性
 - 测试 storage-compatible 的跨 dtype / 跨 `TileView` 复用（BF16↔FP32、fillpad 输出↔输入、`valid_shape` 不同、同一 Vec 表示族内 fractal 不同）
-- 测试生命周期不相交的 Vec ND/NZ tile 在 `MemoryReuse` 和 `DSA_RP` 下均保持分离
+- 测试生命周期不相交的 Vec ND/NZ tile 在 A5 上保持分离，并在 A2/A3 上继续复用（覆盖 `MemoryReuse` 和 `DSA_RP`）
 - 测试 no-alias 守护（`TestForbidOutputAlias` + `TestInplaceOps`），上表每条约束一个用例：
   - `tile.recip` / `tile.rsqrt` / `tile.row_sum` —— 输出不得 alias 输入（`not_inplace_safe`）
   - `tile.sel` —— 输出不得 alias mask / tmp（`forbid_output_alias`）

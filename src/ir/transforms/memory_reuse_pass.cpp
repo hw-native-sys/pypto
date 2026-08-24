@@ -2181,13 +2181,15 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
            pipeline_load_tiles.count(b.variable.get()) != 0;
   };
 
+  const bool enforce_vec_nd_nz_layout = IsA5Target();
+
   // Can `cand` join a single physical buffer that already holds `member`?
   // Lifetimes must not overlap (touching is allowed: a buffer's reader is
   // consumed before the writer at the same statement produces its output), and
   // neither directional gate may block. Shape/dtype need not match: PTO binds a
   // per-var alloc_tile so differing shapes/dtypes legally alias one base, and
   // largest-first ordering guarantees the buffer is sized to its representative.
-  // On Vec only, ND and NZ must not share — see AreVecNdNzCompatible.
+  // On A5 Vec only, ND and NZ must not share — see AreVecNdNzCompatible.
   auto can_share = [&](const LifetimeInterval& cand, const LifetimeInterval& member) {
     // Group-interval overlap is a fast reject; when it fires, fall back to the
     // precise per-var check so mutually-exclusive / same-value phi-family tiles
@@ -2197,7 +2199,7 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
     if (hazard_blocks(cand, member) || hazard_blocks(member, cand)) return false;
     if (forbid_blocks(cand, member) || forbid_blocks(member, cand)) return false;
     if (pipeline_blocks(cand, member)) return false;  // symmetric — one call suffices
-    if (!AreVecNdNzCompatible(cand.variable, member.variable)) return false;
+    if (enforce_vec_nd_nz_layout && !AreVecNdNzCompatible(cand.variable, member.variable)) return false;
     return true;
   };
 
@@ -3310,9 +3312,13 @@ AllocationConstraintAnalysis AnalyzeAllocationConstraints(const FunctionPtr& fun
   }
   ValidateDeclaredAllocs(func->body_, result.declared_allocation_bases, lifetimes.var_liveness);
 
-  for (const LifetimeInterval& interval : lifetimes.lifetimes) {
-    if (const auto layout_class = GetVecNzLayoutClass(interval.variable)) {
-      result.vec_nz_layout_class.emplace(interval.variable.get(), *layout_class);
+  // A5 Vec addresses are representation-sensitive. A2/A3 retain the legacy
+  // cross-layout reuse policy, so do not export StorageLayout hard edges there.
+  if (IsA5Target()) {
+    for (const LifetimeInterval& interval : lifetimes.lifetimes) {
+      if (const auto layout_class = GetVecNzLayoutClass(interval.variable)) {
+        result.vec_nz_layout_class.emplace(interval.variable.get(), *layout_class);
+      }
     }
   }
 
