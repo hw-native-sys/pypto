@@ -107,7 +107,7 @@ ran. A traceback here is the real signal — the exact wording of the line is no
 | C++ compiler | C++17 | GCC or Clang. `CMAKE_CXX_STANDARD 17` is required, not merely preferred |
 | numpy | ≥ 2.0 | Installed automatically |
 | torch | ≥ 2.0 | Installed automatically, but install the CPU wheel first (see below) |
-| nanobind | ≥ 2.0 | Build-time only; fetched automatically |
+| nanobind | ≥ 2.0, < 3 | Build-time only; fetched automatically |
 | scikit-build-core | ≥ 0.10 | Build backend; fetched automatically |
 
 **Install the CPU torch wheel before PyPTO.** `pip install -e .` resolves `torch>=2.0.0`

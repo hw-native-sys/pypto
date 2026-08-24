@@ -352,7 +352,9 @@ jobs:
         python -m pip install --upgrade pip
         # cmake / ninja / nanobind: clang_tidy.py configures CMake with
         # -DCMAKE_EXPORT_COMPILE_COMMANDS=ON and reads nanobind's cmake dir.
-        pip install cmake ninja nanobind
+        # Same cap as pyproject.toml's build requirement: lint must read the
+        # headers the wheel is built against.
+        pip install cmake ninja "nanobind<3"
         VERSION=$(python -c "import sys; sys.path.insert(0, 'tests/lint'); from clang_tidy import REQUIRED_VERSION; print(REQUIRED_VERSION)")
         pip install --retries 5 --timeout 60 "clang-tidy==${VERSION}"
         clang-tidy --version

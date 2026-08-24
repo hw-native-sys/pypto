@@ -102,7 +102,7 @@ OK
 | C++ 编译器 | C++17 | GCC 或 Clang。`CMAKE_CXX_STANDARD 17` 是强制要求而非建议 |
 | numpy | ≥ 2.0 | 自动安装 |
 | torch | ≥ 2.0 | 自动安装，但请先装 CPU 版（见下） |
-| nanobind | ≥ 2.0 | 仅构建期需要，自动获取 |
+| nanobind | ≥ 2.0, < 3 | 仅构建期需要，自动获取 |
 | scikit-build-core | ≥ 0.10 | 构建后端，自动获取 |
 
 **先装 CPU 版 torch，再装 PyPTO。** `pip install -e .` 会把 `torch>=2.0.0` 解析到默认
