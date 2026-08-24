@@ -652,7 +652,11 @@ runs:
         if [ "${PYPTO_USE_UV:-false}" != "true" ]; then
           python -m pip install --upgrade pip
         fi
-        py_install scikit-build-core nanobind cmake ninja
+        # nanobind capped with pyproject.toml's build requirement. This matters
+        # more here than anywhere else: the pypto install below passes
+        # --no-build-isolation, so the extension is compiled against *this*
+        # nanobind and [build-system] requires is never consulted.
+        py_install scikit-build-core "nanobind<3" cmake ninja
         # torch first, and explicitly the CPU build. These are Ascend hosts, and
         # left to resolve `torch>=2.0.0` on its own pip now selects a version
         # whose aarch64 wheel drags in the entire CUDA stack — torch 427 MB,
