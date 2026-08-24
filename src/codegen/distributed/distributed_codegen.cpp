@@ -13,8 +13,11 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <iomanip>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -1280,6 +1283,50 @@ void DistributedCodegen::EmitTreeReduce(const ir::CallPtr& call) {
   }
 }
 
+namespace {
+
+// Renders `init_value` as a Python literal of the tensor's torch dtype, for the
+// `fill_value` argument of ``torch.full``. Mirrors the chip-side rules in
+// tensor_op_codegen.cpp (finite, whole-number for integer dtypes, within the
+// exactly-representable integer range) so a `pl.create_tensor(init_value=...)`
+// that is accepted by one orchestration level is accepted by the other.
+std::string PythonFillLiteral(double init_value, const DataType& dtype) {
+  // Rejected here as well as in the Python front end so an IR built by other
+  // means cannot emit `nan`/`inf`, which are not Python literals.
+  CHECK(std::isfinite(init_value)) << "tensor.create: init_value must be finite, got " << init_value << ".";
+
+  if (dtype == DataType::BOOL) {
+    return init_value != 0.0 ? "True" : "False";
+  }
+
+  if (dtype.IsFloat()) {
+    // Full round-trippable precision: std::to_string truncates to 6 fractional
+    // digits, which would silently perturb the fill.
+    std::ostringstream val;
+    val << std::setprecision(std::numeric_limits<double>::max_digits10) << init_value;
+    return val.str();
+  }
+
+  CHECK(dtype.IsInt()) << "tensor.create: init_value is not supported for dtype " << dtype.ToString()
+                       << "; use a float, integer, or bool dtype.";
+  // A fractional fill into an integer tensor would be silently truncated, so
+  // reject it rather than guess the intent.
+  CHECK(init_value == std::floor(init_value))
+      << "tensor.create: init_value " << init_value << " is not an integer but the tensor dtype is "
+      << dtype.ToString() << "; use a whole-number init_value for integer dtypes.";
+  // `init_value` is a double, so only integers in [-2^53, 2^53] survive the trip
+  // exactly; beyond that the value is already imprecise and the cast below is
+  // undefined for huge magnitudes.
+  constexpr double kMaxExactInt = 9007199254740992.0;  // 2^53
+  CHECK(init_value >= -kMaxExactInt && init_value <= kMaxExactInt)
+      << "tensor.create: init_value " << init_value << " exceeds the exactly-representable integer "
+      << "range (+/-2^53); large-magnitude integer fills are not supported. Use init_value=0 or a "
+      << "smaller value.";
+  return std::to_string(static_cast<int64_t>(init_value));
+}
+
+}  // namespace
+
 void DistributedCodegen::EmitTensorCreate(const ir::CallPtr& call) {
   auto result_type = std::dynamic_pointer_cast<const ir::TensorType>(call->GetType());
   INTERNAL_CHECK(result_type) << "tensor.create must return TensorType";
@@ -1307,9 +1354,30 @@ void DistributedCodegen::EmitTensorCreate(const ir::CallPtr& call) {
 
   std::string torch_dtype = DataTypeToPythonDType(result_type->dtype_);
 
+  // Honour `pl.create_tensor(..., init_value=...)`. The chip-level orchestrator
+  // gets this fill from the runtime (TensorCreateInfo::set_initial_value, see
+  // tensor_op_codegen.cpp); at HOST level the buffer is a plain torch tensor
+  // allocated here, so the fill is the allocation itself. Dropping it here made
+  // a non-zero init_value silently deliver zeros at HOST level only.
+  //
+  // `torch.zeros` is kept for the absent/zero case so the common path emits
+  // exactly what it did before, and because zero is the one fill every dtype
+  // packs identically.
+  std::string alloc = "torch.zeros(" + shape + ", dtype=torch." + torch_dtype + ")";
+  if (call->HasKwarg("init_value")) {
+    const double init_value = call->GetKwarg<double>("init_value", 0.0);
+    if (init_value != 0.0) {
+      alloc = "torch.full(" + shape + ", " + PythonFillLiteral(init_value, result_type->dtype_) +
+              ", dtype=torch." + torch_dtype + ")";
+    } else {
+      // Still validated, so an out-of-contract init_value is rejected uniformly
+      // whether or not it happens to be the value that needs no fill.
+      (void)PythonFillLiteral(init_value, result_type->dtype_);
+    }
+  }
+
   // share_memory_() is required for fork-based distributed runtime visibility.
-  emitter_.EmitLine("tensors[\"" + target + "\"] = torch.zeros(" + shape + ", dtype=torch." + torch_dtype +
-                    ").share_memory_()");
+  emitter_.EmitLine("tensors[\"" + target + "\"] = " + alloc + ".share_memory_()");
 
   declared_vars_.insert(target);
   current_expr_value_ = "";

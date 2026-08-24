@@ -16,6 +16,44 @@ import pytest
 from pypto import codegen, ir, passes
 
 
+def _host_orch_create_code(dtype, init_value):
+    """Generate distributed code for a HOST orchestrator that creates one buffer.
+
+    Shared by the ``init_value`` tests below, which differ only in the dtype and
+    the fill requested — spelling the three-function hierarchy out once per case
+    would bury that difference.
+    """
+
+    @pl.program
+    class Input:
+        @pl.function(level=pl.Level.CHIP, role=pl.Role.SubWorker)
+        def chip_worker(
+            self,
+            a: pl.Tensor[[64], dtype],
+            buf: pl.Out[pl.Tensor[[64], dtype]],
+        ) -> pl.Tensor[[64], dtype]:
+            y: pl.Tensor[[64], dtype] = pl.add(a, a)
+            return y
+
+        @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+        def chip_orch(
+            self,
+            a: pl.Tensor[[64], dtype],
+            buf: pl.Out[pl.Tensor[[64], dtype]],
+        ) -> pl.Tensor[[64], dtype]:
+            result: pl.Tensor[[64], dtype] = self.chip_worker(a, buf)
+            return result
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self, a: pl.Tensor[[64], dtype]) -> pl.Tensor[[64], dtype]:
+            buf: pl.Tensor[[64], dtype] = pl.create_tensor([64], dtype=dtype, init_value=init_value)
+            result: pl.Tensor[[64], dtype] = self.chip_orch(a, buf)
+            return result
+
+    program = passes.convert_to_ssa()(Input)
+    return codegen.DistributedCodegen().generate(program)
+
+
 class TestDistributedCodegen:
     """Test distributed Python codegen on outlined hierarchy programs."""
 
@@ -505,6 +543,54 @@ class TestDistributedCodegen:
         # Plain host tensors use the worker-aware address-free wire helper.
         assert 'make_tensor_arg(orch._worker, tensors["a' in code
         assert 'make_tensor_arg(orch._worker, tensors["b' in code
+
+    def test_create_tensor_init_value_fills_the_buffer(self):
+        """A non-zero init_value must reach the HOST-allocated buffer.
+
+        Regression: codegen used to emit ``torch.zeros`` unconditionally, so a
+        non-zero ``pl.create_tensor(init_value=...)`` was silently dropped at
+        HOST level while the same call was honoured inside a CHIP orchestrator
+        (which gets the fill from ``TensorCreateInfo::set_initial_value``). The
+        program compiled, built and ran — only the numbers were wrong.
+        """
+        code = _host_orch_create_code(pl.FP32, init_value=2.5)
+
+        assert "torch.full((64,), 2.5, dtype=torch.float32).share_memory_()" in code
+        assert "torch.zeros(" not in code
+
+    def test_create_tensor_init_value_integer_dtype(self):
+        """Integer dtypes fill with an integer literal, not a float one."""
+        code = _host_orch_create_code(pl.INT32, init_value=7)
+
+        assert "torch.full((64,), 7, dtype=torch.int32).share_memory_()" in code
+
+    def test_create_tensor_init_value_zero_stays_torch_zeros(self):
+        """init_value=0 is the allocation default, so nothing changes for it."""
+        code = _host_orch_create_code(pl.FP32, init_value=0)
+
+        assert "torch.zeros((64,), dtype=torch.float32).share_memory_()" in code
+        assert "torch.full(" not in code
+
+    def test_create_tensor_init_value_rejects_fractional_integer_fill(self):
+        """A fractional fill into an integer tensor would truncate silently."""
+        with pytest.raises(ValueError, match="whole-number init_value"):
+            _host_orch_create_code(pl.INT32, init_value=2.5)
+
+    def test_create_tensor_init_value_survives_alloc_hoisting(self):
+        """The fill must follow the allocation into _alloc_intermediates.
+
+        HOST-orch allocations are hoisted pre-fork so the child processes can
+        see the shared mapping; the fill has to be applied there, because the
+        hoisted line *is* the allocation.
+        """
+        code = _host_orch_create_code(pl.FP32, init_value=1.0)
+
+        alloc_idx = code.find("def _alloc_intermediates(tensors, world_size=1):")
+        host_idx = code.find("def host_orch(")
+        assert alloc_idx >= 0 and alloc_idx < host_idx
+
+        alloc_block = code[alloc_idx:host_idx]
+        assert "torch.full((64,), 1, dtype=torch.float32).share_memory_()" in alloc_block
 
     def test_host_orch_create_tensor_hoisted_to_alloc_intermediates(self):
         """HOST-orch tensor.create lifts to _alloc_intermediates(tensors).

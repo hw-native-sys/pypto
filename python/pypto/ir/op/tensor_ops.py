@@ -53,14 +53,17 @@ def create(
         shape: List of dimension sizes (int or Expr), or a MakeTuple
         dtype: Data type of tensor elements
         layout: Tensor layout (default: ND)
-        init_value: If given, the runtime pre-fills the freshly allocated
-            buffer with this scalar on the AICPU (via the runtime's
-            ``TensorCreateInfo::set_initial_value``) before any kernel writes
-            it. ``init_value=0`` zeroes the buffer and is valid for every
-            dtype. Non-zero values are supported for integer and 32/64-bit
-            float dtypes; non-zero fills of sub-32-bit float dtypes
-            (fp16/bf16) are rejected at codegen because the orchestration
-            translation unit has no ``half``/``bfloat16`` type to pack them.
+        init_value: If given, the freshly allocated buffer is pre-filled with
+            this scalar before any kernel writes it. ``init_value=0`` zeroes
+            the buffer and is valid for every dtype. For a device-level
+            orchestrator the fill runs on the AICPU (via the runtime's
+            ``TensorCreateInfo::set_initial_value``), so non-zero values are
+            supported for integer and 32/64-bit float dtypes only; non-zero
+            fills of sub-32-bit float dtypes (fp16/bf16) are rejected at
+            codegen because the orchestration translation unit has no
+            ``half``/``bfloat16`` type to pack them. A HOST-level orchestrator
+            allocates the buffer as a shared torch tensor (``torch.full``), so
+            there non-zero fills work for every dtype.
         manual_dep: Opt this tensor out of OverlapMap auto-dep tracking
             for its **entire lifetime**. When True, codegen marks the
             ``tensor.create`` call so every task that reads or writes the
