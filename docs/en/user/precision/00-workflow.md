@@ -199,15 +199,22 @@ them with `python -m simpler_setup.tools.dump_viewer`.
 
 ### When the result changes between runs
 
-Before dumping anything, check whether the result is *consistently* wrong. Re-run the same
-input a few times: a value that moves is not an arithmetic bug, and no pass dump will
-explain it. It is an ordering bug, and the IR is entitled to look correct at every pass —
-statement order does not constrain execution order.
+Before dumping anything, re-run the same input a few times. A value that moves means
+something is unordered — but two very different things can be, and they are cheap to tell
+apart:
 
-The runtime infers RAW and WAW from buffer overlap, but **WAR is not tracked**: a writer
-overwriting a buffer some other task may still be reading takes no edge, because finding
-every in-flight reader would be a per-write walk on the hot path. That anti-dependency is
-yours to declare. See [Dependencies](../performance/03-dependencies.md) for the full rule
+- **Last bits only, in a kernel that uses split-K or an atomic add.** That is accumulation
+  order across cores. It is expected, step 2 above already covers it, and there is nothing
+  to fix.
+- **Anything larger** — whole regions wrong, values off by a lot, or a result that is
+  sometimes right and sometimes not. That is a task-ordering bug, and no pass dump will
+  explain it: the IR is entitled to look correct at every pass, because statement order does
+  not constrain execution order.
+
+For the second, the runtime infers RAW and WAW from buffer overlap, but **WAR is not
+tracked**: a writer overwriting a buffer some other task may still be reading takes no
+edge, because finding every in-flight reader would be a per-write walk on the hot path.
+That anti-dependency is yours to declare. See [Dependencies](../performance/03-dependencies.md) for the full rule
 and its cost.
 
 ```python
