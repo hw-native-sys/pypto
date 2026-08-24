@@ -105,6 +105,82 @@ def _assert_if_phi_arms_write_the_phi_buffer(program: ir.Program) -> None:
 _TILE_MOVE_OP = ir.get_op("tile.move").name
 
 
+def _carry_memref(expr):
+    t = getattr(expr, "type", None)
+    return t.memref if isinstance(t, ir.TileType) and t.memref is not None else None
+
+
+def _same_base_address(a: ir.MemRef, b: ir.MemRef) -> bool:
+    """Do two MemRefs start at the same address in the same allocation?
+
+    Mirrors the C++ `SameBaseAddress`. Comparing only `base_` would call two
+    slots of one ``pl.MemRef(slots=N)`` the same storage; size is deliberately
+    not compared, since a padded accumulator views one buffer at two extents.
+    """
+    if a.base_.unique_id != b.base_.unique_id:
+        return False
+    off_a, off_b = a.byte_offset_, b.byte_offset_
+    if not isinstance(off_a, ir.ConstInt) or not isinstance(off_b, ir.ConstInt):
+        return False
+    return off_a.value == off_b.value
+
+
+def _assert_carry_yield_lands_in_its_buffer(program: ir.Program) -> None:
+    """Assert each loop carry's yielded value occupies that carry's own byte range.
+
+    The value a `pl.range` carry yields becomes the next iteration's `iter_arg`,
+    which codegen reads out of the carry's buffer. Yielding something that lives
+    somewhere else means the next iteration reads whatever the buffer still held.
+    """
+    checked = 0
+
+    class _YieldChecker(ir.IRVisitor):
+        def visit_for_stmt(self, op):  # type: ignore[override]
+            nonlocal checked
+            body = op.body
+            stmts = body.stmts if isinstance(body, ir.SeqStmts) else [body]
+            yield_stmt = next((s for s in stmts if isinstance(s, ir.YieldStmt)), None)
+            if yield_stmt is not None:
+                for i, iter_arg in enumerate(op.iter_args):
+                    if i >= len(yield_stmt.value):
+                        continue
+                    carry, yielded = _carry_memref(iter_arg.initValue), _carry_memref(yield_stmt.value[i])
+                    if carry is None or yielded is None:
+                        continue
+                    assert _same_base_address(carry, yielded), (
+                        f"carry '{iter_arg.name_hint}' yields a value outside its own buffer"
+                    )
+                    checked += 1
+            super().visit_for_stmt(op)
+
+    for function in program.functions.values():
+        _YieldChecker().visit_stmt(function.body)
+    assert checked, "no tile-typed loop carry was checked -- the assertion is vacuous"
+
+
+def _count_tile_moves_in_loops(program: ir.Program) -> int:
+    """How many `tile.move` statements sit directly in a loop body."""
+    total = 0
+
+    class _Counter(ir.IRVisitor):
+        def visit_for_stmt(self, op):  # type: ignore[override]
+            nonlocal total
+            body = op.body
+            stmts = body.stmts if isinstance(body, ir.SeqStmts) else [body]
+            for stmt in stmts:
+                if (
+                    isinstance(stmt, ir.AssignStmt)
+                    and isinstance(stmt.value, ir.Call)
+                    and stmt.value.op.name == _TILE_MOVE_OP
+                ):
+                    total += 1
+            super().visit_for_stmt(op)
+
+    for function in program.functions.values():
+        _Counter().visit_stmt(function.body)
+    return total
+
+
 def _assert_carry_writebacks_do_not_clobber(program: ir.Program) -> None:
     """Assert no loop-carry writeback reads a carry buffer an earlier one overwrote.
 
@@ -2433,6 +2509,132 @@ class TestYieldFixup:
         After = _run_pipeline(Before)
         ir.assert_structural_equal(After, Expected)
         _assert_carry_writebacks_do_not_clobber(After)
+
+    def test_carry_writeback_distinguishes_slots_of_one_allocation(self):
+        """Two slots of one ``pl.MemRef(slots=2)`` are distinct carry buffers.
+
+        Comparing carries by allocation makes slot 0 and slot 1 look like the same
+        storage, so the swap's copies were dropped as unnecessary and both carries
+        kept their initial values for the whole loop. They share a base Ptr but
+        occupy disjoint byte ranges, so the swap needs the same spill-and-copy
+        treatment it gets on separate allocations.
+        """
+        slots = pl.MemRef(slots=2)
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                input_tensor: pl.Tensor[[64, 64], pl.FP32],
+                output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                head_0: pl.Tile[[64, 64], pl.FP32, slots[0], pl.Mem.Vec] = pl.load(
+                    input_tensor, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
+                tail_0: pl.Tile[[64, 64], pl.FP32, slots[1], pl.Mem.Vec] = pl.load(
+                    input_tensor, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
+                for _i, (cur, prev) in pl.range(0, 4, init_values=(head_0, tail_0)):
+                    swap_a: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = prev
+                    swap_b: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = cur
+                    _keep: pl.Tensor[[64, 64], pl.FP32] = pl.store(cur, [0, 0], output)
+                    r_cur, r_prev = pl.yield_(swap_a, swap_b)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(r_prev, [0, 0], output)
+                return result
+
+        After = _run_pipeline(Before)
+        _assert_carry_yield_lands_in_its_buffer(After)
+        _assert_carry_writebacks_do_not_clobber(After)
+        # The swap is a cycle, so one side parks in a scratch buffer first. Without
+        # it the two slots would just overwrite each other in whichever order ran.
+        assert _count_tile_moves_in_loops(After) == 3, "expected a spill plus both carry writebacks"
+
+    def test_nested_loop_carry_seeded_from_an_outer_iter_arg_is_written_back(self):
+        """An inner loop seeded from the enclosing loop's carry still needs its copy.
+
+        ``inner``'s initValue is the outer loop's ``IterArg``, whose own ObjectKind
+        ``As<Var>`` does not match, so the inner carry was skipped entirely and its
+        result never reached the buffer the outer loop reads. ``mrgsort`` is
+        ``.not_inplace_safe()``, so the retargeter cannot place ``grown`` on that
+        buffer either and a real ``tile.move`` is required.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                src_tensor: pl.Tensor[[1, 2048], pl.FP32],
+                idx_tensor: pl.Tensor[[1, 2048], pl.UINT32],
+                val_output: pl.Out[pl.Tensor[[1, 2048], pl.FP32]],
+            ) -> pl.Tensor[[1, 2048], pl.FP32]:
+                src_tile: pl.Tile[[1, 2048], pl.FP32] = pl.load(
+                    src_tensor, [0, 0], [1, 2048], target_memory=pl.Mem.Vec
+                )
+                idx_tile: pl.Tile[[1, 2048], pl.UINT32] = pl.load(
+                    idx_tensor, [0, 0], [1, 2048], target_memory=pl.Mem.Vec
+                )
+                seed: pl.Tile[[1, 4096], pl.FP32] = pl.tile.sort32(src_tile, idx_tile)
+                for _o, (outer,) in pl.range(0, 2, init_values=(seed,)):
+                    for _i, (inner,) in pl.range(0, 3, init_values=(outer,)):
+                        grown: pl.Tile[[1, 4096], pl.FP32] = pl.tile.mrgsort(inner, block_len=64)
+                        r_inner = pl.yield_(grown)
+                    r_outer = pl.yield_(r_inner)
+                vals: pl.Tile[[1, 2048], pl.FP32] = pl.tile.gather_mask(
+                    r_outer, mask_pattern=pl.tile.MaskPattern.P0101
+                )
+                out_val: pl.Tensor[[1, 2048], pl.FP32] = pl.store(vals, [0, 0], val_output)
+                return out_val
+
+        # `grown` lands on its own mem_vec_6; grown_mv copies it into the carry
+        # buffer mem_vec_5 that both loops read.
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                src_tensor: pl.Tensor[[1, 2048], pl.FP32, pl.MemRef("mem_ddr_0", 0, 8192)],
+                idx_tensor: pl.Tensor[[1, 2048], pl.UINT32, pl.MemRef("mem_ddr_1", 0, 8192)],
+                val_output: pl.Out[pl.Tensor[[1, 2048], pl.FP32, pl.MemRef("mem_ddr_2", 0, 8192)]],
+            ) -> pl.Tensor[[1, 2048], pl.FP32]:
+                mem_vec_4: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 8192)
+                mem_vec_5: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                mem_vec_6: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                src_tile: pl.Tile[[1, 2048], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = (
+                    pl.tile.load(src_tensor, [0, 0], [1, 2048], [1, 2048], target_memory=pl.Mem.Vec)
+                )
+                idx_tile: pl.Tile[[1, 2048], pl.UINT32, pl.MemRef(mem_vec_4, 0, 8192), pl.Mem.Vec] = (
+                    pl.tile.load(idx_tensor, [0, 0], [1, 2048], [1, 2048], target_memory=pl.Mem.Vec)
+                )
+                seed: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
+                    pl.tile.sort32(src_tile, idx_tile)
+                )
+                for _o, (outer,) in pl.range(2, init_values=(seed,)):
+                    for _i, (inner,) in pl.range(3, init_values=(outer,)):
+                        grown: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = (
+                            pl.tile.mrgsort(inner, block_len=64)
+                        )
+                        grown_mv: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
+                            pl.tile.move(grown, target_memory=pl.Mem.Vec)
+                        )
+                        r_inner: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
+                            pl.yield_(grown_mv)
+                        )
+                    r_outer: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
+                        pl.yield_(r_inner)
+                    )
+                vals: pl.Tile[[1, 2048], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = (
+                    pl.tile.gather_mask(r_outer, mask_pattern=pl.tile.MaskPattern.P0101)
+                )
+                out_val: pl.Tensor[[1, 2048], pl.FP32, pl.MemRef("mem_ddr_2", 0, 8192)] = pl.tile.store(
+                    vals, [0, 0], val_output
+                )
+                return out_val
+
+        After = _run_pipeline(Before)
+        ir.assert_structural_equal(After, Expected)
+        _assert_carry_yield_lands_in_its_buffer(After)
 
     def test_carries_sharing_one_buffer_are_rejected(self):
         """Two carries seeded from one tile share a buffer, which no order can save.
