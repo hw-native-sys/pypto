@@ -1200,6 +1200,73 @@ def test_boundary_result_yielded_into_iter_arg_fails():
     assert "yielded back into" in errors[0].message
 
 
+def test_boundary_yield_inside_trailing_region_fails():
+    """(i) The yield may sit INSIDE the loop's trailing region, not beside it.
+
+    ConvertToSSA places a loop's carry ``YieldStmt`` inside a trailing
+    ``SplitAivScopeStmt`` (SSAVerifier treats that scope as transparent), which is
+    the shape real DSL input takes: the region is the last thing in the body and
+    the carry is rebound within it. A scan over the body's direct children only
+    would not find that yield, and the back-edge carry would reach the broken
+    lowering unreported.
+    """
+    span = ir.Span.unknown()
+    seed_call = T.full([8, 128], FP32, 0.0, span=span)
+    seed = ir.Var("seed", seed_call.type, span)
+
+    carry = ir.IterArg("carry", seed_call.type, seed, span)
+    add = T.add(carry, carry, span)
+    inner = ir.Var("inner", add.type, span)
+    shard_stmt, sharded = _shard_of_acc(span, shape=[16, 128])
+    # Yield is the trailing statement INSIDE the region, not a sibling of it.
+    region = _region(
+        ir.SplitMode.UP_DOWN,
+        [ir.AssignStmt(inner, add, span), shard_stmt, ir.YieldStmt([sharded], span)],
+    )
+    loop = _loop(span, [carry], [region], return_vars=[ir.Var("rv", seed_call.type, span)])
+    seed_region = _region(ir.SplitMode.NONE, [ir.AssignStmt(seed, seed_call, span)])
+    program = _program(ir.SeqStmts([seed_region, loop], span))
+
+    errors = _errors(program)
+    assert len(errors) == 1
+    assert "across a loop back-edge" in errors[0].message
+    assert "yielded back into" in errors[0].message
+
+
+def test_non_trailing_yield_is_not_paired_with_iter_args():
+    """(i) A yield that is not on the back edge must not be paired positionally.
+
+    Only the body's LAST statement carries the loop's back edge. A yield with
+    statements after it is some other construct (or malformed IR another verifier
+    reports), so pairing its values with iter_args would attribute a boundary
+    result to a carry that does not exist -- a misleading diagnostic. The init
+    here is a non-boundary tile, so the yield arm is the only one that could fire.
+    """
+    span = ir.Span.unknown()
+    seed_call = T.full([8, 128], FP32, 0.0, span=span)
+    seed = ir.Var("seed", seed_call.type, span)
+
+    carry = ir.IterArg("carry", seed_call.type, seed, span)
+    add = T.add(carry, carry, span)
+    inner = ir.Var("inner", add.type, span)
+    shard_stmt, sharded = _shard_of_acc(span, shape=[16, 128])
+    loop = _loop(
+        span,
+        [carry],
+        [
+            _region(ir.SplitMode.UP_DOWN, [shard_stmt]),
+            ir.YieldStmt([sharded], span),
+            # Trailing statement: the yield above is therefore NOT the back edge.
+            _region(ir.SplitMode.NONE, [ir.AssignStmt(inner, add, span)]),
+        ],
+        return_vars=[ir.Var("rv", seed_call.type, span)],
+    )
+    seed_region = _region(ir.SplitMode.NONE, [ir.AssignStmt(seed, seed_call, span)])
+    program = _program(ir.SeqStmts([seed_region, loop], span))
+
+    assert not [e for e in _errors(program) if "across a loop back-edge" in e.message]
+
+
 def test_boundary_carry_in_while_loop_fails():
     """(i) covers WhileStmt iter_args too, not just ForStmt."""
     span = ir.Span.unknown()

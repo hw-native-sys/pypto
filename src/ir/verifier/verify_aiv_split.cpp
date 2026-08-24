@@ -30,6 +30,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
 #include "pypto/ir/transforms/utils/split_axis_utils.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
 
@@ -148,20 +149,18 @@ CallPtr BoundaryDefOfIn(const ExprPtr& expr, const std::unordered_map<const Var*
 /// would report an if-arm as a loop carry.
 const std::vector<ExprPtr>* TrailingYieldValues(const StmtPtr& body, size_t arity) {
   if (!body) return nullptr;
-  const std::vector<StmtPtr>* stmts = nullptr;
-  std::vector<StmtPtr> single;
-  if (auto seq = As<SeqStmts>(body)) {
-    stmts = &seq->stmts_;
-  } else {
-    single.push_back(body);
-    stmts = &single;
-  }
-  for (size_t i = stmts->size(); i-- > 0;) {
-    if (auto yield = As<YieldStmt>((*stmts)[i])) {
-      return yield->value_.size() == arity ? &yield->value_ : nullptr;
-    }
-  }
-  return nullptr;
+  // transform_utils::GetLastYieldStmt is the shared traversal for "the yield on
+  // this body's back edge", and it is the one to reuse rather than re-roll: it
+  // descends only the LAST statement (so a yield with anything after it is not
+  // mistaken for the back edge), and it steps through RuntimeScopeStmt and
+  // SplitAivScopeStmt, which SSA treats as transparent. ConvertToSSA places a
+  // loop's carry yield INSIDE a trailing region, so that second property is not
+  // an edge case here -- it is the shape ordinary DSL input takes.
+  auto yield = transform_utils::GetLastYieldStmt(body);
+  // Arity mismatch is another verifier's finding; pairing values with iter_args
+  // positionally would be wrong here, so leave the yield side unchecked instead.
+  if (!yield || yield->value_.size() != arity) return nullptr;
+  return &yield->value_;
 }
 
 /// The lane a call reads its OPERANDS on — what the crossing checks (f)/(g) need
