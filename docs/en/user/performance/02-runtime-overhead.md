@@ -8,8 +8,8 @@ Five ways to spend less time per task without changing what the tasks compute.
 
 Granularity changes *how many* tasks there are. This page changes *what each one costs*:
 one dispatch instead of two, one dispatch instead of `N`, no dispatch at all when a runtime
-value says the work is unnecessary, a dispatch that starts earlier, or no dispatch at all
-where a barrier will do.
+value says the work is unnecessary, a dispatch that starts earlier, or one kernel carrying a
+barrier in place of two tasks and the AICPU round-trip between them.
 
 | Technique | Removes |
 | --------- | ------- |
@@ -176,17 +176,26 @@ retired inline: it never reaches a core, while its fanin and fanout still settle
 consumers unlock exactly as they would have.
 
 **Cost:** the task still exists. You save the dispatch and the core time, not the
-bookkeeping — the slot, the edges and the retirement all still happen, so predicating a
-task that almost always runs buys nothing and costs a little. Three constraints bite:
+bookkeeping — the slot, the edges and the retirement all still happen. So the saving is
+roughly *how often it skips* × *what the task costs*, against a fixed per-task overhead: an
+expensive task worth skipping one run in twenty can pay for itself, a cheap one that almost
+always runs will not. It is a measurement, not a rule of thumb.
+
+Two limits are enforced when you compile, so they bound what you can express rather than
+waiting to surprise you:
 
 - Only `tensor[indices] OP int-literal`, one comparison. No arithmetic, no `and`/`or`. Reduce
   anything richer to a single gate value in a prior kernel.
 - The operand must be a **signed** 8/16/32/64-bit integer tensor. The runtime sign-extends
-  what it reads, so a `UINT32` count of 3'000'000'000 compares as negative and inverts the
-  decision silently.
+  the bytes it reads, which is exactly why an unsigned operand is refused rather than
+  quietly compared as a negative number.
+
+The third is the one to watch, because nothing can check it in general:
+
 - The operand's producer must be among this task's `deps=`, or the dispatch-point read can
-  see stale data. Above, `gate` is a function parameter with no producer at all, which is
-  the trivially safe case.
+  see stale data — no diagnostic, just a decision made from an old value. The parser catches
+  it only where the producer is statically provable. Above, `gate` is a function parameter
+  with no producer at all, which is the trivially safe case.
 
 **How to confirm:** the swimlane shows the predicated task retiring without occupying a core
 lane, and the graph keeps its shape — the node is still there, it just did not run.
