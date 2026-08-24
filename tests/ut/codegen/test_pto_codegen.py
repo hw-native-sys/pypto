@@ -1815,6 +1815,7 @@ class TestGenerateKernelWrapper:
         transformed = _run_default_passes(SplitWrapperProgram)
         func = transformed.get_function("split_vec")
         assert func is not None
+        assert _uses_dynamic_subblock_id(func) is True
         assert transformed.get_function("split_vec__aiv1") is None
 
         wrapper = _generate_kernel_wrapper(
@@ -2029,6 +2030,7 @@ AICORE void split_vec() {
         split_vec = transformed.get_function("split_vec")
         assert split_cube is not None
         assert split_vec is not None
+        assert _uses_dynamic_subblock_id(split_vec) is True
 
         monkeypatch.setattr(
             "pypto.backend.pto_backend._compile_pto_module",

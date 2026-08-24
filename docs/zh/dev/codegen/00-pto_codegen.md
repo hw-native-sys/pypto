@@ -865,10 +865,11 @@ lane id,而非 ccec `get_subblockid()` 寄存器 -- 后者在
 `TPUSH(pipe, tile, subblock_id)` / `TPOP(...)` 的第三个实参传入。如果函数还没有
 合成的 subblock 形参，后端会给生成函数增加一个私有尾随形参。显式重载根据每次调用
 的实际 tile 类型推导字节偏移，因此同一个自动 pipe 可以安全承载大小不同的连续传输。
-与 block 身份一样，运行时 lane 无条件发射（无 `__CPU_SIM` 分叉），因为
-`GlobalContext.sub_block_id` 在每个平台都由调度器填充。CPU simulation 和 in-core
-cost-model 构建保留 PTO-ISA 的普通双实参端点，因为这些实现已经对 lane context
-建模，且不提供仅用于 device 的显式 lane 重载。
+与 block 身份一样，wrapper 会无条件解析运行时 lane，因为
+`GlobalContext.sub_block_id` 在每个平台都由调度器填充。端点实参则受构建条件保护：
+device 构建会把 lane 传给显式重载，而 CPU simulation 和 in-core cost-model 构建保留
+PTO-ISA 的普通双实参端点，因为这些实现已经对 lane context 建模，且不提供仅用于
+device 的显式 lane 重载。
 
 **检测范围。** 两层各自基于函数体独立检测 SPMD usage:
 

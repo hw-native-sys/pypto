@@ -914,11 +914,13 @@ function has no synthetic subblock parameter already, the backend adds a
 private trailing parameter to the generated function. The explicit overload
 derives the byte offset from each call's actual tile type, so one automatic
 pipe can safely carry differently sized sequential transfers. Like block
-identity, the runtime lane is emitted unconditionally (no `__CPU_SIM` fork)
-because `GlobalContext.sub_block_id` is populated by the scheduler on every
-platform. CPU simulation and in-core cost-model builds retain PTO-ISA's normal
-two-argument endpoint because those implementations already model their lane
-context and do not expose the device-only explicit-lane overload.
+identity, the wrapper resolves the runtime lane unconditionally because
+`GlobalContext.sub_block_id` is populated by the scheduler on every platform.
+The endpoint argument is build-guarded: device builds pass the lane to the
+explicit overload, while CPU simulation and in-core cost-model builds retain
+PTO-ISA's normal two-argument endpoint because those implementations already
+model their lane context and do not expose the device-only explicit-lane
+overload.
 
 **Detection scope.** Both layers detect SPMD usage on a per-function basis:
 
