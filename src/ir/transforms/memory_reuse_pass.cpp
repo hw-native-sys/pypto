@@ -41,6 +41,7 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
@@ -1454,12 +1455,27 @@ LifetimeAnalysisResult AnalyzeAllocationLifetimesImpl(const StmtPtr& func_body,
           std::move(pipeline_load_tiles)};
 }
 
-// NOTE: The former tile-type reuse-compatibility gate (AreTileTypesCompatible)
-// has been removed. PTO codegen binds a per-var alloc_tile to each tile, so two
-// tiles that share a physical MemRef can legally carry different shapes, dtypes,
-// or TileView attributes. In-place read/write hazards are handled precisely by
-// not_inplace_safe() and per-operand forbid_output_alias() markers (see
-// ForbidAliasCollector below).
+// PTO codegen binds a per-var alloc_tile to each tile, so lifetime-disjoint
+// values may generally share one physical MemRef despite different shapes or
+// dtypes.  Vec ND and NZ are the narrow exception on A5: reusing one address
+// across those representation families silently corrupts mixed-kernel values,
+// even when no single tile.move aliases its own input.  Keep the gate Vec-only
+// so Left/Right/Mat cross-shape reuse remains available.
+static bool IsNzLikeBlayout(TileLayout blayout) { return blayout == TileLayout::col_major; }
+
+static std::optional<bool> GetVecNzLayoutClass(const VarPtr& var) {
+  auto tile = As<TileType>(var->GetType());
+  if (!tile) return std::nullopt;
+  const auto space = tile->GetMemorySpace();
+  if (!space || *space != MemorySpace::Vec) return std::nullopt;
+  return IsNzLikeBlayout(tile_view_semantics::GetEffectiveTileView(*tile).blayout);
+}
+
+static bool AreVecNdNzCompatible(const VarPtr& first, const VarPtr& second) {
+  const auto first_class = GetVecNzLayoutClass(first);
+  const auto second_class = GetVecNzLayoutClass(second);
+  return !first_class.has_value() || !second_class.has_value() || first_class == second_class;
+}
 
 /**
  * @brief Check if two lifetimes overlap.
@@ -2168,10 +2184,10 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
   // Can `cand` join a single physical buffer that already holds `member`?
   // Lifetimes must not overlap (touching is allowed: a buffer's reader is
   // consumed before the writer at the same statement produces its output), and
-  // neither directional gate may block. No tile-type / size check is needed:
-  // PTO binds a per-var alloc_tile so differing shapes/dtypes legally alias one
-  // base, and largest-first ordering guarantees the buffer is sized to its
-  // representative (no member is ever larger than the buffer it joins).
+  // neither directional gate may block. Shape/dtype need not match: PTO binds a
+  // per-var alloc_tile so differing shapes/dtypes legally alias one base, and
+  // largest-first ordering guarantees the buffer is sized to its representative.
+  // On Vec only, ND and NZ must not share — see AreVecNdNzCompatible.
   auto can_share = [&](const LifetimeInterval& cand, const LifetimeInterval& member) {
     // Group-interval overlap is a fast reject; when it fires, fall back to the
     // precise per-var check so mutually-exclusive / same-value phi-family tiles
@@ -2181,6 +2197,7 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
     if (hazard_blocks(cand, member) || hazard_blocks(member, cand)) return false;
     if (forbid_blocks(cand, member) || forbid_blocks(member, cand)) return false;
     if (pipeline_blocks(cand, member)) return false;  // symmetric — one call suffices
+    if (!AreVecNdNzCompatible(cand.variable, member.variable)) return false;
     return true;
   };
 
@@ -3292,6 +3309,12 @@ AllocationConstraintAnalysis AnalyzeAllocationConstraints(const FunctionPtr& fun
     result.declared_allocation_bases.insert(base);
   }
   ValidateDeclaredAllocs(func->body_, result.declared_allocation_bases, lifetimes.var_liveness);
+
+  for (const LifetimeInterval& interval : lifetimes.lifetimes) {
+    if (const auto layout_class = GetVecNzLayoutClass(interval.variable)) {
+      result.vec_nz_layout_class.emplace(interval.variable.get(), *layout_class);
+    }
+  }
 
   result.needs_load_tpop_hazard_guard = NeedsLoadTpopHazardGuard(func);
   if (result.needs_load_tpop_hazard_guard) {

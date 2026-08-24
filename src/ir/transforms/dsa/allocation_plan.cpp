@@ -101,6 +101,41 @@ AllocationPlan BuildDsaAllocationPlan(const FunctionPtr& func) {
     }
   }
 
+  // A5 Vec storage is representation-sensitive: lifetime-disjoint ND and NZ
+  // tiles still need different physical addresses.  Materialize only the
+  // cross-class pairs, preserving reuse within each representation family.
+  std::vector<size_t> vec_nd_intervals;
+  std::vector<size_t> vec_nz_intervals;
+  for (size_t index = 0; index < intervals.size(); ++index) {
+    const auto layout = constraints.vec_nz_layout_class.find(intervals[index].variable.get());
+    if (layout == constraints.vec_nz_layout_class.end()) continue;
+    (layout->second ? vec_nz_intervals : vec_nd_intervals).push_back(index);
+  }
+  auto add_disjoint_layout_pairs = [&intervals, &add_separation](std::vector<size_t> earlier,
+                                                                 std::vector<size_t> later) {
+    std::sort(earlier.begin(), earlier.end(), [&intervals](size_t lhs, size_t rhs) {
+      return std::pair{intervals[lhs].last_use_point, lhs} <
+             std::pair{intervals[rhs].last_use_point, rhs};
+    });
+    std::sort(later.begin(), later.end(), [&intervals](size_t lhs, size_t rhs) {
+      return std::pair{intervals[lhs].def_point, lhs} <
+             std::pair{intervals[rhs].def_point, rhs};
+    });
+
+    size_t eligible = 0;
+    for (size_t later_index : later) {
+      while (eligible < earlier.size() &&
+             intervals[earlier[eligible]].last_use_point <= intervals[later_index].def_point) {
+        ++eligible;
+      }
+      for (size_t prior = 0; prior < eligible; ++prior) {
+        add_separation(earlier[prior], later_index, AllocationSeparationReason::StorageLayout);
+      }
+    }
+  };
+  add_disjoint_layout_pairs(vec_nd_intervals, vec_nz_intervals);
+  add_disjoint_layout_pairs(vec_nz_intervals, vec_nd_intervals);
+
   // Preserve requested software-pipeline depth as hard separations first. The
   // DSA-RP driver alone may later relax this typed policy under capacity pressure.
   using GroupKey = std::pair<MemorySpace, int32_t>;
