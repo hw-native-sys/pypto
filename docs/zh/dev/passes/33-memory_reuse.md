@@ -26,8 +26,8 @@
 
 `MemoryReuse` 在地址分配前先选择共享的 MemRef 身份。`DSA_RP` 则保留这些独立
 身份，并在 `AllocateMemoryAddr` 中结合容量与复用惩罚联合选择地址。二者同时运行
-会在 DSA-RP 评估之前删除候选方案。生命周期干涉、语义 no-alias 规则与目标
-hazard 等正确性事实，在 DSA-RP 问题中仍然是硬约束。
+会在 DSA-RP 评估之前删除候选方案。生命周期干涉、语义 no-alias 规则、目标
+hazard 与 Vec ND/NZ storage-layout 分离等正确性事实，在 DSA-RP 问题中仍然是硬约束。
 
 ## API
 
@@ -97,14 +97,18 @@ program_optimized = reuse_pass(program)
 - `DSA_RP` 跳过 `MemoryReuse`；它把请求的流水线深度表示为硬分离，并在
   `AllocateMemoryAddr` 中执行仅放宽流水线意图的回退。
 
-**不再有 shape / dtype / TileView 兼容性门槛**：共享同一物理 MemRef 的 tile 可以携带**不同**的 shape、dtype 或 `TileView` 属性。PTO codegen 为每个 tile 绑定一条 per-variable 的 `alloc_tile`，因此每个别名都以各自的静态 shape / dtype / layout / `valid_shape` 声明共享基址。这允许例如：
+**允许跨 shape / dtype 复用，但 Vec storage layout 除外**：共享同一物理 MemRef 的 tile 通常可以携带**不同**的 shape、dtype 或 `TileView` 属性。PTO codegen 为每个 tile 绑定一条 per-variable 的 `alloc_tile`，因此每个别名都以各自的静态 shape / dtype / layout / `valid_shape` 声明共享基址。
+
+A5 Vec 存储对表示形式敏感：即使生命周期不相交，有效 layout 分属 ND-like 与 NZ-like 的两个 Vec tile 也不得共享物理地址。`MemoryReuse` 通过狭窄的 `AreVecNdNzCompatible` 门槛执行该限制。同一 Vec 表示族内仍允许复用（包括 fractal 不同的情形），非 Vec 内存空间也不受此门槛限制。`DSA_RP` 会把每个跨表示族 pair 以不可放宽的 `StorageLayout` 硬分离传给 `AllocateMemoryAddr`。
+
+除此之外仍允许例如：
 
 - 跨 dtype 复用 —— BF16 tile 复用已死亡的 FP32 tile 的缓冲区（例如跨 `tile.cast`）；
 - `tile.fillpad` 输出复用其输入，以及两个 `pad` 不同的 fillpad 输出共享一个缓冲区；
-- N-D tile 在 `valid_shape` 不同的情况下共享缓冲区（各自在自己的 `alloc_tile` 上保留各自的 `valid_shape`）；
+- N-D tile 在 `valid_shape` 不同的情况下共享缓冲区（各自在自己的 `alloc_tile` 上保留各自的 `valid_shape`），以及同一 Vec 表示族内 fractal 不同的 tile 共享缓冲区；
 - L0 cube 输入 `Left` / `Right` 中 shape 不同的子 tile 共享同一槽位（例如 fused-attention QK 的 `Right` `[k, SEQ]` 被 PV 的 `Right` `[k', HEAD]` 复用，将 L0B 峰值减半 —— issue #1595）。
 
-  早期版本以 `AreTileTypesCompatible`（shape / dtype / view 匹配，外加一个狭窄的 L0 字节复用例外）作为门槛；该门槛已移除。对读-写同体（read-while-write）算子的正确性现由上面的 no-alias 守护精确处理，而不再依赖粗粒度的整块匹配。
+  旧的粗粒度 `AreTileTypesCompatible`（shape / dtype / view 匹配，外加一个狭窄的 L0 字节复用例外）仍已移除。对读-写同体（read-while-write）算子的正确性由上面的 no-alias 守护精确处理；Vec ND/NZ 规则是独立的物理存储约束，因此也覆盖彼此无关但生命周期不相交的值。
 
 **Alloc 清理**：
 
@@ -255,7 +259,8 @@ passes.def("memory_reuse", &pass::MemoryReuse, "Memory reuse optimization");
 - 测试重叠生命周期不复用
 - 测试内存空间隔离
 - 测试字节大小兼容性
-- 测试跨 dtype / 跨 `TileView` 复用（现已允许：BF16↔FP32、fillpad 输出↔输入、`valid_shape` 不同）
+- 测试 storage-compatible 的跨 dtype / 跨 `TileView` 复用（BF16↔FP32、fillpad 输出↔输入、`valid_shape` 不同、同一 Vec 表示族内 fractal 不同）
+- 测试生命周期不相交的 Vec ND/NZ tile 在 `MemoryReuse` 和 `DSA_RP` 下均保持分离
 - 测试 no-alias 守护（`TestForbidOutputAlias` + `TestInplaceOps`），上表每条约束一个用例：
   - `tile.recip` / `tile.rsqrt` / `tile.row_sum` —— 输出不得 alias 输入（`not_inplace_safe`）
   - `tile.sel` —— 输出不得 alias mask / tmp（`forbid_output_alias`）

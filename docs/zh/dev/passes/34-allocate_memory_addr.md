@@ -73,8 +73,8 @@ compile(program, memory_planner=passes.MemoryPlanner.DSA_RP)
 每个片上内存空间都是独立的固定容量 arena。强制别名物化后的每个分配身份成为一个
 buffer，带有字节大小、对齐和保守的半开生命周期。问题包含：
 
-- 生命周期干涉、预留范围、语义 no-alias、目标 hazard 和请求的流水线 stage
-  分离等**硬约束**；作者声明的 `pl.MemRef`
+- 生命周期干涉、预留范围、语义 no-alias、目标 hazard、Vec ND/NZ storage layout
+  分离（`StorageLayout`）和请求的流水线 stage 分离等**硬约束**；作者声明的 `pl.MemRef`
   分配还会与同一内存空间中的其他所有分配建立硬分离。多 slot 声明会作为覆盖完整
   声明范围的单个 buffer 放置，同时每个成员保留其常量或运行时选择的 slot 偏移；
 - 对生命周期兼容的物理复用，如果内置 recognizer 将其识别为跨 pipe WAR 或 WAW
@@ -102,8 +102,9 @@ Canonical greedy 尝试偏移 `0`、预留范围末尾，以及已放置硬/软�
 1. 先在所有请求的跨 stage 分离均为硬约束时运行有界 canonical-greedy 搜索。
 2. 若该搜索未找到可放置方案——这并不证明严格数学问题不可行——则仅放宽唯一硬
    理由为流水线意图的 pair，把它们改为单位复用惩罚后再次搜索。
-3. 若最终放置重叠了放宽的 pair，发出 `PH-DSA-001` 性能诊断。所有语义与目标
-   hazard 分离始终保持为硬约束。若放宽后的有界搜索仍未找到可放置方案，则报告
+3. 若最终放置重叠了放宽的 pair，发出 `PH-DSA-001` 性能诊断。所有语义、目标
+   hazard 与 `StorageLayout` 分离始终保持为硬约束。若放宽后的有界搜索仍未找到
+   可放置方案，则报告
    OOM/no-fit 编译错误；这仍表示搜索失败，并非不可行性证明。
 
 > **工具链要求：** `DSA_RP` 依赖 ptoas InsertSync 识别不同分配根之间的物理范围
@@ -206,8 +207,8 @@ passes.def("allocate_memory_addr", &pass::AllocateMemoryAddr,
 - 测试 MemRef 去重的原始指针唯一性
 - 测试无后端配置时的默认策略行为
 - 测试容量诊断会归因跨核流水 ring 预留的字节数（见下文）
-- 测试 DSA-RP 几何、容量、硬约束、惩罚激活、确定性 canonical-greedy 放置、
-  以及独立验证
+- 测试 DSA-RP 几何、容量、硬约束（包括 Vec ND/NZ 的 `StorageLayout` 分离）、
+  惩罚激活、确定性 canonical-greedy 放置以及独立验证
 - 直接测试 solver 之前的精确 recognizer edge 集合，并测试最终放置几何
 - 刻画 canonical-greedy `kNoFit` 只是有界搜索结果，而不是不可行性证明
 

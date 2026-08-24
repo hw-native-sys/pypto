@@ -31,7 +31,8 @@ Semantics-required loop-carry and in-place aliases are already materialized by
 addresses under capacity and reuse penalties in `AllocateMemoryAddr`. Running
 both would erase alternatives before DSA-RP can evaluate them. Correctness
 facts collected for this pass—lifetime interference, semantic no-alias rules,
-and target hazards—remain hard constraints in the DSA-RP problem.
+target hazards, and Vec ND/NZ storage-layout separation—remain hard constraints
+in the DSA-RP problem.
 
 ## API
 
@@ -101,14 +102,18 @@ program_optimized = reuse_pass(program)
 - `DSA_RP` skips `MemoryReuse`; it represents requested pipeline depth as hard
   separations and performs its pipeline-only fallback in `AllocateMemoryAddr`.
 
-**No shape / dtype / TileView compatibility gate**: tiles that share a physical MemRef may carry **different** shapes, dtypes, or `TileView` attributes. PTO codegen binds a per-variable `alloc_tile` to each tile, so each alias declares the shared base with its own static shape / dtype / layout / `valid_shape`. This permits, for example:
+**Shape / dtype reuse, with a Vec storage-layout exception**: tiles that share a physical MemRef may generally carry **different** shapes, dtypes, or `TileView` attributes. PTO codegen binds a per-variable `alloc_tile` to each tile, so each alias declares the shared base with its own static shape / dtype / layout / `valid_shape`.
+
+A5 Vec storage is representation-sensitive: even when their lifetimes are disjoint, a Vec tile with an effective ND-like layout and one with an effective NZ-like layout must not share a physical address. `MemoryReuse` enforces this with the narrow `AreVecNdNzCompatible` gate. Reuse remains permitted within the same Vec representation family (including different fractals), and the gate does not apply to non-Vec memory spaces. `DSA_RP` exports each cross-family pair as an unrelaxable `StorageLayout` hard separation in `AllocateMemoryAddr`.
+
+The remaining flexibility permits, for example:
 
 - cross-dtype reuse — a BF16 tile reusing a dead FP32 tile's buffer (e.g. across `tile.cast`);
 - `tile.fillpad` output reusing its input, and two fillpad outputs with different `pad` sharing one buffer;
-- N-D tiles with divergent `valid_shape` sharing a buffer (each keeps its own `valid_shape` on its own `alloc_tile`);
+- N-D tiles with divergent `valid_shape` sharing a buffer (each keeps its own `valid_shape` on its own `alloc_tile`), and same-family Vec layouts with different fractals sharing a buffer;
 - L0 cube-input `Left` / `Right` sub-tiles of differing shape sharing one slot (e.g. fused-attention QK `Right` `[k, SEQ]` reused by PV `Right` `[k', HEAD]`, halving peak L0B — issue #1595).
 
-  Earlier revisions gated reuse on an `AreTileTypesCompatible` shape / dtype / view match (with a narrow L0 byte-reuse exception); that gate has been removed. Correctness for read-while-write ops is now handled precisely by the no-alias guard above rather than by a coarse whole-tile match.
+  The former coarse `AreTileTypesCompatible` shape / dtype / view match (with a narrow L0 byte-reuse exception) remains removed. Correctness for read-while-write ops is handled precisely by the no-alias guard above; the Vec ND/NZ rule is an independent physical-storage constraint and therefore also covers unrelated, lifetime-disjoint values.
 
 **Alloc cleanup**:
 
@@ -268,7 +273,8 @@ passes.def("memory_reuse", &pass::MemoryReuse, "Memory reuse optimization");
 - Tests overlapping lifetime no-reuse
 - Tests memory space separation
 - Tests byte-size compatibility
-- Tests cross-dtype / cross-`TileView` reuse (now permitted: BF16↔FP32, fillpad output↔input, divergent `valid_shape`)
+- Tests cross-dtype / cross-`TileView` reuse where storage-compatible (BF16↔FP32, fillpad output↔input, divergent `valid_shape`, same-family Vec fractals)
+- Tests that lifetime-disjoint Vec ND/NZ tiles stay separate with both `MemoryReuse` and `DSA_RP`
 - Tests the no-alias guard (`TestForbidOutputAlias` + `TestInplaceOps`), one case per constraint above:
   - `tile.recip` / `tile.rsqrt` / `tile.row_sum` — output must not alias input (`not_inplace_safe`)
   - `tile.sel` — output must not alias the mask / tmp (`forbid_output_alias`)

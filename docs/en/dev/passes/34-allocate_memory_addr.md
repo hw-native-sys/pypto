@@ -82,7 +82,8 @@ post-alias allocation identity becomes one buffer with byte size, alignment,
 and a conservative half-open lifetime. The problem has:
 
 - **hard constraints** for lifetime interference, reserved ranges, semantic
-  no-alias rules, target hazards, and requested pipeline-stage separation.
+  no-alias rules, target hazards, Vec ND/NZ storage-layout separation
+  (`StorageLayout`), and requested pipeline-stage separation.
   Author-declared `pl.MemRef` allocations
   are also hard-separated from every other allocation in their memory space.
   A multi-slot declaration is placed as one buffer covering its full declared
@@ -124,8 +125,9 @@ Pipeline intent uses a strict-then-soft policy:
    reason is pipeline intent, add unit reuse penalties for them, and search
    again.
 3. If the selected placement overlaps a relaxed pair, emit the
-   `PH-DSA-001` performance diagnostic. All semantic and target-hazard
-   separations remain hard. If the relaxed bounded search also finds no fit,
+   `PH-DSA-001` performance diagnostic. All semantic, target-hazard, and
+   `StorageLayout` separations remain hard. If the relaxed bounded search also
+   finds no fit,
    report a compile-time OOM/no-fit error; this remains a search failure, not
    an infeasibility certificate.
 
@@ -233,8 +235,9 @@ passes.def("allocate_memory_addr", &pass::AllocateMemoryAddr,
 - Tests raw pointer uniqueness for MemRef deduplication
 - Tests default policy behavior without a backend configured
 - Tests the capacity diagnostic attributes reserved cross-core pipe bytes (see below)
-- Tests DSA-RP geometry, capacity, hard constraints, penalty activation,
-  deterministic canonical-greedy placement, and independent validation
+- Tests DSA-RP geometry, capacity, hard constraints (including Vec ND/NZ
+  `StorageLayout` separation), penalty activation, deterministic canonical-greedy
+  placement, and independent validation
 - Tests exact pre-solver recognized-edge sets as well as their final placement geometry
 - Characterizes that canonical-greedy `kNoFit` is a bounded-search result, not an infeasibility proof
 
