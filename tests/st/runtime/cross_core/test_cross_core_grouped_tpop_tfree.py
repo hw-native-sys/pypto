@@ -165,11 +165,18 @@ def _replace_ptoas_function_body(wrapper_text: str, new_ptoas_text: str, func_na
     """Replace one rewritten PTOAS function body without disturbing its group peers."""
     _, _, old_body_start, old_body_end = _find_ptoas_function(func_name, wrapper_text)
     _, _, new_body_start, new_body_end = _find_ptoas_function(func_name, new_ptoas_text)
-    return (
+    rewritten = (
         wrapper_text[: old_body_start + 1]
         + new_ptoas_text[new_body_start + 1 : new_body_end]
         + wrapper_text[old_body_end:]
     )
+    _, _, rewritten_body_start, rewritten_body_end = _find_ptoas_function(func_name, rewritten)
+    old_non_target = wrapper_text[: old_body_start + 1] + wrapper_text[old_body_end:]
+    rewritten_non_target = rewritten[: rewritten_body_start + 1] + rewritten[rewritten_body_end:]
+    assert rewritten_non_target == old_non_target, (
+        f"Rewriting {func_name} must preserve every other grouped function and wrapper section"
+    )
+    return rewritten
 
 
 def _rebuild_consecutive_tpop_tfree_artifact(work_dir: Path) -> None:
@@ -188,12 +195,7 @@ def _rebuild_consecutive_tpop_tfree_artifact(work_dir: Path) -> None:
     for kernel in kernel_config.KERNELS:
         wrapper_path = Path(kernel["source"])
         wrapper_text = wrapper_path.read_text(encoding="utf-8")
-        lane_forwarding_count = wrapper_text.count("PYPTO_SPLIT_RUNTIME_LANE_ARG(")
-        assert lane_forwarding_count > 2, "Expected split AIV calls to forward the runtime lane"
         rewritten_wrapper = _replace_ptoas_function_body(wrapper_text, new_body, "main_incore_0_aic")
-        assert rewritten_wrapper.count("PYPTO_SPLIT_RUNTIME_LANE_ARG(") == lane_forwarding_count, (
-            "Reordering the AIC body must preserve split AIV lane forwarding"
-        )
         wrapper_path.write_text(
             rewritten_wrapper,
             encoding="utf-8",
