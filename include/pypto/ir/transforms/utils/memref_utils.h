@@ -223,6 +223,32 @@ inline MemRefPtr GetDefinedMemRef(const std::shared_ptr<const TileType>& tile_ty
   return *tile_type->memref_;
 }
 
+/// Do two MemRefs start at the same address in the same allocation?
+///
+/// Stronger than `MemRef::SameAllocation`, which compares only the base Ptr: two
+/// slots of one `pl.MemRef(slots=N)` share a base at different offsets, so
+/// "same allocation" does not mean "same storage". Use this wherever the
+/// question is whether a value already sits where it has to end up — between two
+/// slots of one allocation a reconciling copy is still required.
+///
+/// Size is deliberately not compared. A padded loop-carried accumulator carries
+/// its buffer under one valid shape and yields it under another, so the two
+/// MemRefs describe the same storage at differing extents; requiring equal sizes
+/// would ask for a copy from a buffer onto itself, which for `Acc` has no legal
+/// lowering at all.
+///
+/// A non-constant offset is only accepted when both sides carry the *same*
+/// offset expression, so an unprovable pair reports "not the same address" and
+/// the caller emits the copy rather than silently dropping it.
+inline bool SameBaseAddress(const MemRefPtr& a, const MemRefPtr& b) {
+  CHECK(a != nullptr && b != nullptr) << "MemRef must not be null";
+  if (a->base_.get() != b->base_.get()) return false;
+  if (a->byte_offset_.get() == b->byte_offset_.get()) return true;
+  auto off_a = As<ConstInt>(a->byte_offset_);
+  auto off_b = As<ConstInt>(b->byte_offset_);
+  return off_a && off_b && off_a->value_ == off_b->value_;
+}
+
 inline bool TryRegisterUniqueMemRef(const MemRefPtr& memref, MemorySpace memory_space,
                                     std::map<const MemRef*, MemorySpace>& seen_ptrs) {
   CHECK(memref != nullptr) << "MemRef must not be null";

@@ -2787,25 +2787,41 @@ class YieldFixupMutator : public IRMutator {
     // Check each (iter_arg, yield_value) pair for MemRef mismatch.
     // Use initValue's MemRef as the target because codegen maps iter_arg to initValue's buffer,
     // and MemoryReuse may have updated initValue's MemRef without updating iter_arg's.
-    RejectOverlappingCarryBuffers(for_stmt);
+    // One index over the carry buffers serves both the overlap rejection below
+    // and the conflict graph in OrderCarryCopies.
+    const std::vector<MemRefPtr> carry_ranges = CollectCarryRanges(for_stmt);
+    const CarryRangeIndex carry_index(carry_ranges);
+    RejectOverlappingCarryBuffers(for_stmt, carry_index);
 
     std::vector<CarryCopy> copies;
     for (size_t i = 0; i < yield_stmt->value_.size() && i < for_stmt->iter_args_.size(); ++i) {
-      auto yield_var = As<Var>(yield_stmt->value_[i]);
+      // AsVarLike, not As<Var>: a nested loop both yields and seeds carries with
+      // the enclosing loop's IterArg, whose own ObjectKind As<Var> does not match.
+      // Skipping those left the nested carry with no writeback at all.
+      auto yield_var = AsVarLike(yield_stmt->value_[i]);
       if (!yield_var) continue;
+
+      // Yielding this position's own iter_arg leaves the carry untouched, so
+      // there is nothing to write back. Short-circuit before comparing buffers:
+      // it is the one case where the two sides are the same storage by
+      // construction, whatever their (possibly still stale) types say.
+      if (yield_var.get() == static_cast<const Var*>(for_stmt->iter_args_[i].get())) continue;
 
       auto yield_tile = GetTileTypeWithMemRef(yield_var->GetType());
       if (!yield_tile) continue;
       auto yield_memref = GetDefinedMemRef(yield_tile);
 
       // Get the initValue's MemRef (the actual buffer used at runtime)
-      auto init_var = As<Var>(for_stmt->iter_args_[i]->initValue_);
+      auto init_var = AsVarLike(for_stmt->iter_args_[i]->initValue_);
       if (!init_var) continue;
       auto init_tile = GetTileTypeWithMemRef(init_var->GetType());
       if (!init_tile) continue;
       auto init_memref = GetDefinedMemRef(init_tile);
 
-      if (MemRef::SameAllocation(yield_memref, init_memref)) continue;
+      // SameBaseAddress, not SameAllocation: two slots of one pl.MemRef(slots=N)
+      // share a base, so "same allocation" would skip the copy that moves the
+      // value from one slot to the other and silently carry the wrong slot.
+      if (SameBaseAddress(yield_memref, init_memref)) continue;
 
       // MemRef mismatch — create tile.move to copy yield value into initValue's buffer
       auto target_memory = init_tile->GetMemorySpace();
@@ -2825,7 +2841,7 @@ class YieldFixupMutator : public IRMutator {
     // `pl.yield_` rebinds every carry simultaneously, so the copies that realize
     // it must not observe each other's writes. Order them first.
     std::vector<StmtPtr> spill_stmts;
-    const std::vector<size_t> order = OrderCarryCopies(&copies, &spill_stmts);
+    const std::vector<size_t> order = OrderCarryCopies(&copies, carry_index, &spill_stmts);
 
     // Build new yield values with moved vars substituted
     std::vector<ExprPtr> new_yield_values = yield_stmt->value_;
@@ -2895,7 +2911,9 @@ class YieldFixupMutator : public IRMutator {
       // Check else branch: if MemRef differs from target, insert tile.move
       if (then_tile && else_tile) {
         auto else_memref = GetDefinedMemRef(else_tile);
-        if (!MemRef::SameAllocation(else_memref, target_memref)) {
+        // SameBaseAddress, not SameAllocation: an arm sitting on a sibling slot of
+        // the same allocation still has to be copied into the phi's slot.
+        if (!SameBaseAddress(else_memref, target_memref)) {
           auto [moved_var, move_stmt] = CreateTileMove(else_var, target_memref, target_memory);
           else_move_stmts.emplace_back(std::move(move_stmt));
           else_moves.emplace_back(i, moved_var);
@@ -2907,7 +2925,7 @@ class YieldFixupMutator : public IRMutator {
       auto rv_tile = As<TileType>(new_return_vars[i]->GetType());
       if (rv_tile && rv_tile->memref_.has_value()) {
         auto rv_memref = GetDefinedMemRef(rv_tile);
-        if (!MemRef::SameAllocation(rv_memref, target_memref)) {
+        if (!SameBaseAddress(rv_memref, target_memref)) {
           auto new_rv_type = CloneTypeWithMemRefAndRemapExprs(
               rv_tile, target_memref, [this](const ExprPtr& e) { return VisitExpr(e); }, target_memory);
           new_return_vars[i] =
@@ -2961,6 +2979,118 @@ class YieldFixupMutator : public IRMutator {
   std::vector<StmtPtr> pending_allocs_;
   uint64_t spill_counter_ = 0;
 
+  /// Byte ranges grouped by allocation, so overlap questions are index lookups
+  /// rather than all-pairs scans.
+  ///
+  /// Within an allocation the constant-offset ranges are sorted by start, which
+  /// makes both users linear-after-sort: the pairwise-overlap check only has to
+  /// compare neighbours (sorted by start, if any two ranges overlap then some
+  /// adjacent pair does), and a query binary-searches to its first candidate and
+  /// stops at the first range past its end. A range whose offset is not constant
+  /// has no position on that axis, so it is kept aside and treated as touching
+  /// everything in its allocation — the same conservative answer
+  /// `MemRef::MayAlias` gives.
+  class CarryRangeIndex {
+   public:
+    /// `ranges[i]` is the byte range owned by carry `i`; a null entry is skipped.
+    explicit CarryRangeIndex(const std::vector<MemRefPtr>& ranges) {
+      for (size_t i = 0; i < ranges.size(); ++i) {
+        if (!ranges[i]) continue;
+        const Var* base = ranges[i]->base_.get();
+        auto offset = As<ConstInt>(ranges[i]->byte_offset_);
+        if (!offset) {
+          unpositioned_[base].push_back(i);
+          continue;
+        }
+        const int64_t begin = offset->value_;
+        positioned_[base].push_back(Entry{begin, begin + static_cast<int64_t>(ranges[i]->size_), i});
+      }
+      for (auto& [base, entries] : positioned_) {
+        static_cast<void>(base);
+        std::sort(entries.begin(), entries.end(),
+                  [](const Entry& a, const Entry& b) { return a.begin < b.begin; });
+      }
+    }
+
+    /// Call `fn(i)` for every indexed range that may overlap `query`.
+    template <typename Fn>
+    void ForEachOverlapping(const MemRefPtr& query, const Fn& fn) const {
+      const Var* base = query->base_.get();
+      if (auto loose = unpositioned_.find(base); loose != unpositioned_.end()) {
+        for (size_t i : loose->second) fn(i);
+      }
+      auto bucket = positioned_.find(base);
+      if (bucket == positioned_.end()) return;
+      const auto& entries = bucket->second;
+
+      auto offset = As<ConstInt>(query->byte_offset_);
+      if (!offset) {  // unknown position — conservatively touches the whole allocation
+        for (const Entry& entry : entries) fn(entry.index);
+        return;
+      }
+      const int64_t begin = offset->value_;
+      const int64_t end = begin + static_cast<int64_t>(query->size_);
+      // Entries are sorted by start, so the first candidate is the first one
+      // starting at or after `begin`, less the single earlier one that may still
+      // cover `begin`.
+      auto it = std::lower_bound(entries.begin(), entries.end(), begin,
+                                 [](const Entry& entry, int64_t value) { return entry.begin < value; });
+      if (it != entries.begin() && std::prev(it)->end > begin) --it;
+      for (; it != entries.end() && it->begin < end; ++it) {
+        if (it->end > begin) fn(it->index);
+      }
+    }
+
+    /// Every pair of indexed ranges that overlaps, as (lower index, higher index).
+    [[nodiscard]] std::vector<std::pair<size_t, size_t>> OverlappingPairs() const {
+      std::vector<std::pair<size_t, size_t>> pairs;
+      for (const auto& [base, entries] : positioned_) {
+        for (size_t n = 1; n < entries.size(); ++n) {
+          if (entries[n].begin < entries[n - 1].end) {
+            pairs.emplace_back(std::minmax(entries[n - 1].index, entries[n].index));
+          }
+        }
+        // An unpositioned range conservatively covers its whole allocation, so it
+        // conflicts with every other range there. One witness is enough to report.
+        auto loose = unpositioned_.find(base);
+        if (loose != unpositioned_.end() && !entries.empty()) {
+          pairs.emplace_back(std::minmax(loose->second.front(), entries.front().index));
+        }
+      }
+      for (const auto& [base, loose] : unpositioned_) {
+        static_cast<void>(base);
+        if (loose.size() > 1) pairs.emplace_back(std::minmax(loose[0], loose[1]));
+      }
+      return pairs;
+    }
+
+   private:
+    struct Entry {
+      int64_t begin;
+      int64_t end;
+      size_t index;
+    };
+    std::map<const Var*, std::vector<Entry>> positioned_;
+    std::map<const Var*, std::vector<size_t>> unpositioned_;
+  };
+
+  /// The byte range each carry owns, indexed by iter_arg position (null when the
+  /// carry is not a tile with a MemRef).
+  static std::vector<MemRefPtr> CollectCarryRanges(const ForStmtPtr& for_stmt) {
+    std::vector<MemRefPtr> ranges(for_stmt->iter_args_.size());
+    for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
+      // AsVarLike: a nested loop seeds its carries from the enclosing loop's
+      // IterArg, which As<Var> would skip -- and skipping it is exactly how two
+      // nested carries seeded from one outer carry would slip past the check below.
+      auto init_var = AsVarLike(for_stmt->iter_args_[i]->initValue_);
+      if (!init_var) continue;
+      auto init_tile = GetTileTypeWithMemRef(init_var->GetType());
+      if (!init_tile) continue;
+      ranges[i] = GetDefinedMemRef(init_tile);
+    }
+    return ranges;
+  }
+
   /// Reject a loop whose carries do not each own their buffer.
   ///
   /// Two carries whose buffers overlap cannot both survive an iteration: whatever
@@ -2973,28 +3103,14 @@ class YieldFixupMutator : public IRMutator {
   ///
   /// Byte ranges, not allocations: disjoint slices of one declared multi-slot
   /// buffer are independent carries and stay legal.
-  static void RejectOverlappingCarryBuffers(const ForStmtPtr& for_stmt) {
-    std::vector<std::pair<const IterArg*, MemRefPtr>> carries;
-    carries.reserve(for_stmt->iter_args_.size());
-    for (const auto& iter_arg : for_stmt->iter_args_) {
-      // AsVarLike: a nested loop seeds its carries from the enclosing loop's
-      // IterArg, which As<Var> would skip -- and skipping it is exactly how two
-      // nested carries seeded from one outer carry would slip past this check.
-      auto init_var = AsVarLike(iter_arg->initValue_);
-      if (!init_var) continue;
-      auto init_tile = GetTileTypeWithMemRef(init_var->GetType());
-      if (!init_tile) continue;
-      carries.emplace_back(iter_arg.get(), GetDefinedMemRef(init_tile));
-    }
-    for (size_t i = 0; i < carries.size(); ++i) {
-      for (size_t j = i + 1; j < carries.size(); ++j) {
-        CHECK_SPAN(!MemRef::MayAlias(carries[i].second, carries[j].second), for_stmt->span_)
-            << "Loop-carried values '" << carries[i].first->name_hint_ << "' and '"
-            << carries[j].first->name_hint_
-            << "' share the same on-chip buffer, so one iteration cannot preserve both. Give each "
-               "loop-carried tile its own initial value -- build them with separate ops instead of "
-               "seeding both from the same tile.";
-      }
+  static void RejectOverlappingCarryBuffers(const ForStmtPtr& for_stmt, const CarryRangeIndex& index) {
+    for (const auto& [lhs, rhs] : index.OverlappingPairs()) {
+      CHECK_SPAN(false, for_stmt->span_)
+          << "Loop-carried values '" << for_stmt->iter_args_[lhs]->name_hint_ << "' and '"
+          << for_stmt->iter_args_[rhs]->name_hint_
+          << "' share the same on-chip buffer, so one iteration cannot preserve both. Give each "
+             "loop-carried tile its own initial value -- build them with separate ops instead of "
+             "seeding both from the same tile.";
     }
   }
 
@@ -3017,34 +3133,31 @@ class YieldFixupMutator : public IRMutator {
   /// spilled copy's own outgoing edges, so the traversal resumes where it stalled
   /// instead of rebuilding anything, and each cycle costs exactly one spill.
   ///
-  /// Cost is O(k log k + E) in one loop's carry count k: destinations are bucketed
-  /// by allocation, so a source is range-tested only against destinations that
-  /// could possibly alias it rather than against all k, and every edge is relaxed
-  /// at most once.
-  std::vector<size_t> OrderCarryCopies(std::vector<CarryCopy>* copies, std::vector<StmtPtr>* spills) {
+  /// Cost is O(k log k + E) in one loop's carry count k: `carry_index` answers each
+  /// source with a binary search plus one step per range it actually overlaps, so
+  /// k carries on disjoint slots of one allocation cost k lookups rather than k^2
+  /// pairwise tests, and every edge is relaxed at most once.
+  std::vector<size_t> OrderCarryCopies(std::vector<CarryCopy>* copies, const CarryRangeIndex& carry_index,
+                                       std::vector<StmtPtr>* spills) {
     const size_t count = copies->size();
+
+    // A copy writes its carry's byte range, so `carry_index` — built over exactly
+    // those ranges — already indexes every destination. Map the carry positions it
+    // reports back onto copy positions; a carry with no copy has nothing to order.
+    std::map<size_t, size_t> copy_of_carry;
+    for (size_t j = 0; j < count; ++j) copy_of_carry.emplace((*copies)[j].index, j);
 
     // A copy reads its source's byte range and writes its destination's, so two
     // copies conflict exactly when one's source overlaps the other's destination.
-    // Ranges, not allocations: disjoint slices of one declared multi-slot buffer
-    // are independent carries, and RejectOverlappingCarryBuffers has already
-    // established that no two destinations overlap.
-    std::map<const Var*, std::vector<size_t>> dsts_by_base;
-    for (size_t j = 0; j < count; ++j) {
-      dsts_by_base[(*copies)[j].dst_memref->base_.get()].push_back(j);
-    }
-
     std::vector<std::vector<size_t>> successors(count);
     std::vector<size_t> in_degree(count, 0);
     for (size_t i = 0; i < count; ++i) {
-      auto bucket = dsts_by_base.find((*copies)[i].src_memref->base_.get());
-      if (bucket == dsts_by_base.end()) continue;
-      for (size_t j : bucket->second) {
-        if (i == j) continue;
-        if (!MemRef::MayAlias((*copies)[i].src_memref, (*copies)[j].dst_memref)) continue;
-        successors[i].push_back(j);  // i reads what j overwrites
-        ++in_degree[j];
-      }
+      carry_index.ForEachOverlapping((*copies)[i].src_memref, [&](size_t carry) {
+        auto hit = copy_of_carry.find(carry);
+        if (hit == copy_of_carry.end() || hit->second == i) return;
+        successors[i].push_back(hit->second);  // i reads what hit->second overwrites
+        ++in_degree[hit->second];
+      });
     }
 
     std::vector<size_t> order;
@@ -3166,17 +3279,19 @@ class YieldFixupMutator : public IRMutator {
     std::vector<VarPtr> new_return_vars = for_stmt->return_vars_;
 
     for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
-      auto init_var = As<Var>(for_stmt->iter_args_[i]->initValue_);
+      auto init_var = AsVarLike(for_stmt->iter_args_[i]->initValue_);
       if (!init_var) continue;
       auto init_tile = GetTileTypeWithMemRef(init_var->GetType());
       if (!init_tile) continue;
       auto init_memref = GetDefinedMemRef(init_tile);
 
-      // Patch iter_arg if its MemRef differs from initValue's
+      // Patch iter_arg if its MemRef differs from initValue's. SameByteRange, not
+      // SameAllocation: an iter_arg left on a sibling slot of one multi-slot
+      // allocation is a different buffer and still has to be re-pointed.
       auto ia_tile = As<TileType>(for_stmt->iter_args_[i]->GetType());
       if (ia_tile && ia_tile->memref_.has_value()) {
         auto ia_memref = GetDefinedMemRef(ia_tile);
-        if (!MemRef::SameAllocation(ia_memref, init_memref)) {
+        if (!SameBaseAddress(ia_memref, init_memref)) {
           auto new_ia_type = CloneTypeWithMemRefAndRemapExprs(
               ia_tile, init_memref, [this](const ExprPtr& expr) { return VisitExpr(expr); },
               init_tile->GetMemorySpace());
@@ -3190,7 +3305,7 @@ class YieldFixupMutator : public IRMutator {
 
       // Patch return_var to share yield value's MemRef (which should == initValue's after fixup)
       if (i >= new_return_vars.size() || !yield_stmt || i >= yield_stmt->value_.size()) continue;
-      auto yield_var = As<Var>(yield_stmt->value_[i]);
+      auto yield_var = AsVarLike(yield_stmt->value_[i]);
       if (!yield_var) continue;
       auto yield_tile = GetTileTypeWithMemRef(yield_var->GetType());
       if (!yield_tile) continue;
@@ -3198,7 +3313,7 @@ class YieldFixupMutator : public IRMutator {
       auto rv_tile = As<TileType>(new_return_vars[i]->GetType());
       if (!rv_tile || !rv_tile->memref_.has_value()) continue;
       auto rv_memref = GetDefinedMemRef(rv_tile);
-      if (!MemRef::SameAllocation(rv_memref, yield_memref)) {
+      if (!SameBaseAddress(rv_memref, yield_memref)) {
         auto new_rv_type = CloneTypeWithMemRefAndRemapExprs(
             rv_tile, yield_memref, [this](const ExprPtr& expr) { return VisitExpr(expr); },
             yield_tile->GetMemorySpace());
