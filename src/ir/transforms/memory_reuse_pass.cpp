@@ -2786,8 +2786,9 @@ class YieldFixupMutator : public IRMutator {
     // Check each (iter_arg, yield_value) pair for MemRef mismatch.
     // Use initValue's MemRef as the target because codegen maps iter_arg to initValue's buffer,
     // and MemoryReuse may have updated initValue's MemRef without updating iter_arg's.
-    std::vector<std::pair<size_t, VarPtr>> moves_to_insert;  // (index, new_moved_var)
-    std::vector<StmtPtr> move_stmts;
+    RejectOverlappingCarryBuffers(for_stmt);
+
+    std::vector<CarryCopy> copies;
     for (size_t i = 0; i < yield_stmt->value_.size() && i < for_stmt->iter_args_.size(); ++i) {
       auto yield_var = As<Var>(yield_stmt->value_[i]);
       if (!yield_var) continue;
@@ -2809,24 +2810,35 @@ class YieldFixupMutator : public IRMutator {
       auto target_memory = init_tile->GetMemorySpace();
       auto [moved_var, move_stmt] = CreateTileMove(yield_var, init_memref, target_memory);
 
-      move_stmts.emplace_back(std::move(move_stmt));
-      moves_to_insert.emplace_back(i, moved_var);
+      copies.push_back(CarryCopy{i, yield_var, std::move(moved_var), std::move(move_stmt), yield_memref,
+                                 init_memref, target_memory});
     }
 
-    if (moves_to_insert.empty()) {
+    if (copies.empty()) {
       // Even without tile.move insertion, iter_arg and return_var may have stale MemRefs
       // (MemoryReuse updates initValue/yield but not iter_arg/return_var types).
       // Ensure all 4 loop-carry variables share the same MemRef (= initValue's).
       return PatchIterArgsAndReturnVars(for_stmt, yield_stmt);
     }
 
+    // `pl.yield_` rebinds every carry simultaneously, so the copies that realize
+    // it must not observe each other's writes. Order them first.
+    std::vector<StmtPtr> spill_stmts;
+    const std::vector<size_t> order = OrderCarryCopies(&copies, &spill_stmts);
+
     // Build new yield values with moved vars substituted
     std::vector<ExprPtr> new_yield_values = yield_stmt->value_;
-    for (const auto& [idx, moved_var] : moves_to_insert) {
-      new_yield_values[idx] = moved_var;
+    for (const auto& copy : copies) {
+      new_yield_values[copy.index] = copy.moved_var;
     }
     auto new_yield = MutableCopy(yield_stmt);
     new_yield->value_ = std::move(new_yield_values);
+
+    // A spill reads a carry buffer before any copy writes one, so every spill
+    // precedes every copy.
+    std::vector<StmtPtr> move_stmts = std::move(spill_stmts);
+    move_stmts.reserve(move_stmts.size() + order.size());
+    for (size_t idx : order) move_stmts.push_back(copies[idx].move_stmt);
 
     // Insert tile.move stmts before yield and replace yield in body
     auto new_body = InsertMovesAndReplaceYield(for_stmt->body_, new_yield, move_stmts);
@@ -2925,8 +2937,171 @@ class YieldFixupMutator : public IRMutator {
     return new_if;
   }
 
+ public:
+  /// Allocations this fixup had to create (cycle spills), for the caller to
+  /// hoist onto the function-body head. Empty for every loop whose carries do
+  /// not form a copy cycle, which is the overwhelmingly common case.
+  std::vector<StmtPtr> TakePendingAllocs() { return std::move(pending_allocs_); }
+
  private:
   bool fixup_if_stmts_ = true;
+
+  /// One reconciling copy for one loop carry: `dst_memref <- source`.
+  struct CarryCopy {
+    size_t index;                           ///< iter_arg / yield position
+    VarPtr source;                          ///< what the copy reads
+    VarPtr moved_var;                       ///< the copy's LHS, replacing the yield value
+    StmtPtr move_stmt;                      ///< the `tile.move` itself
+    MemRefPtr src_memref;                   ///< byte range the copy reads
+    MemRefPtr dst_memref;                   ///< the carry buffer the copy writes
+    std::optional<MemorySpace> dst_memory;  ///< memory space of `dst_memref`
+  };
+
+  std::vector<StmtPtr> pending_allocs_;
+  uint64_t spill_counter_ = 0;
+
+  /// Reject a loop whose carries do not each own their buffer.
+  ///
+  /// Two carries whose buffers overlap cannot both survive an iteration: whatever
+  /// order the writebacks run in, the second one destroys the first. The usual
+  /// source is seeding two `pl.range` carries from one tile (`lag1 = one;
+  /// lag2 = one`), which makes both carries that tile's buffer. That is a real
+  /// limitation of the carry lowering rather than a compiler invariant, so it is
+  /// reported to the author -- and reported here, where the carries are still
+  /// named, rather than downstream as a degenerate `tile.move` onto itself.
+  ///
+  /// Byte ranges, not allocations: disjoint slices of one declared multi-slot
+  /// buffer are independent carries and stay legal.
+  static void RejectOverlappingCarryBuffers(const ForStmtPtr& for_stmt) {
+    std::vector<std::pair<const IterArg*, MemRefPtr>> carries;
+    carries.reserve(for_stmt->iter_args_.size());
+    for (const auto& iter_arg : for_stmt->iter_args_) {
+      auto init_var = As<Var>(iter_arg->initValue_);
+      if (!init_var) continue;
+      auto init_tile = GetTileTypeWithMemRef(init_var->GetType());
+      if (!init_tile) continue;
+      carries.emplace_back(iter_arg.get(), GetDefinedMemRef(init_tile));
+    }
+    for (size_t i = 0; i < carries.size(); ++i) {
+      for (size_t j = i + 1; j < carries.size(); ++j) {
+        CHECK_SPAN(!MemRef::MayAlias(carries[i].second, carries[j].second), for_stmt->span_)
+            << "Loop-carried values '" << carries[i].first->name_hint_ << "' and '"
+            << carries[j].first->name_hint_
+            << "' share the same on-chip buffer, so one iteration cannot preserve both. Give each "
+               "loop-carried tile its own initial value -- build them with separate ops instead of "
+               "seeding both from the same tile.";
+      }
+    }
+  }
+
+  /// Order the carry copies so none overwrites a buffer another still reads.
+  ///
+  /// `pl.yield_` rebinds every carry at once, but the copies realizing it run in
+  /// sequence, so copy A must precede copy B whenever A reads the buffer B
+  /// writes. Emitting them in iter_arg order instead collapses a shift register:
+  /// for `lag2 = lag1; lag1 = v`, writing lag1's buffer first makes lag2 read the
+  /// new lag1 and the loop silently carries `lag2 == lag1` ([#2481]).
+  ///
+  /// Returns indices into `*copies` in emission order. A copy cycle — the swap
+  /// `a, b = b, a`, where each carry's value lives in the other's buffer — has no
+  /// valid order, so one member is spilled into a scratch buffer first (appended
+  /// to `*spills`, which the caller emits ahead of every copy) and its copy is
+  /// rewritten to read the spill. That removes the spilled copy's outgoing edges
+  /// and breaks the cycle.
+  ///
+  /// Complexity is O(k^3) in a single loop's carry count k, not in IR size: the
+  /// conflict graph is O(k^2) pairwise range tests and is rebuilt only once per
+  /// broken cycle, which is rare and bounded by k.
+  std::vector<size_t> OrderCarryCopies(std::vector<CarryCopy>* copies, std::vector<StmtPtr>* spills) {
+    const size_t count = copies->size();
+    std::vector<size_t> order;
+    order.reserve(count);
+
+    while (true) {
+      // A copy reads its source's byte range and writes its destination's, so two
+      // copies conflict exactly when one's source overlaps the other's
+      // destination. Compare ranges rather than allocations: disjoint slices of
+      // one declared multi-slot buffer are independent carries.
+      std::vector<std::vector<size_t>> successors(count);
+      std::vector<size_t> in_degree(count, 0);
+      for (size_t i = 0; i < count; ++i) {
+        for (size_t j = 0; j < count; ++j) {
+          if (i == j) continue;
+          if (!MemRef::MayAlias((*copies)[i].src_memref, (*copies)[j].dst_memref)) continue;
+          successors[i].push_back(j);  // i reads what j overwrites
+          ++in_degree[j];
+        }
+      }
+
+      order.clear();
+      std::vector<size_t> ready;
+      for (size_t i = 0; i < count; ++i) {
+        if (in_degree[i] == 0) ready.push_back(i);
+      }
+      while (!ready.empty()) {
+        const size_t node = ready.back();
+        ready.pop_back();
+        order.push_back(node);
+        for (size_t next : successors[node]) {
+          if (--in_degree[next] == 0) ready.push_back(next);
+        }
+      }
+      // Kahn emits predecessors first, and an edge means "must run before", so
+      // `order` is already the emission order.
+      if (order.size() == count) return order;
+
+      // Whatever Kahn could not emit sits on (or behind) a cycle. Spill the
+      // lowest-numbered such carry and retry; each spill strictly shrinks the
+      // residual set, so this terminates.
+      size_t cycle_member = count;
+      for (size_t i = 0; i < count; ++i) {
+        if (in_degree[i] != 0) {
+          cycle_member = i;
+          break;
+        }
+      }
+      INTERNAL_CHECK_SPAN(cycle_member < count, (*copies)[0].source->span_)
+          << "Internal error: loop-carry copy ordering stalled with no cycle member to spill";
+      SpillCarrySource(&(*copies)[cycle_member], spills);
+    }
+  }
+
+  /// Redirect one carry copy through a fresh scratch buffer, so the copy no
+  /// longer reads a buffer its siblings overwrite. Emits the scratch allocation
+  /// into `pending_allocs_` for the caller to hoist.
+  void SpillCarrySource(CarryCopy* copy, std::vector<StmtPtr>* spills) {
+    auto src_tile = GetTileTypeWithMemRef(copy->source->GetType());
+    INTERNAL_CHECK_SPAN(src_tile, copy->source->span_)
+        << "Internal error: a loop-carry copy source must be a TileType with a MemRef";
+    auto src_memref = GetDefinedMemRef(src_tile);
+    auto src_memory = src_tile->GetMemorySpace();
+    INTERNAL_CHECK_SPAN(src_memory.has_value(), copy->source->span_)
+        << "Internal error: a loop-carry copy source must carry a memory space to spill";
+
+    // `mem_<space>_carry_spill_N` cannot collide with InitMemRef's
+    // `mem_<space>_<N>`, which never has a non-numeric segment before its
+    // counter, and the counter is per-function so two spills cannot collide
+    // either. The name is cosmetic, but it has to stay unique for the
+    // print -> parse roundtrip to rebind the same allocation.
+    std::string space_str = MemorySpaceToString(*src_memory);
+    std::transform(space_str.begin(), space_str.end(), space_str.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    const std::string base_name = "mem_" + space_str + "_carry_spill_" + std::to_string(spill_counter_++);
+    auto scratch_base = std::make_shared<Var>(base_name, GetPtrType(), copy->source->span_);
+    auto scratch_memref = std::make_shared<MemRef>(scratch_base, static_cast<int64_t>(0), src_memref->size_,
+                                                   copy->source->span_);
+    pending_allocs_.push_back(CreateAllocStatement(scratch_memref, *src_memory));
+
+    auto [spilled_var, spill_stmt] = CreateTileMove(copy->source, scratch_memref, src_memory);
+    spills->push_back(std::move(spill_stmt));
+
+    auto [moved_var, move_stmt] = CreateTileMove(spilled_var, copy->dst_memref, copy->dst_memory);
+    copy->source = spilled_var;
+    copy->moved_var = std::move(moved_var);
+    copy->move_stmt = std::move(move_stmt);
+    copy->src_memref = scratch_memref;
+  }
+
   // Create a tile.move operation that copies source into target_memref's buffer.
   // Returns (moved_var, move_assign_stmt).
   std::pair<VarPtr, StmtPtr> CreateTileMove(const VarPtr& source, const MemRefPtr& target_memref,
@@ -3237,12 +3412,18 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
       new_body = applier.VisitStmt(new_body);
     }
 
+    // Identity-copy normalization brackets YieldFixup on both sides; see the
+    // matching step in TransformMemoryReuse for why each side is needed.
+    new_body = NormalizeIdentityCopyBuffersMutator().VisitStmt(new_body);
+
     YieldFixupMutator yield_fixup(/*fixup_if_stmts=*/true);
     new_body = yield_fixup.VisitStmt(new_body);
+    new_body = InsertAllocsIntoBody(new_body, yield_fixup.TakePendingAllocs());
     new_body = NormalizeIdentityCopyBuffersMutator().VisitStmt(new_body);
   } else if (ctx != nullptr && ctx->GetMemoryPlanner() == MemoryPlanner::PtoAS) {
     YieldFixupMutator yield_fixup(/*fixup_if_stmts=*/false);
     new_body = yield_fixup.VisitStmt(new_body);
+    new_body = InsertAllocsIntoBody(new_body, yield_fixup.TakePendingAllocs());
   }
 
   if (new_body == func->body_) return func;
@@ -3338,13 +3519,35 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
     }
   }
 
+  // Step 3.9 / 4.5: Reconcile bare-Var SSA identity copies whose buffers diverged
+  // from the value they rename.  No-op when no mismatch exists.
+  //
+  // This runs on both sides of YieldFixup because both sides create such a
+  // divergence, from opposite directions:
+  //
+  //  - before, because Step 3.75's accumulator-if-phi retarget leaves a rename
+  //    stranded on the pre-coalesce buffer, and because a carry rename such as
+  //    `lag2 = lag1` only lands on lag1's buffer here. YieldFixup has to see the
+  //    settled buffer to order the carry writebacks against each other: against
+  //    the pre-normalization buffers every rename still sits on a buffer of its
+  //    own, so no conflict is visible and a shift register silently collapses
+  //    ([#2481]).
+  //  - after, because YieldFixup's own IfStmt fixup repoints a phi return_var
+  //    onto the canonical branch buffer, which strands that phi's downstream
+  //    `c = c_phi` rename in exactly the same way.
+  //
+  // The mutator is idempotent, so the second run is a no-op whenever the first
+  // already settled everything.
+  new_body = NormalizeIdentityCopyBuffersMutator().VisitStmt(new_body);
+
   // Step 4: Fix ForStmt/IfStmt yield/return_var MemRef mismatches
   YieldFixupMutator yield_fixup;
   new_body = yield_fixup.VisitStmt(new_body);
+  // A carry-copy cycle needs a scratch buffer; its alloc belongs on the body head
+  // like every other allocation, and Step 5 below keeps it because it is in use.
+  new_body = InsertAllocsIntoBody(new_body, yield_fixup.TakePendingAllocs());
 
-  // Step 4.5: Reconcile bare-Var SSA identity copies whose buffers diverged when
-  // Step 3.75 retargeted an accumulator if-phi (its downstream `c = c_phi` copy
-  // keeps the pre-coalesce buffer otherwise).  No-op when no mismatch exists.
+  // Step 4.5: the second half of the bracket described at Step 3.9.
   new_body = NormalizeIdentityCopyBuffersMutator().VisitStmt(new_body);
 
   // Step 5: Remove alloc statements for MemRefs no longer in use

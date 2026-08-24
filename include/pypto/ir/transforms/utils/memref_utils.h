@@ -292,6 +292,29 @@ inline StmtPtr CreateAllocStatement(const MemRefPtr& memref, MemorySpace memory_
   return std::make_shared<AssignStmt>(memref->base_, alloc_call, Span::unknown());
 }
 
+/// Prepend alloc statements to a function body's top-level statement list.
+///
+/// Every consumer of the allocation list scans the body's top-level `SeqStmts`
+/// (see `CollectPinnedAllocSizes`), so an allocation created after `InitMemRef`
+/// has to land there too rather than beside its first use.
+inline StmtPtr InsertAllocsIntoBody(const StmtPtr& body, const std::vector<StmtPtr>& alloc_stmts) {
+  if (alloc_stmts.empty()) return body;
+
+  std::vector<StmtPtr> new_seq_stmts;
+  new_seq_stmts.insert(new_seq_stmts.end(), alloc_stmts.begin(), alloc_stmts.end());
+
+  const Span& span = body ? body->span_ : alloc_stmts.front()->span_;
+  if (body) {
+    if (auto seq = As<SeqStmts>(body)) {
+      new_seq_stmts.insert(new_seq_stmts.end(), seq->stmts_.begin(), seq->stmts_.end());
+    } else {
+      new_seq_stmts.push_back(body);
+    }
+  }
+
+  return SeqStmts::Flatten(std::move(new_seq_stmts), span);
+}
+
 /// The base Ptr an alloc statement declares when it is a user-owned (pinned)
 /// buffer, else null. Null for every compiler-created allocation.
 inline VarPtr GetPinnedAllocBase(const StmtPtr& stmt) {

@@ -102,6 +102,57 @@ def _assert_if_phi_arms_write_the_phi_buffer(program: ir.Program) -> None:
     assert checked, "no tile-typed if-phi arm was checked -- the assertion is vacuous"
 
 
+_TILE_MOVE_OP = ir.get_op("tile.move").name
+
+
+def _assert_carry_writebacks_do_not_clobber(program: ir.Program) -> None:
+    """Assert no loop-carry writeback reads a carry buffer an earlier one overwrote.
+
+    ``pl.yield_`` rebinds every carry at once, but the ``tile.move`` copies that
+    realize it run in sequence. A copy reading a carry buffer some earlier copy
+    already wrote observes that iteration's *new* value instead of the old one it
+    was written for, which is how a shift register collapses. Copies through a
+    cycle spill buffer are exempt by construction: a spill destination is a fresh
+    allocation, never one of the loop's carry buffers.
+    """
+
+    def memref_of(expr):
+        t = getattr(expr, "type", None)
+        return t.memref if isinstance(t, ir.TileType) and t.memref is not None else None
+
+    checked = 0
+
+    class _OrderChecker(ir.IRVisitor):
+        def visit_for_stmt(self, op):  # type: ignore[override]
+            nonlocal checked
+            carry_buffers = [m for m in (memref_of(a.initValue) for a in op.iter_args) if m is not None]
+            body = op.body
+            stmts = body.stmts if isinstance(body, ir.SeqStmts) else [body]
+            overwritten: list[tuple[str, ir.MemRef]] = []
+            for stmt in stmts:
+                if not isinstance(stmt, ir.AssignStmt) or not isinstance(stmt.value, ir.Call):
+                    continue
+                if stmt.value.op.name != _TILE_MOVE_OP or not stmt.value.args:
+                    continue
+                src, dst = memref_of(stmt.value.args[0]), memref_of(stmt.var)
+                if src is None or dst is None:
+                    continue
+                if any(ir.MemRef.may_alias(src, carry) for carry in carry_buffers):
+                    for earlier_name, earlier_dst in overwritten:
+                        assert not ir.MemRef.may_alias(src, earlier_dst), (
+                            f"carry writeback '{stmt.var.name_hint}' reads a buffer "
+                            f"'{earlier_name}' already overwrote"
+                        )
+                    checked += 1
+                if any(ir.MemRef.may_alias(dst, carry) for carry in carry_buffers):
+                    overwritten.append((stmt.var.name_hint, dst))
+            super().visit_for_stmt(op)
+
+    for function in program.functions.values():
+        _OrderChecker().visit_stmt(function.body)
+    assert checked, "no carry writeback read a carry buffer -- the assertion is vacuous"
+
+
 class TestBasic:
     """Core reuse logic: chain reuse, producer-consumer, size/shape, transitive conflicts."""
 
@@ -2229,6 +2280,188 @@ class TestYieldFixup:
         After = _run_pipeline(Before)
         ir.assert_structural_equal(After, Expected)
         _assert_if_phi_arms_write_the_phi_buffer(After)
+
+    def test_carry_writebacks_run_before_they_are_overwritten(self):
+        """A carry rename must be read before a sibling carry overwrites its buffer.
+
+        ``prev = cur`` renames the first carry, so after identity-copy
+        normalization it *is* ``cur``'s buffer. Emitting the writebacks in
+        iter_arg order would store ``grown`` into that buffer first and leave the
+        second writeback reading the value it just replaced -- the shift register
+        would carry ``prev == cur`` ([#2481]). Ordering the copies against each
+        other puts ``shifted_mv`` first; no scratch buffer is needed because the
+        conflict is one-directional.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                input_tensor: pl.Tensor[[64, 64], pl.FP32],
+                output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                head_0: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    input_tensor, [0, 0], [64, 64]
+                )
+                tail_0: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    input_tensor, [0, 0], [64, 64]
+                )
+                for _i, (cur, prev) in pl.range(0, 4, init_values=(head_0, tail_0)):
+                    shifted: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = cur
+                    grown: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(cur, prev)
+                    _keep: pl.Tensor[[64, 64], pl.FP32] = pl.store(cur, [0, 0], output)
+                    r_cur, r_prev = pl.yield_(grown, shifted)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(r_prev, [0, 0], output)
+                return result
+
+        # shifted (on cur's buffer mem_vec_2) is copied into prev's buffer before
+        # grown overwrites mem_vec_2 -- the reverse of iter_arg order.
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                input_tensor: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_0", 0, 16384)],
+                output: pl.Out[pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                mem_vec_5: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                head_0: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
+                    input_tensor, [0, 0], [64, 64], [64, 64]
+                )
+                tail_0: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = pl.tile.load(
+                    input_tensor, [0, 0], [64, 64], [64, 64]
+                )
+                for _i, (cur, prev) in pl.range(4, init_values=(head_0, tail_0)):
+                    shifted: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = cur
+                    grown: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
+                        pl.tile.add(cur, prev)
+                    )
+                    _keep: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
+                        cur, [0, 0], output
+                    )
+                    shifted_mv: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
+                        pl.tile.move(shifted, target_memory=pl.Mem.Vec)
+                    )
+                    grown_mv: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
+                        pl.tile.move(grown, target_memory=pl.Mem.Vec)
+                    )
+                    r_cur, r_prev = pl.yield_(grown_mv, shifted_mv)
+                result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
+                    r_prev, [0, 0], output
+                )
+                return result
+
+        After = _run_pipeline(Before)
+        ir.assert_structural_equal(After, Expected)
+        _assert_carry_writebacks_do_not_clobber(After)
+
+    def test_carry_writeback_cycle_is_broken_with_a_spill_buffer(self):
+        """A carry swap has no valid copy order, so one side is spilled first.
+
+        ``cur, prev = prev, cur`` makes each carry's value live in the other's
+        buffer, so whichever writeback runs first destroys the other's source. One
+        member is copied into a scratch buffer ahead of both writebacks and its
+        own writeback then reads the scratch -- the standard parallel-copy cycle
+        break. Without it both carries ended up holding the old ``prev``.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                input_tensor: pl.Tensor[[64, 64], pl.FP32],
+                output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                head_0: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    input_tensor, [0, 0], [64, 64]
+                )
+                tail_0: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    input_tensor, [0, 0], [64, 64]
+                )
+                for _i, (cur, prev) in pl.range(0, 4, init_values=(head_0, tail_0)):
+                    swap_a: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = prev
+                    swap_b: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = cur
+                    _keep: pl.Tensor[[64, 64], pl.FP32] = pl.store(cur, [0, 0], output)
+                    r_cur, r_prev = pl.yield_(swap_a, swap_b)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(r_prev, [0, 0], output)
+                return result
+
+        # swap_a (old prev) is parked in the spill buffer, prev's buffer then takes
+        # the old cur, and the spill finally lands in cur's buffer.
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                input_tensor: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_0", 0, 16384)],
+                output: pl.Out[pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                mem_vec_carry_spill_0: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                head_0: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
+                    input_tensor, [0, 0], [64, 64], [64, 64]
+                )
+                tail_0: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = pl.tile.load(
+                    input_tensor, [0, 0], [64, 64], [64, 64]
+                )
+                for _i, (cur, prev) in pl.range(4, init_values=(head_0, tail_0)):
+                    swap_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = prev
+                    swap_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = cur
+                    _keep: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
+                        cur, [0, 0], output
+                    )
+                    swap_a_mv: pl.Tile[
+                        [64, 64], pl.FP32, pl.MemRef(mem_vec_carry_spill_0, 0, 16384), pl.Mem.Vec
+                    ] = pl.tile.move(swap_a, target_memory=pl.Mem.Vec)
+                    swap_b_mv: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
+                        pl.tile.move(swap_b, target_memory=pl.Mem.Vec)
+                    )
+                    swap_a_mv_mv: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
+                        pl.tile.move(swap_a_mv, target_memory=pl.Mem.Vec)
+                    )
+                    r_cur, r_prev = pl.yield_(swap_a_mv_mv, swap_b_mv)
+                result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
+                    r_prev, [0, 0], output
+                )
+                return result
+
+        After = _run_pipeline(Before)
+        ir.assert_structural_equal(After, Expected)
+        _assert_carry_writebacks_do_not_clobber(After)
+
+    def test_carries_sharing_one_buffer_are_rejected(self):
+        """Two carries seeded from one tile share a buffer, which no order can save.
+
+        ``prev`` and ``cur`` are both initialised from ``seed``, so both carries
+        *are* ``seed``'s buffer and one iteration cannot preserve both. Report it
+        against the loop, where the carries still have names, rather than leaving
+        codegen to reject the degenerate self-copy it eventually produces.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                input_tensor: pl.Tensor[[64, 64], pl.FP32],
+                output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                seed: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(input_tensor, [0, 0], [64, 64])
+                for _i, (cur, prev) in pl.range(0, 4, init_values=(seed, seed)):
+                    shifted: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = cur
+                    grown: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(cur, prev)
+                    _keep: pl.Tensor[[64, 64], pl.FP32] = pl.store(cur, [0, 0], output)
+                    r_cur, r_prev = pl.yield_(grown, shifted)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(r_prev, [0, 0], output)
+                return result
+
+        with pytest.raises(ValueError, match="share the same on-chip buffer"):
+            _run_pipeline(Before)
 
     def test_divergent_acc_phi_rejects_acc_to_acc_move(self):
         """YieldFixup must not manufacture an unsupported Acc-to-Acc copy.
