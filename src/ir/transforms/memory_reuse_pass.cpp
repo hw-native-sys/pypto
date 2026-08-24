@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <any>
+#include <cctype>
 #include <climits>
 #include <cstddef>
 #include <cstdint>
@@ -2976,7 +2977,10 @@ class YieldFixupMutator : public IRMutator {
     std::vector<std::pair<const IterArg*, MemRefPtr>> carries;
     carries.reserve(for_stmt->iter_args_.size());
     for (const auto& iter_arg : for_stmt->iter_args_) {
-      auto init_var = As<Var>(iter_arg->initValue_);
+      // AsVarLike: a nested loop seeds its carries from the enclosing loop's
+      // IterArg, which As<Var> would skip -- and skipping it is exactly how two
+      // nested carries seeded from one outer carry would slip past this check.
+      auto init_var = AsVarLike(iter_arg->initValue_);
       if (!init_var) continue;
       auto init_tile = GetTileTypeWithMemRef(init_var->GetType());
       if (!init_tile) continue;
@@ -3004,66 +3008,92 @@ class YieldFixupMutator : public IRMutator {
   ///
   /// Returns indices into `*copies` in emission order. A copy cycle — the swap
   /// `a, b = b, a`, where each carry's value lives in the other's buffer — has no
-  /// valid order, so one member is spilled into a scratch buffer first (appended
-  /// to `*spills`, which the caller emits ahead of every copy) and its copy is
-  /// rewritten to read the spill. That removes the spilled copy's outgoing edges
-  /// and breaks the cycle.
+  /// valid order, so its members are spilled into scratch buffers first (appended
+  /// to `*spills`, which the caller emits ahead of every copy) and their copies
+  /// read the spills instead. A spill destination is a fresh allocation nothing
+  /// else writes, so spilling removes every outgoing edge of the spilled copy.
   ///
-  /// Complexity is O(k^3) in a single loop's carry count k, not in IR size: the
-  /// conflict graph is O(k^2) pairwise range tests and is rebuilt only once per
-  /// broken cycle, which is rare and bounded by k.
+  /// The graph is built once and consumed incrementally: a spill drops only the
+  /// spilled copy's own outgoing edges, so the traversal resumes where it stalled
+  /// instead of rebuilding anything, and each cycle costs exactly one spill.
+  ///
+  /// Cost is O(k log k + E) in one loop's carry count k: destinations are bucketed
+  /// by allocation, so a source is range-tested only against destinations that
+  /// could possibly alias it rather than against all k, and every edge is relaxed
+  /// at most once.
   std::vector<size_t> OrderCarryCopies(std::vector<CarryCopy>* copies, std::vector<StmtPtr>* spills) {
     const size_t count = copies->size();
+
+    // A copy reads its source's byte range and writes its destination's, so two
+    // copies conflict exactly when one's source overlaps the other's destination.
+    // Ranges, not allocations: disjoint slices of one declared multi-slot buffer
+    // are independent carries, and RejectOverlappingCarryBuffers has already
+    // established that no two destinations overlap.
+    std::map<const Var*, std::vector<size_t>> dsts_by_base;
+    for (size_t j = 0; j < count; ++j) {
+      dsts_by_base[(*copies)[j].dst_memref->base_.get()].push_back(j);
+    }
+
+    std::vector<std::vector<size_t>> successors(count);
+    std::vector<size_t> in_degree(count, 0);
+    for (size_t i = 0; i < count; ++i) {
+      auto bucket = dsts_by_base.find((*copies)[i].src_memref->base_.get());
+      if (bucket == dsts_by_base.end()) continue;
+      for (size_t j : bucket->second) {
+        if (i == j) continue;
+        if (!MemRef::MayAlias((*copies)[i].src_memref, (*copies)[j].dst_memref)) continue;
+        successors[i].push_back(j);  // i reads what j overwrites
+        ++in_degree[j];
+      }
+    }
+
     std::vector<size_t> order;
     order.reserve(count);
+    std::vector<bool> emitted(count, false);
+    std::vector<size_t> ready;
+    for (size_t i = 0; i < count; ++i) {
+      if (in_degree[i] == 0) ready.push_back(i);
+    }
 
-    while (true) {
-      // A copy reads its source's byte range and writes its destination's, so two
-      // copies conflict exactly when one's source overlaps the other's
-      // destination. Compare ranges rather than allocations: disjoint slices of
-      // one declared multi-slot buffer are independent carries.
-      std::vector<std::vector<size_t>> successors(count);
-      std::vector<size_t> in_degree(count, 0);
-      for (size_t i = 0; i < count; ++i) {
-        for (size_t j = 0; j < count; ++j) {
-          if (i == j) continue;
-          if (!MemRef::MayAlias((*copies)[i].src_memref, (*copies)[j].dst_memref)) continue;
-          successors[i].push_back(j);  // i reads what j overwrites
-          ++in_degree[j];
-        }
+    auto release = [&](size_t node) {
+      for (size_t next : successors[node]) {
+        if (--in_degree[next] == 0 && !emitted[next]) ready.push_back(next);
       }
+      successors[node].clear();
+    };
 
-      order.clear();
-      std::vector<size_t> ready;
-      for (size_t i = 0; i < count; ++i) {
-        if (in_degree[i] == 0) ready.push_back(i);
-      }
-      while (!ready.empty()) {
+    while (order.size() < count) {
+      if (!ready.empty()) {
         const size_t node = ready.back();
         ready.pop_back();
+        if (emitted[node]) continue;
+        // Kahn: every predecessor is already emitted, and an edge means "must run
+        // before", so appending here builds the emission order directly.
+        emitted[node] = true;
         order.push_back(node);
-        for (size_t next : successors[node]) {
-          if (--in_degree[next] == 0) ready.push_back(next);
-        }
+        release(node);
+        continue;
       }
-      // Kahn emits predecessors first, and an edge means "must run before", so
-      // `order` is already the emission order.
-      if (order.size() == count) return order;
 
-      // Whatever Kahn could not emit sits on (or behind) a cycle. Spill the
-      // lowest-numbered such carry and retry; each spill strictly shrinks the
-      // residual set, so this terminates.
-      size_t cycle_member = count;
+      // Nothing is runnable, so the remaining copies sit on or behind a cycle.
+      // Spill one member: its copy then reads a fresh buffer nothing else writes,
+      // which drops its outgoing edges and lets the rest of the cycle proceed.
+      // A blocked node always has an unemitted successor (an emitted one would
+      // mean the edge was already violated), so such a victim exists.
+      size_t victim = count;
       for (size_t i = 0; i < count; ++i) {
-        if (in_degree[i] != 0) {
-          cycle_member = i;
+        if (!emitted[i] && !successors[i].empty()) {
+          victim = i;
           break;
         }
       }
-      INTERNAL_CHECK_SPAN(cycle_member < count, (*copies)[0].source->span_)
+      INTERNAL_CHECK_SPAN(victim < count, (*copies)[0].source->span_)
           << "Internal error: loop-carry copy ordering stalled with no cycle member to spill";
-      SpillCarrySource(&(*copies)[cycle_member], spills);
+      SpillCarrySource(&(*copies)[victim], spills);
+      release(victim);
+      if (in_degree[victim] == 0) ready.push_back(victim);
     }
+    return order;
   }
 
   /// Redirect one carry copy through a fresh scratch buffer, so the copy no
