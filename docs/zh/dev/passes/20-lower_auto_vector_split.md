@@ -348,7 +348,7 @@ lane 的——lane `L` 持有 `clamp(V - L*half, 0, half)`——因此哪种模�
 | 行（非切分轴） | `LeftRight` | 两 lane 相同、静态 | TPOP `valid_row` 操作数 | 支持 |
 | 列（切分轴） | `LeftRight` | 逐 lane | 无 | **拒绝** |
 | 列为运行期值 | 任意 | 两 lane 相同、动态 | 无（`treshape` 不带操作数） | **拒绝** |
-| 行为运行期值 | `UpDown` | 逐 lane、动态 | TPOP `valid_row` 操作数、偶数 code | 支持（见下方说明） |
+| 行为运行期值 | `UpDown` | 逐 lane、动态 | 边界算子保留整 box + 第一个消费者的 `valid_shape` | 支持（见下方说明） |
 | 行逐 lane **且**列收窄 | `UpDown` | 两者 | 无（`treshape` 会同时重写两个轴） | **拒绝** |
 
 `ReshapeSplitAxis` 只能对切分轴做 ceil 折半，因为 lane 索引不属于 op 的类型函数。

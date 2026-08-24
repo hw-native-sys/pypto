@@ -153,6 +153,43 @@ def runtime_tail_rows(
     return out
 
 
+@pl.jit
+def runtime_tail_fillpad_first(
+    a: pl.Tensor[[ROWS, K], pl.BF16],
+    w: pl.Tensor[[COLS, K], pl.BF16],
+    vt: pl.Tensor[[1], pl.INDEX],
+    out: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+    """A pad fill straight off the boundary, with nothing to fill up to."""
+    v: pl.Scalar[pl.INDEX] = pl.tensor.read(vt, [0])
+    with pl.at(level=pl.Level.CORE_GROUP, name_hint="fill_first"):
+        a_tile = pl.slice(a, [ROWS, K], [0, 0], valid_shape=[v, K])
+        acc = pl.matmul(a_tile, w[0:COLS, 0:K], b_trans=True, out_dtype=pl.FP32)
+        for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+            shard = pl.aiv_shard(acc)
+            padded = pl.fillpad(shard, pad_value=pl.PadValue.zero)
+            out[aiv_id * HALF : aiv_id * HALF + HALF, 0:COLS] = padded
+    return out
+
+
+@pl.jit
+def runtime_tail_store_first(
+    a: pl.Tensor[[ROWS, K], pl.BF16],
+    w: pl.Tensor[[COLS, K], pl.BF16],
+    vt: pl.Tensor[[1], pl.INDEX],
+    out: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+    """The boundary tile stored directly, with no consumer to carry the extent."""
+    v: pl.Scalar[pl.INDEX] = pl.tensor.read(vt, [0])
+    with pl.at(level=pl.Level.CORE_GROUP, name_hint="store_first"):
+        a_tile = pl.slice(a, [ROWS, K], [0, 0], valid_shape=[v, K])
+        acc = pl.matmul(a_tile, w[0:COLS, 0:K], b_trans=True, out_dtype=pl.FP32)
+        for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+            shard = pl.aiv_shard(acc)
+            out[aiv_id * HALF : aiv_id * HALF + HALF, 0:COLS] = shard
+    return out
+
+
 def _args(valid_m: int):
     return [
         torch.randn(valid_m, K, dtype=torch.bfloat16),
@@ -335,6 +372,41 @@ def test_runtime_extent_lands_on_the_first_consumer(runtime_tail_pto):
     consumer = re.search(r"pto\.alloc_tile[^\n]*valid_row = (%\w+)", aiv)
     assert consumer, f"no consumer tile carries a computed valid_row:\n{aiv}"
     assert not consumer.group(1).startswith("%c"), f"consumer extent is a constant:\n{aiv}"
+
+
+def _runtime_tail_args(v: int):
+    return [
+        torch.randn(ROWS, K, dtype=torch.bfloat16),
+        torch.randn(COLS, K, dtype=torch.bfloat16),
+        torch.tensor([v], dtype=torch.int64),
+        torch.empty(ROWS, COLS, dtype=torch.float32),
+    ]
+
+
+def test_runtime_extent_rejects_a_pad_fill_at_the_boundary():
+    """The extent has to land on a consumer -- a pad fill is not one.
+
+    ``tile.fillpad`` reads where the lane's data ENDS, and its result is fully
+    valid by construction. Off a boundary that carries the transport's box it
+    would fill nothing and hand the padding on as data, so it is refused with the
+    two authoring routes that do work.
+    """
+    with pytest.raises(ValueError) as exc:
+        runtime_tail_fillpad_first(*_runtime_tail_args(12), config=RunConfig(platform="a2a3"))
+
+    message = str(exc.value)
+    assert "fills the padding of a Cube -> Vector boundary tile" in message, message
+    assert "pl.fillpad(acc) ahead of pl.aiv_shard(acc)" in message, message
+
+
+def test_runtime_extent_rejects_a_direct_store_of_the_boundary():
+    """Storing the boundary tile itself would write the transport's padding."""
+    with pytest.raises(ValueError) as exc:
+        runtime_tail_store_first(*_runtime_tail_args(12), config=RunConfig(platform="a2a3"))
+
+    message = str(exc.value)
+    assert "consumes a Cube -> Vector boundary tile directly" in message, message
+    assert "narrow after the crossing" in message, message
 
 
 if __name__ == "__main__":

@@ -393,7 +393,7 @@ geometric rule at the end of this section instead.
 | rows (non-split) | `LeftRight` | shared, static | TPOP `valid_row` operand | supported |
 | cols (split axis) | `LeftRight` | per-lane | none | **rejected** |
 | cols, runtime-valued | either | shared, dynamic | none (`treshape` takes no operands) | **rejected** |
-| rows, runtime-valued | `UpDown` | per-lane, dynamic | TPOP `valid_row` operand, even code | supported (see the note below) |
+| rows, runtime-valued | `UpDown` | per-lane, dynamic | the boundary op's FULL box + the first consumer's `valid_shape` | supported (see the note below) |
 | rows per-lane **and** cols narrowed | `UpDown` | both | none (`treshape` rewrites both axes) | **rejected** |
 
 `ReshapeSplitAxis` can only ceil-halve the split-axis extent (the lane index is
