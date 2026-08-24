@@ -452,7 +452,7 @@ bool ShareOneMemRefWindow(const std::shared_ptr<const TileType>& lhs,
 //
 // A declared index naming a non-tile argument (`tile.store` / `tile.write`
 // declare index 2, a TensorType) drops out: GetTileTypeWithMemRef returns null.
-bool ShouldAliasResultToInPlaceInput(const AssignStmtPtr& stmt) {
+bool ShouldAliasResultToInPlaceInput(PTOCodegen& codegen, const AssignStmtPtr& stmt) {
   auto call = As<ir::Call>(stmt->value_);
   if (!call || !call->op_) return false;
 
@@ -479,9 +479,28 @@ bool ShouldAliasResultToInPlaceInput(const AssignStmtPtr& stmt) {
   if (!declared.has_value()) return false;
   auto input_tile_type = input_tile_type_at(*declared);
   if (!input_tile_type) return false;
-  return ShareOneMemRefWindow(result_tile_type, input_tile_type) &&
-         ir::TileBufSignature::FromTileType(*result_tile_type) ==
-             ir::TileBufSignature::FromTileType(*input_tile_type);
+  if (!ShareOneMemRefWindow(result_tile_type, input_tile_type) ||
+      !(ir::TileBufSignature::FromTileType(*result_tile_type) ==
+        ir::TileBufSignature::FromTileType(*input_tile_type))) {
+    return false;
+  }
+
+  // A full-Acc matmul_acc historically used a distinct result handle, even
+  // when memory reuse assigned that handle the accumulator's physical L0C
+  // address. Keep that lowering: making the result and loop-carried input the
+  // very same MLIR SSA changes PTOAS' full-accumulator loop lowering and can
+  // stall long-running kernels. The in-place alias added for #2403 is required
+  // only when operand 0 is a real pto.subview: without it the MAD writes a
+  // private handle instead of the parent Acc window. A lazily materialized
+  // subview no longer denotes that parent window, so it follows the ordinary
+  // distinct-result path too.
+  if (ir::IsOp(call, "tile.matmul_acc")) {
+    const std::string accumulator_ssa = codegen.GetExprAsCode(call->args_[*declared]);
+    const auto* subview = codegen.GetSubviewMaterialization(accumulator_ssa);
+    return subview != nullptr && !subview->emitted;
+  }
+
+  return true;
 }
 
 // `array.update_element` is SSA-functional in the IR (returns a fresh
@@ -2072,7 +2091,7 @@ void PTOCodegen::VisitStmt(const ir::StmtPtr& stmt) {
 void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   auto call = As<ir::Call>(op->value_);
   const bool is_set_validshape = ir::IsOp(call, "tile.set_validshape");
-  const bool alias_result_to_in_place_input = ShouldAliasResultToInPlaceInput(op);
+  const bool alias_result_to_in_place_input = ShouldAliasResultToInPlaceInput(*this, op);
   const bool alias_array_update_to_input = ShouldAliasArrayUpdateResultToInput(op);
 
   if (ir::IsOp(call, "pld.tile.remote_load")) {

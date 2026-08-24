@@ -70,6 +70,27 @@ class MatmulAccPlain:
 
 
 @pl.program
+class MatmulAccSubview:
+    """A legal column window of a larger Acc tile used as the destination."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        lhs: pl.Tensor[[16, 16], pl.FP32],
+        rhs: pl.Tensor[[16, 16], pl.FP32],
+        output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        lhs_mat = pl.load(lhs, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat)
+        rhs_mat = pl.load(rhs, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat)
+        lhs_tile = pl.move(lhs_mat, target_memory=pl.MemorySpace.Left)
+        rhs_tile = pl.move(rhs_mat, target_memory=pl.MemorySpace.Right)
+        parent = pl.tile.create([16, 32], pl.FP32, target_memory=pl.MemorySpace.Acc)
+        accumulator = pl.tile.slice(parent, [16, 16], [0, 16])
+        result = pl.tile.matmul_acc(accumulator, lhs_tile, rhs_tile)
+        return pl.store(result, [0, 0], output)
+
+
+@pl.program
 class MatmulAccInitTrue:
     """Literal ``True`` — folds to the non-accumulating form."""
 
@@ -144,6 +165,49 @@ class MatmulAccSplitK:
             b: pl.Tile[[16, 16], pl.FP32] = pl.load(rhs, [k0, 0], [16, 16], target_memory=pl.MemorySpace.Mat)
             acc_tile = pl.matmul_acc(acc_tile, a, b, init_cond=(k0 == 0))
         return pl.store(acc_tile, [0, 0], output)
+
+
+def _matmul_acc_io_ssas(mlir: str) -> tuple[str, str]:
+    lines = [line.strip() for line in mlir.splitlines() if "pto.tmatmul.acc" in line]
+    assert len(lines) == 1, f"expected exactly one pto.tmatmul.acc, got:\n{mlir}"
+    line = lines[0]
+    ins = line.split("ins(", 1)[1].split(")", 1)[0].split(":", 1)[0]
+    outs = line.split("outs(", 1)[1].split(")", 1)[0].split(":", 1)[0]
+    return ins.split(",", 1)[0].strip(), outs.strip()
+
+
+def test_full_accumulator_keeps_distinct_result_handle():
+    """Full-Acc accumulation keeps the pre-#2403 result-handle lowering."""
+    mlir = _generate_default_mlir(MatmulAccPlain)
+    _, result = _matmul_acc_io_ssas(mlir)
+    acc_allocs = {
+        line.split("=", 1)[0].strip(): line.split("addr = ", 1)[1].split()[0]
+        for line in mlir.splitlines()
+        if "= pto.alloc_tile addr = " in line and "loc=acc" in line
+    }
+    assert result in acc_allocs and any(
+        handle != result and address == acc_allocs[result] for handle, address in acc_allocs.items()
+    ), (
+        "a full Acc result must get its own MLIR handle even when memory reuse gives "
+        f"it the accumulator's L0C address:\n{mlir}"
+    )
+
+
+def test_acc_subview_accumulates_in_place():
+    """A real Acc pto.subview must remain the MAD's in-place destination."""
+    mlir = _generate_default_mlir(MatmulAccSubview)
+    subviews = {line.split("=", 1)[0].strip() for line in mlir.splitlines() if "= pto.subview " in line}
+    assert subviews, f"expected an Acc pto.subview destination:\n{mlir}"
+    accumulator, result = _matmul_acc_io_ssas(mlir)
+    assert accumulator == result and result in subviews, (
+        "matmul_acc must write the parent Acc window through its pto.subview SSA:\n" + mlir
+    )
+    assert not any(
+        "pto.tmov" in line
+        and "loc=acc" in line.split("ins(", 1)[-1].split("outs(", 1)[0]
+        and "loc=acc" in line.split("outs(", 1)[-1]
+        for line in mlir.splitlines()
+    ), f"subview accumulation must not emit an Acc-to-Acc move:\n{mlir}"
 
 
 def test_no_init_cond_emits_only_the_accumulating_form():
