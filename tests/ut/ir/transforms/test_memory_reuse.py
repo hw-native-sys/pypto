@@ -2050,8 +2050,16 @@ class TestYieldFixup:
                 idx_tensor: pl.Tensor[[1, 2048], pl.UINT32],
                 val_output: pl.Out[pl.Tensor[[1, 2048], pl.FP32]],
             ) -> pl.Tensor[[1, 2048], pl.FP32]:
-                src_tile: pl.Tile[[1, 2048], pl.FP32] = pl.load(src_tensor, [0, 0], [1, 2048])
-                idx_tile: pl.Tile[[1, 2048], pl.UINT32] = pl.load(idx_tensor, [0, 0], [1, 2048])
+                # This pipeline stops before InferTileMemorySpace, so an unset space --
+                # which since #2475 means "the compiler places it" -- is never resolved,
+                # and an Opaque function has no on-chip memory to place it in. Name it on
+                # the loads; the tiles derived from them take their space from their inputs.
+                src_tile: pl.Tile[[1, 2048], pl.FP32] = pl.load(
+                    src_tensor, [0, 0], [1, 2048], target_memory=pl.Mem.Vec
+                )
+                idx_tile: pl.Tile[[1, 2048], pl.UINT32] = pl.load(
+                    idx_tensor, [0, 0], [1, 2048], target_memory=pl.Mem.Vec
+                )
                 sorted_tile: pl.Tile[[1, 4096], pl.FP32] = pl.tile.sort32(src_tile, idx_tile)
                 for i, (tile_iter,) in pl.range(3, init_values=(sorted_tile,)):
                     if i >= 1:
@@ -2145,8 +2153,16 @@ class TestYieldFixup:
                 idx_tensor: pl.Tensor[[1, 2048], pl.UINT32],
                 val_output: pl.Out[pl.Tensor[[1, 2048], pl.FP32]],
             ) -> pl.Tensor[[1, 2048], pl.FP32]:
-                src_tile: pl.Tile[[1, 2048], pl.FP32] = pl.load(src_tensor, [0, 0], [1, 2048])
-                idx_tile: pl.Tile[[1, 2048], pl.UINT32] = pl.load(idx_tensor, [0, 0], [1, 2048])
+                # This pipeline stops before InferTileMemorySpace, so an unset space --
+                # which since #2475 means "the compiler places it" -- is never resolved,
+                # and an Opaque function has no on-chip memory to place it in. Name it on
+                # the loads; the tiles derived from them take their space from their inputs.
+                src_tile: pl.Tile[[1, 2048], pl.FP32] = pl.load(
+                    src_tensor, [0, 0], [1, 2048], target_memory=pl.Mem.Vec
+                )
+                idx_tile: pl.Tile[[1, 2048], pl.UINT32] = pl.load(
+                    idx_tensor, [0, 0], [1, 2048], target_memory=pl.Mem.Vec
+                )
                 sorted_tile: pl.Tile[[1, 4096], pl.FP32] = pl.tile.sort32(src_tile, idx_tile)
                 for i, (tile_iter,) in pl.range(3, init_values=(sorted_tile,)):
                     if i < 1:
