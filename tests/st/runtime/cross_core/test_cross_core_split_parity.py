@@ -9,11 +9,20 @@
 
 """Cross-core 1C2V split runtime parity probes.
 
-These probes exercise ``UP_DOWN`` and ``LEFT_RIGHT`` splits on an even static
-[16, 16] tile with the runtime ``valid_shape`` swept through every parity
-regime (small / below-half / at-half / above-half / near-full):
+These probes exercise an ``UP_DOWN`` split on an even static [16, 16] tile with
+the runtime ``valid_row`` swept through every parity regime (small / below-half
+/ at-half / above-half / near-full):
 
-  VR/VC ∈ {1, 7, 8, 9, 15}
+  VR ∈ {1, 7, 8, 9, 12, 15}
+
+The COLUMN extent is not swept, and is not a free field: the FIFO slot is
+written at the producer's physical column pitch and pto-isa rebuilds the read
+geometry from the popped tile's own ``validCol`` (``gmStrideR = validCol``,
+doubled for the left-right codes). A narrowed column therefore mis-strides the
+read on either mode, and on ``LEFT_RIGHT`` it is the split axis as well, so it
+would have to differ per lane -- which nothing can express. That shape is
+rejected now, and ``test_left_right_narrowed_column_is_rejected`` pins the
+diagnostic.
 
 For each subblock, ``SplitVectorKernel``'s ``LocalizeValidDimForSplit`` computes
 the per-subblock valid extent as
@@ -107,8 +116,8 @@ def _build_c2v_ud_program() -> Any:
                 [ROWS, COLS],
                 pl.FP32,
                 pl.Mem.Acc,
-                pl.TileView(valid_shape=[valid_rows, valid_cols]),
-            ] = pl.tile.set_validshape(acc, valid_rows, valid_cols)
+                pl.TileView(valid_shape=[valid_rows, COLS]),
+            ] = pl.tile.set_validshape(acc, valid_rows, COLS)
             pl.tpush_to_aiv(narrowed, split=1)
 
         @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
@@ -135,7 +144,7 @@ def _build_c2v_ud_program() -> Any:
                 [ROWS, COLS],
                 pl.FP32,
                 pl.Mem.Vec,
-                pl.TileView(valid_shape=[valid_rows, valid_cols]),
+                pl.TileView(valid_shape=[valid_rows, COLS]),
             ] = pl.tpop_from_aic(split=1)
             incremented: pl.Tile[[ROWS, COLS], pl.FP32] = pl.add(popped, 1.0)
             pl.tfree_to_aic(popped)
@@ -358,15 +367,6 @@ _UP_DOWN_PARITY_CASES = [
     (15, 16, "vr15", True),
 ]
 
-_LEFT_RIGHT_PARITY_CASES = [
-    (16, 1, "vc1", True),
-    (16, 7, "vc7", True),
-    (16, 8, "vc8", False),
-    (16, 9, "vc9", True),
-    (16, 12, "vc12", True),
-    (16, 15, "vc15", True),
-]
-
 
 def _sweep_params(cases):
     """(vr, vc) params, with the known-unplaceable extents marked xfail."""
@@ -394,11 +394,23 @@ class TestSplitParityRuntime:
 
     @pytest.mark.platforms("a2a3")
     @pytest.mark.parametrize("platform", [pytest.param("a2a3", id="a2a3")])
-    @pytest.mark.parametrize("vr,vc", _sweep_params(_LEFT_RIGHT_PARITY_CASES))
-    def test_left_right_valid_shape_parity(self, test_runner, vr, vc, platform):
-        case = _C2VValidShapeParityCase(vr, vc, pl.SplitMode.LEFT_RIGHT, platform=platform)
+    def test_left_right_narrowed_column_is_rejected(self, test_runner, platform):
+        """LEFT_RIGHT narrows the SPLIT axis, which the transport cannot carry.
+
+        pto-isa reconstructs the producer's rectangle from the popped tile's own
+        column extent -- ``gmStrideR = 2 * validCol`` and
+        ``subAIVOffset = subBlockId * validCol`` -- so both the pitch and lane 1's
+        band only line up when ``validCol`` is the lane's full column box. A
+        narrowed column extent has no carrier at all, and used to compile into a
+        silently mis-strided read: on a2a3 this sweep passed for every VC only
+        because its operands were uniform constants.
+        """
+        case = _C2VValidShapeParityCase(ROWS, 9, pl.SplitMode.LEFT_RIGHT, platform=platform)
         result = test_runner.run(case)
-        assert result.passed, f"LEFT_RIGHT (VR={vr},VC={vc}) failed: {result.error}"
+
+        assert not result.passed, "a per-lane column extent must not compile"
+        assert "LEFT_RIGHT splits the column axis" in result.error, result.error
+        assert "mode=pl.SplitMode.UP_DOWN" in result.error, result.error
 
 
 # ---------------------------------------------------------------------------

@@ -375,12 +375,16 @@ store 保护——它的消费者由折半遍历重建，而非本遍历。
   extent 验证。[pto-isa 的 pop](https://github.com/hw-native-sys/pto-isa/issues/263)
   确实按被弹出 tile 自身的 extent 放置 lane 1，与其源码读法一致——此前得出相反结论的实测，
   其探针两个操作数都是常量，乘积的每一行每一列都相同，落位错误因而无法分辨。
-- **手写 `tile.tpop_from_aic` 上的同类 extent 仍会落位错误。** `SplitVectorKernel` 的折半
-  会把用户声明的 `valid_shape` 局部化到 pop 自身，而 pto-isa 正是从这里读取数据段偏移。
+- **手写 `tile.tpop_from_aic` 上的同类行 extent 仍会落位错误。** `SplitVectorKernel` 的
+  折半会把用户声明的 `valid_shape` 局部化到 pop 自身，而 pto-isa 正是从这里读取数据段偏移。
   仅加宽 pop 并不能修复该路径：其消费者继承作者的声明，随后从完整来源写入部分目标，实测
   结果更差。`tests/st/runtime/cross_core/test_cross_core_split_parity.py` 中标记 xfail
-  的参数记录了受影响的取值范围（`UP_DOWN` 下 `half < V < box`，以及 `LEFT_RIGHT` 下任何
-  被收窄的列 extent——此时 pop 还会算错 GM 的行间隔）。
+  的参数记录了受影响的取值范围：`UP_DOWN` 下 `half < V < box`。
+- **被收窄的列 extent 在所有路径上一律拒绝。** 它根本没有承载者——槽位按生产者的物理列
+  间距写入，而 pop 依据 tile 自身的 `validCol` 重建读取几何——并且在 `LeftRight` 下它就是
+  切分轴，必须逐 lane 取值。该契约由 `CheckSplitBoundaryCarriesValid`
+  （`src/ir/op/tile_ops/cross_core.cpp`）统一持有：它既在边界算子的类型推导中运行，也由
+  `ShardSplitCode` 调用，因此手写的 `tile.tpush_to_aiv` / `tile.tpop_from_aic` 同样受其约束。
 - **空 lane 的 store 被保护。** ragged extent 覆盖不到的 lane，其 extent 为 `0`，而
   零行 `TSTORE` 超出 pto-isa 契约（`TSTORE_IMPL` 断言 `GetValidRow() > 0`）。store
   被加上运行时 `extent > 0` 判断；`tpop` 与 `tfree` 保持**无条件**——两个 lane 都占用

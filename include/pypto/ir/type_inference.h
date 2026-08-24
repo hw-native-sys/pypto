@@ -184,6 +184,37 @@ enum class ProofResult {
 ProofResult ProveValidExtentEqual(const ExprPtr& lhs, const ExprPtr& rhs);
 
 /**
+ * @brief Enforce what a Cube <-> Vector boundary can carry in its valid_shape.
+ *
+ * The FIFO slot is written by the producer at its PHYSICAL column pitch and read
+ * back by each lane with pto-isa's own geometry, which it derives from the
+ * POPPED tile's runtime valid extents (``popVecTileFromGMFiFo``):
+ * ``gmStrideR = validCol`` (doubled for the left-right codes) and
+ * ``subAIVOffset = subBlockId * validRow * validCol`` (``* validCol`` for
+ * left-right). Both only reconstruct the producer's rectangle when the COLUMN
+ * extent is the full physical box, which is why a narrowed column extent has no
+ * carrier across this boundary at all -- on LEFT_RIGHT it is additionally the
+ * split axis, so it would have to be per-lane, which nothing can express.
+ *
+ * Called from the boundary op's own deduction (``tile.aiv_shard`` /
+ * ``tile.aic_gather``) AND from the transport code choice
+ * (``split_axis::ShardSplitCode``), so a hand-written
+ * ``tile.tpush_to_aiv`` / ``tile.tpop_from_aic`` pair is held to the same
+ * contract as a compiler-generated boundary.
+ *
+ * @param op_name Op name for diagnostics.
+ * @param shape The tile's PHYSICAL shape (rank 2; other ranks return).
+ * @param valid The tile's valid_shape.
+ * @param split_axis 0 (UP_DOWN), 1 (LEFT_RIGHT), or -1 for a split=0 crossing.
+ * @param halve Whether this boundary actually splits (a gather passes false).
+ * @param span Span for diagnostics.
+ * @throws pypto::ValueError naming the shapes that would work.
+ */
+void CheckSplitBoundaryCarriesValid(const std::string& op_name, const std::vector<ExprPtr>& shape,
+                                    const std::vector<ExprPtr>& valid, int split_axis, bool halve,
+                                    const Span& span);
+
+/**
  * @brief Prove whether one valid-extent expression is less than or equal to another
  *
  * @return kTrue when lhs <= rhs is proven, kFalse when lhs > rhs is proven,

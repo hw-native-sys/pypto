@@ -43,6 +43,7 @@
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -1333,6 +1334,20 @@ int ShardSplitCode(SplitMode mode, const TypePtr& full_type, int split_dim, cons
                    const std::string& op_name, const Span& span) {
   if (mode == SplitMode::None) return kSplitNone;
   auto tt = std::dynamic_pointer_cast<const TileType>(full_type);
+  // What the FIFO can carry at all. The boundary ops are checked when their type
+  // is deduced; a HAND-WRITTEN tile.tpush_to_aiv / tile.tpop_from_aic pair never
+  // goes through that deduction, and reaches the transport here instead. Both
+  // must obey the same contract, because it is pto-isa's geometry rather than a
+  // pass's convention: the pop derives its GM row stride and its lane offset
+  // from the popped tile's own valid extents, so a narrowed COLUMN extent
+  // mis-strides the read against the producer's full-box pitch (measured on
+  // a2a3: a [16, 16] boundary read back with valid_col 12 or 8 misses the
+  // golden, while 16 matches).
+  if (tt) {
+    CheckSplitBoundaryCarriesValid(op_name, tt->shape_,
+                                   tile_view_semantics::GetEffectiveTileView(*tt).valid_shape, split_dim,
+                                   /*halve=*/true, span);
+  }
   auto extents = ComputeLaneExtents(tt, split_dim, lane_stride);
   // No compile-time lane extents (a runtime box, valid extent or stride): the
   // even code, which is exact only when the boundary tile carries the FULL

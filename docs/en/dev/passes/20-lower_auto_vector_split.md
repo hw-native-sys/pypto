@@ -428,15 +428,21 @@ rebuilt by the halving walk rather than by this one.
   that suggested otherwise came from a probe whose operands were uniform
   constants, which makes every row and column of the product identical and any
   band offset indistinguishable.
-- **The same extent on a hand-written `tile.tpop_from_aic` is still misplaced.**
-  `SplitVectorKernel`'s halving localizes a declared `valid_shape` onto the pop
-  itself, where pto-isa reads it as the band offset. Widening only the pop does
-  not fix that path: its consumers inherit the author's declaration and then
-  write partial destinations out of a full source, which measures worse on
-  device. The xfailing params of
-  `tests/st/runtime/cross_core/test_cross_core_split_parity.py` record the
-  regimes this affects (`half < V < box` on `UP_DOWN`, and any narrowed column
-  extent on `LEFT_RIGHT`, where the pop additionally mis-strides the GM gap).
+- **The same ROW extent on a hand-written `tile.tpop_from_aic` is still
+  misplaced.** `SplitVectorKernel`'s halving localizes a declared `valid_shape`
+  onto the pop itself, where pto-isa reads it as the band offset. Widening only
+  the pop does not fix that path: its consumers inherit the author's declaration
+  and then write partial destinations out of a full source, which measures worse
+  on device. The xfailing params of
+  `tests/st/runtime/cross_core/test_cross_core_split_parity.py` record the regime
+  this affects: `half < V < box` on `UP_DOWN`.
+- **A narrowed COLUMN extent is rejected on every path.** It has no carrier at
+  all — the slot is written at the producer's physical column pitch while the pop
+  rebuilds its geometry from the tile's own `validCol` — and on `LeftRight` it is
+  the split axis, so it would have to be per-lane. `CheckSplitBoundaryCarriesValid`
+  (`src/ir/op/tile_ops/cross_core.cpp`) owns that contract; it runs both in the
+  boundary op's deduction and from `ShardSplitCode`, so a hand-written
+  `tile.tpush_to_aiv` / `tile.tpop_from_aic` pair is held to it too.
 - **An empty lane's store is guarded.** A lane the ragged extent does not reach
   has extent `0`, and a zero-row `TSTORE` is outside pto-isa's contract
   (`TSTORE_IMPL` asserts `GetValidRow() > 0`). The store gets a runtime
