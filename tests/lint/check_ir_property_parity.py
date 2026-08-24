@@ -20,8 +20,8 @@ set looks healthy right up to that point.
 
 This check enforces, against the header as the authoritative list:
 
-1. *Coverage* -- each of the other three layers declares exactly the enumerators the header does.
-   ``kCount`` is a sentinel, not a property, and is excluded everywhere.
+1. *Coverage* -- each of the other three layers declares each of the header's enumerators exactly
+   once, and nothing else. ``kCount`` is a sentinel, not a property, and is excluded everywhere.
 2. *Order* -- each layer lists them in the header's declaration order. Order carries no runtime
    meaning (nanobind binds each ``.value`` to its C++ value, and stub members hold no value at all),
    but a layer that drifts out of order cannot be diffed against the header by position, which is
@@ -32,7 +32,8 @@ This check enforces, against the header as the authoritative list:
 
 Each layer is also sanity-checked for pattern drift: a declaration written in a form the regex here
 does not match would be skipped in silence, which is the one failure this lint must not have, so an
-unparsed entry is reported rather than ignored.
+unparsed entry is reported rather than ignored. C++ comments are blanked before scanning, so a
+commented-out declaration cannot satisfy the check on behalf of the code it describes.
 
 Usage:
 
@@ -42,7 +43,10 @@ Usage:
 import argparse
 import re
 import sys
+from collections import Counter
 from pathlib import Path
+
+from _cpp_text import strip_cpp_comments
 
 # The four declaration sites, relative to the repo root.
 ENUM_DECL = "include/pypto/ir/transforms/ir_property.h"
@@ -82,14 +86,22 @@ def read(root: Path, rel: str) -> str:
     return (root / rel).read_text(encoding="utf-8")
 
 
+def read_cpp(root: Path, rel: str) -> str:
+    """Read a C++ source with its comments blanked out.
+
+    A declaration inside a comment is prose about the code, not the code. Counting one would let a
+    commented-out `.value(...)` or `case` satisfy this check while the runtime enum stays short --
+    the exact silent-success this lint exists to prevent.
+    """
+    return strip_cpp_comments(read(root, rel))
+
+
 def parse_enum(root: Path) -> tuple[list[str], list[str]]:
     """Return (enumerators in declaration order, errors) from the header."""
-    match = ENUM_BLOCK_RE.search(read(root, ENUM_DECL))
+    match = ENUM_BLOCK_RE.search(read_cpp(root, ENUM_DECL))
     if match is None:
         return [], [f"{ENUM_DECL}: could not locate `enum class IRProperty : <type> {{ ... }};`"]
-    # Doc comments hold prose that would otherwise parse as enumerators.
-    body = re.sub(r"///<.*|//.*", "", match.group(1))
-    names = [m.group(1) for m in ENUM_MEMBER_RE.finditer(body)]
+    names = [m.group(1) for m in ENUM_MEMBER_RE.finditer(match.group(1))]
     errors: list[str] = []
     if SENTINEL not in names:
         errors.append(
@@ -100,7 +112,7 @@ def parse_enum(root: Path) -> tuple[list[str], list[str]]:
 
 def parse_to_string(root: Path) -> tuple[list[str], list[str]]:
     """Return (enumerators handled by IRPropertyToString, errors), checking each returned spelling."""
-    match = TO_STRING_BLOCK_RE.search(read(root, TO_STRING_DECL))
+    match = TO_STRING_BLOCK_RE.search(read_cpp(root, TO_STRING_DECL))
     if match is None:
         return [], [f"{TO_STRING_DECL}: could not locate the body of `IRPropertyToString`"]
     body = match.group(1)
@@ -124,7 +136,7 @@ def parse_to_string(root: Path) -> tuple[list[str], list[str]]:
 
 def parse_binding(root: Path) -> tuple[list[str], list[str]]:
     """Return (enumerators bound by nanobind, errors), checking each Python-visible name."""
-    match = BINDING_BLOCK_RE.search(read(root, BINDING_DECL))
+    match = BINDING_BLOCK_RE.search(read_cpp(root, BINDING_DECL))
     if match is None:
         return [], [f"{BINDING_DECL}: could not locate the `nb::enum_<IRProperty>(...)` chain"]
     block = match.group(0)
@@ -163,7 +175,7 @@ def parse_stub(root: Path) -> tuple[list[str], list[str]]:
 
 
 def compare(layer: str, expected: list[str], actual: list[str], how: str) -> list[str]:
-    """Report enumerators the layer is missing, ones it invents, and any order drift."""
+    """Report enumerators the layer is missing, ones it invents or repeats, and any order drift."""
     errors = [
         f"{layer}: `IRProperty::{name}` is declared in {ENUM_DECL} but not here -- add it as {how}"
         for name in expected
@@ -174,6 +186,13 @@ def compare(layer: str, expected: list[str], actual: list[str], how: str) -> lis
         for name in actual
         if name not in expected
     ]
+    errors += [
+        f"{layer}: `{name}` is declared {count} times -- declare each enumerator exactly once"
+        for name, count in sorted(Counter(actual).items())
+        if count > 1
+    ]
+    # Past the checks above, `actual` holds each expected name exactly once and nothing else, so it
+    # is a permutation of `expected` -- equal in length, and unequal only at some shared index.
     if not errors and actual != expected:
         first = next(i for i, (a, e) in enumerate(zip(actual, expected)) if a != e)
         errors.append(
