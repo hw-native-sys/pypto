@@ -84,6 +84,30 @@ inline void ValidateBaseName(const std::string& base_name) {
   }
 }
 
+/// Append a `_`-separated `suffix` to `base` without ever *introducing* the
+/// `__` delimiter ValidateBaseName reserves.
+///
+/// A base may legitimately end in `_`: `_` is Python's throwaway name and the
+/// documented loop variable of `for _ in pl.split_aiv(...)` (see
+/// docs/en/user/language/04-scopes.md). A naive `base + "_" + suffix` fuses the
+/// two underscores into the reserved delimiter, so the first downstream renamer
+/// rejects a name the author never wrote.
+///
+/// A base that *already* contains `__` is passed through untouched — that is a
+/// user-facing error ValidateBaseName must still report, not one to hide here.
+/// The contract is exactly: valid base in => valid name out; invalid base in =>
+/// still-invalid name out.
+inline std::string JoinNameSuffix(const std::string& base, const std::string& suffix) {
+  if (base.find("__") != std::string::npos) {
+    return base + "_" + suffix;
+  }
+  std::string_view trimmed(base);
+  while (!trimmed.empty() && trimmed.back() == '_') {
+    trimmed.remove_suffix(1);
+  }
+  return std::string(trimmed) + "_" + suffix;
+}
+
 inline std::string BuildName(const std::string& base_name, const std::string& qualifier = "",
                              const std::optional<std::string>& role = std::nullopt,
                              const std::optional<int>& version = std::nullopt) {

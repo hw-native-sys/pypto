@@ -36,12 +36,14 @@ program_inlined = inline_pass(program)
 3. **Iterate to fixpoint** — each iteration walks every function (including the Inline ones, so that nested Inline-calls-Inline expands transitively):
    - For every top-level `LHS = inline_call(args)` or `EvalStmt(inline_call(args))` in a function body:
      - Build the param-substitution map (formal `Var` → actual `Expr`).
-     - Alpha-rename every locally-bound `Var` in the inlined body to a fresh name (`<orig>_inline<counter>`) to avoid collisions across multiple call sites.
+     - Alpha-rename every locally-bound `Var` in the inlined body to a fresh name (`<orig>_inline<counter>`, with any trailing `_` trimmed off `<orig>`) to avoid collisions across multiple call sites.
      - Splice the renamed-and-substituted body's statements before the call site.
      - Replace the call with: `LHS = renamed_return` (single-return) or `LHS = MakeTuple([renamed_returns...])` (multi-return). When `LHS` resolves to the same `Var` as the substituted return value, the assignment is omitted to avoid a redundant SSA copy.
 4. **Drop** all Inline functions from the program.
 
 The pass uses a single underscore (`_inline`) in the rename suffix because `__` is reserved by the IR's auto-naming convention (see `auto_name_utils.h`).
+
+A single-underscore suffix is not sufficient on its own: `<orig>` may itself end in `_` — `_` is Python's throwaway name and the documented loop variable of `for _ in pl.split_aiv(...)` — and plain concatenation would then fuse two individually-legal underscores into the reserved delimiter. `FreshName` therefore joins through `auto_name::JoinNameSuffix`, which trims that tail: `_` renames to `_inline7`, not `__inline7`. A `<orig>` that *already* contains `__` is passed through unchanged, so an author-written `a__b` stays the user-facing error `ValidateBaseName` reports rather than being silently normalized.
 
 ## Example
 
