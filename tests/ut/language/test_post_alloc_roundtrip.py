@@ -25,6 +25,13 @@ from pypto import ir
 class TestSoftmaxRescaleDSL:
     """Simplified softmax-rescale written directly in DSL form."""
 
+    def test_language_exports_ptr_wrapper_only(self):
+        """The DSL exposes ``pl.Ptr`` while the raw type stays in ``pypto.ir``."""
+        assert "Ptr" in pl.__all__
+        assert "PtrType" not in pl.__all__
+        assert not hasattr(pl, "PtrType")
+        assert hasattr(ir, "PtrType")
+
     def test_softmax_rescale_incore_init(self):
         """Incore function that allocates tiles and returns a Tuple."""
 

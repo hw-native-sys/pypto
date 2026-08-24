@@ -18,7 +18,8 @@ import pypto.language as pl
 
 对于未命名程序: `# pypto.program`
 
-**注意:** 模块前缀可配置 (默认 `pl`, 旧版 `ir`, 支持自定义)。
+**注意:** 模块前缀可配置 (默认 `pl`, 旧版 `ir`, 支持自定义)，但 `pld` 保留给
+`pypto.language.distributed` 使用。
 
 本规范拆分为四个页面：
 

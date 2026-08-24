@@ -18,7 +18,8 @@ import pypto.language as pl
 
 For unnamed programs: `# pypto.program`
 
-**Note:** Module prefix is configurable (default `pl`, legacy `ir`, custom allowed).
+**Note:** Module prefix is configurable (default `pl`, legacy `ir`, custom allowed),
+except `pld`, which is reserved for `pypto.language.distributed`.
 
 The specification is split across four pages:
 

@@ -26,7 +26,8 @@ def python_print(
 
     Args:
         node: IR node (Expr, Stmt, Function, Program) or Type object to print
-        prefix: Module prefix (default 'pl' for 'import pypto.language as pl')
+        prefix: Module prefix (default ``pl``). ``pld`` is reserved for
+            ``pypto.language.distributed`` when printing a Program.
         concise: If true, omit intermediate type annotations (default false)
         format: If true, apply registered format callback (default true)
         explicit_layout: If true, print every tile's fully-resolved
@@ -35,6 +36,9 @@ def python_print(
 
     Returns:
         Python-style string representation
+
+    Raises:
+        ValueError: If ``prefix="pld"`` is used to print a Program
     """
     if isinstance(node, _ir_core.Type):
         return _ir_core.python_print_type(node, prefix, format, explicit_layout)

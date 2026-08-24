@@ -3004,6 +3004,9 @@ static std::unordered_map<const Var*, std::string> CollectDynVarMapping(const Pr
 }
 
 void IRPythonPrinter::VisitProgram(const ProgramPtr& program) {
+  CHECK(prefix_ != "pld")
+      << "Python printer prefix 'pld' is reserved for pypto.language.distributed; choose another prefix";
+
   // Render everything below the imports into a scratch buffer first. Whether the
   // program needs ``import pypto.language.distributed as pld`` is only knowable
   // once the body exists: every distributed spelling is hardcoded with the

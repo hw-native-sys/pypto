@@ -365,7 +365,8 @@ void BindIR(nb::module_& m) {
           nb::arg("prefix") = "pl", nb::arg("concise") = false, nb::arg("format") = true,
           "Convert to Python-style string representation.\n\n"
           "Args:\n"
-          "    prefix: Module prefix (default 'pl' for 'import pypto.language as pl')\n"
+          "    prefix: Module prefix (default 'pl'). 'pld' is reserved for\n"
+          "        pypto.language.distributed when printing a Program\n"
           "    concise: If true, omit intermediate type annotations (default false)\n"
           "    format: If true, apply registered format callback (default true)");
 
@@ -1898,7 +1899,8 @@ void BindIR(nb::module_& m) {
       "Print IR node (Expr, Stmt, Function, or Program) in Python IR syntax.\n\n"
       "Args:\n"
       "    node: IR node to print\n"
-      "    prefix: Module prefix (default 'pl' for 'import pypto.language as pl')\n"
+      "    prefix: Module prefix (default 'pl'). 'pld' is reserved for\n"
+      "        pypto.language.distributed when printing a Program\n"
       "    concise: If true, omit intermediate type annotations (default false)\n"
       "    format: If true, apply registered format callback (default true)\n"
       "    explicit_layout: If true, print every tile's fully-resolved\n"

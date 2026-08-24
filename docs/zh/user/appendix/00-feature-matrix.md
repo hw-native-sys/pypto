@@ -39,7 +39,7 @@ PyPTO 面向两代 Ascend。`backend_type` 在编译期选择其一，它同时�
 
 | 类型 | 是什么 | 取值 |
 | ---- | ------ | ---- |
-| `PtrType` | 分配身份令牌的指针类型 | — |
+| `Ptr` | 分配身份令牌的 DSL 包装类型 | 由分配操作产生 |
 | `MemRefType` | `pl.MemRef` 绑定的类型 | — |
 | `TileView` | tile 的有效形状与 stride 视图 | 由 `pl.TileView(...)` 构造 |
 | `TileLayout` | tile 布局 | `row_major`、`col_major`、`none_box` |

@@ -125,6 +125,15 @@ def test_python_print_program():
     assert "def simple_func" in result
 
 
+def test_python_print_program_rejects_distributed_prefix():
+    """The main DSL alias must not shadow the reserved distributed alias."""
+    span = ir.Span.unknown()
+    program = ir.Program([], "test_program", span)
+
+    with pytest.raises(ValueError, match="prefix 'pld' is reserved"):
+        program.as_python(prefix="pld")
+
+
 def test_python_print_if_stmt_basic():
     """Test basic if statement printing."""
     span = ir.Span.unknown()

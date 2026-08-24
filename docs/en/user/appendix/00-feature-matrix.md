@@ -44,7 +44,7 @@ hand.
 
 | Type | Meaning | Values |
 | ---- | ------- | ------ |
-| `PtrType` | Pointer type for allocation identity tokens | — |
+| `Ptr` | DSL wrapper for allocation identity tokens | Produced by allocation operations |
 | `MemRefType` | The type of a `pl.MemRef` binding | — |
 | `TileView` | A tile's valid shape and stride view | Built by `pl.TileView(...)` |
 | `TileLayout` | Tile layout | `row_major`, `col_major`, `none_box` |

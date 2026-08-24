@@ -67,7 +67,8 @@ bool IsRightAssociative(const ExprPtr& expr);
  * @brief Print an IR node in Python syntax
  *
  * @param node IR node to print (Expr, Stmt, Function, or Program)
- * @param prefix Module prefix to use (default: "pl", can be "ir" for legacy)
+ * @param prefix Module prefix to use (default: "pl", can be "ir" for legacy).
+ *        "pld" is reserved for pypto.language.distributed when printing a Program.
  * @param concise If true, omit intermediate type annotations (default: false)
  * @param explicit_layout If true, print every tile's fully-resolved
  *        blayout/slayout/fractal from GetEffectiveTileView — including tiles

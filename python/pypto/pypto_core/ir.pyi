@@ -148,12 +148,16 @@ class IRNode:
         """Convert to Python-style string representation.
 
         Args:
-            prefix: Module prefix (default 'pl' for 'import pypto.language as pl')
+            prefix: Module prefix (default ``pl``). ``pld`` is reserved for
+                ``pypto.language.distributed`` when printing a Program.
             concise: If true, omit intermediate type annotations (default false)
             format: If true, apply registered format callback (default true)
 
         Returns:
             Python-style string representation
+
+        Raises:
+            ValueError: If ``prefix="pld"`` is used to print a Program
         """
 
 class Expr(IRNode):
@@ -3737,7 +3741,8 @@ def python_print(
 
     Args:
         node: IR node to print
-        prefix: Module prefix (default 'pl' for 'import pypto.language as pl')
+        prefix: Module prefix (default ``pl``). ``pld`` is reserved for
+            ``pypto.language.distributed`` when printing a Program.
         concise: If true, omit intermediate type annotations (default false)
         format: If true, apply registered format callback (default true)
         explicit_layout: If true, print every tile's fully-resolved
@@ -3746,6 +3751,9 @@ def python_print(
 
     Returns:
         String representation of the IR node
+
+    Raises:
+        ValueError: If ``prefix="pld"`` is used to print a Program
     """
 
 def python_print_type(
