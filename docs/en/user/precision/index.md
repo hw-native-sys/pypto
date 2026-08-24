@@ -2,7 +2,8 @@
 
 The result is wrong, not slow. This chapter is the order in which to suspect things.
 
-> **Prerequisites:** [Tutorials](../tutorials/index.md) — specifically the `allclose`
+> **Prerequisites:** [Execution](../execution/index.md) — compiling, running, and the
+> `RunConfig` fields this chapter turns on. Also [Tutorials](../tutorials/index.md) — specifically the `allclose`
 > comparison from [Your first operator](../tutorials/00-elementwise.md).
 
 ## What this chapter is
