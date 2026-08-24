@@ -905,11 +905,20 @@ scheduler stores in `GlobalContext.sub_block_id`) and appends
 `__pypto_spmd_subblock_idx` after any block-identity args. It deliberately
 reads the runtime lane id rather than the ccec `get_subblockid()` register,
 which returns a stale value under the `tensormap_and_ringbuffer` dispatch.
-This is independent of — and coexists with — the `get_subblockid()` macro
-bridge (`pypto_runtime_subblock_id`) that A2A3 dual-AIV wrappers install for
-ptoas-*internal* pipe-slot offsets. Like block identity, it is emitted
-unconditionally (no `__CPU_SIM` fork) because `GlobalContext.sub_block_id` is
-populated by the scheduler on every platform.
+
+Split AIV FIFO endpoints use that runtime value even when the tensor program
+does not call `tile.get_subblock_idx()`: after PTOAS lowers a split endpoint,
+the wrapper backend forwards the lane as the third argument of PTO-ISA's
+explicit `TPUSH(pipe, tile, subblock_id)` / `TPOP(...)` overload. If the
+function has no synthetic subblock parameter already, the backend adds a
+private trailing parameter to the generated function. The explicit overload
+derives the byte offset from each call's actual tile type, so one automatic
+pipe can safely carry differently sized sequential transfers. Like block
+identity, the runtime lane is emitted unconditionally (no `__CPU_SIM` fork)
+because `GlobalContext.sub_block_id` is populated by the scheduler on every
+platform. CPU simulation and in-core cost-model builds retain PTO-ISA's normal
+two-argument endpoint because those implementations already model their lane
+context and do not expose the device-only explicit-lane overload.
 
 **Detection scope.** Both layers detect SPMD usage on a per-function basis:
 
@@ -918,7 +927,9 @@ populated by the scheduler on every platform.
   block / subblock params to a given function's signature.
 - `_uses_spmd_block_ops` / `_uses_dynamic_subblock_id` (Python,
   `python/pypto/backend/pto_backend.py`) drive whether the wrapper appends the
-  matching locals to the inner call site.
+  matching locals to the inner call site. Split `TPUSH` / `TPOP` endpoints are
+  additionally detected by `_runtime_split_fifo_endpoint_counts`; they reuse
+  that subblock argument or request the private one described above.
 
 For non-SPMD sibling functions in an SPMD group (`group_uses_spmd=True` but
 the function itself does not call `tile.get_block_*`), the wrapper still
@@ -928,7 +939,7 @@ the inner call, matching the function's MLIR signature.
 
 This replaces the earlier macro-shadow + `[[block_local]] static` /
 `static thread_local` bridge plus `#pragma push_macro` / `#undef` /
-`pop_macro` dance. Block identity now flows through the call graph like
+`pop_macro` dance. Block and lane identity now flow through the call graph like
 every other per-launch value (tensor pointers, scalar args, dynamic dims).
 
 ### Implementation

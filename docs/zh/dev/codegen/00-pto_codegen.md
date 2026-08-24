@@ -858,11 +858,17 @@ wrapper 从 `intrinsic.h::get_sub_block_id(args)`(调度器写入
 `GlobalContext.sub_block_id` 的运行时 per-core lane id)解析出值,并把
 `__pypto_spmd_subblock_idx` 追加在 block 身份实参之后。它刻意读取运行时
 lane id,而非 ccec `get_subblockid()` 寄存器 -- 后者在
-`tensormap_and_ringbuffer` 调度下返回过期值。这与 A2A3 dual-AIV wrapper 为
-ptoas **内部** pipe-slot 偏移安装的 `get_subblockid()` 宏桥接
-(`pypto_runtime_subblock_id`)相互独立、并存。与 block 身份一样,它无条件发射
-(无 `__CPU_SIM` 分叉),因为 `GlobalContext.sub_block_id` 在每个平台都由调度器
-填充。
+`tensormap_and_ringbuffer` 调度下返回过期值。
+
+即使张量程序没有调用 `tile.get_subblock_idx()`，split AIV FIFO 端点也会使用这个
+运行时值：PTOAS 下沉 split 端点后，wrapper 后端把 lane 作为 PTO-ISA 显式重载
+`TPUSH(pipe, tile, subblock_id)` / `TPOP(...)` 的第三个实参传入。如果函数还没有
+合成的 subblock 形参，后端会给生成函数增加一个私有尾随形参。显式重载根据每次调用
+的实际 tile 类型推导字节偏移，因此同一个自动 pipe 可以安全承载大小不同的连续传输。
+与 block 身份一样，运行时 lane 无条件发射（无 `__CPU_SIM` 分叉），因为
+`GlobalContext.sub_block_id` 在每个平台都由调度器填充。CPU simulation 和 in-core
+cost-model 构建保留 PTO-ISA 的普通双实参端点，因为这些实现已经对 lane context
+建模，且不提供仅用于 device 的显式 lane 重载。
 
 **检测范围。** 两层各自基于函数体独立检测 SPMD usage:
 
@@ -871,7 +877,9 @@ ptoas **内部** pipe-slot 偏移安装的 `get_subblockid()` 宏桥接
   block / subblock 形参。
 - `_uses_spmd_block_ops` / `_uses_dynamic_subblock_id`(Python，位于
   `python/pypto/backend/pto_backend.py`)决定 wrapper 是否把相应局部变量追加到
-  对内函数调用末尾。
+  对内函数调用末尾。split `TPUSH` / `TPOP` 端点还由
+  `_runtime_split_fifo_endpoint_counts` 检测；它们复用该 subblock 实参，或请求上述
+  私有形参。
 
 对于 SPMD 组内自身不调用 `tile.get_block_*` 的 sibling 函数
 (`group_uses_spmd=True` 但函数本身不用 SPMD ops)，wrapper 仍会声明这两个
@@ -880,7 +888,7 @@ ptoas **内部** pipe-slot 偏移安装的 `get_subblockid()` 宏桥接
 
 此设计替换了旧的宏 shadow + `[[block_local]] static` /
 `static thread_local` 桥接以及 `#pragma push_macro` / `#undef` /
-`pop_macro` 舞步。block 身份现在与张量指针、标量参数、动态维一样
+`pop_macro` 舞步。block 和 lane 身份现在与张量指针、标量参数、动态维一样
 通过调用图正常传递。
 
 ### 实现

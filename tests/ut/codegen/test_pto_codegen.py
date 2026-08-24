@@ -171,6 +171,63 @@ __global__ AICORE void test_func(__gm__ float* v1, float v2, __gm__ float* v3) {
 }
 """
 
+SAMPLE_GROUPED_SPLIT_PTOAS_OUTPUT = """\
+#include "pto/pto-inst.hpp"
+using namespace pto;
+
+AICORE void split_cube(__gm__ float* v1) {
+  return;
+}
+
+AICORE void split_vec(__gm__ float* v1, int32_t v4) {
+  auto v2 = TPipe<0, Direction::DIR_C2V, 512, 8, 2, false>(v1, 0, 0);
+  Tile<TileType::Vec, float, 8, 16, BLayout::RowMajor> v3;
+  TPOP<TPipe<0, Direction::DIR_C2V, 512, 8, 2, false>,
+       Tile<TileType::Vec, float, 8, 16, BLayout::RowMajor>,
+       TileSplitAxis::TILE_UP_DOWN>(v2, v3);
+  return;
+}
+"""
+
+
+def _split_ptoas_output_for(
+    func_name: str,
+    *,
+    runtime_lane_param: bool = False,
+    direction: str = "DIR_C2V",
+    include_push: bool = False,
+) -> str:
+    """Return one split PTOAS function, optionally with a V2C push."""
+
+    params = "__gm__ float* v1"
+    if runtime_lane_param:
+        params += ", int32_t v2"
+    pipe = "v3" if runtime_lane_param else "v2"
+    popped = "v4" if runtime_lane_param else "v3"
+    produced = "v5" if runtime_lane_param else "v4"
+    push = ""
+    if include_push:
+        push = f"""\
+  TPUSH<TPipe<0, Direction::{direction}, 1024, 4, 2, false>,
+        Tile<TileType::Vec, bfloat16_t, 8, 16, BLayout::RowMajor>,
+        TileSplitAxis::TILE_UP_DOWN>({pipe}, {produced});
+"""
+    return f"""\
+#include "pto/pto-inst.hpp"
+using namespace pto;
+
+AICORE void {func_name}({params}) {{
+  auto {pipe} = TPipe<0, Direction::{direction}, 1024, 4, 2, false>(v1, 0, 0);
+  Tile<TileType::Vec, float, 8, 16, BLayout::RowMajor> {popped};
+  Tile<TileType::Vec, bfloat16_t, 8, 16, BLayout::RowMajor> {produced};
+  TPOP<TPipe<0, Direction::{direction}, 1024, 4, 2, false>,
+       Tile<TileType::Vec, float, 8, 16, BLayout::RowMajor>,
+       TileSplitAxis::TILE_UP_DOWN>({pipe}, {popped});
+{push}
+  return;
+}}
+"""
+
 
 def _make_func(name, params_spec):
     """Build a Function from parameter specs.
@@ -1760,19 +1817,20 @@ class TestGenerateKernelWrapper:
         assert func is not None
         assert transformed.get_function("split_vec__aiv1") is None
 
-        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
+        wrapper = _generate_kernel_wrapper(
+            func,
+            _split_ptoas_output_for(func.name, runtime_lane_param=True),
+        )
         assert "PYPTO_FIXED_SUBBLOCK_ID" not in wrapper
-        assert wrapper.count("#if !defined(__CPU_SIM)\n") == 2
-        assert '#if !defined(__CPU_SIM)\n#include "intrinsic.h"' in wrapper
-        assert "[[block_local]] static int32_t pypto_runtime_subblock_id;" in wrapper
         assert '#include "intrinsic.h"' in wrapper
-        assert "#define get_subblockid() pypto_runtime_subblock_id" in wrapper
-        assert (
-            "#if !defined(__CPU_SIM)\n"
-            "    // Read A2A3 mixed-task subblock id from runtime dispatch context\n"
-            "    pypto_runtime_subblock_id = get_sub_block_id(args);\n"
-            "#endif"
-        ) in wrapper
+        assert "[[block_local]]" not in wrapper
+        assert "#define get_subblockid()" not in wrapper
+        assert "int32_t __pypto_runtime_subblock_idx" not in wrapper
+        assert "TileSplitAxis::TILE_UP_DOWN>(v3, v4 PYPTO_SPLIT_RUNTIME_LANE_ARG(v2));" in wrapper
+        assert "#define PYPTO_SPLIT_RUNTIME_LANE_ARG(subblock_id) , subblock_id" in wrapper
+        assert "#undef PYPTO_SPLIT_RUNTIME_LANE_ARG" in wrapper
+        assert "int32_t __pypto_spmd_subblock_idx = get_sub_block_id(args);" in wrapper
+        assert "split_vec(out__ssa_v0, __gm_pipe_buffer, __pypto_spmd_subblock_idx);" in wrapper
 
     def test_no_split_dual_dispatch_wrapper_uses_runtime_subblock_bridge_on_a2a3(self):
         @pl.program
@@ -1793,9 +1851,147 @@ class TestGenerateKernelWrapper:
 
         wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
         assert "PYPTO_FIXED_SUBBLOCK_ID" not in wrapper
-        assert "[[block_local]] static int32_t pypto_runtime_subblock_id;" in wrapper
-        assert "#define get_subblockid() pypto_runtime_subblock_id" in wrapper
-        assert "pypto_runtime_subblock_id = get_sub_block_id(args);" in wrapper
+        assert "[[block_local]]" not in wrapper
+        assert "#define get_subblockid()" not in wrapper
+        assert "int32_t __pypto_spmd_subblock_idx = get_sub_block_id(args);" in wrapper
+        assert "__pypto_spmd_subblock_idx);" in wrapper
+
+    def test_split_fifo_calls_reuse_existing_dynamic_subblock_parameter(self):
+        """A function using the lane op forwards its existing PTOAS parameter to FIFO calls."""
+
+        @pl.program
+        class ExplicitLaneSplitProgram:
+            @pl.function(type=pl.FunctionType.AIV)
+            def split_vec(self):
+                pl.func_attr({"split": pl.SplitMode.UP_DOWN})
+                pl.tile.get_subblock_idx()
+                pipe_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=pipe_buf)
+                popped: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
+                    split=1
+                )
+                pl.tfree_to_aic(popped)
+
+        func = ExplicitLaneSplitProgram.get_function("split_vec")
+        assert func is not None
+
+        wrapper = _generate_kernel_wrapper(
+            func,
+            _split_ptoas_output_for(func.name, runtime_lane_param=True),
+        )
+
+        assert "int32_t __pypto_runtime_subblock_idx" not in wrapper
+        assert "TileSplitAxis::TILE_UP_DOWN>(v3, v4 PYPTO_SPLIT_RUNTIME_LANE_ARG(v2));" in wrapper
+        assert "int32_t __pypto_spmd_subblock_idx = get_sub_block_id(args);" in wrapper
+        assert "split_vec(__pypto_spmd_subblock_idx);" in wrapper
+
+    def test_legacy_fixed_lane_wrapper_keeps_compile_time_subblock_id(self):
+        """Legacy lane-specialized AIV wrappers retain their fixed lane override."""
+
+        @pl.program
+        class FixedLaneSplitProgram:
+            @pl.function(type=pl.FunctionType.AIV)
+            def split_vec__aiv1(self):
+                pl.func_attr({"split": pl.SplitMode.UP_DOWN})
+                pipe_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=pipe_buf)
+                popped: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
+                    split=1
+                )
+                pl.tfree_to_aic(popped)
+
+        func = FixedLaneSplitProgram.get_function("split_vec__aiv1")
+        assert func is not None
+
+        wrapper = _generate_kernel_wrapper(func, _split_ptoas_output_for(func.name))
+
+        assert "#define PYPTO_FIXED_SUBBLOCK_ID 1" in wrapper
+        assert "#define get_subblockid() PYPTO_FIXED_SUBBLOCK_ID" in wrapper
+        assert "TileSplitAxis::TILE_UP_DOWN>(v2, v3);" in wrapper
+        assert "__pypto_runtime_subblock_idx" not in wrapper
+
+    def test_one_automatic_pipe_supports_different_sequential_split_tile_sizes(self):
+        """Per-call lane forwarding must not assume one byte offset per automatic FIFO."""
+
+        @pl.program
+        class SequentialTransfersProgram:
+            @pl.function(type=pl.FunctionType.AIV)
+            def split_vec(self):
+                pl.func_attr({"split": pl.SplitMode.UP_DOWN})
+                pipe_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=65536, base=0x1000)
+                pl.aiv_initialize_pipe(
+                    pipe_buf,
+                    pipe_buf,
+                    dir_mask=3,
+                    slot_size=16384,
+                    slot_num=4,
+                )
+                first: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
+                    split=1
+                )
+                reply: pl.Tile[[16, 64], pl.FP32] = pl.tile.muls(first, 2.0)
+                pl.tpush_to_aic(reply, split=1)
+                pl.tfree_to_aic(first)
+                second: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
+                    split=1
+                )
+                pl.tfree_to_aic(second)
+
+        func = SequentialTransfersProgram.get_function("split_vec")
+        assert func is not None
+        fixture = """\
+#include "pto/pto-inst.hpp"
+using namespace pto;
+
+AICORE void split_vec() {
+  auto pipe = TPipe<0, Direction::DIR_BOTH, 16384, 4, 4, false>(0, 0, 0);
+  Tile<TileType::Vec, float, 16, 64, BLayout::RowMajor> first;
+  Tile<TileType::Vec, float, 16, 64, BLayout::RowMajor> reply;
+  Tile<TileType::Vec, float, 16, 128, BLayout::RowMajor> second;
+  TPOP<TPipe<0, Direction::DIR_BOTH, 16384, 4, 4, false>,
+       Tile<TileType::Vec, float, 16, 64, BLayout::RowMajor>,
+       TileSplitAxis::TILE_UP_DOWN>(pipe, first);
+  TPUSH<TPipe<0, Direction::DIR_BOTH, 16384, 4, 4, false>,
+        Tile<TileType::Vec, float, 16, 64, BLayout::RowMajor>,
+        TileSplitAxis::TILE_UP_DOWN>(pipe, reply);
+  TFREE<TPipe<0, Direction::DIR_BOTH, 16384, 4, 4, false>,
+        TileSplitAxis::TILE_UP_DOWN>(pipe);
+  TPOP<TPipe<0, Direction::DIR_BOTH, 16384, 4, 4, false>,
+       Tile<TileType::Vec, float, 16, 128, BLayout::RowMajor>,
+       TileSplitAxis::TILE_UP_DOWN>(pipe, second);
+  return;
+}
+"""
+
+        wrapper = _generate_kernel_wrapper(func, fixture)
+
+        assert wrapper.count("PYPTO_SPLIT_RUNTIME_LANE_ARG(__pypto_runtime_subblock_idx)") == 3
+        assert "TileSplitAxis::TILE_UP_DOWN>(pipe);" in wrapper
+        assert ".setEntryOffset(" not in wrapper
+
+    def test_split_fifo_bridge_fails_closed_when_ptoas_omits_an_endpoint_kind(self):
+        """Missing split PTOAS endpoint directions are rejected during wrapper generation."""
+
+        @pl.program
+        class BidirectionalProgram:
+            @pl.function(type=pl.FunctionType.AIV)
+            def split_vec(self):
+                pl.func_attr({"split": pl.SplitMode.UP_DOWN})
+                pipe_buf = pl.reserve_buffer(name="pipe", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(pipe_buf, pipe_buf, dir_mask=3, slot_size=1024)
+                popped: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
+                    split=1
+                )
+                produced: pl.Tile[[8, 16], pl.BF16] = pl.tile.cast(popped, target_type=pl.BF16)
+                pl.tpush_to_aic(produced, split=1)
+                pl.tfree_to_aic(popped)
+
+        func = BidirectionalProgram.get_function("split_vec")
+        assert func is not None
+        pop_only = _split_ptoas_output_for(func.name, direction="DIR_BOTH")
+
+        with pytest.raises(RuntimeError, match=r"IR push/pop=1/1, PTOAS push/pop=0/1"):
+            _generate_kernel_wrapper(func, pop_only)
 
     def test_split_aiv_wrapper_uses_runtime_subblock_bridge_in_group_output_on_a2a3(
         self, tmp_path, monkeypatch
@@ -1836,7 +2032,9 @@ class TestGenerateKernelWrapper:
 
         monkeypatch.setattr(
             "pypto.backend.pto_backend._compile_pto_module",
-            lambda _pto_code, _module_name, _output_dir, _memory_planner=None: SAMPLE_PTOAS_OUTPUT,
+            lambda _pto_code, _module_name, _output_dir, _memory_planner=None: (
+                SAMPLE_GROUPED_SPLIT_PTOAS_OUTPUT
+            ),
         )
 
         result_files = {}
@@ -1855,12 +2053,11 @@ class TestGenerateKernelWrapper:
         split_vec_wrapper = next(
             content for path, content in result_files.items() if path.endswith("split_vec.cpp")
         )
-        assert "static __aicore__ void test_func" in split_cube_wrapper
-        assert "static __aicore__ void test_func" in split_vec_wrapper
-        assert '#if !defined(__CPU_SIM)\n#include "intrinsic.h"' in split_vec_wrapper
-        assert "[[block_local]] static int32_t pypto_runtime_subblock_id;" in split_vec_wrapper
-        assert "#define get_subblockid() pypto_runtime_subblock_id" in split_vec_wrapper
-        assert "pypto_runtime_subblock_id = get_sub_block_id(args);" in split_vec_wrapper
+        assert "static __aicore__ void split_cube" in split_cube_wrapper
+        assert "static __aicore__ void split_vec" in split_vec_wrapper
+        assert "__pypto_runtime_subblock_idx" not in split_cube_wrapper
+        assert "TileSplitAxis::TILE_UP_DOWN>(v2, v3);" in split_cube_wrapper
+        assert "TileSplitAxis::TILE_UP_DOWN>(v2, v3 PYPTO_SPLIT_RUNTIME_LANE_ARG(v4));" in split_vec_wrapper
 
     def test_spmd_wrapper_drops_macro_bridge_and_appends_block_args(self):
         @pl.program
