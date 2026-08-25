@@ -66,6 +66,16 @@ bool AreExprsEqual(const ExprPtr& e1, const ExprPtr& e2) {
   if (b1 && b2 && e1->GetKind() == e2->GetKind()) {
     return AreExprsEqual(b1->left_, b2->left_) && AreExprsEqual(b1->right_, b2->right_);
   }
+  // Unary nodes compare the same way. `Cast` is the one that matters in practice:
+  // a declared allocation's runtime slot subscript lowers to
+  // `cast(index, INDEX) % n * stride`, and two sites that write the same
+  // subscript build two such trees. Without this they compare unequal by pointer
+  // and a carry looks like it moved between slots when it never left one.
+  auto u1 = As<UnaryExpr>(e1);
+  auto u2 = As<UnaryExpr>(e2);
+  if (u1 && u2 && e1->GetKind() == e2->GetKind()) {
+    return AreExprsEqual(u1->operand_, u2->operand_);
+  }
   // Call nodes produced by different invocation sites have different pointer
   // identities but may be structurally identical (e.g. two pld.world_size()
   // calls). Compare by op name (per operator-identity-checks.md) plus
