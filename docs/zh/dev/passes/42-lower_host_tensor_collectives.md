@@ -72,6 +72,33 @@ comm-domain scope 带有显式 device 列表，则生成 `SeqStmts`；否则生�
 若用户代码使用赋值形式，pass 会在生成的 builtin 调用之后追加
 `<result> = <original expr>`，保留 public API 的 rebind 语义。
 
+## 打印形式
+
+`builtin.tensor.*` 算子在注册表中标记为 `internal_only`（内部专用）：没有任何
+DSL 包装器可以拼写它们，面向用户的算子构造路径也会按名字拒绝它们。但 Python
+printer 仍然需要打印它们，因此把它们放在 `pl.builtin` 命名空间下 —— 与它给任何
+非 `pld` 注册算子加 `pl.` 前缀的规则一致：
+
+```python
+for r_1 in pl.range(pl.const(0, pl.INT64), pld.system.world_size(), pl.const(1, pl.INT64)):
+    pl.builtin.tensor.allreduce(
+        data, signal, op=0, dtype=pl.FP32, core_num=1,
+        attrs={"op": 0, "dtype": pl.FP32, "core_num": 1, "device": r_1,
+               "arg_directions": [pl.adir.inout, pl.adir.inout]},
+    )
+```
+
+Parser 能读回这种拼写（`ast_parser._parse_builtin_op`），因此 lowering 产生的
+dispatch 可以完成 print -> parse 往返。它是仅供机器使用（machine-only）的表面，
+且限定在真正注册于 `builtin.` 下的名字：它通过 `ir.create_internal_op_call`
+构造，面向用户的 `ir.create_op_call` 守卫保持不变。用户代码请改写复合形式
+`pld.tensor.*`。
+
+注意：整程序的 `assert_structural_equal` 往返仍然被上一个 pass 阻断 ——
+[`MaterializeCommDomainScopes`](41-materialize_comm_domain_scopes.md) 会合成
+`CommDomainScopeStmt`（打印为前导注释）以及 `DistributedTensorType` 上的
+`WindowBuffer` 反向引用（完全不打印），二者都没有可解析回来的 DSL 表面。
+
 ## 检查
 
 该 pass 要求两个参数都是已经 materialize 的 `DistributedTensorType` view，并且位于同一个

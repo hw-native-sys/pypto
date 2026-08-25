@@ -6227,6 +6227,14 @@ class ASTParser:
         if len(attrs) == 3 and attrs[0] == "pld":
             return self._parse_pld_category_op(attrs[1], attrs[2], call)
 
+        # pl.builtin.<category>.<op> (4-segment) — printer-emitted internal
+        # builtin dispatch, e.g. ``pl.builtin.tensor.allreduce(...)``. Matched
+        # on ``attrs[1]`` alone so a malformed spelling gets the namespace's own
+        # diagnostic instead of falling through to the 2-segment unified path
+        # and reporting the useless "Unknown operation 'pl.builtin'".
+        if len(attrs) >= 2 and attrs[0] == "pl" and attrs[1] == "builtin":
+            return self._parse_builtin_op(attrs[2:], call)
+
         # pl.tensor.{operation} (3-segment)
         if len(attrs) >= 3 and attrs[0] == "pl" and attrs[1] == "tensor":
             op_name = attrs[2]
@@ -8701,6 +8709,62 @@ class ASTParser:
             )
 
         return self._dispatch_op(submodule, f"pld.{category}", op_name, call)
+
+    def _parse_builtin_op(self, segments: list[str], call: ast.Call) -> ir.Expr:
+        """Parse printer-emitted ``pl.builtin.<category>.<op>(...)``.
+
+        ``builtin.*`` operators are compiler-internal chip dispatches that
+        passes synthesize — today ``builtin.tensor.*``, emitted by
+        ``LowerHostTensorCollectives`` for the host ``pld.tensor.*``
+        collectives. They are ``internal_only`` in the registry, so no DSL
+        wrapper spells them and users write the composite ``pld.tensor.*``
+        form instead.
+
+        This path exists so the printer's output past those passes re-parses:
+        the print -> parse round-trip must hold for every IR the pipeline can
+        produce, and the printer renders a registered ``builtin.<ns>.<op>`` as
+        ``pl.builtin.<ns>.<op>`` like any other non-``pld`` operator. It is the
+        machine-only reader for that writer — the counterpart of
+        ``_parse_printed_alloc_call`` — so it builds through
+        ``ir.create_internal_op_call`` and is scoped to the ``builtin.``
+        namespace: no other internal operator becomes reachable, and the
+        user-facing ``create_op_call`` guard is untouched.
+        """
+        span = self.span_tracker.get_span(call)
+        if len(segments) != 2:
+            raise InvalidOperationError(
+                f"Unknown operation '{ast.unparse(call.func)}'",
+                span=span,
+                hint="pl.builtin is the compiler-internal operator namespace and is spelled "
+                "pl.builtin.<category>.<op> (e.g. pl.builtin.tensor.allreduce); it is emitted by "
+                "the printer, not written by hand — use the pld.tensor.* collective instead",
+            )
+        category, op_name = segments
+        full_name = f"builtin.{category}.{op_name}"
+        if not ir.is_op_registered(full_name):
+            raise InvalidOperationError(
+                f"Unknown builtin operation 'pl.builtin.{category}.{op_name}'",
+                span=span,
+                hint="pl.builtin.* names compiler-internal dispatches emitted by lowering passes "
+                "(e.g. pl.builtin.tensor.allreduce); check spelling, or use the public "
+                "pld.tensor.* collective",
+            )
+
+        args = [self.parse_expression(arg) for arg in call.args]
+        kwargs = self._parse_op_kwargs(call)
+        attrs = self._parse_op_attrs(call)
+        try:
+            built = ir.create_internal_op_call(full_name, args, kwargs, span)
+        except BUG_CLASS_EXCEPTIONS:
+            # Compiler bug, not a bad kernel - surface it with its type and trace intact.
+            raise
+        except Exception as e:
+            raise InvalidOperationError(
+                f"Error in builtin operation '{full_name}': "
+                f"{concise_error_message(e, strip_trailing_span=True)}",
+                span=span,
+            ) from e
+        return self._attach_op_attrs(built, attrs)
 
     # Maps iterator type name to ForKind enum value.
     _ITERATOR_TO_KIND = {
