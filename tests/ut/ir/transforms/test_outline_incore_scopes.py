@@ -1365,7 +1365,14 @@ class TestOutlineSubmitTaskId:
             passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
 
     def test_deferred_wait_accepts_static_conditional_registration_loop(self):
-        """The MoE waiter is bounded and consumers use ordinary deps unchanged."""
+        """The MoE waiter is bounded and consumers use ordinary deps unchanged.
+
+        ``Expected`` (after both outlining passes) pins the whole shape at once:
+        the waiter is outlined carrying ``deferred_completion_waiter``, the
+        gather body carries no ``system.cacheinvalid``, and ``main`` ends up
+        with two launches where the second takes the waiter's TaskId as its
+        single dep.
+        """
 
         @pl.program
         class Before:
@@ -1400,36 +1407,69 @@ class TestOutlineSubmitTaskId:
                     out = pl.store(value, [offset], out)
                 return out
 
-        after = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
-        waiter = after.get_function("dispatch_wait")
-        consumer = after.get_function("dispatch_gather")
-        assert waiter is not None
-        assert waiter.attrs["deferred_completion_waiter"] is True
-        assert consumer is not None
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, strict_ssa=True)
+            def dispatch_gather(
+                self,
+                payload: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                block: pl.Scalar[pl.INDEX] = pl.tile.get_block_idx()
+                offset: pl.Scalar[pl.INDEX] = block * 16
+                value: pl.Tile[[16], pl.FP32] = pl.tile.load(payload, [offset], [16], [16])
+                out_1: pl.Tensor[[64], pl.FP32] = pl.tile.store(value, [offset], out)
+                out_store: pl.Tensor[[64], pl.FP32] = out_1
+                return out
 
-        calls: list[ir.Call] = []
+            @pl.function(type=pl.FunctionType.Spmd, strict_ssa=True)
+            def dispatch_gather_spmd(
+                self,
+                payload: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                out_2: pl.Tensor[[64], pl.FP32] = self.dispatch_gather(payload, out)
+                return out
 
-        class _CallCollector(ir.IRVisitor):
-            def visit_call(self, op):
-                calls.append(op)
-                super().visit_call(op)
+            @pl.function(type=pl.FunctionType.InCore, strict_ssa=True)
+            def dispatch_wait(
+                self,
+                indices: pl.Tensor[[1, 1], pl.INT32],
+                my_rank: pl.Scalar[pl.INT32],
+                signal: pld.DistributedTensor[[8, 1], pl.INT32],
+                epoch: pl.Scalar[pl.INT32],
+            ):
+                pl.func_attr({"deferred_completion_waiter": True})
+                idx_anchor: pl.Scalar[pl.INT32] = pl.tensor.read(indices, [0, 0])
+                for src in pl.range(8):
+                    if src != pl.cast(my_rank, pl.INDEX):
+                        pld.system.defer_wait(signal, [src, 0], epoch, cmp=pld.WaitCmp.Ge)
 
-        _CallCollector().visit_stmt(consumer.body)
-        assert all(call.op.name != ir.get_op("system.cacheinvalid").name for call in calls)
+            @pl.function(type=pl.FunctionType.Orchestration, strict_ssa=True)
+            def main(
+                self,
+                signal: pld.DistributedTensor[[8, 1], pl.INT32],
+                indices: pl.Tensor[[1, 1], pl.INT32],
+                payload: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+                my_rank: pl.Scalar[pl.INT32],
+                epoch: pl.Scalar[pl.INT32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                wait_ret: pl.Tuple[pl.Scalar[pl.TASK_ID]] = pl.submit(
+                    self.dispatch_wait, indices, my_rank, signal, epoch
+                )
+                wait_tid: pl.Scalar[pl.TASK_ID] = wait_ret[0]
+                gather_ret: pl.Tuple[pl.Tensor[[64], pl.FP32], pl.Scalar[pl.TASK_ID]] = pl.spmd_submit(
+                    self.dispatch_gather_spmd, payload, out, deps=[wait_tid], core_num=4
+                )
+                out_2: pl.Tensor[[64], pl.FP32] = gather_ret[0]
+                gather_tid: pl.Scalar[pl.TASK_ID] = gather_ret[1]
+                return out_2
 
-        after = passes.outline_cluster_scopes()(after)
-        main = after.get_function("main")
-        assert main is not None
-        submits: list[ir.Submit] = []
-
-        class _SubmitCollector(ir.IRVisitor):
-            def visit_submit(self, op):
-                submits.append(op)
-                super().visit_submit(op)
-
-        _SubmitCollector().visit_stmt(main.body)
-        assert len(submits) == 2
-        assert len(submits[1].deps) == 1
+        after = passes.outline_cluster_scopes()(
+            passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+        )
+        ir.assert_structural_equal(after, Expected)
 
     def test_deferred_wait_accepts_pure_scalar_temporary_in_registration_loop(self):
         """Hoisting pure expected-value arithmetic must not change legality."""

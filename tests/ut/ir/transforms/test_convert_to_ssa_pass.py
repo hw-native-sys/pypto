@@ -924,10 +924,16 @@ class TestEdgeCases:
         silently downgrades to a plain ``TensorType`` and downstream passes
         (``CollectCommGroups``, codegen) lose the comm-group binding.
 
-        The dynamic-shape ``valid_shape`` is what forces the
-        ``changed=true`` branch in ``SubstType``; the static-shape happy
-        path is covered by the polymorphism tests in
+        The dynamic-shape ``valid_shape`` is what forces the ``changed=true``
+        branch in ``SubstType``; the static-shape happy path is covered by the
+        polymorphism tests in
         ``tests/ut/language/parser/test_distributed_tensor_polymorphism.py``.
+
+        ``Expected`` spells the ``tensor.slice`` result as
+        ``pld.DistributedTensor[...]``: had substitution rebuilt it as a plain
+        ``pl.Tensor``, the ObjectKind would differ and the comparison would
+        fail. (``window_buffer_`` stays None here — it is populated later by
+        CollectCommGroups.)
         """
 
         @pl.program
@@ -944,38 +950,29 @@ class TestEdgeCases:
                 tile = pl.load(sub, [0, 0], [8, 64])
                 return pl.store(tile, [0, 0], out)
 
-        After = passes.convert_to_ssa()(Before)
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, strict_ssa=True)
+            def main(
+                self,
+                data: pl.InOut[pld.DistributedTensor[[16, 64], pl.FP32]],
+                n: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[8, 64], pl.FP32]],
+            ) -> pl.Tensor[[8, 64], pl.FP32]:
+                valid_len: pl.Scalar[pl.INDEX] = pl.min(n, 64)
+                sub: pld.DistributedTensor[
+                    [8, 64],
+                    pl.FP32,
+                    pl.TensorView(valid_shape=[8, valid_len], stride=[], layout=pl.TensorLayout.ND),
+                ] = pl.tensor.slice(data, [8, 64], [0, 0], [8, valid_len])
+                tile: pl.Tile[
+                    [8, 64],
+                    pl.FP32,
+                    pl.TileView(valid_shape=[8, pl.min(valid_len, pl.const(64, pl.INDEX))]),
+                ] = pl.tile.load(sub, [0, 0], [8, 64], [8, 64])
+                return pl.tile.store(tile, [0, 0], out)
 
-        # Locate the post-SSA tensor.slice Call and assert its return type
-        # remains a DistributedTensorType (window_buffer_ stays None — it is
-        # populated later by CollectCommGroups; the load-bearing invariant
-        # here is the preserved ObjectKind).
-        gvar = After.get_global_var("main")
-        assert gvar is not None
-        func = After.functions[gvar]
-
-        slice_calls: list[ir.Call] = []
-
-        def walk(stmt: ir.Stmt) -> None:
-            if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call):
-                if stmt.value.op.name == ir.get_op("tensor.slice").name:
-                    slice_calls.append(stmt.value)
-            if isinstance(stmt, ir.SeqStmts):
-                for s in stmt.stmts:
-                    walk(s)
-            if isinstance(stmt, ir.ForStmt):
-                walk(stmt.body)
-            if isinstance(stmt, ir.IfStmt):
-                walk(stmt.then_body)
-                if stmt.else_body is not None:
-                    walk(stmt.else_body)
-
-        walk(func.body)
-        assert len(slice_calls) == 1
-        t = slice_calls[0].type
-        assert isinstance(t, ir.DistributedTensorType), (
-            f"SSA substitution must preserve DistributedTensorType, got {type(t).__name__}"
-        )
+        ir.assert_structural_equal(passes.convert_to_ssa()(Before), Expected)
 
     def test_unused_variable(self):
         """Unused variable should still be versioned."""

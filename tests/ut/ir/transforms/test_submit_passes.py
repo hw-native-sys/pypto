@@ -9,207 +9,152 @@
 
 """Tests for IR passes operating on Submit nodes.
 
-The parser emits ``ir.Submit`` for ``pl.submit(...)``. These tests
-construct Submit-bearing IR directly (bypassing the DSL) and verify that
-DCE / SSA and the printer's round-trip preserve the structural shape
-(op, args, first-class deps_) without leaking Vars or degrading Submit
-to Call.
+The parser emits ``ir.Submit`` for ``pl.submit(...)`` / ``pl.spmd_submit(...)``,
+so every program here is DSL-authored in the Before/Expected style. The
+comparisons verify that DCE / SSA preserve the structural shape (op, args,
+first-class ``deps_``, the SPMD launch spec) without leaking Vars or degrading
+Submit to Call.
+
+Two former round-trip tests are folded into those comparisons rather than
+asserted separately: ``convert_to_ssa()`` runs at the default
+``VerificationLevel.BASIC``, whose round-trip instrument prints and re-parses
+the pass output on every case below. That is strictly stronger than the
+substring check on the printed ``pl.submit`` form it replaces, and it is what
+pins that the single-LHS print form re-parses.
 """
 
 import pypto.language as pl
 import pytest
-from pypto import DataType, ir, passes
+from pypto import ir, passes
 
-
-def _build_program_with_submit(reassign: bool = False) -> ir.Program:
-    """Build a Program with one kernel and a caller that pl.submits it.
-
-    When ``reassign`` is True the caller reassigns a Var so SSA conversion
-    has actual work to do (otherwise the input is already in SSA form and
-    the pass is a no-op).
-    """
-    span = ir.Span.unknown()
-    kernel_x = ir.Var("x", ir.ScalarType(DataType.INDEX), span)
-    kernel = ir.Function(
-        "kernel",
-        [kernel_x],
-        [ir.ScalarType(DataType.INDEX)],
-        ir.ReturnStmt([kernel_x], span),
-        span,
-    )
-    kernel_gvar = ir.GlobalVar("kernel")
-
-    caller_arg = ir.Var("a", ir.ScalarType(DataType.INDEX), span)
-    tid_arg = ir.Var("t", ir.ScalarType(DataType.TASK_ID), span)
-    submit_ret_ty = ir.TupleType([ir.ScalarType(DataType.INDEX), ir.ScalarType(DataType.TASK_ID)])
-    res_var = ir.Var("res", submit_ret_ty, span)
-
-    stmts: list[ir.Stmt] = []
-    if reassign:
-        # Reassign caller_arg so SSA conversion mints a fresh version that the
-        # Submit's args reference. After SSA the Submit's args_[0] should point
-        # to the latest version of `a`.
-        one = ir.ConstInt(1, DataType.INDEX, span)
-        stmts.append(ir.AssignStmt(caller_arg, ir.Add(caller_arg, one, DataType.INDEX, span), span))
-
-    submit = ir.Submit(kernel_gvar, [caller_arg], [tid_arg], submit_ret_ty, span)
-    stmts.append(ir.AssignStmt(res_var, submit, span))
-    stmts.append(ir.ReturnStmt([res_var], span))
-
-    body = ir.SeqStmts(stmts, span)
-    caller = ir.Function("caller", [caller_arg, tid_arg], [submit_ret_ty], body, span)
-    return ir.Program([kernel, caller], "submit_pipeline_smoke", span)
-
-
-def _find_submit_in_function(func: ir.Function) -> ir.Submit | None:
-    """Return the first Submit node in ``func``'s body, or None."""
-    body = func.body
-    if isinstance(body, ir.SeqStmts):
-        stmts = list(body.stmts)
-    else:
-        stmts = [body]
-    for stmt in stmts:
-        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Submit):
-            return stmt.value
-    return None
+# ---------------------------------------------------------------------------
+# ConvertToSSA over ``pl.submit`` / ``pl.spmd_submit``.
+#
+# Each pair below is Before/Expected in the DSL. ``assert_structural_equal``
+# maps Vars by definition site rather than by name, so ``Expected`` spells the
+# post-SSA versions with readable names (``a_1``) instead of the printer's
+# ``a__ssa_v1``. A single structural comparison covers every property these
+# tests exist for at once: the RHS is still a ``Submit`` (a degraded plain
+# ``Call`` has a different node kind), ``args`` / ``deps`` / ``core_num`` point
+# at the post-rename versions, and the SPMD launch spec survives.
+#
+# ``convert_to_ssa()`` runs at the default VerificationLevel.BASIC, so the
+# print -> re-parse round-trip instrument also runs on every one of these —
+# which is what pins that the single-LHS ``pl.submit`` print form re-parses.
+# ---------------------------------------------------------------------------
 
 
 def test_ssa_preserves_submit_node_kind():
-    """convert_to_ssa() must preserve Submit-ness — the result still has a
-    Submit on the assignment RHS, not a degraded plain Call. Default
-    VerificationLevel.BASIC enables the print → re-parse round-trip
-    instrument, which now accepts the single-LHS Submit print form."""
-    program_before = _build_program_with_submit(reassign=False)
-    program_after = passes.convert_to_ssa()(program_before)
+    """An already-SSA Submit survives the pass unchanged — still a Submit, with
+    its single arg and its first-class dep intact."""
 
-    caller_after = program_after.get_function("caller")
-    assert caller_after is not None
-    submit_after = _find_submit_in_function(caller_after)
-    assert submit_after is not None, "SSA pass must keep the Submit; got body without one"
-    assert isinstance(submit_after, ir.Submit)
-    assert len(submit_after.args) == 1
-    assert len(submit_after.deps) == 1
+    @pl.program
+    class Before:
+        @pl.function
+        def kernel(self, x: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+            return x
+
+        @pl.function
+        def caller(self, a: pl.Scalar[pl.INDEX], t: pl.Scalar[pl.TASK_ID]):
+            with pl.manual_scope():
+                res, tid = pl.submit(self.kernel, a, deps=[t])
+            return res, tid
+
+    ir.assert_structural_equal(passes.convert_to_ssa()(Before), Before)
 
 
 def test_ssa_renames_submit_args_and_deps():
-    """When SSA conversion mints a fresh version of a Var that the Submit
-    references in args or deps, the rebuilt Submit must reference the new
-    version (verifies the IRMutator default walks both fields)."""
-    program_before = _build_program_with_submit(reassign=True)
-    program_after = passes.convert_to_ssa()(program_before)
+    """A reassigned Var reaches the Submit's ``args`` as its latest version.
 
-    caller_after = program_after.get_function("caller")
-    assert caller_after is not None
-    submit_after = _find_submit_in_function(caller_after)
-    assert submit_after is not None
-
-    # The reassigned arg `a` was rewritten by SSA — the Submit's args[0]
-    # must point at the latest SSA version, not the original `a` parameter.
-    arg_var = submit_after.args[0]
-    assert isinstance(arg_var, ir.Var)
-    caller_params = list(caller_after.params)
-    assert arg_var is not caller_params[0]
-
-
-def test_submit_round_trips_through_ssa():
-    """An SSA-converted Submit-bearing program prints the pl.submit form."""
-    program_before = _build_program_with_submit(reassign=False)
-    program_after = passes.convert_to_ssa()(program_before)
-
-    text = program_after.as_python()
-    assert "pl.submit(self.kernel" in text, text
-
-
-def _build_program_with_spmd_submit(core_num_is_var: bool = False) -> ir.Program:
-    """Build a caller that ``pl.spmd_submit``s a kernel (Submit + launch spec).
-
-    When ``core_num_is_var`` the launch ``core_num`` references the (reassigned)
-    caller arg so SSA conversion must remap it — exercising the IRMutator's
-    first-class ``core_num_`` walk. Otherwise ``core_num`` is a constant.
+    ``a`` is rebound before the submit, so the rebuilt Submit must reference the
+    post-rebind value rather than the original parameter — which is what pins
+    that the IRMutator default walks both ``args_`` and ``deps_``.
     """
-    span = ir.Span.unknown()
-    kernel_x = ir.Var("x", ir.ScalarType(DataType.INDEX), span)
-    kernel = ir.Function(
-        "kernel", [kernel_x], [ir.ScalarType(DataType.INDEX)], ir.ReturnStmt([kernel_x], span), span
-    )
-    kernel_gvar = ir.GlobalVar("kernel")
 
-    caller_arg = ir.Var("a", ir.ScalarType(DataType.INDEX), span)
-    tid_arg = ir.Var("t", ir.ScalarType(DataType.TASK_ID), span)
-    submit_ret_ty = ir.TupleType([ir.ScalarType(DataType.INDEX), ir.ScalarType(DataType.TASK_ID)])
-    res_var = ir.Var("res", submit_ret_ty, span)
+    @pl.program
+    class Before:
+        @pl.function
+        def kernel(self, x: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+            return x
 
-    stmts: list[ir.Stmt] = []
-    if core_num_is_var:
-        # Reassign `a` so SSA mints a fresh version; core_num references it.
-        one = ir.ConstInt(1, DataType.INDEX, span)
-        stmts.append(ir.AssignStmt(caller_arg, ir.Add(caller_arg, one, DataType.INDEX, span), span))
-        core_num: ir.Expr = caller_arg
-    else:
-        core_num = ir.ConstInt(4, DataType.INDEX, span)
+        @pl.function
+        def caller(self, a: pl.Scalar[pl.INDEX], t: pl.Scalar[pl.TASK_ID]):
+            a = a + 1
+            with pl.manual_scope():
+                res, tid = pl.submit(self.kernel, a, deps=[t])
+            return res, tid
 
-    submit = ir.Submit(
-        kernel_gvar,
-        [caller_arg],
-        [tid_arg],
-        {},
-        None,
-        submit_ret_ty,
-        span,
-        core_num=core_num,
-        sync_start=True,
-    )
-    stmts.append(ir.AssignStmt(res_var, submit, span))
-    stmts.append(ir.ReturnStmt([res_var], span))
+    @pl.program
+    class Expected:
+        @pl.function(strict_ssa=True)
+        def kernel(self, x: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+            return x
 
-    caller = ir.Function("caller", [caller_arg, tid_arg], [submit_ret_ty], ir.SeqStmts(stmts, span), span)
-    return ir.Program([kernel, caller], "spmd_submit_smoke", span)
+        @pl.function(strict_ssa=True)
+        def caller(self, a: pl.Scalar[pl.INDEX], t: pl.Scalar[pl.TASK_ID]):
+            a_1 = a + 1
+            with pl.manual_scope():
+                res, tid = pl.submit(self.kernel, a_1, deps=[t])
+            return res, tid
+
+    ir.assert_structural_equal(passes.convert_to_ssa()(Before), Expected)
 
 
 def test_ssa_preserves_spmd_submit_launch_spec():
-    """convert_to_ssa() must carry the SPMD launch spec (core_num / sync_start)
-    through the Submit reconstruction — a pass that dropped them would silently
-    downgrade an SPMD launch to a single-block submit."""
-    program_after = passes.convert_to_ssa()(_build_program_with_spmd_submit(core_num_is_var=False))
-    caller_after = program_after.get_function("caller")
-    assert caller_after is not None
-    submit_after = _find_submit_in_function(caller_after)
-    assert submit_after is not None
-    assert submit_after.sync_start is True
-    assert isinstance(submit_after.core_num, ir.ConstInt)
-    assert submit_after.core_num.value == 4
+    """The SPMD launch spec (``core_num`` / ``sync_start``) survives the Submit
+    reconstruction — a pass that dropped it would silently downgrade an SPMD
+    launch to a single-block submit."""
+
+    @pl.program
+    class Before:
+        @pl.function
+        def kernel(self, x: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+            return x
+
+        @pl.function
+        def caller(self, a: pl.Scalar[pl.INDEX], t: pl.Scalar[pl.TASK_ID]):
+            with pl.manual_scope():
+                res, tid = pl.spmd_submit(self.kernel, a, core_num=4, sync_start=True, deps=[t])
+            return res, tid
+
+    ir.assert_structural_equal(passes.convert_to_ssa()(Before), Before)
 
 
 def test_ssa_remaps_spmd_submit_core_num_var():
-    """When core_num references a Var that SSA renames, the rebuilt Submit's
-    core_num must point at the fresh version (IRMutator walks core_num_)."""
-    program_after = passes.convert_to_ssa()(_build_program_with_spmd_submit(core_num_is_var=True))
-    caller_after = program_after.get_function("caller")
-    assert caller_after is not None
-    submit_after = _find_submit_in_function(caller_after)
-    assert submit_after is not None
-    assert submit_after.core_num is not None
-    core_num_var = submit_after.core_num
-    assert isinstance(core_num_var, ir.Var)
-    # The original `a` parameter was reassigned; core_num must reference the
-    # latest SSA version, not the stale parameter.
-    assert core_num_var is not list(caller_after.params)[0]
-    # And it must be the same Var the (remapped) arg references.
-    assert core_num_var is submit_after.args[0]
+    """A ``core_num`` that reads a renamed Var is remapped like any other use.
 
-
-def test_submit_single_lhs_form_round_trips():
-    """The single-LHS print form ``res: pl.Tuple[..., TASK_ID] = pl.submit(...)``
-    is re-accepted by the parser, which means
-    ``passes.convert_to_ssa()`` with default ``VerificationLevel.BASIC``
-    (round-trip enabled) accepts a Submit-bearing program. Regression
-    guard against the parser-side fix.
+    ``core_num`` is a first-class Submit field rather than an ordinary arg, so
+    it needs its own IRMutator walk; ``Expected`` pins that it lands on the same
+    post-rebind version the arg does.
     """
-    program_before = _build_program_with_submit(reassign=False)
-    # No explicit PassContext — default verification is BASIC, which runs
-    # the RoundtripInstrument on every pass. If the parser had still
-    # required ``out, tid = ...`` unpacking, this call would raise.
-    passes.convert_to_ssa()(program_before)
+
+    @pl.program
+    class Before:
+        @pl.function
+        def kernel(self, x: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+            return x
+
+        @pl.function
+        def caller(self, a: pl.Scalar[pl.INDEX], t: pl.Scalar[pl.TASK_ID]):
+            a = a + 1
+            with pl.manual_scope():
+                res, tid = pl.spmd_submit(self.kernel, a, core_num=a, sync_start=True, deps=[t])
+            return res, tid
+
+    @pl.program
+    class Expected:
+        @pl.function(strict_ssa=True)
+        def kernel(self, x: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+            return x
+
+        @pl.function(strict_ssa=True)
+        def caller(self, a: pl.Scalar[pl.INDEX], t: pl.Scalar[pl.TASK_ID]):
+            a_1 = a + 1
+            with pl.manual_scope():
+                res, tid = pl.spmd_submit(self.kernel, a_1, core_num=a_1, sync_start=True, deps=[t])
+            return res, tid
+
+    ir.assert_structural_equal(passes.convert_to_ssa()(Before), Expected)
 
 
 # ---------------------------------------------------------------------------

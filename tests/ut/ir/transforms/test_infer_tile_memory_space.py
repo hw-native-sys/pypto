@@ -338,7 +338,12 @@ class TestInferTileMemorySpaceCubeOps:
         ir.assert_structural_equal(After, Expected)
 
     def test_inserted_matmul_move_remaps_dump_vars_attr(self):
-        """Var-valued Call attrs follow an operand replaced by tile.move."""
+        """Var-valued Call attrs follow an operand replaced by tile.move.
+
+        ``Expected`` pins the whole rewrite: the ``dump_vars`` entry names the
+        post-move ``Mem.Left`` operand, not the pre-move ``Mem.Mat`` load it was
+        written against.
+        """
 
         @pl.program
         class Before:
@@ -351,45 +356,45 @@ class TestInferTileMemorySpaceCubeOps:
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 x_tile = pl.load(x, [0, 0], [16, 128])
                 y_tile = pl.load(y, [0, 0], [128, 128])
-                z_tile = pl.matmul(x_tile, y_tile)
+                z_tile = pl.matmul(x_tile, y_tile, attrs={"dump_vars": [x_tile]})
                 result = pl.store(z_tile, [0, 0], out)
                 return result
 
-        class _MarkMatmulDump(ir.IRMutator):
-            def visit_call(self, op):
-                expr = super().visit_call(op)
-                call = expr if isinstance(expr, ir.Call) else op
-                if call.op.name != _OP_TILE_MATMUL:
-                    return expr
-                attrs = dict(call.attrs)
-                attrs["dump_vars"] = [call.args[0]]
-                return ir.Call(
-                    call.op,
-                    list(call.args),
-                    dict(call.kwargs),
-                    attrs,
-                    call.type,
-                    call.span,
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                x_tile: pl.Tile[[16, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    x, [0, 0], [16, 128], [16, 128], target_memory=pl.Mem.Mat
                 )
+                y_tile: pl.Tile[[128, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    y, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Mat
+                )
+                x_tile_Left: pl.Tile[[16, 128], pl.BF16, pl.Mem.Left] = pl.tile.move(
+                    x_tile, target_memory=pl.Mem.Left
+                )
+                y_tile_Right: pl.Tile[[128, 128], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                    y_tile, target_memory=pl.Mem.Right
+                )
+                z_tile: pl.Tile[[16, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(
+                    x_tile_Left, y_tile_Right, attrs={"dump_vars": [x_tile_Left]}
+                )
+                result: pl.Tensor[[16, 128], pl.FP32] = pl.tile.store(z_tile, [0, 0], out)
+                return result
 
-        marked = _MarkMatmulDump().visit_program(Before)
-        after = passes.infer_tile_memory_space()(marked)
-        matmuls = []
-
-        class _CollectMatmul(ir.IRVisitor):
-            def visit_call(self, op):
-                if op.op.name == _OP_TILE_MATMUL:
-                    matmuls.append(op)
-                super().visit_call(op)
-
-        _CollectMatmul().visit_program(after)
-        assert len(matmuls) == 1
-        matmul = matmuls[0]
-        assert list(matmul.attrs["dump_vars"]) == [matmul.args[0]]
-        assert matmul.args[0].type.memory_space == pl.MemorySpace.Left
+        ir.assert_structural_equal(passes.infer_tile_memory_space()(Before), Expected)
 
     def test_distinct_inserted_moves_expand_dump_vars_attr(self):
-        """One dumped source used in both matmul slots follows both moves."""
+        """One dumped source used in both matmul slots follows both moves.
+
+        ``x_tile`` feeds the Left and the Right slot, so it is moved twice and
+        the single ``dump_vars`` entry expands to both post-move operands.
+        """
 
         @pl.program
         class Before:
@@ -400,45 +405,34 @@ class TestInferTileMemorySpaceCubeOps:
                 out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 x_tile = pl.load(x, [0, 0], [128, 128])
-                z_tile = pl.matmul(x_tile, x_tile)
+                z_tile = pl.matmul(x_tile, x_tile, attrs={"dump_vars": [x_tile]})
                 result = pl.store(z_tile, [0, 0], out)
                 return result
 
-        class _MarkMatmulDump(ir.IRMutator):
-            def visit_call(self, op):
-                expr = super().visit_call(op)
-                call = expr if isinstance(expr, ir.Call) else op
-                if call.op.name != _OP_TILE_MATMUL:
-                    return expr
-                attrs = dict(call.attrs)
-                attrs["dump_vars"] = [call.args[0]]
-                return ir.Call(
-                    call.op,
-                    list(call.args),
-                    dict(call.kwargs),
-                    attrs,
-                    call.type,
-                    call.span,
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[128, 128], pl.BF16],
+                out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                x_tile: pl.Tile[[128, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    x, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Mat
                 )
+                x_tile_Left: pl.Tile[[128, 128], pl.BF16, pl.Mem.Left] = pl.tile.move(
+                    x_tile, target_memory=pl.Mem.Left
+                )
+                x_tile_Right: pl.Tile[[128, 128], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                    x_tile, target_memory=pl.Mem.Right
+                )
+                z_tile: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(
+                    x_tile_Left, x_tile_Right, attrs={"dump_vars": [x_tile_Left, x_tile_Right]}
+                )
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.tile.store(z_tile, [0, 0], out)
+                return result
 
-        marked = _MarkMatmulDump().visit_program(Before)
-        after = passes.infer_tile_memory_space()(marked)
-        matmuls = []
-
-        class _CollectMatmul(ir.IRVisitor):
-            def visit_call(self, op):
-                if op.op.name == _OP_TILE_MATMUL:
-                    matmuls.append(op)
-                super().visit_call(op)
-
-        _CollectMatmul().visit_program(after)
-        assert len(matmuls) == 1
-        matmul = matmuls[0]
-        assert list(matmul.attrs["dump_vars"]) == list(matmul.args[:2])
-        assert [arg.type.memory_space for arg in matmul.args[:2]] == [
-            pl.MemorySpace.Left,
-            pl.MemorySpace.Right,
-        ]
+        ir.assert_structural_equal(passes.infer_tile_memory_space()(Before), Expected)
 
     def test_matmul_full_pipeline(self):
         """Full matmul pipeline: load->Mat, move->Left/Right, matmul->Acc."""
@@ -2750,9 +2744,15 @@ out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
 """
 
     def test_retargeted_bridge_preserves_unrelated_attrs_and_strips_private_marker(self):
-        """Phase 3 preserves unrelated attrs while consuming bridge provenance."""
-        before = pl.parse_program(
-            """
+        """Phase 3 preserves unrelated attrs while consuming bridge provenance.
+
+        The bridge marker and an unrelated sentinel ride into the pass on the
+        same ``tile.load``. ``Expected`` pins that the load comes out retargeted
+        to ``Mem.Vec`` still carrying the sentinel, with the private marker
+        consumed — and, being a whole-program comparison, that no other call
+        picked the marker up either.
+        """
+        program = """
 @pl.program
 class RetargetedBridgeAttrs:
     @pl.function(type=pl.FunctionType.InCore)
@@ -2763,11 +2763,7 @@ class RetargetedBridgeAttrs:
         out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
     ) -> pl.Tensor[[16, 128], pl.FP32]:
         for n in pl.range(0, 2, 1):
-            lhs_mat = pl.tile.load(lhs, [0, 0], [16, 128])
-            rhs_mat = pl.tile.load(rhs, [0, 0], [128, 128], target_memory=pl.Mem.Mat)
-            lhs_left = pl.tile.extract(lhs_mat, 0, 0, [16, 128], target_memory=pl.Mem.Left)
-            rhs_right = pl.tile.move(rhs_mat, target_memory=pl.Mem.Right)
-            c = pl.tile.matmul(lhs_left, rhs_right)
+{body}
             out = pl.tile.store(c, [0, 0], out)
         return out
 
@@ -2781,53 +2777,42 @@ class RetargetedBridgeAttrs:
         result = self.kernel(lhs, rhs, out)
         return result
 """
-        )
-        before = passes.convert_to_ssa()(before)
-        marker = "__compiler_tensor_to_tile_mat_bridge"
-        sentinel = "residency_test_sentinel"
-        stamped = False
+        before_body = """            lhs_mat = pl.tile.load(
+                lhs, [0, 0], [16, 128],
+                attrs={"__compiler_tensor_to_tile_mat_bridge": True, "residency_test_sentinel": 7},
+            )
+            rhs_mat = pl.tile.load(rhs, [0, 0], [128, 128], target_memory=pl.Mem.Mat)
+            lhs_left = pl.tile.extract(lhs_mat, 0, 0, [16, 128], target_memory=pl.Mem.Left)
+            rhs_right = pl.tile.move(rhs_mat, target_memory=pl.Mem.Right)
+            c = pl.tile.matmul(lhs_left, rhs_right)"""
+        expected_body = """            lhs_mat: pl.Tile[[16, 128], pl.BF16, pl.Mem.Vec] = pl.tile.load(
+                lhs, [0, 0], [16, 128], [16, 128], target_memory=pl.Mem.Vec,
+                attrs={"residency_test_sentinel": 7},
+            )
+            rhs_mat: pl.Tile[[128, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                rhs, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Mat
+            )
+            lhs_left: pl.Tile[
+                [16, 128], pl.BF16, pl.Mem.Left, pl.TileView(blayout=pl.TileLayout.row_major)
+            ] = pl.tile.extract(lhs_mat, 0, 0, [16, 128], target_memory=pl.Mem.Left)
+            rhs_right: pl.Tile[[128, 128], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                rhs_mat, target_memory=pl.Mem.Right
+            )
+            c: pl.Tile[[16, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lhs_left, rhs_right)"""
 
-        class _StampFirstLoad(ir.IRMutator):
-            def visit_call(self, op):
-                nonlocal stamped
-                expr = super().visit_call(op)
-                call = expr if isinstance(expr, ir.Call) else op
-                if call.op.name == _OP_TILE_LOAD and not stamped:
-                    stamped = True
-                    attrs = dict(call.attrs)
-                    attrs[marker] = True
-                    attrs[sentinel] = 7
-                    return ir.Call(
-                        call.op,
-                        list(call.args),
-                        dict(call.kwargs),
-                        attrs,
-                        call.type,
-                        call.span,
-                    )
-                return expr
-
-        before = _StampFirstLoad().visit_program(before)
+        Before = passes.convert_to_ssa()(pl.parse_program(program.format(body=before_body)))
+        Expected = passes.convert_to_ssa()(pl.parse_program(program.format(body=expected_body)))
         backend.set_backend_type(BackendType.Ascend910B)
-        after = passes.infer_tile_memory_space()(before)
-        load_attrs = []
-
-        class _CollectLoadAttrs(ir.IRVisitor):
-            def visit_call(self, op):
-                if op.op.name == _OP_TILE_LOAD:
-                    load_attrs.append(dict(op.attrs))
-                super().visit_call(op)
-
-        _CollectLoadAttrs().visit_program(after)
-        preserved = [attrs for attrs in load_attrs if attrs.get(sentinel) == 7]
-        assert len(preserved) == 1
-        assert marker not in preserved[0]
-        assert marker not in ir.python_print(after)
+        ir.assert_structural_equal(passes.infer_tile_memory_space()(Before), Expected)
 
     def test_private_marker_stripped_when_function_has_no_tile_memory(self):
-        """The early no-Tile path consumes transient provenance too."""
-        before = pl.parse_program(
-            """
+        """The early no-Tile path consumes transient provenance too.
+
+        Nothing in this kernel has a Tile memory space to infer, so the pass
+        takes its early-out path — which must still strip the private marker
+        while leaving the unrelated sentinel alone.
+        """
+        program = """
 @pl.program
 class MarkerOnlyScalarCall:
     @pl.function(type=pl.FunctionType.InCore)
@@ -2835,46 +2820,22 @@ class MarkerOnlyScalarCall:
         self,
         out: pl.Out[pl.Tensor[[1], pl.FP32]],
     ) -> pl.Tensor[[1], pl.FP32]:
-        idx = pl.tile.get_block_idx()
+        idx = pl.tile.get_block_idx({attrs})
         return out
 """
-        )
-        before = passes.convert_to_ssa()(before)
-        marker = "__compiler_tensor_to_tile_mat_bridge"
-
-        class _StampScalarCall(ir.IRMutator):
-            def visit_call(self, op):
-                expr = super().visit_call(op)
-                call = expr if isinstance(expr, ir.Call) else op
-                if call.op.name != _OP_TILE_GET_BLOCK_IDX:
-                    return expr
-                attrs = dict(call.attrs)
-                attrs[marker] = True
-                attrs["residency_test_sentinel"] = 11
-                return ir.Call(
-                    call.op,
-                    list(call.args),
-                    dict(call.kwargs),
-                    attrs,
-                    call.type,
-                    call.span,
+        Before = passes.convert_to_ssa()(
+            pl.parse_program(
+                program.format(
+                    attrs='attrs={"__compiler_tensor_to_tile_mat_bridge": True, '
+                    '"residency_test_sentinel": 11}'
                 )
-
-        before = _StampScalarCall().visit_program(before)
+            )
+        )
+        Expected = passes.convert_to_ssa()(
+            pl.parse_program(program.format(attrs='attrs={"residency_test_sentinel": 11}'))
+        )
         backend.set_backend_type(BackendType.Ascend910B)
-        after = passes.infer_tile_memory_space()(before)
-        scalar_attrs = []
-
-        class _CollectScalarAttrs(ir.IRVisitor):
-            def visit_call(self, op):
-                if op.op.name == _OP_TILE_GET_BLOCK_IDX:
-                    scalar_attrs.append(dict(op.attrs))
-                super().visit_call(op)
-
-        _CollectScalarAttrs().visit_program(after)
-        assert len(scalar_attrs) == 1
-        assert scalar_attrs[0].get("residency_test_sentinel") == 11
-        assert marker not in scalar_attrs[0]
+        ir.assert_structural_equal(passes.infer_tile_memory_space()(Before), Expected)
 
     def test_tensor_matmul_stationary_lhs_loads_once(self):
         """The tensor API reproduction hoists GM->L1 and invariant L1->L0A.

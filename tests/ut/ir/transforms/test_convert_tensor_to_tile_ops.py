@@ -36,6 +36,12 @@ from pypto.pypto_core.ir import MemorySpace, PadValue
 # share one parametrized body.
 # ---------------------------------------------------------------------------
 
+# Runtime valid-row extents for the dynamic row-broadcast div tests: `lhs` and a
+# covering `rhs` share one symbol, while `_UNRELATED_ROWS` names an extent the
+# pass cannot prove covers the dividend.
+_SHARED_ROWS = pl.dynamic("shared_rows")
+_UNRELATED_ROWS = pl.dynamic("unrelated_rows")
+
 InSpec = tuple[str, list[int], DataType]  # (param name, shape, dtype)
 ExtraSpec = tuple[str, ir.Type]  # (param name, ir type) — non-tensor (e.g. Scalar) extra params
 TensorBody = Callable[..., ir.Expr]  # (ib, in_vars[, extras]) -> final tensor var
@@ -554,53 +560,72 @@ class TestConvertTensorToTileOps:
 
     def test_tensor_view_passes_through_incore(self):
         """``tensor.view`` remains a GM metadata op in an InCore function."""
-        ib = IRBuilder()
-        with ib.function("kernel", type=ir.FunctionType.InCore) as f:
-            x = f.param("x", ir.TensorType([2, 16], DataType.FP32))
-            viewed = ib.let("viewed", tensor_ops.view(x, [32]))
-            f.return_type(viewed.type)
-            ib.return_stmt(viewed)
-        before = ir.Program([f.get_result()], "TensorViewPassThrough", ir.Span.unknown())
 
-        after = passes.convert_tensor_to_tile_ops()(before)
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, x: pl.Tensor[[2, 16], pl.FP32]
+            ) -> pl.Tensor[[32], pl.FP32, pl.TensorView(stride=[1], layout=pl.TensorLayout.ND)]:
+                viewed = pl.tensor.view(x, [32])
+                return viewed
 
-        ir.assert_structural_equal(after, before)
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Before)
 
     def test_tensor_slice_drop_dims_lowers_to_tile(self):
-        """Rank reduction preserves source validity and emits a separate reshape."""
-        ib = IRBuilder()
-        with ib.function("kernel", type=ir.FunctionType.InCore) as f:
-            source_view = ir.TensorView(valid_shape=[3, 12], layout=ir.TensorLayout.ND)
-            x = f.param(
-                "x",
-                ir.TensorType([3, 64], DataType.FP32, memref=None, tensor_view=source_view),
-            )
-            sliced = ib.let("sliced", tensor_ops.slice(x, [1, 64], [1, 0], drop_dims=[0]))
-            f.return_type(sliced.type)
-            ib.return_stmt(sliced)
-        before = ir.Program([f.get_result()], "TensorSliceDropDims", ir.Span.unknown())
+        """Rank reduction preserves source validity and emits a separate reshape.
 
-        after = passes.convert_tensor_to_tile_ops()(before)
-        text = ir.python_print(after)
+        ``Expected`` pins that the dropped axis is folded into the ``tile.load``
+        extent (``[1, 64]`` read, ``[1, 12]`` valid) and that the rank drop is a
+        *separate* ``tile.reshape`` rather than a nested one.
+        """
 
-        assert "pl.tile.load(x, [1, 0], [1, 64], [1, 12]" in text
-        assert "pl.tile.reshape(" in text
-        assert ", [64])" in text
-        assert "pl.tile.reshape(pl.tile.load(" not in text
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[3, 64], pl.FP32, pl.TensorView(valid_shape=[3, 12], layout=pl.TensorLayout.ND)],
+            ) -> pl.Tensor[[64], pl.FP32, pl.TensorView(valid_shape=[12], layout=pl.TensorLayout.ND)]:
+                sliced = pl.tensor.slice(x, [1, 64], [1, 0], drop_dims=[0])
+                return sliced
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[3, 64], pl.FP32, pl.TensorView(valid_shape=[3, 12], layout=pl.TensorLayout.ND)],
+                ret0__out: pl.Out[
+                    pl.Tensor[[64], pl.FP32, pl.TensorView(valid_shape=[12], layout=pl.TensorLayout.ND)]
+                ],
+            ) -> pl.Tensor[[64], pl.FP32, pl.TensorView(valid_shape=[12], layout=pl.TensorLayout.ND)]:
+                slice_load: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec, pl.TileView(valid_shape=[1, 12])] = (
+                    pl.tile.load(x, [1, 0], [1, 64], [1, 12], target_memory=pl.Mem.Vec)
+                )
+                sliced__tile: pl.Tile[[64], pl.FP32, pl.Mem.Vec, pl.TileView(valid_shape=[12])] = (
+                    pl.tile.reshape(slice_load, [64])
+                )
+                ret0__store = pl.tile.store(sliced__tile, [0], ret0__out)
+                return ret0__store
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_tensor_view_rejects_input_converted_to_tile(self):
         """A GM view cannot consume a producer that pass 12 lowers to Tile."""
-        ib = IRBuilder()
-        with ib.function("kernel", type=ir.FunctionType.InCore) as f:
-            x = f.param("x", ir.TensorType([4, 8], DataType.FP32))
-            f.return_type(ir.TensorType([32], DataType.FP32))
-            sliced = ib.let("sliced", tensor_ops.slice(x, [4, 8], [0, 0]))
-            viewed = ib.let("viewed", tensor_ops.view(sliced, [32]))
-            ib.return_stmt(viewed)
-        program = ir.Program([f.get_result()], "TensorViewConvertedInput", ir.Span.unknown())
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, x: pl.Tensor[[4, 8], pl.FP32]) -> pl.Tensor[[32], pl.FP32]:
+                sliced = pl.tensor.slice(x, [4, 8], [0, 0])
+                viewed = pl.tensor.view(sliced, [32])
+                return viewed
 
         with pytest.raises(ValueError, match="result of an op lowered to Tile"):
-            passes.convert_tensor_to_tile_ops()(program)
+            passes.convert_tensor_to_tile_ops()(Before)
 
     def test_reinterpret_view_auto_shape_lowers_to_tile(self):
         """Packed ND tensor reinterpret lowers 1:1 and keeps auto-shape semantics."""
@@ -637,23 +662,19 @@ class TestConvertTensorToTileOps:
 
     def test_reinterpret_view_rejects_dn_incore_lowering(self):
         """DN tensor reinterpret is rejected before conversion loses its contiguous axis."""
-        span = ir.Span.unknown()
-        source_type = ir.TensorType(
-            [8, 16],
-            DataType.FP32,
-            None,
-            ir.TensorView([], ir.TensorLayout.DN),
-        )
-        ib = IRBuilder()
-        with ib.function("kernel", type=ir.FunctionType.InCore) as f:
-            x = f.param("x", source_type)
-            viewed = ib.let("viewed", tensor_ops.reinterpret_view(x, DataType.INT16))
-            f.return_type(viewed.type)
-            ib.return_stmt(viewed)
-        program = ir.Program([f.get_result()], "DnReinterpretView", span)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[8, 16], pl.FP32, pl.TensorView(stride=[], layout=pl.TensorLayout.DN)],
+            ) -> pl.Tensor[[8, 32], pl.INT16, pl.TensorView(stride=[], layout=pl.TensorLayout.DN)]:
+                viewed = pl.tensor.reinterpret_view(x, pl.INT16)
+                return viewed
 
         with pytest.raises(ValueError, match="only packed ND tensors"):
-            passes.convert_tensor_to_tile_ops()(program)
+            passes.convert_tensor_to_tile_ops()(Before)
 
     def test_2d_tensor(self):
         """2D tensor -> correct offsets and shapes for load/store."""
@@ -1291,65 +1312,56 @@ class TestConvertTensorToTileOps:
 
     def test_div_row_broadcast_requires_divisor_valid_rows_to_cover_dividend(self):
         """The row-expand template reads one divisor scalar for every valid output row."""
-        span = ir.Span.unknown()
-        lhs_type = ir.TensorType(
-            [8, 16],
-            DataType.FP32,
-            None,
-            ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=[7, 16]),
-        )
-        rhs_type = ir.TensorType(
-            [8, 1],
-            DataType.FP32,
-            None,
-            ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=[6, 1]),
-        )
-        ib = IRBuilder()
-        with ib.function("kernel", type=ir.FunctionType.InCore) as f:
-            lhs = f.param("lhs", lhs_type)
-            rhs = f.param("rhs", rhs_type)
-            result = ib.let("result", tensor_ops.div(lhs, rhs))
-            f.return_type(result.type)
-            ib.return_stmt(result)
-        before = ir.Program([f.get_result()], "ShortDivisorValidRows", span)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[
+                    [8, 16], pl.FP32, pl.TensorView(layout=pl.TensorLayout.ND, valid_shape=[7, 16])
+                ],
+                rhs: pl.Tensor[[8, 1], pl.FP32, pl.TensorView(layout=pl.TensorLayout.ND, valid_shape=[6, 1])],
+            ) -> pl.Tensor[[8, 16], pl.FP32, pl.TensorView(layout=pl.TensorLayout.ND, valid_shape=[7, 16])]:
+                result = pl.div(lhs, rhs)
+                return result
 
         with pytest.raises(ValueError, match=r"divisor valid rows to cover the dividend"):
-            passes.convert_tensor_to_tile_ops()(before)
+            passes.convert_tensor_to_tile_ops()(Before)
 
     def test_div_row_broadcast_dynamic_valid_rows_must_be_provably_covered(self):
         """A shared runtime extent is safe, while unrelated extents need a runtime guard."""
-        span = ir.Span.unknown()
-        shared_rows = ir.Var("shared_rows", ir.ScalarType(DataType.INDEX), span)
-        unrelated_rows = ir.Var("unrelated_rows", ir.ScalarType(DataType.INDEX), span)
 
-        def make_program(rhs_rows: ir.Expr, name: str) -> ir.Program:
-            lhs_type = ir.TensorType(
-                [8, 16],
-                DataType.FP32,
-                None,
-                ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=[shared_rows, 16]),
-            )
-            rhs_type = ir.TensorType(
-                [8, 1],
-                DataType.FP32,
-                None,
-                ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=[rhs_rows, 1]),
-            )
-            ib = IRBuilder()
-            with ib.function("kernel", type=ir.FunctionType.InCore) as f:
-                lhs = f.param("lhs", lhs_type)
-                rhs = f.param("rhs", rhs_type)
-                result = ib.let("result", tensor_ops.div(lhs, rhs))
-                f.return_type(result.type)
-                ib.return_stmt(result)
-            return ir.Program([f.get_result()], name, span)
+        def make_program(rhs_rows):
+            @pl.program
+            class Before:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[
+                        [8, 16],
+                        pl.FP32,
+                        pl.TensorView(layout=pl.TensorLayout.ND, valid_shape=[_SHARED_ROWS, 16]),
+                    ],
+                    rhs: pl.Tensor[
+                        [8, 1], pl.FP32, pl.TensorView(layout=pl.TensorLayout.ND, valid_shape=[rhs_rows, 1])
+                    ],
+                ) -> pl.Tensor[
+                    [8, 16],
+                    pl.FP32,
+                    pl.TensorView(layout=pl.TensorLayout.ND, valid_shape=[_SHARED_ROWS, 16]),
+                ]:
+                    result = pl.div(lhs, rhs)
+                    return result
 
-        converted = passes.convert_tensor_to_tile_ops()(make_program(shared_rows, "SharedDivValidRows"))
+            return Before
+
+        converted = passes.convert_tensor_to_tile_ops()(make_program(_SHARED_ROWS))
         kernel = _require_function(converted, "kernel")
         assert _find_first_call_to(kernel, "tile.row_expand_div") is not None
 
         with pytest.raises(ValueError, match=r"divisor valid rows to cover the dividend"):
-            passes.convert_tensor_to_tile_ops()(make_program(unrelated_rows, "UnknownDivValidRows"))
+            passes.convert_tensor_to_tile_ops()(make_program(_UNRELATED_ROWS))
 
     def test_div_mixed_float_row_broadcast_inserts_explicit_cast(self):
         """Row-expand division receives one exact floating dtype after tensor promotion."""
@@ -1417,31 +1429,25 @@ class TestConvertTensorToTileOps:
             passes.convert_tensor_to_tile_ops()(before)
 
     def test_div_rejects_mismatched_valid_shapes_conversion(self):
-        """Equal physical shapes with different source valid regions cannot lower to tdiv."""
-        span = ir.Span.unknown()
-        lhs_type = ir.TensorType(
-            [8, 16],
-            DataType.FP32,
-            None,
-            ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=[7, 16]),
-        )
-        rhs_type = ir.TensorType(
-            [8, 16],
-            DataType.FP32,
-            None,
-            ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=[8, 16]),
-        )
-        ib = IRBuilder()
-        with ib.function("kernel", type=ir.FunctionType.InCore) as f:
-            lhs = f.param("lhs", lhs_type)
-            rhs = f.param("rhs", rhs_type)
-            result = ib.let("result", tensor_ops.div(lhs, rhs))
-            f.return_type(result.type)
-            ib.return_stmt(result)
-        before = ir.Program([f.get_result()], "MismatchedDivValidShapes", span)
+        """Exact-shape tile.div needs one shared valid_shape across src0/src1/dst."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[
+                    [8, 16], pl.FP32, pl.TensorView(layout=pl.TensorLayout.ND, valid_shape=[7, 16])
+                ],
+                rhs: pl.Tensor[
+                    [8, 16], pl.FP32, pl.TensorView(layout=pl.TensorLayout.ND, valid_shape=[8, 16])
+                ],
+            ) -> pl.Tensor[[8, 16], pl.FP32, pl.TensorView(layout=pl.TensorLayout.ND, valid_shape=[7, 16])]:
+                result = pl.div(lhs, rhs)
+                return result
 
         with pytest.raises(ValueError, match=r"requires src0, src1, and dst to have the same valid_shape"):
-            passes.convert_tensor_to_tile_ops()(before)
+            passes.convert_tensor_to_tile_ops()(Before)
 
     def test_subs_mixed_dtype_conversion_preserves_lhs_dtype(self):
         """An explicit FP32 scalar stays FP32 while the i16 tsubs result stays i16."""
@@ -3264,21 +3270,22 @@ class TestGmLocalTensorConversion:
 
     def test_mixed_store_through_tensor_view_rejected(self):
         """A GM tensor.view preserves the parameter's store identity."""
-        tensor_type = ir.TensorType([32], DataType.INT32)
-        ib = IRBuilder()
-        with ib.function("view_alias", type=ir.FunctionType.InCore) as f:
-            dst = f.param("dst", tensor_type)
-            val = f.param("val", ir.ScalarType(DataType.INT32))
-            f.return_type(tensor_type)
-            viewed = ib.let("viewed", tensor_ops.view(dst, [32]))
-            src = ib.let("src", tile_ops.load(dst, [0], [32]))
-            stored = ib.let("stored", tile_ops.store(src, [0], viewed))
-            ib.let("scalar_stored", tensor_ops.write(dst, [0], val))
-            ib.return_stmt(stored)
-        program = ir.Program([f.get_result()], "ViewAliasMixedStores", ir.Span.unknown())
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def view_alias(
+                self, dst: pl.Tensor[[32], pl.INT32], val: pl.Scalar[pl.INT32]
+            ) -> pl.Tensor[[32], pl.INT32]:
+                viewed = pl.tensor.view(dst, [32])
+                src = pl.tile.load(dst, [0], [32])
+                stored = pl.tile.store(src, [0], viewed)
+                # The scalar store is what collides with the MTE3 store above.
+                scalar_stored = pl.tensor.write(dst, [0], val)  # noqa: F841
+                return stored
 
         with pytest.raises(ValueError, match="mixes MTE3 and scalar stores"):
-            passes.convert_tensor_to_tile_ops()(program)
+            passes.convert_tensor_to_tile_ops()(Before)
 
     @pytest.mark.parametrize("loop_kind", ["for", "while"])
     def test_mixed_store_through_loop_carried_alias_rejected(self, loop_kind: str):
@@ -3440,50 +3447,69 @@ class TestSliceMatmulConversion:
         _assert_convert_equal(before, expected)
 
     def test_rank_reducing_slice_then_matmul_preserves_valid_shape(self):
-        """Consumer-driven Mat loads keep 5-arg validity and lower drop_dims."""
-        ib = IRBuilder()
-        with ib.function("kernel", type=ir.FunctionType.InCore) as f:
-            a = f.param("a", ir.TensorType([16, 64], DataType.BF16))
-            b = f.param("b", ir.TensorType([2, 64, 32], DataType.BF16))
-            b_slice = ib.let(
-                "b_slice",
-                tensor_ops.slice(
+        """Consumer-driven Mat loads keep 5-arg validity and lower drop_dims.
+
+        ``Expected`` pins the whole lowering at once: the dropped axis rides in
+        the ``tile.load`` extent (``[1, 64, 32]`` read, ``[1, 64, 16]`` valid) on
+        the Mat bridge, a single ``tile.reshape`` performs the rank drop, and the
+        matmul consumes the reshape result rather than the raw load.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, a: pl.Tensor[[16, 64], pl.BF16], b: pl.Tensor[[2, 64, 32], pl.BF16]
+            ) -> pl.Tensor[[16, 32], pl.FP32]:
+                b_slice = pl.tensor.slice(b, [1, 64, 32], [1, 0, 0], valid_shape=[1, 64, 16], drop_dims=[0])
+                result = pl.tensor.matmul(a, b_slice)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[2, 64, 32], pl.BF16],
+                ret0__out: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
+            ) -> pl.Tensor[[16, 32], pl.FP32]:
+                b_slice__tile_full_rank: pl.Tile[
+                    [1, 64, 32], pl.BF16, pl.Mem.Mat, pl.TileView(valid_shape=[1, 64, 16])
+                ] = pl.tile.load(
                     b,
-                    [1, 64, 32],
                     [1, 0, 0],
-                    valid_shape=[1, 64, 16],
-                    drop_dims=[0],
-                ),
-            )
-            result = ib.let("result", tensor_ops.matmul(a, b_slice))
-            f.return_type(result.type)
-            ib.return_stmt(result)
-        before = ir.Program([f.get_result()], "RankReducingSliceMatmul", ir.Span.unknown())
+                    [1, 64, 32],
+                    [1, 64, 16],
+                    target_memory=pl.Mem.Mat,
+                    attrs={"__compiler_tensor_to_tile_mat_bridge": True},
+                )
+                b_slice__tile: pl.Tile[
+                    [64, 32],
+                    pl.BF16,
+                    pl.Mem.Mat,
+                    pl.TileView(
+                        valid_shape=[64, 16],
+                        blayout=pl.TileLayout.row_major,
+                        slayout=pl.TileLayout.none_box,
+                    ),
+                ] = pl.tile.reshape(b_slice__tile_full_rank, [64, 32])
+                a_mat: pl.Tile[[16, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    a,
+                    [0, 0],
+                    [16, 64],
+                    [16, 64],
+                    target_memory=pl.Mem.Mat,
+                    attrs={"__compiler_tensor_to_tile_mat_bridge": True},
+                )
+                result__tile: pl.Tile[[16, 32], pl.FP32, pl.Mem.Acc, pl.TileView(valid_shape=[16, 16])] = (
+                    pl.tile.matmul(a_mat, b_slice__tile)
+                )
+                ret0__store = pl.tile.store(result__tile, [0, 0], ret0__out)
+                return ret0__store
 
-        after = passes.convert_tensor_to_tile_ops()(before)
-        kernel = after.get_function("kernel")
-        assert kernel is not None
-
-        b_load = next(
-            load
-            for load in _find_calls_to(kernel, "tile.load")
-            if isinstance(load.args[0], ir.Var) and load.args[0].name_hint == "b"
-        )
-        assert _tuple_int_values(b_load.args[3]) == [1, 64, 16]
-        assert isinstance(b_load.type, ir.TileType)
-        assert b_load.type.memory_space == MemorySpace.Mat
-        assert dict(b_load.attrs).get(_MAT_BRIDGE_ATTR) is True
-
-        reshapes = _find_calls_to(kernel, "tile.reshape")
-        assert len(reshapes) == 1
-        reshape = reshapes[0]
-        assert isinstance(reshape.args[0], ir.Var)
-        assert _tuple_int_values(reshape.args[1]) == [64, 32]
-
-        matmul = _find_calls_to(kernel, "tile.matmul")
-        assert len(matmul) == 1
-        assert isinstance(matmul[0].args[1], ir.Var)
-        assert matmul[0].args[1].name_hint == "b_slice__tile"
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_slice_alias_then_matmul_routes_load_to_mat(self):
         """tensor.slice → SSA alias → tensor.matmul emits tile.load(Mat).

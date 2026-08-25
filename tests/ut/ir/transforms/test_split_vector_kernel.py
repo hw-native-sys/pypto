@@ -15,7 +15,6 @@ import pypto.language as pl
 import pytest
 from pypto import backend, ir, passes
 from pypto.backend import BackendType
-from pypto.ir import op as ir_op
 from pypto.ir.printer import python_print
 
 
@@ -254,81 +253,56 @@ class TestSplitVectorKernelNoSplitA2A3:
         _assert_split_matches_expected(Before, Expected)
 
     def test_no_split_dual_dispatch_rewrites_lane1_tile_load_to_create(self):
+        """Lane1 replay rewrites a producer ``tile.load`` into ``tile.create``.
+
+        The replay lane never consumes the loaded data — only the ``tpush`` has
+        to happen on both lanes — so lane1 gets an empty tile of the load's
+        result shape instead of a second GM read.
+        """
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
 
-        span = ir.Span.unknown()
-        zero = ir.ConstInt(0, pl.INDEX, span)
-        dim = ir.ConstInt(16, pl.INDEX, span)
-        offsets = ir.MakeTuple([zero, zero], span)
-        shapes = ir.MakeTuple([dim, dim], span)
-        valid_shape = ir.MakeTuple([dim, dim], span)
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"dual_aiv_dispatch": True})
+            def main_aiv(
+                self,
+                data: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                slot_buf = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="main_aic")
+                pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=slot_buf)
+                loaded: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    data, [0, 0], [16, 16], target_memory=pl.MemorySpace.Vec
+                )
+                pl.tpush_to_aic(loaded, split=0)
+                return out
 
-        data = ir.Var("data", ir.TensorType([16, 16], pl.FP32), span)
-        out = ir.Var("out", ir.TensorType([16, 16], pl.FP32), span)
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"dual_aiv_dispatch": True})
+            def main_aiv(
+                self,
+                data: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                slot_buf = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="main_aic")
+                pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=slot_buf)
+                if subblock_idx == 0:
+                    loaded: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                        data, [0, 0], [16, 16], target_memory=pl.MemorySpace.Vec
+                    )
+                    pl.tpush_to_aic(loaded, split=0)
+                    return out
+                else:
+                    loaded_lane1: pl.Tile[
+                        [16, 16], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[0, 0])
+                    ] = pl.tile.create([16, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+                    pl.tpush_to_aic(loaded_lane1, split=0)
+                    return out
 
-        load_view = ir.TileView(valid_shape=[dim, dim])
-        load_type = ir.TileType([16, 16], pl.FP32, None, load_view, ir.MemorySpace.Vec)
-        loaded = ir.Var("loaded", load_type, span)
-        # Canonical 4-operand tile.load ([tensor, offsets, shapes, valid_shape])
-        # with the full kwarg set the DSL/IR builder emits (target_memory +
-        # transpose). Matching the canonical operand/kwarg arity is what lets the
-        # hand-built body survive the print->parse roundtrip verifier.
-        load_call = ir.Call(
-            ir.Op("tile.load"),
-            [data, offsets, shapes, valid_shape],
-            {"target_memory": ir.MemorySpace.Vec},
-            load_type,
-            span,
-        )
-
-        tpush_call = ir.Call(ir.Op("tile.tpush_to_aic"), [loaded], {"split": 0}, ir.UnknownType(), span)
-
-        # Cross-core pipe scaffolding the MixedKernelExpanded property requires
-        # for an AIV function that uses a V2C op (tpush_to_aic): a dominating
-        # import_peer_buffer + aiv_initialize_pipe. Built via the IR op builders
-        # so the Calls are canonical and survive the roundtrip verifier. This is
-        # the same scaffolding ExpandMixedKernel injects in the real pipeline.
-        peer_buf_call = ir_op.system.import_peer_buffer(
-            name="v2c_slot_buffer", peer_func="main_aic", span=span
-        )
-        peer_buf = ir.Var("peer_buf", peer_buf_call.type, span)
-        init_pipe_call = ir_op.system.aiv_initialize_pipe(
-            v2c_consumer_buf=peer_buf, dir_mask=2, slot_size=512, span=span
-        )
-
-        body = ir.SeqStmts(
-            [
-                ir.AssignStmt(peer_buf, peer_buf_call, span),
-                ir.EvalStmt(init_pipe_call, span),
-                ir.AssignStmt(loaded, load_call, span),
-                ir.EvalStmt(tpush_call, span),
-                ir.ReturnStmt([out], span),
-            ],
-            span,
-        )
-        func = ir.Function(
-            "main_aiv",
-            [(data, ir.ParamDirection.In), (out, ir.ParamDirection.Out)],
-            [out.type],
-            body,
-            span,
-            ir.FunctionType.AIV,
-            attrs={"dual_aiv_dispatch": True},
-        )
-
-        actual = _run_split_vector_kernel(ir.Program([func], "tile_load_program", span))
-        printed = python_print(actual)
-
-        assert "if subblock_idx == 0:" in printed
-        assert printed.count("pl.tile.load(") == 1
-        assert printed.count("pl.tile.create(") == 1
-        assert printed.count("pl.tile.tpush_to_aic(") == 2
-        assert re.search(
-            r"loaded__ssa_v0_\d+: pl.Tile\[\[16, 16\], pl.FP32, pl.Mem.Vec, "
-            r"pl.TileView\(valid_shape=\[0, 0\]\)\] = pl.tile.create",
-            printed,
-        )
+        _assert_split_matches_expected(Before, Expected)
 
     def test_no_split_dual_dispatch_rewrites_lane1_tile_slice_to_create(self):
         """Lane1 replay rewrites a producer ``tile.slice`` into ``tile.create``.
@@ -337,94 +311,63 @@ class TestSplitVectorKernelNoSplitA2A3:
         lane only needs an empty tile of the slice's result shape. Forcing the
         slice's explicit ``valid_shape`` to a static 0 would emit a
         ``v_row=0, v_col=0`` subview that pto-isa cannot compile (no
-        ``GetValidRow`` overload for a static mask of 0); the rewrite to
-        ``tile.create`` yields a dynamic-valid empty tile instead (gh#1649).
+        ``GetValidRow`` overload for a static mask of 0); ``Expected`` pins the
+        rewrite to a dynamic-valid empty ``tile.create`` instead (gh#1649).
         """
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
 
-        span = ir.Span.unknown()
-        zero = ir.ConstInt(0, pl.INDEX, span)
-        dim = ir.ConstInt(16, pl.INDEX, span)
-        sub = ir.ConstInt(8, pl.INDEX, span)
-        offsets = ir.MakeTuple([zero, zero], span)
-        shapes = ir.MakeTuple([dim, dim], span)
-        valid_shape = ir.MakeTuple([dim, dim], span)
-        slice_shape = ir.MakeTuple([dim, sub], span)
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"dual_aiv_dispatch": True})
+            def main_aiv(
+                self,
+                data: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 8], pl.FP32]],
+            ) -> pl.Tensor[[16, 8], pl.FP32]:
+                slot_buf = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="main_aic")
+                pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=slot_buf)
+                loaded: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    data, [0, 0], [16, 16], target_memory=pl.MemorySpace.Vec
+                )
+                sliced: pl.Tile[[16, 8], pl.FP32, pl.MemorySpace.Vec] = pl.tile.slice(loaded, [16, 8], [0, 0])
+                pl.tpush_to_aic(sliced, split=0)
+                return out
 
-        data = ir.Var("data", ir.TensorType([16, 16], pl.FP32), span)
-        out = ir.Var("out", ir.TensorType([16, 8], pl.FP32), span)
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"dual_aiv_dispatch": True})
+            def main_aiv(
+                self,
+                data: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 8], pl.FP32]],
+            ) -> pl.Tensor[[16, 8], pl.FP32]:
+                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                slot_buf = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="main_aic")
+                pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=slot_buf)
+                if subblock_idx == 0:
+                    loaded: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                        data, [0, 0], [16, 16], target_memory=pl.MemorySpace.Vec
+                    )
+                    sliced: pl.Tile[[16, 8], pl.FP32, pl.MemorySpace.Vec] = pl.tile.slice(
+                        loaded, [16, 8], [0, 0]
+                    )
+                    pl.tpush_to_aic(sliced, split=0)
+                    return out
+                else:
+                    # Both the load and the slice collapse to empty creates; the
+                    # slice result is a dynamic-valid empty [16, 8] tile, never a
+                    # static v_row=0 / v_col=0 subview.
+                    loaded_lane1: pl.Tile[
+                        [16, 16], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[0, 0])
+                    ] = pl.tile.create([16, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+                    sliced_lane1: pl.Tile[
+                        [16, 8], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[0, 0])
+                    ] = pl.tile.create([16, 8], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+                    pl.tpush_to_aic(sliced_lane1, split=0)
+                    return out
 
-        load_type = ir.TileType(
-            [16, 16], pl.FP32, None, ir.TileView(valid_shape=[dim, dim]), ir.MemorySpace.Vec
-        )
-        loaded = ir.Var("loaded", load_type, span)
-        # Canonical 4-operand tile.load + full kwarg set (see the load->create
-        # test above) so the hand-built body round-trips under verification. The
-        # producer ``tile.slice`` below is already canonical: a 3-operand
-        # ``[tile, shape, offset]`` slice (no explicit valid_shape) is exactly
-        # what the DSL/IR builder emits, so it needs no padding.
-        load_call = ir.Call(
-            ir.Op("tile.load"),
-            [data, offsets, shapes, valid_shape],
-            {"target_memory": ir.MemorySpace.Vec},
-            load_type,
-            span,
-        )
-
-        slice_type = ir.TileType(
-            [16, 8], pl.FP32, None, ir.TileView(valid_shape=[dim, sub]), ir.MemorySpace.Vec
-        )
-        sliced = ir.Var("sliced", slice_type, span)
-        slice_call = ir.Call(ir.Op("tile.slice"), [loaded, slice_shape, offsets], {}, slice_type, span)
-
-        tpush_call = ir.Call(ir.Op("tile.tpush_to_aic"), [sliced], {"split": 0}, ir.UnknownType(), span)
-
-        # Cross-core pipe scaffolding required by MixedKernelExpanded for an AIV
-        # function using a V2C op (see the load->create test above).
-        peer_buf_call = ir_op.system.import_peer_buffer(
-            name="v2c_slot_buffer", peer_func="main_aic", span=span
-        )
-        peer_buf = ir.Var("peer_buf", peer_buf_call.type, span)
-        init_pipe_call = ir_op.system.aiv_initialize_pipe(
-            v2c_consumer_buf=peer_buf, dir_mask=2, slot_size=512, span=span
-        )
-
-        body = ir.SeqStmts(
-            [
-                ir.AssignStmt(peer_buf, peer_buf_call, span),
-                ir.EvalStmt(init_pipe_call, span),
-                ir.AssignStmt(loaded, load_call, span),
-                ir.AssignStmt(sliced, slice_call, span),
-                ir.EvalStmt(tpush_call, span),
-                ir.ReturnStmt([out], span),
-            ],
-            span,
-        )
-        func = ir.Function(
-            "main_aiv",
-            [(data, ir.ParamDirection.In), (out, ir.ParamDirection.Out)],
-            [out.type],
-            body,
-            span,
-            ir.FunctionType.AIV,
-            attrs={"dual_aiv_dispatch": True},
-        )
-
-        actual = _run_split_vector_kernel(ir.Program([func], "tile_slice_program", span))
-        printed = python_print(actual)
-
-        assert "if subblock_idx == 0:" in printed
-        # Lane0 keeps the real slice; lane1 replaces it (and the load) with create.
-        assert printed.count("pl.tile.slice(") == 1
-        assert printed.count("pl.tile.create(") == 2
-        # The lane1 slice result is a dynamic-valid empty [16, 8] tile, never a
-        # static v_row=0/v_col=0 subview.
-        assert re.search(
-            r"sliced__ssa_v0_\d+: pl.Tile\[\[16, 8\], pl.FP32, pl.Mem.Vec, "
-            r"pl.TileView\(valid_shape=\[0, 0\]\)\] = pl.tile.create",
-            printed,
-        )
+        _assert_split_matches_expected(Before, Expected)
 
     def test_no_split_dual_dispatch_rewrites_lane1_transpose_to_create(self):
         """Lane1 replay rewrites a ``tile.transpose`` into ``tile.create``.
@@ -437,82 +380,55 @@ class TestSplitVectorKernelNoSplitA2A3:
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
 
-        span = ir.Span.unknown()
-        zero = ir.ConstInt(0, pl.INDEX, span)
-        one = ir.ConstInt(1, pl.INDEX, span)
-        dim = ir.ConstInt(16, pl.INDEX, span)
-        offsets = ir.MakeTuple([zero, zero], span)
-        shapes = ir.MakeTuple([dim, dim], span)
-        valid_shape = ir.MakeTuple([dim, dim], span)
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"dual_aiv_dispatch": True})
+            def main_aiv(
+                self,
+                data: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                slot_buf = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="main_aic")
+                pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=slot_buf)
+                loaded: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    data, [0, 0], [16, 16], target_memory=pl.MemorySpace.Vec
+                )
+                transposed: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.transpose(loaded, 0, 1)
+                pl.tpush_to_aic(transposed, split=0)
+                return out
 
-        data = ir.Var("data", ir.TensorType([16, 16], pl.FP32), span)
-        out = ir.Var("out", ir.TensorType([16, 16], pl.FP32), span)
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"dual_aiv_dispatch": True})
+            def main_aiv(
+                self,
+                data: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                slot_buf = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="main_aic")
+                pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=slot_buf)
+                if subblock_idx == 0:
+                    loaded: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                        data, [0, 0], [16, 16], target_memory=pl.MemorySpace.Vec
+                    )
+                    transposed: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.transpose(
+                        loaded, 0, 1
+                    )
+                    pl.tpush_to_aic(transposed, split=0)
+                    return out
+                else:
+                    # Lane 1 keeps no transpose at all — the hazard the rewrite avoids.
+                    loaded_lane1: pl.Tile[
+                        [16, 16], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[0, 0])
+                    ] = pl.tile.create([16, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+                    transposed_lane1: pl.Tile[
+                        [16, 16], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[0, 0])
+                    ] = pl.tile.create([16, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+                    pl.tpush_to_aic(transposed_lane1, split=0)
+                    return out
 
-        load_type = ir.TileType(
-            [16, 16], pl.FP32, None, ir.TileView(valid_shape=[dim, dim]), ir.MemorySpace.Vec
-        )
-        loaded = ir.Var("loaded", load_type, span)
-        load_call = ir.Call(
-            ir.Op("tile.load"),
-            [data, offsets, shapes, valid_shape],
-            {"target_memory": ir.MemorySpace.Vec},
-            load_type,
-            span,
-        )
-
-        transpose_type = ir.TileType(
-            [16, 16], pl.FP32, None, ir.TileView(valid_shape=[dim, dim]), ir.MemorySpace.Vec
-        )
-        transposed = ir.Var("transposed", transpose_type, span)
-        transpose_call = ir.Call(ir.Op("tile.transpose"), [loaded, zero, one], {}, transpose_type, span)
-
-        tpush_call = ir.Call(ir.Op("tile.tpush_to_aic"), [transposed], {"split": 0}, ir.UnknownType(), span)
-
-        peer_buf_call = ir_op.system.import_peer_buffer(
-            name="v2c_slot_buffer", peer_func="main_aic", span=span
-        )
-        peer_buf = ir.Var("peer_buf", peer_buf_call.type, span)
-        init_pipe_call = ir_op.system.aiv_initialize_pipe(
-            v2c_consumer_buf=peer_buf, dir_mask=2, slot_size=512, span=span
-        )
-
-        body = ir.SeqStmts(
-            [
-                ir.AssignStmt(peer_buf, peer_buf_call, span),
-                ir.EvalStmt(init_pipe_call, span),
-                ir.AssignStmt(loaded, load_call, span),
-                ir.AssignStmt(transposed, transpose_call, span),
-                ir.EvalStmt(tpush_call, span),
-                ir.ReturnStmt([out], span),
-            ],
-            span,
-        )
-        func = ir.Function(
-            "main_aiv",
-            [(data, ir.ParamDirection.In), (out, ir.ParamDirection.Out)],
-            [out.type],
-            body,
-            span,
-            ir.FunctionType.AIV,
-            attrs={"dual_aiv_dispatch": True},
-        )
-
-        actual = _run_split_vector_kernel(ir.Program([func], "tile_transpose_program", span))
-        printed = python_print(actual)
-
-        assert "if subblock_idx == 0:" in printed
-        # Lane0 keeps the real transpose; lane1 replaces it (and the load) with create.
-        assert printed.count("pl.tile.transpose(") == 1
-        assert printed.count("pl.tile.create(") == 2
-        then_branch, lane1 = printed.split("else:", 1)
-        # Lane 0 keeps the real transpose; lane 1 replaces it with an empty create.
-        assert "pl.tile.transpose(" in then_branch
-        assert "pl.tile.transpose(" not in lane1
-        assert re.search(
-            r"transposed__ssa_v0_\d+: pl.Tile\[\[16, 16\], pl.FP32, pl.Mem.Vec, "
-            r"pl.TileView\(valid_shape=\[0, 0\]\)\] = pl.tile.create",
-            lane1,
-        )
+        _assert_split_matches_expected(Before, Expected)
 
     def test_no_split_dual_dispatch_hoists_import_peer_buffer_and_pipe_init(self):
         backend.reset_for_testing()

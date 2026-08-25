@@ -1418,7 +1418,14 @@ class TestAutoTileMatmulL0MNTiling:
         ir.assert_structural_equal(passes.auto_tile_matmul_l0()(Before), Before)
 
     def test_matmul_bias_partial_n_boundary_keeps_logical_store_extent(self):
-        """A 16-column N tail is sliced from bias and stored only at its logical width."""
+        """A 16-column N tail is sliced from bias and stored only at its logical width.
+
+        ``Expected`` pins the whole fold: the tail's bias arrives as its own
+        narrow ``tile.load(bias, [0, 512], [1, 16], [1, 16])`` routed through
+        ``Mem.Bias`` — never as a ``tile.slice`` / ``tile.extract`` of the full
+        ``bias_mat`` — and the tail store lands at column 512 at its logical
+        16-column width.
+        """
         _backend.reset_for_testing()
         _backend.set_backend_type(BackendType.Ascend950)
         M, K, N = 528, 32, 528
@@ -1440,13 +1447,74 @@ class TestAutoTileMatmulL0MNTiling:
                 out = pl.store(c, [0, 0], out)
                 return out
 
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[528, 32], pl.BF16],
+                rhs: pl.Tensor[[32, 528], pl.BF16],
+                bias: pl.Tensor[[1, 528], pl.FP32],
+                out: pl.Out[pl.Tensor[[528, 528], pl.FP32]],
+            ) -> pl.Tensor[[528, 528], pl.FP32]:
+                lhs_mat: pl.Tile[[528, 32], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [528, 32], [528, 32], target_memory=pl.Mem.Mat
+                )
+                rhs_mat: pl.Tile[[32, 528], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [32, 528], [32, 528], target_memory=pl.Mem.Mat
+                )
+                for c_o, (c_oc,) in pl.range(0, 528, 528, init_values=(out,)):
+                    c_a: pl.Tile[
+                        [528, 32], pl.BF16, pl.Mem.Left, pl.TileView(blayout=pl.TileLayout.row_major)
+                    ] = pl.tile.extract(lhs_mat, c_o, 0, [528, 32], target_memory=pl.Mem.Left)
+                    for c_i, (c_ic,) in pl.pipeline(
+                        0,
+                        512,
+                        64,
+                        stage=2,
+                        init_values=(c_oc,),
+                        attrs={"pipeline_overlap_stores": False},
+                    ):
+                        c_b: pl.Tile[[32, 64], pl.BF16, pl.Mem.Right] = pl.tile.extract(
+                            rhs_mat, 0, c_i, [32, 64], target_memory=pl.Mem.Right
+                        )
+                        # The per-tile bias is loaded narrow from GM, not sliced
+                        # out of the full-width bias_mat.
+                        c_bias_mat: pl.Tile[
+                            [1, 64],
+                            pl.FP32,
+                            pl.Mem.Mat,
+                            pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box),
+                        ] = pl.tile.load(bias, [0, c_i], [1, 64], [1, 64], target_memory=pl.Mem.Mat)
+                        c_bias: pl.Tile[[1, 64], pl.FP32, pl.Mem.Bias] = pl.tile.move(
+                            c_bias_mat, target_memory=pl.Mem.Bias
+                        )
+                        c_c: pl.Tile[[528, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_bias(c_a, c_b, c_bias)
+                        out_t0: pl.Tensor[[528, 528], pl.FP32] = pl.tile.store(c_c, [c_o, c_i], c_ic)
+                        c_irv = pl.yield_(out_t0)
+                    c_orv = pl.yield_(c_irv)
+                # The peeled 16-column tail.
+                c_ta1: pl.Tile[
+                    [528, 32], pl.BF16, pl.Mem.Left, pl.TileView(blayout=pl.TileLayout.row_major)
+                ] = pl.tile.extract(lhs_mat, 0, 0, [528, 32], target_memory=pl.Mem.Left)
+                c_tb1: pl.Tile[[32, 16], pl.BF16, pl.Mem.Right] = pl.tile.extract(
+                    rhs_mat, 0, 512, [32, 16], target_memory=pl.Mem.Right
+                )
+                c_tbias1_mat: pl.Tile[
+                    [1, 16],
+                    pl.FP32,
+                    pl.Mem.Mat,
+                    pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box),
+                ] = pl.tile.load(bias, [0, 512], [1, 16], [1, 16], target_memory=pl.Mem.Mat)
+                c_tbias1: pl.Tile[[1, 16], pl.FP32, pl.Mem.Bias] = pl.tile.move(
+                    c_tbias1_mat, target_memory=pl.Mem.Bias
+                )
+                c_tc1: pl.Tile[[528, 16], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_bias(c_ta1, c_tb1, c_tbias1)
+                out_t1: pl.Tensor[[528, 528], pl.FP32] = pl.tile.store(c_tc1, [0, 512], c_orv)
+                return out_t1
+
         After = passes.auto_tile_matmul_l0()(Before)
-        printed = ir.python_print(After)
-        assert re.search(r"pl\.tile\.load\(\s*bias,\s*\[0, 512\],\s*\[1, 16\],\s*\[1, 16\]", printed)
-        assert "pl.tile.slice(bias_mat" not in printed
-        assert "target_memory=pl.Mem.Bias" in printed
-        assert "pl.tile.extract(bias_mat" not in printed
-        assert re.search(r"pl\.tile\.store\([^\n]+\[\d+, 512\]", printed)
+        ir.assert_structural_equal(After, Expected)
         _assert_ssa_valid(After, "test_matmul_bias_partial_n_boundary")
 
         # Exercise the production lowering as well as the AutoTile-local IR:
