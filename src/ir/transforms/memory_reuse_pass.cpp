@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <functional>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -2818,10 +2819,21 @@ class YieldFixupMutator : public IRMutator {
       if (!init_tile) continue;
       auto init_memref = GetDefinedMemRef(init_tile);
 
-      // SameBaseAddress, not SameAllocation: two slots of one pl.MemRef(slots=N)
+      // Compare addresses, not allocations: two slots of one pl.MemRef(slots=N)
       // share a base, so "same allocation" would skip the copy that moves the
       // value from one slot to the other and silently carry the wrong slot.
-      if (SameBaseAddress(yield_memref, init_memref)) continue;
+      const AddressRelation relation = CompareBaseAddress(yield_memref, init_memref);
+      if (relation == AddressRelation::kSame) continue;
+      // Two symbolic offsets into one allocation may or may not name the same
+      // bytes. Copying is wrong if they coincide (a tile.move onto itself, which
+      // Acc cannot lower at all) and skipping is wrong if they do not, so say so
+      // rather than pick one and hope.
+      CHECK_SPAN(relation == AddressRelation::kDifferent, for_stmt->span_)
+          << "Loop-carried value '" << for_stmt->iter_args_[i]->name_hint_
+          << "' is yielded at a slot of its own allocation that cannot be shown equal to, or "
+             "distinct from, the slot it is carried in, so whether the carry needs a copy is "
+             "undecidable here. Subscript the declared allocation with the same expression at both "
+             "ends, or give the carry its own allocation.";
 
       // MemRef mismatch — create tile.move to copy yield value into initValue's buffer
       auto target_memory = init_tile->GetMemorySpace();
@@ -2911,9 +2923,16 @@ class YieldFixupMutator : public IRMutator {
       // Check else branch: if MemRef differs from target, insert tile.move
       if (then_tile && else_tile) {
         auto else_memref = GetDefinedMemRef(else_tile);
-        // SameBaseAddress, not SameAllocation: an arm sitting on a sibling slot of
-        // the same allocation still has to be copied into the phi's slot.
-        if (!SameBaseAddress(else_memref, target_memref)) {
+        // Addresses, not allocations: an arm sitting on a sibling slot of the same
+        // allocation still has to be copied into the phi's slot.
+        const AddressRelation arm = CompareBaseAddress(else_memref, target_memref);
+        CHECK_SPAN(arm != AddressRelation::kUnknown, if_stmt->span_)
+            << "Branch result '" << if_stmt->return_vars_[i]->name_hint_
+            << "' is produced at a slot of its own allocation that cannot be shown equal to, or "
+               "distinct from, the slot the other branch produces, so whether this arm needs a copy "
+               "is undecidable here. Subscript the declared allocation with the same expression in "
+               "both branches, or give the branches separate allocations.";
+        if (arm == AddressRelation::kDifferent) {
           auto [moved_var, move_stmt] = CreateTileMove(else_var, target_memref, target_memory);
           else_move_stmts.emplace_back(std::move(move_stmt));
           else_moves.emplace_back(i, moved_var);
@@ -2925,7 +2944,7 @@ class YieldFixupMutator : public IRMutator {
       auto rv_tile = As<TileType>(new_return_vars[i]->GetType());
       if (rv_tile && rv_tile->memref_.has_value()) {
         auto rv_memref = GetDefinedMemRef(rv_tile);
-        if (!SameBaseAddress(rv_memref, target_memref)) {
+        if (CompareBaseAddress(rv_memref, target_memref) == AddressRelation::kDifferent) {
           auto new_rv_type = CloneTypeWithMemRefAndRemapExprs(
               rv_tile, target_memref, [this](const ExprPtr& e) { return VisitExpr(e); }, target_memory);
           new_return_vars[i] =
@@ -3003,7 +3022,7 @@ class YieldFixupMutator : public IRMutator {
           continue;
         }
         const int64_t begin = offset->value_;
-        positioned_[base].push_back(Entry{begin, begin + static_cast<int64_t>(ranges[i]->size_), i});
+        positioned_[base].push_back(Entry{begin, RangeEnd(begin, ranges[i]->size_, ranges[i]->span_), i});
       }
       for (auto& [base, entries] : positioned_) {
         static_cast<void>(base);
@@ -3029,7 +3048,7 @@ class YieldFixupMutator : public IRMutator {
         return;
       }
       const int64_t begin = offset->value_;
-      const int64_t end = begin + static_cast<int64_t>(query->size_);
+      const int64_t end = RangeEnd(begin, query->size_, query->span_);
       // Entries are sorted by start, so the first candidate is the first one
       // starting at or after `begin`, less the single earlier one that may still
       // cover `begin`.
@@ -3070,6 +3089,23 @@ class YieldFixupMutator : public IRMutator {
       int64_t end;
       size_t index;
     };
+
+    /// One past the last byte of `[begin, begin + size)`, as a signed offset.
+    ///
+    /// `MemRef::size_` is unsigned and the interval arithmetic below is signed,
+    /// so a size past `INT64_MAX` or a sum that wraps would silently corrupt both
+    /// the sort order and every overlap answer derived from it. No on-chip buffer
+    /// comes anywhere near that, so a violation is a corrupt MemRef rather than
+    /// something to accommodate.
+    static int64_t RangeEnd(int64_t begin, uint64_t size, const Span& span) {
+      constexpr auto kMax = std::numeric_limits<int64_t>::max();
+      INTERNAL_CHECK_SPAN(size <= static_cast<uint64_t>(kMax), span)
+          << "Internal error: MemRef size " << size << " does not fit a signed byte offset";
+      const auto signed_size = static_cast<int64_t>(size);
+      INTERNAL_CHECK_SPAN(begin <= kMax - signed_size, span)
+          << "Internal error: MemRef byte range [" << begin << ", +" << size << ") overflows";
+      return begin + signed_size;
+    }
     std::map<const Var*, std::vector<Entry>> positioned_;
     std::map<const Var*, std::vector<size_t>> unpositioned_;
   };
@@ -3131,7 +3167,9 @@ class YieldFixupMutator : public IRMutator {
   ///
   /// The graph is built once and consumed incrementally: a spill drops only the
   /// spilled copy's own outgoing edges, so the traversal resumes where it stalled
-  /// instead of rebuilding anything, and each cycle costs exactly one spill.
+  /// instead of rebuilding anything, and each cycle costs exactly one spill —
+  /// victims come from the residual graph's strongly connected components, so a
+  /// node merely downstream of a cycle is never spilled.
   ///
   /// Cost is O(k log k + E) in one loop's carry count k: `carry_index` answers each
   /// source with a binary search plus one step per range it actually overlaps, so
@@ -3188,25 +3226,92 @@ class YieldFixupMutator : public IRMutator {
         continue;
       }
 
-      // Nothing is runnable, so the remaining copies sit on or behind a cycle.
-      // Spill one member: its copy then reads a fresh buffer nothing else writes,
-      // which drops its outgoing edges and lets the rest of the cycle proceed.
-      // A blocked node always has an unemitted successor (an emitted one would
-      // mean the edge was already violated), so such a victim exists.
-      size_t victim = count;
-      for (size_t i = 0; i < count; ++i) {
-        if (!emitted[i] && !successors[i].empty()) {
-          victim = i;
-          break;
-        }
+      // Nothing is runnable, so every remaining copy sits on or behind a cycle.
+      // Take victims from the strongly connected components rather than from the
+      // first node that still has an outgoing edge: such a node need not be on a
+      // cycle at all, and spilling one that merely sits downstream of one costs a
+      // scratch buffer without unblocking anything. One victim per component, all
+      // of them in this round, so k/2 independent two-cycles cost a single pass.
+      const std::vector<size_t> victims = CycleVictims(successors, emitted);
+      INTERNAL_CHECK_SPAN(!victims.empty(), (*copies)[0].source->span_)
+          << "Internal error: loop-carry copy ordering stalled with no cycle to break";
+      for (size_t victim : victims) {
+        SpillCarrySource(&(*copies)[victim], spills);
+        release(victim);
+        if (in_degree[victim] == 0 && !emitted[victim]) ready.push_back(victim);
       }
-      INTERNAL_CHECK_SPAN(victim < count, (*copies)[0].source->span_)
-          << "Internal error: loop-carry copy ordering stalled with no cycle member to spill";
-      SpillCarrySource(&(*copies)[victim], spills);
-      release(victim);
-      if (in_degree[victim] == 0) ready.push_back(victim);
     }
     return order;
+  }
+
+  /// One member of every cycle still blocking the emission order.
+  ///
+  /// Tarjan over the unemitted subgraph: a strongly connected component larger
+  /// than one node, or a single node with an edge to itself, is exactly a set of
+  /// copies that cannot be ordered among themselves. Everything else Kahn can
+  /// still drain once those are broken, so nodes that merely sit downstream of a
+  /// cycle are left alone and cost no scratch buffer.
+  ///
+  /// Runs in O(k + E) over the residual graph, once per stall.
+  static std::vector<size_t> CycleVictims(const std::vector<std::vector<size_t>>& successors,
+                                          const std::vector<bool>& emitted) {
+    const size_t count = successors.size();
+    constexpr size_t kUnvisited = std::numeric_limits<size_t>::max();
+    std::vector<size_t> index(count, kUnvisited);
+    std::vector<size_t> lowlink(count, 0);
+    std::vector<size_t> component_stack;
+    std::vector<bool> on_stack(count, false);
+    std::vector<size_t> victims;
+    size_t next_index = 0;
+
+    for (size_t root = 0; root < count; ++root) {
+      if (emitted[root] || index[root] != kUnvisited) continue;
+      index[root] = lowlink[root] = next_index++;
+      component_stack.push_back(root);
+      on_stack[root] = true;
+      std::vector<std::pair<size_t, size_t>> frames{{root, size_t{0}}};
+
+      while (!frames.empty()) {
+        // Re-read the frame each step: descending can reallocate the vector.
+        const size_t node = frames.back().first;
+        if (frames.back().second < successors[node].size()) {
+          const size_t next = successors[node][frames.back().second++];
+          if (emitted[next]) continue;
+          if (index[next] == kUnvisited) {
+            index[next] = lowlink[next] = next_index++;
+            component_stack.push_back(next);
+            on_stack[next] = true;
+            frames.emplace_back(next, size_t{0});
+          } else if (on_stack[next]) {
+            lowlink[node] = std::min(lowlink[node], index[next]);
+          }
+          continue;
+        }
+
+        if (lowlink[node] == index[node]) {
+          std::vector<size_t> component;
+          while (true) {
+            const size_t member = component_stack.back();
+            component_stack.pop_back();
+            on_stack[member] = false;
+            component.push_back(member);
+            if (member == node) break;
+          }
+          const bool has_self_edge =
+              std::find(successors[node].begin(), successors[node].end(), node) != successors[node].end();
+          if (component.size() > 1 || has_self_edge) {
+            victims.push_back(*std::min_element(component.begin(), component.end()));
+          }
+        }
+
+        frames.pop_back();
+        if (!frames.empty()) {
+          const size_t parent = frames.back().first;
+          lowlink[parent] = std::min(lowlink[parent], lowlink[node]);
+        }
+      }
+    }
+    return victims;
   }
 
   /// Redirect one carry copy through a fresh scratch buffer, so the copy no
@@ -3285,13 +3390,15 @@ class YieldFixupMutator : public IRMutator {
       if (!init_tile) continue;
       auto init_memref = GetDefinedMemRef(init_tile);
 
-      // Patch iter_arg if its MemRef differs from initValue's. SameByteRange, not
-      // SameAllocation: an iter_arg left on a sibling slot of one multi-slot
-      // allocation is a different buffer and still has to be re-pointed.
+      // Patch iter_arg if its MemRef differs from initValue's. Addresses, not
+      // allocations: an iter_arg left on a sibling slot of one multi-slot
+      // allocation is a different buffer and still has to be re-pointed. These two
+      // sites only retype a node, they never move data, so an unprovable symbolic
+      // pair is left alone rather than rejected.
       auto ia_tile = As<TileType>(for_stmt->iter_args_[i]->GetType());
       if (ia_tile && ia_tile->memref_.has_value()) {
         auto ia_memref = GetDefinedMemRef(ia_tile);
-        if (!SameBaseAddress(ia_memref, init_memref)) {
+        if (CompareBaseAddress(ia_memref, init_memref) == AddressRelation::kDifferent) {
           auto new_ia_type = CloneTypeWithMemRefAndRemapExprs(
               ia_tile, init_memref, [this](const ExprPtr& expr) { return VisitExpr(expr); },
               init_tile->GetMemorySpace());
@@ -3313,7 +3420,7 @@ class YieldFixupMutator : public IRMutator {
       auto rv_tile = As<TileType>(new_return_vars[i]->GetType());
       if (!rv_tile || !rv_tile->memref_.has_value()) continue;
       auto rv_memref = GetDefinedMemRef(rv_tile);
-      if (!SameBaseAddress(rv_memref, yield_memref)) {
+      if (CompareBaseAddress(rv_memref, yield_memref) == AddressRelation::kDifferent) {
         auto new_rv_type = CloneTypeWithMemRefAndRemapExprs(
             rv_tile, yield_memref, [this](const ExprPtr& expr) { return VisitExpr(expr); },
             yield_tile->GetMemorySpace());
