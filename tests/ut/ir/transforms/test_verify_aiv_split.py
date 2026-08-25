@@ -51,6 +51,15 @@ node:
       store offsets, so only there does an already-per-lane value get halved and
       offset twice. A ``mode=NONE`` region rewrites nothing and MAY consume a
       boundary result from elsewhere — the cross-core comm-kernel shape.
+  (k) a function does not mix a no-split crossing with a split one. Every
+      ``pl.aiv_shard`` / ``pl.aic_gather`` in one function rides ONE logical
+      cross-core pipe (both directions included), and pto-isa bakes
+      split-vs-no-split into that pipe's type rather than into each transfer.
+      Two DIFFERENT split axes are fine — ``UP_DOWN`` beside ``LEFT_RIGHT``
+      shares the pipe, since the axis IS per-transfer — so the rule is drawn
+      between ``SplitMode.NONE`` and everything else, exactly where PTOAS draws
+      it. Keyed on the boundary ops, not the region modes: a region carrying no
+      crossing contributes no transport and may keep any mode.
 
 Lane-sharding of once-only side effects (``pld.system.notify``) is deliberately
 NOT a check — see the comment above
@@ -1400,6 +1409,113 @@ def test_boundary_consumed_in_defining_region_passes():
 
 
 # ---------------------------------------------------------------------------
+# (k) One function, one cross-core pipe -> one transport class
+#
+# The rule is NOT "sibling regions must share a mode". PTOAS partitions the pipe
+# between split = 0 and split != 0, because pto-isa carries no-split as a
+# parameter of the pipe TYPE (``TPipe<..., IsNoSplit, ...>``) while the split
+# AXIS is a per-transfer template argument of ``TALLOC`` / ``TPUSH`` / ``TPOP``.
+# So the pairs below mirror what PTOAS accepts, axis for axis.
+# ---------------------------------------------------------------------------
+
+
+def _shard_in(span, mode, name):
+    """A region of ``mode`` holding one ``aiv_shard`` at that mode.
+
+    Distinct ``name`` per call so two regions do not bind the same Var — the
+    shard result is unused here, since (k) is about the CROSSING, not about who
+    reads it.
+    """
+    data = ir.Var(name + "_acc", _tile([16, 128], mem=MS.Acc), span)
+    shard = T.aiv_shard(data, split=int(mode.value), span=span)
+    return _region(mode, [ir.AssignStmt(ir.Var(name, shard.type, span), shard, span)])
+
+
+def test_nosplit_and_split_crossings_in_one_function_fail():
+    """A NONE crossing beside an UP_DOWN one: one pipe cannot carry both."""
+    span = ir.Span.unknown()
+    program = _program(
+        ir.SeqStmts(
+            [_shard_in(span, ir.SplitMode.NONE, "a"), _shard_in(span, ir.SplitMode.UP_DOWN, "b")], span
+        )
+    )
+
+    errors = _errors(program)
+    assert len(errors) == 1
+    assert errors[0].rule_name == "AivSplitValid"
+    assert "SINGLE logical cross-core pipe" in errors[0].message
+    # Both ends are named, so the author can find the other crossing.
+    assert "pl.SplitMode.NONE" in errors[0].message
+    assert "pl.SplitMode.UP_DOWN" in errors[0].message
+
+
+def test_two_different_split_axes_in_one_function_pass():
+    """The negative that keeps (k) from overreaching into "same mode everywhere".
+
+    UP_DOWN beside LEFT_RIGHT compiles through PTOAS today: the two transfers
+    carry their own ``TileSplitAxis``, and the pipe they share only has to agree
+    that it IS split. If this ever starts failing, (k) has been widened past the
+    constraint it exists to state.
+    """
+    span = ir.Span.unknown()
+    program = _program(
+        ir.SeqStmts(
+            [_shard_in(span, ir.SplitMode.UP_DOWN, "a"), _shard_in(span, ir.SplitMode.LEFT_RIGHT, "b")],
+            span,
+        )
+    )
+
+    assert _errors(program) == []
+
+
+def test_two_nosplit_crossings_in_one_function_pass():
+    """The other plain negative: two NONE crossings agree on the no-split pipe."""
+    span = ir.Span.unknown()
+    program = _program(
+        ir.SeqStmts([_shard_in(span, ir.SplitMode.NONE, "a"), _shard_in(span, ir.SplitMode.NONE, "b")], span)
+    )
+
+    assert _errors(program) == []
+
+
+def test_region_without_a_crossing_keeps_any_mode():
+    """(k) is keyed on the boundary ops, not on the region modes.
+
+    A NONE region doing plain vector work next to an UP_DOWN region that DOES
+    cross contributes nothing to the pipe — this is the comm-kernel shape (a
+    NONE region pinning ``pld.system.notify`` to the vector lane), and a
+    region-mode-keyed check would reject it.
+    """
+    span = ir.Span.unknown()
+    data = ir.Var("d", _tile([16, 128]), span)
+    add = T.add(data, data, span)
+    plain = _region(ir.SplitMode.NONE, [ir.AssignStmt(ir.Var("res", add.type, span), add, span)])
+    program = _program(ir.SeqStmts([_shard_in(span, ir.SplitMode.UP_DOWN, "a"), plain], span))
+
+    assert _errors(program) == []
+
+
+def test_crossing_directions_share_one_pipe():
+    """C->V and V->C are not separate pipes: one initialize_pipe carries both.
+
+    ``BuildAutomaticPipeSetup`` emits a single ``initialize_pipe`` per side with
+    a combined ``dir_mask``, so a ``pl.aic_gather`` under NONE conflicts with a
+    ``pl.aiv_shard`` under UP_DOWN exactly as two shards would.
+    """
+    span = ir.Span.unknown()
+    vec = ir.Var("v", _tile([16, 128], mem=MS.Vec), span)
+    gather = T.aic_gather(vec, split=int(ir.SplitMode.NONE.value), span=span)
+    gather_region = _region(ir.SplitMode.NONE, [ir.AssignStmt(ir.Var("g", gather.type, span), gather, span)])
+    program = _program(ir.SeqStmts([_shard_in(span, ir.SplitMode.UP_DOWN, "a"), gather_region], span))
+
+    errors = _errors(program)
+    assert len(errors) == 1
+    assert "SINGLE logical cross-core pipe" in errors[0].message
+    assert "pl.aic_gather" in errors[0].message
+    assert "pl.aiv_shard" in errors[0].message
+
+
+# ---------------------------------------------------------------------------
 # (i) / (j) at the DSL level.
 #
 # The hand-built fixtures above would all pass even if the checks never fired on
@@ -1512,6 +1628,60 @@ def test_dsl_shard_produced_and_consumed_in_one_iteration_passes():
         ssa = passes.convert_to_ssa()(Prog)
 
     assert _errors(ssa) == []
+
+
+def test_dsl_nosplit_and_split_regions_fail():
+    """(k) at the DSL level: the shape that used to reach PTOAS.
+
+    A full-width phase and a row-split one, each naming its own crossing — the
+    natural decomposition when one phase's reduction cannot be column-split. It
+    parses, lowers, and used to fail only in the backend, at
+    ``'pto.initialize_l2g2l_pipe' op cannot mix 'split = 0' with 'split = 1'``,
+    naming an op the author never wrote.
+    """
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            a: pl.Tensor[[512, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+        ) -> pl.Tensor[[512, 128], pl.FP32]:
+            for _p in pl.split_aiv(2, mode=pl.SplitMode.NONE):  # noqa: B007
+                full = pl.aiv_shard(a)
+                e0 = pl.exp(full)  # noqa: F841
+            for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):  # noqa: B007
+                half = pl.aiv_shard(a)
+                e1 = pl.exp(half)  # noqa: F841
+            return out
+
+    errors = _errors(Prog)
+    assert len(errors) == 1
+    assert errors[0].rule_name == "AivSplitValid"
+    assert "SINGLE logical cross-core pipe" in errors[0].message
+
+
+def test_dsl_up_down_and_left_right_regions_pass():
+    """The DSL negative for (k): two axes, one split pipe, accepted by PTOAS."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            a: pl.Tensor[[512, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+        ) -> pl.Tensor[[512, 128], pl.FP32]:
+            for _r in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):  # noqa: B007
+                rows = pl.aiv_shard(a)
+                e0 = pl.exp(rows)  # noqa: F841
+            for _c in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):  # noqa: B007
+                cols = pl.aiv_shard(a)
+                e1 = pl.exp(cols)  # noqa: F841
+            return out
+
+    assert _errors(Prog) == []
 
 
 if __name__ == "__main__":

@@ -181,6 +181,34 @@ wrapping it changes the text and not the execution. Cube ops and barriers stay o
 
 A function with **no** `pl.split_aiv` at all is unaffected — write it exactly as before.
 
+**Every crossing in one function must agree on split-vs-no-split.** All the
+`pl.aiv_shard` / `pl.aic_gather` calls in a function ride a single cross-core pipe, and the
+hardware fixes that pipe as either split or un-split for its whole lifetime. So a
+`mode=NONE` region that crosses the boundary cannot sit beside an `UP_DOWN` or `LEFT_RIGHT`
+region that also crosses it:
+
+```python
+for _ in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+    a = pl.exp(pl.aiv_shard(mm0))         # crossing, no split
+for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+    b = pl.exp(pl.aiv_shard(mm1))         # crossing, split      -> rejected
+```
+
+Two **different** split axes are fine, because the axis is chosen per transfer — only
+split-vs-no-split belongs to the pipe:
+
+```python
+for r in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+    a = pl.exp(pl.aiv_shard(mm0))
+for c in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
+    b = pl.exp(pl.aiv_shard(mm1))         # accepted
+```
+
+A region that carries **no** crossing is free to use any mode — the `mode=NONE` region that
+only pins a `pld.system.notify` to the vector lane never touches the pipe. When two phases
+genuinely need different transports, put them in separate `pl.at(level=pl.Level.CORE_GROUP)`
+scopes: each becomes its own function, and so gets its own pipe.
+
 ### Name every tile that crosses a region edge
 
 **Once a function opens a region, a tile crossing a region edge must say so.** The
@@ -361,6 +389,7 @@ pl.system.sync_wait(0, pipe=pl.PipeType.MTE2, core_type=pl.KernelType.AIC)    # 
 | **`cube op '...' inside a pl.split_aiv region`** | A region body is AIV work | Move the `pl.matmul` out of the region |
 | **`'x' is produced on the CUBE lane ... reads it on the VECTOR lane inside one`** | An unnamed C->V crossing into a region | Read it as `pl.aiv_shard(x)` at the top of the region |
 | **`'x' is defined inside a pl.split_aiv region but ... reads it on the CUBE lane outside`** | An unnamed V->C crossing out of a region | Gather it inside the region: `x = pl.aic_gather(x)` |
+| **`'pl.aiv_shard' crosses the AIC/AIV boundary under ... but ... earlier in this function crosses it under ...`** | One function's crossings mix `mode=NONE` with a split mode; they share one cross-core pipe | Make every crossing agree on split-vs-no-split, drop the crossing from one region, or split the phases into separate `pl.at(level=pl.Level.CORE_GROUP)` scopes |
 | **The cube reads one lane's value at random** | A V->C crossing out of a `mode=NONE` region — both lanes push, one shared slot, no arbitration, **not diagnosed** | Gather only a lane-uniform value; use a data-parallel region if the lanes hold different halves |
 | **A peer's signal counter reads twice what it should** | Both AIV lanes ran the same `pld.system.notify` — **not diagnosed** | Shard the notify by `aiv_id`, or guard it with `if aiv_id == 0:` |
 | **A rank reads stale data after its `pld.system.wait` returns** | Either the double-notify above, or an incomplete cache-publication/fence/barrier/invalidation sequence between the cube and vector phases | Shard the notify; add the full GM handoff sequence |

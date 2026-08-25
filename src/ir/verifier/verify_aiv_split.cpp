@@ -110,6 +110,39 @@ bool IsBoundaryOp(const CallPtr& op) {
 
 bool IsGatherOp(const CallPtr& op) { return IsOp(op, "tile.aic_gather") || IsOp(op, "tensor.aic_gather"); }
 
+/// Every diagnostic this verifier raises goes through here, whether it comes
+/// from the per-node walk or from a whole-function check reported outside it,
+/// so the rule name and severity have one definition.
+void AddError(std::vector<Diagnostic>& diagnostics, const Span& span, const std::string& message) {
+  diagnostics.emplace_back(DiagnosticSeverity::Error, "AivSplitValid", 0, message, span);
+}
+
+/// The DSL spelling of a split code, for a diagnostic an author can act on
+/// (``SplitModeToString`` gives the C++ enumerator, which is not what anyone
+/// types). Falls back to the raw code instead of throwing on an out-of-range
+/// one: a verifier reports on malformed IR, it does not add a failure of its
+/// own on top of it.
+std::string SplitModeDslName(int split_code) {
+  if (IsValidSplitCode(split_code)) {
+    switch (SplitModeFromSplitCode(split_code)) {
+      case SplitMode::None:
+        return "pl.SplitMode.NONE";
+      case SplitMode::UpDown:
+        return "pl.SplitMode.UP_DOWN";
+      case SplitMode::LeftRight:
+        return "pl.SplitMode.LEFT_RIGHT";
+    }
+  }
+  return "split=" + std::to_string(split_code);
+}
+
+/// " (at file:line:col)" when the span carries a source location, else empty.
+/// Check (k) names BOTH ends of a conflict and only one of them can own the
+/// diagnostic's own span, so the other has to be spelled out in the text.
+std::string AtSpanSuffix(const Span& span) {
+  return span.is_valid() ? " (at " + span.to_string() + ")" : std::string();
+}
+
 /// Where a Var was bound, for the region-edge crossing checks.
 struct ValueDef {
   CallPtr call;  ///< the defining call (null when the binding is not a Call)
@@ -185,6 +218,18 @@ core_affinity::CoreAffinity ConsumerLane(const CallPtr& op) {
   }
 }
 
+/// One cross-core transport a boundary op contributes, for check (k). `split`
+/// is the op's authored ``split`` kwarg — the SplitMode int ExpandMixedKernel
+/// turns into the pto split code on the tpush/tpop/tfree triple, and the value
+/// PTOAS then classifies as no-split (0) or split (non-zero).
+struct BoundaryTransport {
+  CallPtr call;  ///< the boundary op; null when no op of this class was seen
+  int split = kSplitNone;
+  size_t order = 0;  ///< scan position, so the diagnostic lands on the SECOND one
+
+  [[nodiscard]] bool seen() const { return call != nullptr; }
+};
+
 /// Function-level facts the per-node checks need but cannot read off a single
 /// node.
 struct FunctionSplitFacts {
@@ -197,6 +242,12 @@ struct FunctionSplitFacts {
   /// param, an IterArg or a loop return var has no defining call, and a check
   /// that cannot see how a value was produced must stay silent about it.
   std::unordered_map<const Var*, ValueDef> defs;
+  /// The first boundary op of each transport class, for check (k). Only the
+  /// first of each is kept: the check is "are both classes present", and one
+  /// diagnostic naming one representative of each is the report — one per
+  /// offending op would be noise, since they all ride the same pipe.
+  BoundaryTransport first_nosplit;
+  BoundaryTransport first_split;
 };
 
 /// Single pre-pass over one function body collecting `FunctionSplitFacts`.
@@ -222,15 +273,83 @@ class FunctionSplitFactScanner : public IRVisitor {
     IRVisitor::VisitStmt_(op);
   }
 
+  void VisitExpr_(const CallPtr& op) override {
+    RecordBoundaryTransport(op);
+    IRVisitor::VisitExpr_(op);
+  }
+
   [[nodiscard]] const FunctionSplitFacts& facts() const { return facts_; }
 
  private:
+  /// Classify one boundary op into its transport class, for check (k).
+  ///
+  /// Keyed on the op's OWN ``split`` kwarg rather than on the enclosing
+  /// region's mode, because the kwarg is what actually reaches the pipe: the
+  /// parser stamps it from the innermost ``pl.split_aiv`` mode (so nesting
+  /// resolves for free), the outlined ``pl.tile.aiv_shard(t, split=N)`` form
+  /// carries it with no region at all, and a region holding no boundary op
+  /// contributes no transport — which the kwarg reading gets right without a
+  /// separate "does this region transport anything" gate.
+  ///
+  /// A boundary op with NO ``split`` kwarg is malformed IR, not a no-split
+  /// transport: reading the missing key as 0 would invent one and report a mix
+  /// that is not there. Every front end stamps it (ast_parser's two surface
+  /// forms, LowerAutoVectorSplit's MakeReshapeOpCall, and the 1:1
+  /// tensor -> tile conversion that forwards it), so skipping costs nothing.
+  void RecordBoundaryTransport(const CallPtr& op) {
+    if (!op || !op->op_ || !IsBoundaryOp(op) || !op->HasKwarg("split")) return;
+    const int split = op->GetKwarg<int>("split", kSplitNone);
+    BoundaryTransport& slot = (split == kSplitNone) ? facts_.first_nosplit : facts_.first_split;
+    if (!slot.seen()) slot = BoundaryTransport{op, split, boundary_order_};
+    ++boundary_order_;
+  }
+
   FunctionSplitFacts facts_;
+  /// Position of the next boundary op in the scan, so check (k) can report on
+  /// the one that INTRODUCES the mix rather than on whichever it stored first.
+  size_t boundary_order_ = 0;
   /// Innermost enclosing region, or null at top level. Replaces a plain depth
   /// counter: nesting still resolves to "the region this binding is in", which
   /// is what ValueDef::region records.
   const SplitAivScopeStmt* cur_region_ = nullptr;
 };
+
+/// (k) One function, one cross-core pipe -- so one transport class.
+///
+/// Reported here rather than from the per-node walk because it is a
+/// whole-function fact: the two offending ops are legal individually and only
+/// their coexistence is the error, so there is no single node to hang it on.
+/// Check (e) is function-gated for the same reason, and shares the same
+/// assumption -- one region-bearing function is one outlined InCore function is
+/// one pipe. That holds across this property's whole verification window, which
+/// opens only once OutlineIncoreScopes has lifted each CORE_GROUP scope into
+/// its own function.
+void CheckSingleTransportClass(const FunctionSplitFacts& facts, std::vector<Diagnostic>& diagnostics) {
+  if (!facts.first_nosplit.seen() || !facts.first_split.seen()) return;
+  // Report on the op that ARRIVES second: everything before it is consistent
+  // with itself, so that is the crossing whose mode has to give.
+  const bool nosplit_is_later = facts.first_nosplit.order > facts.first_split.order;
+  const BoundaryTransport& late = nosplit_is_later ? facts.first_nosplit : facts.first_split;
+  const BoundaryTransport& early = nosplit_is_later ? facts.first_split : facts.first_nosplit;
+
+  AddError(diagnostics, late.call->span_,
+           "'" + BoundaryOpDslName(late.call) + "' crosses the AIC/AIV boundary under " +
+               SplitModeDslName(late.split) + ", but '" + BoundaryOpDslName(early.call) +
+               "' earlier in this function crosses it under " + SplitModeDslName(early.split) +
+               AtSpanSuffix(early.call->span_) +
+               ". Every pl.aiv_shard / pl.aic_gather in one function rides a SINGLE logical "
+               "cross-core pipe (one initialize_pipe per side, both directions on the same pipe), "
+               "and the ISA bakes split-vs-no-split into that pipe's TYPE rather than into each "
+               "transfer, so one pipe runs either the no-split protocol or the split one and never "
+               "both. Two DIFFERENT split axes are fine -- pl.SplitMode.UP_DOWN beside "
+               "pl.SplitMode.LEFT_RIGHT shares the pipe, because the split AXIS is per-transfer. "
+               "Fix it one of three ways: (1) give this crossing a split mode too (or give the "
+               "other one pl.SplitMode.NONE) so every crossing in the function agrees on "
+               "split-vs-no-split; (2) drop the crossing from one of the two regions -- a region "
+               "with no pl.aiv_shard / pl.aic_gather contributes no transport and may keep any "
+               "mode; or (3) split the phases into separate CORE_GROUP scopes, which outline into "
+               "separate functions and so get a pipe each.");
+}
 
 // Structural verifier for the first-class SplitAivScopeStmt region (live between
 // OutlineIncoreScopes and LowerAutoVectorSplit). It keys every check on the node
@@ -320,6 +439,21 @@ class FunctionSplitFactScanner : public IRVisitor {
 //       Keyed on the DEFINITION being a boundary op, not on the value being
 //       per-lane: a per-lane value one op removed from the boundary is legal and
 //       shipped (see the note on CheckBoundaryRegionLocality).
+//
+//   (k) A function must not mix a no-split crossing with a split one. Every
+//       pl.aiv_shard / pl.aic_gather in one function rides ONE logical
+//       cross-core pipe -- BuildAutomaticPipeSetup emits a single
+//       initialize_pipe per side, with a combined dir_mask, so both directions
+//       share it too -- and pto-isa bakes split-vs-no-split into that pipe's
+//       TYPE (the IsNoSplit parameter of TPipe<...>), not into each transfer.
+//       One pipe therefore runs the no-split protocol or the split one for its
+//       whole lifetime, and PTOAS rejects the mix at
+//       'pto.initialize_l2g2l_pipe', naming an internal op the author never
+//       wrote. The split AXIS is genuinely per-transfer (TALLOC / TPUSH / TPOP
+//       take TileSplitAxis as their own template argument), so UP_DOWN beside
+//       LEFT_RIGHT shares one pipe and is NOT rejected -- the split is between
+//       SplitMode::None and everything else, exactly as PTOAS partitions it.
+//       Reported once per function, on the later of the two offending ops.
 //
 // (f) and (g) are the point of manual mode. BOTH crossings already lower without
 // them: the compiler happily emits tpush/tpop(split=0) for an implicit crossing
@@ -751,9 +885,7 @@ class SplitAivStructuralVerifier : public IRVisitor {
     return BoundaryDefOfIn(expr, facts_.defs);
   }
 
-  void Err(const Span& span, const std::string& message) {
-    diagnostics_.emplace_back(DiagnosticSeverity::Error, "AivSplitValid", 0, message, span);
-  }
+  void Err(const Span& span, const std::string& message) { AddError(diagnostics_, span, message); }
 
   std::vector<Diagnostic>& diagnostics_;
   /// Whole-function facts for checks (e), (f) and (g). Held by reference — the
@@ -794,6 +926,9 @@ class AivSplitValidPropertyVerifierImpl : public PropertyVerifier {
       // the body can still establish.
       FunctionSplitFactScanner scanner;
       scanner.VisitStmt(func->body_);
+      // (k) is a whole-function fact -- one pipe per function -- so it is
+      // reported once here rather than from the per-node walk below.
+      CheckSingleTransportClass(scanner.facts(), diagnostics);
       // ``kAttrSplitAiv`` (function.h) is the provenance signal for check (h):
       // ScopeOutliner stamps it when it outlines a scope holding pl.split_aiv
       // regions, and LowerAutoVectorSplit re-stamps it on the lowered result.

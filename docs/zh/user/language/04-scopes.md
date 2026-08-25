@@ -163,6 +163,31 @@ with pl.at(level=pl.Level.CORE_GROUP):
 
 完全**没有** `pl.split_aiv` 的函数不受影响 —— 按原来的写法写即可。
 
+**同一函数内的所有跨越必须在 split / no-split 上取得一致。** 函数里所有 `pl.aiv_shard` /
+`pl.aic_gather` 都跑在同一条跨核 pipe 上，而硬件在这条 pipe 的整个生命周期内把它固定为
+split 或 no-split 之一。因此，一个会跨越边界的 `mode=NONE` 区域，不能与同样会跨越边界的
+`UP_DOWN` 或 `LEFT_RIGHT` 区域并存：
+
+```python
+for _ in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+    a = pl.exp(pl.aiv_shard(mm0))         # 跨越，不切分
+for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+    b = pl.exp(pl.aiv_shard(mm1))         # 跨越，切分       -> 被拒绝
+```
+
+两种**不同**的切分轴则没有问题：轴是逐次传输选择的，只有 split / no-split 属于 pipe：
+
+```python
+for r in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+    a = pl.exp(pl.aiv_shard(mm0))
+for c in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
+    b = pl.exp(pl.aiv_shard(mm1))         # 接受
+```
+
+**不含**任何跨越的区域可以使用任意模式 —— 只用来把 `pld.system.notify` 钉在向量 lane 上的
+`mode=NONE` 区域根本不碰这条 pipe。当两个阶段确实需要不同的传输方式时，把它们放进各自的
+`pl.at(level=pl.Level.CORE_GROUP)` scope：每个 scope 会成为独立的函数，从而各得一条 pipe。
+
 ### 每一个跨区域边界的 tile 都要写明
 
 **只要函数开了区域，跨越区域边界的 tile 就必须写明。** 手动模式下两核之间的边界由你放置，
@@ -323,6 +348,7 @@ pl.system.sync_wait(0, pipe=pl.PipeType.MTE2, core_type=pl.KernelType.AIC)    # 
 | **`cube op '...' inside a pl.split_aiv region`** | 区域体是 AIV 的工作 | 把 `pl.matmul` 移出区域 |
 | **`'x' is produced on the CUBE lane ... reads it on the VECTOR lane inside one`** | 未写明的 C->V 跨越（进入区域） | 在区域开头以 `pl.aiv_shard(x)` 读取 |
 | **`'x' is defined inside a pl.split_aiv region but ... reads it on the CUBE lane outside`** | 未写明的 V->C 跨越（离开区域） | 在区域内 gather：`x = pl.aic_gather(x)` |
+| **`'pl.aiv_shard' crosses the AIC/AIV boundary under ... but ... earlier in this function crosses it under ...`** | 同一函数的跨越混用了 `mode=NONE` 与切分模式，而它们共用一条跨核 pipe | 让所有跨越在 split / no-split 上一致，或去掉其中一个区域的跨越，或把两个阶段拆进各自的 `pl.at(level=pl.Level.CORE_GROUP)` scope |
 | **cube 随机读到其中一条 lane 的值** | 从 `mode=NONE` 区域向外的 V->C 跨越 —— 两条 lane 都 push、共用一个槽位、无仲裁，**不会有诊断** | 只 gather lane-uniform 的值；若两条 lane 持有不同的半块，请改用数据并行区域 |
 | **对端的信号计数器读到的值是应有值的两倍** | 两条 AIV lane 都执行了同一条 `pld.system.notify` —— **不会有诊断** | 按 `aiv_id` 分片该 notify，或用 `if aiv_id == 0:` 限定 |
 | **某个 rank 的 `pld.system.wait` 返回后读到过期数据** | 要么是上面的重复 notify，要么是 cube 与 vector 阶段之间的 cache 发布 / fence / barrier / 失效序列不完整 | 分片该 notify；补全 GM 交接序列 |
