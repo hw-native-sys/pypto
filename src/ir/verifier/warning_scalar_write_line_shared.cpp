@@ -271,11 +271,16 @@ LineVerdict Classify(const InstAffine& offset, int64_t elem_bytes, int64_t* stri
   }
 
   int64_t min_stride = 0;
+  bool every_stride_aligned = true;
   for (size_t d = 0; d < kMaxInstanceDims; ++d) {
     if (offset.coef[d] == 0) continue;
     int64_t stride = 0;
     if (MulOverflows(offset.coef[d], elem_bytes, &stride)) return LineVerdict::Indeterminate;
     if (stride < 0) stride = -stride;
+    // EVERY dimension must step by whole lines. Checking only the smallest
+    // would call `g*16 + h*17` (INT32: strides 64 and 68) disjoint, even though
+    // (g=1,h=0) at byte 64 and (g=0,h=1) at byte 68 land in the same line.
+    if (stride % kCacheLineBytes != 0) every_stride_aligned = false;
     if (min_stride == 0 || stride < min_stride) min_stride = stride;
   }
 
@@ -286,7 +291,7 @@ LineVerdict Classify(const InstAffine& offset, int64_t elem_bytes, int64_t* stri
   if (min_stride == 0) return LineVerdict::Indeterminate;
 
   *stride_out = min_stride;
-  if (min_stride % kCacheLineBytes != 0) return LineVerdict::Interleaved;
+  if (!every_stride_aligned) return LineVerdict::Interleaved;
   if (span > min_stride) return LineVerdict::Interleaved;
   if (base % kCacheLineBytes != 0) return LineVerdict::Interleaved;
   return LineVerdict::Disjoint;
@@ -410,7 +415,7 @@ class ScalarWriteVisitor : public IRVisitor {
   void VisitStmt_(const SpmdScopeStmtPtr& op) override {
     auto core_num = As<ConstInt>(op->core_num_);
     const bool multi = !(core_num && core_num->value_ == 1);
-    const size_t mark = scope_local_.size();
+    const size_t mark = scope_local_stack_.size();
     if (multi) {
       const std::string count = core_num ? std::to_string(core_num->value_) : "a runtime number of";
       PushInstanceDim(
@@ -425,7 +430,7 @@ class ScalarWriteVisitor : public IRVisitor {
 
   void VisitStmt_(const ForStmtPtr& op) override {
     const bool multi = op->kind_ == ForKind::Parallel;
-    const size_t mark = scope_local_.size();
+    const size_t mark = scope_local_stack_.size();
     if (multi) {
       auto stop = As<ConstInt>(op->stop_);
       const std::string count = stop ? std::to_string(stop->value_) : "a runtime number of";
@@ -437,7 +442,6 @@ class ScalarWriteVisitor : public IRVisitor {
       // pushed; a sequential one inherits its range from start/stop.
       bindings_[op->loop_var_.get()] =
           multi ? InstAffine::Instance(instance_dims_ - 1) : SequentialLoopVarModel(op);
-      NoteScopeLocal(op->loop_var_.get());
     }
     IRVisitor::VisitStmt_(op);
     TrimScopeLocals(mark);
@@ -450,7 +454,11 @@ class ScalarWriteVisitor : public IRVisitor {
     // The value is modelled BEFORE the LHS is bound: an assignment's RHS cannot
     // read the name it defines (the IR is use-after-def even pre-SSA).
     bindings_[op->var_.get()] = Eval(op->value_);
-    NoteScopeLocal(op->var_.get());
+    // Only an allocation made inside the scope is instance-private. Binding the
+    // definition site instead would let an ordinary alias of an external tensor
+    // (`alias = out`, or the `out = pl.write(out, ...)` rebind form) suppress
+    // the warning for the very corruption this check exists to find.
+    if (IsInstancePrivateAllocation(op->value_)) NoteScopeLocal(op->var_.get());
   }
 
   void VisitExpr_(const CallPtr& op) override {
@@ -586,23 +594,38 @@ class ScalarWriteVisitor : public IRVisitor {
     contexts_.pop_back();
   }
 
+  /// True for a tensor allocated inside the current scope: each instance runs
+  /// its own copy, so no other instance can observe writes to it.
+  [[nodiscard]] static bool IsInstancePrivateAllocation(const ExprPtr& value) {
+    auto call = As<Call>(value);
+    return call && (IsOp(call, "tensor.create") || IsOp(call, "tensor.full"));
+  }
+
   void NoteScopeLocal(const Var* v) {
-    if (!contexts_.empty()) scope_local_.push_back(v);
+    if (contexts_.empty()) return;
+    scope_local_stack_.push_back(v);
+    scope_local_set_.insert(v);
   }
 
   [[nodiscard]] bool IsScopeLocal(const Var* v) const {
-    return std::find(scope_local_.begin(), scope_local_.end(), v) != scope_local_.end();
+    // O(1). A linear scan here would make the whole check O(N^2) on a scope
+    // holding many allocations (see .claude/rules/pass-complexity.md).
+    return scope_local_set_.find(v) != scope_local_set_.end();
   }
 
   void TrimScopeLocals(size_t mark) {
-    while (scope_local_.size() > mark) scope_local_.pop_back();
+    while (scope_local_stack_.size() > mark) {
+      scope_local_set_.erase(scope_local_stack_.back());
+      scope_local_stack_.pop_back();
+    }
   }
 
   size_t instance_dims_ = 0;
   size_t unmodelled_dims_ = 0;  ///< Instance scopes past the tracking limit.
   std::vector<size_t> spmd_dim_stack_;
   std::vector<Context> contexts_;
-  std::vector<const Var*> scope_local_;
+  std::vector<const Var*> scope_local_stack_;
+  std::unordered_set<const Var*> scope_local_set_;
   std::unordered_map<const Var*, InstAffine> bindings_;
 };
 

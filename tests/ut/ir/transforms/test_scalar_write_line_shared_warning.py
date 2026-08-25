@@ -283,6 +283,26 @@ class TestNotApplicable:
 
         assert _warnings(Prog) == []
 
+    def test_alias_of_an_external_tensor_is_reported(self):
+        """An alias does not make the underlying GM allocation private."""
+
+        @pl.program
+        class Prog:
+            @pl.function
+            def main(
+                self,
+                src: pl.Tensor[[N], pl.INT32],
+                out: pl.Out[pl.Tensor[[N], pl.INT32]],
+            ) -> pl.Tensor[[N], pl.INT32]:
+                with pl.spmd(BLOCKS, name_hint="aliased"):
+                    blk = pl.tile.get_block_idx()
+                    alias = out
+                    for i in pl.range(pl.cast(blk, pl.INDEX), N, BLOCKS):
+                        pl.write(alias, [i], pl.cast(pl.read(src, [i]) + 1, pl.INT32))
+                return out
+
+        assert len(_warnings(Prog)) == 1
+
     def test_hoisted_tensor_is_reported(self):
         """The ``--internal`` variant: a buffer declared outside the scope."""
 
@@ -366,6 +386,52 @@ class TestDtypeWidth:
                     base = pl.cast(blk, pl.INDEX) * 32
                     for i in pl.range(base, base + 32):
                         pl.write(out, [i], pl.read(src, [i]))
+                return out
+
+        assert _warnings(Prog) == []
+
+
+class TestEveryStrideChecked:
+    """Disjointness needs EVERY instance dimension to step by whole lines."""
+
+    def test_one_misaligned_dimension_is_reported(self):
+        """Strides 64 and 68 bytes: the smaller is a line multiple, the other is
+        not, so (g=1,h=0) and (g=0,h=1) land in the same line."""
+
+        @pl.program
+        class Prog:
+            @pl.function
+            def main(
+                self,
+                src: pl.Tensor[[4096], pl.INT32],
+                out: pl.Out[pl.Tensor[[4096], pl.INT32]],
+            ) -> pl.Tensor[[4096], pl.INT32]:
+                for g in pl.parallel(4):
+                    with pl.spmd(4, name_hint="mix"):
+                        h = pl.tile.get_block_idx()
+                        idx = g * 16 + pl.cast(h, pl.INDEX) * 17
+                        pl.write(out, [idx], pl.cast(pl.read(src, [idx]) + 1, pl.INT32))
+                return out
+
+        assert len(_warnings(Prog)) == 1
+
+    def test_both_dimensions_line_aligned_is_silent(self):
+        """Strides 64 and 1024 bytes: both whole multiples of the line."""
+
+        @pl.program
+        class Prog:
+            @pl.function
+            def main(
+                self,
+                src: pl.Tensor[[4096], pl.INT32],
+                out: pl.Out[pl.Tensor[[4096], pl.INT32]],
+            ) -> pl.Tensor[[4096], pl.INT32]:
+                for g in pl.parallel(4):
+                    with pl.spmd(4, name_hint="mix"):
+                        h = pl.tile.get_block_idx()
+                        base = g * 256 + pl.cast(h, pl.INDEX) * 16
+                        for i in pl.range(base, base + 16):
+                            pl.write(out, [i], pl.cast(pl.read(src, [i]) + 1, pl.INT32))
                 return out
 
         assert _warnings(Prog) == []
