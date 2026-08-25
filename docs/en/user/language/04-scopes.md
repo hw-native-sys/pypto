@@ -355,6 +355,7 @@ pl.system.sync_wait(0, pipe=pl.PipeType.MTE2, core_type=pl.KernelType.AIC)    # 
 | ------- | ------------ | --- |
 | **`Misplaced tensor op ... should be inside InCore block`** | Operators sit directly in the `@pl.jit` body | Wrap them in `with pl.at(level=pl.Level.CORE_GROUP):` |
 | **`with pl.spmd(n):` body rejected** | It neither reads the block index nor dispatches a kernel | Read `pl.tile.get_block_idx()`, or call a kernel |
+| **Most `pl.write` stores vanish, a different set each run** | Concurrent instances write different elements of one 64-byte cache line — the line, not the element, is what reaches DDR | Give each instance whole 64-byte lines, or write from `pl.spmd(1)`; see [Memory](03-memory.md#scalar-writes-from-concurrent-task-instances) |
 | **`optimizations=` rejected** | Built up in a variable — the parser reads the AST | Write the list inline at the call site |
 | **Printed IR cannot be reparsed** | A device-size query was bound to a name before use | Write the call inline where it is used |
 | **`vector op '...' sits outside every pl.split_aiv region`** | The function opens a region, so the regions own vector placement | Wrap that phase in `for _ in pl.split_aiv(2, mode=pl.SplitMode.NONE):` |

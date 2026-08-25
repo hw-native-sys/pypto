@@ -210,7 +210,9 @@ void BindPass(nb::module_& m) {
       .value("TileInnermostDimGranularity", DiagnosticCheck::TileInnermostDimGranularity,
              "Tile innermost dim below recommended HW memory-access granularity (PH001)")
       .value("OutParamWriteDropped", DiagnosticCheck::OutParamWriteDropped,
-             "Rebinding an Out/InOut parameter drops the caller's write");
+             "Rebinding an Out/InOut parameter drops the caller's write")
+      .value("ScalarWriteLineShared", DiagnosticCheck::ScalarWriteLineShared,
+             "pl.write from concurrent task instances may share a 64-byte cache line");
 
   // Bind DiagnosticCheckSet
   auto diagnostic_check_set =

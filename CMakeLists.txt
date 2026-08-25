@@ -280,6 +280,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/diagnostic_check_registry.cpp
     src/ir/verifier/warning_unused_var.cpp
     src/ir/verifier/warning_out_param_write_dropped.cpp
+    src/ir/verifier/warning_scalar_write_line_shared.cpp
     src/ir/verifier/perf_hint_tile_innermost_dim.cpp
 
     # IR - Serialization

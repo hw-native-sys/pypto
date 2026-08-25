@@ -109,6 +109,103 @@ DDR ──────────► Vec ────────────�
 
 `offsets` 与 `shape` 是被搬运的那块张量区域 —— 偏移是**张量**内的偏移，shape 是结果 tile 的尺寸。
 
+### 标量元素访问
+
+`pl.read` 与 `pl.write` 按下标访问**张量**的单个元素，中间不经过 tile：
+
+```python
+n = pl.read(counts, [0])                      # 从 DDR 读一个 INT32
+pl.write(plan, [row], pl.cast(v, pl.INT32))   # 往 DDR 写一个 INT32
+```
+
+它走的是与 `pl.load` / `pl.store` **不同的通路**，而不是它们的小号版本：
+
+| 对比项 | `pl.load` / `pl.store` | `pl.read` / `pl.write` |
+| ------ | ---------------------- | ---------------------- |
+| 单位 | 一个 tile | 一个元素 |
+| 到 DDR 的通路 | DMA，直达 | 发起核自己的数据 cache |
+| 真正抵达 DDR 的粒度 | tile 覆盖的字节 | **整条 64 字节 cache line** |
+| 多个核同时写是否安全 | 是 | 仅在下述规则成立时 |
+
+请把它们用于控制值 —— 计数器、偏移、小的描述符表 —— 而不是批量数据。一个 `pl.write` 循环每次只搬一个元素，而一次 `pl.store` 搬的是整个 tile。
+
+### 来自并发任务实例的标量写
+
+一次 `pl.write` 并不会自己抵达 DDR。它落在发起核的数据 cache 里，而该 cache 在 kernel 结束时按**整条 64 字节 line** 写回。不同核的 cache 之间没有任何一致性维护。
+
+于是当两个核写入**恰好落在同一条 64 字节 line 上的不同元素**时，各自都会把自己那份完整的 64 字节写回去 —— 其中只有一个元素是新的，另外 15 个是它从未碰过的陈旧值。最后写回的那个赢下整条 line，另一个核的写就消失了。运行时既不报错也不告警：张量在大多数下标上仍保持旧值，而**哪些**下标幸存每次运行都不一样。
+
+> **致命陷阱：** 两个实例写同一条 64 字节 line 上的*不同*元素，会静默地互相丢失对方的写。下标互不相交**并不够** —— 抵达内存的单位是 line，所以一个实例写回时会连带把它看到的那 15 个相邻元素一并写回，覆盖掉别的实例放在那里的值。
+
+这件事关乎**并发，而不是 `pl.spmd`**。有两种构造会让你的代码以多个实例运行，任意一种都足以踩中：
+
+| 构造 | 实例数 |
+| ---- | ------ |
+| `pl.spmd(n)`，`n > 1` | `n` 个 block，每核一个 |
+| `for g in pl.parallel(n):` | `n` 个可能被运行时重叠执行的任务实例 |
+
+从这两者派发出去的 kernel 会继承这个重数，所以写在 `@pl.function(type=InCore)` 被调函数里的 `pl.write` 同样算数。
+
+**单个实例内部没有这个风险。** 一个实例在一个核上顺序执行自己的函数体，它的写按程序序落进同一个 cache，不存在 line 争用 —— 一个任务内部普通 `pl.range` 循环里的 `pl.write`，无论下标怎么写都是安全的。
+
+**规则：每个实例必须独占完整的 64 字节 line。** 对 `INT32` / `FP32` 是 16 个元素，`FP16` / `BF16` 是 32 个，`INT64` 是 8 个，`INT8` 是 64 个。
+
+```python
+N = 64          # INT32 -> 每条 64 字节 line 放 16 个元素
+
+# 错误 —— 网格跨步：block 0..15 全都写进 out[0:16]，同一条 line
+with pl.spmd(24):
+    blk = pl.tile.get_block_idx()
+    for i in pl.range(pl.cast(blk, pl.INDEX), N, 24):
+        pl.write(out, [i], pl.cast(pl.read(src, [i]) + 1, pl.INT32))
+
+# 正确 —— block b 独占 out[16b : 16b+16]，恰好一条 line
+with pl.spmd(N // 16):
+    blk = pl.tile.get_block_idx()
+    base = pl.cast(blk, pl.INDEX) * 16
+    for i in pl.range(base, base + 16):
+        pl.write(out, [i], pl.cast(pl.read(src, [i]) + 1, pl.INT32))
+```
+
+两段代码都对每个下标恰好写一次、且只由一个 block 写。但只有第二段是对的。
+
+| 你的需求 | 做法 |
+| -------- | ---- |
+| 少量控制值 | `pl.spmd(1)` —— 单个实例在任何布局下都正确 |
+| 每个实例写一段连续区间 | 让这段区间的**大小和起始**都对齐到 64 字节 |
+| 多个实例真正做 scatter | 往清零的张量做 `pl.store(..., atomic=pl.AtomicType.ADD)` —— 走 DMA 通路，是一致的 |
+| 每个实例的部分结果 | 先写到每实例的 scratch 行，之后再用 `pl.spmd(1)` 汇总 |
+
+当编译器无法证明该规则成立时会告警 —— 见下面的 [`ScalarWriteLineShared`](#scalarwritelineshared)。
+
+读同样经过这个 cache，但实践中没有这个风险：只有当另一个实例在**同一个任务内**写过该元素时才可能读到陈旧值，而那本身就已经违反了 `pl.spmd` 与 `pl.parallel` 所断言的独立性。跨任务时该 line 会被 invalidate，下一个任务读到的是新数据。
+
+#### `ScalarWriteLineShared`
+
+对每一个写入"生命周期长于写它的那个实例"的张量的 `pl.write`，编译器会尝试证明每个实例的字节都落在完整的、实例私有的 64 字节 line 上。证明不了的它都会报出来，并区分是哪一种情况。
+
+当下标可分析且布局确实是交错的，它会给出实测的跨步：
+
+```text
+[warning] [ScalarWriteLineShared] pl.write into 'out' from 24 concurrent blocks
+  ('fill_spmd') in function 'main': consecutive blocks write 4 bytes apart, so 16 of
+  them share each 64-byte cache line and their stores overwrite one another. [...]
+  Give each one whole 64-byte lines (16 x INT32), or issue the writes from a single
+  instance (pl.spmd(1)).
+```
+
+当下标根本无法分析 —— 最常见的原因是下标本身是从另一个张量读出来的 —— 它会如实说明，而不去猜：
+
+```text
+[warning] [ScalarWriteLineShared] pl.write into 'out' from 24 concurrent blocks
+  ('moe_route_gather_spmd') in function 'main': the index is computed at runtime, so
+  the compiler cannot tell whether two blocks share a 64-byte cache line. [...]
+```
+
+第二种是常见形态，而且它是一个**问题**而非判决：用运行时下标的代码完全可能是对的。请确认你的各个实例落在 64 字节边界上；如果确实如此，这条告警是在告诉你：正确性依赖于一条没有任何东西强制保证的布局不变量，值得在写入处写一句注释。若要在整次构建中关掉这个检查，把 `ScalarWriteLineShared` 放进 pass context 的 `disabled_diagnostics`。
+
+有两种情况它有意不报，因为判定它们需要此刻还不存在的任务依赖图：两个**不同的**任务写同一个张量，以及被"把实例下标钉死到单个值"的谓词保护起来的写（`if blk == 0:`）。后者会被保守地报出来。
+
 ### 有效形状与填充
 
 某个算子写入的元素可能少于 tile 分配的量 —— 比如某一维最后一块不能整除的部分。`pl.set_validshape` 记录该区域，`pl.fillpad` 用选定的值填充其余部分。
@@ -140,6 +237,7 @@ m = pl.row_max(t)                              # pad value decides what the tail
 | **`pl.load(..., target_memory=pl.Mem.Left)` 被拒绝** | DDR load 只能到 `Vec` / `Mat` | 先 load 到 `Mat`，再 `pl.move` 到 `Left` |
 | **只有最后一块 tile 的规约结果不对** | 填充值参与了规约 | 用 `pl.set_validshape`，并选对 `PadValue` |
 | **InCore 函数内 `pl.create_tensor` 失败** | 张量分配是控制面的事 | 在控制面分配，或改为接收 `pl.Out[...]` 参数 |
+| **大多数 `pl.write` 的写消失了，且每次运行消失的都不一样** | 并发的 `pl.spmd` block 或 `pl.parallel` 实例写进了同一条 64 字节 line | 让每个实例独占完整的 64 字节 line，或改由 `pl.spmd(1)` 来写 |
 | **片上缓冲区耗尽** | 同时常驻的东西太多 | 缩小 tile，或用 `pl.cross_core_slot(slot_num=N)` 缩小跨核环 |
 
 ## 配套示例
@@ -153,6 +251,7 @@ m = pl.row_max(t)                              # pad value decides what the tail
 ## See Also
 
 - [类型](00-types.md) —— `Tensor` 与 `Tile` 的区别，以及 dtype 的 `get_byte()` 有什么用。
+- [作用域与放置](04-scopes.md) —— `pl.spmd` 的 block，以及你在断言什么样的独立性。
 - [作用域与放置](04-scopes.md) —— 代码在哪里执行，以及跨核环深度。
 - [算子](../ops/01-catalog.md) —— 搬运、规约与广播家族。
 - [InferTileMemorySpace](../../dev/passes/17-infer_tile_memory_space.md) —— 替你插入 move 的那个 pass。
