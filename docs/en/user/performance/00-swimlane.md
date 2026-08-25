@@ -182,6 +182,56 @@ problem from a fake one:
 - An idle core **with ready, undispatched work** is overhead. That is the scheduler not
   keeping up, and belongs to [Runtime overhead](02-runtime-overhead.md).
 
+### Where the makespan actually went
+
+`sched_overhead_analysis` answers one question. The critical-path analysis answers the
+broader one — *what is the dependency-limited floor, and which tasks spent the rest?*
+
+```bash
+python -m simpler_setup.tools.critical_path <run-dir>
+```
+
+It discovers every directory holding `chip_swimlane_records.json`, `deps.json` and
+`name_map*.json` as siblings, and writes one report per rank beside its records file. Point
+it at a whole run tree rather than a single rank.
+
+Two paths come out of it, and the difference between them is the finding:
+
+| Path | What it is |
+| ---- | ---------- |
+| **Static CPM** | the longest duration-weighted chain — the latency floor with unlimited cores |
+| **Observed** | the as-executed backward walk from the last task to finish |
+
+Each task's compute plus the stall in front of it tiles the observed makespan exactly, and
+the stall is attributed as `data-wait` (an upstream producer is late), `core-wait` (the
+assigned core was busy — resource serialization) or `front-gap` (launch delay before any
+task ran).
+
+That gives the verdict the rest of this chapter branches on:
+
+| Reading | Verdict | Where it goes |
+| ------- | ------- | ------------- |
+| Static CPM near the makespan | dependency-bound — more cores cannot help | [03](03-dependencies.md), and granularity in [01](01-task-granularity.md) |
+| Static CPM well below, `core-wait` dominant | resource serialization | [01](01-task-granularity.md) |
+| Static CPM well below, `front-gap` large | launch and dispatch cost | [02](02-runtime-overhead.md), [06](06-host.md) |
+| Compute high, stall low | genuinely compute-bound | [04](04-incore.md) |
+
+> **Check the tiling line before quoting anything.** Each rank prints
+> `tiling check: compute+stall = ... vs makespan ...`, and it must read `exact`. A non-zero
+> difference means the walk did not tile the makespan and the per-task attribution is
+> unsound. Two more that quietly invalidate a report: families named `unknown` or `cid<N>`
+> mean the name map did not resolve, so family-level conclusions mean nothing; and with
+> multiple rounds the capture covers the **first** round, so the makespan includes warm-up.
+>
+> **One capture is one sample.** Two captures of the same unchanged workload can differ by
+> several points of stall share. Never compare two configurations from one capture each.
+
+The `critical-path-analysis` skill in the `pypto-user` plugin
+(`claude plugin install pypto-user@pypto-skills`) drives this end to end — artifact
+resolution, the validation list above, and the interpretation. The tool itself is in the
+runtime and needs no device, no build and no checkout: it is pure post-processing over a
+capture someone else took.
+
 ## Next
 
 With the picture in front of you, work down the chapter in order — granularity, then
