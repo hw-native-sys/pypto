@@ -305,36 +305,22 @@ class TestSystemOpsParsing:
         assert isinstance(reparsed, ir.Program)
         ir.assert_structural_equal(Before, reparsed)
 
-    def test_syncall_invalid_core_type_raises(self):
-        """syncall rejects an unknown core_type at construction time."""
-        with pytest.raises(ValueError, match="core_type"):
-            pl.system.syncall(core_type="bogus")
+    def test_syncall_rejects_non_enum_kwargs(self):
+        """These keywords are enum-only; a string names no member."""
+        for bad in ("mix", "bogus", 3):
+            with pytest.raises(TypeError, match="core_type must be a KernelType member"):
+                pl.system.syncall(core_type=bad)  # type: ignore[arg-type]
+        with pytest.raises(TypeError, match="mode must be a SyncAllMode member"):
+            pl.system.syncall(mode="hard")  # type: ignore[arg-type]
+
+    def test_sync_event_core_type_domain(self):
+        """An event pins one kernel, so MIX is rejected and both-kernel means omitting it."""
         with pytest.raises(TypeError, match="core_type must be a KernelType member"):
-            pl.system.syncall(core_type=3)  # type: ignore[arg-type]  # not an enum nor a string
-
-    def test_syncall_string_kwargs_are_deprecated(self):
-        """The pre-enum string spelling still builds the same call, with a warning."""
-        with pytest.deprecated_call(match="KernelType.AIV"):
-            deprecated = pl.system.syncall(core_type="aiv_only")
-        with pytest.deprecated_call(match="SyncAllMode.HARD"):
-            pl.system.syncall(mode="hard")
-        current = pl.system.syncall(core_type=pl.KernelType.AIV)
-        assert deprecated.kwargs == current.kwargs == {"core_type": "aiv_only"}
-
-    def test_sync_event_string_core_type_is_deprecated(self):
-        """sync_set / sync_wait still take the old strings, mapped onto pl.KernelType."""
-        with pytest.deprecated_call(match="KernelType.AIV"):
-            deprecated = pl.system.sync_set(3, pipe=pl.PipeType.MTE3, core_type="aiv")
-        current = pl.system.sync_set(3, pipe=pl.PipeType.MTE3, core_type=pl.KernelType.AIV)
-        assert deprecated.kwargs == current.kwargs
-        with pytest.deprecated_call(match="KernelType.AIC"):
-            pl.system.sync_wait(3, pipe=pl.PipeType.MTE2, core_type="aic")
-        # The syncall participant-set spellings are not the event vocabulary.
-        with pytest.raises(ValueError, match="core_type"):
-            pl.system.sync_wait(3, pipe=pl.PipeType.MTE2, core_type="aiv_only")
-        # An event pins one lane; both lanes is spelled by omitting core_type.
+            pl.system.sync_set(3, pipe=pl.PipeType.MTE3, core_type="aiv")  # type: ignore[arg-type]
         with pytest.raises(ValueError, match="Omit core_type"):
             pl.system.sync_wait(3, pipe=pl.PipeType.MTE2, core_type=pl.KernelType.MIX)
+        # Omitting it leaves the event unpinned, so no core_type attr is stamped.
+        assert "core_type" not in pl.system.sync_wait(3, pipe=pl.PipeType.MTE2).kwargs
 
     def test_syncall_soft_round_trip(self):
         """Round-trip for the soft (GM-polling) form of pl.system.syncall."""
@@ -445,13 +431,10 @@ class TestSystemOpsParsing:
 
     def test_syncall_soft_validation(self):
         """Soft syncall validates mode, core type, workspace, and participant count."""
-        with pytest.raises(ValueError, match="mode"):
-            pl.system.syncall(mode="bogus")
-        # An unknown core_type is rejected.
-        with pytest.raises(ValueError, match="core_type"):
-            pl.system.syncall(mode=pl.SyncAllMode.SOFT, core_type="bogus_type", used_cores=4)
-        # CUBE, VECTOR, and SHARED are all supported; each still requires a
-        # shared gm_workspace.
+        with pytest.raises(TypeError, match="mode must be a SyncAllMode member"):
+            pl.system.syncall(mode="bogus")  # type: ignore[arg-type]
+        # AIC, AIV, and MIX are all supported; each still requires a shared
+        # gm_workspace.
         for ct in pl.KernelType:
             with pytest.raises(ValueError, match="gm_workspace"):
                 pl.system.syncall(mode=pl.SyncAllMode.SOFT, core_type=ct, used_cores=4)

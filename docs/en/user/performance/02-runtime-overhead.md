@@ -261,8 +261,7 @@ Two modes, and the choice is not stylistic:
 | `pl.SyncAllMode.SOFT` | GM-polling counter | Any (`used_cores` participants) | `gm_workspace`, `used_cores` |
 
 `mode` and `core_type` are enums (`pl.SyncAllMode`, `pl.KernelType` — `MIX` is the
-both-kernel participant set). The strings these keywords used to take — `mode="soft"`,
-`core_type="mix"` — still work and emit a `DeprecationWarning`.
+both-kernel participant set); the strings these keywords once took are no longer accepted.
 
 Both modes synchronize arrival only: they do not wait for a preceding `TSTORE` or make
 business data cache-coherent. For a GM producer-to-consumer handoff that may span multiple
