@@ -43,12 +43,15 @@ description: >-
   is tempted to find an interpreter on its own; conda is the wrong answer, and
   the right one is to move the step after the bootstrap instead.
 
-  The calling job must define PTOAS_ROOT, PTOAS_VERSION,
-  PTOAS_SHA256, the CMAKE_* and the non-path CCACHE_* (MAXSIZE / UMASK) environment
-  variables; they are read from the job environment here. CCACHE_NAMESPACE and
-  every cache path (CCACHE_DIR, PIP_CACHE_DIR, PTOAS_CACHE_DIR, UV_CACHE_DIR) are
-  resolved and exported by this action — they derive from CI_CACHE_ROOT and so
-  cannot live in the caller's static job-level `env:` block.
+  When install-toolchain is true, the calling job must define PTOAS_ROOT,
+  PTOAS_VERSION, PTOAS_SHA256_AARCH64, and PTOAS_SHA256_X86_64. Every caller
+  must also define the CMAKE_* and non-path CCACHE_* (MAXSIZE / UMASK)
+  environment variables; they are read from the job environment here. The
+  action selects the checksum that matches the actual host architecture.
+  CCACHE_NAMESPACE and every cache path (CCACHE_DIR, PIP_CACHE_DIR,
+  PTOAS_CACHE_DIR, UV_CACHE_DIR) are resolved and exported by this action —
+  they derive from CI_CACHE_ROOT and so cannot live in the caller's static
+  job-level `env:` block.
 
   Which installer a job gets follows from its toolchain, and the bootstrap step
   states it in PYPTO_USE_UV. The bundle carries uv, so bundle jobs build the venv
@@ -561,6 +564,25 @@ runs:
         # intentionally tests Python 3.10. Install the matching cp310 wheel into
         # an isolated venv so PTOAS_ROOT/bin/ptoas keeps the existing contract.
         PTOAS_ARCH="$(uname -m)"
+        case "$PTOAS_ARCH" in
+          aarch64)
+            PTOAS_SHA256_NAME=PTOAS_SHA256_AARCH64
+            PTOAS_SHA256="${PTOAS_SHA256_AARCH64:-}"
+            ;;
+          x86_64)
+            PTOAS_SHA256_NAME=PTOAS_SHA256_X86_64
+            PTOAS_SHA256="${PTOAS_SHA256_X86_64:-}"
+            ;;
+          *)
+            echo "::error::Unsupported ptoas host architecture '$PTOAS_ARCH'"
+            echo "Supported architectures are aarch64 and x86_64."
+            exit 1
+            ;;
+        esac
+        if ! printf '%s' "$PTOAS_SHA256" | grep -qE '^[0-9a-f]{64}$'; then
+          echo "::error::$PTOAS_SHA256_NAME must be a 64-character lowercase SHA256"
+          exit 1
+        fi
         PTOAS_PACKAGE_VERSION="${PTOAS_VERSION#v}"
         PTOAS_WHEEL_NAME="ptoas-${PTOAS_PACKAGE_VERSION}-cp310-cp310-manylinux_2_34_${PTOAS_ARCH}.whl"
         CACHE_WHEEL="$PTOAS_CACHE_DIR/$PTOAS_WHEEL_NAME"
