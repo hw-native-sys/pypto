@@ -2825,9 +2825,14 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const std::map<VarPtr, VarPtr>& 
                                           old->size_, old->span_);
         };
 
-        // Create new TileType with shared MemRef
-        auto new_tile_type = std::dynamic_pointer_cast<const TileType>(CloneTypeWithMemRefAndRemapExprs(
-            curr_tile_type, source_memref, [this](const ExprPtr& expr) { return VisitExpr(expr); }));
+        // Rebase the representative through the same path as every member of
+        // its semantic sharing group.  A smaller tile may reuse a larger
+        // allocation; substituting source_memref wholesale here would give the
+        // representative the larger window while its aliases retain their
+        // original window, splitting one loop-carried accumulator family.
+        auto new_tile_type = std::dynamic_pointer_cast<const TileType>(
+            CloneTypeWithMemRefAndRemapExprs(curr_tile_type, rebase_memref(curr_tile_type),
+                                             [this](const ExprPtr& expr) { return VisitExpr(expr); }));
 
         // Create new Var
         auto new_var = std::make_shared<const Var>(op->var_->name_hint_, new_tile_type, op->var_->span_);
