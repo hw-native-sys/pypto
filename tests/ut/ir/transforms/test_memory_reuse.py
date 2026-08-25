@@ -4414,6 +4414,71 @@ class TestAscend910BLoadTpopHazard:
             f"{bases['down_prev']}"
         )
 
+    @staticmethod
+    def _build_back_edge_program():
+        """The tpop producer stands *after* the writer that consumes its value.
+
+        ``pipe_carry`` starts out as a plain ``tile.create``, so iteration 0 is
+        safe; from iteration 1 on it holds the ``tile.tpop_from_aic`` result that
+        the loop yields back into it.  The writer ``down_next`` therefore reads a
+        load result and a tpop value, but its tpop producer is only reached
+        *later* in program order — a single forward walk classifies the writer
+        before the carry's buffer is known to be tainted.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main(self, down: pl.InOut[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+                mem_vec_0: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 4096)
+                mem_vec_1: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 4096)
+                mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 4096)
+                pipe_seed: pl.Tile[[8, 128], pl.FP32, pl.MemRef(mem_vec_0, 0, 4096), pl.Mem.Vec] = (
+                    pl.tile.create([8, 128], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+                )
+                for _i, (pipe_carry,) in pl.range(0, 2, init_values=(pipe_seed,)):
+                    down_prev: pl.Tile[[8, 128], pl.FP32, pl.MemRef(mem_vec_1, 0, 4096), pl.Mem.Vec] = (
+                        pl.tile.load(down, [0, 0], [8, 128], [8, 128], target_memory=pl.Mem.Vec)
+                    )
+                    # noqa: F841 — `down_next` is the writer under test; consuming it
+                    # (yielding it into a second carry) would move its lifetime and stop
+                    # MemoryReuse coalescing it onto the load buffer, defeating the test.
+                    down_next: pl.Tile[[8, 128], pl.FP32, pl.MemRef(mem_vec_2, 0, 4096), pl.Mem.Vec] = (  # noqa: F841
+                        pl.tile.add(down_prev, pipe_carry)
+                    )
+                    pipe_next: pl.Tile[[8, 128], pl.FP32, pl.MemRef(mem_vec_0, 0, 4096), pl.Mem.Vec] = (
+                        pl.tile.tpop_from_aic(split=1)
+                    )
+                    loop_out = pl.yield_(pipe_next)
+                result: pl.Tensor[[16, 128], pl.FP32] = pl.tile.store(loop_out, [0, 0], down)
+                return result
+
+        return Prog
+
+    def test_tpop_reaching_a_writer_across_the_back_edge_blocks_reuse(self):
+        """Taint arriving through the loop back edge must still block the reuse.
+
+        The carry's buffer is only known to hold a tpop value once the *yielded*
+        producer is reached, which is after the writer in program order.  A
+        single forward traversal misses it and coalesces ``down_next`` onto the
+        load buffer; ``HazardInputCollector::Run`` walks the body twice so the
+        completed buffer taint is in hand before the writer is classified.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        try:
+            After = passes.memory_reuse()(self._build_back_edge_program())
+        finally:
+            backend.reset_for_testing()
+
+        bases = _collect_tile_memref_bases(After)
+        assert "down_prev" in bases and "down_next" in bases, f"missing tile vars; got {bases}"
+        assert bases["down_next"] != bases["down_prev"], (
+            "Ascend910B split-AIV: tile.add output must NOT reuse the tile.load buffer when the "
+            "tpop_from_aic value reaches it across the loop back edge, but both bind to "
+            f"{bases['down_prev']}"
+        )
+
     def test_ascend950_allows_load_buffer_reuse(self):
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend950)

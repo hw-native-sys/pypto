@@ -1487,7 +1487,8 @@ static bool LifetimesOverlap(const LifetimeInterval& a, const LifetimeInterval& 
 // undone after the fact by a dedicated LegalizePTOBufferReuse split pass; the
 // guard below folds that responsibility into the reuse decision.
 //
-// `HazardInputs` is collected in a single forward IR walk:
+// `HazardInputs` is collected by walking the function body (see
+// `HazardInputCollector::Run` for why that walk runs twice):
 //   - load_derived: vars produced by tile.load or by a legal view op chained
 //     from a load (these alias the load's physical buffer).
 //   - reads_tpop:   vars whose defining op consumes a tile.tpop_from_aic value.
@@ -1500,7 +1501,9 @@ static bool LifetimesOverlap(const LifetimeInterval& a, const LifetimeInterval& 
 // member of either set; but the carry chain it belongs to (init value, IterArg,
 // yield value) has already been fused onto one MemRef base by
 // MaterializeSemanticAliases, so an IterArg operand is classified by that base
-// instead — see `HazardInputCollector::IsTainted`.
+// instead — see `HazardInputCollector::IsTainted`.  A carry also breaks program
+// order, since the producer that taints the base may stand after the use it
+// taints; `HazardInputCollector::Run` covers that with a second traversal.
 
 // Resolve a tile Var to its MemRef base pointer (nullptr if it is not a tile or
 // has no MemRef yet).  View ops share their source's base, so a view and its
@@ -1523,6 +1526,34 @@ using HazardInputs = AllocationHazardInputs;
 
 class HazardInputCollector : public IRVisitor {
  public:
+  /// Classify `body` in TWO traversals, then hand the result to `Take()`.
+  ///
+  /// One forward walk is not enough, because a value can reach a use through a
+  /// loop back edge — from a producer that stands *after* that use in program
+  /// order:
+  ///
+  /// ```
+  /// for (carry,) in range(..., init=[non_tpop]):
+  ///   w = tile.add(l, carry)        // from iteration 1 on, `carry` is a tpop value
+  ///   p = tile.tpop_from_aic()      // ... but the producer is only seen here
+  ///   yield p                       // p must-aliases carry's base
+  /// ```
+  ///
+  /// A single walk classifies `w` before `p` taints the carry's base, so `w`
+  /// escapes `reads_tpop` and its output may be coalesced onto `l`'s buffer.
+  ///
+  /// Two traversals suffice, and a third could never add anything: the base
+  /// sets are complete after the first pass.  `tpop_bases_` only ever takes a
+  /// `tile.tpop_from_aic` def, which is order-independent; `load_derived_bases_`
+  /// additionally takes view outputs, and a view shares its source's base, so
+  /// marking one inserts a base that is already present.  Only the *Var* sets
+  /// grow in the second pass, and those propagate in program order within it.
+  /// Both traversals are O(N), so the collector stays linear.
+  void Run(const StmtPtr& body) {
+    VisitStmt(body);
+    VisitStmt(body);
+  }
+
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (GetTileTypeWithMemRef(op->var_->GetType())) {
       if (auto call = As<Call>(op->value_)) {
@@ -1535,8 +1566,10 @@ class HazardInputCollector : public IRVisitor {
         for (const auto& arg : call->args_) {
           if (auto v = AsVarLike(arg)) input_vars.push_back(v);
         }
-        // load_derived closure: defs precede uses in program order, so a view's
-        // source is already classified by the time we reach the view.
+        // load_derived closure: within one traversal defs precede uses, so a
+        // view's source is already classified by the time we reach the view;
+        // a source that only becomes tainted across a loop back edge is picked
+        // up by the second traversal (see `Run`).
         if (IsOp(call, "tile.load")) {
           MarkLoadDerived(op->var_);
         } else if (IsLegalTileViewOp(call->op_)) {
@@ -3345,7 +3378,7 @@ AllocationConstraintAnalysis AnalyzeAllocationConstraints(const FunctionPtr& fun
   result.needs_load_tpop_hazard_guard = NeedsLoadTpopHazardGuard(func);
   if (result.needs_load_tpop_hazard_guard) {
     HazardInputCollector collector;
-    collector.VisitStmt(func->body_);
+    collector.Run(func->body_);
     result.target_hazard_inputs = collector.Take();
   }
 

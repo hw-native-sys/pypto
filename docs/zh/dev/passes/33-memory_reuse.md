@@ -157,7 +157,9 @@ MemoryReuse 掌管所有 buffer 合并决策，因此它从源头上阻止这种
 - writer 的定义 op 消费了 `tile.tpop_from_aic` 的值，**且**
 - 它将要原地复用的那个 buffer 成员（其 last use 正是该 writer 的定义语句）是 load 派生的。
 
-两种分类都在对函数体的一次前向遍历中收集，并以 `Var` 标识（identity）为键。读取**操作数（operand）**时还需多一步：值可能经由**循环携带（loop carry）**到达 writer，而 `IterArg` 本身从来不是 `AssignStmt` 的定义，因此 `Var` 标识永远无法对其分类。由于 [`MaterializeSemanticAliases`](32-materialize_semantic_aliases.md) 已经把每条 carry 链（init value、`IterArg`、yield value）融合到同一个 MemRef base 上，`IterArg` 操作数改为按该 base 的污染（taint）状态来分类。而让这条 carry 首先变得可见的前提，是用 `AsVarLike` 读取操作数（绝不能用 `As<Var>`，它不匹配 `IterArg` 自己的 `ObjectKind`）；否则 `down_next = tile.add(down_prev, pipe_carry)` 中被携带的 `tpop` 值会静默丢失污染标记，从而形成危害性的原地复用。
+两种分类都以 `Var` 标识（identity）为键。读取**操作数（operand）**时还需多一步：值可能经由**循环携带（loop carry）**到达 writer，而 `IterArg` 本身从来不是 `AssignStmt` 的定义，因此 `Var` 标识永远无法对其分类。由于 [`MaterializeSemanticAliases`](32-materialize_semantic_aliases.md) 已经把每条 carry 链（init value、`IterArg`、yield value）融合到同一个 MemRef base 上，`IterArg` 操作数改为按该 base 的污染（taint）状态来分类。而让这条 carry 首先变得可见的前提，是用 `AsVarLike` 读取操作数（绝不能用 `As<Var>`，它不匹配 `IterArg` 自己的 `ObjectKind`）；否则 `down_next = tile.add(down_prev, pipe_carry)` 中被携带的 `tpop` 值会静默丢失污染标记，从而形成危害性的原地复用。
+
+carry 同时也打破了程序序，因此收集器会对函数体遍历**两次**。污染某条 carry buffer 的 producer 可能位于它所污染的那个 use **之后**——例如 `w = tile.add(l, carry); p = tile.tpop_from_aic(); yield p`，从第 1 次迭代起 `w` 就读到了 tpop 值，但单次前向遍历在见到 `p` 之前就已经对 `w` 完成了分类。第三次遍历不会带来任何新信息：第一次遍历后 base 集合即已完备（`tile.tpop_from_aic` 的定义与顺序无关，而 view 与其 source 共享 base），因此第二次遍历中只有 `Var` 集合会增长，且它们在该次遍历内部按程序序传播。两次遍历均为 O(N)。
 
 该 guard 由 `BackendHandler::RequiresSplitLoadTpopWorkaround()`（仅 Ascend910B 为 true）以及函数为 split-AIV 这两个条件门控；在其他任何 backend / 函数类型下输入集合为空，复用行为不变。writer 仍可自由复用任何**非** load buffer —— 只有 load + tpop 的原地组合会被拒绝。（该 guard 此前由独立的 `LegalizePTOBufferReuse` pass 在事后拆分 buffer 来实现，现已并入 MemoryReuse。）
 
