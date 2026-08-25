@@ -8726,9 +8726,20 @@ class ASTParser:
         ``pl.builtin.<ns>.<op>`` like any other non-``pld`` operator. It is the
         machine-only reader for that writer — the counterpart of
         ``_parse_printed_alloc_call`` — so it builds through
-        ``ir.create_internal_op_call`` and is scoped to the ``builtin.``
+        ``ir._create_internal_op_call`` and is scoped to the ``builtin.``
         namespace: no other internal operator becomes reachable, and the
         user-facing ``create_op_call`` guard is untouched.
+
+        Because this is a *reader for the printer*, it accepts only what the
+        printer can write. Every ``builtin.*`` dispatch is built by one
+        function (``MakeBuiltinCallWithAttrs`` in
+        ``lower_host_tensor_collectives_pass.cpp``), which unconditionally
+        stamps a ``device`` attr and an ``arg_directions`` attr covering every
+        positional arg; orchestration codegen then reads both back behind
+        internal checks. Hand-written source that omits them would be accepted
+        here and blow up much later as an "internal error" — a compiler-bug
+        diagnostic for what is really bad user input — so the invariants are
+        required up front and a violation is reported as a user error.
         """
         span = self.span_tracker.get_span(call)
         if len(segments) != 2:
@@ -8752,9 +8763,10 @@ class ASTParser:
 
         args = [self.parse_expression(arg) for arg in call.args]
         kwargs = self._parse_op_kwargs(call)
-        attrs = self._parse_op_attrs(call)
+        attrs = self._parse_op_attrs(call) or {}
+        self._check_builtin_op_printer_invariants(full_name, args, attrs, span)
         try:
-            built = ir.create_internal_op_call(full_name, args, kwargs, span)
+            built = ir._create_internal_op_call(full_name, args, kwargs, span)
         except BUG_CLASS_EXCEPTIONS:
             # Compiler bug, not a bad kernel - surface it with its type and trace intact.
             raise
@@ -8765,6 +8777,47 @@ class ASTParser:
                 span=span,
             ) from e
         return self._attach_op_attrs(built, attrs)
+
+    def _check_builtin_op_printer_invariants(
+        self, full_name: str, args: list[Any], attrs: dict[str, object], span: ir.Span
+    ) -> None:
+        """Reject a ``pl.builtin.*`` call the printer could not have written.
+
+        Keeps the accepted grammar equal to the printer's output, so this
+        machine-only surface cannot be used to hand-build a dispatch that
+        orchestration codegen would reject with an ``INTERNAL_CHECK`` (see
+        ``EmitBuiltinWindowCollectiveDispatch``: it requires a ``device`` attr
+        to resolve the rank expression, and one ``arg_directions`` entry per
+        positional arg).
+        """
+        hint = (
+            f"pl.builtin.* is emitted by the python printer, not written by hand — "
+            f"{full_name} is reached by writing the public pld.{full_name.split('.', 1)[1]} "
+            f"collective and letting LowerHostTensorCollectives lower it"
+        )
+        if "device" not in attrs:
+            raise InvalidOperationError(
+                f"'pl.{full_name}' requires a device attr naming the dispatching rank "
+                f'(attrs={{"device": <rank>}})',
+                span=span,
+                hint=hint,
+            )
+        directions = attrs.get("arg_directions")
+        if directions is None:
+            raise InvalidOperationError(
+                f"'pl.{full_name}' requires an arg_directions attr "
+                f'(attrs={{"arg_directions": [pl.adir.<dir>, ...]}})',
+                span=span,
+                hint=hint,
+            )
+        if len(cast("list[object]", directions)) != len(args):
+            raise InvalidOperationError(
+                f"'pl.{full_name}' has {len(args)} positional args but "
+                f"{len(cast('list[object]', directions))} arg_directions entries; "
+                "orchestration codegen requires one direction per arg",
+                span=span,
+                hint=hint,
+            )
 
     # Maps iterator type name to ForKind enum value.
     _ITERATOR_TO_KIND = {

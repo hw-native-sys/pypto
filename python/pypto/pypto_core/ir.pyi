@@ -3068,21 +3068,23 @@ def create_op_call(
         Exception: If operator is not registered, is internal-only, or type deduction fails
     """
 
-def create_internal_op_call(
+def _create_internal_op_call(
     op_name: str,
     args: Sequence[Expr],
     kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace | PadValue],
     span: Span,
 ) -> Call:
-    """Create a Call expression for a compiler-internal operator.
+    """Create a Call expression for a compiler-internal operator. **Private.**
 
     Compiler-internal counterpart of :func:`create_op_call`: it reaches
     operators marked ``internal_only`` (e.g. the ``builtin.tensor.*`` chip
     dispatches that ``LowerHostTensorCollectives`` emits), which the
     user-facing path rejects by design. Reserved for the round-trip parser,
     which must rebuild the printer-emitted ``pl.builtin.<ns>.<op>(...)`` form
-    that no DSL wrapper can spell. Op builders and DSL wrappers keep using
-    :func:`create_op_call`.
+    that no DSL wrapper can spell — and which re-checks the invariants the
+    printer stamps before calling in, so the guard is enforced at the
+    user-facing surface rather than dropped. Op builders and DSL wrappers keep
+    using :func:`create_op_call`.
 
     Args:
         op_name: Name of the registered operator

@@ -98,9 +98,12 @@ for r_1 in pl.range(pl.const(0, pl.INT64), pld.system.world_size(), pl.const(1, 
 
 The parser reads that spelling back (`ast_parser._parse_builtin_op`), so the
 lowered dispatch survives print -> parse. It is a machine-only surface, scoped
-to names actually registered under `builtin.`: it builds through
-`ir.create_internal_op_call` and leaves the user-facing `ir.create_op_call`
-guard in place. Write the composite `pld.tensor.*` form instead.
+to names actually registered under `builtin.`, and it accepts only what the
+printer can write: the `device` and `arg_directions` attrs are required, since
+orchestration codegen reads both back behind internal checks. A hand-written
+call omitting them is rejected as a user error at parse time rather than
+surfacing as a compiler-bug diagnostic during codegen. Write the composite
+`pld.tensor.*` form instead.
 
 Note that a whole-program `assert_structural_equal` round-trip is still blocked
 one pass upstream: [`MaterializeCommDomainScopes`](41-materialize_comm_domain_scopes.md)

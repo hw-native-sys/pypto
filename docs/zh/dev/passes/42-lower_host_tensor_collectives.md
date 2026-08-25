@@ -90,9 +90,11 @@ for r_1 in pl.range(pl.const(0, pl.INT64), pld.system.world_size(), pl.const(1, 
 
 Parser 能读回这种拼写（`ast_parser._parse_builtin_op`），因此 lowering 产生的
 dispatch 可以完成 print -> parse 往返。它是仅供机器使用（machine-only）的表面，
-且限定在真正注册于 `builtin.` 下的名字：它通过 `ir.create_internal_op_call`
-构造，面向用户的 `ir.create_op_call` 守卫保持不变。用户代码请改写复合形式
-`pld.tensor.*`。
+限定在真正注册于 `builtin.` 下的名字，并且只接受 printer 能写出的形式：
+`device` 与 `arg_directions` 两个 attr 是必需的，因为 orchestration codegen 会在
+内部检查（internal check）后读回它们。手写调用若省略这些 attr，会在 parse 阶段
+按用户错误拒绝，而不是在 codegen 阶段表现为编译器 bug 诊断。用户代码请改写复合
+形式 `pld.tensor.*`。
 
 注意：整程序的 `assert_structural_equal` 往返仍然被上一个 pass 阻断 ——
 [`MaterializeCommDomainScopes`](41-materialize_comm_domain_scopes.md) 会合成

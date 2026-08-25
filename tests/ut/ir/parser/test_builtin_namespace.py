@@ -73,9 +73,12 @@ def _barrier_program(call: str) -> str:
     return _BARRIER_SRC.format(call=call)
 
 
+_PRINTED_BARRIER = 'pl.builtin.tensor.barrier(signal, attrs={"device": r, "arg_directions": [pl.adir.inout]})'
+
+
 def test_builtin_op_parses_to_the_internal_registry_op():
-    """``pl.builtin.tensor.barrier`` builds the internal-only registered op."""
-    program = pl.parse_program(_barrier_program("pl.builtin.tensor.barrier(signal)"))
+    """The printed form builds the internal-only registered op."""
+    program = pl.parse_program(_barrier_program(_PRINTED_BARRIER))
     host = _get_func(program, "host_orch")
 
     calls = [
@@ -90,11 +93,7 @@ def test_builtin_op_parses_to_the_internal_registry_op():
 
 def test_builtin_op_carries_machine_only_attrs():
     """The trailing ``attrs={...}`` dict the printer emits round-trips."""
-    program = pl.parse_program(
-        _barrier_program(
-            'pl.builtin.tensor.barrier(signal, attrs={"device": r, "arg_directions": [pl.adir.inout]})'
-        )
-    )
+    program = pl.parse_program(_barrier_program(_PRINTED_BARRIER))
     host = _get_func(program, "host_orch")
 
     barriers = [
@@ -116,12 +115,12 @@ def test_builtin_namespace_is_scoped_to_registered_builtin_ops():
     """An unregistered ``builtin.`` name is rejected — the namespace does not
     become a back door onto arbitrary internal operators."""
     with pytest.raises(InvalidOperationError, match="Unknown builtin operation"):
-        pl.parse_program(_barrier_program("pl.builtin.tensor.not_a_collective(signal)"))
+        pl.parse_program(_barrier_program(_PRINTED_BARRIER.replace("barrier", "not_a_collective")))
 
     # ``tensor.write`` is a real op, but it is not registered under ``builtin.``,
     # so the builtin namespace must not reach it either.
     with pytest.raises(InvalidOperationError, match="Unknown builtin operation"):
-        pl.parse_program(_barrier_program("pl.builtin.tensor.write(signal)"))
+        pl.parse_program(_barrier_program(_PRINTED_BARRIER.replace("barrier", "write")))
 
 
 def test_builtin_namespace_rejects_a_wrong_segment_count():
@@ -130,7 +129,7 @@ def test_builtin_namespace_rejects_a_wrong_segment_count():
     than reporting ``Unknown operation 'pl.builtin'`` from the 2-segment
     unified path."""
     with pytest.raises(InvalidOperationError) as excinfo:
-        pl.parse_program(_barrier_program("pl.builtin.barrier(signal)"))
+        pl.parse_program(_barrier_program(_PRINTED_BARRIER.replace("tensor.barrier", "barrier")))
     assert "pl.builtin.barrier" in str(excinfo.value)
     assert excinfo.value.hint is not None
     assert "pl.builtin.<category>.<op>" in excinfo.value.hint
@@ -139,8 +138,41 @@ def test_builtin_namespace_rejects_a_wrong_segment_count():
 def test_builtin_op_reports_deduction_failures_against_its_own_name():
     """A bad payload surfaces as an error naming the builtin, not a bare
     registry message."""
-    with pytest.raises(InvalidOperationError, match="builtin.tensor.barrier"):
-        pl.parse_program(_barrier_program("pl.builtin.tensor.barrier(signal, signal)"))
+    two_args = _PRINTED_BARRIER.replace("(signal,", "(signal, signal,").replace(
+        "[pl.adir.inout]", "[pl.adir.inout, pl.adir.inout]"
+    )
+    with pytest.raises(InvalidOperationError, match=r"builtin\.tensor\.barrier"):
+        pl.parse_program(_barrier_program(two_args))
+
+
+def test_hand_written_builtin_call_without_device_is_a_user_error():
+    """A bare `pl.builtin.tensor.barrier(signal)` is rejected at parse time.
+
+    Orchestration codegen resolves the dispatching rank from the `device` attr
+    behind an `INTERNAL_CHECK`, so accepting a hand-written call without it
+    would turn bad user input into a compiler-bug diagnostic much later. The
+    printer always stamps the attr, so requiring it costs the round-trip
+    nothing.
+    """
+    with pytest.raises(InvalidOperationError) as excinfo:
+        pl.parse_program(_barrier_program("pl.builtin.tensor.barrier(signal)"))
+    assert "device" in str(excinfo.value)
+    assert excinfo.value.hint is not None
+    assert "pld.tensor.barrier" in excinfo.value.hint
+
+
+def test_hand_written_builtin_call_without_arg_directions_is_a_user_error():
+    """`arg_directions` is the other invariant codegen reads back internally."""
+    with pytest.raises(InvalidOperationError, match="arg_directions"):
+        pl.parse_program(_barrier_program('pl.builtin.tensor.barrier(signal, attrs={"device": r})'))
+
+
+def test_builtin_call_arg_directions_must_cover_every_arg():
+    """One direction per positional arg — codegen asserts the two lengths match."""
+    with pytest.raises(InvalidOperationError, match="arg_directions entries"):
+        pl.parse_program(
+            _barrier_program('pl.builtin.tensor.barrier(signal, attrs={"device": r, "arg_directions": []})')
+        )
 
 
 def test_public_collective_still_lowers_through_pld_surface():
