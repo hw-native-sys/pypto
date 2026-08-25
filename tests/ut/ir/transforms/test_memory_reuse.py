@@ -113,16 +113,15 @@ def _carry_memref(expr):
 def _same_base_address(a: ir.MemRef, b: ir.MemRef) -> bool:
     """Do two MemRefs start at the same address in the same allocation?
 
-    Mirrors the C++ `SameBaseAddress`. Comparing only `base_` would call two
+    Mirrors the C++ `CompareBaseAddress`. Comparing only `base_` would call two
     slots of one ``pl.MemRef(slots=N)`` the same storage; size is deliberately
     not compared, since a padded accumulator views one buffer at two extents.
+    Offsets compare structurally, so a runtime slot subscript spelled the same
+    way at two sites still counts as one address.
     """
     if a.base_.unique_id != b.base_.unique_id:
         return False
-    off_a, off_b = a.byte_offset_, b.byte_offset_
-    if not isinstance(off_a, ir.ConstInt) or not isinstance(off_b, ir.ConstInt):
-        return False
-    return off_a.value == off_b.value
+    return ir.structural_equal(a.byte_offset_, b.byte_offset_)
 
 
 def _assert_carry_yield_lands_in_its_buffer(program: ir.Program) -> None:
@@ -156,6 +155,24 @@ def _assert_carry_yield_lands_in_its_buffer(program: ir.Program) -> None:
     for function in program.functions.values():
         _YieldChecker().visit_stmt(function.body)
     assert checked, "no tile-typed loop carry was checked -- the assertion is vacuous"
+
+
+def _count_carry_spill_buffers(program: ir.Program) -> int:
+    """How many distinct cycle-spill scratch allocations the pass created."""
+    names = set()
+
+    class _Counter(ir.IRVisitor):
+        def visit_assign_stmt(self, stmt):  # type: ignore[override]
+            t = stmt.var.type
+            if isinstance(t, ir.TileType) and t.memref is not None:
+                name = t.memref.base_.name_hint
+                if "carry_spill" in name:
+                    names.add(name)
+            super().visit_assign_stmt(stmt)
+
+    for function in program.functions.values():
+        _Counter().visit_stmt(function.body)
+    return len(names)
 
 
 def _count_tile_moves_in_loops(program: ir.Program) -> int:
@@ -2635,6 +2652,87 @@ class TestYieldFixup:
         After = _run_pipeline(Before)
         ir.assert_structural_equal(After, Expected)
         _assert_carry_yield_lands_in_its_buffer(After)
+
+    def test_carry_held_in_one_dynamic_slot_needs_no_copy(self):
+        """A carry that never leaves its runtime slot must not be copied onto itself.
+
+        `buf[k % 2]` is written at two sites, so the two byte offsets are
+        structurally identical trees but distinct objects. Comparing them by
+        pointer identity called them different addresses and produced a
+        `tile.move` whose source and destination are the same bytes -- rejected
+        outright in Acc, an overlapping copy anywhere else.
+        """
+        buf = pl.MemRef(slots=2)
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                input_tensor: pl.Tensor[[64, 64], pl.FP32],
+                output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+                k: pl.Scalar[pl.INT32],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                seed: pl.Tile[[64, 64], pl.FP32, buf[k % 2], pl.Mem.Vec] = pl.load(
+                    input_tensor, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
+                for _i, (acc,) in pl.range(0, 4, init_values=(seed,)):
+                    nxt: pl.Tile[[64, 64], pl.FP32, buf[k % 2], pl.Mem.Vec] = pl.add(acc, acc)
+                    r = pl.yield_(nxt)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(r, [0, 0], output)
+                return result
+
+        After = _run_pipeline(Before)
+        assert _count_tile_moves_in_loops(After) == 0, "a carry that stays in its slot needs no copy"
+        _assert_carry_yield_lands_in_its_buffer(After)
+
+    def test_independent_carry_cycles_each_cost_one_spill(self):
+        """Two disjoint swaps break with one scratch buffer each, in a single pass.
+
+        Each swap is its own cycle, so exactly one member of each has to be
+        parked. Victims come from the residual graph's strongly connected
+        components, which both names real cycle members and finds every cycle in
+        one traversal -- scanning for "any node that still has an outgoing edge"
+        instead would rescan the whole set once per cycle.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                input_tensor: pl.Tensor[[64, 64], pl.FP32],
+                output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                a0: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    input_tensor, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
+                b0: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    input_tensor, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
+                c0: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    input_tensor, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
+                d0: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    input_tensor, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
+                for _i, (pa, pb, pc, pd) in pl.range(0, 4, init_values=(a0, b0, c0, d0)):
+                    sa: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pb
+                    sb: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pa
+                    sc: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pd
+                    sd: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pc
+                    _keep: pl.Tensor[[64, 64], pl.FP32] = pl.store(pa, [0, 0], output)
+                    _keep2: pl.Tensor[[64, 64], pl.FP32] = pl.store(pc, [0, 0], output)
+                    ra, rb, rc, rd = pl.yield_(sa, sb, sc, sd)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(rd, [0, 0], output)
+                return result
+
+        After = _run_pipeline(Before)
+        # One scratch buffer per swap, and no more: four writebacks plus two spills.
+        assert _count_carry_spill_buffers(After) == 2, "expected exactly one spill per cycle"
+        assert _count_tile_moves_in_loops(After) == 6, "expected four writebacks plus two spills"
+        _assert_carry_yield_lands_in_its_buffer(After)
+        _assert_carry_writebacks_do_not_clobber(After)
 
     def test_carries_sharing_one_buffer_are_rejected(self):
         """Two carries seeded from one tile share a buffer, which no order can save.
