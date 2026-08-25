@@ -323,7 +323,7 @@ def test_alloc_window_buffer_rejects_non_positive_static_dim():
     with pytest.raises(ParserSyntaxError, match="all dimensions must be positive"):
 
         @pl.program
-        class P:  # noqa: F841
+        class PZeroDim:  # noqa: F841
             @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
             def host_orch(self):
                 buf = pld.alloc_window_buffer([0, 128], dtype=pl.FP32)  # noqa: F841
@@ -332,7 +332,7 @@ def test_alloc_window_buffer_rejects_non_positive_static_dim():
     with pytest.raises(ParserSyntaxError, match="all dimensions must be positive"):
 
         @pl.program
-        class P:  # noqa: F841
+        class PNegativeDim:  # noqa: F841
             @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
             def host_orch(self):
                 buf = pld.alloc_window_buffer([64, -1], dtype=pl.FP32)  # noqa: F841

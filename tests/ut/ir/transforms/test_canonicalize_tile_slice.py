@@ -1529,7 +1529,7 @@ class TestAccAccumulatorSliceContiguity:
         if valid_shape is None:
 
             @pl.program
-            class Prog:
+            class ProgPlainSlice:
                 @pl.function(type=pl.FunctionType.InCore)
                 def kernel(
                     self,
@@ -1555,10 +1555,12 @@ class TestAccAccumulatorSliceContiguity:
                     out = pl.tile.store(acc_new, [0, 0], out)
                     return out
 
+            return ProgPlainSlice
+
         else:
 
             @pl.program
-            class Prog:
+            class ProgValidShapeSlice:
                 @pl.function(type=pl.FunctionType.InCore)
                 def kernel(
                     self,
@@ -1584,7 +1586,7 @@ class TestAccAccumulatorSliceContiguity:
                     out = pl.tile.store(acc_new, [0, 0], out)
                     return out
 
-        return Prog
+            return ProgValidShapeSlice
 
     def test_row_window_of_multi_block_column_acc_rejected(self):
         """A [16, 32] row window of a [32, 32] Acc tile spans neither the full

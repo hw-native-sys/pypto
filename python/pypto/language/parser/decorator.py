@@ -28,7 +28,7 @@ from .ast_parser import ASTParser
 from .comment_extractor import extract_line_comments
 from .diagnostics import BUG_CLASS_EXCEPTIONS, ParserError, ParserSyntaxError, concise_error_message
 from .enum_utils import FUNCTION_TYPE_MAP, LEVEL_MAP, ROLE_MAP, SPLIT_MODE_MAP, extract_enum_value
-from .source_lookup import get_class_source_lines
+from .source_lookup import DuplicateClassDefinitionError, get_class_source_lines
 
 
 def _is_pl_func_attr_stmt(stmt: ast.stmt) -> bool:
@@ -815,6 +815,17 @@ def _get_source_info(entity: Callable | type, entity_type: str) -> tuple[str, li
         else:
             source_lines_raw, starting_line = inspect.getsourcelines(entity)
         return source_file, source_lines_raw, starting_line
+    except DuplicateClassDefinitionError as exc:
+        # Falling through to the line-number-blind fallbacks would resolve the
+        # ambiguity by picking the first definition — which is the silent
+        # mis-parse this error exists to report. Surface it instead.
+        raise ParserSyntaxError(
+            f"Cannot tell which definition of {entity_type} '{name}' to parse: {exc}",
+            hint=(
+                "Give each definition a distinct name, or define the "
+                f"{entity_type} once and read the differing values from closure variables."
+            ),
+        ) from exc
     except (OSError, TypeError):
         pass
 

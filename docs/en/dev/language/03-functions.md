@@ -155,6 +155,49 @@ disabled.insert(passes.DiagnosticCheck.OutParamWriteDropped)
 ir.compile(program, disabled_diagnostics=disabled)
 ```
 
+## How a `@pl.program` Class Is Located
+
+`@pl.program` parses the class *body from source*, so it first has to find the
+`class` statement that produced the decorated object. The class name alone does
+not identify it: one function may define the same name in several branches, and
+every one of them carries the same `__qualname__`.
+
+The decorator resolves this from the line numbers of the methods in the class
+body, so each branch is parsed from its own source:
+
+```python
+def make(case):
+    if case == "add":
+        @pl.program
+        class Prog:                                # parsed from *this* body
+            @pl.function
+            def main(self, x: pl.Tensor[[8], pl.FP32]) -> pl.Tensor[[8], pl.FP32]:
+                return pl.add(x, 1.0)
+        return Prog
+
+    @pl.program
+    class Prog:                                    # and this one from *this* body
+        @pl.function
+        def main(self, x: pl.Tensor[[8], pl.FP32]) -> pl.Tensor[[8], pl.FP32]:
+            return pl.mul(x, 3.0)
+    return Prog
+```
+
+When the definitions genuinely cannot be told apart, the decorator raises a
+`ParserSyntaxError` naming every candidate line rather than picking one — a
+wrong pick would compile a body you never wrote. Give the classes distinct
+names, or define the class once and vary it through a closure variable:
+
+```python
+def make(scale):
+    @pl.program
+    class Prog:                                    # one definition, parameterised
+        @pl.function
+        def main(self, x: pl.Tensor[[8], pl.FP32]) -> pl.Tensor[[8], pl.FP32]:
+            return pl.mul(x, scale)
+    return Prog
+```
+
 ## Cross-Module Function Reuse
 
 Functions defined outside a `@pl.program` class can be reused via two mechanisms.

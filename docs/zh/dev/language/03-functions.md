@@ -144,6 +144,46 @@ disabled.insert(passes.DiagnosticCheck.OutParamWriteDropped)
 ir.compile(program, disabled_diagnostics=disabled)
 ```
 
+## `@pl.program` 如何定位类定义
+
+`@pl.program` 是*从源码解析*类体的，因此它必须先找到生成被装饰对象的那条 `class`
+语句。仅凭类名无法确定这一点: 同一个函数可以在多个分支里定义同名类，它们的
+`__qualname__` 完全相同。
+
+装饰器通过类体中各方法的行号来消歧，因此每个分支都按自己的源码解析:
+
+```python
+def make(case):
+    if case == "add":
+        @pl.program
+        class Prog:                                # 解析*这个*类体
+            @pl.function
+            def main(self, x: pl.Tensor[[8], pl.FP32]) -> pl.Tensor[[8], pl.FP32]:
+                return pl.add(x, 1.0)
+        return Prog
+
+    @pl.program
+    class Prog:                                    # 这个则解析*这个*类体
+        @pl.function
+        def main(self, x: pl.Tensor[[8], pl.FP32]) -> pl.Tensor[[8], pl.FP32]:
+            return pl.mul(x, 3.0)
+    return Prog
+```
+
+当多个定义确实无法区分时，装饰器会抛出 `ParserSyntaxError` 并列出全部候选行号，
+而不是任选其一——选错就会编译出你从未写过的类体。此时请给各个类取不同的名字，
+或者只定义一次、用闭包变量参数化:
+
+```python
+def make(scale):
+    @pl.program
+    class Prog:                                    # 单一定义，参数化
+        @pl.function
+        def main(self, x: pl.Tensor[[8], pl.FP32]) -> pl.Tensor[[8], pl.FP32]:
+            return pl.mul(x, scale)
+    return Prog
+```
+
 ## 跨模块函数复用
 
 在 `@pl.program` 类之外定义的函数可通过两种机制复用。

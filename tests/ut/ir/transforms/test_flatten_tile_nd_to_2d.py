@@ -1385,7 +1385,7 @@ class TestFlattenTileNdTo2DControlFlow:
         if loop_kind == "for":
 
             @pl.program
-            class Before:
+            class BeforeForLoop:
                 @pl.function(type=pl.FunctionType.InCore)
                 def main_incore_0(
                     self,
@@ -1404,10 +1404,12 @@ class TestFlattenTileNdTo2DControlFlow:
                     y = self.main_incore_0(x, out_0)
                     return y
 
+            Before = BeforeForLoop
+
         else:
 
             @pl.program
-            class Before:
+            class BeforeWhileLoop:
                 @pl.function(type=pl.FunctionType.InCore)
                 def main_incore_0(
                     self,
@@ -1427,6 +1429,8 @@ class TestFlattenTileNdTo2DControlFlow:
                     out_0 = pl.create_tensor([2, 3, 4], dtype=pl.FP32)
                     y = self.main_incore_0(x, out_0)
                     return y
+
+            Before = BeforeWhileLoop
 
         Before = passes.convert_to_ssa()(Before)
         After = passes.flatten_tile_nd_to_2d()(Before)
