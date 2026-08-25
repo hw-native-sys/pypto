@@ -16,6 +16,8 @@ This aligns MemRef objects consistently: if two tiles share a MemRef in
 ``After``, the corresponding tiles in ``Expected`` must also share.
 """
 
+from concurrent.futures import ThreadPoolExecutor
+
 import pypto.language as pl
 import pytest
 from pypto import DataType, InternalError, backend, ir, passes
@@ -37,6 +39,19 @@ def _run_pipeline(program: ir.Program) -> ir.Program:
     tests exercise the same combined transformation.
     """
     return passes.memory_reuse()(passes.materialize_semantic_aliases()(passes.init_mem_ref()(program)))
+
+
+def _run_pipeline_without_pass_context(program: ir.Program) -> ir.Program:
+    """Run the public standalone pass path without pytest's thread-local context."""
+
+    def run() -> ir.Program:
+        assert passes.PassContext.current() is None
+        return _run_pipeline(program)
+
+    # The autouse verification fixture owns a PassContext on the test thread.
+    # A fresh worker thread has no active context but shares BackendConfig.
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        return executor.submit(run).result()
 
 
 def _collect_allocated_tile_ranges(program: ir.Program) -> dict[str, tuple[int, int]]:
@@ -4189,7 +4204,7 @@ class TestStorageLayoutReuseGate:
         """Only A5 separates disjoint-lifetime ND and NZ Vec tiles."""
 
         Before = self._build_nd_nz_program()
-        After = _run_pipeline(Before)
+        After = _run_pipeline_without_pass_context(Before)
         bases = _collect_tile_memref_bases(After)
         assert "tile_nd" in bases and "tile_nz" in bases, f"missing tiles in {bases}"
         is_separate = bases["tile_nd"] != bases["tile_nz"]

@@ -832,10 +832,10 @@ def test_canonical_split_k_boundary_codegen_uses_box_aligned_physical_width():
         r"valid_col = %c16_index : !pto\.tile_buf<loc=mat, dtype=i8, rows=384, cols=32,",
         pto,
     ), pto
-    # The boundary sub-tile's Acc is the one buffer the whole predicated K-loop
-    # writes: allocated at the box-aligned physical width (cols=32) and narrowed
-    # to the logical N=16 by the explicit set_validshape the accumulator seed
-    # carries.  Pin the pair on the buffer the boundary tstore actually drains.
+    # The boundary sub-tile's Acc is allocated at the box-aligned physical width
+    # (cols=32) and narrowed to logical N=16. Full-Acc codegen may give the seed
+    # and result distinct SSA handles, so pin the logical shape on the result
+    # handle drained by the boundary tstore instead of requiring one SSA name.
     tail_store = re.search(
         r"pto\.tstore ins\((?P<acc>%[\w.]+) : !pto\.tile_buf<loc=acc, dtype=i32, "
         r"rows=(?P<rows>128|144), cols=32,[^)]*\) outs\([^)]*<(?P=rows)x16xi32>\)",
@@ -845,12 +845,16 @@ def test_canonical_split_k_boundary_codegen_uses_box_aligned_physical_width():
     tail_acc = re.escape(tail_store.group("acc"))
     tail_rows = tail_store.group("rows")
     assert re.search(
-        rf"{tail_acc} = pto\.alloc_tile [^\n]*: !pto\.tile_buf<loc=acc, dtype=i32, "
+        rf"{tail_acc} = pto\.alloc_tile [^\n]*valid_row = %c{tail_rows}_index "
+        rf"valid_col = %c16_index : !pto\.tile_buf<loc=acc, dtype=i32, "
         rf"rows={tail_rows}, cols=32,",
         pto,
     ), pto
     assert re.search(
-        rf"pto\.set_validshape {tail_acc}, %c{tail_rows}_index, %c16_index : "
+        rf"(?P<seed>%[\w.]+) = pto\.alloc_tile [^\n]*valid_row = %c{tail_rows}_index "
+        rf"valid_col = %c32_index : !pto\.tile_buf<loc=acc, dtype=i32, "
+        rf"rows={tail_rows}, cols=32,[^\n]*\n\s*"
+        rf"pto\.set_validshape (?P=seed), %c{tail_rows}_index, %c16_index : "
         rf"!pto\.tile_buf<loc=acc, dtype=i32, rows={tail_rows}, cols=32,",
         pto,
     ), pto

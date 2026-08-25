@@ -279,7 +279,9 @@ inline bool SubtreeWritesBase(const StmtPtr& stmt, const Var* target_base) {
 bool IsA5Target() {
   if (!backend::BackendConfig::IsConfigured()) return false;
   const auto* ctx = PassContext::Current();
-  return ctx != nullptr && ctx->GetBackendHandler()->GetPtoTargetArch() == "a5";
+  const auto* handler =
+      ctx != nullptr ? ctx->GetBackendHandler() : backend::BackendConfig::GetBackend()->GetHandler();
+  return handler->GetPtoTargetArch() == "a5";
 }
 
 bool IsA5Prelu(const CallPtr& call) { return IsOp(call, "tile.prelu") && IsA5Target(); }
