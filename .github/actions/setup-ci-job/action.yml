@@ -230,6 +230,11 @@ runs:
         # concurrent access, and sharing it is the point — a wheel any job has
         # already downloaded is hardlinked into the next venv instead of being
         # fetched and unpacked again.
+        #
+        # Sharing it also means nothing bounds it: uv has no size cap and evicts
+        # nothing on its own. The last step of this action is what keeps it from
+        # growing without limit; see the comment there for what it removes and
+        # why that specific set.
         {
           echo "CCACHE_DIR=$CI_CACHE_ROOT/ccache"
           echo "PIP_CACHE_DIR=$CI_CACHE_ROOT/$PIP_CACHE_NAME"
@@ -753,3 +758,79 @@ runs:
     - name: Show ccache stats (after)
       shell: bash
       run: ccache -s || true
+
+    - name: Drop the always-rebuilt local wheels from the shared uv cache
+      # Runs even when the build failed: a crashed run leaves its entries behind
+      # too, and this removes them by package name rather than by run.
+      if: ${{ always() && inputs.toolchain == 'bundle' }}
+      shell: bash
+      working-directory: ${{ inputs.checkout-path }}
+      run: |
+        # UV_CACHE_DIR is shared by every job on this host (see "Check runner
+        # config"), and uv bounds it in no way at all: there is no size cap, no
+        # TTL, and no eviction — only the explicit `uv cache clean` / `uv cache
+        # prune` commands. Nothing in this repo ran either, so the directory only
+        # ever grew, and on a busy host it reached the terabyte range.
+        #
+        # What grew is pypto and simpler specifically. Both are installed from a
+        # local directory named on the command line:
+        #
+        #     uv pip install --no-build-isolation '.[dev]'
+        #     uv pip install --no-build-isolation ./runtime
+        #
+        # and uv documents that form as a special case — it "will always rebuild
+        # and reinstall any local directory dependencies passed explicitly on the
+        # command-line". Always rebuilt means the cached wheel can never be hit,
+        # so these entries carry no value whatsoever; they are pure residue, and
+        # each one is an extension-module wheel (~112 MiB at -g2, ~19 MiB at -g1).
+        # Nine self-hosted jobs per run, seven of them also building simpler, all
+        # writing into one directory that never shrinks.
+        #
+        # Clean by package name, which leaves the part of the cache that does pay
+        # for itself — torch, nanobind, cmake, ninja and the rest of the resolved
+        # dependency set — intact for the next job.
+        #
+        # NOT `uv cache prune --ci`, the usual CI recommendation: it removes
+        # pre-built wheels and *retains* wheels built from source, which is
+        # precisely backwards here. It would evict the entries worth keeping and
+        # keep the ones that grow.
+        if [ ! -f activate.sh ]; then
+          echo "no activate.sh (bootstrap did not get that far) — skipping"
+          exit 0
+        fi
+        source activate.sh
+        if ! command -v uv >/dev/null 2>&1; then
+          echo "uv not on PATH — skipping"
+          exit 0
+        fi
+        cache_dir="$(uv cache dir 2>/dev/null || echo "${UV_CACHE_DIR:-}")"
+        # One job per host does this, not all of them. `uv cache clean` takes a
+        # lock over the *whole* cache, and every job here reaches this step at
+        # roughly the same time while its neighbours are still installing. Left
+        # to queue, each one pays the wait and only the first accomplishes
+        # anything: a measured run had a job block 4m22s and then report "No
+        # cache entries found", because the holder had already removed the same
+        # entries. `flock -n` turns that wait into an immediate exit.
+        #
+        # The lock lives under CI_CACHE_ROOT, which the runner-config step
+        # creates, rather than in the cache dir, which may not exist yet.
+        exec 9>"$CI_CACHE_ROOT/.uv-cleanup.lock" || exit 0
+        if ! flock -n 9; then
+          echo "another job on this host is already cleaning the uv cache — skipping"
+          exit 0
+        fi
+        # df, not du: this runs on the critical path and `du` walks the tree,
+        # which on the terabyte-scale cache this step exists to prevent is the
+        # slowest thing here. The filesystem's own accounting is O(1) and is
+        # what the disk-space alarm actually watches. uv reports what it removed.
+        df -h "$cache_dir" 2>/dev/null | tail -1 | sed "s|^|cache_df before |" || true
+        # No --force. That flag skips uv's in-use lock, and the cache is shared
+        # with whatever else the host is running; a concurrent install must not
+        # have entries deleted from under it.
+        #
+        # UV_LOCK_TIMEOUT caps how long we wait for that lock (default 300s).
+        # Keep it short: this job's tests are queued behind this step, and the
+        # work is not urgent — whichever job next finds the lock free does it.
+        UV_LOCK_TIMEOUT=30 uv cache clean pypto simpler \
+          || echo "::warning::uv cache clean did not complete (cache left as-is)"
+        df -h "$cache_dir" 2>/dev/null | tail -1 | sed "s|^|cache_df after  |" || true
