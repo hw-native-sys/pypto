@@ -197,5 +197,40 @@ class TestTileViewHashEqConsistency:
         assert ir.structural_hash(null_type) != ir.structural_hash(compact_type)
 
 
+class TestUnaryExprEquality:
+    """Cast operands compare structurally, and the hash keeps up.
+
+    ``AreExprsEqual`` matches unary nodes on kind, result dtype and operand, so
+    two sites spelling the same cast produce equal TileViews. Hash and equality
+    have to agree or a Python set of TileViews stops behaving like a set.
+    """
+
+    @staticmethod
+    def _cast_view(dtype):
+        span = _make_span()
+        operand = ir.Var("x", ir.ScalarType(DataType.INT32), span)
+        return _make_view(valid_shape=[ir.cast(operand, dtype, span), _make_const(16, span)])
+
+    def test_separately_built_identical_casts_are_equal(self):
+        span = _make_span()
+        operand = ir.Var("x", ir.ScalarType(DataType.INT32), span)
+        left = ir.cast(operand, DataType.INDEX, span)
+        right = ir.cast(operand, DataType.INDEX, span)
+        assert left is not right, "the point of the test is two distinct objects"
+
+        lhs = _make_view(valid_shape=[left, _make_const(16, span)])
+        rhs = _make_view(valid_shape=[right, _make_const(16, span)])
+        assert lhs == rhs
+        assert hash(lhs) == hash(rhs)
+        assert len({lhs, rhs}) == 1, "equal views must collapse in a set"
+
+    def test_casts_to_different_dtypes_are_not_equal(self):
+        """A cast's result dtype is part of its value, not derivable from the operand."""
+        lhs = self._cast_view(DataType.INDEX)
+        rhs = self._cast_view(DataType.INT64)
+        assert lhs != rhs
+        assert hash(lhs) != hash(rhs)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
