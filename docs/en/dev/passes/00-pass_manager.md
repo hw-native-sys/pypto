@@ -395,6 +395,8 @@ class PassPipeline {
 
 When `VerificationLevel` is `Basic` (the default), the pipeline automatically verifies the **lightweight properties** listed by `GetVerifiedProperties()` (`src/ir/transforms/ir_property.cpp`), each one exactly once per time it is produced. This catches common IR errors without requiring manual `PassContext` setup.
 
+The members of that set — and of `GetStructuralProperties()` and `GetDefaultVerifyProperties()` — are restated in prose three times: the `Returns {...}` clause on each declaration in `ir_property.h`, and a summary row in each language's [Verifier](99-verifier.md) doc. `tests/lint/check_property_set_doc_parity.py` (a pre-commit hook) holds those copies to the C++ initializers, since a property added to an initializer alone compiles and passes CI while every list a developer reads stays short by one.
+
 **How it works**:
 
 1. At pipeline input, verify `GetStructuralProperties() ∩ GetVerifiedProperties()` — the invariants that hold on the user's own IR before any pass runs

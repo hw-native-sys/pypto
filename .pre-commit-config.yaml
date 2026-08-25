@@ -91,6 +91,13 @@ repos:
           language_version: python3
           pass_filenames: false
 
+        - id: check-property-set-doc-parity
+          name: check-property-set-doc-parity
+          entry: python tests/lint/check_property_set_doc_parity.py
+          language: python
+          language_version: python3
+          pass_filenames: false
+
     - repo: https://github.com/pre-commit/pre-commit-hooks
       rev: v4.6.0
       hooks:

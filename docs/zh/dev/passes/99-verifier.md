@@ -178,7 +178,7 @@
 | ---- | ------ | ---- |
 | `GetStructuralProperties()` | `{TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly, AtomicAddDtypeValid}` | 由 `VerificationInstrument` 在每个 Pass 执行前后验证的不变量（与 `GetVerifiedProperties()` 共有的子集还会在流水线启动时验证） |
 | `GetDefaultVerifyProperties()` | `{SSAForm, TypeChecked, NoNestedCalls, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, TileTypeCoherence, ArrayNotEscaped}` | `run_verifier()` 的默认属性集 |
-| `GetVerifiedProperties()` | `{SSAForm, TypeChecked, MixedKernelExpanded, AllocatedMemoryAddr, BreakContinueValid, NoRedundantBlocks, InOutUseValid, CallDirectionsResolved, ManualDepsOnSubmitOnly, ReturnParamsExplicit, AivSplitValid, HardSyncallOccupancyValid, IterArgCarryClassified, RuntimeScopesMaterialized, AccToGmStoreValid, AtomicAddDtypeValid, TileMemoryInferred}` | `PassPipeline` 自动验证的轻量级属性集 |
+| `GetVerifiedProperties()` | `{SSAForm, TypeChecked, MixedKernelExpanded, AllocatedMemoryAddr, BreakContinueValid, NoRedundantBlocks, InOutUseValid, CallDirectionsResolved, ManualDepsOnSubmitOnly, ReturnParamsExplicit, AivSplitValid, TileMemoryInferred, HardSyncallOccupancyValid, IterArgCarryClassified, RuntimeScopesMaterialized, DistTensorCtxMaterialized, AccToGmStoreValid, AtomicAddDtypeValid}` | `PassPipeline` 自动验证的轻量级属性集 |
 
 ### RunVerifier Pass 工厂
 

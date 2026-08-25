@@ -393,6 +393,8 @@ class PassPipeline {
 
 当 `VerificationLevel` 为 `Basic`（默认值）时，流水线会自动验证 `GetVerifiedProperties()`（`src/ir/transforms/ir_property.cpp`）列出的**轻量级属性**，每次产生时各验证一次。这可以在无需手动设置 `PassContext` 的情况下捕获常见的 IR 错误。
 
+该集合——以及 `GetStructuralProperties()` 和 `GetDefaultVerifyProperties()`——的成员在文字描述中被重复列出了三份：`ir_property.h` 中每个声明上的 `Returns {...}` 子句，以及各语言版本 [Verifier](99-verifier.md) 文档中的一行汇总。`tests/lint/check_property_set_doc_parity.py`（一个 pre-commit 钩子）负责让这些副本与 C++ 初始化列表保持一致：仅把属性加进初始化列表而不更新副本，既能编译也能通过 CI，但开发者实际阅读的每一份列表都会少一项。
+
 **工作原理**：
 
 1. 在流水线入口验证 `GetStructuralProperties() ∩ GetVerifiedProperties()`——这些不变量在任何 Pass 运行前就应在用户自己的 IR 上成立
