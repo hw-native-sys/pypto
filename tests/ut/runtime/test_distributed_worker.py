@@ -1947,6 +1947,21 @@ class TestMultiProgram:
         assert fake_worker.call_args.kwargs["persistent"] is True
         assert fake_worker.call_args.kwargs["reset_persistent_windows"] is None
 
+    def test_prepare_forwards_inherited_host_tensors(self):
+        """The documented entry point is ``compiled.prepare(inherited_host_tensors=...)``.
+
+        Regression: the keyword existed only on the DistributedWorker constructor, so the
+        call the user manual shows raised TypeError and the zero-copy path was reachable
+        only through the lower-level API.
+        """
+        from pypto.ir.distributed_compiled_program import DistributedCompiledProgram  # noqa: PLC0415
+
+        primary = _fake_compiled([_param("a", [4])], [])
+        host = torch.zeros(4, dtype=torch.float32).share_memory_()
+        with patch("pypto.runtime.distributed_runner.DistributedWorker") as fake_worker:
+            DistributedCompiledProgram.prepare(primary, inherited_host_tensors=[host])
+        assert fake_worker.call_args.kwargs["inherited_host_tensors"] == [host]
+
     def test_prepare_forwards_startup_timeout(self):
         from pypto.ir.distributed_compiled_program import DistributedCompiledProgram  # noqa: PLC0415
 
@@ -3502,6 +3517,52 @@ class TestNamedInheritedHostRanges:
         rt.copy_to(dev.data_ptr, other.data_ptr(), nbytes)
 
         assert not isinstance(patched_setup["worker"].copy_to.call_args.args[1], _NamedHostRange)
+        rt.close()
+
+    def test_a_range_listed_through_prepare_is_named(self, patched_setup):
+        """End to end through the documented entry point, not just the constructor."""
+        from pypto.ir.distributed_compiled_program import DistributedCompiledProgram  # noqa: PLC0415
+
+        host = torch.zeros(4, 4, dtype=torch.float32).share_memory_()
+        rt = DistributedCompiledProgram.prepare(
+            _fake_compiled([_param("a", [4, 4])], []),
+            inherited_host_tensors=[host],
+        )
+        dev = self._dev(rt)
+        nbytes = host.numel() * host.element_size()
+        patched_setup["worker"].create_buffer.reset_mock()
+
+        rt.copy_to(dev.data_ptr, host.data_ptr(), nbytes)
+
+        assert isinstance(patched_setup["worker"].copy_to.call_args.args[1], _NamedHostRange)
+        patched_setup["worker"].create_buffer.assert_not_called()
+        rt.close()
+
+    def test_the_same_range_in_both_directions_gets_distinct_identities(self, patched_setup):
+        """One identity may name only one backing, and the two directions differ in access.
+
+        Regression: the identity was keyed on ``(host_ptr, nbytes)`` alone while a source is
+        granted READ and a destination READWRITE, so a copy_to followed by a copy_from on one
+        range reused a single identity under two descriptors — which `ImportRegistry.materialize`
+        rejects for the changed access. Keyed by direction, both are named and reuse stays
+        per-range rather than per-copy.
+        """
+        host = torch.zeros(4, 4, dtype=torch.float32).share_memory_()
+        rt = DistributedWorker(_fake_compiled([_param("a", [4, 4])], []), inherited_host_tensors=[host])
+        dev = self._dev(rt)
+        nbytes = host.numel() * host.element_size()
+
+        rt.copy_to(dev.data_ptr, host.data_ptr(), nbytes)
+        rt.copy_from(host.data_ptr(), dev.data_ptr, nbytes)
+
+        src = patched_setup["worker"].copy_to.call_args.args[1]
+        dst = patched_setup["worker"].copy_from.call_args.args[0]
+        assert (src.access, dst.access) == ("READ", "READWRITE")
+        assert src.buffer_id != dst.buffer_id
+
+        # Re-copying either direction must still reuse that direction's identity.
+        rt.copy_to(dev.data_ptr, host.data_ptr(), nbytes)
+        assert patched_setup["worker"].copy_to.call_args.args[1].buffer_id == src.buffer_id
         rt.close()
 
     def test_copy_to_stages_a_partially_overlapping_range(self, patched_setup):

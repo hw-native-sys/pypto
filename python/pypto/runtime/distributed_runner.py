@@ -1592,7 +1592,7 @@ class DistributedWorker(Worker):
         # And re-copying the same range must reuse its identity, because one identity may name
         # only one backing: `materialize` refuses a second descriptor for an identity it has
         # already handed out.
-        self._named_identities: dict[tuple[int, int], tuple[bytes, int]] = {}
+        self._named_identities: dict[tuple[int, int, bool], tuple[bytes, int]] = {}
         # Minting is not atomic (`+=` is load/add/store, and the lazy owner mint is
         # check-then-act) while `alloc_stacked_tensor` runs one thread per chip through this
         # path, so the cache and the counter are guarded together.
@@ -2253,7 +2253,7 @@ class DistributedWorker(Worker):
             return 0
         return int(self._w.committed_device_memory(worker_id))
 
-    def _buffer_identity_for(self, host_ptr: int, nbytes: int) -> tuple[bytes, int]:
+    def _buffer_identity_for(self, host_ptr: int, nbytes: int, *, writing: bool) -> tuple[bytes, int]:
         """Return the stable ``(owner_instance_id, buffer_id)`` naming this host range.
 
         Keyed on the range rather than counted per call, so a range copied N times keeps one
@@ -2264,13 +2264,19 @@ class DistributedWorker(Worker):
         registry without bound. Distinct sub-ranges of one registered tensor still get distinct
         identities, which is what a sharded upload needs.
 
+        The direction is part of the key because it decides the descriptor's ``access``: a
+        source is named ``READ`` and a destination ``READWRITE``. One identity may name only
+        one backing, so a range copied in both directions under a single identity would have
+        ``materialize`` reject the second descriptor for the changed access. Two identities per
+        range is still bounded — the property that matters is that it does not grow per copy.
+
         Held under a lock because ``alloc_stacked_tensor`` drives this from one thread per chip.
         """
         from simpler.buffer import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
             mint_owner_instance_id,
         )
 
-        key = (int(host_ptr), int(nbytes))
+        key = (int(host_ptr), int(nbytes), bool(writing))
         with self._named_identity_mu:
             cached = self._named_identities.get(key)
             if cached is not None:
@@ -2324,7 +2330,7 @@ class DistributedWorker(Worker):
         for start, stop in self._inherited_host_spans:
             if host_ptr < start or end > stop:
                 continue
-            owner, buffer_id = self._buffer_identity_for(host_ptr, nbytes)
+            owner, buffer_id = self._buffer_identity_for(host_ptr, nbytes, writing=writing)
             return wrap_fork_inherited(
                 host_ptr,
                 nbytes,
