@@ -4354,6 +4354,66 @@ class TestAscend910BLoadTpopHazard:
             f"{ranges['down_next']} from load buffer {ranges['down_prev']}"
         )
 
+    @staticmethod
+    def _build_loop_carried_program():
+        """Same hazard, but the tpop value reaches the writer through a loop carry.
+
+        ``down_next = tile.add(down_prev=tile.load, pipe_carry)`` where
+        ``pipe_carry`` is the loop's ``IterArg``, initialised from the
+        ``tile.tpop_from_aic`` result and so must-aliased onto its buffer.  The
+        writer still reads a load result and a tpop value at one statement, so
+        the hazard is identical to ``_build_program``'s straight-line form — only
+        the spelling of the tpop operand differs.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main(self, down: pl.InOut[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+                mem_vec_0: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 4096)
+                mem_vec_1: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 4096)
+                mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 4096)
+                pipe_chunk: pl.Tile[[8, 128], pl.FP32, pl.MemRef(mem_vec_0, 0, 4096), pl.Mem.Vec] = (
+                    pl.tile.tpop_from_aic(split=1)
+                )
+                for _i, (pipe_carry,) in pl.range(0, 2, init_values=(pipe_chunk,)):
+                    down_prev: pl.Tile[[8, 128], pl.FP32, pl.MemRef(mem_vec_1, 0, 4096), pl.Mem.Vec] = (
+                        pl.tile.load(down, [0, 0], [8, 128], [8, 128], target_memory=pl.Mem.Vec)
+                    )
+                    down_next: pl.Tile[[8, 128], pl.FP32, pl.MemRef(mem_vec_2, 0, 4096), pl.Mem.Vec] = (
+                        pl.tile.add(down_prev, pipe_carry)
+                    )
+                    loop_out = pl.yield_(down_next)
+                result: pl.Tensor[[16, 128], pl.FP32] = pl.tile.store(loop_out, [0, 0], down)
+                return result
+
+        return Prog
+
+    def test_iter_arg_tpop_operand_still_blocks_load_buffer_reuse(self):
+        """A loop-carried tpop operand must not escape the guard.
+
+        The operand is an ``IterArg``, which has its own ``ObjectKind`` and is
+        never itself an ``AssignStmt`` def, so neither ``As<Var>`` nor Var
+        identity can classify it.  ``HazardInputCollector`` reads operands with
+        ``AsVarLike`` and resolves a carry through the MemRef base its chain was
+        fused onto; without that, ``down_next`` is not recognised as reading a
+        tpop value and MemoryReuse forms the in-place load touch.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        try:
+            After = passes.memory_reuse()(self._build_loop_carried_program())
+        finally:
+            backend.reset_for_testing()
+
+        bases = _collect_tile_memref_bases(After)
+        assert "down_prev" in bases and "down_next" in bases, f"missing tile vars; got {bases}"
+        assert bases["down_next"] != bases["down_prev"], (
+            "Ascend910B split-AIV: tile.add output must NOT reuse the tile.load buffer when the "
+            "tpop_from_aic operand arrives as a loop-carried IterArg, but both bind to "
+            f"{bases['down_prev']}"
+        )
+
     def test_ascend950_allows_load_buffer_reuse(self):
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend950)

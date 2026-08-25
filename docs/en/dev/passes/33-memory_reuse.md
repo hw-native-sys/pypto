@@ -171,6 +171,8 @@ MemoryReuse owns every buffer-coalescing decision, so it prevents the hazardous 
 - the writer's defining op consumes a `tile.tpop_from_aic` value, **and**
 - the buffer member it would reuse in place (whose last use is the writer's def statement) is load-derived.
 
+Both classifications are collected in one forward walk over the function body and keyed on `Var` identity. An operand takes one extra step: a value can reach the writer through a **loop carry**, and an `IterArg` is never itself an `AssignStmt` def, so `Var` identity can never classify it. Since [`MaterializeSemanticAliases`](32-materialize_semantic_aliases.md) has already fused each carry chain — init value, `IterArg`, yield value — onto one MemRef base, an `IterArg` operand is classified by the taint of that base instead. Reading operands with `AsVarLike` (never `As<Var>`, which does not match `IterArg`'s own `ObjectKind`) is what makes the carry visible in the first place; without it, `down_next = tile.add(down_prev, pipe_carry)` with a carried `tpop` value silently loses the taint and the hazardous in-place reuse is formed.
+
 The guard is gated by `BackendHandler::RequiresSplitLoadTpopWorkaround()` (true only for Ascend910B) and the function being split-AIV; on every other backend / function kind the inputs are empty and reuse behaviour is unchanged. The writer is still free to reuse any **non**-load buffer — only the load + tpop in-place combination is rejected. (This guard previously lived in a dedicated `LegalizePTOBufferReuse` pass that split the buffer after the fact; it now folds into MemoryReuse.)
 
 ## Example
