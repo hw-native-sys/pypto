@@ -188,7 +188,8 @@ ordinary `pl.range` loop of `pl.write` inside one task is always safe, whatever 
 ```python
 N = 64          # INT32 -> 16 elements per 64-byte line
 
-# WRONG — grid-stride: blocks 0..15 all write inside out[0:16], one line
+# WRONG — grid-stride: blocks 0..15 each land one element in out[0:16], so
+# 16 blocks share that first line (and the later lines they also write)
 with pl.spmd(24):
     blk = pl.tile.get_block_idx()
     for i in pl.range(pl.cast(blk, pl.INDEX), N, 24):
@@ -252,10 +253,12 @@ they do, the warning is telling you that correctness rests on a layout invariant
 enforces, which is worth a comment at the write site. To silence the check across a build,
 put `ScalarWriteLineShared` in the pass context's `disabled_diagnostics`.
 
-Two cases it deliberately does not report, because deciding them needs the task dependency
-graph that does not exist this early: two *different* tasks writing one tensor, and a write
-guarded by a predicate that pins it to a single instance (`if blk == 0:`). The second is
-reported conservatively.
+Two cases it does not decide precisely, because both need the task dependency graph that
+does not exist this early. Two *different* tasks writing one tensor is **not reported** at
+all — whether they overlap in time is unknown, so reporting would fire on every ordered
+producer/consumer pair. A write guarded by a predicate that pins it to a single instance
+(`if blk == 0:`) **is reported**, conservatively: the guard makes it safe, but the check
+does not read predicates, so it treats the write as multi-instance.
 
 ### Valid shape and padding
 

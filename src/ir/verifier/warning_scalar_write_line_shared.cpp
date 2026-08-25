@@ -93,12 +93,13 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/ir/expr.h"
-#include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
@@ -213,11 +214,18 @@ InstAffine AffineMul(const InstAffine& a, const InstAffine& b) {
   }
   const int64_t k = cst->lo;
   InstAffine r;
-  if (MulOverflows(var->lo, k, &r.lo) || MulOverflows(var->hi - 1, k, &r.hi) ||
-      AddOverflows(r.hi, 1, &r.hi)) {
+  // Multiply the *inclusive* endpoints, then re-derive the exclusive top. A
+  // negative factor flips which endpoint is the low one, so the orientation must
+  // be chosen before the `+1` — swapping the exclusive bounds afterwards moves
+  // both ends inward and understates the span by two.
+  int64_t end_lo = 0;
+  int64_t end_hi = 0;
+  if (MulOverflows(var->lo, k, &end_lo) || MulOverflows(var->hi - 1, k, &end_hi)) {
     return InstAffine::Unknown();
   }
-  if (k < 0) std::swap(r.lo, r.hi);  // a negative factor flips the interval
+  if (end_lo > end_hi) std::swap(end_lo, end_hi);
+  r.lo = end_lo;
+  if (AddOverflows(end_hi, 1, &r.hi)) return InstAffine::Unknown();
   for (size_t d = 0; d < kMaxInstanceDims; ++d) {
     if (MulOverflows(var->coef[d], k, &r.coef[d])) return InstAffine::Unknown();
   }
@@ -392,7 +400,7 @@ class ScalarWriteVisitor : public IRVisitor {
       contexts_.push_back(
           {"multiple concurrent task instances (dispatched from a "
            "multi-instance scope)",
-           "task instances"});
+           "task instances", /*dim_allocated=*/true});
     }
   }
 
@@ -456,7 +464,11 @@ class ScalarWriteVisitor : public IRVisitor {
     if (!tensor_type) return;
     const int64_t elem_bytes = static_cast<int64_t>(tensor_type->dtype_.GetByte());
 
-    const InstAffine offset = FlatOffset(As<MakeTuple>(op->args_[1]), tensor_type->shape_);
+    // A scope past the tracking limit contributes a dimension the model cannot
+    // represent, so nothing below it can be proven — report rather than guess.
+    const InstAffine offset = unmodelled_dims_ > 0
+                                  ? InstAffine::Unknown()
+                                  : FlatOffset(As<MakeTuple>(op->args_[1]), tensor_type->shape_);
     int64_t stride_bytes = 0;
     const LineVerdict verdict = Classify(offset, elem_bytes, &stride_bytes);
     if (verdict == LineVerdict::Disjoint) return;
@@ -472,6 +484,7 @@ class ScalarWriteVisitor : public IRVisitor {
   struct Context {
     std::string origin;
     std::string instance_word;
+    bool dim_allocated;  ///< False once nesting exceeds kMaxInstanceDims.
   };
 
   [[nodiscard]] InstAffine Eval(const ExprPtr& expr) const {
@@ -547,15 +560,29 @@ class ScalarWriteVisitor : public IRVisitor {
     return acc;
   }
 
+  /// Pop must mirror push exactly. A push past `kMaxInstanceDims` allocates no
+  /// dimension, so popping it unconditionally would drop an *outer* dimension's
+  /// entry and leave every enclosing scope mis-modelled. The per-context flag
+  /// records what the push actually did.
   void PushInstanceDim(bool is_spmd, std::string origin, std::string instance_word) {
-    if (instance_dims_ < kMaxInstanceDims && is_spmd) spmd_dim_stack_.push_back(instance_dims_);
-    if (instance_dims_ < kMaxInstanceDims) ++instance_dims_;
-    contexts_.push_back({std::move(origin), std::move(instance_word)});
+    const bool dim_allocated = instance_dims_ < kMaxInstanceDims;
+    if (dim_allocated) {
+      if (is_spmd) spmd_dim_stack_.push_back(instance_dims_);
+      ++instance_dims_;
+    } else {
+      ++unmodelled_dims_;
+    }
+    contexts_.push_back({std::move(origin), std::move(instance_word), dim_allocated});
   }
 
   void PopInstanceDim(bool is_spmd) {
-    if (is_spmd && !spmd_dim_stack_.empty()) spmd_dim_stack_.pop_back();
-    if (instance_dims_ > 0) --instance_dims_;
+    const bool dim_allocated = contexts_.back().dim_allocated;
+    if (dim_allocated) {
+      if (is_spmd && !spmd_dim_stack_.empty()) spmd_dim_stack_.pop_back();
+      if (instance_dims_ > 0) --instance_dims_;
+    } else if (unmodelled_dims_ > 0) {
+      --unmodelled_dims_;
+    }
     contexts_.pop_back();
   }
 
@@ -572,6 +599,7 @@ class ScalarWriteVisitor : public IRVisitor {
   }
 
   size_t instance_dims_ = 0;
+  size_t unmodelled_dims_ = 0;  ///< Instance scopes past the tracking limit.
   std::vector<size_t> spmd_dim_stack_;
   std::vector<Context> contexts_;
   std::vector<const Var*> scope_local_;

@@ -180,6 +180,52 @@ class TestProvenDisjointIsSilent:
         assert len(_warnings(Prog)) == 1
 
 
+class TestNegativeCoefficient:
+    """A reversed instance->address mapping gives the block index a negative
+    coefficient, which the interval arithmetic must orient correctly."""
+
+    def test_reversed_line_ownership_is_silent(self):
+        """Block b owns the line at the far end; still one whole line each."""
+
+        @pl.program
+        class Prog:
+            @pl.function
+            def main(
+                self,
+                src: pl.Tensor[[LINE * BLOCKS], pl.INT32],
+                out: pl.Out[pl.Tensor[[LINE * BLOCKS], pl.INT32]],
+            ) -> pl.Tensor[[LINE * BLOCKS], pl.INT32]:
+                with pl.spmd(BLOCKS, name_hint="reversed"):
+                    blk = pl.tile.get_block_idx()
+                    base = (BLOCKS - 1 - pl.cast(blk, pl.INDEX)) * LINE
+                    for i in pl.range(base, base + LINE):
+                        pl.write(out, [i], pl.cast(pl.read(src, [i]) + 1, pl.INT32))
+                return out
+
+        assert _warnings(Prog) == []
+
+    def test_reversed_interleaved_is_reported(self):
+        """Same reversal, but one element per block -- still shares lines."""
+
+        @pl.program
+        class Prog:
+            @pl.function
+            def main(
+                self,
+                src: pl.Tensor[[N], pl.INT32],
+                out: pl.Out[pl.Tensor[[N], pl.INT32]],
+            ) -> pl.Tensor[[N], pl.INT32]:
+                with pl.spmd(BLOCKS, name_hint="revfill"):
+                    blk = pl.tile.get_block_idx()
+                    idx = BLOCKS - 1 - pl.cast(blk, pl.INDEX)
+                    pl.write(out, [idx], pl.cast(pl.read(src, [idx]) + 1, pl.INT32))
+                return out
+
+        found = _warnings(Prog)
+        assert len(found) == 1
+        assert "4 bytes apart" in found[0].message
+
+
 class TestNotApplicable:
     """Shapes the check must leave alone."""
 
