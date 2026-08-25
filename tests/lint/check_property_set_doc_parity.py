@@ -28,7 +28,10 @@ This check enforces, against the initializers in ``ir_property.cpp`` as the auth
 2. *Order* -- each copy lists them in the initializer's order, so a copy can be diffed against the
    C++ by position rather than by set membership.
 3. *Completeness* -- every getter with an initializer has a ``Returns {...}`` clause and a row in
-   both docs, so a newly added set cannot start out undocumented.
+   both docs, and no site states members for a getter the C++ no longer defines, so neither adding a
+   set nor removing one can leave a copy behind in one language and not the other.
+4. *Uniqueness* -- no site states a getter's members twice. Two copies can disagree, and only one of
+   them would be compared against the C++.
 
 Each site is also sanity-checked for pattern drift: a copy written in a form the regexes here do not
 match would be skipped in silence, which is the one failure this lint must not have, so an unparsed
@@ -65,11 +68,14 @@ HEADER_RE = re.compile(r"/\*\*(.*?)\*/\s*const IRPropertySet& (\w+)\(\);", re.DO
 # Any declaration of such a getter, used to catch one with no doxygen block at all.
 HEADER_ANY_RE = re.compile(r"^const IRPropertySet& (\w+)\(\);", re.MULTILINE)
 
-# `| `GetFooProperties()` | `{A, B, C}` | description |` in the docs' summary table.
+# `| `GetFooProperties()` | `{A, B, C}` | description |` in the docs' summary table. Requiring the
+# `{...}` cell is specific enough on its own -- it matches the three property-set rows and nothing
+# else in either doc -- so this is deliberately NOT narrowed to the getters the C++ defines: a row
+# left behind for a deleted getter has to keep matching in order to be reported as stale.
 DOC_ROW_RE = re.compile(r"^\|\s*`(\w+)\(\)`\s*\|\s*`\{([^}]*)\}`\s*\|", re.MULTILINE)
 # Any row keyed on such a getter, used to catch one whose set cell is written some other way. Both
-# doc files are full of tables keyed on a `method()` cell, so this is matched only against the
-# getters the C++ actually defines -- everything else is an unrelated API table.
+# doc files are full of tables keyed on a `method()` cell, so this one IS matched only against the
+# getters the C++ defines -- everything else is an unrelated API table, however it is written.
 DOC_ROW_ANY_RE = re.compile(r"^\|\s*`(\w+)\(\)`\s*\|", re.MULTILINE)
 
 # The `{...}` payload of a `Returns {...}` clause, which wraps across ` * `-prefixed comment lines.
@@ -107,6 +113,12 @@ def parse_header(root: Path, known: set[str]) -> tuple[dict[str, list[str]], lis
     parsed: dict[str, list[str]] = {}
     errors: list[str] = []
     for m in HEADER_RE.finditer(text):
+        if m.group(2) in parsed:
+            errors.append(
+                f"{HEADER_DECL}: `{m.group(2)}()` is declared more than once with a `Returns {{...}}` "
+                f"clause -- the copies can disagree and only one is compared, so keep exactly one"
+            )
+            continue
         returns = RETURNS_RE.search(m.group(1))
         if returns is None:
             errors.append(
@@ -125,10 +137,25 @@ def parse_header(root: Path, known: set[str]) -> tuple[dict[str, list[str]], lis
 
 
 def parse_doc(root: Path, rel: str, known: set[str]) -> tuple[dict[str, list[str]], list[str]]:
-    """Return (getter -> properties named by its summary row, errors) from one verifier doc."""
+    """Return (getter -> properties named by its summary row, errors) from one verifier doc.
+
+    Rows are collected without reference to `known` so that a row surviving a getter's deletion is
+    still returned, and so reaches the caller's "documented but has no initializer" check. Only the
+    malformed-row sweep is scoped to `known`, because its pattern alone cannot tell a property-set
+    row from the several unrelated API tables these docs key on a `method()` cell.
+    """
     text = read(root, rel)
-    parsed = {m.group(1): split_names(m.group(2)) for m in DOC_ROW_RE.finditer(text) if m.group(1) in known}
-    errors = [
+    parsed: dict[str, list[str]] = {}
+    errors: list[str] = []
+    for m in DOC_ROW_RE.finditer(text):
+        if m.group(1) in parsed:
+            errors.append(
+                f"{rel}: `{m.group(1)}()` has more than one summary row -- the rows can disagree and "
+                f"only one is compared, so keep exactly one"
+            )
+            continue
+        parsed[m.group(1)] = split_names(m.group(2))
+    errors += [
         f"{rel}: the row for `{m.group(1)}()` does not spell its members as a `` `{{A, B, C}}` `` cell, "
         f"so it goes unpoliced"
         for m in DOC_ROW_ANY_RE.finditer(text)
