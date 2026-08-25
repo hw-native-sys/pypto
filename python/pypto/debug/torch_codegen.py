@@ -608,6 +608,13 @@ def _assemble(target, source, offsets, atomic=0):
     else:
         target[slices] = source[valid_slices]
     return target
+
+def _acc_init(acc, prod, init_cond):
+    # `init_cond` is the MAD's cmatrixInit bit: where the predicate holds the op
+    # *overwrites* the accumulator with the fresh product instead of adding into
+    # it.  The predicate is a BOOL *scalar*, so this is a whole-op branch rather
+    # than an elementwise torch.where.
+    return prod if init_cond else acc + prod
 """
 
 # ---------------------------------------------------------------------------
@@ -663,17 +670,55 @@ def _handle_tensor_matmul(a: list[str], kw: dict[str, Any]) -> str:
     return expr
 
 
+def _acc_expr(acc: str, prod: str, init_cond: str | None) -> str:
+    """Combine an accumulator with a fresh matmul product.
+
+    The accumulating matmuls take an optional trailing `init_cond` operand -- a
+    BOOL scalar carrying the MAD's ``cmatrixInit`` bit.  Where it holds, the op
+    *overwrites* `acc` with `prod` instead of accumulating into it, so dropping
+    it would model an overwrite as an accumulate.
+
+    Args:
+        acc: Emitted expression for the accumulator operand
+        prod: Emitted expression for the `lhs @ rhs` product
+        init_cond: Emitted expression for the predicate, or None when the call
+            carries no `init_cond` operand (always accumulate)
+
+    Returns:
+        A Python expression string for the op's result
+    """
+    if init_cond is None:
+        return f"({acc} + {prod})"
+    # Fold a literal predicate the way the pto backend does, so the generated
+    # script keeps the shape of the branch the machine actually takes.
+    if init_cond in ("True", "1"):
+        return prod
+    if init_cond in ("False", "0"):
+        return f"({acc} + {prod})"
+    return f"_acc_init({acc}, {prod}, {init_cond})"
+
+
+def _init_cond_arg(a: list[str], index: int) -> str | None:
+    """Return the emitted `init_cond` operand at `index`, or None if absent."""
+    return a[index] if len(a) > index else None
+
+
 def _handle_tensor_matmul_acc(a: list[str], kw: dict[str, Any]) -> str:
     acc, lhs, rhs = a[0], a[1], a[2]
     if kw.get("a_trans"):
         lhs = f"{lhs}.mT"
     if kw.get("b_trans"):
         rhs = f"{rhs}.mT"
-    expr = f"({acc} + torch.matmul({lhs}, {rhs}))"
+    expr = _acc_expr(acc, f"torch.matmul({lhs}, {rhs})", _init_cond_arg(a, 3))
     out_dtype = kw.get("out_dtype")
     if isinstance(out_dtype, DataType):
         expr = f"{expr}.to({_torch_dtype(out_dtype)})"
     return expr
+
+
+def _tile_matmul_acc(a: list[str], _kw: dict[str, Any]) -> str:
+    """Accumulating tile matmul; `.float()` matches hardware FP32 accumulation."""
+    return _acc_expr(a[0], f"torch.matmul({a[1]}, {a[2]}).float()", _init_cond_arg(a, 3))
 
 
 def _handle_cast(a: list[str], kw: dict[str, Any]) -> str:
@@ -1078,11 +1123,11 @@ def _register_ops() -> None:  # noqa: PLR0915
     # tile matmul variants — .float() to match hardware FP32 accumulation output
     m["tile.matmul"] = lambda a, _kw: f"torch.matmul({a[0]}, {a[1]}).float()"
     m["tile.batch_matmul"] = lambda a, _kw: f"torch.matmul({a[0]}, {a[1]}).float()"
-    m["tile.matmul_acc"] = lambda a, _kw: f"({a[0]} + torch.matmul({a[1]}, {a[2]}).float())"
-    m["tile.batch_matmul_acc"] = lambda a, _kw: f"({a[0]} + torch.matmul({a[1]}, {a[2]}).float())"
+    m["tile.matmul_acc"] = _tile_matmul_acc
+    m["tile.batch_matmul_acc"] = _tile_matmul_acc
     m["tile.matmul_bias"] = lambda a, _kw: f"(torch.matmul({a[0]}, {a[1]}).float() + {a[2]})"
     m["tile.gemv"] = lambda a, _kw: f"torch.matmul({a[0]}, {a[1]}).float()"
-    m["tile.gemv_acc"] = lambda a, _kw: f"({a[0]} + torch.matmul({a[1]}, {a[2]}).float())"
+    m["tile.gemv_acc"] = _tile_matmul_acc
     m["tile.gemv_bias"] = lambda a, _kw: f"(torch.matmul({a[0]}, {a[1]}).float() + {a[2]})"
 
     # tile ternary ops (third arg is workspace/tmp, ignore it)

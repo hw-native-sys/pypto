@@ -85,6 +85,27 @@ torch_codegen(node: _ir.Program | _ir.Function, check_shapes: bool = False) -> s
 - cross-core 管道操作
 - `system.*` 操作（调试场景下按 no-op 处理）
 
+### 累加型 matmul 与 `init_cond`
+
+`tile.matmul_acc` / `tensor.matmul_acc` 可以带一个可选的尾部 `init_cond`
+操作数——一个承载 MAD `cmatrixInit` 位的 BOOL 标量（scalar）。在谓词成立的迭代上，
+该算子会用 `lhs @ rhs` **覆盖**（overwrite）累加器，而不是累加进去；因此忽略它的参考
+实现会把覆盖建模成累加。
+
+该谓词是*标量*而非逐元素掩码，所以生成的是整个算子级别的分支，而不是 `torch.where`：
+
+| 调用 | 生成的表达式 |
+| ---- | ------------ |
+| `matmul_acc(acc, a, b)` | `(acc + torch.matmul(a, b).float())` |
+| `matmul_acc(acc, a, b, k == 0)` | `_acc_init(acc, torch.matmul(a, b).float(), (k == 0))` |
+| `matmul_acc(acc, a, b, True)` | `torch.matmul(a, b).float()` |
+| `matmul_acc(acc, a, b, False)` | `(acc + torch.matmul(a, b).float())` |
+
+字面量谓词会直接折叠成它所选中的那一支，这与 PTO codegen 选择 `pto.tmatmul` 而非
+`pto.tmatmul.acc`（而不是对编译期常量发射 `scf.if`）的做法一致。`_acc_init` 是
+preamble 中的辅助函数；`tile.batch_matmul_acc` 和 `tile.gemv_acc` 共用同一个
+emitter，因此一旦这些算子将来支持该谓词，它们可以直接受益。
+
 ### cross-core 相关映射
 
 - `tile.tpush_to_aiv` -> `_cross_core_rt.push_to_aiv(tile, split[, lane_stride])`

@@ -449,6 +449,120 @@ def test_tile_matmul_acc():
     assert "acc + torch.matmul(a, b).float()" in code
 
 
+def test_tile_matmul_acc_runtime_init_cond_overwrites():
+    """A runtime init_cond must overwrite the accumulator, not accumulate into it."""
+
+    @pl.program
+    class SplitKFromNonZeroAcc:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            seed: pl.Tensor[[16, 16], pl.FP32],
+            lhs: pl.Tensor[[16, 32], pl.FP32],
+            rhs: pl.Tensor[[32, 16], pl.FP32],
+            output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            # A *non-zero* accumulator is what separates overwrite from
+            # accumulate; the tile.create zero seed the compiler emits today
+            # makes the two coincide. Seeding it with a matmul both keeps the
+            # accumulator in Acc and gives it a value the k0 == 0 step must drop.
+            seed_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(
+                seed, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat
+            )
+            head: pl.Tile[[16, 16], pl.FP32] = pl.load(
+                lhs, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat
+            )
+            acc_tile: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Acc] = pl.matmul(seed_tile, head)
+            for k0 in pl.range(0, 32, 16):
+                a: pl.Tile[[16, 16], pl.FP32] = pl.load(
+                    lhs, [0, k0], [16, 16], target_memory=pl.MemorySpace.Mat
+                )
+                b: pl.Tile[[16, 16], pl.FP32] = pl.load(
+                    rhs, [k0, 0], [16, 16], target_memory=pl.MemorySpace.Mat
+                )
+                acc_tile = pl.matmul_acc(acc_tile, a, b, init_cond=(k0 == 0))
+            return pl.store(acc_tile, [0, 0], output)
+
+    code = torch_codegen(SplitKFromNonZeroAcc)
+    assert "_acc_init(acc_tile, torch.matmul(a, b).float(), (k0 == 0))" in code
+
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102
+    seed = torch.full((16, 16), 3.0)
+    lhs = torch.ones(16, 32)
+    rhs = torch.ones(32, 16)
+    out = torch.zeros(16, 16)
+    ns["kernel"](seed, lhs, rhs, out)
+
+    # k0 == 0 overwrites the seeded accumulator; k0 == 16 accumulates into it.
+    overwrite = lhs[:, :16] @ rhs[:16, :] + lhs[:, 16:] @ rhs[16:, :]
+    assert torch.allclose(out, overwrite)
+    # Dropping the predicate would fold the seed product in instead.
+    assert not torch.allclose(out, seed @ lhs[:, :16] + overwrite)
+
+
+def test_tile_matmul_acc_literal_init_cond_folds():
+    """A literal init_cond picks one arm outright, mirroring the pto backend."""
+
+    @pl.program
+    class MatmulAccInitTrue:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            lhs: pl.Tensor[[16, 16], pl.FP32],
+            rhs: pl.Tensor[[16, 16], pl.FP32],
+            output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            a: pl.Tile[[16, 16], pl.FP32] = pl.load(lhs, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat)
+            b: pl.Tile[[16, 16], pl.FP32] = pl.load(rhs, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat)
+            acc: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Acc] = pl.matmul(a, b)
+            out_tile: pl.Tile[[16, 16], pl.FP32] = pl.tile.matmul_acc(acc, a, b, init_cond=True)
+            return pl.store(out_tile, [0, 0], output)
+
+    @pl.program
+    class MatmulAccInitFalse:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            lhs: pl.Tensor[[16, 16], pl.FP32],
+            rhs: pl.Tensor[[16, 16], pl.FP32],
+            output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            a: pl.Tile[[16, 16], pl.FP32] = pl.load(lhs, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat)
+            b: pl.Tile[[16, 16], pl.FP32] = pl.load(rhs, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat)
+            acc: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Acc] = pl.matmul(a, b)
+            out_tile: pl.Tile[[16, 16], pl.FP32] = pl.tile.matmul_acc(acc, a, b, init_cond=False)
+            return pl.store(out_tile, [0, 0], output)
+
+    # True selects the overwrite arm outright -- the accumulator drops out.
+    assert "out_tile = torch.matmul(a, b).float()" in torch_codegen(MatmulAccInitTrue)
+    # False selects the accumulating arm, identical to carrying no predicate.
+    assert "out_tile = (acc + torch.matmul(a, b).float())" in torch_codegen(MatmulAccInitFalse)
+
+
+def test_tensor_matmul_acc_init_cond_with_transpose():
+    """tensor.matmul_acc must honour init_cond alongside a_trans/b_trans."""
+
+    @pl.program
+    class TensorSplitK:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            acc: pl.Tensor[[16, 16], pl.FP32],
+            # a_trans=True, so lhs is [K=32, M=16] and the product is [16, 16].
+            lhs: pl.Tensor[[32, 16], pl.FP32],
+            rhs: pl.Tensor[[32, 16], pl.FP32],
+            output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            result: pl.Tensor[[16, 16], pl.FP32] = acc
+            for k0 in pl.range(0, 2):
+                result = pl.matmul_acc(result, lhs, rhs, a_trans=True, init_cond=(k0 == 0))
+            return pl.assemble(output, result, [0, 0])
+
+    code = torch_codegen(TensorSplitK)
+    assert "_acc_init(result, torch.matmul(lhs.mT, rhs), (k0 == 0))" in code
+
+
 def test_tile_cmp():
     """tile.cmp should emit correct comparison operator."""
     a = _tile_var("a", [64])
