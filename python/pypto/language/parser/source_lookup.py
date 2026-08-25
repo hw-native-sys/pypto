@@ -27,8 +27,8 @@ may each define ``class Prog``, and both carry the qualname
 ``make.<locals>.Prog``. ``inspect.findsource`` resolves that by source order —
 it returns the *first* definition for every one of them, so a decorator built on
 it silently parses the wrong body. This module instead locates the definition
-that actually produced ``cls`` from the line numbers of the code objects in the
-class body (``vars(cls)``), and raises `DuplicateClassDefinitionError` when
+that actually produced ``cls`` from the line numbers of the code objects its
+body defines in this same file, and raises `DuplicateClassDefinitionError` when
 nothing in the class object can distinguish the candidates. Guessing is never a
 valid answer here: the caller would compile a body the user never wrote.
 
@@ -42,6 +42,7 @@ import ast
 import dataclasses
 import inspect
 import linecache
+import os
 import types
 from collections.abc import Iterator
 from typing import Any
@@ -189,21 +190,57 @@ def _code_objects(value: Any) -> Iterator[types.CodeType]:
             yield code
 
 
-def _member_definition_lines(cls: type) -> set[int]:
-    """Return the source lines of every code object defined in ``cls``'s body.
+def _identifies_source_file(candidate: str, source_file: str) -> bool:
+    """True when ``candidate`` names the same file as ``source_file``.
+
+    Compares the strings first, which is the normal case — a module's methods
+    record the very filename ``inspect.getsourcefile`` reports for its classes —
+    and falls back to an inode comparison so a symlinked or differently-spelled
+    path still counts. A name no file backs, such as an ``exec`` pseudo-filename,
+    identifies nothing.
+    """
+    if candidate == source_file:
+        return True
+    try:
+        return os.path.samefile(candidate, source_file)
+    except (OSError, ValueError):
+        return False
+
+
+def _member_definition_lines(cls: type, source_file: str) -> set[int]:
+    """Return the ``source_file`` lines of the code objects defined in ``cls``'s body.
 
     Each line is where CPython recorded the member's definition — the first
     decorator line for a decorated ``def``, the ``def`` line otherwise. Both fall
     strictly inside the owning ``class`` block, which is what makes them usable
-    as evidence of *which* same-named class body ran. Members assigned from
-    elsewhere (``m = some_module_level_func``) land outside every candidate and
-    are simply not evidence.
+    as evidence of *which* same-named class body ran.
+
+    A line number only means something in the file it was recorded against, so a
+    member whose code object comes from *another* file is dropped rather than
+    measured against this one. A class body may hold such a member as an ordinary
+    attribute (``helper = some_imported_function``), and its unrelated line can
+    otherwise land inside a sibling candidate's block and manufacture an
+    ambiguity that does not exist. Members assigned from elsewhere in this same
+    file need no special case: they land outside every candidate and are simply
+    not evidence.
     """
     try:
         namespace = vars(cls)
     except TypeError:
         return set()
-    return {code.co_firstlineno for value in namespace.values() for code in _code_objects(value)}
+
+    lines: set[int] = set()
+    # Filenames repeat across a class body; resolving each one once keeps the
+    # inode fallback off the per-member path.
+    is_this_file: dict[str, bool] = {}
+    for value in namespace.values():
+        for code in _code_objects(value):
+            filename = code.co_filename
+            if filename not in is_this_file:
+                is_this_file[filename] = _identifies_source_file(filename, source_file)
+            if is_this_file[filename]:
+                lines.add(code.co_firstlineno)
+    return lines
 
 
 def _resolve_class_site(cls: type, source_file: str, sites: list[_ClassSite]) -> _ClassSite:
@@ -211,7 +248,8 @@ def _resolve_class_site(cls: type, source_file: str, sites: list[_ClassSite]) ->
 
     Args:
         cls: Class being located
-        source_file: File the sites were indexed from, for the error message
+        source_file: File the sites were indexed from; also scopes which member
+            code objects count as line evidence
         sites: Every definition of ``cls``'s qualname, in source order
 
     Returns:
@@ -224,7 +262,7 @@ def _resolve_class_site(cls: type, source_file: str, sites: list[_ClassSite]) ->
     if len(sites) == 1:
         return sites[0]
 
-    member_lines = _member_definition_lines(cls)
+    member_lines = _member_definition_lines(cls, source_file)
     matched = [site for site in sites if any(site.contains(line) for line in member_lines)]
     if len(matched) == 1:
         return matched[0]

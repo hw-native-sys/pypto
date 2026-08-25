@@ -2500,6 +2500,30 @@ class TestClassSourceLookup:
             assert f'WHICH = "{cls.WHICH}"' in block, f"resolved the wrong body for WHICH={cls.WHICH}"
             assert cls.which.__code__.co_firstlineno > start, "method must sit inside the resolved block"
 
+    def test_a_member_from_another_file_is_not_line_evidence(self):
+        """A class attribute defined in a *different* file contributes no line.
+
+        Its `co_firstlineno` is numbered against its own file, so measuring it
+        against this one can land inside a sibling candidate's block and
+        manufacture an ambiguity that does not exist. A class body holding
+        `helper = some_imported_function` is exactly that shape.
+        """
+        first, second = _make_shadowed_classes()
+        _, first_start = source_lookup.get_class_source_lines(first)
+
+        # A callable from another file whose line falls inside the FIRST block.
+        decoy_line = first_start + 1
+        decoy_source = "\n" * (decoy_line - 1) + "def decoy(): pass\n"
+        namespace = {}
+        exec(compile(decoy_source, "<not-this-file>", "exec"), namespace)  # noqa: S102
+        setattr(second, "decoy", namespace["decoy"])
+        assert getattr(second, "decoy").__code__.co_firstlineno == decoy_line
+
+        lines, start = source_lookup.get_class_source_lines(second)
+
+        assert 'WHICH = "second"' in "".join(lines), "an unrelated file's line steered the lookup"
+        assert start != first_start
+
     def test_indistinguishable_shadowed_qualname_is_reported_not_guessed(self):
         """With no evidence to pick a definition, the lookup refuses to guess.
 
