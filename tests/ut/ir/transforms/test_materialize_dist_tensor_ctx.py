@@ -821,7 +821,7 @@ def test_submit_prefix_runtime_out_keeps_ctx_after_passed_args():
         @pl.function(type=pl.FunctionType.Orchestration)
         def main(self, data: pld.DistributedTensor[[4], pl.FP32]):
             with pl.manual_scope():
-                out, tid = pl.submit(self.stage, data)
+                out, _tid = pl.submit(self.stage, data)
             return out
 
     @pl.program
@@ -838,7 +838,7 @@ def test_submit_prefix_runtime_out_keeps_ctx_after_passed_args():
         @pl.function(type=pl.FunctionType.Orchestration)
         def main(self, data: pld.DistributedTensor[[4], pl.FP32], data_ctx: pld.CommCtx):
             with pl.manual_scope():
-                out, tid = pl.submit(
+                out, _tid = pl.submit(
                     self.stage,
                     data,
                     data_ctx,

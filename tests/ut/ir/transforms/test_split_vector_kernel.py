@@ -376,6 +376,11 @@ class TestSplitVectorKernelNoSplitA2A3:
         when every operand is a zero-valid replay tile -- the same static/zero
         hazard gh#1649 hit for subview slices. The replay result is discarded, so
         lane1 emits an empty tile of the transposed shape instead (gh#1761).
+
+        The tile is deliberately non-square (``[16, 8] -> [8, 16]``): with a
+        square one the replay ``tile.create`` would have the same shape whether
+        the rewrite took the transpose's result shape or its source shape, so
+        the comparison would not pin which.
         """
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
@@ -385,15 +390,15 @@ class TestSplitVectorKernelNoSplitA2A3:
             @pl.function(type=pl.FunctionType.AIV, attrs={"dual_aiv_dispatch": True})
             def main_aiv(
                 self,
-                data: pl.Tensor[[16, 16], pl.FP32],
-                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
-            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                data: pl.Tensor[[16, 8], pl.FP32],
+                out: pl.Out[pl.Tensor[[8, 16], pl.FP32]],
+            ) -> pl.Tensor[[8, 16], pl.FP32]:
                 slot_buf = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="main_aic")
                 pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=slot_buf)
-                loaded: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    data, [0, 0], [16, 16], target_memory=pl.MemorySpace.Vec
+                loaded: pl.Tile[[16, 8], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    data, [0, 0], [16, 8], target_memory=pl.MemorySpace.Vec
                 )
-                transposed: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.transpose(loaded, 0, 1)
+                transposed: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.transpose(loaded, 0, 1)
                 pl.tpush_to_aic(transposed, split=0)
                 return out
 
@@ -402,29 +407,30 @@ class TestSplitVectorKernelNoSplitA2A3:
             @pl.function(type=pl.FunctionType.AIV, attrs={"dual_aiv_dispatch": True})
             def main_aiv(
                 self,
-                data: pl.Tensor[[16, 16], pl.FP32],
-                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
-            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                data: pl.Tensor[[16, 8], pl.FP32],
+                out: pl.Out[pl.Tensor[[8, 16], pl.FP32]],
+            ) -> pl.Tensor[[8, 16], pl.FP32]:
                 subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
                 slot_buf = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="main_aic")
                 pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=slot_buf)
                 if subblock_idx == 0:
-                    loaded: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                        data, [0, 0], [16, 16], target_memory=pl.MemorySpace.Vec
+                    loaded: pl.Tile[[16, 8], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                        data, [0, 0], [16, 8], target_memory=pl.MemorySpace.Vec
                     )
-                    transposed: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.transpose(
+                    transposed: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.transpose(
                         loaded, 0, 1
                     )
                     pl.tpush_to_aic(transposed, split=0)
                     return out
                 else:
-                    # Lane 1 keeps no transpose at all — the hazard the rewrite avoids.
+                    # Lane 1 keeps no transpose at all -- the hazard the rewrite
+                    # avoids -- and its empty tile carries the TRANSPOSED shape.
                     loaded_lane1: pl.Tile[
-                        [16, 16], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[0, 0])
-                    ] = pl.tile.create([16, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+                        [16, 8], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[0, 0])
+                    ] = pl.tile.create([16, 8], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
                     transposed_lane1: pl.Tile[
-                        [16, 16], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[0, 0])
-                    ] = pl.tile.create([16, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+                        [8, 16], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[0, 0])
+                    ] = pl.tile.create([8, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
                     pl.tpush_to_aic(transposed_lane1, split=0)
                     return out
 

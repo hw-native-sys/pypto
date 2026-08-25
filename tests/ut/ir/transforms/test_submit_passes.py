@@ -15,12 +15,13 @@ comparisons verify that DCE / SSA preserve the structural shape (op, args,
 first-class ``deps_``, the SPMD launch spec) without leaking Vars or degrading
 Submit to Call.
 
-Two former round-trip tests are folded into those comparisons rather than
-asserted separately: ``convert_to_ssa()`` runs at the default
-``VerificationLevel.BASIC``, whose round-trip instrument prints and re-parses
-the pass output on every case below. That is strictly stronger than the
-substring check on the printed ``pl.submit`` form it replaces, and it is what
-pins that the single-LHS print form re-parses.
+The print -> re-parse round-trip of the single-LHS ``pl.submit`` form is
+asserted explicitly by ``test_submit_single_lhs_form_round_trips`` below,
+NOT left to the ambient verification fixture. The conftest installs the
+round-trip instrument only when ``PYPTO_VERIFY_LEVEL`` is ``roundtrip`` (the
+default); under the supported ``basic`` level it installs property
+verification alone, so the structural comparisons here would never reach the
+printer or the parser.
 """
 
 import pypto.language as pl
@@ -38,9 +39,9 @@ from pypto import ir, passes
 # ``Call`` has a different node kind), ``args`` / ``deps`` / ``core_num`` point
 # at the post-rename versions, and the SPMD launch spec survives.
 #
-# ``convert_to_ssa()`` runs at the default VerificationLevel.BASIC, so the
-# print -> re-parse round-trip instrument also runs on every one of these —
-# which is what pins that the single-LHS ``pl.submit`` print form re-parses.
+# The single-LHS ``pl.submit`` print form is pinned separately and explicitly
+# by ``test_submit_single_lhs_form_round_trips``; these comparisons are
+# structural only and do not exercise the printer.
 # ---------------------------------------------------------------------------
 
 
@@ -155,6 +156,35 @@ def test_ssa_remaps_spmd_submit_core_num_var():
             return res, tid
 
     ir.assert_structural_equal(passes.convert_to_ssa()(Before), Expected)
+
+
+def test_submit_single_lhs_form_round_trips():
+    """The single-LHS print form re-parses to a structurally identical program.
+
+    ``convert_to_ssa`` prints a Submit as
+    ``res: pl.Tuple[..., pl.Scalar[pl.TASK_ID]] = pl.submit(...)`` rather than
+    as an ``out, tid = ...`` unpacking, and the parser has to accept that form
+    back. Asserted here with an explicit print -> parse -> compare so it holds
+    at every ``PYPTO_VERIFY_LEVEL``, including ``basic``, where the conftest
+    installs no round-trip instrument.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function
+        def kernel(self, x: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+            return x
+
+        @pl.function
+        def caller(self, a: pl.Scalar[pl.INDEX], t: pl.Scalar[pl.TASK_ID]):
+            with pl.manual_scope():
+                res, tid = pl.submit(self.kernel, a, deps=[t])
+            return res, tid
+
+    After = passes.convert_to_ssa()(Before)
+    printed = After.as_python()
+    assert "pl.submit(self.kernel" in printed, printed
+    ir.assert_structural_equal(pl.parse_program(printed), After)
 
 
 # ---------------------------------------------------------------------------
