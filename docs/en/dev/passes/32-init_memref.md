@@ -1,14 +1,15 @@
 # InitMemRef Pass
 
-Initializes MemRef for all variables and creates alloc operations with unallocated addresses.
+Materializes compiler-owned PTO level3 scratch, initializes MemRef for all variables, and creates alloc operations with unallocated addresses.
 
 ## Overview
 
-This pass performs three tasks:
+This pass performs four tasks:
 
 1. **Normalizes statement structure** (calls NormalizeStmtStructure internally)
-2. **Initializes MemRef** for TileType and TensorType variables
-3. **Creates `tile.alloc` operations** for each non-DDR MemRef with `addr=-1` (unallocated)
+2. **Materializes compiler-owned level3 scratch** for the A2/A3 `tile.ci`, narrowing `tile.cast`, and required `tile.sort32` forms that need an explicit tmp under level3
+3. **Initializes MemRef** for TileType and TensorType variables
+4. **Creates `tile.alloc` operations** for each non-DDR MemRef with `addr=-1` (unallocated)
 
 Memory space is read from `TileType::memory_space_` (set by InferTileMemorySpace). Variables without `memory_space` default to DDR.
 
@@ -44,16 +45,17 @@ program_with_memrefs = init_pass(program)
 ## Algorithm
 
 1. **Normalize structure**: Call `NormalizeStmtStructure` to ensure flat `SeqStmts` structure
-2. **Resolve declared allocations**: Collect every one-argument `pl.MemRef(...)` declaration and derive each one's size and memory space from the tiles bound to it (see [Declared allocations](#declared-allocations))
-3. **Initialize MemRef**: Read `memory_space` from `TileType` (set by InferTileMemorySpace), create MemRef objects (addr=-1) and attach to variable types
+2. **Materialize level3 scratch**: Under the PyPTO or DSA-RP planner on A2/A3, insert ordinary Vec `tile.create` values for missing compiler-owned `tile.ci`, narrowing `tile.cast`, and required `tile.sort32` scratch. Explicit caller tmp on `tile.sel` / `tile.sels` / `tile.prelu` is preserved. The PTOAS planner and A5 are unchanged.
+3. **Resolve declared allocations**: Collect every one-argument `pl.MemRef(...)` declaration and derive each one's size and memory space from the tiles bound to it (see [Declared allocations](#declared-allocations))
+4. **Initialize MemRef**: Read `memory_space` from `TileType` (set by InferTileMemorySpace), create MemRef objects (addr=-1) and attach to variable types
    - **tile.store**: result shares MemRef with the output tensor argument (specified by `output_reuses_input_arg` registry attribute)
    - **View ops** (e.g. `tile.reshape`): output shares MemRef with the input tile
    - **Reuse-input ops** (e.g. `tile.matmul_acc`, `tile.gemv_acc`): output shares MemRef with the specified input (via `output_reuses_input_arg` registry attribute)
    - **ForStmt/IfStmt return_vars**: patched to share MemRef with corresponding yield values
    - **Declared allocations**: the tile keeps the allocation the author declared instead of getting a fresh one
-4. **Collect non-DDR MemRefs**: Gather unique MemRef objects from TileType variables that are not in DDR
-5. **Create alloc statements**: For each non-DDR MemRef, create `tile.alloc(memspace, -1, size, id)` — with `pinned=True` when the base was declared by the author
-6. **Prepend allocs**: Insert alloc statements at the beginning of the function body's top-level `SeqStmts`
+5. **Collect non-DDR MemRefs**: Gather unique MemRef objects from TileType variables that are not in DDR
+6. **Create alloc statements**: For each non-DDR MemRef, create `tile.alloc(memspace, -1, size, id)` — with `pinned=True` when the base was declared by the author
+7. **Prepend allocs**: Insert alloc statements at the beginning of the function body's top-level `SeqStmts`
 
 ## Declared allocations
 
@@ -203,6 +205,7 @@ Pass InitMemRef();
 **Implementation**: `src/ir/transforms/init_memref.cpp`
 
 - `NormalizeStmtStructure` is called internally before MemRef initialization
+- `MaterializePtoLevel3ScratchMutator` inserts only missing compiler-owned optional scratch (`tile.ci`, narrowing `tile.cast`, required `tile.sort32`) after all tile shape/cast rewrites and before MemRef collection; explicit caller tmp on `tile.sel` / `tile.sels` / `tile.prelu` is preserved
 - `InitMemRefMutator` reads `memory_space` from `TileType` and creates MemRef objects
   - Handles MemRef sharing for view ops, reuse-input ops (`tile.store`, `matmul_acc`, `gemv_acc`), tile aliases (`a = b`), and ForStmt/IfStmt yield values
 - `NonDDRMemRefCollector` collects unique non-DDR MemRefs
@@ -220,6 +223,7 @@ passes.def("init_mem_ref", &pass::InitMemRef, "Initialize MemRef for variables")
 - Tests addr=-1 for all MemRefs
 - Tests tile.alloc statements are created for non-DDR MemRefs
 - Tests normalized `SeqStmts` structure
+- Tests planner/target-gated `tile.ci`, narrowing `tile.cast`, and `tile.sort32` scratch materialization
 - Tests tile.store result shares MemRef with output param
 - Tests accumulate op (matmul_acc) MemRef sharing with accumulator input
 - Tests ForStmt loop-carry MemRef relationships (initValue/iter_arg sharing, yield/return_var sharing)

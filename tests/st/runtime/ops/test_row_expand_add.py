@@ -98,6 +98,7 @@ class TileRowExpandAddCase(PTOTestCase):
         self.packed_row_vector = packed_row_vector
         self.tmp_shape = tmp_shape
         self.tmp_dtype = tmp_dtype
+        self._platform = platform
 
     @property
     def row_vector_cols(self) -> int:
@@ -150,6 +151,10 @@ class TileRowExpandAddCase(PTOTestCase):
         use_tmp = self.use_tmp
         row_cols = self.row_vector_cols
         tmp_m, tmp_n = self.tmp_shape or (m, n)
+        if use_tmp and self.tmp_shape is None and self._platform == "a2a3":
+            # PTOAS v0.60's A2/A3 tmp-form reserves an 8 KiB workspace.
+            elem_bytes = self.dtype.torch_dtype.itemsize
+            tmp_n = max(tmp_n, (8192 + m * elem_bytes - 1) // (m * elem_bytes))
         tmp_dtype = _PL_DT[self.tmp_dtype or self.dtype]
 
         if use_tmp:

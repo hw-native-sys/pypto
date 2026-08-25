@@ -17,8 +17,12 @@
  * single instruction into a shortest sequence of native casts. Path search is
  * BFS over the native-conversion table the active BackendHandler supplies via
  * GetTcvtAdjacency(), so this pass holds no per-architecture knowledge of its
- * own. Typical outcome for A5 INT32→FP16 is INT32→FP32→FP16 — same byte-width
- * to float, then resize — which adds no precision loss beyond the final narrow.
+ * own for the cast graph. Typical outcome for A5 INT32→FP16 is INT32→FP32→FP16
+ * — same byte-width to float, then resize — which adds no precision loss beyond
+ * the final narrow.
+ *
+ * Scratch required by the final native hops is materialized immediately before
+ * MemRef initialization, after this pass has finished constructing the chain.
  */
 
 #include <algorithm>

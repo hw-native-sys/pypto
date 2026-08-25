@@ -18,7 +18,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <optional>
 #include <sstream>
 #include <string>
 #include <unordered_set>
@@ -26,6 +25,7 @@
 #include <vector>
 
 #include "pypto/backend/common/backend.h"
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
@@ -56,6 +56,8 @@ using ir::Var;
 using pto_ops_detail::AsPto;
 using pto_ops_detail::CheckSubviewTileCompat;
 using pto_ops_detail::EmitPartitionViewPTO;
+using pto_ops_detail::EnsureStaticViewTileSsa;
+using pto_ops_detail::EnsureTileViewSsa;
 using pto_ops_detail::GetDimStrings;
 using pto_ops_detail::GetIndexOffsetCodes;
 using pto_ops_detail::GetSizeCodes;
@@ -524,27 +526,85 @@ static std::string MakeGatherRowCodegenPTO(const CallPtr& op, codegen::CodegenBa
 }
 
 // Helper function for Sort32: emits pto.tsort32
-// PTOAS expects: ins(src, idx : src_type, idx_type) outs(dst : dst_type)
+// PTOAS expects: ins(src, idx[, tmp] : src_type, idx_type[, tmp_type]) outs(dst : dst_type)
 static std::string MakeSort32CodegenPTO(const std::string& pto_op_name, const CallPtr& op,
                                         codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
-  INTERNAL_CHECK_SPAN(op->args_.size() == 2, op->span_)
-      << "Operation:[" << pto_op_name << "] requires 2 arguments (src, idx), but got " << op->args_.size();
+  INTERNAL_CHECK_SPAN(op->args_.size() == 2 || op->args_.size() == 3, op->span_)
+      << "Operation:[" << pto_op_name << "] requires 2 or 3 arguments (src, idx[, tmp]), but got "
+      << op->args_.size();
 
+  const bool level3 = codegen.GetBackendHandler()->RequiresLevel3TmpScratch();
   std::string src = codegen.GetExprAsCode(op->args_[0]);
   std::string idx = codegen.GetExprAsCode(op->args_[1]);
   std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
   std::string idx_type = codegen.GetExprTypeAnnotation(op->args_[1]);
+  std::string tmp;
+  std::string tmp_type;
+  bool use_static_views = false;
+  if (level3 && op->args_.size() == 3) {
+    // A2/A3 level3 TSORT32 verifies explicit tmp against static valid_shape.
+    tmp = EnsureStaticViewTileSsa(op->args_[2], codegen, "sort32_tmp_view");
+    tmp_type = codegen.GetViewTileBufTypeStringFromTileType(As<ir::TileType>(op->args_[2]->GetType()));
+  } else if (level3) {
+    // alloc_tile carries valid extents as operands, so its SSA type remains
+    // dynamic even when the IR valid_shape is fully static. PTOAS uses the
+    // source *type* to decide whether an aligned tsort32 can skip implicit
+    // scratch. Rebind static inputs to zero-copy views so a 32-aligned width
+    // is recognized instead of being rejected as a dynamic level3 form.
+    auto src_tile = As<ir::TileType>(op->args_[0]->GetType());
+    auto idx_tile = As<ir::TileType>(op->args_[1]->GetType());
+    INTERNAL_CHECK_SPAN(src_tile && idx_tile, op->span_)
+        << "Internal error: tile.sort32 inputs must be TileType";
+    const auto src_valid = ir::tile_view_semantics::GetEffectiveTileView(*src_tile).valid_shape;
+    const bool has_static_valid =
+        src_valid.size() == 2 && As<ir::ConstInt>(src_valid[0]) && As<ir::ConstInt>(src_valid[1]);
+    if (has_static_valid) {
+      use_static_views = true;
+      src = EnsureStaticViewTileSsa(op->args_[0], codegen, "sort32_src_view");
+      idx = EnsureStaticViewTileSsa(op->args_[1], codegen, "sort32_idx_view");
+      src_type = codegen.GetViewTileBufTypeStringFromTileType(src_tile);
+      idx_type = codegen.GetViewTileBufTypeStringFromTileType(idx_tile);
+    }
+  } else if (op->args_.size() == 3) {
+    tmp = codegen.GetExprAsCode(op->args_[2]);
+    tmp_type = codegen.GetExprTypeAnnotation(op->args_[2]);
+  }
 
-  std::string dst = codegen.GetCurrentResultTarget();
-  std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
+  auto dst_var = codegen.GetCurrentResultVar();
+  INTERNAL_CHECK_SPAN(dst_var, op->span_) << "Internal error: tile.sort32 requires an assignment target";
+  auto dst_tile = As<ir::TileType>(dst_var->GetType());
+  INTERNAL_CHECK_SPAN(dst_tile, op->span_) << "Internal error: tile.sort32 result must be a TileType";
+  const bool use_static_dst = level3 && (op->args_.size() == 3 || use_static_views);
+  auto sort_dst_tile = dst_tile;
+  if (use_static_dst && !pto_ops_detail::HasStaticValidShape(dst_tile)) {
+    // Keep the result allocation's runtime logical valid_shape for downstream
+    // stores, but present TSORT32 with a static view of that allocation's full
+    // physical capacity. PTOAS A2/A3 rejects a dynamic destination view even
+    // though the source valid width determines how many tuples are produced.
+    auto physical_view = ir::tile_view_semantics::GetEffectiveTileView(*dst_tile);
+    physical_view.valid_shape = dst_tile->shape_;
+    sort_dst_tile = std::make_shared<ir::TileType>(dst_tile->shape_, dst_tile->dtype_, dst_tile->memref_,
+                                                   physical_view, dst_tile->memory_space_);
+  }
+  const std::string dst = use_static_dst
+                              ? EnsureTileViewSsa(dst_var, sort_dst_tile, codegen, "sort32_dst_view")
+                              : codegen.GetCurrentResultTarget();
+  const std::string dst_type = use_static_dst ? codegen.GetViewTileBufTypeStringFromTileType(sort_dst_tile)
+                                              : codegen.GetCurrentResultTileBufTypeString();
 
   std::ostringstream oss;
   oss << pto_op_name;
-  // ins clause: src, idx
+  // ins clause: src, idx[, tmp]
   oss << " ins(" << src << ", " << idx;
-  if (!src_type.empty() || !idx_type.empty()) {
+  if (!tmp.empty()) {
+    oss << ", " << tmp;
+  }
+  if (!src_type.empty() || !idx_type.empty() || !tmp_type.empty()) {
     oss << " : " << src_type << ", " << idx_type;
+    if (!tmp.empty()) {
+      oss << ", " << tmp_type;
+    }
   }
   // outs clause: dst only (idx is modified in-place by hardware)
   oss << ") outs(" << dst;

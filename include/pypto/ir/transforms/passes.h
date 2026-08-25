@@ -141,7 +141,10 @@ Pass CreateProgramPass(std::function<ProgramPtr(const ProgramPtr&)> transform, c
 /**
  * @brief Create an init memref pass
  *
- * Initializes MemRef for all variables in functions.
+ * Materializes compiler-owned PTO level3 scratch after tile rewriting, then
+ * initializes MemRef for all variables in functions. The scratch becomes an
+ * ordinary tile allocation so PyPTO/DSA-RP can reuse and place it; PTOAS-owned
+ * level2 planning is left untouched.
  * Sets memory space to UB by default, or DDR for tile.load/tile.store operands.
  */
 Pass InitMemRef();

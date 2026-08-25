@@ -34,12 +34,13 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
+#include "src/ir/op/sort_utils.h"
 
 namespace pypto {
 namespace ir {
 
 // ============================================================================
-// tensor.sort32 — sorts fixed 32-element blocks, output has last dim doubled.
+// tensor.sort32 — sorts fixed 32-element blocks into 8-byte value-index pairs.
 // ============================================================================
 
 TypePtr DeduceTensorSort32Type(const std::vector<ExprPtr>& args,
@@ -77,17 +78,10 @@ TypePtr DeduceTensorSort32Type(const std::vector<ExprPtr>& args,
         << "The operator " << op_name << " requires idx shape to match src shape at axis " << i;
   }
 
-  std::vector<ExprPtr> output_shape(input_shape.begin(), input_shape.end() - 1);
-  auto last_dim = input_shape.back();
-  if (auto const_dim = As<ConstInt>(last_dim)) {
-    int64_t doubled = const_dim->value_ * 2;
-    output_shape.push_back(std::make_shared<ConstInt>(doubled, DataType::INDEX, Span::unknown()));
-  } else {
-    auto two = std::make_shared<ConstInt>(2, DataType::INDEX, Span::unknown());
-    output_shape.push_back(std::make_shared<Mul>(last_dim, two, DataType::INDEX, Span::unknown()));
-  }
-
-  return std::make_shared<TensorType>(output_shape, src_type->dtype_);
+  const auto output_shape = GetSort32OutputShape(input_shape, src_type->dtype_, args[0]->span_);
+  const auto output_valid_shape =
+      GetSort32OutputShape(GetValidShape(src_type), src_type->dtype_, args[0]->span_);
+  return MakeFreshTensorType(output_shape, src_type->dtype_, output_valid_shape);
 }
 
 REGISTER_OP("tensor.sort32")

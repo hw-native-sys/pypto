@@ -138,6 +138,8 @@ void BindBackend(nb::module_& m) {
            "Whether ExpandMixedKernel must inject the GM-backed pipe slot buffer")
       .def("requires_split_load_tpop_workaround", &BackendHandler::RequiresSplitLoadTpopWorkaround,
            "Whether MemoryReuse must apply the load + tpop_from_aic in-place hazard guard")
+      .def("requires_level3_tmp_scratch", &BackendHandler::RequiresLevel3TmpScratch,
+           "Whether InitMemRef/codegen must materialize PTOAS level-3 explicit tmp scratch")
       .def("requires_vto_c_fractal_adapt", &BackendHandler::RequiresVtoCFractalAdapt,
            "Whether AIV-side V-to-C tpush must materialise a fractal-layout adapter move")
       .def("requires_runtime_subblock_bridge", &BackendHandler::RequiresRuntimeSubblockBridge,

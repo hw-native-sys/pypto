@@ -1720,8 +1720,8 @@ def scatter_update(input: T, *args: Any, **kwargs: Any) -> T:
 def sort32(src: T, idx: T) -> T:
     """Sort fixed 32-element blocks, permuting ``idx`` alongside ``src``.
 
-    Dispatched by input type. Returns sorted value-index pairs with a doubled
-    last dimension.
+    Dispatched by input type. Returns 8-byte value-index pairs; the last
+    dimension is 2x the input width for FP32 and 4x for FP16.
     """
     if isinstance(src, Tensor) and isinstance(idx, Tensor):
         return _tensor.sort32(src, idx)

@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <any>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -44,6 +45,7 @@
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/l0c_footprint.h"
 #include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
@@ -51,6 +53,7 @@
 #include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 #include "pypto/ir/verifier/verifier.h"
 
 namespace pypto {
@@ -148,6 +151,164 @@ std::optional<uint64_t> StaticSliceViewSpanBytes(const CallPtr& call, const Shap
   if (max_linear_offset == std::numeric_limits<uint64_t>::max()) return std::nullopt;
   return storage_size::StaticStorageBytes(max_linear_offset + 1, view->dtype_);
 }
+
+// ============================================================================
+// Compiler-owned PTO level3 scratch
+// ============================================================================
+
+// Compiler-owned PTO level3 scratch (A2/A3 under PyPTO/DSA-RP planners only).
+constexpr int64_t kA2A3CiScratchColsInt32 = 192;
+constexpr int64_t kA2A3CiScratchColsInt16 = 448;
+// PTOAS v0.60 makeTCvtTmpType head block: 4 bytes * 64 cols * min(cols/64, 255).
+constexpr int64_t kTcvtHeadBlockCols = 64;
+constexpr int64_t kTcvtHeadBlockBytes = 4;
+constexpr int64_t kTcvtHeadMaxBlocks = 255;
+constexpr int64_t kTcvtTailRowBytes = 32;
+constexpr int64_t kTcvtFp16HalfToI8Base = 128;
+constexpr int64_t kTcvtMinScratchBytes = 32;
+constexpr int64_t kTcvtScratchAlignBytes = 32;
+
+int64_t CeilDivI64(int64_t num, int64_t den) { return (num + den - 1) / den; }
+
+/// Non-saturating A2/A3 pto.tcvt forms whose ISA implementation needs a tmp.
+/// Mirrors PTOAS v0.60 `makeTCvtTmpType` for FP32->INT16 and FP16->{INT16,INT8,UINT8}.
+///
+/// Excludes INT4: pto-isa routes FP16<->INT4 through saturating `vconv_f162s4*`
+/// without a TmpTileData operand (`kIsNarrowingCvt` does not cover int4). PTOAS
+/// level3 therefore does not require an explicit tcvt tmp for those casts.
+bool TcvtNeedsLevel3Scratch(DataType src, DataType dst) {
+  if (src == DataType::FP32 && dst == DataType::INT16) return true;
+  return src == DataType::FP16 && (dst == DataType::INT16 || dst == DataType::INT8 || dst == DataType::UINT8);
+}
+
+/// Match PTOAS v0.60's makeTCvtTmpType capacity calculation. The returned byte
+/// count is represented as an i8 scratch tile so the shape is also its capacity.
+int64_t TcvtScratchCapacityBytes(const TileTypePtr& src_tile, DataType dst, const Span& span) {
+  const auto src_shape = src_tile->shape_;
+  const auto valid_shape = GetValidShape(src_tile);
+  CHECK_SPAN(src_shape.size() == 2 && valid_shape.size() == 2, span)
+      << "InitMemRef: A2/A3 narrowing tile.cast scratch requires a 2D source tile";
+  auto rows_ci = As<ConstInt>(valid_shape[0]);
+  auto cols_ci = As<ConstInt>(valid_shape[1]);
+  auto src_cols_ci = As<ConstInt>(src_shape[1]);
+  CHECK_SPAN(rows_ci && cols_ci && src_cols_ci, span)
+      << "InitMemRef: A2/A3 non-saturating narrowing tile.cast requires static source shape "
+         "and valid_shape to size its level3 scratch tile";
+
+  const int64_t rows = rows_ci->value_;
+  const int64_t cols = cols_ci->value_;
+  const int64_t src_cols = src_cols_ci->value_;
+  int64_t bytes = 0;
+  if (src_tile->dtype_ == DataType::FP32) {
+    if (rows > 0 && cols > 0) {
+      const int64_t head = kTcvtHeadBlockBytes * kTcvtHeadBlockCols *
+                           std::min<int64_t>(cols / kTcvtHeadBlockCols, kTcvtHeadMaxBlocks);
+      const int64_t remainder = cols % kTcvtHeadBlockCols;
+      const int64_t tail =
+          remainder == 0
+              ? 0
+              : kTcvtTailRowBytes * ((std::min<int64_t>(rows, kTcvtHeadMaxBlocks) - 1) * (src_cols / 8) +
+                                     CeilDivI64(remainder, 8));
+      bytes = std::max(head, tail);
+    }
+  } else if (src_tile->dtype_ == DataType::FP16 && cols > 0) {
+    const int64_t width = std::min<int64_t>(cols, kTcvtHeadBlockCols);
+    const int64_t half_to_i16 = kTcvtTailRowBytes * CeilDivI64(width, 8);
+    const int64_t half_to_i8 =
+        std::max(half_to_i16, kTcvtFp16HalfToI8Base + kTcvtTailRowBytes * CeilDivI64(width, 16));
+    bytes = (dst == DataType::INT8 || dst == DataType::UINT8) ? half_to_i8 : half_to_i16;
+  }
+  return std::max<int64_t>(kTcvtMinScratchBytes,
+                           CeilDivI64(bytes, kTcvtScratchAlignBytes) * kTcvtScratchAlignBytes);
+}
+
+ExprPtr MakeStaticShape(const std::vector<int64_t>& dims, const Span& span) {
+  std::vector<ExprPtr> elements;
+  elements.reserve(dims.size());
+  for (int64_t dim : dims) {
+    elements.push_back(std::make_shared<ConstInt>(dim, DataType::INDEX, span));
+  }
+  return std::make_shared<MakeTuple>(std::move(elements), span);
+}
+
+struct PtoScratchSpec {
+  ExprPtr shape;
+  DataType dtype;
+  std::string name_component;
+};
+
+/// Materialize A2/A3 level3 scratch before MemRef collection.
+///
+/// Optional compiler-owned scratch (`tile.ci`, narrowing `tile.cast`, required
+/// `tile.sort32`) is inserted only when absent. Caller-owned tmp operands on
+/// `tile.sel` / `tile.sels` / `tile.prelu` are preserved when present; those
+/// ops require an explicit tmp in the IR, so this pass never synthesizes one
+/// for them. `tile.col_sum` / `tile.row_expand_add` likewise keep caller tmp.
+class MaterializePtoLevel3ScratchMutator : public IRMutator {
+ public:
+  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+    auto call = As<Call>(op->value_);
+    if (!call) return IRMutator::VisitStmt_(op);
+
+    auto spec = GetScratchSpec(call, op->span_);
+    if (!spec.has_value()) return IRMutator::VisitStmt_(op);
+
+    std::vector<std::pair<std::string, std::any>> kwargs = {
+        {"dtype", spec->dtype},
+        {"target_memory", MemorySpace::Vec},
+    };
+    auto scratch_create = OpRegistry::GetInstance().Create("tile.create", {spec->shape}, kwargs, call->span_);
+    const std::string scratch_name =
+        auto_name::BuildName(auto_name::GetBaseName(op->var_->name_hint_), spec->name_component, "tmp",
+                             static_cast<int>(scratch_counter_++));
+    auto scratch_var = std::make_shared<Var>(scratch_name, scratch_create->GetType(), op->span_);
+    auto scratch_assign = std::make_shared<AssignStmt>(scratch_var, scratch_create, op->span_);
+
+    std::vector<ExprPtr> args = call->args_;
+    args.push_back(scratch_var);
+    auto new_call = std::make_shared<Call>(call->op_, std::move(args), call->kwargs_, call->attrs_,
+                                           call->GetType(), call->span_);
+    auto new_assign = MutableCopy(op);
+    new_assign->value_ = std::move(new_call);
+    return SeqStmts::Flatten({std::move(scratch_assign), std::move(new_assign)}, op->span_);
+  }
+
+ private:
+  static std::optional<PtoScratchSpec> GetScratchSpec(const CallPtr& call, const Span& span) {
+    if (IsOp(call, "tile.ci") && call->args_.size() == 2) {
+      auto result_type = As<TileType>(call->GetType());
+      INTERNAL_CHECK_SPAN(result_type, span) << "tile.ci result must be TileType before InitMemRef";
+      // PTOAS v0.60 level3 TCI tmp width: 192 FP32 cols for 32-bit dst, 448 for 16-bit dst.
+      const int64_t cols =
+          result_type->dtype_.GetBit() == 32 ? kA2A3CiScratchColsInt32 : kA2A3CiScratchColsInt16;
+      return PtoScratchSpec{MakeStaticShape({1, cols}, span), DataType::FP32, "ci"};
+    }
+
+    if (IsOp(call, "tile.cast") && call->args_.size() == 1) {
+      auto src_type = As<TileType>(call->args_[0]->GetType());
+      INTERNAL_CHECK_SPAN(src_type, span) << "tile.cast source must be TileType before InitMemRef";
+      const DataType dst = call->GetKwarg<DataType>("target_type");
+      if (!TcvtNeedsLevel3Scratch(src_type->dtype_, dst)) return std::nullopt;
+      const int64_t bytes = TcvtScratchCapacityBytes(src_type, dst, span);
+      return PtoScratchSpec{MakeStaticShape({1, bytes}, span), DataType::INT8, "tcvt"};
+    }
+
+    if (IsOp(call, "tile.sort32") && call->args_.size() == 2) {
+      auto src_type = As<TileType>(call->args_[0]->GetType());
+      INTERNAL_CHECK_SPAN(src_type, span) << "tile.sort32 source must be TileType before InitMemRef";
+      const auto valid_shape = GetValidShape(src_type);
+      INTERNAL_CHECK_SPAN(valid_shape.size() == 2, span)
+          << "tile.sort32 source must have a 2D valid_shape before InitMemRef";
+      auto valid_cols = As<ConstInt>(valid_shape[1]);
+      if (valid_cols && valid_cols->value_ % 32 == 0) return std::nullopt;
+      return PtoScratchSpec{std::make_shared<MakeTuple>(src_type->shape_, span), src_type->dtype_, "sort32"};
+    }
+
+    return std::nullopt;
+  }
+
+  std::size_t scratch_counter_ = 0;
+};
 
 // ============================================================================
 // Author-declared allocations (`pl.Tile[..., pl.MemRef("name"), ...]`)
@@ -809,8 +970,9 @@ class InitMemRefMutator : public IRMutator {
  *
  * This transformation:
  * 1. Normalizes statement structure (ensures SeqStmts)
- * 2. Initializes the MemRef field for all Var nodes
- * 3. Creates tile.alloc operations for non-DDR MemRefs (addr=-1, unallocated)
+ * 2. Materializes compiler-owned PTO scratch required by level3
+ * 3. Initializes the MemRef field for all Var nodes
+ * 4. Creates tile.alloc operations for non-DDR MemRefs (addr=-1, unallocated)
  *
  * Memory space is read from TileType::memory_space_ (set by InferTileMemorySpace).
  * Variables without memory_space default to DDR.
@@ -825,7 +987,17 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
     handler = ctx ? ctx->GetBackendHandler() : backend::GetBackend()->GetHandler();
   }
 
-  // Step 2: Resolve author-declared allocations (`pl.Tile[..., pl.MemRef("name"),
+  // PTOAS level2 owns implicit-tmp materialization as part of PlanMemory. PyPTO
+  // and DSA-RP instead emit fixed addresses and invoke level3, so backends that
+  // report RequiresLevel3TmpScratch() must materialize scratch here.
+  const MemoryPlanner planner = ctx ? ctx->GetMemoryPlanner() : MemoryPlanner::PyPTO;
+  if (handler != nullptr && handler->RequiresLevel3TmpScratch() &&
+      (planner == MemoryPlanner::PyPTO || planner == MemoryPlanner::DsaRP)) {
+    MaterializePtoLevel3ScratchMutator materializer;
+    normalized_func = materializer.VisitFunction(normalized_func);
+  }
+
+  // Step 3: Resolve author-declared allocations (`pl.Tile[..., pl.MemRef("name"),
   // ...]`), then mutate variables to initialize their MemRef. They must be
   // collected up front: a declared allocation's size is the max over ALL tiles
   // bound to it, which is only known after the whole function has been seen.
@@ -872,7 +1044,7 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
   result_func->params_ = new_params;
   result_func->body_ = new_body;
 
-  // Step 3: Collect ALL MemRefs (DDR gets tensor.alloc, on-chip gets tile.alloc)
+  // Step 4: Collect ALL MemRefs (DDR gets tensor.alloc, on-chip gets tile.alloc)
   memref_collectors::MemRefWithSpaceCollector collector(/*skip_ddr=*/false);
   for (const auto& param : new_params) {
     collector.VisitExpr(param);
@@ -897,7 +1069,7 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
     }
   }
 
-  // Step 4: Insert alloc statements at the beginning of the function body
+  // Step 5: Insert alloc statements at the beginning of the function body
   auto final_body = InsertAllocsIntoBody(new_body, alloc_stmts);
 
   result_func->body_ = final_body;

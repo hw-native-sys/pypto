@@ -759,6 +759,8 @@ def ci(
     shape: Sequence[int],
     dtype: DataType = DataType.INT32,
     descending: bool = False,
+    *,
+    tmp: Tile | None = None,
 ) -> Tile:
     """Generate a contiguous integer sequence into a tile.
 
@@ -776,12 +778,19 @@ def ci(
         shape: Shape of the destination tile (static, innermost dim != 1).
         dtype: Destination dtype. One of {INT16, INT32}. Defaults to INT32.
         descending: If True, generate a descending sequence.
+        tmp: Optional A2/A3 PTOAS scratch tile. Normally compiler-generated.
 
     Returns:
         Tile wrapping the ci operation.
     """
     start_expr = start.unwrap() if isinstance(start, Scalar) else start
-    call_expr = _ir_ops.ci(start_expr, list(shape), dtype=dtype, descending=descending)
+    call_expr = _ir_ops.ci(
+        start_expr,
+        list(shape),
+        dtype=dtype,
+        descending=descending,
+        tmp=None if tmp is None else tmp.unwrap(),
+    )
     return Tile(expr=call_expr)
 
 
@@ -1256,6 +1265,8 @@ def cast(
     tile: Tile,
     target_type: int | DataType,
     mode: str | int = "round",
+    *,
+    tmp: Tile | None = None,
 ) -> Tile:
     """Cast tile to target data type (element-wise).
 
@@ -1264,6 +1275,7 @@ def cast(
         target_type: Target data type (DataType)
         mode: Rounding mode — string name ("none", "rint", "round", "floor",
               "ceil", "trunc", "odd") or int (0–6)
+        tmp: Optional A2/A3 PTOAS scratch tile. Normally compiler-generated.
 
     Returns:
         Tile wrapping the cast operation
@@ -1271,7 +1283,8 @@ def cast(
     Example:
         >>> tile_fp32 = pl.tile.cast(tile_bf16, pl.FP32)
     """
-    call_expr = _ir_ops.cast(tile.unwrap(), target_type, mode)
+    tmp_expr = None if tmp is None else tmp.unwrap()
+    call_expr = _ir_ops.cast(tile.unwrap(), target_type, mode, tmp=tmp_expr)
     return Tile(expr=call_expr)
 
 
@@ -2780,7 +2793,7 @@ def sel(mask: Tile, lhs: Tile, rhs: Tile, tmp: Tile) -> Tile:
         mask: Predicate mask tile; encoding is target-defined
         lhs: Source tile 0, selected where mask is true
         rhs: Source tile 1, selected where mask is false
-        tmp: Scratch tile required by TSEL (UINT8 [1, 32] on A2/A3)
+        tmp: Scratch tile required by TSEL (UINT32 [1, 16] on A2/A3; unread ABI placeholder on A5)
 
     Returns:
         Tile wrapping the sel operation
@@ -2809,11 +2822,12 @@ def sels(mask: Tile, src: Tile, tmp: Tile, scalar: int | float | Expr | Scalar) 
     return Tile(expr=call_expr)
 
 
-def sort32(src: Tile, idx: Tile) -> Tile:
+def sort32(src: Tile, idx: Tile, *, tmp: Tile | None = None) -> Tile:
     """Sort fixed 32-element blocks with explicit index tile.
 
     Sorts 32-element blocks in src, permuting idx alongside.
-    Returns sorted value-index pairs tile with doubled last dimension.
+    Returns an 8-byte value-index-pair tile. Its last dimension is 2x the input
+    width for FP32 and 4x the input width for FP16.
 
     For FP16 src: initialize idx with [0, 1, 2, ..., 31] per block.
     For FP32 src: initialize idx with [0, 2, 4, ..., 62] per block.
@@ -2821,11 +2835,12 @@ def sort32(src: Tile, idx: Tile) -> Tile:
     Args:
         src: Input value tile (FP16 or FP32)
         idx: Input index tile with sequential offsets
+        tmp: Optional A2/A3 PTOAS scratch tile. Normally compiler-generated.
 
     Returns:
-        Tile wrapping the sort32 operation (last dim doubled)
+        Tile wrapping the dtype-dependent expanded sort32 output
     """
-    call_expr = _ir_ops.sort32(src.unwrap(), idx.unwrap())
+    call_expr = _ir_ops.sort32(src.unwrap(), idx.unwrap(), tmp=None if tmp is None else tmp.unwrap())
     return Tile(expr=call_expr)
 
 

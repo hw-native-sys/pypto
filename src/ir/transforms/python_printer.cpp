@@ -1289,6 +1289,13 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   // such fixup.
   const bool acc_kw_init_cond =
       (IsOp(op, "tensor.matmul_acc") || IsOp(op, "tile.gemv_acc")) && op->args_.size() == 4;
+  // tile.ci keeps dtype/descending in their established positional slots; its
+  // compiler-generated third IR operand therefore prints as keyword-only tmp.
+  const bool ci_kw_tmp = IsOp(op, "tile.ci") && op->args_.size() == 3;
+  // tile.cast keeps (tile, target_type, mode) as the public signature; its
+  // compiler-generated scratch operand likewise prints as keyword-only tmp.
+  const bool cast_kw_tmp = IsOp(op, "tile.cast") && op->args_.size() == 2;
+  const bool sort32_kw_tmp = IsOp(op, "tile.sort32") && op->args_.size() == 3;
   const bool mgather = IsOp(op, "tile.mgather");
   const int mgather_coalesce = mgather ? op->GetKwarg<int>("coalesce", 0) : 0;
   const bool mgather_kw_scratch = mgather && mgather_coalesce == 1 && op->args_.size() >= 3;
@@ -1299,6 +1306,9 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   for (size_t i = 0; i < op->args_.size(); ++i) {
     if (gather_row_kw_valid && i == 5) continue;
     if (acc_kw_init_cond && i == 3) continue;
+    if (ci_kw_tmp && i == 2) continue;
+    if (cast_kw_tmp && i == 1) continue;
+    if (sort32_kw_tmp && i == 2) continue;
     if (mgather && i >= 2) continue;
     if (i > 0) stream_ << ", ";
 
@@ -1326,6 +1336,21 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   if (acc_kw_init_cond) {
     stream_ << ", init_cond=";
     VisitExpr(op->args_[3]);
+    need_comma = true;
+  }
+  if (ci_kw_tmp) {
+    stream_ << ", tmp=";
+    VisitExpr(op->args_[2]);
+    need_comma = true;
+  }
+  if (cast_kw_tmp) {
+    stream_ << ", tmp=";
+    VisitExpr(op->args_[1]);
+    need_comma = true;
+  }
+  if (sort32_kw_tmp) {
+    stream_ << ", tmp=";
+    VisitExpr(op->args_[2]);
     need_comma = true;
   }
   if (mgather_kw_scratch) {

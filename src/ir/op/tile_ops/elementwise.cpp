@@ -1088,17 +1088,15 @@ REGISTER_OP("tile.sel")
     .add_argument("mask", "Predicate mask tile; encoding is target-defined (TileType)")
     .add_argument("lhs", "Source tile 0, selected where mask is true (TileType)")
     .add_argument("rhs", "Source tile 1, selected where mask is false (TileType)")
-    .add_argument("tmp", "Scratch tile required by TSEL (TileType UINT8 [1, 32])")
+    .add_argument("tmp", "Scratch tile required by TSEL (TileType UINT32 [1, 16] on A2/A3)")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_input_memory(2, MemorySpace::Vec)
     .set_input_memory(3, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
-    // The TSEL intrinsic reads the predicate mask (arg 0) and the tmp scratch
-    // (arg 3) while writing dst, so dst must not share their buffers — even
-    // though tile.sel is otherwise in-place-safe w.r.t. its lhs/rhs value
-    // operands. (The mask/tmp also differ in dtype/shape from dst, so codegen
-    // could not reinterpret them in place anyway.)
+    // TSEL reads the predicate mask (arg 0) and tmp scratch (arg 3) while
+    // writing dst. Dead lhs/rhs value operands may be reused when lifetimes
+    // allow; mask/tmp stay forbidden via registry (see 34-memory_reuse.md).
     .forbid_output_alias(0)
     .forbid_output_alias(3)
     .f_deduce_type([](const std::vector<ExprPtr>& args,

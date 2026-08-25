@@ -57,10 +57,6 @@ using ir::Var;
 using pto_ops_detail::AsPto;
 using pto_ops_detail::CheckSafeIdentifier;
 using pto_ops_detail::EmitIndexOperand;
-using pto_ops_detail::EmitPartitionViewPTO;
-using pto_ops_detail::GetDimStrings;
-using pto_ops_detail::GetSizeCodes;
-using pto_ops_detail::MakePartitionTensorViewType;
 
 static bool IsSameDimExpr(const ExprPtr& lhs, const ExprPtr& rhs) {
   if (lhs == rhs) {
@@ -688,9 +684,10 @@ void RegisterCrossCoreOps(Backend& backend, const std::unordered_set<std::string
         << "system.syncall (soft " << core_type << ") requires gm_workspace and optional used_cores, got "
         << op->args_.size() << " operands";
 
-    // gm_workspace: shared GM int32 tensor -> pto.partition_view over the whole
-    // buffer. PTO-ISA uses one exclusive 64-byte cache line, so a statically
-    // shaped workspace must contain at least 16 int32 elements.
+    // gm_workspace: shared GM int32 tensor. PTOAS v0.60's tile-native soft
+    // SYNCALL ABI takes the raw GM pointer and constructs its fixed 16-element
+    // GlobalTensor internally. PTO-ISA uses one exclusive 64-byte cache line,
+    // so a statically shaped workspace must contain at least 16 int32 elements.
     auto gm_var = AsVarLike(op->args_[0]);
     CHECK_SPAN(gm_var, op->span_) << "system.syncall soft: gm_workspace must be a tensor variable";
     auto gm_tt = As<ir::TensorType>(gm_var->GetType());
@@ -720,18 +717,9 @@ void RegisterCrossCoreOps(Backend& backend, const std::unordered_set<std::string
           << " INT32 elements (64 bytes), got " << static_capacity;
     }
 
-    const std::string gm_view = codegen.GetOrCreateTensorView(gm_var);
-    const std::string gm_view_type = codegen.GetTensorViewTypeString(gm_tt.get());
-    const std::string partition_type = MakePartitionTensorViewType(GetDimStrings(gm_tt->shape_), dtype_str);
-    const std::vector<std::string> offset_codes(gm_tt->shape_.size(),
-                                                codegen.GetOrEmitConstant(int64_t{0}, DataType::INDEX));
-    const std::vector<std::string> size_codes = GetSizeCodes(gm_tt->shape_, codegen);
-    const std::string gm_pview = EmitPartitionViewPTO(gm_var->name_hint_ + "_syncgm", gm_view, gm_view_type,
-                                                      partition_type, offset_codes, size_codes, codegen);
-
-    // Assemble the operand and type lists: gm_pview[, used_cores].
-    std::vector<std::string> operands = {gm_pview};
-    std::vector<std::string> types = {partition_type};
+    // Assemble the operand and type lists: gm_ptr[, used_cores].
+    std::vector<std::string> operands = {codegen.GetTensorBasePtr(gm_var)};
+    std::vector<std::string> types = {"!pto.ptr<i32>"};
     if (op->args_.size() == 2) {
       CHECK_SPAN(ExprIsI32Scalar(op->args_[1]), op->span_)
           << "system.syncall soft: used_cores must be an INT32 scalar";

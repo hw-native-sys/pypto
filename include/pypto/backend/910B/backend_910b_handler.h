@@ -42,6 +42,7 @@ class Ascend910BHandler : public BackendHandler {
 
   [[nodiscard]] bool RequiresGMPipeBuffer() const override { return true; }
   [[nodiscard]] bool RequiresSplitLoadTpopWorkaround() const override { return true; }
+  [[nodiscard]] bool RequiresLevel3TmpScratch() const override { return true; }
   [[nodiscard]] bool RequiresVtoCFractalAdapt() const override { return false; }
   [[nodiscard]] bool RequiresRuntimeSubblockBridge() const override { return true; }
   [[nodiscard]] bool RequiresNoSplitDualAivDispatch() const override { return true; }

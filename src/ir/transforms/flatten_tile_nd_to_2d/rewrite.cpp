@@ -21,7 +21,6 @@
 #include <utility>
 #include <vector>
 
-#include "pypto/backend/common/backend.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"

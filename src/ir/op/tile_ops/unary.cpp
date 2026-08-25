@@ -113,13 +113,20 @@ TypePtr DeduceTileFP32OnlyType(const std::vector<ExprPtr>& args,
 TypePtr DeduceTileCastType(const std::vector<ExprPtr>& args,
                            const std::vector<std::pair<std::string, std::any>>& kwargs,
                            const std::string& op_name) {
-  CHECK(args.size() == 1) << "The operator " << op_name << " requires exactly 1 argument, but got "
-                          << args.size();
+  CHECK(args.size() == 1 || args.size() == 2)
+      << "The operator " << op_name << " requires 1 or 2 arguments (tile[, tmp]), but got " << args.size();
 
   // Argument must be TileType
   auto tile_type = As<TileType>(args[0]->GetType());
   CHECK(tile_type) << "The operator " << op_name << " requires argument to be a TileType, but got "
                    << args[0]->GetType()->TypeName();
+
+  if (args.size() == 2) {
+    auto tmp_type = As<TileType>(args[1]->GetType());
+    CHECK(tmp_type) << "The operator " << op_name
+                    << " requires optional second argument 'tmp' to be a TileType, but got "
+                    << args[1]->GetType()->TypeName();
+  }
 
   // Read target_type from kwargs
   bool found_target_type = false;
@@ -276,10 +283,13 @@ REGISTER_OP("tile.cast")
     .functional_execution_memory_access()
     .set_description("Cast tile to target data type (element-wise)")
     .add_argument("tile", "Input tile (TileType)")
+    .add_argument("tmp", "Optional A2/A3 scratch tile for non-saturating narrowing pto.tcvt")
     .set_attr<DataType>("target_type")
     .set_attr<int>("mode")  // Round Mode: None(0), RINT(1), ROUND(2), FLOOR(3), CEIL(4), TRUNC(5), ODD(6)
     .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    .forbid_output_alias(1)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileCastType(args, kwargs, "tile.cast");

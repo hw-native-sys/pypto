@@ -33,6 +33,7 @@ from pypto import backend as _backend
 from pypto import ir, passes
 from pypto.backend import BackendType
 from pypto.ir import MemorySpace
+from pypto.ir.op import tile as tile_ops
 
 
 class TestBasic:
@@ -975,6 +976,207 @@ class TestDynamicValidShape:
         vs = rv.type.tile_view.valid_shape
         assert len(vs) == 2
         assert isinstance(vs[1], ir.Var), "valid_shape[1] should be a Var, not a fresh clone"
+
+
+class TestPtoLevel3Scratch:
+    """Compiler-owned A2/A3 scratch enters the ordinary MemRef pipeline here."""
+
+    @staticmethod
+    def _calls(program: ir.Program, op_name: str) -> list[ir.Call]:
+        calls: list[ir.Call] = []
+
+        class _Collector(ir.IRVisitor):
+            def visit_call(self, op: ir.Call) -> None:
+                if op.op.name == op_name:
+                    calls.append(op)
+                super().visit_call(op)
+
+        _Collector().visit_program(program)
+        return calls
+
+    @staticmethod
+    def _run(
+        program: ir.Program, backend_type: BackendType, planner=passes.MemoryPlanner.PYPTO
+    ) -> ir.Program:
+        _backend.reset_for_testing()
+        _backend.set_backend_type(backend_type)
+        try:
+            with passes.PassContext([], memory_planner=planner):
+                return passes.init_mem_ref()(program)
+        finally:
+            _backend.reset_for_testing()
+
+    @staticmethod
+    def _ci_program(dtype=pl.INT32):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self) -> pl.Tile[[1, 64], dtype, pl.Mem.Vec]:
+                seq: pl.Tile[[1, 64], dtype, pl.Mem.Vec] = pl.tile.ci(0, [1, 64], dtype=dtype)
+                return seq
+
+        return Before
+
+    @pytest.mark.parametrize(
+        ("dtype", "expected_cols"),
+        [(pl.INT32, 192), (pl.UINT32, 192), (pl.INT16, 448), (pl.UINT16, 448)],
+    )
+    def test_a2a3_ci_scratch_is_allocated_by_width(self, dtype, expected_cols):
+        after = self._run(self._ci_program(dtype), BackendType.Ascend910B)
+        ci = self._calls(after, ir.get_op("tile.ci").name)
+        assert len(ci) == 1 and len(ci[0].args) == 3
+        tmp = cast(ir.TileType, ci[0].args[2].type)
+        assert tmp.shape == [1, expected_cols]
+        assert tmp.dtype == ir.DataType.FP32
+        assert tmp.memref is not None
+
+    def test_a5_and_ptoas_planner_keep_ci_implicit(self):
+        a5 = self._run(self._ci_program(), BackendType.Ascend950)
+        ptoas = self._run(self._ci_program(), BackendType.Ascend910B, planner=passes.MemoryPlanner.PTOAS)
+        assert len(self._calls(a5, ir.get_op("tile.ci").name)[0].args) == 2
+        assert len(self._calls(ptoas, ir.get_op("tile.ci").name)[0].args) == 2
+
+    def test_explicit_ci_scratch_is_preserved(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self) -> pl.Tile[[1, 64], pl.INT32, pl.Mem.Vec]:
+                tmp: pl.Tile[[1, 192], pl.FP32, pl.Mem.Vec] = pl.tile.create(
+                    [1, 192], dtype=pl.FP32, target_memory=pl.Mem.Vec
+                )
+                seq: pl.Tile[[1, 64], pl.INT32, pl.Mem.Vec] = pl.tile.ci(0, [1, 64], dtype=pl.INT32, tmp=tmp)
+                return seq
+
+        after = self._run(Before, BackendType.Ascend910B)
+        ci = self._calls(after, ir.get_op("tile.ci").name)[0]
+        creates = self._calls(after, ir.get_op("tile.create").name)
+        assert len(ci.args) == 3
+        assert len(creates) == 1
+
+    @staticmethod
+    def _cast_program(src_dtype, dst_dtype):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[16, 16], src_dtype],
+            ) -> pl.Tile[[16, 16], dst_dtype, pl.Mem.Vec]:
+                tile: pl.Tile[[16, 16], src_dtype, pl.Mem.Vec] = pl.tile.load(
+                    src, [0, 0], [16, 16], target_memory=pl.Mem.Vec
+                )
+                result: pl.Tile[[16, 16], dst_dtype, pl.Mem.Vec] = pl.tile.cast(
+                    tile, target_type=dst_dtype, mode="round"
+                )
+                return result
+
+        return Before
+
+    @pytest.mark.parametrize(
+        ("src_dtype", "dst_dtype", "expected_bytes"),
+        [(pl.FP32, pl.INT16, 1024), (pl.FP16, pl.INT16, 64), (pl.FP16, pl.INT8, 160)],
+    )
+    def test_a2a3_narrowing_cast_scratch(self, src_dtype, dst_dtype, expected_bytes):
+        after = self._run(self._cast_program(src_dtype, dst_dtype), BackendType.Ascend910B)
+        cast_call = self._calls(after, ir.get_op("tile.cast").name)[0]
+        assert len(cast_call.args) == 2
+        tmp = cast(ir.TileType, cast_call.args[1].type)
+        assert tmp.shape == [1, expected_bytes]
+        assert tmp.dtype == ir.DataType.INT8
+        assert tmp.memref is not None
+
+    def test_non_narrowing_cast_has_no_scratch(self):
+        after = self._run(self._cast_program(pl.FP32, pl.FP16), BackendType.Ascend910B)
+        assert len(self._calls(after, ir.get_op("tile.cast").name)[0].args) == 1
+
+    def test_fp16_to_int4_has_no_level3_scratch(self):
+        """FP16->INT4 uses native vconv without PTOAS level-3 tcvt tmp."""
+        after = self._run(self._cast_program(pl.FP16, pl.INT4), BackendType.Ascend910B)
+        assert len(self._calls(after, ir.get_op("tile.cast").name)[0].args) == 1
+
+    @staticmethod
+    def _narrowing_cast_program(rows: int, cols: int, src_dtype, dst_dtype):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[rows, cols], src_dtype],
+            ) -> pl.Tile[[rows, cols], dst_dtype, pl.Mem.Vec]:
+                tile: pl.Tile[[rows, cols], src_dtype, pl.Mem.Vec] = pl.tile.load(
+                    src, [0, 0], [rows, cols], target_memory=pl.Mem.Vec
+                )
+                result: pl.Tile[[rows, cols], dst_dtype, pl.Mem.Vec] = pl.tile.cast(
+                    tile, target_type=dst_dtype, mode="round"
+                )
+                return result
+
+        return Before
+
+    @pytest.mark.parametrize(
+        ("rows", "cols", "expected_bytes"),
+        [
+            (1, 128, 512),  # head-only: 4*64*min(128/64,255)
+            (16, 80, 4864),  # tail-only: cols not aligned to 64
+        ],
+    )
+    def test_a2a3_narrowing_cast_scratch_branches(self, rows, cols, expected_bytes):
+        after = self._run(self._narrowing_cast_program(rows, cols, pl.FP32, pl.INT16), BackendType.Ascend910B)
+        cast_call = self._calls(after, ir.get_op("tile.cast").name)[0]
+        assert len(cast_call.args) == 2
+        tmp = cast(ir.TileType, cast_call.args[1].type)
+        assert tmp.shape == [1, expected_bytes]
+        assert tmp.dtype == ir.DataType.INT8
+
+    def test_a2a3_narrowing_cast_scratch_rows_capped_at_255(self):
+        after_255 = self._run(
+            self._narrowing_cast_program(255, 80, pl.FP32, pl.INT16), BackendType.Ascend910B
+        )
+        after_400 = self._run(
+            self._narrowing_cast_program(400, 80, pl.FP32, pl.INT16), BackendType.Ascend910B
+        )
+
+        def scratch_bytes(prog):
+            cast_call = self._calls(prog, ir.get_op("tile.cast").name)[0]
+            return cast(ir.TileType, cast_call.args[1].type).shape[1]
+
+        assert scratch_bytes(after_255) == scratch_bytes(after_400)
+
+    @staticmethod
+    def _sort_program(*, dynamic_valid_col: bool) -> ir.Program:
+        span = ir.Span.unknown()
+        ib = ir.IRBuilder()
+        with ib.function("kernel", type=ir.FunctionType.InCore) as f:
+            src = f.param("src", ir.TensorType([1, 64], ir.DataType.FP32))
+            idx = f.param("idx", ir.TensorType([1, 64], ir.DataType.UINT32))
+            if dynamic_valid_col:
+                valid_col = f.param("valid_col", ir.ScalarType(ir.DataType.INDEX))
+                valid_shape = [1, valid_col]
+            else:
+                valid_shape = [1, 64]
+            src_tile = ib.let(
+                "src_tile", tile_ops.load(src, [0, 0], [1, 64], valid_shape, target_memory=MemorySpace.Vec)
+            )
+            idx_tile = ib.let(
+                "idx_tile", tile_ops.load(idx, [0, 0], [1, 64], valid_shape, target_memory=MemorySpace.Vec)
+            )
+            result = ib.let("result", tile_ops.sort32(src_tile, idx_tile))
+            f.return_type(result.type)
+            ib.return_stmt(result)
+        return ir.Program([f.get_result()], "sort_program", span)
+
+    def test_sort32_dynamic_valid_col_gets_physical_shape_scratch(self):
+        after = self._run(self._sort_program(dynamic_valid_col=True), BackendType.Ascend910B)
+        sort32 = self._calls(after, ir.get_op("tile.sort32").name)[0]
+        assert len(sort32.args) == 3
+        tmp = cast(ir.TileType, sort32.args[2].type)
+        assert tmp.shape == [1, 64]
+        assert tmp.dtype == ir.DataType.FP32
+        assert tmp.memref is not None
+
+    def test_sort32_static_aligned_valid_col_needs_no_scratch(self):
+        after = self._run(self._sort_program(dynamic_valid_col=False), BackendType.Ascend910B)
+        assert len(self._calls(after, ir.get_op("tile.sort32").name)[0].args) == 2
 
 
 class TestEdgeCases:

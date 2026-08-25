@@ -193,7 +193,7 @@ or call `set_validshape` on the source tile before taking the view.
 | `system.reserve_buffer(...)` | `%name = pto.reserve_buffer {name = "N", size = S, location = #pto.address_space<loc>, auto = false, base = B} -> i32` | Reserve buffer (`auto = true`, `base` omitted under `memory_planner=PTOAS`) |
 | `system.import_peer_buffer(...)` | `%name = pto.import_reserved_buffer {name = "N", peer_func = @F} -> i32` | Import peer buffer |
 | `system.syncall(core_type=C)` | `pto.syncall() mode = #pto.sync_all_mode<hard>, core_type = #pto.sync_core_type<C>` | Cross-core all-participant barrier (hard/FFTS form) |
-| `system.syncall(mode="soft", core_type=C, gm_workspace=ws, used_cores=N)` | `pto.syncall(%gm_pview[, %used] : !pto.partition_tensor_view<...xi32>[, i32]) mode = #pto.sync_all_mode<soft>, core_type = #pto.sync_core_type<C>` | Current PTO-ISA soft/GM-polling barrier (partial occupancy; at least 64-byte GM workspace; explicit `N=0` derives the count from device launch registers and omits `%used`) |
+| `system.syncall(mode="soft", core_type=C, gm_workspace=ws, used_cores=N)` | `pto.syncall(%gm_ptr[, %used] : !pto.ptr<i32>[, i32]) mode = #pto.sync_all_mode<soft>, core_type = #pto.sync_core_type<C>` | Current PTO-ISA soft/GM-polling barrier (partial occupancy; at least 64-byte GM workspace; explicit `N=0` derives the count from device launch registers and omits `%used`) |
 
 **Notes:**
 

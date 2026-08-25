@@ -2024,8 +2024,8 @@ def sort32(src: Expr, idx: Expr, span: Span | None = None) -> Call:
     """Sort fixed 32-element blocks with explicit index tensor (tensor-level).
 
     Tensor-level counterpart of ``tile.sort32``. Sorts 32-element blocks in src
-    and permutes idx accordingly. Output tensor stores sorted value-index pairs
-    with the last dimension doubled.
+    and permutes idx accordingly. Output tensor stores 8-byte value-index pairs;
+    its last dimension is 2x the input width for FP32 and 4x for FP16.
 
     Args:
         src: Input value tensor (TensorType, FP16 or FP32)
@@ -2033,7 +2033,7 @@ def sort32(src: Expr, idx: Expr, span: Span | None = None) -> Call:
         span: Optional source span for debugging
 
     Returns:
-        Call expression returning sorted tensor with doubled last dimension
+        Call expression returning the dtype-dependent expanded sort output
     """
     actual_span = _get_span_or_capture(span)
     return _ir_core.create_op_call("tensor.sort32", [src, idx], {}, actual_span)

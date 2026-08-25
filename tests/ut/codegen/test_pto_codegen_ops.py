@@ -916,10 +916,10 @@ class TestB02SelectionAndPreluCodegen:
         with pytest.raises(ValueError, match="tmp overlaps src"):
             self._generate_mlir(Prog, BackendType.Ascend910B)
 
-        line = self._op_line(self._generate_mlir(Prog, BackendType.Ascend950), "pto.tsels")
-        ins, outs = self._ins_outs_ssas(line)
-        assert ins[1] == ins[2]
-        self._assert_named_ssas(outs, ["result"])
+        a5_line = self._op_line(self._generate_mlir(Prog, BackendType.Ascend950), "pto.tsels")
+        a5_ins, a5_outs = self._ins_outs_ssas(a5_line)
+        assert a5_ins[1] == a5_ins[2]
+        self._assert_named_ssas(a5_outs, ["result"])
 
     def test_tsels_tmp_may_alias_mask_only_on_a5(self):
         @pl.program
@@ -939,10 +939,10 @@ class TestB02SelectionAndPreluCodegen:
         with pytest.raises(ValueError, match="tmp overlaps mask"):
             self._generate_mlir(Prog, BackendType.Ascend910B)
 
-        line = self._op_line(self._generate_mlir(Prog, BackendType.Ascend950), "pto.tsels")
-        ins, outs = self._ins_outs_ssas(line)
-        assert ins[0] == ins[2]
-        self._assert_named_ssas(outs, ["result"])
+        a5_line = self._op_line(self._generate_mlir(Prog, BackendType.Ascend950), "pto.tsels")
+        a5_ins, a5_outs = self._ins_outs_ssas(a5_line)
+        assert a5_ins[0] == a5_ins[2]
+        self._assert_named_ssas(a5_outs, ["result"])
 
     def test_tsels_a2a3_rejects_overlapping_tmp_view(self):
         @pl.program
@@ -966,8 +966,8 @@ class TestB02SelectionAndPreluCodegen:
 
         assert "pto.tsels" in self._generate_mlir(Prog, BackendType.Ascend950)
 
-    def test_tsels_tmp_may_alias_result_on_a2a3(self):
-        """A2/A3 consumes tmp through set_cmpmask before the first dst write."""
+    def test_tsels_a2a3_keeps_caller_tmp(self):
+        """A2/A3 preserves an explicit caller tmp instead of synthesizing sels_tmp."""
 
         @pl.program
         class Prog:
@@ -991,9 +991,6 @@ class TestB02SelectionAndPreluCodegen:
         ins, outs = self._ins_outs_ssas(line)
         self._assert_named_ssas(ins[:3], ["mask", "src", "tmp"])
         self._assert_named_ssas(outs, ["result"])
-        tmp_addr = self._alloc_addr_for_named_ssa(mlir, "tmp")
-        result_addr = self._alloc_addr_for_named_ssa(mlir, "result")
-        assert tmp_addr == result_addr
 
     def test_tprelu_emits_target_specific_exact_operands(self):
         @pl.program
@@ -1013,8 +1010,9 @@ class TestB02SelectionAndPreluCodegen:
 
         a3_line = self._op_line(self._generate_mlir(Prog, BackendType.Ascend910B), "pto.tprelu")
         a3_ins, a3_outs = self._ins_outs_ssas(a3_line)
-        self._assert_named_ssas(a3_ins, ["src_tile", "slope_tile", "tmp"])
-        self._assert_named_ssas(a3_outs, ["result"])
+        self._assert_named_ssas(a3_ins, ["prelu_src_view", "prelu_slope_view", "prelu_tmp_view"])
+        self._assert_named_ssas(a3_outs, ["prelu_dst_view"])
+        assert "v_row=16" in a3_line and "v_row=?" not in a3_line.split("pto.tprelu", 1)[1]
 
         a5_line = self._op_line(self._generate_mlir(Prog, BackendType.Ascend950), "pto.tprelu")
         a5_ins, a5_outs = self._ins_outs_ssas(a5_line)
@@ -1022,7 +1020,7 @@ class TestB02SelectionAndPreluCodegen:
         self._assert_named_ssas(a5_outs, ["result"])
 
     def test_tprelu_signed_scratch_is_a5_only(self):
-        """A2/A3 requires UINT8 scratch even though the pinned verifier accepts signed i8."""
+        """A2/A3 requires UINT8 scratch; caller-provided signed tmp is rejected there."""
 
         @pl.program
         class Prog:
@@ -1039,12 +1037,13 @@ class TestB02SelectionAndPreluCodegen:
                 result: pl.Tile[[16, 16], pl.FP32] = pl.tile.prelu(src_tile, slope_tile, tmp)
                 return pl.store(result, [0, 0], out)
 
-        with pytest.raises(ValueError, match="A2/A3 requires UINT8 tmp scratch"):
+        with pytest.raises(ValueError, match="UINT8 tmp scratch"):
             self._generate_mlir(Prog, BackendType.Ascend910B)
-        line = self._op_line(self._generate_mlir(Prog, BackendType.Ascend950), "pto.tprelu")
-        ins, outs = self._ins_outs_ssas(line)
-        self._assert_named_ssas(ins, ["src_tile", "slope_tile", "tmp"])
-        self._assert_named_ssas(outs, ["result"])
+
+        a5_line = self._op_line(self._generate_mlir(Prog, BackendType.Ascend950), "pto.tprelu")
+        a5_ins, a5_outs = self._ins_outs_ssas(a5_line)
+        self._assert_named_ssas(a5_ins, ["src_tile", "slope_tile", "tmp"])
+        self._assert_named_ssas(a5_outs, ["result"])
 
     def test_tprelu_a3_rejects_overlapping_views_but_a5_accepts_them(self):
         @pl.program
@@ -1077,7 +1076,7 @@ class TestB02SelectionAndPreluCodegen:
         self._assert_named_ssas(ins[2:], ["tmp"])
         self._assert_named_ssas(outs, ["result"])
 
-    def test_tprelu_undersized_tmp_is_a3_only_validation(self):
+    def test_tprelu_undersized_tmp_is_rejected_on_a2a3(self):
         @pl.program
         class Prog:
             @pl.function(type=pl.FunctionType.InCore)
@@ -2866,6 +2865,10 @@ class TestMrgSortCodegen:
                 return pl.store(vals, [0, 0], src)
 
         mlir = self._generate_mlir(Prog)
+        tsort32_line = next(line for line in mlir.splitlines() if "pto.tsort32" in line)
+        assert "%sort32_src_view" in tsort32_line and "%sort32_idx_view" in tsort32_line, tsort32_line
+        assert "%sort32_dst_view" in tsort32_line, tsort32_line
+        assert "v_row=?" not in tsort32_line and "v_col=?" not in tsort32_line, tsort32_line
         assert "pto.tmrgsort" in mlir, f"Expected pto.tmrgsort in codegen output:\n{mlir}"
         # Constant block_len should appear as an i32 constant
         tmrgsort_lines = [line for line in mlir.splitlines() if "pto.tmrgsort" in line]
@@ -2902,6 +2905,40 @@ class TestMrgSortCodegen:
         tmrgsort_lines = [line for line in mlir.splitlines() if "pto.tmrgsort" in line]
         assert tmrgsort_lines, "No pto.tmrgsort line found"
         assert "i32" in tmrgsort_lines[0], f"block_len type annotation should be i32: {tmrgsort_lines[0]}"
+
+    @pytest.mark.parametrize(
+        ("src_dtype", "output_cols"),
+        [(pl.FP32, 128), (pl.FP16, 256)],
+    )
+    def test_sort32_dynamic_valid_width_emits_level3_scratch(self, src_dtype, output_cols):
+        """A runtime valid width keeps logical output bounds and uses static TSORT capacity."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[1, 64], src_dtype],
+                idx: pl.Tensor[[1, 64], pl.UINT32],
+                out: pl.Tensor[[1, output_cols], src_dtype],
+                valid_cols: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[1, output_cols], src_dtype]:
+                src_tile = pl.load(src, [0, 0], [1, 64], valid_shape=[1, valid_cols])
+                idx_tile = pl.load(idx, [0, 0], [1, 64], valid_shape=[1, valid_cols])
+                sorted_tile = pl.tile.sort32(src_tile, idx_tile)
+                return pl.store(sorted_tile, [0, 0], out)
+
+        mlir = self._generate_mlir(Prog)
+        line = next(line for line in mlir.splitlines() if "pto.tsort32" in line)
+        ins = line.split("ins(", 1)[1].split(":", 1)[0]
+        assert ins.count(",") == 2, line
+        assert "%sort32_tmp_view" in line and "%sort32_dst_view" in line, line
+        outs = line.split("outs(", 1)[1]
+        assert f"cols={output_cols}" in outs and f"v_col={output_cols}" in outs, line
+        assert "v_col=?" not in outs, line
+        tstore_line = next(line for line in mlir.splitlines() if "pto.tstore" in line)
+        assert "%sorted_tile" in tstore_line and "%sort32_dst_view" not in tstore_line, tstore_line
+        assert "arith.muli" in mlir, mlir
 
 
 class TestConstDtypeCodegen:
@@ -2958,6 +2995,83 @@ class TestConstDtypeCodegen:
         assert "f16" in mlir, f"Expected f16 in MLIR output:\n{mlir}"
         assert "0.00000000000000000e+00 : f16" in mlir, f"Expected f16 float constant in MLIR:\n{mlir}"
         assert "0.00000000000000000e+00 : f32" not in mlir, f"f32 constant leaked into MLIR:\n{mlir}"
+
+
+class TestLevel3StaticViewCodegen:
+    """Codegen static-view bridges for explicit level-3 tmp forms on Ascend910B."""
+
+    def _generate_mlir(self, program_cls) -> str:
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program_cls)
+        codegen_instance = codegen.PTOCodegen()
+        funcs = list(optimized.functions.values())
+        assert funcs
+        single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
+        return codegen_instance.generate(single)
+
+    def test_tci_emits_static_view_for_explicit_tmp(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                out: pl.Tensor[[1, 32], pl.INT32],
+            ) -> pl.Tensor[[1, 32], pl.INT32]:
+                tmp: pl.Tile[[1, 192], pl.FP32, pl.Mem.Vec] = pl.tile.create(
+                    [1, 192], dtype=pl.FP32, target_memory=pl.Mem.Vec
+                )
+                seq: pl.Tile[[1, 32], pl.INT32, pl.Mem.Vec] = pl.tile.ci(0, [1, 32], dtype=pl.INT32, tmp=tmp)
+                return pl.store(seq, [0, 0], out)
+
+        mlir = self._generate_mlir(Prog)
+        tci_line = next(line for line in mlir.splitlines() if "pto.tci" in line)
+        assert "%ci_tmp_view" in tci_line and "%ci_dst_view" in tci_line, tci_line
+        assert "v_row=?" not in tci_line and "v_col=?" not in tci_line, tci_line
+
+    def test_tcvt_emits_static_view_for_explicit_tmp(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Tensor[[16, 16], pl.INT16],
+            ) -> pl.Tensor[[16, 16], pl.INT16]:
+                tile_in: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.load(
+                    src, [0, 0], [16, 16], target_memory=pl.Mem.Vec
+                )
+                result: pl.Tile[[16, 16], pl.INT16, pl.Mem.Vec] = pl.tile.cast(
+                    tile_in, target_type=pl.INT16, mode="round"
+                )
+                return pl.store(result, [0, 0], out)
+
+        mlir = self._generate_mlir(Prog)
+        tcvt_line = next(line for line in mlir.splitlines() if "pto.tcvt" in line)
+        assert "%tcvt_tmp_view" in tcvt_line and "%tcvt_dst_view" in tcvt_line, tcvt_line
+        assert "v_row=?" not in tcvt_line and "v_col=?" not in tcvt_line, tcvt_line
+
+    def test_tcolsum_binary_emits_static_view_for_tmp(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                input: pl.Tensor[[16, 16], pl.FP32],
+                output: pl.Tensor[[1, 16], pl.FP32],
+            ) -> pl.Tensor[[1, 16], pl.FP32]:
+                tile_in: pl.Tile[[16, 16], pl.FP32] = pl.load(input, [0, 0], [16, 16])
+                tmp_tile: pl.Tile[[16, 16], pl.FP32] = pl.tile.create(
+                    [16, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                result: pl.Tile[[1, 16], pl.FP32] = pl.tile.col_sum(tile_in, tmp_tile)
+                return pl.store(result, [0, 0], output)
+
+        mlir = self._generate_mlir(Prog)
+        tcolsum_line = next(line for line in mlir.splitlines() if "pto.tcolsum" in line)
+        assert "%colsum_tmp_view" in tcolsum_line and "%colsum_dst_view" in tcolsum_line, tcolsum_line
+        assert "isBinary = true" in tcolsum_line, tcolsum_line
 
 
 class TestColReductionCodegen:
@@ -3895,14 +4009,11 @@ class TestSyncAllCodegen:
         assert line, f"soft pto.syncall not found in MLIR:\n{mlir}"
         assert "mode = #pto.sync_all_mode<soft>" in line, f"soft mode missing:\n{line}"
         assert "core_type = #pto.sync_core_type<aiv_only>" in line, f"core_type missing:\n{line}"
-        # The current PTO-ISA takes only gm partition_view + optional used_cores.
-        assert "partition_tensor_view<16xi32>" in line, f"gm partition_view missing:\n{line}"
+        # PTOAS v0.60 takes the raw GM pointer + optional used_cores.
+        assert "!pto.ptr<i32>" in line, f"gm pointer missing:\n{line}"
         assert "tile_buf" not in line, f"legacy scratch operand still emitted:\n{line}"
         assert line.split(" : ", 1)[0].count(",") == 1, f"unexpected soft operand count:\n{line}"
-        # The GM workspace is lowered to a partition_view over all 16 slots.
-        assert any("partition_view" in ln and "syncgm" in ln for ln in mlir.splitlines()), (
-            f"gm workspace partition_view not emitted:\n{mlir}"
-        )
+        assert not any("partition_view" in ln and "syncgm" in ln for ln in mlir.splitlines()), mlir
 
     def test_syncall_soft_omits_launch_derived_participant_count(self):
         """used_cores=0 emits the canonical single-operand soft form."""
@@ -3922,7 +4033,7 @@ class TestSyncAllCodegen:
         mlir = self._generate_mlir(Prog)
         line = next((ln for ln in mlir.splitlines() if "pto.syncall(" in ln), "")
         assert line, f"soft pto.syncall not found in MLIR:\n{mlir}"
-        assert "partition_tensor_view<4x4xi32>" in line, f"gm partition_view missing:\n{line}"
+        assert "!pto.ptr<i32>" in line, f"gm pointer missing:\n{line}"
         assert line.split(" : ", 1)[0].count(",") == 0, f"unexpected used_cores operand:\n{line}"
         assert "mode = #pto.sync_all_mode<soft>" in line, f"soft mode missing:\n{line}"
 
@@ -3948,7 +4059,7 @@ class TestSyncAllCodegen:
         mlir = self._generate_mlir(Prog)
         line = next((ln for ln in mlir.splitlines() if "pto.syncall(" in ln), "")
         assert line, f"soft pto.syncall not found in MLIR:\n{mlir}"
-        assert "partition_tensor_view<16xi32>, i32" in line, f"dynamic used_cores missing:\n{line}"
+        assert "!pto.ptr<i32>, i32" in line, f"dynamic used_cores missing:\n{line}"
         assert line.split(" : ", 1)[0].count(",") == 1, f"unexpected soft operand count:\n{line}"
 
     def test_syncall_soft_rejects_workspace_smaller_than_cache_line(self):

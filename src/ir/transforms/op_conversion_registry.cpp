@@ -37,6 +37,7 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/storage_size.h"
+#include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/utils/tile_conversion_utils.h"
 #include "pypto/ir/type.h"
@@ -59,13 +60,40 @@ namespace {
 constexpr int kCastModeNone = 0;
 constexpr int kCastModeRound = 2;
 
+// TSEL scratch geometry: A2/A3 level3 uses UINT32 [1,16]; A5 keeps UINT8 [1,32].
+constexpr int kTselScratchColsLevel3 = 16;
+constexpr int kTselScratchColsDefault = 32;
+
 bool IsConstOne(const ExprPtr& expr) { return IsConstValue(expr, 1); }
+
+const backend::BackendHandler* GetActiveBackendHandler() {
+  if (!backend::BackendConfig::IsConfigured()) return nullptr;
+  const auto* ctx = PassContext::Current();
+  return ctx ? ctx->GetBackendHandler() : backend::BackendConfig::GetBackend()->GetHandler();
+}
 
 // A5 index-form gather needs full-tile flat indices; A2A3 keeps the legacy
 // per-row path (see RegisterGatherOps Case 1/2).
 bool IsA5TargetArch() {
-  if (!backend::BackendConfig::IsConfigured()) return false;
-  return backend::BackendConfig::GetBackend()->GetHandler()->GetPtoTargetArch() == "a5";
+  const auto* handler = GetActiveBackendHandler();
+  return handler != nullptr && handler->GetPtoTargetArch() == "a5";
+}
+
+bool RequiresLevel3TmpScratchForConversion() {
+  const auto* handler = GetActiveBackendHandler();
+  return handler != nullptr && handler->RequiresLevel3TmpScratch();
+}
+
+struct TselScratchSpec {
+  DataType dtype;
+  int cols;
+};
+
+TselScratchSpec GetTselScratchSpec() {
+  if (RequiresLevel3TmpScratchForConversion()) {
+    return {DataType::UINT32, kTselScratchColsLevel3};
+  }
+  return {DataType::UINT8, kTselScratchColsDefault};
 }
 
 // Detect row-broadcast pattern: [M, N] op [M, 1] or [M, 1] op [M, N]
@@ -698,8 +726,9 @@ void OpConversionRegistry::RegisterMemoryOps() {
     ExprPtr zero_s = mask_dt.IsFloat() ? ExprPtr(std::make_shared<ConstFloat>(0.0, mask_dt, span))
                                        : ExprPtr(std::make_shared<ConstInt>(0, mask_dt, span));
     auto pred = emit("tile.cmps", {mask, zero_s}, {{"cmp_type", 1}}, "su_pred");
-    auto tmp = emit("tile.create", {MakeShapeTuple({one, make_idx(32)}, span)},
-                    {{"dtype", DataType(DataType::UINT8)}, {"target_memory", MemorySpace::Vec}}, "su_tmp");
+    const auto tsel_scratch = GetTselScratchSpec();
+    auto tmp = emit("tile.create", {MakeShapeTuple({one, make_idx(tsel_scratch.cols)}, span)},
+                    {{"dtype", tsel_scratch.dtype}, {"target_memory", MemorySpace::Vec}}, "su_tmp");
     auto out = op_reg.Create("tile.sel", {pred, scattered, args[0], tmp}, span);
     return ConversionResult{std::move(prologue), out};
   };
@@ -2297,11 +2326,12 @@ void OpConversionRegistry::RegisterScatterOps() {
                                                 : ExprPtr(std::make_shared<ConstInt>(0, mask_dt, span));
         std::vector<std::pair<std::string, std::any>> cmp_kw = {{"cmp_type", 1}};
         auto pred = emit("tile.cmps", {mask, zero_scalar}, cmp_kw, "scatter_pred");
-        // tmp = TSEL scratch tile (UINT8 [1, 32]).
-        std::vector<std::pair<std::string, std::any>> tmp_kw = {{"dtype", DataType(DataType::UINT8)},
+        // tmp = TSEL scratch tile (UINT32 [1,16] on level3 backends).
+        const auto tsel_scratch = GetTselScratchSpec();
+        std::vector<std::pair<std::string, std::any>> tmp_kw = {{"dtype", tsel_scratch.dtype},
                                                                 {"target_memory", MemorySpace::Vec}};
-        auto tmp =
-            emit("tile.create", {MakeShapeTuple({one, make_idx(32)}, span)}, tmp_kw, "scatter_sel_tmp");
+        auto tmp = emit("tile.create", {MakeShapeTuple({one, make_idx(tsel_scratch.cols)}, span)}, tmp_kw,
+                        "scatter_sel_tmp");
         // out = sel(pred, scattered, input, tmp): scattered @written, input @unwritten.
         auto out_call = op_reg.Create("tile.sel", {pred, scattered, args[0], tmp}, span);
         return ConversionResult{std::move(prologue), out_call};
@@ -2385,9 +2415,10 @@ void OpConversionRegistry::RegisterScatterOps() {
         ExprPtr zero_scalar = mask_dt.IsFloat() ? ExprPtr(std::make_shared<ConstFloat>(0.0, mask_dt, span))
                                                 : ExprPtr(std::make_shared<ConstInt>(0, mask_dt, span));
         auto pred = emit("tile.cmps", {mask, zero_scalar}, {{"cmp_type", 1}}, "scatter_mask_pred");
-        // tmp = TSEL scratch tile (UINT8 [1, 32]).
-        auto tmp = emit("tile.create", {MakeShapeTuple({make_idx(1), make_idx(32)}, span)},
-                        {{"dtype", DataType(DataType::UINT8)}, {"target_memory", MemorySpace::Vec}},
+        // tmp = TSEL scratch tile (UINT32 [1,16] on level3 backends).
+        const auto tsel_scratch = GetTselScratchSpec();
+        auto tmp = emit("tile.create", {MakeShapeTuple({make_idx(1), make_idx(tsel_scratch.cols)}, span)},
+                        {{"dtype", tsel_scratch.dtype}, {"target_memory", MemorySpace::Vec}},
                         "scatter_mask_sel_tmp");
         // out = sel(pred, scattered, dst, tmp): scattered @selected, dst @unselected.
         auto out_call = op_reg.Create("tile.sel", {pred, scattered, args[1], tmp}, span);
@@ -2460,10 +2491,12 @@ void OpConversionRegistry::RegisterCmpOps() {
     auto one_var = make_full(1.0, "cmp_one");
     auto zero_var = make_full(0.0, "cmp_zero");
 
-    std::vector<ExprPtr> tmp_shape_dims = {std::make_shared<ConstInt>(1, DataType::INDEX, span),
-                                           std::make_shared<ConstInt>(32, DataType::INDEX, span)};
+    const auto tsel_scratch = GetTselScratchSpec();
+    std::vector<ExprPtr> tmp_shape_dims = {
+        std::make_shared<ConstInt>(1, DataType::INDEX, span),
+        std::make_shared<ConstInt>(tsel_scratch.cols, DataType::INDEX, span)};
     auto tmp_shape_tuple = std::make_shared<MakeTuple>(tmp_shape_dims, span);
-    std::vector<std::pair<std::string, std::any>> tmp_kw = {{"dtype", DataType::UINT8},
+    std::vector<std::pair<std::string, std::any>> tmp_kw = {{"dtype", tsel_scratch.dtype},
                                                             {"target_memory", MemorySpace::Vec}};
     auto tmp_call = op_reg.Create("tile.create", {tmp_shape_tuple}, tmp_kw, span);
     auto tmp_var = std::make_shared<Var>("cmp_tmp", tmp_call->GetType(), span);

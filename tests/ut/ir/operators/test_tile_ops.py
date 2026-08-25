@@ -7049,6 +7049,48 @@ class TestWriteValidRegionUnion:
         assert result_type.tensor_view is None
 
 
+class TestTileSort32Ops:
+    """Type-inference coverage for TSORT32's packed value-index output."""
+
+    @pytest.mark.parametrize(
+        ("dtype", "expected_width"),
+        [(DataType.FP32, 64), (DataType.FP16, 128)],
+    )
+    def test_output_width_depends_on_dtype(self, dtype, expected_width):
+        span = ir.Span.unknown()
+        src = ir.Var("src", ir.TileType([1, 32], dtype), span)
+        idx = ir.Var("idx", ir.TileType([1, 32], DataType.UINT32), span)
+
+        result_type = tile.sort32(src, idx).type
+
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.dtype == dtype
+        assert result_type.shape == [1, expected_width]
+        assert _valid_of(result_type) == [1, expected_width]
+
+    @pytest.mark.parametrize(
+        ("dtype", "factor", "physical_width"),
+        [(DataType.FP32, 2, 128), (DataType.FP16, 4, 256)],
+    )
+    def test_scales_symbolic_valid_width(self, dtype, factor, physical_width):
+        span = ir.Span.unknown()
+        valid_cols = ir.Var("valid_cols", ir.ScalarType(DataType.INDEX), span)
+        src_view = ir.TileView(valid_shape=[1, valid_cols])
+        idx_view = ir.TileView(valid_shape=[1, valid_cols])
+        src = ir.Var("src", ir.TileType([1, 64], dtype, tile_view=src_view), span)
+        idx = ir.Var("idx", ir.TileType([1, 64], DataType.UINT32, tile_view=idx_view), span)
+
+        result_type = tile.sort32(src, idx).type
+
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.shape == [1, physical_width]
+        valid_width = result_type.get_effective_tile_view().valid_shape[1]
+        assert isinstance(valid_width, ir.Mul)
+        assert valid_width.left is valid_cols
+        assert isinstance(valid_width.right, ir.ConstInt)
+        assert valid_width.right.value == factor
+
+
 class TestB03TriAndGatherOps:
     """IR contracts for TTRI, TGATHERB, and MGATHER."""
 

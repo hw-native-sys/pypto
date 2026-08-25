@@ -3997,12 +3997,16 @@ class TestAssembleParentStride:
 class TestConvertSortOps:
     """Test conversion of tensor sort ops to tile sort ops."""
 
-    def test_sort32_conversion(self):
+    @pytest.mark.parametrize(
+        ("dtype", "out_shape"),
+        [(DataType.FP32, [8, 64]), (DataType.FP16, [8, 128])],
+    )
+    def test_sort32_conversion(self, dtype, out_shape):
         """tensor.sort32 -> tile.load (src, idx) + tile.sort32 + tile.store."""
         before, expected = _make_pair(
-            in_specs=[("src", [8, 32], DataType.FP32), ("idx", [8, 32], DataType.UINT32)],
-            out_shape=[8, 64],
-            out_dtype=DataType.FP32,
+            in_specs=[("src", [8, 32], dtype), ("idx", [8, 32], DataType.UINT32)],
+            out_shape=out_shape,
+            out_dtype=dtype,
             tensor_op=lambda ins: tensor_ops.sort32(ins[0], ins[1]),
             tile_op=lambda ts: tile_ops.sort32(ts[0], ts[1]),
         )

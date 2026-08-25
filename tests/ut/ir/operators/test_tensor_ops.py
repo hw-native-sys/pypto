@@ -4179,12 +4179,16 @@ class TestTensorFormatShapeError:
             ir.op.tensor.add(tensor_a, tensor_b)
 
 
-def test_tensor_sort32():
-    """tensor.sort32 doubles the last dim and preserves dtype."""
+@pytest.mark.parametrize(
+    ("dtype", "expected_width"),
+    [(DataType.FP32, 64), (DataType.FP16, 128)],
+)
+def test_tensor_sort32_output_width_depends_on_dtype(dtype, expected_width):
+    """tensor.sort32 reserves one 8-byte value-index pair per input."""
     span = ir.Span.unknown()
     d8 = ir.ConstInt(8, DataType.INT32, span)
     d32 = ir.ConstInt(32, DataType.INT32, span)
-    src = ir.Var("src", ir.TensorType([d8, d32], DataType.FP32), span)
+    src = ir.Var("src", ir.TensorType([d8, d32], dtype), span)
     idx = ir.Var("idx", ir.TensorType([d8, d32], DataType.UINT32), span)
 
     call = ir.op.tensor.sort32(src, idx)
@@ -4193,10 +4197,31 @@ def test_tensor_sort32():
 
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
-    assert result_type.dtype == DataType.FP32
+    assert result_type.dtype == dtype
     assert len(result_type.shape) == 2
     assert isinstance(result_type.shape[1], ir.ConstInt)
-    assert result_type.shape[1].value == 64
+    assert result_type.shape[1].value == expected_width
+
+
+def test_tensor_sort32_scales_symbolic_valid_width():
+    """The logical output region tracks a runtime FP16 input tail at 4x width."""
+    span = ir.Span.unknown()
+    valid_cols = ir.Var("valid_cols", ir.ScalarType(DataType.INDEX), span)
+    src_view = ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=[1, valid_cols])
+    idx_view = ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=[1, valid_cols])
+    src = ir.Var("src", ir.TensorType([1, 64], DataType.FP16, tensor_view=src_view), span)
+    idx = ir.Var("idx", ir.TensorType([1, 64], DataType.UINT32, tensor_view=idx_view), span)
+
+    result_type = ir.op.tensor.sort32(src, idx).type
+
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.shape == [1, 256]
+    assert result_type.tensor_view is not None
+    valid_width = result_type.tensor_view.valid_shape[1]
+    assert isinstance(valid_width, ir.Mul)
+    assert valid_width.left is valid_cols
+    assert isinstance(valid_width.right, ir.ConstInt)
+    assert valid_width.right.value == 4
 
 
 def test_tensor_sort32_wrong_dtype():

@@ -20,7 +20,6 @@
 
 #include <any>
 #include <cstddef>
-#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -34,9 +33,9 @@
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
-#include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
+#include "src/ir/op/sort_utils.h"
 
 namespace pypto {
 namespace ir {
@@ -59,8 +58,9 @@ static T GetKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, c
 TypePtr DeduceTileSort32Type(const std::vector<ExprPtr>& args,
                              const std::vector<std::pair<std::string, std::any>>& kwargs,
                              const std::string& op_name) {
-  CHECK(args.size() == 2) << "The operator " << op_name << " requires 2 arguments (src, idx), but got "
-                          << args.size();
+  CHECK(args.size() == 2 || args.size() == 3)
+      << "The operator " << op_name << " requires 2 or 3 arguments (src, idx[, tmp]), but got "
+      << args.size();
 
   // First arg: src tile (f16 or f32)
   auto src_type = As<TileType>(args[0]->GetType());
@@ -75,23 +75,25 @@ TypePtr DeduceTileSort32Type(const std::vector<ExprPtr>& args,
   CHECK(idx_type) << "The operator " << op_name << " requires second argument to be a TileType, but got "
                   << args[1]->GetType()->TypeName();
 
-  // Build output shape: double the last dimension for value-index pairs
-  const auto& input_shape = src_type->shape_;
-  CHECK(!input_shape.empty()) << "The operator " << op_name << " requires non-empty input shape";
-
-  std::vector<ExprPtr> output_shape(input_shape.begin(), input_shape.end() - 1);
-  auto last_dim = input_shape.back();
-  // Try constant evaluation for the common case (sort32 always uses cols=32 -> 64)
-  if (auto const_dim = As<ConstInt>(last_dim)) {
-    int64_t doubled = const_dim->value_ * 2;
-    output_shape.push_back(std::make_shared<ConstInt>(doubled, DataType::INDEX, Span::unknown()));
-  } else {
-    auto two = std::make_shared<ConstInt>(2, DataType::INDEX, Span::unknown());
-    output_shape.push_back(std::make_shared<Mul>(last_dim, two, DataType::INDEX, Span::unknown()));
+  if (args.size() == 3) {
+    auto tmp_type = As<TileType>(args[2]->GetType());
+    CHECK(tmp_type) << "The operator " << op_name
+                    << " requires optional third argument 'tmp' to be a TileType, but got "
+                    << args[2]->GetType()->TypeName();
+    CHECK(tmp_type->dtype_ == src_type->dtype_)
+        << "The operator " << op_name << " requires tmp dtype to match src dtype ("
+        << src_type->dtype_.ToString() << "), but got " << tmp_type->dtype_.ToString();
   }
 
+  // TSORT32 stores 8-byte value-index pairs: 2 FP32 or 4 FP16 elements.
+  const auto& input_shape = src_type->shape_;
+  CHECK(!input_shape.empty()) << "The operator " << op_name << " requires non-empty input shape";
+  const auto output_shape = GetSort32OutputShape(input_shape, src_type->dtype_, args[0]->span_);
+  const auto output_valid_shape =
+      GetSort32OutputShape(GetValidShape(src_type), src_type->dtype_, args[0]->span_);
+
   TileView tile_view;
-  tile_view.valid_shape = output_shape;
+  tile_view.valid_shape = output_valid_shape;
   InheritTileViewLayout(tile_view, src_type);
   return std::make_shared<TileType>(output_shape, src_type->dtype_, std::nullopt, tile_view);
 }
@@ -106,8 +108,10 @@ REGISTER_OP("tile.sort32")
     .set_description("Sort fixed 32-element blocks (maps to pto.tsort32)")
     .add_argument("src", "Input value tile (TileType, f16 or f32)")
     .add_argument("idx", "Input index tile (TileType)")
+    .add_argument("tmp", "Optional A2/A3 scratch tile (same dtype and capacity as src)")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
+    .set_input_memory(2, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     .not_inplace_safe()
     .f_deduce_type([](const std::vector<ExprPtr>& args,

@@ -2104,8 +2104,8 @@ def sort32(src: Tensor, idx: Tensor) -> Tensor:
     """Sort fixed 32-element blocks with explicit index tensor (tensor-level).
 
     Tensor-level counterpart of ``pl.tile.sort32``. Sorts 32-element blocks in
-    src, permuting idx alongside. Returns sorted value-index pairs tensor with
-    doubled last dimension.
+    src, permuting idx alongside. Returns an 8-byte value-index-pair tensor;
+    its last dimension is 2x the input width for FP32 and 4x for FP16.
 
     For FP16 src: initialize idx with [0, 1, 2, ..., 31] per block.
     For FP32 src: initialize idx with [0, 2, 4, ..., 62] per block.
@@ -2115,7 +2115,7 @@ def sort32(src: Tensor, idx: Tensor) -> Tensor:
         idx: Input index tensor with sequential offsets
 
     Returns:
-        Tensor wrapping the sort32 operation (last dim doubled)
+        Tensor wrapping the dtype-dependent expanded sort32 output
     """
     call_expr = _ir_ops.sort32(src.unwrap(), idx.unwrap())
     return Tensor(expr=call_expr)

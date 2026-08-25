@@ -1,14 +1,15 @@
 # InitMemRef Pass
 
-为所有变量初始化内存引用 (MemRef)，并创建地址未分配的 alloc 操作。
+物化编译器负责的 PTO level3 scratch，为所有变量初始化内存引用 (MemRef)，并创建地址未分配的 alloc 操作。
 
 ## 概述
 
-此 Pass 执行三项任务：
+此 Pass 执行四项任务：
 
 1. **规范化语句 (Statement) 结构**（内部调用 NormalizeStmtStructure）
-2. **为 TileType 和 TensorType 变量初始化 MemRef**
-3. **为每个非 DDR 的 MemRef 创建 `tile.alloc` 操作**，地址为 `addr=-1`（未分配）
+2. **物化编译器负责的 level3 scratch**：处理 A2/A3 上需要 scratch 的 `tile.ci`、窄化 `tile.cast` 和 `tile.sort32`；`tile.sel` / `tile.sels` / `tile.prelu` 的 caller tmp 原样保留
+3. **为 TileType 和 TensorType 变量初始化 MemRef**
+4. **为每个非 DDR 的 MemRef 创建 `tile.alloc` 操作**，地址为 `addr=-1`（未分配）
 
 内存空间从 `TileType::memory_space_` 读取（由 InferTileMemorySpace 设置）。无 `memory_space` 的变量默认为 DDR。
 
@@ -44,16 +45,17 @@ program_with_memrefs = init_pass(program)
 ## 算法
 
 1. **规范化结构**：调用 `NormalizeStmtStructure` 确保 `SeqStmts` 为扁平结构
-2. **解析声明式分配**：收集所有单参数 `pl.MemRef(...)` 声明，并从绑定的 tile 推导出每块分配的大小与内存空间（见[声明式分配](#声明式分配)）
-3. **初始化 MemRef**：从 `TileType` 读取 `memory_space`（由 InferTileMemorySpace 设置），创建 MemRef 对象（addr=-1）并附加到变量类型
+2. **物化 level3 scratch**：在 A2/A3 的 PyPTO 或 DSA-RP 规划模式下，为缺失的 `tile.ci`、窄化 `tile.cast` 与必要的 `tile.sort32` scratch 插入普通 Vec `tile.create`。`tile.sel` / `tile.sels` / `tile.prelu` 的 caller tmp 原样保留；PTOAS 规划器与 A5 不变。
+3. **解析声明式分配**：收集所有单参数 `pl.MemRef(...)` 声明，并从绑定的 tile 推导出每块分配的大小与内存空间（见[声明式分配](#声明式分配)）
+4. **初始化 MemRef**：从 `TileType` 读取 `memory_space`（由 InferTileMemorySpace 设置），创建 MemRef 对象（addr=-1）并附加到变量类型
    - **tile.store**：结果与输出 tensor 参数共享 MemRef（由 `output_reuses_input_arg` 注册表属性指定）
    - **View 操作**（如 `tile.reshape`）：输出与输入 tile 共享 MemRef
    - **复用输入操作**（如 `tile.matmul_acc`、`tile.gemv_acc`）：输出与指定输入共享 MemRef（由 `output_reuses_input_arg` 注册表属性指定）
    - **ForStmt/IfStmt return_vars**：修补为与对应 yield 值共享 MemRef
    - **用户绑定的 tile**：保留作者指定的 buffer，而不是新建一块分配
-4. **收集非 DDR MemRef**：从 TileType 变量中收集不在 DDR 中的唯一 MemRef 对象
-5. **创建 alloc 语句**：为每个非 DDR MemRef 创建 `tile.alloc(memspace, -1, size, id)`；base 属于声明式分配时带上 `pinned=True`
-6. **前置 alloc**：将 alloc 语句插入到函数体顶层 `SeqStmts` 的开头
+5. **收集非 DDR MemRef**：从 TileType 变量中收集不在 DDR 中的唯一 MemRef 对象
+6. **创建 alloc 语句**：为每个非 DDR MemRef 创建 `tile.alloc(memspace, -1, size, id)`；base 属于声明式分配时带上 `pinned=True`
+7. **前置 alloc**：将 alloc 语句插入到函数体顶层 `SeqStmts` 的开头
 
 ## 声明式分配
 
@@ -190,6 +192,7 @@ Pass InitMemRef();
 **实现文件**：`src/ir/transforms/init_memref.cpp`
 
 - `NormalizeStmtStructure` 在 MemRef 初始化之前被内部调用
+- `MaterializePtoLevel3ScratchMutator` 在所有 tile shape/cast 重写之后、MemRef 收集之前，仅插入缺失的编译器可选 scratch（`tile.ci`、窄化 `tile.cast`、必要的 `tile.sort32`）；`tile.sel` / `tile.sels` / `tile.prelu` 的 caller tmp 原样保留
 - `InitMemRefMutator` 从 `TileType` 读取 `memory_space` 并创建 MemRef 对象
   - 处理 view 操作、复用输入操作（`tile.store`、`matmul_acc`、`gemv_acc`）、tile 别名（`a = b`）以及 ForStmt/IfStmt yield 值的 MemRef 共享
 - `NonDDRMemRefCollector` 收集唯一的非 DDR MemRef
@@ -207,6 +210,7 @@ passes.def("init_mem_ref", &pass::InitMemRef, "Initialize MemRef for variables")
 - 测试所有 MemRef 的 addr=-1
 - 测试为非 DDR MemRef 创建 tile.alloc 语句
 - 测试规范化后的 `SeqStmts` 结构
+- 测试按 planner/target 门控的 `tile.ci`、窄化 `tile.cast` 与 `tile.sort32` scratch 物化
 - 测试 tile.store 结果与输出参数共享 MemRef
 - 测试累加操作（matmul_acc）与累加器输入共享 MemRef
 - 测试 ForStmt 循环携带变量的 MemRef 关系（initValue/iter_arg 共享，yield/return_var 共享）

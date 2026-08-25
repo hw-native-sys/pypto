@@ -23,6 +23,7 @@
  */
 
 #include <cstddef>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -34,6 +35,7 @@
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -79,6 +81,20 @@ std::string EmitFlatOffsetSSAFromValues(const std::vector<std::string>& indices,
                                         const std::string& name_hint);
 std::string GenerateInsOutsClause(const ir::CallPtr& op, codegen::PTOCodegen& codegen,
                                   const std::string& config_attr = "");
+bool HasStaticValidShape(const std::shared_ptr<const ir::TileType>& tile_type);
+void RequireStaticValidShapeForPtoas(const std::shared_ptr<const ir::TileType>& tile_type,
+                                     std::string_view op_name, std::string_view role, const ir::Span& span);
+std::string GetTileViewTypeAnnotation(const ir::ExprPtr& expr, codegen::PTOCodegen& codegen);
+std::string EnsureTileViewSsa(const ir::ExprPtr& expr,
+                              const std::shared_ptr<const ir::TileType>& view_tile_type,
+                              codegen::PTOCodegen& codegen, const std::string& temp_prefix);
+std::string EnsureStaticViewTileSsa(const ir::ExprPtr& expr, codegen::PTOCodegen& codegen,
+                                    const std::string& temp_prefix);
+void EmitInsOutsWithViewTypes(codegen::PTOCodegen& codegen, std::string_view pto_op_name,
+                              const std::vector<std::pair<std::string, std::string>>& ins,
+                              const std::string& result_ssa,
+                              const std::shared_ptr<const ir::TileType>& result_tile_type,
+                              const std::string& config_attr = "");
 void EmitInsOuts(codegen::PTOCodegen& codegen, std::string_view pto_op_name,
                  const std::vector<std::pair<std::string, std::string>>& ins);
 std::string MaterializeSubviewOperandIfNeeded(const ir::ExprPtr& expr, codegen::PTOCodegen& codegen,

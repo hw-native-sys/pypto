@@ -200,6 +200,17 @@ class BackendHandler {
   [[nodiscard]] virtual bool RequiresSplitLoadTpopWorkaround() const = 0;
 
   /**
+   * @brief Whether PyPTO/DSA-RP must materialize PTOAS level-3 explicit tmp
+   *        scratch and emit static-valid codegen views.
+   *
+   * True on Ascend910B (a2a3): InitMemRef appends compiler-owned scratch for
+   * ops such as tile.ci / narrowing tile.cast / tile.sort32, and codegen
+   * bridges explicit-tmp forms with static valid_shape. False on Ascend950:
+   * PTOAS level-2 PlanMemory owns implicit tmp instead.
+   */
+  [[nodiscard]] virtual bool RequiresLevel3TmpScratch() const = 0;
+
+  /**
    * @brief Whether AIV-side V-to-C tpush must materialise a fractal-layout
    *        adapter `tile.move` before the actual tpush.
    *
