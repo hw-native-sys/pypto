@@ -237,8 +237,9 @@ way — removing it cannot change execution order, only the bookkeeping the sche
 carries.
 
 ```bash
-python -m simpler_setup.tools.deps_viewer <deps.json> --edge-mode reduced
-python -m simpler_setup.tools.deps_viewer <deps.json> --edge-mode reduced_dataflow
+DEPS_JSON="outputs/<run>/deps.json"
+python -m simpler_setup.tools.deps_viewer "$DEPS_JSON" --edge-mode reduced
+python -m simpler_setup.tools.deps_viewer "$DEPS_JSON" --edge-mode reduced_dataflow
 ```
 
 > **Never report from `reduced` alone.** Edges carry a `source`, and `creator` edges — the
@@ -260,11 +261,12 @@ Two more things that look like answers and are not:
 - **A graph of depth 1 cannot contain a redundant edge at all** — with no two-hop path
   there is nothing to imply an edge. Check the depth first; a `0` there ends the audit
   rather than telling you the graph is minimal.
-- **A cycle silently disables reduction.** The tool warns on stderr, emits the full graph,
-  and still **exits 0**. Read stderr; the exit status is not proof a reduction ran.
+- **A cycle disables reduction without failing.** The tool warns on stderr, emits the full
+  graph, and still **exits 0**. Read stderr; a zero exit is not proof a reduction ran.
 
-Add `--func-names <name_map*.json>` to get kernel names instead of numeric ids in the
-printed edge list. The audit consumes `deps.json` alone — no timing artifacts, no device.
+The audit itself consumes `deps.json` alone — no timing artifacts, no device. Adding
+`--func-names` reads one more file, the run's `name_map*.json`, and is worth it:
+it puts kernel names in the printed edge list instead of numeric ids.
 
 ## Deciding
 

@@ -101,8 +101,10 @@ cfg = RunConfig(platform="a2a3", enable_chip_swimlane=3,  # 调度器阶段及�
 运行时也能把记录转成可以在 [ui.perfetto.dev](https://ui.perfetto.dev) 里加载的 Chrome Trace Event JSON：
 
 ```bash
-python -m simpler_setup.tools.swimlane_converter <records>.json \
-    --deps-json <deps>.json -o out.json
+RECORDS="outputs/<run>/chip_swimlane_records.json"
+DEPS_JSON="outputs/<run>/deps.json"
+python -m simpler_setup.tools.swimlane_converter "$RECORDS" \
+    --deps-json "$DEPS_JSON" -o out.json
 ```
 
 ## 怎么读
@@ -129,8 +131,9 @@ dispatch ──────► start ──────► end ─────�
 当你想把间隙量化而不是靠眼估时，运行时自带一份分析，它只回答一个问题 —— *什么时候，一个空闲的核明明有就绪的活、而调度器还没把活放上去？*
 
 ```bash
+# $RECORDS 与 $DEPS_JSON 沿用上面的赋值
 python -m simpler_setup.tools.sched_overhead_analysis \
-    --chip-swimlane-records-json <records>.json --deps-json <deps>.json
+    --chip-swimlane-records-json "$RECORDS" --deps-json "$DEPS_JSON"
 ```
 
 它给出逐引擎与全系统的开销占 makespan 的比例、取件代价分布、AICPU 调度循环预算，以及把关键路径拆成「计算」与「调度器注入」两部分的归因。同样这些数字可以用 `swimlane_converter --overhead` 叠加成时间线上的 counter 轨。
@@ -147,7 +150,8 @@ python -m simpler_setup.tools.sched_overhead_analysis \
 `sched_overhead_analysis` 回答的是一个具体问题。关键路径分析回答的是更大的那个 —— *依赖决定的下限在哪，剩下的时间被谁花掉了？*
 
 ```bash
-python -m simpler_setup.tools.critical_path <run-dir>
+RUN_DIR="outputs/<run>"        # 存放本次采集的那棵树
+python -m simpler_setup.tools.critical_path "$RUN_DIR"
 ```
 
 它会找出每一个同时含有 `chip_swimlane_records.json`、`deps.json` 与 `name_map*.json` 的目录，并在各自的 records 文件旁边写一份逐 rank 的报告。把它指向整棵 run 树，而不是单个 rank。

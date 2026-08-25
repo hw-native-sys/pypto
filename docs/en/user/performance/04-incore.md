@@ -191,8 +191,8 @@ The raw output is cluttered. The repo tool cleans it into a per-pipe, Perfetto-v
 trace:
 
 ```bash
-python -m pypto.tools.clean_sim_trace \
-  <build-dir>/kernel_insight_all_funcs_<ts>/funcs/<kernel>/collect/out/OPPROF_* -o <out>
+TRACE="<build-dir>/kernel_insight_all_funcs_<ts>/funcs/<kernel>/collect/out"
+python -m pypto.tools.clean_sim_trace "$TRACE"/OPPROF_* -o trace-out
 ```
 
 That writes `trace.clean.json` with the pipeline lanes in dataflow order —

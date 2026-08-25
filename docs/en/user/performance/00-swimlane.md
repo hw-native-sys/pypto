@@ -127,8 +127,10 @@ The runtime also converts the records into a Chrome Trace Event JSON that loads 
 [ui.perfetto.dev](https://ui.perfetto.dev):
 
 ```bash
-python -m simpler_setup.tools.swimlane_converter <records>.json \
-    --deps-json <deps>.json -o out.json
+RECORDS="outputs/<run>/chip_swimlane_records.json"
+DEPS_JSON="outputs/<run>/deps.json"
+python -m simpler_setup.tools.swimlane_converter "$RECORDS" \
+    --deps-json "$DEPS_JSON" -o out.json
 ```
 
 ## Reading it
@@ -161,8 +163,9 @@ that answers one specific question — *when is time lost because an idle core h
 work the scheduler had not placed yet?*
 
 ```bash
+# $RECORDS and $DEPS_JSON as set above
 python -m simpler_setup.tools.sched_overhead_analysis \
-    --chip-swimlane-records-json <records>.json --deps-json <deps>.json
+    --chip-swimlane-records-json "$RECORDS" --deps-json "$DEPS_JSON"
 ```
 
 This one needs a **level ≥ 3** capture for its scheduler-loop parts —
@@ -188,7 +191,8 @@ problem from a fake one:
 broader one — *what is the dependency-limited floor, and which tasks spent the rest?*
 
 ```bash
-python -m simpler_setup.tools.critical_path <run-dir>
+RUN_DIR="outputs/<run>"        # the tree holding the capture
+python -m simpler_setup.tools.critical_path "$RUN_DIR"
 ```
 
 It discovers every directory holding `chip_swimlane_records.json`, `deps.json` and
