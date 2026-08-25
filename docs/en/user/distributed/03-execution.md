@@ -135,35 +135,45 @@ it may be an ordinary tensor allocated after `prepare()`. It does not need
 ### Skipping the staging copy
 
 Staging costs one full host-side copy of the payload, which for a large resident weight
-is worth avoiding. A range can be named in place instead — no staging buffer, no
-memcpy — when the child can already see it and nothing will change it:
+is worth avoiding. A range registered through `inherited_host_tensors` is named in place
+instead — no staging buffer, no memcpy — because it predates the fork and every child
+holds it at the same address.
 
-- it was registered through `inherited_host_tensors`, so it predates the fork and every
-  child holds it at the same address; **and**
-- it is either shared memory (`.share_memory_()`, which `torch.is_shared()` reports), or
-  the caller lists it in `immutable_host_tensors`.
+**Listing a tensor is a guarantee you make.** By passing it in
+`inherited_host_tensors` you assert two things:
 
-The second option exists because `is_shared()` answers a different question than the one
-that matters. It reports whether the storage is a shared-memory allocation; what decides
-safety is whether anything writes those bytes after the fork. A read-only `MAP_SHARED`
-file mapping wrapped with `mmap` + `numpy.frombuffer` + `torch.from_numpy` is genuinely
-shared and still reports `False`, so it would be copied needlessly. Declaring it says what
-inference cannot see.
+- its backing is **visible across processes** — a `MAP_SHARED` mapping, whether torch's
+  own shared memory or an external file mapping; and
+- that mapping stays **valid for the worker's lifetime**.
+
+Passing a `MAP_PRIVATE` backing is **unsupported**. Copy-on-write leaves the child reading
+its pre-fork snapshot, so an upload may carry stale or incorrect data. Nothing detects
+this for you.
+
+PyPTO cannot verify the guarantee, and does not try. `torch.is_shared()` answers a
+different question — whether the storage is a torch shared-memory allocation — and a
+read-only `MAP_SHARED` file mapping wrapped with `mmap` + `numpy.frombuffer` +
+`torch.from_numpy` is genuinely shared while reporting `False`. Reading
+`/proc/self/maps` would answer correctly but only on Linux, and the simulator also runs
+on macOS. So `is_shared()` is kept as a one-way signal: `True` confirms a torch-managed
+shared backing, `False` is inconclusive, and for the tensors it cannot confirm PyPTO
+emits one `RuntimeWarning` at `prepare()` time and proceeds. It never rejects the tensor
+and never falls back to staging — falling back would silently reinstate the copy you
+asked it to skip.
 
 ```python
-weights = map_readonly_shared(path)          # mmap-backed, is_shared() == False
+weights = map_readonly_shared(path)          # mmap-backed MAP_SHARED, is_shared() == False
 with compiled.prepare(
-    inherited_host_tensors=[weights],        # visible in every child
-    immutable_host_tensors=[weights],        # and never written after this point
+    inherited_host_tensors=[weights],        # "visible in every child, for my lifetime"
 ) as rt:
     resident = rt.alloc_stacked_tensor(weights)
 ```
 
-`immutable_host_tensors` is a promise about **uploads**, and reading back into a declared
-range is refused rather than quietly staged — staging would write the same bytes into the
-same range, breaking the promise while looking like it worked. Read back into a tensor you
-did not declare. Anything not declared, or allocated after `prepare()`, keeps staging
-exactly as before.
+The guarantee is about visibility, so it holds in both directions: a listed range may be
+an upload source or a read-back destination. Writability is left to the hardware — a range
+mapped `MAP_SHARED` from a read-only file descriptor faults on write rather than corrupting
+anything. Anything not listed, or allocated after `prepare()`, keeps staging exactly as
+before.
 
 A named upload source is granted `READ`; only a destination is granted `READWRITE`. That
 matters for a read-only mapping: describing it as writable would tell the runtime a

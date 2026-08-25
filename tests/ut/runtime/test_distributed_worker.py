@@ -22,6 +22,7 @@ import importlib.util
 import json
 import sys
 import threading
+import warnings
 import weakref
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -3337,12 +3338,19 @@ class TestNamedInheritedHostRanges:
         patched_setup["worker"].create_buffer.assert_not_called()
         rt.close()
 
-    def test_copy_to_stages_a_private_inherited_range(self, patched_setup):
-        # MAP_PRIVATE: the child's pages are frozen at fork, so a named range would upload
-        # whatever was there before a later parent write. Staging reads the parent's current
-        # contents instead, which is why it stays the correct path here.
+    def test_copy_to_stages_an_unlisted_range(self, patched_setup):
+        # Reachability, not backing: a tensor the caller never listed has no guarantee attached,
+        # so it stages and the memmove reads the parent's current contents.
+        #
+        # This replaces test_copy_to_stages_a_private_inherited_range, which asserted the
+        # opposite for a *listed* private tensor: that listing a MAP_PRIVATE range was safe
+        # because the runtime would infer it from `is_shared()` and stage it anyway. Under the
+        # caller-guarantee contract that inference is gone, so a listed private range is now
+        # named and uploads stale bytes. That is a deliberate narrowing of the contract, agreed
+        # in review; if it is ever rejected, restore the `is_shared()` gate in
+        # `_named_host_buffer` rather than weakening this test.
         host = torch.zeros(4, 4, dtype=torch.float32)
-        rt = DistributedWorker(_fake_compiled([_param("a", [4, 4])], []), inherited_host_tensors=[host])
+        rt = DistributedWorker(_fake_compiled([_param("a", [4, 4])], []))
         dev = self._dev(rt)
         nbytes = host.numel() * host.element_size()
         host.fill_(1.0)
@@ -3354,18 +3362,17 @@ class TestNamedInheritedHostRanges:
         assert ctypes.string_at(staged.base, nbytes) == ctypes.string_at(host.data_ptr(), nbytes)
         rt.close()
 
-    def test_a_declared_immutable_range_is_named_even_when_not_shared(self, patched_setup):
-        """The case inference cannot reach: safe to name, but `is_shared()` says otherwise.
+    def test_a_listed_range_is_named_even_when_not_shared(self, patched_setup):
+        """The case no portable check can reach: safe to name, but `is_shared()` says otherwise.
 
         A read-only `MAP_SHARED` file mapping wrapped through `mmap` + `from_numpy` is shared at
-        the OS level and reports `is_shared() == False`, so it is staged despite being the single
-        biggest beneficiary of naming. The caller declaring it closes that gap.
+        the OS level and reports `is_shared() == False`. Listing it is the caller's guarantee,
+        so it is named rather than staged — which is the whole point of the facility.
         """
-        host = torch.zeros(4, 4, dtype=torch.float32)  # NOT shared
+        host = torch.zeros(4, 4, dtype=torch.float32)  # NOT torch-shared
         rt = DistributedWorker(
             _fake_compiled([_param("a", [4, 4])], []),
             inherited_host_tensors=[host],
-            immutable_host_tensors=[host],
         )
         dev = self._dev(rt)
         nbytes = host.numel() * host.element_size()
@@ -3379,73 +3386,18 @@ class TestNamedInheritedHostRanges:
         patched_setup["worker"].create_buffer.assert_not_called()
         rt.close()
 
-    def test_a_read_back_into_a_declared_range_is_refused(self, patched_setup):
-        """Writing a range declared immutable is a caller bug, and staging would hide it.
+    def test_a_read_back_into_a_listed_range_is_named(self, patched_setup):
+        """Both directions, deliberately: one guarantee, no direction rule.
 
-        Falling back to staging would write the same bytes into the same range, breaking the
-        promise just as thoroughly while looking like it worked — and for the read-only mapping
-        this option exists for, that write faults. Refusing names the mistake instead.
-        """
-        host = torch.zeros(4, 4, dtype=torch.float32)  # NOT shared
-        rt = DistributedWorker(
-            _fake_compiled([_param("a", [4, 4])], []),
-            inherited_host_tensors=[host],
-            immutable_host_tensors=[host],
-        )
-        dev = self._dev(rt)
-        nbytes = host.numel() * host.element_size()
-
-        with pytest.raises(ValueError, match="declared through immutable_host_tensors"):
-            rt.copy_from(host.data_ptr(), dev.data_ptr, nbytes)
-        rt.close()
-
-    def test_a_shared_range_declared_immutable_is_also_refused_for_read_back(self, patched_setup):
-        """Shared memory makes the write *work*; it does not make it consistent with the promise.
-
-        This is the case a mechanical check would wave through: the bytes land where the parent
-        can see them, so nothing breaks — except the declaration the caller made, which other
-        decisions now rest on.
-        """
-        host = torch.zeros(4, 4, dtype=torch.float32).share_memory_()
-        rt = DistributedWorker(
-            _fake_compiled([_param("a", [4, 4])], []),
-            inherited_host_tensors=[host],
-            immutable_host_tensors=[host],
-        )
-        dev = self._dev(rt)
-        nbytes = host.numel() * host.element_size()
-
-        with pytest.raises(ValueError, match="declared through immutable_host_tensors"):
-            rt.copy_from(host.data_ptr(), dev.data_ptr, nbytes)
-        rt.close()
-
-    def test_a_named_upload_source_is_granted_read_only(self, patched_setup):
-        """An upload source is read by the child and nothing more, so the descriptor says READ.
-
-        Granting READWRITE would tell the ABI a consumer may write memory that, for the
-        read-only file mapping this option targets, faults on a write — the same class of
-        misdeclaration the declaration exists to remove.
+        The guarantee is about visibility, so it holds whichever way the bytes move. Writability
+        is the MMU's business — a range mapped MAP_SHARED from a read-only fd faults on write
+        instead of corrupting anything, so the runtime does not need to police it.
         """
         host = torch.zeros(4, 4, dtype=torch.float32)
         rt = DistributedWorker(
             _fake_compiled([_param("a", [4, 4])], []),
             inherited_host_tensors=[host],
-            immutable_host_tensors=[host],
         )
-        dev = self._dev(rt)
-        nbytes = host.numel() * host.element_size()
-
-        rt.copy_to(dev.data_ptr, host.data_ptr(), nbytes)
-
-        named = patched_setup["worker"].copy_to.call_args.args[1]
-        assert isinstance(named, _NamedHostRange)
-        assert (named.backend_kind, named.access) == ("FORK_SHM", "READ")
-        rt.close()
-
-    def test_an_undeclared_shared_range_is_still_named_as_a_d2h_destination(self, patched_setup):
-        """The rules above must not regress the case that was already safe: shared, undeclared."""
-        host = torch.zeros(4, 4, dtype=torch.float32).share_memory_()
-        rt = DistributedWorker(_fake_compiled([_param("a", [4, 4])], []), inherited_host_tensors=[host])
         dev = self._dev(rt)
         nbytes = host.numel() * host.element_size()
 
@@ -3454,39 +3406,80 @@ class TestNamedInheritedHostRanges:
         assert isinstance(patched_setup["worker"].copy_from.call_args.args[0], _NamedHostRange)
         rt.close()
 
-    def test_a_non_tensor_declared_entry_is_rejected(self, patched_setup):
-        """Matches how `inherited_host_tensors` rejects them: TypeError, not AttributeError."""
-        with pytest.raises(TypeError, match="immutable_host_tensors entries must be torch.Tensor"):
-            DistributedWorker(
-                _fake_compiled([_param("a", [4, 4])], []),
-                immutable_host_tensors=[None],  # pyright: ignore[reportArgumentType]
-            )
+    def test_a_named_upload_source_is_granted_read_only(self, patched_setup):
+        """An upload source is read by the child and nothing more, so the descriptor says READ.
 
-    def test_declaring_a_range_does_not_name_its_neighbours(self, patched_setup):
-        """The declaration is per range, so an undeclared private tensor still stages."""
-        declared = torch.zeros(4, 4, dtype=torch.float32)
-        other = torch.zeros(4, 4, dtype=torch.float32)
-        rt = DistributedWorker(
-            _fake_compiled([_param("a", [4, 4])], []),
-            inherited_host_tensors=[declared, other],
-            immutable_host_tensors=[declared],
-        )
-        dev = self._dev(rt)
-        nbytes = other.numel() * other.element_size()
-
-        rt.copy_to(dev.data_ptr, other.data_ptr(), nbytes)
-
-        assert not isinstance(patched_setup["worker"].copy_to.call_args.args[1], _NamedHostRange)
-        rt.close()
-
-    def test_a_declared_range_must_still_be_inherited(self, patched_setup):
-        """Declaring immutability says nothing about reachability: a post-fork tensor has no
-        mapping in the child, so it stages regardless of what the caller promises."""
+        Granting READWRITE would tell the ABI a consumer may write memory that, for the
+        read-only file mapping this targets, faults on a write.
+        """
         host = torch.zeros(4, 4, dtype=torch.float32)
         rt = DistributedWorker(
             _fake_compiled([_param("a", [4, 4])], []),
-            immutable_host_tensors=[host],
+            inherited_host_tensors=[host],
         )
+        dev = self._dev(rt)
+        nbytes = host.numel() * host.element_size()
+
+        rt.copy_to(dev.data_ptr, host.data_ptr(), nbytes)
+
+        named = patched_setup["worker"].copy_to.call_args.args[1]
+        assert (named.backend_kind, named.access) == ("FORK_SHM", "READ")
+        rt.close()
+
+    def test_a_named_read_back_destination_is_granted_readwrite(self, patched_setup):
+        """A destination is written, so the descriptor must say so."""
+        host = torch.zeros(4, 4, dtype=torch.float32).share_memory_()
+        rt = DistributedWorker(_fake_compiled([_param("a", [4, 4])], []), inherited_host_tensors=[host])
+        dev = self._dev(rt)
+        nbytes = host.numel() * host.element_size()
+
+        rt.copy_from(host.data_ptr(), dev.data_ptr, nbytes)
+
+        named = patched_setup["worker"].copy_from.call_args.args[0]
+        assert (named.backend_kind, named.access) == ("FORK_SHM", "READWRITE")
+        rt.close()
+
+    def test_an_unverifiable_listed_tensor_warns_once(self, patched_setup):
+        """`is_shared()` survives as a best-effort signal: False is inconclusive, so warn.
+
+        One warning per worker, not per tensor and not per copy, and it neither rejects the
+        tensor nor falls back to staging — falling back would silently reinstate the copy this
+        facility removes.
+        """
+        unverifiable = torch.zeros(4, 4, dtype=torch.float32)
+        confirmed = torch.zeros(4, 4, dtype=torch.float32).share_memory_()
+
+        with pytest.warns(RuntimeWarning, match="cannot be verified as cross-process visible") as rec:
+            rt = DistributedWorker(
+                _fake_compiled([_param("a", [4, 4])], []),
+                inherited_host_tensors=[unverifiable, confirmed],
+            )
+
+        assert len(rec) == 1
+        assert "1 of 2" in str(rec[0].message)
+        dev = self._dev(rt)
+        nbytes = unverifiable.numel() * unverifiable.element_size()
+        rt.copy_to(dev.data_ptr, unverifiable.data_ptr(), nbytes)
+        assert isinstance(patched_setup["worker"].copy_to.call_args.args[1], _NamedHostRange)
+        rt.close()
+
+    def test_all_confirmed_tensors_warn_not_at_all(self, patched_setup):
+        """`is_shared() == True` is conclusive, so there is nothing to caveat."""
+        host = torch.zeros(4, 4, dtype=torch.float32).share_memory_()
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            rt = DistributedWorker(
+                _fake_compiled([_param("a", [4, 4])], []),
+                inherited_host_tensors=[host],
+            )
+        rt.close()
+
+    def test_a_listed_range_must_still_be_inherited(self, patched_setup):
+        """The guarantee says nothing about reachability: a post-fork tensor has no mapping in
+        the child, so it stages regardless of what the caller promises."""
+        host = torch.zeros(4, 4, dtype=torch.float32)
+        rt = DistributedWorker(_fake_compiled([_param("a", [4, 4])], []))
         dev = self._dev(rt)
         nbytes = host.numel() * host.element_size()
 
@@ -3495,12 +3488,21 @@ class TestNamedInheritedHostRanges:
         assert not isinstance(patched_setup["worker"].copy_to.call_args.args[1], _NamedHostRange)
         rt.close()
 
-    def test_a_non_cpu_declared_tensor_is_rejected(self, patched_setup):
-        with pytest.raises(ValueError, match="immutable_host_tensors must be contiguous CPU"):
-            DistributedWorker(
-                _fake_compiled([_param("a", [4, 4])], []),
-                immutable_host_tensors=[torch.zeros(4, 4).t()],
-            )
+    def test_listing_a_range_does_not_name_its_neighbours(self, patched_setup):
+        """The guarantee is per listed range, so an unlisted tensor still stages."""
+        listed = torch.zeros(4, 4, dtype=torch.float32)
+        other = torch.zeros(4, 4, dtype=torch.float32)
+        rt = DistributedWorker(
+            _fake_compiled([_param("a", [4, 4])], []),
+            inherited_host_tensors=[listed],
+        )
+        dev = self._dev(rt)
+        nbytes = other.numel() * other.element_size()
+
+        rt.copy_to(dev.data_ptr, other.data_ptr(), nbytes)
+
+        assert not isinstance(patched_setup["worker"].copy_to.call_args.args[1], _NamedHostRange)
+        rt.close()
 
     def test_copy_to_stages_a_partially_overlapping_range(self, patched_setup):
         host = torch.zeros(8, dtype=torch.float32).share_memory_()

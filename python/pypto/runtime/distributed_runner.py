@@ -1439,27 +1439,6 @@ def execute_distributed_compiled(
     return compiled(*args, config=config)
 
 
-def _immutable_host_spans(
-    tensors: Sequence[torch.Tensor] | None,
-) -> tuple[tuple[int, int], ...]:
-    """Return ``(start, end)`` for each range the caller declares is never written post-fork."""
-    spans: list[tuple[int, int]] = []
-    for tensor in tensors or ():
-        if not isinstance(tensor, torch.Tensor):
-            raise TypeError(
-                "DistributedWorker immutable_host_tensors entries must be torch.Tensor objects, "
-                f"got {type(tensor).__name__}."
-            )
-        if tensor.device.type != "cpu" or not tensor.is_contiguous():
-            raise ValueError(
-                "DistributedWorker immutable_host_tensors must be contiguous CPU tensors; "
-                f"got device={tensor.device} shape={tuple(tensor.shape)}."
-            )
-        start = tensor.data_ptr()
-        spans.append((start, start + tensor.numel() * tensor.element_size()))
-    return tuple(spans)
-
-
 class DistributedWorker(Worker):
     """L3 distributed execution handle: prepare once, dispatch many.
 
@@ -1482,9 +1461,20 @@ class DistributedWorker(Worker):
     tensor (no ``copy_from``). Explicit :meth:`alloc_tensor` /
     :meth:`alloc_stacked_tensor` uploads and copy-backs stage through
     runtime-owned POSIX-shm Buffers, so their CPU-contiguous host endpoints may
-    be ordinary tensors created after ``prepare``. ``inherited_host_tensors``
-    remains a compatibility lifetime facility; it does not make an ordinary
-    tensor a valid direct dispatch argument.
+    be ordinary tensors created after ``prepare``.
+
+    ``inherited_host_tensors`` keeps such a host range alive for the worker's
+    lifetime *and* is a caller guarantee about it: listing a tensor asserts that
+    its backing is visible across processes — a ``MAP_SHARED`` mapping, whether
+    torch's own shared memory or an external file mapping — and that the mapping
+    stays valid for as long as the worker lives. Listed ranges are then named in
+    place instead of staged, which is what removes the per-copy ``memmove``.
+    Passing a ``MAP_PRIVATE`` backing is **unsupported**: copy-on-write leaves the
+    child reading its pre-fork snapshot, so uploads may carry stale or incorrect
+    data. PyPTO cannot verify the guarantee — ``torch.is_shared()`` returns
+    ``False`` for valid external ``MAP_SHARED`` mappings — so it warns once at
+    prepare time for the tensors it cannot confirm and proceeds. Listing a tensor
+    does not make it a valid direct dispatch argument.
 
     ``callbacks`` binds a caller-supplied callable to a SubWorker by name — e.g.
     a real sampling closure. Abstract SubWorkers (declared with a ``...`` body)
@@ -1534,7 +1524,6 @@ class DistributedWorker(Worker):
         callbacks: dict[str, Callable[..., Any]] | None = None,
         sub_worker_overrides: dict[str, Callable[..., Any]] | None = None,
         inherited_host_tensors: Sequence[torch.Tensor] | None = None,
-        immutable_host_tensors: Sequence[torch.Tensor] | None = None,
         startup_timeout_s: float | None = None,
     ) -> None:
         super().__init__()  # initialize Worker ABC state (_owned_tensors)
@@ -1560,29 +1549,40 @@ class DistributedWorker(Worker):
         self._inherited_host_tensors = inherited
         # `copy_to` / `copy_from` stage through a simpler-owned shm Buffer so an ordinary
         # post-fork tensor is a legal endpoint. That relaxation costs one full copy of the
-        # payload, which a fork-inherited MAP_SHARED range does not need: parent and child
-        # see the same pages, so it can be named in place. Whether a range is MAP_SHARED is
-        # the caller's to know and cannot be inferred from an address, so record it here,
-        # where the tensors are still in hand, as (start, end, is_shared) spans. A
-        # MAP_PRIVATE range is staged unless the caller declares it immutable below, and even
-        # then only as an upload source — see `_named_host_buffer`.
-        # Ranges the caller *declares* are never written after ``prepare()``. This cannot be
-        # inferred: ``torch.is_shared()`` answers "is this storage a shared-memory allocation",
-        # while what the copy path needs to know is "will anyone write these bytes after the
-        # fork". A read-only ``MAP_SHARED`` file mapping built with ``mmap`` + ``from_numpy`` is
-        # genuinely shared at the OS level and still reports ``False``, so inference rejects
-        # exactly the case that benefits most. Only the caller knows, so it says so here.
-        self._immutable_host_spans: tuple[tuple[int, int], ...] = _immutable_host_spans(
-            immutable_host_tensors
-        )
-        self._inherited_host_spans: tuple[tuple[int, int, bool], ...] = tuple(
+        # payload, which a fork-inherited range visible across processes does not need:
+        # parent and child see the same pages, so it can be named in place. Record the
+        # extents here, where the tensors are still in hand, since an address alone says
+        # nothing about its backing.
+        #
+        # Listing a tensor is the caller's guarantee that the backing is cross-process
+        # visible (see the class docstring). It is not inferred, because no portable check
+        # exists: `torch.is_shared()` answers "is this storage a torch shared-memory
+        # allocation", which is a different question. A read-only MAP_SHARED file mapping
+        # built with `mmap` + `from_numpy` is genuinely shared at the OS level and still
+        # reports False, so inference would reject exactly the case that benefits most,
+        # while reading /proc/self/maps would tie this file to Linux and the simulator also
+        # runs on macOS.
+        self._inherited_host_spans: tuple[tuple[int, int], ...] = tuple(
             (
                 tensor.data_ptr(),
                 tensor.data_ptr() + tensor.numel() * tensor.element_size(),
-                bool(tensor.is_shared()),
             )
             for tensor in inherited
         )
+        # `is_shared()` is kept as a one-way signal: True confirms a torch-managed shared
+        # backing, False is inconclusive. Warn once rather than per tensor, and never
+        # reject or silently fall back to staging — falling back would hide the cost this
+        # facility exists to remove, and rejecting would refuse the valid external mapping.
+        unverifiable = sum(1 for tensor in inherited if not tensor.is_shared())
+        if unverifiable:
+            warnings.warn(
+                f"DistributedWorker: {unverifiable} of {len(inherited)} inherited_host_tensors "
+                "cannot be verified as cross-process visible (torch.is_shared() is False, which "
+                "is inconclusive for external MAP_SHARED mappings). Naming them relies on the "
+                "caller's guarantee; a MAP_PRIVATE backing yields stale or incorrect data.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
         self._buffer_owner_id: bytes | None = None
         self._buffer_id_seq = 0
         # One identity per host *range*, not per copy. Both properties this buys are load
@@ -2292,29 +2292,22 @@ class DistributedWorker(Worker):
         needs no staging buffer and no host-side memcpy. A tensor allocated after
         ``prepare`` has no mapping in the child, so the caller stages it.
 
-        **Shared, or declared immutable.** A range that ``torch.is_shared()`` reports as
-        shared is always safe to name. A range that does not is named only if the caller
-        listed it in ``immutable_host_tensors``, promising nothing writes it after
-        ``prepare()``.
+        **The list is the guarantee.** Listing a tensor in ``inherited_host_tensors``
+        asserts that its backing is visible across processes and stays valid for the
+        worker's lifetime, so any range inside a listed span is named in place. Nothing is
+        inferred and nothing is rejected: ``torch.is_shared()`` is a one-way signal, so
+        deciding from it would refuse a read-only ``MAP_SHARED`` file mapping — which
+        reports ``False`` while being perfectly safe to name — and reading
+        ``/proc/self/maps`` would tie this to Linux while the simulator also runs on macOS.
+        A ``MAP_PRIVATE`` backing is unsupported here rather than handled: the child keeps
+        reading its pre-fork snapshot, so the caller would upload stale bytes.
 
-        The declaration applies to upload sources only, and a read-back into a declared range
-        is refused rather than quietly staged: staging writes the same bytes, so it would break
-        the promise just as thoroughly while looking like it worked. An undeclared range still
-        has to be genuinely shared to be named as a destination, since writing a private page in
-        the child leaves the parent reading the old contents.
-
-        A named source is granted ``READ`` and only a destination ``READWRITE``. Naming a
-        read-only mapping ``READWRITE`` would tell the ABI a consumer may write memory that
-        faults on a write — the same kind of misdeclaration this option exists to remove.
-
-        Both conditions exist because inference alone is wrong in both directions. A
-        ``MAP_PRIVATE`` range is inherited too, but copy-on-write means the child keeps
-        reading its pre-fork snapshot, so a parent that writes after registering would
-        upload stale bytes — there, staging is not a fallback but the correct behaviour,
-        since its ``memmove`` runs in the parent. Conversely a read-only ``MAP_SHARED`` file
-        mapping wrapped through ``mmap`` + ``from_numpy`` reports ``is_shared() == False``
-        while being perfectly safe to name, which is why the declaration exists rather than
-        a wider guess.
+        Writability is left to the MMU rather than tracked here, because visibility and
+        writability are separate properties and one caller guarantee only covers the first.
+        A range mapped ``MAP_SHARED`` from a read-only fd is genuinely shared and still
+        faults on write, so a read-back into it fails immediately instead of corrupting
+        anything. A named source is granted ``READ`` and only a destination ``READWRITE``,
+        so the ABI is never told a consumer may write memory it may not.
 
         Each range is wrapped on its own rather than offset into a whole-tensor Buffer,
         because a Buffer carries no offset: a shard's address is interior to its stacked
@@ -2328,23 +2321,8 @@ class DistributedWorker(Worker):
         )
 
         end = host_ptr + nbytes
-        declared_immutable = any(
-            start <= host_ptr and end <= stop for start, stop in self._immutable_host_spans
-        )
-        if writing and declared_immutable:
-            # The caller promised nothing writes this range after prepare(), and a read-back
-            # would do exactly that. Refusing is the only way to honour the promise: staging
-            # writes the same bytes, so silently taking that path would break it just as
-            # thoroughly while looking like it worked.
-            raise ValueError(
-                f"copy_from destination 0x{host_ptr:x}+{nbytes} lies in a range declared through "
-                "immutable_host_tensors, which promises nothing writes it after prepare(); read "
-                "back into a tensor that was not declared immutable."
-            )
-        for start, stop, is_shared in self._inherited_host_spans:
+        for start, stop in self._inherited_host_spans:
             if host_ptr < start or end > stop:
-                continue
-            if not is_shared and not declared_immutable:
                 continue
             owner, buffer_id = self._buffer_identity_for(host_ptr, nbytes)
             return wrap_fork_inherited(
@@ -2556,7 +2534,6 @@ class DistributedWorker(Worker):
         # No later copy may name these ranges: the parent has dropped its references, so a
         # copy after this point stages rather than wrapping memory nobody vouches for.
         self._inherited_host_spans = ()
-        self._immutable_host_spans = ()
         with self._named_identity_mu:
             self._named_identities.clear()
 
@@ -2873,7 +2850,6 @@ class DistributedWorker(Worker):
             finally:
                 self._inherited_host_tensors = ()
                 self._inherited_host_spans = ()
-                self._immutable_host_spans = ()
                 self._named_identities.clear()
                 self._persistent_domains_by_program.clear()
                 if self._close_complete:
