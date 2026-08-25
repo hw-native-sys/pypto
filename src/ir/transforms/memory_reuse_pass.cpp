@@ -48,6 +48,7 @@
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/allocation_constraint_analysis.h"
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/lifetime_analysis.h"
@@ -77,6 +78,21 @@ class VarUseCollector : public IRVisitor {
     IRVisitor::VisitExpr_(var);
   }
 };
+
+/// True when two MemRefs denote the same codegen-visible byte window.
+/// Allocation identity alone is insufficient: one allocation can contain
+/// multiple disjoint tile windows and pipeline slots.
+bool SamePhysicalWindow(const MemRefPtr& lhs, const MemRefPtr& rhs) {
+  if (!lhs || !rhs || !MemRef::SameAllocation(lhs, rhs) || lhs->size_ != rhs->size_ ||
+      lhs->slot_count_ != rhs->slot_count_ || !structural_equal(lhs->byte_offset_, rhs->byte_offset_)) {
+    return false;
+  }
+
+  const bool lhs_has_slot = lhs->slot_index_.has_value() && *lhs->slot_index_;
+  const bool rhs_has_slot = rhs->slot_index_.has_value() && *rhs->slot_index_;
+  if (lhs_has_slot != rhs_has_slot) return false;
+  return !lhs_has_slot || structural_equal(*lhs->slot_index_, *rhs->slot_index_);
+}
 
 // ============================================================================
 // Top-down target retargeting
@@ -249,35 +265,74 @@ class SubtreeReadBaseCollector : public IRVisitor {
   }
 };
 
-inline bool SubtreeReadsBase(const StmtPtr& stmt, const Var* target_base) {
-  if (!stmt) return false;
-  SubtreeReadBaseCollector c;
-  c.VisitStmt(stmt);
-  return c.bases.count(target_base) > 0;
-}
-
-// Collects the MemRef bases WRITTEN (assignment LHS) in a subtree — the dual of
-// SubtreeReadBaseCollector, which intentionally skips write targets. Used by the
-// branch-tail liveness scan to also reject a later write-only clobber of the base
-// (a fresh def whose LHS aliases the base but that does not read it), which a
-// reads-only scan would miss.
-class SubtreeWriteBaseCollector : public IRVisitor {
+/// Collect exact SSA Vars read by a subtree. Assignment LHS definitions are
+/// excluded, matching SubtreeReadBaseCollector's read semantics.
+class SubtreeReadVarCollector : public IRVisitor {
  public:
-  std::set<const Var*> bases;
+  std::set<const Var*> vars;
+
+  void VisitExpr_(const VarPtr& var) override {
+    vars.insert(var.get());
+    IRVisitor::VisitExpr_(var);
+  }
 
   void VisitStmt_(const AssignStmtPtr& op) override {
-    if (auto tile = GetTileTypeWithMemRef(op->var_->GetType())) {
-      bases.insert(GetDefinedMemRef(tile)->base_.get());
-    }
-    IRVisitor::VisitStmt_(op);  // continue into nested stmts
+    if (op->value_) VisitExpr(op->value_);
   }
 };
 
-inline bool SubtreeWritesBase(const StmtPtr& stmt, const Var* target_base) {
-  if (!stmt) return false;
-  SubtreeWriteBaseCollector c;
-  c.VisitStmt(stmt);
-  return c.bases.count(target_base) > 0;
+bool SubtreeReadsAnyVar(const StmtPtr& stmt, const std::set<const Var*>& candidates) {
+  if (!stmt || candidates.empty()) return false;
+  SubtreeReadVarCollector collector;
+  collector.VisitStmt(stmt);
+  return std::any_of(candidates.begin(), candidates.end(),
+                     [&](const Var* var) { return collector.vars.count(var) > 0; });
+}
+
+/// Collect codegen-visible MemRef windows read by a subtree.
+class SubtreeReadWindowCollector : public IRVisitor {
+ public:
+  std::vector<MemRefPtr> windows;
+
+  void VisitExpr_(const VarPtr& var) override {
+    if (auto tile = GetTileTypeWithMemRef(var->GetType())) {
+      windows.push_back(GetDefinedMemRef(tile));
+    }
+    IRVisitor::VisitExpr_(var);
+  }
+
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (op->value_) VisitExpr(op->value_);
+  }
+};
+
+bool SubtreeReadsWindow(const StmtPtr& stmt, const MemRefPtr& target) {
+  if (!stmt || !target) return false;
+  SubtreeReadWindowCollector collector;
+  collector.VisitStmt(stmt);
+  return std::any_of(collector.windows.begin(), collector.windows.end(),
+                     [&](const MemRefPtr& window) { return MemRef::MayAlias(window, target); });
+}
+
+/// Collect codegen-visible MemRef windows written by assignment LHSs.
+class SubtreeWriteWindowCollector : public IRVisitor {
+ public:
+  std::vector<MemRefPtr> windows;
+
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (auto tile = GetTileTypeWithMemRef(op->var_->GetType())) {
+      windows.push_back(GetDefinedMemRef(tile));
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+};
+
+bool SubtreeWritesWindow(const StmtPtr& stmt, const MemRefPtr& target) {
+  if (!stmt || !target) return false;
+  SubtreeWriteWindowCollector collector;
+  collector.VisitStmt(stmt);
+  return std::any_of(collector.windows.begin(), collector.windows.end(),
+                     [&](const MemRefPtr& window) { return MemRef::MayAlias(window, target); });
 }
 
 bool IsA5Target() {
@@ -323,11 +378,7 @@ class TopDownRetargeter {
   ///
   /// Retiring this repair is therefore a *long-horizon* intent, not a near-term
   /// plan.  It would need the source-level migration to land first, and it is
-  /// worth doing eventually because the repair is not sound in general: the
-  /// branch-exclusivity argument below does not cover a post-if read of the
-  /// accumulator that bypasses the phi, where the seed path's data is returned
-  /// with no diagnostic at any layer.  Until then, prefer `init_cond` in new
-  /// code and leave existing peels alone.
+  /// Until then, prefer `init_cond` in new code and leave existing peels alone.
   ///
   /// LowerPipelineLoops peels a stage=2 K-loop into an epilogue IfStmt whose live
   /// branch is an in-place accumulator (matmul_acc, output aliasing input on the
@@ -345,10 +396,13 @@ class TopDownRetargeter {
   /// verifies the two preconditions branch exclusivity actually needs: (a) the
   /// seed producer is lexically inside the branch, and (b) a branch-scoped
   /// liveness scan (`IsTargetDeadAtAssign(..., stop_at=if)`) finds no same-branch
-  /// tail read of the accumulator buffer.  When either fails, that phi is left to
-  /// YieldFixup instead of being coalesced.  Returns the rewrite map (apply via
-  /// RetypeApplier).  A needed-but-declined retarget (after the preconditions
-  /// hold) is a hard error — no legal Acc->Acc move exists to fall back to.
+  /// tail read of the accumulator buffer.  For a branch-local loop seeded outside
+  /// the IfStmt, an additional post-if scan proves that no external handle to the
+  /// accumulator window remains observable independently of the phi.  When any
+  /// condition fails, that phi is left to YieldFixup instead of being coalesced.
+  /// Returns the rewrite map (apply via RetypeApplier).  A needed-but-declined
+  /// retarget (after the preconditions hold) is a hard error — no legal Acc->Acc
+  /// move exists to fall back to.
   std::map<VarPtr, TypePtr> CoalesceAccumulatorIfPhis(const StmtPtr& func_body) {
     DefMapVisitor def_v;
     def_v.Run(func_body);
@@ -422,53 +476,71 @@ class TopDownRetargeter {
     }
   }
 
-  // True when `var` is produced by an in-place accumulator op: a Call whose op
-  // reuses input `k` (matmul_acc) and whose output MemRef aliases input `k`'s —
-  // i.e. mad_acc's shared %dst.  This branch's buffer is the one we keep; the
-  // other branch's producer is the seed we retarget onto it.
-  bool IsInplaceAccumulatorProducer(const VarPtr& var) {
+  struct AccumulatorTarget {
+    MemRefPtr memref;
+    std::optional<MemorySpace> memory_space;
+    // Non-null only for a branch-local loop whose accumulator is seeded by a
+    // value defined outside the enclosing IfStmt.
+    VarPtr external_seed;
+  };
+
+  // Resolve the canonical allocation of an in-place accumulator producer. A
+  // bare SSA alias may still carry a stale type after a nested child rewrite,
+  // so return the underlying producer's target rather than a boolean that would
+  // make the caller accidentally select the alias's stale MemRef.
+  std::optional<AccumulatorTarget> FindInplaceAccumulatorProducer(const VarPtr& var) {
     std::set<const Var*> seen;
-    return IsInplaceAccumulatorProducer(var, seen);
+    return FindInplaceAccumulatorProducer(var, seen);
   }
 
-  bool IsInplaceAccumulatorProducer(const VarPtr& var, std::set<const Var*>& seen) {
-    if (!seen.insert(var.get()).second) return false;
+  std::optional<AccumulatorTarget> FindInplaceAccumulatorProducer(const VarPtr& var,
+                                                                  std::set<const Var*>& seen) {
+    if (!seen.insert(var.get()).second) return std::nullopt;
     auto it = defs_.find(var);
-    if (it == defs_.end() || it->second.kind != VarDef::kAssign) return false;
+    if (it == defs_.end() || it->second.kind != VarDef::kAssign) return std::nullopt;
     auto assign = As<AssignStmt>(it->second.assign_stmt);
-    if (!assign) return false;
+    if (!assign) return std::nullopt;
     auto call = As<Call>(assign->value_);
     if (!call) {
       auto alias = AsVarLike(assign->value_);
-      return alias && IsInplaceAccumulatorProducer(alias, seen);
+      return alias ? FindInplaceAccumulatorProducer(alias, seen) : std::nullopt;
     }
-    if (!call->op_) return false;
+    if (!call->op_) return std::nullopt;
     const auto& reg = OpRegistry::GetInstance();
-    if (!reg.IsRegistered(call->op_->name_)) return false;
+    if (!reg.IsRegistered(call->op_->name_)) return std::nullopt;
     auto reuse_idx = reg.GetEntry(call->op_->name_).GetOutputReusesInputArg();
-    if (!reuse_idx.has_value() || *reuse_idx >= call->args_.size()) return false;
+    if (!reuse_idx.has_value() || *reuse_idx >= call->args_.size()) return std::nullopt;
     auto in_var = AsVarLike(call->args_[*reuse_idx]);
-    if (!in_var) return false;
-    auto out_tile = GetTileTypeWithMemRef(var->GetType());
-    auto in_tile = GetTileTypeWithMemRef(in_var->GetType());
-    if (!out_tile || !in_tile) return false;
-    return MemRef::SameAllocation(GetDefinedMemRef(out_tile), GetDefinedMemRef(in_tile));
+    if (!in_var) return std::nullopt;
+    auto in_tile = CurrentTileType(in_var);
+    if (!in_tile) return std::nullopt;
+    // The registered reuse input is authoritative. Lowering may have left the
+    // Call result typed on an older allocation; TryRetargetVar below repairs the
+    // result onto this canonical input allocation before the phi is rewritten.
+    return AccumulatorTarget{GetDefinedMemRef(in_tile), in_tile->GetMemorySpace(), nullptr};
   }
 
-  /// Return whether ``var`` is a branch-local accumulator loop seeded by a
-  /// value defined outside ``branch_scope``.
-  bool IsExternallySeededAccumulatorLoop(const VarPtr& var, const IfStmtPtr& branch_scope) {
+  /// Resolve a branch-local accumulator loop seeded by a value defined outside
+  /// ``branch_scope``. Both locality halves are required: the loop itself must
+  /// be inside the branch and its seed must be outside it.
+  std::optional<AccumulatorTarget> FindExternallySeededAccumulatorLoop(const VarPtr& var,
+                                                                       const IfStmtPtr& branch_scope) {
     auto it = defs_.find(var);
-    if (it == defs_.end() || it->second.kind != VarDef::kForReturn) return false;
+    if (it == defs_.end() || it->second.kind != VarDef::kForReturn) return std::nullopt;
     auto loop = As<ForStmt>(it->second.control_stmt);
-    if (!loop || it->second.return_idx >= loop->iter_args_.size()) return false;
+    if (!loop || it->second.return_idx >= loop->iter_args_.size()) return std::nullopt;
+
+    const bool loop_inside_branch =
+        std::any_of(it->second.ancestors.begin(), it->second.ancestors.end(),
+                    [&](const StmtPtr& ancestor) { return ancestor.get() == branch_scope.get(); });
+    if (!loop_inside_branch) return std::nullopt;
 
     auto init = AsVarLike(loop->iter_args_[it->second.return_idx]->initValue_);
-    auto result_tile = GetTileTypeWithMemRef(var->GetType());
-    auto init_tile = init ? GetTileTypeWithMemRef(init->GetType()) : nullptr;
+    auto result_tile = CurrentTileType(var);
+    auto init_tile = init ? CurrentTileType(init) : nullptr;
     if (!init || !result_tile || !init_tile ||
-        !MemRef::SameAllocation(GetDefinedMemRef(result_tile), GetDefinedMemRef(init_tile))) {
-      return false;
+        !SamePhysicalWindow(GetDefinedMemRef(result_tile), GetDefinedMemRef(init_tile))) {
+      return std::nullopt;
     }
 
     auto init_def = defs_.find(init);
@@ -476,13 +548,16 @@ class TopDownRetargeter {
       const bool init_inside_branch =
           std::any_of(init_def->second.ancestors.begin(), init_def->second.ancestors.end(),
                       [&](const StmtPtr& ancestor) { return ancestor.get() == branch_scope.get(); });
-      if (init_inside_branch) return false;
+      if (init_inside_branch) return std::nullopt;
     }
 
     auto body_yield = FindYieldStmt(loop->body_);
-    if (!body_yield || it->second.return_idx >= body_yield->value_.size()) return false;
+    if (!body_yield || it->second.return_idx >= body_yield->value_.size()) return std::nullopt;
     auto yielded = AsVarLike(body_yield->value_[it->second.return_idx]);
-    return yielded && CurrentBase(yielded) == GetDefinedMemRef(init_tile)->base_.get();
+    if (!yielded || !SamePhysicalWindow(CurrentMemRef(yielded), GetDefinedMemRef(init_tile))) {
+      return std::nullopt;
+    }
+    return AccumulatorTarget{GetDefinedMemRef(init_tile), init_tile->GetMemorySpace(), init};
   }
 
   // For an IfStmt whose branches yield an in-place accumulator on one side and a
@@ -501,25 +576,25 @@ class TopDownRetargeter {
       auto else_var = AsVarLike(else_yield->value_[i]);
       if (!then_var || !else_var) continue;
 
-      const bool then_acc =
-          IsInplaceAccumulatorProducer(then_var) || IsExternallySeededAccumulatorLoop(then_var, if_stmt);
-      const bool else_acc =
-          IsInplaceAccumulatorProducer(else_var) || IsExternallySeededAccumulatorLoop(else_var, if_stmt);
-      if (then_acc == else_acc) continue;  // need exactly one in-place accumulator
+      auto then_target = FindInplaceAccumulatorProducer(then_var);
+      if (!then_target) then_target = FindExternallySeededAccumulatorLoop(then_var, if_stmt);
+      auto else_target = FindInplaceAccumulatorProducer(else_var);
+      if (!else_target) else_target = FindExternallySeededAccumulatorLoop(else_var, if_stmt);
+      if (then_target.has_value() == else_target.has_value()) continue;  // need exactly one accumulator
 
+      const bool then_acc = then_target.has_value();
       const VarPtr& acc_var = then_acc ? then_var : else_var;
       const VarPtr& seed_var = then_acc ? else_var : then_var;
+      const AccumulatorTarget& target = then_acc ? *then_target : *else_target;
 
-      auto acc_tile = GetTileTypeWithMemRef(acc_var->GetType());
-      auto seed_tile = GetTileTypeWithMemRef(seed_var->GetType());
-      if (!acc_tile || !seed_tile) continue;
-      if (acc_tile->GetMemorySpace() != MemorySpace::Acc) continue;  // Acc-only (no legal move)
+      auto seed_tile = CurrentTileType(seed_var);
+      if (!seed_tile) continue;
+      if (target.memory_space != MemorySpace::Acc) continue;  // Acc-only (no legal move)
 
-      auto acc_memref = GetDefinedMemRef(acc_tile);
-      if (MemRef::SameAllocation(acc_memref, GetDefinedMemRef(seed_tile))) continue;  // already shared
+      const bool seed_already_shared = SamePhysicalWindow(target.memref, GetDefinedMemRef(seed_tile));
 
       auto seed_def = defs_.find(seed_var);
-      if (seed_def == defs_.end()) continue;
+      if (!seed_already_shared && seed_def == defs_.end()) continue;
 
       // The `check_liveness=false` bypass below is only sound when branch
       // exclusivity actually applies, which requires BOTH:
@@ -531,49 +606,81 @@ class TopDownRetargeter {
       //      same-branch tail read between the seed producer and the yield).
       // When either fails, leave the phi untouched here. YieldFixup will fail
       // loudly rather than emit an unsupported Acc->Acc move.
-      const auto& seed_anc = seed_def->second.ancestors;
-      const bool in_branch = std::any_of(seed_anc.begin(), seed_anc.end(),
-                                         [&](const StmtPtr& a) { return a.get() == if_stmt.get(); });
-      if (!in_branch) continue;
-      if (!IsTargetDeadAfterDefinition(seed_def->second, acc_memref->base_.get(),
-                                       /*stop_at=*/if_stmt.get())) {
+      if (!seed_already_shared) {
+        const auto& seed_anc = seed_def->second.ancestors;
+        const bool in_branch = std::any_of(seed_anc.begin(), seed_anc.end(),
+                                           [&](const StmtPtr& a) { return a.get() == if_stmt.get(); });
+        if (!in_branch) continue;
+        if (!IsTargetDeadAfterDefinition(seed_def->second, target.memref,
+                                         /*stop_at=*/if_stmt.get())) {
+          continue;
+        }
+      }
+
+      // A branch-local loop can reuse a seed defined outside the IfStmt only
+      // when that external value is not observed independently after the phi.
+      // Otherwise retargeting the sibling seed would clobber the external value
+      // on the path where the loop does not execute.
+      if (target.external_seed &&
+          HasIndependentExternalUseAfterIf(if_stmt, if_stmt->return_vars_[i], target)) {
         continue;
       }
 
-      // Now safe: (a)+(b) plus exclusivity cover every read of acc_memref, so we
+      // Align any alias/ForReturn wrapper on the accumulator side with the
+      // canonical producer target before using it as the phi's allocation.
+      INTERNAL_CHECK_SPAN(TryRetargetVar(acc_var, target.memref, target.memory_space), acc_var->span_)
+          << "Internal error: cannot align the accumulator branch with its canonical L0C allocation";
+
+      // Now safe: (a)+(b) plus exclusivity cover every read of the target allocation, so we
       // bypass the global liveness (which would false-decline on the legitimate
       // post-if phi consumer). A remaining decline is a genuine "cannot coalesce
       // this Acc phi" — fail loud, since no legal Acc->Acc move exists.
-      bool ok = false;
-      if (seed_def->second.kind == VarDef::kAssign) {
-        auto seed_assign = As<AssignStmt>(seed_def->second.assign_stmt);
-        if (!seed_assign) continue;
-        if (As<Call>(seed_assign->value_)) {
-          ok = RetargetAssign(seed_var, seed_def->second, acc_memref, acc_tile->GetMemorySpace(),
-                              /*check_liveness=*/false);
-        } else if (AsVarLike(seed_assign->value_)) {
-          ok = TryRetargetVar(seed_var, acc_memref, acc_tile->GetMemorySpace());
+      bool ok = seed_already_shared;
+      if (!seed_already_shared) {
+        if (seed_def->second.kind == VarDef::kAssign) {
+          auto seed_assign = As<AssignStmt>(seed_def->second.assign_stmt);
+          if (!seed_assign) continue;
+          if (As<Call>(seed_assign->value_)) {
+            ok = RetargetAssign(seed_var, seed_def->second, target.memref, target.memory_space,
+                                /*check_liveness=*/false);
+          } else if (AsVarLike(seed_assign->value_)) {
+            ok = TryRetargetVar(seed_var, target.memref, target.memory_space);
+          } else {
+            continue;
+          }
+        } else if (seed_def->second.kind == VarDef::kForReturn) {
+          ok = TryRetargetVar(seed_var, target.memref, target.memory_space);
         } else {
           continue;
         }
-      } else if (seed_def->second.kind == VarDef::kForReturn) {
-        ok = TryRetargetVar(seed_var, acc_memref, acc_tile->GetMemorySpace());
-      } else {
-        continue;
       }
       INTERNAL_CHECK_SPAN(ok, seed_var->span_)
           << "Internal error: cannot coalesce L0C accumulator across a peeled if-phi — seed producer '"
           << seed_var->name_hint_
           << "' refused retarget onto the accumulator buffer, which would force an illegal "
              "Acc->Acc tile.move.";
+
+      // The phi itself is part of the semantic accumulator family. Pinning it
+      // here is required by the PTOAS planner, which skips legacy MemoryReuse
+      // and otherwise declares a separate head handle for the merged value.
+      PlanRewrite(if_stmt->return_vars_[i], target.memref, target.memory_space);
     }
+  }
+
+  TileTypePtr CurrentTileType(const VarPtr& var) {
+    auto it = rewrites_.find(var);
+    auto type = (it != rewrites_.end()) ? it->second : var->GetType();
+    return GetTileTypeWithMemRef(type);
+  }
+
+  MemRefPtr CurrentMemRef(const VarPtr& var) {
+    auto tile = CurrentTileType(var);
+    return tile ? GetDefinedMemRef(tile) : nullptr;
   }
 
   /// Current (possibly-rewritten) MemRef base of `var`.
   const Var* CurrentBase(const VarPtr& var) {
-    auto it = rewrites_.find(var);
-    auto type = (it != rewrites_.end()) ? it->second : var->GetType();
-    auto tile = GetTileTypeWithMemRef(type);
+    auto tile = CurrentTileType(var);
     if (!tile) return nullptr;
     return GetDefinedMemRef(tile)->base_.get();
   }
@@ -581,8 +688,8 @@ class TopDownRetargeter {
   /// Attempts to rewrite `var`'s MemRef to `target` by walking its producer chain.
   /// Returns true if var already has target MemRef or a rewrite was planned.
   bool TryRetargetVar(const VarPtr& var, const MemRefPtr& target, std::optional<MemorySpace> target_memory) {
-    if (CurrentBase(var) == target->base_.get()) return true;  // already aligned
-    if (!visiting_.insert(var).second) return false;           // cycle
+    if (SamePhysicalWindow(CurrentMemRef(var), target)) return true;  // already aligned
+    if (!visiting_.insert(var).second) return false;                  // cycle
     struct Guard {
       std::set<VarPtr>* s;
       VarPtr v;
@@ -705,7 +812,7 @@ class TopDownRetargeter {
 
     // Unconstrained: check liveness, then plan retype.  (Skipped for if-phi
     // branch coalescing, where branch exclusivity is a stronger guarantee.)
-    if (check_liveness && !IsTargetDeadAtAssign(def, target->base_.get())) return false;
+    if (check_liveness && !IsTargetDeadAtAssign(def, target)) return false;
     PlanRewrite(var, target, target_memory);
     return true;
   }
@@ -861,11 +968,39 @@ class TopDownRetargeter {
     return nullptr;
   }
 
-  /// Is target's base Ptr unread between the definition and the end of its containing body?
+  /// True when a branch-local accumulator loop's external seed is read after
+  /// the enclosing IfStmt through a path other than the IfStmt return value.
+  /// Such a read observes the pre-loop value on the sibling path, so placing
+  /// that sibling's producer in the seed's window would be a clobber.
+  bool HasIndependentExternalUseAfterIf(const IfStmtPtr& if_stmt, const VarPtr& if_return,
+                                        const AccumulatorTarget& target) {
+    if (!target.external_seed) return false;
+    auto return_def = defs_.find(if_return);
+    if (return_def == defs_.end() || return_def->second.kind != VarDef::kIfReturn) return true;
+
+    const std::set<const Var*> external_seed{target.external_seed.get()};
+    StmtPtr child_on_path = if_stmt;
+    for (auto it = return_def->second.ancestors.rbegin(); it != return_def->second.ancestors.rend(); ++it) {
+      const auto& ancestor = *it;
+      if (auto seq = As<SeqStmts>(ancestor)) {
+        auto pos = std::find(seq->stmts_.begin(), seq->stmts_.end(), child_on_path);
+        if (pos != seq->stmts_.end()) {
+          for (++pos; pos != seq->stmts_.end(); ++pos) {
+            if (SubtreeReadsAnyVar(*pos, external_seed)) return true;
+          }
+        }
+      }
+      child_on_path = ancestor;
+    }
+    return false;
+  }
+
+  /// Is target's physical window untouched between the definition and the end
+  /// of its containing body?
   /// Also walks into nested control flow to check for reads there.
   /// Liveness check: walks the AssignStmt's full ancestor chain from innermost
   /// outward and, at every enclosing SeqStmts, scans the siblings that execute
-  /// after the AssignStmt for reads of `target_base`.  Walking continues past
+  /// after the AssignStmt for reads of `target`.  Walking continues past
   /// IfStmt branches into the parent body so reads that appear after a nested
   /// IfStmt (but still within the enclosing ForStmt's body) are detected.  The
   /// walk stops at the first enclosing ForStmt — reads outside the loop body
@@ -882,7 +1017,8 @@ class TopDownRetargeter {
   /// same-branch read between the seed producer and the yield) while ignoring
   /// the mutually-exclusive sibling branch and the legitimate post-if phi
   /// consumers — the reads it must *not* treat as conflicts.
-  bool IsTargetDeadAfterDefinition(const VarDef& def, const Var* target_base, const Stmt* stop_at = nullptr) {
+  bool IsTargetDeadAfterDefinition(const VarDef& def, const MemRefPtr& target,
+                                   const Stmt* stop_at = nullptr) {
     if (def.ancestors.empty()) return true;
 
     // `child_on_path` is the direct descendant of the current ancestor that
@@ -898,10 +1034,10 @@ class TopDownRetargeter {
         auto pos = std::find(seq->stmts_.begin(), seq->stmts_.end(), child_on_path);
         if (pos != seq->stmts_.end()) {
           for (++pos; pos != seq->stmts_.end(); ++pos) {
-            // A later READ observes the retyped value's buffer; a later WRITE-only
-            // def clobbers it before its consumer. Reject both (SubtreeReadsBase
-            // alone misses the write-only clobber — the seed-branch tail case).
-            if (SubtreeReadsBase(*pos, target_base) || SubtreeWritesBase(*pos, target_base)) return false;
+            // A later overlapping READ observes the retyped value's bytes; a
+            // later overlapping WRITE-only def clobbers them before their
+            // consumer. Disjoint windows in one allocation are independent.
+            if (SubtreeReadsWindow(*pos, target) || SubtreeWritesWindow(*pos, target)) return false;
           }
         }
       }
@@ -920,10 +1056,10 @@ class TopDownRetargeter {
     return true;
   }
 
-  bool IsTargetDeadAtAssign(const VarDef& def, const Var* target_base, const Stmt* stop_at = nullptr) {
+  bool IsTargetDeadAtAssign(const VarDef& def, const MemRefPtr& target, const Stmt* stop_at = nullptr) {
     INTERNAL_CHECK(def.kind == VarDef::kAssign)
         << "Internal error: IsTargetDeadAtAssign requires an assignment definition";
-    return IsTargetDeadAfterDefinition(def, target_base, stop_at);
+    return IsTargetDeadAfterDefinition(def, target, stop_at);
   }
 };
 
@@ -3725,27 +3861,27 @@ class NormalizeIdentityCopyBuffersMutator : public IRMutator {
       auto lhs_tile = new_src ? GetTileTypeWithMemRef(op->var_->GetType()) : nullptr;
       auto rhs_tile = new_src ? GetTileTypeWithMemRef(new_src->GetType()) : nullptr;
       if (lhs_tile && rhs_tile &&
-          !MemRef::SameAllocation(GetDefinedMemRef(lhs_tile), GetDefinedMemRef(rhs_tile))) {
+          !SamePhysicalWindow(GetDefinedMemRef(lhs_tile), GetDefinedMemRef(rhs_tile))) {
         auto new_lhs = std::make_shared<Var>(op->var_->name_hint_, new_src->GetType(), op->var_->span_);
         subst_[op->var_] = new_lhs;
         return std::make_shared<AssignStmt>(new_lhs, new_src, op->span_);
       }
     }
     // An in-place accumulator Call (GetOutputReusesInputArg, e.g. tile.matmul_acc)
-    // is not a bare rename, but its output MemRef aliases its reused input's. When
-    // the coalescing retargeted that input onto another buffer (its bare-copy chain
-    // retyped in subst_ above), the Call's output must follow — else it is left
-    // declared on the now-orphaned original buffer that nothing writes, and
-    // downstream reads of this output address a stale, never-written buffer (the
-    // non-divisor K-peel matmul_acc tail after CoalesceAccumulatorIfPhis).
+    // is not a bare rename, but its output MemRef must alias its reused input's.
+    // Retargeting and pipeline/control-flow lowering can expose a stale output
+    // type; normalize it even when the input itself was not substituted during
+    // this traversal (the non-divisor K-peel matmul_acc tail is one example).
     if (auto reanchored = ReanchorInplaceOutput(op)) return reanchored;
     return IRMutator::VisitStmt_(op);
   }
 
  private:
-  /// Re-anchor an in-place op's output onto its reused input's new buffer when the
-  /// input was retargeted, preserving the output's tile metadata (shape/dtype/space)
-  /// and swapping only the MemRef.  Returns nullptr when not applicable.
+  /// Re-anchor an in-place op's output onto its reused input's buffer, preserving
+  /// the output's tile metadata (shape/dtype/space) and swapping only the MemRef.
+  /// This also repairs a producer/output mismatch introduced by control-flow or
+  /// pipeline lowering even when the input itself was not substituted in this
+  /// traversal. Returns nullptr when the allocation already agrees.
   StmtPtr ReanchorInplaceOutput(const AssignStmtPtr& op) {
     auto call = As<Call>(op->value_);
     if (!call) return nullptr;
@@ -3755,15 +3891,12 @@ class NormalizeIdentityCopyBuffersMutator : public IRMutator {
     if (!reuse_idx.has_value() || *reuse_idx >= call->args_.size()) return nullptr;
     auto in_var = AsVarLike(call->args_[*reuse_idx]);
     if (!in_var) return nullptr;
-    auto new_in = AsVarLike(VisitExpr(in_var));                   // follow prior subst_ renames
-    if (!new_in || new_in.get() == in_var.get()) return nullptr;  // input not moved
+    auto new_in = AsVarLike(VisitExpr(in_var));  // follow prior subst_ renames
+    if (!new_in) return nullptr;
     auto lhs_tile = GetTileTypeWithMemRef(op->var_->GetType());
-    auto in_old_tile = GetTileTypeWithMemRef(in_var->GetType());
     auto in_new_tile = GetTileTypeWithMemRef(new_in->GetType());
-    if (!lhs_tile || !in_old_tile || !in_new_tile) return nullptr;
-    // Fire only when the output aliased the input in-place AND the input moved.
-    if (!MemRef::SameAllocation(GetDefinedMemRef(lhs_tile), GetDefinedMemRef(in_old_tile)) ||
-        MemRef::SameAllocation(GetDefinedMemRef(in_new_tile), GetDefinedMemRef(in_old_tile))) {
+    if (!lhs_tile || !in_new_tile ||
+        SamePhysicalWindow(GetDefinedMemRef(lhs_tile), GetDefinedMemRef(in_new_tile))) {
       return nullptr;
     }
     auto new_type = CloneTypeWithMemRef(op->var_->GetType(), GetDefinedMemRef(in_new_tile),
@@ -3824,6 +3957,12 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
       new_body = applier.VisitStmt(new_body);
     }
   }
+  // Accumulator-phi retargeting can expose bare SSA aliases or in-place outputs
+  // whose types still name the pre-retarget allocation. Those are semantic
+  // aliases too, so normalize them before any planner observes lifetimes or
+  // emits handles. Planner-specific repetitions remain below because later
+  // YieldFixup/reuse steps can create fresh mismatches.
+  new_body = NormalizeIdentityCopyBuffersMutator().VisitStmt(new_body);
 
   // Under memory_planner=PtoAS or DsaRP the whole MemoryReuse pass is skipped.
   // DsaRP must therefore run the remaining correctness normalizations from
@@ -3840,10 +3979,9 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
   // decisions, which can themselves create fresh mismatches.
   //
   // PTOAS needs only the ForStmt YieldFixup half: addr-less codegen already
-  // re-points a branch-local producer at the if-phi handle. DSA-RP emits
-  // explicit addresses, so after the common accumulator-phi coalescing above it
-  // materializes both IfStmt and ForStmt fixups and finally repairs bare-Var
-  // identity copies before lifetime analysis and placement.
+  // re-points a branch-local producer at the if-phi handle. DSA-RP instead
+  // materializes both IfStmt and ForStmt fixups and repairs bare-Var identity
+  // copies before lifetime analysis and placement.
   const auto* ctx = PassContext::Current();
   if (ctx != nullptr && ctx->GetMemoryPlanner() == MemoryPlanner::DsaRP) {
     // Identity-copy normalization brackets YieldFixup on both sides; see the

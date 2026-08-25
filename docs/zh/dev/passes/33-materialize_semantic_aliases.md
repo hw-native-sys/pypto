@@ -45,22 +45,28 @@ program = passes.materialize_semantic_aliases()(program)
 1. **自顶向下重定向**（`TopDownRetargeter`）：对每个 `ForStmt`，取每个 `iter_arg`
    的规范 MemRef 作为目标，推送到 yield 值及其 producer 链上（跟随原地
    `output-reuses-input` 算子与 view 输入）。`IfStmt` 的返回值被推送到两个分支的
-   yield。
+   yield，然后应用收集到的类型改写。
 2. **规范化 peeled accumulator phi**：按后序访问嵌套 `IfStmt`，同时识别直接的
    in-place accumulator producer，以及由分支外 accumulator seed 驱动的分支内
    loop。当且仅当一个分支是 accumulator continuation 时，把另一个分支的局部
-   seed、phi result、alias 和嵌套 loop carry 重定向到同一个 `Acc` allocation。
-   只有 seed 位于该分支内且 target 在分支剩余部分已 dead 时才允许这样做。
-3. **应用重定型**（`RetypeApplier`）：就地改写收集到的变量类型，使生产者直接写入
-   carried buffer。
+   seed、phi result、alias 和嵌套 loop carry 重定向到 reused input 的规范 `Acc`
+   allocation。accumulator loop 和 sibling seed 都必须位于各自分支内，而且 target
+   在 seed 分支剩余部分必须已 dead。当分支内 loop 由 `IfStmt` 外部的 seed 驱动时，
+   该外部 seed 在 `if` 之后也不能存在绕过 phi 的独立读取；否则在 loop 不执行的
+   sibling 路径上，重定向后的 producer 会覆盖仍可观察的值。
+3. **规范化语义 identity chain**（`NormalizeIdentityCopyBuffersMutator`）：让 bare SSA
+   copy 与 source 共享 allocation，并让每个注册的 in-place result 与其 reused input
+   共享 allocation。这样可在任何 memory planner 观察 lifetime 或 PTOAS 发射 tile
+   handle 之前消除 lowering 引入的类型漂移。
 
 当没有可重定向的内容时（`Compute` 返回空）本 pass 是 no-op，并跳过
 `Orchestration` 函数（无 TileType 变量）。
 
 ## 与 codegen 的关系
 
-PTO codegen 把解析到*同一* MemRef 身份（`base` + `byte_offset` + `size`）的变量
-渲染成同一个 `tile_buf` handle，因此本 pass 之后,循环累加器会发出原地的
+PTO codegen 把解析到*同一*物理 MemRef window（`base` + `byte_offset` + `size` +
+pipeline-slot 元数据）的变量渲染成同一个 `tile_buf` handle，因此本 pass 之后,
+循环累加器会发出原地的
 `pto.tadd ins(%acc, %t) outs(%acc)`，而不是写到独立的 `%acc_next`。
 `memory_planner=DSA_RP` 会把每个所得分配身份变成一个 DSA buffer；
 `memory_planner=PTOAS` 则让 codegen 不带物理地址发射该身份，交给 ptoas
@@ -71,7 +77,9 @@ PTO codegen 把解析到*同一* MemRef 身份（`base` + `byte_offset` + `size`
 
 - view / 部分 view 保留各自的 `byte_offset`/`size` 元数据。在 `DSA_RP` 下，共享
   同一 `base` 的所有成员属于同一个物理分配；规划器整体移动该分配，并在回写时保留
-  每个成员的相对偏移。
+  每个成员的相对偏移。仅共享 `base` 不足以建立 must-alias 关系：互不相交的 byte
+  window 和不同 pipeline slot 会保持独立，直到 producer 被安全地重定向到精确的
+  canonical window。
 - 在默认（`PYPTO`）流水线里,本 pass 加上 `MemoryReuse` 组合起来等于原来单个
   `MemoryReuse` pass 的行为。
 - `DSA_RP` 与 `PTOAS` 都跳过这里的机会性 MemRef 合并；二者都不能撤销本 pass
@@ -79,3 +87,6 @@ PTO codegen 把解析到*同一* MemRef 身份（`base` + `byte_offset` + `size`
 - accumulator-phi 规范化会在 lifetime planning 之前对所有 memory planner 运行。
   legacy `PYPTO` 路径在机会性 reuse 之后会再运行一次，因为 reuse 可能引入新的
   carry/phi mismatch。
+- 新的 matmul accumulator 推荐使用单个
+  `tile.matmul_acc(..., init_cond=...)`。为兼容已有手写 kernel，peeled
+  `matmul`/`matmul_acc` 分支仍受支持，并由本 pass 规范化。

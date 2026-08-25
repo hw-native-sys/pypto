@@ -16,9 +16,11 @@ This aligns MemRef objects consistently: if two tiles share a MemRef in
 ``After``, the corresponding tiles in ``Expected`` must also share.
 """
 
+import re
+
 import pypto.language as pl
 import pytest
-from pypto import DataType, InternalError, backend, ir, passes, testing
+from pypto import DataType, InternalError, backend, codegen, ir, passes, testing
 from pypto.backend import BackendType
 from pypto.ir.op import tile
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
@@ -3707,11 +3709,12 @@ class TestTopDownRetargeter:
             valid_shape = tile_type.get_effective_tile_view().valid_shape
             assert [dim.value for dim in valid_shape if isinstance(dim, ir.ConstInt)] == [16, 16]
 
-    def test_nested_tensor_matmul_acc_join_needs_no_acc_repair_move(self):
-        """Nested outer/inner K loops lower without an illegal Acc repair move."""
-
-        backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+    @pytest.mark.parametrize(
+        "planner",
+        [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS],
+    )
+    def test_nested_tensor_matmul_acc_join_needs_no_acc_repair_move(self, planner, ascend_backend):
+        """Nested outer/inner K loops use one L0C handle under every planner."""
 
         @pl.program
         class NestedAccumulator:
@@ -3755,7 +3758,8 @@ class TestTopDownRetargeter:
                     output = pl.tensor.assemble(output, tile, [region_index * 16, 0])
                 return output
 
-        lowered = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(NestedAccumulator)
+        with passes.PassContext([], memory_planner=planner):
+            lowered = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(NestedAccumulator)
         aic_functions = [
             function for function in lowered.functions.values() if function.func_type == ir.FunctionType.AIC
         ]
@@ -3765,6 +3769,27 @@ class TestTopDownRetargeter:
         assert "pl.tile.matmul_acc(" in body
         assert not any(
             "pl.tile.move(" in line and "target_memory=pl.Mem.Acc" in line for line in body.splitlines()
+        )
+
+        aic = aic_functions[0]
+        pto = codegen.PTOCodegen().generate(
+            ir.Program([aic], aic.name, lowered.span),
+            emit_tile_addr=planner != passes.MemoryPlanner.PTOAS,
+        )
+        acc_lines = [line for line in pto.splitlines() if "pto.tmatmul.acc" in line]
+        assert acc_lines, f"{planner}: expected at least one accumulating matmul:\n{pto}"
+        acc_handles = {
+            match.group(1)
+            for line in acc_lines
+            if (match := re.search(r"pto\.tmatmul\.acc ins\((%[A-Za-z0-9_]+)", line))
+        }
+        assert len(acc_handles) == 1, (
+            f"{planner}: expected one persistent L0C handle, got {acc_handles}:\n{pto}"
+        )
+        acc_handle = next(iter(acc_handles))
+        first_partials = [line for line in pto.splitlines() if "pto.tmatmul " in line]
+        assert any(re.search(rf"outs\({re.escape(acc_handle)}(?:\s|:)", line) for line in first_partials), (
+            f"{planner}: first partial must initialize the handle consumed by tmatmul.acc ({acc_handle}):\n{pto}"
         )
 
     def test_pipelined_kloop_accumulator_coalesces_to_one_acc_buffer(self):
@@ -4016,6 +4041,194 @@ class TestTopDownRetargeter:
         # emitting invalid IR for this unlowerable control-flow shape.
         with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
             _run_pipeline(_divergent_acc_phi_program())
+
+    def test_pre_if_accumulator_loop_is_not_treated_as_branch_local(self):
+        """A loop result defined before an if cannot justify branch-exclusive reuse."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 64], pl.BF16],
+                rhs: pl.Tensor[[64, 64], pl.BF16],
+                cond: pl.Scalar[pl.INDEX],
+                bypass_out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> tuple[pl.Tensor[[16, 64], pl.FP32], pl.Tensor[[16, 64], pl.FP32]]:
+                sa_mat = pl.tile.load(lhs, [0, 0], [16, 64], target_memory=pl.Mem.Mat)
+                sb_mat = pl.tile.load(rhs, [0, 0], [64, 64], target_memory=pl.Mem.Mat)
+                sa = pl.tile.move(sa_mat, target_memory=pl.Mem.Left)
+                sb = pl.tile.move(sb_mat, target_memory=pl.Mem.Right)
+                initial = pl.tile.matmul(sa, sb)
+                for _k, (carried,) in pl.range(1, init_values=(initial,)):
+                    updated = pl.tile.matmul_acc(carried, sa, sb)
+                    loop_result = pl.yield_(updated)
+                if cond < 1:
+                    merged = pl.yield_(loop_result)
+                else:
+                    seed = pl.tile.matmul(sa, sb)
+                    merged = pl.yield_(seed)
+                bypass_result = pl.tile.store(loop_result, [0, 0], bypass_out)
+                result = pl.tile.store(merged, [0, 0], out)
+                return bypass_result, result
+
+        # The pre-if loop result remains live after the if. Treating it as a
+        # branch-local accumulator would retarget the sibling seed onto its
+        # buffer and clobber bypass_result on that path. Decline and fail closed
+        # because the remaining divergent Acc phi has no legal repair move.
+        with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
+            _run_pipeline(Before)
+
+    def test_branch_local_accumulator_loop_preserves_external_seed_after_if(self):
+        """A branch-local accumulator loop cannot donate an externally live buffer.
+
+        The loop mutates ``initial`` only on the then path. Retargeting the else
+        branch's fresh ``seed`` onto that allocation would also overwrite
+        ``bypass_result`` on the else path, where the loop never executes.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 64], pl.BF16],
+                rhs: pl.Tensor[[64, 64], pl.BF16],
+                cond: pl.Scalar[pl.INDEX],
+                bypass_out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> tuple[pl.Tensor[[16, 64], pl.FP32], pl.Tensor[[16, 64], pl.FP32]]:
+                sa_mat = pl.tile.load(lhs, [0, 0], [16, 64], target_memory=pl.Mem.Mat)
+                sb_mat = pl.tile.load(rhs, [0, 0], [64, 64], target_memory=pl.Mem.Mat)
+                sa = pl.tile.move(sa_mat, target_memory=pl.Mem.Left)
+                sb = pl.tile.move(sb_mat, target_memory=pl.Mem.Right)
+                initial = pl.tile.matmul(sa, sb)
+                if cond < 1:
+                    for _k, (carried,) in pl.range(1, init_values=(initial,)):
+                        updated = pl.tile.matmul_acc(carried, sa, sb)
+                        loop_result = pl.yield_(updated)
+                    merged = pl.yield_(loop_result)
+                else:
+                    seed = pl.tile.matmul(sa, sb)
+                    merged = pl.yield_(seed)
+                bypass_result = pl.tile.store(initial, [0, 0], bypass_out)
+                result = pl.tile.store(merged, [0, 0], out)
+                return bypass_result, result
+
+        # Retargeting ``seed`` onto ``initial`` is unsafe because ``initial``
+        # remains independently observable after the if on the else path. The
+        # remaining divergent Acc phi has no legal Acc-to-Acc repair move.
+        with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
+            _run_pipeline(Before)
+
+    def test_accumulator_if_phi_same_base_disjoint_windows_are_coalesced(self):
+        """Same base with a different byte window is not an aligned accumulator.
+
+        This models post-InitMemRef IR where two Acc tiles occupy disjoint halves
+        of one allocation. The fresh seed must be retargeted to the accumulator's
+        exact window; base-pointer equality alone leaves the phi reading bytes
+        that the seed branch never wrote.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 64], pl.BF16, pl.MemRef("mem_ddr_0", 0, 2048)],
+                rhs: pl.Tensor[[64, 64], pl.BF16, pl.MemRef("mem_ddr_1", 0, 8192)],
+                cond: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32, pl.MemRef("mem_ddr_2", 0, 4096)]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                mem_mat_3: pl.Ptr = pl.tile.alloc(pl.Mem.Mat, 2048)
+                mem_mat_4: pl.Ptr = pl.tile.alloc(pl.Mem.Mat, 8192)
+                mem_acc_5: pl.Ptr = pl.tile.alloc(pl.Mem.Acc, 8192)
+                sa: pl.Tile[[16, 64], pl.BF16, pl.MemRef(mem_mat_3, 0, 2048), pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [16, 64], [16, 64], target_memory=pl.Mem.Mat
+                )
+                sb: pl.Tile[[64, 64], pl.BF16, pl.MemRef(mem_mat_4, 0, 8192), pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Mat
+                )
+                prev: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_5, 0, 4096), pl.Mem.Acc] = pl.tile.matmul(
+                    sa, sb
+                )
+                if cond < 1:
+                    seed: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_5, 4096, 4096), pl.Mem.Acc] = (
+                        pl.tile.matmul(sa, sb)
+                    )
+                    phi = pl.yield_(seed)
+                else:
+                    acc: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_5, 0, 4096), pl.Mem.Acc] = (
+                        pl.tile.matmul_acc(prev, sa, sb)
+                    )
+                    phi = pl.yield_(acc)
+                return pl.tile.store(phi, [0, 0], out)
+
+        after = passes.memory_reuse()(Before)
+        ranges = _collect_allocated_tile_ranges(after)
+        for name in ("prev", "seed", "acc"):
+            assert ranges[name] == (0, 4096), f"{name} did not use the canonical Acc window: {ranges}"
+
+        phi_ranges: list[tuple[int, int]] = []
+
+        class _IfReturnCollector(ir.IRVisitor):
+            def visit_if_stmt(self, stmt):  # type: ignore[override]
+                for var in stmt.return_vars:
+                    tile_type = var.type
+                    if isinstance(tile_type, ir.TileType) and tile_type.memref is not None:
+                        offset = tile_type.memref.byte_offset_
+                        assert isinstance(offset, ir.ConstInt)
+                        phi_ranges.append((offset.value, tile_type.memref.size_))
+                super().visit_if_stmt(stmt)
+
+        main = after.get_function("kernel")
+        assert main is not None
+        _IfReturnCollector().visit_stmt(main.body)
+        assert phi_ranges == [(0, 4096)]
+
+    def test_divergent_bare_acc_alias_fails_closed(self):
+        """An alias with a stale MemRef cannot select the accumulator target."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 64], pl.BF16, pl.MemRef("mem_ddr_0", 0, 2048)],
+                rhs: pl.Tensor[[64, 64], pl.BF16, pl.MemRef("mem_ddr_1", 0, 8192)],
+                cond: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32, pl.MemRef("mem_ddr_2", 0, 4096)]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                mem_mat_3: pl.Ptr = pl.tile.alloc(pl.Mem.Mat, 2048)
+                mem_mat_4: pl.Ptr = pl.tile.alloc(pl.Mem.Mat, 8192)
+                mem_acc_5: pl.Ptr = pl.tile.alloc(pl.Mem.Acc, 4096)
+                mem_acc_6: pl.Ptr = pl.tile.alloc(pl.Mem.Acc, 4096)
+                mem_acc_7: pl.Ptr = pl.tile.alloc(pl.Mem.Acc, 4096)
+                sa: pl.Tile[[16, 64], pl.BF16, pl.MemRef(mem_mat_3, 0, 2048), pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [16, 64], [16, 64], target_memory=pl.Mem.Mat
+                )
+                sb: pl.Tile[[64, 64], pl.BF16, pl.MemRef(mem_mat_4, 0, 8192), pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Mat
+                )
+                prev: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_5, 0, 4096), pl.Mem.Acc] = pl.tile.matmul(
+                    sa, sb
+                )
+                if cond < 1:
+                    seed: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_7, 0, 4096), pl.Mem.Acc] = (
+                        pl.tile.matmul(sa, sb)
+                    )
+                    phi = pl.yield_(seed)
+                else:
+                    acc: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_5, 0, 4096), pl.Mem.Acc] = (
+                        pl.tile.matmul_acc(prev, sa, sb)
+                    )
+                    stale_alias: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_6, 0, 4096), pl.Mem.Acc] = acc
+                    phi = pl.yield_(stale_alias)
+                return pl.tile.store(phi, [0, 0], out)
+
+        with pytest.raises(InternalError, match="cannot align the accumulator branch"):
+            passes.materialize_semantic_aliases()(Before)
 
     def test_seed_branch_write_only_clobber_blocks_acc_coalesce(self):
         """Safety gate for the accumulator-if-phi coalescer's branch-tail
