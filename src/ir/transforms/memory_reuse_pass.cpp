@@ -2709,8 +2709,14 @@ class AlignLoopCarriesToInitMutator : public IRMutator {
       // MemRef, and always rebuild when the carried init reference changed so a
       // remapped init_expr is preserved regardless of the carry's type.
       auto ia_tile = As<TileType>(op->iter_args_[i]->GetType());
-      bool ia_memref_differs = init_tile && ia_tile && ia_tile->memref_.has_value() &&
-                               !MemRef::SameAllocation(GetDefinedMemRef(ia_tile), init_memref);
+      // Addresses, not allocations: an iter_arg left on a sibling slot of one
+      // multi-slot allocation names different bytes and still has to be moved to
+      // init's. Anything not provably init's address is realigned -- this only
+      // retypes a node, so realigning an unprovable pair costs nothing while
+      // leaving it keeps a possibly-wrong slot in the metadata.
+      bool ia_memref_differs =
+          init_tile && ia_tile && ia_tile->memref_.has_value() &&
+          CompareBaseAddress(GetDefinedMemRef(ia_tile), init_memref) != AddressRelation::kSame;
       if (ia_memref_differs || init_changed) {
         TypePtr new_ia_type = ia_memref_differs ? retype_to_init(ia_tile) : op->iter_args_[i]->GetType();
         new_iter_args[i] = std::make_shared<IterArg>(op->iter_args_[i]->name_hint_, new_ia_type, init_expr,
@@ -2724,7 +2730,7 @@ class AlignLoopCarriesToInitMutator : public IRMutator {
       if (init_tile && i < new_return_vars.size()) {
         auto rv_tile = As<TileType>(op->return_vars_[i]->GetType());
         if (rv_tile && rv_tile->memref_.has_value() &&
-            !MemRef::SameAllocation(GetDefinedMemRef(rv_tile), init_memref)) {
+            CompareBaseAddress(GetDefinedMemRef(rv_tile), init_memref) != AddressRelation::kSame) {
           new_return_vars[i] = std::make_shared<Var>(op->return_vars_[i]->name_hint_, retype_to_init(rv_tile),
                                                      op->return_vars_[i]->span_);
           var_remap_[op->return_vars_[i].get()] = new_return_vars[i];
@@ -2944,7 +2950,8 @@ class YieldFixupMutator : public IRMutator {
       auto rv_tile = As<TileType>(new_return_vars[i]->GetType());
       if (rv_tile && rv_tile->memref_.has_value()) {
         auto rv_memref = GetDefinedMemRef(rv_tile);
-        if (CompareBaseAddress(rv_memref, target_memref) == AddressRelation::kDifferent) {
+        // Metadata only, so realign anything not provably already the target.
+        if (CompareBaseAddress(rv_memref, target_memref) != AddressRelation::kSame) {
           auto new_rv_type = CloneTypeWithMemRefAndRemapExprs(
               rv_tile, target_memref, [this](const ExprPtr& e) { return VisitExpr(e); }, target_memory);
           new_return_vars[i] =
@@ -3392,13 +3399,14 @@ class YieldFixupMutator : public IRMutator {
 
       // Patch iter_arg if its MemRef differs from initValue's. Addresses, not
       // allocations: an iter_arg left on a sibling slot of one multi-slot
-      // allocation is a different buffer and still has to be re-pointed. These two
-      // sites only retype a node, they never move data, so an unprovable symbolic
-      // pair is left alone rather than rejected.
+      // allocation is a different buffer and still has to be re-pointed. These
+      // sites only retype a node, they never move data, so anything not provably
+      // init's address is repointed: an unprovable pair costs nothing to realign
+      // and would otherwise leave a possibly-wrong slot in the metadata.
       auto ia_tile = As<TileType>(for_stmt->iter_args_[i]->GetType());
       if (ia_tile && ia_tile->memref_.has_value()) {
         auto ia_memref = GetDefinedMemRef(ia_tile);
-        if (CompareBaseAddress(ia_memref, init_memref) == AddressRelation::kDifferent) {
+        if (CompareBaseAddress(ia_memref, init_memref) != AddressRelation::kSame) {
           auto new_ia_type = CloneTypeWithMemRefAndRemapExprs(
               ia_tile, init_memref, [this](const ExprPtr& expr) { return VisitExpr(expr); },
               init_tile->GetMemorySpace());
@@ -3420,7 +3428,7 @@ class YieldFixupMutator : public IRMutator {
       auto rv_tile = As<TileType>(new_return_vars[i]->GetType());
       if (!rv_tile || !rv_tile->memref_.has_value()) continue;
       auto rv_memref = GetDefinedMemRef(rv_tile);
-      if (CompareBaseAddress(rv_memref, yield_memref) == AddressRelation::kDifferent) {
+      if (CompareBaseAddress(rv_memref, yield_memref) != AddressRelation::kSame) {
         auto new_rv_type = CloneTypeWithMemRefAndRemapExprs(
             rv_tile, yield_memref, [this](const ExprPtr& expr) { return VisitExpr(expr); },
             yield_tile->GetMemorySpace());
