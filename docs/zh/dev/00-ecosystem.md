@@ -62,7 +62,7 @@ PTO（Parallel Tensor/Tile Operation）项目是一个多仓库工具链，用�
 **pypto 的两条代码生成路径：**
 
 - **InCore 函数**（tile 级计算）→ `.pto` → PTOAS → pto-isa → AICore 二进制
-- **Orchestration 函数**（任务调度）→ 使用 PTO2 runtime API 的 C++ → 编译到 AICPU
+- **Orchestration 函数**（任务调度）→ 使用 simpler runtime API 的 C++ → 编译到 AICPU
 
 ## 组件详情
 
@@ -75,7 +75,7 @@ PTO（Parallel Tensor/Tile Operation）项目是一个多仓库工具链，用�
 **输出：**
 
 - `.pto` 文件 — PTO-ISA MLIR 方言，每个 InCore 内核函数一个文件（运行在 AICore 上）
-- Orchestration C++ — 使用 PTO2 runtime API 的任务调度代码（运行在 AICPU 上）
+- Orchestration C++ — 使用 simpler runtime API 的任务调度代码（运行在 AICPU 上）
 
 **内部流水线：**
 
@@ -153,7 +153,7 @@ ISA 头文件；但它永远不会被*读取* —— 环境里的值不等于 pi
 **输入：**
 
 - 编译后的 AICore 内核二进制文件（InCore 路径：pypto → PTOAS → pto-isa → 设备编译器）
-- 编译后的 AICPU orchestration 二进制文件（Orchestration 路径：pypto → 使用 PTO2 runtime API 的 C++ → 设备编译器）
+- 编译后的 AICPU orchestration 二进制文件（Orchestration 路径：pypto → 使用 simpler runtime API 的 C++ → 设备编译器）
 
 **职责：**
 
@@ -161,7 +161,7 @@ ISA 头文件；但它永远不会被*读取* —— 环境里的值不等于 pi
 - 协调 Host ↔ AICPU ↔ AICore 执行
 - 管理设备内存、同步和握手协议
 
-**与 pypto 的接口：** pypto 生成的 orchestration C++ 代码使用 PTO2 runtime API（`rt_submit_task`、`make_tensor_external` 等），simpler 实现该 API。运行时 API 是 pypto orchestration codegen 和 simpler 之间的契约。
+**与 pypto 的接口：** pypto 生成的 orchestration C++ 代码使用 simpler runtime API（`rt_submit_task`、`make_tensor_external` 等），simpler 实现该 API。运行时 API 是 pypto orchestration codegen 和 simpler 之间的契约。
 
 ## 接口总结
 
@@ -172,7 +172,7 @@ pypto-lib ──[ Python API: pypto.language / pypto.ir ]──► pypto
      pypto ──[ .pto files: PTO-ISA MLIR dialect     ]──► PTOAS
    pto-isa ──[ C++ #include: tile instruction hdrs  ]──► PTOAS
    pto-isa ──[ C++ #include: ISA headers            ]──► simpler
-     pypto ──[ C++ API: PTO2 runtime API calls      ]──► simpler
+     pypto ──[ C++ API: simpler runtime API calls      ]──► simpler
 ```
 
 | 边界 | 格式 | 提供者 | 消费者 |
@@ -191,6 +191,6 @@ pypto-lib ──[ Python API: pypto.language / pypto.ir ]──► pypto
 | ---- | -------- | ---------- |
 | 新增 tile 指令 | pto-isa + PTOAS + pypto | ISA 头文件、PTO MLIR 方言、pypto op/codegen |
 | 新增张量原语 | pypto-lib + pypto | Python DSL（如需新 ops） |
-| 新增运行时特性 | simpler + pypto | PTO2 runtime API、orchestration codegen |
+| 新增运行时特性 | simpler + pypto | simpler runtime API、orchestration codegen |
 | 新增 PTO MLIR op | PTOAS + pypto | PTO MLIR 方言、pypto PTO codegen |
 | 新增模型示例 | 仅 pypto-lib | 无（现有 API 的消费者） |

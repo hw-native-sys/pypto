@@ -12,7 +12,7 @@ Two scenarios live in this file:
 
 1. Issue #1209 follow-up — ``pl.transpose(x, 0, 1)`` + ``pl.slice(xt, ...)``
    must access column ``h`` of ``x`` (not the first contiguous chunk in
-   memory). The runtime ``ChipTensor::transpose`` is a metadata-only swap, so the
+   memory). The runtime ``TaskTensor::transpose`` is a metadata-only swap, so the
    IR result must record swapped physical strides for codegen to emit a
    correctly addressed ``make_tensor_view``. Restricted to a5/a5sim — the
    path produces a ``GlobalTensor<DN>`` source that a2a3 rejects at the

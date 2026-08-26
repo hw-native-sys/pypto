@@ -245,7 +245,7 @@ class PassManager:
             passes.materialize_dist_tensor_ctx,
             passes.simplify,
             # Insert explicit AUTO RuntimeScopeStmt nodes (function body + for/if
-            # bodies) into Orchestration functions so codegen emits PTO2_SCOPE
+            # bodies) into Orchestration functions so codegen emits SIMPLER_SCOPE
             # 1:1 from the IR. Runs after the final Simplify and after every
             # rewriting transform, so none of them has to reason about the
             # inserted scope wrappers.

@@ -736,14 +736,14 @@ output_dir/
 ├── kernels/aiv/
 │   └── <func_name>.cpp              # Final wrapper
 ├── orchestration/
-│   └── <orch_func_name>.cpp         # PTO2 runtime orchestration code
+│   └── <orch_func_name>.cpp         # simpler runtime orchestration code
 └── kernel_config.py                 # Runtime/orchestration/kernel config
 ```
 
 `ptoas_passes/` is emitted only when `ir.compile(...,
 dump_ptoas_passes=True)` or `RunConfig(dump_ptoas_passes=True)` is used.
 
-The orchestration codegen generates identical orchestration C++ code using the PTO2 runtime API (`rt_submit_task`, `make_tensor_external`, etc.).
+The orchestration codegen generates identical orchestration C++ code using the simpler runtime API (`rt_submit_task`, `make_tensor_external`, etc.).
 
 ### Runtime configuration (`kernel_config.py`)
 

@@ -1496,7 +1496,7 @@ void BindIR(nb::module_& m) {
       .value("Cluster", ScopeKind::Cluster, "Cluster scope for co-scheduled AIC + AIV groups")
       .value("Hierarchy", ScopeKind::Hierarchy, "Distributed hierarchy scope (uses level/role)")
       .value("Spmd", ScopeKind::Spmd, "SPMD dispatch scope (core_num/sync_start)")
-      .value("Runtime", ScopeKind::Runtime, "Runtime orchestration scope (PTO2_SCOPE wrapper)")
+      .value("Runtime", ScopeKind::Runtime, "Runtime orchestration scope (SIMPLER_SCOPE wrapper)")
       .value("CommDomain", ScopeKind::CommDomain,
              "Comm-domain scope (with orch.allocate_domain(...) wrapper for host_orch window buffers)")
       .value("SplitAiv", ScopeKind::SplitAiv, "Explicit AIV-split region (pl.split_aiv)")
@@ -1649,8 +1649,8 @@ void BindIR(nb::module_& m) {
   // RuntimeScopeStmt
   auto runtime_scope_stmt_class = nb::class_<RuntimeScopeStmt, ScopeStmt>(
       ir, "RuntimeScopeStmt",
-      "Runtime orchestration scope: emits PTO2_SCOPE() (manual=False) or "
-      "PTO2_SCOPE(PTO2ScopeMode::MANUAL) (manual=True) wrappers in codegen");
+      "Runtime orchestration scope: emits SIMPLER_SCOPE() (manual=False) or "
+      "SIMPLER_SCOPE(ScopeMode::MANUAL) (manual=True) wrappers in codegen");
   runtime_scope_stmt_class.def(nb::init<bool, std::string, const StmtPtr&, const Span&>(),
                                nb::arg("manual") = false, nb::arg("name_hint") = "", nb::arg("body"),
                                nb::arg("span"), "Create a Runtime scope statement");

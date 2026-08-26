@@ -681,7 +681,7 @@ inline std::vector<std::pair<std::string, std::any>> WithArgDirectionOverridesAt
 
 /**
  * @brief Reserved attr key for the set of dep edges that codegen packs into
- * a stack ``PTO2TaskId[]`` array and emits as a single
+ * a stack ``TaskId[]`` array and emits as a single
  * ``params.set_dependencies(arr, count)`` call before the kernel submit.
  *
  * Value type: ``std::vector<VarPtr>`` where every entry is a Var of

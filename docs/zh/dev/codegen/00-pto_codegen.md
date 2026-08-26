@@ -709,14 +709,14 @@ output_dir/
 ├── kernels/aiv/
 │   └── <func_name>.cpp              # Final wrapper
 ├── orchestration/
-│   └── <orch_func_name>.cpp         # PTO2 runtime orchestration code
+│   └── <orch_func_name>.cpp         # simpler runtime orchestration code
 └── kernel_config.py                 # Runtime/orchestration/kernel config
 ```
 
 仅当使用 `ir.compile(..., dump_ptoas_passes=True)` 或
 `RunConfig(dump_ptoas_passes=True)` 时才会生成 `ptoas_passes/`。
 
-编排代码生成使用 PTO2 运行时 API (`rt_submit_task`, `make_tensor_external` 等) 生成编排 C++ 代码。
+编排代码生成使用 simpler 运行时 API (`rt_submit_task`, `make_tensor_external` 等) 生成编排 C++ 代码。
 
 ### 运行时配置 (`kernel_config.py`)
 

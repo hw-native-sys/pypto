@@ -209,7 +209,7 @@ field from the `Stmt` base class. See [Leading comments on statements](#leading-
 | **HierarchyScopeStmt** | `name_hint_`, `body_`, `level_`, `role_` (optional) | Pipeline-stage region for a given Level/Role |
 | **SpmdScopeStmt** | `name_hint_`, `body_`, `core_num_` (integer-typed `Expr`), `sync_start_` | SPMD launch region; outlined to `Function(Spmd)` |
 | **SplitAivScopeStmt** | `name_hint_`, `body_`, `split_` (`SplitMode`, never `None`), `count_` (= 2) | Explicit AIV-split region (`pl.split_aiv`); nestable; consumed and erased by `LowerAutoVectorSplit` (pass 20) |
-| **RuntimeScopeStmt** | `name_hint_`, `body_`, `manual_` | Orchestrator runtime region (`PTO2_SCOPE`); `manual_=true` selects manual dependency mode |
+| **RuntimeScopeStmt** | `name_hint_`, `body_`, `manual_` | Orchestrator runtime region (`SIMPLER_SCOPE`); `manual_=true` selects manual dependency mode |
 | **YieldStmt** | `values_` | Yield values in loop iteration |
 | **EvalStmt** | `expr_` | Evaluate expression for side effects |
 | **SeqStmts** | `stmts_` | General statement sequence |
@@ -400,8 +400,8 @@ runtime = ir.RuntimeScopeStmt(manual=True, name_hint="", body=body, span=span)
     IR `Call`, enforced by the ManualDepsOnSubmitOnly verifier), then fills
     a fixed-size stack array and emits one
     `params.set_dependencies(arr, count)` call per task.
-- `RuntimeScopeStmt` lowers to `PTO2_SCOPE()` for `manual=false` and
-  `PTO2_SCOPE(PTO2ScopeMode::MANUAL)` for `manual=true`. It is created by
+- `RuntimeScopeStmt` lowers to `SIMPLER_SCOPE()` for `manual=false` and
+  `SIMPLER_SCOPE(ScopeMode::MANUAL)` for `manual=true`. It is created by
   `pl.manual_scope()` (manual mode) and by the orchestration codegen path
   (auto mode); it is **not** outlined into a separate function.
 

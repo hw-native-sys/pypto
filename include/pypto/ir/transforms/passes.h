@@ -899,7 +899,7 @@ Pass FoldNoOpReshape();
  * @brief Materialize implicit orchestration scopes as explicit RuntimeScopeStmt nodes
  *
  * The simpler runtime wraps regions of an Orchestration function in
- * ``PTO2_SCOPE()`` blocks. Historically the orchestration codegen decided where
+ * ``SIMPLER_SCOPE()`` blocks. Historically the orchestration codegen decided where
  * to emit those wrappers from the for/if structure: the whole function body, and
  * each ForStmt / IfStmt branch body, were wrapped implicitly (suppressed inside a
  * manual ``RuntimeScopeStmt``). That embedded codegen policy in the printer.
@@ -910,7 +910,7 @@ Pass FoldNoOpReshape();
  *  - wrapping each ForStmt body and each IfStmt then/else body,
  *
  * while skipping insertion anywhere inside a manual ``RuntimeScopeStmt`` (the
- * runtime forbids AUTO nested in MANUAL). Codegen then emits ``PTO2_SCOPE`` only
+ * runtime forbids AUTO nested in MANUAL). Codegen then emits ``SIMPLER_SCOPE`` only
  * from ``RuntimeScopeStmt`` nodes, staying 1:1 with the IR.
  *
  * Runs last in the pipeline (after the final Simplify) so no other transform has
@@ -930,7 +930,7 @@ Pass MaterializeRuntimeScopes();
  *    variable is declared and the yield assigns back to it (issue #1286).
  *
  * Inside a ``pl.manual_scope`` a ``Scalar[TASK_ID]`` carry additionally lowers to
- * a ``PTO2TaskId[N]`` array whose extent N comes from the loop's (or a threaded
+ * a ``TaskId[N]`` array whose extent N comes from the loop's (or a threaded
  * inner loop's) constant trip count.
  *
  * The orchestration codegen used to derive both from an alias-equivalence

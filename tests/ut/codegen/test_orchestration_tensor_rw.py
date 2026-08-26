@@ -330,7 +330,7 @@ class TestTensorReadWriteOffsetCodegen:
         assert "kv_proj__windowed" in code, code
 
         declared_names = re.findall(
-            r"^\s*(?:const\s+ChipTensor&|ChipTensor|PTO2TaskId|auto)\s+([A-Za-z_]\w*)\s*=",
+            r"^\s*(?:const\s+TaskTensor&|TaskTensor|TaskId|auto)\s+([A-Za-z_]\w*)\s*=",
             code,
             flags=re.MULTILINE,
         )
@@ -340,10 +340,10 @@ class TestTensorReadWriteOffsetCodegen:
         )
 
         mutable_tensor_names = set(
-            re.findall(r"^\s*ChipTensor\s+([A-Za-z_]\w*)\s*=", code, flags=re.MULTILINE)
+            re.findall(r"^\s*TaskTensor\s+([A-Za-z_]\w*)\s*=", code, flags=re.MULTILINE)
         )
         const_alias_names = set(
-            re.findall(r"^\s*const\s+ChipTensor&\s+([A-Za-z_]\w*)\s*=", code, flags=re.MULTILINE)
+            re.findall(r"^\s*const\s+TaskTensor&\s+([A-Za-z_]\w*)\s*=", code, flags=re.MULTILINE)
         )
         assert not (mutable_tensor_names & const_alias_names), code
 
@@ -738,7 +738,7 @@ class TestTensorReadWriteOffsetCodegen:
         # If the codegen emits an explicit SSA alias for the SPMD result,
         # it must bind to ext_out and never to ext_scratch.
         out_alias_lines = [
-            line for line in code.splitlines() if line.lstrip().startswith("const ChipTensor& out__")
+            line for line in code.splitlines() if line.lstrip().startswith("const TaskTensor& out__")
         ]
         for line in out_alias_lines:
             assert "ext_out" in line and "ext_scratch" not in line, (
@@ -828,7 +828,7 @@ class TestTensorReadWriteOffsetCodegen:
 
         # Any explicit SSA alias for the result must bind to ext_out as well.
         alias_lines = [
-            line for line in code.splitlines() if line.lstrip().startswith("const ChipTensor& out")
+            line for line in code.splitlines() if line.lstrip().startswith("const TaskTensor& out")
         ]
         for line in alias_lines:
             assert "ext_pre" not in line and "ext_post" not in line, (

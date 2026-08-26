@@ -386,7 +386,7 @@ PropertyVerifierPtr CreateIterArgCarryClassifiedPropertyVerifier();
  * ``MaterializeRuntimeScopes`` inserts explicit ``RuntimeScopeStmt`` nodes, or
  * when the user declares ``@pl.function(auto_scope=False)`` (the pass is a
  * no-op and codegen still accepts the function). Orchestration codegen emits
- * ``PTO2_SCOPE()`` only from those nodes; skipping the pass leaves
+ * ``SIMPLER_SCOPE()`` only from those nodes; skipping the pass leaves
  * ``auto_scope=True`` and would silently omit scopes.
  *
  * @return Shared pointer to RuntimeScopesMaterialized PropertyVerifier

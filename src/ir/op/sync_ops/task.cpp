@@ -55,15 +55,15 @@ TypePtr DeduceBoolScalarType(const std::vector<ExprPtr>& args,
 
 }  // namespace
 
-// system.task_invalid — produces an invalid PTO2TaskId sentinel.
+// system.task_invalid — produces an invalid TaskId sentinel.
 //
 // Surfaced as the Python literal ``None`` in TaskId-typed positions: a
 // ``prev_tid = None`` loop-carry seed or a ``deps=[None]`` entry. At codegen
-// time it lowers to ``PTO2TaskId::invalid()``; downstream
+// time it lowers to ``TaskId::invalid()``; downstream
 // ``set_dependencies`` calls skip invalid entries via an ``is_valid()``
 // guard so the runtime sees no edge on the first iteration.
 REGISTER_OP("system.task_invalid")
-    .set_description("Construct an invalid PTO2TaskId sentinel for manual_scope dep carries")
+    .set_description("Construct an invalid TaskId sentinel for manual_scope dep carries")
     .set_op_category("TaskOp")
     .no_argument()
     .f_deduce_type(DeduceTaskIdScalarType);

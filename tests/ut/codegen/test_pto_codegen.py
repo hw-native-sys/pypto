@@ -1238,10 +1238,10 @@ class TestPreprocessPtoasOutput:
         assert "ptoas_bitcast" in result
 
     def test_renames_only_standalone_ptoas_tensor_type(self):
-        source = "Tensor value; GlobalTensor<float> global; TensorView view; ChipTensor ready;\n"
+        source = "Tensor value; GlobalTensor<float> global; TensorView view; TaskTensor ready;\n"
 
         assert _preprocess_ptoas_output(source) == (
-            "ChipTensor value; GlobalTensor<float> global; TensorView view; ChipTensor ready;\n"
+            "TaskTensor value; GlobalTensor<float> global; TensorView view; TaskTensor ready;\n"
         )
 
     def test_mgather_preprocess_fast_path_preserves_unrelated_content(self):
@@ -1341,17 +1341,17 @@ class TestGenerateArgUnpacking:
     def test_tensor_only(self):
         func = _make_func("test_fn", [("a", "tensor"), ("b", "tensor"), ("out", "tensor")])
         code, names = _generate_arg_unpacking(func)
-        assert "reinterpret_cast<__gm__ ChipTensor*>(args[0])" in code
-        assert "reinterpret_cast<__gm__ ChipTensor*>(args[1])" in code
-        assert "reinterpret_cast<__gm__ ChipTensor*>(args[2])" in code
+        assert "reinterpret_cast<__gm__ TaskTensor*>(args[0])" in code
+        assert "reinterpret_cast<__gm__ TaskTensor*>(args[1])" in code
+        assert "reinterpret_cast<__gm__ TaskTensor*>(args[2])" in code
         assert names == ["a", "b", "out"]
 
     def test_mixed_tensor_scalar(self):
         func = _make_func("test_fn", [("input", "tensor"), ("scale", "scalar"), ("output", "tensor")])
         code, names = _generate_arg_unpacking(func)
         # Tensors-first: input=args[0], output=args[1], scale=args[2]
-        assert "reinterpret_cast<__gm__ ChipTensor*>(args[0])" in code
-        assert "reinterpret_cast<__gm__ ChipTensor*>(args[1])" in code
+        assert "reinterpret_cast<__gm__ TaskTensor*>(args[0])" in code
+        assert "reinterpret_cast<__gm__ TaskTensor*>(args[1])" in code
         assert "scale_conv.u64 = args[2];" in code
         assert "float scale = scale_conv.val;" in code
         assert names == ["input", "output", "scale"]
@@ -1655,9 +1655,9 @@ class TestGenerateKernelWrapper:
         assert func is not None
         wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
 
-        assert '#include "pto_async_kernel_api.h"' in wrapper
-        assert '#if !__has_include("pto_async_kernel_api.h")' in wrapper
-        assert "requires a Simpler runtime that provides pto_async_kernel_api.h" in wrapper
+        assert '#include "async_kernel_api.h"' in wrapper
+        assert '#if !__has_include("async_kernel_api.h")' in wrapper
+        assert "requires a Simpler runtime that provides async_kernel_api.h" in wrapper
         assert "static __aicore__ void pypto_register_counter_completion(" in wrapper
         assert "AsyncCtx ctx = get_async_ctx(raw_args);" in wrapper
         assert "if (!async_ctx_is_deferred(ctx))" in wrapper
@@ -1673,20 +1673,20 @@ class TestGenerateKernelWrapper:
             < wrapper.index("expected < 0 || expected > kMaxExpected")
         )
         assert wrapper.count("*ctx.completion_count = 0;") == 2
-        assert "*ctx.completion_error_code = PTO2_ERROR_ASYNC_COMPLETION_INVALID;" in wrapper
+        assert "*ctx.completion_error_code = SIMPLER_ERROR_ASYNC_COMPLETION_INVALID;" in wrapper
         assert "ctx.task_token.raw = 0;" in wrapper
         assert "__builtin_trap();" in wrapper and "trap();" in wrapper
         assert "expected < 0 || expected > kMaxExpected" in wrapper
         assert wrapper.index("expected < 0 || expected > kMaxExpected") < wrapper.index(
             "static_cast<uint32_t>(expected)"
         )
-        assert "PTO2_ERROR_ASYNC_COMPLETION_INVALID" in wrapper
+        assert "SIMPLER_ERROR_ASYNC_COMPLETION_INVALID" in wrapper
         # Registration + writeback delegates to the runtime's public helper
         # rather than restating its token fields. Its only failure is slab
         # overflow, which it records itself as ASYNC_WAIT_OVERFLOW, so the
         # adapter must not also publish REGISTRATION_FAILED.
         assert "save_expected_notification_counter(" in wrapper
-        assert "PTO2_ERROR_ASYNC_REGISTRATION_FAILED" not in wrapper
+        assert "SIMPLER_ERROR_ASYNC_REGISTRATION_FAILED" not in wrapper
         # The only automatic detector for runtime capacity drift.
         assert "static_assert(MAX_COMPLETIONS_PER_TASK == 64," in wrapper
         assert "pto2::detail::defer_flush(ctx);" in wrapper

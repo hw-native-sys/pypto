@@ -83,7 +83,7 @@ python runtime/tools/scope_stats_plot.py <work_dir>/dfx_outputs/scope_stats/scop
 cfg = RunConfig(platform="a2a3sim", ring_task_window=64, ring_heap=1 << 20)
 ```
 
-每一项都接受一个标量（广播到全部四个 scope-depth 环）或恰好 4 个 int 的列表，分别设定环 0..3，其中 `0` 表示该环保持默认。默认值 `None` 表示不设该字段，运行时回落到它的环境变量（`PTO2_RING_TASK_WINDOW`、`PTO2_RING_HEAP`）或编译期默认值。
+每一项都接受一个标量（广播到全部四个 scope-depth 环）或恰好 4 个 int 的列表，分别设定环 0..3，其中 `0` 表示该环保持默认。默认值 `None` 表示不设该字段，运行时回落到它的编译期默认值；旧的进程级 `PTO2_RING_*` 环境变量已经退役，不再被读取。
 
 `ring_heap` 以字节计而 `ring_task_window` 以槽计，是最容易犯的错：`ring_heap=64` 不是 64 个缓冲区，而是 64 字节，会因为不足 1024 而被拒。
 

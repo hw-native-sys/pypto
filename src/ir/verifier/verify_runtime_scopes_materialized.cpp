@@ -36,7 +36,7 @@ class RuntimeScopesMaterializedPropertyVerifierImpl : public PropertyVerifier {
       diagnostics.emplace_back(DiagnosticSeverity::Error, "RuntimeScopesMaterialized", 0,
                                "Orchestration function '" + func->name_ +
                                    "' still has auto_scope=True. Run MaterializeRuntimeScopes before "
-                                   "orchestration codegen — codegen emits PTO2_SCOPE only from "
+                                   "orchestration codegen — codegen emits SIMPLER_SCOPE only from "
                                    "RuntimeScopeStmt nodes, not from implicit for/if wrapping.",
                                func->span_);
     }

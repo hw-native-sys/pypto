@@ -719,10 +719,10 @@ def tfree_to_aiv(
 
 
 def task_invalid(*, span: Span | None = None) -> Call:
-    """Construct an invalid ``PTO2TaskId`` sentinel.
+    """Construct an invalid ``TaskId`` sentinel.
 
     Returns a ``Call`` of result type ``Scalar[TASK_ID]`` that codegen lowers
-    to ``PTO2TaskId::invalid()`` — the "no producer" sentinel that downstream
+    to ``TaskId::invalid()`` — the "no producer" sentinel that downstream
     ``set_dependencies`` calls skip via an ``is_valid()`` guard. Surfaced in
     the DSL as the Python literal ``None`` in TaskId-typed positions.
 

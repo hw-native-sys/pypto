@@ -2274,7 +2274,7 @@ class ScopeKind(enum.Enum):
     """SPMD dispatch scope (core_num/sync_start on ScopeStmt)."""
 
     Runtime = 5
-    """Runtime orchestration scope (PTO2_SCOPE wrapper, manual on/off)."""
+    """Runtime orchestration scope (SIMPLER_SCOPE wrapper, manual on/off)."""
 
     CommDomain = 6
     """Comm-domain scope (with orch.allocate_domain(...) wrapper for host_orch
@@ -2468,11 +2468,11 @@ class SplitAivScopeStmt(ScopeStmt):
     ) -> None: ...
 
 class RuntimeScopeStmt(ScopeStmt):
-    """Runtime orchestration scope: a PTO2_SCOPE wrapper at codegen.
+    """Runtime orchestration scope: a SIMPLER_SCOPE wrapper at codegen.
 
     The ``manual`` flag picks between two emission modes:
-      - ``manual=False`` → ``PTO2_SCOPE() { ... }`` (auto-dep via TensorMap)
-      - ``manual=True``  → ``PTO2_SCOPE(PTO2ScopeMode::MANUAL) { ... }``
+      - ``manual=False`` → ``SIMPLER_SCOPE() { ... }`` (auto-dep via TensorMap)
+      - ``manual=True``  → ``SIMPLER_SCOPE(ScopeMode::MANUAL) { ... }``
         (no auto-dep; compiler emits explicit ``add_dep`` from SSA data flow
         plus user-supplied ``deps=[...]`` on each kernel call)
     """

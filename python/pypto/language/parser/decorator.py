@@ -926,7 +926,7 @@ def function(
         role: Function role (e.g. pl.Role.SubWorker)
         attrs: Function-level attributes dict (e.g. {"split": pl.SplitMode.UP_DOWN})
         auto_scope: If True (default), the compiler inserts AUTO runtime scopes
-                   (PTO2_SCOPE) around the function body and each for/if body.
+                   (SIMPLER_SCOPE) around the function body and each for/if body.
                    Set False to place scopes by hand with ``with pl.scope()``
                    (only meaningful for Orchestration functions).
         strict_ssa: If True, enforce SSA (single assignment per variable).

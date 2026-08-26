@@ -100,7 +100,7 @@ void BindPass(nb::module_& m) {
              "device communication context is an explicit CommCtxType SSA value traceable to a parameter")
       .value("RuntimeScopesMaterialized", IRProperty::RuntimeScopesMaterialized,
              "Orchestration functions carry explicit RuntimeScopeStmt nodes for the function body and "
-             "for/if bodies; codegen no longer emits implicit PTO2_SCOPE() wrappers")
+             "for/if bodies; codegen no longer emits implicit SIMPLER_SCOPE() wrappers")
       .value("AssignTypeSymmetry", IRProperty::AssignTypeSymmetry,
              "Every AssignStmt has structural_equal(var->GetType(), value->GetType()) — covers dtype, "
              "shape, tile_view/tensor_view, and TileType memory_space (memref excluded as an allocation "
@@ -610,7 +610,7 @@ void BindPass(nb::module_& m) {
              "Materialize implicit orchestration scopes as explicit RuntimeScopeStmt nodes.\n\n"
              "For every Orchestration function, inserts AUTO RuntimeScopeStmt (manual_=false)\n"
              "wrapping the function body and each ForStmt / IfStmt branch body (suppressed\n"
-             "inside a manual scope). Codegen then emits PTO2_SCOPE only from RuntimeScopeStmt\n"
+             "inside a manual scope). Codegen then emits SIMPLER_SCOPE only from RuntimeScopeStmt\n"
              "nodes, 1:1 with the IR. Runs last in the pipeline, after the final Simplify.");
   passes.def("classify_iter_arg_carry", &pass::ClassifyIterArgCarry,
              "Classify ForStmt iter_arg carries and size TaskId array carries.\n\n"

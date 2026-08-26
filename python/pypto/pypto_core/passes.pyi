@@ -756,7 +756,7 @@ def materialize_runtime_scopes() -> Pass:
     ``RuntimeScopeStmt`` (``manual=False``) nodes wrapping the function body and
     each ``ForStmt`` / ``IfStmt`` branch body, while skipping insertion inside a
     manual ``RuntimeScopeStmt`` (the runtime forbids AUTO nested in MANUAL).
-    Codegen then emits ``PTO2_SCOPE`` only from ``RuntimeScopeStmt`` nodes, 1:1
+    Codegen then emits ``SIMPLER_SCOPE`` only from ``RuntimeScopeStmt`` nodes, 1:1
     with the IR.
 
     Runs last in the pipeline (after the final :func:`simplify`) so no other

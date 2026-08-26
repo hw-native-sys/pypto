@@ -62,7 +62,7 @@ All repositories live under [github.com/hw-native-sys](https://github.com/hw-nat
 **Two codegen paths from pypto:**
 
 - **InCore functions** (tile-level compute) → `.pto` → PTOAS → pto-isa → AICore binaries
-- **Orchestration functions** (task scheduling) → C++ using PTO2 runtime API → compiled for AICPU
+- **Orchestration functions** (task scheduling) → C++ using simpler runtime API → compiled for AICPU
 
 ## Component Details
 
@@ -75,7 +75,7 @@ The core compiler. Takes Python tensor programs and compiles them into device-ex
 **Outputs:**
 
 - `.pto` files — PTO-ISA MLIR dialect, one per InCore kernel function (runs on AICore)
-- Orchestration C++ — task scheduling code using PTO2 runtime API (runs on AICPU)
+- Orchestration C++ — task scheduling code using simpler runtime API (runs on AICPU)
 
 **Internal pipeline:**
 
@@ -156,7 +156,7 @@ Executes compiled programs on Ascend hardware. Manages the three-program executi
 **Inputs:**
 
 - Compiled AICore kernel binaries (InCore path: pypto → PTOAS → pto-isa → device compiler)
-- Compiled AICPU orchestration binary (Orchestration path: pypto → C++ with PTO2 runtime API → device compiler)
+- Compiled AICPU orchestration binary (Orchestration path: pypto → C++ with simpler runtime API → device compiler)
 
 **Responsibilities:**
 
@@ -164,7 +164,7 @@ Executes compiled programs on Ascend hardware. Manages the three-program executi
 - Coordinate Host ↔ AICPU ↔ AICore execution
 - Handle device memory, synchronization, and handshake protocols
 
-**Interface with pypto:** The orchestration C++ code that pypto generates uses the PTO2 runtime API (`rt_submit_task`, `make_tensor_external`, etc.), which simpler implements. The runtime API is the contract between pypto's orchestration codegen and simpler.
+**Interface with pypto:** The orchestration C++ code that pypto generates uses the simpler runtime API (`rt_submit_task`, `make_tensor_external`, etc.), which simpler implements. The runtime API is the contract between pypto's orchestration codegen and simpler.
 
 ## Interface Summary
 
@@ -175,7 +175,7 @@ pypto-lib ──[ Python API: pypto.language / pypto.ir ]──► pypto
      pypto ──[ .pto files: PTO-ISA MLIR dialect     ]──► PTOAS
    pto-isa ──[ C++ #include: tile instruction hdrs  ]──► PTOAS
    pto-isa ──[ C++ #include: ISA headers            ]──► simpler
-     pypto ──[ C++ API: PTO2 runtime API calls      ]──► simpler
+     pypto ──[ C++ API: simpler runtime API calls      ]──► simpler
 ```
 
 | Border | Format | Who provides | Who consumes |
@@ -194,6 +194,6 @@ When a change spans multiple repos, identify which interfaces are affected:
 | ------ | -------------- | ------------------ |
 | New tile instruction | pto-isa + PTOAS + pypto | ISA headers, PTO MLIR dialect, pypto op/codegen |
 | New tensor primitive | pypto-lib + pypto | Python DSL (if new ops needed) |
-| New runtime feature | simpler + pypto | PTO2 runtime API, orchestration codegen |
+| New runtime feature | simpler + pypto | simpler runtime API, orchestration codegen |
 | New PTO MLIR op | PTOAS + pypto | PTO MLIR dialect, pypto PTO codegen |
 | New model example | pypto-lib only | None (consumer of existing APIs) |

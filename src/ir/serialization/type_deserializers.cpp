@@ -897,7 +897,7 @@ static IRNodePtr DeserializeSplitAivScopeStmt(const msgpack::object& fields_obj,
                                              DeserializeScopeAttrs(fields_obj, ctx, zone));
 }
 
-// Deserialize RuntimeScopeStmt (pl.manual_scope MANUAL wrapper / AUTO PTO2_SCOPE
+// Deserialize RuntimeScopeStmt (pl.manual_scope MANUAL wrapper / AUTO SIMPLER_SCOPE
 // wrapper added by MaterializeRuntimeScopes). Submit nodes live inside this, so
 // serializing a manual_scope program requires it.
 static IRNodePtr DeserializeRuntimeScopeStmt(const msgpack::object& fields_obj, msgpack::zone& zone,

@@ -244,7 +244,7 @@ class RunConfig:
             ``4`` = MEMORY — see ``runtime/docs/dfx/pmu-profiling.md``).
             Output: ``<work_dir>/dfx_outputs/pmu.csv``. Mirrors
             ``--enable-pmu N``.
-        enable_dep_gen: Capture PTO2 dependency edges into
+        enable_dep_gen: Capture simpler dependency edges into
             ``<work_dir>/dfx_outputs/deps.json``. Render to HTML on demand via
             ``python -m simpler_setup.tools.deps_viewer <deps.json> --format
             html`` (the CLI defaults to text output). Mirrors
@@ -284,20 +284,18 @@ class RunConfig:
             rings 0..3 independently; each entry must be a power of two ``>= 4`` (a
             ``0`` list-entry leaves that ring at its default). ``None`` (default)
             leaves the field unset so the runtime falls back to its
-            ``PTO2_RING_TASK_WINDOW`` env var or compile-time default.
+            compile-time default.
         ring_heap: Optional per-invocation override of the per-ring output-heap
             size in **bytes**. Forwarded to ``CallConfig.runtime_env.ring_heap``.
             A scalar or a list/tuple of 4 ints (per ring 0..3); each entry must
             be a power of two ``>= 1024`` (a ``0`` list-entry leaves that ring at its
-            default). ``None`` defers to the runtime's ``PTO2_RING_HEAP`` env var
-            or compile-time default.
+            default). ``None`` defers to the runtime's compile-time default.
         ring_dep_pool: Optional per-invocation override of the per-ring
             dependency-edge pool capacity. Forwarded to
             ``CallConfig.runtime_env.ring_dep_pool``. A scalar or a list/tuple
             of 4 ints (per ring 0..3); each entry must be in ``[4, INT32_MAX]`` (a
             ``0`` list-entry leaves that ring at its default). ``None`` defers
-            to the runtime's
-            ``PTO2_RING_DEP_POOL`` env var or compile-time default.
+            to the runtime's compile-time default.
         distributed_config: Optional L3 distributed-execution config, consumed
             only on the ``@pl.jit`` path. When set, it is forwarded to
             ``ir.compile()`` (via :func:`~pypto.jit.decorator._run_config_compile_kwargs`)
@@ -961,7 +959,7 @@ def _apply_ring_overrides(call_config: Any, run_config: "RunConfig") -> None:
 
     Each ``runtime_env`` field is left at its ``0`` default when the matching
     ``RunConfig`` override is ``None``, so the runtime applies its own
-    ``PTO2_RING_*`` env var / compile-time fallback. Shared by the L2
+    compile-time default. Shared by the L2
     (:func:`_build_call_config`) and L3
     (:func:`pypto.runtime.distributed_runner._make_call_config`) dispatch paths
     so both transcribe ring sizing identically.
@@ -1017,7 +1015,7 @@ def _build_call_config(
     cfg.enable_scope_stats = run_config.enable_scope_stats
 
     # Per-task ring sizing: leave the runtime_env field at its 0 default when
-    # unset so the runtime applies its own PTO2_RING_* / compile-time fallback.
+    # unset so the runtime applies its own compile-time default.
     _apply_ring_overrides(cfg, run_config)
 
     if dfx_dir is not None:

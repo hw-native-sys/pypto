@@ -42,11 +42,11 @@ AICORE inline __gm__ T *CommRemotePtr(__gm__ CommContext *ctx, __gm__ T *local_p
 }  // namespace
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
-  __gm__ ChipTensor *input_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
-  __gm__ ChipTensor *target_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
-  __gm__ ChipTensor *signal_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[2]);
-  __gm__ ChipTensor *send_counts_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[3]);
-  __gm__ ChipTensor *recv_counts_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[4]);
+  __gm__ TaskTensor *input_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+  __gm__ TaskTensor *target_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
+  __gm__ TaskTensor *signal_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[2]);
+  __gm__ TaskTensor *send_counts_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[3]);
+  __gm__ TaskTensor *recv_counts_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[4]);
   int nranks = static_cast<int>(args[5]);
   __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[6]);
 

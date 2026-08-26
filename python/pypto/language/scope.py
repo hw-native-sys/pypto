@@ -14,11 +14,11 @@ from typing import Any
 
 
 class ScopeMode(Enum):
-    """Dependency-tracking mode of a runtime scope (``PTO2_SCOPE``).
+    """Dependency-tracking mode of a runtime scope (``SIMPLER_SCOPE``).
 
-    - ``AUTO``: OverlapMap auto-dependency tracking is on (``PTO2_SCOPE()``).
+    - ``AUTO``: OverlapMap auto-dependency tracking is on (``SIMPLER_SCOPE()``).
     - ``MANUAL``: auto tracking is off; the user declares every edge via
-      ``pl.submit(..., deps=[...])`` (``PTO2_SCOPE(PTO2ScopeMode::MANUAL)``).
+      ``pl.submit(..., deps=[...])`` (``SIMPLER_SCOPE(ScopeMode::MANUAL)``).
     """
 
     AUTO = 0
@@ -26,7 +26,7 @@ class ScopeMode(Enum):
 
 
 class scope:
-    """Context manager marking a runtime scope (``PTO2_SCOPE``) region.
+    """Context manager marking a runtime scope (``SIMPLER_SCOPE``) region.
 
     A runtime scope is a resource-management + dependency-tracking boundary in
     the simpler runtime: it bounds OverlapMap auto-dependency tracking and gives

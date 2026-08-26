@@ -3931,7 +3931,7 @@ class ASTParser:
         """Parse ``with pl.scope(mode=...):`` into a Runtime scope.
 
         ``mode`` defaults to ``ScopeMode.AUTO``. AUTO scopes are the explicit IR
-        form of the orchestration ``PTO2_SCOPE()`` block; MANUAL scopes turn off
+        form of the orchestration ``SIMPLER_SCOPE()`` block; MANUAL scopes turn off
         auto dependency tracking (``pl.scope(mode=pl.ScopeMode.MANUAL)`` — the
         former ``pl.manual_scope()``).
         """
@@ -5878,10 +5878,10 @@ class ASTParser:
             return ir.ConstFloat(value, DataType.DEFAULT_CONST_FLOAT, span)
         elif value is None:
             # ``None`` is the "no producer yet" TaskId sentinel — the Pythonic
-            # spelling of an invalid PTO2TaskId. Used to seed a TaskId loop
+            # spelling of an invalid TaskId. Used to seed a TaskId loop
             # carry (``prev_tid = None``) or as a ``deps=[None]`` entry.
             # Lowers to ``system.task_invalid`` -> Scalar[TASK_ID]; codegen
-            # emits ``PTO2TaskId::invalid()`` and downstream ``set_dependencies``
+            # emits ``TaskId::invalid()`` and downstream ``set_dependencies``
             # skips it via an ``is_valid()`` guard.
             return ir.create_op_call("system.task_invalid", [], {}, span)
         else:

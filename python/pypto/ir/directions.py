@@ -11,7 +11,7 @@
 
 These helpers exist for tests, examples and hand-written IR code that need to
 attach :class:`ir.ArgDirection` values to a call without importing the enum
-explicitly. They mirror the runtime ``add_input/add_output/add_output(ChipTensor)
+explicitly. They mirror the runtime ``add_input/add_output/add_output(TaskTensor)
 /add_inout/add_no_dep/add_scalar`` API on the call site.
 
 The user-facing DSL (``pypto.language``) keeps using :class:`pl.Out` and

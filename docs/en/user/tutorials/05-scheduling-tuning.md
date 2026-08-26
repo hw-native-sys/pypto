@@ -101,8 +101,8 @@ cfg = RunConfig(platform="a2a3sim", ring_task_window=64, ring_heap=1 << 20)
 
 Each accepts a scalar (broadcast to all four scope-depth rings) or a list of exactly 4 ints
 sizing rings 0..3 independently, where a `0` entry leaves that ring at its default. `None`
-— the default — leaves the field unset so the runtime falls back to its env var
-(`PTO2_RING_TASK_WINDOW`, `PTO2_RING_HEAP`) or the compile-time default.
+— the default — leaves the field unset so the runtime falls back to its compile-time
+default. The old process-wide `PTO2_RING_*` env vars are retired and no longer read.
 
 `ring_heap` being in bytes while `ring_task_window` is in slots is the easy mistake: a
 `ring_heap=64` is not 64 buffers, it is 64 bytes, and it is rejected for being under 1024.

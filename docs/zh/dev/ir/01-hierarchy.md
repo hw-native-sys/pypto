@@ -203,7 +203,7 @@ for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 | **HierarchyScopeStmt** | `name_hint_`, `body_`, `level_`, `role_`（可选） | 给定 Level/Role 的流水线阶段区域 |
 | **SpmdScopeStmt** | `name_hint_`, `body_`, `core_num_`（整型 `Expr`）, `sync_start_` | SPMD 启动区域；提取为 `Function(Spmd)` |
 | **SplitAivScopeStmt** | `name_hint_`, `body_`, `split_`（`SplitMode`，永不为 `None`）, `count_`（= 2） | 显式 AIV 切分区域（`pl.split_aiv`）；可嵌套；由 `LowerAutoVectorSplit`（pass 20）消费并擦除 |
-| **RuntimeScopeStmt** | `name_hint_`, `body_`, `manual_` | Orchestrator 运行时区域（`PTO2_SCOPE`）；`manual_=true` 选择手工依赖模式 |
+| **RuntimeScopeStmt** | `name_hint_`, `body_`, `manual_` | Orchestrator 运行时区域（`SIMPLER_SCOPE`）；`manual_=true` 选择手工依赖模式 |
 | **YieldStmt** | `values_` | 在循环迭代中产出值 |
 | **EvalStmt** | `expr_` | 为副作用求值表达式 |
 | **SeqStmts** | `stmts_` | 通用语句序列 |
@@ -354,8 +354,8 @@ runtime = ir.RuntimeScopeStmt(manual=True, name_hint="", body=body, span=span)
     永不落到 IR 的普通 `Call` 上，由 ManualDepsOnSubmitOnly verifier 保证）——
     然后填充一个定长栈数组，并对每个 task 发出一次
     `params.set_dependencies(arr, count)` 调用。
-- `RuntimeScopeStmt` 在 `manual=false` 时下沉为 `PTO2_SCOPE()`，在
-  `manual=true` 时下沉为 `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`。它由
+- `RuntimeScopeStmt` 在 `manual=false` 时下沉为 `SIMPLER_SCOPE()`，在
+  `manual=true` 时下沉为 `SIMPLER_SCOPE(ScopeMode::MANUAL)`。它由
   `pl.manual_scope()`（manual 模式）和 orchestration codegen 路径
   （auto 模式）创建；**不会**被独立外提为函数。
 

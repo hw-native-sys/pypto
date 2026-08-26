@@ -142,6 +142,6 @@ calls (sub-microsecond on modern hardware).
 - **Runtime DFX** (`RunConfig.enable_chip_swimlane`, `enable_dump_args`,
   `enable_pmu`, `enable_dep_gen`) drives Simpler's per-task diagnostic
   artefacts — swimlane records, tensor I/O dumps, AICore PMU CSVs, and
-  PTO2 dep_gen edges. The four flags are independent, share
+  simpler dep_gen edges. The four flags are independent, share
   `<work_dir>/dfx_outputs/` as their output root, and are orthogonal to
   compile profiling. See [03-runtime-dfx.md](03-runtime-dfx.md).

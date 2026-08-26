@@ -1,13 +1,13 @@
 # MaterializeRuntimeScopes Pass
 
 向 Orchestration 函数中插入显式的 AUTO `RuntimeScopeStmt` 节点，使 PTO
-orchestration codegen 直接从 IR 中 1:1 地 emit `PTO2_SCOPE()`，而不再依据
+orchestration codegen 直接从 IR 中 1:1 地 emit `SIMPLER_SCOPE()`，而不再依据
 `for` / `if` 结构推导 scope —— 除非函数用 `@pl.function(auto_scope=False)`
 选择退出，此时由用户手工摆放每个 scope。
 
 ## 概述
 
-simpler 运行时把 orchestration 例程的若干区域包进 `PTO2_SCOPE()` 块（通过
+simpler 运行时把 orchestration 例程的若干区域包进 `SIMPLER_SCOPE()` 块（通过
 OverlapMap 做自动依赖追踪），并提供一个隐式顶层 scope。因此 scope 在编译器侧
 是一种**调优 / 放置**手段，从不是正确性要求 —— 一个函数可以一个编译器 scope
 都没有。
@@ -16,7 +16,7 @@ OverlapMap 做自动依赖追踪），并提供一个隐式顶层 scope。因此
 `FunctionType::Orchestration` 函数，本 pass 插入 AUTO `RuntimeScopeStmt`
 （`manual_ = false`），包裹整个函数体以及每个 `ForStmt` 体和 `IfStmt` 的
 then/else 体（在 manual scope 内部抑制，因为运行时禁止 AUTO 嵌套在 MANUAL）。
-此后 codegen **只**从 `RuntimeScopeStmt` 节点 emit `PTO2_SCOPE`，与 IR 保持
+此后 codegen **只**从 `RuntimeScopeStmt` 节点 emit `SIMPLER_SCOPE`，与 IR 保持
 1:1（见 [orchestration codegen](../codegen/01-orchestration_codegen.md)）。
 
 当 `AutoDeriveTaskDependencies(analyze_auto_scopes=True)` 已经证明默认模式下的
@@ -114,7 +114,7 @@ def orch(self, a, out):
 包裹、manual scope 抑制、幂等、opt-out no-op / scope 保留、默认模式拒绝 AUTO）
 以及 `tests/ut/language/parser/test_scope_parsing.py`（`pl.scope()` 解析 /
 round-trip / 模式 / 嵌套 / opt-out 规则）。完整 orchestration codegen 测试套件
-（`tests/ut/codegen/test_orchestration_codegen.py`）验证 emit 的 `PTO2_SCOPE`
+（`tests/ut/codegen/test_orchestration_codegen.py`）验证 emit 的 `SIMPLER_SCOPE`
 输出与此前由 codegen 驱动的行为逐字节一致。
 
 ## Pass 属性

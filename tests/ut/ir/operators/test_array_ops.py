@@ -65,7 +65,7 @@ def test_array_type_accepts_all_integer_dtypes():
 def test_array_type_accepts_task_id_dtype():
     """TASK_ID is admitted as an opaque 64-bit scalar — used as the fence
     companion in manual_scope lowering. Same on-core C-stack layout as the
-    integer dtypes (PTO2TaskId is a 64-bit POD).
+    integer dtypes (TaskId is a 64-bit POD).
     """
     t = ir.ArrayType(DataType.TASK_ID, 4)
     assert t.dtype == DataType.TASK_ID

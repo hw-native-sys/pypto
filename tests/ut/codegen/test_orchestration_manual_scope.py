@@ -108,7 +108,7 @@ class TestManualScopeCodegen:
         code = _generate_orch_code(transformed)
 
         assert code.count("params_t0.add_scalar(signal_ctx);") == 1, code
-        assert "const ChipTensor& y = task_0_outs.get_ref(0);" in code, code
+        assert "const TaskTensor& y = task_0_outs.get_ref(0);" in code, code
         assert "params_t1.add_input(y);" in code, code
         assert "signal_ctx.get_ref" not in code, code
 
@@ -137,10 +137,10 @@ class TestManualScopeCodegen:
         transformed = pm.run_passes(Prog)
         code = _generate_orch_code(transformed)
 
-        assert "PTO2_SCOPE(PTO2ScopeMode::MANUAL)" in code
+        assert "SIMPLER_SCOPE(ScopeMode::MANUAL)" in code
         # Every kernel submit inside a manual scope captures the submit's
         # outputs handle so downstream code can call ``.task_id()`` on it.
-        # We no longer pre-emit a ``PTO2TaskId task_<n>`` variable — the
+        # We no longer pre-emit a ``TaskId task_<n>`` variable — the
         # ``pl.submit`` producer-TaskId tuple element binds it on demand.
         assert "TaskOutputTensors task_0_outs = rt_submit_aiv_task(" in code
         assert "TaskOutputTensors task_1_outs = rt_submit_aiv_task(" in code
@@ -181,14 +181,14 @@ class TestManualScopeCodegen:
         code = _generate_orch_code(transformed)
 
         # Each ``pl.submit`` producer TaskId binds to ``task_<n>_outs.task_id()``.
-        assert "PTO2TaskId a_tid = task_0_outs.task_id();" in code
-        assert "PTO2TaskId b_tid = task_1_outs.task_id();" in code
+        assert "TaskId a_tid = task_0_outs.task_id();" in code
+        assert "TaskId b_tid = task_1_outs.task_id();" in code
         # The consumer's deps are packed into a fixed-size stack array and
         # attached with a single ``set_dependencies(arr, count)`` call. Both
         # entries are unconditionally filled (plain TaskId bindings, not
         # iter-arg carries, so no is_valid() guard).
         assert "CoreTaskArgs params_t2;" in code
-        assert "PTO2TaskId params_t2_deps[2];" in code
+        assert "TaskId params_t2_deps[2];" in code
         assert "params_t2_deps[params_t2_deps_count++] = a_tid;" in code
         assert "params_t2_deps[params_t2_deps_count++] = b_tid;" in code
         assert "params_t2.set_dependencies(params_t2_deps, params_t2_deps_count);" in code
@@ -225,8 +225,8 @@ class TestManualScopeCodegen:
         code = _generate_orch_code(transformed)
 
         assert "rt_submit_dummy_task(params_phase_fence_barrier_0)" in code, code
-        assert f"PTO2TaskId params_phase_fence_barrier_0_deps[{N_BRANCHES}];" in code, code
-        assert re.search(r"PTO2TaskId params_t\d+_deps\[1\];", code), code
+        assert f"TaskId params_phase_fence_barrier_0_deps[{N_BRANCHES}];" in code, code
+        assert re.search(r"TaskId params_t\d+_deps\[1\];", code), code
         assert re.search(
             r"if \(barrier.*\.is_valid\(\)\) (params_t\d+)_deps\[\1_deps_count\+\+\] = barrier",
             code,
@@ -259,7 +259,7 @@ class TestManualScopeCodegen:
         code = _generate_orch_code(transformed)
 
         assert "rt_submit_dummy_task(params_phase_fence_barrier_0)" in code, code
-        assert "PTO2TaskId params_phase_fence_barrier_0_deps[1];" in code, code
+        assert "TaskId params_phase_fence_barrier_0_deps[1];" in code, code
         # ``tid`` is a fresh direct-producer TaskId (issue #1966): its dep-array
         # insert is emitted WITHOUT the redundant is_valid() guard.
         assert re.search(
@@ -268,7 +268,7 @@ class TestManualScopeCodegen:
             code,
         ), code
         assert "if (tid.is_valid())" not in code, code
-        assert re.search(r"PTO2TaskId params_t\d+_deps\[1\];", code), code
+        assert re.search(r"TaskId params_t\d+_deps\[1\];", code), code
 
     def test_user_written_empty_task_dummy_submits_unconditionally(self):
         # A user-written ``task_dummy(deps=[])`` has no producers but must still
@@ -300,11 +300,11 @@ class TestManualScopeCodegen:
             "TaskOutputTensors phase_fence_barrier_0_outs = "
             "rt_submit_dummy_task(params_phase_fence_barrier_0);" in code
         ), code
-        assert "PTO2TaskId barrier = phase_fence_barrier_0_outs.task_id();" in code, code
+        assert "TaskId barrier = phase_fence_barrier_0_outs.task_id();" in code, code
         # No runtime deps-count guard for the empty-deps path — that guard is
         # what statically elided the barrier before the fix.
         assert "if (params_phase_fence_barrier_0_deps_count > 0)" not in code, code
-        assert "PTO2TaskId barrier = PTO2TaskId::invalid();" not in code, code
+        assert "TaskId barrier = TaskId::invalid();" not in code, code
         # The consumer still lists the (now valid) barrier in its fanin.
         assert re.search(
             r"if \(barrier.*\.is_valid\(\)\) (params_t\d+)_deps\[\1_deps_count\+\+\] = barrier",
@@ -349,7 +349,7 @@ class TestManualScopeCodegen:
         transformed = pm.run_passes(Prog)
         code = _generate_orch_code(transformed)
 
-        assert "PTO2TaskId params_t2_deps[1];" in code
+        assert "TaskId params_t2_deps[1];" in code
         assert "params_t2_deps[params_t2_deps_count++] = user_tid;" in code
         assert "task_0_outs.task_id()" not in code
         assert code.count("params_t2.set_dependencies(") == 1
@@ -373,7 +373,7 @@ class TestManualScopeCodegen:
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
         transformed = pm.run_passes(Prog)
         code = _generate_orch_code(transformed)
-        assert "PTO2ScopeMode::MANUAL" not in code
+        assert "ScopeMode::MANUAL" not in code
         assert "TaskOutputTensors task_0_outs" not in code
         assert "set_dependencies(" not in code
 
@@ -422,10 +422,10 @@ class TestManualScopeCodegen:
         # The outlined ``stage1`` Call captures the TaskOutputTensors handle
         # and binds ``t1`` to the producer TaskId.
         assert "TaskOutputTensors task_0_outs = rt_submit_aiv_task(" in code, code
-        assert "PTO2TaskId t1 = task_0_outs.task_id();" in code, code
+        assert "TaskId t1 = task_0_outs.task_id();" in code, code
         # ``stage2`` carries the explicit dep on ``t1`` via the stack-array
         # + set_dependencies path.
-        assert "PTO2TaskId params_t1_deps[1];" in code, code
+        assert "TaskId params_t1_deps[1];" in code, code
         # ``t1`` is a fresh direct-producer TaskId (issue #1966): unguarded insert.
         assert "params_t1_deps[params_t1_deps_count++] = t1;" in code, code
         assert "if (t1.is_valid())" not in code, code
@@ -433,7 +433,7 @@ class TestManualScopeCodegen:
         # The parser-emitted ``t1 = system.task_invalid()`` placeholder is
         # dropped by the outliner once the real TupleGetItem binding is
         # generated.
-        assert "PTO2TaskId t1 = PTO2TaskId::invalid();" not in code, code
+        assert "TaskId t1 = TaskId::invalid();" not in code, code
 
     def test_inline_pl_at_task_id_return_feeds_downstream_deps(self):
         """Regression for issue #1456: a ``TaskId`` produced inside an inline
@@ -487,7 +487,7 @@ class TestManualScopeCodegen:
         The runtime's ``Arg::set_dependencies`` is orthogonal to OverlapMap
         auto-tracking (final fanin = auto ∪ explicit), so the codegen emits
         the task-output capture and the deps stack array without requiring a
-        ``with pl.manual_scope():`` wrapper. The implicit ``PTO2_SCOPE()``
+        ``with pl.manual_scope():`` wrapper. The implicit ``SIMPLER_SCOPE()``
         (auto OverlapMap) stays on.
         """
         backend.reset_for_testing()
@@ -514,14 +514,14 @@ class TestManualScopeCodegen:
         code = _generate_orch_code(transformed)
 
         # Stays in auto scope — no MANUAL wrapper.
-        assert "PTO2ScopeMode::MANUAL" not in code, code
+        assert "ScopeMode::MANUAL" not in code, code
         # Both submits capture their TaskOutputTensors handle for downstream
         # ``.task_id()``.
         assert "TaskOutputTensors task_0_outs = rt_submit_aiv_task(" in code, code
-        assert "PTO2TaskId a_tid = task_0_outs.task_id();" in code, code
+        assert "TaskId a_tid = task_0_outs.task_id();" in code, code
         # k2's explicit dep on a_tid is wired through a stack deps array +
         # set_dependencies, exactly like in manual scope.
-        assert "PTO2TaskId params_t1_deps[1];" in code, code
+        assert "TaskId params_t1_deps[1];" in code, code
         # ``a_tid`` is a fresh direct-producer TaskId (issue #1966): unguarded insert.
         assert "params_t1_deps[params_t1_deps_count++] = a_tid;" in code, code
         assert "if (a_tid.is_valid())" not in code, code
@@ -532,7 +532,7 @@ class TestManualScopeCodegen:
     ):
         """AutoDeriveTaskDependencies may add explicit deps inside AUTO scopes.
 
-        The scope must stay AUTO (``PTO2_SCOPE()`` / OverlapMap still enabled),
+        The scope must stay AUTO (``SIMPLER_SCOPE()`` / OverlapMap still enabled),
         while compiler-derived edges use the same ``set_dependencies`` codegen
         path as user-written deps when AUTO-scope analysis is explicitly enabled.
         """
@@ -562,14 +562,14 @@ class TestManualScopeCodegen:
         transformed = _run_default_pipeline_with_auto_scope_deps(Prog)
         code = _generate_orch_code(transformed)
 
-        assert "PTO2_SCOPE(PTO2ScopeMode::MANUAL)" not in code, code
-        assert "PTO2_SCOPE() {" in code, code
+        assert "SIMPLER_SCOPE(ScopeMode::MANUAL)" not in code, code
+        assert "SIMPLER_SCOPE() {" in code, code
         producer_tid = re.search(
-            r"PTO2TaskId (\w+_tid) = PTO2TaskId::invalid\(\);[\s\S]*\1 = task_0_outs\.task_id\(\);",
+            r"TaskId (\w+_tid) = TaskId::invalid\(\);[\s\S]*\1 = task_0_outs\.task_id\(\);",
             code,
         )
         assert producer_tid, code
-        assert "PTO2TaskId params_t1_deps[1];" in code, code
+        assert "TaskId params_t1_deps[1];" in code, code
         assert (
             f"if ({producer_tid.group(1)}.is_valid()) "
             f"params_t1_deps[params_t1_deps_count++] = {producer_tid.group(1)};"
@@ -604,9 +604,9 @@ class TestManualScopeCodegen:
         transformed = pm.run_passes(Prog)
         code = _generate_orch_code(transformed)
 
-        assert "PTO2_SCOPE(PTO2ScopeMode::MANUAL)" not in code, code
-        assert "PTO2_SCOPE() {" in code, code
-        assert "PTO2TaskId producer_tid = task_0_outs.task_id();" not in code, code
+        assert "SIMPLER_SCOPE(ScopeMode::MANUAL)" not in code, code
+        assert "SIMPLER_SCOPE() {" in code, code
+        assert "TaskId producer_tid = task_0_outs.task_id();" not in code, code
         assert "params_t1.set_dependencies(" not in code, code
 
     def test_compiler_derived_deps_in_default_auto_scope_emit_set_dependencies_when_enabled(self):
@@ -636,14 +636,14 @@ class TestManualScopeCodegen:
         transformed = _run_default_pipeline_with_auto_scope_deps(Prog)
         code = _generate_orch_code(transformed)
 
-        assert code.count("PTO2_SCOPE(PTO2ScopeMode::MANUAL)") == 1, code
-        assert "PTO2_SCOPE() {" not in code, code
+        assert code.count("SIMPLER_SCOPE(ScopeMode::MANUAL)") == 1, code
+        assert "SIMPLER_SCOPE() {" not in code, code
         producer_tid = re.search(
-            r"PTO2TaskId (\w+_tid) = PTO2TaskId::invalid\(\);[\s\S]*\1 = task_0_outs\.task_id\(\);",
+            r"TaskId (\w+_tid) = TaskId::invalid\(\);[\s\S]*\1 = task_0_outs\.task_id\(\);",
             code,
         )
         assert producer_tid, code
-        assert "PTO2TaskId params_t1_deps[1];" in code, code
+        assert "TaskId params_t1_deps[1];" in code, code
         assert (
             f"if ({producer_tid.group(1)}.is_valid()) "
             f"params_t1_deps[params_t1_deps_count++] = {producer_tid.group(1)};"
@@ -678,7 +678,7 @@ class TestManualScopeCodegen:
         transformed = pm.run_passes(Prog)
         code = _generate_orch_code(transformed)
 
-        assert "PTO2_SCOPE(PTO2ScopeMode::MANUAL)" not in code, code
+        assert "SIMPLER_SCOPE(ScopeMode::MANUAL)" not in code, code
         assert "TaskOutputTensors task_0_outs = rt_submit_aiv_task(" not in code, code
         assert "set_dependencies(" not in code, code
 
@@ -709,11 +709,11 @@ class TestManualScopeCodegen:
         transformed = _run_default_pipeline_with_auto_scope_deps(Prog)
         code = _generate_orch_code(transformed)
 
-        assert code.count("PTO2_SCOPE(PTO2ScopeMode::MANUAL)") == 1, code
-        assert "PTO2_SCOPE() {" not in code, code
+        assert code.count("SIMPLER_SCOPE(ScopeMode::MANUAL)") == 1, code
+        assert "SIMPLER_SCOPE() {" not in code, code
         assert "TaskOutputTensors task_0_outs = rt_submit_aiv_task(" in code, code
         producer_tid = re.search(
-            r"PTO2TaskId (\w+_tid) = PTO2TaskId::invalid\(\);[\s\S]*\1 = task_0_outs\.task_id\(\);",
+            r"TaskId (\w+_tid) = TaskId::invalid\(\);[\s\S]*\1 = task_0_outs\.task_id\(\);",
             code,
         )
         assert producer_tid, code
@@ -757,10 +757,10 @@ class TestManualScopeCodegen:
         transformed = pm.run_passes(Prog)
         code = _generate_orch_code(transformed)
 
-        assert "PTO2ScopeMode::MANUAL" not in code, code
-        assert re.search(r"PTO2TaskId\s+prev\s*=\s*tids\[0\];", code), code
+        assert "ScopeMode::MANUAL" not in code, code
+        assert re.search(r"TaskId\s+prev\s*=\s*tids\[0\];", code), code
         assert "tids[0] = second_tid;" in code, code
-        assert "PTO2TaskId params_t2_deps[1];" in code, code
+        assert "TaskId params_t2_deps[1];" in code, code
         assert "if (prev.is_valid()) params_t2_deps[params_t2_deps_count++] = prev;" in code, code
         assert "params_t2.set_dependencies(params_t2_deps, params_t2_deps_count);" in code, code
 
@@ -845,14 +845,14 @@ class TestManualScopeCodegen:
 
         # The manual scope remains manual; ordering comes only from the user
         # dep below, preserving cross-iteration parallelism.
-        assert "PTO2_SCOPE(PTO2ScopeMode::MANUAL)" in code, code
+        assert "SIMPLER_SCOPE(ScopeMode::MANUAL)" in code, code
         assert "for (int64_t i = 0; i < 4; i += 1)" in code, code
         assert "for (int64_t j = 0; j < 8; j += 1)" in code, code
 
         # The producer TaskId is preserved through windowed rewriting and is
         # threaded into the consumer dependency edge.
         assert "TaskOutputTensors task_0_outs = rt_submit_aiv_task(" in code, code
-        producer_tid = re.search(r"PTO2TaskId (\w+) = task_0_outs\.task_id\(\);", code)
+        producer_tid = re.search(r"TaskId (\w+) = task_0_outs\.task_id\(\);", code)
         assert producer_tid, code
         assert "TaskOutputTensors task_1_outs = rt_submit_aiv_task(" in code, code
 
@@ -937,14 +937,14 @@ class TestManualScopeCodegen:
 
         # The manual scope remains manual; ordering comes only from the user
         # dep below, preserving cross-iteration parallelism.
-        assert "PTO2_SCOPE(PTO2ScopeMode::MANUAL)" in code, code
+        assert "SIMPLER_SCOPE(ScopeMode::MANUAL)" in code, code
         assert "for (int64_t i = 0; i < 8; i += 1)" in code, code
         assert "for (int64_t j = 0; j < 4; j += 1)" in code, code
 
         # The producer TaskId is preserved through windowed rewriting and is
         # threaded into the consumer dependency edge.
         assert "TaskOutputTensors task_0_outs = rt_submit_aiv_task(" in code, code
-        producer_tid = re.search(r"PTO2TaskId (\w+) = task_0_outs\.task_id\(\);", code)
+        producer_tid = re.search(r"TaskId (\w+) = task_0_outs\.task_id\(\);", code)
         assert producer_tid, code
         assert "TaskOutputTensors task_1_outs = rt_submit_aiv_task(" in code, code
 
@@ -1036,7 +1036,7 @@ class TestManualScopeCodegen:
 
         # Identify the loop-carried array by its seed broadcast: the seed
         # TaskId is written to every slot before the loop. Deps-buffer arrays
-        # (``params_t*_deps`` / ``_submit_deps_buf``) are also ``PTO2TaskId[N]``
+        # (``params_t*_deps`` / ``_submit_deps_buf``) are also ``TaskId[N]``
         # but are never seeded this way, so this name is unambiguous.
         seed_writes = re.findall(r"(\w+)\[\d+\] = seed_tid;", code)
         assert len(seed_writes) == N, code
@@ -1045,15 +1045,15 @@ class TestManualScopeCodegen:
         # Exactly ONE backing declaration for the carry — the single-array
         # threading invariant is the heart of the fix. A regression that wiped
         # the carry would either crash or allocate a distinct array.
-        assert len(re.findall(rf"PTO2TaskId\s+{carry_arr}\[{N}\]", code)) == 1, code
+        assert len(re.findall(rf"TaskId\s+{carry_arr}\[{N}\]", code)) == 1, code
         # The manual-scope parallel loop writes each producer TaskId back into
         # its slot of the SAME backing array (the per-slot loop-carry write).
         # Scope the assertion to the MANUAL block region (everything after the
         # marker) so it cannot be satisfied by the constant-index seed writes
         # that precede the loop, and require a variable slot index (the loop
         # var) to pin the per-iteration write.
-        assert "PTO2_SCOPE(PTO2ScopeMode::MANUAL)" in code, code
-        manual_region = code[code.index("PTO2_SCOPE(PTO2ScopeMode::MANUAL)") :]
+        assert "SIMPLER_SCOPE(ScopeMode::MANUAL)" in code, code
+        manual_region = code[code.index("SIMPLER_SCOPE(ScopeMode::MANUAL)") :]
         assert re.search(rf"{carry_arr}\[[A-Za-z_]\w*\]\s*=\s*\w+;", manual_region), code
         # The carry is consumed by per-slot reads (the consumer fences on the
         # previous iteration's producers, and the parallel body reads its own
@@ -1066,7 +1066,7 @@ class TestManualScopeCodegen:
         """``pl.parallel(<dynamic>)`` carrying a manual_scope dep must error.
 
         Array-carry codegen needs a const trip count to allocate a fixed-size
-        ``PTO2TaskId[N]`` fence array. With a dynamic trip count we cannot
+        ``TaskId[N]`` fence array. With a dynamic trip count we cannot
         emit correct multi-deps lowering; silently falling back to a scalar
         ``last-dispatched`` fence would be wrong. ``ClassifyIterArgCarry`` (the
         pipeline's last pass, which sizes the array carry) surfaces this as a
@@ -1167,14 +1167,14 @@ class TestManualScopeCodegen:
         transformed = pm.run_passes(Prog)
         code = _generate_orch_code(transformed)
         assert "rt_submit_dummy_task(params_phase_fence_barrier_0)" in code, code
-        assert f"PTO2TaskId params_phase_fence_barrier_0_deps[{ABOVE_LEGACY_CAP}];" in code, code
-        assert re.search(r"PTO2TaskId params_t\d+_deps\[1\];", code), code
+        assert f"TaskId params_phase_fence_barrier_0_deps[{ABOVE_LEGACY_CAP}];" in code, code
+        assert re.search(r"TaskId params_t\d+_deps\[1\];", code), code
         assert re.search(
             r"if \(phase_fence_barrier_0_tid\.is_valid\(\)\) "
             r"(params_t\d+)_deps\[\1_deps_count\+\+\] = phase_fence_barrier_0_tid;",
             code,
         ), code
-        assert not re.search(rf"PTO2TaskId params_t\d+_deps\[{ABOVE_LEGACY_CAP}\];", code), code
+        assert not re.search(rf"TaskId params_t\d+_deps\[{ABOVE_LEGACY_CAP}\];", code), code
 
     def test_manual_scope_phase_fence_scalar_dep_does_not_emit_dummy_barrier(self):
         """Scalar TaskId deps remain on the legacy single-edge lowering path."""
@@ -1203,7 +1203,7 @@ class TestManualScopeCodegen:
         code = _generate_orch_code(transformed)
 
         assert "rt_submit_dummy_task" not in code, code
-        assert "PTO2TaskId params_t1_deps[1];" in code, code
+        assert "TaskId params_t1_deps[1];" in code, code
         assert "params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);" in code, code
 
     def test_manual_scope_phase_fence_mixed_deps_do_not_emit_dummy_barrier(self):
@@ -1260,7 +1260,7 @@ class TestManualScopeCodegen:
 
         assert "rt_submit_dummy_task" not in code, code
         # 4 user deps (tids[0..3]) + 1 user dep (seed_tid) = 5
-        assert re.search(r"PTO2TaskId params_t\d+_deps\[5\];", code), code
+        assert re.search(r"TaskId params_t\d+_deps\[5\];", code), code
 
     def test_auto_scope_array_dep_does_not_emit_dummy_barrier(self):
         """Array deps outside manual_scope keep the existing explicit-deps lowering."""
@@ -1306,7 +1306,7 @@ class TestManualScopeCodegen:
         code = _generate_orch_code(transformed)
 
         assert "rt_submit_dummy_task" not in code, code
-        assert re.search(r"PTO2TaskId params_t\d+_deps\[4\];", code), code
+        assert re.search(r"TaskId params_t\d+_deps\[4\];", code), code
 
     def test_manual_scope_submit_task_id_dep(self):
         """The producer TaskId of a ``pl.submit(...)`` threaded into a later
@@ -1318,7 +1318,7 @@ class TestManualScopeCodegen:
 
         Expected codegen for the dep chain:
             CoreTaskArgs params_t1;
-            PTO2TaskId params_t1_deps[1];
+            TaskId params_t1_deps[1];
             uint32_t params_t1_deps_count = 0;
             params_t1_deps[params_t1_deps_count++] = <producer TaskId>;
             params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);
@@ -1380,7 +1380,7 @@ class TestManualScopeCodegen:
         code = _generate_orch_code(transformed)
 
         # The producer TaskId is attached to the consumer dependency edge.
-        producer_tid = re.search(r"PTO2TaskId (\w+) = task_0_outs\.task_id\(\);", code)
+        producer_tid = re.search(r"TaskId (\w+) = task_0_outs\.task_id\(\);", code)
         assert producer_tid, code
         # The dep edge is filled into the consumer's stack deps array and
         # attached with a single ``set_dependencies`` call.
@@ -1396,7 +1396,7 @@ class TestManualScopeCodegen:
             for step in pl.range(N):
                 out, prev_tid = pl.submit(self.kern, ..., deps=[prev_tid])
 
-        ``prev_tid`` starts as the ``None`` sentinel (``PTO2TaskId::invalid()``)
+        ``prev_tid`` starts as the ``None`` sentinel (``TaskId::invalid()``)
         and is rebound each iteration to the submit's producer TaskId. Because
         it is a loop iter_arg, the dep fill is guarded by ``is_valid()`` so the
         first iteration contributes no edge.
@@ -1440,8 +1440,8 @@ class TestManualScopeCodegen:
         transformed = pm.run_passes(Prog)
         code = _generate_orch_code(transformed)
 
-        # The ``None`` seed lowers to an invalid PTO2TaskId sentinel.
-        assert "PTO2TaskId::invalid()" in code, code
+        # The ``None`` seed lowers to an invalid TaskId sentinel.
+        assert "TaskId::invalid()" in code, code
         # The iter-arg TaskId carry is filled into the deps array under an
         # ``is_valid()`` guard (first iteration's sentinel is skipped).
         assert ".is_valid())" in code, code
@@ -1503,16 +1503,16 @@ class TestManualScopeCodegen:
         # so the assertion is not brittle to any future SSA renaming /
         # suffixing the codegen may apply to the producer TaskId emit name.
         assert "TaskOutputTensors task_0_outs = rt_submit_aiv_task(" in code, code
-        producer_tid = re.search(r"PTO2TaskId (\w+) = task_0_outs\.task_id\(\);", code)
+        producer_tid = re.search(r"TaskId (\w+) = task_0_outs\.task_id\(\);", code)
         assert producer_tid, code
         # Inner kernel runs inside a MANUAL scope.
-        assert "PTO2_SCOPE(PTO2ScopeMode::MANUAL)" in code, code
+        assert "SIMPLER_SCOPE(ScopeMode::MANUAL)" in code, code
         # The inner kernel's deps array MUST include the producer TaskId edge —
         # this is what the bug used to silently drop. Without these lines the
         # inner ``rt_submit_*_task`` would have no explicit fence on the outer
         # task and the regression would re-emerge.
         assert "CoreTaskArgs params_t1;" in code, code
-        assert "PTO2TaskId params_t1_deps[1];" in code, code
+        assert "TaskId params_t1_deps[1];" in code, code
         # ``outer_tid`` is a fresh direct-producer TaskId declared in the outer
         # C++ scope (issue #1966): its cross-scope dep insert is unguarded.
         assert f"params_t1_deps[params_t1_deps_count++] = {producer_tid.group(1)};" in code, code
@@ -1566,7 +1566,7 @@ class TestManualScopeCodegen:
         contrasting *caller-allocated* branch in the same program: ``out`` is
         passed positionally, so it aliases to ``ext_out`` and must NOT go
         through ``get_ref`` — ``TaskOutputTensors`` holds only runtime-created
-        outputs (``runtime/.../pto_types.h``), so a ``get_ref`` there would
+        outputs (``runtime/.../types.h``), so a ``get_ref`` there would
         index past it.
         """
         backend.reset_for_testing()
