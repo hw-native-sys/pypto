@@ -26,11 +26,11 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import torch
 from pypto import ir
-from pypto.ir.distributed_compiled_program import DistributedConfig
+from pypto.ir.distributed_compiled_program import DistributedCompiledProgram, DistributedConfig
 
 WORLD_SIZE = 8
 DIM = 128
@@ -133,11 +133,14 @@ def main() -> None:
 
     with tempfile.TemporaryDirectory(prefix="pypto-dispatch-latency-") as output_dir:
         program = load_rank_add_program(Path(output_dir), args.tensor_args)
-        compiled = ir.compile(
-            program,
-            platform=args.platform,
-            output_dir=output_dir,
-            distributed_config=DistributedConfig(device_ids=devices, num_sub_workers=0),
+        compiled = cast(
+            DistributedCompiledProgram,
+            ir.compile(
+                program,
+                platform=args.platform,
+                output_dir=output_dir,
+                distributed_config=DistributedConfig(device_ids=devices, num_sub_workers=0),
+            ),
         )
         submit_ms: list[float] = []
         wait_ms: list[float] = []
