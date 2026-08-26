@@ -747,17 +747,26 @@ def test_canonical_split_k_preserves_store_attrs_on_every_output_tile():
     assert all(attrs.get("test_store_marker") == 2232 for attrs in collector.attrs)
 
 
-def test_issue_2232_full_default_pipeline_allocates():
-    """After loop-level M/N tiling, both the issue reproducer and the general
-    two-axis grid reach concrete allocation in the complete Default pipeline."""
+@pytest.mark.parametrize(
+    "kernel",
+    [issue_2232_repro, canonical_split_k_mn],
+    ids=["issue-2232-wide-n", "general-mn-grid"],
+)
+def test_issue_2232_full_default_pipeline_allocates(kernel):
+    """After loop-level M/N tiling, each peeled split-K pattern reaches
+    concrete allocation in the complete Default pipeline.
+
+    Keep these as separate cases: the wide-N reproducer and general two-axis
+    grid exercise different physical accumulator windows, and a failure in one
+    must not prevent the other from reaching MemoryReuse.
+    """
     from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
 
     _backend.reset_for_testing()
     _backend.set_backend_type(BackendType.Ascend910B)
     pass_manager = PassManager.get_strategy(OptimizationStrategy.Default)
-    for kernel in (issue_2232_repro, canonical_split_k_mn):
-        result = pass_manager.run_passes(_jit_program(kernel))
-        assert result is not None
+    result = pass_manager.run_passes(_jit_program(kernel))
+    assert result is not None
 
 
 def test_predicated_full_default_pipeline_allocates():

@@ -520,6 +520,39 @@ class TopDownRetargeter {
     return AccumulatorTarget{GetDefinedMemRef(in_tile), in_tile->GetMemorySpace(), nullptr};
   }
 
+  /// True when ``var`` is an alias/in-place producer chain whose reused input
+  /// ultimately reaches ``root``. This proves accumulator semantics without
+  /// relying on the MemRefs already being coalesced: MemoryReuse may have just
+  /// packed one member of the family onto another physical window, which is the
+  /// mismatch this analysis exists to repair.
+  bool IsInplaceChainRootedAt(const VarPtr& var, const VarPtr& root) {
+    std::set<const Var*> seen;
+    return IsInplaceChainRootedAt(var, root, seen);
+  }
+
+  bool IsInplaceChainRootedAt(const VarPtr& var, const VarPtr& root, std::set<const Var*>& seen) {
+    if (var.get() == root.get()) return true;
+    if (!seen.insert(var.get()).second) return false;
+
+    auto it = defs_.find(var);
+    if (it == defs_.end() || it->second.kind != VarDef::kAssign) return false;
+    auto assign = As<AssignStmt>(it->second.assign_stmt);
+    if (!assign) return false;
+
+    if (auto alias = AsVarLike(assign->value_)) {
+      return IsInplaceChainRootedAt(alias, root, seen);
+    }
+
+    auto call = As<Call>(assign->value_);
+    if (!call || !call->op_) return false;
+    const auto& reg = OpRegistry::GetInstance();
+    if (!reg.IsRegistered(call->op_->name_)) return false;
+    auto reuse_idx = reg.GetEntry(call->op_->name_).GetOutputReusesInputArg();
+    if (!reuse_idx.has_value() || *reuse_idx >= call->args_.size()) return false;
+    auto reused = AsVarLike(call->args_[*reuse_idx]);
+    return reused && IsInplaceChainRootedAt(reused, root, seen);
+  }
+
   /// Resolve a branch-local accumulator loop seeded by a value defined outside
   /// ``branch_scope``. Both locality halves are required: the loop itself must
   /// be inside the branch and its seed must be outside it.
@@ -536,12 +569,8 @@ class TopDownRetargeter {
     if (!loop_inside_branch) return std::nullopt;
 
     auto init = AsVarLike(loop->iter_args_[it->second.return_idx]->initValue_);
-    auto result_tile = CurrentTileType(var);
     auto init_tile = init ? CurrentTileType(init) : nullptr;
-    if (!init || !result_tile || !init_tile ||
-        !SamePhysicalWindow(GetDefinedMemRef(result_tile), GetDefinedMemRef(init_tile))) {
-      return std::nullopt;
-    }
+    if (!init || !CurrentTileType(var) || !init_tile) return std::nullopt;
 
     auto init_def = defs_.find(init);
     if (init_def != defs_.end()) {
@@ -554,9 +583,8 @@ class TopDownRetargeter {
     auto body_yield = FindYieldStmt(loop->body_);
     if (!body_yield || it->second.return_idx >= body_yield->value_.size()) return std::nullopt;
     auto yielded = AsVarLike(body_yield->value_[it->second.return_idx]);
-    if (!yielded || !SamePhysicalWindow(CurrentMemRef(yielded), GetDefinedMemRef(init_tile))) {
-      return std::nullopt;
-    }
+    auto iter_arg = std::static_pointer_cast<const Var>(loop->iter_args_[it->second.return_idx]);
+    if (!yielded || !IsInplaceChainRootedAt(yielded, iter_arg)) return std::nullopt;
     return AccumulatorTarget{GetDefinedMemRef(init_tile), init_tile->GetMemorySpace(), init};
   }
 
