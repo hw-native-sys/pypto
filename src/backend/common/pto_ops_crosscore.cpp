@@ -39,6 +39,7 @@
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 #include "src/backend/common/pto_ops_internal.h"
 
 namespace pypto {
@@ -118,16 +119,30 @@ static bool EmitTpushTransportValidShape(const char* target, const CallPtr& op, 
   ExprPtr transport_row = shape[0];
   ExprPtr transport_col = shape[1];
 
-  // A no-split Acc->Vec FIFO slot is laid out using the source's physical box.
-  // Both dimensions therefore need to be full for TPUSH, even though later
-  // vector compute/store must continue to see the narrower logical shape. An
-  // empty tile remains an empty protocol operation and must not be widened.
+  // A no-split Acc->Vec FIFO slot is laid out using the source's physical box,
+  // so a partially written COLUMN range leaves stale bytes *inside* the valid
+  // rows -- those columns must be transported at the full box width. An empty
+  // tile remains an empty protocol operation and must not be widened at all.
+  //
+  // The ROW extent is the opposite: it must stay exactly as the producer wrote
+  // it. Every L0C reader derives its source pitch from validRow --
+  // `ceil(validRow/16)*16` for a compact tile, `TileData::Rows` otherwise
+  // (pto-isa `tstore_common.hpp`, `TStoreAccNz2nd`) -- and `mad` laid the
+  // result out at the pitch implied by the L0A operand's *valid* rows
+  // (`TMatmul.hpp`: `uint16_t m = aMatrix.GetValidRow()`). Widening the rows
+  // here re-derives that pitch from the physical box, so TPUSH walks L0C at a
+  // stride `mad` never wrote at: with a 64-row box valid to 16 the push picks
+  // up N-fractal 4j for every fractal j, silently corrupting the valid rows
+  // (issue #2510). Rows past validRow stay stale in the slot, which is exactly
+  // what a narrowed valid_shape already promises about its invalid region --
+  // and the transport moves validRow rows instead of the whole box.
   if (acc_to_vec_no_split) {
     for (const auto& valid_dim : valid_shape) {
       if (auto dim_const = As<ir::ConstInt>(valid_dim); dim_const && dim_const->value_ == 0) {
         return false;
       }
     }
+    transport_row = valid_shape[0];
   }
 
   // For the 910B no-split dual-AIV path there is NO genuine cross-core row
@@ -151,6 +166,24 @@ static bool EmitTpushTransportValidShape(const char* target, const CallPtr& op, 
       return false;
     }
   }
+
+  // A genuine row split needs the full box in the slot -- lane 1 reads the band
+  // starting at the box half, which only exists if the producer wrote it -- but
+  // writing it means reading L0C at the physical pitch, which is not the pitch
+  // `mad` used for a row-narrowed operand. The two requirements are mutually
+  // exclusive, so the shape is refused here instead of being lowered into
+  // silently skewed data (measured: a 64-row box valid to 16 across
+  // `pl.split(UP_DOWN)` returns 1808 of 8192 elements wrong). Gated on the
+  // pitches actually differing, so a single-fractal-block accumulator -- where
+  // `ceil(validRow/16)*16 == Rows` -- keeps crossing as before.
+  CHECK_SPAN(!(split != 0 && tile_view.compact == ir::CompactMode::normal) ||
+                 ir::AccPitchesCoincide(valid_shape[0], shape[0]),
+             op->span_)
+      << "a row-narrowed matmul accumulator cannot cross a split Cube-to-Vector boundary: mad wrote "
+      << "L0C at the pitch implied by the matmul's valid rows, while a split transport must carry "
+      << "the full physical box so both vector lanes receive their band. Either drop the row "
+      << "narrowing on the matmul's left operand (narrow the result with pl.set_validshape "
+      << "instead), or route the accumulator through GM and dequantize it in a second scope.";
 
   if (IsSameDimExpr(transport_row, valid_shape[0]) && IsSameDimExpr(transport_col, valid_shape[1])) {
     return false;

@@ -143,6 +143,7 @@ def create(
     span: Span | None = None,
     *,
     flat_layout: bool | None = None,
+    compact: bool | None = None,
 ) -> Call:
     """Create a tile from a shape.
 
@@ -166,6 +167,13 @@ def create(
             ``target_memory=Mat`` and is mutually exclusive with ``transpose``.
             Default ``None`` keeps the canonical layout. Kept keyword-only so
             it does not shift ``span``'s positional slot for existing callers.
+        compact: Keyword-only. Compiler-internal. When True, declare that this
+            L0C buffer holds a valid-region-packed product, i.e. that its
+            N-fractal pitch is ``ceil(validRow/16)*16`` rather than the physical
+            row count -- the layout ``mad`` writes when the matmul's left operand
+            is row-narrowed. Requires ``target_memory=Acc``. Kernels do not set
+            this: ``AutoTileMatmulL0`` declares it on the accumulator seed it
+            synthesizes, and every reader of that accumulator inherits it.
 
     Returns:
         Call expression that returns a TileType with the created tile
@@ -179,6 +187,8 @@ def create(
         kwargs["transpose"] = transpose
     if flat_layout is not None:
         kwargs["flat_layout"] = flat_layout
+    if compact is not None:
+        kwargs["compact"] = compact
     return _ir_core.create_op_call("tile.create", [shape_tuple], kwargs, actual_span)
 
 

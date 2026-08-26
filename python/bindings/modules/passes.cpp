@@ -125,6 +125,10 @@ void BindPass(nb::module_& m) {
              "Every tile.store draining an Acc-resident tile targets a GM tensor whose dtype the "
              "backend fix-pipe can narrow into (INT32/FP32/FP16[/BF16]); INT8/INT16 must route "
              "through a Vec tile instead")
+      .value("AccCompactValid", IRProperty::AccCompactValid,
+             "Every tile.matmul_acc accumulates into a CompactMode.normal buffer when mad's pitch "
+             "(ceil(lhs validRow/16)*16) differs from the accumulator's physical row count, and no "
+             "tile outside Left/Right/Acc carries a compact mode")
       .value("AtomicAddDtypeValid", IRProperty::AtomicAddDtypeValid,
              "Every atomic-add write into GM (tile.store / tensor.assemble / pld.tensor.put / "
              "pld.tile.put / pld.tensor.remote_store / pld.tile.remote_store) targets a dtype the "

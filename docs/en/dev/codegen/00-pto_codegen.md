@@ -221,12 +221,29 @@ or call `set_validshape` on the source tile before taking the view.
   same pitch (`gmStrideR = valid_col`, doubled for the left-right codes). A partial valid shape on
   one side of the transport and not the other therefore mis-strides the pop — silent corruption of
   the *valid* region, since the ISA's matching assertion is compiled out in release builds. So a
-  partial Acc-to-Vec transfer uses the full physical box for both TPUSH and TPOP, whether the
-  transfer is no-split or split, and restores the logical valid shape immediately on each side of the
-  transport — on the consumer side through a metadata-only `pto.treshape` (a frontend tpop result is
-  not a locally bound PTOAS tile, so `pto.set_validshape` cannot restore it in place). The split-axis
-  extent is the exception: it stays per-lane on the TPOP operands, because that is what tells the ISA
-  where lane 1's band begins.
+  partial Acc-to-Vec transfer uses the full physical box for TPOP and for the TPUSH **columns**,
+  whether the transfer is no-split or split, and restores the logical valid shape immediately on each
+  side of the transport — on the consumer side through a metadata-only `pto.treshape` (a frontend
+  tpop result is not a locally bound PTOAS tile, so `pto.set_validshape` cannot restore it in place).
+  The split-axis extent is one exception: it stays per-lane on the TPOP operands, because that is
+  what tells the ISA where lane 1's band begins.
+- The **row** extent of a *no-split* Acc-to-Vec TPUSH is the other exception: it stays exactly as the
+  producer wrote it. TPUSH runs `TStoreAccNz2nd` out of L0C, whose source pitch is
+  `ceil(validRow/16)*16` for a compact tile and `TileData::Rows` otherwise, while `mad` laid the
+  product out at the pitch implied by the L0A operand's *valid* rows. Widening `validRow` before the
+  push re-derives that pitch from the physical box, so the fix-pipe walks L0C at a stride `mad` never
+  wrote at — with a 64-row box valid to 16 the push picks up N-fractal `4j` for every fractal `j`
+  (issue #2510). The rows past `validRow` stay stale in the slot, which is what a narrowed
+  `valid_shape` already promises about its invalid region, and the transport moves `validRow` rows
+  instead of the whole box.
+- A **split** Acc-to-Vec transport cannot take that route: lane 1 reads the band starting at the box
+  half, which exists only if the producer wrote the full box — and writing it means reading L0C at
+  the physical pitch, which is not the pitch `mad` used. The two requirements are mutually exclusive,
+  so a row-narrowed compact accumulator crossing a `pl.split` / `pl.split_aiv` boundary is **rejected**
+  with a message naming both DSL alternatives (narrow the result instead of the operand, or stage the
+  accumulator through GM), rather than lowered into silently skewed data — measured on device at 1808
+  of 8192 elements wrong before the refusal. The refusal is gated on the pitches actually differing,
+  so a single-fractal-block accumulator (`ceil(validRow/16)*16 == Rows`) keeps crossing as before.
 - When a tpop result `TileView.valid_shape` differs from the physical tile shape, PTO codegen emits PTOAS frontend operands as `%buf = pto.tpop_from_*(%valid_row, %valid_col) {[id = I, ]split = N} -> !pto.tile_buf<..., v_row=?, v_col=?, ...>`. This covers dynamic expressions and static non-full shapes such as `[0, 0]`; the operands carry the logical extents used by compute and store. The full-box Cube-to-Vector transport above overrides this for a statically-shaped, non-empty partial pop, because `pto.treshape` carries no valid-row/valid-col operands and so can only restore *static* logical extents.
 - For split consumers, `LowerAutoVectorSplit` localizes those dynamic tpop
   valid-shape operands per subblock (for example global `[8, 16]` becomes
@@ -698,6 +715,19 @@ The `compact` attribute is omitted for its null default. Two paths set `normal(1
   full tile config matches. `tile.set_validshape` likewise inherits: it is metadata-only and may run
   *after* the buffer was written, so the pitch its readers must use is the one `mad` already wrote at
   — deriving a new one from the narrowed rows would re-interpret bytes that were never repacked.
+
+  A buffer can also *declare* the mode at creation: `tile.create(..., target_memory=Acc,
+  compact=True)`. A fresh L0C buffer has no prior bytes to re-interpret, so a declaration is not an
+  alias re-derivation — and it is what `AutoTileMatmulL0` puts on the accumulator seed it synthesizes
+  when it splits K, since `tile.matmul_acc` inherits from that seed and a non-compact one drags the
+  whole chain, and the reader after the loop, back to the physical pitch. A declaration is also the
+  only form that survives: a type a pass stamps onto a call is discarded as soon as any later pass
+  re-deduces it (`InferTileMemorySpace` does), whereas a kwarg is re-read every time.
+
+  `AccCompactValid` (see [Verifier](../passes/99-verifier.md)) checks both halves of the contract:
+  every `tile.matmul_acc` accumulates into a compact buffer when `mad`'s pitch differs from the
+  accumulator's physical row count, and no tile outside Left/Right/Acc carries a compact mode at
+  all.
 
 Note that the Acc → L1 readers (`TExtractAccToMat`, `TMovCcToCb`) have no `CompactMode` branch in
 PTO-ISA on either a2a3 or a5, so a runtime-narrowed accumulator consumed by `tile.extract` /

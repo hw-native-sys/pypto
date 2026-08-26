@@ -300,6 +300,7 @@ def create(
     transpose: bool | None = None,
     *,
     flat_layout: bool | None = None,
+    compact: bool | None = None,
 ) -> Tile:
     """Create a tile from a shape.
 
@@ -316,6 +317,13 @@ def create(
             than the boxed NZ layout Mat tiles normally carry. Requires
             ``target_memory=Mat`` and is mutually exclusive with ``transpose``.
             Default ``None`` keeps the canonical layout.
+        compact: Keyword-only. Compiler-internal. Declares that this L0C buffer
+            holds a valid-region-packed product -- N-fractal pitch
+            ``ceil(validRow/16)*16`` rather than the physical row count, which is
+            what ``mad`` writes when the matmul's left operand is row-narrowed.
+            Requires ``target_memory=Acc``. Kernels do not set this;
+            ``AutoTileMatmulL0`` declares it on the accumulator seed it
+            synthesizes for a split K.
 
     Returns:
         Tile wrapping the create operation
@@ -328,6 +336,7 @@ def create(
         target_memory,
         transpose,
         flat_layout=flat_layout,
+        compact=compact,
     )
     return Tile(expr=call_expr)
 

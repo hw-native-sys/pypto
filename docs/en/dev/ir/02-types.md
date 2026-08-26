@@ -206,9 +206,14 @@ memory space. Redundant explicit defaults such as `pl.TileView()` are treated
 as semantically equivalent to the omitted form and may print back in canonical
 syntax. `TileView.compact` records whether a partial boxed tile uses PTO's
 valid-region-packed representation (`CompactMode.normal`) or the ordinary
-physical-box representation (`CompactMode.null`, the default). The compiler
-sets this automatically for partial `tile.extract` transfers into L0A/L0B;
-normal user code does not need to select it.
+physical-box representation (`CompactMode.null`, the default). It is meaningful
+only in the fractal spaces — `Left` / `Right` / `Acc` — because it *is* an
+N-fractal pitch; the `AccCompactValid` verifier rejects it anywhere else. The
+compiler sets it automatically for partial `tile.extract` transfers into
+L0A/L0B and for a row-narrowed matmul accumulator (whose L0C pitch `mad`
+derives from the L0A operand's valid rows), and `AutoTileMatmulL0` declares it
+on a synthesized accumulator seed via `tile.create(..., compact=True)`. Normal
+user code does not need to select it.
 
 The implicit view depends on the memory space, so the constructor collapses a
 view to `nullopt` only against the space it is given. An `f_deduce_type`

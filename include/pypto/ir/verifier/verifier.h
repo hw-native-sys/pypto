@@ -98,6 +98,18 @@ PropertyVerifierPtr CreateNoNestedCallPropertyVerifier();
 PropertyVerifierPtr CreateAccToGmStoreValidPropertyVerifier();
 
 /**
+ * @brief Factory for the Acc compact-mode property verifier
+ *
+ * Checks that every ``tile.matmul_acc`` / ``tile.matmul_mx_acc`` accumulates
+ * into a compact buffer whenever ``mad``'s pitch differs from the accumulator's
+ * physical row count, and that no tile outside Left/Right/Acc carries a compact
+ * mode.
+ *
+ * @return Shared pointer to AccCompactValid PropertyVerifier
+ */
+PropertyVerifierPtr CreateAccCompactValidPropertyVerifier();
+
+/**
  * @brief Factory for the atomic-add destination-dtype property verifier
  *
  * Checks every atomic-add write into GM (``tile.store`` / ``tensor.assemble`` /

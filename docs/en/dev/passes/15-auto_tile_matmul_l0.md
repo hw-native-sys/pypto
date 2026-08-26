@@ -178,6 +178,31 @@ class After:
         ...
 ```
 
+### Row-narrowed left operand: the seed declares `compact`
+
+When the left operand's valid rows are not provably its physical rows, the
+accumulator seed is emitted as a *narrowed, compact* placeholder:
+
+```python
+c_l0_init_storage = pl.tile.create([64, 128], pl.INT32, target_memory=Acc, compact=True)
+c_l0_init = pl.tile.set_validshape(c_l0_init_storage, 16, 128)
+```
+
+`mad` takes M from the L0A operand's **valid** rows and lays the product out in
+L0C with an N-fractal stride of `ceil(M/16)*16` (pto-isa `TMatmul.hpp`), and
+only a compact tile makes a reader recompute that pitch instead of using the
+physical row count. `tile.matmul` gets the mode from
+`StampCompactForNarrowedAccRows`, but `tile.matmul_acc` **inherits** its
+accumulator operand's mode — so a non-compact seed drags every accumulate step,
+and the `tile.store` / `tile.tpush_to_aiv` after the loop, back to the physical
+pitch and scrambles every N-fractal above the first (issues #2470, #2510).
+
+The mode is *declared* on the `tile.create` rather than stamped onto the type
+afterwards because a declaration is what survives: `InferTileMemorySpace`
+re-deduces every call whose arguments changed, discarding pass-applied type
+refinements, while a kwarg is re-read by the deducer each time.
+`AccCompactValid` verifies the resulting contract.
+
 ### `tile.matmul_acc`
 
 The caller's accumulator threads through the iter-arg directly; no if-else is needed:

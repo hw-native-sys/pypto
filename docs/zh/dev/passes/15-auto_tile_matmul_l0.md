@@ -166,6 +166,26 @@ class After:
         ...
 ```
 
+### 行窄化的左操作数：种子声明 `compact`
+
+当左操作数的有效行数无法证明等于物理行数时，累加器种子会以*窄化且 compact* 的占位形式生成：
+
+```python
+c_l0_init_storage = pl.tile.create([64, 128], pl.INT32, target_memory=Acc, compact=True)
+c_l0_init = pl.tile.set_validshape(c_l0_init_storage, 16, 128)
+```
+
+`mad` 取 L0A 操作数的**有效**行数作为 M，并以 `ceil(M/16)*16` 的 N-fractal stride 把乘积
+写入 L0C（pto-isa `TMatmul.hpp`），只有 compact 的 tile 才会让读取方重新计算该 pitch，
+否则一律使用物理行数。`tile.matmul` 的模式来自 `StampCompactForNarrowedAccRows`，而
+`tile.matmul_acc` 是**继承**累加器操作数的模式——因此非 compact 的种子会把每一步累加、
+以及循环之后的 `tile.store` / `tile.tpush_to_aiv` 一起拖回物理 pitch，令第一个之后的每个
+N-fractal 都错位（issue #2470、#2510）。
+
+该模式在 `tile.create` 上**声明**而非事后盖在类型上，是因为只有声明能够存活：
+`InferTileMemorySpace` 会对参数发生变化的 call 重新推导类型，从而丢弃 pass 盖上的类型细化，
+而 kwarg 每次都会被 deducer 重新读取。生成的契约由 `AccCompactValid` 校验。
+
 ### `tile.matmul_acc`
 
 调用方的累加器直接穿过 iter-arg，无需 if-else：
