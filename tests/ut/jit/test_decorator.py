@@ -12,6 +12,7 @@
 import ast
 import importlib
 import inspect
+import re
 import warnings
 
 import pypto.language as pl
@@ -36,7 +37,7 @@ from pypto.jit.decorator import (
     _SlicedArg,
     jit,
 )
-from pypto.jit.specializer import TensorMeta
+from pypto.jit.specializer import Specializer, TensorMeta
 from pypto.language.parser.diagnostics.exceptions import ParserTypeError
 from pypto.pypto_core import DataType, ir
 from pypto.runtime.runner import RunConfig
@@ -824,6 +825,10 @@ def _reshape_body(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
 def _callsite_metadata_kernel(x: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
     """Dependency used by point-in-time call-site metadata tests."""
     return out
+
+
+# Module global (not a closure var) for the folding-precedence test.
+_CLOSURE_FOLD_ROWS = 64
 
 
 def _plain_rebind_callsite(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
@@ -2663,6 +2668,200 @@ class TestJitSourceProvenance:
         incore = list(prog.get_function("_provenance_kernel").body)[0]
         assert incore.span.filename == __file__
         assert incore.span.begin_line == expected_with_line
+
+
+class TestClosureConstantFolding:
+    """A ``@pl.jit`` function defined inside a factory (issue #2449).
+
+    The generated ``@pl.program`` source is ``exec``'d in a fresh module holding
+    only ``pl`` and ``pld``, so every free name in a body must be folded to a
+    literal first. Folding used to read ``__globals__`` alone, where a closure
+    free var never appears — so a factory constant survived verbatim and the
+    parser raised ``Undefined variable``. Annotations always worked (they are
+    rendered from ``tensor_meta``, not from the name), which made the gap
+    invisible from outside.
+    """
+
+    @staticmethod
+    def _specialize(entry, *args) -> str:
+        _pn, _, tmeta, sv, sd, pfd = entry._bind_args(args, {})
+        contexts = entry._build_contexts(tmeta, sv, sd, pfd)
+        return Specializer(f"_jit_{entry.__name__}", contexts).specialize()
+
+    @staticmethod
+    def _build_factory_entry(rows: int):
+        """Return a @pl.jit entry whose body references the factory's ``rows``."""
+
+        @jit.incore
+        def copy_incore(t: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+            tile = pl.load(t, [0, 0], [64, 64])
+            pl.store(tile, [0, 0], out)
+            return out
+
+        @jit
+        def entry(a: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+            # ``rows`` is a closure free var, not a module global.
+            tmp = pl.create_tensor([rows, 64], dtype=pl.FP32)
+            return copy_incore(tmp, out)
+
+        return entry
+
+    def test_closure_constant_folds_into_generated_body(self):
+        """A factory constant referenced in a body is inlined as a literal."""
+        torch = pytest.importorskip("torch")
+
+        entry = self._build_factory_entry(64)
+        a = torch.zeros(64, 64, dtype=torch.float32)
+        out = torch.zeros(64, 64, dtype=torch.float32)
+        source = self._specialize(entry, a, out)
+
+        assert "pl.create_tensor([64, 64]" in source
+        # The free name must not survive — it is undefined in the generated module.
+        assert not re.search(r"\brows\b", source)
+
+    def test_closure_constant_specializes_per_value(self):
+        """Two factory instantiations fold their own constant, not a shared one."""
+        torch = pytest.importorskip("torch")
+
+        a = torch.zeros(64, 64, dtype=torch.float32)
+        out = torch.zeros(64, 64, dtype=torch.float32)
+        assert "pl.create_tensor([32, 64]" in self._specialize(self._build_factory_entry(32), a, out)
+        assert "pl.create_tensor([96, 64]" in self._specialize(self._build_factory_entry(96), a, out)
+
+    @staticmethod
+    def _build_mutable_factory_entry():
+        """Return (entry, setter) sharing one closure cell, so the setter
+        rebinds the *same* ``JITFunction``'s captured constant."""
+
+        rows = 64
+
+        @jit.incore
+        def copy_incore(t: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+            tile = pl.load(t, [0, 0], [64, 64])
+            pl.store(tile, [0, 0], out)
+            return out
+
+        @jit
+        def entry(a: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+            tmp = pl.create_tensor([rows, 64], dtype=pl.FP32)
+            return copy_incore(tmp, out)
+
+        def set_rows(value: int) -> None:
+            nonlocal rows
+            rows = value
+
+        return entry, set_rows
+
+    def test_rebound_closure_cell_changes_the_generated_source(self):
+        """Rebinding the cell on one JITFunction changes what gets emitted.
+
+        This is the premise of the cache-key test below: if the artifact did not
+        depend on the cell, keying on it would be pointless.
+        """
+        torch = pytest.importorskip("torch")
+
+        entry, set_rows = self._build_mutable_factory_entry()
+        a = torch.zeros(64, 64, dtype=torch.float32)
+        out = torch.zeros(64, 64, dtype=torch.float32)
+
+        before = self._specialize(entry, a, out)
+        set_rows(96)
+        after = self._specialize(entry, a, out)
+
+        assert "pl.create_tensor([64, 64]" in before
+        assert "pl.create_tensor([96, 64]" in after
+
+    def test_rebound_closure_cell_splits_the_cache(self):
+        """A rebound cell must not silently reuse the previous artifact.
+
+        ``_get_source_hash`` hashes the function *text*, which a ``nonlocal``
+        rebind leaves byte-identical, so the closure values have to enter the
+        key separately. Two distinct factory instances would not catch this —
+        they are different ``JITFunction`` objects with their own caches.
+        """
+        torch = pytest.importorskip("torch")
+
+        entry, set_rows = self._build_mutable_factory_entry()
+        a = torch.zeros(64, 64, dtype=torch.float32)
+        out = torch.zeros(64, 64, dtype=torch.float32)
+
+        del a, out
+        before = entry._folded_closure_constants()
+        source_hash_before = entry._get_source_hash()
+        set_rows(96)
+        after = entry._folded_closure_constants()
+
+        # The text-based hash cannot see the rebind — that is the whole problem.
+        assert entry._get_source_hash() == source_hash_before
+        # The closure component does, so the composed key differs.
+        assert before != after
+        assert ("entry", "rows", "64") in before
+        assert ("entry", "rows", "96") in after
+
+    def test_rebound_closure_cell_recompiles_instead_of_reusing(self):
+        """The observable consequence: ``compile()`` must not hand back the
+        artifact built from the previous cell value.
+
+        Kept separate from the key-component test so this assertion is reached
+        on its own — a regression in the key wiring has to fail *here*, not be
+        masked by an earlier assertion.
+        """
+        torch = pytest.importorskip("torch")
+
+        entry, set_rows = self._build_mutable_factory_entry()
+        a = torch.zeros(64, 64, dtype=torch.float32)
+        out = torch.zeros(64, 64, dtype=torch.float32)
+
+        compiled_before = entry.compile(a, out, config=RunConfig(platform="a2a3sim"))
+        set_rows(128)
+        compiled_after = entry.compile(a, out, config=RunConfig(platform="a2a3sim"))
+        assert compiled_before is not compiled_after, "stale artifact reused after rebind"
+        assert len(entry._cache) == 2
+        # An unchanged cell must still hit the cache, or the key would be useless.
+        assert entry.compile(a, out, config=RunConfig(platform="a2a3sim")) is compiled_after
+        assert len(entry._cache) == 2
+
+    def test_closure_constants_key_component_is_stable_and_typed(self):
+        """Equal state yields an equal component (so a genuine re-call still
+        hits the cache), and ``repr`` keeps look-alike values apart."""
+        from pypto.jit.cache import make_cache_key  # noqa: PLC0415
+
+        def key_for(closure_constants):
+            return make_cache_key(
+                source_hash="h",
+                param_names=["x"],
+                tensor_shapes={"x": (64, 64)},
+                tensor_dtypes={"x": DataType.FP32},
+                dynamic_dims=set(),
+                scalar_values={},
+                closure_constants=closure_constants,
+            )
+
+        base = key_for((("entry", "rows", "1"),))
+        assert base == key_for((("entry", "rows", "1"),))
+        # 1 / 1.0 / True all fold, and all produce different literals.
+        assert len({base, key_for((("entry", "rows", "1.0"),)), key_for((("entry", "rows", "True"),))}) == 3
+
+    def test_module_globals_still_fold(self):
+        """Closure bindings are merged on top of globals, not instead of them."""
+        torch = pytest.importorskip("torch")
+
+        @jit.incore
+        def copy_incore(t: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+            tile = pl.load(t, [0, 0], [64, 64])
+            pl.store(tile, [0, 0], out)
+            return out
+
+        @jit
+        def entry(a: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+            tmp = pl.create_tensor([_CLOSURE_FOLD_ROWS, 64], dtype=pl.FP32)
+            return copy_incore(tmp, out)
+
+        a = torch.zeros(64, 64, dtype=torch.float32)
+        out = torch.zeros(64, 64, dtype=torch.float32)
+        source = self._specialize(entry, a, out)
+        assert "pl.create_tensor([64, 64]" in source
+        assert not re.search(r"\b_CLOSURE_FOLD_ROWS\b", source)
 
 
 if __name__ == "__main__":

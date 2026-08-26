@@ -78,6 +78,7 @@ from .specializer import (
     _collect_annotation_dynamic_dims,
     _collect_dynvar_names,
     build_specialize_context,
+    func_name_lookup,
 )
 
 # ---------------------------------------------------------------------------
@@ -247,7 +248,7 @@ def _resolve_annotation(annotation: Any, ann_ns: dict[str, Any] | None) -> Any:
     """Resolve one parameter annotation, evaluating the string form if needed.
 
     ``from __future__ import annotations`` in the *user's* module leaves every
-    annotation as a string; ``ann_ns`` (from ``_func_name_lookup``) is the
+    annotation as a string; ``ann_ns`` (from :func:`func_name_lookup`) is the
     namespace to evaluate it in.
 
     Args:
@@ -271,7 +272,7 @@ def _resolve_annotation(annotation: Any, ann_ns: dict[str, Any] | None) -> Any:
 def _annotation_namespace(func: Any, sig: inspect.Signature) -> dict[str, Any] | None:
     """Namespace for resolving ``func``'s string annotations, or None if unneeded."""
     if any(isinstance(p.annotation, str) for n, p in sig.parameters.items() if n != "self"):
-        return _func_name_lookup(func)
+        return func_name_lookup(func)
     return None
 
 
@@ -641,27 +642,6 @@ def _build_dynvar_anchor_index(
     return anchors
 
 
-def _func_name_lookup(func: Any) -> dict[str, Any]:
-    """Return ``func.__globals__`` merged with closure free-var bindings.
-
-    A function defined inside a test method (or any other enclosing scope)
-    captures module-level helpers (``HIDDEN``, ``ROWS``, ...) as closure free
-    vars, not as globals — both namespaces have to be inspected for static
-    shape-element resolution to find them. Closure bindings override globals,
-    matching Python's own name-resolution order at the function's call site.
-    """
-    out: dict[str, Any] = dict(getattr(func, "__globals__", {}))
-    co_freevars = getattr(getattr(func, "__code__", None), "co_freevars", ())
-    closure = getattr(func, "__closure__", None) or ()
-    for fv_name, cell in zip(co_freevars, closure, strict=True):
-        try:
-            out[fv_name] = cell.cell_contents
-        except ValueError:
-            # Unbound closure cell — skip silently (matches _discover_deps).
-            pass
-    return out
-
-
 def _scan_dep_io(
     func: Any, caller_func_type: str = "orchestration"
 ) -> dict[str, tuple[list[str], list[str]]]:
@@ -1000,7 +980,7 @@ def _extract_local_tensor_metas(
     func_def = _get_func_def(func)
     local: dict[str, TensorMeta] = dict(seed_meta or {})
     dtype_map = _get_pl_dtype_map()
-    func_globals = _func_name_lookup(func)
+    func_globals = func_name_lookup(func)
     scalars: dict[str, int | float | bool] = seed_scalars or {}
     dim_aliases: dict[str, tuple[str, int]] = {}
     dynvar_anchors = _build_dynvar_anchor_index(seed_meta or {})
@@ -1652,6 +1632,45 @@ class JITFunction:
             )
         return self._dep_layouts
 
+    def _folded_closure_constants(self) -> tuple[tuple[str, str, str], ...]:
+        """Closure constants that fold into the generated source, for the cache key.
+
+        The body transformer inlines a free ``int`` / ``float`` / ``bool`` as a
+        literal, so its value is baked into the artifact — but it lives in
+        ``__closure__``, not in the function text. Rebinding the cell
+        (``nonlocal rows``) therefore leaves ``source_hash`` identical, and
+        without this component the next call would be handed the previous
+        value's artifact. Same shape of problem as ``_dep_declared_layouts``.
+
+        Deliberately **not** memoized, unlike ``_dep_declared_layouts`` and
+        ``_get_source_hash``: a closure cell can be rebound over this
+        ``JITFunction``'s lifetime, which is exactly the case this guards.
+
+        Every foldable free variable is reported, not only those the body
+        actually references. That is a superset, so it can split the cache more
+        finely than strictly required — the safe direction — and it avoids
+        re-deriving which names survive folding.
+
+        Returns:
+            Sorted ``(function name, free variable, repr of value)`` triples
+        """
+        collected: list[tuple[str, str, str]] = []
+        for func_obj in (self._func, *(dep._func for dep in self._get_deps())):
+            func_name = getattr(func_obj, "__name__", "<unknown>")
+            co_freevars = getattr(getattr(func_obj, "__code__", None), "co_freevars", ())
+            closure = getattr(func_obj, "__closure__", None) or ()
+            for fv_name, cell in zip(co_freevars, closure, strict=True):
+                try:
+                    value = cell.cell_contents
+                except ValueError:
+                    # Unbound cell — nothing folds, so nothing to key on.
+                    continue
+                # Mirror the folder's own test so the key covers exactly what
+                # gets inlined (see _BodyTransformer.visit_Name).
+                if isinstance(value, (int, float, bool)) and not isinstance(value, type):
+                    collected.append((func_name, fv_name, repr(value)))
+        return tuple(sorted(collected))
+
     def _get_dep_graph(
         self,
     ) -> tuple[
@@ -1904,7 +1923,7 @@ class JITFunction:
         # ``Tensor`` / ``Scalar`` instance annotations on Python 3.10.
         ann_ns: dict[str, Any] | None = None
         if any(isinstance(p.annotation, str) for n, p in sig.parameters.items() if n != "self"):
-            ann_ns = _func_name_lookup(self._func)
+            ann_ns = func_name_lookup(self._func)
 
         deps, callers_by_id, _, call_args_cache = self._get_dep_graph()
         per_func_dyn_maps = _compute_per_func_dyndim_maps(
@@ -2095,6 +2114,7 @@ class JITFunction:
             tensor_dtypes={n: m.dtype for n, m in specialization.tensor_meta.items()},
             tensor_layouts={n: m.layout for n, m in specialization.tensor_meta.items()},
             dep_layouts=self._dep_declared_layouts(),
+            closure_constants=self._folded_closure_constants(),
             dynamic_dims={
                 (n, i) for n, m in specialization.tensor_meta.items() for i in m.dynamic_dim_indices()
             },

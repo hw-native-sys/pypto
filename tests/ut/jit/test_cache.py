@@ -111,6 +111,7 @@ class TestMakeCacheKey:
             ("memory_planner", None),
             ("enable_pypto_l0c_double_buffer", False),
             ("dep_layouts", ()),
+            ("closure_constants", ()),
             ("runtime", "tensormap_and_ringbuffer"),
         )
 
