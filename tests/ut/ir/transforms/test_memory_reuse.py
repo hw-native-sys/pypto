@@ -2694,6 +2694,13 @@ class TestYieldFixup:
         components, which both names real cycle members and finds every cycle in
         one traversal -- scanning for "any node that still has an outgoing edge"
         instead would rescan the whole set once per cycle.
+
+        This covers several single-cycle components. Several cycles sharing a node
+        inside *one* component is handled too (CycleVictims re-decomposes what is
+        left of a component after each spill), but is not exercised here: a copy
+        reads one source, so it takes a source spanning two carry slots at once to
+        give any node a second outgoing edge, and that has no spelling in the DSL
+        that survives to this pass.
         """
 
         @pl.program

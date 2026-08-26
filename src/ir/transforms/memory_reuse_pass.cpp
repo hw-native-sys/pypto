@@ -3174,9 +3174,10 @@ class YieldFixupMutator : public IRMutator {
   ///
   /// The graph is built once and consumed incrementally: a spill drops only the
   /// spilled copy's own outgoing edges, so the traversal resumes where it stalled
-  /// instead of rebuilding anything, and each cycle costs exactly one spill —
-  /// victims come from the residual graph's strongly connected components, so a
-  /// node merely downstream of a cycle is never spilled.
+  /// instead of rebuilding anything. Victims come from the residual graph's
+  /// strongly connected components, so a node merely downstream of a cycle is
+  /// never spilled, and one victim set is enough to leave the residual acyclic —
+  /// the traversal stalls at most once.
   ///
   /// Cost is O(k log k + E) in one loop's carry count k: `carry_index` answers each
   /// source with a binary search plus one step per range it actually overlaps, so
@@ -3242,6 +3243,8 @@ class YieldFixupMutator : public IRMutator {
       const std::vector<size_t> victims = CycleVictims(successors, emitted);
       INTERNAL_CHECK_SPAN(!victims.empty(), (*copies)[0].source->span_)
           << "Internal error: loop-carry copy ordering stalled with no cycle to break";
+      // CycleVictims returns a set that leaves the residual acyclic, so Kahn
+      // drains the rest without stalling again.
       for (size_t victim : victims) {
         SpillCarrySource(&(*copies)[victim], spills);
         release(victim);
@@ -3251,31 +3254,32 @@ class YieldFixupMutator : public IRMutator {
     return order;
   }
 
-  /// One member of every cycle still blocking the emission order.
+  /// The strongly connected components of `nodes`, using only edges between
+  /// nodes still marked active.
   ///
-  /// Tarjan over the unemitted subgraph: a strongly connected component larger
-  /// than one node, or a single node with an edge to itself, is exactly a set of
-  /// copies that cannot be ordered among themselves. Everything else Kahn can
-  /// still drain once those are broken, so nodes that merely sit downstream of a
-  /// cycle are left alone and cost no scratch buffer.
-  ///
-  /// Runs in O(k + E) over the residual graph, once per stall.
-  static std::vector<size_t> CycleVictims(const std::vector<std::vector<size_t>>& successors,
-                                          const std::vector<bool>& emitted) {
-    const size_t count = successors.size();
+  /// Tarjan, iteratively so a deep chain cannot overflow the stack. Restricting
+  /// to a node subset is what lets the caller re-decompose one component without
+  /// walking the whole graph again.
+  static std::vector<std::vector<size_t>> StronglyConnectedComponents(
+      const std::vector<std::vector<size_t>>& successors, const std::vector<char>& active,
+      const std::vector<size_t>& nodes) {
     constexpr size_t kUnvisited = std::numeric_limits<size_t>::max();
+    const size_t count = successors.size();
     std::vector<size_t> index(count, kUnvisited);
     std::vector<size_t> lowlink(count, 0);
+    std::vector<char> in_subset(count, 0);
+    std::vector<char> on_stack(count, 0);
+    for (size_t node : nodes) in_subset[node] = 1;
+
     std::vector<size_t> component_stack;
-    std::vector<bool> on_stack(count, false);
-    std::vector<size_t> victims;
+    std::vector<std::vector<size_t>> components;
     size_t next_index = 0;
 
-    for (size_t root = 0; root < count; ++root) {
-      if (emitted[root] || index[root] != kUnvisited) continue;
+    for (size_t root : nodes) {
+      if (!active[root] || index[root] != kUnvisited) continue;
       index[root] = lowlink[root] = next_index++;
       component_stack.push_back(root);
-      on_stack[root] = true;
+      on_stack[root] = 1;
       std::vector<std::pair<size_t, size_t>> frames{{root, size_t{0}}};
 
       while (!frames.empty()) {
@@ -3283,11 +3287,11 @@ class YieldFixupMutator : public IRMutator {
         const size_t node = frames.back().first;
         if (frames.back().second < successors[node].size()) {
           const size_t next = successors[node][frames.back().second++];
-          if (emitted[next]) continue;
+          if (!in_subset[next] || !active[next]) continue;
           if (index[next] == kUnvisited) {
             index[next] = lowlink[next] = next_index++;
             component_stack.push_back(next);
-            on_stack[next] = true;
+            on_stack[next] = 1;
             frames.emplace_back(next, size_t{0});
           } else if (on_stack[next]) {
             lowlink[node] = std::min(lowlink[node], index[next]);
@@ -3300,15 +3304,11 @@ class YieldFixupMutator : public IRMutator {
           while (true) {
             const size_t member = component_stack.back();
             component_stack.pop_back();
-            on_stack[member] = false;
+            on_stack[member] = 0;
             component.push_back(member);
             if (member == node) break;
           }
-          const bool has_self_edge =
-              std::find(successors[node].begin(), successors[node].end(), node) != successors[node].end();
-          if (component.size() > 1 || has_self_edge) {
-            victims.push_back(*std::min_element(component.begin(), component.end()));
-          }
+          components.push_back(std::move(component));
         }
 
         frames.pop_back();
@@ -3316,6 +3316,60 @@ class YieldFixupMutator : public IRMutator {
           const size_t parent = frames.back().first;
           lowlink[parent] = std::min(lowlink[parent], lowlink[node]);
         }
+      }
+    }
+    return components;
+  }
+
+  /// A set of copies whose spilling leaves the residual graph acyclic.
+  ///
+  /// Every cycle lies inside one strongly connected component, so it is enough
+  /// to make each component acyclic. Spilling a node drops all of its outgoing
+  /// edges, which breaks every cycle through it -- but a component holding
+  /// several cycles that do not all pass through one node stays cyclic after a
+  /// single spill, so what is left of that component is decomposed again. The
+  /// re-decomposition is confined to the component's own nodes: the caller gets
+  /// one acyclic residual from one call and never re-walks the whole graph.
+  ///
+  /// Victims are always on a cycle at the moment they are chosen, so no scratch
+  /// buffer is spent on a copy that merely sits downstream of one. The set is
+  /// not guaranteed minimal -- a minimum feedback vertex set is NP-hard, and the
+  /// lowest-numbered member is picked instead.
+  ///
+  /// Cost is O(k + E) for the first decomposition plus, per component that needs
+  /// more than one spill, another pass over that component alone.
+  static std::vector<size_t> CycleVictims(const std::vector<std::vector<size_t>>& successors,
+                                          const std::vector<bool>& emitted) {
+    const size_t count = successors.size();
+    std::vector<char> active(count, 0);
+    std::vector<size_t> all_nodes;
+    for (size_t i = 0; i < count; ++i) {
+      if (emitted[i]) continue;
+      active[i] = 1;
+      all_nodes.push_back(i);
+    }
+
+    std::vector<size_t> victims;
+    std::vector<std::vector<size_t>> pending{std::move(all_nodes)};
+    while (!pending.empty()) {
+      const std::vector<size_t> subset = std::move(pending.back());
+      pending.pop_back();
+      for (auto& component : StronglyConnectedComponents(successors, active, subset)) {
+        const bool has_self_edge = component.size() == 1 &&
+                                   std::find(successors[component[0]].begin(), successors[component[0]].end(),
+                                             component[0]) != successors[component[0]].end();
+        if (component.size() < 2 && !has_self_edge) continue;
+
+        const size_t victim = *std::min_element(component.begin(), component.end());
+        victims.push_back(victim);
+        active[victim] = 0;  // its outgoing edges are gone once it reads a spill
+
+        // The rest of this component may still hold a cycle the victim was not on.
+        std::vector<size_t> remainder;
+        for (size_t member : component) {
+          if (member != victim) remainder.push_back(member);
+        }
+        if (remainder.size() > 1) pending.push_back(std::move(remainder));
       }
     }
     return victims;
