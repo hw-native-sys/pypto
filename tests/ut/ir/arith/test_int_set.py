@@ -15,6 +15,7 @@ from pypto.arith import Analyzer, IntSet, IntSetAnalyzer
 
 S = ir.Span.unknown()
 INT = DataType.INT64
+FLOAT = DataType.FP32
 BOOL = DataType.BOOL
 
 x = ir.Var("x", ir.ScalarType(INT), S)
@@ -28,6 +29,10 @@ d = ir.Var("d", ir.ScalarType(INT), S)
 
 def ci(value: int) -> ir.ConstInt:
     return ir.ConstInt(value, INT, S)
+
+
+def cf(value: float) -> ir.ConstFloat:
+    return ir.ConstFloat(value, FLOAT, S)
 
 
 def assert_is_const_int(expr: ir.Expr | None, expected: int) -> None:
@@ -296,6 +301,25 @@ class TestIntSetConstraint:
         with ana.constraint_context(ir.Lt(x, ci(10), BOOL, S)):
             s = ana.int_set(x)
             assert_is_const_int(s.max_value, 9)
+
+    @pytest.mark.parametrize("constraint", [ir.Lt, ir.Gt])
+    def test_strict_float_constraint_does_not_use_integer_unit(self, constraint):
+        ana = Analyzer()
+        value = ir.Var("value", ir.ScalarType(FLOAT), S)
+        ana.int_set.update(value, IntSet.everything())
+        with ana.constraint_context(constraint(value, cf(1.0), BOOL, S)):
+            constrained = ana.int_set(value)
+            assert constrained.min_value is None
+            assert constrained.max_value is None
+
+    @pytest.mark.parametrize("constraint", [ir.Lt, ir.Gt])
+    def test_strict_non_scalar_constraint_is_ignored(self, constraint):
+        analyzer = IntSetAnalyzer()
+        scalar = ir.Var("scalar", ir.ScalarType(INT), S)
+        tensor = ir.Var("tensor", ir.TensorType([1], FLOAT), S)
+
+        assert analyzer.enter_constraint(constraint(tensor, scalar, BOOL, S)) is None
+        assert analyzer.enter_constraint(constraint(scalar, tensor, BOOL, S)) is None
 
     def test_constraint_scope_restores(self):
         ana = Analyzer()

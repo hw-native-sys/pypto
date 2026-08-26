@@ -29,6 +29,7 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/transforms/base/functor.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
@@ -397,6 +398,13 @@ std::function<void()> IntSetAnalyzer::Impl::EnterConstraint(const ExprPtr& const
                          SymMinUpper(old.max_value, new_set.max_value, parent_)};
   };
 
+  auto AreIntegerScalarOperands = [](const ExprPtr& left, const ExprPtr& right) {
+    // type.h is included directly, but LLVM 21 include-cleaner can miss it after a transitive inclusion.
+    auto left_type = As<ScalarType>(left->GetType());    // NOLINT(misc-include-cleaner)
+    auto right_type = As<ScalarType>(right->GetType());  // NOLINT(misc-include-cleaner)
+    return left_type && right_type && left_type->dtype_.IsInt() && right_type->dtype_.IsInt();
+  };
+
   ExprPtr one = MakeConstInt(1, DataType::INT64);
 
   std::function<void(const ExprPtr&)> TryParse = [&](const ExprPtr& expr) {
@@ -410,8 +418,9 @@ std::function<void()> IntSetAnalyzer::Impl::EnterConstraint(const ExprPtr& const
       }
       return;
     }
-    // Gt: left > right  =>  left.min = right + 1
+    // Gt: for integer operands, left > right  =>  left.min = right + 1
     if (auto gt = As<Gt>(expr)) {
+      if (!AreIntegerScalarOperands(gt->left_, gt->right_)) return;
       if (auto var = As<Var>(gt->left_)) {
         TryTighten(var.get(), {MaybeSimplify(parent_, MakeAdd(gt->right_, one)), nullptr});
       }
@@ -430,8 +439,9 @@ std::function<void()> IntSetAnalyzer::Impl::EnterConstraint(const ExprPtr& const
       }
       return;
     }
-    // Lt: left < right  =>  left.max = right - 1
+    // Lt: for integer operands, left < right  =>  left.max = right - 1
     if (auto lt = As<Lt>(expr)) {
+      if (!AreIntegerScalarOperands(lt->left_, lt->right_)) return;
       if (auto var = As<Var>(lt->left_)) {
         TryTighten(var.get(), {nullptr, MaybeSimplify(parent_, MakeSub(lt->right_, one))});
       }
