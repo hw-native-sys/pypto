@@ -1020,6 +1020,30 @@ def split_aiv(n: int, *, mode: ir.SplitMode) -> SplitAivContext:
             kv = pl.aic_gather(v)                # V->C: named
         out = pl.matmul(kv, w)                   # cube again, outside
 
+    **Every crossing in one function must agree on split-vs-no-split.** All the
+    ``pl.aiv_shard`` / ``pl.aic_gather`` calls in a function ride ONE logical
+    cross-core pipe -- one ``initialize_pipe`` per side, both directions on the
+    same pipe -- and pto-isa carries no-split as a parameter of that pipe's TYPE
+    (``TPipe<..., IsNoSplit, ...>``), selecting a different handshake protocol.
+    A pipe is therefore split or un-split for its whole lifetime, so a ``NONE``
+    region that crosses the boundary cannot sit beside a data-parallel one that
+    also crosses it::
+
+        for _ in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+            a = pl.exp(pl.aiv_shard(mm0))        # crossing, no split
+        for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+            b = pl.exp(pl.aiv_shard(mm1))        # crossing, split   -> rejected
+
+    Two **different** split axes are fine -- the axis is a per-transfer choice,
+    only split-vs-no-split belongs to the pipe -- so ``UP_DOWN`` beside
+    ``LEFT_RIGHT`` is accepted. A region carrying **no** crossing is free to use
+    any mode: the ``NONE`` region that only pins a ``pld.system.notify`` to the
+    vector lane never touches the pipe. When two phases genuinely need different
+    transports, put them in separate ``pl.at(level=pl.Level.CORE_GROUP)`` scopes
+    -- each outlines into its own function, and so gets its own pipe. Diagnosed
+    by ``AivSplitValid`` at OutlineIncoreScopes; without it the program reaches
+    ptoas, which rejects it at ``pto.initialize_l2g2l_pipe``.
+
     **Gather only a lane-uniform value out of a ``NONE`` region.** The ISA requires
     both AIV sub-lanes to take part in a no-split handshake and they share one
     destination slot with no per-lane offset, and nothing arbitrates between

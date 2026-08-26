@@ -217,9 +217,11 @@ tile 调用 `set_validshape`。
   断言在 release 构建里被编译掉了。所以部分有效的 Acc-to-Vec 传输无论是否切分，
   TPOP 以及 TPUSH 的**列**维度都使用完整物理 box，并在传输两侧立即恢复逻辑 valid
   shape——消费侧通过纯元数据的 `pto.treshape` 恢复（前端 tpop 结果不是 PTOAS 的本地
-  绑定 tile，`pto.set_validshape` 无法就地修改它）。第一个例外是切分轴上的 extent：
-  它必须保持逐 lane 的值并留在 TPOP 操作数上，因为 ISA 正是靠它定位 lane 1 的数据段
-  起点。
+  绑定 tile，`pto.set_validshape` 无法就地修改它）。第一个例外是切分轴上的 extent：它必须保持
+  逐 lane 的值并留在 TPOP 操作数上，因为 ISA 正是靠它定位 lane 1 的数据段起点——也正因如此，
+  编译期无法核验的逐 lane extent 绝不能到达那里。`pl.split_aiv` 区域中切分轴 extent 为运行期
+  值的边界，会让被弹出的 tile 保留完整 box（`split_axis::WithFullSplitAxisValid`），使偶数
+  code 的数据段落在 box 的一半处，而把 lane 自身的 extent 交给消费者携带。
 - 第二个例外是**非切分** Acc-to-Vec TPUSH 的**行**维度：它必须保持 producer 写入时
   的值。TPUSH 执行的是 L0C 上的 `TStoreAccNz2nd`，其源 pitch 对 compact tile 为
   `ceil(validRow/16)*16`，否则为 `TileData::Rows`；而 `mad` 是按 L0A 操作数的**有效**
@@ -236,7 +238,7 @@ tile 调用 `set_validshape`。
   拒绝之前，设备上实测 8192 个元素中有 1808 个是错的。该拒绝以 pitch 确实不同为前提，
   因此单个 fractal 行块的累加器（`ceil(validRow/16)*16 == Rows`）仍可照常跨越。
 - 当 tpop 结果的 `TileView.valid_shape` 与物理 tile shape 不一致时，PTO codegen 会生成 PTOAS 前端操作数：`%buf = pto.tpop_from_*(%valid_row, %valid_col) {[id = I, ]split = N} -> !pto.tile_buf<..., v_row=?, v_col=?, ...>`。这同时覆盖动态表达式和 `[0, 0]` 这类静态非满形状；operand 携带后续计算和 store 使用的逻辑范围。对于静态形状、非空的部分 pop，上述 Cube-to-Vector 完整 box 传输优先，因为 `pto.treshape` 不带 valid-row/valid-col operand，只能恢复*静态*逻辑范围。
-- 对于 split consumer，`LowerAutoVectorSplit` 会按 subblock 本地化这些动态
+- 对于手写 pop 的 split consumer，`SplitVectorKernel` 会按 subblock 本地化这些动态
   tpop valid-shape operand（例如 `[16, 16]` tile 做上下切分时，全局
   `[8, 16]` 会变成 `[8, 16]` 和 `[0, 16]`）。奇数切分轴走同一条路径——`[17, 128]`
   的 tile 在 `split = 3` 下，lane 0 弹出 `[9, 128]`，lane 1 弹出 `[8, 128]`。

@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <string>
@@ -25,10 +26,12 @@
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
 #include "pypto/ir/transforms/utils/split_axis_utils.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
 
@@ -108,6 +111,92 @@ bool IsBoundaryOp(const CallPtr& op) {
 
 bool IsGatherOp(const CallPtr& op) { return IsOp(op, "tile.aic_gather") || IsOp(op, "tensor.aic_gather"); }
 
+/// Every diagnostic this verifier raises goes through here, whether it comes
+/// from the per-node walk or from a whole-function check reported outside it,
+/// so the rule name and severity have one definition.
+void AddError(std::vector<Diagnostic>& diagnostics, const Span& span, const std::string& message) {
+  diagnostics.emplace_back(DiagnosticSeverity::Error, "AivSplitValid", 0, message, span);
+}
+
+/// The DSL spelling of a split code, for a diagnostic an author can act on
+/// (``SplitModeToString`` gives the C++ enumerator, which is not what anyone
+/// types). Falls back to the raw code instead of throwing on an out-of-range
+/// one: a verifier reports on malformed IR, it does not add a failure of its
+/// own on top of it.
+std::string SplitModeDslName(int split_code) {
+  if (IsValidSplitCode(split_code)) {
+    switch (SplitModeFromSplitCode(split_code)) {
+      case SplitMode::None:
+        return "pl.SplitMode.NONE";
+      case SplitMode::UpDown:
+        return "pl.SplitMode.UP_DOWN";
+      case SplitMode::LeftRight:
+        return "pl.SplitMode.LEFT_RIGHT";
+    }
+  }
+  return "split=" + std::to_string(split_code);
+}
+
+/// " (at file:line:col)" when the span carries a source location, else empty.
+/// Check (k) names BOTH ends of a conflict and only one of them can own the
+/// diagnostic's own span, so the other has to be spelled out in the text.
+std::string AtSpanSuffix(const Span& span) {
+  return span.is_valid() ? " (at " + span.to_string() + ")" : std::string();
+}
+
+/// Where a Var was bound, for the region-edge crossing checks.
+struct ValueDef {
+  CallPtr call;  ///< the defining call (null when the binding is not a Call)
+  /// The innermost region the binding sits in, or null when it sits outside
+  /// every region. Checks (f)/(g) need only the presence (`in_region()`); check
+  /// (j) needs the IDENTITY, because a boundary result is legal in the region
+  /// that produced it and rejected in any OTHER data-parallel one.
+  const SplitAivScopeStmt* region = nullptr;
+
+  [[nodiscard]] bool in_region() const { return region != nullptr; }
+};
+
+/// The author-facing spelling of a boundary op, for a diagnostic that has to name
+/// the call the author would write. Both the tile.* and tensor.* forms of one
+/// direction map to the same pl.* name, so a message reads the same wherever in
+/// the verification window it fires.
+std::string BoundaryOpDslName(const CallPtr& op) { return IsGatherOp(op) ? "pl.aic_gather" : "pl.aiv_shard"; }
+
+/// The defining Call of `expr` when that definition is a boundary op, else null.
+/// AsVarLike so an IterArg carrying the value is resolved like a plain Var
+/// (ir-kind-traits.md); the def map itself only ever holds AssignStmt bindings,
+/// so a chained carry resolves to null rather than to the wrong producer.
+CallPtr BoundaryDefOfIn(const ExprPtr& expr, const std::unordered_map<const Var*, ValueDef>& defs) {
+  auto var = AsVarLike(expr);
+  if (!var) return nullptr;
+  auto it = defs.find(var.get());
+  if (it == defs.end() || !it->second.call || !IsBoundaryOp(it->second.call)) return nullptr;
+  return it->second.call;
+}
+
+/// The values of the loop body's trailing YieldStmt, when it has one of exactly
+/// `arity`. Null otherwise, which leaves check (i)'s yield end unchecked rather
+/// than pairing an iter_arg with the wrong value.
+///
+/// Only the body's own top level is searched: a YieldStmt nested inside an IfStmt
+/// is that conditional's phi, not the loop's back edge, and pairing against it
+/// would report an if-arm as a loop carry.
+const std::vector<ExprPtr>* TrailingYieldValues(const StmtPtr& body, size_t arity) {
+  if (!body) return nullptr;
+  // transform_utils::GetLastYieldStmt is the shared traversal for "the yield on
+  // this body's back edge", and it is the one to reuse rather than re-roll: it
+  // descends only the LAST statement (so a yield with anything after it is not
+  // mistaken for the back edge), and it steps through RuntimeScopeStmt and
+  // SplitAivScopeStmt, which SSA treats as transparent. ConvertToSSA places a
+  // loop's carry yield INSIDE a trailing region, so that second property is not
+  // an edge case here -- it is the shape ordinary DSL input takes.
+  auto yield = transform_utils::GetLastYieldStmt(body);
+  // Arity mismatch is another verifier's finding; pairing values with iter_args
+  // positionally would be wrong here, so leave the yield side unchecked instead.
+  if (!yield || yield->value_.size() != arity) return nullptr;
+  return &yield->value_;
+}
+
 /// The lane a call reads its OPERANDS on — what the crossing checks (f)/(g) need
 /// from a consumer.
 ///
@@ -130,10 +219,16 @@ core_affinity::CoreAffinity ConsumerLane(const CallPtr& op) {
   }
 }
 
-/// Where a Var was bound, for the region-edge crossing checks.
-struct ValueDef {
-  CallPtr call;    ///< the defining call (null when the binding is not a Call)
-  bool in_region;  ///< bound at region depth > 0
+/// One cross-core transport a boundary op contributes, for check (k). `split`
+/// is the op's authored ``split`` kwarg — the SplitMode int ExpandMixedKernel
+/// turns into the pto split code on the tpush/tpop/tfree triple, and the value
+/// PTOAS then classifies as no-split (0) or split (non-zero).
+struct BoundaryTransport {
+  CallPtr call;  ///< the boundary op; null when no op of this class was seen
+  int split = kSplitNone;
+  size_t order = 0;  ///< scan position, so the diagnostic lands on the SECOND one
+
+  [[nodiscard]] bool seen() const { return call != nullptr; }
 };
 
 /// Function-level facts the per-node checks need but cannot read off a single
@@ -148,6 +243,12 @@ struct FunctionSplitFacts {
   /// param, an IterArg or a loop return var has no defining call, and a check
   /// that cannot see how a value was produced must stay silent about it.
   std::unordered_map<const Var*, ValueDef> defs;
+  /// The first boundary op of each transport class, for check (k). Only the
+  /// first of each is kept: the check is "are both classes present", and one
+  /// diagnostic naming one representative of each is the report — one per
+  /// offending op would be noise, since they all ride the same pipe.
+  BoundaryTransport first_nosplit;
+  BoundaryTransport first_split;
 };
 
 /// Single pre-pass over one function body collecting `FunctionSplitFacts`.
@@ -160,24 +261,96 @@ class FunctionSplitFactScanner : public IRVisitor {
  public:
   void VisitStmt_(const SplitAivScopeStmtPtr& op) override {
     facts_.has_region = true;
-    ++depth_;
+    const SplitAivScopeStmt* prev = cur_region_;
+    cur_region_ = op.get();
     IRVisitor::VisitStmt_(op);
-    --depth_;
+    cur_region_ = prev;
   }
 
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (op->var_) {
-      facts_.defs[op->var_.get()] = ValueDef{std::dynamic_pointer_cast<const Call>(op->value_), depth_ > 0};
+      facts_.defs[op->var_.get()] = ValueDef{std::dynamic_pointer_cast<const Call>(op->value_), cur_region_};
     }
     IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitExpr_(const CallPtr& op) override {
+    RecordBoundaryTransport(op);
+    IRVisitor::VisitExpr_(op);
   }
 
   [[nodiscard]] const FunctionSplitFacts& facts() const { return facts_; }
 
  private:
+  /// Classify one boundary op into its transport class, for check (k).
+  ///
+  /// Keyed on the op's OWN ``split`` kwarg rather than on the enclosing
+  /// region's mode, because the kwarg is what actually reaches the pipe: the
+  /// parser stamps it from the innermost ``pl.split_aiv`` mode (so nesting
+  /// resolves for free), the outlined ``pl.tile.aiv_shard(t, split=N)`` form
+  /// carries it with no region at all, and a region holding no boundary op
+  /// contributes no transport — which the kwarg reading gets right without a
+  /// separate "does this region transport anything" gate.
+  ///
+  /// A boundary op with NO ``split`` kwarg is malformed IR, not a no-split
+  /// transport: reading the missing key as 0 would invent one and report a mix
+  /// that is not there. Every front end stamps it (ast_parser's two surface
+  /// forms, LowerAutoVectorSplit's MakeReshapeOpCall, and the 1:1
+  /// tensor -> tile conversion that forwards it), so skipping costs nothing.
+  void RecordBoundaryTransport(const CallPtr& op) {
+    if (!op || !op->op_ || !IsBoundaryOp(op) || !op->HasKwarg("split")) return;
+    const int split = op->GetKwarg<int>("split", kSplitNone);
+    BoundaryTransport& slot = (split == kSplitNone) ? facts_.first_nosplit : facts_.first_split;
+    if (!slot.seen()) slot = BoundaryTransport{op, split, boundary_order_};
+    ++boundary_order_;
+  }
+
   FunctionSplitFacts facts_;
-  int depth_ = 0;
+  /// Position of the next boundary op in the scan, so check (k) can report on
+  /// the one that INTRODUCES the mix rather than on whichever it stored first.
+  size_t boundary_order_ = 0;
+  /// Innermost enclosing region, or null at top level. Replaces a plain depth
+  /// counter: nesting still resolves to "the region this binding is in", which
+  /// is what ValueDef::region records.
+  const SplitAivScopeStmt* cur_region_ = nullptr;
 };
+
+/// (k) One function, one cross-core pipe -- so one transport class.
+///
+/// Reported here rather than from the per-node walk because it is a
+/// whole-function fact: the two offending ops are legal individually and only
+/// their coexistence is the error, so there is no single node to hang it on.
+/// Check (e) is function-gated for the same reason, and shares the same
+/// assumption -- one region-bearing function is one outlined InCore function is
+/// one pipe. That holds across this property's whole verification window, which
+/// opens only once OutlineIncoreScopes has lifted each CORE_GROUP scope into
+/// its own function.
+void CheckSingleTransportClass(const FunctionSplitFacts& facts, std::vector<Diagnostic>& diagnostics) {
+  if (!facts.first_nosplit.seen() || !facts.first_split.seen()) return;
+  // Report on the op that ARRIVES second: everything before it is consistent
+  // with itself, so that is the crossing whose mode has to give.
+  const bool nosplit_is_later = facts.first_nosplit.order > facts.first_split.order;
+  const BoundaryTransport& late = nosplit_is_later ? facts.first_nosplit : facts.first_split;
+  const BoundaryTransport& early = nosplit_is_later ? facts.first_split : facts.first_nosplit;
+
+  AddError(diagnostics, late.call->span_,
+           "'" + BoundaryOpDslName(late.call) + "' crosses the AIC/AIV boundary under " +
+               SplitModeDslName(late.split) + ", but '" + BoundaryOpDslName(early.call) +
+               "' earlier in this function crosses it under " + SplitModeDslName(early.split) +
+               AtSpanSuffix(early.call->span_) +
+               ". Every pl.aiv_shard / pl.aic_gather in one function rides a SINGLE logical "
+               "cross-core pipe (one initialize_pipe per side, both directions on the same pipe), "
+               "and the ISA bakes split-vs-no-split into that pipe's TYPE rather than into each "
+               "transfer, so one pipe runs either the no-split protocol or the split one and never "
+               "both. Two DIFFERENT split axes are fine -- pl.SplitMode.UP_DOWN beside "
+               "pl.SplitMode.LEFT_RIGHT shares the pipe, because the split AXIS is per-transfer. "
+               "Fix it one of three ways: (1) give this crossing a split mode too (or give the "
+               "other one pl.SplitMode.NONE) so every crossing in the function agrees on "
+               "split-vs-no-split; (2) drop the crossing from one of the two regions -- a region "
+               "with no pl.aiv_shard / pl.aic_gather contributes no transport and may keep any "
+               "mode; or (3) split the phases into separate CORE_GROUP scopes, which outline into "
+               "separate functions and so get a pipe each.");
+}
 
 // Structural verifier for the first-class SplitAivScopeStmt region (live between
 // OutlineIncoreScopes and LowerAutoVectorSplit). It keys every check on the node
@@ -242,6 +415,46 @@ class FunctionSplitFactScanner : public IRVisitor {
 //       OUTSIDE it must be the result of a tile.aic_gather.
 //   (g) C->V: a CUBE-produced value defined OUTSIDE every region and consumed by
 //       a VECTOR-lane op INSIDE one must reach it through a tile.aiv_shard.
+//   (i) A pl.aiv_shard / pl.aic_gather result must not cross a loop back-edge —
+//       neither as a loop iter_arg's init value nor as the value yielded back
+//       into one. The half-width property is not tracked through a loop phi:
+//       LowerAutoVectorSplit's scan sees the IterArg rather than the shard that
+//       defined it and reports an already-halved tile as full width, while
+//       ExpandMixedKernel folds the boundary into a tpop and then
+//       FixupIterArgInitValues — which runs before the DeepClone that would
+//       substitute it — reads the original init var as undefined and resurrects
+//       the very op that was just folded away. Both ends are checked: the loop
+//       type-checks either way, so a body seeded with a half-shaped tile.full and
+//       fed by a shard from iteration 1 onwards defeats the same passes with no
+//       init-side signal.
+//   (j) A boundary result must be consumed in the region that produced it, when
+//       the consuming region is DATA-PARALLEL. Both paths such a region can take
+//       mishandle one from elsewhere: with no boundary op of its own it halves
+//       every tile it computes along the split axis and localizes every store
+//       offset to the lane, so an already-per-lane value is halved twice and
+//       offset twice; with one, nothing is re-halved but ScanRegionHalfWidth is
+//       seeded per REGION, so the incoming value is misjudged as full width. A
+//       mode=NONE region takes neither path and is exempt — that carve-out is
+//       what keeps the cross-core comm-kernel shape (shard in one region, consume
+//       in a NONE one) legal, and it is why (j) is gated rather than universal.
+//       Keyed on the DEFINITION being a boundary op, not on the value being
+//       per-lane: a per-lane value one op removed from the boundary is legal and
+//       shipped (see the note on CheckBoundaryRegionLocality).
+//
+//   (k) A function must not mix a no-split crossing with a split one. Every
+//       pl.aiv_shard / pl.aic_gather in one function rides ONE logical
+//       cross-core pipe -- BuildAutomaticPipeSetup emits a single
+//       initialize_pipe per side, with a combined dir_mask, so both directions
+//       share it too -- and pto-isa bakes split-vs-no-split into that pipe's
+//       TYPE (the IsNoSplit parameter of TPipe<...>), not into each transfer.
+//       One pipe therefore runs the no-split protocol or the split one for its
+//       whole lifetime, and PTOAS rejects the mix at
+//       'pto.initialize_l2g2l_pipe', naming an internal op the author never
+//       wrote. The split AXIS is genuinely per-transfer (TALLOC / TPUSH / TPOP
+//       take TileSplitAxis as their own template argument), so UP_DOWN beside
+//       LEFT_RIGHT shares one pipe and is NOT rejected -- the split is between
+//       SplitMode::None and everything else, exactly as PTOAS partitions it.
+//       Reported once per function, on the later of the two offending ops.
 //
 // (f) and (g) are the point of manual mode. BOTH crossings already lower without
 // them: the compiler happily emits tpush/tpop(split=0) for an implicit crossing
@@ -326,6 +539,8 @@ class SplitAivStructuralVerifier : public IRVisitor {
           "let pass 8 outline it.");
     }
     int prev_split_dim = cur_split_dim_;
+    const SplitAivScopeStmt* prev_region = cur_region_;
+    cur_region_ = op.get();
     ++depth_;
     // A task-parallel (None) region has NO split axis — both lanes run the full
     // body, dispatched via aiv_id. Mark cur_split_dim_ = -1 so the one genuinely
@@ -335,6 +550,21 @@ class SplitAivStructuralVerifier : public IRVisitor {
     IRVisitor::VisitStmt(op->body_);
     --depth_;
     cur_split_dim_ = prev_split_dim;
+    cur_region_ = prev_region;
+  }
+
+  // (i) A boundary result must not be carried across a loop back-edge. Keyed on
+  // the loop header, which is where both ends of the carry are visible: the
+  // iter_arg's init (the value iteration 0 reads) and the matching yield (the
+  // value every later iteration reads).
+  void VisitStmt_(const ForStmtPtr& op) override {
+    CheckNoBoundaryCarry(op->iter_args_, op->body_);
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    CheckNoBoundaryCarry(op->iter_args_, op->body_);
+    IRVisitor::VisitStmt_(op);
   }
 
   void VisitExpr_(const CallPtr& op) override {
@@ -372,6 +602,10 @@ class SplitAivStructuralVerifier : public IRVisitor {
                                  : "."));
         }
         if (data_parallel) {
+          // (j) A boundary result belongs to the region that produced it. Gated
+          // on the data-parallel modes for the same reason as (b) below: only
+          // they rewrite the region's tiles and offsets.
+          CheckBoundaryRegionLocality(op);
           // (b) A reduce over the split axis yields a partial per-lane result.
           // Gated on the data-parallel modes: a NONE region has no split axis,
           // so the same reduce is a full (not partial) reduction on both lanes.
@@ -442,7 +676,7 @@ class SplitAivStructuralVerifier : public IRVisitor {
       // where the author put the value — same carve-out, same reason.
       if (def.call && IsHoistedMemoryOp(def.call)) continue;
 
-      if (!in_region && def.in_region) {
+      if (!in_region && def.in_region()) {
         // (f) V->C: defined inside a region, read on the cube lane outside it.
         if (def.call && IsGatherOp(def.call)) continue;
         Err(op->span_,
@@ -455,7 +689,7 @@ class SplitAivStructuralVerifier : public IRVisitor {
                 ")' — and read the "
                 "gathered value here.");
         reported.push_back(var.get());
-      } else if (in_region && !def.in_region && def.call &&
+      } else if (in_region && !def.in_region() && def.call &&
                  core_affinity::ClassifyCallAffinity(def.call) == core_affinity::CoreAffinity::CUBE) {
         // (g) C->V: cube-produced outside every region, read on the vector lane
         // inside one. Gated on the DEFINER being cube work rather than on the
@@ -473,6 +707,109 @@ class SplitAivStructuralVerifier : public IRVisitor {
                 "sharded value here.");
         reported.push_back(var.get());
       }
+    }
+  }
+
+  /// (i) A pl.aiv_shard / pl.aic_gather result must not be carried across a loop
+  /// back-edge.
+  ///
+  /// Both ends of the carry are checked. The INIT is what iteration 0 reads; the
+  /// matching YIELD is what every later iteration reads. Checking only the init
+  /// would miss a loop seeded with a half-shaped non-boundary tile (a
+  /// `tile.full([HALF, N])`) and fed by a boundary op from the body onwards --
+  /// same defeat, no diagnostic.
+  ///
+  /// Both ends are looked up in the same def map the crossing checks use, so the
+  /// whole check is O(iter_args) hash lookups per loop, i.e. O(N) over the body.
+  void CheckNoBoundaryCarry(const std::vector<IterArgPtr>& iter_args, const StmtPtr& body) {
+    if (!facts_.has_region || iter_args.empty()) return;
+    // Positional: yields[i] is the value rebound into iter_args[i] on the back
+    // edge. A body with no trailing yield (or a mismatched arity, which the
+    // structural verifiers reject on their own) simply leaves the yield side
+    // unchecked rather than mis-pairing it.
+    const std::vector<ExprPtr>* yields = TrailingYieldValues(body, iter_args.size());
+    for (size_t i = 0; i < iter_args.size(); ++i) {
+      const auto& iter_arg = iter_args[i];
+      if (!iter_arg) continue;
+      const char* end = "the initial value of";
+      CallPtr def = BoundaryDefOf(iter_arg->initValue_);
+      if (!def && yields != nullptr) {
+        def = BoundaryDefOf((*yields)[i]);
+        end = "yielded back into";
+      }
+      if (!def) continue;
+      Err(iter_arg->span_,
+          "'" + iter_arg->name_hint_ + "' carries a " + BoundaryOpDslName(def) +
+              " result across a loop back-edge: it is " + end +
+              " a loop-carried variable, so the loop body reads the copy produced by the PREVIOUS "
+              "iteration. A boundary result is per-lane (half-width), and that property is not "
+              "tracked across a loop carry -- nor can the boundary op be folded into its cross-core "
+              "tpush/tpop while the loop still carries the result. Fix it one of two ways: (1) produce "
+              "and consume it in ONE iteration -- move the " +
+              BoundaryOpDslName(def) +
+              " call into the loop body, next to the op that reads it; or (2) if you are pipelining "
+              "the cube ahead of the vector, carry the FULL-width pl.matmul accumulator across the "
+              "loop and shard it at the point of use -- note that keeps a second set of L0C "
+              "accumulators live and may exceed the Acc budget.");
+    }
+  }
+
+  /// (j) A boundary result must be consumed in the region that produced it.
+  ///
+  /// Runs only in a DATA-PARALLEL region. Both lowering paths such a region can
+  /// take mishandle a boundary result from ANOTHER region, for different reasons:
+  ///   * IMPLICIT (no boundary op written in this region): LowerAutoVectorSplit
+  ///     halves every tile the region computes along the split axis and localizes
+  ///     every store offset to the lane, so an already-per-lane value is halved
+  ///     twice and offset twice. The offset corruption is silent; the shape
+  ///     corruption escapes pypto and surfaces from ptoas.
+  ///   * EXPLICIT (this region writes its own aiv_shard / aic_gather): nothing is
+  ///     re-halved, but ScanRegionHalfWidth seeds its half-width set per REGION,
+  ///     so the incoming value is misjudged as full width and the region is
+  ///     rejected with a message that is factually wrong about it.
+  /// A mode=NONE region takes neither path -- no split axis, no halving, no
+  /// scan -- so it may legitimately consume a boundary result produced elsewhere.
+  /// That is the shape the cross-core comm kernels use, and it is why this check
+  /// is gated rather than applied to every region.
+  ///
+  /// Keyed on the DEFINITION being a boundary op, not on the value being
+  /// per-lane. A per-lane value one op removed from the boundary (a `row_scale`
+  /// derived from a shard inside region A and read in region B) is legal today
+  /// and shipped; widening this check to reach it would reject working kernels.
+  ///
+  /// A boundary op is not judged as a consumer, for the same reason (f)/(g) skip
+  /// one: the op IS the crossing, so it is the wrong node to report a crossing
+  /// against. The (e)/(f)/(g) tile.load / tile.store carve-out deliberately does
+  /// NOT apply here -- that carve-out exists because ConvertTensorToTileOps
+  /// hoists the pair OUT of a region, and this check only ever looks at a
+  /// consumer sitting INSIDE one, which is where the author put it.
+  void CheckBoundaryRegionLocality(const CallPtr& op) {
+    if (IsBoundaryOp(op)) return;
+    std::vector<const Var*> reported;
+    for (const auto& arg : op->args_) {
+      auto var = AsVarLike(arg);
+      if (!var) continue;
+      if (std::find(reported.begin(), reported.end(), var.get()) != reported.end()) continue;
+      auto it = facts_.defs.find(var.get());
+      if (it == facts_.defs.end()) continue;
+      const ValueDef& def = it->second;
+      if (!def.call || !IsBoundaryOp(def.call)) continue;
+      if (def.region == cur_region_) continue;  // produced right here -- the legal case
+      reported.push_back(var.get());
+      Err(op->span_,
+          "'" + var->name_hint_ + "' is a " + BoundaryOpDslName(def.call) +
+              " result produced in a DIFFERENT pl.split_aiv region, but '" + op->op_->name_ +
+              "' reads it inside this data-parallel one. A data-parallel region (mode=UP_DOWN / "
+              "LEFT_RIGHT) mishandles a boundary result it did not produce, whichever way it lowers: "
+              "if the region has no boundary op of its own the compiler halves every tile it computes "
+              "along the split axis and localizes every store offset to the lane, so an ALREADY "
+              "per-lane value is halved a second time and offset twice; and if the region does write "
+              "its own boundary op, nothing is re-halved but the half-width scan is seeded per region, "
+              "so the incoming value is misjudged as full width. Fix it one of two ways: (1) move the "
+              "ops that read it into the region that produced it; or (2) move the " +
+              BoundaryOpDslName(def.call) +
+              " call into this region. A mode=SplitMode.NONE region has no split axis and halves "
+              "nothing, so it MAY consume a boundary result produced elsewhere.");
     }
   }
 
@@ -543,9 +880,13 @@ class SplitAivStructuralVerifier : public IRVisitor {
     }
   }
 
-  void Err(const Span& span, const std::string& message) {
-    diagnostics_.emplace_back(DiagnosticSeverity::Error, "AivSplitValid", 0, message, span);
+  /// Member wrapper over the file-local resolver: every call site inside this
+  /// class means "in THIS function's def map".
+  [[nodiscard]] CallPtr BoundaryDefOf(const ExprPtr& expr) const {
+    return BoundaryDefOfIn(expr, facts_.defs);
   }
+
+  void Err(const Span& span, const std::string& message) { AddError(diagnostics_, span, message); }
 
   std::vector<Diagnostic>& diagnostics_;
   /// Whole-function facts for checks (e), (f) and (g). Held by reference — the
@@ -553,9 +894,13 @@ class SplitAivStructuralVerifier : public IRVisitor {
   /// outlives it, and `defs` is one entry per binding, too big to copy per
   /// function for no gain.
   const FunctionSplitFacts& facts_;
-  int depth_ = 0;                ///< Region nesting depth (>0 means inside a split_aiv region).
-  int cur_split_dim_ = -1;       ///< Split axis of the innermost enclosing region (-1 outside any region).
-  bool func_is_incore_ = false;  ///< Enclosing function is FunctionType::InCore, for check (h).
+  int depth_ = 0;           ///< Region nesting depth (>0 means inside a split_aiv region).
+  int cur_split_dim_ = -1;  ///< Split axis of the innermost enclosing region (-1 outside any region).
+  /// Innermost enclosing region node, or null outside every region. Check (j)
+  /// compares it against the region a value was DEFINED in, so presence alone
+  /// (depth_) is not enough.
+  const SplitAivScopeStmt* cur_region_ = nullptr;
+  bool func_is_incore_ = false;       ///< Enclosing function is FunctionType::InCore, for check (h).
   bool func_from_outlining_ = false;  ///< It carries the outliner's ``split_aiv`` stamp, for check (h).
 };
 
@@ -582,6 +927,9 @@ class AivSplitValidPropertyVerifierImpl : public PropertyVerifier {
       // the body can still establish.
       FunctionSplitFactScanner scanner;
       scanner.VisitStmt(func->body_);
+      // (k) is a whole-function fact -- one pipe per function -- so it is
+      // reported once here rather than from the per-node walk below.
+      CheckSingleTransportClass(scanner.facts(), diagnostics);
       // ``kAttrSplitAiv`` (function.h) is the provenance signal for check (h):
       // ScopeOutliner stamps it when it outlines a scope holding pl.split_aiv
       // regions, and LowerAutoVectorSplit re-stamps it on the lowered result.

@@ -36,12 +36,14 @@ program_inlined = inline_pass(program)
 3. **迭代到不动点** — 每次迭代遍历所有函数(包括 Inline 函数本身,以便嵌套的 Inline-calls-Inline 也能传递展开):
    - 对函数体中每个顶层 `LHS = inline_call(args)` 或 `EvalStmt(inline_call(args))`:
      - 构建参数替换映射(形参 `Var` → 实参 `Expr`)。
-     - 对内联体中每个本地绑定的 `Var` 做 alpha 重命名(`<orig>_inline<counter>`),避免多个调用点之间冲突。
+     - 对内联体中每个本地绑定的 `Var` 做 alpha 重命名(`<orig>_inline<counter>`,并去掉 `<orig>` 末尾的 `_`),避免多个调用点之间冲突。
      - 在调用点之前插入重命名+替换后的函数体语句。
      - 用 `LHS = renamed_return`(单返回值)或 `LHS = MakeTuple([renamed_returns...])`(多返回值)替换调用。当 `LHS` 与替换后的返回 `Var` 是同一个 `Var` 时,赋值被省略以避免冗余 SSA 拷贝。
 4. **删除**所有 Inline 函数。
 
 重命名后缀使用单下划线(`_inline`),因为 `__` 被 IR 自动命名约定保留(参见 `auto_name_utils.h`)。
+
+仅靠单下划线后缀并不足够:`<orig>` 本身可能以 `_` 结尾——`_` 是 Python 的弃值名,也是 `for _ in pl.split_aiv(...)` 文档所载的循环变量——此时直接拼接会把两个各自合法的下划线融合成保留分隔符。因此 `FreshName` 通过 `auto_name::JoinNameSuffix` 拼接,该函数会去掉这段尾巴:`_` 重命名为 `_inline7`,而非 `__inline7`。若 `<orig>` 本身**已经**含有 `__`,则原样透传,使作者手写的 `a__b` 仍然是 `ValidateBaseName` 报告的用户错误,而不会被悄悄规范化。
 
 ## 示例
 

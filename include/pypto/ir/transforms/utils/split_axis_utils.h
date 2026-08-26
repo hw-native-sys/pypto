@@ -117,9 +117,15 @@ ExprPtr ResolveLaneStride(const std::vector<StmtPtr>& stmts, int split_dim);
  * code. Any other ragged extent has no expressible band pair and is rejected
  * with an actionable message rather than silently popping the wrong rows.
  *
- * A dynamic (non-ConstInt) box or valid extent has no compile-time lane extents;
- * it keeps the even code, the only one whose lowering does not depend on the
- * parity.
+ * A dynamic (non-ConstInt) box or valid extent has no compile-time lane extents,
+ * so no code can be verified against them. It keeps the even code, which is exact
+ * only when the boundary tile also declares the full split-axis box: the producer
+ * transports that box, so lane 1's band sits at the box half and the even code
+ * points there whatever the extent turns out to be. LocalizeExplicitBoundaryValid
+ * establishes that pairing for a ``pl.split_aiv`` region (WithFullSplitAxisValid)
+ * and moves the lane's own extent onto the boundary's consumers. A hand-written
+ * ``tile.tpop_from_aic`` keeps its declared per-lane extent and is still
+ * misplaced for such a boundary — see RebuildTpopWithHalvedShape.
  *
  * @param mode The split mode (``None`` yields ``kSplitNone``).
  * @param full_type The PRE-split (full-width) boundary tile type.
@@ -165,6 +171,45 @@ int GatherSplitCode(SplitMode mode, const TypePtr& full_type, int split_dim, con
  */
 std::optional<std::pair<int64_t, int64_t>> StaticLaneExtents(const TypePtr& full_type, int split_dim,
                                                              const ExprPtr& lane_stride);
+
+/**
+ * @brief Whether the boundary's per-lane extents are known at compile time.
+ *
+ * The split code is a compile-time promise about the lanes' RUNTIME extents, and
+ * ShardSplitCode can only keep (or refuse) that promise when both the box and
+ * the valid extent are constants. When they are not, the per-lane extent must
+ * NOT be materialized onto the boundary tile: pto-isa would place lane 1's band
+ * at that extent, while the producer transported the full physical box. The
+ * boundary tile keeps its full split-axis extent instead, and the lane's real
+ * extent is carried by its consumers.
+ *
+ * @param full_type The PRE-split (full-width) boundary tile type.
+ * @param split_dim The partitioned tile dimension (see SplitDimension).
+ * @param lane_stride The body's partition stride; null for the box partition.
+ * @return ``true`` when both lane extents are compile-time constants.
+ */
+bool HasStaticLaneExtents(const TypePtr& full_type, int split_dim, const ExprPtr& lane_stride);
+
+/**
+ * @brief The same tile type with its split-axis extent declared FULL.
+ *
+ * pto-isa finds lane 1's band inside the FIFO slot from the POPPED tile's own
+ * split-axis extent, while the producer always transports the full physical box
+ * (PTO codegen's ``EmitTpushTransportValidShape`` widens every split tpush). The
+ * two agree only when the lanes' extents were verifiable at compile time — the
+ * balanced partition and the odd codes exist exactly to make them agree. When
+ * they were not (see HasStaticLaneExtents), the boundary tile must declare the
+ * box instead, which puts lane 1's band at the box half, where the producer
+ * wrote it. The lane's real extent is then carried by the boundary's consumers:
+ * the halving localizes each of them from its own pre-split type, and the
+ * explicit-region walk stamps it on the first one it reaches.
+ *
+ * @param type The (already halved) boundary tile type.
+ * @param split_dim The partitioned tile dimension (see SplitDimension).
+ * @return The type with ``valid_shape[split_dim] == shape_[split_dim]``;
+ *         @p type unchanged when it is not a TileType or already full there.
+ */
+TypePtr WithFullSplitAxisValid(const TypePtr& type, int split_dim);
 
 /**
  * @brief Detect a vector reduction that collapses the split axis.

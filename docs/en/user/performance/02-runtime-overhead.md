@@ -1,19 +1,21 @@
 # Runtime Overhead
 
-Four ways to spend less time per task without changing what the tasks compute.
+Five ways to spend less time per task without changing what the tasks compute.
 
 > **Prerequisites:** [Task granularity](01-task-granularity.md).
 
 ## Where this differs from the previous page
 
 Granularity changes *how many* tasks there are. This page changes *what each one costs*:
-one dispatch instead of two, one dispatch instead of `N`, a dispatch that starts earlier,
-or no dispatch at all where a barrier will do.
+one dispatch instead of two, one dispatch instead of `N`, no dispatch at all when a runtime
+value says the work is unnecessary, a dispatch that starts earlier, or one kernel carrying a
+barrier in place of two tasks and the AICPU round-trip between them.
 
 | Technique | Removes |
 | --------- | ------- |
 | [Mixed kernel](#build-a-mixed-kernel) | One of two dispatches, plus the GM round-trip between them |
 | [SPMD](#use-spmd) | `N − 1` dispatches for `N` blocks of the same work |
+| [Dispatch predicate](#skip-the-task-entirely) | The whole dispatch, when a runtime value says the work is not needed |
 | [`allow_early_resolve`](#let-consumers-pre-stage) | The pickup latency on the critical path |
 | [In-kernel `syncall`](#synchronize-inside-the-kernel) | An AICPU round-trip per synchronization point |
 
@@ -134,6 +136,70 @@ retires.
 occupying many core lanes at once. The plugin highlights all blocks of an SPMD task
 together when you click one.
 
+## Skip the task entirely
+
+**When it applies:** work whose need is only known at run time — an MoE expert whose
+router sent it no rows, a refinement step a computed error count makes unnecessary. The
+count exists only once an earlier task has run, so the decision cannot be made while
+building the graph.
+
+**How:** `predicate=` on `pl.spmd`, `pl.submit` or `pl.spmd_submit`. In a `@pl.jit`
+function `pl.spmd` is the form that carries it — `pl.at` has no predicate.
+
+<!-- doctest: run -->
+```python
+@pl.jit
+def gated(a: pl.Tensor, gate: pl.Tensor, out: pl.Out[pl.Tensor]):
+    with pl.manual_scope():
+        with pl.spmd(BLOCKS) as base_tid:                    # always dispatched
+            i = pl.tile.get_block_idx()
+            t = pl.load(a, [i * TILE_ROWS, 0], [TILE_ROWS, COLS])
+            pl.store(pl.mul(t, 2.0), [i * TILE_ROWS, 0], out)
+        # Dispatched only when the scheduler finds gate[0, 0] > 0.
+        with pl.spmd(BLOCKS, deps=[base_tid], predicate=(gate[0, 0] > 0)) as _bump:
+            i = pl.tile.get_block_idx()
+            t = pl.load(out, [i * TILE_ROWS, 0], [TILE_ROWS, COLS])
+            pl.store(pl.add(t, 1.0), [i * TILE_ROWS, 0], out)
+    return out
+
+for gate_value, expected in ((0, A * 2.0), (1, A * 2.0 + 1.0)):
+    gate = torch.full((1, 1), gate_value, dtype=torch.int32)
+    out = fresh()
+    gated(A, gate, out, config=CFG)
+    torch.testing.assert_close(out, expected, rtol=1e-4, atol=1e-4)
+```
+
+The scheduler evaluates the comparison at the **dispatch point**, after the task's
+dependencies are satisfied, so it reads a current value without the orchestration ever
+waiting on the tensor. When it is false the task is routed to the same queue as a dummy and
+retired inline: it never reaches a core, while its fanin and fanout still settle so
+consumers unlock exactly as they would have.
+
+**Cost:** the task still exists. You save the dispatch and the core time, not the
+bookkeeping — the slot, the edges and the retirement all still happen. So the saving is
+roughly *how often it skips* × *what the task costs*, against a fixed per-task overhead: an
+expensive task worth skipping one run in twenty can pay for itself, a cheap one that almost
+always runs will not. It is a measurement, not a rule of thumb.
+
+Two limits are enforced when you compile, so they bound what you can express rather than
+waiting to surprise you:
+
+- Only `tensor[indices] OP int-literal`, one comparison. No arithmetic, no `and`/`or`. Reduce
+  anything richer to a single gate value in a prior kernel.
+- The operand must be a **signed** 8/16/32/64-bit integer tensor. The runtime sign-extends
+  the bytes it reads, which is exactly why an unsigned operand is refused rather than
+  quietly compared as a negative number.
+
+The third is the one to watch, because nothing can check it in general:
+
+- The operand's producer must be among this task's `deps=`, or the dispatch-point read can
+  see stale data — no diagnostic, just a decision made from an old value. The parser catches
+  it only where the producer is statically provable. Above, `gate` is a function parameter
+  with no producer at all, which is the trivially safe case.
+
+**How to confirm:** the swimlane shows the predicated task retiring without occupying a core
+lane, and the graph keeps its shape — the node is still there, it just did not run.
+
 ## Let consumers pre-stage
 
 **When it applies:** a critical path built from many short tasks, where each consumer sits
@@ -195,8 +261,7 @@ Two modes, and the choice is not stylistic:
 | `pl.SyncAllMode.SOFT` | GM-polling counter | Any (`used_cores` participants) | `gm_workspace`, `used_cores` |
 
 `mode` and `core_type` are enums (`pl.SyncAllMode`, `pl.KernelType` — `MIX` is the
-both-kernel participant set). The strings these keywords used to take — `mode="soft"`,
-`core_type="mix"` — still work and emit a `DeprecationWarning`.
+both-kernel participant set); the strings these keywords once took are no longer accepted.
 
 Both modes synchronize arrival only: they do not wait for a preceding `TSTORE` or make
 business data cache-coherent. For a GM producer-to-consumer handoff that may span multiple

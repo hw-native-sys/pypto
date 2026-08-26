@@ -2420,7 +2420,13 @@ class TestAutoPipeSetup:
         _assert_function_equal(After, Expected, "main_incore_0_aiv")
 
     def test_alias_tfree_preserves_explicit_pipe_id(self):
-        """Canonicalizing a tfree alias must keep its original pipe id kwarg."""
+        """Canonicalizing a tfree alias must keep its original pipe id kwarg.
+
+        ``pl.tfree_to_aiv(alias, id=0)`` is canonicalized onto the tpop result
+        the alias names; ``Expected`` pins that the rewrite retargets the
+        argument *without* rewriting the explicit ``id=0`` to the tpop's own
+        ``id=1``.
+        """
 
         @pl.program
         class Before:
@@ -2435,31 +2441,53 @@ class TestAutoPipeSetup:
                 vector_tile: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=0)
                 pl.tfree_to_aic(vector_tile)
 
-        After = _expand_raw(Before)
-        aic_func = After.get_function("main_incore_0_aic")
-        assert aic_func is not None
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIC)
+            def main_incore_0_aic(self):
+                main_incore_0_v2c_slot_buffer: pl.Scalar[pl.INT32] = pl.reserve_buffer(
+                    name="main_incore_0_v2c_slot_buffer", size=2048, base=pl.AUTO
+                )
+                main_incore_0_c2v_slot_buffer_import: pl.Scalar[pl.INT32] = pl.import_peer_buffer(
+                    name="main_incore_0_c2v_slot_buffer", peer_func="main_incore_0_aiv"
+                )
+                pl.aic_initialize_pipe(
+                    main_incore_0_c2v_slot_buffer_import,
+                    main_incore_0_v2c_slot_buffer,
+                    dir_mask=3,
+                    slot_size=1024,
+                    slot_num=2,
+                )
+                received: pl.Tile[[16, 16], pl.FP16, pl.Mem.Mat] = pl.tpop_from_aiv(split=0, id=1)
+                # The alias binding survives the split; only its tfree use is retargeted.
+                alias: pl.Tile[[16, 16], pl.FP16, pl.Mem.Mat] = received  # noqa: F841
+                # Retargeted onto `received`, and still `id=0`, not the tpop's `id=1`.
+                pl.tfree_to_aiv(received, id=0)
 
-        tpop_var = None
-        tfree_call = None
-        for stmt in ir.flatten_to_stmts(aic_func.body):
-            if isinstance(stmt, ir.AssignStmt):
-                call = stmt.value
-            elif isinstance(stmt, ir.EvalStmt):
-                call = stmt.expr
-            else:
-                call = None
-            if not isinstance(call, ir.Call):
-                continue
-            if call.op.name == ir.get_op("tile.tpop_from_aiv").name:
-                assert isinstance(stmt, ir.AssignStmt)
-                tpop_var = stmt.var
-            elif call.op.name == ir.get_op("system.tfree_to_aiv").name:
-                tfree_call = call
+            @pl.function(type=pl.FunctionType.AIV)
+            def main_incore_0_aiv(self):
+                main_incore_0_v2c_slot_buffer_import: pl.Scalar[pl.INT32] = pl.import_peer_buffer(
+                    name="main_incore_0_v2c_slot_buffer", peer_func="main_incore_0_aic"
+                )
+                main_incore_0_c2v_slot_buffer: pl.Scalar[pl.INT32] = pl.reserve_buffer(
+                    name="main_incore_0_c2v_slot_buffer", size=2048, base=pl.AUTO
+                )
+                pl.aiv_initialize_pipe(
+                    main_incore_0_c2v_slot_buffer,
+                    main_incore_0_v2c_slot_buffer_import,
+                    dir_mask=3,
+                    slot_size=1024,
+                    slot_num=2,
+                )
+                vector_tile: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+                pl.tfree_to_aic(vector_tile)
 
-        assert tpop_var is not None
-        assert tfree_call is not None
-        assert tfree_call.args == [tpop_var]
-        assert tfree_call.kwargs["id"] == 0
+            @pl.function(type=pl.FunctionType.Group)
+            def main_incore_0(self):
+                self.main_incore_0_aic()
+                self.main_incore_0_aiv()
+
+        ir.assert_structural_equal(_expand_raw(Before), Expected)
 
     def test_auto_tfree_does_not_hoist_user_before_if_defined_tile(self):
         """A later tpop user must stay after an if-defined tile result."""
@@ -4367,33 +4395,13 @@ class TestManualPipeVtoCFractalAdapt:
     def test_push_keeps_its_attrs(self):
         """The rewrite replaces the pushed tile and nothing else.
 
-        `Call.attrs` carries compiler metadata an earlier pass or a caller may
+        ``Call.attrs`` carries compiler metadata an earlier pass or a caller may
         have attached to the op. Rebuilding the push must not quietly drop it,
         the same way rebuilding through CreateTpush would drop the kwargs.
-        Asserted on the attrs rather than structurally, because the Expected
-        programs above are written in the DSL and the DSL has no syntax for
-        stamping an opaque attr on a call.
+        ``Expected`` pins the marker riding through onto the adapted push, and
+        — being a whole-program comparison — that the fractal ``tile.move`` the
+        adapter inserts is the only other change.
         """
-
-        class _StampPushAttrs(ir.IRMutator):
-            def visit_call(self, op: ir.Call) -> ir.Expr:
-                expr = super().visit_call(op)
-                call = expr if isinstance(expr, ir.Call) else op
-                if call.op.name != ir.get_op("tile.tpush_to_aic").name:
-                    return expr
-                attrs = dict(call.attrs)
-                attrs["test_push_marker"] = 4471
-                return ir.Call(call.op, list(call.args), dict(call.kwargs), attrs, call.type, call.span)
-
-        class _CollectPushAttrs(ir.IRVisitor):
-            def __init__(self) -> None:
-                super().__init__()
-                self.attrs: list[dict] = []
-
-            def visit_call(self, op: ir.Call) -> None:
-                if op.op.name == ir.get_op("tile.tpush_to_aic").name:
-                    self.attrs.append(dict(op.attrs))
-                super().visit_call(op)
 
         @pl.program
         class Before:
@@ -4424,7 +4432,7 @@ class TestManualPipeVtoCFractalAdapt:
                 pl.aiv_initialize_pipe(pl.const(0, pl.INT32), v2c_peer, dir_mask=2, slot_size=1024, id=1)
                 a_tile = pl.load(a, [0, 0], [16, 16])
                 doubled = pl.add(a_tile, a_tile)
-                pl.tpush_to_aic(doubled, split=0, id=1)
+                pl.tpush_to_aic(doubled, split=0, id=1, attrs={"test_push_marker": 4471})
 
             @pl.function(type=pl.FunctionType.Group)
             def manual_group(
@@ -4436,14 +4444,71 @@ class TestManualPipeVtoCFractalAdapt:
                 self.manual_aiv(a, out_0)
                 return result
 
-        stamped = _StampPushAttrs().visit_program(
-            passes.infer_tile_memory_space()(passes.convert_to_ssa()(Before))
-        )
-        collector = _CollectPushAttrs()
-        collector.visit_program(passes.expand_mixed_kernel()(stamped))
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIC)
+            def manual_aic(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                v2c: pl.Scalar[pl.INT32] = pl.reserve_buffer(name="v2c_slot_buffer", size=8192, base=pl.AUTO)
+                pl.aic_initialize_pipe(pl.const(0, pl.INT32), v2c, dir_mask=2, slot_size=1024, id=1)
+                lhs_mat: pl.Tile[[16, 16], pl.FP32, pl.Mem.Mat] = pl.tpop_from_aiv(split=0, id=1)
+                lhs_left: pl.Tile[[16, 16], pl.FP32, pl.Mem.Left] = pl.tile.move(
+                    lhs_mat, target_memory=pl.Mem.Left
+                )
+                rhs_mat: pl.Tile[[16, 16], pl.FP32, pl.Mem.Mat] = pl.tile.load(
+                    a, [0, 0], [16, 16], [16, 16], target_memory=pl.Mem.Mat
+                )
+                rhs_right: pl.Tile[[16, 16], pl.FP32, pl.Mem.Right] = pl.tile.move(
+                    rhs_mat, target_memory=pl.Mem.Right
+                )
+                acc: pl.Tile[[16, 16], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lhs_left, rhs_right)
+                pl.tfree_to_aiv(lhs_mat, id=1)
+                out_0_store: pl.Tensor[[16, 16], pl.FP32] = pl.tile.store(acc, [0, 0], out_0)
+                return out_0_store
 
-        assert collector.attrs, "the adapted program must still contain a V->C push"
-        assert all(a.get("test_push_marker") == 4471 for a in collector.attrs)
+            @pl.function(type=pl.FunctionType.AIV)
+            def manual_aiv(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ):
+                v2c_peer: pl.Scalar[pl.INT32] = pl.import_peer_buffer(
+                    name="v2c_slot_buffer", peer_func="manual_aic"
+                )
+                pl.aiv_initialize_pipe(pl.const(0, pl.INT32), v2c_peer, dir_mask=2, slot_size=1024, id=1)
+                a_tile: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    a, [0, 0], [16, 16], [16, 16], target_memory=pl.Mem.Vec
+                )
+                doubled: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.add(a_tile, a_tile)
+                # The fractal adapter's inserted NZ move — the only change the
+                # rewrite makes besides re-pointing the push at its result.
+                doubled_nz: pl.Tile[
+                    [16, 16],
+                    pl.FP32,
+                    pl.Mem.Vec,
+                    pl.TileView(blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.row_major),
+                ] = pl.tile.move(
+                    doubled,
+                    target_memory=pl.Mem.Vec,
+                    blayout=pl.TileLayout.col_major,
+                    slayout=pl.TileLayout.row_major,
+                )
+                pl.tpush_to_aic(doubled_nz, split=0, id=1, attrs={"test_push_marker": 4471})
+
+            @pl.function(type=pl.FunctionType.Group)
+            def manual_group(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                result = self.manual_aic(a, out_0)
+                self.manual_aiv(a, out_0)
+                return result
+
+        ir.assert_structural_equal(_expand_raw(Before), Expected)
 
     def test_adapting_is_idempotent(self):
         """A push already carrying the boundary view is left alone on a second run."""

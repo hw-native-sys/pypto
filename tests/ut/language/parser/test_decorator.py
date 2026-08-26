@@ -2387,31 +2387,62 @@ def _make_local_class() -> type:
 
 
 def _make_shadowed_classes() -> tuple[type, type]:
-    """Return two classes sharing one qualname, in definition order."""
+    """Return two classes sharing one qualname, in definition order.
+
+    Each body defines a method, so the code objects in `vars(cls)` point back at
+    the definition that built it -- the evidence the lookup resolves a repeated
+    qualname with.
+    """
 
     class Shadowed:
         WHICH = "first"
+
+        def which(self) -> str:
+            return self.WHICH
 
     first = Shadowed
 
     class Shadowed:  # noqa: F811 - deliberate duplicate qualname
         WHICH = "second"
 
+        def which(self) -> str:
+            return self.WHICH
+
     return first, Shadowed
 
 
-def _lookup_classes() -> list[type]:
-    """Every class shape the lookup must handle, including a shadowed qualname."""
-    first_shadowed, second_shadowed = _make_shadowed_classes()
+def _make_opaque_shadowed_classes() -> tuple[type, type]:
+    """Return two classes sharing one qualname whose bodies hold no code objects.
+
+    Neither class object carries anything that points back at its own
+    definition, so a runtime without `__firstlineno__` cannot tell them apart.
+    """
+
+    class Opaque:
+        WHICH = "first"
+
+    first = Opaque
+
+    class Opaque:  # noqa: F811 - deliberate duplicate qualname
+        WHICH = "second"
+
+    return first, Opaque
+
+
+def _unique_qualname_classes() -> list[type]:
+    """Class shapes whose qualname is defined exactly once in this file."""
     return [
         _LookupPlain,
         _LookupPlain.Nested,
         _LookupDecorated,
         _make_local_class(),
-        first_shadowed,
-        second_shadowed,
         TestClassSourceLookup,
     ]
+
+
+def _lookup_classes() -> list[type]:
+    """Every class shape the lookup must handle, including a shadowed qualname."""
+    return [*_unique_qualname_classes(), *_make_shadowed_classes()]
 
 
 # Whether this runtime actually consults the qualname index. CPython 3.13+ stamps
@@ -2441,8 +2472,12 @@ class TestClassSourceLookup:
 
         Asserted end to end through `_get_source_info` so it holds on runtimes
         that use the index and on those that defer to `inspect`.
+
+        Shadowed qualnames are the one place the two may legitimately disagree
+        (`inspect` answers with the first definition on runtimes without
+        `__firstlineno__`), so they get their own test below.
         """
-        for cls in _lookup_classes():
+        for cls in _unique_qualname_classes():
             expected_lines, expected_start = inspect.getsourcelines(cls)
             actual_lines, actual_start = source_lookup.get_class_source_lines(cls)
 
@@ -2450,6 +2485,89 @@ class TestClassSourceLookup:
                 f"{cls.__qualname__}: start line {actual_start} != inspect's {expected_start}"
             )
             assert actual_lines == expected_lines, f"{cls.__qualname__}: source block differs from inspect's"
+
+    def test_shadowed_qualname_resolves_to_the_class_that_was_built(self):
+        """Two same-qualname classes each resolve to their *own* body.
+
+        `inspect.findsource` matches on qualname alone and so answers with the
+        first definition for both -- the collapse that made every later
+        `@pl.program` of a repeated name compile the first one's kernel.
+        """
+        for cls in _make_shadowed_classes():
+            lines, start = source_lookup.get_class_source_lines(cls)
+            block = "".join(lines)
+
+            assert f'WHICH = "{cls.WHICH}"' in block, f"resolved the wrong body for WHICH={cls.WHICH}"
+            assert cls.which.__code__.co_firstlineno > start, "method must sit inside the resolved block"
+
+    def test_a_member_from_another_file_is_not_line_evidence(self):
+        """A class attribute defined in a *different* file contributes no line.
+
+        Its `co_firstlineno` is numbered against its own file, so measuring it
+        against this one can land inside a sibling candidate's block and
+        manufacture an ambiguity that does not exist. A class body holding
+        `helper = some_imported_function` is exactly that shape.
+        """
+        first, second = _make_shadowed_classes()
+        _, first_start = source_lookup.get_class_source_lines(first)
+
+        # A callable from another file whose line falls inside the FIRST block.
+        decoy_line = first_start + 1
+        decoy_source = "\n" * (decoy_line - 1) + "def decoy(): pass\n"
+        namespace = {}
+        exec(compile(decoy_source, "<not-this-file>", "exec"), namespace)  # noqa: S102
+        setattr(second, "decoy", namespace["decoy"])
+        assert getattr(second, "decoy").__code__.co_firstlineno == decoy_line
+
+        lines, start = source_lookup.get_class_source_lines(second)
+
+        assert 'WHICH = "second"' in "".join(lines), "an unrelated file's line steered the lookup"
+        assert start != first_start
+
+    def test_indistinguishable_shadowed_qualname_is_reported_not_guessed(self):
+        """With no evidence to pick a definition, the lookup refuses to guess.
+
+        Guessing here is what the old behaviour did, and it is unrecoverable
+        downstream: the caller compiles a body the user never wrote, with no
+        warning. Runtimes that stamp `__firstlineno__` resolve it exactly and so
+        never reach this path.
+        """
+        for cls in _make_opaque_shadowed_classes():
+            if source_lookup._records_own_first_line(cls):
+                lines, _ = source_lookup.get_class_source_lines(cls)
+                assert f'WHICH = "{cls.WHICH}"' in "".join(lines)
+                continue
+
+            with pytest.raises(source_lookup.DuplicateClassDefinitionError) as excinfo:
+                source_lookup.get_class_source_lines(cls)
+
+            assert len(excinfo.value.first_lines) == 2
+            assert "Opaque" in excinfo.value.qualname
+
+    def test_duplicate_program_class_names_parse_their_own_bodies(self):
+        """End to end: two `@pl.program class Prog` in one function stay distinct."""
+
+        def make(case: str) -> ir.Program:
+            if case == "add":
+
+                @pl.program
+                class Prog:
+                    @pl.function
+                    def main(self, x: pl.Tensor[[8], pl.FP32]) -> pl.Tensor[[8], pl.FP32]:
+                        return pl.add(x, 1.0)
+
+                return Prog
+
+            @pl.program
+            class Prog:
+                @pl.function
+                def main(self, x: pl.Tensor[[8], pl.FP32]) -> pl.Tensor[[8], pl.FP32]:
+                    return pl.mul(x, 3.0)
+
+            return Prog
+
+        assert "tensor.adds" in ir.python_print(make("add"))
+        assert "tensor.muls" in ir.python_print(make("mul"))
 
     def test_defers_to_inspect_when_the_class_records_its_own_line(self):
         """The index is bypassed exactly when the runtime stamps `__firstlineno__`.
@@ -2493,18 +2611,20 @@ class TestClassSourceLookup:
         assert actual_lines == expected_lines
         assert actual_lines[0].lstrip().startswith("@_identity_decorator")
 
-    def test_index_keeps_the_first_of_two_same_qualname_classes(self):
-        """The index's tie-break matches `_ClassFinder`: first definition wins.
+    def test_index_keeps_every_definition_of_a_repeated_qualname(self):
+        """The index records all same-qualname classes, in source order.
 
-        Exercises the index directly, so it documents that behaviour on every
-        runtime -- including those where `get_class_source_lines` defers and the
-        ambiguity is instead resolved by `__firstlineno__`.
+        `_ClassFinder` keeps only the first, which is precisely what makes it
+        unable to resolve the later ones. Exercises the index directly, so it
+        documents the shape on every runtime -- including those where
+        `get_class_source_lines` defers and `__firstlineno__` does the picking.
         """
         source = "class Dup:\n    pass\n\n\nclass Dup:\n    pass\n"
         indexer = source_lookup._ClassLineIndexer()
         indexer.visit(ast.parse(source))
 
-        assert indexer.index["Dup"] == 1
+        assert [site.first_line for site in indexer.index["Dup"]] == [1, 5]
+        assert [site.end_line for site in indexer.index["Dup"]] == [2, 6]
 
     @pytest.mark.skipif(not _INDEX_IN_USE, reason="runtime resolves classes via __firstlineno__")
     def test_file_is_parsed_once_regardless_of_class_count(self, monkeypatch):
@@ -2541,11 +2661,11 @@ class TestClassSourceLookup:
         try:
             before_lines: list[str] = before.splitlines(keepends=True)
             linecache.cache[filename] = (len(before), None, before_lines, filename)
-            assert source_lookup._class_line_index(filename, before_lines)["Alpha"] == 1
+            assert source_lookup._class_line_index(filename, before_lines)["Alpha"][0].first_line == 1
 
             after_lines: list[str] = after.splitlines(keepends=True)
             linecache.cache[filename] = (len(after), None, after_lines, filename)
-            assert source_lookup._class_line_index(filename, after_lines)["Alpha"] == 2
+            assert source_lookup._class_line_index(filename, after_lines)["Alpha"][0].first_line == 2
         finally:
             linecache.cache.pop(filename, None)
             source_lookup._CLASS_LINE_INDEX_CACHE.pop(filename, None)

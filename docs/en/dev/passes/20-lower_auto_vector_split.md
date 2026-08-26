@@ -215,9 +215,19 @@ any of the following holds:
 
 | Accepted | Why |
 | -------- | --- |
-| Consumes a `tile.aiv_shard` result (transitively) | It is in the half-width dataflow by construction. |
+| Consumes a `tile.aiv_shard` result defined in **this** region (transitively) | It is in the half-width dataflow by construction. |
 | A pure generator — `tile.full` / `tile.ci` / `tile.random` (and `tile.create`, which classifies `SHARED` and so was never reportable anyway) | Its result is a function of its attributes only: it reads no tile and no memory, so per-lane replication is correct at whatever extent the author wrote. |
 | An address-carrying op — `tile.load` / `tile.slice` / `tile.extract` / `tile.gather_row` — whose **read address** references the region's `aiv_id` | The author localized it explicitly, e.g. `data[base + aiv_id * HALF : ...]`. Only the read-offset args count (`tile.load` arg 1, `tile.slice` arg 2, `tile.extract` args 1–2, `tile.gather_row` arg 3 = `src_offset`) — a lane reference in a `shape`, a `valid_shape`, or a *destination* slot does not move the window, so it does not admit. |
+
+The scan is seeded **per region** and makes one forward pass in program order, so
+it recognises only a boundary result defined in the region it is scanning. A
+`tile.aiv_shard` result reaching the region from elsewhere — produced in a sibling
+region, or arriving through a loop `iter_arg` on the back edge — is invisible to
+it, and the consumer would be reported as full width even though the value really
+is per-lane. Both shapes are rejected 12 passes earlier by the `AivSplitValid`
+verifier (checks (i) and (j), see [99-verifier.md](99-verifier.md)), which is what
+keeps that false positive off the author's screen; this scan therefore only ever
+meets a same-region dataflow, which is the domain it was written for.
 
 `tile.gather_row` is the DMA case: being DPS it carries **two** offsets, and only
 `src_offset` decides whether the lanes do different work — a lane-derived
@@ -393,7 +403,7 @@ geometric rule at the end of this section instead.
 | rows (non-split) | `LeftRight` | shared, static | TPOP `valid_row` operand | supported |
 | cols (split axis) | `LeftRight` | per-lane | none | **rejected** |
 | cols, runtime-valued | either | shared, dynamic | none (`treshape` takes no operands) | **rejected** |
-| rows, runtime-valued | `UpDown` | per-lane, dynamic | TPOP `valid_row` operand, even code | supported (see the note below) |
+| rows, runtime-valued | `UpDown` | per-lane, dynamic | the boundary op's FULL box + the first consumer's `valid_shape` | supported (see the note below) |
 | rows per-lane **and** cols narrowed | `UpDown` | both | none (`treshape` rewrites both axes) | **rejected** |
 
 `ReshapeSplitAxis` can only ceil-halve the split-axis extent (the lane index is
@@ -413,17 +423,36 @@ rebuilt by the halving walk rather than by this one.
   boundary — 13 of a 16-row box gives 8 and 5 — which is what the balanced
   partition below is for. When it does not apply, `ShardSplitCode` reports the
   extents instead, naming what would work.
-- **A runtime split-axis valid extent keeps the even code.** The split code is a
-  compile-time attr, but which one the lanes need appears to depend on their
-  *runtime* extents: 15 of a 16-wide axis leaves the lanes at 8 and 7. The even
-  code is what this path emits, and what the device is measured to accept —
-  `tests/st/runtime/cross_core/test_cross_core_split_parity.py` compares
-  `output[:VR, :VC]` elementwise for `VC = 1, 7, 8, 9, 15` on a2a3 and passes,
-  and perturbing that golden on lane 1's columns alone does fail it, so the
-  check covers the band in question. Reading pto-isa's pop suggests a mis-placed
-  lane 1 instead; which reading is the contract is asked upstream in
-  [pto-isa#263](https://github.com/hw-native-sys/pto-isa/issues/263). Until that
-  answers, the encoding follows the measured behaviour.
+- **A runtime split-axis valid extent pops the FULL box.** The split code is a
+  compile-time attr, but which one the lanes need depends on their *runtime*
+  extents: 12 of a 16-row axis leaves them at 8 and 4, 16 leaves them at 8 and 8.
+  No code is right for both, so the boundary op does not carry a per-lane extent
+  at all — `LocalizeExplicitBoundaryValid` gives it the full box
+  (`split_axis::WithFullSplitAxisValid`) and moves the lane's extent onto the
+  first consumer. That pairs exactly with the even code: the producer transports
+  the full physical box, so lane 1's band sits at the box half and the even code
+  points there, whatever the extent turns out to be. Confirmed on a2a3 for every
+  extent 1..16 of a 16-row boundary. The [pto-isa
+  pop](https://github.com/hw-native-sys/pto-isa/issues/263) does place lane 1 at
+  the popped tile's own extent, as its source reads — the earlier measurement
+  that suggested otherwise came from a probe whose operands were uniform
+  constants, which makes every row and column of the product identical and any
+  band offset indistinguishable.
+- **The same ROW extent on a hand-written `tile.tpop_from_aic` is still
+  misplaced.** `SplitVectorKernel`'s halving localizes a declared `valid_shape`
+  onto the pop itself, where pto-isa reads it as the band offset. Widening only
+  the pop does not fix that path: its consumers inherit the author's declaration
+  and then write partial destinations out of a full source, which measures worse
+  on device. The xfailing params of
+  `tests/st/runtime/cross_core/test_cross_core_split_parity.py` record the regime
+  this affects: `half < V < box` on `UP_DOWN`.
+- **A narrowed COLUMN extent is rejected on every path.** It has no carrier at
+  all — the slot is written at the producer's physical column pitch while the pop
+  rebuilds its geometry from the tile's own `validCol` — and on `LeftRight` it is
+  the split axis, so it would have to be per-lane. `CheckSplitBoundaryCarriesValid`
+  (`src/ir/op/tile_ops/cross_core.cpp`) owns that contract; it runs both in the
+  boundary op's deduction and from `ShardSplitCode`, so a hand-written
+  `tile.tpush_to_aiv` / `tile.tpop_from_aic` pair is held to it too.
 - **An empty lane's store is guarded.** A lane the ragged extent does not reach
   has extent `0`, and a zero-row `TSTORE` is outside pto-isa's contract
   (`TSTORE_IMPL` asserts `GetValidRow() > 0`). The store gets a runtime

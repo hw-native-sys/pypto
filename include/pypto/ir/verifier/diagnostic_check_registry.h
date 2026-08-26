@@ -43,6 +43,7 @@ enum class DiagnosticCheck : uint32_t {
   // future: TileShapeBlocksDmaVectorization, PartialPipelineFill, ...
   // --- Warnings (appended; values are stable across releases) -------------
   OutParamWriteDropped = 3,
+  ScalarWriteLineShared = 4,
   kCount
 };
 
@@ -153,6 +154,9 @@ PropertyVerifierPtr CreateTileInnermostDimGranularityVerifier();
 
 /// Factory function for creating OutParamWriteDropped warning verifier (issue #2352)
 PropertyVerifierPtr CreateOutParamWriteDroppedWarningVerifier();
+
+/// `pl.write` from concurrent task instances that may share a 64-byte cache line.
+PropertyVerifierPtr CreateScalarWriteLineSharedWarningVerifier();
 
 }  // namespace ir
 }  // namespace pypto

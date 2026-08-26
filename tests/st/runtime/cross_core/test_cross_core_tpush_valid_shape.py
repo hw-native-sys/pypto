@@ -82,8 +82,8 @@ class C2VTpushValidShapeTestCase(PTOTestCase):
                     [ROWS, COLS],
                     pl.FP32,
                     pl.Mem.Acc,
-                    pl.TileView(valid_shape=[valid_rows, valid_cols]),
-                ] = pl.tile.set_validshape(acc, valid_rows, valid_cols)
+                    pl.TileView(valid_shape=[valid_rows, COLS]),
+                ] = pl.tile.set_validshape(acc, valid_rows, COLS)
                 pl.tpush_to_aiv(narrowed, split=1)
 
             @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
@@ -111,7 +111,7 @@ class C2VTpushValidShapeTestCase(PTOTestCase):
                     [ROWS, COLS],
                     pl.FP32,
                     pl.Mem.Vec,
-                    pl.TileView(valid_shape=[valid_rows, valid_cols]),
+                    pl.TileView(valid_shape=[valid_rows, COLS]),
                 ] = pl.tpop_from_aic(split=1)
                 incremented: pl.Tile[[ROWS, COLS], pl.FP32] = pl.add(popped, 1.0)
                 pl.tfree_to_aic(popped)

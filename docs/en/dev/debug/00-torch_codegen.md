@@ -85,6 +85,30 @@ Mappings are registered by category:
 - cross-core pipe operations
 - `system.*` operations (no-op in debug codegen)
 
+### Accumulating matmuls and `init_cond`
+
+`tile.matmul_acc` / `tensor.matmul_acc` take an optional trailing `init_cond`
+operand — a BOOL scalar carrying the MAD's `cmatrixInit` bit. Where the
+predicate holds, the op **overwrites** the accumulator with `lhs @ rhs` instead
+of accumulating into it, so a reference that ignored it would model an
+overwrite as an accumulate.
+
+The predicate is a *scalar*, not an elementwise mask, so it emits a whole-op
+branch rather than a `torch.where`:
+
+| Call | Emitted expression |
+| ---- | ------------------ |
+| `matmul_acc(acc, a, b)` | `(acc + torch.matmul(a, b).float())` |
+| `matmul_acc(acc, a, b, k == 0)` | `_acc_init(acc, torch.matmul(a, b).float(), (k == 0))` |
+| `matmul_acc(acc, a, b, True)` | `torch.matmul(a, b).float()` |
+| `matmul_acc(acc, a, b, False)` | `(acc + torch.matmul(a, b).float())` |
+
+A literal predicate is folded to the arm it selects, mirroring how PTO codegen
+picks `pto.tmatmul` over `pto.tmatmul.acc` instead of emitting an `scf.if` on a
+compile-time constant. `_acc_init` is a preamble helper; `tile.batch_matmul_acc`
+and `tile.gemv_acc` share the same emitter, so they pick the predicate up for
+free if it is ever added to those ops.
+
 ### Cross-core operation mappings
 
 - `tile.tpush_to_aiv` -> `_cross_core_rt.push_to_aiv(tile, split[, lane_stride])`

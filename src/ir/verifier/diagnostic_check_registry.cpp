@@ -37,6 +37,8 @@ std::string DiagnosticCheckToString(DiagnosticCheck check) {
       return "TileInnermostDimGranularity";
     case DiagnosticCheck::OutParamWriteDropped:
       return "OutParamWriteDropped";
+    case DiagnosticCheck::ScalarWriteLineShared:
+      return "ScalarWriteLineShared";
     default:
       return "Unknown";
   }
@@ -87,6 +89,11 @@ DiagnosticCheckRegistry::DiagnosticCheckRegistry() {
   // parameter the user wrote, before ConvertToSSA versions it to `out__ssa_v2`.
   Register(DiagnosticCheck::OutParamWriteDropped, DiagnosticSeverity::Warning, DiagnosticPhase::PrePipeline,
            /*hint_code=*/"", CreateOutParamWriteDroppedWarningVerifier);
+  // Runs on the pipeline input: the instance-multiplying scopes are still the
+  // user's own, and the index expressions are the ones they wrote, before SSA
+  // versioning and before ConvertTensorToTileOps rewrites the surrounding ops.
+  Register(DiagnosticCheck::ScalarWriteLineShared, DiagnosticSeverity::Warning, DiagnosticPhase::PrePipeline,
+           /*hint_code=*/"", CreateScalarWriteLineSharedWarningVerifier);
 
   // Performance hints (issue #1180) — run once at the end of the pipeline,
   // after tile shapes and memory layout are fully resolved.

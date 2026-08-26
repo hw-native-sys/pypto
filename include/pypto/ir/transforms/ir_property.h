@@ -245,9 +245,9 @@ enum class VerificationLevel {
  * BreakContinueValid, NoRedundantBlocks, InOutUseValid,
  * CallDirectionsResolved, ManualDepsOnSubmitOnly, ReturnParamsExplicit,
  * AivSplitValid, TileMemoryInferred, HardSyncallOccupancyValid,
- * IterArgCarryClassified, RuntimeScopesMaterialized, AccToGmStoreValid,
- * AtomicAddDtypeValid} — lightweight checks that catch the most common IR
- * errors.
+ * IterArgCarryClassified, RuntimeScopesMaterialized,
+ * DistTensorCtxMaterialized, AccToGmStoreValid, AccCompactValid, AtomicAddDtypeValid} —
+ * lightweight checks that catch the most common IR errors.
  */
 const IRPropertySet& GetVerifiedProperties();
 
@@ -257,7 +257,8 @@ const IRPropertySet& GetVerifiedProperties();
  * These are verified automatically at pipeline start and never declared
  * in per-pass PassProperties. Returns {TypeChecked, BreakContinueValid,
  * NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore,
- * InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly}.
+ * InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly,
+ * AtomicAddDtypeValid}.
  */
 const IRPropertySet& GetStructuralProperties();
 
@@ -265,7 +266,8 @@ const IRPropertySet& GetStructuralProperties();
  * @brief Default property set for explicit verification
  *
  * Returns {SSAForm, TypeChecked, NoNestedCalls, BreakContinueValid,
- * NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore} — the properties checked by
+ * NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore,
+ * TileTypeCoherence, ArrayNotEscaped} — the properties checked by
  * run_verifier() when no explicit set is given.
  */
 const IRPropertySet& GetDefaultVerifyProperties();

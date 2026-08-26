@@ -3,7 +3,7 @@ name: Build CI Image
 on:
   push:
     branches: [main]
-    paths: [".github/docker/github_ci.Dockerfile"]
+    paths: [".github/docker/github_ci.Dockerfile", "build-constraints.txt"]
   workflow_dispatch:
 
 env:

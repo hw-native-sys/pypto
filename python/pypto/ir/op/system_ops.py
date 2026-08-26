@@ -19,7 +19,6 @@ System operations handle hardware synchronization and cross-core communication:
 - reserve_buffer / import_peer_buffer: Cross-core buffer management (i32 SSA results)
 """
 
-import warnings
 from collections.abc import Sequence
 from enum import Enum, auto
 from typing import Any, Protocol, TypeVar, overload, runtime_checkable
@@ -93,77 +92,56 @@ _SYNC_EVENT_CORE_TYPE: dict[KernelType, str] = {
     KernelType.AIC: "aic",
     KernelType.AIV: "aiv",
 }
-# The same tables inverted: the deprecated string spellings each op accepts.
-_SYNCALL_KERNELS: dict[str, KernelType] = {v: k for k, v in _SYNCALL_CORE_TYPE.items()}
-_SYNC_EVENT_KERNELS: dict[str, KernelType] = {v: k for k, v in _SYNC_EVENT_CORE_TYPE.items()}
+# Each table's keys are also the op's domain: what it accepts as ``core_type``.
+_SYNCALL_KERNELS: tuple[KernelType, ...] = tuple(_SYNCALL_CORE_TYPE)
+_SYNC_EVENT_KERNELS: tuple[KernelType, ...] = tuple(_SYNC_EVENT_CORE_TYPE)
 
 _SYNC_EVENT_MIX_HINT = ". Omit core_type to leave the event in both kernels"
 
 _EnumT = TypeVar("_EnumT", bound=Enum)
 
 
-def _coerce_enum(
+def _check_enum(
     value: Any,
     enum_cls: type[_EnumT],
     param: str,
     op_name: str,
     *,
-    aliases: dict[str, _EnumT] | None = None,
-    stacklevel: int = 3,
+    allowed: tuple[_EnumT, ...] | None = None,
     hint: str = "",
 ) -> _EnumT:
-    """Normalize an op keyword to its enum member.
+    """Validate that an op keyword is an enum member this op accepts.
 
-    The string spelling these keywords used before they were typed is still
-    accepted, with a ``DeprecationWarning``. Pass ``stacklevel`` so the warning
-    points at the user's call rather than at an internal helper: it counts
-    frames from this function, so ``3`` is right when a public op wrapper calls
-    this directly.
-
-    ``aliases`` doubles as the per-op domain: an op that accepts only part of
-    the enum passes only those spellings, and a member outside them is rejected
-    the same way an unknown string is.
+    ``allowed`` is the per-op domain: an op that takes only part of the enum
+    passes just those members, and one outside them is rejected. Omit it to
+    accept every member.
 
     Args:
-        value: Value passed by the caller — an ``enum_cls`` member, or its
-            deprecated string spelling
+        value: Value passed by the caller
         enum_cls: Enum the keyword is typed as
         param: Keyword name, for the messages
         op_name: Operation name, for the messages
-        aliases: Accepted string spelling to member; defaults to mapping each
-            member's own ``value``
-        stacklevel: ``warnings.warn`` stack level for the deprecation
+        allowed: Members this op accepts; defaults to every member
         hint: Appended to the rejection message, to point at the alternative
 
     Returns:
-        The matching ``enum_cls`` member
+        ``value``, once confirmed to be a member this op accepts
 
     Raises:
-        ValueError: If ``value`` names no member this op accepts
-        TypeError: If ``value`` is neither a member nor a string
+        ValueError: If ``value`` is a member outside this op's domain
+        TypeError: If ``value`` is not an ``enum_cls`` member at all
     """
-    by_string = aliases if aliases is not None else {member.value: member for member in enum_cls}
-    accepted = list(dict.fromkeys(by_string.values()))
+    accepted = allowed if allowed is not None else tuple(enum_cls)
     valid = ", ".join(f"{enum_cls.__name__}.{member.name}" for member in accepted)
-    if isinstance(value, enum_cls):
-        if value in accepted:
-            return value
+    if not isinstance(value, enum_cls):
+        raise TypeError(
+            f"{op_name} {param} must be a {enum_cls.__name__} member, got {value!r}. Valid values: {valid}"
+        )
+    if value not in accepted:
         raise ValueError(
             f"{op_name} {param} must be one of {valid}, got {enum_cls.__name__}.{value.name}{hint}"
         )
-    if isinstance(value, str):
-        if value not in by_string:
-            raise ValueError(f"{op_name} {param} must be one of {valid}, got {value!r}{hint}")
-        member = by_string[value]
-        warnings.warn(
-            f"{op_name} {param}={value!r} is deprecated: pass {enum_cls.__name__}.{member.name} instead",
-            DeprecationWarning,
-            stacklevel=stacklevel,
-        )
-        return member
-    raise TypeError(
-        f"{op_name} {param} must be a {enum_cls.__name__} member, got {value!r}. Valid values: {valid}"
-    )
+    return value
 
 
 def _create_sync_op(
@@ -274,7 +252,7 @@ def _create_cross_core_sync_op(
     *,
     pipe: PipeType,
     ffts_mode: int | None,
-    core_type: KernelType | str | None,
+    core_type: KernelType | None,
     span: Span | None,
 ) -> Call:
     """Create a PTO cross-core sync set/wait operation."""
@@ -290,17 +268,15 @@ def _create_cross_core_sync_op(
     if ffts_mode is not None:
         kwargs["ffts_mode"] = ffts_mode
     if core_type is not None:
-        # 4 frames back is the caller of the public sync_set / sync_wait wrapper.
-        kernel = _coerce_enum(
+        _check_enum(
             core_type,
             KernelType,
             "core_type",
             op_name,
-            aliases=_SYNC_EVENT_KERNELS,
-            stacklevel=4,
+            allowed=_SYNC_EVENT_KERNELS,
             hint=_SYNC_EVENT_MIX_HINT,
         )
-        kwargs["core_type"] = _SYNC_EVENT_CORE_TYPE[kernel]
+        kwargs["core_type"] = _SYNC_EVENT_CORE_TYPE[core_type]
 
     actual_span = _get_span_or_capture(span, frame_offset=2)
     return _ir_core.create_op_call(op_name, args, kwargs, actual_span)
@@ -311,16 +287,14 @@ def sync_set(
     *,
     pipe: PipeType,
     ffts_mode: int | None = None,
-    core_type: KernelType | str | None = None,
+    core_type: KernelType | None = None,
     span: Span | None = None,
 ) -> Call:
     """Set an explicit Cube/Vector cross-core synchronization event.
 
     ``core_type`` (``KernelType.AIC`` / ``KernelType.AIV``) targets the operation
     to one kernel when expanding a mixed InCore function. Omit it to leave the
-    event in both, which is what an explicitly typed AIC/AIV function wants. The
-    old ``"aic"`` / ``"aiv"`` strings still work but emit a
-    ``DeprecationWarning``.
+    event in both, which is what an explicitly typed AIC/AIV function wants.
     """
     return _create_cross_core_sync_op(
         "system.sync_set", event_id, pipe=pipe, ffts_mode=ffts_mode, core_type=core_type, span=span
@@ -331,16 +305,14 @@ def sync_wait(
     event_id: int | Expr,
     *,
     pipe: PipeType,
-    core_type: KernelType | str | None = None,
+    core_type: KernelType | None = None,
     span: Span | None = None,
 ) -> Call:
     """Wait for an explicit Cube/Vector cross-core synchronization event.
 
     ``core_type`` (``KernelType.AIC`` / ``KernelType.AIV``) targets the operation
     to one kernel when expanding a mixed InCore function. Omit it to leave the
-    wait in both, which is what an explicitly typed AIC/AIV function wants. The
-    old ``"aic"`` / ``"aiv"`` strings still work but emit a
-    ``DeprecationWarning``.
+    wait in both, which is what an explicitly typed AIC/AIV function wants.
     """
     return _create_cross_core_sync_op(
         "system.sync_wait", event_id, pipe=pipe, ffts_mode=None, core_type=core_type, span=span
@@ -448,7 +420,7 @@ def cacheinvalid(
     )
 
 
-def syncall(*, core_type: KernelType | str = KernelType.MIX, span: Span | None = None) -> Call:
+def syncall(*, core_type: KernelType = KernelType.MIX, span: Span | None = None) -> Call:
     """Cross-core all-participant barrier (``pto::SYNCALL``, hard/FFTS form).
 
     Every core in the participant set selected by ``core_type`` must execute
@@ -472,22 +444,21 @@ def syncall(*, core_type: KernelType | str = KernelType.MIX, span: Span | None =
 
     Args:
         core_type: Participant set, a :class:`KernelType` member —
-            ``MIX`` rendezvouses both kernels. The equivalent string still
-            works but emits a ``DeprecationWarning``.
+            ``MIX`` rendezvouses both kernels.
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for system.syncall
     """
-    kernels = _coerce_enum(core_type, KernelType, "core_type", "syncall", aliases=_SYNCALL_KERNELS)
+    _check_enum(core_type, KernelType, "core_type", "syncall", allowed=_SYNCALL_KERNELS)
     actual_span = _get_span_or_capture(span, frame_offset=1)
     return _ir_core.create_op_call(
-        "system.syncall", [], {"core_type": _SYNCALL_CORE_TYPE[kernels]}, actual_span
+        "system.syncall", [], {"core_type": _SYNCALL_CORE_TYPE[core_type]}, actual_span
     )
 
 
 def syncall_soft(
-    core_type: KernelType | str,
+    core_type: KernelType,
     gm_workspace: Expr,
     used_cores: Expr | None = None,
     *,
@@ -506,8 +477,7 @@ def syncall_soft(
 
     Args:
         core_type: Participant set, a :class:`KernelType` member —
-            ``MIX`` rendezvouses both kernels. The equivalent string still
-            works but emits a ``DeprecationWarning``.
+            ``MIX`` rendezvouses both kernels.
         gm_workspace: Shared, zero-initialized GM INT32 workspace with at least
             16 elements (64 bytes).
         used_cores: Optional INT32 participant count. Omit to derive it from the
@@ -518,7 +488,7 @@ def syncall_soft(
     Returns:
         Call expression for the soft-mode system.syncall.
     """
-    kernels = _coerce_enum(core_type, KernelType, "core_type", "soft syncall", aliases=_SYNCALL_KERNELS)
+    _check_enum(core_type, KernelType, "core_type", "soft syncall", allowed=_SYNCALL_KERNELS)
     if used_cores is not None:
         used_type = used_cores.type
         if not isinstance(used_type, ScalarType) or used_type.dtype != DataType.INT32:
@@ -538,7 +508,7 @@ def syncall_soft(
     return _ir_core.create_op_call(
         "system.syncall",
         args,
-        {"core_type": _SYNCALL_CORE_TYPE[kernels], "mode": SyncAllMode.SOFT.value},
+        {"core_type": _SYNCALL_CORE_TYPE[core_type], "mode": SyncAllMode.SOFT.value},
         actual_span,
     )
 

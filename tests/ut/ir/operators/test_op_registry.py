@@ -17,7 +17,9 @@ Tests cover:
 - Error cases
 """
 
+import re
 import sys
+from pathlib import Path
 
 import pypto
 import pytest
@@ -1283,6 +1285,56 @@ _IN_PLACE_OPS = [
         "tile.tget_scale_addr",
     )
 ]
+
+
+class TestResultAliasContract:
+    """The result-alias contract may only name operators that have a result.
+
+    ``ResultAliasedArgIndex`` answers "which argument's buffer does this call's
+    result name". A side-effect-only operator deduces ``UnknownType`` — "no SSA
+    result for downstream consumers" — so there is no result to alias, and its
+    write target travels through ``ArgEffect`` / ``CallWriteTargets`` instead.
+    Listing one would invite a consumer to read a destination alias out of a
+    bare side effect.
+    """
+
+    _REPO_ROOT = Path(__file__).resolve().parents[4]
+    _CONTRACT = _REPO_ROOT / "src/ir/transforms/utils/result_alias_utils.cpp"
+
+    def _contract_ops(self) -> set[str]:
+        text = self._CONTRACT.read_text()
+        return set(re.findall(r'IsOp\(call, "([^"]+)"\)', text))
+
+    def _side_effect_only_ops(self) -> set[str]:
+        """Operators whose registered deduction returns ``GetUnknownType()``."""
+        op_sources = sorted((self._REPO_ROOT / "src/ir/op").rglob("*.cpp"))
+        joined = "\n".join(f.read_text() for f in op_sources)
+        side_effect = set()
+        for match in re.finditer(r'REGISTER_OP\("([^"]+)"\)(.*?)(?=REGISTER_OP\(|\Z)', joined, re.S):
+            name, body = match.group(1), match.group(2)
+            deduce = re.search(r"f_deduce_type\(\s*&?([A-Za-z_][A-Za-z0-9_]*)", body)
+            if deduce is None:
+                continue
+            fn = re.search(r"TypePtr\s+" + deduce.group(1) + r"\s*\([^)]*\)[^{]*\{(.*?)\n\}", joined, re.S)
+            if fn is not None and "GetUnknownType()" in fn.group(1):
+                side_effect.add(name)
+        return side_effect
+
+    def test_contract_names_only_registered_operators(self):
+        for name in self._contract_ops():
+            # Raises if the literal is not a registered operator.
+            assert ir.get_op(name).name == name
+
+    def test_contract_excludes_side_effect_only_operators(self):
+        side_effect = self._side_effect_only_ops()
+        # Guard the detector itself: these are known side-effect-only ops.
+        for known in ("pld.tile.put", "pld.tile.get", "pld.system.notify"):
+            assert known in side_effect, f"{known} should be detected as side-effect-only"
+
+        listed = sorted(self._contract_ops() & side_effect)
+        assert listed == [], "these operators have no SSA result, so they cannot alias one: " + ", ".join(
+            listed
+        )
 
 
 if __name__ == "__main__":

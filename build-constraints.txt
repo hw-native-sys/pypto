@@ -1,0 +1,24 @@
+# Build inputs, pinned.
+#
+# `[build-system] requires` in pyproject.toml states what pypto is *compatible*
+# with. This file states what it is actually *built* against, so the same commit
+# builds the same way tomorrow as it did today.
+#
+# Why both: on 2026-08-24 nanobind 3.0.0 was published, the unbounded
+# `nanobind>=2.0.0` resolved to it, and CI went red on every branch at once with
+# no commit to bisect (#2492, #2493). A compatibility range cannot prevent that
+# -- only a pinned input can.
+#
+# CI reads this through PIP_CONSTRAINT / UV_CONSTRAINT, which pip and uv apply to
+# build-dependency installs too, so it reaches both the isolated wheel builds and
+# the `--no-build-isolation` ones in .github/actions/setup-ci-job.
+#
+# To bump one: change the version here, in its own commit, and let CI say whether
+# it holds. A green run is then a statement about a known set of inputs.
+#
+# Versions below are what CI validated on main at a5113628.
+
+cmake==4.4.2
+nanobind==2.15.0
+ninja==1.13.0
+scikit-build-core==1.0.3

@@ -373,43 +373,38 @@ class TestMemRefSharing:
         """A plain tile alias `a = t` of a MemRef-less tpop result stays MemRef-less.
 
         Without this, `ShareMemRefFrom` returns null for the MemRef-less tpop and
-        the alias falls through to a fresh, disconnected buffer.
+        the alias falls through to a fresh, disconnected buffer — which ``Expected``
+        pins by giving only ``out`` a MemRef.
         """
-        span = ir.Span.unknown()
-        tile_type = ir.TileType([16, 16], ir.DataType.FP32, memory_space=MemorySpace.Vec)
 
-        t = ir.Var("t", tile_type, span)
-        tpop = ir.Call(ir.Op("tile.tpop_from_aic"), [], {"split": 0}, tile_type, span)
-        a = ir.Var("a", tile_type, span)
-        out = ir.Var("out", tile_type, span)
-        muls = ir.Call(ir.Op("tile.muls"), [a], {"scalar": 1.0}, tile_type, span)
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def main(self) -> pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec]:
+                t: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=0)
+                a: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = t
+                out: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.muls(a, 1.0)
+                return out
 
-        body = ir.SeqStmts(
-            [
-                ir.AssignStmt(t, tpop, span),
-                ir.AssignStmt(a, t, span),
-                ir.AssignStmt(out, muls, span),
-                ir.ReturnStmt([out], span),
-            ],
-            span,
-        )
-        func = ir.Function("main", [], [tile_type], body, span, type=ir.FunctionType.AIV)
-        program = ir.Program([func], "alias_prog", span)
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIV)
+            def main(self) -> pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec]:
+                mem_vec_0: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 1024)
+                # `t` (tpop result) and its alias `a` stay MemRef-less; only the
+                # ordinary consumer `out` is given a buffer.
+                t: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=0)
+                a: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = t
+                out: pl.Tile[
+                    [16, 16], pl.FP32, pl.MemRef(mem_vec_0, pl.const(0, pl.INT64), 1024), pl.Mem.Vec
+                ] = pl.tile.muls(a, 1.0)
+                return out
 
         with passes.PassContext(
             [passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)],
         ):
-            after = passes.init_mem_ref()(program)
-
-        func_after = next(iter(after.functions.values()))
-        memref_by_name: dict[str, object] = {}
-        for stmt in cast(ir.SeqStmts, func_after.body).stmts:
-            if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.var.type, ir.TileType):
-                memref_by_name[stmt.var.name_hint] = stmt.var.type.memref
-
-        assert memref_by_name["t"] is None, "tpop result must be MemRef-less"
-        assert memref_by_name["a"] is None, "alias of a tpop result must be MemRef-less"
-        assert memref_by_name["out"] is not None, "a normal consumer still gets a MemRef"
+            After = passes.init_mem_ref()(Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_matmul_acc_shares_memref_with_accumulator(self):
         """tile.matmul_acc output shares MemRef with its accumulator input (arg[0])."""

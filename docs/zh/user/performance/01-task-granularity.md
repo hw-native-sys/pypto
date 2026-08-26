@@ -159,7 +159,7 @@ torch.testing.assert_close(out, expected, rtol=1e-4, atol=1e-4)
 
 **代价：** 合并后的任务要同时持有每一个中间结果。
 
-> **跨引擎合并不是这一招。** 把一个 cube 操作和一个 vector 操作放进同一个作用域，还需要一个 split 模式 —— 没有 `pl.split(...)` 的话缓冲放不下，编译器会拒绝这个作用域。那个情形是 [mix kernel](02-runtime-overhead.md#构建-mix-kernel)；把 `matmul` 和消费它的 vector 操作合并之前先读它。
+> **跨引擎合并不是这一招。** 把一个 cube 操作和一个 vector 操作放进同一个作用域，还需要一个 split 模式 —— 没有 `pl.split(...)` 的话缓冲放不下，编译器会拒绝这个作用域。那个情形是 [mix kernel](02-runtime-overhead.md#build-a-mixed-kernel)；把 `matmul` 和消费它的 vector 操作合并之前先读它。
 
 **怎么确认：** 被合并的任务不再作为独立节点出现在 `deps.json` 里，中间结果的 GM 流量从 kernel 里消失。
 
@@ -176,7 +176,7 @@ torch.testing.assert_close(out, expected, rtol=1e-4, atol=1e-4)
 
 如果合并让你掉到核数以下，你只是把瓶颈搬了个家而不是消掉它，而泳道图会说得很明白：条很宽、隙没了、而大多数核的泳道干脆是**空的**。
 
-注意 [SPMD](02-runtime-overhead.md#使用-spmd) 并不会消掉这个取舍。它和 `pl.parallel` 一样，只是**描述**工作的一种方式 —— 一次派发扇出到很多 block —— 每个 block 干多少活仍然由你决定。它改变的是这种描述的价钱：N 个 block 只付一次派发而不是 N 次。粒度这个问题两种写法下都还是你的。
+注意 [SPMD](02-runtime-overhead.md#use-spmd) 并不会消掉这个取舍。它和 `pl.parallel` 一样，只是**描述**工作的一种方式 —— 一次派发扇出到很多 block —— 每个 block 干多少活仍然由你决定。它改变的是这种描述的价钱：N 个 block 只付一次派发而不是 N 次。粒度这个问题两种写法下都还是你的。
 
 ## 怎么判断
 

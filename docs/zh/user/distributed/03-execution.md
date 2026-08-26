@@ -118,6 +118,45 @@ with compiled.prepare() as rt:
 `torch.Tensor` 时只需是 CPU 连续张量，可以是在 `prepare()` 后创建的普通张量；
 无需 `.share_memory_()`、fork 前分配或 `inherited_host_tensors`。
 
+### 跳过 staging 拷贝
+
+staging 需要在 host 侧完整拷贝一份数据；对体积很大的常驻权重，这份拷贝值得省掉。
+通过 `inherited_host_tensors` 注册的区间会被直接按地址命名，既不需要 staging buffer
+也不需要 memcpy：它在 fork 之前就已存在，每个子进程都在同一地址看到它。
+
+**列入该列表即是你作出的保证。** 把一个张量传入 `inherited_host_tensors`，等于断言两点：
+
+- 它的后备内存**跨进程可见**——即 `MAP_SHARED` 映射，无论是 torch 自己的共享内存
+  还是外部文件映射；并且
+- 该映射在 worker 的整个生命周期内**始终有效**。
+
+传入 `MAP_PRIVATE` 后备内存属于**不受支持**的用法。写时复制会让子进程一直读到 fork
+之前的快照，因此上传的数据可能是陈旧或错误的。这一点不会被自动检测出来。
+
+PyPTO 无法验证这项保证，也不去尝试。`is_shared()` 回答的是另一个问题——storage 是否
+为 torch 的共享内存分配；而用 `mmap` + `numpy.frombuffer` + `torch.from_numpy` 包装的
+只读 `MAP_SHARED` 文件映射确实是共享的，`is_shared()` 却返回 `False`。读取
+`/proc/self/maps` 能给出正确答案，但仅限 Linux，而模拟器同样运行在 macOS 上。因此
+`is_shared()` 被保留为单向信号：`True` 可确认是 torch 管理的共享内存，`False` 则无从
+判断；对于无法确认的张量，PyPTO 会在 `prepare()` 时发出一次 `RuntimeWarning` 后继续
+执行。它既不拒绝该张量，也不退回 staging——退回 staging 会悄悄把你要求省掉的那份拷贝
+重新加回来。
+
+```python
+weights = map_readonly_shared(path)          # mmap 支撑的 MAP_SHARED，is_shared() == False
+with compiled.prepare(
+    inherited_host_tensors=[weights],        # “每个子进程都可见，且在我的生命周期内有效”
+) as rt:
+    resident = rt.alloc_stacked_tensor(weights)
+```
+
+这项保证针对的是可见性，因此两个方向都成立：被列入的区间既可作上传源，也可作读回目标。
+可写性交由硬件负责——以只读文件描述符建立的 `MAP_SHARED` 映射在写入时会直接触发错误，
+而不会破坏任何数据。未列入的张量，或在 `prepare()` 之后分配的张量，其行为与此前完全一致。
+
+被命名的上传源只授予 `READ`，只有目标才授予 `READWRITE`。这对只读映射很关键：把它
+描述为可写，等于告诉 runtime 消费者可以写一段写入即出错的内存。
+
 ## One-Shot vs 持久 Worker
 
 ### One-Shot

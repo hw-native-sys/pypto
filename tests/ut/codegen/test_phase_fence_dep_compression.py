@@ -835,7 +835,7 @@ class TestPhaseFenceDepCompressionCodegen:
             if case_name == "scalar":
 
                 @pl.program
-                class Prog:
+                class ProgScalar:
                     @pl.function(type=pl.FunctionType.InCore)
                     def kern(
                         self,
@@ -860,12 +860,12 @@ class TestPhaseFenceDepCompressionCodegen:
                             out, _ = pl.submit(self.kern, x, out, tile_r, 0, deps=[tid])
                         return out
 
-                return Prog
+                return ProgScalar
 
             if case_name == "mixed_array_scalar":
 
                 @pl.program
-                class Prog:
+                class ProgMixedArrayScalar:
                     @pl.function(type=pl.FunctionType.InCore)
                     def kern(
                         self,
@@ -894,12 +894,12 @@ class TestPhaseFenceDepCompressionCodegen:
                                 tids[branch] = tid
                         return out
 
-                return Prog
+                return ProgMixedArrayScalar
 
             if case_name == "two_arrays_same_call":
 
                 @pl.program
-                class Prog:
+                class ProgTwoArraysSameCall:
                     @pl.function(type=pl.FunctionType.InCore)
                     def kern(
                         self,
@@ -929,10 +929,10 @@ class TestPhaseFenceDepCompressionCodegen:
                                 tids_b[branch] = tid
                         return out
 
-                return Prog
+                return ProgTwoArraysSameCall
 
             @pl.program
-            class Prog:
+            class ProgAutoScope:
                 @pl.function(type=pl.FunctionType.InCore)
                 def kern(
                     self,
@@ -959,7 +959,7 @@ class TestPhaseFenceDepCompressionCodegen:
                         tids[branch] = tid
                     return out
 
-            return Prog
+            return ProgAutoScope
 
         code = _compile_program(make_program(case_name))
         assert "rt_submit_dummy_task" not in code, code

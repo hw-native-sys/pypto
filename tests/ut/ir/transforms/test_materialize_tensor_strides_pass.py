@@ -210,34 +210,52 @@ def test_empty_default_nd_view_canonicalizes_absent():
 
 
 def test_distributed_tensor_param_preserves_memref_and_pad_metadata():
-    """Materializing a distributed tensor view keeps non-stride metadata."""
-    base = ir.Var("base", ir.PtrType(), _SPAN)
-    memref = ir.MemRef(base, 0, 128, _SPAN)
-    view = ir.TensorView([], ir.TensorLayout.DN, [], ir.PadValue.zero)
-    dist_type = ir.DistributedTensorType(_dims([4, 8]), DataType.FP32, memref, view)
+    """Materializing a distributed tensor view keeps non-stride metadata.
 
-    ib = IRBuilder()
-    with ib.program("main") as prog:
-        with ib.function("f") as f:
-            f.param("x", dist_type)
-            ib.return_stmt([])
-        prog.add_function(f.get_result())
-    After = _materialize(prog.get_result())
-    func = After.get_function("f")
-    assert func is not None
+    The ``MemRef`` binding and the ``pad`` value ride through untouched; only
+    the empty stride slot is filled with the packed DN canonical stride.
+    """
 
-    param_type = func.params[0].type
-    assert isinstance(param_type, ir.DistributedTensorType)
-    assert param_type.memref is memref
-    assert param_type.window_buffer is None
-    assert param_type.tensor_view is not None
-    assert _values_of(param_type.tensor_view.stride) == [1, 4]
-    assert param_type.tensor_view.layout == ir.TensorLayout.DN
-    assert param_type.tensor_view.pad == ir.PadValue.zero
+    @pl.program
+    class Before:
+        @pl.function
+        def f(
+            self,
+            x: pld.DistributedTensor[
+                [4, 8],
+                pl.FP32,
+                pl.TensorView(stride=[], layout=pl.TensorLayout.DN, pad=pl.PadValue.zero),
+                pl.MemRef("base", 0, 128),
+            ],
+        ):
+            return  # noqa: PLR1711 - DSL spelling of an empty body
+
+    @pl.program
+    class Expected:
+        @pl.function
+        def f(
+            self,
+            x: pld.DistributedTensor[
+                [4, 8],
+                pl.FP32,
+                pl.TensorView(stride=[1, 4], layout=pl.TensorLayout.DN, pad=pl.PadValue.zero),
+                pl.MemRef("base", 0, 128),
+            ],
+        ):
+            return  # noqa: PLR1711 - DSL spelling of an empty body
+
+    ir.assert_structural_equal(_materialize(Before), Expected)
 
 
 def test_distributed_tensor_view_preserves_window_buffer_metadata():
-    """A materialized distributed tensor.view keeps its WindowBuffer binding."""
+    """A materialized distributed ``tensor.view`` keeps its WindowBuffer binding.
+
+    Hand-built rather than DSL-authored, and necessarily so: the DSL parser
+    fills a ``pl.tensor.view`` result's stride at parse time, so a DSL
+    ``Before`` would arrive here already materialized and the comparison would
+    be vacuous. ``ir.op.tensor.view`` leaves the stride empty, which is the
+    input shape this pass exists to fix.
+    """
     base = ir.Var("buf", ir.PtrType(), _SPAN)
     window = ir.WindowBuffer(base, ir.ConstInt(128, DataType.INT64, _SPAN), span=_SPAN)
     src_type = ir.DistributedTensorType(_dims([4, 8]), DataType.FP32, window)
@@ -491,24 +509,39 @@ def test_strict_verifier_passes_after_materialization():
 
 
 def test_tuple_return_type_materialized():
-    # A function whose single return is a Tuple of two empty-stride DN tensors.
-    # Both elements must be materialized to their packed DN canonical stride:
-    #   [4, 8]    -> [1, 4]
-    #   [2, 4, 8] -> [32, 1, 4]
-    # (DN formula, doc 28-materialize_tensor_strides.md "Stride Formulas".)
-    def build(stride_2d, stride_3d):
-        x = ir.Var("x", _dn_tensor([4, 8], stride_2d), _SPAN)
-        y = ir.Var("y", _dn_tensor([2, 4, 8], stride_3d), _SPAN)
-        ret_tuple = ir.TupleType([_dn_tensor([4, 8], stride_2d), _dn_tensor([2, 4, 8], stride_3d)])
-        body = ir.ReturnStmt([x, y], _SPAN)
-        func = ir.Function("f", [x, y], [ret_tuple], body, _SPAN)
-        return ir.Program([func], "p", _SPAN)
+    """Both elements of a Tuple return signature are DN-packed.
 
-    Before = build([], [])
-    Expected = build([1, 4], [32, 1, 4])
+    ``[4, 8] -> [1, 4]`` and ``[2, 4, 8] -> [32, 1, 4]`` per the DN formula
+    (doc 28-materialize_tensor_strides.md "Stride Formulas").
+    """
 
-    After = _materialize(Before)
-    ir.assert_structural_equal(After, Expected)
+    @pl.program
+    class Before:
+        @pl.function
+        def f(
+            self,
+            x: pl.Tensor[[4, 8], pl.FP32, pl.TensorView(stride=[], layout=pl.TensorLayout.DN)],
+            y: pl.Tensor[[2, 4, 8], pl.FP32, pl.TensorView(stride=[], layout=pl.TensorLayout.DN)],
+        ) -> tuple[
+            pl.Tensor[[4, 8], pl.FP32, pl.TensorView(stride=[], layout=pl.TensorLayout.DN)],
+            pl.Tensor[[2, 4, 8], pl.FP32, pl.TensorView(stride=[], layout=pl.TensorLayout.DN)],
+        ]:
+            return x, y
+
+    @pl.program
+    class Expected:
+        @pl.function
+        def f(
+            self,
+            x: pl.Tensor[[4, 8], pl.FP32, pl.TensorView(stride=[1, 4], layout=pl.TensorLayout.DN)],
+            y: pl.Tensor[[2, 4, 8], pl.FP32, pl.TensorView(stride=[32, 1, 4], layout=pl.TensorLayout.DN)],
+        ) -> tuple[
+            pl.Tensor[[4, 8], pl.FP32, pl.TensorView(stride=[1, 4], layout=pl.TensorLayout.DN)],
+            pl.Tensor[[2, 4, 8], pl.FP32, pl.TensorView(stride=[32, 1, 4], layout=pl.TensorLayout.DN)],
+        ]:
+            return x, y
+
+    ir.assert_structural_equal(_materialize(Before), Expected)
 
 
 # ============================================================================
@@ -521,35 +554,31 @@ def test_tuple_return_type_materialized():
 
 
 def test_iter_arg_type_and_init_materialized():
-    def build(stride):
-        init = ir.Var("init", _dn_tensor([4, 8], stride), _SPAN)
-        acc = ir.IterArg("acc", _dn_tensor([4, 8], stride), init, _SPAN)
-        i = ir.Var("i", ir.ScalarType(DataType.INDEX), _SPAN)
-        ret = ir.Var("r", _dn_tensor([4, 8], stride), _SPAN)
-        # A ForStmt carrying iter_args must end its body with a YieldStmt that
-        # yields the loop-carried values (SSA invariant enforced by SSAVerify).
-        # A single-child body is the YieldStmt directly (NormalizedStmtStructure
-        # rejects a SeqStmts wrapping a single child).
-        loop_body = ir.YieldStmt([acc], _SPAN)
-        for_stmt = ir.ForStmt(
-            i,
-            ir.ConstInt(0, DataType.INDEX, _SPAN),
-            ir.ConstInt(4, DataType.INDEX, _SPAN),
-            ir.ConstInt(1, DataType.INDEX, _SPAN),
-            [acc],
-            loop_body,
-            [ret],
-            _SPAN,
-        )
-        body = ir.SeqStmts([for_stmt, ir.ReturnStmt([ret], _SPAN)], _SPAN)
-        func = ir.Function("f", [init], [_dn_tensor([4, 8], stride)], body, _SPAN)
-        return ir.Program([func], "p", _SPAN)
+    """A loop-carried DN tensor comes out packed, and so does its init value."""
 
-    Before = build([])
-    Expected = build([1, 4])
+    @pl.program
+    class Before:
+        @pl.function
+        def f(
+            self,
+            init: pl.Tensor[[4, 8], pl.FP32, pl.TensorView(stride=[], layout=pl.TensorLayout.DN)],
+        ) -> pl.Tensor[[4, 8], pl.FP32, pl.TensorView(stride=[], layout=pl.TensorLayout.DN)]:
+            for _i, (acc,) in pl.range(0, 4, init_values=(init,)):
+                r = pl.yield_(acc)
+            return r
 
-    After = _materialize(Before)
-    ir.assert_structural_equal(After, Expected)
+    @pl.program
+    class Expected:
+        @pl.function
+        def f(
+            self,
+            init: pl.Tensor[[4, 8], pl.FP32, pl.TensorView(stride=[1, 4], layout=pl.TensorLayout.DN)],
+        ) -> pl.Tensor[[4, 8], pl.FP32, pl.TensorView(stride=[1, 4], layout=pl.TensorLayout.DN)]:
+            for _i, (acc,) in pl.range(0, 4, init_values=(init,)):
+                r = pl.yield_(acc)
+            return r
+
+    ir.assert_structural_equal(_materialize(Before), Expected)
 
 
 # ============================================================================
@@ -571,26 +600,46 @@ def test_iter_arg_type_and_init_materialized():
 
 
 def test_submit_return_type_materialized():
-    def build(stride):
-        kx = ir.Var("x", _dn_tensor([4, 8], stride), _SPAN)
-        kernel = ir.Function("kernel", [kx], [_dn_tensor([4, 8], stride)], ir.ReturnStmt([kx], _SPAN), _SPAN)
-        kgv = ir.GlobalVar("kernel")
+    """Every reachable TensorType — kernel params/return, caller param, AND the
+    Submit node's own tuple-return element — comes out DN-packed ``[1, 4]``."""
 
-        a = ir.Var("a", _dn_tensor([4, 8], stride), _SPAN)
-        submit_ret = ir.TupleType([_dn_tensor([4, 8], stride), ir.ScalarType(DataType.TASK_ID)])
-        res = ir.Var("res", submit_ret, _SPAN)
-        submit = ir.Submit(kgv, [a], [], submit_ret, _SPAN)
-        body = ir.SeqStmts([ir.AssignStmt(res, submit, _SPAN), ir.ReturnStmt([res], _SPAN)], _SPAN)
-        caller = ir.Function("caller", [a], [submit_ret], body, _SPAN)
-        return ir.Program([kernel, caller], "p", _SPAN)
+    @pl.program
+    class Before:
+        @pl.function
+        def kernel(
+            self,
+            x: pl.Tensor[[4, 8], pl.FP32, pl.TensorView(stride=[], layout=pl.TensorLayout.DN)],
+        ) -> pl.Tensor[[4, 8], pl.FP32, pl.TensorView(stride=[], layout=pl.TensorLayout.DN)]:
+            return x
 
-    Before = build([])
-    # Every reachable TensorType — kernel params/return, caller param/return,
-    # AND the Submit node's own tuple-return element — should be DN-packed [1, 4].
-    Expected = build([1, 4])
+        @pl.function
+        def caller(
+            self,
+            a: pl.Tensor[[4, 8], pl.FP32, pl.TensorView(stride=[], layout=pl.TensorLayout.DN)],
+        ):
+            with pl.manual_scope():
+                res, tid = pl.submit(self.kernel, a)
+            return res, tid
 
-    After = _materialize(Before)
-    ir.assert_structural_equal(After, Expected)
+    @pl.program
+    class Expected:
+        @pl.function
+        def kernel(
+            self,
+            x: pl.Tensor[[4, 8], pl.FP32, pl.TensorView(stride=[1, 4], layout=pl.TensorLayout.DN)],
+        ) -> pl.Tensor[[4, 8], pl.FP32, pl.TensorView(stride=[1, 4], layout=pl.TensorLayout.DN)]:
+            return x
+
+        @pl.function
+        def caller(
+            self,
+            a: pl.Tensor[[4, 8], pl.FP32, pl.TensorView(stride=[1, 4], layout=pl.TensorLayout.DN)],
+        ):
+            with pl.manual_scope():
+                res, tid = pl.submit(self.kernel, a)
+            return res, tid
+
+    ir.assert_structural_equal(_materialize(Before), Expected)
 
 
 if __name__ == "__main__":

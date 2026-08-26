@@ -211,6 +211,14 @@ nav:
           - en/user/tutorials/03-mixed-kernel.md
           - en/user/tutorials/04-task-graph.md
           - en/user/tutorials/05-scheduling-tuning.md
+      - Execution:
+          - en/user/execution/index.md
+          - en/user/execution/00-compile.md
+          - en/user/execution/01-run.md
+      - Precision:
+          - en/user/precision/index.md
+          - en/user/precision/00-workflow.md
+          - en/user/precision/01-cases.md
       - Performance:
           - en/user/performance/index.md
           - en/user/performance/00-swimlane.md
@@ -220,10 +228,6 @@ nav:
           - en/user/performance/04-incore.md
           - en/user/performance/05-memory.md
           - en/user/performance/06-host.md
-      - Precision:
-          - en/user/precision/index.md
-          - en/user/precision/00-workflow.md
-          - en/user/precision/01-cases.md
       - Tasks and Ordering:
           - en/user/tasks/index.md
           - en/user/tasks/00-model.md
@@ -235,10 +239,6 @@ nav:
           - en/user/ops/00-dispatch.md
           - en/user/ops/01-catalog.md
       - en/user/00-getting_started.md
-      - Execution:
-          - en/user/execution/index.md
-          - en/user/execution/00-compile.md
-          - en/user/execution/01-run.md
       - Tools:
           - en/user/tools/index.md
           - en/user/tools/00-debugging.md

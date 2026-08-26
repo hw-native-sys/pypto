@@ -2898,6 +2898,21 @@ class TestControlFlow:
         ir.assert_structural_equal(After, Expected)
 
 
+def _assert_single_acc_buffer_no_move(after: ir.Program, label: str) -> None:
+    """Assert an accumulator chain landed on ONE Acc allocation with no copy.
+
+    Two Acc bases, or a surviving ``tile.move``, both mean the same thing: one
+    logical accumulator ended up on two L0C buffers, which the hardware cannot
+    realize (nothing reads L0C except the FIXPIPE drain).
+    """
+    printed = ir.python_print(after)
+    acc_bases = {b for b in _collect_tile_memref_bases(after).values() if "acc" in b}
+    assert len(acc_bases) == 1, (
+        f"{label}: expected ONE Acc allocation, got {len(acc_bases)}: {sorted(acc_bases)}\n{printed}"
+    )
+    assert "tile.move" not in printed, f"{label}: an in-place accumulator chain needs no move:\n{printed}"
+
+
 class TestTopDownRetargeter:
     """Tests for the Step-0 top-down retargeter inside MemoryReuse.
 
@@ -3649,9 +3664,152 @@ class TestTopDownRetargeter:
         After = _run_pipeline(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_predicated_pipelined_kloop_uses_one_acc_buffer(self):
+        """The migration target for the peel the sibling test rejects.
 
-class TestMetadata:
-    """Function metadata should survive MemoryReuse rewrites."""
+        Spelling the same stage-2 pipelined split-K reduction as one predicated
+        ``tile.matmul_acc(c_iter, sa, sb, init_cond=(ko == 0))`` keeps the whole
+        accumulator chain (``tile.create`` init + the per-block accumulate + the
+        loop yield) on ONE Acc allocation with no ``tile.move`` -- exactly what
+        the deleted coalescer used to reconstruct after the fact. Runs the real
+        ``lower_pipeline_loops`` under BASIC verification, so this checks legal
+        IR, not just a buffer count.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[176, 192], pl.BF16],
+                rhs: pl.Tensor[[192, 176], pl.BF16],
+                out: pl.Out[pl.Tensor[[176, 176], pl.FP32]],
+            ) -> pl.Tensor[[176, 176], pl.FP32]:
+                lhs_mat: pl.Tile[[176, 192], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [176, 192], target_memory=pl.Mem.Mat
+                )
+                rhs_mat: pl.Tile[[192, 176], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [192, 176], target_memory=pl.Mem.Mat
+                )
+                c_init: pl.Tile[[176, 176], pl.FP32, pl.Mem.Acc] = pl.tile.create(
+                    [176, 176], dtype=pl.FP32, target_memory=pl.Mem.Acc
+                )
+                for ko, (c_iter,) in pl.pipeline(0, 192, 64, init_values=(c_init,), stage=2):
+                    sa: pl.Tile[[176, 64], pl.BF16, pl.Mem.Left] = pl.tile.extract(
+                        lhs_mat, 0, ko, shape=[176, 64], target_memory=pl.Mem.Left
+                    )
+                    sb: pl.Tile[[64, 176], pl.BF16, pl.Mem.Right] = pl.tile.extract(
+                        rhs_mat, ko, 0, shape=[64, 176], target_memory=pl.Mem.Right
+                    )
+                    c_acc: pl.Tile[[176, 176], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
+                        c_iter, sa, sb, init_cond=(ko == 0)
+                    )
+                    c: pl.Tile[[176, 176], pl.FP32, pl.Mem.Acc] = pl.yield_(c_acc)
+                result: pl.Tensor[[176, 176], pl.FP32] = pl.store(c, [0, 0], out)
+                return result
+
+        peeled = passes.init_mem_ref()(passes.lower_pipeline_loops()(Before))
+
+        with passes.PassContext([], passes.VerificationLevel.BASIC):
+            legacy_after = passes.memory_reuse()(passes.materialize_semantic_aliases()(peeled))
+        _assert_single_acc_buffer_no_move(legacy_after, "PYPTO")
+
+        with passes.PassContext(
+            [],
+            passes.VerificationLevel.BASIC,
+            memory_planner=passes.MemoryPlanner.DSA_RP,
+        ):
+            dsa_after = passes.materialize_semantic_aliases()(peeled)
+        _assert_single_acc_buffer_no_move(dsa_after, "DSA_RP")
+
+    def test_peel_inside_a_carrying_loop_still_compiles(self):
+        """The common source spelling of split-K -- an ``if k == 0`` peel *inside*
+        a loop that carries the accumulator -- must keep compiling.
+
+        ``MaterializeSemanticAliases`` propagates the carry's buffer down through
+        the if-phi into BOTH arms, so the two producers land on the accumulator
+        buffer and no divergence ever reaches YieldFixup. This is the shape of
+        every existing peeled kernel, so it is the regression guard that the
+        diagnostic does not fire on code that compiles today.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 192], pl.BF16],
+                rhs: pl.Tensor[[192, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                lhs_mat: pl.Tile[[16, 192], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [16, 192], target_memory=pl.Mem.Mat
+                )
+                rhs_mat: pl.Tile[[192, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [192, 64], target_memory=pl.Mem.Mat
+                )
+                c_init: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.create(
+                    [16, 64], dtype=pl.FP32, target_memory=pl.Mem.Acc
+                )
+                for ko, (c_iter,) in pl.range(0, 192, 64, init_values=(c_init,)):
+                    sa: pl.Tile[[16, 64], pl.BF16, pl.Mem.Left] = pl.tile.extract(
+                        lhs_mat, 0, ko, shape=[16, 64], target_memory=pl.Mem.Left
+                    )
+                    sb: pl.Tile[[64, 64], pl.BF16, pl.Mem.Right] = pl.tile.extract(
+                        rhs_mat, ko, 0, shape=[64, 64], target_memory=pl.Mem.Right
+                    )
+                    if ko == 0:
+                        c_first: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(sa, sb)
+                        c_phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_first)
+                    else:
+                        c_acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(c_iter, sa, sb)
+                        c_phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_acc)
+                    c: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_phi)
+                result: pl.Tensor[[16, 64], pl.FP32] = pl.store(c, [0, 0], out)
+                return result
+
+        _assert_single_acc_buffer_no_move(_run_pipeline(Before), "peel-in-carry")
+
+    def test_predicated_accumulate_inside_a_carrying_loop(self):
+        """The ``init_cond`` spelling of the peel above lowers to the same result.
+
+        Keeps the diagnostic's advice testable rather than aspirational: the form
+        the message recommends must reach one Acc allocation with no ``tile.move``.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 192], pl.BF16],
+                rhs: pl.Tensor[[192, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                lhs_mat: pl.Tile[[16, 192], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [16, 192], target_memory=pl.Mem.Mat
+                )
+                rhs_mat: pl.Tile[[192, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [192, 64], target_memory=pl.Mem.Mat
+                )
+                c_init: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.create(
+                    [16, 64], dtype=pl.FP32, target_memory=pl.Mem.Acc
+                )
+                for ko, (c_iter,) in pl.range(0, 192, 64, init_values=(c_init,)):
+                    sa: pl.Tile[[16, 64], pl.BF16, pl.Mem.Left] = pl.tile.extract(
+                        lhs_mat, 0, ko, shape=[16, 64], target_memory=pl.Mem.Left
+                    )
+                    sb: pl.Tile[[64, 64], pl.BF16, pl.Mem.Right] = pl.tile.extract(
+                        rhs_mat, ko, 0, shape=[64, 64], target_memory=pl.Mem.Right
+                    )
+                    c_acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
+                        c_iter, sa, sb, init_cond=(ko == 0)
+                    )
+                    c: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_acc)
+                result: pl.Tensor[[16, 64], pl.FP32] = pl.store(c, [0, 0], out)
+                return result
+
+        _assert_single_acc_buffer_no_move(_run_pipeline(Before), "init_cond-in-carry")
 
     def test_preserves_split_metadata(self):
         @pl.program
@@ -4194,6 +4352,131 @@ class TestAscend910BLoadTpopHazard:
         assert previous_offset + previous_size <= next_offset or next_offset + next_size <= previous_offset, (
             "Ascend910B split-AIV: DSA-RP must physically separate tile.add output "
             f"{ranges['down_next']} from load buffer {ranges['down_prev']}"
+        )
+
+    @staticmethod
+    def _build_loop_carried_program():
+        """Same hazard, but the tpop value reaches the writer through a loop carry.
+
+        ``down_next = tile.add(down_prev=tile.load, pipe_carry)`` where
+        ``pipe_carry`` is the loop's ``IterArg``, initialised from the
+        ``tile.tpop_from_aic`` result and so must-aliased onto its buffer.  The
+        writer still reads a load result and a tpop value at one statement, so
+        the hazard is identical to ``_build_program``'s straight-line form — only
+        the spelling of the tpop operand differs.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main(self, down: pl.InOut[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+                mem_vec_0: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 4096)
+                mem_vec_1: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 4096)
+                mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 4096)
+                pipe_chunk: pl.Tile[[8, 128], pl.FP32, pl.MemRef(mem_vec_0, 0, 4096), pl.Mem.Vec] = (
+                    pl.tile.tpop_from_aic(split=1)
+                )
+                for _i, (pipe_carry,) in pl.range(0, 2, init_values=(pipe_chunk,)):
+                    down_prev: pl.Tile[[8, 128], pl.FP32, pl.MemRef(mem_vec_1, 0, 4096), pl.Mem.Vec] = (
+                        pl.tile.load(down, [0, 0], [8, 128], [8, 128], target_memory=pl.Mem.Vec)
+                    )
+                    down_next: pl.Tile[[8, 128], pl.FP32, pl.MemRef(mem_vec_2, 0, 4096), pl.Mem.Vec] = (
+                        pl.tile.add(down_prev, pipe_carry)
+                    )
+                    loop_out = pl.yield_(down_next)
+                result: pl.Tensor[[16, 128], pl.FP32] = pl.tile.store(loop_out, [0, 0], down)
+                return result
+
+        return Prog
+
+    def test_iter_arg_tpop_operand_still_blocks_load_buffer_reuse(self):
+        """A loop-carried tpop operand must not escape the guard.
+
+        The operand is an ``IterArg``, which has its own ``ObjectKind`` and is
+        never itself an ``AssignStmt`` def, so neither ``As<Var>`` nor Var
+        identity can classify it.  ``HazardInputCollector`` reads operands with
+        ``AsVarLike`` and resolves a carry through the MemRef base its chain was
+        fused onto; without that, ``down_next`` is not recognised as reading a
+        tpop value and MemoryReuse forms the in-place load touch.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        try:
+            After = passes.memory_reuse()(self._build_loop_carried_program())
+        finally:
+            backend.reset_for_testing()
+
+        bases = _collect_tile_memref_bases(After)
+        assert "down_prev" in bases and "down_next" in bases, f"missing tile vars; got {bases}"
+        assert bases["down_next"] != bases["down_prev"], (
+            "Ascend910B split-AIV: tile.add output must NOT reuse the tile.load buffer when the "
+            "tpop_from_aic operand arrives as a loop-carried IterArg, but both bind to "
+            f"{bases['down_prev']}"
+        )
+
+    @staticmethod
+    def _build_back_edge_program():
+        """The tpop producer stands *after* the writer that consumes its value.
+
+        ``pipe_carry`` starts out as a plain ``tile.create``, so iteration 0 is
+        safe; from iteration 1 on it holds the ``tile.tpop_from_aic`` result that
+        the loop yields back into it.  The writer ``down_next`` therefore reads a
+        load result and a tpop value, but its tpop producer is only reached
+        *later* in program order — a single forward walk classifies the writer
+        before the carry's buffer is known to be tainted.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main(self, down: pl.InOut[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+                mem_vec_0: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 4096)
+                mem_vec_1: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 4096)
+                mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 4096)
+                pipe_seed: pl.Tile[[8, 128], pl.FP32, pl.MemRef(mem_vec_0, 0, 4096), pl.Mem.Vec] = (
+                    pl.tile.create([8, 128], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+                )
+                for _i, (pipe_carry,) in pl.range(0, 2, init_values=(pipe_seed,)):
+                    down_prev: pl.Tile[[8, 128], pl.FP32, pl.MemRef(mem_vec_1, 0, 4096), pl.Mem.Vec] = (
+                        pl.tile.load(down, [0, 0], [8, 128], [8, 128], target_memory=pl.Mem.Vec)
+                    )
+                    # noqa: F841 — `down_next` is the writer under test; consuming it
+                    # (yielding it into a second carry) would move its lifetime and stop
+                    # MemoryReuse coalescing it onto the load buffer, defeating the test.
+                    down_next: pl.Tile[[8, 128], pl.FP32, pl.MemRef(mem_vec_2, 0, 4096), pl.Mem.Vec] = (  # noqa: F841
+                        pl.tile.add(down_prev, pipe_carry)
+                    )
+                    pipe_next: pl.Tile[[8, 128], pl.FP32, pl.MemRef(mem_vec_0, 0, 4096), pl.Mem.Vec] = (
+                        pl.tile.tpop_from_aic(split=1)
+                    )
+                    loop_out = pl.yield_(pipe_next)
+                result: pl.Tensor[[16, 128], pl.FP32] = pl.tile.store(loop_out, [0, 0], down)
+                return result
+
+        return Prog
+
+    def test_tpop_reaching_a_writer_across_the_back_edge_blocks_reuse(self):
+        """Taint arriving through the loop back edge must still block the reuse.
+
+        The carry's buffer is only known to hold a tpop value once the *yielded*
+        producer is reached, which is after the writer in program order.  A
+        single forward traversal misses it and coalesces ``down_next`` onto the
+        load buffer; ``HazardInputCollector::Run`` walks the body twice so the
+        completed buffer taint is in hand before the writer is classified.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        try:
+            After = passes.memory_reuse()(self._build_back_edge_program())
+        finally:
+            backend.reset_for_testing()
+
+        bases = _collect_tile_memref_bases(After)
+        assert "down_prev" in bases and "down_next" in bases, f"missing tile vars; got {bases}"
+        assert bases["down_next"] != bases["down_prev"], (
+            "Ascend910B split-AIV: tile.add output must NOT reuse the tile.load buffer when the "
+            "tpop_from_aic value reaches it across the loop back edge, but both bind to "
+            f"{bases['down_prev']}"
         )
 
     def test_ascend950_allows_load_buffer_reuse(self):

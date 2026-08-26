@@ -481,6 +481,7 @@ class DistributedCompiledProgram:
         reset_persistent_windows: bool | None = None,
         callbacks: dict[str, Callable[..., Any]] | None = None,
         sub_worker_overrides: dict[str, Callable[..., Any]] | None = None,
+        inherited_host_tensors: Sequence[torch.Tensor] | None = None,
         startup_timeout_s: float | None = None,
     ) -> "DistributedWorker":
         """Prepare a reusable L3 execution handle (setup once, dispatch many).
@@ -537,6 +538,17 @@ class DistributedCompiledProgram:
                 raises ``ValueError``. In multi-program mode the callbacks apply
                 to every prepared program.
             sub_worker_overrides: Deprecated alias for ``callbacks``.
+            inherited_host_tensors: Host ranges that predate the fork and that
+                the caller **guarantees** are visible across processes — a
+                ``MAP_SHARED`` mapping, whether torch's own shared memory or an
+                external file mapping — and stay valid for the worker's lifetime.
+                Listed ranges are named in place by ``copy_to`` / ``copy_from``
+                instead of being staged through an owned shm ``Buffer``, which
+                removes one full host-side copy of the payload. Passing a
+                ``MAP_PRIVATE`` backing is unsupported and may upload stale or
+                incorrect data; see :class:`DistributedWorker` for the full
+                contract and for the warning emitted when the guarantee cannot
+                be confirmed.
             startup_timeout_s: Optional positive finite bound, in seconds, for
                 the forked worker hierarchy to report startup readiness. ``None``
                 keeps Simpler's default timeout.
@@ -554,6 +566,7 @@ class DistributedCompiledProgram:
             reset_persistent_windows=reset_persistent_windows,
             callbacks=callbacks,
             sub_worker_overrides=sub_worker_overrides,
+            inherited_host_tensors=inherited_host_tensors,
             startup_timeout_s=startup_timeout_s,
         )
 

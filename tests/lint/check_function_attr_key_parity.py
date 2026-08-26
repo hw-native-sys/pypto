@@ -65,6 +65,8 @@ import re
 import sys
 from pathlib import Path
 
+from _cpp_text import strip_cpp_comments
+
 # Declaration sites, relative to the repo root.
 CPP_DECL = "include/pypto/ir/function.h"
 PY_DECL = "python/pypto/_function_attrs.py"
@@ -106,42 +108,6 @@ def cpp_ident_to_py(ident: str) -> str:
     """``kAttrDualAivDispatch`` -> ``DUAL_AIV_DISPATCH_ATTR``."""
     body = ident[len("kAttr") :]
     return re.sub(r"(?<!^)(?=[A-Z])", "_", body).upper() + "_ATTR"
-
-
-def strip_cpp_comments(text: str) -> str:
-    """Blank out ``//`` and ``/* */`` comments, preserving line structure and string literals."""
-    out: list[str] = []
-    i, n = 0, len(text)
-    while i < n:
-        c = text[i]
-        if c in ('"', "'"):
-            out.append(c)
-            i += 1
-            while i < n:
-                out.append(text[i])
-                if text[i] == "\\" and i + 1 < n:
-                    out.append(text[i + 1])
-                    i += 2
-                    continue
-                if text[i] == c:
-                    i += 1
-                    break
-                i += 1
-            continue
-        if c == "/" and i + 1 < n and text[i + 1] == "/":
-            while i < n and text[i] != "\n":
-                i += 1
-            continue
-        if c == "/" and i + 1 < n and text[i + 1] == "*":
-            i += 2
-            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
-                out.append("\n" if text[i] == "\n" else " ")
-                i += 1
-            i = min(i + 2, n)
-            continue
-        out.append(c)
-        i += 1
-    return "".join(out)
 
 
 def parse_declarations(root: Path) -> tuple[dict[str, str], dict[str, str], list[str]]:

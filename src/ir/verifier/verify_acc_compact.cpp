@@ -65,7 +65,20 @@ bool IsFractalSpace(MemorySpace space) {
 /// cannot tell an accumulator `mad` wrote from an Acc tile some `tile.load`
 /// filled at the physical pitch.
 ///
-/// **(2) Only a fractal space carries a compact mode at all.** Compact is a
+/// **(2) A compact accumulator's packed pitch survives its aliases.**
+/// `tile.set_validshape` is metadata-only and deliberately keeps `compact`
+/// (`transform.cpp`), because the pitch its readers must use is the one the
+/// producing `mad` already laid the bytes out at. Nothing enforced that: a
+/// compact accumulator re-narrowed across a fractal boundary -- `mad` writes 17
+/// valid rows at pitch 32, the alias then declares 16 -- keeps the flag while
+/// changing the number every compact reader derives the pitch from, so TPUSH and
+/// TSTORE walk L0C at 16 over bytes packed at 32. The alias is rejected here
+/// rather than silently re-interpreted; narrow the result after it leaves L0C
+/// instead. A *fresh* full-box source is exempt: `AutoTileMatmulL0` declares its
+/// accumulator seed as `tile.create(compact=True)` and narrows it immediately,
+/// and a buffer nothing has written yet re-interprets nothing.
+///
+/// **(3) Only a fractal space carries a compact mode at all.** Compact is a
 /// property of a fractal pitch. A UB (`Vec`) tile has none, and no pto-isa Vec
 /// path reads `TileData::Compact` -- stamping it there is inert at best and, on
 /// the ops that *do* consult it (`TMov`, `TFillPad`), a silent layout change.
@@ -94,7 +107,10 @@ class AccCompactVisitor : public IRVisitor {
   // (`AssignTypeSymmetry`), so checking the call as well would report one tile
   // twice, and a call result nothing binds is a tile nothing reads.
   void VisitExpr_(const CallPtr& op) override {
-    if (op) CheckAccumulate(op);
+    if (op) {
+      CheckAccumulate(op);
+      CheckValidShapeAlias(op);
+    }
     IRVisitor::VisitExpr_(op);
   }
 
@@ -102,7 +118,11 @@ class AccCompactVisitor : public IRVisitor {
   // it through the Call view keeps the check correct if that ever changes (see
   // `pass-submit-awareness.md`).
   void VisitExpr_(const SubmitPtr& op) override {
-    if (op) CheckAccumulate(SubmitToCallView(op));
+    if (op) {
+      const CallPtr view = SubmitToCallView(op);
+      CheckAccumulate(view);
+      CheckValidShapeAlias(view);
+    }
     IRVisitor::VisitExpr_(op);
   }
 
@@ -137,6 +157,51 @@ class AccCompactVisitor : public IRVisitor {
         call->span_);
   }
 
+  /// `tile.set_validshape(src, rows, cols)` -- args[1] is the new valid row count.
+  void CheckValidShapeAlias(const CallPtr& call) {
+    if (!IsOp(call, "tile.set_validshape")) return;
+    if (call->args_.size() < 2 || !call->args_[0] || !call->args_[1]) return;
+
+    auto src_type = As<TileType>(call->args_[0]->GetType());
+    if (!src_type || !src_type->memory_space_.has_value()) return;
+    if (*src_type->memory_space_ != MemorySpace::Acc || src_type->shape_.empty()) return;
+
+    const TileView src_view = tile_view_semantics::GetEffectiveTileView(*src_type);
+    if (src_view.compact != CompactMode::normal || src_view.valid_shape.empty()) return;
+    // A full-box source is a declaration, not a re-interpretation: nothing has
+    // been written into it yet (the AutoTileMatmulL0 accumulator seed).
+    if (ProveValidExtentEqual(src_view.valid_shape[0], src_type->shape_[0]) == ProofResult::kTrue) {
+      return;
+    }
+    if (!PackedPitchDiffers(src_view.valid_shape[0], call->args_[1])) return;
+
+    diagnostics_.emplace_back(
+        DiagnosticSeverity::Error, "AccCompactValid", /*error_code=*/2,
+        "'tile.set_validshape' re-narrows a compact accumulator from " +
+            PythonPrint(src_view.valid_shape[0]) + " to " + PythonPrint(call->args_[1]) +
+            " valid rows, which changes the pitch its readers derive (function '" + func_name_ +
+            "'). The op is metadata-only, so the bytes stay packed at ceil(" +
+            PythonPrint(src_view.valid_shape[0]) +
+            "/16)*16 while every compact reader would now walk them at the new extent's pitch. "
+            "Narrow the result after it leaves L0C -- cast or move it to Vec first, then "
+            "pl.set_validshape the vector tile.",
+        call->span_);
+  }
+
+  /// Do the two extents provably pack to different N-fractal pitches? Only a
+  /// decidable difference is reported; an undecidable pair is left alone rather
+  /// than rejecting IR that may well be consistent.
+  static bool PackedPitchDiffers(const ExprPtr& old_rows, const ExprPtr& new_rows) {
+    if (ProveValidExtentEqual(old_rows, new_rows) == ProofResult::kTrue) return false;
+    auto old_const = As<ConstInt>(old_rows);
+    auto new_const = As<ConstInt>(new_rows);
+    if (!old_const || !new_const) return false;
+    const auto packed = [](int64_t v) {
+      return (v + kAccFractalRows - 1) / kAccFractalRows * kAccFractalRows;
+    };
+    return packed(old_const->value_) != packed(new_const->value_);
+  }
+
   void CheckSpaceOfType(const TypePtr& type, const Span& span) {
     if (!type) return;
     if (auto tuple_type = As<TupleType>(type)) {
@@ -151,7 +216,7 @@ class AccCompactVisitor : public IRVisitor {
     if (IsFractalSpace(*tile_type->memory_space_)) return;
 
     diagnostics_.emplace_back(
-        DiagnosticSeverity::Error, "AccCompactValid", /*error_code=*/2,
+        DiagnosticSeverity::Error, "AccCompactValid", /*error_code=*/3,
         "tile in memory space '" + MemorySpaceToString(*tile_type->memory_space_) +
             "' carries a compact mode (function '" + func_name_ +
             "'). Compact describes an N-fractal pitch, so only Left/Right/Acc tiles may carry it; "

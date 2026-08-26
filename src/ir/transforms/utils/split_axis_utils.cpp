@@ -43,6 +43,7 @@
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -81,6 +82,16 @@ bool IsReduceOnSplitAxis(const CallPtr& call, int split_dim) {
     return split_dim == 0;
   }
   return false;
+}
+
+TypePtr WithFullSplitAxisValid(const TypePtr& type, int split_dim) {
+  auto tt = std::dynamic_pointer_cast<const TileType>(type);
+  if (!tt || split_dim < 0 || split_dim >= static_cast<int>(tt->shape_.size())) return type;
+  TileView tv = tile_view_semantics::GetEffectiveTileView(*tt);
+  if (split_dim >= static_cast<int>(tv.valid_shape.size())) return type;
+  if (AreExprsEqual(tv.valid_shape[split_dim], tt->shape_[split_dim])) return type;
+  tv.valid_shape[split_dim] = tt->shape_[split_dim];
+  return std::make_shared<TileType>(tt->shape_, tt->dtype_, tt->memref_, std::move(tv), tt->memory_space_);
 }
 
 namespace {
@@ -250,8 +261,48 @@ ExprPtr LocalizeTupleElementForSplit(const ExprPtr& tuple_expr, int dim, const E
   return std::make_shared<MakeTuple>(std::move(new_elements), tuple_expr->span_);
 }
 
+// Whether @p call fills a tile's PAD region, i.e. reads where the operand's valid
+// data ends in order to define everything past it. Such an op is the one kind of
+// consumer that cannot receive a deferred extent: its result is fully valid by
+// construction, so the extent has nowhere to land, and it would fill nothing.
+// `tile.set_validshape` to the full box looks the same in the type system but is
+// a relabel, not a fill — the author is declaring the padding to be data, which
+// is exactly what a deferred boundary hands them.
+bool FillsPadRegion(const CallPtr& call) {
+  return IsOp(call, "tile.fillpad") || IsOp(call, "tile.fillpad_inplace") ||
+         IsOp(call, "tile.fillpad_expand");
+}
+
+// A store must not read a boundary tile whose split-axis extent was left at the
+// transport's (see WithFullSplitAxisValid): that extent is the truth about the
+// FIFO band and a lie about how much of the lane's box is data.
+void RejectDeferredValidStore(bool deferred, const CallPtr& call) {
+  CHECK_SPAN(!deferred, call->span_)
+      << "tile.store: this store consumes a Cube -> Vector boundary tile directly, and that "
+         "boundary's split-axis valid extent is a RUNTIME value, so the two AIV lanes' extents "
+         "are not known at compile time. The popped tile therefore has to declare the transport's "
+         "full box — that is what places lane 1's band where the producer wrote it — rather than "
+         "the lane's own extent, and storing it would write the lane's padding as data.\n"
+         "Author one of these instead:\n"
+         "  * narrow after the crossing: run a vector op whose result carries the extent you want "
+         "stored (e.g. pl.fillpad(...) to define the padding, then pl.set_validshape(...)), and "
+         "store that\n"
+         "  * make the split-axis valid extent a compile-time constant, so the lanes can be "
+         "balanced and the extent can ride on the transport itself\n"
+         "  * keep the extent at or below the box half, so the second lane is empty";
+}
+
 CallPtr RebuildTpopWithHalvedShape(const CallPtr& call, int split_code, int split_dim,
                                    const ExprPtr& subblock_idx, const ExprPtr& lane_stride) {
+  // NOT widened for a runtime extent, unlike the boundary ops in
+  // LocalizeExplicitBoundaryValid. A hand-written tpop declares its own
+  // valid_shape and its consumers inherit that declaration, so widening the pop
+  // alone leaves each consumer writing a partial destination out of a full
+  // source — measured to produce wrong data on a2a3 for every extent except the
+  // two where the widening is a no-op. See
+  // tests/st/runtime/cross_core/test_cross_core_split_parity.py, whose
+  // xfailing params record what a runtime split-axis extent still gets wrong on
+  // this path.
   auto new_result_type = HalveTileShape(call->GetType(), split_dim, subblock_idx, lane_stride);
 
   std::vector<std::pair<std::string, std::any>> new_kwargs;
@@ -1119,6 +1170,12 @@ struct LocalizedTile {
   ExprPtr lane_extent;                     ///< clamp(V - idx*half, 0, half)
   ExprPtr joined_extent;                   ///< V, the pre-shard extent a gather restores
   std::shared_ptr<const TileType> before;  ///< the type before localization
+  /// The extent could NOT ride on the boundary op itself (see
+  /// WithFullSplitAxisValid): the shard keeps the full box so the transport
+  /// places lane 1's band correctly, and the extent lands on this consumer chain
+  /// instead. An op that READS the extent without producing a tile — a store —
+  /// has nowhere to put it and is rejected.
+  bool deferred = false;
 };
 
 }  // namespace
@@ -1281,26 +1338,47 @@ std::optional<std::pair<int64_t, int64_t>> StaticLaneExtents(const TypePtr& full
   return std::make_pair(extents->lane0, extents->lane1);
 }
 
+bool HasStaticLaneExtents(const TypePtr& full_type, int split_dim, const ExprPtr& lane_stride) {
+  return StaticLaneExtents(full_type, split_dim, lane_stride).has_value();
+}
+
 int ShardSplitCode(SplitMode mode, const TypePtr& full_type, int split_dim, const ExprPtr& lane_stride,
                    const std::string& op_name, const Span& span) {
   if (mode == SplitMode::None) return kSplitNone;
   auto tt = std::dynamic_pointer_cast<const TileType>(full_type);
+  // What the FIFO can carry at all. The boundary ops are checked when their type
+  // is deduced; a HAND-WRITTEN tile.tpush_to_aiv / tile.tpop_from_aic pair never
+  // goes through that deduction, and reaches the transport here instead. Both
+  // must obey the same contract, because it is pto-isa's geometry rather than a
+  // pass's convention: the pop derives its GM row stride and its lane offset
+  // from the popped tile's own valid extents, so a narrowed COLUMN extent
+  // mis-strides the read against the producer's full-box pitch (measured on
+  // a2a3: a [16, 16] boundary read back with valid_col 12 or 8 misses the
+  // golden, while 16 matches).
+  if (tt) {
+    CheckSplitBoundaryCarriesValid(op_name, tt->shape_,
+                                   tile_view_semantics::GetEffectiveTileView(*tt).valid_shape, split_dim,
+                                   /*halve=*/true, span);
+  }
   auto extents = ComputeLaneExtents(tt, split_dim, lane_stride);
-  // No compile-time lane extents (a runtime box, valid extent or stride): emit
-  // the even code, which is what this path emitted before the odd codes existed
-  // and what the device is measured to accept.
+  // No compile-time lane extents (a runtime box, valid extent or stride): the
+  // even code, which is exact only when the boundary tile carries the FULL
+  // split-axis box rather than the lane's extent. The producer transports the
+  // full box (PTO codegen widens every split tpush), so lane 1's band sits at
+  // the box half and the even code points pto-isa there; which lane holds how
+  // much data is carried by the tile's CONSUMERS, where no band offset depends
+  // on it. LocalizeExplicitBoundaryValid establishes that pairing for a
+  // pl.split_aiv region's boundary op (WithFullSplitAxisValid).
   //
-  // Reading pto-isa's pop suggests otherwise — it derives lane 1's band from the
-  // popped tile's runtime valid extent, so a runtime extent that leaves the
-  // lanes unequal (15 of a 16-wide axis gives 8 and 7) looks like it would need
-  // the odd code. The device says the even code is right: rejecting these
-  // boundaries was tried and it took down
-  // tests/st/runtime/cross_core/test_cross_core_split_parity.py, whose
-  // LEFT_RIGHT cases (lanes 8 / 7 and 8 / 1) pass an elementwise on-device
-  // comparison — re-verified by perturbing the golden on lane 1's columns
-  // alone, which does fail. Which reading is the contract is asked upstream in
-  // hw-native-sys/pto-isa#263; until that answers, the encoding follows the
-  // measured behaviour rather than the source reading.
+  // The pairing is what makes this safe. The even code beside a PER-LANE extent
+  // silently mis-places lane 1: a 16-row box valid to 12 leaves the lanes 8 and
+  // 4, and pto-isa reads lane 1's band at row 4 while the producer wrote it at
+  // row 8. A hand-written tile.tpop_from_aic still pairs this way and is still
+  // wrong for such an extent -- widening it alone regresses the device (see
+  // RebuildTpopWithHalvedShape). It went unnoticed for as long as it did
+  // because tests/st/runtime/cross_core/test_cross_core_split_parity.py fed
+  // both operands uniform constants, which makes every row and column of the
+  // product identical and any band offset indistinguishable.
   if (!extents.has_value()) return SplitCodeFor(mode, /*odd_extent=*/false);
 
   if (extents->lane0 == extents->lane1) return SplitCodeFor(mode, /*odd_extent=*/false);
@@ -1384,6 +1462,19 @@ struct LocalizeState {
 
 std::vector<StmtPtr> LocalizeStmts(const std::vector<StmtPtr>& stmts, int split_dim, const Span& span,
                                    LocalizeState& state);
+
+/// The tracked (localized or deferred) boundary tile this call reads, or null.
+const LocalizedTile* FindTrackedSource(const CallPtr& call, const LocalizeState& state) {
+  for (const auto& arg : call->args_) {
+    auto arg_var = AsVarLike(arg);
+    if (!arg_var) continue;
+    auto replaced = state.replacements.find(arg_var.get());
+    const Var* key = (replaced != state.replacements.end()) ? replaced->second.get() : arg_var.get();
+    auto it = state.tracked.find(key);
+    if (it != state.tracked.end()) return &it->second;
+  }
+  return nullptr;
+}
 
 /// Recurse into a nested body, preserving its statement kind.
 StmtPtr LocalizeNestedBody(const StmtPtr& body, int split_dim, const Span& span, LocalizeState& state) {
@@ -1516,6 +1607,20 @@ std::vector<StmtPtr> LocalizeStmts(const std::vector<StmtPtr>& stmts, int split_
       continue;
     }
 
+    // A store whose result is ignored is an EvalStmt, so the AssignStmt walk below
+    // never sees it — but it reads the boundary tile's extent just the same, and
+    // a deferred one would put the transport's padding in the output.
+    if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
+      if (auto eval_call = AsCall(eval->expr_);
+          eval_call && eval_call->op_ && IsOp(eval_call, "tile.store")) {
+        if (const LocalizedTile* eval_source = FindTrackedSource(eval_call, state)) {
+          RejectDeferredValidStore(eval_source->deferred, eval_call);
+        }
+      }
+      result.push_back(stmt);
+      continue;
+    }
+
     auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt);
     auto call = assign ? AsCall(assign->value_) : nullptr;
     if (!assign || !call || !call->op_) {
@@ -1553,31 +1658,28 @@ std::vector<StmtPtr> LocalizeStmts(const std::vector<StmtPtr>& stmts, int split_
       INTERNAL_CHECK_SPAN(state.lane_index, call->span_)
           << "Internal error: a pl.split_aiv region with a partially-valid split axis has no "
              "tile.get_subblock_idx binding, so the per-lane extent cannot be materialized";
-      auto new_type = LocalizeShardValidForLane(shard, operand, split_dim, state.lane_index);
+      auto localized = LocalizeShardValidForLane(shard, operand, split_dim, state.lane_index);
       auto lane_extent =
-          tile_view_semantics::GetEffectiveTileView(*std::dynamic_pointer_cast<const TileType>(new_type))
+          tile_view_semantics::GetEffectiveTileView(*std::dynamic_pointer_cast<const TileType>(localized))
               .valid_shape[split_dim];
+      // Where the extent may LAND. It belongs on the shard itself only when the
+      // transport was verified to place both lanes' bands, which needs
+      // compile-time lane extents: pto-isa reads lane 1's band offset off this
+      // very tile, and the producer transported the full box. A runtime extent
+      // leaves the shard full-width and hands the lane's extent to the consumers
+      // below (see WithFullSplitAxisValid).
+      const bool deferred = !HasStaticLaneExtents(operand, split_dim, /*lane_stride=*/nullptr);
+      auto new_type = deferred ? WithFullSplitAxisValid(shard, split_dim) : localized;
       auto new_var = std::make_shared<Var>(assign->var_->name_hint_, new_type, assign->var_->span_);
       auto new_call = std::make_shared<Call>(call->op_, call->args_, call->kwargs_, new_type, call->span_);
       state.replacements[assign->var_.get()] = new_var;
-      state.tracked[new_var.get()] = LocalizedTile{lane_extent, operand_valid[split_dim], shard};
+      state.tracked[new_var.get()] = LocalizedTile{lane_extent, operand_valid[split_dim], shard, deferred};
       result.push_back(std::make_shared<AssignStmt>(new_var, new_call, assign->span_));
       continue;
     }
 
     // --- Consumers: carry the per-lane extent, or say why we cannot. ---------
-    const LocalizedTile* source = nullptr;
-    for (const auto& arg : call->args_) {
-      auto arg_var = AsVarLike(arg);
-      if (!arg_var) continue;
-      auto replaced = state.replacements.find(arg_var.get());
-      const Var* key = (replaced != state.replacements.end()) ? replaced->second.get() : arg_var.get();
-      auto it = state.tracked.find(key);
-      if (it != state.tracked.end()) {
-        source = &it->second;
-        break;
-      }
-    }
+    const LocalizedTile* source = FindTrackedSource(call, state);
     // tile.aic_gather is the region's EXIT: it re-joins the two lanes' bands and
     // hands a FULL tile back to the cube. This is the one place the join can be
     // typed correctly, because it is the only place the lanes' TRUE extents are
@@ -1660,6 +1762,11 @@ std::vector<StmtPtr> LocalizeStmts(const std::vector<StmtPtr>& stmts, int split_
       // the store on a non-empty lane. The tpop and the tfree stay
       // UNCONDITIONAL: both lanes must still pop and free the slot or the pipe
       // desynchronizes.
+      // A store of a DEFERRED boundary tile would write the transport's box, not
+      // the lane's data: the extent never got a consumer to land on.
+      if (IsOp(call, "tile.store")) {
+        RejectDeferredValidStore(source->deferred, call);
+      }
       if (IsOp(call, "tile.store") && !IsProvablyPositive(source->lane_extent)) {
         // The guard can be a plain IfStmt because a store's SSA result is a
         // destination-passing alias (see CollectChainedStoreDestinations). Only a
@@ -1687,6 +1794,24 @@ std::vector<StmtPtr> LocalizeStmts(const std::vector<StmtPtr>& stmts, int split_
       result.push_back(stmt);
       continue;
     }
+
+    // A pad FILL is the one consumer that reads where the lane's data ends. Its
+    // result is fully valid by construction, so it hits the widen shortcut below
+    // and the deferred extent would be dropped — leaving the fill with nothing to
+    // do and the transport's padding declared as data.
+    CHECK_SPAN(!(source->deferred && FillsPadRegion(call)), call->span_)
+        << call->op_->name_
+        << ": this fills the padding of a Cube -> Vector boundary tile whose split-axis valid extent "
+           "is a RUNTIME value. The boundary has to declare the transport's full box (that is what "
+           "places lane 1's band where the producer wrote it), so by the time the fill runs there is "
+           "no per-lane boundary left to fill up to, and it would define nothing.\n"
+        << "Author one of these instead:\n"
+        << "  * fill the padding on the CUBE side, before the crossing: pl.fillpad(acc) ahead of "
+           "pl.aiv_shard(acc), so the transported box carries defined padding\n"
+        << "  * put the lane's own compute first — any op that passes valid_shape through (a cast, an "
+           "elementwise) materializes the lane extent, and a fill after it works normally\n"
+        << "  * make the split-axis valid extent a compile-time constant, so it rides the boundary "
+           "itself";
 
     // A consumer that WIDENS the logical region back to the whole physical box
     // (a set_validshape to the full extent) deliberately drops the per-lane

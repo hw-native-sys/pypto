@@ -652,11 +652,26 @@ runs:
         if [ "${PYPTO_USE_UV:-false}" != "true" ]; then
           python -m pip install --upgrade pip
         fi
-        # nanobind capped with pyproject.toml's build requirement. This matters
-        # more here than anywhere else: the pypto install below passes
+        # Build inputs come from this checkout's build-constraints.txt. The
+        # workflow-level default assumes a checkout at $GITHUB_WORKSPACE; jobs
+        # using this action may check out into a subdirectory, so resolve the
+        # real path here and publish it for every later step in the job.
+        # It matters more here than anywhere else: the pypto install below passes
         # --no-build-isolation, so the extension is compiled against *this*
-        # nanobind and [build-system] requires is never consulted.
-        py_install scikit-build-core "nanobind<3" cmake ninja
+        # install and [build-system] requires is never consulted.
+        BUILD_CONSTRAINTS="$(pwd)/build-constraints.txt"
+        test -f "$BUILD_CONSTRAINTS" || {
+          echo "build-constraints.txt missing at $BUILD_CONSTRAINTS" >&2
+          exit 1
+        }
+        # PIP_BUILD_CONSTRAINT is the variable pip applies to build
+        # dependencies; PIP_CONSTRAINT is what older pip honours for them. Both,
+        # because the runners do not all carry the same pip.
+        for v in PIP_CONSTRAINT PIP_BUILD_CONSTRAINT UV_CONSTRAINT UV_BUILD_CONSTRAINT; do
+          echo "$v=$BUILD_CONSTRAINTS" >> "$GITHUB_ENV"
+          export "$v=$BUILD_CONSTRAINTS"
+        done
+        py_install scikit-build-core nanobind cmake ninja
         # torch first, and explicitly the CPU build. These are Ascend hosts, and
         # left to resolve `torch>=2.0.0` on its own pip now selects a version
         # whose aarch64 wheel drags in the entire CUDA stack — torch 427 MB,
@@ -684,6 +699,22 @@ runs:
           py_install "$TORCH_PIN"
         fi
         py_install --no-build-isolation '.[dev]'
+        # One line naming the build inputs this artifact was produced from. The
+        # 2026-08-24 outage was hard to place precisely because nothing reported
+        # them: an upstream release and a code change looked identical.
+        # importlib.metadata rather than `pip list`: the bundle toolchain's venv
+        # is built by `uv venv` and has no pip in it at all, which is exactly the
+        # set of jobs that outage hit.
+        python - <<'PY'
+        from importlib.metadata import PackageNotFoundError, version
+        names = ("cmake", "nanobind", "ninja", "scikit-build-core")
+        def resolve(n):
+            try:
+                return f"{n}=={version(n)}"
+            except PackageNotFoundError:
+                return f"{n}=<absent>"
+        print("[build inputs]", " ".join(resolve(n) for n in names))
+        PY
         # simpler (./runtime) is only needed on the codegen -> device path; the
         # --codegen-only job skips it (install-toolchain=false).
         if [ "$INSTALL_TOOLCHAIN" = "true" ]; then

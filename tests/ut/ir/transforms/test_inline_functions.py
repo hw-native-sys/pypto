@@ -908,5 +908,80 @@ class TestInlineFunctionsSubmitCallSite:
         )
 
 
+class TestInlineFunctionsReservedDelimiter:
+    """A local whose name ends in `_` must not fuse with the `_inlineN` suffix.
+
+    `assert_structural_equal` compares under alpha-equivalence, so it cannot see
+    a name-shape regression. These assert the produced name text directly, and
+    that the first downstream renamer (ConvertToSSA, the first pass to re-derive
+    an auto-name from a Var) accepts the result.
+    """
+
+    def test_underscore_local_does_not_fuse(self):
+        """`_` is Python's throwaway name — inlining must not yield `__inlineN`."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def helper(self, x: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
+                _: pl.Tensor[[1], pl.INT32] = pl.mul(x, x)
+                return _
+
+            @pl.function
+            def main(self, a: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
+                z: pl.Tensor[[1], pl.INT32] = self.helper(a)
+                return z
+
+        After = passes.inline_functions()(Before)
+        printed = ir.python_print(After)
+        assert "__" not in printed, printed
+        passes.convert_to_ssa()(After)  # must not raise
+
+    def test_trailing_underscore_local_does_not_fuse(self):
+        """Any base ending in `_`, not only the bare `_`."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def helper(self, x: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
+                t_: pl.Tensor[[1], pl.INT32] = pl.mul(x, x)
+                return t_
+
+            @pl.function
+            def main(self, a: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
+                z: pl.Tensor[[1], pl.INT32] = self.helper(a)
+                return z
+
+        After = passes.inline_functions()(Before)
+        printed = ir.python_print(After)
+        assert "__" not in printed, printed
+        assert "t_inline" in printed, printed
+        passes.convert_to_ssa()(After)  # must not raise
+
+    def test_author_written_double_underscore_still_rejected(self):
+        """Inlining must not launder a base that was already invalid.
+
+        Trimming the tail is about not *creating* the reserved delimiter; a name
+        the author wrote with `__` in it stays a user-facing error (see
+        test_convert_to_ssa_pass.py::test_reserved_auto_name_delimiter_in_base_raises).
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def helper(self, x: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
+                a__b: pl.Tensor[[1], pl.INT32] = pl.mul(x, x)
+                return a__b
+
+            @pl.function
+            def main(self, a: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
+                z: pl.Tensor[[1], pl.INT32] = self.helper(a)
+                return z
+
+        After = passes.inline_functions()(Before)
+        with pytest.raises(ValueError, match="reserved delimiter '__'"):
+            passes.convert_to_ssa()(After)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

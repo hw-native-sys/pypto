@@ -169,10 +169,10 @@ def test_cross_core_sync_static_and_dynamic_event_ids():
     assert dynamic_wait.kwargs["core_type"] == "aic"
 
 
-@pytest.mark.parametrize("core_type", ["cube", "vector", "mix", "aic_only"])
-def test_cross_core_sync_rejects_invalid_core_type(core_type):
-    """Mixed kernels target explicit events with the public AIC/AIV names."""
-    with pytest.raises(ValueError, match="core_type"):
+@pytest.mark.parametrize("core_type", ["aic", "aiv", "aic_only", "mix", 0])
+def test_cross_core_sync_rejects_non_enum_core_type(core_type):
+    """``core_type`` is enum-only: the lowered attr spelling is not an input."""
+    with pytest.raises(TypeError, match="core_type must be a KernelType member"):
         system_ops.sync_set(0, pipe=ir.PipeType.FIX, core_type=core_type)
 
 
@@ -180,25 +180,6 @@ def test_cross_core_sync_rejects_mix_kernel():
     """An event pins one kernel; landing in both is spelled by omitting core_type."""
     with pytest.raises(ValueError, match="Omit core_type"):
         system_ops.sync_set(0, pipe=ir.PipeType.FIX, core_type=system_ops.KernelType.MIX)
-
-
-def test_cross_core_sync_rejects_non_affinity_core_type():
-    """A value that is neither a KernelType nor a kernel string is a type error."""
-    with pytest.raises(TypeError, match="core_type must be a KernelType member"):
-        system_ops.sync_set(0, pipe=ir.PipeType.FIX, core_type=0)  # type: ignore[arg-type]
-
-
-@pytest.mark.parametrize(
-    ("spelling", "member"),
-    [("aic", system_ops.KernelType.AIC), ("aiv", system_ops.KernelType.AIV)],
-)
-def test_cross_core_sync_kernel_string_is_deprecated(spelling, member):
-    """The pre-enum string still builds the same call, with a warning."""
-    with pytest.deprecated_call(match=f"KernelType.{member.name}"):
-        deprecated = system_ops.sync_set(0, pipe=ir.PipeType.FIX, core_type=spelling)
-    current = system_ops.sync_set(0, pipe=ir.PipeType.FIX, core_type=member)
-    assert deprecated.kwargs == current.kwargs
-    assert deprecated.kwargs["core_type"] == spelling
 
 
 @pytest.mark.parametrize("event_id", [-1, 14])

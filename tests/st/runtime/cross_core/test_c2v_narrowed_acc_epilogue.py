@@ -135,7 +135,8 @@ class _StagedKSplitCase(PTOTestCase):
         return f"c2v_narrowed_acc_staged_k{K_MULTI_BLOCK}"
 
     def define_tensors(self) -> list[TensorSpec]:
-        return _io_tensors(K_MULTI_BLOCK) + [
+        return [
+            *_io_tensors(K_MULTI_BLOCK),
             TensorSpec("acc_gm", [M_TILE, N_TILE], DataType.INT32, init_value=torch.zeros),
         ]
 

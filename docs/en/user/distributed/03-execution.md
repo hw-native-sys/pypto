@@ -132,6 +132,53 @@ When a host endpoint is a `torch.Tensor`, it only needs to be CPU-contiguous;
 it may be an ordinary tensor allocated after `prepare()`. It does not need
 `.share_memory_()`, pre-fork allocation, or `inherited_host_tensors`.
 
+### Skipping the staging copy
+
+Staging costs one full host-side copy of the payload, which for a large resident weight
+is worth avoiding. A range registered through `inherited_host_tensors` is named in place
+instead — no staging buffer, no memcpy — because it predates the fork and every child
+holds it at the same address.
+
+**Listing a tensor is a guarantee you make.** By passing it in
+`inherited_host_tensors` you assert two things:
+
+- its backing is **visible across processes** — a `MAP_SHARED` mapping, whether torch's
+  own shared memory or an external file mapping; and
+- that mapping stays **valid for the worker's lifetime**.
+
+Passing a `MAP_PRIVATE` backing is **unsupported**. Copy-on-write leaves the child reading
+its pre-fork snapshot, so an upload may carry stale or incorrect data. Nothing detects
+this for you.
+
+PyPTO cannot verify the guarantee, and does not try. `torch.is_shared()` answers a
+different question — whether the storage is a torch shared-memory allocation — and a
+read-only `MAP_SHARED` file mapping wrapped with `mmap` + `numpy.frombuffer` +
+`torch.from_numpy` is genuinely shared while reporting `False`. Reading
+`/proc/self/maps` would answer correctly but only on Linux, and the simulator also runs
+on macOS. So `is_shared()` is kept as a one-way signal: `True` confirms a torch-managed
+shared backing, `False` is inconclusive, and for the tensors it cannot confirm PyPTO
+emits one `RuntimeWarning` at `prepare()` time and proceeds. It never rejects the tensor
+and never falls back to staging — falling back would silently reinstate the copy you
+asked it to skip.
+
+```python
+weights = map_readonly_shared(path)          # mmap-backed MAP_SHARED, is_shared() == False
+with compiled.prepare(
+    inherited_host_tensors=[weights],        # "visible in every child, for my lifetime"
+) as rt:
+    resident = rt.alloc_stacked_tensor(weights)
+```
+
+The guarantee is about visibility, so it holds in both directions: a listed range may be
+an upload source or a read-back destination. Writability is left to the hardware — a range
+mapped `MAP_SHARED` from a read-only file descriptor faults on write rather than corrupting
+anything. Anything not listed, or allocated after `prepare()`, keeps staging exactly as
+before.
+
+A named upload source is granted `READ`; only a destination is granted `READWRITE`. That
+matters for a read-only mapping: describing it as writable would tell the runtime a
+consumer may write memory that faults on a write.
+
 ## One-Shot vs Persistent Worker
 
 ### One-Shot

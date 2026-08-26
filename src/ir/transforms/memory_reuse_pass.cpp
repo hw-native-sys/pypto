@@ -297,6 +297,33 @@ class TopDownRetargeter {
 
   /// Coalesce peeled loop-carried accumulator if-phis.
   ///
+  /// DIRECTION OF TRAVEL (long horizon — do not act on this without a migration).
+  /// The shape this repairs is the *hand-peeled* split-K idiom:
+  ///
+  ///     if k == 0: acc = tile.matmul(a, b)          // fresh Acc buffer
+  ///     else:      acc = tile.matmul_acc(acc, a, b) // in-place, another buffer
+  ///
+  /// It gives one logical value two producers on two L0C buffers, which the
+  /// machine cannot represent — there is no Acc->Acc copy, so this repair exists
+  /// only to rewrite buffer identity after the fact.  The predicated spelling
+  /// says the same thing on one buffer and needs no repair:
+  ///
+  ///     acc = tile.matmul_acc(acc, a, b, init_cond=(k == 0))
+  ///
+  /// `AutoTileMatmulL0` already *generates* the predicated form (and head-peels
+  /// the bias K-loop, which has no `init_cond` operand), so no compiler-generated
+  /// IR reaches this function any more — every remaining caller is a peel in the
+  /// author's own source.  We keep repairing those: existing kernels written with
+  /// the peel must keep compiling, and pypto-lib alone has 95 such sites.
+  ///
+  /// Retiring this repair is therefore a *long-horizon* intent, not a near-term
+  /// plan.  It would need the source-level migration to land first, and it is
+  /// worth doing eventually because the repair is not sound in general: the
+  /// branch-exclusivity argument below does not cover a post-if read of the
+  /// accumulator that bypasses the phi, where the seed path's data is returned
+  /// with no diagnostic at any layer.  Until then, prefer `init_cond` in new
+  /// code and leave existing peels alone.
+  ///
   /// LowerPipelineLoops peels a stage=2 K-loop into an epilogue IfStmt whose live
   /// branch is an in-place accumulator (matmul_acc, output aliasing input on the
   /// accumulator buffer) and whose dead `if k==0` branch is a fresh matmul seed on a
@@ -1460,13 +1487,32 @@ static bool LifetimesOverlap(const LifetimeInterval& a, const LifetimeInterval& 
 // undone after the fact by a dedicated LegalizePTOBufferReuse split pass; the
 // guard below folds that responsibility into the reuse decision.
 //
-// `HazardInputs` is collected in a single forward IR walk:
+// `HazardInputs` is collected by walking the function body (see
+// `HazardInputCollector::Run` for why that walk runs twice):
 //   - load_derived: vars produced by tile.load or by a legal view op chained
 //     from a load (these alias the load's physical buffer).
 //   - reads_tpop:   vars whose defining op consumes a tile.tpop_from_aic value.
-// Membership is keyed on Var identity and checked against the reuse-decision
+// Both sets are keyed on Var identity and checked against the reuse-decision
 // representatives (a sharing group's earliest-defined member, which for a
 // writer is the writer's own output and for a load is the load itself).
+//
+// Reading an *operand* takes one extra step, because a value can reach the op
+// through a loop carry.  An IterArg is never an AssignStmt def, so it is never a
+// member of either set; but the carry chain it belongs to (init value, IterArg,
+// yield value) has already been fused onto one MemRef base by
+// MaterializeSemanticAliases, so an IterArg operand is classified by that base
+// instead — see `HazardInputCollector::IsTainted`.  A carry also breaks program
+// order, since the producer that taints the base may stand after the use it
+// taints; `HazardInputCollector::Run` covers that with a second traversal.
+
+// Resolve a tile Var to its MemRef base pointer (nullptr if it is not a tile or
+// has no MemRef yet).  View ops share their source's base, so a view and its
+// source resolve to the same pointer here.
+static const Var* TileMemRefBase(const VarPtr& v) {
+  auto t = As<TileType>(v->GetType());
+  if (t && t->memref_.has_value() && t->memref_.value()->base_) return t->memref_.value()->base_.get();
+  return nullptr;
+}
 
 /// Op names whose output aliases the input MemRef and lowers to a PTO view
 /// instruction — kept in sync with the PTO buffer-reuse view allowlist.
@@ -1480,28 +1526,63 @@ using HazardInputs = AllocationHazardInputs;
 
 class HazardInputCollector : public IRVisitor {
  public:
+  /// Classify `body` in TWO traversals, then hand the result to `Take()`.
+  ///
+  /// One forward walk is not enough, because a value can reach a use through a
+  /// loop back edge — from a producer that stands *after* that use in program
+  /// order:
+  ///
+  /// ```
+  /// for (carry,) in range(..., init=[non_tpop]):
+  ///   w = tile.add(l, carry)        // from iteration 1 on, `carry` is a tpop value
+  ///   p = tile.tpop_from_aic()      // ... but the producer is only seen here
+  ///   yield p                       // p must-aliases carry's base
+  /// ```
+  ///
+  /// A single walk classifies `w` before `p` taints the carry's base, so `w`
+  /// escapes `reads_tpop` and its output may be coalesced onto `l`'s buffer.
+  ///
+  /// Two traversals suffice, and a third could never add anything: the base
+  /// sets are complete after the first pass.  `tpop_bases_` only ever takes a
+  /// `tile.tpop_from_aic` def, which is order-independent; `load_derived_bases_`
+  /// additionally takes view outputs, and a view shares its source's base, so
+  /// marking one inserts a base that is already present.  Only the *Var* sets
+  /// grow in the second pass, and those propagate in program order within it.
+  /// Both traversals are O(N), so the collector stays linear.
+  void Run(const StmtPtr& body) {
+    VisitStmt(body);
+    VisitStmt(body);
+  }
+
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (GetTileTypeWithMemRef(op->var_->GetType())) {
       if (auto call = As<Call>(op->value_)) {
-        std::vector<const Var*> input_vars;
+        // AsVarLike, not As<Var>: an operand may be an enclosing loop's IterArg
+        // — the loop-carry shape of `tile.add(x, c_iter)` / `tile.matmul_acc(
+        // c_iter, ...)`.  IterArg has its own ObjectKind, so As<Var> returns
+        // null there and would drop the operand, and with it the load / tpop
+        // taint the carry brings into the body.
+        std::vector<VarPtr> input_vars;
         for (const auto& arg : call->args_) {
-          if (auto v = As<Var>(arg)) input_vars.push_back(v.get());
+          if (auto v = AsVarLike(arg)) input_vars.push_back(v);
         }
-        // load_derived closure: defs precede uses in program order, so a view's
-        // source is already classified by the time we reach the view.
+        // load_derived closure: within one traversal defs precede uses, so a
+        // view's source is already classified by the time we reach the view;
+        // a source that only becomes tainted across a loop back edge is picked
+        // up by the second traversal (see `Run`).
         if (IsOp(call, "tile.load")) {
-          inputs_.load_derived.insert(op->var_.get());
+          MarkLoadDerived(op->var_);
         } else if (IsLegalTileViewOp(call->op_)) {
-          for (const Var* in : input_vars) {
-            if (inputs_.load_derived.count(in) != 0) {
-              inputs_.load_derived.insert(op->var_.get());
+          for (const VarPtr& in : input_vars) {
+            if (IsLoadDerived(in)) {
+              MarkLoadDerived(op->var_);
               break;
             }
           }
         }
-        if (IsOp(call, "tile.tpop_from_aic")) tpop_vars_.insert(op->var_.get());
-        for (const Var* in : input_vars) {
-          if (tpop_vars_.count(in) != 0) {
+        if (IsOp(call, "tile.tpop_from_aic")) MarkTpop(op->var_);
+        for (const VarPtr& in : input_vars) {
+          if (IsTpop(in)) {
             inputs_.reads_tpop.insert(op->var_.get());
             break;
           }
@@ -1514,8 +1595,45 @@ class HazardInputCollector : public IRVisitor {
   HazardInputs Take() { return std::move(inputs_); }
 
  private:
+  // Taint a var and the physical buffer it occupies.  The buffer mirror exists
+  // for loop carries: an IterArg is never itself an AssignStmt def, so it can
+  // never be a member of the Var-keyed sets no matter how it is spelled at the
+  // use site.  MaterializeSemanticAliases (which runs immediately before this
+  // pass) has already fused each carry — init value, IterArg, yield value —
+  // onto ONE MemRef base, so a carry's taint is exactly the taint of the base it
+  // must-aliases.
+  void MarkLoadDerived(const VarPtr& v) {
+    inputs_.load_derived.insert(v.get());
+    if (const Var* base = TileMemRefBase(v)) load_derived_bases_.insert(base);
+  }
+
+  void MarkTpop(const VarPtr& v) {
+    tpop_vars_.insert(v.get());
+    if (const Var* base = TileMemRefBase(v)) tpop_bases_.insert(base);
+  }
+
+  [[nodiscard]] bool IsLoadDerived(const VarPtr& v) const {
+    return IsTainted(inputs_.load_derived, load_derived_bases_, v);
+  }
+
+  [[nodiscard]] bool IsTpop(const VarPtr& v) const { return IsTainted(tpop_vars_, tpop_bases_, v); }
+
+  // Var identity stays the exact test for an ordinary operand — two tiles that
+  // merely share a base (a view and its source) are still classified by the view
+  // allowlist above, not by the buffer.  Only a carry, which identity provably
+  // cannot answer for, falls back to its must-aliased base.
+  [[nodiscard]] static bool IsTainted(const std::unordered_set<const Var*>& vars,
+                                      const std::unordered_set<const Var*>& bases, const VarPtr& v) {
+    if (vars.count(v.get()) != 0) return true;
+    if (!As<IterArg>(v)) return false;
+    const Var* base = TileMemRefBase(v);
+    return base != nullptr && bases.count(base) != 0;
+  }
+
   HazardInputs inputs_;
   std::unordered_set<const Var*> tpop_vars_;
+  std::unordered_set<const Var*> load_derived_bases_;  ///< MemRef bases holding a load_derived value
+  std::unordered_set<const Var*> tpop_bases_;          ///< MemRef bases holding a tpop_from_aic value
 };
 
 // ---------------------------------------------------------------------------
@@ -1547,15 +1665,6 @@ class HazardInputCollector : public IRVisitor {
 // the *physical buffer* it ends up on (following both reuse-map reassignment and
 // VIEW inheritance) and blocks the output from landing there — see the use site.
 using ForbidAliasMap = AllocationForbidAliasMap;
-
-// Resolve a tile Var to its MemRef base pointer (nullptr if it is not a tile or
-// has no MemRef yet).  View ops share their source's base, so a view and its
-// source resolve to the same pointer here.
-static const Var* TileMemRefBase(const VarPtr& v) {
-  auto t = As<TileType>(v->GetType());
-  if (t && t->memref_.has_value() && t->memref_.value()->base_) return t->memref_.value()->base_.get();
-  return nullptr;
-}
 
 class ForbidAliasCollector : public IRVisitor {
  public:
@@ -3269,7 +3378,7 @@ AllocationConstraintAnalysis AnalyzeAllocationConstraints(const FunctionPtr& fun
   result.needs_load_tpop_hazard_guard = NeedsLoadTpopHazardGuard(func);
   if (result.needs_load_tpop_hazard_guard) {
     HazardInputCollector collector;
-    collector.VisitStmt(func->body_);
+    collector.Run(func->body_);
     result.target_hazard_inputs = collector.Take();
   }
 

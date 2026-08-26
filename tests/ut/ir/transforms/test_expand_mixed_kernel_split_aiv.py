@@ -23,6 +23,7 @@ configured by the directory-level ``conftest.py``.
 """
 
 import pypto.language as pl
+import pypto.language.distributed as pld
 import pytest
 from pypto import DataType, ir, passes
 from pypto.ir.op import tile_ops as T
@@ -65,45 +66,24 @@ def _assert_no_free_var(program):
 # ---------------------------------------------------------------------------
 
 
-def _build_aiv_shard_program():
+@pl.program
+class _AivShardBefore:
     """qk[128,128]Vec --aiv_shard(split=1)--> half[64,128], consumed by a vector add."""
-    span = ir.Span.unknown()
-    qk = ir.Var("qk", _tile([128, 128], mem=MS.Vec), span)
-    out_0 = ir.Var("out_0", ir.TensorType([64, 128], FP32), span)
 
-    shard = T.aiv_shard(qk, split=1, span=span)
-    assert isinstance(shard.type, ir.TileType)
-    half = ir.Var("half", _tile(shard.type.shape, shard.type.tile_view, MS.Vec), span)
-    add = T.add(half, half, span)
-    assert isinstance(add.type, ir.TileType)
-    y = ir.Var("y", _tile(add.type.shape, add.type.tile_view, MS.Vec), span)
-    store = T.store(y, [0, 0], out_0, span=span)
-    out_store = ir.Var("out_store", store.type, span)
-
-    body = ir.SeqStmts(
-        [
-            ir.AssignStmt(half, shard, span),
-            ir.AssignStmt(y, add, span),
-            ir.AssignStmt(out_store, store, span),
-            ir.ReturnStmt([out_store], span),
-        ],
-        span,
-    )
-    func = ir.Function(
-        "split_aiv",
-        [(qk, _IN), (out_0, _OUT)],
-        [out_0.type],
-        body,
-        span,
-        ir.FunctionType.InCore,
-        attrs={"split": ir.SplitMode.UP_DOWN, "split_aiv": True},
-    )
-    return ir.Program([func], "test_aiv_shard", span), qk
+    @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": True})
+    def split_aiv(
+        self,
+        qk: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec],
+        out_0: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+    ) -> pl.Tensor[[64, 128], pl.FP32]:
+        half: pl.Tile[[64, 128], pl.FP32, pl.Mem.Vec] = pl.tile.aiv_shard(qk, split=1)
+        y: pl.Tile[[64, 128], pl.FP32, pl.Mem.Vec] = pl.tile.add(half, half)
+        out_store = pl.tile.store(y, [0, 0], out_0)
+        return out_store
 
 
 def test_aiv_shard_folds_into_cube_to_vector_boundary():
-    program, _ = _build_aiv_shard_program()
-    after = _expand(program)
+    after = _expand(_AivShardBefore)
 
     @pl.program
     class Expected:
@@ -223,7 +203,7 @@ def _build_aic_gather_program():
         body,
         span,
         ir.FunctionType.InCore,
-        attrs={"split": ir.SplitMode.UP_DOWN, "split_aiv": True},
+        attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": True},
     )
     return ir.Program([func], "test_aic_gather", span), half2
 
@@ -274,7 +254,7 @@ def _build_shard_program(box_rows, valid_rows, lane_stride=None):
         body,
         span,
         ir.FunctionType.InCore,
-        attrs={"split": ir.SplitMode.UP_DOWN, "split_aiv": True},
+        attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": True},
     )
     return ir.Program([func], "test_shard_split_code", span)
 
@@ -311,36 +291,78 @@ def test_folded_transport_carries_the_pto_isa_split_code(
 
 def test_folded_transport_carries_the_left_right_odd_code():
     """The dim-1 mirror: an odd COLUMN axis takes TILE_LEFT_RIGHT_ODD (code 4)."""
-    span = ir.Span.unknown()
-    qk = ir.Var("qk", _tile([128, 15], None, MS.Vec), span)
-    out_0 = ir.Var("out_0", ir.TensorType([128, 8], FP32), span)
 
-    shard = T.aiv_shard(qk, split=2, span=span)
-    assert isinstance(shard.type, ir.TileType)
-    half = ir.Var("half", _tile(shard.type.shape, shard.type.tile_view, MS.Vec), span)
-    store = T.store(half, [0, 0], out_0, span=span)
-    out_store = ir.Var("out_store", store.type, span)
-    body = ir.SeqStmts(
-        [
-            ir.AssignStmt(half, shard, span),
-            ir.AssignStmt(out_store, store, span),
-            ir.ReturnStmt([out_store], span),
-        ],
-        span,
-    )
-    func = ir.Function(
-        "split_aiv",
-        [(qk, _IN), (out_0, _OUT)],
-        [out_0.type],
-        body,
-        span,
-        ir.FunctionType.InCore,
-        attrs={"split": ir.SplitMode.LEFT_RIGHT, "split_aiv": True},
-    )
-    printed = ir.python_print(_expand(ir.Program([func], "test_lr_split_code", span)))
+    @pl.program
+    class Before:
+        @pl.function(
+            type=pl.FunctionType.InCore,
+            attrs={"split": pl.SplitMode.LEFT_RIGHT, "split_aiv": True},
+        )
+        def split_aiv(
+            self,
+            qk: pl.Tile[[128, 15], pl.FP32, pl.Mem.Vec],
+            out_0: pl.Out[pl.Tensor[[128, 8], pl.FP32]],
+        ) -> pl.Tensor[[128, 8], pl.FP32]:
+            half: pl.Tile[[128, 8], pl.FP32, pl.Mem.Vec] = pl.tile.aiv_shard(qk, split=2)
+            out_store = pl.tile.store(half, [0, 0], out_0)
+            return out_store
 
-    assert "pl.tile.tpush_to_aiv(qk, split=4)" in printed, printed
-    assert "pl.tile.tpop_from_aic(split=4)" in printed, printed
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIC)
+        def split_aiv_aic(
+            self,
+            qk: pl.Tile[[128, 15], pl.FP32, pl.Mem.Vec],
+            out_0: pl.Out[pl.Tensor[[128, 8], pl.FP32]],
+        ):
+            pl.func_attr({"split": pl.SplitMode.LEFT_RIGHT, "split_aiv": True})
+            split_aiv_c2v_slot_buffer_import: pl.Scalar[pl.INT32] = pl.system.import_peer_buffer(
+                name="split_aiv_c2v_slot_buffer", peer_func="split_aiv_aiv"
+            )
+            pl.system.aic_initialize_pipe(
+                split_aiv_c2v_slot_buffer_import,
+                pl.const(0, pl.INT32),
+                dir_mask=1,
+                slot_size=7680,
+                slot_num=2,
+            )
+            # Code 4 == TILE_LEFT_RIGHT_ODD: the lanes hold 8 and 7 columns.
+            pl.tile.tpush_to_aiv(qk, split=4)
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def split_aiv_aiv(
+            self,
+            qk: pl.Tile[[128, 15], pl.FP32, pl.Mem.Vec],
+            out_0: pl.Out[pl.Tensor[[128, 8], pl.FP32]],
+        ) -> pl.Tensor[[128, 8], pl.FP32]:
+            pl.func_attr({"split": pl.SplitMode.LEFT_RIGHT, "split_aiv": True})
+            split_aiv_c2v_slot_buffer: pl.Scalar[pl.INT32] = pl.system.reserve_buffer(
+                name="split_aiv_c2v_slot_buffer", size=15360, base=-1
+            )
+            pl.system.aiv_initialize_pipe(
+                split_aiv_c2v_slot_buffer,
+                pl.const(0, pl.INT32),
+                dir_mask=1,
+                slot_size=7680,
+                slot_num=2,
+            )
+            half: pl.Tile[[128, 8], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=4)
+            out_store: pl.Tensor[[128, 8], pl.FP32] = pl.tile.store(half, [0, 0], out_0)
+            pl.system.tfree_to_aic(half)
+            return out_store
+
+        @pl.function(type=pl.FunctionType.Group)
+        def split_aiv(
+            self,
+            qk: pl.Tile[[128, 15], pl.FP32, pl.Mem.Vec],
+            out_0: pl.Out[pl.Tensor[[128, 8], pl.FP32]],
+        ) -> pl.Tensor[[128, 8], pl.FP32]:
+            pl.func_attr({"split": pl.SplitMode.LEFT_RIGHT, "split_aiv": True})
+            self.split_aiv_aic(qk, out_0)
+            self.split_aiv_aiv(qk, out_0)
+            return out_0
+
+    ir.assert_structural_equal(_expand(Before), Expected)
 
 
 def test_folded_transport_rejects_lane_extents_pto_isa_cannot_place():
@@ -501,95 +523,47 @@ def test_aic_gather_folds_into_vector_to_cube_boundary():
 # reaches a downstream pass or a printed dump.
 # ---------------------------------------------------------------------------
 
-_PLACEMENT_ATTRS = {"core_placement": "aiv"}
+# The two Before programs differ ONLY in the region placement stamp, so the pair
+# of structural comparisons below isolates the stamp as the cause of every
+# difference between their expanded forms.
+#
+# Note the two programs must not share a class name: `@pl.program` resolves the
+# decorated class from source, so two same-named classes in one scope collapse
+# to whichever appears first.
 
 
-def _notify_call(span, sig, peer, *, placed: bool) -> ir.Call:
-    """A ``pld.system.notify`` (AtomicAdd), optionally region-placed on AIV.
-
-    ``placed=False`` is the identical call without the stamp, so a pair of these
-    isolates the stamp as the only difference between the two programs.
-    """
-    zero = ir.ConstInt(0, DataType.INDEX, span)
-    offsets = ir.MakeTuple([zero, zero], span)
-    value = ir.ConstInt(1, DataType.INT32, span)
-    call = ir.create_op_call("pld.system.notify", [sig, peer, offsets, value], {"op": 0}, span)
-    if not placed:
-        return call
-    return ir.Call(call.op, call.args, call.kwargs, _PLACEMENT_ATTRS, call.type, call.span)
-
-
-def _build_notify_program(*, placed: bool):
-    """The aiv_shard kernel above (mixed: cube push + vector half) plus a notify.
-
-    The shard is what makes the function mixed, so ExpandMixedKernel really does
-    split it into a pair — the precondition for anything being duplicated.
-    """
-    span = ir.Span.unknown()
-    qk = ir.Var("qk", _tile([128, 128], mem=MS.Vec), span)
-    sig = ir.Var("sig", ir.DistributedTensorType([4, 4], DataType.INT32), span)
-    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
-    out_0 = ir.Var("out_0", ir.TensorType([64, 128], FP32), span)
-
-    shard = T.aiv_shard(qk, split=1, span=span)
-    assert isinstance(shard.type, ir.TileType)
-    half = ir.Var("half", _tile(shard.type.shape, shard.type.tile_view, MS.Vec), span)
-    add = T.add(half, half, span)
-    assert isinstance(add.type, ir.TileType)
-    y = ir.Var("y", _tile(add.type.shape, add.type.tile_view, MS.Vec), span)
-    store = T.store(y, [0, 0], out_0, span=span)
-    out_store = ir.Var("out_store", store.type, span)
-
-    body = ir.SeqStmts(
-        [
-            ir.AssignStmt(half, shard, span),
-            ir.AssignStmt(y, add, span),
-            ir.EvalStmt(_notify_call(span, sig, peer, placed=placed), span),
-            ir.AssignStmt(out_store, store, span),
-            ir.ReturnStmt([out_store], span),
-        ],
-        span,
-    )
-    func = ir.Function(
-        "split_aiv",
-        [(qk, _IN), (sig, _IN), (peer, _IN), (out_0, _OUT)],
-        [out_0.type],
-        body,
-        span,
-        ir.FunctionType.InCore,
-        attrs={"split": ir.SplitMode.UP_DOWN, "split_aiv": True},
-    )
-    return ir.Program([func], "test_notify_placement", span)
+@pl.program
+class _PlacedNotifyBefore:
+    @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": True})
+    def split_aiv(
+        self,
+        qk: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec],
+        sig: pld.DistributedTensor[[4, 4], pl.INT32],
+        peer: pl.Scalar[pl.INT32],
+        out_0: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+    ) -> pl.Tensor[[64, 128], pl.FP32]:
+        half: pl.Tile[[64, 128], pl.FP32, pl.Mem.Vec] = pl.tile.aiv_shard(qk, split=1)
+        y: pl.Tile[[64, 128], pl.FP32, pl.Mem.Vec] = pl.tile.add(half, half)
+        pld.system.notify(sig, peer, [0, 0], 1, op=pld.NotifyOp.AtomicAdd, attrs={"core_placement": "aiv"})
+        out_store = pl.tile.store(y, [0, 0], out_0)
+        return out_store
 
 
-def _count_op_calls(func, op_name: str) -> int:
-    """How many ``Call``s to ``op_name`` appear anywhere in ``func``'s body."""
-    seen = 0
-
-    def walk(node):
-        nonlocal seen
-        if node is None:
-            return
-        if isinstance(node, ir.Call) and isinstance(node.op, ir.Op) and node.op.name == op_name:
-            seen += 1
-        if isinstance(node, ir.SeqStmts):
-            for stmt in node.stmts:
-                walk(stmt)
-            return
-        if isinstance(node, ir.AssignStmt):
-            walk(node.value)
-        if isinstance(node, ir.EvalStmt):
-            walk(node.expr)
-        walk(getattr(node, "body", None))
-
-    walk(func.body)
-    return seen
-
-
-def _notify_counts_by_lane(after) -> dict[str, int]:
-    """notify count per expanded function, keyed by function name."""
-    op_name = ir.get_op("pld.system.notify").name
-    return {func.name: _count_op_calls(func, op_name) for func in after.functions.values()}
+@pl.program
+class _UnplacedNotifyBefore:
+    @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": True})
+    def split_aiv(
+        self,
+        qk: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec],
+        sig: pld.DistributedTensor[[4, 4], pl.INT32],
+        peer: pl.Scalar[pl.INT32],
+        out_0: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+    ) -> pl.Tensor[[64, 128], pl.FP32]:
+        half: pl.Tile[[64, 128], pl.FP32, pl.Mem.Vec] = pl.tile.aiv_shard(qk, split=1)
+        y: pl.Tile[[64, 128], pl.FP32, pl.Mem.Vec] = pl.tile.add(half, half)
+        pld.system.notify(sig, peer, [0, 0], 1, op=pld.NotifyOp.AtomicAdd)
+        out_store = pl.tile.store(y, [0, 0], out_0)
+        return out_store
 
 
 def test_region_placed_notify_lands_on_aiv_lane_only():
@@ -597,15 +571,79 @@ def test_region_placed_notify_lands_on_aiv_lane_only():
 
     This is the fix for the double-signal bug: one notify survives the split, on
     the vector lane the author chose with ``pl.split_aiv``.
-    """
-    after = _expand(_build_notify_program(placed=True))
-    counts = _notify_counts_by_lane(after)
 
-    assert counts["split_aiv_aiv"] == 1
-    assert counts["split_aiv_aic"] == 0
-    # Exactly one across the whole program — the property that actually matters,
-    # stated independently of which lane won.
-    assert sum(counts.values()) == 1
+    ``Expected`` also pins the two facts that used to be separate tests: no
+    expanded function still carries the ``core_placement`` stamp (its lifetime
+    ends at this pass, and a leftover would show up as an attrs mismatch), and
+    the stamp moved nothing but the notify — the vector add stays on AIV and the
+    cross-core boundary keeps its tpush on AIC and its tpop on AIV, exactly as
+    in the unplaced expansion below.
+    """
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIC)
+        def split_aiv_aic(
+            self,
+            qk: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec],
+            sig: pld.DistributedTensor[[4, 4], pl.INT32],
+            peer: pl.Scalar[pl.INT32],
+            out_0: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+        ):
+            pl.func_attr({"split": pl.SplitMode.UP_DOWN, "split_aiv": True})
+            split_aiv_c2v_slot_buffer_import: pl.Scalar[pl.INT32] = pl.system.import_peer_buffer(
+                name="split_aiv_c2v_slot_buffer", peer_func="split_aiv_aiv"
+            )
+            pl.system.aic_initialize_pipe(
+                split_aiv_c2v_slot_buffer_import,
+                pl.const(0, pl.INT32),
+                dir_mask=1,
+                slot_size=65536,
+                slot_num=2,
+            )
+            pl.tile.tpush_to_aiv(qk, split=1)
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def split_aiv_aiv(
+            self,
+            qk: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec],
+            sig: pld.DistributedTensor[[4, 4], pl.INT32],
+            peer: pl.Scalar[pl.INT32],
+            out_0: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            pl.func_attr({"split": pl.SplitMode.UP_DOWN, "split_aiv": True})
+            split_aiv_c2v_slot_buffer: pl.Scalar[pl.INT32] = pl.system.reserve_buffer(
+                name="split_aiv_c2v_slot_buffer", size=131072, base=-1
+            )
+            pl.system.aiv_initialize_pipe(
+                split_aiv_c2v_slot_buffer,
+                pl.const(0, pl.INT32),
+                dir_mask=1,
+                slot_size=65536,
+                slot_num=2,
+            )
+            half: pl.Tile[[64, 128], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=1)
+            y: pl.Tile[[64, 128], pl.FP32, pl.Mem.Vec] = pl.tile.add(half, half)
+            pl.system.tfree_to_aic(half)
+            pld.system.notify(sig, peer, [0, 0], 1, op=pld.NotifyOp.AtomicAdd)
+            out_store = pl.tile.store(y, [0, 0], out_0)
+            return out_store
+
+        @pl.function(type=pl.FunctionType.Group)
+        def split_aiv(
+            self,
+            qk: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec],
+            sig: pld.DistributedTensor[[4, 4], pl.INT32],
+            peer: pl.Scalar[pl.INT32],
+            out_0: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            pl.func_attr({"split": pl.SplitMode.UP_DOWN, "split_aiv": True})
+            self.split_aiv_aic(qk, sig, peer, out_0)
+            self.split_aiv_aiv(qk, sig, peer, out_0)
+            return out_0
+
+    after = _expand(_PlacedNotifyBefore)
+    ir.assert_structural_equal(after, Expected)
     _assert_no_free_var(after)
 
 
@@ -615,49 +653,76 @@ def test_unplaced_notify_is_duplicated_onto_both_lanes():
     This is the reported bug, pinned here so the fix above cannot be mistaken
     for something the pass already did. Nothing rejects the unplaced form —
     putting the comm phase in a region is the author's job, documented rather
-    than enforced.
+    than enforced. Everything else is identical to the placed expansion.
     """
-    after = _expand(_build_notify_program(placed=False))
-    counts = _notify_counts_by_lane(after)
 
-    assert counts["split_aiv_aiv"] == 1
-    assert counts["split_aiv_aic"] == 1
-    assert sum(counts.values()) == 2
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIC)
+        def split_aiv_aic(
+            self,
+            qk: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec],
+            sig: pld.DistributedTensor[[4, 4], pl.INT32],
+            peer: pl.Scalar[pl.INT32],
+            out_0: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+        ):
+            pl.func_attr({"split": pl.SplitMode.UP_DOWN, "split_aiv": True})
+            split_aiv_c2v_slot_buffer_import: pl.Scalar[pl.INT32] = pl.system.import_peer_buffer(
+                name="split_aiv_c2v_slot_buffer", peer_func="split_aiv_aiv"
+            )
+            pl.system.aic_initialize_pipe(
+                split_aiv_c2v_slot_buffer_import,
+                pl.const(0, pl.INT32),
+                dir_mask=1,
+                slot_size=65536,
+                slot_num=2,
+            )
+            pl.tile.tpush_to_aiv(qk, split=1)
+            # The duplicate: a SHARED call with no region to place it lands here too.
+            pld.system.notify(sig, peer, [0, 0], 1, op=pld.NotifyOp.AtomicAdd)
 
+        @pl.function(type=pl.FunctionType.AIV)
+        def split_aiv_aiv(
+            self,
+            qk: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec],
+            sig: pld.DistributedTensor[[4, 4], pl.INT32],
+            peer: pl.Scalar[pl.INT32],
+            out_0: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            pl.func_attr({"split": pl.SplitMode.UP_DOWN, "split_aiv": True})
+            split_aiv_c2v_slot_buffer: pl.Scalar[pl.INT32] = pl.system.reserve_buffer(
+                name="split_aiv_c2v_slot_buffer", size=131072, base=-1
+            )
+            pl.system.aiv_initialize_pipe(
+                split_aiv_c2v_slot_buffer,
+                pl.const(0, pl.INT32),
+                dir_mask=1,
+                slot_size=65536,
+                slot_num=2,
+            )
+            half: pl.Tile[[64, 128], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=1)
+            y: pl.Tile[[64, 128], pl.FP32, pl.Mem.Vec] = pl.tile.add(half, half)
+            pl.system.tfree_to_aic(half)
+            pld.system.notify(sig, peer, [0, 0], 1, op=pld.NotifyOp.AtomicAdd)
+            out_store = pl.tile.store(y, [0, 0], out_0)
+            return out_store
 
-def test_placement_stamp_is_stripped_after_expansion():
-    """The stamp's lifetime ends here: no expanded function still carries it.
+        @pl.function(type=pl.FunctionType.Group)
+        def split_aiv(
+            self,
+            qk: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec],
+            sig: pld.DistributedTensor[[4, 4], pl.INT32],
+            peer: pl.Scalar[pl.INT32],
+            out_0: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            pl.func_attr({"split": pl.SplitMode.UP_DOWN, "split_aiv": True})
+            self.split_aiv_aic(qk, sig, peer, out_0)
+            self.split_aiv_aiv(qk, sig, peer, out_0)
+            return out_0
 
-    ``core_placement`` exists only to bridge the region erasure in pass 20 to
-    the affinity roll-up in pass 21. Leaving it behind would put a defunct
-    region marker into every later pass dump, the print -> parse round-trip and
-    every downstream structural comparison.
-    """
-    after = _expand(_build_notify_program(placed=True))
-
-    assert "core_placement" not in ir.python_print(after)
-
-
-def test_placement_stamp_does_not_move_vector_compute():
-    """The stamp changes the notify's lane and nothing else.
-
-    Guards against the override being applied too broadly: the stamped and
-    unstamped programs must expand identically apart from where the notify
-    lands, so the vector add stays on AIV and the cross-core boundary keeps its
-    tpush on AIC and tpop on AIV in both.
-    """
-    placed = _expand(_build_notify_program(placed=True))
-    unplaced = _expand(_build_notify_program(placed=False))
-
-    add_name = ir.get_op("tile.add").name
-    push_name = ir.get_op("tile.tpush_to_aiv").name
-    pop_name = ir.get_op("tile.tpop_from_aic").name
-    for after in (placed, unplaced):
-        funcs = {func.name: func for func in after.functions.values()}
-        assert _count_op_calls(funcs["split_aiv_aiv"], add_name) == 1
-        assert _count_op_calls(funcs["split_aiv_aic"], add_name) == 0
-        assert _count_op_calls(funcs["split_aiv_aic"], push_name) == 1
-        assert _count_op_calls(funcs["split_aiv_aiv"], pop_name) == 1
+    after = _expand(_UnplacedNotifyBefore)
+    ir.assert_structural_equal(after, Expected)
+    _assert_no_free_var(after)
 
 
 if __name__ == "__main__":

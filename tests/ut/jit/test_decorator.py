@@ -2054,6 +2054,33 @@ class TestInlineFuncIntegration:
         assert "copy_inline" not in func_names, f"Inline should be spliced, got {func_names}"
         assert "subscript_caller" in func_names
 
+    def test_jit_inline_split_aiv_underscore_loop_var(self):
+        """`for _ in pl.split_aiv(...)` is the documented lane-agnostic idiom and
+        must compile inside an inline callee.
+
+        The inliner alpha-renames callee locals by appending `_inline<N>`; with a
+        loop variable named `_` that used to concatenate into `__inline<N>`, and
+        the `__` there is the delimiter reserved by the IR auto-naming utility,
+        so ConvertToSSA rejected a name the author never wrote.
+        """
+        torch = pytest.importorskip("torch")
+
+        @jit.inline(auto_scope=False)
+        def region(x: pl.Tensor, y: pl.Tensor):
+            M, N = x.shape
+            with pl.spmd(1, name_hint="usc") as _tid:
+                _blk = pl.tile.get_block_idx()
+                for _ in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+                    y = pl.assemble(y, pl.mul(x[0:M, 0:N], 2.0), [0, 0])
+            return y
+
+        @jit
+        def entry(x: pl.Tensor, y: pl.Out[pl.Tensor]):
+            y = region(x, y)
+            return y
+
+        entry.compile(torch.zeros(16, 64), torch.zeros(16, 64))
+
 
 class TestOpaqueFuncIntegration:
     """End-to-end @pl.jit.opaque: dep is emitted as a separate Opaque IR function."""

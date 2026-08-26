@@ -31,6 +31,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -158,13 +159,20 @@ class DefVarCollector : public IRVisitor {
 // sites of the same inline function. Pass execution is sequential, so a
 // plain static int suffices.
 //
-// Single underscore is intentional — `__` is reserved by the IR auto-naming
-// utility (see auto_name_utils.h::ValidateBaseName) for its own
-// `name__role__version` scheme; re-using `__` here would trip the validator
-// when downstream passes rename the inlined Vars again.
+// `__` is reserved by the IR auto-naming utility (see
+// auto_name_utils.h::ValidateBaseName) for its own `name__role__version`
+// scheme; re-using `__` here trips the validator when downstream passes rename
+// the inlined Vars again.
+//
+// A single-underscore *suffix* is not enough on its own: `orig` may already end
+// in one — `_` is Python's throwaway name and the documented loop variable of
+// `for _ in pl.split_aiv(...)` — in which case plain concatenation *creates* the
+// reserved delimiter out of two individually-legal halves. JoinNameSuffix trims
+// that tail, so `_` inlines to `_inline7` rather than the rejected `__inline7`,
+// while leaving an already-invalid `a__b` invalid for ValidateBaseName to report.
 std::string FreshName(const std::string& orig) {
   static int counter = 0;
-  return orig + "_inline" + std::to_string(counter++);
+  return auto_name::JoinNameSuffix(orig, "inline" + std::to_string(counter++));
 }
 
 // Counts ReturnStmts anywhere inside a body. Splicing only handles a trailing

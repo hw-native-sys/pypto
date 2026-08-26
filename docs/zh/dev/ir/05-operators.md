@@ -245,6 +245,12 @@ for k0 in pl.pipeline(0, K, K_TILE, stage=2):
 该谓词是位置操作数而非 registry kwarg，因为它可能依赖循环变量，而 kwarg 只承载
 编译期常量。作为操作数注册也意味着它像其他 SSA 值一样参与 use-def 链。
 
+既然是操作数，它在 tile 层按位置打印 ——
+`pl.tile.matmul_acc(acc, lhs, rhs, k0 == 0)`。在 tensor 层第 4 个位置槽已经属于
+`a_trans`，因此 printer 改用关键字形式打印该谓词 ——
+`pl.tensor.matmul_acc(acc, lhs, rhs, init_cond=k0 == 0, a_trans=False, b_trans=False)`
+—— 打印结果重新解析后仍是同一份 IR。
+
 降级方式取决于谓词是否在编译期已知：
 
 | `init_cond` | 生成代码 |
@@ -258,14 +264,41 @@ ISA 将该语义承载为 MAD 指令 Xt 寄存器的第 63 位（`cmatrixInit`�
 init 操作数。由于 `matmul_acc` 是原地操作（`set_output_reuses_input(0)`），两个分
 支写入同一缓冲区，`scf.if` 不产生返回值 —— Acc tile 上不会生成 phi。
 
-两项限制，均以显式诊断而非静默丢弃的方式处理：
+「字面量」涵盖常量谓词到达 emitter 时的**两种**形态：DSL 写法 `init_cond=True`/
+`False` 到达时是 BOOL 类型的 `ConstInt`，而被更早的 pass 折叠过的谓词到达时是
+`ConstBool` —— 当 [`LowerPipelineLoops`](../passes/28-lower_pipeline_loops.md)
+复制 K-loop *且*外层循环被消除、每个副本的索引成为字面量时，生成的 `ko == 0` 正是
+这种形态。两者都会直接选定一个分支；若 emitter 只折叠其中一种，未覆盖到的每个 K
+block 都会发出双倍 MAD。
+
+因此该折叠取决于 trip count，并非普遍成立：在 `16x512x64` 下流水循环被完全消除，
+最终 PTO 中没有 `scf.if`；而在 `16x2048x64` 下副本索引仍是符号量（`ko`、
+`ko + 256`），会残留两个 `scf.if`。这不是回退 —— 它所替换的剥离式 `IfStmt` 在这些
+形状下同样产生两个分支。
+
+编译器自己也使用它所推荐的写法：`AutoTileMatmulL0` 对普通 `tile.matmul` 的 K-loop
+直接*生成*带谓词的形式，因此 `tile.create` 种子、循环携带值与循环的 `return_var`
+在构造上共用同一块 L0C buffer。`tile.matmul_bias` 没有 `init_cond` 操作数，无法使用
+带谓词的循环体；因此改为把它的第一个 K block *提到循环之外*（head-peel）：该 block
+恰好只加一次 bias 并铸造出累加器，其余 block 统一累加进去。这样无需谓词也能得到同样
+的单 buffer 链，因此该 pass 不再生成任何累加器 phi。
+
+一项限制，以显式诊断而非静默丢弃的方式处理：
 
 - **拒绝 rank > 2**。批量形式在 `FlattenTileNdTo2D` 中会展开为多次
   `tile.matmul_acc` 调用，无处安放逐调用的谓词。请改为在 batch 维上循环。
-- **`AutoTileMatmulL0` 不对带谓词的调用做 L0 切分**。该 pass 匹配 3 操作数的
-  `tile.matmul_acc`，因此 4 操作数形式会自动跳过并保持原样 —— 这正是手工管理
-  split-K 所期望的。超尺寸的带谓词累加因而由编写者负责，这与超尺寸的无谓词
-  `tile.matmul_acc` 现有行为一致。
+
+超尺寸的*带谓词* `tile.matmul_acc` 与无谓词形式一样会被做 K 切分：调用方的谓词与
+所生成循环自身的 `ko == 0` 做与运算，而剥离出的尾块保持无谓词的 3 操作数形式
+（它永远不是第一个 K block）。
+
+累加形式的 M/N 切分只在*循环*层可用，且两种写法一视同仁：由
+`tile.create([M, N])`、split-K `pl.pipeline` 与单个 2D store 组成的三元组会在其
+K-loop 之外被切分，无论其中的归约是 peel 写法
+（`if ko == 0: matmul else: matmul_acc`）还是谓词写法
+（`matmul_acc(acc, lhs, rhs, ko == 0)`）。不属于该形态时 —— 独立的超尺寸
+`tile.matmul_acc`（累加器由调用方持有），或 `init_cond` 不是对循环归纳变量首块判定的
+带谓词调用 —— 切分累加器不受支持，该 pass 会以 `PH-AT-006` 性能提示明确说明。
 
 在 tile 层，`tile.batch_matmul` 为 `TileType` 操作数提供批量语义。它接受 rank >= 2 的
 tile，广播前导批量维度，并保持与 `tile.matmul` 相同的纯操作数接口风格。如果批量操作数
@@ -635,7 +668,7 @@ with ib.function("tile_computation") as f:
 | `system.bar_m` | 矩阵屏障（下降为 `pto.barrier <PIPE_M>`） | 无 |
 | `system.fence` | 全局内存屏障（下降为 `pto.fence.barrier_all #pto.fence_scope<gm>`） | 无 |
 | `system.cacheinvalid` | 使 tensor 子区域基地址所在的那一条 cache line 失效。参数：`tensor`、`shapes`（N 维）、`offsets`（N 维）。任意区域大小（包括单个元素）都下降为 `pto.partition_view` + `pto.cmo.cacheinvalid %payload_view single_cache_line : !pto.partition_tensor_view<...>`；`shapes` 不会让它遍历区域内的所有 cache line。无参数形式使全部 GM cache 失效。 | 无 |
-| `system.syncall` | 跨核全员屏障（`pto::SYNCALL`）。`mode="hard"`（FFTS，无 operand）或 `mode="soft"`（GM 轮询，带 operand） | `core_type`（`"aiv_only"` \| `"aic_only"` \| `"mix"`）、`mode`（`"hard"` \| `"soft"`） |
+| `system.syncall` | 跨核全员屏障（`pto::SYNCALL`）。属性 `mode` 取 `"hard"`（FFTS，无 operand）或 `"soft"`（GM 轮询，带 operand） | `core_type`（`"aiv_only"` \| `"aic_only"` \| `"mix"`）、`mode`（`"hard"` \| `"soft"`） |
 | `system.sync_src` | 设置同步标志 | `set_pipe`, `wait_pipe`, `event_id` |
 | `system.sync_dst` | 等待同步标志 | `set_pipe`, `wait_pipe`, `event_id` |
 | `system.task_invalid` | `PTO2TaskId::invalid()` 哨兵——TaskId carry 的 "暂无 producer" 种子 | 无 |
@@ -643,13 +676,13 @@ with ib.function("tile_computation") as f:
 | `system.available_cluster_count` | 本次运行的 MIX cluster（= AIC）数，由设备读回。结果为 `Scalar[INT32]` | 无 |
 | `system.available_aiv_count` | 本次运行的独立 AIV 核数，由设备读回。结果为 `Scalar[INT32]` | 无 |
 
-`system.syncall` 有两种 mode。**hard** 形态（`mode="hard"`，默认）下沉为 FFTS 屏障，等待所选 `core_type` 的**全部**物理核到达；kernel 必须以满占用方式启动（每个物理核一个 block）**且带 `sync_start=True`**（使所有 block 同时驻留——非 sync_start 启动可能分波次派发 block 而使屏障死锁），否则屏障死锁（AICore 错误 507018）。**soft** 形态（`mode="soft"`）轮询一段共享 GM workspace，因此可在**部分**占用下工作。`gm_workspace` 是共享、清零的 GM `INT32` tensor，至少包含 16 个元素（64 字节）。请将它作为 kernel 参数传入，使所有 block 共享同一缓冲；该缓冲必须独占一条 cache line，并在首次使用前清零。
+`system.syncall` 有两种 mode，由其 `mode` **IR 属性**选择；Python 接口则用 `pl.SyncAllMode` 成员表达（见下文）。**hard** 形态（属性 `"hard"`，默认）下沉为 FFTS 屏障，等待所选 `core_type` 的**全部**物理核到达；kernel 必须以满占用方式启动（每个物理核一个 block）**且带 `sync_start=True`**（使所有 block 同时驻留——非 sync_start 启动可能分波次派发 block 而使屏障死锁），否则屏障死锁（AICore 错误 507018）。**soft** 形态（属性 `"soft"`）轮询一段共享 GM workspace，因此可在**部分**占用下工作。`gm_workspace` 是共享、清零的 GM `INT32` tensor，至少包含 16 个元素（64 字节）。请将它作为 kernel 参数传入，使所有 block 共享同一缓冲；该缓冲必须独占一条 cache line，并在首次使用前清零。
 
 当前 PTO-ISA 对所有 `core_type` 使用相同的 soft operand ABI：`[gm_workspace]` 从设备启动配置推导参与核数，`[gm_workspace, used_cores]` 则以 INT32 范围内的 Python 整数或 `INT32` 标量显式指定。高层 DSL 要求必须传入 `used_cores` 以明确选择：正数生成双 operand 形式，显式传入 `0` 才生成单 operand 形式。对 `mix` 而言，显式计数是 AIC 与 AIV 参与者的总数。当 runtime 的逻辑 grid 与设备启动寄存器不一致时必须传入正数；当前 PyPTO 固定的 Simpler runtime 就属于这种情况。不再需要 UB/L1 scratch tile。
 
 两种 mode 都只保证 barrier 到达：不会等待 `TSTORE` 等前序数据指令，也不会发布或使业务数据的 cache line 失效。跨核通过 GM 交接可能跨多条 cache line 的数据时，应保守地在 barrier 前用全 GM `system.cacheinvalid()` 和 `system.fence` 显式发布 producer 的写，然后在 consumer 读之前用全 GM `system.cacheinvalid()` 使其 cache 失效。tensor-region 形式只使 view 基地址所在的那一条 cache line 失效。
 
-`core_type` 与 `mode` 属性**在 IR 中**仍是字符串，但 Python 接口是枚举：`pl.KernelType`（`AIC` / `AIV` / `MIX`，表示算子属于展开后的哪个 kernel）与 `pl.SyncAllMode`（`HARD` / `SOFT`）。对应的字符串仍然被接受，但会发出 `DeprecationWarning`；无法识别的字符串抛 `ValueError`，既非字符串又非枚举成员的值抛 `TypeError`。统一的 `mode=` 关键字 API 是 **DSL** 层接口（`pl.system.syncall`）。`pypto.ir.op.system` 下的 Python IR 辅助函数则是拆开的：`syncall(core_type=...)` 构造 hard 形态，`syncall_soft(core_type, gm_workspace, used_cores=None)` 构造 soft 形态。
+`core_type` 与 `mode` 属性**在 IR 中**仍是字符串，但 Python 接口是枚举：`pl.KernelType`（`AIC` / `AIV` / `MIX`，表示算子属于展开后的哪个 kernel）与 `pl.SyncAllMode`（`HARD` / `SOFT`）。只接受枚举成员：下沉后的属性拼写是 API 的产物而非输入，传字符串抛 `TypeError`；传了不属于该算子取值域的成员抛 `ValueError`。统一的 `mode=` 关键字 API 是 **DSL** 层接口（`pl.system.syncall`）。`pypto.ir.op.system` 下的 Python IR 辅助函数则是拆开的：`syncall(core_type=...)` 构造 hard 形态，`syncall_soft(core_type, gm_workspace, used_cores=None)` 构造 soft 形态。
 
 `system.available_cluster_count` / `system.available_aiv_count` 是 SPMD **启动形状查询**：把它作为 `pl.spmd(...)` 的 `core_num` 传入，启动宽度即按本次运行落到的设备自适应。Orchestration codegen 分别下沉为 `rt_available_cluster_count()` / `rt_available_aiv_count()`。混合（AIC+AIV）或纯 cube kernel 用 cluster 数（每个 core-group 一个 block），纯 vector kernel 用 AIV 数。这是唯一能跨设备保持满占用的启动宽度，而 hard `system.syncall` 正需要满占用；`HardSyncallOccupancy` verifier 对这类宽度不再做数量比较，并会拒绝用错核类型的查询。请把调用内联传入（`pl.spmd(pl.system.available_cluster_count())`），不要先绑定到变量名——变量名会以「定义在调用方的变量」形式落到外提出的 `Spmd` 包装函数上，IR printer 无法重新解析。源码：`src/ir/op/sync_ops/launch.cpp`。
 
@@ -670,7 +703,7 @@ with ib.function("tile_computation") as f:
 | `system.sync_wait` | 0 或 1（`event_id_dyn`） | 在对端核类型发出 `pto.sync.wait` | `pipe`、静态 `event_id`、可选 `core_type` |
 | `system.set_ffts` | 1（`workspace`） | 声明 A3 显式跨核事件所需的 FFTS 设置 | — |
 
-在显式指定类型的 AIC/AIV kernel 中使用 `pl.system.sync_set(event_id, pipe=..., ffts_mode=...)` 和 `pl.system.sync_wait(event_id, pipe=...)`。在混合 InCore kernel 中，传入 `core_type=pl.KernelType.AIV` 或 `core_type=pl.KernelType.AIC`，以便 kernel 展开时将各事件操作保留在目标核通道上（IR 属性仍保存下沉后的 `"aiv"` / `"aic"` 拼写，这两个字符串在 API 上也仍被接受，但会发出 `DeprecationWarning`）。这里不接受 `pl.KernelType.MIX`——事件只钉一条 lane，两条都跑是通过省略 `core_type` 表达的。`system.syncall` 与事件算子最终都归入 `ClassifyCallAffinity` 的同一套 `KernelType` 分类，区别只在 IR 属性的拼写（`"aic_only"` 与 `"aic"`）。在 A3 上，每个参与同步的 AIC/AIV 函数都必须在首次显式事件操作前调用 `pl.system.set_ffts(workspace)`；`workspace` 必须是至少包含 256 个元素的一维 `INT64` 张量，并作为 PTOAS 的设置操作数。PyPTO 的常驻运行时会持续安装硬件 FFTS 控制地址，因此生成的运行时封装不会用该操作数覆盖此地址。A5 不需要该设置。`event_id` 可以是用户可用范围 0–13 内的整数，也可以是动态 `pl.Scalar[pl.INDEX]`；ID 14 和 15 为保留值。`sync_set` 的可选 `ffts_mode` 必须为 0、1 或 2。手写跨核协议的作者负责正确配对事件 ID 和 pipe。PyPTO 的常规核内自动依赖插入仍保持启用，并使用独立的 `set_flag`/`wait_flag` 机制，因此不会占用这些显式跨核事件 ID。
+在显式指定类型的 AIC/AIV kernel 中使用 `pl.system.sync_set(event_id, pipe=..., ffts_mode=...)` 和 `pl.system.sync_wait(event_id, pipe=...)`。在混合 InCore kernel 中，传入 `core_type=pl.KernelType.AIV` 或 `core_type=pl.KernelType.AIC`，以便 kernel 展开时将各事件操作保留在目标核通道上（IR 属性仍保存下沉后的 `"aiv"` / `"aic"` 拼写，那是 API 的产物，不是可接受的输入）。这里不接受 `pl.KernelType.MIX`——事件只钉一条 lane，两条都跑是通过省略 `core_type` 表达的。`system.syncall` 与事件算子最终都归入 `ClassifyCallAffinity` 的同一套 `KernelType` 分类，区别只在 IR 属性的拼写（`"aic_only"` 与 `"aic"`）。在 A3 上，每个参与同步的 AIC/AIV 函数都必须在首次显式事件操作前调用 `pl.system.set_ffts(workspace)`；`workspace` 必须是至少包含 256 个元素的一维 `INT64` 张量，并作为 PTOAS 的设置操作数。PyPTO 的常驻运行时会持续安装硬件 FFTS 控制地址，因此生成的运行时封装不会用该操作数覆盖此地址。A5 不需要该设置。`event_id` 可以是用户可用范围 0–13 内的整数，也可以是动态 `pl.Scalar[pl.INDEX]`；ID 14 和 15 为保留值。`sync_set` 的可选 `ffts_mode` 必须为 0、1 或 2。手写跨核协议的作者负责正确配对事件 ID 和 pipe。PyPTO 的常规核内自动依赖插入仍保持启用，并使用独立的 `set_flag`/`wait_flag` 机制，因此不会占用这些显式跨核事件 ID。
 
 ### 数据传输操作
 

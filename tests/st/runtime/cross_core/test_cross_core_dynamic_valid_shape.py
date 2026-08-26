@@ -21,7 +21,7 @@ from pypto.runtime.runner import RunConfig
 ROWS = 16
 COLS = 16
 VALID_ROWS = 8
-VALID_COLS = 12
+VALID_COLS = COLS  # the column extent is pinned to the physical box by the FIFO transport
 SLOT_SIZE_BYTES = ROWS * COLS * 4
 BUFFER_SIZE_BYTES = SLOT_SIZE_BYTES * 4
 
@@ -113,7 +113,7 @@ class C2VDynamicTpopValidShapeTestCase(PTOTestCase):
                     [ROWS, COLS],
                     pl.FP32,
                     pl.Mem.Vec,
-                    pl.TileView(valid_shape=[valid_rows, valid_cols]),
+                    pl.TileView(valid_shape=[valid_rows, VALID_COLS]),
                 ] = pl.tpop_from_aic(split=1)
                 incremented: pl.Tile[[ROWS, COLS], pl.FP32] = pl.add(popped, 1.0)
                 pl.tfree_to_aic(popped)
@@ -222,8 +222,8 @@ class C2VDynamicTpushValidShapeTestCase(PTOTestCase):
                     [ROWS, COLS],
                     pl.FP32,
                     pl.Mem.Acc,
-                    pl.TileView(valid_shape=[valid_rows, valid_cols]),
-                ] = pl.tile.set_validshape(acc, valid_rows, valid_cols)
+                    pl.TileView(valid_shape=[valid_rows, VALID_COLS]),
+                ] = pl.tile.set_validshape(acc, valid_rows, VALID_COLS)
                 pl.tpush_to_aiv(narrowed, split=1)
 
             @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
@@ -250,7 +250,7 @@ class C2VDynamicTpushValidShapeTestCase(PTOTestCase):
                     [ROWS, COLS],
                     pl.FP32,
                     pl.Mem.Vec,
-                    pl.TileView(valid_shape=[valid_rows, valid_cols]),
+                    pl.TileView(valid_shape=[valid_rows, VALID_COLS]),
                 ] = pl.tpop_from_aic(split=1)
                 incremented: pl.Tile[[ROWS, COLS], pl.FP32] = pl.add(popped, 1.0)
                 pl.tfree_to_aic(popped)

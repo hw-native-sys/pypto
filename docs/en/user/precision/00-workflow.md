@@ -197,6 +197,44 @@ them with `python -m simpler_setup.tools.dump_viewer`.
 > host-side collector (~42 MB/s drain) and get the AICPU killed by a STARS op-execute
 > timeout. Prefer level `1` plus `pl.dump_tag` on the specific tensors you are chasing.
 
+### When the result changes between runs
+
+Before dumping anything, re-run the same input a few times. A value that moves means
+something is unordered — but two very different things can be, and they are cheap to tell
+apart:
+
+- **Last bits only, in a kernel that uses split-K or an atomic add.** That is accumulation
+  order across cores. It is expected, step 2 above already covers it, and there is nothing
+  to fix.
+- **Anything larger** — whole regions wrong, values off by a lot, or a result that is
+  sometimes right and sometimes not. That is a task-ordering bug, and no pass dump will
+  explain it: the IR is entitled to look correct at every pass, because statement order does
+  not constrain execution order.
+
+For the second, the runtime infers RAW and WAW from buffer overlap, but **WAR is not
+tracked**: a writer overwriting a buffer some other task may still be reading takes no
+edge, because finding every in-flight reader would be a per-write walk on the hot path.
+That anti-dependency is yours to declare. See [Dependencies](../performance/03-dependencies.md) for the full rule
+and its cost.
+
+```python
+cfg = RunConfig(platform="a2a3sim", enable_dep_gen=True)   # writes deps.json
+```
+
+Read the graph and look for the edge you assumed was there. The fix is to name it —
+`deps=[reader_tid]` on the writer, leaving the readers as plain inputs (`INPUT`, which is
+what an unannotated parameter already is).
+
+> **Do not fix it by promoting the reader to `pl.InOut`.** It does create the edge, since an
+> `INOUT` registers as a writer and the overwrite then takes a WAW edge on it. It also
+> serializes every *other* reader of that buffer against each other, because each one
+> becomes the registered producer in turn. A tensor read concurrently by several tasks
+> loses that concurrency entirely, to buy one anti-dependency.
+
+Note that dumping perturbs this: `enable_dump_args` adds GM traffic and changes timing, so a
+race can hide or move when you turn it on. Settle the ordering question from the graph
+first, then go back to comparing values.
+
 ### When the value you want is not a tensor
 
 Dumping only reaches things that *are* tensors. The value that would settle the question is
@@ -226,7 +264,7 @@ output is wrong" into "this step is wrong" in one run.
 | Symptom | Likely cause | Step |
 | ------- | ------------ | ---- |
 | **Correct kernel fails `allclose`** | `rtol=1e-5` against FP16 inputs | 1 |
-| **Differs run to run, same input** | Split-K atomic accumulation order | 2 |
+| **Differs run to run, same input** | Split-K atomic accumulation order, **or a missing WAR edge** | 2, then 5 |
 | **Differs only for long reductions** | FP16/BF16 accumulator | 2 |
 | **Blamed on a multi-hop cast** | Often bit-identical — check the class | 2 |
 | **IR matches every pass, device does not** | Not a semantic bug | 5 |

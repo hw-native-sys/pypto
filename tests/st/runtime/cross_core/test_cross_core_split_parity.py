@@ -9,19 +9,35 @@
 
 """Cross-core 1C2V split runtime parity probes.
 
-These probes exercise ``UP_DOWN`` and ``LEFT_RIGHT`` splits on an even static
-[16, 16] tile with the runtime ``valid_shape`` swept through every parity
-regime (small / below-half / at-half / above-half / near-full):
+These probes exercise an ``UP_DOWN`` split on an even static [16, 16] tile with
+the runtime ``valid_row`` swept through every parity regime (small / below-half
+/ at-half / above-half / near-full):
 
-  VR/VC ∈ {1, 7, 8, 9, 15}
+  VR ∈ {1, 7, 8, 9, 12, 15}
+
+The COLUMN extent is not swept, and is not a free field: the FIFO slot is
+written at the producer's physical column pitch and pto-isa rebuilds the read
+geometry from the popped tile's own ``validCol`` (``gmStrideR = validCol``,
+doubled for the left-right codes). A narrowed column therefore mis-strides the
+read on either mode, and on ``LEFT_RIGHT`` it is the split axis as well, so it
+would have to differ per lane -- which nothing can express. That shape is
+rejected now, and ``test_left_right_narrowed_column_is_rejected`` pins the
+diagnostic.
 
 For each subblock, ``SplitVectorKernel``'s ``LocalizeValidDimForSplit`` computes
 the per-subblock valid extent as
-``max(min(valid_dim - subblock_idx * half_dim, half_dim), 0)`` (see
-``src/ir/transforms/split_vector_kernel_pass.cpp:233``). The store
+``max(min(valid_dim - subblock_idx * half_dim, half_dim), 0)``. The store
 auto-adjusts its offset to the subblock-relative slot via ``AdjustOffsets``,
 so the user-written store offset stays ``[0, 0]`` and the compiler places
 subblock 0 at the origin and subblock 1 at the split-axis half.
+
+A RUNTIME extent never reaches the transport itself, though: pto-isa finds
+lane 1's band inside the slot from the popped tile's own split-axis extent, so
+a tile declaring ``clamp(VR - 8, 0, 8)`` would send lane 1 to row ``VR - 8``
+while the producer wrote its rows at row 8. The popped tile therefore declares
+the full box on the split axis (``split_axis::WithFullSplitAxisValid``) and the
+localized extent lands on its consumers. That is what the sweep below checks
+element by element -- which is why the operands must not be uniform.
 
 This is the canonical pattern users follow when they need to ship an odd
 extent (e.g. ``valid_rows = 17``) through ``tpush_to_aiv`` / ``tpop_from_aic``:
@@ -46,6 +62,20 @@ COLS = 16
 HALF = ROWS // 2
 SLOT_SIZE_BYTES = ROWS * COLS * 4
 BUFFER_SIZE_BYTES = SLOT_SIZE_BYTES * 4
+
+
+# Operands whose product varies on both axes -- see define_tensors below. Named
+# functions rather than tensor literals: golden_writer inlines a tensor
+# init_value only up to 100 elements, and extracts the SOURCE of a named
+# function, so these two must stay self-contained (no module-level names).
+def _row_ramp() -> torch.Tensor:
+    """``a[i, k] = i + 1`` on a [16, 16] BF16 box."""
+    return torch.arange(1, 17, dtype=torch.bfloat16).reshape(16, 1).expand(16, 16).contiguous()
+
+
+def _col_ramp() -> torch.Tensor:
+    """``b[k, j] = j + 1`` on a [16, 16] BF16 box."""
+    return torch.arange(1, 17, dtype=torch.bfloat16).expand(16, 16).contiguous()
 
 
 def _build_c2v_ud_program() -> Any:
@@ -86,8 +116,8 @@ def _build_c2v_ud_program() -> Any:
                 [ROWS, COLS],
                 pl.FP32,
                 pl.Mem.Acc,
-                pl.TileView(valid_shape=[valid_rows, valid_cols]),
-            ] = pl.tile.set_validshape(acc, valid_rows, valid_cols)
+                pl.TileView(valid_shape=[valid_rows, COLS]),
+            ] = pl.tile.set_validshape(acc, valid_rows, COLS)
             pl.tpush_to_aiv(narrowed, split=1)
 
         @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
@@ -114,7 +144,7 @@ def _build_c2v_ud_program() -> Any:
                 [ROWS, COLS],
                 pl.FP32,
                 pl.Mem.Vec,
-                pl.TileView(valid_shape=[valid_rows, valid_cols]),
+                pl.TileView(valid_shape=[valid_rows, COLS]),
             ] = pl.tpop_from_aic(split=1)
             incremented: pl.Tile[[ROWS, COLS], pl.FP32] = pl.add(popped, 1.0)
             pl.tfree_to_aic(popped)
@@ -276,9 +306,15 @@ class _C2VValidShapeParityCase(PTOTestCase):
         return f"cross_core_split_parity_{sm}_vr{self._valid_rows}_vc{self._valid_cols}"
 
     def define_tensors(self) -> list[TensorSpec]:
+        # a[i, k] = i + 1 and b[k, j] = j + 1 give C[i, j] = COLS * (i + 1) * (j + 1):
+        # distinct on every row AND every column. Uniform operands (the constants
+        # this probe used to carry) make every element of the product identical,
+        # which makes a lane whose FIFO band is read at the wrong offset
+        # indistinguishable from a correct one -- the exact defect this sweep
+        # exists to catch.
         return [
-            TensorSpec("a", [ROWS, COLS], DataType.BF16, init_value=1.0),
-            TensorSpec("b", [ROWS, COLS], DataType.BF16, init_value=2.0),
+            TensorSpec("a", [ROWS, COLS], DataType.BF16, init_value=_row_ramp),
+            TensorSpec("b", [ROWS, COLS], DataType.BF16, init_value=_col_ramp),
             TensorSpec(
                 "valid_shape",
                 [2],
@@ -304,23 +340,45 @@ class _C2VValidShapeParityCase(PTOTestCase):
 
 
 # Valid-shape parity sweep on box [16, 16]: covers below-half (1, 7), at-half
-# (8), above-half (9, 15) — the regimes that distinguish "subblock 1 no-op"
-# from "subblock 1 contributes a partial extent".
+# (8), above-half (9, 12, 15) — the regimes that distinguish "subblock 1 no-op"
+# from "subblock 1 contributes a partial extent". 12 is the deep tail: it leaves
+# the lanes 8 and 4, the widest gap the box partition can produce, so a lane 1
+# read at its own extent lands four rows (or columns) off.
+#
+# The xfailing params are the ones a HAND-WRITTEN ``tile.tpop_from_aic`` still
+# gets wrong on a2a3, and they were invisible until this probe stopped feeding
+# uniform operands. Its declared per-lane extent reaches the transport, so
+# pto-isa places lane 1's band at that extent instead of at the box half where
+# the producer wrote it; on LEFT_RIGHT a narrowed split-axis (column) extent
+# additionally collapses the pop's GM row gap, which is why even the
+# empty-lane-1 columns miss. Widening only the pop is not the fix here — the
+# consumers inherit the declared extent and then write partial destinations out
+# of a full source, which measures worse. A ``pl.split_aiv`` region has no such
+# problem: LocalizeExplicitBoundaryValid keeps the boundary op full-width and
+# moves the lane extent onto the consumers.
+_UNPLACEABLE = "runtime split-axis extent on a hand-written tpop: lane 1's band is placed at its own extent"
+
 _UP_DOWN_PARITY_CASES = [
-    (1, 16, "vr1"),
-    (7, 16, "vr7"),
-    (8, 16, "vr8"),
-    (9, 16, "vr9"),
-    (15, 16, "vr15"),
+    (1, 16, "vr1", False),
+    (7, 16, "vr7", False),
+    (8, 16, "vr8", False),
+    (9, 16, "vr9", True),
+    (12, 16, "vr12", True),
+    (15, 16, "vr15", True),
 ]
 
-_LEFT_RIGHT_PARITY_CASES = [
-    (16, 1, "vc1"),
-    (16, 7, "vc7"),
-    (16, 8, "vc8"),
-    (16, 9, "vc9"),
-    (16, 15, "vc15"),
-]
+
+def _sweep_params(cases):
+    """(vr, vc) params, with the known-unplaceable extents marked xfail."""
+    return [
+        pytest.param(
+            vr,
+            vc,
+            id=name,
+            marks=[pytest.mark.xfail(strict=True, reason=_UNPLACEABLE)] if broken else [],
+        )
+        for vr, vc, name, broken in cases
+    ]
 
 
 class TestSplitParityRuntime:
@@ -328,11 +386,7 @@ class TestSplitParityRuntime:
 
     @pytest.mark.platforms("a2a3")
     @pytest.mark.parametrize("platform", [pytest.param("a2a3", id="a2a3")])
-    @pytest.mark.parametrize(
-        "vr,vc",
-        [c[:2] for c in _UP_DOWN_PARITY_CASES],
-        ids=[c[2] for c in _UP_DOWN_PARITY_CASES],
-    )
+    @pytest.mark.parametrize("vr,vc", _sweep_params(_UP_DOWN_PARITY_CASES))
     def test_up_down_valid_shape_parity(self, test_runner, vr, vc, platform):
         case = _C2VValidShapeParityCase(vr, vc, pl.SplitMode.UP_DOWN, platform=platform)
         result = test_runner.run(case)
@@ -340,15 +394,23 @@ class TestSplitParityRuntime:
 
     @pytest.mark.platforms("a2a3")
     @pytest.mark.parametrize("platform", [pytest.param("a2a3", id="a2a3")])
-    @pytest.mark.parametrize(
-        "vr,vc",
-        [c[:2] for c in _LEFT_RIGHT_PARITY_CASES],
-        ids=[c[2] for c in _LEFT_RIGHT_PARITY_CASES],
-    )
-    def test_left_right_valid_shape_parity(self, test_runner, vr, vc, platform):
-        case = _C2VValidShapeParityCase(vr, vc, pl.SplitMode.LEFT_RIGHT, platform=platform)
+    def test_left_right_narrowed_column_is_rejected(self, test_runner, platform):
+        """LEFT_RIGHT narrows the SPLIT axis, which the transport cannot carry.
+
+        pto-isa reconstructs the producer's rectangle from the popped tile's own
+        column extent -- ``gmStrideR = 2 * validCol`` and
+        ``subAIVOffset = subBlockId * validCol`` -- so both the pitch and lane 1's
+        band only line up when ``validCol`` is the lane's full column box. A
+        narrowed column extent has no carrier at all, and used to compile into a
+        silently mis-strided read: on a2a3 this sweep passed for every VC only
+        because its operands were uniform constants.
+        """
+        case = _C2VValidShapeParityCase(ROWS, 9, pl.SplitMode.LEFT_RIGHT, platform=platform)
         result = test_runner.run(case)
-        assert result.passed, f"LEFT_RIGHT (VR={vr},VC={vc}) failed: {result.error}"
+
+        assert not result.passed, "a per-lane column extent must not compile"
+        assert "LEFT_RIGHT splits the column axis" in result.error, result.error
+        assert "mode=pl.SplitMode.UP_DOWN" in result.error, result.error
 
 
 # ---------------------------------------------------------------------------

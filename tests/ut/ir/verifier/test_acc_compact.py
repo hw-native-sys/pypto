@@ -22,6 +22,11 @@ hand: the lhs whose valid rows ``mad`` takes M from, and the accumulator buffer
 the result aliases in place. A reader cannot make that comparison -- a
 ``tile.store`` cannot tell an accumulator ``mad`` wrote from an Acc tile some
 ``tile.load`` filled at the physical pitch.
+
+The second rule guards the same pitch through aliases: ``tile.set_validshape`` is
+metadata-only and keeps ``compact``, so re-declaring the valid rows across a
+fractal boundary changes the number every compact reader derives its pitch from
+while the bytes stay packed where ``mad`` put them.
 """
 
 import pypto.language as pl
@@ -133,6 +138,74 @@ def test_single_fractal_block_accumulator_needs_no_compact():
     would reject legal IR.
     """
     assert _verify(_matmul_acc_program(16, 1, ir.CompactMode.null)) == []
+
+
+def _set_validshape_program(src_valid_rows, new_valid_rows, compact=ir.CompactMode.normal):
+    """One AIC function that re-declares a compact accumulator's valid rows."""
+    span = ir.Span.unknown()
+    rows = ir.ConstInt(ROWS, pl.INDEX, span)
+    cols = ir.ConstInt(COLS, pl.INDEX, span)
+    src_valid = ir.ConstInt(src_valid_rows, pl.INDEX, span)
+    new_valid = ir.ConstInt(new_valid_rows, pl.INDEX, span)
+
+    src_type = ir.TileType(
+        [rows, cols],
+        pl.INT32,
+        None,
+        ir.TileView(valid_shape=[src_valid, cols], compact=compact),
+        ir.MemorySpace.Acc,
+    )
+    dst_type = ir.TileType(
+        [rows, cols],
+        pl.INT32,
+        None,
+        ir.TileView(valid_shape=[new_valid, cols], compact=compact),
+        ir.MemorySpace.Acc,
+    )
+    src = ir.Var("acc", src_type, span)
+    dst = ir.Var("acc_narrowed", dst_type, span)
+    call = ir.Call(ir.Op("tile.set_validshape"), [src, new_valid, cols], dst_type, span)
+    func = ir.Function(
+        "acc_alias",
+        [(src, ir.ParamDirection.In)],
+        [],
+        ir.SeqStmts([ir.AssignStmt(dst, call, span)], span),
+        span,
+        ir.FunctionType.AIC,
+    )
+    return ir.Program([func], "acc_alias_program", span)
+
+
+def test_re_narrowing_a_compact_accumulator_across_a_fractal_boundary_is_rejected():
+    """``mad`` packed the bytes at ceil(17/16)*16 = 32; the alias would read them at 16.
+
+    ``tile.set_validshape`` is metadata-only and keeps ``compact``, so changing the
+    valid rows changes the number every compact reader derives its pitch from
+    without repacking anything.
+    """
+    diags = _verify(_set_validshape_program(17, 16))
+    assert len(diags) == 1
+    assert diags[0].rule_name == "AccCompactValid"
+    assert "re-narrows a compact accumulator" in diags[0].message
+
+
+def test_re_narrowing_within_one_fractal_block_is_accepted():
+    """17 -> 20 valid rows both pack to 32, so no reader changes its stride."""
+    assert _verify(_set_validshape_program(17, 20)) == []
+
+
+def test_narrowing_a_fresh_full_box_accumulator_is_accepted():
+    """The AutoTileMatmulL0 seed: tile.create(compact=True) narrowed straight away.
+
+    A buffer nothing has written yet re-interprets nothing, so declaring its valid
+    region is not an alias re-pitch.
+    """
+    assert _verify(_set_validshape_program(ROWS, VALID_ROWS)) == []
+
+
+def test_re_narrowing_a_non_compact_accumulator_is_accepted():
+    """Without the flag every reader uses the physical rows, whatever the extent."""
+    assert _verify(_set_validshape_program(17, 16, compact=ir.CompactMode.null)) == []
 
 
 def test_compact_outside_a_fractal_space_is_rejected():
