@@ -103,8 +103,8 @@ def make_tensor_arg(worker: Any, arg: Any) -> Any:
               simpler's worker-aware wire helper).
             - :class:`~pypto.runtime.DeviceTensor`: a worker-resident buffer;
               after owner/liveness validation, its retained ``Buffer``
-              constructs an address-free wire ``Tensor`` (memory is
-              caller-managed).
+              lazily constructs and reuses an address-free wire ``Tensor``
+              descriptor (memory is caller-managed).
             - simpler ``Tensor``: returned as-is (already device-side).
 
     Returns:
@@ -125,5 +125,5 @@ def make_tensor_arg(worker: Any, arg: Any) -> Any:
             dtype = task_interface.torch_dtype_to_datatype(arg.dtype)
         except KeyError as e:
             raise ValueError(f"Unsupported DeviceTensor dtype: {arg.dtype}") from e
-        return arg.buffer.tensor(shapes=arg.shape, dtype=dtype)
+        return arg._get_wire_tensor(dtype)
     return torch_interop.make_tensor_arg(worker, arg)

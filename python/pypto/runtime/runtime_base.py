@@ -92,6 +92,11 @@ class Worker(ABC):
         # DeviceTensor value is the allocation identity: a stale handle must
         # not free a newer allocation that reused the same device address.
         self._owned_tensors: dict[tuple[int, int], DeviceTensor] = {}
+        # Reverse allocation-identity index used by the generated L3 tensor
+        # packing path. A wide distributed dispatch may validate thousands of
+        # resident shards, so looking up the owning ``(worker_id, data_ptr)``
+        # key must not scan the complete allocation table for every argument.
+        self._owned_tensor_keys: dict[int, tuple[int, int]] = {}
         # Raw simpler Workers are bound back to this owner for DeviceTensor
         # wire conversion.  The concrete runtime sets this whenever it creates
         # (or recreates) its backend; tensor_arg.py rejects stale backends whose
@@ -191,9 +196,12 @@ class Worker(ABC):
         ``DeviceTensor`` keeps its Buffer handle after ``free_tensor()`` so
         that the immutable public handle remains inspectable.  The retained
         handle alone is therefore not proof of liveness.  The authoritative
-        check is object identity in ``_device_buffers``: this rejects foreign
-        Workers, freed handles, and pointer-reuse (ABA) cases before a stale
-        wire descriptor can enter simpler ``Worker.run``.
+        check combines the exact ``DeviceTensor`` allocation identity with
+        object identity in ``_device_buffers``: this rejects foreign Workers,
+        freed handles, and pointer-reuse (ABA) cases before a stale wire
+        descriptor can enter simpler ``Worker.run``. The reverse identity
+        index keeps this check O(1), including when *worker_id* is omitted by
+        generated orchestration code.
         """
         self._require_ready("dispatch DeviceTensor")
         worker_name = type(self).__name__
@@ -208,12 +216,14 @@ class Worker(ABC):
             raise TypeError(
                 f"{label}: {worker_name} does not retain owner Buffers required for DeviceTensor dispatch."
             )
-        if worker_id is None:
-            owned = any(
-                ptr == tensor.data_ptr and buffer is tensor.buffer for (_wid, ptr), buffer in buffers.items()
-            )
-        else:
-            owned = buffers.get((worker_id, tensor.data_ptr)) is tensor.buffer
+        key = self._owned_tensor_keys.get(id(tensor))
+        owned = (
+            key is not None
+            and key[1] == tensor.data_ptr
+            and (worker_id is None or key[0] == worker_id)
+            and self._owned_tensors.get(key) is tensor
+            and buffers.get(key) is tensor.buffer
+        )
         if not owned:
             placement = "" if worker_id is None else f" on worker_id={worker_id}"
             raise ValueError(
@@ -265,7 +275,9 @@ class Worker(ABC):
             init=init,
             init_prep=self._prepare_init,
         )
-        self._owned_tensors[(worker_id, t.data_ptr)] = t
+        key = (worker_id, t.data_ptr)
+        self._owned_tensors[key] = t
+        self._owned_tensor_keys[id(t)] = key
         return t
 
     def free_tensor(self, t: DeviceTensor, *, worker_id: int = 0) -> None:
@@ -310,6 +322,7 @@ class Worker(ABC):
         # can retry. A successful first free removes the key and keeps the
         # genuine second-free path idempotent.
         del self._owned_tensors[key]
+        del self._owned_tensor_keys[id(t)]
 
     def _close_owned_tensors(self) -> None:
         """Release any DeviceTensors the caller forgot to :meth:`free_tensor`.
@@ -323,6 +336,7 @@ class Worker(ABC):
         # close()) don't double-iterate.
         leaked = self._owned_tensors
         self._owned_tensors = {}
+        self._owned_tensor_keys.clear()
         for worker_id, ptr in leaked:
             try:
                 self.free(ptr, worker_id=worker_id)
