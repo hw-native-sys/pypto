@@ -1938,6 +1938,8 @@ def batch_matmul_acc(
     lhs: Expr,
     rhs: Expr,
     span: Span | None = None,
+    *,
+    init_cond: Expr | None = None,
 ) -> Call:
     """Batch matrix multiplication with accumulation.
 
@@ -1945,17 +1947,26 @@ def batch_matmul_acc(
     rhs. The broadcast batch shape must equal acc's batch shape (acc is the in-place
     accumulation target and is not broadcast).
 
+    ``init_cond`` behaves exactly as it does on
+    [`matmul_acc`][pypto.ir.op.tile_ops.matmul_acc]: where the predicate holds,
+    ``acc`` is overwritten with ``lhs @ rhs`` instead of accumulated into.
+    ``FlattenTileNdTo2D`` forwards it to every 2D ``tile.matmul_acc`` it unrolls
+    this op into — each of those is the sole writer of its own row band of the
+    accumulator, so the predicate applies band by band.
+
     Args:
         acc: Accumulator tile (TileType, at least 2D)
         lhs: Left-hand side tile (TileType, at least 2D)
         rhs: Right-hand side tile (TileType, at least 2D)
         span: Optional source span for debugging (auto-captured if not provided)
+        init_cond: Optional BOOL scalar predicate selecting overwrite over accumulate
 
     Returns:
         Call expression for batch matrix multiplication with accumulation
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.batch_matmul_acc", [acc, lhs, rhs], {}, actual_span)
+    args = [acc, lhs, rhs] if init_cond is None else [acc, lhs, rhs, init_cond]
+    return _ir_core.create_op_call("tile.batch_matmul_acc", args, {}, actual_span)
 
 
 def gemv(lhs: Expr, rhs: Expr, span: Span | None = None, *, acc_phase: str = "unspecified") -> Call:

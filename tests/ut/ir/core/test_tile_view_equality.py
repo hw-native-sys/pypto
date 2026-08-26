@@ -197,5 +197,59 @@ class TestTileViewHashEqConsistency:
         assert ir.structural_hash(null_type) != ir.structural_hash(compact_type)
 
 
+class TestUnaryExprEquality:
+    """Cast operands compare structurally, and the hash keeps up.
+
+    ``AreExprsEqual`` matches unary nodes on kind, result dtype and operand, so
+    two sites spelling the same cast produce equal TileViews. Hash and equality
+    have to agree or a Python set of TileViews stops behaving like a set.
+    """
+
+    @staticmethod
+    def _cast_view(operand, dtype):
+        """A view whose first valid-shape entry is `cast(operand, dtype)`.
+
+        The operand is passed in rather than built here: two views must differ in
+        the cast dtype *only*, or a fresh operand Var would make them unequal by
+        pointer identity and the assertion would hold whether or not the dtype is
+        compared at all.
+        """
+        span = _make_span()
+        return _make_view(valid_shape=[ir.cast(operand, dtype, span), _make_const(16, span)])
+
+    def test_separately_built_identical_casts_are_equal(self):
+        span = _make_span()
+        operand = ir.Var("x", ir.ScalarType(DataType.INT32), span)
+        left = ir.cast(operand, DataType.INDEX, span)
+        right = ir.cast(operand, DataType.INDEX, span)
+        assert left is not right, "the point of the test is two distinct objects"
+
+        lhs = _make_view(valid_shape=[left, _make_const(16, span)])
+        rhs = _make_view(valid_shape=[right, _make_const(16, span)])
+        assert lhs == rhs
+        assert hash(lhs) == hash(rhs)
+        assert len({lhs, rhs}) == 1, "equal views must collapse in a set"
+
+    def test_casts_to_different_dtypes_are_not_equal(self):
+        """A cast's result dtype is part of its value, not derivable from the operand."""
+        operand = ir.Var("x", ir.ScalarType(DataType.INT32), _make_span())
+        lhs = self._cast_view(operand, DataType.INDEX)
+        rhs = self._cast_view(operand, DataType.INT64)
+        assert lhs != rhs
+        assert hash(lhs) != hash(rhs)
+
+    def test_same_dtype_cast_on_one_operand_is_equal(self):
+        """The control for the test above: same operand, same dtype, still equal.
+
+        Without it a regression that made every cast compare unequal would leave
+        the dtype test passing for the wrong reason.
+        """
+        operand = ir.Var("x", ir.ScalarType(DataType.INT32), _make_span())
+        lhs = self._cast_view(operand, DataType.INDEX)
+        rhs = self._cast_view(operand, DataType.INDEX)
+        assert lhs == rhs
+        assert hash(lhs) == hash(rhs)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

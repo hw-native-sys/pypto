@@ -734,6 +734,219 @@ class TestOutlineClusterScopes:
             f"expected InOut at outlined callee param {buf_idx}, got {list(outlined.param_directions)}"
         )
 
+    def test_cluster_capture_read_by_one_callee_written_by_another(self):
+        """One callee reads the capture, another overwrites it: ``InOut``.
+
+        ``ParamDirection`` is not a lattice this evidence can be folded along.
+        ``In`` is the analysis's *no evidence yet* floor, so merging the callee
+        directions one call at a time turned ``In`` (from ``reads``) and ``Out``
+        (from ``writes``) into ``Out`` and dropped a read that genuinely
+        happens — the wrapper would be told it need not stage ``shared``'s
+        incoming contents, which is exactly the RAW edge ``reads`` depends on.
+
+        The body itself neither loads nor stores ``shared``; the only evidence
+        is the two callee slots, so this pins the accumulation rather than any
+        Step 0/1 path.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def reads(
+                self,
+                src: pl.Tensor[[16, 128], pl.FP32],
+                dst: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                t: pl.Tile[[16, 128], pl.FP32] = pl.load(src, [0, 0], [16, 128])
+                dst = pl.store(t, [0, 0], dst)
+                return dst
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def writes(self, dst: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+                dst = pl.assemble(dst, pl.full([16, 128], dtype=pl.FP32, value=0.0), [0, 0])
+                return dst
+
+            @pl.function
+            def main(
+                self,
+                shared: pl.Tensor[[16, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                with pl.cluster():
+                    res = self.reads(shared, out)
+                    self.writes(shared)
+                return res
+
+        After = passes.outline_cluster_scopes()(passes.convert_to_ssa()(Before))
+
+        outlined = After.get_function("main_cluster_0")
+        assert outlined is not None, f"main_cluster_0 missing from {list(After.functions)}"
+        directions = {
+            p.name_hint.split("__ssa_v")[0]: d for p, d in zip(outlined.params, outlined.param_directions)
+        }
+        assert directions["shared"] == ir.ParamDirection.InOut, (
+            f"a capture one callee reads and another overwrites is InOut, got {directions}"
+        )
+        # The write-only capture still comes out ``Out``: keeping the two
+        # observations apart must not manufacture a read (issue #2415).
+        assert directions["out"] == ir.ParamDirection.Out, (
+            f"expected Out for the write-only capture, got {directions}"
+        )
+
+    def test_cluster_body_read_survives_a_write_only_callee_slot(self):
+        """A read in the body counts even when a callee overwrites the capture.
+
+        The two halves of the verdict come from different places: the body read
+        from Step 0's scan, the write from the callee's declared slot. Deriving
+        the direction from the callee slots alone lost the first, leaving
+        ``shared`` ``Out`` — telling the wrapper it need not stage the contents
+        ``pl.load`` right there consumes.
+
+        Step 0 can be trusted for this only because it now skips arguments a
+        callee declares ``Out``; otherwise handing a capture to ``overwrite``
+        would itself look like a read and every write-only capture would come
+        back ``InOut`` (issue #2415). ``out`` below is that control case.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def overwrite(self, dst: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+                dst = pl.assemble(dst, pl.full([16, 128], dtype=pl.FP32, value=0.0), [0, 0])
+                return dst
+
+            @pl.function
+            def main(
+                self,
+                shared: pl.Tensor[[16, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                with pl.cluster():
+                    t: pl.Tile[[16, 128], pl.FP32] = pl.load(shared, [0, 0], [16, 128])
+                    out = pl.store(pl.exp(t), [0, 0], out)
+                    self.overwrite(shared)
+                return out
+
+        After = passes.outline_cluster_scopes()(passes.convert_to_ssa()(Before))
+
+        outlined = After.get_function("main_cluster_0")
+        assert outlined is not None, f"main_cluster_0 missing from {list(After.functions)}"
+        directions = {
+            p.name_hint.split("__ssa_v")[0]: d for p, d in zip(outlined.params, outlined.param_directions)
+        }
+        assert directions["shared"] == ir.ParamDirection.InOut, (
+            f"the body loads `shared` before the callee overwrites it; got {directions}"
+        )
+        assert directions["out"] == ir.ParamDirection.Out, (
+            f"`out` is only ever stored into and must stay Out; got {directions}"
+        )
+
+    def test_cluster_loop_carried_capture_takes_callee_direction(self):
+        """A loop-carried capture is an ``IterArg``, and must still be mapped.
+
+        ``IterArg`` derives from ``Var`` but carries its own ``ObjectKind``, so
+        ``As<Var>`` never matches one (`.claude/rules/ir-kind-traits.md`).
+        Matching the argument that way skipped every loop-carried capture, which
+        left the wrapper parameter at the seeded ``In`` however the callee
+        declared its slot — here the callee overwrites ``acc``.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def writes(self, dst: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+                dst = pl.assemble(dst, pl.full([16, 128], dtype=pl.FP32, value=0.0), [0, 0])
+                return dst
+
+            @pl.function
+            def main(self, out: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+                for i, (acc,) in pl.range(3, init_values=(out,)):
+                    with pl.cluster():
+                        updated = self.writes(acc)
+                    acc_rv = pl.yield_(updated)
+                return acc_rv
+
+        After = passes.outline_cluster_scopes()(passes.convert_to_ssa()(Before))
+
+        outlined = After.get_function("main_cluster_0")
+        assert outlined is not None, f"main_cluster_0 missing from {list(After.functions)}"
+        acc_idx = next(i for i, p in enumerate(outlined.params) if p.name_hint.startswith("acc"))
+        assert outlined.param_directions[acc_idx] == ir.ParamDirection.Out, (
+            f"the loop-carried capture takes the callee's Out slot, got {list(outlined.param_directions)}"
+        )
+
+    def test_cluster_submit_only_out_capture_stays_out(self):
+        """A capture handed only to a ``pl.submit`` ``Out`` slot is ``Out``.
+
+        The base visitor does not forward ``Submit`` to the ``Call`` handler, so
+        without a dedicated override every launch argument counted as a read and
+        this capture came back ``InOut`` — the false cross-rank dependency of
+        issue #2415, for exactly the programs that launch work asynchronously.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def overwrite(self, dst: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+                dst = pl.assemble(dst, pl.full([16, 128], dtype=pl.FP32, value=0.0), [0, 0])
+                return dst
+
+            @pl.function
+            def main(self, out: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+                with pl.cluster():
+                    res, tid = pl.submit(self.overwrite, out)
+                return res
+
+        After = passes.outline_cluster_scopes()(passes.convert_to_ssa()(Before))
+
+        outlined = After.get_function("main_cluster_0")
+        assert outlined is not None, f"main_cluster_0 missing from {list(After.functions)}"
+        out_idx = next(i for i, p in enumerate(outlined.params) if p.name_hint.startswith("out"))
+        assert outlined.param_directions[out_idx] == ir.ParamDirection.Out, (
+            f"a submit-only write target must not gain a read, got {list(outlined.param_directions)}"
+        )
+
+    def test_cluster_body_read_survives_a_submit_out_slot(self):
+        """The Submit skip is per-argument, not a blanket "launches read nothing".
+
+        ``shared`` is loaded by the body *and* overwritten through the launch,
+        so it is ``InOut``; ``out`` is only ever stored into and stays ``Out``.
+        Skipping every argument of a ``Submit`` would collapse both to ``Out``.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def overwrite(self, dst: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+                dst = pl.assemble(dst, pl.full([16, 128], dtype=pl.FP32, value=0.0), [0, 0])
+                return dst
+
+            @pl.function
+            def main(
+                self,
+                shared: pl.Tensor[[16, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                with pl.cluster():
+                    t: pl.Tile[[16, 128], pl.FP32] = pl.load(shared, [0, 0], [16, 128])
+                    out = pl.store(pl.exp(t), [0, 0], out)
+                    res, tid = pl.submit(self.overwrite, shared)
+                return out
+
+        After = passes.outline_cluster_scopes()(passes.convert_to_ssa()(Before))
+
+        outlined = After.get_function("main_cluster_0")
+        assert outlined is not None, f"main_cluster_0 missing from {list(After.functions)}"
+        directions = {
+            p.name_hint.split("__ssa_v")[0]: d for p, d in zip(outlined.params, outlined.param_directions)
+        }
+        assert directions["shared"] == ir.ParamDirection.InOut, (
+            f"the body loads `shared` before the launch overwrites it; got {directions}"
+        )
+        assert directions["out"] == ir.ParamDirection.Out, (
+            f"`out` is only ever stored into and must stay Out; got {directions}"
+        )
+
     def test_cluster_store_target_becomes_out(self):
         """A Cluster scope that writes an external tensor via ``pl.store`` marks
         that tensor as an ``Out`` parameter on the outlined Group function.

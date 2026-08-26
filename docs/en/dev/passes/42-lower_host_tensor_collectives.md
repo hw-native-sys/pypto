@@ -80,6 +80,37 @@ consistent with the devices actually running.
 Assignments preserve the user-facing rebind idiom by appending
 `<result> = <original expr>` after the generated builtin calls.
 
+## Printed form
+
+The `builtin.tensor.*` operators are `internal_only` in the registry: no DSL
+wrapper spells them, and the user-facing op-creation path rejects them by name.
+The python printer still has to render them, and does so under the `pl.builtin`
+namespace — the same `pl.` prefix it puts on any non-`pld` registered operator:
+
+```python
+for r_1 in pl.range(pl.const(0, pl.INT64), pld.system.world_size(), pl.const(1, pl.INT64)):
+    pl.builtin.tensor.allreduce(
+        data, signal, op=0, dtype=pl.FP32, core_num=1,
+        attrs={"op": 0, "dtype": pl.FP32, "core_num": 1, "device": r_1,
+               "arg_directions": [pl.adir.inout, pl.adir.inout]},
+    )
+```
+
+The parser reads that spelling back (`ast_parser._parse_builtin_op`), so the
+lowered dispatch survives print -> parse. It is a machine-only surface, scoped
+to names actually registered under `builtin.`, and it accepts only what the
+printer can write: the `device` and `arg_directions` attrs are required, since
+orchestration codegen reads both back behind internal checks. A hand-written
+call omitting them is rejected as a user error at parse time rather than
+surfacing as a compiler-bug diagnostic during codegen. Write the composite
+`pld.tensor.*` form instead.
+
+Note that a whole-program `assert_structural_equal` round-trip is still blocked
+one pass upstream: [`MaterializeCommDomainScopes`](41-materialize_comm_domain_scopes.md)
+synthesizes `CommDomainScopeStmt` (printed as a leading comment) and the
+`WindowBuffer` back-references on `DistributedTensorType` (not printed), and
+neither has a DSL surface to parse back.
+
 ## Checks
 
 The pass requires both args to be materialized `DistributedTensorType` views in

@@ -12,9 +12,11 @@
 
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
+#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
@@ -53,6 +55,17 @@ TupleGetItemExpr::TupleGetItemExpr(ExprPtr tuple, int index, Span span)
   type_ = tuple_type->types_[index];
 }
 
+namespace {
+
+/// The scalar dtype an expression evaluates to, or nullopt when it is not scalar.
+std::optional<DataType> ScalarDataTypeOf(const ExprPtr& e) {
+  auto scalar = std::dynamic_pointer_cast<const ScalarType>(e->GetType());
+  if (!scalar) return std::nullopt;
+  return scalar->dtype_;
+}
+
+}  // namespace
+
 bool AreExprsEqual(const ExprPtr& e1, const ExprPtr& e2) {
   if (e1 == e2) return true;
   if (!e1 || !e2) return false;
@@ -65,6 +78,21 @@ bool AreExprsEqual(const ExprPtr& e1, const ExprPtr& e2) {
   auto b2 = As<BinaryExpr>(e2);
   if (b1 && b2 && e1->GetKind() == e2->GetKind()) {
     return AreExprsEqual(b1->left_, b2->left_) && AreExprsEqual(b1->right_, b2->right_);
+  }
+  // Unary nodes compare the same way, plus their result dtype. `Cast` is the one
+  // that matters in practice: a declared allocation's runtime slot subscript
+  // lowers to `cast(index, INDEX) % n * stride`, and two sites that write the
+  // same subscript build two such trees. Without this they compare unequal by
+  // pointer and a carry looks like it moved between slots when it never left one.
+  //
+  // The dtype is part of the value here and not derivable from the operand:
+  // `cast(x, INT32)` and `cast(x, INDEX)` share a kind and an operand while
+  // denoting different numbers, and callers comparing byte offsets would read
+  // that as one address.
+  auto u1 = As<UnaryExpr>(e1);
+  auto u2 = As<UnaryExpr>(e2);
+  if (u1 && u2 && e1->GetKind() == e2->GetKind()) {
+    return ScalarDataTypeOf(e1) == ScalarDataTypeOf(e2) && AreExprsEqual(u1->operand_, u2->operand_);
   }
   // Call nodes produced by different invocation sites have different pointer
   // identities but may be structurally identical (e.g. two pld.world_size()

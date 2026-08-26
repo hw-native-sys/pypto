@@ -120,11 +120,13 @@ constexpr uint64_t kConstIntHashTag = 1;
 constexpr uint64_t kExprPtrHashTag = 2;
 constexpr uint64_t kBinaryExprHashTag = 3;
 constexpr uint64_t kCallExprHashTag = 4;
+constexpr uint64_t kUnaryExprHashTag = 5;
 
-// Mirror AreExprsEqual: ConstInt nodes compare by value, binary ops and Call
-// nodes compare structurally (kind + operands / op + args), all others by
-// pointer identity.  The hash must match this granularity — any extension to
-// AreExprsEqual MUST get a corresponding branch here.
+// Mirror AreExprsEqual: ConstInt nodes compare by value, binary ops, unary ops
+// and Call nodes compare structurally (kind + operands / kind + dtype + operand /
+// op + args), all others by pointer identity.  The hash must match this
+// granularity — any extension to AreExprsEqual MUST get a corresponding branch
+// here.
 inline uint64_t HashExprForAreExprsEqual(const ExprPtr& e) {
   if (!e) return 0;
   if (auto c = As<ConstInt>(e)) {
@@ -134,6 +136,15 @@ inline uint64_t HashExprForAreExprsEqual(const ExprPtr& e) {
     uint64_t h = hash_combine(kBinaryExprHashTag, static_cast<uint64_t>(e->GetKind()));
     h = hash_combine(h, HashExprForAreExprsEqual(b->left_));
     return hash_combine(h, HashExprForAreExprsEqual(b->right_));
+  }
+  if (auto u = As<UnaryExpr>(e)) {
+    // AreExprsEqual compares a unary node's kind, result dtype and operand, so
+    // all three have to reach the hash or two equal TileViews could land in
+    // different buckets.
+    uint64_t h = hash_combine(kUnaryExprHashTag, static_cast<uint64_t>(e->GetKind()));
+    auto scalar = std::dynamic_pointer_cast<const ScalarType>(e->GetType());
+    h = hash_combine(h, scalar ? static_cast<uint64_t>(scalar->dtype_.Code()) : 0);
+    return hash_combine(h, HashExprForAreExprsEqual(u->operand_));
   }
   if (auto call = As<Call>(e)) {
     uint64_t h = hash_combine(kCallExprHashTag, std::hash<std::string>{}(call->op_ ? call->op_->name_ : ""));

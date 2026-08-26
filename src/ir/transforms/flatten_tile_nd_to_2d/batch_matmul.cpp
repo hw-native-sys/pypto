@@ -778,6 +778,18 @@ BatchMatmulAccResult LowerBatchMatmulAcc(const AssignStmtPtr& assign, const Call
       << "FlattenTileNdTo2D: tile.batch_matmul_acc expects acc to be 2D after flatten, got rank "
       << acc_type->shape_.size();
 
+  // The optional init_cond predicate is loop-invariant across the batch unroll:
+  // each emitted tile.matmul_acc is the sole writer of its own row band of acc,
+  // so "overwrite instead of accumulate" applies band by band. Forward it
+  // verbatim rather than dropping it — a silently dropped predicate would
+  // accumulate into an uninitialized accumulator on the k == 0 step.
+  const ExprPtr init_cond = call->args_.size() == 4 ? Substitute(call->args_[3], ctx.var_map) : nullptr;
+  auto make_matmul_acc = [&](const ExprPtr& acc, const ExprPtr& lhs, const ExprPtr& rhs) {
+    std::vector<ExprPtr> mm_args = {acc, lhs, rhs};
+    if (init_cond) mm_args.push_back(init_cond);
+    return op_registry.Create("tile.matmul_acc", mm_args, span);
+  };
+
   // Normalize lhs/rhs operands (peel safe reshape, flag tile.transpose_view).
   auto lhs_info = NormalizeBatchMatmulOperand(call->args_[1], "lhs", def_map, ctx);
   auto rhs_info = NormalizeBatchMatmulOperand(call->args_[2], "rhs", def_map, ctx);
@@ -874,7 +886,7 @@ BatchMatmulAccResult LowerBatchMatmulAcc(const AssignStmtPtr& assign, const Call
     out.stmts.insert(out.stmts.end(), lhs_page.stmts.begin(), lhs_page.stmts.end());
     out.stmts.insert(out.stmts.end(), rhs_page.stmts.begin(), rhs_page.stmts.end());
 
-    auto matmul_acc = op_registry.Create("tile.matmul_acc", {current_acc, lhs_page.var, rhs_page.var}, span);
+    auto matmul_acc = make_matmul_acc(current_acc, lhs_page.var, rhs_page.var);
     auto new_acc = std::make_shared<Var>(current_acc->name_hint_, matmul_acc->GetType(), span);
     out.stmts.push_back(std::make_shared<AssignStmt>(new_acc, matmul_acc, assign->span_));
     out.output_var = new_acc;
@@ -903,7 +915,7 @@ BatchMatmulAccResult LowerBatchMatmulAcc(const AssignStmtPtr& assign, const Call
     auto acc_page_var = std::make_shared<Var>("acc_page_" + suffix, acc_slice->GetType(), span);
     out.stmts.push_back(std::make_shared<AssignStmt>(acc_page_var, acc_slice, assign->span_));
 
-    auto matmul_acc = op_registry.Create("tile.matmul_acc", {acc_page_var, lhs_page.var, rhs_page.var}, span);
+    auto matmul_acc = make_matmul_acc(acc_page_var, lhs_page.var, rhs_page.var);
     auto matmul_var = std::make_shared<Var>("matmul_acc_" + suffix, matmul_acc->GetType(), span);
     out.stmts.push_back(std::make_shared<AssignStmt>(matmul_var, matmul_acc, assign->span_));
 

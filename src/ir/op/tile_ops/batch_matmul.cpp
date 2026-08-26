@@ -157,8 +157,10 @@ TypePtr DeduceTileBatchMatMulAccType(const std::vector<ExprPtr>& args,
                                      const std::vector<std::pair<std::string, std::any>>& kwargs,
                                      const std::string& op_name) {
   (void)kwargs;
-  CHECK(args.size() == 3) << "The operator " << op_name << " requires exactly 3 arguments, but got "
-                          << args.size();
+  CHECK(args.size() == 3 || args.size() == 4)
+      << "The operator " << op_name << " requires 3 arguments (acc, lhs, rhs) or 4 with the optional "
+      << "init_cond predicate, but got " << args.size();
+  CheckMatmulInitCond(args, 3, op_name);
 
   auto acc_type = As<TileType>(args[0]->GetType());
   auto lhs_type = As<TileType>(args[1]->GetType());
@@ -298,6 +300,10 @@ REGISTER_OP("tile.batch_matmul_acc")
     .add_argument("acc", "Accumulator tile (TileType, at least 2D)")
     .add_argument("lhs", "Left-hand side tile (TileType, at least 2D)")
     .add_argument("rhs", "Right-hand side tile (TileType, at least 2D)")
+    .add_argument("init_cond",
+                  "Optional BOOL scalar; where it holds the accumulator is overwritten with "
+                  "lhs @ rhs instead of accumulated into (the split-K `k == 0` step). Forwarded "
+                  "verbatim to every tile.matmul_acc FlattenTileNdTo2D unrolls this op into")
     .set_input_memory(0, MemorySpace::Acc)
     .set_input_memory(1, MemorySpace::Left)
     .set_input_memory(2, MemorySpace::Right)

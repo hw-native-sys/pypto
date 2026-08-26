@@ -759,6 +759,25 @@ void BindIR(nb::module_& m) {
       nb::arg("op_name"), nb::arg("args"), nb::arg("kwargs"), nb::arg("span"),
       "Create a Call expression with args and kwargs");
 
+  // Underscore-prefixed: NOT a public API. Compiler-internal counterpart of
+  // `create_op_call`, it reaches operators marked `internal_only`, which
+  // `CreateUserFacing` rejects by design. Its only caller is the round-trip
+  // parser, rebuilding a printer-emitted internal dispatch
+  // (`pl.builtin.<ns>.<op>(...)`) that no DSL wrapper can spell; that caller
+  // re-checks the invariants the printer stamps before calling in, so the
+  // guard `internal_only` provides is enforced at the user-facing surface
+  // rather than dropped. `create_op_call` still routes through
+  // `CreateUserFacing` and is unaffected.
+  ir.def(
+      "_create_internal_op_call",
+      [](const std::string& op_name, const std::vector<ExprPtr>& args, const nb::dict& kwargs_dict,
+         const Span& span) {
+        auto kwargs = ConvertKwargsDict(kwargs_dict);
+        return OpRegistry::GetInstance().CreateInternal(op_name, args, kwargs, span);
+      },
+      nb::arg("op_name"), nb::arg("args"), nb::arg("kwargs"), nb::arg("span"),
+      "Create a Call expression for a compiler-internal operator (round-trip parser only)");
+
   ir.def(
       "set_call_attrs",
       [](const CallPtr& call, const nb::dict& attrs_dict) -> CallPtr {

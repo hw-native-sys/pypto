@@ -103,9 +103,9 @@ torch_codegen(node: _ir.Program | _ir.Function, check_shapes: bool = False) -> s
 
 字面量谓词会直接折叠成它所选中的那一支，这与 PTO codegen 选择 `pto.tmatmul` 而非
 `pto.tmatmul.acc`（而不是对编译期常量发射 `scf.if`）的做法一致。`_acc_init` 是
-preamble 中的辅助函数，为所有累加型 matmul 共用：`tile.gemv_acc` 同样携带该谓词
-（GEMV 就是 M 为 1 的 matmul，跑在同一个 cube MAD 上），而 `tile.batch_matmul_acc`
-一旦将来支持该谓词也可以直接受益。
+preamble 中的辅助函数，为所有累加型 matmul 共用，因此它们都通过这同一个 handler
+处理该谓词：`tile.matmul_acc`、`tensor.matmul_acc`、`tile.batch_matmul_acc` 与
+`tile.gemv_acc`（GEMV 就是 M 为 1 的 matmul，跑在同一个 cube MAD 上）。
 
 ### cross-core 相关映射
 

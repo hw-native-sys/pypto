@@ -366,8 +366,7 @@ pl.system.cacheinvalid()  # consumer invalidates before reading
 For a finer handoff than a whole-barrier rendezvous, `pl.system.sync_set` / `pl.system.sync_wait`
 raise and await a single cross-core event. In a **mixed** InCore kernel, pin each one to the lane
 that must run it with `core_type=pl.KernelType.AIC` or `core_type=pl.KernelType.AIV`; in an
-explicitly typed AIC or AIV kernel the lane is already known, so omit the argument. The old
-`"aic"` / `"aiv"` strings still work and emit a `DeprecationWarning`.
+explicitly typed AIC or AIV kernel the lane is already known, so omit the argument.
 
 ```python
 pl.system.sync_set(0, pipe=pl.PipeType.MTE3, core_type=pl.KernelType.AIV)   # raised on AIV

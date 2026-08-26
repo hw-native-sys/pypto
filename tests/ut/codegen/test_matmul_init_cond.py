@@ -263,6 +263,48 @@ class TestAutoTiledPredicateFolds:
         assert mlir.count("pto.tmatmul ") == 1, mlir
 
 
+class TestGroupedOperandsCarryPredicate:
+    """A grouped GEMM keeps its group axis and still gets the predicate.
+
+    A MoE expert slices its weights as ``w[e:e+1, :, :]`` — rank 3, batch 1 —
+    which converts to ``tile.batch_matmul_acc``. That op forwards ``init_cond``
+    to the single 2D ``tile.matmul_acc`` the batch=1 fast path emits, so the
+    predicate's domain is exactly ``matmul_acc``'s own rather than a rank-2
+    subset of it. Without the forwarding, the grouped site is the one shape in a
+    split-K tree that cannot use the idiom the rest of the tree uses.
+    """
+
+    def test_rank3_batch_one_folds_to_one_overwrite_and_one_accumulate(self):
+        @pl.program
+        class GroupedSplitK:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 512], pl.BF16],
+                w: pl.Tensor[[2, 64, 512], pl.BF16],
+                output: pl.Out[pl.Tensor[[1, 16, 64], pl.FP32]],
+            ) -> pl.Tensor[[1, 16, 64], pl.FP32]:
+                acc = pl.tensor.create([1, 16, 64], pl.FP32)
+                for kb in pl.pipeline(0, 2, stage=2):
+                    k0 = kb * 256
+                    x_k = pl.tensor.slice(x, [16, 256], [0, k0])
+                    # Keeps the expert axis: rank 3, batch_count == 1.
+                    w_k = pl.tensor.slice(w, [1, 64, 256], [0, 0, k0])
+                    acc = pl.matmul_acc(acc, x_k, w_k, b_trans=True, init_cond=(kb == 0))
+                return pl.tensor.assemble(output, acc, [0, 0, 0])
+
+        mlir = _generate_default_mlir(GroupedSplitK)
+        # The predicate is a seed test on the unrolled K induction variable, so
+        # it folds: the kb == 0 step overwrites, the rest accumulate. A dropped
+        # predicate would accumulate into an uninitialized accumulator (no
+        # pto.tmatmul at all); an unfolded one would emit a branch.
+        assert "scf.if" not in mlir, "a compile-time-constant init_cond must select one arm outright\n" + mlir
+        assert mlir.count("pto.tmatmul ") == 1, (
+            "the kb == 0 step must overwrite the accumulator exactly once\n" + mlir
+        )
+        assert mlir.count("pto.tmatmul.acc") >= 1, "the remaining K steps must accumulate\n" + mlir
+
+
 # ---------------------------------------------------------------------------
 # GEMV — the same predicate on the same cube MAD, at M = 1.
 # ---------------------------------------------------------------------------

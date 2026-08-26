@@ -1310,22 +1310,31 @@ def matmul_acc(acc: Tile, lhs: Tile, rhs: Tile, init_cond: BoolLike | None = Non
     return Tile(expr=call_expr)
 
 
-def batch_matmul_acc(acc: Tile, lhs: Tile, rhs: Tile) -> Tile:
+def batch_matmul_acc(acc: Tile, lhs: Tile, rhs: Tile, init_cond: BoolLike | None = None) -> Tile:
     """Batch matrix multiplication with accumulation: acc += lhs @ rhs.
 
     Performs the in-place ``acc += lhs @ rhs`` with batch-dim broadcasting between
     ``lhs`` and ``rhs``. The broadcast batch shape must equal the batch shape of
     ``acc`` (acc is the in-place accumulation target and is not broadcast).
 
+    ``init_cond`` behaves exactly as on
+    [`matmul_acc`][pypto.language.op.tile_ops.matmul_acc]: where it holds, ``acc``
+    is overwritten with ``lhs @ rhs`` rather than accumulated into.
+    ``FlattenTileNdTo2D`` forwards the predicate to every 2D ``tile.matmul_acc``
+    it unrolls this op into.
+
     Args:
         acc: Accumulator tile (at least 2D)
         lhs: Left-hand side tile (at least 2D)
         rhs: Right-hand side tile (at least 2D)
+        init_cond: Optional predicate selecting overwrite over accumulate
 
     Returns:
         Tile wrapping the batch_matmul_acc operation
     """
-    call_expr = _ir_ops.batch_matmul_acc(acc.unwrap(), lhs.unwrap(), rhs.unwrap())
+    call_expr = _ir_ops.batch_matmul_acc(
+        acc.unwrap(), lhs.unwrap(), rhs.unwrap(), init_cond=predicate_to_expr(init_cond)
+    )
     return Tile(expr=call_expr)
 
 

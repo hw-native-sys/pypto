@@ -200,9 +200,8 @@ with pl.spmd(pl.system.available_aiv_count()):
 | `pl.SyncAllMode.HARD`（默认） | FFTS 屏障 | `core_type` 的**全部**物理核 | 无 |
 | `pl.SyncAllMode.SOFT` | GM 轮询计数 | 任意（`used_cores` 个参与者） | `gm_workspace`、`used_cores` |
 
-`mode` 与 `core_type` 是枚举（`pl.SyncAllMode`、`pl.KernelType`——`MIX` 即两个 kernel 都参与）。
-这两个关键字过去接受的字符串 —— `mode="soft"`、`core_type="mix"` —— 仍然可用，但会发出
-`DeprecationWarning`。
+`mode` 与 `core_type` 是枚举（`pl.SyncAllMode`、`pl.KernelType`——`MIX` 即两个 kernel 都参与）；
+这两个关键字过去接受的字符串已不再支持。
 
 两种 mode 都只同步到达：它们不会等待前序 `TSTORE`，也不会让业务数据的 cache 保持一致。通过 GM 从 producer 向 consumer 交接可能跨多条 cache line 的数据时，请保守地在 `syncall` 之前使用全 GM `pl.system.cacheinvalid()` + `pl.system.fence()`，然后在 consumer 读之前再次调用 `pl.system.cacheinvalid()`。tensor-region overload 当前只使 view 基地址所在的那一条 cache line 失效。
 
