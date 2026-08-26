@@ -1985,11 +1985,18 @@ def gemv_acc(
     span: Span | None = None,
     *,
     acc_phase: str = "unspecified",
+    init_cond: Expr | None = None,
 ) -> Call:
     """GEMV with accumulation: C[1,N] += A[1,K] @ B[K,N].
 
     ``acc`` must use the GEMV output dtype. The logical K extents and lhs/rhs
     dtype requirements are identical to :func:`gemv`.
+
+    With ``init_cond``, the accumulator's initial value is conditional: on the
+    steps where the predicate holds, ``acc`` is overwritten with ``lhs @ rhs``
+    instead of accumulated into. GEMV runs on the same cube MAD as
+    :func:`matmul_acc`, so it carries the same predicate; see that function for
+    the split-K ``k == 0`` idiom this removes the peel from.
 
     Args:
         acc: Accumulator tile (TileType [1, N])
@@ -1997,12 +2004,14 @@ def gemv_acc(
         rhs: Right-hand side tile (TileType [K, N])
         acc_phase: Accumulation phase: ``"unspecified"``, ``"partial"``, or ``"final"``
         span: Optional source span for debugging (auto-captured if not provided)
+        init_cond: Optional BOOL scalar predicate selecting overwrite over accumulate
 
     Returns:
         Call expression for GEMV with accumulation
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.gemv_acc", [acc, lhs, rhs], {"acc_phase": acc_phase}, actual_span)
+    args = [acc, lhs, rhs] if init_cond is None else [acc, lhs, rhs, init_cond]
+    return _ir_core.create_op_call("tile.gemv_acc", args, {"acc_phase": acc_phase}, actual_span)
 
 
 def gemv_bias(

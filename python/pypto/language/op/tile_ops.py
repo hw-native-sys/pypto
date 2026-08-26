@@ -1428,22 +1428,53 @@ def gemv(lhs: Tile, rhs: Tile, acc_phase: str = "unspecified") -> Tile:
     return Tile(expr=call_expr)
 
 
-def gemv_acc(acc: Tile, lhs: Tile, rhs: Tile, acc_phase: str = "unspecified") -> Tile:
+def gemv_acc(
+    acc: Tile,
+    lhs: Tile,
+    rhs: Tile,
+    acc_phase: str = "unspecified",
+    *,
+    init_cond: BoolLike | None = None,
+) -> Tile:
     """GEMV with accumulation: C[1,N] += A[1,K] @ B[K,N].
 
     ``acc`` must use the GEMV output dtype. The logical K extents and lhs/rhs
     dtype requirements are identical to [`gemv`][pypto.language.tile.gemv].
+
+    ``init_cond`` makes the accumulator's initial value conditional, exactly as in
+    [`matmul_acc`][pypto.language.tile.matmul_acc] — GEMV is a matmul whose M is
+    1, run on the same cube MAD, so it carries the same predicate bit. On the
+    steps where it holds, ``acc`` is overwritten with ``lhs @ rhs`` rather than
+    accumulated into, which removes the peeled first step from split-K::
+
+        for k0 in pl.pipeline(0, K, K_TILE):
+            a = pl.load(vec, [0, k0], [1, K_TILE], target_memory=pl.MemorySpace.Mat)
+            b = pl.load(mat, [k0, 0], [K_TILE, N], target_memory=pl.MemorySpace.Mat)
+            acc = pl.tile.gemv_acc(acc, a, b, init_cond=(k0 == 0))
+
+    A literal ``True`` / ``False`` selects one form at compile time; a runtime
+    predicate lowers to a branch over the two, with no phi on the accumulator.
+
+    ``init_cond`` is keyword-only because ``acc_phase`` already owns the fourth
+    positional slot.
 
     Args:
         acc: Accumulator tile [1, N]
         lhs: Row vector tile [1, K]
         rhs: Right-hand side tile [K, N]
         acc_phase: Accumulation phase: ``"unspecified"``, ``"partial"``, or ``"final"``
+        init_cond: Optional predicate selecting overwrite over accumulate
 
     Returns:
         Tile wrapping the gemv_acc operation
     """
-    call_expr = _ir_ops.gemv_acc(acc.unwrap(), lhs.unwrap(), rhs.unwrap(), acc_phase=acc_phase)
+    call_expr = _ir_ops.gemv_acc(
+        acc.unwrap(),
+        lhs.unwrap(),
+        rhs.unwrap(),
+        acc_phase=acc_phase,
+        init_cond=predicate_to_expr(init_cond),
+    )
     return Tile(expr=call_expr)
 
 

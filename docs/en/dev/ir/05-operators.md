@@ -260,11 +260,11 @@ computes from lhs M/K and rhs N.
 
 #### Conditional accumulator initialization (`init_cond`)
 
-`tile.matmul_acc` and `tensor.matmul_acc` take an optional fourth operand,
-`init_cond`: a BOOL scalar that selects, per execution, whether the accumulator
-is *overwritten* with `lhs @ rhs` or accumulated into. It is the split-K
-`k == 0` idiom, and it removes the need either to zero the accumulator or to
-peel the first K step:
+`tile.matmul_acc`, `tensor.matmul_acc`, and `tile.gemv_acc` take an optional
+fourth operand, `init_cond`: a BOOL scalar that selects, per execution, whether
+the accumulator is *overwritten* with `lhs @ rhs` or accumulated into. It is the
+split-K `k == 0` idiom, and it removes the need either to zero the accumulator or
+to peel the first K step:
 
 ```python
 acc = pl.tile.create([16, N], pl.INT32, target_memory=pl.Mem.Acc)
@@ -279,11 +279,13 @@ as an operand also means it participates in the use-def chain like any other
 SSA value.
 
 Being an operand, it prints positionally at the tile layer —
-`pl.tile.matmul_acc(acc, lhs, rhs, k0 == 0)`. At the tensor layer positional
-slot 4 already belongs to `a_trans`, so the printer emits the predicate as a
-keyword instead —
+`pl.tile.matmul_acc(acc, lhs, rhs, k0 == 0)`. Two signatures already spend
+positional slot 4 (`a_trans` at the tensor layer, `acc_phase` on GEMV), so there
+the printer emits it as a keyword — and `init_cond` is correspondingly
+keyword-only in those DSL signatures. Every printed form reparses to the same IR:
+
 `pl.tensor.matmul_acc(acc, lhs, rhs, init_cond=k0 == 0, a_trans=False, b_trans=False)`
-— and the printed call reparses to the same IR.
+`pl.tile.gemv_acc(acc, lhs, rhs, init_cond=k0 == 0, acc_phase='unspecified')`
 
 Lowering depends on whether the predicate is known at compile time:
 
@@ -292,6 +294,11 @@ Lowering depends on whether the predicate is known at compile time:
 | absent, or literal `False` | `pto.tmatmul.acc ins(dst, lhs, rhs) outs(dst)` |
 | literal `True` | `pto.tmatmul ins(lhs, rhs) outs(dst)` |
 | runtime predicate | `scf.if cond { pto.tmatmul } else { pto.tmatmul.acc }` |
+
+`tile.gemv_acc` lowers through the same emitter with `pto.tgemv.acc` /
+`pto.tgemv` substituted — GEMV is a matmul whose M is 1, run on the same cube
+MAD, so it carries the same `cmatrixInit` bit. Its `acc_phase` attribute rides on
+whichever arm is emitted.
 
 The ISA carries this as bit 63 (`cmatrixInit`) of the MAD's Xt register, so the
 hardware needs no branch; `pto.tmatmul` and `pto.tmatmul.acc` are distinct ops
@@ -441,6 +448,24 @@ output shape `[1, N]`; its valid N may be wider when the physical N matches.
 `tile.gemv`, `tile.gemv_acc`, and `tile.gemv_bias` accept `acc_phase` as
 `"unspecified"` (the default), `"partial"`, or `"final"`. Use `"partial"`
 while more K chunks remain and `"final"` for the last chunk.
+
+`tile.gemv_acc` additionally takes the optional `init_cond` predicate — see
+[Conditional accumulator initialization](#conditional-accumulator-initialization-init_cond).
+`tile.gemv_bias` carries none, mirroring `tile.matmul_bias`: a biased GEMV
+already mints its accumulator, so it has no initial value to predicate.
+
+The padded Acc contract shapes how a predicated split-K GEMV mints that
+accumulator. Because a `[1, N]` result occupies 16 physical rows,
+`pl.tile.create([1, N], ...)` is rejected on physical shape and `[16, N]` on
+valid shape; create at the physical shape and narrow the valid rectangle:
+
+```python
+acc_raw = pl.tile.create([16, N], pl.FP32, target_memory=pl.Mem.Acc)
+acc = pl.tile.set_validshape(acc_raw, 1, N)  # then gemv_acc(..., init_cond=(k0 == 0))
+```
+
+Before `init_cond`, the peel did this implicitly — a straight-line `pl.tile.gemv`
+mints a correctly typed accumulator, at the cost of a phi between the branches.
 
 ## Python Usage
 

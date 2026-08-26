@@ -540,6 +540,56 @@ def test_tile_matmul_acc_literal_init_cond_folds():
     assert "out_tile = (acc + torch.matmul(a, b).float())" in torch_codegen(MatmulAccInitFalse)
 
 
+def test_tile_gemv_acc_runtime_init_cond_overwrites():
+    """GEMV carries the same predicate as matmul, so the reference must honour it.
+
+    ``tile.gemv_acc`` shares the ``_tile_matmul_acc`` handler -- GEMV is a matmul
+    whose M is 1 on the same cube MAD. This pins that the shared handler reads
+    the predicate for GEMV too, rather than modelling an overwrite as an
+    accumulate.
+    """
+
+    @pl.program
+    class GemvSplitKFromNonZeroAcc:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            seed: pl.Tensor[[1, 32], pl.FP32],
+            seed_rhs: pl.Tensor[[32, 16], pl.FP32],
+            lhs: pl.Tensor[[1, 64], pl.FP32],
+            rhs: pl.Tensor[[64, 16], pl.FP32],
+            output: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+        ) -> pl.Tensor[[1, 16], pl.FP32]:
+            # Seed with a plain gemv so the accumulator is both Acc-resident and
+            # non-zero -- a zero seed would make overwrite and accumulate agree.
+            seed_tile = pl.load(seed, [0, 0], [1, 32], target_memory=pl.MemorySpace.Mat)
+            seed_rhs_tile = pl.load(seed_rhs, [0, 0], [32, 16], target_memory=pl.MemorySpace.Mat)
+            acc_tile = pl.tile.gemv(seed_tile, seed_rhs_tile)
+            for k0 in pl.range(0, 64, 32):
+                a = pl.load(lhs, [0, k0], [1, 32], target_memory=pl.MemorySpace.Mat)
+                b = pl.load(rhs, [k0, 0], [32, 16], target_memory=pl.MemorySpace.Mat)
+                acc_tile = pl.tile.gemv_acc(acc_tile, a, b, init_cond=(k0 == 0))
+            return pl.store(acc_tile, [0, 0], output)
+
+    code = torch_codegen(GemvSplitKFromNonZeroAcc)
+    assert "_acc_init(acc_tile, torch.matmul(a, b).float(), (k0 == 0))" in code
+
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102
+    seed = torch.full((1, 32), 3.0)
+    seed_rhs = torch.full((32, 16), 2.0)
+    lhs = torch.ones(1, 64)
+    rhs = torch.ones(64, 16)
+    out = torch.zeros(1, 16)
+    ns["kernel"](seed, seed_rhs, lhs, rhs, out)
+
+    # k0 == 0 overwrites the seeded accumulator; k0 == 32 accumulates into it.
+    overwrite = lhs[:, :32] @ rhs[:32, :] + lhs[:, 32:] @ rhs[32:, :]
+    assert torch.allclose(out, overwrite)
+    # Dropping the predicate would fold the seed product in instead.
+    assert not torch.allclose(out, seed @ seed_rhs + overwrite)
+
+
 def test_tensor_matmul_acc_init_cond_with_transpose():
     """tensor.matmul_acc must honour init_cond alongside a_trans/b_trans."""
 

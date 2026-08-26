@@ -609,6 +609,90 @@ class GemvAccTestCase(PTOTestCase):
         tensors["out"][:] = result.to(out_dtype)
 
 
+class GemvAccInitCondTestCase(PTOTestCase):
+    """Split-K GEMV driven by ``init_cond`` instead of a peeled first step.
+
+    ``GemvAccTestCase`` above spells the same reduction the old way: a
+    straight-line ``tile.gemv`` for the first K chunk, then ``tile.gemv_acc`` for
+    the rest. Here every chunk is one predicated ``tile.gemv_acc`` inside the
+    loop, so the accumulator stays single-def.
+
+    The property is numeric, not structural. The accumulator is minted by
+    ``tile.create`` and never zeroed, so if ``init_cond`` failed to select the
+    overwriting form on ``k0 == 0`` the result would carry whatever L0C held and
+    the comparison against ``a @ b`` would fail.
+
+    It is created at the *padded* physical shape -- a ``[1, N]`` GEMV result
+    occupies 16 rows -- and then narrowed to its valid ``[1, N]`` rectangle. The
+    peeled ``tile.gemv`` this replaces produced that type implicitly.
+    """
+
+    __test__ = False
+
+    def __init__(self, *, k_chunk=128, chunks=2, n=N, config=None):
+        super().__init__(config)
+        self._k_chunk, self._chunks, self._n = k_chunk, chunks, n
+        self._k = k_chunk * chunks
+
+    def get_name(self) -> str:
+        return f"tile_gemv_acc_init_cond_1x{self._k}x{self._n}_kt{self._k_chunk}"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec(
+                "a",
+                [1, self._k],
+                DataType.FP32,
+                init_value=lambda: _gemv_input([1, self._k], DataType.FP32),
+            ),
+            TensorSpec(
+                "b",
+                [self._k, self._n],
+                DataType.FP32,
+                init_value=lambda: _gemv_input([self._k, self._n], DataType.FP32),
+            ),
+            TensorSpec("out", [1, self._n], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        k_chunk, n, k_total = self._k_chunk, self._n, self._k
+
+        @pl.program
+        class GemvAccInitCondProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[1, k_total], pl.FP32],
+                b: pl.Tensor[[k_total, n], pl.FP32],
+                out: pl.Out[pl.Tensor[[1, n], pl.FP32]],
+            ) -> pl.Tensor[[1, n], pl.FP32]:
+                acc_raw = pl.tile.create([16, n], pl.FP32, target_memory=pl.MemorySpace.Acc)
+                acc = pl.tile.set_validshape(acc_raw, 1, n)
+                for k0 in pl.range(0, k_total, k_chunk):
+                    a_l1 = pl.load(a, [0, k0], [1, k_chunk], target_memory=pl.MemorySpace.Mat)
+                    b_l1 = pl.load(b, [k0, 0], [k_chunk, n], target_memory=pl.MemorySpace.Mat)
+                    acc = pl.tile.gemv_acc(acc, a_l1, b_l1, init_cond=(k0 == 0))
+                out = pl.store(acc, [0, 0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                a: pl.Tensor[[1, k_total], pl.FP32],
+                b: pl.Tensor[[k_total, n], pl.FP32],
+                out: pl.Out[pl.Tensor[[1, n], pl.FP32]],
+            ) -> pl.Tensor[[1, n], pl.FP32]:
+                out = self.kernel(a, b, out)
+                return out
+
+        return GemvAccInitCondProgram
+
+    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
+        a = tensors["a"].to(torch.float32)
+        b = tensors["b"].to(torch.float32)
+        tensors["out"][:] = torch.matmul(a, b).to(torch.float32)
+
+
 class TestGemvAcc:
     """Cube gemv_acc on A2/A3 across N, valid-region tails, and supported dtypes."""
 
@@ -645,6 +729,13 @@ class TestGemvAcc:
     @pytest.mark.parametrize("narrow", ["N", "KN"])
     def test_tile_gemv_acc_output_tail(self, test_runner, narrow):
         result = test_runner.run(GemvAccTestCase(n=32, narrow=narrow, config=_cfg()))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.platforms("a2a3")
+    @pytest.mark.parametrize("n", [64, 128], ids=["n64", "n128"])
+    def test_tile_gemv_acc_init_cond(self, test_runner, n):
+        """Split-K where ``init_cond=(k0 == 0)`` replaces the peeled first step."""
+        result = test_runner.run(GemvAccInitCondTestCase(n=n, config=_cfg()))
         assert result.passed, f"Test failed: {result.error}"
 
 
