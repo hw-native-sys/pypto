@@ -206,9 +206,15 @@ class TestUnaryExprEquality:
     """
 
     @staticmethod
-    def _cast_view(dtype):
+    def _cast_view(operand, dtype):
+        """A view whose first valid-shape entry is `cast(operand, dtype)`.
+
+        The operand is passed in rather than built here: two views must differ in
+        the cast dtype *only*, or a fresh operand Var would make them unequal by
+        pointer identity and the assertion would hold whether or not the dtype is
+        compared at all.
+        """
         span = _make_span()
-        operand = ir.Var("x", ir.ScalarType(DataType.INT32), span)
         return _make_view(valid_shape=[ir.cast(operand, dtype, span), _make_const(16, span)])
 
     def test_separately_built_identical_casts_are_equal(self):
@@ -226,10 +232,23 @@ class TestUnaryExprEquality:
 
     def test_casts_to_different_dtypes_are_not_equal(self):
         """A cast's result dtype is part of its value, not derivable from the operand."""
-        lhs = self._cast_view(DataType.INDEX)
-        rhs = self._cast_view(DataType.INT64)
+        operand = ir.Var("x", ir.ScalarType(DataType.INT32), _make_span())
+        lhs = self._cast_view(operand, DataType.INDEX)
+        rhs = self._cast_view(operand, DataType.INT64)
         assert lhs != rhs
         assert hash(lhs) != hash(rhs)
+
+    def test_same_dtype_cast_on_one_operand_is_equal(self):
+        """The control for the test above: same operand, same dtype, still equal.
+
+        Without it a regression that made every cast compare unequal would leave
+        the dtype test passing for the wrong reason.
+        """
+        operand = ir.Var("x", ir.ScalarType(DataType.INT32), _make_span())
+        lhs = self._cast_view(operand, DataType.INDEX)
+        rhs = self._cast_view(operand, DataType.INDEX)
+        assert lhs == rhs
+        assert hash(lhs) == hash(rhs)
 
 
 if __name__ == "__main__":
