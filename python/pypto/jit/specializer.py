@@ -67,11 +67,19 @@ class DynDim:
                      same compilation, but still available as the static-shape
                      fallback wherever a numeric dim is required (e.g.
                      ``pl.slice`` parent-dim inheritance, ``ir.compile``).
+        synthesized: True when ``@pl.jit`` invented this symbol for an extent it
+                     could not resolve statically — a runtime-valued dim such as
+                     ``pld.world_size()`` or ``pl.tensor.read(...)``. Such a dim
+                     is a placeholder: a dep that declares the same dim with
+                     ``pl.dynamic`` replaces it with the user's symbol, so a
+                     kernel body referencing that name stays bound. A DynDim the
+                     caller actually derived is never replaced.
     """
 
     name: str
     literal: str
     static_bound: int
+    synthesized: bool = False
 
 
 ShapeDim = int | DynDim
