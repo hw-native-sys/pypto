@@ -334,9 +334,13 @@ a predicate, so the pass no longer generates an accumulator phi at all.
 
 One limitation, diagnosed rather than silently dropped:
 
-- **Rank > 2 is rejected.** The batched form expands into several
-  `tile.matmul_acc` calls inside `FlattenTileNdTo2D`, which has no place to
-  thread a per-call predicate. Loop over the batch dimension instead.
+- **`batch_count > 1` is rejected.** Not because of the predicate — this shape
+  fails identically without one. `FlattenTileNdTo2D` gives each batch a
+  `tile.slice` of the accumulator, and a row window of a multi-block-column
+  L0C tile is strided, which the MAD cannot address (pto-isa#253). Rank > 2 is
+  fine as long as the batch dims multiply to 1, which is the grouped-GEMM case
+  (`[1, N, K]` weights). For a genuine batch, loop over the batch dimension
+  instead.
 
 An oversized *predicated* `tile.matmul_acc` is K-tiled like the unpredicated
 one: the caller's predicate is ANDed with the emitted loop's own `ko == 0`, and

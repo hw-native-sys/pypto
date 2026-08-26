@@ -294,8 +294,11 @@ block 都会发出双倍 MAD。
 
 一项限制，以显式诊断而非静默丢弃的方式处理：
 
-- **拒绝 rank > 2**。批量形式在 `FlattenTileNdTo2D` 中会展开为多次
-  `tile.matmul_acc` 调用，无处安放逐调用的谓词。请改为在 batch 维上循环。
+- **拒绝 `batch_count > 1`**。这与谓词无关 —— 该形状在不带谓词时同样失败。
+  `FlattenTileNdTo2D` 会为每个 batch 取一份累加器的 `tile.slice`，而多 block
+  列 L0C tile 的行窗口是跨步的，MAD 无法寻址（pto-isa#253）。只要 batch 维之积
+  为 1，rank > 2 就是允许的 —— 这正是 grouped GEMM 的情形（`[1, N, K]` 权重）。
+  若确实需要多个 batch，请改为在 batch 维上循环。
 
 超尺寸的*带谓词* `tile.matmul_acc` 与无谓词形式一样会被做 K 切分：调用方的谓词与
 所生成循环自身的 `ko == 0` 做与运算，而剥离出的尾块保持无谓词的 3 操作数形式
