@@ -734,8 +734,8 @@ def _build_lane_valid_shard_program():
     """A C->V shard whose per-lane ``valid_shape`` is an expression over ``aiv_id``.
 
     This is what a ragged split axis looks like by the time it reaches this pass:
-    ``LowerAutoVectorSplit`` (pass 20) repairs the deducer's lane-agnostic
-    ceil(V/2) guess by writing the lane's true extent into the shard result's
+    ``LowerAutoVectorSplit`` repairs the deducer's lane-agnostic ceil(V/2) guess
+    by writing the lane's true extent into the shard result's
     TileView, as an expression over the region's own
     ``aiv_id = tile.get_subblock_idx()`` binding. So the shard's TYPE — not just
     its operands — carries a reference to a body-local Var, and the tpop this
