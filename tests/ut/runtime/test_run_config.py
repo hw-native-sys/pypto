@@ -260,7 +260,7 @@ class TestRunConfigRingSizing:
     """Verify per-task ring-sizing overrides on ``RunConfig``.
 
     ``None`` (default) means "unset" so the runtime falls back to its
-    ``PTO2_RING_*`` env var / compile-time default. Provided values must
+    compile-time default. Provided values must
     satisfy the same constraints the runtime's ``RuntimeEnv::validate()``
     enforces — ``RunConfig`` checks them early for a clear error message.
     """

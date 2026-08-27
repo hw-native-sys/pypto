@@ -80,9 +80,9 @@ def test_array_slot_task_id_usable_as_submit_dep():
 
     code = _generate_orch_full_pipeline(P, allow_relaxed_verification=True)
 
-    # ``prev = tids[0]`` lowers to a scalar PTO2TaskId snapshot local read from
+    # ``prev = tids[0]`` lowers to a scalar TaskId snapshot local read from
     # the array slot (the dep site references the snapshot, not a slot re-read).
-    assert re.search(r"PTO2TaskId\s+prev\w*\s*=\s*tids\w*\[0\];", code), code
+    assert re.search(r"TaskId\s+prev\w*\s*=\s*tids\w*\[0\];", code), code
     # The consumer gets exactly one dependency array, filled from BOTH the direct
     # producer tid (seed_tid) and the array-slot snapshot (prev).
     assert code.count("set_dependencies(") == 1, code
@@ -99,7 +99,7 @@ def test_direct_producer_dep_skips_is_valid_guard():
 
     A dependency TaskId produced by a ``pl.submit(...)`` earlier in the same
     straight-line scope is statically always-valid — the runtime never hands it
-    the ``PTO2TaskId::invalid()`` sentinel. Orchestration codegen must therefore
+    the ``TaskId::invalid()`` sentinel. Orchestration codegen must therefore
     emit its ``set_dependencies`` insert *without* the redundant ``is_valid()``
     guard. Loop-carried ``iter_arg`` / ``None``-seed / array-slot TaskIds still
     keep the guard (see ``test_compiler_derived_deps_for_fixed_trip_loop_fan_in_``
@@ -125,7 +125,7 @@ def test_direct_producer_dep_skips_is_valid_guard():
     code = _generate_orch_full_pipeline(P, allow_relaxed_verification=True)
 
     # The producer TaskId (task 0) is a fresh direct-producer local.
-    producer = re.search(r"PTO2TaskId\s+(\w+)\s*=\s*task_0_outs\.task_id\(\);", code)
+    producer = re.search(r"TaskId\s+(\w+)\s*=\s*task_0_outs\.task_id\(\);", code)
     assert producer, code
     name = producer.group(1)
     # Its dependency-array insert is UNGUARDED (the #1966 optimization) ...
@@ -140,7 +140,7 @@ def test_user_dep_edge_across_closed_scope_is_rejected():
 
     Regression for the issue #1577 lifetime hazard *and* for the silent-drop
     that replaced it. A producer TaskId declared inside a nested AUTO
-    ``pl.scope()`` names a ``PTO2TaskId`` C++ local that dies at the block's
+    ``pl.scope()`` names a ``TaskId`` C++ local that dies at the block's
     closing brace, so codegen cannot reference it afterwards. Emitting the
     reference produced uncompilable C++ (#1577); silently dropping the edge
     instead left the consumer unordered against its producer, which surfaces at
@@ -178,7 +178,7 @@ def test_user_dep_edge_across_closed_scope_is_rejected():
 
 
 def test_cross_scope_task_id_is_hoisted_for_set_dependencies():
-    """A compiler-derived dependency can legally cross a generated PTO2_SCOPE.
+    """A compiler-derived dependency can legally cross a generated SIMPLER_SCOPE.
 
     The producer TaskId must be declared in the outer C++ scope, assigned inside
     the producer block, and used by the later consumer's set_dependencies call.
@@ -211,9 +211,9 @@ def test_cross_scope_task_id_is_hoisted_for_set_dependencies():
         transformed = passes.derive_call_directions()(P)
         code = _generate_orch_from_transformed_program(transformed)
 
-    assert re.search(r"PTO2TaskId\s+scoped_tid_tid\s*=\s*PTO2TaskId::invalid\(\);", code), code
+    assert re.search(r"TaskId\s+scoped_tid_tid\s*=\s*TaskId::invalid\(\);", code), code
     assert "scoped_tid_tid = task_0_outs.task_id();" in code
-    assert "PTO2TaskId scoped_tid = task_0_outs.task_id();" not in code
+    assert "TaskId scoped_tid = task_0_outs.task_id();" not in code
     assert re.search(
         r"if \(scoped_tid_tid\.is_valid\(\)\) "
         r"params_t\d+_deps\[params_t\d+_deps_count\+\+\] = scoped_tid_tid;",
@@ -411,11 +411,11 @@ def test_compiler_derived_deps_for_fixed_trip_loop_fan_in_capture_task_ids():
         allow_relaxed_verification=True,
     )
 
-    fan_in = re.search(r"PTO2TaskId\s+(last_tid\w*)\[4\];", code)
+    fan_in = re.search(r"TaskId\s+(last_tid\w*)\[4\];", code)
     assert fan_in, code
     fan_in_name = fan_in.group(1)
     assert f"{fan_in_name}[_i] = last_tid__ssa_v0;" in code, code
-    assert re.search(r"PTO2TaskId params_t\d+_deps\[4\];", code), code
+    assert re.search(r"TaskId params_t\d+_deps\[4\];", code), code
     assert len(re.findall(rf"if \({fan_in_name}\[\d+\]\.is_valid\(\)\)", code)) == 4, code
     assert re.search(r"params_t\d+\.set_dependencies\(params_t\d+_deps, params_t\d+_deps_count\);", code), (
         code
@@ -461,10 +461,10 @@ def test_compiler_derived_deps_for_dynamic_trip_loop_fan_in_falls_back():
 
     code = _generate_orch_full_pipeline(P, analyze_auto_scopes_for_deps=True)
 
-    assert "std::vector<PTO2TaskId>" not in code
+    assert "std::vector<TaskId>" not in code
     assert "#include <vector>" not in code
     assert ".set_dependencies(" not in code
-    assert "PTO2_SCOPE(PTO2ScopeMode::MANUAL)" not in code
+    assert "SIMPLER_SCOPE(ScopeMode::MANUAL)" not in code
 
 
 def test_compiler_derived_deps_for_dynamic_trip_tensor_carrier_falls_back():
@@ -505,7 +505,7 @@ def test_compiler_derived_deps_for_dynamic_trip_tensor_carrier_falls_back():
 
     code = _generate_orch_full_pipeline(P, analyze_auto_scopes_for_deps=True)
 
-    assert "std::vector<PTO2TaskId>" not in code
+    assert "std::vector<TaskId>" not in code
     assert "#include <vector>" not in code
     assert ".set_dependencies(" not in code
 
@@ -519,7 +519,7 @@ def test_descending_parallel_loop_emits_descending_cpp_loop():
     so ``for (i = 4; i < 0; i += -1)`` ran zero times. The kernel silently
     submitted nothing.
 
-    Both directions run 4 times, so both must take the static ``PTO2TaskId[4]``
+    Both directions run 4 times, so both must take the static ``TaskId[4]``
     path and emit a loop whose condition actually admits iterations.
     """
 
@@ -560,11 +560,11 @@ def test_descending_parallel_loop_emits_descending_cpp_loop():
     assert down_header.group(2) == ">", down
 
     # Both directions have a static trip count of 4, so both must size their
-    # compiler-dep fan-in as a fixed PTO2TaskId[4] and neither may fall back to
+    # compiler-dep fan-in as a fixed TaskId[4] and neither may fall back to
     # the dynamic vector path (whose capacity expression also evaluated to 0).
     for label, code in (("ascending", up), ("descending", down)):
-        assert re.search(r"PTO2TaskId \w+\[4\]", code), (label, code)
-        assert "std::vector<PTO2TaskId>" not in code, (label, code)
+        assert re.search(r"TaskId \w+\[4\]", code), (label, code)
+        assert "std::vector<TaskId>" not in code, (label, code)
 
 
 def test_zero_step_loop_emits_a_terminating_condition():
@@ -670,7 +670,7 @@ def test_compiler_derived_deps_for_dynamic_parallel_tensor_carriers_share_phase_
 
     assert "#include <vector>" in code
     collection = re.search(
-        r"std::vector<PTO2TaskId>\s+(\w+)\(static_cast<size_t>\((\w+)\)\);\n\s+uint32_t\s+(\w+)\s*=\s*0;",
+        r"std::vector<TaskId>\s+(\w+)\(static_cast<size_t>\((\w+)\)\);\n\s+uint32_t\s+(\w+)\s*=\s*0;",
         code,
     )
     assert collection, code
@@ -686,8 +686,8 @@ def test_compiler_derived_deps_for_dynamic_parallel_tensor_carriers_share_phase_
     assert code.count("Dynamic compiler-dependency barrier") == 1, code
     assert code.count("rt_submit_dummy_task") == 1, code
     assert f".set_dependencies({buffer_name}.data(), {count_name});" in code, code
-    assert re.search(r"PTO2TaskId params_t\d+_deps\[1\];", code), code
-    assert not re.search(r"PTO2TaskId params_t\d+_deps\[[23]\];", code), code
+    assert re.search(r"TaskId params_t\d+_deps\[1\];", code), code
+    assert not re.search(r"TaskId params_t\d+_deps\[[23]\];", code), code
     assert code.count(".add_no_dep(") >= 3, code
 
 
@@ -730,7 +730,7 @@ def test_compiler_derived_deps_for_dynamic_trip_tuple_output_tensor_carrier_fall
 
     code = _generate_orch_full_pipeline(P, analyze_auto_scopes_for_deps=True)
 
-    assert "std::vector<PTO2TaskId>" not in code
+    assert "std::vector<TaskId>" not in code
     assert "#include <vector>" not in code
     assert ".set_dependencies(" not in code
 
@@ -804,20 +804,20 @@ def test_compiler_auto_manual_scope_is_not_tied_to_function_name():
         allow_relaxed_verification=True,
     )
 
-    assert code.count("PTO2_SCOPE(PTO2ScopeMode::MANUAL)") == 1, code
+    assert code.count("SIMPLER_SCOPE(ScopeMode::MANUAL)") == 1, code
     qk_tid = re.search(r"\b(\w+_tid)\s*=\s*task_0_outs\.task_id\(\);", code)
     assert qk_tid, code
-    rope_tid = re.search(r"(?:PTO2TaskId\s+)?(\w+_tid\w*)\s*=\s*task_1_outs\.task_id\(\);", code)
+    rope_tid = re.search(r"(?:TaskId\s+)?(\w+_tid\w*)\s*=\s*task_1_outs\.task_id\(\);", code)
     assert rope_tid, code
     assert qk_tid.group(1) != rope_tid.group(1), code
     collection = re.search(
-        r"std::vector<PTO2TaskId>\s+(\w+)\(static_cast<size_t>\(\w+\)\);\n\s+uint32_t\s+(\w+)\s*=\s*0;",
+        r"std::vector<TaskId>\s+(\w+)\(static_cast<size_t>\(\w+\)\);\n\s+uint32_t\s+(\w+)\s*=\s*0;",
         code,
     )
     assert collection, code
     buffer_name, count_name = collection.groups()
     assert code.count(f"{buffer_name}[{count_name}++] =") == 1, code
-    manual_scope_idx = code.index("PTO2_SCOPE(PTO2ScopeMode::MANUAL)")
+    manual_scope_idx = code.index("SIMPLER_SCOPE(ScopeMode::MANUAL)")
     qk_submit_idx = code.index("TaskOutputTensors task_0_outs")
     assert manual_scope_idx < qk_submit_idx, code
     rope_submit_idx = code.index("TaskOutputTensors task_1_outs", manual_scope_idx)
@@ -880,9 +880,9 @@ def test_user_dep_edge_out_of_compiler_inserted_loop_scope_is_rejected():
     """The boundary need not be user-written to swallow a ``deps=[...]`` edge.
 
     ``MaterializeRuntimeScopes`` wraps every ``ForStmt`` body in its own AUTO
-    ``PTO2_SCOPE``, so a TaskId produced in the loop body and depended on after
+    ``SIMPLER_SCOPE``, so a TaskId produced in the loop body and depended on after
     the loop crosses a closed scope even though the source names no scope at
-    all. The loop-carry machinery does hoist a valid C++ ``PTO2TaskId`` to the
+    all. The loop-carry machinery does hoist a valid C++ ``TaskId`` to the
     outer level, but the dep binding is not visible there, so the edge would be
     dropped — reject instead.
     """
@@ -1002,7 +1002,7 @@ def test_grid_tid_dep_inside_producing_manual_scope_still_wires():
             return out
 
     code = _generate_orch_full_pipeline(P, allow_relaxed_verification=True)
-    assert re.search(r"PTO2TaskId grid_tid = task_0_outs\.task_id\(\);", code), code
+    assert re.search(r"TaskId grid_tid = task_0_outs\.task_id\(\);", code), code
     assert re.search(r"\] = grid_tid;", code), code
     assert ".set_dependencies(" in code, code
 
@@ -1051,7 +1051,7 @@ def test_spmd_submit_emits_launch_spec_and_captures_task_id():
     # sync_start defaults False on the consumer — emitted exactly once.
     assert code.count("set_require_sync_start(true)") == 1, code
     # Producer TaskId is captured and the consumer depends on it.
-    assert re.search(r"PTO2TaskId\s+\w+\s*=\s*task_0_outs\.task_id\(\);", code), code
+    assert re.search(r"TaskId\s+\w+\s*=\s*task_0_outs\.task_id\(\);", code), code
     assert "set_dependencies(" in code, code
     # Direct-call dispatch emits set_dependencies BEFORE the launch spec (deps
     # -> launch_spec -> early_resolve). This locks the byte-identical per-path
@@ -1325,7 +1325,7 @@ def test_compiler_dep_carry_array_sized_by_outer_loop_trip_count():
     When a Sequential outer loop (trip M) wraps a Parallel inner loop (trip N)
     inside a ``pl.manual_scope``, and the outer loop's TaskId iter_arg receives a
     compiler-derived dependency edge, the carry array must declare
-    ``PTO2TaskId arr[M]`` (outer trip), NOT ``arr[N]`` (inner trip).
+    ``TaskId arr[M]`` (outer trip), NOT ``arr[N]`` (inner trip).
 
     ``ResolveArrayCarrySize`` would otherwise recurse into the inner Parallel loop
     and return N, producing a mis-sized fan-in array that over- or under-fences
@@ -1371,15 +1371,15 @@ def test_compiler_dep_carry_array_sized_by_outer_loop_trip_count():
 
     # The compiler-dep carry array must be sized by the outer loop trip M=4.
     # The emit name is derived from prev's return_var (SSA-base "prev").
-    outer_arr = re.search(r"PTO2TaskId\s+(prev\w*)\[(" + str(M) + r")\];", code)
-    assert outer_arr, f"Expected PTO2TaskId <prev...>[{M}] (outer trip) in:\n{code}"
+    outer_arr = re.search(r"TaskId\s+(prev\w*)\[(" + str(M) + r")\];", code)
+    assert outer_arr, f"Expected TaskId <prev...>[{M}] (outer trip) in:\n{code}"
     # The init loop also iterates M times, not N.
     assert f"for (int64_t __init_i = 0; __init_i < {M}; ++__init_i)" in code, (
         f"Expected init loop bound {M} in:\n{code}"
     )
     # No array declaration should be sized by the inner trip N=8.
-    assert not re.search(r"PTO2TaskId\s+\w+\[" + str(N) + r"\];", code), (
-        f"Unexpected PTO2TaskId array sized [{N}] (inner trip) in:\n{code}"
+    assert not re.search(r"TaskId\s+\w+\[" + str(N) + r"\];", code), (
+        f"Unexpected TaskId array sized [{N}] (inner trip) in:\n{code}"
     )
 
 

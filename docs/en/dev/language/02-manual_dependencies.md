@@ -17,7 +17,7 @@ unit that fits your use case; combine if needed.
 
 | Surface | Granularity | Effect |
 | ------- | ----------- | ------ |
-| `with pl.manual_scope():` | per-region | Lowers to `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`. Inside, the runtime never auto-tracks; the user must declare every required ordering edge explicitly (see Mechanism B). |
+| `with pl.manual_scope():` | per-region | Lowers to `SIMPLER_SCOPE(ScopeMode::MANUAL)`. Inside, the runtime never auto-tracks; the user must declare every required ordering edge explicitly (see Mechanism B). |
 | `pl.create_tensor([...], dtype=..., manual_dep=True)` | per-tensor lifetime | Every task that reads or writes this tensor skips `OverlapMap` lookup and insert for its **entire lifetime**, regardless of scope. Useful for scratch buffers that are managed entirely by explicit edges. |
 | `pl.no_dep(arg)` | per-call argument | At a kernel call site, the wrapped argument's `ArgDirection` becomes `NoDep` — auto-tracking ignores that slot **for this submission only**. Legal regardless of whether the callee declares the slot as `In`, `Out`, or `InOut`: the user asserts out-of-band that there is no RaW / WaW / WaR conflict on this slot (e.g. paged-attention writes whose offset is data-dependent but disjoint by allocation protocol). No effect inside `pl.manual_scope` (the scope already disables auto-tracking). |
 | `with pl.at(..., no_dep_args=[t1, t2]):` | per-arg, on a `pl.at`-block | The `pl.at`-block analogue of `pl.no_dep(arg)`. The outliner makes the listed tensors arguments of the synthesised kernel call; `DeriveCallDirections` then forces those arg slots to `NoDep` — same effect as wrapping the tensors with `pl.no_dep(...)` at an explicit call site. Each entry must be a bare tensor name visible to the enclosing scope. Same In / Out / InOut applicability as `pl.no_dep(arg)`: a captured tensor that the scope body mutates via `pl.assemble` becomes `InOut` on the synthesised kernel, and `no_dep_args=` overrides it to `NoDep` just as it overrides `In`. Note: `no_dep_args=` takes **tensors**, while `deps=` takes **TaskIds** — same word "dep", different layer. |
@@ -34,7 +34,7 @@ shape (single kernel call, outlined `pl.at` region, or dependency-only fan-in).
 | `with pl.at(level=pl.Level.CORE_GROUP, deps=[...]) as tid:` | outlined `pl.at`-block | The whole block is outlined into an `InCore` kernel + `Submit`; `tid` captures the synthesized Submit's TaskId, usable as a dep for later `pl.submit` / `pl.at` sites. Without `as tid` the outliner synthesizes an unused TaskId Var — deps always travel on `Submit::deps_`. Also accepts `allow_early_resolve=True` (same early-dispatch opt-in as `pl.submit`); it forces the `Submit` shape even without `as tid` and lowers to `Arg::set_allow_early_resolve(true)`. |
 | `with pl.spmd(N, deps=[...]) as tid:` | outlined SPMD dispatch | The SPMD sibling of the `pl.at ... as tid` form. The inline body is auto-outlined into an `InCore` kernel and dispatched across `N` blocks; `tid` captures the grid-wide producer TaskId. `deps=` accepted only with `as tid`. `core_num` / `sync_start` ride on the lowered `Submit`'s own `core_num` / `sync_start` fields (the launch spec belongs to the launch site, not the outlined callee); codegen reads them from there. Also accepts `allow_early_resolve=True` (same early-dispatch opt-in as `pl.submit` / `pl.at`; valid on all three `pl.spmd` forms, forcing the `Submit` shape even without `as tid`) and `predicate=(t[i] > 0)` (see [Dispatch predicate](#dispatch-predicate-predicate); also valid on all three forms and also forces the `Submit` shape). Cannot nest inside `pl.cluster()`. |
 | `barrier = pl.system.task_dummy(deps=[...])` | dependency-only barrier | Submits no kernel. The returned TaskId is a compact fan-in point for later `deps=[barrier]`. |
-| `None` (Python literal) | seed / dep entry | The "no producer yet" sentinel. `prev_tid = None` seeds a TaskId loop iter_arg; `None` in `deps=[None]` is dropped (contributes no edge). Lowers to `system.task_invalid` → `PTO2TaskId::invalid()`. |
+| `None` (Python literal) | seed / dep entry | The "no producer yet" sentinel. `prev_tid = None` seeds a TaskId loop iter_arg; `None` in `deps=[None]` is dropped (contributes no edge). Lowers to `system.task_invalid` → `TaskId::invalid()`. |
 
 **These surfaces work regardless of Mechanism A state.** Use explicit deps in
 plain auto-tracked orchestration, inside `pl.manual_scope()`, or with a
@@ -267,7 +267,7 @@ with pl.manual_scope():
 ```
 
 `prev_tid` is rebound inside `pl.parallel`, so codegen lowers the carry as
-a `PTO2TaskId[N_BRANCHES]` array. Each task in phase `N+1` waits for all
+a `TaskId[N_BRANCHES]` array. Each task in phase `N+1` waits for all
 `N_BRANCHES` tasks of phase `N`, not just the last-dispatched one.
 
 ## See Also

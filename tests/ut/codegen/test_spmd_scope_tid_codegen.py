@@ -157,7 +157,7 @@ class TestSpmdScopeTaskIdCodegen:
 
         code = self._codegen(transformed)
         # Bind the producer TaskId alias captured from the first dispatch ...
-        m = re.search(r"PTO2TaskId (\w+) = task_0_outs\.task_id\(\);", code)
+        m = re.search(r"TaskId (\w+) = task_0_outs\.task_id\(\);", code)
         assert m is not None, f"first dispatch's producer TaskId not captured\n{code}"
         alias = m.group(1)
         # ... assert THAT alias (not just any TaskId) is pushed into a deps array ...
@@ -395,7 +395,7 @@ class TestSpmdScopeTaskIdCodegen:
 
         # Producer (task 0) captures its task output handle + producer TaskId.
         assert "TaskOutputTensors task_0_outs = rt_submit_task(mixed_0, params_t0);" in code, code
-        m = re.search(r"PTO2TaskId (\w+) = task_0_outs\.task_id\(\);", code)
+        m = re.search(r"TaskId (\w+) = task_0_outs\.task_id\(\);", code)
         assert m is not None, f"producer TaskId not captured\n{code}"
         tid = m.group(1)
 

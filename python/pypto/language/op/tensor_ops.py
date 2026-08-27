@@ -175,13 +175,12 @@ def create(
         shape: List of dimension sizes (int or Expr)
         dtype: Data type of tensor elements
         layout: Tensor layout (default: ND)
-        init_value: If given, the runtime pre-fills the freshly allocated
-            buffer with this scalar on the AICPU (before any kernel writes it).
-            ``init_value=0`` zeroes the buffer and works for every dtype.
-            Non-zero values work for integer and 32/64-bit float dtypes;
-            non-zero fills of fp16/bf16 are rejected at codegen. The fill only
-            applies to this runtime-allocated buffer and is cheaper than
-            ``pl.full`` (which materializes a constant tensor via a kernel).
+        init_value: **Removed.** Passing anything but ``None`` raises
+            ``ValueError``. The runtime dropped its create-info fill, so a
+            runtime-allocated buffer can no longer be pre-filled from
+            orchestration. Seed it with a kernel — ``pl.full`` materializes a
+            constant tensor, or write the buffer from your own kernel — and
+            order every reader after that kernel with an explicit dependency.
         manual_dep: Opt this tensor out of OverlapMap auto-dep tracking for
             its **entire lifetime**. When True, every task that reads or
             writes this tensor skips OverlapMap lookup and insert, so the

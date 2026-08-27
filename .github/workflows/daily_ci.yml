@@ -53,14 +53,15 @@ jobs:
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
-    runs-on: [self-hosted, linux, arm64, npu-a5]
+    runs-on: [self-hosted, linux, npu-a5]
     defaults:
       run:
         working-directory: daily-a5-checkout
     env:
       PTOAS_ROOT: ${{ github.workspace }}/daily-a5-checkout/ptoas-bin
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
-      PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
+      PTOAS_SHA256_AARCH64: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
+      PTOAS_SHA256_X86_64: ${{ needs.toolchain.outputs.ptoas_sha256_x86_64 }}
       CMAKE_BUILD_PARALLEL_LEVEL: 16
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
@@ -137,14 +138,15 @@ jobs:
       contents: read
     # TEST MODE: keep the device runner and pin task-submit to its card (see
     # ci.yml system-tests). FLIP TO PROD: cpu runner + `--device auto`.
-    runs-on: [self-hosted, linux, arm64, npu]
+    runs-on: [self-hosted, linux, npu]
     defaults:
       run:
         working-directory: perf-checkout
     env:
       PTOAS_ROOT: ${{ github.workspace }}/perf-checkout/ptoas-bin
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
-      PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
+      PTOAS_SHA256_AARCH64: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
+      PTOAS_SHA256_X86_64: ${{ needs.toolchain.outputs.ptoas_sha256_x86_64 }}
       CMAKE_BUILD_PARALLEL_LEVEL: 16
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache

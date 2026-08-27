@@ -11,11 +11,13 @@
 
 #include <algorithm>
 #include <any>
+#include <cctype>
 #include <climits>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -2707,8 +2709,14 @@ class AlignLoopCarriesToInitMutator : public IRMutator {
       // MemRef, and always rebuild when the carried init reference changed so a
       // remapped init_expr is preserved regardless of the carry's type.
       auto ia_tile = As<TileType>(op->iter_args_[i]->GetType());
-      bool ia_memref_differs = init_tile && ia_tile && ia_tile->memref_.has_value() &&
-                               !MemRef::SameAllocation(GetDefinedMemRef(ia_tile), init_memref);
+      // Addresses, not allocations: an iter_arg left on a sibling slot of one
+      // multi-slot allocation names different bytes and still has to be moved to
+      // init's. Anything not provably init's address is realigned -- this only
+      // retypes a node, so realigning an unprovable pair costs nothing while
+      // leaving it keeps a possibly-wrong slot in the metadata.
+      bool ia_memref_differs =
+          init_tile && ia_tile && ia_tile->memref_.has_value() &&
+          CompareBaseAddress(GetDefinedMemRef(ia_tile), init_memref) != AddressRelation::kSame;
       if (ia_memref_differs || init_changed) {
         TypePtr new_ia_type = ia_memref_differs ? retype_to_init(ia_tile) : op->iter_args_[i]->GetType();
         new_iter_args[i] = std::make_shared<IterArg>(op->iter_args_[i]->name_hint_, new_ia_type, init_expr,
@@ -2722,7 +2730,7 @@ class AlignLoopCarriesToInitMutator : public IRMutator {
       if (init_tile && i < new_return_vars.size()) {
         auto rv_tile = As<TileType>(op->return_vars_[i]->GetType());
         if (rv_tile && rv_tile->memref_.has_value() &&
-            !MemRef::SameAllocation(GetDefinedMemRef(rv_tile), init_memref)) {
+            CompareBaseAddress(GetDefinedMemRef(rv_tile), init_memref) != AddressRelation::kSame) {
           new_return_vars[i] = std::make_shared<Var>(op->return_vars_[i]->name_hint_, retype_to_init(rv_tile),
                                                      op->return_vars_[i]->span_);
           var_remap_[op->return_vars_[i].get()] = new_return_vars[i];
@@ -2786,47 +2794,86 @@ class YieldFixupMutator : public IRMutator {
     // Check each (iter_arg, yield_value) pair for MemRef mismatch.
     // Use initValue's MemRef as the target because codegen maps iter_arg to initValue's buffer,
     // and MemoryReuse may have updated initValue's MemRef without updating iter_arg's.
-    std::vector<std::pair<size_t, VarPtr>> moves_to_insert;  // (index, new_moved_var)
-    std::vector<StmtPtr> move_stmts;
+    // One index over the carry buffers serves both the overlap rejection below
+    // and the conflict graph in OrderCarryCopies.
+    const std::vector<MemRefPtr> carry_ranges = CollectCarryRanges(for_stmt);
+    const CarryRangeIndex carry_index(carry_ranges);
+    RejectOverlappingCarryBuffers(for_stmt, carry_index);
+
+    std::vector<CarryCopy> copies;
     for (size_t i = 0; i < yield_stmt->value_.size() && i < for_stmt->iter_args_.size(); ++i) {
-      auto yield_var = As<Var>(yield_stmt->value_[i]);
+      // AsVarLike, not As<Var>: a nested loop both yields and seeds carries with
+      // the enclosing loop's IterArg, whose own ObjectKind As<Var> does not match.
+      // Skipping those left the nested carry with no writeback at all.
+      auto yield_var = AsVarLike(yield_stmt->value_[i]);
       if (!yield_var) continue;
+
+      // Yielding this position's own iter_arg leaves the carry untouched, so
+      // there is nothing to write back. Short-circuit before comparing buffers:
+      // it is the one case where the two sides are the same storage by
+      // construction, whatever their (possibly still stale) types say.
+      if (yield_var.get() == static_cast<const Var*>(for_stmt->iter_args_[i].get())) continue;
 
       auto yield_tile = GetTileTypeWithMemRef(yield_var->GetType());
       if (!yield_tile) continue;
       auto yield_memref = GetDefinedMemRef(yield_tile);
 
       // Get the initValue's MemRef (the actual buffer used at runtime)
-      auto init_var = As<Var>(for_stmt->iter_args_[i]->initValue_);
+      auto init_var = AsVarLike(for_stmt->iter_args_[i]->initValue_);
       if (!init_var) continue;
       auto init_tile = GetTileTypeWithMemRef(init_var->GetType());
       if (!init_tile) continue;
       auto init_memref = GetDefinedMemRef(init_tile);
 
-      if (MemRef::SameAllocation(yield_memref, init_memref)) continue;
+      // Compare addresses, not allocations: two slots of one pl.MemRef(slots=N)
+      // share a base, so "same allocation" would skip the copy that moves the
+      // value from one slot to the other and silently carry the wrong slot.
+      const AddressRelation relation = CompareBaseAddress(yield_memref, init_memref);
+      if (relation == AddressRelation::kSame) continue;
+      // Two symbolic offsets into one allocation may or may not name the same
+      // bytes. Copying is wrong if they coincide (a tile.move onto itself, which
+      // Acc cannot lower at all) and skipping is wrong if they do not, so say so
+      // rather than pick one and hope.
+      CHECK_SPAN(relation == AddressRelation::kDifferent, for_stmt->span_)
+          << "Loop-carried value '" << for_stmt->iter_args_[i]->name_hint_
+          << "' is yielded at a slot of its own allocation that cannot be shown equal to, or "
+             "distinct from, the slot it is carried in, so whether the carry needs a copy is "
+             "undecidable here. Subscript the declared allocation with the same expression at both "
+             "ends, or give the carry its own allocation.";
 
       // MemRef mismatch — create tile.move to copy yield value into initValue's buffer
       auto target_memory = init_tile->GetMemorySpace();
       auto [moved_var, move_stmt] = CreateTileMove(yield_var, init_memref, target_memory);
 
-      move_stmts.emplace_back(std::move(move_stmt));
-      moves_to_insert.emplace_back(i, moved_var);
+      copies.push_back(CarryCopy{i, yield_var, std::move(moved_var), std::move(move_stmt), yield_memref,
+                                 init_memref, target_memory});
     }
 
-    if (moves_to_insert.empty()) {
+    if (copies.empty()) {
       // Even without tile.move insertion, iter_arg and return_var may have stale MemRefs
       // (MemoryReuse updates initValue/yield but not iter_arg/return_var types).
       // Ensure all 4 loop-carry variables share the same MemRef (= initValue's).
       return PatchIterArgsAndReturnVars(for_stmt, yield_stmt);
     }
 
+    // `pl.yield_` rebinds every carry simultaneously, so the copies that realize
+    // it must not observe each other's writes. Order them first.
+    std::vector<StmtPtr> spill_stmts;
+    const std::vector<size_t> order = OrderCarryCopies(&copies, carry_index, &spill_stmts);
+
     // Build new yield values with moved vars substituted
     std::vector<ExprPtr> new_yield_values = yield_stmt->value_;
-    for (const auto& [idx, moved_var] : moves_to_insert) {
-      new_yield_values[idx] = moved_var;
+    for (const auto& copy : copies) {
+      new_yield_values[copy.index] = copy.moved_var;
     }
     auto new_yield = MutableCopy(yield_stmt);
     new_yield->value_ = std::move(new_yield_values);
+
+    // A spill reads a carry buffer before any copy writes one, so every spill
+    // precedes every copy.
+    std::vector<StmtPtr> move_stmts = std::move(spill_stmts);
+    move_stmts.reserve(move_stmts.size() + order.size());
+    for (size_t idx : order) move_stmts.push_back(copies[idx].move_stmt);
 
     // Insert tile.move stmts before yield and replace yield in body
     auto new_body = InsertMovesAndReplaceYield(for_stmt->body_, new_yield, move_stmts);
@@ -2882,7 +2929,16 @@ class YieldFixupMutator : public IRMutator {
       // Check else branch: if MemRef differs from target, insert tile.move
       if (then_tile && else_tile) {
         auto else_memref = GetDefinedMemRef(else_tile);
-        if (!MemRef::SameAllocation(else_memref, target_memref)) {
+        // Addresses, not allocations: an arm sitting on a sibling slot of the same
+        // allocation still has to be copied into the phi's slot.
+        const AddressRelation arm = CompareBaseAddress(else_memref, target_memref);
+        CHECK_SPAN(arm != AddressRelation::kUnknown, if_stmt->span_)
+            << "Branch result '" << if_stmt->return_vars_[i]->name_hint_
+            << "' is produced at a slot of its own allocation that cannot be shown equal to, or "
+               "distinct from, the slot the other branch produces, so whether this arm needs a copy "
+               "is undecidable here. Subscript the declared allocation with the same expression in "
+               "both branches, or give the branches separate allocations.";
+        if (arm == AddressRelation::kDifferent) {
           auto [moved_var, move_stmt] = CreateTileMove(else_var, target_memref, target_memory);
           else_move_stmts.emplace_back(std::move(move_stmt));
           else_moves.emplace_back(i, moved_var);
@@ -2894,7 +2950,8 @@ class YieldFixupMutator : public IRMutator {
       auto rv_tile = As<TileType>(new_return_vars[i]->GetType());
       if (rv_tile && rv_tile->memref_.has_value()) {
         auto rv_memref = GetDefinedMemRef(rv_tile);
-        if (!MemRef::SameAllocation(rv_memref, target_memref)) {
+        // Metadata only, so realign anything not provably already the target.
+        if (CompareBaseAddress(rv_memref, target_memref) != AddressRelation::kSame) {
           auto new_rv_type = CloneTypeWithMemRefAndRemapExprs(
               rv_tile, target_memref, [this](const ExprPtr& e) { return VisitExpr(e); }, target_memory);
           new_return_vars[i] =
@@ -2925,8 +2982,435 @@ class YieldFixupMutator : public IRMutator {
     return new_if;
   }
 
+ public:
+  /// Allocations this fixup had to create (cycle spills), for the caller to
+  /// hoist onto the function-body head. Empty for every loop whose carries do
+  /// not form a copy cycle, which is the overwhelmingly common case.
+  std::vector<StmtPtr> TakePendingAllocs() { return std::move(pending_allocs_); }
+
  private:
   bool fixup_if_stmts_ = true;
+
+  /// One reconciling copy for one loop carry: `dst_memref <- source`.
+  struct CarryCopy {
+    size_t index;                           ///< iter_arg / yield position
+    VarPtr source;                          ///< what the copy reads
+    VarPtr moved_var;                       ///< the copy's LHS, replacing the yield value
+    StmtPtr move_stmt;                      ///< the `tile.move` itself
+    MemRefPtr src_memref;                   ///< byte range the copy reads
+    MemRefPtr dst_memref;                   ///< the carry buffer the copy writes
+    std::optional<MemorySpace> dst_memory;  ///< memory space of `dst_memref`
+  };
+
+  std::vector<StmtPtr> pending_allocs_;
+  uint64_t spill_counter_ = 0;
+
+  /// Byte ranges grouped by allocation, so overlap questions are index lookups
+  /// rather than all-pairs scans.
+  ///
+  /// Within an allocation the constant-offset ranges are sorted by start, which
+  /// makes both users linear-after-sort: the pairwise-overlap check only has to
+  /// compare neighbours (sorted by start, if any two ranges overlap then some
+  /// adjacent pair does), and a query binary-searches to its first candidate and
+  /// stops at the first range past its end. A range whose offset is not constant
+  /// has no position on that axis, so it is kept aside and treated as touching
+  /// everything in its allocation — the same conservative answer
+  /// `MemRef::MayAlias` gives.
+  class CarryRangeIndex {
+   public:
+    /// `ranges[i]` is the byte range owned by carry `i`; a null entry is skipped.
+    explicit CarryRangeIndex(const std::vector<MemRefPtr>& ranges) {
+      for (size_t i = 0; i < ranges.size(); ++i) {
+        if (!ranges[i]) continue;
+        const Var* base = ranges[i]->base_.get();
+        auto offset = As<ConstInt>(ranges[i]->byte_offset_);
+        if (!offset) {
+          unpositioned_[base].push_back(i);
+          continue;
+        }
+        const int64_t begin = offset->value_;
+        positioned_[base].push_back(Entry{begin, RangeEnd(begin, ranges[i]->size_, ranges[i]->span_), i});
+      }
+      for (auto& [base, entries] : positioned_) {
+        static_cast<void>(base);
+        std::sort(entries.begin(), entries.end(),
+                  [](const Entry& a, const Entry& b) { return a.begin < b.begin; });
+      }
+    }
+
+    /// Call `fn(i)` for every indexed range that may overlap `query`.
+    template <typename Fn>
+    void ForEachOverlapping(const MemRefPtr& query, const Fn& fn) const {
+      const Var* base = query->base_.get();
+      if (auto loose = unpositioned_.find(base); loose != unpositioned_.end()) {
+        for (size_t i : loose->second) fn(i);
+      }
+      auto bucket = positioned_.find(base);
+      if (bucket == positioned_.end()) return;
+      const auto& entries = bucket->second;
+
+      auto offset = As<ConstInt>(query->byte_offset_);
+      if (!offset) {  // unknown position — conservatively touches the whole allocation
+        for (const Entry& entry : entries) fn(entry.index);
+        return;
+      }
+      const int64_t begin = offset->value_;
+      const int64_t end = RangeEnd(begin, query->size_, query->span_);
+      // Entries are sorted by start, so the first candidate is the first one
+      // starting at or after `begin`, less the single earlier one that may still
+      // cover `begin`.
+      auto it = std::lower_bound(entries.begin(), entries.end(), begin,
+                                 [](const Entry& entry, int64_t value) { return entry.begin < value; });
+      if (it != entries.begin() && std::prev(it)->end > begin) --it;
+      for (; it != entries.end() && it->begin < end; ++it) {
+        if (it->end > begin) fn(it->index);
+      }
+    }
+
+    /// Every pair of indexed ranges that overlaps, as (lower index, higher index).
+    [[nodiscard]] std::vector<std::pair<size_t, size_t>> OverlappingPairs() const {
+      std::vector<std::pair<size_t, size_t>> pairs;
+      for (const auto& [base, entries] : positioned_) {
+        for (size_t n = 1; n < entries.size(); ++n) {
+          if (entries[n].begin < entries[n - 1].end) {
+            pairs.emplace_back(std::minmax(entries[n - 1].index, entries[n].index));
+          }
+        }
+        // An unpositioned range conservatively covers its whole allocation, so it
+        // conflicts with every other range there. One witness is enough to report.
+        auto loose = unpositioned_.find(base);
+        if (loose != unpositioned_.end() && !entries.empty()) {
+          pairs.emplace_back(std::minmax(loose->second.front(), entries.front().index));
+        }
+      }
+      for (const auto& [base, loose] : unpositioned_) {
+        static_cast<void>(base);
+        if (loose.size() > 1) pairs.emplace_back(std::minmax(loose[0], loose[1]));
+      }
+      return pairs;
+    }
+
+   private:
+    struct Entry {
+      int64_t begin;
+      int64_t end;
+      size_t index;
+    };
+
+    /// One past the last byte of `[begin, begin + size)`, as a signed offset.
+    ///
+    /// `MemRef::size_` is unsigned and the interval arithmetic below is signed,
+    /// so a size past `INT64_MAX` or a sum that wraps would silently corrupt both
+    /// the sort order and every overlap answer derived from it. No on-chip buffer
+    /// comes anywhere near that, so a violation is a corrupt MemRef rather than
+    /// something to accommodate.
+    static int64_t RangeEnd(int64_t begin, uint64_t size, const Span& span) {
+      constexpr auto kMax = std::numeric_limits<int64_t>::max();
+      INTERNAL_CHECK_SPAN(size <= static_cast<uint64_t>(kMax), span)
+          << "Internal error: MemRef size " << size << " does not fit a signed byte offset";
+      const auto signed_size = static_cast<int64_t>(size);
+      INTERNAL_CHECK_SPAN(begin <= kMax - signed_size, span)
+          << "Internal error: MemRef byte range [" << begin << ", +" << size << ") overflows";
+      return begin + signed_size;
+    }
+    std::map<const Var*, std::vector<Entry>> positioned_;
+    std::map<const Var*, std::vector<size_t>> unpositioned_;
+  };
+
+  /// The byte range each carry owns, indexed by iter_arg position (null when the
+  /// carry is not a tile with a MemRef).
+  static std::vector<MemRefPtr> CollectCarryRanges(const ForStmtPtr& for_stmt) {
+    std::vector<MemRefPtr> ranges(for_stmt->iter_args_.size());
+    for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
+      // AsVarLike: a nested loop seeds its carries from the enclosing loop's
+      // IterArg, which As<Var> would skip -- and skipping it is exactly how two
+      // nested carries seeded from one outer carry would slip past the check below.
+      auto init_var = AsVarLike(for_stmt->iter_args_[i]->initValue_);
+      if (!init_var) continue;
+      auto init_tile = GetTileTypeWithMemRef(init_var->GetType());
+      if (!init_tile) continue;
+      ranges[i] = GetDefinedMemRef(init_tile);
+    }
+    return ranges;
+  }
+
+  /// Reject a loop whose carries do not each own their buffer.
+  ///
+  /// Two carries whose buffers overlap cannot both survive an iteration: whatever
+  /// order the writebacks run in, the second one destroys the first. The usual
+  /// source is seeding two `pl.range` carries from one tile (`lag1 = one;
+  /// lag2 = one`), which makes both carries that tile's buffer. That is a real
+  /// limitation of the carry lowering rather than a compiler invariant, so it is
+  /// reported to the author -- and reported here, where the carries are still
+  /// named, rather than downstream as a degenerate `tile.move` onto itself.
+  ///
+  /// Byte ranges, not allocations: disjoint slices of one declared multi-slot
+  /// buffer are independent carries and stay legal.
+  static void RejectOverlappingCarryBuffers(const ForStmtPtr& for_stmt, const CarryRangeIndex& index) {
+    for (const auto& [lhs, rhs] : index.OverlappingPairs()) {
+      CHECK_SPAN(false, for_stmt->span_)
+          << "Loop-carried values '" << for_stmt->iter_args_[lhs]->name_hint_ << "' and '"
+          << for_stmt->iter_args_[rhs]->name_hint_
+          << "' share the same on-chip buffer, so one iteration cannot preserve both. Give each "
+             "loop-carried tile its own initial value -- build them with separate ops instead of "
+             "seeding both from the same tile.";
+    }
+  }
+
+  /// Order the carry copies so none overwrites a buffer another still reads.
+  ///
+  /// `pl.yield_` rebinds every carry at once, but the copies realizing it run in
+  /// sequence, so copy A must precede copy B whenever A reads the buffer B
+  /// writes. Emitting them in iter_arg order instead collapses a shift register:
+  /// for `lag2 = lag1; lag1 = v`, writing lag1's buffer first makes lag2 read the
+  /// new lag1 and the loop silently carries `lag2 == lag1` ([#2481]).
+  ///
+  /// Returns indices into `*copies` in emission order. A copy cycle — the swap
+  /// `a, b = b, a`, where each carry's value lives in the other's buffer — has no
+  /// valid order, so its members are spilled into scratch buffers first (appended
+  /// to `*spills`, which the caller emits ahead of every copy) and their copies
+  /// read the spills instead. A spill destination is a fresh allocation nothing
+  /// else writes, so spilling removes every outgoing edge of the spilled copy.
+  ///
+  /// The graph is built once and consumed incrementally: a spill drops only the
+  /// spilled copy's own outgoing edges, so the traversal resumes where it stalled
+  /// instead of rebuilding anything. Victims come from the residual graph's
+  /// strongly connected components, so a node merely downstream of a cycle is
+  /// never spilled, and one victim set is enough to leave the residual acyclic —
+  /// the traversal stalls at most once.
+  ///
+  /// Cost is O(k log k + E) in one loop's carry count k: `carry_index` answers each
+  /// source with a binary search plus one step per range it actually overlaps, so
+  /// k carries on disjoint slots of one allocation cost k lookups rather than k^2
+  /// pairwise tests, and every edge is relaxed at most once.
+  std::vector<size_t> OrderCarryCopies(std::vector<CarryCopy>* copies, const CarryRangeIndex& carry_index,
+                                       std::vector<StmtPtr>* spills) {
+    const size_t count = copies->size();
+
+    // A copy writes its carry's byte range, so `carry_index` — built over exactly
+    // those ranges — already indexes every destination. Map the carry positions it
+    // reports back onto copy positions; a carry with no copy has nothing to order.
+    std::map<size_t, size_t> copy_of_carry;
+    for (size_t j = 0; j < count; ++j) copy_of_carry.emplace((*copies)[j].index, j);
+
+    // A copy reads its source's byte range and writes its destination's, so two
+    // copies conflict exactly when one's source overlaps the other's destination.
+    std::vector<std::vector<size_t>> successors(count);
+    std::vector<size_t> in_degree(count, 0);
+    for (size_t i = 0; i < count; ++i) {
+      carry_index.ForEachOverlapping((*copies)[i].src_memref, [&](size_t carry) {
+        auto hit = copy_of_carry.find(carry);
+        if (hit == copy_of_carry.end() || hit->second == i) return;
+        successors[i].push_back(hit->second);  // i reads what hit->second overwrites
+        ++in_degree[hit->second];
+      });
+    }
+
+    std::vector<size_t> order;
+    order.reserve(count);
+    std::vector<bool> emitted(count, false);
+    std::vector<size_t> ready;
+    for (size_t i = 0; i < count; ++i) {
+      if (in_degree[i] == 0) ready.push_back(i);
+    }
+
+    auto release = [&](size_t node) {
+      for (size_t next : successors[node]) {
+        if (--in_degree[next] == 0 && !emitted[next]) ready.push_back(next);
+      }
+      successors[node].clear();
+    };
+
+    while (order.size() < count) {
+      if (!ready.empty()) {
+        const size_t node = ready.back();
+        ready.pop_back();
+        if (emitted[node]) continue;
+        // Kahn: every predecessor is already emitted, and an edge means "must run
+        // before", so appending here builds the emission order directly.
+        emitted[node] = true;
+        order.push_back(node);
+        release(node);
+        continue;
+      }
+
+      // Nothing is runnable, so every remaining copy sits on or behind a cycle.
+      // Take victims from the strongly connected components rather than from the
+      // first node that still has an outgoing edge: such a node need not be on a
+      // cycle at all, and spilling one that merely sits downstream of one costs a
+      // scratch buffer without unblocking anything. One victim per component, all
+      // of them in this round, so k/2 independent two-cycles cost a single pass.
+      const std::vector<size_t> victims = CycleVictims(successors, emitted);
+      INTERNAL_CHECK_SPAN(!victims.empty(), (*copies)[0].source->span_)
+          << "Internal error: loop-carry copy ordering stalled with no cycle to break";
+      // CycleVictims returns a set that leaves the residual acyclic, so Kahn
+      // drains the rest without stalling again.
+      for (size_t victim : victims) {
+        SpillCarrySource(&(*copies)[victim], spills);
+        release(victim);
+        if (in_degree[victim] == 0 && !emitted[victim]) ready.push_back(victim);
+      }
+    }
+    return order;
+  }
+
+  /// The strongly connected components of `nodes`, using only edges between
+  /// nodes still marked active.
+  ///
+  /// Tarjan, iteratively so a deep chain cannot overflow the stack. Restricting
+  /// to a node subset is what lets the caller re-decompose one component without
+  /// walking the whole graph again.
+  static std::vector<std::vector<size_t>> StronglyConnectedComponents(
+      const std::vector<std::vector<size_t>>& successors, const std::vector<char>& active,
+      const std::vector<size_t>& nodes) {
+    constexpr size_t kUnvisited = std::numeric_limits<size_t>::max();
+    const size_t count = successors.size();
+    std::vector<size_t> index(count, kUnvisited);
+    std::vector<size_t> lowlink(count, 0);
+    std::vector<char> in_subset(count, 0);
+    std::vector<char> on_stack(count, 0);
+    for (size_t node : nodes) in_subset[node] = 1;
+
+    std::vector<size_t> component_stack;
+    std::vector<std::vector<size_t>> components;
+    size_t next_index = 0;
+
+    for (size_t root : nodes) {
+      if (!active[root] || index[root] != kUnvisited) continue;
+      index[root] = lowlink[root] = next_index++;
+      component_stack.push_back(root);
+      on_stack[root] = 1;
+      std::vector<std::pair<size_t, size_t>> frames{{root, size_t{0}}};
+
+      while (!frames.empty()) {
+        // Re-read the frame each step: descending can reallocate the vector.
+        const size_t node = frames.back().first;
+        if (frames.back().second < successors[node].size()) {
+          const size_t next = successors[node][frames.back().second++];
+          if (!in_subset[next] || !active[next]) continue;
+          if (index[next] == kUnvisited) {
+            index[next] = lowlink[next] = next_index++;
+            component_stack.push_back(next);
+            on_stack[next] = 1;
+            frames.emplace_back(next, size_t{0});
+          } else if (on_stack[next]) {
+            lowlink[node] = std::min(lowlink[node], index[next]);
+          }
+          continue;
+        }
+
+        if (lowlink[node] == index[node]) {
+          std::vector<size_t> component;
+          while (true) {
+            const size_t member = component_stack.back();
+            component_stack.pop_back();
+            on_stack[member] = 0;
+            component.push_back(member);
+            if (member == node) break;
+          }
+          components.push_back(std::move(component));
+        }
+
+        frames.pop_back();
+        if (!frames.empty()) {
+          const size_t parent = frames.back().first;
+          lowlink[parent] = std::min(lowlink[parent], lowlink[node]);
+        }
+      }
+    }
+    return components;
+  }
+
+  /// A set of copies whose spilling leaves the residual graph acyclic.
+  ///
+  /// Every cycle lies inside one strongly connected component, so it is enough
+  /// to make each component acyclic. Spilling a node drops all of its outgoing
+  /// edges, which breaks every cycle through it -- but a component holding
+  /// several cycles that do not all pass through one node stays cyclic after a
+  /// single spill, so what is left of that component is decomposed again. The
+  /// re-decomposition is confined to the component's own nodes: the caller gets
+  /// one acyclic residual from one call and never re-walks the whole graph.
+  ///
+  /// Victims are always on a cycle at the moment they are chosen, so no scratch
+  /// buffer is spent on a copy that merely sits downstream of one. The set is
+  /// not guaranteed minimal -- a minimum feedback vertex set is NP-hard, and the
+  /// lowest-numbered member is picked instead.
+  ///
+  /// Cost is O(k + E) for the first decomposition plus, per component that needs
+  /// more than one spill, another pass over that component alone.
+  static std::vector<size_t> CycleVictims(const std::vector<std::vector<size_t>>& successors,
+                                          const std::vector<bool>& emitted) {
+    const size_t count = successors.size();
+    std::vector<char> active(count, 0);
+    std::vector<size_t> all_nodes;
+    for (size_t i = 0; i < count; ++i) {
+      if (emitted[i]) continue;
+      active[i] = 1;
+      all_nodes.push_back(i);
+    }
+
+    std::vector<size_t> victims;
+    std::vector<std::vector<size_t>> pending{std::move(all_nodes)};
+    while (!pending.empty()) {
+      const std::vector<size_t> subset = std::move(pending.back());
+      pending.pop_back();
+      for (auto& component : StronglyConnectedComponents(successors, active, subset)) {
+        const bool has_self_edge = component.size() == 1 &&
+                                   std::find(successors[component[0]].begin(), successors[component[0]].end(),
+                                             component[0]) != successors[component[0]].end();
+        if (component.size() < 2 && !has_self_edge) continue;
+
+        const size_t victim = *std::min_element(component.begin(), component.end());
+        victims.push_back(victim);
+        active[victim] = 0;  // its outgoing edges are gone once it reads a spill
+
+        // The rest of this component may still hold a cycle the victim was not on.
+        std::vector<size_t> remainder;
+        for (size_t member : component) {
+          if (member != victim) remainder.push_back(member);
+        }
+        if (remainder.size() > 1) pending.push_back(std::move(remainder));
+      }
+    }
+    return victims;
+  }
+
+  /// Redirect one carry copy through a fresh scratch buffer, so the copy no
+  /// longer reads a buffer its siblings overwrite. Emits the scratch allocation
+  /// into `pending_allocs_` for the caller to hoist.
+  void SpillCarrySource(CarryCopy* copy, std::vector<StmtPtr>* spills) {
+    auto src_tile = GetTileTypeWithMemRef(copy->source->GetType());
+    INTERNAL_CHECK_SPAN(src_tile, copy->source->span_)
+        << "Internal error: a loop-carry copy source must be a TileType with a MemRef";
+    auto src_memref = GetDefinedMemRef(src_tile);
+    auto src_memory = src_tile->GetMemorySpace();
+    INTERNAL_CHECK_SPAN(src_memory.has_value(), copy->source->span_)
+        << "Internal error: a loop-carry copy source must carry a memory space to spill";
+
+    // `mem_<space>_carry_spill_N` cannot collide with InitMemRef's
+    // `mem_<space>_<N>`, which never has a non-numeric segment before its
+    // counter, and the counter is per-function so two spills cannot collide
+    // either. The name is cosmetic, but it has to stay unique for the
+    // print -> parse roundtrip to rebind the same allocation.
+    std::string space_str = MemorySpaceToString(*src_memory);
+    std::transform(space_str.begin(), space_str.end(), space_str.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    const std::string base_name = "mem_" + space_str + "_carry_spill_" + std::to_string(spill_counter_++);
+    auto scratch_base = std::make_shared<Var>(base_name, GetPtrType(), copy->source->span_);
+    auto scratch_memref = std::make_shared<MemRef>(scratch_base, static_cast<int64_t>(0), src_memref->size_,
+                                                   copy->source->span_);
+    pending_allocs_.push_back(CreateAllocStatement(scratch_memref, *src_memory));
+
+    auto [spilled_var, spill_stmt] = CreateTileMove(copy->source, scratch_memref, src_memory);
+    spills->push_back(std::move(spill_stmt));
+
+    auto [moved_var, move_stmt] = CreateTileMove(spilled_var, copy->dst_memref, copy->dst_memory);
+    copy->source = spilled_var;
+    copy->moved_var = std::move(moved_var);
+    copy->move_stmt = std::move(move_stmt);
+    copy->src_memref = scratch_memref;
+  }
+
   // Create a tile.move operation that copies source into target_memref's buffer.
   // Returns (moved_var, move_assign_stmt).
   std::pair<VarPtr, StmtPtr> CreateTileMove(const VarPtr& source, const MemRefPtr& target_memref,
@@ -2961,17 +3445,22 @@ class YieldFixupMutator : public IRMutator {
     std::vector<VarPtr> new_return_vars = for_stmt->return_vars_;
 
     for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
-      auto init_var = As<Var>(for_stmt->iter_args_[i]->initValue_);
+      auto init_var = AsVarLike(for_stmt->iter_args_[i]->initValue_);
       if (!init_var) continue;
       auto init_tile = GetTileTypeWithMemRef(init_var->GetType());
       if (!init_tile) continue;
       auto init_memref = GetDefinedMemRef(init_tile);
 
-      // Patch iter_arg if its MemRef differs from initValue's
+      // Patch iter_arg if its MemRef differs from initValue's. Addresses, not
+      // allocations: an iter_arg left on a sibling slot of one multi-slot
+      // allocation is a different buffer and still has to be re-pointed. These
+      // sites only retype a node, they never move data, so anything not provably
+      // init's address is repointed: an unprovable pair costs nothing to realign
+      // and would otherwise leave a possibly-wrong slot in the metadata.
       auto ia_tile = As<TileType>(for_stmt->iter_args_[i]->GetType());
       if (ia_tile && ia_tile->memref_.has_value()) {
         auto ia_memref = GetDefinedMemRef(ia_tile);
-        if (!MemRef::SameAllocation(ia_memref, init_memref)) {
+        if (CompareBaseAddress(ia_memref, init_memref) != AddressRelation::kSame) {
           auto new_ia_type = CloneTypeWithMemRefAndRemapExprs(
               ia_tile, init_memref, [this](const ExprPtr& expr) { return VisitExpr(expr); },
               init_tile->GetMemorySpace());
@@ -2985,7 +3474,7 @@ class YieldFixupMutator : public IRMutator {
 
       // Patch return_var to share yield value's MemRef (which should == initValue's after fixup)
       if (i >= new_return_vars.size() || !yield_stmt || i >= yield_stmt->value_.size()) continue;
-      auto yield_var = As<Var>(yield_stmt->value_[i]);
+      auto yield_var = AsVarLike(yield_stmt->value_[i]);
       if (!yield_var) continue;
       auto yield_tile = GetTileTypeWithMemRef(yield_var->GetType());
       if (!yield_tile) continue;
@@ -2993,7 +3482,7 @@ class YieldFixupMutator : public IRMutator {
       auto rv_tile = As<TileType>(new_return_vars[i]->GetType());
       if (!rv_tile || !rv_tile->memref_.has_value()) continue;
       auto rv_memref = GetDefinedMemRef(rv_tile);
-      if (!MemRef::SameAllocation(rv_memref, yield_memref)) {
+      if (CompareBaseAddress(rv_memref, yield_memref) != AddressRelation::kSame) {
         auto new_rv_type = CloneTypeWithMemRefAndRemapExprs(
             rv_tile, yield_memref, [this](const ExprPtr& expr) { return VisitExpr(expr); },
             yield_tile->GetMemorySpace());
@@ -3237,12 +3726,18 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
       new_body = applier.VisitStmt(new_body);
     }
 
+    // Identity-copy normalization brackets YieldFixup on both sides; see the
+    // matching step in TransformMemoryReuse for why each side is needed.
+    new_body = NormalizeIdentityCopyBuffersMutator().VisitStmt(new_body);
+
     YieldFixupMutator yield_fixup(/*fixup_if_stmts=*/true);
     new_body = yield_fixup.VisitStmt(new_body);
+    new_body = InsertAllocsIntoBody(new_body, yield_fixup.TakePendingAllocs());
     new_body = NormalizeIdentityCopyBuffersMutator().VisitStmt(new_body);
   } else if (ctx != nullptr && ctx->GetMemoryPlanner() == MemoryPlanner::PtoAS) {
     YieldFixupMutator yield_fixup(/*fixup_if_stmts=*/false);
     new_body = yield_fixup.VisitStmt(new_body);
+    new_body = InsertAllocsIntoBody(new_body, yield_fixup.TakePendingAllocs());
   }
 
   if (new_body == func->body_) return func;
@@ -3338,13 +3833,35 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
     }
   }
 
+  // Step 3.9 / 4.5: Reconcile bare-Var SSA identity copies whose buffers diverged
+  // from the value they rename.  No-op when no mismatch exists.
+  //
+  // This runs on both sides of YieldFixup because both sides create such a
+  // divergence, from opposite directions:
+  //
+  //  - before, because Step 3.75's accumulator-if-phi retarget leaves a rename
+  //    stranded on the pre-coalesce buffer, and because a carry rename such as
+  //    `lag2 = lag1` only lands on lag1's buffer here. YieldFixup has to see the
+  //    settled buffer to order the carry writebacks against each other: against
+  //    the pre-normalization buffers every rename still sits on a buffer of its
+  //    own, so no conflict is visible and a shift register silently collapses
+  //    ([#2481]).
+  //  - after, because YieldFixup's own IfStmt fixup repoints a phi return_var
+  //    onto the canonical branch buffer, which strands that phi's downstream
+  //    `c = c_phi` rename in exactly the same way.
+  //
+  // The mutator is idempotent, so the second run is a no-op whenever the first
+  // already settled everything.
+  new_body = NormalizeIdentityCopyBuffersMutator().VisitStmt(new_body);
+
   // Step 4: Fix ForStmt/IfStmt yield/return_var MemRef mismatches
   YieldFixupMutator yield_fixup;
   new_body = yield_fixup.VisitStmt(new_body);
+  // A carry-copy cycle needs a scratch buffer; its alloc belongs on the body head
+  // like every other allocation, and Step 5 below keeps it because it is in use.
+  new_body = InsertAllocsIntoBody(new_body, yield_fixup.TakePendingAllocs());
 
-  // Step 4.5: Reconcile bare-Var SSA identity copies whose buffers diverged when
-  // Step 3.75 retargeted an accumulator if-phi (its downstream `c = c_phi` copy
-  // keeps the pre-coalesce buffer otherwise).  No-op when no mismatch exists.
+  // Step 4.5: the second half of the bracket described at Step 3.9.
   new_body = NormalizeIdentityCopyBuffersMutator().VisitStmt(new_body);
 
   // Step 5: Remove alloc statements for MemRefs no longer in use

@@ -327,7 +327,6 @@ pl.system.cacheinvalid()  # consumer 读之前使 cache 失效
 如果不需要整体会合这么粗的粒度，`pl.system.sync_set` / `pl.system.sync_wait` 可以发起并等待单个跨核事件。
 在**混合** InCore kernel 中，用 `core_type=pl.KernelType.AIC` 或 `core_type=pl.KernelType.AIV`
 把每个事件操作钉在应当执行它的核通道上；在显式指定类型的 AIC 或 AIV kernel 中通道已经确定，省略该参数即可。
-过去的 `"aic"` / `"aiv"` 字符串仍然可用，但会发出 `DeprecationWarning`。
 
 ```python
 pl.system.sync_set(0, pipe=pl.PipeType.MTE3, core_type=pl.KernelType.AIV)   # 在 AIV 上发起

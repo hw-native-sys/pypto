@@ -336,7 +336,7 @@ def _build_phase_fence_program():
                 # via ``tids[branch] = tid``, so this remains a direct-dependency
                 # fallback case rather than a dummy-barrier compression witness.
                 # First phase has no prior-phase producer; ``pl.array.create``
-                # initialises every slot to ``PTO2TaskId::invalid()`` and the
+                # initialises every slot to ``TaskId::invalid()`` and the
                 # runtime fence skips invalid entries via ``is_valid()``.
                 tids = pl.array.create(N_BRANCHES, pl.TASK_ID)
                 for phase in pl.range(N_PHASES):

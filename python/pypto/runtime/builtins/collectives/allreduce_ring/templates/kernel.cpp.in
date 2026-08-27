@@ -90,8 +90,8 @@ AICORE inline void RoundBarrier(__gm__ CommContext *ctx, __gm__ int32_t *signal_
 }  // namespace
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
-  __gm__ ChipTensor *data_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
-  __gm__ ChipTensor *signal_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
+  __gm__ TaskTensor *data_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[0]);
+  __gm__ TaskTensor *signal_tensor = reinterpret_cast<__gm__ TaskTensor *>(args[1]);
   int nranks = static_cast<int>(args[2]);
   __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[3]);
 

@@ -692,8 +692,8 @@ def _exec_task_submit(
     (see ``_shell_quote_run``), so the minimal CI ``task-submit`` (which lacks
     those options) works — matching the mechanism-B ``--run`` payloads and the
     ``daily_ci`` a5 job. ``task-submit`` still preserves the caller's exported
-    environment via ``runuser`` (PTO_ISA_ROOT / PTOAS_ROOT / PYTHONPATH /
-    PTO2_RING_* reach the child that way), but the CANN vars no longer depend on
+    environment via ``runuser`` (PTO_ISA_ROOT / PTOAS_ROOT / PYTHONPATH reach the
+    child that way), but the CANN vars no longer depend on
     that snapshot surviving the high-concurrency submit path.
     """
     argv = [

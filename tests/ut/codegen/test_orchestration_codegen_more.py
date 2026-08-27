@@ -63,7 +63,7 @@ class TestOrchestrationMore:
         assert "DataType::FP4E2M1" in code
 
     def test_fp4_slice_uses_x2_carrier_shape_and_offset(self):
-        """FP4 slice metadata passed to runtime ChipTensor::view is in carrier units."""
+        """FP4 slice metadata passed to runtime TaskTensor::view is in carrier units."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend950)
 
@@ -80,7 +80,7 @@ class TestOrchestrationMore:
         code = _generate_orch_code(Fp4SliceProgram)
         assert "uint32_t chunk_offsets[2] = {0, 4};" in code
         assert "std::min<uint32_t>(4, ext_data.shapes[1] - chunk_offsets[1])" in code
-        assert "ChipTensor chunk = ext_data.view(chunk_shapes, chunk_offsets);" in code
+        assert "TaskTensor chunk = ext_data.view(chunk_shapes, chunk_offsets);" in code
 
     def test_fp4_slice_dynamic_offset_checks_alignment_before_conversion(self):
         """Dynamic packed-axis offsets are checked before conversion to carrier units."""
@@ -139,9 +139,9 @@ class TestOrchestrationMore:
 
         code = _generate_orch_code(Fp4ShapeViewProgram)
         assert "uint32_t reshaped_shapes[2] = {4, 16};" in code
-        assert "ChipTensor reshaped = ext_data.reshape(reshaped_shapes, 2);" in code
+        assert "TaskTensor reshaped = ext_data.reshape(reshaped_shapes, 2);" in code
         assert "uint32_t viewed_shapes[2] = {2, 32};" in code
-        assert "ChipTensor viewed = reshaped.reshape(viewed_shapes, 2);" in code
+        assert "TaskTensor viewed = reshaped.reshape(viewed_shapes, 2);" in code
 
     def test_fp4_transpose_keeps_packed_axis_fixed(self):
         """Swapping non-packed axes is representable; moving the packed axis is not."""
@@ -159,7 +159,7 @@ class TestOrchestrationMore:
                 return transposed
 
         code = _generate_orch_code(Fp4NonPackedTransposeProgram)
-        assert "ChipTensor transposed = ext_data.transpose(0, 1);" in code
+        assert "TaskTensor transposed = ext_data.transpose(0, 1);" in code
 
         @pl.program
         class Fp4PackedTransposeProgram:
@@ -298,8 +298,8 @@ class TestOrchestrationMore:
         # For loop with dynamic bound from tensor.read
         assert "for (int64_t i = 0; i < n_blocks; i += 1)" in code
 
-        # PTO2_SCOPE wraps the for loop body
-        assert "PTO2_SCOPE()" in code
+        # SIMPLER_SCOPE wraps the for loop body
+        assert "SIMPLER_SCOPE()" in code
 
         # tensor.slice generates array variables and runtime .view() call with dynamic offset.
         # Shape dims are clamped to the source extent (offset already emitted above) so the
@@ -312,7 +312,7 @@ class TestOrchestrationMore:
             in code
         )
         assert "uint32_t chunk_offsets[2] = {static_cast<uint32_t>((i * 16)), 0};" in code
-        assert "ChipTensor chunk = ext_data.view(chunk_shapes, chunk_offsets);" in code
+        assert "TaskTensor chunk = ext_data.view(chunk_shapes, chunk_offsets);" in code
 
         # tensor.read now goes through get_tensor_data<T>() so the runtime owns
         # access validation/synchronization, instead of bypassing it with a raw
@@ -350,7 +350,7 @@ class TestOrchestrationMore:
             in code
         )
         assert "uint32_t chunk_offsets[2] = {0, 0};" in code
-        assert "ChipTensor chunk = ext_data.view(chunk_shapes, chunk_offsets);" in code
+        assert "TaskTensor chunk = ext_data.view(chunk_shapes, chunk_offsets);" in code
 
     def test_tensor_slice_with_drop_dims(self):
         """A scalar-indexed tensor slice emits a view followed by rank reduction."""
@@ -369,7 +369,7 @@ class TestOrchestrationMore:
 
         code = _generate_orch_code(DropDimSliceProgram)
 
-        assert "ChipTensor chunk_view = ext_data.view(chunk_shapes, chunk_offsets);" in code
+        assert "TaskTensor chunk_view = ext_data.view(chunk_shapes, chunk_offsets);" in code
         assert "chunk.ndims = 2;" in code
         assert "chunk.shapes[0] = chunk_view.shapes[0];" in code
         assert "chunk.strides[0] = chunk_view.strides[0];" in code
@@ -409,7 +409,7 @@ class TestOrchestrationMore:
         assert "chunk.is_contiguous = chunk_empty || chunk_contiguous;" in code
 
     def test_tensor_reshape_external_input(self):
-        """tensor.reshape on an external orchestration input emits ChipTensor::reshape on ext_<name>."""
+        """tensor.reshape on an external orchestration input emits TaskTensor::reshape on ext_<name>."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
 
@@ -427,11 +427,11 @@ class TestOrchestrationMore:
 
         # Shape array emitted with the result variable name as prefix.
         assert "uint32_t r_shapes[2] = {16, 16};" in code
-        # Reshape lowers to runtime ChipTensor::reshape on the external tensor handle.
-        assert "ChipTensor r = ext_data.reshape(r_shapes, 2);" in code
+        # Reshape lowers to runtime TaskTensor::reshape on the external tensor handle.
+        assert "TaskTensor r = ext_data.reshape(r_shapes, 2);" in code
 
     def test_tensor_reshape_after_slice(self):
-        """slice -> reshape chain: reshape input is a local ChipTensor (no ext_ prefix)."""
+        """slice -> reshape chain: reshape input is a local TaskTensor (no ext_ prefix)."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
 
@@ -456,13 +456,13 @@ class TestOrchestrationMore:
             "(chunk_offsets[2] >= ext_data.shapes[2] ? 0u : std::min<uint32_t>(16, ext_data.shapes[2] - chunk_offsets[2]))};"  # noqa: E501
             in code
         )
-        assert "ChipTensor chunk = ext_data.view(chunk_shapes, chunk_offsets);" in code
-        # reshape emits its shape array and calls .reshape on the local ChipTensor (no ext_ prefix).
+        assert "TaskTensor chunk = ext_data.view(chunk_shapes, chunk_offsets);" in code
+        # reshape emits its shape array and calls .reshape on the local TaskTensor (no ext_ prefix).
         assert "uint32_t r_shapes[2] = {16, 16};" in code
-        assert "ChipTensor r = chunk.reshape(r_shapes, 2);" in code
+        assert "TaskTensor r = chunk.reshape(r_shapes, 2);" in code
 
     def test_tensor_transpose_external_input(self):
-        """tensor.transpose on an external orchestration input emits ChipTensor::transpose on ext_<name>."""
+        """tensor.transpose on an external orchestration input emits TaskTensor::transpose on ext_<name>."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
 
@@ -478,8 +478,8 @@ class TestOrchestrationMore:
 
         code = _generate_orch_code(TransposeExternalProgram)
 
-        # transpose lowers to runtime ChipTensor::transpose on the external tensor handle.
-        assert "ChipTensor t = ext_data.transpose(0, 1);" in code
+        # transpose lowers to runtime TaskTensor::transpose on the external tensor handle.
+        assert "TaskTensor t = ext_data.transpose(0, 1);" in code
 
     def test_tensor_transpose_negative_axis(self):
         """tensor.transpose with negative axis indices is normalized at codegen time."""
@@ -499,10 +499,10 @@ class TestOrchestrationMore:
         code = _generate_orch_code(TransposeNegativeProgram)
 
         # -1 / -2 on a 3D tensor should normalize to axes 2 and 1 respectively.
-        assert "ChipTensor t = ext_data.transpose(2, 1);" in code
+        assert "TaskTensor t = ext_data.transpose(2, 1);" in code
 
     def test_tensor_transpose_after_slice(self):
-        """slice -> transpose chain: transpose input is a local ChipTensor (no ext_ prefix)."""
+        """slice -> transpose chain: transpose input is a local TaskTensor (no ext_ prefix)."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
 
@@ -520,12 +520,12 @@ class TestOrchestrationMore:
         code = _generate_orch_code(TransposeAfterSliceProgram)
 
         # slice still emits view on the external tensor.
-        assert "ChipTensor chunk = ext_data.view(chunk_shapes, chunk_offsets);" in code
-        # transpose calls .transpose on the local ChipTensor (no ext_ prefix).
-        assert "ChipTensor t = chunk.transpose(1, 2);" in code
+        assert "TaskTensor chunk = ext_data.view(chunk_shapes, chunk_offsets);" in code
+        # transpose calls .transpose on the local TaskTensor (no ext_ prefix).
+        assert "TaskTensor t = chunk.transpose(1, 2);" in code
 
     def test_tensor_view_cross_flip_lowers_to_transpose(self):
-        """Cross-layout flip (ND→DN) lowers to runtime ChipTensor::transpose on the
+        """Cross-layout flip (ND→DN) lowers to runtime TaskTensor::transpose on the
         trailing pair (shapes + strides swapped, start_offset preserved)."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
@@ -541,9 +541,9 @@ class TestOrchestrationMore:
 
         code = _generate_orch_code(program)
 
-        # Cross-layout flip swaps the trailing pair via runtime ChipTensor::transpose
+        # Cross-layout flip swaps the trailing pair via runtime TaskTensor::transpose
         # on the external tensor handle (start_offset preserved).
-        assert "ChipTensor b_dn = ext_b.transpose(0, 1);" in code
+        assert "TaskTensor b_dn = ext_b.transpose(0, 1);" in code
         # The deleted pre-#808 fields must never be emitted.
         assert "raw_shapes" not in code
         assert "is_raw_eq_shapes" not in code
@@ -564,7 +564,7 @@ class TestOrchestrationMore:
 
         code = _generate_orch_code(program)
 
-        assert "ChipTensor b_same = ext_b;" in code
+        assert "TaskTensor b_same = ext_b;" in code
         assert ".transpose(" not in code
 
     def test_tensor_view_shape_reinterpret_runs_through_default_pipeline(self):
@@ -591,12 +591,12 @@ class TestOrchestrationMore:
         shape_decl = re.search(r"uint32_t (\w+)_shapes\[2\] = \{4, 8\};", code)
         assert shape_decl is not None, code
         viewed_name = shape_decl.group(1)
-        reshape_line = next(line for line in code.splitlines() if f"ChipTensor {viewed_name} =" in line)
+        reshape_line = next(line for line in code.splitlines() if f"TaskTensor {viewed_name} =" in line)
         assert f".reshape({viewed_name}_shapes, 2);" in reshape_line
 
     def test_tensor_view_shape_layout_combination_rejected(self):
         """Combining shape reinterpret with a layout change is rejected at
-        orchestration codegen time -- the runtime ``ChipTensor::reshape`` does not
+        orchestration codegen time -- the runtime ``TaskTensor::reshape`` does not
         support arbitrary-stride layout views. The error uses ``CHECK_SPAN``
         and raises ``ValueError`` (not ``InternalError``).
 
@@ -624,7 +624,7 @@ class TestOrchestrationMore:
         """Shape-only tensor.view on a DN source cannot lower to runtime reshape.
 
         Even when the requested target layout equals the source layout, runtime
-        ``ChipTensor::reshape`` assumes ND/row-major contiguous storage and cannot
+        ``TaskTensor::reshape`` assumes ND/row-major contiguous storage and cannot
         preserve a DN physical stride.
         """
         backend.reset_for_testing()
@@ -689,8 +689,8 @@ class TestOrchestrationMore:
         # If statement with comparison
         assert "if ((i == 0))" in code
 
-        # PTO2_SCOPE wraps for loop body and if/else bodies
-        assert "PTO2_SCOPE()" in code
+        # SIMPLER_SCOPE wraps for loop body and if/else bodies
+        assert "SIMPLER_SCOPE()" in code
 
         # Scalar assignment in both branches
         assert "is_first = 1" in code
@@ -861,12 +861,12 @@ class TestOrchestrationMore:
 
         # TensorCreateInfo declarations exist (exactly once each)
         # a_acc is a return value → external (orch_args.tensor(i).ref())
-        assert code.count("const ChipTensor& ext_a_acc = orch_args.tensor(1).ref()") == 1
+        assert code.count("const TaskTensor& ext_a_acc = orch_args.tensor(1).ref()") == 1
         assert code.count("TensorCreateInfo b_acc_ci(") == 1
 
         # For loop exists with correct structure
         assert "for (int64_t i = 0; i < 4; i += 1)" in code
-        assert "PTO2_SCOPE()" in code
+        assert "SIMPLER_SCOPE()" in code
 
         # Both tasks submitted
         assert "kernel_init" in code
@@ -918,7 +918,7 @@ class TestOrchestrationMore:
         code = _generate_orch_code(transformed)
 
         assert "alloc_tensors(acc_ci)" in code
-        assert "const ChipTensor& acc = alloc_0.get_ref(0);" in code
+        assert "const TaskTensor& acc = alloc_0.get_ref(0);" in code
         assert "make_tensor_external(nullptr" not in code
         assert "acc__loop_state" not in code
         assert "params_t1.add_input(acc);" in code
@@ -1008,9 +1008,9 @@ class TestOrchestrationMore:
 
         code = _generate_orch_code(transformed)
 
-        assert "ChipTensor row = ext_out.view(row_shapes, row_offsets);" in code
+        assert "TaskTensor row = ext_out.view(row_shapes, row_offsets);" in code
         assert "params_t0.add_inout(row)" in code
-        assert "ChipTensor row = make_tensor(" not in code
+        assert "TaskTensor row = make_tensor(" not in code
         assert "memcpy(" not in code
         assert "ext_out = out;" not in code
 
@@ -1052,9 +1052,9 @@ class TestOrchestrationMore:
         code = _generate_orch_code(transformed)
 
         assert "TensorCreateInfo row_ci(row_ci_shapes, 2, DataType::FLOAT32);" in code
-        assert "const ChipTensor& row = " in code
+        assert "const TaskTensor& row = " in code
         assert "make_tensor_external(nullptr, row_ci_shapes, 2, DataType::FLOAT32)" not in code
-        assert "ChipTensor row = ext_out.view(row_shapes, row_offsets);" not in code
+        assert "TaskTensor row = ext_out.view(row_shapes, row_offsets);" not in code
 
     def test_tensor_assemble_slice_source_does_not_require_view_fast_path(self):
         """tensor.assemble should stay codegenable when the source is not a rewritten tensor.create."""
@@ -1079,8 +1079,8 @@ class TestOrchestrationMore:
 
         code = _generate_orch_code(transformed)
 
-        assert "ChipTensor chunk = ext_x.view(chunk_shapes, chunk_offsets);" in code
-        assert "ChipTensor chunk = ext_out.view(chunk_shapes, chunk_offsets);" not in code
+        assert "TaskTensor chunk = ext_x.view(chunk_shapes, chunk_offsets);" in code
+        assert "TaskTensor chunk = ext_out.view(chunk_shapes, chunk_offsets);" not in code
 
     def test_param_with_numeric_suffix(self):
         """Regression test for issue #573: params with numeric suffixes must not be collapsed.
@@ -1139,7 +1139,7 @@ class TestOrchestrationMore:
         assert "expected_arg_count = 3" in code
 
         # Tuple-return elements must not be collapsed into a single alias
-        assert "ChipTensor& out =" not in code
+        assert "TaskTensor& out =" not in code
 
     def test_repeated_auto_output_buffers_get_unique_names(self):
         """Repeated auto-generated output buffers should keep distinct emitted names."""
@@ -1182,11 +1182,11 @@ class TestOrchestrationMore:
         assert "params_t0.add_output(ret0__out)" in code
         assert "params_t1.add_output(ret0__out_1)" in code
         # ``first`` is kernel_add's in-place output buffer ret0__out, so it
-        # remaps to ret0__out (no ``const ChipTensor& first = ...`` alias is minted);
+        # remaps to ret0__out (no ``const TaskTensor& first = ...`` alias is minted);
         # the second call reads that buffer directly.
         assert "params_t1.add_input(ret0__out)" in code
-        assert "const ChipTensor& first" not in code
-        assert "const ChipTensor& second" not in code
+        assert "const TaskTensor& first" not in code
+        assert "const TaskTensor& second" not in code
 
     def test_unused_alias_not_emitted(self):
         """Alias for a kernel result that is never consumed downstream should be omitted."""
@@ -1220,7 +1220,7 @@ class TestOrchestrationMore:
         code = _generate_orch_code(transformed)
 
         assert "rt_submit_" in code
-        assert "const ChipTensor& result" not in code
+        assert "const TaskTensor& result" not in code
 
     def test_multi_scope_alloc_tensors_batching(self):
         """Each scope (function body, for body) batches its own alloc_tensors independently."""
@@ -1275,9 +1275,9 @@ class TestOrchestrationMore:
         assert "alloc_0 = alloc_tensors(" in code
         assert "alloc_1 = alloc_tensors(" in code
         # Verify bindings from each alloc
-        assert "const ChipTensor& t1 = alloc_0.get_ref(0);" in code
-        assert "const ChipTensor& t2 = alloc_0.get_ref(1);" in code
-        assert "const ChipTensor& tmp = alloc_1.get_ref(0);" in code
+        assert "const TaskTensor& t1 = alloc_0.get_ref(0);" in code
+        assert "const TaskTensor& t2 = alloc_0.get_ref(1);" in code
+        assert "const TaskTensor& tmp = alloc_1.get_ref(0);" in code
 
     def test_alloc_tensors_splits_at_16(self):
         """More than 16 create_tensor in one scope are split into multiple alloc_tensors calls."""

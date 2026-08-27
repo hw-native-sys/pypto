@@ -305,7 +305,7 @@ def pytest_addoption(parser):
         "--enable-dep-gen",
         action="store_true",
         default=False,
-        help="Capture PTO2 dependency edges into <work_dir>/dfx_outputs/deps.json "
+        help="Capture simpler dependency edges into <work_dir>/dfx_outputs/deps.json "
         "and render deps_graph.html.",
     )
     parser.addoption(

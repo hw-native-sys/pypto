@@ -671,7 +671,7 @@ def _make_call_config(
     on top, so a single L3 dispatch can size the
     runtime's ring buffers without mutating the prepared program's shared
     config. ``None`` (the default) leaves the baseline untouched and the runtime
-    applies its own ``PTO2_RING_*`` env var / compile-time fallback.
+    applies its own compile-time default.
 
     DFX diagnostics (``enable_dump_args`` / ``enable_pmu`` / ``enable_dep_gen``
     / ``enable_scope_stats`` / ``enable_chip_swimlane``) are likewise read from

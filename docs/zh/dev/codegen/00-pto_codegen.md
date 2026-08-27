@@ -215,13 +215,28 @@ tile 调用 `set_validshape`。
   （`gmStrideR = valid_col`，左右切分的 code 下加倍）。因此若传输两侧的 valid shape
   不一致，pop 的 stride 就会错位——这会静默破坏*有效*区域的数据，因为 ISA 中对应的
   断言在 release 构建里被编译掉了。所以部分有效的 Acc-to-Vec 传输无论是否切分，
-  TPUSH 和 TPOP 都使用完整物理 box，并在传输两侧立即恢复逻辑 valid shape——消费侧
-  通过纯元数据的 `pto.treshape` 恢复（前端 tpop 结果不是 PTOAS 的本地绑定 tile，
-  `pto.set_validshape` 无法就地修改它）。唯一的例外是切分轴上的 extent：它必须保持
+  TPOP 以及 TPUSH 的**列**维度都使用完整物理 box，并在传输两侧立即恢复逻辑 valid
+  shape——消费侧通过纯元数据的 `pto.treshape` 恢复（前端 tpop 结果不是 PTOAS 的本地
+  绑定 tile，`pto.set_validshape` 无法就地修改它）。第一个例外是切分轴上的 extent：它必须保持
   逐 lane 的值并留在 TPOP 操作数上，因为 ISA 正是靠它定位 lane 1 的数据段起点——也正因如此，
   编译期无法核验的逐 lane extent 绝不能到达那里。`pl.split_aiv` 区域中切分轴 extent 为运行期
   值的边界，会让被弹出的 tile 保留完整 box（`split_axis::WithFullSplitAxisValid`），使偶数
   code 的数据段落在 box 的一半处，而把 lane 自身的 extent 交给消费者携带。
+- 第二个例外是**非切分** Acc-to-Vec TPUSH 的**行**维度：它必须保持 producer 写入时
+  的值。TPUSH 执行的是 L0C 上的 `TStoreAccNz2nd`，其源 pitch 对 compact tile 为
+  `ceil(validRow/16)*16`，否则为 `TileData::Rows`；而 `mad` 是按 L0A 操作数的**有效**
+  行数所隐含的 pitch 写出乘积的。在 push 之前把 `validRow` 撑大到物理 box，会让该
+  pitch 改按 box 推导，于是 fix-pipe 以 `mad` 从未写入过的 stride 遍历 L0C——64 行的
+  box 只有 16 行有效时，fractal `j` 会读到 `4j`（issue #2510）。超出 `validRow` 的行
+  会在 slot 中保留旧数据，这正是窄化 `valid_shape` 对其无效区域给出的承诺，同时传输
+  量也从整个 box 降到 `validRow` 行。
+- **切分**的 Acc-to-Vec 传输走不了这条路：lane 1 从 box 一半处开始读自己的数据段，而
+  该数据段只有在 producer 写满整个 box 时才存在——但写满 box 就意味着按物理 pitch 读
+  L0C，而那并不是 `mad` 使用的 pitch。二者互斥，因此行窄化的 compact 累加器跨
+  `pl.split` / `pl.split_aiv` 边界时会被**拒绝**，并给出指明两种 DSL 替代写法的报错
+  （窄化结果而非操作数，或让累加器经 GM 中转），而不是下降成静默错位的数据——在加入该
+  拒绝之前，设备上实测 8192 个元素中有 1808 个是错的。该拒绝以 pitch 确实不同为前提，
+  因此单个 fractal 行块的累加器（`ceil(validRow/16)*16 == Rows`）仍可照常跨越。
 - 当 tpop 结果的 `TileView.valid_shape` 与物理 tile shape 不一致时，PTO codegen 会生成 PTOAS 前端操作数：`%buf = pto.tpop_from_*(%valid_row, %valid_col) {[id = I, ]split = N} -> !pto.tile_buf<..., v_row=?, v_col=?, ...>`。这同时覆盖动态表达式和 `[0, 0]` 这类静态非满形状；operand 携带后续计算和 store 使用的逻辑范围。对于静态形状、非空的部分 pop，上述 Cube-to-Vector 完整 box 传输优先，因为 `pto.treshape` 不带 valid-row/valid-col operand，只能恢复*静态*逻辑范围。
 - 对于手写 pop 的 split consumer，`SplitVectorKernel` 会按 subblock 本地化这些动态
   tpop valid-shape operand（例如 `[16, 16]` tile 做上下切分时，全局
@@ -674,6 +689,18 @@ tile_c = pl.mul(tile_a, tile_b)
   执行，因此读取方必须使用的仍是 `mad` 当初写入时的 pitch —— 若按窄化后的行数重新
   推导，就会以从未重排过的方式重新解释这些字节。
 
+  buffer 也可以在创建时**声明**该模式：`tile.create(..., target_memory=Acc,
+  compact=True)`。新建的 L0C buffer 没有既有字节可供重新解释，因此这不是别名上的重新
+  推导——`AutoTileMatmulL0` 在切分 K 时正是这样声明它合成的累加器种子：
+  `tile.matmul_acc` 会继承该种子的模式，种子若非 compact，就会把整条累加链以及循环之后
+  的读取方一起拖回物理 pitch。声明也是唯一能存活的形式：pass 盖在 call 上的类型，会在
+  任何后续 pass 重新推导时被丢弃（`InferTileMemorySpace` 就会），而 kwarg 每次都会被
+  重新读取。
+
+  `AccCompactValid`（见 [Verifier](../passes/99-verifier.md)）会校验该契约的两半：当 `mad`
+  的 pitch 与累加器物理行数不同时，每个 `tile.matmul_acc` 都必须累加进 compact 的 buffer；
+  且 Left/Right/Acc 之外的任何 tile 都不得携带 compact 模式。
+
 注意：在 a2a3 与 a5 上，PTO-ISA 的 Acc → L1 读取方（`TExtractAccToMat`、
 `TMovCcToCb`）都没有 `CompactMode` 分支，因此运行期窄化的累加器若经
 `tile.extract` / `tile.move` 进入 L1，仍会按物理 `Rows` pitch 读取。该缺口需要
@@ -709,14 +736,14 @@ output_dir/
 ├── kernels/aiv/
 │   └── <func_name>.cpp              # Final wrapper
 ├── orchestration/
-│   └── <orch_func_name>.cpp         # PTO2 runtime orchestration code
+│   └── <orch_func_name>.cpp         # simpler runtime orchestration code
 └── kernel_config.py                 # Runtime/orchestration/kernel config
 ```
 
 仅当使用 `ir.compile(..., dump_ptoas_passes=True)` 或
 `RunConfig(dump_ptoas_passes=True)` 时才会生成 `ptoas_passes/`。
 
-编排代码生成使用 PTO2 运行时 API (`rt_submit_task`, `make_tensor_external` 等) 生成编排 C++ 代码。
+编排代码生成使用 simpler 运行时 API (`rt_submit_task`, `make_tensor_external` 等) 生成编排 C++ 代码。
 
 ### 运行时配置 (`kernel_config.py`)
 

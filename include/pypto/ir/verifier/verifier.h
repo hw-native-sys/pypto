@@ -98,6 +98,18 @@ PropertyVerifierPtr CreateNoNestedCallPropertyVerifier();
 PropertyVerifierPtr CreateAccToGmStoreValidPropertyVerifier();
 
 /**
+ * @brief Factory for the Acc compact-mode property verifier
+ *
+ * Checks that every ``tile.matmul_acc`` / ``tile.matmul_mx_acc`` accumulates
+ * into a compact buffer whenever ``mad``'s pitch differs from the accumulator's
+ * physical row count, and that no tile outside Left/Right/Acc carries a compact
+ * mode.
+ *
+ * @return Shared pointer to AccCompactValid PropertyVerifier
+ */
+PropertyVerifierPtr CreateAccCompactValidPropertyVerifier();
+
+/**
  * @brief Factory for the atomic-add destination-dtype property verifier
  *
  * Checks every atomic-add write into GM (``tile.store`` / ``tensor.assemble`` /
@@ -386,7 +398,7 @@ PropertyVerifierPtr CreateIterArgCarryClassifiedPropertyVerifier();
  * ``MaterializeRuntimeScopes`` inserts explicit ``RuntimeScopeStmt`` nodes, or
  * when the user declares ``@pl.function(auto_scope=False)`` (the pass is a
  * no-op and codegen still accepts the function). Orchestration codegen emits
- * ``PTO2_SCOPE()`` only from those nodes; skipping the pass leaves
+ * ``SIMPLER_SCOPE()`` only from those nodes; skipping the pass leaves
  * ``auto_scope=True`` and would silently omit scopes.
  *
  * @return Shared pointer to RuntimeScopesMaterialized PropertyVerifier

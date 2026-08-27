@@ -17,8 +17,9 @@ NT, TR, TC = 8, 64, 128          # tiles in the loop, tile rows, tile cols
 ROWS = NT * TR
 CFG = RunConfig(platform="__PLATFORM__")
 
-torch.manual_seed(0)
-A = torch.randn(ROWS, TC, dtype=torch.float32)
+# Cycle through binary-exact values in a stable range on every host architecture.
+indices = torch.arange(ROWS * TC, dtype=torch.int64)
+A = (indices % 3 - 1).to(torch.float32).reshape(ROWS, TC)
 
 
 def check(kernel):
@@ -191,8 +192,8 @@ The raw output is cluttered. The repo tool cleans it into a per-pipe, Perfetto-v
 trace:
 
 ```bash
-python -m pypto.tools.clean_sim_trace \
-  <build-dir>/kernel_insight_all_funcs_<ts>/funcs/<kernel>/collect/out/OPPROF_* -o <out>
+TRACE="<build-dir>/kernel_insight_all_funcs_<ts>/funcs/<kernel>/collect/out"
+python -m pypto.tools.clean_sim_trace "$TRACE"/OPPROF_* -o trace-out
 ```
 
 That writes `trace.clean.json` with the pipeline lanes in dataflow order —

@@ -17,7 +17,7 @@ jobs:
   # one of them is documentation, elides the whole build/test pipeline below:
   # `clang-tidy`, `unit-tests`, `codegen-tests`, the four device jobs and
   # `system-tests-a5sim`. A prose-only change cannot break a build or a test, so
-  # spending four in-house arm64 CPU / NPU slots (a scarce shared pool) on it
+  # spending four in-house CPU / NPU slots (a scarce shared pool) on it
   # only delays every other PR in the queue.
   #
   # Two mechanisms, because one of them does not work for a matrix job:
@@ -236,7 +236,7 @@ jobs:
   # test job lists both of them in its `needs` (the five jobs that also consume
   # `needs.toolchain.outputs.*` list `toolchain` alongside), so a formatting or
   # static-analysis failure short-circuits the run before any downstream job
-  # claims a GitHub-hosted ubuntu slot or one of the in-house arm64 CPU / NPU
+  # claims a GitHub-hosted ubuntu slot or one of the in-house CPU / NPU
   # slots (a scarce shared pool).
   #
   # This cannot weaken the merge rule: `pre-commit` and `clang-tidy` are
@@ -247,16 +247,16 @@ jobs:
   # both in that required list; the whole gate rests on it.
   #
   # Accepted trade-offs:
-  #  - `clang-tidy` runs on the in-house arm64 *cpu* pool, so that pool is now a
+  #  - `clang-tidy` runs on the in-house *cpu* pool, so that pool is now a
   #    serialization point for the whole workflow: if it is saturated or offline,
   #    no test job starts. Its setup is not cheap either (per-job venv, pip
   #    install of cmake/ninja/nanobind + pinned clang-tidy, a full CMake
   #    configure), and that wall time is prepended to every test job on the green
   #    path. Accepted to keep a non-linting tree off the scarce device runners.
   #  - `codegen-tests` used to run concurrently with `clang-tidy` on that same
-  #    arm64 cpu pool (hence their separate checkout trees, so neither one's
+  #    self-hosted cpu pool (hence their separate checkout trees, so neither one's
   #    `git clean` wipes the other). They are serialized within a run now, which
-  #    frees a slot for other PRs at the cost of arm64-cpu wall time.
+  #    frees a slot for other PRs at the cost of self-hosted cpu wall time.
   #
   # `toolchain` is deliberately NOT gated: it is a seconds-long metadata read on
   # a free GitHub-hosted runner, so gating it would protect no scarce capacity
@@ -284,7 +284,7 @@ jobs:
     env:
       PIP_CONSTRAINT: ${{ github.workspace }}/clang-tidy-checkout/build-constraints.txt
       PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/clang-tidy-checkout/build-constraints.txt
-    # De-containered: runs host-native on the in-house arm64 CPU runner (same
+    # De-containered: runs host-native on the in-house CPU runner (same
     # infra as before, minus the localhost:5000/ci-py310 image). clang_tidy.py
     # generates compile_commands.json via a CMake configure (needs cmake / ninja /
     # nanobind and a C++ compiler) and pip-installs the pinned clang-tidy, so it
@@ -293,13 +293,13 @@ jobs:
     # pto-isa / simpler / device) — just the conda env + a per-job venv.
     #
     # Checks out under ./clang-tidy-checkout so its `git clean` never wipes the
-    # sibling codegen-checkout tree (both jobs share the arm64 cpu runner pool).
+    # sibling codegen-checkout tree (both jobs share the cpu runner pool).
     #
     # Docs-only gate (see the `changes` job) — a prose-only PR touches no C++, and
-    # skipping the gate here keeps the scarce arm64 cpu pool free.
+    # skipping the gate here keeps the scarce cpu pool free.
     needs: changes
     if: needs.changes.outputs.docs_only != 'true'
-    runs-on: [self-hosted, linux, arm64, cpu]
+    runs-on: [self-hosted, linux, cpu]
     defaults:
       run:
         working-directory: clang-tidy-checkout
@@ -471,7 +471,7 @@ jobs:
     if: needs.changes.outputs.docs_changed == 'true'
     permissions:
       contents: read
-    runs-on: [self-hosted, linux, arm64, cpu]
+    runs-on: [self-hosted, linux, cpu]
     defaults:
       run:
         working-directory: docs-checkout
@@ -479,7 +479,8 @@ jobs:
       PTOAS_ROOT: ${{ github.workspace }}/docs-checkout/ptoas-bin
       PTO_ISA_ROOT: ${{ github.workspace }}/docs-checkout/pto-isa
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
-      PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
+      PTOAS_SHA256_AARCH64: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
+      PTOAS_SHA256_X86_64: ${{ needs.toolchain.outputs.ptoas_sha256_x86_64 }}
       CMAKE_BUILD_PARALLEL_LEVEL: 16
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
@@ -508,7 +509,7 @@ jobs:
           python tests/docs/run_doc_examples.py --pages docs/en/user --check-parity -p a2a3sim
 
   examples-tests:
-    # The distributed examples ladder (doc-plan 02) — every example must compile
+    # The distributed examples ladder — every example must compile
     # AND run with a passing golden on the simulator (a2a3sim), so the teaching
     # material cannot silently rot.
     #
@@ -521,14 +522,15 @@ jobs:
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
-    runs-on: [self-hosted, linux, arm64, cpu]
+    runs-on: [self-hosted, linux, cpu]
     defaults:
       run:
         working-directory: examples-checkout
     env:
       PTOAS_ROOT: ${{ github.workspace }}/examples-checkout/ptoas-bin
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
-      PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
+      PTOAS_SHA256_AARCH64: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
+      PTOAS_SHA256_X86_64: ${{ needs.toolchain.outputs.ptoas_sha256_x86_64 }}
       CMAKE_BUILD_PARALLEL_LEVEL: 16
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
@@ -582,6 +584,19 @@ jobs:
           python examples/distributed/07_dynamic_rank_count.py -p a2a3sim -d 0,1,2
           echo "=== examples/distributed/07_dynamic_rank_count.py -d 0,1,2,3 ==="
           python examples/distributed/07_dynamic_rank_count.py -p a2a3sim -d 0,1,2,3
+          # Steps 08-11: the all-reduce comparisons are only observable
+          # at P=4 (P=2 collapses mesh/two-phase/ring into the same exchange); the
+          # reveal runs both modes.
+          echo "=== examples/distributed/08_allreduce_mesh.py -d 0,1,2,3 ==="
+          python examples/distributed/08_allreduce_mesh.py -p a2a3sim -d 0,1,2,3
+          echo "=== examples/distributed/09_allreduce_two_phase.py -d 0,1,2,3 ==="
+          python examples/distributed/09_allreduce_two_phase.py -p a2a3sim -d 0,1,2,3
+          echo "=== examples/distributed/10_allreduce_ring.py -d 0,1,2,3 ==="
+          python examples/distributed/10_allreduce_ring.py -p a2a3sim -d 0,1,2,3
+          echo "=== examples/distributed/11_allreduce_reveal.py -d 0,1,2,3 ==="
+          python examples/distributed/11_allreduce_reveal.py -p a2a3sim -d 0,1,2,3
+          echo "=== examples/distributed/11_allreduce_reveal.py --mode ring -d 0,1,2,3 ==="
+          python examples/distributed/11_allreduce_reveal.py -p a2a3sim -d 0,1,2,3 --mode ring
 
       # The teaching ladders. These carry the manual's beginner/intermediate/
       # advanced/utils citations, so leaving them unrun let the pages point at
@@ -621,12 +636,12 @@ jobs:
     # land under ./codegen-checkout so they don't collide with other jobs' trees
     # on the shared self-hosted host.
     #
-    # Lint gate (see the pre-commit job) — shares the arm64 cpu pool with
+    # Lint gate (see the pre-commit job) — shares the self-hosted cpu pool with
     # clang-tidy, so it must not start until that pool's lint job is green.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
     needs: [changes, pre-commit, clang-tidy]
     if: needs.changes.outputs.docs_only != 'true'
-    runs-on: [self-hosted, linux, arm64, cpu]
+    runs-on: [self-hosted, linux, cpu]
     defaults:
       run:
         working-directory: codegen-checkout
@@ -718,16 +733,17 @@ jobs:
     # TEST MODE: keep the device runner so DEVICE_ID/DEVICE_ID exist and pin
     # task-submit to that card (validates the new compile-card-free + task-submit
     # execute flow deterministically). FLIP TO PROD: change this to
-    # `[self-hosted, linux, arm64, cpu]` and drop --task-submit-device below so
+    # `[self-hosted, linux, cpu]` and drop --task-submit-device below so
     # cases borrow any free card via `--device auto`.
-    runs-on: [self-hosted, linux, arm64, npu]
+    runs-on: [self-hosted, linux, npu]
     defaults:
       run:
         working-directory: st-checkout
     env:
       PTOAS_ROOT: ${{ github.workspace }}/st-checkout/ptoas-bin
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
-      PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
+      PTOAS_SHA256_AARCH64: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
+      PTOAS_SHA256_X86_64: ${{ needs.toolchain.outputs.ptoas_sha256_x86_64 }}
       CMAKE_BUILD_PARALLEL_LEVEL: 16
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
@@ -836,16 +852,17 @@ jobs:
       contents: read
     # TEST MODE: keep the device runner so DEVICE_ID exists and pin task-submit
     # to that card. FLIP TO PROD: change this to
-    # `[self-hosted, linux, arm64, cpu]` and drop --task-submit-device / the
+    # `[self-hosted, linux, cpu]` and drop --task-submit-device / the
     # explicit --device below so cases borrow any free card via `--device auto`.
-    runs-on: [self-hosted, linux, arm64, npu]
+    runs-on: [self-hosted, linux, npu]
     defaults:
       run:
         working-directory: st-direct-checkout
     env:
       PTOAS_ROOT: ${{ github.workspace }}/st-direct-checkout/ptoas-bin
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
-      PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
+      PTOAS_SHA256_AARCH64: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
+      PTOAS_SHA256_X86_64: ${{ needs.toolchain.outputs.ptoas_sha256_x86_64 }}
       CMAKE_BUILD_PARALLEL_LEVEL: 16
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
@@ -981,14 +998,15 @@ jobs:
       contents: read
     # TEST MODE: keep the 2-device runner and pin task-submit to DEVICE_ID
     # (see system-tests). FLIP TO PROD: cpu runner + `--device auto --device-num 2`.
-    runs-on: [self-hosted, linux, arm64, npu]
+    runs-on: [self-hosted, linux, npu]
     defaults:
       run:
         working-directory: dist-checkout
     env:
       PTOAS_ROOT: ${{ github.workspace }}/dist-checkout/ptoas-bin
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
-      PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
+      PTOAS_SHA256_AARCH64: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
+      PTOAS_SHA256_X86_64: ${{ needs.toolchain.outputs.ptoas_sha256_x86_64 }}
       CMAKE_BUILD_PARALLEL_LEVEL: 16
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
@@ -1065,14 +1083,15 @@ jobs:
       contents: read
     # TEST MODE: keep the device runner and pin task-submit to its card (see
     # system-tests). FLIP TO PROD: cpu runner + `--device auto`.
-    runs-on: [self-hosted, linux, arm64, npu]
+    runs-on: [self-hosted, linux, npu]
     defaults:
       run:
         working-directory: lib-checkout
     env:
       PTOAS_ROOT: ${{ github.workspace }}/lib-checkout/ptoas-bin
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
-      PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
+      PTOAS_SHA256_AARCH64: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
+      PTOAS_SHA256_X86_64: ${{ needs.toolchain.outputs.ptoas_sha256_x86_64 }}
       CMAKE_BUILD_PARALLEL_LEVEL: 16
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
@@ -1280,14 +1299,15 @@ jobs:
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
-    runs-on: [self-hosted, linux, arm64, npu-a5]
+    runs-on: [self-hosted, linux, npu-a5]
     defaults:
       run:
         working-directory: a5-checkout
     env:
       PTOAS_ROOT: ${{ github.workspace }}/a5-checkout/ptoas-bin
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
-      PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
+      PTOAS_SHA256_AARCH64: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
+      PTOAS_SHA256_X86_64: ${{ needs.toolchain.outputs.ptoas_sha256_x86_64 }}
       CMAKE_BUILD_PARALLEL_LEVEL: 16
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache

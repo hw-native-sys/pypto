@@ -378,10 +378,13 @@ using DirectDefMap = std::unordered_map<const Var*, AssignStmtPtr>;
 /// emits the Nz TileView ``(col_major, row_major, fractal=1024)`` that
 /// matches matmul output, so iter_arg/yield TileViews line up.
 AssignStmtPtr BuildAccInit(int64_t m, int64_t n, const DataType& dtype, const std::string& name_hint,
-                           const Span& span) {
+                           const Span& span, bool compact = false) {
   auto& reg = OpRegistry::GetInstance();
   std::vector<std::pair<std::string, std::any>> kwargs = {{"dtype", dtype},
                                                           {"target_memory", MemorySpace::Acc}};
+  if (compact) {
+    kwargs.emplace_back("compact", true);
+  }
   auto call = reg.Create("tile.create", {MakeIndexTuple({m, n}, span)}, kwargs, span);
   auto var = std::make_shared<Var>(name_hint, call->GetType(), span);
   return std::make_shared<AssignStmt>(var, call, span);
@@ -414,7 +417,17 @@ AccInitValue BuildAccInitWithValidShape(int64_t physical_m, int64_t physical_n, 
     return AccInitValue{{init}, init->var_};
   }
 
-  auto storage = BuildAccInit(physical_m, physical_n, dtype, name_hint + "_storage", span);
+  // Declare the buffer compact when its valid rows are not provably its physical
+  // rows -- the same predicate `StampCompactForNarrowedAccRows` applies to a
+  // matmul result, because the K-loop's own `mad` is what writes this buffer and
+  // it takes M from the L0A operand's valid rows. `tile.set_validshape` below
+  // inherits the mode, so the iter_arg, every `tile.matmul_acc` that accumulates
+  // into it (the op inherits its accumulator's compact mode) and the reader after
+  // the loop all agree with the pitch the hardware used. Leaving the seed
+  // non-compact silently skews every N-fractal above the first (#2470, #2510).
+  const bool rows_narrowed =
+      ProveValidExtentEqual(valid_m, MakeIndex(physical_m, span)) != ProofResult::kTrue;
+  auto storage = BuildAccInit(physical_m, physical_n, dtype, name_hint + "_storage", span, rows_narrowed);
   auto& reg = OpRegistry::GetInstance();
   auto narrowed_call =
       reg.Create("tile.set_validshape", {storage->var_, std::move(valid_m), std::move(valid_n)}, span);

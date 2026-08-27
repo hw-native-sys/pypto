@@ -262,5 +262,52 @@ class Alt:
     assert _program_decls(_reparse(prog)) == _program_decls(prog)
 
 
+def test_repeating_the_same_policy_for_one_tensor_is_accepted():
+    """A restated declaration is redundant, not an error: one entry survives."""
+
+    @pl.program
+    class Prog:
+        @pl.function
+        def main(
+            self,
+            a: pl.Tensor[[64, 64], pl.FP32],
+            out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            with pl.at(level=pl.Level.CORE_GROUP, name_hint="k"):
+                pl.set_cache_policy(a, pl.CachePolicy.BYPASS)
+                pl.set_cache_policy(a, pl.CachePolicy.BYPASS)
+                t: pl.Tile[[64, 64], pl.FP32] = pl.load(a, [0, 0], [64, 64])
+                out = pl.store(t, [0, 0], out)
+            return out
+
+    decls = _program_decls(Prog)
+    assert sum(len(entries) for _scope, entries in decls) == 1, decls
+
+
+def test_conflicting_policies_for_one_tensor_are_rejected():
+    """Two different policies for one tensor in one scope contradict each other.
+
+    Keeping the first silently resolved this toward BYPASS — the direction that
+    also asserts the coherency contract the second statement retracts — so the
+    parser rejects it instead of picking a winner.
+    """
+    with pytest.raises(Exception, match="conflicting policies"):
+
+        @pl.program
+        class Prog:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="k"):
+                    pl.set_cache_policy(a, pl.CachePolicy.BYPASS)
+                    pl.set_cache_policy(a, pl.CachePolicy.DEFAULT)
+                    t: pl.Tile[[64, 64], pl.FP32] = pl.load(a, [0, 0], [64, 64])
+                    out = pl.store(t, [0, 0], out)
+                return out
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

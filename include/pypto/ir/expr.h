@@ -681,7 +681,7 @@ inline std::vector<std::pair<std::string, std::any>> WithArgDirectionOverridesAt
 
 /**
  * @brief Reserved attr key for the set of dep edges that codegen packs into
- * a stack ``PTO2TaskId[]`` array and emits as a single
+ * a stack ``TaskId[]`` array and emits as a single
  * ``params.set_dependencies(arr, count)`` call before the kernel submit.
  *
  * Value type: ``std::vector<VarPtr>`` where every entry is a Var of
@@ -1511,8 +1511,9 @@ class TupleGetItemExpr : public Expr {
 using TupleGetItemExprPtr = std::shared_ptr<const TupleGetItemExpr>;
 
 /**
- * @brief Compare two ExprPtr values: ConstInt by value, binary ops structurally
- * (same kind, recursively equal operands), otherwise by pointer identity
+ * @brief Compare two ExprPtr values: ConstInt by value, binary/unary ops and
+ * Calls structurally (same kind or op name, recursively equal operands),
+ * otherwise by pointer identity
  */
 bool AreExprsEqual(const ExprPtr& e1, const ExprPtr& e2);
 

@@ -1547,7 +1547,7 @@ class JITFunction:
             per-rank.
         _level: pl.Level or None.
         _auto_scope: Whether the compiler auto-inserts AUTO runtime scopes
-            (PTO2_SCOPE) around the body and each for/if body. ``True`` by
+            (SIMPLER_SCOPE) around the body and each for/if body. ``True`` by
             default; set ``False`` via ``@pl.jit(auto_scope=False)`` /
             ``@pl.jit.host(auto_scope=False)`` to place scopes by hand with
             ``with pl.scope()``. Also accepted on

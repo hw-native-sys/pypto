@@ -16,8 +16,9 @@ NT, TR, TC = 8, 64, 128          # tiles in the loop, tile rows, tile cols
 ROWS = NT * TR
 CFG = RunConfig(platform="__PLATFORM__")
 
-torch.manual_seed(0)
-A = torch.randn(ROWS, TC, dtype=torch.float32)
+# Cycle through binary-exact values in a stable range on every host architecture.
+indices = torch.arange(ROWS * TC, dtype=torch.int64)
+A = (indices % 3 - 1).to(torch.float32).reshape(ROWS, TC)
 
 
 def check(kernel):
@@ -153,8 +154,8 @@ case 上驱动 `incore_profile.py`：
 原始输出很杂。仓库内的工具把它清理成一份按流水分道、可用 Perfetto 查看的 trace：
 
 ```bash
-python -m pypto.tools.clean_sim_trace \
-  <build-dir>/kernel_insight_all_funcs_<ts>/funcs/<kernel>/collect/out/OPPROF_* -o <out>
+TRACE="<build-dir>/kernel_insight_all_funcs_<ts>/funcs/<kernel>/collect/out"
+python -m pypto.tools.clean_sim_trace "$TRACE"/OPPROF_* -o trace-out
 ```
 
 它写出 `trace.clean.json`，泳道按数据流顺序排列 —— **MTE2 → MTE1 → CUBE → VECTOR → FIXPIPE → MTE3** —— 外加 `instr_metrics.json`，含逐指令的流水、cycle 数与 vector 利用率。

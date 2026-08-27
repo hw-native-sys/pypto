@@ -2292,7 +2292,7 @@ class ScopeKind(enum.Enum):
     """SPMD dispatch scope (core_num/sync_start on ScopeStmt)."""
 
     Runtime = 5
-    """Runtime orchestration scope (PTO2_SCOPE wrapper, manual on/off)."""
+    """Runtime orchestration scope (SIMPLER_SCOPE wrapper, manual on/off)."""
 
     CommDomain = 6
     """Comm-domain scope (with orch.allocate_domain(...) wrapper for host_orch
@@ -2486,11 +2486,11 @@ class SplitAivScopeStmt(ScopeStmt):
     ) -> None: ...
 
 class RuntimeScopeStmt(ScopeStmt):
-    """Runtime orchestration scope: a PTO2_SCOPE wrapper at codegen.
+    """Runtime orchestration scope: a SIMPLER_SCOPE wrapper at codegen.
 
     The ``manual`` flag picks between two emission modes:
-      - ``manual=False`` → ``PTO2_SCOPE() { ... }`` (auto-dep via TensorMap)
-      - ``manual=True``  → ``PTO2_SCOPE(PTO2ScopeMode::MANUAL) { ... }``
+      - ``manual=False`` → ``SIMPLER_SCOPE() { ... }`` (auto-dep via TensorMap)
+      - ``manual=True``  → ``SIMPLER_SCOPE(ScopeMode::MANUAL) { ... }``
         (no auto-dep; compiler emits explicit ``add_dep`` from SSA data flow
         plus user-supplied ``deps=[...]`` on each kernel call)
     """
@@ -3084,6 +3084,37 @@ def create_op_call(
 
     Raises:
         Exception: If operator is not registered, is internal-only, or type deduction fails
+    """
+
+def _create_internal_op_call(
+    op_name: str,
+    args: Sequence[Expr],
+    kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace | PadValue],
+    span: Span,
+) -> Call:
+    """Create a Call expression for a compiler-internal operator. **Private.**
+
+    Compiler-internal counterpart of :func:`create_op_call`: it reaches
+    operators marked ``internal_only`` (e.g. the ``builtin.tensor.*`` chip
+    dispatches that ``LowerHostTensorCollectives`` emits), which the
+    user-facing path rejects by design. Reserved for the round-trip parser,
+    which must rebuild the printer-emitted ``pl.builtin.<ns>.<op>(...)`` form
+    that no DSL wrapper can spell — and which re-checks the invariants the
+    printer stamps before calling in, so the guard is enforced at the
+    user-facing surface rather than dropped. Op builders and DSL wrappers keep
+    using :func:`create_op_call`.
+
+    Args:
+        op_name: Name of the registered operator
+        args: Positional Expr arguments
+        kwargs: Keyword arguments (metadata)
+        span: Source location
+
+    Returns:
+        Call expression with automatically deduced result type
+
+    Raises:
+        Exception: If operator is not registered or type deduction fails
     """
 
 def set_call_attrs(call: Call, attrs: Mapping[str, object]) -> Call:

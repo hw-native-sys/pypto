@@ -863,5 +863,64 @@ def test_canonical_split_k_boundary_codegen_uses_box_aligned_physical_width():
     assert "pto.tmov" not in pto, f"accumulator chains must coalesce without tile.move:\n{pto}"
 
 
+def test_row_narrowed_matmul_declares_a_compact_accumulator_seed():
+    """A K-split matmul whose lhs is row-narrowed must keep CompactMode through the chain.
+
+    ``mad`` takes M from the L0A operand's valid rows and lays L0C out with an
+    N-fractal stride of ``ceil(M/16)*16``; a reader that is not told the tile is
+    compact walks it at the physical row count instead and picks up the wrong
+    fractal (issues #2470, #2510). ``tile.matmul`` gets the mode from
+    ``StampCompactForNarrowedAccRows``, but when the pass has to split K it also
+    synthesizes the accumulator seed -- and ``tile.matmul_acc`` inherits its
+    accumulator operand's mode, so a non-compact seed drags the whole chain, and
+    the store after the loop, back to the physical pitch.
+
+    The seed therefore *declares* the mode on its ``tile.create``. A declaration
+    is what survives: a type stamped by the pass is discarded the moment
+    ``InferTileMemorySpace`` re-deduces the call, whereas a kwarg is re-read.
+    """
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910B)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            lhs: pl.Tensor[[64, 2048], pl.INT8],
+            rhs: pl.Tensor[[2048, 128], pl.INT8],
+            out: pl.Out[pl.Tensor[[64, 128], pl.INT32]],
+        ) -> pl.Tensor[[64, 128], pl.INT32]:
+            lhs_mat: pl.Tile[
+                [64, 2048],
+                pl.INT8,
+                pl.Mem.Mat,
+                pl.TileView(valid_shape=[16, 2048]),
+            ] = pl.tile.load(lhs, [0, 0], [64, 2048], valid_shape=[16, 2048], target_memory=pl.Mem.Mat)
+            rhs_mat: pl.Tile[[2048, 128], pl.INT8, pl.Mem.Mat] = pl.tile.load(
+                rhs, [0, 0], [2048, 128], target_memory=pl.Mem.Mat
+            )
+            product: pl.Tile[
+                [64, 128],
+                pl.INT32,
+                pl.Mem.Acc,
+                pl.TileView(valid_shape=[16, 128], compact=pl.CompactMode.normal),
+            ] = pl.tile.matmul(lhs_mat, rhs_mat)
+            out = pl.tile.store(product, [0, 0], out)
+            return out
+
+    after = passes.auto_tile_matmul_l0()(Before)
+    printed = ir.python_print(after)
+
+    assert re.search(r"pl\.tile\.create\(\s*\[64, 128\][^)]*compact=True", printed, re.S), (
+        f"the synthesized accumulator seed must declare compact=True:\n{printed}"
+    )
+    acc_views = re.findall(r"pl\.Mem\.Acc,\s*pl\.TileView\((valid_shape=\[16,[^)]*)\)", printed, re.S)
+    assert acc_views, printed
+    for view in acc_views:
+        assert "compact=pl.CompactMode.normal" in view, (
+            f"every row-narrowed Acc tile in the K chain must stay compact, got {view!r}:\n{printed}"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

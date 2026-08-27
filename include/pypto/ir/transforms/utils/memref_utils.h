@@ -223,6 +223,43 @@ inline MemRefPtr GetDefinedMemRef(const std::shared_ptr<const TileType>& tile_ty
   return *tile_type->memref_;
 }
 
+/// How two MemRefs' start addresses relate.
+enum class AddressRelation {
+  kSame,       ///< provably the same address
+  kDifferent,  ///< provably different addresses
+  kUnknown,    ///< same allocation, offsets neither provably equal nor provably apart
+};
+
+/// Compare where two MemRefs start, more precisely than `MemRef::SameAllocation`.
+///
+/// `SameAllocation` compares only the base Ptr, so two slots of one
+/// `pl.MemRef(slots=N)` look like the same storage. Use this wherever the
+/// question is whether a value already sits where it has to end up: between two
+/// slots of one allocation a reconciling copy is still required.
+///
+/// Size is deliberately not compared. A padded loop-carried accumulator carries
+/// its buffer under one valid shape and yields it under another, so the two
+/// MemRefs describe the same storage at differing extents; requiring equal sizes
+/// would ask for a copy from a buffer onto itself, which for `Acc` has no legal
+/// lowering at all.
+///
+/// Offsets compare through `AreExprsEqual`, so a runtime slot subscript written
+/// twice (`buf[i % 2]` at two sites builds two structurally identical trees)
+/// still reports `kSame`. What it cannot prove either way is `kUnknown` — two
+/// *different* symbolic offsets into one allocation may or may not land on the
+/// same bytes. Callers that would move data must reject that case rather than
+/// guess: copying is unsafe when the addresses turn out equal, and skipping is
+/// unsafe when they do not.
+inline AddressRelation CompareBaseAddress(const MemRefPtr& a, const MemRefPtr& b) {
+  CHECK(a != nullptr && b != nullptr) << "MemRef must not be null";
+  if (a->base_.get() != b->base_.get()) return AddressRelation::kDifferent;
+  if (AreExprsEqual(a->byte_offset_, b->byte_offset_)) return AddressRelation::kSame;
+  // AreExprsEqual folds ConstInt by value, so two constants that compare unequal
+  // really are different addresses; anything else is symbolic and unprovable.
+  if (As<ConstInt>(a->byte_offset_) && As<ConstInt>(b->byte_offset_)) return AddressRelation::kDifferent;
+  return AddressRelation::kUnknown;
+}
+
 inline bool TryRegisterUniqueMemRef(const MemRefPtr& memref, MemorySpace memory_space,
                                     std::map<const MemRef*, MemorySpace>& seen_ptrs) {
   CHECK(memref != nullptr) << "MemRef must not be null";
@@ -290,6 +327,29 @@ inline StmtPtr CreateAllocStatement(const MemRefPtr& memref, MemorySpace memory_
       std::make_shared<Call>(alloc_op, alloc_args, std::move(alloc_kwargs), GetPtrType(), Span::unknown());
 
   return std::make_shared<AssignStmt>(memref->base_, alloc_call, Span::unknown());
+}
+
+/// Prepend alloc statements to a function body's top-level statement list.
+///
+/// Every consumer of the allocation list scans the body's top-level `SeqStmts`
+/// (see `CollectPinnedAllocSizes`), so an allocation created after `InitMemRef`
+/// has to land there too rather than beside its first use.
+inline StmtPtr InsertAllocsIntoBody(const StmtPtr& body, const std::vector<StmtPtr>& alloc_stmts) {
+  if (alloc_stmts.empty()) return body;
+
+  std::vector<StmtPtr> new_seq_stmts;
+  new_seq_stmts.insert(new_seq_stmts.end(), alloc_stmts.begin(), alloc_stmts.end());
+
+  const Span& span = body ? body->span_ : alloc_stmts.front()->span_;
+  if (body) {
+    if (auto seq = As<SeqStmts>(body)) {
+      new_seq_stmts.insert(new_seq_stmts.end(), seq->stmts_.begin(), seq->stmts_.end());
+    } else {
+      new_seq_stmts.push_back(body);
+    }
+  }
+
+  return SeqStmts::Flatten(std::move(new_seq_stmts), span);
 }
 
 /// The base Ptr an alloc statement declares when it is a user-owned (pinned)

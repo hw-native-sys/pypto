@@ -47,6 +47,7 @@ from .diagnostics import (
 )
 from .enum_utils import (
     CACHE_POLICY_MAP,
+    CACHE_POLICY_NAMES,
     LEVEL_MAP,
     ROLE_MAP,
     SCOPE_MODE_MAP,
@@ -3429,10 +3430,25 @@ class ASTParser:
                 )
             var, policy = self._resolve_cache_policy_marker(child)
             self._consumed_cache_policy_markers[id(child)] = child
-            # A repeated declaration for the same binding is redundant, not an
-            # error; keep the first so the attr stays a set of distinct tensors.
-            if not any(var is v for v, _ in decls):
+            # A repeated declaration for the same binding is redundant when it
+            # restates the same policy — keep the first so the attr stays a set
+            # of distinct tensors. A repeat that names a *different* policy is a
+            # contradiction, not a redundancy: silently keeping the first would
+            # resolve it toward BYPASS, the direction that also asserts the
+            # coherency contract the second statement retracts.
+            existing = next((p for v, p in decls if v is var), None)
+            if existing is None:
                 decls.append((var, policy))
+            elif existing != policy:
+                raise ParserSyntaxError(
+                    f"pl.set_cache_policy() declares conflicting policies for '{var.name_hint}' "
+                    f"in one scope: {CACHE_POLICY_NAMES[existing]} then "
+                    f"{CACHE_POLICY_NAMES[policy]}",
+                    span=self.span_tracker.get_span(child),
+                    hint="One tensor takes one policy per scope. Drop the redundant "
+                    "declaration, or move the differing one into its own scope. To vary "
+                    "the policy per access, use pl.load(..., cache=...) instead.",
+                )
         return decls
 
     def _merge_cache_policy_attr(
@@ -4164,7 +4180,7 @@ class ASTParser:
         """Parse ``with pl.scope(mode=...):`` into a Runtime scope.
 
         ``mode`` defaults to ``ScopeMode.AUTO``. AUTO scopes are the explicit IR
-        form of the orchestration ``PTO2_SCOPE()`` block; MANUAL scopes turn off
+        form of the orchestration ``SIMPLER_SCOPE()`` block; MANUAL scopes turn off
         auto dependency tracking (``pl.scope(mode=pl.ScopeMode.MANUAL)`` — the
         former ``pl.manual_scope()``).
         """
@@ -6135,10 +6151,10 @@ class ASTParser:
             return ir.ConstFloat(value, DataType.DEFAULT_CONST_FLOAT, span)
         elif value is None:
             # ``None`` is the "no producer yet" TaskId sentinel — the Pythonic
-            # spelling of an invalid PTO2TaskId. Used to seed a TaskId loop
+            # spelling of an invalid TaskId. Used to seed a TaskId loop
             # carry (``prev_tid = None``) or as a ``deps=[None]`` entry.
             # Lowers to ``system.task_invalid`` -> Scalar[TASK_ID]; codegen
-            # emits ``PTO2TaskId::invalid()`` and downstream ``set_dependencies``
+            # emits ``TaskId::invalid()`` and downstream ``set_dependencies``
             # skips it via an ``is_valid()`` guard.
             return ir.create_op_call("system.task_invalid", [], {}, span)
         else:
@@ -6483,6 +6499,14 @@ class ASTParser:
         # pld.<category>.<op> (3-segment canonical form; category = system/tensor/tile)
         if len(attrs) == 3 and attrs[0] == "pld":
             return self._parse_pld_category_op(attrs[1], attrs[2], call)
+
+        # pl.builtin.<category>.<op> (4-segment) — printer-emitted internal
+        # builtin dispatch, e.g. ``pl.builtin.tensor.allreduce(...)``. Matched
+        # on ``attrs[1]`` alone so a malformed spelling gets the namespace's own
+        # diagnostic instead of falling through to the 2-segment unified path
+        # and reporting the useless "Unknown operation 'pl.builtin'".
+        if len(attrs) >= 2 and attrs[0] == "pl" and attrs[1] == "builtin":
+            return self._parse_builtin_op(attrs[2:], call)
 
         # pl.tensor.{operation} (3-segment)
         if len(attrs) >= 3 and attrs[0] == "pl" and attrs[1] == "tensor":
@@ -8996,6 +9020,115 @@ class ASTParser:
             )
 
         return self._dispatch_op(submodule, f"pld.{category}", op_name, call)
+
+    def _parse_builtin_op(self, segments: list[str], call: ast.Call) -> ir.Expr:
+        """Parse printer-emitted ``pl.builtin.<category>.<op>(...)``.
+
+        ``builtin.*`` operators are compiler-internal chip dispatches that
+        passes synthesize — today ``builtin.tensor.*``, emitted by
+        ``LowerHostTensorCollectives`` for the host ``pld.tensor.*``
+        collectives. They are ``internal_only`` in the registry, so no DSL
+        wrapper spells them and users write the composite ``pld.tensor.*``
+        form instead.
+
+        This path exists so the printer's output past those passes re-parses:
+        the print -> parse round-trip must hold for every IR the pipeline can
+        produce, and the printer renders a registered ``builtin.<ns>.<op>`` as
+        ``pl.builtin.<ns>.<op>`` like any other non-``pld`` operator. It is the
+        machine-only reader for that writer — the counterpart of
+        ``_parse_printed_alloc_call`` — so it builds through
+        ``ir._create_internal_op_call`` and is scoped to the ``builtin.``
+        namespace: no other internal operator becomes reachable, and the
+        user-facing ``create_op_call`` guard is untouched.
+
+        Because this is a *reader for the printer*, it accepts only what the
+        printer can write. Every ``builtin.*`` dispatch is built by one
+        function (``MakeBuiltinCallWithAttrs`` in
+        ``lower_host_tensor_collectives_pass.cpp``), which unconditionally
+        stamps a ``device`` attr and an ``arg_directions`` attr covering every
+        positional arg; orchestration codegen then reads both back behind
+        internal checks. Hand-written source that omits them would be accepted
+        here and blow up much later as an "internal error" — a compiler-bug
+        diagnostic for what is really bad user input — so the invariants are
+        required up front and a violation is reported as a user error.
+        """
+        span = self.span_tracker.get_span(call)
+        if len(segments) != 2:
+            raise InvalidOperationError(
+                f"Unknown operation '{ast.unparse(call.func)}'",
+                span=span,
+                hint="pl.builtin is the compiler-internal operator namespace and is spelled "
+                "pl.builtin.<category>.<op> (e.g. pl.builtin.tensor.allreduce); it is emitted by "
+                "the printer, not written by hand — use the pld.tensor.* collective instead",
+            )
+        category, op_name = segments
+        full_name = f"builtin.{category}.{op_name}"
+        if not ir.is_op_registered(full_name):
+            raise InvalidOperationError(
+                f"Unknown builtin operation 'pl.builtin.{category}.{op_name}'",
+                span=span,
+                hint="pl.builtin.* names compiler-internal dispatches emitted by lowering passes "
+                "(e.g. pl.builtin.tensor.allreduce); check spelling, or use the public "
+                "pld.tensor.* collective",
+            )
+
+        args = [self.parse_expression(arg) for arg in call.args]
+        kwargs = self._parse_op_kwargs(call)
+        attrs = self._parse_op_attrs(call) or {}
+        self._check_builtin_op_printer_invariants(full_name, args, attrs, span)
+        try:
+            built = ir._create_internal_op_call(full_name, args, kwargs, span)
+        except BUG_CLASS_EXCEPTIONS:
+            # Compiler bug, not a bad kernel - surface it with its type and trace intact.
+            raise
+        except Exception as e:
+            raise InvalidOperationError(
+                f"Error in builtin operation '{full_name}': "
+                f"{concise_error_message(e, strip_trailing_span=True)}",
+                span=span,
+            ) from e
+        return self._attach_op_attrs(built, attrs)
+
+    def _check_builtin_op_printer_invariants(
+        self, full_name: str, args: list[Any], attrs: dict[str, object], span: ir.Span
+    ) -> None:
+        """Reject a ``pl.builtin.*`` call the printer could not have written.
+
+        Keeps the accepted grammar equal to the printer's output, so this
+        machine-only surface cannot be used to hand-build a dispatch that
+        orchestration codegen would reject with an ``INTERNAL_CHECK`` (see
+        ``EmitBuiltinWindowCollectiveDispatch``: it requires a ``device`` attr
+        to resolve the rank expression, and one ``arg_directions`` entry per
+        positional arg).
+        """
+        hint = (
+            f"pl.builtin.* is emitted by the python printer, not written by hand — "
+            f"{full_name} is reached by writing the public pld.{full_name.split('.', 1)[1]} "
+            f"collective and letting LowerHostTensorCollectives lower it"
+        )
+        if "device" not in attrs:
+            raise InvalidOperationError(
+                f"'pl.{full_name}' requires a device attr naming the dispatching rank "
+                f'(attrs={{"device": <rank>}})',
+                span=span,
+                hint=hint,
+            )
+        directions = attrs.get("arg_directions")
+        if directions is None:
+            raise InvalidOperationError(
+                f"'pl.{full_name}' requires an arg_directions attr "
+                f'(attrs={{"arg_directions": [pl.adir.<dir>, ...]}})',
+                span=span,
+                hint=hint,
+            )
+        if len(cast("list[object]", directions)) != len(args):
+            raise InvalidOperationError(
+                f"'pl.{full_name}' has {len(args)} positional args but "
+                f"{len(cast('list[object]', directions))} arg_directions entries; "
+                "orchestration codegen requires one direction per arg",
+                span=span,
+                hint=hint,
+            )
 
     # Maps iterator type name to ForKind enum value.
     _ITERATOR_TO_KIND = {

@@ -348,8 +348,10 @@ TypePtr DeduceTileGemvAccType(const std::vector<ExprPtr>& args,
                               const std::vector<std::pair<std::string, std::any>>& kwargs,
                               const std::string& op_name) {
   ValidateGemvAccPhase(kwargs, op_name);
-  CHECK(args.size() == 3) << "The operator " << op_name << " requires exactly 3 arguments, but got "
-                          << args.size();
+  CHECK(args.size() == 3 || args.size() == 4)
+      << "The operator " << op_name << " requires 3 arguments (acc, lhs, rhs) or 4 with the optional "
+      << "init_cond predicate, but got " << args.size();
+  CheckMatmulInitCond(args, 3, op_name);
   auto acc_type = As<TileType>(args[0]->GetType());
   CHECK(acc_type) << "The operator " << op_name << " requires first argument (acc) to be a TileType, but got "
                   << args[0]->GetType()->TypeName();
@@ -484,6 +486,9 @@ REGISTER_OP("tile.gemv_acc")
     .add_argument("acc", "Accumulator tile (TileType, 2D [1, N])")
     .add_argument("lhs", "Row vector tile (TileType, 2D [1, K])")
     .add_argument("rhs", "Right-hand side tile (TileType, 2D [K, N])")
+    .add_argument("init_cond",
+                  "Optional BOOL scalar; where it holds the accumulator is overwritten with "
+                  "lhs @ rhs instead of accumulated into (the split-K `k == 0` step)")
     .set_attr<std::string>("acc_phase")
     .set_input_memory(0, MemorySpace::Acc)
     .set_input_memory(1, MemorySpace::Left)

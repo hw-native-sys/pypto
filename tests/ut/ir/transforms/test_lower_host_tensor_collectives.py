@@ -10,17 +10,23 @@
 
 """Tests for ``LowerHostTensorCollectives``.
 
-The lowering emits ``builtin.tensor.*`` internal ops that the public DSL cannot
-spell (the composite ``pld.tensor.*`` call is what gets lowered), so a whole-
-``@pl.program`` ``Expected`` cannot be parsed for these tests. As in the
-materialize_comm_domain_scopes module, the structural Before/Expected pattern
-is applied at the granularity of the pass's comparable output product — the
-emitted builtin dispatch — via :func:`_assert_builtin_dispatch`, which pins the
-full dispatch (world-size loop, every window-bound arg in order, arg
-directions, and the complete kwarg/attr dicts).
+The lowering emits ``builtin.tensor.*`` internal ops, which the printer renders
+as ``pl.builtin.tensor.*`` — a machine-only surface the parser reads back, so
+the lowered dispatch survives print -> parse. A whole-``@pl.program``
+``Expected`` still cannot be parsed for these tests, but for an upstream
+reason: ``MaterializeCommDomainScopes`` must run first, and neither the
+``CommDomainScopeStmt`` it synthesizes nor the ``WindowBuffer`` back-references
+it stamps on ``DistributedTensorType`` has a DSL surface.
+
+So, as in the materialize_comm_domain_scopes module, the structural
+Before/Expected pattern is applied at the granularity of the pass's comparable
+output product — the emitted builtin dispatch — via
+:func:`_assert_builtin_dispatch`, which pins the full dispatch (world-size
+loop, every window-bound arg in order, arg directions, and the complete
+kwarg/attr dicts) both in the pass output and in its re-parse.
 """
 
-from typing import cast
+from typing import Any, cast
 
 import pypto.language as pl
 import pypto.language.distributed as pld
@@ -38,6 +44,13 @@ _BUILTIN_REDUCE_SCATTER = ir.get_op("builtin.tensor.reduce_scatter").name
 
 @pytest.fixture(autouse=True)
 def _basic_verification_context():
+    """Property verification only — the conftest default adds the roundtrip
+    instrument, which these programs cannot satisfy: they run
+    ``MaterializeCommDomainScopes``, whose ``CommDomainScopeStmt`` and
+    ``WindowBuffer`` back-references have no DSL surface and so fail
+    whole-program structural equality after a re-parse. The builtin dispatch
+    itself does round-trip; ``_assert_builtin_dispatch`` checks that directly.
+    """
     with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
         yield
 
@@ -128,7 +141,7 @@ def _assert_alias_keeps_window_buffer(alias: ir.AssignStmt) -> None:
 
 
 def _assert_builtin_dispatch(
-    host_body: ir.Stmt,
+    result: ir.Program,
     builtin_name: str,
     *,
     arg_names: list[str],
@@ -136,16 +149,56 @@ def _assert_builtin_dispatch(
     kwargs: dict[str, object],
     attrs: dict[str, object] | None = None,
 ) -> ir.Call:
+    """Pin the lowered ``builtin_name`` dispatch, in the pass output *and* in the
+    print -> parse round-trip of that output.
+
+    The printer renders the lowered internal op as ``pl.builtin.tensor.<op>`` and
+    the parser reads that machine-only surface back, so re-parsing the printed
+    program must rebuild the same dispatch. Matching both sides against one set
+    of expectations keeps the two halves from drifting.
+
+    Whole-program ``assert_structural_equal`` cannot be used for that half:
+    ``MaterializeCommDomainScopes`` (which must run first) synthesizes
+    ``CommDomainScopeStmt`` and the ``WindowBuffer`` back-references on
+    ``DistributedTensorType``, and neither has a DSL surface — the scope prints
+    as a leading comment and the back-reference is not printed at all. Hence
+    ``window_bound_args=False`` on the re-parsed side; everything the lowering
+    itself produces is still matched exactly.
+
+    Returns the dispatch call from the lowered (non-re-parsed) program.
+    """
+    expectations: dict[str, Any] = {
+        "arg_names": arg_names,
+        "arg_directions": arg_directions,
+        "kwargs": kwargs,
+        "attrs": attrs,
+    }
+    call = _match_builtin_dispatch(_get_func(result, "host_orch").body, builtin_name, **expectations)
+    reparsed = pl.parse_program(ir.python_print(result, format=False))
+    assert isinstance(reparsed, ir.Program)
+    _match_builtin_dispatch(
+        _get_func(reparsed, "host_orch").body, builtin_name, window_bound_args=False, **expectations
+    )
+    return call
+
+
+def _match_builtin_dispatch(
+    host_body: ir.Stmt,
+    builtin_name: str,
+    *,
+    arg_names: list[str],
+    arg_directions: list[ir.ArgDirection],
+    kwargs: dict[str, object],
+    attrs: dict[str, object] | None = None,
+    window_bound_args: bool = True,
+) -> ir.Call:
     """Assert the host body dispatches ``builtin_name`` exactly once and pin the
     full emitted structure of the dispatch.
 
     This is the structural-comparison equivalent of the Before/Expected pattern
-    for ``LowerHostTensorCollectives``: the lowered output is a ``builtin.tensor.*``
-    internal op that the public DSL cannot spell (the composite ``pld.tensor.*``
-    call is what gets lowered), so no ``Expected`` program source can be parsed.
-    As in the materialize_comm_domain_scopes module, the pattern is applied at
-    the granularity of the pass's comparable output product — the builtin
-    dispatch. The helper pins:
+    for ``LowerHostTensorCollectives``, applied — as in the
+    materialize_comm_domain_scopes module — at the granularity of the pass's
+    comparable output product: the builtin dispatch. The helper pins:
 
     * exactly one ``for r in pl.range(pld.system.world_size())`` loop whose body
       is exactly the builtin EvalStmt (extra or missing surrounding statements
@@ -196,7 +249,8 @@ def _assert_builtin_dispatch(
         var = _as_var(actual)
         assert var.name_hint == expected, f"expected arg window var {expected!r}, got {var.name_hint!r}"
         assert isinstance(var.type, ir.DistributedTensorType)
-        assert var.type.window_buffer is not None, f"arg {expected!r} must be window-bound"
+        if window_bound_args:
+            assert var.type.window_buffer is not None, f"arg {expected!r} must be window-bound"
 
     assert list(call.arg_directions) == arg_directions
     # arg_directions is mirrored in attrs
@@ -235,10 +289,9 @@ def test_host_allreduce_lowers_to_builtin_world_size_loop():
 
     program = cast(ir.Program, passes.materialize_comm_domain_scopes()(P))
     result = cast(ir.Program, passes.lower_host_tensor_collectives()(program))
-    host = _get_func(result, "host_orch")
 
     _assert_builtin_dispatch(
-        host.body,
+        result,
         "builtin.tensor.allreduce",
         arg_names=["data", "signal"],
         arg_directions=[ir.ArgDirection.InOut, ir.ArgDirection.InOut],
@@ -266,10 +319,9 @@ def test_implicit_host_allreduce_synthesizes_signal_then_lowers():
     program = passes.synthesize_allreduce_signals()(P)
     program = passes.materialize_comm_domain_scopes()(program)
     result = passes.lower_host_tensor_collectives()(program)
-    host = _get_func(result, "host_orch")
 
     _assert_builtin_dispatch(
-        host.body,
+        result,
         "builtin.tensor.allreduce",
         arg_names=["data", "__allreduce_signal_0"],
         arg_directions=[ir.ArgDirection.InOut, ir.ArgDirection.InOut],
@@ -306,7 +358,7 @@ def test_return_implicit_host_allreduce_synthesizes_signal_then_lowers():
     return_stmts = _collect_return_stmts(host.body)
 
     _assert_builtin_dispatch(
-        host.body,
+        result,
         "builtin.tensor.allreduce",
         arg_names=["data", "__allreduce_signal_0"],
         arg_directions=[ir.ArgDirection.InOut, ir.ArgDirection.InOut],
@@ -351,7 +403,7 @@ def test_return_explicit_host_allreduce_lowers_with_user_signal():
     return_stmts = _collect_return_stmts(host.body)
 
     _assert_builtin_dispatch(
-        host.body,
+        result,
         "builtin.tensor.allreduce",
         arg_names=["data", "signal"],
         arg_directions=[ir.ArgDirection.InOut, ir.ArgDirection.InOut],
@@ -549,12 +601,11 @@ def test_host_allreduce_multicore_propagates_core_num_and_accepts_wider_signal()
 
     program = passes.materialize_comm_domain_scopes()(P)
     result = passes.lower_host_tensor_collectives()(program)
-    host = _get_func(result, "host_orch")
 
     # A stride of 8 is wider than the 4 requested lanes: the spare lanes are
     # accepted and `core_num` reaches the builtin unchanged.
     _assert_builtin_dispatch(
-        host.body,
+        result,
         "builtin.tensor.allreduce",
         arg_names=["data", "signal"],
         arg_directions=[ir.ArgDirection.InOut, ir.ArgDirection.InOut],
@@ -746,9 +797,8 @@ def test_host_barrier_lowers_to_builtin_world_size_loop():
 
     program = passes.materialize_comm_domain_scopes()(P)
     result = passes.lower_host_tensor_collectives()(program)
-    host = _get_func(result, "host_orch")
     _assert_builtin_dispatch(
-        host.body,
+        result,
         "builtin.tensor.barrier",
         arg_names=["signal"],
         arg_directions=[ir.ArgDirection.InOut],
@@ -815,9 +865,8 @@ def test_host_broadcast_lowers_to_builtin_world_size_loop():
 
     program = passes.materialize_comm_domain_scopes()(P)
     result = passes.lower_host_tensor_collectives()(program)
-    host = _get_func(result, "host_orch")
     _assert_builtin_dispatch(
-        host.body,
+        result,
         "builtin.tensor.broadcast",
         arg_names=["data", "signal"],
         arg_directions=[ir.ArgDirection.InOut, ir.ArgDirection.InOut],
@@ -885,9 +934,8 @@ def test_host_reduce_scatter_lowers_to_builtin_world_size_loop():
 
     program = passes.materialize_comm_domain_scopes()(P)
     result = passes.lower_host_tensor_collectives()(program)
-    host = _get_func(result, "host_orch")
     _assert_builtin_dispatch(
-        host.body,
+        result,
         "builtin.tensor.reduce_scatter",
         arg_names=["data", "signal"],
         arg_directions=[ir.ArgDirection.InOut, ir.ArgDirection.InOut],
@@ -1052,9 +1100,8 @@ def test_host_allgather_lowers_to_namesake_builtin():
 
     program = passes.materialize_comm_domain_scopes()(P)
     result = passes.lower_host_tensor_collectives()(program)
-    host = _get_func(result, "host_orch")
     _assert_builtin_dispatch(
-        host.body,
+        result,
         "builtin.tensor.allgather",
         arg_names=["stage", "data", "signal"],
         arg_directions=[
@@ -1363,10 +1410,9 @@ def test_host_all_to_all_lowers_to_namesake_builtin():
 
     program = passes.materialize_comm_domain_scopes()(P)
     result = passes.lower_host_tensor_collectives()(program)
-    host = _get_func(result, "host_orch")
 
     _assert_builtin_dispatch(
-        host.body,
+        result,
         "builtin.tensor.all_to_all",
         arg_names=["stage", "data", "signal"],
         arg_directions=[
@@ -1453,9 +1499,8 @@ def test_host_all_to_all_v_lowers_to_namesake_builtin():
 
     program = passes.materialize_comm_domain_scopes()(P)
     result = passes.lower_host_tensor_collectives()(program)
-    host = _get_func(result, "host_orch")
     _assert_builtin_dispatch(
-        host.body,
+        result,
         "builtin.tensor.all_to_all_v",
         arg_names=["inp", "data", "signal", "counts", "recv"],
         arg_directions=[
@@ -1837,10 +1882,9 @@ def test_host_allreduce_ring_lowers_to_ring_builtin():
 
     program = cast(ir.Program, passes.materialize_comm_domain_scopes()(P))
     result = cast(ir.Program, passes.lower_host_tensor_collectives()(program))
-    host = _get_func(result, "host_orch")
 
     _assert_builtin_dispatch(
-        host.body,
+        result,
         "builtin.tensor.allreduce_ring",
         arg_names=["data", "signal"],
         arg_directions=[ir.ArgDirection.InOut, ir.ArgDirection.InOut],

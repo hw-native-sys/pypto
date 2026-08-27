@@ -203,14 +203,15 @@ def scaled(a: pl.Tensor, out: pl.Out[pl.Tensor]):
 check(scaled, sized)
 ```
 
-Leaving a field `None` (the default) defers to the runtime's `PTO2_RING_*` environment
-variables or its compile-time default, so you can also experiment without touching source.
+Leaving a field `None` (the default) defers to the runtime's compile-time default.
+The process-wide `PTO2_RING_*` environment variables are retired and no longer read,
+so `RunConfig` is the only way to size the rings.
 
 **Cost:** memory, and the arithmetic is per ring — a scalar you meant as "just make it
 bigger" is applied four times. Sizing the rings is also the *second* fix: a task window
 that overflows because one scope holds thousands of tasks is better split into two scopes
 than grown. The runtime says so itself when it fails — *"raise `ring_task_window`
-(`PTO2_RING_TASK_WINDOW`) or split the scope"*.
+(`runtime_env.ring_task_window`) or split the scope"*.
 
 **How to confirm:** the metadata line of a fresh `scope_stats.jsonl` shows the new sizes,
 and the peak that was pinned at capacity is no longer pinned.
@@ -234,11 +235,17 @@ with pl.at(level=pl.Level.CORE_GROUP):
     acc = pl.matmul(activations, weights, out_dtype=pl.FP32)
 ```
 
-`pl.set_cache_policy` is a standalone statement at the top of a `pl.at` or
-`pl.spmd` body. It covers every read of that tensor in the scope, so tensor-level
-code needs no change at the access sites — which matters because those reads are
-implicit: `pl.matmul`, `pl.assemble` and subscript slicing issue loads without a
-call you could annotate.
+`pl.set_cache_policy` is a standalone statement at the top level of a
+`pl.at(level=pl.Level.CORE_GROUP, ...)` or `pl.spmd(...)` body — anywhere among
+that body's own statements, not necessarily the first line. It covers every read
+of that tensor in the scope, so tensor-level code needs no change at the access
+sites — which matters because those reads are implicit: `pl.matmul`,
+`pl.assemble` and subscript slicing issue loads without a call you could
+annotate.
+
+A declaration on a non-`CORE_GROUP` `pl.at` scope parses and is carried, but
+nothing lowers it into a load today, so it has no effect — those scopes do not
+become device kernels.
 
 When you *are* writing tile-level code and already name the load, put it there
 instead:

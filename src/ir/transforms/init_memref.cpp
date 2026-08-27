@@ -804,24 +804,6 @@ class InitMemRefMutator : public IRMutator {
 };
 
 // Insert alloc statements at the beginning of a function body.
-StmtPtr InsertAllocsIntoBody(const StmtPtr& body, const std::vector<StmtPtr>& alloc_stmts) {
-  if (alloc_stmts.empty()) return body;
-
-  std::vector<StmtPtr> new_seq_stmts;
-  new_seq_stmts.insert(new_seq_stmts.end(), alloc_stmts.begin(), alloc_stmts.end());
-
-  const Span& span = body ? body->span_ : alloc_stmts.front()->span_;
-  if (body) {
-    if (auto seq = As<SeqStmts>(body)) {
-      new_seq_stmts.insert(new_seq_stmts.end(), seq->stmts_.begin(), seq->stmts_.end());
-    } else {
-      new_seq_stmts.push_back(body);
-    }
-  }
-
-  return SeqStmts::Flatten(std::move(new_seq_stmts), span);
-}
-
 /**
  * @brief Initialize MemRef for all variables in a function
  *

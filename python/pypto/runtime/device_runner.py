@@ -736,7 +736,7 @@ def execute_on_device(  # noqa: PLR0913
         enable_pmu: AICore PMU event type. ``0`` disables; ``>0`` selects
             an event type (``2`` = PIPE_UTILIZATION, ``4`` = MEMORY).
             Mirrors ``--enable-pmu N``.
-        enable_dep_gen: Capture PTO2 dependency edges (``deps.json``).
+        enable_dep_gen: Capture simpler dependency edges (``deps.json``).
             Mirrors ``--enable-dep-gen``.
         enable_scope_stats: Capture per-scope ring-fill peaks
             (``scope_stats/scope_stats.jsonl``). Mirrors

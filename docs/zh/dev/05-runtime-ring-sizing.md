@@ -30,12 +30,12 @@ Simpler 的 `CallConfig.runtime_env` 上的同名字段一一对应，并且按 
 
 ```text
 单任务 CallConfig.runtime_env 值   （RunConfig 覆盖 —— 最高优先级）
-  └─ 回退到 → PTO2_RING_* 环境变量  （进程级）
-       └─ 回退到 → 编译期默认值      （最低优先级）
+  └─ 回退到 → 编译期默认值           （最低优先级）
 ```
 
-因此 `RunConfig` 覆盖优先于 `PTO2_RING_TASK_WINDOW` / `PTO2_RING_HEAP` /
-`PTO2_RING_DEP_POOL` 环境变量，而后者又优先于运行时内置的默认值。
+因此 `RunConfig` 覆盖直接优先于运行时内置的默认值，两者之间没有其他层级。进程级的
+`PTO2_RING_TASK_WINDOW` / `PTO2_RING_HEAP` / `PTO2_RING_DEP_POOL` 环境变量已经
+**退役** —— 运行时不再读取它们，若检测到被导出则每次 bind 告警一次。
 
 ## 校验
 

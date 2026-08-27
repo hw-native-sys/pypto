@@ -238,6 +238,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/utils/parent_stmt_analysis.cpp
     src/ir/transforms/utils/pipeline_loop_utils.cpp
     src/ir/transforms/utils/return_lineage_utils.cpp
+    src/ir/transforms/utils/result_alias_utils.cpp
     src/ir/transforms/utils/scope_outline_utils.cpp
     src/ir/transforms/utils/split_axis_utils.cpp
     src/ir/transforms/utils/stmt_dependency_analysis.cpp
@@ -252,6 +253,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/mixed_kernel_expanded_verifier.cpp
     src/ir/verifier/verify_hard_syncall_occupancy.cpp
     src/ir/verifier/verify_aiv_split.cpp
+    src/ir/verifier/verify_acc_compact.cpp
     src/ir/verifier/verify_acc_to_gm_store.cpp
     src/ir/verifier/verify_atomic_add_dtype.cpp
     src/ir/verifier/verify_ssa_pass.cpp

@@ -32,13 +32,13 @@ For each value the runtime resolves the effective size as:
 
 ```text
 per-task CallConfig.runtime_env value   (RunConfig override — highest priority)
-  └─ falls back to → PTO2_RING_* env var (process-wide)
-       └─ falls back to → compile-time default (lowest priority)
+  └─ falls back to → compile-time default (lowest priority)
 ```
 
-So a `RunConfig` override wins over the `PTO2_RING_TASK_WINDOW` /
-`PTO2_RING_HEAP` / `PTO2_RING_DEP_POOL` environment variables, which in turn win
-over the runtime's built-in defaults.
+So a `RunConfig` override wins over the runtime's built-in defaults, and there
+is no tier in between. The process-wide `PTO2_RING_TASK_WINDOW` /
+`PTO2_RING_HEAP` / `PTO2_RING_DEP_POOL` environment variables are **retired** —
+the runtime no longer reads them, and warns once per bind if one is exported.
 
 ## Validation
 

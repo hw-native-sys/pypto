@@ -14,7 +14,7 @@ DSL 暴露**两套正交的机制**，用户可任意组合：
 
 | 表层语法 | 粒度 | 作用 |
 | -------- | ---- | ---- |
-| `with pl.manual_scope():` | per-region | 下沉为 `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`。区域内 runtime 不做自动跟踪；用户需要的排序边必须通过机制 B 显式声明。 |
+| `with pl.manual_scope():` | per-region | 下沉为 `SIMPLER_SCOPE(ScopeMode::MANUAL)`。区域内 runtime 不做自动跟踪；用户需要的排序边必须通过机制 B 显式声明。 |
 | `pl.create_tensor([...], dtype=..., manual_dep=True)` | per-tensor 生命周期 | 任何读 / 写该 tensor 的 task 都**整生命周期**跳过 `OverlapMap` 的 lookup 和 insert，不受 scope 影响。适合那种"完全交给显式边管理"的 scratch buffer。 |
 | `pl.no_dep(arg)` | per-call 参数 | kernel 调用点上，被包装的参数其 `ArgDirection` 变为 `NoDep`——**仅本次提交**对该槽位不进入自动跟踪。不论 callee 把该槽位声明为 `In`、`Out` 还是 `InOut` 都合法：用户在带外（out-of-band）承诺该槽位不存在 RaW / WaW / WaR 冲突——例如 paged-attention 那种"写偏移是数据相关、但按分配协议保证不相交"的场景。在 `pl.manual_scope` 内没有意义（scope 已经全员退出）。 |
 | `with pl.at(..., no_dep_args=[t1, t2]):` | per-arg, 作用于 `pl.at`-块 | `pl.no_dep(arg)` 在 `pl.at`-块上的对应物。outliner 把列出的 tensor 作为合成 kernel call 的实参；`DeriveCallDirections` 随后把这些实参槽位标为 `NoDep`——和在显式 call 站点用 `pl.no_dep(...)` 等效。每一项必须是外层 scope 可见的张量名。In / Out / InOut 的适用范围与 `pl.no_dep(arg)` 相同：如果 scope 体里用 `pl.assemble` 写过这个 capture，outliner 会把合成 kernel 上该形参推断成 `InOut`，`no_dep_args=` 仍然把它覆盖为 `NoDep`（和覆盖 `In` 一样）。注意：`no_dep_args=` 接收**张量**，`deps=` 接收 **TaskId**——同一个 "dep"，作用在不同层。 |
@@ -31,7 +31,7 @@ DSL 暴露**两套正交的机制**，用户可任意组合：
 | `with pl.at(level=pl.Level.CORE_GROUP, deps=[...]) as tid:` | outlined `pl.at`-块 | 整块被 outline 成 InCore kernel + `Submit`；`tid` 捕获被合成的 Submit 的 TaskId，可作为后续 `pl.submit` / `pl.at` 的 dep。不写 `as tid` 时 outliner 会合成一个未使用的 TaskId Var——deps 始终走 `Submit::deps_`。同样接受 `allow_early_resolve=True`（与 `pl.submit` 相同的 early-dispatch 选项）；即使不写 `as tid` 也会强制走 `Submit` 形态，并 lower 为 `Arg::set_allow_early_resolve(true)`。 |
 | `with pl.spmd(N, deps=[...]) as tid:` | outlined SPMD 分发 | `pl.at ... as tid` 形式的 SPMD 版本。内联 body 自动外包成 InCore kernel 并在 `N` 个 block 上分发；`tid` 捕获 grid 级 producer TaskId。`deps=` 仅在带 `as tid` 时可用。`core_num` / `sync_start` 记录在 lower 出的 `Submit` 自身的 `core_num` / `sync_start` 字段上（launch spec 属于启动点，而非外包出的被调函数）；codegen 直接从那里读取。同样接受 `allow_early_resolve=True`（与 `pl.submit` / `pl.at` 相同的 early-dispatch 选项；`pl.spmd` 三种形式均可用，即使不写 `as tid` 也会强制走 `Submit` 形态）和 `predicate=(t[i] > 0)`（参见[调度谓词](#调度谓词predicate)；同样三种形式均可用，同样强制走 `Submit` 形态）。不能嵌套在 `pl.cluster()` 内。 |
 | `barrier = pl.system.task_dummy(deps=[...])` | dependency-only barrier | 不提交 kernel。返回的 TaskId 是一个紧凑的 fan-in 点，可供后续 `deps=[barrier]` 使用。 |
-| `None`（Python 字面量） | 种子 / dep 条目 | "暂无 producer" 的哨兵。`prev_tid = None` 用作 TaskId 循环 iter_arg 的种子；`deps=[None]` 中的 `None` 被丢弃（不贡献任何边）。下沉为 `system.task_invalid` → `PTO2TaskId::invalid()`。 |
+| `None`（Python 字面量） | 种子 / dep 条目 | "暂无 producer" 的哨兵。`prev_tid = None` 用作 TaskId 循环 iter_arg 的种子；`deps=[None]` 中的 `None` 被丢弃（不贡献任何边）。下沉为 `system.task_invalid` → `TaskId::invalid()`。 |
 
 **这些表面都不依赖机制 A 的状态。** 显式 deps 可用于普通自动跟踪、
 `pl.manual_scope()` 内或 `manual_dep=True` tensor 上，并总是在自动跟踪结果
@@ -239,7 +239,7 @@ with pl.manual_scope():
 ```
 
 `prev_tid` 在 `pl.parallel` 内被重新绑定，所以 codegen 把 carry 下沉为
-`PTO2TaskId[N_BRANCHES]` 数组。phase `N+1` 中的每个 task 都会等待
+`TaskId[N_BRANCHES]` 数组。phase `N+1` 中的每个 task 都会等待
 phase `N` 的全部 `N_BRANCHES` 个 task，而非只等最后那个。
 
 ## 参考资料

@@ -171,9 +171,9 @@ def scaled(a: pl.Tensor, out: pl.Out[pl.Tensor]):
 check(scaled, sized)
 ```
 
-字段留空（默认 `None`）会回落到运行时的 `PTO2_RING_*` 环境变量或它的编译期默认值，所以你也可以不改源码来做实验。
+字段留空（默认 `None`）会回落到运行时的编译期默认值。进程级的 `PTO2_RING_*` 环境变量已经退役、不再被读取，因此 `RunConfig` 是给环设尺寸的唯一途径。
 
-**代价：** 内存，而且算术是按环算的 —— 你以为「就整体大一点」的那个标量，会被应用四次。给环加尺寸也是**第二顺位**的修法：一个因为某个作用域里塞了上千个任务而溢出的任务窗口，拆成两个作用域比把它撑大更好。运行时失败时自己就是这么说的 —— *「raise `ring_task_window`（`PTO2_RING_TASK_WINDOW`）or split the scope」*。
+**代价：** 内存，而且算术是按环算的 —— 你以为「就整体大一点」的那个标量，会被应用四次。给环加尺寸也是**第二顺位**的修法：一个因为某个作用域里塞了上千个任务而溢出的任务窗口，拆成两个作用域比把它撑大更好。运行时失败时自己就是这么说的 —— *「raise `ring_task_window`（`runtime_env.ring_task_window`）or split the scope」*。
 
 **怎么确认：** 新一份 `scope_stats.jsonl` 的元数据行显示新尺寸，而原来顶在容量上的那个峰值不再顶着。
 
@@ -194,9 +194,14 @@ with pl.at(level=pl.Level.CORE_GROUP):
     acc = pl.matmul(activations, weights, out_dtype=pl.FP32)
 ```
 
-`pl.set_cache_policy` 是写在 `pl.at` 或 `pl.spmd` 作用域体开头的独立语句。它覆盖该作用域内
-对这个张量的每一次读取，因此张量层代码在访问点上无需任何改动 —— 这一点很关键，因为那些读取
-是隐式的：`pl.matmul`、`pl.assemble` 和下标切片都会发出 load，却没有可供标注的调用点。
+`pl.set_cache_policy` 是写在 `pl.at(level=pl.Level.CORE_GROUP, ...)` 或
+`pl.spmd(...)` 作用域体**顶层**的独立语句 —— 位于该 body 自身的语句之中即可，不必是第一行。
+它覆盖该作用域内对这个张量的每一次读取，因此张量层代码在访问点上无需任何改动 —— 这一点很
+关键，因为那些读取是隐式的：`pl.matmul`、`pl.assemble` 和下标切片都会发出 load，却没有可供
+标注的调用点。
+
+写在非 `CORE_GROUP` 的 `pl.at` 作用域上的声明可以解析并被携带，但目前没有任何环节会把它下降
+到 load，因此不产生效果 —— 那些作用域不会变成设备侧 kernel。
 
 当你写的是 tile 层代码、已经显式写出了 load 时，就标在那里：
 

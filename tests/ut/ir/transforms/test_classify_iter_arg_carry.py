@@ -15,7 +15,7 @@ The pass stamps each Orchestration ``ForStmt`` with a per-iter_arg carry plan:
   aliases the iter_arg (same backing buffer), so codegen routes iter_arg and
   return_var to the init value's emit name. ``True`` means a materialised mutable
   carry variable is needed.
-* ``iter_arg_array_size_<i>`` (int, positive extents only) — the ``PTO2TaskId[N]``
+* ``iter_arg_array_size_<i>`` (int, positive extents only) — the ``TaskId[N]``
   fence-array extent for a ``Scalar[TASK_ID]`` carry inside a ``pl.manual_scope``.
 
 Tests assert on the stamped attrs rather than on a full Expected program: the
@@ -158,7 +158,7 @@ def test_fresh_tensor_yield_is_a_rebind():
 
 def test_manual_scope_parallel_task_id_carry_is_sized():
     """A ``Scalar[TASK_ID]`` carry on a const-trip ``pl.parallel`` inside a
-    manual scope lowers to a ``PTO2TaskId[N]`` fence array of that trip count."""
+    manual scope lowers to a ``TaskId[N]`` fence array of that trip count."""
     rows, cols, tile = 128, 128, 32
 
     @pl.program

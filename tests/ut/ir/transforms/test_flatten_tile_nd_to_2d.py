@@ -3032,6 +3032,146 @@ class TestNdTensorMatmulConversion:
         assert names_flatten.count(_OP_TILE_MATMUL) == 1
         assert names_flatten.count(_OP_TILE_MATMUL_ACC) == 1
 
+    def test_nd_tensor_matmul_acc_forwards_init_cond(self):
+        """A grouped (rank-3, batch=1) ``tensor.matmul_acc`` carries ``init_cond``.
+
+        The predicate's domain is exactly ``matmul_acc``'s own: an operand shape
+        that accumulates without a predicate accumulates with one. Conversion
+        routes the rank-3 call to ``tile.batch_matmul_acc``, which forwards the
+        predicate to the single 2D ``tile.matmul_acc`` the batch=1 fast path
+        emits — the accumulator is a whole tile there, so there is no slice and
+        no per-band bookkeeping.
+
+        ``Expected`` pins the whole lowered function, not just the predicated
+        call: the accumulator must thread from the seeding ``tile.matmul`` into
+        ``tile.matmul_acc``'s operand 0, the grouped ``[1, 64, 256]`` weight must
+        collapse through ``tensor.view`` + ``transpose_view`` to a ``[256, 64]``
+        Mat operand, and the result must stay a ``[16, 64]`` Acc tile. Only the
+        trailing operand differs between the two parametrizations.
+
+        A *runtime* predicate is used deliberately: it pins that the predicate
+        arrives as a live SSA expression over ``k``, which a literal could not
+        distinguish from a constant the pass invented. The literal spelling is
+        covered end to end in ``tests/ut/codegen/test_matmul_init_cond.py``,
+        where it must fold to a single MAD.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def main_incore_0(
+                self,
+                h0: pl.Tensor[[16, 256], pl.BF16],
+                w0: pl.Tensor[[1, 64, 256], pl.BF16],
+                h1: pl.Tensor[[16, 256], pl.BF16],
+                w1: pl.Tensor[[1, 64, 256], pl.BF16],
+                k: pl.Scalar[pl.INDEX],
+                out_0: pl.Out[pl.Tensor[[1, 16, 64], pl.FP32]],
+            ) -> pl.Tensor[[1, 16, 64], pl.FP32]:
+                acc_: pl.Tensor[[1, 16, 64], pl.FP32] = pl.tensor.matmul(
+                    h0, w0, b_trans=True, out_dtype=pl.FP32
+                )
+                acc_2: pl.Tensor[[1, 16, 64], pl.FP32] = pl.tensor.matmul_acc(
+                    acc_, h1, w1, b_trans=True, init_cond=(k == 0)
+                )
+                out_r: pl.Tensor[[1, 16, 64], pl.FP32] = pl.tensor.assemble(out_0, acc_2, [0, 0, 0])
+                return out_r
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def main_incore_0(
+                self,
+                h0: pl.Tensor[[16, 256], pl.BF16],
+                w0: pl.Tensor[[1, 64, 256], pl.BF16],
+                h1: pl.Tensor[[16, 256], pl.BF16],
+                w1: pl.Tensor[[1, 64, 256], pl.BF16],
+                k: pl.Scalar[pl.INDEX],
+                out_0: pl.Out[pl.Tensor[[1, 16, 64], pl.FP32]],
+            ) -> pl.Tensor[[1, 16, 64], pl.FP32]:
+                h0_mat: pl.Tile[[16, 256], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    h0,
+                    [0, 0],
+                    [16, 256],
+                    [16, 256],
+                    target_memory=pl.Mem.Mat,
+                    attrs={"__compiler_tensor_to_tile_mat_bridge": True},
+                )
+                w0_mat_view2d: pl.Tensor[
+                    [64, 256], pl.BF16, pl.TensorView(stride=[256, 1], layout=pl.TensorLayout.ND)
+                ] = pl.tensor.view(w0, [64, 256])
+                w0_mat: pl.Tile[[64, 256], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    w0_mat_view2d,
+                    [0, 0],
+                    [64, 256],
+                    [64, 256],
+                    target_memory=pl.Mem.Mat,
+                    attrs={"__compiler_tensor_to_tile_mat_bridge": True},
+                )
+                w0_mat_t: pl.Tile[
+                    [256, 64],
+                    pl.BF16,
+                    pl.Mem.Mat,
+                    pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.col_major),
+                ] = pl.tile.transpose_view(w0_mat)
+                lhs_slice_0: pl.Tile[[16, 256], pl.BF16, pl.Mem.Mat] = pl.tile.slice(
+                    h0_mat, [16, 256], [0, 0]
+                )
+                rhs_slice_0: pl.Tile[
+                    [256, 64],
+                    pl.BF16,
+                    pl.Mem.Mat,
+                    pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.col_major),
+                ] = pl.tile.slice(w0_mat_t, [256, 64], [0, 0])
+                acc__tile: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lhs_slice_0, rhs_slice_0)
+                h1_mat: pl.Tile[[16, 256], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    h1,
+                    [0, 0],
+                    [16, 256],
+                    [16, 256],
+                    target_memory=pl.Mem.Mat,
+                    attrs={"__compiler_tensor_to_tile_mat_bridge": True},
+                )
+                w1_mat_view2d: pl.Tensor[
+                    [64, 256], pl.BF16, pl.TensorView(stride=[256, 1], layout=pl.TensorLayout.ND)
+                ] = pl.tensor.view(w1, [64, 256])
+                w1_mat: pl.Tile[[64, 256], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    w1_mat_view2d,
+                    [0, 0],
+                    [64, 256],
+                    [64, 256],
+                    target_memory=pl.Mem.Mat,
+                    attrs={"__compiler_tensor_to_tile_mat_bridge": True},
+                )
+                w1_mat_t: pl.Tile[
+                    [256, 64],
+                    pl.BF16,
+                    pl.Mem.Mat,
+                    pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.col_major),
+                ] = pl.tile.transpose_view(w1_mat)
+                lhs_slice_0_1: pl.Tile[[16, 256], pl.BF16, pl.Mem.Mat] = pl.tile.slice(
+                    h1_mat, [16, 256], [0, 0]
+                )
+                rhs_slice_0_1: pl.Tile[
+                    [256, 64],
+                    pl.BF16,
+                    pl.Mem.Mat,
+                    pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.col_major),
+                ] = pl.tile.slice(w1_mat_t, [256, 64], [0, 0])
+                # The forwarded predicate — the whole point of the test. Without
+                # the forwarding this is a 3-operand call, and the k == 0 step
+                # would accumulate into an uninitialized accumulator.
+                acc__tile_1: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
+                    acc__tile, lhs_slice_0_1, rhs_slice_0_1, k == 0
+                )
+                out_0__tile: pl.Tensor[[1, 16, 64], pl.FP32] = pl.tile.store(
+                    acc__tile_1, [0, 0, 0], out_0, [1, 16, 64]
+                )
+                return out_0__tile
+
+        After = passes.flatten_tile_nd_to_2d()(passes.convert_tensor_to_tile_ops()(Before))
+        ir.assert_structural_equal(After, Expected)
+
 
 # ----------------------------------------------------------------------------
 # Regression coverage for #1278 — TileType memory_space presence mismatch on

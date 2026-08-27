@@ -256,7 +256,7 @@ class ChipWorker(Worker):
         # dispatch. Only ring sizing keys the cache, and dispatch takes its ring
         # sizing from the *per-call* RunConfig (``_dispatch``) — never from this
         # worker's ``_config`` — so a bare CallConfig is what an unsized dispatch
-        # resolves to (runtime_env 0 -> PTO2_RING_* / compile-time fallback).
+        # resolves to (runtime_env 0 -> the runtime's compile-time default).
         # Transcribing ``_config``'s rings here would instead build an arena no
         # dispatch asks for. A per-call RunConfig that sizes the rings differently
         # rebuilds once, as before. No-op without a prebuilt arena.

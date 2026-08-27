@@ -106,22 +106,60 @@ IR 上。若被捕获变量是被 `tile.store` 之外的方式重新绑定，则
 store 目标导出（该缓冲区已经通过写方向参数对调用方可见），因此其函数体保留原有的
 重新绑定——被捕获变量仍然会成为参数，而这正是此前出问题的部分。
 
-**写方向：除非函数体读取，否则为 `Out`**：作用域写入的被捕获 tensor——`tile.store`
-的目标或 `tensor.assemble` 的目的操作数——会被 `InferParamDirections` 从 `In`
-提升。具体得到哪个写方向，取决于函数体是否**同时读取**它。这两个写操作都是**就地**
-更新目的操作数的一个子区域：未被写到的区域既不会被 load 也不会被重新 store，因此
-出现在该目的槽位并不会把数据带入作用域，不算读取。只出现在目的槽位的参数因此是
-`Out`；其它任何使用——喂给 `tensor.slice`、计算算子，或作为被调函数的 `In`/`InOut`
-实参——都会使其成为 `InOut`。SSA 下写后状态会绑定到一个新 Var，读取**该别名**同样算读：
+**哪些算子写入**不在这里判定。每个算子在注册表上声明它对各个实参的效应
+（`set_arg_effect`，参见[算子](../ir/05-operators.md#参数效应argument-effects)），
+`InferParamDirections` 直接读取该声明。此前本 pass 只识别 `tile.store` 与
+`tensor.assemble` 两个写算子，因此一个作用域若通过 `tensor.write`、
+`tensor.expand_clone`、`pld.system.notify`、`pld.tile.put` 或任何其它写算子写入被捕获
+tensor，该 tensor 看起来就完全没被动过：参数停留在 `In`，调用方拿不到对这次写入的依赖，
+而后续两个重新推导方向的 pass 会与本 pass 对同一次调用给出不同答案。
+
+**写方向：除非函数体读取，否则为 `Out`**：作用域写入的被捕获 tensor 会被
+`InferParamDirections` 从 `In` 提升。具体得到哪个写方向，取决于函数体是否**同时读取**
+它。被算子声明为 `Write` 的实参是**就地**更新目的操作数的一个子区域：未被写到的区域既
+不会被 load 也不会被重新 store，因此出现在该目的槽位并不会把数据带入作用域，不算读取。
+只出现在这类槽位的参数因此是 `Out`；其它任何使用——喂给 `tensor.slice`、计算算子，或
+作为被调函数的 `In`/`InOut` 实参——都会使其成为 `InOut`。被声明为 `ReadWrite` 的实参
+留在读取路径上：原子 store / assemble（`out += x` 会读取累加器）与 `AtomicAdd` 形式的
+notify 因此保持目的操作数为 `InOut`，而普通形式不会——这是按算子陈述的一条规则，而不是
+每个 pass 各自开一个特例。SSA 下写后状态会绑定到一个新 Var，读取**该别名**同样算读：
 它指向同一块 buffer，而对作用域从未写过的区域的读取确实需要入参内容。无法识别的使用一律
 按读取处理，因此该推导只会偏向 `InOut`。
 
 两个键除外：`dump_vars` 与 `arg_direction_overrides_vars` 只是把张量作为**记账**引用
 （dump 标记、`NoDep` 退出），并不访问其内容。
 
-每一个证据来源——读取扫描、store 目标集合、assemble 扫描，以及每个内层被调函数声明的
-槽位——都只是访问集合的**下界**，因此它们按 `In < Out < InOut` 合并，而不是互相覆盖。
-直接赋值会让一个把槽位声明为 `Out` 的被调函数抹掉函数体真实发生的读取。
+每一个证据来源——读取扫描、store 目标集合、函数体内被声明的写入，以及每个内层被调函数声明的
+槽位——都只是访问集合的**下界**，任何一个来源都不得覆盖另一个。函数体一侧的来源按
+`In < Out < InOut` 合并。
+
+被调函数的槽位**不按**该序合并，这是唯一的例外。`In` 是初始化时的"尚无证据"地板，
+因此它不能同时表示"有人读过"——那样理解会把每一个只写的 capture 提升为 `InOut`，
+即 issue #2415 所说的虚假读取。于是逐个调用折叠会丢失信息：一个 capture 若分别传给
+某个被调函数的 `In` 槽和另一个的 `Out` 槽，先合并成 `In`、再合并成 `Out`，读取被丢掉。
+改为把被调函数的证据累积成两个独立标志——`In`/`InOut` 记为读、`Out`/`InOut` 记为写——
+最后一次性推导方向，这样上述 capture 得到 `InOut`，而只被写入的 capture 仍然是 `Out`。
+
+该判定的"读"这一半同时取自函数体扫描与被调函数槽位，因为一个 capture 可能被函数体读取、
+又被某个被调函数覆写：
+
+```python
+with pl.cluster():
+    value = pl.load(shared, [0, 0], [16, 128])  # 函数体读取
+    self.overwrite(shared)                      # 被调函数覆写
+```
+
+`shared` 是 `InOut`。若只看被调函数槽位就会判成 `Out`，等于告诉 wrapper 无需搬入
+`pl.load` 正要消费的那份内容。函数体扫描在此可信，是因为它会跳过被调函数声明为 `Out`
+的实参——那是内建算子声明写槽在用户函数一侧的对应物——因此把 capture 交给只写槽位
+本身不再被算作一次读取。
+
+该跳过同样适用于 `pl.submit`，而不只是普通调用。基础 visitor 不会把 `Submit` 转发到
+`Call` 处理函数，因此任务提交需要自己的规则；否则每个提交实参都算作读取，只传给 `Out`
+槽位的 capture 就会变成 `InOut`。`Submit` 的 `args_[i]` 按前缀映射到 `params_[i]`
+（`args_.size() <= params_.size()`，省略的尾部由运行时分配），而会破坏该 identity 的
+尾随 `CommCtx` 形参由第 43 个 pass 生成，远在任何 outliner 之后。它的 `deps_` 始终按
+读取处理——那是本次提交消费的 TaskId 值，绝非写入目的地。
 
 **Hierarchy 作用域是例外。** `OutlineScope` 对 `ScopeKind::Hierarchy` 有意保持
 `store_output_set` 为空（无需显式返回输出，buffer 已对调用方可见），因此被 Hierarchy
@@ -174,7 +212,7 @@ root 是外层函数的 `InOut` 形参时，把被调函数的 `Out` 重新提�
 追加（[`InjectGMPipeBuffer`](22-inject_gm_pipe_buffer.md)、
 [`MaterializeDistTensorCtx`](43-materialize_dist_tensor_ctx.md)），也会向前插入
 （[`MaterializeValidShapeSymbols`](47-materialize_valid_shape_symbols.md)）。本 pass 用
-`CHECK_SPAN` 拒绝两类用户错误：声明所指的张量未被作用域 body 捕获（没有任何读取，因而
+`CHECK_SPAN` 拒绝两类用户错误：声明所指的张量未被作用域 body 捕获（既不读也不写，因而
 没有参数承载该策略），以及对 `InferParamDirections` 判定为 `Out` / `InOut` 的参数声明
 `BYPASS`（对同一 kernel 自己会写的字节做 bypass 读取，是一致性缺陷）。该转换位于共享的
 外提工具中，因此兄弟路径 `OutlineHierarchyScopes` 会以同样方式打上该 attr。参见

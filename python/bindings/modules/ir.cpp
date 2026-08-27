@@ -823,6 +823,25 @@ void BindIR(nb::module_& m) {
       nb::arg("op_name"), nb::arg("args"), nb::arg("kwargs"), nb::arg("span"),
       "Create a Call expression with args and kwargs");
 
+  // Underscore-prefixed: NOT a public API. Compiler-internal counterpart of
+  // `create_op_call`, it reaches operators marked `internal_only`, which
+  // `CreateUserFacing` rejects by design. Its only caller is the round-trip
+  // parser, rebuilding a printer-emitted internal dispatch
+  // (`pl.builtin.<ns>.<op>(...)`) that no DSL wrapper can spell; that caller
+  // re-checks the invariants the printer stamps before calling in, so the
+  // guard `internal_only` provides is enforced at the user-facing surface
+  // rather than dropped. `create_op_call` still routes through
+  // `CreateUserFacing` and is unaffected.
+  ir.def(
+      "_create_internal_op_call",
+      [](const std::string& op_name, const std::vector<ExprPtr>& args, const nb::dict& kwargs_dict,
+         const Span& span) {
+        auto kwargs = ConvertKwargsDict(kwargs_dict);
+        return OpRegistry::GetInstance().CreateInternal(op_name, args, kwargs, span);
+      },
+      nb::arg("op_name"), nb::arg("args"), nb::arg("kwargs"), nb::arg("span"),
+      "Create a Call expression for a compiler-internal operator (round-trip parser only)");
+
   ir.def(
       "set_call_attrs",
       [](const CallPtr& call, const nb::dict& attrs_dict) -> CallPtr {
@@ -1562,7 +1581,7 @@ void BindIR(nb::module_& m) {
       .value("Cluster", ScopeKind::Cluster, "Cluster scope for co-scheduled AIC + AIV groups")
       .value("Hierarchy", ScopeKind::Hierarchy, "Distributed hierarchy scope (uses level/role)")
       .value("Spmd", ScopeKind::Spmd, "SPMD dispatch scope (core_num/sync_start)")
-      .value("Runtime", ScopeKind::Runtime, "Runtime orchestration scope (PTO2_SCOPE wrapper)")
+      .value("Runtime", ScopeKind::Runtime, "Runtime orchestration scope (SIMPLER_SCOPE wrapper)")
       .value("CommDomain", ScopeKind::CommDomain,
              "Comm-domain scope (with orch.allocate_domain(...) wrapper for host_orch window buffers)")
       .value("SplitAiv", ScopeKind::SplitAiv, "Explicit AIV-split region (pl.split_aiv)")
@@ -1715,8 +1734,8 @@ void BindIR(nb::module_& m) {
   // RuntimeScopeStmt
   auto runtime_scope_stmt_class = nb::class_<RuntimeScopeStmt, ScopeStmt>(
       ir, "RuntimeScopeStmt",
-      "Runtime orchestration scope: emits PTO2_SCOPE() (manual=False) or "
-      "PTO2_SCOPE(PTO2ScopeMode::MANUAL) (manual=True) wrappers in codegen");
+      "Runtime orchestration scope: emits SIMPLER_SCOPE() (manual=False) or "
+      "SIMPLER_SCOPE(ScopeMode::MANUAL) (manual=True) wrappers in codegen");
   runtime_scope_stmt_class.def(nb::init<bool, std::string, const StmtPtr&, const Span&>(),
                                nb::arg("manual") = false, nb::arg("name_hint") = "", nb::arg("body"),
                                nb::arg("span"), "Create a Runtime scope statement");

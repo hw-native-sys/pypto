@@ -357,7 +357,7 @@ TypePtr DeduceTensorTransposeType(const std::vector<ExprPtr>& args,
   //     drive the implicit "swap last two dims" path used by DN-source loads.
   //
   //  2. Explicit strides. tensor.transpose at orchestration level lowers to
-  //     runtime ChipTensor::transpose, a metadata-only swap of shapes / offsets;
+  //     runtime TaskTensor::transpose, a metadata-only swap of shapes / offsets;
   //     the underlying GM data stays in the source's row-major layout. So the
   //     physical strides for the post-transpose view are the source's strides
   //     reordered at (axis1, axis2). Recording those strides on the result

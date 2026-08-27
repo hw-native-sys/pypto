@@ -118,7 +118,7 @@ parser 还强制另外两条规则：
 | `pl.set_cache_policy() first argument must be a bare variable name` | Parser（`ParserSyntaxError`） | `t.field`、`t[0]`、`f(t)` —— 没有可跟踪的绑定 |
 | `pl.set_cache_policy() argument '<n>' is not defined at this point` | Parser（`ParserSyntaxError`） | 作用域起始处该名字尚未绑定 |
 | `pl.set_cache_policy() argument '<n>' is not a tensor` | Parser（`ParserTypeError`） | 只有 GM 张量读取才有缓存策略 |
-| `pl.set_cache_policy(...) references tensor '<n>', which is not captured by the scope body` | `OutlineIncoreScopes`（`CHECK_SPAN` → `ValueError`） | 作用域从不读取该张量，因此没有参数承载该策略 |
+| `pl.set_cache_policy(...) references tensor '<n>', which is not captured by the scope body` | `OutlineIncoreScopes`（`CHECK_SPAN` → `ValueError`） | 作用域 body 既不读也不写该张量，因此它未被捕获，没有参数承载该策略 |
 | `pl.set_cache_policy(<n>, CachePolicy.BYPASS) is not allowed on a tensor this scope writes (<dir>)` | `OutlineIncoreScopes`（`CHECK_SPAN` → `ValueError`） | 对同一 kernel 自己会写的字节做 bypass 读取，是一致性缺陷 |
 
 外提阶段这两条拒绝属于**用户错误**，而非编译器 bug —— 所以用 `CHECK_SPAN`，它会附带

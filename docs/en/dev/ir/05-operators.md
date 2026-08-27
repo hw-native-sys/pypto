@@ -260,11 +260,11 @@ computes from lhs M/K and rhs N.
 
 #### Conditional accumulator initialization (`init_cond`)
 
-`tile.matmul_acc` and `tensor.matmul_acc` take an optional fourth operand,
-`init_cond`: a BOOL scalar that selects, per execution, whether the accumulator
-is *overwritten* with `lhs @ rhs` or accumulated into. It is the split-K
-`k == 0` idiom, and it removes the need either to zero the accumulator or to
-peel the first K step:
+`tile.matmul_acc`, `tile.batch_matmul_acc`, `tensor.matmul_acc`, and
+`tile.gemv_acc` take an optional fourth operand, `init_cond`: a BOOL scalar that
+selects, per execution, whether the accumulator is *overwritten* with
+`lhs @ rhs` or accumulated into. It is the split-K `k == 0` idiom, and it removes
+the need either to zero the accumulator or to peel the first K step:
 
 ```python
 acc = pl.tile.create([16, N], pl.INT32, target_memory=pl.Mem.Acc)
@@ -273,17 +273,29 @@ for k0 in pl.pipeline(0, K, K_TILE, stage=2):
     acc = pl.tile.matmul_acc(acc, a_left, b_right, init_cond=(k0 == 0))
 ```
 
+The predicate's domain is exactly `matmul_acc`'s own: any operand shape that
+accumulates without a predicate accumulates with one. A `tensor.matmul_acc` with
+an operand of rank > 2 converts to `tile.batch_matmul_acc`, which forwards
+`init_cond` verbatim to every 2D `tile.matmul_acc` that `FlattenTileNdTo2D`
+unrolls it into — each of those is the sole writer of its own row band of the
+accumulator, so the predicate applies band by band. (Only `batch_count == 1`
+reaches codegen today; a larger batch is rejected in `FlattenTileNdTo2D` for a
+reason unrelated to the predicate — the per-batch accumulator would be a strided
+L0C row window, which the MAD cannot address.)
+
 The predicate is a positional operand rather than a registry kwarg because it
 may be loop-dependent; kwargs carry only compile-time constants. Registering it
 as an operand also means it participates in the use-def chain like any other
 SSA value.
 
 Being an operand, it prints positionally at the tile layer —
-`pl.tile.matmul_acc(acc, lhs, rhs, k0 == 0)`. At the tensor layer positional
-slot 4 already belongs to `a_trans`, so the printer emits the predicate as a
-keyword instead —
+`pl.tile.matmul_acc(acc, lhs, rhs, k0 == 0)`. Two signatures already spend
+positional slot 4 (`a_trans` at the tensor layer, `acc_phase` on GEMV), so there
+the printer emits it as a keyword — and `init_cond` is correspondingly
+keyword-only in those DSL signatures. Every printed form reparses to the same IR:
+
 `pl.tensor.matmul_acc(acc, lhs, rhs, init_cond=k0 == 0, a_trans=False, b_trans=False)`
-— and the printed call reparses to the same IR.
+`pl.tile.gemv_acc(acc, lhs, rhs, init_cond=k0 == 0, acc_phase='unspecified')`
 
 Lowering depends on whether the predicate is known at compile time:
 
@@ -292,6 +304,11 @@ Lowering depends on whether the predicate is known at compile time:
 | absent, or literal `False` | `pto.tmatmul.acc ins(dst, lhs, rhs) outs(dst)` |
 | literal `True` | `pto.tmatmul ins(lhs, rhs) outs(dst)` |
 | runtime predicate | `scf.if cond { pto.tmatmul } else { pto.tmatmul.acc }` |
+
+`tile.gemv_acc` lowers through the same emitter with `pto.tgemv.acc` /
+`pto.tgemv` substituted — GEMV is a matmul whose M is 1, run on the same cube
+MAD, so it carries the same `cmatrixInit` bit. Its `acc_phase` attribute rides on
+whichever arm is emitted.
 
 The ISA carries this as bit 63 (`cmatrixInit`) of the MAD's Xt register, so the
 hardware needs no branch; `pto.tmatmul` and `pto.tmatmul.acc` are distinct ops
@@ -324,9 +341,13 @@ a predicate, so the pass no longer generates an accumulator phi at all.
 
 One limitation, diagnosed rather than silently dropped:
 
-- **Rank > 2 is rejected.** The batched form expands into several
-  `tile.matmul_acc` calls inside `FlattenTileNdTo2D`, which has no place to
-  thread a per-call predicate. Loop over the batch dimension instead.
+- **`batch_count > 1` is rejected.** Not because of the predicate — this shape
+  fails identically without one. `FlattenTileNdTo2D` gives each batch a
+  `tile.slice` of the accumulator, and a row window of a multi-block-column
+  L0C tile is strided, which the MAD cannot address (pto-isa#253). Rank > 2 is
+  fine as long as the batch dims multiply to 1, which is the grouped-GEMM case
+  (`[1, N, K]` weights). For a genuine batch, loop over the batch dimension
+  instead.
 
 An oversized *predicated* `tile.matmul_acc` is K-tiled like the unpredicated
 one: the caller's predicate is ANDed with the emitted loop's own `ko == 0`, and
@@ -441,6 +462,24 @@ output shape `[1, N]`; its valid N may be wider when the physical N matches.
 `tile.gemv`, `tile.gemv_acc`, and `tile.gemv_bias` accept `acc_phase` as
 `"unspecified"` (the default), `"partial"`, or `"final"`. Use `"partial"`
 while more K chunks remain and `"final"` for the last chunk.
+
+`tile.gemv_acc` additionally takes the optional `init_cond` predicate — see
+[Conditional accumulator initialization](#conditional-accumulator-initialization-init_cond).
+`tile.gemv_bias` carries none, mirroring `tile.matmul_bias`: a biased GEMV
+already mints its accumulator, so it has no initial value to predicate.
+
+The padded Acc contract shapes how a predicated split-K GEMV mints that
+accumulator. Because a `[1, N]` result occupies 16 physical rows,
+`pl.tile.create([1, N], ...)` is rejected on physical shape and `[16, N]` on
+valid shape; create at the physical shape and narrow the valid rectangle:
+
+```python
+acc_raw = pl.tile.create([16, N], pl.FP32, target_memory=pl.Mem.Acc)
+acc = pl.tile.set_validshape(acc_raw, 1, N)  # then gemv_acc(..., init_cond=(k0 == 0))
+```
+
+Before `init_cond`, the peel did this implicitly — a straight-line `pl.tile.gemv`
+mints a correctly typed accumulator, at the cost of a phi between the branches.
 
 ## Python Usage
 
@@ -733,21 +772,21 @@ with ib.function("tile_computation") as f:
 | `system.bar_m` | Matrix barrier (lowers to `pto.barrier <PIPE_M>`) | None |
 | `system.fence` | Memory barrier over global memory (lowers to `pto.fence.barrier_all #pto.fence_scope<gm>`) | None |
 | `system.cacheinvalid` | Invalidate the cache line containing a tensor sub-region's base address. Args: `tensor`, `shapes` (N-D), `offsets` (N-D). Every region size — a single element included — lowers to `pto.partition_view` + `pto.cmo.cacheinvalid %payload_view single_cache_line : !pto.partition_tensor_view<...>`; `shapes` does not make it walk every cache line. The no-argument form invalidates all GM. | None |
-| `system.syncall` | Cross-core all-participant barrier (`pto::SYNCALL`). `mode="hard"` (FFTS, no operands) or `mode="soft"` (GM-polling, operands) | `core_type` (`"aiv_only"` \| `"aic_only"` \| `"mix"`), `mode` (`"hard"` \| `"soft"`) |
+| `system.syncall` | Cross-core all-participant barrier (`pto::SYNCALL`). Attr `mode` `"hard"` (FFTS, no operands) or `"soft"` (GM-polling, operands) | `core_type` (`"aiv_only"` \| `"aic_only"` \| `"mix"`), `mode` (`"hard"` \| `"soft"`) |
 | `system.sync_src` | Set sync flag | `set_pipe`, `wait_pipe`, `event_id` |
 | `system.sync_dst` | Wait sync flag | `set_pipe`, `wait_pipe`, `event_id` |
-| `system.task_invalid` | Sentinel `PTO2TaskId::invalid()` — "no producer" seed for a TaskId carry | None |
+| `system.task_invalid` | Sentinel `TaskId::invalid()` — "no producer" seed for a TaskId carry | None |
 | `system.task_is_valid` | Test whether a `TASK_ID` value is a valid (non-sentinel) handle | None; sole positional arg is the TaskId Var |
 | `system.available_cluster_count` | This run's MIX cluster (= AIC) count, read from the device. Result `Scalar[INT32]` | None |
 | `system.available_aiv_count` | This run's standalone AIV core count, read from the device. Result `Scalar[INT32]` | None |
 
-`system.syncall` has two modes. The **hard** form (`mode="hard"`, default) emits an FFTS barrier that waits for **all** physical cores of the selected `core_type`; the kernel must be launched at full occupancy (one block per physical core) **and with `sync_start=True`** (so all blocks are co-resident — a non-sync_start launch may dispatch blocks in waves and deadlock the barrier), or it deadlocks (AICore error 507018). The **soft** form (`mode="soft"`) polls a shared GM workspace and so works at **partial** occupancy. `gm_workspace` is a shared, zero-initialized GM `INT32` tensor containing at least 16 elements (64 bytes). Pass it as a kernel parameter so all blocks share one buffer; it must occupy an exclusive cache line and be zero-initialized before its first use.
+`system.syncall` has two modes, selected by its `mode` **IR attribute**; the Python surfaces spell them as `pl.SyncAllMode` members instead (see below). The **hard** form (attr `"hard"`, the default) emits an FFTS barrier that waits for **all** physical cores of the selected `core_type`; the kernel must be launched at full occupancy (one block per physical core) **and with `sync_start=True`** (so all blocks are co-resident — a non-sync_start launch may dispatch blocks in waves and deadlock the barrier), or it deadlocks (AICore error 507018). The **soft** form (attr `"soft"`) polls a shared GM workspace and so works at **partial** occupancy. `gm_workspace` is a shared, zero-initialized GM `INT32` tensor containing at least 16 elements (64 bytes). Pass it as a kernel parameter so all blocks share one buffer; it must occupy an exclusive cache line and be zero-initialized before its first use.
 
 The current PTO-ISA uses the same soft operand ABI for every `core_type`: `[gm_workspace]` derives the participant count from the device launch configuration, while `[gm_workspace, used_cores]` supplies it explicitly as a Python integer in the INT32 range or an `INT32` scalar. The high-level DSL requires `used_cores` to make that choice explicit: pass a positive count for the two-operand form, or explicitly pass `0` for the one-operand form. For `mix`, an explicit count is the total number of AIC and AIV participants. Runtimes whose logical grid differs from the device launch registers must use a positive explicit count; this includes the currently pinned Simpler runtime. No UB/L1 scratch tile is required.
 
 Both modes guarantee barrier arrival only. They do not wait for preceding data instructions such as `TSTORE`, and they do not publish or invalidate business-data cache lines. For a cross-core GM handoff that may span multiple cache lines, conservatively publish the producer's writes with whole-GM `system.cacheinvalid()` and `system.fence` before the barrier, then use whole-GM `system.cacheinvalid()` on the consumer before it reads. The tensor-region form invalidates only the cache line containing the view's base address.
 
-The `core_type` and `mode` attributes stay strings **in the IR**, but the Python surfaces are enum-typed: `pl.KernelType` (`AIC` / `AIV` / `MIX`, naming which generated kernel the op belongs to) and `pl.SyncAllMode` (`HARD` / `SOFT`). The equivalent strings are still accepted and emit a `DeprecationWarning`; an unrecognized string is a `ValueError`, and a non-string non-member is a `TypeError`. The unified `mode=` keyword API is the **DSL** surface (`pl.system.syncall`). The Python IR helpers under `pypto.ir.op.system` are split instead: `syncall(core_type=...)` builds the hard form and `syncall_soft(core_type, gm_workspace, used_cores=None)` builds the soft form.
+The `core_type` and `mode` attributes stay strings **in the IR**, but the Python surfaces are enum-typed: `pl.KernelType` (`AIC` / `AIV` / `MIX`, naming which generated kernel the op belongs to) and `pl.SyncAllMode` (`HARD` / `SOFT`). Only members are accepted: the lowered attr spelling is an output, not an input, so passing one is a `TypeError`, and a member outside an op's own domain is a `ValueError`. The unified `mode=` keyword API is the **DSL** surface (`pl.system.syncall`). The Python IR helpers under `pypto.ir.op.system` are split instead: `syncall(core_type=...)` builds the hard form and `syncall_soft(core_type, gm_workspace, used_cores=None)` builds the soft form.
 
 `system.available_cluster_count` / `system.available_aiv_count` are the SPMD **launch-shape queries**: pass one as `pl.spmd(...)`'s `core_num` so the launch sizes itself on the device the run lands on. Orchestration codegen lowers them to `rt_available_cluster_count()` / `rt_available_aiv_count()`. Use the cluster count for a mixed (AIC+AIV) or cube-only kernel — one block per core-group — and the AIV count for a vector-only kernel. This is the only launch width that stays at full occupancy across devices, which the hard `system.syncall` requires; the `HardSyncallOccupancy` verifier accepts these widths without a count comparison and rejects the query for the *other* core type. Pass the call inline (`pl.spmd(pl.system.available_cluster_count())`) rather than binding it to a name first — a name reaches the outlined `Spmd` wrapper as a variable defined in the caller, which the IR printer cannot re-parse. Source: `src/ir/op/sync_ops/launch.cpp`.
 
@@ -768,7 +807,7 @@ The `core_type` and `mode` attributes stay strings **in the IR**, but the Python
 | `system.sync_wait` | 0 or 1 (`event_id_dyn`) | Emit `pto.sync.wait` on the peer core type | `pipe`, static `event_id`, optional `core_type` |
 | `system.set_ffts` | 1 (`workspace`) | Declare the A3 FFTS setup required by explicit cross-core events | — |
 
-Use `pl.system.sync_set(event_id, pipe=..., ffts_mode=...)` and `pl.system.sync_wait(event_id, pipe=...)` in explicitly typed AIC/AIV kernels. In a mixed InCore kernel, pass `core_type=pl.KernelType.AIV` or `core_type=pl.KernelType.AIC` to retain each event operation on the intended lane when the kernel is expanded (the IR attr keeps the lowered `"aiv"` / `"aic"` spelling, and those strings are still accepted at the API with a `DeprecationWarning`). `pl.KernelType.MIX` is rejected here — an event pins one lane, and both-lane placement is spelled by omitting `core_type`. Both `system.syncall` and the event ops feed the same `KernelType` classification in `ClassifyCallAffinity`; only their IR attr vocabularies differ (`"aic_only"` vs `"aic"`). On A3, call `pl.system.set_ffts(workspace)` in every participating AIC/AIV function before its first explicit event operation; `workspace` must be a one-dimensional `INT64` tensor with at least 256 elements and acts as the PTOAS setup operand. PyPTO's persistent runtime keeps the hardware FFTS control address installed, so generated runtime wrappers do not replace it with this operand. A5 does not require this setup. `event_id` may be an integer in the user-available range 0–13 or a dynamic `pl.Scalar[pl.INDEX]`; IDs 14 and 15 are reserved. `ffts_mode`, when supplied to `sync_set`, must be 0, 1, or 2. The author of a manual cross-core protocol is responsible for pairing event IDs and pipes. PyPTO's normal automatic intra-core dependency insertion remains enabled and uses the separate `set_flag`/`wait_flag` mechanism, so it does not allocate from these explicit cross-core event IDs.
+Use `pl.system.sync_set(event_id, pipe=..., ffts_mode=...)` and `pl.system.sync_wait(event_id, pipe=...)` in explicitly typed AIC/AIV kernels. In a mixed InCore kernel, pass `core_type=pl.KernelType.AIV` or `core_type=pl.KernelType.AIC` to retain each event operation on the intended lane when the kernel is expanded (the IR attr keeps the lowered `"aiv"` / `"aic"` spelling, which is an output of the API, not an accepted input). `pl.KernelType.MIX` is rejected here — an event pins one lane, and both-lane placement is spelled by omitting `core_type`. Both `system.syncall` and the event ops feed the same `KernelType` classification in `ClassifyCallAffinity`; only their IR attr vocabularies differ (`"aic_only"` vs `"aic"`). On A3, call `pl.system.set_ffts(workspace)` in every participating AIC/AIV function before its first explicit event operation; `workspace` must be a one-dimensional `INT64` tensor with at least 256 elements and acts as the PTOAS setup operand. PyPTO's persistent runtime keeps the hardware FFTS control address installed, so generated runtime wrappers do not replace it with this operand. A5 does not require this setup. `event_id` may be an integer in the user-available range 0–13 or a dynamic `pl.Scalar[pl.INDEX]`; IDs 14 and 15 are reserved. `ffts_mode`, when supplied to `sync_set`, must be 0, 1, or 2. The author of a manual cross-core protocol is responsible for pairing event IDs and pipes. PyPTO's normal automatic intra-core dependency insertion remains enabled and uses the separate `set_flag`/`wait_flag` mechanism, so it does not allocate from these explicit cross-core event IDs.
 
 ### Data Transfer Operations
 

@@ -263,6 +263,10 @@ nav:
           - en/user/distributed/10-remote_load_store.md
           - en/user/distributed/11-put_get.md
           - en/user/distributed/12-dynamic_rank_count.md
+          - en/user/distributed/13-allreduce_mesh.md
+          - en/user/distributed/14-allreduce_two_phase.md
+          - en/user/distributed/15-allreduce_ring.md
+          - en/user/distributed/16-allreduce_reveal.md
   - API Reference:
       - en/api/index.md
       - en/api/language.md

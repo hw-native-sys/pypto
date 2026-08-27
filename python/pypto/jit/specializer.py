@@ -136,7 +136,7 @@ class SpecializeContext:
         orig_col_offset: Indentation (in columns) stripped by ``textwrap.dedent``
             from the original source — added back to recover original columns.
         auto_scope: Whether the compiler auto-inserts AUTO runtime scopes
-            (PTO2_SCOPE). ``True`` by default; ``False`` emits
+            (SIMPLER_SCOPE). ``True`` by default; ``False`` emits
             ``@pl.function(..., auto_scope=False)`` so the body places scopes
             by hand. Honored for the Orchestration entry, HOST orchestrator,
             and inline sub-function decorators (see

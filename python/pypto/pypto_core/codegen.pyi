@@ -126,7 +126,7 @@ class DistributedCodegen:
 def generate_orchestration(program: Program, func: Function) -> OrchestrationResult:
     """Generate C++ orchestration code for a function.
 
-    Uses PTO2 runtime API. This is backend-agnostic.
+    Uses simpler runtime API. This is backend-agnostic.
 
     Args:
         program: The IR Program containing all functions

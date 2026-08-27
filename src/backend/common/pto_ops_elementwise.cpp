@@ -969,17 +969,14 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
   // Xt register, but the `pto.*` tile ops expose it only as the choice between
   // the accumulating and the non-accumulating op, so a runtime predicate lowers
   // to a branch over the two.  No phi is needed: both arms write `dst` in place.
-  // `supports_init_cond` must track the op's own type deduction: `tile.gemv_acc`
-  // still accepts exactly 3 arguments, so accepting a 4th here would only create
-  // an unreachable branch behind a `CHECK` that fires earlier in deduction.
-  auto make_acc_codegen = [](const std::string& pto_op, const std::string& init_pto_op,
-                             bool supports_init_cond) {
-    return [pto_op, init_pto_op, supports_init_cond](const ir::CallPtr& op,
-                                                     codegen::CodegenBase& codegen_base) -> std::string {
+  // Both ops reaching here accept the predicate: GEMV is a matmul whose M is 1,
+  // run on the same cube MAD, so it carries the same `cmatrixInit` bit.
+  auto make_acc_codegen = [](const std::string& pto_op, const std::string& init_pto_op) {
+    return [pto_op, init_pto_op](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) -> std::string {
       auto& codegen = AsPto(codegen_base);
-      INTERNAL_CHECK_SPAN(op->args_.size() == 3 || (supports_init_cond && op->args_.size() == 4), op->span_)
-          << pto_op << " requires 3 arguments (acc, lhs, rhs)"
-          << (supports_init_cond ? " or 4 with init_cond" : "") << ", but got " << op->args_.size();
+      INTERNAL_CHECK_SPAN(op->args_.size() == 3 || op->args_.size() == 4, op->span_)
+          << pto_op << " requires 3 arguments (acc, lhs, rhs) or 4 with init_cond, but got "
+          << op->args_.size();
 
       std::string dst = codegen.GetCurrentResultTarget();
       std::string lhs = codegen.GetExprAsCode(op->args_[1]);
@@ -1108,11 +1105,11 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
     };
   };
 
-  reg("tile.matmul_acc", make_acc_codegen("pto.tmatmul.acc", "pto.tmatmul", /*supports_init_cond=*/true));
+  reg("tile.matmul_acc", make_acc_codegen("pto.tmatmul.acc", "pto.tmatmul"));
   reg("tile.gemv", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeGemvCodegenPTO("pto.tgemv", 2, op, codegen);
   });
-  reg("tile.gemv_acc", make_acc_codegen("pto.tgemv.acc", "pto.tgemv", /*supports_init_cond=*/false));
+  reg("tile.gemv_acc", make_acc_codegen("pto.tgemv.acc", "pto.tgemv"));
   reg("tile.matmul_mx_acc", make_mx_acc_codegen("pto.tmatmul.mx.acc"));
   reg("tile.gemv_bias", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeGemvCodegenPTO("pto.tgemv.bias", 3, op, codegen);

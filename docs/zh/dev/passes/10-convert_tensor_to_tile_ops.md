@@ -47,7 +47,9 @@ program_tiled = convert_pass(program)
 
 4. **插入 tile.store（出口存储）**：对每个从 `TensorType` 转换为 `TileType` 的返回值，添加 `Out` 参数并插入 `tile.store(tile, zeros, out_param)`。如果返回值来自 `tile.assemble` 循环，则将循环重写为直接使用 `tile.store`（转换时 assemble-loop 重写；与 `OptimizeOrchTensors` 模式 3 不同，该模式处理跨函数优化）。
 
-5. **升级被写入参数的方向（direction）**：通过别名溯源分析（`AnalyzeCallAccess`）把每次读/写归属到其来源参数，再把被写入的 `In` 参数升级为 `Out`（只写）或 `InOut`（既读又写）。识别为写目标的 op：`tile.store`、`tensor.write`、`tensor.assemble`、`pld.tile.remote_store`、`pld.tile.put` / `pld.tile.get`、`pld.system.notify`（`NotifyOp.Set` 使其 `target` 为只写，`NotifyOp.AtomicAdd` 使其为读+写）、`system.syncall`（workspace），以及复合集合通信 `pld.tensor.allreduce` / `allgather` / `reduce_scatter` / `barrier` / `broadcast` / `all_to_all(_v)` —— 由于本 pass 运行在 `LowerCompositeOps` 之前，这些 op 的 signal / target 操作数在此直接标记为读+写。其余 op 的实参一律只计为读。用户已显式声明为 `Out` / `InOut` 的参数保持不变。
+5. **升级被写入参数的方向（direction）**：通过别名溯源分析（`AnalyzeCallAccess`）把每次读/写归属到其来源参数，再把被写入的 `In` 参数升级为 `Out`（只写）或 `InOut`（既读又写）。**某个算子写哪个实参不再由本 pass 判定**，而是读取该算子在注册表上的声明（`set_arg_effect`，参见 [算子](../ir/05-operators.md#参数效应argument-effects)）；因此 `tile.store`、`tile.mscatter`、`tensor.write`、`tensor.assemble`、`tensor.expand_clone`、`pld.tile.*` / `pld.tensor.*` 推送与拉取家族、`pld.system.notify`、`system.syncall` 以及复合集合通信都经由同一张表进入本分析。被声明为 `Write` 的实参不计为读：只写入子区域的 store 从不读取未触及的部分。由 kwarg 决定的效应按调用逐个解析，因此原子 store 或 `AtomicAdd` 形式的 notify 会把目的操作数标记为读+写，而普通形式不会。用户已显式声明为 `Out` / `InOut` 的参数保持不变。
+
+   从未声明效应的算子仍然按"读取全部实参"处理。该默认值如今只覆盖注册表无话可说的算子（其中绝大多数是纯函数式的），而不再是一张手工维护清单的兜底——新增的写类算子曾经可以悄无声息地从这张清单里漏掉。
 
 ### GM 存储一致性限制
 

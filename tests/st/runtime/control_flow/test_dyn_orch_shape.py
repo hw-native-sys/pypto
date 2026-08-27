@@ -147,7 +147,7 @@ class DynOrchReshapeAddTestCase(PTOTestCase):
     """Test add kernel where the orchestration uses ``pl.reshape`` on dynamic 1D inputs.
 
     Validates that ``tensor.reshape`` is supported in Orchestration functions and lowers
-    to the runtime ``ChipTensor::reshape`` interface (issue #1068).  The orchestration takes
+    to the runtime ``TaskTensor::reshape`` interface (issue #1068).  The orchestration takes
     flat 1D tensors of length ``rows*cols`` and reshapes them to ``[rows, cols]`` before
     forwarding them to a 2D InCore add kernel.
     Expected result: c = a + b over the full rows×cols tile.
@@ -219,12 +219,12 @@ class DynOrchTransposeAddTestCase(PTOTestCase):
     """Test add kernel where the orchestration uses ``pl.transpose`` on dynamic 2D inputs.
 
     Validates that ``tensor.transpose`` is supported in Orchestration functions and lowers
-    to the runtime ``ChipTensor::transpose`` interface (issue #1071).  The orchestration takes
+    to the runtime ``TaskTensor::transpose`` interface (issue #1071).  The orchestration takes
     ``[rows, cols]`` tensors, swaps axes 0/1 via ``pl.transpose`` (zero-copy metadata
     swap of shape/raw_shape/offset), and forwards the resulting ``[cols, rows]`` views to
     a 2D InCore add kernel.
 
-    Because ``ChipTensor::transpose`` only swaps metadata and the kernel performs an
+    Because ``TaskTensor::transpose`` only swaps metadata and the kernel performs an
     element-wise add (which is layout-agnostic at the byte level), the bit pattern of
     ``c`` equals the bit pattern of ``a + b`` re-laid out to ``[cols, rows]``.
     """
@@ -772,7 +772,7 @@ class TestDynOrchShapeOperations:
         """Test add where the orchestration transposes dynamic 2D inputs before dispatch.
 
         Validates ``pl.transpose`` (issue #1071) inside an Orchestration function lowers
-        to the runtime ``ChipTensor::transpose`` zero-copy metadata swap.  Uses an asymmetric
+        to the runtime ``TaskTensor::transpose`` zero-copy metadata swap.  Uses an asymmetric
         shape (rows != cols) so the ``[rows, cols] -> [cols, rows]`` view transformation
         is actually exercised end-to-end (a buggy no-op transpose would not pass this).
         """

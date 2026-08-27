@@ -327,7 +327,7 @@ the whole pass pipeline, so an invariant that fails there cannot have come from 
 | Result of an `As<T>()` downcast | `INTERNAL_CHECK_SPAN` | The operand type was settled during type deduction and re-checked by the verifier |
 | Codegen-internal bookkeeping (SSA names, offset maps) | `INTERNAL_CHECK` | Populated by codegen itself; no user-reachable input |
 | Unsupported dtype x backend, unsupported feature combination | `CHECK_SPAN` | The user chose the dtype and the backend; the message should name the remedy |
-| A user-supplied kwarg's value (e.g. `tensor.create`'s `init_value`) | `CHECK_SPAN` | No upstream pass constrains it |
+| A user-supplied kwarg's value (e.g. `tensor.assemble`'s `atomic`) | `CHECK_SPAN` | No upstream pass constrains it |
 
 The table is the policy, not a description of the current tree: the argument-count sweep is done,
 but roughly 34 post-`As<T>()` checks in these two directories are still `CHECK`. That sweep needs

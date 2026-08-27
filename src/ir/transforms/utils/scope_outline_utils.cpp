@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -26,7 +27,6 @@
 
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
-#include "pypto/ir/comm.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -39,6 +39,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/deferred_wait_contract.h"
+#include "pypto/ir/transforms/utils/result_alias_utils.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
@@ -46,6 +47,22 @@
 namespace pypto {
 namespace ir {
 namespace outline_utils {
+
+std::vector<CallWriteTarget> CallWriteTargets(const CallPtr& call) {
+  std::vector<CallWriteTarget> targets;
+  if (!call) return targets;
+  const auto* entry = LookupOpEntry(call->op_);
+  if (!entry || !entry->WritesAnyArg()) return targets;
+  for (size_t i = 0; i < call->args_.size(); ++i) {
+    auto effect = entry->GetArgEffect(i, call->kwargs_);
+    if (!ArgEffectWrites(effect)) continue;
+    if (auto var = AsVarLike(call->args_[i])) {
+      targets.push_back(CallWriteTarget{var, i, effect});
+    }
+  }
+  return targets;
+}
+
 namespace {
 
 /**
@@ -54,6 +71,14 @@ namespace {
  * These tensors are modified via side-effect inside scopes but are not
  * captured by VarDefUseCollector since they are defined externally.  The third
  * argument of store is the output tensor.
+ *
+ * Deliberately narrower than `CallWriteTargets`, which answers "what does this
+ * call write" for the direction analysis. This set drives the *export*
+ * machinery — a store target becomes an extra outlined-function output, and
+ * `StoreEvalToAssignMutator` binds a result Var for it — and that mechanism
+ * exists for a write whose result the body does not already thread. An SSA-pure
+ * writer such as `tensor.assemble` returns the updated tensor and the caller
+ * binds it, so exporting it too would add a redundant output.
  */
 class StoreTargetCollector : public IRVisitor {
  public:
@@ -75,10 +100,17 @@ class StoreTargetCollector : public IRVisitor {
 /// access either one witnessed: ``In < Out < InOut``.
 ///
 /// Evidence about a parameter arrives from several independent places
-/// (``ParamReadCollector``, the store-target set, the assemble scan, each inner
-/// callee), and each one is a *lower* bound — none of them can prove the
-/// absence of an access the others saw. Merging rather than assigning is what
-/// keeps a later observation from erasing an earlier one.
+/// (``ParamReadCollector``, the store-target set, the assemble scan), and each
+/// one is a *lower* bound — none of them can prove the absence of an access the
+/// others saw. Merging rather than assigning is what keeps a later observation
+/// from erasing an earlier one.
+///
+/// The inner callees' evidence does **not** arrive through this ordering.
+/// ``In`` is the seeded *no evidence yet* floor, so it cannot also stand for
+/// "somebody read this" — folding a callee's ``In`` slot against another's
+/// ``Out`` slot along the ranks above would yield ``Out`` and lose the read.
+/// ``InferParamDirections`` accumulates the callee slots as two independent
+/// flags and calls this once, with the verdict already formed.
 [[nodiscard]] inline ParamDirection MergeParamDirection(ParamDirection lhs, ParamDirection rhs) {
   auto rank = [](ParamDirection d) {
     switch (d) {
@@ -103,19 +135,23 @@ class StoreTargetCollector : public IRVisitor {
 /**
  * @brief Marks which captured variables a scope body *reads*.
  *
- * A "read" is any use of the variable other than the write-destination operand
- * of the two ops that update a caller-owned tensor in place:
+ * A "read" is any use of the variable other than an operand the callee purely
+ * overwrites. Two declarations say so, one per kind of callee: a builtin's
+ * ``ArgEffect::Write`` slot (``DestinationSlots``, read straight off the
+ * argument-effect registry rather than from a hand-kept list of op names) and a
+ * user function's ``ParamDirection::Out`` parameter (``CalleeWriteOnlySlots``). Such
+ * an operand replaces a sub-region of the destination *in place*: the untouched
+ * region is neither loaded nor re-stored, so passing the variable there moves
+ * no data into the scope and is not a read. ``tile.store(tile, offsets,
+ * target)`` and ``tensor.assemble(dst, src, offsets)`` are the familiar cases,
+ * but nothing here names them.
  *
- *   - ``tile.store(tile, offsets, target)``  — ``args_[2]`` is the destination
- *   - ``tensor.assemble(dst, src, offsets)`` — ``args_[0]`` is the destination
- *
- * Both replace a sub-region of the destination *in place*: the untouched region
- * is neither loaded nor re-stored, so passing the variable there moves no data
- * into the scope and is not a read. An *atomic* store or assemble
- * (``atomic=pl.AtomicType.Add``) is the exception — it accumulates into the
- * destination, so that operand stays on the read path. Every other use is, including a use inside
- * the same call's remaining operands (``pl.assemble(dst, pl.slice(dst, ...))``
- * really does read ``dst``).
+ * The registry already draws the distinction this analysis needs: an *atomic*
+ * store or assemble (``atomic=pl.AtomicType.Add``) declares ``ReadWrite``
+ * rather than ``Write``, because it accumulates into the destination, so that
+ * operand stays on the read path without being special-cased. Every other use
+ * is a read, including a use inside the same call's remaining operands
+ * (``pl.assemble(dst, pl.slice(dst, ...))`` really does read ``dst``).
  *
  * Definition sites are not reads either, so the stmt hooks below skip the
  * binding fields (an ``AssignStmt`` LHS, a loop's ``loop_var_`` / ``iter_args_``
@@ -139,8 +175,15 @@ class StoreTargetCollector : public IRVisitor {
  */
 class ParamReadCollector : public IRVisitor {
  public:
-  ParamReadCollector(const std::unordered_map<const Var*, size_t>& var_to_idx, std::vector<bool>& has_read)
-      : aliases_(var_to_idx), has_read_(has_read) {}
+  /// @param program Resolves a ``GlobalVar`` callee so an argument the callee
+  ///                 declares ``Out`` can be skipped, exactly as a builtin's
+  ///                 declared ``Write`` slot is. May be null, in which case
+  ///                 every call argument stays on the read path — the
+  ///                 conservative answer, since an unresolvable callee could
+  ///                 read anything.
+  ParamReadCollector(const std::unordered_map<const Var*, size_t>& var_to_idx, std::vector<bool>& has_read,
+                     ProgramPtr program)
+      : aliases_(var_to_idx), has_read_(has_read), program_(std::move(program)) {}
 
  protected:
   void VisitVarLike_(const VarPtr& op) override {
@@ -187,54 +230,132 @@ class ParamReadCollector : public IRVisitor {
   void VisitStmt_(const IfStmtPtr& op) override {
     VisitExpr(op->condition_);
     VisitStmt(op->then_body_);
-    if (op->else_body_.has_value()) VisitStmt(*op->else_body_);
+    // Bound to a local so the optional's engagement is provable at the use:
+    // through `op->`, the analysis cannot tie the guard to the access.
+    const auto& else_body = op->else_body_;
+    if (else_body.has_value()) VisitStmt(else_body.value());
   }
 
-  /// The operand index ``op`` overwrites in place, or ``args_.size()`` when it
-  /// overwrites none. Both ops replace a sub-region of that operand without
-  /// moving data into the scope, which is what makes the slot a non-read.
+  /// The operand indices ``op`` overwrites in place. Such an operand replaces a
+  /// sub-region of the destination without moving data into the scope, which is
+  /// what makes the slot a non-read.
   ///
-  /// An *atomic* store or assemble is excluded: ``out += x`` accumulates into
-  /// the destination, so it reads the value already there. Reporting no
-  /// destination leaves that operand on the normal read path, which keeps an
-  /// accumulator ``InOut`` — and therefore staged, so it starts from the
-  /// caller's zeros rather than allocator garbage.
-  [[nodiscard]] static size_t DestinationSlot(const CallPtr& op) {
-    auto opnode = std::dynamic_pointer_cast<const Op>(op->op_);
-    const bool is_assemble = opnode && IsOp(opnode, "tensor.assemble") && !op->args_.empty();
-    const bool is_store = opnode && IsOp(opnode, "tile.store") && op->args_.size() >= 3;
-    if (!is_assemble && !is_store) return op->args_.size();
-    if (op->GetKwarg<int>("atomic", static_cast<int>(AtomicType::kNone)) !=
-        static_cast<int>(AtomicType::kNone)) {
-      return op->args_.size();  // read-modify-write, not a pure overwrite
+  /// Read from the operator's registry declaration, which already draws the
+  /// distinction this analysis needs: an *atomic* store or assemble declares
+  /// ``ReadWrite`` rather than ``Write``, because ``out += x`` reads the value
+  /// already there. Such an operand stays on the normal read path, which keeps
+  /// an accumulator ``InOut`` — and therefore staged, so it starts from the
+  /// caller's zeros rather than allocator garbage. The same rule now covers
+  /// every declared writer, so an ``AtomicAdd`` notify keeps its signal
+  /// ``InOut`` while a ``Set`` notify does not, without either being named here.
+  [[nodiscard]] static std::set<size_t> DestinationSlots(const CallPtr& op) {
+    std::set<size_t> slots;
+    for (const auto& target : CallWriteTargets(op)) {
+      if (target.effect == ArgEffect::Write) slots.insert(target.slot);
     }
-    return is_assemble ? 0 : 2;
+    return slots;
   }
 
-  /// The tensor ``value`` writes in place, or null when it writes none.
+  /// The argument indices a call to a *user function* purely overwrites.
+  ///
+  /// A callee parameter declared ``Out`` is the user-function counterpart of a
+  /// builtin's ``ArgEffect::Write`` slot: the callee replaces the buffer's
+  /// contents without consulting them, so handing a capture to that slot moves
+  /// no data into this scope and is not a read. Without this, *every* argument
+  /// of *every* inner call counted as a read, and the later merge had to ignore
+  /// the resulting ``has_read`` to keep write-only captures ``Out`` — which is
+  /// how a genuine body read next to a write-only call slot got lost.
+  ///
+  /// Both call-like kinds are covered. ``Call`` maps ``args_[i]`` to
+  /// ``params_[i]`` with full coverage; ``Submit`` maps the same way over a
+  /// *prefix*, with ``args_.size() <= params_.size()`` — the omitted tail is
+  /// runtime-allocated and never appears as an argument here. The trailing
+  /// ``CommCtx`` params that would break that identity are materialised by
+  /// pass 43, long after any outliner runs, so the prefix mapping is exact at
+  /// this point (`.claude/rules/pass-submit-awareness.md`).
+  ///
+  /// Anything that fails those constraints — no program to resolve the callee,
+  /// a non-``GlobalVar`` callee, or a size that violates the coverage bound —
+  /// yields no skips, leaving every argument on the read path. That
+  /// over-approximates reads, which is the safe direction.
+  [[nodiscard]] std::set<size_t> CalleeWriteOnlySlots(const OpPtr& callee_op, size_t arg_count,
+                                                      bool is_submit) const {
+    std::set<size_t> slots;
+    if (!program_) return slots;
+    auto gv = std::dynamic_pointer_cast<const GlobalVar>(callee_op);
+    if (!gv) return slots;
+    auto callee = program_->GetFunction(gv->name_);
+    if (!callee) return slots;
+    const auto& dirs = callee->param_directions_;
+    const bool covered = is_submit ? (arg_count <= dirs.size()) : (arg_count == dirs.size());
+    if (!covered) return slots;
+    for (size_t i = 0; i < arg_count; ++i) {
+      if (dirs[i] == ParamDirection::Out) slots.insert(i);
+    }
+    return slots;
+  }
+
+  /// The tensor ``value`` names on the way out, or null when it names none.
+  ///
+  /// Only the operator's declared result-alias contract answers, which is the
+  /// same one ``ConvertTensorToTileOps`` reads. Writing an argument does not
+  /// make the result name it: ``tile.mgather`` stages Mat *elem* gathers
+  /// through a GM ``scratch`` operand and returns a **fresh** tile, so treating
+  /// its lone write slot as the alias would register the gathered tile as
+  /// another name for ``scratch``. Reading the tile would then mark a
+  /// write-only ``scratch`` read and promote it to ``InOut`` — the false read
+  /// that turns disjoint per-rank slices into a cross-rank dependency
+  /// (issue #2415). An operator whose result really does name a destination
+  /// says so in the contract.
   [[nodiscard]] static VarPtr WrittenDestination(const ExprPtr& value) {
     auto call = As<Call>(value);
     if (!call) return nullptr;
-    size_t dst_slot = DestinationSlot(call);
-    if (dst_slot >= call->args_.size()) return nullptr;
-    return AsVarLike(call->args_[dst_slot]);
+    auto index = ResultAliasedArgIndex(call);
+    if (!index) return nullptr;
+    return AsVarLike(call->args_[*index]);
   }
 
   void VisitExpr_(const CallPtr& op) override {
-    // ``dst_slot`` is the one operand index that is a pure write destination;
-    // ``args_.size()`` (the default) means "no operand is skipped".
-    size_t dst_slot = DestinationSlot(op);
+    // The operand indices this call purely overwrites; every other operand is
+    // walked as a read.
+    const auto dst_slots = DestinationSlots(op);
+    const auto callee_out_slots = CalleeWriteOnlySlots(op->op_, op->args_.size(), /*is_submit=*/false);
     for (size_t i = 0; i < op->args_.size(); ++i) {
       // Skipping the whole operand, not just a bare Var in it, is deliberate:
       // the destination slot only ever holds the tensor being written, so
       // anything nested there is address computation, not a content read.
-      if (i == dst_slot) continue;
+      if (dst_slots.count(i) > 0 || callee_out_slots.count(i) > 0) continue;
       INTERNAL_CHECK_SPAN(op->args_[i], op->span_) << "Call has null argument at index " << i;
       VisitExpr(op->args_[i]);
     }
     // Reference-typed attrs name Vars used elsewhere; mirror the base visitor so
     // a var reachable only through an attr is still counted as read — except
     // for the bookkeeping keys, which name a tensor without accessing it.
+    for (const auto& [key, value] : op->attrs_) {
+      if (!ShouldVisitScopeAttr(key)) continue;
+      ForEachAttrExpr(value, [this](const ExprPtr& e) { VisitExpr(e); });
+    }
+  }
+
+  /// A task launch reads its capture exactly as a plain call does, and the base
+  /// visitor's ``Submit`` handler does not forward to the ``Call`` one (see
+  /// `.claude/rules/pass-submit-awareness.md`). Without this override every
+  /// ``pl.submit`` argument counted as a read, so a capture handed only to a
+  /// callee's ``Out`` slot came back ``InOut`` — the false cross-rank
+  /// dependency of issue #2415, for exactly the ``manual_scope`` programs that
+  /// launch work asynchronously.
+  void VisitExpr_(const SubmitPtr& op) override {
+    const auto callee_out_slots = CalleeWriteOnlySlots(op->op_, op->args_.size(), /*is_submit=*/true);
+    for (size_t i = 0; i < op->args_.size(); ++i) {
+      if (callee_out_slots.count(i) > 0) continue;
+      INTERNAL_CHECK_SPAN(op->args_[i], op->span_) << "Submit has null argument at index " << i;
+      VisitExpr(op->args_[i]);
+    }
+    // ``deps_`` are TaskId values this launch consumes — real SSA uses, never
+    // a write destination, so they are always read.
+    for (const auto& dep : op->deps_) {
+      if (dep) VisitExpr(dep);
+    }
     for (const auto& [key, value] : op->attrs_) {
       if (!ShouldVisitScopeAttr(key)) continue;
       ForEachAttrExpr(value, [this](const ExprPtr& e) { VisitExpr(e); });
@@ -263,6 +384,7 @@ class ParamReadCollector : public IRVisitor {
   /// plus each SSA binding of a post-write state discovered along the way.
   std::unordered_map<const Var*, size_t> aliases_;
   std::vector<bool>& has_read_;
+  ProgramPtr program_;
 };
 
 /**
@@ -511,8 +633,11 @@ class UpwardExposedUseCollector : public IRVisitor {
     // masked by a write on the other, then join on *must*-definitions: a
     // variable written by only one arm may still carry its incoming value.
     const std::vector<const Var*> then_new = VisitBranchIsolated(op->then_body_);
-    if (!op->else_body_.has_value()) return;
-    const std::vector<const Var*> else_new = VisitBranchIsolated(*op->else_body_);
+    // Bound to a local so the optional's engagement is provable at the use:
+    // through `op->`, the analysis cannot tie the guard to the access.
+    const auto& else_body = op->else_body_;
+    if (!else_body.has_value()) return;
+    const std::vector<const Var*> else_new = VisitBranchIsolated(else_body.value());
     const std::unordered_set<const Var*> then_set(then_new.begin(), then_new.end());
     for (const auto* var : else_new) {
       if (then_set.count(var) > 0) Define(var);
@@ -1741,19 +1866,22 @@ std::string ScopeOutliner::GenerateHierarchySuffix(Level level, const std::optio
 /// Infer parameter directions for the outlined function by examining the scope body.
 ///
 /// Strategy:
-///   0. Collect which captured vars the body *reads* — every use except the
-///      two write-destination operand slots (``tile.store``'s target and
-///      ``tensor.assemble``'s destination). Conservative by construction: an
-///      unrecognised use counts as a read, so the classification can only err
-///      towards ``InOut``.
-///   1. Mark tile.store targets (from ``store_output_set``) as written
-///   2. Mark tensor.assemble destinations as written (``tensor.assemble`` is
-///      SSA-pure but its first arg is a destination the result aliases in
-///      place; without this the spmd wrapper for
-///      ``for n0 in pl.spmd(...): out = pl.assemble(out, slice, [...])``
-///      keeps direction In on the shared output and the orchestration
-///      codegen drops the SSA-result alias for the call)
-///   3. Merge ``Out``/``InOut`` directions from inner GlobalVar calls
+///   0. Collect which captured vars the body *reads* — every use except an
+///      operand the operator declares it purely overwrites. Conservative by
+///      construction: an unrecognised use counts as a read, so the
+///      classification can only err towards ``InOut``.
+///   1. Mark every captured var the body writes. Which argument an operator
+///      writes comes from its registry declaration (`set_arg_effect`), so a
+///      scope writing through ``tile.mscatter``, ``tensor.write``,
+///      ``pld.tile.put`` or any other declared writer is classified the same
+///      way as one writing through ``tile.store``. Two sources feed this: the
+///      exported ``store_output_set`` (targets that also become outputs) and a
+///      scan of the body, which catches an SSA-pure writer such as
+///      ``tensor.assemble`` whose result the caller rebinds — without it the
+///      spmd wrapper for ``for n0 in pl.spmd(...): out = pl.assemble(out,
+///      slice, [...])`` keeps direction In on the shared output and the
+///      orchestration codegen drops the SSA-result alias for the call.
+///   2. Merge ``Out``/``InOut`` directions from inner GlobalVar calls
 ///
 /// A written param is ``InOut`` only when Step 0 also saw a read; a
 /// write-only param is ``Out``. Claiming ``InOut`` for a param the body never
@@ -1780,40 +1908,37 @@ std::vector<ParamDirection> ScopeOutliner::InferParamDirections(
   // Step 0: which captured vars does the body read? A written param earns
   // ``InOut`` only when it is also read; write-only earns ``Out``.
   std::vector<bool> has_read(input_vars.size(), false);
-  ParamReadCollector(var_to_idx, has_read).VisitStmt(body);
+  ParamReadCollector(var_to_idx, has_read, program_).VisitStmt(body);
   std::vector<ParamDirection> written_direction(input_vars.size());
   for (size_t i = 0; i < input_vars.size(); ++i) {
     written_direction[i] = has_read[i] ? ParamDirection::InOut : ParamDirection::Out;
   }
 
-  // Step 1: mark tile.store targets as written
+  // Step 1a: mark the exported write targets
   for (size_t i = 0; i < input_vars.size(); ++i) {
     if (store_output_set.count(input_vars[i].get())) {
       directions[i] = written_direction[i];
     }
   }
 
-  // Step 2: mark tensor.assemble destinations as written. ``tensor.assemble``
-  // is SSA-pure (returns a fresh Tensor) but the first arg is a destination
-  // that the result aliases in place — when the destination is a parameter
-  // the function writes into the caller's backing buffer.
-  class AssembleDestUpgrader : public IRVisitor {
+  // Step 1b: scan the body for writes the exported set does not carry. An
+  // SSA-pure writer such as ``tensor.assemble`` returns a fresh Tensor, so it
+  // never enters ``store_output_set``, yet its destination operand is the
+  // caller's backing buffer and the result aliases it in place.
+  class WrittenParamUpgrader : public IRVisitor {
    public:
-    AssembleDestUpgrader(const std::unordered_map<const Var*, size_t>& var_to_idx,
+    WrittenParamUpgrader(const std::unordered_map<const Var*, size_t>& var_to_idx,
                          std::vector<ParamDirection>& directions,
                          const std::vector<ParamDirection>& written_direction)
         : var_to_idx_(var_to_idx), directions_(directions), written_direction_(written_direction) {}
 
    protected:
     void VisitExpr_(const CallPtr& call) override {
-      auto opnode = std::dynamic_pointer_cast<const Op>(call->op_);
-      if (opnode && IsOp(opnode, "tensor.assemble") && !call->args_.empty()) {
-        if (auto var = As<Var>(call->args_[0])) {
-          auto it = var_to_idx_.find(var.get());
-          if (it != var_to_idx_.end() && directions_[it->second] == ParamDirection::In) {
-            directions_[it->second] = written_direction_[it->second];
-          }
-        }
+      for (const auto& target : CallWriteTargets(call)) {
+        auto it = var_to_idx_.find(target.var.get());
+        if (it == var_to_idx_.end()) continue;
+        directions_[it->second] =
+            MergeParamDirection(directions_[it->second], written_direction_[it->second]);
       }
       IRVisitor::VisitExpr_(call);
     }
@@ -1823,20 +1948,38 @@ std::vector<ParamDirection> ScopeOutliner::InferParamDirections(
     std::vector<ParamDirection>& directions_;
     const std::vector<ParamDirection>& written_direction_;
   };
-  AssembleDestUpgrader(var_to_idx, directions, written_direction).VisitStmt(body);
+  WrittenParamUpgrader(var_to_idx, directions, written_direction).VisitStmt(body);
 
   if (!program_) return directions;
 
-  // Step 3: collect all GlobalVar function calls in the body and merge
+  // Step 2: collect all GlobalVar function calls in the body and merge
   // ``Out``/``InOut`` directions from their callees onto our parameters.
   class CallFinder : public IRVisitor {
    public:
     std::vector<CallPtr> found_calls;
     void VisitExpr_(const CallPtr& call) override {
+      Record(call);
+      IRVisitor::VisitExpr_(call);
+    }
+
+    /// A task launch calls its callee just as a plain call does, and the base
+    /// visitor's Submit handler does not forward here (see
+    /// `.claude/rules/pass-submit-awareness.md`), so a `pl.submit` inside an
+    /// outlined scope would otherwise contribute no callee direction at all.
+    /// The view is transient — the merge below only reads its `op_` and
+    /// `args_`, and it is never stored in the IR. Its arguments are a
+    /// positional *prefix* of the callee's parameters; the merge is already
+    /// bounded by both sizes.
+    void VisitExpr_(const SubmitPtr& submit) override {
+      Record(SubmitToCallView(submit));
+      IRVisitor::VisitExpr_(submit);
+    }
+
+   private:
+    void Record(const CallPtr& call) {
       if (std::dynamic_pointer_cast<const GlobalVar>(call->op_)) {
         found_calls.push_back(call);
       }
-      IRVisitor::VisitExpr_(call);
     }
   };
 
@@ -1844,7 +1987,20 @@ std::vector<ParamDirection> ScopeOutliner::InferParamDirections(
   finder.VisitStmt(body);
   if (finder.found_calls.empty()) return directions;
 
-  // Merge directions from all calls, preferring Out/InOut over In
+  // Accumulate what the callees prove about each capture as two independent
+  // observations rather than folding one direction at a time.
+  //
+  // ``ParamDirection`` is not a lattice this evidence can be merged along.
+  // ``In`` is the *no evidence yet* floor — ``directions`` is seeded with it —
+  // so ``MergeParamDirection`` cannot read an ``In`` operand as "somebody read
+  // this" without also promoting every write-only capture to ``InOut``, which
+  // is the false read issue #2415 exists to prevent. Folding per call therefore
+  // dropped a real read: a capture handed to one callee's ``In`` slot and
+  // another's ``Out`` slot merged to ``In``, then to ``Out``, losing the first
+  // observation. Kept apart, the two combine into the ``InOut`` such a capture
+  // actually is, and a capture only ever written still comes out ``Out``.
+  std::vector<bool> callee_reads(input_vars.size(), false);
+  std::vector<bool> callee_writes(input_vars.size(), false);
   for (const auto& call : finder.found_calls) {
     auto gv = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
     if (!gv) continue;
@@ -1853,20 +2009,41 @@ std::vector<ParamDirection> ScopeOutliner::InferParamDirections(
     const auto& call_args = call->args_;
     const auto& callee_dirs = callee->param_directions_;
     for (size_t arg_idx = 0; arg_idx < call_args.size() && arg_idx < callee_dirs.size(); ++arg_idx) {
-      auto arg_var = As<Var>(call_args[arg_idx]);
+      // ``AsVarLike``: a loop-carried capture arrives as an ``IterArg``, which
+      // has its own ``ObjectKind`` and so never matches ``As<Var>``
+      // (`.claude/rules/ir-kind-traits.md`). Missing it pinned the wrapper
+      // parameter to the seeded ``In`` no matter what the callee declared.
+      auto arg_var = AsVarLike(call_args[arg_idx]);
       if (!arg_var) continue;
       auto it = var_to_idx.find(arg_var.get());
       if (it == var_to_idx.end()) continue;
-      // Merge monotonically along ``In < Out < InOut`` rather than
-      // overwriting (same ordering ``ComputeWrapperEffectiveDirections``
-      // uses). A callee slot only ever adds evidence: it can lift ``In`` to a
-      // write direction, or lift ``Out`` to ``InOut`` when the callee reads.
-      // It must never *remove* the read Step 0 saw in this body — a plain
-      // assignment would demote a genuine ``InOut`` to ``Out`` whenever the
-      // same capture is also handed to a callee that declares its slot
-      // ``Out``, dropping a real RAW dependency.
-      directions[it->second] = MergeParamDirection(directions[it->second], callee_dirs[arg_idx]);
+      const ParamDirection callee_dir = callee_dirs[arg_idx];
+      if (callee_dir == ParamDirection::In || callee_dir == ParamDirection::InOut) {
+        callee_reads[it->second] = true;
+      }
+      if (callee_dir == ParamDirection::Out || callee_dir == ParamDirection::InOut) {
+        callee_writes[it->second] = true;
+      }
     }
+  }
+
+  // Only a write is new information here; a callee that merely reads its slot
+  // leaves the capture where the body put it. The read half of the verdict
+  // combines *both* sources: a slot some callee reads, and a read Step 0 saw in
+  // this body. Step 0's answer is now trustworthy for this — it skips the
+  // arguments a callee declares ``Out``, so ``has_read`` no longer counts the
+  // argument pass itself and means what it says. Consulting only the callees
+  // would drop the read in
+  //
+  //     value = pl.load(shared, ...)   # this body reads it
+  //     self.overwrite(shared)         # and a callee overwrites it
+  //
+  // leaving ``shared`` ``Out`` and telling the wrapper it need not stage the
+  // very contents ``pl.load`` consumes.
+  for (size_t i = 0; i < input_vars.size(); ++i) {
+    if (!callee_writes[i]) continue;
+    const bool is_read = callee_reads[i] || has_read[i];
+    directions[i] = MergeParamDirection(directions[i], is_read ? ParamDirection::InOut : ParamDirection::Out);
   }
 
   return directions;

@@ -16,10 +16,10 @@ orchestration codegen 直接读取，不再自行推导。
 
 当且仅当 iter_arg 的 yield 值落在该 iter_arg 的**别名等价类**（alias class，即指
 向同一后端缓冲区的 Var 集合）中时，它才是 trivial。`Scalar[TASK_ID]` carry 永远不
-是 trivial：运行时每次迭代都返回一个全新的 `PTO2TaskId`。
+是 trivial：运行时每次迭代都返回一个全新的 `TaskId`。
 
 在 `pl.manual_scope` 内部，`Scalar[TASK_ID]` 的 rebind carry 还会进一步降级为定长的
-`PTO2TaskId[N]` fence 数组。`N` 取自持有该数组的 `pl.parallel` 循环的常量 trip
+`TaskId[N]` fence 数组。`N` 取自持有该数组的 `pl.parallel` 循环的常量 trip
 count；若一个 `Sequential` 循环把该数组穿过内层 `pl.parallel` 向外传递，则继承内层
 的 extent。
 
@@ -56,7 +56,7 @@ return_var 当作外层 iter_arg 的别名，会把外层 slot 误标为 trivial
 | Key | 类型 | 含义 |
 | --- | ---- | ---- |
 | `iter_arg_rebind_<i>` | `bool` | `True` = 物化 carry，`False` = 平凡别名。**每个** slot 都会打上，因此该 attr 的存在本身就证明 pass 跑过了。 |
-| `iter_arg_array_size_<i>` | `int` | `PTO2TaskId[N]` fence 数组的 extent。仅在为正时打上；缺失表示走标量 / tensor / `ArrayType` carry 路径。 |
+| `iter_arg_array_size_<i>` | `int` | `TaskId[N]` fence 数组的 extent。仅在为正时打上；缺失表示走标量 / tensor / `ArrayType` carry 路径。 |
 
 读取请使用 `ir::transform_utils::IterArgIsRebind()` / `IterArgArraySize()`
 （`include/pypto/ir/transforms/utils/transform_utils.h`），不要手写字符串匹配 key。
@@ -82,12 +82,12 @@ yield 处赋值。
 
 在 manual scope 内，`pl.parallel(4)` 上的 TaskId carry 得到
 `attrs={"iter_arg_rebind_0": True, "iter_arg_array_size_0": 4}`，降级为
-`PTO2TaskId arr[4];`。
+`TaskId arr[4];`。
 
 ## 报错
 
 携带 manual-scope 依赖（`deps=[...]`）的 `pl.parallel` 循环必须有静态可知的 trip
-count——运行时 fence 需要定长 `N` 的 `PTO2TaskId[N]` 数组。动态 trip count 会抛出面向
+count——运行时 fence 需要定长 `N` 的 `TaskId[N]` 数组。动态 trip count 会抛出面向
 用户的错误：
 
 ```text
@@ -121,7 +121,7 @@ codegen 会把所有 carry 静默降级成平凡别名。
 `AutoDeriveTaskDependencies` 产生），orchestration codegen 会在本 pass 打的 plan 之上
 再叠加两个标志。它们依赖 program 全局的依赖边而非循环自身的结构，因此仍留在 codegen：
 carry 被强制置为 `rebind`，尺寸取自外层循环的常量 trip count；当该 trip count 是动态
-值时，退化为 `std::vector<PTO2TaskId>` 收集。
+值时，退化为 `std::vector<TaskId>` 收集。
 
 ## 参见
 

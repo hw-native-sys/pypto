@@ -1137,16 +1137,13 @@ void OpConversionRegistry::RegisterMatmulOps() {
         const bool nd = rank_of(args[0]) > 2 || rank_of(args[1]) > 2 || rank_of(args[2]) > 2;
         const std::string out_op = nd ? "tile.batch_matmul_acc" : "tile.matmul_acc";
         std::vector<ExprPtr> out_args = {args[0], args[1], args[2]};
-        if (args.size() == 4) {
-          // The batched form expands into several tile.matmul_acc calls inside
-          // FlattenTileNdTo2D, which has no place to thread a per-call
-          // predicate; only the 2D path carries init_cond.
-          CHECK_SPAN(!nd, span)
-              << "tensor.matmul_acc does not support init_cond on operands of rank > 2 (got acc rank "
-              << rank_of(args[0]) << ", lhs rank " << rank_of(args[1]) << ", rhs rank " << rank_of(args[2])
-              << "). Loop over the batch dimension and accumulate with 2D operands instead.";
-          out_args.push_back(args[3]);
-        }
+        // init_cond rides along on both forms. The batched op forwards it to every
+        // tile.matmul_acc FlattenTileNdTo2D unrolls it into, so the predicate's
+        // domain is exactly tensor.matmul_acc's own: whatever shape accumulates
+        // without a predicate accumulates with one. (batch_count > 1 is rejected
+        // later, in FlattenTileNdTo2D, for a reason unrelated to init_cond — the
+        // per-batch accumulator is a strided L0C row window the MAD cannot address.)
+        if (args.size() == 4) out_args.push_back(args[3]);
         return ConversionResult{OpRegistry::GetInstance().Create(out_op, out_args, span)};
       },
       {{1, {MemorySpace::Mat, "a_trans"}}, {2, {MemorySpace::Mat, "b_trans"}}});

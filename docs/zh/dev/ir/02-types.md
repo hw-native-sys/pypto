@@ -19,7 +19,7 @@ float_type = ir.ScalarType(DataType.FP32)
 
 > **注意：** `INDEX` 是用于索引计算（循环变量、维度、偏移量、步长）的独立整数类型。它拥有自己的类型代码和字符串表示（`"index"`）。虽然语义上与 `INT64` 类似，但 `INDEX != INT64` —— 它们是不同的类型。在代码生成中，INDEX 和 INT64 之间的隐式类型转换会被抑制。
 >
-> **注意：** `TASK_ID` 是一个不透明的 64-bit handle（类型代码 `0x50`），表示 runtime 的 `PTO2TaskId`。它**不是**数值类型——上面没有任何算术运算。`Scalar[TASK_ID]` 值由 `with pl.manual_scope():` 内的 `pl.submit(...)` 产生（它返回的二元组第二个元素命名 producer task）。Python 字面量 `None` 是 "暂无 producer" 的哨兵——它用作 TaskId 循环 iter_arg 的种子，也可作为 `deps=[None]` 条目；当 `None` 出现在 TaskId 位置时，会下沉为 [`system.task_invalid`](05-operators.md) builtin → `PTO2TaskId::invalid()`。TaskId 值通过 `pl.submit(...)` 的 `deps=[tid1, tid2]` kwarg 传入。codegen 把 `TASK_ID` 下沉为 `PTO2TaskId`。
+> **注意：** `TASK_ID` 是一个不透明的 64-bit handle（类型代码 `0x50`），表示 runtime 的 `TaskId`。它**不是**数值类型——上面没有任何算术运算。`Scalar[TASK_ID]` 值由 `with pl.manual_scope():` 内的 `pl.submit(...)` 产生（它返回的二元组第二个元素命名 producer task）。Python 字面量 `None` 是 "暂无 producer" 的哨兵——它用作 TaskId 循环 iter_arg 的种子，也可作为 `deps=[None]` 条目；当 `None` 出现在 TaskId 位置时，会下沉为 [`system.task_invalid`](05-operators.md) builtin → `TaskId::invalid()`。TaskId 值通过 `pl.submit(...)` 的 `deps=[tid1, tid2]` kwarg 传入。codegen 把 `TASK_ID` 下沉为 `TaskId`。
 
 ### TensorType
 
@@ -200,8 +200,12 @@ TileView：它由 tile shape 以及（如果存在）tile memory space 推导得
 像 `pl.TileView()` 这样的冗余显式默认写法，会与省略写法被视为语义等价，
 并且在 printer 输出时可能统一成规范形式。`TileView.compact` 记录部分有效的
 boxed tile 是采用 PTO 的有效区域紧凑表示（`CompactMode.normal`），还是普通的
-物理 box 表示（默认的 `CompactMode.null`）。编译器会为进入 L0A/L0B 的部分
-`tile.extract` 自动设置该字段，普通用户代码无需手动选择。
+物理 box 表示（默认的 `CompactMode.null`）。它只在 fractal 空间——`Left` / `Right` /
+`Acc`——有意义，因为它本身描述的就是 N-fractal pitch；`AccCompactValid` 校验器会拒绝
+其它空间上的 compact。编译器会为进入 L0A/L0B 的部分 `tile.extract`、以及行窄化的
+matmul 累加器（其 L0C pitch 由 `mad` 按 L0A 操作数的有效行数推导）自动设置该字段，
+`AutoTileMatmulL0` 还会通过 `tile.create(..., compact=True)` 在它合成的累加器种子上
+声明该字段。普通用户代码无需手动选择。
 
 隐式 view 依赖 memory space，构造函数只会针对传入的 space 把 view 折叠成
 `nullopt`。凡能确定结果 space 的 `f_deduce_type`，**都必须把该 space 传进来**：

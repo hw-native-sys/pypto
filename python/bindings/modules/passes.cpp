@@ -100,7 +100,7 @@ void BindPass(nb::module_& m) {
              "device communication context is an explicit CommCtxType SSA value traceable to a parameter")
       .value("RuntimeScopesMaterialized", IRProperty::RuntimeScopesMaterialized,
              "Orchestration functions carry explicit RuntimeScopeStmt nodes for the function body and "
-             "for/if bodies; codegen no longer emits implicit PTO2_SCOPE() wrappers")
+             "for/if bodies; codegen no longer emits implicit SIMPLER_SCOPE() wrappers")
       .value("AssignTypeSymmetry", IRProperty::AssignTypeSymmetry,
              "Every AssignStmt has structural_equal(var->GetType(), value->GetType()) — covers dtype, "
              "shape, tile_view/tensor_view, and TileType memory_space (memref excluded as an allocation "
@@ -133,7 +133,11 @@ void BindPass(nb::module_& m) {
              "Every atomic-add write into GM (tile.store / tensor.assemble / pld.tensor.put / "
              "pld.tile.put / pld.tensor.remote_store / pld.tile.remote_store) targets a dtype the "
              "backend store pipe can combine; a bf16 destination requires the Ascend910B (A2/A3) "
-             "profile");
+             "profile")
+      .value("AccCompactValid", IRProperty::AccCompactValid,
+             "Every tile.matmul_acc / tile.matmul_mx_acc accumulates into a CompactMode.normal "
+             "buffer when mad's pitch (ceil(lhs validRow/16)*16) differs from the accumulator's "
+             "physical row count, and no tile outside Left/Right/Acc carries a compact mode");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");
@@ -610,7 +614,7 @@ void BindPass(nb::module_& m) {
              "Materialize implicit orchestration scopes as explicit RuntimeScopeStmt nodes.\n\n"
              "For every Orchestration function, inserts AUTO RuntimeScopeStmt (manual_=false)\n"
              "wrapping the function body and each ForStmt / IfStmt branch body (suppressed\n"
-             "inside a manual scope). Codegen then emits PTO2_SCOPE only from RuntimeScopeStmt\n"
+             "inside a manual scope). Codegen then emits SIMPLER_SCOPE only from RuntimeScopeStmt\n"
              "nodes, 1:1 with the IR. Runs last in the pipeline, after the final Simplify.");
   passes.def("classify_iter_arg_carry", &pass::ClassifyIterArgCarry,
              "Classify ForStmt iter_arg carries and size TaskId array carries.\n\n"

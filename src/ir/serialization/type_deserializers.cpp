@@ -55,6 +55,19 @@ using DeserializerContext = serialization::detail::DeserializerContext;
 // A missing field silently defaults to empty (backward compat with older .pto blobs).
 // A present field with an unexpected type raises — silently treating malformed data
 // as "no comments" would hide serializer/deserializer mismatches.
+/// Reject a cache-policy int that names no declared policy.
+///
+/// A `.pto` file is external input, so an out-of-range value is a user-facing
+/// error, not an internal invariant: fail at the boundary with the value in
+/// hand rather than letting an unknown policy reach a pass or codegen.
+static void CheckCachePolicyValue(int policy, const std::string& context) {
+  CHECK(policy == static_cast<int>(CachePolicy::kDefault) ||
+        policy == static_cast<int>(CachePolicy::kBypass))
+      << context << " has unknown CachePolicy value " << policy << "; expected "
+      << static_cast<int>(CachePolicy::kDefault) << " (default) or "
+      << static_cast<int>(CachePolicy::kBypass) << " (bypass)";
+}
+
 static std::vector<std::string> DeserializeLeadingComments(const msgpack::object& fields_obj) {
   std::vector<std::string> comments;
   if (fields_obj.type != msgpack::type::MAP) return comments;
@@ -314,17 +327,31 @@ static std::vector<std::pair<std::string, std::any>> DeserializeKwargs(const msg
           }
           VarPtr var;
           int policy = 0;
+          bool saw_var = false;
+          bool saw_policy = false;
           msgpack::object_kv* q = elem.via.map.ptr;
           msgpack::object_kv* const qend = elem.via.map.ptr + elem.via.map.size;
           for (; q < qend; ++q) {
             std::string field;
             q->key.convert(field);
-            if (field == "var" && q->val.type != msgpack::type::NIL) {
-              var = std::static_pointer_cast<const Var>(ctx.DeserializeNode(q->val, zone));
+            if (field == "var") {
+              saw_var = true;
+              if (q->val.type != msgpack::type::NIL) {
+                var = std::static_pointer_cast<const Var>(ctx.DeserializeNode(q->val, zone));
+              }
             } else if (field == "policy") {
+              saw_policy = true;
               policy = q->val.as<int>();
             }
           }
+          // Both fields are required. Defaulting a missing one would silently
+          // turn a truncated entry into a valid-looking declaration -- a lost
+          // BYPASS, or a DEFAULT invented for a tensor nobody named.
+          if (!saw_var || !saw_policy) {
+            throw TypeError("VarPolicyList kwarg '" + key +
+                            "' entries must have both 'var' and 'policy' fields");
+          }
+          CheckCachePolicyValue(policy, "VarPolicyList kwarg '" + key + "'");
           entries.emplace_back(std::move(var), policy);
         }
         kwargs.emplace_back(key, std::move(entries));
@@ -343,17 +370,29 @@ static std::vector<std::pair<std::string, std::any>> DeserializeKwargs(const msg
           }
           int32_t index = 0;
           int policy = 0;
+          bool saw_index = false;
+          bool saw_policy = false;
           msgpack::object_kv* q = elem.via.map.ptr;
           msgpack::object_kv* const qend = elem.via.map.ptr + elem.via.map.size;
           for (; q < qend; ++q) {
             std::string field;
             q->key.convert(field);
             if (field == "index") {
+              saw_index = true;
               index = q->val.as<int32_t>();
             } else if (field == "policy") {
+              saw_policy = true;
               policy = q->val.as<int>();
             }
           }
+          // See the VarPolicyList arm: a missing field must fail, not default --
+          // index 0 is a real parameter, so a truncated entry would silently
+          // retarget the declaration at the first parameter.
+          if (!saw_index || !saw_policy) {
+            throw TypeError("IndexPolicyList kwarg '" + key +
+                            "' entries must have both 'index' and 'policy' fields");
+          }
+          CheckCachePolicyValue(policy, "IndexPolicyList kwarg '" + key + "'");
           entries.emplace_back(index, policy);
         }
         kwargs.emplace_back(key, std::move(entries));
@@ -956,7 +995,7 @@ static IRNodePtr DeserializeSplitAivScopeStmt(const msgpack::object& fields_obj,
                                              DeserializeScopeAttrs(fields_obj, ctx, zone));
 }
 
-// Deserialize RuntimeScopeStmt (pl.manual_scope MANUAL wrapper / AUTO PTO2_SCOPE
+// Deserialize RuntimeScopeStmt (pl.manual_scope MANUAL wrapper / AUTO SIMPLER_SCOPE
 // wrapper added by MaterializeRuntimeScopes). Submit nodes live inside this, so
 // serializing a manual_scope program requires it.
 static IRNodePtr DeserializeRuntimeScopeStmt(const msgpack::object& fields_obj, msgpack::zone& zone,

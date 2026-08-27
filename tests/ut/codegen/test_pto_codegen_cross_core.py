@@ -788,6 +788,111 @@ class TestCrossCoreTpushTpopCodegen:
             f"restoration must use a metadata-only treshape:\n{consumer_code}"
         )
 
+    def _row_narrowed_acc_push_program(self, valid_rows, valid_cols, compact, split=0, rows=64):
+        """One AIC function that pushes a row-narrowed Acc tile into the C2V FIFO."""
+        span = ir.Span.unknown()
+        zero = ir.ConstInt(0, pl.INDEX, span)
+        box_rows = rows
+        rows = ir.ConstInt(box_rows, pl.INDEX, span)
+        cols = ir.ConstInt(128, pl.INDEX, span)
+        v_rows = ir.ConstInt(valid_rows, pl.INDEX, span)
+        v_cols = ir.ConstInt(valid_cols, pl.INDEX, span)
+        offsets = ir.MakeTuple([zero, zero], span)
+        shape = ir.MakeTuple([rows, cols], span)
+        valid_shape = ir.MakeTuple([v_rows, v_cols], span)
+
+        src = ir.Var("src", ir.TensorType([box_rows, 128], pl.INT32), span)
+        acc_memref = ir.MemRef(ir.MemorySpace.Acc, ir.ConstInt(0, pl.INT64, span), box_rows * 128 * 4, 0)
+        acc_type = ir.TileType(
+            [rows, cols],
+            pl.INT32,
+            acc_memref,
+            ir.TileView(valid_shape=[v_rows, v_cols], compact=compact),
+            ir.MemorySpace.Acc,
+        )
+        acc_tile = ir.Var("acc_tile", acc_type, span)
+        load_call = ir.Call(
+            ir.Op("tile.load"),
+            [src, offsets, shape, valid_shape],
+            {"target_memory": ir.MemorySpace.Acc},
+            acc_type,
+            span,
+        )
+        push_call = ir.Call(ir.Op("tile.tpush_to_aiv"), [acc_tile], {"split": split}, ir.UnknownType(), span)
+        producer = ir.Function(
+            "narrow_acc_producer",
+            [(src, ir.ParamDirection.In)],
+            [],
+            ir.SeqStmts([ir.AssignStmt(acc_tile, load_call, span), ir.EvalStmt(push_call, span)], span),
+            span,
+            ir.FunctionType.AIC,
+        )
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        mlir_code = codegen.PTOCodegen().generate(ir.Program([producer], "narrow_acc_push_program", span))
+        return _extract_func_section(mlir_code, "narrow_acc_producer")
+
+    def test_no_split_acc_to_vec_transport_keeps_the_producer_row_extent(self):
+        """A row-narrowed compact Acc must reach TPUSH at its own row extent.
+
+        ``mad`` lays the product out in L0C with an N-fractal stride taken from
+        the L0A operand's *valid* rows (pto-isa ``TMatmul.hpp``:
+        ``uint16_t m = aMatrix.GetValidRow()``), and ``TStoreAccNz2nd`` -- which
+        is what TPUSH runs -- recomputes that stride as
+        ``ceil(validRow/16)*16`` for a compact tile. Widening validRow to the
+        physical box before the push therefore makes the fix-pipe walk L0C at a
+        pitch ``mad`` never wrote at: with a 64-row box valid to 16 the push
+        picks up N-fractal 4j for every fractal j (issue #2510). Columns are a
+        different story and stay widened -- see the sibling test.
+        """
+        producer_code = self._row_narrowed_acc_push_program(16, 128, ir.CompactMode.normal)
+        assert "pto.set_validshape" not in producer_code, (
+            "a full-width row-narrowed Acc needs no transport widening at all; widening the rows "
+            f"desynchronizes TPUSH from the pitch mad wrote at:\n{producer_code}"
+        )
+
+    def test_no_split_acc_to_vec_transport_widens_columns_only(self):
+        """Columns still widen to the box; rows still do not.
+
+        The FIFO slot's row pitch is the producer's physical column count, so a
+        partially written column range leaves stale bytes *inside* the valid
+        rows. That is why the column half of the transport normalization stays.
+        """
+        producer_code = self._row_narrowed_acc_push_program(16, 96, ir.CompactMode.normal)
+        producer_lines = [line.strip() for line in producer_code.splitlines()]
+        push_index = next(i for i, line in enumerate(producer_lines) if "pto.tpush_to_aiv" in line)
+        validshape = [(i, line) for i, line in enumerate(producer_lines) if "pto.set_validshape" in line]
+        assert len(validshape) == 2, producer_code
+        assert validshape[0][0] < push_index < validshape[1][0]
+        assert ", %c16_index, %c128_index :" in validshape[0][1], (
+            f"transport must keep the producer's 16 valid rows and widen only the columns:\n{producer_code}"
+        )
+        assert ", %c16_index, %c96_index :" in validshape[1][1]
+
+    def test_split_acc_to_vec_rejects_a_row_narrowed_compact_accumulator(self):
+        """A compact narrowed Acc cannot cross a *split* boundary — refuse, don't skew.
+
+        A genuine row split needs the full box in the slot (lane 1 reads the band
+        at the box half, which exists only if the producer wrote it), but writing
+        it means reading L0C at the physical pitch — not the pitch ``mad`` used
+        for a row-narrowed operand. The two requirements are mutually exclusive,
+        so the shape is rejected with a message naming both DSL alternatives
+        rather than lowered into silently skewed data (measured on device: 1808
+        of 8192 elements wrong).
+        """
+        with pytest.raises(ValueError, match="cannot cross a split Cube-to-Vector boundary"):
+            self._row_narrowed_acc_push_program(16, 128, ir.CompactMode.normal, split=1)
+
+    def test_split_acc_to_vec_allows_a_single_fractal_block_accumulator(self):
+        """``ceil(validRow/16)*16 == Rows`` leaves writer and reader agreeing anyway.
+
+        The refusal is gated on the pitches actually differing, so the shapes that
+        cross a split boundary correctly today — a `[16, N]` accumulator, whatever
+        its valid rows — keep doing so.
+        """
+        producer_code = self._row_narrowed_acc_push_program(8, 128, ir.CompactMode.normal, split=1, rows=16)
+        assert "pto.tpush_to_aiv" in producer_code
+
     def test_split_acc_to_vec_pop_uses_full_box_for_tpop(self):
         """A split C2V pop transports the full per-lane box, not the logical valid box.
 

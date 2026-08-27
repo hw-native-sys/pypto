@@ -1,14 +1,14 @@
 # MaterializeRuntimeScopes Pass
 
 Inserts explicit AUTO `RuntimeScopeStmt` nodes into Orchestration functions so
-that PTO orchestration codegen emits `PTO2_SCOPE()` 1:1 from the IR instead of
+that PTO orchestration codegen emits `SIMPLER_SCOPE()` 1:1 from the IR instead of
 deriving the scope structure from `for` / `if` statements — unless the function
 opts out with `@pl.function(auto_scope=False)`, in which case the user places
 every scope by hand.
 
 ## Overview
 
-The simpler runtime wraps regions of an orchestration routine in `PTO2_SCOPE()`
+The simpler runtime wraps regions of an orchestration routine in `SIMPLER_SCOPE()`
 blocks (auto dependency tracking via the OverlapMap). It also provides an
 implicit top-level scope, so scopes are a **tuning / placement** mechanism, never
 a correctness requirement — a function may end up with zero compiler scopes.
@@ -17,7 +17,7 @@ By default (`auto_scope=True`) the compiler owns scope placement: for every
 `FunctionType::Orchestration` function this pass inserts AUTO `RuntimeScopeStmt`
 (`manual_ = false`) nodes wrapping the whole function body and each `ForStmt`
 body and `IfStmt` then/else body (suppressed inside a manual scope, since the
-runtime forbids AUTO nested in MANUAL). Codegen then emits `PTO2_SCOPE` **only**
+runtime forbids AUTO nested in MANUAL). Codegen then emits `SIMPLER_SCOPE` **only**
 from `RuntimeScopeStmt` nodes — staying 1:1 with the IR (see
 [orchestration codegen](../codegen/01-orchestration_codegen.md)).
 
@@ -127,7 +127,7 @@ preservation, AUTO-in-default rejection) and
 `tests/ut/language/parser/test_scope_parsing.py` (`pl.scope()` parse / round-trip
 / mode / nesting / opt-out rules). The full orchestration codegen suite
 (`tests/ut/codegen/test_orchestration_codegen.py`) verifies the emitted
-`PTO2_SCOPE` output is byte-identical to the previous codegen-driven behavior.
+`SIMPLER_SCOPE` output is byte-identical to the previous codegen-driven behavior.
 
 ## Pass Properties
 

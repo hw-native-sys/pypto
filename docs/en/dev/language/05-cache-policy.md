@@ -127,7 +127,7 @@ first one is kept, so the attr stays a set of distinct tensors.
 | `pl.set_cache_policy() first argument must be a bare variable name` | Parser (`ParserSyntaxError`) | `t.field`, `t[0]`, `f(t)` — no binding to track |
 | `pl.set_cache_policy() argument '<n>' is not defined at this point` | Parser (`ParserSyntaxError`) | Name not bound where the scope starts |
 | `pl.set_cache_policy() argument '<n>' is not a tensor` | Parser (`ParserTypeError`) | Only a GM tensor read has a cache policy |
-| `pl.set_cache_policy(...) references tensor '<n>', which is not captured by the scope body` | `OutlineIncoreScopes` (`CHECK_SPAN` → `ValueError`) | The scope never reads the tensor, so no parameter carries it |
+| `pl.set_cache_policy(...) references tensor '<n>', which is not captured by the scope body` | `OutlineIncoreScopes` (`CHECK_SPAN` → `ValueError`) | The scope body neither reads nor writes the tensor, so it is not captured and no parameter carries the policy |
 | `pl.set_cache_policy(<n>, CachePolicy.BYPASS) is not allowed on a tensor this scope writes (<dir>)` | `OutlineIncoreScopes` (`CHECK_SPAN` → `ValueError`) | A bypassing read of bytes the same kernel writes is a coherency bug |
 
 The two outliner rejections are user errors, not compiler bugs — hence

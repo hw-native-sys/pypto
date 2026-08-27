@@ -6,7 +6,7 @@ The boundary the dependency inference runs inside, and the switch that turns it 
 
 ## Concept
 
-A **runtime scope** (`PTO2_SCOPE`) is two things at once:
+A **runtime scope** (`SIMPLER_SCOPE`) is two things at once:
 
 - the region the OverlapMap tracks dependencies within, and
 - a heap tier, so nested scopes reclaim their memory independently.
