@@ -137,7 +137,7 @@ consumer one source of truth: `callee->param_directions_`.
 `Output`, `OutputExisting`, `InOut`, `NoDep`, `Scalar` — which is what
 dependency analysis and codegen actually consume.
 
-See [Derive Call Directions](../passes/37-derive_call_directions.md).
+See [Derive Call Directions](../passes/38-derive_call_directions.md).
 
 ### 4. Consistency warning (PostPipeline)
 
@@ -206,5 +206,5 @@ pinned as a passing test.
 - [Operator System](05-operators.md) — the declaration surface, in full.
 - [Outline InCore Scopes](../passes/08-outline_incore_scopes.md) — stage 1.
 - [Convert Tensor to Tile Ops](../passes/10-convert_tensor_to_tile_ops.md) — stage 2.
-- [Derive Call Directions](../passes/37-derive_call_directions.md) — stage 3.
+- [Derive Call Directions](../passes/38-derive_call_directions.md) — stage 3.
 - [IR Verifier](../passes/99-verifier.md) — stage 4.
