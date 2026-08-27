@@ -193,5 +193,58 @@ def test_graph_function_roundtrips():
     assert _layer(reparsed).func_type == ir.FunctionType.Graph
 
 
+# ---------------------------------------------------------------------------
+# Parser treatment
+# ---------------------------------------------------------------------------
+
+
+def test_graph_body_folds_tensor_dim_to_the_signature_symbol():
+    """A Graph body gets the same dynamic-extent folding as an Orchestration one.
+
+    `_fold_tensor_dim` rewrites ``pl.tensor.dim(x, 0)`` into the symbol the
+    signature already binds for that extent. Gated strictly on Orchestration, a
+    Graph body instead mints a *second* runtime scalar for the same extent, and
+    a shape built from it disagrees structurally with a callee or tensor type
+    that uses the declared symbol.
+
+    The two programs below are the same body under the two function types; the
+    decorator's `type=` must be a literal, so they cannot share a builder.
+    """
+    N = pl.dynamic("N")
+
+    @pl.program
+    class AsGraph:
+        @pl.function(type=pl.FunctionType.Graph)
+        def layer(
+            self,
+            x: pl.Tensor[[N, 64], pl.FP32],
+            out: pl.InOut[pl.Tensor[[N, 64], pl.FP32]],
+        ) -> pl.Tensor[[N, 64], pl.FP32]:
+            n = pl.tensor.dim(x, 0)
+            for _ in pl.range(n):
+                pass
+            return out
+
+    @pl.program
+    class AsOrchestration:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def layer(
+            self,
+            x: pl.Tensor[[N, 64], pl.FP32],
+            out: pl.InOut[pl.Tensor[[N, 64], pl.FP32]],
+        ) -> pl.Tensor[[N, 64], pl.FP32]:
+            n = pl.tensor.dim(x, 0)
+            for _ in pl.range(n):
+                pass
+            return out
+
+    graph_text = python_print(_layer(AsGraph))
+    assert "pl.tensor.dim" not in graph_text, "the extent symbol was not reused"
+
+    # Same body, same parser output — only the decorator line differs.
+    orch_text = python_print(_layer(AsOrchestration))
+    assert graph_text.split("\n", 1)[1] == orch_text.split("\n", 1)[1]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

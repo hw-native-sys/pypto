@@ -171,6 +171,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/materialize_comm_domain_scopes_pass.cpp
     src/ir/transforms/lower_host_tensor_collectives_pass.cpp
     src/ir/transforms/materialize_dist_tensor_ctx_pass.cpp
+    src/ir/transforms/legalize_graph_boundary_pass.cpp
     src/ir/transforms/materialize_valid_shape_symbols_pass.cpp
     src/ir/transforms/optimize_orch_tensors_pass.cpp
     src/ir/transforms/derive_call_directions_pass.cpp
@@ -256,6 +257,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/verify_acc_compact.cpp
     src/ir/verifier/verify_acc_to_gm_store.cpp
     src/ir/verifier/verify_atomic_add_dtype.cpp
+    src/ir/verifier/warning_in_param_written.cpp
     src/ir/verifier/verify_ssa_pass.cpp
     src/ir/verifier/verify_no_nested_call_pass.cpp
     src/ir/verifier/verify_no_nested_incore.cpp
@@ -277,6 +279,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/verify_call_directions.cpp
     src/ir/verifier/verify_tile_type_coherence.cpp
     src/ir/verifier/verify_assign_type_symmetry.cpp
+    src/ir/verifier/verify_graph_functions.cpp
     src/ir/verifier/verify_orchestration_references.cpp
     src/ir/verifier/verify_tensor_view_canonical.cpp
     src/ir/verifier/diagnostic_check_registry.cpp

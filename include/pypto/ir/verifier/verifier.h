@@ -123,6 +123,24 @@ PropertyVerifierPtr CreateAccCompactValidPropertyVerifier();
 PropertyVerifierPtr CreateAtomicAddDtypeValidPropertyVerifier();
 
 /**
+ * @brief Factory for the InParamWritten warning verifier.
+ *
+ * Reports a parameter declared `In` that its own function body writes, where
+ * "writes" means *declared* as written — by a builtin's registry effects or by
+ * a callee's own `param_directions_`.
+ *
+ * **Best-effort.** It is not registered as an `IRProperty`, and it does not
+ * promise to find every such parameter: it reads the same declarations
+ * direction inference reads, so an operator that declared no effect is
+ * invisible to it, and it runs `PostPipeline`, where `InitMemRef` has already
+ * invalidated `SSAForm`, so its buffer lineage can both miss and misattribute a
+ * write across control flow. See the file comment for the specific shapes.
+ *
+ * @return Shared pointer to the warning verifier
+ */
+PropertyVerifierPtr CreateInParamWrittenWarningVerifier();
+
+/**
  * @brief Factory function for creating NormalizedStmtStructure property verifier
  * @return Shared pointer to NormalizedStmtStructure PropertyVerifier
  */
@@ -404,6 +422,19 @@ PropertyVerifierPtr CreateIterArgCarryClassifiedPropertyVerifier();
  * @return Shared pointer to RuntimeScopesMaterialized PropertyVerifier
  */
 PropertyVerifierPtr CreateRuntimeScopesMaterializedPropertyVerifier();
+
+/**
+ * @brief Create a verifier for the GraphBoundaryLegalized property
+ *
+ * Re-states the boundary contract LegalizeGraphBoundary enforces, so a later
+ * pass that reintroduces a violation is caught. That matters more here than for
+ * a typical property: almost every host_build_graph constraint degrades to a
+ * *silent* non-graph fallback at runtime — the program stays numerically correct
+ * and merely loses the speedup — so this verifier is the automated detector.
+ *
+ * @return Property verifier instance
+ */
+PropertyVerifierPtr CreateGraphBoundaryLegalizedPropertyVerifier();
 
 /**
  * @brief Factory function for creating CallDirectionsResolved property verifier

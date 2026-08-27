@@ -129,7 +129,9 @@ std::vector<WrapperCallInfo> CollectInnerCalls(const FunctionPtr& wrapper, const
   std::vector<WrapperCallInfo> result;
   if (!wrapper || !wrapper->body_ || !program) return result;
   CallVisitor visitor(program, [&](const CallPtr& call, const FunctionPtr& callee) {
-    if (callee->func_type_ != FunctionType::Orchestration && callee->func_type_ != FunctionType::Opaque) {
+    // Exclude semantics: a Graph callee is a task launch, not a wrapper's
+    // inner kernel call, so it must be skipped alongside Orchestration.
+    if (!IsOrchestrationLike(callee->func_type_) && callee->func_type_ != FunctionType::Opaque) {
       result.push_back({call, callee});
     }
     return false;

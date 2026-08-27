@@ -75,10 +75,12 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   // it sits in GetStructuralProperties() and fires at pipeline input rather than
   // after a particular pass.
   Register(IRProperty::AtomicAddDtypeValid, CreateAtomicAddDtypeValidPropertyVerifier);
+
   Register(IRProperty::InlineFunctionsEliminated, CreateInlineFunctionsEliminatedPropertyVerifier);
   Register(IRProperty::OrchestrationReferencesResolved,
            CreateOrchestrationReferencesResolvedPropertyVerifier);
   Register(IRProperty::RuntimeScopesMaterialized, CreateRuntimeScopesMaterializedPropertyVerifier);
+  Register(IRProperty::GraphBoundaryLegalized, CreateGraphBoundaryLegalizedPropertyVerifier);
   // TensorViewCanonical (RFC #1300 §2.4): strict mode — every TensorView
   // reaching the codegen-entry boundary must carry explicit stride. The
   // registry default fires immediately after ``MaterializeTensorStrides``

@@ -1896,7 +1896,7 @@ class ASTParser:
         # must not defeat the alias; only an annotation asking for a *different*
         # type falls through to a Let of its own.
         if (
-            self._func_type == ir.FunctionType.Orchestration
+            ir.is_orchestration_like(self._func_type)
             and self._is_param_dim_symbol(value_expr)
             and (existing_var is None or self._is_param_dim_symbol(existing_var))
             and (override_type is None or _types_match(override_type, value_expr.type))
@@ -3216,7 +3216,7 @@ class ASTParser:
         assert isinstance(call, ast.Call)
         span = self.span_tracker.get_span(stmt)
 
-        if self._func_type not in (ir.FunctionType.Orchestration, ir.FunctionType.Inline):
+        if not ir.is_orchestration_like(self._func_type) and self._func_type != ir.FunctionType.Inline:
             raise ParserSyntaxError(
                 "pl.dump_tag() is only valid inside an Orchestration or Inline function",
                 span=span,
@@ -8760,7 +8760,10 @@ class ASTParser:
 
         Returns the folded extent, or None to emit ``tensor.dim`` as usual.
         """
-        if self._func_type != ir.FunctionType.Orchestration:
+        # A Graph body is orchestration too. Skipping it here would mint a second
+        # runtime scalar for an extent the signature already names, so shapes built
+        # from it can disagree structurally with a callee that uses the symbol.
+        if not ir.is_orchestration_like(self._func_type):
             return None
         # Every spelling the DSL accepts must fold. The printer normalizes them all
         # to ``dim(x, 0)``, so a spelling that did not fold here would fold on

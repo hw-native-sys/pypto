@@ -1885,6 +1885,10 @@ void BindIR(nb::module_& m) {
   ir.def("is_incore_type", &IsInCoreType, nb::arg("func_type"),
          "Check if a FunctionType is an InCore variant (InCore, AIC, or AIV)");
 
+  // IsOrchestrationLike helper
+  ir.def("is_orchestration_like", nb::overload_cast<FunctionType>(&IsOrchestrationLike), nb::arg("func_type"),
+         "Check if a FunctionType has an orchestration body (Orchestration or Graph)");
+
   // LevelToLinquLevel helper
   ir.def("level_to_linqu_level", &LevelToLinquLevel, nb::arg("level"),
          "Map Level enum value to Linqu hierarchy level number (0-7)");

@@ -42,8 +42,8 @@ default mode, where the compiler owns placement).
 
 **When to use**: in the `Default` strategy, immediately after the final
 `Simplify` and before
-[`ClassifyIterArgCarry`](45-classify_iter_arg_carry.md) and
-[`InsertCommFence`](46-insert_comm_fence.md). Running after every rewriting
+[`ClassifyIterArgCarry`](46-classify_iter_arg_carry.md) and
+[`InsertCommFence`](47-insert_comm_fence.md). Running after every rewriting
 transform means none of them has to reason about the inserted scope wrappers.
 
 **Scope**: only `Orchestration` functions are modified. InCore / AIC / AIV /

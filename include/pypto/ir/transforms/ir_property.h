@@ -112,6 +112,11 @@ enum class IRProperty : uint64_t {
                                     ///< from the L0A operand, and only a compact tile makes a reader
                                     ///< recompute that pitch instead of using the physical row count.
                                     ///< Verifiable once InferTileMemorySpace has resolved memory spaces
+  GraphBoundaryLegalized,           ///< Every FunctionType::Graph function satisfies the
+                                    ///< host_build_graph boundary contract: its derived boundary
+                                    ///< scalars have been hoisted to the call sites, its signature
+                                    ///< fits the runtime's tensor/direction/return limits, and no
+                                    ///< call site launches it in a form the runtime cannot cache
   kCount                            ///< Sentinel (must be last)
 };
 
@@ -246,7 +251,8 @@ enum class VerificationLevel {
  * CallDirectionsResolved, ManualDepsOnSubmitOnly, ReturnParamsExplicit,
  * AivSplitValid, TileMemoryInferred, HardSyncallOccupancyValid,
  * IterArgCarryClassified, RuntimeScopesMaterialized,
- * DistTensorCtxMaterialized, AccToGmStoreValid, AccCompactValid, AtomicAddDtypeValid} —
+ * DistTensorCtxMaterialized, GraphBoundaryLegalized, AccToGmStoreValid,
+ * AccCompactValid, AtomicAddDtypeValid} —
  * lightweight checks that catch the most common IR errors.
  */
 const IRPropertySet& GetVerifiedProperties();

@@ -41,6 +41,7 @@ def aicore_kernel(x: pl.INT64) -> pl.INT64:
 | `pl.FunctionType.AIC` | Cube core | Cube core kernel (specialized InCore) |
 | `pl.FunctionType.AIV` | Vector core | Vector core kernel (specialized InCore) |
 | `pl.FunctionType.Group` | Multi-core | Co-scheduled group of AIC + AIV kernels |
+| `pl.FunctionType.Graph` | Host/AICPU | Recordable orchestration fragment, replayed by the `host_build_graph` runtime (see below) |
 
 When no type is specified, functions default to `Opaque`.
 
