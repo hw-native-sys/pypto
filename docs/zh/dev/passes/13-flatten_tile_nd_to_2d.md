@@ -177,6 +177,10 @@ acc__tile      : Tile[[64, 256], INT32]                              <- pl.creat
 `TypeCheck` 诊断与 `AccCompactValid` 属性验证器拒绝。`ConvertTensorToTileOps` 出于同样的
 原因调用同一个 helper——2D 种子在 `tensor.matmul` 变成 `tile.matmul` 时就已经被收窄了。
 
+两种情况下携带值保持原样：一是缓冲区的两种读法本来就不会分歧——单 fractal 块的 `[16, N]`
+累加器无论有效行是多少都按物理行打包；二是收窄用的表达式只在循环体内计算，重新声明的种子
+在那之前根本命名不到它。
+
 ## 实现
 
 **头文件**：`include/pypto/ir/transforms/passes.h`

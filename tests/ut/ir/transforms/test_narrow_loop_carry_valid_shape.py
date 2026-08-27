@@ -36,6 +36,9 @@ M_TILE = 64
 K = 1024
 N_TILE = 256
 K_TILE = 512
+FRACTAL_ROWS = 16  # one L0C fractal block: every valid row count packs to the box
+FRACTAL_N_TILE = 128  # pypto-lib's projection tile; keeps the Mat arena within budget
+FRACTAL_K_TILE = 256
 
 _TILE_STORE_OP = ir.get_op("tile.store").name
 _TILE_CREATE_OP = ir.get_op("tile.create").name
@@ -78,6 +81,56 @@ def create_tensor_seeded_acc_2d(
         v = pl.min(M_TILE, pl.read(rows, [b, 0]))
         acc = pl.create_tensor([M_TILE, N_TILE], dtype=pl.INT32)
         for k0 in pl.pipeline(0, K, K_TILE, stage=2):
+            xk = pl.slice(x, [M_TILE, K_TILE], [m0, k0], valid_shape=[v, K_TILE])
+            wk = pl.slice(w, [N_TILE, K_TILE], [0, k0])
+            if k0 == 0:
+                acc = pl.matmul(xk, wk, b_trans=True, out_dtype=pl.INT32)
+            else:
+                acc = pl.matmul_acc(acc, xk, wk, b_trans=True)
+        y[m0 : m0 + M_TILE, :] = acc
+    return y
+
+
+@pl.jit
+def single_fractal_block_acc(
+    x: pl.Tensor[[BLOCKS * FRACTAL_ROWS, K], pl.BF16],
+    w: pl.Tensor[[K, FRACTAL_N_TILE], pl.BF16],
+    rows: pl.Tensor[[BLOCKS, 1], pl.INT32],
+    y: pl.Out[pl.Tensor[[BLOCKS * FRACTAL_ROWS, FRACTAL_N_TILE], pl.FP32]],
+):
+    """A [16, N] accumulator: `ceil(v/16)*16` is 16 for every valid row count it can hold.
+
+    This is the shape pypto-lib's `qkv_proj_rope` projections use, down to the runtime row
+    count computed next to the slice it bounds.
+    """
+    for b in pl.spmd(BLOCKS, name_hint="mm_fractal", allow_early_resolve=True):
+        m0 = b * FRACTAL_ROWS
+        acc = pl.create_tensor([FRACTAL_ROWS, FRACTAL_N_TILE], dtype=pl.FP32)
+        for k0 in pl.pipeline(0, K, FRACTAL_K_TILE, stage=2):
+            v = pl.min(FRACTAL_ROWS, pl.read(rows, [b, 0]))
+            xk = pl.slice(x, [FRACTAL_ROWS, FRACTAL_K_TILE], [m0, k0], valid_shape=[v, FRACTAL_K_TILE])
+            wk = pl.slice(w, [FRACTAL_K_TILE, FRACTAL_N_TILE], [k0, 0])
+            if k0 == 0:
+                acc = pl.matmul(xk, wk, out_dtype=pl.FP32)
+            else:
+                acc = pl.matmul_acc(acc, xk, wk)
+        y[m0 : m0 + FRACTAL_ROWS, :] = acc
+    return y
+
+
+@pl.jit
+def extent_computed_inside_the_loop(
+    x: pl.Tensor[[BLOCKS * M_TILE, K], pl.INT8],
+    w: pl.Tensor[[N_TILE, K], pl.INT8],
+    rows: pl.Tensor[[BLOCKS, 1], pl.INT32],
+    y: pl.Out[pl.Tensor[[BLOCKS * M_TILE, N_TILE], pl.INT32]],
+):
+    """The pitches differ, but the row count is only computed inside the loop body."""
+    for b in pl.spmd(BLOCKS, name_hint="mm_inner_v", allow_early_resolve=True):
+        m0 = b * M_TILE
+        acc = pl.create_tensor([M_TILE, N_TILE], dtype=pl.INT32)
+        for k0 in pl.pipeline(0, K, K_TILE, stage=2):
+            v = pl.min(M_TILE, pl.read(rows, [b, 0]))
             xk = pl.slice(x, [M_TILE, K_TILE], [m0, k0], valid_shape=[v, K_TILE])
             wk = pl.slice(w, [N_TILE, K_TILE], [0, k0])
             if k0 == 0:
@@ -211,6 +264,15 @@ def _loops(program):
     return collector.loops
 
 
+def _incore_functions(program):
+    """The device side of a lowered program; the host orchestration has its own backend."""
+    return [
+        func
+        for func in program.functions.values()
+        if func.func_type in (pl.FunctionType.InCore, pl.FunctionType.AIC, pl.FunctionType.AIV)
+    ]
+
+
 def _stored_tile_type(program):
     """The TileType the single ``tile.store`` reads."""
     stores = _calls(program, _TILE_STORE_OP)
@@ -298,6 +360,76 @@ def test_seed_is_redeclared_as_a_compact_narrowed_box():
     assert any(_tile_view(alias.type).compact == ir.CompactMode.normal for alias in aliases)
 
 
+def test_single_fractal_block_accumulator_is_left_alone():
+    """`ceil(validRow/16)*16 == Rows` leaves writer and reader agreeing anyway.
+
+    A `[16, N]` accumulator packs to its own box whatever its valid rows, so the compact
+    flag cannot change a reader's pitch — the same exemption `AccCompactValid` makes. This
+    is pypto-lib's `qkv_proj_rope` shape, and re-declaring it there was both unnecessary
+    and harmful: its row count is computed inside the loop, so the seed could not name it,
+    and codegen was left with a symbol it could not bind.
+
+    The carry still outlives a narrower yield, which is why this lowers without the
+    verification instrument — that general defect is not what this repair claims.
+    """
+    with passes.PassContext([]):
+        after = _lower(single_fractal_block_acc)
+    stored = _stored_tile_type(after)
+
+    assert not [call for call in _calls(after, _TILE_CREATE_OP) if call.kwargs.get("compact")]
+    assert not _calls(after, _TILE_SET_VALIDSHAPE_OP)
+    assert stored.tile_view is None or stored.tile_view.compact != ir.CompactMode.normal
+
+
+def test_single_fractal_block_accumulator_still_reaches_codegen():
+    """And it compiles all the way to PTO, which is how pypto-lib builds.
+
+    Property verification stays on here (it is what `PassContext([])` keeps); only the
+    per-pass diagnostic instrument is dropped, exactly as a production compile runs.
+    Codegen is the step that catches a hoisted extent: re-declaring the seed with a row
+    count computed inside the loop leaves `pto.tstore`'s valid extent naming a symbol the
+    kernel cannot bind to a dimension, a scalar parameter, or a loop variable.
+    """
+    from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910B)
+    with passes.PassContext([]):
+        lowered = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(
+            _jit_program(single_fractal_block_acc)
+        )
+    mlir = codegen.PTOCodegen().generate(ir.Program(_incore_functions(lowered), lowered.name, ir.Span.unknown()))
+
+    assert "pto.tstore" in mlir
+
+
+def test_extent_computed_inside_the_loop_is_declined_loudly():
+    """An extent the seed cannot name is declined, not hoisted.
+
+    The re-declared seed sits before the loop, so an extent computed in the body is not in
+    scope there. Hoisting it would leave codegen with a symbol it cannot bind to a
+    dimension, a scalar parameter, or a loop variable — a worse failure than the one this
+    repair exists to fix. Here the pitches *do* differ, so declining leaves a program that
+    would corrupt data; `AccCompactValid` is what makes that a compile error instead, and
+    this test pins that the two decisions compose into a loud failure rather than a silent
+    one.
+    """
+    from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+
+    with passes.PassContext([]):
+        after = _lower(extent_computed_inside_the_loop)
+    assert not [call for call in _calls(after, _TILE_CREATE_OP) if call.kwargs.get("compact")]
+    assert _is_const(_valid_rows(_stored_tile_type(after)), M_TILE)
+
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910B)
+    with pytest.raises(Exception, match="AccCompactValid"):
+        with passes.PassContext([]):
+            PassManager.get_strategy(OptimizationStrategy.Default).run_passes(
+                _jit_program(extent_computed_inside_the_loop)
+            )
+
+
 def test_full_height_carry_is_left_alone():
     """Nothing narrows, so nothing is re-declared and the historical form survives."""
     after = _lower(full_height_acc)
@@ -368,13 +500,7 @@ def test_emitted_pto_stores_at_the_pitch_mad_wrote_at():
     lowered = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(
         _jit_program(create_tensor_seeded_acc)
     )
-    # PTO codegen emits the device side only; the host orchestration has its own backend.
-    incore = [
-        func
-        for func in lowered.functions.values()
-        if func.func_type in (pl.FunctionType.InCore, pl.FunctionType.AIC, pl.FunctionType.AIV)
-    ]
-    mlir = codegen.PTOCodegen().generate(ir.Program(incore, lowered.name, ir.Span.unknown()))
+    mlir = codegen.PTOCodegen().generate(ir.Program(_incore_functions(lowered), lowered.name, ir.Span.unknown()))
 
     stores = [line.strip() for line in mlir.splitlines() if "pto.tstore" in line]
     assert len(stores) == 1, mlir

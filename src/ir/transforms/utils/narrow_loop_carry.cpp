@@ -33,6 +33,7 @@
 #include "pypto/ir/transforms/utils/acc_init_builder.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
@@ -85,6 +86,28 @@ std::optional<std::vector<ExprPtr>> NarrowedValidShape(const TileTypePtr& init_t
     any = true;
   }
   return any ? std::optional<std::vector<ExprPtr>>{std::move(narrowed)} : std::nullopt;
+}
+
+/// Whether every var the extents name is defined outside @p body.
+///
+/// The re-declared seed sits *before* the loop, so an extent computed inside the body
+/// cannot be named there. `pl.min(M_TILE, t_dim - t0)` written next to the slice it
+/// bounds is the common spelling of exactly that, and hoisting it would leave codegen
+/// with a symbol it cannot bind to a dimension, a scalar parameter, or a loop variable.
+/// The narrowing is declined instead of moving the computation, which would need the
+/// extent to be loop-invariant and is a larger change than this repair.
+bool ExtentsAreVisibleBeforeLoop(const std::vector<ExprPtr>& extents, const StmtPtr& body) {
+  var_collectors::VarDefUseCollector body_defs;
+  body_defs.VisitStmt(body);
+  for (const auto& extent : extents) {
+    if (!extent) continue;
+    var_collectors::VarDefUseCollector extent_vars;
+    extent_vars.VisitExpr(extent);
+    for (const auto* used : extent_vars.var_uses) {
+      if (body_defs.var_defs.count(used) > 0) return false;
+    }
+  }
+  return true;
 }
 
 /// Re-type the def-use closure of a set of re-typed vars.
@@ -342,6 +365,13 @@ class NarrowLoopCarryMutator : public RetypeClosureMutator {
       // Only an L0C carry is re-declared, and `tile.set_validshape` is 2D.
       if (narrowed->size() != 2) continue;
       if (yield_tile->GetMemorySpace() != MemorySpace::Acc) continue;
+      // Nothing to reconcile when both readings of the buffer land on the same pitch --
+      // notably a single-fractal-block box, where `ceil(validRow/16)*16` is the physical
+      // row count whatever the valid rows are. The same predicate `AccCompactValid` uses,
+      // so a carry this declines is also a carry the verifier does not ask about, and a
+      // `[16, N]` accumulator keeps the exact form it has today.
+      if (AccPitchesCoincide(narrowed->at(0), init_tile->shape_[0])) continue;
+      if (!ExtentsAreVisibleBeforeLoop(*narrowed, body)) continue;
 
       auto narrowed_init = BuildNarrowedInit(iter_arg->initValue_, init_tile, *narrowed, &prologue);
       if (!narrowed_init) continue;

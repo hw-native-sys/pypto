@@ -372,6 +372,11 @@ diagnostic and the `AccCompactValid` property verifier reject. `FlattenTileNdTo2
 the same helper, for an ND seed whose narrowing only appears when `tile.batch_matmul` is
 unrolled into 2D matmuls.
 
+A carry is left exactly as it is when the two readings of its buffer cannot disagree — a
+single-fractal-block `[16, N]` accumulator packs to its physical rows whatever its valid
+rows — or when the narrowed extent is only computed inside the loop body, where the
+re-declared seed could not name it.
+
 ## Implementation
 
 **Header**: `include/pypto/ir/transforms/passes.h`

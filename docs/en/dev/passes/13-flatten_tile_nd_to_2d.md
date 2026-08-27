@@ -204,6 +204,11 @@ carry this pass creates would otherwise be rejected by the `TypeCheck` diagnosti
 the same reason — a 2D seed is narrowed one pass earlier, when `tensor.matmul` becomes
 `tile.matmul`.
 
+A carry is left exactly as it is when the two readings of its buffer cannot disagree — a
+single-fractal-block `[16, N]` accumulator packs to its physical rows whatever its valid
+rows — or when the narrowed extent is only computed inside the loop body, where the
+re-declared seed could not name it.
+
 ## Implementation
 
 **Header**: `include/pypto/ir/transforms/passes.h`

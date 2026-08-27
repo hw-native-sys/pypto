@@ -54,6 +54,15 @@ namespace narrow_loop_carry {
  *     every ``valid_shape`` is bounded by that box, so a dynamic yield extent is already
  *     trusted to fit inside it. An init that is *itself* already narrowed is never widened
  *     on an undecidable relation.
+ *   * only where the two readings of the buffer would actually disagree
+ *     (``AccPitchesCoincide``, shared with the ``AccCompactValid`` verifier). A
+ *     single-fractal-block box packs to its physical rows whatever its valid rows, so a
+ *     ``[16, N]`` accumulator keeps the exact form it has today.
+ *   * only where the narrowed extents are visible *before* the loop. The re-declared seed
+ *     sits there, and the common spelling puts the row count next to the slice it bounds,
+ *     inside the body -- hoisting that would leave codegen with a symbol it cannot bind.
+ *     Such a carry is declined; where its pitches genuinely differ, ``AccCompactValid``
+ *     then reports it as a compile error rather than letting it corrupt data.
  *
  * @param func Function to repair (any type; only loop carries inside it are touched)
  * @return The repaired function, or @p func itself when nothing narrows

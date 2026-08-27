@@ -348,6 +348,10 @@ for k0 in pl.pipeline(0, K, K_TILE, stage=2):
 `AccCompactValid` 属性验证器拒绝。`FlattenTileNdTo2D` 调用同一个 helper，用于 ND 种子——
 它的收窄要等到 `tile.batch_matmul` 展开成 2D matmul 时才出现。
 
+两种情况下携带值保持原样：一是缓冲区的两种读法本来就不会分歧——单 fractal 块的 `[16, N]`
+累加器无论有效行是多少都按物理行打包；二是收窄用的表达式只在循环体内计算，重新声明的种子
+在那之前根本命名不到它。
+
 ## 实现
 
 **头文件**：`include/pypto/ir/transforms/passes.h`
