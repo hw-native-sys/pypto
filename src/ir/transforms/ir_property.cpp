@@ -146,7 +146,6 @@ std::string IRPropertySet::ToString() const {
 const IRPropertySet& GetVerifiedProperties() {
   static const IRPropertySet props{IRProperty::SSAForm,
                                    IRProperty::TypeChecked,
-                                   IRProperty::UseAfterDef,
                                    IRProperty::MixedKernelExpanded,
                                    IRProperty::AllocatedMemoryAddr,
                                    IRProperty::BreakContinueValid,

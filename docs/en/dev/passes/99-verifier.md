@@ -26,27 +26,10 @@ Extensible verification system for validating PyPTO IR correctness through plugg
 
 | Category | Examples | Behavior |
 | -------- | -------- | -------- |
-| **Structural** | TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly, AtomicAddDtypeValid | Always true. Verified before/after each pass by `VerificationInstrument`; the subset shared with `GetVerifiedProperties()` is also checked at pipeline start. Normally absent from PassProperties — see [Re-checking a structural property mid-pipeline](#re-checking-a-structural-property-mid-pipeline). |
+| **Structural** | TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly, AtomicAddDtypeValid | Always true. Verified before/after each pass by `VerificationInstrument`; the subset shared with `GetVerifiedProperties()` is also checked at pipeline start. Never in PassProperties. |
 | **Pipeline** | SSAForm, NoNestedCalls, HasMemRefs, ... | Produced/invalidated by passes. Verified per pass-declared contracts. |
 
-`GetStructuralProperties()` returns `{TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly, AtomicAddDtypeValid}`. These are verified **before/after each pass** by `VerificationInstrument`. At **pipeline start**, `PassPipeline::Run()` verifies only the lightweight subset shared with `GetVerifiedProperties()` (`GetStructuralProperties().Intersection(GetVerifiedProperties())`) — so e.g. `ArrayNotEscaped` is checked before/after each pass but not at pipeline start. A pass normally leaves them out of `required`/`produced`/`invalidated` entirely; `VerificationInstrument` unions them with the pass's declared properties, so no pass can break one of these fundamental invariants without having declared anything.
-
-#### Re-checking a structural property mid-pipeline
-
-`VerificationInstrument` is opt-in — it is a `PassContext` instrument, not part of the default configuration. So under `VerificationLevel::Basic` a structural property is verified **exactly once**, at pipeline input, and then trusted for the rest of the run: `PassPipeline::Run()` records it in `verified`, and the per-pass check subtracts what is already verified.
-
-That is the right default for an invariant no pass is expected to touch. It is the wrong default for a pass whose *characteristic* failure would violate one, where the difference between naming the offending IR at the pass that produced it and letting a downstream pass trip over the consequence is the difference between a one-line diagnostic and a debugging session.
-
-Such a pass declares the property in **both** `invalidated` and `produced`:
-
-- the `invalidated` entry drops it from `verified`, which is what allows the check to run again at all;
-- the `produced` entry re-runs its verifier immediately after that pass.
-
-Declaring only `produced` is a no-op — the property is already in `verified`, and the per-pass check subtracts it.
-
-`ExpandMixedKernel` is the one pass that does this today, with `UseAfterDef` (see [22-expand_mixed_kernel.md](22-expand_mixed_kernel.md)). It rebuilds two whole function bodies by pruning statements per lane, so "a statement kept on one side whose operand was pruned from the other" is exactly a use with no reaching definition. The property must also be in `GetVerifiedProperties()` for either declaration to have any effect, since both sides of the per-pass check intersect with that set.
-
-This is a deliberate, narrow exception, not a second property model: the property is still structural, still verified at pipeline input, and still checked around every pass when the instrument is enabled. Declaring it merely adds one more checkpoint on the default path.
+`GetStructuralProperties()` returns `{TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly, AtomicAddDtypeValid}`. These are verified **before/after each pass** by `VerificationInstrument`. At **pipeline start**, `PassPipeline::Run()` verifies only the lightweight subset shared with `GetVerifiedProperties()` (`GetStructuralProperties().Intersection(GetVerifiedProperties())`) — so e.g. `ArrayNotEscaped` is checked before/after each pass but not at pipeline start. Since no pass declares them in `required`/`produced`/`invalidated`, `VerificationInstrument` unions them with the pass's declared properties to ensure no pass breaks these fundamental invariants.
 
 ### Verification Rule System
 
@@ -335,7 +318,7 @@ Singleton registry mapping `IRProperty` values to `PropertyVerifier` factories. 
 | -------- | ------- | ----------- |
 | `GetStructuralProperties()` | `{TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly, AtomicAddDtypeValid}` | Invariants verified before/after each pass by `VerificationInstrument` (the subset shared with `GetVerifiedProperties()` is also checked at pipeline start) |
 | `GetDefaultVerifyProperties()` | `{SSAForm, TypeChecked, NoNestedCalls, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, TileTypeCoherence, ArrayNotEscaped}` | Default set for `run_verifier()` |
-| `GetVerifiedProperties()` | `{SSAForm, TypeChecked, UseAfterDef, MixedKernelExpanded, AllocatedMemoryAddr, BreakContinueValid, NoRedundantBlocks, InOutUseValid, CallDirectionsResolved, ManualDepsOnSubmitOnly, ReturnParamsExplicit, AivSplitValid, TileMemoryInferred, HardSyncallOccupancyValid, IterArgCarryClassified, RuntimeScopesMaterialized, DistTensorCtxMaterialized, GraphBoundaryLegalized, AccToGmStoreValid, AccCompactValid, AtomicAddDtypeValid}` | Lightweight set for `PassPipeline` auto-verify |
+| `GetVerifiedProperties()` | `{SSAForm, TypeChecked, MixedKernelExpanded, AllocatedMemoryAddr, BreakContinueValid, NoRedundantBlocks, InOutUseValid, CallDirectionsResolved, ManualDepsOnSubmitOnly, ReturnParamsExplicit, AivSplitValid, TileMemoryInferred, HardSyncallOccupancyValid, IterArgCarryClassified, RuntimeScopesMaterialized, DistTensorCtxMaterialized, GraphBoundaryLegalized, AccToGmStoreValid, AccCompactValid, AtomicAddDtypeValid}` | Lightweight set for `PassPipeline` auto-verify |
 
 ### RunVerifier Pass Factory
 

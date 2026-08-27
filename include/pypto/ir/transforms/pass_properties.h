@@ -304,26 +304,15 @@ inline const PassProperties kLowerAutoVectorSplitProperties{
 // performs, but because this pass resolves each kernel's FunctionType to AIV/AIC/Group —
 // the precondition the hard-syncall occupancy verifier depends on). The verifier fires
 // once, right after this pass.
-//
-// UseAfterDef is re-checked here for the same reason it is worth checking at all:
-// this pass rebuilds two whole function bodies by pruning statements per lane, so
-// "a statement kept on one side whose operand was pruned from the other" is its
-// characteristic failure — and that is exactly a use with no reaching definition.
-// Naming the stranded variable and the pass that stranded it beats the downstream
-// symptoms the same bug produces otherwise (MemoryReuse's Acc->Acc `tile.move`
-// guard, or PTO codegen's "no MLIR mapping for MemRef base"), neither of which
-// names either. It has to be invalidated as well as produced: UseAfterDef is
-// structural, so the pipeline already verified it at input and recorded it in
-// `verified`, and the per-pass check subtracts what is already verified.
 inline const PassProperties kExpandMixedKernelProperties{
     .required = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch,
                  IRProperty::TileOps2D, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure},
     .produced = {IRProperty::SSAForm, IRProperty::MixedKernelExpanded, IRProperty::NormalizedStmtStructure,
-                 IRProperty::HardSyncallOccupancyValid, IRProperty::AccCompactValid, IRProperty::UseAfterDef},
+                 IRProperty::HardSyncallOccupancyValid, IRProperty::AccCompactValid},
     // The Cube->Vector boundary `tile.move` is rebuilt here as a tpush/tpop
     // pair with a freshly built consumer type, so the Acc compact contract has
     // to be re-checked on that new IR rather than trusted from pass 17.
-    .invalidated = {IRProperty::AccCompactValid, IRProperty::UseAfterDef}};
+    .invalidated = {IRProperty::AccCompactValid}};
 
 // -- GM pipe buffer injection pass (backend-gated; extracted from ExpandMixedKernel) --
 

@@ -26,27 +26,10 @@
 
 | 类别 | 示例 | 行为 |
 | ---- | ---- | ---- |
-| **结构性** | TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly, AtomicAddDtypeValid | 始终为真。由 `VerificationInstrument` 在每个 Pass 执行前后验证；与 `GetVerifiedProperties()` 共有的子集还会在流水线启动时验证。通常不在 PassProperties 中声明——参见[在流水线中途重新校验结构性属性](#在流水线中途重新校验结构性属性)。 |
+| **结构性** | TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly, AtomicAddDtypeValid | 始终为真。由 `VerificationInstrument` 在每个 Pass 执行前后验证；与 `GetVerifiedProperties()` 共有的子集还会在流水线启动时验证。不在 PassProperties 中声明。 |
 | **流水线** | SSAForm, NoNestedCalls, HasMemRefs, ... | 由 Pass 产生/失效。按 Pass 声明的契约验证。 |
 
-`GetStructuralProperties()` 返回 `{TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly, AtomicAddDtypeValid}`。这些由 `VerificationInstrument` **在每个 Pass 执行前后验证**。在**流水线启动时**，`PassPipeline::Run()` 仅额外验证与 `GetVerifiedProperties()` 共有的轻量子集（`GetStructuralProperties().Intersection(GetVerifiedProperties())`）——因此例如 `ArrayNotEscaped` 会在每个 Pass 前后验证，但不会在流水线启动时验证。Pass 通常完全不在 `required`/`produced`/`invalidated` 中提及它们；`VerificationInstrument` 会把它们与 Pass 声明的属性合并，因此任何 Pass 都无法在「什么都没声明」的情况下破坏这些基本不变量。
-
-#### 在流水线中途重新校验结构性属性
-
-`VerificationInstrument` 是选择性启用的——它是一个 `PassContext` instrument，并不属于默认配置。因此在 `VerificationLevel::Basic` 下，结构性属性**只会被校验一次**（在流水线输入处），此后整个运行过程都直接信任它：`PassPipeline::Run()` 会把它记入 `verified`，而每个 Pass 的检查会减去已校验的部分。
-
-对于没有任何 Pass 会去触碰的不变量，这是正确的默认行为。但对于「其*典型*失败形态恰好就会违反该不变量」的 Pass，这个默认就不合适了：在产生问题的那个 Pass 上直接指名出错的 IR，与让某个下游 Pass 撞上其后果，二者的差别就是一行诊断信息和一次调试会话的差别。
-
-这类 Pass 需要在 `invalidated` 和 `produced` 中**同时**声明该属性：
-
-- `invalidated` 声明把它从 `verified` 中移除——这正是让检查能够再次运行的前提；
-- `produced` 声明让其 verifier 在该 Pass 之后立即重新运行。
-
-只声明 `produced` 是无效的——该属性已在 `verified` 中，每个 Pass 的检查会把它减掉。
-
-`ExpandMixedKernel` 是目前唯一这样做的 Pass，声明的属性是 `UseAfterDef`（参见 [22-expand_mixed_kernel.md](22-expand_mixed_kernel.md)）。它通过按 lane 裁剪语句重建了两个完整的函数体，因此「一侧保留的语句，其操作数却在另一侧被裁掉」恰好就是「使用点没有可达定义」。此外该属性还必须位于 `GetVerifiedProperties()` 中，两处声明才会真正生效——每个 Pass 的检查在两侧都会与该集合取交集。
-
-这是一个刻意为之的窄例外，而不是第二套属性模型：该属性依然是结构性的，依然在流水线输入处被校验，启用 instrument 时也依然在每个 Pass 前后被检查。声明它只是在默认路径上多加了一个检查点。
+`GetStructuralProperties()` 返回 `{TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly, AtomicAddDtypeValid}`。这些由 `VerificationInstrument` **在每个 Pass 执行前后验证**。在**流水线启动时**，`PassPipeline::Run()` 仅额外验证与 `GetVerifiedProperties()` 共有的轻量子集（`GetStructuralProperties().Intersection(GetVerifiedProperties())`）——因此例如 `ArrayNotEscaped` 会在每个 Pass 前后验证，但不会在流水线启动时验证。由于没有 Pass 在 `required`/`produced`/`invalidated` 中声明它们，`VerificationInstrument` 将它们与 Pass 声明的属性合并，确保没有 Pass 破坏这些基本不变量。
 
 ### 验证规则系统
 
@@ -304,7 +287,7 @@ lineage **不**跨 phi（`return_vars_` / `iter_args_`）传递，因此分支�
 | ---- | ------ | ---- |
 | `GetStructuralProperties()` | `{TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly, AtomicAddDtypeValid}` | 由 `VerificationInstrument` 在每个 Pass 执行前后验证的不变量（与 `GetVerifiedProperties()` 共有的子集还会在流水线启动时验证） |
 | `GetDefaultVerifyProperties()` | `{SSAForm, TypeChecked, NoNestedCalls, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, TileTypeCoherence, ArrayNotEscaped}` | `run_verifier()` 的默认属性集 |
-| `GetVerifiedProperties()` | `{SSAForm, TypeChecked, UseAfterDef, MixedKernelExpanded, AllocatedMemoryAddr, BreakContinueValid, NoRedundantBlocks, InOutUseValid, CallDirectionsResolved, ManualDepsOnSubmitOnly, ReturnParamsExplicit, AivSplitValid, TileMemoryInferred, HardSyncallOccupancyValid, IterArgCarryClassified, RuntimeScopesMaterialized, DistTensorCtxMaterialized, GraphBoundaryLegalized, AccToGmStoreValid, AccCompactValid, AtomicAddDtypeValid}` | `PassPipeline` 自动验证的轻量级属性集 |
+| `GetVerifiedProperties()` | `{SSAForm, TypeChecked, MixedKernelExpanded, AllocatedMemoryAddr, BreakContinueValid, NoRedundantBlocks, InOutUseValid, CallDirectionsResolved, ManualDepsOnSubmitOnly, ReturnParamsExplicit, AivSplitValid, TileMemoryInferred, HardSyncallOccupancyValid, IterArgCarryClassified, RuntimeScopesMaterialized, DistTensorCtxMaterialized, GraphBoundaryLegalized, AccToGmStoreValid, AccCompactValid, AtomicAddDtypeValid}` | `PassPipeline` 自动验证的轻量级属性集 |
 
 ### RunVerifier Pass 工厂
 

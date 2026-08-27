@@ -246,8 +246,8 @@ enum class VerificationLevel {
 /**
  * @brief Get the set of properties automatically verified during compilation
  *
- * Returns {SSAForm, TypeChecked, UseAfterDef, MixedKernelExpanded,
- * AllocatedMemoryAddr, BreakContinueValid, NoRedundantBlocks, InOutUseValid,
+ * Returns {SSAForm, TypeChecked, MixedKernelExpanded, AllocatedMemoryAddr,
+ * BreakContinueValid, NoRedundantBlocks, InOutUseValid,
  * CallDirectionsResolved, ManualDepsOnSubmitOnly, ReturnParamsExplicit,
  * AivSplitValid, TileMemoryInferred, HardSyncallOccupancyValid,
  * IterArgCarryClassified, RuntimeScopesMaterialized,
@@ -260,14 +260,8 @@ const IRPropertySet& GetVerifiedProperties();
 /**
  * @brief Structural invariants that must hold at all pipeline stages
  *
- * These are verified automatically at pipeline start, and a pass normally
- * leaves them out of its PassProperties entirely. The one exception is a pass
- * whose characteristic failure would violate one: declaring it in BOTH
- * `invalidated` and `produced` drops it from the pipeline's verified set and
- * re-runs its verifier right after that pass, which is the only way to get a
- * second check on the default path (VerificationInstrument, which checks them
- * around every pass, is opt-in). ExpandMixedKernel does this with UseAfterDef;
- * see docs/en/dev/passes/99-verifier.md. Returns {TypeChecked, BreakContinueValid,
+ * These are verified automatically at pipeline start and never declared
+ * in per-pass PassProperties. Returns {TypeChecked, BreakContinueValid,
  * NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore,
  * InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly,
  * AtomicAddDtypeValid}.
