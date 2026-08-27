@@ -503,10 +503,14 @@ class After:
 | 属性 | 值 |
 | ---- | -- |
 | 所需 | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D, TileMemoryInferred, NormalizedStmtStructure |
-| 产生 | SSAForm, MixedKernelExpanded, NormalizedStmtStructure, HardSyncallOccupancyValid |
-| 失效 | — |
+| 产生 | SSAForm, MixedKernelExpanded, NormalizedStmtStructure, HardSyncallOccupancyValid, AccCompactValid, UseAfterDef |
+| 失效 | AccCompactValid, UseAfterDef |
 
 `HardSyncallOccupancyValid` 在此产生，并非因为本 pass 做了什么改写，而是因为它把每个 kernel 的 `FunctionType` 解析为 AIV/AIC/Group——这正是硬 syncall 占用率 verifier 所依赖的前置条件。该 verifier 只在本 pass 之后触发一次。
+
+`AccCompactValid` 在此失效并重新产生：Cube->Vector 边界的 `tile.move` 在本 pass 中被重建为 tpush/tpop 对，并带上新构造的消费者类型，因此 Acc compact 契约必须在这份新 IR 上重新校验，而不能沿用 `InferTileMemorySpace` 的结论。
+
+`UseAfterDef` 在此失效并重新产生，理由正是它在这里值得校验的原因：本 pass 通过按 lane 裁剪语句重建了两个完整的函数体，因此「一侧保留的语句，其操作数却在另一侧被裁掉」是它的典型失败形态——而这恰好就是「使用点没有可达定义」。指名被悬空的变量以及造成悬空的 pass，远好于同一个 bug 在下游表现出的症状（`MemoryReuse` 的 Acc->Acc `tile.move` 守卫，或 PTO codegen 的 "no MLIR mapping for MemRef base"），后两者都不会指名其中任何一个。让检查真正跑起来的是 `失效` 声明：`UseAfterDef` 是结构性属性，流水线在输入处已经校验过并记录，而每个 pass 的检查会减去已校验的部分。
 
 ## 属性验证器
 

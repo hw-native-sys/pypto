@@ -246,8 +246,8 @@ enum class VerificationLevel {
 /**
  * @brief Get the set of properties automatically verified during compilation
  *
- * Returns {SSAForm, TypeChecked, MixedKernelExpanded, AllocatedMemoryAddr,
- * BreakContinueValid, NoRedundantBlocks, InOutUseValid,
+ * Returns {SSAForm, TypeChecked, UseAfterDef, MixedKernelExpanded,
+ * AllocatedMemoryAddr, BreakContinueValid, NoRedundantBlocks, InOutUseValid,
  * CallDirectionsResolved, ManualDepsOnSubmitOnly, ReturnParamsExplicit,
  * AivSplitValid, TileMemoryInferred, HardSyncallOccupancyValid,
  * IterArgCarryClassified, RuntimeScopesMaterialized,

@@ -725,5 +725,96 @@ def test_unplaced_notify_is_duplicated_onto_both_lanes():
     _assert_no_free_var(after)
 
 
+# ---------------------------------------------------------------------------
+# CASE per-lane valid_shape (the boundary type that references the lane index)
+# ---------------------------------------------------------------------------
+
+
+def _build_lane_valid_shard_program():
+    """A C->V shard whose per-lane ``valid_shape`` is an expression over ``aiv_id``.
+
+    This is what a ragged split axis looks like by the time it reaches this pass:
+    ``LowerAutoVectorSplit`` (pass 20) repairs the deducer's lane-agnostic
+    ceil(V/2) guess by writing the lane's true extent into the shard result's
+    TileView, as an expression over the region's own
+    ``aiv_id = tile.get_subblock_idx()`` binding. So the shard's TYPE — not just
+    its operands — carries a reference to a body-local Var, and the tpop this
+    pass builds from it inherits that reference.
+    """
+    span = ir.Span.unknown()
+    idx = ir.ScalarType(DataType.INDEX)
+    aiv_id = ir.Var("aiv_id", idx, span)
+
+    qk = ir.Var("qk", _tile([128, 128], None, MS.Vec), span)
+    out_0 = ir.Var("out_0", ir.TensorType([64, 128], FP32), span)
+
+    shard = T.aiv_shard(qk, split=1, span=span)
+    assert isinstance(shard.type, ir.TileType)
+    # 64 rows on lane 0, 40 on lane 1 -> `64 - aiv_id * 24`, the shape
+    # LocalizeValidDimForSplit produces for a partially-valid split axis.
+    lane_rows = ir.Sub(
+        ir.ConstInt(64, DataType.INDEX, span),
+        ir.Mul(aiv_id, ir.ConstInt(24, DataType.INDEX, span), DataType.INDEX, span),
+        DataType.INDEX,
+        span,
+    )
+    lane_view = ir.TileView(valid_shape=[lane_rows, ir.ConstInt(128, DataType.INDEX, span)])
+    half = ir.Var("half", _tile(shard.type.shape, lane_view, MS.Vec), span)
+    shard = ir.Call(shard.op, shard.args, shard.kwargs, half.type, span)
+
+    store = T.store(half, [0, 0], out_0, span=span)
+    out_store = ir.Var("out_store", store.type, span)
+
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(aiv_id, T.get_subblock_idx(span=span), span),
+            ir.AssignStmt(half, shard, span),
+            ir.AssignStmt(out_store, store, span),
+            ir.ReturnStmt([out_store], span),
+        ],
+        span,
+    )
+    func = ir.Function(
+        "split_aiv",
+        [(qk, _IN), (out_0, _OUT)],
+        [out_0.type],
+        body,
+        span,
+        ir.FunctionType.InCore,
+        attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": True},
+    )
+    return ir.Program([func], "test_lane_valid_shard", span)
+
+
+def test_boundary_tpop_type_binds_the_cloned_lane_index():
+    """The tpop's per-lane extent must name the AIV lane's OWN ``aiv_id``.
+
+    Each lane body is deep-cloned, so ``aiv_id = tile.get_subblock_idx()`` gets a
+    fresh Var. The boundary tpop is built before that clone and carries the
+    shard's ``valid_shape`` verbatim, so its type has to be remapped with
+    everything else — otherwise it keeps pointing at the PRE-clone Var and the
+    AIV body reads a lane index nothing in it defines. That dangling reference is
+    invisible to a structural comparison (both Vars print as ``aiv_id``) and
+    survives to codegen, so ``UseAfterDef`` is what states it.
+    """
+    after = _expand(_build_lane_valid_shard_program())
+
+    props = passes.IRPropertySet()
+    props.insert(passes.IRProperty.UseAfterDef)
+    errors = [
+        d
+        for d in passes.PropertyVerifierRegistry.verify(props, after)
+        if d.severity == passes.DiagnosticSeverity.Error
+    ]
+    assert not errors, [d.message for d in errors]
+
+    printed = ir.python_print(after)
+    # A Var referenced only from a type has no binding to print, so the printer
+    # declares it as a free symbol instead of failing — the visible symptom.
+    assert "pl.dynamic(" not in printed, printed
+    # The extent itself must survive the repair, not be dropped to make it bind.
+    assert "aiv_id" in printed, printed
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -1395,17 +1395,34 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
     return std::make_pair(fresh_params, param_map);
   };
 
-  // Helper to pre-seed tpop var remappings into a DeepClone map.
-  // Maps both the original dest_var and the clean_var itself to prevent
-  // DeepClone from creating yet another fresh copy at the AssignStmt DefField.
-  auto seed_tpop_remap = [](std::unordered_map<const Var*, ExprPtr>& clone_map,
-                            const std::unordered_map<const Var*, VarPtr>& tpop_remap) {
+  // Rewrite the vars a boundary tpop replaced (the op result / the move source)
+  // onto that tpop's own Var, in the lane body, BEFORE the clone.
+  //
+  // This used to be seeded into the DeepClone map instead, which additionally
+  // needed `clone_map[tpop_var] = tpop_var` so the AssignStmt DefField did not
+  // mint a THIRD identity. That self-seed is what made it wrong: DeepClone skips
+  // RemapType for an already-mapped Var (deep_clone_utils.cpp `CloneVar`), so a
+  // tpop Var whose TileType embeds a body-local Var kept pointing at the
+  // PRE-clone one while the definition itself got a fresh clone — a dangling
+  // cross-reference that fails UseAfterDef. A `pl.split_aiv` boundary is exactly
+  // that shape: LocalizeExplicitBoundaryValid writes the lane's `valid_shape`
+  // as an expression over the region's own `aiv_id = tile.get_subblock_idx()`
+  // binding, and BuildCoreBody copies it onto the tpop result type.
+  //
+  // Substituting first leaves the body referencing only `tpop_var`, so DeepClone
+  // treats it as an ordinary local: one fresh clone at its definition site, with
+  // its type remapped along with everything else.
+  auto apply_tpop_remap = [](const StmtPtr& body_stmt,
+                             const std::unordered_map<const Var*, VarPtr>& tpop_remap) {
+    std::unordered_map<const Var*, VarPtr> subst;
     for (const auto& [orig_ptr, tpop_var] : tpop_remap) {
-      clone_map[orig_ptr] = tpop_var;
-      // Also seed the tpop_var itself to prevent DeepClone from re-cloning it
-      // when it encounters it as an AssignStmt LHS (DefField).
-      clone_map[tpop_var.get()] = tpop_var;
+      // A tpop Var maps to itself in `tpop_remap` (it is registered there so
+      // FinalizeTpopTfrees can find it); substituting it onto itself is a no-op
+      // that only costs a cycle check.
+      if (orig_ptr == tpop_var.get()) continue;
+      subst[orig_ptr] = tpop_var;
     }
+    return subst.empty() ? body_stmt : transform_utils::Substitute(body_stmt, subst);
   };
 
   // Shared GM tensor origin map (used by both lanes). Built from the ORIGINAL
@@ -1417,14 +1434,14 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
 
   // Create AIC function with deep clone (fresh Vars for all params and locals)
   auto [aic_params, aic_map] = make_param_map();
-  seed_tpop_remap(aic_map, aic_tpop_remap);
   // Repoint AIC-lane references to GM tensor versions written on the AIV lane
   // (e.g. a vector tile.store feeding a cube matmul consumer) onto the shared
   // base parameter; otherwise the cube consumer references an unbound free Var
-  // and PTO codegen cannot resolve its tensor view. Runs AFTER seed_tpop_remap
-  // so boundary-tpop remaps win (already-mapped refs are skipped) and BEFORE the
-  // clone so DeepClone applies the repoint.
-  auto aic_body_stmt = MakeBody(aic_final, func->span_);
+  // and PTO codegen cannot resolve its tensor view. Runs AFTER apply_tpop_remap
+  // so boundary-tpop results are already bound to their tpop Var (and therefore
+  // defined in the body, which this skips) and BEFORE the clone so DeepClone
+  // applies the repoint.
+  auto aic_body_stmt = apply_tpop_remap(MakeBody(aic_final, func->span_), aic_tpop_remap);
   RemapDanglingGmRefsToParam(aic_body_stmt, aic_map, gm_origin_map, func);
   auto [aic_cloned_body, aic_clone_map_unused] = DeepClone(aic_body_stmt, aic_map);
   (void)aic_clone_map_unused;
@@ -1435,7 +1452,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
   // Create AIV function with deep clone (fresh Vars for all params and locals,
   // ensuring no shared Var pointers with AIC for structural equality)
   auto [aiv_params, aiv_map] = make_param_map();
-  seed_tpop_remap(aiv_map, aiv_tpop_remap);
+  auto aiv_body_stmt = apply_tpop_remap(MakeBody(aiv_final, func->span_), aiv_tpop_remap);
 
   // Map dangling tile.store result vars to the store destination's fresh param.
   // When a tile.store is on the AIC side, its result var is stripped from the AIV body,
@@ -1444,7 +1461,6 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
   {
     // Collect all vars defined in the AIV body
     var_collectors::VarDefUseCollector aiv_def_collector;
-    auto aiv_body_stmt = MakeBody(aiv_final, func->span_);
     aiv_def_collector.VisitStmt(aiv_body_stmt);
 
     // Scan original body recursively for tile.store AssignStmts
@@ -1477,12 +1493,13 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
     // versions of a GM tensor written on the AIC lane and consumed here. Uses
     // the shared GM origin map (with IfStmt-phi propagation) and the symmetric
     // repoint helper also applied to the AIC lane. Refs already in aiv_map (the
-    // tile.store-result block above, params, tpop remaps) are skipped, so this
-    // is purely additive over prior AIV behavior.
+    // tile.store-result block above, params) and refs defined in the body (every
+    // boundary tpop result, bound by apply_tpop_remap) are skipped, so this is
+    // purely additive over prior AIV behavior.
     RemapDanglingGmRefsToParam(aiv_body_stmt, aiv_map, gm_origin_map, func);
   }
 
-  auto [aiv_cloned_body, aiv_clone_map_unused] = DeepClone(MakeBody(aiv_final, func->span_), aiv_map);
+  auto [aiv_cloned_body, aiv_clone_map_unused] = DeepClone(aiv_body_stmt, aiv_map);
   (void)aiv_clone_map_unused;
   auto aiv_attrs = func->attrs_;
   if (needs_dual_aiv_dispatch) {

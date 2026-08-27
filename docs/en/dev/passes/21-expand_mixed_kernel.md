@@ -542,10 +542,14 @@ class After:
 | Property | Value |
 | -------- | ----- |
 | Required | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D, TileMemoryInferred, NormalizedStmtStructure |
-| Produced | SSAForm, MixedKernelExpanded, NormalizedStmtStructure, HardSyncallOccupancyValid |
-| Invalidated | — |
+| Produced | SSAForm, MixedKernelExpanded, NormalizedStmtStructure, HardSyncallOccupancyValid, AccCompactValid, UseAfterDef |
+| Invalidated | AccCompactValid, UseAfterDef |
 
 `HardSyncallOccupancyValid` is produced here not by anything this pass rewrites, but because resolving each kernel's `FunctionType` to AIV/AIC/Group is the precondition the hard-syncall occupancy verifier depends on. That verifier fires once, right after this pass.
+
+`AccCompactValid` is invalidated and re-produced because the Cube->Vector boundary `tile.move` is rebuilt here as a tpush/tpop pair with a freshly built consumer type, so the Acc compact contract has to be re-checked on that new IR rather than trusted from `InferTileMemorySpace`.
+
+`UseAfterDef` is invalidated and re-produced for the reason it is worth checking at all here: this pass rebuilds two whole function bodies by pruning statements per lane, so "a statement kept on one side whose operand was pruned from the other" is its characteristic failure — and that is exactly a use with no reaching definition. Naming the stranded variable and the pass that stranded it beats the downstream symptoms the same bug produces otherwise (`MemoryReuse`'s Acc->Acc `tile.move` guard, or PTO codegen's "no MLIR mapping for MemRef base"), neither of which names either. The invalidate is what makes the check run: `UseAfterDef` is structural, so the pipeline already verified it at input and recorded it, and the per-pass check subtracts what is already verified.
 
 ## Property Verifier
 
