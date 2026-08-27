@@ -339,6 +339,23 @@ class StructuralHasher {
         // structural_equal compares it element-wise.
         const auto& idxs = AnyCast<std::vector<int32_t>>(value, "hashing kwarg: " + key);
         for (int32_t v : idxs) h = hash_combine(h, std::hash<int32_t>{}(v));
+      } else if (value.type() == typeid(std::vector<std::pair<int32_t, int>>)) {
+        // ``kAttrCachePolicyParams`` on an outlined Function: (param index,
+        // policy) pairs. Both halves are integers, so both are hashed in order;
+        // structural_equal compares the vector element-wise.
+        const auto& pairs = AnyCast<std::vector<std::pair<int32_t, int>>>(value, "hashing kwarg: " + key);
+        for (const auto& [idx, policy] : pairs) {
+          h = hash_combine(h, std::hash<int32_t>{}(idx));
+          h = hash_combine(h, std::hash<int>{}(policy));
+        }
+      } else if (value.type() == typeid(std::vector<std::pair<VarPtr, int>>)) {
+        // ``kAttrCachePolicyVars`` on a ScopeStmt: (Var, policy) pairs. Only the
+        // policy half is hashed — the Var half is skipped for the same reason as
+        // the Var-valued attrs below (HashNode is auto-mapping-counter-order
+        // dependent). structural_equal still compares the Vars, so this only
+        // makes the hash coarser, never wrong.
+        const auto& pairs = AnyCast<std::vector<std::pair<VarPtr, int>>>(value, "hashing kwarg: " + key);
+        for (const auto& entry : pairs) h = hash_combine(h, std::hash<int>{}(entry.second));
       } else if (value.type() == typeid(VarPtr) || value.type() == typeid(std::vector<VarPtr>) ||
                  value.type() == typeid(ExprPtr)) {
         // Var-/Expr-valued attrs (task_id_var / manual_dep_edges / dump_vars /

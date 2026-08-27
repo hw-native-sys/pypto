@@ -82,6 +82,91 @@ bool IsPassthroughTensorOp(const CallPtr& call) {
   return IsOp(call, "tensor.dim") || IsOp(call, "tensor.view");
 }
 
+/// Declared GM cache policy per source tensor, keyed by the param Var the
+/// declaration resolved to. ``CachePolicy`` stored as ``int``, the type the
+/// ``tile.load`` ``cache`` kwarg is registered with.
+using CachePolicyByParam = std::unordered_map<const Var*, int>;
+
+/**
+ * @brief Resolve an InCore function's ``cache_policy`` attr to its param Vars.
+ *
+ * ``OutlineIncoreScopes`` (pass 8) records ``pl.set_cache_policy`` declarations
+ * as (param index, policy) pairs, because at that point the param Vars are
+ * freshly minted. Here the indices are turned back into Var identities — the
+ * form every load site below matches its source arg against — and the attr is
+ * erased on the way out (see ``EraseCachePolicyAttr``): param indices are only
+ * valid across passes 8..10, since later passes both append to and prepend onto
+ * param lists.
+ */
+CachePolicyByParam BuildCachePolicyByParam(const FunctionPtr& func) {
+  CachePolicyByParam policies;
+  auto indices = func->GetAttr<std::vector<std::pair<int32_t, int>>>(kAttrCachePolicyParams);
+  policies.reserve(indices.size());
+  for (const auto& [idx, policy] : indices) {
+    INTERNAL_CHECK_SPAN(idx >= 0 && static_cast<size_t>(idx) < func->params_.size(), func->span_)
+        << "Internal error: cache_policy param index " << idx << " out of range for function '" << func->name_
+        << "' with " << func->params_.size() << " param(s)";
+    // insert_or_assign, not emplace: a tensor declared twice takes its last
+    // declaration, deterministically (the attr is sorted by index).
+    policies.insert_or_assign(func->params_[static_cast<size_t>(idx)].get(), policy);
+  }
+  return policies;
+}
+
+/// Drop the consumed ``cache_policy`` attr. Nothing downstream may see it —
+/// its param indices go stale the moment a later pass grows the param list.
+std::vector<std::pair<std::string, std::any>> EraseCachePolicyAttr(
+    const std::vector<std::pair<std::string, std::any>>& attrs) {
+  std::vector<std::pair<std::string, std::any>> kept;
+  kept.reserve(attrs.size());
+  for (const auto& kv : attrs) {
+    if (kv.first == kAttrCachePolicyParams) continue;
+    kept.push_back(kv);
+  }
+  return kept;
+}
+
+/**
+ * @brief Add the declared ``cache`` kwarg for a synthesised ``tile.load``.
+ *
+ * No-op unless ``src`` is a param carrying a declaration. An explicit
+ * ``cache=`` already in ``kwargs`` always wins (precedence: per-access kwarg,
+ * then the scope declaration, then ``CachePolicy::kDefault``).
+ */
+void AppendCachePolicyKwarg(const ExprPtr& src, const CachePolicyByParam& policies,
+                            std::vector<std::pair<std::string, std::any>>* kwargs) {
+  if (policies.empty()) return;
+  auto var = AsVarLike(src);
+  if (!var) return;
+  auto it = policies.find(var.get());
+  if (it == policies.end()) return;
+  const bool stated_explicitly =
+      std::any_of(kwargs->begin(), kwargs->end(), [](const auto& kv) { return kv.first == "cache"; });
+  if (stated_explicitly) return;
+  kwargs->emplace_back("cache", it->second);
+}
+
+/**
+ * @brief Stamp the declared policy onto a ``tile.load`` already in the body.
+ *
+ * A hand-written (or earlier-pass) load of a declared tensor must honour the
+ * declaration exactly as a synthesised one does, unless it states its own
+ * ``cache=``. Returns nullptr when nothing changes, so callers keep their
+ * copy-on-write short-circuit. Only ``Call`` is considered: a ``Submit``
+ * launches a task through a ``GlobalVar`` callee and can never carry a tile op.
+ */
+CallPtr StampCachePolicyOnLoad(const CallPtr& call, const CachePolicyByParam& policies) {
+  if (policies.empty() || !IsOp(call, "tile.load") || call->args_.empty()) return nullptr;
+  auto kwargs = call->kwargs_;
+  AppendCachePolicyKwarg(call->args_[0], policies, &kwargs);
+  // Unchanged when the source carries no declaration, or when the load already
+  // states its own ``cache=``.
+  if (kwargs.size() == call->kwargs_.size()) return nullptr;
+  auto stamped = MutableCopy(call);
+  stamped->kwargs_ = std::move(kwargs);
+  return stamped;
+}
+
 void CheckReinterpretViewIncoreLayout(const CallPtr& call) {
   if (!IsOp(call, "tensor.reinterpret_view")) return;
 
@@ -542,10 +627,27 @@ class TypePropagatingMutator : public IRMutator {
 class TensorToTileMutator : public TypePropagatingMutator {
  public:
   TensorToTileMutator(const OpConversionRegistry& conv_registry, const OpRegistry& op_registry,
-                      const ConsumerSpaceCollector& consumer_collector)
-      : conv_registry_(conv_registry), op_registry_(op_registry), consumer_collector_(consumer_collector) {}
+                      const ConsumerSpaceCollector& consumer_collector, CachePolicyByParam cache_policies)
+      : conv_registry_(conv_registry),
+        op_registry_(op_registry),
+        consumer_collector_(consumer_collector),
+        cache_policies_(std::move(cache_policies)) {}
 
  protected:
+  /// Honour a ``pl.set_cache_policy`` declaration on a ``tile.load`` that was
+  /// already in the body (user-written, or produced by an earlier pass) rather
+  /// than synthesised here. Hooked on the generic Call visit so the loads a
+  /// converter emits in its own prologue are covered too.
+  ExprPtr VisitExpr_(const CallPtr& op) override {
+    // Qualified with IRMutator: TypePropagatingMutator declares only the
+    // IterArg overload, which hides the base Call one from name lookup.
+    auto visited = IRMutator::VisitExpr_(op);
+    auto call = As<Call>(visited);
+    if (!call) return visited;
+    auto stamped = StampCachePolicyOnLoad(call, cache_policies_);
+    return stamped ? ExprPtr(stamped) : visited;
+  }
+
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     // Pin this Var's address for the pass so a freed-then-reused address cannot
     // alias a stale var_remap_ entry (see TypePropagatingMutator::RetainVar).
@@ -688,6 +790,7 @@ class TensorToTileMutator : public TypePropagatingMutator {
     // The consumer-driven load is always natural; a transposed (b_trans/a_trans)
     // operand gets a zero-copy tile.transpose_view at the matmul site instead.
     std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", req.space}};
+    AppendCachePolicyKwarg(input, cache_policies_, &load_kwargs);
     auto load_call =
         MarkCompilerMatBridge(op_registry_.Create("tile.load", {input, offset_arg, shape_arg, valid_shape},
                                                   load_kwargs, call->span_),
@@ -740,6 +843,7 @@ class TensorToTileMutator : public TypePropagatingMutator {
       auto offsets = MakeZeroOffsets(tensor_type->shape_.size(), call->span_);
       auto shapes = MakeShapeTuple(tensor_type->shape_, call->span_);
       std::vector<std::pair<std::string, std::any>> load_kw = {{"target_memory", space}};
+      AppendCachePolicyKwarg(arg, cache_policies_, &load_kw);
       auto load = MarkCompilerMatBridge(
           op_registry_.Create("tile.load", {arg, offsets, shapes, shapes}, load_kw, call->span_), space);
       std::string var_name;
@@ -818,6 +922,9 @@ class TensorToTileMutator : public TypePropagatingMutator {
   const OpConversionRegistry& conv_registry_;
   const OpRegistry& op_registry_;
   const ConsumerSpaceCollector& consumer_collector_;
+  /// Declared GM cache policies of this function's params (empty when the
+  /// function carries no ``pl.set_cache_policy`` declaration).
+  const CachePolicyByParam cache_policies_;
 };
 
 bool ExprUsesVar(const ExprPtr& expr, const Var* target) {
@@ -2044,8 +2151,14 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   consumer_collector.VisitStmt(canonical_body);
   consumer_collector.PropagateThroughInheritInputOps();
 
+  // Resolve the scope-declared GM cache policies onto this function's params.
+  // Every load this pass synthesises below, and every load already in the body,
+  // carries the declaration onward as a ``cache`` kwarg; the function attr is
+  // erased when the transformed function is rebuilt.
+  auto cache_policies = BuildCachePolicyByParam(func);
+
   // Create the body mutator
-  TensorToTileMutator mutator(conv_registry, op_registry, consumer_collector);
+  TensorToTileMutator mutator(conv_registry, op_registry, consumer_collector, cache_policies);
 
   // New body statements (prefix tile.loads + mutated body)
   std::vector<StmtPtr> new_stmts;
@@ -2086,6 +2199,7 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
     if (entry_req.has_value()) {
       load_kwargs.emplace_back("target_memory", entry_req->space);
     }
+    AppendCachePolicyKwarg(var, cache_policies, &load_kwargs);
     auto load_call = MarkCompilerMatBridge(
         op_registry.Create("tile.load", {var, offsets, shapes, shapes}, load_kwargs, load_span),
         entry_req.has_value() ? entry_req->space : MemorySpace::Vec);
@@ -2195,9 +2309,9 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   UpgradeWrittenTensorParamDirections(new_stmts, new_params, new_param_directions);
 
   auto new_body = SeqStmts::Flatten(std::move(new_stmts), span);
-  auto new_func =
-      std::make_shared<Function>(func->name_, new_params, new_param_directions, new_return_types, new_body,
-                                 span, FunctionType::InCore, func->level_, func->role_, func->attrs_);
+  auto new_func = std::make_shared<Function>(func->name_, new_params, new_param_directions, new_return_types,
+                                             new_body, span, FunctionType::InCore, func->level_, func->role_,
+                                             EraseCachePolicyAttr(func->attrs_));
 
   return {new_func, num_added_outputs};
 }

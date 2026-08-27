@@ -655,6 +655,37 @@ class StructuralEqualImpl {
             }
           }
         }
+      } else if (lhs_val.type() == typeid(std::vector<std::pair<VarPtr, int>>)) {
+        // ``kAttrCachePolicyVars`` on ScopeStmts: (Var, ``CachePolicy``-as-int)
+        // pairs written by the DSL parser for ``pl.set_cache_policy(...)``.
+        // The Var half goes through the same Var-mapping path as the Var-list
+        // arm above, so an SSA rename still matches; the int half is compared
+        // directly.
+        const auto& lhs_pairs =
+            AnyCast<std::vector<std::pair<VarPtr, int>>>(lhs_val, "comparing kwarg: " + lhs_key);
+        const auto& rhs_pairs =
+            AnyCast<std::vector<std::pair<VarPtr, int>>>(rhs_val, "comparing kwarg: " + lhs_key);
+        if (lhs_pairs.size() != rhs_pairs.size()) {
+          values_equal = false;
+        } else {
+          values_equal = true;
+          for (size_t j = 0; j < lhs_pairs.size(); ++j) {
+            if (lhs_pairs[j].second != rhs_pairs[j].second ||
+                !Equal(lhs_pairs[j].first, rhs_pairs[j].first)) {
+              values_equal = false;
+              break;
+            }
+          }
+        }
+      } else if (lhs_val.type() == typeid(std::vector<std::pair<int32_t, int>>)) {
+        // ``kAttrCachePolicyParams`` on an outlined Function: (param index,
+        // ``CachePolicy``-as-int) pairs. Both halves are plain integers, so a
+        // element-wise vector compare is exact.
+        const auto& lhs_pairs =
+            AnyCast<std::vector<std::pair<int32_t, int>>>(lhs_val, "comparing kwarg: " + lhs_key);
+        const auto& rhs_pairs =
+            AnyCast<std::vector<std::pair<int32_t, int>>>(rhs_val, "comparing kwarg: " + lhs_key);
+        values_equal = (lhs_pairs == rhs_pairs);
       } else if (lhs_val.type() == typeid(VarPtr)) {
         // ``kAttrTaskIdVar`` on ScopeStmts.
         const auto& lhs_var = AnyCast<VarPtr>(lhs_val, "comparing kwarg: " + lhs_key);

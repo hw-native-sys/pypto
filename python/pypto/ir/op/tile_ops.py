@@ -193,6 +193,7 @@ def load(
     target_memory: MemorySpace | None = None,
     clamp: bool = False,
     span: Span | None = None,
+    cache: int = 0,
 ) -> Call:
     """Copy data from tensor to specified memory level.
 
@@ -222,6 +223,10 @@ def load(
             and is rejected when that provably fails; with ``clamp=True`` the
             request is cut back to the source edge instead.
         span: Optional source span for debugging (auto-captured if not provided)
+        cache: ``CachePolicy`` underlying int — 0 (``kDefault``, ordinary cached
+            GM read) or 1 (``kBypass``, declared streaming read). The kwarg is
+            omitted entirely when 0, so ordinary loads are unchanged and the
+            absence of the kwarg reads as "default" everywhere downstream.
 
     Returns:
         Call expression that returns a TileType with the copied data
@@ -258,6 +263,8 @@ def load(
         kwargs["target_memory"] = target_memory
     if clamp:
         kwargs["clamp"] = True
+    if cache:
+        kwargs["cache"] = cache
 
     valid_shape_tuple = shapes_tuple
     if valid_shape is not None:

@@ -98,6 +98,27 @@ output[0:1, 0:32] = staged
 Using `tensor.write` for every element is also supported when a single bulk
 store is not practical.
 
+### Cache-Policy Declarations → `tile.load` `cache` Kwarg
+
+This pass is where a declared GM cache policy stops being metadata and becomes
+part of the access. [`OutlineIncoreScopes`](08-outline_incore_scopes.md) left the
+declarations on the InCore function as the `cache_policy` attr —
+`std::vector<std::pair<int32_t, int>>` (param index, `CachePolicy` as int).
+Phase 1 turns those indices back into param `Var` identities once per function,
+then adds `{"cache", <policy>}` to every `tile.load` whose source arg is a listed
+param: the entry loads it synthesises, the consumer-driven Mat loads, the
+input-space bridge loads, and any `tile.load` already in the body (user-written
+or produced by an earlier pass). The attr is **erased** when the transformed
+function is rebuilt — nothing downstream may see it, because its param indices go
+stale the moment a later pass grows the param list.
+
+Precedence is per access: an explicit `pl.load(..., cache=...)` kwarg already on
+the load always wins over the scope declaration, in both directions, so
+`cache=pl.CachePolicy.DEFAULT` opts one read back into the cache inside a
+bypassing scope. From here the kwarg simply rides the op through the remaining
+passes to codegen, the way `target_memory` does. See
+[GM Cache-Access Policy](../language/05-cache-policy.md).
+
 ### Phase 2a: Propagate Added Outputs Through Spmd/Group Wrappers
 
 `OutlineClusterScopes` produces Spmd/Group wrappers that are transparent 1:1

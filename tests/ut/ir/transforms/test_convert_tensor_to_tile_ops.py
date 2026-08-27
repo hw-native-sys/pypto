@@ -5965,5 +5965,200 @@ class TestSynthesizedOpSpans:
         assert exp_after.span.begin_line > func.span.begin_line
 
 
+class TestCachePolicyConversion:
+    """``pl.set_cache_policy`` reaches this pass as the outlined-function attr
+    ``cache_policy`` — ``(param index, CachePolicy-as-int)`` pairs stamped by
+    OutlineIncoreScopes (pass 8) — and leaves it as a ``cache`` kwarg on every
+    ``tile.load`` that reads a declared param. The attr itself is erased here:
+    its indices go stale the moment a later pass grows the param list, so
+    nothing downstream may see it.
+
+    Each Before is authored in the shape pass 8 really hands over: a *bare*
+    InCore function (the scope already consumed) carrying the resolved attr via
+    ``pl.func_attr``, plus the Orchestration caller pass 8 mints beside it.
+    Writing the ``pl.at`` scope here instead would re-test pass 8's translation
+    rather than this pass's consumption of its output.
+
+    Precedence (a per-access kwarg beats the scope declaration) is covered from
+    the BYPASS side only. The opposite direction — an explicit
+    ``cache=CachePolicy.DEFAULT`` re-caching one access inside a bypassing scope
+    — is not expressible today: the load builder omits the kwarg entirely when
+    the policy is 0, leaving nothing for the pass to tell apart from an
+    unannotated load.
+    """
+
+    _BYPASS = int(pl.CachePolicy.BYPASS)
+
+    @staticmethod
+    def _loads_by_source(func: ir.Function) -> dict[str, ir.Call]:
+        """Map every ``tile.load`` in ``func`` to the name of the tensor it reads."""
+        loads: dict[str, ir.Call] = {}
+        for call in _find_calls_to(func, ir.get_op("tile.load").name):
+            source = call.args[0]
+            assert isinstance(source, ir.Var), f"tile.load source is not a Var: {source}"
+            assert source.name_hint not in loads, f"more than one tile.load reads '{source.name_hint}'"
+            loads[source.name_hint] = call
+        return loads
+
+    @staticmethod
+    def _declared_matmul() -> ir.Program:
+        """Post-pass-8 matmul kernel declaring BYPASS for param 1 (``b``)."""
+
+        @pl.program
+        class Declared:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def mm(
+                a: pl.Tensor[[256, 128], pl.FP32],
+                b: pl.Tensor[[128, 256], pl.FP32],
+                out: pl.Out[pl.Tensor[[256, 256], pl.FP32]],
+            ) -> pl.Tensor[[256, 256], pl.FP32]:
+                pl.func_attr({"cache_policy": [(1, 1)]})
+                c: pl.Tensor[[256, 256], pl.FP32] = pl.matmul(a, b, out_dtype=pl.FP32)
+                out = pl.assemble(out, c, [0, 0])
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+            def main(
+                self,
+                a: pl.Tensor[[256, 128], pl.FP32],
+                b: pl.Tensor[[128, 256], pl.FP32],
+                out: pl.Out[pl.Tensor[[256, 256], pl.FP32]],
+            ) -> pl.Tensor[[256, 256], pl.FP32]:
+                y: pl.Tensor[[256, 256], pl.FP32] = self.mm(a, b, out)
+                return y
+
+        return Declared
+
+    @staticmethod
+    def _undeclared_matmul() -> ir.Program:
+        """The same kernel without the attr — the control the declared run is read against."""
+
+        @pl.program
+        class Undeclared:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def mm(
+                a: pl.Tensor[[256, 128], pl.FP32],
+                b: pl.Tensor[[128, 256], pl.FP32],
+                out: pl.Out[pl.Tensor[[256, 256], pl.FP32]],
+            ) -> pl.Tensor[[256, 256], pl.FP32]:
+                c: pl.Tensor[[256, 256], pl.FP32] = pl.matmul(a, b, out_dtype=pl.FP32)
+                out = pl.assemble(out, c, [0, 0])
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+            def main(
+                self,
+                a: pl.Tensor[[256, 128], pl.FP32],
+                b: pl.Tensor[[128, 256], pl.FP32],
+                out: pl.Out[pl.Tensor[[256, 256], pl.FP32]],
+            ) -> pl.Tensor[[256, 256], pl.FP32]:
+                y: pl.Tensor[[256, 256], pl.FP32] = self.mm(a, b, out)
+                return y
+
+        return Undeclared
+
+    def test_declared_param_gets_the_cache_kwarg_on_its_synthesised_load(self):
+        """Only the declared param's Mat bridge load is stamped."""
+        after = passes.convert_tensor_to_tile_ops()(self._declared_matmul())
+        loads = self._loads_by_source(_require_function(after, "mm"))
+
+        assert loads["b"].kwargs["cache"] == self._BYPASS
+        # The other operand is untouched: a declaration names one tensor, not
+        # the kernel.
+        assert "cache" not in loads["a"].kwargs
+
+    def test_undeclared_kernel_gets_no_cache_kwarg(self):
+        """Control for the test above: with no attr, no load is stamped."""
+        after = passes.convert_tensor_to_tile_ops()(self._undeclared_matmul())
+        loads = self._loads_by_source(_require_function(after, "mm"))
+
+        assert set(loads) == {"a", "b"}
+        assert all("cache" not in load.kwargs for load in loads.values())
+
+    def test_function_attr_is_erased_by_the_conversion(self):
+        """Param indices stay valid only across passes 8..10 — later passes both
+        append to param lists and prepend onto them — so the attr must not
+        outlive its consumer."""
+        after = passes.convert_tensor_to_tile_ops()(self._declared_matmul())
+
+        assert "cache_policy" not in dict(_require_function(after, "mm").attrs)
+        assert "cache_policy" not in dict(_require_function(after, "main").attrs)
+
+    def test_preexisting_tile_load_of_a_declared_param_is_stamped(self):
+        """A load already in the body honours the declaration exactly as a
+        synthesised one does: the author wrote ``pl.load`` by hand, but the
+        scope-level declaration still covers that read."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def k(
+                x: pl.Tensor[[64, 64], pl.FP32],
+                y: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                pl.func_attr({"cache_policy": [(0, 1)]})
+                tx: pl.Tile[[64, 64], pl.FP32] = pl.load(x, [0, 0], [64, 64])
+                ty: pl.Tile[[64, 64], pl.FP32] = pl.load(y, [0, 0], [64, 64])
+                s: pl.Tile[[64, 64], pl.FP32] = pl.tile.add(tx, ty)
+                out = pl.store(s, [0, 0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+            def main(
+                self,
+                x: pl.Tensor[[64, 64], pl.FP32],
+                y: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                z: pl.Tensor[[64, 64], pl.FP32] = self.k(x, y, out)
+                return z
+
+        loads = self._loads_by_source(_require_function(passes.convert_tensor_to_tile_ops()(Before), "k"))
+        assert loads["x"].kwargs["cache"] == self._BYPASS
+        assert "cache" not in loads["y"].kwargs
+
+    def test_explicit_kwarg_survives_and_is_not_duplicated(self):
+        """The per-access surface stands on its own, and coincides cleanly with
+        the scope declaration.
+
+        ``y`` is annotated at the access with no declaration behind it; ``x``
+        carries both. Either way the load ends up with exactly one ``cache``
+        kwarg holding BYPASS — the pass never appends a second one over a value
+        the load already states.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def k(
+                x: pl.Tensor[[64, 64], pl.FP32],
+                y: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                pl.func_attr({"cache_policy": [(0, 1)]})
+                tx: pl.Tile[[64, 64], pl.FP32] = pl.load(x, [0, 0], [64, 64], cache=pl.CachePolicy.BYPASS)
+                ty: pl.Tile[[64, 64], pl.FP32] = pl.load(y, [0, 0], [64, 64], cache=pl.CachePolicy.BYPASS)
+                s: pl.Tile[[64, 64], pl.FP32] = pl.tile.add(tx, ty)
+                out = pl.store(s, [0, 0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+            def main(
+                self,
+                x: pl.Tensor[[64, 64], pl.FP32],
+                y: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                z: pl.Tensor[[64, 64], pl.FP32] = self.k(x, y, out)
+                return z
+
+        loads = self._loads_by_source(_require_function(passes.convert_tensor_to_tile_ops()(Before), "k"))
+        for name in ("x", "y"):
+            keys = [key for key, _ in loads[name].kwargs.items()]
+            assert keys.count("cache") == 1, f"duplicate cache kwarg on '{name}'"
+            assert loads[name].kwargs["cache"] == self._BYPASS
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

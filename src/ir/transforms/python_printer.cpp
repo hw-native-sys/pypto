@@ -455,6 +455,18 @@ class IRPythonPrinter : public IRVisitor {
   // printers so the parser can recover the marker after a print/reparse roundtrip.
   bool PrintScopeNoDepsAttr(const ScopeStmtPtr& op);
 
+  // Surface ``ScopeStmt.attrs[kAttrCachePolicyVars]`` as leading marker
+  // STATEMENTS in the scope body — ``pl.set_cache_policy(t, pl.CachePolicy.X)``
+  // — and NOT as a header kwarg the way ``no_dep_args=`` / ``dumps=`` do,
+  // because a statement is the DSL surface the parser accepts. The parser
+  // hoists the markers back onto the scope attr wherever they appear in the
+  // body, so the roundtrip is position-normalising: however the user ordered
+  // them, they print first. Emitted from whichever scope object carries the
+  // attr — in the Spmd inlining branches that is the nested InCore, not ``op``.
+  // Returns true when something was printed, so a caller whose body may be
+  // empty can tell whether a ``pass`` filler is still needed.
+  bool PrintScopeCachePolicyStmts(const ScopeStmtPtr& op);
+
   // Emit ``deps=[t1, t2]`` if the scope carries ``kAttrManualDepEdges``; returns
   // true when something was printed. Mirrors PrintScopeNoDepsAttr — the parser
   // recovers ``deps=`` on ``pl.at(...)`` via _parse_at_meta.
@@ -914,6 +926,32 @@ void IRPythonPrinter::PrintAttrValue(const std::any& value, const Span& span) {
       INTERNAL_CHECK_SPAN(vars[i], span)
           << "Internal error: null Var in attr list; the DSL has no null-Var syntax to round-trip";
       stream_ << GetVarName(vars[i].get());
+    }
+    stream_ << "]";
+  } else if (t == typeid(std::vector<std::pair<int32_t, int>>)) {
+    // ``kAttrCachePolicyParams`` on an outlined Function: (param index, policy)
+    // pairs. Printed as a list of tuples so a pass dump taken between
+    // OutlineIncoreScopes and ConvertTensorToTileOps — the only window where
+    // this attr exists — round-trips instead of aborting.
+    const auto& pairs = std::any_cast<std::vector<std::pair<int32_t, int>>>(value);
+    stream_ << "[";
+    for (size_t i = 0; i < pairs.size(); ++i) {
+      if (i > 0) stream_ << ", ";
+      stream_ << "(" << pairs[i].first << ", " << pairs[i].second << ")";
+    }
+    stream_ << "]";
+  } else if (t == typeid(std::vector<std::pair<VarPtr, int>>)) {
+    // ``kAttrCachePolicyVars``. On a ScopeStmt this attr is surfaced as
+    // ``pl.set_cache_policy(...)`` marker statements instead (see
+    // PrintScopeCachePolicyStmts); this arm is the generic-attr fallback, so a
+    // dump never aborts on a carrier the scope printer did not claim.
+    const auto& pairs = std::any_cast<std::vector<std::pair<VarPtr, int>>>(value);
+    stream_ << "[";
+    for (size_t i = 0; i < pairs.size(); ++i) {
+      if (i > 0) stream_ << ", ";
+      INTERNAL_CHECK_SPAN(pairs[i].first, span)
+          << "Internal error: null Var in attr list; the DSL has no null-Var syntax to round-trip";
+      stream_ << "(" << GetVarName(pairs[i].first.get()) << ", " << pairs[i].second << ")";
     }
     stream_ << "]";
   } else if (t == typeid(VarPtr)) {
@@ -2004,6 +2042,29 @@ bool IRPythonPrinter::PrintScopeDepsAttr(const ScopeStmtPtr& op) {
   return PrintScopeVarListKwarg(op, kAttrManualDepEdges, "deps");
 }
 
+// One ``<indent>pl.set_cache_policy(<tensor>, pl.CachePolicy.<NAME>)`` line per
+// declaration. Callers invoke this after ``IncreaseIndent()`` and before the
+// body block, so the markers lead the scope body exactly as the parser expects
+// to find them. Null Vars are skipped for the same reason
+// ``PrintScopeVarListKwarg`` skips them: the rendered Python must stay valid.
+bool IRPythonPrinter::PrintScopeCachePolicyStmts(const ScopeStmtPtr& op) {
+  if (!op) return false;
+  bool printed = false;
+  for (const auto& [k, v] : op->attrs_) {
+    if (k != kAttrCachePolicyVars) continue;
+    const auto* entries = std::any_cast<std::vector<std::pair<VarPtr, int>>>(&v);
+    if (!entries) continue;
+    for (const auto& [var, policy] : *entries) {
+      if (!var) continue;
+      stream_ << GetIndent() << prefix_ << ".set_cache_policy(" << GetVarName(var.get()) << ", " << prefix_
+              << ".CachePolicy."
+              << AttrValueToEnumMember(CachePolicyToString(static_cast<CachePolicy>(policy))) << ")\n";
+      printed = true;
+    }
+  }
+  return printed;
+}
+
 void IRPythonPrinter::PrintScopeOptimizations(SplitMode split, const ScopeStmtPtr& slot_num_holder) {
   const bool has_mode = split != SplitMode::None;
   const bool has_slot_num = slot_num_holder && slot_num_holder->HasAttr("slot_num");
@@ -2104,6 +2165,7 @@ void IRPythonPrinter::VisitStmt_(const HierarchyScopeStmtPtr& op) {
   PrintScopeTaskIdVarSuffix(op);
   stream_ << ":\n";
   IncreaseIndent();
+  PrintScopeCachePolicyStmts(op);
   PrintStmtBlock(op->body_);
   DecreaseIndent();
 }
@@ -2127,6 +2189,7 @@ void IRPythonPrinter::VisitStmt_(const InCoreScopeStmtPtr& op) {
   PrintScopeTaskIdVarSuffix(op);
   stream_ << ":\n";
   IncreaseIndent();
+  PrintScopeCachePolicyStmts(op);
   PrintStmtBlock(op->body_);
   DecreaseIndent();
 }
@@ -2176,7 +2239,18 @@ void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
     PrintScopeTaskIdVarSuffix(op);
     stream_ << ":\n";
     IncreaseIndent();
-    if (!SpmdInlineBodyRebuildsCarrier(incore)) {
+    // The inlining branches below drop the nested ``pl.at(level=CORE_GROUP)``
+    // header, and a ``pl.set_cache_policy`` written inside the Spmd body
+    // attaches to that inner InCore scope — so its declarations must be printed
+    // here, from ``incore``, or they are lost. When the carrier is spelled out
+    // instead, the nested InCore prints its own markers and re-printing them
+    // here would duplicate them.
+    const bool inlines_incore_body = SpmdInlineBodyRebuildsCarrier(incore);
+    PrintScopeCachePolicyStmts(op);
+    if (inlines_incore_body) {
+      PrintScopeCachePolicyStmts(incore);
+    }
+    if (!inlines_incore_body) {
       // Print the body as-is. Either inlining would drop the carrier — the parser
       // re-synthesises an InCore only for a body that carries a split or reads the
       // per-block index, so the carrier must be spelled out as a nested
@@ -2219,6 +2293,9 @@ void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
     PrintScopePredicateAttr(op);
     stream_ << "):\n";
     IncreaseIndent();
+    // The for-form drops the nested ``pl.at(level=CORE_GROUP)`` header, so the
+    // inner InCore's declarations are printed here or they are lost.
+    const bool printed_cache_policy = PrintScopeCachePolicyStmts(incore);
     // Emit the InCore body skipping the get_block_idx binding we just
     // materialized as the loop variable. ShouldSuppressPlaceholder keeps the
     // ``with pl.at(...) as tid:`` round-trip working if such a scope ever
@@ -2230,7 +2307,11 @@ void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
         PrintStmtBlock(incore_seq->stmts_[i]);
         if (i + 1 < incore_seq->stmts_.size()) stream_ << "\n";
       }
-    } else {
+    } else if (!printed_cache_policy) {
+      // Only a body with nothing left after the loop-var binding needs the
+      // ``pass`` filler — the marker statements above already count as body
+      // content, and printing ``pass`` after them is both redundant and (were
+      // the markers ever dropped) a silent loss of the declaration.
       stream_ << GetIndent() << "pass\n";
     }
     DecreaseIndent();

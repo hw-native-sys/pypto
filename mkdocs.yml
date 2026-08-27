@@ -366,6 +366,7 @@ nav:
           - en/dev/language/02-manual_dependencies.md
           - en/dev/language/03-functions.md
           - en/dev/language/04-external-kernels.md
+          - en/dev/language/05-cache-policy.md
       - Code Generation:
           - en/dev/codegen/index.md
           - en/dev/codegen/00-pto_codegen.md

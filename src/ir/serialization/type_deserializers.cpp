@@ -298,6 +298,65 @@ static std::vector<std::pair<std::string, std::any>> DeserializeKwargs(const msg
           idxs.push_back(value_obj_inner.via.array.ptr[j].as<int32_t>());
         }
         kwargs.emplace_back(key, std::move(idxs));
+      } else if (type_name == "VarPolicyList") {
+        // kAttrCachePolicyVars — (tensor Var, CachePolicy-as-int) pairs from
+        // `pl.set_cache_policy`. The Var half resolves through the node table so
+        // identity round-trips; a nil Var reconstructs a null VarPtr.
+        if (!has_value_obj || value_obj_inner.type != msgpack::type::ARRAY) {
+          throw TypeError("VarPolicyList kwarg '" + key + "' must have ARRAY value");
+        }
+        std::vector<std::pair<VarPtr, int>> entries;
+        entries.reserve(value_obj_inner.via.array.size);
+        for (uint32_t j = 0; j < value_obj_inner.via.array.size; ++j) {
+          const msgpack::object& elem = value_obj_inner.via.array.ptr[j];
+          if (elem.type != msgpack::type::MAP) {
+            throw TypeError("VarPolicyList kwarg '" + key + "' entries must be MAP");
+          }
+          VarPtr var;
+          int policy = 0;
+          msgpack::object_kv* q = elem.via.map.ptr;
+          msgpack::object_kv* const qend = elem.via.map.ptr + elem.via.map.size;
+          for (; q < qend; ++q) {
+            std::string field;
+            q->key.convert(field);
+            if (field == "var" && q->val.type != msgpack::type::NIL) {
+              var = std::static_pointer_cast<const Var>(ctx.DeserializeNode(q->val, zone));
+            } else if (field == "policy") {
+              policy = q->val.as<int>();
+            }
+          }
+          entries.emplace_back(std::move(var), policy);
+        }
+        kwargs.emplace_back(key, std::move(entries));
+      } else if (type_name == "IndexPolicyList") {
+        // kAttrCachePolicyParams — (param index, CachePolicy-as-int) pairs written
+        // by the outliner and erased by ConvertTensorToTileOps.
+        if (!has_value_obj || value_obj_inner.type != msgpack::type::ARRAY) {
+          throw TypeError("IndexPolicyList kwarg '" + key + "' must have ARRAY value");
+        }
+        std::vector<std::pair<int32_t, int>> entries;
+        entries.reserve(value_obj_inner.via.array.size);
+        for (uint32_t j = 0; j < value_obj_inner.via.array.size; ++j) {
+          const msgpack::object& elem = value_obj_inner.via.array.ptr[j];
+          if (elem.type != msgpack::type::MAP) {
+            throw TypeError("IndexPolicyList kwarg '" + key + "' entries must be MAP");
+          }
+          int32_t index = 0;
+          int policy = 0;
+          msgpack::object_kv* q = elem.via.map.ptr;
+          msgpack::object_kv* const qend = elem.via.map.ptr + elem.via.map.size;
+          for (; q < qend; ++q) {
+            std::string field;
+            q->key.convert(field);
+            if (field == "index") {
+              index = q->val.as<int32_t>();
+            } else if (field == "policy") {
+              policy = q->val.as<int>();
+            }
+          }
+          entries.emplace_back(index, policy);
+        }
+        kwargs.emplace_back(key, std::move(entries));
       } else if (type_name == "Expr") {
         // Reserved Expr-valued attr (kAttrDevice). Resolved through the node table.
         // A missing 'value' field is a malformed envelope (fail fast); an

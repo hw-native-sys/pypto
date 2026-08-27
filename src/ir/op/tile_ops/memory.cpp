@@ -1076,6 +1076,9 @@ REGISTER_OP("tile.load")
         "Valid shape of tile in each dimension, in source tensor coordinates (TupleType of ScalarType). ")
     .set_attr<MemorySpace>("target_memory")
     .set_attr<bool>("clamp")
+    // Declared GM cache-access policy, carried as an int (``ir::CachePolicy``)
+    // so serialization / structural comparison need no new enum arm.
+    .set_attr<int>("cache")
     // No fallback: when target_memory is absent, memory_space stays unresolved and
     // InferTileMemorySpace picks the space from consumer demand.
     .set_output_memory_from_kwarg("target_memory")

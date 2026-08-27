@@ -162,6 +162,24 @@ root 是外层函数的 `InOut` 形参时，把被调函数的 `Out` 重新提�
   组合进一个 `@pl.jit.host` 程序。同一规则也适用于共用外提工具的兄弟 pass
   `OutlineHierarchyScopes` 与 `OutlineClusterScopes`。
 
+**缓存策略声明变为参数索引**：作用域 body 中的
+`pl.set_cache_policy(t, pl.CachePolicy.BYPASS)` 语句已由 parser 提升到作用域的
+`cache_policy_vars` attr 上（`std::vector<std::pair<VarPtr, int>>`，按 Var 身份索引）。
+本 pass 用与 `no_dep_args` 转换相同的"已捕获输入索引表"逐个解析这些 Var，并把该列表
+重新发出为外提函数的 `cache_policy` attr —— `std::vector<std::pair<int32_t, int>>`
+（参数索引，`CachePolicy` 的 int 值），按索引排序，使声明顺序与捕获顺序都无法改变 IR。
+作用域 attr **在此处被消费，绝不向下传播**：从这里开始，函数 attr 是唯一载体，直到
+[`ConvertTensorToTileOps`](10-convert_tensor_to_tile_ops.md) 把它变成每条 `tile.load`
+上的 `cache` kwarg 并擦除它为止。参数索引仅在该窗口内有效 —— 后续 pass 既会向参数列表
+追加（[`InjectGMPipeBuffer`](22-inject_gm_pipe_buffer.md)、
+[`MaterializeDistTensorCtx`](43-materialize_dist_tensor_ctx.md)），也会向前插入
+（[`MaterializeValidShapeSymbols`](47-materialize_valid_shape_symbols.md)）。本 pass 用
+`CHECK_SPAN` 拒绝两类用户错误：声明所指的张量未被作用域 body 捕获（没有任何读取，因而
+没有参数承载该策略），以及对 `InferParamDirections` 判定为 `Out` / `InOut` 的参数声明
+`BYPASS`（对同一 kernel 自己会写的字节做 bypass 读取，是一致性缺陷）。该转换位于共享的
+外提工具中，因此兄弟路径 `OutlineHierarchyScopes` 会以同样方式打上该 attr。参见
+[GM 缓存访问策略](../language/05-cache-policy.md)。
+
 ## 示例
 
 ### 基本提取
