@@ -12,6 +12,7 @@
 import ast
 import importlib
 import inspect
+import re
 import warnings
 
 import pypto.language as pl
@@ -20,6 +21,7 @@ import pytest
 from pypto.ir import OptimizationStrategy, PassManager
 from pypto.ir.compiled_program import CompiledProgram
 from pypto.jit.decorator import (
+    _SYNTHESIZED_DYN_PREFIX,
     JITFunction,
     _arg_ref,
     _build_param_mapping,
@@ -34,11 +36,12 @@ from pypto.jit.decorator import (
     _scan_dep_io,
     _scan_dynamic_dims,
     _SlicedArg,
+    _synthesized_dyn_dim,
     jit,
 )
-from pypto.jit.specializer import TensorMeta
+from pypto.jit.specializer import DynDim, Specializer, TensorMeta
 from pypto.language.parser.diagnostics.exceptions import ParserTypeError
-from pypto.pypto_core import DataType, ir
+from pypto.pypto_core import DataType, InternalError, ir
 from pypto.runtime.runner import RunConfig
 
 # ---------------------------------------------------------------------------
@@ -826,6 +829,66 @@ def _callsite_metadata_kernel(x: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor
     return out
 
 
+# --- Runtime-sized local extents (synthesized DynDim) ------------------------
+# Fixtures for the tests covering a local tensor whose extent is only known at
+# runtime: one decorated dep, then plain (undecorated) caller bodies fed straight
+# to ``_extract_local_tensor_metas`` / ``_resolve_dep_call_metadata``.
+
+
+@jit.incore
+def _synth_dim_kernel(t: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+    """Dependency for the synthesized-dim overlay tests."""
+    return out
+
+
+# Module global (not a closure var) for the folding-precedence test.
+_CLOSURE_FOLD_ROWS = 64
+
+
+def _runtime_create_body(cfg: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+    """create_tensor whose leading extent is read out of a tensor at runtime."""
+    n = pl.tensor.read(cfg, [0])
+    tmp = pl.create_tensor([n, 8], dtype=pl.FP32)  # noqa: F841 — tracked by metadata extraction
+    return out
+
+
+def _dyn_arith_create_body(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+    """create_tensor sized by arithmetic over a DynDim — not statically foldable."""
+    rows = pl.tensor.dim(src, 0)
+    tmp = pl.create_tensor([rows * 2, 8], dtype=pl.FP32)  # noqa: F841 — tracked by extraction
+    return out
+
+
+def _runtime_window_body(out: pl.Out[pl.Tensor]) -> pl.Tensor:
+    """pld.window whose leading extent is the runtime world size."""
+    buf = pld.alloc_window_buffer([2, 8], dtype=pl.INT32)
+    win = pld.window(buf, [pld.world_size(), 8], dtype=pl.INT32)  # noqa: F841 — tracked
+    return out
+
+
+def _runtime_reshape_body(src: pl.Tensor, cfg: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+    """pl.reshape with a runtime extent — stays strict, no meta."""
+    n = pl.tensor.read(cfg, [0])
+    flat = pl.reshape(src, [n, 8])  # noqa: F841 — deliberately untracked
+    return out
+
+
+def _runtime_create_then_dep(cfg: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+    """A runtime-sized local crossing a dep call boundary (issue #2450's shape)."""
+    n = pl.tensor.read(cfg, [0])
+    tmp = pl.create_tensor([n, 8], dtype=pl.FP32)
+    out = _synth_dim_kernel(tmp, out)
+    return out
+
+
+def _dyn_alias_create_then_dep(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+    """A local carrying a caller-derived (not synthesized) DynDim into a dep."""
+    rows = pl.tensor.dim(src, 0)
+    tmp = pl.create_tensor([rows, 8], dtype=pl.FP32)
+    out = _synth_dim_kernel(tmp, out)
+    return out
+
+
 def _plain_rebind_callsite(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
     src = pl.reshape(src, [4, 8])
     out = _callsite_metadata_kernel(src, out)
@@ -1074,10 +1137,17 @@ class TestSliceAndDepReturnMetadata:
         program = attn_entry.lower(big, cfg, out)
         assert isinstance(program, ir.Program)
 
-    def test_unresolvable_create_tensor_dim_still_raises_clear_error(self):
-        """A pl.create_tensor with a non-static dim has no parent to fall back
-        to, so the view is untracked and the existing clear ValueError fires
-        for the downstream dep parameter."""
+    def test_runtime_create_tensor_dim_defers_to_the_shared_pipeline(self):
+        """A runtime-sized ``pl.create_tensor`` dim no longer fails in the JIT
+        frontend — it becomes a synthesized DynDim and the shared pass pipeline
+        diagnoses whatever the program actually does with it.
+
+        Here the kernel loads the WHOLE tensor as a tile, so the dynamic dim
+        reaches the tile shape, which InitMemRef rejects. That is the same
+        error a hand-written ``@pl.program`` gets for the same code — the point
+        of this test is that ``@pl.jit`` no longer front-runs it with a
+        frontend-only "missing inferred tensor metadata".
+        """
         torch = pytest.importorskip("torch")
 
         @jit.incore
@@ -1096,8 +1166,9 @@ class TestSliceAndDepReturnMetadata:
 
         cfg = torch.zeros(1, dtype=torch.int64)
         out = torch.empty(16, 32)
-        with pytest.raises(ValueError, match="missing inferred tensor metadata"):
+        with pytest.raises(InternalError, match="InitMemRef requires static shape") as excinfo:
             bad_entry.lower(cfg, out)
+        assert "missing inferred tensor metadata" not in str(excinfo.value)
 
     def test_extract_local_tensor_metas_reshape(self):
         """``_extract_local_tensor_metas`` infers metas for pl.reshape results."""
@@ -1317,8 +1388,6 @@ class TestDynamicLocalTensorMetadata:
         """An alias rebound to a non-``pl.tensor.dim`` value must not stamp
         the parent's DynDim onto downstream shape resolution — regression for
         the flow-insensitive alias bug raised by CodeRabbit."""
-        from pypto.jit.specializer import DynDim  # noqa: PLC0415
-
         m_dim = DynDim(name="M", literal="M", static_bound=5)
         seed = {"x": TensorMeta(shape=(m_dim, 128), dtype=DataType.FP32)}
 
@@ -1329,9 +1398,14 @@ class TestDynamicLocalTensorMetadata:
             return buf
 
         metas = _extract_local_tensor_metas(body, seed_meta=seed)
-        # ``buf`` must NOT be recorded — ``tokens`` is no longer a clean dim
-        # alias, so pl.create_tensor's shape can't be statically resolved.
-        assert "buf" not in metas
+        # ``tokens`` is no longer a clean dim alias, so the dim cannot be
+        # statically resolved: it gets a synthesized placeholder. What must NOT
+        # happen is inheriting the parent's ``M`` — that is the flow-insensitive
+        # bug this guards.
+        dim = metas["buf"].shape[0]
+        assert isinstance(dim, DynDim)
+        assert dim.synthesized
+        assert dim.name != m_dim.name
 
     def test_issue_1524_repro_compiles(self):
         """The exact failing pattern from issue #1524."""
@@ -2663,6 +2737,367 @@ class TestJitSourceProvenance:
         incore = list(prog.get_function("_provenance_kernel").body)[0]
         assert incore.span.filename == __file__
         assert incore.span.begin_line == expected_with_line
+
+
+class TestClosureConstantFolding:
+    """A ``@pl.jit`` function defined inside a factory (issue #2449).
+
+    The generated ``@pl.program`` source is ``exec``'d in a fresh module holding
+    only ``pl`` and ``pld``, so every free name in a body must be folded to a
+    literal first. Folding used to read ``__globals__`` alone, where a closure
+    free var never appears — so a factory constant survived verbatim and the
+    parser raised ``Undefined variable``. Annotations always worked (they are
+    rendered from ``tensor_meta``, not from the name), which made the gap
+    invisible from outside.
+    """
+
+    @staticmethod
+    def _specialize(entry, *args) -> str:
+        _pn, _, tmeta, sv, sd, pfd = entry._bind_args(args, {})
+        contexts = entry._build_contexts(tmeta, sv, sd, pfd)
+        return Specializer(f"_jit_{entry.__name__}", contexts).specialize()
+
+    @staticmethod
+    def _build_factory_entry(rows: int):
+        """Return a @pl.jit entry whose body references the factory's ``rows``."""
+
+        @jit.incore
+        def copy_incore(t: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+            tile = pl.load(t, [0, 0], [64, 64])
+            pl.store(tile, [0, 0], out)
+            return out
+
+        @jit
+        def entry(a: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+            # ``rows`` is a closure free var, not a module global.
+            tmp = pl.create_tensor([rows, 64], dtype=pl.FP32)
+            return copy_incore(tmp, out)
+
+        return entry
+
+    def test_closure_constant_folds_into_generated_body(self):
+        """A factory constant referenced in a body is inlined as a literal."""
+        torch = pytest.importorskip("torch")
+
+        entry = self._build_factory_entry(64)
+        a = torch.zeros(64, 64, dtype=torch.float32)
+        out = torch.zeros(64, 64, dtype=torch.float32)
+        source = self._specialize(entry, a, out)
+
+        assert "pl.create_tensor([64, 64]" in source
+        # The free name must not survive — it is undefined in the generated module.
+        assert not re.search(r"\brows\b", source)
+
+    def test_closure_constant_specializes_per_value(self):
+        """Two factory instantiations fold their own constant, not a shared one."""
+        torch = pytest.importorskip("torch")
+
+        a = torch.zeros(64, 64, dtype=torch.float32)
+        out = torch.zeros(64, 64, dtype=torch.float32)
+        assert "pl.create_tensor([32, 64]" in self._specialize(self._build_factory_entry(32), a, out)
+        assert "pl.create_tensor([96, 64]" in self._specialize(self._build_factory_entry(96), a, out)
+
+    @staticmethod
+    def _build_mutable_factory_entry():
+        """Return (entry, setter) sharing one closure cell, so the setter
+        rebinds the *same* ``JITFunction``'s captured constant."""
+
+        rows = 64
+
+        @jit.incore
+        def copy_incore(t: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+            tile = pl.load(t, [0, 0], [64, 64])
+            pl.store(tile, [0, 0], out)
+            return out
+
+        @jit
+        def entry(a: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+            tmp = pl.create_tensor([rows, 64], dtype=pl.FP32)
+            return copy_incore(tmp, out)
+
+        def set_rows(value: int) -> None:
+            nonlocal rows
+            rows = value
+
+        return entry, set_rows
+
+    def test_rebound_closure_cell_changes_the_generated_source(self):
+        """Rebinding the cell on one JITFunction changes what gets emitted.
+
+        This is the premise of the cache-key test below: if the artifact did not
+        depend on the cell, keying on it would be pointless.
+        """
+        torch = pytest.importorskip("torch")
+
+        entry, set_rows = self._build_mutable_factory_entry()
+        a = torch.zeros(64, 64, dtype=torch.float32)
+        out = torch.zeros(64, 64, dtype=torch.float32)
+
+        before = self._specialize(entry, a, out)
+        set_rows(96)
+        after = self._specialize(entry, a, out)
+
+        assert "pl.create_tensor([64, 64]" in before
+        assert "pl.create_tensor([96, 64]" in after
+
+    def test_rebound_closure_cell_splits_the_cache(self):
+        """A rebound cell must not silently reuse the previous artifact.
+
+        ``_get_source_hash`` hashes the function *text*, which a ``nonlocal``
+        rebind leaves byte-identical, so the closure values have to enter the
+        key separately. Two distinct factory instances would not catch this —
+        they are different ``JITFunction`` objects with their own caches.
+        """
+        torch = pytest.importorskip("torch")
+
+        entry, set_rows = self._build_mutable_factory_entry()
+        a = torch.zeros(64, 64, dtype=torch.float32)
+        out = torch.zeros(64, 64, dtype=torch.float32)
+
+        del a, out
+        before = entry._folded_closure_constants()
+        source_hash_before = entry._get_source_hash()
+        set_rows(96)
+        after = entry._folded_closure_constants()
+
+        # The text-based hash cannot see the rebind — that is the whole problem.
+        assert entry._get_source_hash() == source_hash_before
+        # The closure component does, so the composed key differs.
+        assert before != after
+        assert ("entry", "rows", "64") in before
+        assert ("entry", "rows", "96") in after
+
+    def test_rebound_closure_cell_recompiles_instead_of_reusing(self):
+        """The observable consequence: ``compile()`` must not hand back the
+        artifact built from the previous cell value.
+
+        Kept separate from the key-component test so this assertion is reached
+        on its own — a regression in the key wiring has to fail *here*, not be
+        masked by an earlier assertion.
+        """
+        torch = pytest.importorskip("torch")
+
+        entry, set_rows = self._build_mutable_factory_entry()
+        a = torch.zeros(64, 64, dtype=torch.float32)
+        out = torch.zeros(64, 64, dtype=torch.float32)
+
+        compiled_before = entry.compile(a, out, config=RunConfig(platform="a2a3sim"))
+        set_rows(128)
+        compiled_after = entry.compile(a, out, config=RunConfig(platform="a2a3sim"))
+        assert compiled_before is not compiled_after, "stale artifact reused after rebind"
+        assert len(entry._cache) == 2
+        # An unchanged cell must still hit the cache, or the key would be useless.
+        assert entry.compile(a, out, config=RunConfig(platform="a2a3sim")) is compiled_after
+        assert len(entry._cache) == 2
+
+    def test_closure_constants_key_component_is_stable_and_typed(self):
+        """Equal state yields an equal component (so a genuine re-call still
+        hits the cache), and ``repr`` keeps look-alike values apart."""
+        from pypto.jit.cache import make_cache_key  # noqa: PLC0415
+
+        def key_for(closure_constants):
+            return make_cache_key(
+                source_hash="h",
+                param_names=["x"],
+                tensor_shapes={"x": (64, 64)},
+                tensor_dtypes={"x": DataType.FP32},
+                dynamic_dims=set(),
+                scalar_values={},
+                closure_constants=closure_constants,
+            )
+
+        base = key_for((("entry", "rows", "1"),))
+        assert base == key_for((("entry", "rows", "1"),))
+        # 1 / 1.0 / True all fold, and all produce different literals.
+        assert len({base, key_for((("entry", "rows", "1.0"),)), key_for((("entry", "rows", "True"),))}) == 3
+
+    def test_module_globals_still_fold(self):
+        """Closure bindings are merged on top of globals, not instead of them."""
+        torch = pytest.importorskip("torch")
+
+        @jit.incore
+        def copy_incore(t: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+            tile = pl.load(t, [0, 0], [64, 64])
+            pl.store(tile, [0, 0], out)
+            return out
+
+        @jit
+        def entry(a: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+            tmp = pl.create_tensor([_CLOSURE_FOLD_ROWS, 64], dtype=pl.FP32)
+            return copy_incore(tmp, out)
+
+        a = torch.zeros(64, 64, dtype=torch.float32)
+        out = torch.zeros(64, 64, dtype=torch.float32)
+        source = self._specialize(entry, a, out)
+        assert "pl.create_tensor([64, 64]" in source
+        assert not re.search(r"\b_CLOSURE_FOLD_ROWS\b", source)
+
+
+class TestRuntimeSizedLocalExtents:
+    """A local tensor whose extent is only known at runtime (issue #2450).
+
+    ``pld.window(buf, [pld.world_size(), 1], ...)`` and
+    ``pl.create_tensor([pl.tensor.read(cfg, [0]), 128], ...)`` have no static
+    extent. Before this behaviour the whole meta was dropped, and the moment the
+    local was passed to a dep ``_build_params`` raised "missing inferred tensor
+    metadata". Now the unresolved dim becomes a synthesized ``DynDim``, which the
+    generated program declares via ``pl.dynamic`` and the kernel binds from the
+    actual argument's descriptor — the same IR a hand-written ``@pl.program``
+    produces for this pattern.
+    """
+
+    @staticmethod
+    def _leading_dim(metas: dict[str, TensorMeta], name: str):
+        assert name in metas, f"{name!r} has no meta: {sorted(metas)}"
+        return metas[name].shape[0]
+
+    def test_runtime_create_extent_synthesizes_dyn_dim(self):
+        """A create_tensor dim read out of a tensor becomes a synthesized DynDim."""
+        seed = {
+            "cfg": TensorMeta(shape=(1,), dtype=DataType.INT64),
+            "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
+        }
+        metas = _extract_local_tensor_metas(_runtime_create_body, seed_meta=seed)
+        dim = self._leading_dim(metas, "tmp")
+        assert isinstance(dim, DynDim)
+        assert dim.synthesized
+        assert dim.name.startswith(_SYNTHESIZED_DYN_PREFIX)
+        # Only the unresolved dim is synthesized; the literal one stays an int.
+        assert metas["tmp"].shape[1] == 8
+        assert metas["tmp"].dtype == DataType.FP32
+
+    def test_runtime_window_extent_synthesizes_dyn_dim(self):
+        """pld.window sized by pld.world_size() gets a synthesized DynDim."""
+        seed = {"out": TensorMeta(shape=(16, 8), dtype=DataType.FP32)}
+        metas = _extract_local_tensor_metas(_runtime_window_body, seed_meta=seed)
+        dim = self._leading_dim(metas, "win")
+        assert isinstance(dim, DynDim)
+        assert dim.synthesized
+        assert metas["win"].shape[1] == 8
+        assert metas["win"].dtype == DataType.INT32
+
+    def test_arithmetic_over_dyn_dim_synthesizes(self):
+        """``M * 2`` is not statically foldable, so that dim is synthesized too."""
+        seed = {
+            "src": TensorMeta(shape=(DynDim(name="M", literal="M", static_bound=32), 8), dtype=DataType.FP32),
+            "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
+        }
+        metas = _extract_local_tensor_metas(_dyn_arith_create_body, seed_meta=seed)
+        dim = self._leading_dim(metas, "tmp")
+        assert isinstance(dim, DynDim)
+        assert dim.synthesized
+
+    def test_statically_resolvable_dims_are_not_synthesized(self):
+        """Existing static resolution is untouched — no placeholder is invented."""
+        seed = {
+            "src": TensorMeta(shape=(32, 32), dtype=DataType.FP32),
+            "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
+        }
+        metas = _extract_local_tensor_metas(_slice_then_dep_body, seed_meta=seed)
+        assert metas["buf"] == TensorMeta(shape=(16, 8), dtype=DataType.FP32)
+        assert all(not isinstance(d, DynDim) for d in metas["buf"].shape)
+
+    def test_reshape_stays_strict(self):
+        """A reshape dim is constrained by the source's element count, which an
+        invented symbol cannot express — it still declines the meta."""
+        seed = {
+            "src": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
+            "cfg": TensorMeta(shape=(1,), dtype=DataType.INT64),
+            "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
+        }
+        metas = _extract_local_tensor_metas(_runtime_reshape_body, seed_meta=seed)
+        assert "flat" not in metas
+
+    def test_synthesized_dim_reaches_dep_parameter(self):
+        """The dep parameter is typed instead of raising "missing inferred
+        tensor metadata" — issue #2450's failure."""
+        seed = {
+            "cfg": TensorMeta(shape=(1,), dtype=DataType.INT64),
+            "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
+        }
+        metas, _, _ = _resolve_dep_call_metadata(
+            _synth_dim_kernel, _runtime_create_then_dep, seed, {}, {}, {}
+        )
+        dim = self._leading_dim(metas, "t")
+        assert isinstance(dim, DynDim)
+        assert dim.synthesized
+
+    def test_dep_declared_symbol_replaces_synthesized_placeholder(self):
+        """A dep that declares the dim ``pl.dynamic`` gets its own symbol back.
+
+        The dep's body may reference that name (``for i in pl.range(NR)``);
+        keeping the invented one would leave the reference unbound.
+        """
+        seed = {
+            "cfg": TensorMeta(shape=(1,), dtype=DataType.INT64),
+            "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
+        }
+        dep_dyn_map = {"t": {0: DynDim(name="NR", literal="NR", static_bound=0)}}
+        metas, _, _ = _resolve_dep_call_metadata(
+            _synth_dim_kernel, _runtime_create_then_dep, seed, {}, {}, dep_dyn_map
+        )
+        dim = self._leading_dim(metas, "t")
+        assert isinstance(dim, DynDim)
+        assert dim.name == "NR"
+        assert not dim.synthesized
+
+    def test_runtime_sized_local_lowers_end_to_end(self):
+        """The headline claim: a runtime-sized local crossing a dep boundary
+        reaches a real ``ir.Program``, with the synthesized symbol declared via
+        ``pl.dynamic`` and left dynamic in the kernel's parameter type."""
+        torch = pytest.importorskip("torch")
+
+        @jit.incore
+        def scale_incore(t: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+            tile = pl.load(t, [0, 0], [64, 64])
+            pl.store(pl.add(tile, tile), [0, 0], out)
+            return out
+
+        @jit
+        def runtime_sized_entry(cfg: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+            n = pl.tensor.read(cfg, [0])
+            tmp = pl.create_tensor([n, 64], dtype=pl.FP32)
+            return scale_incore(tmp, out)
+
+        cfg = torch.zeros(1, dtype=torch.int64)
+        out = torch.zeros(64, 64, dtype=torch.float32)
+        program = runtime_sized_entry.lower(cfg, out)
+        assert isinstance(program, ir.Program)
+
+        # The kernel parameter kept a dynamic leading dim rather than being
+        # frozen to the placeholder extent.
+        kernel = program.get_function("scale_incore")
+        assert kernel is not None
+        param_type = kernel.params[0].type
+        assert isinstance(param_type, ir.TensorType)
+        leading = param_type.shape[0]
+        assert not isinstance(leading, ir.ConstInt), f"leading dim froze to {leading}"
+
+    def test_synthesized_symbol_is_qualified_by_owning_function(self):
+        """Two functions each holding a runtime-sized local of the same name get
+        distinct symbols, so a dumped program never shows one name on two
+        unrelated tensors."""
+        a = _synthesized_dyn_dim("host_entry", "tmp", 0)
+        b = _synthesized_dyn_dim("mid", "tmp", 0)
+        assert a.name != b.name
+        assert a.name.startswith(_SYNTHESIZED_DYN_PREFIX)
+        assert b.name.startswith(_SYNTHESIZED_DYN_PREFIX)
+
+    def test_caller_derived_dyn_dim_outranks_dep_declaration(self):
+        """A DynDim the caller actually derived is NOT replaced — its symbol is
+        the one bound at the call site (pre-existing precedence)."""
+        seed = {
+            "src": TensorMeta(shape=(DynDim(name="M", literal="M", static_bound=32), 8), dtype=DataType.FP32),
+            "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
+        }
+        dep_dyn_map = {"t": {0: DynDim(name="NR", literal="NR", static_bound=0)}}
+        metas, _, _ = _resolve_dep_call_metadata(
+            _synth_dim_kernel, _dyn_alias_create_then_dep, seed, {}, {}, dep_dyn_map
+        )
+        dim = self._leading_dim(metas, "t")
+        assert isinstance(dim, DynDim)
+        assert dim.name == "M"
+        assert not dim.synthesized
 
 
 if __name__ == "__main__":

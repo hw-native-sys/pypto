@@ -100,6 +100,27 @@ output[0:1, 0:32] = staged
 Using `tensor.write` for every element is also supported when a single bulk
 store is not practical.
 
+### Cache-Policy Declarations → `tile.load` `cache` Kwarg
+
+This pass is where a declared GM cache policy stops being metadata and becomes
+part of the access. [`OutlineIncoreScopes`](08-outline_incore_scopes.md) left the
+declarations on the InCore function as the `cache_policy` attr —
+`std::vector<std::pair<int32_t, int>>` (param index, `CachePolicy` as int).
+Phase 1 turns those indices back into param `Var` identities once per function,
+then adds `{"cache", <policy>}` to every `tile.load` whose source arg is a listed
+param: the entry loads it synthesises, the consumer-driven Mat loads, the
+input-space bridge loads, and any `tile.load` already in the body (user-written
+or produced by an earlier pass). The attr is **erased** when the transformed
+function is rebuilt — nothing downstream may see it, because its param indices go
+stale the moment a later pass grows the param list.
+
+Precedence is per access: an explicit `pl.load(..., cache=...)` kwarg already on
+the load always wins over the scope declaration, in both directions, so
+`cache=pl.CachePolicy.DEFAULT` opts one read back into the cache inside a
+bypassing scope. From here the kwarg simply rides the op through the remaining
+passes to codegen, the way `target_memory` does. See
+[GM Cache-Access Policy](../language/05-cache-policy.md).
+
 ### Phase 2a: Propagate Added Outputs Through Spmd/Group Wrappers
 
 `OutlineClusterScopes` produces Spmd/Group wrappers that are transparent 1:1
@@ -137,7 +158,7 @@ already rewritten in Phase 1 / 2a.
 
 When `tensor.slice` feeds into `tensor.matmul` or `tensor.matmul_acc`, the slice must produce a Mat-space tile instead of a Vec-space tile. The pass pre-scans for this pattern and emits a natural Mat `tile.load`; a transposed operand (`a_trans` for LHS, `b_trans` for RHS) gets a zero-copy `tile.transpose_view` at the matmul site.
 
-The demand is propagated **through** zero-copy metadata ops that declare `set_output_memory_inherit_input()` — `tensor.slice`, `tensor.view`, `tensor.reshape`, `tensor.reinterpret_view`, `tensor.set_validshape`. So an operand written as `pl.matmul(pl.set_validshape(a[:, :K], rows, K), b)` still loads straight to Mat. An op that aliases its input's storage but omits that declaration breaks the chain: the operand materializes in Vec and needs a `tile.move` to Mat, which is a vector→cube boundary that flips an otherwise pure-CUBE InCore scope to `MIXED` and makes [`ExpandMixedKernel`](21-expand_mixed_kernel.md) split it into an AIC/AIV pair.
+The demand is propagated **through** zero-copy metadata ops that declare `set_output_memory_inherit_input()` — `tensor.slice`, `tensor.view`, `tensor.reshape`, `tensor.reinterpret_view`, `tensor.set_validshape`. So an operand written as `pl.matmul(pl.set_validshape(a[:, :K], rows, K), b)` still loads straight to Mat. An op that aliases its input's storage but omits that declaration breaks the chain: the operand materializes in Vec and needs a `tile.move` to Mat, which is a vector→cube boundary that flips an otherwise pure-CUBE InCore scope to `MIXED` and makes [`ExpandMixedKernel`](22-expand_mixed_kernel.md) split it into an AIC/AIV pair.
 
 ## Transpose Lowering
 
@@ -259,7 +280,7 @@ for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
 oi = pl.matmul(full, v, out_dtype=pl.FP32)               # Tensor, OUTSIDE the region
 ```
 
-This pass lowers each **1:1** to its tile op (`tensor.aiv_shard` → `tile.aiv_shard`, `tensor.aic_gather` → `tile.aic_gather`), so from here on the IR is byte-identical to what the AUTO `pl.split` path produces via [`LowerAutoVectorSplit`](20-lower_auto_vector_split.md) (pass 20). `ExpandMixedKernel` (pass 21) then folds both into the cross-core `tpush`/`tpop` machinery.
+This pass lowers each **1:1** to its tile op (`tensor.aiv_shard` → `tile.aiv_shard`, `tensor.aic_gather` → `tile.aic_gather`), so from here on the IR is byte-identical to what the AUTO `pl.split` path produces via [`LowerAutoVectorSplit`](21-lower_auto_vector_split.md) (pass 20). `ExpandMixedKernel` (pass 21) then folds both into the cross-core `tpush`/`tpop` machinery.
 
 **Constraints** (enforced by the tensor-level deducer and the DSL parser, not this pass):
 
@@ -322,6 +343,40 @@ Key changes:
 - `Out` parameter `ret0_out` added to InCore function
 - `tensor.create` inserted at orchestration call site
 
+## Loop-Carry Valid-Shape Repair
+
+`tensor.matmul` drops its operands' `valid_shape`, so an accumulator only becomes narrower
+than the seed it is carried from once this pass produces a `tile.matmul` over a
+row-narrowed left operand:
+
+```python
+acc = pl.create_tensor([M, N], dtype=pl.INT32)          # full box
+for k0 in pl.pipeline(0, K, K_TILE, stage=2):
+    xk = pl.slice(x, [M, K_TILE], [m0, k0], valid_shape=[v, K_TILE])   # runtime v
+    acc = pl.matmul_acc(acc, xk, wk, b_trans=True)      # narrowed, compact result
+```
+
+The carry is typed from its **init value alone** — `ConvertToSSA` mints the `IterArg` from
+the seed, this pass re-mints it from the converted seed, and both force the loop's
+`return_var` back to that type — so the narrowing dies at the loop boundary. `mad` writes
+L0C at an N-fractal stride of `ceil(v/16)*16` while a reader that believes the full box
+height walks it at the physical row pitch, corrupting every N-fractal above the first
+(issue #2470).
+
+Before returning, this pass therefore calls `narrow_loop_carry::NarrowAccCarries` on each
+function: an Acc carry seeded by `tile.create` is re-declared at the extent its yields
+prove — `tile.create(compact=True)` plus `tile.set_validshape` — and the body's def-use
+closure is re-typed through the operators' own deducers. Repairing it in the pass that
+creates it keeps the pipeline verifiable; leaving it would publish a carry the `TypeCheck`
+diagnostic and the `AccCompactValid` property verifier reject. `FlattenTileNdTo2D` calls
+the same helper, for an ND seed whose narrowing only appears when `tile.batch_matmul` is
+unrolled into 2D matmuls.
+
+A carry is left exactly as it is when the two readings of its buffer cannot disagree — a
+single-fractal-block `[16, N]` accumulator packs to its physical rows whatever its valid
+rows — or when the narrowed extent is only computed inside the loop body, where the
+re-declared seed could not name it.
+
 ## Implementation
 
 **Header**: `include/pypto/ir/transforms/passes.h`
@@ -330,7 +385,7 @@ Key changes:
 
 **Python binding**: `python/bindings/modules/passes.cpp`
 
-**Tests**: `tests/ut/ir/transforms/test_convert_tensor_to_tile_ops.py`
+**Tests**: `tests/ut/ir/transforms/test_convert_tensor_to_tile_ops.py`, `tests/ut/ir/transforms/test_narrow_loop_carry_valid_shape.py` (the carry repair)
 
 ## Pass Properties
 

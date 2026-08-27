@@ -2475,6 +2475,11 @@ std::string PTOCodegen::TryGetTensorView(const VarPtr& tensor_var) const {
   return "";
 }
 
+bool PTOCodegen::NoteCacheBypassWarned(const ir::Var* tensor) {
+  INTERNAL_CHECK(tensor != nullptr) << "Internal error: null tensor passed to NoteCacheBypassWarned";
+  return fs_.cache_bypass_warned.insert(tensor).second;
+}
+
 std::string PTOCodegen::GetOrCreateTensorView(const VarPtr& tensor_var) {
   std::string view = TryGetTensorView(tensor_var);
   INTERNAL_CHECK_SPAN(!view.empty(), tensor_var->span_)

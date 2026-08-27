@@ -26,8 +26,14 @@ The two cases here are the same arithmetic through the two readers:
 * ``staged`` sends the accumulator to GM (the ``TSTORE`` reader) over a K wide
   enough that the compiler synthesizes its own K-accumulation loop, whose seed is
   where the chain used to lose the mode (#2470).
+* ``carried`` writes that K loop by hand -- a ``pl.create_tensor`` seed seeded before a
+  ``pl.pipeline`` and rebound under ``if k0 == 0`` -- which is how the model kernel in
+  #2470 spells it. The carry is typed from the seed alone, so the narrowing every matmul
+  in the body produced used to die at the loop boundary and the store read the full box.
 
-Both returned 14336 of 65536 elements wrong before the fix, inside the valid rows.
+The first two returned 14336 of 65536 elements wrong before their fix; the third returned
+75264 of 131072 wrong in the issue's own reproducer, its 48-row tail garbage rather than
+the untouched zeros the others left.
 """
 
 from typing import Any
@@ -42,6 +48,7 @@ VALID_ROWS = 16  # rows that actually hold data
 N_TILE = 128
 K_ONE_BLOCK = 256  # one L0 K block: a single tile.matmul
 K_MULTI_BLOCK = 2048  # several L0 K blocks: a synthesized K-accumulation loop
+K_BLOCK = 512  # per-iteration K slice of the hand-written carry loop
 SCALE = 1.0 / 4096.0
 
 
@@ -186,6 +193,76 @@ class _StagedKSplitCase(PTOTestCase):
         _expected(tensors)
 
 
+class _CarriedKLoopCase(PTOTestCase):
+    """A hand-written K loop whose accumulator is seeded by ``pl.create_tensor``."""
+
+    __test__ = False
+
+    def __init__(self, *, platform=None, config=None):
+        super().__init__(config, platform=platform)
+
+    def get_name(self) -> str:
+        return f"c2v_narrowed_acc_carried_k{K_MULTI_BLOCK}"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            *_io_tensors(K_MULTI_BLOCK),
+            TensorSpec("acc_gm", [M_TILE, N_TILE], DataType.INT32, init_value=torch.zeros),
+        ]
+
+    def get_program(self) -> Any:
+        k = K_MULTI_BLOCK
+
+        @pl.program
+        class CarriedKLoopProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def cube(
+                self,
+                x: pl.Tensor[[M_TILE, k], pl.INT8],
+                w: pl.Tensor[[N_TILE, k], pl.INT8],
+                acc_gm: pl.InOut[pl.Tensor[[M_TILE, N_TILE], pl.INT32]],
+            ) -> pl.Tensor[[M_TILE, N_TILE], pl.INT32]:
+                acc = pl.create_tensor([M_TILE, N_TILE], dtype=pl.INT32)
+                for k0 in pl.pipeline(0, k, K_BLOCK, stage=2):
+                    xk = pl.slice(x, [M_TILE, K_BLOCK], [0, k0], valid_shape=[VALID_ROWS, K_BLOCK])
+                    wk = pl.slice(w, [N_TILE, K_BLOCK], [0, k0])
+                    if k0 == 0:
+                        acc = pl.matmul(xk, wk, b_trans=True, out_dtype=pl.INT32)
+                    else:
+                        acc = pl.matmul_acc(acc, xk, wk, b_trans=True)
+                acc_gm[:] = acc
+                return acc_gm
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def dequant(
+                self,
+                acc_gm: pl.Tensor[[M_TILE, N_TILE], pl.INT32],
+                scale: pl.Tensor[[M_TILE, 1], pl.FP32],
+                out: pl.InOut[pl.Tensor[[M_TILE, N_TILE], pl.FP32]],
+            ) -> pl.Tensor[[M_TILE, N_TILE], pl.FP32]:
+                deq = pl.row_expand_mul(pl.cast(acc_gm[:], target_type=pl.FP32, mode="none"), scale)
+                out[:] = pl.fillpad(pl.set_validshape(deq, VALID_ROWS, N_TILE), pad_value=pl.PadValue.zero)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                x: pl.Tensor[[M_TILE, k], pl.INT8],
+                w: pl.Tensor[[N_TILE, k], pl.INT8],
+                scale: pl.Tensor[[M_TILE, 1], pl.FP32],
+                out: pl.InOut[pl.Tensor[[M_TILE, N_TILE], pl.FP32]],
+                acc_gm: pl.InOut[pl.Tensor[[M_TILE, N_TILE], pl.INT32]],
+            ) -> pl.Tensor[[M_TILE, N_TILE], pl.FP32]:
+                acc_gm = self.cube(x, w, acc_gm)
+                out = self.dequant(acc_gm, scale, out)
+                return out
+
+        return CarriedKLoopProgram
+
+    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
+        _expected(tensors)
+
+
 class TestNarrowedAccEpilogue:
     """A narrowed accumulator must survive both of its readers."""
 
@@ -202,6 +279,13 @@ class TestNarrowedAccEpilogue:
         """The TSTORE path over a compiler-synthesized K loop (#2470)."""
         result = test_runner.run(_StagedKSplitCase(platform=platform))
         assert result.passed, f"GM-staged accumulator failed: {result.error}"
+
+    @pytest.mark.platforms("a2a3")
+    @pytest.mark.parametrize("platform", [pytest.param("a2a3", id="a2a3")])
+    def test_gm_stored_accumulator_carried_by_a_hand_written_loop(self, test_runner, platform):
+        """The TSTORE path over a user-written carry seeded by pl.create_tensor (#2470)."""
+        result = test_runner.run(_CarriedKLoopCase(platform=platform))
+        assert result.passed, f"carried accumulator failed: {result.error}"
 
 
 if __name__ == "__main__":

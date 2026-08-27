@@ -42,6 +42,7 @@ from pypto.jit import JITFunction, jit
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import (
     AtomicType,
+    CachePolicy,
     CompactMode,
     ForKind,
     FunctionType,
@@ -116,6 +117,7 @@ from .op.tensor_ops import (
     paged_gather,
     random,
     scatter,
+    set_cache_policy,
 )
 from .op.tile_ops import (
     MemRefType,
@@ -487,6 +489,7 @@ __all__ = [
     "spmd_submit",
     "no_dep",
     "dump_tag",
+    "set_cache_policy",
     "scatter",
     "arange",
     "gather",
@@ -499,6 +502,7 @@ __all__ = [
     "FunctionType",
     "ForKind",
     "AtomicType",
+    "CachePolicy",
     "KernelType",
     "SyncAllMode",
     "Level",

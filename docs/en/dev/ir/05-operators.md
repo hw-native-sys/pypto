@@ -48,6 +48,9 @@ auto dynamic_dim = make_int(kDynamicDim);
 
 ### Argument effects
 
+> The whole chain that consumes these declarations is laid out in
+> [Parameter Direction Inference](08-param-directions.md).
+
 An operator that updates one of its arguments in place must say so. Direction
 inference, dependency analysis and the parameter-direction verifier all ask the
 registry the same question — *does this call write the buffer this argument
@@ -319,7 +322,7 @@ yields no value — no phi is materialized on the Acc tile.
 "Literal" covers **both** spellings a constant predicate arrives in: a DSL
 `init_cond=True`/`False` reaches the emitter as a BOOL-typed `ConstInt`, while a
 predicate an earlier pass folded reaches it as a `ConstBool` — which is what the
-generated `ko == 0` becomes when [`LowerPipelineLoops`](../passes/28-lower_pipeline_loops.md)
+generated `ko == 0` becomes when [`LowerPipelineLoops`](../passes/29-lower_pipeline_loops.md)
 replicates the K-loop *and* the enclosing loop is eliminated, so each replica's
 index is a literal. Both pick an arm outright, and an emitter that folded only
 one of the two would double the MADs of every K block it missed.
@@ -685,7 +688,7 @@ whose implicit `blayout` is `col_major`.
 `tile.move` stamps the destination `memory_space` itself (see the `TileType`
 contract in [Types](02-types.md#tiletype)), so a result view matching the
 destination's implicit view collapses to `nullopt` — the same per-space view
-[`InferTileMemorySpace`](../passes/17-infer_tile_memory_space.md) refreshes a
+[`InferTileMemorySpace`](../passes/18-infer_tile_memory_space.md) refreshes a
 retyped tile to.
 
 `tile.move` is not in-place safe: within one memory space, its source and result
@@ -714,6 +717,14 @@ not a whole number of 32-wide rows. `[1, 8, 16]` valid `[1, 8, 5]` is not a flat
 prefix at all, yet `[8, 16]` valid `[8, 5]` is exact, because dropping a full
 unit axis keeps rows as rows. `tensor.reshape`'s optional third `valid_shape`
 operand may only *narrow* the derived region, never claim data outside it.
+
+An **identity** `tile.reshape` — one whose target shape equals the source's —
+additionally keeps the source's layout triple (`blayout` / `slayout` / `fractal`) and its
+resolved memory space, instead of re-deriving the layout from the shape. Re-deriving
+yields the space-agnostic flat layout, which `NormalizeImplicitTileView` rescues only for
+a view that collapses; an Acc box that is narrowed, padded, or declared `compact` never
+collapses, so the flat layout would stick and its reader would walk L0C as a plain
+row-major buffer (issue #2470).
 
 **Data Flow:** `TensorType (DDR) → tile.load → TileType (Unified Buffer) → tile.{ops} → TileType → tile.store → TensorType (DDR)`
 

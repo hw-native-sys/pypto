@@ -55,7 +55,7 @@
 
 中间那一段最值得记住：FP16 的「溢出」始于 `65520`，而不是 `65504`。
 
-只有当某个中间类型无法精确表示**确实落在目标范围内**的源值时，链式转换才会引入真正的差异。请去 [LegalizeTileCast](../../dev/passes/14-legalize_tile_cast.md) 查你这条链属于哪一类，而不是假定那一跳就是元凶。
+只有当某个中间类型无法精确表示**确实落在目标范围内**的源值时，链式转换才会引入真正的差异。请去 [LegalizeTileCast](../../dev/passes/15-legalize_tile_cast.md) 查你这条链属于哪一类，而不是假定那一跳就是元凶。
 
 这个断言是可验证的，所以本页就验证它。下面的块用 PyPTO 做 `INT32 → FP16`，并与 torch 对同一批值的转换逐位比较，覆盖论证所依赖的三个区间 —— 可精确表示、超出 FP16 范围、以及超过 `2^24`（此时 FP32 那一跳自身会舍入）：
 
@@ -208,5 +208,5 @@ def fused(x: pl.Tensor, out: pl.Out[pl.Tensor],
 ## 参见
 
 - [实例](01-cases.md) —— 这套顺序的端到端应用。
-- [LegalizeTileCast](../../dev/passes/14-legalize_tile_cast.md) —— cast 链何时是精确的。
+- [LegalizeTileCast](../../dev/passes/15-legalize_tile_cast.md) —— cast 链何时是精确的。
 - [规约与 softmax](../tutorials/01-reduction-softmax.md) —— padding 与规约。

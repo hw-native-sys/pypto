@@ -203,6 +203,7 @@ def load(
     target_memory: MemorySpace | None = None,
     clamp: bool = False,
     span: Span | None = None,
+    cache: int | None = None,
 ) -> Call:
     """Copy data from tensor to specified memory level.
 
@@ -232,6 +233,13 @@ def load(
             and is rejected when that provably fails; with ``clamp=True`` the
             request is cut back to the source edge instead.
         span: Optional source span for debugging (auto-captured if not provided)
+        cache: ``CachePolicy`` underlying int — 0 (``kDefault``, ordinary cached
+            GM read) or 1 (``kBypass``, declared streaming read). ``None`` (the
+            default) means the caller stated no policy and omits the kwarg, so
+            ordinary loads are unchanged and a scope-level declaration may still
+            stamp one later. An explicit 0 is NOT the same as ``None``: it is
+            recorded, and it is what makes ``cache=CachePolicy.DEFAULT`` opt a
+            single read back into the cache inside a bypassing scope.
 
     Returns:
         Call expression that returns a TileType with the copied data
@@ -268,6 +276,11 @@ def load(
         kwargs["target_memory"] = target_memory
     if clamp:
         kwargs["clamp"] = True
+    # `is not None`, not truthiness: an explicit `cache=0` (DEFAULT) is a real
+    # per-access override that must out-rank a scope declaration, so it has to
+    # survive into the IR. Only an unstated policy omits the kwarg.
+    if cache is not None:
+        kwargs["cache"] = cache
 
     valid_shape_tuple = shapes_tuple
     if valid_shape is not None:

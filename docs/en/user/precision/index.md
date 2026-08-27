@@ -51,7 +51,7 @@ one branch saves most of the time people lose here.
 ## See Also
 
 - [Performance](../performance/index.md) — the sibling loop, for slow rather than wrong.
-- [LegalizeTileCast](../../dev/passes/14-legalize_tile_cast.md) — when a cast chain is
+- [LegalizeTileCast](../../dev/passes/15-legalize_tile_cast.md) — when a cast chain is
   exact, and when it is not.
 - [Reduction and softmax](../tutorials/01-reduction-softmax.md) — padding in reductions, a
   frequent source of quiet wrongness.

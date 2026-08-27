@@ -80,22 +80,182 @@ inline std::vector<ExprPtr> BuildRowMajorStrides(const std::vector<ExprPtr>& sha
   return strides;
 }
 
+/// NZ fractal geometry, mirroring pto-isa's ``Layout::NZ``.
+///
+/// Ground truth (pto-isa ``include/pto/common/``):
+///   * ``constants.hpp``  — ``FRACTAL_NZ_ROW = 16``, ``C0_SIZE_BYTE = 32``
+///   * ``pto_tile.hpp``   — ``TileShape2D<T, R, C, Layout::NZ>``
+///                          = ``Shape<1, C/c0, R/16, 16, c0>``
+///   * ``pto_tile.hpp``   — ``BaseShape2D<T, R, C, Layout::NZ>``
+///                          = ``Stride<C*R, R*c0, 16*c0, c0, 1>``
+///
+/// pto-isa spells the C0 line as ``C0_SIZE_BYTE / sizeof(T)``. That is the same
+/// quantity as ``NzC0Elems`` below computes, but only for whole-byte dtypes —
+/// ``sizeof`` has no sub-byte value, which is why sub-byte dtypes have no NZ
+/// form here at all. See ``NzC0Elems``.
+constexpr int64_t kNzFractalRow = 16;
+constexpr int64_t kNzC0SizeByte = 32;
+constexpr int64_t kNzC0SizeBit = kNzC0SizeByte * 8;
+
+/// Number of elements in one NZ C0 line (32 bytes) for ``dtype``.
+///
+/// Derived from the *bit* width, not ``GetByte()``. ``GetByte()`` is
+/// ``ceil(bits/8)``, so every sub-byte dtype (INT4 / UINT4 / FP4 / HF4 / BOOL)
+/// reports 1 and would yield ``c0 = 32`` instead of the 64 elements that
+/// actually fit in a 32-byte C0 line — silently mis-blocking the tensor and
+/// accepting misaligned extents (e.g. FP4 ``C = 544`` passes ``% 32`` but is
+/// not a multiple of 64).
+///
+/// Sub-byte dtypes are rejected for now. This is a **PyPTO milestone-1 scope
+/// limit, not a hardware or pto-isa one**: pto-isa's NZ machinery does handle
+/// FP4 (``tload_common.hpp`` carries explicit ``caps::IsFP4`` branches through
+/// the NZ paths and asserts ``staticShape[4] == C0_SIZE_BYTE / sizeof(DType)``).
+/// Supporting it here means validating the packed-nibble addressing end to end,
+/// which milestone 1 does not attempt. The bit-based formula above is already
+/// the correct one to build on when it does.
+inline int64_t NzC0Elems(DataType dtype) {
+  const auto bits = static_cast<int64_t>(dtype.GetBit());
+  CHECK(bits >= 8) << "NZ layout does not support the sub-byte dtype '" << dtype.ToString() << "' (" << bits
+                   << " bits per element) yet. This is a current PyPTO limitation, not a hardware one. "
+                   << "Use a whole-byte dtype, or annotate the tensor as pl.ND.";
+  CHECK(kNzC0SizeBit % bits == 0) << "NZ layout: dtype '" << dtype.ToString() << "' (" << bits
+                                  << " bits per element) does not "
+                                  << "evenly divide the " << kNzC0SizeByte << "-byte C0 line";
+  return kNzC0SizeBit / bits;
+}
+
+/// True when ``shape`` is already in blocked NZ form: rank >= 4 with trailing
+/// dims ``[16, c0]``.
+///
+/// This is the post-``BlockNzTensorViews`` invariant. It is a *structural*
+/// test, not a proof of provenance — an ordinary ND tensor that happens to end
+/// in ``[16, c0]`` also satisfies it. Callers use it to assert that a tensor
+/// *tagged* NZ has been blocked, never to infer that a tensor *is* NZ.
+inline bool IsBlockedNzShape(const std::vector<ExprPtr>& shape, DataType dtype) {
+  if (shape.size() < 4) return false;
+  // A predicate must answer, not throw: a dtype with no NZ C0 line simply has
+  // no blocked form. ``NzC0Elems`` raises for those, so screen them here.
+  const auto bits = static_cast<int64_t>(dtype.GetBit());
+  if (bits < 8 || kNzC0SizeBit % bits != 0) return false;
+  auto fractal = As<ConstInt>(shape[shape.size() - 2]);
+  auto line = As<ConstInt>(shape.back());
+  return fractal && line && fractal->value_ == kNzFractalRow && line->value_ == NzC0Elems(dtype);
+}
+
+/// Rewrite a logical shape ``[..., R, C]`` into the blocked NZ shape
+/// ``[..., C/c0, R/16, 16, c0]`` that pto-isa's ``Layout::NZ`` GlobalTensor
+/// requires. Rank grows by 2 (the trailing logical pair becomes four dims).
+///
+/// The blocked shape's *row-major* strides are exactly pto-isa's NZ strides:
+///
+///   row-major over ``[..., C/c0, R/16, 16, c0]``
+///     = ``[..., (C/c0)*R*c0, (R/16)*16*c0, 16*c0, c0, 1]``
+///     = ``[..., C*R,          R*c0,         16*c0, c0, 1]``
+///     = ``BaseShape2D<T, R, C, Layout::NZ>``
+///
+/// so NZ needs no dedicated stride rule — ``BuildLogicalStridesFromLayout``
+/// routes it through ``BuildRowMajorStrides`` once the shape is blocked.
+///
+/// Alignment is a *user* contract (the annotation asserts how the bytes were
+/// written), so violations raise ``pypto::ValueError`` naming the authoring fix.
+/// Milestone 1 requires static trailing dims: a dynamic extent cannot be proven
+/// divisible, and silently mis-addressing GM is worse than refusing to compile.
+inline std::vector<ExprPtr> BlockNzShape(const std::vector<ExprPtr>& shape, DataType dtype,
+                                         const Span& span = Span::unknown()) {
+  CHECK_SPAN(shape.size() >= 2, span)
+      << "NZ layout requires a tensor of rank >= 2 (the trailing pair is the fractal plane), got rank "
+      << shape.size();
+  const int64_t c0 = NzC0Elems(dtype);
+
+  auto rows = As<ConstInt>(shape[shape.size() - 2]);
+  auto cols = As<ConstInt>(shape.back());
+  CHECK_SPAN(rows, span) << "NZ layout requires a static shape[-2], got a dynamic extent. "
+                         << "Dynamic NZ tensors are not supported yet.";
+  CHECK_SPAN(cols, span) << "NZ layout requires a static shape[-1], got a dynamic extent. "
+                         << "Dynamic NZ tensors are not supported yet.";
+  CHECK_SPAN(rows->value_ > 0 && rows->value_ % kNzFractalRow == 0, span)
+      << "NZ layout requires shape[-2] to be a positive multiple of " << kNzFractalRow << ", got "
+      << rows->value_ << ". The bytes of an NZ tensor are grouped into " << kNzFractalRow
+      << "-row fractals, so a partial fractal has no representation.";
+  CHECK_SPAN(cols->value_ > 0 && cols->value_ % c0 == 0, span)
+      << "NZ layout requires shape[-1] to be a positive multiple of c0 = " << c0 << " (" << kNzC0SizeBit
+      << " bits / " << dtype.GetBit() << "-bit '" << dtype.ToString() << "'), got " << cols->value_ << ".";
+
+  std::vector<ExprPtr> blocked;
+  blocked.reserve(shape.size() + 2);
+  for (size_t i = 0; i + 2 < shape.size(); ++i) blocked.push_back(shape[i]);
+  auto make_index = [&span](int64_t v) { return std::make_shared<ConstInt>(v, DataType::INDEX, span); };
+  blocked.push_back(make_index(cols->value_ / c0));             // C/c0  — column blocks (outermost)
+  blocked.push_back(make_index(rows->value_ / kNzFractalRow));  // R/16 — row fractals
+  blocked.push_back(make_index(kNzFractalRow));                 // 16    — rows within a fractal
+  blocked.push_back(make_index(c0));                            // c0    — contiguous C0 line
+  return blocked;
+}
+
+/// Map logical offsets ``[..., r0, c0off]`` into the blocked NZ coordinate
+/// system ``[..., c0off/c0, r0/16, 0, 0]`` produced by ``BlockNzShape``.
+///
+/// A slice must start on a fractal boundary; an unaligned offset has no blocked
+/// representation and is rejected rather than silently truncated.
+inline std::vector<ExprPtr> BlockNzOffsets(const std::vector<ExprPtr>& offsets, DataType dtype,
+                                           const Span& span = Span::unknown()) {
+  CHECK_SPAN(offsets.size() >= 2, span) << "NZ layout requires rank >= 2 offsets, got " << offsets.size();
+  const int64_t c0 = NzC0Elems(dtype);
+
+  // Milestone 1 maps only *constant* trailing offsets. A symbolic offset would
+  // need a divisibility proof plus an algebraic rewrite (``nb*256`` -> ``nb*16``
+  // for the 16-row axis); that is not implemented, so even a provably aligned
+  // expression is refused rather than guessed at. This is the limit that keeps
+  // a loop-derived slice (``n0 = nb * N_TILE``) out of NZ for now.
+  auto row_off = As<ConstInt>(offsets[offsets.size() - 2]);
+  auto col_off = As<ConstInt>(offsets.back());
+  CHECK_SPAN(row_off, span) << "NZ layout does not support a dynamic offset on shape[-2] yet: only a "
+                            << "constant offset (a multiple of " << kNzFractalRow << ") can be mapped to "
+                            << "blocked coordinates. A loop-derived slice offset is not supported yet.";
+  CHECK_SPAN(col_off, span) << "NZ layout does not support a dynamic offset on shape[-1] yet: only a "
+                            << "constant offset (a multiple of c0 = " << c0 << ") can be mapped to "
+                            << "blocked coordinates. A loop-derived slice offset is not supported yet.";
+  CHECK_SPAN(row_off->value_ >= 0 && row_off->value_ % kNzFractalRow == 0, span)
+      << "NZ slice offset on shape[-2] must be a non-negative multiple of " << kNzFractalRow << ", got "
+      << row_off->value_ << ".";
+  CHECK_SPAN(col_off->value_ >= 0 && col_off->value_ % c0 == 0, span)
+      << "NZ slice offset on shape[-1] must be a non-negative multiple of c0 = " << c0 << ", got "
+      << col_off->value_ << ".";
+
+  std::vector<ExprPtr> blocked;
+  blocked.reserve(offsets.size() + 2);
+  for (size_t i = 0; i + 2 < offsets.size(); ++i) blocked.push_back(offsets[i]);
+  auto make_index = [&span](int64_t v) { return std::make_shared<ConstInt>(v, DataType::INDEX, span); };
+  blocked.push_back(make_index(col_off->value_ / c0));
+  blocked.push_back(make_index(row_off->value_ / kNzFractalRow));
+  blocked.push_back(make_index(0));  // start of the fractal's rows
+  blocked.push_back(make_index(0));  // start of the C0 line
+  return blocked;
+}
+
 /// Build packed canonical strides for the given (shape, layout).
 ///
-/// Definitions (per RFC #1300 §2.3):
+/// Definitions (per RFC #1300 §2.3, amended for NZ):
 ///   ND : strides[n-1] = 1; strides[k] = strides[k+1] * shape[k+1]
 ///   DN : strides[n-2] = 1; strides[n-1] = shape[n-2];
 ///        strides[n-3] = shape[n-2] * shape[n-1];
 ///        strides[k]   = strides[k+1] * shape[k+1]   (k = n-4 .. 0)
-///   NZ : not representable as logical strides — CHECK-fails.
+///   NZ : row-major over the *blocked* shape (see ``BlockNzShape``). RFC #1300
+///        originally declared NZ unrepresentable; that holds for a logical 2-D
+///        shape but not for the blocked rank-(r+2) form, whose strides are
+///        ordinary row-major and match pto-isa's ``BaseShape2D<..., NZ>``
+///        exactly. Callers must block the shape first — ``CheckNzViewIsBlocked``
+///        enforces that invariant downstream.
 ///
-/// Throws ``pypto::ValueError`` for NZ layout or for DN layout with rank < 2.
+/// Throws ``pypto::ValueError`` for DN layout with rank < 2.
 inline std::vector<ExprPtr> BuildLogicalStridesFromLayout(const std::vector<ExprPtr>& shape,
                                                           TensorLayout layout) {
   size_t ndim = shape.size();
   if (ndim == 0) return {};
 
-  if (layout == TensorLayout::ND || IsMxTensorLayout(layout)) {
+  // NZ joins the row-major family once its shape is blocked — see the NZ note
+  // above and ``BlockNzShape``.
+  if (layout == TensorLayout::ND || layout == TensorLayout::NZ || IsMxTensorLayout(layout)) {
     return BuildRowMajorStrides(shape);
   }
 
@@ -118,9 +278,9 @@ inline std::vector<ExprPtr> BuildLogicalStridesFromLayout(const std::vector<Expr
     return strides;
   }
 
-  // NZ is fractal; cannot be represented as flat logical strides.
-  CHECK(false) << "BuildLogicalStridesFromLayout: layout '" << TensorLayoutToString(layout)
-               << "' has no logical-stride representation (NZ is tile-only and fractal)";
+  // Every TensorLayout is handled above; a new enum value must pick a family.
+  INTERNAL_CHECK(false) << "Internal error: BuildLogicalStridesFromLayout has no stride rule for layout '"
+                        << TensorLayoutToString(layout) << "'";
   return {};
 }
 
@@ -206,9 +366,6 @@ inline std::optional<bool> StaticGreaterEqual(const ExprPtr& lhs, const ExprPtr&
 inline CanonicalCheckResult CheckCanonicalView(const std::vector<ExprPtr>& shape,
                                                const std::vector<ExprPtr>& stride, TensorLayout layout,
                                                bool relaxed_symbolic = true) {
-  if (layout == TensorLayout::NZ) {
-    return {false, "NZ layout is tile-only and not allowed on TensorType"};
-  }
   // 0-rank tensors (scalar tensors) are canonical iff stride is also empty.
   // Check this before the generic stride.empty() rejection so a scalar tensor
   // doesn't trip the "must be materialized" error.
@@ -226,7 +383,10 @@ inline CanonicalCheckResult CheckCanonicalView(const std::vector<ExprPtr>& shape
 
   size_t n = shape.size();
 
-  if (layout == TensorLayout::ND || IsMxTensorLayout(layout)) {
+  // Blocked NZ is row-major over its rank-(r+2) shape, so it shares the ND
+  // canonical form. ``CheckNzViewIsBlocked`` separately enforces that an NZ
+  // view has actually been blocked; this only checks the stride structure.
+  if (layout == TensorLayout::ND || layout == TensorLayout::NZ || IsMxTensorLayout(layout)) {
     if (!detail::IsConstOne(stride[n - 1])) {
       return {false, TensorLayoutToString(layout) + " layout requires innermost stride to be ConstInt(1)"};
     }

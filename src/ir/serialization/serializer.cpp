@@ -866,6 +866,41 @@ msgpack::object FieldSerializerVisitor::VisitLeafField(
       idx_map["type"] = msgpack::object("Int32Vector", zone_);
       idx_map["value"] = msgpack::object(idx_vec, zone_);
       kwargs_msgs.push_back(make_pair(key, msgpack::object(idx_map, zone_)));
+    } else if (value.type() == typeid(std::vector<std::pair<VarPtr, int>>)) {
+      // kAttrCachePolicyVars — the (tensor Var, CachePolicy) pairs the DSL parser
+      // writes onto a ScopeStmt for `pl.set_cache_policy(t, policy)`. The Var half
+      // rides the same node-reference machinery as the Var-list attrs above so it
+      // round-trips by identity; the policy half is a plain int.
+      const auto& entries = AnyCast<std::vector<std::pair<VarPtr, int>>>(value, "serializing kwarg: " + key);
+      std::vector<msgpack::object> entry_vec;
+      entry_vec.reserve(entries.size());
+      for (const auto& [var, policy] : entries) {
+        std::map<std::string, msgpack::object> entry_map;
+        entry_map["var"] = var ? ctx_.SerializeNode(var, zone_) : msgpack::object();
+        entry_map["policy"] = msgpack::object(policy);
+        entry_vec.emplace_back(entry_map, zone_);
+      }
+      std::map<std::string, msgpack::object> pol_map;
+      pol_map["type"] = msgpack::object("VarPolicyList", zone_);
+      pol_map["value"] = msgpack::object(entry_vec, zone_);
+      kwargs_msgs.push_back(make_pair(key, msgpack::object(pol_map, zone_)));
+    } else if (value.type() == typeid(std::vector<std::pair<int32_t, int>>)) {
+      // kAttrCachePolicyParams — the (param index, CachePolicy) pairs the outliner
+      // writes onto an outlined Function, consumed and erased by
+      // ConvertTensorToTileOps. Both halves are plain ints.
+      const auto& entries = AnyCast<std::vector<std::pair<int32_t, int>>>(value, "serializing kwarg: " + key);
+      std::vector<msgpack::object> entry_vec;
+      entry_vec.reserve(entries.size());
+      for (const auto& [idx, policy] : entries) {
+        std::map<std::string, msgpack::object> entry_map;
+        entry_map["index"] = msgpack::object(idx);
+        entry_map["policy"] = msgpack::object(policy);
+        entry_vec.emplace_back(entry_map, zone_);
+      }
+      std::map<std::string, msgpack::object> pol_map;
+      pol_map["type"] = msgpack::object("IndexPolicyList", zone_);
+      pol_map["value"] = msgpack::object(entry_vec, zone_);
+      kwargs_msgs.push_back(make_pair(key, msgpack::object(pol_map, zone_)));
     } else if (value.type() == typeid(ExprPtr)) {
       // Reserved Expr-valued attr (e.g. kAttrDevice, the distributed
       // device-placement expression). Serialize through the node-reference
@@ -879,7 +914,9 @@ msgpack::object FieldSerializerVisitor::VisitLeafField(
       throw TypeError("Invalid kwarg type for key: " + key +
                       ", expected int, bool, std::string, double, float, DataType, MemorySpace, "
                       "TensorLayout, TileLayout, PadValue, ArgDirection, std::vector<ArgDirection>, "
-                      "std::vector<int32_t>, VarPtr, std::vector<VarPtr>, or ExprPtr, but got " +
+                      "std::vector<int32_t>, VarPtr, std::vector<VarPtr>, "
+                      "std::vector<std::pair<VarPtr, int>>, "
+                      "std::vector<std::pair<int32_t, int>>, or ExprPtr, but got " +
                       DemangleTypeName(value.type().name()));
     }
   }

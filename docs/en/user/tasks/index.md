@@ -52,4 +52,4 @@ the inference off entirely and makes every edge yours to declare.
 - [Scopes and Placement](../language/04-scopes.md) — the sibling question: which hardware runs the code.
 - [Types § parameter directions](../language/00-types.md#parameter-directions) — what the runtime reads to infer an edge.
 - [Operations](../ops/01-catalog.md) — one-line entries for the operators named here.
-- [AutoDeriveTaskDependencies](../../dev/passes/38-auto_derive_task_dependencies.md) — the pass that emits the compiler-side edges.
+- [AutoDeriveTaskDependencies](../../dev/passes/39-auto_derive_task_dependencies.md) — the pass that emits the compiler-side edges.

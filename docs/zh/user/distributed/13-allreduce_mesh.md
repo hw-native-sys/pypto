@@ -42,17 +42,18 @@ OK
 数量工厂。这与本集合通信的系统测试
 `tests/st/distributed/collectives/test_l3_allreduce.py` 完全一致。
 
-步骤 01-07 使用 `@pl.jit` 系列；这里改用 class form 是**必需的，而非风格
-选择**——但原因是信号形状是*动态的*，而非编译期的。`signal` 是形状为
-`[pld.world_size(), 1]` 的窗口，而 `@pl.jit` 必须为它传给依赖函数的每个
-参数静态推断形状与 dtype，因此会报
-`missing inferred tensor metadata for parameter 'signal'`；`@pl.program`
-没有这一要求。（`@pl.jit` 本身并不排斥分布式张量——步骤 03、05、06、07
-都传递它们——它无法处理的是运行期决定的窗口维度。）
+步骤 01-07 使用 `@pl.jit` 系列；这里改用 class form 是一种呈现上的选择，
+而非必需。`signal` 是形状为 `[pld.world_size(), 1]` 的窗口，其行数无法由
+任何静态规则折叠。`@pl.jit` 会为这样的维度合成一个动态维，在它生成的程序
+里用 `pl.dynamic` 声明，kernel 再从实参的 descriptor 绑定它——这在结构上
+就是下面 class form 手写的 `NR`，只是符号名不同。这里采用 class form，是为
+了让该形状与它对应的系统测试并排展示得更清楚。
 
-步骤 09 与 10 改用 class form 的理由更强：它们的块大小 `SIZE // nr` 是
-**tile 形状**，而 tile 形状必须在 kernel 编译时已知，所以那里确实需要
-编译期 rank 数量与工厂。信号的行数不是 tile 形状，因此这里可以保持动态。
+步骤 09 与 10 改用 class form 的理由则**确实是硬性的**：它们的块大小
+`SIZE // nr` 是 **tile 形状**，而 tile 形状必须在 kernel 编译时已知，所以
+那里确实需要编译期 rank 数量与工厂。这一限制对两种装饰器系列同样成立——
+动态维一旦流入 tile 形状，会在下游由 `InitMemRef` 拒绝，而不是在前端。
+信号的行数不是 tile 形状，因此这里可以保持动态。
 
 kernel 是每个手工集合通信共有的四阶段：
 
@@ -105,7 +106,7 @@ rank 读取。round 密集：`P-1` 次远程读取加一个 barrier。正是这�
 | 某些 rank 的和里含零 | barrier 缺失/错误；读取竞争了 store | Phase 3 前做 barrier（通知全部/等待全部） |
 | 只在 P=4 出错 | P=2 掩盖竞争（单一对端） | 用 P≥4 运行；检查 barrier 覆盖每个对端 |
 | 每个 rank 结果相同但与 torch 和不同 | 归约顺序不同（非 bug） | 用容差比较（示例已如此） |
-| `missing inferred tensor metadata for parameter 'signal'` | kernel 写成了 `@pl.jit`，而它无法为维度是 `pld.world_size()` 的窗口定型 | 改用 `@pl.program` class form（如本例）；`@pl.jit` 要求每个依赖参数都是静态形状 |
+| `InitMemRef requires static shape ... is dynamic` | 运行期决定的维度流入了 **tile** 形状（例如由 rank 数量推导出的块大小） | 像步骤 09-10 那样用工厂给该 kernel 一个编译期 rank 数量；两种装饰器系列都不允许 tile 形状是运行期尺寸 |
 | golden 出现巨大差异 | slice 被求和在错误位置（如自己的 slice 被重复计算） | 只 staging 一次；从自己的 slice 开始再累加对端 |
 
 ## 参见（See also）

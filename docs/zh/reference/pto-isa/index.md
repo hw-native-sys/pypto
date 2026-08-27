@@ -10,5 +10,5 @@ PyPTO 生成代码所面向的硬件模型与指令语义。
 
 ## 另请参阅
 
-- [SkewCrossCorePipeline Pass](../../dev/passes/26-skew_cross_core_pipeline.md) —— 把跨核循环软流水到该架构上的 pass。
-- [InjectGMPipeBuffer Pass](../../dev/passes/22-inject_gm_pipe_buffer.md) —— Ascend910B 上经 GM 路由的跨核 pipe workspace。
+- [SkewCrossCorePipeline Pass](../../dev/passes/27-skew_cross_core_pipeline.md) —— 把跨核循环软流水到该架构上的 pass。
+- [InjectGMPipeBuffer Pass](../../dev/passes/23-inject_gm_pipe_buffer.md) —— Ascend910B 上经 GM 路由的跨核 pipe workspace。

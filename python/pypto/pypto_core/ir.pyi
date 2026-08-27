@@ -381,6 +381,24 @@ class PadValue(enum.Enum):
     min = ...
     """Min value padding."""
 
+class CachePolicy(enum.IntEnum):
+    """GM cache-access policy declared for a tensor read.
+
+    A semantic contract the author states, never a hint the compiler invents.
+    Stored as ``int`` in the ``tile.load`` ``cache`` kwarg.
+    """
+
+    DEFAULT = 0
+    """Ordinary cached GM access."""
+
+    BYPASS = 1
+    """Streaming access declared to bypass the cache.
+
+    Asserts this tensor has no reuse worth caching and that nothing writes
+    those bytes while the kernel runs — mixing a cached write and a bypassing
+    read of the same bytes is a coherency bug.
+    """
+
 class CompactMode(enum.Enum):
     """Partial-tile compact mode enumeration."""
 

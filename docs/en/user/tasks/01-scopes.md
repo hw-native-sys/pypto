@@ -90,4 +90,4 @@ you already know — rather than as a way to fix one inference you disagreed wit
 - [The dependency model](00-model.md) — what the tracking infers when it is on.
 - [Declaring an edge](02-submit.md) — `deps=`, which works in either mode.
 - [Refining the graph](03-tuning.md) — the finer-grained opt-outs that do not cost a whole region.
-- [MaterializeRuntimeScopes](../../dev/passes/45-materialize_runtime_scopes.md) — how AUTO scopes are placed.
+- [MaterializeRuntimeScopes](../../dev/passes/46-materialize_runtime_scopes.md) — how AUTO scopes are placed.

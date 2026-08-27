@@ -56,7 +56,32 @@ endif()
 # Compiler flags
 set(CMAKE_CXX_FLAGS_DEBUG "-g -O0")
 set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
-set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-g -O2 -DNDEBUG")
+
+# RelWithDebInfo's debug level is a knob rather than a literal, because its two
+# consumers want different things from it. Level 2 is what a developer needs
+# under a debugger: locals and types. Level 1 keeps function descriptions and
+# the line-number tables -- everything libbacktrace reads to turn a PC into the
+# `File "src/...", line N` frames tests/ut/core/test_error.py pins -- and drops
+# the rest.
+#
+# Measured on this tree with gcc 15.2, the compiler CI builds with: the
+# extension goes 304 MiB -> 62.5 MiB and the wheel around it 111 MiB -> 18 MiB,
+# the compile is about a third faster, and the backtraces come out
+# byte-identical. .debug_line survives at 6.2 MiB; .debug_loclists (variable
+# locations) goes to zero and .debug_info drops 206 MiB -> 22 MiB.
+#
+# The default stays 2, so a local build is exactly what it was. CI passes 1: it
+# never attaches a debugger to what it builds, and it pays for the difference
+# once per build and eight more times per run in wheel installs.
+set(PYPTO_DEBUG_INFO_LEVEL "2" CACHE STRING
+    "Debug info level for RelWithDebInfo builds: 2 = full, 1 = backtraces only")
+set_property(CACHE PYPTO_DEBUG_INFO_LEVEL PROPERTY STRINGS 0 1 2 3)
+if(NOT PYPTO_DEBUG_INFO_LEVEL MATCHES "^[0-3]$")
+    message(FATAL_ERROR
+        "PYPTO_DEBUG_INFO_LEVEL must be a gcc/clang debug level 0-3, got "
+        "'${PYPTO_DEBUG_INFO_LEVEL}'")
+endif()
+set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-g${PYPTO_DEBUG_INFO_LEVEL} -O2 -DNDEBUG")
 
 # Fix debug info paths when building in a temp directory (e.g., pip install)
 # This remaps paths in DWARF debug info so backtraces show clean relative paths
@@ -157,6 +182,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/dsa/memref_dsa_adapter.cpp
     src/ir/transforms/dsa/reuse_penalty_recognizer.cpp
     src/ir/transforms/allocate_memory_addr_pass.cpp
+    src/ir/transforms/block_nz_tensor_views_pass.cpp
     src/ir/transforms/canonicalize_tile_slice_pass.cpp
     src/ir/transforms/fold_no_op_reshape_pass.cpp
     src/ir/transforms/stamp_tfree_split_pass.cpp
@@ -225,6 +251,8 @@ set(PYPTO_SOURCES
     src/ir/transforms/canonicalize_io_order_pass.cpp
     src/ir/transforms/structural_equal.cpp
     src/ir/transforms/structural_hash.cpp
+    src/ir/transforms/utils/acc_init_builder.cpp
+    src/ir/transforms/utils/narrow_loop_carry.cpp
     src/ir/transforms/utils/buffer_root_collector.cpp
     src/ir/transforms/utils/core_affinity.cpp
     src/ir/transforms/utils/core_side_ops.cpp

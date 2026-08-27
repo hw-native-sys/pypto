@@ -401,4 +401,4 @@ pl.system.sync_wait(0, pipe=pl.PipeType.MTE2, core_type=pl.KernelType.AIC)    # 
 - [Memory and Data Movement](03-memory.md) — what the placed code does with buffers.
 - [Tasks and Ordering](../tasks/index.md) — when the placed work runs relative to everything else.
 - [OutlineIncoreScopes](../../dev/passes/08-outline_incore_scopes.md) — how `pl.at` becomes a function.
-- [ExpandMixedKernel](../../dev/passes/21-expand_mixed_kernel.md) — what `pl.split` drives.
+- [ExpandMixedKernel](../../dev/passes/22-expand_mixed_kernel.md) — what `pl.split` drives.

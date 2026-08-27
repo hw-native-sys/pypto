@@ -269,7 +269,20 @@ std::optional<TensorView> MakeWindowTensorView(const std::shared_ptr<const Tenso
   if (tensor_type->tensor_view_.has_value()) {
     auto new_view = tensor_type->tensor_view_;
     if (new_view->stride.empty()) {
-      if (new_view->layout == TensorLayout::NZ) return std::nullopt;
+      // Window externalization runs from OptimizeOrchTensors, three passes
+      // before BlockNzTensorViews, so an NZ view reaching here still carries
+      // its *logical* shape. Materializing a row-major stride for it would be
+      // doubly wrong: the stride would not describe the fractal byte order, and
+      // BlockNzTensorViews would then reject the window parameter for carrying
+      // an explicit stride — turning a skipped windowization into a compile
+      // error. Decline the window instead, exactly as before.
+      //
+      // A blocked NZ shape *is* row-major, so it takes the ordinary path; that
+      // only matters if this helper is ever reached after pass 14.
+      if (new_view->layout == TensorLayout::NZ &&
+          !tensor_view_semantics::IsBlockedNzShape(tensor_type->shape_, tensor_type->dtype_)) {
+        return std::nullopt;
+      }
       new_view->stride =
           tensor_view_semantics::BuildLogicalStridesFromLayout(tensor_type->shape_, new_view->layout);
     }

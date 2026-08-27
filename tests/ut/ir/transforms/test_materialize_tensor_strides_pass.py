@@ -33,6 +33,7 @@ import pypto.language.distributed as pld
 import pytest
 from pypto import DataType, ir
 from pypto.ir import IRBuilder
+from pypto.pypto_core import InternalError
 from pypto.pypto_core import passes as _passes
 
 _SPAN = ir.Span.unknown()
@@ -336,19 +337,24 @@ def test_strided_dn_subview_unchanged():
 
 
 # ============================================================================
-# NZ on TensorType is rejected by the pass itself
+# An *unblocked* NZ TensorType is rejected by the pass itself
 # ============================================================================
 #
-# NZ is a fractal, tile-only layout with no logical-stride representation, so
-# a TensorType carrying it is invalid IR. The pass rejects it directly instead
-# of leaving the slot untouched for the paired TensorViewCanonical verifier:
-# delegating meant the malformed slot survived silently whenever verification
-# was disabled (``PYPTO_VERIFY_LEVEL=none``), even though the pass declares
-# TensorViewCanonical as produced. The rejection is a CHECK, so it surfaces as
-# a ValueError at every verification level.
+# NZ is legal on a TensorType, but only in the blocked rank-(r+2) form that
+# ``BlockNzTensorViews`` produces — ``[..., C/c0, R/16, 16, c0]``, whose plain
+# row-major strides are exactly pto-isa's ``BaseShape2D<..., Layout::NZ>``.
+# A logical-shaped NZ view reaching this pass means BlockNzTensorViews did not
+# run or missed a slot, so the rejection is a pass invariant (INTERNAL_CHECK,
+# surfacing as InternalError), not a user error — the user-facing alignment
+# diagnostics live in BlockNzShape, far earlier in the pipeline.
+#
+# The pass still rejects directly instead of leaving the slot for the paired
+# TensorViewCanonical verifier: delegating meant the malformed slot survived
+# silently whenever verification was disabled (``PYPTO_VERIFY_LEVEL=none``),
+# even though the pass declares TensorViewCanonical as produced.
 
 
-def test_nz_on_tensor_rejected_by_pass():
+def test_unblocked_nz_on_tensor_rejected_by_pass():
     @pl.program
     class Before:
         @pl.function
@@ -358,15 +364,16 @@ def test_nz_on_tensor_rejected_by_pass():
         ):
             pl.const(0, pl.INT64)
 
-    with pytest.raises(ValueError, match="NZ layout") as excinfo:
+    with pytest.raises(InternalError, match="not blocked") as excinfo:
         _materialize(Before)
-    # The pass threads the carrying node's Span into CHECK_SPAN so the message
-    # points at the offending annotation. Assert the location is present, not
-    # just the text — otherwise dropping the span would go unnoticed.
+    # The pass threads the carrying node's Span into INTERNAL_CHECK_SPAN so the
+    # message points at the offending annotation. Assert the location is
+    # present, not just the text — otherwise dropping the span would go
+    # unnoticed.
     assert re.search(r"\[[^]\s]+:\d+:\d+\]", str(excinfo.value)), str(excinfo.value)
 
 
-def test_nz_on_distributed_tensor_rejected_by_pass():
+def test_unblocked_nz_on_distributed_tensor_rejected_by_pass():
     @pl.program
     class Before:
         @pl.function
@@ -376,14 +383,14 @@ def test_nz_on_distributed_tensor_rejected_by_pass():
         ):
             pl.const(0, pl.INT64)
 
-    with pytest.raises(ValueError, match="NZ layout"):
+    with pytest.raises(InternalError, match="not blocked"):
         _materialize(Before)
 
 
-def test_nz_with_explicit_stride_rejected_by_pass():
-    # An explicit stride does not make NZ valid on a TensorType. The check runs
-    # before the "already explicit, nothing to materialize" short-circuit, so
-    # this slot cannot slip through the pass claiming TensorViewCanonical.
+def test_unblocked_nz_with_explicit_stride_rejected_by_pass():
+    # An explicit stride does not make an unblocked NZ view valid. The check
+    # runs before the "already explicit, nothing to materialize" short-circuit,
+    # so this slot cannot slip through the pass claiming TensorViewCanonical.
     @pl.program
     class Before:
         @pl.function
@@ -393,11 +400,11 @@ def test_nz_with_explicit_stride_rejected_by_pass():
         ):
             pl.const(0, pl.INT64)
 
-    with pytest.raises(ValueError, match="NZ layout"):
+    with pytest.raises(InternalError, match="not blocked"):
         _materialize(Before)
 
 
-def test_nz_rejected_under_verification_disabled():
+def test_unblocked_nz_rejected_under_verification_disabled():
     # Regression guard for the delegation bug: with no VerificationInstrument
     # installed, nothing but the pass itself can reject the invalid slot.
     @pl.program
@@ -410,8 +417,31 @@ def test_nz_rejected_under_verification_disabled():
             pl.const(0, pl.INT64)
 
     with _passes.PassContext([], _passes.VerificationLevel.NONE):
-        with pytest.raises(ValueError, match="NZ layout"):
+        with pytest.raises(InternalError, match="not blocked"):
             _materialize(Before)
+
+
+def test_blocked_nz_gets_row_major_strides():
+    # The positive counterpart: once the shape is blocked, NZ is an ordinary
+    # row-major family member. For [256, 512] INT8 (c0 = 32) the blocked shape
+    # is [16, 16, 16, 32] and pto-isa's BaseShape2D<int8_t, 256, 512, NZ> is
+    # Stride<256*32, 16*32, 32, 1> = [8192, 512, 32, 1].
+    @pl.program
+    class Before:
+        @pl.function
+        def f(
+            self,
+            x: pl.Tensor[[16, 16, 16, 32], pl.INT8, pl.TensorView(stride=[], layout=pl.TensorLayout.NZ)],
+        ):
+            pl.const(0, pl.INT64)
+
+    After = _materialize(Before)
+    param_type = list(After.functions.values())[0].params[0].type
+    assert isinstance(param_type, ir.TensorType)
+    view = param_type.tensor_view
+    assert view is not None
+    assert view.layout == ir.TensorLayout.NZ
+    assert _values_of(view.stride) == [8192, 512, 32, 1]
 
 
 # ============================================================================
@@ -512,7 +542,7 @@ def test_tuple_return_type_materialized():
     """Both elements of a Tuple return signature are DN-packed.
 
     ``[4, 8] -> [1, 4]`` and ``[2, 4, 8] -> [32, 1, 4]`` per the DN formula
-    (doc 28-materialize_tensor_strides.md "Stride Formulas").
+    (doc 31-materialize_tensor_strides.md "Stride Formulas").
     """
 
     @pl.program

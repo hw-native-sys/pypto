@@ -329,6 +329,22 @@ TypePtr DeduceTileReshapeType(const std::vector<ExprPtr>& args,
   tile_view.pad = source_view.pad;
   tile_view.compact = source_view.compact;
 
+  if (tile_view_semantics::ShapeExprListsEquivalent(new_shape, tile_type->shape_)) {
+    // An identity reshape does not move bytes, so it is a view onto the same address
+    // arithmetic: it keeps the WHOLE source view -- layout triple, `stride` and
+    // `start_offset` included -- and the source's memory space. Rebuilding the view from
+    // the shape instead yields the space-agnostic flat default, which
+    // `NormalizeImplicitTileView` rescues only for a view that collapses -- and an Acc box
+    // that is narrowed, padded or declared compact never does, so the flat layout would
+    // stick and its reader would walk L0C as if it were a plain row-major buffer
+    // (issue #2470). Dropping an explicit `stride` / `start_offset` would relocate a
+    // strided sub-view outright.
+    TileView identity_view = source_view;
+    identity_view.valid_shape = tile_view.valid_shape;
+    return std::make_shared<TileType>(new_shape, tile_type->dtype_, std::nullopt, identity_view,
+                                      tile_type->GetMemorySpace());
+  }
+
   tile_view.blayout = tile_view_semantics::InferImplicitTileLayoutFromShape(new_shape);
 
   return std::make_shared<TileType>(new_shape, tile_type->dtype_, std::nullopt, tile_view);

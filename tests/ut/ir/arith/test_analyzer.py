@@ -325,6 +325,21 @@ class TestConstraintContext:
         assert bound.max_value == 99
         analyzer.unbind(x)
 
+    def test_strict_float_constraint_skips_the_integer_unit_step(self):
+        # `f > 1.0` permits f = 1.5, so it must be recorded as `f >= 1`, not as the
+        # unit-stepped `f >= 2` — the latter lets a nested `f >= 2.0` fold to
+        # always-true and silently drops the else branch of the inner IfStmt.
+        f = ir.Var("f", ir.ScalarType(DataType.FP32), S)
+        cf_one = ir.ConstFloat(1.0, DataType.FP32, S)
+        cf_two = ir.ConstFloat(2.0, DataType.FP32, S)
+        cf_half = ir.ConstFloat(0.5, DataType.FP32, S)
+
+        with analyzer.constraint_context(ir.Gt(f, cf_one, BOOL, S)):
+            assert analyzer.const_int_bound(f).min_value == 1
+            assert analyzer.can_prove(ir.Ge(f, cf_two, BOOL, S)) is False
+            # The relaxed bound is still a bound: weaker facts stay provable.
+            assert analyzer.can_prove(ir.Ge(f, cf_half, BOOL, S)) is True
+
     def test_nested_constraints(self):
         analyzer.bind(x, 0, 100)
 

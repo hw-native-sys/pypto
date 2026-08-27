@@ -198,6 +198,13 @@ TypePtr DeduceRemoteLoadType(const std::vector<ExprPtr>& args,
         tile_view.blayout = TileLayout::col_major;
         break;
       case TensorLayout::NZ:
+        // Previously a silent `break` that kept the shape-inferred blayout.
+        // That was harmless only while NZ was unreachable on a TensorType; now
+        // that NZ is legal, falling through would deduce an ND/DN tile layout
+        // for fractal source bytes. Distributed NZ needs its own blocking
+        // (BlockNzTensorViews covers tile.load only), so refuse explicitly.
+        CHECK_SPAN(false, args[0]->span_) << "Distributed remote_load does not support the NZ layout yet; "
+                                          << "annotate the distributed tensor as pl.ND or pl.DN";
         break;
       case TensorLayout::MX_A_ZZ:
       case TensorLayout::MX_B_NN:

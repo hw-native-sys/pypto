@@ -9,6 +9,7 @@ The Python DSL as the compiler sees it.
 | [Manual Dependency Primitives](02-manual_dependencies.md) | `pl.manual_scope`, explicit `deps=` edges, dispatch predicates, array-carry fences |
 | [Functions and Program Structure](03-functions.md) | Function types, parameter directions, cross-module reuse, printing IR |
 | [Integrating Hand-Written C++ Kernels](04-external-kernels.md) | Calling an existing hand-written C++ InCore kernel from a PyPTO program |
+| [GM Cache-Access Policy](05-cache-policy.md) | `pl.set_cache_policy` / `pl.load(cache=...)` — the declared GM cache policy, its coherency contract, and how it reaches codegen |
 
 ## See Also
 

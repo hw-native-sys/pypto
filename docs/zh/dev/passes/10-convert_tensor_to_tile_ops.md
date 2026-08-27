@@ -94,6 +94,23 @@ output[0:1, 0:32] = staged
 
 如果不适合使用单次批量存储，也可以对所有元素统一使用 `tensor.write`。
 
+### 缓存策略声明 → `tile.load` 的 `cache` kwarg
+
+本 pass 是声明式 GM 缓存策略从元数据变成访问本身的地方。
+[`OutlineIncoreScopes`](08-outline_incore_scopes.md) 把这些声明留在 InCore 函数的
+`cache_policy` attr 上 —— `std::vector<std::pair<int32_t, int>>`（参数索引，
+`CachePolicy` 的 int 值）。阶段一在每个函数上把这些索引一次性还原为参数 `Var` 身份，
+随后为每条源实参属于列表中参数的 `tile.load` 加上 `{"cache", <policy>}`：包括它合成的
+入口 load、consumer-driven 的 Mat load、输入空间桥接（input-space bridge）load，以及
+body 中本就存在的任何 `tile.load`（用户手写的，或更早的 pass 产生的）。该 attr 在重建
+变换后的函数时被**擦除** —— 下游不允许看到它，因为只要后续 pass 增长参数列表，其中的
+参数索引就会失效。
+
+优先级按单次访问判定：load 上已有的显式 `pl.load(..., cache=...)` kwarg 在两个方向上
+都优先于作用域声明，因此 `cache=pl.CachePolicy.DEFAULT` 可以在 bypass 作用域内把某一次
+读取单独放回缓存。从这里开始，该 kwarg 只是像 `target_memory` 一样随 op 穿过剩余的
+pass 抵达 codegen。参见 [GM 缓存访问策略](../language/05-cache-policy.md)。
+
 ### 阶段二a：通过 Spmd/Group 包装函数转发新增 Out 参数
 
 `OutlineClusterScopes` 产生的 Spmd/Group 包装函数是对其参数到单个内部 InCore
@@ -126,7 +143,7 @@ InCore、Spmd、Group 函数在本阶段被跳过 —— 它们已在阶段一 /
 
 当 `tensor.slice` 的结果被 `tensor.matmul` 或 `tensor.matmul_acc` 使用时，slice 必须生成 Mat 空间的 tile 而非 Vec 空间。本 pass 预扫描此模式，生成自然的 Mat `tile.load`；转置操作数（LHS 用 `a_trans`，RHS 用 `b_trans`）在 matmul 处叠加零拷贝 `tile.transpose_view`。
 
-该需求会**穿过**声明了 `set_output_memory_inherit_input()` 的零拷贝元数据 op 继续向上传播 —— `tensor.slice`、`tensor.view`、`tensor.reshape`、`tensor.reinterpret_view`、`tensor.set_validshape`。因此 `pl.matmul(pl.set_validshape(a[:, :K], rows, K), b)` 这样的操作数仍然直接加载到 Mat。若某个别名输入存储的 op 漏掉该声明，传播链就会断开：操作数被物化到 Vec，再通过 `tile.move` 桥接到 Mat，而这是一个 vector→cube 边界，会把本应是纯 CUBE 的 InCore scope 判定为 `MIXED`，导致 [`ExpandMixedKernel`](21-expand_mixed_kernel.md) 将其拆分为 AIC/AIV 两个函数。
+该需求会**穿过**声明了 `set_output_memory_inherit_input()` 的零拷贝元数据 op 继续向上传播 —— `tensor.slice`、`tensor.view`、`tensor.reshape`、`tensor.reinterpret_view`、`tensor.set_validshape`。因此 `pl.matmul(pl.set_validshape(a[:, :K], rows, K), b)` 这样的操作数仍然直接加载到 Mat。若某个别名输入存储的 op 漏掉该声明，传播链就会断开：操作数被物化到 Vec，再通过 `tile.move` 桥接到 Mat，而这是一个 vector→cube 边界，会把本应是纯 CUBE 的 InCore scope 判定为 `MIXED`，导致 [`ExpandMixedKernel`](22-expand_mixed_kernel.md) 将其拆分为 AIC/AIV 两个函数。
 
 ## Transpose 下沉
 
@@ -244,7 +261,7 @@ for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
 oi = pl.matmul(full, v, out_dtype=pl.FP32)               # Tensor，位于区域外
 ```
 
-本 pass 将两者**各自 1:1**下降为对应的 tile 算子（`tensor.aiv_shard` → `tile.aiv_shard`,`tensor.aic_gather` → `tile.aic_gather`）；此后 IR 与 AUTO `pl.split` 路径经 [`LowerAutoVectorSplit`](20-lower_auto_vector_split.md)（pass 20）产出的结果逐字节一致。随后 `ExpandMixedKernel`（pass 21）将两者折叠进跨核 `tpush`/`tpop` 机制。
+本 pass 将两者**各自 1:1**下降为对应的 tile 算子（`tensor.aiv_shard` → `tile.aiv_shard`,`tensor.aic_gather` → `tile.aic_gather`）；此后 IR 与 AUTO `pl.split` 路径经 [`LowerAutoVectorSplit`](21-lower_auto_vector_split.md)（pass 20）产出的结果逐字节一致。随后 `ExpandMixedKernel`（pass 21）将两者折叠进跨核 `tpush`/`tpop` 机制。
 
 **约束**（由张量级类型推导器与 DSL 解析器施加,而非本 pass）：
 
@@ -307,6 +324,34 @@ class After:
 - InCore 函数新增 `Out` 参数 `ret0_out`
 - 编排函数调用点插入 `tensor.create`
 
+## 循环携带值的 valid_shape 修复
+
+`tensor.matmul` 会丢弃操作数的 `valid_shape`，因此只有当本 pass 把它变成作用于被收窄左
+操作数的 `tile.matmul` 之后，累加器才会比它所携带的种子更窄：
+
+```python
+acc = pl.create_tensor([M, N], dtype=pl.INT32)          # 完整盒
+for k0 in pl.pipeline(0, K, K_TILE, stage=2):
+    xk = pl.slice(x, [M, K_TILE], [m0, k0], valid_shape=[v, K_TILE])   # 运行期 v
+    acc = pl.matmul_acc(acc, xk, wk, b_trans=True)      # 收窄且 compact 的结果
+```
+
+循环携带值**只按其初值定型**——`ConvertToSSA` 用种子铸出 `IterArg`，本 pass 再用转换后的
+种子重铸一次，两者都会把循环的 `return_var` 拉回同一类型——于是收窄在循环边界上消失。
+`mad` 以 `ceil(v/16)*16` 的 N-fractal 步长写 L0C，而相信完整盒高的读者按物理行步长遍历，
+第一个之后的每个 N-fractal 都会被打乱（issue #2470）。
+
+因此本 pass 在返回前会对每个函数调用 `narrow_loop_carry::NarrowAccCarries`：由
+`tile.create` 播种的 Acc 携带值会按 yield 可证明的范围重新声明——`tile.create(compact=True)`
+加 `tile.set_validshape`——并让循环体的 def-use 闭包经由算子自身的 deducer 重新定型。在制造
+问题的 pass 里就地修复，才能保持流水线可验证；否则产出的携带值会被 `TypeCheck` 诊断与
+`AccCompactValid` 属性验证器拒绝。`FlattenTileNdTo2D` 调用同一个 helper，用于 ND 种子——
+它的收窄要等到 `tile.batch_matmul` 展开成 2D matmul 时才出现。
+
+两种情况下携带值保持原样：一是缓冲区的两种读法本来就不会分歧——单 fractal 块的 `[16, N]`
+累加器无论有效行是多少都按物理行打包；二是收窄用的表达式只在循环体内计算，重新声明的种子
+在那之前根本命名不到它。
+
 ## 实现
 
 **头文件**：`include/pypto/ir/transforms/passes.h`
@@ -315,7 +360,7 @@ class After:
 
 **Python 绑定**：`python/bindings/modules/passes.cpp`
 
-**测试**：`tests/ut/ir/transforms/test_convert_tensor_to_tile_ops.py`
+**测试**：`tests/ut/ir/transforms/test_convert_tensor_to_tile_ops.py`、`tests/ut/ir/transforms/test_narrow_loop_carry_valid_shape.py`（携带值修复）
 
 ## Pass 属性
 

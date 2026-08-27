@@ -47,18 +47,20 @@ body, so one module-level `@pl.program` serves any world size picked with `-d`
 `tests/st/distributed/collectives/test_l3_allreduce.py`, the system test for
 this same collective.
 
-Steps 01-07 use the `@pl.jit` family, and the switch to the class form here is
-**required, not stylistic** — but the reason is the *dynamic* signal shape, not
-a compile-time one. `signal` is a window shaped `[pld.world_size(), 1]`, and
-`@pl.jit` must statically infer shape and dtype for every parameter it forwards
-to a dependency; it rejects this one with `missing inferred tensor metadata for
-parameter 'signal'`. `@pl.program` carries no such requirement. (`@pl.jit` is
-fine with distributed tensors as such — steps 03, 05, 06 and 07 all pass them
-— it is specifically a runtime-sized window dim it cannot type.)
+Steps 01-07 use the `@pl.jit` family, and the class form here is a
+presentational choice rather than a requirement. `signal` is a window shaped
+`[pld.world_size(), 1]`, whose row count no static rule can fold. `@pl.jit`
+gives such a dim a synthesized dynamic dimension, declares it via `pl.dynamic`
+in the program it generates, and the kernel binds it from the actual argument's
+descriptor — structurally what the class form below writes by hand as `NR`,
+differing only in the symbol's name. The class form is used here because it
+makes that shape explicit next to the system test it mirrors.
 
-Steps 09 and 10 switch for a stronger reason: their chunk size `SIZE // nr` is
-a **tile shape**, and tile shapes must be known when the kernel is compiled, so
-those genuinely need a compile-time rank count and a factory. A signal row
+Steps 09 and 10 switch for a reason that *is* binding: their chunk size
+`SIZE // nr` is a **tile shape**, and tile shapes must be known when the kernel
+is compiled, so those genuinely need a compile-time rank count and a factory.
+That limit applies to either decorator family — a dynamic dim reaching a tile
+shape is rejected downstream by `InitMemRef`, not by the frontend. A signal row
 count is not a tile shape, which is why it can stay dynamic here.
 
 The kernel is the four phases every hand-rolled collective shares:
@@ -113,7 +115,7 @@ is exactly why the two-phase and ring variants exist.
 | Sum includes zeros at some ranks | Barrier missing/incorrect; read raced the store | Barrier (notify all / wait all) before Phase 3 |
 | Wrong result only at P=4 | P=2 hides the race (single peer) | Run P≥4; check the barrier covers every peer |
 | Same result on every rank but ≠ torch sum | Reduction order differs (not a bug) | Compare with a tolerance (the example already does) |
-| `missing inferred tensor metadata for parameter 'signal'` | The kernel was written with `@pl.jit`, which cannot type a window whose dim is `pld.world_size()` | Use the `@pl.program` class form (as here); `@pl.jit` needs every dep parameter statically shaped |
+| `InitMemRef requires static shape ... is dynamic` | A runtime-sized dim reached a **tile** shape (e.g. a chunk size derived from the rank count) | Give that kernel a compile-time rank count via a factory, as steps 09-10 do; tile shapes cannot be runtime-sized in either decorator family |
 | Golden fails with a huge diff | Slices summed in the wrong place (e.g. own slice counted twice) | Stage once; accumulate from your own slice, then peers |
 
 ## See also

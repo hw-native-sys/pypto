@@ -246,4 +246,4 @@ phase `N` 的全部 `N_BRANCHES` 个 task，而非只等最后那个。
 
 - [语句与控制流](01-statements.md) —— 这些原语所依赖的作用域上下文管理器
 - [编排代码生成](../codegen/01-orchestration_codegen.md) —— 它们如何下降
-- [AutoDeriveTaskDependencies](../passes/38-auto_derive_task_dependencies.md) —— 消费这些信息的 pass
+- [AutoDeriveTaskDependencies](../passes/39-auto_derive_task_dependencies.md) —— 消费这些信息的 pass

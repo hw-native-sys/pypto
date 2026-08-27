@@ -28,6 +28,12 @@ _OP_TILE_SLICE = ir.get_op("tile.slice").name
 _OP_TILE_TRANSPOSE = ir.get_op("tile.transpose").name
 
 
+def _const_int(expr: ir.Expr) -> int:
+    """The value of a constant Expr, asserting it is one."""
+    assert isinstance(expr, ir.ConstInt), f"expected a ConstInt, got {type(expr).__name__}"
+    return expr.value
+
+
 def _operand_dtype(expr: ir.Expr) -> DataType:
     """Return a constant operand's dtype, narrowing ``Expr`` for the type checker."""
     assert isinstance(expr, (ir.ConstInt, ir.ConstFloat)), f"expected a constant, got {type(expr).__name__}"
@@ -3056,6 +3062,46 @@ class TestTileSliceReshapeOps:
         tile_arg = pl.Tile(expr=tile_var)
         with pytest.warns(UserWarning, match="pad_value has no effect"):
             pl.tile.slice(tile_arg, [8, 16], [0, 0], pad_value=pl.PadValue.zero)
+
+    def test_tile_reshape_identity_keeps_the_whole_source_view(self):
+        """An identity reshape is a view onto the same bytes, so it keeps the source view.
+
+        Re-deriving the view from the shape gives the space-agnostic flat default, which
+        ``NormalizeImplicitTileView`` rescues only for a view that collapses — and a
+        narrowed, padded or compact Acc box never does, so the flat layout would stick
+        (issue #2470). ``stride`` and ``start_offset`` are the same story one level down:
+        they *are* the address arithmetic, and dropping them relocates a strided sub-view.
+        """
+        span = ir.Span.unknown()
+        rows = ir.ConstInt(64, DataType.INT32, span)
+        cols = ir.ConstInt(128, DataType.INT32, span)
+        source_view = ir.TileView(
+            valid_shape=[16, 128],
+            stride=[256, 1],
+            start_offset=512,
+            blayout=ir.TileLayout.col_major,
+            slayout=ir.TileLayout.row_major,
+            fractal=1024,
+            compact=ir.CompactMode.normal,
+        )
+        source_type = ir.TileType([rows, cols], DataType.INT32, None, source_view, ir.MemorySpace.Acc)
+        source = ir.Var("acc", source_type, span)
+
+        result = tile.reshape(source, [64, 128]).type
+        assert isinstance(result, ir.TileType)
+        view = result.tile_view
+        assert view is not None
+
+        assert result.memory_space == ir.MemorySpace.Acc
+        assert view.blayout == ir.TileLayout.col_major
+        assert view.slayout == ir.TileLayout.row_major
+        assert view.fractal == 1024
+        assert view.compact == ir.CompactMode.normal
+        assert [_const_int(dim) for dim in view.stride] == [256, 1], (
+            "an identity reshape must keep the source's stride — it is the same addressing"
+        )
+        assert view.start_offset is not None and _const_int(view.start_offset) == 512
+        assert [_const_int(dim) for dim in view.valid_shape] == [16, 128]
 
     def test_tile_reshape(self):
         """Test tile.reshape operation."""

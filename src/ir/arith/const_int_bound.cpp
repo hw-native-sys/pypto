@@ -397,8 +397,23 @@ class ConstIntBoundAnalyzer::Impl : public ExprFunctor<Bound> {
 std::function<void()> ConstIntBoundAnalyzer::Impl::EnterConstraint(const ExprPtr& constraint) {
   std::vector<std::pair<const Expr*, Bound>> recovery;
 
+  // A strict comparison is recorded as the equivalent closed bound. Only integers
+  // have a predecessor, so `x > c` is `x >= c + 1` for them and merely `x >= c` for
+  // everything else: applying the unit step to a float variable records `f >= 2`
+  // for `f > 1.0`, which excludes the legal value 1.5 and lets CanProve() fold a
+  // nested `f >= 2.0` to always-true. The relaxed bound stays sound — a float
+  // variable keeps contributing bounds, just without the strictness.
+  auto IsIntegerScalar = [](const VarPtr& var) {
+    auto scalar_type = As<ScalarType>(var->GetType());
+    return scalar_type && scalar_type->dtype_.IsInt();
+  };
+  auto StrictBound = [&](const VarPtr& var, int64_t bound, int64_t unit) {
+    return IsIntegerScalar(var) ? InfAwareAdd(bound, unit) : bound;
+  };
+
   // Helper: try to tighten bound for a variable.
-  auto TryTighten = [&](const Expr* var_ptr, const Bound& new_bound) {
+  auto TryTighten = [&](const VarPtr& var, const Bound& new_bound) {
+    const Expr* var_ptr = var.get();
     auto it = var_map_.find(var_ptr);
     Bound old = (it != var_map_.end()) ? it->second : DefaultBoundFromDtype(var_ptr);
     recovery.emplace_back(var_ptr, old);
@@ -413,10 +428,10 @@ std::function<void()> ConstIntBoundAnalyzer::Impl::EnterConstraint(const ExprPtr
     if (auto ge = As<Ge>(expr)) {
       if (auto var = As<Var>(ge->left_)) {
         auto rb = VisitExpr(ge->right_);
-        if (rb.is_const()) TryTighten(var.get(), {rb.min_value, Bound::kPosInf});
+        if (rb.is_const()) TryTighten(var, {rb.min_value, Bound::kPosInf});
       } else if (auto var = As<Var>(ge->right_)) {
         auto lb = VisitExpr(ge->left_);
-        if (lb.is_const()) TryTighten(var.get(), {Bound::kNegInf, lb.max_value});
+        if (lb.is_const()) TryTighten(var, {Bound::kNegInf, lb.max_value});
       }
       return;
     }
@@ -424,10 +439,10 @@ std::function<void()> ConstIntBoundAnalyzer::Impl::EnterConstraint(const ExprPtr
     if (auto gt = As<Gt>(expr)) {
       if (auto var = As<Var>(gt->left_)) {
         auto rb = VisitExpr(gt->right_);
-        if (rb.is_const()) TryTighten(var.get(), {InfAwareAdd(rb.min_value, 1), Bound::kPosInf});
+        if (rb.is_const()) TryTighten(var, {StrictBound(var, rb.min_value, 1), Bound::kPosInf});
       } else if (auto var = As<Var>(gt->right_)) {
         auto lb = VisitExpr(gt->left_);
-        if (lb.is_const()) TryTighten(var.get(), {Bound::kNegInf, InfAwareAdd(lb.max_value, -1)});
+        if (lb.is_const()) TryTighten(var, {Bound::kNegInf, StrictBound(var, lb.max_value, -1)});
       }
       return;
     }
@@ -435,10 +450,10 @@ std::function<void()> ConstIntBoundAnalyzer::Impl::EnterConstraint(const ExprPtr
     if (auto le = As<Le>(expr)) {
       if (auto var_l = As<Var>(le->left_)) {
         auto rb = VisitExpr(le->right_);
-        if (rb.is_const()) TryTighten(var_l.get(), {Bound::kNegInf, rb.max_value});
+        if (rb.is_const()) TryTighten(var_l, {Bound::kNegInf, rb.max_value});
       } else if (auto var_r = As<Var>(le->right_)) {
         auto lb = VisitExpr(le->left_);
-        if (lb.is_const()) TryTighten(var_r.get(), {lb.min_value, Bound::kPosInf});
+        if (lb.is_const()) TryTighten(var_r, {lb.min_value, Bound::kPosInf});
       }
       return;
     }
@@ -446,10 +461,10 @@ std::function<void()> ConstIntBoundAnalyzer::Impl::EnterConstraint(const ExprPtr
     if (auto lt = As<Lt>(expr)) {
       if (auto var = As<Var>(lt->left_)) {
         auto rb = VisitExpr(lt->right_);
-        if (rb.is_const()) TryTighten(var.get(), {Bound::kNegInf, InfAwareAdd(rb.max_value, -1)});
+        if (rb.is_const()) TryTighten(var, {Bound::kNegInf, StrictBound(var, rb.max_value, -1)});
       } else if (auto var = As<Var>(lt->right_)) {
         auto lb = VisitExpr(lt->left_);
-        if (lb.is_const()) TryTighten(var.get(), {InfAwareAdd(lb.min_value, 1), Bound::kPosInf});
+        if (lb.is_const()) TryTighten(var, {StrictBound(var, lb.min_value, 1), Bound::kPosInf});
       }
       return;
     }
@@ -457,10 +472,10 @@ std::function<void()> ConstIntBoundAnalyzer::Impl::EnterConstraint(const ExprPtr
     if (auto eq = As<Eq>(expr)) {
       if (auto var = As<Var>(eq->left_)) {
         auto rb = VisitExpr(eq->right_);
-        if (rb.is_const()) TryTighten(var.get(), rb);
+        if (rb.is_const()) TryTighten(var, rb);
       } else if (auto var = As<Var>(eq->right_)) {
         auto lb = VisitExpr(eq->left_);
-        if (lb.is_const()) TryTighten(var.get(), lb);
+        if (lb.is_const()) TryTighten(var, lb);
       }
       return;
     }
