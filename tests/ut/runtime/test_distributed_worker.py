@@ -986,6 +986,7 @@ class TestDeviceMemoryApi:
 
     def test_copy_to_with_offset_checks_parameters(self, patched_setup):
         rt = DistributedWorker(_fake_compiled([_param("a", [16, 16])], []))
+        patched_setup["worker"].alloc_child_tensor.return_value = _FakeBuffer(0xDEAD0000, 64)
         ptr = rt.malloc(64)
         host = (ctypes.c_ubyte * 32)()
         bad_offset: Any = "0"
