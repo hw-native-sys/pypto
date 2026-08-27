@@ -654,5 +654,201 @@ def test_incore_array_loop_build_then_dynamic_read():
     assert re.search(r"arith\.index_cast .* to index", get_ctx), get_ctx
 
 
+def _compile_orch(program_cls) -> str:
+    """Run the Default pass pipeline + orchestration codegen.
+
+    Unlike ``_generate_orch``, this goes through ConvertToSSA, so an array
+    rebound under an ``if`` reaches codegen as a real ``IfStmt`` ArrayType
+    return_var (a phi) rather than a single straight-line Var.
+    """
+    from pypto import backend  # noqa: PLC0415
+    from pypto.backend import BackendType  # noqa: PLC0415
+    from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
+    optimized = pm.run_passes(program_cls)
+    for func in optimized.functions.values():
+        if func.func_type == ir.FunctionType.Orchestration:
+            return codegen.generate_orchestration(optimized, func).code
+    raise AssertionError("no Orchestration function found in program")
+
+
+def test_orch_array_store_under_runtime_predicate_shares_one_backing():
+    """A runtime-predicated array store mutates the one backing C-stack array.
+
+    ConvertToSSA gives the ``if`` an ArrayType return_var (the array is rebound
+    in one branch only). An ArrayType SSA value names a backing array rather
+    than a copyable value, so the phi must be *aliased* onto that array — a raw
+    C array is not assignable, and declaring one from its type is impossible.
+    Orchestration counterpart of
+    ``test_incore_array_if_else_assignment_shares_one_backing``.
+    """
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            n_live: pl.Tensor[[1], pl.INT32],
+            out: pl.Out[pl.Tensor[[16], pl.INT32]],
+        ) -> pl.Tensor[[16], pl.INT32]:
+            n: pl.Scalar[pl.INT32] = pl.read(n_live, [0])
+            arr = pl.array.create(8, pl.INT32)
+            for i in pl.range(8):
+                if i < n:
+                    arr[i] = i
+            v: pl.Scalar[pl.INT32] = arr[0]
+            pl.write(out, [0], v)
+            return out
+
+    code = _compile_orch(Prog)
+    # Exactly one backing declaration — the phi adds none.
+    decls = [ln for ln in code.splitlines() if "int32_t arr[8]" in ln]
+    assert len(decls) == 1, code
+    # The predicated write lands in place on that array...
+    assert "arr[i] = i;" in code, code
+    # ...and the post-if read resolves to the same array, not to a phi copy.
+    assert "arr[0]" in code, code
+    # No slot-by-slot copy loop was emitted for the phi (nothing to copy).
+    assert "__yield_i" not in code, code
+
+
+def test_orch_array_store_under_runtime_predicate_without_loop():
+    """The predicate alone triggers the phi — the enclosing loop is incidental."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            n_live: pl.Tensor[[1], pl.INT32],
+            out: pl.Out[pl.Tensor[[16], pl.INT32]],
+        ) -> pl.Tensor[[16], pl.INT32]:
+            n: pl.Scalar[pl.INT32] = pl.read(n_live, [0])
+            arr = pl.array.create(8, pl.INT32)
+            if n > 0:
+                arr[0] = 7
+            v: pl.Scalar[pl.INT32] = arr[0]
+            pl.write(out, [0], v)
+            return out
+
+    code = _compile_orch(Prog)
+    decls = [ln for ln in code.splitlines() if "int32_t arr[8]" in ln]
+    assert len(decls) == 1, code
+    assert "arr[0] = 7;" in code, code
+
+
+def test_orch_array_store_in_both_branches_shares_one_backing():
+    """Writing in both branches still targets the single backing array."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            n_live: pl.Tensor[[1], pl.INT32],
+            out: pl.Out[pl.Tensor[[16], pl.INT32]],
+        ) -> pl.Tensor[[16], pl.INT32]:
+            n: pl.Scalar[pl.INT32] = pl.read(n_live, [0])
+            arr = pl.array.create(8, pl.INT32)
+            if n > 0:
+                arr[0] = 7
+            else:
+                arr[0] = 1
+            v: pl.Scalar[pl.INT32] = arr[0]
+            pl.write(out, [0], v)
+            return out
+
+    code = _compile_orch(Prog)
+    decls = [ln for ln in code.splitlines() if "int32_t arr[8]" in ln]
+    assert len(decls) == 1, code
+    # Both branch writes name the same array.
+    assert "arr[0] = 7;" in code, code
+    assert "arr[0] = 1;" in code, code
+
+
+def test_orch_array_created_inside_branch_is_rejected_with_user_error():
+    """A per-branch array cannot back the phi — reject it with an actionable message.
+
+    Each branch creates its own storage, so there is no single backing array to
+    bind the phi onto. That is a user-expressible construct orchestration cannot
+    lower, so it must surface as a ValueError naming the fix, not as an internal
+    assertion about a type the author never wrote.
+    """
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            n_live: pl.Tensor[[1], pl.INT32],
+            out: pl.Out[pl.Tensor[[16], pl.INT32]],
+        ) -> pl.Tensor[[16], pl.INT32]:
+            n: pl.Scalar[pl.INT32] = pl.read(n_live, [0])
+            if n > 0:
+                arr = pl.array.create(8, pl.INT32)
+                arr[0] = 7
+            else:
+                arr = pl.array.create(8, pl.INT32)
+                arr[0] = 1
+            v: pl.Scalar[pl.INT32] = arr[0]
+            pl.write(out, [0], v)
+            return out
+
+    with pytest.raises(ValueError, match="cannot outlive it"):
+        _compile_orch(Prog)
+
+
+def test_orch_task_id_array_store_under_runtime_predicate():
+    """A predicated TaskId publish stays readable as a dependency afterwards.
+
+    The shape the DSL documents for handing a TaskId between orchestration
+    phases: publish into a ``pl.array`` of TASK_ID under a runtime guard, then
+    depend on a slot of it. The phi must alias the backing array or the
+    consumer's ``deps=[...]`` would read an array nothing wrote.
+    """
+
+    rows, cols, tile_r = 64, 16, 16
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            x: pl.Tensor[[rows, cols], pl.FP32],
+            n_live: pl.Tensor[[1], pl.INT32],
+            out: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
+        ) -> pl.Tensor[[rows, cols], pl.FP32]:
+            n: pl.Scalar[pl.INT32] = pl.read(n_live, [0])
+            tids = pl.array.create(4, pl.TASK_ID)
+            with pl.manual_scope():
+                for g in pl.parallel(4):
+                    row: pl.Scalar[pl.INDEX] = g * tile_r
+                    with pl.at(level=pl.Level.CORE_GROUP, name_hint="prod") as tid:
+                        t: pl.Tile[[tile_r, cols], pl.FP32] = pl.load(x, [row, 0], [tile_r, cols])
+                        r: pl.Tile[[tile_r, cols], pl.FP32] = pl.add(t, t)
+                        out = pl.store(r, [row, 0], out)
+                    if g < n:
+                        tids[g] = tid
+                for g2 in pl.parallel(4):
+                    row2: pl.Scalar[pl.INDEX] = g2 * tile_r
+                    with pl.at(level=pl.Level.CORE_GROUP, name_hint="cons", deps=[tids[g2]]):
+                        t2: pl.Tile[[tile_r, cols], pl.FP32] = pl.load(x, [row2, 0], [tile_r, cols])
+                        r2: pl.Tile[[tile_r, cols], pl.FP32] = pl.add(t2, t2)
+                        out = pl.store(r2, [row2, 0], out)
+            return out
+
+    code = _compile_orch(Prog)
+    decls = [ln for ln in code.splitlines() if "PTO2TaskId tids[4]" in ln]
+    assert len(decls) == 1, code
+    # The guarded publish writes the backing array in place...
+    assert "tids[g] = " in code, code
+    # ...and the consumer's dependency reads a slot of that same array.
+    assert "tids[g2]" in code, code
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

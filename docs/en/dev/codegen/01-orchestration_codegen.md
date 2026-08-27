@@ -465,6 +465,50 @@ if (condition) {
 }
 ```
 
+#### `ArrayType` return_vars (array phis)
+
+Writing one element of a `pl.array` under an `if` whose condition survives to
+codegen makes the array a branch result. `arr[i] = v` is SSA-functional — it
+desugars to `arr = pl.array.update_element(arr, i, v)` — so `ConvertToSSA` sees
+`arr` diverge between the branches and synthesizes an `IfStmt` return_var for
+it:
+
+```python
+if i < n:                       # runtime-valued n — the guard survives
+    tids[i] = tid               # tids diverges => ArrayType phi
+```
+
+Such a phi is **not** declared. An `ArrayType` SSA value is a *reference* to one
+backing C-stack array rather than a copyable value: every `array.update_element`
+aliases its result onto its input's emit name, so both branches mutate the same
+storage and the merge is a no-op. A raw C array could not be declared from its
+type nor assigned anyway — asking `GetCppType` for one is an internal error.
+
+`BindArrayReturnVars` instead resolves the backing array each branch yields
+(walking `array.update_element` chains back to the array bound before the `if`)
+and binds the phi's emit name onto it, so reads after the `if` resolve straight
+to that array:
+
+```cpp
+PTO2TaskId tids[8];             // the one backing array
+...
+if ((i < static_cast<int64_t>(n))) {
+    tids[i] = p_tid;            // in-place; no phi variable, no copy
+} else {
+}
+```
+
+Binding happens **before** the branches are emitted, because every generated
+`PTO2_SCOPE` snapshots and restores `array_carry_vars_` (see [Manual Scope and
+TaskId Lowering](#manual-scope-and-taskid-lowering)) — a binding added inside a
+branch body would be discarded at its closing brace. This mirrors how loop
+carries are registered ahead of their body's scope, and how the PTO backend
+keeps in-place (array / tensor) return_vars out of its `scf.if` results.
+
+Both branches must name the same backing array. Creating a *different* array in
+each branch is rejected with a user-facing `CHECK` — create the array before the
+`if` and write its elements inside the branches instead.
+
 ## Python API
 
 ```python

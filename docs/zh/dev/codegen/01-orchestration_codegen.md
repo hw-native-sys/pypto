@@ -450,6 +450,45 @@ if (condition) {
 }
 ```
 
+#### `ArrayType` return_vars（数组 phi）
+
+若 `if` 的条件是运行期值（不会在编译期折叠），在其分支中写入 `pl.array` 的某个
+元素会使该数组成为分支结果。`arr[i] = v` 是 SSA 函数式的——它会脱糖为
+`arr = pl.array.update_element(arr, i, v)`——因此 `ConvertToSSA` 会发现 `arr`
+在两个分支间产生分歧，并为它合成一个 `IfStmt` return_var：
+
+```python
+if i < n:                       # n 为运行期值，该判断会保留到 codegen
+    tids[i] = tid               # tids 分歧 => ArrayType phi
+```
+
+这样的 phi **不会**被声明。`ArrayType` SSA 值是对唯一后端 C 栈数组的*引用*，
+而非可拷贝的值：每个 `array.update_element` 都会把结果别名到其输入的 emit 名字
+上，因此两个分支修改的是同一块存储，合并本身是空操作。原生 C 数组既不能由类型
+声明出来，也不能整体赋值——向 `GetCppType` 索取该类型属于内部错误。
+
+`BindArrayReturnVars` 会转而解析每个分支所 yield 的后端数组（沿
+`array.update_element` 链回溯到 `if` 之前已绑定的数组），并把 phi 的 emit 名字
+绑定到它，使 `if` 之后的读取直接落到该数组：
+
+```cpp
+PTO2TaskId tids[8];             // 唯一的后端数组
+...
+if ((i < static_cast<int64_t>(n))) {
+    tids[i] = p_tid;            // 原地写入；没有 phi 变量，也没有拷贝
+} else {
+}
+```
+
+绑定发生在生成两个分支**之前**，因为每个生成的 `PTO2_SCOPE` 都会在进入时快照、
+退出时还原 `array_carry_vars_`（参见 [Manual Scope 与 TaskId
+降级](#manual-scope-与-taskid-降级)）——在分支体内部添加的绑定会在其右花括号
+处被丢弃。这与循环 carry 在其循环体 scope 之前注册的做法一致，也与 PTO 后端把
+原地（数组／张量）return_var 排除在 `scf.if` 结果之外的做法一致。
+
+两个分支必须指向同一块后端数组。若在每个分支中各自创建*不同*的数组，会以面向
+用户的 `CHECK` 报错——请在 `if` 之前创建数组，并在分支内写入其元素。
+
 ## Python API
 
 ```python
