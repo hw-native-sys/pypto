@@ -306,6 +306,26 @@ def _incore_functions(program):
     ]
 
 
+class _AssignVarCollector(ir.IRVisitor):
+    """Every ``AssignStmt`` var whose name starts with a prefix."""
+
+    def __init__(self, prefix: str):
+        super().__init__()
+        self.prefix = prefix
+        self.vars = []
+
+    def visit_assign_stmt(self, op: ir.AssignStmt) -> None:
+        if op.var.name_hint.startswith(self.prefix):
+            self.vars.append(op.var)
+        super().visit_assign_stmt(op)
+
+
+def _assign_vars(program, prefix):
+    collector = _AssignVarCollector(prefix)
+    collector.visit_program(program)
+    return collector.vars
+
+
 def _stored_tile_type(program):
     """The TileType the single ``tile.store`` reads."""
     stores = _calls(program, _TILE_STORE_OP)
@@ -415,6 +435,71 @@ def test_a_repaired_carry_reaches_a_later_loops_carry():
     ]
     assert len(carries) == 2, f"expected both K loops to carry the accumulator, got {len(carries)}"
     assert all(not _is_const(_valid_rows(arg.type), M_TILE) for arg in carries)
+
+
+_TILE_BATCH_MATMUL_ACC_OP = ir.get_op("tile.batch_matmul_acc").name
+_ALIAS_NAME = "acc_alias"
+
+
+class _InsertCarryAlias(ir.IRMutator):
+    """Put a bare SSA copy of the carry between the ``IterArg`` and its accumulate.
+
+    ``alias = acc`` is a legal assignment whose value is not an operator call. A repair
+    that only re-types call results would rewrite the copy's right-hand side and leave the
+    Var it binds at the seed's width — an asymmetry `AssignTypeSymmetry` and the
+    `TypeCheck` diagnostic both reject, and a dead end for the propagation, since the
+    accumulate downstream still reads the old type through the alias.
+    """
+
+    def visit_assign_stmt(self, op: ir.AssignStmt) -> ir.Stmt:
+        rebuilt = super().visit_assign_stmt(op)
+        if not isinstance(rebuilt, ir.AssignStmt):
+            return rebuilt
+        call = rebuilt.value
+        if not isinstance(call, ir.Call) or call.op.name != _TILE_BATCH_MATMUL_ACC_OP:
+            return rebuilt
+        carry = call.args[0]
+        if not isinstance(carry, ir.IterArg):
+            return rebuilt
+
+        alias = ir.Var(_ALIAS_NAME, carry.type, rebuilt.span)
+        through_alias = ir.Call(
+            call.op,
+            [alias, *list(call.args[1:])],
+            dict(call.kwargs),
+            call.type,
+            call.span,
+        )
+        return ir.SeqStmts(
+            [
+                ir.AssignStmt(alias, carry, rebuilt.span),
+                ir.AssignStmt(rebuilt.var, through_alias, rebuilt.span),
+            ],
+            rebuilt.span,
+        )
+
+
+def test_a_bare_alias_of_the_carry_is_re_typed():
+    """The propagation must cross an assignment whose value is not a call.
+
+    Reaching the assertions at all means the repaired program passed the
+    ``BEFORE_AND_AFTER`` verification this suite installs — which is where an alias left
+    at the old type is caught, as an assign-type asymmetry.
+    """
+    before = _lower(create_tensor_seeded_acc, stop_after="lower_composite_ops")
+    with_alias = _InsertCarryAlias().visit_program(before)
+    assert _assign_vars(with_alias, _ALIAS_NAME), "the alias was not injected"
+
+    after = passes.flatten_tile_nd_to_2d()(with_alias)
+
+    aliases = _assign_vars(after, _ALIAS_NAME)
+    assert aliases, "the repair dropped the alias"
+    for var in aliases:
+        assert isinstance(var.type, ir.TileType)
+        assert not _is_const(_valid_rows(var.type), M_TILE), (
+            f"the alias still binds the seed's full height: {var.type}"
+        )
+    assert not _is_const(_valid_rows(_stored_tile_type(after)), M_TILE)
 
 
 def test_single_fractal_block_accumulator_is_left_alone():

@@ -292,30 +292,54 @@ class CarryRewriter : public IRMutator {
     auto rebuilt = IRMutator::VisitStmt_(op);
     auto assign = As<AssignStmt>(rebuilt);
     if (!assign) return rebuilt;
+    return BindResult(op, assign, RededuceIfOperandsMoved(op, assign));
+  }
 
-    // Re-deduce ONLY when an operand actually moved. A freshly deduced type is not
-    // interchangeable with the stored one -- it carries no MemRef and no resolved
-    // memory space -- so re-deducing calls this pass did not disturb would silently
-    // strip both from every tile in the program.
-    auto call = As<Call>(assign->value_);
-    if (!call || !call->op_) return rebuilt;
-    if (!OperandsMoved(op->value_, assign->value_)) return rebuilt;
+  /// The value to bind, re-deduced when this visit moved one of a call's operands.
+  ///
+  /// Re-deduce ONLY then. A freshly deduced type is not interchangeable with the stored
+  /// one -- it carries no MemRef and no resolved memory space -- so re-deducing calls this
+  /// pass did not disturb would silently strip both from every tile in the program.
+  ExprPtr RededuceIfOperandsMoved(const AssignStmtPtr& original, const AssignStmtPtr& rebuilt) {
+    auto call = As<Call>(rebuilt->value_);
+    if (!call || !call->op_) return rebuilt->value_;
+    if (!OperandsMoved(original->value_, rebuilt->value_)) return rebuilt->value_;
     // A call to a user function carries a GlobalVar, not a registered operator --
     // `OpRegistry::Create` rejects those by name, so screen them out first.
     auto& registry = OpRegistry::GetInstance();
-    if (!registry.IsRegistered(call->op_->name_)) return rebuilt;
+    if (!registry.IsRegistered(call->op_->name_)) return rebuilt->value_;
     auto deduced = registry.Create(call->op_->name_, call->args_, call->kwargs_, call->span_);
-    if (!deduced) return rebuilt;
+    if (!deduced) return rebuilt->value_;
     // Attributes come from the *rebuilt* call, whose contents this visit already remapped.
-    auto fresh = transform_utils::PreserveCallAttrs(call, deduced);
+    return transform_utils::PreserveCallAttrs(call, deduced);
+  }
 
-    const auto& old_type = assign->var_->GetType();
-    const auto& new_type = fresh->GetType();
-    if (old_type && new_type && structural_equal(old_type, new_type)) return rebuilt;
+  /// Bind an assignment's result at the type its value now carries.
+  ///
+  /// Every value shape reaches here, not only an operator call: ``alias = acc`` is a legal
+  /// SSA copy, and a mutator that rewrote only its right-hand side would leave the bound
+  /// Var at the width the carry used to have -- an asymmetry ``AssignTypeSymmetry`` and the
+  /// ``TypeCheck`` diagnostic both reject, and a dead end for the propagation, since every
+  /// later use still reads the old type through the alias.
+  ///
+  /// An assignment this visit did not touch keeps its Var, so a program the repair has no
+  /// business in comes through byte-identical.
+  StmtPtr BindResult(const AssignStmtPtr& original, const AssignStmtPtr& rebuilt, const ExprPtr& value) {
+    if (value.get() == original->value_.get()) return rebuilt;
 
-    auto new_var = std::make_shared<Var>(assign->var_->name_hint_, new_type, assign->var_->span_);
-    replaced_[op->var_.get()] = new_var;
-    return std::make_shared<AssignStmt>(new_var, fresh, assign->span_);
+    const auto& old_type = rebuilt->var_->GetType();
+    const auto& new_type = value->GetType();
+    const bool retype = new_type && (!old_type || !structural_equal(old_type, new_type));
+    if (!retype && value.get() == rebuilt->value_.get()) return rebuilt;
+
+    auto result = MutableCopy(rebuilt);  // MutableCopy so leading comments survive
+    result->value_ = value;
+    if (retype) {
+      auto new_var = std::make_shared<Var>(rebuilt->var_->name_hint_, new_type, rebuilt->var_->span_);
+      replaced_[original->var_.get()] = new_var;
+      result->var_ = new_var;
+    }
+    return result;
   }
 
   StmtPtr VisitStmt_(const IfStmtPtr& op) override {
