@@ -12,6 +12,8 @@
 /// Loop-carry valid-shape repair. See ``narrow_loop_carry.h`` for the contract and the
 /// reasoning behind the scope limits; this file is the mechanism.
 
+#include "pypto/ir/transforms/utils/narrow_loop_carry.h"
+
 #include <algorithm>
 #include <map>
 #include <memory>
@@ -30,9 +32,8 @@
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/acc_init_builder.h"
-#include "pypto/ir/transforms/utils/mutable_copy.h"
-#include "pypto/ir/transforms/utils/narrow_loop_carry.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
+#include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
@@ -208,7 +209,8 @@ class RetypeClosureMutator : public IRMutator {
                             const std::vector<VarPtr>& original_return_vars) {
     const auto& iter_args = for_stmt ? for_stmt->iter_args_ : while_stmt->iter_args_;
     const auto& body = for_stmt ? for_stmt->body_ : while_stmt->body_;
-    if (iter_args.size() != original_iter_args.size()) return for_stmt ? StmtPtr(for_stmt) : StmtPtr(while_stmt);
+    if (iter_args.size() != original_iter_args.size())
+      return for_stmt ? StmtPtr(for_stmt) : StmtPtr(while_stmt);
 
     std::map<const Var*, VarPtr> carry_seed;
     std::vector<IterArgPtr> new_iter_args = iter_args;
@@ -226,16 +228,15 @@ class RetypeClosureMutator : public IRMutator {
 
     RetypeClosureMutator retyper(std::move(carry_seed));
     auto new_body = retyper.VisitStmt(body);
-    auto new_return_vars = RetypeReturnVars(new_body, for_stmt ? for_stmt->return_vars_ : while_stmt->return_vars_,
-                                            original_return_vars, this);
+    auto new_return_vars = RetypeReturnVars(
+        new_body, for_stmt ? for_stmt->return_vars_ : while_stmt->return_vars_, original_return_vars, this);
     return loop_repair::RebuildLoop(for_stmt, while_stmt, new_iter_args, new_body, new_return_vars);
   }
 
   /// Re-type a loop's ``return_vars`` from its (re-typed) yields, and publish each
   /// replacement to @p publish_to so later statements re-deduce through the new type
   /// rather than merely substituting the var.
-  static std::vector<VarPtr> RetypeReturnVars(const StmtPtr& new_body,
-                                              const std::vector<VarPtr>& return_vars,
+  static std::vector<VarPtr> RetypeReturnVars(const StmtPtr& new_body, const std::vector<VarPtr>& return_vars,
                                               const std::vector<VarPtr>& original_return_vars,
                                               RetypeClosureMutator* publish_to) {
     const auto new_yields = TrailingYieldValues(new_body);
@@ -294,13 +295,11 @@ class NarrowLoopCarryMutator : public RetypeClosureMutator {
 
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
     // Inner loops first: a nested carry may itself narrow this loop's yields.
-    return NarrowCarries(As<ForStmt>(IRMutator::VisitStmt_(op)), nullptr, op->iter_args_,
-                         op->return_vars_);
+    return NarrowCarries(As<ForStmt>(IRMutator::VisitStmt_(op)), nullptr, op->iter_args_, op->return_vars_);
   }
 
   StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
-    return NarrowCarries(nullptr, As<WhileStmt>(IRMutator::VisitStmt_(op)), op->iter_args_,
-                         op->return_vars_);
+    return NarrowCarries(nullptr, As<WhileStmt>(IRMutator::VisitStmt_(op)), op->iter_args_, op->return_vars_);
   }
 
  private:

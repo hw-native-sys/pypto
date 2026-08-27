@@ -378,8 +378,7 @@ using DirectDefMap = std::unordered_map<const Var*, AssignStmtPtr>;
 /// can be tiled in turn.
 AssignStmtPtr BuildAccInit(int64_t m, int64_t n, const DataType& dtype, const std::string& name_hint,
                            const Span& span, bool compact = false) {
-  return acc_init::BuildAccStorage({MakeIndex(m, span), MakeIndex(n, span)}, dtype, name_hint, span,
-                                   compact);
+  return acc_init::BuildAccStorage({MakeIndex(m, span), MakeIndex(n, span)}, dtype, name_hint, span, compact);
 }
 
 using AccInitValue = acc_init::AccInit;

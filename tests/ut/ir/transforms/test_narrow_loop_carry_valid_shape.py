@@ -220,6 +220,13 @@ def _stored_tile_type(program):
     return tile_type
 
 
+def _tile_view(tile_type):
+    """The tile's explicit view, which every assertion below requires it to carry."""
+    view = tile_type.tile_view
+    assert view is not None, f"expected an explicit TileView on {tile_type}"
+    return view
+
+
 def _valid_rows(tile_type):
     view = tile_type.tile_view
     if view is None or not view.valid_shape:
@@ -243,17 +250,16 @@ def test_flatten_repairs_an_nd_seeded_carry():
     stored = _stored_tile_type(after)
 
     assert not _is_const(_valid_rows(stored), M_TILE), (
-        "the store must read the accumulator at the extent the matmuls wrote, "
-        f"got {_valid_rows(stored)}"
+        f"the store must read the accumulator at the extent the matmuls wrote, got {_valid_rows(stored)}"
     )
-    assert stored.tile_view.compact == ir.CompactMode.normal, (
+    assert _tile_view(stored).compact == ir.CompactMode.normal, (
         "a row-narrowed accumulator is packed at ceil(validRow/16)*16; without compact "
         "its reader recomputes the physical row pitch instead"
     )
     # The identity `tile.reshape` between the loop and the store must not re-derive the
     # layout from the shape -- that yields the flat default and loses Acc's NZ box.
-    assert stored.tile_view.blayout == ir.TileLayout.col_major
-    assert stored.tile_view.slayout == ir.TileLayout.row_major
+    assert _tile_view(stored).blayout == ir.TileLayout.col_major
+    assert _tile_view(stored).slayout == ir.TileLayout.row_major
     assert stored.memory_space == ir.MemorySpace.Acc
 
 
@@ -270,7 +276,7 @@ def test_convert_tensor_to_tile_ops_repairs_a_2d_seeded_carry():
     stored = _stored_tile_type(after)
 
     assert not _is_const(_valid_rows(stored), M_TILE)
-    assert stored.tile_view.compact == ir.CompactMode.normal
+    assert _tile_view(stored).compact == ir.CompactMode.normal
 
 
 def test_seed_is_redeclared_as_a_compact_narrowed_box():
@@ -289,7 +295,7 @@ def test_seed_is_redeclared_as_a_compact_narrowed_box():
 
     aliases = _calls(after, _TILE_SET_VALIDSHAPE_OP)
     assert aliases, "the compact box is narrowed through tile.set_validshape"
-    assert any(alias.type.tile_view.compact == ir.CompactMode.normal for alias in aliases)
+    assert any(_tile_view(alias.type).compact == ir.CompactMode.normal for alias in aliases)
 
 
 def test_full_height_carry_is_left_alone():
