@@ -261,7 +261,13 @@ class TileMemorySpaceAnalyzer : public IRVisitor {
     for (size_t i = 0; i < op->return_vars_.size(); ++i) {
       if (!As<TileType>(op->return_vars_[i]->GetType())) continue;
       if (i >= yield_stmt->value_.size()) continue;
-      auto yield_var = As<Var>(yield_stmt->value_[i]);
+      // AsVarLike (not As<Var>) so a yielded IterArg is matched — the mirror of
+      // the init seeding above. A carry held across the loop yields the IterArg
+      // itself (the pass-through slot of `pl.yield_(a, b_next)`), and a nested
+      // loop may yield the enclosing loop's IterArg. IterArg has its own
+      // ObjectKind, so As<Var> returns null for both and the whole slot — the
+      // return_var and the iter_arg back-propagation below — is skipped.
+      auto yield_var = AsVarLike(yield_stmt->value_[i]);
       if (!yield_var) continue;
 
       // Fallback to the TileType annotation handles IfStmt return_vars — they
@@ -288,7 +294,10 @@ class TileMemorySpaceAnalyzer : public IRVisitor {
         // whether or not the analyzer has already recorded it — e.g. an IfStmt
         // return_var used as the loop init is never visited by the AssignStmt
         // path, so it would otherwise keep its old memory space.
-        if (auto init_var = As<Var>(op->iter_args_[i]->initValue_);
+        // AsVarLike (not As<Var>) for the same reason the seeding loop above uses
+        // it: an inner loop's init is the enclosing loop's IterArg, and the two
+        // share a buffer, so the promotion has to reach the outer carrier too.
+        if (auto init_var = AsVarLike(op->iter_args_[i]->initValue_);
             init_var && As<TileType>(init_var->GetType())) {
           var_memory_[init_var] = *yield_memory;
         }
