@@ -93,6 +93,38 @@ def create_tensor_seeded_acc_2d(
 
 
 @pl.jit
+def carry_flows_into_a_later_loop(
+    x: pl.Tensor[[BLOCKS * M_TILE, K], pl.INT8],
+    w: pl.Tensor[[N_TILE, K], pl.INT8],
+    rows: pl.Tensor[[BLOCKS, 1], pl.INT32],
+    y: pl.Out[pl.Tensor[[BLOCKS * M_TILE, N_TILE], pl.INT32]],
+):
+    """Two K loops in sequence: the second carries the accumulator the first repaired.
+
+    The second loop's carry is initialised by a value this repair re-typed, so its own
+    ``IterArg`` -- and everything its body deduces from it -- has to follow, or the body
+    keeps referring to the carry at the width the seed used to have.
+    """
+    for b in pl.spmd(BLOCKS, name_hint="mm_two_loops", allow_early_resolve=True):
+        m0 = b * M_TILE
+        v = pl.min(M_TILE, pl.read(rows, [b, 0]))
+        acc = pl.create_tensor([M_TILE, N_TILE], dtype=pl.INT32)
+        for k0 in pl.pipeline(0, K // 2, K_TILE, stage=2):
+            xk = pl.slice(x, [M_TILE, K_TILE], [m0, k0], valid_shape=[v, K_TILE])
+            wk = pl.slice(w, [N_TILE, K_TILE], [0, k0])
+            if k0 == 0:
+                acc = pl.matmul(xk, wk, b_trans=True, out_dtype=pl.INT32)
+            else:
+                acc = pl.matmul_acc(acc, xk, wk, b_trans=True)
+        for k1 in pl.pipeline(K // 2, K, K_TILE, stage=2):
+            xk2 = pl.slice(x, [M_TILE, K_TILE], [m0, k1], valid_shape=[v, K_TILE])
+            wk2 = pl.slice(w, [N_TILE, K_TILE], [0, k1])
+            acc = pl.matmul_acc(acc, xk2, wk2, b_trans=True)
+        y[m0 : m0 + M_TILE, :] = acc
+    return y
+
+
+@pl.jit
 def single_fractal_block_acc(
     x: pl.Tensor[[BLOCKS * FRACTAL_ROWS, K], pl.BF16],
     w: pl.Tensor[[K, FRACTAL_N_TILE], pl.BF16],
@@ -359,6 +391,30 @@ def test_seed_is_redeclared_as_a_compact_narrowed_box():
     aliases = _calls(after, _TILE_SET_VALIDSHAPE_OP)
     assert aliases, "the compact box is narrowed through tile.set_validshape"
     assert any(_tile_view(alias.type).compact == ir.CompactMode.normal for alias in aliases)
+
+
+def test_a_repaired_carry_reaches_a_later_loops_carry():
+    """A carry initialised by a re-typed value is re-minted, and its body follows.
+
+    Substituting the init alone would leave the second loop's ``IterArg`` at the seed's
+    width while its init is narrow -- the body would deduce against the stale type and the
+    ``TypeCheck`` diagnostic (which this suite installs for every pass) would reject the
+    program before this assertion ran.
+    """
+    after = _lower(carry_flows_into_a_later_loop)
+    stored = _stored_tile_type(after)
+
+    assert not _is_const(_valid_rows(stored), M_TILE)
+    assert _tile_view(stored).compact == ir.CompactMode.normal
+    # Both loops carry the accumulator, and both must declare the narrowed extent.
+    carries = [
+        arg
+        for loop in _loops(after)
+        for arg in loop.iter_args
+        if isinstance(arg.type, ir.TileType) and arg.type.memory_space == ir.MemorySpace.Acc
+    ]
+    assert len(carries) == 2, f"expected both K loops to carry the accumulator, got {len(carries)}"
+    assert all(not _is_const(_valid_rows(arg.type), M_TILE) for arg in carries)
 
 
 def test_single_fractal_block_accumulator_is_left_alone():

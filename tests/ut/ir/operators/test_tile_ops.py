@@ -28,6 +28,12 @@ _OP_TILE_SLICE = ir.get_op("tile.slice").name
 _OP_TILE_TRANSPOSE = ir.get_op("tile.transpose").name
 
 
+def _const_int(expr: ir.Expr) -> int:
+    """The value of a constant Expr, asserting it is one."""
+    assert isinstance(expr, ir.ConstInt), f"expected a ConstInt, got {type(expr).__name__}"
+    return expr.value
+
+
 def _operand_dtype(expr: ir.Expr) -> DataType:
     """Return a constant operand's dtype, narrowing ``Expr`` for the type checker."""
     assert isinstance(expr, (ir.ConstInt, ir.ConstFloat)), f"expected a constant, got {type(expr).__name__}"
@@ -3091,11 +3097,11 @@ class TestTileSliceReshapeOps:
         assert view.slayout == ir.TileLayout.row_major
         assert view.fractal == 1024
         assert view.compact == ir.CompactMode.normal
-        assert [int(s.value) for s in view.stride] == [256, 1], (
+        assert [_const_int(dim) for dim in view.stride] == [256, 1], (
             "an identity reshape must keep the source's stride — it is the same addressing"
         )
-        assert view.start_offset is not None and int(view.start_offset.value) == 512
-        assert [int(v.value) for v in view.valid_shape] == [16, 128]
+        assert view.start_offset is not None and _const_int(view.start_offset) == 512
+        assert [_const_int(dim) for dim in view.valid_shape] == [16, 128]
 
     def test_tile_reshape(self):
         """Test tile.reshape operation."""
