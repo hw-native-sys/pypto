@@ -2386,6 +2386,38 @@ class DistributedWorker(Worker):
         finally:
             self._w.release_buffer(host)
 
+    def copy_to_offset(
+        self,
+        dst_base_ptr: int,
+        dst_offset: int,
+        src_host_ptr: int,
+        nbytes: int,
+        *,
+        worker_id: int = 0,
+    ) -> None:
+        """H2D copy into a validated sub-range of a live device allocation."""
+        self._require_open("copy_to_offset")
+        dst = self._device_buffer(dst_base_ptr, worker_id, "copy_to_offset")
+        if not isinstance(dst_offset, int) or dst_offset < 0:
+            raise ValueError(f"dst_offset must be a non-negative int, got {dst_offset!r}")
+        if not isinstance(nbytes, int) or nbytes <= 0:
+            raise ValueError(f"nbytes must be a positive int, got {nbytes!r}")
+        allocation_nbytes = int(dst.nbytes)
+        if dst_offset + nbytes > allocation_nbytes:
+            raise ValueError(
+                f"DistributedWorker.copy_to_offset(dst_offset={dst_offset}, nbytes={nbytes}) exceeds "
+                f"allocation size {allocation_nbytes}"
+            )
+        host = self._w.create_buffer(nbytes)
+        try:
+            ctypes.memmove(int(host.base), src_host_ptr, nbytes)
+            if dst_offset == 0:
+                self._w.copy_to(dst, host)
+            else:
+                self._w.copy_to(dst, host, dst_offset)
+        finally:
+            self._w.release_buffer(host)
+
     def copy_from(self, dst_host_ptr: int, src_dev_ptr: int, nbytes: int, *, worker_id: int = 0) -> None:
         """D2H copy: ``nbytes`` from device *src_dev_ptr* back to host *dst_host_ptr*."""
         self._require_open("copy_from")

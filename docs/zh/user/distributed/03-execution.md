@@ -31,6 +31,7 @@ with compiled.prepare() as rt:
 | `rt.alloc_tensor(shape, dtype, *, init=None)` | 分配 worker 常驻的 `DeviceTensor`。`init` 从 host 拷贝（一次性 H2D）。 |
 | `rt.free_tensor(tensor)` | 释放 `DeviceTensor`。 |
 | `rt.copy_to(dst_dev_ptr, src_host_ptr, nbytes, *, worker_id=0)` | 显式 staged H2D 拷贝。host `torch.Tensor` 源只需为 CPU 连续张量，可在 `prepare()` 后创建。 |
+| `rt.copy_to_offset(dst_base_ptr, dst_offset, src_host_ptr, nbytes, *, worker_id=0)` | 显式 staged H2D 拷贝到常驻设备缓冲区的子区间。 |
 | `rt.copy_from(dst_host_ptr, src_dev_ptr, nbytes, *, worker_id=0)` | 显式 staged D2H 拷贝。host `torch.Tensor` 目标只需为 CPU 连续张量，可在 `prepare()` 后创建。 |
 | `rt.alloc_stacked_tensor(host_w)` | 沿 dim 0 分片 `host_w`——分片 `i` 上传到卡 `i`。返回 `StackedDeviceTensor`。 |
 | `rt.free_stacked_tensor(stacked)` | 释放 `StackedDeviceTensor` 的所有分片。 |
