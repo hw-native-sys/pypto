@@ -1162,7 +1162,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     binding.array_name = name_it->second;
     // Carry the backing array's registrations so a downstream ``deps=[arr[i]]``
     // or an enclosing ForStmt carry seeded by the phi resolves to the same
-    // storage. Captured here because a generated ``PTO2_SCOPE`` restores
+    // storage. Captured here because a generated ``SIMPLER_SCOPE`` restores
     // ``array_carry_vars_`` / ``manual_task_id_map_`` at its closing brace.
     auto carry_it = array_carry_vars_.find(yield_var.get());
     if (carry_it != array_carry_vars_.end()) binding.carry = carry_it->second;
@@ -1172,7 +1172,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   /// Install the array-phi bindings captured from the branches. Runs after both
   /// branches are emitted, at the enclosing level, because every generated
-  /// ``PTO2_SCOPE`` snapshots and restores ``array_carry_vars_`` — registering
+  /// ``SIMPLER_SCOPE`` snapshots and restores ``array_carry_vars_`` — registering
   /// inside a branch body would be discarded at its closing brace.
   void InstallArrayPhiBindings(const IfStmtPtr& if_stmt) {
     for (const auto& rv : if_stmt->return_vars_) {

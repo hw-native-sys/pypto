@@ -471,7 +471,7 @@ if i < n:                       # n 为运行期值，该判断会保留到 code
 完毕后再把 phi 的 emit 名字绑定到该数组，使 `if` 之后的读取直接落到它：
 
 ```cpp
-PTO2TaskId tids[8];             // 唯一的后端数组
+TaskId tids[8];             // 唯一的后端数组
 ...
 if ((i < static_cast<int64_t>(n))) {
     tids[i] = p_tid;            // 原地写入；没有 phi 变量，也没有拷贝
@@ -486,7 +486,7 @@ if ((i < static_cast<int64_t>(n))) {
   是内层 `if` / `for` 自己的 ArrayType return_var。到 yield 时该嵌套语句已经完成
   绑定，因此一次查表即可覆盖任意嵌套深度。这同时把每个 phi 的开销降为 O(1)：不会
   重复遍历任何分支子树。
-- **安装发生在两个分支都生成之后**，且在外层进行，因为每个生成的 `PTO2_SCOPE` 都会
+- **安装发生在两个分支都生成之后**，且在外层进行，因为每个生成的 `SIMPLER_SCOPE` 都会
   在进入时快照、退出时还原 `array_carry_vars_`（参见 [Manual Scope 与 TaskId
   降级](#manual-scope-与-taskid-降级)）——在分支体内部做的注册会在其右花括号处被
   丢弃。PTO 后端捕获并绑定其原地 return_var 的方式与此相同。

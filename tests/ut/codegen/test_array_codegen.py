@@ -906,7 +906,7 @@ def test_orch_task_id_array_store_under_runtime_predicate():
             return out
 
     code = _compile_orch(Prog)
-    decls = [ln for ln in code.splitlines() if "PTO2TaskId tids[4]" in ln]
+    decls = [ln for ln in code.splitlines() if "TaskId tids[4]" in ln]
     assert len(decls) == 1, code
     # The guarded publish writes the backing array in place...
     assert "tids[g] = " in code, code

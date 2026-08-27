@@ -489,7 +489,7 @@ the phi's emit name is bound onto it once both branches are emitted, so reads
 after the `if` resolve straight to that array:
 
 ```cpp
-PTO2TaskId tids[8];             // the one backing array
+TaskId tids[8];             // the one backing array
 ...
 if ((i < static_cast<int64_t>(n))) {
     tids[i] = p_tid;            // in-place; no phi variable, no copy
@@ -506,7 +506,7 @@ Two ordering constraints shape this:
   has already been bound, so one lookup resolves every nesting depth. This also
   keeps the work O(1) per phi: no branch subtree is traversed twice.
 - **Installation happens after both branches**, at the enclosing level, because
-  every generated `PTO2_SCOPE` snapshots and restores `array_carry_vars_` (see
+  every generated `SIMPLER_SCOPE` snapshots and restores `array_carry_vars_` (see
   [Manual Scope and TaskId Lowering](#manual-scope-and-taskid-lowering)) — a
   registration made inside a branch body would be discarded at its closing
   brace. The PTO backend captures and binds its in-place return_vars the same
