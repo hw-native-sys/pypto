@@ -19,6 +19,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -209,14 +210,27 @@ class RetypeClosureMutator : public IRMutator {
                                     new_return_vars, if_stmt->span_);
   }
 
-  StmtPtr VisitStmt_(const ForStmtPtr& op) override {
-    return PropagateIntoLoop(As<ForStmt>(RebuildWithVisitedChildren(op)), nullptr, op->iter_args_,
-                             op->return_vars_);
+  StmtPtr VisitStmt_(const ForStmtPtr& op) override { return VisitLoop(op); }
+
+  StmtPtr VisitStmt_(const WhileStmtPtr& op) override { return VisitLoop(op); }
+
+  /// Visit a loop's children, then carry any re-typed value across its boundary.
+  template <typename LoopPtr>
+  StmtPtr VisitLoop(const LoopPtr& op) {
+    auto rebuilt = RebuildWithVisitedChildren(op);
+    auto loop = As<std::remove_const_t<typename LoopPtr::element_type>>(rebuilt);
+    if (!loop) return rebuilt;
+    return PropagateIntoLoop(loop, op->iter_args_, op->return_vars_);
   }
 
-  StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
-    return PropagateIntoLoop(nullptr, As<WhileStmt>(RebuildWithVisitedChildren(op)), op->iter_args_,
-                             op->return_vars_);
+  /// Rebuild a loop of either kind with new carry state.
+  static StmtPtr RebuildLoopLike(const ForStmtPtr& loop, const std::vector<IterArgPtr>& iter_args,
+                                 const StmtPtr& body, const std::vector<VarPtr>& return_vars) {
+    return loop_repair::RebuildForStmt(loop, iter_args, body, return_vars);
+  }
+  static StmtPtr RebuildLoopLike(const WhileStmtPtr& loop, const std::vector<IterArgPtr>& iter_args,
+                                 const StmtPtr& body, const std::vector<VarPtr>& return_vars) {
+    return loop_repair::RebuildWhileStmt(loop, iter_args, body, return_vars);
   }
 
   /// Visit a loop's children and rebuild it, without either level's carry handling -- the
@@ -232,14 +246,13 @@ class RetypeClosureMutator : public IRMutator {
   /// everything the nested body deduced from it — at the old type. Re-mint the iter_arg
   /// from its new init and re-run the closure through the nested body, exactly as the
   /// outer narrowing does; the loop's own results then follow its re-typed yields.
-  StmtPtr PropagateIntoLoop(const std::shared_ptr<const ForStmt>& for_stmt,
-                            const std::shared_ptr<const WhileStmt>& while_stmt,
-                            const std::vector<IterArgPtr>& original_iter_args,
+  template <typename LoopPtr>
+  StmtPtr PropagateIntoLoop(const LoopPtr& loop, const std::vector<IterArgPtr>& original_iter_args,
                             const std::vector<VarPtr>& original_return_vars) {
-    const auto& iter_args = for_stmt ? for_stmt->iter_args_ : while_stmt->iter_args_;
-    const auto& body = for_stmt ? for_stmt->body_ : while_stmt->body_;
+    const auto& iter_args = loop->iter_args_;
+    const auto& body = loop->body_;
     if (iter_args.size() != original_iter_args.size()) {
-      return for_stmt ? StmtPtr(for_stmt) : StmtPtr(while_stmt);
+      return loop;
     }
 
     std::map<const Var*, VarPtr> carry_seed;
@@ -254,13 +267,12 @@ class RetypeClosureMutator : public IRMutator {
       new_iter_args[i] = new_iter_arg;
       carry_seed[static_cast<const Var*>(original_iter_args[i].get())] = new_iter_arg;
     }
-    if (carry_seed.empty()) return for_stmt ? StmtPtr(for_stmt) : StmtPtr(while_stmt);
+    if (carry_seed.empty()) return loop;
 
     RetypeClosureMutator retyper(std::move(carry_seed));
     auto new_body = retyper.VisitStmt(body);
-    auto new_return_vars = RetypeReturnVars(
-        new_body, for_stmt ? for_stmt->return_vars_ : while_stmt->return_vars_, original_return_vars, this);
-    return loop_repair::RebuildLoop(for_stmt, while_stmt, new_iter_args, new_body, new_return_vars);
+    auto new_return_vars = RetypeReturnVars(new_body, loop->return_vars_, original_return_vars, this);
+    return RebuildLoopLike(loop, new_iter_args, new_body, new_return_vars);
   }
 
   /// Re-type a loop's ``return_vars`` from its (re-typed) yields, and publish each
@@ -323,34 +335,34 @@ class NarrowLoopCarryMutator : public RetypeClosureMutator {
     return std::make_shared<SeqStmts>(out, op->span_);
   }
 
-  StmtPtr VisitStmt_(const ForStmtPtr& op) override {
-    // Inner loops first: a nested carry may itself narrow this loop's yields.
-    return NarrowCarries(As<ForStmt>(RebuildWithVisitedChildren(op)), nullptr, op->iter_args_,
-                         op->return_vars_);
-  }
+  StmtPtr VisitStmt_(const ForStmtPtr& op) override { return VisitLoopAndNarrow(op); }
 
-  StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
-    return NarrowCarries(nullptr, As<WhileStmt>(RebuildWithVisitedChildren(op)), op->iter_args_,
-                         op->return_vars_);
-  }
+  StmtPtr VisitStmt_(const WhileStmtPtr& op) override { return VisitLoopAndNarrow(op); }
 
  private:
-  StmtPtr NarrowCarries(const std::shared_ptr<const ForStmt>& for_stmt,
-                        const std::shared_ptr<const WhileStmt>& while_stmt,
-                        const std::vector<IterArgPtr>& original_iter_args,
+  /// Visit a loop's children, then re-declare every Acc carry the body proves narrower.
+  template <typename LoopPtr>
+  StmtPtr VisitLoopAndNarrow(const LoopPtr& op) {
+    // Inner loops first: a nested carry may itself narrow this loop's yields.
+    auto rebuilt = RebuildWithVisitedChildren(op);
+    auto loop = As<std::remove_const_t<typename LoopPtr::element_type>>(rebuilt);
+    if (!loop) return rebuilt;
+    return NarrowCarries(loop, op->iter_args_, op->return_vars_);
+  }
+
+  template <typename LoopPtr>
+  StmtPtr NarrowCarries(const LoopPtr& loop, const std::vector<IterArgPtr>& original_iter_args,
                         const std::vector<VarPtr>& original_return_vars) {
-    StmtPtr visited = for_stmt ? StmtPtr(for_stmt) : StmtPtr(while_stmt);
-    if (!for_stmt && !while_stmt) return visited;
-    const auto& iter_args = for_stmt ? for_stmt->iter_args_ : while_stmt->iter_args_;
-    const auto& body = for_stmt ? for_stmt->body_ : while_stmt->body_;
-    const auto& return_vars = for_stmt ? for_stmt->return_vars_ : while_stmt->return_vars_;
+    const auto& iter_args = loop->iter_args_;
+    const auto& body = loop->body_;
+    const auto& return_vars = loop->return_vars_;
     if (iter_args.empty() || iter_args.size() != original_iter_args.size()) {
-      return PropagateIntoLoop(for_stmt, while_stmt, original_iter_args, original_return_vars);
+      return PropagateIntoLoop(loop, original_iter_args, original_return_vars);
     }
 
     const auto yields = TrailingYieldValues(body);
     if (yields.size() != iter_args.size()) {
-      return PropagateIntoLoop(for_stmt, while_stmt, original_iter_args, original_return_vars);
+      return PropagateIntoLoop(loop, original_iter_args, original_return_vars);
     }
 
     std::vector<StmtPtr> prologue;
@@ -382,13 +394,13 @@ class NarrowLoopCarryMutator : public RetypeClosureMutator {
       carry_seed[static_cast<const Var*>(original_iter_args[i].get())] = new_iter_arg;
     }
     if (carry_seed.empty()) {
-      return PropagateIntoLoop(for_stmt, while_stmt, original_iter_args, original_return_vars);
+      return PropagateIntoLoop(loop, original_iter_args, original_return_vars);
     }
 
     RetypeClosureMutator retyper(std::move(carry_seed));
     auto new_body = retyper.VisitStmt(body);
     auto new_return_vars = RetypeReturnVars(new_body, return_vars, original_return_vars, this);
-    auto new_loop = loop_repair::RebuildLoop(for_stmt, while_stmt, new_iter_args, new_body, new_return_vars);
+    auto new_loop = RebuildLoopLike(loop, new_iter_args, new_body, new_return_vars);
     if (prologue.empty()) return new_loop;
     prologue.push_back(new_loop);
     return std::make_shared<SeqStmts>(prologue, new_loop->span_);
