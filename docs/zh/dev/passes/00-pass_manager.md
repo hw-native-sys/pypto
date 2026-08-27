@@ -402,20 +402,21 @@ class PassPipeline {
 3. 当某个 Pass *失效*了这样一个属性时，将其从已验证集合中移除，以便后续的产生者重新验证
 4. 出错时抛出 `VerificationError`
 
-**使用 `Default` 策略时**（共 20 次检查；两个集合都声明在 `ir_property.cpp` 中，因此该时序完全由它们与上面的逐 Pass 属性表推导得出）：
+**使用 `Default` 策略时**（共 25 次检查；两个集合都声明在 `ir_property.cpp` 中，因此该时序完全由它们与上面的逐 Pass 属性表推导得出）：
 
 | 验证时机 | 验证的属性 |
 | -------- | ---------- |
-| 流水线入口 | TypeChecked, BreakContinueValid, NoRedundantBlocks, InOutUseValid, ManualDepsOnSubmitOnly, AtomicAddDtypeValid |
+| 流水线入口 | TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, InOutUseValid, ManualDepsOnSubmitOnly, AtomicAddDtypeValid |
 | ConvertToSSA | SSAForm |
 | OutlineIncoreScopes | AivSplitValid |
 | ConvertTensorToTileOps | AivSplitValid *（重新验证——本 Pass 会先失效它，参见 [10](10-convert_tensor_to_tile_ops.md)）* |
-| InferTileMemorySpace | AivSplitValid *（重新验证）*、TileMemoryInferred、AccToGmStoreValid |
-| ExpandMixedKernel | MixedKernelExpanded, HardSyncallOccupancyValid |
+| InferTileMemorySpace | AivSplitValid *（重新验证）*、TileMemoryInferred、AccToGmStoreValid、AccCompactValid |
+| ExpandMixedKernel | MixedKernelExpanded、HardSyncallOccupancyValid、AccCompactValid *（重新验证）*、UseAfterDef *（重新验证——唯一被 Pass 声明的结构性属性，参见 [99](99-verifier.md#在流水线中途重新校验结构性属性)）* |
 | NormalizeReturnOrder | ReturnParamsExplicit |
 | AllocateMemoryAddr | AllocatedMemoryAddr |
 | DeriveCallDirections | CallDirectionsResolved |
 | MaterializeDistTensorCtx | DistTensorCtxMaterialized |
+| LegalizeGraphBoundary | GraphBoundaryLegalized |
 | MaterializeRuntimeScopes | RuntimeScopesMaterialized |
 | ClassifyIterArgCarry | IterArgCarryClassified |
 

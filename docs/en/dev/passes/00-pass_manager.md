@@ -404,20 +404,21 @@ The members of that set — and of `GetStructuralProperties()` and `GetDefaultVe
 3. When a pass *invalidates* such a property, drop it from the verified set so a later producer re-verifies it
 4. Throw `VerificationError` on errors
 
-**With the `Default` strategy** (20 checks; the two sets are declared in `ir_property.cpp`, so this schedule follows from them and from the per-pass table above):
+**With the `Default` strategy** (25 checks; the two sets are declared in `ir_property.cpp`, so this schedule follows from them and from the per-pass table above):
 
 | Verification point | Properties verified |
 | ------------------ | ------------------- |
-| pipeline input | TypeChecked, BreakContinueValid, NoRedundantBlocks, InOutUseValid, ManualDepsOnSubmitOnly, AtomicAddDtypeValid |
+| pipeline input | TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, InOutUseValid, ManualDepsOnSubmitOnly, AtomicAddDtypeValid |
 | ConvertToSSA | SSAForm |
 | OutlineIncoreScopes | AivSplitValid |
 | ConvertTensorToTileOps | AivSplitValid *(re-verified — the pass invalidates it, see [10](10-convert_tensor_to_tile_ops.md))* |
-| InferTileMemorySpace | AivSplitValid *(re-verified)*, TileMemoryInferred, AccToGmStoreValid |
-| ExpandMixedKernel | MixedKernelExpanded, HardSyncallOccupancyValid |
+| InferTileMemorySpace | AivSplitValid *(re-verified)*, TileMemoryInferred, AccToGmStoreValid, AccCompactValid |
+| ExpandMixedKernel | MixedKernelExpanded, HardSyncallOccupancyValid, AccCompactValid *(re-verified)*, UseAfterDef *(re-verified — the only structural property any pass declares, see [99](99-verifier.md#re-checking-a-structural-property-mid-pipeline))* |
 | NormalizeReturnOrder | ReturnParamsExplicit |
 | AllocateMemoryAddr | AllocatedMemoryAddr |
 | DeriveCallDirections | CallDirectionsResolved |
 | MaterializeDistTensorCtx | DistTensorCtxMaterialized |
+| LegalizeGraphBoundary | GraphBoundaryLegalized |
 | MaterializeRuntimeScopes | RuntimeScopesMaterialized |
 | ClassifyIterArgCarry | IterArgCarryClassified |
 
