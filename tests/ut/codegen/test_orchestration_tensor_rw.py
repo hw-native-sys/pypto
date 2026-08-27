@@ -267,7 +267,7 @@ class TestTensorReadWriteOffsetCodegen:
         # Canaries: keep the trigger's two independently materialized loop carries, and keep
         # their deliberately reverse-lexical task parameter order (b: FP32, then a: INT32).
         carry_decl_re = re.compile(
-            r"^\s*(?:Tensor|ChipTensor)\s+(?P<name>(?P<base>[ab])__rv[A-Za-z0-9_]*)"
+            r"^\s*(?:Tensor|ChipTensor|TaskTensor)\s+(?P<name>(?P<base>[ab])__rv[A-Za-z0-9_]*)"
             r"\s*=\s*ext_(?P=base)\s*;\s*$",
             re.MULTILINE,
         )
@@ -295,7 +295,7 @@ class TestTensorReadWriteOffsetCodegen:
         )
         cross_wires = []
         for match in carry_update_re.finditer(code):
-            rhs_base = re.match(r"(?P<base>[ab])(?:__|$)", match["rhs"])
+            rhs_base = re.match(r"(?:ext_)?(?P<base>[ab])(?:_|$)", match["rhs"])
             if rhs_base and rhs_base["base"] != match["lhs_base"]:
                 cross_wires.append(match.group(0).strip())
 

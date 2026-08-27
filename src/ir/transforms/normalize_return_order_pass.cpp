@@ -394,11 +394,12 @@ class UnsupportedCallResultUseCollector : public IRVisitor {
       const ReturnPermutationMap& permutations,
       const std::unordered_map<const Var*, std::unordered_set<std::string>>& bindings,
       const std::unordered_set<const Expr*>& directly_bound_calls, bool allow_direct_projections,
-      std::string caller_name)
+      bool allow_wrapper_tuple_forward, std::string caller_name)
       : permutations_(permutations),
         bindings_(bindings),
         directly_bound_calls_(directly_bound_calls),
         allow_direct_projections_(allow_direct_projections),
+        allow_wrapper_tuple_forward_(allow_wrapper_tuple_forward),
         caller_name_(std::move(caller_name)) {}
 
   void VisitExpr(const ExprPtr& expr) override {
@@ -424,6 +425,34 @@ class UnsupportedCallResultUseCollector : public IRVisitor {
   // The LHS is a definition, not a use.  Visiting it through the base visitor
   // would incorrectly classify the direct call binding itself as an escape.
   void VisitStmt_(const AssignStmtPtr& op) override { VisitExpr(op->value_); }
+
+  void VisitStmt_(const EvalStmtPtr& op) override {
+    // A top-level EvalStmt intentionally discards the result. There is no
+    // tuple contract to preserve, but nested reordered calls in its arguments
+    // must still go through the ordinary safety checks.
+    const Expr* previous_discarded_call = discarded_result_call_;
+    if (allow_direct_projections_ && (As<Call>(op->expr_) || As<Submit>(op->expr_))) {
+      discarded_result_call_ = op->expr_.get();
+    }
+    VisitExpr(op->expr_);
+    discarded_result_call_ = previous_discarded_call;
+  }
+
+  void VisitStmt_(const ReturnStmtPtr& op) override {
+    for (const auto& value : op->value_) {
+      if (allow_wrapper_tuple_forward_) {
+        if (auto var = AsVarLike(value)) {
+          auto it = bindings_.find(var.get());
+          if (it != bindings_.end() && it->second.size() == 1) {
+            // Step B materializes an inverse-permutation tuple adapter for this
+            // directly forwarded component, preserving the wrapper contract.
+            continue;
+          }
+        }
+      }
+      VisitExpr(value);
+    }
+  }
 
   void VisitExpr_(const TupleGetItemExprPtr& op) override {
     if (allow_direct_projections_) {
@@ -469,7 +498,7 @@ class UnsupportedCallResultUseCollector : public IRVisitor {
       RecordUnsafe(global_var->name_, call_expr->span_, "the reordered callee is called from an InCore body",
                    "Move the call to a non-InCore caller, or make the callee return Out/InOut tensors in "
                    "parameter order");
-    } else if (!directly_bound_calls_.count(call_expr)) {
+    } else if (!directly_bound_calls_.count(call_expr) && call_expr != discarded_result_call_) {
       RecordUnsafe(
           global_var->name_, call_expr->span_, "the call result is not directly assigned to a tuple binding",
           "Assign the call result directly to a tuple binding, then use only TupleGetItem projections "
@@ -488,8 +517,10 @@ class UnsupportedCallResultUseCollector : public IRVisitor {
   const std::unordered_map<const Var*, std::unordered_set<std::string>>& bindings_;
   const std::unordered_set<const Expr*>& directly_bound_calls_;
   bool allow_direct_projections_;
+  bool allow_wrapper_tuple_forward_;
   std::string caller_name_;
   const Span* current_use_span_ = nullptr;
+  const Expr* discarded_result_call_ = nullptr;
 };
 
 struct ReturnPermutationSafetyReport {
@@ -509,9 +540,9 @@ ReturnPermutationSafetyReport FindUnsafeReturnPermutations(const std::vector<Fun
     // Step B intentionally skips InCore bodies.  Therefore even a direct
     // projection there is unsupported and rejects the callee permutation.
     const bool allow_direct_projections = !IsInCoreType(func->func_type_);
-    UnsupportedCallResultUseCollector use_collector(permutations, binding_collector.bindings,
-                                                    binding_collector.directly_bound_calls,
-                                                    allow_direct_projections, func->name_);
+    UnsupportedCallResultUseCollector use_collector(
+        permutations, binding_collector.bindings, binding_collector.directly_bound_calls,
+        allow_direct_projections, IsWrapperType(func->func_type_), func->name_);
     use_collector.VisitStmt(func->body_);
     report.unsafe_callees.insert(use_collector.unsafe_callees.begin(), use_collector.unsafe_callees.end());
     if (!report.first_unsafe_use && use_collector.first_unsafe_use) {
@@ -554,8 +585,8 @@ TypePtr PermuteCallLikeResultType(const TypePtr& type, const std::vector<int>& p
 // functions that call reordered InCore functions.
 class TupleIndexPermutationMutator : public IRMutator {
  public:
-  explicit TupleIndexPermutationMutator(const ReturnPermutationMap& permutations)
-      : permutations_(permutations) {}
+  TupleIndexPermutationMutator(const ReturnPermutationMap& permutations, bool adapt_wrapper_tuple_return)
+      : permutations_(permutations), adapt_wrapper_tuple_return_(adapt_wrapper_tuple_return) {}
 
  protected:
   ExprPtr VisitExpr_(const CallPtr& op) override {
@@ -617,6 +648,44 @@ class TupleIndexPermutationMutator : public IRMutator {
     return op;
   }
 
+  StmtPtr VisitStmt_(const ReturnStmtPtr& op) override {
+    std::vector<ExprPtr> new_values;
+    new_values.reserve(op->value_.size());
+    bool modified = false;
+    for (const auto& value : op->value_) {
+      auto new_value = VisitExpr(value);
+      if (adapt_wrapper_tuple_return_) {
+        if (auto var = As<Var>(new_value)) {
+          auto it = reordered_tuple_vars_.find(var.get());
+          if (it != reordered_tuple_vars_.end()) {
+            const auto& perm = *it->second;
+            auto tuple_type = As<TupleType>(new_value->GetType());
+            INTERNAL_CHECK_SPAN(tuple_type, op->span_)
+                << "Internal error: NormalizeReturnOrder wrapper forwards a non-tuple reordered result";
+            INTERNAL_CHECK_SPAN(tuple_type->types_.size() >= perm.size(), op->span_)
+                << "Internal error: NormalizeReturnOrder wrapper result arity is smaller than its "
+                   "permutation";
+
+            std::vector<ExprPtr> elements;
+            elements.reserve(tuple_type->types_.size());
+            for (size_t old_index = 0; old_index < tuple_type->types_.size(); ++old_index) {
+              int new_index = static_cast<int>(old_index);
+              if (old_index < perm.size() && perm[old_index] != kNoParam) {
+                new_index = perm[old_index];
+              }
+              elements.push_back(std::make_shared<TupleGetItemExpr>(new_value, new_index, op->span_));
+            }
+            new_value = std::make_shared<MakeTuple>(std::move(elements), op->span_);
+          }
+        }
+      }
+      modified = modified || new_value.get() != value.get();
+      new_values.push_back(std::move(new_value));
+    }
+    if (modified) return std::make_shared<ReturnStmt>(std::move(new_values), op->span_);
+    return op;
+  }
+
   ExprPtr VisitExpr_(const TupleGetItemExprPtr& op) override {
     auto new_tuple = IRMutator::VisitExpr(op->tuple_);
 
@@ -651,6 +720,7 @@ class TupleIndexPermutationMutator : public IRMutator {
   }
 
   const ReturnPermutationMap& permutations_;
+  bool adapt_wrapper_tuple_return_;
   std::unordered_map<const Var*, const std::vector<int>*> reordered_tuple_vars_;
 };
 
@@ -719,7 +789,7 @@ Pass NormalizeReturnOrder() {
     std::vector<FunctionPtr> final_functions;
     for (const auto& func : functions) {
       if (!IsInCoreType(func->func_type_)) {
-        TupleIndexPermutationMutator mutator(permutations);
+        TupleIndexPermutationMutator mutator(permutations, IsWrapperType(func->func_type_));
         auto new_body = mutator.VisitStmt(func->body_);
         if (new_body.get() != func->body_.get()) {
           final_functions.push_back(std::make_shared<Function>(

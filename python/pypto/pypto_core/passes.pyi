@@ -385,6 +385,9 @@ def fold_no_op_reshape() -> Pass:
 def normalize_return_order() -> Pass:
     """Create a return-order normalization pass.
 
+    Canonicalizes tensor parameter-writeback returns and reorders InCore return
+    tuples to Out/InOut parameter order.
+
     Reordered Call/Submit results must be directly bound and used only through
     tuple-element projections in non-InCore callers.
     """
