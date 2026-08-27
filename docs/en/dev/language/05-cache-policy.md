@@ -166,7 +166,7 @@ Design notes that keep the chain honest:
   [`InjectGMPipeBuffer`](../passes/22-inject_gm_pipe_buffer.md) and
   [`MaterializeDistTensorCtx`](../passes/43-materialize_dist_tensor_ctx.md)
   append, and
-  [`MaterializeValidShapeSymbols`](../passes/47-materialize_valid_shape_symbols.md)
+  [`MaterializeValidShapeSymbols`](../passes/48-materialize_valid_shape_symbols.md)
   *prepends*. That is why pass 10 erases the attr after converting it.
 - **The kwarg is an `int`, not the enum.** It follows `tile.store`'s `atomic`
   kwarg, so the serializer, deserializer, `structural_hash` and

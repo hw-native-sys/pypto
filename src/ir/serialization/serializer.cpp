@@ -878,7 +878,7 @@ msgpack::object FieldSerializerVisitor::VisitLeafField(
         std::map<std::string, msgpack::object> entry_map;
         entry_map["var"] = var ? ctx_.SerializeNode(var, zone_) : msgpack::object();
         entry_map["policy"] = msgpack::object(policy);
-        entry_vec.push_back(msgpack::object(entry_map, zone_));
+        entry_vec.emplace_back(entry_map, zone_);
       }
       std::map<std::string, msgpack::object> pol_map;
       pol_map["type"] = msgpack::object("VarPolicyList", zone_);
@@ -895,7 +895,7 @@ msgpack::object FieldSerializerVisitor::VisitLeafField(
         std::map<std::string, msgpack::object> entry_map;
         entry_map["index"] = msgpack::object(idx);
         entry_map["policy"] = msgpack::object(policy);
-        entry_vec.push_back(msgpack::object(entry_map, zone_));
+        entry_vec.emplace_back(entry_map, zone_);
       }
       std::map<std::string, msgpack::object> pol_map;
       pol_map["type"] = msgpack::object("IndexPolicyList", zone_);

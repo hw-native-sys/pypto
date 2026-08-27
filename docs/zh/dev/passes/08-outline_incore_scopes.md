@@ -211,7 +211,7 @@ root 是外层函数的 `InOut` 形参时，把被调函数的 `Out` 重新提�
 上的 `cache` kwarg 并擦除它为止。参数索引仅在该窗口内有效 —— 后续 pass 既会向参数列表
 追加（[`InjectGMPipeBuffer`](22-inject_gm_pipe_buffer.md)、
 [`MaterializeDistTensorCtx`](43-materialize_dist_tensor_ctx.md)），也会向前插入
-（[`MaterializeValidShapeSymbols`](47-materialize_valid_shape_symbols.md)）。本 pass 用
+（[`MaterializeValidShapeSymbols`](48-materialize_valid_shape_symbols.md)）。本 pass 用
 `CHECK_SPAN` 拒绝两类用户错误：声明所指的张量未被作用域 body 捕获（既不读也不写，因而
 没有参数承载该策略），以及对 `InferParamDirections` 判定为 `Out` / `InOut` 的参数声明
 `BYPASS`（对同一 kernel 自己会写的字节做 bypass 读取，是一致性缺陷）。该转换位于共享的
