@@ -64,6 +64,16 @@ namespace narrow_loop_carry {
  *     Such a carry is declined; where its pitches genuinely differ, ``AccCompactValid``
  *     then reports it as a compile error rather than letting it corrupt data.
  *
+ * Cost is O(N log N) in the size of the function: three linear sweeps -- a scope index, a
+ * decision pass over types, and one top-down rewrite -- over ordered-map lookups. The
+ * rewrite settles each loop's carries *before* visiting its body, so one visit types the
+ * body against the narrowed carry; deciding afterwards would re-type it a second time,
+ * and a nested carry would compound that per level.
+ *
+ * One round: a carry whose yields only narrow *because* an inner carry was repaired is
+ * decided against the types as they were, and is left alone. Nothing miscompiles -- an
+ * unrepaired pitch disagreement is what ``AccCompactValid`` rejects.
+ *
  * @param func Function to repair (any type; only loop carries inside it are touched)
  * @return The repaired function, or @p func itself when nothing narrows
  */

@@ -205,6 +205,8 @@ namespace ir {
 
 namespace {
 
+using transform_utils::PreserveCallAttrs;
+
 constexpr const char* kPassName = "AutoTileMatmulL0";
 
 ExprPtr MakeIndex(int64_t v, const Span& span) {
@@ -1399,17 +1401,6 @@ class SubtilePlacer {
   [[nodiscard]] virtual VarPtr PlaceAt(std::vector<StmtPtr>& stmts, const VarPtr& sub, const ExprPtr& row_off,
                                        const ExprPtr& col_off, const VarPtr& chain_in, int step) = 0;
 };
-
-CallPtr PreserveCallAttrs(const std::vector<std::pair<std::string, std::any>>& attrs,
-                          const CallPtr& deduced) {
-  if (attrs.empty()) return deduced;
-  return std::make_shared<Call>(deduced->op_, deduced->args_, deduced->kwargs_, attrs, deduced->GetType(),
-                                deduced->span_);
-}
-
-CallPtr PreserveCallAttrs(const CallPtr& original, const CallPtr& deduced) {
-  return PreserveCallAttrs(original->attrs_, deduced);
-}
 
 /// Direct-store placement: ``out = tile.store(sub, [base_r + mi, base_c + ni],
 /// out_prev)`` per sub-tile, chaining the DDR output tensor in SSA form.

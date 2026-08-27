@@ -360,7 +360,7 @@ for k0 in pl.pipeline(0, K, K_TILE, stage=2):
 
 **Python 绑定**：`python/bindings/modules/passes.cpp`
 
-**测试**：`tests/ut/ir/transforms/test_convert_tensor_to_tile_ops.py`
+**测试**：`tests/ut/ir/transforms/test_convert_tensor_to_tile_ops.py`、`tests/ut/ir/transforms/test_narrow_loop_carry_valid_shape.py`（携带值修复）
 
 ## Pass 属性
 

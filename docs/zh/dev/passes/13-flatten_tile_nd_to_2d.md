@@ -189,7 +189,7 @@ acc__tile      : Tile[[64, 256], INT32]                              <- pl.creat
 
 | 阶段 | 文件 | 职责 |
 | ---- | ---- | ---- |
-| 协调 | `src/ir/transforms/flatten_tile_nd_to_2d/pass.cpp` | 选择 InCore 函数，并按 analysis → rewrite 顺序执行 |
+| 协调 | `src/ir/transforms/flatten_tile_nd_to_2d/pass.cpp` | 选择 InCore 函数，按 analysis → rewrite 顺序执行，并修复被改写收窄的循环携带值 |
 | 分析 (analysis) | `src/ir/transforms/flatten_tile_nd_to_2d/analysis.cpp` | 只读的前置条件验证 |
 | 改写协调 | `src/ir/transforms/flatten_tile_nd_to_2d/rewrite.cpp` | 递归遍历语句并分派算子改写 |
 | 改写工具 | `src/ir/transforms/flatten_tile_nd_to_2d/rewrite_utils.cpp` | 共享形状、索引和容量辅助逻辑 |
@@ -201,7 +201,7 @@ acc__tile      : Tile[[64, 256], INT32]                              <- pl.creat
 
 **Python 绑定**：`python/bindings/modules/passes.cpp`
 
-**测试**：`tests/ut/ir/transforms/test_flatten_tile_nd_to_2d.py`、`tests/st/codegen/dsl/test_flatten_dynamic_tile_3d.py`（issue #1578 端到端）
+**测试**：`tests/ut/ir/transforms/test_flatten_tile_nd_to_2d.py`、`tests/ut/ir/transforms/test_narrow_loop_carry_valid_shape.py`（携带值修复）、`tests/st/codegen/dsl/test_flatten_dynamic_tile_3d.py`（issue #1578 端到端）
 
 ## Pass 属性
 
