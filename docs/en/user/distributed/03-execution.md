@@ -30,8 +30,7 @@ directly via `DistributedWorker(compiled)`, importable from
 | `rt.submit(compiled, x, y, z)` | Bounded asynchronous dispatch — returns a `DistributedRunHandle`. |
 | `rt.alloc_tensor(shape, dtype, *, init=None)` | Allocate a worker-resident `DeviceTensor`. `init` copies from host (one-time H2D). |
 | `rt.free_tensor(tensor)` | Release a `DeviceTensor`. |
-| `rt.copy_to(dst_dev_ptr, src_host_ptr, nbytes, *, worker_id=0)` | Explicit staged H2D copy. A host `torch.Tensor` source only needs to be CPU-contiguous and may be created after `prepare()`. |
-| `rt.copy_to_offset(dst_base_ptr, dst_offset, src_host_ptr, nbytes, *, worker_id=0)` | Explicit staged H2D copy into a sub-range of an existing device allocation. |
+| `rt.copy_to(dst_dev_ptr, src_host_ptr, nbytes, *, dst_offset=0, src_offset=0, worker_id=0)` | Explicit staged H2D copy. `dst_offset` and `src_offset` allow addressing sub-ranges: copy from ``src_host_ptr + src_offset`` into ``dst_dev_ptr + dst_offset``. A host `torch.Tensor` source only needs to be CPU-contiguous and may be created after `prepare()`. |
 | `rt.copy_from(dst_host_ptr, src_dev_ptr, nbytes, *, worker_id=0)` | Explicit staged D2H copy. A host `torch.Tensor` destination only needs to be CPU-contiguous and may be created after `prepare()`. |
 | `rt.alloc_stacked_tensor(host_w)` | Shard host_w along dim 0 — shard `i` uploaded to card `i`. Returns `StackedDeviceTensor`. |
 | `rt.free_stacked_tensor(stacked)` | Release all shards of a `StackedDeviceTensor`. |

@@ -966,57 +966,62 @@ class TestDeviceMemoryApi:
         rt.free(ptr)
         rt.close()
 
-    def test_copy_to_offset_writes_into_device_region(self, patched_setup):
+    def test_copy_to_with_offset_writes_into_device_region(self, patched_setup):
         rt = DistributedWorker(_fake_compiled([_param("a", [16, 16])], []))
         ptr = rt.malloc(128)
         host = (ctypes.c_ubyte * 16)()
         for i in range(16):
             host[i] = i
-        rt.copy_to_offset(ptr, 32, ctypes.addressof(host), 16)
+        rt.copy_to(ptr, ctypes.addressof(host), 16, dst_offset=32)
 
-        call_args = patched_setup["worker"].copy_to.call_args.args
-        assert call_args[0] is rt._buffer_for_ptr(ptr)
-        assert call_args[1] != host
-        assert call_args[2] == 32
-        assert ctypes.string_at(call_args[1].base, 16) == ctypes.string_at(ctypes.addressof(host), 16)
-        patched_setup["worker"].release_buffer.assert_called_once_with(call_args[1])
+        call_args = patched_setup["worker"].copy_to.call_args
+        assert call_args.args[0] is rt._buffer_for_ptr(ptr)
+        assert call_args.args[1] != host
+        assert call_args.kwargs.get("dst_offset") == 32
+        assert call_args.kwargs["nbytes"] == 16
+        assert ctypes.string_at(call_args.args[1].base, 16) == ctypes.string_at(ctypes.addressof(host), 16)
+        patched_setup["worker"].release_buffer.assert_called_once_with(call_args.args[1])
         rt.free(ptr)
         rt.close()
 
-    def test_copy_to_offset_checks_parameters(self, patched_setup):
+    def test_copy_to_with_offset_checks_parameters(self, patched_setup):
         rt = DistributedWorker(_fake_compiled([_param("a", [16, 16])], []))
         ptr = rt.malloc(64)
         host = (ctypes.c_ubyte * 32)()
         bad_offset: Any = "0"
 
         with pytest.raises(ValueError, match="dst_offset must be a non-negative int"):
-            rt.copy_to_offset(ptr, -1, ctypes.addressof(host), 16)
+            rt.copy_to(ptr, ctypes.addressof(host), 16, dst_offset=-1)
         with pytest.raises(ValueError, match="dst_offset must be a non-negative int"):
-            rt.copy_to_offset(ptr, bad_offset, ctypes.addressof(host), 16)
+            rt.copy_to(ptr, ctypes.addressof(host), 16, dst_offset=bad_offset)
+        with pytest.raises(ValueError, match="src_offset must be a non-negative int"):
+            rt.copy_to(ptr, ctypes.addressof(host), 16, src_offset=-1)
+        with pytest.raises(ValueError, match="src_offset must be a non-negative int"):
+            rt.copy_to(ptr, ctypes.addressof(host), 16, src_offset=bad_offset)
         with pytest.raises(ValueError, match="must be a positive int"):
-            rt.copy_to_offset(ptr, 0, ctypes.addressof(host), 0)
+            rt.copy_to(ptr, ctypes.addressof(host), 0, dst_offset=0)
         with pytest.raises(ValueError, match="must be a positive int"):
-            rt.copy_to_offset(ptr, 0, ctypes.addressof(host), -1)
+            rt.copy_to(ptr, ctypes.addressof(host), -1, dst_offset=0)
         with pytest.raises(ValueError, match="exceeds allocation size"):
-            rt.copy_to_offset(ptr, 60, ctypes.addressof(host), 16)
+            rt.copy_to(ptr, ctypes.addressof(host), 16, dst_offset=60)
         with pytest.raises(ValueError, match="interior pointer"):
-            rt.copy_to_offset(ptr + 32, 0, ctypes.addressof(host), 16)
+            rt.copy_to(ptr + 32, ctypes.addressof(host), 16, dst_offset=0)
 
         rt.free(ptr)
         rt.close()
 
-    def test_copy_to_offset_supports_non_default_worker_id(self, patched_setup):
+    def test_copy_to_with_offset_supports_non_default_worker_id(self, patched_setup):
         rt = DistributedWorker(_fake_compiled([_param("a", [16, 16])], []))
         ptr = rt.malloc(64, worker_id=1)
         host = (ctypes.c_ubyte * 16)()
-        rt.copy_to_offset(ptr, 8, ctypes.addressof(host), 8, worker_id=1)
+        rt.copy_to(ptr, ctypes.addressof(host), 8, dst_offset=8, worker_id=1)
 
-        call_args = patched_setup["worker"].copy_to.call_args.args
-        assert call_args[0] is rt._buffer_for_ptr(ptr, worker_id=1)
-        assert call_args[2] == 8
+        call_args = patched_setup["worker"].copy_to.call_args
+        assert call_args.args[0] is rt._buffer_for_ptr(ptr, worker_id=1)
+        assert call_args.kwargs["dst_offset"] == 8
 
         with pytest.raises(ValueError, match="worker_id=0"):
-            rt.copy_to_offset(ptr, 0, ctypes.addressof(host), 8, worker_id=0)
+            rt.copy_to(ptr, ctypes.addressof(host), 8, worker_id=0)
         rt.free(ptr, worker_id=1)
         rt.close()
 
