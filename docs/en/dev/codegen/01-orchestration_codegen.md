@@ -484,10 +484,9 @@ aliases its result onto its input's emit name, so both branches mutate the same
 storage and the merge is a no-op. A raw C array could not be declared from its
 type nor assigned anyway — asking `GetCppType` for one is an internal error.
 
-`BindArrayReturnVars` instead resolves the backing array each branch yields
-(walking `array.update_element` chains back to the array bound before the `if`)
-and binds the phi's emit name onto it, so reads after the `if` resolve straight
-to that array:
+Instead, each branch's `YieldStmt` records the backing array it resolves to, and
+the phi's emit name is bound onto it once both branches are emitted, so reads
+after the `if` resolve straight to that array:
 
 ```cpp
 PTO2TaskId tids[8];             // the one backing array
@@ -498,16 +497,25 @@ if ((i < static_cast<int64_t>(n))) {
 }
 ```
 
-Binding happens **before** the branches are emitted, because every generated
-`PTO2_SCOPE` snapshots and restores `array_carry_vars_` (see [Manual Scope and
-TaskId Lowering](#manual-scope-and-taskid-lowering)) — a binding added inside a
-branch body would be discarded at its closing brace. This mirrors how loop
-carries are registered ahead of their body's scope, and how the PTO backend
-keeps in-place (array / tensor) return_vars out of its `scf.if` results.
+Two ordering constraints shape this:
+
+- **Resolution happens at each branch's yield**, not by pre-scanning the branch.
+  The yielded value is not always an `array.update_element` result — when the
+  array is updated under *nested* control flow, the branch yields the inner
+  `if` / `for`'s own ArrayType return_var. By yield time that nested statement
+  has already been bound, so one lookup resolves every nesting depth. This also
+  keeps the work O(1) per phi: no branch subtree is traversed twice.
+- **Installation happens after both branches**, at the enclosing level, because
+  every generated `PTO2_SCOPE` snapshots and restores `array_carry_vars_` (see
+  [Manual Scope and TaskId Lowering](#manual-scope-and-taskid-lowering)) — a
+  registration made inside a branch body would be discarded at its closing
+  brace. The PTO backend captures and binds its in-place return_vars the same
+  way.
 
 Both branches must name the same backing array. Creating a *different* array in
-each branch is rejected with a user-facing `CHECK` — create the array before the
-`if` and write its elements inside the branches instead.
+each branch leaves nothing single to bind the phi onto, and is rejected with a
+user-facing `CHECK` — create the array before the `if` and write its elements
+inside the branches instead.
 
 ## Python API
 

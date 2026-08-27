@@ -770,13 +770,77 @@ def test_orch_array_store_in_both_branches_shares_one_backing():
     assert "arr[0] = 1;" in code, code
 
 
+def test_orch_array_store_under_nested_if_shares_one_backing():
+    """An array updated under a *nested* runtime `if` still resolves to one array.
+
+    The outer `if`'s phi yields the inner `if`'s phi, not an
+    ``array.update_element`` result. Resolution therefore has to run at yield
+    time, once the inner statement has bound its own return_var — pre-scanning
+    the outer branch for update_element chains would not find one.
+    """
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            n_live: pl.Tensor[[1], pl.INT32],
+            out: pl.Out[pl.Tensor[[16], pl.INT32]],
+        ) -> pl.Tensor[[16], pl.INT32]:
+            n: pl.Scalar[pl.INT32] = pl.read(n_live, [0])
+            arr = pl.array.create(8, pl.INT32)
+            if n > 0:
+                if n > 1:
+                    arr[0] = 7
+            v: pl.Scalar[pl.INT32] = arr[0]
+            pl.write(out, [0], v)
+            return out
+
+    code = _compile_orch(Prog)
+    decls = [ln for ln in code.splitlines() if "int32_t arr[8]" in ln]
+    assert len(decls) == 1, code
+    assert "arr[0] = 7;" in code, code
+    assert "__yield_i" not in code, code
+
+
+def test_orch_array_store_in_loop_inside_if_shares_one_backing():
+    """A loop nested in an `if` branch also resolves back to the one array.
+
+    Here the outer `if`'s phi yields the ForStmt's ArrayType return_var — a
+    second nested-control-flow shape the yield-time resolution must cover.
+    """
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            n_live: pl.Tensor[[1], pl.INT32],
+            out: pl.Out[pl.Tensor[[16], pl.INT32]],
+        ) -> pl.Tensor[[16], pl.INT32]:
+            n: pl.Scalar[pl.INT32] = pl.read(n_live, [0])
+            arr = pl.array.create(8, pl.INT32)
+            if n > 0:
+                for i in pl.range(4):
+                    arr[i] = i
+            v: pl.Scalar[pl.INT32] = arr[0]
+            pl.write(out, [0], v)
+            return out
+
+    code = _compile_orch(Prog)
+    decls = [ln for ln in code.splitlines() if "int32_t arr[8]" in ln]
+    assert len(decls) == 1, code
+    assert "arr[i] = i;" in code, code
+
+
 def test_orch_array_created_inside_branch_is_rejected_with_user_error():
     """A per-branch array cannot back the phi — reject it with an actionable message.
 
-    Each branch creates its own storage, so there is no single backing array to
-    bind the phi onto. That is a user-expressible construct orchestration cannot
-    lower, so it must surface as a ValueError naming the fix, not as an internal
-    assertion about a type the author never wrote.
+    Each branch creates its own storage, so the two branches resolve to
+    different backing arrays and there is nothing single to bind the phi onto.
+    That is a user-expressible construct orchestration cannot lower, so it must
+    surface as a ValueError naming the fix, not as an internal assertion about a
+    type the author never wrote.
     """
 
     @pl.program
@@ -798,7 +862,7 @@ def test_orch_array_created_inside_branch_is_rejected_with_user_error():
             pl.write(out, [0], v)
             return out
 
-    with pytest.raises(ValueError, match="cannot outlive it"):
+    with pytest.raises(ValueError, match="different array in each branch"):
         _compile_orch(Prog)
 
 

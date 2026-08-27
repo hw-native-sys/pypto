@@ -122,35 +122,6 @@ const char* ParamDirectionToRuntimeName(ParamDirection dir) {
   return "";
 }
 
-/// Maps each ``array.update_element`` result Var in a subtree to the array it
-/// was derived from. Lets an ``IfStmt`` branch's ArrayType yield be walked back
-/// to the backing array that was already bound before the ``if``: the result of
-/// ``array.update_element`` shares storage with its input, so the whole chain
-/// names one C-stack array.
-class ArrayUpdateChainCollector : public ir::IRVisitor {
- public:
-  void VisitStmt_(const AssignStmtPtr& op) override {
-    // ``array.update_element`` is a builtin, so a Submit (a task launch of a
-    // user function) can never carry it; the view keeps the dispatch uniform
-    // with the rest of the file rather than adding a Call-only special case.
-    CallPtr call = transform_utils::AsCallOrSubmitView(op->value_);
-    if (call && IsOp(call, "array.update_element") && !call->args_.empty()) {
-      chain_[op->var_.get()] = call->args_[0];
-    }
-    ir::IRVisitor::VisitStmt_(op);
-  }
-
-  /// The array ``var`` was derived from, or nullptr when it is not an
-  /// ``array.update_element`` result inside this subtree.
-  [[nodiscard]] ExprPtr Input(const Var* var) const {
-    auto it = chain_.find(var);
-    return it == chain_.end() ? nullptr : it->second;
-  }
-
- private:
-  std::unordered_map<const Var*, ExprPtr> chain_;
-};
-
 // The runtime primitive ``Arg::set_dependencies(ptr, count)`` has no upper
 // bound on the explicit dep count, and codegen sizes each call's
 // ``PTO2TaskId <task>_deps[K]`` stack array to its exact edge count, so there
@@ -1128,105 +1099,87 @@ class OrchestrationStmtCodegen : public CodegenBase {
     array_carry_vars_ = std::move(saved_array_carry);
   }
 
-  /// Bind each ArrayType ``IfStmt`` return_var (a phi) onto the C-stack array
-  /// its branches mutate, instead of declaring a variable for it.
+  /// Mark each ArrayType ``IfStmt`` return_var (a phi) as bound-by-yield, so no
+  /// declaration is emitted for it.
   ///
-  /// An ArrayType SSA value is a *reference* to one backing array, not a
+  /// An ArrayType SSA value is a *reference* to one backing C-stack array, not a
   /// copyable value: ``array.update_element`` is SSA-functional in the IR but
   /// in-place in the emitted C, and every result aliases its input's emit name
-  /// (see ``HandleArrayUpdateElementAssign``). Both branches therefore mutate
-  /// the same storage and the merge is a no-op — there is nothing to declare,
-  /// and a raw C array could not be declared from its type or assigned anyway.
-  /// The PTO backend keeps in-place (array / tensor) return_vars out of the
-  /// ``scf.if`` results for the same reason (``pto_control_flow_codegen.cpp``).
+  /// (see ``HandleArrayUpdateElementAssign``). Both branches therefore mutate the
+  /// same storage and the merge is a no-op — there is nothing to declare, and a
+  /// raw C array could not be declared from its type or assigned anyway. The PTO
+  /// backend keeps in-place (array / tensor) return_vars out of the ``scf.if``
+  /// results for the same reason (``pto_control_flow_codegen.cpp``).
   ///
-  /// Binding happens *before* the branches are emitted, because every generated
-  /// ``PTO2_SCOPE`` snapshots and restores ``array_carry_vars_`` — a binding
-  /// added inside a branch body would be discarded at its closing brace. This
-  /// matches how loop carries are registered ahead of their body's scope.
-  void BindArrayReturnVars(const IfStmtPtr& if_stmt) {
-    // Slots into ``return_vars_`` — yield values are positionally aligned with
-    // it, so the index is what both branches are queried by.
-    std::vector<size_t> array_slots;
-    for (size_t i = 0; i < if_stmt->return_vars_.size(); ++i) {
-      if (As<ArrayType>(if_stmt->return_vars_[i]->GetType())) array_slots.push_back(i);
-    }
-    if (array_slots.empty()) return;
-
-    INTERNAL_CHECK_SPAN(if_stmt->else_body_.has_value(), if_stmt->span_)
-        << "Internal error: IfStmt with ArrayType return_vars requires an else_body to name the "
-           "backing array its branches mutate";
-
-    // Both branches must resolve to the SAME backing array. Assert it rather
-    // than binding to whichever branch was walked last.
-    auto then_names = ResolveBranchArrayNames(if_stmt, if_stmt->then_body_, array_slots, "then");
-    auto else_names = ResolveBranchArrayNames(if_stmt, *if_stmt->else_body_, array_slots, "else");
-
-    for (size_t i = 0; i < array_slots.size(); ++i) {
-      const auto& rv = if_stmt->return_vars_[array_slots[i]];
-      CHECK_SPAN(then_names[i].second == else_names[i].second, if_stmt->span_)
-          << "Assigning a different array in each branch of an `if` is not supported: '" << rv->name_hint_
-          << "' would name one array on the `if` path (" << then_names[i].second
-          << ") and another on the `else` path (" << else_names[i].second
-          << "). Create the array before the `if` and write its elements inside the branches "
-             "instead.";
-      const auto& root = then_names[i].first;
-      emit_name_map_[rv.get()] = then_names[i].second;
-      // Share the backing array's carry / TaskId registrations so a downstream
-      // ``deps=[arr[i]]`` or an enclosing ForStmt carry seeded by the phi
-      // resolves to the same storage.
-      auto carry_it = array_carry_vars_.find(root.get());
-      if (carry_it != array_carry_vars_.end()) array_carry_vars_[rv.get()] = carry_it->second;
-      auto tid_it = manual_task_id_map_.find(root.get());
-      if (tid_it != manual_task_id_map_.end()) manual_task_id_map_[rv.get()] = tid_it->second;
+  /// Each branch's YieldStmt records the backing array it resolves to (see
+  /// ``RecordArrayPhiYield``); ``InstallArrayPhiBindings`` then binds the phi
+  /// after both branches are emitted. Resolving at yield time — rather than by
+  /// pre-scanning the branch — is what lets an array updated under *nested*
+  /// control flow work: a nested ``if`` / ``for`` has already bound its own
+  /// return_var by the time the enclosing branch yields it.
+  void MarkArrayReturnVars(const IfStmtPtr& if_stmt) {
+    for (const auto& rv : if_stmt->return_vars_) {
+      if (!As<ArrayType>(rv->GetType())) continue;
+      INTERNAL_CHECK_SPAN(if_stmt->else_body_.has_value(), if_stmt->span_)
+          << "Internal error: IfStmt with ArrayType return_vars requires an else_body to name the "
+             "backing array its branches mutate";
+      pending_array_phis_.emplace(rv.get(), ArrayPhiBinding{});
     }
   }
 
-  /// For each ArrayType return_var slot, resolve the backing array one branch
-  /// yields: walk ``array.update_element`` results defined inside the branch
-  /// back to the array Var that was already bound before the ``if``. Returns
-  /// (root var, emit name) per slot, in ``array_slots`` order.
-  std::vector<std::pair<VarPtr, std::string>> ResolveBranchArrayNames(const IfStmtPtr& if_stmt,
-                                                                      const StmtPtr& branch_body,
-                                                                      const std::vector<size_t>& array_slots,
-                                                                      const std::string& branch_label) {
-    auto yield = transform_utils::GetLastYieldStmt(transform_utils::UnwrapAutoScope(branch_body));
-    INTERNAL_CHECK_SPAN(yield, if_stmt->span_)
-        << "Internal error: IfStmt " << branch_label << "-branch has ArrayType return_vars but no yield";
+  /// Record the backing array one branch yields for an ArrayType phi. Called
+  /// from the branch's YieldStmt, where the yielded Var is already bound —
+  /// including when it is a nested ``if`` / ``for`` return_var.
+  void RecordArrayPhiYield(const VarPtr& rv, const ExprPtr& yield_value, const Span& span) {
+    auto yield_var = AsVarLike(yield_value);
+    INTERNAL_CHECK_SPAN(yield_var, span) << "Internal error: ArrayType IfStmt phi '" << rv->name_hint_
+                                         << "' expects a Var yield value, got " << yield_value->TypeName();
+    auto name_it = emit_name_map_.find(yield_var.get());
+    INTERNAL_CHECK_SPAN(name_it != emit_name_map_.end(), span)
+        << "Internal error: ArrayType IfStmt phi '" << rv->name_hint_ << "' yield value '"
+        << yield_var->name_hint_ << "' has no backing array emit name";
 
-    ArrayUpdateChainCollector chain;
-    chain.VisitStmt(branch_body);
-
-    std::vector<std::pair<VarPtr, std::string>> resolved;
-    resolved.reserve(array_slots.size());
-    for (size_t slot : array_slots) {
-      const auto& rv = if_stmt->return_vars_[slot];
-      INTERNAL_CHECK_SPAN(slot < yield->value_.size(), if_stmt->span_)
-          << "Internal error: IfStmt " << branch_label << "-branch yield has no value for ArrayType "
-          << "return_var '" << rv->name_hint_ << "'";
-
-      auto var = AsVarLike(yield->value_[slot]);
-      // Walk back through in-branch update_element results to the array bound
-      // before the ``if``. SSA guarantees the chain is acyclic; the visited set
-      // is a defensive bound against malformed IR.
-      std::unordered_set<const Var*> seen;
-      while (var && !emit_name_map_.count(var.get()) && seen.insert(var.get()).second) {
-        auto input = chain.Input(var.get());
-        if (!input) break;
-        var = AsVarLike(input);
-      }
-      INTERNAL_CHECK_SPAN(var, if_stmt->span_)
-          << "Internal error: IfStmt " << branch_label << "-branch ArrayType yield for '" << rv->name_hint_
-          << "' does not resolve to a Var";
-      auto name_it = emit_name_map_.find(var.get());
-      CHECK_SPAN(name_it != emit_name_map_.end(), if_stmt->span_)
-          << "An array created inside an `if` branch cannot outlive it: '" << rv->name_hint_
-          << "' is read after the `if`, but the " << branch_label << " branch yields '" << var->name_hint_
-          << "', which names no array declared before the `if`. Create the array before the `if` "
-             "and write its elements inside the branches instead.";
-      resolved.emplace_back(var, name_it->second);
+    auto& binding = pending_array_phis_.at(rv.get());
+    if (binding.resolved) {
+      // The other branch got here first — both must name the same storage.
+      // Creating a separate array per branch has no single backing to bind to.
+      CHECK_SPAN(binding.array_name == name_it->second, span)
+          << "Assigning a different array in each branch of an `if` is not supported: '" << rv->name_hint_
+          << "' would name one array on one path (" << binding.array_name << ") and another on the other ("
+          << name_it->second
+          << "). Create the array before the `if` and write its elements inside the branches "
+             "instead.";
+      return;
     }
-    return resolved;
+    binding.resolved = true;
+    binding.array_name = name_it->second;
+    // Carry the backing array's registrations so a downstream ``deps=[arr[i]]``
+    // or an enclosing ForStmt carry seeded by the phi resolves to the same
+    // storage. Captured here because a generated ``PTO2_SCOPE`` restores
+    // ``array_carry_vars_`` / ``manual_task_id_map_`` at its closing brace.
+    auto carry_it = array_carry_vars_.find(yield_var.get());
+    if (carry_it != array_carry_vars_.end()) binding.carry = carry_it->second;
+    auto tid_it = manual_task_id_map_.find(yield_var.get());
+    if (tid_it != manual_task_id_map_.end()) binding.task_id = tid_it->second;
+  }
+
+  /// Install the array-phi bindings captured from the branches. Runs after both
+  /// branches are emitted, at the enclosing level, because every generated
+  /// ``PTO2_SCOPE`` snapshots and restores ``array_carry_vars_`` — registering
+  /// inside a branch body would be discarded at its closing brace.
+  void InstallArrayPhiBindings(const IfStmtPtr& if_stmt) {
+    for (const auto& rv : if_stmt->return_vars_) {
+      if (!As<ArrayType>(rv->GetType())) continue;
+      auto it = pending_array_phis_.find(rv.get());
+      if (it == pending_array_phis_.end()) continue;
+      INTERNAL_CHECK_SPAN(it->second.resolved, if_stmt->span_)
+          << "Internal error: IfStmt ArrayType return_var '" << rv->name_hint_
+          << "' was not resolved to a backing array by either branch yield";
+      emit_name_map_[rv.get()] = it->second.array_name;
+      if (it->second.carry.has_value()) array_carry_vars_[rv.get()] = *it->second.carry;
+      if (it->second.task_id.has_value()) manual_task_id_map_[rv.get()] = *it->second.task_id;
+      pending_array_phis_.erase(it);
+    }
   }
 
   void VisitStmt_(const IfStmtPtr& if_stmt) override {
@@ -1281,11 +1234,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
       }
     }
 
-    BindArrayReturnVars(if_stmt);
+    MarkArrayReturnVars(if_stmt);
 
     for (const auto& rv : if_stmt->return_vars_) {
-      // ArrayType return_vars were bound to their backing array above and need
-      // no declaration — see BindArrayReturnVars.
+      // ArrayType return_vars are bound to their backing array by the branch
+      // yields and need no declaration — see MarkArrayReturnVars.
       if (As<ArrayType>(rv->GetType())) continue;
       const std::string emit_name = ReserveVarEmitName(rv.get());
       const std::string cpp_type = GetCppType(rv->GetType());
@@ -1319,6 +1272,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
 
     EmitIndentedLine("}");
+
+    // Bind array phis here, at the enclosing level: a registration made inside a
+    // branch body would be dropped by that branch's scope restore.
+    InstallArrayPhiBindings(if_stmt);
   }
 
   void VisitStmt_(const AssignStmtPtr& assign) override {
@@ -1574,6 +1531,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
         continue;
       }
       const auto& rv = current_return_vars_[i];
+      // ArrayType IfStmt phi: record the backing array this branch yields; the
+      // enclosing IfStmt binds it once both branches are emitted. Nothing is
+      // emitted — the branch already mutated that array in place.
+      if (pending_array_phis_.count(rv.get())) {
+        RecordArrayPhiYield(rv, yield_stmt->value_[i], yield_stmt->span_);
+        continue;
+      }
       auto dyn_it = dynamic_task_id_collections_.find(rv.get());
       if (dyn_it != dynamic_task_id_collections_.end()) {
         auto yield_var = AsVarLike(yield_stmt->value_[i]);
@@ -4259,6 +4223,18 @@ class OrchestrationStmtCodegen : public CodegenBase {
     int64_t size;
   };
   std::unordered_map<const Var*, ArrayCarryEntry> array_carry_vars_;
+  /// In-flight ArrayType ``IfStmt`` return_vars (phis). An ArrayType SSA value
+  /// names one backing C-stack array rather than a copyable value, so a phi is
+  /// aliased onto that array instead of being declared (see
+  /// ``MarkArrayReturnVars``). An entry is added before the branches are
+  /// emitted, filled in by each branch's yield, and erased once bound.
+  struct ArrayPhiBinding {
+    bool resolved = false;
+    std::string array_name;
+    std::optional<ArrayCarryEntry> carry;
+    std::optional<ManualTaskIdBinding> task_id;
+  };
+  std::unordered_map<const Var*, ArrayPhiBinding> pending_array_phis_;
   std::unordered_map<const Var*, DynamicTaskIdCollection> dynamic_task_id_collections_;
   bool needs_vector_include_ = false;
   /// Names of mutable ChipTensor values declared in each generated C++ block.
