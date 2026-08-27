@@ -1348,7 +1348,44 @@ jobs:
       contents: read
     # TEST MODE: keep the 2-device runner and pin task-submit to DEVICE_ID
     # (see system-tests). FLIP TO PROD: cpu runner + `--device auto --device-num 2`.
-    runs-on: [self-hosted, linux, npu]
+    #
+    # Pinned to aarch64, which is a workaround and not a fix. Since #2525 gave
+    # the `npu` pool a second host, the label spans an aarch64 box (runners
+    # `npu-N`) and an x86_64 one (`infra024-npu-a2a3-N`), and this job's
+    # communication cases do not survive the x86_64 half. Over the 19 most
+    # recent completed runs: 11/11 green on aarch64, 3 green / 5 red on x86_64.
+    #
+    # The reason to pin is not the red check, it is that the failure WEDGES THE
+    # CARD. A red run starts with one collective hanging --
+    #   chip run lane is poisoned: finalize_native_run failed
+    #   aclrtSynchronizeStreamWithTimeout (AICPU) failed: 507018
+    # -- and from there the device cannot be re-entered at all: 207 subsequent
+    # cases die in `simpler_init failed with code 507033`, and the recovery path
+    # fails the same way (`force_reset_device: aclrtSetDevice(2) failed: 507033`,
+    # `attach_current_thread: rtSetDevice(12) failed: 507033`). Both borrowed
+    # cards end up unusable and CI cannot reset them itself.
+    #
+    # `infra024-npu-a2a3-1..10` are ten runner instances on ONE machine sharing
+    # ONE set of cards, so cards left in that state are not contained to the job
+    # that hit it. pypto-lib-model is pinned alongside this job as a precaution
+    # for the same reason; see its comment for why that evidence is weaker.
+    #
+    # Two things this evidence does NOT establish, so do not repeat them as
+    # fact. (1) That this job is the origin of the host's bad cards: over one
+    # morning the x86_64 host showed a failure wave across ALL its npu jobs,
+    # single-card `system-tests` / `system-tests-direct` included, and a
+    # two-card run of this job passed in the middle of it -- which it could not
+    # have done if the cards were globally wedged. A likelier reading is that
+    # some cards are bad at any given time and this job, needing two, draws one
+    # more often. (2) That the split is architectural: the 3 green x86_64 runs
+    # interleave with the red ones in time, so this is that host's health, not
+    # its ISA. Pinning buys a trustworthy signal; it does not diagnose the host.
+    #
+    # Cost: the job no longer draws from the x86_64 half of the npu pool, so it
+    # can queue behind the aarch64 box for a two-card slot. #2525 dropped the
+    # arch label from every self-hosted job deliberately; remove this one again
+    # once multi-card comm stops wedging cards there -- it is not permanent.
+    runs-on: [self-hosted, linux, arm64, npu]
     defaults:
       run:
         working-directory: dist-checkout
@@ -1433,7 +1470,27 @@ jobs:
       contents: read
     # TEST MODE: keep the device runner and pin task-submit to its card (see
     # system-tests). FLIP TO PROD: cpu runner + `--device auto`.
-    runs-on: [self-hosted, linux, npu]
+    #
+    # Pinned to aarch64 as a PRECAUTION, weaker evidence than the pin on
+    # dist-system-tests. One step here is multi-card -- the DeepSeek moe example
+    # at `--ep 2` -- and a failing multi-card run is known to leave the cards it
+    # borrowed unusable (see dist-system-tests for the 507018 -> 507033 cascade
+    # and the failing force_reset). `infra024-npu-a2a3-1..10` are ten runner
+    # instances on ONE machine sharing ONE set of cards, so damage there is not
+    # contained to the job that caused it.
+    #
+    # What is NOT established: that this job has ever wedged anything. Its moe
+    # step has never itself failed (1 pass on x86_64; otherwise skipped behind
+    # an earlier step), and the x86_64 host shows a host-wide npu failure wave
+    # that also takes down single-card jobs, so the two red runs here -- both in
+    # single-card Qwen3 steps -- are at least as likely to be victims of that
+    # wave as evidence of anything this job did. The pin buys insurance against
+    # a failure mode whose damage lands on OTHER jobs, not a fix for this one.
+    #
+    # Cost: nine single-card steps lose the x86_64 half of the pool to contain
+    # one multi-card step. This is the first thing to unpin -- do it as soon as
+    # the x86_64 host is healthy, or split the moe step into its own job.
+    runs-on: [self-hosted, linux, arm64, npu]
     defaults:
       run:
         working-directory: lib-checkout
