@@ -270,8 +270,7 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
   // parser and hand-built or deserialized IR can hand over any int, and an
   // unknown one would otherwise surface at codegen with no context.
   const int cache = GetKwarg<int>(kwargs, "cache", static_cast<int>(CachePolicy::kDefault));
-  CHECK(cache == static_cast<int>(CachePolicy::kDefault) ||
-        cache == static_cast<int>(CachePolicy::kBypass))
+  CHECK(cache == static_cast<int>(CachePolicy::kDefault) || cache == static_cast<int>(CachePolicy::kBypass))
       << "The operator " << op_name
       << " cache kwarg must be CachePolicy.DEFAULT or CachePolicy.BYPASS, but got int " << cache;
 

@@ -33,6 +33,7 @@ yet handled by the structural comparator.
 import pypto.language as pl
 import pytest
 from pypto import ir
+from pypto.language.parser.diagnostics import ParserSyntaxError
 
 BYPASS = int(ir.CachePolicy.BYPASS)
 DEFAULT = int(ir.CachePolicy.DEFAULT)
@@ -291,7 +292,7 @@ def test_conflicting_policies_for_one_tensor_are_rejected():
     also asserts the coherency contract the second statement retracts — so the
     parser rejects it instead of picking a winner.
     """
-    with pytest.raises(Exception, match="conflicting policies"):
+    with pytest.raises(ParserSyntaxError, match="conflicting policies"):
 
         @pl.program
         class Prog:

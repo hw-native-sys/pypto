@@ -6171,7 +6171,6 @@ class TestCachePolicyConversion:
             assert keys.count("cache") == 1, f"duplicate cache kwarg on '{name}'"
             assert loads[name].kwargs["cache"] == self._BYPASS
 
-
     def test_explicit_default_on_a_load_survives_and_beats_the_declaration(self):
         """An explicit ``cache=CachePolicy.DEFAULT`` re-caches one access.
 
@@ -6189,9 +6188,7 @@ class TestCachePolicyConversion:
                 out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 pl.func_attr({"cache_policy": [(0, 1)]})
-                t: pl.Tile[[64, 64], pl.FP32] = pl.load(
-                    x, [0, 0], [64, 64], cache=pl.CachePolicy.DEFAULT
-                )
+                t: pl.Tile[[64, 64], pl.FP32] = pl.load(x, [0, 0], [64, 64], cache=pl.CachePolicy.DEFAULT)
                 out = pl.store(t, [0, 0], out)
                 return out
 

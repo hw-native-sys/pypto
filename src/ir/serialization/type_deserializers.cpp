@@ -61,11 +61,10 @@ using DeserializerContext = serialization::detail::DeserializerContext;
 /// error, not an internal invariant: fail at the boundary with the value in
 /// hand rather than letting an unknown policy reach a pass or codegen.
 static void CheckCachePolicyValue(int policy, const std::string& context) {
-  CHECK(policy == static_cast<int>(CachePolicy::kDefault) ||
-        policy == static_cast<int>(CachePolicy::kBypass))
+  CHECK(policy == static_cast<int>(CachePolicy::kDefault) || policy == static_cast<int>(CachePolicy::kBypass))
       << context << " has unknown CachePolicy value " << policy << "; expected "
-      << static_cast<int>(CachePolicy::kDefault) << " (default) or "
-      << static_cast<int>(CachePolicy::kBypass) << " (bypass)";
+      << static_cast<int>(CachePolicy::kDefault) << " (default) or " << static_cast<int>(CachePolicy::kBypass)
+      << " (bypass)";
 }
 
 static std::vector<std::string> DeserializeLeadingComments(const msgpack::object& fields_obj) {
