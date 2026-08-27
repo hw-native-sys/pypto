@@ -645,6 +645,12 @@ valid `[8, 5]` 是精确的，因为丢弃完全有效的单位轴不改变行�
 `tensor.reshape` 可选的第三个 `valid_shape` 操作数只能*收窄*推导出的区域，
 不能声称拥有该区域之外的数据。
 
+**恒等** `tile.reshape`（目标形状与源形状相同）还会保留源的 layout 三元组
+（`blayout` / `slayout` / `fractal`）及其已解析的内存空间，而不是按形状重新推导 layout。
+重新推导得到的是与空间无关的扁平 layout；`NormalizeImplicitTileView` 只会为可折叠的
+view 兜底，而被收窄、带 pad 或声明了 `compact` 的 Acc 盒永远不可折叠——扁平 layout 于是
+被固化下来，其读者会把 L0C 当作普通 row-major 缓冲区来遍历（issue #2470）。
+
 **数据流：** `TensorType (DDR) → tile.load → TileType (Unified Buffer) → tile.{ops} → TileType → tile.store → TensorType (DDR)`
 
 ### 掩码模式

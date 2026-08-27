@@ -329,6 +329,20 @@ TypePtr DeduceTileReshapeType(const std::vector<ExprPtr>& args,
   tile_view.pad = source_view.pad;
   tile_view.compact = source_view.compact;
 
+  if (tile_view_semantics::ShapeExprListsEquivalent(new_shape, tile_type->shape_)) {
+    // An identity reshape does not move bytes, so it keeps the source's layout and
+    // space. Re-deriving the layout from the shape yields the space-agnostic flat
+    // default, which `NormalizeImplicitTileView` rescues only for a view that
+    // collapses -- and an Acc box that is narrowed, padded or declared compact never
+    // does, so the flat layout would stick and its reader would walk L0C as if it
+    // were a plain row-major buffer (issue #2470).
+    tile_view.blayout = source_view.blayout;
+    tile_view.slayout = source_view.slayout;
+    tile_view.fractal = source_view.fractal;
+    return std::make_shared<TileType>(new_shape, tile_type->dtype_, std::nullopt, tile_view,
+                                      tile_type->GetMemorySpace());
+  }
+
   tile_view.blayout = tile_view_semantics::InferImplicitTileLayoutFromShape(new_shape);
 
   return std::make_shared<TileType>(new_shape, tile_type->dtype_, std::nullopt, tile_view);

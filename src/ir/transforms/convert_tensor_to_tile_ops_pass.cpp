@@ -42,6 +42,7 @@
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/narrow_loop_carry.h"
 #include "pypto/ir/transforms/utils/result_alias_utils.h"
 #include "pypto/ir/transforms/utils/tile_conversion_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -2601,6 +2602,15 @@ Pass ConvertTensorToTileOps() {
           }
         }
       }
+    }
+
+    // A `tensor.matmul` drops its operands' valid_shape, so an accumulator only
+    // becomes narrower than the seed it is carried from once this pass turns it into
+    // a `tile.matmul` -- which re-types the yields but not the carry those yields
+    // flow through. Repair it here rather than leave a carry the TypeCheck and
+    // AccCompactValid verifiers reject (issue #2470).
+    for (auto& func : functions_phase2b) {
+      func = narrow_loop_carry::NarrowAccCarries(func);
     }
 
     return std::make_shared<Program>(functions_phase2b, program->name_, program->span_);

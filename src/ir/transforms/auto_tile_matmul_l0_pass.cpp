@@ -189,6 +189,7 @@
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/acc_init_builder.h"
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
@@ -374,67 +375,34 @@ using DirectDefMap = std::unordered_map<const Var*, AssignStmtPtr>;
 /// chain structurally consistent with the per-iter ``tile.matmul[_acc]``
 /// outputs, so subsequent matmul_acc consumers (and any nested for-loops
 /// initialised from this return_var) still see an Acc-typed accumulator and
-/// can be tiled in turn.  ``tile.create``'s deduce_type honors ``Acc`` and
-/// emits the Nz TileView ``(col_major, row_major, fractal=1024)`` that
-/// matches matmul output, so iter_arg/yield TileViews line up.
+/// can be tiled in turn.
 AssignStmtPtr BuildAccInit(int64_t m, int64_t n, const DataType& dtype, const std::string& name_hint,
                            const Span& span, bool compact = false) {
-  auto& reg = OpRegistry::GetInstance();
-  std::vector<std::pair<std::string, std::any>> kwargs = {{"dtype", dtype},
-                                                          {"target_memory", MemorySpace::Acc}};
-  if (compact) {
-    kwargs.emplace_back("compact", true);
-  }
-  auto call = reg.Create("tile.create", {MakeIndexTuple({m, n}, span)}, kwargs, span);
-  auto var = std::make_shared<Var>(name_hint, call->GetType(), span);
-  return std::make_shared<AssignStmt>(var, call, span);
+  return acc_init::BuildAccStorage({MakeIndex(m, span), MakeIndex(n, span)}, dtype, name_hint, span,
+                                   compact);
 }
 
-struct AccInitValue {
-  std::vector<StmtPtr> stmts;
-  VarPtr value;
-};
+using AccInitValue = acc_init::AccInit;
+
+/// Build an Acc placeholder whose allocation may be box-padded while its valid
+/// rectangle remains the logical output tile.  Delegates to
+/// ``acc_init::BuildNarrowedAccInit``, which ``narrow_loop_carry`` also uses to
+/// re-declare a user-written accumulator seed once a loop proves its carry is
+/// narrower, so the two cannot drift on the compact rule.
+AccInitValue BuildAccInitWithValidShape(int64_t physical_m, int64_t physical_n, ExprPtr valid_m,
+                                        ExprPtr valid_n, const DataType& dtype, const std::string& name_hint,
+                                        const Span& span) {
+  INTERNAL_CHECK_SPAN(valid_m && valid_n, span)
+      << "Internal error: accumulator initializer requires two valid extents";
+  return acc_init::BuildNarrowedAccInit({MakeIndex(physical_m, span), MakeIndex(physical_n, span)},
+                                        {std::move(valid_m), std::move(valid_n)}, dtype, name_hint, span);
+}
 
 enum class MatmulKind {
   kFresh,
   kAccumulate,
   kBias,
 };
-
-/// Build an Acc placeholder whose allocation may be box-padded while its valid
-/// rectangle remains the logical output tile. The ordinary unpadded case keeps
-/// the historical single ``tile.create`` form byte-for-byte.
-AccInitValue BuildAccInitWithValidShape(int64_t physical_m, int64_t physical_n, ExprPtr valid_m,
-                                        ExprPtr valid_n, const DataType& dtype, const std::string& name_hint,
-                                        const Span& span) {
-  INTERNAL_CHECK_SPAN(valid_m && valid_n, span)
-      << "Internal error: accumulator initializer requires two valid extents";
-  auto valid_m_const = As<ConstInt>(valid_m);
-  auto valid_n_const = As<ConstInt>(valid_n);
-  if (valid_m_const && valid_n_const && physical_m == valid_m_const->value_ &&
-      physical_n == valid_n_const->value_) {
-    auto init = BuildAccInit(physical_m, physical_n, dtype, name_hint, span);
-    return AccInitValue{{init}, init->var_};
-  }
-
-  // Declare the buffer compact when its valid rows are not provably its physical
-  // rows -- the same predicate `StampCompactForNarrowedAccRows` applies to a
-  // matmul result, because the K-loop's own `mad` is what writes this buffer and
-  // it takes M from the L0A operand's valid rows. `tile.set_validshape` below
-  // inherits the mode, so the iter_arg, every `tile.matmul_acc` that accumulates
-  // into it (the op inherits its accumulator's compact mode) and the reader after
-  // the loop all agree with the pitch the hardware used. Leaving the seed
-  // non-compact silently skews every N-fractal above the first (#2470, #2510).
-  const bool rows_narrowed =
-      ProveValidExtentEqual(valid_m, MakeIndex(physical_m, span)) != ProofResult::kTrue;
-  auto storage = BuildAccInit(physical_m, physical_n, dtype, name_hint + "_storage", span, rows_narrowed);
-  auto& reg = OpRegistry::GetInstance();
-  auto narrowed_call =
-      reg.Create("tile.set_validshape", {storage->var_, std::move(valid_m), std::move(valid_n)}, span);
-  auto narrowed_var = std::make_shared<Var>(name_hint, narrowed_call->GetType(), span);
-  auto narrowed = std::make_shared<AssignStmt>(narrowed_var, narrowed_call, span);
-  return AccInitValue{{storage, narrowed}, narrowed_var};
-}
 
 struct KLoopRewrite {
   AssignStmtPtr original;

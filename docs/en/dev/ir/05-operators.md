@@ -715,6 +715,14 @@ prefix at all, yet `[8, 16]` valid `[8, 5]` is exact, because dropping a full
 unit axis keeps rows as rows. `tensor.reshape`'s optional third `valid_shape`
 operand may only *narrow* the derived region, never claim data outside it.
 
+An **identity** `tile.reshape` — one whose target shape equals the source's —
+additionally keeps the source's layout triple (`blayout` / `slayout` / `fractal`) and its
+resolved memory space, instead of re-deriving the layout from the shape. Re-deriving
+yields the space-agnostic flat layout, which `NormalizeImplicitTileView` rescues only for
+a view that collapses; an Acc box that is narrowed, padded, or declared `compact` never
+collapses, so the flat layout would stick and its reader would walk L0C as a plain
+row-major buffer (issue #2470).
+
 **Data Flow:** `TensorType (DDR) → tile.load → TileType (Unified Buffer) → tile.{ops} → TileType → tile.store → TensorType (DDR)`
 
 ### Mask patterns

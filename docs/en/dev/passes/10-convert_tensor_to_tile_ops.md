@@ -343,6 +343,35 @@ Key changes:
 - `Out` parameter `ret0_out` added to InCore function
 - `tensor.create` inserted at orchestration call site
 
+## Loop-Carry Valid-Shape Repair
+
+`tensor.matmul` drops its operands' `valid_shape`, so an accumulator only becomes narrower
+than the seed it is carried from once this pass produces a `tile.matmul` over a
+row-narrowed left operand:
+
+```python
+acc = pl.create_tensor([M, N], dtype=pl.INT32)          # full box
+for k0 in pl.pipeline(0, K, K_TILE, stage=2):
+    xk = pl.slice(x, [M, K_TILE], [m0, k0], valid_shape=[v, K_TILE])   # runtime v
+    acc = pl.matmul_acc(acc, xk, wk, b_trans=True)      # narrowed, compact result
+```
+
+The carry is typed from its **init value alone** — `ConvertToSSA` mints the `IterArg` from
+the seed, this pass re-mints it from the converted seed, and both force the loop's
+`return_var` back to that type — so the narrowing dies at the loop boundary. `mad` writes
+L0C at an N-fractal stride of `ceil(v/16)*16` while a reader that believes the full box
+height walks it at the physical row pitch, corrupting every N-fractal above the first
+(issue #2470).
+
+Before returning, this pass therefore calls `narrow_loop_carry::NarrowAccCarries` on each
+function: an Acc carry seeded by `tile.create` is re-declared at the extent its yields
+prove — `tile.create(compact=True)` plus `tile.set_validshape` — and the body's def-use
+closure is re-typed through the operators' own deducers. Repairing it in the pass that
+creates it keeps the pipeline verifiable; leaving it would publish a carry the `TypeCheck`
+diagnostic and the `AccCompactValid` property verifier reject. `FlattenTileNdTo2D` calls
+the same helper, for an ND seed whose narrowing only appears when `tile.batch_matmul` is
+unrolled into 2D matmuls.
+
 ## Implementation
 
 **Header**: `include/pypto/ir/transforms/passes.h`
@@ -351,7 +380,7 @@ Key changes:
 
 **Python binding**: `python/bindings/modules/passes.cpp`
 
-**Tests**: `tests/ut/ir/transforms/test_convert_tensor_to_tile_ops.py`
+**Tests**: `tests/ut/ir/transforms/test_convert_tensor_to_tile_ops.py`, `tests/ut/ir/transforms/test_narrow_loop_carry_valid_shape.py` (the carry repair)
 
 ## Pass Properties
 
