@@ -25,6 +25,7 @@ create the mismatch -- ``ConvertTensorToTileOps`` for a 2D seed and ``FlattenTil
 for an ND one -- so no pipeline stage publishes a carry its own verifiers reject.
 """
 
+import pypto
 import pypto.language as pl
 import pytest
 from pypto import backend as _backend
@@ -398,7 +399,8 @@ def test_single_fractal_block_accumulator_still_reaches_codegen():
         lowered = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(
             _jit_program(single_fractal_block_acc)
         )
-    mlir = codegen.PTOCodegen().generate(ir.Program(_incore_functions(lowered), lowered.name, ir.Span.unknown()))
+    device_side = ir.Program(_incore_functions(lowered), lowered.name, ir.Span.unknown())
+    mlir = codegen.PTOCodegen().generate(device_side)
 
     assert "pto.tstore" in mlir
 
@@ -423,7 +425,7 @@ def test_extent_computed_inside_the_loop_is_declined_loudly():
 
     _backend.reset_for_testing()
     _backend.set_backend_type(BackendType.Ascend910B)
-    with pytest.raises(Exception, match="AccCompactValid"):
+    with pytest.raises(pypto.Error, match="AccCompactValid"):
         with passes.PassContext([]):
             PassManager.get_strategy(OptimizationStrategy.Default).run_passes(
                 _jit_program(extent_computed_inside_the_loop)
@@ -500,7 +502,8 @@ def test_emitted_pto_stores_at_the_pitch_mad_wrote_at():
     lowered = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(
         _jit_program(create_tensor_seeded_acc)
     )
-    mlir = codegen.PTOCodegen().generate(ir.Program(_incore_functions(lowered), lowered.name, ir.Span.unknown()))
+    device_side = ir.Program(_incore_functions(lowered), lowered.name, ir.Span.unknown())
+    mlir = codegen.PTOCodegen().generate(device_side)
 
     stores = [line.strip() for line in mlir.splitlines() if "pto.tstore" in line]
     assert len(stores) == 1, mlir
