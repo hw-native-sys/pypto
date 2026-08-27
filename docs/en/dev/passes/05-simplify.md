@@ -189,6 +189,59 @@ for ob in pl.range(0, 68, 2):
 
 The analyzer binds `ob ∈ [0, 68)` while visiting the loop body, so `off`'s `AssignStmt` registers a `ConstIntBound` of `[256, 17408]` for `off`. `CanProve(Not(off == 0))` then succeeds and Fold A drops the dead then branch. `off` is bound for analysis only — it is not substituted — so the surviving `later_chunk(off)` still references the scalar. (If `off` becomes unused after the fold, scalar DCE removes its binding.)
 
+### Where an index bound comes from
+
+`INDEX` is the dtype of every index computation, and it is **signed** — codegen
+emits `arith.cmpi slt` and `arith.maxsi` for it. So the dtype alone proves
+nothing about a variable's sign, and the analyzer treats an unbound `INDEX` Var
+as `[-inf, +inf]`. Non-negativity has to be established, never assumed:
+
+| Source | Bound | Established by |
+| ------ | ----- | -------------- |
+| Assigned scalar | its RHS's range | `BindScalarBound`, from the value being produced |
+| Loop variable | `[start, stop)`, or `[start, +inf)` when `stop` is symbolic | `IRMutatorWithAnalyzer` on `ForStmt`, for a positive step |
+| Branch condition | the constraint's range | `EnterConstraint` for the arm's scope |
+| Block / subblock builtin | `[0, +inf)`; a block *count* is `[1, +inf)` | the op's own semantics, in `ConstIntBoundAnalyzer` |
+| Whole shape / valid-shape dimension | `[0, +inf)` | `DimensionSymbolScope`, around the write-union proofs |
+| Runtime scalar parameter | `[-inf, +inf]` | nothing — the caller chooses the value |
+
+The last three rows are the distinction that matters, and none of them is a fact
+about `INDEX`. `tile.get_subblock_idx()` is non-negative because of what the op
+*returns*. A dimension is non-negative because it is a count of elements.
+
+**That second rule stops at the dimension.** `DimensionSymbolScope` binds a
+dimension that *is* a bare symbol, and never descends into one that is a
+compound expression. Being a `valid_shape` makes the field an extent; it does not
+make every variable that computes it one:
+
+```python
+valid = pl.max(-x, 0)    # a legal dynamic extent over a signed runtime scalar
+```
+
+Assuming `x >= 0` folds that to a constant `0`, which reads as an empty region
+and silently shrinks the result. Offsets are never bound at all — `max(x, 0)` in
+an offset is a deliberate clamp whose whole point is that `x` can be negative,
+and folding it to `x` would move the region a store writes.
+
+Assuming it everywhere silently changes what a kernel computes:
+
+```python
+pos: pl.Scalar[pl.INDEX] = base - 1   # [-1, +inf)
+if pos >= 0:                          # live guard, kept
+    if pos < 8:
+        read_row(pos)
+```
+
+Under a blanket `[0, +inf)` default, `pos >= 0` proves statically true and Fold
+A drops the outer guard, leaving the upper-bound check standing alone — which a
+negative `pos` passes, reaching `read_row` with an index that is then clamped to
+row 0 (issue #2500). The same held for a bare `Scalar[pl.INDEX]` parameter: the
+caller can pass `-1`.
+
+Everything a pass still needs to know about a symbol's sign now comes from
+somewhere that can prove it — the value assigned, the loop, the branch, the op,
+or the symbol's use as a whole dimension.
+
 ### Single-trip loop collapse (Fold B)
 
 **Before**:

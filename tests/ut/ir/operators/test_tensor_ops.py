@@ -4964,6 +4964,36 @@ class TestTensorAssembleValidRegionUnion:
         assert ir.python_print(view.valid_shape[0]) == "pl.min(k + m, 64)"
         assert _valid_of(result_type)[1] == 128
 
+    def test_clamped_negative_extent_is_not_treated_as_a_dimension_symbol(self):
+        """`max(-x, 0)` is a compound extent: nothing may assume `x >= 0`.
+
+        The union may take a *whole* dimension that is a bare symbol as
+        non-negative — a dimension is a count of elements. It must not descend
+        into a compound extent and assume the same of the variables inside it.
+        Here the true extent is `4` when `x == -4`; assuming `x >= 0` collapses
+        `max(-x, 0)` to `0`, which reads as an empty target and silently returns
+        the written extent alone instead of the union (issue #2500).
+
+        The union keeps `-x`: `max(max(-x, 0), 2)` is `max(-x, 2)`, which is `4`
+        for `x == -4` and `2` for `x == 5` — both correct.
+        """
+        x = self._symbol("x")
+        span = ir.Span.unknown()
+        clamped = ir.Max(
+            ir.Neg(x, DataType.INDEX, span), ir.ConstInt(0, DataType.INDEX, span), DataType.INDEX, span
+        )
+        target = _partial_tensor_var([64, 128], [clamped, 128], name="dst")
+        source = _partial_tensor_var([32, 128], [2, 128], name="src")
+
+        result_type = ir.op.tensor.assemble(target, source, [0, 0]).type
+
+        assert isinstance(result_type, ir.TensorType)
+        view = result_type.tensor_view
+        assert view is not None
+        printed = ir.python_print(view.valid_shape[0])
+        assert "-x" in printed, f"the negated scalar was folded away: {printed}"
+        assert printed == "pl.min(pl.max(-x, 2), 64)", printed
+
     def test_unprovable_symbolic_offset_rejects(self):
         """An offset unrelated to the target's extent cannot be shown to abut it."""
         k = self._symbol("k")

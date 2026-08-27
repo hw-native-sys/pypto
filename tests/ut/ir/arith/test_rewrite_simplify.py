@@ -11,7 +11,7 @@
 
 import pytest
 from pypto import DataType, ir
-from pypto.arith import Analyzer, RewriteSimplifier
+from pypto.arith import Analyzer, ConstIntBound, RewriteSimplifier
 
 S = ir.Span.unknown()
 INT = DataType.INT64
@@ -488,21 +488,48 @@ class TestMinMaxRules:
         assert isinstance(result.left, ir.Max)
         assert_is_const_int(result.right, 3)
 
-    def test_max_index_non_negative(self):
-        """max(n, 0) => n when n has INDEX dtype (non-negative by definition)."""
+    def test_max_zero_folds_for_a_non_negative_var(self):
+        """max(n, 0) => n once n is known non-negative."""
         ana = Analyzer()
         n = ir.Var("n", ir.ScalarType(IDX), S)
+        ana.const_int_bound.update(n, ConstIntBound(0, ConstIntBound.kPosInf))
         expr = ir.Max(n, ir.ConstInt(0, IDX, S), IDX, S)
         result = ana.simplify(expr)
         assert result is n
 
-    def test_max_zero_index_commutative(self):
-        """max(0, n) => n when n has INDEX dtype."""
+    def test_max_zero_folds_commutatively(self):
+        """max(0, n) => n once n is known non-negative."""
         ana = Analyzer()
         n = ir.Var("n", ir.ScalarType(IDX), S)
+        ana.const_int_bound.update(n, ConstIntBound(0, ConstIntBound.kPosInf))
         expr = ir.Max(ir.ConstInt(0, IDX, S), n, IDX, S)
         result = ana.simplify(expr)
         assert result is n
+
+    def test_negated_scalar_clamp_is_kept(self):
+        """`max(-x, 0)` is a legal dynamic extent and must survive.
+
+        Nothing may assume the variables inside an extent are non-negative. Being
+        a shape or valid_shape makes the *field* a count of elements; it does not
+        make every variable that computes it one. Folding this to a constant `0`
+        would silently shrink the region for every negative `x` (issue #2500).
+        """
+        x = ir.Var("x", ir.ScalarType(IDX), S)
+        clamp = ir.Max(ir.Neg(x, IDX, S), ir.ConstInt(0, IDX, S), IDX, S)
+        assert ir.python_print(Analyzer().simplify(clamp)) == "pl.max(-x, 0)"
+
+    def test_max_zero_is_kept_for_a_bare_index_var(self):
+        """max(n, 0) stands when nothing proves n >= 0.
+
+        The `INDEX` dtype alone does not: it is signed, so folding here would
+        rewrite a real clamp into a no-op for every negative n (issue #2500).
+        """
+        ana = Analyzer()
+        n = ir.Var("n", ir.ScalarType(IDX), S)
+        expr = ir.Max(n, ir.ConstInt(0, IDX, S), IDX, S)
+        result = ana.simplify(expr)
+        assert result is not n
+        assert isinstance(result, ir.Max)
 
 
 # ============================================================================

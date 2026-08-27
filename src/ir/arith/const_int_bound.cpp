@@ -32,6 +32,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/transforms/base/functor.h"
 #include "pypto/ir/type.h"
@@ -202,19 +203,19 @@ class ConstIntBoundAnalyzer::Impl : public ExprFunctor<Bound> {
   Bound VisitExpr_(const VarPtr& op) override {
     auto it = var_map_.find(op.get());
     if (it != var_map_.end()) return it->second;
-    return DefaultBoundFromDtype(op.get());
+    return DefaultBound();
   }
 
   Bound VisitExpr_(const IterArgPtr& op) override {
     // IterArg is a Var subclass — look up in var_map_
     auto it = var_map_.find(op.get());
     if (it != var_map_.end()) return it->second;
-    return DefaultBoundFromDtype(op.get());
+    return DefaultBound();
   }
 
   Bound VisitExpr_(const MemRefPtr& /*op*/) override { return Everything(); }
   Bound VisitExpr_(const WindowBufferPtr& /*op*/) override { return Everything(); }
-  Bound VisitExpr_(const CallPtr& /*op*/) override { return Everything(); }
+  Bound VisitExpr_(const CallPtr& op) override { return BoundFromOpSemantics(op->op_); }
   Bound VisitExpr_(const SubmitPtr& /*op*/) override { return Everything(); }
   Bound VisitExpr_(const MakeTuplePtr& /*op*/) override { return Everything(); }
   Bound VisitExpr_(const TupleGetItemExprPtr& /*op*/) override { return Everything(); }
@@ -376,15 +377,37 @@ class ConstIntBoundAnalyzer::Impl : public ExprFunctor<Bound> {
   }
 
  private:
-  /// INDEX-typed variables are implicitly non-negative; other types use full range.
-  static Bound DefaultBoundFromDtype(const Expr* expr) {
-    if (auto st = std::dynamic_pointer_cast<const ScalarType>(expr->GetType())) {
-      if (st->dtype_ == DataType::INDEX) {
-        return {0, Bound::kPosInf};
-      }
+  /// The range a builtin's own semantics establish for its result.
+  ///
+  /// These are the hardware identity queries: which block / subblock this
+  /// instance is, and how many there are. A block index is never negative and a
+  /// block count is never zero -- facts about what the op returns, not about
+  /// `INDEX`, which is signed and proves nothing (issue #2500). Keeping them
+  /// here ties each range to the op that guarantees it, instead of to a dtype
+  /// default that would also cover unrelated user scalars.
+  ///
+  /// Without this, a shard extent such as `min(max(rows - aiv_id * 8, 0), 8)`
+  /// no longer folds to `max(rows - aiv_id * 8, 0)`, because an unbounded
+  /// `aiv_id` lets `rows - aiv_id * 8` exceed the tile.
+  static Bound BoundFromOpSemantics(const OpPtr& op) {
+    if (!op) return Everything();
+    if (IsOp(op, "tile.get_block_idx") || IsOp(op, "tile.get_subblock_idx") ||
+        IsOp(op, "tensor.get_block_idx") || IsOp(op, "tensor.get_subblock_idx")) {
+      return {0, Bound::kPosInf};
+    }
+    if (IsOp(op, "tile.get_block_num") || IsOp(op, "tensor.get_block_num")) {
+      return {1, Bound::kPosInf};
     }
     return Everything();
   }
+
+  /// The bound a Var carries when nothing has bound it.
+  ///
+  /// Always unbounded. No dtype implies a sign: `INDEX` is signed, and a Var of
+  /// it -- a derived scalar or a caller-supplied parameter alike -- can be
+  /// negative at runtime (issue #2500). A caller that knows better binds the
+  /// variable; nothing is assumed on its behalf here.
+  static Bound DefaultBound() { return Everything(); }
 
   Analyzer* parent_;
   std::unordered_map<const Expr*, Bound> var_map_;
@@ -415,7 +438,7 @@ std::function<void()> ConstIntBoundAnalyzer::Impl::EnterConstraint(const ExprPtr
   auto TryTighten = [&](const VarPtr& var, const Bound& new_bound) {
     const Expr* var_ptr = var.get();
     auto it = var_map_.find(var_ptr);
-    Bound old = (it != var_map_.end()) ? it->second : DefaultBoundFromDtype(var_ptr);
+    Bound old = (it != var_map_.end()) ? it->second : DefaultBound();
     recovery.emplace_back(var_ptr, old);
     var_map_[var_ptr] = {std::max(old.min_value, new_bound.min_value),
                          std::min(old.max_value, new_bound.max_value)};

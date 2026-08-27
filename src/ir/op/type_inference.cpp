@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <any>
 #include <cstddef>
+#include <initializer_list>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -39,6 +40,66 @@
 
 namespace pypto {
 namespace ir {
+
+namespace {
+
+/// The per-thread analyzer this file proves and folds with.
+///
+/// One analyzer is shared rather than one per helper, so repeated calls on the
+/// slow path (e.g. per-dim inside BroadcastShapes) reuse sub-analyzer state
+/// instead of paying full setup per call.
+arith::Analyzer& GeneralAnalyzer() {
+  thread_local arith::Analyzer analyzer;
+  return analyzer;
+}
+
+/// Bind, for as long as it is in scope, every *whole dimension* that is a bare
+/// symbol to `[0, +inf)`.
+///
+/// A shape or valid_shape dimension is a count of elements, so a Var standing
+/// alone as one cannot be negative. The rule deliberately stops there and does
+/// not descend: being an extent is a property of the dimension, not of every
+/// variable that helps compute it. `valid = max(-x, 0)` is a legal dynamic
+/// extent over a signed runtime scalar, and assuming `x >= 0` would fold it to
+/// a constant `0` — silently shrinking the region (issue #2500).
+///
+/// Offsets are never bound here. An offset is ordinary signed index arithmetic,
+/// and `max(x, 0)` there is a deliberate clamp whose whole point is that `x` can
+/// be negative.
+class DimensionSymbolScope {
+ public:
+  DimensionSymbolScope(arith::Analyzer* analyzer,
+                       std::initializer_list<const std::vector<ExprPtr>*> dimension_vectors)
+      : analyzer_(analyzer) {
+    for (const auto* dims : dimension_vectors) {
+      if (dims == nullptr) continue;
+      for (const auto& dim : *dims) {
+        auto var = AsVarLike(dim);
+        if (!var) continue;
+        auto scalar_type = As<ScalarType>(var->GetType());
+        if (!scalar_type || !scalar_type->dtype_.IsInt()) continue;
+        if (analyzer_->const_int_bound(dim).is_non_negative()) continue;
+        analyzer_->const_int_bound.Update(var, {0, arith::ConstIntBound::kPosInf});
+        bound_.push_back(var);
+      }
+    }
+  }
+
+  ~DimensionSymbolScope() {
+    for (auto it = bound_.rbegin(); it != bound_.rend(); ++it) {
+      analyzer_->const_int_bound.Unbind(*it);
+    }
+  }
+
+  DimensionSymbolScope(const DimensionSymbolScope&) = delete;
+  DimensionSymbolScope& operator=(const DimensionSymbolScope&) = delete;
+
+ private:
+  arith::Analyzer* analyzer_;
+  std::vector<VarPtr> bound_;
+};
+
+}  // namespace
 
 BroadcastResult BroadcastShapes(const std::vector<ExprPtr>& shape1, const std::vector<ExprPtr>& shape2) {
   // Handle empty shapes
@@ -233,11 +294,7 @@ bool DimensionsEqual(const ExprPtr& dim1, const ExprPtr& dim2) {
   // For symbolic dimensions, prove equality via expression simplification.
   // Handles cases like `(x + 64) - x` vs `(x + 128) - (x + 64)` which both
   // reduce to 64 but are not structurally identical.
-  //
-  // Uses a thread_local analyzer so repeated calls on the slow path (e.g.
-  // per-dim inside BroadcastShapes) reuse sub-analyzer state instead of
-  // paying full setup per call.
-  thread_local arith::Analyzer analyzer;
+  arith::Analyzer& analyzer = GeneralAnalyzer();
   return analyzer.CanProveEqual(dim1, dim2);
 }
 
@@ -292,7 +349,7 @@ ProofResult ProveValidExtentEqual(const ExprPtr& lhs, const ExprPtr& rhs) {
     return ProofResult::kTrue;
   }
 
-  thread_local arith::Analyzer analyzer;
+  arith::Analyzer& analyzer = GeneralAnalyzer();
   if (analyzer.CanProveEqual(lhs, rhs)) {
     return ProofResult::kTrue;
   }
@@ -310,7 +367,7 @@ ProofResult ProveValidExtentLessEqual(const ExprPtr& lhs, const ExprPtr& rhs) {
     return ProofResult::kTrue;
   }
 
-  thread_local arith::Analyzer analyzer;
+  arith::Analyzer& analyzer = GeneralAnalyzer();
   if (analyzer.CanProve(MakeLe(lhs, rhs))) {
     return ProofResult::kTrue;
   }
@@ -518,8 +575,12 @@ ExprPtr IndexZero() {
 }
 
 /// Fold an expression through the arithmetic analyzer so constants collapse.
+///
+/// Deliberately the *general* analyzer despite the name: callers fold sums that
+/// carry an offset -- `WriteFarEdge` returns `offset + extent`, and the reach
+/// helpers fold `offset + reach` -- and an offset's variables are signed.
 ExprPtr FoldExtent(const ExprPtr& expr) {
-  thread_local arith::Analyzer analyzer;
+  arith::Analyzer& analyzer = GeneralAnalyzer();
   return analyzer.Simplify(expr);
 }
 
@@ -1118,6 +1179,8 @@ ExprPtr WriteFarEdge(const WriteValidShapeUnionParams& p, size_t i) {
 
 std::vector<ExprPtr> InferWriteValidShapeUnion(const WriteValidShapeUnionParams& params) {
   CheckWriteUnionRanks(params);
+  // The target's and source's own dimensions are extents; the offsets are not.
+  DimensionSymbolScope dimension_symbols(&GeneralAnalyzer(), {&params.target_valid, &params.source_valid});
   const size_t rank = params.target_physical.size();
   for (size_t i = 0; i < rank; ++i) {
     CheckWriteDimBounds(params, i);

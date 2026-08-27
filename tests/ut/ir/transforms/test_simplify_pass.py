@@ -1230,14 +1230,42 @@ class TestConstantIfCollapse:
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
 
-    def test_symbolic_index_scalar_keeps_nonneg_default_bound(self):
-        """A symbolic INDEX scalar must keep its non-negative default bound.
+    def test_leaf_index_parameter_keeps_its_guard(self):
+        """A leaf INDEX *parameter* is not non-negative, so its guard survives.
 
-        `idx = a - b` (a, b INDEX) has an unknown [-inf, +inf] range, but
-        `idx` is INDEX-typed and therefore non-negative. BindScalarBound must
-        intersect the RHS range with the dtype default rather than overwrite
-        it — otherwise the uninformative RHS range erases the non-negativity
-        and `if idx < 0` (statically false for an INDEX scalar) stops folding.
+        Nothing here proves `a >= 0`. `a` is a runtime scalar the caller
+        supplies, `INDEX` is a signed type — codegen emits `arith.cmpi slt` for
+        it — and being unassigned only means the analyzer never saw a value, not
+        that the value is non-negative. Folding `if a < 0` away would silently
+        change what the kernel computes for `a = -1`: the program writes `b`,
+        the folded one writes `a`.
+
+        Non-negativity has to come from somewhere real — an explicit binding, a
+        loop's constant start, or the extent rule the shape proofs opt into —
+        never from the dtype.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, a: pl.Scalar[pl.INDEX], b: pl.Scalar[pl.INDEX], out: pl.Tensor[[1], pl.INDEX]):
+                if a < 0:
+                    pl.tensor.write(out, [0], b)
+                else:
+                    pl.tensor.write(out, [0], a)
+
+        after = passes.simplify()(Before)
+        # Unchanged: both arms, and the guard between them, are still reachable.
+        ir.assert_structural_equal(after, Before)
+
+    def test_derived_index_scalar_keeps_negative_range_guard(self):
+        """A *derived* INDEX scalar takes its range from its RHS, not the dtype default.
+
+        `idx = a - b` is negative whenever `b > a`, so `if idx < 0` is a live
+        guard. `BindScalarBound` must record the derived range instead of
+        intersecting it with the INDEX default `[0, +inf)` — that intersection
+        deletes a reachable negative range and folds the guard away as
+        statically false (issue #2500).
         """
 
         @pl.program
@@ -1250,15 +1278,37 @@ class TestConstantIfCollapse:
                 else:
                     pl.tensor.write(out, [0], idx)
 
-        # `idx < 0` is statically false (INDEX ≥ 0), so the then branch drops.
-        # `idx` is bound for analysis only, not substituted, so the surviving
-        # write still references it.
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
+
+    def test_nested_guard_on_derived_index_scalar_is_preserved(self):
+        """Nested `if pos >= 0: if pos < N:` keeps both guards (issue #2500).
+
+        The outer guard is the only thing keeping a negative offset out of the
+        inner body. Proving it statically true left the upper-bound check
+        standing alone, which a negative `pos` passes — the read then went
+        ahead against a clamped offset and the kernel silently returned wrong
+        data. Both `IfStmt`s must survive.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, base: pl.Scalar[pl.INDEX], out: pl.Tensor[[1], pl.INDEX]):
+                pos: pl.Scalar[pl.INDEX] = base - 1
+                if pos >= 0:
+                    if pos < 8:
+                        pl.tensor.write(out, [0], pos)
+
+        # Both guards survive; the outer one is only canonicalized `Ge` -> `Le`.
         @pl.program
         class Expected:
             @pl.function
-            def main(self, a: pl.Scalar[pl.INDEX], b: pl.Scalar[pl.INDEX], out: pl.Tensor[[1], pl.INDEX]):  # noqa: ARG002
-                idx: pl.Scalar[pl.INDEX] = a - b
-                pl.tensor.write(out, [0], idx)
+            def main(self, base: pl.Scalar[pl.INDEX], out: pl.Tensor[[1], pl.INDEX]):
+                pos: pl.Scalar[pl.INDEX] = base - 1
+                if 0 <= pos:
+                    if pos < 8:
+                        pl.tensor.write(out, [0], pos)
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)

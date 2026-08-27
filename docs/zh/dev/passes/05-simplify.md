@@ -189,6 +189,48 @@ for ob in pl.range(0, 68, 2):
 
 分析器在访问循环体期间得知 `ob ∈ [0, 68)`，因此 `off` 的 `AssignStmt` 为 `off` 注册了 `[256, 17408]` 的 `ConstIntBound`。`CanProve(Not(off == 0))` 随后成功，Fold A 丢弃死的 then 分支。`off` 只用于分析、不会被代换，因此保留下来的 `later_chunk(off)` 仍引用该标量。（若折叠后 `off` 不再被使用，标量 DCE 会删除其绑定。）
 
+### 索引边界从何而来
+
+`INDEX` 是所有索引计算的 dtype，而它是**有符号的**——codegen 为其发射 `arith.cmpi slt` 与
+`arith.maxsi`。因此仅凭 dtype 无法证明变量的符号，分析器把未绑定的 `INDEX` Var 视为
+`[-inf, +inf]`。非负性必须被建立，而不能被假定：
+
+| 来源 | 边界 | 由谁建立 |
+| ---- | ---- | -------- |
+| 被赋值的标量 | 其 RHS 的区间 | `BindScalarBound`，来自被产生的值 |
+| 循环变量 | `[start, stop)`；`stop` 为符号时取 `[start, +inf)` | `IRMutatorWithAnalyzer` 处理 `ForStmt`，要求步长为正 |
+| 分支条件 | 该约束的区间 | 该分支作用域内的 `EnterConstraint` |
+| block / subblock 内建 op | `[0, +inf)`；block *数量* 为 `[1, +inf)` | 该 op 自身语义，在 `ConstIntBoundAnalyzer` 中 |
+| 整个 shape / valid-shape 维度 | `[0, +inf)` | `DimensionSymbolScope`，包裹 write-union 证明 |
+| 运行时标量参数 | `[-inf, +inf]` | 无——取值由调用方决定 |
+
+最后三行正是关键区别，且没有一条是关于 `INDEX` 类型的事实。`tile.get_subblock_idx()` 非负，是因为该
+op **返回什么**；维度非负，是因为它是元素个数。
+
+**第二条规则止于维度本身。** `DimensionSymbolScope` 只绑定**本身就是裸符号**的维度，绝不深入到复合
+表达式内部。字段是 `valid_shape` 只能说明该字段是 extent，并不能说明计算它的每个变量都是 extent：
+
+```python
+valid = pl.max(-x, 0)    # 基于有符号运行时标量的合法动态 extent
+```
+
+假定 `x >= 0` 会把它折叠为常量 `0`，读起来就是空区域，从而静默缩小结果。offset 则完全不绑定——offset
+中的 `max(x, 0)` 是刻意的钳位，其意义恰恰在于 `x` 可能为负，折叠成 `x` 会移动 store 写入的区域。
+
+```python
+pos: pl.Scalar[pl.INDEX] = base - 1   # [-1, +inf)
+if pos >= 0:                          # 有效守卫，予以保留
+    if pos < 8:
+        read_row(pos)
+```
+
+在一刀切的 `[0, +inf)` 默认区间下，`pos >= 0` 被证明为恒真，Fold A 丢弃外层守卫——只剩下界检查
+独自成立，而负的 `pos` 恰好能通过它，带着随后被钳位到第 0 行的索引进入 `read_row`
+（issue #2500）。对裸的 `Scalar[pl.INDEX]` 参数同样成立：调用方可以传入 `-1`。
+
+这也是为什么 `ConstIntBound` 的约束作用域在退出时会**恢复**显式的 `[-inf, +inf]` 绑定而不是删除
+它——在 extent 规则下，被删除的条目会退回 `[0, +inf)`，而那并非该变量原本的边界。
+
 ### 单次循环折叠（Fold B）
 
 **变换前**：

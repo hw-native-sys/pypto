@@ -64,11 +64,17 @@ class TestConstIntBoundBasics:
         assert b.max_value == ConstIntBound.kPosInf
         assert b.is_everything()
 
-    def test_index_var_non_negative(self):
-        """INDEX-typed vars are implicitly non-negative."""
+    def test_index_var_is_not_implicitly_non_negative(self):
+        """An unbound INDEX var is unbounded — the dtype implies no sign.
+
+        `INDEX` is signed, so a runtime scalar of it can hold a negative value.
+        Defaulting it to `[0, +inf)` folded users' `if idx >= 0` guards away as
+        statically true and silently dropped the bounds check behind them
+        (issue #2500).
+        """
         idx_var = ir.Var("n", ir.ScalarType(DataType.INDEX), S)
         b = analyzer(idx_var)
-        assert b.min_value == 0
+        assert b.min_value == ConstIntBound.kNegInf
         assert b.max_value == ConstIntBound.kPosInf
 
     def test_bound_var(self):

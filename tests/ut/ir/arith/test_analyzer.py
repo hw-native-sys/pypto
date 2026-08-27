@@ -11,7 +11,7 @@
 
 import pytest
 from pypto import DataType, ir
-from pypto.arith import Analyzer, RewriteSimplifier
+from pypto.arith import Analyzer, ConstIntBound, RewriteSimplifier
 
 S = ir.Span.unknown()
 INT = DataType.INT64
@@ -614,10 +614,15 @@ class TestConstraintContext:
         analyzer.unbind(x)
         analyzer.unbind(y)
 
-    def test_index_non_negativity_preserved_under_constraint(self):
-        """INDEX var retains [0, +inf) lower bound when tightened by an upper-bound constraint."""
+    def test_lower_bound_preserved_under_upper_bound_constraint(self):
+        """An upper-bound constraint tightens the top and leaves the bottom alone.
+
+        The lower bound comes from an explicit binding, never from the `INDEX`
+        dtype: that type is signed, so a runtime scalar of it may be negative,
+        and assuming otherwise folds live user guards away (issue #2500).
+        """
         n = ir.Var("n", ir.ScalarType(DataType.INDEX), S)
-        # Without constraint: INDEX var is [0, +inf)
+        analyzer.const_int_bound.update(n, ConstIntBound(0, ConstIntBound.kPosInf))
         bound = analyzer.const_int_bound(n)
         assert bound.min_value == 0
 

@@ -616,7 +616,12 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
 
   /// Rebuild a TensorType or TileType with every embedded ExprPtr (shape,
   /// stride, valid_shape, start_offset) passed through `SimplifyExpr`.
-  /// Returns the original TypePtr if nothing changed.
+  ///
+  /// Nothing is assumed about the variables inside them. Being a shape or a
+  /// valid_shape makes the *field* an extent; it does not make every free
+  /// variable in it one. `valid = max(-x, 0)` is a legal dynamic extent over a
+  /// signed runtime scalar, and assuming `x >= 0` folds it to a constant `0`,
+  /// silently shrinking the region.
   TypePtr SimplifyType(const TypePtr& type) {
     if (!type) return type;
     if (auto t = AsTensorTypeLike(type)) {
@@ -726,21 +731,20 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   /// prove dead branch guards from the value's range without inlining the
   /// scalar into its use sites.
   ///
-  /// The RHS range is intersected with @p var's dtype-default bound rather
-  /// than overwriting it. `var` is not yet bound, so `const_int_bound(var)`
-  /// returns that default (e.g. an INDEX scalar is implicitly non-negative).
-  /// Intersecting can only tighten: an uninformative RHS — a Call, whose bound
-  /// analyzer returns "everything" — then leaves the default intact instead of
-  /// erasing it, so guards like `if idx < 0` on an INDEX scalar still fold.
+  /// The RHS range is recorded as-is. It is deliberately *not* intersected with
+  /// whatever `const_int_bound(var)` answers for the still-unbound `var`: the
+  /// value being produced is the strongest evidence available, and intersecting
+  /// it with a weaker standing assumption can only delete reachable values.
+  ///
+  /// That mattered when an unbound `INDEX` Var defaulted to `[0, +inf)`:
+  /// `window = pos - 1` was recorded as `[0, +inf)` instead of `[-1, +inf)`, so
+  /// a user guard such as `if window >= 0` folded away as statically true and
+  /// the bounds check the kernel depended on was silently dropped (issue
+  /// #2500). That default is gone -- an unbound Var is now `[-inf, +inf]`
+  /// whatever its dtype -- but the rule stands on its own, and still holds for
+  /// any var the caller has bound before this point.
   void BindScalarBound(const VarPtr& var, const ExprPtr& value) {
-    auto rhs = analyzer_->const_int_bound(value);
-    auto def = analyzer_->const_int_bound(var);
-    arith::ConstIntBound bound{std::max(rhs.min_value, def.min_value),
-                               std::min(rhs.max_value, def.max_value)};
-    // An empty intersection means the RHS range contradicts the var's dtype
-    // (malformed IR); skip the update and leave the default untouched.
-    if (bound.min_value > bound.max_value) return;
-    analyzer_->const_int_bound.Update(var, bound);
+    analyzer_->const_int_bound.Update(var, analyzer_->const_int_bound(value));
     scalar_binding_log_.push_back(var);
   }
 
