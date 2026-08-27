@@ -17,10 +17,14 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/span.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/type_inference.h"
 
 namespace pypto {

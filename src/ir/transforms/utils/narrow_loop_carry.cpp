@@ -14,7 +14,7 @@
 
 #include "pypto/ir/transforms/utils/narrow_loop_carry.h"
 
-#include <algorithm>
+#include <cstddef>
 #include <map>
 #include <memory>
 #include <optional>
@@ -22,7 +22,6 @@
 #include <utility>
 #include <vector>
 
-#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -188,14 +187,21 @@ class RetypeClosureMutator : public IRMutator {
   }
 
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
-    return PropagateIntoLoop(As<ForStmt>(IRMutator::VisitStmt_(op)), nullptr, op->iter_args_,
+    return PropagateIntoLoop(As<ForStmt>(RebuildWithVisitedChildren(op)), nullptr, op->iter_args_,
                              op->return_vars_);
   }
 
   StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
-    return PropagateIntoLoop(nullptr, As<WhileStmt>(IRMutator::VisitStmt_(op)), op->iter_args_,
+    return PropagateIntoLoop(nullptr, As<WhileStmt>(RebuildWithVisitedChildren(op)), op->iter_args_,
                              op->return_vars_);
   }
+
+  /// Visit a loop's children and rebuild it, without either level's carry handling -- the
+  /// caller applies that itself once the body is in its final shape. A named helper rather
+  /// than a qualified ``IRMutator::VisitStmt_`` call, which would read as skipping this
+  /// class's own override.
+  StmtPtr RebuildWithVisitedChildren(const ForStmtPtr& op) { return IRMutator::VisitStmt_(op); }
+  StmtPtr RebuildWithVisitedChildren(const WhileStmtPtr& op) { return IRMutator::VisitStmt_(op); }
 
   /// Carry a re-typed value across a nested loop boundary.
   ///
@@ -209,8 +215,9 @@ class RetypeClosureMutator : public IRMutator {
                             const std::vector<VarPtr>& original_return_vars) {
     const auto& iter_args = for_stmt ? for_stmt->iter_args_ : while_stmt->iter_args_;
     const auto& body = for_stmt ? for_stmt->body_ : while_stmt->body_;
-    if (iter_args.size() != original_iter_args.size())
+    if (iter_args.size() != original_iter_args.size()) {
       return for_stmt ? StmtPtr(for_stmt) : StmtPtr(while_stmt);
+    }
 
     std::map<const Var*, VarPtr> carry_seed;
     std::vector<IterArgPtr> new_iter_args = iter_args;
@@ -295,11 +302,13 @@ class NarrowLoopCarryMutator : public RetypeClosureMutator {
 
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
     // Inner loops first: a nested carry may itself narrow this loop's yields.
-    return NarrowCarries(As<ForStmt>(IRMutator::VisitStmt_(op)), nullptr, op->iter_args_, op->return_vars_);
+    return NarrowCarries(As<ForStmt>(RebuildWithVisitedChildren(op)), nullptr, op->iter_args_,
+                         op->return_vars_);
   }
 
   StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
-    return NarrowCarries(nullptr, As<WhileStmt>(IRMutator::VisitStmt_(op)), op->iter_args_, op->return_vars_);
+    return NarrowCarries(nullptr, As<WhileStmt>(RebuildWithVisitedChildren(op)), op->iter_args_,
+                         op->return_vars_);
   }
 
  private:
