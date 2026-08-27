@@ -68,8 +68,8 @@ class TestTupleLineagePointerKeying:
     propagated onto the other tuple's consumers. In the DeepSeek-V4 KV compressor
     this made the ``kv_state`` / ``score_state`` return aliases reuse the
     externalized ``kv_cache`` / ``kv`` window reshape names, so the generated
-    orchestration C++ declared those names twice (``ChipTensor X = ...`` then
-    ``const ChipTensor& X = ...``) and failed to compile with ``conflicting
+    orchestration C++ declared those names twice (``TaskTensor X = ...`` then
+    ``const TaskTensor& X = ...``) and failed to compile with ``conflicting
     declaration``.
     """
 
@@ -112,7 +112,7 @@ class TestTupleLineagePointerKeying:
 
         # No declared name may appear twice (the conflicting-declaration bug).
         declared = re.findall(
-            r"^\s*(?:const\s+ChipTensor&|ChipTensor|PTO2TaskId|auto)\s+([A-Za-z_]\w*)\s*=",
+            r"^\s*(?:const\s+TaskTensor&|TaskTensor|TaskId|auto)\s+([A-Za-z_]\w*)\s*=",
             code,
             flags=re.MULTILINE,
         )
@@ -121,8 +121,8 @@ class TestTupleLineagePointerKeying:
 
         # Each consumer must reshape from its OWN tuple's element, not a stale /
         # undeclared getitem name. Before the fix, ``fa`` read undeclared ``a0``.
-        assert "ChipTensor fa = rsh0.reshape" in code, code
-        assert "ChipTensor fb = rsh1.reshape" in code, code
+        assert "TaskTensor fa = rsh0.reshape" in code, code
+        assert "TaskTensor fb = rsh1.reshape" in code, code
         assert "a0.reshape" not in code and "b0.reshape" not in code, code
 
 
@@ -149,7 +149,7 @@ class TestUnregisteredOpError:
             codegen.generate_orchestration(program, orch_func)
 
     def test_reinterpret_view_has_explicit_orchestration_error(self):
-        """Runtime ChipTensor views cannot change dtype; direct users get an actionable error."""
+        """Runtime TaskTensor views cannot change dtype; direct users get an actionable error."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
 
@@ -867,7 +867,7 @@ class TestTupleReturnNameHintCollision:
         # tmp_first and tmp_second share the name_hint "ret__tmp_v0"; the tuple
         # metadata must still attach each call's elements to that call. Each
         # element is the in-place Out arg of its call, so it remaps to that arg
-        # (no ``const ChipTensor& first_a = ...`` alias is minted). The consumer
+        # (no ``const TaskTensor& first_a = ...`` alias is minted). The consumer
         # reading first_a/second_a/first_b/second_b therefore reads call_a's
         # outs then call_b's outs, in order — not cross-contaminated.
         i_a1 = code.index("// Task 2: kernel_consume")
@@ -879,10 +879,10 @@ class TestTupleReturnNameHintCollision:
         assert a1 < a2 < b1 < b2, code
         # No per-element const-ref alias survives the remap.
         for name in ("first_a", "second_a", "first_b", "second_b"):
-            assert f"const ChipTensor& {name} " not in code, code
+            assert f"const TaskTensor& {name} " not in code, code
 
         declared_names = re.findall(
-            r"^\s*(?:const\s+ChipTensor&|ChipTensor)\s+([A-Za-z_]\w*)\s*=",
+            r"^\s*(?:const\s+TaskTensor&|TaskTensor)\s+([A-Za-z_]\w*)\s*=",
             code,
             flags=re.MULTILINE,
         )
@@ -896,13 +896,13 @@ class TestScalarCarryPhiCodegen:
     """Regression tests for scalar loop carries in orchestration codegen."""
 
     def test_scalar_carry_phi_not_emitted_as_tensor(self):
-        """Regression for #1580: Scalar loop carry must not be aliased as const ChipTensor&.
+        """Regression for #1580: Scalar loop carry must not be aliased as const TaskTensor&.
 
         When a Scalar variable is defined before a pl.parallel loop and then
         reused (reassigned) inside it, alongside Tensor carries, ConvertToSSA
         promotes the scalar into the parallel-loop carry tuple.  The orchestration
         codegen must emit the Scalar carry phi as ``int64_t = 0`` (untraced scalar
-        default), NOT as ``const ChipTensor& = <carry_var>`` (type mismatch that causes
+        default), NOT as ``const TaskTensor& = <carry_var>`` (type mismatch that causes
         a C++ compile error).
         """
         backend.reset_for_testing()
@@ -939,7 +939,7 @@ class TestScalarCarryPhiCodegen:
 
                 # The parallel loop carries global_c_idx (Scalar) mixed with
                 # Tensor carries out_b, out_c.  Before the fix, the Scalar carry
-                # phi was emitted as ``const ChipTensor&`` causing a C++ compile error.
+                # phi was emitted as ``const TaskTensor&`` causing a C++ compile error.
                 for batch_idx in pl.parallel(0, N // TILE):
                     with pl.at(level=pl.Level.CORE_GROUP, name_hint="scope_b"):
                         for inner in pl.range(TILE):
@@ -953,12 +953,12 @@ class TestScalarCarryPhiCodegen:
         code = _generate_orch_code(transformed)
 
         # The Scalar carry phi must be emitted as int64_t = 0 (untraced scalar
-        # default), never as const ChipTensor& = <carry> (type mismatch / #1580).
+        # default), never as const TaskTensor& = <carry> (type mismatch / #1580).
         assert "int64_t global_c_idx__rv" in code, (
-            "global_c_idx carry phi should be emitted as int64_t, not const ChipTensor&\n" + code
+            "global_c_idx carry phi should be emitted as int64_t, not const TaskTensor&\n" + code
         )
-        assert "const ChipTensor& global_c_idx" not in code, (
-            "global_c_idx must not be aliased as const ChipTensor& (scalar/tensor type mismatch)\n" + code
+        assert "const TaskTensor& global_c_idx" not in code, (
+            "global_c_idx must not be aliased as const TaskTensor& (scalar/tensor type mismatch)\n" + code
         )
 
         # out_b and out_c Tensor carries must each alias to their own carry.

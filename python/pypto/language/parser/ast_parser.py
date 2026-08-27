@@ -46,6 +46,8 @@ from .diagnostics import (
     concise_error_message,
 )
 from .enum_utils import (
+    CACHE_POLICY_MAP,
+    CACHE_POLICY_NAMES,
     LEVEL_MAP,
     ROLE_MAP,
     SCOPE_MODE_MAP,
@@ -78,6 +80,11 @@ _FUNC_ATTR_DIRECTIVE = "func_attr"
 # The ``split`` attr stores an int but is spelled (and printed) as the
 # ``pl.SplitMode.X`` enum, so it needs enum handling on both attr paths.
 _SPLIT_ATTR = "split"
+
+# Scope attr seeded by ``pl.set_cache_policy(t, policy)``; mirrors
+# ``ir::kAttrCachePolicyVars``. Holds ``list[tuple[Var, int]]`` and is consumed
+# by the scope outliner, which re-emits it as outlined-function param indices.
+_CACHE_POLICY_VARS_ATTR = "cache_policy_vars"
 
 # Sentinel: a parsed attr value that must not be stored at all. ``None`` cannot
 # serve here — it is a legitimate attr value — so identity against this object
@@ -187,6 +194,31 @@ def _is_pl_call(node: object, attr_name: str) -> TypeGuard[ast.Call]:
         and func.attr == attr_name
         and isinstance(func.value, ast.Name)
         and func.value.id == "pl"
+    )
+
+
+def _is_cache_policy_marker(node: object) -> TypeGuard[ast.Call]:
+    """Return True for either spelling of the ``set_cache_policy`` marker call.
+
+    ``pl.set_cache_policy(...)`` is the canonical form the printer emits, but the
+    function lives in ``tensor_ops`` and so is equally reachable as
+    ``pl.tensor.set_cache_policy(...)``. Both are recognised here — otherwise the
+    submodule spelling would slip past the marker dispatch and fail as an
+    ordinary evaluation statement with an error that names neither the marker nor
+    its rules. Recognising it normalises it to ``pl.set_cache_policy`` on print.
+    """
+    if _is_pl_call(node, "set_cache_policy"):
+        return True
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    return (
+        isinstance(func, ast.Attribute)
+        and func.attr == "set_cache_policy"
+        and isinstance(func.value, ast.Attribute)
+        and func.value.attr == "tensor"
+        and isinstance(func.value.value, ast.Name)
+        and func.value.value.id == "pl"
     )
 
 
@@ -738,6 +770,17 @@ class ASTParser:
         # per-call ``dump_vars`` entry. See ``_handle_dump_tag``.
         self._dump_tagged_vars: list[Any] = []
 
+        # ``pl.set_cache_policy(...)`` markers already hoisted onto a scope attr
+        # by :meth:`_collect_scope_cache_policy_decls`, keyed by ``id()`` of the
+        # AST statement. The pre-scan runs *before* the scope body is parsed
+        # (scope attrs are fixed at ``begin_scope``), so the marker is still in
+        # the body's statement list when ``parse_evaluation_statement`` reaches
+        # it; this registry is how the handler tells an already-consumed marker
+        # from one written somewhere the declaration cannot attach. The AST node
+        # is kept as the value so it stays alive and its ``id()`` cannot be
+        # reused by another object mid-parse. See ``_handle_set_cache_policy``.
+        self._consumed_cache_policy_markers: dict[int, ast.Expr] = {}
+
         # Inline function expansion state
         self._inline_mode = False
         self._inline_return_expr: ir.Expr | None = None
@@ -1029,6 +1072,9 @@ class ASTParser:
         # special migration: ``dump_vars`` rides on the spliced Call nodes and
         # the mutator substitutes the callee Var for the caller's arg.
         self._dump_tagged_vars: list[Any] = []
+        # Reset alongside it: the consumed-marker registry only has to outlive
+        # the body parse of the function whose scopes seeded it.
+        self._consumed_cache_policy_markers = {}
 
         # Begin building function
         with self.builder.function(
@@ -1850,7 +1896,7 @@ class ASTParser:
         # must not defeat the alias; only an annotation asking for a *different*
         # type falls through to a Let of its own.
         if (
-            self._func_type == ir.FunctionType.Orchestration
+            ir.is_orchestration_like(self._func_type)
             and self._is_param_dim_symbol(value_expr)
             and (existing_var is None or self._is_param_dim_symbol(existing_var))
             and (override_type is None or _types_match(override_type, value_expr.type))
@@ -3170,7 +3216,7 @@ class ASTParser:
         assert isinstance(call, ast.Call)
         span = self.span_tracker.get_span(stmt)
 
-        if self._func_type not in (ir.FunctionType.Orchestration, ir.FunctionType.Inline):
+        if not ir.is_orchestration_like(self._func_type) and self._func_type != ir.FunctionType.Inline:
             raise ParserSyntaxError(
                 "pl.dump_tag() is only valid inside an Orchestration or Inline function",
                 span=span,
@@ -3223,6 +3269,209 @@ class ASTParser:
             )
         if not any(var is t for t in self._dump_tagged_vars):
             self._dump_tagged_vars.append(var)
+
+    # ``pl.set_cache_policy`` may only be written where the declaration has a
+    # scope to attach to. Spelling out the legal positions once keeps the
+    # position rejection and the fallback kind rejection from drifting apart.
+    _CACHE_POLICY_POSITION_HINT = (
+        "Write pl.set_cache_policy(t, pl.CachePolicy.BYPASS) as a standalone statement "
+        "directly inside a `with pl.at(...):` / `with pl.spmd(...):` scope body (or a "
+        "`for i in pl.spmd(...):` body). It declares a property of the whole scope, so it "
+        "cannot sit outside one, nor nested inside an `if` / `for` within one — a "
+        "conditionally-executed declaration is a promise the compiler cannot check. To "
+        "annotate a single access instead, use pl.load(..., cache=pl.CachePolicy.BYPASS)."
+    )
+
+    def _handle_set_cache_policy(self, stmt: ast.Expr) -> None:
+        """Handle ``pl.set_cache_policy(<name>, pl.CachePolicy.<NAME>)`` at statement position.
+
+        The declarative GM cache-access marker. Unlike ``pl.dump_tag`` — which is
+        forward-sticky and consumed right here — this one attaches to the
+        *enclosing scope*, and a ``ScopeStmt``'s attrs are fixed when the scope
+        begins, before its body is parsed. So the real work happens earlier, in
+        :meth:`_collect_scope_cache_policy_decls`, which pre-scans the body's
+        top-level statements at each scope-construction site and records what it
+        consumed in ``_consumed_cache_policy_markers``.
+
+        By the time the body parse reaches the marker, therefore, a legal one is
+        already on the scope attr and only has to be skipped so it emits no IR.
+        Reaching here *unconsumed* means the marker was written where no scope
+        could take it — outside a scope, or nested inside an ``if`` / ``for``
+        within one — which is the rejection this handler exists for.
+        """
+        if id(stmt) in self._consumed_cache_policy_markers:
+            return
+        raise ParserSyntaxError(
+            "pl.set_cache_policy() must be a standalone statement directly inside a "
+            "pl.at(...) / pl.spmd(...) scope body",
+            span=self.span_tracker.get_span(stmt),
+            hint=self._CACHE_POLICY_POSITION_HINT,
+        )
+
+    def _resolve_cache_policy_marker(self, stmt: ast.Expr) -> "tuple[ir.Var, int]":
+        """Validate one ``pl.set_cache_policy(...)`` marker and resolve its operands.
+
+        Returns the ``(Var, CachePolicy-as-int)`` pair the scope attr carries.
+        The policy is stored as a plain ``int`` because that is what the C++
+        attr (``std::vector<std::pair<VarPtr, int>>``) and the downstream
+        ``tile.load`` ``cache`` kwarg both hold.
+        """
+        call = stmt.value
+        assert isinstance(call, ast.Call)
+        span = self.span_tracker.get_span(stmt)
+
+        expected_args = 2
+        if len(call.args) != expected_args or call.keywords:
+            raise ParserSyntaxError(
+                "pl.set_cache_policy() takes exactly two positional arguments (no keywords)",
+                span=span,
+                hint="Use: pl.set_cache_policy(tensor_var, pl.CachePolicy.BYPASS)",
+            )
+        if not isinstance(call.args[0], ast.Name):
+            raise ParserSyntaxError(
+                "pl.set_cache_policy() first argument must be a bare variable name",
+                span=self.span_tracker.get_span(call.args[0]),
+                hint=(
+                    "Write pl.set_cache_policy(b, pl.CachePolicy.BYPASS) where b is a tensor "
+                    "bound outside the scope and read inside it. The declaration is tracked by "
+                    "variable identity, so attribute / subscript / call expressions — which name "
+                    "no binding — are not supported."
+                ),
+            )
+        policy = extract_enum_value(call.args[1], CACHE_POLICY_MAP, "CachePolicy", "pl.CachePolicy")
+
+        # Resolved against the bindings live *at the scope*, not inside it: the
+        # declaration names a tensor the scope body captures from outside, which
+        # is exactly what the scope outliner later resolves to an outlined
+        # parameter index. Identity matching is reliable because the scope
+        # manager returns a stable object per binding, so a later rebinding of
+        # the same name yields a new (undeclared) Var.
+        name = call.args[0].id
+        var = self.scope_manager.lookup_var(name)
+        if var is None:
+            raise ParserSyntaxError(
+                f"pl.set_cache_policy() argument '{name}' is not defined at this point",
+                span=span,
+                hint=(
+                    "Declare a policy only for a tensor already bound where the scope starts — a "
+                    "parameter or an earlier assignment. A tensor created inside the scope body "
+                    "is not captured by it and has no policy to declare."
+                ),
+            )
+        # ``lookup_var`` may return a non-Var placeholder (e.g. a loop-yield name
+        # string), and only tensors are read from GM. Reject early so the scope
+        # attr never carries a typeless binding for the outliner to trip over.
+        if not isinstance(var, ir.Var) or not isinstance(var.type, ir.TensorType):
+            got = type(var.type).__name__ if isinstance(var, ir.Var) else type(var).__name__
+            raise ParserTypeError(
+                f"pl.set_cache_policy() argument '{name}' is not a tensor (got {got})",
+                span=self.span_tracker.get_span(call.args[0]),
+                hint="A cache-access policy only applies to a tensor read from global memory.",
+            )
+        return var, int(policy)
+
+    # Scope kinds that carry ``kAttrCachePolicyVars``: the two the outliner turns
+    # into a device kernel, and the only two whose printer re-emits the marker
+    # statements (see ``IRPythonPrinter::PrintScopeCachePolicyStmts``). A Spmd
+    # scope reaches here only in the wrapper-less *dispatch* shape — an inline
+    # body is carried by a nested InCore, which is what this set matches — and a
+    # dispatch body's reads live in the pre-defined callee, not here. Accepting
+    # the marker on any other kind would attach an attr nothing consumes and the
+    # printer drops, silently discarding a contract the author stated.
+    _CACHE_POLICY_SCOPE_KINDS: "frozenset[ir.ScopeKind]" = frozenset(
+        {ir.ScopeKind.Hierarchy, ir.ScopeKind.InCore}
+    )
+
+    # Per-kind explanation of why the declaration has nowhere to attach.
+    _CACHE_POLICY_REJECT_HINTS: "dict[ir.ScopeKind, str]" = {
+        ir.ScopeKind.Spmd: (
+            "This `pl.spmd(...)` body dispatches a pre-defined kernel, so the GM reads happen "
+            "inside that callee, not here. Declare the policy in the callee — a "
+            "`with pl.at(level=pl.Level.CORE_GROUP):` scope in its body, or "
+            "pl.load(..., cache=pl.CachePolicy.BYPASS) on the access itself. An *inline* "
+            "pl.spmd body does accept the marker: it is carried by the InCore scope the body "
+            "is outlined into."
+        ),
+        ir.ScopeKind.Cluster: (
+            "A pl.cluster(...) scope co-schedules AIC and AIV work rather than becoming a "
+            "kernel of its own. Move the declaration into the `with pl.at(...):` scope that "
+            "actually reads the tensor."
+        ),
+        ir.ScopeKind.Runtime: (
+            "A runtime scope (pl.manual_scope / pl.auto_scope) only chooses dependency "
+            "semantics for the tasks it contains; it issues no GM read of its own. Move the "
+            "declaration into the `with pl.at(...):` scope that reads the tensor."
+        ),
+    }
+
+    def _collect_scope_cache_policy_decls(
+        self, body: "list[ast.stmt]", scope_kind: "ir.ScopeKind"
+    ) -> "list[tuple[ir.Var, int]]":
+        """Hoist the ``pl.set_cache_policy(...)`` markers out of a scope body.
+
+        Called at every scope-construction site, just before ``builder.scope()``,
+        because a ``ScopeStmt``'s attrs are fixed when the scope begins. Only
+        the body's *top-level* statements are scanned: a marker nested inside an
+        ``if`` / ``for`` is deliberately left for
+        :meth:`_handle_set_cache_policy` to reject.
+
+        Position within the body does not matter — the printer re-emits the
+        declarations first, so the roundtrip is position-normalising.
+        """
+        decls: list[tuple[ir.Var, int]] = []
+        for child in body:
+            if not isinstance(child, ast.Expr) or not _is_cache_policy_marker(child.value):
+                continue
+            if scope_kind not in self._CACHE_POLICY_SCOPE_KINDS:
+                raise ParserSyntaxError(
+                    f"pl.set_cache_policy() has nothing to attach to on this {scope_kind.name} scope",
+                    span=self.span_tracker.get_span(child),
+                    hint=self._CACHE_POLICY_REJECT_HINTS.get(scope_kind, self._CACHE_POLICY_POSITION_HINT),
+                )
+            var, policy = self._resolve_cache_policy_marker(child)
+            self._consumed_cache_policy_markers[id(child)] = child
+            # A repeated declaration for the same binding is redundant when it
+            # restates the same policy — keep the first so the attr stays a set
+            # of distinct tensors. A repeat that names a *different* policy is a
+            # contradiction, not a redundancy: silently keeping the first would
+            # resolve it toward BYPASS, the direction that also asserts the
+            # coherency contract the second statement retracts.
+            existing = next((p for v, p in decls if v is var), None)
+            if existing is None:
+                decls.append((var, policy))
+            elif existing != policy:
+                raise ParserSyntaxError(
+                    f"pl.set_cache_policy() declares conflicting policies for '{var.name_hint}' "
+                    f"in one scope: {CACHE_POLICY_NAMES[existing]} then "
+                    f"{CACHE_POLICY_NAMES[policy]}",
+                    span=self.span_tracker.get_span(child),
+                    hint="One tensor takes one policy per scope. Drop the redundant "
+                    "declaration, or move the differing one into its own scope. To vary "
+                    "the policy per access, use pl.load(..., cache=...) instead.",
+                )
+        return decls
+
+    def _merge_cache_policy_attr(
+        self,
+        attrs: "list[tuple[str, Any]] | None",
+        decls: "list[tuple[ir.Var, int]]",
+    ) -> "list[tuple[str, Any]] | None":
+        """Attach hoisted cache-policy declarations to a scope's attr list.
+
+        Placed right after ``dump_vars`` and before ``task_id_var`` / ``slot_num``
+        for the same reason :meth:`_merge_forward_sticky_dump` picks that slot:
+        ``structural_equal`` compares attrs positionally, so first parse and
+        print -> reparse must agree on the order.
+        """
+        if not decls:
+            return attrs
+        new_attrs: list[tuple[str, Any]] = list(attrs) if attrs else []
+        insert_at = next(
+            (i for i, (k, _) in enumerate(new_attrs) if k in {"task_id_var", "slot_num"}),
+            len(new_attrs),
+        )
+        new_attrs.insert(insert_at, (_CACHE_POLICY_VARS_ATTR, decls))
+        return new_attrs
 
     def _validate_while_call_args(self, while_call: ast.Call) -> None:
         """Validate that pl.while_() has no positional arguments."""
@@ -3931,7 +4180,7 @@ class ASTParser:
         """Parse ``with pl.scope(mode=...):`` into a Runtime scope.
 
         ``mode`` defaults to ``ScopeMode.AUTO``. AUTO scopes are the explicit IR
-        form of the orchestration ``PTO2_SCOPE()`` block; MANUAL scopes turn off
+        form of the orchestration ``SIMPLER_SCOPE()`` block; MANUAL scopes turn off
         auto dependency tracking (``pl.scope(mode=pl.ScopeMode.MANUAL)`` — the
         former ``pl.manual_scope()``).
         """
@@ -4607,6 +4856,14 @@ class ASTParser:
         spmd_name_hint, incore_name_hint = _split_spmd_for_loop_name_hints(name_hint)
         incore_attrs = self._merge_forward_sticky_dump(None, ir.ScopeKind.InCore)
         incore_attrs = self._append_split_slot_num_attr(incore_attrs, split_slot_num)
+        # Cache-policy declarations attach to the InCore carrier, not the Spmd
+        # scope: the carrier is what gets outlined into the per-block kernel
+        # whose params the policy resolves against. That is also the scope the
+        # printer re-emits them from, since the Spmd printer inlines this
+        # carrier's header away.
+        incore_attrs = self._merge_cache_policy_attr(
+            incore_attrs, self._collect_scope_cache_policy_decls(stmt.body, ir.ScopeKind.InCore)
+        )
         with self.builder.scope(
             scope_kind,
             span,
@@ -4943,6 +5200,13 @@ class ASTParser:
         # (BuildWrapperReorderedParams) honours that inner call's dump_vars.
         incore_attrs = self._merge_forward_sticky_dump(None, ir.ScopeKind.InCore)
         incore_attrs = self._append_split_slot_num_attr(incore_attrs, split_slot_num)
+        # Same as the with-form: the declarations belong to the InCore carrier
+        # the loop body lowers to, which is also the scope the printer re-emits
+        # them from (the ``for i in pl.spmd(...)`` form drops the carrier's
+        # header entirely).
+        incore_attrs = self._merge_cache_policy_attr(
+            incore_attrs, self._collect_scope_cache_policy_decls(stmt.body, ir.ScopeKind.InCore)
+        )
         with self.builder.scope(
             ir.ScopeKind.Spmd,
             span,
@@ -5217,6 +5481,12 @@ class ASTParser:
     ) -> None:
         """Build a scope statement from a with-statement body."""
         attrs = self._merge_forward_sticky_dump(attrs, scope_kind)
+        # Hoist the body's ``pl.set_cache_policy`` markers onto this scope before
+        # it begins — ``begin_scope`` fixes the attrs, so there is no later point
+        # at which a marker found mid-body could still attach.
+        attrs = self._merge_cache_policy_attr(
+            attrs, self._collect_scope_cache_policy_decls(stmt.body, scope_kind)
+        )
         with self.builder.scope(
             scope_kind,
             span,
@@ -5707,6 +5977,9 @@ class ASTParser:
         if _is_pl_call(stmt.value, "dump_tag"):
             self._handle_dump_tag(stmt)
             return
+        if _is_cache_policy_marker(stmt.value):
+            self._handle_set_cache_policy(stmt)
+            return
 
         # Special case: bare pl.yield_() emits a YieldStmt via parse_yield_call.
         # Do not create an additional EvalStmt for the returned expression.
@@ -5878,10 +6151,10 @@ class ASTParser:
             return ir.ConstFloat(value, DataType.DEFAULT_CONST_FLOAT, span)
         elif value is None:
             # ``None`` is the "no producer yet" TaskId sentinel — the Pythonic
-            # spelling of an invalid PTO2TaskId. Used to seed a TaskId loop
+            # spelling of an invalid TaskId. Used to seed a TaskId loop
             # carry (``prev_tid = None``) or as a ``deps=[None]`` entry.
             # Lowers to ``system.task_invalid`` -> Scalar[TASK_ID]; codegen
-            # emits ``PTO2TaskId::invalid()`` and downstream ``set_dependencies``
+            # emits ``TaskId::invalid()`` and downstream ``set_dependencies``
             # skips it via an ``is_valid()`` guard.
             return ir.create_op_call("system.task_invalid", [], {}, span)
         else:
@@ -7737,9 +8010,18 @@ class ASTParser:
             # All bare names -> Var list (resolved in the current scope).
             if all(isinstance(e, ast.Name) for e in elts):
                 return [self.parse_expression(e) for e in elts]
+            # All 2-tuples -> the cache-policy pair lists: ``[(idx, policy), ...]``
+            # for the outlined-function attr and ``[(name, policy), ...]`` for the
+            # scope attr. Both halves are recovered by the same syntax rules used
+            # above, so the pair shape alone distinguishes them from every other
+            # list attr. Written by PrintAttrValue's matching arms.
+            pair_nodes = [e for e in elts if isinstance(e, ast.Tuple) and len(e.elts) == 2]  # noqa: PLR2004
+            if len(pair_nodes) == len(elts):
+                return [self._parse_attr_pair(method_name, key, e) for e in pair_nodes]
             raise ParserSyntaxError(
                 f"attrs['{key}'] on call to '{method_name}': list elements are mixed or of an "
-                "unsupported kind (expected all ints, all pl.adir.<name>, or all names)",
+                "unsupported kind (expected all ints, all pl.adir.<name>, all names, or all "
+                "(name_or_int, int) pairs)",
                 span=node_span,
             )
         # Printed enum attrs must remain enum attrs. ``parse_expression`` either
@@ -7758,6 +8040,35 @@ class ASTParser:
                 pass
         # Bare name -> Var; any other expression -> the parsed IR expression.
         return self.parse_expression(value_node)
+
+    def _parse_attr_pair(self, method_name: str, key: str, node: ast.Tuple) -> "tuple[Any, int]":
+        """Reconstruct one ``(reference, int)`` attr tuple from its AST node.
+
+        The pair shape backs the cache-policy carriers: ``(param_index, policy)``
+        on an outlined Function and ``(tensor_name, policy)`` on a ScopeStmt.
+        The second half is always a plain int (the ``CachePolicy`` value); the
+        first is either an int index or a bare name resolved to its Var.
+        """
+        first_node, second_node = node.elts
+        if not (
+            isinstance(second_node, ast.Constant)
+            and isinstance(second_node.value, int)
+            and not isinstance(second_node.value, bool)
+        ):
+            raise ParserSyntaxError(
+                f"attrs['{key}'] on call to '{method_name}': the second element of a pair must be "
+                "an integer literal",
+                span=self.span_tracker.get_span(second_node),
+            )
+        if isinstance(first_node, ast.Constant) and isinstance(first_node.value, int):
+            return first_node.value, second_node.value
+        if isinstance(first_node, ast.Name):
+            return self.parse_expression(first_node), second_node.value
+        raise ParserSyntaxError(
+            f"attrs['{key}'] on call to '{method_name}': the first element of a pair must be an "
+            "integer literal or a bare variable name",
+            span=self.span_tracker.get_span(first_node),
+        )
 
     def _extract_generic_call_attrs(
         self,
@@ -8449,7 +8760,10 @@ class ASTParser:
 
         Returns the folded extent, or None to emit ``tensor.dim`` as usual.
         """
-        if self._func_type != ir.FunctionType.Orchestration:
+        # A Graph body is orchestration too. Skipping it here would mint a second
+        # runtime scalar for an extent the signature already names, so shapes built
+        # from it can disagree structurally with a callee that uses the symbol.
+        if not ir.is_orchestration_like(self._func_type):
             return None
         # Every spelling the DSL accepts must fold. The printer normalizes them all
         # to ``dim(x, 0)``, so a spelling that did not fold here would fold on

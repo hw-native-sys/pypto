@@ -56,7 +56,7 @@ producer_count * consumer_count - (producer_count + consumer_count) > 0
 修复前：
 
 ```cpp
-PTO2TaskId params_t21_deps[81];
+TaskId params_t21_deps[81];
 // 80 resid1_tile deps + 1 current down_acc dep
 params_t21.set_dependencies(params_t21_deps, params_t21_deps_count);
 ```
@@ -65,14 +65,14 @@ params_t21.set_dependencies(params_t21_deps, params_t21_deps_count);
 
 ```cpp
 CoreTaskArgs params_phase_fence_barrier_0;
-PTO2TaskId params_phase_fence_barrier_0_deps[80];
+TaskId params_phase_fence_barrier_0_deps[80];
 params_phase_fence_barrier_0.set_dependencies(...);
 TaskOutputTensors phase_fence_barrier_0_outs =
     rt_submit_dummy_task(params_phase_fence_barrier_0);
-PTO2TaskId phase_fence_barrier_0_tid =
+TaskId phase_fence_barrier_0_tid =
     phase_fence_barrier_0_outs.task_id();
 
-PTO2TaskId params_t21_deps[2];
+TaskId params_t21_deps[2];
 // barrier TaskId + current down_acc TaskId
 params_t21.set_dependencies(params_t21_deps, params_t21_deps_count);
 ```

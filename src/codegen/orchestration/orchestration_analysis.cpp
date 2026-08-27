@@ -225,7 +225,7 @@ void VarLineageCollector::VisitStmt_(const ForStmtPtr& for_stmt) {
       // that has no relationship to the init param.  Propagating param lineage
       // to a Scalar return_var would make the return->param map bind a Scalar
       // return element to a param index, causing EmitTensorAlias to emit
-      // ``const ChipTensor&`` for an int64_t variable (issue #1580).
+      // ``const TaskTensor&`` for an int64_t variable (issue #1580).
       if (i < for_stmt->return_vars_.size() && AsTensorTypeLike(for_stmt->return_vars_[i]->GetType())) {
         var_to_param[for_stmt->return_vars_[i].get()] = param;
       }

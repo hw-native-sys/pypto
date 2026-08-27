@@ -17,16 +17,16 @@ An orchestration loop carry lowers one of two ways in the generated C++:
 An iter_arg is **trivial** exactly when its yield value lies in the iter_arg's
 *alias class* — the set of Vars naming the same backing buffer. A
 `Scalar[TASK_ID]` carry is never trivial: the runtime hands back a fresh
-`PTO2TaskId` each iteration.
+`TaskId` each iteration.
 
 Inside a `pl.manual_scope`, a `Scalar[TASK_ID]` rebind carry additionally lowers
-to a fixed-extent `PTO2TaskId[N]` fence array. `N` is the constant trip count of
+to a fixed-extent `TaskId[N]` fence array. `N` is the constant trip count of
 the `pl.parallel` loop that owns the array; a `Sequential` loop threading that
 array through an inner `pl.parallel` inherits the inner extent.
 
 **When to use**: in the `Default` strategy, immediately after
-[`MaterializeRuntimeScopes`](44-materialize_runtime_scopes.md) and immediately
-before [`InsertCommFence`](46-insert_comm_fence.md). Running this late means the
+[`MaterializeRuntimeScopes`](45-materialize_runtime_scopes.md) and immediately
+before [`InsertCommFence`](47-insert_comm_fence.md). Running this late means the
 classified IR is exactly the IR codegen lowers — `InsertCommFence` only adds
 InCore fence ops and never touches Orchestration `ForStmt` iter_args.
 
@@ -62,7 +62,7 @@ index-suffixed keys:
 | Key | Type | Meaning |
 | --- | ---- | ------- |
 | `iter_arg_rebind_<i>` | `bool` | `True` = materialised carry, `False` = trivial alias. Stamped for **every** slot, so its presence proves the pass ran. |
-| `iter_arg_array_size_<i>` | `int` | `PTO2TaskId[N]` fence-array extent. Stamped only when positive; absence means the scalar / tensor / `ArrayType` carry path. |
+| `iter_arg_array_size_<i>` | `int` | `TaskId[N]` fence-array extent. Stamped only when positive; absence means the scalar / tensor / `ArrayType` carry path. |
 
 Read them with `ir::transform_utils::IterArgIsRebind()` /
 `IterArgArraySize()` (`include/pypto/ir/transforms/utils/transform_utils.h`) —
@@ -89,12 +89,12 @@ Swapping the body for a `pl.create_tensor` result yields
 
 Inside a manual scope, a TaskId carry on `pl.parallel(4)` yields
 `attrs={"iter_arg_rebind_0": True, "iter_arg_array_size_0": 4}`, lowering to
-`PTO2TaskId arr[4];`.
+`TaskId arr[4];`.
 
 ## Errors
 
 A `pl.parallel` loop carrying a manual-scope dependency (`deps=[...]`) must have
-a statically-known trip count — the runtime fence needs a `PTO2TaskId[N]` array
+a statically-known trip count — the runtime fence needs a `TaskId[N]` array
 of fixed `N`. A dynamic trip count raises a user-facing error:
 
 ```text
@@ -130,11 +130,11 @@ iter_args that collect *compiler-derived* task dependencies
 (`attrs["compiler_manual_dep_edges"]`, produced by `AutoDeriveTaskDependencies`).
 Those depend on program-wide dependency edges rather than on the loop's own
 structure, so they stay in codegen: the carry is forced to `rebind`, sized from
-the outer loop's const trip count, and falls back to a `std::vector<PTO2TaskId>`
+the outer loop's const trip count, and falls back to a `std::vector<TaskId>`
 collection when that trip count is dynamic.
 
 ## See also
 
-- [MaterializeRuntimeScopes](44-materialize_runtime_scopes.md) — the pass that runs immediately before
+- [MaterializeRuntimeScopes](45-materialize_runtime_scopes.md) — the pass that runs immediately before
 - [Orchestration codegen](../codegen/01-orchestration_codegen.md) — the consumer of the stamped plan
 - [Pass manager](00-pass_manager.md)

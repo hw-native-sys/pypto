@@ -245,7 +245,7 @@ class AliasForest {
 
     // Calls with output_existing/inout args (e.g. InCore kernels): the result
     // aliases the Out/InOut arg the callee actually returns, mirroring the
-    // codegen alias ``const ChipTensor& result = args[out_idx];``. For kernels with
+    // codegen alias ``const TaskTensor& result = args[out_idx];``. For kernels with
     // multiple Out params (e.g. real result + GM scratch passed through pl.spmd
     // mixed dispatch), tracing the ReturnStmt back to its Param avoids aliasing
     // the result to an arbitrary scratch tensor.
@@ -316,7 +316,7 @@ std::vector<IterArgCarryPlan> AnalyzeCarries(const ForStmtPtr& for_stmt, const P
       auto yield_var = AsVarLike(yield->value_[i]);
       plans[i].is_rebind = !yield_var || !aliases.InClassOf(yield_var.get(), for_stmt->iter_args_[i].get());
       // A TaskId carry is never a trivial alias: the runtime hands back a fresh
-      // PTO2TaskId per iteration, so it always needs a materialised carry.
+      // TaskId per iteration, so it always needs a materialised carry.
       if (IsTaskIdScalar(for_stmt->iter_args_[i])) plans[i].is_rebind = true;
     }
   }
@@ -333,7 +333,7 @@ std::vector<IterArgCarryPlan> AnalyzeCarries(const ForStmtPtr& for_stmt, const P
       CHECK_SPAN(plans[i].array_size > 0, for_stmt->span_)
           << "manual_scope: pl.parallel loops carrying a manual_scope dep "
           << "(via ``deps=[...]``) must have a statically-known trip count. "
-          << "The runtime fence requires a PTO2TaskId[N] array of fixed N. "
+          << "The runtime fence requires a TaskId[N] array of fixed N. "
           << "Either make the parallel loop's trip count a Python int "
           << "(e.g. ``pl.parallel(4)``) or restructure to put the parallel "
           << "loop inside a const-bounded scope.";
@@ -414,9 +414,11 @@ Pass ClassifyIterArgCarry() {
     auto new_functions = program->functions_;
     for (auto& [gvar, func] : new_functions) {
       if (!func || !func->body_) continue;
-      // Only Orchestration functions carry loop-carried runtime state that the
-      // orchestration codegen lowers into carry variables / TaskId arrays.
-      if (func->func_type_ != FunctionType::Orchestration) continue;
+      // Only orchestration bodies carry loop-carried runtime state that the
+      // orchestration codegen lowers into carry variables / TaskId arrays. A
+      // Graph body may contain such loops, and codegen reads the
+      // ``iter_arg_rebind_<i>`` attrs this pass stamps.
+      if (!IsOrchestrationLike(func->func_type_)) continue;
 
       IterArgCarryStamper stamper(program);
       auto new_body = stamper.VisitStmt(func->body_);

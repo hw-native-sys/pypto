@@ -9,6 +9,7 @@
 | [手工依赖原语](02-manual_dependencies.md) | `pl.manual_scope`、显式 `deps=` 边、调度谓词、array-carry fence |
 | [函数与程序结构](03-functions.md) | 函数类型、参数方向、跨模块复用、打印 IR |
 | [集成手写 C++ Kernel](04-external-kernels.md) | 从 PyPTO 程序中调用已有的手写 C++ InCore kernel |
+| [GM 缓存访问策略](05-cache-policy.md) | `pl.set_cache_policy` / `pl.load(cache=...)` —— 声明式 GM 缓存策略、它的一致性契约，以及它如何抵达 codegen |
 
 ## 另请参阅
 

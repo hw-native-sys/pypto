@@ -143,6 +143,7 @@ def create(
     span: Span | None = None,
     *,
     flat_layout: bool | None = None,
+    compact: bool | None = None,
 ) -> Call:
     """Create a tile from a shape.
 
@@ -166,6 +167,13 @@ def create(
             ``target_memory=Mat`` and is mutually exclusive with ``transpose``.
             Default ``None`` keeps the canonical layout. Kept keyword-only so
             it does not shift ``span``'s positional slot for existing callers.
+        compact: Keyword-only. Compiler-internal. When True, declare that this
+            L0C buffer holds a valid-region-packed product, i.e. that its
+            N-fractal pitch is ``ceil(validRow/16)*16`` rather than the physical
+            row count -- the layout ``mad`` writes when the matmul's left operand
+            is row-narrowed. Requires ``target_memory=Acc``. Kernels do not set
+            this: ``AutoTileMatmulL0`` declares it on the accumulator seed it
+            synthesizes, and every reader of that accumulator inherits it.
 
     Returns:
         Call expression that returns a TileType with the created tile
@@ -179,6 +187,8 @@ def create(
         kwargs["transpose"] = transpose
     if flat_layout is not None:
         kwargs["flat_layout"] = flat_layout
+    if compact is not None:
+        kwargs["compact"] = compact
     return _ir_core.create_op_call("tile.create", [shape_tuple], kwargs, actual_span)
 
 
@@ -193,6 +203,7 @@ def load(
     target_memory: MemorySpace | None = None,
     clamp: bool = False,
     span: Span | None = None,
+    cache: int | None = None,
 ) -> Call:
     """Copy data from tensor to specified memory level.
 
@@ -222,6 +233,13 @@ def load(
             and is rejected when that provably fails; with ``clamp=True`` the
             request is cut back to the source edge instead.
         span: Optional source span for debugging (auto-captured if not provided)
+        cache: ``CachePolicy`` underlying int — 0 (``kDefault``, ordinary cached
+            GM read) or 1 (``kBypass``, declared streaming read). ``None`` (the
+            default) means the caller stated no policy and omits the kwarg, so
+            ordinary loads are unchanged and a scope-level declaration may still
+            stamp one later. An explicit 0 is NOT the same as ``None``: it is
+            recorded, and it is what makes ``cache=CachePolicy.DEFAULT`` opt a
+            single read back into the cache inside a bypassing scope.
 
     Returns:
         Call expression that returns a TileType with the copied data
@@ -258,6 +276,11 @@ def load(
         kwargs["target_memory"] = target_memory
     if clamp:
         kwargs["clamp"] = True
+    # `is not None`, not truthiness: an explicit `cache=0` (DEFAULT) is a real
+    # per-access override that must out-rank a scope declaration, so it has to
+    # survive into the IR. Only an unstated policy omits the kwarg.
+    if cache is not None:
+        kwargs["cache"] = cache
 
     valid_shape_tuple = shapes_tuple
     if valid_shape is not None:
@@ -1996,11 +2019,18 @@ def gemv_acc(
     span: Span | None = None,
     *,
     acc_phase: str = "unspecified",
+    init_cond: Expr | None = None,
 ) -> Call:
     """GEMV with accumulation: C[1,N] += A[1,K] @ B[K,N].
 
     ``acc`` must use the GEMV output dtype. The logical K extents and lhs/rhs
     dtype requirements are identical to :func:`gemv`.
+
+    With ``init_cond``, the accumulator's initial value is conditional: on the
+    steps where the predicate holds, ``acc`` is overwritten with ``lhs @ rhs``
+    instead of accumulated into. GEMV runs on the same cube MAD as
+    :func:`matmul_acc`, so it carries the same predicate; see that function for
+    the split-K ``k == 0`` idiom this removes the peel from.
 
     Args:
         acc: Accumulator tile (TileType [1, N])
@@ -2008,12 +2038,14 @@ def gemv_acc(
         rhs: Right-hand side tile (TileType [K, N])
         acc_phase: Accumulation phase: ``"unspecified"``, ``"partial"``, or ``"final"``
         span: Optional source span for debugging (auto-captured if not provided)
+        init_cond: Optional BOOL scalar predicate selecting overwrite over accumulate
 
     Returns:
         Call expression for GEMV with accumulation
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.gemv_acc", [acc, lhs, rhs], {"acc_phase": acc_phase}, actual_span)
+    args = [acc, lhs, rhs] if init_cond is None else [acc, lhs, rhs, init_cond]
+    return _ir_core.create_op_call("tile.gemv_acc", args, {"acc_phase": acc_phase}, actual_span)
 
 
 def gemv_bias(

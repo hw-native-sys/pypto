@@ -30,13 +30,16 @@ class RuntimeScopesMaterializedPropertyVerifierImpl : public PropertyVerifier {
   void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
     if (!program) return;
     for (const auto& [gv, func] : program->functions_) {
-      if (!func || func->func_type_ != FunctionType::Orchestration) continue;
+      // Graph bodies are orchestration too: codegen emits SIMPLER_SCOPE only from
+      // RuntimeScopeStmt, so a Graph body that skipped MaterializeRuntimeScopes
+      // would compile into a scope-less region.
+      if (!func || !IsOrchestrationLike(func->func_type_)) continue;
       if (!func->GetAttr<bool>(kAttrAutoScope, true)) continue;
 
       diagnostics.emplace_back(DiagnosticSeverity::Error, "RuntimeScopesMaterialized", 0,
-                               "Orchestration function '" + func->name_ +
+                               FunctionTypeToString(func->func_type_) + " function '" + func->name_ +
                                    "' still has auto_scope=True. Run MaterializeRuntimeScopes before "
-                                   "orchestration codegen — codegen emits PTO2_SCOPE only from "
+                                   "orchestration codegen — codegen emits SIMPLER_SCOPE only from "
                                    "RuntimeScopeStmt nodes, not from implicit for/if wrapping.",
                                func->span_);
     }

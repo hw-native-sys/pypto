@@ -345,7 +345,7 @@ def _build_phase_fence_program():
                 # remains a direct-dependency fallback case rather than a
                 # dummy-barrier phase-fence compression witness.
                 # ``pl.array.create`` auto-initializes all slots to
-                # ``PTO2TaskId::invalid()``; the runtime fence skips
+                # ``TaskId::invalid()``; the runtime fence skips
                 # invalid entries via ``is_valid()`` so the first phase
                 # has no prior-phase dependency.
                 tids = pl.array.create(N_BRANCHES, pl.TASK_ID)

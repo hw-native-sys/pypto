@@ -51,6 +51,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/alloc_batching.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -76,7 +77,7 @@ struct IterArgCarryPlan {
   int64_t array_size = 0;
   /// True when this iter_arg collects compiler-derived task dependencies
   /// (NeedsCompilerDepTaskId). The carry is initialised with
-  /// PTO2TaskId::invalid() and filled by yielded producer TaskIds.
+  /// TaskId::invalid() and filled by yielded producer TaskIds.
   bool compiler_dep_collection = false;
   /// True when compiler-dep collection needs a dynamic (vector) backing store
   /// because the ForStmt trip count is not a compile-time constant.
@@ -124,7 +125,7 @@ const char* ParamDirectionToRuntimeName(ParamDirection dir) {
 
 // The runtime primitive ``Arg::set_dependencies(ptr, count)`` has no upper
 // bound on the explicit dep count, and codegen sizes each call's
-// ``PTO2TaskId <task>_deps[K]`` stack array to its exact edge count, so there
+// ``TaskId <task>_deps[K]`` stack array to its exact edge count, so there
 // is no codegen-time cap on per-task explicit dependencies.
 
 // ---------------------------------------------------------------------------
@@ -143,7 +144,13 @@ std::string GenerateIncludes(bool include_optional, bool include_vector = false)
     oss << "#include <optional>\n";
   }
   oss << "\n";
-  oss << "#include \"pto_orchestration_api.h\"\n\n";
+  oss << "#include \"orchestration_api.h\"\n";
+  // The per-runtime `tensor.h` shim sits first on the orchestration include
+  // path and defines `TaskTensor` as whichever runtime this is built for
+  // (`simpler::tmr::Tensor` / `simpler::hbg::Tensor`). Orchestration works in
+  // that type, not in the 72-byte boundary `ChipTensor` (simpler#1974), and
+  // `orchestration_api.h` does not reach the shim on its own.
+  oss << "#include \"tensor.h\"\n\n";
   return oss.str();
 }
 
@@ -159,9 +166,9 @@ std::string GenerateScalarUnpack(const std::string& var_name, int scalar_index,
 std::string GenerateConfigFunction(int expected_arg_count) {
   std::ostringstream oss;
   oss << "__attribute__((visibility(\"default\")))\n";
-  oss << "PTO2OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs& orch_args) {\n";
+  oss << "OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs& orch_args) {\n";
   oss << "    (void)orch_args;\n";
-  oss << "    return PTO2OrchestrationConfig{\n";
+  oss << "    return OrchestrationConfig{\n";
   oss << "        .expected_arg_count = " << expected_arg_count << ",\n";
   oss << "    };\n";
   oss << "}\n\n";
@@ -188,7 +195,7 @@ std::string GenerateMakeTensorExternal(const std::string& var_name, int orch_ind
                                        [[maybe_unused]] const TensorTypePtr& tensor_type,
                                        [[maybe_unused]] const CodegenBase& codegen) {
   std::ostringstream oss;
-  oss << "    const ChipTensor& ext_" << var_name << " = orch_args.tensor(" << orch_index << ").ref();\n";
+  oss << "    const TaskTensor& ext_" << var_name << " = orch_args.tensor(" << orch_index << ").ref();\n";
   return oss.str();
 }
 
@@ -587,13 +594,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
     EmitIndentedLine("// Compiler-dependency barrier " + std::to_string(barrier_idx) +
                      ": compressed loop fan-in");
     EmitTaskParamsDecl(task_var);
-    EmitIndentedLine("PTO2TaskId " + deps_arr + "[" + std::to_string(names.size()) + "];");
+    EmitIndentedLine("TaskId " + deps_arr + "[" + std::to_string(names.size()) + "];");
     EmitIndentedLine("uint32_t " + deps_cnt + " = 0;");
     for (const auto& name : names) {
       EmitDepArrayInsert(name, deps_arr, deps_cnt);
     }
     EmitIndentedLine(task_var + ".set_dependencies(" + deps_arr + ", " + deps_cnt + ");");
-    EmitIndentedLine("PTO2TaskId " + tid_name + " = PTO2TaskId::invalid();");
+    EmitIndentedLine("TaskId " + tid_name + " = TaskId::invalid();");
     EmitIndentedLine("if (" + deps_cnt + " > 0) {");
     {
       IndentGuard guard(Active());
@@ -618,7 +625,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     EmitIndentedLine("// Dynamic compiler-dependency barrier " + std::to_string(barrier_idx) +
                      ": compressed loop fan-in");
     EmitTaskParamsDecl(task_var);
-    EmitIndentedLine("PTO2TaskId " + tid_name + " = PTO2TaskId::invalid();");
+    EmitIndentedLine("TaskId " + tid_name + " = TaskId::invalid();");
     EmitIndentedLine("if (" + collection.count_name + " > 0) {");
     {
       IndentGuard guard(Active());
@@ -682,13 +689,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
         carry_plans[i].array_size = EvalConstTripCount(for_stmt);
         carry_plans[i].compiler_dep_collection = true;
         // compiler_dep_collection is functionally only consumed inside the
-        // array_size > 0 branch below (for PTO2TaskId::invalid() init).
+        // array_size > 0 branch below (for TaskId::invalid() init).
         // When array_size == 0 the dynamic path handles collection instead.
         if (carry_plans[i].array_size <= 0 && for_stmt->kind_ == ForKind::Parallel) {
           carry_plans[i].dynamic_compiler_dep_collection = true;
         }
         // Override is_rebind: ClassifyIterArgCarry only sets it for TASK_ID
-        // iter_args, but ChipTensor-typed iter_args with compiler-dep edges also
+        // iter_args, but TaskTensor-typed iter_args with compiler-dep edges also
         // need true so the yield handler emits dynamic-collection writes.
         carry_plans[i].is_rebind = true;
       }
@@ -702,9 +709,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
     std::optional<DynamicTaskIdCollection> dynamic_compiler_dep_collection_info;
 
     // Emit carry declarations for each iter_arg. Three lowering paths:
-    //   - array_size > 0  -> TaskId array-carry (PTO2TaskId arr[N])
+    //   - array_size > 0  -> TaskId array-carry (TaskId arr[N])
     //   - ArrayType carry  -> C-stack array with in-place-update semantics
-    //   - is_rebind        -> scalar/ChipTensor mutable carry variable
+    //   - is_rebind        -> scalar/TaskTensor mutable carry variable
     //   - else             -> trivial alias to init's emit name
     for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
       const auto& iter_arg = for_stmt->iter_args_[i];
@@ -727,13 +734,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
           init_is_var ? GetExternalTensorName(init_emit_name) : GenerateExprString(iter_arg->initValue_);
 
       if (array_size > 0) {
-        // ARRAY CARRY PATH — allocate ``PTO2TaskId <name>[N]`` and init it.
+        // ARRAY CARRY PATH — allocate ``TaskId <name>[N]`` and init it.
         // Initialisation rule: if the iter_arg's init value is itself an
         // array-carry Var, copy slot-by-slot; otherwise broadcast the scalar
         // init expression to every slot.
         const int64_t N = array_size;
         std::string rv_array_name = ReserveSyntheticEmitName(return_var->name_hint_);
-        EmitIndentedLine("PTO2TaskId " + rv_array_name + "[" + std::to_string(N) + "];");
+        EmitIndentedLine("TaskId " + rv_array_name + "[" + std::to_string(N) + "];");
 
         auto outer_init_var = AsVarLike(iter_arg->initValue_);
         const ArrayCarryEntry* outer_init_arr = nullptr;
@@ -744,7 +751,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         if (outer_init_arr && outer_init_arr->size == N) {
           EmitArrayCopyLoop(N, rv_array_name, outer_init_arr->array_name, "__init_i");
         } else if (carry_plans[i].compiler_dep_collection) {
-          EmitArrayFillLoop(N, rv_array_name, "PTO2TaskId::invalid()", "__init_i");
+          EmitArrayFillLoop(N, rv_array_name, "TaskId::invalid()", "__init_i");
         } else {
           EmitArrayFillLoop(N, rv_array_name, init_var_name, "__init_i");
         }
@@ -792,7 +799,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
             << array_ty->extent()->TypeName();
         const int64_t N = extent_const->value_;
         const bool is_task_id_array = (array_ty->dtype_ == DataType::TASK_ID);
-        const std::string cpp_dtype = is_task_id_array ? "PTO2TaskId" : array_ty->dtype_.ToCTypeString();
+        const std::string cpp_dtype = is_task_id_array ? "TaskId" : array_ty->dtype_.ToCTypeString();
 
         // An ArrayType carry is in-place-update semantics: the body's
         // ``array.update_element`` aliases its LHS back to the carry's emit
@@ -835,7 +842,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         RegisterArrayCarry(return_var.get(), carry_name, N);
       } else if (is_rebind) {
         // Scalar (single-name) carry path — only fires for non-TaskId
-        // iter_args (e.g. ChipTensor) or Sequential TaskId iter_args whose
+        // iter_args (e.g. TaskTensor) or Sequential TaskId iter_args whose
         // yield value isn't an inner array. Parallel TaskId iter_args are
         // guaranteed to use the array-carry path above (the const-trip-count
         // CHECK above would have fired otherwise).
@@ -849,11 +856,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
         // declared names.
         std::string carry_name = ReserveSyntheticEmitName(return_var->name_hint_);
         const std::string cpp_type = GetCppType(return_var->GetType());
-        // A ChipTensor loop carry directly in a ``pl.manual_scope`` body is hoisted to
+        // A TaskTensor loop carry directly in a ``pl.manual_scope`` body is hoisted to
         // the enclosing scope so a task / method-receiver placed AFTER the block
-        // resolves it (issue #1713; see EmitMutableTensorCarryDecl). Non-ChipTensor
+        // resolves it (issue #1713; see EmitMutableTensorCarryDecl). Non-TaskTensor
         // (e.g. Sequential TaskId scalar) carries keep their in-block decl.
-        if (cpp_type == "ChipTensor") {
+        if (cpp_type == "TaskTensor") {
           EmitMutableTensorCarryDecl(carry_name, init_var_name);
         } else {
           EmitIndentedLine(cpp_type + " " + carry_name + " = " + init_var_name + ";");
@@ -903,7 +910,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
           EmitIndentedLine("#if SIMPLER_ORCH_PROFILING");
           EmitIndentedLine("uint64_t " + profile_start_name + " = rt_orch_profile_now();");
           EmitIndentedLine("#endif");
-          EmitIndentedLine("std::vector<PTO2TaskId> " + collection.data_name + "(static_cast<size_t>(" +
+          EmitIndentedLine("std::vector<TaskId> " + collection.data_name + "(static_cast<size_t>(" +
                            capacity_name + "));");
           EmitIndentedLine("uint32_t " + collection.count_name + " = 0;");
           EmitIndentedLine("#if SIMPLER_ORCH_PROFILING");
@@ -932,7 +939,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
       IndentGuard indent_guard(Active());
       PushCppScope();
 
-      // The implicit ``PTO2_SCOPE()`` wrapper around the loop body is now an
+      // The implicit ``SIMPLER_SCOPE()`` wrapper around the loop body is now an
       // explicit AUTO RuntimeScopeStmt inserted by MaterializeRuntimeScopes
       // (suppressed inside a manual scope); visiting the body emits it 1:1.
 
@@ -991,15 +998,15 @@ class OrchestrationStmtCodegen : public CodegenBase {
     DeclareCompilerDepTaskIdsAtFirstScope();
     DeclareHoistedTaskIdsForScope(scope.get());
     // Snapshot the TaskId / array-carry bindings on entry to EVERY generated
-    // PTO2_SCOPE (AUTO or MANUAL); restore on exit. A binding added inside the
-    // block names a C++ local (e.g. ``PTO2TaskId tid = ...``, ``PTO2TaskId prev
+    // SIMPLER_SCOPE (AUTO or MANUAL); restore on exit. A binding added inside the
+    // block names a C++ local (e.g. ``TaskId tid = ...``, ``TaskId prev
     // = arr[k]``) declared inside the generated ``{ }`` — it dies at the closing
     // brace, so it must not leak to the enclosing scope where a later
     // ``set_dependencies`` / array-yield would reference a now-out-of-scope
     // identifier (issue #1577). The snapshot is by COPY so outer entries stay
     // visible inside the block: a task in the scope can still fence on TaskIds
     // produced by tasks emitted in the enclosing (auto or outer) scope. Loop /
-    // branch carries are registered *before* their body's PTO2_SCOPE (outside
+    // branch carries are registered *before* their body's SIMPLER_SCOPE (outside
     // this frame), so they correctly survive the block.
     auto saved_map = manual_task_id_map_;
     auto saved_array_carry = array_carry_vars_;
@@ -1008,7 +1015,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
       // AUTO scope: emit inline. No alias hoisting needed — the outermost AUTO
       // wrapper has nothing placed after it, and for/if bodies escape values
       // through phis / iter_args rather than raw const-ref aliases.
-      EmitIndentedLine("PTO2_SCOPE() {");
+      EmitIndentedLine("SIMPLER_SCOPE() {");
       {
         IndentGuard indent_guard(Active());
         PushCppScope();
@@ -1033,7 +1040,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     //     scheduling dependency, so its declaration is hoisted to the enclosing
     //     scope (EmitBatchedAllocTensors flushes it into ``scope_hoist_sink_``).
     // We buffer the block body so the hoisted allocation decls can be flushed
-    // ahead of the ``PTO2_SCOPE(MANUAL) {`` header, where they are in scope both
+    // ahead of the ``SIMPLER_SCOPE(MANUAL) {`` header, where they are in scope both
     // inside the block and at after-scope readers.
     const int parent_indent_level = Active().GetIndentLevel();
     const std::string parent_indent = IndentAtLevel(parent_indent_level);
@@ -1073,12 +1080,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
     for (const auto& line : hoisted) {
       Active().AppendRaw(line);
     }
-    Active().AppendRaw(parent_indent + "PTO2_SCOPE(PTO2ScopeMode::MANUAL) {\n");
+    Active().AppendRaw(parent_indent + "SIMPLER_SCOPE(ScopeMode::MANUAL) {\n");
     Active().AppendRaw(body_emitter.GetCode());
     Active().AppendRaw(parent_indent + "}\n");
 
     // Restore the outer scheduling bindings. A binding minted inside the block
-    // that names a manual-scope-local C++ identifier (e.g. ``PTO2TaskId prev =
+    // that names a manual-scope-local C++ identifier (e.g. ``TaskId prev =
     // arr[k];``) dies at the closing brace and must not leak (issue #1577).
     // BUT an array carry registered inside the scope can reuse a backing array
     // declared in the ENCLOSING scope — e.g. a ``pl.parallel`` TaskId array
@@ -1185,12 +1192,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
   void VisitStmt_(const IfStmtPtr& if_stmt) override {
     std::string cond_expr = GenerateExprString(if_stmt->condition_);
 
-    // A default-constructed ``ChipTensor`` is deliberately uninitialised. Seed
-    // the phi declaration for a ChipTensor return_var from a valid ChipTensor
+    // A default-constructed ``TaskTensor`` is deliberately uninitialised. Seed
+    // the phi declaration for a TaskTensor return_var from a valid TaskTensor
     // that's already in scope instead. Try sources in order:
     //   1. The first tensor function parameter (selected by orch arg index,
     //      not lexical name — picking from ``param_name_set_`` could yield a
-    //      scalar param and emit ``ChipTensor x = <scalar>;`` which won't compile).
+    //      scalar param and emit ``TaskTensor x = <scalar>;`` which won't compile).
     //   2. A Var yielded by either branch that's already declared at
     //      if-entry (an outer iter_arg, or a prior in-body assignment). This
     //      handles parameterless functions whose branches yield a name
@@ -1242,11 +1249,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
       if (As<ArrayType>(rv->GetType())) continue;
       const std::string emit_name = ReserveVarEmitName(rv.get());
       const std::string cpp_type = GetCppType(rv->GetType());
-      if (cpp_type == "ChipTensor") {
+      if (cpp_type == "TaskTensor") {
         INTERNAL_CHECK_SPAN(!tensor_phi_init.empty(), if_stmt->span_)
             << "Internal error: IfStmt return_var '" << rv->name_hint_
-            << "' is a ChipTensor but no in-scope ChipTensor was found to use as the "
-            << "valid phi placeholder (a default-constructed ``ChipTensor`` is uninitialised). "
+            << "' is a TaskTensor but no in-scope TaskTensor was found to use as the "
+            << "valid phi placeholder (a default-constructed ``TaskTensor`` is uninitialised). "
             << "Expected either a function parameter or a branch yield value "
             << "to resolve to a Var already declared at if-entry.";
         // Phi placeholder init — overwritten by branch yields. When the IfStmt is
@@ -1308,7 +1315,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
       }
       if (IsOp(call, "system.task_invalid")) {
         // The Python literal ``None`` in a TaskId position lowers here.
-        EmitIndentedLine("PTO2TaskId " + var_name + " = PTO2TaskId::invalid();");
+        EmitIndentedLine("TaskId " + var_name + " = TaskId::invalid();");
 
         // Register so a downstream ``deps=[<this var>]`` resolves to the
         // emitted name (string variant). The ``is_valid()`` guard in
@@ -1381,7 +1388,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
           }
         }
         // ``prev = tids[k]`` reads one slot of a TaskId array into a scalar
-        // C++ local (``PTO2TaskId prev = arr[k];``). Register the LHS so a
+        // C++ local (``TaskId prev = arr[k];``). Register the LHS so a
         // downstream ``deps=[prev]`` resolves to this snapshot local (string
         // variant) — mirroring the producer-TaskId registration in
         // ``GenerateSubmitReturnAliases``. Binding to the local (not the
@@ -1473,7 +1480,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         }
         // Inside a ``pl.manual_scope``, collapse a pure SSA tensor copy ``X = Y``
         // by remapping ``X``'s emit name to ``Y`` instead of emitting a
-        // scope-local ``ChipTensor X = Y;`` decl (issue #1713). ``X`` is a fresh SSA
+        // scope-local ``TaskTensor X = Y;`` decl (issue #1713). ``X`` is a fresh SSA
         // version of the *same physical tensor* as ``Y`` (e.g. a post-loop
         // rebind ``score = score_rv`` lowering to ``score__ssa_v1 = score``, or a
         // windowed-assemble result rebind). The decl would die at the block's
@@ -1493,11 +1500,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
         // ``X = <hoisted carry>`` at the manual-scope body indent — where the
         // carry is post-loop and stable (the canonical ``score = score_rv``
         // rebind). Inside the loop body (a deeper indent) a copy of the carry
-        // keeps its ``ChipTensor X = carry;`` decl, so a pre-yield snapshot can never
+        // keeps its ``TaskTensor X = carry;`` decl, so a pre-yield snapshot can never
         // alias the carry's later value.
         const bool carry_collapse_ok =
             hoisted_carry_names_.count(value_expr) == 0 || IsAtManualScopeBodyIndent();
-        if (cpp_type == "ChipTensor" && manual_local_names_ != nullptr && IsEnclosingScopeValid(value_expr) &&
+        if (cpp_type == "TaskTensor" && manual_local_names_ != nullptr && IsEnclosingScopeValid(value_expr) &&
             !IsMutableTensorNameInCurrentScope(value_expr) && !IsMutableTensorNameInCurrentScope(var_name) &&
             carry_collapse_ok) {
           emit_name_map_[assign->var_.get()] = value_expr;
@@ -1747,14 +1754,14 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   std::string GetCppType(const TypePtr& type) {
     if (auto scalar_type = As<ScalarType>(type)) {
-      // TaskId is an opaque 64-bit handle, not numeric — emit as PTO2TaskId.
-      if (scalar_type->dtype_ == DataType::TASK_ID) return "PTO2TaskId";
+      // TaskId is an opaque 64-bit handle, not numeric — emit as TaskId.
+      if (scalar_type->dtype_ == DataType::TASK_ID) return "TaskId";
       return scalar_type->dtype_.ToCTypeString();
     }
-    // TensorType: use ``ChipTensor`` so default-constructible declarations are
+    // TensorType: use ``TaskTensor`` so default-constructible declarations are
     // legal (C++ rejects ``auto x;`` without init). Yield/Assign downstream
     // will rebind it.
-    if (AsTensorTypeLike(type)) return "ChipTensor";
+    if (AsTensorTypeLike(type)) return "TaskTensor";
     if (As<CommCtxType>(type)) return "uint64_t";
     // ArrayType has split declaration syntax (``dtype name[N]``) — there's no
     // single "type expression" that names a C array. No caller should ask for
@@ -1800,9 +1807,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
       case ArgDirection::OutputExisting:
         // The runtime overloads add_output on the argument type:
         //   add_output(TensorCreateInfo&)  -> OUTPUT       (runtime allocates)
-        //   add_output(ChipTensor&)            -> OUTPUT_EXISTING (write-only existing tensor)
+        //   add_output(TaskTensor&)            -> OUTPUT_EXISTING (write-only existing tensor)
         // The codegen pre-allocates via tensor.create + alloc_tensors, so the emitted
-        // call site always passes a ChipTensor& and the OUTPUT_EXISTING overload is selected.
+        // call site always passes a TaskTensor& and the OUTPUT_EXISTING overload is selected.
         // We still distinguish the two ArgDirections in the IR to let downstream phases
         // switch to the runtime-allocated form without an IR change.
         return "add_output";
@@ -1829,7 +1836,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// Reorder a param list so non-scalar (tensor) entries precede scalars,
   /// preserving relative order within each group — the new PTOParam ordering
   /// invariant (tensors must be added before scalars; see
-  /// check_add_tensor_valid() in pto_types.h). A hand-rolled two-pass stable
+  /// check_add_tensor_capacity() in types.h). A hand-rolled two-pass stable
   /// reorder rather than ``std::stable_partition``: libstdc++'s stable_partition
   /// allocates a temporary buffer through the C++17-deprecated
   /// ``std::get_temporary_buffer`` for a non-trivially-relocatable element type,
@@ -1985,11 +1992,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
       EmitIndentedLine(shapes.str());
     }
 
-    // No set_initial_value() here: this CI is synthesised for a callee Out param
-    // that the caller never passed (a runtime-allocated output), so there is no
-    // user-facing `pl.create_tensor(..., init_value=...)` to honour. Buffer
-    // pre-fill is emitted only on the originating `tensor.create` op (see
-    // tensor_op_codegen.cpp), which keeps its own CI on the orchestration path.
+    // This CI is synthesised for a callee Out param the caller never passed (a
+    // runtime-allocated output). Its buffer arrives uninitialised: the runtime
+    // dropped TensorCreateInfo's create-info fill, so no orchestration-side
+    // pre-fill exists on any tensor.create path either. A kernel that reads
+    // before writing must be ordered after a seeding kernel.
     EmitIndentedLine("TensorCreateInfo " + ci_var + "(" + ci_var + "_shapes, " + std::to_string(ndim) + ", " +
                      GetRuntimeDataTypeString(tensor_ty->dtype_) + ");");
 
@@ -2023,7 +2030,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   // separate scalar-arg store (CORE_MAX_SCALAR_ARGS) and the runtime tensor
   // dump skips SCALAR entries anyway, so excluding them keeps the recorded
   // signature 1:1 with the payload tensors and bounds sig_count by the same
-  // CORE_MAX_TENSOR_ARGS cap that check_add_tensor_valid enforces on the
+  // CORE_MAX_TENSOR_ARGS cap that check_add_tensor_capacity enforces on the
   // payload. Including scalars would inflate sig_count past CORE_MAX_TENSOR_ARGS
   // and trip make_callable's "sig_count exceeds MaxSig" guard.
   // func_id is name-deduped, so we record once per kernel (first call wins).
@@ -2120,7 +2127,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
           << " params (Call requires full coverage; only Submit may be a prefix).";
     }
 
-    // New PTOParam API: tensors must precede scalars (see check_add_tensor_valid() in pto_types.h)
+    // New PTOParam API: tensors must precede scalars (see check_add_tensor_capacity() in types.h)
     return ReorderTensorsBeforeScalars(params);
   }
 
@@ -2443,10 +2450,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
   // IR may still spell a constant one.
   [[nodiscard]] std::pair<ExprPtr, bool> EffectiveLaunchSpec(const CallPtr& call,
                                                              const FunctionPtr& launch_func) const {
-    ExprPtr core_num = call->GetAttr<ExprPtr>(kAttrCoreNum, nullptr);
+    ExprPtr core_num = alloc_batching::EffectiveCoreNum(call, launch_func);
     bool sync_start = call->GetAttr<bool>(kAttrSyncStart, false);
-    if (!core_num && launch_func) {
-      core_num = launch_func->GetAttr<ExprPtr>(kAttrCoreNum, nullptr);
+    if (!call->GetAttr<ExprPtr>(kAttrCoreNum, nullptr) && launch_func) {
       sync_start = launch_func->GetAttr<bool>(kAttrSyncStart, false);
     }
     return {core_num, sync_start};
@@ -2634,7 +2640,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   /// Upper bound on the number of dependency entries ``EmitManualDeps`` could
-  /// fill for ``call``. Used to size the per-task ``PTO2TaskId <task>_deps[K]``
+  /// fill for ``call``. Used to size the per-task ``TaskId <task>_deps[K]``
   /// stack array. ``manual_dep_edges`` is orthogonal to scope mode: the
   /// runtime adds these on top of any auto-tracked deps in auto scope (final
   /// fanin = auto ∪ explicit), so this count fires whenever the parser
@@ -2671,7 +2677,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return merged;
   }
 
-  /// Resolve ``edge`` to the live ``PTO2TaskId`` binding of its producer, or
+  /// Resolve ``edge`` to the live ``TaskId`` binding of its producer, or
   /// ``nullptr`` when no binding is visible here — the producer sits in a
   /// scope that has already closed, so its C++ local is gone and the edge is
   /// dropped from the emitted ``set_dependencies`` call.
@@ -2985,7 +2991,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   /// Emit explicit dependency wiring for a kernel ``Call``: a fixed-size
-  /// ``PTO2TaskId <task>_deps[K]`` stack array filled with the valid producer
+  /// ``TaskId <task>_deps[K]`` stack array filled with the valid producer
   /// TaskIds from ``Call.attrs["manual_dep_edges"]``, followed by a single
   /// ``<task>.set_dependencies(<task>_deps, <task>_deps_count)``.
   ///
@@ -2993,7 +2999,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// ``deps=[tid1, tid2]`` kwarg — each entry a ``Scalar[TASK_ID]`` Var, or an
   /// ``Array[N, TASK_ID]`` that contributes one slot each. Each entry is
   /// emitted via ``EmitDepArrayInsert``: an entry that may hold the
-  /// ``PTO2TaskId::invalid()`` sentinel — a ``None`` loop-carry seed, an early
+  /// ``TaskId::invalid()`` sentinel — a ``None`` loop-carry seed, an early
   /// loop iteration's iter_arg carry, an unwritten array slot, or a hoisted /
   /// dummy / barrier tid — is guarded by ``is_valid()`` so an invalid id never
   /// reaches ``set_dependencies``. A fresh direct-producer id, proven always
@@ -3008,7 +3014,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // A fresh direct-producer TaskId is statically valid (see
     // guaranteed_valid_task_ids_) so its insert skips the runtime is_valid()
     // guard; every other id keeps the guard because it may hold the
-    // ``PTO2TaskId::invalid()`` sentinel.
+    // ``TaskId::invalid()`` sentinel.
     if (guaranteed_valid_task_ids_.count(name)) {
       EmitIndentedLine(assign);
     } else {
@@ -3021,7 +3027,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     if (dep_capacity == 0) return;
     const std::string deps_arr = task_var + "_deps";
     const std::string deps_cnt = task_var + "_deps_count";
-    EmitIndentedLine("PTO2TaskId " + deps_arr + "[" + std::to_string(dep_capacity) + "];");
+    EmitIndentedLine("TaskId " + deps_arr + "[" + std::to_string(dep_capacity) + "];");
     EmitIndentedLine("uint32_t " + deps_cnt + " = 0;");
     std::unordered_set<std::string> emitted_names;
     auto emit_one_dep = [&](const std::string& name) {
@@ -3044,7 +3050,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         }
       } else {
         const auto& name = std::get<std::string>(*binding);
-        // A scalar TaskId may hold the ``PTO2TaskId::invalid()`` sentinel — an
+        // A scalar TaskId may hold the ``TaskId::invalid()`` sentinel — an
         // iter_arg carry on the first loop iteration, or a ``None``
         // (``system.task_invalid``) loop-carry seed. ``EmitDepArrayInsert``
         // guards those with ``is_valid()``, and elides the guard only for a
@@ -3072,7 +3078,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
       // submit only when the barrier ends up fencing nothing (every dep
       // resolved to an invalid sentinel).
       EmitManualDeps(call, task_var);
-      EmitIndentedLine("PTO2TaskId " + tid_name + " = PTO2TaskId::invalid();");
+      EmitIndentedLine("TaskId " + tid_name + " = TaskId::invalid();");
       EmitIndentedLine("if (" + deps_cnt + " > 0) {");
       {
         IndentGuard guard(Active());
@@ -3090,14 +3096,14 @@ class OrchestrationStmtCodegen : public CodegenBase {
       // its successors, so submit it unconditionally — eliding it would
       // silently drop those edges.
       EmitIndentedLine("TaskOutputTensors " + outs_var + " = rt_submit_dummy_task(" + task_var + ");");
-      EmitIndentedLine("PTO2TaskId " + tid_name + " = " + outs_var + ".task_id();");
+      EmitIndentedLine("TaskId " + tid_name + " = " + outs_var + ".task_id();");
     }
   }
 
-  static constexpr size_t kMaxAllocTensorsArgs = 16;
+  static constexpr size_t kMaxAllocTensorsArgs = alloc_batching::kAllocTensorsArgs;
 
   static bool IsInjectedGMPipeCreateVar(const VarPtr& var) {
-    return var && var->name_hint_.rfind("gm_pipe_buffer_", 0) == 0;
+    return alloc_batching::IsInjectedGMPipeCreateVar(var);
   }
 
   int64_t GetGMPipeWorkspaceElements(const FunctionPtr& root_func) {
@@ -3170,22 +3176,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   static bool ExprRefsAnyOf(const ExprPtr& expr, const std::unordered_set<const Var*>& vars) {
-    if (!expr) {
-      return false;
-    }
-    if (auto var = As<Var>(expr)) {
-      return vars.count(var.get()) > 0;
-    }
-    if (auto bin = As<BinaryExpr>(expr)) {
-      return ExprRefsAnyOf(bin->left_, vars) || ExprRefsAnyOf(bin->right_, vars);
-    }
-    if (auto un = As<UnaryExpr>(expr)) {
-      return ExprRefsAnyOf(un->operand_, vars);
-    }
-    if (auto cast_expr = As<Cast>(expr)) {
-      return ExprRefsAnyOf(cast_expr->operand_, vars);
-    }
-    return false;
+    return alloc_batching::ExprRefsAnyOf(expr, vars);
   }
 
   bool ShapeDependsOnLocalVars(const CallPtr& call,
@@ -3216,7 +3207,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     EmitIndentedLine(alloc.str());
 
     for (size_t i = 0; i < emit_names.size(); i++) {
-      EmitIndentedLine("const ChipTensor& " + emit_names[i] + " = " + alloc_var + ".get_ref(" +
+      EmitIndentedLine("const TaskTensor& " + emit_names[i] + " = " + alloc_var + ".get_ref(" +
                        std::to_string(i) + ");");
     }
   }
@@ -3549,7 +3540,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     // A caller-allocated kernel/submit output aliases an arg it writes in place
     // — it is the *same physical tensor* as that arg. Rather than mint a
-    // ``const ChipTensor& <result> = <source>;`` rename, we remap the result Var's
+    // ``const TaskTensor& <result> = <source>;`` rename, we remap the result Var's
     // emit name to the source, so every reference resolves directly to the
     // source name. This is the strategy ``tensor.assemble`` already uses
     // (HandleTensorAssembleAssign); applying it uniformly drops the redundant
@@ -3579,7 +3570,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     if (mutable_alias) {
       EmitIndentedLine(alias_name + " = " + out_name + ";");
     } else {
-      EmitIndentedLine("const ChipTensor& " + alias_name + " = " + out_name + ";");
+      EmitIndentedLine("const TaskTensor& " + alias_name + " = " + out_name + ";");
     }
   }
 
@@ -3604,14 +3595,14 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   void RegisterMutableTensorName(const std::string& cpp_type, const std::string& emit_name) {
-    if (cpp_type == "ChipTensor") {
+    if (cpp_type == "TaskTensor") {
       mutable_tensor_name_scopes_.back().insert(emit_name);
     }
   }
 
   /// Register a hoisted loop carry's emit name as mutable in the scope that
   /// ENCLOSES the current (manual-scope body) C++ frame — the frame the hoisted
-  /// ``ChipTensor <carry> = <init>;`` decl lands in (issue #1713). The carry's
+  /// ``TaskTensor <carry> = <init>;`` decl lands in (issue #1713). The carry's
   /// in-loop ``<carry> = ...;`` reassignments still resolve through that
   /// enclosing frame, and a post-loop ``X = <carry>`` rebind reads the carry as
   /// *not* mutable-in-current-scope (it is mutable one level out), so the rebind
@@ -3622,33 +3613,33 @@ class OrchestrationStmtCodegen : public CodegenBase {
     mutable_tensor_name_scopes_[mutable_tensor_name_scopes_.size() - 2].insert(emit_name);
   }
 
-  /// Emit a mutable ``ChipTensor <name> = <init>;`` decl for a loop carry or an
+  /// Emit a mutable ``TaskTensor <name> = <init>;`` decl for a loop carry or an
   /// IfStmt phi placeholder, hoisting it out of a ``pl.manual_scope`` body into
   /// the enclosing scope when the construct sits directly in that body
   /// (``IsAtManualScopeBodyIndent``) and ``init`` is enclosing-scope-valid
   /// (issue #1713). The hoisted decl keeps ``<name>`` visible to a task or
-  /// method-receiver placed AFTER the ``PTO2_SCOPE(MANUAL)`` block; the in-block
+  /// method-receiver placed AFTER the ``SIMPLER_SCOPE(MANUAL)`` block; the in-block
   /// ``<name> = ...;`` reassignments (loop yields / branch merges) stay put and
   /// resolve through the enclosing frame. ``init`` is an enclosing-scope value
   /// that does not change between the hoist point and the block, so moving the
-  /// decl one level out is ordering-inert; a default-constructed ``ChipTensor``
+  /// decl one level out is ordering-inert; a default-constructed ``TaskTensor``
   /// is uninitialised, so the whole decl (init included) is hoisted, not a bare forward
   /// declaration. Registering ``<name>`` mutable in the *enclosing* frame and
   /// tracking it in ``hoisted_carry_names_`` also lets a post-block ``X = <name>``
   /// rebind collapse onto it (see the Var-RHS catch-all in VisitStmt_(AssignStmt)).
-  /// Caller guarantees the decl type is ``ChipTensor``.
+  /// Caller guarantees the decl type is ``TaskTensor``.
   void EmitMutableTensorCarryDecl(const std::string& name, const std::string& init_expr) {
     if (scope_hoist_sink_ != nullptr && IsAtManualScopeBodyIndent() && IsEnclosingScopeValid(init_expr)) {
-      scope_hoist_sink_->push_back(IndentAtLevel(scope_hoist_indent_level_) + "ChipTensor " + name + " = " +
+      scope_hoist_sink_->push_back(IndentAtLevel(scope_hoist_indent_level_) + "TaskTensor " + name + " = " +
                                    init_expr + ";\n");
       RegisterMutableTensorNameInEnclosingScope(name);
       hoisted_carry_names_.insert(name);
       if (manual_local_names_ != nullptr) manual_local_names_->erase(name);
       if (enclosing_manual_local_names_ != nullptr) enclosing_manual_local_names_->insert(name);
     } else {
-      EmitIndentedLine("ChipTensor " + name + " = " + init_expr + ";");
+      EmitIndentedLine("TaskTensor " + name + " = " + init_expr + ";");
 
-      RegisterMutableTensorName("ChipTensor", name);
+      RegisterMutableTensorName("TaskTensor", name);
     }
   }
 
@@ -3683,7 +3674,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   void DeclareHoistedTaskId(const Var* var) {
     if (!var || hoisted_task_id_emit_names_by_key_.count(TaskIdHoistKey(var))) return;
     std::string name = ReserveSyntheticEmitName(GetSSABaseName(var->name_hint_) + "_tid");
-    EmitIndentedLine("PTO2TaskId " + name + " = PTO2TaskId::invalid();");
+    EmitIndentedLine("TaskId " + name + " = TaskId::invalid();");
 
     hoisted_task_id_emit_names_by_key_[TaskIdHoistKey(var)] = name;
     hoisted_task_id_emit_names_[var->UniqueId()] = name;
@@ -3724,12 +3715,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
       return hoisted_it->second;
     }
     std::string tid_name = ReserveSyntheticEmitName(base_name);
-    EmitIndentedLine("PTO2TaskId " + tid_name + " = " + value_expr + ";");
+    EmitIndentedLine("TaskId " + tid_name + " = " + value_expr + ";");
     // Fresh producer local: every caller binds a ``task_<n>_outs.task_id()``
     // producer id, which the runtime guarantees valid. Record so its dep-array
     // insert can skip the redundant is_valid() guard. The hoisted branches
     // above deliberately do NOT record: those names are pre-declared
-    // ``= PTO2TaskId::invalid()`` loop carries that may be invalid at a read.
+    // ``= TaskId::invalid()`` loop carries that may be invalid at a read.
     guaranteed_valid_task_ids_.insert(tid_name);
 
     return tid_name;
@@ -3753,7 +3744,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
       return hoisted_it->second;
     }
     std::string tid_name = ReserveVarEmitName(var);
-    EmitIndentedLine("PTO2TaskId " + tid_name + " = " + value_expr + ";");
+    EmitIndentedLine("TaskId " + tid_name + " = " + value_expr + ";");
     // Fresh producer local (see BindSyntheticTaskId): the sole caller binds a
     // ``task_<n>_outs.task_id()`` producer id, always valid. The hoisted
     // branches above are left unrecorded for the same reason.
@@ -3902,9 +3893,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
   ///   - Caller-allocated (param_idx < original arg count): alias to
   ///     ``call->args_[param_idx]`` — the original tensor variable the user
   ///     passed in. The runtime's ``TaskOutputTensors`` stores only
-  ///     ``add_output`` entries (see runtime/.../pto_types.h:72 — "Only
+  ///     ``add_output`` entries (see runtime/.../types.h — "Only
   ///     runtime-created outputs are stored here"), so ``add_inout`` /
-  ///     in-args ``add_output(ChipTensor&)`` slots do **not** appear in
+  ///     in-args ``add_output(TaskTensor&)`` slots do **not** appear in
   ///     ``task_<idx>_outs`` and ``get_ref`` would skip past them or assert.
   ///   - Runtime-allocated (param_idx >= original arg count): alias to
   ///     ``task_<idx>_outs.get_ref(runtime_out_pos)`` where
@@ -4011,7 +4002,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         if (IsMutableTensorNameInCurrentScope(elem_name)) {
           EmitIndentedLine(elem_name + " = " + source + ";");
         } else {
-          EmitIndentedLine("const ChipTensor& " + elem_name + " = " + source + ";");
+          EmitIndentedLine("const TaskTensor& " + elem_name + " = " + source + ";");
         }
       }
     }
@@ -4020,7 +4011,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   void VisitScopedBranchBody(const StmtPtr& body, const std::vector<VarPtr>& return_vars) {
     IndentGuard indent_guard(Active());
     PushCppScope();
-    // The implicit ``PTO2_SCOPE()`` wrapper around the branch body is now an
+    // The implicit ``SIMPLER_SCOPE()`` wrapper around the branch body is now an
     // explicit AUTO RuntimeScopeStmt inserted by MaterializeRuntimeScopes
     // (suppressed inside a manual scope); visiting the body emits it 1:1.
     auto saved = current_return_vars_;
@@ -4183,7 +4174,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   int phase_fence_barrier_counter_ = 0;
   int alloc_counter_ = 0;
   /// Depth of nested ``RuntimeScopeStmt(manual=true)``. While > 0, the codegen
-  /// suppresses the implicit ``PTO2_SCOPE()`` wrapper around ForStmt/IfStmt
+  /// suppresses the implicit ``SIMPLER_SCOPE()`` wrapper around ForStmt/IfStmt
   /// bodies (the runtime forbids nesting AUTO scope inside MANUAL).
   int in_manual_scope_depth_ = 0;
   /// Map from a producer ``Var`` to the task identity to use when it appears
@@ -4195,7 +4186,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   ///   * ``std::string`` value: a ``ForStmt`` TaskId iter_arg's emit name, a
   ///     ``pl.submit`` producer-TaskId tuple element's emit name, or a
   ///     ``system.task_invalid`` (``None``) LHS emit name — a single
-  ///     ``PTO2TaskId`` variable.
+  ///     ``TaskId`` variable.
   ///   * ``std::vector<std::string>`` value: a ``ForStmt`` TaskId iter_arg that
   ///     carries an *array* of task ids (Parallel ForStmt with const trip
   ///     count, or Sequential ForStmt propagating an inner Parallel array
@@ -4217,7 +4208,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// The key is either a ``ForStmt`` iter_arg (when used as a deps source) or
   /// a ``ForStmt`` return_var (when used as a yield target). For each key the
   /// recorded ``array_name`` is the C++ identifier of the underlying
-  /// ``PTO2TaskId[N]`` array and ``size`` is the slot count ``N``.
+  /// ``TaskId[N]`` array and ``size`` is the slot count ``N``.
   struct ArrayCarryEntry {
     std::string array_name;
     int64_t size;
@@ -4237,18 +4228,18 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::unordered_map<const Var*, ArrayPhiBinding> pending_array_phis_;
   std::unordered_map<const Var*, DynamicTaskIdCollection> dynamic_task_id_collections_;
   bool needs_vector_include_ = false;
-  /// Names of mutable ChipTensor values declared in each generated C++ block.
+  /// Names of mutable TaskTensor values declared in each generated C++ block.
   /// Tuple-output alias emission must avoid redeclaring names already declared
   /// in the same block, but must not treat outer-block declarations as aliases:
   /// C++ shadowing is valid and sometimes required to avoid rebinding an outer
-  /// loop-carried ChipTensor too early.
+  /// loop-carried TaskTensor too early.
   std::vector<std::unordered_set<std::string>> mutable_tensor_name_scopes_{{}};
   /// Manual-scope cross-scope tensor handling (issue #1697). While a
   /// ``pl.manual_scope`` block body is being buffered, EmitBatchedAllocTensors
   /// routes a hoisted ``alloc_tensors`` declaration (rendered at
   /// ``scope_hoist_indent_level_``, the parent indent) into ``scope_hoist_sink_``
   /// instead of the deep block indent; the scope handler flushes the sink ahead
-  /// of the ``PTO2_SCOPE(MANUAL) {`` header. ``manual_local_names_`` holds the
+  /// of the ``SIMPLER_SCOPE(MANUAL) {`` header. ``manual_local_names_`` holds the
   /// tensor emit names that are scope-local — first reserved inside the block
   /// and not (yet) hoisted out of it — so ``IsEnclosingScopeValid`` (which gates
   /// both the alloc hoist and the EmitTensorAlias remap) is a single membership
@@ -4261,7 +4252,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   int scope_hoist_indent_level_ = 0;
   std::set<std::string>* manual_local_names_ = nullptr;
   std::set<std::string>* enclosing_manual_local_names_ = nullptr;
-  /// Emit names of loop carries whose ``ChipTensor carry = init;`` decl was hoisted
+  /// Emit names of loop carries whose ``TaskTensor carry = init;`` decl was hoisted
   /// out of a manual-scope body (issue #1713). Such a carry is mutable in an
   /// *enclosing* C++ frame, so ``IsMutableTensorNameInCurrentScope`` (which only
   /// scans the back frame) does not see it. The Var-RHS collapse uses this set to
@@ -4286,7 +4277,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::unordered_map<uint64_t, std::string> hoisted_task_id_emit_names_;
   std::unordered_map<uint64_t, std::string> hoisted_task_id_emit_names_by_key_;
   /// Emit names of fresh direct-producer TaskId locals
-  /// (``PTO2TaskId <name> = task_<n>_outs.task_id();``) — statically always
+  /// (``TaskId <name> = task_<n>_outs.task_id();``) — statically always
   /// valid, so their dependency-array insert skips the runtime is_valid()
   /// guard (see EmitDepArrayInsert). Populated only by the fresh-declaration
   /// branch of BindSyntheticTaskId / BindVarTaskId; hoisted / loop-carried /
@@ -4401,7 +4392,7 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   stmt_codegen.SetEffectiveUses(std::move(use_collector.var_uses));
   stmt_codegen.PrepareCrossScopeTaskIdHoists(func->body_);
   // MaterializeRuntimeScopes wraps the whole body in an AUTO RuntimeScopeStmt,
-  // so the outermost ``PTO2_SCOPE()`` is now emitted by the scope handler at the
+  // so the outermost ``SIMPLER_SCOPE()`` is now emitted by the scope handler at the
   // base indent (4) rather than by a hardcoded wrapper below; the body lands at 8.
   stmt_codegen.SetInitialIndent(4);
   stmt_codegen.VisitStmt(func->body_);
@@ -4491,7 +4482,7 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
     for (const auto& def : dyn_dim_defs) oss << def;
   }
 
-  // The outermost PTO2_SCOPE() is now an explicit RuntimeScopeStmt emitted by
+  // The outermost SIMPLER_SCOPE() is now an explicit RuntimeScopeStmt emitted by
   // stmt_codegen (see MaterializeRuntimeScopes); just splice its output in.
   oss << "\n";
   oss << body_code;

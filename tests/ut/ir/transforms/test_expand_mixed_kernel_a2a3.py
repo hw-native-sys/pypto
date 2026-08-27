@@ -119,6 +119,29 @@ def test_forged_waiter_marker_without_task_level_call_site_is_rejected():
         _run_pipeline(Program)
 
 
+def test_deferred_waiter_dispatched_from_a_graph_body_is_accepted():
+    """The caller check asks "is this a task-level orchestration body".
+
+    A Graph body is one — its call sites are task launches like any other
+    orchestration body's. Requiring strictly `Orchestration` rejects a legal
+    Graph that dispatches a deferred waiter, with a message telling the author
+    to do what they already did.
+    """
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def waiter(self, signal: pld.DistributedTensor[[1, 1], pl.INT32]):
+            pl.func_attr({"deferred_completion_waiter": True})
+            pld.system.defer_wait(signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
+
+        @pl.function(type=pl.FunctionType.Graph)
+        def layer(self, signal: pld.DistributedTensor[[1, 1], pl.INT32]):
+            self.waiter(signal)
+
+    _run_pipeline(Program)
+
+
 def test_forged_waiter_plain_call_early_resolve_fails_closed():
     """A plain GlobalVar call cannot smuggle an unsafe early-resolve attr."""
 

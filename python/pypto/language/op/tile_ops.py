@@ -175,6 +175,7 @@ from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import (
     AtomicType,
+    CachePolicy,
     Expr,
     MemorySpace,
     PadValue,
@@ -300,6 +301,7 @@ def create(
     transpose: bool | None = None,
     *,
     flat_layout: bool | None = None,
+    compact: bool | None = None,
 ) -> Tile:
     """Create a tile from a shape.
 
@@ -316,6 +318,13 @@ def create(
             than the boxed NZ layout Mat tiles normally carry. Requires
             ``target_memory=Mat`` and is mutually exclusive with ``transpose``.
             Default ``None`` keeps the canonical layout.
+        compact: Keyword-only. Compiler-internal. Declares that this L0C buffer
+            holds a valid-region-packed product -- N-fractal pitch
+            ``ceil(validRow/16)*16`` rather than the physical row count, which is
+            what ``mad`` writes when the matmul's left operand is row-narrowed.
+            Requires ``target_memory=Acc``. Kernels do not set this;
+            ``AutoTileMatmulL0`` declares it on the accumulator seed it
+            synthesizes for a split K.
 
     Returns:
         Tile wrapping the create operation
@@ -328,6 +337,7 @@ def create(
         target_memory,
         transpose,
         flat_layout=flat_layout,
+        compact=compact,
     )
     return Tile(expr=call_expr)
 
@@ -378,6 +388,7 @@ def load(
     valid_shape: Sequence[IntLike] | None = None,
     target_memory: MemorySpace | None = None,
     clamp: bool = False,
+    cache: CachePolicy | None = None,
 ) -> Tile:
     """Copy data from tensor to unified buffer (tile).
 
@@ -403,6 +414,18 @@ def load(
             load asserts ``offsets + valid_shape`` stays inside the source and is
             rejected when that provably fails; ``clamp=True`` cuts the request back
             to the source edge instead.
+        cache: GM cache-access policy for *this* read. ``None`` (the default)
+            states no policy, leaving any scope-level declaration to apply.
+            ``CachePolicy.BYPASS`` declares a streaming read — it asserts the
+            bytes have no reuse worth caching and that nothing writes them while
+            the kernel runs; coherency is the author's contract (see
+            [`pl.set_cache_policy`][pypto.language.tensor.set_cache_policy] for
+            the full contract). An explicit value here always wins over a
+            scope-level ``pl.set_cache_policy`` declaration for the same tensor,
+            in both directions: ``cache=CachePolicy.DEFAULT`` opts this one read
+            back into the cache inside a bypassing scope. PTOAS has no L2-bypass
+            path yet (https://github.com/hw-native-sys/PTOAS/issues/1356), so a
+            BYPASS request warns and compiles as an ordinary cached access today.
 
     Returns:
         Tile wrapping the load operation
@@ -410,6 +433,8 @@ def load(
     Example:
         >>> # 2D load
         >>> tile = load(tensor, offsets=[0, 0], shapes=[32, 32])
+        >>> # streaming read, no cache reuse expected
+        >>> tile = load(tensor, [0, 0], [32, 32], cache=pl.CachePolicy.BYPASS)
     """
     if valid_shape is None:
         valid_shape = shapes
@@ -420,6 +445,7 @@ def load(
         _normalize_intlike(valid_shape),
         target_memory,
         clamp=clamp,
+        cache=None if cache is None else int(cache),
     )
     return Tile(expr=call_expr)
 
@@ -1437,22 +1463,53 @@ def gemv(lhs: Tile, rhs: Tile, acc_phase: str = "unspecified") -> Tile:
     return Tile(expr=call_expr)
 
 
-def gemv_acc(acc: Tile, lhs: Tile, rhs: Tile, acc_phase: str = "unspecified") -> Tile:
+def gemv_acc(
+    acc: Tile,
+    lhs: Tile,
+    rhs: Tile,
+    acc_phase: str = "unspecified",
+    *,
+    init_cond: BoolLike | None = None,
+) -> Tile:
     """GEMV with accumulation: C[1,N] += A[1,K] @ B[K,N].
 
     ``acc`` must use the GEMV output dtype. The logical K extents and lhs/rhs
     dtype requirements are identical to [`gemv`][pypto.language.tile.gemv].
+
+    ``init_cond`` makes the accumulator's initial value conditional, exactly as in
+    [`matmul_acc`][pypto.language.tile.matmul_acc] — GEMV is a matmul whose M is
+    1, run on the same cube MAD, so it carries the same predicate bit. On the
+    steps where it holds, ``acc`` is overwritten with ``lhs @ rhs`` rather than
+    accumulated into, which removes the peeled first step from split-K::
+
+        for k0 in pl.pipeline(0, K, K_TILE):
+            a = pl.load(vec, [0, k0], [1, K_TILE], target_memory=pl.MemorySpace.Mat)
+            b = pl.load(mat, [k0, 0], [K_TILE, N], target_memory=pl.MemorySpace.Mat)
+            acc = pl.tile.gemv_acc(acc, a, b, init_cond=(k0 == 0))
+
+    A literal ``True`` / ``False`` selects one form at compile time; a runtime
+    predicate lowers to a branch over the two, with no phi on the accumulator.
+
+    ``init_cond`` is keyword-only because ``acc_phase`` already owns the fourth
+    positional slot.
 
     Args:
         acc: Accumulator tile [1, N]
         lhs: Row vector tile [1, K]
         rhs: Right-hand side tile [K, N]
         acc_phase: Accumulation phase: ``"unspecified"``, ``"partial"``, or ``"final"``
+        init_cond: Optional predicate selecting overwrite over accumulate
 
     Returns:
         Tile wrapping the gemv_acc operation
     """
-    call_expr = _ir_ops.gemv_acc(acc.unwrap(), lhs.unwrap(), rhs.unwrap(), acc_phase=acc_phase)
+    call_expr = _ir_ops.gemv_acc(
+        acc.unwrap(),
+        lhs.unwrap(),
+        rhs.unwrap(),
+        acc_phase=acc_phase,
+        init_cond=predicate_to_expr(init_cond),
+    )
     return Tile(expr=call_expr)
 
 

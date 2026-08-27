@@ -142,6 +142,16 @@ pip install -e ".[dev]"     # 可编辑 + pytest、ruff、pyright、clang-tidy
 CMAKE_BUILD_TYPE=Release pip install .
 ```
 
+`RelWithDebInfo` 携带完整调试信息 —— 调试器需要它，它也占了产物的绝大部分：扩展模块
+304 MiB，其中 292 MiB 是 DWARF。设置 `PYPTO_DEBUG_INFO_LEVEL=1` 只保留 backtrace 会读的
+部分（函数描述与行号表），扩展模块降到 62 MiB、其 wheel 降到 18 MiB，编译快约三分之一，
+而错误信息里的 `C++ Traceback` 完全不变。失去的是局部变量和类型信息，所以准备挂调试器时
+请保持默认值：
+
+```bash
+SKBUILD_CMAKE_DEFINE=PYPTO_DEBUG_INFO_LEVEL=1 pip install .
+```
+
 检测到 `ccache` 时会自动启用，能显著降低重复构建的成本：
 
 ```bash

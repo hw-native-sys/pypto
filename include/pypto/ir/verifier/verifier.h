@@ -98,6 +98,18 @@ PropertyVerifierPtr CreateNoNestedCallPropertyVerifier();
 PropertyVerifierPtr CreateAccToGmStoreValidPropertyVerifier();
 
 /**
+ * @brief Factory for the Acc compact-mode property verifier
+ *
+ * Checks that every ``tile.matmul_acc`` / ``tile.matmul_mx_acc`` accumulates
+ * into a compact buffer whenever ``mad``'s pitch differs from the accumulator's
+ * physical row count, and that no tile outside Left/Right/Acc carries a compact
+ * mode.
+ *
+ * @return Shared pointer to AccCompactValid PropertyVerifier
+ */
+PropertyVerifierPtr CreateAccCompactValidPropertyVerifier();
+
+/**
  * @brief Factory for the atomic-add destination-dtype property verifier
  *
  * Checks every atomic-add write into GM (``tile.store`` / ``tensor.assemble`` /
@@ -109,6 +121,24 @@ PropertyVerifierPtr CreateAccToGmStoreValidPropertyVerifier();
  * @return Shared pointer to AtomicAddDtypeValid PropertyVerifier
  */
 PropertyVerifierPtr CreateAtomicAddDtypeValidPropertyVerifier();
+
+/**
+ * @brief Factory for the InParamWritten warning verifier.
+ *
+ * Reports a parameter declared `In` that its own function body writes, where
+ * "writes" means *declared* as written — by a builtin's registry effects or by
+ * a callee's own `param_directions_`.
+ *
+ * **Best-effort.** It is not registered as an `IRProperty`, and it does not
+ * promise to find every such parameter: it reads the same declarations
+ * direction inference reads, so an operator that declared no effect is
+ * invisible to it, and it runs `PostPipeline`, where `InitMemRef` has already
+ * invalidated `SSAForm`, so its buffer lineage can both miss and misattribute a
+ * write across control flow. See the file comment for the specific shapes.
+ *
+ * @return Shared pointer to the warning verifier
+ */
+PropertyVerifierPtr CreateInParamWrittenWarningVerifier();
 
 /**
  * @brief Factory function for creating NormalizedStmtStructure property verifier
@@ -386,12 +416,25 @@ PropertyVerifierPtr CreateIterArgCarryClassifiedPropertyVerifier();
  * ``MaterializeRuntimeScopes`` inserts explicit ``RuntimeScopeStmt`` nodes, or
  * when the user declares ``@pl.function(auto_scope=False)`` (the pass is a
  * no-op and codegen still accepts the function). Orchestration codegen emits
- * ``PTO2_SCOPE()`` only from those nodes; skipping the pass leaves
+ * ``SIMPLER_SCOPE()`` only from those nodes; skipping the pass leaves
  * ``auto_scope=True`` and would silently omit scopes.
  *
  * @return Shared pointer to RuntimeScopesMaterialized PropertyVerifier
  */
 PropertyVerifierPtr CreateRuntimeScopesMaterializedPropertyVerifier();
+
+/**
+ * @brief Create a verifier for the GraphBoundaryLegalized property
+ *
+ * Re-states the boundary contract LegalizeGraphBoundary enforces, so a later
+ * pass that reintroduces a violation is caught. That matters more here than for
+ * a typical property: almost every host_build_graph constraint degrades to a
+ * *silent* non-graph fallback at runtime — the program stays numerically correct
+ * and merely loses the speedup — so this verifier is the automated detector.
+ *
+ * @return Property verifier instance
+ */
+PropertyVerifierPtr CreateGraphBoundaryLegalizedPropertyVerifier();
 
 /**
  * @brief Factory function for creating CallDirectionsResolved property verifier

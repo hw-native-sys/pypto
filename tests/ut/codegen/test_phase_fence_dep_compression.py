@@ -59,8 +59,8 @@ def _compile_program_with_auto_deps(program_cls) -> str:
 
 def _assert_single_barrier_shape(code: str, *, fanin: int) -> None:
     assert "rt_submit_dummy_task(params_phase_fence_barrier_0)" in code, code
-    assert f"PTO2TaskId params_phase_fence_barrier_0_deps[{fanin}];" in code, code
-    real_dep_arrays = re.findall(r"PTO2TaskId (params_t\d+)_deps\[1\];", code)
+    assert f"TaskId params_phase_fence_barrier_0_deps[{fanin}];" in code, code
+    real_dep_arrays = re.findall(r"TaskId (params_t\d+)_deps\[1\];", code)
     assert real_dep_arrays, code
     assert any(
         (
@@ -70,7 +70,7 @@ def _assert_single_barrier_shape(code: str, *, fanin: int) -> None:
         in code
         for task_var in real_dep_arrays
     ), code
-    assert not re.search(rf"PTO2TaskId params_t\d+_deps\[{fanin}\];", code), code
+    assert not re.search(rf"TaskId params_t\d+_deps\[{fanin}\];", code), code
 
 
 def _assert_ordered(code: str, *needles: str) -> None:
@@ -322,12 +322,11 @@ class TestPhaseFenceDepCompressionCodegen:
 
         code = _compile_program_with_auto_deps(Prog)
 
-        assert code.count("PTO2_SCOPE(PTO2ScopeMode::MANUAL)") == 1, code
-        assert code.index("PTO2_SCOPE(PTO2ScopeMode::MANUAL)") < code.index(
-            "TaskOutputTensors task_0_outs"
-        ), code
+        assert code.count("SIMPLER_SCOPE(ScopeMode::MANUAL)") == 1, code
+        scope_at = code.index("SIMPLER_SCOPE(ScopeMode::MANUAL)")
+        assert scope_at < code.index("TaskOutputTensors task_0_outs"), code
         _assert_single_barrier_shape(code, fanin=4)
-        assert re.search(r"PTO2TaskId params_t\d+_deps\[4\];", code) is None, code
+        assert re.search(r"TaskId params_t\d+_deps\[4\];", code) is None, code
 
     def test_auto_scope_compiler_array_dep_compression_preserves_scalar_dep(self):
         @pl.program
@@ -370,14 +369,13 @@ class TestPhaseFenceDepCompressionCodegen:
 
         code = _compile_program_with_auto_deps(Prog)
 
-        assert code.count("PTO2_SCOPE(PTO2ScopeMode::MANUAL)") == 1, code
-        assert code.index("PTO2_SCOPE(PTO2ScopeMode::MANUAL)") < code.index(
-            "TaskOutputTensors task_0_outs"
-        ), code
+        assert code.count("SIMPLER_SCOPE(ScopeMode::MANUAL)") == 1, code
+        scope_at = code.index("SIMPLER_SCOPE(ScopeMode::MANUAL)")
+        assert scope_at < code.index("TaskOutputTensors task_0_outs"), code
         assert "rt_submit_dummy_task(params_phase_fence_barrier_0)" in code, code
-        assert "PTO2TaskId params_phase_fence_barrier_0_deps[4];" in code, code
-        assert re.search(r"PTO2TaskId params_t\d+_deps\[2\];", code), code
-        assert re.search(r"PTO2TaskId params_t\d+_deps\[5\];", code) is None, code
+        assert "TaskId params_phase_fence_barrier_0_deps[4];" in code, code
+        assert re.search(r"TaskId params_t\d+_deps\[2\];", code), code
+        assert re.search(r"TaskId params_t\d+_deps\[5\];", code) is None, code
 
     def test_multiloop_chain_compresses_only_stable_segments(self):
         rows, cols = 640, 128
@@ -462,8 +460,8 @@ class TestPhaseFenceDepCompressionCodegen:
         # User-written manual scopes do not receive compiler-derived deps;
         # stable array deps are still compressed to manual phase-fence barriers.
         assert code.count("rt_submit_dummy_task(params_phase_fence_barrier_") >= 1, code
-        assert re.search(r"PTO2TaskId params_phase_fence_barrier_\d+_deps\[4\];", code), code
-        assert re.search(r"PTO2TaskId params_phase_fence_barrier_\d+_deps\[8\];", code), code
+        assert re.search(r"TaskId params_phase_fence_barrier_\d+_deps\[4\];", code), code
+        assert re.search(r"TaskId params_phase_fence_barrier_\d+_deps\[8\];", code), code
         _assert_ordered(
             code,
             "for (int64_t r1 =",
@@ -541,13 +539,13 @@ class TestPhaseFenceDepCompressionCodegen:
         # Mixed shapes keep compressible array deps as phase fences and leave
         # the non-covered deps as direct fan-in arrays.
         assert code.count("rt_submit_dummy_task(params_phase_fence_barrier_") == 1, code
-        assert re.search(r"PTO2TaskId params_phase_fence_barrier_\d+_deps\[3\];", code), code
+        assert re.search(r"TaskId params_phase_fence_barrier_\d+_deps\[3\];", code), code
         assert re.search(
             r"if \(phase_fence_barrier_\d+_tid\.is_valid\(\)\) "
             r"params_t\d+_deps\[params_t\d+_deps_count\+\+\] = phase_fence_barrier_\d+_tid;",
             code,
         ), code
-        assert re.search(r"PTO2TaskId params_t\d+_deps\[3\];", code), code
+        assert re.search(r"TaskId params_t\d+_deps\[3\];", code), code
         _assert_ordered(
             code,
             "for (int64_t group =",
@@ -602,7 +600,7 @@ class TestPhaseFenceDepCompressionCodegen:
 
         code = _compile_program(Prog)
         assert "rt_submit_dummy_task" not in code, code
-        assert re.search(r"PTO2TaskId params_t\d+_deps\[4\];", code), code
+        assert re.search(r"TaskId params_t\d+_deps\[4\];", code), code
 
     def test_array_fanin_to_single_consumer_does_not_emit_dummy_barrier(self):
         rows, cols = 128, 128
@@ -641,7 +639,7 @@ class TestPhaseFenceDepCompressionCodegen:
 
         code = _compile_program(Prog)
         assert "rt_submit_dummy_task" not in code, code
-        assert re.search(r"PTO2TaskId params_t\d+_deps\[4\];", code), code
+        assert re.search(r"TaskId params_t\d+_deps\[4\];", code), code
 
     def test_two_by_two_low_benefit_phase_fence_does_not_emit_dummy_barrier(self):
         rows, cols = 128, 128
@@ -681,7 +679,7 @@ class TestPhaseFenceDepCompressionCodegen:
 
         code = _compile_program(Prog)
         assert "rt_submit_dummy_task" not in code, code
-        assert re.search(r"PTO2TaskId params_t\d+_deps\[2\];", code), code
+        assert re.search(r"TaskId params_t\d+_deps\[2\];", code), code
 
     def test_if_consumer_same_carrier_update_falls_back(self):
         rows, cols = 128, 128
@@ -722,7 +720,7 @@ class TestPhaseFenceDepCompressionCodegen:
 
         code = _compile_program(Prog)
         assert "rt_submit_dummy_task" not in code, code
-        assert re.search(r"PTO2TaskId params_t\d+_deps\[4\];", code), code
+        assert re.search(r"TaskId params_t\d+_deps\[4\];", code), code
 
     def test_two_same_carrier_arrays_fall_back_independently(self):
         rows, cols = 256, 128
@@ -778,7 +776,7 @@ class TestPhaseFenceDepCompressionCodegen:
 
         code = _compile_program(Prog)
         assert "rt_submit_dummy_task" not in code, code
-        assert len(re.findall(r"PTO2TaskId params_t\d+_deps\[4\];", code)) >= 2, code
+        assert len(re.findall(r"TaskId params_t\d+_deps\[4\];", code)) >= 2, code
 
     def test_reset_per_outer_same_carrier_loop_falls_back_inside_batch(self):
         rows, cols = 256, 128
@@ -820,7 +818,7 @@ class TestPhaseFenceDepCompressionCodegen:
 
         code = _compile_program(Prog)
         assert "rt_submit_dummy_task" not in code, code
-        assert re.search(r"PTO2TaskId params_t\d+_deps\[4\];", code), code
+        assert re.search(r"TaskId params_t\d+_deps\[4\];", code), code
 
     @pytest.mark.parametrize(
         "case_name",
@@ -1002,7 +1000,7 @@ class TestPhaseFenceDepCompressionCodegen:
         code = _compile_program(Prog)
         assert "rt_submit_dummy_task" not in code, code
         assert re.search(
-            r"PTO2TaskId (params_t\d+)_deps\[1\];\s*"
+            r"TaskId (params_t\d+)_deps\[1\];\s*"
             r"uint32_t \1_deps_count = 0;\s*"
             r"if \(prev\.is_valid\(\)\) \1_deps\[\1_deps_count\+\+\] = prev;\s*"
             r"\1\.set_dependencies\(\1_deps, \1_deps_count\);",
@@ -1050,7 +1048,7 @@ class TestPhaseFenceDepCompressionCodegen:
 
         code = _compile_program(Prog)
         assert "rt_submit_dummy_task" not in code, code
-        assert len(re.findall(r"PTO2TaskId params_t\d+_deps\[4\];", code)) >= 2, code
+        assert len(re.findall(r"TaskId params_t\d+_deps\[4\];", code)) >= 2, code
 
 
 if __name__ == "__main__":

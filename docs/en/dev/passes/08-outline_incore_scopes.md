@@ -231,6 +231,30 @@ automatically):
   same rule applies to the sibling `OutlineHierarchyScopes` and
   `OutlineClusterScopes` passes (which share the outlining utility).
 
+**Cache-policy declarations become param indices**: a
+`pl.set_cache_policy(t, pl.CachePolicy.BYPASS)` statement in the scope body is
+hoisted by the parser onto the scope's `cache_policy_vars` attr
+(`std::vector<std::pair<VarPtr, int>>`, keyed by Var identity). This pass
+resolves each Var through the same captured-input index map the `no_dep_args`
+translation uses and re-emits the list as the outlined function's `cache_policy`
+attr — `std::vector<std::pair<int32_t, int>>` (param index, `CachePolicy` as
+int), sorted by index so declaration order and capture order cannot change the
+IR. The scope attr is **consumed here and never propagated**: from this point the
+function attr is the single carrier, until
+[`ConvertTensorToTileOps`](10-convert_tensor_to_tile_ops.md) turns it into a
+`cache` kwarg on each `tile.load` and erases it. Param indices are only valid
+across that window — later passes both append to
+([`InjectGMPipeBuffer`](22-inject_gm_pipe_buffer.md),
+[`MaterializeDistTensorCtx`](43-materialize_dist_tensor_ctx.md)) and prepend onto
+([`MaterializeValidShapeSymbols`](48-materialize_valid_shape_symbols.md)) param
+lists. Two user errors are rejected here with `CHECK_SPAN`: a declaration naming
+a tensor the scope body does not capture (it is neither read nor written, so no parameter
+carries the policy), and `BYPASS` on a parameter `InferParamDirections` resolved
+to `Out` / `InOut` (a bypassing read of bytes the same kernel writes is a
+coherency bug). The translation lives in the shared outlining utility, so the
+sibling `OutlineHierarchyScopes` path stamps the attr the same way. See
+[GM Cache-Access Policy](../language/05-cache-policy.md).
+
 ## Example
 
 ### Basic Outlining

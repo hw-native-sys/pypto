@@ -223,7 +223,7 @@ inline std::optional<int64_t> EvalConstTripCount(const ForStmtPtr& for_stmt) {
 ///
 /// ``MaterializeRuntimeScopes`` wraps the orchestration function body and each
 /// ForStmt / IfStmt branch body in an AUTO ``RuntimeScopeStmt`` so codegen emits
-/// ``PTO2_SCOPE()`` 1:1 from the IR. ``GetLastYieldStmt`` / ``FlattenToStmts``
+/// ``SIMPLER_SCOPE()`` 1:1 from the IR. ``GetLastYieldStmt`` / ``FlattenToStmts``
 /// do not descend through a scope node, so callers unwrap first. User
 /// ``pl.manual_scope`` scopes stay opaque — they were never auto-wrapped —
 /// except for compiler-synthesised manual scopes, which carry

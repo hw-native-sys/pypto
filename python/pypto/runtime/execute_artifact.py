@@ -398,7 +398,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--enable-pmu", type=int, default=0, metavar="EVENT", help="AICore PMU event type (0=off)"
     )
-    parser.add_argument("--enable-dep-gen", action="store_true", help="Capture PTO2 dependency edges")
+    parser.add_argument("--enable-dep-gen", action="store_true", help="Capture simpler dependency edges")
     parser.add_argument("--enable-scope-stats", action="store_true", help="Capture per-scope ring-fill stats")
     parser.add_argument(
         "--no-validate",

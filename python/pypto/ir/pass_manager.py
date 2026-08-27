@@ -244,8 +244,14 @@ class PassManager:
             passes.lower_host_tensor_collectives,
             passes.materialize_dist_tensor_ctx,
             passes.simplify,
+            # Hoist each boundary scalar a Graph body derives out to its call
+            # sites, and reject the graphs the host_build_graph runtime could not
+            # record. Runs here because argument directions and cross-task edges
+            # are already known, while scopes are not yet materialised around the
+            # statements it moves.
+            passes.legalize_graph_boundary,
             # Insert explicit AUTO RuntimeScopeStmt nodes (function body + for/if
-            # bodies) into Orchestration functions so codegen emits PTO2_SCOPE
+            # bodies) into Orchestration functions so codegen emits SIMPLER_SCOPE
             # 1:1 from the IR. Runs after the final Simplify and after every
             # rewriting transform, so none of them has to reason about the
             # inserted scope wrappers.

@@ -56,7 +56,32 @@ endif()
 # Compiler flags
 set(CMAKE_CXX_FLAGS_DEBUG "-g -O0")
 set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
-set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-g -O2 -DNDEBUG")
+
+# RelWithDebInfo's debug level is a knob rather than a literal, because its two
+# consumers want different things from it. Level 2 is what a developer needs
+# under a debugger: locals and types. Level 1 keeps function descriptions and
+# the line-number tables -- everything libbacktrace reads to turn a PC into the
+# `File "src/...", line N` frames tests/ut/core/test_error.py pins -- and drops
+# the rest.
+#
+# Measured on this tree with gcc 15.2, the compiler CI builds with: the
+# extension goes 304 MiB -> 62.5 MiB and the wheel around it 111 MiB -> 18 MiB,
+# the compile is about a third faster, and the backtraces come out
+# byte-identical. .debug_line survives at 6.2 MiB; .debug_loclists (variable
+# locations) goes to zero and .debug_info drops 206 MiB -> 22 MiB.
+#
+# The default stays 2, so a local build is exactly what it was. CI passes 1: it
+# never attaches a debugger to what it builds, and it pays for the difference
+# once per build and eight more times per run in wheel installs.
+set(PYPTO_DEBUG_INFO_LEVEL "2" CACHE STRING
+    "Debug info level for RelWithDebInfo builds: 2 = full, 1 = backtraces only")
+set_property(CACHE PYPTO_DEBUG_INFO_LEVEL PROPERTY STRINGS 0 1 2 3)
+if(NOT PYPTO_DEBUG_INFO_LEVEL MATCHES "^[0-3]$")
+    message(FATAL_ERROR
+        "PYPTO_DEBUG_INFO_LEVEL must be a gcc/clang debug level 0-3, got "
+        "'${PYPTO_DEBUG_INFO_LEVEL}'")
+endif()
+set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-g${PYPTO_DEBUG_INFO_LEVEL} -O2 -DNDEBUG")
 
 # Fix debug info paths when building in a temp directory (e.g., pip install)
 # This remaps paths in DWARF debug info so backtraces show clean relative paths
@@ -171,6 +196,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/materialize_comm_domain_scopes_pass.cpp
     src/ir/transforms/lower_host_tensor_collectives_pass.cpp
     src/ir/transforms/materialize_dist_tensor_ctx_pass.cpp
+    src/ir/transforms/legalize_graph_boundary_pass.cpp
     src/ir/transforms/materialize_valid_shape_symbols_pass.cpp
     src/ir/transforms/optimize_orch_tensors_pass.cpp
     src/ir/transforms/derive_call_directions_pass.cpp
@@ -253,8 +279,10 @@ set(PYPTO_SOURCES
     src/ir/verifier/mixed_kernel_expanded_verifier.cpp
     src/ir/verifier/verify_hard_syncall_occupancy.cpp
     src/ir/verifier/verify_aiv_split.cpp
+    src/ir/verifier/verify_acc_compact.cpp
     src/ir/verifier/verify_acc_to_gm_store.cpp
     src/ir/verifier/verify_atomic_add_dtype.cpp
+    src/ir/verifier/warning_in_param_written.cpp
     src/ir/verifier/verify_ssa_pass.cpp
     src/ir/verifier/verify_no_nested_call_pass.cpp
     src/ir/verifier/verify_no_nested_incore.cpp
@@ -276,6 +304,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/verify_call_directions.cpp
     src/ir/verifier/verify_tile_type_coherence.cpp
     src/ir/verifier/verify_assign_type_symmetry.cpp
+    src/ir/verifier/verify_graph_functions.cpp
     src/ir/verifier/verify_orchestration_references.cpp
     src/ir/verifier/verify_tensor_view_canonical.cpp
     src/ir/verifier/diagnostic_check_registry.cpp

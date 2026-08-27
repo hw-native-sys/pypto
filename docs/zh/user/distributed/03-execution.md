@@ -35,6 +35,8 @@ with compiled.prepare() as rt:
 | `rt.alloc_stacked_tensor(host_w)` | 沿 dim 0 分片 `host_w`——分片 `i` 上传到卡 `i`。返回 `StackedDeviceTensor`。 |
 | `rt.free_stacked_tensor(stacked)` | 释放 `StackedDeviceTensor` 的所有分片。 |
 | `rt.copy_stacked_from(stacked, host_out)` | staged D2H 读回 CPU 连续的 `host_out`；可在 `prepare()` 后分配。 |
+| `rt.committed_device_memory(worker_id=0)` | 本 worker 自己的分配器在卡 `worker_id` 上已提交的设备 HBM 字节数——张量、池化 arena、运行时 buffer。多卡总量需按 id 求和。 |
+| `rt.device_memory_info(worker_id=0)` | `worker_id` 所在整张卡的 `(free_bytes, total_bytes)`，即驱动看到的视图。用它来决定分配多大；卡上其他任何东西都会改变 `free_bytes` 而不改变已提交总量。模拟器后端会抛异常，而不是报告 0。 |
 | `rt.release_inherited_host_tensor_refs()` | 释放父进程中为兼容保留的生命周期引用。 |
 | `rt.close()` | 释放 buffer，关闭芯片 worker。作为上下文管理器时自动调用。 |
 

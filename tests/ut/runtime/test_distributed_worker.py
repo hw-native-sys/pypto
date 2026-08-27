@@ -3694,5 +3694,119 @@ class TestNamedInheritedHostRanges:
         rt.close()
 
 
+class TestDeviceMemoryInfo:
+    """``DistributedWorker.device_memory_info`` forwards a device-wide HBM query.
+
+    Distinct from ``committed_device_memory``, which reports only what this
+    worker's own allocator committed; this one is what the driver sees for the
+    whole card, so a serving process can size a KV cache against it.
+    """
+
+    @staticmethod
+    def _worker(patched_setup):
+        return DistributedWorker(_fake_compiled([_param("a", [16, 16])], []))
+
+    def test_forwards_the_logical_worker_id_unchanged(self, patched_setup):
+        """The id names a logical chip worker, so it must not be remapped on the way down."""
+        m = patched_setup
+        m["worker"].device_memory_info.return_value = SimpleNamespace(free_bytes=1024, total_bytes=4096)
+        rt = self._worker(patched_setup)
+
+        rt.device_memory_info(3)
+
+        m["worker"].device_memory_info.assert_called_once_with(3)
+        rt.close()
+
+    def test_defaults_to_worker_zero(self, patched_setup):
+        m = patched_setup
+        m["worker"].device_memory_info.return_value = SimpleNamespace(free_bytes=1, total_bytes=2)
+        rt = self._worker(patched_setup)
+
+        rt.device_memory_info()
+
+        m["worker"].device_memory_info.assert_called_once_with(0)
+        rt.close()
+
+    def test_returns_plain_ints_not_the_simpler_struct(self, patched_setup):
+        """simpler answers with a ``DeviceMemoryInfo``; callers are promised ints.
+
+        Returning the struct would leak a simpler type through the facade, which is
+        the coupling this method exists to avoid.
+        """
+        m = patched_setup
+        m["worker"].device_memory_info.return_value = SimpleNamespace(free_bytes=1234, total_bytes=5678)
+        rt = self._worker(patched_setup)
+
+        free, total = rt.device_memory_info(0)
+
+        assert (free, total) == (1234, 5678)
+        assert type(free) is int and type(total) is int
+        rt.close()
+
+    def test_normalizes_non_int_byte_counts(self, patched_setup):
+        """A binding may hand back a numpy-ish scalar; the tuple stays plain ints."""
+
+        class _IntLike:
+            def __init__(self, value):
+                self._value = value
+
+            def __index__(self):
+                return self._value
+
+            __int__ = __index__
+
+        m = patched_setup
+        m["worker"].device_memory_info.return_value = SimpleNamespace(
+            free_bytes=_IntLike(7), total_bytes=_IntLike(9)
+        )
+        rt = self._worker(patched_setup)
+
+        free, total = rt.device_memory_info(0)
+
+        assert (free, total) == (7, 9)
+        assert type(free) is int and type(total) is int
+        rt.close()
+
+    def test_rejects_use_after_close(self, patched_setup):
+        """Consistent with every other DistributedWorker method."""
+        m = patched_setup
+        m["worker"].device_memory_info.return_value = SimpleNamespace(free_bytes=1, total_bytes=2)
+        rt = self._worker(patched_setup)
+        rt.close()
+
+        with pytest.raises(RuntimeError, match="after close"):
+            rt.device_memory_info(0)
+
+    def test_propagates_unsupported_backend(self, patched_setup):
+        """Simulator backends have no device-wide memory to report.
+
+        The error must reach the caller: a swallowed one would look like a card
+        with no free memory.
+        """
+        m = patched_setup
+        m["worker"].device_memory_info.side_effect = NotImplementedError(
+            "device_memory_info is not supported on simulator backends"
+        )
+        rt = self._worker(patched_setup)
+
+        with pytest.raises(NotImplementedError, match="simulator backends"):
+            rt.device_memory_info(0)
+        rt.close()
+
+    def test_does_not_soften_a_failed_query_into_zero(self, patched_setup):
+        """``committed_device_memory`` answers 0 when it cannot ask; this must not.
+
+        A caller sizing an allocation from a fabricated ``(0, 0)`` would silently
+        under-allocate instead of failing, so the runtime error propagates.
+        """
+        m = patched_setup
+        m["worker"].device_memory_info.side_effect = RuntimeError("query failed")
+        rt = self._worker(patched_setup)
+
+        with pytest.raises(RuntimeError, match="query failed"):
+            rt.device_memory_info(0)
+        rt.close()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

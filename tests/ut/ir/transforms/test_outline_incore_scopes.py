@@ -3288,5 +3288,206 @@ class TestGraphFunctionTypeIsPreserved:
         assert main.func_type == ir.FunctionType.Orchestration
 
 
+class TestOutlineCachePolicy:
+    """``pl.set_cache_policy(t, policy)`` lowering: ``ScopeStmt.attrs['cache_policy_vars']``
+    holds the captured Vars the declaration names, and the outliner translates
+    them into positional indices into the outlined function's params, re-emitted
+    as the function attr ``cache_policy``.
+
+    The Var form is *consumed* here — it must not survive onto the synthesised
+    call or onto either function. Param indices are a carrier with a deliberately
+    short life: they stay valid only until ConvertTensorToTileOps (pass 10) turns
+    them into per-``tile.load`` ``cache`` kwargs, because passes after that both
+    append to param lists (InjectGMPipeBuffer, MaterializeDistTensorCtx) and
+    prepend onto them (MaterializeValidShapeSymbols).
+
+    The two rejections below are author errors rather than compiler bugs — a
+    declaration naming a tensor the scope never reads, and a bypassing read of
+    bytes the same kernel writes — so they surface as ``ValueError`` from
+    ``CHECK_SPAN``, not as an internal error.
+    """
+
+    @staticmethod
+    def _outline(program: ir.Program) -> ir.Program:
+        return passes.outline_incore_scopes()(passes.convert_to_ssa()(program))
+
+    @staticmethod
+    def _kernel(program: ir.Program, name: str) -> ir.Function:
+        func = program.get_function(name)
+        assert func is not None, f"outlined kernel '{name}' not found"
+        return func
+
+    def test_declaration_becomes_a_param_index_on_the_outlined_kernel(self):
+        """The declared Var is resolved to its slot in the outlined signature."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[256, 128], pl.FP32],
+                b: pl.Tensor[[128, 256], pl.FP32],
+                out: pl.Out[pl.Tensor[[256, 256], pl.FP32]],
+            ) -> pl.Tensor[[256, 256], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="mm"):
+                    pl.set_cache_policy(b, pl.CachePolicy.BYPASS)
+                    c: pl.Tensor[[256, 256], pl.FP32] = pl.matmul(a, b, out_dtype=pl.FP32)
+                    out = pl.assemble(out, c, [0, 0])
+                return out
+
+        mm = self._kernel(self._outline(Before), "mm")
+        # Capture order is a, b, out — so b's declaration lands at index 1,
+        # paired with CachePolicy.BYPASS's underlying int (the form the
+        # ``tile.load`` ``cache`` kwarg is registered with).
+        assert dict(mm.attrs)["cache_policy"] == [(1, int(pl.CachePolicy.BYPASS))]
+        assert mm.params[1].name_hint.startswith("b"), "index 1 must be the declared tensor's slot"
+
+    def test_scope_attr_is_consumed_by_outlining(self):
+        """The Var-keyed scope attr is translated, never propagated."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[256, 128], pl.FP32],
+                b: pl.Tensor[[128, 256], pl.FP32],
+                out: pl.Out[pl.Tensor[[256, 256], pl.FP32]],
+            ) -> pl.Tensor[[256, 256], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="mm"):
+                    pl.set_cache_policy(b, pl.CachePolicy.BYPASS)
+                    c: pl.Tensor[[256, 256], pl.FP32] = pl.matmul(a, b, out_dtype=pl.FP32)
+                    out = pl.assemble(out, c, [0, 0])
+                return out
+
+        After = self._outline(Before)
+
+        # Not on the synthesised dispatch: the declaration is a property of the
+        # callee's parameters, and nothing at the call site consumes it.
+        call = TestOutlineNoDepArgs._outlined_user_call(After)
+        assert "cache_policy_vars" not in call.attrs
+        assert "cache_policy" not in call.attrs
+        # Not on the orchestrator either — only the outlined kernel carries it.
+        main = self._kernel(After, "main")
+        assert "cache_policy_vars" not in dict(main.attrs)
+        assert "cache_policy" not in dict(main.attrs)
+        # And the Var form is gone from the kernel: indices replaced it.
+        assert "cache_policy_vars" not in dict(self._kernel(After, "mm").attrs)
+
+    def test_declarations_are_recorded_in_param_index_order(self):
+        """Declaration order is irrelevant; the attr is sorted by param index.
+
+        The declaration set is order-independent, so two spellings that differ
+        only in the order the author wrote them must produce structurally equal
+        IR (and identical dumps).
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[256, 128], pl.FP32],
+                b: pl.Tensor[[128, 256], pl.FP32],
+                out: pl.Out[pl.Tensor[[256, 256], pl.FP32]],
+            ) -> pl.Tensor[[256, 256], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="mm"):
+                    # Written b-then-a; a is captured first, so the attr must
+                    # come back a-then-b.
+                    pl.set_cache_policy(b, pl.CachePolicy.BYPASS)
+                    pl.set_cache_policy(a, pl.CachePolicy.BYPASS)
+                    c: pl.Tensor[[256, 256], pl.FP32] = pl.matmul(a, b, out_dtype=pl.FP32)
+                    out = pl.assemble(out, c, [0, 0])
+                return out
+
+        mm = self._kernel(self._outline(Before), "mm")
+        bypass = int(pl.CachePolicy.BYPASS)
+        assert dict(mm.attrs)["cache_policy"] == [(0, bypass), (1, bypass)]
+
+    def test_default_policy_is_allowed_on_a_written_tensor(self):
+        """Only BYPASS carries the no-concurrent-write promise, so only BYPASS
+        is restricted to ``In`` params. DEFAULT states nothing and is legal
+        anywhere the tensor is captured."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[256, 128], pl.FP32],
+                b: pl.Tensor[[128, 256], pl.FP32],
+                out: pl.Out[pl.Tensor[[256, 256], pl.FP32]],
+            ) -> pl.Tensor[[256, 256], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="mm"):
+                    pl.set_cache_policy(out, pl.CachePolicy.DEFAULT)
+                    c: pl.Tensor[[256, 256], pl.FP32] = pl.matmul(a, b, out_dtype=pl.FP32)
+                    out = pl.assemble(out, c, [0, 0])
+                return out
+
+        mm = self._kernel(self._outline(Before), "mm")
+        assert dict(mm.attrs)["cache_policy"] == [(2, int(pl.CachePolicy.DEFAULT))]
+
+    def test_declaration_on_an_uncaptured_tensor_is_rejected(self):
+        """A tensor the scope body never reads has no parameter to resolve to."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                w: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    pl.set_cache_policy(w, pl.CachePolicy.BYPASS)
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+        with pytest.raises(ValueError, match="not captured by the scope body"):
+            self._outline(Before)
+
+    def test_bypass_on_an_out_param_is_rejected(self):
+        """BYPASS promises nothing writes those bytes while the kernel runs; a
+        tensor the scope itself writes breaks that promise by construction."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[256, 128], pl.FP32],
+                b: pl.Tensor[[128, 256], pl.FP32],
+                out: pl.Out[pl.Tensor[[256, 256], pl.FP32]],
+            ) -> pl.Tensor[[256, 256], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="mm"):
+                    pl.set_cache_policy(out, pl.CachePolicy.BYPASS)
+                    c: pl.Tensor[[256, 256], pl.FP32] = pl.matmul(a, b, out_dtype=pl.FP32)
+                    out = pl.assemble(out, c, [0, 0])
+                return out
+
+        with pytest.raises(ValueError, match=r"not allowed on a tensor this scope writes \(Out\)"):
+            self._outline(Before)
+
+    def test_bypass_on_an_inout_param_is_rejected(self):
+        """Same rejection for a captured tensor that is both read and updated."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64, 64], pl.FP32],
+                k: pl.Tensor[[64, 64], pl.FP32],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="kk"):
+                    pl.set_cache_policy(k, pl.CachePolicy.BYPASS)
+                    t: pl.Tensor[[64, 64], pl.FP32] = pl.add(k, x)
+                    k = pl.assemble(k, t, [0, 0])
+                return k
+
+        with pytest.raises(ValueError, match=r"not allowed on a tensor this scope writes \(InOut\)"):
+            self._outline(Before)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

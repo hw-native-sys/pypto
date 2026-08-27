@@ -22,6 +22,7 @@ __all__ = [
     "create",
     "no_dep",
     "dump_tag",
+    "set_cache_policy",
     "read",
     "write",
     "dim",
@@ -127,7 +128,7 @@ from pypto.ir.op import tensor_ops as _ir_ops
 from pypto.ir.utils import _normalize_expr, caller_warning_stacklevel, has_partial_valid_region
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import AtomicType, Expr, MemorySpace, PadValue, TensorLayout
+from pypto.pypto_core.ir import AtomicType, CachePolicy, Expr, MemorySpace, PadValue, TensorLayout
 
 from ..typing import BoolLike, IntLike, Ptr, Scalar, Tensor, predicate_to_expr
 
@@ -174,13 +175,12 @@ def create(
         shape: List of dimension sizes (int or Expr)
         dtype: Data type of tensor elements
         layout: Tensor layout (default: ND)
-        init_value: If given, the runtime pre-fills the freshly allocated
-            buffer with this scalar on the AICPU (before any kernel writes it).
-            ``init_value=0`` zeroes the buffer and works for every dtype.
-            Non-zero values work for integer and 32/64-bit float dtypes;
-            non-zero fills of fp16/bf16 are rejected at codegen. The fill only
-            applies to this runtime-allocated buffer and is cheaper than
-            ``pl.full`` (which materializes a constant tensor via a kernel).
+        init_value: **Removed.** Passing anything but ``None`` raises
+            ``ValueError``. The runtime dropped its create-info fill, so a
+            runtime-allocated buffer can no longer be pre-filled from
+            orchestration. Seed it with a kernel — ``pl.full`` materializes a
+            constant tensor, or write the buffer from your own kernel — and
+            order every reader after that kernel with an explicit dependency.
         manual_dep: Opt this tensor out of OverlapMap auto-dep tracking for
             its **entire lifetime**. When True, every task that reads or
             writes this tensor skips OverlapMap lookup and insert, so the
@@ -355,6 +355,68 @@ def dump_tag(tensor: Tensor) -> Tensor:
         The tensor unchanged. The marker is consumed at parse time.
     """
     return tensor
+
+
+def set_cache_policy(tensor: Tensor, policy: CachePolicy) -> None:
+    """Declare the GM cache-access policy for every read of ``tensor`` in this scope.
+
+    The scope-level surface of the cache policy, for tensor programming — where
+    the GM reads are implicit and there is no ``pl.load`` call to annotate. The
+    per-access counterpart is the ``cache=`` kwarg on
+    [`pl.load`][pypto.language.tile.load], which names one read instead of all
+    of them. ``pl.slice`` deliberately takes no ``cache=``: a slice computes an
+    address descriptor, it moves no data.
+
+    Write it as a **standalone statement directly inside** a ``pl.at(...)`` /
+    ``pl.spmd(...)`` scope body. Anywhere else — nested in an ``if`` / ``for``
+    inside the scope, or outside a scope altogether — the parser rejects it,
+    because the declaration attaches to the scope, and a conditionally-executed
+    declaration would be a promise the compiler cannot check.
+
+    Semantics:
+
+    * **A contract, not a hint.** ``CachePolicy.BYPASS`` asserts two things
+      about ``tensor``: that the kernel streams it with no reuse worth caching,
+      and that **nothing writes those bytes while the kernel runs**. Mixing a
+      cached write and a bypassing read of the same bytes is a coherency bug
+      the compiler cannot detect, so coherency is the author's contract. This
+      is why the policy is never a default and never inferred. Declaring
+      BYPASS on a tensor the scope itself writes is rejected at outlining.
+    * **Tracked by Var identity, never by name.** The declaration names the
+      binding live at the scope, so rebinding the name afterwards
+      (``b = self.foo(b)``) yields a new value the declaration does not cover.
+    * **Consumed at parse time.** It emits no IR statement of its own: the
+      parser records it on the enclosing scope, the scope outliner resolves it
+      to the outlined kernel's parameters, and ``ConvertTensorToTileOps`` turns
+      it into a ``cache`` kwarg on each ``tile.load`` that reads a declared
+      parameter.
+    * **Explicit wins.** An explicit ``pl.load(..., cache=...)`` overrides the
+      scope declaration for that one access, in both directions — so
+      ``cache=pl.CachePolicy.DEFAULT`` opts a single read back into the cache
+      inside a bypassing scope.
+
+    Current status: PTOAS has no L2-bypass path yet
+    (https://github.com/hw-native-sys/PTOAS/issues/1356). The declaration is
+    carried all the way to codegen, but codegen emits a warning and compiles it
+    as an ordinary cached access, so generated code is unchanged today. Writing
+    the declaration now is what makes the kernel pick the bypass up for free
+    once that lands.
+
+    Args:
+        tensor: The tensor whose reads the policy applies to. Must be a
+            ``Tensor`` value bound outside the scope and read inside it.
+        policy: ``CachePolicy.BYPASS`` to declare a streaming, non-cached read;
+            ``CachePolicy.DEFAULT`` for an ordinary cached read.
+
+    Returns:
+        Nothing. The marker is consumed at parse time and produces no value.
+
+    Example:
+        >>> with pl.at(level=pl.Level.CORE_GROUP, name_hint="mm"):
+        ...     pl.set_cache_policy(b, pl.CachePolicy.BYPASS)
+        ...     c = pl.matmul(a, b, out_dtype=pl.FP32)
+        ...     out = pl.assemble(out, c, [0, 0])
+    """
 
 
 def read(tensor: Tensor, indices: IntLike | Sequence[IntLike]) -> Scalar:

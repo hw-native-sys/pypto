@@ -105,9 +105,10 @@ branch rather than a `torch.where`:
 
 A literal predicate is folded to the arm it selects, mirroring how PTO codegen
 picks `pto.tmatmul` over `pto.tmatmul.acc` instead of emitting an `scf.if` on a
-compile-time constant. `_acc_init` is a preamble helper; `tile.batch_matmul_acc`
-and `tile.gemv_acc` share the same emitter, so they pick the predicate up for
-free if it is ever added to those ops.
+compile-time constant. `_acc_init` is a preamble helper shared by every
+accumulating matmul, so each honours the predicate through the one handler:
+`tile.matmul_acc`, `tensor.matmul_acc`, `tile.batch_matmul_acc`, and
+`tile.gemv_acc` (GEMV is a matmul whose M is 1, on the same cube MAD).
 
 ### Cross-core operation mappings
 

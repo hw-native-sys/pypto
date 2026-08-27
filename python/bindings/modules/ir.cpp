@@ -194,6 +194,59 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
           vars.push_back(nb::cast<VarPtr>(elem));
         }
         kwargs.emplace_back(key, std::move(vars));
+      } else if (key == kAttrCachePolicyParams) {
+        // ``cache_policy`` on an outlined Function: (param index, policy) pairs,
+        // reconstructed from a printed pass dump by ast_parser._parse_attr_pair.
+        std::vector<std::pair<int32_t, int>> decls;
+        for (auto elem : seq) {
+          const bool is_pair = (nb::isinstance<nb::tuple>(elem) || nb::isinstance<nb::list>(elem)) &&
+                               nb::len(nb::cast<nb::sequence>(elem)) == 2;
+          if (!is_pair) {
+            throw pypto::TypeError("Unsupported list element type for key: " + key +
+                                   " (expected an (int, int) pair)");
+          }
+          auto pair = nb::cast<nb::sequence>(elem);
+          auto it = pair.begin();
+          nb::handle idx_obj = *it;
+          nb::handle policy_obj = *(++it);
+          if (nb::isinstance<nb::bool_>(idx_obj) || !nb::isinstance<nb::int_>(idx_obj) ||
+              nb::isinstance<nb::bool_>(policy_obj) || !nb::isinstance<nb::int_>(policy_obj)) {
+            throw pypto::TypeError("Unsupported list element type for key: " + key +
+                                   " (expected an (int, int) pair)");
+          }
+          int64_t idx = nb::cast<int64_t>(idx_obj);
+          if (idx < std::numeric_limits<int32_t>::min() || idx > std::numeric_limits<int32_t>::max()) {
+            throw pypto::ValueError("List value " + std::to_string(idx) + " for key: " + key +
+                                    " is out of int32 range");
+          }
+          decls.emplace_back(static_cast<int32_t>(idx), nb::cast<int>(policy_obj));
+        }
+        kwargs.emplace_back(key, std::move(decls));
+      } else if (key == kAttrCachePolicyVars) {
+        // ``pl.set_cache_policy(t, policy)`` scope attr, written by the DSL
+        // parser: a list of ``(Var, int)`` pairs. Keyed rather than sniffed for
+        // the same reason as the arms above — a bare pair list says nothing
+        // about which half is the reference.
+        std::vector<std::pair<VarPtr, int>> decls;
+        for (auto elem : seq) {
+          const bool is_pair = (nb::isinstance<nb::tuple>(elem) || nb::isinstance<nb::list>(elem)) &&
+                               nb::len(nb::cast<nb::sequence>(elem)) == 2;
+          if (!is_pair) {
+            throw pypto::TypeError("Unsupported list element type for key: " + key +
+                                   " (expected a (Var, int) pair)");
+          }
+          auto pair = nb::cast<nb::sequence>(elem);
+          auto it = pair.begin();
+          nb::handle var_obj = *it;
+          nb::handle policy_obj = *(++it);
+          if (!nb::isinstance<Var>(var_obj) || nb::isinstance<nb::bool_>(policy_obj) ||
+              !nb::isinstance<nb::int_>(policy_obj)) {
+            throw pypto::TypeError("Unsupported list element type for key: " + key +
+                                   " (expected a (Var, int) pair)");
+          }
+          decls.emplace_back(nb::cast<VarPtr>(var_obj), nb::cast<int>(policy_obj));
+        }
+        kwargs.emplace_back(key, std::move(decls));
       } else if (nb::len(seq) > 0 && nb::isinstance<Var>(*seq.begin())) {
         // Open-world key holding a Var list — ``pl.func_attr({"operands": [x, w]})``.
         // Function attrs are an open key namespace, so no reserved-key list can
@@ -405,6 +458,17 @@ void BindIR(nb::module_& m) {
       .value("zero", PadValue::zero, "Zero padding")
       .value("max", PadValue::max, "Max value padding")
       .value("min", PadValue::min, "Min value padding")
+      .export_values();
+
+  // CachePolicy enum - declared GM cache-access policy for a tensor read.
+  // nb::is_arithmetic like AtomicType: the policy rides the `tile.load` "cache"
+  // kwarg as a plain `int`, so the DSL needs `int(policy)` to work.
+  nb::enum_<CachePolicy>(ir, "CachePolicy", nb::is_arithmetic(),
+                         "GM cache-access policy declared for a tensor read")
+      .value("DEFAULT", CachePolicy::kDefault, "Ordinary cached GM access")
+      .value("BYPASS", CachePolicy::kBypass,
+             "Streaming access declared to bypass the cache: asserts this tensor has no reuse "
+             "worth caching and that nothing writes those bytes while the kernel runs")
       .export_values();
 
   // TensorView - struct for tensor view information - must be before TensorType
@@ -1196,6 +1260,27 @@ void BindIR(nb::module_& m) {
           lst.append(nb::cast(v));
         }
         result[key.c_str()] = lst;
+      } else if (value.type() == typeid(std::vector<std::pair<VarPtr, int>>)) {
+        // Used by ScopeStmt attrs["cache_policy_vars"] — the parse-time
+        // ``pl.set_cache_policy`` declarations, as ``list[tuple[Var, int]]``.
+        const auto& decls =
+            AnyCast<std::vector<std::pair<VarPtr, int>>>(value, "converting to Python: " + key);
+        nb::list lst;
+        for (const auto& [v, policy] : decls) {
+          lst.append(nb::make_tuple(nb::cast(v), nb::cast(policy)));
+        }
+        result[key.c_str()] = lst;
+      } else if (value.type() == typeid(std::vector<std::pair<int32_t, int>>)) {
+        // Used by Function attrs["cache_policy"] — the same declarations after
+        // the scope outliner resolved them to param indices, as
+        // ``list[tuple[int, int]]``.
+        const auto& decls =
+            AnyCast<std::vector<std::pair<int32_t, int>>>(value, "converting to Python: " + key);
+        nb::list lst;
+        for (const auto& [idx, policy] : decls) {
+          lst.append(nb::make_tuple(nb::cast(idx), nb::cast(policy)));
+        }
+        result[key.c_str()] = lst;
       } else if (value.type() == typeid(VarPtr)) {
         // Used by ScopeStmt attrs["task_id_var"] (single producer TaskId Var).
         result[key.c_str()] = nb::cast(AnyCast<VarPtr>(value, "converting to Python: " + key));
@@ -1496,7 +1581,7 @@ void BindIR(nb::module_& m) {
       .value("Cluster", ScopeKind::Cluster, "Cluster scope for co-scheduled AIC + AIV groups")
       .value("Hierarchy", ScopeKind::Hierarchy, "Distributed hierarchy scope (uses level/role)")
       .value("Spmd", ScopeKind::Spmd, "SPMD dispatch scope (core_num/sync_start)")
-      .value("Runtime", ScopeKind::Runtime, "Runtime orchestration scope (PTO2_SCOPE wrapper)")
+      .value("Runtime", ScopeKind::Runtime, "Runtime orchestration scope (SIMPLER_SCOPE wrapper)")
       .value("CommDomain", ScopeKind::CommDomain,
              "Comm-domain scope (with orch.allocate_domain(...) wrapper for host_orch window buffers)")
       .value("SplitAiv", ScopeKind::SplitAiv, "Explicit AIV-split region (pl.split_aiv)")
@@ -1649,8 +1734,8 @@ void BindIR(nb::module_& m) {
   // RuntimeScopeStmt
   auto runtime_scope_stmt_class = nb::class_<RuntimeScopeStmt, ScopeStmt>(
       ir, "RuntimeScopeStmt",
-      "Runtime orchestration scope: emits PTO2_SCOPE() (manual=False) or "
-      "PTO2_SCOPE(PTO2ScopeMode::MANUAL) (manual=True) wrappers in codegen");
+      "Runtime orchestration scope: emits SIMPLER_SCOPE() (manual=False) or "
+      "SIMPLER_SCOPE(ScopeMode::MANUAL) (manual=True) wrappers in codegen");
   runtime_scope_stmt_class.def(nb::init<bool, std::string, const StmtPtr&, const Span&>(),
                                nb::arg("manual") = false, nb::arg("name_hint") = "", nb::arg("body"),
                                nb::arg("span"), "Create a Runtime scope statement");
@@ -1799,6 +1884,10 @@ void BindIR(nb::module_& m) {
   // IsInCoreType helper
   ir.def("is_incore_type", &IsInCoreType, nb::arg("func_type"),
          "Check if a FunctionType is an InCore variant (InCore, AIC, or AIV)");
+
+  // IsOrchestrationLike helper
+  ir.def("is_orchestration_like", nb::overload_cast<FunctionType>(&IsOrchestrationLike), nb::arg("func_type"),
+         "Check if a FunctionType has an orchestration body (Orchestration or Graph)");
 
   // LevelToLinquLevel helper
   ir.def("level_to_linqu_level", &LevelToLinquLevel, nb::arg("level"),

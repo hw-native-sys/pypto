@@ -56,16 +56,16 @@ REGISTER_ORCHESTRATION_OP(array_create, ("array.create")) {
   CHECK(extent_const) << "array.create extent must be a compile-time ConstInt";
 
   std::string result_var = codegen.GetCurrentResultTarget();
-  // TASK_ID is opaque, not numeric — emit ``PTO2TaskId`` rather than letting
+  // TASK_ID is opaque, not numeric — emit ``TaskId`` rather than letting
   // ``DataType::ToCTypeString`` fall through to its "unknown" default.
   const bool is_task_id = array_type->dtype_ == DataType::TASK_ID;
-  std::string cpp_type = is_task_id ? "PTO2TaskId" : array_type->dtype_.ToCTypeString();
+  std::string cpp_type = is_task_id ? "TaskId" : array_type->dtype_.ToCTypeString();
   const int64_t N = extent_const->value_;
 
   std::ostringstream oss;
   if (is_task_id) {
-    // ``PTO2TaskId`` is not a plain integer — its "invalid" sentinel is
-    // ``PTO2TaskId::invalid()``, which is NOT bit-zero. Zero-initializing
+    // ``TaskId`` is not a plain integer — its "invalid" sentinel is
+    // ``TaskId::invalid()``, which is NOT bit-zero. Zero-initializing
     // would silently mark every slot as a real "task id 0" reference,
     // causing the runtime fence to wait on a bogus dep on the first
     // iteration. Explicitly fill with the invalid sentinel. The
@@ -73,7 +73,7 @@ REGISTER_ORCHESTRATION_OP(array_create, ("array.create")) {
     // orchestration codegen's single-line indent works correctly.
     oss << cpp_type << " " << result_var << "[" << N << "]; "
         << "for (int64_t __init_i = 0; __init_i < " << N << "; ++__init_i) " << result_var
-        << "[__init_i] = PTO2TaskId::invalid();";
+        << "[__init_i] = TaskId::invalid();";
   } else {
     // Numeric integer / BOOL: ``= {0}`` zero-initializes the whole array.
     // Avoid ``std::array`` so the generated code stays on the device CPU's
@@ -94,7 +94,7 @@ REGISTER_ORCHESTRATION_OP(array_get_element, ("array.get_element")) {
   CHECK(result_type) << "array.get_element must return ScalarType";
   // TASK_ID is opaque — same special case as ``array.create``.
   std::string cpp_type =
-      result_type->dtype_ == DataType::TASK_ID ? "PTO2TaskId" : result_type->dtype_.ToCTypeString();
+      result_type->dtype_ == DataType::TASK_ID ? "TaskId" : result_type->dtype_.ToCTypeString();
 
   std::string result_var = codegen.GetCurrentResultTarget();
 

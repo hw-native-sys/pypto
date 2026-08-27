@@ -67,11 +67,19 @@ class DynDim:
                      same compilation, but still available as the static-shape
                      fallback wherever a numeric dim is required (e.g.
                      ``pl.slice`` parent-dim inheritance, ``ir.compile``).
+        synthesized: True when ``@pl.jit`` invented this symbol for an extent it
+                     could not resolve statically — a runtime-valued dim such as
+                     ``pld.world_size()`` or ``pl.tensor.read(...)``. Such a dim
+                     is a placeholder: a dep that declares the same dim with
+                     ``pl.dynamic`` replaces it with the user's symbol, so a
+                     kernel body referencing that name stays bound. A DynDim the
+                     caller actually derived is never replaced.
     """
 
     name: str
     literal: str
     static_bound: int
+    synthesized: bool = False
 
 
 ShapeDim = int | DynDim
@@ -123,10 +131,14 @@ class SpecializeContext:
         scalar_values: Concrete value per scalar param name.
         scalar_dtypes: DataType annotation per scalar param name.
         dep_names: Names of dep functions called from this function.
-        py_globals: The originating function's ``__globals__``. The specializer
-            uses this to resolve module-level int/float/bool constants (e.g.
-            ``BATCH``, ``HIDDEN`` imported from a config module) by inlining
-            them at the use site.
+        py_globals: Every name visible to the originating function — its
+            ``__globals__`` merged with its closure free vars, as built by
+            :func:`func_name_lookup`. The specializer uses this to resolve
+            int/float/bool constants (``BATCH`` imported from a config module,
+            a factory's captured rank count) by inlining them at the use site.
+            Closure free vars must be included: the generated program is
+            ``exec``'d in a fresh module, so a captured name that survives
+            unfolded is undefined there (#2449).
         orig_file: Path to the user's real source file (``inspect.getsourcefile``),
             or ``None`` when the function has no on-disk source (REPL / exec).
             Used to map generated diagnostics back to the user's ``.py`` (#1612).
@@ -136,7 +148,7 @@ class SpecializeContext:
         orig_col_offset: Indentation (in columns) stripped by ``textwrap.dedent``
             from the original source — added back to recover original columns.
         auto_scope: Whether the compiler auto-inserts AUTO runtime scopes
-            (PTO2_SCOPE). ``True`` by default; ``False`` emits
+            (SIMPLER_SCOPE). ``True`` by default; ``False`` emits
             ``@pl.function(..., auto_scope=False)`` so the body places scopes
             by hand. Honored for the Orchestration entry, HOST orchestrator,
             and inline sub-function decorators (see
@@ -199,6 +211,38 @@ class SpecializeContext:
                 if isinstance(d, DynDim):
                     out[d.name] = d.literal
         return out
+
+
+# ---------------------------------------------------------------------------
+# Name resolution
+# ---------------------------------------------------------------------------
+
+
+def func_name_lookup(func: Any) -> dict[str, Any]:
+    """Return ``func.__globals__`` merged with closure free-var bindings.
+
+    A function defined inside a factory, a test method, or any other enclosing
+    scope captures the names it uses (``HIDDEN``, ``ROWS``, a factory's ``nr``,
+    ...) as closure free vars, not as globals — both namespaces have to be
+    inspected to find them. Closure bindings override globals, matching Python's
+    own name-resolution order at the function's call site.
+
+    This is the namespace every ``@pl.jit`` name lookup must use. The generated
+    ``@pl.program`` source is ``exec``'d in a fresh module holding only ``pl``
+    and ``pld``, so a free name that survives into it is undefined there; both
+    static shape resolution and body constant-folding therefore resolve against
+    this mapping rather than ``__globals__`` alone.
+    """
+    out: dict[str, Any] = dict(getattr(func, "__globals__", {}))
+    co_freevars = getattr(getattr(func, "__code__", None), "co_freevars", ())
+    closure = getattr(func, "__closure__", None) or ()
+    for fv_name, cell in zip(co_freevars, closure, strict=True):
+        try:
+            out[fv_name] = cell.cell_contents
+        except ValueError:
+            # Unbound closure cell — skip silently (matches _discover_deps).
+            pass
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -2099,7 +2143,10 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
         scalar_dtypes=scalar_dtypes,
         dep_names=dep_names,
         auto_scope=auto_scope,
-        py_globals=getattr(func, "__globals__", {}),
+        # Closure-aware: a factory-defined kernel captures its constants as free
+        # vars, which never appear in __globals__. Folding must see them or they
+        # survive verbatim into the generated source and are undefined there.
+        py_globals=func_name_lookup(func),
         orig_file=orig_file,
         orig_start_line=orig_start_line,
         orig_col_offset=orig_col_offset,

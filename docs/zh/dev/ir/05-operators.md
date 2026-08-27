@@ -231,10 +231,10 @@ lhs M/K 与 rhs N 实际计算的较小矩形。
 
 #### 条件式累加器初始化（`init_cond`）
 
-`tile.matmul_acc`、`tile.batch_matmul_acc` 与 `tensor.matmul_acc` 接受一个可选的
-第四操作数 `init_cond`：一个 BOOL 标量，用于逐次执行地选择累加器是被 `lhs @ rhs`
-**覆写**还是被累加。这就是 split-K 的 `k == 0` 惯用法，它同时省去了清零累加器与
-剥离首个 K 步的需要：
+`tile.matmul_acc`、`tile.batch_matmul_acc`、`tensor.matmul_acc` 与 `tile.gemv_acc`
+接受一个可选的第四操作数 `init_cond`：一个 BOOL 标量，用于逐次执行地选择累加器是被
+`lhs @ rhs` **覆写**还是被累加。这就是 split-K 的 `k == 0` 惯用法，它同时省去了清零
+累加器与剥离首个 K 步的需要：
 
 ```python
 acc = pl.tile.create([16, N], pl.INT32, target_memory=pl.Mem.Acc)
@@ -255,10 +255,12 @@ for k0 in pl.pipeline(0, K, K_TILE, stage=2):
 编译期常量。作为操作数注册也意味着它像其他 SSA 值一样参与 use-def 链。
 
 既然是操作数，它在 tile 层按位置打印 ——
-`pl.tile.matmul_acc(acc, lhs, rhs, k0 == 0)`。在 tensor 层第 4 个位置槽已经属于
-`a_trans`，因此 printer 改用关键字形式打印该谓词 ——
+`pl.tile.matmul_acc(acc, lhs, rhs, k0 == 0)`。有两个签名的第 4 个位置槽已被占用
+（tensor 层是 `a_trans`，GEMV 是 `acc_phase`），因此 printer 对它们改用关键字形式打印，
+`init_cond` 在这两个 DSL 签名中也相应地是 keyword-only。各形式重新解析后仍是同一份 IR：
+
 `pl.tensor.matmul_acc(acc, lhs, rhs, init_cond=k0 == 0, a_trans=False, b_trans=False)`
-—— 打印结果重新解析后仍是同一份 IR。
+`pl.tile.gemv_acc(acc, lhs, rhs, init_cond=k0 == 0, acc_phase='unspecified')`
 
 降级方式取决于谓词是否在编译期已知：
 
@@ -267,6 +269,10 @@ for k0 in pl.pipeline(0, K, K_TILE, stage=2):
 | 缺省，或字面量 `False` | `pto.tmatmul.acc ins(dst, lhs, rhs) outs(dst)` |
 | 字面量 `True` | `pto.tmatmul ins(lhs, rhs) outs(dst)` |
 | 运行期谓词 | `scf.if cond { pto.tmatmul } else { pto.tmatmul.acc }` |
+
+`tile.gemv_acc` 走同一个 emitter，只是把指令换成 `pto.tgemv.acc` / `pto.tgemv` ——
+GEMV 就是 M 为 1 的 matmul，跑在同一个 cube MAD 上，因此携带同一个 `cmatrixInit`
+位。其 `acc_phase` 属性会附着在实际生成的那一条指令上。
 
 ISA 将该语义承载为 MAD 指令 Xt 寄存器的第 63 位（`cmatrixInit`），因此硬件本身
 无需分支；分支的来源是 `pto.tmatmul` 与 `pto.tmatmul.acc` 是两个独立算子、且不带
@@ -396,6 +402,22 @@ rhs 的逻辑 K 必须覆盖 lhs 的逻辑 K。支持的 dtype 三元组为
 `tile.gemv`、`tile.gemv_acc` 和 `tile.gemv_bias` 的 `acc_phase` 可设为
 `"unspecified"`（默认值）、`"partial"` 或 `"final"`。后续仍有 K 分块时
 使用 `"partial"`，最后一个分块使用 `"final"`。
+
+`tile.gemv_acc` 还接受可选的 `init_cond` 谓词 ——
+见[条件式累加器初始化](#条件式累加器初始化init_cond)。`tile.gemv_bias` 没有该操作数，
+与 `tile.matmul_bias` 一致：带 bias 的 GEMV 本身就铸造累加器，没有可被谓词化的初值。
+
+Acc 的补齐契约决定了带谓词的 split-K GEMV 如何铸造该累加器。由于 `[1, N]` 结果占用
+16 个物理行，`pl.tile.create([1, N], ...)` 会因物理 shape 被拒，`[16, N]` 则因 valid
+shape 被拒；应按物理 shape 创建再收窄 valid 矩形：
+
+```python
+acc_raw = pl.tile.create([16, N], pl.FP32, target_memory=pl.Mem.Acc)
+acc = pl.tile.set_validshape(acc_raw, 1, N)  # 随后 gemv_acc(..., init_cond=(k0 == 0))
+```
+
+在 `init_cond` 之前，这一步是由剥离的首个 K 步隐式完成的 —— 一条直线展开的
+`pl.tile.gemv` 会铸造出类型正确的累加器，代价是两个分支之间的一个 phi。
 
 ## Python 用法
 
@@ -683,7 +705,7 @@ with ib.function("tile_computation") as f:
 | `system.syncall` | 跨核全员屏障（`pto::SYNCALL`）。属性 `mode` 取 `"hard"`（FFTS，无 operand）或 `"soft"`（GM 轮询，带 operand） | `core_type`（`"aiv_only"` \| `"aic_only"` \| `"mix"`）、`mode`（`"hard"` \| `"soft"`） |
 | `system.sync_src` | 设置同步标志 | `set_pipe`, `wait_pipe`, `event_id` |
 | `system.sync_dst` | 等待同步标志 | `set_pipe`, `wait_pipe`, `event_id` |
-| `system.task_invalid` | `PTO2TaskId::invalid()` 哨兵——TaskId carry 的 "暂无 producer" 种子 | 无 |
+| `system.task_invalid` | `TaskId::invalid()` 哨兵——TaskId carry 的 "暂无 producer" 种子 | 无 |
 | `system.task_is_valid` | 测试某个 `TASK_ID` 值是否为有效（非哨兵）handle | 无；唯一位置参数是 TaskId Var |
 | `system.available_cluster_count` | 本次运行的 MIX cluster（= AIC）数，由设备读回。结果为 `Scalar[INT32]` | 无 |
 | `system.available_aiv_count` | 本次运行的独立 AIV 核数，由设备读回。结果为 `Scalar[INT32]` | 无 |

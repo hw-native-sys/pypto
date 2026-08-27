@@ -38,11 +38,13 @@ data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum, core_num=4)
 - 每步 O(N/P) 远程流量——每个 rank 读取一个邻居
 - Signal 形状：`[2 × (NR − 1), NR]`
 - 要求编译时已知 NR——使用工厂函数模式：外层 Python 函数接收 `nr`/`size`，
-  推导出 `total_rounds = 2 * (nr - 1)`，并在自己的函数体内定义
-  `@pl.jit` 函数，使 `[total_rounds, nr]` 成为编译期常量（specializer 会把
-  闭包常量折叠进生成的程序）。参见下方"可运行示例"一节中的
-  `collectives/test_l3_tensor_allreduce_ring_intrinsic.py`——该测试当前
-  使用等价的 `@pl.program` 类形式。
+  推导出 `total_rounds = 2 * (nr - 1)`，并在自己的函数体内定义程序，使
+  `[total_rounds, nr]` 成为编译期常量。
+- 两种装饰器系列都支持这一模式。`@pl.program` / `@pl.function` 会在装饰时
+  捕获*定义处*帧的局部变量；`@pl.jit` 系列则会把闭包常量折叠进它重新生成
+  的源码，因此在 HOST 编排体内引用的工厂常量同样能够解析。类形式的写法参见
+  下方"可运行示例"一节中的
+  `collectives/test_l3_tensor_allreduce_ring_intrinsic.py`。
 - 最适合大消息（>16 KiB）和高带宽
 
 | 方面 | Mesh | Ring |
@@ -212,7 +214,7 @@ PyPTO 有三种方式运行集合通信——根据代码运行的位置以及�
 | 集合通信 | 教程步骤 | 先手工？ |
 | -------- | -------- | -------- |
 | barrier | [09-barrier](09-barrier.md) | 是（步骤 04，然后揭示） |
-| allreduce | 规划中——步骤 08–11 | 是（mesh、two-phase、ring，然后揭示） |
+| allreduce | [13-allreduce_mesh](13-allreduce_mesh.md) · [14-allreduce_two_phase](14-allreduce_two_phase.md) · [15-allreduce_ring](15-allreduce_ring.md) · [16-allreduce_reveal](16-allreduce_reveal.md) | 是（步骤 08–11） |
 | broadcast | 规划中——步骤 12 | 是 |
 | allgather | 规划中——步骤 13 | 是 |
 | reduce_scatter | 规划中——步骤 14 | 是 |

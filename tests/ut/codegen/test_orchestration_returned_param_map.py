@@ -262,7 +262,7 @@ _TASK_RE = re.compile(
 _OP_RE = re.compile(r"\.add_(input|inout|output)\((\w+)\)")
 
 # A loop-tail carry rebind, e.g. "cur__rv_v3 = cur__ssa_v4;". Matches the bare assignment
-# only -- the "ChipTensor cur__rv_v3 = cur;" declaration above the loop is not a rebind.
+# only -- the "TaskTensor cur__rv_v3 = cur;" declaration above the loop is not a rebind.
 _CARRY_RE = re.compile(r"^\s*(\w+)__rv_v\d+\s*=\s*(\w+);\s*$", re.MULTILINE)
 
 

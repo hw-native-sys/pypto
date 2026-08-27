@@ -74,7 +74,7 @@ def _finalize_for_codegen(program):
 
     MaterializeRuntimeScopes gives the orchestration function body and for/if
     bodies explicit AUTO RuntimeScopeStmt nodes (codegen no longer emits implicit
-    PTO2_SCOPE() wrappers). ClassifyIterArgCarry then stamps each ForStmt's
+    SIMPLER_SCOPE() wrappers). ClassifyIterArgCarry then stamps each ForStmt's
     iter_arg carry plan, which codegen reads instead of deriving. Both are
     codegen preconditions and both are no-ops when the program already went
     through the pass pipeline. Must run after DeriveCallDirections (a declared
@@ -121,7 +121,7 @@ def _out_of_scope_tensor_refs(code: str) -> list[str]:
 
     Walks brace scopes recording the tensor identifiers declared in each, then
     flags any *use* that names a declared tensor not visible at the use site.
-    Three use shapes are scanned (a name escaping a closed ``PTO2_SCOPE`` block
+    Three use shapes are scanned (a name escaping a closed ``SIMPLER_SCOPE`` block
     can surface as any of them):
 
       * ``add_input/output/inout/no_dep(X)``         — call-arg reads (#1697)
@@ -138,7 +138,7 @@ def _out_of_scope_tensor_refs(code: str) -> list[str]:
     Numeric literals (``= 0;``), casts, and scalar locals carry neither marker,
     so they never yield false positives.
     """
-    decl_re = re.compile(r"\b(?:const\s+ChipTensor\s*&|ChipTensor|TaskOutputTensors|Arg)\s+(\w+)")
+    decl_re = re.compile(r"\b(?:const\s+TaskTensor\s*&|TaskTensor|TaskOutputTensors|Arg)\s+(\w+)")
     declared_anywhere = set(decl_re.findall(code))
     # An SSA-versioned tensor temp is unambiguously a tensor regardless of whether
     # its declaration still exists, so an out-of-scope reference to one is always
@@ -153,7 +153,7 @@ def _out_of_scope_tensor_refs(code: str) -> list[str]:
         line = raw.strip()
         # Declarations and uses are each emitted on their own line (never sharing
         # a line with a scope brace), so resolve them against the current scope
-        # set first. Declarations are recorded before uses so a ``const ChipTensor& Y
+        # set first. Declarations are recorded before uses so a ``const TaskTensor& Y
         # = X`` line registers Y while still checking the RHS read of X.
         for m in decl_re.finditer(line):
             scopes[-1].add(m.group(1))

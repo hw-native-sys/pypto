@@ -229,6 +229,45 @@ correct for free. A missing edge in a manual scope is a race, not an error messa
 **How to confirm:** `enable_dep_gen=True`, and read the graph against what you intended —
 this is the one case where reading the whole graph, not a diff of it, is the check.
 
+## Edges you did not need
+
+Having added edges by hand, the opposite question is worth asking: which of them were
+already implied? An edge `(u, v)` is redundant when `v` is reachable from `u` some other
+way — removing it cannot change execution order, only the bookkeeping the scheduler
+carries.
+
+```bash
+DEPS_JSON="outputs/<run>/deps.json"
+python -m simpler_setup.tools.deps_viewer "$DEPS_JSON" --edge-mode reduced
+python -m simpler_setup.tools.deps_viewer "$DEPS_JSON" --edge-mode reduced_dataflow
+```
+
+> **Never report from `reduced` alone.** Edges carry a `source`, and `creator` edges — the
+> ones keeping alive the task that owns a tensor a consumer still references — are
+> protected from structural reduction unconditionally, because ordering is not what they
+> encode. Protection is per pair, so a single creator annotation shields the whole edge. On
+> a measured graph of 5120 `creator` plus 1008 `tensormap` edges, **all** 2032 redundant
+> pairs carried a creator annotation: `reduced` reported `0` while `reduced_dataflow`
+> removed 992. A zero from `reduced` is evidence about the mode, not about your graph.
+
+`reduced_dataflow` makes creator edges eligible, dropping one only when every creator
+annotation on the pair is an exactly-known `INOUT` region and every byte provably flows
+from an earlier `Output` on to a later `INOUT` owned by the same creator. Ambiguous or
+over-complex stride metadata keeps the edge, as does an `OUTPUT_EXISTING` edge, which
+begins a reuse generation.
+
+Two more things that look like answers and are not:
+
+- **A graph of depth 1 cannot contain a redundant edge at all** — with no two-hop path
+  there is nothing to imply an edge. Check the depth first; a `0` there ends the audit
+  rather than telling you the graph is minimal.
+- **A cycle disables reduction without failing.** The tool warns on stderr, emits the full
+  graph, and still **exits 0**. Read stderr; a zero exit is not proof a reduction ran.
+
+The audit itself consumes `deps.json` alone — no timing artifacts, no device. Adding
+`--func-names` reads one more file, the run's `name_map*.json`, and is worth it:
+it puts kernel names in the printed edge list instead of numeric ids.
+
 ## Deciding
 
 ```text

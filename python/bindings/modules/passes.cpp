@@ -100,7 +100,7 @@ void BindPass(nb::module_& m) {
              "device communication context is an explicit CommCtxType SSA value traceable to a parameter")
       .value("RuntimeScopesMaterialized", IRProperty::RuntimeScopesMaterialized,
              "Orchestration functions carry explicit RuntimeScopeStmt nodes for the function body and "
-             "for/if bodies; codegen no longer emits implicit PTO2_SCOPE() wrappers")
+             "for/if bodies; codegen no longer emits implicit SIMPLER_SCOPE() wrappers")
       .value("AssignTypeSymmetry", IRProperty::AssignTypeSymmetry,
              "Every AssignStmt has structural_equal(var->GetType(), value->GetType()) — covers dtype, "
              "shape, tile_view/tensor_view, and TileType memory_space (memref excluded as an allocation "
@@ -133,7 +133,15 @@ void BindPass(nb::module_& m) {
              "Every atomic-add write into GM (tile.store / tensor.assemble / pld.tensor.put / "
              "pld.tile.put / pld.tensor.remote_store / pld.tile.remote_store) targets a dtype the "
              "backend store pipe can combine; a bf16 destination requires the Ascend910B (A2/A3) "
-             "profile");
+             "profile")
+      .value("AccCompactValid", IRProperty::AccCompactValid,
+             "Every tile.matmul_acc / tile.matmul_mx_acc accumulates into a CompactMode.normal "
+             "buffer when mad's pitch (ceil(lhs validRow/16)*16) differs from the accumulator's "
+             "physical row count, and no tile outside Left/Right/Acc carries a compact mode")
+      .value("GraphBoundaryLegalized", IRProperty::GraphBoundaryLegalized,
+             "Every FunctionType::Graph function satisfies the host_build_graph boundary contract: "
+             "derived boundary scalars hoisted to the call sites, a signature within the runtime's "
+             "tensor/direction/return limits, and no call site the runtime could not cache");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");
@@ -216,7 +224,10 @@ void BindPass(nb::module_& m) {
       .value("OutParamWriteDropped", DiagnosticCheck::OutParamWriteDropped,
              "Rebinding an Out/InOut parameter drops the caller's write")
       .value("ScalarWriteLineShared", DiagnosticCheck::ScalarWriteLineShared,
-             "pl.write from concurrent task instances may share a 64-byte cache line");
+             "pl.write from concurrent task instances may share a 64-byte cache line")
+      .value("InParamWritten", DiagnosticCheck::InParamWritten,
+             "A parameter declared In that its own function body writes. The write is invisible to "
+             "dependency analysis, so nothing is ordered against it");
 
   // Bind DiagnosticCheckSet
   auto diagnostic_check_set =
@@ -597,6 +608,9 @@ void BindPass(nb::module_& m) {
              "Lower host-level pld.tensor.allreduce calls to builtin tensor collective dispatches.");
   passes.def("materialize_dist_tensor_ctx", &pass::MaterializeDistTensorCtx,
              "Materialize CommCtx parameters and arguments for DistributedTensor function parameters.");
+  passes.def("legalize_graph_boundary", &pass::LegalizeGraphBoundary,
+             "Hoist derived boundary scalars out of Graph functions and reject graphs the "
+             "host_build_graph runtime could not record");
   passes.def("materialize_valid_shape_symbols", &pass::MaterializeValidShapeSymbols,
              "Materialize a Scalar[INDEX] parameter per unbindable device-kernel valid_shape symbol.\n\n"
              "A pl.dynamic() symbol named only in a parameter's pl.TensorView(valid_shape=...) is\n"
@@ -610,7 +624,7 @@ void BindPass(nb::module_& m) {
              "Materialize implicit orchestration scopes as explicit RuntimeScopeStmt nodes.\n\n"
              "For every Orchestration function, inserts AUTO RuntimeScopeStmt (manual_=false)\n"
              "wrapping the function body and each ForStmt / IfStmt branch body (suppressed\n"
-             "inside a manual scope). Codegen then emits PTO2_SCOPE only from RuntimeScopeStmt\n"
+             "inside a manual scope). Codegen then emits SIMPLER_SCOPE only from RuntimeScopeStmt\n"
              "nodes, 1:1 with the IR. Runs last in the pipeline, after the final Simplify.");
   passes.def("classify_iter_arg_carry", &pass::ClassifyIterArgCarry,
              "Classify ForStmt iter_arg carries and size TaskId array carries.\n\n"

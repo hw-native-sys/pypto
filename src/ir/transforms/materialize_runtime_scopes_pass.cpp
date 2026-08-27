@@ -149,7 +149,7 @@ bool IsAutoScope(const StmtPtr& stmt) {
 }
 
 /// Wrap @p body in an AUTO RuntimeScopeStmt (manual_ = false). Mirrors the
-/// ``PTO2_SCOPE()`` block the orchestration codegen used to emit implicitly.
+/// ``SIMPLER_SCOPE()`` block the orchestration codegen used to emit implicitly.
 StmtPtr WrapAuto(const StmtPtr& body) {
   return std::make_shared<RuntimeScopeStmt>(/*manual=*/false, /*name_hint=*/"", body, body->span_);
 }
@@ -177,7 +177,7 @@ StmtPtr StripCompilerAutoManualCallCandidates(const StmtPtr& body) {
 }
 
 /// Inserts AUTO RuntimeScopeStmt nodes around ForStmt and IfStmt bodies,
-/// replicating the orchestration codegen's former implicit ``PTO2_SCOPE()``
+/// replicating the orchestration codegen's former implicit ``SIMPLER_SCOPE()``
 /// wrapping. Insertion is suppressed inside a manual RuntimeScopeStmt — the
 /// runtime forbids AUTO scope nested in MANUAL scope, exactly as codegen's
 /// ``in_manual_scope_depth_`` counter enforced.
@@ -236,9 +236,11 @@ class InsertAutoScopeMutator : public IRMutator {
 Pass MaterializeRuntimeScopes() {
   auto pass_func = [](const FunctionPtr& func) -> FunctionPtr {
     if (!func || !func->body_) return func;
-    // Only Orchestration functions are wrapped in PTO2_SCOPE blocks by codegen;
-    // InCore/AIC/AIV/Group/Spmd bodies are never scope-wrapped.
-    if (func->func_type_ != FunctionType::Orchestration) return func;
+    // Only orchestration bodies are wrapped in SIMPLER_SCOPE blocks by codegen;
+    // InCore/AIC/AIV/Group/Spmd bodies are never scope-wrapped. A Graph body is
+    // one too — codegen emits SIMPLER_SCOPE solely from RuntimeScopeStmt, so
+    // skipping it would yield a scope-less Graph function.
+    if (!IsOrchestrationLike(func->func_type_)) return func;
 
     // ``@pl.function(auto_scope=False)`` opts out of automatic AUTO-scope
     // insertion: the user places every scope by hand (``with pl.scope()`` /
@@ -255,7 +257,7 @@ Pass MaterializeRuntimeScopes() {
     }
 
     // Always wrap the whole function body in an AUTO scope, matching the
-    // always-on outermost ``PTO2_SCOPE()`` codegen emitted at function entry.
+    // always-on outermost ``SIMPLER_SCOPE()`` codegen emitted at function entry.
     StmtPtr new_body = whole_layer_manual ? WrapCompilerAutoManualLayer(inner)
                                           : (IsAutoScope(inner) ? inner : WrapAuto(inner));
     new_body = StripCompilerAutoManualCallCandidates(new_body);

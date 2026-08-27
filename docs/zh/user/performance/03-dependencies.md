@@ -183,6 +183,27 @@ with pl.at(level=pl.Level.CORE_GROUP,
 
 **怎么确认：** `enable_dep_gen=True`，然后拿图对着你的意图读 —— 这是唯一一种「该读整张图而不是读它的 diff」的情形。
 
+## 你其实不需要的那些边
+
+手工加过边之后，反过来的问题也值得一问：其中哪些本来就已经被蕴含了？当 `v` 能从 `u` 经由别的路径到达时，边 `(u, v)` 就是冗余的 —— 去掉它不会改变执行顺序，只会减少调度器要维护的簿记。
+
+```bash
+DEPS_JSON="outputs/<run>/deps.json"
+python -m simpler_setup.tools.deps_viewer "$DEPS_JSON" --edge-mode reduced
+python -m simpler_setup.tools.deps_viewer "$DEPS_JSON" --edge-mode reduced_dataflow
+```
+
+> **绝不要只看 `reduced` 就下结论。** 边带有 `source`，而 `creator` 边 —— 那些为了让「拥有某个消费者仍在引用的张量」的任务保持存活而存在的边 —— 会无条件地免于结构化归约，因为它们编码的根本不是顺序。这种保护是按 pair 生效的，所以一条 creator 标注就能护住整条边。在一份实测的图上（5120 条 `creator` 加 1008 条 `tensormap`），**全部** 2032 个冗余 pair 都带着 creator 标注：`reduced` 报 `0`，而 `reduced_dataflow` 去掉了 992 条。`reduced` 报零，是关于这个模式的证据，不是关于你这张图的。
+
+`reduced_dataflow` 让 creator 边变得可去除，但只在该 pair 上每一条 creator 标注都是确切已知的 `INOUT` 区域、且每个字节都可证明是从更早的 `Output` 流向同一 creator 拥有的更晚的 `INOUT` 时才去。stride 元数据含糊或过于复杂会保留该边，`OUTPUT_EXISTING` 边也会 —— 它开启的是一个新的复用世代。
+
+另外两件看着像答案、其实不是的事：
+
+- **深度为 1 的图根本不可能有冗余边** —— 没有两跳路径，也就没有什么能蕴含一条边。先看深度；那里的 `0` 意味着审计到此为止，而不是说明这张图已经最简。
+- **存在环会让归约失效，但不会让命令失败。** 工具会在 stderr 上告警、输出完整图，并且**仍然以 0 退出**。要读 stderr；退出码为 0 不能证明归约真的跑过。
+
+审计本身只消耗 `deps.json` —— 不需要时序产物，也不需要设备。加上 `--func-names` 会多读一个文件，即本次运行的 `name_map*.json`，但值得：它会让打印出的边列表显示 kernel 名而不是数字 id。
+
 ## 怎么判断
 
 ```text

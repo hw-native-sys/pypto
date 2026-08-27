@@ -671,7 +671,7 @@ def _make_call_config(
     on top, so a single L3 dispatch can size the
     runtime's ring buffers without mutating the prepared program's shared
     config. ``None`` (the default) leaves the baseline untouched and the runtime
-    applies its own ``PTO2_RING_*`` env var / compile-time fallback.
+    applies its own compile-time default.
 
     DFX diagnostics (``enable_dump_args`` / ``enable_pmu`` / ``enable_dep_gen``
     / ``enable_scope_stats`` / ``enable_chip_swimlane``) are likewise read from
@@ -2252,6 +2252,30 @@ class DistributedWorker(Worker):
         if self._w is None:
             return 0
         return int(self._w.committed_device_memory(worker_id))
+
+    def device_memory_info(self, worker_id: int = 0) -> tuple[int, int]:
+        """Free and total device HBM (bytes) as the driver sees it, for the device
+        chip *worker_id* runs on. Routes through the underlying simpler
+        ``Worker(level=3)`` facade, which forwards the query to the forked chip child.
+
+        This is a device-wide snapshot and answers a different question from
+        :meth:`committed_device_memory`, which reports only what this worker's own
+        ``MemoryAllocator`` has committed. Anything else on the card -- another
+        process, another worker, the driver itself -- moves ``free_bytes`` without
+        moving that committed total.
+
+        Unlike :meth:`committed_device_memory`, a failed query is never softened
+        into a zero here: a caller sizing a KV cache from a fabricated ``(0, 0)``
+        would silently under-allocate, so the underlying error propagates instead.
+        Simulator backends synthesize no device-wide memory and raise
+        ``NotImplementedError``.
+
+        Returns:
+            ``(free_bytes, total_bytes)``, both as Python ints.
+        """
+        self._require_open("device_memory_info")
+        info = self._w.device_memory_info(worker_id)
+        return int(info.free_bytes), int(info.total_bytes)
 
     def _buffer_identity_for(self, host_ptr: int, nbytes: int, *, writing: bool) -> tuple[bytes, int]:
         """Return the stable ``(owner_instance_id, buffer_id)`` naming this host range.

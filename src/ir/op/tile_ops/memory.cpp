@@ -263,6 +263,17 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
     tile_view.valid_shape = valid_shape_tuple->elements_;
   }
 
+  // Optional GM cache-access policy. Absent = the caller stated none; an
+  // explicit kDefault is distinct from absence and out-ranks a scope-level
+  // declaration downstream. Range-checked here, at the op boundary, for the
+  // same reason `atomic` is: the DSL types it as CachePolicy, but the text
+  // parser and hand-built or deserialized IR can hand over any int, and an
+  // unknown one would otherwise surface at codegen with no context.
+  const int cache = GetKwarg<int>(kwargs, "cache", static_cast<int>(CachePolicy::kDefault));
+  CHECK(cache == static_cast<int>(CachePolicy::kDefault) || cache == static_cast<int>(CachePolicy::kBypass))
+      << "The operator " << op_name
+      << " cache kwarg must be CachePolicy.DEFAULT or CachePolicy.BYPASS, but got int " << cache;
+
   // Return TileType with same dtype as tensor and TileView containing valid_shape.
   // When target_memory is specified, write it into memory_space_ so the constructed
   // type is internally coherent (tile_view layout and memory_space agree). This
@@ -588,9 +599,21 @@ TypePtr DeduceTileCreateTileType(const std::vector<ExprPtr>& args,
   // tile: a contiguous byte-staging buffer rather than the boxed NZ layout Mat
   // tiles normally carry.
   bool flat_layout = false;
+  // `compact=true` DECLARES that the fresh L0C buffer holds a valid-region-packed
+  // product: `mad` lays its result out with an N-fractal stride of
+  // `ceil(validRow/16)*16` taken from the L0A operand's valid rows (pto-isa
+  // `TMatmul.hpp`), so an accumulator seeded here for a row-narrowed matmul is
+  // written at that pitch and every reader must recompute it the same way.
+  // Declaring it at creation rather than stamping it later is what makes the mode
+  // survive: a pass-applied type refinement is discarded the moment any pass
+  // re-deduces the call (InferTileMemorySpace does), whereas a kwarg is re-read.
+  // `tile.set_validshape` then inherits the mode onto the narrowed seed without
+  // re-interpreting bytes it did not write (the inherit-only contract of #2474).
+  bool compact_layout = false;
   for (const auto& [k, v] : kwargs) {
     if (k == "transpose") transpose_layout = AnyCast<bool>(v, "transpose");
     if (k == "flat_layout") flat_layout = AnyCast<bool>(v, "flat_layout");
+    if (k == "compact") compact_layout = AnyCast<bool>(v, "compact");
   }
   // The transposed Mat (ZN) layout is a 2D L1 matmul-`b_trans` operand layout; it
   // is meaningless for a non-Mat space or a non-2D shape. Fail fast rather than
@@ -603,6 +626,13 @@ TypePtr DeduceTileCreateTileType(const std::vector<ExprPtr>& args,
   CHECK(!flat_layout || (target_memory_opt == MemorySpace::Mat && !transpose_layout))
       << "The operator " << op_name
       << " supports flat_layout=true only for target_memory=Mat (L1) without transpose";
+  // Compact is a fractal-pitch property of an accumulator. Left/Right get theirs
+  // from the partial `tile.extract` that fills them, so `tile.create` only ever
+  // needs to declare it for L0C.
+  CHECK(!compact_layout || target_memory_opt == MemorySpace::Acc)
+      << "The operator " << op_name
+      << " supports compact=true only for target_memory=Acc (L0C), which is the only space whose "
+         "fractal pitch a matmul derives from the valid row count";
 
   // A flat L1 tile keeps the canonical flat view (blayout=row_major,
   // slayout=none_box, fractal default) — it is deliberately NOT boxed. We also
@@ -617,6 +647,9 @@ TypePtr DeduceTileCreateTileType(const std::vector<ExprPtr>& args,
     // space it is a view of rather than against nullopt (see 02-types.md).
     tile_view_semantics::SetTileLayout(
         tile_view, tile_view_semantics::GetImplicitTileLayout(tile_shape, MemorySpace::Acc));
+    if (compact_layout) {
+      tile_view.compact = CompactMode::normal;
+    }
     creation_space = MemorySpace::Acc;
   } else if (transpose_layout) {
     tile_view.blayout = TileLayout::row_major;
@@ -1052,6 +1085,7 @@ REGISTER_OP("tile.create")
     .set_attr<MemorySpace>("target_memory")
     .set_attr<bool>("transpose")
     .set_attr<bool>("flat_layout")
+    .set_attr<bool>("compact")
     .no_execution_memory_access()
     // No fallback: when target_memory is absent, memory_space stays unresolved and
     // InferTileMemorySpace picks the space from consumer demand.
@@ -1076,6 +1110,9 @@ REGISTER_OP("tile.load")
         "Valid shape of tile in each dimension, in source tensor coordinates (TupleType of ScalarType). ")
     .set_attr<MemorySpace>("target_memory")
     .set_attr<bool>("clamp")
+    // Declared GM cache-access policy, carried as an int (``ir::CachePolicy``)
+    // so serialization / structural comparison need no new enum arm.
+    .set_attr<int>("cache")
     // No fallback: when target_memory is absent, memory_space stays unresolved and
     // InferTileMemorySpace picks the space from consumer demand.
     .set_output_memory_from_kwarg("target_memory")

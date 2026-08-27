@@ -43,12 +43,15 @@ description: >-
   is tempted to find an interpreter on its own; conda is the wrong answer, and
   the right one is to move the step after the bootstrap instead.
 
-  The calling job must define PTOAS_ROOT, PTOAS_VERSION,
-  PTOAS_SHA256, the CMAKE_* and the non-path CCACHE_* (MAXSIZE / UMASK) environment
-  variables; they are read from the job environment here. CCACHE_NAMESPACE and
-  every cache path (CCACHE_DIR, PIP_CACHE_DIR, PTOAS_CACHE_DIR, UV_CACHE_DIR) are
-  resolved and exported by this action — they derive from CI_CACHE_ROOT and so
-  cannot live in the caller's static job-level `env:` block.
+  When install-toolchain is true, the calling job must define PTOAS_ROOT,
+  PTOAS_VERSION, PTOAS_SHA256_AARCH64, and PTOAS_SHA256_X86_64. Every caller
+  must also define the CMAKE_* and non-path CCACHE_* (MAXSIZE / UMASK)
+  environment variables; they are read from the job environment here. The
+  action selects the checksum that matches the actual host architecture.
+  CCACHE_NAMESPACE and every cache path (CCACHE_DIR, PIP_CACHE_DIR,
+  PTOAS_CACHE_DIR, UV_CACHE_DIR) are resolved and exported by this action —
+  they derive from CI_CACHE_ROOT and so cannot live in the caller's static
+  job-level `env:` block.
 
   Which installer a job gets follows from its toolchain, and the bootstrap step
   states it in PYPTO_USE_UV. The bundle carries uv, so bundle jobs build the venv
@@ -227,6 +230,11 @@ runs:
         # concurrent access, and sharing it is the point — a wheel any job has
         # already downloaded is hardlinked into the next venv instead of being
         # fetched and unpacked again.
+        #
+        # Sharing it also means nothing bounds it: uv has no size cap and evicts
+        # nothing on its own. The last step of this action is what keeps it from
+        # growing without limit; see the comment there for what it removes and
+        # why that specific set.
         {
           echo "CCACHE_DIR=$CI_CACHE_ROOT/ccache"
           echo "PIP_CACHE_DIR=$CI_CACHE_ROOT/$PIP_CACHE_NAME"
@@ -561,6 +569,25 @@ runs:
         # intentionally tests Python 3.10. Install the matching cp310 wheel into
         # an isolated venv so PTOAS_ROOT/bin/ptoas keeps the existing contract.
         PTOAS_ARCH="$(uname -m)"
+        case "$PTOAS_ARCH" in
+          aarch64)
+            PTOAS_SHA256_NAME=PTOAS_SHA256_AARCH64
+            PTOAS_SHA256="${PTOAS_SHA256_AARCH64:-}"
+            ;;
+          x86_64)
+            PTOAS_SHA256_NAME=PTOAS_SHA256_X86_64
+            PTOAS_SHA256="${PTOAS_SHA256_X86_64:-}"
+            ;;
+          *)
+            echo "::error::Unsupported ptoas host architecture '$PTOAS_ARCH'"
+            echo "Supported architectures are aarch64 and x86_64."
+            exit 1
+            ;;
+        esac
+        if ! printf '%s' "$PTOAS_SHA256" | grep -qE '^[0-9a-f]{64}$'; then
+          echo "::error::$PTOAS_SHA256_NAME must be a 64-character lowercase SHA256"
+          exit 1
+        fi
         PTOAS_PACKAGE_VERSION="${PTOAS_VERSION#v}"
         PTOAS_WHEEL_NAME="ptoas-${PTOAS_PACKAGE_VERSION}-cp310-cp310-manylinux_2_34_${PTOAS_ARCH}.whl"
         CACHE_WHEEL="$PTOAS_CACHE_DIR/$PTOAS_WHEEL_NAME"
@@ -632,6 +659,7 @@ runs:
       working-directory: ${{ inputs.checkout-path }}
       env:
         INSTALL_TOOLCHAIN: ${{ inputs.install-toolchain }}
+        PTO_ISA_COMMIT: ${{ inputs.pto-isa-commit }}
       run: |
         source activate.sh
         rm -rf ./build ./_skbuild ./runtime/build ./runtime/_skbuild
@@ -647,6 +675,14 @@ runs:
             uv pip install "$@"
           else
             pip install "$@"
+          fi
+        }
+        # Same split, for producing a wheel instead of installing one.
+        py_build_wheel() {  # <out-dir> <source-dir>
+          if [ "${PYPTO_USE_UV:-false}" = "true" ]; then
+            uv build --wheel --no-build-isolation --out-dir "$1" "$2"
+          else
+            pip wheel --no-build-isolation --no-deps --wheel-dir "$1" "$2"
           fi
         }
         if [ "${PYPTO_USE_UV:-false}" != "true" ]; then
@@ -698,14 +734,13 @@ runs:
           echo "note: download.pytorch.org unreachable — falling back to PyPI"
           py_install "$TORCH_PIN"
         fi
-        py_install --no-build-isolation '.[dev]'
         # One line naming the build inputs this artifact was produced from. The
         # 2026-08-24 outage was hard to place precisely because nothing reported
         # them: an upstream release and a code change looked identical.
         # importlib.metadata rather than `pip list`: the bundle toolchain's venv
         # is built by `uv venv` and has no pip in it at all, which is exactly the
         # set of jobs that outage hit.
-        python - <<'PY'
+        build_inputs="$(python - <<'PY'
         from importlib.metadata import PackageNotFoundError, version
         names = ("cmake", "nanobind", "ninja", "scikit-build-core")
         def resolve(n):
@@ -713,12 +748,282 @@ runs:
                 return f"{n}=={version(n)}"
             except PackageNotFoundError:
                 return f"{n}=<absent>"
-        print("[build inputs]", " ".join(resolve(n) for n in names))
+        print(" ".join(resolve(n) for n in names))
         PY
+        )"
+        echo "[build inputs] $build_inputs"
+
+        # ----------------------------------------------------------------------
+        # Wheel cache — a second layer above ccache, aimed at a different axis.
+        #
+        # ccache caches across *commits*: it makes the TUs a change did not touch
+        # free. It can do nothing about the shape that actually dominates this
+        # workflow — eight jobs building the SAME commit, on the SAME machine, at
+        # the same time. Measured on run 32452961616, every job saw roughly 138
+        # real compiles out of 240 TUs and still spent 1m56-3m09 here: the
+        # remainder is cmake configure, 240 ccache lookups, linking a 304 MiB
+        # .so and zipping the 111 MiB wheel around it, none of which ccache
+        # serves. So cache the product, not the objects.
+        #
+        # Slots are content-addressed by the checkout's tree hash, so a slot can
+        # never be stale — a different tree is a different key, and gitlinks put
+        # the submodule pins (hence runtime/pto_isa.pin) inside that hash. What
+        # the tree does NOT cover, but which still decides the artifact's ABI,
+        # must be in the key by hand: architecture, interpreter ABI, and the
+        # toolchain bundle. A key short one dimension is not a slow cache, it is
+        # a silently mismatched binary — that is issue #1139 one layer down, in
+        # ccache, and it surfaced as a moving segfault rather than as an error.
+        #
+        # pypto's wheel is host-independent: its CMake resolves nothing outside
+        # the venv (find_package Python + nanobind, and nothing else) and
+        # installs one target, so sourcing CANN's set_env.sh beforehand cannot
+        # change what comes out. simpler's is NOT — see its key below.
+        #
+        # The cache is the runner's own disk and nothing is ever uploaded: the
+        # wheel is 111 MiB, and a fan-out of eight would push ~1 GB per run
+        # through the proxy that already drops ptoas' 63 MB download. A job that
+        # lands on a host with a cold cache just builds, exactly as before —
+        # every failure path in here degrades to the in-place install this
+        # replaced, so the cache can never be the reason a job fails.
+        # ----------------------------------------------------------------------
+        wheel_cache="$CI_CACHE_ROOT/wheels"
+        # EXT_SUFFIX is ".cpython-310-aarch64-linux-gnu.so" — interpreter ABI and
+        # platform in one string, read from the interpreter that will import the
+        # result rather than assembled from parts.
+        abi_tag="$(python -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX").lstrip(".").rsplit(".", 1)[0])')"
+        # No `unknown` fallback here. A key that keeps abi_tag but has lost the
+        # toolchain is not a cache miss, it is the silently mismatched binary
+        # the paragraph above exists to prevent — so an unresolvable prefix
+        # turns the cache off, like every other missing input in this block.
+        # The bundle path already fails hard on an empty PYPTO_TOOLCHAIN when it
+        # builds the venv, and the conda path always has CONDA_PREFIX, so this
+        # is a guard against those invariants breaking, not a path CI takes.
+        toolchain_prefix="${PYPTO_TOOLCHAIN:-${CONDA_PREFIX:-}}"
+        toolchain_id="$(basename "${toolchain_prefix:-none}")"
+        # CI never attaches a debugger to what it builds, so it takes the
+        # cheaper of the two levels CMakeLists.txt offers: 111 MiB of wheel
+        # becomes 18 MiB, paid back once in the build and eight more times in
+        # the installs. It is in the key because it changes the artifact -- the
+        # same rule the arch and the toolchain are here for.
+        debug_level=1
+        # Bump to invalidate every slot on every host at once — the escape hatch
+        # for a change that alters what a slot holds without altering any input
+        # named above.
+        # The wheel is a function of these four as much as of the source:
+        # scikit-build-core drives the build, nanobind is compiled into the
+        # extension, and the cmake/ninja pair decides what gets emitted. No
+        # tree hash covers them. `pypto_tree` does cover build-constraints.txt,
+        # but `simpler_tree` is the runtime submodule's tree and does not -- so
+        # editing that file alone used to leave the simpler slot serving a wheel
+        # built by the previous tools. Neither tree covers a version that
+        # floated inside the constraints, or a toolchain that moved underneath
+        # an unchanged pin. Key on what was actually resolved rather than on the
+        # file that asks for it, and both holes close at once.
+        build_inputs_id="$(printf '%s' "$build_inputs" | sha256sum | cut -c1-12)"
+        cache_epoch=1
+        cache_ready=true
+        mkdir -p "$wheel_cache" 2>/dev/null || cache_ready=false
+        # Guarded, not bare: an unresolvable tree must turn the cache off, not
+        # take the step down with it — every other failure here degrades to the
+        # in-place build, and this one has no business being the exception.
+        pypto_tree="$(git rev-parse 'HEAD^{tree}' 2>/dev/null || true)"
+        # The runtime's own tree, plus the pto-isa commit it pins: simpler links
+        # pto-isa, which is why ccache is namespaced by that commit too.
+        simpler_tree="$(git -C runtime rev-parse 'HEAD^{tree}' 2>/dev/null || true)"
+        # ...and the set of runtimes the build host could actually produce.
+        # Installing simpler runs simpler_setup/build_runtimes.py, which asks
+        # what the toolchain supports: gcc alone yields the a2a3sim / a5sim
+        # runtimes, and the onboard a2a3 / a5 pair is added only when ccec and
+        # CANN's cross-compiler are both there. The wheel therefore differs by
+        # build host, and a simulator-only wheel installed on a device job fails
+        # at run time, not install time — validate_runtime_pto_isa_current_pin
+        # reports "_assets/build/lib/pto_isa_build.json is absent" once a test
+        # asks for an onboard runtime.
+        #
+        # Probed with the same predicate build_runtimes.detect_platforms() uses,
+        # rather than keyed on the needs-device input: the input says what the
+        # job wants, this says what the build produced. CANN identifies itself
+        # in there too, because the onboard runtimes are compiled against that
+        # toolkit and an upgrade must not be served the old ones.
+        #
+        # Naming CANN is fussier than it looks. CANN_ROOT is a symlink on at
+        # least one runner (/usr/local/Ascend/cann -> cann-9.0.0), so its own
+        # basename is the version-free "cann" and repointing the link would
+        # leave the key unmoved; readlink resolves that. The install info is
+        # then hashed on top, because an in-place upgrade would keep even the
+        # resolved directory name.
+        simpler_rt="sim"
+        if command -v ccec >/dev/null 2>&1 &&
+           [ -f "${ASCEND_HOME_PATH:-}/tools/hcc/bin/aarch64-target-linux-gnu-g++" ]; then
+          cann_id="$(basename "$(readlink -f "${CANN_ROOT:-}")" 2>/dev/null || echo unknown)"
+          cann_info="$(ls "${CANN_ROOT:-}"/*-linux/ascend_toolkit_install.info 2>/dev/null | head -1)"
+          if [ -n "$cann_info" ]; then
+            cann_id="$cann_id-$(sha256sum "$cann_info" | cut -c1-12)"
+          fi
+          simpler_rt="sim-onboard-$cann_id"
+        fi
+        if [ -z "$pypto_tree" ] || [ -z "$simpler_tree" ] ||
+           [ -z "$toolchain_prefix" ] || [ -z "$build_inputs" ]; then
+          echo "::warning::a key input is unresolvable (tree hash, toolchain" \
+               "prefix or build inputs) — wheel cache disabled for this job"
+          cache_ready=false
+        fi
+        # Probed, not assumed: an older uv has no 'uv build' subcommand at all,
+        # and discovering that as a failed build simultaneously in every job is
+        # the one way this change could take CI down. Falling back to the
+        # in-place install costs exactly what today costs. The pip branch needs
+        # no probe: 'pip wheel' predates any pip that could run here.
+        if [ "${PYPTO_USE_UV:-false}" = "true" ] \
+           && ! uv build --help 2>/dev/null | grep -q -- '--no-build-isolation'; then
+          echo "::warning::this uv cannot build wheels — wheel cache disabled"
+          cache_ready=false
+        fi
+        pypto_key="pypto-${pypto_tree}-${abi_tag}-${toolchain_id}-g${debug_level}-b${build_inputs_id}-e${cache_epoch}"
+        simpler_key="simpler-${simpler_tree}-${PTO_ISA_COMMIT:-none}-${abi_tag}-${toolchain_id}-${simpler_rt}-b${build_inputs_id}-e${cache_epoch}"
+
+        # 0 = slot is complete, 1 = cache unusable (build in place instead),
+        # 2 = the build itself failed (a real error; do not build it twice).
+        ensure_slot() {  # <slot-dir> <source-dir>
+          [ "$cache_ready" = true ] || return 1
+          [ -f "$1/.ok" ] && return 0
+          # flock serialises the fan-out: the first job to arrive builds, the
+          # rest wait and then install. The wait is not a new cost — without it
+          # each of them would be running that same build, competing for the
+          # same cores. -w so a wedged holder degrades to an in-place build
+          # rather than to this job's timeout.
+          # Created with touch first: a failing redirect on `exec` takes the
+          # whole shell down, `|| return 1` or not, so the failure has to be
+          # caught by a command that can actually be tested.
+          _lock="$wheel_cache/.lock-$(basename "$1")"
+          touch "$_lock" 2>/dev/null || return 1
+          exec 9>"$_lock"
+          if ! flock -w 1800 9; then
+            echo "::warning::wheel cache: lock wait timed out for $(basename "$1")"
+            return 1
+          fi
+          if [ ! -f "$1/.ok" ]; then
+            # 000 for the same reason CCACHE_UMASK is 000: every runner instance
+            # on this host shares one cache root.
+            _old_umask="$(umask)"
+            umask 000
+            # Build OUTSIDE the cache, then copy in. Writing the wheel
+            # straight into $CI_CACHE_ROOT made a full or over-quota cache
+            # partition indistinguishable from a failed compile -- and a failed
+            # compile is fatal, so a full disk took every self-hosted job down
+            # with it instead of degrading to the in-place install this block
+            # promises. Only the compile is allowed to be fatal now; everything
+            # from the copy onwards is a caching problem and degrades.
+            _build="$(mktemp -d "${RUNNER_TEMP:-/tmp}/pypto-wheel-XXXXXX")" ||
+              { umask "$_old_umask"; flock -u 9; return 1; }
+            if ! py_build_wheel "$_build" "$2"; then
+              rm -rf "$_build"
+              umask "$_old_umask"
+              flock -u 9
+              echo "::error::building the wheel for $2 failed"
+              return 2
+            fi
+            # A build that reports success but emits nothing is still a build
+            # problem, not a cache one; it must not be retried in place either.
+            if ! ls "$_build"/*.whl >/dev/null 2>&1; then
+              rm -rf "$_build"
+              umask "$_old_umask"
+              flock -u 9
+              echo "::error::the wheel build for $2 produced no wheel"
+              return 2
+            fi
+            # Publish. Every failure below leaves .ok absent, so the function
+            # returns 1 and the caller installs in place -- it pays for the
+            # build twice, which is the price of not failing the job at all.
+            # .ok is written last: it is what every other job trusts.
+            if _tmp="$(mktemp -d "$wheel_cache/.tmp-XXXXXX" 2>/dev/null)" &&
+               cp "$_build"/*.whl "$_tmp/" 2>/dev/null &&
+               touch "$_tmp/.ok" 2>/dev/null; then
+              # Atomic publish. -T so a racing publisher's slot is never nested
+              # inside ours; the two have identical content, so losing the race
+              # costs only our copy.
+              mv -T "$_tmp" "$1" 2>/dev/null || rm -rf "$_tmp"
+            else
+              [ -n "${_tmp:-}" ] && rm -rf "$_tmp"
+              echo "::warning::could not publish $(basename "$1") to the wheel" \
+                   "cache — the build itself was fine"
+            fi
+            rm -rf "$_build"
+            umask "$_old_umask"
+          fi
+          flock -u 9
+          [ -f "$1/.ok" ]
+        }
+
+        install_slot() {  # <slot-dir> <requirement>
+          _whl="$(ls "$1"/*.whl 2>/dev/null | head -1)"
+          # A complete slot always holds one. Returning instead of installing a
+          # literal glob keeps a slot that lost a race with the prune from
+          # turning into an unreadable pip error.
+          [ -n "$_whl" ] || return 1
+          # touch BEFORE installing: mtime is the slot's last-use stamp for the
+          # prune below, and stamping first keeps a slot that is being read out
+          # of the prune's reach.
+          touch "$1" 2>/dev/null || true
+          py_install "$2 @ file://$_whl"
+        }
+
+        # LRU prune, before the builds rather than after them: run last, it could
+        # never free space for the job that had just run out of it. install_slot
+        # stamps every hit, so mtime is last use, not
+        # creation — a slot that main keeps re-testing survives. At ~20 MB a
+        # pypto slot (PYPTO_DEBUG_INFO_LEVEL above is what makes it that
+        # rather than ~123 MB) and ~30 runs a day, two days sits well inside the
+        # headroom measured on the aarch64 cpu/npu box (808 G free) and the a5
+        # host (340 G). infra024 was not measured and does not need to be: the
+        # prune, not the headroom, is what bounds this on any host. The second
+        # sweep collects temp dirs from a build that was killed mid-flight.
+        if [ "$cache_ready" = true ]; then
+          find "$wheel_cache" -mindepth 1 -maxdepth 1 -type d -mtime +2 -exec rm -rf {} + 2>/dev/null || true
+          find "$wheel_cache" -mindepth 1 -maxdepth 1 -type d -name '.tmp-*' -mmin +180 -exec rm -rf {} + 2>/dev/null || true
+          # Lock files outlive their slots and are empty, so they are collected
+          # on the same schedule. Removing one a live builder holds is harmless:
+          # flock keeps working on the open fd, and a newcomer that recreates the
+          # file and builds concurrently loses the mv -T race and drops its copy.
+          find "$wheel_cache" -mindepth 1 -maxdepth 1 -type f -name '.lock-*' -mtime +2 -delete 2>/dev/null || true
+          du -sh "$wheel_cache" 2>/dev/null | sed 's/^/wheel cache size: /' || true
+        fi
+
+        pypto_slot="$wheel_cache/$pypto_key"
+        # Exported around this build alone, not for the step: simpler's CMake
+        # has no such option, and handing it one would earn a "Manually-
+        # specified variables were not used by the project" warning in every
+        # runtime build for no gain.
+        export SKBUILD_CMAKE_DEFINE="PYPTO_DEBUG_INFO_LEVEL=$debug_level"
+        rc=0; ensure_slot "$pypto_slot" . || rc=$?
+        case "$rc" in
+          0) echo "wheel cache: pypto <- $pypto_key"
+             install_slot "$pypto_slot" 'pypto[dev]' || {
+               echo "::warning::wheel cache slot vanished — installing pypto in place"
+               py_install --no-build-isolation '.[dev]'
+             } ;;
+          2) exit 1 ;;
+          *) echo "::warning::wheel cache unusable — installing pypto in place"
+             py_install --no-build-isolation '.[dev]' ;;
+        esac
+        unset SKBUILD_CMAKE_DEFINE
+
         # simpler (./runtime) is only needed on the codegen -> device path; the
-        # --codegen-only job skips it (install-toolchain=false).
+        # --codegen-only job skips it (install-toolchain=false). Its slot is
+        # keyed by the runtimes the build host can produce, so a device job
+        # never installs a simulator-only wheel.
         if [ "$INSTALL_TOOLCHAIN" = "true" ]; then
-          py_install --no-build-isolation ./runtime
+          simpler_slot="$wheel_cache/$simpler_key"
+          rc=0; ensure_slot "$simpler_slot" ./runtime || rc=$?
+          case "$rc" in
+            0) echo "wheel cache: simpler <- $simpler_key"
+               install_slot "$simpler_slot" 'simpler' || {
+                 echo "::warning::wheel cache slot vanished — installing simpler in place"
+                 py_install --no-build-isolation ./runtime
+               } ;;
+            2) exit 1 ;;
+            *) echo "::warning::wheel cache unusable — installing simpler in place"
+               py_install --no-build-isolation ./runtime ;;
+          esac
           # Fail fast if the venv can't import our freshly-built packages (catches
           # a stale conda shadow or a broken venv here, not 10 min later in the
           # test step). The conda py310 base env must NOT have pypto/simpler
@@ -728,6 +1033,83 @@ runs:
           python -c "import pypto; print('env OK:', pypto.__file__)"
         fi
 
+
     - name: Show ccache stats (after)
       shell: bash
       run: ccache -s || true
+
+    - name: Drop the always-rebuilt local wheels from the shared uv cache
+      # Runs even when the build failed: a crashed run leaves its entries behind
+      # too, and this removes them by package name rather than by run.
+      if: ${{ always() && inputs.toolchain == 'bundle' }}
+      shell: bash
+      working-directory: ${{ inputs.checkout-path }}
+      run: |
+        # UV_CACHE_DIR is shared by every job on this host (see "Check runner
+        # config"), and uv bounds it in no way at all: there is no size cap, no
+        # TTL, and no eviction — only the explicit `uv cache clean` / `uv cache
+        # prune` commands. Nothing in this repo ran either, so the directory only
+        # ever grew, and on a busy host it reached the terabyte range.
+        #
+        # What grew is pypto and simpler specifically. Both are installed from a
+        # local directory named on the command line:
+        #
+        #     uv pip install --no-build-isolation '.[dev]'
+        #     uv pip install --no-build-isolation ./runtime
+        #
+        # and uv documents that form as a special case — it "will always rebuild
+        # and reinstall any local directory dependencies passed explicitly on the
+        # command-line". Always rebuilt means the cached wheel can never be hit,
+        # so these entries carry no value whatsoever; they are pure residue, and
+        # each one is an extension-module wheel (~112 MiB at -g2, ~19 MiB at -g1).
+        # Nine self-hosted jobs per run, seven of them also building simpler, all
+        # writing into one directory that never shrinks.
+        #
+        # Clean by package name, which leaves the part of the cache that does pay
+        # for itself — torch, nanobind, cmake, ninja and the rest of the resolved
+        # dependency set — intact for the next job.
+        #
+        # NOT `uv cache prune --ci`, the usual CI recommendation: it removes
+        # pre-built wheels and *retains* wheels built from source, which is
+        # precisely backwards here. It would evict the entries worth keeping and
+        # keep the ones that grow.
+        if [ ! -f activate.sh ]; then
+          echo "no activate.sh (bootstrap did not get that far) — skipping"
+          exit 0
+        fi
+        source activate.sh
+        if ! command -v uv >/dev/null 2>&1; then
+          echo "uv not on PATH — skipping"
+          exit 0
+        fi
+        cache_dir="$(uv cache dir 2>/dev/null || echo "${UV_CACHE_DIR:-}")"
+        # One job per host does this, not all of them. `uv cache clean` takes a
+        # lock over the *whole* cache, and every job here reaches this step at
+        # roughly the same time while its neighbours are still installing. Left
+        # to queue, each one pays the wait and only the first accomplishes
+        # anything: a measured run had a job block 4m22s and then report "No
+        # cache entries found", because the holder had already removed the same
+        # entries. `flock -n` turns that wait into an immediate exit.
+        #
+        # The lock lives under CI_CACHE_ROOT, which the runner-config step
+        # creates, rather than in the cache dir, which may not exist yet.
+        exec 9>"$CI_CACHE_ROOT/.uv-cleanup.lock" || exit 0
+        if ! flock -n 9; then
+          echo "another job on this host is already cleaning the uv cache — skipping"
+          exit 0
+        fi
+        # df, not du: this runs on the critical path and `du` walks the tree,
+        # which on the terabyte-scale cache this step exists to prevent is the
+        # slowest thing here. The filesystem's own accounting is O(1) and is
+        # what the disk-space alarm actually watches. uv reports what it removed.
+        df -h "$cache_dir" 2>/dev/null | tail -1 | sed "s|^|cache_df before |" || true
+        # No --force. That flag skips uv's in-use lock, and the cache is shared
+        # with whatever else the host is running; a concurrent install must not
+        # have entries deleted from under it.
+        #
+        # UV_LOCK_TIMEOUT caps how long we wait for that lock (default 300s).
+        # Keep it short: this job's tests are queued behind this step, and the
+        # work is not urgent — whichever job next finds the lock free does it.
+        UV_LOCK_TIMEOUT=30 uv cache clean pypto simpler \
+          || echo "::warning::uv cache clean did not complete (cache left as-is)"
+        df -h "$cache_dir" 2>/dev/null | tail -1 | sed "s|^|cache_df after  |" || true

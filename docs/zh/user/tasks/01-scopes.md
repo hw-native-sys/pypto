@@ -6,7 +6,7 @@
 
 ## Concept
 
-一个**运行时作用域**（`PTO2_SCOPE`）同时是两样东西：
+一个**运行时作用域**（`SIMPLER_SCOPE`）同时是两样东西：
 
 - OverlapMap 跟踪依赖的区域，以及
 - 一个堆层级，因此嵌套作用域各自独立回收内存。
@@ -73,4 +73,4 @@ OverlapMap 本来会为该区域内每一次 submit 推出的一切 —— 包�
 - [依赖模型](00-model.md) —— 跟踪开启时它会推出什么。
 - [声明一条边](02-submit.md) —— `deps=`，两种模式下都有效。
 - [精修依赖图](03-tuning.md) —— 不必付出整个区域代价的细粒度退出方式。
-- [MaterializeRuntimeScopes](../../dev/passes/44-materialize_runtime_scopes.md) —— AUTO 作用域是怎么放置的。
+- [MaterializeRuntimeScopes](../../dev/passes/45-materialize_runtime_scopes.md) —— AUTO 作用域是怎么放置的。

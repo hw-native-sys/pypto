@@ -1354,7 +1354,7 @@ class TorchCodegen(_ir.IRVisitor):
         the shape check above), so there a parameter's runtime shape is not the
         extent its type declares.
         """
-        if func.func_type != _ir.FunctionType.Orchestration:
+        if not _ir.is_orchestration_like(func.func_type):
             return
         defined: set[str] = set()
         for param in func.params:

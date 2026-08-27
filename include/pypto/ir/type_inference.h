@@ -33,6 +33,8 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/kind_traits.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/printer.h"  // NOLINT(misc-include-cleaner) -- needed for operator<< on ExprPtr
@@ -670,6 +672,40 @@ inline void InheritTileViewLayout(TileView& dst, const std::shared_ptr<const Til
   dst.slayout = eff.slayout;
   dst.pad = eff.pad;
   dst.compact = eff.compact;
+}
+
+/// L0C's fractal row block. `mad` rounds its M up to this, and a compact reader recomputes the
+/// N-fractal stride as `ceil(validRow/16)*16`.
+constexpr int64_t kAccFractalRows = 16;
+
+/**
+ * @brief Would the compact and non-compact readings of an Acc tile use the same N-fractal pitch?
+ *
+ * `StampCompactForNarrowedAccRows` stamps whenever equality is not *proven*, which is the safe
+ * direction for a stamper: a compact tile whose valid rows fill the box recomputes the stride it
+ * would have read from `Rows` anyway. Checks need the other direction — they may only reject a tile
+ * whose two readings genuinely differ, or they fail legal IR. The readings differ unless
+ * `ceil(validRow/16)*16 == Rows`, which holds when the valid rows fill the box and, for a
+ * single-fractal-block box, for *every* extent it can hold: a `[16, N]` gemv accumulator valid to
+ * one row still packs to 16.
+ *
+ * @param valid_rows Valid row extent (may be dynamic)
+ * @param physical_rows Physical row extent
+ * @return true when the two pitches provably coincide, so the compact flag cannot change a reader
+ */
+inline bool AccPitchesCoincide(const ExprPtr& valid_rows, const ExprPtr& physical_rows) {
+  if (ProveValidExtentEqual(valid_rows, physical_rows) == ProofResult::kTrue) {
+    return true;
+  }
+  auto physical_const = As<ConstInt>(physical_rows);
+  if (!physical_const) {
+    return false;
+  }
+  if (auto valid_const = As<ConstInt>(valid_rows)) {
+    const int64_t packed = (valid_const->value_ + kAccFractalRows - 1) / kAccFractalRows * kAccFractalRows;
+    return packed == physical_const->value_;
+  }
+  return physical_const->value_ == kAccFractalRows;
 }
 
 /**

@@ -101,8 +101,10 @@ cfg = RunConfig(platform="a2a3", enable_chip_swimlane=3,  # 调度器阶段及�
 运行时也能把记录转成可以在 [ui.perfetto.dev](https://ui.perfetto.dev) 里加载的 Chrome Trace Event JSON：
 
 ```bash
-python -m simpler_setup.tools.swimlane_converter <records>.json \
-    --deps-json <deps>.json -o out.json
+RECORDS="outputs/<run>/chip_swimlane_records.json"
+DEPS_JSON="outputs/<run>/deps.json"
+python -m simpler_setup.tools.swimlane_converter "$RECORDS" \
+    --deps-json "$DEPS_JSON" -o out.json
 ```
 
 ## 怎么读
@@ -129,8 +131,9 @@ dispatch ──────► start ──────► end ─────�
 当你想把间隙量化而不是靠眼估时，运行时自带一份分析，它只回答一个问题 —— *什么时候，一个空闲的核明明有就绪的活、而调度器还没把活放上去？*
 
 ```bash
+# $RECORDS 与 $DEPS_JSON 沿用上面的赋值
 python -m simpler_setup.tools.sched_overhead_analysis \
-    --chip-swimlane-records-json <records>.json --deps-json <deps>.json
+    --chip-swimlane-records-json "$RECORDS" --deps-json "$DEPS_JSON"
 ```
 
 它给出逐引擎与全系统的开销占 makespan 的比例、取件代价分布、AICPU 调度循环预算，以及把关键路径拆成「计算」与「调度器注入」两部分的归因。同样这些数字可以用 `swimlane_converter --overhead` 叠加成时间线上的 counter 轨。
@@ -141,6 +144,41 @@ python -m simpler_setup.tools.sched_overhead_analysis \
 
 - **没有就绪活**的空闲核**不算**开销。它的空闲是依赖图规定的 —— 那表现为并行度低，属于 [管理任务依赖](03-dependencies.md)。
 - **有就绪但未派发的活**时的空闲核算开销。那是调度器没跟上，属于 [运行时开销](02-runtime-overhead.md)。
+
+### makespan 究竟花在哪了
+
+`sched_overhead_analysis` 回答的是一个具体问题。关键路径分析回答的是更大的那个 —— *依赖决定的下限在哪，剩下的时间被谁花掉了？*
+
+```bash
+RUN_DIR="outputs/<run>"        # 存放本次采集的那棵树
+python -m simpler_setup.tools.critical_path "$RUN_DIR"
+```
+
+它会找出每一个同时含有 `chip_swimlane_records.json`、`deps.json` 与 `name_map*.json` 的目录，并在各自的 records 文件旁边写一份逐 rank 的报告。把它指向整棵 run 树，而不是单个 rank。
+
+它给出两条路径，而结论正在于两者之差：
+
+| 路径 | 是什么 |
+| ---- | ------ |
+| **Static CPM** | 按时长加权的最长链 —— 核数无限时的延迟下限 |
+| **Observed** | 从最后结束的任务往回走的实际执行路径 |
+
+每个任务的计算时间加上它前面的停顿，正好铺满 observed makespan；停顿被归为 `data-wait`（上游生产者迟到）、`core-wait`（分到的核在忙 —— 资源串行）或 `front-gap`（第一个任务开始前的启动延迟）。
+
+由此得到本章其余部分据以分叉的判断：
+
+| 读数 | 判断 | 该去哪 |
+| ---- | ---- | ------ |
+| Static CPM 接近 makespan | 依赖受限 —— 加核没用 | [03](03-dependencies.md)，以及 [01](01-task-granularity.md) 的粒度 |
+| Static CPM 远低于它，`core-wait` 占主导 | 资源串行 | [01](01-task-granularity.md) |
+| Static CPM 远低于它，`front-gap` 很大 | 启动与派发开销 | [02](02-runtime-overhead.md)、[06](06-host.md) |
+| 计算占比高、停顿低 | 确实是计算受限 | [04](04-incore.md) |
+
+> **引用任何数字之前，先看 tiling 那一行。** 每个 rank 都会打印 `tiling check: compute+stall = ... vs makespan ...`，它必须是 `exact`。差值非零意味着这次回溯没有铺满 makespan，逐任务的归因就是不可靠的。另有两种情况会悄悄让报告失效：family 显示为 `unknown` 或 `cid<N>` 说明 name map 没解析出来，此时 family 层面的结论毫无意义；以及跑多轮时采集只覆盖**第一轮**，makespan 里含着预热成本。
+>
+> **一次采集只是一个样本。** 同一份没有改动的负载采两次，停顿占比可以差好几个点。绝不要拿两个配置各采一次来做对比。
+
+`pypto-user` 插件里的 `critical-path-analysis` skill（`claude plugin install pypto-user@pypto-skills`）会把这套流程从头跑到尾 —— 定位产物、执行上面那份校验清单、并给出解读。工具本身在 runtime 里，不需要设备、不需要构建、也不需要仓库检出：它是对别人采好的一份数据做纯后处理。
 
 ## 下一步
 

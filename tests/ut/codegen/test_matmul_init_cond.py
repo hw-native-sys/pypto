@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""``matmul_acc(init_cond=...)`` — conditional accumulator initialization.
+"""``matmul_acc`` / ``gemv_acc`` ``init_cond`` — conditional accumulator init.
 
 ``init_cond`` makes the accumulator's initial value conditional: where the
 predicate holds, the accumulator is overwritten with ``lhs @ rhs`` rather than
@@ -18,6 +18,13 @@ in-place Acc buffer.
 The ISA carries this as one bit of the MAD's Xt register, but ``pto.tmatmul`` and
 ``pto.tmatmul.acc`` are distinct ops, so a *runtime* predicate lowers to a branch
 over the two while a literal one selects a single op at compile time.
+
+GEMV is covered in the same file because it is the same mechanism on the same
+unit: ``tile.gemv_acc`` is a matmul whose M is 1, run on the same cube MAD, so it
+carries the same predicate bit and lowers through the same emitter. Its only
+difference is the padded Acc contract — a ``[1, N]`` GEMV result occupies 16
+physical rows — so its accumulator is minted as a ``[16, N]`` tile narrowed to a
+valid ``[1, N]`` rather than created at its logical shape.
 """
 
 import pypto.language as pl
@@ -296,6 +303,161 @@ class TestGroupedOperandsCarryPredicate:
             "the kb == 0 step must overwrite the accumulator exactly once\n" + mlir
         )
         assert mlir.count("pto.tmatmul.acc") >= 1, "the remaining K steps must accumulate\n" + mlir
+
+
+# ---------------------------------------------------------------------------
+# GEMV — the same predicate on the same cube MAD, at M = 1.
+# ---------------------------------------------------------------------------
+
+
+@pl.program
+class GemvAccPlain:
+    """No predicate — the accumulating form, unchanged."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        lhs: pl.Tensor[[1, 128], pl.FP32],
+        rhs: pl.Tensor[[128, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+    ) -> pl.Tensor[[1, 64], pl.FP32]:
+        lhs_tile = pl.load(lhs, [0, 0], [1, 128], target_memory=pl.MemorySpace.Mat)
+        rhs_tile = pl.load(rhs, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
+        acc_raw = pl.tile.create([16, 64], pl.FP32, target_memory=pl.MemorySpace.Acc)
+        acc_tile = pl.tile.set_validshape(acc_raw, 1, 64)
+        out_tile = pl.tile.gemv_acc(acc_tile, lhs_tile, rhs_tile)
+        return pl.store(out_tile, [0, 0], output)
+
+
+@pl.program
+class GemvAccInitTrue:
+    """Literal ``True`` — folds to the non-accumulating form."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        lhs: pl.Tensor[[1, 128], pl.FP32],
+        rhs: pl.Tensor[[128, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+    ) -> pl.Tensor[[1, 64], pl.FP32]:
+        lhs_tile = pl.load(lhs, [0, 0], [1, 128], target_memory=pl.MemorySpace.Mat)
+        rhs_tile = pl.load(rhs, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
+        acc_raw = pl.tile.create([16, 64], pl.FP32, target_memory=pl.MemorySpace.Acc)
+        acc_tile = pl.tile.set_validshape(acc_raw, 1, 64)
+        out_tile = pl.tile.gemv_acc(acc_tile, lhs_tile, rhs_tile, init_cond=True)
+        return pl.store(out_tile, [0, 0], output)
+
+
+@pl.program
+class GemvAccInitFalse:
+    """Literal ``False`` — folds to the accumulating form."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        lhs: pl.Tensor[[1, 128], pl.FP32],
+        rhs: pl.Tensor[[128, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+    ) -> pl.Tensor[[1, 64], pl.FP32]:
+        lhs_tile = pl.load(lhs, [0, 0], [1, 128], target_memory=pl.MemorySpace.Mat)
+        rhs_tile = pl.load(rhs, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
+        acc_raw = pl.tile.create([16, 64], pl.FP32, target_memory=pl.MemorySpace.Acc)
+        acc_tile = pl.tile.set_validshape(acc_raw, 1, 64)
+        out_tile = pl.tile.gemv_acc(acc_tile, lhs_tile, rhs_tile, init_cond=False)
+        return pl.store(out_tile, [0, 0], output)
+
+
+@pl.program
+class GemvAccSplitK:
+    """Runtime predicate — the split-K ``k == 0`` idiom, without the peel.
+
+    Before ``init_cond``, this loop had to peel its first step into a separate
+    ``pl.tile.gemv`` behind an ``if``, which is what minted the accumulator and
+    forced it through a phi.
+
+    Spelled through the top-level ``pl.gemv_acc`` rather than ``pl.tile.gemv_acc``
+    so the re-exported name is covered too. ``acc_phase`` is passed alongside to
+    pin that it still composes with the predicate.
+    """
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        lhs: pl.Tensor[[1, 256], pl.FP32],
+        rhs: pl.Tensor[[256, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+    ) -> pl.Tensor[[1, 64], pl.FP32]:
+        acc_raw = pl.tile.create([16, 64], pl.FP32, target_memory=pl.MemorySpace.Acc)
+        acc_tile = pl.tile.set_validshape(acc_raw, 1, 64)
+        for k0 in pl.range(0, 256, 128):
+            a = pl.load(lhs, [0, k0], [1, 128], target_memory=pl.MemorySpace.Mat)
+            b = pl.load(rhs, [k0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
+            acc_tile = pl.gemv_acc(acc_tile, a, b, acc_phase="partial", init_cond=(k0 == 0))
+        return pl.store(acc_tile, [0, 0], output)
+
+
+def test_gemv_no_init_cond_emits_only_the_accumulating_form():
+    mlir = _generate_default_mlir(GemvAccPlain)
+    assert "pto.tgemv.acc" in mlir, mlir
+    assert mlir.count("pto.tgemv") == 1, mlir
+    assert "scf.if" not in mlir, mlir
+
+
+def test_gemv_literal_true_folds_to_the_non_accumulating_form():
+    mlir = _generate_default_mlir(GemvAccInitTrue)
+    assert "pto.tgemv.acc" not in mlir, (
+        "init_cond=True must overwrite the accumulator, not accumulate into it:\n" + mlir
+    )
+    assert "pto.tgemv " in mlir, mlir
+    assert "scf.if" not in mlir, mlir
+
+
+def test_gemv_literal_false_folds_to_the_accumulating_form():
+    mlir = _generate_default_mlir(GemvAccInitFalse)
+    assert "pto.tgemv.acc" in mlir, mlir
+    assert mlir.count("pto.tgemv") == 1, mlir
+    assert "scf.if" not in mlir, mlir
+
+
+def test_gemv_runtime_predicate_branches_over_both_forms():
+    mlir = _generate_default_mlir(GemvAccSplitK)
+    assert "scf.if" in mlir, "a runtime init_cond must lower to a branch:\n" + mlir
+    assert "pto.tgemv.acc" in mlir, mlir
+    assert mlir.count("pto.tgemv") == 2, "expected exactly the initializing and accumulating forms:\n" + mlir
+    # Both arms write the same in-place accumulator, so scf.if carries no result
+    # — the peel this replaces is exactly what needed a phi.
+    assert "= scf.if" not in mlir, (
+        "the accumulator is written in place, so scf.if must not yield a value:\n" + mlir
+    )
+    # acc_phase rides on both arms rather than being dropped by the branch.
+    gemv_lines = [line for line in mlir.splitlines() if "pto.tgemv" in line]
+    assert len(gemv_lines) == 2, mlir
+    assert all("#pto<acc_phase partial>" in line for line in gemv_lines), mlir
+
+
+def test_gemv_non_boolean_init_cond_is_rejected():
+    with pytest.raises(InvalidOperationError, match="init_cond to have dtype BOOL"):
+
+        @pl.program
+        class BadGemvInitCond:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[1, 128], pl.FP32],
+                rhs: pl.Tensor[[128, 64], pl.FP32],
+                idx: pl.Tensor[[1, 64], pl.FP32],
+                output: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+            ) -> pl.Tensor[[1, 64], pl.FP32]:
+                lhs_tile = pl.load(lhs, [0, 0], [1, 128], target_memory=pl.MemorySpace.Mat)
+                rhs_tile = pl.load(rhs, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
+                acc_raw = pl.tile.create([16, 64], pl.FP32, target_memory=pl.MemorySpace.Acc)
+                acc_tile = pl.tile.set_validshape(acc_raw, 1, 64)
+                # An index, not a predicate — must be rejected rather than
+                # silently reinterpreted as a truth value.
+                out_tile = pl.tile.gemv_acc(acc_tile, lhs_tile, rhs_tile, init_cond=pl.read(idx, [0, 0]))
+                return pl.store(out_tile, [0, 0], output)
+
+        _ = BadGemvInitCond
 
 
 if __name__ == "__main__":

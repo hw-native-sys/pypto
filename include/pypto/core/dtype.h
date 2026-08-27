@@ -91,9 +91,9 @@ class DataType {
   // Identifier / handle types: 0x50-0x5F (16 slots reserved).
   // Opaque 64-bit handles to runtime-managed entities. Not numeric — they
   // do not participate in arithmetic or casts. Used for IR Vars whose value
-  // is a runtime identity (e.g. a ``PTO2TaskId`` captured by ``pl.submit``).
+  // is a runtime identity (e.g. a ``TaskId`` captured by ``pl.submit``).
   static constexpr uint8_t kIdentifierRangeStart = 0x50;
-  static constexpr uint8_t kTaskIdCode = 0x50;  // PTO2TaskId — manual_scope dep handle
+  static constexpr uint8_t kTaskIdCode = 0x50;  // TaskId — manual_scope dep handle
   static constexpr uint8_t kIdentifierRangeEnd = 0x5F;
 
   // Static constants for all data types

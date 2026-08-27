@@ -55,6 +55,19 @@ SCOPE_MODE_MAP: dict[str, bool] = {
     "MANUAL": True,
 }
 
+# Maps pl.CachePolicy names to the enum, for the ``pl.set_cache_policy(t, policy)``
+# marker statement. Only the two declared policies exist — the policy is a
+# contract the author states, never something the compiler infers.
+CACHE_POLICY_MAP: dict[str, ir.CachePolicy] = {
+    "DEFAULT": ir.CachePolicy.DEFAULT,
+    "BYPASS": ir.CachePolicy.BYPASS,
+}
+
+# Reverse of CACHE_POLICY_MAP, keyed by the underlying int the IR carries, for
+# naming a policy back to the user in a diagnostic. Derived rather than written
+# out so the two cannot drift.
+CACHE_POLICY_NAMES: dict[int, str] = {int(v): k for k, v in CACHE_POLICY_MAP.items()}
+
 FUNCTION_TYPE_MAP: dict[str, ir.FunctionType] = {
     "Opaque": ir.FunctionType.Opaque,
     "Orchestration": ir.FunctionType.Orchestration,
@@ -113,6 +126,8 @@ __all__ = [
     "LEVEL_MAP",
     "ROLE_MAP",
     "SPLIT_MODE_MAP",
+    "CACHE_POLICY_MAP",
+    "CACHE_POLICY_NAMES",
     "FUNCTION_TYPE_MAP",
     "extract_enum_value",
 ]

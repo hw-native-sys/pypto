@@ -67,7 +67,7 @@ enum class ScopeKind : uint8_t {
   Cluster = 2,     ///< Cluster scope for co-scheduled AIC + AIV groups
   Hierarchy = 3,   ///< Distributed hierarchy scope (uses level_/role_ on ScopeStmt)
   Spmd = 4,        ///< SPMD dispatch scope (core_num/sync_start on ScopeStmt)
-  Runtime = 5,     ///< Runtime orchestration scope (PTO2_SCOPE wrapper, manual on/off)
+  Runtime = 5,     ///< Runtime orchestration scope (SIMPLER_SCOPE wrapper, manual on/off)
   CommDomain = 6,  ///< CommDomain scope (with orch.allocate_domain(...) wrapper)
   SplitAiv = 7     ///< Explicit AIV-split region (pl.split_aiv, nestable in loops/conditionals)
 };
@@ -946,12 +946,12 @@ class SplitAivScopeStmt : public ScopeStmt {
 using SplitAivScopeStmtPtr = std::shared_ptr<const SplitAivScopeStmt>;
 
 /**
- * @brief Runtime orchestration scope: a PTO2_SCOPE wrapper at codegen.
+ * @brief Runtime orchestration scope: a SIMPLER_SCOPE wrapper at codegen.
  *
- * Marks a region wrapped by the simpler runtime's PTO2_SCOPE block. The
+ * Marks a region wrapped by the simpler runtime's SIMPLER_SCOPE block. The
  * ``manual_`` flag picks between two modes:
- *   - manual_ = false → PTO2_SCOPE()                       (auto-dep via TensorMap)
- *   - manual_ = true  → PTO2_SCOPE(PTO2ScopeMode::MANUAL)  (no auto-dep, explicit deps)
+ *   - manual_ = false → SIMPLER_SCOPE()                       (auto-dep via TensorMap)
+ *   - manual_ = true  → SIMPLER_SCOPE(ScopeMode::MANUAL)  (no auto-dep, explicit deps)
  *
  * Inside a manual=true region, the parser writes the ``deps=[tid1, tid2]``
  * list of a ``pl.submit(...)`` call into the typed ``Submit::deps_`` field
@@ -959,14 +959,14 @@ using SplitAivScopeStmtPtr = std::shared_ptr<const SplitAivScopeStmt>;
  * the ``None`` sentinel — or an ``Array[N, TASK_ID]`` from
  * ``pl.array.create(N, pl.TASK_ID)``); plain Calls never carry dep edges
  * (ManualDepsOnSubmitOnly invariant). Codegen packs those edges into a stack
- * ``PTO2TaskId[]`` array and emits a single
+ * ``TaskId[]`` array and emits a single
  * ``params.set_dependencies(arr, count)`` call before the kernel submit
  * (array entries contribute one slot each).
  *
  * The runtime forbids:
  *   - Manual scope nested inside another manual scope
  *   - Auto scope nested inside a manual scope (codegen suppresses the
- *     implicit ``PTO2_SCOPE()`` wrap on ForStmt/IfStmt bodies inside manual)
+ *     implicit ``SIMPLER_SCOPE()`` wrap on ForStmt/IfStmt bodies inside manual)
  */
 class RuntimeScopeStmt : public ScopeStmt {
  public:
@@ -987,7 +987,7 @@ class RuntimeScopeStmt : public ScopeStmt {
   }
 
  public:
-  bool manual_;  ///< true = MANUAL scope; false = AUTO scope (default PTO2_SCOPE())
+  bool manual_;  ///< true = MANUAL scope; false = AUTO scope (default SIMPLER_SCOPE())
 };
 
 using RuntimeScopeStmtPtr = std::shared_ptr<const RuntimeScopeStmt>;

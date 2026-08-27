@@ -105,6 +105,10 @@ std::string IRPropertyToString(IRProperty prop) {
       return "AccToGmStoreValid";
     case IRProperty::AtomicAddDtypeValid:
       return "AtomicAddDtypeValid";
+    case IRProperty::AccCompactValid:
+      return "AccCompactValid";
+    case IRProperty::GraphBoundaryLegalized:
+      return "GraphBoundaryLegalized";
     default:
       return "Unknown";
   }
@@ -156,7 +160,9 @@ const IRPropertySet& GetVerifiedProperties() {
                                    IRProperty::IterArgCarryClassified,
                                    IRProperty::RuntimeScopesMaterialized,
                                    IRProperty::DistTensorCtxMaterialized,
+                                   IRProperty::GraphBoundaryLegalized,
                                    IRProperty::AccToGmStoreValid,
+                                   IRProperty::AccCompactValid,
                                    IRProperty::AtomicAddDtypeValid};
   return props;
 }

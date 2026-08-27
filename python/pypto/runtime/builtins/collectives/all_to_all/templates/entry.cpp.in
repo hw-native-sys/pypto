@@ -13,15 +13,15 @@
 
 #include <cstdint>
 
-#include "pto_orchestration_api.h"
+#include "orchestration_api.h"
 
 namespace {
 
 template <typename DType>
 void submit_all_to_all_kernel(const ChipTaskArgs &orch_args) {
-  const ChipTensor &input = orch_args.tensor(0).ref();
-  const ChipTensor &target = orch_args.tensor(1).ref();
-  const ChipTensor &signal = orch_args.tensor(2).ref();
+  const TaskTensor &input = orch_args.tensor(0).ref();
+  const TaskTensor &target = orch_args.tensor(1).ref();
+  const TaskTensor &signal = orch_args.tensor(2).ref();
 
   CoreTaskArgs params;
   params.add_input(input);
@@ -36,10 +36,10 @@ void submit_all_to_all_kernel(const ChipTaskArgs &orch_args) {
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(
+__attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_config(
     const ChipTaskArgs &orch_args) {
   (void)orch_args;
-  return PTO2OrchestrationConfig{
+  return OrchestrationConfig{
       .expected_arg_count = 5,
   };
 }

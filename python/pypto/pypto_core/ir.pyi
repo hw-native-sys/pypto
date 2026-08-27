@@ -381,6 +381,24 @@ class PadValue(enum.Enum):
     min = ...
     """Min value padding."""
 
+class CachePolicy(enum.IntEnum):
+    """GM cache-access policy declared for a tensor read.
+
+    A semantic contract the author states, never a hint the compiler invents.
+    Stored as ``int`` in the ``tile.load`` ``cache`` kwarg.
+    """
+
+    DEFAULT = 0
+    """Ordinary cached GM access."""
+
+    BYPASS = 1
+    """Streaming access declared to bypass the cache.
+
+    Asserts this tensor has no reuse worth caching and that nothing writes
+    those bytes while the kernel runs — mixing a cached write and a bypassing
+    read of the same bytes is a coherency bug.
+    """
+
 class CompactMode(enum.Enum):
     """Partial-tile compact mode enumeration."""
 
@@ -2274,7 +2292,7 @@ class ScopeKind(enum.Enum):
     """SPMD dispatch scope (core_num/sync_start on ScopeStmt)."""
 
     Runtime = 5
-    """Runtime orchestration scope (PTO2_SCOPE wrapper, manual on/off)."""
+    """Runtime orchestration scope (SIMPLER_SCOPE wrapper, manual on/off)."""
 
     CommDomain = 6
     """Comm-domain scope (with orch.allocate_domain(...) wrapper for host_orch
@@ -2468,11 +2486,11 @@ class SplitAivScopeStmt(ScopeStmt):
     ) -> None: ...
 
 class RuntimeScopeStmt(ScopeStmt):
-    """Runtime orchestration scope: a PTO2_SCOPE wrapper at codegen.
+    """Runtime orchestration scope: a SIMPLER_SCOPE wrapper at codegen.
 
     The ``manual`` flag picks between two emission modes:
-      - ``manual=False`` → ``PTO2_SCOPE() { ... }`` (auto-dep via TensorMap)
-      - ``manual=True``  → ``PTO2_SCOPE(PTO2ScopeMode::MANUAL) { ... }``
+      - ``manual=False`` → ``SIMPLER_SCOPE() { ... }`` (auto-dep via TensorMap)
+      - ``manual=True``  → ``SIMPLER_SCOPE(ScopeMode::MANUAL) { ... }``
         (no auto-dep; compiler emits explicit ``add_dep`` from SSA data flow
         plus user-supplied ``deps=[...]`` on each kernel call)
     """
@@ -3123,6 +3141,21 @@ def is_incore_type(func_type: FunctionType) -> bool:
 
     Returns:
         True if the type is InCore, AIC, or AIV
+    """
+
+def is_orchestration_like(func_type: FunctionType) -> bool:
+    """Check if a FunctionType has an orchestration body (Orchestration or Graph).
+
+    Both are host/AICPU task-orchestration code, so a caller that acts on a
+    function *because it orchestrates tasks* must accept either. Prefer this
+    over ``func_type == FunctionType.Orchestration``, which silently skips
+    Graph bodies.
+
+    Args:
+        func_type: The function type to check
+
+    Returns:
+        True if the type is Orchestration or Graph
     """
 
 def level_to_linqu_level(level: Level) -> int:

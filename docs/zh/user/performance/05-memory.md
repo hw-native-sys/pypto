@@ -171,11 +171,56 @@ def scaled(a: pl.Tensor, out: pl.Out[pl.Tensor]):
 check(scaled, sized)
 ```
 
-字段留空（默认 `None`）会回落到运行时的 `PTO2_RING_*` 环境变量或它的编译期默认值，所以你也可以不改源码来做实验。
+字段留空（默认 `None`）会回落到运行时的编译期默认值。进程级的 `PTO2_RING_*` 环境变量已经退役、不再被读取，因此 `RunConfig` 是给环设尺寸的唯一途径。
 
-**代价：** 内存，而且算术是按环算的 —— 你以为「就整体大一点」的那个标量，会被应用四次。给环加尺寸也是**第二顺位**的修法：一个因为某个作用域里塞了上千个任务而溢出的任务窗口，拆成两个作用域比把它撑大更好。运行时失败时自己就是这么说的 —— *「raise `ring_task_window`（`PTO2_RING_TASK_WINDOW`）or split the scope」*。
+**代价：** 内存，而且算术是按环算的 —— 你以为「就整体大一点」的那个标量，会被应用四次。给环加尺寸也是**第二顺位**的修法：一个因为某个作用域里塞了上千个任务而溢出的任务窗口，拆成两个作用域比把它撑大更好。运行时失败时自己就是这么说的 —— *「raise `ring_task_window`（`runtime_env.ring_task_window`）or split the scope」*。
 
 **怎么确认：** 新一份 `scope_stats.jsonl` 的元数据行显示新尺寸，而原来顶在容量上的那个峰值不再顶着。
+
+## 让流式操作数绕过缓存
+
+并不是内核读到的每个缓冲区都值得占用缓存。一个每个字节只被读一次的权重矩阵不可能命中缓存，
+却仍会冲刷末级缓存（last-level cache），把真正会被重复读取的那一小块激活工作集挤出去。
+两个操作数、一个缓存、相反的诉求。
+
+编译器无法区分它们 —— 复用（reuse）对它并不可靠可见，而猜错的代价是几个百分点的性能悄悄
+劣化，而不是一个报错。所以由你来声明：
+
+```python
+with pl.at(level=pl.Level.CORE_GROUP):
+    pl.set_cache_policy(weights, pl.CachePolicy.BYPASS)
+    # 本作用域内对 `weights` 的每次读取都被声明为流式；
+    # 激活值仍走默认的带缓存路径。
+    acc = pl.matmul(activations, weights, out_dtype=pl.FP32)
+```
+
+`pl.set_cache_policy` 是写在 `pl.at(level=pl.Level.CORE_GROUP, ...)` 或
+`pl.spmd(...)` 作用域体**顶层**的独立语句 —— 位于该 body 自身的语句之中即可，不必是第一行。
+它覆盖该作用域内对这个张量的每一次读取，因此张量层代码在访问点上无需任何改动 —— 这一点很
+关键，因为那些读取是隐式的：`pl.matmul`、`pl.assemble` 和下标切片都会发出 load，却没有可供
+标注的调用点。
+
+写在非 `CORE_GROUP` 的 `pl.at` 作用域上的声明可以解析并被携带，但目前没有任何环节会把它下降
+到 load，因此不产生效果 —— 那些作用域不会变成设备侧 kernel。
+
+当你写的是 tile 层代码、已经显式写出了 load 时，就标在那里：
+
+```python
+tile = pl.load(weights, [n0, k0], [256, 512], cache=pl.CachePolicy.BYPASS)
+```
+
+load 上显式的 `cache=` 永远优先于作用域声明，两个方向都成立 —— 所以在一个整体绕过缓存的
+作用域里，`cache=pl.CachePolicy.DEFAULT` 可以把某一次访问单独放回缓存路径。
+
+**代价：** 正确性由你保证。`BYPASS` 断言了两件事：这个张量没有值得缓存的复用，**并且**内核
+运行期间没有任何一方写这些字节。对同一段字节混用带缓存的写和绕过缓存的读是一致性
+（coherency）缺陷 —— 这正是它绝不作为默认、也绝不由编译器推断的原因。编译器会拒绝它能看见的
+那种情况（在作用域会写入的张量上声明 `BYPASS` 是错误），但无法证明一般情形。
+
+**当前状态：** 工具链尚无 bypass 通路
+（[PTOAS#1356](https://github.com/hw-native-sys/PTOAS/issues/1356)）。`BYPASS` 声明会被接受
+并向下传递，在编译期给出告警，生成的代码与普通带缓存读取完全一致。现在就写上不会有任何代价，
+等该 issue 落地后即可自动生效。
 
 ## 参见
 

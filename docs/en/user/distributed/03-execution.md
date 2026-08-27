@@ -35,6 +35,8 @@ directly via `DistributedWorker(compiled)`, importable from
 | `rt.alloc_stacked_tensor(host_w)` | Shard host_w along dim 0 — shard `i` uploaded to card `i`. Returns `StackedDeviceTensor`. |
 | `rt.free_stacked_tensor(stacked)` | Release all shards of a `StackedDeviceTensor`. |
 | `rt.copy_stacked_from(stacked, host_out)` | Staged D2H read-back of every shard into a CPU-contiguous `host_out`; it may be allocated after `prepare()`. |
+| `rt.committed_device_memory(worker_id=0)` | Device HBM (bytes) this worker's own allocator has committed on card `worker_id` — tensors, pooled arenas, runtime buffers. Sum across ids for a multi-chip total. |
+| `rt.device_memory_info(worker_id=0)` | `(free_bytes, total_bytes)` for the whole card `worker_id` runs on, as the driver sees it. Use this to size an allocation; anything else on the card moves `free_bytes` without moving the committed total. Raises on simulator backends rather than reporting zeros. |
 | `rt.release_inherited_host_tensor_refs()` | Drop compatibility lifetime references retained in the parent process. |
 | `rt.close()` | Release buffers, shut down chip workers. Called automatically as context manager. |
 

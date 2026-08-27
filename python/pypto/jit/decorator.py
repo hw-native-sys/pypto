@@ -78,6 +78,7 @@ from .specializer import (
     _collect_annotation_dynamic_dims,
     _collect_dynvar_names,
     build_specialize_context,
+    func_name_lookup,
 )
 
 # ---------------------------------------------------------------------------
@@ -185,6 +186,46 @@ def _is_tensor(obj: Any) -> bool:
     return isinstance(obj, torch.Tensor)
 
 
+# Prefix for the dynamic symbols ``@pl.jit`` invents when a local tensor's
+# extent is only known at runtime. Reserved: user DSL code must not declare
+# ``pl.dynamic()`` symbols starting with it.
+_SYNTHESIZED_DYN_PREFIX = "_jitdyn_"
+
+
+def _synthesized_dyn_dim(owner: str, base: str, dim_idx: int) -> DynDim:
+    """Build the placeholder ``DynDim`` for an extent only known at runtime.
+
+    A local tensor sized by a runtime expression — ``pld.world_size()``,
+    ``pl.tensor.read(cfg, [0])``, arithmetic over a ``DynDim`` — has no static
+    extent to record. Rather than dropping the whole meta (which surfaces as
+    ``_build_params``' "missing inferred tensor metadata" the moment the local
+    crosses a dep call boundary), stamp a fresh symbol on that dim. The
+    generated program then declares it via ``pl.dynamic`` and the kernel binds
+    it from the actual argument's descriptor, exactly as a hand-written
+    ``@pl.program`` would.
+
+    The symbol is qualified by the function that owns the local. Two functions
+    each holding a runtime-sized local named ``tmp`` would otherwise land on one
+    name for unrelated extents. That is not *wrong* — a dynamic symbol carries no
+    cross-function equality constraint, and each function emits its own
+    "read dim k of the declaring argument" binding — but one name on two
+    unrelated tensors makes a dumped program much harder to read.
+
+    Args:
+        owner: Name of the function whose body declares the local
+        base: Name of the local the meta describes, for a readable symbol
+        dim_idx: Index of the unresolved dim within that local's shape
+
+    Returns:
+        A ``synthesized=True`` DynDim named ``_jitdyn_<owner>_<base>_d<dim_idx>``
+    """
+    name = f"{_SYNTHESIZED_DYN_PREFIX}{owner}_{base}_d{dim_idx}"
+    # ``static_bound=1`` matches the placeholder extent ``_signature_tensor_meta``
+    # uses for annotation-declared dynamic dims: the specialized program is
+    # extent-independent, so no concrete value is available or needed here.
+    return DynDim(name=name, literal=name, static_bound=1, synthesized=True)
+
+
 def _build_tensor_meta(
     extents: Sequence[int],
     dtype: DataType,
@@ -247,7 +288,7 @@ def _resolve_annotation(annotation: Any, ann_ns: dict[str, Any] | None) -> Any:
     """Resolve one parameter annotation, evaluating the string form if needed.
 
     ``from __future__ import annotations`` in the *user's* module leaves every
-    annotation as a string; ``ann_ns`` (from ``_func_name_lookup``) is the
+    annotation as a string; ``ann_ns`` (from ``func_name_lookup``) is the
     namespace to evaluate it in.
 
     Args:
@@ -271,7 +312,7 @@ def _resolve_annotation(annotation: Any, ann_ns: dict[str, Any] | None) -> Any:
 def _annotation_namespace(func: Any, sig: inspect.Signature) -> dict[str, Any] | None:
     """Namespace for resolving ``func``'s string annotations, or None if unneeded."""
     if any(isinstance(p.annotation, str) for n, p in sig.parameters.items() if n != "self"):
-        return _func_name_lookup(func)
+        return func_name_lookup(func)
     return None
 
 
@@ -641,27 +682,6 @@ def _build_dynvar_anchor_index(
     return anchors
 
 
-def _func_name_lookup(func: Any) -> dict[str, Any]:
-    """Return ``func.__globals__`` merged with closure free-var bindings.
-
-    A function defined inside a test method (or any other enclosing scope)
-    captures module-level helpers (``HIDDEN``, ``ROWS``, ...) as closure free
-    vars, not as globals — both namespaces have to be inspected for static
-    shape-element resolution to find them. Closure bindings override globals,
-    matching Python's own name-resolution order at the function's call site.
-    """
-    out: dict[str, Any] = dict(getattr(func, "__globals__", {}))
-    co_freevars = getattr(getattr(func, "__code__", None), "co_freevars", ())
-    closure = getattr(func, "__closure__", None) or ()
-    for fv_name, cell in zip(co_freevars, closure, strict=True):
-        try:
-            out[fv_name] = cell.cell_contents
-        except ValueError:
-            # Unbound closure cell — skip silently (matches _discover_deps).
-            pass
-    return out
-
-
 def _scan_dep_io(
     func: Any, caller_func_type: str = "orchestration"
 ) -> dict[str, tuple[list[str], list[str]]]:
@@ -858,14 +878,15 @@ def _update_local_tensor_meta(
     dim_aliases: dict[str, tuple[str, int]],
     dep_io: dict[str, tuple[list[str], list[str]]],
     resolve_int: Callable[[ast.expr], int | None],
-    pl_attr_handlers: dict[str, Callable[[ast.Call], TensorMeta | None]],
+    pl_attr_handlers: dict[str, Callable[[ast.Call, str | None], TensorMeta | None]],
 ) -> None:
     """Apply one assignment's metadata effects to the source-ordered state."""
     parts = _assignment_parts(stmt)
     if parts is None:
         return
     targets, value = parts
-    has_named_target = any(isinstance(target, ast.Name) for target in targets)
+    named_target = next((t.id for t in targets if isinstance(t, ast.Name)), None)
+    has_named_target = named_target is not None
     meta: TensorMeta | None = None
     preserve_existing = False
     dep_target_metas: list[dict[str, TensorMeta]] = [{} for _ in targets]
@@ -882,7 +903,9 @@ def _update_local_tensor_meta(
         if isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Name) and has_named_target:
             handler = pl_attr_handlers.get(fn.attr)
             if handler is not None:
-                meta = handler(value)
+                # The target name seeds any dynamic symbol the handler has to
+                # synthesize for a runtime-sized extent.
+                meta = handler(value, named_target)
             else:
                 # Keep the pre-existing behavior for pl operations whose
                 # result metadata this extractor does not model (for example,
@@ -925,7 +948,7 @@ def _walk_local_tensor_meta_stmts(
     dim_aliases: dict[str, tuple[str, int]],
     dep_io: dict[str, tuple[list[str], list[str]]],
     resolve_int: Callable[[ast.expr], int | None],
-    pl_attr_handlers: dict[str, Callable[[ast.Call], TensorMeta | None]],
+    pl_attr_handlers: dict[str, Callable[[ast.Call, str | None], TensorMeta | None]],
 ) -> bool:
     """Walk supported DSL scopes in source order until the selected call."""
     for stmt in stmts:
@@ -990,9 +1013,15 @@ def _extract_local_tensor_metas(
     parameter, a dep call passing a parameter through, or a local
     ``pl.create_tensor`` sized off a dynamic dim of a parameter all resolve;
     ``seed_scalars`` lets compile-time-specialized scalar parameters appear
-    as shape dimensions. Anything not statically resolvable is skipped
-    silently — the clear ``ValueError`` in ``Specializer._build_params`` then
-    fires for that variable. When ``stop_at_dep`` is provided, extraction stops
+    as shape dimensions.
+
+    A ``pl.create_tensor`` / ``pld.window`` dim that no static rule resolves —
+    a runtime extent such as ``pld.world_size()``, ``pl.tensor.read(cfg, [0])``,
+    or arithmetic over a ``DynDim`` — becomes a synthesized ``DynDim`` (see
+    :func:`_synthesized_dyn_dim`) rather than voiding the whole meta. Everything
+    else not statically resolvable is still skipped silently, and the clear
+    ``ValueError`` in ``Specializer._build_params`` fires for that variable.
+    When ``stop_at_dep`` is provided, extraction stops
     immediately before the first source-ordered call to that dependency. This
     produces the point-in-time metadata visible to that call and ignores later
     rebindings.
@@ -1000,7 +1029,7 @@ def _extract_local_tensor_metas(
     func_def = _get_func_def(func)
     local: dict[str, TensorMeta] = dict(seed_meta or {})
     dtype_map = _get_pl_dtype_map()
-    func_globals = _func_name_lookup(func)
+    func_globals = func_name_lookup(func)
     scalars: dict[str, int | float | bool] = seed_scalars or {}
     dim_aliases: dict[str, tuple[str, int]] = {}
     dynvar_anchors = _build_dynvar_anchor_index(seed_meta or {})
@@ -1070,14 +1099,23 @@ def _extract_local_tensor_metas(
         v = _resolve_shape_elt(elt)
         return v if isinstance(v, int) else None
 
-    def _resolve_shape(node: ast.expr | None) -> tuple[ShapeDim, ...] | None:
+    def _resolve_shape(node: ast.expr | None, dyn_base: str | None = None) -> tuple[ShapeDim, ...] | None:
+        """Resolve a shape literal, optionally synthesizing runtime-only dims.
+
+        ``dyn_base`` is the name of the local being assigned. When given, a dim
+        that no static rule resolves becomes a synthesized ``DynDim`` instead of
+        failing the whole shape (see :func:`_synthesized_dyn_dim`). Callers that
+        pass ``None`` keep the strict all-or-nothing behaviour.
+        """
         if not isinstance(node, ast.List):
             return None
         dims: list[ShapeDim] = []
-        for elt in node.elts:
+        for i, elt in enumerate(node.elts):
             v = _resolve_shape_elt(elt)
             if v is None:
-                return None
+                if dyn_base is None:
+                    return None
+                v = _synthesized_dyn_dim(func_def.name, dyn_base, i)
             dims.append(v)
         return tuple(dims)
 
@@ -1091,26 +1129,31 @@ def _extract_local_tensor_metas(
                 return dtype_map.get(kw.value.attr)
         return None
 
-    def _create_tensor_meta(call: ast.Call) -> TensorMeta | None:
-        shape = _resolve_shape(call.args[0]) if call.args else None
+    def _create_tensor_meta(call: ast.Call, target: str | None = None) -> TensorMeta | None:
+        # A runtime-sized extent (``pl.create_tensor([n, 128], ...)`` where ``n``
+        # is read from a tensor) synthesizes a dynamic dim rather than dropping
+        # the meta -- the allocation itself is runtime-sized either way.
+        shape = _resolve_shape(call.args[0], target) if call.args else None
         dtype_val = _dtype_from_kw(call)
         if shape is None or dtype_val is None:
             return None
         return TensorMeta(shape=shape, dtype=dtype_val)
 
-    def _window_meta(call: ast.Call) -> TensorMeta | None:
+    def _window_meta(call: ast.Call, target: str | None = None) -> TensorMeta | None:
         # pld.window(buffer, [shape], dtype=pl.XXX) — a distributed window view
         # over a window buffer. Shape is the 2nd positional arg; dtype is the
         # ``dtype=`` keyword (same spelling as create_tensor). Lets a host
         # orchestrator's per-rank window locals propagate their meta into the
         # ``pld.DistributedTensor`` parameters of the chip orchestrator it calls.
-        shape = _resolve_shape(call.args[1]) if len(call.args) >= 2 else None
+        # A runtime-sized dim (``[pld.world_size(), 1]``) synthesizes a dynamic
+        # dim, the same way create_tensor does.
+        shape = _resolve_shape(call.args[1], target) if len(call.args) >= 2 else None
         dtype_val = _dtype_from_kw(call)
         if shape is None or dtype_val is None:
             return None
         return TensorMeta(shape=shape, dtype=dtype_val)
 
-    def _reshape_meta(call: ast.Call) -> TensorMeta | None:
+    def _reshape_meta(call: ast.Call, target: str | None = None) -> TensorMeta | None:
         # pl.reshape(input, shape) — dtype inherited from source tensor.
         src = (
             call.args[0] if call.args else next((kw.value for kw in call.keywords if kw.arg == "input"), None)
@@ -1125,6 +1168,10 @@ def _extract_local_tensor_metas(
         )
         if shape_node is None:
             return None
+        # Strict on purpose (no ``target``): a reshape's dims are constrained by
+        # the source's element count, which a freshly invented symbol cannot
+        # express. ``pl.slice`` below is strict for the mirror reason — it
+        # already has a better answer, the parent dim's static bound.
         shape = _resolve_shape(shape_node)
         if shape is None:
             return None
@@ -1136,7 +1183,7 @@ def _extract_local_tensor_metas(
             return None
         return TensorMeta(shape=shape, dtype=src_meta.dtype)
 
-    def _slice_meta(call: ast.Call) -> TensorMeta | None:
+    def _slice_meta(call: ast.Call, target: str | None = None) -> TensorMeta | None:
         # pl.slice(tensor, shape, offset, ...) — shape is positional index 1 or kw `shape=`.
         src = call.args[0] if call.args else None
         if not isinstance(src, ast.Name) or src.id not in local:
@@ -1366,10 +1413,33 @@ def _resolve_dep_call_metadata(
         dep_scalar_values = {n: caller_scalar_values[n] for n in dep_param_names if n in caller_scalar_values}
         dep_scalar_dtypes = {n: caller_scalar_dtypes[n] for n in dep_param_names if n in caller_scalar_dtypes}
 
-    # Overlay DynDim from the dep's own declarations (pre-computed in
-    # _compute_per_func_dyndim_maps). Dims already carrying a DynDim from
-    # the caller take precedence; we only fill plain int dims and pin
-    # ``static_bound`` to the meta's current extent so cache keys stay coherent.
+    _overlay_dep_declared_dyn_dims(dep_dyn_map, dep_tensor_meta)
+    _overlay_dep_declared_layouts(dep, dep_tensor_meta)
+
+    return dep_tensor_meta, dep_scalar_values, dep_scalar_dtypes
+
+
+def _overlay_dep_declared_dyn_dims(
+    dep_dyn_map: dict[str, dict[int, DynDim]], dep_tensor_meta: dict[str, TensorMeta]
+) -> None:
+    """Stamp the DynDims a dep declares itself onto its parameter metas, in place.
+
+    ``dep_dyn_map`` is pre-computed by ``_compute_per_func_dyndim_maps``. A
+    DynDim the caller actually derived takes precedence — its symbol is the one
+    bound at the call site — so only plain int dims and synthesized placeholders
+    are overwritten. The replacement keeps whatever ``static_bound`` the dim
+    already carried (the int extent, or a placeholder's ``1``) so cache keys stay
+    coherent.
+
+    Replacing a placeholder matters beyond naming: the dep's body may reference
+    its declared symbol (``for i in pl.range(NR)``). Keeping the invented name
+    on the parameter would leave that reference unbound in the generated
+    program, so the declaration wins whenever we only had a placeholder.
+
+    Args:
+        dep_dyn_map: Per-parameter ``dim_idx -> DynDim`` the dep declares
+        dep_tensor_meta: Per-parameter meta to update in place
+    """
     for dep_param, dim_to_dyn in dep_dyn_map.items():
         meta = dep_tensor_meta.get(dep_param)
         if meta is None:
@@ -1377,20 +1447,18 @@ def _resolve_dep_call_metadata(
         new_shape: list[ShapeDim] = list(meta.shape)
         changed = False
         for i, dyn in dim_to_dyn.items():
-            if i >= len(new_shape) or isinstance(new_shape[i], DynDim):
+            if i >= len(new_shape):
                 continue
             existing = new_shape[i]
-            assert isinstance(existing, int)
-            new_shape[i] = DynDim(name=dyn.name, literal=dyn.literal, static_bound=existing)
+            if isinstance(existing, DynDim) and not existing.synthesized:
+                continue
+            static_bound = existing.static_bound if isinstance(existing, DynDim) else existing
+            new_shape[i] = DynDim(name=dyn.name, literal=dyn.literal, static_bound=static_bound)
             changed = True
         if changed:
             dep_tensor_meta[dep_param] = TensorMeta(
                 shape=tuple(new_shape), dtype=meta.dtype, layout=meta.layout
             )
-
-    _overlay_dep_declared_layouts(dep, dep_tensor_meta)
-
-    return dep_tensor_meta, dep_scalar_values, dep_scalar_dtypes
 
 
 def _overlay_dep_declared_layouts(dep: JITFunction, dep_tensor_meta: dict[str, TensorMeta]) -> None:
@@ -1547,7 +1615,7 @@ class JITFunction:
             per-rank.
         _level: pl.Level or None.
         _auto_scope: Whether the compiler auto-inserts AUTO runtime scopes
-            (PTO2_SCOPE) around the body and each for/if body. ``True`` by
+            (SIMPLER_SCOPE) around the body and each for/if body. ``True`` by
             default; set ``False`` via ``@pl.jit(auto_scope=False)`` /
             ``@pl.jit.host(auto_scope=False)`` to place scopes by hand with
             ``with pl.scope()``. Also accepted on
@@ -1651,6 +1719,45 @@ class JITFunction:
                 )
             )
         return self._dep_layouts
+
+    def _folded_closure_constants(self) -> tuple[tuple[str, str, str], ...]:
+        """Closure constants that fold into the generated source, for the cache key.
+
+        The body transformer inlines a free ``int`` / ``float`` / ``bool`` as a
+        literal, so its value is baked into the artifact — but it lives in
+        ``__closure__``, not in the function text. Rebinding the cell
+        (``nonlocal rows``) therefore leaves ``source_hash`` identical, and
+        without this component the next call would be handed the previous
+        value's artifact. Same shape of problem as ``_dep_declared_layouts``.
+
+        Deliberately **not** memoized, unlike ``_dep_declared_layouts`` and
+        ``_get_source_hash``: a closure cell can be rebound over this
+        ``JITFunction``'s lifetime, which is exactly the case this guards.
+
+        Every foldable free variable is reported, not only those the body
+        actually references. That is a superset, so it can split the cache more
+        finely than strictly required — the safe direction — and it avoids
+        re-deriving which names survive folding.
+
+        Returns:
+            Sorted ``(function name, free variable, repr of value)`` triples
+        """
+        collected: list[tuple[str, str, str]] = []
+        for func_obj in (self._func, *(dep._func for dep in self._get_deps())):
+            func_name = getattr(func_obj, "__name__", "<unknown>")
+            co_freevars = getattr(getattr(func_obj, "__code__", None), "co_freevars", ())
+            closure = getattr(func_obj, "__closure__", None) or ()
+            for fv_name, cell in zip(co_freevars, closure, strict=True):
+                try:
+                    value = cell.cell_contents
+                except ValueError:
+                    # Unbound cell — nothing folds, so nothing to key on.
+                    continue
+                # Mirror the folder's own test so the key covers exactly what
+                # gets inlined (see _BodyTransformer.visit_Name).
+                if isinstance(value, (int, float, bool)) and not isinstance(value, type):
+                    collected.append((func_name, fv_name, repr(value)))
+        return tuple(sorted(collected))
 
     def _get_dep_graph(
         self,
@@ -1904,7 +2011,7 @@ class JITFunction:
         # ``Tensor`` / ``Scalar`` instance annotations on Python 3.10.
         ann_ns: dict[str, Any] | None = None
         if any(isinstance(p.annotation, str) for n, p in sig.parameters.items() if n != "self"):
-            ann_ns = _func_name_lookup(self._func)
+            ann_ns = func_name_lookup(self._func)
 
         deps, callers_by_id, _, call_args_cache = self._get_dep_graph()
         per_func_dyn_maps = _compute_per_func_dyndim_maps(
@@ -2095,6 +2202,7 @@ class JITFunction:
             tensor_dtypes={n: m.dtype for n, m in specialization.tensor_meta.items()},
             tensor_layouts={n: m.layout for n, m in specialization.tensor_meta.items()},
             dep_layouts=self._dep_declared_layouts(),
+            closure_constants=self._folded_closure_constants(),
             dynamic_dims={
                 (n, i) for n, m in specialization.tensor_meta.items() for i in m.dynamic_dim_indices()
             },

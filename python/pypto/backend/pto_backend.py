@@ -12,7 +12,7 @@
 Orchestrates the full PTO backend output pipeline:
 
 - **Kernel files**: InCore functions go through C++ PTOCodegen (IR → MLIR) → ptoas → kernel wrapper
-- **Orchestration**: Shared C++ orchestration codegen (PTO2 runtime API)
+- **Orchestration**: Shared C++ orchestration codegen (simpler runtime API)
 - **Config**: Generates kernel_config.py with runtime/orchestration/kernel metadata
 
 Entry point: ``generate(program, output_dir) -> dict[str, str]``
@@ -272,8 +272,8 @@ _DEFERRED_COMPLETION_ADAPTER = """\
 //
 // Provenance: every construct below except the address arithmetic and the
 // `expected` range check is runtime policy owned by
-// `runtime/src/{arch}/runtime/{rt}/runtime/pto_async_kernel_api.h` and its
-// siblings — AsyncCtx decoding, the slab-validity predicate, the PTO2_ERROR_*
+// `runtime/src/{arch}/runtime/{rt}/runtime/async_kernel_api.h` and its
+// siblings — AsyncCtx decoding, the slab-validity predicate, the SIMPLER_ERROR_*
 // codes, and the flush discipline. That header's public surface is
 // get_async_ctx / async_ctx_is_deferred / register_completion_condition /
 // send_notification / save_expected_notification_counter; the `pto2::detail`
@@ -305,7 +305,7 @@ static __aicore__ void pypto_register_counter_completion(
         // only this local AsyncCtx copy valid after recording the error.
         if (ctx.completion_count != nullptr && ctx.completion_error_code != nullptr) {
             *ctx.completion_count = 0;
-            *ctx.completion_error_code = PTO2_ERROR_ASYNC_COMPLETION_INVALID;
+            *ctx.completion_error_code = SIMPLER_ERROR_ASYNC_COMPLETION_INVALID;
             ctx.task_token.raw = 0;
             pto2::detail::defer_flush(ctx);
             return;
@@ -330,7 +330,7 @@ static __aicore__ void pypto_register_counter_completion(
         // to notify the scheduler, so fail the kernel immediately.
         if (ctx.completion_count != nullptr && ctx.completion_error_code != nullptr) {
             *ctx.completion_count = 0;
-            *ctx.completion_error_code = PTO2_ERROR_ASYNC_COMPLETION_INVALID;
+            *ctx.completion_error_code = SIMPLER_ERROR_ASYNC_COMPLETION_INVALID;
             pto2::detail::defer_flush(ctx);
             return;
         }
@@ -343,7 +343,7 @@ static __aicore__ void pypto_register_counter_completion(
 
     constexpr int64_t kMaxExpected = 0x7fffffffLL;
     if (counter_base == nullptr || element_offset < 0 || expected < 0 || expected > kMaxExpected) {
-        pto2::detail::defer_error(ctx, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
+        pto2::detail::defer_error(ctx, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
         pto2::detail::defer_flush(ctx);
         return;
     }
@@ -353,7 +353,7 @@ static __aicore__ void pypto_register_counter_completion(
     const uint64_t base = reinterpret_cast<uint64_t>(counter_base);
     const uint64_t offset = static_cast<uint64_t>(element_offset);
     if ((base & (kElementBytes - 1u)) != 0u || offset > (kMaxAddress - base) / kElementBytes) {
-        pto2::detail::defer_error(ctx, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
+        pto2::detail::defer_error(ctx, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
         pto2::detail::defer_flush(ctx);
         return;
     }
@@ -375,11 +375,11 @@ static __aicore__ void pypto_register_counter_completion(
 
 _DEFERRED_COMPLETION_INCLUDE = """\
 #if defined(__has_include)
-#if !__has_include("pto_async_kernel_api.h")
-#error "pld.system.defer_wait requires a Simpler runtime that provides pto_async_kernel_api.h"
+#if !__has_include("async_kernel_api.h")
+#error "pld.system.defer_wait requires a Simpler runtime that provides async_kernel_api.h"
 #endif
 #endif
-#include "pto_async_kernel_api.h"
+#include "async_kernel_api.h"
 """
 
 
@@ -577,7 +577,7 @@ def _generate_arg_unpacking(func: _ir_core.Function, *, uses_spmd: bool = False)
         c_type = param.type.dtype.to_c_type_string()
         lines.append(f"    // Unpack tensor: {param_name}")
         lines.append(
-            f"    __gm__ ChipTensor* {param_name}_tensor = reinterpret_cast<__gm__ ChipTensor*>(args[{i}]);"
+            f"    __gm__ TaskTensor* {param_name}_tensor = reinterpret_cast<__gm__ TaskTensor*>(args[{i}]);"
         )
         if param_name == "__gm_pipe_buffer" and uses_spmd:
             lines.append("    // SPMD: shard GM pipe workspace by logical block_idx to avoid overlap.")
@@ -1776,12 +1776,17 @@ def _collect_chip_task_functions(
     scopes), preventing redundant compilation and cross-orchestration name
     collisions in ``next_levels/{orch}/`` artifacts.
     """
+    # A Graph fragment belongs to the chip sub-program like any other callee.
+    # Omitting it here does not merely skip the fragment: the walk stops at it,
+    # so every kernel reachable *only* through it disappears from the
+    # sub-program too, and orchestration codegen then fails looking them up.
     chip_func_types = (
         _ir_core.FunctionType.InCore,
         _ir_core.FunctionType.AIC,
         _ir_core.FunctionType.AIV,
         _ir_core.FunctionType.Group,
         _ir_core.FunctionType.Spmd,
+        _ir_core.FunctionType.Graph,
     )
 
     result: list[_ir_core.Function] = [orch_func]

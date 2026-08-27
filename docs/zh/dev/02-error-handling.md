@@ -316,7 +316,7 @@ Pass 处理的 IR 已被早期 pass 验证过。Pass 中的失败不变式因此
 | `As<T>()` 向下转型的结果 | `INTERNAL_CHECK_SPAN` | 操作数类型在类型推导阶段已确定,并由验证器复查 |
 | Codegen 内部簿记(SSA 名字、偏移映射) | `INTERNAL_CHECK` | 由 codegen 自身填充,用户无法触及 |
 | 不支持的 dtype x 后端组合、不支持的特性组合 | `CHECK_SPAN` | dtype 和后端由用户选择,消息应给出解决办法 |
-| 用户传入的 kwarg 取值(如 `tensor.create` 的 `init_value`) | `CHECK_SPAN` | 没有上游 pass 对其加以约束 |
+| 用户传入的 kwarg 取值(如 `tensor.assemble` 的 `atomic`) | `CHECK_SPAN` | 没有上游 pass 对其加以约束 |
 
 上表是策略,而非对当前代码树的描述:参数个数的清理已经完成,但这两个目录中仍有约 34 处
 post-`As<T>()` 检查是 `CHECK`。该清理需要逐点判断 —— 其中若干紧邻断言 `ValueError` 的测试 ——
