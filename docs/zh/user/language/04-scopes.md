@@ -360,4 +360,4 @@ pl.system.sync_wait(0, pipe=pl.PipeType.MTE2, core_type=pl.KernelType.AIC)    # 
 - [内存与数据搬运](03-memory.md) —— 被放置的代码拿缓冲区做什么。
 - [任务与定序](../tasks/index.md) —— 被放置的工作相对其他任务什么时候跑。
 - [OutlineIncoreScopes](../../dev/passes/08-outline_incore_scopes.md) —— `pl.at` 如何变成函数。
-- [ExpandMixedKernel](../../dev/passes/21-expand_mixed_kernel.md) —— `pl.split` 驱动的是什么。
+- [ExpandMixedKernel](../../dev/passes/22-expand_mixed_kernel.md) —— `pl.split` 驱动的是什么。

@@ -37,6 +37,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"  // CHECK_SPAN / INTERNAL_CHECK; transitively pulls in error.h
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -57,25 +58,30 @@ namespace ir {
 
 namespace {
 
-/// Reject an NZ view carried by a tensor-like type.
+/// Assert that an NZ view has already been rewritten into its blocked form.
 ///
-/// NZ is a fractal, tile-only layout with no logical-stride representation, so
-/// a TensorType / DistributedTensorType carrying it is invalid IR — the same
-/// judgement ``tensor.view``, ``CheckCanonicalView`` and the
-/// ``TensorViewCanonical`` verifier all make. Rejecting it here rather than
-/// passing it through keeps the pass honest about the ``TensorViewCanonical``
-/// property it declares as produced: delegating the rejection to the verifier
-/// means the malformed slot survives whenever verification is disabled
-/// (``PYPTO_VERIFY_LEVEL=none``), only to resurface much later as an opaque
-/// backend layout mismatch.
+/// ``BlockNzTensorViews`` turns every logical ``pl.Tensor[..., pl.NZ]``
+/// annotation into the blocked rank-(r+2) shape whose trailing dims are
+/// ``[16, c0]`` (see ``BlockNzShape``). Only in that form does NZ have a
+/// canonical stride — the plain row-major one this pass is about to build.
 ///
-/// This is a user error, not a pass invariant: nothing in the pipeline mints
-/// an NZ TensorType, but a ``pl.Tensor[..., pl.NZ]`` annotation survives
-/// parsing, so the message names the authoring fix.
-void CheckNoNzOnTensorType(const TensorView& view, const Span& span) {
-  CHECK_SPAN(view.layout != TensorLayout::NZ, span)
-      << "MaterializeTensorStrides: NZ layout is tile-only and not allowed on a tensor type. "
-      << "Annotate the tensor as pl.ND or pl.DN, and produce NZ on a Tile instead.";
+/// Checking here rather than leaving it to the verifier keeps the pass honest
+/// about the ``TensorViewCanonical`` property it declares as produced:
+/// delegating the check means a malformed slot survives whenever verification
+/// is disabled (``PYPTO_VERIFY_LEVEL=none``), only to resurface much later as
+/// an opaque backend layout mismatch.
+///
+/// This is a pass invariant, not a user error — the user-facing alignment
+/// diagnostics live in ``BlockNzShape``, which runs far earlier. An unblocked
+/// NZ view reaching here means pass ``BlockNzTensorViews`` did not run or
+/// missed a slot.
+void CheckNzViewIsBlocked(const TensorView& view, const std::vector<ExprPtr>& shape, DataType dtype,
+                          const Span& span) {
+  if (view.layout != TensorLayout::NZ) return;
+  INTERNAL_CHECK_SPAN(tensor_view_semantics::IsBlockedNzShape(shape, dtype), span)
+      << "Internal error: MaterializeTensorStrides found an NZ tensor whose shape is not blocked "
+      << "(expected rank >= 4 with trailing dims [" << tensor_view_semantics::kNzFractalRow << ", "
+      << tensor_view_semantics::NzC0Elems(dtype) << "]) — BlockNzTensorViews did not run or missed it";
 }
 
 /// Rewrite a TensorType (or recursively a TupleType containing TensorTypes)
@@ -97,8 +103,9 @@ TypePtr MaterializeType(const TypePtr& type, const Span& span) {
     }
     const TensorView& view = *dist_type->tensor_view_;
     // Checked before the stride short-circuit below, mirroring the verifier's
-    // ordering: an NZ view is invalid whether or not its stride is explicit.
-    CheckNoNzOnTensorType(view, span);
+    // ordering: an unblocked NZ view is invalid whether or not its stride is
+    // explicit.
+    CheckNzViewIsBlocked(view, dist_type->shape_, dist_type->dtype_, span);
     if (!view.stride.empty()) {
       return type;
     }
@@ -116,7 +123,7 @@ TypePtr MaterializeType(const TypePtr& type, const Span& span) {
       return type;
     }
     const TensorView& view = *tensor_type->tensor_view_;
-    CheckNoNzOnTensorType(view, span);
+    CheckNzViewIsBlocked(view, tensor_type->shape_, tensor_type->dtype_, span);
     if (!view.stride.empty()) {
       // Already explicit.
       return type;

@@ -77,7 +77,7 @@
 
 | 主题 | 当前位置 |
 | ---- | -------- |
-| 混合 kernel（AIC + AIV 同一函数） | [LowerAutoVectorSplit](../dev/passes/20-lower_auto_vector_split.md)、[ExpandMixedKernel](../dev/passes/21-expand_mixed_kernel.md)、[TPUSH/TPOP](../reference/pto-isa/01-tpush_tpop.md) |
+| 混合 kernel（AIC + AIV 同一函数） | [LowerAutoVectorSplit](../dev/passes/21-lower_auto_vector_split.md)、[ExpandMixedKernel](../dev/passes/22-expand_mixed_kernel.md)、[TPUSH/TPOP](../reference/pto-isa/01-tpush_tpop.md) |
 | 性能提示与诊断 | [诊断](../dev/passes/92-diagnostics.md)、[编译性能剖析](../dev/01-compile-profiling.md) |
 | 运行时 DFX 开关、ring sizing、memory map | [运行时 DFX](../dev/03-runtime-dfx.md)、[逐任务 Ring Sizing](../dev/05-runtime-ring-sizing.md)、[内存图](../dev/07-memory-map.md) |
 | 外部 C++ kernel | [集成手写 C++ Kernel](../dev/language/04-external-kernels.md) |

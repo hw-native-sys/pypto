@@ -509,6 +509,14 @@ void BindPass(nb::module_& m) {
              "Applies three patterns: iter-arg reuse (merge Out->InOut), assemble parent\n"
              "strides (attach TensorView to Out params), and assemble-loop rewrite\n"
              "(convert tile.assemble loops to tile.store loops).");
+  passes.def("block_nz_tensor_views", &pass::BlockNzTensorViews,
+             "Create a pass that rewrites logical pl.NZ tensors into pto-isa's blocked NZ form\n\n"
+             "An NZ TensorType shape [..., R, C] becomes [..., C/c0, R/16, 16, c0], where\n"
+             "c0 is the element count of a 32-byte C0 line (256 / dtype bits), and every\n"
+             "consuming tile.load has its offsets / shapes / valid_shape rewritten into\n"
+             "blocked coordinates while its logical 2-D destination TileType is preserved.\n"
+             "Must run after ConvertTensorToTileOps and after FlattenTileNdTo2D (it\n"
+             "requires TileOps2D: the destination tile must already be 2-D).");
   passes.def("flatten_tile_nd_to_2d", &pass::FlattenTileNdTo2D,
              "Create a pass that flattens ND tile ops to 2D in InCore functions\n\n"
              "Merges all dimensions except the last into a single dimension.\n"

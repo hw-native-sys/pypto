@@ -92,8 +92,8 @@ are independent. If they are not, the result is a race.
 ping-pong. The outer loop advances in strides of `stage * step` and a tail dispatch covers
 the remainder when the trip count does not divide evenly. `stage` is required and must be
 a positive integer (typically 2–4). It is lowered at tile level by
-[LowerPipelineLoops](../../dev/passes/28-lower_pipeline_loops.md) — or, under
-`memory_planner=PTOAS`, by [LowerPipelineToSlots](../../dev/passes/27-lower_pipeline_to_slots.md),
+[LowerPipelineLoops](../../dev/passes/29-lower_pipeline_loops.md) — or, under
+`memory_planner=PTOAS`, by [LowerPipelineToSlots](../../dev/passes/28-lower_pipeline_to_slots.md),
 which rotates one un-replicated body through the slots of a single allocation instead.
 
 ```python
@@ -205,5 +205,5 @@ non-SSA source is normal input, not a compatibility mode.
 - [Scopes and Placement](04-scopes.md) — the placement scopes these loops sit inside.
 - [ConvertToSSA](../../dev/passes/04-convert_to_ssa.md) — the conversion this page's rules come from.
 - [UnrollLoops](../../dev/passes/02-unroll_loops.md) — what `pl.unroll` becomes.
-- [LowerPipelineToSlots](../../dev/passes/27-lower_pipeline_to_slots.md) — what `pl.pipeline` becomes under `memory_planner=PTOAS`.
-- [LowerPipelineLoops](../../dev/passes/28-lower_pipeline_loops.md) — what `pl.pipeline` becomes otherwise.
+- [LowerPipelineToSlots](../../dev/passes/28-lower_pipeline_to_slots.md) — what `pl.pipeline` becomes under `memory_planner=PTOAS`.
+- [LowerPipelineLoops](../../dev/passes/29-lower_pipeline_loops.md) — what `pl.pipeline` becomes otherwise.

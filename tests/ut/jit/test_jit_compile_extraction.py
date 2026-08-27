@@ -642,16 +642,18 @@ class TestUnsupportedLayoutSlot:
 
 
 class TestNzOnTensorIsNotJitSpecific:
-    """``pl.NZ`` in a *tensor* annotation is rejected downstream on every path.
+    """``pl.NZ`` in a *tensor* annotation reaches the param type on every path.
 
-    NZ describes a tile layout; on a TensorType it survives parsing but ptoas
-    later refuses it ("layout mismatch: user-specified layout=nz but
-    inferred=nd"). That is true of ``@pl.function`` too, so @pl.jit carrying the
-    layout through is parity, not a new defect — the alternative (dropping it)
-    is what silently produced an ND buffer from an NZ annotation.
+    NZ on a TensorType asserts that the GM bytes are already in PTO-native NZ
+    fractal order; ``BlockNzTensorViews`` later rewrites the shape into the
+    blocked rank-(r+2) form pto-isa needs. What matters here is only that the
+    annotation *survives specialization* — dropping it is what silently produced
+    an ND buffer from an NZ annotation.
 
-    This pins the shared behaviour so the propagation is not mistaken for a
-    claim that NZ tensors compile.
+    ``@pl.function`` behaves identically, so @pl.jit carrying the layout through
+    is parity. These tests deliberately stop at the param type: the blocking and
+    its diagnostics are covered by
+    tests/ut/ir/transforms/test_block_nz_tensor_views.py.
     """
 
     def test_nz_survives_specialization_unchanged(self):

@@ -5552,7 +5552,7 @@ class TestCapacityGatedReuse:
     afford it; when it cannot, the shed / force_legacy floor merges them (the
     fa_fused 8->1 collapse in miniature). The success metric is WAR distance /
     overlap, *never* sync-flag count (see the pipeline-stage guard in
-    docs/en/dev/passes/29-memory_reuse.md). The operands are ``tile.move``
+    docs/en/dev/passes/34-memory_reuse.md). The operands are ``tile.move``
     results (not loads), so the legacy load-only guard never protected them either.
     """
 
@@ -6027,7 +6027,7 @@ class TestCapacityGatedReuse:
 
     def test_composes_with_matmul_acc_carry(self):
         """Carry composition (#1352; see the loop-carry re-alignment in
-        docs/en/dev/passes/29-memory_reuse.md): the gate only ever *adds* separation and
+        docs/en/dev/passes/34-memory_reuse.md): the gate only ever *adds* separation and
         excludes loop carries from the packer, so capacity-gated reuse must not disturb a
         matmul_acc accumulator chain. These operands carry no pipeline_membership tags,
         so they never trip the gated residue constraint and behave like legacy. The pass

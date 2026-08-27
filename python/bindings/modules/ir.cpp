@@ -498,7 +498,8 @@ void BindIR(nb::module_& m) {
   tvs.def("build_logical_strides_from_layout", &tensor_view_semantics::BuildLogicalStridesFromLayout,
           nb::arg("shape"), nb::arg("layout"),
           "Build packed canonical strides for (shape, layout). "
-          "Raises ValueError on NZ layout or DN with rank < 2.");
+          "NZ is row-major over its blocked rank-(r+2) shape, the same rule as ND. "
+          "Raises ValueError on DN with rank < 2.");
 
   tvs.def(
       "derive_layout_from_strides",

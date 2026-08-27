@@ -106,7 +106,7 @@ DDR ──────────► Vec ────────────�
 ```
 
 When a consumer needs `Left` / `Right` / `Acc` / `Bias`, the producer stops at `Mat` (or
-`Vec`) and [InferTileMemorySpace](../../dev/passes/17-infer_tile_memory_space.md) inserts
+`Vec`) and [InferTileMemorySpace](../../dev/passes/18-infer_tile_memory_space.md) inserts
 the `tile.move` — you write it explicitly when you want to control where it happens.
 
 ### Moving data
@@ -287,8 +287,8 @@ Reloading the same operand for every tile of a loop is the most common avoidable
 Hoist the load out of the loop when the operand is loop-invariant, and prefer `Mat`
 residency for a matmul operand reused across the K loop. What the compiler will and will
 not do here — buffer reuse, address assignment — is decided by
-[MemoryReuse](../../dev/passes/33-memory_reuse.md) and
-[AllocateMemoryAddr](../../dev/passes/34-allocate_memory_addr.md); [Memory](../performance/05-memory.md)
+[MemoryReuse](../../dev/passes/34-memory_reuse.md) and
+[AllocateMemoryAddr](../../dev/passes/35-allocate_memory_addr.md); [Memory](../performance/05-memory.md)
 covers how to drive them.
 
 ## Edge Cases
@@ -321,6 +321,6 @@ covers how to drive them.
 - [Scopes and Placement](04-scopes.md) — `pl.spmd` blocks, and what independence you are asserting.
 - [Scopes and Placement](04-scopes.md) — where the code runs, and cross-core ring depth.
 - [Operations](../ops/01-catalog.md) — the movement, reduction, and broadcast families.
-- [InferTileMemorySpace](../../dev/passes/17-infer_tile_memory_space.md) — the pass that inserts moves you did not write.
-- [MemoryReuse](../../dev/passes/33-memory_reuse.md) — how buffers are shared across lifetimes.
+- [InferTileMemorySpace](../../dev/passes/18-infer_tile_memory_space.md) — the pass that inserts moves you did not write.
+- [MemoryReuse](../../dev/passes/34-memory_reuse.md) — how buffers are shared across lifetimes.
 - [Memory Map](../../dev/07-memory-map.md) — visualizing what ended up on chip.

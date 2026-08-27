@@ -89,4 +89,4 @@ OverlapMap 基于缓冲区工作，所以它推出的恰好是那些**本身就�
 - [运行时作用域](01-scopes.md) —— 这套推导运行在哪个边界内，以及怎么关掉它。
 - [声明一条边](02-submit.md) —— 给任务起个名字，好让后面的任务等它。
 - [类型 § 参数方向](../language/00-types.md#参数方向) —— 推导所读的那个声明。
-- [AutoDeriveTaskDependencies](../../dev/passes/38-auto_derive_task_dependencies.md) —— 这件事的编译器侧一半。
+- [AutoDeriveTaskDependencies](../../dev/passes/39-auto_derive_task_dependencies.md) —— 这件事的编译器侧一半。

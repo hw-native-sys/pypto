@@ -182,6 +182,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/dsa/memref_dsa_adapter.cpp
     src/ir/transforms/dsa/reuse_penalty_recognizer.cpp
     src/ir/transforms/allocate_memory_addr_pass.cpp
+    src/ir/transforms/block_nz_tensor_views_pass.cpp
     src/ir/transforms/canonicalize_tile_slice_pass.cpp
     src/ir/transforms/fold_no_op_reshape_pass.cpp
     src/ir/transforms/stamp_tfree_split_pass.cpp

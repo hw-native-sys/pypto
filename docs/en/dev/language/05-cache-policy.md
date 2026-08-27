@@ -157,16 +157,16 @@ Design notes that keep the chain honest:
 - **Not a field on `TensorView`.** A plain kernel parameter has no
   `tensor_view_` at all, so stamping a policy there would force one into
   existence — dragging in the strict `TensorViewCanonical` verifier, and
-  [`MaterializeTensorStrides`](../passes/30-materialize_tensor_strides.md)
+  [`MaterializeTensorStrides`](../passes/31-materialize_tensor_strides.md)
   rebuilds the view through a positional constructor that would silently drop
   the field.
 - **Param indices are valid only across passes 8..10.** Only
   `OutlineClusterScopes` sits between them, and it does not mutate an outlined
   InCore param list. Downstream passes *do*:
-  [`InjectGMPipeBuffer`](../passes/22-inject_gm_pipe_buffer.md) and
-  [`MaterializeDistTensorCtx`](../passes/43-materialize_dist_tensor_ctx.md)
+  [`InjectGMPipeBuffer`](../passes/23-inject_gm_pipe_buffer.md) and
+  [`MaterializeDistTensorCtx`](../passes/44-materialize_dist_tensor_ctx.md)
   append, and
-  [`MaterializeValidShapeSymbols`](../passes/48-materialize_valid_shape_symbols.md)
+  [`MaterializeValidShapeSymbols`](../passes/49-materialize_valid_shape_symbols.md)
   *prepends*. That is why pass 10 erases the attr after converting it.
 - **The kwarg is an `int`, not the enum.** It follows `tile.store`'s `atomic`
   kwarg, so the serializer, deserializer, `structural_hash` and

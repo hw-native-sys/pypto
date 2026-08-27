@@ -265,8 +265,13 @@ TypePtr DeduceTensorReinterpretViewType(const std::vector<ExprPtr>& args,
   const DataType target_dtype = GetRequiredKwarg<DataType>(kwargs, "dtype", kOpName);
   const TensorLayout layout =
       tensor_type->tensor_view_.has_value() ? tensor_type->tensor_view_->layout : TensorLayout::ND;
+  // NZ is a legal TensorType layout (in its blocked form), but reinterpreting a
+  // fractal-blocked buffer under a new dtype would silently change which bytes
+  // each element maps to — the fractal geometry is dtype-dependent (c0 = 32 /
+  // sizeof(dtype)). Refuse rather than mis-address.
   CHECK_SPAN(layout != TensorLayout::NZ, args[0]->span_)
-      << kOpName << " does not support boxed/fractal NZ tensor layout";
+      << kOpName << " does not support the NZ layout: its fractal blocking depends on the element "
+      << "size, so reinterpreting the dtype would remap every element. Slice the NZ tensor directly.";
   CHECK_SPAN(layout != TensorLayout::DN || tensor_type->shape_.size() >= 2, args[0]->span_)
       << kOpName << " requires rank >= 2 for DN layout";
 
@@ -482,10 +487,19 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
   TensorLayout new_layout = requested_layout.value_or(src_layout);
   CHECK_SPAN(!IsMxTensorLayout(src_layout) && !IsMxTensorLayout(new_layout), args[0]->span_)
       << "tensor.view does not support MX layouts";
-  CHECK(new_layout != TensorLayout::NZ)
-      << "tensor.view: NZ layout is not allowed on TensorType (NZ is tile-only)";
+  // NZ is a legal TensorType layout (in its blocked form), but tensor.view
+  // reinterprets shape/strides, and a blocked NZ view's dims are a fractal
+  // decomposition rather than free axes — re-viewing them would break the
+  // addressing. Milestone 1 therefore keeps NZ out of tensor.view entirely.
+  // Source first: when the source is NZ, ``new_layout`` defaults to it, so
+  // checking the destination first would report the derived symptom instead of
+  // the annotation the user actually wrote.
   CHECK(src_layout != TensorLayout::NZ)
-      << "tensor.view: src has NZ layout (NZ is tile-only and not allowed on TensorType)";
+      << "tensor.view does not support an NZ source: its dims are a fractal decomposition, "
+      << "so re-viewing them would break the fractal addressing. Slice the NZ tensor directly.";
+  CHECK(new_layout != TensorLayout::NZ)
+      << "tensor.view cannot produce an NZ layout: the blocked NZ shape is derived from the "
+      << "source tensor by BlockNzTensorViews, not chosen at a view site";
 
   if (src_type->tensor_view_.has_value() && !src_type->tensor_view_->stride.empty()) {
     auto canon_check = tensor_view_semantics::CheckCanonicalView(

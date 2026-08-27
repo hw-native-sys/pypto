@@ -14,7 +14,7 @@ PTO 代码生成 (CodeGen) (`PTOCodegen`) 从 PyPTO 中间表示 (IR) 生成 PTO
 
 **原因：** 嵌入分析逻辑的代码生成会变得脆弱——它重复了 Pass 已有的逻辑，且更难以独立测试。保持代码生成为直接的转换，确保其可预测性和可维护性。
 
-**当发现代码生成中存在分析逻辑时：** 创建跟踪 Issue，在有带宽时将其重构为专用 Pass。[#814](https://github.com/hw-native-sys/pypto/issues/814) 就是一个实例：编排代码生成中的返回值到参数追踪逻辑已重构为 [`NormalizeReturnOrder`](../passes/25-normalize_return_order.md) pass。
+**当发现代码生成中存在分析逻辑时：** 创建跟踪 Issue，在有带宽时将其重构为专用 Pass。[#814](https://github.com/hw-native-sys/pypto/issues/814) 就是一个实例：编排代码生成中的返回值到参数追踪逻辑已重构为 [`NormalizeReturnOrder`](../passes/26-normalize_return_order.md) pass。
 
 ## 概述
 
@@ -208,8 +208,8 @@ tile 调用 `set_validshape`。
   `eL` 是 lane `L` 在切分轴上的**运行时** valid extent——ISA 直接从被弹出的 tile 上读取
   （`popVecTileFromGMFiFo`），因此偶数 code 要求 `e0 == e1`，奇数 code 要求
   `e0 == e1 + 1`。这些 extent 由
-  [LowerAutoVectorSplit](../passes/20-lower_auto_vector_split.md) 物化，
-  [ExpandMixedKernel](../passes/21-expand_mixed_kernel.md) 选择匹配的 code。
+  [LowerAutoVectorSplit](../passes/21-lower_auto_vector_split.md) 物化，
+  [ExpandMixedKernel](../passes/22-expand_mixed_kernel.md) 选择匹配的 code。
 - Cube-to-Vector FIFO 搬运的是紧凑矩形：producer 以 `valid_col` 为行间距写入
   `valid_row` x `valid_col` 数据块，每个消费 lane 再以相同间距读回自己的数据段
   （`gmStrideR = valid_col`，左右切分的 code 下加倍）。因此若传输两侧的 valid shape

@@ -86,4 +86,4 @@ instead, and see [Memory](../performance/05-memory.md).
 - [Memory](../performance/05-memory.md) — the runtime-side rings, and the on-chip budget this tool draws.
 - [Tuning the InCore function](../performance/04-incore.md) — what consumes that budget.
 - [Debugging](00-debugging.md) — the other reader of pass dumps.
-- [AllocateMemoryAddr](../../dev/passes/34-allocate_memory_addr.md) — the pass whose output this is.
+- [AllocateMemoryAddr](../../dev/passes/35-allocate_memory_addr.md) — the pass whose output this is.

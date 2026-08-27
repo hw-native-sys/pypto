@@ -176,6 +176,14 @@ class PassManager:
         tile_pto_passes: tuple[PassFactory, ...] = (
             passes.lower_composite_ops,
             passes.flatten_tile_nd_to_2d,
+            # Rewrite `pl.NZ` tensors into pto-isa's blocked rank-(r+2) form and
+            # retarget their tile.load coordinates. Runs immediately after
+            # FlattenTileNdTo2D so the destination tile is already the logical 2D
+            # operand: blocking a still-ND-rank tile would leave a tile.load whose
+            # annotation and argument ranks cannot both be printed. Flatten skips
+            # its ND2NZ window collapse for NZ sources so the logical window is
+            # still intact here.
+            passes.block_nz_tensor_views,
             # Expand non-native tile.cast (src,dst) pairs into shortest native
             # cast chains (e.g. A5 INT32→FP16 → INT32→FP32→FP16) before
             # AutoTileMatmulL0 may FIXPIPE-fold already-native f32→bf16/f16.

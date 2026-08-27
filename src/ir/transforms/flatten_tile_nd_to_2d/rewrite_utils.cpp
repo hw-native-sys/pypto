@@ -170,6 +170,13 @@ CallPtr CreateCollapsedTensorView(const ExprPtr& tensor, const TensorTypePtr& te
   auto flat_shape = CollapseLeadingDimsTo2D(tensor_type->shape_, span);
   const TensorLayout layout =
       tensor_type->tensor_view_.has_value() ? tensor_type->tensor_view_->layout : TensorLayout::ND;
+  // Collapsing a blocked NZ tensor would multiply its fractal dims into a flat
+  // row count and silently destroy the fractal addressing. NZ loads are routed
+  // around this helper by IsNzSourceLoad; reaching here means that guard was
+  // bypassed.
+  INTERNAL_CHECK_SPAN(layout != TensorLayout::NZ, span)
+      << "Internal error: FlattenTileNdTo2D tried to collapse an NZ tensor view to 2D; "
+      << "a blocked NZ tensor must be passed through unchanged";
   TensorView flat_view = tensor_view_semantics::CanonicalizeView(flat_shape, layout);
 
   if (tensor_type->tensor_view_.has_value()) {

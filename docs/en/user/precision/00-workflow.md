@@ -74,7 +74,7 @@ The middle case is the one worth remembering: FP16 "overflow" starts at `65520`,
 
 A chain introduces a real difference only when an intermediate type cannot exactly represent
 source values that *are* in the destination's range. Check
-[LegalizeTileCast](../../dev/passes/14-legalize_tile_cast.md) for the class your chain falls
+[LegalizeTileCast](../../dev/passes/15-legalize_tile_cast.md) for the class your chain falls
 into rather than assuming the hop is the culprit.
 
 The claim is checkable, so this page checks it. The block below casts `INT32 → FP16`
@@ -273,5 +273,5 @@ output is wrong" into "this step is wrong" in one run.
 ## See Also
 
 - [Worked cases](01-cases.md) — this order applied end to end.
-- [LegalizeTileCast](../../dev/passes/14-legalize_tile_cast.md) — when a cast chain is exact.
+- [LegalizeTileCast](../../dev/passes/15-legalize_tile_cast.md) — when a cast chain is exact.
 - [Reduction and softmax](../tutorials/01-reduction-softmax.md) — padding and reductions.
