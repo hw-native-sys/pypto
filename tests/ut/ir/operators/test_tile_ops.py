@@ -3082,9 +3082,10 @@ class TestTileSliceReshapeOps:
         source = ir.Var("acc", source_type, span)
 
         result = tile.reshape(source, [64, 128]).type
-        view = result.tile_view
-
         assert isinstance(result, ir.TileType)
+        view = result.tile_view
+        assert view is not None
+
         assert result.memory_space == ir.MemorySpace.Acc
         assert view.blayout == ir.TileLayout.col_major
         assert view.slayout == ir.TileLayout.row_major

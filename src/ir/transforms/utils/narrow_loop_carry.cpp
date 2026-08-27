@@ -36,7 +36,6 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -234,7 +233,7 @@ class CarryAnalyzer : public IRVisitor {
   /// The narrowing is declined instead of moving the computation, which would need the
   /// extent to be loop-invariant and is a larger change than this repair.
   template <typename LoopPtr>
-  bool ExtentsAreVisibleBefore(const std::vector<ExprPtr>& extents, const LoopPtr& loop) const {
+  [[nodiscard]] bool ExtentsAreVisibleBefore(const std::vector<ExprPtr>& extents, const LoopPtr& loop) const {
     for (const auto& extent : extents) {
       if (!extent) continue;
       ExtentVarCollector used;
