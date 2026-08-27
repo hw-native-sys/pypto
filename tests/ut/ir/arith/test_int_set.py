@@ -302,24 +302,58 @@ class TestIntSetConstraint:
             s = ana.int_set(x)
             assert_is_const_int(s.max_value, 9)
 
-    @pytest.mark.parametrize("constraint", [ir.Lt, ir.Gt])
-    def test_strict_float_constraint_does_not_use_integer_unit(self, constraint):
+    def test_constraint_lt_tightens_index_dtype(self):
+        # INDEX is the dtype of loop vars and valid-shape scalars, and it is the
+        # dtype the integer guard is most load-bearing for: DataType.INDEX must
+        # classify as an integer, or every loop-bound constraint would be dropped.
+        ana = Analyzer()
+        idx = ir.Var("idx", ir.ScalarType(DataType.INDEX), S)
+        ana.int_set.update(idx, IntSet.everything())
+        with ana.constraint_context(ir.Lt(idx, ir.ConstInt(10, DataType.INDEX, S), BOOL, S)):
+            assert_is_const_int(ana.int_set(idx).max_value, 9)
+
+    def test_non_strict_float_constraint_still_bounds(self):
+        # A float variable keeps contributing bounds — only the unit step is
+        # integer-only, and Ge does not use it.
+        ana = Analyzer()
+        value = ir.Var("value", ir.ScalarType(FLOAT), S)
+        ana.int_set.update(value, IntSet.everything())
+        with ana.constraint_context(ir.Ge(value, cf(1.0), BOOL, S)):
+            constrained = ana.int_set(value)
+            assert isinstance(constrained.min_value, ir.ConstFloat)
+            assert constrained.min_value.value == 1.0
+            assert constrained.max_value is None
+
+    @pytest.mark.parametrize(
+        ("constraint", "bound_attr", "other_attr"),
+        [(ir.Gt, "min_value", "max_value"), (ir.Lt, "max_value", "min_value")],
+    )
+    def test_strict_float_constraint_drops_the_unit_step(self, constraint, bound_attr, other_attr):
+        # Floats have no predecessor: `f > 1.0` must record `f >= 1.0`, never
+        # `f >= 2.0` — the latter excludes the legal value 1.5.
         ana = Analyzer()
         value = ir.Var("value", ir.ScalarType(FLOAT), S)
         ana.int_set.update(value, IntSet.everything())
         with ana.constraint_context(constraint(value, cf(1.0), BOOL, S)):
             constrained = ana.int_set(value)
-            assert constrained.min_value is None
-            assert constrained.max_value is None
+            bound = getattr(constrained, bound_attr)
+            assert isinstance(bound, ir.ConstFloat)
+            assert bound.value == 1.0
+            assert getattr(constrained, other_attr) is None
 
-    @pytest.mark.parametrize("constraint", [ir.Lt, ir.Gt])
-    def test_strict_non_scalar_constraint_is_ignored(self, constraint):
+    @pytest.mark.parametrize("constraint", [ir.Lt, ir.Gt, ir.Le, ir.Ge, ir.Eq])
+    def test_non_scalar_constraint_is_ignored(self, constraint):
+        # A non-scalar bound would be handed to MakeAdd/MakeSub (strict) or to the
+        # Ge/Min/Max builders inside SymMaxLower/SymMinUpper (non-strict), both of
+        # which reject it. Drop the constraint instead, keeping the existing bound.
         analyzer = IntSetAnalyzer()
         scalar = ir.Var("scalar", ir.ScalarType(INT), S)
         tensor = ir.Var("tensor", ir.TensorType([1], FLOAT), S)
+        analyzer.update(scalar, IntSet.interval(ci(0), ci(100)))
 
         assert analyzer.enter_constraint(constraint(tensor, scalar, BOOL, S)) is None
         assert analyzer.enter_constraint(constraint(scalar, tensor, BOOL, S)) is None
+        assert_is_const_int(analyzer(scalar).max_value, 100)
 
     def test_constraint_scope_restores(self):
         ana = Analyzer()
