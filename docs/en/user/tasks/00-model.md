@@ -113,4 +113,4 @@ one — that is [`pl.manual_scope`](01-scopes.md).
 - [Runtime scopes](01-scopes.md) — the boundary this inference runs inside, and how to switch it off.
 - [Declaring an edge](02-submit.md) — naming a task so a later one can wait on it.
 - [Types § parameter directions](../language/00-types.md#parameter-directions) — the declaration the inference reads.
-- [AutoDeriveTaskDependencies](../../dev/passes/38-auto_derive_task_dependencies.md) — the compiler-side half of this.
+- [AutoDeriveTaskDependencies](../../dev/passes/39-auto_derive_task_dependencies.md) — the compiler-side half of this.

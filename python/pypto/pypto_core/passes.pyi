@@ -509,6 +509,22 @@ def convert_tensor_to_tile_ops() -> Pass:
 def optimize_orch_tensors() -> Pass:
     """Create a pass that optimizes tensor buffer usage in orchestration and InCore functions."""
 
+def block_nz_tensor_views() -> Pass:
+    """Create a pass that rewrites logical ``pl.NZ`` tensors into blocked NZ form.
+
+    An NZ ``TensorType`` shape ``[..., R, C]`` becomes ``[..., C/c0, R/16, 16, c0]``,
+    where ``c0`` is the number of elements in a 32-byte C0 line (``256 / dtype
+    bits``) — the blocked rank-(r+2) form pto-isa's ``Layout::NZ`` GlobalTensor
+    requires. Every consuming ``tile.load`` has its offsets / shapes / valid_shape
+    rewritten into blocked coordinates while its logical 2-D destination
+    ``TileType`` is preserved.
+
+    Must run after ``convert_tensor_to_tile_ops`` and **after**
+    ``flatten_tile_nd_to_2d`` — it requires ``TileOps2D``, because blocking a
+    load whose tile is still ND-rank yields a call whose type annotation and
+    argument ranks cannot both be printed.
+    """
+
 def flatten_tile_nd_to_2d() -> Pass:
     """Create a pass that flattens ND tile ops to 2D in InCore functions."""
 
@@ -1014,6 +1030,7 @@ __all__ = [
     "outline_hierarchy_scopes",
     "convert_tensor_to_tile_ops",
     "optimize_orch_tensors",
+    "block_nz_tensor_views",
     "flatten_tile_nd_to_2d",
     "legalize_tile_cast",
     "auto_tile_matmul_l0",

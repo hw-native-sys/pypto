@@ -124,3 +124,5 @@ auto used = memref_collectors::CollectUsedBasePtrs(func->body_);
 | `auto_name_utils.h` | SSA name generation, rename maps, name parsing |
 | `parent_stmt_analysis.h` | Parent-child statement mapping |
 | `dead_code_elimination.h` | Dead code removal within functions |
+| `acc_init_builder.h` | `BuildAccStorage`, `BuildNarrowedAccInit` — declare an L0C accumulator, compact when its valid rows do not fill the box |
+| `narrow_loop_carry.h` | `NarrowAccCarries` — re-declare an Acc loop carry at the valid extent its yields prove |

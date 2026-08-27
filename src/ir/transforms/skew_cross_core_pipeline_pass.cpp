@@ -153,7 +153,7 @@ bool BodyHasCrossCorePair(const StmtPtr& body) {
 ///    not hold the same way, since a produce clone's accumulator is drained to
 ///    the peer core while the next clone's MAD runs — the same overlap LPL
 ///    carves out for dbC=2. Separating the stages' buffers is this pass's whole
-///    purpose (see `docs/en/dev/passes/26-skew_cross_core_pipeline.md`), and
+///    purpose (see `docs/en/dev/passes/27-skew_cross_core_pipeline.md`), and
 ///    since #1949 `MemoryReuse`'s capacity-gated path honours membership in
 ///    every space including `Acc`, so adopting LPL's skip here would drop these
 ///    accumulators out of the gate entirely. No skew test covers a matmul body

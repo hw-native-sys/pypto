@@ -154,6 +154,33 @@ for c, (o,) in pl.range(0, s_dim, CHUNK, init_values=(out,)):
 如果一个 >2D tile 到达本 Pass 时**物理形状是动态的**（用户没切静态 chunk），它无法展平,Pass 会抛出可操作的
 报错,指向两种修法:用 `pl.range`/`pl.parallel` 对动态维分块,或在进入 InCore（`pl.at`）作用域前 reshape 为 2D。
 
+## 循环携带值的 valid_shape 修复
+
+当 `tile.batch_matmul` 的左操作数带着被收窄的 `valid_shape` 时，展开后得到的 2D matmul
+结果比它流入的累加器更窄。而累加器所经过的循环携带值**只按其初值定型**，因此它仍然宣称
+种子那个没有任何 `mad` 写满过的完整盒高：
+
+```text
+acc__tile      : Tile[[64, 256], INT32]                              <- pl.create_tensor 种子
+  iter_arg     : Tile[[64, 256], INT32]                              <- 按种子定型
+  yield        : Tile[[64, 256], INT32, Acc, valid=[v, 256], compact] <- 循环体实际产出
+  return_var   : Tile[[64, 256], INT32]                              <- 被强行拉回 iter_arg 的类型
+```
+
+`mad` 以 `ceil(v/16)*16` 的 N-fractal 步长把乘积写进 L0C，而相信完整盒高的读者会按物理行
+步长遍历该缓冲区，从而打乱第一个之后的每一个 N-fractal（issue #2470）。因此本 pass 在返回
+之前会对每个改写过的函数调用 `narrow_loop_carry::NarrowAccCarries`：把种子按 yield 可证明
+的范围重新声明——`tile.create(compact=True)` 加 `tile.set_validshape`，与 `AutoTileMatmulL0`
+切分 K 时构造的形式一致——并让循环体的 def-use 闭包通过算子自身的 deducer 重新定型。
+
+在这里修复而不是留给后续 pass，正是流水线可验证性的前提：否则本 pass 产出的携带值会被
+`TypeCheck` 诊断与 `AccCompactValid` 属性验证器拒绝。`ConvertTensorToTileOps` 出于同样的
+原因调用同一个 helper——2D 种子在 `tensor.matmul` 变成 `tile.matmul` 时就已经被收窄了。
+
+两种情况下携带值保持原样：一是缓冲区的两种读法本来就不会分歧——单 fractal 块的 `[16, N]`
+累加器无论有效行是多少都按物理行打包；二是收窄用的表达式只在循环体内计算，重新声明的种子
+在那之前根本命名不到它。
+
 ## 实现
 
 **头文件**：`include/pypto/ir/transforms/passes.h`
@@ -162,7 +189,7 @@ for c, (o,) in pl.range(0, s_dim, CHUNK, init_values=(out,)):
 
 | 阶段 | 文件 | 职责 |
 | ---- | ---- | ---- |
-| 协调 | `src/ir/transforms/flatten_tile_nd_to_2d/pass.cpp` | 选择 InCore 函数，并按 analysis → rewrite 顺序执行 |
+| 协调 | `src/ir/transforms/flatten_tile_nd_to_2d/pass.cpp` | 选择 InCore 函数，按 analysis → rewrite 顺序执行，并修复被改写收窄的循环携带值 |
 | 分析 (analysis) | `src/ir/transforms/flatten_tile_nd_to_2d/analysis.cpp` | 只读的前置条件验证 |
 | 改写协调 | `src/ir/transforms/flatten_tile_nd_to_2d/rewrite.cpp` | 递归遍历语句并分派算子改写 |
 | 改写工具 | `src/ir/transforms/flatten_tile_nd_to_2d/rewrite_utils.cpp` | 共享形状、索引和容量辅助逻辑 |
@@ -174,7 +201,7 @@ for c, (o,) in pl.range(0, s_dim, CHUNK, init_values=(out,)):
 
 **Python 绑定**：`python/bindings/modules/passes.cpp`
 
-**测试**：`tests/ut/ir/transforms/test_flatten_tile_nd_to_2d.py`、`tests/st/codegen/dsl/test_flatten_dynamic_tile_3d.py`（issue #1578 端到端）
+**测试**：`tests/ut/ir/transforms/test_flatten_tile_nd_to_2d.py`、`tests/ut/ir/transforms/test_narrow_loop_carry_valid_shape.py`（携带值修复）、`tests/st/codegen/dsl/test_flatten_dynamic_tile_3d.py`（issue #1578 端到端）
 
 ## Pass 属性
 

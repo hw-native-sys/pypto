@@ -195,7 +195,7 @@ approximation. The direction propagates into
 argument from the *callee's* direction, so a false `InOut` turns disjoint
 per-rank slices of one `pl.Out` tensor into a cross-rank write dependency
 (issue #2415). Ordering a write-only parameter genuinely needs is not lost:
-[`DeriveCallDirections`](37-derive_call_directions.md) re-derives the
+[`DeriveCallDirections`](38-derive_call_directions.md) re-derives the
 *call-site* direction and promotes a callee `Out` back to `InOut` under a
 sequential ancestor, behind a prior writer of the same root, or when the root is
 an enclosing `InOut` parameter.
@@ -230,6 +230,30 @@ automatically):
   `@pl.jit.host` program without manually renaming shared helper internals. The
   same rule applies to the sibling `OutlineHierarchyScopes` and
   `OutlineClusterScopes` passes (which share the outlining utility).
+
+**Cache-policy declarations become param indices**: a
+`pl.set_cache_policy(t, pl.CachePolicy.BYPASS)` statement in the scope body is
+hoisted by the parser onto the scope's `cache_policy_vars` attr
+(`std::vector<std::pair<VarPtr, int>>`, keyed by Var identity). This pass
+resolves each Var through the same captured-input index map the `no_dep_args`
+translation uses and re-emits the list as the outlined function's `cache_policy`
+attr — `std::vector<std::pair<int32_t, int>>` (param index, `CachePolicy` as
+int), sorted by index so declaration order and capture order cannot change the
+IR. The scope attr is **consumed here and never propagated**: from this point the
+function attr is the single carrier, until
+[`ConvertTensorToTileOps`](10-convert_tensor_to_tile_ops.md) turns it into a
+`cache` kwarg on each `tile.load` and erases it. Param indices are only valid
+across that window — later passes both append to
+([`InjectGMPipeBuffer`](23-inject_gm_pipe_buffer.md),
+[`MaterializeDistTensorCtx`](44-materialize_dist_tensor_ctx.md)) and prepend onto
+([`MaterializeValidShapeSymbols`](49-materialize_valid_shape_symbols.md)) param
+lists. Two user errors are rejected here with `CHECK_SPAN`: a declaration naming
+a tensor the scope body does not capture (it is neither read nor written, so no parameter
+carries the policy), and `BYPASS` on a parameter `InferParamDirections` resolved
+to `Out` / `InOut` (a bypassing read of bytes the same kernel writes is a
+coherency bug). The translation lives in the shared outlining utility, so the
+sibling `OutlineHierarchyScopes` path stamps the attr the same way. See
+[GM Cache-Access Policy](../language/05-cache-policy.md).
 
 ## Example
 
@@ -354,7 +378,7 @@ passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes, "Outline InCore 
 explicit `pl.split_aiv` regions (`SplitAivScopeStmt`) cannot coexist on one
 scope (the outliner bridges a single region's mode into a function-level
 representative `split`, which would silently collide with the user's
-`pl.split`). See [`LowerAutoVectorSplit`](20-lower_auto_vector_split.md) for how
+`pl.split`). See [`LowerAutoVectorSplit`](21-lower_auto_vector_split.md) for how
 the surviving mechanism is lowered.
 
 **Any** `pl.split(...)` is rejected, `SplitMode.NONE` included (RFC #1820). NONE
@@ -395,7 +419,7 @@ onto the function only when all regions agree *and* that mode is a real split:
 absent key, so a `split=SplitMode.NONE` entry was invisible to every consumer —
 and the parser drops it, which made print → parse lossy (`Kwargs size mismatch`).
 The authoritative per-region mode always rides `SplitAivScopeStmt::split_`, which
-[`LowerAutoVectorSplit`](20-lower_auto_vector_split.md) consumes. The printer
+[`LowerAutoVectorSplit`](21-lower_auto_vector_split.md) consumes. The printer
 applies the same rule as a backstop: it omits a `split` attr of `SplitMode.NONE`
 so IR that bypassed this pass (a pre-existing `.pto` blob, a programmatically
 built `Function`) still prints in the canonical, re-parsable form.
@@ -410,6 +434,6 @@ built `Function`) still prints in the canonical, re-parsable form.
 
 `AivSplitValid` opens here. The pass preserves the first-class `SplitAivScopeStmt` regions inside
 each outlined InCore function, so the structural region verifier can run from this point until
-[`LowerAutoVectorSplit`](20-lower_auto_vector_split.md) erases the node and invalidates the
+[`LowerAutoVectorSplit`](21-lower_auto_vector_split.md) erases the node and invalidates the
 property. `ConvertTensorToTileOps` and `InferTileMemorySpace` re-verify it in between, once the
 boundary's memory side becomes observable.

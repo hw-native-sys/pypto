@@ -274,4 +274,4 @@ a `TaskId[N_BRANCHES]` array. Each task in phase `N+1` waits for all
 
 - [Statements and Control Flow](01-statements.md) — the scope context managers these build on
 - [Orchestration Codegen](../codegen/01-orchestration_codegen.md) — how these lower
-- [AutoDeriveTaskDependencies](../passes/38-auto_derive_task_dependencies.md) — the pass that consumes them
+- [AutoDeriveTaskDependencies](../passes/39-auto_derive_task_dependencies.md) — the pass that consumes them

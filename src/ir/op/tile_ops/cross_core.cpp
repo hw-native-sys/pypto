@@ -209,7 +209,7 @@ SplitReshaped ReshapeSplitAxis(std::vector<ExprPtr> shape, std::vector<ExprPtr> 
 // compiler's own localized clamp and is left alone.
 //
 // Docs: docs/en/dev/codegen/00-pto_codegen.md,
-//       docs/en/dev/passes/20-lower_auto_vector_split.md
+//       docs/en/dev/passes/21-lower_auto_vector_split.md
 bool IsFullExtent(const ExprPtr& valid_dim, const ExprPtr& dim) {
   return ProveValidExtentEqual(valid_dim, dim) == ProofResult::kTrue;
 }

@@ -170,6 +170,26 @@ inline const PassProperties kOptimizeOrchTensorsProperties{
     .required = {IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps},
     .produced = {IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps}};
 
+// -- Blocked NZ tensor views ---------------------------------------------------
+//
+// Rewrites a logical ``pl.NZ`` tensor into pto-isa's blocked rank-(r+2) form
+// and retargets its ``tile.load`` coordinates. It changes shapes and load
+// coordinates inside the existing tile-op vocabulary without establishing or
+// destroying an IRProperty of its own.
+//
+// It does, however, *require* TileOps2D: the destination tile must already be
+// the logical 2D operand when the load's GM window is blocked. Blocking an
+// ND-rank tile leaves a ``tile.load`` whose type annotation and argument ranks
+// cannot both be printed, which the printer round-trip rejects. Declaring the
+// requirement is what makes a hand-assembled pipeline in the wrong order fail
+// the property check instead of failing obscurely later.
+
+inline const PassProperties kBlockNzTensorViewsProperties{
+    .required = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::TileOps2D,
+                 IRProperty::NormalizedStmtStructure},
+    .produced = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::TileOps2D,
+                 IRProperty::NormalizedStmtStructure}};
+
 // -- Tile ND-to-2D flattening pass --------------------------------------------
 
 inline const PassProperties kFlattenTileNdTo2DProperties{

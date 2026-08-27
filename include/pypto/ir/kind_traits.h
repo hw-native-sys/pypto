@@ -398,6 +398,30 @@ std::optional<std::any> MapAttrExprs(const std::any& value, F&& remap) {
     if (!changed) return std::nullopt;
     return std::any(std::move(next));
   }
+  if (const auto* var_ints = std::any_cast<std::vector<std::pair<VarPtr, int>>>(&value)) {
+    // ``kAttrCachePolicyVars``: ``(Var, CachePolicy-as-int)`` pairs. Only the
+    // Var half is a reference; the int rides through untouched. Without this
+    // arm the declaration would still name the pre-SSA Var after ConvertToSSA,
+    // and the scope outliner would reject it as an uncaptured tensor.
+    std::vector<std::pair<VarPtr, int>> next;
+    next.reserve(var_ints->size());
+    bool changed = false;
+    for (const auto& [v, policy] : *var_ints) {
+      if (!v) {
+        next.emplace_back(v, policy);
+        continue;
+      }
+      auto remapped = AsVarLike(remap(ExprPtr(v)));
+      if (!remapped) {
+        next.emplace_back(v, policy);  // Should not happen; keep the original over corrupting the attr.
+        continue;
+      }
+      if (remapped.get() != v.get()) changed = true;
+      next.emplace_back(std::move(remapped), policy);
+    }
+    if (!changed) return std::nullopt;
+    return std::any(std::move(next));
+  }
   if (const auto* expr = std::any_cast<ExprPtr>(&value)) {
     if (!*expr) return std::nullopt;
     auto next = remap(*expr);

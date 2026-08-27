@@ -211,7 +211,7 @@ with `pl.range` and declare one allocation per slot; leave the levels you want t
 to manage unannotated.
 
 Under `memory_planner=PTOAS` the compiler reaches for the *same* mechanism rather than a
-different one: [`LowerPipelineToSlots`](../passes/27-lower_pipeline_to_slots.md) synthesizes
+different one: [`LowerPipelineToSlots`](../passes/28-lower_pipeline_to_slots.md) synthesizes
 exactly the declaration above — `slots=F`, indexed `iv % F` — for every eligible top-level
 `tile.load` of a `pl.pipeline` body, so one body rotates through the slots instead of being
 replicated. A tile you bound yourself is left alone, and any loop that pass declines still
@@ -228,8 +228,8 @@ for stack, (out_outer,) in pl.pipeline(STACKS, stage=2, init_values=(out,)):
         pong: pl.Tile[[K, STEP], pl.BF16, l0b_pong, pl.Mem.Right] = ...
 ```
 
-See [InitMemRef](../passes/31-init_memref.md#declared-allocations) and
-[MemoryReuse](../passes/33-memory_reuse.md#declared-allocations).
+See [InitMemRef](../passes/32-init_memref.md#declared-allocations) and
+[MemoryReuse](../passes/34-memory_reuse.md#declared-allocations).
 
 ### Tile Views (TileView)
 

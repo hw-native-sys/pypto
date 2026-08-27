@@ -22,7 +22,7 @@
 
 **第 2 步就排除了它。** 这条链与直接转换**逐位相同**：FP16 在 65504 以上饱和，低于它的每个整数在 FP32 里都是精确的，所以 FP32 那一跳从不舍入，只有最后一跳舍入 —— 与直接 `INT32→FP16` 完全一样。`LegalizeTileCast` 展开的是 ISA 一条指令发不出来的转换；**展开不等于近似**。
 
-**要带走的判断方法。** 只有当某个中间类型无法精确表示落在目标范围内的源值时，链式转换才会产生差异。请对**你自己**那条链检查这个性质，而不是把「它被展开了」当作证据。见 [LegalizeTileCast](../../dev/passes/14-legalize_tile_cast.md)。
+**要带走的判断方法。** 只有当某个中间类型无法精确表示落在目标范围内的源值时，链式转换才会产生差异。请对**你自己**那条链检查这个性质，而不是把「它被展开了」当作证据。见 [LegalizeTileCast](../../dev/passes/15-legalize_tile_cast.md)。
 
 **那该去哪找。** 回到第 2 步找别的条目，或者进到第 4 步。
 
@@ -84,4 +84,4 @@ cfg = RunConfig(platform="a2a3sim", enable_dump_args=1)
 
 - [缩小精度差距](00-workflow.md) —— 这套流程。
 - [性能](../performance/index.md) —— 对「慢」的同类处理。
-- [LegalizeTileCast](../../dev/passes/14-legalize_tile_cast.md) —— cast 链的精确性。
+- [LegalizeTileCast](../../dev/passes/15-legalize_tile_cast.md) —— cast 链的精确性。

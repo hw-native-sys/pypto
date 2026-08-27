@@ -151,7 +151,7 @@ a gather that only one lane can compute, or a region that mixes split and unspli
 Otherwise stay on `pl.split` — it inserts the same operators and gets the pairing right.
 
 For the machine-level contract see [TPUSH/TPOP](../../reference/pto-isa/01-tpush_tpop.md);
-for what the pass does, [ExpandMixedKernel](../../dev/passes/21-expand_mixed_kernel.md).
+for what the pass does, [ExpandMixedKernel](../../dev/passes/22-expand_mixed_kernel.md).
 
 ## Edge Cases
 

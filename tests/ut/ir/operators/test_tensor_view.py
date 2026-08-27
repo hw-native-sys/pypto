@@ -218,9 +218,14 @@ def test_dsl_view_preserves_distributed_tensor_wrapper():
 
 
 def test_nz_target_rejected():
-    """NZ on TensorType is forbidden (NZ is tile-only / fractal)."""
+    """tensor.view cannot mint an NZ layout.
+
+    NZ is legal on a TensorType, but only in the blocked rank-(r+2) form that
+    BlockNzTensorViews derives from the source tensor — it is not a layout a
+    view site gets to choose.
+    """
     src = _tensor_var([8, 4])
-    with pytest.raises(ValueError, match="NZ layout is not allowed"):
+    with pytest.raises(ValueError, match="cannot produce an NZ layout"):
         ir.op.tensor.view(src, layout=ir.TensorLayout.NZ)
 
 

@@ -12,6 +12,7 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/narrow_loop_carry.h"
 #include "src/ir/transforms/flatten_tile_nd_to_2d/internal.h"
 
 namespace pypto {
@@ -25,7 +26,13 @@ FunctionPtr TransformFunction(const FunctionPtr& func) {
   }
 
   flatten_tile_nd_to_2d::Analyze(func);
-  return flatten_tile_nd_to_2d::Rewrite(func);
+  auto flattened = flatten_tile_nd_to_2d::Rewrite(func);
+  // Unrolling a `tile.batch_matmul` into 2D matmuls is what first narrows an
+  // accumulator whose left operand carries a runtime valid row count, so the loop
+  // carry that accumulator flows through has to be re-declared at that extent
+  // before this pass returns -- otherwise it publishes a carry its own TypeCheck
+  // and AccCompactValid verifiers reject (issue #2470).
+  return narrow_loop_carry::NarrowAccCarries(flattened);
 }
 
 }  // namespace

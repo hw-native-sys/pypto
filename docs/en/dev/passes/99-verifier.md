@@ -90,6 +90,9 @@ The `run_verifier()` utility creates a standalone `Pass` for ad-hoc use in custo
 
 ### InParamWritten
 
+> This is the last stage of the chain described in
+> [Parameter Direction Inference](../ir/08-param-directions.md).
+
 **Warning**: `DiagnosticCheck::InParamWritten` — a parameter declared `In` is
 written by its own function body.
 

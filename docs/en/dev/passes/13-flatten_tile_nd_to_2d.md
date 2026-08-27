@@ -176,6 +176,39 @@ If a >2D tile reaches the pass with a **dynamic physical shape** (the user did n
 chunk), it cannot be flattened and the pass raises an actionable error pointing to the two fixes:
 chunk the dynamic dim with `pl.range`/`pl.parallel`, or reshape to 2D before the InCore (`pl.at`) scope.
 
+## Loop-carry valid-shape repair
+
+Unrolling a `tile.batch_matmul` whose left operand carries a narrowed `valid_shape`
+produces 2D matmuls whose results are narrower than the accumulator they flow into. The
+loop carry that accumulator travels through is typed from its **init value alone**, so it
+keeps advertising the seed's full box height that no `mad` ever wrote:
+
+```text
+acc__tile      : Tile[[64, 256], INT32]                         <- pl.create_tensor seed
+  iter_arg     : Tile[[64, 256], INT32]                         <- typed from the seed
+  yield        : Tile[[64, 256], INT32, Acc, valid=[v, 256], compact]   <- what the body produced
+  return_var   : Tile[[64, 256], INT32]                         <- forced back to the iter_arg
+```
+
+`mad` lays its product out in L0C at an N-fractal stride of `ceil(v/16)*16`, so a reader
+that believes the full height walks the buffer at the physical row pitch and scrambles
+every N-fractal above the first (issue #2470). This pass therefore calls
+`narrow_loop_carry::NarrowAccCarries` on each function it rewrites, before returning: the
+seed is re-declared at the extent the yields prove — `tile.create(compact=True)` plus
+`tile.set_validshape`, the same form `AutoTileMatmulL0` builds when it splits K — and the
+body's def-use closure is re-typed through the operators' own deducers.
+
+Repairing it here rather than in a later pass is what keeps the pipeline verifiable: the
+carry this pass creates would otherwise be rejected by the `TypeCheck` diagnostic and the
+`AccCompactValid` property verifier. `ConvertTensorToTileOps` calls the same helper for
+the same reason — a 2D seed is narrowed one pass earlier, when `tensor.matmul` becomes
+`tile.matmul`.
+
+A carry is left exactly as it is when the two readings of its buffer cannot disagree — a
+single-fractal-block `[16, N]` accumulator packs to its physical rows whatever its valid
+rows — or when the narrowed extent is only computed inside the loop body, where the
+re-declared seed could not name it.
+
 ## Implementation
 
 **Header**: `include/pypto/ir/transforms/passes.h`
@@ -184,7 +217,7 @@ The implementation is split by responsibility:
 
 | Phase | File | Responsibility |
 | ----- | ---- | -------------- |
-| Coordination | `src/ir/transforms/flatten_tile_nd_to_2d/pass.cpp` | Select InCore functions and sequence analysis before rewrite |
+| Coordination | `src/ir/transforms/flatten_tile_nd_to_2d/pass.cpp` | Select InCore functions, sequence analysis before rewrite, and repair the loop carries the rewrite narrowed |
 | Analysis | `src/ir/transforms/flatten_tile_nd_to_2d/analysis.cpp` | Read-only precondition validation |
 | Rewrite orchestration | `src/ir/transforms/flatten_tile_nd_to_2d/rewrite.cpp` | Recursive statement traversal and operation dispatch |
 | Rewrite utilities | `src/ir/transforms/flatten_tile_nd_to_2d/rewrite_utils.cpp` | Shared shape, index, and capacity helpers |
@@ -196,7 +229,7 @@ The phase entry points and rewrite component interface are private to the transf
 
 **Python binding**: `python/bindings/modules/passes.cpp`
 
-**Tests**: `tests/ut/ir/transforms/test_flatten_tile_nd_to_2d.py`, `tests/st/codegen/dsl/test_flatten_dynamic_tile_3d.py` (issue #1578 end-to-end)
+**Tests**: `tests/ut/ir/transforms/test_flatten_tile_nd_to_2d.py`, `tests/ut/ir/transforms/test_narrow_loop_carry_valid_shape.py` (the carry repair), `tests/st/codegen/dsl/test_flatten_dynamic_tile_3d.py` (issue #1578 end-to-end)
 
 ## Pass Properties
 

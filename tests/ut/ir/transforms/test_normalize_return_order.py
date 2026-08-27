@@ -519,7 +519,7 @@ class TestNormalizeReturnOrderSubmit:
     ``[2]``. When Step A reorders the InCore kernel's returns, those
     projection indices must be permuted in lockstep so the same physical
     output buffer still flows into the same name (doc
-    ``24-normalize_return_order.md`` §"Step B"; pass principle in
+    ``26-normalize_return_order.md`` §"Step B"; pass principle in
     ``.claude/rules/pass-submit-awareness.md``).
     """
 

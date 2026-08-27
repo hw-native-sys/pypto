@@ -33,6 +33,7 @@ TENSOR_OPTIMIZATION_PASSES = [
     *TENSOR_ONLY_PASSES,
     "LowerCompositeOps",
     "FlattenTileNdTo2D",
+    "BlockNzTensorViews",
     "LegalizeTileCast",
     "AutoTileMatmulL0",
     "CanonicalizeTileSlice",

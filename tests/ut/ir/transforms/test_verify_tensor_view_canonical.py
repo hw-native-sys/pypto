@@ -142,21 +142,33 @@ def test_empty_stride_fails_strict():
 # ============================================================================
 
 
-def test_nz_layout_rejected_weak():
+def test_unblocked_nz_layout_rejected_weak():
+    # NZ is legal on a TensorType, but only in the blocked rank-(r+2) form.
+    # A logical 2-D NZ shape has no row-major stride that describes the fractal
+    # byte order, so the verifier flags it.
     view = ir.TensorView(_stride(16, 1), ir.TensorLayout.NZ)
     t = ir.TensorType(_shape(8, 16), DataType.FP32, None, view)
     diags = _verify(_program_with_param_type(t))
     assert len(diags) == 1
     assert "NZ" in diags[0].message
-    assert "tile-only" in diags[0].message
+    assert "unblocked" in diags[0].message
 
 
-def test_nz_layout_rejected_strict():
-    # NZ is rejected even when stride is empty — layout family is wrong.
+def test_unblocked_nz_layout_rejected_strict():
+    # Rejected even when stride is empty — the shape, not the stride, is wrong.
     view = ir.TensorView([], ir.TensorLayout.NZ)
     t = ir.TensorType(_shape(8, 16), DataType.FP32, None, view)
     diags = _verify(_program_with_param_type(t), require_materialized=True)
     assert any("NZ" in d.message for d in diags)
+
+
+def test_blocked_nz_layout_accepted():
+    # The positive counterpart: [256, 512] INT8 blocked to [16, 16, 16, 32]
+    # with pto-isa's NZ strides [8192, 512, 32, 1] is canonical.
+    view = ir.TensorView(_stride(8192, 512, 32, 1), ir.TensorLayout.NZ)
+    t = ir.TensorType(_shape(16, 16, 16, 32), DataType.INT8, None, view)
+    diags = _verify(_program_with_param_type(t), require_materialized=True)
+    assert diags == []
 
 
 # ============================================================================

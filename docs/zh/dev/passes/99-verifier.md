@@ -90,6 +90,8 @@
 
 ### InParamWritten
 
+> 这是[参数方向推导](../ir/08-param-directions.md)所述整条链的最后一环。
+
 **警告**：`DiagnosticCheck::InParamWritten` —— 声明为 `In` 的参数被其所在函数体写入。
 
 这是一个**警告，而非 `IRProperty`**，这个区分是实质性的而非措辞问题。见下文"为何不是属性"。

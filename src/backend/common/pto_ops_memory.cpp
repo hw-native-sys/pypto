@@ -38,6 +38,7 @@
 #include "pypto/ir/memref.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/type.h"
 #include "src/backend/common/pto_ops_internal.h"
 
@@ -106,6 +107,21 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
 
   INTERNAL_CHECK_SPAN(!shapes_tuple->elements_.empty(), op->span_)
       << "tile.load shapes tuple must have at least one element";
+
+  // TEMPORARY (pypto #2534): PTOAS has no L2-bypass path yet
+  // (https://github.com/hw-native-sys/PTOAS/issues/1356), so a BYPASS request is
+  // carried through the IR but compiles as an ordinary cached access. When that
+  // issue closes, this warn is REPLACED in place by
+  // `GetOrCreateTensorView(tensor, policy)` against an addptr-rooted view — the
+  // declaration already reaches here, so nothing upstream changes.
+  const auto policy = static_cast<ir::CachePolicy>(op->GetKwarg<int>("cache", 0));
+  if (policy == ir::CachePolicy::kBypass && codegen.NoteCacheBypassWarned(tensor.get())) {
+    LOG_WARN << "[warning] [CacheBypassUnsupported] tensor '"
+             << ir::auto_name::GetBaseName(tensor->name_hint_)
+             << "' requests CachePolicy.BYPASS, but PTOAS has no L2-bypass path yet "
+             << "(https://github.com/hw-native-sys/PTOAS/issues/1356); compiling as an "
+             << "ordinary cached access" << (op->span_.is_valid() ? " at " + op->span_.to_string() : "");
+  }
 
   std::string tensor_view = codegen.GetOrCreateTensorView(tensor);
   std::string dtype_str = codegen.GetTypeString(tensor_type->dtype_);

@@ -41,7 +41,9 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "pypto/ir/transforms/utils/buffer_root_collector.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/narrow_loop_carry.h"
 #include "pypto/ir/transforms/utils/result_alias_utils.h"
 #include "pypto/ir/transforms/utils/tile_conversion_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -80,6 +82,119 @@ CallPtr MarkCompilerMatBridge(const CallPtr& call, MemorySpace space) {
 
 bool IsPassthroughTensorOp(const CallPtr& call) {
   return IsOp(call, "tensor.dim") || IsOp(call, "tensor.view");
+}
+
+/// Declared GM cache policy per source tensor, keyed by the param Var the
+/// declaration resolved to. ``CachePolicy`` stored as ``int``, the type the
+/// ``tile.load`` ``cache`` kwarg is registered with.
+using CachePolicyByParam = std::unordered_map<const Var*, int>;
+
+/**
+ * @brief Resolve an InCore function's ``cache_policy`` attr to its param Vars.
+ *
+ * ``OutlineIncoreScopes`` (pass 8) records ``pl.set_cache_policy`` declarations
+ * as (param index, policy) pairs, because at that point the param Vars are
+ * freshly minted. Here the indices are turned back into Var identities — the
+ * form every load site below matches its source arg against — and the attr is
+ * erased on the way out (see ``EraseCachePolicyAttr``): param indices are only
+ * valid across passes 8..10, since later passes both append to and prepend onto
+ * param lists.
+ */
+CachePolicyByParam BuildCachePolicyByParam(const FunctionPtr& func) {
+  CachePolicyByParam policies;
+  auto indices = func->GetAttr<std::vector<std::pair<int32_t, int>>>(kAttrCachePolicyParams);
+  policies.reserve(indices.size());
+  for (const auto& [idx, policy] : indices) {
+    INTERNAL_CHECK_SPAN(idx >= 0 && static_cast<size_t>(idx) < func->params_.size(), func->span_)
+        << "Internal error: cache_policy param index " << idx << " out of range for function '" << func->name_
+        << "' with " << func->params_.size() << " param(s)";
+    // insert_or_assign, not emplace: a tensor declared twice takes its last
+    // declaration, deterministically (the attr is sorted by index).
+    policies.insert_or_assign(func->params_[static_cast<size_t>(idx)].get(), policy);
+  }
+  return policies;
+}
+
+/// Drop the consumed ``cache_policy`` attr. Nothing downstream may see it —
+/// its param indices go stale the moment a later pass grows the param list.
+std::vector<std::pair<std::string, std::any>> EraseCachePolicyAttr(
+    const std::vector<std::pair<std::string, std::any>>& attrs) {
+  std::vector<std::pair<std::string, std::any>> kept;
+  kept.reserve(attrs.size());
+  for (const auto& kv : attrs) {
+    if (kv.first == kAttrCachePolicyParams) continue;
+    kept.push_back(kv);
+  }
+  return kept;
+}
+
+/// Longest ``IterArg`` init chain followed when resolving a load source. Loop
+/// nesting is the real bound (single digits); this only stops malformed IR from
+/// spinning.
+constexpr int kMaxIterArgInitChain = 64;
+
+/**
+ * @brief Resolve a load source to the function parameter it ultimately reads.
+ *
+ * A loop-carried tensor reaches its load as an ``IterArg``, not as the param
+ * ``Var`` the declaration named -- ``IterArg`` is its own ``ObjectKind``, so
+ * ``AsVarLike`` hands it back as itself and a param-keyed lookup misses. Follow
+ * ``initValue_`` back to the root first, mirroring how
+ * ``PTOCodegen::TryGetTensorView`` resolves the same shape. Returns the
+ * innermost resolvable Var-like, which for a non-carried source is the source
+ * itself.
+ */
+VarPtr ResolveToRootParam(const ExprPtr& src) {
+  auto var = AsVarLike(src);
+  for (int depth = 0; var && depth < kMaxIterArgInitChain; ++depth) {
+    auto iter_arg = As<IterArg>(var);
+    if (!iter_arg) return var;
+    auto init = AsVarLike(iter_arg->initValue_);
+    if (!init) return var;
+    var = init;
+  }
+  return var;
+}
+
+/**
+ * @brief Add the declared ``cache`` kwarg for a synthesised ``tile.load``.
+ *
+ * No-op unless ``src`` is a param carrying a declaration. An explicit
+ * ``cache=`` already in ``kwargs`` always wins (precedence: per-access kwarg,
+ * then the scope declaration, then ``CachePolicy::kDefault``).
+ */
+void AppendCachePolicyKwarg(const ExprPtr& src, const CachePolicyByParam& policies,
+                            std::vector<std::pair<std::string, std::any>>* kwargs) {
+  if (policies.empty()) return;
+  auto var = ResolveToRootParam(src);
+  if (!var) return;
+  auto it = policies.find(var.get());
+  if (it == policies.end()) return;
+  const bool stated_explicitly =
+      std::any_of(kwargs->begin(), kwargs->end(), [](const auto& kv) { return kv.first == "cache"; });
+  if (stated_explicitly) return;
+  kwargs->emplace_back("cache", it->second);
+}
+
+/**
+ * @brief Stamp the declared policy onto a ``tile.load`` already in the body.
+ *
+ * A hand-written (or earlier-pass) load of a declared tensor must honour the
+ * declaration exactly as a synthesised one does, unless it states its own
+ * ``cache=``. Returns nullptr when nothing changes, so callers keep their
+ * copy-on-write short-circuit. Only ``Call`` is considered: a ``Submit``
+ * launches a task through a ``GlobalVar`` callee and can never carry a tile op.
+ */
+CallPtr StampCachePolicyOnLoad(const CallPtr& call, const CachePolicyByParam& policies) {
+  if (policies.empty() || !IsOp(call, "tile.load") || call->args_.empty()) return nullptr;
+  auto kwargs = call->kwargs_;
+  AppendCachePolicyKwarg(call->args_[0], policies, &kwargs);
+  // Unchanged when the source carries no declaration, or when the load already
+  // states its own ``cache=``.
+  if (kwargs.size() == call->kwargs_.size()) return nullptr;
+  auto stamped = MutableCopy(call);
+  stamped->kwargs_ = std::move(kwargs);
+  return stamped;
 }
 
 void CheckReinterpretViewIncoreLayout(const CallPtr& call) {
@@ -542,10 +657,27 @@ class TypePropagatingMutator : public IRMutator {
 class TensorToTileMutator : public TypePropagatingMutator {
  public:
   TensorToTileMutator(const OpConversionRegistry& conv_registry, const OpRegistry& op_registry,
-                      const ConsumerSpaceCollector& consumer_collector)
-      : conv_registry_(conv_registry), op_registry_(op_registry), consumer_collector_(consumer_collector) {}
+                      const ConsumerSpaceCollector& consumer_collector, CachePolicyByParam cache_policies)
+      : conv_registry_(conv_registry),
+        op_registry_(op_registry),
+        consumer_collector_(consumer_collector),
+        cache_policies_(std::move(cache_policies)) {}
 
  protected:
+  /// Honour a ``pl.set_cache_policy`` declaration on a ``tile.load`` that was
+  /// already in the body (user-written, or produced by an earlier pass) rather
+  /// than synthesised here. Hooked on the generic Call visit so the loads a
+  /// converter emits in its own prologue are covered too.
+  ExprPtr VisitExpr_(const CallPtr& op) override {
+    // Qualified with IRMutator: TypePropagatingMutator declares only the
+    // IterArg overload, which hides the base Call one from name lookup.
+    auto visited = IRMutator::VisitExpr_(op);
+    auto call = As<Call>(visited);
+    if (!call) return visited;
+    auto stamped = StampCachePolicyOnLoad(call, cache_policies_);
+    return stamped ? ExprPtr(stamped) : visited;
+  }
+
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     // Pin this Var's address for the pass so a freed-then-reused address cannot
     // alias a stale var_remap_ entry (see TypePropagatingMutator::RetainVar).
@@ -688,6 +820,7 @@ class TensorToTileMutator : public TypePropagatingMutator {
     // The consumer-driven load is always natural; a transposed (b_trans/a_trans)
     // operand gets a zero-copy tile.transpose_view at the matmul site instead.
     std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", req.space}};
+    AppendCachePolicyKwarg(input, cache_policies_, &load_kwargs);
     auto load_call =
         MarkCompilerMatBridge(op_registry_.Create("tile.load", {input, offset_arg, shape_arg, valid_shape},
                                                   load_kwargs, call->span_),
@@ -740,6 +873,7 @@ class TensorToTileMutator : public TypePropagatingMutator {
       auto offsets = MakeZeroOffsets(tensor_type->shape_.size(), call->span_);
       auto shapes = MakeShapeTuple(tensor_type->shape_, call->span_);
       std::vector<std::pair<std::string, std::any>> load_kw = {{"target_memory", space}};
+      AppendCachePolicyKwarg(arg, cache_policies_, &load_kw);
       auto load = MarkCompilerMatBridge(
           op_registry_.Create("tile.load", {arg, offsets, shapes, shapes}, load_kw, call->span_), space);
       std::string var_name;
@@ -818,6 +952,9 @@ class TensorToTileMutator : public TypePropagatingMutator {
   const OpConversionRegistry& conv_registry_;
   const OpRegistry& op_registry_;
   const ConsumerSpaceCollector& consumer_collector_;
+  /// Declared GM cache policies of this function's params (empty when the
+  /// function carries no ``pl.set_cache_policy`` declaration).
+  const CachePolicyByParam cache_policies_;
 };
 
 bool ExprUsesVar(const ExprPtr& expr, const Var* target) {
@@ -1788,8 +1925,14 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   consumer_collector.VisitStmt(canonical_body);
   consumer_collector.PropagateThroughInheritInputOps();
 
+  // Resolve the scope-declared GM cache policies onto this function's params.
+  // Every load this pass synthesises below, and every load already in the body,
+  // carries the declaration onward as a ``cache`` kwarg; the function attr is
+  // erased when the transformed function is rebuilt.
+  auto cache_policies = BuildCachePolicyByParam(func);
+
   // Create the body mutator
-  TensorToTileMutator mutator(conv_registry, op_registry, consumer_collector);
+  TensorToTileMutator mutator(conv_registry, op_registry, consumer_collector, cache_policies);
 
   // New body statements (prefix tile.loads + mutated body)
   std::vector<StmtPtr> new_stmts;
@@ -1830,6 +1973,7 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
     if (entry_req.has_value()) {
       load_kwargs.emplace_back("target_memory", entry_req->space);
     }
+    AppendCachePolicyKwarg(var, cache_policies, &load_kwargs);
     auto load_call = MarkCompilerMatBridge(
         op_registry.Create("tile.load", {var, offsets, shapes, shapes}, load_kwargs, load_span),
         entry_req.has_value() ? entry_req->space : MemorySpace::Vec);
@@ -1939,9 +2083,9 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   UpgradeWrittenTensorParamDirections(new_stmts, new_params, new_param_directions);
 
   auto new_body = SeqStmts::Flatten(std::move(new_stmts), span);
-  auto new_func =
-      std::make_shared<Function>(func->name_, new_params, new_param_directions, new_return_types, new_body,
-                                 span, FunctionType::InCore, func->level_, func->role_, func->attrs_);
+  auto new_func = std::make_shared<Function>(func->name_, new_params, new_param_directions, new_return_types,
+                                             new_body, span, FunctionType::InCore, func->level_, func->role_,
+                                             EraseCachePolicyAttr(func->attrs_));
 
   return {new_func, num_added_outputs};
 }
@@ -2404,48 +2548,139 @@ Pass ConvertTensorToTileOps() {
         func_map[func->name_] = func;
       }
 
+      // Everything derived from a *body* is computed once, before the fixed
+      // point. The loop below only rewrites `param_directions_` — it replaces a
+      // function with a `MutableCopy` whose body is the same node — so the
+      // parameter index, the buffer lineage and the call list are all invariant
+      // across rounds. Rebuilding them per round made the added analysis cost
+      // O(rounds x program), over the O(N log N) bound
+      // `.claude/rules/pass-complexity.md` sets; hoisting leaves the loop
+      // proportional to the call arguments it actually re-reads.
+      struct CallerFacts {
+        std::unordered_map<const Var*, size_t> param_idx;
+        std::vector<CallPtr> calls;
+        std::unordered_map<const Var*, const Var*> buffer_roots;
+        std::unordered_map<const Var*, std::vector<const Var*>> candidates;
+      };
+      std::unordered_map<std::string, CallerFacts> facts_by_name;
+      for (const auto& func : functions_phase2b) {
+        if (func->func_type_ == FunctionType::InCore) continue;
+
+        CallerFacts f;
+        for (size_t i = 0; i < func->params_.size(); ++i) {
+          f.param_idx[func->params_[i].get()] = i;
+        }
+
+        // An argument rarely *is* the parameter. `for acc in ...: acc =
+        // kernel(x, acc)` forwards a loop-carried `IterArg` whose value is the
+        // parameter's buffer, and looking the IterArg up in `param_idx` finds
+        // nothing — so the enclosing signature kept declaring `In` for a buffer
+        // the call chain writes. Resolving the argument to its owning buffer
+        // first is what makes the propagation reach through a carry, and it is
+        // the same resolution the InParamWritten warning uses to decide which
+        // parameter a write lands on.
+        buffer_root::BufferRootCollector roots(program, buffer_root::AmbiguousRootPolicy::kSkip);
+        roots.Initialize(func->params_);
+        roots.VisitStmt(func->body_);
+        f.buffer_roots = roots.buffer_roots;
+        // An ambiguous var is exactly the case the single-root map cannot
+        // answer, so keep the candidates it does have.
+        for (const Var* var : roots.ambiguous_buffer_vars) {
+          f.candidates[var] = roots.RootCandidatesOf(var);
+        }
+
+        class CallScanner : public IRVisitor {
+         public:
+          std::vector<CallPtr> calls;
+          void VisitExpr_(const CallPtr& call) override {
+            Record(call);
+            IRVisitor::VisitExpr_(call);
+          }
+
+          /// A task launch forwards its arguments exactly as a plain call does,
+          /// and the base visitor does not route `Submit` through the `Call`
+          /// handler (`.claude/rules/pass-submit-awareness.md`). Without this a
+          /// parameter handed to an `Out` callee through `pl.submit` never
+          /// reached the propagation below, so an orchestration function that
+          /// only ever submits kept declaring `In` for a buffer its tasks write.
+          /// The view is transient — the loop reads only `op_` and `args_` — and
+          /// `args_` is a positional prefix of the callee's params, which the
+          /// loop's dual bound already respects.
+          void VisitExpr_(const SubmitPtr& submit) override {
+            Record(SubmitToCallView(submit));
+            IRVisitor::VisitExpr_(submit);
+          }
+
+         private:
+          void Record(const CallPtr& call) {
+            if (std::dynamic_pointer_cast<const GlobalVar>(call->op_)) {
+              calls.push_back(call);
+            }
+          }
+        };
+        CallScanner scanner;
+        scanner.VisitStmt(func->body_);
+        f.calls = std::move(scanner.calls);
+
+        facts_by_name[func->name_] = std::move(f);
+      }
+
       bool changed = true;
       while (changed) {
         changed = false;
         for (auto& func : functions_phase2b) {
           if (func->func_type_ == FunctionType::InCore) continue;
-
-          std::unordered_map<const Var*, size_t> param_idx;
-          for (size_t i = 0; i < func->params_.size(); ++i) {
-            param_idx[func->params_[i].get()] = i;
-          }
-
-          class CallScanner : public IRVisitor {
-           public:
-            std::vector<CallPtr> calls;
-            void VisitExpr_(const CallPtr& call) override {
-              if (std::dynamic_pointer_cast<const GlobalVar>(call->op_)) {
-                calls.push_back(call);
-              }
-              IRVisitor::VisitExpr_(call);
-            }
-          };
-          CallScanner scanner;
-          scanner.VisitStmt(func->body_);
+          auto facts_it = facts_by_name.find(func->name_);
+          if (facts_it == facts_by_name.end()) continue;
+          const CallerFacts& facts = facts_it->second;
 
           auto new_dirs = func->param_directions_;
-          for (const auto& call : scanner.calls) {
+          for (const auto& call : facts.calls) {
             auto gv = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
             if (!gv) continue;
             auto callee_it = func_map.find(gv->name_);
             if (callee_it == func_map.end()) continue;
             const auto& callee = callee_it->second;
             for (size_t ai = 0; ai < call->args_.size() && ai < callee->param_directions_.size(); ++ai) {
-              auto arg_var = As<Var>(call->args_[ai]);
+              // AsVarLike, not As<Var>: an IterArg has its own ObjectKind and
+              // does not match As<Var> (.claude/rules/ir-kind-traits.md).
+              auto arg_var = AsVarLike(call->args_[ai]);
               if (!arg_var) continue;
-              auto pi = param_idx.find(arg_var.get());
-              if (pi == param_idx.end()) continue;
-              ParamDirection callee_dir = callee->param_directions_[ai];
-              ParamDirection& caller_dir = new_dirs[pi->second];
-              if (callee_dir == ParamDirection::Out && caller_dir == ParamDirection::In) {
-                caller_dir = ParamDirection::Out;
-              } else if (callee_dir == ParamDirection::InOut && caller_dir != ParamDirection::InOut) {
-                caller_dir = ParamDirection::InOut;
+              const ParamDirection callee_dir = callee->param_directions_[ai];
+              if (callee_dir != ParamDirection::Out && callee_dir != ParamDirection::InOut) continue;
+
+              // Control flow can leave a value naming more than one buffer:
+              //
+              //     t = a if cond else b
+              //     self.writer(src, t)      # writer declares its slot Out
+              //
+              // The callee writes whichever `t` turned out to be, so *both* `a`
+              // and `b` may be written and both must be upgraded. Skipping the
+              // ambiguous var — which is what this did — drops the dependency
+              // for every candidate at once, and that is the direction that
+              // fails silently: an under-declared `In` loses the RAW edge and
+              // races on device, where an over-declared `Out` only over-orders.
+              // Under `kSkip` such a var has no `buffer_roots` entry by
+              // construction, so the candidate list is the only place the answer
+              // exists.
+              auto cand_it = facts.candidates.find(arg_var.get());
+              std::vector<const Var*> arg_roots;
+              if (cand_it != facts.candidates.end()) {
+                arg_roots = cand_it->second;
+              } else {
+                auto root_it = facts.buffer_roots.find(arg_var.get());
+                arg_roots.push_back(root_it == facts.buffer_roots.end() ? arg_var.get() : root_it->second);
+              }
+
+              for (const Var* arg_root : arg_roots) {
+                auto pi = facts.param_idx.find(arg_root);
+                if (pi == facts.param_idx.end()) continue;
+                ParamDirection& caller_dir = new_dirs[pi->second];
+                if (callee_dir == ParamDirection::Out && caller_dir == ParamDirection::In) {
+                  caller_dir = ParamDirection::Out;
+                } else if (callee_dir == ParamDirection::InOut && caller_dir != ParamDirection::InOut) {
+                  caller_dir = ParamDirection::InOut;
+                }
               }
             }
           }
@@ -2459,6 +2694,15 @@ Pass ConvertTensorToTileOps() {
           }
         }
       }
+    }
+
+    // A `tensor.matmul` drops its operands' valid_shape, so an accumulator only
+    // becomes narrower than the seed it is carried from once this pass turns it into
+    // a `tile.matmul` -- which re-types the yields but not the carry those yields
+    // flow through. Repair it here rather than leave a carry the TypeCheck and
+    // AccCompactValid verifiers reject (issue #2470).
+    for (auto& func : functions_phase2b) {
+      func = narrow_loop_carry::NarrowAccCarries(func);
     }
 
     return std::make_shared<Program>(functions_phase2b, program->name_, program->span_);

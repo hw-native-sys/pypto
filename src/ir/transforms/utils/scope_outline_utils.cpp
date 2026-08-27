@@ -1325,6 +1325,18 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
     outlined_body = std::make_shared<SeqStmts>(body_stmts, op->span_);
   }
 
+  // Map each captured input Var to its positional index. The index is exact for
+  // BOTH surfaces the translations below need: ``input_params`` is built
+  // index-parallel to ``input_vars`` and is what the outlined ``Function`` is
+  // constructed from, and ``call_args`` is built from ``input_vars`` in the same
+  // order. Built once here, ahead of the attr resolution that follows, and
+  // reused by the no_dep / dump translations further down.
+  std::unordered_map<const Var*, int32_t> input_var_to_idx;
+  input_var_to_idx.reserve(input_vars.size());
+  for (size_t i = 0; i < input_vars.size(); ++i) {
+    input_var_to_idx[input_vars[i].get()] = static_cast<int32_t>(i);
+  }
+
   // Register the outlined function (propagate level/role from ScopeStmt, convert split/core_num to attrs)
   std::vector<std::pair<std::string, std::any>> outlined_attrs;
   auto append_split_attr = [&](SplitMode split) {
@@ -1349,6 +1361,42 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
     if (deferred_wait.has_deferred_wait) {
       outlined_attrs.emplace_back(kAttrDeferredCompletionWaiter, true);
     }
+  };
+  // Resolve pl.set_cache_policy declarations onto the outlined function's params.
+  // The scope attr is consumed here and never propagated: downstream the function
+  // attr (param indices) is the single carrier until ConvertTensorToTileOps
+  // converts it to per-load kwargs at pass 10.
+  auto append_cache_policy_attr = [&]() {
+    auto scope_cache_policies = op->GetAttr<std::vector<std::pair<VarPtr, int>>>(kAttrCachePolicyVars);
+    if (scope_cache_policies.empty()) return;
+    std::vector<std::pair<int32_t, int>> cache_policy_indices;
+    cache_policy_indices.reserve(scope_cache_policies.size());
+    for (const auto& [v, policy] : scope_cache_policies) {
+      INTERNAL_CHECK_SPAN(v, op->span_)
+          << "Internal error: null Var in cache_policy_vars on outlined scope '" << outlined_func_name << "'";
+      auto it = input_var_to_idx.find(v.get());
+      CHECK_SPAN(it != input_var_to_idx.end(), op->span_)
+          << "pl.set_cache_policy(...) references tensor '" << v->name_hint_
+          << "', which is not captured by the scope body. Only tensors actually read inside the "
+             "scope can be declared.";
+      // A bypassing read only makes sense on a tensor this kernel does not
+      // write: the policy is a promise about the bytes, and the direction
+      // inference above already knows whether the scope writes them.
+      const ParamDirection dir = input_param_directions[static_cast<size_t>(it->second)];
+      CHECK_SPAN(static_cast<CachePolicy>(policy) != CachePolicy::kBypass || dir == ParamDirection::In,
+                 op->span_)
+          << "pl.set_cache_policy(" << v->name_hint_
+          << ", CachePolicy.BYPASS) is not allowed on a tensor this scope writes ("
+          << ParamDirectionToString(dir)
+          << "). A bypassing read of bytes the same kernel writes is a coherency bug.";
+      cache_policy_indices.emplace_back(it->second, policy);
+    }
+    // Sorted by param index for the same reason ``arg_dir_override_indices`` is:
+    // the declaration set is order-independent, so two programs that differ only
+    // in the order the user wrote the declarations (or in capture order) must
+    // produce structurally equal IR, and dumps must stay deterministic.
+    std::sort(cache_policy_indices.begin(), cache_policy_indices.end());
+    outlined_attrs.emplace_back(kAttrCachePolicyParams, std::move(cache_policy_indices));
   };
   // Bridge the first-class SplitAivScopeStmt region into the function-level
   // AIV-split markers the downstream contract (passes 11-24) expects. The
@@ -1418,6 +1466,10 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
     append_deferred_completion_waiter_attr();
     append_split_aiv_attr(incore->split_);
   }
+  // Scope-kind agnostic: a cache-policy declaration reads the same on an InCore
+  // task and on the Hierarchy scope that encloses one, and both outline through
+  // this helper.
+  append_cache_policy_attr();
   std::optional<Level> outlined_level;
   std::optional<Role> outlined_role;
   if (auto hier = As<HierarchyScopeStmt>(op)) {
@@ -1509,17 +1561,6 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
     var_types_[scope_task_id_var.get()] = scope_task_id_var->GetType();
     var_objects_[scope_task_id_var.get()] = scope_task_id_var;
     known_names_.insert(scope_task_id_var->name_hint_);
-  }
-
-  // Map each captured input Var to its positional arg index. Shared by the
-  // no_dep override translation and the dump translation below; built once
-  // when either needs it.
-  std::unordered_map<const Var*, int32_t> input_var_to_idx;
-  if (!scope_no_dep_vars.empty() || !scope_dump_vars.empty()) {
-    input_var_to_idx.reserve(input_vars.size());
-    for (size_t i = 0; i < input_vars.size(); ++i) {
-      input_var_to_idx[input_vars[i].get()] = static_cast<int32_t>(i);
-    }
   }
 
   std::vector<int32_t> arg_dir_override_indices;

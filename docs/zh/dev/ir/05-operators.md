@@ -48,6 +48,9 @@ auto dynamic_dim = make_int(kDynamicDim);
 
 ### 参数效应（Argument effects）
 
+> 消费这些声明的整条链见
+> [参数方向推导](08-param-directions.md)。
+
 原地更新某个参数的算子必须显式声明。方向推导（direction inference）、依赖分析
 （dependency analysis）和参数方向验证器都向注册表询问同一个问题——*这次调用是否
 写入该参数所指的缓冲区？*——而从未回答过的算子会被读成纯消费者：
@@ -281,7 +284,7 @@ init 操作数。由于 `matmul_acc` 是原地操作（`set_output_reuses_input(
 
 「字面量」涵盖常量谓词到达 emitter 时的**两种**形态：DSL 写法 `init_cond=True`/
 `False` 到达时是 BOOL 类型的 `ConstInt`，而被更早的 pass 折叠过的谓词到达时是
-`ConstBool` —— 当 [`LowerPipelineLoops`](../passes/28-lower_pipeline_loops.md)
+`ConstBool` —— 当 [`LowerPipelineLoops`](../passes/29-lower_pipeline_loops.md)
 复制 K-loop *且*外层循环被消除、每个副本的索引成为字面量时，生成的 `ko == 0` 正是
 这种形态。两者都会直接选定一个分支；若 emitter 只折叠其中一种，未覆盖到的每个 K
 block 都会发出双倍 MAD。
@@ -617,7 +620,7 @@ layout 来自目标，因为它描述的是目标缓冲区如何分块，由
 `tile.move` 自己把目标 `memory_space` 打到推导出的类型上（参见
 [类型](02-types.md#tiletype) 中的 `TileType` 契约），因此当结果 view 与目标 space 的
 implicit view 一致时会折叠为 `nullopt` —— 这与
-[`InferTileMemorySpace`](../passes/17-infer_tile_memory_space.md) 为重新定型的 tile
+[`InferTileMemorySpace`](../passes/18-infer_tile_memory_space.md) 为重新定型的 tile
 刷新的 per-space implicit view 是同一套。
 
 `tile.move` 不支持原地执行：在同一 memory space 内，源和结果必须解析到不同地址。
@@ -644,6 +647,12 @@ reshape 是零拷贝视图，无法凭空产生数据：`tensor.reshape` 与 `ti
 valid `[8, 5]` 是精确的，因为丢弃完全有效的单位轴不改变行列关系。
 `tensor.reshape` 可选的第三个 `valid_shape` 操作数只能*收窄*推导出的区域，
 不能声称拥有该区域之外的数据。
+
+**恒等** `tile.reshape`（目标形状与源形状相同）还会保留源的 layout 三元组
+（`blayout` / `slayout` / `fractal`）及其已解析的内存空间，而不是按形状重新推导 layout。
+重新推导得到的是与空间无关的扁平 layout；`NormalizeImplicitTileView` 只会为可折叠的
+view 兜底，而被收窄、带 pad 或声明了 `compact` 的 Acc 盒永远不可折叠——扁平 layout 于是
+被固化下来，其读者会把 L0C 当作普通 row-major 缓冲区来遍历（issue #2470）。
 
 **数据流：** `TensorType (DDR) → tile.load → TileType (Unified Buffer) → tile.{ops} → TileType → tile.store → TensorType (DDR)`
 

@@ -38,7 +38,7 @@ approximation.
 **The judgement to carry forward.** A chain differs only when an intermediate cannot
 represent the in-range source values exactly. Check that property for *your* chain rather
 than treating "it got expanded" as evidence. See
-[LegalizeTileCast](../../dev/passes/14-legalize_tile_cast.md).
+[LegalizeTileCast](../../dev/passes/15-legalize_tile_cast.md).
 
 **Where to look instead.** Back to step 2 for another entry, or on to step 4.
 
@@ -119,4 +119,4 @@ there was nothing to find.
 
 - [Narrowing down a gap](00-workflow.md) — the procedure.
 - [Performance](../performance/index.md) — the same treatment for slow.
-- [LegalizeTileCast](../../dev/passes/14-legalize_tile_cast.md) — cast chain exactness.
+- [LegalizeTileCast](../../dev/passes/15-legalize_tile_cast.md) — cast chain exactness.

@@ -152,6 +152,18 @@ through the environment:
 CMAKE_BUILD_TYPE=Release pip install .
 ```
 
+`RelWithDebInfo` carries full debug info, which is what a debugger needs — and also most
+of the artifact: the extension is 304 MiB, of which 292 MiB is DWARF. Set
+`PYPTO_DEBUG_INFO_LEVEL=1` to keep only what backtraces read, the function descriptions
+and line-number tables. The extension drops to 62 MiB and its wheel to 18 MiB, the
+compile is about a third faster, and the `C++ Traceback` in an error message is
+unchanged. What goes is local variables and types, so keep the default whenever you
+plan to attach a debugger:
+
+```bash
+SKBUILD_CMAKE_DEFINE=PYPTO_DEBUG_INFO_LEVEL=1 pip install .
+```
+
 `ccache` is detected and used automatically when present, which makes repeated builds
 substantially cheaper:
 

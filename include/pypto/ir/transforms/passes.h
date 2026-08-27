@@ -481,6 +481,35 @@ Pass ConvertTensorToTileOps();
 Pass OptimizeOrchTensors();
 
 /**
+ * @brief Rewrite logical ``pl.NZ`` tensors into pto-isa's blocked NZ form
+ *
+ * A ``pl.Tensor[[..., R, C], dtype, pl.NZ]`` annotation asserts that the GM
+ * bytes are already in PTO-native NZ fractal order while the DSL keeps the
+ * logical shape and slicing. pto-isa describes such a buffer with a blocked
+ * rank-(r+2) GlobalTensor, so this pass rewrites:
+ *
+ *   - every NZ ``TensorType`` shape to ``[..., C/c0, R/16, 16, c0]``, where
+ *     ``c0`` is the number of elements in a 32-byte C0 line (``256 / bits``);
+ *     strides stay empty for ``MaterializeTensorStrides``, whose plain
+ *     row-major rule already yields pto-isa's NZ strides once blocked;
+ *   - every consuming ``tile.load``'s offsets / shapes / valid_shape into
+ *     blocked coordinates, preserving the logical 2-D destination ``TileType``.
+ *
+ * Milestone 1 scope: read-only, ``target_memory=Mat`` only, whole-byte dtypes,
+ * static shapes, ``R % 16 == 0`` and ``C % c0 == 0`` with equally aligned slice
+ * offsets. Anything else is rejected rather than silently mis-addressed.
+ *
+ * Requirements:
+ * - Input IR must have tile ops (run ConvertTensorToTileOps first)
+ * - Must run **after** FlattenTileNdTo2D (requires ``TileOps2D``): the
+ *   destination tile must already be the logical 2-D operand, or the rewritten
+ *   ``tile.load`` has a type annotation and argument ranks that cannot both be
+ *   printed. FlattenTileNdTo2D skips its ND2NZ window collapse for NZ sources,
+ *   so the logical window is still intact here.
+ */
+Pass BlockNzTensorViews();
+
+/**
  * @brief Flatten ND tile ops to 2D in InCore functions
  *
  * Merges all dimensions except the last into a single dimension.

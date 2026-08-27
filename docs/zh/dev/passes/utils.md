@@ -123,3 +123,5 @@ auto used = memref_collectors::CollectUsedBasePtrs(func->body_);
 | `auto_name_utils.h` | SSA 名称生成、重命名映射、名称解析 |
 | `parent_stmt_analysis.h` | 父子语句映射 |
 | `dead_code_elimination.h` | 函数内死代码消除 |
+| `acc_init_builder.h` | `BuildAccStorage`、`BuildNarrowedAccInit` —— 声明 L0C 累加器；有效行未填满物理盒时声明为 compact |
+| `narrow_loop_carry.h` | `NarrowAccCarries` —— 把 Acc 循环携带值重新声明为其 yield 可证明的有效范围 |

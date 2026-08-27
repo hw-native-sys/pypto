@@ -40,4 +40,4 @@
 - [作用域与放置](../language/04-scopes.md) —— 姊妹问题：代码由哪块硬件执行。
 - [类型 § 参数方向](../language/00-types.md#参数方向) —— 运行时据以推边的那个声明。
 - [算子](../ops/01-catalog.md) —— 本章提到的算子的一行式条目。
-- [AutoDeriveTaskDependencies](../../dev/passes/38-auto_derive_task_dependencies.md) —— 发出编译器侧那些边的 pass。
+- [AutoDeriveTaskDependencies](../../dev/passes/39-auto_derive_task_dependencies.md) —— 发出编译器侧那些边的 pass。

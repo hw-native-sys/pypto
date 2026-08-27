@@ -65,6 +65,20 @@ bool HasKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, const
                      [&name](const auto& kwarg) { return kwarg.first == name; });
 }
 
+/// True when a `tile.load`'s source tensor carries the NZ layout.
+///
+/// `BlockNzTensorViews` has already put such a load into its final form — a
+/// blocked rank-(r+2) GM window feeding a logical 2D tile — so this pass must
+/// leave it alone rather than collapse the window or re-deduce the tile type.
+bool IsNzSourceLoad(const std::vector<ExprPtr>& args) {
+  if (args.empty()) return false;
+  auto tensor = AsVarLike(args[0]);
+  if (!tensor) return false;
+  auto tensor_type = AsTensorTypeLike(tensor->GetType());
+  return tensor_type && tensor_type->tensor_view_.has_value() &&
+         tensor_type->tensor_view_->layout == TensorLayout::NZ;
+}
+
 /// Carry the assignment's MemRef onto a type re-deduced by `OpRegistry::Create`.
 ///
 /// Re-deducing yields authoritative shape / dtype / view metadata but never a
@@ -731,7 +745,14 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         // A natural Mat load lowers to ND2NZ, which requires a 2D GlobalTensor.
         // Materialize that source-window collapse in IR with tensor.view; plain
         // Vec loads and transposed Mat loads keep their tensor-rank source window.
-        if (IsNaturalNzMatLoad(result_tile, pending_batch_matmul_mat)) {
+        // The collapse below exists because a natural Mat load lowers to ND2NZ,
+        // which pto-isa only accepts on a 2D GlobalTensor. An NZ *source* takes
+        // the NZ2NZ path instead, and BlockNzTensorViews (which runs right after
+        // this pass) will give it the blocked rank-(r+2) window that path wants.
+        // Collapsing here would flatten the fractal dims into a row count and
+        // destroy that structure, so leave the window at tensor rank and only
+        // flatten the tile.
+        if (IsNaturalNzMatLoad(result_tile, pending_batch_matmul_mat) && !IsNzSourceLoad(sub_args)) {
           auto tensor = AsVarLike(sub_args[0]);
           auto tensor_type = tensor ? AsTensorTypeLike(tensor->GetType()) : nullptr;
           INTERNAL_CHECK_SPAN(tensor && tensor_type, span)

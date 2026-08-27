@@ -72,4 +72,4 @@ python -m pypto.tools.memory_map "$OUT/passes_dump/NN_after_SomePass.py" -o map.
 - [内存](../performance/05-memory.md) —— 运行时那四个环，以及本工具所画的片上预算。
 - [InCore 函数调优](../performance/04-incore.md) —— 消耗这份预算的一侧。
 - [调试](00-debugging.md) —— pass dump 的另一个读者。
-- [AllocateMemoryAddr](../../dev/passes/34-allocate_memory_addr.md) —— 这张图所呈现的那个 pass 的输出。
+- [AllocateMemoryAddr](../../dev/passes/35-allocate_memory_addr.md) —— 这张图所呈现的那个 pass 的输出。

@@ -12,12 +12,15 @@
 #ifndef PYPTO_IR_TRANSFORMS_UTILS_TRANSFORM_UTILS_H_
 #define PYPTO_IR_TRANSFORMS_UTILS_TRANSFORM_UTILS_H_
 
+#include <any>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "pypto/ir/expr.h"
@@ -100,6 +103,26 @@ inline CallPtr GetCallFromStmt(const StmtPtr& stmt) {
   if (auto assign = As<AssignStmt>(stmt)) return As<Call>(assign->value_);
   if (auto eval = As<EvalStmt>(stmt)) return As<Call>(eval->expr_);
   return nullptr;
+}
+
+/// Re-attach a Call's attributes to a freshly deduced Call.
+///
+/// ``OpRegistry::Create`` re-runs the operator's deducer and therefore returns a Call
+/// carrying no attributes. A pass that re-deduces a call to refresh its result type must
+/// put them back, or compiler-set semantics (dependency edges, split assignments, pipe
+/// ids, ...) silently disappear from the rebuilt node. Returns @p deduced untouched when
+/// there is nothing to carry over.
+inline CallPtr PreserveCallAttrs(const std::vector<std::pair<std::string, std::any>>& attrs,
+                                 const CallPtr& deduced) {
+  if (attrs.empty()) return deduced;
+  return std::make_shared<Call>(deduced->op_, deduced->args_, deduced->kwargs_, attrs, deduced->GetType(),
+                                deduced->span_);
+}
+
+/// Overload taking the attributes from @p original -- pass the *rebuilt* call when a
+/// mutator has already remapped what its attributes reference.
+inline CallPtr PreserveCallAttrs(const CallPtr& original, const CallPtr& deduced) {
+  return PreserveCallAttrs(original->attrs_, deduced);
 }
 
 /// Collect all AssignStmt var_ (DEF sites) from a statement tree.

@@ -29,6 +29,7 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/transforms/base/functor.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
@@ -388,9 +389,36 @@ class IntSetAnalyzer::Impl : public ExprFunctor<IntSet> {
 std::function<void()> IntSetAnalyzer::Impl::EnterConstraint(const ExprPtr& constraint) {
   std::vector<std::pair<const Expr*, IntSet>> recovery;
 
-  auto TryTighten = [&](const Expr* var_ptr, const IntSet& new_set) {
+  // SymMaxLower / SymMinUpper merge a new bound with the existing one by building
+  // Ge / Min / Max over the two, and those builders reject operands that are not
+  // scalars of the same numeric category. So a bound is recorded only when it is a
+  // numeric scalar matching the category of the variable it bounds; anything else
+  // (non-scalar, bool, mismatched category) is dropped instead.
+  auto NumericScalarType = [](const ExprPtr& expr) -> ScalarTypePtr {
+    auto scalar_type = As<ScalarType>(expr->GetType());
+    if (scalar_type && (scalar_type->dtype_.IsInt() || scalar_type->dtype_.IsFloat())) return scalar_type;
+    return nullptr;
+  };
+
+  auto TryTighten = [&](const VarPtr& var, const IntSet& new_set) {
+    if (new_set.is_everything()) return;  // No bound survived — nothing to record.
+    auto var_type = NumericScalarType(var);
+    if (!var_type) return;
+    auto MatchesVarCategory = [&](const ExprPtr& bound) {
+      auto bound_type = NumericScalarType(bound);
+      return bound_type && bound_type->dtype_.IsInt() == var_type->dtype_.IsInt();
+    };
+    if (new_set.min_value && !MatchesVarCategory(new_set.min_value)) return;
+    if (new_set.max_value && !MatchesVarCategory(new_set.max_value)) return;
+
+    const Expr* var_ptr = var.get();
     auto it = var_map_.find(var_ptr);
     IntSet old = (it != var_map_.end()) ? it->second : IntSet::Everything();
+    // Update() / Bind() are not routed through this guard, so an existing bound may
+    // be of the other category — merging it here is what would build the mixed Min/Max.
+    if (old.min_value && !MatchesVarCategory(old.min_value)) return;
+    if (old.max_value && !MatchesVarCategory(old.max_value)) return;
+
     recovery.emplace_back(var_ptr, old);
     // Tighten: new_min = max(old.min, new.min), new_max = min(old.max, new.max)
     var_map_[var_ptr] = {SymMaxLower(old.min_value, new_set.min_value, parent_),
@@ -399,54 +427,65 @@ std::function<void()> IntSetAnalyzer::Impl::EnterConstraint(const ExprPtr& const
 
   ExprPtr one = MakeConstInt(1, DataType::INT64);
 
+  // A strict comparison is stored as the equivalent closed bound. Integers have a
+  // predecessor, so `left > right` is *exactly* `left >= right + 1`. No other dtype
+  // does — `f > 1.0` does not imply `f >= 2.0` — so there the strictness is simply
+  // forgotten and the non-strict bound `left >= right` is recorded instead: weaker,
+  // but sound, and it keeps float comparisons contributing bounds at all.
+  auto StrictBound = [&](const ExprPtr& bound, bool increment) -> ExprPtr {
+    auto bound_type = NumericScalarType(bound);
+    if (!bound_type || !bound_type->dtype_.IsInt()) return bound;
+    return MaybeSimplify(parent_, increment ? MakeAdd(bound, one) : MakeSub(bound, one));
+  };
+
   std::function<void(const ExprPtr&)> TryParse = [&](const ExprPtr& expr) {
     // Ge: left >= right  =>  left.min = right
     if (auto ge = As<Ge>(expr)) {
       if (auto var = As<Var>(ge->left_)) {
-        TryTighten(var.get(), {ge->right_, nullptr});
+        TryTighten(var, {ge->right_, nullptr});
       }
       if (auto var = As<Var>(ge->right_)) {
-        TryTighten(var.get(), {nullptr, ge->left_});
+        TryTighten(var, {nullptr, ge->left_});
       }
       return;
     }
     // Gt: left > right  =>  left.min = right + 1
     if (auto gt = As<Gt>(expr)) {
       if (auto var = As<Var>(gt->left_)) {
-        TryTighten(var.get(), {MaybeSimplify(parent_, MakeAdd(gt->right_, one)), nullptr});
+        TryTighten(var, {StrictBound(gt->right_, /*increment=*/true), nullptr});
       }
       if (auto var = As<Var>(gt->right_)) {
-        TryTighten(var.get(), {nullptr, MaybeSimplify(parent_, MakeSub(gt->left_, one))});
+        TryTighten(var, {nullptr, StrictBound(gt->left_, /*increment=*/false)});
       }
       return;
     }
     // Le: left <= right  =>  left.max = right
     if (auto le = As<Le>(expr)) {
       if (auto var = As<Var>(le->left_)) {
-        TryTighten(var.get(), {nullptr, le->right_});
+        TryTighten(var, {nullptr, le->right_});
       }
       if (auto var = As<Var>(le->right_)) {
-        TryTighten(var.get(), {le->left_, nullptr});
+        TryTighten(var, {le->left_, nullptr});
       }
       return;
     }
     // Lt: left < right  =>  left.max = right - 1
     if (auto lt = As<Lt>(expr)) {
       if (auto var = As<Var>(lt->left_)) {
-        TryTighten(var.get(), {nullptr, MaybeSimplify(parent_, MakeSub(lt->right_, one))});
+        TryTighten(var, {nullptr, StrictBound(lt->right_, /*increment=*/false)});
       }
       if (auto var = As<Var>(lt->right_)) {
-        TryTighten(var.get(), {MaybeSimplify(parent_, MakeAdd(lt->left_, one)), nullptr});
+        TryTighten(var, {StrictBound(lt->left_, /*increment=*/true), nullptr});
       }
       return;
     }
     // Eq: left == right  =>  left = [right, right]
     if (auto eq = As<Eq>(expr)) {
       if (auto var = As<Var>(eq->left_)) {
-        TryTighten(var.get(), IntSet::SinglePoint(eq->right_));
+        TryTighten(var, IntSet::SinglePoint(eq->right_));
       }
       if (auto var = As<Var>(eq->right_)) {
-        TryTighten(var.get(), IntSet::SinglePoint(eq->left_));
+        TryTighten(var, IntSet::SinglePoint(eq->left_));
       }
       return;
     }

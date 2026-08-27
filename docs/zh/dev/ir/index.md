@@ -15,6 +15,7 @@ IR 定义是整个编译器的真源：pass 可以重写，IR 节点定义不可
 | [算子系统](05-operators.md) | 带自动类型推导的类型安全算子定义 |
 | [IR Builder](06-builder.md) | 增量构造 IR —— Python 用上下文管理器，C++ 用 Begin/End |
 | [IR Parser](07-parser.md) | 通过 `@pl.function` / `@pl.program` 把 Python DSL 转成 IR，以及它强制的 SSA 性质 |
+| [参数方向](08-param-directions.md) | `In`/`Out`/`InOut` 如何被推导——各阶段共同读取的注册表声明，以及基于它的四个 pass |
 
 ## 另请参阅
 

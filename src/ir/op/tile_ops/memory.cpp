@@ -263,6 +263,17 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
     tile_view.valid_shape = valid_shape_tuple->elements_;
   }
 
+  // Optional GM cache-access policy. Absent = the caller stated none; an
+  // explicit kDefault is distinct from absence and out-ranks a scope-level
+  // declaration downstream. Range-checked here, at the op boundary, for the
+  // same reason `atomic` is: the DSL types it as CachePolicy, but the text
+  // parser and hand-built or deserialized IR can hand over any int, and an
+  // unknown one would otherwise surface at codegen with no context.
+  const int cache = GetKwarg<int>(kwargs, "cache", static_cast<int>(CachePolicy::kDefault));
+  CHECK(cache == static_cast<int>(CachePolicy::kDefault) || cache == static_cast<int>(CachePolicy::kBypass))
+      << "The operator " << op_name
+      << " cache kwarg must be CachePolicy.DEFAULT or CachePolicy.BYPASS, but got int " << cache;
+
   // Return TileType with same dtype as tensor and TileView containing valid_shape.
   // When target_memory is specified, write it into memory_space_ so the constructed
   // type is internally coherent (tile_view layout and memory_space agree). This
@@ -1099,6 +1110,9 @@ REGISTER_OP("tile.load")
         "Valid shape of tile in each dimension, in source tensor coordinates (TupleType of ScalarType). ")
     .set_attr<MemorySpace>("target_memory")
     .set_attr<bool>("clamp")
+    // Declared GM cache-access policy, carried as an int (``ir::CachePolicy``)
+    // so serialization / structural comparison need no new enum arm.
+    .set_attr<int>("cache")
     // No fallback: when target_memory is absent, memory_space stays unresolved and
     // InferTileMemorySpace picks the space from consumer demand.
     .set_output_memory_from_kwarg("target_memory")

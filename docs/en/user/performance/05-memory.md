@@ -216,6 +216,61 @@ than grown. The runtime says so itself when it fails — *"raise `ring_task_wind
 **How to confirm:** the metadata line of a fresh `scope_stats.jsonl` shows the new sizes,
 and the peak that was pinned at capacity is no longer pinned.
 
+## Keeping a streaming operand out of the cache
+
+Not every buffer a kernel reads deserves cache. A weight matrix that each byte is
+read from exactly once cannot hit, yet it still sweeps the last-level cache and
+evicts the small activation working set that *does* get reread. Two operands, one
+cache, opposite needs.
+
+The compiler cannot tell them apart — reuse is not reliably visible to it, and a
+wrong guess is a silent multi-percent regression rather than an error. So you
+declare it:
+
+```python
+with pl.at(level=pl.Level.CORE_GROUP):
+    pl.set_cache_policy(weights, pl.CachePolicy.BYPASS)
+    # every read of `weights` in this scope is now declared streaming;
+    # the activations keep the default cached path.
+    acc = pl.matmul(activations, weights, out_dtype=pl.FP32)
+```
+
+`pl.set_cache_policy` is a standalone statement at the top level of a
+`pl.at(level=pl.Level.CORE_GROUP, ...)` or `pl.spmd(...)` body — anywhere among
+that body's own statements, not necessarily the first line. It covers every read
+of that tensor in the scope, so tensor-level code needs no change at the access
+sites — which matters because those reads are implicit: `pl.matmul`,
+`pl.assemble` and subscript slicing issue loads without a call you could
+annotate.
+
+A declaration on a non-`CORE_GROUP` `pl.at` scope parses and is carried, but
+nothing lowers it into a load today, so it has no effect — those scopes do not
+become device kernels.
+
+When you *are* writing tile-level code and already name the load, put it there
+instead:
+
+```python
+tile = pl.load(weights, [n0, k0], [256, 512], cache=pl.CachePolicy.BYPASS)
+```
+
+An explicit `cache=` on a load always wins over the scope declaration, in both
+directions — so `cache=pl.CachePolicy.DEFAULT` opts one access back into the
+cache inside an otherwise-bypassing scope.
+
+**Cost:** correctness is yours to guarantee. `BYPASS` asserts two things: this
+tensor has no reuse worth caching, *and* nothing writes those bytes while the
+kernel runs. Mixing a cached write with a bypassing read of the same bytes is a
+coherency bug, which is why this is never a default and never inferred. The
+compiler rejects the case it can see — declaring `BYPASS` on a tensor the scope
+writes is an error — but it cannot prove the general case.
+
+**Current status:** the toolchain has no bypass path yet
+([PTOAS#1356](https://github.com/hw-native-sys/PTOAS/issues/1356)). A `BYPASS`
+declaration is accepted and carried, warns at compile time, and generates exactly
+the same code as an ordinary cached read. Declaring it now costs nothing and
+starts working when that lands.
+
 ## See also
 
 - [Runtime scopes](../tasks/01-scopes.md) — scopes as a dependency-semantics choice.

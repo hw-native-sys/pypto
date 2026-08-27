@@ -170,7 +170,7 @@ with pl.cluster():
 `DistributedCodegen::EmitCallToWorker`，后者按**被调函数**的方向为每个 rank 的
 chip dispatch 实参打标签，于是一个错误的 `InOut` 会把同一个 `pl.Out` tensor 上
 互不相交的各 rank 切片变成跨 rank 写依赖（issue #2415）。而只写参数真正需要的
-定序不会因此丢失：[`DeriveCallDirections`](37-derive_call_directions.md) 会重新
+定序不会因此丢失：[`DeriveCallDirections`](38-derive_call_directions.md) 会重新
 推导**调用点**方向——在顺序执行的外层循环内、在同一 root 的前序写者之后，或该
 root 是外层函数的 `InOut` 形参时，把被调函数的 `Out` 重新提升为 `InOut`。
 
@@ -199,6 +199,24 @@ root 是外层函数的 `InOut` 形参时，把被调函数的 `Out` 重新提�
   这样无需手动重命名共享 helper 的内部 `name_hint`，即可把可独立运行的子 kernel
   组合进一个 `@pl.jit.host` 程序。同一规则也适用于共用外提工具的兄弟 pass
   `OutlineHierarchyScopes` 与 `OutlineClusterScopes`。
+
+**缓存策略声明变为参数索引**：作用域 body 中的
+`pl.set_cache_policy(t, pl.CachePolicy.BYPASS)` 语句已由 parser 提升到作用域的
+`cache_policy_vars` attr 上（`std::vector<std::pair<VarPtr, int>>`，按 Var 身份索引）。
+本 pass 用与 `no_dep_args` 转换相同的"已捕获输入索引表"逐个解析这些 Var，并把该列表
+重新发出为外提函数的 `cache_policy` attr —— `std::vector<std::pair<int32_t, int>>`
+（参数索引，`CachePolicy` 的 int 值），按索引排序，使声明顺序与捕获顺序都无法改变 IR。
+作用域 attr **在此处被消费，绝不向下传播**：从这里开始，函数 attr 是唯一载体，直到
+[`ConvertTensorToTileOps`](10-convert_tensor_to_tile_ops.md) 把它变成每条 `tile.load`
+上的 `cache` kwarg 并擦除它为止。参数索引仅在该窗口内有效 —— 后续 pass 既会向参数列表
+追加（[`InjectGMPipeBuffer`](23-inject_gm_pipe_buffer.md)、
+[`MaterializeDistTensorCtx`](44-materialize_dist_tensor_ctx.md)），也会向前插入
+（[`MaterializeValidShapeSymbols`](49-materialize_valid_shape_symbols.md)）。本 pass 用
+`CHECK_SPAN` 拒绝两类用户错误：声明所指的张量未被作用域 body 捕获（既不读也不写，因而
+没有参数承载该策略），以及对 `InferParamDirections` 判定为 `Out` / `InOut` 的参数声明
+`BYPASS`（对同一 kernel 自己会写的字节做 bypass 读取，是一致性缺陷）。该转换位于共享的
+外提工具中，因此兄弟路径 `OutlineHierarchyScopes` 会以同样方式打上该 attr。参见
+[GM 缓存访问策略](../language/05-cache-policy.md)。
 
 ## 示例
 
@@ -322,7 +340,7 @@ passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes, "Outline InCore 
 承载于作用域自身的 `split_`）与显式 `pl.split_aiv` 区域（`SplitAivScopeStmt`）不能在同一
 作用域共存（outliner 会把单个区域的模式桥接为函数级代表 `split`，从而与用户的
 `pl.split` 静默冲突）。幸存机制如何下降见
-[`LowerAutoVectorSplit`](20-lower_auto_vector_split.md)。
+[`LowerAutoVectorSplit`](21-lower_auto_vector_split.md)。
 
 **任何** `pl.split(...)` 都会被拒绝，包括 `SplitMode.NONE`（RFC #1820）。NONE 本身不
 携带拆分，但把它写在同时持有区域的作用域上，读起来仍像"在一个作用域里混用了自动与手动
@@ -357,7 +375,7 @@ passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes, "Outline InCore 
 `Function::GetSplitMode()` 把存储的 `0` 与缺失的键同样映射为 `nullopt`，因此
 `split=SplitMode.NONE` 这一项对所有消费方都不可见；而 parser 会在回读时丢弃它，导致
 print → parse 有损（`Kwargs size mismatch`）。权威的逐区域模式始终承载于
-`SplitAivScopeStmt::split_`，由 [`LowerAutoVectorSplit`](20-lower_auto_vector_split.md)
+`SplitAivScopeStmt::split_`，由 [`LowerAutoVectorSplit`](21-lower_auto_vector_split.md)
 消费。printer 以同一规则兜底：省略取值为 `SplitMode.NONE` 的 `split` 属性，使绕过本 Pass
 的 IR（此前写出的 `.pto`、以编程方式构造的 `Function`）依然以规范、可重新解析的形式打印。
 
@@ -371,5 +389,5 @@ print → parse 有损（`Kwargs size mismatch`）。权威的逐区域模式始
 
 `AivSplitValid` 的验证窗口从这里打开。本 Pass 在每个被外提的 InCore 函数内保留第一类
 `SplitAivScopeStmt` 区域，因此结构化区域 verifier 可以从此处一直运行到
-[`LowerAutoVectorSplit`](20-lower_auto_vector_split.md) 擦除该节点并使属性失效为止。
+[`LowerAutoVectorSplit`](21-lower_auto_vector_split.md) 擦除该节点并使属性失效为止。
 其间 `ConvertTensorToTileOps` 与 `InferTileMemorySpace` 会在边界内存变得可观察后各重新验证一次。

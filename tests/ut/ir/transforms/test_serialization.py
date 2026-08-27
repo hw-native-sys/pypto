@@ -16,6 +16,7 @@ from typing import cast
 import pypto.language as pl
 import pytest
 from pypto import DataType, ir
+from pypto.pypto_core import passes
 
 
 def _drop_fixmap_entries(payload: bytes, map_field: str, entries: list[bytes]) -> bytes:
@@ -1274,6 +1275,50 @@ class TestLeadingCommentsRoundTrip:
         func = list(restored.functions.values())[0]
         assert ["outer", "header"] in _collect(func.body)
         assert ["body"] in _collect(func.body)
+
+
+class TestCachePolicyAttrSerialization:
+    """`.pto` round-trip for the two cache-policy carrier attrs (issue #2534).
+
+    Both attrs live only between parse and ConvertTensorToTileOps, so a
+    post-pipeline `.pto` never carries them -- but serializing a mid-pipeline
+    snapshot is a legal thing to do, and without a codec arm it threw instead.
+    """
+
+    @staticmethod
+    def _demo():
+        @pl.program
+        class Demo:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[256, 128], pl.FP32],
+                b: pl.Tensor[[128, 256], pl.FP32],
+                out: pl.Out[pl.Tensor[[256, 256], pl.FP32]],
+            ) -> pl.Tensor[[256, 256], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="mm"):
+                    pl.set_cache_policy(b, pl.CachePolicy.BYPASS)
+                    c: pl.Tensor[[256, 256], pl.FP32] = pl.matmul(a, b, out_dtype=pl.FP32)
+                    out = pl.assemble(out, c, [0, 0])
+                return out
+
+        return Demo
+
+    def test_scope_attr_survives_pto_roundtrip(self):
+        """The Var-keyed scope attr round-trips by Var identity, not by name."""
+        program = self._demo()
+        restored = ir.deserialize(ir.serialize(program))
+        ir.assert_structural_equal(program, restored, enable_auto_mapping=True)
+
+    def test_function_attr_survives_pto_roundtrip(self):
+        """The param-index function attr round-trips after outlining."""
+        outlined = passes.outline_incore_scopes()(passes.convert_to_ssa()(self._demo()))
+        restored = ir.deserialize(ir.serialize(outlined))
+        ir.assert_structural_equal(outlined, restored, enable_auto_mapping=True)
+
+        mm = cast(ir.Program, restored).get_function("mm")
+        assert mm is not None
+        assert dict(mm.attrs)["cache_policy"] == [(1, 1)]
 
 
 if __name__ == "__main__":
