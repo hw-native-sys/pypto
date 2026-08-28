@@ -515,7 +515,11 @@ class ChainCollector {
 
 /// Verdict for one chain: either a plan, or the reason it cannot be packed.
 struct ChainVerdict {
-  std::optional<AccPackingPlan> plan;
+  // Heap-allocated so returning ChainVerdict never move-constructs AccPackingPlan
+  // through std::optional (clang-analyzer-core.uninitialized.Assign false-positive
+  // on AccPackingPlan::batch_count when the plan was filled from a seed pointer
+  // the analyzer cannot see was published by RecordSeed).
+  std::unique_ptr<AccPackingPlan> plan;
   std::string reason;
   bool has_batch_producer = false;
   /// The chain holds more than one allocating definition. Neither packing can
@@ -752,21 +756,18 @@ ChainVerdict JudgeChain(ChainCollector& graph, const std::vector<const Var*>& me
     }
   }
 
-  // Aggregate-initialize every field in one expression rather than
-  // default-constructing and assigning field by field.
-  //
-  // The NOLINT is an unavoidable false positive, not a silenced defect. `head` is
-  // `*chain_seeds.front()` -- a deref of a pointer collected in `RecordSeed`, a
-  // different function -- so the analyzer cannot see where the pointee was built
-  // and models every `head` field as undefined. It then reports that undefined
-  // value flowing into `batch_count` when `ChainVerdict` is moved out of this
-  // function through `std::optional`'s move constructor. Every `AccSeed` field has
-  // an in-class initializer (`batch_count = 1`), `RecordSeed` assigns
-  // `batch_count` before publishing the seed, and it returns early for
-  // `batch_count <= 1`, so no seed with an undefined or unusable `batch_count`
-  // ever reaches here.
-  // NOLINTNEXTLINE(clang-analyzer-core.uninitialized.Assign)
-  verdict.plan = AccPackingPlan{batch_count, rows, cols, head.dtype, head.batch_dims, head.nd_shape};
+  // Publish via unique_ptr so returning ChainVerdict only moves the pointer —
+  // never AccPackingPlan itself through std::optional's move constructor, which
+  // triggered a clang-analyzer-core.uninitialized.Assign false positive on
+  // batch_count (the analyzer cannot see that `head` was published by RecordSeed).
+  auto plan = std::make_unique<AccPackingPlan>();
+  plan->batch_count = batch_count;
+  plan->rows = rows;
+  plan->cols = cols;
+  plan->dtype = head.dtype;
+  plan->batch_dims = head.batch_dims;
+  plan->nd_shape = head.nd_shape;
+  verdict.plan = std::move(plan);
   return verdict;
 }
 
@@ -843,7 +844,7 @@ AccPackingMapPtr BuildAccPackingMap(const FunctionPtr& func) {
     const auto& members = members_it == components.end() ? kNoMembers : members_it->second;
 
     auto verdict = JudgeChain(graph, members, these_seeds);
-    if (verdict.plan.has_value()) {
+    if (verdict.plan) {
       const size_t plan_index = map->AddPlan(*verdict.plan);
       for (const auto* member : members) map->Bind(member, plan_index);
       continue;

@@ -162,6 +162,22 @@ class TestPrefetchOpVerification:
         with pytest.raises(ValueError, match="expects src to be a Var or IterArg"):
             ir_prefetch.async_prefetch(reshaped, ctx, span)
 
+    def test_mx_layout_source_rejected_before_codegen(self):
+        span = ir.Span.unknown()
+        source = ir.Var(
+            "source",
+            ir.TensorType(
+                [1, 256],
+                DataType.FP8E8M0,
+                tensor_view=ir.TensorView([], ir.TensorLayout.MX_A_ZZ),
+            ),
+            span,
+        )
+        ctx = ir_prefetch.make_context(span)
+
+        with pytest.raises(ValueError, match="does not support MX-layout"):
+            ir_prefetch.async_prefetch(source, ctx, span)
+
     def test_iter_arg_source_remains_accepted(self):
         """Loop-carried tensor bindings are Var-like PTOAS view sources."""
         span = ir.Span.unknown()

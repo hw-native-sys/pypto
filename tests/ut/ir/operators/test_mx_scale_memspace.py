@@ -39,12 +39,12 @@ def _tile_var(shape, dtype, *, memory=None, view=None, name="t"):
     return ir.Var(name, tt, ir.Span.unknown())
 
 
-def _mx_tensor_var(name, rows, cols, layout=ir.TensorLayout.MX_A_ZZ):
+def _mx_tensor_var(name, rows, cols, layout=ir.TensorLayout.MX_A_ZZ, dtype=DataType.FP8E8M0):
     return ir.Var(
         name,
         ir.TensorType(
             _const_shape(rows, cols),
-            DataType.FP8E8M0,
+            dtype,
             tensor_view=ir.TensorView([], layout),
         ),
         ir.Span.unknown(),
@@ -114,6 +114,29 @@ class TestMxScaleMemSpaces:
         tensor = _mx_tensor_var("s", 16, 8)
         with pytest.raises(ValueError, match="Mat|Vec"):
             tile.load(tensor, [0, 0], [16, 8], target_memory=ir.MemorySpace.Vec)
+
+    @pytest.mark.parametrize("layout", [ir.TensorLayout.MX_A_ZZ, ir.TensorLayout.MX_B_NN])
+    def test_gather_row_rejects_mx_source_at_tensor_and_tile_layers(self, layout):
+        src = _mx_tensor_var("scale", 16, 8, layout)
+        tensor_acc = tensor.create_l1([16, 8], DataType.FP8E8M0)
+        with pytest.raises(ValueError, match="does not support MX-layout source tensors"):
+            tensor.gather_row(tensor_acc, src, [0, 0], [0, 0], [1, 8])
+
+        tile_acc = _tile_var(_const_shape(16, 8), DataType.FP8E8M0, memory=ir.MemorySpace.Mat)
+        with pytest.raises(ValueError, match="does not support MX-layout source tensors"):
+            tile.gather_row(tile_acc, src, [0, 0], [0, 0], [1, 8])
+
+    @pytest.mark.parametrize("invalid_cols", [31, 0])
+    def test_fp4_set_validshape_rejects_invalid_packed_dimension(self, invalid_cols):
+        src = _tile_var(_const_shape(16, 64), DataType.FP4, memory=ir.MemorySpace.Vec)
+        with pytest.raises(ValueError, match="packed FP4 valid dimension.*positive even"):
+            tile.set_validshape(src, 8, invalid_cols)
+
+    def test_fp4_set_validshape_rejects_dynamic_packed_dimension(self):
+        src = _tile_var(_const_shape(16, 64), DataType.FP4, memory=ir.MemorySpace.Vec)
+        dynamic_cols = ir.Var("valid_cols", ir.ScalarType(DataType.INDEX), ir.Span.unknown())
+        with pytest.raises(ValueError, match="packed FP4 valid dimension.*static positive even"):
+            tile.set_validshape(src, 8, dynamic_cols)
 
     def test_mx_layout_rejects_non_2d_load_window(self):
         tensor = _mx_tensor_var("s", 16, 8)
@@ -205,7 +228,7 @@ class TestMxScaleMemSpaces:
             tile.create([16, 8], DataType.FP8E8M0, target_memory=space)
 
     def test_mx_load_rejects_strided_tensor_view(self):
-        shape = _const_shape(8, 8)
+        shape = _const_shape(16, 8)
         tensor = ir.Var(
             "s",
             ir.TensorType(
@@ -216,12 +239,39 @@ class TestMxScaleMemSpaces:
             ir.Span.unknown(),
         )
         with pytest.raises(ValueError, match="packed 2D"):
-            tile.load(tensor, [0, 0], [8, 8], target_memory=ir.MemorySpace.Mat)
+            tile.load(tensor, [0, 0], [16, 8], target_memory=ir.MemorySpace.Mat)
 
     def test_tensor_slice_rejects_mx_source(self):
         source = _mx_tensor_var("source", 16, 8)
         with pytest.raises(ValueError, match="tensor.slice does not support MX-layout tensors"):
             tensor.slice(source, [8, 8], [1, 0])
+
+    def test_store_rejects_mx_destination(self):
+        destination = _mx_tensor_var("destination", 16, 8)
+        source = _tile_var(_const_shape(16, 8), DataType.FP8E8M0, memory=ir.MemorySpace.Vec)
+        with pytest.raises(ValueError, match="tile.store does not support MX-layout"):
+            tile.store(source, [0, 0], destination)
+
+    def test_mscatter_rejects_mx_destination(self):
+        destination = _mx_tensor_var("destination", 16, 8, dtype=DataType.FP16)
+        source = _tile_var(_const_shape(16, 8), DataType.FP16, memory=ir.MemorySpace.Vec)
+        indices = _tile_var(_const_shape(16, 8), DataType.INT32, memory=ir.MemorySpace.Vec)
+        with pytest.raises(ValueError, match="tile.mscatter does not support MX-layout"):
+            tile.mscatter(source, indices, destination)
+
+    def test_vec_mgather_rejects_mx_source(self):
+        source = _mx_tensor_var("source", 16, 8, dtype=DataType.FP8E4M3FN)
+        indices = _tile_var(_const_shape(1, 4), DataType.INT32, memory=ir.MemorySpace.Vec)
+        with pytest.raises(ValueError, match="Vec output does not support MX-layout"):
+            tile.mgather(source, indices)
+
+    def test_cacheinvalid_rejects_mx_region(self):
+        source = _mx_tensor_var("source", 16, 8)
+        span = ir.Span.unknown()
+        shape = ir.MakeTuple(_const_shape(16, 8), span)
+        offsets = ir.MakeTuple(_const_shape(0, 0), span)
+        with pytest.raises(ValueError, match="system.cacheinvalid does not support MX-layout"):
+            ir.create_op_call("system.cacheinvalid", [source, shape, offsets], {}, span)
 
     def test_mx_load_rejects_ssa_bound_slice_in_dsl(self):
         with pytest.raises(InvalidOperationError, match="tensor.slice does not support MX-layout tensors"):
@@ -257,16 +307,16 @@ class TestMxScaleMemSpaces:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
-                source: pl.Tensor[[8, 8], pl.FP8E8M0, pl.MX_A_ZZ],
-            ) -> pl.Tensor[[8, 8], pl.FP8E8M0, pl.MX_A_ZZ]:
-                _scale = pl.load(source, [0, 0], [8, 8], target_memory=pl.Mem.Mat)
+                source: pl.Tensor[[16, 8], pl.FP8E8M0, pl.MX_A_ZZ],
+            ) -> pl.Tensor[[16, 8], pl.FP8E8M0, pl.MX_A_ZZ]:
+                _scale = pl.load(source, [0, 0], [16, 8], target_memory=pl.Mem.Mat)
                 return source
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestration(
                 self,
-                source: pl.Tensor[[8, 8], pl.FP8E8M0, pl.MX_A_ZZ],
-            ) -> pl.Tensor[[8, 8], pl.FP8E8M0, pl.MX_A_ZZ]:
+                source: pl.Tensor[[16, 8], pl.FP8E8M0, pl.MX_A_ZZ],
+            ) -> pl.Tensor[[16, 8], pl.FP8E8M0, pl.MX_A_ZZ]:
                 result, _ = pl.submit(self.kernel, source)
                 return result
 
@@ -286,7 +336,7 @@ class TestMxScaleMemSpaces:
             codegen.generate_orchestration(program, orchestration)
 
     def test_mx_load_accepts_materialized_packed_nd_tensor_view(self):
-        shape = _const_shape(8, 8)
+        shape = _const_shape(16, 8)
         tensor = ir.Var(
             "s",
             ir.TensorType(
@@ -299,7 +349,7 @@ class TestMxScaleMemSpaces:
         call = tile.load(
             tensor,
             [0, 0],
-            [8, 8],
+            [16, 8],
             target_memory=ir.MemorySpace.Mat,
         )
         assert isinstance(call.type, ir.TileType)
@@ -328,44 +378,17 @@ class TestMxScaleMemSpaces:
 
         program = ir.Program([function.get_result()], "mx_load_codegen", span)
         pto = codegen.PTOCodegen().generate(program)
+        # MX param views are skipped; tile.load owns the packed rank-5 view
+        # (EmitMxPhysicalView) because PTOAS logical mx_* expansion is incomplete.
         assert pto.count("pto.make_tensor_view") == 1
         assert "pto.make_tensor_view %arg0" in pto
-        assert "strides = [%c2_index, %c1_index] {layout = #pto.layout<mx_a_zz>}" in pto
+        assert "mx5d_view" in pto
+        # Logical [16, 2] MX_A_ZZ -> physical [1, 16/16, 2/2, 16, 2]
+        assert "shape = [%c1_index, %c1_index, %c1_index, %c16_index, %c2_index]" in pto
+        assert "strides = [%c32_index, %c32_index, %c32_index, %c2_index, %c1_index]" in pto
+        assert "!pto.tensor_view<?x?x?x?x?x!pto.f8E8M0>" in pto
         assert "pto.tload" in pto
-
-    @pytest.mark.parametrize(
-        ("layout", "pto_layout"),
-        [
-            (ir.TensorLayout.MX_A_ZZ, "mx_a_zz"),
-            (ir.TensorLayout.MX_B_NN, "mx_b_nn"),
-        ],
-    )
-    def test_mx_column_vector_keeps_mx_layout(self, layout, pto_layout):
-        span = ir.Span.unknown()
-        tensor_type = ir.TensorType(
-            _const_shape(16, 1),
-            DataType.FP8E8M0,
-            tensor_view=ir.TensorView([], layout),
-        )
-        builder = ir.IRBuilder()
-        with builder.function("mx_column_load", type=ir.FunctionType.InCore) as function:
-            source = function.param("source", tensor_type)
-            scale = builder.let(
-                "scale",
-                tile.load(
-                    source,
-                    [0, 0],
-                    [16, 1],
-                    target_memory=ir.MemorySpace.Mat,
-                ),
-            )
-            function.return_type(scale.type)
-            builder.return_stmt(scale)
-
-        program = ir.Program([function.get_result()], "mx_column_load", span)
-        pto = codegen.PTOCodegen().generate(program)
-        assert f"{{layout = #pto.layout<{pto_layout}>}}" in pto
-        assert "{layout = #pto.layout<dn>}" not in pto
+        assert "{layout = #pto.layout<mx_a_zz>}" in pto
 
 
 if __name__ == "__main__":

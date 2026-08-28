@@ -6,7 +6,7 @@ baseline is Little-oil/PTOAS `main`
 `d852dd2dba3e5bf7a69ce8324eb88afc336e8a33`: 189 public interfaces from the manual
 plus 15 source-only compatibility/tile interfaces still present in `PTOOps.td`, for a
 total of 204. Column statuses were checked against the **current PyPTO source** (last
-updated 2026-08-11). When an op is added or changed, update only its corresponding row.
+updated 2026-08-14). When an op is added or changed, update only its corresponding row.
 
 The matrix includes public/compatibility interfaces even when their PyPTO level is
 `internal`. Separately, it excludes 32 additional `PTOOps.td` ops that exist only
@@ -208,7 +208,7 @@ for lowering/compiler plumbing, plus other dialects such as VPTO, VMI, and SIMT.
 | pto.tget_scale_addr | GetScaleAddr + TASSIGN | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen; Mat→scale `tmov` emitted in source order, PTOAS `PTOA5NormalizeTMovPass` reorders bind-before-fill; see [operators MX constraints](ir/05-operators.md#mx--ascend950-ptoas-constraints) |
 | pto.tmov.fp | TMOV_FP | tile | ✅ | ❌ | ❌ | ❌ | — | backend hook exists; IR/Python frontend and ST are missing |
 | pto.tquant | TQUANT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
-| pto.tquant.mx | TQUANT (overload) | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
+| pto.tquant.mx | TQUANT (overload) | tile | ✅ | ✅ | ❌ | ✅ | — | A5 MXFP8-only standalone quantization frontend+codegen+hardware ST (`group_axis` A/B); MXFP4 quant deferred |
 | pto.tstore_fp | TSTORE_FP | tile | ✅ | ❌ | ❌ | ❌ | — | the current backend emits `pto.tstore.fp` |
 | pto.tdequant | TDEQUANT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
 | **Synchronization (8)** |  |  |  |  |  |  |  |  |

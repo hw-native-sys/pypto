@@ -204,7 +204,7 @@ Pass InsertMxScaleAddr() {
   auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
     std::map<GlobalVarPtr, FunctionPtr, GlobalVarPtrLess> new_functions;
     for (const auto& [gvar, func] : program->functions_) {
-      if (func->func_type_ == FunctionType::InCore) {
+      if (IsInCoreType(func->func_type_)) {
         new_functions[gvar] = TransformInsertMxScaleAddr(func);
       } else {
         new_functions[gvar] = func;

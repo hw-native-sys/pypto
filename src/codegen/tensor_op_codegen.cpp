@@ -508,14 +508,23 @@ REGISTER_ORCHESTRATION_OP(tensor_view, ("tensor.view")) {
   std::ostringstream oss;
 
   if (op->args_.size() >= 2) {
-    CHECK_SPAN(target_layout == src_layout, op->span_)
+    const bool is_mx_scale_backing_nd_view =
+        input_type->dtype_ == DataType::FP8E8M0 &&
+        ((IsMxTensorLayout(src_layout) && target_layout == TensorLayout::ND) ||
+         (src_layout == TensorLayout::ND && IsMxTensorLayout(target_layout)));
+    CHECK_SPAN(target_layout == src_layout || is_mx_scale_backing_nd_view, op->span_)
         << "tensor.view orchestration lowering cannot combine shape reinterpret with layout change: "
         << "runtime TaskTensor::reshape has no arbitrary-stride layout view; pass only a shape argument "
         << "(no layout change) in orchestration code or lower the view through PTO in-core codegen";
-    CHECK_SPAN(src_layout == TensorLayout::ND && target_layout == TensorLayout::ND, op->span_)
+    CHECK_SPAN(
+        (src_layout == TensorLayout::ND && target_layout == TensorLayout::ND) || is_mx_scale_backing_nd_view,
+        op->span_)
         << "tensor.view orchestration lowering only supports shape reinterpret for ND layout tensors: "
         << "runtime TaskTensor::reshape assumes row-major contiguous storage; lower non-ND views through "
         << "PTO in-core codegen";
+    if (is_mx_scale_backing_nd_view) {
+      return "TaskTensor " + result_var + " = " + ext_input_name + ";";
+    }
     auto shape_tuple = As<MakeTuple>(op->args_[1]);
     auto tuple_type = As<TupleType>(op->args_[1]->GetType());
     INTERNAL_CHECK_SPAN(tuple_type, op->span_) << "tensor.view shape must be TupleType";

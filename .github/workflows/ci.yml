@@ -1632,15 +1632,19 @@ jobs:
         with:
           checkout-path: lib-checkout
 
-  mixed-kernel-tests-a5:
-    # A5 (Ascend950) on-board coverage for MIXED KERNELS — InCore scopes holding
-    # both Cube (AIC) and Vector (AIV) work, which ExpandMixedKernel splits into
-    # an AIC + AIV pair wrapped in a Group (docs/en/dev/passes/21-expand_mixed_kernel.md).
-    # Everything else in this workflow exercises that path on a2a3 (910B) only:
-    # `system-tests*` run --platform=a2a3, and `system-tests-a5sim` runs the a5
-    # profile in the SIMULATOR. This job is the first per-PR run of the mixed /
-    # cross-core path on real A5 silicon.
+  onboard-tests-a5:
+    # A5 (Ascend950) on-board coverage. Formerly `tests-a5`; renamed
+    # because the job now also runs MX ST (matmul_mx / quant_mx) on the same
+    # npu-a5 card. Two steps share one checkout / install:
+    #   1. mixed-kernel-tests-a5 — cross_core V<->C path on silicon
+    #   2. mx-tests-a5           — host-prequant matmul_mx + on-board quant/quant-to-matmul
     #
+    # Everything else in this workflow exercises the mixed / cross-core path on
+    # a2a3 (910B) only: `system-tests*` run --platform=a2a3, and
+    # `system-tests-a5sim` runs the a5 profile in the SIMULATOR. This job is the
+    # first per-PR run of those paths on real A5 silicon.
+    #
+    # --- mixed-kernel-tests-a5 ---
     # Scope — cross_core/test_cross_core.py, already validated on the a5 profile
     # elsewhere (it runs on a5sim in the job below), so a red result here means a
     # regression and not an unvalidated combination: V<->C tpush/tpop over all
@@ -1689,6 +1693,12 @@ jobs:
     # whose test cases hardcode `get_backend_type() -> Ascend910B`, so under
     # --platform=a5 it would compile for 910B and run on A5 silicon. Widen this
     # list once those are made arch-agnostic.
+    #
+    # --- mx-tests-a5 ---
+    # Scope — tests/st/runtime/ops/test_matmul_mx.py (host-prequant MXFP8/FP4×FP8
+    # matmul_mx / matmul_mx_acc), test_quant_mx.py (on-board quant_mx for
+    # MX_A_ZZ / MX_B_NN), and test_quantized_matmul_mx.py (GM-staged
+    # quant-to-matmul). All are `@pytest.mark.platforms("a5")`.
     #
     # Setup is the standard device-job shape (same composite action / env as
     # `system-tests`), on the npu-a5 runner pool. That runner must satisfy the
@@ -1750,7 +1760,7 @@ jobs:
           # bundle and carries no conda env, so this is not optional here.
           toolchain: bundle
 
-      - name: Test mixed-kernel system tests (A5, on board)
+      - name: mixed-kernel-tests-a5
         timeout-minutes: 60
         # Mechanism B: one task-submit card session wrapping a single pytest run
         # (no precompile pipeline), executed in-process on the borrowed card. The
@@ -1764,6 +1774,22 @@ jobs:
           task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 3600 \
             --run "cd $GITHUB_WORKSPACE/a5-checkout && source activate.sh && python -m pytest \
               tests/st/runtime/cross_core/test_cross_core.py \
+              -v --forked --platform=a5 --device=\$TASK_DEVICE"
+
+      - name: mx-tests-a5
+        timeout-minutes: 60
+        # Same card session shape as mixed-kernel-tests-a5. matmul_mx covers
+        # host-prequant MXFP8 / FP4×FP8; quant_mx covers on-board TQUANT; the
+        # staged case verifies the produced data and scale feed a later matmul.
+        run: |
+          source activate.sh
+          echo "[device] DEVICE_ID=$DEVICE_ID"
+          test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
+          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 3600 \
+            --run "cd $GITHUB_WORKSPACE/a5-checkout && source activate.sh && python -m pytest \
+              tests/st/runtime/ops/test_matmul_mx.py \
+              tests/st/runtime/ops/test_quant_mx.py \
+              tests/st/runtime/ops/test_quantized_matmul_mx.py \
               -v --forked --platform=a5 --device=\$TASK_DEVICE"
 
       - name: Kill orphaned task-submit tasks

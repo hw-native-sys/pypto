@@ -796,6 +796,7 @@ class TestRegistryInfrastructure:
             "tile.exp",
             "tile.recip",
             "tile.sqrt",
+            "tile.tquant_mx",
             "tile.row_sum",
             "tile.row_max",
             "tile.row_min",

@@ -1145,11 +1145,20 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
         continue;
       }
       if (fs_.ffts_workspace_vars.count(var.get()) > 0) continue;
+      // PTOAS / pto-isa special requirement (MX GM scale rank-5):
+      //   Generic parameter make_tensor_view stays logical rank-2 + layout=mx_*.
+      //   That path does not expand SFractal [16,2] correctly for A5 TLoad
+      //   (expands e.g. [64,4] to Shape<1,1,1,64,4> and fails staticShape[3]==16).
+      //   Skip it here; MX tile.load owns the packed expansion via
+      //   EmitMxPhysicalView (see that helper for a with/without example).
+      const bool is_mx_tensor =
+          tensor_type->tensor_view_.has_value() && IsMxTensorLayout(tensor_type->tensor_view_->layout);
+      RegisterBasePtr(var, GetVarName(var));
+      if (is_mx_tensor) continue;
       std::string tensor_view = NewNamedTemp(var->name_hint_ + "_view");
       BindTensorView(var, tensor_view);
       // Remember the base pointer so mid-body pl.read/pl.write resolve to !pto.ptr
       // even after a slice-assign rebinds the var to its tensor_view.
-      RegisterBasePtr(var, GetVarName(var));
 
       for (const auto& j : tensor_type->shape_) {
         if (As<ir::ConstInt>(j)) {
@@ -1260,6 +1269,13 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
   for (const auto& param : func->params_) {
     auto tensor_type = ir::AsTensorTypeLike(param->GetType());
     if (!tensor_type) continue;
+    // PTOAS / pto-isa: MX tile.load owns its packed rank-5 view
+    // (EmitMxPhysicalView).  Do not register a generic logical rank-2 parameter
+    // view for these tensors — that would reintroduce the broken SFractal
+    // expansion described on EmitMxPhysicalView.
+    if (tensor_type->tensor_view_.has_value() && IsMxTensorLayout(tensor_type->tensor_view_->layout)) {
+      continue;
+    }
     // Core-group outlining keeps the complete public signature on both the
     // AIC and AIV functions.  Do not materialize a view for a tensor that the
     // outlined body does not reference: PTOAS cannot infer a non-ND layout for
@@ -1482,6 +1498,11 @@ PTOCodegen::AllocTileFields PTOCodegen::ComputeAllocTileFields(
   // FP4 Vec tile_bufs use PTOAS's physical x2-carrier coordinates along the
   // BLayout packed axis. PyPTO keeps logical nibble shapes internally; matrix
   // spaces are excluded because TMATMUL_MX has its own logical-dimension ABI.
+  //
+  // PTOAS special requirement (FP4 Vec physical valid_shape): valid_row /
+  // valid_col operands on pto.alloc_tile must use the packed physical extent
+  // (logical / 2) on that axis. Skipping this conversion makes PTOAS reject
+  // or mis-size the tile relative to the f4E2M1x2 carrier.
   const auto memory_space = tile_type->GetMemorySpace();
   const auto tile_view = ir::tile_view_semantics::GetEffectiveTileView(*tile_type);
   const bool packed_fp4_vec =
@@ -2535,20 +2556,40 @@ std::string PTOCodegen::GetViewTileBufTypeStringFromTileType(
 
   // `pto.alloc_tile` conveys the valid extent through `valid_row` / `valid_col`
   // operands, so ExtractTileTypeInfo always renders `v_row=?, v_col=?`. A view op
-  // that takes NO such operands — `pto.treshape` — cannot: ptoas default-
+  // that takes NO such operands — `pto.treshape` — cannot: PTOAS default-
   // constructs its destination tile from the result type alone, so a dynamic
   // valid leaves the tile's valid extent at zero and every consumer silently
   // becomes a no-op. Render static valid dims whenever the view's effective
   // valid_shape is statically known.
+  //
+  // This static-valid type string is the PTOAS-facing half of
+  // EmitStaticValidTileView (pto.tquant.mx / X-to-ZZ requireStaticShape): the
+  // treshape result type must carry concrete v_row/v_col, not `?`.
+  //
+  // PTOAS special requirement (FP4 Vec physical valid_shape): when the tile is
+  // FP4 in Vec, also convert the BLayout packed axis from logical nibble
+  // extent to f4E2M1x2 physical extent (/2) so the static type matches the
+  // carrier coordinates PTOAS expects on that tile_buf.
   const auto view = ir::tile_view_semantics::GetEffectiveTileView(*tile_type);
   const auto& valid = view.valid_shape;
+  const bool packed_fp4_vec = tile_type->dtype_ == DataType::FP4 && *memory_space == ir::MemorySpace::Vec;
+  const size_t packed_dim = view.blayout == ir::TileLayout::col_major ? 0 : 1;
+  auto physical_valid = [&](int64_t value, size_t dim) {
+    if (packed_fp4_vec && dim == packed_dim) {
+      CHECK(value > 0 && value % 2 == 0) << "FP4 Vec view valid_shape packed dimension must be a positive "
+                                            "even logical extent for PTOAS, got "
+                                         << value;
+      return value / 2;
+    }
+    return value;
+  };
   if (valid.size() == 1) {
     // Match ComputeAllocTileFields / ExtractTileTypeInfo: a 1-D valid_shape
     // maps to rows=1, cols=shape[0]. Without this a 1-D reshape view keeps the
     // dynamic zero-valid extent and its consumers become silent no-ops.
     if (auto v_col = As<ir::ConstInt>(valid[0])) {
       c.v_row = 1;
-      c.v_col = v_col->value_;
+      c.v_col = physical_valid(v_col->value_, 1);
       c.v_row_dynamic = false;
       c.v_col_dynamic = false;
     }
@@ -2556,8 +2597,8 @@ std::string PTOCodegen::GetViewTileBufTypeStringFromTileType(
     auto v_row = As<ir::ConstInt>(valid[0]);
     auto v_col = As<ir::ConstInt>(valid[1]);
     if (v_row && v_col) {
-      c.v_row = v_row->value_;
-      c.v_col = v_col->value_;
+      c.v_row = physical_valid(v_row->value_, 0);
+      c.v_col = physical_valid(v_col->value_, 1);
       c.v_row_dynamic = false;
       c.v_col_dynamic = false;
     }

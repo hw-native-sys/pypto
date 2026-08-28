@@ -364,8 +364,16 @@ TypePtr DeduceTileReinterpretViewType(const std::vector<ExprPtr>& args,
 
   const DataType target_dtype = GetRequiredKwarg<DataType>(kwargs, "dtype", kOpName);
   const TileView source_view = tile_view_semantics::GetEffectiveTileView(*tile_type);
-  CHECK_SPAN(source_view.slayout == TileLayout::none_box, args[0]->span_)
-      << kOpName << " only supports flat tiles with slayout=none_box; boxed/fractal tiles are unsupported";
+  const bool complete_mx_scale_layout =
+      (source_view.blayout == TileLayout::row_major && source_view.slayout == TileLayout::row_major) ||
+      (source_view.blayout == TileLayout::col_major && source_view.slayout == TileLayout::col_major);
+  const bool mx_scale_byte_alias =
+      source_view.fractal == tile_view_semantics::kMXScaleFractal && complete_mx_scale_layout &&
+      ((tile_type->dtype_ == DataType::UINT8 && target_dtype == DataType::FP8E8M0) ||
+       (tile_type->dtype_ == DataType::FP8E8M0 && target_dtype == DataType::UINT8));
+  CHECK_SPAN(source_view.slayout == TileLayout::none_box || mx_scale_byte_alias, args[0]->span_)
+      << kOpName
+      << " only supports flat tiles with slayout=none_box, except UINT8/FP8E8M0 MX-scale byte aliases";
   CHECK_SPAN(source_view.blayout == TileLayout::row_major || source_view.blayout == TileLayout::col_major,
              args[0]->span_)
       << kOpName << " requires row_major or col_major blayout";
@@ -1004,6 +1012,16 @@ TypePtr DeduceTileSetValidShapeType(const std::vector<ExprPtr>& args,
   // a fully-written accumulator here must therefore leave its non-compact
   // reading pitch alone.
   TileView tile_view = tile_view_semantics::GetEffectiveTileView(*tile_type);
+  if (tile_type->dtype_ == DataType::FP4 && tile_type->memory_space_ == MemorySpace::Vec) {
+    const size_t packed_dim = tile_view.blayout == TileLayout::col_major ? 0 : 1;
+    const ExprPtr& packed_valid = args[packed_dim + 1];
+    auto packed_const = As<ConstInt>(packed_valid);
+    CHECK_SPAN(packed_const, packed_valid->span_)
+        << "tile.set_validshape requires the packed FP4 valid dimension to be a static positive even value";
+    CHECK_SPAN(packed_const->value_ > 0 && packed_const->value_ % 2 == 0, packed_valid->span_)
+        << "tile.set_validshape requires the packed FP4 valid dimension to be a positive even value, but got "
+        << packed_const->value_;
+  }
   tile_view.valid_shape = {args[1], args[2]};
 
   return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);

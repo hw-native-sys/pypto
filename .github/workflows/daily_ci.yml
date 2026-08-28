@@ -36,7 +36,7 @@ jobs:
   a5-system-tests:
     # Nightly A5 (Ascend950) on-board coverage. Setup is the standard device-job
     # shape — the same composite action / env / task-submit mechanism as ci.yml
-    # `mixed-kernel-tests-a5` and the `qwen3-perf` job below — on the npu-a5
+    # `onboard-tests-a5` and the `qwen3-perf` job below — on the npu-a5
     # runner pool. That runner must satisfy the setup-ci-job contract for a
     # bundle job: CI_CACHE_ROOT / CANN_ROOT + DEVICE_ID in its .env, the
     # pypto-toolchain bundle installed, and task-submit / npu-smi / ccache /

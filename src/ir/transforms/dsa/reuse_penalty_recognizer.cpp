@@ -330,14 +330,22 @@ class AccessCollector : public IRVisitor {
     const std::vector<VarPtr> results = ResolveCallResults(result);
     const bool whole_assemble = IsProvablyWholeAssemble(call, results);
     std::vector<std::pair<size_t, VarPtr>> reads;
+    std::vector<std::pair<size_t, VarPtr>> writes;
+    const auto& registry = OpRegistry::GetInstance();
+    const OpRegistryEntry* entry =
+        registry.IsRegistered(call->op_->name_) ? &registry.GetEntry(call->op_->name_) : nullptr;
     for (size_t argument_index = 0; argument_index < call->args_.size(); ++argument_index) {
       // A whole-window assemble overwrites the target. Its old contents are
       // not an input access; partial assemble remains Unknown and is poisoned.
-      if (whole_assemble && argument_index == 0) continue;
       const VarPtr var = AsVarLike(call->args_[argument_index]);
-      if (const auto interval = FindInterval(var)) reads.emplace_back(*interval, var);
+      const auto interval = FindInterval(var);
+      if (!interval) continue;
+      const ArgEffect effect = entry ? entry->GetArgEffect(argument_index, call->kwargs_) : ArgEffect::Read;
+      if (ArgEffectReads(effect) && !(whole_assemble && argument_index == 0)) {
+        reads.emplace_back(*interval, var);
+      }
+      if (ArgEffectWrites(effect)) writes.emplace_back(*interval, var);
     }
-    std::vector<std::pair<size_t, VarPtr>> writes;
     for (const VarPtr& output : results) {
       if (const auto interval = FindInterval(output)) writes.emplace_back(*interval, output);
     }

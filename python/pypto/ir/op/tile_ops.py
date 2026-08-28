@@ -1826,6 +1826,77 @@ def not_(tile: Expr, span: Span | None = None) -> Call:
 
 
 # ============================================================================
+# MX Quantization Operations
+# ============================================================================
+
+
+def tquant_mx(
+    src: Expr,
+    *,
+    group_axis: int,
+    dtype: DataType = DataType.FP8E4M3FN,
+    span: Span | None = None,
+) -> Call:
+    """MX block-32 dynamic quantization returning quantized data and scale."""
+    actual_span = _get_span_or_capture(span)
+    kwargs: dict[str, Any] = {"dtype": dtype, "group_axis": group_axis}
+    return _ir_core.create_op_call("tile.tquant_mx", [src], kwargs, actual_span)
+
+
+def tquant_mx_raw(
+    src: Expr,
+    max_scratch: Expr,
+    scaling_scratch: Expr,
+    *,
+    dtype: DataType = DataType.FP8E4M3FN,
+    group_axis: int = 1,
+    span: Span | None = None,
+) -> Call:
+    """Build the compiler-internal value-returning raw MX quantization Call.
+
+    Returns ``TupleType{INT8 dst, UINT8 exp}``. ``max_scratch`` / ``scaling_scratch``
+    are write-only per-group workspaces (same role as ``gather_compare``'s tmp).
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call(
+        "tile.tquant_mx_raw",
+        [src, max_scratch, scaling_scratch],
+        {"dtype": dtype, "group_axis": group_axis},
+        actual_span,
+    )
+
+
+def tmov_x2zz(
+    src: Expr,
+    tmp: Expr,
+    *,
+    group_axis: int = 1,
+    dst_rows: int | None = None,
+    dst_cols: int | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Exponent X-to-ZZ layout conversion returning a UINT8 ZZ tile.
+
+    ``tmp`` is a write-only workspace. Axis1 requires capacity
+    ``64 + ceil(rows/16) * cols`` bytes and ``dst_rows``/``dst_cols`` (ZZ ``[M,G]``)
+    because TQUANT emits a legacy-flat exp ``[1, M*G]``. Axis0 requires a minimal
+    32-byte-aligned Vec pad. A5-only.
+    """
+    actual_span = _get_span_or_capture(span)
+    kwargs: dict[str, Any] = {"group_axis": group_axis}
+    if dst_rows is not None:
+        kwargs["dst_rows"] = int(dst_rows)
+    if dst_cols is not None:
+        kwargs["dst_cols"] = int(dst_cols)
+    return _ir_core.create_op_call(
+        "tile.tmov_x2zz",
+        [src, tmp],
+        kwargs,
+        actual_span,
+    )
+
+
+# ============================================================================
 # Matrix Operations
 # ============================================================================
 

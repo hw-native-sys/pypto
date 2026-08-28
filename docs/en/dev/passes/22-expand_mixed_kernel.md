@@ -188,6 +188,13 @@ Setup is derived from the split bodies:
 
 When cross-core directions use different tile sizes, the pass picks `max(all observed tile byte sizes)` as the common `slot_size` for `initialize_pipe`. Smaller tiles leave unused bytes in each slot but hardware correctness is preserved. Explicit user-authored programs can still create multiple independent pipes by supplying different `id` values to `initialize_pipe` and matching `tpush` / `tpop` / `tfree` ops.
 
+### Known limitation: MX quantization followed by matmul
+
+The automatic setup does not yet support carrying both `quant_mx` data and its
+FP8E8M0 scale to `matmul_mx` inside one mixed task. Keep the operations in
+separate AIV and AIC kernels and stage both values through GM. Automatic paired
+data/scale pipes are deferred to a follow-up change.
+
 ### Overriding the slot count (`slot_num`)
 
 The default slot count (`cross_core_pipe::kDefaultAutoPipeSlotNum` = 2) can be

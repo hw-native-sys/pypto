@@ -115,6 +115,13 @@
 | [`dim`][pypto.language.tensor.dim] | `pl.` | 张量的运行期维度 |
 | [`read`][pypto.language.read] [`write`][pypto.language.write] | `pl.` | 元素访问 |
 
+## 量化
+
+| 算子 | 可达 | 作用 |
+| ---- | ---- | ---- |
+| `quant_mx` | `pl.` (t) | Ascend950 MXFP8 block-32 动态量化，生成 FP8E4M3FN 数据及 FP8E8M0 scale（`group_axis` 对齐 PTOAS `grpAxis`）。本版本不含 MXFP4 quant。暂不支持与 `matmul_mx` 同 InCore mixed task — 请经 GM 分核（见 [类型](../language/00-types.md)） |
+| `tmov_x2zz` | `pl.` (t) | Ascend950 指数 X-to-ZZ 布局转换（UINT8）。`tmp` 为只写 workspace；axis1 需 `dst_rows`/`dst_cols` 指定 ZZ `[M,G]`（相对 TQUANT 扁平 exp）。通常由 `quant_mx` 降级使用，而非直接调用 |
+
 ## 线性代数
 
 | 算子 | 可达 | 作用 |

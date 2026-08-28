@@ -676,10 +676,39 @@ def test_no_access_operation_has_no_exact_pipe(ascend_backend):
     assert testing.try_infer_pipe(call) is None
 
 
-@pytest.mark.parametrize("op_name", ["tile.matmul_acc", "tile.gemv_acc", "tile.batch_matmul_acc"])
-def test_accumulate_ops_declare_functional_access(op_name):
-    """Accumulator ops expose their complete read/write contract to the recognizer."""
+@pytest.mark.parametrize(
+    "op_name",
+    ["tile.matmul_acc", "tile.gemv_acc", "tile.batch_matmul_acc", "tile.tquant_mx_raw", "tile.tmov_x2zz"],
+)
+def test_executable_ops_declare_functional_access(op_name):
+    """Executable ops expose their complete read/write contract to the recognizer."""
     assert testing.get_execution_memory_access_evidence(op_name) == "functional"
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
+def test_dsa_rp_tracks_tmov_x2zz_write_workspace(ascend_backend):
+    """X-to-ZZ source reads and workspace writes both block an inbound reuse."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(
+            self,
+            input_a: pl.Tensor[[1, 32], pl.UINT8],
+            input_b: pl.Tensor[[1, 96], pl.UINT8],
+            output: pl.Tensor[[16, 2], pl.UINT8],
+        ) -> pl.Tensor[[16, 2], pl.UINT8]:
+            source = pl.load(input_a, [0, 0], [1, 32], target_memory=pl.Mem.Vec)
+            temporary = pl.tile.create([1, 96], pl.UINT8, target_memory=pl.Mem.Vec)
+            moved = pl.tmov_x2zz(source, temporary, group_axis=1, dst_rows=16, dst_cols=2)
+            _later = pl.load(input_b, [0, 0], [1, 96], target_memory=pl.Mem.Vec)
+            return pl.store(moved, [0, 0], output)
+
+    pairs = _recognized_pairs(Before)
+    ranges = _tile_ranges(_plan_with_dsa_rp(Before))
+    for prior in ("source", "temporary"):
+        assert frozenset((prior, "_later")) in pairs
+        assert not _overlap(ranges[prior], ranges["_later"])
 
 
 def test_matmul_acc_functional_access_does_not_poison_allocation(ascend_backend):

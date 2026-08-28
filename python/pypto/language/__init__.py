@@ -157,6 +157,12 @@ from .op.tile_ops import (
 from .op.tile_ops import (
     mscatter as mscatter,
 )
+from .op.tile_ops import (
+    quant_mx as quant_mx,
+)
+from .op.tile_ops import (
+    tmov_x2zz as tmov_x2zz,
+)
 from .op.unified_ops import (
     abs,
     add,
@@ -456,6 +462,9 @@ __all__ = [
     "sel",
     "sels",
     "tri",
+    # MX quantization
+    "quant_mx",
+    "tmov_x2zz",
     # Promoted system ops (cross-core)
     "AUTO",
     "tpush_to_aiv",

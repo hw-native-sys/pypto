@@ -658,9 +658,9 @@ def lower_composite_ops() -> Pass:
     """Decompose composite tile/distributed ops into primitive ops.
 
     Lowering rules are registered through the composite-lowering registry.
-    Today the pass handles ``tile.sin`` / ``tile.cos`` and explicit-signal
-    InCore ``pld.tensor.allreduce``. Host-level allreduce is skipped here and
-    lowered later by :func:`lower_host_tensor_collectives`.
+    Today the pass handles ``tile.sin`` / ``tile.cos``, packed ``tile.tquant_mx``,
+    and explicit-signal InCore ``pld.tensor.allreduce``. Host-level allreduce is
+    skipped here and lowered later by :func:`lower_host_tensor_collectives`.
 
     FP32-only for the trig rules. Non-FP32 inputs are rejected at
     op-construction time.

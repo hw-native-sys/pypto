@@ -31,11 +31,11 @@ from pypto.pypto_core import passes
 after = passes.insert_mx_scale_addr()(passes.infer_tile_memory_space()(program))
 ```
 
-仅重写 `FunctionType::InCore` 函数。
+重写所有 InCore 变体函数（`FunctionType::InCore` / `AIC` / `AIV`）。Mixed kernel 与前端直接书写的 cube/vector 函数走 AIC/AIV，也必须插入绑定。
 
 ## 算法
 
-遍历每个 InCore 函数体。对每个 `tile.matmul_mx` / `tile.matmul_mx_acc` / `tile.matmul_mx_bias` 赋值：
+遍历每个 InCore 变体函数体。对每个 `tile.matmul_mx` / `tile.matmul_mx_acc` / `tile.matmul_mx_bias` 赋值：
 
 1. 按算子配对 data/scale 操作数下标（`matmul_mx` / `_bias` 为 `(0,1)/(2,3)`；`_acc` 为 `(1,2)/(3,4)`）。
 2. 要求操作数为 Var-like（`Var` 或 `IterArg`），且 memory space 已构成合法的 LeftScale↔Left 或 RightScale↔Right 配对。

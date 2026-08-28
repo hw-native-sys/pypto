@@ -29,8 +29,17 @@
 
 namespace pypto::ir::tile_view_semantics {
 
-/// MX block-scale fractal size: one shared exponent per 32 elements (A5 ISA).
+/// MX block-scale fractal size: the 32-byte scale box (A5 ISA).
+/// Distinct from kMXGroupSize (elements sharing one E8M0 exponent), even though
+/// both are numerically 32 today.
 inline constexpr int kMXScaleFractal = 32;
+
+/// MX block-32 quantization group size: elements sharing one E8M0 exponent.
+inline constexpr int64_t kMXGroupSize = 32;
+
+/// Physical SFractal box for packed MX GM scale GlobalTensors (EmitMxPhysicalView).
+inline constexpr int64_t kMXSFractalRows = 16;
+inline constexpr int64_t kMXSFractalCols = 2;
 
 /// Acc (L0C) fractal size: the accumulator is NZ-boxed at 1024 bytes.
 inline constexpr uint64_t kAccFractal = 1024;

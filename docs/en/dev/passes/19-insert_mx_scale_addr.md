@@ -31,11 +31,11 @@ from pypto.pypto_core import passes
 after = passes.insert_mx_scale_addr()(passes.infer_tile_memory_space()(program))
 ```
 
-Only `FunctionType::InCore` functions are rewritten.
+Rewrites all InCore-variant functions (`FunctionType::InCore` / `AIC` / `AIV`). Mixed kernels and frontend-written cube/vector functions use AIC/AIV and must receive the same bindings.
 
 ## Algorithm
 
-Walk each InCore body. For every `tile.matmul_mx` / `tile.matmul_mx_acc` / `tile.matmul_mx_bias` assignment:
+Walk each InCore-variant body. For every `tile.matmul_mx` / `tile.matmul_mx_acc` / `tile.matmul_mx_bias` assignment:
 
 1. Pair data/scale operand indices (`(0,1)/(2,3)` for `matmul_mx` / `_bias`; `(1,2)/(3,4)` for `_acc`).
 2. Require Var-like operands (`Var` or `IterArg`) whose memory spaces already form a legal LeftScale↔Left or RightScale↔Right pair.

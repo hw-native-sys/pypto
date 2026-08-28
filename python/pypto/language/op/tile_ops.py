@@ -66,6 +66,8 @@ __all__ = [
     "abs",
     "relu",
     "cast",
+    "quant_mx",
+    "tmov_x2zz",
     "matmul",
     "batch_matmul",
     "matmul_acc",
@@ -1288,6 +1290,91 @@ def cast(
     return Tile(expr=call_expr)
 
 
+# ============================================================================
+# MX Quantization Operations
+# ============================================================================
+
+
+def quant_mx(
+    src: Tile,
+    *,
+    group_axis: int,
+    dtype: DataType = DataType.FP8E4M3FN,
+) -> tuple[Tile, Tile]:
+    """MXFP8 block-32 dynamic quantization with PTOAS ``grpAxis`` selection.
+
+    ``group_axis`` is required and must be ``0`` or ``1`` (same meaning as
+    PTOAS ``#pto<mx_group_axis axis*>``). Axis 1 is the A-side ``[M, K]`` path;
+    axis 0 is the B-side ``[N, K]`` path (LowerCompositeOps transposes to
+    ``[K, N]`` before quantization). GM ``TensorLayout.MX_*`` is only for
+    tensor / ``tensor.view`` annotations, not this tile op.
+
+    This release supports **MXFP8 only** (``dtype=FP8E4M3FN``). MXFP4 is out of
+    scope for this PR.
+
+    Args:
+        src: Source tile (FP16/FP32/BF16, 2D).
+            ``group_axis=1``: ``[M, K]`` with ``M%16==0``, ``K%64==0``.
+            ``group_axis=0``: ``[N, K]`` with ``N%32==0``, ``K%64==0``.
+        group_axis: PTOAS grouping axis — ``1`` (A-side) or ``0`` (B-side).
+        dtype: Must be ``FP8E4M3FN`` (default).
+
+    Returns:
+        ``group_axis=1``: ``(quant[M,K], scale[M,K/32])`` row/row ZZ scale.
+        ``group_axis=0``: ``(quant[K,N], scale[K/32,N])`` — data transposed to
+        Cube RHS layout; scale col/col NN.
+
+    Note:
+        ``quant_mx`` and ``matmul_mx`` cannot currently share one InCore mixed
+        task. Stage the quantized data and scale through GM between separate
+        AIV and AIC kernels; automatic cross-core data+scale transport is a
+        follow-up.
+    """
+    if group_axis not in (0, 1):
+        raise ValueError(f"pl.quant_mx group_axis must be 0 or 1, but got {group_axis!r}")
+    if dtype != DataType.FP8E4M3FN:
+        raise ValueError(f"pl.quant_mx supports only FP8E4M3FN (MXFP8), but got {dtype}")
+    call_expr = _ir_ops.tquant_mx(src.unwrap(), dtype=dtype, group_axis=group_axis)
+    span = call_expr.span
+    return (
+        Tile(expr=_ir_core.TupleGetItemExpr(call_expr, 0, span)),
+        Tile(expr=_ir_core.TupleGetItemExpr(call_expr, 1, span)),
+    )
+
+
+def tmov_x2zz(
+    src: Tile,
+    tmp: Tile,
+    *,
+    group_axis: int = 1,
+    dst_rows: int | None = None,
+    dst_cols: int | None = None,
+) -> Tile:
+    """Exponent X-to-ZZ layout conversion (A5-only).
+
+    ``tmp`` is a write-only workspace. Axis1 requires capacity
+    ``64 + ceil(rows/16) * cols`` bytes (typically 32-byte-aligned by the
+    caller) and ``dst_rows``/``dst_cols`` for the ZZ ``[M, G]`` shape. Axis0
+    (TMovDnTo2Zz) still requires a Vec tmp operand; use a minimal 32-byte-aligned
+    pad.
+    """
+    if group_axis not in (0, 1):
+        raise ValueError(f"pl.tmov_x2zz group_axis must be 0 or 1, but got {group_axis!r}")
+    call_expr = _ir_ops.tmov_x2zz(
+        src.unwrap(),
+        tmp.unwrap(),
+        group_axis=group_axis,
+        dst_rows=dst_rows,
+        dst_cols=dst_cols,
+    )
+    return Tile(expr=call_expr)
+
+
+# ============================================================================
+# Matrix Operations
+# ============================================================================
+
+
 def matmul(lhs: Tile, rhs: Tile) -> Tile:
     """Matrix multiplication of two tiles.
 
@@ -1409,9 +1496,10 @@ def matmul_bias(lhs: Tile, rhs: Tile, bias: Tile) -> Tile:
 def matmul_mx(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
     """MX block-scale matrix multiplication.
 
-    Both data tiles passed to this operation must be FP8E4M3FN. For the
-    supported FP4 x FP8 input form, explicitly cast the FP4 lhs to FP8E4M3FN
-    before calling this operation; native FP4 x FP4 is not supported.
+    Scales use logical ``[M, K/32]`` / ``[K/32, N]`` shapes. Both data tiles
+    passed to this operation must be FP8E4M3FN. For the supported FP4 x FP8
+    input form, explicitly cast the FP4 lhs to FP8E4M3FN before calling this
+    operation; native FP4 x FP4 is not supported.
 
     Args:
         lhs: Left-hand side data tile (FP8E4M3FN)

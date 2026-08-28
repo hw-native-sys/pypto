@@ -263,12 +263,21 @@ inline ReinterpretViewPlan Resolve(const std::vector<ExprPtr>& source_shape,
                                    DataType target_dtype, size_t contiguous_axis,
                                    const std::optional<std::vector<ExprPtr>>& requested_shape,
                                    const std::string& op_name, const Span& span) {
-  CHECK_SPAN(IsSupportedDType(source_dtype), span)
+  const bool mx_alias = (source_dtype == DataType::INT8 && target_dtype == DataType::FP8E4M3FN) ||
+                        (source_dtype == DataType::FP8E4M3FN && target_dtype == DataType::INT8) ||
+                        (source_dtype == DataType::UINT8 && target_dtype == DataType::FP8E8M0) ||
+                        (source_dtype == DataType::FP8E8M0 && target_dtype == DataType::UINT8);
+  const bool uses_unsupported_fp8 =
+      (!IsSupportedDType(source_dtype) && source_dtype.IsFloat() && source_dtype.GetBit() == 8) ||
+      (!IsSupportedDType(target_dtype) && target_dtype.IsFloat() && target_dtype.GetBit() == 8);
+  CHECK_SPAN(mx_alias || !uses_unsupported_fp8, span)
+      << op_name << " only supports FP8 reinterpretation for INT8<->FP8E4M3FN and UINT8<->FP8E8M0";
+  CHECK_SPAN(IsSupportedDType(source_dtype) || mx_alias, span)
       << op_name << " does not support source dtype " << source_dtype.ToString()
-      << "; supported dtypes are byte-addressable int/uint8/16/32/64, FP16, BF16, and FP32";
-  CHECK_SPAN(IsSupportedDType(target_dtype), span)
+      << "; FP8 aliases are limited to INT8<->FP8E4M3FN and UINT8<->FP8E8M0";
+  CHECK_SPAN(IsSupportedDType(target_dtype) || mx_alias, span)
       << op_name << " does not support target dtype " << target_dtype.ToString()
-      << "; supported dtypes are byte-addressable int/uint8/16/32/64, FP16, BF16, and FP32";
+      << "; FP8 aliases are limited to INT8<->FP8E4M3FN and UINT8<->FP8E8M0";
   CHECK_SPAN(source_dtype != target_dtype, span)
       << op_name << " requires source and target dtypes to differ; use reshape/view for shape-only changes";
   detail::ValidatePhysicalShape(source_shape, "source shape", op_name, span);

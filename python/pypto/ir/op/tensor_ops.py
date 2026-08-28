@@ -1874,9 +1874,11 @@ def view(
        2D or a contiguous-prefix linear collapse to ``[1, product(shape)]``;
        both require an explicit target ``valid_shape``.
     Combining ``shape`` with a layout change is valid for type deduction and
-    PTO in-core lowering. Orchestration lowering only supports shape
-    reinterpret for ND-layout tensors because the runtime ``TaskTensor::reshape``
-    cannot express an arbitrary-layout view.
+    PTO in-core lowering. Only orchestration lowering is restricted: it supports
+    ND shape reinterprets and shaped ND/MX_A_ZZ/MX_B_NN backing/consumer views
+    for FP8E8M0 MX scales; other layout-changing shape reinterprets are
+    unsupported because the runtime ``TaskTensor::reshape`` cannot express an
+    arbitrary-layout view.
 
     Args:
         tensor: Input tensor expression.
@@ -1891,9 +1893,9 @@ def view(
             collapse reinterprets a source with partial validity.
         layout: Target ``TensorLayout`` (ND or DN). Must not be ``NZ``.
             When provided without ``shape``, performs a layout-only flip.
-            When combined with ``shape``, layout changes are supported in-core
-            but not by orchestration lowering. Orchestration shape reinterpret
-            is limited to ND-layout tensors.
+            Orchestration also permits shaped ND/MX_A_ZZ/MX_B_NN backing and
+            consumer views for FP8E8M0 MX scales; other layout-changing shape
+            views remain limited to in-core lowering.
         span: Optional source span for debugging (auto-captured if not
             provided).
 

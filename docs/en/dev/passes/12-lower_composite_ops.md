@@ -1,16 +1,16 @@
 # LowerCompositeOps Pass
 
-Decomposes composite tile / distributed ops into compositions of primitive tile ops (`tile.muls`, `tile.adds`, `tile.add`, `tile.sub`, `tile.mul`, `tile.maximum`, `tile.minimum`, `tile.cast`) and distributed primitives, so codegen never has to emit a high-level intrinsic. Today the pass handles `tile.sin` / `tile.cos` (FP32 Cody-Waite + Horner) and `pld.tensor.*` distributed collectives (`allreduce` (mesh and ring), `allgather`, `reduce_scatter`, `broadcast`, `barrier`). Mesh and ring allreduce may also create a metadata-preserving `tensor.view` so tile load/remote/store operate on a 2D flattened target window. New composite ops add a lowering rule to the dispatch table inside the pass file without touching the dispatcher.
+Decomposes composite tile / distributed ops into primitive operations so codegen does not need to emit their high-level forms. Today the pass handles `tile.sin` / `tile.cos` (FP32 Cody-Waite + Horner), packed `tile.tquant_mx`, and `pld.tensor.*` distributed collectives (`allreduce` (mesh and ring), `allgather`, `reduce_scatter`, `broadcast`, `barrier`). Mesh and ring allreduce may also create a metadata-preserving `tensor.view` so tile load/remote/store operate on a 2D flattened target window.
 
 ## Overview
 
-`LowerCompositeOps` is a function-level pass that rewrites every `var = Call(...)` `AssignStmt` whose callee appears in the pass's lowering dispatch table. For `tile.sin` / `tile.cos`, the rule emits a fixed-shape primitive tile-op recipe using `tile.muls`, `tile.adds`, `tile.add`, `tile.sub`, `tile.mul`, and `tile.cast`: Cody-Waite range reduction (4-part π split) followed by a degree-9 odd Horner polynomial. For `pld.tensor.*` distributed collectives, the rules emit the cross-rank recipes documented below; `pld.tensor.allreduce` remains explicit-signal in InCore/composite lowering. The original target `Var` is preserved as the LHS of the final `AssignStmt`, so downstream uses keep the same name and identity.
+`LowerCompositeOps` is a function-level pass that rewrites every `var = Call(...)` `AssignStmt` whose callee appears in the pass's lowering dispatch table. For `tile.sin` / `tile.cos`, the rule emits a fixed-shape primitive tile-op recipe using `tile.muls`, `tile.adds`, `tile.add`, `tile.sub`, `tile.mul`, and `tile.cast`: Cody-Waite range reduction (4-part π split) followed by a degree-9 odd Horner polynomial. `tile.tquant_mx` becomes value-returning `tile.tquant_mx_raw` + `tile.tmov_x2zz` (gather_compare-style SSA) plus explicit workspace tiles; public FP8 aliases are added via `reinterpret_view` / `transpose_view`. For `pld.tensor.*` distributed collectives, the rules emit the cross-rank recipes documented below; `pld.tensor.allreduce` remains explicit-signal in InCore/composite lowering. The original target `Var` is preserved as the LHS of the final `AssignStmt`, so downstream uses keep the same name and identity.
 
 Host-orchestrator `pld.tensor.allreduce` calls are skipped by this pass: `SynthesizeAllReduceSignals` first normalizes optional-signal host calls to the explicit-signal form, `MaterializeCommDomainScopes` places the data and signal windows into comm domains, and then `LowerHostTensorCollectives` lowers them to internal builtin dispatches.
 
 The `tile.sin` / `tile.cos` rules are **FP32-only**. Non-FP32 trig inputs are rejected at op-construction time by the shared `DeduceTileFP32OnlyType` deducer (see `src/ir/op/tile_ops/unary.cpp:94`), so those rules only see well-typed FP32 operands. Distributed rules have their own dtype contracts; allreduce supports FP16 and FP32 as documented below.
 
-The pass is **structural no-op** on programs that contain no registered composite call such as `tile.sin`, `tile.cos`, or `pld.tensor.*` distributed collectives: every other statement passes through `IRMutator::VisitStmt_`. The decomposition emits only primitive tile ops (`tile.muls`, `tile.adds`, `tile.add`, `tile.sub`, `tile.mul`, `tile.maximum`, `tile.minimum`, `tile.cast`) and distributed primitives, none of which the mutator rewrites — so the pass is also **idempotent**.
+The pass is **structural no-op** on programs that contain no registered composite call such as `tile.sin`, `tile.cos`, `tile.tquant_mx`, or `pld.tensor.*` distributed collectives: every other statement passes through `IRMutator::VisitStmt_`. The decomposition emits only primitive tile ops, the internal value-returning `tile.tquant_mx_raw` / `tile.tmov_x2zz` forms, and distributed primitives, none of which the mutator rewrites — so the pass is also **idempotent**.
 
 **Requires**: nothing.
 
@@ -22,7 +22,9 @@ The empty `PassProperties` contract (`kLowerCompositeOpsProperties` in `include/
 
 ## When It Runs
 
-`LowerCompositeOps` is the **first entry of `tile_pto_passes`** in the `Default` pipeline (see `python/pypto/ir/pass_manager.py`), running immediately after `ConvertTensorToTileOps` (slot 12) and `OptimizeOrchTensors` (slot 13). At this point all tensor-level transcendental calls (`tensor.sin`, `tensor.cos`) have been rewritten to their tile equivalents (`tile.sin`, `tile.cos`) by the conversion registry, and the tile pipeline is about to start tile-shape canonicalisation. Lowering trig before `FlattenTileNdTo2D` keeps the decomposition independent of the 2D-flattening rules — every primitive tile op in the recipe (`tile.muls`, `tile.adds`, `tile.add`, `tile.sub`, `tile.mul`, `tile.cast`) has well-defined behaviour at any rank.
+`LowerCompositeOps` is the **first entry of `tile_pto_passes`** in the `Default` pipeline (see `python/pypto/ir/pass_manager.py`), running immediately after `ConvertTensorToTileOps` (slot 12) and `OptimizeOrchTensors` (slot 13). At this point all tensor-level transcendental calls (`tensor.sin`, `tensor.cos`) have been rewritten to their tile equivalents (`tile.sin`, `tile.cos`) by the conversion registry, and the tile pipeline is about to start tile-shape canonicalisation. Lowering trig before `FlattenTileNdTo2D` keeps the decomposition independent of the 2D-flattening rules — every primitive tile op in the recipe (`tile.muls`, `tile.adds`, `tile.add`, `tile.sub`, `tile.mul`, `tile.cast`) has well-defined behaviour at any rank. Packed `tile.tquant_mx` is also lowered here (after `FlattenCallExpr` has stabilized tuple consumers).
+
+**Pass order vs memory space:** `LowerCompositeOps` runs **before** `InferTileMemorySpace`. Scratch tiles created by the `tile.tquant_mx` rule therefore stamp `MemorySpace::Vec` explicitly on `tile.create` so later memory planning still sees addresses; this is intentional, not a signal that Infer should have already run.
 
 ## Architecture
 
@@ -42,12 +44,20 @@ src/ir/transforms/lower_composite_ops_pass.cpp
   LowerCompositeOpsMutator  — walks the function, looks up a rule per Call
 ```
 
-Adding a new composite op (all edits stay in `lower_composite_ops_pass.cpp`):
+Adding a new single-result composite op (all edits stay in `lower_composite_ops_pass.cpp`):
 
 1. Write a `Lower<Op>Rule(call, args, builder)` function. It receives the original `CallPtr` (use `call->span_`, `call->kwargs_`, `call->op_->name_` as needed), the visited arg expressions (var-remap already applied), and a `LoweringBuilder` whose `Bind` helper appends an `AssignStmt` per intermediate temp. For rules that need control flow, use `builder.EmitFor` / `builder.EmitForReduce` / `builder.EmitIf` / `builder.EmitIfExpr` — each takes a body callback that receives a nested builder sharing the same temp counter, so emitted temps stay uniquely named regardless of nesting depth. `LowerTensorAllReduceRule` is the canonical example of a control-flow-bearing rule (ready barrier plus chunked remote_load+accumulate / barrier / store for mesh; `LowerTensorRingAllReduceRule` adds a chunked RS+AG ring schedule dispatched via a `mode` kwarg).
 2. Add a `{"<op>", &Lower<Op>Rule}` row to `kRules` inside `LookupCompositeRule`.
 
-No edits to the mutator are needed. When the table grows past a handful of entries — or a rule wants its own translation unit — promote it back to a standalone registry under `src/ir/transforms/composite_ops/`.
+Multi-result rules return `MakeTuple`; the mutator maps both the original result and ordinary SSA aliases of that tuple, so direct projections and alias-chain projections expose the same destinations. When the table grows past a handful of entries — or a rule wants its own translation unit — promote it back to a standalone registry under `src/ir/transforms/composite_ops/`.
+
+## Algorithm (`tile.tquant_mx` rule)
+
+The lowering creates source-dtype `max` / `scaling` write-only workspace tiles, then binds a value-returning `tile.tquant_mx_raw(src, max, scaling)` whose `TupleType{INT8 dst, UINT8 exp}` elements are projected with `TupleGetItem` (same SSA pattern as `tile.gather_compare`). Codegen resolves those projections via `ResolveTupleResultElements` and emits `pto.tquant.mx` with four outs (dst, exp, max, scaling). Public `group_axis` matches PTOAS `grpAxis`: axis1 keeps `[M,K]` and returns scale `[M,K/32]`; axis0 first transposes `[N,K]` to `[K,N]` and returns scale `[K/32,N]`. Both forms then bind value-returning `tile.tmov_x2zz(exp, tmp)`. Axis1 tmp capacity is `64 + ceil(rows/16)*cols` bytes (32-byte-aligned); axis0 uses a minimal 32-byte Vec pad required by `TMovDnTo2Zz`. Axis0 follows pto-isa `TMovDnTo2Zz` (pin `be5ccb76`): DN `[M̂,N]` → ZZ `[N,M̂]` row/row, then a zero-copy `tile.transpose_view` yields the public `[M̂,N]` col/col scale. A zero-copy FP8 data alias and FP8E8M0 scale alias complete the public tuple. Write effects on the workspace args keep the Calls alive under DCE when a public result is unused.
+
+Public usage still stages `quant_mx` and `matmul_mx` through separate AIV/AIC kernels and GM; same-InCore mixed-task transport of quant data plus scale is a follow-up (see [ExpandMixedKernel](22-expand_mixed_kernel.md#known-limitation-mx-quantization-followed-by-matmul)).
+
+The mutator records composite-produced `MakeTuple`s (and SSA aliases of those tuples) in a private `composite_tuples_` map so `TupleGetItem` projections fold without abusing global `var_remap_` for arbitrary `v = (a, b)` assignments. The internal `tile.tquant_mx_raw` / `tile.tmov_x2zz` ops are not registered as composite rules, preserving pass idempotency.
 
 ## Algorithm (sin / cos rule)
 
@@ -184,7 +194,9 @@ All constants are FP32 literals (the `k*` literals near the top of `src/ir/trans
 
 ## Idempotency
 
-Running `LowerCompositeOps` twice produces identical IR after the first run: the recipes emit only primitives such as `tile.muls`, `tile.adds`, `tile.add`, `tile.sub`, `tile.mul`, `tile.maximum`, `tile.minimum`, and `tile.cast`, plus the distributed primitives listed below. The mutator only rewrites registered composite calls (`tile.sin`, `tile.cos`, `pld.tensor.*` distributed collectives, ...), so the second invocation visits the body and changes nothing. This is verified by the sin/cos and distributed-collective idempotency tests in `tests/ut/ir/transforms/test_lower_composite_ops.py`.
+Running `LowerCompositeOps` twice produces identical IR after the first run: the recipes emit only primitive tile ops, internal `tile.tquant_mx_raw` / `tile.tmov_x2zz`, and the distributed primitives listed below. None of those results is itself a registered composite call, so the second invocation visits the body and changes nothing.
+
+The `tile.tquant_mx` rule emits the non-composite `tile.tquant_mx_raw` and `tile.tmov_x2zz`, so MX lowering is idempotent as well.
 
 ## `pld.tensor.*` distributed collectives
 
@@ -270,3 +282,4 @@ The cast modes `RINT` (cos), `ROUND` (sin), `FLOOR` (sign), and `None` (int↔fl
 - **Op deducer**: `DeduceTileFP32OnlyType` in `src/ir/op/tile_ops/unary.cpp:94` — enforces FP32-only at op-construction time.
 - **Conversion registry**: `RegisterSimple("tensor.sin", "tile.sin")` and the cos counterpart in `src/ir/transforms/op_conversion_registry.cpp` — the upstream tensor-to-tile rewrite that produces the `tile.sin` / `tile.cos` calls this pass consumes.
 - **Tests**: `tests/ut/ir/transforms/test_lower_composite_ops.py` (structural), `tests/ut/ir/transforms/test_lower_composite_ops_numerical.py` (NumPy-reference numerical).
+- **MX quantization tests**: `tests/ut/codegen/test_quant_mx_codegen.py` (tuple consumption and memory planning).

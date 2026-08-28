@@ -55,6 +55,9 @@ TypePtr DeduceTensorReadType(const std::vector<ExprPtr>& args,
   auto tensor_type = AsTensorTypeLike(args[0]->GetType());
   CHECK(tensor_type) << "tensor.read requires first argument to be a TensorType, but got "
                      << args[0]->GetType()->TypeName();
+  CHECK_SPAN(!tensor_type->tensor_view_ || !IsMxTensorLayout(tensor_type->tensor_view_->layout),
+             args[0]->span_)
+      << "tensor.read does not support MX-layout tensors";
 
   // Second argument must be TupleType (indices)
   auto indices_type = As<TupleType>(args[1]->GetType());
@@ -842,6 +845,9 @@ TypePtr DeduceTensorWriteType(const std::vector<ExprPtr>& args,
   auto tensor_type = AsTensorTypeLike(args[0]->GetType());
   CHECK(tensor_type) << "tensor.write requires first argument to be a TensorType, but got "
                      << args[0]->GetType()->TypeName();
+  CHECK_SPAN(!tensor_type->tensor_view_ || !IsMxTensorLayout(tensor_type->tensor_view_->layout),
+             args[0]->span_)
+      << "tensor.write does not support MX-layout tensors";
 
   auto indices_type = As<TupleType>(args[1]->GetType());
   CHECK(indices_type) << "tensor.write requires indices to be TupleType, but got "

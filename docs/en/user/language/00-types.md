@@ -200,13 +200,17 @@ scale pack, `MX_B_NN` for the right/B one — so that a Mat-to-scale `pl.move` c
 source layout instead of byte-copying incompatible data into `LeftScale` / `RightScale`.
 They are the one case where a layout marker on a `pl.Tensor` annotation is required rather
 than discouraged. Current limitations: an MX `pl.load` must pass `target_memory=pl.Mem.Mat`
-explicitly, MX subviews (`slice`, `reshape`, `transpose`, `reinterpret_view`, `view`) and
-MX `remote_load` are rejected. The matmul itself is `pl.matmul_mx` and its `_acc` /
+explicitly; ordinary MX subviews (`slice`, `reshape`, `transpose`, `reinterpret_view`) and
+MX `remote_load` are rejected. Exception: FP8E8M0 `pl.tensor.view` may alias packed ND
+backing to `MX_A_ZZ` / `MX_B_NN` as a logical rank-2 view (`layout=mx_*`; PTOAS v0.60 packs
+physically). The matmul itself is `pl.matmul_mx` and its `_acc` /
 `_bias` variants, which take a data tile and a scale tile per operand. Both data tiles reaching
 the op must be `FP8E4M3FN`. The supported FP4-input form is a left FP4 operand multiplied by a
 right FP8 operand: write `pl.cast(fp4_tile, pl.FP8E4M3FN)` before `matmul_mx`. On A5 the cast
 legalization pass expands that request to FP4→BF16→FP32→FP8E4M3FN. Native FP4×FP4 and the
-reverse FP8×FP4 form are not supported; MXFP4 quantization is not exposed yet.
+reverse FP8×FP4 form are not supported. Standalone `pl.quant_mx` (MXFP8-only in this release, with
+`group_axis` matching PTOAS `grpAxis`) is available;
+it cannot yet share one InCore mixed task with `matmul_mx` — stage through GM between AIV/AIC.
 
 ### Dynamic shapes
 

@@ -30,6 +30,10 @@ from pypto.language.parser.diagnostics.exceptions import ParserError
 
 _OP_PLD_TILE_REMOTE_LOAD = ir.get_op("pld.tile.remote_load").name
 _OP_TILE_LOAD = ir.get_op("tile.load").name
+_OP_TILE_TQUANT_MX = ir.get_op("tile.tquant_mx").name
+_OP_TILE_TQUANT_MX_RAW = ir.get_op("tile.tquant_mx_raw").name
+_OP_TILE_TMOV_X2ZZ = ir.get_op("tile.tmov_x2zz").name
+_OP_TILE_TRANSPOSE = ir.get_op("tile.transpose").name
 
 # Primitive tile ops the decomposition is allowed to emit (besides framework
 # infrastructure ops like tile.load / tile.store / tile.move that wrap the
@@ -304,6 +308,86 @@ def test_cos_lowering_is_idempotent():
     once = passes.lower_composite_ops()(Prog)
     twice = passes.lower_composite_ops()(once)
     ir.assert_structural_equal(twice, once)
+
+
+def _collect_op_names(program):
+    names = []
+
+    class Collector(ir.IRVisitor):
+        def visit_call(self, call):
+            names.append(call.op.name)
+            super().visit_call(call)
+
+    Collector().visit_program(program)
+    return names
+
+
+@pytest.mark.parametrize(
+    ("group_axis", "src_rows", "src_cols", "quant_rows", "quant_cols"),
+    [
+        (1, 16, 64, 16, 64),
+        (0, 32, 64, 64, 32),
+    ],
+)
+def test_tquant_mx_is_decomposed_to_value_returning_ops(
+    group_axis, src_rows, src_cols, quant_rows, quant_cols
+):
+    """``tile.tquant_mx`` lowers to Bind of ``tquant_mx_raw`` + ``tmov_x2zz`` (not Eval)."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main_incore_0(
+            self,
+            src: pl.Tensor[[src_rows, src_cols], pl.FP16],
+            out: pl.Out[pl.Tensor[[quant_rows, quant_cols], pl.FP8E4M3FN]],
+        ) -> pl.Tensor[[quant_rows, quant_cols], pl.FP8E4M3FN]:
+            quant, _scale = pl.quant_mx(
+                pl.load(src, [0, 0], [src_rows, src_cols]),
+                group_axis=group_axis,
+            )
+            return pl.store(quant, [0, 0], out)
+
+        @pl.function
+        def main(
+            self, src: pl.Tensor[[src_rows, src_cols], pl.FP16]
+        ) -> pl.Tensor[[quant_rows, quant_cols], pl.FP8E4M3FN]:
+            out = pl.create_tensor([quant_rows, quant_cols], dtype=pl.FP8E4M3FN)
+            return self.main_incore_0(src, out)
+
+    After = passes.lower_composite_ops()(Before)
+    names = _collect_op_names(After)
+    assert _OP_TILE_TQUANT_MX not in names
+    assert _OP_TILE_TQUANT_MX_RAW in names
+    assert _OP_TILE_TMOV_X2ZZ in names
+    assert (_OP_TILE_TRANSPOSE in names) == (group_axis == 0)
+
+    class FormCollector(ir.IRVisitor):
+        def __init__(self):
+            super().__init__()
+            self.eval_raw = 0
+            self.assign_raw = 0
+            self.assign_x2zz = 0
+
+        def visit_eval_stmt(self, stmt):
+            if isinstance(stmt.expr, ir.Call) and stmt.expr.op.name == _OP_TILE_TQUANT_MX_RAW:
+                self.eval_raw += 1
+            super().visit_eval_stmt(stmt)
+
+        def visit_assign_stmt(self, stmt):
+            if isinstance(stmt.value, ir.Call):
+                if stmt.value.op.name == _OP_TILE_TQUANT_MX_RAW:
+                    self.assign_raw += 1
+                elif stmt.value.op.name == _OP_TILE_TMOV_X2ZZ:
+                    self.assign_x2zz += 1
+            super().visit_assign_stmt(stmt)
+
+    forms = FormCollector()
+    forms.visit_program(After)
+    assert (forms.eval_raw, forms.assign_raw, forms.assign_x2zz) == (0, 1, 1)
+
+    twice = passes.lower_composite_ops()(After)
+    ir.assert_structural_equal(twice, After)
 
 
 def test_both_sin_and_cos_in_same_function():

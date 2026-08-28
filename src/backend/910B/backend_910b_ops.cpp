@@ -26,11 +26,11 @@ namespace pypto {
 namespace backend {
 
 static const bool kOpsRegistered = [] {
-  // MX block-scale matmul and its internal scale-address binding are A5-only.
-  // Keep them out of the A2/A3 registry so direct codegen cannot emit PTO ops
-  // that the target ISA does not support.
-  RegisterPTOOps(Backend910B::Instance(),
-                 {"tile.matmul_mx", "tile.matmul_mx_acc", "tile.matmul_mx_bias", "tile.tget_scale_addr"});
+  // MX block-scale matmul, scale-address binding, and quantization are A5-only.
+  // Keep them out of the A2/A3 registry so direct codegen cannot emit PTO ops that the target ISA does not
+  // support.
+  RegisterPTOOps(Backend910B::Instance(), {"tile.matmul_mx", "tile.matmul_mx_acc", "tile.matmul_mx_bias",
+                                           "tile.tget_scale_addr", "tile.tquant_mx_raw", "tile.tmov_x2zz"});
   return true;
 }();
 

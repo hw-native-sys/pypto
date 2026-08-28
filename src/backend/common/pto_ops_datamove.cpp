@@ -1016,6 +1016,122 @@ static void EmitTreshapeView(codegen::PTOCodegen& codegen, const ir::ExprPtr& sr
   codegen.Emit(oss.str());
 }
 
+struct StaticValidTileView {
+  std::string ssa;
+  std::string type;
+};
+
+// PTOAS special requirement (static valid_shape bridge):
+//   pto.tquant.mx and the X-to-ZZ form of pto.tmov verify every operand tile_buf
+//   with requireStaticShape: both physical dims and the type's v_row/v_col must
+//   be compile-time constants. A dynamic valid leaves the tile's effective
+//   extent at zero and the op becomes a silent no-op or fails verification.
+//
+// PyPTO's generic alloc_tile path deliberately emits v_row=?, v_col=? and
+// conveys the live extent through separate valid_row/valid_col operands (so
+// pl.set_validshape / runtime ctx_len work for ordinary Vec ops). That ABI
+// cannot satisfy TQUANT/X2ZZ, so at these instruction sites only we insert a
+// zero-copy pto.treshape whose *result type* carries the static valid extents
+// from GetViewTileBufTypeStringFromTileType. Do not drop this bridge without a
+// matching PTOAS change that accepts dynamic-valid tile_bufs on those ops.
+static StaticValidTileView EmitStaticValidTileView(codegen::PTOCodegen& codegen, const ir::ExprPtr& arg,
+                                                   const std::string& name_hint) {
+  auto tile_type = As<ir::TileType>(arg->GetType());
+  INTERNAL_CHECK_SPAN(tile_type, arg->span_) << "Internal error: grouped MX operand must be a TileType";
+  const std::string source = codegen.GetExprAsCode(arg);
+  const std::string source_type = GetViewSourceType(codegen, arg);
+  const std::string static_type = codegen.GetViewTileBufTypeStringFromTileType(tile_type);
+  INTERNAL_CHECK_SPAN(!source_type.empty() && !static_type.empty(), arg->span_)
+      << "Internal error: grouped MX operand has no PTO type annotation";
+  INTERNAL_CHECK_SPAN(
+      static_type.find("v_row=?") == std::string::npos && static_type.find("v_col=?") == std::string::npos,
+      arg->span_)
+      << "Internal error: grouped MX operand must carry static valid dimensions";
+  const std::string view = codegen.NewNamedTemp(name_hint);
+  codegen.RegisterTileBufType(view, static_type);
+  codegen.Emit(view + " = pto.treshape " + source + " : " + source_type + " -> " + static_type);
+  return {view, static_type};
+}
+
+// Helper for tile.tquant_mx_raw (value-returning MX block-32 quant) → pto.tquant.mx:
+//   pto.tquant.mx ins(src : src_ty)
+//                 outs(dst, scale, max, scaling : dst_ty, scale_ty, max_ty, scaling_ty)
+//                 {quant_type = #pto<quant_type MXFP8>, grpAxis = ...}
+//
+// Op surface: 3 inputs (src, max_ws, scaling_ws) / TupleType{INT8 dst, UINT8 exp}.
+// DPS dst/exp buffers are bound by downstream `tq_dst = raw[0]` / `tq_exp = raw[1]`
+// AssignStmts from LowerCompositeOps (same pattern as tile.gather_compare).
+static std::string MakeTQuantMxCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = AsPto(codegen_base);
+  INTERNAL_CHECK_SPAN(op->args_.size() == 3, op->span_)
+      << "tile.tquant_mx_raw requires src, max, and scaling workspaces, but got " << op->args_.size();
+
+  const DataType dtype = op->GetKwarg<DataType>("dtype", DataType::FP8E4M3FN);
+  INTERNAL_CHECK_SPAN(dtype == DataType::FP8E4M3FN, op->span_)
+      << "Internal error: tile.tquant_mx_raw reached codegen with unsupported dtype " << dtype.ToString()
+      << "; this PR only supports MXFP8 (FP8E4M3FN)";
+
+  ir::VarPtr tuple_var = codegen.GetCurrentResultVar();
+  INTERNAL_CHECK_SPAN(tuple_var, op->span_)
+      << "Internal error: tile.tquant_mx_raw codegen requires current_result_var";
+
+  auto element_vars = codegen.ResolveTupleResultElements(tuple_var, /*arity=*/2);
+  INTERNAL_CHECK_SPAN(element_vars[0] && element_vars[1], op->span_)
+      << "Internal error: tile.tquant_mx_raw expects two TupleGetItemExpr consumers (dst, exp), got "
+      << (element_vars[0] ? "dst-yes" : "dst-no") << "/" << (element_vars[1] ? "exp-yes" : "exp-no");
+
+  std::array<std::shared_ptr<const ir::TileType>, 2> elem_types;
+  for (size_t i = 0; i < 2; ++i) {
+    elem_types[i] = ir::GetTileTypeWithMemRef(element_vars[i]->GetType());
+    INTERNAL_CHECK_SPAN(elem_types[i], element_vars[i]->span_)
+        << "Internal error: tile.tquant_mx_raw element var " << i
+        << " must have TileType with MemRef set by InitMemRef";
+    codegen.EmitAllocTileForVar(element_vars[i], elem_types[i]);
+  }
+
+  // Every TQUANT operand must take the static-valid bridge (see EmitStaticValidTileView).
+  auto src_view = EmitStaticValidTileView(codegen, op->args_[0], "tquant_src_static");
+  auto max_view = EmitStaticValidTileView(codegen, op->args_[1], "tquant_max_static");
+  auto scaling_view = EmitStaticValidTileView(codegen, op->args_[2], "tquant_scaling_static");
+  auto dst_view = EmitStaticValidTileView(codegen, element_vars[0], "tquant_dst_static");
+  auto scale_view = EmitStaticValidTileView(codegen, element_vars[1], "tquant_exp_static");
+
+  std::ostringstream oss;
+  oss << "pto.tquant.mx ins(" << src_view.ssa << " : " << src_view.type;
+  const int group_axis = op->GetKwarg<int>("group_axis", 1);
+  INTERNAL_CHECK_SPAN(group_axis == 0 || group_axis == 1, op->span_)
+      << "Internal error: tile.tquant_mx_raw group_axis must be 0 or 1";
+  oss << ") outs(" << dst_view.ssa << ", " << scale_view.ssa << ", " << max_view.ssa << ", "
+      << scaling_view.ssa << " : " << dst_view.type << ", " << scale_view.type << ", " << max_view.type
+      << ", " << scaling_view.type << ") {quant_type = #pto<quant_type MXFP8"
+      << ">, grpAxis = #pto<mx_group_axis axis" << group_axis << ">}";
+  codegen.Emit(oss.str());
+  return "";
+}
+
+// tile.tmov_x2zz(src, tmp) → value-returning ZZ UINT8 tile. Codegen emits the
+// PTOAS PR 1197 non-scaling third-operand form of pto.tmov. Same
+// requireStaticShape rule as tquant.mx: every operand goes through
+// EmitStaticValidTileView.
+static std::string MakeTMovX2ZzCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = AsPto(codegen_base);
+  INTERNAL_CHECK_SPAN(op->args_.size() == 2, op->span_) << "tile.tmov_x2zz requires src and tmp operands";
+  auto src_view = EmitStaticValidTileView(codegen, op->args_[0], "x2zz_src_static");
+  auto tmp_view = EmitStaticValidTileView(codegen, op->args_[1], "x2zz_tmp_static");
+  // Single-tile value return: InitMemRef already allocated the ZZ destination.
+  auto dst_view = EmitStaticValidTileView(codegen, codegen.GetCurrentResultVar(), "x2zz_dst_static");
+  const int group_axis = op->GetKwarg<int>("group_axis", 1);
+  INTERNAL_CHECK_SPAN(group_axis == 0 || group_axis == 1, op->span_)
+      << "Internal error: tile.tmov_x2zz group_axis must be 0 or 1";
+
+  std::ostringstream oss;
+  oss << "pto.tmov ins(" << src_view.ssa << " : " << src_view.type << ", " << tmp_view.ssa << " : "
+      << tmp_view.type << ") outs(" << dst_view.ssa << " : " << dst_view.type
+      << ") {grpAxis = #pto<mx_group_axis axis" << group_axis << ">}";
+  codegen.Emit(oss.str());
+  return "";
+}
+
 void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>& exclude_ops) {
   // Register ops with custom codegen logic
   auto reg = [&](const char* op_name, BackendCodegenFunc fn) {
@@ -1268,6 +1384,14 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     return MakeTileAssembleCodegenPTO(op, codegen);
   });
 
+  reg("tile.tquant_mx_raw", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeTQuantMxCodegenPTO(op, codegen);
+  });
+
+  reg("tile.tmov_x2zz", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeTMovX2ZzCodegenPTO(op, codegen);
+  });
+
   reg("tile.gather_row", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeGatherRowCodegenPTO(op, codegen);
   });
@@ -1432,6 +1556,20 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
         << "tile.set_validshape requires 3 arguments (tile, valid_rows, valid_cols), but got "
         << op->args_.size();
 
+    auto tile_type = ir::As<ir::TileType>(op->args_[0]->GetType());
+    INTERNAL_CHECK_SPAN(tile_type, op->span_)
+        << "Internal error: tile.set_validshape input must be a TileType";
+    const auto tile_view = ir::tile_view_semantics::GetEffectiveTileView(*tile_type);
+    // PTOAS special requirement (FP4 Vec physical valid_shape):
+    //   FP4 Vec tile_bufs use the f4E2M1x2 carrier, so PTOAS valid_row/valid_col
+    //   are counted in packed physical elements along the BLayout axis (logical
+    //   nibble extent / 2). PyPTO IR keeps logical nibble shapes; convert here
+    //   so pto.set_validshape matches the alloc_tile / treshape physical ABI.
+    //   Matrix spaces are excluded — TMATMUL_MX has its own logical-dim ABI.
+    const bool packed_fp4_vec =
+        tile_type->dtype_ == DataType::FP4 && tile_type->memory_space_ == ir::MemorySpace::Vec;
+    const size_t packed_dim = tile_view.blayout == ir::TileLayout::col_major ? 0 : 1;
+
     std::string tile_buf = codegen.GetExprAsCode(op->args_[0]);
     std::string tile_buf_type = codegen.GetExprTypeAnnotation(op->args_[0]);
     if (tile_buf.empty()) {
@@ -1468,14 +1606,18 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
            "slice itself -- pl.tile.slice(tile, shape, offset, valid_shape=[...]), which also accepts "
            "runtime extents -- or call pl.set_validshape on the source tile before taking the view";
 
-    auto emit_index_arg = [&](const ir::ExprPtr& arg) -> std::string {
-      if (auto var = ir::As<ir::Var>(arg)) {
+    auto emit_index_arg = [&](const ir::ExprPtr& arg, bool pack_fp4) -> std::string {
+      if (auto var = ir::AsVarLike(arg)) {
+        INTERNAL_CHECK_SPAN(!pack_fp4, op->span_)
+            << "Internal error: packed FP4 valid dimension must be static before PTO codegen";
         std::string mlir_name = codegen.GetVarName(var);
         return codegen.EmitCastToIndex(var, mlir_name);
       }
       if (auto c = ir::As<ir::ConstInt>(arg)) {
-        return codegen.GetOrEmitConstant(c->value_, DataType::INDEX);
+        return codegen.GetOrEmitConstant(pack_fp4 ? c->value_ / 2 : c->value_, DataType::INDEX);
       }
+      INTERNAL_CHECK_SPAN(!pack_fp4, op->span_)
+          << "Internal error: packed FP4 valid dimension must be static before PTO codegen";
       std::string ssa = codegen.GetExprAsCode(arg);
       if (auto st = ir::As<ir::ScalarType>(arg->GetType())) {
         if (st->dtype_ != DataType::INDEX) {
@@ -1488,8 +1630,8 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
       return ssa;
     };
 
-    std::string vr = emit_index_arg(op->args_[1]);
-    std::string vc = emit_index_arg(op->args_[2]);
+    std::string vr = emit_index_arg(op->args_[1], packed_fp4_vec && packed_dim == 0);
+    std::string vc = emit_index_arg(op->args_[2], packed_fp4_vec && packed_dim == 1);
 
     codegen.RegisterTileBufType(tile_buf, tile_buf_type);
     codegen.SetCurrentResultBuf(tile_buf);
