@@ -2280,19 +2280,10 @@ class DistributedWorker(Worker):
     def _buffer_identity_for(self, host_ptr: int, nbytes: int, *, writing: bool) -> tuple[bytes, int]:
         """Return the stable ``(owner_instance_id, buffer_id)`` naming this host range.
 
-        Keyed on the range rather than counted per call, so a range copied N times keeps one
-        identity: the consumer's ``ImportRegistry`` refuses a second descriptor for an identity
-        it has already materialized, and it only drops an entry when the owner releases the
-        Buffer — which the named path never does, since it hands out the caller's own mapping.
-        Per-copy identities would therefore both collide on a re-copy and grow a child's
-        registry without bound. Distinct sub-ranges of one registered tensor still get distinct
-        identities, which is what a sharded upload needs.
-
-        The direction is part of the key because it decides the descriptor's ``access``: a
-        source is named ``READ`` and a destination ``READWRITE``. One identity may name only
-        one backing, so a range copied in both directions under a single identity would have
-        ``materialize`` reject the second descriptor for the changed access. Two identities per
-        range is still bounded — the property that matters is that it does not grow per copy.
+        Keyed on the complete inherited span rather than the requested copy range, so one
+        memory allocation has exactly one runtime Buffer identity. Sub-range copies reuse that
+        identity and express their position through the runtime copy offset. Every descriptor
+        uses ``READWRITE`` so the same identity remains valid in both copy directions.
 
         Held under a lock because ``alloc_stacked_tensor`` drives this from one thread per chip.
         """
@@ -2300,7 +2291,7 @@ class DistributedWorker(Worker):
             mint_owner_instance_id,
         )
 
-        key = (int(host_ptr), int(nbytes), bool(writing))
+        key = (int(host_ptr), int(nbytes), False)
         with self._named_identity_mu:
             cached = self._named_identities.get(key)
             if cached is not None:
@@ -2314,7 +2305,9 @@ class DistributedWorker(Worker):
             self._named_identities[key] = identity
             return identity
 
-    def _named_host_buffer(self, host_ptr: int, nbytes: int, *, writing: bool = False) -> Any:
+    def _named_host_buffer(
+        self, host_ptr: int, nbytes: int, *, writing: bool = False
+    ) -> tuple[Any, int] | None:
         """Name a fork-inherited MAP_SHARED host range in place, or ``None`` to stage it.
 
         Only memory registered through ``inherited_host_tensors`` can be named at all: it
@@ -2332,17 +2325,9 @@ class DistributedWorker(Worker):
         A ``MAP_PRIVATE`` backing is unsupported here rather than handled: the child keeps
         reading its pre-fork snapshot, so the caller would upload stale bytes.
 
-        Writability is left to the MMU rather than tracked here, because visibility and
-        writability are separate properties and one caller guarantee only covers the first.
-        A range mapped ``MAP_SHARED`` from a read-only fd is genuinely shared and still
-        faults on write, so a read-back into it fails immediately instead of corrupting
-        anything. A named source is granted ``READ`` and only a destination ``READWRITE``,
-        so the ABI is never told a consumer may write memory it may not.
-
-        Each range is wrapped on its own rather than offset into a whole-tensor Buffer,
-        because a Buffer carries no offset: a shard's address is interior to its stacked
-        tensor, so per-range wrapping is what keeps one shard's copy from moving the whole
-        stack.
+        The complete registered span is always wrapped as one ``READWRITE`` Buffer. A requested
+        sub-range returns that Buffer plus its relative offset, which the runtime copy API applies
+        without creating another Buffer identity for the same memory.
         """
         from simpler.buffer import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
             AccessMode,
@@ -2354,18 +2339,18 @@ class DistributedWorker(Worker):
         for start, stop in self._inherited_host_spans:
             if host_ptr < start or end > stop:
                 continue
-            owner, buffer_id = self._buffer_identity_for(host_ptr, nbytes, writing=writing)
-            return wrap_fork_inherited(
-                host_ptr,
-                nbytes,
-                owner,
-                buffer_id,
-                # A source is read by the child and nothing more, so say so: naming a read-only
-                # mapping READWRITE would tell the ABI the consumer may write memory that faults
-                # on a write, which is the same class of misdeclaration this whole option exists
-                # to remove. FORK_SHM accepts any access, so READ is expressible here.
-                access=AccessMode.READWRITE if writing else AccessMode.READ,
-                backend_kind=BackendKind.FORK_SHM,
+            span_nbytes = stop - start
+            owner, buffer_id = self._buffer_identity_for(start, span_nbytes, writing=writing)
+            return (
+                wrap_fork_inherited(
+                    start,
+                    span_nbytes,
+                    owner,
+                    buffer_id,
+                    access=AccessMode.READWRITE,
+                    backend_kind=BackendKind.FORK_SHM,
+                ),
+                host_ptr - start,
             )
         return None
 
@@ -2397,9 +2382,16 @@ class DistributedWorker(Worker):
             )
 
         src_ptr = int(src_host_ptr) + src_offset
-        src = self._named_host_buffer(src_ptr, int(nbytes))
-        if src is not None:
-            self._w.copy_to(dst, src, dst_offset=dst_offset, nbytes=nbytes)
+        named_src = self._named_host_buffer(src_ptr, int(nbytes))
+        if named_src is not None:
+            src, named_src_offset = named_src
+            self._w.copy_to(
+                dst,
+                src,
+                dst_offset=dst_offset,
+                src_offset=named_src_offset,
+                nbytes=nbytes,
+            )
             return
         host = self._w.create_buffer(nbytes)
         try:
@@ -2414,9 +2406,10 @@ class DistributedWorker(Worker):
         src = self._device_buffer(src_dev_ptr, worker_id, "copy_from")
         if not isinstance(nbytes, int) or nbytes <= 0:
             raise ValueError(f"nbytes must be a positive int, got {nbytes!r}")
-        dst = self._named_host_buffer(int(dst_host_ptr), int(nbytes), writing=True)
-        if dst is not None:
-            self._w.copy_from(dst, src)
+        named_dst = self._named_host_buffer(int(dst_host_ptr), int(nbytes), writing=True)
+        if named_dst is not None:
+            dst, named_dst_offset = named_dst
+            self._w.copy_from(dst, src, dst_offset=named_dst_offset, nbytes=nbytes)
             return
         host = self._w.create_buffer(nbytes)
         try:
