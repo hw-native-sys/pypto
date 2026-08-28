@@ -490,7 +490,7 @@ The PTO-oriented tile stage of `Default` is:
 11. [`InjectGMPipeBuffer`](23-inject_gm_pipe_buffer.md)
 12. [`SplitVectorKernel`](24-split_vector_kernel.md) (only stamps attrs for split_aiv functions + handles the no-split dual-AIV path)
 13. [`StampTfreeSplit`](25-stamp_tfree_split.md) (copies each cross-core tpop's split/pipe-id onto its matching tfree op)
-14. [`NormalizeReturnOrder`](26-normalize_return_order.md)
+14. `NormalizeReturnOrder`
 15. [`SkewCrossCorePipeline`](27-skew_cross_core_pipeline.md) (cross-core cube/vector software-pipeline skew; runs immediately before LowerPipelineLoops)
 16. [`LowerPipelineToSlots`](28-lower_pipeline_to_slots.md) (rotates an eligible `pl.pipeline` body through the slots of one allocation instead of replicating it; self-gated on `memory_planner=PTOAS`, and every loop it declines is left for `LowerPipelineLoops`)
 17. [`LowerPipelineLoops`](29-lower_pipeline_loops.md)
@@ -526,16 +526,11 @@ needed.
 
 [`NormalizeReturnOrder`](26-normalize_return_order.md) reorders `ReturnStmt::value_` in InCore functions so that
 `return[i]` corresponds to the i-th `Out`/`InOut` parameter in declaration order,
-and updates call/submit result tuple types, their binding Vars, and
-`TupleGetItemExpr` indices at call sites accordingly (while preserving a
-Submit's trailing TASK_ID). A preflight rejects a candidate result unless it is
-directly bound and used only through element projections in a non-InCore caller;
-whole-tuple aliases, control-flow carries, returns, and arguments require an
-inverse-permutation adapter that this pass does not synthesize. This gives
-positional consumers a canonical InCore tuple while orchestration codegen reads
-the explicit return-position-to-parameter map without tracing through
-`tile.store`/yield chains. The pass is placed before `InitMemRef` so it runs
-after all kernel splitting but before memory allocation.
+and updates `TupleGetItemExpr` indices at call sites accordingly. This lets
+orchestration codegen map tuple element indices to output parameters with a
+direct `out_indices[i]` lookup, without tracing through `tile.store`/yield
+chains. The pass is placed before `InitMemRef` so it runs after all kernel
+splitting but before memory allocation.
 
 `Simplify` folds arithmetic identities (`x + 0 → x`, `x * 1 → x`), evaluates
 constant-only expressions, runs range-aware rewrites using loop-variable

@@ -37,6 +37,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/deferred_wait_contract.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
@@ -1688,6 +1689,18 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
     return_types[i] = freshened->GetType();
   }
 
+  // Map each captured input Var to its positional index. The index is exact for
+  // BOTH surfaces the translations below need: ``input_params`` is built
+  // index-parallel to ``input_vars`` and is what the outlined ``Function`` is
+  // constructed from, and ``call_args`` is built from ``input_vars`` in the same
+  // order. Built once here and reused by output canonicalization and the attr
+  // translations further down.
+  std::unordered_map<const Var*, int32_t> input_var_to_idx;
+  input_var_to_idx.reserve(input_vars.size());
+  for (size_t i = 0; i < input_vars.size(); ++i) {
+    input_var_to_idx[input_vars[i].get()] = static_cast<int32_t>(i);
+  }
+
   // Build outlined function body (transformed body + return statement).
   //
   // Return params, not SSA result vars: every tensor output the scope
@@ -1699,24 +1712,65 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
   if (outlined_output_vars.empty()) {
     outlined_body = transformed_body;
   } else {
-    std::unordered_map<const Var*, VarPtr> input_to_param;
-    for (size_t i = 0; i < input_vars.size(); ++i) {
-      input_to_param[input_vars[i].get()] = input_params[i];
-    }
+    // Trace every generated result in one indexed walk. ConvertToSSA may order
+    // If phis by SSA name while captures stay in first-read order; branch
+    // consensus proves which captured buffer each phi still represents.
+    auto return_param_indices = return_lineage::TraceToParamIndicesForOutlining(
+        outlined_output_vars, transformed_body, input_params, program_,
+        /*trace_if_merges=*/outlined_func_type_ == FunctionType::InCore);
     std::vector<ExprPtr> return_exprs;
     return_exprs.reserve(outlined_output_vars.size());
     for (size_t i = 0; i < output_vars.size(); ++i) {
       VarPtr ret = outlined_output_vars[i];
+      std::optional<size_t> param_idx = return_param_indices[i];
       if (store_output_set.count(output_vars[i].get())) {
         // Store target: also an input, so the param is known directly.
-        auto param_it = input_to_param.find(output_vars[i].get());
-        if (param_it != input_to_param.end()) ret = param_it->second;
-      } else if (AsTensorTypeLike(ret->GetType())) {
-        if (auto param = return_lineage::TraceToParam(ret, transformed_body, input_params, program_)) {
-          ret = param;
-        }
+        auto param_it = input_var_to_idx.find(output_vars[i].get());
+        param_idx = param_it == input_var_to_idx.end()
+                        ? std::nullopt
+                        : std::optional<size_t>(static_cast<size_t>(param_it->second));
+      } else if (!AsTensorTypeLike(ret->GetType())) {
+        param_idx.reset();
       }
+      if (param_idx && *param_idx < input_params.size() &&
+          structural_equal(ret->GetType(), input_params[*param_idx]->GetType())) {
+        ret = input_params[*param_idx];
+      } else {
+        param_idx.reset();
+      }
+      return_param_indices[i] = param_idx;
       return_exprs.push_back(ret);
+    }
+
+    // An outlined InCore function and its caller are generated together, so
+    // canonicalize their shared output contract here. Out/InOut parameter
+    // declaration order is the ABI order; SSA phi names and definition order
+    // are not. Stay conservative when any result is fresh, scalar, ambiguous,
+    // or duplicates another result's parameter.
+    bool can_order = outlined_func_type_ == FunctionType::InCore;
+    std::unordered_set<size_t> seen_params;
+    for (const auto& param_idx : return_param_indices) {
+      if (!param_idx || *param_idx >= input_param_directions.size() ||
+          (input_param_directions[*param_idx] != ParamDirection::Out &&
+           input_param_directions[*param_idx] != ParamDirection::InOut) ||
+          !seen_params.insert(*param_idx).second) {
+        can_order = false;
+        break;
+      }
+    }
+    if (can_order) {
+      std::vector<size_t> order(return_exprs.size());
+      for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+      std::stable_sort(order.begin(), order.end(), [&](size_t lhs, size_t rhs) {
+        return return_param_indices[lhs].value() < return_param_indices[rhs].value();
+      });
+      auto reorder = [&](auto& values) {
+        auto original = values;
+        for (size_t i = 0; i < order.size(); ++i) values[i] = original[order[i]];
+      };
+      reorder(output_vars);
+      reorder(return_types);
+      reorder(return_exprs);
     }
     auto return_stmt = std::make_shared<ReturnStmt>(return_exprs, op->span_);
 
@@ -1728,18 +1782,6 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
     }
     body_stmts.push_back(return_stmt);
     outlined_body = std::make_shared<SeqStmts>(body_stmts, op->span_);
-  }
-
-  // Map each captured input Var to its positional index. The index is exact for
-  // BOTH surfaces the translations below need: ``input_params`` is built
-  // index-parallel to ``input_vars`` and is what the outlined ``Function`` is
-  // constructed from, and ``call_args`` is built from ``input_vars`` in the same
-  // order. Built once here, ahead of the attr resolution that follows, and
-  // reused by the no_dep / dump translations further down.
-  std::unordered_map<const Var*, int32_t> input_var_to_idx;
-  input_var_to_idx.reserve(input_vars.size());
-  for (size_t i = 0; i < input_vars.size(); ++i) {
-    input_var_to_idx[input_vars[i].get()] = static_cast<int32_t>(i);
   }
 
   // Register the outlined function (propagate level/role from ScopeStmt, convert split/core_num to attrs)

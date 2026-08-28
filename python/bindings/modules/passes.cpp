@@ -399,9 +399,9 @@ void BindPass(nb::module_& m) {
 
   passes.def("normalize_return_order", &pass::NormalizeReturnOrder,
              "Create a return order normalization pass\n\n"
-             "Canonicalizes tensor param-writeback returns and reorders InCore return tuples\n"
-             "to Out/InOut parameter order. Reordered Call/Submit results must be directly\n"
-             "bound and used only through TupleGetItem projections in non-InCore callers.");
+             "Reorders return tuple values in InCore functions so that return[i]\n"
+             "corresponds to the i-th Out/InOut parameter in declaration order,\n"
+             "and updates TupleGetItemExpr indices at call sites accordingly.");
 
   // Bind SSAErrorType enum
   nb::enum_<ssa::ErrorType>(passes, "SSAErrorType", "SSA verification error types")

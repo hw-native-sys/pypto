@@ -210,6 +210,16 @@ are traced via the shared `return_lineage` utility. Kernel-allocated outputs
 keep their SSA value. This makes the return→param mapping a pointer-identity
 lookup for orchestration codegen (`ReturnParamsExplicit` invariant).
 
+For a generated InCore function, when every returned tensor resolves to a
+distinct captured `Out`/`InOut` parameter, the outliner orders the returns,
+return types, and caller projections together by captured-parameter order. It
+indexes the body once for all outputs and treats an `IfStmt` result as the same
+buffer only when every branch resolves to the same parameter. If any output is
+fresh, scalar, ambiguous, untraceable, or duplicates another parameter, the
+whole generated contract keeps its original order. Thus, when canonicalization
+is provably safe, SSA naming and definition order do not determine the
+Out-writeback ABI.
+
 **Naming**:
 
 - Default: `{original_func}_incore_{counter}` (e.g., `main_incore_0`, `main_incore_1`)

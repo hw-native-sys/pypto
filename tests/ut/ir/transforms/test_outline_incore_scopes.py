@@ -388,6 +388,229 @@ class TestOutlineIncoreScopes:
         After = passes.outline_incore_scopes()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_outline_if_phi_writebacks_follow_out_param_order(self):
+        """Generated returns and caller projections share Out-param order (#2392).
+
+        The scope first captures ``b`` and then ``a``, while ConvertToSSA sorts
+        the If results lexically as ``a`` then ``b``.  The If's internal order
+        may remain lexical, but the generated function boundary must use the
+        stable captured-parameter order ``b, a``.
+
+        ``scratch`` is another captured Out parameter but is intentionally not
+        returned, proving that the canonical returned subsequence need not cover
+        every Out parameter.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                cond: pl.Scalar[pl.BOOL],
+                scratch: pl.Out[pl.Tensor[[1], pl.FP32]],
+                b: pl.Out[pl.Tensor[[16], pl.FP32]],
+                a: pl.Out[pl.Tensor[[16], pl.INT32]],
+                b_patch: pl.Tensor[[8], pl.FP32],
+                a_patch: pl.Tensor[[8], pl.INT32],
+            ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.INT32]]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    pl.tensor.write(scratch, [0], pl.const(0.0, pl.FP32))
+                    if cond:
+                        b[0:8] = b_patch
+                        a[0:8] = a_patch
+                return b, a
+
+        ssa = passes.convert_to_ssa()(Before)
+        after = passes.outline_incore_scopes()(ssa)
+        funcs = {func.name: func for _, func in after.functions.items()}
+        outlined = next(func for func in funcs.values() if func.func_type == ir.FunctionType.InCore)
+        caller = funcs["main"]
+
+        outlined_ifs = [stmt for stmt in ir.flatten_to_stmts(outlined.body) if isinstance(stmt, ir.IfStmt)]
+        assert len(outlined_ifs) == 1
+        if_return_types = [var.type for var in outlined_ifs[0].return_vars]
+        assert [ty.dtype for ty in if_return_types if isinstance(ty, ir.TensorType)] == [
+            DataType.INT32,
+            DataType.FP32,
+        ]
+
+        output_params = [
+            param
+            for param, direction in zip(outlined.params, outlined.param_directions, strict=True)
+            if direction in (ir.ParamDirection.Out, ir.ParamDirection.InOut)
+        ]
+        assert [param.name_hint.split("__ssa_v")[0] for param in output_params] == ["scratch", "b", "a"]
+        returned_params = output_params[1:]
+        returned_param_types = [param.type for param in returned_params]
+        assert [ty.dtype for ty in returned_param_types if isinstance(ty, ir.TensorType)] == [
+            DataType.FP32,
+            DataType.INT32,
+        ]
+        assert [ty.dtype for ty in outlined.return_types if isinstance(ty, ir.TensorType)] == [
+            DataType.FP32,
+            DataType.INT32,
+        ]
+
+        outlined_returns = [
+            stmt for stmt in ir.flatten_to_stmts(outlined.body) if isinstance(stmt, ir.ReturnStmt)
+        ]
+        assert len(outlined_returns) == 1
+        assert list(outlined_returns[0].value) == returned_params
+
+        caller_stmts = ir.flatten_to_stmts(caller.body)
+        call_assign = next(
+            stmt
+            for stmt in caller_stmts
+            if isinstance(stmt, ir.AssignStmt)
+            and isinstance(stmt.value, ir.Call)
+            and stmt.value.op.name == outlined.name
+        )
+        call_type = call_assign.value.type
+        assert isinstance(call_type, ir.TupleType)
+        assert [item.dtype for item in call_type.types if isinstance(item, ir.TensorType)] == [
+            DataType.FP32,
+            DataType.INT32,
+        ]
+        projections = [
+            stmt
+            for stmt in caller_stmts
+            if isinstance(stmt, ir.AssignStmt)
+            and isinstance(stmt.value, ir.TupleGetItemExpr)
+            and stmt.value.tuple is call_assign.var
+        ]
+        projection_values = [stmt.value for stmt in projections]
+        assert [value.index for value in projection_values if isinstance(value, ir.TupleGetItemExpr)] == [
+            0,
+            1,
+        ]
+        projection_types = [stmt.var.type for stmt in projections]
+        assert [ty.dtype for ty in projection_types if isinstance(ty, ir.TensorType)] == [
+            DataType.FP32,
+            DataType.INT32,
+        ]
+        assert projections[0].var.name_hint.startswith("b")
+        assert projections[1].var.name_hint.startswith("a")
+
+    def test_outline_if_phi_with_conflicting_roots_keeps_original_order(self):
+        """A branch-dependent buffer identity must not be guessed."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                cond: pl.Scalar[pl.BOOL],
+                second: pl.Out[pl.Tensor[[16], pl.FP32]],
+                first: pl.Out[pl.Tensor[[16], pl.FP32]],
+                patch: pl.Tensor[[8], pl.FP32],
+            ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.FP32]]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    if cond:
+                        second = pl.assemble(second, patch, [0])
+                        first = pl.assemble(first, patch, [0])
+                    else:
+                        second_old: pl.Tensor[[16], pl.FP32] = second
+                        first_old: pl.Tensor[[16], pl.FP32] = first
+                        second = pl.assemble(first_old, patch, [0])
+                        first = pl.assemble(second_old, patch, [0])
+                return first, second
+
+        after = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+        funcs = {func.name: func for _, func in after.functions.items()}
+        outlined = next(func for func in funcs.values() if func.func_type == ir.FunctionType.InCore)
+
+        output_params = [
+            param
+            for param, direction in zip(outlined.params, outlined.param_directions, strict=True)
+            if direction in (ir.ParamDirection.Out, ir.ParamDirection.InOut)
+        ]
+        assert output_params[0].name_hint.startswith("second")
+        assert output_params[1].name_hint.startswith("first")
+
+        outlined_stmts = ir.flatten_to_stmts(outlined.body)
+        if_stmt = next(stmt for stmt in outlined_stmts if isinstance(stmt, ir.IfStmt))
+        return_stmt = next(stmt for stmt in outlined_stmts if isinstance(stmt, ir.ReturnStmt))
+        assert list(return_stmt.value) == list(if_stmt.return_vars)
+        first_return, second_return = return_stmt.value
+        assert isinstance(first_return, ir.Var)
+        assert isinstance(second_return, ir.Var)
+        assert first_return.name_hint.startswith("first")
+        assert second_return.name_hint.startswith("second")
+        assert not any(value.same_as(param) for value in return_stmt.value for param in output_params)
+
+        caller = funcs["main"]
+        projections = [
+            stmt
+            for stmt in ir.flatten_to_stmts(caller.body)
+            if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.TupleGetItemExpr)
+        ]
+        projection_values = [stmt.value for stmt in projections]
+        assert [value.index for value in projection_values if isinstance(value, ir.TupleGetItemExpr)] == [
+            0,
+            1,
+        ]
+        assert projections[0].var.name_hint.startswith("first")
+        assert projections[1].var.name_hint.startswith("second")
+
+    def test_outline_mixed_fresh_and_writeback_outputs_keep_original_order(self):
+        """One fresh result makes output-contract ordering all-or-nothing."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                b: pl.Out[pl.Tensor[[16], pl.FP32]],
+                a: pl.Out[pl.Tensor[[16], pl.FP32]],
+                b_patch: pl.Tensor[[8], pl.FP32],
+                a_patch: pl.Tensor[[8], pl.FP32],
+                x: pl.Tensor[[16], pl.FP32],
+            ) -> tuple[
+                pl.Tensor[[16], pl.FP32],
+                pl.Tensor[[16], pl.FP32],
+                pl.Tensor[[16], pl.FP32],
+            ]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    b_probe: pl.Tensor[[16], pl.FP32] = pl.add(b, b)  # noqa: F841
+                    a = pl.assemble(a, a_patch, [0])
+                    fresh: pl.Tensor[[16], pl.FP32] = pl.add(x, x)
+                    b = pl.assemble(b, b_patch, [0])
+                return a, fresh, b
+
+        after = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+        funcs = {func.name: func for _, func in after.functions.items()}
+        outlined = next(func for func in funcs.values() if func.func_type == ir.FunctionType.InCore)
+        output_params = [
+            param
+            for param, direction in zip(outlined.params, outlined.param_directions, strict=True)
+            if direction in (ir.ParamDirection.Out, ir.ParamDirection.InOut)
+        ]
+        assert output_params[0].name_hint.startswith("b")
+        assert output_params[1].name_hint.startswith("a")
+
+        return_stmt = next(
+            stmt for stmt in ir.flatten_to_stmts(outlined.body) if isinstance(stmt, ir.ReturnStmt)
+        )
+        assert return_stmt.value[0].same_as(output_params[1])
+        fresh_return = return_stmt.value[1]
+        assert isinstance(fresh_return, ir.Var)
+        assert fresh_return.name_hint.startswith("fresh")
+        assert not any(return_stmt.value[1].same_as(param) for param in output_params)
+        assert return_stmt.value[2].same_as(output_params[0])
+
+        projections = [
+            stmt
+            for stmt in ir.flatten_to_stmts(funcs["main"].body)
+            if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.TupleGetItemExpr)
+        ]
+        projection_values = [stmt.value for stmt in projections]
+        assert [value.index for value in projection_values if isinstance(value, ir.TupleGetItemExpr)] == [
+            0,
+            1,
+            2,
+        ]
+        assert [stmt.var.name_hint.split("__")[0] for stmt in projections] == ["a", "fresh", "b"]
+
     def test_outline_scope_with_intermediate_computation(self):
         """Test outlining scope with computation before, inside, and after."""
 
@@ -493,20 +716,20 @@ class TestOutlineIncoreScopes:
                 self,
                 buf_a: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
                 buf_b: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
-            ) -> tuple[pl.Tensor[[16, 1], pl.FP32], pl.Tensor[[16, 128], pl.FP32]]:
+            ) -> tuple[pl.Tensor[[16, 128], pl.FP32], pl.Tensor[[16, 1], pl.FP32]]:
                 tile_a = pl.tile.full([16, 128], dtype=pl.FP32, value=0.0)
                 tile_b = pl.tile.full([16, 1], dtype=pl.FP32, value=0.0)
                 buf_a_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(tile_a, [0, 0], buf_a)
                 buf_b_store: pl.Tensor[[16, 1], pl.FP32] = pl.store(tile_b, [0, 0], buf_b)
-                return (buf_b, buf_a)
+                return (buf_a, buf_b)
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(self, x: pl.Tensor[[16, 128], pl.FP32]) -> pl.Tensor[[16, 128], pl.FP32]:
                 buf_a: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
                 buf_b: pl.Tensor[[16, 1], pl.FP32] = pl.create_tensor([16, 1], dtype=pl.FP32)
                 ret = self.main_incore_0(buf_a, buf_b)
-                buf_b2 = ret[0]
-                buf_a2 = ret[1]
+                buf_a2 = ret[0]
+                buf_b2 = ret[1]  # noqa: F841
                 result: pl.Tensor[[16, 128], pl.FP32] = pl.add(buf_a2, x)
                 return result
 
@@ -994,6 +1217,13 @@ class TestOutlineIncoreScopes:
             f"mgather scratch is written, never read; got {directions}"
         )
         assert directions["out"] == ir.ParamDirection.Out, f"expected Out for out, got {directions}"
+        assert len(outlined.return_types) == 1
+        out_param = next(param for param in outlined.params if param.name_hint.startswith("out"))
+        return_stmt = next(
+            stmt for stmt in ir.flatten_to_stmts(outlined.body) if isinstance(stmt, ir.ReturnStmt)
+        )
+        assert len(return_stmt.value) == 1
+        assert return_stmt.value[0].same_as(out_param)
 
     def test_outline_spmd_assemble_keeps_out_param_out(self):
         """Regression for issue #2415: a ``pl.Out`` formal stays ``Out``.

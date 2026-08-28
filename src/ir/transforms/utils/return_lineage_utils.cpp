@@ -48,10 +48,13 @@ CallPtr AsCallOrSubmitView(const ExprPtr& expr) {
 }
 
 // Per-body index: topmost ReturnStmt, per-var defining AssignStmt, loop-carry
-// edges (iter_arg / tensor return_var -> init value var), and IfStmt merge
-// edges (return_var -> both branch yields).
+// edges (iter_arg / tensor return_var -> init value var), and optionally tensor
+// IfStmt merge edges. If merges are collected only for the scope outliner: the
+// general ReturnedParamIndices contract deliberately remains unchanged.
 class BodyIndexCollector : public IRVisitor {
  public:
+  explicit BodyIndexCollector(bool collect_if_merges = false) : collect_if_merges_(collect_if_merges) {}
+
   ReturnStmtPtr first_return;
   std::unordered_map<const Var*, AssignStmtPtr> var_def;
   std::unordered_map<const Var*, const Var*> carry_src;
@@ -74,7 +77,7 @@ class BodyIndexCollector : public IRVisitor {
     IRVisitor::VisitStmt_(while_stmt);
   }
   void VisitStmt_(const IfStmtPtr& if_stmt) override {
-    RecordMergeSources(if_stmt);
+    if (collect_if_merges_) RecordMergeSources(if_stmt);
     IRVisitor::VisitStmt_(if_stmt);
   }
 
@@ -98,12 +101,10 @@ class BodyIndexCollector : public IRVisitor {
     auto else_yield = transform_utils::GetLastYieldStmt(*if_stmt->else_body_);
     if (!then_yield || !else_yield) return;
 
-    for (size_t i = 0;
-         i < if_stmt->return_vars_.size() && i < then_yield->value_.size() && i < else_yield->value_.size();
-         ++i) {
+    size_t count =
+        std::min({if_stmt->return_vars_.size(), then_yield->value_.size(), else_yield->value_.size()});
+    for (size_t i = 0; i < count; ++i) {
       const auto& return_var = if_stmt->return_vars_[i];
-      // Scalar branch results are value-typed, not buffer aliases. Keep their
-      // lineage conservative for the same reason as scalar loop carries.
       if (!return_var || !AsTensorTypeLike(return_var->GetType())) continue;
       auto then_var = AsVarLike(then_yield->value_[i]);
       auto else_var = AsVarLike(else_yield->value_[i]);
@@ -111,6 +112,8 @@ class BodyIndexCollector : public IRVisitor {
       merge_srcs.emplace(return_var.get(), std::vector<const Var*>{then_var.get(), else_var.get()});
     }
   }
+
+  bool collect_if_merges_;
 };
 
 // Cross-function memo + cycle guard, shared by the recursive tracer. The
@@ -130,189 +133,106 @@ TraceContext& Ctx() {
 std::vector<std::optional<size_t>> ReturnedParamIndicesImpl(const FunctionPtr& func,
                                                             const ProgramPtr& program);
 
-struct VarTraceState {
-  std::unordered_map<const Var*, const Var*> memo;
-  std::unordered_set<const Var*> active;
-};
-
-struct VarTraceStep {
-  bool terminal = true;
-  const Var* root = nullptr;
-  std::vector<const Var*> sources;
-};
-
-// Describe one node in the per-body lineage graph. A terminal step is either a
-// param root or an untraceable leaf; a non-terminal step lists every predecessor
-// whose roots must converge. Most nodes have one predecessor, while an IfStmt
-// merge has both branch yields.
-VarTraceStep DescribeVarTraceStep(const Var* var, const BodyIndexCollector& index,
-                                  const std::unordered_set<const Var*>& params, const ProgramPtr& program) {
-  if (params.count(var)) return {.terminal = true, .root = var};
-
-  if (auto merge_it = index.merge_srcs.find(var); merge_it != index.merge_srcs.end()) {
-    return {.terminal = false, .root = nullptr, .sources = merge_it->second};
-  }
-
-  if (auto carry_it = index.carry_src.find(var); carry_it != index.carry_src.end()) {
-    return {.terminal = false, .root = nullptr, .sources = {carry_it->second}};
-  }
-
-  auto def_it = index.var_def.find(var);
-  if (def_it == index.var_def.end()) return {};
-  const auto& value = def_it->second->value_;
-
-  if (auto rhs_var = AsVarLike(value)) {
-    return {.terminal = false, .root = nullptr, .sources = {rhs_var.get()}};
-  }
-
-  if (auto tuple_get = As<TupleGetItemExpr>(value)) {
-    // Tuple destructuring of a user call: resolve via the callee's own
-    // returned-param map, then continue from the corresponding arg var.
-    auto tuple_var = AsVarLike(tuple_get->tuple_);
-    if (!tuple_var) return {};
-    auto tuple_def = index.var_def.find(tuple_var.get());
-    if (tuple_def == index.var_def.end()) return {};
-    auto call = AsCallOrSubmitView(tuple_def->second->value_);
-    if (!call || IsBuiltinOp(call->op_->name_)) return {};
-    auto callee = program ? program->GetFunction(call->op_->name_) : nullptr;
-    if (!callee) return {};
-    auto ret_map = ReturnedParamIndicesImpl(callee, program);
-    size_t pos = static_cast<size_t>(tuple_get->index_);
-    if (tuple_get->index_ < 0 || pos >= ret_map.size() || !ret_map[pos]) return {};
-    size_t mapped = ret_map[pos].value();  // NOLINT(bugprone-unchecked-optional-access)
-    if (mapped >= call->args_.size()) return {};
-    auto arg_var = AsVarLike(call->args_[mapped]);
-    if (!arg_var) return {};
-    return {.terminal = false, .root = nullptr, .sources = {arg_var.get()}};
-  }
-
-  if (auto call = AsCallOrSubmitView(value)) {
-    const std::string& op_name = call->op_->name_;
-    // Builtin output-side ops bind a fresh SSA var to an existing buffer, so
-    // the result inherits that argument's param lineage.
-    if (auto aliased = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size())) {
-      auto arg_var = AsVarLike(call->args_[*aliased]);
-      if (!arg_var) return {};
-      return {.terminal = false, .root = nullptr, .sources = {arg_var.get()}};
-    }
-    // Any other builtin stops the walk — including buffer-aliasing views
-    // (`tensor.view`, `tile.slice`, ...). A view lands in its source's buffer
-    // but carries a different shape / tensor_view, so `NormalizeReturnOrder`
-    // cannot use it: rewriting `return view(p, [1, 17])` to `return p` would
-    // return the wrong shape.
-    //
-    // Consumers must not read that stop as "this value is unrelated to any
-    // param". Two of them care about different things than the rewrite does,
-    // and views are imprecise for both:
-    //   - `ReturnParamsExplicit` treats a nullopt position as a fresh
-    //     kernel-allocated tensor. A view-shaped writeback is not fresh — it
-    //     already lives in the param's buffer.
-    //   - identity lineage (which comm domain a DistributedTensor belongs to)
-    //     *does* follow views, because the view propagates `window_buffer_`
-    //     verbatim; `MaterializeDistTensorCtx` layers that on top of this walk.
-    // Splitting writeback lineage from identity lineage would fix both; until
-    // then, downstream buffer identity is recovered by the MemRef layer.
-    if (!IsBuiltinOp(op_name)) {
-      // Single-result user call: continue from the arg the callee returns.
-      auto callee = program ? program->GetFunction(op_name) : nullptr;
-      if (!callee) return {};
-      auto ret_map = ReturnedParamIndicesImpl(callee, program);
-      if (ret_map.size() != 1 || !ret_map[0]) return {};
-      size_t mapped = ret_map[0].value();  // NOLINT(bugprone-unchecked-optional-access)
-      if (mapped >= call->args_.size()) return {};
-      auto arg_var = AsVarLike(call->args_[mapped]);
-      if (!arg_var) return {};
-      return {.terminal = false, .root = nullptr, .sources = {arg_var.get()}};
-    }
-  }
-  return {};
-}
-
 // Trace a body var back to a param of `params`; nullptr when untraceable.
-//
-// Use an explicit post-order DFS stack rather than C++ recursion. Generated SSA
-// can contain long, flat alias/writeback chains even when its statement tree is
-// shallow; keeping those graph edges off the process stack makes auxiliary
-// memory O(V) without risking a stack overflow. `active` retains the recursive
-// implementation's cycle semantics, and `memo` ensures every reachable node and
-// edge is processed at most once.
 const Var* TraceVar(const Var* var, const BodyIndexCollector& index,
                     const std::unordered_set<const Var*>& params, const ProgramPtr& program,
-                    VarTraceState& state) {
-  if (!var) return nullptr;
-  if (auto memo_it = state.memo.find(var); memo_it != state.memo.end()) {
-    return memo_it->second;
-  }
+                    std::unordered_set<const Var*>& visited) {
+  while (var) {
+    if (!visited.insert(var).second) return nullptr;
+    if (params.count(var)) return var;
 
-  struct Frame {
-    const Var* var;
-    std::vector<const Var*> sources;
-    size_t next_source = 0;
-    const Var* common_root = nullptr;
-  };
-
-  std::vector<Frame> stack;
-  const Var* next_var = var;
-  const Var* pending_root = nullptr;
-  bool has_pending_root = false;
-
-  while (true) {
-    if (next_var) {
-      if (auto memo_it = state.memo.find(next_var); memo_it != state.memo.end()) {
-        pending_root = memo_it->second;
-        has_pending_root = true;
-        next_var = nullptr;
-      } else if (!state.active.insert(next_var).second) {
-        // A back-edge is conservatively untraceable. Do not memoize the active
-        // node here: its owning frame will consume this null result and unwind.
-        pending_root = nullptr;
-        has_pending_root = true;
-        next_var = nullptr;
-      } else {
-        auto step = DescribeVarTraceStep(next_var, index, params, program);
-        if (step.terminal || step.sources.empty()) {
-          state.active.erase(next_var);
-          state.memo.emplace(next_var, step.root);
-          pending_root = step.root;
-          has_pending_root = true;
-          next_var = nullptr;
-        } else {
-          stack.push_back(Frame{next_var, std::move(step.sources)});
-          next_var = stack.back().sources[0];
-          has_pending_root = false;
-          continue;
-        }
+    if (auto merge_it = index.merge_srcs.find(var); merge_it != index.merge_srcs.end()) {
+      const Var* root = nullptr;
+      for (const Var* source : merge_it->second) {
+        auto branch_visited = visited;
+        const Var* branch_root = TraceVar(source, index, params, program, branch_visited);
+        if (!branch_root || (root && branch_root != root)) return nullptr;
+        root = branch_root;
       }
+      return root;
     }
 
-    if (!has_pending_root) continue;
-    if (stack.empty()) return pending_root;
-
-    auto& frame = stack.back();
-    if (!pending_root || (frame.common_root && pending_root != frame.common_root)) {
-      const Var* finished_var = frame.var;
-      stack.pop_back();
-      state.active.erase(finished_var);
-      state.memo.emplace(finished_var, nullptr);
-      pending_root = nullptr;
+    if (auto carry_it = index.carry_src.find(var); carry_it != index.carry_src.end()) {
+      var = carry_it->second;
       continue;
     }
 
-    frame.common_root = pending_root;
-    ++frame.next_source;
-    if (frame.next_source < frame.sources.size()) {
-      next_var = frame.sources[frame.next_source];
-      has_pending_root = false;
+    auto def_it = index.var_def.find(var);
+    if (def_it == index.var_def.end()) return nullptr;
+    const auto& value = def_it->second->value_;
+
+    if (auto rhs_var = AsVarLike(value)) {
+      var = rhs_var.get();
       continue;
     }
 
-    const Var* finished_var = frame.var;
-    const Var* finished_root = frame.common_root;
-    stack.pop_back();
-    state.active.erase(finished_var);
-    state.memo.emplace(finished_var, finished_root);
-    pending_root = finished_root;
+    if (auto tuple_get = As<TupleGetItemExpr>(value)) {
+      // Tuple destructuring of a user call: resolve via the callee's own
+      // returned-param map, then continue from the corresponding arg var.
+      auto tuple_var = AsVarLike(tuple_get->tuple_);
+      if (!tuple_var) return nullptr;
+      auto tuple_def = index.var_def.find(tuple_var.get());
+      if (tuple_def == index.var_def.end()) return nullptr;
+      auto call = AsCallOrSubmitView(tuple_def->second->value_);
+      if (!call || IsBuiltinOp(call->op_->name_)) return nullptr;
+      auto callee = program ? program->GetFunction(call->op_->name_) : nullptr;
+      if (!callee) return nullptr;
+      auto ret_map = ReturnedParamIndicesImpl(callee, program);
+      size_t pos = static_cast<size_t>(tuple_get->index_);
+      if (tuple_get->index_ < 0 || pos >= ret_map.size() || !ret_map[pos]) return nullptr;
+      size_t mapped = ret_map[pos].value();  // NOLINT(bugprone-unchecked-optional-access)
+      if (mapped >= call->args_.size()) return nullptr;
+      auto arg_var = AsVarLike(call->args_[mapped]);
+      if (!arg_var) return nullptr;
+      var = arg_var.get();
+      continue;
+    }
+
+    if (auto call = AsCallOrSubmitView(value)) {
+      const std::string& op_name = call->op_->name_;
+      // Builtin output-side ops bind a fresh SSA var to an existing buffer, so
+      // the result inherits that argument's param lineage.
+      if (auto aliased = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size())) {
+        auto arg_var = AsVarLike(call->args_[*aliased]);
+        if (!arg_var) return nullptr;
+        var = arg_var.get();
+        continue;
+      }
+      // Any other builtin stops the walk — including buffer-aliasing views
+      // (`tensor.view`, `tile.slice`, ...). A view lands in its source's buffer
+      // but carries a different shape / tensor_view, so `NormalizeReturnOrder`
+      // cannot use it: rewriting `return view(p, [1, 17])` to `return p` would
+      // return the wrong shape.
+      //
+      // Consumers must not read that stop as "this value is unrelated to any
+      // param". Two of them care about different things than the rewrite does,
+      // and views are imprecise for both:
+      //   - `ReturnParamsExplicit` treats a nullopt position as a fresh
+      //     kernel-allocated tensor. A view-shaped writeback is not fresh — it
+      //     already lives in the param's buffer.
+      //   - identity lineage (which comm domain a DistributedTensor belongs to)
+      //     *does* follow views, because the view propagates `window_buffer_`
+      //     verbatim; `MaterializeDistTensorCtx` layers that on top of this walk.
+      // Splitting writeback lineage from identity lineage would fix both; until
+      // then, downstream buffer identity is recovered by the MemRef layer.
+      if (!IsBuiltinOp(op_name)) {
+        // Single-result user call: continue from the arg the callee returns.
+        auto callee = program ? program->GetFunction(op_name) : nullptr;
+        if (!callee) return nullptr;
+        auto ret_map = ReturnedParamIndicesImpl(callee, program);
+        if (ret_map.size() != 1 || !ret_map[0]) return nullptr;
+        size_t mapped = ret_map[0].value();  // NOLINT(bugprone-unchecked-optional-access)
+        if (mapped >= call->args_.size()) return nullptr;
+        auto arg_var = AsVarLike(call->args_[mapped]);
+        if (!arg_var) return nullptr;
+        var = arg_var.get();
+        continue;
+      }
+      return nullptr;
+    }
+    return nullptr;
   }
+  return nullptr;
 }
 
 std::vector<std::optional<size_t>> TraceExprsToParamIndices(const std::vector<ExprPtr>& exprs,
@@ -323,14 +243,14 @@ std::vector<std::optional<size_t>> TraceExprsToParamIndices(const std::vector<Ex
   for (const auto& p : params) param_set.insert(p.get());
   std::unordered_map<const Var*, size_t> param_to_index;
   for (size_t i = 0; i < params.size(); ++i) param_to_index.emplace(params[i].get(), i);
-  VarTraceState state;
 
   std::vector<std::optional<size_t>> result;
   result.reserve(exprs.size());
   for (const auto& expr : exprs) {
     std::optional<size_t> idx;
     if (auto var = AsVarLike(expr)) {
-      if (const Var* root = TraceVar(var.get(), index, param_set, program, state)) {
+      std::unordered_set<const Var*> visited;
+      if (const Var* root = TraceVar(var.get(), index, param_set, program, visited)) {
         if (auto it = param_to_index.find(root); it != param_to_index.end()) {
           idx = it->second;
         }
@@ -371,7 +291,6 @@ std::vector<std::optional<size_t>> ExpandForwardedTupleVar(const Var* tuple_var,
   for (const auto& p : params) param_set.insert(p.get());
   std::unordered_map<const Var*, size_t> param_to_index;
   for (size_t i = 0; i < params.size(); ++i) param_to_index.emplace(params[i].get(), i);
-  VarTraceState state;
 
   // Walk SSA var-to-var aliases down to the statement that defines the tuple.
   const Var* var = tuple_var;
@@ -409,7 +328,8 @@ std::vector<std::optional<size_t>> ExpandForwardedTupleVar(const Var* tuple_var,
     if (!arg_var) continue;
     // The arg need not be a param outright -- it may itself be an assemble /
     // loop-carry chain rooted at one, so run it through the normal tracer.
-    const Var* root = TraceVar(arg_var.get(), index, param_set, program, state);
+    std::unordered_set<const Var*> visited;
+    const Var* root = TraceVar(arg_var.get(), index, param_set, program, visited);
     if (!root) continue;
     if (auto it = param_to_index.find(root); it != param_to_index.end()) {
       result[pos] = it->second;
@@ -574,20 +494,23 @@ std::vector<std::optional<size_t>> ReturnedParamIndices(const FunctionPtr& func,
   return ReturnedParamIndicesImpl(func, program);
 }
 
+std::vector<std::optional<size_t>> TraceToParamIndicesForOutlining(const std::vector<VarPtr>& vars,
+                                                                   const StmtPtr& body,
+                                                                   const std::vector<VarPtr>& params,
+                                                                   const ProgramPtr& program,
+                                                                   bool trace_if_merges) {
+  if (!body) return std::vector<std::optional<size_t>>(vars.size());
+
+  BodyIndexCollector index(trace_if_merges);
+  index.VisitStmt(body);
+  return TraceExprsToParamIndices(std::vector<ExprPtr>(vars.begin(), vars.end()), index, params, program);
+}
+
 VarPtr TraceToParam(const VarPtr& var, const StmtPtr& body, const std::vector<VarPtr>& params,
                     const ProgramPtr& program) {
-  if (!var || !body) return nullptr;
-  BodyIndexCollector index;
-  index.VisitStmt(body);
-  std::unordered_set<const Var*> param_set;
-  for (const auto& p : params) param_set.insert(p.get());
-  VarTraceState state;
-  const Var* root = TraceVar(var.get(), index, param_set, program, state);
-  if (!root) return nullptr;
-  for (const auto& p : params) {
-    if (p.get() == root) return p;
-  }
-  return nullptr;
+  auto indices = TraceToParamIndicesForOutlining({var}, body, params, program, /*trace_if_merges=*/false);
+  if (indices.empty() || !indices[0]) return nullptr;
+  return params[indices[0].value()];  // NOLINT(bugprone-unchecked-optional-access)
 }
 
 }  // namespace return_lineage

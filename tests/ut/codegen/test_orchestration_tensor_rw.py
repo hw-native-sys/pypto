@@ -264,21 +264,12 @@ class TestTensorReadWriteOffsetCodegen:
         transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
         code = _generate_orch_code(transformed)
 
-        # Canaries: keep the trigger's two independently materialized loop carries, and keep
-        # their deliberately reverse-lexical task parameter order (b: FP32, then a: INT32).
-        carry_decl_re = re.compile(
-            r"^\s*(?:Tensor|ChipTensor|TaskTensor)\s+(?P<name>(?P<base>[ab])__rv[A-Za-z0-9_]*)"
-            r"\s*=\s*ext_(?P=base)\s*;\s*$",
-            re.MULTILINE,
-        )
-        carry_names = {match["base"]: match["name"] for match in carry_decl_re.finditer(code)}
-        assert carry_names.keys() == {"a", "b"}, (
-            "the #2392 canary requires distinct a/b loop carries initialized from their own "
-            f"external outputs, got {carry_names}:\n{code}"
-        )
-
+        # Keep the deliberately reverse-lexical task parameter order (b: FP32,
+        # then a: INT32). Simplify may either retain SSA carry aliases or remove
+        # them and pass the external tensors directly; both spellings must keep
+        # the same buffer identity.
         task_inouts = re.findall(
-            r"params_t\d+\.add_inout\((?P<base>[ab])__rv[A-Za-z0-9_]*\);",
+            r"params_t\d+\.add_inout\((?:ext_)?(?P<base>[ab])(?:__rv[A-Za-z0-9_]*)?\);",
             code,
         )
         assert task_inouts == ["b", "a"], (
@@ -286,18 +277,19 @@ class TestTensorReadWriteOffsetCodegen:
             f"output parameter order; got {task_inouts}:\n{code}"
         )
 
-        # Check every direct update of either carry, rather than only the exact adjacent swap
-        # originally reported. This also catches cross-wires whose SSA suffixes or spacing change.
-        carry_update_re = re.compile(
-            r"^\s*(?P<lhs>(?P<lhs_base>[ab])__rv[A-Za-z0-9_]*)\s*=\s*"
-            r"(?P<rhs>[A-Za-z_][A-Za-z0-9_]*)\s*;\s*$",
+        # Check every direct identity edge, including carry initialization,
+        # carry updates, and the fully simplified ``TaskTensor b = ext_b`` form.
+        identity_edge_re = re.compile(
+            r"^\s*(?:(?:const\s+)?(?:Tensor|ChipTensor|TaskTensor)&?\s+)?"
+            r"(?P<lhs>(?:ext_)?(?P<lhs_base>[ab])(?:__rv[A-Za-z0-9_]*)?)\s*=\s*"
+            r"(?P<rhs>(?:ext_)?(?P<rhs_base>[ab])(?:__rv[A-Za-z0-9_]*)?)\s*;\s*$",
             re.MULTILINE,
         )
-        cross_wires = []
-        for match in carry_update_re.finditer(code):
-            rhs_base = re.match(r"(?:ext_)?(?P<base>[ab])(?:_|$)", match["rhs"])
-            if rhs_base and rhs_base["base"] != match["lhs_base"]:
-                cross_wires.append(match.group(0).strip())
+        identity_edges = list(identity_edge_re.finditer(code))
+        assert {match["lhs_base"] for match in identity_edges} == {"a", "b"}, code
+        cross_wires = [
+            match.group(0).strip() for match in identity_edges if match["lhs_base"] != match["rhs_base"]
+        ]
 
         assert not cross_wires, (
             "loop-carried output handles were updated from the other output; this routes FP32 "
