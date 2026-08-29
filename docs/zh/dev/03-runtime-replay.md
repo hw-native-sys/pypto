@@ -218,6 +218,34 @@ post-SSA 名字），chip callables 通过遍历 `next_levels/` 重建；
 （含 `distributed_config` 块）。所以手改或被截断的 sidecar 会以一个
 `ValueError` 失败，并指明文件名与重新编译的修复方式。
 
+### 在拿到卡之前就把二进制编好
+
+芯片二进制默认在第一次 prepare / 调用时才编译，于是整条 ptoas/ccec + g++ 工具链
+就压在一次已经占着卡的运行的关键路径上。`build_binaries()` 只做这部分工作、不做
+别的，因此可以在一台没有 NPU 的 CPU 机器上跑：
+
+```python
+prog = DistributedCompiledProgram.from_dir("build_output/<jit_dir>/")
+prog.build_binaries()          # 只有 ptoas/ccec + g++；不碰 NPU，不 fork
+```
+
+每个 `next_levels/<name>/` 子构建都会被编译，`.o`/`.so` 落在该子构建自己的
+`cache/` 下，并盖上它们所依据的 runtime 与 PTO-ISA 身份图章。之后对同一目录的
+`prepare()` / `__call__()` 会直接复用 —— 换一个进程也算，通过 `from_dir` 复用一个
+并非本对象产出的目录也算。在一个三子构建的 host collective 上实测：冷编 ~1.6s，
+热装配 ~0.05s。
+
+这些二进制与 `device_ids` 无关：`ir.compile` 只在 codegen **之后**才消费
+`distributed_config`，所以这样编出来的目录可以通过上面的 `distributed_config`
+覆盖在任意卡集合上重放。这正是编译与执行得以在空间或时间上分离的原因 —— 既可以
+在 serving worker 借卡之前预热它的二进制，也可以把整个测试套件在卡外预编译、再把
+产物交给一次短暂的上卡运行。`tests/st/README.md` 描述了分布式系统测试采用的两趟
+形式。
+
+**这不是通用的编译缓存。** 复用是按目录为键的，而目录内部那层生成 kernel 的二进制
+缓存又是按位置而非内容为键，所以把**不同的**源码编进一个已有二进制的目录会复用到
+陈旧的产物。请为每个 commit 编进全新目录。
+
 L3 replay 会把 `RunConfig` 中的运行时 DFX 字段透传到每个芯片派发，产物写入
 `dfx_outputs/rank{r}/d{k}/`；onboard 泳道使用
 [运行时 DFX 开关](03-runtime-dfx.md) 里描述的抓图/计时两趟协议。

@@ -570,6 +570,40 @@ class DistributedCompiledProgram:
             startup_timeout_s=startup_timeout_s,
         )
 
+    def build_binaries(self) -> int:
+        """Build every chip sub-build's kernel and orchestration binaries, card-free.
+
+        This is the device-independent half of the work that :meth:`prepare` and
+        :meth:`__call__` would otherwise do on the critical path: each
+        ``next_levels/<name>/`` sub-build is run through the ptoas/ccec and g++
+        toolchains and its ``.o``/``.so`` land in that sub-build's ``cache/``,
+        stamped with the runtime and PTO-ISA identity they were built against.
+        No NPU is touched and no worker is forked, so it can run on a plain CPU
+        host, ahead of time, or concurrently with other programs.
+
+        A later :meth:`prepare` / :meth:`__call__` on this same ``output_dir``
+        reuses those binaries instead of rebuilding them — including from a
+        different process, and (via :meth:`from_dir`) from a build directory this
+        object did not produce. That is what makes "compile everywhere, execute
+        where the cards are" possible: warm a serving worker's binaries before it
+        borrows a device, or precompile a whole test suite off the cards.
+
+        The binaries do not depend on ``device_ids``: the distributed config is
+        consumed only after codegen, so a directory built here replays on any
+        card set (see :meth:`from_dir`'s ``distributed_config`` override).
+
+        Returns:
+            The number of chip sub-builds that were assembled.
+
+        Raises:
+            RuntimeError: The build directory contains no chip-level sub-build,
+                or its sub-builds disagree on the runtime to link against.
+        """
+        from pypto.runtime.distributed_runner import _assemble_chip_callables  # noqa: PLC0415
+
+        chip_callables, _runtime_name, _enable_sdma = _assemble_chip_callables(self)
+        return len(chip_callables)
+
     @staticmethod
     def _build_full_args(input_args, param_infos, output_indices):
         output_set = set(output_indices)

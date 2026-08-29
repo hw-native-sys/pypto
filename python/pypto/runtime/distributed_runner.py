@@ -370,18 +370,35 @@ def _assemble_chip_callables(
     runtime_name: str | None = None
     enable_sdma = False
     next_levels_dir = compiled.output_dir / "next_levels"
-    if next_levels_dir.is_dir():
-        for chip_dir in sorted(next_levels_dir.iterdir()):
-            if not (chip_dir / "kernel_config.py").exists():
-                continue
-            # Imported lazily — and only once there is a real chip to build — so
-            # the "no chip-level tasks" error path below stays usable without the
-            # heavy device_runner → simpler toolchain import.
-            from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
+    chip_dirs = (
+        [d for d in sorted(next_levels_dir.iterdir()) if (d / "kernel_config.py").exists()]
+        if next_levels_dir.is_dir()
+        else []
+    )
+    if chip_dirs:
+        # Imported lazily — and only once there is a real chip to build — so
+        # the "no chip-level tasks" error path below stays usable without the
+        # heavy device_runner → simpler toolchain import.
+        from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
 
-            chip_callable, chip_runtime, chip_runtime_config = compile_and_assemble(
-                chip_dir, compiled.platform
-            )
+        # Sub-builds are independent: each owns its work_dir, its own
+        # ``binary_context_lock``, and its own toolchain invocations, and the
+        # per-sub-build cost is dominated by ptoas/ccec + g++ process startup
+        # rather than by CPU. Building them concurrently turns a P-chip
+        # program's assembly from P serial windows into one — measured on a
+        # host all_to_all_v (4 sub-builds), 6.6s → 1.6s. Results are zipped back
+        # onto ``chip_dirs`` in sorted order so the runtime-mismatch error below
+        # names the same chip regardless of completion order.
+        if len(chip_dirs) == 1:
+            results = [compile_and_assemble(chip_dirs[0], compiled.platform)]
+        else:
+            with ThreadPoolExecutor(
+                max_workers=len(chip_dirs), thread_name_prefix="pypto-chip-build"
+            ) as pool:
+                results = list(pool.map(lambda d: compile_and_assemble(d, compiled.platform), chip_dirs))
+        for chip_dir, (chip_callable, chip_runtime, chip_runtime_config) in zip(
+            chip_dirs, results, strict=True
+        ):
             chip_callables[chip_dir.name] = chip_callable
             enable_sdma = enable_sdma or bool(chip_runtime_config.get("enable_sdma", False))
             if runtime_name is None:
