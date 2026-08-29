@@ -201,9 +201,17 @@ _TensorT = TypeVar("_TensorT", bound=Tensor)
 
 # Constrained TypeVar for the split-axis reshape wrappers (aiv_shard / aic_gather):
 # the operand is either a Tile (legacy @pl.program form) or a Tensor (@pl.jit /
-# pl.spmd form), and the result is the SAME kind as the input. A constrained
-# TypeVar keeps that correlation (Tile -> Tile, Tensor -> Tensor) instead of a
-# ``Tensor | Tile`` union, which would type every result as the union.
+# pl.spmd form), and the result is the SAME kind as the input.
+#
+# Constrained, NOT bound, and deliberately unlike the loop-carry TypeVars in
+# dsl_api: a bound ``Tensor | Tile`` would propagate a DistributedTensor operand
+# into the result type, but AIV/AIC split does not accept one. The deducer
+# matches the operand with ``As<TensorType>``, which is precise-match and returns
+# null for DistributedTensorType by design, so ``tensor.aiv_shard(dist)`` is
+# rejected ("requires argument to be a (non-distributed) TensorType", see
+# DeduceSplitReshapeTensor in src/ir/op/tile_ops/cross_core.cpp). Collapsing the
+# subclass here keeps the annotation from advertising a result the op cannot
+# produce; widening it needs both operation contracts updated first.
 _SplitOperandT = TypeVar("_SplitOperandT", Tensor, Tile)
 
 

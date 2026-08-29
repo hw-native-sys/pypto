@@ -28,18 +28,26 @@ RangeArg = Union[int, "Scalar"]
 # Condition argument type: bool literal or Scalar variable
 CondArg = Union[bool, "Scalar"]
 
-ExprType = TypeVar("ExprType", int, float, "Scalar", "Tensor", "Tile", "Array")
+# Loop-carry TypeVars are *bound*, not constrained, so a concrete subclass
+# survives the carry round trip: ``pl.range(init_values=(dist_tensor,))`` must
+# yield ``DistributedTensor``, not a plain ``Tensor``. A constrained
+# ``TypeVar(..., "Tensor", ...)`` solves to the matching constraint instead of to
+# the argument type, erasing the subclass — which is why ``pld.system.notify`` /
+# ``wait`` had to over-widen their signal parameter. Same rationale as
+# ``unified_ops.T``. ``int`` / ``float`` stay in the bound so ``yield_(1)`` and
+# scalar-literal init values remain valid in the DSL.
+ExprType = TypeVar("ExprType", bound="int | float | Scalar | Tensor | Tile | Array")
 
 
 T = TypeVar("T")
 W = TypeVar("W")
 
-# TypeVars for overloads (int/float included so yield_(1) is valid in DSL)
-T1 = TypeVar("T1", int, float, "Scalar", "Tensor", "Tile", "Array")
-T2 = TypeVar("T2", int, float, "Scalar", "Tensor", "Tile", "Array")
-T3 = TypeVar("T3", int, float, "Scalar", "Tensor", "Tile", "Array")
-T4 = TypeVar("T4", int, float, "Scalar", "Tensor", "Tile", "Array")
-T5 = TypeVar("T5", int, float, "Scalar", "Tensor", "Tile", "Array")
+# TypeVars for overloads (see the bound-vs-constrained note on ExprType above)
+T1 = TypeVar("T1", bound="int | float | Scalar | Tensor | Tile | Array")
+T2 = TypeVar("T2", bound="int | float | Scalar | Tensor | Tile | Array")
+T3 = TypeVar("T3", bound="int | float | Scalar | Tensor | Tile | Array")
+T4 = TypeVar("T4", bound="int | float | Scalar | Tensor | Tile | Array")
+T5 = TypeVar("T5", bound="int | float | Scalar | Tensor | Tile | Array")
 
 
 class RangeIterator(Generic[T]):

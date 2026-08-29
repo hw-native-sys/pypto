@@ -21,8 +21,8 @@ cross-rank synchronisation primitives:
   that is not :class:`ir.DistributedTensorType`.
 * :func:`notify` / :func:`wait` / :func:`defer_wait` — cross-rank notification,
   blocking wait, and deferred task-completion registration on a window-bound
-  signal matrix. Side-effect-only; the C++ verifier refuses a plain
-  :class:`pl.Tensor` target.
+  signal matrix. Side-effect-only; a plain :class:`pl.Tensor` target is
+  rejected statically by the annotation and again by the C++ verifier.
 * :func:`rank` / :func:`nranks` — CommContext scalar reads (``INT32``). The
   op verifier rejects any argument whose type is not :class:`ir.CommCtxType`.
 
@@ -38,7 +38,6 @@ from collections.abc import Sequence
 
 from pypto.ir.op.distributed import system_ops as _ir_system
 from pypto.language.typing import IntLike, Scalar
-from pypto.language.typing.tensor import Tensor
 from pypto.pypto_core.ir import Call, NotifyOp, WaitCmp
 
 from ..typing.comm_ctx import CommCtx
@@ -123,7 +122,7 @@ def nranks(ctx: CommCtx) -> Scalar:
 
 
 def notify(
-    target: Tensor,
+    target: DistributedTensor,
     peer: IntLike,
     offsets: Sequence[IntLike],
     value: IntLike,
@@ -148,8 +147,7 @@ def notify(
        window-bound signal tensor.
 
     Args:
-        target: Window-bound :class:`pld.DistributedTensor` signal matrix. The
-            C++ verifier refuses a plain :class:`pl.Tensor`.
+        target: Window-bound :class:`pld.DistributedTensor` signal matrix.
         peer: Peer rank index.
         offsets: Offsets into the remote slice, one per ``target`` dimension.
         value: Scalar payload to deposit at the peer slot.
@@ -160,7 +158,7 @@ def notify(
 
 
 def wait(
-    signal: Tensor,
+    signal: DistributedTensor,
     offsets: Sequence[IntLike],
     expected: IntLike,
     *,
@@ -176,8 +174,7 @@ def wait(
     because it lowers to an IR attr (printed as ``cmp=<int>``).
 
     Args:
-        signal: Window-bound :class:`pld.DistributedTensor` signal matrix. The
-            C++ verifier refuses a plain :class:`pl.Tensor`.
+        signal: Window-bound :class:`pld.DistributedTensor` signal matrix.
         offsets: Offsets into the local slice, one per ``signal`` dimension.
         expected: Scalar threshold value to compare against.
         cmp: :class:`pld.WaitCmp` selecting equality vs greater-or-equal
@@ -187,7 +184,7 @@ def wait(
 
 
 def defer_wait(
-    signal: Tensor,
+    signal: DistributedTensor,
     offsets: Sequence[IntLike],
     expected: IntLike,
     *,
