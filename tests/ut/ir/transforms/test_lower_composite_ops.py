@@ -99,6 +99,39 @@ def test_lower_composite_ops_noop_on_no_trig():
     ir.assert_structural_equal(After, Before)
 
 
+def test_lower_composite_ops_noop_on_a_plain_tuple_binding():
+    """A user tuple literal is not a composite result, so the pass must not fold it.
+
+    Tuple-returning rules bind their result to a ``MakeTuple`` and fold the
+    downstream ``TupleGetItem`` projections. That folding is keyed on the tuples
+    this pass produced (``composite_tuples_``); an ordinary ``v = (a, b)`` written
+    by the user must survive untouched, or the pass would rewrite programs that
+    contain no composite op at all -- leaving a dead tuple binding behind.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main_incore_0(
+            self,
+            x: pl.Tensor[[16, 16], pl.FP32],
+            out_0: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            x_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+            pair = (x_tile, x_tile)
+            out_0: pl.Tensor[[16, 16], pl.FP32] = pl.store(pair[0], [0, 0], out_0)
+            return out_0
+
+        @pl.function
+        def main(self, x: pl.Tensor[[16, 16], pl.FP32]) -> pl.Tensor[[16, 16], pl.FP32]:
+            out_0: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
+            r: pl.Tensor[[16, 16], pl.FP32] = self.main_incore_0(x, out_0)
+            return r
+
+    After = passes.lower_composite_ops()(Before)
+    ir.assert_structural_equal(After, Before)
+
+
 def test_sin_is_decomposed_to_primitives():
     """``tile.sin`` is decomposed into the full Cody-Waite + Horner primitive tree."""
 
