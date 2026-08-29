@@ -193,7 +193,7 @@ Note the spelling: it lives under `pl.system`, not at top level.
 | **`pl.no_dep` breaks metadata inference under `@pl.jit`** | The wrapper hides the tensor from `@pl.jit`'s shape/dtype inference | Use `no_dep_args=[t]` on the enclosing `pl.at` scope instead |
 | **Predicate rejected by the parser** | Only `tensor[indices] OP int-literal` is expressible | Reduce to one gate value in a prior kernel, predicate on that |
 | **Predicated task runs when it should not** | The operand's producer is not in `deps=` | Add the producer's TaskId to `deps=` |
-| **`predicate` / `allow_early_resolve` rejected under `pl.cluster()`** | A `pl.spmd` nested in a cluster produces no Submit to carry the hint | Move the hint out of the cluster |
+| **`predicate` / `allow_early_resolve` / `timing_slot` rejected under `pl.cluster()`** | A `pl.spmd` nested in a cluster produces no Submit to carry the hint | Move the hint out of the cluster |
 | **`allow_early_resolve` changed nothing** | A consumer pre-stages only when *all* its producers are flagged | Flag the other producers too, or accept it does not apply |
 | **`pl.task_dummy` is not defined** | It lives under `pl.system` | Call `pl.system.task_dummy(deps=[...])` |
 

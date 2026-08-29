@@ -147,7 +147,7 @@ out, _ = pl.submit(self.consumer, x, out, deps=[gate])
 | **`@pl.jit` 下 `pl.no_dep` 破坏元数据推断** | 包裹层让 `@pl.jit` 的 shape/dtype 推断看不到该张量 | 改在外层 `pl.at` 作用域上写 `no_dep_args=[t]` |
 | **谓词被解析器拒绝** | 可表达的只有 `tensor[indices] OP int 字面量` | 在前一个 kernel 里归约成一个门控值，对它做谓词 |
 | **被谓词的任务在不该跑时跑了** | 操作数的生产者不在 `deps=` 里 | 把生产者的 TaskId 加进 `deps=` |
-| **`pl.cluster()` 下 `predicate` / `allow_early_resolve` 被拒绝** | cluster 内嵌的 `pl.spmd` 不产生可承载该提示的 Submit | 把提示移出 cluster |
+| **`pl.cluster()` 下 `predicate` / `allow_early_resolve` / `timing_slot` 被拒绝** | cluster 内嵌的 `pl.spmd` 不产生可承载该提示的 Submit | 把提示移出 cluster |
 | **`allow_early_resolve` 没有任何效果** | 消费者只有在它*所有*生产者都被标记后才预置 | 把其余生产者也标记上，或接受它在此不适用 |
 | **`pl.task_dummy` 未定义** | 它在 `pl.system` 下 | 调用 `pl.system.task_dummy(deps=[...])` |
 

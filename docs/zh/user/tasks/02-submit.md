@@ -115,7 +115,7 @@ mid, _ = pl.spmd_submit(self.stage_a, x, core_num=N, deps=[barrier_tid], timing_
 out, _ = pl.spmd_submit(self.stage_b, mid, w, core_num=N, deps=[barrier_tid], timing_slot=0)
 ```
 
-产生的 trace span 名称为 `simpler_run.runner_run.device_wall.task_slot_0`。slot 只在单个 device 时钟域内有效；L3 汇总应取各 rank duration 的最大值，不能相减不同 device 的时间戳。
+产生的 trace span 名称为 `chip.run.runner_run.device_wall.task_slot_0`。slot 只在单个 device 时钟域内有效；L3 汇总应取各 rank duration 的最大值，不能相减不同 device 的时间戳。
 
 ### 用 TaskId 数组做扇入
 

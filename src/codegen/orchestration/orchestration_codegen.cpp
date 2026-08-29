@@ -2503,10 +2503,14 @@ class OrchestrationStmtCodegen : public CodegenBase {
   // every task tagged with a slot into one device-domain dispatch-to-finish span.
   // The parser validates the user-facing literal; retain this codegen guard for
   // hand-built or deserialized IR that bypasses the parser.
+  // Mirrors the runtime's ``NUM_TASK_TIMING_SLOTS`` in ``device_phase.h``.
+  static constexpr int kRuntimeNumTaskTimingSlots = 16;
+
   void EmitTaskTimingSlot(const std::string& task_var, const CallPtr& call) {
-    if (!call->HasAttr("task_timing_slot")) return;
-    const int slot = call->GetAttr<int>("task_timing_slot");
-    CHECK_SPAN(slot >= 0 && slot < 16, call->span_) << "task_timing_slot must be in 0..15, got " << slot;
+    if (!call->HasAttr(kAttrTaskTimingSlot)) return;
+    const int slot = call->GetAttr<int>(kAttrTaskTimingSlot);
+    CHECK_SPAN(slot >= 0 && slot < kRuntimeNumTaskTimingSlots, call->span_)
+        << "task_timing_slot must be in 0.." << kRuntimeNumTaskTimingSlots - 1 << ", got " << slot;
     EmitIndentedLine(task_var + ".set_task_timing_slot(" + std::to_string(slot) + ");");
   }
 

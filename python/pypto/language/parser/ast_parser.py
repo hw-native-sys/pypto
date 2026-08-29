@@ -7400,7 +7400,7 @@ class ASTParser:
             or isinstance(kw.value.value, bool)
         ):
             raise ParserSyntaxError(
-                f"'{method_name}' timing_slot must be an integer literal in 0..15",
+                f"'{method_name}' timing_slot must be a non-negative integer literal in 0..15",
                 span=self.span_tracker.get_span(kw.value),
                 hint="Write timing_slot=0 to tag this task with task-timing slot 0.",
             )

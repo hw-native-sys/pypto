@@ -221,8 +221,17 @@ class TestTimingSlotParsing:
         (submit,) = _main_submits(Prog)
         assert submit.attrs["task_timing_slot"] == 15
 
-    @pytest.mark.parametrize("slot", ["-1", "16", "True", "1.5", "slot"])
-    def test_invalid_slot_rejected(self, slot):
+    @pytest.mark.parametrize(
+        ("slot", "error"),
+        [
+            ("-1", "timing_slot must be a non-negative integer literal in 0..15"),
+            ("16", "timing_slot must be in 0..15, got 16"),
+            ("True", "timing_slot must be a non-negative integer literal in 0..15"),
+            ("1.5", "timing_slot must be a non-negative integer literal in 0..15"),
+            ("slot", "timing_slot must be a non-negative integer literal in 0..15"),
+        ],
+    )
+    def test_invalid_slot_rejected(self, slot, error):
         source = """
 import pypto.language as pl
 
@@ -238,7 +247,7 @@ class Prog:
             out, _ = pl.submit(self.producer, x, timing_slot=SLOT)
         return out
 """.replace("SLOT", slot)
-        with pytest.raises(ParserSyntaxError, match="timing_slot must"):
+        with pytest.raises(ParserSyntaxError, match=error):
             pl.parse_program(source)
 
     def test_timing_slot_round_trips_as_submit_attr(self):

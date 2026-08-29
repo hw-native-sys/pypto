@@ -929,6 +929,15 @@ inline constexpr const char* kAttrCoreNum = "core_num";
 inline constexpr const char* kAttrSyncStart = "sync_start";
 
 /**
+ * @brief Reserved attr key for a selective device-timing tag on ``pl.submit``.
+ *
+ * Value type: ``int`` in ``0..15``. Written by the DSL parser and read by
+ * orchestration codegen to emit ``Arg::set_task_timing_slot``. The value has
+ * no IR references, so generic attr copying preserves it across Submit rebuilds.
+ */
+inline constexpr const char* kAttrTaskTimingSlot = "task_timing_slot";
+
+/**
  * @brief True for a ``Call`` attr key whose value is a single ``ExprPtr``
  * naming an IR subtree evaluated in the node's own scope.
  *

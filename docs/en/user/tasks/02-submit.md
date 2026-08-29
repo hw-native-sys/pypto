@@ -143,7 +143,7 @@ out, _ = pl.spmd_submit(self.stage_b, mid, w, core_num=N, deps=[barrier_tid], ti
 ```
 
 The resulting trace span is named
-`simpler_run.runner_run.device_wall.task_slot_0`. A slot is local to one device;
+`chip.run.runner_run.device_wall.task_slot_0`. A slot is local to one device;
 for L3, aggregate its duration as the maximum across ranks, not by comparing
 timestamps from different devices.
 
