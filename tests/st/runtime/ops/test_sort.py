@@ -818,16 +818,14 @@ class Sort32GatherMaskFP32TestCase(PTOTestCase):
 # --- Tests ---
 
 
-# sort32/mrgsort intrinsics are A2A3-only (Ascend 910B). Additionally, the
-# a2a3sim simulator value-converts TSORT32 index lanes while the expected
-# outputs in this file reinterpret raw uint32 bits, so the index-checking
-# cases would compare incompatible representations on the simulator. Until
-# ``compute_expected()`` is taught the simulator's lane convention, restrict
-# the whole class to onboard a2a3 only.
+# The focused sort32 regression overrides this class marker for A5 and A5sim.
+# The remaining sort/gather/mrgsort pipelines retain their existing onboard
+# A2/A3 scope, including the known A2/A3 simulator index-lane discrepancy.
 @pytest.mark.platforms("a2a3")
 class TestSort:
     """Test suite for sort32 and mrgsort operations."""
 
+    @pytest.mark.platforms("a2a3", "a5", "a5sim")
     @pytest.mark.parametrize("platform", PLATFORMS)
     def test_sort32_fp32(self, test_runner, platform):
         """Test sort32 with FP32 data: verify descending sort with index tracking."""

@@ -2831,10 +2831,10 @@ class TestMatmulAccCompactCodegen:
 class TestMrgSortCodegen:
     """Tests for mrgsort format1 code generation with constant and variable block_len."""
 
-    def _generate_mlir(self, program_cls) -> str:
+    def _generate_mlir(self, program_cls, backend_type=BackendType.Ascend910B, *, emit_tile_addr=True) -> str:
         """Run PassManager and PTOCodegen on the given program, return MLIR string."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(backend_type)
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
         optimized = pm.run_passes(program_cls)
@@ -2842,7 +2842,7 @@ class TestMrgSortCodegen:
         funcs = list(optimized.functions.values())
         assert funcs, "Program has no functions"
         single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
-        return codegen_instance.generate(single)
+        return codegen_instance.generate(single, emit_tile_addr=emit_tile_addr)
 
     def test_mrgsort_format1_const_block_len(self):
         """mrgsort with constant block_len=64 should generate pto.tmrgsort with i32 operand."""
@@ -2910,7 +2910,8 @@ class TestMrgSortCodegen:
         ("src_dtype", "output_cols"),
         [(pl.FP32, 128), (pl.FP16, 256)],
     )
-    def test_sort32_dynamic_valid_width_emits_level3_scratch(self, src_dtype, output_cols):
+    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+    def test_sort32_dynamic_valid_width_emits_level3_scratch(self, src_dtype, output_cols, backend_type):
         """A runtime valid width keeps logical output bounds and uses static TSORT capacity."""
 
         @pl.program
@@ -2928,7 +2929,7 @@ class TestMrgSortCodegen:
                 sorted_tile = pl.tile.sort32(src_tile, idx_tile)
                 return pl.store(sorted_tile, [0, 0], out)
 
-        mlir = self._generate_mlir(Prog)
+        mlir = self._generate_mlir(Prog, backend_type)
         line = next(line for line in mlir.splitlines() if "pto.tsort32" in line)
         ins = line.split("ins(", 1)[1].split(":", 1)[0]
         assert ins.count(",") == 2, line
@@ -2939,6 +2940,34 @@ class TestMrgSortCodegen:
         tstore_line = next(line for line in mlir.splitlines() if "pto.tstore" in line)
         assert "%sorted_tile" in tstore_line and "%sort32_dst_view" not in tstore_line, tstore_line
         assert "arith.muli" in mlir, mlir
+
+    @pytest.mark.parametrize(
+        ("backend_type", "emit_tile_addr"),
+        [(BackendType.Ascend950, True), (BackendType.Ascend910B, False)],
+    )
+    def test_static_aligned_sort32_uses_static_views_without_tmp(self, backend_type, emit_tile_addr):
+        """A5 level3 and the existing A2/A3 path expose static aligned widths."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[1, 64], pl.FP32],
+                idx: pl.Tensor[[1, 64], pl.UINT32],
+                out: pl.Tensor[[1, 128], pl.FP32],
+            ) -> pl.Tensor[[1, 128], pl.FP32]:
+                src_tile = pl.load(src, [0, 0], [1, 64])
+                idx_tile = pl.load(idx, [0, 0], [1, 64])
+                sorted_tile = pl.tile.sort32(src_tile, idx_tile)
+                return pl.store(sorted_tile, [0, 0], out)
+
+        mlir = self._generate_mlir(Prog, backend_type, emit_tile_addr=emit_tile_addr)
+        line = next(line for line in mlir.splitlines() if "pto.tsort32" in line)
+        assert "%sort32_src_view" in line and "%sort32_idx_view" in line, line
+        assert "%sort32_dst_view" in line, line
+        assert "sort32_tmp" not in line, line
+        assert "v_row=?" not in line and "v_col=?" not in line, line
 
 
 class TestConstDtypeCodegen:

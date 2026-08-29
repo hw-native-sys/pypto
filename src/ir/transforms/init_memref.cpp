@@ -288,7 +288,7 @@ struct PtoScratchSpec {
   std::string name_component;
 };
 
-/// Materialize A2/A3 level3 scratch before MemRef collection.
+/// Materialize level3 scratch before MemRef collection.
 ///
 /// Optional compiler-owned scratch (`tile.ci`, narrowing `tile.cast`, required
 /// `tile.sort32`) is inserted only when absent. Caller-owned tmp operands on
@@ -297,6 +297,9 @@ struct PtoScratchSpec {
 /// for them. `tile.col_sum` / `tile.row_expand_add` likewise keep caller tmp.
 class MaterializePtoLevel3ScratchMutator : public IRMutator {
  public:
+  explicit MaterializePtoLevel3ScratchMutator(bool materialize_a2a3_scratch)
+      : materialize_a2a3_scratch_(materialize_a2a3_scratch) {}
+
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     auto call = As<Call>(op->value_);
     if (!call) return IRMutator::VisitStmt_(op);
@@ -325,8 +328,9 @@ class MaterializePtoLevel3ScratchMutator : public IRMutator {
   }
 
  private:
-  static std::optional<PtoScratchSpec> GetScratchSpec(const CallPtr& call, const Span& span) {
+  std::optional<PtoScratchSpec> GetScratchSpec(const CallPtr& call, const Span& span) const {
     if (IsOp(call, "tile.ci") && call->args_.size() == 2) {
+      if (!materialize_a2a3_scratch_) return std::nullopt;
       auto result_type = As<TileType>(call->GetType());
       INTERNAL_CHECK_SPAN(result_type, span) << "tile.ci result must be TileType before InitMemRef";
       // PTOAS v0.60 level3 TCI tmp width: 192 FP32 cols for 32-bit dst, 448 for 16-bit dst.
@@ -336,6 +340,7 @@ class MaterializePtoLevel3ScratchMutator : public IRMutator {
     }
 
     if (IsOp(call, "tile.cast") && call->args_.size() == 1) {
+      if (!materialize_a2a3_scratch_) return std::nullopt;
       auto src_type = As<TileType>(call->args_[0]->GetType());
       INTERNAL_CHECK_SPAN(src_type, span) << "tile.cast source must be TileType before InitMemRef";
       const DataType dst = call->GetKwarg<DataType>("target_type");
@@ -358,6 +363,7 @@ class MaterializePtoLevel3ScratchMutator : public IRMutator {
     return std::nullopt;
   }
 
+  bool materialize_a2a3_scratch_ = false;
   std::size_t scratch_counter_ = 0;
 };
 
@@ -1043,12 +1049,11 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
   }
 
   // PTOAS level2 owns implicit-tmp materialization as part of PlanMemory. PyPTO
-  // and DSA-RP instead emit fixed addresses and invoke level3, so backends that
-  // report RequiresLevel3TmpScratch() must materialize scratch here.
+  // and DSA-RP instead emit fixed addresses and invoke level3. CI/TCVT scratch
+  // remains restricted to A2/A3, while TSORT32 scratch is level-driven.
   const MemoryPlanner planner = ctx ? ctx->GetMemoryPlanner() : MemoryPlanner::PyPTO;
-  if (handler != nullptr && handler->RequiresLevel3TmpScratch() &&
-      (planner == MemoryPlanner::PyPTO || planner == MemoryPlanner::DsaRP)) {
-    MaterializePtoLevel3ScratchMutator materializer;
+  if (handler != nullptr && (planner == MemoryPlanner::PyPTO || planner == MemoryPlanner::DsaRP)) {
+    MaterializePtoLevel3ScratchMutator materializer(handler->RequiresLevel3TmpScratch());
     normalized_func = materializer.VisitFunction(normalized_func);
   }
 

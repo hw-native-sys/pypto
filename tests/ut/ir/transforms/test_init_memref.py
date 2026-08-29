@@ -1230,7 +1230,7 @@ class TestDynamicValidShape:
 
 
 class TestPtoLevel3Scratch:
-    """Compiler-owned A2/A3 scratch enters the ordinary MemRef pipeline here."""
+    """Compiler-owned level3 scratch enters the ordinary MemRef pipeline here."""
 
     @staticmethod
     def _calls(program: ir.Program, op_name: str) -> list[ir.Call]:
@@ -1340,6 +1340,10 @@ class TestPtoLevel3Scratch:
         after = self._run(self._cast_program(pl.FP32, pl.FP16), BackendType.Ascend910B)
         assert len(self._calls(after, ir.get_op("tile.cast").name)[0].args) == 1
 
+    def test_a5_narrowing_cast_keeps_implicit_tmp_abi(self):
+        after = self._run(self._cast_program(pl.FP32, pl.INT16), BackendType.Ascend950)
+        assert len(self._calls(after, ir.get_op("tile.cast").name)[0].args) == 1
+
     def test_fp16_to_int4_has_no_level3_scratch(self):
         """FP16->INT4 uses native vconv without PTOAS level-3 tcvt tmp."""
         after = self._run(self._cast_program(pl.FP16, pl.INT4), BackendType.Ascend910B)
@@ -1416,8 +1420,9 @@ class TestPtoLevel3Scratch:
             ib.return_stmt(result)
         return ir.Program([f.get_result()], "sort_program", span)
 
-    def test_sort32_dynamic_valid_col_gets_physical_shape_scratch(self):
-        after = self._run(self._sort_program(dynamic_valid_col=True), BackendType.Ascend910B)
+    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+    def test_sort32_dynamic_valid_col_gets_physical_shape_scratch(self, backend_type):
+        after = self._run(self._sort_program(dynamic_valid_col=True), backend_type)
         sort32 = self._calls(after, ir.get_op("tile.sort32").name)[0]
         assert len(sort32.args) == 3
         tmp = cast(ir.TileType, sort32.args[2].type)
@@ -1425,8 +1430,17 @@ class TestPtoLevel3Scratch:
         assert tmp.dtype == ir.DataType.FP32
         assert tmp.memref is not None
 
-    def test_sort32_static_aligned_valid_col_needs_no_scratch(self):
-        after = self._run(self._sort_program(dynamic_valid_col=False), BackendType.Ascend910B)
+    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+    def test_sort32_static_aligned_valid_col_needs_no_scratch(self, backend_type):
+        after = self._run(self._sort_program(dynamic_valid_col=False), backend_type)
+        assert len(self._calls(after, ir.get_op("tile.sort32").name)[0].args) == 2
+
+    def test_a5_ptoas_planner_leaves_sort32_scratch_to_plan_memory(self):
+        after = self._run(
+            self._sort_program(dynamic_valid_col=True),
+            BackendType.Ascend950,
+            planner=passes.MemoryPlanner.PTOAS,
+        )
         assert len(self._calls(after, ir.get_op("tile.sort32").name)[0].args) == 2
 
 

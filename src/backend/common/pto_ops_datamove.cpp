@@ -534,7 +534,9 @@ static std::string MakeSort32CodegenPTO(const std::string& pto_op_name, const Ca
       << "Operation:[" << pto_op_name << "] requires 2 or 3 arguments (src, idx[, tmp]), but got "
       << op->args_.size();
 
-  const bool level3 = codegen.GetBackendHandler()->RequiresLevel3TmpScratch();
+  // Preserve the existing A2/A3 bridge for every planner. A5 additionally
+  // needs it only when PyPTO/DSA-RP emits fixed addresses and invokes level3.
+  const bool level3 = codegen.GetBackendHandler()->RequiresLevel3TmpScratch() || codegen.EmitTileAddr();
   std::string src = codegen.GetExprAsCode(op->args_[0]);
   std::string idx = codegen.GetExprAsCode(op->args_[1]);
   std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
@@ -543,7 +545,7 @@ static std::string MakeSort32CodegenPTO(const std::string& pto_op_name, const Ca
   std::string tmp_type;
   bool use_static_views = false;
   if (level3 && op->args_.size() == 3) {
-    // A2/A3 level3 TSORT32 verifies explicit tmp against static valid_shape.
+    // PTOAS level3 TSORT32 verifies explicit tmp against static valid_shape.
     tmp = EnsureStaticViewTileSsa(op->args_[2], codegen, "sort32_tmp_view");
     tmp_type = codegen.GetViewTileBufTypeStringFromTileType(As<ir::TileType>(op->args_[2]->GetType()));
   } else if (level3) {
@@ -580,7 +582,7 @@ static std::string MakeSort32CodegenPTO(const std::string& pto_op_name, const Ca
   if (use_static_dst && !pto_ops_detail::HasStaticValidShape(dst_tile)) {
     // Keep the result allocation's runtime logical valid_shape for downstream
     // stores, but present TSORT32 with a static view of that allocation's full
-    // physical capacity. PTOAS A2/A3 rejects a dynamic destination view even
+    // physical capacity. PTOAS level3 rejects a dynamic destination view even
     // though the source valid width determines how many tuples are produced.
     auto physical_view = ir::tile_view_semantics::GetEffectiveTileView(*dst_tile);
     physical_view.valid_shape = dst_tile->shape_;

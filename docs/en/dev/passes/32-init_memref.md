@@ -7,7 +7,7 @@ Materializes compiler-owned PTO level3 scratch, initializes MemRef for all varia
 This pass performs four tasks:
 
 1. **Normalizes statement structure** (calls NormalizeStmtStructure internally)
-2. **Materializes compiler-owned level3 scratch** for the A2/A3 `tile.ci`, narrowing `tile.cast`, and required `tile.sort32` forms that need an explicit tmp under level3
+2. **Materializes compiler-owned level3 scratch** for the A2/A3 `tile.ci` and narrowing `tile.cast` ABIs, plus required `tile.sort32` forms on A2/A3 and A5
 3. **Initializes MemRef** for TileType and TensorType variables
 4. **Creates `tile.alloc` operations** for each non-DDR MemRef with `addr=-1` (unallocated)
 
@@ -45,7 +45,7 @@ program_with_memrefs = init_pass(program)
 ## Algorithm
 
 1. **Normalize structure**: Call `NormalizeStmtStructure` to ensure flat `SeqStmts` structure
-2. **Materialize level3 scratch**: Under the PyPTO or DSA-RP planner on A2/A3, insert ordinary Vec `tile.create` values for missing compiler-owned `tile.ci`, narrowing `tile.cast`, and required `tile.sort32` scratch. Explicit caller tmp on `tile.sel` / `tile.sels` / `tile.prelu` is preserved. The PTOAS planner and A5 are unchanged.
+2. **Materialize level3 scratch**: Under the PyPTO or DSA-RP planner, insert ordinary Vec `tile.create` values for missing compiler-owned scratch. `tile.ci` and narrowing `tile.cast` remain A2/A3-only, while required `tile.sort32` scratch is materialized on both A2/A3 and A5. Explicit caller tmp on `tile.sel` / `tile.sels` / `tile.prelu` is preserved. The PTOAS planner remains unchanged because its level-2 `PlanMemory` owns implicit scratch.
 3. **Resolve declared allocations**: Collect every one-argument `pl.MemRef(...)` declaration and derive each one's size and memory space from the tiles bound to it (see [Declared allocations](#declared-allocations))
 4. **Initialize MemRef**: Read `memory_space` from `TileType` (set by InferTileMemorySpace), create MemRef objects (addr=-1) and attach to variable types
    - **tile.store**: result shares MemRef with the output tensor argument (specified by `output_reuses_input_arg` registry attribute)

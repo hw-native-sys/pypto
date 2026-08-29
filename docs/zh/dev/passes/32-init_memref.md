@@ -7,7 +7,7 @@
 此 Pass 执行四项任务：
 
 1. **规范化语句 (Statement) 结构**（内部调用 NormalizeStmtStructure）
-2. **物化编译器负责的 level3 scratch**：处理 A2/A3 上需要 scratch 的 `tile.ci`、窄化 `tile.cast` 和 `tile.sort32`；`tile.sel` / `tile.sels` / `tile.prelu` 的 caller tmp 原样保留
+2. **物化编译器负责的 level3 scratch**：处理 A2/A3 ABI 的 `tile.ci`、窄化 `tile.cast`，以及 A2/A3 与 A5 上需要 scratch 的 `tile.sort32`；`tile.sel` / `tile.sels` / `tile.prelu` 的 caller tmp 原样保留
 3. **为 TileType 和 TensorType 变量初始化 MemRef**
 4. **为每个非 DDR 的 MemRef 创建 `tile.alloc` 操作**，地址为 `addr=-1`（未分配）
 
@@ -45,7 +45,7 @@ program_with_memrefs = init_pass(program)
 ## 算法
 
 1. **规范化结构**：调用 `NormalizeStmtStructure` 确保 `SeqStmts` 为扁平结构
-2. **物化 level3 scratch**：在 A2/A3 的 PyPTO 或 DSA-RP 规划模式下，为缺失的 `tile.ci`、窄化 `tile.cast` 与必要的 `tile.sort32` scratch 插入普通 Vec `tile.create`。`tile.sel` / `tile.sels` / `tile.prelu` 的 caller tmp 原样保留；PTOAS 规划器与 A5 不变。
+2. **物化 level3 scratch**：在 PyPTO 或 DSA-RP 规划模式下，为缺失的编译器 scratch 插入普通 Vec `tile.create`。`tile.ci` 与窄化 `tile.cast` 仍仅适用于 A2/A3，必要的 `tile.sort32` scratch 则同时适用于 A2/A3 和 A5。`tile.sel` / `tile.sels` / `tile.prelu` 的 caller tmp 原样保留。PTOAS 规划器保持不变，由其 level-2 `PlanMemory` 管理隐式 scratch。
 3. **解析声明式分配**：收集所有单参数 `pl.MemRef(...)` 声明，并从绑定的 tile 推导出每块分配的大小与内存空间（见[声明式分配](#声明式分配)）
 4. **初始化 MemRef**：从 `TileType` 读取 `memory_space`（由 InferTileMemorySpace 设置），创建 MemRef 对象（addr=-1）并附加到变量类型
    - **tile.store**：结果与输出 tensor 参数共享 MemRef（由 `output_reuses_input_arg` 注册表属性指定）
