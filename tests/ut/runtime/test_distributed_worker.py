@@ -989,7 +989,9 @@ class TestDeviceMemoryApi:
         ptr = rt.malloc(128)
         host = (ctypes.c_ubyte * 64)()
         host_ptr = ctypes.addressof(host)
-        rt._inherited_host_spans = ((host_ptr, host_ptr + 64),)
+        rt._inherited_host_spans = rt._merge_overlapping_spans(
+            ((host_ptr, host_ptr + 48), (host_ptr + 16, host_ptr + 64))
+        )
 
         rt.copy_to(ptr, host_ptr, 16, dst_offset=4, src_offset=8)
         first_copy = patched_setup["worker"].copy_to.call_args
@@ -1003,6 +1005,7 @@ class TestDeviceMemoryApi:
         reverse_host = reverse_copy.args[0]
         assert first_host.base == second_host.base == reverse_host.base == host_ptr
         assert first_host.nbytes == second_host.nbytes == reverse_host.nbytes == 64
+        assert first_host is second_host is reverse_host
         assert (first_host.owner, first_host.buffer_id) == (second_host.owner, second_host.buffer_id)
         assert (first_host.owner, first_host.buffer_id) == (reverse_host.owner, reverse_host.buffer_id)
         assert first_host.access == second_host.access == reverse_host.access == "READWRITE"
@@ -3624,7 +3627,7 @@ class TestNamedInheritedHostRanges:
         patched_setup["worker"].create_buffer.assert_not_called()
         rt.close()
 
-    def test_the_same_span_in_both_directions_reuses_one_identity(self, patched_setup):
+    def test_the_same_span_in_both_directions_reuses_one_buffer(self, patched_setup):
         """One memory span has one READWRITE descriptor in both copy directions."""
         host = torch.zeros(4, 4, dtype=torch.float32).share_memory_()
         rt = DistributedWorker(_fake_compiled([_param("a", [4, 4])], []), inherited_host_tensors=[host])
@@ -3637,11 +3640,11 @@ class TestNamedInheritedHostRanges:
         src = patched_setup["worker"].copy_to.call_args.args[1]
         dst = patched_setup["worker"].copy_from.call_args.args[0]
         assert (src.access, dst.access) == ("READWRITE", "READWRITE")
-        assert (src.owner, src.buffer_id) == (dst.owner, dst.buffer_id)
+        assert src is dst
 
-        # Re-copying either direction must still reuse the span's identity.
+        # Re-copying either direction must still reuse the span's Buffer object.
         rt.copy_to(dev.data_ptr, host.data_ptr(), nbytes)
-        assert patched_setup["worker"].copy_to.call_args.args[1].buffer_id == src.buffer_id
+        assert patched_setup["worker"].copy_to.call_args.args[1] is src
         rt.close()
 
     def test_copy_to_stages_a_partially_overlapping_range(self, patched_setup):
@@ -3687,8 +3690,8 @@ class TestNamedInheritedHostRanges:
         assert not isinstance(patched_setup["worker"].copy_to.call_args.args[1], _NamedHostRange)
         rt.close()
 
-    def test_one_range_keeps_one_identity_across_copies(self, patched_setup):
-        """Re-copying a range must reuse its identity, not mint a new one.
+    def test_one_range_keeps_one_buffer_across_copies(self, patched_setup):
+        """Re-copying a range must reuse its Buffer object, not mint a new one.
 
         Two reasons, both in the consumer: ``ImportRegistry.materialize`` refuses a second
         descriptor for an identity it already handed out, so a fresh id per copy would make the
@@ -3707,13 +3710,16 @@ class TestNamedInheritedHostRanges:
         rt.copy_to(dev.data_ptr, host.data_ptr(), nbytes)
         second = patched_setup["worker"].copy_to.call_args.args[1]
 
-        assert (first.owner, first.buffer_id) == (second.owner, second.buffer_id)
+        assert first is second
         rt.close()
 
-    def test_distinct_sub_ranges_reuse_the_span_identity(self, patched_setup):
-        """Sub-ranges reuse one Buffer and differ only in their runtime offset."""
+    def test_overlapping_views_and_sub_ranges_reuse_one_buffer(self, patched_setup):
+        """Aliased views and sub-ranges reuse one Buffer and differ only by offset."""
         host = torch.zeros(4, 4, dtype=torch.float32).share_memory_()
-        rt = DistributedWorker(_fake_compiled([_param("a", [4, 4])], []), inherited_host_tensors=[host])
+        rt = DistributedWorker(
+            _fake_compiled([_param("a", [4, 4])], []),
+            inherited_host_tensors=[host[:3], host[1:]],
+        )
         dev = self._dev(rt)
         half = host.numel() * host.element_size() // 2
 
@@ -3725,7 +3731,7 @@ class TestNamedInheritedHostRanges:
         first = first_call.args[1]
         second = second_call.args[1]
         assert (first.base, first.nbytes) == (host.data_ptr(), host.numel() * host.element_size())
-        assert (first.owner, first.buffer_id) == (second.owner, second.buffer_id)
+        assert first is second
         assert first_call.kwargs["src_offset"] == 0
         assert second_call.kwargs["src_offset"] == half
         rt.close()
@@ -3736,7 +3742,7 @@ class TestNamedInheritedHostRanges:
         rt = DistributedWorker(_fake_compiled([_param("a", [4, 4])], []), inherited_host_tensors=[host])
         row = 4 * host.element_size()
         rows = 64
-        seen: list[tuple[int, tuple[Any, int]]] = []
+        seen: list[tuple[int, int]] = []
         lock = threading.Lock()
 
         def _copy(index: int) -> None:
@@ -3745,29 +3751,29 @@ class TestNamedInheritedHostRanges:
             assert named is not None
             buffer, relative_offset = named
             with lock:
-                seen.append((relative_offset, (buffer.owner, buffer.buffer_id)))
+                seen.append((relative_offset, id(buffer)))
 
         with ThreadPoolExecutor(max_workers=8) as pool:
             list(pool.map(_copy, range(rows)))
 
-        identities = [identity for _, identity in seen]
+        buffer_ids = [buffer_id for _, buffer_id in seen]
         assert len(seen) == rows
-        assert len(set(identities)) == 1
+        assert len(set(buffer_ids)) == 1
         assert {offset for offset, _ in seen} == {index * row for index in range(rows)}
         rt.close()
 
-    def test_identity_cache_is_dropped_with_the_ranges_it_names(self, patched_setup):
+    def test_buffer_cache_is_dropped_with_the_ranges_it_names(self, patched_setup):
         """After the parent releases its references, nothing may keep naming those ranges."""
         host = torch.zeros(4, 4, dtype=torch.float32).share_memory_()
         rt = DistributedWorker(_fake_compiled([_param("a", [4, 4])], []), inherited_host_tensors=[host])
         dev = self._dev(rt)
         nbytes = host.numel() * host.element_size()
         rt.copy_to(dev.data_ptr, host.data_ptr(), nbytes)
-        assert rt._named_identities
+        assert rt._named_host_buffers
 
         rt.release_inherited_host_tensor_refs()
 
-        assert not rt._named_identities
+        assert not rt._named_host_buffers
         rt.close()
 
 
