@@ -2525,16 +2525,16 @@ class LowerCompositeOpsMutator : public IRMutator {
     if (!call) {
       auto visited = IRMutator::VisitStmt_(op);
       auto assign = As<AssignStmt>(visited);
-      // Propagate SSA aliases of composite-produced tuples (`alias = pair`), so
-      // a later `alias[i]` folds and no tuple-typed Var survives for codegen to
-      // materialize. Resolve against the PRE-visit RHS: `IRMutator::VisitStmt_`
-      // has already expanded `pair` to its MakeTuple via var_remap_, and a bare
-      // MakeTuple deliberately does not resolve (see ResolveCompositeTuple), so
-      // an ordinary user `v = (a, b)` is left exactly as it was.
+      // Propagate aliases of composite-produced tuples (e.g. alias = pair).
+      // Prefer composite_tuples_; if VisitExpr already expanded the RHS to a
+      // MakeTuple via var_remap_, also seed var_remap_ for the alias Var so
+      // later projections and ConvertToSSA see a concrete tuple.
       if (assign) {
-        if (auto mt = ResolveCompositeTuple(op->value_)) {
+        if (auto mt = ResolveCompositeTuple(assign->value_)) {
           composite_tuples_[op->var_.get()] = mt;
-          var_remap_[op->var_.get()] = mt;
+          if (As<MakeTuple>(assign->value_)) {
+            var_remap_[op->var_.get()] = assign->value_;
+          }
         }
       }
       return visited;
@@ -2551,11 +2551,9 @@ class LowerCompositeOpsMutator : public IRMutator {
     LoweringBuilder builder(op->var_->name_hint_, temp_counter_);
     ExprPtr result = rule(call, visited_args, builder);
     if (auto mt = As<MakeTuple>(result)) {
-      // composite_tuples_ drives TupleGetItem folding; var_remap_ additionally
-      // expands the Var itself so no tuple-typed Var reaches codegen (it cannot
-      // materialize one). Both are keyed on this Var alone -- membership in
-      // composite_tuples_ is what gates every other site, so an ordinary user
-      // `v = (a, b)` never enters either map.
+      // Record privately for TupleGetItem folding, and also seed var_remap_ so
+      // SSA aliases (`alias = pair`) expand through VisitExpr_(Var) without
+      // needing a global "any MakeTuple" remap.
       composite_tuples_[op->var_.get()] = mt;
       var_remap_[op->var_.get()] = result;
     }
@@ -2677,12 +2675,10 @@ class LowerCompositeOpsMutator : public IRMutator {
     return out;
   }
 
-  /// Resolve an expression to a MakeTuple produced by this pass, via the Var it
-  /// was bound to (directly or through an SSA alias). Returns nullptr for any
-  /// other tuple — a bare `MakeTuple` operand is deliberately NOT accepted, so
-  /// an ordinary user `v = (a, b)` never enters composite_tuples_ and this pass
-  /// stays a no-op on programs that contain no composite ops.
+  /// Resolve an expression to a MakeTuple produced by this pass (including
+  /// aliases recorded in composite_tuples_). Returns nullptr if not found.
   MakeTuplePtr ResolveCompositeTuple(const ExprPtr& expr) const {
+    if (auto mt = As<MakeTuple>(expr)) return mt;
     if (auto var = AsVarLike(expr)) {
       auto it = composite_tuples_.find(var.get());
       if (it != composite_tuples_.end()) return it->second;
