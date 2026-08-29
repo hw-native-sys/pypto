@@ -1428,9 +1428,56 @@ jobs:
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
           unset-ring: 'true'
 
+      - name: Precompile distributed artifacts (card-free)
+        # Pass 1 of two. Over half of this suite's wall clock used to be compile
+        # work done while holding two NPUs idle: profiling the serial run put
+        # ir.compile + the per-chip ptoas/ccec build at ~277s of ~620s, against
+        # only ~126s of actual device dispatch. None of that needs a card, so it
+        # runs here instead — on the CPU host, fanned out under -n, before any
+        # card is borrowed.
+        #
+        # Each test's program is compiled into a slot under --precompile-dir and
+        # its chip binaries built there; the run then stops at the first device
+        # edge. Pass 2 rebinds each usable slot via
+        # DistributedCompiledProgram.from_dir and avoids recompiling; a missing
+        # or unusable slot falls back to compiling in place. The artifact does
+        # not depend on which cards it will run on (ir.compile consumes
+        # distributed_config only after codegen),
+        # so --device here is a placeholder that exists only to give the cases the
+        # same rank count pass 2 will have -- these two ids are never touched.
+        #
+        # The store is keyed by test id, not by content, which is sound only
+        # because both passes run from this one checkout inside this one job.
+        # RUNNER_TEMP is per-job, so it cannot leak into a later job on this
+        # persistent runner; reusing a store across commits would serve stale
+        # binaries. Do not point this at a shared or persistent directory.
+        #
+        # A codegen regression now fails here, in ~40s, without having claimed an
+        # NPU at all.
+        timeout-minutes: 20
+        run: |
+          source activate.sh
+          rm -rf "$RUNNER_TEMP/dist-precompile"
+          python -m pytest tests/st/distributed -q -n 16 \
+            --precompile-dir="$RUNNER_TEMP/dist-precompile" --precompile-only \
+            --device=0,1 \
+            --ignore=tests/st/distributed/test_l2_multi_orch.py
+
       - name: Test distributed system tests
+        # Pass 2 of two: the device half, still on two cards. --precompile-dir
+        # points at what the card-free step just built, so the borrowed cards do
+        # device work and essentially no compilation (a warm chip sub-build is
+        # ~0.05s against ~1.6s cold). A missing or unusable slot silently falls
+        # back to compiling in place, so this step is correct on its own if pass 1
+        # is ever skipped -- just slower.
+        #
+        # Measured on a two-card box: 746s -> 383s here, with pass 1 adding ~40s
+        # that holds no card. Card-seconds roughly halve. Widening this step with
+        # xdist would cut wall clock further but needs two cards per worker;
+        # tests/st/conftest.py partitions --device for that if it is ever wanted.
+        #
         # The step clock includes both task-submit queueing and the device run.
-        # Keep enough headroom for a typical ~10-minute suite after waiting for
+        # Keep enough headroom for a typical ~7-minute suite after waiting for
         # a two-card slot; --max-time below still caps device execution at 30m,
         # so leave the step budget above that or the runner kills the task
         # before task-submit can report the cap cleanly.
@@ -1443,13 +1490,21 @@ jobs:
         run: |
           source activate.sh
           task-submit --device "$DEVICE_ID" --device-num 2 --timeout 3600 --max-time 1800 \
-            --run "cd $GITHUB_WORKSPACE/dist-checkout && source activate.sh && python -m pytest tests/st/distributed -v --device=\$TASK_DEVICE --ignore=tests/st/distributed/test_l2_multi_orch.py"
+            --run "cd $GITHUB_WORKSPACE/dist-checkout && source activate.sh && python -m pytest tests/st/distributed -v --precompile-dir=$RUNNER_TEMP/dist-precompile --device=\$TASK_DEVICE --ignore=tests/st/distributed/test_l2_multi_orch.py"
 
       - name: Kill orphaned task-submit tasks
         if: always()
         uses: ./.github/actions/kill-orphaned-tasks
         with:
           checkout-path: dist-checkout
+
+      - name: Drop the precompile store
+        # Keyed by test id, so it is only ever valid for the commit that built
+        # it. RUNNER_TEMP is per-job, but delete it explicitly rather than rely
+        # on that: a store surviving into another commit's job would hand it
+        # binaries built from different sources.
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/dist-precompile"
 
   pypto-lib-model:
     # No container: each model run borrows an NPU from the host-level

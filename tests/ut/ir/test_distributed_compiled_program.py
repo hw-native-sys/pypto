@@ -387,5 +387,40 @@ def test_from_dir_output_indices_match_out_params(compiled, tmp_path):
     assert param_infos[2].direction == ParamDirection.Out
 
 
+def test_build_binaries_assembles_every_chip_and_reports_the_count(compiled):
+    """The card-free build delegates to the chip assembler and counts its sub-builds."""
+    with patch(
+        "pypto.runtime.distributed_runner._assemble_chip_callables",
+        return_value=({"chip_orch": object(), "builtin.tensor.allreduce": object()}, "rt", False),
+    ) as assemble:
+        assert compiled.build_binaries() == 2
+    assemble.assert_called_once_with(compiled)
+
+
+def test_build_binaries_touches_no_device(compiled):
+    """It must not construct a Worker — that is the whole point of the split."""
+    with (
+        patch(
+            "pypto.runtime.distributed_runner._assemble_chip_callables",
+            return_value=({"chip_orch": object()}, "rt", False),
+        ),
+        patch("pypto.runtime.distributed_runner._construct_worker") as construct,
+    ):
+        compiled.build_binaries()
+    construct.assert_not_called()
+
+
+def test_build_binaries_propagates_assembler_failure(compiled):
+    """A build directory with no chip sub-build fails loudly rather than reporting 0."""
+    with (
+        patch(
+            "pypto.runtime.distributed_runner._assemble_chip_callables",
+            side_effect=RuntimeError("No chip-level tasks found"),
+        ),
+        pytest.raises(RuntimeError, match="No chip-level tasks found"),
+    ):
+        compiled.build_binaries()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
