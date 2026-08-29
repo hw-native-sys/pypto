@@ -52,7 +52,7 @@ from .compiled_program import (
 _META_SCHEMA = 2
 
 if TYPE_CHECKING:
-    from pypto.runtime.distributed_runner import DistributedWorker
+    from pypto.runtime.distributed_runner import DistributedWorker, ReadOnlyHostTensor
     from pypto.runtime.runner import RunConfig
 
 
@@ -481,7 +481,7 @@ class DistributedCompiledProgram:
         reset_persistent_windows: bool | None = None,
         callbacks: dict[str, Callable[..., Any]] | None = None,
         sub_worker_overrides: dict[str, Callable[..., Any]] | None = None,
-        inherited_host_tensors: Sequence[torch.Tensor] | None = None,
+        inherited_host_tensors: "Sequence[torch.Tensor | ReadOnlyHostTensor] | None" = None,
         startup_timeout_s: float | None = None,
     ) -> "DistributedWorker":
         """Prepare a reusable L3 execution handle (setup once, dispatch many).
@@ -548,7 +548,10 @@ class DistributedCompiledProgram:
                 ``MAP_PRIVATE`` backing is unsupported and may upload stale or
                 incorrect data; see :class:`DistributedWorker` for the full
                 contract and for the warning emitted when the guarantee cannot
-                be confirmed.
+                be confirmed. An entry may be wrapped in
+                :class:`~pypto.runtime.ReadOnlyHostTensor` when the backing is
+                shared but not writable, which makes ``copy_from`` into it raise
+                instead of faulting in the forked child.
             startup_timeout_s: Optional positive finite bound, in seconds, for
                 the forked worker hierarchy to report startup readiness. ``None``
                 keeps Simpler's default timeout.

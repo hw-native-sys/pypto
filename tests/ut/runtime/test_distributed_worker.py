@@ -47,6 +47,7 @@ from pypto.runtime.bench import (
 from pypto.runtime.distributed_runner import (
     DistributedRunHandle,
     DistributedWorker,
+    ReadOnlyHostTensor,
     _assemble_chip_callables,
     _clear_dfx_dispatch_dirs,
     _collect_l3_swimlane,
@@ -989,9 +990,7 @@ class TestDeviceMemoryApi:
         ptr = rt.malloc(128)
         host = (ctypes.c_ubyte * 64)()
         host_ptr = ctypes.addressof(host)
-        rt._inherited_host_spans = rt._merge_overlapping_spans(
-            ((host_ptr, host_ptr + 48), (host_ptr + 16, host_ptr + 64))
-        )
+        rt._inherited_host_spans = (((host_ptr, host_ptr + 64), False),)
 
         rt.copy_to(ptr, host_ptr, 16, dst_offset=4, src_offset=8)
         first_copy = patched_setup["worker"].copy_to.call_args
@@ -1058,6 +1057,77 @@ class TestDeviceMemoryApi:
         with pytest.raises(ValueError, match="worker_id=0"):
             rt.copy_to(ptr, ctypes.addressof(host), 8, worker_id=0)
         rt.free(ptr, worker_id=1)
+        rt.close()
+
+    def test_copy_from_with_offset_reads_a_device_sub_range(self, patched_setup):
+        """A staged D2H reads `src_offset` into `dst_host_ptr + dst_offset`."""
+        rt = DistributedWorker(_fake_compiled([_param("a", [16, 16])], []))
+        patched_setup["worker"].alloc_child_tensor.return_value = _FakeBuffer(0xDEAD0000, 128)
+        ptr = rt.malloc(128)
+        host = (ctypes.c_ubyte * 64)()
+
+        def _fill(dst_buffer, _src, **_kwargs):
+            ctypes.memset(int(dst_buffer.base), 0xAB, int(dst_buffer.nbytes))
+
+        patched_setup["worker"].copy_from.side_effect = _fill
+        rt.copy_from(ctypes.addressof(host), ptr, 16, dst_offset=8, src_offset=32)
+
+        call_args = patched_setup["worker"].copy_from.call_args
+        assert call_args.args[1] is rt._buffer_for_ptr(ptr)
+        assert call_args.kwargs["src_offset"] == 32
+        assert call_args.kwargs["nbytes"] == 16
+        # dst_offset is resolved host-side for a staged copy, so the staging buffer starts at 0
+        # and the payload lands at `dst_offset` in the caller's memory.
+        assert bytes(host[:8]) == b"\x00" * 8
+        assert bytes(host[8:24]) == b"\xab" * 16
+        assert bytes(host[24:]) == b"\x00" * 40
+        patched_setup["worker"].release_buffer.assert_called_once_with(call_args.args[0])
+        rt.free(ptr)
+        rt.close()
+
+    def test_copy_from_with_offset_checks_parameters(self, patched_setup):
+        rt = DistributedWorker(_fake_compiled([_param("a", [16, 16])], []))
+        patched_setup["worker"].alloc_child_tensor.return_value = _FakeBuffer(0xDEAD0000, 64)
+        ptr = rt.malloc(64)
+        host = (ctypes.c_ubyte * 32)()
+        bad_offset: Any = "0"
+
+        with pytest.raises(ValueError, match="dst_offset must be a non-negative int"):
+            rt.copy_from(ctypes.addressof(host), ptr, 16, dst_offset=-1)
+        with pytest.raises(ValueError, match="dst_offset must be a non-negative int"):
+            rt.copy_from(ctypes.addressof(host), ptr, 16, dst_offset=bad_offset)
+        with pytest.raises(ValueError, match="src_offset must be a non-negative int"):
+            rt.copy_from(ctypes.addressof(host), ptr, 16, src_offset=-1)
+        with pytest.raises(ValueError, match="src_offset must be a non-negative int"):
+            rt.copy_from(ctypes.addressof(host), ptr, 16, src_offset=bad_offset)
+        with pytest.raises(ValueError, match="must be a positive int"):
+            rt.copy_from(ctypes.addressof(host), ptr, 0)
+        with pytest.raises(ValueError, match="exceeds allocation size"):
+            rt.copy_from(ctypes.addressof(host), ptr, 16, src_offset=60)
+        with pytest.raises(ValueError, match="interior pointer"):
+            rt.copy_from(ctypes.addressof(host), ptr + 32, 16)
+
+        rt.free(ptr)
+        rt.close()
+
+    def test_copy_from_offsets_reach_a_named_span_without_a_second_buffer(self, patched_setup):
+        """A named D2H applies the host offset within the span's one Buffer."""
+        host = torch.zeros(16, 4, dtype=torch.float32).share_memory_()
+        rt = DistributedWorker(
+            _fake_compiled([_param("a", [4, 4])], []),
+            inherited_host_tensors=[host],
+        )
+        dev = _resident(rt, (4, 4))
+
+        rt.copy_from(host.data_ptr(), dev.data_ptr, 32, dst_offset=64, src_offset=16)
+
+        call_args = patched_setup["worker"].copy_from.call_args
+        named = call_args.args[0]
+        assert (named.base, named.nbytes) == (host.data_ptr(), host.numel() * host.element_size())
+        assert call_args.kwargs["dst_offset"] == 64
+        assert call_args.kwargs["src_offset"] == 16
+        assert call_args.kwargs["nbytes"] == 32
+        patched_setup["worker"].create_buffer.assert_not_called()
         rt.close()
 
     def test_alloc_tensor_forwards_malloc_and_copy(self, patched_setup):
@@ -3713,15 +3783,25 @@ class TestNamedInheritedHostRanges:
         assert first is second
         rt.close()
 
-    def test_overlapping_views_and_sub_ranges_reuse_one_buffer(self, patched_setup):
-        """Aliased views and sub-ranges reuse one Buffer and differ only by offset."""
+    @pytest.mark.parametrize(
+        "views",
+        [("overlapping", slice(0, 3), slice(1, 4)), ("disjoint", slice(0, 2), slice(2, 4))],
+    )
+    def test_views_of_one_storage_reuse_one_buffer(self, patched_setup, views):
+        """A listed view names its whole storage, so any set of views yields one Buffer.
+
+        The disjoint case is the one a range-overlap heuristic gets wrong: ``host[:2]`` and
+        ``host[2:]`` do not intersect, yet they are one allocation and must not be named twice.
+        """
+        _label, first_view, second_view = views
         host = torch.zeros(4, 4, dtype=torch.float32).share_memory_()
         rt = DistributedWorker(
             _fake_compiled([_param("a", [4, 4])], []),
-            inherited_host_tensors=[host[:3], host[1:]],
+            inherited_host_tensors=[host[first_view], host[second_view]],
         )
         dev = self._dev(rt)
-        half = host.numel() * host.element_size() // 2
+        nbytes = host.numel() * host.element_size()
+        half = nbytes // 2
 
         rt.copy_to(dev.data_ptr, host.data_ptr(), half)
         first_call = patched_setup["worker"].copy_to.call_args
@@ -3730,10 +3810,62 @@ class TestNamedInheritedHostRanges:
 
         first = first_call.args[1]
         second = second_call.args[1]
-        assert (first.base, first.nbytes) == (host.data_ptr(), host.numel() * host.element_size())
+        assert (first.base, first.nbytes) == (host.data_ptr(), nbytes)
         assert first is second
         assert first_call.kwargs["src_offset"] == 0
         assert second_call.kwargs["src_offset"] == half
+        rt.close()
+
+    def test_a_read_only_listing_is_named_read_and_refuses_a_read_back(self, patched_setup):
+        """A ReadOnlyHostTensor span uploads in place but is refused as a D2H destination.
+
+        One Buffer carries one access mode, so the marker is the only way to say a shared
+        backing is not writable; declaring it READWRITE would grant the child a write right
+        over memory that faults on the store.
+        """
+        host = torch.zeros(4, 4, dtype=torch.float32).share_memory_()
+        rt = DistributedWorker(
+            _fake_compiled([_param("a", [4, 4])], []),
+            inherited_host_tensors=[ReadOnlyHostTensor(host)],
+        )
+        dev = self._dev(rt)
+        nbytes = host.numel() * host.element_size()
+
+        rt.copy_to(dev.data_ptr, host.data_ptr(), nbytes)
+        named = patched_setup["worker"].copy_to.call_args.args[1]
+        assert (named.backend_kind, named.access) == ("FORK_SHM", "READ")
+        patched_setup["worker"].create_buffer.assert_not_called()
+
+        with pytest.raises(ValueError, match="ReadOnlyHostTensor"):
+            rt.copy_from(host.data_ptr(), dev.data_ptr, nbytes)
+        rt.close()
+
+    def test_one_allocation_listed_both_ways_is_refused(self, patched_setup):
+        """One allocation has one access mode, so a contradictory listing cannot be resolved."""
+        host = torch.zeros(4, 4, dtype=torch.float32).share_memory_()
+        with pytest.raises(ValueError, match="one allocation has one access mode"):
+            DistributedWorker(
+                _fake_compiled([_param("a", [4, 4])], []),
+                inherited_host_tensors=[host, ReadOnlyHostTensor(host[1:])],
+            )
+
+    def test_a_read_only_marking_leaves_other_allocations_writable(self, patched_setup):
+        """The marker is per allocation, not a mode for the whole list."""
+        weights = torch.zeros(4, 4, dtype=torch.float32).share_memory_()
+        cache = torch.zeros(4, 4, dtype=torch.float32).share_memory_()
+        rt = DistributedWorker(
+            _fake_compiled([_param("a", [4, 4])], []),
+            inherited_host_tensors=[ReadOnlyHostTensor(weights), cache],
+        )
+        dev = self._dev(rt)
+        nbytes = cache.numel() * cache.element_size()
+
+        rt.copy_from(cache.data_ptr(), dev.data_ptr, nbytes)
+        named = patched_setup["worker"].copy_from.call_args.args[0]
+        assert (named.base, named.access) == (cache.data_ptr(), "READWRITE")
+
+        with pytest.raises(ValueError, match="ReadOnlyHostTensor"):
+            rt.copy_from(weights.data_ptr(), dev.data_ptr, nbytes)
         rt.close()
 
     def test_concurrent_sub_ranges_share_one_identity_and_keep_their_offsets(self, patched_setup):
@@ -3749,7 +3881,7 @@ class TestNamedInheritedHostRanges:
             offset = host.data_ptr() + index * row
             named = rt._named_host_buffer(offset, row)
             assert named is not None
-            buffer, relative_offset = named
+            buffer, relative_offset, _read_only = named
             with lock:
                 seen.append((relative_offset, id(buffer)))
 

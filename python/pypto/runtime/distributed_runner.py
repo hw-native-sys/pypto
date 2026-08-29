@@ -1439,6 +1439,32 @@ def execute_distributed_compiled(
     return compiled(*args, config=config)
 
 
+# ``eq=False`` keeps identity semantics: a generated ``__eq__`` would compare the tensor
+# field with ``==``, which yields a tensor and raises on ``bool()`` for anything but a
+# single element. Equality of two markers is not a question worth answering anyway.
+@dataclass(frozen=True, eq=False)
+class ReadOnlyHostTensor:
+    """An ``inherited_host_tensors`` entry a worker may read but never write.
+
+    Wrap a tensor whose backing is ``MAP_SHARED`` from a read-only fd: it is genuinely
+    visible across processes — so it is worth naming in place rather than staging — and
+    still faults on a write. The allocation's Buffer is then declared ``AccessMode.READ``,
+    which makes the ABI refuse a D2H into it instead of leaving the forked child to fault
+    on the store.
+
+    Writability cannot be inferred, for the same reason visibility cannot: ``torch`` erases
+    it (``torch.from_numpy`` on a read-only array yields a writable tensor), a write probe
+    faults rather than raising, and ``/proc/self/maps`` would tie this to Linux. Marking is
+    therefore a caller guarantee, exactly like listing the tensor in the first place.
+
+    The marker governs the **named-copy** descriptor only. Dispatch arguments are named by
+    the runtime's own path (``Worker.make_tensor_arg``), which this does not reach, so
+    marking a dispatch IO buffer read-only does not stop the child from writing it.
+    """
+
+    tensor: torch.Tensor
+
+
 class DistributedWorker(Worker):
     """L3 distributed execution handle: prepare once, dispatch many.
 
@@ -1475,6 +1501,14 @@ class DistributedWorker(Worker):
     ``False`` for valid external ``MAP_SHARED`` mappings — so it warns once at
     prepare time for the tensors it cannot confirm and proceeds. Listing a tensor
     does not make it a valid direct dispatch argument.
+
+    The guarantee is made per *allocation*: a listed tensor names its whole storage,
+    so every view of one storage shares one Buffer and reaches its own bytes by
+    offset. Wrap an entry in :class:`ReadOnlyHostTensor` when the backing is shared
+    but not writable — a ``MAP_SHARED`` mapping of a read-only fd. That allocation's
+    Buffer is then declared ``READ``, and :meth:`copy_from` into it is refused
+    instead of faulting inside the forked child. Listing the same allocation both
+    read-only and writable is a ``ValueError``: one allocation has one access mode.
 
     ``callbacks`` binds a caller-supplied callable to a SubWorker by name — e.g.
     a real sampling closure. Abstract SubWorkers (declared with a ``...`` body)
@@ -1523,7 +1557,7 @@ class DistributedWorker(Worker):
         reset_persistent_windows: bool | None = None,
         callbacks: dict[str, Callable[..., Any]] | None = None,
         sub_worker_overrides: dict[str, Callable[..., Any]] | None = None,
-        inherited_host_tensors: Sequence[torch.Tensor] | None = None,
+        inherited_host_tensors: Sequence[torch.Tensor | ReadOnlyHostTensor] | None = None,
         startup_timeout_s: float | None = None,
     ) -> None:
         super().__init__()  # initialize Worker ABC state (_owned_tensors)
@@ -1534,42 +1568,8 @@ class DistributedWorker(Worker):
         self._device_buffers: dict[tuple[int, int], Any] = {}
         callbacks = _coalesce_callbacks(callbacks, sub_worker_overrides)
         reset_persistent_windows = _resolve_persistent_window_reset(persistent, reset_persistent_windows)
-        inherited = tuple(inherited_host_tensors) if inherited_host_tensors is not None else ()
-        for tensor in inherited:
-            if not isinstance(tensor, torch.Tensor):
-                raise TypeError(
-                    "DistributedWorker inherited_host_tensors entries must be torch.Tensor objects, "
-                    f"got {type(tensor).__name__}."
-                )
-            if tensor.device.type != "cpu" or not tensor.is_contiguous():
-                raise ValueError(
-                    "DistributedWorker inherited_host_tensors must be contiguous CPU tensors; "
-                    f"got device={tensor.device} shape={tuple(tensor.shape)}."
-                )
+        inherited, self._inherited_host_spans = self._resolve_inherited_host_tensors(inherited_host_tensors)
         self._inherited_host_tensors = inherited
-        # `copy_to` / `copy_from` stage through a simpler-owned shm Buffer so an ordinary
-        # post-fork tensor is a legal endpoint. That relaxation costs one full copy of the
-        # payload, which a fork-inherited range visible across processes does not need:
-        # parent and child see the same pages, so it can be named in place. Record the
-        # extents here, where the tensors are still in hand, since an address alone says
-        # nothing about its backing.
-        #
-        # Listing a tensor is the caller's guarantee that the backing is cross-process
-        # visible (see the class docstring). It is not inferred, because no portable check
-        # exists: `torch.is_shared()` answers "is this storage a torch shared-memory
-        # allocation", which is a different question. A read-only MAP_SHARED file mapping
-        # built with `mmap` + `from_numpy` is genuinely shared at the OS level and still
-        # reports False, so inference would reject exactly the case that benefits most,
-        # while reading /proc/self/maps would tie this file to Linux and the simulator also
-        # runs on macOS.
-        inherited_host_spans: tuple[tuple[int, int], ...] = tuple(
-            (
-                tensor.data_ptr(),
-                tensor.data_ptr() + tensor.numel() * tensor.element_size(),
-            )
-            for tensor in inherited
-        )
-        self._inherited_host_spans = self._merge_overlapping_spans(inherited_host_spans)
         # `is_shared()` is kept as a one-way signal: True confirms a torch-managed shared
         # backing, False is inconclusive. Warn once rather than per tensor, and never
         # reject or silently fall back to staging — falling back would hide the cost this
@@ -2274,23 +2274,90 @@ class DistributedWorker(Worker):
         return int(info.free_bytes), int(info.total_bytes)
 
     @staticmethod
-    def _merge_overlapping_spans(
-        spans: tuple[tuple[int, int], ...],
-    ) -> tuple[tuple[int, int], ...]:
-        """Canonicalize aliased spans without joining adjacent allocations."""
-        merged: list[tuple[int, int]] = []
-        for start, stop in sorted(set(spans)):
-            if stop <= start:
-                continue
-            if merged and start < merged[-1][1]:
-                previous_start, previous_stop = merged[-1]
-                merged[-1] = (previous_start, max(previous_stop, stop))
-            else:
-                merged.append((start, stop))
-        return tuple(merged)
+    def _storage_span(tensor: torch.Tensor) -> tuple[int, int]:
+        """``(start, stop)`` of the *allocation* backing *tensor*, not of the view itself.
 
-    def _named_buffer_for_span(self, host_ptr: int, nbytes: int) -> Any:
-        """Return the unique runtime Buffer object for one canonical inherited span."""
+        Every view of one storage answers with the identical span, which is what makes one
+        allocation resolve to one Buffer no matter which views the caller listed.
+        """
+        storage = tensor.untyped_storage()
+        base = int(storage.data_ptr())
+        return base, base + int(storage.nbytes())
+
+    @classmethod
+    def _resolve_inherited_host_tensors(
+        cls,
+        entries: Sequence[torch.Tensor | ReadOnlyHostTensor] | None,
+    ) -> tuple[tuple[torch.Tensor, ...], tuple[tuple[tuple[int, int], bool], ...]]:
+        """Validate the listed entries and reduce them to ``(tensors, spans)``.
+
+        `copy_to` / `copy_from` stage through a simpler-owned shm Buffer so an ordinary
+        post-fork tensor is a legal endpoint. That relaxation costs one full copy of the
+        payload, which a fork-inherited range visible across processes does not need: parent
+        and child see the same pages, so it can be named in place. The extents are recorded
+        here, while the tensors are still in hand, since an address alone says nothing about
+        its backing.
+
+        Listing a tensor is the caller's guarantee that the backing is cross-process visible
+        (see the class docstring). It is not inferred, because no portable check exists:
+        ``torch.is_shared()`` answers "is this storage a torch shared-memory allocation",
+        which is a different question. A read-only MAP_SHARED file mapping built with ``mmap``
+        + ``from_numpy`` is genuinely shared at the OS level and still reports False, so
+        inference would reject exactly the case that benefits most, while reading
+        ``/proc/self/maps`` would tie this file to Linux and the simulator also runs on macOS.
+
+        A span is one *allocation* (the tensor's storage), not the listed view's extent: the
+        allocation is the unit a Buffer names, so every view of one storage collapses to one
+        span and reaches its own bytes by offset. Recording view extents instead would make
+        the number of Buffers a function of which views the caller happened to list — two
+        disjoint slices of one storage would name it twice. Naming the storage widens the
+        guarantee from the listed view to the allocation containing it, which holds for free:
+        a storage is one mapping, so if any part of it is cross-process visible, all of it is.
+        This mirrors how the runtime's own dispatch path names a host tensor
+        (``Worker.make_tensor_arg`` memoizes per storage base, then separates views by
+        ``byte_offset``).
+        """
+        listed = tuple(entries) if entries is not None else ()
+        tensors: list[torch.Tensor] = []
+        span_read_only: dict[tuple[int, int], bool] = {}
+        for entry in listed:
+            is_marked = isinstance(entry, ReadOnlyHostTensor)
+            tensor = entry.tensor if is_marked else entry
+            if not isinstance(tensor, torch.Tensor):
+                raise TypeError(
+                    "DistributedWorker inherited_host_tensors entries must be torch.Tensor or "
+                    f"ReadOnlyHostTensor objects, got {type(entry).__name__}."
+                )
+            if tensor.device.type != "cpu" or not tensor.is_contiguous():
+                raise ValueError(
+                    "DistributedWorker inherited_host_tensors must be contiguous CPU tensors; "
+                    f"got device={tensor.device} shape={tuple(tensor.shape)}."
+                )
+            tensors.append(tensor)
+            span = cls._storage_span(tensor)
+            previous = span_read_only.get(span)
+            # One allocation, one Buffer, so one access mode. Taking the narrower would make a
+            # later copy_from fail for a range the caller did list as writable; taking the wider
+            # would discard a read-only guarantee. Neither is recoverable, so refuse instead.
+            if previous is not None and previous != is_marked:
+                raise ValueError(
+                    f"DistributedWorker inherited_host_tensors: the allocation at 0x{span[0]:x} is "
+                    "listed both read-only and writable; one allocation has one access mode."
+                )
+            span_read_only[span] = is_marked
+        return tuple(tensors), tuple(sorted(span_read_only.items()))
+
+    def _named_buffer_for_span(self, host_ptr: int, nbytes: int, *, read_only: bool) -> Any:
+        """Return the unique runtime Buffer object for one inherited allocation.
+
+        The access mode is fixed here and never revisited: one Buffer carries one canonical
+        identity, ``ImportRegistry.materialize`` refuses a second descriptor for an identity it
+        already handed out, and ``re_export`` copies access through rather than narrowing it. A
+        span therefore cannot be READ for uploads and READWRITE for read-backs, so the default is
+        the writable one a bidirectional span needs, and only a span the caller explicitly marked
+        :class:`ReadOnlyHostTensor` keeps READ — which is what lets the ABI refuse a D2H into a
+        mapping that would fault on the store.
+        """
         from simpler.buffer import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
             AccessMode,
             BackendKind,
@@ -2313,13 +2380,13 @@ class DistributedWorker(Worker):
                 nbytes,
                 owner,
                 self._buffer_id_seq,
-                access=AccessMode.READWRITE,
+                access=AccessMode.READ if read_only else AccessMode.READWRITE,
                 backend_kind=BackendKind.FORK_SHM,
             )
             self._named_host_buffers[key] = buffer
             return buffer
 
-    def _named_host_buffer(self, host_ptr: int, nbytes: int) -> tuple[Any, int] | None:
+    def _named_host_buffer(self, host_ptr: int, nbytes: int) -> tuple[Any, int, bool] | None:
         """Name a fork-inherited MAP_SHARED host range in place, or ``None`` to stage it.
 
         Only memory registered through ``inherited_host_tensors`` can be named at all: it
@@ -2337,16 +2404,18 @@ class DistributedWorker(Worker):
         A ``MAP_PRIVATE`` backing is unsupported here rather than handled: the child keeps
         reading its pre-fork snapshot, so the caller would upload stale bytes.
 
-        The complete registered span is always wrapped as one ``READWRITE`` Buffer. A requested
-        sub-range returns that same Buffer object plus its relative offset, which the runtime copy
-        API applies without creating another Buffer for the same memory.
+        A whole registered allocation is wrapped as one Buffer. A requested sub-range returns
+        that same Buffer object plus its offset within the allocation and whether the caller
+        marked it read-only, so the runtime copy API reaches the sub-range without a second
+        Buffer for the same memory.
         """
         end = host_ptr + nbytes
-        for start, stop in self._inherited_host_spans:
+        for (start, stop), read_only in self._inherited_host_spans:
             if host_ptr < start or end > stop:
                 continue
             span_nbytes = stop - start
-            return self._named_buffer_for_span(start, span_nbytes), host_ptr - start
+            buffer = self._named_buffer_for_span(start, span_nbytes, read_only=read_only)
+            return buffer, host_ptr - start, read_only
         return None
 
     def copy_to(
@@ -2379,7 +2448,7 @@ class DistributedWorker(Worker):
         src_ptr = int(src_host_ptr) + src_offset
         named_src = self._named_host_buffer(src_ptr, int(nbytes))
         if named_src is not None:
-            src, named_src_offset = named_src
+            src, named_src_offset, _read_only = named_src
             self._w.copy_to(
                 dst,
                 src,
@@ -2395,21 +2464,54 @@ class DistributedWorker(Worker):
         finally:
             self._w.release_buffer(host)
 
-    def copy_from(self, dst_host_ptr: int, src_dev_ptr: int, nbytes: int, *, worker_id: int = 0) -> None:
-        """D2H copy: ``nbytes`` from device *src_dev_ptr* back to host *dst_host_ptr*."""
+    def copy_from(
+        self,
+        dst_host_ptr: int,
+        src_dev_ptr: int,
+        nbytes: int,
+        *,
+        dst_offset: int = 0,
+        src_offset: int = 0,
+        worker_id: int = 0,
+    ) -> None:
+        """D2H copy: ``nbytes`` from ``src_dev_ptr + src_offset`` to ``dst_host_ptr + dst_offset``."""
         self._require_open("copy_from")
         src = self._device_buffer(src_dev_ptr, worker_id, "copy_from")
+        if not isinstance(dst_offset, int) or dst_offset < 0:
+            raise ValueError(f"dst_offset must be a non-negative int, got {dst_offset!r}")
+        if not isinstance(src_offset, int) or src_offset < 0:
+            raise ValueError(f"src_offset must be a non-negative int, got {src_offset!r}")
         if not isinstance(nbytes, int) or nbytes <= 0:
             raise ValueError(f"nbytes must be a positive int, got {nbytes!r}")
-        named_dst = self._named_host_buffer(int(dst_host_ptr), int(nbytes))
+
+        allocation_nbytes = int(src.nbytes)
+        if src_offset + nbytes > allocation_nbytes:
+            raise ValueError(
+                f"DistributedWorker.copy_from(src_offset={src_offset}, nbytes={nbytes}) exceeds "
+                f"allocation size {allocation_nbytes}"
+            )
+
+        dst_ptr = int(dst_host_ptr) + dst_offset
+        named_dst = self._named_host_buffer(dst_ptr, int(nbytes))
         if named_dst is not None:
-            dst, named_dst_offset = named_dst
-            self._w.copy_from(dst, src, dst_offset=named_dst_offset, nbytes=nbytes)
+            dst, named_dst_offset, read_only = named_dst
+            if read_only:
+                raise ValueError(
+                    f"DistributedWorker.copy_from: 0x{dst_ptr:x} lies in a host allocation listed as "
+                    "ReadOnlyHostTensor; a D2H destination must be writable."
+                )
+            self._w.copy_from(
+                dst,
+                src,
+                dst_offset=named_dst_offset,
+                src_offset=src_offset,
+                nbytes=nbytes,
+            )
             return
         host = self._w.create_buffer(nbytes)
         try:
-            self._w.copy_from(host, src)
-            ctypes.memmove(dst_host_ptr, int(host.base), nbytes)
+            self._w.copy_from(host, src, src_offset=src_offset, nbytes=nbytes)
+            ctypes.memmove(dst_ptr, int(host.base), nbytes)
         finally:
             self._w.release_buffer(host)
 

@@ -30,8 +30,8 @@ with compiled.prepare() as rt:
 | `rt.submit(compiled, x, y, z)` | 有界异步分发——返回 `DistributedRunHandle`。 |
 | `rt.alloc_tensor(shape, dtype, *, init=None)` | 分配 worker 常驻的 `DeviceTensor`。`init` 从 host 拷贝（一次性 H2D）。 |
 | `rt.free_tensor(tensor)` | 释放 `DeviceTensor`。 |
-| `rt.copy_to(dst_dev_ptr, src_host_ptr, nbytes, *, dst_offset=0, src_offset=0, worker_id=0)` | 显式 staged H2D 拷贝。`dst_offset` 和 `src_offset` 用于子区间传输：从 ``src_host_ptr + src_offset`` 拷贝到 ``dst_dev_ptr + dst_offset``。host `torch.Tensor` 源只需为 CPU 连续张量，可在 `prepare()` 后创建。 |
-| `rt.copy_from(dst_host_ptr, src_dev_ptr, nbytes, *, worker_id=0)` | 显式 staged D2H 拷贝。host `torch.Tensor` 目标只需为 CPU 连续张量，可在 `prepare()` 后创建。 |
+| `rt.copy_to(dst_dev_ptr, src_host_ptr, nbytes, *, dst_offset=0, src_offset=0, worker_id=0)` | 显式 staged H2D 拷贝。`dst_offset` 和 `src_offset` 用于子区间传输：从 `src_host_ptr + src_offset` 拷贝到 `dst_dev_ptr + dst_offset`。`dst_offset + nbytes` 必须落在 device 分配内。host `torch.Tensor` 源只需为 CPU 连续张量，可在 `prepare()` 后创建。 |
+| `rt.copy_from(dst_host_ptr, src_dev_ptr, nbytes, *, dst_offset=0, src_offset=0, worker_id=0)` | 显式 staged D2H 拷贝。`dst_offset` 和 `src_offset` 用于子区间传输：从 `src_dev_ptr + src_offset` 拷贝到 `dst_host_ptr + dst_offset`。`src_offset + nbytes` 必须落在 device 分配内。host `torch.Tensor` 目标只需为 CPU 连续张量，可在 `prepare()` 后创建。 |
 | `rt.alloc_stacked_tensor(host_w)` | 沿 dim 0 分片 `host_w`——分片 `i` 上传到卡 `i`。返回 `StackedDeviceTensor`。 |
 | `rt.free_stacked_tensor(stacked)` | 释放 `StackedDeviceTensor` 的所有分片。 |
 | `rt.copy_stacked_from(stacked, host_out)` | staged D2H 读回 CPU 连续的 `host_out`；可在 `prepare()` 后分配。 |
@@ -153,11 +153,39 @@ with compiled.prepare(
 ```
 
 这项保证针对的是可见性，因此两个方向都成立：被列入的区间既可作上传源，也可作读回目标。
-可写性交由硬件负责——以只读文件描述符建立的 `MAP_SHARED` 映射在写入时会直接触发错误，
-而不会破坏任何数据。未列入的张量，或在 `prepare()` 之后分配的张量，其行为与此前完全一致。
+未列入的张量，或在 `prepare()` 之后分配的张量，其行为与此前完全一致。
 
-被命名的上传源只授予 `READ`，只有目标才授予 `READWRITE`。这对只读映射很关键：把它
-描述为可写，等于告诉 runtime 消费者可以写一段写入即出错的内存。
+**一次分配，一个 Buffer。** 被列入的张量命名的是它的整个 *storage*，而不是你传入的那个
+视图的范围。因此同一 storage 的所有视图都归并到同一个 runtime Buffer，各自通过 offset
+访问自己的字节——同时列入 `w`、`w[:2]` 和 `w[2:]`，得到的仍然只有一个。这样 Buffer 的
+数量就取决于内存本身，而不取决于你碰巧列入了哪些视图；按视图各建一个会让同一段字节被
+命名两次，而一个 identity 只能命名一份后备内存。
+
+### 只读后备内存
+
+一个 Buffer 只带一种访问模式，且在创建时就定死，因此被列入的分配默认声明为可写——读回
+目标需要的正是这一点。当后备内存是共享但**不可写**时（典型情况是以只读文件描述符建立的
+`MAP_SHARED` 映射），把该项用 `ReadOnlyHostTensor` 包装：
+
+```python
+from pypto.runtime import ReadOnlyHostTensor
+
+with compiled.prepare(
+    inherited_host_tensors=[kv_cache, ReadOnlyHostTensor(weights)],
+) as rt:
+    ...
+```
+
+该分配的 Buffer 随之声明为 `READ`，对它执行 `copy_from` 会抛出 `ValueError`，而不是把
+写入错误留给 fork 出的子进程去触发。可写性和可见性一样无法推断——torch 会把它抹掉，写
+探测只会直接出错而非抛异常，`/proc/self/maps` 又仅限 Linux——所以标记同样是调用方作出的
+保证，与列入该列表本身性质相同。
+
+把同一个分配既列为只读又列为可写会抛出 `ValueError`：一次分配只有一种访问模式，无论
+静默取窄还是取宽都无法挽回。
+
+该标记只作用于命名拷贝的 descriptor。dispatch 参数由 runtime 自己的路径命名，不经过这里，
+因此把一个 dispatch IO buffer 标记为只读并不能阻止子进程写它。
 
 ## One-Shot vs 持久 Worker
 
