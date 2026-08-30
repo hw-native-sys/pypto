@@ -1273,13 +1273,11 @@ class TestPtoLevel3Scratch:
         [(pl.INT32, 192), (pl.UINT32, 192), (pl.INT16, 448), (pl.UINT16, 448)],
     )
     def test_a2a3_ci_scratch_is_allocated_by_width(self, dtype, expected_cols):
+        # Temporarily: #2523 level3 ci scratch disabled (pypto#2558); keep 2-arg.
+        del expected_cols
         after = self._run(self._ci_program(dtype), BackendType.Ascend910B)
         ci = self._calls(after, ir.get_op("tile.ci").name)
-        assert len(ci) == 1 and len(ci[0].args) == 3
-        tmp = cast(ir.TileType, ci[0].args[2].type)
-        assert tmp.shape == [1, expected_cols]
-        assert tmp.dtype == ir.DataType.FP32
-        assert tmp.memref is not None
+        assert len(ci) == 1 and len(ci[0].args) == 2
 
     def test_a5_and_ptoas_planner_keep_ci_implicit(self):
         a5 = self._run(self._ci_program(), BackendType.Ascend950)
@@ -1328,13 +1326,11 @@ class TestPtoLevel3Scratch:
         [(pl.FP32, pl.INT16, 1024), (pl.FP16, pl.INT16, 64), (pl.FP16, pl.INT8, 160)],
     )
     def test_a2a3_narrowing_cast_scratch(self, src_dtype, dst_dtype, expected_bytes):
+        # Temporarily: #2523 level3 tcvt scratch disabled (pypto#2558); keep 1-arg.
+        del expected_bytes
         after = self._run(self._cast_program(src_dtype, dst_dtype), BackendType.Ascend910B)
         cast_call = self._calls(after, ir.get_op("tile.cast").name)[0]
-        assert len(cast_call.args) == 2
-        tmp = cast(ir.TileType, cast_call.args[1].type)
-        assert tmp.shape == [1, expected_bytes]
-        assert tmp.dtype == ir.DataType.INT8
-        assert tmp.memref is not None
+        assert len(cast_call.args) == 1
 
     def test_non_narrowing_cast_has_no_scratch(self):
         after = self._run(self._cast_program(pl.FP32, pl.FP16), BackendType.Ascend910B)
@@ -1376,26 +1372,22 @@ class TestPtoLevel3Scratch:
         ],
     )
     def test_a2a3_narrowing_cast_scratch_branches(self, rows, cols, expected_bytes):
+        # Temporarily: #2523 level3 tcvt scratch disabled (pypto#2558).
+        del expected_bytes
         after = self._run(self._narrowing_cast_program(rows, cols, pl.FP32, pl.INT16), BackendType.Ascend910B)
         cast_call = self._calls(after, ir.get_op("tile.cast").name)[0]
-        assert len(cast_call.args) == 2
-        tmp = cast(ir.TileType, cast_call.args[1].type)
-        assert tmp.shape == [1, expected_bytes]
-        assert tmp.dtype == ir.DataType.INT8
+        assert len(cast_call.args) == 1
 
     def test_a2a3_narrowing_cast_scratch_rows_capped_at_255(self):
+        # Temporarily: #2523 level3 tcvt scratch disabled (pypto#2558); no capacity to compare.
         after_255 = self._run(
             self._narrowing_cast_program(255, 80, pl.FP32, pl.INT16), BackendType.Ascend910B
         )
         after_400 = self._run(
             self._narrowing_cast_program(400, 80, pl.FP32, pl.INT16), BackendType.Ascend910B
         )
-
-        def scratch_bytes(prog):
-            cast_call = self._calls(prog, ir.get_op("tile.cast").name)[0]
-            return cast(ir.TileType, cast_call.args[1].type).shape[1]
-
-        assert scratch_bytes(after_255) == scratch_bytes(after_400)
+        assert len(self._calls(after_255, ir.get_op("tile.cast").name)[0].args) == 1
+        assert len(self._calls(after_400, ir.get_op("tile.cast").name)[0].args) == 1
 
     @staticmethod
     def _sort_program(*, dynamic_valid_col: bool) -> ir.Program:
@@ -1422,13 +1414,10 @@ class TestPtoLevel3Scratch:
 
     @pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
     def test_sort32_dynamic_valid_col_gets_physical_shape_scratch(self, backend_type):
+        # Temporarily: #2523 / #2559 level3 sort32 scratch disabled with ptoas v0.57.
         after = self._run(self._sort_program(dynamic_valid_col=True), backend_type)
         sort32 = self._calls(after, ir.get_op("tile.sort32").name)[0]
-        assert len(sort32.args) == 3
-        tmp = cast(ir.TileType, sort32.args[2].type)
-        assert tmp.shape == [1, 64]
-        assert tmp.dtype == ir.DataType.FP32
-        assert tmp.memref is not None
+        assert len(sort32.args) == 2
 
     @pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
     def test_sort32_static_aligned_valid_col_needs_no_scratch(self, backend_type):

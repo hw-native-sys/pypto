@@ -17,6 +17,13 @@ import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
 from pypto.runtime.runner import RunConfig
 
+pytestmark = pytest.mark.skip(
+    reason=(
+        "PTOAS temporarily pinned to v0.57 (revert #2523 level3 TMP for pypto#2558); "
+        "MX pack/layout requires PTOAS v0.60 — re-enable after tile.ci root-cause fix"
+    ),
+)
+
 MX_GROUP_SIZE = 32
 
 

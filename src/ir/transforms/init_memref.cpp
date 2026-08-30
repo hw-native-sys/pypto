@@ -1051,9 +1051,15 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
   // PTOAS level2 owns implicit-tmp materialization as part of PlanMemory. PyPTO
   // and DSA-RP instead emit fixed addresses and invoke level3. CI/TCVT scratch
   // remains restricted to A2/A3, while TSORT32 scratch is level-driven.
+  //
+  // Temporarily disabled: #2523 compiler-owned level3 scratch (tile.ci / narrowing
+  // cast / sort32) + ptoas v0.60 caused packed-prefill NaN (pypto#2558 /
+  // pypto-lib#1072). PTOAS is pinned to v0.57; do not synthesize those tmps until
+  // the 3-arg tile.ci / PIPE_S vs PIPE_V mismatch is fixed upstream.
   const MemoryPlanner planner = ctx ? ctx->GetMemoryPlanner() : MemoryPlanner::PyPTO;
-  if (handler != nullptr && (planner == MemoryPlanner::PyPTO || planner == MemoryPlanner::DsaRP)) {
-    MaterializePtoLevel3ScratchMutator materializer(handler->RequiresLevel3TmpScratch());
+  if (handler != nullptr && handler->RequiresLevel3TmpScratch() &&
+      (planner == MemoryPlanner::PyPTO || planner == MemoryPlanner::DsaRP)) {
+    MaterializePtoLevel3ScratchMutator materializer(/*materialize_a2a3_scratch=*/true);
     normalized_func = materializer.VisitFunction(normalized_func);
   }
 
