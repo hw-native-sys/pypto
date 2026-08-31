@@ -51,9 +51,10 @@ program = passes.materialize_semantic_aliases()(program)
    loop。当且仅当一个分支是 accumulator continuation 时，把另一个分支的局部
    seed、phi result、alias 和嵌套 loop carry 重定向到 reused input 的规范 `Acc`
    allocation。accumulator loop 和 sibling seed 都必须位于各自分支内，而且 target
-   在 seed 分支剩余部分必须已 dead。当分支内 loop 由 `IfStmt` 外部的 seed 驱动时，
-   该外部 seed 在 `if` 之后也不能存在绕过 phi 的独立读取；否则在 loop 不执行的
-   sibling 路径上，重定向后的 producer 会覆盖仍可观察的值。
+   在 seed 分支剩余部分必须已 dead。无论 continuation 是直接的
+   `tile.matmul_acc` 还是分支内 loop，它复用的 input 及所有 bare/metadata alias 在
+   `if` 之后都不能存在绕过 phi 的独立读取；否则在 continuation 不执行的 sibling
+   路径上，重定向后的 producer 会覆盖仍可观察的值。
 3. **规范化语义 identity chain**（`NormalizeIdentityCopyBuffersMutator`）：让 bare SSA
    copy 与 source 共享 allocation，并让每个注册的 in-place result 与其 reused input
    共享 allocation。这样可在任何 memory planner 观察 lifetime 或 PTOAS 发射 tile

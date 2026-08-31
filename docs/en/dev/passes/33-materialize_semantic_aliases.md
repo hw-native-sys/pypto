@@ -59,10 +59,11 @@ its own fresh MemRef. This pass closes that gap:
    branch's local seed, the phi result, aliases, and nested loop carry onto the
    reused input's canonical `Acc` allocation. Both the accumulator loop and the
    sibling seed must be local to their respective branches, and the target must
-   be dead in the remainder of the seed branch. When a branch-local loop is
-   seeded outside the `IfStmt`, that external seed must also have no independent
-   post-`if` read; otherwise the sibling branch would clobber an observable
-   value on the path where the loop does not execute.
+   be dead in the remainder of the seed branch. Whether the continuation is a
+   direct `tile.matmul_acc` or a branch-local loop, its reused input and every
+   bare/metadata alias must have no independent post-`if` read; otherwise the
+   sibling branch would clobber an observable value on the path where the
+   continuation does not execute.
 3. **Normalize semantic identity chains**
    (`NormalizeIdentityCopyBuffersMutator`): make bare SSA copies share their
    source allocation and make every registered in-place result share its reused

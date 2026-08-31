@@ -59,6 +59,25 @@ def _collect_allocated_tile_ranges(program: ir.Program) -> dict[str, tuple[int, 
     return ranges
 
 
+def _collect_named_tile_memrefs(program: ir.Program, names: set[str]) -> dict[str, ir.MemRef]:
+    """Collect MemRefs for named tile definitions anywhere in a function body."""
+    result: dict[str, ir.MemRef] = {}
+    function = next(iter(program.functions.values()))
+
+    class _MemRefCollector(ir.IRVisitor):
+        def visit_assign_stmt(self, stmt):  # type: ignore[override]
+            tile_type = stmt.var.type
+            if stmt.var.name_hint in names and isinstance(tile_type, ir.TileType):
+                assert tile_type.memref is not None
+                result[stmt.var.name_hint] = tile_type.memref
+            super().visit_assign_stmt(stmt)
+
+    _MemRefCollector().visit_stmt(function.body)
+    missing = names - result.keys()
+    assert not missing, f"tile definitions not found: {sorted(missing)}"
+    return result
+
+
 def _assert_if_phi_arms_write_the_phi_buffer(program: ir.Program) -> None:
     """Assert every arm of every tile-typed if-phi yields into the phi's own buffer.
 
@@ -1241,6 +1260,76 @@ class TestViewOps:
         assert members["s1"][1] == 64 and members["r1"][1] == 64
         # Each member keeps its own 64-byte size, not the target's 512.
         assert members["r0"][2] == 64 and members["r1"][2] == 64
+
+    def test_smaller_view_group_rebased_to_larger_buffer_keeps_member_windows(self):
+        """A smaller representative keeps its own extent when packed into a larger buffer."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                inp: pl.Tensor[[8, 16], pl.FP32],
+                dead_in: pl.Tensor[[16, 16], pl.FP32],
+                out_dead: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+                out: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+            ) -> pl.Tensor[[1, 16], pl.FP32]:
+                dead: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    dead_in, [0, 0], [16, 16], target_memory=pl.Mem.Vec
+                )
+                _dead_out = pl.tile.store(dead, [0, 0], out_dead)
+                src: pl.Tile[[8, 16], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    inp, [0, 0], [8, 16], target_memory=pl.Mem.Vec
+                )
+                row: pl.Tile[[1, 16], pl.FP32, pl.Mem.Vec] = pl.tile.slice(src, [1, 16], [3, 0])
+                result = pl.tile.store(row, [0, 0], out)
+                return result
+
+        After = _run_pipeline(Before)
+        ranges = _collect_named_tile_memrefs(After, {"dead", "src", "row"})
+        dead = ranges["dead"]
+        src = ranges["src"]
+        row = ranges["row"]
+        assert src.base_ is dead.base_, "the smaller group did not reuse the larger dead buffer"
+        assert src.size_ == 8 * 16 * 4
+        assert row.base_ is dead.base_
+        assert row.size_ == 16 * 4
+        assert isinstance(row.byte_offset_, ir.ConstInt)
+        assert row.byte_offset_.value == 3 * 16 * 4
+
+    def test_dynamic_view_offset_is_preserved_when_group_is_rebased(self):
+        """Rebasing changes the allocation base, not a dynamic member's relative offset."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                inp: pl.Tensor[[8, 16], pl.FP32],
+                dead_in: pl.Tensor[[16, 16], pl.FP32],
+                row_index: pl.Scalar[pl.INDEX],
+                out_dead: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+                out: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+            ) -> pl.Tensor[[1, 16], pl.FP32]:
+                dead: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    dead_in, [0, 0], [16, 16], target_memory=pl.Mem.Vec
+                )
+                _dead_out = pl.tile.store(dead, [0, 0], out_dead)
+                src: pl.Tile[[8, 16], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    inp, [0, 0], [8, 16], target_memory=pl.Mem.Vec
+                )
+                row: pl.Tile[[1, 16], pl.FP32, pl.Mem.Vec] = pl.tile.slice(src, [1, 16], [row_index, 0])
+                result = pl.tile.store(row, [0, 0], out)
+                return result
+
+        Initialized = passes.init_mem_ref()(Before)
+        before = _collect_named_tile_memrefs(Initialized, {"row"})["row"]
+        After = passes.memory_reuse()(passes.materialize_semantic_aliases()(Initialized))
+        ranges = _collect_named_tile_memrefs(After, {"dead", "src", "row"})
+        assert ranges["src"].base_ is ranges["dead"].base_
+        assert ranges["row"].base_ is ranges["dead"].base_
+        assert ranges["row"].size_ == before.size_
+        assert ir.structural_equal(ranges["row"].byte_offset_, before.byte_offset_)
 
     def test_loop_carry_retarget_keeps_slice_view_aliased(self):
         """A sub-region view must follow its input when the input is loop-carry
@@ -3973,6 +4062,118 @@ class TestTopDownRetargeter:
         After = _run_pipeline(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_failed_if_retarget_rolls_back_successful_sibling_arm(self):
+        """A declined branch must not leak rewrites planned for its sibling.
+
+        The ``then`` add can write directly into the loop-carry buffer. The
+        ``else`` reshape is an inherit-input view and deliberately refuses
+        direct retargeting. The enclosing if-retarget therefore fails as a
+        unit, and the add must retain its original allocation.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                inp: pl.Tensor[[16, 16], pl.FP32],
+                cond: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                source = pl.tile.load(inp, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+                initial = pl.tile.add(source, source)
+                for _i, (carried,) in pl.range(1, init_values=(initial,)):
+                    if cond < 1:
+                        retargetable = pl.tile.add(source, source)
+                        merged = pl.yield_(retargetable)
+                    else:
+                        blocked = pl.tile.reshape(source, [16, 16])
+                        merged = pl.yield_(blocked)
+                    loop_result = pl.yield_(merged)
+                return pl.tile.store(loop_result, [0, 0], out)
+
+        after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(Before))
+        bases = _collect_tile_memref_bases(after)
+        assert bases["retargetable"] != bases["initial"], (
+            "the successful then-arm rewrite leaked after the else-arm declined"
+        )
+
+    def test_many_loop_carries_use_the_indexed_liveness_path(self):
+        """A wide carry set exercises many liveness queries without subtree rescans."""
+        carry_count = 128
+        initializers = "\n".join(
+            f"        init_{i} = pl.tile.load(inp, [0, 0], [1, 16], target_memory=pl.Mem.Vec)"
+            for i in range(carry_count)
+        )
+        carry_names = ", ".join(f"carry_{i}" for i in range(carry_count))
+        init_names = ", ".join(f"init_{i}" for i in range(carry_count))
+        updates = "\n".join(
+            f"            next_{i} = pl.tile.add(carry_{i}, carry_{i})" for i in range(carry_count)
+        )
+        next_names = ", ".join(f"next_{i}" for i in range(carry_count))
+        result_names = ", ".join(f"result_{i}" for i in range(carry_count))
+        source = f"""
+@pl.program
+class WideCarry:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        inp: pl.Tensor[[1, 16], pl.FP32],
+        out: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+    ) -> pl.Tensor[[1, 16], pl.FP32]:
+{initializers}
+        for _i, ({carry_names}) in pl.range(1, init_values=({init_names})):
+{updates}
+            {result_names} = pl.yield_({next_names})
+        return pl.tile.store(result_0, [0, 0], out)
+"""
+
+        After = passes.materialize_semantic_aliases()(passes.init_mem_ref()(pl.parse_program(source)))
+        ranges = _collect_named_tile_memrefs(After, {"init_0", "next_0", "init_127", "next_127"})
+        assert ranges["next_0"].base_ is ranges["init_0"].base_
+        assert ranges["next_127"].base_ is ranges["init_127"].base_
+
+    def test_shared_alias_suffix_memoizes_accumulator_provenance(self):
+        """Many phis sharing progressively longer producer suffixes stay linear."""
+        chain_length = 128
+        aliases = "\n".join(
+            f"        alias_{i} = {'accumulated' if i == 0 else f'alias_{i - 1}'}"
+            for i in range(chain_length)
+        )
+        phis = "\n".join(
+            f"""        if cond < {i + 1}:
+            seed_{i} = pl.tile.matmul(sa, sb)
+            merged_{i} = pl.yield_(seed_{i})
+        else:
+            merged_{i} = pl.yield_(alias_{i})"""
+            for i in range(chain_length)
+        )
+        source = f"""
+@pl.program
+class SharedSuffix:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        lhs: pl.Tensor[[16, 64], pl.BF16],
+        rhs: pl.Tensor[[64, 64], pl.BF16],
+        cond: pl.Scalar[pl.INDEX],
+        out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+    ) -> pl.Tensor[[16, 64], pl.FP32]:
+        sa_mat = pl.tile.load(lhs, [0, 0], [16, 64], target_memory=pl.Mem.Mat)
+        sb_mat = pl.tile.load(rhs, [0, 0], [64, 64], target_memory=pl.Mem.Mat)
+        sa = pl.tile.move(sa_mat, target_memory=pl.Mem.Left)
+        sb = pl.tile.move(sb_mat, target_memory=pl.Mem.Right)
+        previous = pl.tile.matmul(sa, sb)
+        accumulated = pl.tile.matmul_acc(previous, sa, sb)
+{aliases}
+{phis}
+        return pl.tile.store(merged_{chain_length - 1}, [0, 0], out)
+"""
+
+        before = passes.init_mem_ref()(pl.parse_program(source))
+        with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
+            passes.memory_reuse()(passes.materialize_semantic_aliases()(before))
+
     def test_gating_vec_inplace_if_phi_is_not_acc_coalesced(self):
         """Gating: the accumulator coalescer is Acc-scoped. A structurally
         identical if-phi in Vec space -- ``else`` is an in-place
@@ -4119,6 +4320,171 @@ class TestTopDownRetargeter:
         # Retargeting ``seed`` onto ``initial`` is unsafe because ``initial``
         # remains independently observable after the if on the else path. The
         # remaining divergent Acc phi has no legal Acc-to-Acc repair move.
+        with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
+            _run_pipeline(Before)
+
+    def test_direct_accumulator_phi_preserves_reused_input_after_if(self):
+        """A direct ``matmul_acc`` arm cannot donate a reused input read after the phi."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 64], pl.BF16],
+                rhs: pl.Tensor[[64, 64], pl.BF16],
+                cond: pl.Scalar[pl.INDEX],
+                bypass_out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> tuple[pl.Tensor[[16, 64], pl.FP32], pl.Tensor[[16, 64], pl.FP32]]:
+                sa_mat = pl.tile.load(lhs, [0, 0], [16, 64], target_memory=pl.Mem.Mat)
+                sb_mat = pl.tile.load(rhs, [0, 0], [64, 64], target_memory=pl.Mem.Mat)
+                sa = pl.tile.move(sa_mat, target_memory=pl.Mem.Left)
+                sb = pl.tile.move(sb_mat, target_memory=pl.Mem.Right)
+                previous = pl.tile.matmul(sa, sb)
+                if cond < 1:
+                    seed = pl.tile.matmul(sa, sb)
+                    merged = pl.yield_(seed)
+                else:
+                    accumulated = pl.tile.matmul_acc(previous, sa, sb)
+                    merged = pl.yield_(accumulated)
+                bypass_result = pl.tile.store(previous, [0, 0], bypass_out)
+                result = pl.tile.store(merged, [0, 0], out)
+                return bypass_result, result
+
+        with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
+            _run_pipeline(Before)
+
+    def test_direct_accumulator_phi_preserves_stale_bare_alias_after_if(self):
+        """Bare identity remains observable even when its MemRef metadata has drifted."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 64], pl.BF16],
+                rhs: pl.Tensor[[64, 64], pl.BF16],
+                cond: pl.Scalar[pl.INDEX],
+                bypass_out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> tuple[pl.Tensor[[16, 64], pl.FP32], pl.Tensor[[16, 64], pl.FP32]]:
+                sa_mat = pl.tile.load(lhs, [0, 0], [16, 64], target_memory=pl.Mem.Mat)
+                sb_mat = pl.tile.load(rhs, [0, 0], [64, 64], target_memory=pl.Mem.Mat)
+                sa = pl.tile.move(sa_mat, target_memory=pl.Mem.Left)
+                sb = pl.tile.move(sb_mat, target_memory=pl.Mem.Right)
+                previous = pl.tile.matmul(sa, sb)
+                old_value = previous
+                if cond < 1:
+                    seed = pl.tile.matmul(sa, sb)
+                    merged = pl.yield_(seed)
+                else:
+                    accumulated = pl.tile.matmul_acc(previous, sa, sb)
+                    merged = pl.yield_(accumulated)
+                bypass_result = pl.tile.store(old_value, [0, 0], bypass_out)
+                result = pl.tile.store(merged, [0, 0], out)
+                return bypass_result, result
+
+        initialized = passes.init_mem_ref()(Before)
+        aliases: dict[str, ir.Var] = {}
+
+        class _AliasCollector(ir.IRVisitor):
+            def visit_assign_stmt(self, stmt):  # type: ignore[override]
+                if stmt.var.name_hint == "old_value":
+                    aliases[stmt.var.name_hint] = stmt.var
+                super().visit_assign_stmt(stmt)
+
+        function = initialized.get_function("kernel")
+        assert function is not None
+        _AliasCollector().visit_stmt(function.body)
+        old_alias = aliases["old_value"]
+        old_type = old_alias.type
+        assert isinstance(old_type, ir.TileType) and old_type.memref is not None
+        stale_base = ir.Var("stale_acc", ir.PtrType(), old_alias.span)
+        stale_memref = ir.MemRef(stale_base, 8192, old_type.memref.size_, old_alias.span)
+        stale_type = ir.TileType(
+            old_type.shape,
+            old_type.dtype,
+            stale_memref,
+            old_type.tile_view,
+            old_type.memory_space,
+        )
+        stale_alias = ir.Var(old_alias.name_hint, stale_type, old_alias.span)
+
+        class _DriftBareAlias(ir.IRMutator):
+            def visit_var(self, op):
+                if op is old_alias:
+                    return stale_alias
+                return super().visit_var(op)
+
+        drifted = _DriftBareAlias().visit_program(initialized)
+        with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
+            passes.memory_reuse()(passes.materialize_semantic_aliases()(drifted))
+
+    def test_direct_accumulator_phi_tracks_iter_arg_initializer_after_if(self):
+        """A carried accumulator remains in the initializer's semantic alias family."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 64], pl.BF16],
+                rhs: pl.Tensor[[64, 64], pl.BF16],
+                cond: pl.Scalar[pl.INDEX],
+                bypass_out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                sa_mat = pl.tile.load(lhs, [0, 0], [16, 64], target_memory=pl.Mem.Mat)
+                sb_mat = pl.tile.load(rhs, [0, 0], [64, 64], target_memory=pl.Mem.Mat)
+                sa = pl.tile.move(sa_mat, target_memory=pl.Mem.Left)
+                sb = pl.tile.move(sb_mat, target_memory=pl.Mem.Right)
+                previous = pl.tile.matmul(sa, sb)
+                for _i, (carried,) in pl.range(1, init_values=(previous,)):
+                    if cond < 1:
+                        seed = pl.tile.matmul(sa, sb)
+                        merged = pl.yield_(seed)
+                    else:
+                        accumulated = pl.tile.matmul_acc(carried, sa, sb)
+                        merged = pl.yield_(accumulated)
+                    _bypass_result = pl.tile.store(previous, [0, 0], bypass_out)
+                    loop_result = pl.yield_(merged)
+                result = pl.tile.store(loop_result, [0, 0], out)
+                return result
+
+        with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
+            _run_pipeline(Before)
+
+    def test_direct_accumulator_phi_preserves_metadata_alias_after_if(self):
+        """A pre-if metadata view remains an independent observer of the reused input."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 64], pl.BF16],
+                rhs: pl.Tensor[[64, 64], pl.BF16],
+                cond: pl.Scalar[pl.INDEX],
+                bypass_out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> tuple[pl.Tensor[[16, 64], pl.FP32], pl.Tensor[[16, 64], pl.FP32]]:
+                sa_mat = pl.tile.load(lhs, [0, 0], [16, 64], target_memory=pl.Mem.Mat)
+                sb_mat = pl.tile.load(rhs, [0, 0], [64, 64], target_memory=pl.Mem.Mat)
+                sa = pl.tile.move(sa_mat, target_memory=pl.Mem.Left)
+                sb = pl.tile.move(sb_mat, target_memory=pl.Mem.Right)
+                previous = pl.tile.matmul(sa, sb)
+                old_value = pl.tile.set_validshape(previous, 16, 64)
+                if cond < 1:
+                    seed = pl.tile.matmul(sa, sb)
+                    merged = pl.yield_(seed)
+                else:
+                    accumulated = pl.tile.matmul_acc(previous, sa, sb)
+                    merged = pl.yield_(accumulated)
+                bypass_result = pl.tile.store(old_value, [0, 0], bypass_out)
+                result = pl.tile.store(merged, [0, 0], out)
+                return bypass_result, result
+
         with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
             _run_pipeline(Before)
 
