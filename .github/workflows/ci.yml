@@ -1083,9 +1083,24 @@ jobs:
     # TEST MODE: keep the device runner so DEVICE_ID/DEVICE_ID exist and pin
     # task-submit to that card (validates the new compile-card-free + task-submit
     # execute flow deterministically). FLIP TO PROD: change this to
-    # `[self-hosted, linux, cpu]` and drop --task-submit-device below so
+    # `[self-hosted, linux, x64, cpu]` and drop --task-submit-device below so
     # cases borrow any free card via `--device auto`.
-    runs-on: [self-hosted, linux, npu]
+    #
+    # Pinned to x86_64 to free the aarch64 npu box for the jobs that can only
+    # run there. Since #2525 the `npu` label spans an aarch64 box (runners
+    # `npu-N`) and an x86_64 one (the `*-npu-a2a3-N` instances), and both
+    # `dist-system-tests` and `pypto-lib-model` are pinned to `arm64, npu` (see
+    # their own comments) — so every run of this job that lands on aarch64 takes
+    # that box away from them. `x64` is the label the runner application applies
+    # on its own (`X64`; label matching is case-insensitive) — the same pair
+    # `prebuild-wheels` matrixes over.
+    #
+    # This is a scheduling pin, not a health one, and unlike `dist-system-tests`
+    # it is not working around anything: over the 120 most recent ci.yml runs
+    # both jobs go red on BOTH halves at indistinguishable rates (aarch64 4 red
+    # / 55, x86_64 9 red / 87), failing the same batched step. Lift it if the
+    # arm64 pins it makes room for are lifted.
+    runs-on: [self-hosted, linux, x64, npu]
     defaults:
       run:
         working-directory: st-checkout
@@ -1202,9 +1217,24 @@ jobs:
       contents: read
     # TEST MODE: keep the device runner so DEVICE_ID exists and pin task-submit
     # to that card. FLIP TO PROD: change this to
-    # `[self-hosted, linux, cpu]` and drop --task-submit-device / the
+    # `[self-hosted, linux, x64, cpu]` and drop --task-submit-device / the
     # explicit --device below so cases borrow any free card via `--device auto`.
-    runs-on: [self-hosted, linux, npu]
+    #
+    # Pinned to x86_64 to free the aarch64 npu box for the jobs that can only
+    # run there. Since #2525 the `npu` label spans an aarch64 box (runners
+    # `npu-N`) and an x86_64 one (the `*-npu-a2a3-N` instances), and both
+    # `dist-system-tests` and `pypto-lib-model` are pinned to `arm64, npu` (see
+    # their own comments) — so every run of this job that lands on aarch64 takes
+    # that box away from them. `x64` is the label the runner application applies
+    # on its own (`X64`; label matching is case-insensitive) — the same pair
+    # `prebuild-wheels` matrixes over.
+    #
+    # This is a scheduling pin, not a health one, and unlike `dist-system-tests`
+    # it is not working around anything: over the 120 most recent ci.yml runs
+    # both jobs go red on BOTH halves at indistinguishable rates (aarch64 4 red
+    # / 55, x86_64 9 red / 87), failing the same batched step. Lift it if the
+    # arm64 pins it makes room for are lifted.
+    runs-on: [self-hosted, linux, x64, npu]
     defaults:
       run:
         working-directory: st-direct-checkout
