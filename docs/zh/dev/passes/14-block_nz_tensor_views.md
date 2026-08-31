@@ -97,14 +97,16 @@ wt: pl.Tile[[256, 512], pl.INT8, pl.Mem.Mat] =
 `IsProvableMultipleOf`（`tensor_view_semantics.h`）会沿着本 pass 一次只读扫描收集到的
 两类绑定往回走：
 
-| 绑定形式 | 证明依据 |
-| -------- | -------- |
-| `AssignStmt`（`n0 = nb * 256`） | 乘积中的某个因子是倍数 |
-| `ForStmt`（`for k0 in pl.pipeline(512, 4096, 512)`） | `start` 与 `step` 同时是倍数 |
-| `ConstInt` | 该值本身是倍数 |
+| 绑定形式 | 是轴因子的倍数 | 非负 |
+| -------- | -------------- | ---- |
+| `AssignStmt`（`n0 = nb * 256`） | 乘积中的某个因子是倍数 | 两个因子都非负 |
+| `ForStmt`（`for k0 in pl.pipeline(512, 4096, 512)`） | `start` 与 `step` 同时是倍数 | `start` 与 `step` 同时非负 |
+| `tile.get_block_idx` / `tile.get_block_num` | —— | lane 编号不可能为负 |
+| `ConstInt` | 该值本身是倍数 | 该值 `>= 0` |
 
-在此基础上，和、差与乘积可以组合。因此催生该特性的 grouped-matmul 权重路径现在可以
-编译：
+在此基础上，和与乘积可以组合；差能证明整除性但无法证明符号，因此被拒绝。**两列必须
+同时成立**——见[为什么符号也要证明](#为什么符号也要证明)。因此催生该特性的
+grouped-matmul 权重路径现在可以编译：
 
 ```python
 for nb in pl.spmd(N // N_TILE):
@@ -137,6 +139,18 @@ x * (256 / 16)   ==  268435456    # 重组后：不回绕，读到错误的 frac
 
 另有一处限制是刻意保留的：`IterArg` 永远不会被解析——它的值每次迭代都在变，无论是初值
 还是为它记录的任何绑定，都无法描述某一次使用真正看到的值。
+
+#### 为什么符号也要证明
+
+只证明整除性并不足以保证坐标安全。`n0 = -16` 是 16 的整数倍，而 `FloorDiv(n0, 16)`
+等于 `-1`；codegen 随后会把 `pto.partition_view` 上的负 offset **钳位**到 0 而不是报错，
+于是这次 load 会读到 fractal 0 并返回静默错误的数据——正是 [#2543] 为行索引修掉的那种
+形态。
+
+常量路径本来就会拒绝负的字面量，所以如果符号形式只证明整除性，就会出现同一个值写成
+字面量被拦下、绑定成名字后却被放行的矛盾。`IsProvableNonNegative` 补上了这个缺口。
+
+[#2543]: https://github.com/hw-native-sys/pypto/pull/2543
 
 目标 `TileType` **原样保留**：GM 分区变成 rank-(r+2)，而 tile 保持逻辑 2-D 操作数。
 因此该 load 使用显式类型的 `Call` 构造函数重建，而不是 `OpRegistry::Create`——后者
@@ -172,8 +186,9 @@ pto.tload ins(%w_pview : !pto.partition_tensor_view<16x16x16x32xi8>)
 | `shape[-1] % c0 != 0` | 拒绝——不完整的 C0 线没有表示 |
 | `shape[-2]` / `shape[-1]` 为动态维 | 拒绝——无法静态证明整除 |
 | 切片偏移未对齐到分形边界 | 拒绝——没有分块表示 |
-| 末尾切片偏移为符号形式且对齐可证明 | 映射——见[符号形式的末尾 offset](#符号形式的末尾-offset) |
+| 末尾切片偏移为符号形式且对齐与符号均可证明 | 映射——见[符号形式的末尾 offset](#符号形式的末尾-offset) |
 | 末尾切片偏移为符号形式但对齐无法证明 | 拒绝——绝不基于「大概是对齐的」去做除法 |
+| 末尾切片偏移为符号形式但符号无法证明 | 拒绝——负 offset 在 partition view 上会被钳位而不是报错 |
 | rank < 2 | 拒绝 |
 | `target_memory != Mat`（或缺省） | 拒绝——NZ→NZ 是 cube 操作数路径 |
 | `tile.load` 之外的消费者 | 拒绝——此处 NZ 是只读的 |

@@ -634,6 +634,37 @@ def test_rejects_a_slice_offset_whose_alignment_cannot_be_proven():
         _run(program)
 
 
+def test_rejects_a_slice_offset_whose_sign_cannot_be_proven():
+    """Divisibility is not enough — the offset must also be provably non-negative.
+
+    `nb * 256 - 256` is a clean multiple of 16 and is negative on the first
+    block. A negative offset is *clamped* to 0 at `pto.partition_view` rather
+    than rejected, so it would read fractal 0 and return silently wrong data —
+    the shape #2543 fixed for row indices. A literal `-16` is already refused by
+    the constant path, so accepting this one would mean the same value is caught
+    written inline and waved through once bound to a name.
+    """
+
+    @pl.jit
+    def _maybe_negative(
+        x: pl.Tensor[[64, 512], pl.INT8],
+        w: pl.Tensor[[512, 512], pl.INT8, pl.NZ],
+        out: pl.Out[pl.Tensor[[64, 256], pl.INT32]],
+    ):
+        for nb in pl.spmd(2, name_hint="nz_maybe_neg"):
+            n0 = nb * 256 - 256  # a multiple of 16, but negative when nb == 0
+            xt = pl.slice(x, [64, 512], [0, 0])
+            wt = w[n0 : n0 + 256, 0:512]
+            acc = pl.matmul(xt, wt, b_trans=True, out_dtype=pl.INT32)
+            out[0:64, 0:256] = pl.reshape(acc, [64, 256])
+        return out
+
+    _, _, tm, sv, sd, dyn = _maybe_negative._bind_args_from_signature({})
+    program = _maybe_negative._compile_to_program(tm, sv, sd, dyn, pl)
+    with pytest.raises(ValueError, match=r"offset on shape\[-2\] to be non-negative"):
+        _run(program)
+
+
 def test_rejects_a_loop_variable_whose_step_breaks_alignment():
     """A loop variable is only divisible when *both* its start and step are.
 

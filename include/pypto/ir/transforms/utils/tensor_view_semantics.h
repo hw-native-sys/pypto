@@ -210,6 +210,12 @@ struct NzOffsetFacts {
   /// exact structural quotient (nothing in the IR names its trip count), so the
   /// property is the only thing that licenses dividing it.
   std::function<bool(const VarPtr&, int64_t)> is_multiple_of;
+  /// Whether a ``Var`` is non-negative by construction. Two sources qualify: a
+  /// loop variable whose start and step are both non-negative, and a variable
+  /// bound to an operator whose result cannot be negative (the SPMD block
+  /// index). The second is an *operator* fact, which is why the owning pass
+  /// supplies it rather than this header deciding it structurally.
+  std::function<bool(const VarPtr&)> is_non_negative;
 };
 
 /// Node-visit allowance for one ``IsProvableMultipleOf`` walk.
@@ -282,6 +288,50 @@ inline bool IsProvableMultipleOf(const ExprPtr& expr, int64_t divisor, const NzO
   return false;
 }
 
+/// Whether every runtime value of ``expr`` is non-negative.
+///
+/// Divisibility alone does not make a blocked coordinate safe. ``n0 = -16`` is
+/// a perfectly good multiple of 16, and ``FloorDiv(n0, 16)`` is ``-1``; codegen
+/// then clamps a negative ``pto.partition_view`` offset to 0 rather than
+/// failing, so the load silently reads fractal 0 instead of reporting anything.
+/// That is the same silent-wrong-data shape #2543 fixed for row indices. A
+/// literal ``-16`` is already rejected by the constant path, so without this a
+/// negative offset would be caught inline and waved through once bound to a
+/// name.
+///
+/// ``Sub`` is deliberately absent: ``a - b`` is negative whenever ``b > a``,
+/// and nothing here bounds either side. A difference is therefore refused, even
+/// though its divisibility is provable.
+inline bool IsProvableNonNegative(const ExprPtr& expr, const NzOffsetFacts& facts, int* budget) {
+  if (!expr || --*budget < 0) return false;
+
+  if (auto const_expr = As<ConstInt>(expr)) return const_expr->value_ >= 0;
+
+  // Both operands non-negative implies the product and the sum are too. The
+  // converse cases (two negatives multiplying to a positive) are not worth
+  // proving: refusing them costs nothing real.
+  if (auto mul = As<Mul>(expr)) {
+    return IsProvableNonNegative(mul->left_, facts, budget) &&
+           IsProvableNonNegative(mul->right_, facts, budget);
+  }
+
+  if (auto add = As<Add>(expr)) {
+    return IsProvableNonNegative(add->left_, facts, budget) &&
+           IsProvableNonNegative(add->right_, facts, budget);
+  }
+
+  if (auto var = As<Var>(expr)) {
+    if (facts.is_non_negative && facts.is_non_negative(var)) return true;
+    if (facts.definition) {
+      if (auto def = facts.definition(var)) {
+        return IsProvableNonNegative(def, facts, budget);
+      }
+    }
+  }
+
+  return false;
+}
+
 /// Map logical offsets ``[..., r0, c0off]`` into the blocked NZ coordinate
 /// system ``[..., c0off/c0, r0/16, 0, 0]`` produced by ``BlockNzShape``.
 ///
@@ -307,6 +357,9 @@ inline std::vector<ExprPtr> BlockNzOffsets(const std::vector<ExprPtr>& offsets, 
           << ", got " << const_offset->value_ << ".";
       return std::make_shared<ConstInt>(const_offset->value_ / divisor, DataType::INDEX, span);
     }
+    // Both halves of the constant path's "non-negative multiple" contract have
+    // to be re-proven for a symbolic offset, or the same value would be
+    // rejected written inline and accepted once bound to a name.
     int budget = kNzDivideStepBudget;
     CHECK_SPAN(IsProvableMultipleOf(offset, divisor, facts, &budget), span)
         << "NZ layout requires the slice offset on shape[" << axis << "] to be a multiple of " << unit
@@ -314,6 +367,15 @@ inline std::vector<ExprPtr> BlockNzOffsets(const std::vector<ExprPtr>& offsets, 
         << "start and step are both multiples of " << unit
         << ", and any sum, difference or constant multiple built from those. Slice on a " << unit
         << "-aligned boundary, or annotate the tensor as pl.ND.";
+    int sign_budget = kNzDivideStepBudget;
+    CHECK_SPAN(IsProvableNonNegative(offset, facts, &sign_budget), span)
+        << "NZ layout requires the slice offset on shape[" << axis
+        << "] to be non-negative, and this one cannot be proven to be. A negative offset is clamped to 0 "
+        << "at the partition view rather than rejected, so it would read the wrong fractal silently. "
+        << "Provable forms are a non-negative constant, the SPMD block index, a loop variable whose "
+        << "start and step are both non-negative, and any sum or product built from those — note that a "
+        << "difference never qualifies. Slice from a non-negative offset, or annotate the tensor as "
+        << "pl.ND.";
     // Divide the offset's *result*, never its arithmetic: the expression keeps
     // its own dtype and wraparound behaviour, and only the value it produces is
     // divided. See ``IsProvableMultipleOf`` for why re-association is unsound.

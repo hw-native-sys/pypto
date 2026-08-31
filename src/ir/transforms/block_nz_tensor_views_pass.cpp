@@ -69,6 +69,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -201,6 +202,16 @@ class NzOffsetFactStore {
       const auto& [start, step] = it->second;
       return start % divisor == 0 && step % divisor == 0;
     };
+    facts.is_non_negative = [this](const VarPtr& var) {
+      // The SPMD block index is a lane number, so it is never negative.
+      if (non_negative_vars_.count(var) != 0) return true;
+      auto it = loop_bindings_.find(var);
+      if (it == loop_bindings_.end()) return false;
+      // ``start + i * step`` only stays at or above ``start`` while the step
+      // does not walk downwards, so both have to be non-negative.
+      const auto& [start, step] = it->second;
+      return start >= 0 && step >= 0;
+    };
     return facts;
   }
 
@@ -215,6 +226,14 @@ class NzOffsetFactStore {
       // expression, and keeping them out bounds the map to the index IR.
       if (op->var_ && As<ScalarType>(op->var_->GetType())) {
         store_->definitions_.emplace(op->var_, op->value_);
+        // A block index or block count is a lane number, so it is non-negative
+        // by construction. That is an operator fact rather than a structural
+        // one, which is why it is recorded here rather than derived by the
+        // geometry helpers.
+        auto call = As<Call>(op->value_);
+        if (call && (IsOp(call, "tile.get_block_idx") || IsOp(call, "tile.get_block_num"))) {
+          store_->non_negative_vars_.insert(op->var_);
+        }
       }
       IRVisitor::VisitStmt_(op);
     }
@@ -234,6 +253,7 @@ class NzOffsetFactStore {
 
   std::unordered_map<VarPtr, ExprPtr> definitions_;
   std::unordered_map<VarPtr, std::pair<int64_t, int64_t>> loop_bindings_;
+  std::unordered_set<VarPtr> non_negative_vars_;
 };
 
 /// Rewrite the elements of a ``MakeTuple`` coordinate argument into blocked NZ
