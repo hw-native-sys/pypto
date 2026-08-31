@@ -431,7 +431,10 @@ class GraphBodyChecker : public IRVisitor {
       return;
     }
     if (!IsOp(op, "tensor.create")) return;
-    auto tensor = As<TensorType>(op->GetType());
+    // `AsTensorTypeLike` for the same reason the pass uses it, and for the same
+    // reason the boundary-parameter check above does: it is the test codegen
+    // applies when deciding what a tensor is.
+    auto tensor = AsTensorTypeLike(op->GetType());
     if (!tensor) return;
     for (const auto& extent : tensor->shape_) {
       if (IsLiteralScalarExpr(extent)) continue;

@@ -756,7 +756,15 @@ class RegionAllocationChecker : public IRVisitor {
     // Checked on the *result* type rather than the call arguments: the shape
     // arrives as one list-shaped operand, and the extents are what end up in the
     // TensorCreateInfo the recording copies.
-    auto tensor = As<TensorType>(op->GetType());
+    //
+    // `AsTensorTypeLike`, not `As<TensorType>`, to match the test codegen applies
+    // to the same create (`ShapeDependsOnLocalVars`). `GraphNodeCounter` charges
+    // every create to the shared batch on the strength of this rejection; one
+    // that slipped past here but read as shape-dependent to codegen would take
+    // its own node, and the region would be under-counted. `tensor.create` only
+    // deduces a plain TensorType today, so the two spellings select the same
+    // creates — they are kept identical so that stays true.
+    auto tensor = AsTensorTypeLike(op->GetType());
     if (!tensor) return;
     for (const auto& extent : tensor->shape_) {
       CHECK_SPAN(IsLiteralScalarExpr(extent), op->span_)
