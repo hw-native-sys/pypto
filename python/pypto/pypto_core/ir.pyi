@@ -3327,6 +3327,39 @@ def get_op_write_channel(op_name: str) -> WriteChannel | None:
         Exception: If operator is not registered
     """
 
+class LaneInvariantArg(enum.Enum):
+    """Why an argument carries no lane-indexed data under automatic AIV splitting.
+
+    Declared only for the arguments an operator's own ``f_deduce_type`` cannot
+    speak about; ``LowerAutoVectorSplit`` decides every other operand by
+    re-deducing the halved call. See ``docs/en/dev/passes/21-lower_auto_vector_split.md``.
+    """
+
+    Scratch = ...
+    """Hardware workspace. Full width and halved are both correct."""
+
+    IndexAddressedSource = ...
+    """Lookup table read at absolute indices. Only full width is correct."""
+
+    AbsoluteIndexedDestination = ...
+    """Destination written at absolute indices. Only full width is correct."""
+
+def get_op_lane_invariant_arg(op_name: str, arg_index: int) -> LaneInvariantArg | None:
+    """Why one positional argument carries no lane-indexed data.
+
+    Args:
+        op_name: Name of the operator
+        arg_index: Positional argument index
+
+    Returns:
+        The declared kind, or None when the operator did not declare this
+        argument — automatic AIV splitting then treats it as per-lane data
+        whenever type deduction cannot decide for itself.
+
+    Raises:
+        Exception: If operator is not registered
+    """
+
 def get_op_output_arity(op_name: str) -> int:
     """Number of values an operator produces.
 

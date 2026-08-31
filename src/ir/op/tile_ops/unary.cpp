@@ -273,6 +273,11 @@ REGISTER_OP("tile.rsqrt")
     // writing the output, so the output must not share a buffer with either
     // (same constraint as tile.recip).
     .not_inplace_safe()
+    // NOT declared lane-invariant: DeduceTileRsqrtType requires tmp to match the
+    // input's rank and every dimension, so a full-width tmp beside a halved input
+    // is already rejected by the auto-split pass's type-consistency check. A
+    // declaration here could never be reached, and would read as a contract the
+    // operator itself does not grant.
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRsqrtType(args, kwargs, "tile.rsqrt");
@@ -290,6 +295,7 @@ REGISTER_OP("tile.cast")
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     .forbid_output_alias(1)
+    .set_lane_invariant_arg(1)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileCastType(args, kwargs, "tile.cast");

@@ -18,6 +18,7 @@ import pytest
 from pypto import DataType, InternalError, backend, ir, passes
 from pypto.backend import BackendType
 from pypto.ir import IRBuilder
+from pypto.ir.instruments import make_roundtrip_instrument
 from pypto.ir.op import tensor as tensor_ops
 from pypto.ir.op import tile as tile_ops
 from pypto.language.parser.text_parser import parse
@@ -6499,22 +6500,26 @@ class TestConvertCrossCoreSplitOps:
         # LowerAutoVectorSplit rewrites into tile.aic_gather. Built at the tile
         # level for the same reason as the shard oracle above.
         #
-        # The gather source is VECTOR-PRODUCED (tile.add), not a parameter: the
+        # The gather source is VECTOR-PRODUCED (load -> add), not a parameter: the
         # pass's precondition is that the V->C boundary source has already been
         # halved by the affinity gate, so the gather doubles HALF -> FULL. Sourcing
-        # it from a param instead would leave it full-width and over-double
-        # ([256, 128] -> [512, 128]) while the placement move kept its original
-        # [256, 128] result type — an ill-typed move that misrepresents the pass.
-        # Hence the [256, 128] param: add halves it to the [128, 128] per-lane
-        # half, and the gather doubles that back to the [256, 128] FULL tile the
-        # explicit path also produces.
+        # it from a full-width Vec param instead is out of contract — nothing
+        # inside the region partitions it, so halving the add's result alone would
+        # emit tile.add([256, 128], [256, 128]) -> [128, 128], and the pass now
+        # rejects that (see
+        # test_lower_auto_vector_split.py::test_vector_op_rejects_unsharded_full_width_operand).
+        # Hence the [256, 128] tensor + tile.load: the load halves to the
+        # [128, 128] per-lane half, add carries it, and the gather doubles that
+        # back to the [256, 128] FULL tile the explicit path also produces.
         #
         # The gathered tile is then CONSUMED (move -> Left, matmul, store of the
         # Acc result — tile.store takes only {Vec, Acc}, never Mat). Leaving it
         # dead would let a future DCE drop the synthesized gather.
-        vec = ir.Var("vec", ir.TileType([256, 128], DataType.FP32, None, None, MemorySpace.Vec), span)
+        vec_t = ir.Var("vec_t", ir.TensorType([256, 128], DataType.FP32), span)
         rhs = ir.Var("rhs", ir.TileType([128, 128], DataType.FP32, None, None, MemorySpace.Right), span)
         out_0 = ir.Var("out_0", ir.TensorType([256, 128], DataType.FP32), span)
+        load = tile_ops.load(vec_t, [0, 0], [256, 128], [256, 128], target_memory=MemorySpace.Vec, span=span)
+        vec = ir.Var("vec", load.type, span)
         add = tile_ops.add(vec, vec, span)
         vec_h = ir.Var("vec_h", add.type, span)
         move = tile_ops.move(vec_h, MemorySpace.Mat, span=span)
@@ -6529,13 +6534,14 @@ class TestConvertCrossCoreSplitOps:
         auto_func = ir.Function(
             "split_auto",
             [
-                (vec, ir.ParamDirection.In),
+                (vec_t, ir.ParamDirection.In),
                 (rhs, ir.ParamDirection.In),
                 (out_0, ir.ParamDirection.Out),
             ],
             [out_0.type],
             ir.SeqStmts(
                 [
+                    ir.AssignStmt(vec, load, span),
                     ir.AssignStmt(vec_h, add, span),
                     ir.AssignStmt(gathered, move, span),
                     ir.AssignStmt(left, to_left, span),
@@ -6550,17 +6556,17 @@ class TestConvertCrossCoreSplitOps:
             attrs={"split": ir.SplitMode.UP_DOWN},
         )
         auto_program = ir.Program([auto_func], "auto", span)
-        # Property verification stays ON; only the print->parse roundtrip is dropped.
-        # LowerAutoVectorSplit halves the `tile.add` RESULT to the per-lane [128, 128]
-        # but leaves its operand `vec` at the full [256, 128] param width, so the pass
-        # output is not re-parsable ("annotation for 'vec_h' has shape dimension
-        # 0 = 128 but expression has shape dimension 0 = 256"). That is the same V->C
-        # boundary defect family documented in test_lower_auto_vector_split.py; this
-        # test only compares the resulting `tile.aic_gather` TYPE against the explicit
-        # path, which is unaffected. Tracked by hw-native-sys/pypto#2203 — re-enable
-        # the roundtrip once the pass shards or rejects a full-width source instead
-        # of silently halving only the result.
-        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+        # Property verification AND the print->parse roundtrip are both on: every
+        # value the halving touches is lane-local here, so the pass output is
+        # well-typed and re-parsable. The roundtrip is what caught the defect this
+        # fixture used to encode (a halved result over a full-width operand), so it
+        # stays enabled to keep that regression visible.
+        with passes.PassContext(
+            [
+                passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER),
+                make_roundtrip_instrument(),
+            ]
+        ):
             auto_lowered = passes.lower_auto_vector_split()(auto_program)
         auto_call = _find_first_call_to(
             _require_function(auto_lowered, "split_auto"), ir.get_op("tile.aic_gather").name

@@ -340,6 +340,23 @@ TransposeSplitHazard FindTransposeSplitHazard(const StmtPtr& body, int split_dim
  *        keeps the default box partition.
  * @return The rewritten statement list.
  */
+/// Propagate split tracking from each iter_arg's init value onto the carry
+/// itself, rebuilding its type at the per-lane extent. Call BEFORE lowering the
+/// body: an operation on an untracked full-width carry is otherwise reported as
+/// carrying a full-width operand even though its init was correctly halved.
+std::vector<IterArgPtr> RepairIterArgs(const std::vector<IterArgPtr>& iter_args,
+                                       std::unordered_map<const Var*, TileInfo>& tile_vars,
+                                       std::unordered_map<const Var*, VarPtr>& var_replacements,
+                                       const ExprPtr& subblock_idx, const ExprPtr& lane_stride);
+
+/// Give each loop-exit return_var the tile info of its iter_arg, so a later
+/// tile.store on it gets the per-lane offset. Call AFTER lowering the body.
+std::vector<VarPtr> RepairReturnVars(const std::vector<VarPtr>& return_vars,
+                                     const std::vector<IterArgPtr>& new_iter_args,
+                                     std::unordered_map<const Var*, TileInfo>& tile_vars,
+                                     std::unordered_map<const Var*, VarPtr>& var_replacements,
+                                     const ExprPtr& subblock_idx, const ExprPtr& lane_stride);
+
 std::vector<StmtPtr> ProcessStmts(const std::vector<StmtPtr>& stmts, SplitMode mode, int split_dim,
                                   std::unordered_map<const Var*, TileInfo>& tile_vars, bool is_aiv,
                                   const ExprPtr& subblock_idx,

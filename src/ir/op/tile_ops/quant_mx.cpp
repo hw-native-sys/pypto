@@ -454,6 +454,7 @@ REGISTER_OP("tile.tmov_x2zz")
     .set_arg_effect(1, ArgEffect::Write)
     .not_inplace_safe()
     .functional_execution_memory_access()
+    .set_lane_invariant_arg(1)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileTMovX2ZzType(args, kwargs);

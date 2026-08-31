@@ -1648,6 +1648,10 @@ REGISTER_OP("tile.ci")
     // InitMemRef never synthesizes this operand for A5.
     .forbid_output_alias(2)
     .set_output_memory(MemorySpace::Vec)
+    // NOT declared lane-invariant, for two independent reasons: automatic AIV
+    // splitting refuses tile.ci outright (IsUnsupportedAutoSplitGenerator), and
+    // DeduceTileCiType pins the tmp extent anyway, so the type-consistency check
+    // decides it without metadata.
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileCiType(args, kwargs, "tile.ci");

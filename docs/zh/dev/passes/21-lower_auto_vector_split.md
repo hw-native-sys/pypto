@@ -500,6 +500,169 @@ out_store = pl.tile.store(popped, [0 + aiv_id * 7, 0], out_0)
 状态，而本 pass 不会合成这些调整。请将算子移到会自动折半的拆分区域之外。单元素拆分维与
 已有显式边界的半宽区域仍保持不变。
 
+折半结果的可靠性由**两个条件**共同保证。它们按下面的顺序提问，因为第一个条件凡是能开口
+的地方都已经把第二个包住了：
+
+| # | 条件 | 由谁决定 | 拦住的情形 |
+| - | ---- | -------- | ---------- |
+| 1 | 折半后的节点仍能与其自身实参通过类型检查 | 算子自己的 `f_deduce_type`，无需任何元数据 | 全宽的 `tile.add` 操作数、落在拆分轴上的 rank-1 bias、`row_argmax` 形状匹配的 `tmp`、`tile.transpose_view` 的轴置换 |
+| 2 | 条件 1 **看不见**的操作数必须 lane 局部、沿拆分轴广播、或被**显式声明** | 注册表声明 | `tile.sel` 的全宽 `mask`——其结果推导根本不读它 |
+
+### 条件 1 —— 折半后的节点仍能通过类型检查
+
+改写完实参之后，pass 会用尾部 `Substitute` 将要装入的实参（每个被跟踪的操作数换成其折半
+替身）重新推导一次结果，并把推导出的**物理** shape 与折半后的结果类型比对。valid shape 不
+参与比较：`HalveTileShape` 会按 lane 做本地化，而类型推导无法复现这一点。若重新推导对折半
+后的实参直接报错，同样计为不一致——算子正在拒绝它将要收到的那个节点。
+
+这一问是问算子本身，因此不需要任何逐算子元数据，也不会随着算子新增或契约变化而过时。
+最常见的情形正是由它拦下的：
+
+```python
+def split_auto(vec: pl.Tile[[256, 128], pl.FP32, pl.Mem.Vec], ...):
+    vec_h = pl.tile.add(vec, vec)   # 被拒绝：`vec` 是全宽的
+```
+
+`vec` 是全宽的 `InCore` 参数，区域内无人切分它。仅折半结果会产生
+`tile.add([256, 128], [256, 128]) -> [128, 128]`：该节点声明的 shape 与对其自身实参做类型
+推导的结果相矛盾，无法通过 print→parse，并会误导后续所有依据操作数重新推导类型的消费者。
+请先得到 per-lane 的一半（在区域内使用 `tile.load` / `tile.slice`，或显式写
+`pl.tile.aiv_shard`），或把两条 lane 共享的值放在区域之外。
+
+同一个检查也能正确处理形状启发式两个方向都会判错的情形。操作数与结果**从右对齐**
+（与 `BroadcastShapes` 一致）：
+
+| `tile.add([256, 128], bias)` | `UP_DOWN`（维 0） | `LEFT_RIGHT`（维 1） |
+| ---------------------------- | ----------------- | -------------------- |
+| `bias: [128]` | 接受——在拆分轴上是广播 | 拒绝——`BroadcastShapes([256, 64], [128])` 不成立 |
+| `bias: [1, 128]` | 接受——拆分轴上是单元素维 | 拒绝——其维 1 是全宽 |
+| `bias: [256, 128]` | 拒绝 | 拒绝 |
+
+它同样覆盖轴置换类算子，而后者是任何右对齐规则都描述不了的：
+
+```python
+def split_auto(data: pl.Tile[[1, 256], pl.FP32, pl.Mem.Vec], ...):
+    viewed = pl.tile.transpose_view(data)   # 被拒绝：[128, 1] 与推导出的 [256, 1] 矛盾
+```
+
+`tile.transpose_view` 交换末两维，于是折半后的 `[128, 1]` 结果与其操作数自身推导出的
+`[256, 1]` 相矛盾。与 `tile.transpose` 不同，它是纯视图，不在 `FindTransposeSplitHazard`
+的覆盖范围内（后者只匹配 `tile.transpose`）。
+
+描述 shape 的算子（`tile.full`、`tile.create`、`tile.slice`、`tile.reshape`、
+`tile.reinterpret_view`）在该检查之前就改写了自己的操作数，且全宽源在其语义中有明确含义。
+
+`tile.reshape` 与 `tile.reinterpret_view` 的这一点来自一次更早的改写：对未被跟踪的源，
+其无偏移视图会先以全宽发出，再跟一个 per-subblock 的 `tile.slice`，使每条 lane 读到自己
+的那一半，而不是两条都读第一半。该 slice 只能由**静态**的半宽 extent 物化，因此全宽源上
+动态的拆分 extent 会被直接拒绝，而不是落到普通的结果折半上。
+
+### 条件 2 —— 类型推导看不见的操作数
+
+推导器若从不读某个操作数的 extent，那么它"接受"这件事本身什么也不能说明。pass 会逐调用
+就地判定这一点，同样无需元数据：把该操作数在拆分轴上**加倍**再推导一次。若推导报错或结果
+发生变化，说明推导器**盯着**这个操作数，条件 1 已经替它做过判断；若答案不变，说明推导器对
+它**视而不见**，此时只有声明才能回答全宽是否符合契约。
+
+```python
+picked = pl.tile.sel(mask, lhs, rhs, tmp)   # `mask` 为全宽时被拒绝
+```
+
+`tile.sel` 仅从 `BroadcastShapes(lhs, rhs)` 推导结果，对 `mask` 只检查它是不是 `TileType`；
+于是"全宽 mask + 折半 lhs/rhs"能干干净净地重新推导通过——可两条 lane 都会去读 mask 的第
+`0..127` 行。`tile.sels` 是同一类陷阱：它只校验 mask *覆盖* src 的有效行，而超宽的 mask
+恰好满足覆盖。两者都只声明了自己的 `tmp` 位置，因此它们的 mask 会被拒绝。无人分类过的操作
+数一律按 lane 数据对待——这是安全的默认值。
+
+把这道关卡限定在"推导器看不见"的操作数上，正是它不越界的关键。否则每个带有合法全宽操作数
+的算子都得写一条注册表声明，只为压掉一个本就不该运行的检查——`tile.rsqrt` 就是这么给一个
+"推导器要求与输入逐维相等"的 scratch 加上声明的。
+`tests/ut/ir/operators/test_lane_invariant_arg_coverage.py` 会度量哪些操作数处于盲区，
+对推导器已经能决定、因而永远走不到的声明直接判失败，并钉住盲区集合，使新增算子或放松的
+推导器必须被分类，而不是悄悄漏过。
+
+是否需要声明的判据是*位置对应关系*：输出的第 `i` 个元素是否读取操作数的第 `i` 个元素？
+有两类操作数的答案是否。
+
+**硬件 scratch。** 全宽工作区符合契约，两条 lane 各自声明整块即可：
+
+```python
+scratch = pl.tile.create([256, 128], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+sums = pl.tile.row_sum(v, scratch)      # 接受：[128, 128] x [256, 128] -> [128, 1]
+```
+
+`tile.row_sum` 把 `tmp_tile` 定义为*至少与输入一样大*的 scratch，`DeduceTileRowReductionType`
+从不读它，并通过 `set_lane_invariant_arg(1)` 声明。`tile.create` 注册为
+`CoreAffinity::SHARED`，[亲和性门控](#亲和性门控)因此刻意让它以全宽通过、也从不跟踪它——
+仅凭 extent 匹配会把整个 rms-norm 归约形状都拒掉。
+
+它的同族 `tile.row_argmax` 需要与源*完全同形*的 tmp，`DeduceTileRowReductionType` 用
+`require_exact_tmp_shape` 强制了这一点。因此它**不带**任何声明：条件 1 自己就会拒绝全宽
+tmp，而一条声明反而会宣称一个算子并未给出的契约。
+
+**由绝对索引寻址的操作数。**
+
+```python
+indices = pl.tile.load(idx, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+picked = pl.tile.gather(src, indices, tmp)   # 接受：src 保持 [256, 128]
+```
+
+`tile.gather` 计算 `out[i] = src[indices[i]]`，结果 shape 取自 `indices`。索引值是相对
+`src` 的**绝对**偏移，因此折半 `indices` 本身就让每条 lane 拿到**输出**的各自一半，而两条
+lane 读同一张完整表——这正是正确的降级结果，而不是漏掉的切分。`tile.gatherb` 是同一形态的
+字节偏移版本。`tile.scatter` 与 `tile.scatter_update` 是其写侧对偶，用绝对索引寻址**目的地**。
+
+**声明只是"允许"操作数保持全宽，并不能"保证"它全宽。** 没有任何机制阻止该操作数自己的
+生产者被折半，而各类声明对此的含义不同——这正是注册表需要记录**是哪一类**的原因：
+
+| 类别 | 全宽 | 生产者被折半 | 例子 |
+| ---- | ---- | ------------ | ---- |
+| `Scratch` | 允许 | 无害——输入折半时 scratch 一起折半仍然成立 | `row_sum` 的 `tmp_tile` |
+| `IndexAddressedSource` | 允许 | **拒绝**——索引仍是绝对值，lane 1 读错半区 | `gather` 的 `src` |
+| `AbsoluteIndexedDestination` | 允许 | **拒绝**——同一缺陷的写侧 | `scatter` 的 `dst` |
+
+`tile.scatter` 执行 `dst.flat[indexes[i, j]] = src[i, j]`，索引是相对整块目的地的**扁平**
+偏移，因此按列写入所编码的 `i * dst_cols + c` 一旦行 stride 折半就不再成立。
+
+```python
+src = pl.tile.load(tbl, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+picked = pl.tile.gather(src, indices, tmp)   # 被拒绝：表被折半了
+```
+
+这是常规路径而非角落：张量层的 `pl.gather` 会降级为"`tile.load` 表 + `tile.gather`"，
+所以在拆分区域内做 gather 的作者默认就会撞上。上面两个条件都看不见它——操作数被跟踪，
+条件 2 会跳过；而 `tile.gather` 仅从 `indices` 推导结果，条件 1 也满足。这正是绝对索引这
+两类即便推导器*确实*读了该操作数也仍要保留声明的原因：这个性质在两个方向上都无法用类型
+表达。请把表放在拆分区域**之外**产生再传入；自动保持这类生产者全宽的重写尚未实现。
+
+绝对索引检查跑在折半路径**之前**而非与之并列，因为即使什么都没被折半，尾部的 `Substitute`
+依然会改写实参：
+
+- **结果为单元素维**时会提前返回——`indices` 为 `[1, N]` 的 gather 结果也是 `[1, N]`，
+  结果原封不动，而其下的表仍被折半；
+- **结果为 tuple** 时会整段跳过。`tile.gather_compare` 返回 `Tuple[dst, cdst]`，通用路径
+  （只理解单个 `TileType`）无法折半它——于是它会在已折半的输入之上继续声明全宽元素。
+  消费了被折半操作数的 tuple 返回算子会被拒绝；对 tuple 结果逐元素映射拆分轴尚未实现。
+
+只在*部分* arity 下才是 scratch 的位置无法声明：`tile.mrgsort_format2` 的 `tmp_or_src2`
+在 3/4 路归并里是第三个已排序输入、在 2 路里才是工作区，而 arity 由位置实参个数决定。
+这类位置保持未分类，全宽时按拒绝处理。
+
+### 循环携带值与被丢弃的轴
+
+有两处是在折半**周围**改写状态而非折半本身，它们必须遵循同样的轴映射与跟踪规则，
+否则上面的条件会误判：
+
+- **循环携带值。** `iter_arg` 继承其 init 的跟踪信息，因此 init 被折半时携带值也变为
+  lane 局部；循环出口的 `return_var` 再继承之，使后续 `tile.store` 拿到 per-lane 偏移。
+  显式路径与 AUTO 亲和性门控路径共用 `RepairIterArgs` / `RepairReturnVars`——AUTO 走的是
+  自己的遍历，够不到显式路径的 `ForStmt` 分支，缺了这一步就会把合法的 tile 累加器的携带值
+  当成全宽操作数报错。
+- **带 `drop_dims` 的 `tile.slice`。** `shape` / `offset` / `valid_shape` 按**丢弃前**的
+  rank 索引，而拆分维按结果索引。`drop_dims` 之后才擦除轴，并通过在前面补单元素轴回到 2D，
+  因此 `slice([1, 256, 128], drop_dims=[0]) -> [256, 128]` 的结果维 0 对应源的维 1。
+  在改写任何 tuple 之前，结果轴会先被反向映射回去。
+
 ## 亲和性门控
 
 仅折半**向量**工作，cube 工作保持全尺寸。亲和性由

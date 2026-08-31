@@ -192,6 +192,7 @@ REGISTER_OP("tile.row_sum")
     // TROW* reads the full input row + tmp scratch while writing the reduced
     // output, so the output must not share a buffer with either input.
     .not_inplace_safe()
+    .set_lane_invariant_arg(1)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRowReductionType(args, kwargs, "tile.row_sum");
@@ -208,6 +209,7 @@ REGISTER_OP("tile.row_max")
     // TROW* reads the full input row + tmp scratch while writing the reduced
     // output, so the output must not share a buffer with either input.
     .not_inplace_safe()
+    .set_lane_invariant_arg(1)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRowReductionType(args, kwargs, "tile.row_max");
@@ -224,6 +226,7 @@ REGISTER_OP("tile.row_min")
     // TROW* reads the full input row + tmp scratch while writing the reduced
     // output, so the output must not share a buffer with either input.
     .not_inplace_safe()
+    .set_lane_invariant_arg(1)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       auto result_type = DeduceTileRowReductionType(args, kwargs, "tile.row_min");
@@ -251,6 +254,7 @@ REGISTER_OP("tile.row_prod")
     // TROW* reads the full input row + tmp scratch while writing the reduced
     // output, so the output must not share a buffer with either input.
     .not_inplace_safe()
+    .set_lane_invariant_arg(1)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRowReductionType(args, kwargs, "tile.row_prod");
@@ -270,6 +274,7 @@ REGISTER_OP("tile.col_sum")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    .set_lane_invariant_arg(1)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       CHECK(args.size() == 1 || args.size() == 2)
@@ -341,6 +346,10 @@ REGISTER_OP("tile.row_argmax")
     // The TROWARGMAX path reads the full source/tmp while producing a smaller
     // index output, so the output must not alias an input (mirrors row_max).
     .not_inplace_safe()
+    // NOT declared lane-invariant, and it must not be: the deducer below runs
+    // with require_exact_tmp_shape, so it already rejects a full-width tmp beside
+    // a halved input. Automatic AIV splitting consults a declaration only where
+    // type deduction is silent, so one here could never be reached.
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRowReductionType(args, kwargs, "tile.row_argmax", DataType(DataType::INT32), true);
@@ -355,6 +364,10 @@ REGISTER_OP("tile.row_argmin")
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     .not_inplace_safe()
+    // NOT declared lane-invariant, and it must not be: the deducer below runs
+    // with require_exact_tmp_shape, so it already rejects a full-width tmp beside
+    // a halved input. Automatic AIV splitting consults a declaration only where
+    // type deduction is silent, so one here could never be reached.
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRowReductionType(args, kwargs, "tile.row_argmin", DataType(DataType::INT32), true);
@@ -372,6 +385,13 @@ REGISTER_OP("tile.col_argmax")
     // output must not alias an input (the tmp-bearing column variants share the
     // row-reduction in-place hazard, unlike the 1-arg col_max/col_min).
     .not_inplace_safe()
+    // NOT declared lane-invariant: argmax/argmin need a tmp shaped EXACTLY like
+    // the source (the TROWARGMAX/TCOLARGMAX kernels read the column count from
+    // the tmp/src extent), so a wider tmp walks past the valid columns and can
+    // return the wrong index per column. Unlike the row forms,
+    // DeduceTileColReductionType never inspects args[1] (gh#2615), so type
+    // deduction is BLIND here -- leaving it undeclared is what makes automatic
+    // AIV splitting treat it as per-lane data and reject a full-width one.
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       CHECK(args.size() == 2) << "The operator tile.col_argmax requires 2 arguments, but got " << args.size();
@@ -387,6 +407,13 @@ REGISTER_OP("tile.col_argmin")
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     .not_inplace_safe()
+    // NOT declared lane-invariant: argmax/argmin need a tmp shaped EXACTLY like
+    // the source (the TROWARGMAX/TCOLARGMAX kernels read the column count from
+    // the tmp/src extent), so a wider tmp walks past the valid columns and can
+    // return the wrong index per column. Unlike the row forms,
+    // DeduceTileColReductionType never inspects args[1] (gh#2615), so type
+    // deduction is BLIND here -- leaving it undeclared is what makes automatic
+    // AIV splitting treat it as per-lane data and reject a full-width one.
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       CHECK(args.size() == 2) << "The operator tile.col_argmin requires 2 arguments, but got " << args.size();

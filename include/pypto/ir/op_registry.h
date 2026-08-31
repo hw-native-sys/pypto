@@ -231,6 +231,102 @@ struct OpArgEffectSpec {
 };
 
 /**
+ * @brief Arguments that carry no lane-indexed data
+ *
+ * Automatic AIV vector splitting (`LowerAutoVectorSplit`) halves an op's RESULT
+ * to the per-lane extent and relies on every tile operand being lane-local
+ * already. An operand that is still full width normally means nothing sharded
+ * it, and the two lanes would read the same rows.
+ *
+ * **Most operands need no declaration at all.** The pass decides them by
+ * re-deducing the halved call and refusing to emit a node whose declared result
+ * contradicts type inference over its own arguments. That answer comes from the
+ * operator itself, so it needs no metadata and cannot go stale — and it already
+ * rejects a full-width operand for every operator whose `f_deduce_type` reads
+ * that operand's extent, which is most of them.
+ *
+ * This spec covers the remainder: operands the deducer **never looks at**, where
+ * accepting the halved call proves nothing. `tile.sel` deduces its result from
+ * `lhs`/`rhs` alone, yet its `mask` is per-element data that must be sharded
+ * with them; `tile.sels` validates only that the mask COVERS `src`, so an
+ * over-wide mask passes deduction while feeding lane 1 lane 0's rows. For those,
+ * and only those, the registry is the source of truth.
+ *
+ * The test is *positional correspondence*: does output element `i` read operand
+ * element `i`? Two kinds of operand answer no, and both may stay full width.
+ *
+ * 1. **Hardware scratch.** `tile.row_sum(tile, tmp_tile)` uses `tmp_tile` as
+ *    workspace whose contract is "at least as large as the input", never as
+ *    per-lane data. Each lane declaring the whole buffer is what the
+ *    SHARED-affinity `tile.create` that feeds it already does.
+ *
+ * 2. **A lane-shared source addressed by a separate index operand.**
+ *    `tile.gather(src, indices, tmp)` computes `out[i] = src[indices[i]]`, and
+ *    the index values are absolute into `src`. Halving `indices` therefore gives
+ *    each lane its own half of the OUTPUT while both read the same whole table —
+ *    which is the correct lowering, not a missing shard. `tile.gatherb` is the
+ *    byte-offset form of the same shape.
+ *
+ *    The scatter family is the dual: `tile.scatter` and `tile.scatter_update`
+ *    address a *destination* by absolute index, so halving it while the indices
+ *    stay absolute writes the wrong rows.
+ *
+ * The kinds are NOT interchangeable, which is why `LaneInvariantArg` records
+ * which one applies. They differ on what a *partitioned producer* means. Scratch
+ * may be halved freely: the contract is a size relation to the input, and a
+ * halved input takes a halved scratch with it. An absolutely-addressed operand
+ * may not: if it comes from a `tile.load` inside the region, the split halves
+ * that load and lane 1 addresses the wrong rows while the indices stay absolute.
+ * Since `tensor.gather` lowers to exactly `tile.load` + `tile.gather`, that is
+ * the ordinary path, not a corner — so the split guard rejects a partitioned
+ * producer for those kinds rather than accepting it. That property is not
+ * type-expressible in either direction, so those two kinds stay declared even
+ * where the deducer does read the operand.
+ *
+ * Absent (`std::nullopt`) means the operator declares no such argument, so the
+ * split guard treats a tile operand type deduction cannot decide as lane-indexed
+ * data — the safe answer for an operand nobody has classified.
+ *
+ * Two shapes of argument cannot be declared here:
+ *
+ * * one the deducer already pins. `tile.rsqrt`'s `tmp` must match the input
+ *   rank and every dimension, so a declaration claiming full width is legal
+ *   could never be reached and would read as a contract the operator does not
+ *   grant. `tests/ut/ir/operators/test_lane_invariant_arg_coverage.py` measures
+ *   this and fails on such a declaration;
+ * * one that is scratch only in *some* arities. `tile.mrgsort_format2`'s
+ *   `tmp_or_src2` is a third sorted input in a 3/4-way merge and workspace in a
+ *   2-way one, and the arity is the positional argument count, not a kwarg. Such
+ *   a position stays unclassified, so the split guard treats it as data and
+ *   rejects a full-width one — the safe direction.
+ */
+/// Why an argument carries no lane-indexed data. The two kinds behave
+/// differently when the operand's PRODUCER is partitioned, so they cannot share
+/// one flag.
+enum class LaneInvariantArg : uint8_t {
+  /// Hardware workspace. Full width and halved are both correct: the contract is
+  /// a size relation to the input ("at least as large as"), and a halved input
+  /// takes a halved scratch with it.
+  Scratch = 0,
+  /// A source addressed by a separate index/offset operand, whose values are
+  /// ABSOLUTE into it. Only full width is correct. Halving it while the indices
+  /// stay absolute makes lane 1 read the wrong rows and can index out of bounds,
+  /// so a partitioned producer must be rejected rather than accepted.
+  IndexAddressedSource = 1,
+  /// The write-side dual: a DESTINATION addressed by absolute (often flattened)
+  /// indices, as in `tile.scatter`'s `dst.flat[indexes[i, j]] = src[i, j]`.
+  /// Halving it is the same defect on the write side -- lane 1 writes to the
+  /// wrong half, and a flat index encoding `i * dst_cols + c` no longer matches
+  /// the halved row stride at all.
+  AbsoluteIndexedDestination = 2,
+};
+
+struct OpLaneInvariantArgSpec {
+  /// Argument indices that carry no lane-indexed data, and why.
+  std::map<size_t, LaneInvariantArg> args;
+};
+
+/**
  * @brief Type-erased operator registration entry
  *
  * This class represents a registered operator in the registry system. It stores
@@ -729,6 +825,33 @@ class OpRegistryEntry {
     return *this;
   }
 
+  /// Declare that argument `arg_index` carries no lane-indexed data, so
+  /// automatic AIV vector splitting may leave it full width under a halved
+  /// result. See `OpLaneInvariantArgSpec`: this covers hardware scratch and an
+  /// operand addressed at absolute indices, and it is a claim about the DATA the
+  /// operand carries, not about whether the result shape is deduced from it.
+  ///
+  /// Declare a `Scratch` argument only when the operator's own `f_deduce_type`
+  /// does NOT read its extent — otherwise the split pass decides it without
+  /// metadata and the declaration is unreachable.
+  inline OpRegistryEntry& set_lane_invariant_arg(size_t arg_index,
+                                                 LaneInvariantArg kind = LaneInvariantArg::Scratch) {
+    // This metadata decides whether the split guard protects an operand, so a
+    // declaration that names nothing must fail at registration rather than
+    // silently leave the real operand unguarded. Arguments are declared before
+    // this call in every registration, so the count is already known here.
+    CHECK(arguments_.has_value() && arg_index < arguments_->size())
+        << "Operator '" << name_ << "' declares argument " << arg_index << " lane-invariant, but it has "
+        << (arguments_.has_value() ? std::to_string(arguments_->size()) : std::string("no"))
+        << " declared argument(s); add_argument() must come first and the index must name one of them";
+    auto& args = EnsureLaneInvariantArgs().args;
+    auto [it, inserted] = args.emplace(arg_index, kind);
+    CHECK(inserted || it->second == kind)
+        << "Operator '" << name_ << "' declares argument " << arg_index
+        << " lane-invariant twice with different kinds; a single position has one meaning";
+    return *this;
+  }
+
   /// Declare that this operator writes through none of its arguments. Use it to
   /// classify an operator whose name or side-effect-only signature would
   /// otherwise leave a reader wondering — `pld.system.wait` polls a signal it
@@ -799,6 +922,24 @@ class OpRegistryEntry {
     if (resolver != arg_effects_->kwarg_dependent.end()) return resolver->second(kwargs);
     if (arg_index >= arg_effects_->per_arg.size()) return ArgEffect::Read;
     return arg_effects_->per_arg[arg_index];
+  }
+
+  /// True when argument `arg_index` carries no lane-indexed data for a call
+  /// carrying `kwargs`, so automatic AIV splitting may leave it full width.
+  /// False for every argument the operator did not name — an unclassified
+  /// operand is treated as per-lane data, which is the safe answer.
+  [[nodiscard]] bool IsLaneInvariantArg(size_t arg_index) const {
+    return GetLaneInvariantArgKind(arg_index).has_value();
+  }
+
+  /// Why argument `arg_index` is lane-invariant, or `nullopt` when the operator
+  /// did not declare it. The kind decides what a PARTITIONED producer means:
+  /// harmless for `Scratch`, a miscompile for `IndexAddressedSource`.
+  [[nodiscard]] std::optional<LaneInvariantArg> GetLaneInvariantArgKind(size_t arg_index) const {
+    if (!lane_invariant_args_.has_value()) return std::nullopt;
+    auto it = lane_invariant_args_->args.find(arg_index);
+    if (it == lane_invariant_args_->args.end()) return std::nullopt;
+    return it->second;
   }
 
   /// True when this operator may write through argument `arg_index` under some
@@ -876,6 +1017,13 @@ class OpRegistryEntry {
     return *arg_effects_;
   }
 
+  /// The lane-invariance spec, creating it on first declaration. Same
+  /// single-site engagement rule as `EnsureArgEffects`.
+  OpLaneInvariantArgSpec& EnsureLaneInvariantArgs() {
+    if (!lane_invariant_args_.has_value()) return lane_invariant_args_.emplace();
+    return *lane_invariant_args_;
+  }
+
   /**
    * @brief Set the operator name
    *
@@ -902,6 +1050,8 @@ class OpRegistryEntry {
       deduce_type_;                               ///< Type deduction function
   std::optional<OpMemorySpaceSpec> memory_spec_;  ///< Memory space specification
   std::optional<OpArgEffectSpec> arg_effects_;    ///< Per-argument execution effects; nullopt = unclassified
+  std::optional<OpLaneInvariantArgSpec>
+      lane_invariant_args_;     ///< Args carrying no lane-indexed data; nullopt = none declared
   bool is_inplace_safe_{true};  ///< Whether the op supports in-place execution (src == dst buffer)
   ExecutionMemoryAccessEvidence execution_memory_access_evidence_{ExecutionMemoryAccessEvidence::Unknown};
   std::set<size_t> forbid_output_alias_args_;  ///< Input args whose buffer the output must not reuse

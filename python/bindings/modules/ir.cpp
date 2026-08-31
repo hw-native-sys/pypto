@@ -986,6 +986,24 @@ void BindIR(nb::module_& m) {
       },
       nb::arg("op_name"), "The hardware path an operator's writes travel, or None when it declared none");
 
+  nb::enum_<LaneInvariantArg>(ir, "LaneInvariantArg",
+                              "Why an argument carries no lane-indexed data under automatic AIV splitting")
+      .value("Scratch", LaneInvariantArg::Scratch,
+             "Hardware workspace; full width and halved are both correct")
+      .value("IndexAddressedSource", LaneInvariantArg::IndexAddressedSource,
+             "Lookup table read at absolute indices; only full width is correct")
+      .value("AbsoluteIndexedDestination", LaneInvariantArg::AbsoluteIndexedDestination,
+             "Destination written at absolute indices; only full width is correct");
+
+  ir.def(
+      "get_op_lane_invariant_arg",
+      [](const std::string& op_name, size_t arg_index) -> nb::object {
+        auto kind = OpRegistry::GetInstance().GetEntry(op_name).GetLaneInvariantArgKind(arg_index);
+        return kind.has_value() ? nb::cast(*kind) : nb::none();
+      },
+      nb::arg("op_name"), nb::arg("arg_index"),
+      "Why one positional argument carries no lane-indexed data, or None when the operator declared none");
+
   // Var - const shared_ptr
   auto var_class = nb::class_<Var, Expr>(ir, "Var", "Variable reference expression");
 

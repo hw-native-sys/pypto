@@ -584,6 +584,14 @@ REGISTER_OP("tile.transpose")
     // buffer, and InitMemRef never inherits the input's buffer for it.
     .set_output_memory_inherit_input()
     .not_inplace_safe()
+    // NOT declared lane-invariant. DeduceTileTransposeType validates the tmp's
+    // dtype and rank but not its extents, so type deduction is blind here and
+    // leaving the argument undeclared is what makes automatic AIV splitting
+    // treat a full-width tmp as per-lane data and reject it. That is the right
+    // answer: pto.ttrans reads the transposed extents out of this buffer, so a
+    // tmp wider than the halved input is out of contract. (A transpose whose
+    // axes touch the split axis is refused earlier still, by
+    // FindTransposeSplitHazard.)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileTransposeType(args, kwargs);
@@ -903,6 +911,10 @@ REGISTER_OP("tile.scatter_update")
     .set_output_reuses_input(0)
     // DPS: the indexed rows are rewritten, every other row passes through.
     .set_arg_effect(0, ArgEffect::ReadWrite)
+    // `index` names rows of the WHOLE input, so a partitioned destination is
+    // written at the wrong offsets. Only the destination is declared: `index`
+    // and `src` are ordinary per-lane data and must be sharded.
+    .set_lane_invariant_arg(0, LaneInvariantArg::AbsoluteIndexedDestination)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileScatterUpdateType(args, kwargs);

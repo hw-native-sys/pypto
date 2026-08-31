@@ -199,6 +199,12 @@ REGISTER_OP("tile.scatter")
     // DPS: rewrites the indexed positions of `dst` and passes every other
     // position through, so the prior content reaches the result — a read.
     .set_arg_effect(0, ArgEffect::ReadWrite)
+    // `indexes` are FLATTENED absolute offsets into the whole dst
+    // (dst.flat[indexes[i, j]] = src[i, j]), so a partitioned destination is
+    // written at offsets that no longer mean anything: the encoded
+    // `i * dst_cols + c` does not match a halved row stride. Only dst is
+    // declared -- src and indexes are per-lane data and must be sharded.
+    .set_lane_invariant_arg(0, LaneInvariantArg::AbsoluteIndexedDestination)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileScatterType(args, kwargs, "tile.scatter");

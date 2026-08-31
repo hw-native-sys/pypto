@@ -587,6 +587,207 @@ synthesize. Move the operation outside the automatically-halved split region.
 Singleton split dimensions and already-half-width explicit-boundary regions
 remain unchanged.
 
+Halving a result is sound only under **two conditions**, asked in this order
+because the first subsumes the second wherever it can speak:
+
+| # | Condition | Decided by | Catches |
+| - | --------- | ---------- | ------- |
+| 1 | the halved node still type-checks against its own arguments | the operator's own `f_deduce_type` — no metadata | a full-width `tile.add` operand, a rank-1 bias on the split axis, `row_argmax`'s shape-matched `tmp`, `tile.transpose_view`'s axis permutation |
+| 2 | an operand condition 1 is **blind** to is lane-local, broadcast along the split axis, or **declared** lane-invariant | a registry declaration | `tile.sel`'s full-width `mask`, which its result deduction never reads |
+
+### Condition 1 — the halved node still type-checks
+
+After rewriting the arguments, the pass re-deduces the result from the arguments
+the trailing `Substitute` will install (each tracked operand swapped for its
+halved replacement) and compares the deduced *physical* shape against the halved
+result type. Valid shape is excluded: `HalveTileShape` localizes it per lane,
+which deduction cannot reproduce. A deduction that rejects the halved arguments
+outright counts as a mismatch too — the operator is refusing the very node it
+would receive.
+
+This asks the operator itself, so it needs no per-operator metadata and cannot go
+stale as operators are added or their contracts change. It is what rejects the
+ordinary case:
+
+```python
+def split_auto(vec: pl.Tile[[256, 128], pl.FP32, pl.Mem.Vec], ...):
+    vec_h = pl.tile.add(vec, vec)   # rejected: `vec` is full width
+```
+
+`vec` is a full-width `InCore` parameter, so nothing inside the region partitions
+it. Halving only the result would emit
+`tile.add([256, 128], [256, 128]) -> [128, 128]`, a node whose declared shape
+contradicts type inference over its own arguments; it does not survive
+print→parse and misleads every later consumer that re-derives types from
+operands. Derive the per-lane half first (`tile.load` / `tile.slice` inside the
+region, or an explicit `pl.tile.aiv_shard`), or keep a value both lanes share
+outside the region.
+
+The same check decides cases a shape heuristic gets wrong in both directions.
+Operands align to the result **from the right**, matching `BroadcastShapes`:
+
+| `tile.add([256, 128], bias)` | `UP_DOWN` (dim 0) | `LEFT_RIGHT` (dim 1) |
+| ---------------------------- | ----------------- | -------------------- |
+| `bias: [128]` | accepted — broadcasts over the split axis | rejected — `BroadcastShapes([256, 64], [128])` fails |
+| `bias: [1, 128]` | accepted — singleton on the split axis | rejected — its dim 1 is full width |
+| `bias: [256, 128]` | rejected | rejected |
+
+and it covers an axis-permuting operator, which no right-alignment rule
+describes:
+
+```python
+def split_auto(data: pl.Tile[[1, 256], pl.FP32, pl.Mem.Vec], ...):
+    viewed = pl.tile.transpose_view(data)   # rejected: [128, 1] vs the [256, 1] deduced
+```
+
+`tile.transpose_view` swaps the trailing two dims, so the halved `[128, 1]`
+result contradicts the `[256, 1]` its own operand deduces. Unlike
+`tile.transpose`, this is a pure view and is outside `FindTransposeSplitHazard`,
+which matches `tile.transpose` only.
+
+The shape-describing ops (`tile.full`, `tile.create`, `tile.slice`,
+`tile.reshape`, `tile.reinterpret_view`) rewrite their own operands before this
+check runs, and each has a defined full-width-source meaning.
+
+`tile.reshape` and `tile.reinterpret_view` get that from an earlier rewrite: an
+offsetless view over an untracked source is emitted at full width and followed by
+a per-subblock `tile.slice`, so each lane reads its own half instead of both
+reading the first one. That slice can only be materialized from a **static** half
+extent, so a dynamic split extent over a full-width source is rejected rather
+than left to fall through to plain result halving.
+
+### Condition 2 — operands type deduction is blind to
+
+A deducer that never reads an operand's extent says nothing by accepting it. The
+pass detects that per call, with no metadata: it re-deduces once more with the
+operand **doubled** on the split axis. If deduction throws or the result changes,
+the deducer *pins* that operand and condition 1 already decided it. If the answer
+is unchanged, the operand is *blind*, and only a declaration can say whether full
+width is in contract.
+
+```python
+picked = pl.tile.sel(mask, lhs, rhs, tmp)   # rejected when `mask` is full width
+```
+
+`tile.sel` deduces its result from `BroadcastShapes(lhs, rhs)` alone and checks
+only that `mask` is a `TileType`, so a full-width mask over halved lhs/rhs
+re-deduces perfectly cleanly — yet both lanes would read mask rows `0..127`.
+`tile.sels` is the same shape of trap: it validates that the mask *covers* src's
+valid rows, and an oversized mask satisfies coverage. Both declare only their
+`tmp` position, so their masks are rejected. An operand nobody has classified is
+treated as lane data, which is the safe default.
+
+Restricting this to blind operands is what keeps it in its lane. Without it,
+every operator with a legal full-width operand would need a registry declaration
+purely to suppress a check that had no business running — which is how
+`tile.rsqrt` came to declare a scratch its own deducer requires to match the
+input exactly. `tests/ut/ir/operators/test_lane_invariant_arg_coverage.py`
+measures which operands are blind, fails on a declaration the deducer makes
+unreachable, and pins the blind set so a new operator or a loosened deducer has
+to be classified rather than silently falling through.
+
+The test for a declaration is *positional correspondence*: does output element
+`i` read operand element `i`? Two kinds of operand answer no.
+
+**Hardware scratch.** A full-width workspace is in contract, and each lane simply
+declares the whole thing:
+
+```python
+scratch = pl.tile.create([256, 128], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+sums = pl.tile.row_sum(v, scratch)      # accepted: [128, 128] x [256, 128] -> [128, 1]
+```
+
+`tile.row_sum` documents its `tmp_tile` as scratch *at least as large as* the
+input, never reads it in `DeduceTileRowReductionType`, and declares it with
+`set_lane_invariant_arg(1)`. `tile.create` is registered `CoreAffinity::SHARED`,
+so [the affinity gate](#the-affinity-gate) deliberately passes it through full
+width and never tracks it — matching on the extent alone would reject the whole
+rms-norm reduction shape.
+
+Its sibling `tile.row_argmax` needs a tmp shaped *exactly* like the source, and
+`DeduceTileRowReductionType` enforces that with `require_exact_tmp_shape`. It
+therefore carries **no** declaration: condition 1 rejects a full-width tmp on its
+own, and a declaration would claim a contract the operator does not grant.
+
+**An operand addressed at absolute indices.**
+
+```python
+indices = pl.tile.load(idx, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+picked = pl.tile.gather(src, indices, tmp)   # accepted: src stays [256, 128]
+```
+
+`tile.gather` computes `out[i] = src[indices[i]]` and takes its result shape from
+`indices`. The index values are absolute into `src`, so halving `indices` already
+gives each lane its own half of the **output** while both read the whole table —
+that is the correct lowering, not a missing shard. `tile.gatherb` is the
+byte-offset form of the same shape. `tile.scatter` and `tile.scatter_update` are
+the write-side dual, addressing a *destination* by absolute index.
+
+**The declaration permits a full-width operand; it does not keep one.** Nothing
+stops the operand's own producer from being halved, and the kinds differ on what
+that means — which is why the registry records *which* kind applies:
+
+| Kind | Full width | Producer partitioned | Example |
+| ---- | ---------- | -------------------- | ------- |
+| `Scratch` | allowed | fine — a halved input takes a halved scratch with it | `row_sum`'s `tmp_tile` |
+| `IndexAddressedSource` | allowed | **rejected** — indices stay absolute, so lane 1 reads the wrong half | `gather`'s `src` |
+| `AbsoluteIndexedDestination` | allowed | **rejected** — the write side of the same defect | `scatter`'s `dst` |
+
+`tile.scatter` writes `dst.flat[indexes[i, j]] = src[i, j]` with *flattened*
+offsets into the whole destination, so a column write encoding `i * dst_cols + c`
+stops matching the moment the row stride halves.
+
+```python
+src = pl.tile.load(tbl, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+picked = pl.tile.gather(src, indices, tmp)   # rejected: the table was halved
+```
+
+This is the ordinary path rather than a corner: `pl.gather` over a tensor lowers
+to a `tile.load` of the table feeding `tile.gather`, so an author who gathers
+inside a split region hits it by default. Neither condition above sees it — the
+operand is tracked, so condition 2 skips it, and `tile.gather` deduces its result
+from `indices` alone, so condition 1 is satisfied. That is why the absolute-index
+kinds stay declared even where the deducer *does* read the operand: the property
+is not type-expressible in either direction. Produce the table **outside** the
+split region and pass it in; keeping such a producer at full width automatically
+is not implemented.
+
+The absolute-index check runs **before** the halving path, not beside it, because
+the trailing `Substitute` rewrites the argument even where nothing is halved:
+
+- a **singleton result** returns early — `gather` with `[1, N]` indices yields a
+  `[1, N]` result, so the result is untouched while the table under it is still
+  halved;
+- a **tuple result** skips the block entirely. `tile.gather_compare` returns
+  `Tuple[dst, cdst]`, which the generic path (single `TileType` only) cannot
+  halve — so it would keep declaring full-width elements over a halved input.
+  A tuple-returning op that consumes a partitioned operand is rejected;
+  per-element split mapping for tuple results is not implemented.
+
+A position that is scratch only in *some* arities cannot be declared:
+`tile.mrgsort_format2`'s `tmp_or_src2` is a third sorted input in a 3/4-way merge
+and workspace in a 2-way one, and the arity is the positional argument count.
+Such a position stays unclassified and a full-width one is rejected.
+
+### Carries and dropped axes
+
+Two places rewrite state *around* the halving rather than in it, and both must
+follow the same axis and tracking rules or the conditions above misfire:
+
+- **Loop carries.** An `iter_arg` inherits its init value's tracking, so a halved
+  init makes the carry lane-local; the loop-exit `return_var` inherits it in turn
+  so a later `tile.store` gets the per-lane offset. Both the explicit and the
+  AUTO affinity-gated arms share `RepairIterArgs` / `RepairReturnVars` — the AUTO
+  arm recurses through its own walk and cannot reach the explicit path's `ForStmt`
+  branch, so without this a legal tile accumulator has its carry reported as a
+  full-width operand.
+- **`tile.slice` with `drop_dims`.** `shape` / `offset` / `valid_shape` are
+  indexed in the **pre-drop** rank, while the split dim indexes the result.
+  `drop_dims` erases axes afterwards and pads back to 2D by *prepending* unit
+  axes, so `slice([1, 256, 128], drop_dims=[0]) -> [256, 128]` puts the result's
+  dim 0 on the source's dim 1. The result axis is mapped back before any tuple is
+  touched.
+
 ## The affinity gate
 
 Only **vector** work is halved; cube work stays full. Affinity is decided by

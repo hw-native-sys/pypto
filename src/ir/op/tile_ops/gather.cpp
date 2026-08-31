@@ -110,6 +110,20 @@ REGISTER_OP("tile.gather")
     .set_input_memory(2, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     .not_inplace_safe()
+    // src is a lookup table addressed by absolute index, not positionally: the
+    // halved `indices` already give each lane its own slice of the OUTPUT while
+    // both read the whole table. Declaring the KIND matters -- a partitioned
+    // producer must be rejected, because the indices stay absolute. tmp is plain
+    // workspace, where halving is harmless.
+    .set_lane_invariant_arg(0, LaneInvariantArg::IndexAddressedSource)
+    // tmp IS exempt, because whether an oversized one is out of contract is a
+    // TARGET question this pass cannot answer: A5 does not read tmp in the index
+    // form at all, so a full-width external tmp beside halved indices is legal
+    // there, while A2/A3 requires tmp to match the indices' element type and
+    // valid shape. That A2/A3 rule is already enforced where the target is
+    // known -- the PTOAS verifier -- so rejecting here would only break the
+    // legal A5 form to duplicate a check this pass cannot make accurately.
+    .set_lane_invariant_arg(2)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileGatherType(args, kwargs, "tile.gather");
@@ -217,6 +231,9 @@ REGISTER_OP("tile.gatherb")
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     .not_inplace_safe()
+    // Byte-offset form of tile.gather: src is the shared table, `offset` carries
+    // the per-lane addressing and the result shape.
+    .set_lane_invariant_arg(0, LaneInvariantArg::IndexAddressedSource)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileGatherbType(args, kwargs, "tile.gatherb");
@@ -472,6 +489,7 @@ REGISTER_OP("tile.gather_compare")
     // Vec to every TileType element inside the TupleType.
     .set_output_memory(MemorySpace::Vec)
     .not_inplace_safe()
+    .set_lane_invariant_arg(2)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileGatherCompareType(args, kwargs, "tile.gather_compare");

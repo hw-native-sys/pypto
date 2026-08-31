@@ -308,6 +308,7 @@ REGISTER_OP("tile.row_expand_add")
     // On A2/A3 PTOAS writes tmp while writing dst; keep those allocations
     // distinct. On A5 tmp is a placeholder, and the stricter rule is safe.
     .forbid_output_alias(2)
+    .set_lane_invariant_arg(2)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRowExpandAddType(args, kwargs, "tile.row_expand_add");

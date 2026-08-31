@@ -537,6 +537,7 @@ REGISTER_OP("tile.rem")
     .set_input_memory(2, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     .not_inplace_safe()
+    .set_lane_invariant_arg(2)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRemainderType(args, kwargs, "tile.rem", true);
@@ -679,6 +680,7 @@ REGISTER_OP("tile.rems")
     .set_input_memory(2, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     .not_inplace_safe()
+    .set_lane_invariant_arg(2)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileScalarRemainderType(args, kwargs, "tile.rems", true);
@@ -989,6 +991,7 @@ REGISTER_OP("tile.xor")
     .set_input_memory(1, MemorySpace::Vec)
     .set_input_memory(2, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    .set_lane_invariant_arg(2)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpTernaryType(args, kwargs, "tile.xor", true);
@@ -1004,6 +1007,7 @@ REGISTER_OP("tile.xors")
     .set_input_memory(2, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     .not_inplace_safe()
+    .set_lane_invariant_arg(2)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpXorScalarType(args, kwargs, "tile.xors");
@@ -1084,6 +1088,7 @@ REGISTER_OP("tile.prelu")
     .set_input_memory(2, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     .not_inplace_safe()
+    .set_lane_invariant_arg(2)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTilePreluType(args, kwargs, "tile.prelu");
@@ -1225,6 +1230,7 @@ REGISTER_OP("tile.sel")
     // allow; mask/tmp stay forbidden via registry (see 34-memory_reuse.md).
     .forbid_output_alias(0)
     .forbid_output_alias(3)
+    .set_lane_invariant_arg(3)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileSelType(args, kwargs, "tile.sel");
@@ -1316,6 +1322,7 @@ REGISTER_OP("tile.sels")
     .set_input_memory(2, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     .forbid_output_alias(0)
+    .set_lane_invariant_arg(2)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileSelsType(args, kwargs, "tile.sels");

@@ -70,6 +70,7 @@ from pypto import DataType, ir, passes
 from pypto import backend as _backend
 from pypto.ir.instruments import make_roundtrip_instrument
 from pypto.ir.op import tile_ops as T
+from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.runtime import RunConfig
 
 MS = ir.MemorySpace
@@ -1381,6 +1382,988 @@ def test_vc_boundary_rejects_unhalved_vector_operand():
 
     with pytest.raises(ValueError, match="full-width vector operand"):
         _lower(Before)
+
+
+def test_vector_op_rejects_unsharded_full_width_operand():
+    """A vector op whose operand no lane owns a half of is rejected, not halved.
+
+    ``vec`` is a full-width Vec parameter, so nothing inside the region
+    partitions it. Halving only the ``tile.add`` RESULT would emit
+    ``tile.add([256, 128], [256, 128]) -> [128, 128]`` — a node whose declared
+    shape contradicts type inference over its own arguments, which fails
+    print->parse and misleads every later consumer that re-derives types from
+    operands. This is the elementwise mirror of
+    ``test_vc_boundary_rejects_unhalved_vector_operand`` above: the guard that
+    already existed one boundary later now also covers ordinary vector ops.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            vec: pl.Tile[[256, 128], pl.FP32, pl.Mem.Vec],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_0: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+        ) -> pl.Tensor[[256, 128], pl.FP32]:
+            vec_h = pl.tile.add(vec, vec)
+            gathered_mat = pl.tile.move(vec_h, target_memory=pl.Mem.Mat)
+            left = pl.tile.move(gathered_mat, target_memory=pl.Mem.Left)
+            acc = pl.tile.matmul(left, rhs)
+            out_store = pl.tile.store(acc, [0, 0], out_0)
+            return out_store
+
+    with pytest.raises(ValueError, match="carries a full-width operand") as exc_info:
+        _lower(Before)
+    # The diagnostic names the operand and the in-contract spellings, so the
+    # author can act on it without reading the pass.
+    message = str(exc_info.value)
+    assert "'vec'" in message
+    assert "aiv_shard" in message
+
+
+def test_declared_scratch_operand_stays_full_width():
+    """A full-width operand the operator DECLARES as scratch is kept.
+
+    ``tile.row_sum(tile, tmp_tile)`` uses ``tmp_tile`` as hardware workspace whose
+    contract is "at least as large as the input", never as per-lane data, so it
+    declares ``set_lane_invariant_arg(1)``. The buffer comes from ``tile.create``,
+    registered ``CoreAffinity::SHARED``, so the affinity gate deliberately passes
+    it through full width for both lanes to declare — it is never tracked, and
+    matching on the extent alone would reject the whole rms-norm reduction shape
+    (gh#1864's runtime parity probe).
+
+    The exemption is a registry declaration on purpose. See
+    ``test_sel_full_width_mask_is_rejected`` for why "the result shape is not
+    deduced from this operand" is a different property and cannot stand in.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            x: pl.Tensor[[256, 128], pl.FP32],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_0: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+        ) -> pl.Tensor[[256, 128], pl.FP32]:
+            v = pl.tile.load(x, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            scratch = pl.tile.create([256, 128], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+            sums = pl.tile.row_sum(v, scratch)
+            vec_h = pl.tile.row_expand_mul(v, sums)
+            gathered_mat = pl.tile.move(vec_h, target_memory=pl.Mem.Mat)
+            left = pl.tile.move(gathered_mat, target_memory=pl.Mem.Left)
+            acc = pl.tile.matmul(left, rhs)
+            out_store = pl.tile.store(acc, [0, 0], out_0)
+            return out_store
+
+    @pl.program
+    class Expected:
+        @pl.function(
+            type=pl.FunctionType.InCore,
+            attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": True},
+        )
+        def split_auto(
+            x: pl.Tensor[[256, 128], pl.FP32],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_0: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+        ) -> pl.Tensor[[256, 128], pl.FP32]:
+            subblock_idx = pl.tile.get_subblock_idx()
+            v = pl.tile.load(x, [0 + subblock_idx * 128, 0], [128, 128], [128, 128], target_memory=pl.Mem.Vec)
+            # Untouched: the scratch is SHARED, so both lanes declare it whole.
+            scratch = pl.tile.create([256, 128], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+            sums = pl.tile.row_sum(v, scratch)
+            vec_h = pl.tile.row_expand_mul(v, sums)
+            gathered_mat_mat = pl.tile.aic_gather(vec_h, split=1)
+            gathered_mat = pl.tile.move(gathered_mat_mat, target_memory=pl.Mem.Mat)
+            left = pl.tile.move(gathered_mat, target_memory=pl.Mem.Left)
+            acc = pl.tile.matmul(left, rhs)
+            out_store = pl.tile.store(acc, [0, 0], out_0)
+            return out_store
+
+    # _lower keeps the print->parse roundtrip instrument on, so this also pins the
+    # invariant the guard protects: the accepted node still re-parses.
+    ir.assert_structural_equal(_lower(Before), Expected)
+
+
+def test_dynamic_full_width_reshape_is_rejected():
+    """A full-width reshape source needs a STATIC half extent to be partitioned.
+
+    ``tile.reshape`` over an untracked source is diverted into a full view plus a
+    per-lane ``tile.slice``, and that slice can only be materialized from a static
+    half extent. A dynamic one used to fall through to plain result halving, which
+    is the offsetless-view miscompile the diversion exists to prevent: both lanes
+    read the first half, so lane 1 silently reuses lane 0's data. Reject it, as
+    the sibling ``tile.reinterpret_view`` already does.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            cube_seed: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat],
+            data: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec],
+            rows: pl.Scalar[pl.INDEX],
+            out_0: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            seed_vec = pl.tile.move(cube_seed, target_memory=pl.Mem.Vec)  # noqa: F841
+            reshaped = pl.tile.reshape(data, [rows, 16])
+            out_store = pl.tile.store(reshaped, [0, 0], out_0)
+            return out_store
+
+    with pytest.raises(ValueError, match="requires a static split extent") as exc_info:
+        _lower(Before)
+    message = str(exc_info.value)
+    assert "tile.reshape" in message
+
+
+# ---------------------------------------------------------------------------
+# Halving is gated on TWO independently necessary conditions. Neither implies
+# the other, so each needs its own coverage:
+#   (1) every tile operand is lane-local, split-axis-singleton, or DECLARED
+#       scratch  -- violated by tile.sel's full-width mask, which the operator's
+#       type deduction never reads;
+#   (2) the halved node still type-checks against its own arguments -- violated
+#       by tile.transpose_view, whose axis permutation the broadcast
+#       right-alignment in (1) is not entitled to describe.
+# ---------------------------------------------------------------------------
+
+
+def test_sel_full_width_mask_is_rejected():
+    """A per-element operand outside the result deduction is still lane data.
+
+    ``tile.sel(mask, lhs, rhs, tmp)`` deduces its result from ``BroadcastShapes``
+    over lhs/rhs alone and validates only that ``mask`` is a ``TileType``. So with
+    lhs/rhs halved and a full-width ``mask``, the halved node re-deduces cleanly —
+    condition (2) is satisfied and cannot catch this. Both lanes would then read
+    mask rows 0..127 and silently compute the wrong halves.
+
+    Only condition (1) rejects it, and only because ``tile.sel`` declares arg 3
+    (``tmp``) lane-invariant and NOT arg 0.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            x: pl.Tensor[[256, 128], pl.FP32],
+            mask: pl.Tile[[256, 128], pl.FP32, pl.Mem.Vec],
+            tmp: pl.Tile[[1, 16], pl.UINT32, pl.Mem.Vec],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_0: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+        ) -> pl.Tensor[[256, 128], pl.FP32]:
+            v = pl.tile.load(x, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            w = pl.tile.load(x, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            picked = pl.tile.sel(mask, v, w, tmp)
+            gathered_mat = pl.tile.move(picked, target_memory=pl.Mem.Mat)
+            left = pl.tile.move(gathered_mat, target_memory=pl.Mem.Left)
+            acc = pl.tile.matmul(left, rhs)
+            out_store = pl.tile.store(acc, [0, 0], out_0)
+            return out_store
+
+    with pytest.raises(ValueError, match="carries a full-width operand") as exc_info:
+        _lower(Before)
+    message = str(exc_info.value)
+    assert "'mask'" in message
+
+
+def test_sels_full_width_mask_is_rejected():
+    """An oversized mask satisfies ``tile.sels``' coverage rule and is still wrong.
+
+    ``tile.sels`` validates that the mask's carrier rows *cover* src's valid rows,
+    which a full-width mask over a halved src passes. Coverage is not partition:
+    each lane would read the mask from row 0.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            x: pl.Tensor[[256, 128], pl.FP32],
+            mask: pl.Tile[[256, 128], pl.INT32, pl.Mem.Vec],
+            tmp: pl.Tile[[256, 128], pl.FP32, pl.Mem.Vec],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_0: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+        ) -> pl.Tensor[[256, 128], pl.FP32]:
+            v = pl.tile.load(x, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            picked = pl.tile.sels(mask, v, tmp, pl.const(0.0, pl.FP32))
+            gathered_mat = pl.tile.move(picked, target_memory=pl.Mem.Mat)
+            left = pl.tile.move(gathered_mat, target_memory=pl.Mem.Left)
+            acc = pl.tile.matmul(left, rhs)
+            out_store = pl.tile.store(acc, [0, 0], out_0)
+            return out_store
+
+    with pytest.raises(ValueError, match="carries a full-width operand") as exc_info:
+        _lower(Before)
+    assert "'mask'" in str(exc_info.value)
+
+
+def test_declared_scratch_is_exempt_on_the_left_right_split_axis():
+    """The declaration, not the extent, is what exempts a scratch operand.
+
+    ``tile.sel``'s ``tmp`` is ``[1, 16]``: singleton on dim 0, so ``UP_DOWN`` would
+    skip it for the wrong reason. Under ``LEFT_RIGHT`` the split axis is dim 1,
+    where it is full width — and it must still be accepted, while every real
+    operand is lane-local via ``tile.load``.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.LEFT_RIGHT})
+        def split_auto(
+            x: pl.Tensor[[256, 128], pl.FP32],
+            tmp: pl.Tile[[1, 16], pl.UINT32, pl.Mem.Vec],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_0: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+        ) -> pl.Tensor[[256, 128], pl.FP32]:
+            m = pl.tile.load(x, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            v = pl.tile.load(x, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            w = pl.tile.load(x, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            picked = pl.tile.sel(m, v, w, tmp)
+            gathered_mat = pl.tile.move(picked, target_memory=pl.Mem.Mat)
+            left = pl.tile.move(gathered_mat, target_memory=pl.Mem.Left)
+            acc = pl.tile.matmul(left, rhs)
+            out_store = pl.tile.store(acc, [0, 0], out_0)
+            return out_store
+
+    lowered = _lower(Before)
+    # The tmp operand survives at its declared full width, and the sel result is
+    # halved on the LEFT_RIGHT axis.
+    printed = lowered.as_python()
+    assert "pl.tile.sel(" in printed
+    assert "[256, 64]" in printed
+
+
+def test_gather_full_width_table_is_lane_shared():
+    """A lookup table addressed by absolute index is shared, not un-sharded.
+
+    ``tile.gather`` computes ``out[i] = src[indices[i]]`` and takes its result
+    shape from ``indices``. The index values are absolute into ``src``, so halving
+    ``indices`` already gives each lane its own half of the OUTPUT while both read
+    the whole table — the correct lowering, not a missing shard.
+
+    Positional correspondence is what the guard is really about, and ``src`` has
+    none with the result, so ``tile.gather`` declares it lane-invariant alongside
+    its ``tmp``. See ``test_scatter_update_full_width_index_is_rejected`` for the
+    dual, which must stay rejected.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            idx: pl.Tensor[[256, 128], pl.INT32],
+            scratch: pl.Tensor[[256, 128], pl.INT32],
+            src: pl.Tile[[256, 128], pl.FP32, pl.Mem.Vec],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_0: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+        ) -> pl.Tensor[[256, 128], pl.FP32]:
+            indices = pl.tile.load(idx, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            # tmp is shape-MATCHED to indices on A2/A3, so it is loaded inside the
+            # region and halves with them. Only `src` is lane-shared.
+            tmp = pl.tile.load(scratch, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            picked = pl.tile.gather(src, indices, tmp)
+            gathered_mat = pl.tile.move(picked, target_memory=pl.Mem.Mat)
+            left = pl.tile.move(gathered_mat, target_memory=pl.Mem.Left)
+            acc = pl.tile.matmul(left, rhs)
+            out_store = pl.tile.store(acc, [0, 0], out_0)
+            return out_store
+
+    @pl.program
+    class Expected:
+        @pl.function(
+            type=pl.FunctionType.InCore,
+            attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": True},
+        )
+        def split_auto(
+            idx: pl.Tensor[[256, 128], pl.INT32],
+            scratch: pl.Tensor[[256, 128], pl.INT32],
+            src: pl.Tile[[256, 128], pl.FP32, pl.Mem.Vec],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_0: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+        ) -> pl.Tensor[[256, 128], pl.FP32]:
+            subblock_idx = pl.tile.get_subblock_idx()
+            indices = pl.tile.load(
+                idx, [0 + subblock_idx * 128, 0], [128, 128], [128, 128], target_memory=pl.Mem.Vec
+            )
+            tmp = pl.tile.load(
+                scratch, [0 + subblock_idx * 128, 0], [128, 128], [128, 128], target_memory=pl.Mem.Vec
+            )
+            # `src` stays whole; indices, tmp and the result are all halved.
+            picked = pl.tile.gather(src, indices, tmp)
+            gathered_mat_mat = pl.tile.aic_gather(picked, split=1)
+            gathered_mat = pl.tile.move(gathered_mat_mat, target_memory=pl.Mem.Mat)
+            left = pl.tile.move(gathered_mat, target_memory=pl.Mem.Left)
+            acc = pl.tile.matmul(left, rhs)
+            out_store = pl.tile.store(acc, [0, 0], out_0)
+            return out_store
+
+    ir.assert_structural_equal(_lower(Before), Expected)
+
+
+def test_gatherb_full_width_table_is_lane_shared():
+    """The byte-offset form of the same shape: `offset` carries the addressing."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            off_t: pl.Tensor[[256, 128], pl.UINT32],
+            src: pl.Tile[[256, 128], pl.FP32, pl.Mem.Vec],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_0: pl.Out[pl.Tensor[[256, 1024], pl.FP32]],
+        ) -> pl.Tensor[[256, 1024], pl.FP32]:
+            offset = pl.tile.load(off_t, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            picked = pl.tile.gatherb(src, offset, output_dtype=pl.FP32)
+            seed = pl.tile.move(rhs, target_memory=pl.Mem.Mat)  # noqa: F841
+            out_store = pl.tile.store(picked, [0, 0], out_0)
+            return out_store
+
+    lowered = _lower(Before)
+    printed = lowered.as_python()
+    # The table stays [256, 128] while the gathered result halves to [128, 1024].
+    assert "pl.tile.gatherb(src, offset" in printed
+    assert "[128, 1024]" in printed
+
+
+def test_gather_partitioned_table_producer_is_rejected():
+    """Declaring the table lane-shared permits full width; it does not keep it so.
+
+    Nothing stops the operand's own producer from being halved: a ``tile.load``
+    inside the region is halved with the lane offset baked in. The index values
+    are absolute into the WHOLE table, so lane 1 reads the wrong rows and an index
+    past the halved extent is out of bounds.
+
+    Neither other gate sees this. The operand is tracked, so condition (1) skips
+    it; and ``tile.gather`` deduces its result from ``indices`` alone, so
+    condition (2) is satisfied. It needs its own check.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            tbl: pl.Tensor[[256, 128], pl.FP32],
+            idx: pl.Tensor[[256, 128], pl.INT32],
+            tmp: pl.Tile[[256, 128], pl.INT32, pl.Mem.Vec],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_0: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+        ) -> pl.Tensor[[256, 128], pl.FP32]:
+            # The lookup table is LOADED inside the region, so the pass halves it.
+            src = pl.tile.load(tbl, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            indices = pl.tile.load(idx, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            picked = pl.tile.gather(src, indices, tmp)
+            gathered_mat = pl.tile.move(picked, target_memory=pl.Mem.Mat)
+            left = pl.tile.move(gathered_mat, target_memory=pl.Mem.Left)
+            acc = pl.tile.matmul(left, rhs)
+            out_store = pl.tile.store(acc, [0, 0], out_0)
+            return out_store
+
+    with pytest.raises(ValueError, match="ABSOLUTE indices") as exc_info:
+        _lower(Before)
+    message = str(exc_info.value)
+    assert "'src'" in message
+    # The remedy names where the table has to come from.
+    assert "OUTSIDE the automatically split region" in message
+
+
+def test_gatherb_partitioned_table_producer_is_rejected():
+    """The byte-offset form carries the same absolute-addressing hazard."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            tbl: pl.Tensor[[256, 128], pl.FP32],
+            off_t: pl.Tensor[[256, 128], pl.UINT32],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_0: pl.Out[pl.Tensor[[256, 1024], pl.FP32]],
+        ) -> pl.Tensor[[256, 1024], pl.FP32]:
+            src = pl.tile.load(tbl, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            offset = pl.tile.load(off_t, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            picked = pl.tile.gatherb(src, offset, output_dtype=pl.FP32)
+            seed = pl.tile.move(rhs, target_memory=pl.Mem.Mat)  # noqa: F841
+            out_store = pl.tile.store(picked, [0, 0], out_0)
+            return out_store
+
+    with pytest.raises(ValueError, match="ABSOLUTE indices") as exc_info:
+        _lower(Before)
+    assert "'src'" in str(exc_info.value)
+
+
+def test_scratch_with_partitioned_producer_is_still_accepted():
+    """Halving is harmless for scratch, so the two declared kinds must differ.
+
+    ``tile.row_sum``'s ``tmp_tile`` contract is a size relation to the input
+    ("at least as large as"), and a halved input takes a halved scratch with it.
+    Rejecting every partitioned lane-invariant operand would break this, which is
+    why ``LaneInvariantArg`` records *why* an operand is lane-invariant rather
+    than just that it is.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            x: pl.Tensor[[256, 128], pl.FP32],
+            s: pl.Tensor[[256, 128], pl.FP32],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_0: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+        ) -> pl.Tensor[[256, 128], pl.FP32]:
+            v = pl.tile.load(x, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            # Scratch produced INSIDE the region, so the pass halves it too.
+            scratch = pl.tile.load(s, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            sums = pl.tile.row_sum(v, scratch)
+            vec_h = pl.tile.row_expand_mul(v, sums)
+            gathered_mat = pl.tile.move(vec_h, target_memory=pl.Mem.Mat)
+            left = pl.tile.move(gathered_mat, target_memory=pl.Mem.Left)
+            acc = pl.tile.matmul(left, rhs)
+            out_store = pl.tile.store(acc, [0, 0], out_0)
+            return out_store
+
+    printed = _lower(Before).as_python()
+    # Both the input and its scratch halve together; the reduction follows.
+    assert printed.count("[128, 128], pl.FP32, pl.Mem.Vec") >= 2
+    assert "pl.tile.row_sum(v, scratch)" in printed
+
+
+def test_gather_partitioned_table_is_rejected_even_with_a_singleton_result():
+    """The absolute-index check cannot hang off the halving path.
+
+    With ``indices`` shaped ``[1, N]`` the gather result is ``[1, N]`` too, so the
+    result's split axis is singleton and the halving path returns early — nothing
+    about the RESULT is rewritten. The table underneath it is still halved by its
+    own producer, and the trailing ``Substitute`` still swaps the halved var in,
+    so the absolute indices address the wrong half regardless. The check
+    therefore runs before the singleton early-return, not beside the halving.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            tbl: pl.Tensor[[256, 128], pl.FP32],
+            idx: pl.Tensor[[1, 128], pl.INT32],
+            tmp: pl.Tile[[1, 128], pl.INT32, pl.Mem.Vec],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_0: pl.Out[pl.Tensor[[1, 128], pl.FP32]],
+        ) -> pl.Tensor[[1, 128], pl.FP32]:
+            src = pl.tile.load(tbl, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            indices = pl.tile.load(idx, [0, 0], [1, 128], target_memory=pl.Mem.Vec)
+            picked = pl.tile.gather(src, indices, tmp)
+            seed = pl.tile.move(rhs, target_memory=pl.Mem.Mat)  # noqa: F841
+            out_store = pl.tile.store(picked, [0, 0], out_0)
+            return out_store
+
+    with pytest.raises(ValueError, match="ABSOLUTE indices") as exc_info:
+        _lower(Before)
+    assert "source operand 'src'" in str(exc_info.value)
+
+
+def test_tuple_result_op_over_a_partitioned_operand_is_rejected():
+    """A tuple result is not halveable, and its operands are substituted anyway.
+
+    ``tile.gather_compare`` returns ``Tuple[dst[rows, out_cols], cdst[1, rows]]``,
+    so the generic path — which only understands a single ``TileType`` — skips it
+    entirely: no full-width check, no type consistency, no halving. But the
+    trailing ``Substitute`` still rewrites its arguments, so the call ends up
+    declaring full-width tuple elements over a halved ``[128, 128]`` input. That
+    is illegal IR and would misallocate, so it is rejected; per-element split
+    mapping for tuple results is not implemented.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            t: pl.Tensor[[256, 128], pl.FP32],
+            tmp: pl.Tile[[256, 128], pl.FP32, pl.Mem.Vec],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_0: pl.Out[pl.Tensor[[256, 16], pl.INT32]],
+        ) -> pl.Tensor[[256, 16], pl.INT32]:
+            src = pl.tile.load(t, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            dst, cdst = pl.tile.gather_compare(src, pl.const(1.0, pl.FP32), tmp, cmp_mode="eq", out_cols=16)
+            seed = pl.tile.move(rhs, target_memory=pl.Mem.Mat)  # noqa: F841
+            out_store = pl.tile.store(dst, [0, 0], out_0)
+            return out_store
+
+    with pytest.raises(ValueError, match="returns a tuple of tiles") as exc_info:
+        _lower(Before)
+    assert "tile.gather_compare" in str(exc_info.value)
+
+
+def test_scatter_with_every_operand_partitioned_is_rejected():
+    """All three operands being tracked does not make absolute indices safe.
+
+    ``tile.scatter`` writes ``dst.flat[indexes[i, j]] = src[i, j]``, where the
+    indexes are FLATTENED offsets into the whole ``dst`` (a column write encodes
+    ``i * dst_cols + c``). Loading dst, src and indexes all inside the region
+    tracks every one of them, so the full-width check skips them all and type
+    consistency passes — yet the index values were never rebased, so the halved
+    row stride no longer matches and lane 1 writes past its destination.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            d: pl.Tensor[[256, 128], pl.FP32],
+            s: pl.Tensor[[256, 128], pl.FP32],
+            i: pl.Tensor[[256, 128], pl.INT32],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_0: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+        ) -> pl.Tensor[[256, 128], pl.FP32]:
+            dst = pl.tile.load(d, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            src = pl.tile.load(s, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            indexes = pl.tile.load(i, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            res = pl.tile.scatter(dst, src, indexes)
+            seed = pl.tile.move(rhs, target_memory=pl.Mem.Mat)  # noqa: F841
+            out_store = pl.tile.store(res, [0, 0], out_0)
+            return out_store
+
+    with pytest.raises(ValueError, match="ABSOLUTE indices") as exc_info:
+        _lower(Before)
+    assert "destination operand 'dst'" in str(exc_info.value)
+
+
+def test_shape_matched_scratch_is_not_exempt_at_full_width():
+    """A scratch whose shape the deducer pins is rejected with no metadata involved.
+
+    ``tile.row_argmax`` needs a tmp shaped *exactly* like the source — the
+    TROWARGMAX kernel reads the column count from the tmp/src extent, so a wider
+    tmp walks past the valid columns and can return the wrong index per column.
+    Nothing in the registry says so: ``DeduceTileRowReductionType`` runs with
+    ``require_exact_tmp_shape``, so re-deducing the halved call throws and the
+    type-consistency gate refuses it. The operator answers for itself.
+
+    That is why ``tile.row_sum`` needs a declaration and this one must not have
+    one — see ``test_declared_scratch_operand_stays_full_width`` for the sibling
+    whose deducer never looks at ``tmp_tile``, and
+    ``tests/ut/ir/operators/test_lane_invariant_arg_coverage.py`` for the check
+    that keeps the two apart as deducers change.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            x: pl.Tensor[[256, 128], pl.FP32],
+            tmp: pl.Tile[[256, 128], pl.FP32, pl.Mem.Vec],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_0: pl.Out[pl.Tensor[[256, 1], pl.INT32]],
+        ) -> pl.Tensor[[256, 1], pl.INT32]:
+            v = pl.tile.load(x, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            picked = pl.tile.row_argmax(v, tmp)
+            seed = pl.tile.move(rhs, target_memory=pl.Mem.Mat)  # noqa: F841
+            out_store = pl.tile.store(picked, [0, 0], out_0)
+            return out_store
+
+    with pytest.raises(ValueError, match="carries a full-width operand") as exc_info:
+        _lower(Before)
+    assert "'tmp'" in str(exc_info.value)
+
+
+def test_scratch_the_deducer_pins_needs_no_declaration():
+    """The registry is consulted only where type deduction is silent.
+
+    ``DeduceTileRsqrtType`` requires ``tmp`` to match the input's rank and every
+    dimension, so a full-width ``tmp`` beside a halved input is already refused by
+    re-deducing the halved call. ``tile.rsqrt`` therefore carries NO
+    ``set_lane_invariant_arg`` — one would claim full width is in contract while
+    the operator itself rejects that width, and could never be reached.
+
+    Pinning it here keeps the two halves of the model honest: this is the case a
+    declaration must *not* cover, and
+    ``tests/ut/ir/operators/test_lane_invariant_arg_coverage.py`` fails if one is
+    ever added back.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            x: pl.Tensor[[256, 128], pl.FP32],
+            tmp: pl.Tile[[256, 128], pl.FP32, pl.Mem.Vec],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_0: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+        ) -> pl.Tensor[[256, 128], pl.FP32]:
+            v = pl.tile.load(x, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            scaled = pl.tile.rsqrt(v, tmp=tmp)
+            gathered_mat = pl.tile.move(scaled, target_memory=pl.Mem.Mat)
+            left = pl.tile.move(gathered_mat, target_memory=pl.Mem.Left)
+            acc = pl.tile.matmul(left, rhs)
+            out_store = pl.tile.store(acc, [0, 0], out_0)
+            return out_store
+
+    with pytest.raises(ValueError, match="carries a full-width operand") as exc_info:
+        _lower(Before)
+    assert "'tmp'" in str(exc_info.value)
+
+
+def test_target_dependent_scratch_stays_exempt():
+    """Whether an oversized scratch is out of contract can be a TARGET question.
+
+    ``tile.gather``'s index form does not read ``tmp`` at all on A5, so a
+    full-width external tmp beside halved indices is legal there; A2/A3 requires
+    it to match the indices, and the PTOAS verifier already enforces that where
+    the target is known. Rejecting here would break the legal A5 form to
+    duplicate a check this pass cannot make accurately, so the exemption stays.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            idx: pl.Tensor[[256, 128], pl.INT32],
+            src: pl.Tile[[256, 128], pl.FP32, pl.Mem.Vec],
+            tmp: pl.Tile[[256, 128], pl.INT32, pl.Mem.Vec],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_0: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+        ) -> pl.Tensor[[256, 128], pl.FP32]:
+            indices = pl.tile.load(idx, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            picked = pl.tile.gather(src, indices, tmp)
+            gathered_mat = pl.tile.move(picked, target_memory=pl.Mem.Mat)
+            left = pl.tile.move(gathered_mat, target_memory=pl.Mem.Left)
+            acc = pl.tile.matmul(left, rhs)
+            out_store = pl.tile.store(acc, [0, 0], out_0)
+            return out_store
+
+    printed = _lower(Before).as_python()
+    assert "pl.tile.gather(src, indices, tmp)" in printed
+    # tmp keeps its declared full width; only `indices` and the result are halved.
+    assert "tmp: pl.Tile[[256, 128], pl.INT32" in printed
+    assert "picked: pl.Tile[[128, 128]" in printed
+
+
+def test_loop_carried_tile_accumulator_is_tracked():
+    """The AUTO path must repair loop carries, or it rejects a legal accumulator.
+
+    The AUTO arm recurses through its own affinity-gated walk rather than
+    ``ProcessStmts``, so it never reached the ``ForStmt`` carry repair. The
+    ``iter_arg`` then stayed full width and untracked while its init was halved,
+    and the ``tile.add`` on the carry was reported as a full-width operand — a
+    legal program failing to compile. Existing loop coverage carried only
+    ``Tensor`` iter_args, which are never halved and so never showed this.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            cube_seed: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat],
+            data: pl.Tensor[[128, 128], pl.FP32],
+            out_0: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            seed_vec = pl.tile.move(cube_seed, target_memory=pl.Mem.Vec)  # noqa: F841
+            accum = pl.tile.load(data, [0, 0], [128, 128], target_memory=pl.Mem.Vec)
+            for i, (acc_it,) in pl.range(2, init_values=(accum,)):  # noqa: B007
+                acc_next = pl.tile.add(acc_it, acc_it)
+                acc_loop = pl.yield_(acc_next)
+            out_store = pl.tile.store(acc_loop, [0, 0], out_0)
+            return out_store
+
+    printed = _lower(Before).as_python()
+    # The carry and everything derived from it are lane-local.
+    assert "pl.tile.add(acc_it, acc_it)" in printed
+    assert printed.count("[64, 128]") >= 3
+    # The store on the loop-exit var picks up the per-lane offset.
+    assert "subblock_idx * 64" in printed
+
+
+def test_slice_drop_dims_maps_the_result_axis_back_to_the_source_axis():
+    """shape / offset / valid_shape are indexed in the PRE-DROP rank.
+
+    ``drop_dims`` erases axes from the result after those tuples are built, so
+    ``slice([1, 256, 128], drop_dims=[0]) -> [256, 128]`` puts the result's dim 0
+    on the source's dim 1. Halving the source's dim 0 instead left the node
+    disagreeing with its own arguments, and the type-consistency check then
+    rejected a legal split.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            cube_seed: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat],
+            data: pl.Tensor[[1, 256, 128], pl.FP32],
+            out_0: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+        ) -> pl.Tensor[[256, 128], pl.FP32]:
+            seed_vec = pl.tile.move(cube_seed, target_memory=pl.Mem.Vec)  # noqa: F841
+            v = pl.tile.load(data, [0, 0, 0], [1, 256, 128], target_memory=pl.Mem.Vec)
+            sl = pl.tile.slice(v, [1, 256, 128], [0, 0, 0], drop_dims=[0])
+            out_store = pl.tile.store(sl, [0, 0], out_0)
+            return out_store
+
+    printed = _lower(Before).as_python()
+    # The halved extent and the lane offset both land on source axis 1, not 0.
+    assert "pl.tile.slice(v, [1, 128, 128], [0, 0 + subblock_idx * 128, 0]" in printed
+
+
+def test_slice_drop_dims_maps_across_two_dropped_axes():
+    """Two dropped axes, so the mapping has to walk past both.
+
+    The mapping consumes ``drop_dims`` with a single cursor, relying on
+    ``ParseSliceDropDims`` returning the axes ascending. One dropped axis cannot
+    tell that cursor apart from one that never advances — both land on the same
+    answer — so the shift only shows up once a second axis is dropped:
+    ``slice([1, 1, 256, 128], drop_dims=[0, 1]) -> [256, 128]`` puts the result's
+    dim 0 on the source's dim 2.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            cube_seed: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat],
+            data: pl.Tensor[[1, 1, 256, 128], pl.FP32],
+            out_0: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+        ) -> pl.Tensor[[256, 128], pl.FP32]:
+            seed_vec = pl.tile.move(cube_seed, target_memory=pl.Mem.Vec)  # noqa: F841
+            v = pl.tile.load(data, [0, 0, 0, 0], [1, 1, 256, 128], target_memory=pl.Mem.Vec)
+            sl = pl.tile.slice(v, [1, 1, 256, 128], [0, 0, 0, 0], drop_dims=[0, 1])
+            out_store = pl.tile.store(sl, [0, 0], out_0)
+            return out_store
+
+    printed = _lower(Before).as_python()
+    # Source axis 2 carries the halved extent and the lane offset; 0 and 1 are dropped.
+    assert "pl.tile.slice(v, [1, 1, 128, 128], [0, 0, 0 + subblock_idx * 128, 0]" in printed
+
+
+def test_scatter_update_partitioned_destination_is_rejected():
+    """The scatter dual addresses a DESTINATION by absolute index.
+
+    ``tile.scatter_update`` takes its result from ``input`` and writes rows named
+    by absolute ``index`` values, so a partitioned ``input`` is written at the
+    wrong offsets. The symmetry with ``tile.gather`` is only apparent: gather may
+    keep a full-width source, whereas here the destination is what must stay
+    whole, and ``index`` / ``src`` remain ordinary per-lane data.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            x: pl.Tensor[[256, 128], pl.FP32],
+            index: pl.Tile[[256, 128], pl.INT32, pl.Mem.Vec],
+            values: pl.Tile[[256, 128], pl.FP32, pl.Mem.Vec],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_0: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+        ) -> pl.Tensor[[256, 128], pl.FP32]:
+            base = pl.tile.load(x, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            upd = pl.tile.scatter_update(base, index, values, dim=-2)
+            gathered_mat = pl.tile.move(upd, target_memory=pl.Mem.Mat)
+            left = pl.tile.move(gathered_mat, target_memory=pl.Mem.Left)
+            acc = pl.tile.matmul(left, rhs)
+            out_store = pl.tile.store(acc, [0, 0], out_0)
+            return out_store
+
+    with pytest.raises(ValueError, match="ABSOLUTE indices") as exc_info:
+        _lower(Before)
+    message = str(exc_info.value)
+    assert "destination operand 'base'" in message
+    assert "writes to the wrong half" in message
+
+
+@pytest.mark.parametrize("ascend_backend", [_backend.BackendType.Ascend950], indirect=True)
+def test_tensor_gather_in_a_split_region_is_diagnosed_through_the_pipeline(ascend_backend):
+    """The user-level path reaches the guard, not just hand-written tile IR.
+
+    ``pl.gather`` over a tensor lowers to a ``tile.load`` of the table feeding
+    ``tile.gather`` (`op_conversion_registry.cpp`), and only then does
+    ``LowerAutoVectorSplit`` run — so the table is produced *inside* the split
+    region as a matter of course, and this is the ordinary A5 spelling rather
+    than a hand-built corner. Driving the real pipeline is what proves the guard
+    is reachable the way an author would hit it; the tile-level tests above pass
+    the table as a parameter, which is exactly the shape that never gets halved.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def main(
+            tbl: pl.Tensor[[256, 128], pl.FP32],
+            idx: pl.Tensor[[256, 128], pl.INT32],
+            w: pl.Tensor[[128, 128], pl.FP32],
+            out_0: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+        ) -> pl.Tensor[[256, 128], pl.FP32]:
+            picked = pl.gather(tbl, dim=-1, index=idx)
+            acc = pl.matmul(picked, w)
+            out_0[0:256, 0:128] = acc
+            return out_0
+
+    manager = PassManager(OptimizationStrategy.Default)
+    with pytest.raises(ValueError, match="ABSOLUTE indices") as exc_info:
+        with passes.PassContext([]):
+            manager.run_passes(Before)
+    # The operand named is the tile.load the tensor->tile conversion synthesized.
+    assert "tile.gather" in str(exc_info.value)
+
+
+def test_transpose_view_of_full_width_source_is_rejected():
+    """An axis-permuting view does not obey the broadcast right-alignment.
+
+    ``tile.transpose_view`` swaps the trailing two dims, so an untracked
+    ``[1, 256]`` source under ``UP_DOWN`` presents a *singleton* on the axis the
+    right-alignment maps the result's split dim onto — condition (1) accepts it.
+    The halved ``[128, 1]`` result then contradicts the ``[256, 1]`` the operand
+    deduces, and only condition (2) catches that. Unlike ``tile.transpose``, this
+    is a pure view and is outside ``FindTransposeSplitHazard``.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            cube_seed: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat],
+            data: pl.Tile[[1, 256], pl.FP32, pl.Mem.Vec],
+            out_0: pl.Out[pl.Tensor[[256, 1], pl.FP32]],
+        ) -> pl.Tensor[[256, 1], pl.FP32]:
+            seed_vec = pl.tile.move(cube_seed, target_memory=pl.Mem.Vec)  # noqa: F841
+            viewed = pl.tile.transpose_view(data)
+            out_store = pl.tile.store(viewed, [0, 0], out_0)
+            return out_store
+
+    with pytest.raises(ValueError, match="no longer matches type inference") as exc_info:
+        _lower(Before)
+    assert "tile.transpose_view" in str(exc_info.value)
+
+
+# The full-width-operand guard matches operands to the result from the RIGHT, the
+# alignment BroadcastShapes gives ``tile.add([M, N], [N]) -> [M, N]``. The three
+# tests below pin both answers that alignment produces for the same [128] bias,
+# plus the same-rank singleton it must not be confused with. Indexing the operand
+# with the result's ABSOLUTE split dim gets both directions wrong: it rejects the
+# legal shared bias under UP_DOWN, and under LEFT_RIGHT it reads the index as out
+# of range and skips the operand that does span the split axis.
+
+
+def test_rank1_broadcast_operand_off_the_split_axis_is_shared():
+    """A [128] bias right-aligns to dim 1, so UP_DOWN leaves it whole.
+
+    The bias has no axis of its own on the split dim, so both AIV lanes read it
+    entire while the ``tile.add`` result still halves to [128, 128].
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            x: pl.Tensor[[256, 128], pl.FP32],
+            bias: pl.Tile[[128], pl.FP32, pl.Mem.Vec],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_0: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+        ) -> pl.Tensor[[256, 128], pl.FP32]:
+            v = pl.tile.load(x, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            vec_h = pl.tile.add(v, bias)
+            gathered_mat = pl.tile.move(vec_h, target_memory=pl.Mem.Mat)
+            left = pl.tile.move(gathered_mat, target_memory=pl.Mem.Left)
+            acc = pl.tile.matmul(left, rhs)
+            out_store = pl.tile.store(acc, [0, 0], out_0)
+            return out_store
+
+    @pl.program
+    class Expected:
+        @pl.function(
+            type=pl.FunctionType.InCore,
+            attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": True},
+        )
+        def split_auto(
+            x: pl.Tensor[[256, 128], pl.FP32],
+            bias: pl.Tile[[128], pl.FP32, pl.Mem.Vec],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_0: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+        ) -> pl.Tensor[[256, 128], pl.FP32]:
+            subblock_idx = pl.tile.get_subblock_idx()
+            v = pl.tile.load(x, [0 + subblock_idx * 128, 0], [128, 128], [128, 128], target_memory=pl.Mem.Vec)
+            vec_h = pl.tile.add(v, bias)
+            gathered_mat_mat = pl.tile.aic_gather(vec_h, split=1)
+            gathered_mat = pl.tile.move(gathered_mat_mat, target_memory=pl.Mem.Mat)
+            left = pl.tile.move(gathered_mat, target_memory=pl.Mem.Left)
+            acc = pl.tile.matmul(left, rhs)
+            out_store = pl.tile.store(acc, [0, 0], out_0)
+            return out_store
+
+    ir.assert_structural_equal(_lower(Before), Expected)
+
+
+def test_rank1_broadcast_operand_on_the_split_axis_is_rejected():
+    """The SAME [128] bias right-aligns onto dim 1, which LEFT_RIGHT splits.
+
+    Nothing partitions the bias, so halving only the add's result would emit
+    ``tile.add([128, 64], [128]) -> [128, 64]``. The operand must be reported on
+    its OWN axis 0, not skipped as out of range.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.LEFT_RIGHT})
+        def split_auto(
+            x: pl.Tensor[[256, 128], pl.FP32],
+            bias: pl.Tile[[128], pl.FP32, pl.Mem.Vec],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_0: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+        ) -> pl.Tensor[[256, 128], pl.FP32]:
+            v = pl.tile.load(x, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            vec_h = pl.tile.add(v, bias)
+            gathered_mat = pl.tile.move(vec_h, target_memory=pl.Mem.Mat)
+            left = pl.tile.move(gathered_mat, target_memory=pl.Mem.Left)
+            acc = pl.tile.matmul(left, rhs)
+            out_store = pl.tile.store(acc, [0, 0], out_0)
+            return out_store
+
+    with pytest.raises(ValueError, match="carries a full-width operand") as exc_info:
+        _lower(Before)
+    message = str(exc_info.value)
+    assert "'bias'" in message
+    # Reported on the OPERAND's own axis, which is 0 here, not the result's 1.
+    assert "on its dim 0" in message
+
+
+def test_same_rank_singleton_operand_is_shared():
+    """A same-rank [1, 128] bias is replicated, not partitioned.
+
+    This is the other accepting branch and must not be confused with the
+    right-alignment one: the axis exists, it is simply singleton.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            x: pl.Tensor[[256, 128], pl.FP32],
+            bias: pl.Tile[[1, 128], pl.FP32, pl.Mem.Vec],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_0: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+        ) -> pl.Tensor[[256, 128], pl.FP32]:
+            v = pl.tile.load(x, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            vec_h = pl.tile.add(v, bias)
+            gathered_mat = pl.tile.move(vec_h, target_memory=pl.Mem.Mat)
+            left = pl.tile.move(gathered_mat, target_memory=pl.Mem.Left)
+            acc = pl.tile.matmul(left, rhs)
+            out_store = pl.tile.store(acc, [0, 0], out_0)
+            return out_store
+
+    @pl.program
+    class Expected:
+        @pl.function(
+            type=pl.FunctionType.InCore,
+            attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": True},
+        )
+        def split_auto(
+            x: pl.Tensor[[256, 128], pl.FP32],
+            bias: pl.Tile[[1, 128], pl.FP32, pl.Mem.Vec],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_0: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+        ) -> pl.Tensor[[256, 128], pl.FP32]:
+            subblock_idx = pl.tile.get_subblock_idx()
+            v = pl.tile.load(x, [0 + subblock_idx * 128, 0], [128, 128], [128, 128], target_memory=pl.Mem.Vec)
+            vec_h = pl.tile.add(v, bias)
+            gathered_mat_mat = pl.tile.aic_gather(vec_h, split=1)
+            gathered_mat = pl.tile.move(gathered_mat_mat, target_memory=pl.Mem.Mat)
+            left = pl.tile.move(gathered_mat, target_memory=pl.Mem.Left)
+            acc = pl.tile.matmul(left, rhs)
+            out_store = pl.tile.store(acc, [0, 0], out_0)
+            return out_store
+
+    ir.assert_structural_equal(_lower(Before), Expected)
 
 
 def test_vc_boundary_gathers_on_the_migrated_split_axis():

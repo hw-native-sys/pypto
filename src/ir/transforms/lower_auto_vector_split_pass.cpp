@@ -343,6 +343,14 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
         continue;
       }
 
+      // Transpose hazard BEFORE halving, matching the explicit-boundary arm
+      // above. FindTransposeSplitHazard is a structural check on the input (the
+      // transpose's axis args and its operand's split-dim extent), so it needs no
+      // lowered form — and running it first keeps its specific diagnostic ahead
+      // of the generic full-width-operand rejection the halving would otherwise
+      // raise on the same statement.
+      ValidateTransposeSplitHazard(region_stmts, rdim, reg->span_);
+
       std::unordered_map<const Var*, TileInfo> r_tile_vars;
       std::unordered_map<const Var*, VarPtr> r_var_repl;
       // Reserve the injected per-region index against every name visible in the
@@ -354,14 +362,13 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
       auto lowered =
           LowerStmts(inj.body_stmts, rmode, rdim, r_tile_vars, inj.subblock_idx_expr, r_var_repl, used_names);
 
-      // Per-region cube-operand backstop and transpose-hazard check, using THIS
-      // region's split_dim and span so diagnostics point at the region.
+      // Per-region cube-operand backstop, using THIS region's span so the
+      // diagnostic points at the region.
       bool cube_halved = false;
       CheckNoCubeTileHalved(lowered, r_tile_vars, cube_halved);
       INTERNAL_CHECK_SPAN(!cube_halved, reg->span_)
           << "Internal error: LowerAutoVectorSplit halved a CUBE-affinity op inside a pl.split_aiv "
              "region — the vector-sub-region affinity gate leaked into a cube operand.";
-      ValidateTransposeSplitHazard(lowered, rdim, reg->span_);
 
       StmtPtr region_body =
           (lowered.size() == 1) ? lowered[0] : std::make_shared<SeqStmts>(lowered, reg->span_);
@@ -547,12 +554,21 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
 
     // --- Compound stmts: recurse into the body for vector content. ---
     if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+      // Repair the loop-carried state around the recursion, exactly as
+      // split_axis::ProcessStmt does for the explicit path. This arm recurses
+      // through LowerStmts (only VECTOR leaves may be halved) rather than
+      // ProcessStmts, so it cannot reach that branch and used to leave every
+      // iter_arg full width and untracked -- a legal tile accumulator whose init
+      // was halved then had its carry reported as a full-width operand.
+      auto new_iter_args = split_axis::RepairIterArgs(for_stmt->iter_args_, tile_vars, var_replacements,
+                                                      subblock_idx, lane_stride);
       auto body = transform_utils::FlattenToStmts(for_stmt->body_);
       auto new_body = LowerStmts(body, mode, split_dim, tile_vars, subblock_idx, var_replacements, used_names,
                                  lane_stride);
-      auto new_for = MutableCopy(for_stmt);
-      new_for->body_ = loop_repair::MakeBody(new_body, for_stmt->span_);
-      result.push_back(new_for);
+      auto new_return_vars = split_axis::RepairReturnVars(for_stmt->return_vars_, new_iter_args, tile_vars,
+                                                          var_replacements, subblock_idx, lane_stride);
+      result.push_back(loop_repair::RebuildForStmt(
+          for_stmt, new_iter_args, loop_repair::MakeBody(new_body, for_stmt->span_), new_return_vars));
       continue;
     }
     if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
@@ -573,12 +589,16 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
       continue;
     }
     if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
+      // Same carry repair as the ForStmt arm above.
+      auto new_iter_args = split_axis::RepairIterArgs(while_stmt->iter_args_, tile_vars, var_replacements,
+                                                      subblock_idx, lane_stride);
       auto body = transform_utils::FlattenToStmts(while_stmt->body_);
       auto new_body = LowerStmts(body, mode, split_dim, tile_vars, subblock_idx, var_replacements, used_names,
                                  lane_stride);
-      auto new_while = MutableCopy(while_stmt);
-      new_while->body_ = loop_repair::MakeBody(new_body, while_stmt->span_);
-      result.push_back(new_while);
+      auto new_return_vars = split_axis::RepairReturnVars(while_stmt->return_vars_, new_iter_args, tile_vars,
+                                                          var_replacements, subblock_idx, lane_stride);
+      result.push_back(loop_repair::RebuildWhileStmt(
+          while_stmt, new_iter_args, loop_repair::MakeBody(new_body, while_stmt->span_), new_return_vars));
       continue;
     }
 
