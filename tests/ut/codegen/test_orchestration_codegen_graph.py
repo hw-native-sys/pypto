@@ -365,6 +365,84 @@ class _SubmitDeps:
         return c, d
 
 
+@pl.program
+class _BatchedAllocs:
+    """A Graph whose body allocates 20 tensors, each consumed by a launch.
+
+    The interleaving is the point: a launch between two creates does not close
+    the batch, so codegen packs all 20 into ``ceil(20 / 16) = 2``
+    ``alloc_tensors`` calls -- two recorded nodes, not twenty.
+    """
+
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(
+        self, x: pl.Tensor[[128, 128], pl.FP32], o: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
+        t: pl.Tile[[128, 128], pl.FP32] = pl.load(x, [0, 0], [128, 128])
+        o = pl.store(t, [0, 0], o)
+        return o
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(
+        self,
+        a: pl.Tensor[[128, 128], pl.FP32],
+        c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
+        # Chained so every buffer stays live: an unused create would be folded
+        # away and the batch would never reach the packing boundary.
+        s0: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+        s0 = self.kernel(a, s0)
+        s1: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+        s1 = self.kernel(s0, s1)
+        s2: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+        s2 = self.kernel(s1, s2)
+        s3: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+        s3 = self.kernel(s2, s3)
+        s4: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+        s4 = self.kernel(s3, s4)
+        s5: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+        s5 = self.kernel(s4, s5)
+        s6: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+        s6 = self.kernel(s5, s6)
+        s7: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+        s7 = self.kernel(s6, s7)
+        s8: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+        s8 = self.kernel(s7, s8)
+        s9: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+        s9 = self.kernel(s8, s9)
+        s10: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+        s10 = self.kernel(s9, s10)
+        s11: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+        s11 = self.kernel(s10, s11)
+        s12: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+        s12 = self.kernel(s11, s12)
+        s13: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+        s13 = self.kernel(s12, s13)
+        s14: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+        s14 = self.kernel(s13, s14)
+        s15: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+        s15 = self.kernel(s14, s15)
+        s16: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+        s16 = self.kernel(s15, s16)
+        s17: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+        s17 = self.kernel(s16, s17)
+        s18: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+        s18 = self.kernel(s17, s18)
+        s19: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+        s19 = self.kernel(s18, s19)
+        c = self.kernel(s19, c)
+        return c
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        a: pl.Tensor[[128, 128], pl.FP32],
+        c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
+        c = self.layer(a, c)
+        return c
+
+
 def _compile_orch(program) -> str:
     """Compile one program for host_build_graph and return orchestration/main.cpp."""
     out_dir = tempfile.mkdtemp()
@@ -399,6 +477,36 @@ def test_graph_helper_binds_submit_task_ids():
     body = _graph_body(_compile_orch(_SubmitDeps))
     assert "TaskId t1 = task_0_outs.task_id();" in body, body
     assert "] = t1;" in body, body
+
+
+def _alloc_batch_sizes(body: str) -> list[int]:
+    """Operand count of each ``alloc_tensors`` call in @p body, in order."""
+    return [len(args.split(",")) for args in re.findall(r"alloc_tensors\(([^)]*)\)", body)]
+
+
+def test_graph_allocations_are_packed_sixteen_to_a_node():
+    """Pins codegen to the node count `LegalizeGraphBoundary` charges it.
+
+    The pass and the verifier both estimate a Graph's recorded node count from
+    `alloc_batching::BatchedAllocationNodes`, and reject the region when the
+    total leaves `1..GRAPH_MAX_NODES`. That estimate is only correct because
+    codegen packs `kAllocTensorsArgs` creates per `alloc_tensors` and lets a
+    launch sit between two creates without closing the batch -- which nothing
+    on the codegen side asserted, so a change here would desynchronise the two
+    silently: an over-count rejects a legal Graph, an under-count admits one the
+    runtime then declines to cache and replays as ordinary tasks.
+
+    The counterpart is
+    `test_legalize_graph_boundary.py::test_interleaved_allocations_batch_across_the_statement_list`,
+    which pins the same 20 creates to 2 nodes on the pass side.
+    """
+    body = _graph_body(_compile_orch(_BatchedAllocs))
+    # 16 + 4, not 20 single-create calls and not a batch closed by each launch.
+    assert _alloc_batch_sizes(body) == [16, 4], body
+    # The other half of the node total the pass computes: 21 launches + 2
+    # allocation nodes. A launch that stopped being emitted would make the
+    # batching assertion above pass while the totals still diverged.
+    assert body.count("rt_submit_") == 21, body
 
 
 if __name__ == "__main__":
