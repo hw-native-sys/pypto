@@ -126,14 +126,16 @@ def test_replay_routes_to_execute_compiled(tmp_path: Path) -> None:
     work_dir = _make_build_output(tmp_path)
     a = torch.zeros(2)
     b = torch.zeros(2)
+    config = RunConfig(platform="a2a3sim", device_id=3, ring_heap=512 * 1024 * 1024)
     with patch.object(replay_module, "execute_compiled") as ec:
-        replay(work_dir, a, b, config=RunConfig(platform="a2a3sim", device_id=3))
+        replay(work_dir, a, b, config=config)
     ec.assert_called_once()
     call_args = ec.call_args
     assert call_args.args[0] == work_dir
     assert call_args.args[1] == [a, b]
     assert call_args.kwargs["platform"] == "a2a3sim"
     assert call_args.kwargs["device_id"] == 3
+    assert call_args.kwargs["config"] is config
 
 
 def test_replay_forwards_dfx_flags(tmp_path: Path) -> None:

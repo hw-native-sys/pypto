@@ -215,6 +215,7 @@ def replay(
             platform=config.platform,
             device_id=config.device_id,
             dfx=_DfxOpts.from_run_config(config),
+            config=config,
         )
 
     if named_tensors is not None:

@@ -4,7 +4,7 @@ PyPTO exposes Simpler's per-task ring sizing as three optional overrides on
 [`RunConfig`](../../../python/pypto/runtime/runner.py). They let you size the
 runtime's per-task ring resources for a single dispatch without touching the
 compiled artifact or any global state. This works on both the L2 single-chip
-path (`run()` / `ChipWorker.run()`) and the L3 distributed path
+path (`run()` / `execute_compiled()` / `ChipWorker.run()`) and the L3 distributed path
 (`DistributedWorker.run()` / the one-shot `compiled(...)`).
 
 The runtime keeps its task-launch resources in *ring buffers*. Each override
@@ -57,7 +57,7 @@ than raising an opaque `TypeError` from the power-of-two check.
 
 ## Usage
 
-### L2 single-chip (`run`)
+### L2 single-chip (`run` / `execute_compiled`)
 
 ```python
 from pypto.runtime import run, RunConfig
@@ -73,6 +73,26 @@ compiled = run(
     ),
 )
 ```
+
+The directory-driven entry point accepts the same per-dispatch config. Its
+existing explicit `platform`, `device_id`, DFX, and AICPU arguments keep their
+current precedence; `config` carries the ring overrides that previously had no
+route to `CallConfig.runtime_env`:
+
+```python
+from pypto.runtime import RunConfig, execute_compiled
+
+execute_compiled(
+    work_dir,
+    [a, b, c],
+    platform="a2a3",
+    device_id=0,
+    config=RunConfig(platform="a2a3", ring_heap=512 * 1024 * 1024),
+)
+```
+
+The same ring sizing is used for worker prewarm, the device dispatch, and the
+dependency-capture subprocess used by onboard swimlane collection.
 
 ### L3 distributed (`DistributedWorker` / `compiled(...)`)
 

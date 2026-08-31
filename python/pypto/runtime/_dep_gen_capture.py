@@ -124,6 +124,10 @@ def main(argv: list[str]) -> int:
     if aicpu_thread_num is None:
         aicpu_thread_num = runtime_config.get("aicpu_thread_num")
 
+    from .runner import RunConfig  # noqa: PLC0415
+
+    config = RunConfig(platform=platform, **spec.get("ring_overrides", {}))
+
     dfx_dir.mkdir(parents=True, exist_ok=True)
     execute_on_device(
         chip_callable,
@@ -136,6 +140,7 @@ def main(argv: list[str]) -> int:
         enable_sdma=enable_sdma,
         output_prefix=str(dfx_dir),
         enable_dep_gen=True,
+        config=config,
     )
     return 0
 

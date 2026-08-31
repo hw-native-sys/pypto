@@ -1448,6 +1448,7 @@ def execute_compiled(  # noqa: PLR0913
     level: int = 2,
     aicpu_thread_num: int | None = None,
     analyze_auto_scopes_for_deps: bool = False,
+    config: RunConfig | None = None,
 ) -> None:
     """Execute a pre-compiled program with user-provided tensors and scalars.
 
@@ -1482,6 +1483,11 @@ def execute_compiled(  # noqa: PLR0913
             Accepted here so callers that reuse one config dictionary for
             compile and execute can pass it through safely. It has no effect
             after the program has already been compiled.
+        config: Optional per-dispatch :class:`RunConfig`. Its ring-sizing
+            fields are forwarded to ``CallConfig.runtime_env``. The existing
+            explicit ``platform``, ``device_id``, ``dfx``, and
+            ``aicpu_thread_num`` arguments keep their current behavior and
+            precedence.
 
     Device results are written back into the host tensors in *args* in
     place; per-run timing is no longer returned — read it from the runtime's
@@ -1531,6 +1537,7 @@ def execute_compiled(  # noqa: PLR0913
             enable_pmu=pass_dfx.enable_pmu,
             enable_dep_gen=pass_dfx.enable_dep_gen,
             enable_scope_stats=pass_dfx.enable_scope_stats,
+            config=config,
         )
 
     def _capture_deps() -> None:
@@ -1549,6 +1556,11 @@ def execute_compiled(  # noqa: PLR0913
                 "dfx_dir": str(dfx_dir),
                 "level": level,
                 "aicpu_thread_num": effective_aicpu_thread_num,
+                "ring_overrides": {
+                    "ring_task_window": config.ring_task_window if config is not None else None,
+                    "ring_heap": config.ring_heap if config is not None else None,
+                    "ring_dep_pool": config.ring_dep_pool if config is not None else None,
+                },
             },
             dfx_dir,
             run_id,

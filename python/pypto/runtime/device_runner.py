@@ -42,7 +42,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from importlib import import_module
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -64,6 +64,9 @@ from .task_interface import (
     CoreCallable,  # pyright: ignore[reportAttributeAccessIssue]
     Worker,  # pyright: ignore[reportAttributeAccessIssue]
 )
+
+if TYPE_CHECKING:
+    from .runner import RunConfig
 
 logger = logging.getLogger(__name__)
 
@@ -689,6 +692,7 @@ def execute_on_device(  # noqa: PLR0913
     enable_pmu: int = 0,
     enable_dep_gen: bool = False,
     enable_scope_stats: bool = False,
+    config: RunConfig | None = None,
     runtime_env: dict[str, str] | None = None,
 ) -> None:
     """Execute *chip_callable* on device via Simpler's unified ``Worker``.
@@ -741,6 +745,11 @@ def execute_on_device(  # noqa: PLR0913
         enable_scope_stats: Capture per-scope ring-fill peaks
             (``scope_stats/scope_stats.jsonl``). Mirrors
             ``--enable-scope-stats``.
+        config: Optional per-dispatch :class:`pypto.runtime.RunConfig`.
+            Its ``ring_task_window``, ``ring_heap``, and ``ring_dep_pool``
+            overrides are copied to ``CallConfig.runtime_env`` before worker
+            prewarm and dispatch. Existing explicit arguments above retain
+            their current behavior and precedence.
         runtime_env: Optional per-example environment variable overrides.
             Applied around the device ``run`` call. When an active
             :class:`pypto.runtime.ChipWorker` is reused, ``init()`` has already
@@ -802,6 +811,10 @@ def execute_on_device(  # noqa: PLR0913
     cfg.enable_scope_stats = enable_scope_stats
     if output_prefix:
         cfg.output_prefix = output_prefix
+    if config is not None:
+        from .runner import _apply_ring_overrides  # noqa: PLC0415
+
+        _apply_ring_overrides(cfg, config)
 
     env = runtime_env or {}
     active = _PyptoWorker.current(

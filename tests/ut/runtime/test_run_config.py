@@ -688,6 +688,7 @@ class TestRunConfigCompileForwarding:
 
     def test_execute_compiled_accepts_auto_scope_deps_switch(self, tmp_path, monkeypatch):
         captured: dict = {}
+        config = RunConfig(platform="a2a3sim", ring_heap=1024 * 1024)
 
         def fake_compile_and_assemble(_work_dir, platform):
             captured["compile"] = {"platform": platform}
@@ -708,11 +709,59 @@ class TestRunConfigCompileForwarding:
             platform="a2a3sim",
             device_id=0,
             analyze_auto_scopes_for_deps=True,
+            config=config,
         )
 
         assert captured["compile"]["platform"] == "a2a3sim"
         assert captured["execute"]["args"][3] == "fake_runtime"
         assert captured["execute"]["kwargs"]["aicpu_thread_num"] is None
+        assert captured["execute"]["kwargs"]["config"] is config
+
+    def test_execute_compiled_serializes_ring_config_for_dep_capture(self, tmp_path, monkeypatch):
+        captured: dict = {}
+
+        def fake_compile_and_assemble(_work_dir, _platform):
+            return object(), "fake_runtime", {}
+
+        def fake_execute_on_device(*_args, **kwargs):
+            captured["execute_config"] = kwargs["config"]
+
+        fake_device_runner = types.SimpleNamespace(
+            compile_and_assemble=fake_compile_and_assemble,
+            execute_on_device=fake_execute_on_device,
+        )
+        monkeypatch.setitem(sys.modules, "pypto.runtime.device_runner", fake_device_runner)
+
+        import pypto.runtime.runner as runner_mod  # noqa: PLC0415
+
+        monkeypatch.setattr(
+            runner_mod,
+            "_capture_deps_subprocess",
+            lambda spec, *_args: captured.update(spec=spec),
+        )
+        monkeypatch.setattr(runner_mod, "_collect_dfx_artifacts", lambda *_args: None)
+
+        config = RunConfig(
+            platform="a2a3",
+            ring_task_window=[16, 32, 64, 128],
+            ring_heap=512 * 1024 * 1024,
+            ring_dep_pool=[64, 0, 0, 256],
+        )
+        execute_compiled(
+            tmp_path,
+            [],
+            platform="a2a3",
+            device_id=0,
+            dfx=_DfxOpts(enable_chip_swimlane=True),
+            config=config,
+        )
+
+        assert captured["execute_config"] is config
+        assert captured["spec"]["ring_overrides"] == {
+            "ring_task_window": [16, 32, 64, 128],
+            "ring_heap": 512 * 1024 * 1024,
+            "ring_dep_pool": [64, 0, 0, 256],
+        }
 
     @pytest.mark.parametrize(
         ("runtime_config", "expected_enable_sdma"),

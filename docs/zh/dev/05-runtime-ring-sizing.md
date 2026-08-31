@@ -3,7 +3,7 @@
 PyPTO 通过 [`RunConfig`](../../../python/pypto/runtime/runner.py) 上的三个可选
 覆盖项暴露 Simpler 的单任务 ring 尺寸配置。它们让你在单次派发中为运行时的
 单任务 ring 资源设置尺寸，而无需改动已编译产物或任何全局状态。该能力同时适用于
-L2 单 chip 路径（`run()` / `ChipWorker.run()`）和 L3 分布式路径
+L2 单 chip 路径（`run()` / `execute_compiled()` / `ChipWorker.run()`）和 L3 分布式路径
 （`DistributedWorker.run()` / 一次性的 `compiled(...)`）。
 
 运行时把任务启动相关资源保存在 *ring buffer*（环形缓冲）中。每个覆盖项与
@@ -53,7 +53,7 @@ RunConfig(platform="a2a3", ring_heap=1000)
 
 ## 用法
 
-### L2 单 chip（`run`）
+### L2 单 chip（`run` / `execute_compiled`）
 
 ```python
 from pypto.runtime import run, RunConfig
@@ -69,6 +69,25 @@ compiled = run(
     ),
 )
 ```
+
+目录驱动的入口同样接受单次派发配置。它原有的显式 `platform`、`device_id`、DFX 和
+AICPU 参数保持现有优先级；`config` 用来携带此前无法到达
+`CallConfig.runtime_env` 的 ring 覆盖项：
+
+```python
+from pypto.runtime import RunConfig, execute_compiled
+
+execute_compiled(
+    work_dir,
+    [a, b, c],
+    platform="a2a3",
+    device_id=0,
+    config=RunConfig(platform="a2a3", ring_heap=512 * 1024 * 1024),
+)
+```
+
+worker 预热、正式设备派发，以及板端 swimlane 收集使用的依赖捕获子进程，都会使用
+相同的 ring 尺寸。
 
 ### L3 分布式（`DistributedWorker` / `compiled(...)`）
 

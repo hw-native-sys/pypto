@@ -336,7 +336,13 @@ class TestCompiledProgramCall:
         prog = _make_program_with_orchestration()
         cp = CompiledProgram(prog, str(tmp_path), platform="a2a3sim")
         args = (torch.zeros(128, 128), torch.zeros(128, 128), torch.zeros(128, 128))
-        config = RunConfig(platform="a2a3", device_id=3, enable_pmu=2, aicpu_thread_num=7)
+        config = RunConfig(
+            platform="a2a3",
+            device_id=3,
+            enable_pmu=2,
+            aicpu_thread_num=7,
+            ring_heap=512 * 1024 * 1024,
+        )
 
         with patch("pypto.runtime.runner.execute_compiled") as mock_exec:
             cp(*args, config=config)
@@ -345,6 +351,7 @@ class TestCompiledProgramCall:
         assert mock_exec.call_args.kwargs["device_id"] == 3
         assert mock_exec.call_args.kwargs["dfx"].enable_pmu == 2
         assert mock_exec.call_args.kwargs["aicpu_thread_num"] == 7
+        assert mock_exec.call_args.kwargs["config"] is config
 
     def test_no_config_uses_compiled_platform(self, tmp_path):
         prog = _make_program_with_orchestration()

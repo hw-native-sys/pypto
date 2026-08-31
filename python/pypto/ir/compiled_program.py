@@ -696,6 +696,7 @@ def _invoke_compiled(
         device_id=config.device_id,
         dfx=_DfxOpts.from_run_config(config),
         aicpu_thread_num=config.aicpu_thread_num,
+        config=config,
     )
 
     if not return_style:
