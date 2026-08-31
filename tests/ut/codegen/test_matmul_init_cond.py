@@ -392,7 +392,7 @@ class GemvAccSplitK:
         for k0 in pl.range(0, 256, 128):
             a = pl.load(lhs, [0, k0], [1, 128], target_memory=pl.MemorySpace.Mat)
             b = pl.load(rhs, [k0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
-            acc_tile = pl.gemv_acc(acc_tile, a, b, acc_phase="partial", init_cond=(k0 == 0))
+            acc_tile = pl.gemv_acc(acc_tile, a, b, acc_phase=pl.AccPhase.Partial, init_cond=(k0 == 0))
         return pl.store(acc_tile, [0, 0], output)
 
 
