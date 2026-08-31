@@ -194,6 +194,20 @@ class Worker(ABC):
         check is object identity in ``_device_buffers``: this rejects foreign
         Workers, freed handles, and pointer-reuse (ABA) cases before a stale
         wire descriptor can enter simpler ``Worker.run``.
+
+        When the caller does not name the placement, the retained Buffer
+        usually does: simpler stamps ``owner_worker_id`` on every allocation it
+        hands out, making the owning key derivable rather than searched.  That
+        matters because scanning ``_device_buffers`` costs a walk of every live
+        allocation per validated argument, which on a distributed dispatch (one
+        call per tensor per rank, against a table holding every rank's shards)
+        is quadratic in the allocation count.
+
+        The scan remains as a fallback rather than a hard requirement: a
+        ``DeviceTensor``'s Buffer is only contracted to expose ``base`` and
+        ``tensor(...)``, so a custom Worker's ``_buffer_for_ptr`` may return a
+        handle that names no placement.  Every simpler-allocated Buffer takes
+        the exact-key path.
         """
         self._require_ready("dispatch DeviceTensor")
         worker_name = type(self).__name__
@@ -208,6 +222,11 @@ class Worker(ABC):
             raise TypeError(
                 f"{label}: {worker_name} does not retain owner Buffers required for DeviceTensor dispatch."
             )
+        if worker_id is None:
+            try:
+                worker_id = int(tensor.buffer.owner_worker_id)
+            except (AttributeError, TypeError, ValueError):
+                worker_id = None  # Placeless handle — fall back to the scan.
         if worker_id is None:
             owned = any(
                 ptr == tensor.data_ptr and buffer is tensor.buffer for (_wid, ptr), buffer in buffers.items()

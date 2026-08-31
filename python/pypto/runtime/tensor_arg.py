@@ -23,6 +23,29 @@ Host ``torch.Tensor`` arguments are delegated to
 ``simpler_setup.torch_interop.make_tensor_arg(worker, tensor)``. Never route
 this path through :mod:`pypto.runtime.task_interface`: its compatibility
 ``make_tensor_arg`` alias is chip-only and produces a ``ChipTensor``.
+
+Who validates DeviceTensor liveness
+-----------------------------------
+
+**L3 (distributed): the runtime does, and this module must not.** Every
+``orch.submit_next_level`` runs simpler's ``_child_prov_check_dispatch_locked``,
+which looks each device argument's ``CanonicalIdentity`` up in the owner's
+allocation table, requires ``owner_worker_id`` to equal the dispatch target,
+requires the wire descriptor to equal the registered one field-for-field, and
+holds ``_child_prov_lock`` across the native submit. That check is strictly
+stronger than anything reachable from here: identity keying rejects the
+pointer-reuse (ABA) case that an address-keyed check cannot see, and holding the
+lock through the submit makes authorization and dispatch one transaction. A
+check *here* would re-derive a weaker answer and then release its evidence
+before the submit it was meant to protect.
+
+**L2 (direct chip): nothing else does, so this module still checks.** simpler's
+``_submit_l2_locked`` only records touched identities (which serves
+``release_buffer``, not argument liveness) and materializes the args through
+``ImportRegistry``, whose map-once cache is not invalidated by ``Worker.free``.
+Until the runtime grows an L2 equivalent of the L3 guard, this wrapper is the
+only thing standing between a freed ``DeviceTensor`` and a use-after-free, so
+the owner check below runs on every L2 conversion.
 """
 
 import weakref
@@ -31,17 +54,49 @@ from typing import Any
 
 _PYPTO_OWNER_REF_ATTR = "_pypto_tensor_owner_ref"
 
+# The address-free wire ``Tensor`` a DeviceTensor maps to is a pure function of
+# its (retained Buffer, shape, dtype) — all immutable on the frozen handle — so
+# it is memoized on the handle itself and dies with it: no table to grow, no
+# eviction policy, and no key. Keying a dict on the DeviceTensor would be wrong:
+# ``buffer`` is declared ``compare=False, hash=False``, so a handle freed at some
+# address and a fresh one that reuses that address hash and compare equal (the
+# ABA case) and would share one cache entry.
+#
+# Generated ``host_orch`` converts every tensor parameter once per rank per
+# dispatch (DP8 decode: ~142 tensors x 8 ranks), so rebuilding an identical
+# descriptor each time was pure host-side dispatch latency.
+_WIRE_TENSOR_ATTR = "_pypto_wire_tensor"
+
 
 def bind_tensor_arg_owner(worker: Any, owner: Any) -> None:
     """Bind a raw simpler Worker to its weak PyPTO owner.
 
-    Generated orchestration receives the raw simpler Worker (``orch._worker``),
-    while DeviceTensor liveness is tracked by the public PyPTO Worker.  This
-    weak backlink lets wire conversion consult the authoritative PyPTO Buffer
-    registry without introducing a reference cycle or changing generated code.
+    L2 dispatch reaches this module with the raw simpler Worker, while
+    DeviceTensor liveness is tracked by the public PyPTO Worker. This weak
+    backlink lets the L2 conversion consult the authoritative PyPTO Buffer
+    registry without introducing a reference cycle.
+
+    An L3 Worker's own dispatch path validates device arguments, so the binding
+    is not consulted there. The distributed runner installs it regardless
+    because :func:`_validates_liveness_at_submit` fails closed: a Worker whose
+    level cannot be read falls back to checking, and the check must then find a
+    binding rather than reject a legitimate dispatch.
     """
     setattr(worker, _PYPTO_OWNER_REF_ATTR, weakref.ref(owner))
     owner._tensor_arg_worker = worker
+
+
+def _validates_liveness_at_submit(worker: Any) -> bool:
+    """Whether *worker*'s own dispatch path re-checks device-argument liveness.
+
+    True for every hierarchical (L3+) Worker: its ``submit_next_level`` runs the
+    runtime's identity-keyed provenance guard. False for a direct-chip L2 Worker,
+    whose ``_submit_l2_locked`` has no equivalent — see the module docstring.
+    An unrecognizable worker is treated as unguarded, so a missing or surprising
+    ``level`` fails closed into checking rather than silently skipping.
+    """
+    level = getattr(worker, "level", None)
+    return isinstance(level, int) and level > 2
 
 
 def _require_device_tensor_owner(worker: Any, arg: Any) -> None:
@@ -94,17 +149,17 @@ def make_tensor_arg(worker: Any, arg: Any) -> Any:
     """Convert an orchestration tensor argument into a simpler ``Tensor``.
 
     Args:
-        worker: The raw simpler Worker performing dispatch. DeviceTensor
-            conversion requires it to be bound to the same live PyPTO Worker
-            that allocated the Buffer; host tensors use it directly for
-            simpler's worker-aware conversion.
+        worker: The raw simpler Worker performing dispatch. Host tensors use it
+            directly for simpler's worker-aware conversion; a DeviceTensor
+            dispatched by an L2 Worker additionally requires it to be bound to
+            the live PyPTO Worker that allocated the Buffer.
         arg: One of:
             - ``torch.Tensor``: a CPU-contiguous host tensor (delegated to
               simpler's worker-aware wire helper).
-            - :class:`~pypto.runtime.DeviceTensor`: a worker-resident buffer;
-              after owner/liveness validation, its retained ``Buffer``
-              constructs an address-free wire ``Tensor`` (memory is
-              caller-managed).
+            - :class:`~pypto.runtime.DeviceTensor`: a worker-resident buffer
+              whose retained ``Buffer`` yields an address-free wire ``Tensor``
+              (memory is caller-managed). The descriptor is built once per
+              handle and reused.
             - simpler ``Tensor``: returned as-is (already device-side).
 
     Returns:
@@ -120,10 +175,19 @@ def make_tensor_arg(worker: Any, arg: Any) -> Any:
                 "A raw-pointer DeviceTensor cannot cross the public Worker.run wire ABI; "
                 "allocate it with Worker.alloc_tensor() so it retains its simpler Buffer."
             )
-        _require_device_tensor_owner(worker, arg)
+        # Ahead of the memo, not inside it: an L2 caller must be re-checked on
+        # every dispatch, and a cached descriptor is exactly as stale as the
+        # handle it was built from.
+        if not _validates_liveness_at_submit(worker):
+            _require_device_tensor_owner(worker, arg)
+        cached = arg.__dict__.get(_WIRE_TENSOR_ATTR)
+        if cached is not None:
+            return cached
         try:
             dtype = task_interface.torch_dtype_to_datatype(arg.dtype)
         except KeyError as e:
             raise ValueError(f"Unsupported DeviceTensor dtype: {arg.dtype}") from e
-        return arg.buffer.tensor(shapes=arg.shape, dtype=dtype)
+        wire = arg.buffer.tensor(shapes=arg.shape, dtype=dtype)
+        object.__setattr__(arg, _WIRE_TENSOR_ATTR, wire)
+        return wire
     return torch_interop.make_tensor_arg(worker, arg)

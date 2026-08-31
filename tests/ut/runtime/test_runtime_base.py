@@ -273,6 +273,134 @@ def test_require_ready_consulted_by_alloc_tensor():
         h.alloc_tensor((4,), torch.float32)
 
 
+class _ScanCountingBuffers(dict):
+    """``_device_buffers`` that records every whole-table traversal."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        self.scans = 0
+        super().__init__(*args, **kwargs)
+
+    def items(self):
+        self.scans += 1
+        return super().items()
+
+    def values(self):
+        self.scans += 1
+        return super().values()
+
+    def keys(self):
+        self.scans += 1
+        return super().keys()
+
+    def __iter__(self):
+        self.scans += 1
+        return super().__iter__()
+
+
+class _OwnedBuffer:
+    """Retained owner Buffer carrying the placement simpler stamps on it."""
+
+    def __init__(self, base: int, owner_worker_id: int = 0) -> None:
+        self.base = base
+        self.owner_worker_id = owner_worker_id
+
+    def tensor(self, shapes, dtype):
+        return shapes, dtype
+
+
+class _OwnershipProbe:
+    """Minimal stand-in exposing only what the ownership check consults."""
+
+    def __init__(self, buffers) -> None:
+        self._device_buffers = buffers
+
+    def _require_ready(self, op: str) -> None:
+        pass
+
+    _require_owned_resident_tensor = Worker._require_owned_resident_tensor
+
+
+def test_ownership_check_never_scans_the_buffer_table():
+    """Regression guard for the DP8 O(N^2) host-dispatch staircase.
+
+    A distributed dispatch validates one argument per tensor per rank against a
+    table holding every rank's shards, so a whole-table walk per validation is
+    quadratic in the allocation count. The retained Buffer names its own
+    placement, making the lookup an exact key.
+    """
+    buffers = _ScanCountingBuffers()
+    for worker_id in range(8):
+        for slot in range(16):
+            ptr = 0x1000 + worker_id * 0x10000 + slot * 0x100
+            buffers[(worker_id, ptr)] = _OwnedBuffer(ptr, worker_id)
+
+    probe = _OwnershipProbe(buffers)
+    for (worker_id, ptr), buffer in list(buffers.items()):
+        tensor = DeviceTensor(ptr, (4,), torch.float32, buffer=buffer)
+        probe._require_owned_resident_tensor(tensor, f"Argument on worker {worker_id}")
+
+    # list(buffers.items()) above is the loop's own traversal, not the check's.
+    assert buffers.scans == 1
+
+
+def test_ownership_check_derives_placement_from_the_retained_buffer():
+    """A non-zero worker_id is resolved without the caller naming it."""
+    buffer = _OwnedBuffer(0x2000, owner_worker_id=5)
+    buffers = _ScanCountingBuffers({(5, 0x2000): buffer})
+    probe = _OwnershipProbe(buffers)
+    tensor = DeviceTensor(0x2000, (4,), torch.float32, buffer=buffer)
+
+    probe._require_owned_resident_tensor(tensor, "Argument")
+    assert buffers.scans == 0
+
+
+def test_ownership_check_rejects_a_freed_handle():
+    buffer = _OwnedBuffer(0x2000, owner_worker_id=5)
+    probe = _OwnershipProbe(_ScanCountingBuffers())  # nothing live
+    tensor = DeviceTensor(0x2000, (4,), torch.float32, buffer=buffer)
+
+    with pytest.raises(ValueError, match="not a live allocation.*on worker_id=5"):
+        probe._require_owned_resident_tensor(tensor, "Argument")
+
+
+def test_ownership_check_rejects_pointer_reuse_by_a_stale_handle():
+    """The address is live again, but under a different allocation."""
+    stale_buffer = _OwnedBuffer(0x2000, owner_worker_id=5)
+    fresh_buffer = _OwnedBuffer(0x2000, owner_worker_id=5)
+    probe = _OwnershipProbe(_ScanCountingBuffers({(5, 0x2000): fresh_buffer}))
+    stale = DeviceTensor(0x2000, (4,), torch.float32, buffer=stale_buffer)
+
+    with pytest.raises(ValueError, match="not a live allocation"):
+        probe._require_owned_resident_tensor(stale, "Argument")
+
+
+def test_ownership_check_falls_back_to_a_scan_for_a_placeless_buffer():
+    """A Buffer only has to expose ``base`` and ``tensor(...)``.
+
+    A custom Worker's ``_buffer_for_ptr`` may return a handle that names no
+    worker, so the exact-key path is an optimization for simpler-allocated
+    Buffers, not a new requirement on the DeviceTensor contract.
+    """
+
+    class _PlacelessBuffer:
+        base = 0x2000
+
+        def tensor(self, shapes, dtype):
+            return shapes, dtype
+
+    buffer = _PlacelessBuffer()
+    buffers = _ScanCountingBuffers({(0, 0x2000): buffer})
+    probe = _OwnershipProbe(buffers)
+    tensor = DeviceTensor(0x2000, (4,), torch.float32, buffer=buffer)
+
+    probe._require_owned_resident_tensor(tensor, "Argument")
+    assert buffers.scans == 1
+
+    stale = DeviceTensor(0x2000, (4,), torch.float32, buffer=_PlacelessBuffer())
+    with pytest.raises(ValueError, match="not a live allocation"):
+        probe._require_owned_resident_tensor(stale, "Argument")
+
+
 def test_chip_worker_subclasses_worker_abc():
     assert issubclass(ChipWorker, Worker)
 
