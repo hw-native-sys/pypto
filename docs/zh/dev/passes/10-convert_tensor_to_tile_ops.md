@@ -247,6 +247,26 @@ c_tile = pl.tile.matmul_acc(acc_tile, a_mat, b_mat)
 已把它取整为 112，或在 32 行对齐时取整为 128。compact 让所有读取方重新计算 `mad` 实际
 使用的 pitch；不声明它则会被 `AccCompactValid` 直接拒绝（issue #2470）。
 
+### `N` 的粒度
+
+`M` 的对齐调和的是它流经的各个 tile（`Mat` 操作数与其累加器，见
+`ResolveCubeMAlignment`）。`N` 要调和的则是**内存空间**，这是 `M` 不需要的：
+
+- 右操作数被加载进 `Mat`，随后由
+  [`InferTileMemorySpace`](18-infer_tile_memory_space.md) 提升到 `Right`，而
+  `Right` 用相反的 `slayout` 装载同一个 512 字节分形，于是行列粒度对调：
+
+    | 空间 | `slayout` | fp32 块 | fp16 块 |
+    | ---- | --------- | ------- | ------- |
+    | `Mat` | `row_major` | 16 x 8 | 16 x 16 |
+    | `Right` | `col_major` | 8 x 16 | 16 x 16 |
+
+- 乘积落在 `Acc` 中，其 `N` 方向的块在所有 dtype 下都是 16。
+
+两个数字都是真实的，ptoas 针对各自承载它的 tile 分别提出要求。因此只按 `Mat` 的 8
+对齐，会得到一个「加载处合法、下一个 op 就被拒」的物理尺寸。`ResolveCubeNAlignment`
+因而取三者的最小公倍数；所有粒度都是 2 的幂，故最小公倍数即最大值。
+
 作用范围，以及刻意排除的情况：
 
 | 情况 | 是否对齐 | 原因 |
@@ -254,10 +274,11 @@ c_tile = pl.tile.matmul_acc(acc_tile, a_mat, b_mat)
 | 2-D `tensor.matmul` 左操作数 | 是，按行 | 其行轴即 M，块高在所有 dtype 下都是 16 |
 | 2-D `tensor.matmul_acc` 的左操作数与累加器 | 是，按行 | 同一条轴、同一条规则 —— 且该 op 要求二者物理 M 一致，因此必须一同对齐 |
 | `a_trans` 左操作数，以及与之配对的累加器 | 是，按列 | 自然加载的行轴是 K，M 是列尺寸；累加器经 `m_align_from_arg` 采用该操作数的列粒度 |
-| 右操作数 | 否 | 其行是 `K`，即归约轴 —— 除非硬件按 valid col 做掩码（尚未验证），补齐会把未初始化的 L1 数据带入求和 |
-| 输出的 `N` | 否 | 与 `K` 同属尚未解决的问题；[`AutoTileMatmulL0`](16-auto_tile_matmul_l0.md) 的 `PH-AT-007` 出于同样原因不予处理 |
+| 2-D `tensor.matmul` 右操作数 | 是，在承载 `N` 的那根轴上 | 通常是列；`b_trans` 时是行，因为其自然加载把 `K` 放在列上。`N` 的 padding 落在结果无效区之外，不会被任何人读取 |
+| `tensor.matmul_acc` 右操作数 | 否 | 其累加器必须像在 `M` 上那样与乘积的物理 `N` 一致，这需要同样的跨 tile 决定者传播到分配它的 `tile.create` |
+| 任一操作数的 `K` 轴 | 否 | 除非硬件按 valid col 做掩码（尚未验证），补齐归约轴会把未初始化的 L1 数据带入求和 |
 | rank >= 3 的操作数 | 否 | 它下沉为 `tile.batch_matmul`，其行被 [`FlattenTileNdTo2D`](13-flatten_tile_nd_to_2d.md) 打包成单个 `[B*M, N]` tile —— 分形规则约束的是打包后的尺寸，而非该维度 |
-| M 尺寸为动态值 | 否 | 没有编译期常量可供对齐 |
+| 尺寸为动态值 | 否 | 没有编译期常量可供对齐 |
 
 本 pass 不处理的每一种情况，最终仍由 PyPTO 而非 ptoas 报错：
 [PTO codegen](../codegen/00-pto_codegen.md) 会校验它发射的每一条 `pto.alloc_tile`

@@ -173,6 +173,72 @@ int64_t ResolveCubeMAlignment(const CallPtr& call,
   return std::max<int64_t>(own, kAccFractalRows);
 }
 
+/// Axis of the operand @p req describes that carries the matmul's N.
+///
+/// The mirror of ``CubeMAxis``: an untransposed right operand has N on its
+/// columns, and a transposed one is loaded naturally with K on its columns, so
+/// its N is the row axis.
+size_t CubeNAxis(const CallPtr& call, const InputSpaceReq& req) {
+  return ReadsOperandTransposed(call, req) ? 0 : 1;
+}
+
+/// The physical N alignment the right operand must be allocated to, or 0 when N
+/// cannot be boxed at compile time.
+///
+/// Unlike M, N needs no cross-operand decider: it is carried by the right
+/// operand and the accumulator alone, and both are reached from this one shape.
+/// It does need reconciling across *memory spaces*, which M does not:
+///
+///   * the operand is loaded into ``Mat`` and then promoted on to ``Right`` by
+///     InferTileMemorySpace, and ``Right`` boxes the same fractal under the
+///     opposite ``slayout`` -- which swaps the row and column granularities
+///     (fp32: ``Mat`` is 16x8, ``Right`` is 8x16). A column count legal only
+///     where it was loaded is rejected at the very next op, so the two have to
+///     be reconciled, and the lcm of the box's own two extents is a multiple of
+///     either by construction.
+///   * the product lands in an ``Acc`` whose N box is 16 for every dtype.
+///
+/// Every granularity involved is a power of two, so both lcms are maxima.
+int64_t ResolveCubeNAlignment(const CallPtr& call, const InputSpaceReq& req, size_t idx) {
+  if (idx >= call->args_.size()) return 0;
+  const auto& arg_type = call->args_[idx]->GetType();
+  std::vector<ExprPtr> shape;
+  DataType dtype = DataType::FP32;
+  if (auto tensor_type = As<TensorType>(arg_type)) {
+    shape = tensor_type->shape_;
+    dtype = tensor_type->dtype_;
+  } else if (auto tile_type = As<TileType>(arg_type)) {
+    shape = tile_type->shape_;
+    dtype = tile_type->dtype_;
+  } else {
+    return 0;
+  }
+  if (shape.size() != 2) return 0;
+
+  const auto view = tile_view_semantics::GetImplicitTileView(shape, req.space);
+  const auto box = tile_view_semantics::GetBoxedTileAlignment(view, dtype);
+  if (!box || box->rows <= 0 || box->cols <= 0) return 0;
+  return std::max<int64_t>({box->rows, box->cols, kAccFractalRows});
+}
+
+/// The boxed axis of operand @p idx and the extent it must be allocated to.
+///
+/// One resolver for both load-emitting sites, so a bridged operand and a
+/// consumer-driven one cannot disagree. An operand declares at most one boxed
+/// axis, since the axis it does not carry is the contraction axis.
+std::pair<int64_t, size_t> ResolveBoxedAxis(const CallPtr& call,
+                                            const std::unordered_map<size_t, InputSpaceReq>& input_reqs,
+                                            size_t idx, const InputSpaceReq& req) {
+  if (req.cube_m_axis) {
+    return {ResolveCubeMAlignment(call, input_reqs, req.m_align_from_arg.value_or(idx)),
+            CubeMAxis(call, req)};
+  }
+  if (req.cube_n_axis) {
+    return {ResolveCubeNAlignment(call, req, idx), CubeNAxis(call, req)};
+  }
+  return {0, 0};
+}
+
 bool IsPassthroughTensorOp(const CallPtr& call) {
   return IsOp(call, "tensor.dim") || IsOp(call, "tensor.view");
 }
@@ -597,10 +663,8 @@ class ConsumerSpaceCollector : public IRVisitor {
       if (auto var = AsVarLike(call->args_[idx])) {
         // A transposed use moves this operand's M to its column axis, and the
         // alignment is the one the whole call shares (see ConsumerSpaceReq).
-        const int64_t align = req.cube_m_axis ? ResolveCubeMAlignment(call, entry->input_reqs,
-                                                                      req.m_align_from_arg.value_or(idx))
-                                              : 0;
-        const ConsumerSpaceReq resolved{req.space, align, CubeMAxis(call, req)};
+        const auto [align, boxed_axis] = ResolveBoxedAxis(call, entry->input_reqs, idx, req);
+        const ConsumerSpaceReq resolved{req.space, align, boxed_axis};
         // Several consumers can share one producer (a sliced KV feeding two
         // matmuls, an accumulator seed read by two accumulations); MergeConsumerReq
         // is the single rule for reconciling them.
@@ -1194,9 +1258,8 @@ class TensorToTileMutator : public TypePropagatingMutator {
         // A transposed operand is boxed on its *column* axis: the
         // tile.transpose_view below reinterprets the row axis as the matmul's K,
         // so M is the column extent the natural load allocates.
-        const int64_t m_align =
-            req.cube_m_axis ? ResolveCubeMAlignment(call, input_reqs, req.m_align_from_arg.value_or(idx)) : 0;
-        auto loaded = emit_load(args[idx], tensor_type, req.space, idx, m_align, CubeMAxis(call, req));
+        const auto [box_align, boxed_axis] = ResolveBoxedAxis(call, input_reqs, idx, req);
+        auto loaded = emit_load(args[idx], tensor_type, req.space, idx, box_align, boxed_axis);
         args[idx] = use_view ? emit_view(loaded) : loaded;
         continue;
       }

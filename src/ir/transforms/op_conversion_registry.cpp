@@ -1152,7 +1152,14 @@ void OpConversionRegistry::RegisterMatmulOps() {
         const std::string out_op = nd ? "tile.batch_matmul" : "tile.matmul";
         return ConversionResult{OpRegistry::GetInstance().Create(out_op, {args[0], args[1]}, span)};
       },
-      {{0, {MemorySpace::Mat, "a_trans", /*cube_m_axis=*/true}}, {1, {MemorySpace::Mat, "b_trans"}}});
+      // The right operand carries N. tensor.matmul_acc deliberately does not
+      // declare it: its accumulator must agree with the product on physical N
+      // just as it must on M, which needs the same cross-tile decider M has
+      // (see m_align_from_arg) reaching the tile.create that allocates it.
+      {{0, {MemorySpace::Mat, "a_trans", /*cube_m_axis=*/true}},
+       {1,
+        {MemorySpace::Mat, "b_trans", /*cube_m_axis=*/false, /*m_align_from_arg=*/std::nullopt,
+         /*cube_n_axis=*/true}}});
 
   // tensor.matmul_acc: 2D × 2D × 2D → tile.matmul_acc; any operand ≥3D →
   // tile.batch_matmul_acc. Same a_trans/b_trans handling as tensor.matmul.

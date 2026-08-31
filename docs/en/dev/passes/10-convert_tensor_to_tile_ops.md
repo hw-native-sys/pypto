@@ -281,6 +281,29 @@ rounded to 112 or, at a 32-row alignment, to 128. Compact makes every reader
 recompute the pitch `mad` actually used; without it `AccCompactValid` rejects the
 program (issue #2470).
 
+### The `N` granularity
+
+`M`'s alignment reconciles the tiles it runs through — a `Mat` operand and its
+accumulator (see `ResolveCubeMAlignment`). `N`'s has to reconcile *memory
+spaces* instead, which `M`'s does not:
+
+- the right operand is loaded into `Mat` and then promoted on to `Right` by
+  [`InferTileMemorySpace`](18-infer_tile_memory_space.md), and `Right` boxes the
+  same 512-byte fractal under the opposite `slayout`, which swaps the row and
+  column granularities:
+
+    | Space | `slayout` | fp32 box | fp16 box |
+    | ----- | --------- | -------- | -------- |
+    | `Mat` | `row_major` | 16 x 8 | 16 x 16 |
+    | `Right` | `col_major` | 8 x 16 | 16 x 16 |
+
+- the product lands in an `Acc`, whose `N` box is 16 for every dtype.
+
+Both numbers are real, and ptoas asks for each against the tile that carries it,
+so rounding to `Mat`'s 8 alone yields a box that clears the load and is rejected
+one op later at `Right`. `ResolveCubeNAlignment` therefore takes the lcm of all
+three; every granularity is a power of two, so the lcm is the maximum.
+
 Scope, and what is deliberately left out:
 
 | Case | Boxed? | Why |
@@ -288,10 +311,11 @@ Scope, and what is deliberately left out:
 | 2-D `tensor.matmul` left operand | Yes, on rows | Its row axis is M, whose box height is 16 for every dtype |
 | 2-D `tensor.matmul_acc` left operand and accumulator | Yes, on rows | Same axis, same rule — and the op requires the two to agree on physical M, so they move together |
 | `a_trans` left operand, and the accumulator paired with it | Yes, on columns | The natural load's row axis is K, so M is the column extent; the accumulator adopts that operand's column granularity via `m_align_from_arg` |
-| Right operand | No | Its rows are `K`, the reduction axis — padding it would feed uninitialised L1 into the sum unless the hardware masks by valid col, which is unverified |
-| Output `N` | No | Same open question as `K`; [`AutoTileMatmulL0`](16-auto_tile_matmul_l0.md)'s `PH-AT-007` declines it for the same reason |
+| 2-D `tensor.matmul` right operand | Yes, on the axis carrying `N` | Columns normally; rows under `b_trans`, whose natural load puts `K` on the columns. `N`'s padded cells land outside the result's valid region, so nothing reads them |
+| `tensor.matmul_acc` right operand | No | Its accumulator has to agree with the product on physical `N` just as it does on `M`, which needs the same cross-tile decider reaching the `tile.create` that allocates it |
+| Either operand's `K` axis | No | Padding the reduction axis would feed uninitialised L1 into the sum unless the hardware masks by valid col, which is unverified; [`AutoTileMatmulL0`](16-auto_tile_matmul_l0.md)'s `PH-AT-007` declines it for the same reason |
 | Rank >= 3 operand | No | It lowers to `tile.batch_matmul`, whose rows [`FlattenTileNdTo2D`](13-flatten_tile_nd_to_2d.md) row-packs into one `[B*M, N]` tile — the box rule binds that packed extent, not this dimension |
-| Dynamic M extent | No | No compile-time box to round to |
+| Dynamic extent | No | No compile-time box to round to |
 
 Every case this pass declines still reaches a PyPTO-level error rather than a
 ptoas one: [PTO codegen](../codegen/00-pto_codegen.md#boxed-tile-extents)

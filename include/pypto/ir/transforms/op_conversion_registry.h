@@ -92,6 +92,17 @@ struct InputSpaceReq {
   /// a transposed left operand's column box is ``32 / sizeof(dtype)`` (32 for
   /// INT8).  Naming one decider makes them share a single alignment.
   std::optional<size_t> m_align_from_arg;
+  /// Whether this operand carries the matmul's **N** axis. The output axis is
+  /// boxed on exactly the same grounds as M: only the *physical* extent is
+  /// constrained, and N's padded cells land outside the result's valid region,
+  /// so nothing reads them. K remains unboxable -- padding it would feed
+  /// uninitialised L1 into the sum -- which is why an operand declares at most
+  /// one of ``cube_m_axis`` / ``cube_n_axis``: its remaining axis is K.
+  ///
+  /// Which axis N lands on mirrors M: an untransposed right operand has N on
+  /// its columns, while a transposed one is loaded naturally with K on columns,
+  /// so its N is the *row* axis.
+  bool cube_n_axis = false;
 };
 
 /**

@@ -1772,6 +1772,118 @@ class TestConvertTensorToTileOps:
         _assert_convert_equal(Before, Expected)
 
     @pytest.mark.parametrize(
+        ("name", "dtype", "cols", "boxed_cols"),
+        [
+            # FP32 `Mat` boxes 8 columns, so 17 clears Mat's own rule at 24 -- and is
+            # then rejected again at `Right`, which boxes 16. 24 is the case that
+            # separates the two: legal where it is loaded, illegal one op later.
+            ("fp32_odd", DataType.FP32, 17, 32),
+            ("fp32_mat_aligned_only", DataType.FP32, 24, 32),
+            ("fp16_odd", DataType.FP16, 17, 32),
+            ("already_boxed", DataType.FP32, 64, 64),
+        ],
+    )
+    def test_matmul_rhs_n_axis_is_boxed(self, name, dtype, cols, boxed_cols):
+        """An unaligned matmul N loads a whole number of NZ fractal boxes.
+
+        The mirror of the M rule: only the *physical* extent is constrained, and
+        N's padded cells land outside the result's valid region, so nothing reads
+        them. The granularity is not the loaded space's column box alone --
+        ``InferTileMemorySpace`` promotes the right operand from ``Mat`` on to
+        ``Right``, which boxes the same fractal under the opposite ``slayout``
+        and so swaps the row and column granularities (fp32: ``Mat`` is 16x8,
+        ``Right`` is 8x16). ``fp32_mat_aligned_only`` pins exactly that: 24
+        satisfies ``Mat`` and is still rejected at ``Right``.
+
+        The left operand's rows are already whole boxes here, so the M rule
+        leaves it alone and the two axes stay independently observable.
+        """
+        lhs_shape = [32, 128]
+        rhs_shape = [128, cols]
+        out_shape = [32, cols]
+        in_specs: list[InSpec] = [("lhs", lhs_shape, dtype), ("rhs", rhs_shape, dtype)]
+
+        def before_body(ib, ins):
+            return ib.let("y", tensor_ops.matmul(ins[0], ins[1]))
+
+        def expected_body(ib, params):
+            lhs_p, rhs_p = params
+            lhs_mat = ib.let(
+                "lhs_mat",
+                tile_ops.load(lhs_p, [0, 0], lhs_shape, lhs_shape, target_memory=MemorySpace.Mat),
+            )
+            rhs_mat = ib.let(
+                "rhs_mat",
+                tile_ops.load(rhs_p, [0, 0], [128, boxed_cols], rhs_shape, target_memory=MemorySpace.Mat),
+            )
+            return ib.let("y_tile", tile_ops.matmul(lhs_mat, rhs_mat))
+
+        before = _make_before(in_specs=in_specs, out_shape=out_shape, out_dtype=dtype, body=before_body)
+        expected = _make_expected(
+            in_specs=in_specs, out_shape=out_shape, out_dtype=dtype, body=expected_body, preload=False
+        )
+        _assert_convert_equal(before, expected)
+
+    def test_matmul_rhs_reached_through_set_validshape_is_n_boxed(self):
+        """The N rule reaches the Phase-1 entry load too, like the M rule.
+
+        ``tensor.set_validshape`` propagates the Mat demand back to the parameter,
+        whose load the entry loop emits rather than ``BridgeInputSpaces`` or
+        ``HandleConsumerDrivenLoad``. All three sites read the same resolved
+        (alignment, axis) pair, so a right operand reaching the matmul this way
+        is boxed exactly as a bare one is.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self, a: pl.Tensor[[32, 128], pl.FP16], b: pl.Tensor[[128, 17], pl.FP16]
+            ) -> pl.Tensor[[32, 17], pl.FP32]:
+                bv: pl.Tensor[[128, 17], pl.FP16] = pl.tensor.set_validshape(b, 128, 17)
+                y: pl.Tensor[[32, 17], pl.FP32] = pl.matmul(a, bv, out_dtype=pl.FP32)
+                return y
+
+            @pl.function
+            def main(
+                self, a: pl.Tensor[[32, 128], pl.FP16], b: pl.Tensor[[128, 17], pl.FP16]
+            ) -> pl.Tensor[[32, 17], pl.FP32]:
+                y: pl.Tensor[[32, 17], pl.FP32] = self.main_incore_0(a, b)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.Tensor[[32, 128], pl.FP16],
+                b: pl.Tensor[[128, 17], pl.FP16],
+                ret0_out: pl.Out[pl.Tensor[[32, 17], pl.FP32]],
+            ) -> pl.Tensor[[32, 17], pl.FP32]:
+                # 17 columns allocated as two whole boxes; valid_shape keeps the
+                # true extent, so the store still writes exactly 17 columns.
+                b_mat: pl.Tile[[128, 32], pl.FP16, pl.MemorySpace.Mat] = pl.load(
+                    b, [0, 0], [128, 32], [128, 17], target_memory=pl.MemorySpace.Mat
+                )
+                bv_tile = pl.tile.set_validshape(b_mat, 128, 17)
+                a_mat: pl.Tile[[32, 128], pl.FP16, pl.MemorySpace.Mat] = pl.load(
+                    a, [0, 0], [32, 128], [32, 128], target_memory=pl.MemorySpace.Mat
+                )
+                y_tile = pl.tile.matmul(a_mat, bv_tile)
+                out_store: pl.Tensor[[32, 17], pl.FP32] = pl.store(y_tile, [0, 0], ret0_out)
+                return out_store
+
+            @pl.function
+            def main(
+                self, a: pl.Tensor[[32, 128], pl.FP16], b: pl.Tensor[[128, 17], pl.FP16]
+            ) -> pl.Tensor[[32, 17], pl.FP32]:
+                ret0_out: pl.Tensor[[32, 17], pl.FP32] = pl.create_tensor([32, 17], dtype=pl.FP32)
+                y: pl.Tensor[[32, 17], pl.FP32] = self.main_incore_0(a, b, ret0_out)
+                return y
+
+        _assert_convert_equal(Before, Expected)
+
+    @pytest.mark.parametrize(
         ("name", "dtype", "acc_dtype", "cols", "boxed_cols"),
         [
             # The column box holds 32 bytes' worth of elements: 16 for FP16, 32 for INT8.
@@ -3829,6 +3941,15 @@ class TestSliceMatmulConversion:
         # Row-boxed physical shape of the left operand's load. `a_trans` keeps its
         # natural (unboxed) load: the transpose_view makes its COLUMN axis the M axis.
         lhs_load_shape = lhs_shape if trans_kw == "a_trans" else [-(-lhs_shape[0] // 16) * 16, lhs_shape[1]]
+        # N-boxed physical shape of the right operand's load -- the mirror of the M
+        # boxing above, on whichever axis N lands on: columns normally, and rows
+        # under `b_trans`, whose natural load puts K on the columns. 16 for both
+        # dtypes here, as for M (ResolveCubeNAlignment has the general rule).
+        rhs_load_shape = (
+            [-(-rhs_shape[0] // 16) * 16, rhs_shape[1]]
+            if trans_kw == "b_trans"
+            else [rhs_shape[0], -(-rhs_shape[1] // 16) * 16]
+        )
 
         def before_body(ib, ins):
             a_in, b_in = ins
@@ -3862,12 +3983,12 @@ class TestSliceMatmulConversion:
                 )
                 other_tile = ib.let(
                     "rhs_mat",
-                    tile_ops.load(b_p, [0, 0], rhs_shape, rhs_shape, target_memory=MemorySpace.Mat),
+                    tile_ops.load(b_p, [0, 0], rhs_load_shape, rhs_shape, target_memory=MemorySpace.Mat),
                 )
                 return ib.let("result_tile", tile_ops.matmul(lhs_operand, other_tile))
             sliced_tile = ib.let(
                 "b_slice_tile",
-                tile_ops.load(b_p, [0, 0], rhs_shape, rhs_shape, target_memory=MemorySpace.Mat),
+                tile_ops.load(b_p, [0, 0], rhs_load_shape, rhs_shape, target_memory=MemorySpace.Mat),
             )
             other_tile = ib.let(
                 "lhs_mat",
