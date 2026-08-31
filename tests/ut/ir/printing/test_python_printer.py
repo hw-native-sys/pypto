@@ -1823,7 +1823,7 @@ def test_acc_init_cond_print_parse_roundtrip():
 
     assert "pl.tensor.matmul_acc(acc, lhs, rhs, init_cond=k0 == 0, a_trans=False, b_trans=False)" in printed
     assert "pl.tile.matmul_acc(acc, lhs, rhs, k0 == 0)" in printed
-    assert "pl.tile.gemv_acc(acc, lhs, rhs, init_cond=k0 == 0, acc_phase='unspecified')" in printed
+    assert "pl.tile.gemv_acc(acc, lhs, rhs, init_cond=k0 == 0, acc_phase=pl.AccPhase.Unspecified)" in printed
 
     reparsed = pl.parse_program(printed)
     ir.assert_structural_equal(program, reparsed)
