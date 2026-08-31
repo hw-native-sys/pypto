@@ -579,14 +579,9 @@ std::vector<StmtPtr> RewriteDeadIfPhisOnce(const std::vector<StmtPtr>& stmts,
       if (dropped_any) {
         FilterTrailingYieldSlots(new_then, kept_indices);
         if (new_else.has_value()) FilterTrailingYieldSlots(*new_else, kept_indices);
-        // ConvertToSSA synthesizes an else branch containing only a YieldStmt
-        // when a source-level if-without-else needs phi values.  If every phi
-        // becomes dead, removing that yield leaves an engaged but empty
-        // optional.  The Python printer spells it as `else: pass`, while the
-        // parser canonicalizes that spelling back to no else branch.  Drop the
-        // optional here, at the transform that creates the empty branch.  A
-        // non-empty branch (including any side-effecting statement) and an
-        // else required by a surviving return value are both preserved.
+        // Removing every synthetic phi yield can leave an engaged but empty
+        // else, which prints as `else: pass` but reparses as no else. Reset the
+        // optional here; non-empty branches and surviving phis stay intact.
         if (new_else.has_value() && new_else->empty() && new_return_vars.empty()) {
           new_else.reset();
         }

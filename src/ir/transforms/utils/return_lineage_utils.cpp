@@ -47,6 +47,15 @@ CallPtr AsCallOrSubmitView(const ExprPtr& expr) {
   return nullptr;
 }
 
+using ParamIndexMap = std::unordered_map<const Var*, size_t>;
+
+ParamIndexMap IndexParams(const std::vector<VarPtr>& params) {
+  ParamIndexMap result;
+  result.reserve(params.size());
+  for (size_t i = 0; i < params.size(); ++i) result.emplace(params[i].get(), i);
+  return result;
+}
+
 // Per-body index: topmost ReturnStmt, per-var defining AssignStmt, loop-carry
 // edges (iter_arg / tensor return_var -> init value var), and optionally tensor
 // IfStmt merge edges. If merges are collected only for the scope outliner: the
@@ -133,20 +142,22 @@ TraceContext& Ctx() {
 std::vector<std::optional<size_t>> ReturnedParamIndicesImpl(const FunctionPtr& func,
                                                             const ProgramPtr& program);
 
-// Trace a body var back to a param of `params`; nullptr when untraceable.
-const Var* TraceVar(const Var* var, const BodyIndexCollector& index,
-                    const std::unordered_set<const Var*>& params, const ProgramPtr& program,
-                    std::unordered_set<const Var*>& visited) {
+// Trace a body var back to a param position; nullopt when untraceable.
+std::optional<size_t> TraceVarToParamIndex(const Var* var, const BodyIndexCollector& index,
+                                           const ParamIndexMap& param_indices, const ProgramPtr& program,
+                                           std::unordered_set<const Var*>& visited) {
   while (var) {
-    if (!visited.insert(var).second) return nullptr;
-    if (params.count(var)) return var;
+    if (!visited.insert(var).second) return std::nullopt;
+    if (auto param_it = param_indices.find(var); param_it != param_indices.end()) {
+      return param_it->second;
+    }
 
     if (auto merge_it = index.merge_srcs.find(var); merge_it != index.merge_srcs.end()) {
-      const Var* root = nullptr;
+      std::optional<size_t> root;
       for (const Var* source : merge_it->second) {
         auto branch_visited = visited;
-        const Var* branch_root = TraceVar(source, index, params, program, branch_visited);
-        if (!branch_root || (root && branch_root != root)) return nullptr;
+        auto branch_root = TraceVarToParamIndex(source, index, param_indices, program, branch_visited);
+        if (!branch_root || (root && branch_root != root)) return std::nullopt;
         root = branch_root;
       }
       return root;
@@ -158,7 +169,7 @@ const Var* TraceVar(const Var* var, const BodyIndexCollector& index,
     }
 
     auto def_it = index.var_def.find(var);
-    if (def_it == index.var_def.end()) return nullptr;
+    if (def_it == index.var_def.end()) return std::nullopt;
     const auto& value = def_it->second->value_;
 
     if (auto rhs_var = AsVarLike(value)) {
@@ -170,20 +181,20 @@ const Var* TraceVar(const Var* var, const BodyIndexCollector& index,
       // Tuple destructuring of a user call: resolve via the callee's own
       // returned-param map, then continue from the corresponding arg var.
       auto tuple_var = AsVarLike(tuple_get->tuple_);
-      if (!tuple_var) return nullptr;
+      if (!tuple_var) return std::nullopt;
       auto tuple_def = index.var_def.find(tuple_var.get());
-      if (tuple_def == index.var_def.end()) return nullptr;
+      if (tuple_def == index.var_def.end()) return std::nullopt;
       auto call = AsCallOrSubmitView(tuple_def->second->value_);
-      if (!call || IsBuiltinOp(call->op_->name_)) return nullptr;
+      if (!call || IsBuiltinOp(call->op_->name_)) return std::nullopt;
       auto callee = program ? program->GetFunction(call->op_->name_) : nullptr;
-      if (!callee) return nullptr;
+      if (!callee) return std::nullopt;
       auto ret_map = ReturnedParamIndicesImpl(callee, program);
       size_t pos = static_cast<size_t>(tuple_get->index_);
-      if (tuple_get->index_ < 0 || pos >= ret_map.size() || !ret_map[pos]) return nullptr;
+      if (tuple_get->index_ < 0 || pos >= ret_map.size() || !ret_map[pos]) return std::nullopt;
       size_t mapped = ret_map[pos].value();  // NOLINT(bugprone-unchecked-optional-access)
-      if (mapped >= call->args_.size()) return nullptr;
+      if (mapped >= call->args_.size()) return std::nullopt;
       auto arg_var = AsVarLike(call->args_[mapped]);
-      if (!arg_var) return nullptr;
+      if (!arg_var) return std::nullopt;
       var = arg_var.get();
       continue;
     }
@@ -194,7 +205,7 @@ const Var* TraceVar(const Var* var, const BodyIndexCollector& index,
       // the result inherits that argument's param lineage.
       if (auto aliased = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size())) {
         auto arg_var = AsVarLike(call->args_[*aliased]);
-        if (!arg_var) return nullptr;
+        if (!arg_var) return std::nullopt;
         var = arg_var.get();
         continue;
       }
@@ -218,43 +229,34 @@ const Var* TraceVar(const Var* var, const BodyIndexCollector& index,
       if (!IsBuiltinOp(op_name)) {
         // Single-result user call: continue from the arg the callee returns.
         auto callee = program ? program->GetFunction(op_name) : nullptr;
-        if (!callee) return nullptr;
+        if (!callee) return std::nullopt;
         auto ret_map = ReturnedParamIndicesImpl(callee, program);
-        if (ret_map.size() != 1 || !ret_map[0]) return nullptr;
+        if (ret_map.size() != 1 || !ret_map[0]) return std::nullopt;
         size_t mapped = ret_map[0].value();  // NOLINT(bugprone-unchecked-optional-access)
-        if (mapped >= call->args_.size()) return nullptr;
+        if (mapped >= call->args_.size()) return std::nullopt;
         auto arg_var = AsVarLike(call->args_[mapped]);
-        if (!arg_var) return nullptr;
+        if (!arg_var) return std::nullopt;
         var = arg_var.get();
         continue;
       }
-      return nullptr;
+      return std::nullopt;
     }
-    return nullptr;
+    return std::nullopt;
   }
-  return nullptr;
+  return std::nullopt;
 }
 
 std::vector<std::optional<size_t>> TraceExprsToParamIndices(const std::vector<ExprPtr>& exprs,
                                                             const BodyIndexCollector& index,
-                                                            const std::vector<VarPtr>& params,
+                                                            const ParamIndexMap& param_indices,
                                                             const ProgramPtr& program) {
-  std::unordered_set<const Var*> param_set;
-  for (const auto& p : params) param_set.insert(p.get());
-  std::unordered_map<const Var*, size_t> param_to_index;
-  for (size_t i = 0; i < params.size(); ++i) param_to_index.emplace(params[i].get(), i);
-
   std::vector<std::optional<size_t>> result;
   result.reserve(exprs.size());
   for (const auto& expr : exprs) {
     std::optional<size_t> idx;
     if (auto var = AsVarLike(expr)) {
       std::unordered_set<const Var*> visited;
-      if (const Var* root = TraceVar(var.get(), index, param_set, program, visited)) {
-        if (auto it = param_to_index.find(root); it != param_to_index.end()) {
-          idx = it->second;
-        }
-      }
+      idx = TraceVarToParamIndex(var.get(), index, param_indices, program, visited);
     }
     result.push_back(idx);
   }
@@ -268,8 +270,8 @@ std::vector<std::optional<size_t>> TraceExprsToParamIndices(const std::vector<Ex
 //
 // This is the shape a Group/Spmd wrapper takes when the inner kernel has more
 // than one result (the outliner emits the call, binds its tuple to one SSA var,
-// and returns that var). ``TraceVar`` cannot describe it: it resolves a var to a
-// *single* param root, and its user-call branch deliberately bails on a
+// and returns that var). ``TraceVarToParamIndex`` cannot describe it: it resolves
+// a var to a *single* param position, and its user-call branch deliberately bails on a
 // multi-result callee (``ret_map.size() != 1``). Without this expansion the
 // wrapper's map comes back as a bogus ``[nullopt]``, every caller that
 // destructures the wrapper sees an imprecise map, and they all fall back to the
@@ -285,13 +287,8 @@ std::vector<std::optional<size_t>> TraceExprsToParamIndices(const std::vector<Ex
 // their previous behaviour.
 std::vector<std::optional<size_t>> ExpandForwardedTupleVar(const Var* tuple_var,
                                                            const BodyIndexCollector& index,
-                                                           const std::vector<VarPtr>& params,
+                                                           const ParamIndexMap& param_indices,
                                                            const ProgramPtr& program) {
-  std::unordered_set<const Var*> param_set;
-  for (const auto& p : params) param_set.insert(p.get());
-  std::unordered_map<const Var*, size_t> param_to_index;
-  for (size_t i = 0; i < params.size(); ++i) param_to_index.emplace(params[i].get(), i);
-
   // Walk SSA var-to-var aliases down to the statement that defines the tuple.
   const Var* var = tuple_var;
   std::unordered_set<const Var*> seen;
@@ -307,7 +304,7 @@ std::vector<std::optional<size_t>> ExpandForwardedTupleVar(const Var* tuple_var,
     }
     // A literal tuple construction: each element traces on its own.
     if (auto make_tuple = As<MakeTuple>(value)) {
-      return TraceExprsToParamIndices(make_tuple->elements_, index, params, program);
+      return TraceExprsToParamIndices(make_tuple->elements_, index, param_indices, program);
     }
     call = AsCallOrSubmitView(value);
     break;
@@ -319,23 +316,15 @@ std::vector<std::optional<size_t>> ExpandForwardedTupleVar(const Var* tuple_var,
   auto inner_map = ReturnedParamIndicesImpl(callee, program);
   if (inner_map.empty()) return {};
 
-  std::vector<std::optional<size_t>> result(inner_map.size());
+  std::vector<ExprPtr> forwarded_args(inner_map.size());
   for (size_t pos = 0; pos < inner_map.size(); ++pos) {
     if (!inner_map[pos]) continue;
     size_t mapped = inner_map[pos].value();  // NOLINT(bugprone-unchecked-optional-access)
-    if (mapped >= call->args_.size()) continue;
-    auto arg_var = AsVarLike(call->args_[mapped]);
-    if (!arg_var) continue;
-    // The arg need not be a param outright -- it may itself be an assemble /
-    // loop-carry chain rooted at one, so run it through the normal tracer.
-    std::unordered_set<const Var*> visited;
-    const Var* root = TraceVar(arg_var.get(), index, param_set, program, visited);
-    if (!root) continue;
-    if (auto it = param_to_index.find(root); it != param_to_index.end()) {
-      result[pos] = it->second;
-    }
+    if (mapped < call->args_.size()) forwarded_args[pos] = call->args_[mapped];
   }
-  return result;
+  // Args may themselves be assemble / loop-carry chains, so trace them through
+  // the same batch path as ordinary returns.
+  return TraceExprsToParamIndices(forwarded_args, index, param_indices, program);
 }
 
 // Group/Spmd wrappers may end in the inner kernel call with no top-level
@@ -424,16 +413,17 @@ std::vector<std::optional<size_t>> ReturnedParamIndicesImpl(const FunctionPtr& f
   // ``return_types_`` cannot describe.
   const auto& rets = index.first_return->value_;
   const size_t declared_arity = func->return_types_.size();
+  auto param_indices = IndexParams(func->params_);
   if (rets.size() == 1 && declared_arity > 1) {
     if (auto tuple_var = AsVarLike(rets[0])) {
       if (auto tuple_ty = As<TupleType>(tuple_var->GetType());
           tuple_ty && tuple_ty->types_.size() == declared_arity) {
-        auto expanded = ExpandForwardedTupleVar(tuple_var.get(), index, func->params_, program);
+        auto expanded = ExpandForwardedTupleVar(tuple_var.get(), index, param_indices, program);
         if (expanded.size() == declared_arity) return record(expanded);
       }
     }
   }
-  return record(TraceExprsToParamIndices(rets, index, func->params_, program));
+  return record(TraceExprsToParamIndices(rets, index, param_indices, program));
 }
 
 }  // namespace
@@ -503,7 +493,8 @@ std::vector<std::optional<size_t>> TraceToParamIndicesForOutlining(const std::ve
 
   BodyIndexCollector index(trace_if_merges);
   index.VisitStmt(body);
-  return TraceExprsToParamIndices(std::vector<ExprPtr>(vars.begin(), vars.end()), index, params, program);
+  return TraceExprsToParamIndices(std::vector<ExprPtr>(vars.begin(), vars.end()), index, IndexParams(params),
+                                  program);
 }
 
 VarPtr TraceToParam(const VarPtr& var, const StmtPtr& body, const std::vector<VarPtr>& params,

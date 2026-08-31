@@ -1580,7 +1580,6 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
 
   // Create fresh output variables for the outlined function
   std::vector<VarPtr> outlined_output_vars;
-  std::vector<TypePtr> return_types;
   for (const auto& out_var : output_vars) {
     bool is_store = store_output_set.count(out_var.get()) > 0;
     TypePtr var_type;
@@ -1608,7 +1607,6 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
     outlined_used_names.insert(out_var_name);
     auto outlined_var = std::make_shared<Var>(out_var_name, var_type, op->span_);
     outlined_output_vars.push_back(outlined_var);
-    return_types.push_back(var_type);
     if (!is_store) {
       var_substitution_map[out_var.get()] = outlined_var;
     }
@@ -1656,7 +1654,7 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
   // into var_remap_ keyed by the original Var, so the chain
   //   old → seed (initial param/outlined) → freshened (after type remap)
   // collapses to old → freshened. Pick that out and replace the stale
-  // entry in input_params / outlined_output_vars / return_types.
+  // entry in input_params / outlined_output_vars.
   const auto& post_remap = subst_mutator.GetVarRemap();
   auto resolve_to_freshened = [&](const VarPtr& original, const VarPtr& seeded) -> VarPtr {
     auto it = post_remap.find(original.get());
@@ -1679,14 +1677,12 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
       if (it != post_remap.end()) {
         if (auto freshened = AsVarLike(it->second)) {
           outlined_output_vars[i] = freshened;
-          return_types[i] = freshened->GetType();
         }
       }
       continue;
     }
     auto freshened = resolve_to_freshened(output_vars[i], outlined_output_vars[i]);
     outlined_output_vars[i] = freshened;
-    return_types[i] = freshened->GetType();
   }
 
   // Map each captured input Var to its positional index. The index is exact for
@@ -1709,6 +1705,7 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
   // the param makes the return->param mapping explicit by pointer identity
   // so orchestration codegen never re-derives it heuristically (#1702).
   StmtPtr outlined_body;
+  std::vector<TypePtr> return_types;
   if (outlined_output_vars.empty()) {
     outlined_body = transformed_body;
   } else {
@@ -1718,28 +1715,23 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
     auto return_param_indices = return_lineage::TraceToParamIndicesForOutlining(
         outlined_output_vars, transformed_body, input_params, program_,
         /*trace_if_merges=*/outlined_func_type_ == FunctionType::InCore);
-    std::vector<ExprPtr> return_exprs;
-    return_exprs.reserve(outlined_output_vars.size());
+    std::vector<ExprPtr> return_exprs(outlined_output_vars.begin(), outlined_output_vars.end());
     for (size_t i = 0; i < output_vars.size(); ++i) {
-      VarPtr ret = outlined_output_vars[i];
-      std::optional<size_t> param_idx = return_param_indices[i];
+      auto& ret = return_exprs[i];
+      auto& param_idx = return_param_indices[i];
       if (store_output_set.count(output_vars[i].get())) {
         // Store target: also an input, so the param is known directly.
         auto param_it = input_var_to_idx.find(output_vars[i].get());
         param_idx = param_it == input_var_to_idx.end()
                         ? std::nullopt
                         : std::optional<size_t>(static_cast<size_t>(param_it->second));
-      } else if (!AsTensorTypeLike(ret->GetType())) {
-        param_idx.reset();
       }
-      if (param_idx && *param_idx < input_params.size() &&
-          structural_equal(ret->GetType(), input_params[*param_idx]->GetType())) {
-        ret = input_params[*param_idx];
-      } else {
+      if (!param_idx || *param_idx >= input_params.size() || !AsTensorTypeLike(ret->GetType()) ||
+          !structural_equal(ret->GetType(), input_params[*param_idx]->GetType())) {
         param_idx.reset();
+        continue;
       }
-      return_param_indices[i] = param_idx;
-      return_exprs.push_back(ret);
+      ret = input_params[*param_idx];
     }
 
     // An outlined InCore function and its caller are generated together, so
@@ -1769,9 +1761,10 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
         for (size_t i = 0; i < order.size(); ++i) values[i] = original[order[i]];
       };
       reorder(output_vars);
-      reorder(return_types);
       reorder(return_exprs);
     }
+    return_types.reserve(return_exprs.size());
+    for (const auto& ret : return_exprs) return_types.push_back(ret->GetType());
     auto return_stmt = std::make_shared<ReturnStmt>(return_exprs, op->span_);
 
     std::vector<StmtPtr> body_stmts;

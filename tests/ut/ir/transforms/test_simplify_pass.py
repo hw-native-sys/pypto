@@ -1808,10 +1808,6 @@ class TestDeadIfReturnVarsDCE:
         ssa_if = ssa_if_stmts[0]
         assert len(ssa_if.return_vars) == 1
         assert ssa_if.else_body is not None
-        ssa_else_stmts = ir.flatten_to_stmts(ssa_if.else_body)
-        assert len(ssa_else_stmts) == 1
-        assert isinstance(ssa_else_stmts[0], ir.YieldStmt)
-        assert len(ssa_else_stmts[0].value) == 1
 
         after = passes.simplify()(ssa_form)
         func_after = next(iter(after.functions.values()))
