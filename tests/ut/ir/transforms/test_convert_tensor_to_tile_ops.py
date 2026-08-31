@@ -4261,6 +4261,127 @@ class TestSliceMatmulConversion:
         _assert_convert_output_equal(After, Expected)
 
 
+class TestBridgedLoadSpaceDerivation:
+    """A bridged `tile.load`'s memory space comes from the consuming tile op's
+    `set_input_memory` declaration, not from a second copy in the conversion
+    registry (issue #2480).
+
+    The constraint and the load target are *different* values, which is what
+    makes the derivation load-bearing rather than a rename. `tile.matmul`
+    constrains its operands to L0A/L0B, but MTE2 fills no L0 buffer, so the
+    bridge stages the operand in L1 and `InferTileMemorySpace` adds the last hop.
+    Copying the constraint straight onto the load would emit
+    `tile.load(target_memory=Left)` -- which `tile.load` does not reject, and
+    which fails only in the backend, far from the declaration that caused it.
+    """
+
+    def test_cube_operand_stages_through_mat_not_its_constraint(self):
+        """tile.matmul demands Left/Right; the bridged loads still land in Mat."""
+        matmul_spec = ir.get_op_memory_spec("tile.matmul")
+        assert matmul_spec["input_constraints"][0] == [MemorySpace.Left]
+        assert matmul_spec["input_constraints"][1] == [MemorySpace.Right]
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.Tensor[[16, 128], pl.BF16],
+                b: pl.Tensor[[128, 64], pl.BF16],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                out: pl.Tensor[[16, 64], pl.FP32] = pl.tensor.matmul(a, b, out_dtype=pl.FP32)
+                return out
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 128], pl.BF16],
+                b: pl.Tensor[[128, 64], pl.BF16],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                out: pl.Tensor[[16, 64], pl.FP32] = self.main_incore_0(a, b)
+                return out
+
+        after_src = passes.convert_tensor_to_tile_ops()(Before).as_python()
+
+        assert after_src.count("target_memory=pl.Mem.Mat") == 2
+        # The constraint itself must never reach a load: no tload writes L0.
+        assert "target_memory=pl.Mem.Left" not in after_src
+        assert "target_memory=pl.Mem.Right" not in after_src
+
+    def test_vector_operand_loads_into_its_declared_space(self):
+        """A Vec-constrained consumer bridges straight into Vec -- no staging hop."""
+        # The three operands tensor.scatter bridges are consumed by tile.scatter
+        # (src, indexes) and by the preserve blend's tile.sel (the else-operand).
+        assert ir.get_op_memory_spec("tile.scatter")["input_constraints"][1] == [MemorySpace.Vec]
+        assert ir.get_op_memory_spec("tile.scatter")["input_constraints"][2] == [MemorySpace.Vec]
+        assert ir.get_op_memory_spec("tile.sel")["input_constraints"][2] == [MemorySpace.Vec]
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                inp: pl.Tensor[[16, 8], pl.FP32],
+                idx: pl.Tensor[[4, 8], pl.INT32],
+                src: pl.Tensor[[4, 8], pl.FP32],
+            ) -> pl.Tensor[[16, 8], pl.FP32]:
+                out: pl.Tensor[[16, 8], pl.FP32] = pl.tensor.scatter(inp, dim=-1, index=idx, src=src)
+                return out
+
+            @pl.function
+            def main(
+                self,
+                inp: pl.Tensor[[16, 8], pl.FP32],
+                idx: pl.Tensor[[4, 8], pl.INT32],
+                src: pl.Tensor[[4, 8], pl.FP32],
+            ) -> pl.Tensor[[16, 8], pl.FP32]:
+                out: pl.Tensor[[16, 8], pl.FP32] = self.main_incore_0(inp, idx, src)
+                return out
+
+        after_src = passes.convert_tensor_to_tile_ops()(Before).as_python()
+
+        assert after_src.count("target_memory=pl.Mem.Vec") >= 3
+        assert "target_memory=pl.Mem.Mat" not in after_src
+
+    def test_multi_space_constraint_bridges_to_the_canonical_first_entry(self):
+        """`{Vec, Acc}` bridges to Vec: Acc has no inbound load path at all.
+
+        Backends list the canonical (cheapest, no-move) space first, the same
+        convention InferTileMemorySpace's demand collection reads. Taking the
+        second entry here would ask for a `tile.load` into L0C, which no target
+        implements.
+        """
+        constraints = ir.get_op_memory_spec("pld.tile.remote_store")["input_constraints"]
+        assert constraints[0] == [MemorySpace.Vec, MemorySpace.Acc]
+
+    @pytest.mark.parametrize(
+        ("flat_op", "batch_op"),
+        [
+            ("tile.matmul", "tile.batch_matmul"),
+            ("tile.matmul_acc", "tile.batch_matmul_acc"),
+        ],
+    )
+    def test_a_rank_dispatched_conversion_agrees_across_both_targets(self, flat_op, batch_op):
+        """`tensor.matmul(_acc)` emits the batched op for an ND operand, so its
+        requirement names both and they have to demand the same memory.
+
+        The agreement is structural, not luck: `FlattenTileNdTo2D` unrolls the
+        batched op into the flat one, so the same operand ends up in the same
+        buffer either way. Deriving from the flat op alone would read an
+        operator an ND call never becomes, which is the drift issue #2480 set
+        out to remove. `BridgeSpaceOf` rejects a divergence when the conversion
+        registry is built; this pins the declarations that feed it, so a change
+        to one of the pair fails here with the two spaces named rather than only
+        as an import-time throw.
+        """
+        flat = ir.get_op_memory_spec(flat_op)["input_constraints"]
+        batch = ir.get_op_memory_spec(batch_op)["input_constraints"]
+        assert flat == batch, (
+            f"{flat_op} and {batch_op} are the two targets of one rank dispatch but "
+            f"demand different memory: {flat} vs {batch}"
+        )
+
+
 class TestScatterUpdateConversion:
     """tensor.scatter_update lowers to a whole-row tile.scatter (no tile.scatter_update)."""
 

@@ -39,7 +39,7 @@ program_tiled = convert_pass(program)
 
 对每个 `FunctionType::InCore` 函数：
 
-1. **预扫描 MatmulSlice 模式**：收集被 `tensor.matmul` / `tensor.matmul_acc` 使用的 `tensor.slice` 结果。这些需要生成 Mat 空间的 `tile.load`（自然 load，转置时再叠加零拷贝 `tile.transpose_view`），而非默认的 `tile.load(Vec)`。
+1. **预扫描消费端内存需求**（`ConsumerSpaceCollector`）：由 `OpConversionRegistry` 中声明的 `input_reqs` 驱动，为每个变量收集其下游消费者所需的 memory space。典型场景是 `tensor.slice` 喂给 `tensor.matmul`——它需要生成 Mat 空间的 `tile.load`（自然 load，转置时再叠加零拷贝 `tile.transpose_view`），而不是先落到 Vec 再搬出去——但该机制是通用的，并非 matmul 专用。
 
 2. **插入 tile.load（入口加载）**：为每个被转换 op 直接使用的 `TensorType` 参数，在函数入口插入 `tile.load(param, zeros, shape, shape, target_memory=Vec)`。仅被自加载 op（`tensor.slice`、`tensor.matmul`、`tensor.read`、`tensor.write`、`tensor.assemble`）引用的参数不会生成额外加载。
 
@@ -139,9 +139,73 @@ pass 抵达 codegen。参见 [GM 缓存访问策略](../language/05-cache-policy
 
 InCore、Spmd、Group 函数在本阶段被跳过 —— 它们已在阶段一 / 二a 中被改写。
 
+## 桥接 load 落在哪个空间
+
+被列入某条 conversion 的 `input_reqs` 的操作数，必须以 tile 的形式抵达 converter：
+若它仍是 `TensorType`，`BridgeInputSpaces` 会合成对应的 `tile.load`。该 load 必须
+指明一个 memory space，而这个空间是**从消费该操作数的算子自身的声明推导出来的**，
+不会在这里再写第二遍。
+
+每条 entry 命名的是操作数，而不是空间：
+
+```cpp
+// tensor.matmul：lhs / rhs 作为 rank 分派所选中的那个 matmul 的两个 cube 操作数被桥接。
+{{0, {BridgeSpaceOf({"tile.matmul", "tile.batch_matmul"}, 0), "a_trans", /*cube_m_axis=*/true}},
+ {1, {BridgeSpaceOf({"tile.matmul", "tile.batch_matmul"}, 1), "b_trans"}}}
+```
+
+`BridgeSpaceOf` 从 `OpRegistry` 读取该实参的 `set_input_memory` 约束，再经
+`StagingSpaceForLoad` 折算成落点。因此对本 pass 和
+[`InferTileMemorySpace`](18-infer_tile_memory_space.md) 而言，操作数的 memory space
+只有 `OpRegistry` 这一处声明。
+
+**注册方无法自己写一个空间。** `InputSpaceReq::demanded_space` 的类型是
+`OperandSpace`——没有公开构造函数，也没有从 `MemorySpace` 的转换，因此
+`{MemorySpace::Vec, ...}` 根本编译不过。取得它的唯一途径就是 `BridgeSpaceOf` /
+`OperandSpaceOf`。"只推导、不书写"由此成为类型层面的不变量，而不是下一条注册可以
+悄悄忽略的约定。
+
+**一条 requirement 要列出所有可能消费该操作数的算子。** 即便只有一个也写成花括号
+列表（`BridgeSpaceOf({"tile.sel"}, 2)`）。当 converter 存在分派时这一点才真正生效：
+`tensor.matmul` 对 2D 操作数发射 `tile.matmul`，对 ND 操作数发射
+`tile.batch_matmul`，只按前者推导就会读到一个 ND 调用永远不会变成的算子。所列算子
+必须声明相同的约束。这种一致性是结构性的而非巧合——
+[`FlattenTileNdTo2D`](13-flatten_tile_nd_to_2d.md) 会把 batch 版展开成 2D 版，同一个
+操作数无论走哪条路都落在同一块 buffer——一旦出现分歧就直接抛错，而不是静默地按错误
+的名字去桥接。
+
+**约束与 load 落点是两个不同的空间，这正是关键。** `tile.matmul` 把操作数约束在
+`Left` / `Right`（即 L0A / L0B），但 MTE2 填不了任何 L0 buffer，所以 load 永远无法
+直接满足该约束：
+
+| 操作数约束 | load 落点 | 最后一跳 |
+| ---------- | --------- | -------- |
+| `Vec` | `Vec` | 无 |
+| `Mat` | `Mat` | 无 |
+| `Left` / `Right` / `Bias` / `LeftScale` / `RightScale` | `Mat` | 由 `InferTileMemorySpace` 阶段 2 插入 `tile.move` |
+| `Acc` | — | 不可 load；累加器必须在 L0C 中被*创建* |
+
+这张表由 `StagingSpaceForLoad`（`src/ir/memref.cpp`）持有；`InferTileMemorySpace`
+在重定向自己放置的生产者时调用的是同一个函数——所以桥接产生的 load 与推断产生的
+load 会把同一个操作数放进同一块 buffer。
+
+**出错时会立即报错。** 若命名了未注册的算子，或该算子在该实参上没有声明
+`set_input_memory`，会在构建 conversion registry 时直接抛错，而不是给桥接留下一个
+看似合理的默认值。新增算子不会再悄悄掉进两个注册表之间的缝隙。
+
+**并非所有操作数都走这条路。** 还有另外两种放置 tile 的机制，它们都不是"漏声明"：
+
+- **自装载算子**（`tensor.slice`、`tensor.gather`、`tensor.paged_gather`、
+  `tensor.gather_row`、`tensor.assemble` 等）在 converter 内部自己合成 load，因为
+  load 的 shape 或 offset 本身就是 lowering 的一部分。
+- **继承输入的算子**（`tile.assemble`、`tile.gather_row`）声明了
+  `set_output_memory_inherit_input()` 或 `set_output_reuses_input(idx)`。它们的空间
+  跟随传入的 tile——L1 paged-gather 累加器是 `Mat`，UB 版本是 `Vec`——因此用
+  `set_input_memory` 把它钉死反而会逼出一次错误的 `tile.move`，而不是描述硬件。
+
 ## MatmulSlice 模式
 
-当 `tensor.slice` 的结果被 `tensor.matmul` 或 `tensor.matmul_acc` 使用时，slice 必须生成 Mat 空间的 tile 而非 Vec 空间。本 pass 预扫描此模式，生成自然的 Mat `tile.load`；转置操作数（LHS 用 `a_trans`，RHS 用 `b_trans`）在 matmul 处叠加零拷贝 `tile.transpose_view`。
+这是上文通用 `input_reqs` 流程最典型的一个实例，而非独立的机制。当 `tensor.slice` 的结果被 `tensor.matmul` 或 `tensor.matmul_acc` 使用时，slice 必须生成 Mat 空间的 tile 而非 Vec 空间。`ConsumerSpaceCollector` 像处理任何其他消费者一样，从 matmul 的 `input_reqs` 读出这一需求，生产者据此生成自然的 Mat `tile.load`；转置操作数（LHS 用 `a_trans`，RHS 用 `b_trans`）在 matmul 处叠加零拷贝 `tile.transpose_view`。这里没有任何一处按"该 op 是不是 matmul"来匹配 —— 任何声明了非 Vec 需求的 op，其操作数都以同样的方式回传到生产者。
 
 该需求会**穿过**声明了 `set_output_memory_inherit_input()` 的零拷贝元数据 op 继续向上传播 —— `tensor.slice`、`tensor.view`、`tensor.reshape`、`tensor.reinterpret_view`、`tensor.set_validshape`。因此 `pl.matmul(pl.set_validshape(a[:, :K], rows, K), b)` 这样的操作数仍然直接加载到 Mat。若某个别名输入存储的 op 漏掉该声明，传播链就会断开：操作数被物化到 Vec，再通过 `tile.move` 桥接到 Mat，而这是一个 vector→cube 边界，会把本应是纯 CUBE 的 InCore scope 判定为 `MIXED`，导致 [`ExpandMixedKernel`](22-expand_mixed_kernel.md) 将其拆分为 AIC/AIV 两个函数。
 
@@ -516,7 +580,7 @@ for k0 in pl.pipeline(0, K, K_TILE, stage=2):
 | 组件 | 作用 |
 | ---- | ---- |
 | `TensorArgsInConvertedOpsCollector` | IRVisitor — 识别需要入口加载的 tensor 参数 |
-| `MatmulSlicePatternCollector` | IRVisitor — 查找 slice→matmul 模式以生成 Mat 空间加载 |
+| `ConsumerSpaceCollector` | IRVisitor — 依据 `input_reqs` 收集每个变量被消费端要求的 memory space |
 | `TypePropagatingMutator` | 基类 IRMutator — 通过控制流传播类型变更 |
 | `TensorToTileMutator` | IRMutator — 通过 OpConversionRegistry 将 tensor op 转换为 tile op |
 | `ForwardedCallFinder` | IRVisitor — 定位包装函数对转换后 InCore 的调用（阶段二a） |

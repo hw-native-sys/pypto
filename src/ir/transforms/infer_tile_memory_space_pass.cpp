@@ -473,18 +473,12 @@ class TileMemorySpaceAnalyzer : public IRVisitor {
         // downstream compute ops (matmul etc.) must be reached via a
         // tile.move inserted by Phase 2 MoveCollector. Clamping here keeps
         // the producer's output hardware-valid and preserves the move chain.
-        if (demand == MemorySpace::Vec || demand == MemorySpace::Mat) return demand;
-        // A cube-operand demand still tells us which of {Vec, Mat} to stage
-        // through: L1 is the only buffer a tload can fill that MTE1 can then
-        // move into L0A/L0B, so Mat is the correct staging space and Phase 2
-        // adds the Mat -> L0 move. Falling through to Vec instead would route
-        // the operand GM -> UB -> L1 -> L0 and, worse, put a cube-only operand
-        // on the vector core, which ExpandMixedKernel then reads as a mixed
-        // kernel and splits across AIC/AIV.
-        if (demand == MemorySpace::Left || demand == MemorySpace::Right || demand == MemorySpace::LeftScale ||
-            demand == MemorySpace::RightScale || demand == MemorySpace::Bias) {
-          return MemorySpace::Mat;
-        }
+        //
+        // `StagingSpaceForLoad` holds that clamp, and holds it for the whole
+        // compiler: the `input_reqs` bridge in ConvertTensorToTileOps creates
+        // its loads through the same function, so a bridged load and a load
+        // this pass retargets place the same operand in the same buffer.
+        if (auto staged = StagingSpaceForLoad(demand)) return *staged;
         // A demand for a space with no inbound move edge -- today only Acc,
         // since nothing writes L0C except the MAD unit -- cannot be staged
         // through anywhere. The value has to be *created* where it is needed.

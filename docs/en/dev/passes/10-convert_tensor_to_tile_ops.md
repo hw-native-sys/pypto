@@ -39,7 +39,7 @@ The pass operates in three program-level phases:
 
 For each `FunctionType::InCore` function:
 
-1. **Pre-scan MatmulSlice patterns**: Collect `tensor.slice` results consumed by `tensor.matmul` / `tensor.matmul_acc`. These need a Mat `tile.load` (natural, plus a zero-copy `tile.transpose_view` when transposed) instead of the default `tile.load(Vec)`.
+1. **Pre-scan consumer memory demand** (`ConsumerSpaceCollector`): Collect, for every variable, the memory space its downstream consumers need, driven by the `input_reqs` declared in `OpConversionRegistry`. A `tensor.slice` feeding `tensor.matmul` is the motivating case — it needs a Mat `tile.load` (natural, plus a zero-copy `tile.transpose_view` when transposed) rather than landing in Vec and being moved out again — but the mechanism is general, not matmul-specific.
 
 2. **Insert tile.load (entry loads)**: For each `TensorType` parameter directly consumed by a converted op, insert `tile.load(param, zeros, shape, shape, target_memory=Vec)` at function entry. Parameters only referenced by self-loading ops (`tensor.slice`, `tensor.matmul`, `tensor.read`, `tensor.write`, `tensor.assemble`) are skipped — they manage their own loads.
 
@@ -154,9 +154,90 @@ function or a wrapper that absorbed output params in Phase 2a:
 InCore, Spmd, and Group functions are skipped from this phase — they were
 already rewritten in Phase 1 / 2a.
 
+## Where a Bridged Load Lands
+
+An operand listed in a conversion's `input_reqs` reaches the converter as a tile:
+if it is still a `TensorType`, `BridgeInputSpaces` synthesizes the `tile.load`.
+That load has to name a memory space, and the space is **derived from the
+consuming operator's own declaration**, never written a second time here.
+
+Each entry names the operand rather than the space:
+
+```cpp
+// tensor.matmul: lhs and rhs are bridged as the cube operands of whichever
+// matmul the rank dispatch emits.
+{{0, {BridgeSpaceOf({"tile.matmul", "tile.batch_matmul"}, 0), "a_trans", /*cube_m_axis=*/true}},
+ {1, {BridgeSpaceOf({"tile.matmul", "tile.batch_matmul"}, 1), "b_trans"}}}
+```
+
+`BridgeSpaceOf` reads that argument's `set_input_memory` constraint out of
+`OpRegistry` and stages it through `StagingSpaceForLoad`. `OpRegistry` is
+therefore the single place an operand's memory space is stated, for this pass and
+for [`InferTileMemorySpace`](18-infer_tile_memory_space.md) alike.
+
+**A registration cannot write a space of its own.** `InputSpaceReq::demanded_space`
+is an `OperandSpace`, a type with no public constructor and no conversion from
+`MemorySpace`, so `{MemorySpace::Vec, ...}` does not compile. The only way to
+obtain one is `BridgeSpaceOf` / `OperandSpaceOf`, which is what makes "derived,
+never authored" an invariant of the type rather than a convention the next
+registration can quietly ignore.
+
+**A requirement names every operator that can consume the operand.** The list is
+braced even when there is one (`BridgeSpaceOf({"tile.sel"}, 2)`). It matters when
+a converter dispatches: `tensor.matmul` emits `tile.matmul` for a 2-D operand and
+`tile.batch_matmul` for an ND one, so deriving from the flat op alone would read
+an operator an ND call never becomes. All listed operators must declare the same
+constraint. That agreement is structural rather than lucky —
+[`FlattenTileNdTo2D`](13-flatten_tile_nd_to_2d.md) unrolls the batched op into
+the flat one, so the same operand lands in the same buffer either way — and a
+divergence throws instead of silently bridging against the wrong name.
+
+**The constraint and the load target are different spaces, and that is the
+point.** `tile.matmul` constrains its operands to `Left` / `Right` — L0A and L0B
+— but MTE2 fills no L0 buffer, so a load can never satisfy the constraint
+directly:
+
+| Operand constraint | Load lands in | Last hop |
+| ------------------ | ------------- | -------- |
+| `Vec` | `Vec` | none |
+| `Mat` | `Mat` | none |
+| `Left` / `Right` / `Bias` / `LeftScale` / `RightScale` | `Mat` | `tile.move` added by `InferTileMemorySpace` Phase 2 |
+| `Acc` | — | not loadable; an accumulator must be *created* in L0C |
+
+`StagingSpaceForLoad` (`src/ir/memref.cpp`) holds that table, and
+`InferTileMemorySpace` applies the same function when it retargets a producer it
+placed itself — so a bridged load and an inferred load put the same operand in
+the same buffer.
+
+**Failures are loud and early.** Naming an unregistered operator, or one that
+declares no `set_input_memory` for that argument, throws while the conversion
+registry is being built rather than leaving the bridge with a plausible-looking
+default. A new operator cannot silently fall into the gap between the two
+registries.
+
+**Not every operand goes through this.** Two other mechanisms place a tile, and
+neither is a missing declaration:
+
+- **Self-loading ops** (`tensor.slice`, `tensor.gather`, `tensor.paged_gather`,
+  `tensor.gather_row`, `tensor.assemble`, …) synthesize their own loads inside
+  the converter, because the load's shape or offset is part of the lowering.
+- **Inherit-input ops** (`tile.assemble`, `tile.gather_row`) declare
+  `set_output_memory_inherit_input()` or `set_output_reuses_input(idx)`. Their
+  space follows the tile they are given — `Mat` for an L1 paged-gather
+  accumulator, `Vec` for a UB one — so pinning it with `set_input_memory` would
+  force a wrong `tile.move` instead of describing the hardware.
+
 ## MatmulSlice Pattern
 
-When `tensor.slice` feeds into `tensor.matmul` or `tensor.matmul_acc`, the slice must produce a Mat-space tile instead of a Vec-space tile. The pass pre-scans for this pattern and emits a natural Mat `tile.load`; a transposed operand (`a_trans` for LHS, `b_trans` for RHS) gets a zero-copy `tile.transpose_view` at the matmul site.
+This is the motivating instance of the general `input_reqs` flow above, not a
+mechanism of its own. When `tensor.slice` feeds into `tensor.matmul` or
+`tensor.matmul_acc`, the slice must produce a Mat-space tile instead of a
+Vec-space tile. `ConsumerSpaceCollector` reads that demand off the matmul's
+`input_reqs` like any other consumer's, and the producer answers it with a
+natural Mat `tile.load`; a transposed operand (`a_trans` for LHS, `b_trans` for
+RHS) gets a zero-copy `tile.transpose_view` at the matmul site. Nothing here
+matches on the operator being a matmul — an operand of any op declaring a
+non-Vec requirement reaches its producer the same way.
 
 The demand is propagated **through** zero-copy metadata ops that declare `set_output_memory_inherit_input()` — `tensor.slice`, `tensor.view`, `tensor.reshape`, `tensor.reinterpret_view`, `tensor.set_validshape`. So an operand written as `pl.matmul(pl.set_validshape(a[:, :K], rows, K), b)` still loads straight to Mat. An op that aliases its input's storage but omits that declaration breaks the chain: the operand materializes in Vec and needs a `tile.move` to Mat, which is a vector→cube boundary that flips an otherwise pure-CUBE InCore scope to `MIXED` and makes [`ExpandMixedKernel`](22-expand_mixed_kernel.md) split it into an AIC/AIV pair.
 
@@ -563,7 +644,7 @@ re-declared seed could not name it.
 | Component | Role |
 | --------- | ---- |
 | `TensorArgsInConvertedOpsCollector` | IRVisitor — identifies tensor params needing entry loads |
-| `MatmulSlicePatternCollector` | IRVisitor — finds slice→matmul patterns for Mat-space loads |
+| `ConsumerSpaceCollector` | IRVisitor — collects each variable's consumer-demanded memory space from `input_reqs` |
 | `TypePropagatingMutator` | Base IRMutator — propagates type changes through control flow |
 | `TensorToTileMutator` | IRMutator — converts tensor ops to tile ops via OpConversionRegistry |
 | `ForwardedCallFinder` | IRVisitor — locates the wrapper's call into a transformed InCore (Phase 2a) |

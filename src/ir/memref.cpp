@@ -70,6 +70,27 @@ bool IsTileMoveEverPossibleInto(MemorySpace dst) {
   return false;
 }
 
+std::optional<MemorySpace> StagingSpaceForLoad(MemorySpace demand) {
+  switch (demand) {
+    case MemorySpace::Vec:
+    case MemorySpace::Mat:
+      // MTE2 fills both directly; the load already lands where it is wanted.
+      return demand;
+    case MemorySpace::Left:
+    case MemorySpace::Right:
+    case MemorySpace::Bias:
+    case MemorySpace::LeftScale:
+    case MemorySpace::RightScale:
+      // L1 is the only buffer a tload can fill that MTE1 can then move into the
+      // cube operand buffers, so it is the staging space for all of them.
+      return MemorySpace::Mat;
+    default:
+      // `Acc` has no inbound move edge on any target, and `DDR` / `ScalarLocal`
+      // hold no tile. Neither is reachable by staging.
+      return std::nullopt;
+  }
+}
+
 std::string MemorySpaceToString(MemorySpace space) {
   switch (space) {
     case MemorySpace::DDR:

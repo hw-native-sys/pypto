@@ -88,6 +88,8 @@ yield 查表与 init 载体查表都使用 `AsVarLike` 而非 `As<Var>`。原样
 
 对 retargetable 生产者执行 "夹逼到 `{Vec, Mat}`" 是有意为之：面向 DDR 的 `tile.load` 不能直接产出 `Left` / `Right` / `Acc` / `Bias`；即便下游需求是这些 space 之一，生产者也必须停在 `Mat`（或 `Vec`），由阶段 2 插入 `tile.move` 抵达特化 space。
 
+这段夹逼逻辑放在 `StagingSpaceForLoad`（`src/ir/memref.cpp`）里而不是内联在此处，因为本 pass 并非唯一调用者：[`ConvertTensorToTileOps`](10-convert_tensor_to_tile_ops.md#桥接-load-落在哪个空间) 中的 `input_reqs` 桥接，会用同一个函数、依据本阶段读取的同一份 `set_input_memory` 声明，推导它所*创建*的每个 load 的空间。只保留一份，才能保证桥接产生的 load 与本 pass 重定向的 load 不会把同一个操作数放进不同的 buffer。
+
 究竟停在两者中的哪一个，由需求决定，而非由某个默认值决定。cube 操作数需求会把生产者解析为 **`Mat`**：L1 是 `tload` 能填充、且 MTE1 随后能搬入 L0A/L0B 的唯一缓冲区 —— `Mat -> Left` / `Mat -> Right` 是 PTOAS（`TMovOp::verify`）唯一实现的搬运对。若改为路由到 `Vec`，不仅要多走 GM -> UB -> L1 -> L0 一条链，更糟的是会把仅供 cube 使用的操作数放到 vector 核上，`ExpandMixedKernel` 随后会将其识别为混合 kernel 并拆分到 AIC/AIV。
 
 `Acc` 单独处理：**任何 target、任何路径都无法把数据搬入 `Acc`**，只有矩阵单元才写 L0C。因此必须作为累加器的 tile 只能在 `Acc` 中*创建*，阶段 2 无法为其架桥。`OpRegistry::Create` 会拒绝*显式* space 无法抵达 `Acc` 约束的操作数，但*未设置* space 的生产者仍会携带该需求到达本 pass，上述夹逼不能把它吞掉。

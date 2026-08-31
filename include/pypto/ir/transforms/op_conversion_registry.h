@@ -15,8 +15,10 @@
 #include <any>
 #include <cstddef>
 #include <functional>
+#include <initializer_list>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -62,14 +64,91 @@ using ConversionFunc = std::function<ConversionResult(
     const Span& span)>;
 
 /**
- * @brief Per-input memory space requirement for a converter.
+ * @brief A memory space that was *derived* from an operator's own declaration.
  *
- * Declares that a specific input operand must reside in a particular memory space.
- * The framework uses this to automatically insert tile.load (for TensorType inputs)
- * before calling the converter.
+ * The whole point of this type is that a conversion cannot write one. It has no
+ * public constructor and no conversion from `MemorySpace`, so the only way to
+ * obtain one is `BridgeSpaceOf` / `OperandSpaceOf` below, which read the value
+ * out of the consuming operator's `set_input_memory`. `OpRegistry` therefore
+ * stays the single place an operand's memory space is written -- enforced by the
+ * type, not by a convention a new registration can quietly ignore.
+ */
+class OperandSpace {
+ public:
+  /// The derived space. Call this at the point of use; do not cache it beside
+  /// the requirement, or the derivation stops being the single source again.
+  [[nodiscard]] MemorySpace Get() const { return space_; }
+
+ private:
+  explicit OperandSpace(MemorySpace space) : space_(space) {}
+  MemorySpace space_;
+
+  friend OperandSpace OperandSpaceOf(std::initializer_list<std::string_view> op_names, size_t arg_index);
+  friend OperandSpace BridgeSpaceOf(std::initializer_list<std::string_view> op_names, size_t arg_index);
+};
+
+/**
+ * @brief The space `arg_index` is constrained to, read from the operators that
+ *        consume it, for an operand materialised **in place**.
+ *
+ * Such an operand has no staging space at all: today that is
+ * `tile.matmul_acc`'s accumulator, which nothing but the MAD unit writes, so
+ * the requirement exists to reach the allocation site rather than to place a
+ * load.
+ *
+ * `op_names` lists **every** operator the converter can emit for this operand,
+ * and is a braced list even when there is one -- `OperandSpaceOf({"tile.foo"},
+ * 0)`. A converter that dispatches on rank reaches more than one:
+ * `tensor.matmul` emits `tile.matmul` or `tile.batch_matmul`, and naming only
+ * the 2-D one would silently derive against an operator the call may never
+ * become. All listed operators must declare the same constraint, which is an
+ * invariant rather than a coincidence: `FlattenTileNdTo2D` unrolls the batched
+ * op into the 2-D one, so their operands land in the same buffer by
+ * construction. A divergence is a bug and throws here.
+ *
+ * Throws (`InternalError`) while the conversion registry is built when a listed
+ * operator is unregistered, declares no constraint for `arg_index`, or
+ * disagrees with its siblings.
+ */
+[[nodiscard]] OperandSpace OperandSpaceOf(std::initializer_list<std::string_view> op_names, size_t arg_index);
+
+/**
+ * @brief The space a *bridged* `tile.load` must target for that same operand.
+ *
+ * The constraint and the load target are not the same space, which is why this
+ * is not `OperandSpaceOf`: `tile.matmul` constrains its operands to `Left` /
+ * `Right`, but MTE2 fills no L0 buffer, so the bridge loads into `Mat` and
+ * `InferTileMemorySpace` Phase 2 adds the `Mat -> L0` move. The mapping is
+ * `StagingSpaceForLoad`, shared with that pass, which is what keeps a bridged
+ * load and an inferred load placing the same operand in the same buffer.
+ *
+ * `op_names` follows the same rule as `OperandSpaceOf`. Additionally throws
+ * when the constraint is reachable by no load even indirectly -- such an
+ * operand has to be created where it is needed and takes `OperandSpaceOf`.
+ */
+[[nodiscard]] OperandSpace BridgeSpaceOf(std::initializer_list<std::string_view> op_names, size_t arg_index);
+
+/**
+ * @brief Per-input bridging requirement for a converter.
+ *
+ * Declares that a specific input operand has to reach the converter as a tile.
+ * The framework inserts the `tile.load` for a `TensorType` input, and this
+ * struct says where it lands and how it is shaped.
+ *
+ * `demanded_space` is **derived, not authored** -- see `OperandSpace`. A
+ * registration names the operand it belongs to in one of two spellings and the
+ * value is read from that operator's declaration:
+ *
+ * - `BridgeSpaceOf(...)` for an operand the bridge **loads**, which stages
+ *   through `StagingSpaceForLoad`;
+ * - `OperandSpaceOf(...)` for an operand materialised **in place**, which has
+ *   no staging space at all.
+ *
+ * Which kind an entry is is visible at the registration instead of being
+ * implied by a bare `MemorySpace` literal -- there is no way to write one here.
  */
 struct InputSpaceReq {
-  MemorySpace space;                       ///< Required memory space
+  OperandSpace demanded_space;             ///< Derived via `BridgeSpaceOf` / `OperandSpaceOf`; never authored
   std::optional<std::string> trans_kwarg;  ///< Read transpose flag from this kwarg (if any)
   /// Whether this operand carries the matmul's **M** axis, i.e. an axis the MAD
   /// reads out of a whole number of NZ fractal boxes.  The logical extent of a
@@ -192,6 +271,15 @@ class OpConversionRegistry {
 
 /**
  * @brief Helper macro for simple op conversion registration
+ *
+ * Currently unused, and adding a use needs care: it registers from a static
+ * initializer, which would build the `OpConversionRegistry` singleton while
+ * `OpRegistry` may still be partly empty. `BridgeSpaceOf` / `OperandSpaceOf`
+ * read `OpRegistry` where they are called, so a requirement built from a static
+ * initializer can race operator registration. Both are callable from any
+ * translation unit; call them from registration code that runs after static
+ * init -- as all of it does today, where the singleton is first built from pass
+ * code.
  */
 #define REGISTER_OP_CONVERSION(FromOp, ToOp)                \
   static bool PYPTO_STR_CONCAT(op_conv_reg_, __COUNTER__) = \

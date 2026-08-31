@@ -165,7 +165,7 @@ int64_t ResolveCubeMAlignment(const CallPtr& call,
   }
   if (shape.size() != 2) return 0;
 
-  const auto view = tile_view_semantics::GetImplicitTileView(shape, decider.space);
+  const auto view = tile_view_semantics::GetImplicitTileView(shape, decider.demanded_space.Get());
   const auto box = tile_view_semantics::GetBoxedTileAlignment(view, dtype);
   if (!box) return 0;
   const int64_t own = ReadsOperandTransposed(call, decider) ? box->cols : box->rows;
@@ -215,7 +215,7 @@ int64_t ResolveCubeNAlignment(const CallPtr& call, const InputSpaceReq& req, siz
   }
   if (shape.size() != 2) return 0;
 
-  const auto view = tile_view_semantics::GetImplicitTileView(shape, req.space);
+  const auto view = tile_view_semantics::GetImplicitTileView(shape, req.demanded_space.Get());
   const auto box = tile_view_semantics::GetBoxedTileAlignment(view, dtype);
   if (!box || box->rows <= 0 || box->cols <= 0) return 0;
   return std::max<int64_t>({box->rows, box->cols, kAccFractalRows});
@@ -664,7 +664,7 @@ class ConsumerSpaceCollector : public IRVisitor {
         // A transposed use moves this operand's M to its column axis, and the
         // alignment is the one the whole call shares (see ConsumerSpaceReq).
         const auto [align, boxed_axis] = ResolveBoxedAxis(call, entry->input_reqs, idx, req);
-        const ConsumerSpaceReq resolved{req.space, align, boxed_axis};
+        const ConsumerSpaceReq resolved{req.demanded_space.Get(), align, boxed_axis};
         // Several consumers can share one producer (a sliced KV feeding two
         // matmuls, an accumulator seed read by two accumulations); MergeConsumerReq
         // is the single rule for reconciling them.
@@ -1248,7 +1248,7 @@ class TensorToTileMutator : public TypePropagatingMutator {
       // row-box demand back to the operand's producer (HandleBoxedAccCreate);
       // leaving the operand alone here keeps InferTileMemorySpace's "no data
       // path into Acc memory" diagnostic, which names the real limitation.
-      if (req.space == MemorySpace::Acc) continue;
+      if (req.demanded_space.Get() == MemorySpace::Acc) continue;
       const bool use_view = req.trans_kwarg ? call->GetKwarg<bool>(*req.trans_kwarg, false) : false;
       auto tensor_type = As<TensorType>(args[idx]->GetType());
 
@@ -1259,7 +1259,7 @@ class TensorToTileMutator : public TypePropagatingMutator {
         // tile.transpose_view below reinterprets the row axis as the matmul's K,
         // so M is the column extent the natural load allocates.
         const auto [box_align, boxed_axis] = ResolveBoxedAxis(call, input_reqs, idx, req);
-        auto loaded = emit_load(args[idx], tensor_type, req.space, idx, box_align, boxed_axis);
+        auto loaded = emit_load(args[idx], tensor_type, req.demanded_space.Get(), idx, box_align, boxed_axis);
         args[idx] = use_view ? emit_view(loaded) : loaded;
         continue;
       }

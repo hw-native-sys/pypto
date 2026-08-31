@@ -16,9 +16,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -32,6 +34,7 @@
 #include "pypto/ir/comm.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
@@ -130,7 +133,84 @@ VarPtr AppendScratchTile(std::vector<StmtPtr>* prologue, const std::shared_ptr<c
   return tmp_var;
 }
 
+// The space one operator's argument is declared to require, straight from its
+// `set_input_memory`. `Constraint` is the raw value; the two exported helpers
+// below wrap it.
+MemorySpace ConstraintOf(std::string_view op_name_view, size_t arg_index) {
+  const std::string op_name(op_name_view);
+  auto& registry = OpRegistry::GetInstance();
+  // A conversion that names an operator which does not exist is a bug in this
+  // registry, not user input. Classify it before `GetEntry`, whose own CHECK
+  // would report the same typo as a user-facing `ValueError`.
+  INTERNAL_CHECK(registry.IsRegistered(op_name))
+      << "Internal error: a conversion asks for argument " << arg_index << " of " << op_name
+      << ", which is not a registered operator. Correct the name in the conversion registration.";
+  const auto& spec = registry.GetEntry(op_name).GetMemorySpec();
+  INTERNAL_CHECK(spec.has_value() && arg_index < spec->input_constraints.size() &&
+                 !spec->input_constraints[arg_index].empty())
+      << "Internal error: a conversion asks for argument " << arg_index << " of " << op_name
+      << ", but that operator declares no set_input_memory for it, so there is no space to read. "
+         "Declare the constraint on the operator, or drop the operand from input_reqs.";
+  // Backends list the canonical (cheapest, no-move) space first -- the same
+  // convention InferTileMemorySpace's demand collection follows.
+  return spec->input_constraints[arg_index].front();
+}
+
 }  // namespace
+
+// A conversion entry does not *state* an operand's space; it *names the
+// operators that consume it*, and the value comes from their declarations --
+// the one place the ISA constraint is written.
+//
+// Every operator the converter can emit for this operand must be listed,
+// because a converter that dispatches on rank reaches more than one of them,
+// and they must agree. That agreement is structural, not luck:
+// `FlattenTileNdTo2D` unrolls `tile.batch_matmul` into `tile.matmul`, so the
+// same operand ends up in the same buffer either way. Checking it here is what
+// stops a later change to one of the two from drifting past the bridge
+// unnoticed -- resolving against whichever name a registration happened to list
+// would keep working and quietly bridge against an operator the call never
+// becomes.
+OperandSpace OperandSpaceOf(std::initializer_list<std::string_view> op_names, size_t arg_index) {
+  INTERNAL_CHECK(op_names.size() > 0) << "Internal error: a conversion declares a requirement for argument "
+                                      << arg_index << " without naming any operator that consumes it.";
+  const std::string_view first_name = *op_names.begin();
+  const MemorySpace first = ConstraintOf(first_name, arg_index);
+  for (const std::string_view other_name : op_names) {
+    const MemorySpace other = ConstraintOf(other_name, arg_index);
+    INTERNAL_CHECK(other == first)
+        << "Internal error: a conversion can emit either " << first_name << " or " << other_name
+        << " for argument " << arg_index
+        << ", but they demand different memory: " << MemorySpaceToString(first) << " vs "
+        << MemorySpaceToString(other)
+        << ". One bridge cannot satisfy both. Make the declarations agree, or split the registration "
+           "so each target derives its own requirement.";
+  }
+  return OperandSpace(first);
+}
+
+// The memory space a *bridged* `tile.load` must target for that same operand.
+//
+// The constraint and the load target are not the same space, which is why this
+// is not `OperandSpaceOf`: `tile.matmul` constrains its operands to `Left` and
+// `Right`, but MTE2 fills no L0 buffer, so the bridge loads into `Mat` and
+// `InferTileMemorySpace` Phase 2 adds the `Mat -> L0` move. `StagingSpaceForLoad`
+// holds that mapping for the whole compiler, so a bridged load and a load
+// `InferTileMemorySpace` retargets place the same operand in the same buffer.
+//
+// Only for operands the bridge actually loads. An operand materialised in place
+// -- an accumulator, which nothing but the MAD unit writes -- has no staging
+// space at all and takes `OperandSpaceOf` instead.
+OperandSpace BridgeSpaceOf(std::initializer_list<std::string_view> op_names, size_t arg_index) {
+  const MemorySpace constraint = OperandSpaceOf(op_names, arg_index).Get();
+  const auto staged = StagingSpaceForLoad(constraint);
+  INTERNAL_CHECK(staged.has_value())
+      << "Internal error: a conversion asks to bridge argument " << arg_index << " of " << *op_names.begin()
+      << ", which requires " << MemorySpaceToString(constraint)
+      << " memory, but no tile.load reaches that space even indirectly. Such an operand has to be "
+         "created where it is needed rather than loaded, so its requirement takes OperandSpaceOf.";
+  return OperandSpace(*staged);
+}
 
 OpConversionRegistry& OpConversionRegistry::GetInstance() {
   static OpConversionRegistry instance;
@@ -616,10 +696,13 @@ void OpConversionRegistry::RegisterMemoryOps() {
   //   row k is written whole into dst row index.flat[k] when flat_idx[k, c] = index.flat[k]*d + c.
   //   Build flat_idx = ci([n,d]) + (index.flat - k)*d, where ci[k,c]=k*d+c, then reconstruct the
   //   DPS row-preserve with the same zeroed-scatter + mask + select blend as tensor.scatter.
+  // Where each bridged operand lands in the lowering below: `input` is the
+  // else-operand of the DPS preserve blend, `index` is expanded into the flat
+  // index tile the scatter addresses with, and `src` is the scatter source.
   std::unordered_map<size_t, InputSpaceReq> scatter_update_input_reqs = {
-      {0, {MemorySpace::Vec, std::nullopt}},
-      {1, {MemorySpace::Vec, std::nullopt}},
-      {2, {MemorySpace::Vec, std::nullopt}},
+      {0, {BridgeSpaceOf({"tile.sel"}, 2), std::nullopt}},
+      {1, {BridgeSpaceOf({"tile.scatter"}, 2), std::nullopt}},
+      {2, {BridgeSpaceOf({"tile.scatter"}, 1), std::nullopt}},
   };
   auto scatter_update_conv = [](const std::vector<ExprPtr>& args,
                                 const std::vector<std::pair<std::string, std::any>>& kwargs,
@@ -1152,14 +1235,18 @@ void OpConversionRegistry::RegisterMatmulOps() {
         const std::string out_op = nd ? "tile.batch_matmul" : "tile.matmul";
         return ConversionResult{OpRegistry::GetInstance().Create(out_op, {args[0], args[1]}, span)};
       },
+      // Both targets of the rank dispatch above are named: an ND operand makes
+      // this a tile.batch_matmul, so deriving from tile.matmul alone would read
+      // an operator this call may never become. They are required to agree.
+      //
       // The right operand carries N. tensor.matmul_acc deliberately does not
       // declare it: its accumulator must agree with the product on physical N
       // just as it must on M, which needs the same cross-tile decider M has
       // (see m_align_from_arg) reaching the tile.create that allocates it.
-      {{0, {MemorySpace::Mat, "a_trans", /*cube_m_axis=*/true}},
+      {{0, {BridgeSpaceOf({"tile.matmul", "tile.batch_matmul"}, 0), "a_trans", /*cube_m_axis=*/true}},
        {1,
-        {MemorySpace::Mat, "b_trans", /*cube_m_axis=*/false, /*m_align_from_arg=*/std::nullopt,
-         /*cube_n_axis=*/true}}});
+        {BridgeSpaceOf({"tile.matmul", "tile.batch_matmul"}, 1), "b_trans", /*cube_m_axis=*/false,
+         /*m_align_from_arg=*/std::nullopt, /*cube_n_axis=*/true}}});
 
   // tensor.matmul_acc: 2D × 2D × 2D → tile.matmul_acc; any operand ≥3D →
   // tile.batch_matmul_acc. Same a_trans/b_trans handling as tensor.matmul.
@@ -1190,10 +1277,15 @@ void OpConversionRegistry::RegisterMatmulOps() {
       // Acc box is 16 rows, but it adopts whatever extent the left operand's
       // layout requires. The accumulator's req carries no bridge load (there is
       // no data path into Acc); it exists so ConsumerSpaceCollector can hand the
-      // demand back to the allocation site, where HandleBoxedAccCreate answers it.
-      {{0, {MemorySpace::Acc, std::nullopt, /*cube_m_axis=*/true, /*m_align_from_arg=*/1}},
-       {1, {MemorySpace::Mat, "a_trans", /*cube_m_axis=*/true}},
-       {2, {MemorySpace::Mat, "b_trans"}}});
+      // demand back to the allocation site, where HandleBoxedAccCreate answers
+      // it. Hence `OperandSpaceOf` for arg 0 and `BridgeSpaceOf` for the two
+      // that really are loaded. Both targets of the rank dispatch are named for
+      // the same reason as tensor.matmul above.
+      {{0,
+        {OperandSpaceOf({"tile.matmul_acc", "tile.batch_matmul_acc"}, 0), std::nullopt,
+         /*cube_m_axis=*/true, /*m_align_from_arg=*/1}},
+       {1, {BridgeSpaceOf({"tile.matmul_acc", "tile.batch_matmul_acc"}, 1), "a_trans", /*cube_m_axis=*/true}},
+       {2, {BridgeSpaceOf({"tile.matmul_acc", "tile.batch_matmul_acc"}, 2), "b_trans"}}});
 }
 
 // ============================================================================
@@ -1308,7 +1400,9 @@ void OpConversionRegistry::RegisterSortOps() {
   // Inputs (srcs) are auto-bridged to Vec tiles by the framework (input_reqs).
   std::unordered_map<size_t, InputSpaceReq> mrgsort2_input_reqs;
   for (size_t i = 0; i < 4; ++i) {
-    mrgsort2_input_reqs[i] = {MemorySpace::Vec, std::nullopt};
+    // `emplace`, not `operator[]`: a requirement has no default -- its space is
+    // derived, never blank-then-assigned.
+    mrgsort2_input_reqs.emplace(i, InputSpaceReq{BridgeSpaceOf({"tile.mrgsort_format2"}, i), std::nullopt});
   }
   RegisterCustom(
       "tensor.mrgsort_format2",
@@ -1907,7 +2001,7 @@ void OpConversionRegistry::RegisterGatherOps() {
   // TupleType output; downstream init_memref allocates the backing buffers
   // from that TupleType.
   std::unordered_map<size_t, InputSpaceReq> gc_input_reqs = {
-      {0, {MemorySpace::Vec, std::nullopt}},
+      {0, {BridgeSpaceOf({"tile.gather_compare"}, 0), std::nullopt}},
   };
   RegisterCustom(
       "tensor.gather_compare",
@@ -2167,10 +2261,12 @@ void OpConversionRegistry::RegisterPagedGatherOps() {
 // ============================================================================
 
 void OpConversionRegistry::RegisterScatterOps() {
+  // Same operand roles as tensor.scatter_update: `input` is the preserve
+  // blend's else-operand, `index` feeds the flat index tile, `src` is scattered.
   std::unordered_map<size_t, InputSpaceReq> scatter_input_reqs = {
-      {0, {MemorySpace::Vec, std::nullopt}},
-      {1, {MemorySpace::Vec, std::nullopt}},
-      {2, {MemorySpace::Vec, std::nullopt}},
+      {0, {BridgeSpaceOf({"tile.sel"}, 2), std::nullopt}},
+      {1, {BridgeSpaceOf({"tile.scatter"}, 2), std::nullopt}},
+      {2, {BridgeSpaceOf({"tile.scatter"}, 1), std::nullopt}},
   };
   RegisterCustom(
       "tensor.scatter",
@@ -2356,9 +2452,11 @@ void OpConversionRegistry::RegisterScatterOps() {
       },
       std::move(scatter_input_reqs));
 
+  // `input` is the mask-scatter source; `dst` is the preserve blend's
+  // else-operand, reached through tile.sel rather than tile.scatter_mask.
   std::unordered_map<size_t, InputSpaceReq> scatter_mask_input_reqs = {
-      {0, {MemorySpace::Vec, std::nullopt}},
-      {1, {MemorySpace::Vec, std::nullopt}},
+      {0, {BridgeSpaceOf({"tile.scatter_mask"}, 1), std::nullopt}},
+      {1, {BridgeSpaceOf({"tile.sel"}, 2), std::nullopt}},
   };
   RegisterCustom(
       "tensor.scatter_mask",
@@ -2618,7 +2716,8 @@ void OpConversionRegistry::RegisterDistributedOps() {
   //   - a src still resident in GM is auto-bridged with a natural tile.load into
   //     Vec, and a tensor.slice producer is loaded directly into Vec by the
   //     consumer-driven path.
-  RegisterSimple("pld.tensor.remote_store", "pld.tile.remote_store", {{0, {MemorySpace::Vec, std::nullopt}}});
+  RegisterSimple("pld.tensor.remote_store", "pld.tile.remote_store",
+                 {{0, {BridgeSpaceOf({"pld.tile.remote_store"}, 0), std::nullopt}}});
 
   // pld.tensor.put -> tile.create(stage) + pld.tile.put(dst, peer, src, stage).
   // Stage shape is [rows, cols] with rows = product(leading dims), cols =

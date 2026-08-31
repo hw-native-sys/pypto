@@ -12,6 +12,7 @@
 #ifndef PYPTO_IR_MEMORY_SPACE_H_
 #define PYPTO_IR_MEMORY_SPACE_H_
 
+#include <optional>
 #include <string>
 
 namespace pypto {
@@ -98,6 +99,33 @@ MemorySpace StringToMemorySpace(const std::string& str);
  * @return True when some target implements some move into @p dst
  */
 [[nodiscard]] bool IsTileMoveEverPossibleInto(MemorySpace dst);
+
+/**
+ * @brief The on-chip buffer a DDR-facing producer must fill so that an operand
+ *        demanded in @p demand becomes reachable.
+ *
+ * `tile.load` drives MTE2, which fills only `{Vec, Mat}`. A cube operand is
+ * demanded in `Left` / `Right` / `Bias` (or their A5 scale siblings), and no
+ * `tload` writes those: the operand is staged in `Mat` and an `MTE1` `tile.move`
+ * carries it the last hop. L1 is the only correct staging buffer for them --
+ * routing through `Vec` instead would send the operand `GM -> UB -> L1 -> L0`
+ * and put a cube-only value on the vector core, which `ExpandMixedKernel` then
+ * reads as a mixed kernel and splits across AIC/AIV.
+ *
+ * This is the single answer to "a consumer wants the operand *there*; where does
+ * the load put it?", shared by the two places that ask: the `input_reqs` bridge
+ * in `ConvertTensorToTileOps` (which creates the load) and the retargeting of a
+ * space-less producer in `InferTileMemorySpace` (which places one already there).
+ * Keeping one copy is what makes a bridged load and an inferred load agree.
+ *
+ * @param demand The space the consuming instruction requires its operand in,
+ *               i.e. an entry of that operator's registered `input_constraints`
+ * @return The space to load into, or nullopt when no load can reach @p demand
+ *         even indirectly. Today that is `Acc` (nothing writes L0C but the MAD
+ *         unit, so an accumulator must be *created* there) plus the spaces that
+ *         hold no tile at all (`DDR`, `ScalarLocal`).
+ */
+[[nodiscard]] std::optional<MemorySpace> StagingSpaceForLoad(MemorySpace demand);
 
 }  // namespace ir
 }  // namespace pypto
