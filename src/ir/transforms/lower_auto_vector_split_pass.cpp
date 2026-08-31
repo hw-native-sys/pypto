@@ -434,9 +434,11 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
         }
 
         if (dir == CVDirection::VECTOR_TO_CUBE) {
-          // V->C: HALF vector tile -> FULL via aic_gather, then keep the original
-          // cube-placement move on the gathered FULL tile. The gather result is
-          // full (un-tracked); the cube placement move and matmul stay full.
+          // V->C: HALF vector tile -> FULL Mat tile via aic_gather. If the
+          // original boundary move also targeted Mat, the gather already
+          // realizes that placement and the move is redundant. Keep a
+          // post-gather move only for a more specific cube operand space such
+          // as Left, Right, or Bias.
           INTERNAL_CHECK_SPAN(!call->args_.empty(), call->span_)
               << "Internal error: V->C boundary tile.move must carry a source tile";
           // The vector lane works on per-lane HALVES, so the boundary source has
@@ -487,22 +489,10 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
           // CONSUMING (cube) lane, which is the space ExpandMixedKernel pops the
           // V->C boundary into. Same single source of truth as the shard above.
           auto gather_type = gather->GetType();
-          auto gather_typed =
-              std::make_shared<Call>(gather->op_, gather->args_, gather->kwargs_, gather_type, gather->span_);
-          // Name the gathered FULL tile with the cube-destination's "_mat" suffix:
-          // ExpandMixedKernel folds this gather into the AIC-side V->C boundary and
-          // names the synthesized tpop after this var. The standalone split_aiv
-          // move-boundary path names that tpop BuildBoundaryTpopName(AIC, dest) =
-          // "<dest>_mat", so matching it here keeps both paths' .pto byte-identical.
-          auto full_mat_var =
-              std::make_shared<Var>(assign->var_->name_hint_ + "_mat", gather_type, assign->span_);
-          result.push_back(std::make_shared<AssignStmt>(full_mat_var, gather_typed, assign->span_));
-          // Original cube placement move, now on the FULL gathered tile. Keeping the
-          // move's original result type is only valid if the gather reassembled back
-          // to exactly that shape — now a genuine invariant, since the gather doubles
-          // the operand's own tracked split axis and both user-facing preconditions
-          // (operand halved; split dim gatherable) are enforced above. Compare shapes
-          // only: the gather type deliberately drops layout.
+          // Reusing the move's result type is valid only if the gather
+          // reassembled exactly that shape. Compare shapes only: the inferred
+          // gather type deliberately drops layout, while the original move can
+          // carry a destination-specific layout.
           auto gathered_tile = As<TileType>(gather_type);
           auto move_tile = As<TileType>(call->GetType());
           INTERNAL_CHECK_SPAN(gathered_tile && move_tile, call->span_)
@@ -516,6 +506,26 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
                 << " does not match the cube-placement move's result type; the V->C boundary "
                 << "would emit a tile.move whose result shape contradicts its operand";
           }
+          if (move_tile->GetMemorySpace() == MemorySpace::Mat) {
+            // ExpandMixedKernel lowers aic_gather to a tpop_from_aiv whose
+            // destination is already Mat. Assign it to the original boundary
+            // variable so no unsupported Mat -> Mat tmov survives into PTO.
+            auto direct_gather = std::make_shared<Call>(gather->op_, gather->args_, gather->kwargs_,
+                                                        call->GetType(), gather->span_);
+            result.push_back(std::make_shared<AssignStmt>(assign->var_, direct_gather, assign->span_));
+            continue;
+          }
+          auto gather_typed =
+              std::make_shared<Call>(gather->op_, gather->args_, gather->kwargs_, gather_type, gather->span_);
+          // Name the gathered FULL tile with the cube-destination's "_mat" suffix:
+          // ExpandMixedKernel folds this gather into the AIC-side V->C boundary and
+          // names the synthesized tpop after this var. The standalone split_aiv
+          // move-boundary path names that tpop BuildBoundaryTpopName(AIC, dest) =
+          // "<dest>_mat", so matching it here keeps both paths' .pto byte-identical.
+          auto full_mat_var =
+              std::make_shared<Var>(assign->var_->name_hint_ + "_mat", gather_type, assign->span_);
+          result.push_back(std::make_shared<AssignStmt>(full_mat_var, gather_typed, assign->span_));
+          // Original cube placement move, now on the FULL gathered Mat tile.
           std::vector<ExprPtr> move_args = call->args_;
           move_args[0] = full_mat_var;
           auto new_move = std::make_shared<Call>(call->op_, std::move(move_args), call->kwargs_,

@@ -793,9 +793,20 @@ def _run_split_auto_golden(
     set_backend_type(BackendType.Ascend910B)
     try:
         transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+        with tempfile.TemporaryDirectory() as td:
+            files = pto_backend.generate(transformed, td, skip_ptoas=True)
         code = torch_codegen(transformed, check_shapes=True)
     finally:
         reset_for_testing()
+
+    pto_code = "\n".join(value for name, value in files.items() if name.endswith(".pto"))
+    mat_to_mat_moves = [
+        line for line in pto_code.splitlines() if "pto.tmov" in line and line.count("loc=mat") >= 2
+    ]
+    assert not mat_to_mat_moves, (
+        "a V->C gather already lands in Mat; a post-gather Mat -> Mat move "
+        f"must not survive into PTO: {mat_to_mat_moves}"
+    )
 
     ns: dict = {}
     exec(code, ns)  # noqa: S102

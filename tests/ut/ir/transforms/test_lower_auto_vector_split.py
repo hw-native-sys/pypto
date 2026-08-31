@@ -1308,18 +1308,16 @@ def test_reduce_on_split_axis_rejected():
 # tile.aic_gather is declared HALF -> FULL, so its operand must be a per-lane
 # half the affinity gate produced. The pass enforces that precondition: an
 # un-halved vector operand is rejected rather than doubled (doubling would hand
-# the cube a 2x tile while the cube-placement move kept its original FULL result
-# type, contradicting tile.move's shape-preserving contract).
+# the cube a 2x tile while its FULL destination type remained unchanged).
 # ---------------------------------------------------------------------------
 
 
-def test_vc_boundary_becomes_aic_gather_and_cube_placement_stays_full():
-    """UP_DOWN: a V->C tile.move boundary becomes tile.aic_gather, and the cube
-    placement move on the gathered tile stays FULL ([128, 128] Mat) — the cube
-    side never sees a halved tile.
+def test_vc_boundary_becomes_aic_gather_without_redundant_mat_move():
+    """UP_DOWN: a V->C Mat boundary becomes tile.aic_gather directly.
 
     The vector value crossing to the cube is a halved load, so the gather
-    reassembles [64, 128] -> [128, 128] and the move's kept [128, 128] agrees.
+    reassembles [64, 128] -> [128, 128]. The gather already lands in Mat, so a
+    second Mat-placement move would become an unsupported Mat -> Mat TMOV.
     """
 
     @pl.program
@@ -1350,8 +1348,7 @@ def test_vc_boundary_becomes_aic_gather_and_cube_placement_stays_full():
             subblock_idx = pl.tile.get_subblock_idx()
             seed_vec = pl.tile.aiv_shard(cube_seed, split=1)  # noqa: F841
             v = pl.tile.load(data, [0 + subblock_idx * 64, 0], [64, 128], target_memory=pl.Mem.Vec)
-            gathered_mat = pl.tile.aic_gather(v, split=1)
-            gathered = pl.tile.move(gathered_mat, target_memory=pl.Mem.Mat)  # noqa: F841
+            gathered = pl.tile.aic_gather(v, split=1)  # noqa: F841
             out_store = pl.tile.store(v, [0 + subblock_idx * 64, 0], out_0)
             return out_store
 
@@ -1472,8 +1469,7 @@ def test_declared_scratch_operand_stays_full_width():
             scratch = pl.tile.create([256, 128], dtype=pl.FP32, target_memory=pl.Mem.Vec)
             sums = pl.tile.row_sum(v, scratch)
             vec_h = pl.tile.row_expand_mul(v, sums)
-            gathered_mat_mat = pl.tile.aic_gather(vec_h, split=1)
-            gathered_mat = pl.tile.move(gathered_mat_mat, target_memory=pl.Mem.Mat)
+            gathered_mat = pl.tile.aic_gather(vec_h, split=1)
             left = pl.tile.move(gathered_mat, target_memory=pl.Mem.Left)
             acc = pl.tile.matmul(left, rhs)
             out_store = pl.tile.store(acc, [0, 0], out_0)
@@ -1689,8 +1685,7 @@ def test_gather_full_width_table_is_lane_shared():
             )
             # `src` stays whole; indices, tmp and the result are all halved.
             picked = pl.tile.gather(src, indices, tmp)
-            gathered_mat_mat = pl.tile.aic_gather(picked, split=1)
-            gathered_mat = pl.tile.move(gathered_mat_mat, target_memory=pl.Mem.Mat)
+            gathered_mat = pl.tile.aic_gather(picked, split=1)
             left = pl.tile.move(gathered_mat, target_memory=pl.Mem.Left)
             acc = pl.tile.matmul(left, rhs)
             out_store = pl.tile.store(acc, [0, 0], out_0)
@@ -2277,8 +2272,7 @@ def test_rank1_broadcast_operand_off_the_split_axis_is_shared():
             subblock_idx = pl.tile.get_subblock_idx()
             v = pl.tile.load(x, [0 + subblock_idx * 128, 0], [128, 128], [128, 128], target_memory=pl.Mem.Vec)
             vec_h = pl.tile.add(v, bias)
-            gathered_mat_mat = pl.tile.aic_gather(vec_h, split=1)
-            gathered_mat = pl.tile.move(gathered_mat_mat, target_memory=pl.Mem.Mat)
+            gathered_mat = pl.tile.aic_gather(vec_h, split=1)
             left = pl.tile.move(gathered_mat, target_memory=pl.Mem.Left)
             acc = pl.tile.matmul(left, rhs)
             out_store = pl.tile.store(acc, [0, 0], out_0)
@@ -2359,8 +2353,7 @@ def test_same_rank_singleton_operand_is_shared():
             subblock_idx = pl.tile.get_subblock_idx()
             v = pl.tile.load(x, [0 + subblock_idx * 128, 0], [128, 128], [128, 128], target_memory=pl.Mem.Vec)
             vec_h = pl.tile.add(v, bias)
-            gathered_mat_mat = pl.tile.aic_gather(vec_h, split=1)
-            gathered_mat = pl.tile.move(gathered_mat_mat, target_memory=pl.Mem.Mat)
+            gathered_mat = pl.tile.aic_gather(vec_h, split=1)
             left = pl.tile.move(gathered_mat, target_memory=pl.Mem.Left)
             acc = pl.tile.matmul(left, rhs)
             out_store = pl.tile.store(acc, [0, 0], out_0)
@@ -2409,8 +2402,7 @@ def test_vc_boundary_gathers_on_the_migrated_split_axis():
             seed_vec = pl.tile.aiv_shard(cube_seed, split=1)  # noqa: F841
             col = pl.tile.load(data, [0 + subblock_idx * 8, 0], [8, 1], target_memory=pl.Mem.Vec)
             row = pl.tile.reshape(col, [1, 8])
-            gathered_mat = pl.tile.aic_gather(row, split=2)
-            gathered = pl.tile.move(gathered_mat, target_memory=pl.Mem.Mat)  # noqa: F841
+            gathered = pl.tile.aic_gather(row, split=2)  # noqa: F841
             out_store = pl.tile.store(col, [0 + subblock_idx * 8, 0], out_0)
             return out_store
 
@@ -2452,9 +2444,47 @@ def test_vc_boundary_gathers_left_right_shard_fed_directly():
         ) -> pl.Tensor[[128, 128], pl.FP32]:
             subblock_idx = pl.tile.get_subblock_idx()
             popped = pl.tile.aiv_shard(qk, split=2)
-            back_mat = pl.tile.aic_gather(popped, split=2)
-            back = pl.tile.move(back_mat, target_memory=pl.Mem.Mat)  # noqa: F841
+            back = pl.tile.aic_gather(popped, split=2)  # noqa: F841
             out_store = pl.tile.store(popped, [0, 0 + subblock_idx * 64], out_0)
+            return out_store
+
+    ir.assert_structural_equal(_lower(Before), Expected)
+
+
+def test_vc_boundary_keeps_non_mat_cube_placement():
+    """A gather lands in Mat, but a Left destination still needs tile.move."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            cube_seed: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat],
+            data: pl.Tensor[[128, 128], pl.FP32],
+            out_0: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            seed_vec = pl.tile.move(cube_seed, target_memory=pl.Mem.Vec)  # noqa: F841
+            value = pl.tile.load(data, [0, 0], [128, 128], target_memory=pl.Mem.Vec)
+            left = pl.tile.move(value, target_memory=pl.Mem.Left)  # noqa: F841
+            out_store = pl.tile.store(value, [0, 0], out_0)
+            return out_store
+
+    @pl.program
+    class Expected:
+        @pl.function(
+            type=pl.FunctionType.InCore,
+            attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": True},
+        )
+        def split_auto(
+            cube_seed: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat],
+            data: pl.Tensor[[128, 128], pl.FP32],
+            out_0: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            subblock_idx = pl.tile.get_subblock_idx()
+            seed_vec = pl.tile.aiv_shard(cube_seed, split=1)  # noqa: F841
+            value = pl.tile.load(data, [0 + subblock_idx * 64, 0], [64, 128], target_memory=pl.Mem.Vec)
+            left_mat = pl.tile.aic_gather(value, split=1)
+            left = pl.tile.move(left_mat, target_memory=pl.Mem.Left)  # noqa: F841
+            out_store = pl.tile.store(value, [0 + subblock_idx * 64, 0], out_0)
             return out_store
 
     ir.assert_structural_equal(_lower(Before), Expected)
