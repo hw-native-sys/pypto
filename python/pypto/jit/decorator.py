@@ -33,6 +33,11 @@ Public API
             with pl.at(level=pl.Level.CORE_GROUP):          # loops + pl.at scopes
                 ...
 
+    @pl.jit.graph
+    def layer(a: pl.Tensor, c: pl.InOut[pl.Tensor]):        # FunctionType.Graph
+        with pl.at(level=pl.Level.CORE_GROUP):              # recorded once,
+            ...                                             # replayed after
+
     @pl.jit
     def entry(a: pl.Tensor, c: pl.Out[pl.Tensor]):
         c = sub_kernel(a, c)   # dep discovered automatically (any of incore/inline/opaque)
@@ -2656,7 +2661,7 @@ def _discover_deps(func: Any, caller_func_type: str = "orchestration") -> list[J
 
     all_vars = {**func_globals, **closure_vars}
 
-    allowed_dep_types: set[str] = {"incore", "inline", "opaque", "extern"}
+    allowed_dep_types: set[str] = {"incore", "inline", "opaque", "extern", "graph"}
     if caller_func_type == "host":
         allowed_dep_types.add("orchestration")
 
@@ -2697,6 +2702,11 @@ class _SubFunctionDecorator:
         ``InlineFunctions`` IR pass).
       - ``opaque``  → ``FunctionType.Opaque`` (separate IR function; may wrap
         orchestration loops and ``pl.at`` scopes).
+      - ``graph``   → ``FunctionType.Graph`` (a recordable orchestration
+        fragment; the host_build_graph runtime records its task topology on the
+        first call and replays it after, so N calls cost one graph build rather
+        than N). Requires ``RuntimeKind.HOST_BUILD_GRAPH`` — compile under a
+        ``PassContext(runtime=...)``, or ``LegalizeGraphBoundary`` rejects it.
     """
 
     def __init__(self, func_type: str, *, allow_level: bool, allow_auto_scope: bool = False) -> None:
@@ -2870,6 +2880,7 @@ class _JITDecorator:
         self.incore = _SubFunctionDecorator("incore", allow_level=True)
         self.inline = _SubFunctionDecorator("inline", allow_level=False, allow_auto_scope=True)
         self.opaque = _SubFunctionDecorator("opaque", allow_level=False)
+        self.graph = _SubFunctionDecorator("graph", allow_level=False)
         self.extern = _ExternKernelDecorator()
 
     def __call__(self, func: Any = None, *, auto_scope: bool = True) -> Any:

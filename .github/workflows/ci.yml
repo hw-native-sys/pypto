@@ -1276,6 +1276,12 @@ jobs:
         # per-test and new tests need no edit. swimlane is --ignore'd here — it runs
         # in its own flagged step. (paged_attention has its own step below — passing
         # it as an explicit path here collapses pytest's dir collection.)
+        # test_graph_execution is --ignore'd for a different reason: a ChipWorker
+        # binds one (platform, device_id, runtime), and that file mixes
+        # host_build_graph cases with a default-runtime A/B twin. Two runtimes in
+        # one process poison the shared lane — the first Graph test failed 507018
+        # and took the rest of the step's tests with it — so it runs --forked
+        # below, one process per test.
         run: |
           source activate.sh
           echo "[device] DEVICE_ID=$DEVICE_ID"
@@ -1286,6 +1292,7 @@ jobs:
               --ignore=tests/st/distributed \
               --ignore=tests/st/codegen \
               --ignore=tests/st/runtime/framework_and_models/test_perf_swimlane.py \
+              --ignore=tests/st/runtime/framework_and_models/test_graph_execution.py \
               --device=\$TASK_DEVICE --platform=a2a3"
 
       - name: Test paged-attention codegen (numeric compare, in device env)
@@ -1316,6 +1323,15 @@ jobs:
           source activate.sh
           task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 600 \
             --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest tests/st/runtime/framework_and_models/test_perf_swimlane.py -v --device=\$TASK_DEVICE --platform=a2a3 --enable-chip-swimlane --forked"
+
+      - name: Test Graph record-and-replay (one process per test)
+        # --forked because a ChipWorker binds one (platform, device_id, runtime):
+        # the host_build_graph cases and the default-runtime A/B twin in this file
+        # cannot share a process.
+        run: |
+          source activate.sh
+          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 600 \
+            --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest tests/st/runtime/framework_and_models/test_graph_execution.py -v --device=\$TASK_DEVICE --platform=a2a3 --forked"
 
       - name: Test dump-args output
         run: |

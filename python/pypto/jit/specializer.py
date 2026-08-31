@@ -124,7 +124,7 @@ class SpecializeContext:
     Attributes:
         func_name: Python function name.
         source: Dedented source code of the function.
-        func_type: 'orchestration' | 'incore' | 'inline' | 'opaque' | None (auto).
+        func_type: 'orchestration' | 'incore' | 'inline' | 'opaque' | 'graph' | None (auto).
         level: pl.Level value or None.
         param_names: Ordered parameter names (excluding 'self').
         tensor_meta: TensorMeta per tensor param name.
@@ -1984,6 +1984,8 @@ class Specializer:
             return f"@pl.function(type=pl.FunctionType.Inline{auto_scope_suffix})"
         if ctx.func_type == "opaque":
             return "@pl.function(type=pl.FunctionType.Opaque)"
+        if ctx.func_type == "graph":
+            return "@pl.function(type=pl.FunctionType.Graph)"
         # InCore
         if ctx.level is None:
             return "@pl.function(type=pl.FunctionType.InCore)"

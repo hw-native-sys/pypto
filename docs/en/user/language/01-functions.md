@@ -72,8 +72,9 @@ core levels:
 | `@pl.jit.incore` | `InCore` | A device kernel (accepts `level=` to target a specific hierarchy level) |
 | `@pl.jit.inline` | `Inline` | Helper spliced into every call site by `InlineFunctions` |
 | `@pl.jit.opaque` | `Opaque` | A separate IR function that may hold orchestration loops and `pl.at` scopes |
+| `@pl.jit.graph` | `Graph` | A recordable orchestration fragment — the `host_build_graph` runtime records its task topology on the first call and replays it after, so N calls cost one graph build rather than N. Requires compiling under `RuntimeKind.HOST_BUILD_GRAPH` |
 
-Sub-function dependencies (`.incore` / `.inline` / `.opaque`) are auto-discovered from
+Sub-function dependencies (`.incore` / `.inline` / `.opaque` / `.graph`) are auto-discovered from
 the entry's body — call them by name. A `@pl.jit.host` entry additionally discovers
 `@pl.jit` chip-orchestration dependencies, so a full distributed program needs no
 `@pl.program` class.
