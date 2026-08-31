@@ -640,6 +640,11 @@ _TASK_DUMMY_ONLY_ATTRS = frozenset({"manual_dep_edges", "dummy_task"})
 # fails at import instead of silently dropping the hint from the error message below.
 _TASK_INVALID_OP = ir.get_op("system.task_invalid").name
 
+# Mirrors the runtime's ``NUM_TASK_TIMING_SLOTS`` (runtime/src/common/platform/include/common/device_phase.h),
+# re-spelled here since the parser validates ``timing_slot=`` before it ever reaches
+# codegen's own mirror, ``kRuntimeNumTaskTimingSlots`` in orchestration_codegen.cpp.
+_NUM_TASK_TIMING_SLOTS = 16
+
 
 def _split_spmd_for_loop_name_hints(name_hint: str) -> tuple[str, str]:
     """Map one ``for i in pl.spmd(..., name_hint=...)`` hint to Spmd vs InCore names.
@@ -7405,9 +7410,9 @@ class ASTParser:
                 hint="Write timing_slot=0 to tag this task with task-timing slot 0.",
             )
         slot = kw.value.value
-        if not 0 <= slot < 16:
+        if not 0 <= slot < _NUM_TASK_TIMING_SLOTS:
             raise ParserSyntaxError(
-                f"'{method_name}' timing_slot must be in 0..15, got {slot}",
+                f"'{method_name}' timing_slot must be in 0..{_NUM_TASK_TIMING_SLOTS - 1}, got {slot}",
                 span=self.span_tracker.get_span(kw.value),
                 hint="Choose one of the runtime's sixteen task-timing slots (0 through 15).",
             )
