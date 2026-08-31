@@ -75,4 +75,9 @@ NB_MODULE(pypto_core, m) {
   // Validate that every in-place op declared what it does to the slot it updates —
   // an undeclared writer reads as a pure consumer and its dependency edge vanishes
   pypto::ir::OpRegistry::GetInstance().ValidateArgEffects();
+
+  // Validate that multi-output ops express their outputs as a TupleType result —
+  // a destination tile in the argument list makes the caller pre-allocate a
+  // buffer InitMemRef owns, and hides the write from direction inference
+  pypto::ir::OpRegistry::GetInstance().ValidateMultiOutputOps();
 }

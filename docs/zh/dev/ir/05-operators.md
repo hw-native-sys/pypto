@@ -45,6 +45,8 @@ auto dynamic_dim = make_int(kDynamicDim);
 | `set_arg_effect(i, fn)` | 同上，但由 kwarg 决定 | `.set_arg_effect(2, [](const auto& kw) { ... })` |
 | `no_arg_writes()` | 已分类：不通过任何参数写入 | `.no_arg_writes()` |
 | `set_write_channel(c)` | 算子写入所走的硬件通路 | `.set_write_channel(WriteChannel::Dma)` |
+| `set_output_arity(N)` | 产生的值的个数；`N > 1` 表示结果是 `TupleType`——参见[多输出算子](09-multi_output_ops.md) | `.set_output_arity(2)` |
+| `set_workspace_arg(i)` | 第 `i` 个参数是编译器提供的暂存空间，而非结果 | `.set_workspace_arg(2)` |
 
 ### 参数效应（Argument effects）
 
@@ -950,6 +952,8 @@ a5 或不提供 SDMA provider 的 runtime 上，启用该能力的 worker 会在
    ```
 
 5. **添加测试**，位于 `tests/ut/ir/`，如需要则更新 `CMakeLists.txt`
+
+**要产生多个值？** 先读[多输出算子](09-multi_output_ops.md)——结果属于 `TupleType`，绝不放进参数列表；凡是这类算子会写、却没有声明为 workspace 的参数，注册表都会在 import 期拒绝。
 
 ## 参考
 

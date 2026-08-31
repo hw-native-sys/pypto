@@ -45,6 +45,8 @@ auto dynamic_dim = make_int(kDynamicDim);
 | `set_arg_effect(i, fn)` | Same, when a kwarg decides it | `.set_arg_effect(2, [](const auto& kw) { ... })` |
 | `no_arg_writes()` | Classified: writes through no argument | `.no_arg_writes()` |
 | `set_write_channel(c)` | Hardware path the op's writes take | `.set_write_channel(WriteChannel::Dma)` |
+| `set_output_arity(N)` | Values produced; `N > 1` means a `TupleType` result — see [Multi-Output Operators](09-multi_output_ops.md) | `.set_output_arity(2)` |
+| `set_workspace_arg(i)` | Argument `i` is compiler-supplied scratch, not a result | `.set_workspace_arg(2)` |
 
 ### Argument effects
 
@@ -1027,6 +1029,8 @@ workspace or silently turn a requested prefetch into a no-op. See
    ```
 
 5. **Add tests** in `tests/ut/ir/` and update `CMakeLists.txt` if needed
+
+**Producing more than one value?** Read [Multi-Output Operators](09-multi_output_ops.md) first — the results belong in a `TupleType`, never in the argument list, and the registry rejects at import any argument such an operator writes that was not declared a workspace.
 
 ## References
 

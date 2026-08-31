@@ -285,6 +285,29 @@ CallPtr OpRegistry::CreateImpl(const std::string& op_name, const std::vector<Exp
   }
   INTERNAL_CHECK_SPAN(result_type, span) << "Type deduction failed for '" + op_name + "'";
 
+  // The declared output arity and the deduced shape must agree. A mismatch means
+  // the registration and its f_deduce_type disagree about what the operator
+  // produces, which would surface much later as a null element var inside
+  // multi-output codegen. The reverse direction matters just as much: a tuple
+  // result nobody declared has no arity for codegen to read, so its elements
+  // would never be resolved.
+  const size_t declared_arity = entry.GetOutputArity();
+  auto deduced_tuple = As<TupleType>(result_type);
+  if (declared_arity > 1) {
+    INTERNAL_CHECK_SPAN(deduced_tuple, span)
+        << "Internal error: '" << op_name << "' declares set_output_arity(" << declared_arity
+        << ") but deduced a non-tuple " << result_type->TypeName();
+    INTERNAL_CHECK_SPAN(deduced_tuple->types_.size() == declared_arity, span)
+        << "Internal error: '" << op_name << "' declares set_output_arity(" << declared_arity
+        << ") but deduced a TupleType with " << deduced_tuple->types_.size() << " elements";
+  } else {
+    INTERNAL_CHECK_SPAN(!deduced_tuple, span)
+        << "Internal error: '" << op_name << "' deduced a TupleType result without declaring "
+        << "set_output_arity(" << deduced_tuple->types_.size()
+        << "); multi-output codegen reads the arity from the registry and would not "
+           "resolve this call's elements";
+  }
+
   // Apply OpMemorySpaceSpec to TileType results that lack memory_space.
   // This ensures the deduced type carries memory_space even when individual
   // type deduction functions omit it (fixes issue #553).
@@ -432,6 +455,97 @@ void OpRegistry::ValidateArgEffects() const {
       msg += "\n  - " + name;
     }
     throw ValueError(msg);
+  }
+}
+
+void OpRegistry::ValidateMultiOutputOps() const {
+  std::vector<std::string> unclassified;
+  std::vector<std::string> leaked_destinations;
+  std::vector<std::string> workspace_out_of_range;
+  std::vector<std::string> workspace_never_written;
+  std::vector<std::string> reuses_input;
+  for (const auto& [name, entry] : registry_) {
+    if (entry.GetOutputArity() <= 1) continue;
+    const size_t arg_count = entry.GetArgumentCount();
+    for (size_t i = 0; i < arg_count; ++i) {
+      // An argument nobody classified defaults to Read, and a destination tile
+      // reads exactly like an input under that default. Demanding a verdict is
+      // what turns the leak from invisible into a registration a reviewer sees.
+      if (!entry.HasDeclaredArgEffect(i)) {
+        unclassified.push_back(name + " (argument " + std::to_string(i) + ")");
+        continue;
+      }
+      // A written argument is either scratch the hardware needs or a result the
+      // caller reads. The first is legitimate and must say so; the second is a
+      // destination that belongs in the TupleType.
+      if (entry.MayWriteArg(i) && !entry.IsWorkspaceArg(i)) {
+        leaked_destinations.push_back(name + " (argument " + std::to_string(i) + ")");
+      }
+    }
+    // A workspace declaration is a claim about an argument that exists and that
+    // the hardware writes. Neither half is implied by the loop above: an index
+    // past the end names nothing, and `.no_arg_writes().set_workspace_arg(0)`
+    // classifies argument 0 as Read while calling it hardware-written scratch.
+    // Either way the operator reads as a pure consumer of a slot it writes.
+    for (size_t i : entry.GetWorkspaceArgs()) {
+      if (i >= arg_count) {
+        workspace_out_of_range.push_back(name + " (argument " + std::to_string(i) + " of " +
+                                         std::to_string(arg_count) + ")");
+      } else if (!entry.MayWriteArg(i)) {
+        workspace_never_written.push_back(name + " (argument " + std::to_string(i) + ")");
+      }
+    }
+    const auto& spec = entry.GetMemorySpec();
+    if (spec.has_value() && spec->output_reuses_input_arg.has_value()) {
+      reuses_input.push_back(name);
+    }
+  }
+  auto fail = [](std::string msg, std::vector<std::string> names) {
+    std::sort(names.begin(), names.end());
+    for (const auto& name : names) msg += "\n  - " + name;
+    throw ValueError(msg);
+  };
+  if (!unclassified.empty()) {
+    fail(
+        "The following multi-output ops left an argument unclassified. An operator that "
+        "returns several values must reach a verdict about every argument it takes: an "
+        "undeclared slot defaults to Read, which is indistinguishable from a destination "
+        "tile smuggled into the argument list. Add .set_arg_effect(<index>, ...) for each "
+        "argument — or .no_arg_writes() when the operator writes through none of them:",
+        std::move(unclassified));
+  }
+  if (!leaked_destinations.empty()) {
+    fail(
+        "The following multi-output ops write through an argument that was never declared "
+        "scratch. A written argument is either a workspace the hardware needs — say so with "
+        ".set_workspace_arg(<index>) — or a destination the caller reads, which must be an "
+        "element of the deduced TupleType instead. A destination in the argument list makes "
+        "the caller pre-allocate a buffer InitMemRef owns:",
+        std::move(leaked_destinations));
+  }
+  if (!workspace_out_of_range.empty()) {
+    fail(
+        "The following multi-output ops declare a workspace argument that does not exist. "
+        "set_workspace_arg() names a positional argument, so an index past the end is a "
+        "typo that silently protects nothing:",
+        std::move(workspace_out_of_range));
+  }
+  if (!workspace_never_written.empty()) {
+    fail(
+        "The following multi-output ops declare a workspace argument the operator never "
+        "writes. A workspace is hardware-written scratch by definition; declaring one Read "
+        "-- or reaching that classification through no_arg_writes() -- leaves direction "
+        "inference treating a real write as a read, which is the dropped dependency edge "
+        "this check exists to prevent. Declare the effect that matches what the hardware "
+        "does, or drop the workspace marker:",
+        std::move(workspace_never_written));
+  }
+  if (!reuses_input.empty()) {
+    fail(
+        "The following multi-output ops declare set_output_reuses_input(N). With several "
+        "results, \"the output reuses input N\" cannot say which one, and InitMemRef would "
+        "bind the tuple temporary rather than an element. Drop the declaration:",
+        std::move(reuses_input));
   }
 }
 

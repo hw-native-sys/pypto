@@ -318,6 +318,11 @@ REGISTER_OP("tensor.gather_compare")
     .set_attr<int>("offset")
     .set_attr<int>("out_cols")
     .set_attr<DataType>("count_dtype")
+    // Two outputs (dst, cdst), carried by the deduced TupleType. Both arguments
+    // are pure reads: the tile-level workspace appears only after
+    // ConvertTensorToTileOps synthesizes it.
+    .set_output_arity(2)
+    .no_arg_writes()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorGatherCompareType(args, kwargs, "tensor.gather_compare");

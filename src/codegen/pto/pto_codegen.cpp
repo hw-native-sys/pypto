@@ -11,6 +11,7 @@
 
 #include "pypto/codegen/pto/pto_codegen.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
@@ -496,32 +497,39 @@ bool ShouldAliasArrayUpdateResultToInput(const AssignStmtPtr& stmt) {
 
 const auto& FlattenBody = transform_utils::FlattenToStmts;
 
-// Collects `<var> = TupleGetItemExpr(tuple_var, i)` AssignStmts. IRVisitor
-// auto-recurses through all statement kinds (Seq/For/If/While/Scope/Inline/...),
-// so this stays correct regardless of where the tuple-returning call is nested.
+// Indexes every `<var> = TupleGetItemExpr(tuple_var, i)` AssignStmt in a body,
+// keyed by the tuple Var. One walk builds the whole index, so a multi-output
+// emitter resolves its DPS destinations by lookup rather than by rescanning the
+// body per call. IRVisitor auto-recurses through all statement kinds
+// (Seq/For/If/While/Scope/Inline/...), so this stays correct regardless of where
+// the tuple-returning call is nested.
 class TupleConsumerCollector : public ir::IRVisitor {
  public:
-  explicit TupleConsumerCollector(const ir::Var* tuple_var, size_t arity)
-      : tuple_var_(tuple_var), elements_(arity, nullptr) {}
-
-  [[nodiscard]] const std::vector<ir::VarPtr>& elements() const { return elements_; }
+  [[nodiscard]] std::map<const ir::Var*, std::vector<ir::VarPtr>> Take() { return std::move(index_); }
 
  protected:
   void VisitStmt_(const ir::AssignStmtPtr& op) override {
     if (auto tge = As<ir::TupleGetItemExpr>(op->value_)) {
-      if (auto base = As<ir::Var>(tge->tuple_)) {
-        if (base.get() == tuple_var_ && tge->index_ >= 0 &&
-            static_cast<size_t>(tge->index_) < elements_.size()) {
-          elements_[tge->index_] = op->var_;
-        }
+      if (auto base = As<ir::Var>(tge->tuple_); base && tge->index_ >= 0) {
+        auto& elements = index_[base.get()];
+        const auto index = static_cast<size_t>(tge->index_);
+        if (elements.size() <= index) elements.resize(index + 1, nullptr);
+        // Only one Var can be the hardware destination for an element. A second
+        // binding would silently win, and the first one's own allocation would
+        // stay unwritten for its consumers to read as uninitialized data.
+        INTERNAL_CHECK_SPAN(!elements[index], op->span_)
+            << "Internal error: element " << index << " of tuple '" << base->name_hint_
+            << "' is bound twice, by '" << elements[index]->name_hint_ << "' and '" << op->var_->name_hint_
+            << "'; only one of them can name the destination the "
+            << "instruction writes";
+        elements[index] = op->var_;
       }
     }
     ir::IRVisitor::VisitStmt_(op);
   }
 
  private:
-  const ir::Var* tuple_var_;
-  std::vector<ir::VarPtr> elements_;
+  std::map<const ir::Var*, std::vector<ir::VarPtr>> index_;
 };
 
 }  // namespace
@@ -844,6 +852,16 @@ void PTOCodegen::EmitDeferredCompletionAdapterDeclaration() {
 void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   fs_.Reset();
   fs_.current_function = func;
+
+  // Index every `<var> = <tuple>[i]` binding once. A multi-output op's Call does
+  // not carry its DPS destinations in args_ — the parser desugars them into
+  // separate AssignStmts — so an emitter has to look them up. Resolving each
+  // call by rescanning the body would be O(body) per call.
+  {
+    TupleConsumerCollector collector;
+    collector.VisitStmt(func->body_);
+    fs_.tuple_element_index = collector.Take();
+  }
 
   // Collect dyn-dim Vars from tensor-parameter shapes once. The same list
   // drives both name reservation (Site A below) and the trailing %argN: index
@@ -2277,11 +2295,48 @@ ir::VarPtr PTOCodegen::GetCurrentResultVar() const { return fs_.current_result_v
 std::vector<ir::VarPtr> PTOCodegen::ResolveTupleResultElements(const ir::VarPtr& tuple_var,
                                                                size_t arity) const {
   INTERNAL_CHECK(tuple_var) << "Internal error: ResolveTupleResultElements requires non-null tuple_var";
-  INTERNAL_CHECK(fs_.current_function)
-      << "Internal error: ResolveTupleResultElements requires current_function";
-  TupleConsumerCollector collector(tuple_var.get(), arity);
-  collector.VisitStmt(fs_.current_function->body_);
-  return collector.elements();
+  std::vector<ir::VarPtr> elements(arity, nullptr);
+  const auto it = fs_.tuple_element_index.find(tuple_var.get());
+  if (it == fs_.tuple_element_index.end()) return elements;
+  const size_t resolved = std::min(arity, it->second.size());
+  std::copy_n(it->second.begin(), resolved, elements.begin());
+  return elements;
+}
+
+std::vector<ir::VarPtr> PTOCodegen::ResolveTupleResultElements(const ir::CallPtr& op) const {
+  INTERNAL_CHECK(op && op->op_)
+      << "Internal error: ResolveTupleResultElements requires a call with an operator";
+  const auto& entry = ir::OpRegistry::GetInstance().GetEntry(op->op_->name_);
+  const size_t arity = entry.GetOutputArity();
+  INTERNAL_CHECK_SPAN(arity > 1, op->span_)
+      << "Internal error: '" << op->op_->name_ << "' has output arity " << arity
+      << "; only a multi-output operator has tuple elements to resolve";
+  return ResolveTupleResultElements(GetCurrentResultVar(), arity);
+}
+
+std::vector<PTOCodegen::TupleOutput> PTOCodegen::PrepareTupleOutputs(const ir::CallPtr& op) {
+  const auto element_vars = ResolveTupleResultElements(op);
+  std::vector<TupleOutput> outputs;
+  outputs.reserve(element_vars.size());
+  for (size_t i = 0; i < element_vars.size(); ++i) {
+    // The hardware writes every destination whether or not the program reads it,
+    // so a missing binding is not "an output nobody wanted" — it is a buffer the
+    // intrinsic is about to scribble into with no allocation behind it.
+    INTERNAL_CHECK_SPAN(element_vars[i], op->span_)
+        << "Internal error: '" << op->op_->name_ << "' output " << i << " has no `<var> = tuple[" << i
+        << "]` binding to name its destination";
+    auto tile_type = ir::GetTileTypeWithMemRef(element_vars[i]->GetType());
+    INTERNAL_CHECK_SPAN(tile_type, element_vars[i]->span_)
+        << "Internal error: '" << op->op_->name_ << "' output " << i
+        << " must have TileType with MemRef set by InitMemRef";
+    // Eagerly allocate: the destinations are written by this instruction, before
+    // the `<var> = tuple[i]` AssignStmts that would otherwise emit them. The
+    // emission is idempotent, so those AssignStmts then skip re-emitting.
+    EmitAllocTileForVar(element_vars[i], tile_type);
+    outputs.push_back(TupleOutput{GetVarName(element_vars[i]), GetTileBufTypeStringFromTileType(tile_type),
+                                  element_vars[i], tile_type});
+  }
+  return outputs;
 }
 
 void PTOCodegen::Emit(const std::string& line) { stream_ << GetIndent() << line << LocSuffix() << "\n"; }

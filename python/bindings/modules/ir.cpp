@@ -868,6 +868,26 @@ void BindIR(nb::module_& m) {
       nb::arg("op_name"), "Get an operator instance by name");
 
   ir.def(
+      "get_op_output_arity",
+      [](const std::string& op_name) { return OpRegistry::GetInstance().GetEntry(op_name).GetOutputArity(); },
+      nb::arg("op_name"), "Number of values an operator produces (>1 means a TupleType result)");
+
+  ir.def(
+      "op_arg_is_workspace",
+      [](const std::string& op_name, size_t arg_index) {
+        return OpRegistry::GetInstance().GetEntry(op_name).IsWorkspaceArg(arg_index);
+      },
+      nb::arg("op_name"), nb::arg("arg_index"),
+      "Whether an argument was declared compiler-supplied scratch rather than a result");
+
+  ir.def(
+      "get_op_argument_count",
+      [](const std::string& op_name) {
+        return OpRegistry::GetInstance().GetEntry(op_name).GetArgumentCount();
+      },
+      nb::arg("op_name"), "Number of arguments an operator's registration documents");
+
+  ir.def(
       "get_op_memory_spec",
       [](const std::string& op_name) -> nb::object {
         auto& registry = OpRegistry::GetInstance();

@@ -3300,6 +3300,54 @@ def get_op_write_channel(op_name: str) -> WriteChannel | None:
         Exception: If operator is not registered
     """
 
+def get_op_output_arity(op_name: str) -> int:
+    """Number of values an operator produces.
+
+    1 for an ordinary operator; N > 1 for a multi-output operator, whose deduced
+    result is a ``TupleType`` of exactly N elements. Codegen reads the arity from
+    here rather than restating it per emitter.
+
+    Args:
+        op_name: Name of the operator
+
+    Returns:
+        The declared output arity
+
+    Raises:
+        Exception: If operator is not registered
+    """
+
+def op_arg_is_workspace(op_name: str, arg_index: int) -> bool:
+    """Whether an argument is compiler-supplied scratch rather than a result.
+
+    A multi-output operator may write through an argument only when that
+    argument is declared a workspace; an undeclared written argument is a
+    destination tile leaked into the argument list.
+
+    Args:
+        op_name: Name of the operator
+        arg_index: Positional argument index
+
+    Returns:
+        True when the registration declared this argument a workspace
+
+    Raises:
+        Exception: If operator is not registered
+    """
+
+def get_op_argument_count(op_name: str) -> int:
+    """Number of arguments an operator's registration documents.
+
+    Args:
+        op_name: Name of the operator
+
+    Returns:
+        The documented argument count (0 for an operator taking no arguments)
+
+    Raises:
+        Exception: If operator is not registered
+    """
+
 # ========== Op Conversion Registry ==========
 
 def register_op_conversion(from_op: str, to_op: str) -> None:

@@ -396,6 +396,10 @@ REGISTER_OP("tile.tquant_mx")
     .set_attr<int>("group_axis")
     .set_input_memory(0, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    // Two results (dst, scale), carried by the deduced TupleType; the single
+    // argument is a pure read.
+    .set_output_arity(2)
+    .no_arg_writes()
     .not_inplace_safe()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
@@ -416,8 +420,15 @@ REGISTER_OP("tile.tquant_mx_raw")
     .set_input_memory(1, MemorySpace::Vec)
     .set_input_memory(2, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    // Two results (raw dst, raw exp), carried by the deduced TupleType. max and
+    // scaling are hardware-written scratch that LowerCompositeOps synthesizes --
+    // written, but carrying no result the caller reads.
+    .set_output_arity(2)
+    .set_arg_effect(0, ArgEffect::Read)
     .set_arg_effect(1, ArgEffect::Write)
     .set_arg_effect(2, ArgEffect::Write)
+    .set_workspace_arg(1)
+    .set_workspace_arg(2)
     .not_inplace_safe()
     .functional_execution_memory_access()
     .f_deduce_type([](const std::vector<ExprPtr>& args,

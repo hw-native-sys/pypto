@@ -14,7 +14,6 @@
  * @brief PTO codegen registration for data-movement / tile-view / shuffle ops.
  */
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -37,7 +36,6 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/storage_size.h"
 #include "pypto/ir/tile_view_semantics.h"
-#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/type.h"
 #include "src/backend/common/pto_ops_internal.h"
 
@@ -657,35 +655,16 @@ static std::string MakeGatherMaskCodegenPTO(const CallPtr& op, codegen::CodegenB
 //                   : src_ty, kv_ty, tmp_ty)
 //               outs(dst, cdst : dst_ty, cdst_ty)
 //
-// Op surface: 3 inputs / TupleType{dst_TileType, cdst_TileType} output. DPS
+// Op surface: 3 inputs / TupleType{dst_TileType, cdst_TileType} output. The DPS
 // dst/cdst buffers are bound by downstream `<element> = tuple_var[i]`
-// AssignStmts (parser desugaring of `dst, cdst = ...`). Because the framework
-// only pre-binds `fs_.current_result_*` for TileType LHS, multi-output ops
-// must resolve their own DPS targets — done via ResolveTupleResultElements.
+// AssignStmts (parser desugaring of `dst, cdst = ...`) rather than named in
+// args_, so PrepareTupleOutputs recovers and allocates them.
 static std::string MakeGatherCompareCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
   INTERNAL_CHECK_SPAN(op->args_.size() == 3, op->span_)
       << "tile.gather_compare requires 3 arguments (src, kvalue, tmp), but got " << op->args_.size();
 
-  ir::VarPtr tuple_var = codegen.GetCurrentResultVar();
-  INTERNAL_CHECK_SPAN(tuple_var, op->span_)
-      << "Internal error: tile.gather_compare codegen requires current_result_var";
-
-  auto element_vars = codegen.ResolveTupleResultElements(tuple_var, /*arity=*/2);
-  INTERNAL_CHECK_SPAN(element_vars[0] && element_vars[1], op->span_)
-      << "Internal error: tile.gather_compare expects two TupleGetItemExpr consumers (dst, cdst), got "
-      << (element_vars[0] ? "dst-yes" : "dst-no") << "/" << (element_vars[1] ? "cdst-yes" : "cdst-no");
-
-  // Eagerly emit alloc_tile for dst/cdst; the later `dst = tuple_var[i]`
-  // AssignStmts skip re-emission via fs_.emitted_tile_alloc_vars.
-  std::array<std::shared_ptr<const ir::TileType>, 2> elem_types;
-  for (size_t i = 0; i < 2; ++i) {
-    elem_types[i] = ir::GetTileTypeWithMemRef(element_vars[i]->GetType());
-    INTERNAL_CHECK_SPAN(elem_types[i], element_vars[i]->span_)
-        << "Internal error: tile.gather_compare element var " << i
-        << " must have TileType with MemRef set by InitMemRef";
-    codegen.EmitAllocTileForVar(element_vars[i], elem_types[i]);
-  }
+  const auto outs = codegen.PrepareTupleOutputs(op);
 
   int cmp_mode = op->GetKwarg<int>("cmp_mode");
   CHECK(cmp_mode >= 0 && cmp_mode < 6) << "tile.gather_compare cmp_mode out of range: " << cmp_mode;
@@ -698,19 +677,15 @@ static std::string MakeGatherCompareCodegenPTO(const CallPtr& op, codegen::Codeg
   std::string src_ty = codegen.GetExprTypeAnnotation(op->args_[0]);
   std::string kv_ty = codegen.GetExprTypeAnnotation(op->args_[1]);
   std::string tmp_ty = codegen.GetExprTypeAnnotation(op->args_[2]);
-  std::string dst = codegen.GetVarName(element_vars[0]);
-  std::string cdst = codegen.GetVarName(element_vars[1]);
-  std::string dst_ty = codegen.GetTileBufTypeStringFromTileType(elem_types[0]);
-  std::string cdst_ty = codegen.GetTileBufTypeStringFromTileType(elem_types[1]);
 
   std::ostringstream oss;
   oss << "pto.tgather ins(" << src << ", " << kvalue << ", " << tmp;
   if (!src_ty.empty() || !kv_ty.empty() || !tmp_ty.empty()) {
     oss << " : " << src_ty << ", " << kv_ty << ", " << tmp_ty;
   }
-  oss << ") outs(" << dst << ", " << cdst;
-  if (!dst_ty.empty() || !cdst_ty.empty()) {
-    oss << " : " << dst_ty << ", " << cdst_ty;
+  oss << ") outs(" << outs[0].name << ", " << outs[1].name;
+  if (!outs[0].type_str.empty() || !outs[1].type_str.empty()) {
+    oss << " : " << outs[0].type_str << ", " << outs[1].type_str;
   }
   oss << ") {cmpMode = #pto<cmp " << kCmpNames[cmp_mode] << ">, offset = " << offset << " : i32}";
 
@@ -1073,30 +1048,14 @@ static std::string MakeTQuantMxCodegenPTO(const CallPtr& op, codegen::CodegenBas
       << "Internal error: tile.tquant_mx_raw reached codegen with unsupported dtype " << dtype.ToString()
       << "; this PR only supports MXFP8 (FP8E4M3FN)";
 
-  ir::VarPtr tuple_var = codegen.GetCurrentResultVar();
-  INTERNAL_CHECK_SPAN(tuple_var, op->span_)
-      << "Internal error: tile.tquant_mx_raw codegen requires current_result_var";
-
-  auto element_vars = codegen.ResolveTupleResultElements(tuple_var, /*arity=*/2);
-  INTERNAL_CHECK_SPAN(element_vars[0] && element_vars[1], op->span_)
-      << "Internal error: tile.tquant_mx_raw expects two TupleGetItemExpr consumers (dst, exp), got "
-      << (element_vars[0] ? "dst-yes" : "dst-no") << "/" << (element_vars[1] ? "exp-yes" : "exp-no");
-
-  std::array<std::shared_ptr<const ir::TileType>, 2> elem_types;
-  for (size_t i = 0; i < 2; ++i) {
-    elem_types[i] = ir::GetTileTypeWithMemRef(element_vars[i]->GetType());
-    INTERNAL_CHECK_SPAN(elem_types[i], element_vars[i]->span_)
-        << "Internal error: tile.tquant_mx_raw element var " << i
-        << " must have TileType with MemRef set by InitMemRef";
-    codegen.EmitAllocTileForVar(element_vars[i], elem_types[i]);
-  }
+  const auto outs = codegen.PrepareTupleOutputs(op);
 
   // Every TQUANT operand must take the static-valid bridge (see EmitStaticValidTileView).
   auto src_view = EmitStaticValidTileView(codegen, op->args_[0], "tquant_src_static");
   auto max_view = EmitStaticValidTileView(codegen, op->args_[1], "tquant_max_static");
   auto scaling_view = EmitStaticValidTileView(codegen, op->args_[2], "tquant_scaling_static");
-  auto dst_view = EmitStaticValidTileView(codegen, element_vars[0], "tquant_dst_static");
-  auto scale_view = EmitStaticValidTileView(codegen, element_vars[1], "tquant_exp_static");
+  auto dst_view = EmitStaticValidTileView(codegen, outs[0].var, "tquant_dst_static");
+  auto scale_view = EmitStaticValidTileView(codegen, outs[1].var, "tquant_exp_static");
 
   std::ostringstream oss;
   oss << "pto.tquant.mx ins(" << src_view.ssa << " : " << src_view.type;

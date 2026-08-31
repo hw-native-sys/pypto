@@ -458,6 +458,16 @@ REGISTER_OP("tile.gather_compare")
     .set_attr<DataType>("count_dtype")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(2, MemorySpace::Vec)
+    // Two outputs (dst, cdst), carried by the deduced TupleType rather than by
+    // destination arguments — the caller cannot pre-allocate buffers InitMemRef
+    // owns. `tmp` is hardware scratch that ConvertTensorToTileOps synthesizes:
+    // written, but carrying no result anyone reads, so it is declared a
+    // workspace instead of masquerading as a third output.
+    .set_output_arity(2)
+    .set_arg_effect(0, ArgEffect::Read)
+    .set_arg_effect(1, ArgEffect::Read)
+    .set_arg_effect(2, ArgEffect::Write)
+    .set_workspace_arg(2)
     // Output is a TupleType{TileType_dst, TileType_cdst}. set_output_memory applies
     // Vec to every TileType element inside the TupleType.
     .set_output_memory(MemorySpace::Vec)

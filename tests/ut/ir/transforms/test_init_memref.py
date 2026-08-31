@@ -1474,5 +1474,91 @@ class TestEdgeCases:
             passes.init_mem_ref()(program)
 
 
+class TestMultiOutputElements:
+    """Each element of a multi-output op's TupleType gets its own buffer.
+
+    A multi-output operator carries its results in a ``TupleType`` rather than in
+    destination arguments, so InitMemRef never sees them named in the call. It
+    allocates them through the ordinary per-Var path instead, off the
+    ``<var> = tuple[i]`` bindings the parser emitted — nothing in InitMemRef
+    knows about tuples at all. That the general path genuinely covers the
+    multi-output case is therefore an untested coincidence unless pinned here.
+
+    See ``docs/en/dev/ir/08-multi_output_ops.md``.
+    """
+
+    @staticmethod
+    def _tuple_element_memrefs(program) -> dict[str, ir.MemRef | None]:
+        """MemRef of every var bound to a tuple element, keyed by name hint."""
+        found: dict[str, ir.MemRef | None] = {}
+
+        class _Collector(ir.IRVisitor):
+            def visit_assign_stmt(self, stmt):  # type: ignore[override]
+                if isinstance(stmt.value, ir.TupleGetItemExpr):
+                    tile_type = stmt.var.type
+                    assert isinstance(tile_type, ir.TileType), (
+                        f"{stmt.var.name_hint} is bound to a tuple element but is not a tile"
+                    )
+                    found[stmt.var.name_hint] = tile_type.memref
+                super().visit_assign_stmt(stmt)
+
+        for func in program.functions.values():
+            _Collector().visit_stmt(func.body)
+        return found
+
+    @staticmethod
+    def _build(drop_second_output: bool = False):
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                src: pl.Tensor[[32, 64], pl.FP32],
+                kvalue: pl.Scalar[pl.FP32],
+                out_dst: pl.Out[pl.Tensor[[32, 8], pl.INT32]],
+                out_cdst: pl.Out[pl.Tensor[[1, 32], pl.INT32]],
+            ):
+                s: pl.Tile[[32, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    src, [0, 0], [32, 64], target_memory=pl.Mem.Vec
+                )
+                tmp: pl.Tile[[32, 64], pl.UINT8, pl.MemorySpace.Vec] = pl.tile.create(
+                    [32, 64], pl.UINT8, target_memory=pl.Mem.Vec
+                )
+                d, c = pl.tile.gather_compare(s, kvalue, tmp, cmp_mode="eq", out_cols=8)
+                pl.store(d, [0, 0], out_dst)
+                if not drop_second_output:
+                    pl.store(c, [0, 0], out_cdst)
+
+        return Before
+
+    def test_elements_get_distinct_memrefs(self):
+        after = passes.init_mem_ref()(self._build())
+        memrefs = self._tuple_element_memrefs(after)
+        assert len(memrefs) == 2, f"expected one binding per output, got {sorted(memrefs)}"
+        dst, cdst = memrefs.values()
+        assert dst is not None and cdst is not None, (
+            f"a destination reached codegen with no buffer behind it: {sorted(memrefs)}"
+        )
+        # A MemRef always overlaps itself: without this the negative assertion
+        # below would pass just as well against two objects may_alias cannot read.
+        assert ir.MemRef.may_alias(dst, dst)
+        assert not ir.MemRef.may_alias(dst, cdst), (
+            "the two destinations overlap; pto.tgather writes both in a single "
+            "instruction, so one would clobber the other"
+        )
+
+    def test_unread_element_still_gets_a_buffer(self):
+        """Dropping an output does not make its buffer optional.
+
+        ``pto.tgather`` writes both destinations whichever the program goes on to
+        read, so the unread one still needs an allocation of its own — otherwise
+        the instruction scribbles over whatever happens to sit at that address.
+        """
+        after = passes.init_mem_ref()(self._build(drop_second_output=True))
+        memrefs = self._tuple_element_memrefs(after)
+        assert len(memrefs) == 2, f"a dropped output lost its binding: {sorted(memrefs)}"
+        assert all(m is not None for m in memrefs.values())
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

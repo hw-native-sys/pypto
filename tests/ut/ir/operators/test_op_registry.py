@@ -1338,5 +1338,117 @@ class TestResultAliasContract:
         )
 
 
+class TestMultiOutputOps:
+    """A multi-output operator carries its results in the deduced ``TupleType``.
+
+    The alternative — naming the destination tiles in ``add_argument`` — is the
+    path of least resistance when wrapping a hardware DPS intrinsic, and it is
+    wrong twice over: it makes the caller pre-allocate a buffer ``InitMemRef``
+    owns, and it hides the write from direction inference, which reads an
+    undeclared argument as a pure consumer. ``ValidateMultiOutputOps()`` rejects
+    both shapes at import, so the checks below pin the contract that check
+    maintains rather than re-deriving it.
+    """
+
+    _REPO_ROOT = Path(__file__).resolve().parents[4]
+
+    def _declared_multi_output_ops(self) -> dict[str, int]:
+        """Every operator whose registration calls ``set_output_arity(N > 1)``.
+
+        Scanning the registrations rather than listing names keeps the test
+        growing with the codebase: a new multi-output operator is covered the
+        moment it is registered, with nothing to remember to update here.
+        """
+        found: dict[str, int] = {}
+        for source in sorted((self._REPO_ROOT / "src/ir/op").rglob("*.cpp")):
+            text = source.read_text()
+            for block in re.split(r"\bREGISTER_OP\(", text)[1:]:
+                name_match = re.match(r'"([^"]+)"', block)
+                arity_match = re.search(r"\.set_output_arity\((\d+)\)", block.split(";\n")[0])
+                if name_match and arity_match and int(arity_match.group(1)) > 1:
+                    found[name_match.group(1)] = int(arity_match.group(1))
+        return found
+
+    def test_registrations_are_discoverable(self):
+        """The scan finds the multi-output ops that exist, so the rest is not vacuous."""
+        declared = self._declared_multi_output_ops()
+        assert "tile.gather_compare" in declared, declared
+        assert "tensor.gather_compare" in declared, declared
+
+    def test_declared_arity_reaches_the_registry(self):
+        """Codegen reads the arity from the registry, so the two must agree."""
+        for op_name, arity in self._declared_multi_output_ops().items():
+            assert ir.get_op_output_arity(op_name) == arity, op_name
+
+    def test_every_argument_is_classified(self):
+        """An unclassified argument defaults to ``Read``, which is exactly how a
+        destination tile hides. A multi-output op must reach a verdict on each."""
+        for op_name in self._declared_multi_output_ops():
+            for i in range(ir.get_op_argument_count(op_name)):
+                assert ir.op_has_declared_arg_effect(op_name, i), (
+                    f"{op_name} argument {i} was never classified; the Read it "
+                    f"defaults to is indistinguishable from a destination tile"
+                )
+
+    def test_workspace_declarations_name_a_written_argument(self):
+        """A workspace claims two things: the argument exists, and it is written.
+
+        Neither is implied by the check below, which only walks arguments that
+        exist. An index past the end protects nothing, and a workspace declared
+        ``Read`` — including via ``no_arg_writes()`` — still reads as a pure
+        consumer of a slot the hardware writes.
+        """
+        for op_name in self._declared_multi_output_ops():
+            arg_count = ir.get_op_argument_count(op_name)
+            for i in range(arg_count + 4):
+                if not ir.op_arg_is_workspace(op_name, i):
+                    continue
+                assert i < arg_count, (
+                    f"{op_name} declares argument {i} a workspace but takes only {arg_count}"
+                )
+                assert ir.get_op_arg_effect(op_name, i) != ir.ArgEffect.Read, (
+                    f"{op_name} argument {i} is declared a workspace yet classified Read; "
+                    f"scratch is hardware-written by definition"
+                )
+
+    def test_written_arguments_are_workspaces(self):
+        """A written argument is scratch the hardware needs — which must say so —
+        or a result the caller reads, which belongs in the TupleType instead."""
+        for op_name in self._declared_multi_output_ops():
+            for i in range(ir.get_op_argument_count(op_name)):
+                if ir.get_op_arg_effect(op_name, i) == ir.ArgEffect.Read:
+                    continue
+                assert ir.op_arg_is_workspace(op_name, i), (
+                    f"{op_name} writes argument {i} without declaring it a "
+                    f"workspace; a written argument that carries a result is a "
+                    f"destination and must be a TupleType element"
+                )
+
+    def test_single_output_ops_declare_no_arity(self):
+        """The default arity is what makes ``set_output_arity`` mean something."""
+        assert ir.get_op_output_arity(ir.get_op("tile.add").name) == 1
+        assert ir.get_op_output_arity(ir.get_op("tensor.matmul").name) == 1
+
+    def test_gather_compare_shape(self):
+        """The one multi-output op that exists today, spelled out.
+
+        ``tile.gather_compare`` maps to ``pto.tgather``, which needs three inputs
+        and writes two destinations plus a scratch buffer. Only the scratch is an
+        argument: ``ConvertTensorToTileOps`` synthesizes it, and nobody reads it.
+        """
+        assert ir.get_op_output_arity("tile.gather_compare") == 2
+        assert ir.get_op_argument_count("tile.gather_compare") == 3
+        assert ir.get_op_arg_effect("tile.gather_compare", 0) == ir.ArgEffect.Read
+        assert ir.get_op_arg_effect("tile.gather_compare", 1) == ir.ArgEffect.Read
+        assert ir.get_op_arg_effect("tile.gather_compare", 2) == ir.ArgEffect.Write
+        assert ir.op_arg_is_workspace("tile.gather_compare", 2)
+        assert not ir.op_arg_is_workspace("tile.gather_compare", 0)
+
+        # The tensor-level op has no workspace yet — it appears only after the
+        # tile conversion synthesizes it.
+        assert ir.get_op_output_arity("tensor.gather_compare") == 2
+        assert ir.get_op_argument_count("tensor.gather_compare") == 2
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

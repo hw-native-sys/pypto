@@ -752,6 +752,27 @@ class OpRegistryEntry {
     return *this;
   }
 
+  /// Declare how many values this operator produces. `N > 1` means the deduced
+  /// result is a `TupleType` with exactly N elements, and every element is an
+  /// output: destination tiles must NOT appear in `add_argument()`, because a
+  /// caller cannot pre-allocate a buffer that `InitMemRef` owns. Default 1.
+  inline OpRegistryEntry& set_output_arity(size_t arity) {
+    CHECK(arity >= 1) << "Operator '" << name_ << "' declared output arity " << arity
+                      << "; every operator produces at least one value";
+    output_arity_ = arity;
+    return *this;
+  }
+
+  /// Declare argument `arg_index` to be compiler-supplied scratch: the hardware
+  /// writes it, but it carries no result the caller reads. This is what
+  /// separates a legitimate workspace — `tile.gather_compare`'s `tmp`, which
+  /// `ConvertTensorToTileOps` synthesizes — from a destination tile leaked into
+  /// the argument list, which `ValidateMultiOutputOps()` rejects.
+  inline OpRegistryEntry& set_workspace_arg(size_t arg_index) {
+    workspace_args_.insert(arg_index);
+    return *this;
+  }
+
   /// True when this operator declared its per-argument effects. False means the
   /// operator has never been classified — an analysis that needs the answer must
   /// say so loudly rather than assume read-only.
@@ -780,6 +801,17 @@ class OpRegistryEntry {
     return arg_effects_->per_arg[arg_index];
   }
 
+  /// True when this operator may write through argument `arg_index` under some
+  /// kwargs. Unlike `GetArgEffect`, this answers without inventing a kwargs set
+  /// to run a kwarg-dependent resolver against — a resolver is entitled to
+  /// reject kwargs no real call would carry.
+  [[nodiscard]] bool MayWriteArg(size_t arg_index) const {
+    if (!arg_effects_.has_value()) return false;
+    if (arg_effects_->kwarg_dependent.count(arg_index) > 0) return true;
+    if (arg_index >= arg_effects_->per_arg.size()) return false;
+    return ArgEffectWrites(arg_effects_->per_arg[arg_index]);
+  }
+
   /// True when this operator writes through at least one argument under some
   /// kwargs. Cheap pre-filter for analyses that only care about writers.
   [[nodiscard]] bool WritesAnyArg() const {
@@ -793,6 +825,25 @@ class OpRegistryEntry {
   [[nodiscard]] std::optional<WriteChannel> GetWriteChannel() const {
     return arg_effects_.has_value() ? arg_effects_->write_channel : std::nullopt;
   }
+
+  /// How many values this operator produces: 1 for an ordinary operator, N > 1
+  /// for a multi-output one whose deduced result is a `TupleType` of N elements.
+  /// Codegen reads the arity from here rather than restating it, so an emitter
+  /// and its registration cannot drift apart.
+  [[nodiscard]] size_t GetOutputArity() const { return output_arity_; }
+
+  /// True when argument `arg_index` was declared scratch via `set_workspace_arg()`.
+  [[nodiscard]] bool IsWorkspaceArg(size_t arg_index) const { return workspace_args_.count(arg_index) > 0; }
+
+  /// Every argument index declared scratch via `set_workspace_arg()`. Exposed as
+  /// the declared set rather than as a per-index predicate so validation can
+  /// catch an index that names no argument at all.
+  [[nodiscard]] const std::set<size_t>& GetWorkspaceArgs() const { return workspace_args_; }
+
+  /// Number of arguments the registration documented. 0 both for an operator
+  /// that declared `no_argument()` and for one that declared neither; `Validate()`
+  /// is what tells those apart.
+  [[nodiscard]] size_t GetArgumentCount() const { return arguments_.has_value() ? arguments_->size() : 0; }
 
   inline OpRegistryEntry& set_internal_only(bool value = true) {
     internal_only_ = value;
@@ -856,8 +907,10 @@ class OpRegistryEntry {
   std::set<size_t> forbid_output_alias_args_;  ///< Input args whose buffer the output must not reuse
   std::optional<core_affinity::CoreAffinity> core_affinity_;     ///< Explicit core-affinity override
   std::optional<core_affinity::CrossCoreRole> cross_core_role_;  ///< Cross-core role (for predicates)
-  bool no_duplicate_{false};   ///< True when the op must not run on a second core (set_no_duplicate)
-  bool internal_only_{false};  ///< True for compiler-created ops only.
+  bool no_duplicate_{false};         ///< True when the op must not run on a second core (set_no_duplicate)
+  bool internal_only_{false};        ///< True for compiler-created ops only.
+  size_t output_arity_{1};           ///< Values produced; > 1 means a TupleType result
+  std::set<size_t> workspace_args_;  ///< Args written as scratch rather than as results
   std::optional<std::string> template_dir_;  ///< Package resource for builtin templates.
 };
 
@@ -1022,6 +1075,28 @@ class OpRegistry {
    * @throws ValueError listing every in-place operator with undeclared effects
    */
   void ValidateArgEffects() const;
+
+  /**
+   * @brief Validate that every multi-output operator expresses its outputs as a
+   *        TupleType result rather than as destination arguments.
+   *
+   * A destination tile in the argument list forces the caller to pre-allocate a
+   * buffer `InitMemRef` owns, and hides the write from direction inference — the
+   * exact leak that makes a hardware DPS signature look like an ordinary
+   * multi-input operator. The registry cannot see a destination directly, so it
+   * checks the two shapes that betray one: an argument nobody classified (the
+   * default `Read` then hides the write), and a written argument that was not
+   * declared scratch via `set_workspace_arg()`.
+   *
+   * Also rejects `set_output_reuses_input(N)` on a multi-output operator: with
+   * several results, "the output reuses input N" cannot say which one.
+   *
+   * Call at module init to catch a leaked destination at import time.
+   *
+   * @throws ValueError listing every multi-output op with an unclassified or
+   *         unmarked written argument
+   */
+  void ValidateMultiOutputOps() const;
 
  private:
   OpRegistry() = default;

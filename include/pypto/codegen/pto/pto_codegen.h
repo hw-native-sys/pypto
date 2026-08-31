@@ -431,6 +431,42 @@ class PTOCodegen : public CodegenBase {
                                                                    size_t arity) const;
 
   /**
+   * @brief Resolve the DPS element vars of a multi-output call's tuple result
+   *
+   * The arity comes from the operator registry (`set_output_arity`), so an
+   * emitter never restates how many outputs its operator has and the two cannot
+   * drift apart.
+   *
+   * @param op A call whose operator declares an output arity greater than 1.
+   * @return Vector of length `arity`; entry i is the Var bound to element i, or
+   *         nullptr if no such consumer exists.
+   */
+  [[nodiscard]] std::vector<ir::VarPtr> ResolveTupleResultElements(const ir::CallPtr& op) const;
+
+  /// One DPS destination of a multi-output op: everything an emitter needs to
+  /// name it in an `outs(...)` clause.
+  struct TupleOutput {
+    std::string name;                               ///< SSA name of the destination buffer
+    std::string type_str;                           ///< `!pto.tile<...>` annotation for the `outs` clause
+    ir::VarPtr var;                                 ///< The Var bound to this tuple element
+    std::shared_ptr<const ir::TileType> tile_type;  ///< Its TileType, MemRef resolved
+  };
+
+  /**
+   * @brief Resolve and allocate every DPS destination of a multi-output call
+   *
+   * Wraps the whole preamble a multi-output emitter would otherwise repeat:
+   * resolve the element vars, check each carries a MemRef, and emit its
+   * `alloc_tile` eagerly — the intrinsic writes those buffers before the
+   * `<var> = tuple[i]` AssignStmts that would normally allocate them. An emitter
+   * is then only the format string for its intrinsic.
+   *
+   * @param op A call whose operator declares an output arity greater than 1.
+   * @return One entry per output, in tuple-element order.
+   */
+  [[nodiscard]] std::vector<TupleOutput> PrepareTupleOutputs(const ir::CallPtr& op);
+
+  /**
    * @brief Override the current result buffer name
    *
    * Allows codegen lambdas to redirect the result to a newly allocated buffer.
@@ -1030,6 +1066,11 @@ class PTOCodegen : public CodegenBase {
     /// to recover the per-tensor CommContext pointer.
     std::map<const ir::Var*, std::string> dist_tensor_to_ctx;
 
+    /// Every `<var> = <tuple>[i]` binding in the current function body, keyed by
+    /// the tuple Var. Built once on function entry so a multi-output emitter
+    /// resolves its destinations by lookup rather than by rescanning the body.
+    std::map<const ir::Var*, std::vector<ir::VarPtr>> tuple_element_index;
+
     std::string current_expr_value;
     std::vector<std::string> yield_buffer;
 
@@ -1070,6 +1111,7 @@ class PTOCodegen : public CodegenBase {
       multi_buffer_regions.clear();
       multi_buffer_region_order.clear();
 
+      tuple_element_index.clear();
       current_function.reset();
       current_result_var.reset();
       current_result_buf.clear();
