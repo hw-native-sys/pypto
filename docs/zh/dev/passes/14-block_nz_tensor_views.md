@@ -94,33 +94,49 @@ wt: pl.Tile[[256, 512], pl.INT8, pl.Mem.Mat] =
 
 末尾 offset 不必是常量，但它的对齐必须被**证明**，绝不允许假设。offset 到达本 pass
 时只是它被绑定到的那个 SSA 名字，产生它的算术在别处，因此
-`DivideIndexExactly`（`tensor_view_semantics.h`）会沿着本 pass 一次只读扫描收集到的
+`IsProvableMultipleOf`（`tensor_view_semantics.h`）会沿着本 pass 一次只读扫描收集到的
 两类绑定往回走：
 
-| 绑定形式 | 证明依据 | 构造出的商 |
-| -------- | -------- | ---------- |
-| `AssignStmt`（`n0 = nb * 256`） | 乘积中的某个因子是倍数 | 折叠形式：`nb * 16` |
-| `ForStmt`（`for k0 in pl.pipeline(512, 4096, 512)`） | `start` 与 `step` 同时是倍数 | `k0 // 32` |
-| `ConstInt` | 该值本身是倍数 | 折叠形式：`256 -> 16` |
+| 绑定形式 | 证明依据 |
+| -------- | -------- |
+| `AssignStmt`（`n0 = nb * 256`） | 乘积中的某个因子是倍数 |
+| `ForStmt`（`for k0 in pl.pipeline(512, 4096, 512)`） | `start` 与 `step` 同时是倍数 |
+| `ConstInt` | 该值本身是倍数 |
 
-在此基础上，和、差以及常数倍可以组合：当 `d` 同时整除两边时
-`(a±b)/d = a/d ± b/d`，当 `d` 整除 `a` 时 `(a*b)/d = (a/d)*b`。因此催生该特性的
-grouped-matmul 权重路径现在可以编译：
+在此基础上，和、差与乘积可以组合。因此催生该特性的 grouped-matmul 权重路径现在可以
+编译：
 
 ```python
 for nb in pl.spmd(N // N_TILE):
-    n0 = nb * N_TILE                     # -> 行 fractal offset  nb * (N_TILE/16)
+    n0 = nb * N_TILE                     # -> 行 fractal offset  n0 // 16
     for k0 in pl.pipeline(K_TILE, K, K_TILE, stage=2):
         wt = w[n0 : n0 + N_TILE, k0 : k0 + K_TILE]   # -> c0 block offset  k0 // c0
 ```
 
-有两处限制是刻意保留的。循环变量得到的是 `FloorDiv` 而不是折叠后的乘积，因为 IR 里
-没有任何节点表示它的迭代次数——这个除法之所以精确，正是因为先证明了整除性。另外
-`IterArg` 永远不会被解析：它的值每次迭代都在变，无论是初值还是为它记录的任何绑定，
-都无法描述某一次使用真正看到的值。
-
 凡是走不通证明的表达式一律拒绝，并在诊断中列出可证明的形式。这种拒绝正是设计本身：
 NZ 张量一旦按猜出来的坐标寻址，就会读到错误的 fractal，而下游不会有任何地方发现。
+
+#### 为什么是整体相除，而不是代数重组
+
+被除的只是 offset 的**求值结果**（`FloorDiv(offset, divisor)`）。那个看起来很诱人的
+改写——把 `n0 = nb * 256` 变成 `nb * 16`，从而省掉运行期的除法——是不成立的：IR 的
+算术在其声明位宽上回绕，而重组后的形式不会在同一处回绕：
+
+```text
+x : INT32 = 1 << 24
+(x * 256) / 16   ==  0            # x * 256 在 i32 中回绕为 0
+x * (256 / 16)   ==  268435456    # 重组后：不回绕，读到错误的 fractal
+```
+
+位宽提升并不是元凶，按原位宽重建同样救不回来：对 `a * b = q * 2^W + r`，原表达式得到
+`r / d`，而任何重组都得到 `r / d + q * 2^(W - log2 d)`。把 offset 整体相除，才能完整
+保留它自己的 dtype 与溢出行为。
+
+证明本身能够在回绕下继续成立，是因为这里的除数一定是 2 的幂、因而整除 `2^W`：一个
+`d` 的倍数对 `2^W` 取模之后仍然是 `d` 的倍数。这一前提由 `INTERNAL_CHECK` 固定下来。
+
+另有一处限制是刻意保留的：`IterArg` 永远不会被解析——它的值每次迭代都在变，无论是初值
+还是为它记录的任何绑定，都无法描述某一次使用真正看到的值。
 
 目标 `TileType` **原样保留**：GM 分区变成 rank-(r+2)，而 tile 保持逻辑 2-D 操作数。
 因此该 load 使用显式类型的 `Call` 构造函数重建，而不是 `OpRegistry::Create`——后者

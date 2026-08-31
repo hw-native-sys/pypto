@@ -285,11 +285,12 @@ def test_slice_offsets_are_mapped_to_fractal_coordinates():
 
 
 def test_maps_an_spmd_derived_slice_offset():
-    """`n0 = nb * 256` becomes `nb * 16` on the 16-row axis.
+    """`n0 = nb * 256` becomes `n0 // 16` on the 16-row axis.
 
-    The offset reaches the pass as the SSA name `n0`, not as the `Mul`, so this
-    also pins that the rewrite follows the definition chain. The quotient is a
-    folded multiply, not a division: `(nb * 256) / 16` is exactly `nb * 16`.
+    The offset reaches the pass as the SSA name `n0`, not as the `Mul`, so the
+    divisibility proof has to follow the definition chain to see the `* 256`.
+    What it emits is the whole offset divided, never the re-associated
+    `nb * 16` — see `test_does_not_reassociate_the_offset_arithmetic`.
     """
 
     @pl.jit
@@ -310,10 +311,65 @@ def test_maps_an_spmd_derived_slice_offset():
     call = _nz_load(_run(_spmd_offset._compile_to_program(tm, sv, sd, dyn, pl)))
     col_off, row_off, in_fractal_row, in_c0_line = _elements(call.args[1])
     assert _const(col_off) == 0
-    assert isinstance(row_off, ir.Mul)
-    assert isinstance(row_off.left, ir.Var) and row_off.left.name_hint.startswith("nb")
-    assert _const(row_off.right) == 256 // 16
+    assert isinstance(row_off, ir.FloorDiv)
+    assert isinstance(row_off.left, ir.Var) and row_off.left.name_hint.startswith("n0")
+    assert _const(row_off.right) == 16
     assert (_const(in_fractal_row), _const(in_c0_line)) == (0, 0)
+
+
+def test_does_not_reassociate_the_offset_arithmetic():
+    """The blocked coordinate divides the offset's *result*, never its arithmetic.
+
+    Rewriting `n0 = nb * 256` into `nb * 16` looks equivalent and is not: IR
+    arithmetic wraps at its declared width, and the re-associated form does not
+    wrap at the same point. With `nb: INT32 = 1 << 24`, `nb * 256` wraps to 0 in
+    i32, so the true coordinate is 0 while `nb * 16` is 268435456 — a read from
+    the wrong fractal with no diagnostic anywhere downstream. Matching the
+    original width does not rescue it either: for `a * b = q * 2^W + r` the
+    original yields `r / d` and any re-association yields
+    `r / d + q * 2^(W - log2 d)`.
+
+    So the emitted expression must still *contain* the original offset. This
+    pins that: the quotient's operand is the offset `Var` itself, and no
+    multiply by the reduced factor 256/16 was synthesized.
+    """
+
+    @pl.jit
+    def _no_reassoc(
+        x: pl.Tensor[[64, 512], pl.INT8],
+        w: pl.Tensor[[512, 512], pl.INT8, pl.NZ],
+        out: pl.Out[pl.Tensor[[64, 512], pl.INT32]],
+    ):
+        for nb in pl.spmd(2, name_hint="nz_no_reassoc"):
+            n0 = nb * 256
+            xt = pl.slice(x, [64, 512], [0, 0])
+            wt = w[n0 : n0 + 256, 0:512]
+            acc = pl.matmul(xt, wt, b_trans=True, out_dtype=pl.INT32)
+            out[0:64, n0 : n0 + 256] = pl.reshape(acc, [64, 256])
+        return out
+
+    _, _, tm, sv, sd, dyn = _no_reassoc._bind_args_from_signature({})
+    after = _run(_no_reassoc._compile_to_program(tm, sv, sd, dyn, pl))
+    row_off = _elements(_nz_load(after).args[1])[1]
+
+    # A division of the offset itself, not a product of the block index.
+    assert isinstance(row_off, ir.FloorDiv), f"offset was re-associated into {type(row_off).__name__}"
+    assert isinstance(row_off.left, ir.Var)
+
+    # `n0` keeps its own definition; nothing multiplied the block index by 16.
+    definitions = {
+        stmt.var.name_hint: stmt.value
+        for func in after.functions.values()
+        for stmt in _walk(func.body)
+        if isinstance(stmt, ir.AssignStmt)
+    }
+    n0_def = definitions[row_off.left.name_hint]
+    assert isinstance(n0_def, ir.Mul) and _const(n0_def.right) == 256
+    assert not [
+        value
+        for value in definitions.values()
+        if isinstance(value, ir.Mul) and isinstance(value.right, ir.ConstInt) and value.right.value == 16
+    ], "a reduced-factor multiply was synthesized"
 
 
 def test_maps_a_loop_variable_slice_offset():
@@ -415,12 +471,12 @@ def test_codegen_rank_is_consistent_across_all_three_sites():
     assert "!pto.partition_tensor_view<16x16x16x32xi8>" in pview_line
 
 
-def test_codegen_emits_the_divided_offset_as_one_multiply():
-    """The blocked coordinate reaches `partition_view` as `nb * 16`, not `nb * 256`.
+def test_codegen_emits_the_divided_offset():
+    """The blocked coordinate reaches `partition_view` as the divided offset.
 
     This is the end-to-end statement of the rewrite: the descriptor is the
-    blocked rank-4 NZ one, and the row-fractal offset is the *divided* index —
-    a single `arith.muli`, with no division left to undo it at runtime.
+    blocked rank-4 NZ one, and the row-fractal coordinate is `n0 / 16` — the
+    offset the kernel computed, divided, rather than a re-derived index.
     """
 
     @pl.jit
@@ -451,17 +507,20 @@ def test_codegen_emits_the_divided_offset_as_one_multiply():
     offsets = pview_line.split("offsets = [", 1)[1].split("]", 1)[0].split(", ")
     assert [offsets[0], offsets[2], offsets[3]] == ["%c0_index"] * 3, pview_line
 
-    # `n0 = nb * 256` still exists — the ND store on `out` uses it — so the claim
-    # is not that it vanished, but that the NZ coordinate is a *different*,
-    # divided value: offsets[1] traces back through the negative clamp to `* 16`.
+    # The NZ coordinate is the kernel's own offset divided: offsets[1] traces
+    # back through the negative clamp to a division by 16, whose dividend is the
+    # `n0 = nb * 256` the ND store on `out` also uses.
     def defining_line(operand: str) -> str:
         return next(line for line in lines if line.strip().startswith(f"{operand} = "))
 
     clamp = defining_line(offsets[1])
     assert "arith.maxsi" in clamp, clamp
-    multiply = defining_line(clamp.split("arith.maxsi ", 1)[1].split(",", 1)[0])
-    assert "arith.muli" in multiply and "%c16_index" in multiply, multiply
-    assert "%nb" in multiply, multiply
+    divide = defining_line(clamp.split("arith.maxsi ", 1)[1].split(",", 1)[0])
+    assert "arith.divsi" in divide and "%c16_index" in divide, divide
+
+    dividend = divide.split("arith.divsi ", 1)[1].split(",", 1)[0]
+    offset_def = defining_line(dividend)
+    assert "arith.muli" in offset_def and "%c256_index" in offset_def, offset_def
 
 
 def test_codegen_tile_keeps_logical_2d_nz_layout():

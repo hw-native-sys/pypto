@@ -101,37 +101,55 @@ wt: pl.Tile[[256, 512], pl.INT8, pl.Mem.Mat] =
 
 A trailing offset does not have to be a constant, but its alignment must be
 **proven** — never assumed. An offset arrives here as the SSA name it was bound
-to, not as the arithmetic that produced it, so `DivideIndexExactly`
+to, not as the arithmetic that produced it, so `IsProvableMultipleOf`
 (`tensor_view_semantics.h`) walks two kinds of binding the pass collects from
 the enclosing function in one read-only sweep:
 
-| Binding | Proof | Quotient built |
-| ------- | ----- | -------------- |
-| `AssignStmt` (`n0 = nb * 256`) | one factor of the product is a multiple | folded: `nb * 16` |
-| `ForStmt` (`for k0 in pl.pipeline(512, 4096, 512)`) | `start` and `step` are both multiples | `k0 // 32` |
-| `ConstInt` | the value is a multiple | folded: `256 -> 16` |
+| Binding | Proof |
+| ------- | ----- |
+| `AssignStmt` (`n0 = nb * 256`) | one factor of the product is a multiple |
+| `ForStmt` (`for k0 in pl.pipeline(512, 4096, 512)`) | `start` and `step` are both multiples |
+| `ConstInt` | the value is a multiple |
 
-Sums, differences and constant multiples compose from those, since
-`(a±b)/d = a/d ± b/d` when `d` divides both and `(a*b)/d = (a/d)*b` when `d`
-divides `a`. The grouped-matmul weight path that motivated the feature therefore
-compiles:
+Sums, differences and products compose from those. The grouped-matmul weight
+path that motivated the feature therefore compiles:
 
 ```python
 for nb in pl.spmd(N // N_TILE):
-    n0 = nb * N_TILE                     # -> row fractal offset  nb * (N_TILE/16)
+    n0 = nb * N_TILE                     # -> row fractal offset  n0 // 16
     for k0 in pl.pipeline(K_TILE, K, K_TILE, stage=2):
         wt = w[n0 : n0 + N_TILE, k0 : k0 + K_TILE]   # -> c0 block offset  k0 // c0
 ```
 
-Two limits are deliberate. A loop variable divides to a `FloorDiv` rather than a
-folded product because nothing in the IR names its trip count — the division is
-exact only *because* divisibility was proven first. And an `IterArg` is never
-resolved: its value changes every iteration, so neither its initial value nor any
-binding recorded for it describes the value a given use sees.
-
 Anything the walk cannot prove is rejected with a diagnostic naming the provable
 forms. That refusal is the design: an NZ tensor addressed from a guessed
 coordinate reads the wrong fractal, and nothing downstream would notice.
+
+#### Why the offset is divided, not re-associated
+
+Only the *result* of the offset is divided (`FloorDiv(offset, divisor)`). The
+tempting rewrite — turning `n0 = nb * 256` into `nb * 16` and saving the runtime
+division — is unsound, because IR arithmetic wraps at its declared width while
+the rewritten form does not:
+
+```text
+x : INT32 = 1 << 24
+(x * 256) / 16   ==  0            # x * 256 wraps to 0 in i32
+x * (256 / 16)   ==  268435456    # re-associated: no wrap, wrong fractal
+```
+
+Widening is not the culprit, and rebuilding at the original width does not help:
+for `a * b = q * 2^W + r`, the original yields `r / d` while any re-association
+yields `r / d + q * 2^(W - log2 d)`. Dividing the offset as a whole keeps its
+own dtype and overflow behaviour intact.
+
+The proof itself survives wraparound because every divisor here is a power of
+two and so divides `2^W`: reducing a multiple of `d` modulo `2^W` leaves a
+multiple of `d`. An `INTERNAL_CHECK` pins that precondition.
+
+One further limit is deliberate: an `IterArg` is never resolved, because its
+value changes every iteration, so neither its initial value nor any binding
+recorded for it describes the value a given use sees.
 
 The destination `TileType` is **preserved verbatim**: the GM partition becomes
 rank-(r+2), the tile stays the logical 2-D operand. The load is therefore rebuilt

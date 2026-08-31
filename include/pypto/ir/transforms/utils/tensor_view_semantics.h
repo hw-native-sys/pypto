@@ -212,92 +212,84 @@ struct NzOffsetFacts {
   std::function<bool(const VarPtr&, int64_t)> is_multiple_of;
 };
 
-/// Node-visit allowance for one ``DivideIndexExactly`` walk.
+/// Node-visit allowance for one ``IsProvableMultipleOf`` walk.
 ///
 /// The walk follows SSA definitions, so a diamond-shaped def chain
 /// (``x = y + y``) can be re-entered exponentially. Bounding the visits keeps
-/// the rewrite O(1) per offset — and the pass O(N) — and exhausting the budget
+/// the proof O(1) per offset — and the pass O(N) — and exhausting the budget
 /// degrades to a refusal, never to a wrong answer.
 constexpr int kNzDivideStepBudget = 256;
 
-/// The exact quotient ``expr / divisor``, or nullptr when exactness cannot be
-/// proven.
+/// Whether every runtime value of ``expr`` is a multiple of ``divisor``.
 ///
-/// "Exact" is the whole contract: the result must equal ``expr / divisor`` for
-/// *every* runtime value ``expr`` can take, so a caller may substitute it for a
-/// blocked coordinate with no range check. Each arm preserves that —
-/// ``(a*b)/d = (a/d)*b`` when ``d | a``, ``(a±b)/d = a/d ± b/d`` when ``d``
-/// divides both — and anything unrecognised refuses. Refusing is the point: an
-/// NZ tensor addressed from a guessed coordinate reads the wrong fractal with
-/// no diagnostic anywhere.
-inline ExprPtr DivideIndexExactly(const ExprPtr& expr, int64_t divisor, const NzOffsetFacts& facts,
-                                  int* budget, const Span& span) {
-  INTERNAL_CHECK(divisor > 0) << "Internal error: DivideIndexExactly needs a positive divisor, got "
-                              << divisor;
-  if (!expr || --*budget < 0) return nullptr;
+/// This only *proves* the property; it deliberately does not build the
+/// quotient. Re-associating the offset arithmetic to divide it symbolically —
+/// rewriting ``nb * 256`` into ``nb * 16`` — is unsound, because IR arithmetic
+/// wraps at its declared width while the rewritten form does not:
+///
+///     x : INT32 = 1 << 24
+///     (x * 256) / 16   ==  0            // x * 256 wraps to 0 in i32
+///     x * (256 / 16)   ==  268435456    // re-associated: no wrap, wrong answer
+///
+/// Widening is not the culprit and matching the original width does not help:
+/// with ``a * b = q * 2^W + r``, the original yields ``r / d`` while any
+/// re-association yields ``r / d + q * 2^(W - log2 d)``. Callers therefore
+/// divide the *result* of the original expression (``FloorDiv(expr, divisor)``),
+/// which evaluates the offset exactly as written and only then divides.
+///
+/// The proof itself survives wraparound because every divisor here is a power
+/// of two and therefore divides ``2^W``: reducing a multiple of ``d`` modulo
+/// ``2^W`` leaves a multiple of ``d``. ``INTERNAL_CHECK`` pins that precondition
+/// rather than leaving it implicit.
+inline bool IsProvableMultipleOf(const ExprPtr& expr, int64_t divisor, const NzOffsetFacts& facts,
+                                 int* budget) {
+  INTERNAL_CHECK(divisor > 0 && (divisor & (divisor - 1)) == 0)
+      << "Internal error: NZ divisibility proofs require a power-of-two divisor (it must divide the "
+         "wraparound modulus to survive fixed-width overflow), got "
+      << divisor;
+  if (!expr || --*budget < 0) return false;
 
-  if (auto const_expr = As<ConstInt>(expr)) {
-    if (const_expr->value_ % divisor != 0) return nullptr;
-    return std::make_shared<ConstInt>(const_expr->value_ / divisor, DataType::INDEX, span);
-  }
+  if (auto const_expr = As<ConstInt>(expr)) return const_expr->value_ % divisor == 0;
 
-  // Rebuilt through the promoting ``Make*`` helpers rather than ``MakeIndexMul``:
-  // a ``tile.load`` offset only has to be an *integer* scalar, so forcing INDEX
-  // on a node whose operands are INT32 would leave the declared dtype
-  // disagreeing with them and emit ill-typed arithmetic.
+  // One divisible factor makes the whole product divisible.
   if (auto mul = As<Mul>(expr)) {
-    // One divisible factor is enough, and dividing it leaves the other alone.
-    if (auto left = DivideIndexExactly(mul->left_, divisor, facts, budget, span)) {
-      return MakeMul(left, mul->right_, span);
-    }
-    if (auto right = DivideIndexExactly(mul->right_, divisor, facts, budget, span)) {
-      return MakeMul(mul->left_, right, span);
-    }
-    return nullptr;
+    return IsProvableMultipleOf(mul->left_, divisor, facts, budget) ||
+           IsProvableMultipleOf(mul->right_, divisor, facts, budget);
   }
 
   if (auto add = As<Add>(expr)) {
-    auto left = DivideIndexExactly(add->left_, divisor, facts, budget, span);
-    if (!left) return nullptr;
-    auto right = DivideIndexExactly(add->right_, divisor, facts, budget, span);
-    if (!right) return nullptr;
-    return MakeAdd(left, right, span);
+    return IsProvableMultipleOf(add->left_, divisor, facts, budget) &&
+           IsProvableMultipleOf(add->right_, divisor, facts, budget);
   }
 
   if (auto sub = As<Sub>(expr)) {
-    auto left = DivideIndexExactly(sub->left_, divisor, facts, budget, span);
-    if (!left) return nullptr;
-    auto right = DivideIndexExactly(sub->right_, divisor, facts, budget, span);
-    if (!right) return nullptr;
-    return MakeSub(left, right, span);
+    return IsProvableMultipleOf(sub->left_, divisor, facts, budget) &&
+           IsProvableMultipleOf(sub->right_, divisor, facts, budget);
   }
 
   // ``As<Var>`` deliberately excludes ``IterArg`` (see ir-kind-traits): an
   // IterArg's value changes every iteration, so neither its initial value nor
   // any binding recorded for it proves anything about the value this use sees.
   if (auto var = As<Var>(expr)) {
-    if (facts.is_multiple_of && facts.is_multiple_of(var, divisor)) {
-      // Proven a multiple, so the floor division is the exact quotient. There is
-      // no cheaper spelling: the loop's trip count is implicit in the ForStmt.
-      return MakeFloorDiv(var, std::make_shared<ConstInt>(divisor, DataType::INDEX, span), span);
-    }
+    if (facts.is_multiple_of && facts.is_multiple_of(var, divisor)) return true;
     if (facts.definition) {
       if (auto def = facts.definition(var)) {
-        return DivideIndexExactly(def, divisor, facts, budget, span);
+        return IsProvableMultipleOf(def, divisor, facts, budget);
       }
     }
   }
 
-  return nullptr;
+  return false;
 }
 
 /// Map logical offsets ``[..., r0, c0off]`` into the blocked NZ coordinate
 /// system ``[..., c0off/c0, r0/16, 0, 0]`` produced by ``BlockNzShape``.
 ///
-/// A slice must start on a fractal boundary. A constant offset is checked
-/// directly; a symbolic one is accepted only when ``DivideIndexExactly`` can
-/// *prove* it a multiple of the axis factor and build the quotient. Anything
-/// else is rejected rather than silently truncated.
+/// A slice must start on a fractal boundary. A constant offset is folded
+/// directly; a symbolic one is accepted only when ``IsProvableMultipleOf``
+/// proves it a multiple of the axis factor, and is then divided as a whole
+/// rather than re-associated. Anything else is rejected rather than silently
+/// truncated.
 inline std::vector<ExprPtr> BlockNzOffsets(const std::vector<ExprPtr>& offsets, DataType dtype,
                                            const Span& span = Span::unknown(),
                                            const NzOffsetFacts& facts = {}) {
@@ -316,14 +308,16 @@ inline std::vector<ExprPtr> BlockNzOffsets(const std::vector<ExprPtr>& offsets, 
       return std::make_shared<ConstInt>(const_offset->value_ / divisor, DataType::INDEX, span);
     }
     int budget = kNzDivideStepBudget;
-    auto quotient = DivideIndexExactly(offset, divisor, facts, &budget, span);
-    CHECK_SPAN(quotient, span)
+    CHECK_SPAN(IsProvableMultipleOf(offset, divisor, facts, &budget), span)
         << "NZ layout requires the slice offset on shape[" << axis << "] to be a multiple of " << unit
         << ", and this one cannot be proven to be. Provable forms are a constant, a loop variable whose "
         << "start and step are both multiples of " << unit
         << ", and any sum, difference or constant multiple built from those. Slice on a " << unit
         << "-aligned boundary, or annotate the tensor as pl.ND.";
-    return quotient;
+    // Divide the offset's *result*, never its arithmetic: the expression keeps
+    // its own dtype and wraparound behaviour, and only the value it produces is
+    // divided. See ``IsProvableMultipleOf`` for why re-association is unsound.
+    return MakeFloorDiv(offset, std::make_shared<ConstInt>(divisor, DataType::INDEX, span), span);
   };
 
   // Evaluate the row axis first so its diagnostic wins when both are malformed.
