@@ -52,8 +52,8 @@ program_outlined = outline_pass(program)
    - Call to outlined function with input arguments
    - AssignStmt for each output variable
 6. **Thread control flow**: when the scope sat inside a loop or an `if`, the fresh
-   name bound for a captured store target becomes a real carry on that statement
-   (below)
+   name bound for a store target defined outside that statement becomes a real
+   carry; a target created inside the body remains local (below)
 7. **Add to Program**: Add outlined function to program's function list
 8. **Promote the parent**: an Opaque parent that outlined at least one scope becomes
    `Orchestration` — and its param dyn-dim reads are folded first (below)
@@ -347,6 +347,12 @@ would be reading a Var that is out of scope. The pass therefore threads the
 rename out as a real carry: the value on entry seeds a new `IterArg`, the body
 yields the fresh Var, and a new `return_var` is what the following statements see.
 
+That applies only when the target's incoming value is defined outside the
+control-flow body. A scratch tensor created in the body is recreated on every
+execution: its fresh post-store name is used by later statements in the same
+body, but it does not become an `IterArg`, a yielded value, or a `return_var` of
+the enclosing statement.
+
 **Before** (the scope writes `out` once per iteration, the ReturnStmt reads it):
 
 ```python
@@ -375,7 +381,8 @@ Rules the carry follows:
 | Situation | Result |
 | --------- | ------ |
 | N sibling scopes write one target in one body | one slot; the body yields the last value |
-| Nested loops | the inner carry re-emerges as the outer loop's carry |
+| Target defined in the same control-flow body | local rename only; no carry on that statement |
+| Nested loops | the inner carry re-emerges as an outer carry only when the target is also defined outside the outer body |
 | The target already *is* one of the loop's iter_args | no new slot; later references resolve to that slot's `return_var` |
 | Scope at the function's top level | unchanged — the fresh name is already in scope |
 

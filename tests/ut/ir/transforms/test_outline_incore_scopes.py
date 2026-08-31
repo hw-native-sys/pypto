@@ -3548,6 +3548,80 @@ class TestOutlineScopeInControlFlow:
         assert isinstance(value, ir.Call), f"expected a Call value, got {type(value).__name__}"
         return list(value.args)
 
+    def test_loop_local_store_target_stays_local(self):
+        """A tensor created in the loop body is not a carry of that loop."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[256, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+            ) -> pl.Tensor[[256, 128], pl.FP32]:
+                for i in pl.range(4):
+                    scratch = pl.create_tensor([256, 128], pl.FP32)
+                    with pl.at(level=pl.Level.CORE_GROUP):
+                        t = pl.load(a, [i * 64, 0], [64, 128])
+                        pl.store(pl.mul(t, 2.0), [0, 0], scratch)
+                    with pl.at(level=pl.Level.CORE_GROUP):
+                        t2 = pl.load(scratch, [0, 0], [64, 128])
+                        pl.store(t2, [i * 64, 0], out)
+                return out
+
+        After = self._outline(Before)
+        assert not self._structural_errors(After)
+
+        stmts = self._stmts(After.get_function("main"))
+        loop = self._loop(stmts[0])
+        # `scratch` is recreated on every iteration. Only caller-owned `out`
+        # crosses the loop boundary.
+        assert len(loop.iter_args) == 1
+        assert len(loop.return_vars) == 1
+        assert loop.iter_args[0].name_hint.startswith("out")
+
+        body = self._stmts(loop)
+        scratch_after_store = self._bound_name(body[1])
+        assert any(
+            isinstance(arg, ir.Var) and arg.name_hint == scratch_after_store
+            for arg in self._call_args(body[2])
+        )
+        ret = stmts[1]
+        assert isinstance(ret, ir.ReturnStmt)
+        assert self._name(ret.value[0]) == loop.return_vars[0].name_hint
+
+    def test_child_loop_return_var_is_local_to_parent_branch(self):
+        """A child loop result used as a store target is local to its parent branch."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[64, 128], pl.FP32],
+                flag: pl.Scalar[pl.INT32],
+                out: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+            ) -> pl.Tensor[[64, 128], pl.FP32]:
+                if flag > 0:
+                    scratch = pl.create_tensor([64, 128], pl.FP32)
+                    for _j, (scratch_iter,) in pl.range(1, init_values=(scratch,)):
+                        scratch_rv = pl.yield_(scratch_iter)
+                    with pl.at(level=pl.Level.CORE_GROUP):
+                        t = pl.load(a, [0, 0], [64, 128])
+                        pl.store(t, [0, 0], scratch_rv)
+                return out
+
+        After = self._outline(Before)
+        assert not self._structural_errors(After)
+
+        if_stmt = self._stmts(After.get_function("main"))[0]
+        assert isinstance(if_stmt, ir.IfStmt), f"expected an IfStmt, got {type(if_stmt).__name__}"
+        assert not if_stmt.return_vars
+        assert isinstance(if_stmt.then_body, ir.SeqStmts)
+        inner = self._loop(list(if_stmt.then_body.stmts)[1])
+        assert len(inner.iter_args) == 1
+        assert len(inner.return_vars) == 1
+
     def test_loop_writer_read_after_the_loop_is_threaded_as_a_carry(self):
         """The canonical shape: written by an in-loop scope, read by a later one."""
 

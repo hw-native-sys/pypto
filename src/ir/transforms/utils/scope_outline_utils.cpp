@@ -978,25 +978,46 @@ size_t FindIterArgSlot(const std::vector<IterArgPtr>& iter_args, const Var* var)
 
 }  // namespace
 
+StmtPtr ScopeOutliner::VisitStmt_(const AssignStmtPtr& op) {
+  if (!body_rename_stack_.empty() && op->var_) {
+    body_rename_stack_.back().local_defs.insert(op->var_.get());
+  }
+  return IRMutator::VisitStmt_(op);
+}
+
+void ScopeOutliner::NoteLocalDefinitions(const std::vector<VarPtr>& vars) {
+  if (body_rename_stack_.empty()) return;
+  auto& local_defs = body_rename_stack_.back().local_defs;
+  for (const auto& var : vars) {
+    if (var) local_defs.insert(var.get());
+  }
+}
+
 void ScopeOutliner::NoteStoreTargetRename(const VarPtr& original, const VarPtr& seed, const VarPtr& fresh) {
   if (body_rename_stack_.empty()) return;
   auto& frame = body_rename_stack_.back();
-  auto it = std::find_if(frame.begin(), frame.end(), [&](const BodyStoreRename& rename) {
+  // A target defined in this body is recreated on each execution. Its fresh SSA
+  // name remains visible to later statements in the same body through
+  // store_target_renames_, but it cannot seed a carry at the body's boundary.
+  if (frame.local_defs.count(original.get()) > 0) return;
+
+  auto& renames = frame.renames;
+  auto it = std::find_if(renames.begin(), renames.end(), [&](const BodyStoreRename& rename) {
     return rename.original.get() == original.get();
   });
-  if (it != frame.end()) {
+  if (it != renames.end()) {
     // Renamed again by a later scope in the same body: the carry still starts
     // from the value the body was entered with, only the yielded value moves on.
     it->body_values.push_back(fresh);
     return;
   }
-  frame.push_back(BodyStoreRename{original, seed, {fresh}});
+  renames.push_back(BodyStoreRename{original, seed, {fresh}});
 }
 
 StmtPtr ScopeOutliner::VisitControlFlowBody(const StmtPtr& body, std::vector<BodyStoreRename>* renames) {
   body_rename_stack_.emplace_back();
   auto visited = VisitStmt(body);
-  *renames = std::move(body_rename_stack_.back());
+  *renames = std::move(body_rename_stack_.back().renames);
   body_rename_stack_.pop_back();
   return visited;
 }
@@ -1154,12 +1175,14 @@ void ScopeOutliner::SplitAlreadyCarried(const std::vector<BodyStoreRename>& rena
 }
 
 StmtPtr ScopeOutliner::VisitStmt_(const ForStmtPtr& op) {
+  // A loop's return_vars are definitions in its parent body, not in its own.
+  NoteLocalDefinitions(op->return_vars_);
   // Only the body can outline a scope: the bounds, the iter_arg seeds and the
   // return_vars are all expressions. So one frame around the whole node is
   // enough, and IRMutator's own traversal can stay in charge.
   body_rename_stack_.emplace_back();
   auto visited = IRMutator::VisitStmt_(op);
-  auto renames = std::move(body_rename_stack_.back());
+  auto renames = std::move(body_rename_stack_.back().renames);
   body_rename_stack_.pop_back();
   if (renames.empty()) return visited;
 
@@ -1187,9 +1210,10 @@ StmtPtr ScopeOutliner::VisitStmt_(const ForStmtPtr& op) {
 }
 
 StmtPtr ScopeOutliner::VisitStmt_(const WhileStmtPtr& op) {
+  NoteLocalDefinitions(op->return_vars_);
   body_rename_stack_.emplace_back();
   auto visited = IRMutator::VisitStmt_(op);
-  auto renames = std::move(body_rename_stack_.back());
+  auto renames = std::move(body_rename_stack_.back().renames);
   body_rename_stack_.pop_back();
   if (renames.empty()) return visited;
 
@@ -1217,6 +1241,7 @@ StmtPtr ScopeOutliner::VisitStmt_(const WhileStmtPtr& op) {
 }
 
 StmtPtr ScopeOutliner::VisitStmt_(const IfStmtPtr& op) {
+  NoteLocalDefinitions(op->return_vars_);
   INTERNAL_CHECK_SPAN(op->condition_, op->span_) << "Internal error: IfStmt has null condition";
   auto new_condition = VisitExpr(op->condition_);
 

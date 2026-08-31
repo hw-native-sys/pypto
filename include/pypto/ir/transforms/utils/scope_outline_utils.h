@@ -229,6 +229,7 @@ class ScopeOutliner : public IRMutator {
    * the yield in the iter_arg's alias class (the Out-call and TupleGetItem rules)
    * and marks the carry *trivial*, so codegen is unchanged.
    */
+  StmtPtr VisitStmt_(const AssignStmtPtr& op) override;
   StmtPtr VisitStmt_(const ForStmtPtr& op) override;
   StmtPtr VisitStmt_(const WhileStmtPtr& op) override;
   StmtPtr VisitStmt_(const IfStmtPtr& op) override;
@@ -242,14 +243,24 @@ class ScopeOutliner : public IRMutator {
     std::vector<VarPtr> body_values;  ///< values bound inside the body, in order; the last is yielded
   };
 
+  /// Store-target renames and definitions made directly in one control-flow body.
+  struct BodyRenameFrame {
+    std::vector<BodyStoreRename> renames;
+    std::unordered_set<const Var*> local_defs;
+  };
+
+  /// Record vars that become visible in the enclosing body after a child control-flow statement.
+  void NoteLocalDefinitions(const std::vector<VarPtr>& vars);
+
   /// Record @p fresh as the current value of store target @p original.
   ///
   /// When a control-flow body is open, the rename is also noted on the innermost
-  /// frame so that body can thread it out as a carry. @p seed is the value
-  /// current *before* the rename; a target renamed by N sibling scopes in one
-  /// body keeps the first seed and appends each value, because the intermediate
-  /// ones may still be held by a post-store alias entry that the publish sweep
-  /// has to retarget too.
+  /// frame so that body can thread it out as a carry, unless @p original was
+  /// defined in that same body and is therefore local to each execution of it.
+  /// @p seed is the value current *before* the rename; a target renamed by N
+  /// sibling scopes in one body keeps the first seed and appends each value,
+  /// because the intermediate ones may still be held by a post-store alias entry
+  /// that the publish sweep has to retarget too.
   void NoteStoreTargetRename(const VarPtr& original, const VarPtr& seed, const VarPtr& fresh);
 
   /// Visit @p body with a fresh control-flow frame open, collecting into @p renames
@@ -447,7 +458,7 @@ class ScopeOutliner : public IRMutator {
   /// the forward map.
   std::unordered_map<const Var*, std::vector<const Var*>> renamed_by_value_;
   /// Open control-flow frames, innermost last. Empty at the function's top level.
-  std::vector<std::vector<BodyStoreRename>> body_rename_stack_;
+  std::vector<BodyRenameFrame> body_rename_stack_;
   ScopeKind target_scope_kind_;
   FunctionType outlined_func_type_;
   std::string name_suffix_;
