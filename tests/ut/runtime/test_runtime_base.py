@@ -116,6 +116,7 @@ def test_alloc_tensor_tracks_in_owned_set():
     t = h.alloc_tensor((4,), torch.float32)
     # Tracking is keyed by (worker_id, data_ptr); default worker_id is 0.
     assert (0, t.data_ptr) in h._owned_tensors
+    assert h._owned_tensor_keys[id(t)] == (0, t.data_ptr)
 
 
 def test_free_tensor_untracks_and_frees():
@@ -123,6 +124,7 @@ def test_free_tensor_untracks_and_frees():
     t = h.alloc_tensor((4,), torch.float32)
     h.free_tensor(t)
     assert (0, t.data_ptr) not in h._owned_tensors
+    assert id(t) not in h._owned_tensor_keys
     assert h.freed == [t.data_ptr]
 
 
@@ -135,6 +137,7 @@ def test_close_owned_tensors_frees_leaked():
     h._close_owned_tensors()
     assert b.data_ptr in h.freed
     assert h._owned_tensors == {}
+    assert h._owned_tensor_keys == {}
 
 
 def test_close_owned_tensors_swallows_free_errors():

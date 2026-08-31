@@ -59,6 +59,7 @@ class DeviceTensor:
     shape: tuple[int, ...]
     dtype: torch.dtype
     buffer: Any | None = field(default=None, repr=False, compare=False, hash=False)
+    _wire_tensor: Any | None = field(default=None, init=False, repr=False, compare=False, hash=False)
 
     def __init__(
         self,
@@ -97,6 +98,17 @@ class DeviceTensor:
         object.__setattr__(self, "shape", shape_t)
         object.__setattr__(self, "dtype", dtype)
         object.__setattr__(self, "buffer", buffer)
+        object.__setattr__(self, "_wire_tensor", None)
+
+    def _get_wire_tensor(self, dtype: Any) -> Any:
+        """Return the cached address-free Simpler descriptor for this allocation."""
+        wire_tensor = self._wire_tensor
+        if wire_tensor is None:
+            if self.buffer is None:
+                raise TypeError("A raw-pointer DeviceTensor has no owner Buffer for wire dispatch.")
+            wire_tensor = self.buffer.tensor(shapes=self.shape, dtype=dtype)
+            object.__setattr__(self, "_wire_tensor", wire_tensor)
+        return wire_tensor
 
     @property
     def nbytes(self) -> int:

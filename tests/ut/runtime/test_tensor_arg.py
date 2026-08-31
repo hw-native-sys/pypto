@@ -59,9 +59,12 @@ def test_device_tensor_derives_wire_tensor_from_retained_buffer():
         "pypto.runtime.task_interface.torch_dtype_to_datatype",
         side_effect=lambda d: f"<dtype:{d}>",
     ):
-        make_tensor_arg(worker, dt)
+        first = make_tensor_arg(worker, dt)
+        second = make_tensor_arg(worker, dt)
 
-    owner._require_owned_resident_tensor.assert_called_once_with(dt, "Tensor argument")
+    assert first is second
+    assert owner._require_owned_resident_tensor.call_count == 2
+    owner._require_owned_resident_tensor.assert_called_with(dt, "Tensor argument")
     assert len(captured["tensor_calls"]) == 1
     call = captured["tensor_calls"][0]
     assert call["shapes"] == (8, 16)
@@ -101,6 +104,62 @@ def test_owner_liveness_failure_prevents_wire_tensor_creation():
 
     with pytest.raises(ValueError, match="not a live allocation"):
         make_tensor_arg(worker, dt)
+
+
+def test_cached_wire_tensor_still_requires_live_owner():
+    """Descriptor reuse must not bypass freed or foreign allocation checks."""
+
+    from pypto.runtime.tensor_arg import bind_tensor_arg_owner, make_tensor_arg  # noqa: PLC0415
+
+    worker = MagicMock(name="worker")
+    owner = MagicMock(name="pypto_owner")
+    bind_tensor_arg_owner(worker, owner)
+    buffer = MagicMock(name="buffer")
+    buffer.base = 0xABCD
+    dt = DeviceTensor(buffer.base, (4,), torch.float32, buffer=buffer)
+
+    make_tensor_arg(worker, dt)
+    owner._require_owned_resident_tensor.side_effect = ValueError("allocation was freed")
+
+    with pytest.raises(ValueError, match="allocation was freed"):
+        make_tensor_arg(worker, dt)
+
+    buffer.tensor.assert_called_once()
+
+
+def test_owner_liveness_lookup_does_not_scan_device_buffers():
+    """Wide resident dispatch uses an O(1) allocation identity lookup."""
+
+    class NoIterationDict(dict):
+        def items(self):
+            raise AssertionError("resident tensor validation must not scan all device buffers")
+
+    from pypto.runtime.tensor_arg import bind_tensor_arg_owner, make_tensor_arg  # noqa: PLC0415
+
+    owner = MagicMock(name="pypto_owner")
+    owner._tensor_arg_worker = None
+    worker = MagicMock(name="worker")
+    bind_tensor_arg_owner(worker, owner)
+
+    buffer = MagicMock(name="buffer")
+    buffer.base = 0xABCD
+    buffer.tensor.return_value = MagicMock(name="wire_tensor")
+    dt = DeviceTensor(buffer.base, (4,), torch.float32, buffer=buffer)
+    key = (7, dt.data_ptr)
+    owner._require_owned_resident_tensor = None
+
+    from pypto.runtime.runtime_base import Worker  # noqa: PLC0415
+
+    owner._require_owned_resident_tensor = Worker._require_owned_resident_tensor.__get__(owner)
+    owner._require_ready = MagicMock(name="require_ready")
+    owner._owned_tensor_keys = {id(dt): key}
+    owner._owned_tensors = {key: dt}
+    owner._device_buffers = NoIterationDict({key: buffer})
+
+    make_tensor_arg(worker, dt)
+
+    owner._require_ready.assert_called_once_with("dispatch DeviceTensor")
+    buffer.tensor.assert_called_once()
 
 
 def test_stale_raw_backend_is_rejected_before_owner_validation():
