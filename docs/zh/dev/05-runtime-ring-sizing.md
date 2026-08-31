@@ -16,9 +16,14 @@ Simpler 的 `CallConfig.runtime_env` 上的同名字段一一对应，并且按 
 
 | `RunConfig` 字段 | `CallConfig.runtime_env` 成员 | 作用 | 约束 |
 | ---------------- | ----------------------------- | ---- | ---- |
-| `ring_task_window: int \| None` | `ring_task_window` | task ring 中在途 task slot 的数量 | 2 的幂，`>= 4` |
-| `ring_heap: int \| None` | `ring_heap` | 每个 ring 的 task 输出堆字节数 | 2 的幂，`>= 1024` |
-| `ring_dep_pool: int \| None` | `ring_dep_pool` | 依赖边池容量 | `[4, INT32_MAX]` |
+| `ring_task_window: int \| list[int] \| tuple[int, ...] \| None` | `ring_task_window` | task ring 中在途 task slot 的数量 | 2 的幂，`>= 4` |
+| `ring_heap: int \| list[int] \| tuple[int, ...] \| None` | `ring_heap` | 每个 ring 的 task 输出堆字节数 | 2 的幂，`>= 1024` |
+| `ring_dep_pool: int \| list[int] \| tuple[int, ...] \| None` | `ring_dep_pool` | 依赖边池容量 | `[4, INT32_MAX]` |
+
+每个字段都可传入标量（广播到所有 scope-depth ring），或包含恰好四项的 list/tuple
+（依次配置 ring 0 到 ring 3）。在逐 ring 形式中，`0` 表示该 ring 保持运行时默认值；
+每个非零项必须满足表中的约束。标量 `0` 无效——若要让整个字段保持未设置，请使用
+`None`。
 
 `None`（默认值）表示该字段 **未设置**（在 `CallConfig` 上为 `0`）。PyPTO 仅在值
 不为 `None` 时才写入 `CallConfig.runtime_env`，因此未设置的字段完全交由运行时

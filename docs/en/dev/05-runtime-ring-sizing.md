@@ -18,9 +18,15 @@ applied per dispatch on top of the program's `DistributedConfig` baseline
 
 | `RunConfig` field | `CallConfig.runtime_env` member | Controls | Constraint |
 | ----------------- | ------------------------------- | -------- | ---------- |
-| `ring_task_window: int \| None` | `ring_task_window` | Number of in-flight task slots in the task ring | power of 2, `>= 4` |
-| `ring_heap: int \| None` | `ring_heap` | Bytes of the per-ring task-output heap | power of 2, `>= 1024` |
-| `ring_dep_pool: int \| None` | `ring_dep_pool` | Dependency-edge pool capacity | `[4, INT32_MAX]` |
+| `ring_task_window: int \| list[int] \| tuple[int, ...] \| None` | `ring_task_window` | Number of in-flight task slots in the task ring | power of 2, `>= 4` |
+| `ring_heap: int \| list[int] \| tuple[int, ...] \| None` | `ring_heap` | Bytes of the per-ring task-output heap | power of 2, `>= 1024` |
+| `ring_dep_pool: int \| list[int] \| tuple[int, ...] \| None` | `ring_dep_pool` | Dependency-edge pool capacity | `[4, INT32_MAX]` |
+
+Each field accepts either a scalar, which is broadcast to every scope-depth
+ring, or a list/tuple of exactly four entries for rings 0 through 3. In the
+per-ring form, `0` leaves that ring at its runtime default; every nonzero entry
+must satisfy the constraint in the table. Scalar `0` is invalid—use `None` to
+leave the entire field unset.
 
 `None` (the default) leaves the field **unset** (`0` on `CallConfig`). PyPTO
 writes the value into `CallConfig.runtime_env` only when it is not `None`, so an
