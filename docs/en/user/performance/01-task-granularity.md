@@ -179,12 +179,18 @@ def merged_chain(a: pl.Tensor, b: pl.Tensor, out: pl.Out[pl.Tensor]):
 expected = torch.exp(A[:LARGE] + B[:LARGE])
 scratch, out = torch.zeros(LARGE, COLS), torch.zeros(LARGE, COLS)
 two_tasks_via_gm(A[:LARGE], B[:LARGE], scratch, out, config=CFG)
-torch.testing.assert_close(out, expected, rtol=1e-4, atol=1e-4)
+torch.testing.assert_close(out, expected, rtol=1e-3, atol=1e-4)
 
 out = torch.zeros(LARGE, COLS)
 merged_chain(A[:LARGE], B[:LARGE], out, config=CFG)
-torch.testing.assert_close(out, expected, rtol=1e-4, atol=1e-4)
+torch.testing.assert_close(out, expected, rtol=1e-3, atol=1e-4)
 ```
+
+Both comparisons raise only the relative bound, to `rtol=1e-3`: the device's `exp` carries
+its own relative error of roughly `1e-4`, so the `1e-4` the elementwise blocks above use
+would be measuring the operator's accuracy rather than the transformation. `atol` stays at
+`1e-4` so the small outputs, where it is what the bound rests on, are held as tightly as
+everywhere else.
 
 **Cost:** the merged task holds every intermediate live at once.
 

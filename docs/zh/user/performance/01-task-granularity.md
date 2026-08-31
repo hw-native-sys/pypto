@@ -150,12 +150,16 @@ def merged_chain(a: pl.Tensor, b: pl.Tensor, out: pl.Out[pl.Tensor]):
 expected = torch.exp(A[:LARGE] + B[:LARGE])
 scratch, out = torch.zeros(LARGE, COLS), torch.zeros(LARGE, COLS)
 two_tasks_via_gm(A[:LARGE], B[:LARGE], scratch, out, config=CFG)
-torch.testing.assert_close(out, expected, rtol=1e-4, atol=1e-4)
+torch.testing.assert_close(out, expected, rtol=1e-3, atol=1e-4)
 
 out = torch.zeros(LARGE, COLS)
 merged_chain(A[:LARGE], B[:LARGE], out, config=CFG)
-torch.testing.assert_close(out, expected, rtol=1e-4, atol=1e-4)
+torch.testing.assert_close(out, expected, rtol=1e-3, atol=1e-4)
 ```
+
+这里两处比较只放松了相对界限，取 `rtol=1e-3`：设备上的 `exp` 自身带有约 `1e-4` 的相对误差，
+沿用上面逐元素块里的 `1e-4` 量的就是算子精度，而不是这次变换。`atol` 仍是 `1e-4` —— 输出较小的
+那些元素靠它兜底，那里的松紧和别处一样。
 
 **代价：** 合并后的任务要同时持有每一个中间结果。
 

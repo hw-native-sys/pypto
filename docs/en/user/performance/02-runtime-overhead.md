@@ -220,7 +220,7 @@ def early_resolve(a: pl.Tensor, b: pl.Tensor, scratch: pl.Out[pl.Tensor], out: p
 
 scratch, out = fresh(TILE_ROWS), fresh(TILE_ROWS)
 early_resolve(A[:TILE_ROWS], B[:TILE_ROWS], scratch, out, config=CFG)
-torch.testing.assert_close(out, torch.exp(A[:TILE_ROWS] + B[:TILE_ROWS]), rtol=1e-4, atol=1e-4)
+torch.testing.assert_close(out, torch.exp(A[:TILE_ROWS] + B[:TILE_ROWS]), rtol=1e-3, atol=1e-4)
 ```
 
 The scheduler may then pre-stage that task's consumers onto idle cores *before* it

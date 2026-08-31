@@ -168,7 +168,7 @@ def early_resolve(a: pl.Tensor, b: pl.Tensor, scratch: pl.Out[pl.Tensor], out: p
 
 scratch, out = fresh(TILE_ROWS), fresh(TILE_ROWS)
 early_resolve(A[:TILE_ROWS], B[:TILE_ROWS], scratch, out, config=CFG)
-torch.testing.assert_close(out, torch.exp(A[:TILE_ROWS] + B[:TILE_ROWS]), rtol=1e-4, atol=1e-4)
+torch.testing.assert_close(out, torch.exp(A[:TILE_ROWS] + B[:TILE_ROWS]), rtol=1e-3, atol=1e-4)
 ```
 
 调度器于是可以在这个任务**完成之前**就把它的消费者预置到空闲核上，等它一结束就用门铃放行。
