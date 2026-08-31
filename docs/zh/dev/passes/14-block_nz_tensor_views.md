@@ -90,19 +90,37 @@ wt: pl.Tile[[256, 512], pl.INT8, pl.Mem.Mat] =
     pl.tile.load(w, [1, 16, 16, 0, 0], [1, 16, 16, 16, 32], target_memory=pl.Mem.Mat)
 ```
 
-末尾两个 offset 必须是**常量**。里程碑 1 只对 `ConstInt` 做 `k0/c0` / `n0/16` 映射，
-因此即使符号表达式可证明对齐也会被拒绝——要映射它需要整除性证明加代数改写
-（`nb*256` -> `nb*16`），目前没有实现。
+### 符号形式的末尾 offset
 
-所以**尚不支持循环推导出的切片**：
+末尾 offset 不必是常量，但它的对齐必须被**证明**，绝不允许假设。offset 到达本 pass
+时只是它被绑定到的那个 SSA 名字，产生它的算术在别处，因此
+`DivideIndexExactly`（`tensor_view_semantics.h`）会沿着本 pass 一次只读扫描收集到的
+两类绑定往回走：
+
+| 绑定形式 | 证明依据 | 构造出的商 |
+| -------- | -------- | ---------- |
+| `AssignStmt`（`n0 = nb * 256`） | 乘积中的某个因子是倍数 | 折叠形式：`nb * 16` |
+| `ForStmt`（`for k0 in pl.pipeline(512, 4096, 512)`） | `start` 与 `step` 同时是倍数 | `k0 // 32` |
+| `ConstInt` | 该值本身是倍数 | 折叠形式：`256 -> 16` |
+
+在此基础上，和、差以及常数倍可以组合：当 `d` 同时整除两边时
+`(a±b)/d = a/d ± b/d`，当 `d` 整除 `a` 时 `(a*b)/d = (a/d)*b`。因此催生该特性的
+grouped-matmul 权重路径现在可以编译：
 
 ```python
 for nb in pl.spmd(N // N_TILE):
-    n0 = nb * N_TILE
-    wt = w[n0 : n0 + N_TILE, 0:K_TILE]   # 被拒绝：shape[-2] 上是动态 offset
+    n0 = nb * N_TILE                     # -> 行 fractal offset  nb * (N_TILE/16)
+    for k0 in pl.pipeline(K_TILE, K, K_TILE, stage=2):
+        wt = w[n0 : n0 + N_TILE, k0 : k0 + K_TILE]   # -> c0 block offset  k0 // c0
 ```
 
-这是本里程碑与催生它的 grouped-matmul 权重路径之间最主要的差距，已记录为 issue #2548。
+有两处限制是刻意保留的。循环变量得到的是 `FloorDiv` 而不是折叠后的乘积，因为 IR 里
+没有任何节点表示它的迭代次数——这个除法之所以精确，正是因为先证明了整除性。另外
+`IterArg` 永远不会被解析：它的值每次迭代都在变，无论是初值还是为它记录的任何绑定，
+都无法描述某一次使用真正看到的值。
+
+凡是走不通证明的表达式一律拒绝，并在诊断中列出可证明的形式。这种拒绝正是设计本身：
+NZ 张量一旦按猜出来的坐标寻址，就会读到错误的 fractal，而下游不会有任何地方发现。
 
 目标 `TileType` **原样保留**：GM 分区变成 rank-(r+2)，而 tile 保持逻辑 2-D 操作数。
 因此该 load 使用显式类型的 `Call` 构造函数重建，而不是 `OpRegistry::Create`——后者
@@ -138,7 +156,8 @@ pto.tload ins(%w_pview : !pto.partition_tensor_view<16x16x16x32xi8>)
 | `shape[-1] % c0 != 0` | 拒绝——不完整的 C0 线没有表示 |
 | `shape[-2]` / `shape[-1]` 为动态维 | 拒绝——无法静态证明整除 |
 | 切片偏移未对齐到分形边界 | 拒绝——没有分块表示 |
-| **末尾切片偏移为动态（非常量）** | **拒绝——只映射 `ConstInt` 偏移；即使符号表达式可证明对齐也一并拒绝（#2548）** |
+| 末尾切片偏移为符号形式且对齐可证明 | 映射——见[符号形式的末尾 offset](#符号形式的末尾-offset) |
+| 末尾切片偏移为符号形式但对齐无法证明 | 拒绝——绝不基于「大概是对齐的」去做除法 |
 | rank < 2 | 拒绝 |
 | `target_memory != Mat`（或缺省） | 拒绝——NZ→NZ 是 cube 操作数路径 |
 | `tile.load` 之外的消费者 | 拒绝——此处 NZ 是只读的 |

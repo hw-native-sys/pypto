@@ -97,21 +97,41 @@ wt: pl.Tile[[256, 512], pl.INT8, pl.Mem.Mat] =
     pl.tile.load(w, [1, 16, 16, 0, 0], [1, 16, 16, 16, 32], target_memory=pl.Mem.Mat)
 ```
 
-The two trailing offsets must be **constants**. Milestone 1 performs the
-`k0/c0` / `n0/16` mapping only on `ConstInt`, so a symbolic offset is rejected
-even when it is provably aligned — mapping one would need a divisibility proof
-plus an algebraic rewrite (`nb*256` -> `nb*16`), which is not implemented.
+### Symbolic trailing offsets
 
-A loop-derived slice is therefore **not supported yet**:
+A trailing offset does not have to be a constant, but its alignment must be
+**proven** — never assumed. An offset arrives here as the SSA name it was bound
+to, not as the arithmetic that produced it, so `DivideIndexExactly`
+(`tensor_view_semantics.h`) walks two kinds of binding the pass collects from
+the enclosing function in one read-only sweep:
+
+| Binding | Proof | Quotient built |
+| ------- | ----- | -------------- |
+| `AssignStmt` (`n0 = nb * 256`) | one factor of the product is a multiple | folded: `nb * 16` |
+| `ForStmt` (`for k0 in pl.pipeline(512, 4096, 512)`) | `start` and `step` are both multiples | `k0 // 32` |
+| `ConstInt` | the value is a multiple | folded: `256 -> 16` |
+
+Sums, differences and constant multiples compose from those, since
+`(a±b)/d = a/d ± b/d` when `d` divides both and `(a*b)/d = (a/d)*b` when `d`
+divides `a`. The grouped-matmul weight path that motivated the feature therefore
+compiles:
 
 ```python
 for nb in pl.spmd(N // N_TILE):
-    n0 = nb * N_TILE
-    wt = w[n0 : n0 + N_TILE, 0:K_TILE]   # rejected: dynamic offset on shape[-2]
+    n0 = nb * N_TILE                     # -> row fractal offset  nb * (N_TILE/16)
+    for k0 in pl.pipeline(K_TILE, K, K_TILE, stage=2):
+        wt = w[n0 : n0 + N_TILE, k0 : k0 + K_TILE]   # -> c0 block offset  k0 // c0
 ```
 
-This is the main gap between this milestone and the grouped-matmul weight path
-that motivated it. Tracked as issue #2548.
+Two limits are deliberate. A loop variable divides to a `FloorDiv` rather than a
+folded product because nothing in the IR names its trip count — the division is
+exact only *because* divisibility was proven first. And an `IterArg` is never
+resolved: its value changes every iteration, so neither its initial value nor any
+binding recorded for it describes the value a given use sees.
+
+Anything the walk cannot prove is rejected with a diagnostic naming the provable
+forms. That refusal is the design: an NZ tensor addressed from a guessed
+coordinate reads the wrong fractal, and nothing downstream would notice.
 
 The destination `TileType` is **preserved verbatim**: the GM partition becomes
 rank-(r+2), the tile stays the logical 2-D operand. The load is therefore rebuilt
@@ -149,7 +169,8 @@ diagnostic naming the fix — an NZ tensor must never be silently mis-addressed.
 | `shape[-1] % c0 != 0` | rejected — a partial C0 line has no representation |
 | dynamic `shape[-2]` / `shape[-1]` | rejected — divisibility cannot be proven |
 | slice offset not fractal-aligned | rejected — no blocked representation |
-| **dynamic (non-constant) trailing slice offset** | **rejected — only `ConstInt` offsets are mapped; a provably aligned symbolic offset is refused too (#2548)** |
+| symbolic trailing slice offset, alignment provable | mapped — see [Symbolic trailing offsets](#symbolic-trailing-offsets) |
+| symbolic trailing slice offset, alignment not provable | rejected — never divided on the assumption that it is aligned |
 | rank < 2 | rejected |
 | `target_memory != Mat` (or absent) | rejected — NZ→NZ is the cube operand path |
 | consumer other than `tile.load` | rejected — NZ is read-only here |

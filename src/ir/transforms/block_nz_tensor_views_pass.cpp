@@ -53,13 +53,17 @@
  *     NZ source, so the logical window is still intact when this pass runs.
  *
  * Milestone 1 scope: read-only, matmul operands only (``target_memory=Mat``),
- * whole-byte dtypes, static shapes, fractal-aligned shapes and slice offsets.
- * Everything outside that is rejected with a diagnostic naming the authoring
- * fix — an NZ tensor must never be silently mis-addressed.
+ * whole-byte dtypes, static shapes, fractal-aligned shapes and slice offsets. A
+ * slice offset may be symbolic when its alignment is *provable* — see
+ * ``NzOffsetFactStore`` below and ``DivideIndexExactly`` in
+ * ``tensor_view_semantics.h``. Everything outside that is rejected with a
+ * diagnostic naming the authoring fix — an NZ tensor must never be silently
+ * mis-addressed.
  */
 
 #include <any>
 #include <cstddef>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
@@ -77,9 +81,11 @@
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
+#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
@@ -160,17 +166,92 @@ TypePtr BlockNzType(const TypePtr& type, const Span& span) {
   return type;
 }
 
-/// Rewrite the elements of a ``MakeTuple`` argument through ``fn``.
-ExprPtr BlockTupleArg(const ExprPtr& arg, DataType dtype, const Span& span, bool is_offsets) {
+/// Index bindings a symbolic slice offset has to be proven against.
+///
+/// A slice offset arrives at the ``tile.load`` as the SSA name it was bound to,
+/// so the arithmetic that makes it fractal-aligned lives elsewhere in the
+/// function — in the ``AssignStmt`` that defined it (``n0 = nb * 256``) or in
+/// the ``ForStmt`` that bounds it (``for k0 in pl.pipeline(512, 4096, 512)``).
+/// This collects both in one read-only walk, so the rewrite itself stays a
+/// constant-time lookup and the pass stays O(N).
+///
+/// Collected from the *pre-mutation* body: the mutator only substitutes NZ
+/// tensor Vars, so an index Var is the same node before and after.
+class NzOffsetFactStore {
+ public:
+  explicit NzOffsetFactStore(const StmtPtr& body) {
+    if (!body) return;
+    Collector collector(this);
+    collector.VisitStmt(body);
+  }
+
+  /// A view of this store. The callbacks capture ``this``, so the store must
+  /// outlive every use of the returned facts.
+  [[nodiscard]] tensor_view_semantics::NzOffsetFacts Facts() const {
+    tensor_view_semantics::NzOffsetFacts facts;
+    facts.definition = [this](const VarPtr& var) -> ExprPtr {
+      auto it = definitions_.find(var);
+      return it == definitions_.end() ? nullptr : it->second;
+    };
+    facts.is_multiple_of = [this](const VarPtr& var, int64_t divisor) {
+      auto it = loop_bindings_.find(var);
+      if (it == loop_bindings_.end()) return false;
+      // Every value the loop variable takes is ``start + i * step``, so it is a
+      // multiple of ``divisor`` exactly when both endpoints of that form are.
+      const auto& [start, step] = it->second;
+      return start % divisor == 0 && step % divisor == 0;
+    };
+    return facts;
+  }
+
+ private:
+  class Collector : public IRVisitor {
+   public:
+    explicit Collector(NzOffsetFactStore* store) : store_(store) {}
+
+   protected:
+    void VisitStmt_(const AssignStmtPtr& op) override {
+      // Scalars only: a tensor / tile definition can never be part of an index
+      // expression, and keeping them out bounds the map to the index IR.
+      if (op->var_ && As<ScalarType>(op->var_->GetType())) {
+        store_->definitions_.emplace(op->var_, op->value_);
+      }
+      IRVisitor::VisitStmt_(op);
+    }
+
+    void VisitStmt_(const ForStmtPtr& op) override {
+      auto start = As<ConstInt>(op->start_);
+      auto step = As<ConstInt>(op->step_);
+      if (op->loop_var_ && start && step) {
+        store_->loop_bindings_.emplace(op->loop_var_, std::make_pair(start->value_, step->value_));
+      }
+      IRVisitor::VisitStmt_(op);
+    }
+
+   private:
+    NzOffsetFactStore* store_;
+  };
+
+  std::unordered_map<VarPtr, ExprPtr> definitions_;
+  std::unordered_map<VarPtr, std::pair<int64_t, int64_t>> loop_bindings_;
+};
+
+/// Rewrite the elements of a ``MakeTuple`` coordinate argument into blocked NZ
+/// form. ``facts`` is read only on the offsets path — a shape is a static
+/// extent, never a symbolic expression.
+ExprPtr BlockTupleArg(const ExprPtr& arg, DataType dtype, const Span& span, bool is_offsets,
+                      const tensor_view_semantics::NzOffsetFacts& facts) {
   auto tuple = As<MakeTuple>(arg);
   INTERNAL_CHECK_SPAN(tuple, span) << "Internal error: tile.load coordinate argument must be a MakeTuple";
-  auto blocked = is_offsets ? tensor_view_semantics::BlockNzOffsets(tuple->elements_, dtype, span)
+  auto blocked = is_offsets ? tensor_view_semantics::BlockNzOffsets(tuple->elements_, dtype, span, facts)
                             : tensor_view_semantics::BlockNzShape(tuple->elements_, dtype, span);
   return std::make_shared<MakeTuple>(std::move(blocked), tuple->span_);
 }
 
 class BlockNzMutator : public IRMutator {
  public:
+  explicit BlockNzMutator(tensor_view_semantics::NzOffsetFacts facts) : facts_(std::move(facts)) {}
+
   void AddSubstitution(const VarPtr& old_var, const VarPtr& new_var) { var_cache_[old_var] = new_var; }
 
  protected:
@@ -285,14 +366,15 @@ class BlockNzMutator : public IRMutator {
         << (target.has_value() ? MemorySpaceToString(*target) : std::string("no target_memory"))
         << ". An NZ tensor is a cube weight: load it into Mat, or annotate the tensor as pl.ND.";
 
-    args[1] = BlockTupleArg(args[1], dtype, op->span_, /*is_offsets=*/true);
-    args[2] = BlockTupleArg(args[2], dtype, op->span_, /*is_offsets=*/false);
+    args[1] = BlockTupleArg(args[1], dtype, op->span_, /*is_offsets=*/true, facts_);
+    args[2] = BlockTupleArg(args[2], dtype, op->span_, /*is_offsets=*/false, facts_);
     if (args.size() >= 4) {
-      args[3] = BlockTupleArg(args[3], dtype, op->span_, /*is_offsets=*/false);
+      args[3] = BlockTupleArg(args[3], dtype, op->span_, /*is_offsets=*/false, facts_);
     }
     return args;
   }
 
+  tensor_view_semantics::NzOffsetFacts facts_;
   std::unordered_map<VarPtr, VarPtr> var_cache_;
 };
 
@@ -326,7 +408,9 @@ FunctionPtr TransformFunction(const FunctionPtr& func) {
     new_return_types.push_back(std::move(new_rt));
   }
 
-  BlockNzMutator mutator;
+  // The store owns the maps the facts read, so it must outlive the mutator.
+  NzOffsetFactStore fact_store(func->body_);
+  BlockNzMutator mutator(fact_store.Facts());
   for (const auto& [old_var, new_var] : param_substitutions) {
     mutator.AddSubstitution(old_var, new_var);
   }
