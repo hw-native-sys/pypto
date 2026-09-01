@@ -45,6 +45,8 @@ import torch
 from pypto.ir.printer import python_print
 from pypto.pypto_core import passes
 
+from examples.advanced import moe_graph_predicate as moe
+
 ROWS = 128
 COLS = 128
 LAYERS = 4
@@ -384,6 +386,74 @@ class TestGraphIsNotSilentlyDroppedAtCompile:
                 torch.zeros(ROWS, COLS),
                 config=test_config,
             )
+
+
+# --- MoE routing: a Graph plus per-expert dispatch predicates ---
+#
+# The program under test is the example itself, imported rather than restated —
+# a copy here would let the two drift, and the example is the artifact users
+# actually run.
+
+
+class TestMoeGraphPredicate:
+    """Run-time routing inside a recorded graph.
+
+    A recorded topology cannot branch, and under HBG the orchestration cannot
+    read a count a task has yet to produce — the graph is built before the device
+    runs anything. So every expert is enumerated at build time and each one's
+    dispatch is gated by a predicate the scheduler evaluates on device.
+
+    Asserted per expert *band*: an unrouted expert's band keeps its initial
+    value, so a failure names the expert that ran when it should not have, or the
+    reverse.
+    """
+
+    @staticmethod
+    def _inputs():
+        torch.manual_seed(0)
+        return (
+            torch.randn(moe.D, moe.D, dtype=torch.float32) * 0.1,
+            torch.randn(moe.EXPERTS * moe.D, moe.D, dtype=torch.float32) * 0.1,
+            torch.randn(moe.EXPERTS * moe.D, moe.D, dtype=torch.float32) * 0.1,
+            torch.randn(moe.EXPERTS * moe.D, moe.D, dtype=torch.float32) * 0.1,
+        )
+
+    def _check(self, counts, test_config):
+        x, w_gate, w_up, w_down = self._inputs()
+        out = torch.zeros((moe.EXPERTS * moe.D, moe.D), dtype=torch.float32)
+
+        moe.moe_decode(x, w_gate, w_up, w_down, counts, out, config=test_config)
+
+        want = moe.expected_bands(x, w_gate, w_up, w_down, counts)
+        for e in range(moe.EXPERTS):
+            band = slice(e * moe.D, (e + 1) * moe.D)
+            routed = int(counts[e, 0]) > 0
+            assert torch.allclose(out[band], want[band], rtol=3e-2, atol=3e-2), (
+                f"expert {e} (count={int(counts[e, 0])}) "
+                f"{'should have run' if routed else 'should have been retired inline'}; "
+                f"max diff = {(out[band] - want[band]).abs().max().item()}"
+            )
+
+    def test_only_the_routed_experts_contribute(self, test_config, graph_runtime):
+        """Experts 1 and 3 receive nothing, so their bands must stay zero."""
+        moe.moe_decode._cache.clear()
+        self._check(torch.tensor([[1], [0], [1], [0]], dtype=torch.int32), test_config)
+
+    def test_replay_re_reads_the_predicate(self, test_config, graph_runtime):
+        """Invert the routing on a *reused* compiled program.
+
+        The second call hits the JIT cache, so it replays the graph recorded by
+        the first. A replay that froze the predicate operand — its address or its
+        value — would still route experts 0 and 2 and fail here. This is the case
+        that distinguishes "the predicate is patched on replay" from "the first
+        call's routing happened to be right".
+        """
+        moe.moe_decode._cache.clear()
+        self._check(torch.tensor([[1], [0], [1], [0]], dtype=torch.int32), test_config)
+        assert len(moe.moe_decode._cache) == 1
+
+        self._check(torch.tensor([[0], [1], [0], [1]], dtype=torch.int32), test_config)
+        assert len(moe.moe_decode._cache) == 1, "second call recompiled instead of replaying"
 
 
 if __name__ == "__main__":
