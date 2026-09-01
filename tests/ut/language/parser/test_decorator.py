@@ -1420,6 +1420,51 @@ class TestInlineFunctionCalls:
 
         ir.assert_structural_equal(TwiceCalled, Expected)
 
+    def test_inline_formal_names_do_not_escape_call_scope(self):
+        """A formal name must not overwrite the caller binding of that name."""
+
+        @pl.inline
+        def write_value(
+            value: pl.Tensor[[4], pl.FP32],
+            output: pl.Out[pl.Tensor[[4], pl.FP32]],
+        ) -> pl.Tensor[[4], pl.FP32]:
+            output = pl.tensor.assemble(output, value, [0])
+            return output
+
+        @pl.program
+        class Actual:
+            @pl.function
+            def main(
+                self,
+                first: pl.Tensor[[4], pl.FP32],
+                second: pl.Tensor[[4], pl.FP32],
+                output: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                intermediate = pl.tensor.create([4], dtype=pl.FP32)
+                written_intermediate = write_value(first, intermediate)
+                combined = pl.add(written_intermediate, second)
+                result = write_value(combined, output)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                first: pl.Tensor[[4], pl.FP32],
+                second: pl.Tensor[[4], pl.FP32],
+                output: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                intermediate = pl.tensor.create([4], dtype=pl.FP32)
+                intermediate = pl.tensor.assemble(intermediate, first, [0])
+                written_intermediate = intermediate
+                combined = pl.add(written_intermediate, second)
+                output = pl.tensor.assemble(output, combined, [0])
+                result = output
+                return result
+
+        ir.assert_structural_equal(Actual, Expected)
+
     def test_inline_wrong_arg_count_raises_error(self):
         """Wrong number of arguments raises ParserTypeError."""
 

@@ -8421,8 +8421,15 @@ class ASTParser:
             self.expr_evaluator.closure_vars = prev_closure_vars
             return_expr = self._inline_return_expr
             self._inline_mode, self._inline_return_expr = prev_inline_state
-            # Leak vars so inlined definitions are visible to the caller
-            self.scope_manager.exit_scope(leak_vars=True)
+            # Keep the existing statement-level inline semantics for local
+            # definitions, but never expose formal parameter bindings. A
+            # formal may share a name with an unrelated caller variable; if it
+            # escaped, a later inline call could receive the first call's
+            # actual argument instead of the caller variable it names.
+            self.scope_manager.exit_scope(
+                leak_vars=True,
+                exclude_names=set(inline_func.param_names),
+            )
 
         if return_expr is None:
             raise ParserTypeError(
