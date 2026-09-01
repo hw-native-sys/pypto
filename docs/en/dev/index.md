@@ -31,6 +31,7 @@ PyPTO programs, start with the [User Manual](../user/index.md).
 | [Per-Task Ring Sizing](05-runtime-ring-sizing.md) | The three ring-size overrides on `RunConfig` and when to tune them |
 | [Persistent L3 execution](06-persistent-l3.md) | Reusing one worker across prepared distributed programs |
 | [Memory Map](07-memory-map.md) | Rendering a pass dump into an interactive HTML map of on-chip memory |
+| [Compile and Execution Entry Points](08-entry-points.md) | Every compile and execution entry point, the layer it belongs to, and when to reach for it |
 | [Distributed Operators](distributed_ops.md) | The N6 distributed op family — typed DSL access to collectives and primitives |
 | [PTOAS Op Status Matrix](ptoas-op-status.md) | Which public and compatibility PTOAS ops the compiler currently emits |
 

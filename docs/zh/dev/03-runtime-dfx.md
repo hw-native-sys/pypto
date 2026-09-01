@@ -125,18 +125,18 @@ L2 子进程用两种方式重建编排实参：被 pytest harness 驱动时从 
 ### 从 Python（`RunConfig`）
 
 ```python
-from pypto.runtime import run, RunConfig
+from pypto import ir
+from pypto.runtime import RunConfig
 
-run(
-    MyProgram, a, b, c,
-    config=RunConfig(
-        platform="a2a3sim",
-        enable_chip_swimlane=4,        # 全量 swimlane -> chip_swimlane_records.json
-                                     # （True 等价于等级 4；需要更轻量时用 1-3）
-        enable_dep_gen=True,         # 生成 deps.json（按需用 deps_viewer 渲染 HTML）
-        enable_pmu=4,                # PMU 事件 = MEMORY
-    ),
+config = RunConfig(
+    platform="a2a3sim",
+    enable_chip_swimlane=4,      # 全量 swimlane -> chip_swimlane_records.json
+                                 # （True 等价于等级 4；需要更轻量时用 1-3）
+    enable_dep_gen=True,         # 生成 deps.json（按需用 deps_viewer 渲染 HTML）
+    enable_pmu=4,                # PMU 事件 = MEMORY
 )
+compiled = ir.compile(MyProgram, **config.compile_kwargs())
+compiled(a, b, c, config=config)
 ```
 
 ### 从 pytest

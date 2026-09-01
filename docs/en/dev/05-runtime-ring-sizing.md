@@ -4,12 +4,12 @@ PyPTO exposes Simpler's per-task ring sizing as three optional overrides on
 [`RunConfig`](../../../python/pypto/runtime/runner.py). They let you size the
 runtime's per-task ring resources for a single dispatch without touching the
 compiled artifact or any global state. This works on both the L2 single-chip
-path (`run()` / `execute_compiled()` / `ChipWorker.run()`) and the L3 distributed path
+path (`compiled(...)` / `execute_compiled()` / `ChipWorker.run()`) and the L3 distributed path
 (`DistributedWorker.run()` / the one-shot `compiled(...)`).
 
 The runtime keeps its task-launch resources in *ring buffers*. Each override
 maps 1:1 to a field on Simpler's `CallConfig.runtime_env` and is sized **per
-task submission** — per `run()` / `rt.run()` call — so different submissions of
+task submission** — per `compiled(...)` / `rt.run()` call — so different submissions of
 the same kernel can use different ring sizes. On the L3 path the override is
 applied per dispatch on top of the program's `DistributedConfig` baseline
 (`aicpu_thread_num`) and reaches every chip in that dispatch.
@@ -63,21 +63,20 @@ than raising an opaque `TypeError` from the power-of-two check.
 
 ## Usage
 
-### L2 single-chip (`run` / `execute_compiled`)
+### L2 single-chip (`compiled(...)` / `execute_compiled`)
 
 ```python
-from pypto.runtime import run, RunConfig
+from pypto import ir
+from pypto.runtime import RunConfig
 
-compiled = run(
-    MyProgram,
-    a, b, c,
-    config=RunConfig(
-        platform="a2a3",
-        ring_task_window=128,        # 128 in-flight task slots
-        ring_heap=8 * 1024 * 1024,   # 8 MiB output heap per ring
-        ring_dep_pool=256,           # 256 dependency-edge entries
-    ),
+config = RunConfig(
+    platform="a2a3",
+    ring_task_window=128,        # 128 in-flight task slots
+    ring_heap=8 * 1024 * 1024,   # 8 MiB output heap per ring
+    ring_dep_pool=256,           # 256 dependency-edge entries
 )
+compiled = ir.compile(MyProgram, **config.compile_kwargs())
+compiled(a, b, c, config=config)
 ```
 
 The directory-driven entry point accepts the same per-dispatch config. Its

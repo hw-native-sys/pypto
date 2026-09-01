@@ -8,8 +8,9 @@ To re-run a previously compiled `build_output/<jit_dir>/` after editing
 one or more kernel cpp files — typically to verify a hand-tuned change
 under PMU / swimlane / args-dump — use the debug-only
 [`pypto.runtime.debug.replay`](../../../python/pypto/runtime/debug/replay.py)
-module. It reuses the same `execute_compiled` path as the normal
-`pypto.runtime.run` flow, so DFX flags behave identically.
+module. An L2 build reuses the same `execute_compiled` path as a normal
+`compiled(...)` dispatch; an L3 build is dispatched through
+`execute_distributed_compiled`. Either way DFX flags behave identically.
 
 ```python
 from pypto.runtime.debug import replay

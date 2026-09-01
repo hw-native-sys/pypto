@@ -10,18 +10,28 @@
 """
 PyPTO runtime module.
 
-Provides utilities for compiling a ``@pl.program`` and running it on an
-Ascend NPU (or simulator).
+Provides the execution half of the pipeline: dispatching a program compiled by
+:func:`pypto.ir.compile` onto an Ascend NPU (or simulator), and the device
+memory that outlives a single dispatch.
 
-Example::
+Compilation itself belongs to :func:`pypto.ir.compile`; this module never
+compiles on your behalf. :meth:`RunConfig.compile_kwargs` bridges the two, so
+one config object can drive both phases::
 
     import torch
-    from pypto.runtime import run, RunConfig
+    from pypto import ir
+    from pypto.runtime import RunConfig
+
+    config = RunConfig(platform="a2a3sim")
+    compiled = ir.compile(MyProgram, **config.compile_kwargs())
 
     a = torch.full((128, 128), 2.0)
     b = torch.full((128, 128), 3.0)
     c = torch.zeros(128, 128)
-    compiled = run(MyProgram, a, b, c, config=RunConfig(platform="a2a3sim"))
+    compiled(a, b, c, config=config)
+
+``docs/en/dev/08-entry-points.md`` maps every compile and execution entry point
+to the layer it belongs to.
 """
 
 from .bench import BenchmarkStats, TraceInvocation, TraceSpan, benchmark
@@ -36,7 +46,7 @@ from .log_config import _ensure_configured as _ensure_log_configured
 from .log_config import configure_log
 from .log_config import current_level as log_level
 from .pto_isa import ensure_pto_isa_root, pto_isa_include_dir
-from .runner import RunConfig, RunResult, compile_program, execute_compiled, run
+from .runner import RunConfig, RunResult, execute_compiled
 from .runtime_base import Worker
 from .tensor_spec import ScalarSpec, TensorSpec
 from .worker import ChipWorker, RegistrationHandle
@@ -45,9 +55,7 @@ from .worker import ChipWorker, RegistrationHandle
 _ensure_log_configured()
 
 __all__ = [
-    "run",
     "benchmark",
-    "compile_program",
     "execute_compiled",
     "execute_distributed_compiled",
     "configure_log",

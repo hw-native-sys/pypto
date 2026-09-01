@@ -3,12 +3,12 @@
 PyPTO 通过 [`RunConfig`](../../../python/pypto/runtime/runner.py) 上的三个可选
 覆盖项暴露 Simpler 的单任务 ring 尺寸配置。它们让你在单次派发中为运行时的
 单任务 ring 资源设置尺寸，而无需改动已编译产物或任何全局状态。该能力同时适用于
-L2 单 chip 路径（`run()` / `execute_compiled()` / `ChipWorker.run()`）和 L3 分布式路径
+L2 单 chip 路径（`compiled(...)` / `execute_compiled()` / `ChipWorker.run()`）和 L3 分布式路径
 （`DistributedWorker.run()` / 一次性的 `compiled(...)`）。
 
 运行时把任务启动相关资源保存在 *ring buffer*（环形缓冲）中。每个覆盖项与
 Simpler 的 `CallConfig.runtime_env` 上的同名字段一一对应，并且按 **每次任务提交**
-生效 —— 即每次 `run()` / `rt.run()` 调用，因此同一 kernel 的不同提交可以使用不同
+生效 —— 即每次 `compiled(...)` / `rt.run()` 调用，因此同一 kernel 的不同提交可以使用不同
 的 ring 尺寸。在 L3 路径上，覆盖项按每次派发生效，叠加在程序的 `DistributedConfig`
 基线（`aicpu_thread_num`）之上，并作用于该次派发的所有 chip。
 
@@ -58,21 +58,20 @@ RunConfig(platform="a2a3", ring_heap=1000)
 
 ## 用法
 
-### L2 单 chip（`run` / `execute_compiled`）
+### L2 单 chip（`compiled(...)` / `execute_compiled`）
 
 ```python
-from pypto.runtime import run, RunConfig
+from pypto import ir
+from pypto.runtime import RunConfig
 
-compiled = run(
-    MyProgram,
-    a, b, c,
-    config=RunConfig(
-        platform="a2a3",
-        ring_task_window=128,        # 128 个在途 task slot
-        ring_heap=8 * 1024 * 1024,   # 每个 ring 8 MiB 输出堆
-        ring_dep_pool=256,           # 256 个依赖边条目
-    ),
+config = RunConfig(
+    platform="a2a3",
+    ring_task_window=128,        # 128 个在途 task slot
+    ring_heap=8 * 1024 * 1024,   # 每个 ring 8 MiB 输出堆
+    ring_dep_pool=256,           # 256 个依赖边条目
 )
+compiled = ir.compile(MyProgram, **config.compile_kwargs())
+compiled(a, b, c, config=config)
 ```
 
 目录驱动的入口同样接受单次派发配置。它原有的显式 `platform`、`device_id`、DFX 和

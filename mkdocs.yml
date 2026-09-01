@@ -301,6 +301,7 @@ nav:
       - en/dev/06-persistent-l3.md
       - en/dev/07-memory-map.md
       - en/dev/07-ir-lower-trace.md
+      - en/dev/08-entry-points.md
       - en/dev/distributed_ops.md
       - en/dev/ptoas-op-status.md
       - IR:

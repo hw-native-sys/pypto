@@ -51,9 +51,10 @@ import argparse
 
 import pypto.language as pl
 import torch
+from pypto import ir
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
-from pypto.runtime import RunConfig, run
+from pypto.runtime import RunConfig
 
 # ── Constants ────────────────────────────────────────────────────────────────
 Q_TILE = 16
@@ -801,23 +802,24 @@ def main():
         max_num_blocks_per_req=max_num_blocks_per_req,
         context_len=context_len,
     )
-    run(
-        program,
+    run_config = RunConfig(
+        platform="a2a3sim",
+        device_id=11,
+        strategy=OptimizationStrategy.Default,
+        dump_passes=True,
+        backend_type=BackendType.Ascend910B,
+        compile_profiling=True,
+        enable_chip_swimlane=args.enable_chip_swimlane,
+    )
+    compiled = ir.compile(program, **run_config.compile_kwargs())
+    compiled(
         query,
         key_cache,
         value_cache,
         block_table,
         context_lens,
         out,
-        config=RunConfig(
-            platform="a2a3sim",
-            device_id=11,
-            strategy=OptimizationStrategy.Default,
-            dump_passes=True,
-            backend_type=BackendType.Ascend910B,
-            compile_profiling=True,
-            enable_chip_swimlane=args.enable_chip_swimlane,
-        ),
+        config=run_config,
     )
 
     # Golden validation

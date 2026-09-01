@@ -113,7 +113,7 @@ finally:
 | `ring_task_window` / `ring_heap` / `ring_dep_pool` | 运行时环的尺寸（[内存](../performance/05-memory.md)） |
 | `aicpu_thread_num` | AICPU 线程数覆盖 |
 
-**`RunConfig` 里有些字段属于 harness，不属于派发。** `rtol` / `atol`、`golden_data_dir`、`save_kernels` / `save_kernels_dir` 与 `codegen_only` 是由 `pypto.runtime.run()` 读取的 —— 那条路径会编译、生成 golden 并比对。走 `compiled(...)`、`worker.run(...)` 或注册句柄时，它们不起作用；**尤其是 `codegen_only=True` 在这条路径上并不会阻止派发**，别指望用它来避免一次 launch。
+**`RunConfig` 里有些字段属于 harness，不属于派发。** `rtol` / `atol`、`golden_data_dir`、`save_kernels` 与 `codegen_only` 是由系统测试 harness 读取的 —— 那条路径会编译、生成 golden 并比对。走 `compiled(...)`、`worker.run(...)` 或注册句柄时，它们不起作用；**尤其是 `codegen_only=True` 在这条路径上并不会阻止派发**，别指望用它来避免一次 launch。（`save_kernels_dir` 是例外：`RunConfig.compile_kwargs()` 会把它作为 `ir.compile` 的 `output_dir` 转发。）
 
 ## 边界情况
 
@@ -122,7 +122,7 @@ finally:
 | **worker 在首次派发前就拒绝该程序** | 产物的 `platform` 与 worker 不一致 | 用你要派发的平台去编译 |
 | **`missing inferred tensor metadata for parameter`** | 把 `DeviceTensor` 传给了 `@pl.jit` 入口 | 派发**已编译**的程序；特化器读不到它的 shape/dtype |
 | **设备内存随 launch 增长** | `DeviceTensor` 没释放 | `free_tensor`，或用 `with` 圈住 worker |
-| **`run()` 不给 host/device 拆分** | `execution_time` 是整段墙上时间 | 用 `pypto.runtime.benchmark` 取 `device_wall_us` / `host_wall_us` |
+| **派发不给 host/device 拆分** | `execution_time` 是整段墙上时间 | 用 `pypto.runtime.benchmark` 取 `device_wall_us` / `host_wall_us` |
 
 ## 参见
 

@@ -90,7 +90,7 @@ def execute_artifact_dir(
     caller can validate them separately with the test's real tolerance.
 
     Args:
-        work_dir: A build directory produced by ``compile_program`` +
+        work_dir: A build directory produced by ``ir.compile`` +
             ``compile_and_assemble`` (contains ``kernel_config.py``,
             ``kernels/``, ``orchestration/``, ``golden.py``, ``data/``).
         platform: Target execution platform (e.g. ``"a2a3"``).

@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pypto import ir
 from pypto.backend import (
     BackendType,
     get_backend_type,
@@ -46,7 +47,6 @@ from pypto.backend import (
 )
 from pypto.pypto_core import LogLevel, _set_thread_log_level
 from pypto.pypto_core.passes import MemoryPlanner
-from pypto.runtime import compile_program
 from pypto.runtime.golden_writer import (
     _data_dir_has_files,
     _extract_compute_golden,
@@ -137,7 +137,7 @@ _MAX_TASK_SUBMIT_INFLIGHT = 512
 
 # set_backend_type is called once per backend-type group before the thread pool
 # starts.  Only get_program() needs serialisation because the @pl.program
-# decorator is not thread-safe; compile_program() writes to isolated dirs and
+# decorator is not thread-safe; ir.compile() writes to isolated dirs and
 # runs concurrently.
 _get_program_lock = threading.Lock()
 
@@ -396,7 +396,7 @@ def _compile_for_cache(
 
     The backend type MUST already be set by the caller before entering the pool.
     Only ``get_program`` is serialised (via ``_get_program_lock``) because the
-    ``@pl.program`` decorator is not thread-safe; ``compile_program`` writes to
+    ``@pl.program`` decorator is not thread-safe; ``ir.compile`` writes to
     an isolated directory and runs concurrently.
     """
     backend_type = platform_to_backend(resolved_platform)
@@ -407,9 +407,9 @@ def _compile_for_cache(
             f"Test case {test_case.get_name()} must implement get_program() "
             "to return a @pl.program class or ir.Program"
         )
-    compile_program(
+    ir.compile(
         program,
-        work_dir,
+        output_dir=str(work_dir),
         strategy=test_case.get_strategy(),
         backend_type=backend_type,
         dump_passes=dump_passes,
@@ -1440,9 +1440,9 @@ class TestRunner:
                 )
 
             strategy = test_case.get_strategy()
-            compile_program(
+            ir.compile(
                 program,
-                work_dir,
+                output_dir=str(work_dir),
                 strategy=strategy,
                 backend_type=backend_type,
                 dump_passes=self.config.dump_passes,

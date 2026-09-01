@@ -1307,7 +1307,7 @@ def benchmark(
         compiled: A single-orchestration
             :class:`~pypto.ir.CompiledProgram` (L2) or a
             :class:`~pypto.ir.distributed_compiled_program.DistributedCompiledProgram`
-            (L3) from ``ir.compile`` / ``compile_program``. Multi-orch L2
+            (L3) from ``ir.compile``. Multi-orch L2
             programs must pass ``compiled[<name>]``.
         args: Positional dispatch args, same as ``compiled(*args)``. **L3
             requires shared-memory host** ``torch.Tensor`` **args** (allocated

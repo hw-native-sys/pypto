@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pypto.backend import BackendType
 from pypto.pypto_core.passes import MemoryPlanner
-from pypto.runtime.runner import RunConfig, _DfxOpts, compile_program, execute_compiled, run
+from pypto.runtime.runner import RunConfig, _DfxOpts, execute_compiled
 
 
 class TestRunConfigPlatformResolution:
@@ -629,62 +629,61 @@ class TestMakeCallConfigDfx:
 class TestRunConfigCompileForwarding:
     """Compile-side RunConfig fields are forwarded into ``ir.compile``."""
 
-    def test_run_forwards_auto_scope_deps_switch(self, monkeypatch):
-        captured: dict = {}
+    def test_compile_kwargs_forwards_auto_scope_deps_switch(self):
+        kwargs = RunConfig(platform="a2a3sim", analyze_auto_scopes_for_deps=True).compile_kwargs()
 
-        class FakeCompiled:
-            def __call__(self, *_args, **_kwargs):
-                return None
+        assert kwargs["analyze_auto_scopes_for_deps"] is True
 
-        def fake_compile(_program, **kwargs):
-            captured.update(kwargs)
-            return FakeCompiled()
+    def test_compile_kwargs_forwards_memory_planner(self):
+        kwargs = RunConfig(platform="a2a3sim", memory_planner=MemoryPlanner.DSA_RP).compile_kwargs()
 
-        import pypto.ir as ir_mod  # noqa: PLC0415
+        assert kwargs["memory_planner"] == MemoryPlanner.DSA_RP
 
-        monkeypatch.setattr(ir_mod, "compile", fake_compile)
+    def test_compile_kwargs_forwards_ptoas_pass_dump(self):
+        kwargs = RunConfig(platform="a2a3sim", dump_ptoas_passes=True).compile_kwargs()
 
-        run(object(), config=RunConfig(platform="a2a3sim", analyze_auto_scopes_for_deps=True))
+        assert kwargs["dump_ptoas_passes"] is True
 
-        assert captured["analyze_auto_scopes_for_deps"] is True
+    def test_compile_kwargs_omits_unset_optional_fields(self):
+        """Unset optionals must be absent, not ``None``.
 
-    def test_run_forwards_memory_planner(self, monkeypatch):
-        captured: dict = {}
+        ``ir.compile`` rejects an explicit ``memory_planner`` while a
+        ``PassContext`` is active, so an unset planner has to defer to that
+        context rather than arrive as an explicit ``None``.
+        """
+        kwargs = RunConfig(platform="a2a3sim").compile_kwargs()
 
-        class FakeCompiled:
-            def __call__(self, *_args, **_kwargs):
-                return None
+        assert "memory_planner" not in kwargs
+        assert "output_dir" not in kwargs
+        assert "distributed_config" not in kwargs
 
-        def fake_compile(_program, **kwargs):
-            captured.update(kwargs)
-            return FakeCompiled()
+    def test_compile_kwargs_excludes_dispatch_only_fields(self):
+        """Dispatch-side fields are consumed by ``__call__``, not by compilation."""
+        kwargs = RunConfig(
+            platform="a2a3sim",
+            device_id=3,
+            rtol=1e-3,
+            enable_pmu=2,
+            ring_heap=1024 * 1024,
+        ).compile_kwargs()
 
-        import pypto.ir as ir_mod  # noqa: PLC0415
+        for dispatch_only in ("device_id", "rtol", "atol", "enable_pmu", "ring_heap"):
+            assert dispatch_only not in kwargs
 
-        monkeypatch.setattr(ir_mod, "compile", fake_compile)
+    def test_compile_kwargs_are_accepted_by_ir_compile(self):
+        """Every key must name a real ``ir.compile`` parameter."""
+        import inspect  # noqa: PLC0415
 
-        run(object(), config=RunConfig(platform="a2a3sim", memory_planner=MemoryPlanner.DSA_RP))
+        from pypto import ir  # noqa: PLC0415
 
-        assert captured["memory_planner"] == MemoryPlanner.DSA_RP
+        accepted = set(inspect.signature(ir.compile).parameters)
+        kwargs = RunConfig(
+            platform="a2a3sim",
+            save_kernels_dir="/tmp/pypto-compile-kwargs",
+            memory_planner=MemoryPlanner.DSA_RP,
+        ).compile_kwargs()
 
-    def test_run_forwards_ptoas_pass_dump(self, monkeypatch):
-        captured: dict = {}
-
-        class FakeCompiled:
-            def __call__(self, *_args, **_kwargs):
-                return None
-
-        def fake_compile(_program, **kwargs):
-            captured.update(kwargs)
-            return FakeCompiled()
-
-        import pypto.ir as ir_mod  # noqa: PLC0415
-
-        monkeypatch.setattr(ir_mod, "compile", fake_compile)
-
-        run(object(), config=RunConfig(platform="a2a3sim", dump_ptoas_passes=True))
-
-        assert captured["dump_ptoas_passes"] is True
+        assert set(kwargs) <= accepted
 
     def test_execute_compiled_accepts_auto_scope_deps_switch(self, tmp_path, monkeypatch):
         captured: dict = {}
@@ -795,30 +794,12 @@ class TestRunConfigCompileForwarding:
 
         assert captured["enable_sdma"] is expected_enable_sdma
 
-    def test_compile_program_forwards_auto_scope_deps_switch(self, tmp_path, monkeypatch):
-        captured: dict = {}
+    def test_compile_kwargs_carry_the_codegen_target(self):
+        """``platform`` and the ``backend_type`` it implies both reach compilation."""
+        kwargs = RunConfig(platform="a5sim").compile_kwargs()
 
-        def fake_compile(_program, **kwargs):
-            captured.update(kwargs)
-            return object()
-
-        import pypto.ir as ir_mod  # noqa: PLC0415
-        import pypto.runtime.runner as runner_mod  # noqa: PLC0415
-
-        monkeypatch.setattr(ir_mod, "compile", fake_compile)
-        monkeypatch.setattr(runner_mod, "_patch_orchestration_headers", lambda _work_dir: None)
-
-        compile_program(
-            object(),
-            tmp_path,
-            strategy=RunConfig().strategy,
-            backend_type=BackendType.Ascend910B,
-            analyze_auto_scopes_for_deps=True,
-            dump_ptoas_passes=True,
-        )
-
-        assert captured["analyze_auto_scopes_for_deps"] is True
-        assert captured["dump_ptoas_passes"] is True
+        assert kwargs["platform"] == "a5sim"
+        assert kwargs["backend_type"] == BackendType.Ascend950
 
 
 # ``execute_on_device`` lives in ``device_runner`` which eagerly imports the

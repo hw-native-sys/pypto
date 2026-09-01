@@ -36,15 +36,12 @@ prof.to_json("profile.json")
 ### 方式 4：`RunConfig`
 
 ```python
-from pypto.runtime import run, RunConfig
+from pypto import ir
+from pypto.runtime import RunConfig
 
-result = run(
-    program=MyProgram,
-    tensor_specs=specs,
-    golden=golden_fn,
-    config=RunConfig(compile_profiling=True),
-)
-# result.profile 包含 profiling 数据（dict 格式）
+config = RunConfig(compile_profiling=True)
+compiled = ir.compile(MyProgram, **config.compile_kwargs())
+# 报告落在 `<compiled.output_dir>/report/` 下。
 ```
 
 ## 输出格式
@@ -89,7 +86,7 @@ Total: 2.847s
 
 ## 阶段层次结构
 
-使用 `runtime.run()` 时，profiler 记录以下阶段：
+下表是 profiler 能记录的全部阶段。单次运行只会报告其入口实际经过的那些：
 
 | 阶段 | 说明 |
 | ---- | ---- |

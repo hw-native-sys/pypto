@@ -7,8 +7,8 @@
 需要在改完 kernel cpp 之后重新跑一遍编译产物（典型场景：手调 kernel
 后用 PMU / swimlane / args-dump 验证修改是否正确），使用 debug 专用
 的 [`pypto.runtime.debug.replay`](../../../python/pypto/runtime/debug/replay.py)
-模块。它复用与 `pypto.runtime.run` 相同的 `execute_compiled` 路径,
-因此 DFX 开关的行为完全一致。
+模块。L2 构建复用与普通 `compiled(...)` 派发相同的 `execute_compiled` 路径,
+L3 构建则经由 `execute_distributed_compiled` 派发。两者的 DFX 开关行为完全一致。
 
 ```python
 from pypto.runtime.debug import replay

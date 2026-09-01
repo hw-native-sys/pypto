@@ -12,8 +12,9 @@
 Debug-only entry point for the "I edited a kernel cpp by hand, now re-run
 with DFX (PMU / swimlane / args_dump / dep_gen / scope_stats) enabled" workflow.
 
-Reuses :func:`pypto.runtime.runner.execute_compiled`, so the device-side
-execution path is identical to the normal :func:`pypto.runtime.run` flow.
+An L2 build reuses :func:`pypto.runtime.runner.execute_compiled`, so its
+device-side execution path is identical to a normal ``compiled(...)``
+dispatch; an L3 build goes through ``execute_distributed_compiled``.
 The added value is:
 
 1. A friendlier signature for the replay use case

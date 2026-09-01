@@ -37,8 +37,8 @@ from typing import Any
 import pytest
 import torch
 from harness.core.harness import platform_to_backend
+from pypto import ir
 from pypto.backend.pto_backend import _preprocess_ptoas_output, _run_ptoas
-from pypto.runtime import compile_program
 from pypto.runtime.device_runner import (
     build_orch_args_from_inputs,
     compile_and_assemble,
@@ -211,9 +211,9 @@ class TestCrossCoreGroupedTpopTfree:
             cleanup_dir = work_dir
 
         try:
-            compile_program(
+            ir.compile(
                 V2CUDProgram,
-                work_dir,
+                output_dir=str(work_dir),
                 strategy=test_config.strategy,
                 backend_type=backend_type,
                 dump_passes=test_config.dump_passes,

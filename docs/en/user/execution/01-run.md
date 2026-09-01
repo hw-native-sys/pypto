@@ -131,11 +131,12 @@ launch. `close()` releases the registrations and any `DeviceTensor` the caller f
 | `aicpu_thread_num` | AICPU thread count override |
 
 **Some `RunConfig` fields belong to the harness, not to dispatch.** `rtol` / `atol`,
-`golden_data_dir`, `save_kernels` / `save_kernels_dir` and `codegen_only` are read by
-`pypto.runtime.run()`, which compiles, generates a golden and compares. Going through
-`compiled(...)`, `worker.run(...)` or a registration handle, they do nothing — in
-particular **`codegen_only=True` does not stop a dispatch on this path**, so do not rely on
-it to avoid a launch.
+`golden_data_dir`, `save_kernels` and `codegen_only` are read by the system-test harness,
+which compiles, generates a golden and compares. Going through `compiled(...)`,
+`worker.run(...)` or a registration handle, they do nothing — in particular
+**`codegen_only=True` does not stop a dispatch on this path**, so do not rely on it to
+avoid a launch. (`save_kernels_dir` is the exception: `RunConfig.compile_kwargs()`
+forwards it as `ir.compile`'s `output_dir`.)
 
 ## Edge Cases
 

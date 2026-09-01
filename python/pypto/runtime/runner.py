@@ -10,18 +10,24 @@
 """
 PyPTO runtime runner.
 
-Provides :func:`run`, the main entry point for compiling a ``@pl.program``
-and executing it on an Ascend NPU (or simulator).
+Provides :class:`RunConfig` — the settings that drive a run — and
+:func:`execute_compiled`, which dispatches an already-compiled artifact
+directory onto an Ascend NPU (or simulator).
 
-Typical usage::
+Compilation is :func:`pypto.ir.compile`'s job; nothing here compiles for you.
+:meth:`RunConfig.compile_kwargs` carries the compile-side settings across::
 
     import torch
-    from pypto.runtime import run, RunConfig
+    from pypto import ir
+    from pypto.runtime import RunConfig
+
+    config = RunConfig(platform="a2a3sim")
+    compiled = ir.compile(MyProgram, **config.compile_kwargs())
 
     a = torch.full((128, 128), 2.0)
     b = torch.full((128, 128), 3.0)
     c = torch.zeros(128, 128)
-    compiled = run(MyProgram, a, b, c, config=RunConfig(platform="a2a3sim"))
+    compiled(a, b, c, config=config)
 """
 
 import functools
@@ -153,7 +159,11 @@ def _normalize_swimlane_level(value: int | bool, source: str) -> int:
 
 @dataclass
 class RunConfig:
-    """Configuration for a :func:`run` invocation or harness test execution.
+    """Configuration for compiling and dispatching a program.
+
+    Carries both halves: :meth:`compile_kwargs` extracts the compile-side
+    fields for :func:`pypto.ir.compile`, and the rest is read at dispatch by
+    :meth:`~pypto.ir.CompiledProgram.__call__` / :meth:`Worker.run`.
 
     When passed to :meth:`pypto.jit.decorator.JITFunction.lower`, only
     ``platform``, ``strategy``, diagnostics, dependency analysis, and
@@ -302,11 +312,10 @@ class RunConfig:
             so a HOST-level ``@pl.jit.host`` kernel compiles to a
             :class:`~pypto.ir.distributed_compiled_program.DistributedCompiledProgram`
             and dispatches per-rank. ``None`` (default) compiles a regular
-            single-chip :class:`~pypto.ir.compiled_program.CompiledProgram`. The
-            ``@pl.program`` :func:`run` entry point does not read this field; it
-            forwards no compile-side overrides, so distributed ``@pl.program``
-            execution is driven by ``ir.compile(..., distributed_config=...)``
-            directly rather than through ``RunConfig``.
+            single-chip :class:`~pypto.ir.compiled_program.CompiledProgram`.
+            :meth:`compile_kwargs` forwards it too, so a ``@pl.program``
+            compiled via ``ir.compile(prog, **config.compile_kwargs())`` picks
+            up the same distributed target.
         analyze_auto_scopes_for_deps: If ``True``, enable compiler-derived task
             dependency analysis for AUTO runtime scopes during compilation.
             Defaults to ``False`` so existing runs keep using TensorMap fallback
@@ -468,6 +477,50 @@ class RunConfig:
             or self.enable_scope_stats
         )
 
+    def compile_kwargs(self) -> dict[str, Any]:
+        """Return the compile-side fields as ``ir.compile()`` keyword arguments.
+
+        A :class:`RunConfig` carries both compile-time and dispatch-time
+        settings. This method extracts the compile-time half so a caller can
+        drive the two phases separately without restating the mapping::
+
+            compiled = ir.compile(program, **config.compile_kwargs())
+            compiled(*tensors, config=config)
+
+        Dispatch-only fields (``device_id``, the DFX toggles, the ring-sizing
+        overrides) are not compile inputs and are consumed by
+        :meth:`~pypto.ir.CompiledProgram.__call__` instead. ``rtol`` / ``atol``
+        and ``golden_data_dir`` reach neither phase: only the system-test
+        harness reads them, to compare a dispatch against its golden.
+
+        ``output_dir``, ``distributed_config`` and ``memory_planner`` are
+        forwarded only when set, so an unset value defers to ``ir.compile()``'s
+        own default. That matters for ``memory_planner`` in particular:
+        ``ir.compile()`` rejects an explicit planner while a ``PassContext`` is
+        active, and an unset value must defer to that context.
+
+        Returns:
+            Keyword arguments accepted by :func:`pypto.ir.compile`.
+        """
+        kwargs: dict[str, Any] = {
+            "strategy": self.strategy,
+            "backend_type": self.backend_type,
+            "platform": self.platform,
+            "dump_passes": self.dump_passes,
+            "dump_ptoas_passes": self.dump_ptoas_passes,
+            "profiling": self.compile_profiling,
+            "diagnostic_phase": self.diagnostic_phase,
+            "disabled_diagnostics": self.disabled_diagnostics,
+            "analyze_auto_scopes_for_deps": self.analyze_auto_scopes_for_deps,
+        }
+        if self.save_kernels_dir is not None:
+            kwargs["output_dir"] = self.save_kernels_dir
+        if self.distributed_config is not None:
+            kwargs["distributed_config"] = self.distributed_config
+        if self.memory_planner is not None:
+            kwargs["memory_planner"] = self.memory_planner
+        return kwargs
+
     @property
     def enable_l2_swimlane(self) -> int:
         """Deprecated alias for :attr:`enable_chip_swimlane`.
@@ -532,7 +585,7 @@ class RunResult:
         passed: ``True`` if the program executed and results matched the golden
             reference within the configured tolerances.
         test_name: Optional test case name.  Set by the harness when running
-            a named test case; ``None`` for direct :func:`run` calls.
+            a named test case; ``None`` outside the harness.
         error: Human-readable error message when ``passed`` is ``False``.
         execution_time: Python wall-clock time in seconds for the full run
             (compile + execute + validate). This mixes host-side compile/golden
@@ -563,121 +616,6 @@ class RunResult:
             if self.error:
                 msg += f": {self.error}"
         return msg + time_str
-
-
-def compile_program(  # noqa: PLR0913
-    program: Any,
-    work_dir: Path,
-    *,
-    strategy: OptimizationStrategy,
-    backend_type: BackendType,
-    dump_passes: bool | PassDumpLevel = False,
-    dump_ptoas_passes: bool = False,
-    diagnostic_phase: DiagnosticPhase | None = None,
-    disabled_diagnostics: DiagnosticCheckSet | None = None,
-    profiling: bool = False,
-    analyze_auto_scopes_for_deps: bool = False,
-    memory_planner: MemoryPlanner | None = None,
-    enable_pypto_l0c_double_buffer: bool | None = None,
-) -> None:
-    """Compile *program* to *work_dir* and patch orchestration headers.
-
-    Runs :func:`ir.compile` then inserts ``runtime.h`` / ``<iostream>`` includes
-    into the generated orchestration C++ files (required by Simpler's CodeRunner).
-
-    Args:
-        program: A ``@pl.program`` decorated class or an ``ir.Program`` object.
-        work_dir: Output directory for generated artefacts.
-        strategy: PyPTO optimisation strategy applied during compilation.
-        backend_type: Code-generation backend.
-        dump_passes: Per-pass IR dump control — a :class:`~pypto.ir.PassDumpLevel`
-            or a ``bool`` (``True`` -> ``CONCISE``, ``False`` -> ``NONE``).
-        dump_ptoas_passes: If ``True``, dump intermediate IR after every ptoas
-            pass under ``<work_dir>/ptoas_passes/<codegen-unit>/``.
-        diagnostic_phase: Override the diagnostic phase gate for compilation.
-        disabled_diagnostics: Set of diagnostic checks to disable.
-        profiling: If ``True``, enable compile profiling.
-        analyze_auto_scopes_for_deps: If ``True``, enable compiler-derived task
-            dependency analysis for AUTO runtime scopes.
-        memory_planner: On-chip memory planner forwarded to :func:`ir.compile`.
-        enable_pypto_l0c_double_buffer: Opt the legacy ``PYPTO`` planner in to
-            chooser-emitted dbC=2. Ignored under ``DSA_RP`` and ``PTOAS``, where
-            chooser dbC is automatic.
-    """
-    from pypto import ir  # noqa: PLC0415
-
-    ir.compile(
-        program,
-        output_dir=str(work_dir),
-        strategy=strategy,
-        dump_passes=dump_passes,
-        dump_ptoas_passes=dump_ptoas_passes,
-        backend_type=backend_type,
-        diagnostic_phase=diagnostic_phase,
-        disabled_diagnostics=disabled_diagnostics,
-        profiling=profiling,
-        analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
-        memory_planner=memory_planner,
-        enable_pypto_l0c_double_buffer=enable_pypto_l0c_double_buffer,
-    )
-    _patch_orchestration_headers(work_dir)
-
-
-def run(
-    program: Any,
-    *tensors: torch.Tensor,
-    config: RunConfig | None = None,
-) -> Any:
-    """Compile *program* and execute it with *tensors* on device.
-
-    This is the user-facing entry point for the compile-and-run workflow.
-    No golden function, no TensorSpec — just define, compile, call.
-
-    Args:
-        program: A ``@pl.program`` decorated class or an ``ir.Program``.
-        *tensors: Positional ``torch.Tensor`` arguments matching the
-            orchestration function's parameter order.  Pass no tensors
-            for compile-only.
-        config: Run configuration (platform, device, profiling, etc.).
-            Uses default :class:`RunConfig` if ``None``.
-
-    Returns:
-        A :class:`~pypto.ir.compiled_program.CompiledProgram` that can
-        be called again with new tensors.
-
-    Example:
-        >>> from pypto.runtime import run, RunConfig
-        >>> a = torch.full((128, 128), 2.0)
-        >>> b = torch.full((128, 128), 3.0)
-        >>> c = torch.zeros(128, 128)
-        >>> compiled = run(MyProgram, a, b, c, config=RunConfig(platform="a2a3sim"))
-        >>> # Re-run with different inputs:
-        >>> compiled(a2, b2, c2)
-    """
-    if config is None:
-        config = RunConfig()
-
-    from pypto import ir  # noqa: PLC0415
-
-    compiled = ir.compile(
-        program,
-        output_dir=config.save_kernels_dir,
-        strategy=config.strategy,
-        backend_type=config.backend_type,
-        dump_passes=config.dump_passes,
-        dump_ptoas_passes=config.dump_ptoas_passes,
-        diagnostic_phase=config.diagnostic_phase,
-        disabled_diagnostics=config.disabled_diagnostics,
-        platform=config.platform,
-        profiling=config.compile_profiling,
-        analyze_auto_scopes_for_deps=config.analyze_auto_scopes_for_deps,
-        memory_planner=config.memory_planner,
-    )
-
-    if tensors and not config.codegen_only:
-        compiled(*tensors, config=config)
-
-    return compiled
 
 
 # ---------------------------------------------------------------------------
@@ -1037,7 +975,7 @@ def _execute_on_device(
 ) -> None:
     """Load inputs, execute on device, and validate against golden.
 
-    Shared execution logic used by both :func:`run` and the test harness
+    Shared execution logic used by both :func:`execute_compiled` and the test harness
     (``test_runner.py``).  The caller is responsible for compiling binaries
     via ``compile_and_assemble`` and passing the result here.
 
@@ -1379,60 +1317,6 @@ def _generate_swimlane(
         )
 
 
-def _patch_orchestration_headers(work_dir: Path) -> None:
-    """Add ``runtime.h`` and ``<iostream>`` includes to orchestration C++ files.
-
-    Simpler's CodeRunner requires these headers in the orchestration translation
-    unit.  They are added here rather than in the code generator so that the
-    compiler back-end remains unaware of runtime-specific requirements.
-
-    Args:
-        work_dir: Root output directory produced by :func:`ir.compile`.
-    """
-    orch_dir = work_dir / "orchestration"
-    if not orch_dir.exists():
-        return
-    for cpp_file in orch_dir.glob("*.cpp"):
-        _add_headers_to_file(cpp_file)
-
-
-def _add_headers_to_file(cpp_file: Path) -> None:
-    """Insert missing ``runtime.h`` / ``<iostream>`` headers into *cpp_file*.
-
-    Args:
-        cpp_file: Path to a C++ source file that may be missing the headers.
-    """
-    content = cpp_file.read_text(encoding="utf-8")
-
-    has_runtime_h = '#include "runtime.h"' in content
-    has_iostream = "#include <iostream>" in content
-
-    if has_runtime_h and has_iostream:
-        return  # Nothing to do
-
-    headers: list[str] = []
-    if not has_runtime_h:
-        headers.append('#include "runtime.h"')
-    if not has_iostream:
-        headers.append("#include <iostream>")
-
-    # Find the first non-comment, non-blank line as the insertion point.
-    lines = content.splitlines(keepends=True)
-    insert_pos = 0
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped and not stripped.startswith(("//", "/*", "*")):
-            insert_pos = i
-            break
-
-    header_block = "\n".join(headers) + "\n"
-    if insert_pos > 0:
-        header_block += "\n"
-
-    lines.insert(insert_pos, header_block)
-    cpp_file.write_text("".join(lines), encoding="utf-8")
-
-
 # ---------------------------------------------------------------------------
 # Compiled program execution (callable API)
 # ---------------------------------------------------------------------------
@@ -1497,8 +1381,12 @@ def execute_compiled(  # noqa: PLR0913
 
     work_dir = Path(work_dir)
 
-    # Ensure orchestration headers are patched (idempotent)
-    _patch_orchestration_headers(work_dir)
+    # ``ir.compile`` stamps these when it writes the artifact. Re-apply here
+    # (idempotent) so a directory produced before that change, or one whose
+    # orchestration cpp was hand-edited for a replay, still builds.
+    from pypto.ir.compile import _ensure_orchestration_headers  # noqa: PLC0415
+
+    _ensure_orchestration_headers(str(work_dir))
 
     from .device_runner import (  # noqa: PLC0415
         compile_and_assemble,

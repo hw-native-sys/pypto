@@ -37,15 +37,12 @@ prof.to_json("profile.json")
 ### Option 4: `RunConfig`
 
 ```python
-from pypto.runtime import run, RunConfig
+from pypto import ir
+from pypto.runtime import RunConfig
 
-result = run(
-    program=MyProgram,
-    tensor_specs=specs,
-    golden=golden_fn,
-    config=RunConfig(compile_profiling=True),
-)
-# result.profile contains the profiling data as a dict
+config = RunConfig(compile_profiling=True)
+compiled = ir.compile(MyProgram, **config.compile_kwargs())
+# The report lands in `<compiled.output_dir>/report/`.
 ```
 
 ## Output
@@ -90,7 +87,8 @@ Total: 2.847s
 
 ## Stage Hierarchy
 
-The profiler records the following stages when using `runtime.run()`:
+These are all the stages the profiler can record. A single run reports only
+those its entry point reaches:
 
 | Stage | Description |
 | ----- | ----------- |

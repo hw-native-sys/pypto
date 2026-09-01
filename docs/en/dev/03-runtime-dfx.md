@@ -148,18 +148,18 @@ a *device-resident* tensor routes the graph, in which case it is approximate.
 ### From Python (`RunConfig`)
 
 ```python
-from pypto.runtime import run, RunConfig
+from pypto import ir
+from pypto.runtime import RunConfig
 
-run(
-    MyProgram, a, b, c,
-    config=RunConfig(
-        platform="a2a3sim",
-        enable_chip_swimlane=4,        # full swimlane -> chip_swimlane_records.json
-                                     # (True is the same level 4; use 1-3 for less)
-        enable_dep_gen=True,         # produces deps.json (render with deps_viewer on demand)
-        enable_pmu=4,                # PMU event = MEMORY
-    ),
+config = RunConfig(
+    platform="a2a3sim",
+    enable_chip_swimlane=4,      # full swimlane -> chip_swimlane_records.json
+                                 # (True is the same level 4; use 1-3 for less)
+    enable_dep_gen=True,         # produces deps.json (render with deps_viewer on demand)
+    enable_pmu=4,                # PMU event = MEMORY
 )
+compiled = ir.compile(MyProgram, **config.compile_kwargs())
+compiled(a, b, c, config=config)
 ```
 
 ### From pytest

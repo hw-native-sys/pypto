@@ -10,9 +10,9 @@
 """L2 :class:`ChipWorker` — the single-chip concrete runtime handle.
 
 Inside a ``with ChipWorker(...) as _:`` block, calls to ``CompiledProgram(...)``
-(and :func:`pypto.runtime.run`) reuse the active worker instead of creating a
-fresh one. Outside such a block, behavior is unchanged from one-shot
-construction in :func:`pypto.runtime.device_runner.execute_on_device`.
+reuse the active worker instead of creating a fresh one. Outside such a block,
+behavior is unchanged from one-shot construction in
+:func:`pypto.runtime.device_runner.execute_on_device`.
 
 For explicit dispatch (no ``ContextVar`` discovery), call
 :meth:`ChipWorker.run` directly, or pre-register with :meth:`ChipWorker.register`
@@ -123,9 +123,9 @@ class ChipWorker(Worker):
     setup. Construction without entering a ``with`` block also works — call
     :meth:`close` manually when done, or re-enter via ``with`` later.
 
-    Inside a ``with`` block, ``CompiledProgram.__call__`` and
-    :func:`pypto.runtime.run` find this worker via a ``ContextVar`` and reuse
-    its initialized device context instead of creating a fresh worker per call.
+    Inside a ``with`` block, ``CompiledProgram.__call__`` finds this worker via
+    a ``ContextVar`` and reuses its initialized device context instead of
+    creating a fresh worker per call.
     Reuse only happens when all four binding fields match and the worker has
     every capability required by the artifact — otherwise the caller either
     falls through to the one-shot path (binding mismatch) or raises (capability

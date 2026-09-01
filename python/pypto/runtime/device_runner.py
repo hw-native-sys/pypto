@@ -517,7 +517,7 @@ def _compile_and_assemble_locked(
 
     Args:
         work_dir: Root output directory containing ``kernels/``, ``orchestration/``,
-            and ``kernel_config.py`` (produced by :func:`compile_program`).
+            and ``kernel_config.py`` (produced by :func:`pypto.ir.compile`).
         platform: Target execution platform.
 
     Returns:

@@ -42,6 +42,67 @@ def _write_files(files: dict[str, str], output_dir: str) -> None:
             f.write(content)
 
 
+def _ensure_orchestration_headers(output_dir: str) -> None:
+    """Add the ``runtime.h`` / ``<iostream>`` includes the runtime requires.
+
+    The generated orchestration translation unit is compiled by the runtime's
+    CodeRunner, which requires both headers. Emitting them from the code
+    generator would make the compiler back-end aware of a runtime-specific
+    requirement, so they are stamped here instead — once, as part of writing the
+    artifact, so that *every* compile produces a directory the runtime can build.
+
+    Args:
+        output_dir: Root output directory the artifact was written to.
+    """
+    orch_dir = os.path.join(output_dir, "orchestration")
+    if not os.path.isdir(orch_dir):
+        return
+    for name in os.listdir(orch_dir):
+        if name.endswith(".cpp"):
+            _add_headers_to_file(os.path.join(orch_dir, name))
+
+
+def _add_headers_to_file(cpp_file: str) -> None:
+    """Insert the missing ``runtime.h`` / ``<iostream>`` headers into *cpp_file*.
+
+    Idempotent: a file that already carries both headers is left untouched, so
+    re-running this over an existing artifact directory is safe.
+
+    Args:
+        cpp_file: Path to a C++ source file that may be missing the headers.
+    """
+    with open(cpp_file, encoding="utf-8") as f:
+        content = f.read()
+
+    has_runtime_h = '#include "runtime.h"' in content
+    has_iostream = "#include <iostream>" in content
+    if has_runtime_h and has_iostream:
+        return
+
+    headers: list[str] = []
+    if not has_runtime_h:
+        headers.append('#include "runtime.h"')
+    if not has_iostream:
+        headers.append("#include <iostream>")
+
+    # Insert before the first non-comment, non-blank line.
+    lines = content.splitlines(keepends=True)
+    insert_pos = 0
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped and not stripped.startswith(("//", "/*", "*")):
+            insert_pos = i
+            break
+
+    header_block = "\n".join(headers) + "\n"
+    if insert_pos > 0:
+        header_block += "\n"
+
+    lines.insert(insert_pos, header_block)
+    with open(cpp_file, "w", encoding="utf-8") as f:
+        f.write("".join(lines))
+
+
 def _backend_type_for_platform(platform: str | None, fallback: BackendType) -> BackendType:
     """Return the codegen backend selected by a runtime platform string."""
     if platform is None:
@@ -388,6 +449,7 @@ def compile(  # noqa: PLR0913
             _write_files(exc.files, output_dir)
             raise
         _write_files(files, output_dir)
+        _ensure_orchestration_headers(output_dir)
     finally:
         if owns_profiler and prof is not None:
             prof.__exit__(None, None, None)
