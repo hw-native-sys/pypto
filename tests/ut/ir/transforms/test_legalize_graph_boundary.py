@@ -303,6 +303,53 @@ class TestDerivedScalarHoisting:
         assert "__FREE_VAR" not in caller, caller
         assert not re.search(r"\balias__ssa_v\d+\b", caller), caller
 
+    def test_a_pass_through_defined_after_the_last_hoist(self):
+        """Definition order can end on an alias, with no hoist left to compare it against.
+
+        The inverse of the test above: `base` is hoisted and `col` merely names
+        it, so the call site's merge runs out of hoists while a pass-through is
+        still pending. Deciding whether the alias came next read
+        `by_definition[next_hoist]` before checking a hoist was left — one past
+        the end of a non-empty vector, then dereferenced through `->original`.
+
+        The merge *result* was never wrong (the guard one line below forces the
+        alias to be taken once the hoists are gone), so this asserts the shape
+        the merge must produce and pins the path a sanitizer build watches.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Graph)
+            def layer(
+                self,
+                w: pl.Tensor[[512, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+                idx: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                base = idx * 128
+                col = base
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(w, [col, 0], [128, 128])
+                    pl.store(t, [0, 0], c)
+                return c
+
+            @pl.function
+            def main(
+                self,
+                w: pl.Tensor[[512, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                for i in pl.range(4):
+                    self.layer(w, c, i)
+                return c
+
+        After = _legalize_outlined(Before)
+        assert "base" in _scalar_param_names(_graph_func(After, "layer"))
+        caller = python_print(_graph_func(After, "main"))
+        # `col` names a value only the Graph has; the caller must pass `base`.
+        assert "__FREE_VAR" not in caller, caller
+        assert not re.search(r"\bcol__ssa_v\d+\b", caller), caller
+
     def test_non_graph_program_is_untouched(self):
         @pl.program
         class Before:

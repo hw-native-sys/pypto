@@ -1217,10 +1217,14 @@ class CallSiteExtender : public IRMutator {
     size_t next_hoist = 0;
     size_t next_alias = 0;
     while (next_hoist < by_definition.size() || next_alias < plan.passthrough.size()) {
-      const bool alias_is_next =
-          next_alias < plan.passthrough.size() &&
-          position(plan.passthrough[next_alias].first) < position(by_definition[next_hoist]->original.get());
-      const bool take_alias = next_hoist == by_definition.size() || alias_is_next;
+      // Both lists are bounds-checked before either index is read. Definition
+      // order can end on an alias (`base = idx * 128; col = base`), leaving no
+      // hoist to compare against; asking whether the alias comes next must not
+      // be what discovers that.
+      const bool hoists_left = next_hoist < by_definition.size();
+      const bool take_alias = next_alias < plan.passthrough.size() &&
+                              (!hoists_left || position(plan.passthrough[next_alias].first) <
+                                                   position(by_definition[next_hoist]->original.get()));
       if (take_alias) {
         bind_alias(plan.passthrough[next_alias++]);
       } else {
