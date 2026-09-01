@@ -57,6 +57,17 @@ Python builtin `compile`, so prefer `from pypto import ir` and call
 
 Its parameters are documented in [Compiling](../user/execution/00-compile.md).
 
+Both artifact types it can return, and the config that selects the distributed
+one, are exported from `pypto.ir`:
+
+```python
+from pypto.ir import CompiledProgram, DistributedCompiledProgram, DistributedConfig
+```
+
+The defining module, `pypto.ir.distributed_compiled_program`, stays importable —
+`pypto.runtime` reaches for it directly to avoid an import cycle — but user code
+and tests should take the three names from `pypto.ir`.
+
 ## Execute
 
 | Entry | Layer | Takes | Location |
@@ -107,6 +118,8 @@ These have no stability guarantee. They are not in any `__all__`, and code
 outside PyPTO should not import them:
 
 - `pypto.ir.compile` — `_ensure_orchestration_headers`
+- `pypto.ir.compiled_program` — `CompiledProgram._build_orch_args`,
+  `CompiledProgram._build_call_config`
 - `pypto.runtime.device_runner` — `compile_and_assemble`, `compile_single_kernel`,
   `compile_single_orchestration`, `execute_on_device`
 - `pypto.runtime.kernel_compiler` — `KernelCompiler`, `compile_incore`
@@ -114,9 +127,11 @@ outside PyPTO should not import them:
   `_DfxOpts`
 - `pypto.runtime.tensor_arg`, `pypto.runtime.elf_parser`, `pypto.runtime._binary_cache`
 
-`DistributedCompiledProgram` and `DistributedConfig` are public, but are not
-re-exported from `pypto.ir`; import them from
-`pypto.ir.distributed_compiled_program`.
+The two argument builders marshal user arguments into simpler's `TaskArgs` and
+`CallConfig`. `ChipWorker.run` and `ChipWorker.register` are the supported way
+to reach that path — they call the builders for you, and a caller driving a
+hand-constructed `simpler.worker.Worker` still gets `chip_callable`,
+`runtime_name` and `runtime_config` from the public surface.
 
 ## Command-line entry points
 

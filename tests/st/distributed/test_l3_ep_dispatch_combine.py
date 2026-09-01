@@ -64,7 +64,7 @@ import pypto.language.distributed as pld
 import pytest
 import torch
 from pypto import ir
-from pypto.ir.distributed_compiled_program import DistributedConfig
+from pypto.ir import DistributedConfig
 
 # Real DeepSeek-V4 FLASH MoE shapes (pypto-lib/models/deepseek_v4_flash_mtp) — must
 # mirror the runtime example's constants. ``N_RANKS`` is supplied per-test via

@@ -46,6 +46,7 @@ from .builder import IRBuilder
 from .compile import compile
 from .compiled_program import CompiledProgram
 from .directions import make_call
+from .distributed_compiled_program import DistributedCompiledProgram, DistributedConfig
 
 # Import roundtrip instrument factory
 from .instruments import make_roundtrip_instrument
@@ -104,6 +105,8 @@ __all__ = [
     "python_print",
     "compile",
     "CompiledProgram",
+    "DistributedCompiledProgram",
+    "DistributedConfig",
     "PassManager",
     "OptimizationStrategy",
     "PassDumpLevel",

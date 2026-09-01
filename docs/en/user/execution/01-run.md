@@ -74,7 +74,6 @@ both H2D and D2H for that argument.
 | `param_names` / `output_indices` / `has_return` | The call shape, for a harness binding arguments itself |
 | `program` | The `Program` that was handed to `compile` — usually pre-pass, and `None` after `from_dir` |
 | `chip_callable` / `runtime_name` / `runtime_config` | The runtime-side handles |
-| `build_orch_args` / `build_call_config` | The two builders explicit dispatch needs |
 | `validate_ir` | Per-pass semantic comparison ([Precision](../precision/00-workflow.md)) |
 | `from_dir` / `load` | Rebuild a handle from a saved artifact directory |
 

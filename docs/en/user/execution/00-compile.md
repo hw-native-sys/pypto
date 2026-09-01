@@ -108,9 +108,10 @@ want when the question is "which pass changed this".
 cache holds — so a later call with the same specialization key gets the identical object.
 
 It exposes the whole extraction surface, which is what a harness driving the runtime
-directly needs: `chip_callable`, `runtime_name`, `runtime_config`, `build_orch_args`,
-`build_call_config`, `output_dir`, `platform`, `output_indices`, `param_names`,
-`orchestration_names`, `has_return`.
+directly needs: `chip_callable`, `runtime_name`, `runtime_config`, `output_dir`,
+`platform`, `output_indices`, `param_names`, `orchestration_names`, `has_return`.
+Argument marshalling is not part of that surface — dispatch through
+[`ChipWorker`](01-run.md#explicit-dispatch), which does it for you.
 
 `lower(*args)` goes one step less far: it runs the passes and returns the `Program`,
 writing no artifacts — which also means no `passes_dump/`. It is the right form for

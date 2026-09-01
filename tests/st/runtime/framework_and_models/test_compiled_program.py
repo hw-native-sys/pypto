@@ -140,7 +140,12 @@ class TestJitCompiledProgram:
 
 
 def _manual_dispatch(compiled, *args, device_id, config=None, call_config=None):
-    """Drive a hand-built simpler.Worker via the extraction surface; return coerced list."""
+    """Drive a hand-built simpler.Worker via the extraction surface; return coerced list.
+
+    The two argument builders are internal — ``ChipWorker.run`` is the supported
+    way to reach them. This helper calls them directly so the marshalling that
+    ``ChipWorker`` delegates to stays covered on its own.
+    """
     from simpler.worker import Worker as SimplerWorker  # noqa: PLC0415 — lazy: skip on host-only CI
 
     cc = compiled.chip_callable
@@ -148,11 +153,11 @@ def _manual_dispatch(compiled, *args, device_id, config=None, call_config=None):
     if call_config is not None:
         cfg = call_config
     else:
-        cfg = compiled.build_call_config(config) if config is not None else compiled.build_call_config()
+        cfg = compiled._build_call_config(config) if config is not None else compiled._build_call_config()
     w = SimplerWorker(level=2, device_id=device_id, platform=compiled.platform, runtime=rn)
     w.init()
     try:
-        orch_args, coerced, return_style = compiled.build_orch_args(*args, worker=w)
+        orch_args, coerced, return_style = compiled._build_orch_args(*args, worker=w)
         cid = w.register(cc)
         w.run(cid, orch_args, cfg)
         w.unregister(cid)
@@ -216,7 +221,7 @@ class TestManualWorkerExtraction:
         assert isinstance(compiled.runtime_config, dict)
 
     def test_call_config_override_runs(self, test_config):
-        """build_call_config aicpu_thread_num override is accepted and runs correctly."""
+        """_build_call_config aicpu_thread_num override is accepted and runs correctly."""
         tile_add_128._cache.clear()
         a = torch.full((128, 128), 2.0, dtype=torch.float32)
         b = torch.full((128, 128), 3.0, dtype=torch.float32)
@@ -224,7 +229,7 @@ class TestManualWorkerExtraction:
         compiled = _get_cached_compiled(tile_add_128)
         # 3, not the auto value baked into RUNTIME_CONFIG — otherwise the
         # assertion cannot tell an applied override from the default.
-        cfg = compiled.build_call_config(test_config, aicpu_thread_num=3)
+        cfg = compiled._build_call_config(test_config, aicpu_thread_num=3)
         assert cfg.aicpu_thread_num == 3
         coerced, _ = _manual_dispatch(compiled, a, b, device_id=test_config.device_id, call_config=cfg)
         assert torch.allclose(coerced[compiled.output_indices[0]], torch.full((128, 128), 5.0))

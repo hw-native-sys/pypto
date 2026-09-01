@@ -53,6 +53,15 @@ PyPTO 的编译与执行入口比它拥有的概念要多，而且好几个名�
 
 它的参数在[编译](../user/execution/00-compile.md)中有说明。
 
+它可能返回的两种产物类型，以及选定分布式那一种的配置，都从 `pypto.ir` 导出：
+
+```python
+from pypto.ir import CompiledProgram, DistributedCompiledProgram, DistributedConfig
+```
+
+定义它们的模块 `pypto.ir.distributed_compiled_program` 仍然可以导入 —— `pypto.runtime`
+直接从那里取，以避开导入环 —— 但用户代码与测试应当从 `pypto.ir` 取这三个名字。
+
 ## 执行
 
 | 入口 | 层 | 接受什么 | 位置 |
@@ -99,6 +108,8 @@ compiled(*tensors, config=config)
 以下没有稳定性保证。它们不在任何 `__all__` 中，PyPTO 之外的代码不应导入：
 
 - `pypto.ir.compile` —— `_ensure_orchestration_headers`
+- `pypto.ir.compiled_program` —— `CompiledProgram._build_orch_args`、
+  `CompiledProgram._build_call_config`
 - `pypto.runtime.device_runner` —— `compile_and_assemble`、`compile_single_kernel`、
   `compile_single_orchestration`、`execute_on_device`
 - `pypto.runtime.kernel_compiler` —— `KernelCompiler`、`compile_incore`
@@ -106,8 +117,10 @@ compiled(*tensors, config=config)
   `_DfxOpts`
 - `pypto.runtime.tensor_arg`、`pypto.runtime.elf_parser`、`pypto.runtime._binary_cache`
 
-`DistributedCompiledProgram` 与 `DistributedConfig` 是公开的，但没有从 `pypto.ir`
-重新导出；请从 `pypto.ir.distributed_compiled_program` 导入。
+这两个实参构造器把用户实参编排成 simpler 的 `TaskArgs` 与 `CallConfig`。
+`ChipWorker.run` 与 `ChipWorker.register` 是抵达这条路径的受支持方式 —— 它们会替你调用
+构造器；而自行构造 `simpler.worker.Worker` 的调用方，仍可从公开面拿到 `chip_callable`、
+`runtime_name` 与 `runtime_config`。
 
 ## 命令行入口
 

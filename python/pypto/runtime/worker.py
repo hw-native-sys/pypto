@@ -585,8 +585,8 @@ class ChipWorker(Worker):
             dfx_dir = Path(compiled.output_dir) / "dfx_outputs"
             dfx_dir.mkdir(parents=True, exist_ok=True)
 
-        orch_args, coerced, return_style = compiled.build_orch_args(*args, worker=self._impl)
-        cfg = compiled.build_call_config(rc, dfx_dir=dfx_dir)
+        orch_args, coerced, return_style = compiled._build_orch_args(*args, worker=self._impl)
+        cfg = compiled._build_call_config(rc, dfx_dir=dfx_dir)
         self._run_chip(compiled.chip_callable, orch_args, cfg)
 
         if dfx_dir is not None:

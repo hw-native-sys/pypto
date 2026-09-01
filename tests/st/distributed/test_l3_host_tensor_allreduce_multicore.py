@@ -28,7 +28,7 @@ import pypto.language.distributed as pld
 import pytest
 import torch
 from pypto import ir
-from pypto.ir.distributed_compiled_program import DistributedConfig
+from pypto.ir import DistributedConfig
 
 
 def _make_rank_inputs(n_ranks: int, size: int, round_offset: float = 0.0) -> torch.Tensor:

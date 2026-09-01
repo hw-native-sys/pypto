@@ -250,8 +250,9 @@ class TestCompileForwardsRunConfig:
 
 class TestCompileExposesExtractionSurface:
     """The returned CompiledProgram exposes the full extraction surface added
-    in PR #1496 (chip_callable / build_orch_args / build_call_config),
-    enabling worker integration as required by issue #1455.
+    in PR #1496 — the public runtime handles (chip_callable / runtime_name /
+    runtime_config) plus the internal argument builders ``ChipWorker.run``
+    marshals through — enabling worker integration as required by issue #1455.
 
     These tests only verify that the attributes are *defined on the class* —
     actually exercising compile_and_assemble (which several of these properties
@@ -276,8 +277,8 @@ class TestCompileExposesExtractionSurface:
             "chip_callable",
             "runtime_name",
             "runtime_config",
-            "build_orch_args",
-            "build_call_config",
+            "_build_orch_args",
+            "_build_call_config",
             "output_dir",
             "platform",
             "output_indices",

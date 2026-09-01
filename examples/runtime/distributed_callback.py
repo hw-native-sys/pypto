@@ -40,7 +40,7 @@ Run:  python examples/runtime/distributed_callback.py
 import pypto.language as pl
 import torch
 from pypto import ir
-from pypto.ir.distributed_compiled_program import DistributedConfig
+from pypto.ir import DistributedConfig
 
 PLATFORM = "a2a3sim"  # swap for "a2a3" to target a real device
 

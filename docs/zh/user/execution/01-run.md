@@ -66,7 +66,6 @@ with ChipWorker(config=cfg) as w:
 | `param_names` / `output_indices` / `has_return` | 调用形状，供自行绑定实参的 harness 使用 |
 | `program` | 交给 `compile` 的那份 `Program` —— 通常是未经 pass 的，且经 `from_dir` 重建后为 `None` |
 | `chip_callable` / `runtime_name` / `runtime_config` | 运行时侧的句柄 |
-| `build_orch_args` / `build_call_config` | 显式派发需要的两个构造器 |
 | `validate_ir` | 逐 pass 的语义对比（[精度](../precision/00-workflow.md)） |
 | `from_dir` / `load` | 从已保存的产物目录重建句柄 |
 

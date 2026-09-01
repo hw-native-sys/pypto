@@ -94,7 +94,7 @@ assert compiled.param_names == ["a", "b", "out"]
 
 `@pl.jit` 平时把特化 + 编译 + 派发融成一次 `kernel(*args)` 调用。`compile(*sample_args)` 在编译后停下，返回 JIT 缓存持有的那个 `CompiledProgram` —— 所以之后用同一个特化键调用会拿到同一个对象。
 
-它暴露了完整的提取面，这正是直接驱动运行时的 harness 所需要的：`chip_callable`、`runtime_name`、`runtime_config`、`build_orch_args`、`build_call_config`、`output_dir`、`platform`、`output_indices`、`param_names`、`orchestration_names`、`has_return`。
+它暴露了完整的提取面，这正是直接驱动运行时的 harness 所需要的：`chip_callable`、`runtime_name`、`runtime_config`、`output_dir`、`platform`、`output_indices`、`param_names`、`orchestration_names`、`has_return`。实参编排不属于这个面 —— 交给 [`ChipWorker`](01-run.md#显式派发) 派发，它会替你完成。
 
 `lower(*args)` 比它早停一站：只跑 pass 并返回 `Program`，不写任何产物 —— 也就意味着没有 `passes_dump/`。它适合 [torch codegen](../tools/01-torch-codegen.md)，那里要的就是 IR 本身；而[内存图](../tools/02-memory-map.md)读的是磁盘上的 dump，因此需要 `compile()`。
 

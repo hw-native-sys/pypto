@@ -1191,9 +1191,9 @@ class CompiledProgram(_RuntimeFacade):
                 f"compiled[<name>] instead."
             )
 
-    # --- Argument builders (for users driving a simpler.Worker directly) -----
+    # --- Argument builders (internal; used by the runtime workers) ----------
 
-    def build_orch_args(
+    def _build_orch_args(
         self,
         *args: "CallArg",
         worker: Any | None = None,
@@ -1214,12 +1214,12 @@ class CompiledProgram(_RuntimeFacade):
 
         Raises:
             TypeError: Arg count / type mismatch, or called on a multi-orch
-                program (use ``compiled[<name>].build_orch_args(...)`` instead).
+                program (use ``compiled[<name>]._build_orch_args(...)`` instead).
         """
         if self._sub_chip_dirs:
             raise TypeError(
                 f"Multi-orch program has {len(self._sub_chip_dirs)} orchestrations "
-                f"{sorted(self._sub_chip_dirs)}; use compiled[<name>].build_orch_args(...)."
+                f"{sorted(self._sub_chip_dirs)}; use compiled[<name>]._build_orch_args(...)."
             )
         param_infos, output_indices, return_types = self._get_metadata()
         coerced, return_style = _coerce_args(
@@ -1227,14 +1227,14 @@ class CompiledProgram(_RuntimeFacade):
         )
         if worker is None:
             raise TypeError(
-                "build_orch_args requires the simpler Worker that will own and dispatch these TaskArgs"
+                "_build_orch_args requires the simpler Worker that will own and dispatch these TaskArgs"
             )
         from pypto.runtime.runner import _coerced_to_orch_args  # noqa: PLC0415
 
         orch_args = _coerced_to_orch_args(coerced, worker)
         return orch_args, coerced, return_style
 
-    def build_call_config(
+    def _build_call_config(
         self,
         config: Any = None,
         *,
@@ -1255,12 +1255,13 @@ class CompiledProgram(_RuntimeFacade):
         if self._sub_chip_dirs:
             raise TypeError(
                 f"Multi-orch program has {len(self._sub_chip_dirs)} orchestrations "
-                f"{sorted(self._sub_chip_dirs)}; use compiled[<name>].build_call_config(...)."
+                f"{sorted(self._sub_chip_dirs)}; use compiled[<name>]._build_call_config(...)."
             )
-        from pypto.runtime.runner import RunConfig, _build_call_config  # noqa: PLC0415
+        from pypto.runtime.runner import RunConfig  # noqa: PLC0415
+        from pypto.runtime.runner import _build_call_config as _runner_build_call_config  # noqa: PLC0415
 
         run_config = config if config is not None else RunConfig()
-        return _build_call_config(
+        return _runner_build_call_config(
             run_config,
             runtime_config=self.runtime_config,
             aicpu_thread_num_override=aicpu_thread_num,
@@ -1456,7 +1457,7 @@ class _SubChipCallable(_RuntimeFacade):
     def output_indices(self) -> list[int]:
         return list(self._output_indices)
 
-    def build_orch_args(
+    def _build_orch_args(
         self,
         *args: "CallArg",
         worker: Any | None = None,
@@ -1470,24 +1471,25 @@ class _SubChipCallable(_RuntimeFacade):
         )
         if worker is None:
             raise TypeError(
-                "build_orch_args requires the simpler Worker that will own and dispatch these TaskArgs"
+                "_build_orch_args requires the simpler Worker that will own and dispatch these TaskArgs"
             )
         from pypto.runtime.runner import _coerced_to_orch_args  # noqa: PLC0415
 
         orch_args = _coerced_to_orch_args(coerced, worker)
         return orch_args, coerced, return_style
 
-    def build_call_config(
+    def _build_call_config(
         self,
         config: Any = None,
         *,
         aicpu_thread_num: int | None = None,
         dfx_dir: "Path | None" = None,
     ) -> Any:
-        from pypto.runtime.runner import RunConfig, _build_call_config  # noqa: PLC0415
+        from pypto.runtime.runner import RunConfig  # noqa: PLC0415
+        from pypto.runtime.runner import _build_call_config as _runner_build_call_config  # noqa: PLC0415
 
         run_config = config if config is not None else RunConfig()
-        return _build_call_config(
+        return _runner_build_call_config(
             run_config,
             runtime_config=self.runtime_config,
             aicpu_thread_num_override=aicpu_thread_num,

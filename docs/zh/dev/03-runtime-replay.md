@@ -200,7 +200,7 @@ from pypto.runtime import execute_distributed_compiled
 execute_distributed_compiled("build_output/<jit_dir>/", [a, b, c])
 
 # 可复用对象（需要时覆盖持久化的 platform / 设备）：
-from pypto.ir.distributed_compiled_program import DistributedCompiledProgram, DistributedConfig
+from pypto.ir import DistributedCompiledProgram, DistributedConfig
 prog = DistributedCompiledProgram.from_dir(
     "build_output/<jit_dir>/",
     platform="a2a3",

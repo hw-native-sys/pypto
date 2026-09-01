@@ -387,5 +387,19 @@ def test_from_dir_output_indices_match_out_params(compiled, tmp_path):
     assert param_infos[2].direction == ParamDirection.Out
 
 
+def test_distributed_types_are_reexported_from_pypto_ir():
+    """``pypto.ir`` is the supported spelling; the defining module stays importable.
+
+    ``pypto.runtime`` imports the defining module directly to avoid an import
+    cycle, so the re-export must be an alias of the same objects rather than a
+    second definition — otherwise an ``isinstance`` check would depend on which
+    spelling the caller used.
+    """
+    assert ir.DistributedCompiledProgram is DistributedCompiledProgram
+    assert ir.DistributedConfig is DistributedConfig
+    assert "DistributedCompiledProgram" in ir.__all__
+    assert "DistributedConfig" in ir.__all__
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

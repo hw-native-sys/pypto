@@ -10,8 +10,7 @@
 """Tests for python/pypto/jit/cache.py."""
 
 import pytest
-from pypto.ir import OptimizationStrategy
-from pypto.ir.distributed_compiled_program import DistributedConfig
+from pypto.ir import DistributedConfig, OptimizationStrategy
 from pypto.jit.cache import (
     compute_source_hash,
     make_cache_key,

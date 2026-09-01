@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import pypto.language as pl
 import torch
-from pypto.ir.distributed_compiled_program import DistributedCompiledProgram, DistributedConfig
+from pypto.ir import DistributedCompiledProgram, DistributedConfig
 from pypto.runtime import DistributedWorker, RunConfig
 
 TILE = 128

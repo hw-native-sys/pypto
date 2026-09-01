@@ -45,7 +45,7 @@ import pypto.language.distributed as pld
 import pytest
 import torch
 from pypto import ir
-from pypto.ir.distributed_compiled_program import DistributedConfig
+from pypto.ir import DistributedConfig
 
 N = 16  # rows
 W = 64  # window width (cols): 64*4=256 (FP32) and 64*2=128 (FP16) → 32-byte-aligned rows

@@ -2391,7 +2391,7 @@ class TestCompileKwargForwarding:
 
     def test_run_config_compile_kwargs_forwards_distributed_config(self):
         """A RunConfig.distributed_config is forwarded so @pl.jit.host kernels go distributed."""
-        from pypto.ir.distributed_compiled_program import DistributedConfig  # noqa: PLC0415
+        from pypto.ir import DistributedConfig  # noqa: PLC0415
 
         dc = DistributedConfig(device_ids=[0, 1])
         kwargs = _run_config_compile_kwargs(RunConfig(distributed_config=dc))
@@ -2407,7 +2407,7 @@ class TestCompileKwargForwarding:
 
     def test_make_cache_key_splits_on_distributed_config(self):
         """distributed_config participates in the cache key (distinct device_ids ≠ collide)."""
-        from pypto.ir.distributed_compiled_program import DistributedConfig  # noqa: PLC0415
+        from pypto.ir import DistributedConfig  # noqa: PLC0415
         from pypto.jit.cache import make_cache_key  # noqa: PLC0415
 
         def key_for(distributed_config):
@@ -2463,7 +2463,7 @@ class TestCompileKwargForwarding:
         different ``device_ids`` would silently target the wrong ranks.
         """
         torch = pytest.importorskip("torch")
-        from pypto.ir.distributed_compiled_program import DistributedConfig  # noqa: PLC0415
+        from pypto.ir import DistributedConfig  # noqa: PLC0415
 
         @jit
         def cfg_kernel(a: pl.Tensor[[128, 128], pl.FP32], c: pl.Out[pl.Tensor[[128, 128], pl.FP32]]):
@@ -2588,7 +2588,7 @@ class TestCompileKwargForwarding:
         # so patching the module attribute intercepts the real compilation.
         monkeypatch.setattr(ir_compile_mod, "compile", fake_compile)
 
-        from pypto.ir.distributed_compiled_program import DistributedConfig  # noqa: PLC0415
+        from pypto.ir import DistributedConfig  # noqa: PLC0415
 
         dc = DistributedConfig(device_ids=[0, 1])
         cfg = RunConfig(

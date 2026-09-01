@@ -852,7 +852,7 @@ def _coerced_to_orch_args(
     codegen addresses them from independent pools.
 
     Used by both :func:`execute_compiled` and the extraction path on
-    :class:`pypto.ir.CompiledProgram` (``build_orch_args``).
+    :class:`pypto.ir.CompiledProgram` (``_build_orch_args``).
     """
     from .task_interface import (  # noqa: PLC0415
         TaskArgs,  # pyright: ignore[reportAttributeAccessIssue]

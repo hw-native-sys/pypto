@@ -193,7 +193,7 @@ with compiled.prepare(
 
 ```python
 import torch
-from pypto.ir.distributed_compiled_program import DistributedConfig
+from pypto.ir import DistributedConfig
 from pypto.runtime import RunConfig
 
 dc = DistributedConfig(device_ids=[0, 1, 2, 3])

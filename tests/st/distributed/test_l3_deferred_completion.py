@@ -52,7 +52,7 @@ import pypto.language.distributed as pld
 import pytest
 import torch
 from pypto import ir
-from pypto.ir.distributed_compiled_program import DistributedConfig
+from pypto.ir import DistributedConfig
 
 _N_RANKS = 2
 _A2A3_SIM_AIVS = 16

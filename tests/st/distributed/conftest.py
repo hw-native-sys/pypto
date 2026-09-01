@@ -20,7 +20,7 @@ def disable_runtime_execution_in_codegen_only(request, monkeypatch) -> None:
     if not request.config.getoption("--codegen-only"):
         return
 
-    from pypto.ir.distributed_compiled_program import DistributedCompiledProgram  # noqa: PLC0415
+    from pypto.ir import DistributedCompiledProgram  # noqa: PLC0415
     from pypto.runtime.distributed_runner import DistributedWorker  # noqa: PLC0415
 
     def skip_execution(*args: Any, **kwargs: Any) -> None:

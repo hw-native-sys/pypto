@@ -2293,8 +2293,6 @@ class JITFunction:
           for explicit L2 dispatch.
         - ``CompiledProgram.chip_callable`` / ``runtime_name`` / ``runtime_config``
           to drive a hand-constructed ``simpler.worker.Worker``.
-        - ``CompiledProgram.build_orch_args`` / ``build_call_config`` to
-          assemble the simpler dispatch tuple yourself.
 
         ``config=RunConfig(...)`` is still consumed (and its compile-side
         knobs forwarded to ``ir.compile()``) so the returned

@@ -45,7 +45,7 @@ import pypto.language as pl
 import pytest
 import torch
 from pypto import ir
-from pypto.ir.distributed_compiled_program import DistributedCompiledProgram, DistributedConfig
+from pypto.ir import DistributedCompiledProgram, DistributedConfig
 from pypto.runtime import DistributedWorker, RunConfig
 
 from examples.runtime.multi_program_kv_cache import TILE, decode, prefill

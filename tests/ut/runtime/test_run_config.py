@@ -503,7 +503,7 @@ class TestMakeCallConfigRing:
     """
 
     def test_no_run_config_leaves_runtime_env_at_zero(self, monkeypatch):
-        from pypto.ir.distributed_compiled_program import DistributedConfig  # noqa: PLC0415
+        from pypto.ir import DistributedConfig  # noqa: PLC0415
 
         cfg = _make_dist_call_config_with_fake(DistributedConfig(), None, monkeypatch)
         assert cfg.aicpu_thread_num == 0
@@ -512,7 +512,7 @@ class TestMakeCallConfigRing:
         assert cfg.runtime_env.ring_dep_pool == 0
 
     def test_run_config_ring_overrides_transcribed(self, monkeypatch):
-        from pypto.ir.distributed_compiled_program import DistributedConfig  # noqa: PLC0415
+        from pypto.ir import DistributedConfig  # noqa: PLC0415
 
         run_config = RunConfig(
             platform="a2a3sim",
@@ -526,7 +526,7 @@ class TestMakeCallConfigRing:
         assert cfg.runtime_env.ring_dep_pool == 128
 
     def test_baseline_preserved_and_partial_ring_overlay(self, monkeypatch):
-        from pypto.ir.distributed_compiled_program import DistributedConfig  # noqa: PLC0415
+        from pypto.ir import DistributedConfig  # noqa: PLC0415
 
         dc = DistributedConfig(aicpu_thread_num=3)
         run_config = RunConfig(platform="a2a3sim", ring_heap=1024 * 1024)
@@ -541,7 +541,7 @@ class TestMakeCallConfigRing:
     def test_per_ring_list_overlaid_on_l3_dispatch(self, monkeypatch):
         # A per-program L3 dispatch can size each scope-depth ring independently
         # (e.g. a wider task window for prefill than decode).
-        from pypto.ir.distributed_compiled_program import DistributedConfig  # noqa: PLC0415
+        from pypto.ir import DistributedConfig  # noqa: PLC0415
 
         run_config = RunConfig(platform="a2a3sim", ring_task_window=[16, 32, 128, 256])
         cfg = _make_dist_call_config_with_fake(DistributedConfig(), run_config, monkeypatch)
@@ -562,7 +562,7 @@ class TestMakeCallConfigDfx:
     """
 
     def test_dfx_flags_transcribed_and_prefix_set(self, monkeypatch, tmp_path):
-        from pypto.ir.distributed_compiled_program import DistributedConfig  # noqa: PLC0415
+        from pypto.ir import DistributedConfig  # noqa: PLC0415
 
         dfx_base = tmp_path / "dfx_outputs"
         run_config = RunConfig(
@@ -584,7 +584,7 @@ class TestMakeCallConfigDfx:
         assert dfx_base.is_dir()
 
     def test_swimlane_sets_flag_and_co_enables_dep_gen(self, monkeypatch, tmp_path):
-        from pypto.ir.distributed_compiled_program import DistributedConfig  # noqa: PLC0415
+        from pypto.ir import DistributedConfig  # noqa: PLC0415
 
         dfx_base = tmp_path / "dfx_outputs"
         # User asks for swimlane only; dep_gen is auto-enabled because the
@@ -598,14 +598,14 @@ class TestMakeCallConfigDfx:
         assert cfg.output_prefix == str(dfx_base)
 
     def test_dfx_without_base_raises(self, monkeypatch):
-        from pypto.ir.distributed_compiled_program import DistributedConfig  # noqa: PLC0415
+        from pypto.ir import DistributedConfig  # noqa: PLC0415
 
         run_config = RunConfig(platform="a2a3sim", enable_pmu=1)
         with pytest.raises(ValueError, match="dfx_base is required"):
             _make_dist_call_config_with_fake(DistributedConfig(), run_config, monkeypatch, dfx_base=None)
 
     def test_no_run_config_leaves_dfx_off(self, monkeypatch):
-        from pypto.ir.distributed_compiled_program import DistributedConfig  # noqa: PLC0415
+        from pypto.ir import DistributedConfig  # noqa: PLC0415
 
         cfg = _make_dist_call_config_with_fake(DistributedConfig(), None, monkeypatch)
         assert cfg.output_prefix == ""
@@ -613,7 +613,7 @@ class TestMakeCallConfigDfx:
         assert cfg.enable_dep_gen is False
 
     def test_ring_only_run_config_creates_no_dfx_dir(self, monkeypatch, tmp_path):
-        from pypto.ir.distributed_compiled_program import DistributedConfig  # noqa: PLC0415
+        from pypto.ir import DistributedConfig  # noqa: PLC0415
 
         dfx_base = tmp_path / "dfx_outputs"
         run_config = RunConfig(platform="a2a3sim", ring_heap=1024 * 1024)

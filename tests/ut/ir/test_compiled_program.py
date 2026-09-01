@@ -56,7 +56,7 @@ def _fake_call_config(instance):
     """Stub ``pypto.runtime.task_interface.CallConfig`` via a fake module.
 
     ``task_interface`` imports the device-only ``simpler`` package, so it can't
-    load on host CI. Fake it so ``build_call_config``'s inner import binds to a
+    load on host CI. Fake it so ``_build_call_config``'s inner import binds to a
     ``CallConfig`` that returns ``instance``."""
     fake = types.ModuleType("pypto.runtime.task_interface")
     setattr(fake, "CallConfig", MagicMock(return_value=instance))
@@ -665,7 +665,7 @@ class TestCompiledProgramDeviceTensor:
 class TestCompiledProgramExtraction:
     """Verify the extraction surface that lets users drive ``simpler.worker.Worker``
     directly: ``chip_callable`` / ``runtime_name`` / ``runtime_config`` properties,
-    ``load()``, ``build_orch_args()``, and ``build_call_config()``.
+    ``load()``, ``_build_orch_args()``, and ``_build_call_config()``.
     """
 
     def _patch_assemble(self, chip_callable_name: str = "fake_chip"):
@@ -751,7 +751,7 @@ class TestCompiledProgramExtraction:
         worker = MagicMock(name="worker")
         with patch("pypto.runtime.runner._coerced_to_orch_args") as oa_helper:
             oa_helper.return_value = "fake_orch_args"
-            orch_args, coerced, return_style = cp.build_orch_args(a, b, c, worker=worker)
+            orch_args, coerced, return_style = cp._build_orch_args(a, b, c, worker=worker)
 
         assert orch_args == "fake_orch_args"
         assert coerced == [a, b, c]
@@ -768,7 +768,7 @@ class TestCompiledProgramExtraction:
         worker = MagicMock(name="worker")
         with patch("pypto.runtime.runner._coerced_to_orch_args") as oa_helper:
             oa_helper.return_value = "fake_orch_args"
-            orch_args, coerced, return_style = cp.build_orch_args(a, b, worker=worker)
+            orch_args, coerced, return_style = cp._build_orch_args(a, b, worker=worker)
 
         assert orch_args == "fake_orch_args"
         assert return_style is True
@@ -783,7 +783,7 @@ class TestCompiledProgramExtraction:
         cp = CompiledProgram(prog, str(tmp_path))
         a = torch.zeros(128, 128)
         with pytest.raises(TypeError, match="expects 3"):
-            cp.build_orch_args(a)
+            cp._build_orch_args(a)
 
     def test_build_call_config_uses_runtime_config_default(self, tmp_path):
         """When config has no overrides, RUNTIME_CONFIG values feed CallConfig."""
@@ -798,7 +798,7 @@ class TestCompiledProgramExtraction:
         ):
             from pypto.runtime import RunConfig  # noqa: PLC0415
 
-            cfg = cp.build_call_config(RunConfig())
+            cfg = cp._build_call_config(RunConfig())
 
         assert cfg is fake_call_config
         assert fake_call_config.aicpu_thread_num == 2  # from runtime_config
@@ -815,7 +815,7 @@ class TestCompiledProgramExtraction:
         ):
             from pypto.runtime import RunConfig  # noqa: PLC0415
 
-            cp.build_call_config(RunConfig(aicpu_thread_num=8), aicpu_thread_num=4)
+            cp._build_call_config(RunConfig(aicpu_thread_num=8), aicpu_thread_num=4)
 
         assert fake_call_config.aicpu_thread_num == 4  # kwarg > RunConfig field > runtime_config
 
@@ -831,7 +831,7 @@ class TestCompiledProgramExtraction:
         ):
             from pypto.runtime import RunConfig  # noqa: PLC0415
 
-            cp.build_call_config(RunConfig(aicpu_thread_num=16))
+            cp._build_call_config(RunConfig(aicpu_thread_num=16))
 
         assert fake_call_config.aicpu_thread_num == 16  # RunConfig wins over runtime_config's 2
 
@@ -847,7 +847,7 @@ class TestCompiledProgramExtraction:
         ):
             from pypto.runtime import RunConfig  # noqa: PLC0415
 
-            cp.build_call_config(
+            cp._build_call_config(
                 RunConfig(
                     enable_chip_swimlane=True,
                     enable_dump_args=True,
@@ -884,7 +884,7 @@ class TestCompiledProgramExtraction:
         ):
             from pypto.runtime import RunConfig  # noqa: PLC0415
 
-            cp.build_call_config(RunConfig())
+            cp._build_call_config(RunConfig())
 
         # spec doesn't include "output_prefix", so any attempted set would fail.
         # Reaching here means _build_call_config correctly skipped it.
@@ -917,7 +917,7 @@ class TestCompiledProgramExtractionMultiOrch:
         b = torch.zeros(128, 128)
         c = torch.zeros(128, 128)
         with pytest.raises(TypeError, match="Multi-orch"):
-            cp.build_orch_args(a, b, c)
+            cp._build_orch_args(a, b, c)
 
 
 class TestSubChipCallableExtraction:
@@ -958,7 +958,7 @@ class TestSubChipCallableExtraction:
         worker = MagicMock(name="worker")
         with patch("pypto.runtime.runner._coerced_to_orch_args") as oa_helper:
             oa_helper.return_value = "fake_orch_args"
-            orch_args, coerced, return_style = sub.build_orch_args(a, b, c, worker=worker)
+            orch_args, coerced, return_style = sub._build_orch_args(a, b, c, worker=worker)
 
         assert orch_args == "fake_orch_args"
         assert coerced == [a, b, c]
@@ -1082,7 +1082,7 @@ class TestCompiledMetaAndFromDir:
 
         Regression test for #2344: ``benchmark`` needs ``platform`` /
         ``runtime_name`` / ``runtime_config`` / ``chip_callable`` plus the
-        metadata-derived ``build_orch_args`` / ``build_call_config`` /
+        metadata-derived ``_build_orch_args`` / ``_build_call_config`` /
         ``output_indices``, which previously required a live ``Program``.
         """
         CompiledProgram(_make_program_with_orchestration(), str(tmp_path), platform="a2a3sim")
@@ -1102,10 +1102,10 @@ class TestCompiledMetaAndFromDir:
             assert reloaded.output_indices == [2]
             with patch("pypto.runtime.runner._coerced_to_orch_args") as oa_helper:
                 oa_helper.return_value = "fake_orch_args"
-                orch_args, coerced, return_style = reloaded.build_orch_args(*args, worker=worker)
+                orch_args, coerced, return_style = reloaded._build_orch_args(*args, worker=worker)
                 oa_helper.assert_called_once_with(args, worker)
             with _fake_call_config(call_config):
-                assert reloaded.build_call_config(RunConfig()) is call_config
+                assert reloaded._build_call_config(RunConfig()) is call_config
 
         assert orch_args == "fake_orch_args"
         assert coerced == args

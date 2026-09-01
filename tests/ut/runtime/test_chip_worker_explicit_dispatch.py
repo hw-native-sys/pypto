@@ -12,7 +12,7 @@
 Exercises ``ChipWorker.run / register`` and the :class:`RegistrationHandle`
 returned by ``register`` without touching the device: ``_SimplerWorker`` is
 patched so construction does no real work, and ``CompiledProgram`` extraction
-helpers (``chip_callable / build_orch_args / build_call_config``) are stubbed
+helpers (``chip_callable / _build_orch_args / _build_call_config``) are stubbed
 to return mocks the tests can inspect.
 """
 
@@ -53,8 +53,8 @@ def _fake_compiled(
     compiled.chip_callable = cc
     compiled.output_dir = "/tmp/fake_compiled"
     compiled.output_indices = [2]
-    compiled.build_orch_args.return_value = ("orch_args", ["arg0", "arg1", "out_tensor"], False)
-    compiled.build_call_config.return_value = MagicMock(name="CallConfig")
+    compiled._build_orch_args.return_value = ("orch_args", ["arg0", "arg1", "out_tensor"], False)
+    compiled._build_call_config.return_value = MagicMock(name="CallConfig")
     return compiled
 
 
@@ -113,18 +113,18 @@ def test_run_requires_init(fake_simpler_worker):
 def test_run_inplace_returns_none(fake_simpler_worker):
     w = ChipWorker(config=RunConfig(platform="a2a3sim"))
     compiled = _fake_compiled()
-    # build_orch_args returns return_style=False — in-place call.
+    # _build_orch_args returns return_style=False — in-place call.
     result = w.run(compiled, 1, 2, 3)
     assert result is None
     w.close()
 
 
 def test_run_return_style_packs_outputs(fake_simpler_worker):
-    """When build_orch_args reports return_style, run() should pack outputs."""
+    """When _build_orch_args reports return_style, run() should pack outputs."""
     w = ChipWorker(config=RunConfig(platform="a2a3sim"))
     compiled = _fake_compiled()
     out_tensor = MagicMock(name="out_tensor")
-    compiled.build_orch_args.return_value = ("orch_args", [1, 2, out_tensor], True)
+    compiled._build_orch_args.return_value = ("orch_args", [1, 2, out_tensor], True)
     compiled.output_indices = [2]
     ret = w.run(compiled, 1, 2)
     assert ret is out_tensor

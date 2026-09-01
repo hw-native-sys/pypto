@@ -43,7 +43,7 @@ import pypto.language.distributed as pld
 import pytest
 import torch
 from pypto import ir
-from pypto.ir.distributed_compiled_program import DistributedConfig
+from pypto.ir import DistributedConfig
 
 SIZE = 256  # matches ALLREDUCE_COUNT in runtime allreduce_kernel.cpp
 NR = pl.dynamic("NR")
