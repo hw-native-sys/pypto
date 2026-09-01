@@ -11,14 +11,8 @@
 **All tests belong in `tests/`:**
 
 - `tests/ut/core/` - Core functionality tests
-- `tests/ut/ir/` - IR (Intermediate Representation) tests
-  - `core/` - Basic IR nodes
-  - `expressions/` - Expression tests
-  - `operators/` - Operator tests
-  - `parser/` - Parser tests
-  - `printing/` - Printer tests
-  - `statements/` - Statement tests
-  - `transforms/` - Transform tests
+- `tests/ut/ir/` - IR tests, split by topic: `core/`, `expressions/`, `operators/`,
+  `parser/`, `printing/`, `statements/`, `transforms/`
 - `tests/ut/pass/` - Pass manager tests
 - `tests/lint/` - Linting and code quality checks
 
@@ -40,26 +34,11 @@
 - Edge cases and boundary conditions
 - Cross-layer functionality (C++ ↔ Python)
 
-**When user explicitly requests:**
-
-- "Add tests for this feature"
-- "Write a test to verify this works"
-- "Create regression test for this bug"
-
 ### When NOT to Create Tests
 
-**Don't create:**
-
-- Temporary "proof of concept" test files
-- Ad-hoc example scripts to demonstrate functionality
-- Test files just to show how something works (explain instead)
-- Tests outside the `tests/` directory structure
-
-**If you need to verify something:**
-
-- Use existing test structure
-- Run existing tests
-- Explain in comments or documentation
+**Don't create** temporary "proof of concept" files, ad-hoc demo scripts, tests that only
+show how something works (explain instead), or anything outside `tests/`. To verify
+something, use the existing test structure or run existing tests.
 
 ### Test Framework
 
@@ -80,19 +59,16 @@ if __name__ == "__main__":
 ```python
 # ✅ Good - pytest style with assert
 def test_tensor_shape():
-    tensor = ir.TensorExpr()
-    assert tensor.get_rank() == 3
+    assert ir.TensorExpr().get_rank() == 3
 
 # ❌ Bad - unittest style
 class TestTensor(unittest.TestCase):
     def test_tensor_shape(self):
-        tensor = ir.TensorExpr()
-        self.assertEqual(tensor.get_rank(), 3)
+        self.assertEqual(ir.TensorExpr().get_rank(), 3)
 
-# ❌ Bad - print style (no actual verification)
+# ❌ Bad - print style — passes even when the value is wrong
 def test_tensor_shape():
-    tensor = ir.TensorExpr()
-    print(tensor.get_rank())  # Passes even if wrong!
+    print(ir.TensorExpr().get_rank())
 ```
 
 ### Test Style: Before/After Pattern
@@ -124,6 +100,56 @@ def test_example_transform(self):
 - Use `@pl.program` with `Before` and `Expected` classes (not helper functions)
 - Compare with `ir.assert_structural_equal(After, Expected)`
 
+## Authoring Surface: `@pl.jit` Outside `tests/ut/`
+
+### Core Rule
+
+**Every kernel written to be *run* — `examples/`, `tests/st/`, docs snippets — must use the
+`@pl.jit` family. `@pl.program` + `@pl.function` is for `tests/ut/` only.**
+
+`@pl.jit` is the surface users write; `@pl.program` is the shape `@pl.jit` specializes
+*into* (printing a compiled program yields `@pl.program` source). A UT that asserts on
+that lowered shape writes it directly; a UT of `@pl.jit` itself does not. ST and examples
+are the user-facing corpus — they must demonstrate what users actually write.
+
+| Location | Surface |
+| -------- | ------- |
+| `tests/ut/**` IR / pass transform tests | `@pl.program` + `@pl.function` (pattern above) |
+| `tests/ut/**` where `@pl.jit` is itself under test (`tests/ut/jit/`) | `@pl.jit` family |
+| `tests/st/**`, `examples/**` | `@pl.jit` family |
+| `docs/**` snippets | `@pl.jit` family, unless the snippet documents `@pl.program` itself |
+
+**Verify a new `@pl.jit` kernel with a full `compile()`, never `lower()` alone** — `lower()`
+stops after the passes, so errors like "operators in an Orchestration body" never fire and
+the kernel only fails when someone runs it.
+
+### Translation
+
+| `@pl.program` form | `@pl.jit` form |
+| ------------------ | -------------- |
+| `@pl.function(type=pl.FunctionType.InCore)` | `@pl.jit.incore` |
+| `@pl.function(type=pl.FunctionType.Orchestration)` entry | `@pl.jit` |
+| HOST orchestrator entry | `@pl.jit.host` |
+| `@pl.inline` / `type=Inline` | `@pl.jit.inline` |
+| `@pl.function(type=pl.FunctionType.Opaque)` | `@pl.jit.opaque` |
+
+Deps are discovered from the entry body — call them by name, no class needed. `@pl.jit.host`
+also discovers `@pl.jit` chip orchestrators, so distributed ST needs no `@pl.program`
+either. See `docs/en/user/language/01-functions.md`.
+
+### Existing Files
+
+The pre-`@pl.jit` ST / example corpus is historical, not a violation. **New files must use
+`@pl.jit`; migrate an existing file when you substantially modify it** — never as an
+unrelated drive-by rewrite.
+
+### Narrow Exceptions
+
+Outside `tests/ut/`, `@pl.program` stays correct only when the case *is* about that form —
+parser / printer round-trips consuming printed `@pl.program` text (e.g.
+`examples/utils/parse_from_text.py`). If you believe `@pl.jit` cannot express a new ST
+case, **tell the user before falling back to `@pl.program`** — that gap is itself the finding.
+
 ## Examples Policy
 
 ### Examples Directory
@@ -140,44 +166,16 @@ difficulty tiers for the teaching kernels, category folders for everything else:
 
 ### When to Write Examples
 
-**Only create examples when:**
-
-- User explicitly requests: "Create an example showing X"
-- Adding major new feature that needs demonstration
-- Updating example due to API changes
+**Only create examples when** the user asks for one, a major new feature needs a
+demonstration, or an API change invalidates an existing example.
 
 ### When NOT to Write Examples
 
-**Don't create examples to:**
-
-- Demonstrate how code works during development
-- Test functionality (use `tests/` instead)
-- Show implementation details (use docs instead)
-
-**If you need to demonstrate something:**
-
-- Explain it in conversation
-- Add to documentation with code snippets
-- Reference existing examples
-
-## Documentation vs Examples vs Tests
-
-| Purpose | Location | When to Create |
-| ------- | -------- | -------------- |
-| **Explain concepts** | `docs/` | Always keep updated |
-| **Show usage** | `examples/` | User requests only |
-| **Verify correctness** | `tests/` | For all new features |
-
-## Summary
-
-- ❌ No temporary test files or examples
-- ✅ Add tests to `tests/ut/` for new features
-- ❌ No examples unless explicitly requested
-- ✅ Update `docs/` to explain, not create examples
-- ✅ Use existing examples in `examples/` as reference
+**Don't create examples** to demonstrate code during development, to test functionality
+(use `tests/`), or to show implementation details (use `docs/`). To demonstrate something,
+explain it in conversation, add a snippet to the docs, or point at an existing example.
 
 ## Remember
 
-**Tests validate, examples demonstrate, docs explain.**
-
-Don't conflate these purposes. Keep the codebase clean by only creating files when necessary and in the proper location.
+**Tests validate, examples demonstrate, docs explain.** Don't conflate these purposes —
+create files only when necessary, in the proper location, on the right authoring surface.
