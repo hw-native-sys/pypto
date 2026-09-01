@@ -145,6 +145,9 @@ tile depend on the pad value; see
 For phased GEMV accumulation, select producer phases with `pl.AccPhase`. A producer
 ending with `pl.AccPhase.Final` must be paired with a store using `pl.STPhase.Final`:
 
+Here `lhs0`, `rhs0`, `lhs1`, and `rhs1` are preloaded tiles, and `output` is the
+destination tensor.
+
 ```python
 partial = pl.tile.gemv(lhs0, rhs0, acc_phase=pl.AccPhase.Partial)
 final = pl.tile.gemv_acc(partial, lhs1, rhs1, acc_phase=pl.AccPhase.Final)

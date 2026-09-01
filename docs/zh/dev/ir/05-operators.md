@@ -265,7 +265,7 @@ for k0 in pl.pipeline(0, K, K_TILE, stage=2):
 `init_cond` 在这两个 DSL 签名中也相应地是 keyword-only。各形式重新解析后仍是同一份 IR：
 
 `pl.tensor.matmul_acc(acc, lhs, rhs, init_cond=k0 == 0, a_trans=False, b_trans=False)`
-`pl.tile.gemv_acc(acc, lhs, rhs, init_cond=k0 == 0, acc_phase='unspecified')`
+`pl.tile.gemv_acc(acc, lhs, rhs, init_cond=k0 == 0, acc_phase=pl.AccPhase.Unspecified)`
 
 降级方式取决于谓词是否在编译期已知：
 

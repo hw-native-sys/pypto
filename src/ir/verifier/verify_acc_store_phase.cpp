@@ -249,6 +249,20 @@ class AccStorePhaseVisitor : public IRVisitor {
 
   void CheckStore(const CallPtr& store, const std::optional<TokenId>& source_token) {
     const int st_phase = store->GetKwarg<int>("st_phase", static_cast<int>(STPhase::kUnspecified));
+    if (!IsValidSTPhase(st_phase)) {
+      if (source_token.has_value() && pending_.erase(*source_token) != 0) {
+        reported_.insert(*source_token);
+      }
+      diagnostics_.emplace_back(
+          DiagnosticSeverity::Error, "AccStorePhaseValid", /*error_code=*/5,
+          "tile.store st_phase in function '" + func_name_ +
+              "' must encode pl.STPhase.Unspecified (0) or pl.STPhase.Final (3), but got " +
+              std::to_string(st_phase) +
+              ". A final accumulator producer must be consumed with pl.STPhase.Final so its unit flag is "
+              "cleared.",
+          store->span_);
+      return;
+    }
     if (st_phase == static_cast<int>(STPhase::kFinal)) {
       if (!source_token.has_value()) {
         diagnostics_.emplace_back(

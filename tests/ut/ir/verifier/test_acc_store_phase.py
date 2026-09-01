@@ -18,7 +18,7 @@ are expanded, while the IR still carries the user's source spans.
 import pypto
 import pypto.language as pl
 import pytest
-from pypto import backend
+from pypto import backend, ir
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import passes
@@ -214,6 +214,35 @@ def test_final_producer_with_plain_store_is_rejected():
     assert "st_phase=pl.STPhase.Final" in diagnostics[0].message
 
 
+def test_invalid_store_phase_reports_a_diagnostic():
+    """Malformed IR is diagnosed without formatting the invalid enum value."""
+
+    class _StampInvalidStorePhase(ir.IRMutator):
+        def visit_call(self, op):
+            rewritten = super().visit_call(op)
+            assert isinstance(rewritten, ir.Call)
+            if rewritten.op.name != ir.get_op("tile.store").name:
+                return rewritten
+            kwargs = dict(rewritten.kwargs)
+            kwargs["st_phase"] = 99
+            return ir.Call(
+                rewritten.op,
+                list(rewritten.args),
+                kwargs,
+                dict(rewritten.attrs),
+                rewritten.type,
+                rewritten.span,
+            )
+
+    malformed = _StampInvalidStorePhase().visit_program(_gemv_program())
+    diagnostics = _verify(malformed)
+
+    assert len(diagnostics) == 1
+    assert diagnostics[0].rule_name == "AccStorePhaseValid"
+    assert "must encode pl.STPhase.Unspecified (0) or pl.STPhase.Final (3)" in diagnostics[0].message
+    assert "got 99" in diagnostics[0].message
+
+
 def test_final_store_without_final_producer_is_rejected():
     diagnostics = _verify(_gemv_program(producer_phase=pl.AccPhase.Unspecified))
     assert len(diagnostics) == 1
@@ -276,3 +305,7 @@ def test_default_pipeline_rejects_mismatch_after_inline_functions():
             )
     finally:
         backend.reset_for_testing()
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

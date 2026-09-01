@@ -136,6 +136,8 @@
 分阶段 GEMV 累加通过 `pl.AccPhase` 选择生产者阶段。以 `pl.AccPhase.Final`
 结束的生产者必须与使用 `pl.STPhase.Final` 的 store 配对：
 
+其中 `lhs0`、`rhs0`、`lhs1` 和 `rhs1` 是预加载的 tile，`output` 是目标 tensor。
+
 ```python
 partial = pl.tile.gemv(lhs0, rhs0, acc_phase=pl.AccPhase.Partial)
 final = pl.tile.gemv_acc(partial, lhs1, rhs1, acc_phase=pl.AccPhase.Final)

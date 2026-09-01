@@ -300,7 +300,7 @@ the printer emits it as a keyword — and `init_cond` is correspondingly
 keyword-only in those DSL signatures. Every printed form reparses to the same IR:
 
 `pl.tensor.matmul_acc(acc, lhs, rhs, init_cond=k0 == 0, a_trans=False, b_trans=False)`
-`pl.tile.gemv_acc(acc, lhs, rhs, init_cond=k0 == 0, acc_phase='unspecified')`
+`pl.tile.gemv_acc(acc, lhs, rhs, init_cond=k0 == 0, acc_phase=pl.AccPhase.Unspecified)`
 
 Lowering depends on whether the predicate is known at compile time:
 
