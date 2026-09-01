@@ -181,6 +181,30 @@ def pytest_addoption(parser):
         help="Only generate code, skip runtime execution (default: False)",
     )
     parser.addoption(
+        "--precompile-dir",
+        action="store",
+        default=None,
+        metavar="DIR",
+        help=(
+            "Shared store for distributed (L3) build artifacts, keyed by test id. "
+            "With --precompile-only this is the destination of a card-free compile "
+            "pass; without it, a run reuses whatever that pass left there instead "
+            "of recompiling on the borrowed cards. Both passes must name the same "
+            "DIR and run from the same checkout."
+        ),
+    )
+    parser.addoption(
+        "--precompile-only",
+        action="store_true",
+        default=False,
+        help=(
+            "Card-free pass 1 for --precompile-dir: compile each distributed test's "
+            "program and build its kernel binaries, then skip before any device "
+            "work. Requires --precompile-dir. Touches no NPU, so it can fan out "
+            "with -n as wide as the host allows."
+        ),
+    )
+    parser.addoption(
         "--precompile-workers",
         action="store",
         default=None,
@@ -373,6 +397,69 @@ def _resolve_device_id(raw: str | int) -> int:
     return _parse_device_option(raw)[0]
 
 
+def _is_card_free_session(config: pytest.Config) -> bool:
+    """True when this session never reaches a device, so it needs no card."""
+    return bool(config.getoption("--codegen-only") or config.getoption("--precompile-only"))
+
+
+def _xdist_worker(config: pytest.Config) -> tuple[int, int] | None:
+    """Return ``(worker_index, worker_count)`` under xdist, else ``None``.
+
+    ``config.workerinput`` exists only in a worker process, so this doubles as
+    the "am I running under xdist?" test for the controller and for a plain
+    single-process session.
+    """
+    worker_input = getattr(config, "workerinput", None)
+    if worker_input is None:
+        return None
+    return int(str(worker_input["workerid"]).removeprefix("gw")), int(worker_input["workercount"])
+
+
+def _partition_devices_for_xdist(config: pytest.Config) -> None:
+    """Give each xdist worker a disjoint slice of ``--device``, in place.
+
+    ``--device`` names the cards this pytest *session* owns. Under xdist every
+    worker is a separate process that would otherwise claim the whole list, so
+    two workers would drive the same card concurrently (``halMemCtl EACCES``, or
+    a wedged collective). Rewriting ``config.option.device`` here — before any
+    fixture or the mechanism-A device pool reads it — partitions the pool once
+    and every downstream consumer (``device_ids``, ``_resolve_device_id``,
+    ``start_pipeline``'s queue) inherits the split with no further change.
+
+    A distributed case slices ``device_ids[:n_ranks]`` out of its worker's share,
+    so an L3 suite wants ``--device-num`` = workers x ranks: ``-n 2`` with four
+    borrowed cards runs two 2-rank workers. Cases needing more ranks than one
+    worker holds skip themselves, exactly as they already do on a small runner.
+
+    A pool that does not divide evenly hands the first ``len(devices) %
+    worker_count`` workers one extra card each rather than dropping the tail:
+    three cards across two workers is ``[0, 1]`` + ``[2]``, so a 2-rank case
+    still runs on the first worker instead of skipping on both while a borrowed
+    card sits idle.
+
+    No-op outside xdist, and under the card-free modes ``--codegen-only`` and
+    ``--precompile-only``: neither reaches a device, so such a sweep may fan out
+    as wide as the machine allows (``-n 16`` against a two-card ``--device``)
+    without the partition refusing it for want of cards.
+    """
+    worker = _xdist_worker(config)
+    if worker is None or _is_card_free_session(config):
+        return
+    worker_index, worker_count = worker
+    devices = _parse_device_option(config.option.device)
+    per_worker, remainder = divmod(len(devices), worker_count)
+    if per_worker < 1:
+        raise pytest.UsageError(
+            f"--device lists {len(devices)} card(s) but pytest-xdist started {worker_count} "
+            "workers; each worker needs at least one card of its own. Borrow more cards "
+            "(task-submit --device-num) or lower -n."
+        )
+    start = worker_index * per_worker + min(worker_index, remainder)
+    stop = start + per_worker + (1 if worker_index < remainder else 0)
+    mine = devices[start:stop]
+    config.option.device = ",".join(str(device) for device in mine)
+
+
 def _parse_platform_filter(raw: str) -> tuple[str, ...]:
     """Parse the comma-separated ``--platform`` value into an ordered tuple.
 
@@ -472,10 +559,19 @@ def _redirect_prog_build_dir(request, tmp_path, monkeypatch):
     When ``--save-kernels`` is set the user wants artifacts preserved under
     ``build_output/``, so redirection is skipped — and any ``PYPTO_PROG_BUILD_DIR``
     inherited from the outer environment is cleared so the default base
-    genuinely stays ``build_output``.
+    genuinely stays ``build_output``. That base is per-worker under xdist:
+    ``ir.compile``'s default directory name is ``<program>_<YYYYmmdd_HHMMSS>``,
+    unique per second and program but not per process, so two workers compiling
+    one program in the same second would otherwise share a directory and race on
+    its generated sources and binary cache. (The non-``--save-kernels`` path is
+    already safe: ``tmp_path`` is per test, hence per worker.)
     """
     if request.config.getoption("--save-kernels"):
-        monkeypatch.delenv("PYPTO_PROG_BUILD_DIR", raising=False)
+        worker = _xdist_worker(request.config)
+        if worker is None:
+            monkeypatch.delenv("PYPTO_PROG_BUILD_DIR", raising=False)
+        else:
+            monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(Path("build_output") / f"xdist_gw{worker[0]}"))
         return
     monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(tmp_path / "build_output"))
 
@@ -658,6 +754,10 @@ def tensor_shape(request):
 # Skip markers
 def pytest_configure(config):
     """Register custom markers and apply early runtime settings."""
+    if config.getoption("--precompile-only") and not config.getoption("--precompile-dir"):
+        raise pytest.UsageError("--precompile-only requires --precompile-dir=DIR to write into.")
+    # Before anything reads --device: under xdist this worker owns only a slice.
+    _partition_devices_for_xdist(config)
     config.addinivalue_line(
         "markers",
         "platforms(*ids, reason=...): restrict the test to the given platform ids "

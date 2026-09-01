@@ -49,7 +49,9 @@ Test Case Definition → Build IR → Generate Kernels → Compile → Execute �
 
 ## Running Tests
 
-**Important:** The `--forked` flag is required for running system tests.
+**Important:** The `--forked` flag is required for running system tests, except
+for the L3 distributed suite (`tests/st/distributed`), which CI and the
+distributed examples below run without it.
 
 ### Basic Test Execution
 
@@ -206,12 +208,14 @@ The test framework provides extensive configuration through pytest command-line 
 | Option | Default | Description |
 | ------ | ------- | ----------- |
 | `--platform` | `a2a3` | Comma-separated allowlist of target platforms. Each runtime test case is parametrized over `a2a3`, `a5`, `a2a3sim`, `a5sim`; only variants whose id appears here run. |
-| `--device` | `0` | Device ID for hardware tests (0, 1, 2, ...) |
+| `--device` | `0` | Card(s) this session owns: a single id (`0`), an inclusive range (`0-7`), a comma-separated list (`0,1,12`), or a mix. Under `pytest-xdist` the list is partitioned across the workers (see below). |
 | `--strategy` | `Default` | PyPTO optimization strategy (`Default` is the only supported value) |
 | `--save-kernels` | `False` | Save generated kernels and artifacts to disk |
 | `--kernels-dir` | `build_output/{testName}_{timestamp}/` | Custom output directory for saved kernels |
 | `--dump-passes` | `False` | Dump intermediate IR after each compiler pass |
 | `--codegen-only` | `False` | Only generate code, skip runtime execution |
+| `--precompile-dir` | `None` | Shared store for distributed (L3) build artifacts, keyed by test id (see below) |
+| `--precompile-only` | `False` | Card-free pass 1 for `--precompile-dir`: compile and build binaries, then stop before any device work |
 
 ### Usage Examples
 
@@ -228,12 +232,81 @@ pytest tests/st/ -v --forked --save-kernels --kernels-dir ./my_test_outputs
 # Enable compiler pass dumps for debugging
 pytest tests/st/ -v --forked --save-kernels --dump-passes
 
+# Run the L3 distributed suite on two xdist workers, two cards each
+pytest tests/st/distributed -v -n 2 --dist=loadfile --device=0,1,2,3
+
 # Generate code without running (for code inspection)
 pytest tests/st/ -v --forked --codegen-only --save-kernels
 
 # Combine multiple options
 pytest tests/st/ -v --forked --platform=a2a3sim --save-kernels --dump-passes
 ```
+
+### Running on Several Cards at Once (xdist)
+
+Every `pytest-xdist` worker is its own process, so a shared `--device` list would
+put two workers on one card. `tests/st/conftest.py` therefore partitions the list
+across the workers before any fixture reads it, and gives each worker its own
+`PYPTO_PROG_BUILD_DIR` so two workers never share an `ir.compile` output
+directory.
+
+Give each worker as many cards as its heaviest case needs — a distributed case
+takes `device_ids[:n_ranks]` out of its worker's share, and skips itself when the
+share is too small:
+
+```bash
+# 4 cards, 2 workers, 2 ranks per worker
+pytest tests/st/distributed -v -n 2 --dist=loadfile --device=0,1,2,3
+```
+
+`--dist=loadfile` keeps a file's cases on one worker, which matters for files
+whose cases reuse compiled state. Fewer cards than workers is a `UsageError`
+rather than a silently double-booked card; a pool that does not divide evenly
+hands the first workers one extra card each rather than dropping the tail. Both
+rules apply only to runs that touch a card — the card-free modes
+(`--codegen-only`, `--precompile-only`) are exempt and may fan out past the card
+count, as pass 1 below does.
+
+### Precompiling the Distributed Suite Off the Cards
+
+Most of the L3 suite's wall clock is not device work. Profiling the serial run
+put `ir.compile` plus the per-chip ptoas/ccec build at ~277s of ~620s, against
+only ~126s of actual dispatch — all of that compile time spent holding two NPUs
+idle. `--precompile-dir` splits the run in two so the cards only do device work:
+
+```bash
+D=$(mktemp -d)
+
+# Pass 1 — no card is touched, so fan out as wide as the host allows.
+# --device here only fixes the rank count the cases will see; the ids are unused.
+pytest tests/st/distributed -q -n 16 --precompile-dir="$D" --precompile-only --device=0,1
+
+# Pass 2 — on the borrowed cards, reusing what pass 1 built.
+pytest tests/st/distributed -v --precompile-dir="$D" --device=4,5
+```
+
+Measured on a two-card box: 746s → 370s on the cards, with pass 1 adding ~38s
+that holds no card. A codegen regression now fails in pass 1, in ~38s, without
+claiming an NPU at all.
+
+Pass 1 compiles each test's program into a slot under `$D` and builds its chip
+binaries there via `DistributedCompiledProgram.build_binaries()`, then stops at
+the first device edge. Pass 2 rebinds each usable slot with `from_dir` and
+avoids recompiling; a missing or unusable slot falls back to compiling in place,
+as the constraints below spell out. The artifact does not depend on which cards
+it runs on — `ir.compile` consumes `distributed_config` only after codegen — so
+pass 2 hands it the actually-borrowed ids.
+
+Two constraints:
+
+- **The store is keyed by test id, not by content.** That is sound only because
+  both passes run from one checkout: the sources cannot change between them. A
+  store reused across commits would serve stale binaries. Create it fresh and
+  delete it after.
+- **Slots are optional.** A missing or unusable slot falls back to compiling in
+  place, so pass 2 is correct on its own — just slower. Tests that drive the
+  runtime by hand rather than through `prepare()` / `execute_distributed` skip
+  themselves in pass 1 and compile normally in pass 2.
 
 ## Advanced Usage
 

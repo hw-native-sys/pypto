@@ -237,6 +237,38 @@ and validated field by field on load — including the `distributed_config` bloc
 — so a hand-edited or truncated sidecar fails with one `ValueError` naming the
 file and the recompile that regenerates it.
 
+### Building the binaries before you have a card
+
+Chip binaries are built the first time a program is prepared or called, which
+puts the whole ptoas/ccec + g++ toolchain on the critical path of a run that is
+already holding devices. `build_binaries()` performs exactly that work and
+nothing else, so it can run on a plain CPU host:
+
+```python
+prog = DistributedCompiledProgram.from_dir("build_output/<jit_dir>/")
+prog.build_binaries()          # ptoas/ccec + g++ only; no NPU, no fork
+```
+
+Each `next_levels/<name>/` sub-build is compiled and its `.o`/`.so` land in that
+sub-build's `cache/`, stamped with the runtime and PTO-ISA identity they were
+built against. A later `prepare()` / `__call__()` on the same directory reuses
+them — from a different process too, and through `from_dir` from a directory
+this object did not produce. Measured on a three-sub-build host collective, a
+warm assembly costs ~0.05s against ~1.6s cold.
+
+The binaries do not depend on `device_ids`: `ir.compile` consumes
+`distributed_config` only after codegen, so a directory built this way replays
+on any card set via the `distributed_config` override above. That is what lets
+compilation and execution be separated in space or time — warm a serving
+worker's binaries before it borrows a device, or precompile a whole test suite
+off the cards and hand the artifacts to a short device run. `tests/st/README.md`
+describes the two-pass form the distributed system tests use.
+
+**This is not a general compile cache.** The reuse is keyed by directory, and
+the generated-kernel binary cache inside it is keyed by position rather than by
+content, so recompiling *different* sources into a directory that already holds
+binaries reuses the stale ones. Build into a fresh directory per commit.
+
 L3 replay forwards runtime DFX fields from `RunConfig` through each chip
 dispatch. Artifacts are written under
 `dfx_outputs/rank{r}/d{k}/`; onboard swimlane uses the graph/timing two-pass
