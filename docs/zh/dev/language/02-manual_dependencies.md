@@ -21,7 +21,8 @@ DSL 暴露**两套正交的机制**，用户可任意组合：
 
 ## 机制 B——显式声明 task 间的边（`deps=`）
 
-这些表面都会下沉为 `set_dependencies` codegen；按 producer 形态选择：
+在 L2 编排里这些表面都会下沉为 `set_dependencies` codegen（分布式 HOST
+的下译不同——见下文）；按 producer 形态选择：
 单个 kernel 调用、outlined `pl.at` 区域，或 dependency-only fan-in。
 
 | 表层语法 | producer 形态 | 备注 |
@@ -36,6 +37,15 @@ DSL 暴露**两套正交的机制**，用户可任意组合：
 **这些表面都不依赖机制 A 的状态。** 显式 deps 可用于普通自动跟踪、
 `pl.manual_scope()` 内或 `manual_dep=True` tensor 上，并总是在自动跟踪结果
 **之上**追加；早期"`deps=` 只在 `pl.manual_scope` 内有效"的限制已经解除。
+
+**分布式 HOST 编排的下译不同。** 分布式程序 HOST 级编排函数里的 `pl.submit`
+表面写法相同，但目标是 L3 运行时：TaskId 由 `submit_next_level` 返回的不透明
+`TaskHandle` 背书，每个 `deps=` 条目下译为 `TaskArgs.add_dep_wait(...)`
+（只约束顺序的边——不保留 producer 资源），而非 `set_dependencies`。那里只支持
+`deps=`：`core_num`、`sync_start`、`allow_early_resolve` 与 `predicate=`
+会被拒绝，`pl.spmd_submit` 不可用，且被调方每个实参（包括 `Out` / `InOut`）
+都必须传入，因为 L3 不分配输出张量。显式边叠加在分布式 codegen 自动维护的
+per-rank 通信排序链之上。
 
 普通的 `out = self.kernel(...)` 是 **fire-and-forget**：它不返回 task id，
 并且在它上面写 `deps=` 会被拒绝（parser 报错，提示 "use `pl.submit`"）。

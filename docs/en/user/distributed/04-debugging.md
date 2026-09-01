@@ -7,7 +7,7 @@ one rank while the cause is on another.
 
 | Symptom | Likely Cause | Fix |
 | ------- | ------------ | --- |
-| **All ranks hang** | Notify/wait ordering — a rank is waiting on a peer that hasn't notified yet | Ensure every rank calls `notify` before any rank calls `wait`. The notify loop should precede the wait loop. |
+| **All ranks hang** | Notify/wait ordering — a rank is waiting on a peer that hasn't notified yet | Ensure every rank calls `notify` before any rank calls `wait`. The notify loop should precede the wait loop. When a rank's `wait` lives in a different dispatch from its own send, you can also pin the order explicitly with `pl.submit(..., deps=[send_task])` — see [Declaring an Edge](../tasks/02-submit.md). |
 | **Silent data corruption** | `remote_load` offsets or shape don't match what the peer stored | Verify offsets align with the peer's store offsets. A 1-element shift introduces a full row of garbage. |
 | **Signal cell never reaches expected value** | Wrong `NotifyOp`: used `Set` instead of `AtomicAdd` for a multi-participant barrier | Use `AtomicAdd` when N ranks contribute to the same slot; use `Set` for 1:1 exchanges. |
 | **Shape mismatch at compile time** | `NR` (world size) used in type annotations without `pl.dynamic` | Wrap runtime-resolved dims in `pl.dynamic("NR")`. The compiler needs the name to bind the runtime value. |

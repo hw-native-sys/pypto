@@ -6873,7 +6873,8 @@ class ASTParser:
 
         # Validate argument count before parsing args to fail fast.
         if func_obj is not None:
-            if as_submit:
+            host_submit = as_submit and self._func_level == ir.Level.HOST
+            if as_submit and not host_submit:
                 # For submit (pl.submit / pl.spmd_submit), Out- and InOut-
                 # directed parameters are runtime-allocated outputs that
                 # MAY be omitted at the call site. The lower bound is the
@@ -6888,20 +6889,28 @@ class ASTParser:
                 ok = expected_lo <= len(arg_nodes) <= expected_hi
             else:
                 expected_hi = len(func_obj.params)
-                ok = len(arg_nodes) == len(func_obj.params)
+                expected_lo = expected_hi
+                ok = len(arg_nodes) == expected_hi
             if not ok:
                 param_info = [
                     f"{p.name_hint}: {d.name}" for p, d in zip(func_obj.params, func_obj.param_directions)
                 ]
                 hint = (
                     f"Parameters: {param_info}. Out/InOut params may be omitted in submit calls."
-                    if as_submit
+                    if as_submit and not host_submit
                     else f"Parameters: {param_info}"
                 )
-                raise ParserTypeError(
-                    f"Function '{method_name}' expects "
+                message = (
+                    "Distributed HOST pl.submit(...) requires every callee argument, including "
+                    f"Out/InOut tensors; function '{method_name}' expects {expected_hi} argument(s), "
+                    f"got {len(arg_nodes)}"
+                    if host_submit
+                    else f"Function '{method_name}' expects "
                     + (f"{expected_lo}..{expected_hi}" if as_submit else f"{expected_hi}")
-                    + f" argument(s), got {len(arg_nodes)}",
+                    + f" argument(s), got {len(arg_nodes)}"
+                )
+                raise ParserTypeError(
+                    message,
                     span=span,
                     hint=hint,
                 )

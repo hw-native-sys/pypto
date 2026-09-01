@@ -40,6 +40,7 @@ import pypto.language.distributed as pld
 import pytest
 from pypto import codegen
 from pypto.backend import BackendType, pto_backend
+from pypto.language.parser.diagnostics import ParserTypeError
 from pypto.pypto_core import passes  # match the import path used by ut/conftest.py
 
 SIZE = 64
@@ -668,6 +669,91 @@ def test_two_groups_handle_routing_is_per_dispatch_not_state_bleed():
     assert scalars == ["__comm_d0", "__comm_d1"], (scalars, code)
 
 
+def test_host_submit_deps_lower_to_l3_add_dep_wait():
+    """Only a user-declared Submit dependency emits an L3 ordering edge."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self, data: pl.InOut[pld.DistributedTensor[[SIZE], pl.FP32]]
+        ) -> pld.DistributedTensor[[SIZE], pl.FP32]:
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            data_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+            data = pld.window(data_buf, [SIZE], dtype=pl.FP32)
+            _produced, producer_task = pl.submit(self.chip_orch, data, device=0)
+            _consumed, _consumer_task = pl.submit(
+                self.chip_orch,
+                data,
+                device=0,
+                deps=[producer_task],
+            )
+            return 0
+
+    generated = _lower(Prog)
+
+    assert "_ta_0_handle = _submit_chip(" in generated, generated
+    assert "producer_task = _ta_0_handle" in generated, generated
+    assert "_ta_1.add_dep_wait(producer_task)" in generated, generated
+    assert "_ta_1_handle = _submit_chip(" in generated, generated
+    assert "_consumer_task = _ta_1_handle" in generated, generated
+    assert "_last_task" not in generated, generated
+    # The unpacked DistributedTensor results alias comm windows, which resolve
+    # through the window handle and never live in the tensors dict.
+    assert 'tensors["_produced"]' not in generated, generated
+    assert 'tensors["_consumed"]' not in generated, generated
+    compile(generated, "<host_orch>", "exec")
+
+
+def test_dist_tensor_result_never_aliases_through_tensors_dict():
+    """A window-typed dispatch result must not emit a tensors[...] alias."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self, data: pl.InOut[pld.DistributedTensor[[SIZE], pl.FP32]]
+        ) -> pld.DistributedTensor[[SIZE], pl.FP32]:
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            data_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+            data = pld.window(data_buf, [SIZE], dtype=pl.FP32)
+            _result = self.chip_orch(data, device=0)
+            return 0
+
+    generated = _lower(Prog)
+
+    assert "_submit_chip(" in generated, generated
+    assert 'tensors["_result"]' not in generated, generated
+    compile(generated, "<host_orch>", "exec")
+
+
+def test_host_submit_requires_explicit_output_arguments():
+    """L3 TaskHandle submits cannot request lower-level output allocation."""
+
+    with pytest.raises(ParserTypeError, match="requires every callee argument, including Out/InOut tensors"):
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def chip_orch(
+                self,
+                data: pl.Tensor[[SIZE], pl.FP32],
+                out: pl.Out[pl.Tensor[[SIZE], pl.FP32]],
+            ) -> pl.Tensor[[SIZE], pl.FP32]:
+                return out
+
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host_orch(self, data: pl.Tensor[[SIZE], pl.FP32]):
+                _out, _task = pl.submit(self.chip_orch, data, device=0)
+                return 0
+
+
 def test_host_allreduce_builtin_codegen_uses_next_level_callable_key():
     @pl.program
     class Prog:
@@ -702,6 +788,7 @@ def test_host_allreduce_builtin_codegen_uses_next_level_callable_key():
     assert "distributed_collectives" not in generated, generated
     assert "pld_collectives" not in generated, generated
     assert "data = data" not in generated, generated
+    assert "add_dep_wait" not in generated, generated
 
     specs = cg.get_builtin_next_level_specs()
     assert len(specs) == 1

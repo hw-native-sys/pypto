@@ -138,6 +138,7 @@ class DistributedCodegen : public CodegenBase {
 
   // Expression visitors
   void VisitExpr_(const ir::CallPtr& op) override;
+  void VisitExpr_(const ir::SubmitPtr& op) override;
   void VisitExpr_(const ir::VarPtr& op) override;
   void VisitExpr_(const ir::ConstIntPtr& op) override;
   void VisitExpr_(const ir::ConstFloatPtr& op) override;
@@ -192,7 +193,8 @@ class DistributedCodegen : public CodegenBase {
   void EmitEntryMarker(const std::string& func_name);
 
   // Call-site lowering
-  void EmitCallToWorker(const ir::CallPtr& call, const ir::FunctionPtr& callee);
+  void EmitCallToWorker(const ir::CallPtr& call, const ir::FunctionPtr& callee,
+                        const ir::SubmitPtr& submit = nullptr);
   /**
    * @brief Emit a same-level worker / next-level orchestrator call if @p expr
    *        is one. Returns true if it emitted; false if @p expr is not a
@@ -312,6 +314,11 @@ class DistributedCodegen : public CodegenBase {
   // EmitCallToWorker when the callee has a TupleType return; consumed by
   // VisitStmt_(AssignStmt) when it encounters TupleGetItemExpr unpacking.
   std::map<std::pair<std::string, int>, std::string> tuple_element_tensors_;
+
+  // A distributed ``pl.submit`` returns the runtime TaskHandle as its final
+  // tuple element. Keep it separate from tensor aliases so a later
+  // ``deps=[tid]`` can lower to ``TaskArgs.add_dep_wait(tid)``.
+  std::map<std::pair<std::string, int>, std::string> tuple_element_task_handles_;
 
   // HOST orchestrator AssignStmt defs, populated before comm-domain emission.
   std::unordered_map<const ir::Var*, ir::ExprPtr> host_orch_var_defs_;

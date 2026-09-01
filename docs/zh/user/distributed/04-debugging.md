@@ -7,7 +7,7 @@ rank 上。
 
 | 症状 | 可能原因 | 修复 |
 | ---- | -------- | ---- |
-| **所有 rank 挂起** | notify/wait 顺序错误 | 确保 notify 循环在 wait 循环之前。 |
+| **所有 rank 挂起** | notify/wait 顺序错误 | 确保 notify 循环在 wait 循环之前。若某 rank 的 `wait` 与它自己的 send 分属不同派发，也可用 `pl.submit(..., deps=[send_task])` 显式钉住顺序——见[声明一条边](../tasks/02-submit.md)。 |
 | **静默数据损坏** | `remote_load` offsets 或 shape 不匹配 | 验证 offsets 与对端的 store offsets 对齐。 |
 | **Signal cell 永不达到期望值** | 错误 `NotifyOp` | 多参与者屏障用 `AtomicAdd`；1:1 交换用 `Set`。 |
 | **编译时形状不匹配** | `NR` 未使用 `pl.dynamic` | 将运行时维度包裹在 `pl.dynamic("NR")` 中。 |

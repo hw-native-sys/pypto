@@ -24,7 +24,8 @@ unit that fits your use case; combine if needed.
 
 ## Mechanism B — declare explicit task→task edges (`deps=`)
 
-These surfaces all produce `set_dependencies` codegen; choose by producer
+In L2 orchestration these surfaces all produce `set_dependencies` codegen
+(the distributed HOST lowering differs — see below); choose by producer
 shape (single kernel call, outlined `pl.at` region, or dependency-only fan-in).
 
 | Surface | Producer shape | Notes |
@@ -40,6 +41,18 @@ shape (single kernel call, outlined `pl.at` region, or dependency-only fan-in).
 plain auto-tracked orchestration, inside `pl.manual_scope()`, or with a
 `manual_dep=True` tensor; explicit edges are added on top of auto-tracking.
 The earlier "`deps=` only inside `pl.manual_scope`" restriction no longer applies.
+
+**Distributed HOST orchestrators lower differently.** A `pl.submit` in a
+HOST-level orchestrator of a distributed program keeps the same surface but
+targets the L3 runtime: the TaskId is backed by the opaque `TaskHandle`
+returned by `submit_next_level`, and each `deps=` entry lowers to
+`TaskArgs.add_dep_wait(...)` (an ordering-only edge — it does not retain
+producer resources) instead of `set_dependencies`. Only `deps=` is supported
+there: `core_num`, `sync_start`, `allow_early_resolve` and `predicate=` are
+rejected, `pl.spmd_submit` is unavailable, and every callee argument
+(including `Out` / `InOut`) must be passed because L3 does not allocate
+output tensors. Explicit edges add to the automatic per-rank comm ordering
+chain the distributed codegen maintains.
 
 Plain `out = self.kernel(...)` is **fire-and-forget**: it returns no task
 id, and `deps=` is rejected on it (the parser raises, hinting "use

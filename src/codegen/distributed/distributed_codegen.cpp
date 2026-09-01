@@ -89,6 +89,7 @@ std::string DistributedCodegen::Generate(const ir::ProgramPtr& program) {
   host_orch_var_defs_.clear();
   unwrap_hoisted_var_refs_ = false;
   tuple_element_tensors_.clear();
+  tuple_element_task_handles_.clear();
   emitted_builtin_variants_.clear();
   builtin_next_level_specs_.clear();
 
@@ -672,7 +673,8 @@ void DistributedCodegen::RegisterParamsAndEmitScalarBindings(const ir::FunctionP
 // ========================================================================
 
 bool DistributedCodegen::TryEmitHierarchyCall(const ir::ExprPtr& expr) {
-  auto call = std::dynamic_pointer_cast<const ir::Call>(expr);
+  const auto submit = ir::As<ir::Submit>(expr);
+  const auto call = submit ? ir::SubmitToCallView(submit) : ir::As<ir::Call>(expr);
   if (!call) return false;
   auto gv = std::dynamic_pointer_cast<const ir::GlobalVar>(call->op_);
   if (!gv) return false;
@@ -694,7 +696,7 @@ bool DistributedCodegen::TryEmitHierarchyCall(const ir::ExprPtr& expr) {
                                static_cast<int>(callee_level) == static_cast<int>(current_level) - 1;
 
   if (same_level_sub_worker || next_level_orch) {
-    EmitCallToWorker(call, callee);
+    EmitCallToWorker(call, callee, submit);
     return true;
   }
 
@@ -725,14 +727,31 @@ void DistributedCodegen::VisitStmt_(const ir::AssignStmtPtr& op) {
     INTERNAL_CHECK_SPAN(ir::AsVarLike(tge->tuple_) != nullptr, op->span_)
         << "Internal error: TupleGetItemExpr tuple_ must be a Var-like expression "
         << "for distributed codegen tuple-return unpacking";
+    // A DistributedTensor element aliases a comm window, which resolves through
+    // the type's window_buffer_ and never lives in the tensors dict — emitting
+    // a tensors[...] alias here would KeyError at run time.
+    if (ir::As<ir::DistributedTensorType>(op->var_->GetType())) {
+      declared_vars_.insert(var_name);
+      current_target_var_ = "";
+      return;
+    }
     VisitExpr(tge->tuple_);
     std::string tuple_var = current_expr_value_;
     current_expr_value_ = "";
-    auto it = tuple_element_tensors_.find(std::make_pair(tuple_var, tge->index_));
-    INTERNAL_CHECK_SPAN(it != tuple_element_tensors_.end(), op->span_)
-        << "Internal error: TupleGetItemExpr unpacking found no Out parameter "
-        << "for tuple var '" << tuple_var << "' index " << tge->index_;
-    emitter_.EmitLine("tensors[\"" + var_name + "\"] = tensors[\"" + it->second + "\"]");
+    const auto scalar_type = ir::As<ir::ScalarType>(op->var_->GetType());
+    if (scalar_type && scalar_type->dtype_ == DataType::TASK_ID) {
+      auto it = tuple_element_task_handles_.find(std::make_pair(tuple_var, tge->index_));
+      INTERNAL_CHECK_SPAN(it != tuple_element_task_handles_.end(), op->span_)
+          << "Internal error: distributed Submit TaskId unpacking found no TaskHandle "
+          << "for tuple var '" << tuple_var << "' index " << tge->index_;
+      emitter_.EmitLine(var_name + " = " + it->second);
+    } else {
+      auto it = tuple_element_tensors_.find(std::make_pair(tuple_var, tge->index_));
+      INTERNAL_CHECK_SPAN(it != tuple_element_tensors_.end(), op->span_)
+          << "Internal error: TupleGetItemExpr unpacking found no Out parameter "
+          << "for tuple var '" << tuple_var << "' index " << tge->index_;
+      emitter_.EmitLine("tensors[\"" + var_name + "\"] = tensors[\"" + it->second + "\"]");
+    }
     declared_vars_.insert(var_name);
     current_target_var_ = "";
     return;
@@ -990,6 +1009,12 @@ void DistributedCodegen::VisitExpr_(const ir::CallPtr& op) {
   current_expr_value_ = op_name + "(" + FormatArgs(op->args_) + ")";
 }
 
+void DistributedCodegen::VisitExpr_(const ir::SubmitPtr& op) {
+  INTERNAL_CHECK(op != nullptr) << "Internal error: null Submit";
+  INTERNAL_CHECK_SPAN(TryEmitHierarchyCall(op), op->span_)
+      << "Internal error: distributed codegen only supports Submit for hierarchy calls";
+}
+
 void DistributedCodegen::VisitExpr_(const ir::VarPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null Var";
   if (unwrap_hoisted_var_refs_) {
@@ -1033,9 +1058,23 @@ void DistributedCodegen::VisitExpr_(const ir::ConstBoolPtr& op) {
 // Call-site lowering
 // ========================================================================
 
-void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::FunctionPtr& callee) {
+void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::FunctionPtr& callee,
+                                          const ir::SubmitPtr& submit) {
   bool is_sub = IsSubWorker(callee);
   std::string ta_var = "_ta_" + std::to_string(task_args_counter_++);
+
+  CHECK_SPAN(!submit || !is_sub, call->span_)
+      << "pl.submit(...) in distributed HOST orchestration only supports next-level CHIP dispatches; "
+         "submit same-level SubWorker calls directly instead";
+  CHECK_SPAN(!submit || (!submit->core_num_.has_value() && !submit->sync_start_ &&
+                         !submit->allow_early_resolve_ && !submit->predicate_.has_value()),
+             call->span_)
+      << "Distributed HOST pl.submit(...) supports explicit deps only; core_num, sync_start, "
+         "allow_early_resolve, and predicate are not available for L3 TaskHandle submissions";
+  INTERNAL_CHECK_SPAN(!submit || call->args_.size() == callee->params_.size(), call->span_)
+      << "Internal error: distributed HOST Submit must cover every callee parameter; got "
+      << call->args_.size() << " arguments for " << callee->params_.size() << " parameters in '"
+      << callee->name_ << "'";
 
   // ``device=`` attr (set by N3 parser) is the single source of truth for
   // both the per-rank ``__comm_d0[<r>]`` subscript (used by DistributedTensor
@@ -1203,10 +1242,33 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
     // chip count is only known at run time, so the choice cannot be baked here.
     // ``_submit_chip`` also owns the per-dispatch DFX ``output_prefix``
     // namespacing — see its docstring.
+    if (submit) {
+      INTERNAL_CHECK_SPAN(!target.empty(), submit->span_)
+          << "Internal error: distributed Submit must have an assignment target";
+      for (size_t i = 0; i < submit->deps_.size(); ++i) {
+        const auto dep_type = ir::As<ir::ScalarType>(submit->deps_[i]->GetType());
+        CHECK_SPAN(dep_type && dep_type->dtype_ == DataType::TASK_ID, submit->span_)
+            << "Distributed HOST pl.submit(..., deps=[...]) accepts individual TaskId handles only; "
+               "dependency "
+            << i << " has type " << submit->deps_[i]->GetType()->TypeName();
+        VisitExpr(submit->deps_[i]);
+        const std::string dep = current_expr_value_;
+        current_expr_value_.clear();
+        emitter_.EmitLine(ta_var + ".add_dep_wait(" + dep + ")");
+      }
+    }
     emitter_.EmitLine("_keep.append(" + ta_var + ")");
     const std::string worker_arg = rank_expr.empty() ? "None" : rank_expr;
-    emitter_.EmitLine("_submit_chip(orch, callables[\"" + callee->name_ + "\"], " + ta_var + ", config, " +
-                      worker_arg + ")");
+    const std::string submit_expr = "_submit_chip(orch, callables[\"" + callee->name_ + "\"], " + ta_var +
+                                    ", config, " + worker_arg + ")";
+    if (submit) {
+      const std::string task_handle = ta_var + "_handle";
+      emitter_.EmitLine(task_handle + " = " + submit_expr);
+      tuple_element_task_handles_[std::make_pair(target, static_cast<int>(callee->return_types_.size()))] =
+          task_handle;
+    } else {
+      emitter_.EmitLine(submit_expr);
+    }
   }
 
   // If this call has an assignment target (return value), alias it to the OUT
@@ -1218,6 +1280,7 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
     //   2. tuple[T1, T2]    → return_types_ = [T1, T2]             (flat entries)
     // Both produce TupleGetItemExpr for unpacking, so handle both.
     bool is_tuple_return =
+        submit != nullptr ||
         std::dynamic_pointer_cast<const ir::TupleType>(callee->return_types_.front()) != nullptr ||
         callee->return_types_.size() > 1;
     if (is_tuple_return) {
@@ -1236,11 +1299,18 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
           ++out_idx;
         }
       }
-    } else {
+      if (submit && out_idx == 0) {
+        tuple_element_tensors_[std::make_pair(target, 0)] = target;
+      }
+    } else if (!ir::As<ir::DistributedTensorType>(call->GetType())) {
       // Single return: alias target to the first Out/InOut parameter tensor.
+      // Comm windows resolve through window_buffer_, not the tensors dict, so
+      // a DistributedTensor return gets no alias and window-typed params are
+      // skipped when picking the aliased tensor.
       for (size_t i = 0; i < callee->param_directions_.size() && i < call->args_.size(); ++i) {
         if (callee->param_directions_[i] == ir::ParamDirection::Out ||
             callee->param_directions_[i] == ir::ParamDirection::InOut) {
+          if (ir::As<ir::DistributedTensorType>(call->args_[i]->GetType())) continue;
           VisitExpr(call->args_[i]);
           std::string out_arg = current_expr_value_;
           current_expr_value_ = "";

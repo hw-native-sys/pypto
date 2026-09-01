@@ -105,6 +105,25 @@ a, tid = pl.spmd_submit(self.k1, x, core_num=8)
 
 `core_num` 是**必需的关键字** —— 位置槽属于 kernel。`sync_start`（默认 `False`）要求所有 block 原子启动。`deps=`、`allow_early_resolve=` 与 `predicate=` 的行为与 `pl.submit` 完全一致。
 
+### 分布式 HOST 编排里的 `pl.submit`
+
+在分布式程序的 HOST 级编排函数（`@pl.function(level=pl.Level.HOST,
+role=pl.Role.Orchestrator)`）里，`pl.submit` 以同样的方式命名一次 chip 派发 —— 但 TaskId 由
+L3 运行时的不透明任务句柄（`TaskHandle`）背书，每个 `deps=[producer]` 条目下译为
+`TaskArgs.add_dep_wait(producer)`：一条只约束执行顺序、不延长 producer 资源生命期的边。显式边叠加在自动维护的 per-rank 通信排序之上；当同一 rank 的派发通过通信 window 交互、而你想显式钉住顺序时使用它 —— 例如 WAIT 与同 rank 的 SEND 分属不同派发：
+
+```python
+_sent, send_task = pl.submit(self.send_orch, x, echo, dst, signal, peer, device=rank)
+_received, _ = pl.submit(self.recv_orch, out, dst, signal, device=rank,
+                         deps=[send_task])
+```
+
+与上文 L2 形式的两点差异：
+
+- **必须传入被调方的每一个实参，包括 `Out` / `InOut` 张量** —— L3 不分配输出张量，省略的槽位没有任何东西能补上。
+- **只有 `deps=` 可用。** `core_num`、`sync_start`、`allow_early_resolve` 与 `predicate=`
+  在 L3 没有对应物，会被拒绝；`pl.spmd_submit` 同样在 HOST 级不可用。
+
 ### 用 TaskId 数组做扇入
 
 一个 TaskId 只指代一个任务。要等待**一组**任务 —— 比如一个循环产出的全部生产者 —— 把它们收进一个 `pl.TASK_ID` 的 `pl.array`，再把数组本身作为依赖传入：
@@ -131,6 +150,7 @@ out, _ = pl.submit(self.consumer, data, out, deps=[tids])
 | **`deps= entries must be a TaskId variable`** | TaskId 是对扁平 submit 结果做下标得到的 | 把 TaskId 绑定到独立的名字再传 |
 | **`pl.spmd() does not accept 'deps=' here`** | 向裸 `with` 或 `for` 形式传了 `deps=` | 用 `as tid:` 绑定该区域 —— 只有这种形式接受 `deps=` |
 | **`core_num` 缺失** | 它是 `pl.spmd_submit` 的必需关键字 | 传 `core_num=N`；位置槽是 kernel 的实参 |
+| **`requires every callee argument, including Out/InOut tensors`** | 分布式 HOST submit 省略了 `Out`/`InOut` 实参 | 传入被调方的每一个实参 —— L3 不分配输出 |
 | **消费者只等到了循环的最后一个生产者** | 复用了一个 TaskId 而没有收集 | 收进 `pl.TASK_ID` 的 `pl.array` 并把数组传入 |
 | **auto 作用域里显式边似乎被忽略** | 并没有 —— 等待集合是并集 | 去别处找**缺失**的边，而不是被丢弃的边 |
 

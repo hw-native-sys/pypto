@@ -128,6 +128,31 @@ a, tid = pl.spmd_submit(self.k1, x, core_num=8)
 `sync_start` (default `False`) requires all blocks to launch atomically. `deps=`,
 `allow_early_resolve=` and `predicate=` behave exactly as on `pl.submit`.
 
+### `pl.submit` in a distributed HOST orchestrator
+
+Inside a distributed program's HOST-level orchestrator (`@pl.function(level=pl.Level.HOST,
+role=pl.Role.Orchestrator)`), `pl.submit` names a chip dispatch the same way — but the
+TaskId is backed by the L3 runtime's opaque `TaskHandle`, and each `deps=[producer]` entry
+lowers to `TaskArgs.add_dep_wait(producer)`: an ordering-only edge that does not extend the
+producer's resource lifetime. Explicit edges add to the automatically maintained per-rank
+communication ordering; declare one when a rank's dispatches interact through a comm window
+in an order you want pinned explicitly — e.g. a WAIT living in a different dispatch from the
+same rank's SEND:
+
+```python
+_sent, send_task = pl.submit(self.send_orch, x, echo, dst, signal, peer, device=rank)
+_received, _ = pl.submit(self.recv_orch, out, dst, signal, device=rank,
+                         deps=[send_task])
+```
+
+Two differences from the L2 form above:
+
+- **Every callee argument is required, including `Out` / `InOut` tensors** — L3 does not
+  allocate output tensors, so nothing can fill an omitted slot.
+- **Only `deps=` is available.** `core_num`, `sync_start`, `allow_early_resolve` and
+  `predicate=` have no L3 counterpart and are rejected; `pl.spmd_submit` is likewise not
+  available at HOST level.
+
 ### Fan-in through a TaskId array
 
 One TaskId names one task. To wait on a *set* of tasks — a loop's worth of producers —
@@ -160,6 +185,7 @@ like any other. See [Control Flow](../language/02-control-flow.md).
 | **`deps= entries must be a TaskId variable`** | A TaskId reached by indexing a flat submit result | Bind the TaskId to its own name and pass that |
 | **`pl.spmd() does not accept 'deps=' here`** | `deps=` was passed to the bare `with` or the `for` form | Bind the region with `as tid:` — only that form takes `deps=` |
 | **`core_num` missing** | It is a required keyword on `pl.spmd_submit` | Pass `core_num=N`; positional slots are the kernel's arguments |
+| **`requires every callee argument, including Out/InOut tensors`** | A distributed HOST submit omitted an `Out`/`InOut` argument | Pass every callee argument — L3 does not allocate outputs |
 | **A consumer only waits on the last producer of a loop** | One TaskId was reused instead of collected | Collect into a `pl.array` of `pl.TASK_ID` and pass the array |
 | **Explicit edge seems ignored in auto scope** | It is not — the wait set is the union | Look for a *missing* edge elsewhere, not a discarded one |
 
