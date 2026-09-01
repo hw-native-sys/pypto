@@ -406,14 +406,14 @@ jobs:
     #
     # One leg per architecture, because the cache it fills is the host's own
     # disk and the self-hosted fleet is no longer one machine. The `cpu` and
-    # `npu` pools each span an aarch64 box (cpu-N / npu-N) and an x86_64 one
-    # (infra024-cpu-x64-N / infra024-npu-a2a3-N), and #2525 dropped the `arm64`
-    # pin from every consumer so a job lands on whichever is free — measured
-    # over eight runs, 43% of cpu-pool jobs and half the npu ones go to the
-    # x86_64 host. A single-arch prebuild would leave that host cold and those
-    # jobs building in place, which is exactly what this removes. Each leg's
-    # cpu runner shares a machine, and therefore a CI_CACHE_ROOT, with that
-    # machine's npu runners, so warming from the cpu pool reaches both.
+    # `npu` pools each span one aarch64 box and one x86_64 box, and #2525
+    # dropped the `arm64` pin from every consumer so a job lands on whichever of
+    # the two is free — measured over eight runs, 43% of cpu-pool jobs and half
+    # the npu ones go to the x86_64 host. A single-arch prebuild would leave
+    # that host cold and those jobs building in place, which is exactly what
+    # this removes. Each leg's cpu runner shares a machine, and therefore a
+    # CI_CACHE_ROOT, with that machine's npu runners, so warming from the cpu
+    # pool reaches both.
     #
     # `arm64` / `x64` are the labels the runner application applies on its own
     # (`ARM64` / `X64`); label matching is case-insensitive, and the lowercase
@@ -1114,24 +1114,20 @@ jobs:
     # TEST MODE: keep the device runner so DEVICE_ID/DEVICE_ID exist and pin
     # task-submit to that card (validates the new compile-card-free + task-submit
     # execute flow deterministically). FLIP TO PROD: change this to
-    # `[self-hosted, linux, x64, cpu]` and drop --task-submit-device below so
+    # `[self-hosted, linux, cpu]` and drop --task-submit-device below so
     # cases borrow any free card via `--device auto`.
     #
-    # Pinned to x86_64 to free the aarch64 npu box for the jobs that can only
-    # run there. Since #2525 the `npu` label spans an aarch64 box (runners
-    # `npu-N`) and an x86_64 one (the `*-npu-a2a3-N` instances), and both
-    # `dist-system-tests` and `pypto-lib-model` are pinned to `arm64, npu` (see
-    # their own comments) — so every run of this job that lands on aarch64 takes
-    # that box away from them. `x64` is the label the runner application applies
-    # on its own (`X64`; label matching is case-insensitive) — the same pair
-    # `prebuild-wheels` matrixes over.
+    # Unpinned: takes whichever half of the `npu` pool is free. This job used to
+    # carry an `x64` pin, and its only purpose was to keep the aarch64 npu box
+    # free for `dist-system-tests` / `pypto-lib-model`, which were pinned to it.
+    # Those pins are gone (the x86_64 npu host has been repaired), so the
+    # reservation has nothing left to reserve.
     #
-    # This is a scheduling pin, not a health one, and unlike `dist-system-tests`
-    # it is not working around anything: over the 120 most recent ci.yml runs
-    # both jobs go red on BOTH halves at indistinguishable rates (aarch64 4 red
-    # / 55, x86_64 9 red / 87), failing the same batched step. Lift it if the
-    # arm64 pins it makes room for are lifted.
-    runs-on: [self-hosted, linux, x64, npu]
+    # Lifting it costs no signal, because it was a scheduling pin and not a
+    # health one: over the 120 ci.yml runs before it was lifted both jobs went
+    # red on BOTH halves at indistinguishable rates (aarch64 4 red / 55, x86_64
+    # 9 red / 87), failing the same batched step.
+    runs-on: [self-hosted, linux, npu]
     defaults:
       run:
         working-directory: st-checkout
@@ -1248,24 +1244,20 @@ jobs:
       contents: read
     # TEST MODE: keep the device runner so DEVICE_ID exists and pin task-submit
     # to that card. FLIP TO PROD: change this to
-    # `[self-hosted, linux, x64, cpu]` and drop --task-submit-device / the
+    # `[self-hosted, linux, cpu]` and drop --task-submit-device / the
     # explicit --device below so cases borrow any free card via `--device auto`.
     #
-    # Pinned to x86_64 to free the aarch64 npu box for the jobs that can only
-    # run there. Since #2525 the `npu` label spans an aarch64 box (runners
-    # `npu-N`) and an x86_64 one (the `*-npu-a2a3-N` instances), and both
-    # `dist-system-tests` and `pypto-lib-model` are pinned to `arm64, npu` (see
-    # their own comments) — so every run of this job that lands on aarch64 takes
-    # that box away from them. `x64` is the label the runner application applies
-    # on its own (`X64`; label matching is case-insensitive) — the same pair
-    # `prebuild-wheels` matrixes over.
+    # Unpinned: takes whichever half of the `npu` pool is free. This job used to
+    # carry an `x64` pin, and its only purpose was to keep the aarch64 npu box
+    # free for `dist-system-tests` / `pypto-lib-model`, which were pinned to it.
+    # Those pins are gone (the x86_64 npu host has been repaired), so the
+    # reservation has nothing left to reserve.
     #
-    # This is a scheduling pin, not a health one, and unlike `dist-system-tests`
-    # it is not working around anything: over the 120 most recent ci.yml runs
-    # both jobs go red on BOTH halves at indistinguishable rates (aarch64 4 red
-    # / 55, x86_64 9 red / 87), failing the same batched step. Lift it if the
-    # arm64 pins it makes room for are lifted.
-    runs-on: [self-hosted, linux, x64, npu]
+    # Lifting it costs no signal, because it was a scheduling pin and not a
+    # health one: over the 120 ci.yml runs before it was lifted both jobs went
+    # red on BOTH halves at indistinguishable rates (aarch64 4 red / 55, x86_64
+    # 9 red / 87), failing the same batched step.
+    runs-on: [self-hosted, linux, npu]
     defaults:
       run:
         working-directory: st-direct-checkout
@@ -1426,43 +1418,46 @@ jobs:
     # TEST MODE: keep the 2-device runner and pin task-submit to DEVICE_ID
     # (see system-tests). FLIP TO PROD: cpu runner + `--device auto --device-num 2`.
     #
-    # Pinned to aarch64, which is a workaround and not a fix. Since #2525 gave
-    # the `npu` pool a second host, the label spans an aarch64 box (runners
-    # `npu-N`) and an x86_64 one (`infra024-npu-a2a3-N`), and this job's
-    # communication cases do not survive the x86_64 half. Over the 19 most
-    # recent completed runs: 11/11 green on aarch64, 3 green / 5 red on x86_64.
-    #
-    # The reason to pin is not the red check, it is that the failure WEDGES THE
-    # CARD. A red run starts with one collective hanging --
+    # Runs on the whole `npu` pool, x86_64 half included. It was pinned to
+    # aarch64 for a while and the evidence behind that pin is worth keeping:
+    # over the 19 completed runs before it, this job was 11/11 green on aarch64
+    # and 3 green / 5 red on the x86_64 half, and a red run there did not merely
+    # fail, it WEDGED THE CARD. One collective hangs --
     #   chip run lane is poisoned: finalize_native_run failed
     #   aclrtSynchronizeStreamWithTimeout (AICPU) failed: 507018
     # -- and from there the device cannot be re-entered at all: 207 subsequent
     # cases die in `simpler_init failed with code 507033`, and the recovery path
     # fails the same way (`force_reset_device: aclrtSetDevice(2) failed: 507033`,
     # `attach_current_thread: rtSetDevice(12) failed: 507033`). Both borrowed
-    # cards end up unusable and CI cannot reset them itself.
+    # cards end up unusable and CI cannot reset them itself, and that host's
+    # ten npu runner instances share ONE set of cards, so the damage is not
+    # contained to the job that hit it.
     #
-    # `infra024-npu-a2a3-1..10` are ten runner instances on ONE machine sharing
-    # ONE set of cards, so cards left in that state are not contained to the job
-    # that hit it. pypto-lib-model is pinned alongside this job as a precaution
-    # for the same reason; see its comment for why that evidence is weaker.
+    # The pin is lifted because THE HOST WAS REPAIRED. Corroborating signal from
+    # the 43 most recent ci.yml runs (2026-08-31 11:28 -> 2026-09-01 06:40,
+    # sampled 2026-09-01): that host's single-card npu jobs are 62 green / 5 red
+    # (`system-tests` 32/2, `system-tests-direct` 30/3), and the reds are
+    # scattered rather than clustered -- none of the host-wide failure waves that
+    # went with the wedging. What that window does NOT contain is a MULTI-CARD
+    # run there: this job and `pypto-lib-model` were pinned to aarch64 for all 43
+    # of them, so the first two-card runs on x86_64 are the ones that follow this
+    # change. Watch them.
     #
-    # Two things this evidence does NOT establish, so do not repeat them as
-    # fact. (1) That this job is the origin of the host's bad cards: over one
-    # morning the x86_64 host showed a failure wave across ALL its npu jobs,
-    # single-card `system-tests` / `system-tests-direct` included, and a
-    # two-card run of this job passed in the middle of it -- which it could not
-    # have done if the cards were globally wedged. A likelier reading is that
-    # some cards are bad at any given time and this job, needing two, draws one
-    # more often. (2) That the split is architectural: the 3 green x86_64 runs
-    # interleave with the red ones in time, so this is that host's health, not
-    # its ISA. Pinning buys a trustworthy signal; it does not diagnose the host.
+    # The earlier analysis also recorded two things its evidence did NOT
+    # establish, and both cut against ever restoring the pin. (1) That this job
+    # is the origin of the host's bad cards: over one morning the x86_64 host
+    # showed a failure wave across ALL its npu jobs, single-card `system-tests` /
+    # `system-tests-direct` included, and a two-card run of this job passed in
+    # the middle of it -- which it could not have done if the cards were globally
+    # wedged. A likelier reading is that some cards are bad at any given time and
+    # this job, needing two, draws one more often. (2) That the split is
+    # architectural: the 3 green x86_64 runs interleaved with the red ones in
+    # time, so this was that host's health, not its ISA.
     #
-    # Cost: the job no longer draws from the x86_64 half of the npu pool, so it
-    # can queue behind the aarch64 box for a two-card slot. #2525 dropped the
-    # arch label from every self-hosted job deliberately; remove this one again
-    # once multi-card comm stops wedging cards there -- it is not permanent.
-    runs-on: [self-hosted, linux, arm64, npu]
+    # So if the wedging returns, the thing to fix is the host again, not an arch
+    # label -- the aarch64 box is being decommissioned and will not be there to
+    # move to.
+    runs-on: [self-hosted, linux, npu]
     defaults:
       run:
         working-directory: dist-checkout
@@ -1548,26 +1543,24 @@ jobs:
     # TEST MODE: keep the device runner and pin task-submit to its card (see
     # system-tests). FLIP TO PROD: cpu runner + `--device auto`.
     #
-    # Pinned to aarch64 as a PRECAUTION, weaker evidence than the pin on
-    # dist-system-tests. One step here is multi-card -- the DeepSeek moe example
+    # Runs on the whole `npu` pool, x86_64 half included. It was pinned to
+    # aarch64 as a PRECAUTION alongside dist-system-tests, on weaker evidence
+    # than that job's: one step here is multi-card -- the DeepSeek moe example
     # at `--ep 2` -- and a failing multi-card run is known to leave the cards it
     # borrowed unusable (see dist-system-tests for the 507018 -> 507033 cascade
-    # and the failing force_reset). `infra024-npu-a2a3-1..10` are ten runner
-    # instances on ONE machine sharing ONE set of cards, so damage there is not
-    # contained to the job that caused it.
+    # and the failing force_reset), on a host whose ten runner instances share
+    # ONE set of cards.
     #
-    # What is NOT established: that this job has ever wedged anything. Its moe
-    # step has never itself failed (1 pass on x86_64; otherwise skipped behind
-    # an earlier step), and the x86_64 host shows a host-wide npu failure wave
-    # that also takes down single-card jobs, so the two red runs here -- both in
-    # single-card Qwen3 steps -- are at least as likely to be victims of that
-    # wave as evidence of anything this job did. The pin buys insurance against
-    # a failure mode whose damage lands on OTHER jobs, not a fix for this one.
-    #
-    # Cost: nine single-card steps lose the x86_64 half of the pool to contain
-    # one multi-card step. This is the first thing to unpin -- do it as soon as
-    # the x86_64 host is healthy, or split the moe step into its own job.
-    runs-on: [self-hosted, linux, arm64, npu]
+    # It was always the first of the two to unpin, and it goes with
+    # dist-system-tests now that the x86_64 npu host has been repaired (see that
+    # job for the health data). Nothing here was ever shown to wedge anything:
+    # the moe step has never itself failed (1 pass on x86_64; otherwise skipped
+    # behind an earlier step), and the two red runs were both single-card Qwen3
+    # steps during a host-wide x86_64 npu failure wave that also took down
+    # single-card jobs. If multi-card runs start wedging cards again, split the
+    # moe step into its own job rather than reaching for an arch label -- nine
+    # single-card steps should not pay for one multi-card one.
+    runs-on: [self-hosted, linux, npu]
     defaults:
       run:
         working-directory: lib-checkout
