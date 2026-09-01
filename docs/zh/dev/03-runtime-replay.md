@@ -7,8 +7,8 @@
 需要在改完 kernel cpp 之后重新跑一遍编译产物（典型场景：手调 kernel
 后用 PMU / swimlane / args-dump 验证修改是否正确），使用 debug 专用
 的 [`pypto.runtime.debug.replay`](../../../python/pypto/runtime/debug/replay.py)
-模块。L2 构建复用与普通 `compiled(...)` 派发相同的 `execute_compiled` 路径,
-L3 构建则经由 `execute_distributed_compiled` 派发。两者的 DFX 开关行为完全一致。
+模块。L2 构建复用与普通 `compiled(...)` 派发相同的路径，L3 构建则经由从目录重建的
+`DistributedCompiledProgram` 派发。两者的 DFX 开关行为完全一致。
 
 ```python
 from pypto.runtime.debug import replay
@@ -101,9 +101,8 @@ python build_output/<jit_dir>/debug/run.py
 
 ## 对重放的单芯片构建做 benchmark
 
-`execute_compiled(work_dir, ...)` 是目录驱动的，但 `benchmark()` 需要一个活的
-`CompiledProgram` 来拿 orchestration 参数元数据——这份元数据由 IR `Program`
-派生，而目录重放没有 IR。所以 `ir.compile()` 会在 `kernel_config.py` 旁边额外
+重放是目录驱动的，但 `benchmark()` 需要一个活的 `CompiledProgram` 来拿
+orchestration 参数元数据——这份元数据由 IR `Program` 派生，而目录里没有 IR。所以 `ir.compile()` 会在 `kernel_config.py` 旁边额外
 写一个 `compiled_meta.json`（参数元数据 + platform + backend），
 `CompiledProgram.from_dir()` 只凭它就能重建出完全可调用的程序——
 **不重新编译 pypto、不重跑 pass**：
@@ -179,7 +178,7 @@ build_output/<jit_dir>/
 
 `replay` 会自动识别这种布局（无顶层 `kernel_config.py` 但存在
 `orchestration/host_orch.py`），并改用 simpler `Worker(level=3)` 派发，
-而不是 `execute_compiled`。同样的 CLI / `debug/run.py` 流程无需改动：
+而不是单芯片路径。同样的 CLI / `debug/run.py` 流程无需改动：
 
 ```bash
 python -m pypto.runtime.debug.replay build_output/<jit_dir>/
@@ -192,15 +191,15 @@ python build_output/<jit_dir>/debug/run.py
 被识别，行为与单芯片完全一致。
 
 重建方式与上面单芯片一节相同，只凭 `distributed_meta.json`。
-两个入口直接暴露这个能力：
+既可以一次性调用，也可以留作可复用对象：
 
 ```python
-from pypto.runtime import execute_distributed_compiled
-# 一次性（对标单芯片的 execute_compiled）：
-execute_distributed_compiled("build_output/<jit_dir>/", [a, b, c])
+from pypto.ir import DistributedCompiledProgram, DistributedConfig
+
+# 一次性（对标单芯片的 CompiledProgram.from_dir）：
+DistributedCompiledProgram.from_dir("build_output/<jit_dir>/")(a, b, c)
 
 # 可复用对象（需要时覆盖持久化的 platform / 设备）：
-from pypto.ir import DistributedCompiledProgram, DistributedConfig
 prog = DistributedCompiledProgram.from_dir(
     "build_output/<jit_dir>/",
     platform="a2a3",

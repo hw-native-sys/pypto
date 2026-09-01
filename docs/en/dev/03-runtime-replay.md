@@ -8,9 +8,10 @@ To re-run a previously compiled `build_output/<jit_dir>/` after editing
 one or more kernel cpp files — typically to verify a hand-tuned change
 under PMU / swimlane / args-dump — use the debug-only
 [`pypto.runtime.debug.replay`](../../../python/pypto/runtime/debug/replay.py)
-module. An L2 build reuses the same `execute_compiled` path as a normal
-`compiled(...)` dispatch; an L3 build is dispatched through
-`execute_distributed_compiled`. Either way DFX flags behave identically.
+module. An L2 build reuses the same dispatch path as a normal
+`compiled(...)` call; an L3 build is dispatched through a
+`DistributedCompiledProgram` rebuilt from the directory. Either way DFX
+flags behave identically.
 
 ```python
 from pypto.runtime.debug import replay
@@ -110,12 +111,12 @@ module / CLI is still usable directly against the output directory.
 
 ## Benchmarking a replayed single-chip build
 
-`execute_compiled(work_dir, ...)` is directory-driven, but `benchmark()` needs a
-live `CompiledProgram` for the orchestration param metadata — derived from the IR
-`Program`, which a directory replay does not have. So `ir.compile()` also writes a
-`compiled_meta.json` sidecar (param metadata + platform + backend) next to
-`kernel_config.py`, and `CompiledProgram.from_dir()` rebuilds a fully callable
-program from it — **no pypto recompile, no pass re-run**:
+A replay is directory-driven, but `benchmark()` needs a live `CompiledProgram`
+for the orchestration param metadata — derived from the IR `Program`, which a
+directory has none of. So `ir.compile()` also writes a `compiled_meta.json`
+sidecar (param metadata + platform + backend) next to `kernel_config.py`, and
+`CompiledProgram.from_dir()` rebuilds a fully callable program from it — **no
+pypto recompile, no pass re-run**:
 
 **`from_dir()` reloads metadata only — it does not rebuild sources.** Unlike
 `replay`, it runs neither the `.pto` → cpp splice nor the binary-cache
@@ -196,8 +197,8 @@ build_output/<jit_dir>/
 
 `replay` detects this layout automatically (no top-level `kernel_config.py`
 but `orchestration/host_orch.py` present) and dispatches via simpler
-`Worker(level=3)` instead of `execute_compiled`. The same CLI / `debug/run.py`
-flow works unchanged:
+`Worker(level=3)` instead of the single-chip path. The same CLI /
+`debug/run.py` flow works unchanged:
 
 ```bash
 python -m pypto.runtime.debug.replay build_output/<jit_dir>/
@@ -210,15 +211,15 @@ The `.pto` → cpp splice and `.so` invalidation recurse into every
 kernel cpp directly) is picked up exactly as in the single-chip case.
 
 Reconstruction works as in the single-chip case above, from
-`distributed_meta.json` alone. Two entry points expose it directly:
+`distributed_meta.json` alone, in either a one-shot or a reusable shape:
 
 ```python
-from pypto.runtime import execute_distributed_compiled
-# one-shot (distributed counterpart of execute_compiled):
-execute_distributed_compiled("build_output/<jit_dir>/", [a, b, c])
+from pypto.ir import DistributedCompiledProgram, DistributedConfig
+
+# one-shot (distributed counterpart of CompiledProgram.from_dir):
+DistributedCompiledProgram.from_dir("build_output/<jit_dir>/")(a, b, c)
 
 # reusable object (override the persisted platform / devices if needed):
-from pypto.ir import DistributedCompiledProgram, DistributedConfig
 prog = DistributedCompiledProgram.from_dir(
     "build_output/<jit_dir>/",
     platform="a2a3",

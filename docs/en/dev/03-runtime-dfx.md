@@ -135,7 +135,7 @@ them, matching the existing one-shot L3 replay semantics.
 The L2 subprocess rebuilds the orchestration arguments two ways: from `golden.py`
 when driven by the pytest harness (deterministic inputs → faithful graph), or
 from a recorded spec when driven by the compiled-program API
-(`execute_compiled`). The task graph can be routed by tensor *values*, not just
+(`compiled(...)`). The task graph can be routed by tensor *values*, not just
 scalars (e.g. paged-attention `block_tables` / `seq_lens`), so the spec preserves
 real data wherever it can cross the process boundary: host `torch.Tensor`s are
 saved and reloaded verbatim, scalars are preserved exactly, and only

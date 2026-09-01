@@ -4,7 +4,7 @@ PyPTO exposes Simpler's per-task ring sizing as three optional overrides on
 [`RunConfig`](../../../python/pypto/runtime/runner.py). They let you size the
 runtime's per-task ring resources for a single dispatch without touching the
 compiled artifact or any global state. This works on both the L2 single-chip
-path (`compiled(...)` / `execute_compiled()` / `ChipWorker.run()`) and the L3 distributed path
+path (`compiled(...)` / `CompiledProgram.from_dir(...)` / `ChipWorker.run()`) and the L3 distributed path
 (`DistributedWorker.run()` / the one-shot `compiled(...)`).
 
 The runtime keeps its task-launch resources in *ring buffers*. Each override
@@ -63,7 +63,7 @@ than raising an opaque `TypeError` from the power-of-two check.
 
 ## Usage
 
-### L2 single-chip (`compiled(...)` / `execute_compiled`)
+### L2 single-chip (`compiled(...)` / `ChipWorker.run`)
 
 ```python
 from pypto import ir
@@ -79,19 +79,17 @@ compiled = ir.compile(MyProgram, **config.compile_kwargs())
 compiled(a, b, c, config=config)
 ```
 
-The directory-driven entry point accepts the same per-dispatch config. Its
-existing explicit `platform`, `device_id`, DFX, and AICPU arguments keep their
-current precedence; `config` carries the ring overrides that previously had no
-route to `CallConfig.runtime_env`:
+A handle rebuilt from a build directory takes the same per-dispatch config, so
+a replay can be re-sized without recompiling:
 
 ```python
-from pypto.runtime import RunConfig, execute_compiled
+from pypto.ir import CompiledProgram
+from pypto.runtime import RunConfig
 
-execute_compiled(
-    work_dir,
-    [a, b, c],
-    platform="a2a3",
-    device_id=0,
+CompiledProgram.from_dir(work_dir, platform="a2a3")(
+    a,
+    b,
+    c,
     config=RunConfig(platform="a2a3", ring_heap=512 * 1024 * 1024),
 )
 ```
@@ -176,7 +174,7 @@ overwrites that slot. So:
   `runtime/src/common/task_interface/call_config.h`.
 - Worker-API examples: `runtime/examples/workers/{l2,l3}/per_task_runtime_env/`.
 - L3 dispatch entry points that accept the per-dispatch `RunConfig`:
-  `DistributedWorker.run` / `__call__` and `execute_distributed` in
-  [`distributed_runner.py`](../../../python/pypto/runtime/distributed_runner.py).
+  `DistributedWorker.run` and `DistributedCompiledProgram.__call__`, which
+  reaches [`distributed_runner.py`](../../../python/pypto/runtime/distributed_runner.py).
 - Orthogonal runtime diagnostics on the same `RunConfig`:
   [03-runtime-dfx.md](03-runtime-dfx.md).

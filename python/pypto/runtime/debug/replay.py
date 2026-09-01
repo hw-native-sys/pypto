@@ -12,9 +12,9 @@
 Debug-only entry point for the "I edited a kernel cpp by hand, now re-run
 with DFX (PMU / swimlane / args_dump / dep_gen / scope_stats) enabled" workflow.
 
-An L2 build reuses :func:`pypto.runtime.runner.execute_compiled`, so its
-device-side execution path is identical to a normal ``compiled(...)``
-dispatch; an L3 build goes through ``execute_distributed_compiled``.
+An L2 build reuses the implementation behind a normal ``compiled(...)``
+dispatch, so its device-side execution path is identical; an L3 build
+reconstructs a ``DistributedCompiledProgram`` and calls it.
 The added value is:
 
 1. A friendlier signature for the replay use case
@@ -61,7 +61,7 @@ from pypto.runtime.runner import (
     _SWIMLANE_MAX_LEVEL,
     RunConfig,
     _DfxOpts,
-    execute_compiled,
+    _execute_compiled,
 )
 
 __all__ = ["replay", "invalidate_binary_cache"]
@@ -117,7 +117,8 @@ def replay(
             contains ``kernel_config.py``, ``orchestration/`` and ``kernels/``.
             An L3 distributed build (``orchestration/host_orch.py`` +
             ``next_levels/{rank}/`` + ``distributed_meta.json``) is detected
-            automatically and dispatched via ``execute_distributed_compiled``.
+            automatically and dispatched via
+            :meth:`~pypto.ir.DistributedCompiledProgram.from_dir`.
         *tensors: Positional ``torch.Tensor`` (host), :class:`DeviceTensor`,
             or ctypes scalar arguments matching the orchestration entry's
             parameter order. Outputs are written in-place into the
@@ -158,7 +159,7 @@ def replay(
     work_dir = Path(work_dir)
     # L3 distributed builds have no top-level ``kernel_config.py`` (per-rank
     # configs live under ``next_levels/{rank}/``); they are identified by the
-    # generated HOST orchestrator and dispatched via ``execute_distributed_compiled``.
+    # generated HOST orchestrator and dispatched through DistributedCompiledProgram.
     is_l3 = (
         not (work_dir / "kernel_config.py").exists()
         and (work_dir / "orchestration" / "host_orch.py").exists()
@@ -204,13 +205,14 @@ def replay(
         # L3: reconstruct the distributed program from the build dir and dispatch
         # via simpler Worker(level=3); per-dispatch ring and DFX settings are
         # forwarded through its CallConfig.
-        from pypto.runtime.distributed_runner import (  # noqa: PLC0415
-            execute_distributed_compiled,
+        from pypto.ir.distributed_compiled_program import (  # noqa: PLC0415
+            DistributedCompiledProgram,
         )
 
-        execute_distributed_compiled(work_dir, list(tensors), config=config, platform=config.platform)
+        compiled = DistributedCompiledProgram.from_dir(work_dir, platform=config.platform)
+        compiled(*tensors, config=config)
     else:
-        execute_compiled(
+        _execute_compiled(
             work_dir,
             list(tensors),
             platform=config.platform,

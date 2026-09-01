@@ -239,7 +239,7 @@ class DistributedCompiledProgram:
     def _persist_metadata(self) -> None:
         """Write ``<output_dir>/distributed_meta.json`` for :meth:`from_dir`.
 
-        Captures exactly what :func:`execute_distributed` reads from the
+        Captures exactly what :func:`_execute_distributed` reads from the
         post-pass IR — the HOST-orchestrator param metadata (post-SSA names,
         directions, shapes, dtypes) plus the return-type count — alongside the
         platform / backend / :class:`DistributedConfig` so a later reload can
@@ -425,7 +425,7 @@ class DistributedCompiledProgram:
         live Worker; use :meth:`prepare`, allocate it through the returned
         ``DistributedWorker``, then call ``worker.run(...)``.
         """
-        from pypto.runtime.distributed_runner import execute_distributed  # noqa: PLC0415
+        from pypto.runtime.distributed_runner import _execute_distributed  # noqa: PLC0415
 
         param_infos, output_indices, return_types = self._get_metadata()
         n_params = len(param_infos)
@@ -465,7 +465,7 @@ class DistributedCompiledProgram:
                 )
             coerced.append(arg)
 
-        execute_distributed(self, coerced, config)
+        _execute_distributed(self, coerced, config)
 
         if not return_style:
             return None

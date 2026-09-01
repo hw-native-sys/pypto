@@ -17,7 +17,7 @@ This pypto-owned wrapper widens that conversion to also accept worker-resident
 :class:`~pypto.runtime.DeviceTensor` handles (and already-built simpler
 ``Tensor`` values), so distributed programs can be invoked with
 pre-uploaded device buffers — mirroring the L2 path in
-:func:`pypto.runtime.runner.execute_compiled`.
+:func:`pypto.runtime.runner._execute_compiled`.
 
 Host ``torch.Tensor`` arguments are delegated to
 ``simpler_setup.torch_interop.make_tensor_arg(worker, tensor)``. Never route

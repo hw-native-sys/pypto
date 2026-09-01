@@ -10,9 +10,11 @@
 """
 PyPTO runtime runner.
 
-Provides :class:`RunConfig` — the settings that drive a run — and
-:func:`execute_compiled`, which dispatches an already-compiled artifact
-directory onto an Ascend NPU (or simulator).
+Provides :class:`RunConfig` — the settings that drive a run — and the
+dispatch implementation that puts an already-compiled artifact directory
+onto an Ascend NPU (or simulator). The supported way in is
+:meth:`pypto.ir.CompiledProgram.from_dir`; the module-level
+:func:`execute_compiled` is a deprecated wrapper over the same code.
 
 Compilation is :func:`pypto.ir.compile`'s job; nothing here compiles for you.
 :meth:`RunConfig.compile_kwargs` carries the compile-side settings across::
@@ -851,7 +853,7 @@ def _coerced_to_orch_args(
     L2 boundary. Tensors and scalars are added in separate passes because
     codegen addresses them from independent pools.
 
-    Used by both :func:`execute_compiled` and the extraction path on
+    Used by both :func:`_execute_compiled` and the extraction path on
     :class:`pypto.ir.CompiledProgram` (``_build_orch_args``).
     """
     from .task_interface import (  # noqa: PLC0415
@@ -975,7 +977,7 @@ def _execute_on_device(
 ) -> None:
     """Load inputs, execute on device, and validate against golden.
 
-    Shared execution logic used by both :func:`execute_compiled` and the test harness
+    Shared execution logic used by both :func:`_execute_compiled` and the test harness
     (``test_runner.py``).  The caller is responsible for compiling binaries
     via ``compile_and_assemble`` and passing the result here.
 
@@ -1322,7 +1324,7 @@ def _generate_swimlane(
 # ---------------------------------------------------------------------------
 
 
-def execute_compiled(  # noqa: PLR0913
+def _execute_compiled(  # noqa: PLR0913
     work_dir: str | Path,
     args: list[torch.Tensor | DeviceTensor | _SimpleCData],
     *,
@@ -1463,3 +1465,66 @@ def execute_compiled(  # noqa: PLR0913
     # ``deps.json`` and the deps-render hint fires only on explicit dep_gen.
     if dfx_dir is not None:
         _collect_dfx_artifacts(dfx_dir, platform, dfx)
+
+
+_EXECUTE_COMPILED_DEPRECATION = (
+    "pypto.runtime.execute_compiled is deprecated; reconstruct the artifact and "
+    "call it: ir.CompiledProgram.from_dir(work_dir)(*args, config=cfg). Fold this "
+    "call's explicit platform / device_id / dfx / aicpu_thread_num into cfg first "
+    "-- on the artifact path a supplied config is the sole source of all four. "
+    "The directory-driven function will be removed in a future release."
+)
+
+
+def execute_compiled(  # noqa: PLR0913
+    work_dir: str | Path,
+    args: list[torch.Tensor | DeviceTensor | _SimpleCData],
+    *,
+    platform: str,
+    device_id: int,
+    dfx: _DfxOpts = _DfxOpts(),
+    level: int = 2,
+    aicpu_thread_num: int | None = None,
+    analyze_auto_scopes_for_deps: bool = False,
+    config: RunConfig | None = None,
+) -> None:
+    """Deprecated. Dispatch a build directory without recompiling.
+
+    :meth:`pypto.ir.CompiledProgram.from_dir` rebuilds the same handle from the
+    same directory and dispatches it through the same code path. **The two
+    disagree on precedence, so the migration is not a plain rename.** Here, an
+    explicit ``platform`` / ``device_id`` / ``dfx`` / ``aicpu_thread_num`` wins
+    and ``config`` supplies only the ring overrides. On the artifact path a
+    supplied ``config`` is the sole source of all four — including ``platform``,
+    which then shadows ``from_dir(platform=...)``. Since ``RunConfig.platform``
+    defaults to ``"a2a3sim"``, dropping the explicit arguments would silently
+    move the run to the simulator. Fold them into the config instead::
+
+        # before -- explicit args win; ``cfg`` was read for ring sizing only
+        execute_compiled(work_dir, args, platform="a2a3", device_id=0, config=cfg)
+
+        # after -- ``cfg`` carries every execution setting
+        cfg = dataclasses.replace(cfg, platform="a2a3", device_id=0)
+        ir.CompiledProgram.from_dir(work_dir)(*args, config=cfg)
+
+    ``dfx`` and ``aicpu_thread_num`` have no separate spelling on that path:
+    the DFX toggles and ``aicpu_thread_num`` are already ``RunConfig`` fields,
+    read fresh on every dispatch. ``from_dir(platform=...)`` still decides the
+    platform for a call made *without* a config.
+
+    Emits a :class:`DeprecationWarning` and forwards to the same implementation
+    the artifact path uses. Behaviour of this function is unchanged; only the
+    name is going away.
+    """
+    warnings.warn(_EXECUTE_COMPILED_DEPRECATION, DeprecationWarning, stacklevel=2)
+    _execute_compiled(
+        work_dir,
+        args,
+        platform=platform,
+        device_id=device_id,
+        dfx=dfx,
+        level=level,
+        aicpu_thread_num=aicpu_thread_num,
+        analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
+        config=config,
+    )

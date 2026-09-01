@@ -30,6 +30,16 @@ one config object can drive both phases::
     c = torch.zeros(128, 128)
     compiled(a, b, c, config=config)
 
+``execute_compiled`` and ``execute_distributed_compiled`` dispatch a build
+directory instead of an artifact handle. Both are **deprecated**: rebuild the
+handle with :meth:`pypto.ir.CompiledProgram.from_dir` or
+:meth:`pypto.ir.DistributedCompiledProgram.from_dir` and call it. They still
+work, and forward to the same implementation, but each emits a
+``DeprecationWarning`` and will be removed in a future release. Migrating
+``execute_compiled`` means moving its explicit ``platform`` / ``device_id`` /
+``dfx`` / ``aicpu_thread_num`` onto the :class:`RunConfig` first — see its
+docstring for why a plain rename changes where the run lands.
+
 ``docs/en/dev/08-entry-points.md`` maps every compile and execution entry point
 to the layer it belongs to.
 """

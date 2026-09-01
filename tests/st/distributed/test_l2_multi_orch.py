@@ -161,7 +161,7 @@ class TestL2MultiOrch:
 
         Compiles the multi-orch program with ptoas (no ``skip_ptoas``),
         then invokes one sub-orch through subscript dispatch. Verifies
-        (a) ``execute_compiled`` accepts a ``next_levels/<name>/``
+        (a) ``_execute_compiled`` accepts a ``next_levels/<name>/``
         directory and (b) the kernel produces correct output on real
         hardware.
 

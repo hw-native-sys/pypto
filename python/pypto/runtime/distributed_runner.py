@@ -348,7 +348,7 @@ def _load_generated_module(path: Path) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Setup steps shared by the one-shot ``execute_distributed`` path and the
+# Setup steps shared by the one-shot ``_execute_distributed`` path and the
 # reusable ``DistributedWorker`` handle. Keeping them as free functions lets
 # both paths run identical, expensive setup (compile_and_assemble, module load,
 # Worker construction + registration) without duplicating it.
@@ -1245,7 +1245,7 @@ def _dispatch(
     native_handle.result()
 
 
-def execute_distributed(
+def _execute_distributed(
     compiled: DistributedCompiledProgram,
     coerced_args: Sequence[torch.Tensor | DeviceTensor | StackedDeviceTensor],
     config: RunConfig | None = None,
@@ -1385,6 +1385,14 @@ def execute_distributed(
         _collect_l3_swimlane(output_dir, compiled.platform)
 
 
+_EXECUTE_DISTRIBUTED_COMPILED_DEPRECATION = (
+    "pypto.runtime.execute_distributed_compiled is deprecated; reconstruct the "
+    "artifact and call it: ir.DistributedCompiledProgram.from_dir(output_dir, "
+    "platform=...)(*args, config=...). The directory-driven function will be "
+    "removed in a future release."
+)
+
+
 def execute_distributed_compiled(
     output_dir: str | Path,
     args: Sequence[torch.Tensor | DeviceTensor | StackedDeviceTensor | ctypes._SimpleCData],
@@ -1401,13 +1409,19 @@ def execute_distributed_compiled(
 ):
     """Reconstruct a distributed program from ``output_dir`` and run it once.
 
-    The distributed counterpart of :func:`pypto.runtime.execute_compiled`: it
-    reconstructs a :class:`~pypto.ir.distributed_compiled_program.DistributedCompiledProgram`
-    from an already-compiled build directory (via
-    :meth:`DistributedCompiledProgram.from_dir`) and dispatches it once —
-    **without** re-running the pypto compile. This is the entry point the
-    ``runtime_dir`` replay workflow uses for L3 programs (point it at a
-    ``build_output/`` with hand-edited ``.pto``/``.cpp`` and re-run on device).
+    Deprecated. It reconstructs a
+    :class:`~pypto.ir.DistributedCompiledProgram` from an already-compiled
+    build directory (via :meth:`DistributedCompiledProgram.from_dir`) and
+    dispatches it once — **without** re-running the pypto compile. Both steps
+    are public, so the replacement is the two lines this function wraps::
+
+        # before
+        execute_distributed_compiled(work_dir, args, config=cfg, platform="a2a3")
+
+        # after
+        ir.DistributedCompiledProgram.from_dir(work_dir, platform="a2a3")(*args, config=cfg)
+
+    Emits a :class:`DeprecationWarning`; behaviour is unchanged.
 
     Args:
         output_dir: A build directory produced by a prior ``ir.compile`` of a
@@ -1431,6 +1445,8 @@ def execute_distributed_compiled(
         The call result: allocated output tensor(s) for a return-style program,
         otherwise ``None`` (outputs written in place into the passed arguments).
     """
+    warnings.warn(_EXECUTE_DISTRIBUTED_COMPILED_DEPRECATION, DeprecationWarning, stacklevel=2)
+
     from pypto.ir.distributed_compiled_program import DistributedCompiledProgram  # noqa: PLC0415
 
     compiled = DistributedCompiledProgram.from_dir(

@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pypto.backend import BackendType
 from pypto.pypto_core.passes import MemoryPlanner
-from pypto.runtime.runner import RunConfig, _DfxOpts, execute_compiled
+from pypto.runtime.runner import RunConfig, _DfxOpts, _execute_compiled
 
 
 class TestRunConfigPlatformResolution:
@@ -702,7 +702,7 @@ class TestRunConfigCompileForwarding:
         )
         monkeypatch.setitem(sys.modules, "pypto.runtime.device_runner", fake_device_runner)
 
-        execute_compiled(
+        _execute_compiled(
             tmp_path,
             [],
             platform="a2a3sim",
@@ -746,7 +746,7 @@ class TestRunConfigCompileForwarding:
             ring_heap=512 * 1024 * 1024,
             ring_dep_pool=[64, 0, 0, 256],
         )
-        execute_compiled(
+        _execute_compiled(
             tmp_path,
             [],
             platform="a2a3",
@@ -790,7 +790,7 @@ class TestRunConfigCompileForwarding:
         )
         monkeypatch.setitem(sys.modules, "pypto.runtime.device_runner", fake_device_runner)
 
-        execute_compiled(tmp_path, [], platform="a2a3sim", device_id=0)
+        _execute_compiled(tmp_path, [], platform="a2a3sim", device_id=0)
 
         assert captured["enable_sdma"] is expected_enable_sdma
 

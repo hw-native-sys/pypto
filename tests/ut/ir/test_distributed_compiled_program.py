@@ -10,7 +10,7 @@
 """Unit tests for ``DistributedCompiledProgram.__call__`` argument acceptance.
 
 These tests compile a small L3 program (no device needed, ``skip_ptoas=True``)
-and mock ``execute_distributed`` so the calling convention can be exercised
+and mock ``_execute_distributed`` so the calling convention can be exercised
 without a Worker. Resident tensors require a prepared Worker because their
 owner Buffer/provenance cannot belong to a temporary one-shot Worker.
 """
@@ -85,7 +85,7 @@ def test_one_shot_rejects_device_tensor_with_prepare_guidance(compiled):
     weight = DeviceTensor(0xABCD0000, (128, 128), torch.float32)  # worker-resident
     out = torch.zeros(128, 128, dtype=torch.float32)
 
-    with patch("pypto.runtime.distributed_runner.execute_distributed") as mock_exec:
+    with patch("pypto.runtime.distributed_runner._execute_distributed") as mock_exec:
         with pytest.raises(TypeError, match=r"compiled\.prepare.*worker\.alloc_tensor"):
             compiled(a, weight, out)
     mock_exec.assert_not_called()
@@ -96,7 +96,7 @@ def test_call_rejects_non_tensor(compiled):
     a = torch.zeros(128, 128, dtype=torch.float32)
     out = torch.zeros(128, 128, dtype=torch.float32)
 
-    with patch("pypto.runtime.distributed_runner.execute_distributed"):
+    with patch("pypto.runtime.distributed_runner._execute_distributed"):
         with pytest.raises(TypeError, match=r"host torch\.Tensor"):
             compiled(a, "not a tensor", out)  # type: ignore[arg-type]
 
@@ -107,7 +107,7 @@ def test_call_validates_device_tensor_shape(compiled):
     bad = DeviceTensor(0xABCD0000, (64, 64), torch.float32)  # wrong shape
     out = torch.zeros(128, 128, dtype=torch.float32)
 
-    with patch("pypto.runtime.distributed_runner.execute_distributed"):
+    with patch("pypto.runtime.distributed_runner._execute_distributed"):
         with pytest.raises(TypeError, match=r"compiled\.prepare"):
             compiled(a, bad, out)
 
@@ -125,7 +125,7 @@ def test_one_shot_rejects_stacked_device_tensor_with_prepare_guidance(compiled):
     stacked = _stacked((128, 128))  # per-card resident shards for the [128,128] param
     out = torch.zeros(128, 128, dtype=torch.float32)
 
-    with patch("pypto.runtime.distributed_runner.execute_distributed") as mock_exec:
+    with patch("pypto.runtime.distributed_runner._execute_distributed") as mock_exec:
         with pytest.raises(TypeError, match=r"worker\.alloc_stacked_tensor"):
             compiled(a, stacked, out)
     mock_exec.assert_not_called()
@@ -137,7 +137,7 @@ def test_call_validates_stacked_device_tensor_shape(compiled):
     bad = _stacked((64, 64))  # wrong full_shape for the [128,128] param
     out = torch.zeros(128, 128, dtype=torch.float32)
 
-    with patch("pypto.runtime.distributed_runner.execute_distributed"):
+    with patch("pypto.runtime.distributed_runner._execute_distributed"):
         with pytest.raises(TypeError, match=r"compiled\.prepare"):
             compiled(a, bad, out)
 
@@ -182,12 +182,12 @@ def test_from_dir_round_trips_param_metadata(compiled, tmp_path):
 
 
 def test_from_dir_dispatches_via_runner(compiled, tmp_path):
-    """A reconstructed program is callable and reaches execute_distributed."""
+    """A reconstructed program is callable and reaches _execute_distributed."""
     reloaded = DistributedCompiledProgram.from_dir(tmp_path)
     a = torch.zeros(128, 128, dtype=torch.float32)
     b = torch.zeros(128, 128, dtype=torch.float32)
     f = torch.zeros(128, 128, dtype=torch.float32)
-    with patch("pypto.runtime.distributed_runner.execute_distributed") as mock_exec:
+    with patch("pypto.runtime.distributed_runner._execute_distributed") as mock_exec:
         reloaded(a, b, f)
     mock_exec.assert_called_once()
     # arg 0 is the compiled program; arg 1 the coerced args in param order.

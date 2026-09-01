@@ -113,7 +113,7 @@ resident handle 和已 fork 的层级，但进入两个独立的 `Worker.run()` 
 执行程序，且不会在中间恢复可写参数，这与现有 one-shot L3 replay 语义一致。
 
 L2 子进程用两种方式重建编排实参：被 pytest harness 驱动时从 `golden.py` 重新生成
-（确定性输入 → 图忠实），被编译产物 API（`execute_compiled`）驱动时从记录下来的
+（确定性输入 → 图忠实），被编译产物 API（`compiled(...)`）驱动时从记录下来的
 规格重建。任务图可能由张量**值**（而不只是 scalar）路由，例如 paged-attention 的
 `block_tables` / `seq_lens`，所以规格会尽量保留真实数据：host `torch.Tensor`
 原样存盘再加载、scalar 原样保留，只有驻留在设备上、子进程无法访问的 `DeviceTensor`

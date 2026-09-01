@@ -1585,16 +1585,16 @@ class TestBindSubWorkers:
 
 
 class TestOneShotRegression:
-    """The one-shot execute_distributed path still works after helper extraction."""
+    """The one-shot _execute_distributed path still works after helper extraction."""
 
     def test_one_shot_setup_dispatch_close(self, patched_setup):
-        from pypto.runtime.distributed_runner import execute_distributed  # noqa: PLC0415
+        from pypto.runtime.distributed_runner import _execute_distributed  # noqa: PLC0415
 
         compiled = _fake_compiled([_param("a", [8, 8]), _param("b", [8, 8])], [])
         a = torch.zeros(8, 8, dtype=torch.float32)
         b = torch.zeros(8, 8, dtype=torch.float32)
 
-        execute_distributed(compiled, [a, b])
+        _execute_distributed(compiled, [a, b])
 
         patched_setup["assemble"].assert_called_once()
         patched_setup["construct"].assert_called_once()
@@ -1603,31 +1603,31 @@ class TestOneShotRegression:
         patched_setup["worker"].close.assert_called_once()
 
     def test_one_shot_rejects_resident_tensor_before_setup(self, patched_setup):
-        from pypto.runtime.distributed_runner import execute_distributed  # noqa: PLC0415
+        from pypto.runtime.distributed_runner import _execute_distributed  # noqa: PLC0415
 
         compiled = _fake_compiled([_param("a", [8, 8])], [])
         with pytest.raises(TypeError, match=r"same prepared DistributedWorker"):
-            execute_distributed(compiled, [DeviceTensor(0x1000, (8, 8), torch.float32)])
+            _execute_distributed(compiled, [DeviceTensor(0x1000, (8, 8), torch.float32)])
         patched_setup["assemble"].assert_not_called()
 
     def test_one_shot_enables_sdma_when_a_chip_requires_it(self, patched_setup):
-        from pypto.runtime.distributed_runner import execute_distributed  # noqa: PLC0415
+        from pypto.runtime.distributed_runner import _execute_distributed  # noqa: PLC0415
 
         patched_setup["assemble"].return_value = ({"chip_orch": object()}, "rt_name", True)
         compiled = _fake_compiled([_param("a", [8, 8])], [])
 
-        execute_distributed(compiled, [torch.zeros(8, 8, dtype=torch.float32)])
+        _execute_distributed(compiled, [torch.zeros(8, 8, dtype=torch.float32)])
 
         assert patched_setup["construct"].call_args.kwargs["enable_sdma"] is True
 
     def test_one_shot_retries_incomplete_worker_cleanup(self, patched_setup):
-        from pypto.runtime.distributed_runner import execute_distributed  # noqa: PLC0415
+        from pypto.runtime.distributed_runner import _execute_distributed  # noqa: PLC0415
 
         worker = patched_setup["worker"]
         worker.close.side_effect = [RuntimeError("cleanup pending"), None]
         compiled = _fake_compiled([_param("a", [8, 8])], [])
 
-        execute_distributed(compiled, [torch.zeros(8, 8, dtype=torch.float32)])
+        _execute_distributed(compiled, [torch.zeros(8, 8, dtype=torch.float32)])
 
         assert worker.close.call_count == 2
 

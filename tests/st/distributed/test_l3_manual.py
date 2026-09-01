@@ -109,7 +109,7 @@ class TestL3Manual:
         )
 
         # 2) Assemble the ChipCallable ourselves — the same call
-        # ``execute_distributed`` makes per next_levels/<name>/, but pointed at
+        # ``_execute_distributed`` makes per next_levels/<name>/, but pointed at
         # the L2 root because no HOST-level outlining happened.
         chip_callable, runtime_name, _ = compile_and_assemble(out_dir, platform=test_config.platform)
 

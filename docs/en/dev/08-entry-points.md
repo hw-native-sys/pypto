@@ -36,7 +36,7 @@ into loadable binaries. It is internal and has no supported entry point.
 | A `CompiledProgram` | One dispatch | `compiled(*args, config=...)` |
 | A `CompiledProgram` and device-resident data | Many dispatches | `ChipWorker.run(compiled, *args)` |
 | A `DistributedCompiledProgram` | Many dispatches | `compiled.prepare()` → `DistributedWorker.run(...)` |
-| A build directory on disk | One dispatch, no recompile | `execute_compiled(work_dir, args, ...)` |
+| A build directory on disk | One dispatch, no recompile | `CompiledProgram.from_dir(work_dir)(*args, config=...)` |
 | A `CompiledProgram` | Timed dispatches | `benchmark(compiled, args, ...)` |
 
 ## Compile
@@ -74,8 +74,9 @@ and tests should take the three names from `pypto.ir`.
 | ----- | ----- | ----- | -------- |
 | `CompiledProgram.__call__` | artifact | artifact handle | [`ir/compiled_program.py`](../../../python/pypto/ir/compiled_program.py) |
 | `Worker.run` / `ChipWorker.run` / `DistributedWorker.run` | execute | artifact + worker | [`runtime/worker.py`](../../../python/pypto/runtime/worker.py) |
-| `runtime.execute_compiled` | execute | output directory | [`runtime/runner.py`](../../../python/pypto/runtime/runner.py) |
-| `execute_distributed_compiled` | execute | output directory | [`runtime/distributed_runner.py`](../../../python/pypto/runtime/distributed_runner.py) |
+| `CompiledProgram.from_dir` / `DistributedCompiledProgram.from_dir` | artifact | output directory | [`ir/compiled_program.py`](../../../python/pypto/ir/compiled_program.py) |
+| `runtime.execute_compiled` *(deprecated)* | execute | output directory | [`runtime/runner.py`](../../../python/pypto/runtime/runner.py) |
+| `execute_distributed_compiled` *(deprecated)* | execute | output directory | [`runtime/distributed_runner.py`](../../../python/pypto/runtime/distributed_runner.py) |
 | `device_runner.execute_on_device` | assembly | assembled binaries | [`runtime/device_runner.py`](../../../python/pypto/runtime/device_runner.py) |
 | `execute_artifact_dir` / `execute_batch_manifest` | CLI | output directory | [`runtime/execute_artifact.py`](../../../python/pypto/runtime/execute_artifact.py) |
 
@@ -84,9 +85,50 @@ and `DistributedWorker.run` dispatch an artifact, both implementing
 `Worker.run`. `PassPipeline.run` is unrelated — it transforms a `Program` — as
 is `PassManager.run_passes`.
 
-`execute_compiled` and `execute_distributed_compiled` are the L2 and L3
-directory-driven paths. They skip the PyPTO compile entirely, which is what
-makes [replay](03-runtime-replay.md) possible.
+Dispatching a directory rather than a live handle is what makes
+[replay](03-runtime-replay.md) possible: the PyPTO compile is skipped
+entirely. `from_dir` is how you get there — it rebuilds the artifact handle
+from the persisted sidecar, and calling that handle takes the same path as a
+handle that never left memory.
+
+`execute_compiled` and `execute_distributed_compiled` were the L2 and L3
+spellings of that, and are **deprecated**. Each still forwards to the same
+implementation, and each emits a `DeprecationWarning`.
+
+The L3 one is a plain rename — it already was `from_dir` plus a call:
+
+```python
+# before
+execute_distributed_compiled(work_dir, args, config=cfg, platform="a2a3")
+
+# after
+ir.DistributedCompiledProgram.from_dir(work_dir, platform="a2a3")(*args, config=cfg)
+```
+
+**The L2 one is not**, because the two paths disagree on precedence:
+
+| Setting | `execute_compiled` | `CompiledProgram.__call__` |
+| ------- | ------------------ | -------------------------- |
+| `platform` | the explicit argument | `config.platform` when a config is passed, else the artifact's |
+| `device_id` / `dfx` / `aicpu_thread_num` | the explicit arguments | always from `config` |
+| ring overrides | from `config` | from `config` |
+
+So a `config` passed for ring sizing alone silently takes over the rest, and
+`RunConfig.platform` defaults to `a2a3sim` — dropping the explicit arguments
+would move the run to the simulator. Fold them into the config:
+
+```python
+# before -- explicit args win; cfg was read for ring sizing only
+execute_compiled(work_dir, args, platform="a2a3", device_id=0, config=cfg)
+
+# after -- cfg carries every execution setting
+cfg = dataclasses.replace(cfg, platform="a2a3", device_id=0)
+ir.CompiledProgram.from_dir(work_dir)(*args, config=cfg)
+```
+
+`dfx` and `aicpu_thread_num` need no translation: the DFX toggles and
+`aicpu_thread_num` are already `RunConfig` fields. `from_dir(platform=...)`
+still decides the platform for a call made *without* a config.
 
 ## Driving both phases from one config
 
@@ -118,6 +160,8 @@ These have no stability guarantee. They are not in any `__all__`, and code
 outside PyPTO should not import them:
 
 - `pypto.ir.compile` — `_ensure_orchestration_headers`
+- `pypto.runtime.runner` — `_execute_compiled`
+- `pypto.runtime.distributed_runner` — `_execute_distributed`
 - `pypto.ir.compiled_program` — `CompiledProgram._build_orch_args`,
   `CompiledProgram._build_call_config`
 - `pypto.runtime.device_runner` — `compile_and_assemble`, `compile_single_kernel`,

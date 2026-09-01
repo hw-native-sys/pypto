@@ -9,7 +9,7 @@
 
 """Unit tests for :mod:`pypto.runtime.debug.replay`.
 
-``execute_compiled`` is mocked so these tests run without a device and
+``_execute_compiled`` is mocked so these tests run without a device and
 without the optional ``simpler`` runtime package.
 """
 
@@ -127,7 +127,7 @@ def test_replay_routes_to_execute_compiled(tmp_path: Path) -> None:
     a = torch.zeros(2)
     b = torch.zeros(2)
     config = RunConfig(platform="a2a3sim", device_id=3, ring_heap=512 * 1024 * 1024)
-    with patch.object(replay_module, "execute_compiled") as ec:
+    with patch.object(replay_module, "_execute_compiled") as ec:
         replay(work_dir, a, b, config=config)
     ec.assert_called_once()
     call_args = ec.call_args
@@ -148,7 +148,7 @@ def test_replay_forwards_dfx_flags(tmp_path: Path) -> None:
         enable_dep_gen=True,
         enable_scope_stats=True,
     )
-    with patch.object(replay_module, "execute_compiled") as ec:
+    with patch.object(replay_module, "_execute_compiled") as ec:
         replay(work_dir, config=config)
     dfx = ec.call_args.kwargs["dfx"]
     assert dfx.enable_chip_swimlane == 4  # True normalizes to the full level
@@ -162,7 +162,7 @@ def test_replay_invalidates_by_default(tmp_path: Path) -> None:
     work_dir = _make_build_output(tmp_path)
     bin_file = _touch(work_dir / "cache" / "incore_aiv_foo.bin")
     so_file = _touch(work_dir / "kernels" / "aiv" / "foo.so")
-    with patch.object(replay_module, "execute_compiled"):
+    with patch.object(replay_module, "_execute_compiled"):
         replay(work_dir)
     assert not bin_file.exists()
     assert not so_file.exists()
@@ -172,7 +172,7 @@ def test_replay_skips_invalidation_when_recompile_false(tmp_path: Path) -> None:
     work_dir = _make_build_output(tmp_path)
     bin_file = _touch(work_dir / "cache" / "incore_aiv_foo.bin")
     so_file = _touch(work_dir / "kernels" / "aiv" / "foo.so")
-    with patch.object(replay_module, "execute_compiled"):
+    with patch.object(replay_module, "_execute_compiled"):
         replay(work_dir, recompile=False)
     assert bin_file.exists()
     assert so_file.exists()
@@ -193,7 +193,7 @@ def test_replay_calls_rebuild_before_invalidate(tmp_path: Path) -> None:
         call_order.append("invalidate")
 
     with (
-        patch.object(replay_module, "execute_compiled"),
+        patch.object(replay_module, "_execute_compiled"),
         patch.object(replay_module, "rebuild_kernel_cpp_from_pto", side_effect=_record_rebuild),
         patch.object(replay_module, "invalidate_binary_cache", side_effect=_record_invalidate),
     ):
@@ -204,7 +204,7 @@ def test_replay_calls_rebuild_before_invalidate(tmp_path: Path) -> None:
 def test_replay_skips_rebuild_from_pto_when_disabled(tmp_path: Path) -> None:
     work_dir = _make_build_output(tmp_path)
     with (
-        patch.object(replay_module, "execute_compiled"),
+        patch.object(replay_module, "_execute_compiled"),
         patch.object(replay_module, "rebuild_kernel_cpp_from_pto") as rb,
     ):
         replay(work_dir, rebuild_from_pto=False)
@@ -213,7 +213,7 @@ def test_replay_skips_rebuild_from_pto_when_disabled(tmp_path: Path) -> None:
 
 def test_replay_prints_execute_banner(tmp_path: Path, capsys) -> None:
     work_dir = _make_build_output(tmp_path)
-    with patch.object(replay_module, "execute_compiled"):
+    with patch.object(replay_module, "_execute_compiled"):
         replay(work_dir, rebuild_from_pto=False, recompile=False)
     out = capsys.readouterr().out
     assert "[execute] running on device..." in out
@@ -225,8 +225,11 @@ def test_replay_missing_kernel_config_raises(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# L3 distributed builds route to execute_distributed_compiled (#1689)
+# L3 distributed builds route through DistributedCompiledProgram (#1689)
 # ---------------------------------------------------------------------------
+
+
+_L3_FROM_DIR = "pypto.ir.distributed_compiled_program.DistributedCompiledProgram.from_dir"
 
 
 def _make_l3_build_output(tmp_path: Path) -> Path:
@@ -236,19 +239,20 @@ def _make_l3_build_output(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def test_replay_routes_l3_to_execute_distributed_compiled(tmp_path: Path) -> None:
+def test_replay_routes_l3_through_distributed_compiled_program(tmp_path: Path) -> None:
     work_dir = _make_l3_build_output(tmp_path)
     a, b = torch.zeros(2), torch.zeros(2)
     with (
-        patch("pypto.runtime.distributed_runner.execute_distributed_compiled") as edc,
-        patch.object(replay_module, "execute_compiled") as ec,
+        patch(_L3_FROM_DIR) as from_dir,
+        patch.object(replay_module, "_execute_compiled") as ec,
     ):
         replay(work_dir, a, b, config=RunConfig(platform="a2a3sim"), rebuild_from_pto=False, recompile=False)
-    edc.assert_called_once()
+    from_dir.assert_called_once_with(work_dir, platform="a2a3sim")
     ec.assert_not_called()  # single-chip path must not be taken for L3
-    assert edc.call_args.args[0] == work_dir
-    assert edc.call_args.args[1] == [a, b]
-    assert edc.call_args.kwargs["platform"] == "a2a3sim"
+    compiled = from_dir.return_value
+    compiled.assert_called_once()
+    assert compiled.call_args.args == (a, b)
+    assert compiled.call_args.kwargs["config"].platform == "a2a3sim"
 
 
 def test_replay_l3_runs_l3_aware_rebuild_and_invalidate(tmp_path: Path) -> None:
@@ -264,7 +268,7 @@ def test_replay_l3_runs_l3_aware_rebuild_and_invalidate(tmp_path: Path) -> None:
         order.append("invalidate")
 
     with (
-        patch("pypto.runtime.distributed_runner.execute_distributed_compiled"),
+        patch(_L3_FROM_DIR),
         patch.object(replay_module, "rebuild_kernel_cpp_from_pto", side_effect=_rebuild),
         patch.object(replay_module, "invalidate_binary_cache", side_effect=_invalidate),
     ):
@@ -274,7 +278,7 @@ def test_replay_l3_runs_l3_aware_rebuild_and_invalidate(tmp_path: Path) -> None:
 
 def test_replay_uses_default_run_config_when_none(tmp_path: Path) -> None:
     work_dir = _make_build_output(tmp_path)
-    with patch.object(replay_module, "execute_compiled") as ec:
+    with patch.object(replay_module, "_execute_compiled") as ec:
         replay(work_dir)
     default_cfg = RunConfig()
     assert ec.call_args.kwargs["platform"] == default_cfg.platform
@@ -307,7 +311,7 @@ def test_replay_validate_passes_when_outputs_match(tmp_path: Path) -> None:
     b = torch.full((4,), 3.0)
     c = torch.full((4,), 5.0)  # already correct: a+b
 
-    with patch.object(replay_module, "execute_compiled"):
+    with patch.object(replay_module, "_execute_compiled"):
         replay(work_dir, a, b, c, validate=True)  # must not raise
 
 
@@ -318,7 +322,7 @@ def test_replay_validate_fails_when_outputs_mismatch(tmp_path: Path) -> None:
     b = torch.full((4,), 3.0)
     c = torch.zeros(4)  # wrong: should be 5.0
 
-    with patch.object(replay_module, "execute_compiled"):
+    with patch.object(replay_module, "_execute_compiled"):
         with pytest.raises(AssertionError, match="does not match golden"):
             replay(work_dir, a, b, c, validate=True)
 
@@ -339,7 +343,7 @@ def test_replay_validate_tensor_count_mismatch_raises(tmp_path: Path) -> None:
 def test_replay_validate_false_does_not_open_golden(tmp_path: Path) -> None:
     work_dir = _make_build_output(tmp_path)
     # No golden.py exists; validate=False must not care.
-    with patch.object(replay_module, "execute_compiled"):
+    with patch.object(replay_module, "_execute_compiled"):
         replay(work_dir, torch.zeros(4), validate=False)
 
 

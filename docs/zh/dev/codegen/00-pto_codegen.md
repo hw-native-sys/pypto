@@ -785,7 +785,7 @@ output_dir/
 
 ### 运行时配置 (`kernel_config.py`)
 
-`kernel_config.py` 暴露一个 `RUNTIME_CONFIG` 字典，调用方 (如 `execute_compiled`) 据此派发程序。固定键：
+`kernel_config.py` 暴露一个 `RUNTIME_CONFIG` 字典，派发路径据此启动程序。固定键：
 
 | 键 | 何时写入 | 备注 |
 | -- | -------- | ---- |

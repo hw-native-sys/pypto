@@ -683,13 +683,13 @@ def _invoke_compiled(
         args, param_infos, output_indices, return_types, caller_name=caller_name
     )
 
-    from pypto.runtime.runner import RunConfig, _DfxOpts, execute_compiled  # noqa: PLC0415
+    from pypto.runtime.runner import RunConfig, _DfxOpts, _execute_compiled  # noqa: PLC0415
 
     execution_platform = platform if config is None else config.platform
     if config is None:
         config = RunConfig()
 
-    execute_compiled(
+    _execute_compiled(
         output_dir,
         coerced,
         platform=execution_platform,
@@ -933,7 +933,7 @@ class CompiledProgram(_RuntimeFacade):
         after codegen) rather than ``kernel_config.py`` (only present after ptoas)
         so the dispatch surface is inspectable in ``skip_ptoas=True`` builds --
         calling a sub-callable without ``kernel_config.py`` then fails cleanly
-        inside ``execute_compiled`` with a ``FileNotFoundError``. Distributed (L3+)
+        inside the dispatch path with a ``FileNotFoundError``. Distributed (L3+)
         builds are excluded: they also lay out ``next_levels/<chip_task>/`` but
         expose a single canonical entry point via ``orchestration/host_orch.py`` and
         must be invoked through :meth:`__call__` directly, not by subscript.

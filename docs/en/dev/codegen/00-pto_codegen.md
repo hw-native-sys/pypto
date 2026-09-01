@@ -826,7 +826,7 @@ The orchestration codegen generates identical orchestration C++ code using the s
 
 ### Runtime configuration (`kernel_config.py`)
 
-`kernel_config.py` exposes a `RUNTIME_CONFIG` dict that callers (e.g. `execute_compiled`) read to dispatch the program. Stable keys:
+`kernel_config.py` exposes a `RUNTIME_CONFIG` dict that the dispatch path reads to launch the program. Stable keys:
 
 | Key | When emitted | Notes |
 | --- | ------------ | ----- |
