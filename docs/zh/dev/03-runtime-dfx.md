@@ -49,7 +49,7 @@ PyPTO 将该 prefix 设为 `<work_dir>/dfx_outputs/`，其下的子路径按上�
 写入 `scope_stats/` 子目录，内含 `scope_stats.jsonl`。Simpler 的
 `CallConfig::validate()` 在任一 flag 开启但
 `output_prefix` 为空时拒绝调用；PyPTO 在 Python 侧镜像该契约，
-`execute_on_device` 会**先于** C++ 边界抛 `ValueError`，让 traceback
+`_execute_on_device` 会**先于** C++ 边界抛 `ValueError`，让 traceback
 直接指向调用方代码。
 
 ### L3（分布式）：每次 dispatch 一个子目录
@@ -294,7 +294,7 @@ python runtime/tools/scope_stats_plot.py \
 | 关注点 | 文件 | 函数 / 成员 |
 | ------ | ---- | ----------- |
 | `RunConfig` 字段定义 | [runner.py](../../../python/pypto/runtime/runner.py) | `RunConfig` dataclass + `any_dfx_enabled()` |
-| `CallConfig` 透传 | [device_runner.py](../../../python/pypto/runtime/device_runner.py) | `execute_on_device(..., enable_*, output_prefix)` |
+| `CallConfig` 透传 | [device_runner.py](../../../python/pypto/runtime/device_runner.py) | `_execute_on_device(..., enable_*, output_prefix)` |
 | 流水线打包 | [runner.py](../../../python/pypto/runtime/runner.py) | `_DfxOpts` dataclass + `_DfxOpts.from_run_config` |
 | 按 flag 后处理分发 | [runner.py](../../../python/pypto/runtime/runner.py) | `_collect_dfx_artifacts` |
 | kernel 名称映射合成 | [runner.py](../../../python/pypto/runtime/runner.py) | `_write_name_map` |

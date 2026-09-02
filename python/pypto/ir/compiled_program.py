@@ -776,9 +776,9 @@ class _RuntimeFacade:
         if self._chip_callable is not None:
             return
         self._check_runtime_access()
-        from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
+        from pypto.runtime.device_runner import _compile_and_assemble  # noqa: PLC0415
 
-        cc, rn, rc = compile_and_assemble(self._output_dir, self._platform)
+        cc, rn, rc = _compile_and_assemble(self._output_dir, self._platform)
         # Publish the "loaded" sentinel (_chip_callable) last so a reader can
         # never observe it set while _runtime_name / _runtime_config are None.
         self._runtime_name = rn
@@ -976,7 +976,7 @@ class CompiledProgram(_RuntimeFacade):
         orchestration param metadata (names, directions, shapes, dtypes) plus
         the return-type count -- alongside the platform / backend. Runtime
         artefacts (``chip_callable`` / ``runtime_name`` / ``runtime_config``)
-        need no persistence: ``compile_and_assemble`` already rederives them
+        need no persistence: ``_compile_and_assemble`` already rederives them
         from the generated ``kernel_config.py``.
 
         Best-effort: a program without a resolvable orchestration signature

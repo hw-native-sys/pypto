@@ -56,7 +56,7 @@ table above. Most artefacts are flat files directly under the prefix;
 subdir holding `scope_stats.jsonl`. Simpler's `CallConfig::validate()`
 rejects the call if any
 flag is enabled but `output_prefix` is empty; PyPTO mirrors that contract
-on the Python side and raises `ValueError` from `execute_on_device`
+on the Python side and raises `ValueError` from `_execute_on_device`
 *before* the C++ boundary so the failure traceback points at the
 caller.
 
@@ -331,7 +331,7 @@ this hint at the end of every scope-stats-enabled run.
 | Concern | File | Function / member |
 | ------- | ---- | ----------------- |
 | `RunConfig` field declarations | [runner.py](../../../python/pypto/runtime/runner.py) | `RunConfig` dataclass + `any_dfx_enabled()` |
-| `CallConfig` plumbing | [device_runner.py](../../../python/pypto/runtime/device_runner.py) | `execute_on_device(..., enable_*, output_prefix)` |
+| `CallConfig` plumbing | [device_runner.py](../../../python/pypto/runtime/device_runner.py) | `_execute_on_device(..., enable_*, output_prefix)` |
 | Pipeline bundle | [runner.py](../../../python/pypto/runtime/runner.py) | `_DfxOpts` dataclass + `_DfxOpts.from_run_config` |
 | Per-flag post-run dispatch | [runner.py](../../../python/pypto/runtime/runner.py) | `_collect_dfx_artifacts` |
 | Kernel-name map synthesis | [runner.py](../../../python/pypto/runtime/runner.py) | `_write_name_map` |

@@ -102,7 +102,7 @@ finally:
     worker.close()                                   # cids + DeviceTensors released
 ```
 
-`worker.register(compiled)` triggers `compile_and_assemble` + simpler
+`worker.register(compiled)` triggers `_compile_and_assemble` + simpler
 `register` immediately, so configuration errors surface here rather than on
 first dispatch. The returned `RegistrationHandle` is callable, supports
 `with handle:` for scoped cleanup, and exposes `handle.unregister()` for

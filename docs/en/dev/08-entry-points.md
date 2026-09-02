@@ -46,8 +46,8 @@ into loadable binaries. It is internal and has no supported entry point.
 | `ir.compile` | compile driver | [`ir/compile.py`](../../../python/pypto/ir/compile.py) |
 | `JITFunction.compile` | specialize + driver | [`jit/decorator.py`](../../../python/pypto/jit/decorator.py) |
 | `JITFunction.lower` | specialize only, stops at `ir.Program` | same |
-| `device_runner.compile_and_assemble` | assembly | [`runtime/device_runner.py`](../../../python/pypto/runtime/device_runner.py) |
-| `device_runner.compile_single_kernel` / `compile_single_orchestration` | assembly | same |
+| `device_runner._compile_and_assemble` | assembly | [`runtime/device_runner.py`](../../../python/pypto/runtime/device_runner.py) |
+| `device_runner._compile_single_kernel` / `_compile_single_orchestration` | assembly | same |
 | `KernelCompiler.compile_incore` | ptoas invocation | [`runtime/kernel_compiler.py`](../../../python/pypto/runtime/kernel_compiler.py) |
 
 `ir.compile` is the only supported one; the rest of the table is here so a name
@@ -77,7 +77,7 @@ and tests should take the three names from `pypto.ir`.
 | `CompiledProgram.from_dir` / `DistributedCompiledProgram.from_dir` | artifact | output directory | [`ir/compiled_program.py`](../../../python/pypto/ir/compiled_program.py) |
 | `runtime.execute_compiled` *(deprecated)* | execute | output directory | [`runtime/runner.py`](../../../python/pypto/runtime/runner.py) |
 | `execute_distributed_compiled` *(deprecated)* | execute | output directory | [`runtime/distributed_runner.py`](../../../python/pypto/runtime/distributed_runner.py) |
-| `device_runner.execute_on_device` | assembly | assembled binaries | [`runtime/device_runner.py`](../../../python/pypto/runtime/device_runner.py) |
+| `device_runner._execute_on_device` | assembly | assembled binaries | [`runtime/device_runner.py`](../../../python/pypto/runtime/device_runner.py) |
 | `execute_artifact_dir` / `execute_batch_manifest` | CLI | output directory | [`runtime/execute_artifact.py`](../../../python/pypto/runtime/execute_artifact.py) |
 
 `run` does not say which layer you are on; the receiver does. `ChipWorker.run`
@@ -160,16 +160,22 @@ These have no stability guarantee. They are not in any `__all__`, and code
 outside PyPTO should not import them:
 
 - `pypto.ir.compile` — `_ensure_orchestration_headers`
-- `pypto.runtime.runner` — `_execute_compiled`
-- `pypto.runtime.distributed_runner` — `_execute_distributed`
 - `pypto.ir.compiled_program` — `CompiledProgram._build_orch_args`,
   `CompiledProgram._build_call_config`
-- `pypto.runtime.device_runner` — `compile_and_assemble`, `compile_single_kernel`,
-  `compile_single_orchestration`, `execute_on_device`
+- `pypto.runtime.runner` — `_execute_compiled`, `_execute_golden_case`,
+  `_build_call_config`, `_coerced_to_orch_args`, `_DfxOpts`
+- `pypto.runtime.distributed_runner` — `_execute_distributed`
+- `pypto.runtime.device_runner` — the whole assembly layer:
+  `_compile_and_assemble`, `_compile_single_kernel`,
+  `_compile_single_orchestration`, `_execute_on_device`
 - `pypto.runtime.kernel_compiler` — `KernelCompiler`, `compile_incore`
-- `pypto.runtime.runner` — `_build_call_config`, `_coerced_to_orch_args`,
-  `_DfxOpts`
 - `pypto.runtime.tensor_arg`, `pypto.runtime.elf_parser`, `pypto.runtime._binary_cache`
+
+The assembly layer carries the underscore so a traceback says which side of the
+boundary it came from: an import that has to spell `_` is an import that had to
+decide to. `KernelCompiler` / `compile_incore` and the three modules on the last
+line are the exceptions — they are internal by module rather than by name, and
+carry the same absence of a stability guarantee.
 
 The two argument builders marshal user arguments into simpler's `TaskArgs` and
 `CallConfig`. `ChipWorker.run` and `ChipWorker.register` are the supported way

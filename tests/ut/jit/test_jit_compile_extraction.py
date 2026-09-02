@@ -255,7 +255,7 @@ class TestCompileExposesExtractionSurface:
     marshals through — enabling worker integration as required by issue #1455.
 
     These tests only verify that the attributes are *defined on the class* —
-    actually exercising compile_and_assemble (which several of these properties
+    actually exercising _compile_and_assemble (which several of these properties
     invoke lazily on first access) requires simpler + a device, which unit
     tests don't have. ``hasattr(instance, ...)`` would trigger the property
     getter and import simpler, so check the class directly.
@@ -272,7 +272,7 @@ class TestCompileExposesExtractionSurface:
         cls = type(compiled)
         # The properties + methods that ChipWorker.run / register rely on.
         # Checking ``cls`` instead of ``compiled`` avoids invoking lazy
-        # property getters (chip_callable etc.) which call compile_and_assemble.
+        # property getters (chip_callable etc.) which call _compile_and_assemble.
         for name in (
             "chip_callable",
             "runtime_name",

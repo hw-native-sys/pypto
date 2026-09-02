@@ -120,7 +120,7 @@ L3 派发路径会消费 `RunConfig` 的 `ring_*` 字段和运行时 DFX 字段�
 ## Arena 预热与单槽缓存
 
 某个 ring 尺寸对应的运行时 arena，首次使用时需要约 800ms 构建。worker 现在会在
-`init` 时主动构建它 —— `prepare(config)` / `ChipWorker` / `execute_on_device` ——
+`init` 时主动构建它 —— `prepare(config)` / `ChipWorker` / `_execute_on_device` ——
 使这次冷构建落在 setup 阶段，而不是落在第一次（通常被计时的）派发里。
 
 arena 缓存以**完整的 per-ring 尺寸向量**为 key（4 个 ring 的 `ring_task_window` /

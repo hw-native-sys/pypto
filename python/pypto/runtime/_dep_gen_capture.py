@@ -55,7 +55,7 @@ def _build_argspec_orch_args(args_spec: list[dict]):
     inputs route the same graph); device-resident tensors are rebuilt as zeros;
     scalars are reconstructed exactly.
 
-    The tensors/scalars stay unmaterialized until ``execute_on_device`` has
+    The tensors/scalars stay unmaterialized until ``_execute_on_device`` has
     selected their owning Worker.
     """
     coerced: list = []
@@ -99,7 +99,7 @@ def main(argv: list[str]) -> int:
         "the following compile/run output is for deps.json only (timing is discarded)."
     )
 
-    from .device_runner import compile_and_assemble, execute_on_device  # noqa: PLC0415
+    from .device_runner import _compile_and_assemble, _execute_on_device  # noqa: PLC0415
 
     work_dir = Path(spec["work_dir"])
     platform = spec["platform"]
@@ -107,7 +107,7 @@ def main(argv: list[str]) -> int:
     dfx_dir = Path(spec["dfx_dir"])
     level = int(spec.get("level", 2))
 
-    chip_callable, runtime_name, runtime_config = compile_and_assemble(work_dir, platform)
+    chip_callable, runtime_name, runtime_config = _compile_and_assemble(work_dir, platform)
     enable_sdma = bool(runtime_config.get("enable_sdma", False))
 
     if spec["mode"] == "golden":
@@ -129,7 +129,7 @@ def main(argv: list[str]) -> int:
     config = RunConfig(platform=platform, **spec.get("ring_overrides", {}))
 
     dfx_dir.mkdir(parents=True, exist_ok=True)
-    execute_on_device(
+    _execute_on_device(
         chip_callable,
         orch_args,
         platform,

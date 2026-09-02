@@ -350,7 +350,7 @@ def _load_generated_module(path: Path) -> Any:
 # ---------------------------------------------------------------------------
 # Setup steps shared by the one-shot ``_execute_distributed`` path and the
 # reusable ``DistributedWorker`` handle. Keeping them as free functions lets
-# both paths run identical, expensive setup (compile_and_assemble, module load,
+# both paths run identical, expensive setup (_compile_and_assemble, module load,
 # Worker construction + registration) without duplicating it.
 # ---------------------------------------------------------------------------
 
@@ -362,7 +362,7 @@ def _assemble_chip_callables(
 
     Driven entirely by the on-disk layout — each ``next_levels/{name}/`` that
     contains a ``kernel_config.py`` is a complete single-chip sub-build that
-    :func:`compile_and_assemble` consumes directly. This requires no live IR, so
+    :func:`_compile_and_assemble` consumes directly. This requires no live IR, so
     it works identically for a freshly-compiled program and one reconstructed via
     :meth:`DistributedCompiledProgram.from_dir` (the ``runtime_dir`` replay path).
     """
@@ -377,9 +377,9 @@ def _assemble_chip_callables(
             # Imported lazily — and only once there is a real chip to build — so
             # the "no chip-level tasks" error path below stays usable without the
             # heavy device_runner → simpler toolchain import.
-            from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
+            from pypto.runtime.device_runner import _compile_and_assemble  # noqa: PLC0415
 
-            chip_callable, chip_runtime, chip_runtime_config = compile_and_assemble(
+            chip_callable, chip_runtime, chip_runtime_config = _compile_and_assemble(
                 chip_dir, compiled.platform
             )
             chip_callables[chip_dir.name] = chip_callable
@@ -1486,7 +1486,7 @@ class DistributedWorker(Worker):
 
     Holds an initialized simpler ``Worker(level=3)`` plus all setup artifacts
     (chip callables, host_orch entry, sub-worker fns, comm bootstrap) so the
-    expensive setup — ``compile_and_assemble``, generated-module loading, Worker
+    expensive setup — ``_compile_and_assemble``, generated-module loading, Worker
     construction + registration + ``init()`` (fork) — happens exactly once.
 
     Mirrors the L2 ``with ChipWorker(...)`` reuse block: it exposes device-memory

@@ -10,7 +10,7 @@
 """Execute a pre-compiled ``work_dir`` artifact on one device.
 
 Thin CLI that re-binds an already-compiled build directory (``.o``/``.so``
-written next to each kernel by a prior ``compile_and_assemble``) and runs its
+written next to each kernel by a prior ``_compile_and_assemble``) and runs its
 ``golden.py`` on a single device, validating against the pre-computed golden.
 
 It is the device-side half of the "compile on CPU, borrow a card per case via
@@ -21,7 +21,7 @@ CPU pool, then for each case spawns::
       'python -m pypto.runtime.execute_artifact --work-dir <wd> \\
          --platform <p> --device-id $TASK_DEVICE ...'
 
-Because the binaries are already on disk, ``compile_and_assemble`` hits the
+Because the binaries are already on disk, ``_compile_and_assemble`` hits the
 ``.o``/``.so`` cache and rebuilds the ``ChipCallable`` without recompiling or
 touching a card — the only card window is the device run + ``allclose``.
 
@@ -52,7 +52,7 @@ from pypto.runtime.runner import (
     _SWIMLANE_FULL_LEVEL,
     _SWIMLANE_MAX_LEVEL,
     _DfxOpts,
-    _execute_on_device,
+    _execute_golden_case,
 )
 
 __all__ = ["ArtifactSetupError", "execute_artifact_dir", "execute_batch_manifest", "main"]
@@ -66,7 +66,7 @@ _RESULT_PREFIX = "PYPTO_EXEC_RESULT"
 class ArtifactSetupError(Exception):
     """A pre-run artifact reconstruction / setup failure.
 
-    Raised when ``compile_and_assemble`` cannot rebuild the cached artifact
+    Raised when ``_compile_and_assemble`` cannot rebuild the cached artifact
     (missing / stale ``.o``/``.so``, bad ``work_dir``, corrupt inputs) — i.e.
     *before* any device execution. The CLI reports this as an infra problem
     (``PYPTO_EXEC_RESULT=INFRA``) rather than a device test failure
@@ -84,14 +84,14 @@ def execute_artifact_dir(
 ) -> None:
     """Rebuild the compiled artifact in *work_dir* and run it on *device_id*.
 
-    ``compile_and_assemble`` reuses the cached ``.o``/``.so`` next to each
+    ``_compile_and_assemble`` reuses the cached ``.o``/``.so`` next to each
     kernel, so this neither recompiles nor needs a card until the device run.
     The actual device outputs are always persisted under ``data/actual/`` so a
     caller can validate them separately with the test's real tolerance.
 
     Args:
         work_dir: A build directory produced by ``ir.compile`` +
-            ``compile_and_assemble`` (contains ``kernel_config.py``,
+            ``_compile_and_assemble`` (contains ``kernel_config.py``,
             ``kernels/``, ``orchestration/``, ``golden.py``, ``data/``).
         platform: Target execution platform (e.g. ``"a2a3"``).
         device_id: Hardware device index to run on.
@@ -103,7 +103,7 @@ def execute_artifact_dir(
             per-test tolerance, so this run is tolerance-independent.
 
     Raises:
-        ArtifactSetupError: ``compile_and_assemble`` could not rebuild the
+        ArtifactSetupError: ``_compile_and_assemble`` could not rebuild the
             cached artifact (infra, not a test failure). ``main`` maps it to
             ``PYPTO_EXEC_RESULT=INFRA``.
         Exception: Any device / validation error is propagated to the caller
@@ -125,15 +125,15 @@ def execute_artifact_dir(
 def _reconstruct_artifact(work_dir: Path, platform: str) -> tuple[Any, str, bool]:
     """Rebuild the cached artifact, reclassifying any failure as infra.
 
-    ``compile_and_assemble`` reuses the cached ``.o``/``.so`` next to each kernel
+    ``_compile_and_assemble`` reuses the cached ``.o``/``.so`` next to each kernel
     (a cache hit — no recompile, no card). A failure here is a reconstruction /
     setup problem, so it is wrapped as :class:`ArtifactSetupError` (the CLI reports
     ``PYPTO_EXEC_RESULT=INFRA``) rather than a device test failure.
     """
-    from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
+    from pypto.runtime.device_runner import _compile_and_assemble  # noqa: PLC0415
 
     try:
-        chip_callable, runtime_name, runtime_config = compile_and_assemble(work_dir, platform)
+        chip_callable, runtime_name, runtime_config = _compile_and_assemble(work_dir, platform)
     except Exception as exc:  # noqa: BLE001 — reclassified as infra, re-raised below
         raise ArtifactSetupError(f"artifact reconstruction failed for {work_dir}: {exc}") from exc
     enable_sdma = bool(runtime_config.get("enable_sdma", False))
@@ -158,7 +158,7 @@ def _run_on_device(
     independent) so a caller can validate them separately; runs the in-process
     ``allclose`` only when *validate* is set.
     """
-    _execute_on_device(
+    _execute_golden_case(
         work_dir,
         work_dir / "golden.py",
         chip_callable,
@@ -186,7 +186,7 @@ def execute_batch_manifest(
     pypto import AND the NPU device init are paid once for the batch (not once
     per artifact) — the fix for the per-artifact cold-start cost.  Artifacts
     that share the batch's ``(platform, runtime)`` reuse the worker; a differing
-    one falls back to a fresh one-shot worker inside ``_execute_on_device``.
+    one falls back to a fresh one-shot worker inside ``_execute_golden_case``.
     Before opening the shared worker, the batch reconstructs every artifact so
     it can provision SDMA when any usable artifact on the shared worker's
     binding requires it.  Ordinary artifacts can run on that SDMA-enabled
@@ -261,7 +261,7 @@ def execute_batch_manifest(
     # Onboard swimlane runs a dep-gen subprocess that must own the card/SVM state
     # for the duration of dep capture; a batch ChipWorker held open on the same
     # device_id would collide with it. Fall back to per-artifact one-shot
-    # execution (each _execute_on_device opens + closes its own worker) so the
+    # execution (each _execute_golden_case opens + closes its own worker) so the
     # dep-gen child owns the device first, preserving the two-pass design.
     first_platform = str(entries[0]["platform"])
     if dfx.enable_chip_swimlane and not first_platform.endswith("sim"):

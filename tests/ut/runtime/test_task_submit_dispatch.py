@@ -386,7 +386,7 @@ def test_sim_platform_never_borrows_a_card():
     tc.get_name.return_value = "case_sim"
     timing = SimpleNamespace(device_wall_us=1.0, host_wall_us=2.0)
     with (
-        patch.object(test_runner, "_execute_on_device", return_value=timing) as on_dev,
+        patch.object(test_runner, "_execute_golden_case", return_value=timing) as on_dev,
         patch.object(test_runner, "_run_artifact_via_task_submit") as via_ts,
     ):
         result = test_runner._fused_execute_task(
@@ -400,18 +400,18 @@ def test_sim_platform_never_borrows_a_card():
     via_ts.assert_not_called()
 
 
-def test_fused_compile_records_sdma_capability(tmp_path):
-    fake_compile_and_assemble = Mock(
-        return_value=(object(), "tensormap_and_ringbuffer", {"enable_sdma": True})
+def test_fused_compile_records_sdma_capability(tmp_path, stub_device_runner):
+    stub_device_runner._compile_and_assemble.return_value = (
+        object(),
+        "tensormap_and_ringbuffer",
+        {"enable_sdma": True},
     )
-    fake_device_runner = SimpleNamespace(compile_and_assemble=fake_compile_and_assemble)
     tc = Mock()
 
     with (
         patch.object(test_runner, "_resolve_platform", return_value="a2a3"),
         patch.object(test_runner, "_cache_key", return_value="prefetch@a2a3"),
         patch.object(test_runner, "_compile_for_cache"),
-        patch.dict(sys.modules, {"pypto.runtime.device_runner": fake_device_runner}),
     ):
         artifact = test_runner._fused_compile_task(tc, tmp_path, "a2a3", False, False)
 

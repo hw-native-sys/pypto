@@ -40,9 +40,9 @@ from harness.core.harness import platform_to_backend
 from pypto import ir
 from pypto.backend.pto_backend import _preprocess_ptoas_output, _run_ptoas
 from pypto.runtime.device_runner import (
+    _compile_and_assemble,
+    _execute_on_device,
     build_orch_args_from_inputs,
-    compile_and_assemble,
-    execute_on_device,
     validate_golden,
 )
 
@@ -222,7 +222,7 @@ class TestCrossCoreGroupedTpopTfree:
 
             kernel_config = _load_kernel_config(work_dir)
             runtime_cfg = getattr(kernel_config, "RUNTIME_CONFIG", {})
-            chip_callable, runtime_name, _ = compile_and_assemble(work_dir, platform)
+            chip_callable, runtime_name, _ = _compile_and_assemble(work_dir, platform)
 
             for seed in (0, 1, 2):
                 torch.manual_seed(seed)
@@ -240,7 +240,7 @@ class TestCrossCoreGroupedTpopTfree:
                     output_prefix: str | None = str(dfx_dir)
                 else:
                     output_prefix = None
-                execute_on_device(
+                _execute_on_device(
                     chip_callable,
                     orch_args,
                     platform,

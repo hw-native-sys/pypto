@@ -12,7 +12,7 @@
 Inside a ``with ChipWorker(...) as _:`` block, calls to ``CompiledProgram(...)``
 reuse the active worker instead of creating a fresh one. Outside such a block,
 behavior is unchanged from one-shot construction in
-:func:`pypto.runtime.device_runner.execute_on_device`.
+:func:`pypto.runtime.device_runner._execute_on_device`.
 
 For explicit dispatch (no ``ContextVar`` discovery), call
 :meth:`ChipWorker.run` directly, or pre-register with :meth:`ChipWorker.register`
@@ -97,7 +97,7 @@ _ACTIVE_WORKERS: contextvars.ContextVar[tuple[ChipWorker, ...]] = contextvars.Co
 # Default runtime name — matches the runtime that ``pto_backend`` bakes into
 # every generated ``kernel_config.py`` (``RUNTIME_CONFIG["runtime"]``). That is
 # the value ``CompiledProgram.runtime_name`` reports and the one the reuse
-# lookup in ``device_runner.execute_on_device`` searches for, so a
+# lookup in ``device_runner._execute_on_device`` searches for, so a
 # default-constructed ``with ChipWorker():`` bind-matches a freshly compiled
 # program instead of silently falling through to a one-shot worker. Derived from
 # the RuntimeKind enum that compilation selects, so the two cannot drift apart.
@@ -489,7 +489,7 @@ class ChipWorker(Worker):
     ) -> ChipWorker | None:
         """Return the topmost active ChipWorker matching the binding, or ``None``.
 
-        Used by :func:`pypto.runtime.device_runner.execute_on_device` to
+        Used by :func:`pypto.runtime.device_runner._execute_on_device` to
         decide whether to reuse a user-published ChipWorker or fall through
         to constructing a fresh one-shot worker. A matching worker without a
         required SDMA capability raises instead of opening a second worker on
@@ -510,7 +510,7 @@ class ChipWorker(Worker):
     def _check_binding(self, compiled: CompiledProgram) -> None:
         """Raise on a binding or worker-capability mismatch.
 
-        ``compiled.runtime_name`` triggers ``compile_and_assemble`` lazily,
+        ``compiled.runtime_name`` triggers ``_compile_and_assemble`` lazily,
         which is acceptable because any subsequent dispatch needs it anyway.
         """
         if compiled.platform != self.platform:
@@ -602,7 +602,7 @@ class ChipWorker(Worker):
     def register(self, compiled: CompiledProgram) -> RegistrationHandle:
         """Pre-register *compiled* on this ChipWorker. Returns a callable handle.
 
-        Eager registration: triggers ``compile_and_assemble`` on *compiled*
+        Eager registration: triggers ``_compile_and_assemble`` on *compiled*
         and ``simpler.Worker.register`` immediately, so configuration errors
         surface here rather than at first dispatch. The handle reuses the
         ChipWorker's existing cid cache (multiple ``register`` calls for the
@@ -615,7 +615,7 @@ class ChipWorker(Worker):
         """
         self._require_initialized("register")
         self._check_binding(compiled)
-        cc = compiled.chip_callable  # triggers compile_and_assemble lazily
+        cc = compiled.chip_callable  # triggers _compile_and_assemble lazily
         key = id(cc)
         cid = self._cid_cache.get(key)
         if cid is None:

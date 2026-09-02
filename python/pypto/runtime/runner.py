@@ -739,7 +739,7 @@ def _execute_dfx_passes(
 def _load_golden_module(golden_path: "Path", module_name: str = "_golden") -> Any:
     """Import a generated ``golden.py`` from *golden_path* as a fresh module.
 
-    Shared by :func:`_execute_on_device` and the dep_gen subprocess so the load
+    Shared by :func:`_execute_golden_case` and the dep_gen subprocess so the load
     semantics (and the error message) stay in one place.
     """
     spec = importlib.util.spec_from_file_location(module_name, str(golden_path))
@@ -963,7 +963,7 @@ def _build_call_config(
     return cfg
 
 
-def _execute_on_device(
+def _execute_golden_case(
     work_dir: Path,
     golden_path: Path,
     chip_callable: Any,
@@ -979,15 +979,15 @@ def _execute_on_device(
 
     Shared execution logic used by both :func:`_execute_compiled` and the test harness
     (``test_runner.py``).  The caller is responsible for compiling binaries
-    via ``compile_and_assemble`` and passing the result here.
+    via ``_compile_and_assemble`` and passing the result here.
 
     Tolerances (``RTOL``, ``ATOL``) are read from the generated ``golden.py``.
 
     Args:
         work_dir: Root output directory containing ``data/``, ``golden.py``, etc.
         golden_path: Path to the generated ``golden.py`` file.
-        chip_callable: Pre-compiled ``ChipCallable`` from ``compile_and_assemble``.
-        runtime_name: Runtime name from ``compile_and_assemble``.
+        chip_callable: Pre-compiled ``ChipCallable`` from ``_compile_and_assemble``.
+        runtime_name: Runtime name from ``_compile_and_assemble``.
         platform: Target execution platform.
         device_id: Hardware device index.
         enable_sdma: Whether execution requires an SDMA-capable worker.
@@ -997,8 +997,8 @@ def _execute_on_device(
             post-run converter is invoked.
     """
     from .device_runner import (  # noqa: PLC0415
+        _execute_on_device,
         build_orch_args_from_inputs,
-        execute_on_device,
         validate_golden,
     )
 
@@ -1027,7 +1027,7 @@ def _execute_on_device(
         dfx_dir.mkdir(parents=True, exist_ok=True)
 
     def _run_pass(pass_dfx: "_DfxOpts") -> None:
-        execute_on_device(
+        _execute_on_device(
             chip_callable,
             orch_args,
             platform,
@@ -1092,7 +1092,7 @@ def _execute_on_device(
 def validate_persisted_outputs(work_dir: Path, rtol: float, atol: float) -> None:
     """Validate persisted device outputs against the golden with a given tolerance.
 
-    The counterpart to ``_execute_on_device(..., validate=False,
+    The counterpart to ``_execute_golden_case(..., validate=False,
     actual_out_dir=...)``: the device run (tolerance-independent) persisted the
     actual outputs under ``data/actual/``; this compares them against the
     pre-computed golden under ``data/out/`` using *rtol*/*atol* — letting the
@@ -1338,9 +1338,9 @@ def _execute_compiled(  # noqa: PLR0913
 ) -> None:
     """Execute a pre-compiled program with user-provided tensors and scalars.
 
-    Reuses :func:`device_runner.compile_and_assemble` for binary compilation
+    Reuses :func:`device_runner._compile_and_assemble` for binary compilation
     (with caching and parallel kernel compilation) and
-    :func:`device_runner.execute_on_device` for device dispatch.  Host
+    :func:`device_runner._execute_on_device` for device dispatch.  Host
     ``torch.Tensor`` outputs in *args* are modified in-place with device
     results; :class:`DeviceTensor` arguments retain their owning simpler
     ``Buffer`` and are packed into address-free ``TaskArgs`` (no H2D upload,
@@ -1358,7 +1358,7 @@ def _execute_compiled(  # noqa: PLR0913
         dfx: Runtime DFX toggles. When any flag is enabled the artefacts
             land under ``<work_dir>/dfx_outputs/`` and the matching
             post-run converter is invoked.
-        level: Hierarchy level. Forwarded to :func:`execute_on_device`,
+        level: Hierarchy level. Forwarded to :func:`_execute_on_device`,
             which currently only supports ``2``.
         aicpu_thread_num: Optional override of the AICPU thread count.
             When ``None`` (default), the value baked into
@@ -1391,11 +1391,11 @@ def _execute_compiled(  # noqa: PLR0913
     _ensure_orchestration_headers(str(work_dir))
 
     from .device_runner import (  # noqa: PLC0415
-        compile_and_assemble,
-        execute_on_device,
+        _compile_and_assemble,
+        _execute_on_device,
     )
 
-    chip_callable, runtime_name, runtime_config = compile_and_assemble(work_dir, platform)
+    chip_callable, runtime_name, runtime_config = _compile_and_assemble(work_dir, platform)
     enable_sdma = bool(runtime_config.get("enable_sdma", False))
 
     # Caller-supplied values take precedence over the RUNTIME_CONFIG baked
@@ -1412,7 +1412,7 @@ def _execute_compiled(  # noqa: PLR0913
         dfx_dir.mkdir(parents=True, exist_ok=True)
 
     def _run_pass(pass_dfx: "_DfxOpts") -> None:
-        execute_on_device(
+        _execute_on_device(
             chip_callable,
             args,
             platform,

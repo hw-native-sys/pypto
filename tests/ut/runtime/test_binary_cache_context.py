@@ -303,7 +303,7 @@ def _stub_assembly(device_runner, monkeypatch, tmp_path: Path, chip_build: Mock)
     monkeypatch.setattr(device_runner, "_current_binary_context", Mock(return_value=context))
     monkeypatch.setattr(
         device_runner,
-        "compile_single_orchestration",
+        "_compile_single_orchestration",
         Mock(return_value=b"orchestration binary"),
     )
     monkeypatch.setattr(device_runner, "ChipCallable", SimpleNamespace(build=chip_build))
@@ -321,7 +321,7 @@ def test_compile_and_assemble_records_context_after_success(
     record = Mock()
     monkeypatch.setattr(device_runner, "record_binary_context", record)
 
-    assembled, _, _ = device_runner.compile_and_assemble(tmp_path, "a2a3sim")
+    assembled, _, _ = device_runner._compile_and_assemble(tmp_path, "a2a3sim")
 
     assert assembled is chip
     record.assert_called_once_with(tmp_path, context)
@@ -337,7 +337,7 @@ def test_compile_and_assemble_does_not_stamp_failed_assembly(
     monkeypatch.setattr(device_runner, "record_binary_context", record)
 
     with pytest.raises(RuntimeError, match="assemble failed"):
-        device_runner.compile_and_assemble(tmp_path, "a2a3sim")
+        device_runner._compile_and_assemble(tmp_path, "a2a3sim")
 
     record.assert_not_called()
 
@@ -353,16 +353,16 @@ def test_failed_matching_cache_is_invalidated_before_retry(
     chip = object()
     build = Mock(side_effect=[RuntimeError("assemble failed"), chip])
     _stub_assembly(device_runner, monkeypatch, tmp_path, build)
-    compile_orchestration = device_runner.compile_single_orchestration
+    compile_orchestration = device_runner._compile_single_orchestration
 
     with pytest.raises(RuntimeError, match="assemble failed"):
-        device_runner.compile_and_assemble(tmp_path, "a2a3sim")
+        device_runner._compile_and_assemble(tmp_path, "a2a3sim")
 
     assert cached_binary.exists()
     assert not binary_context_path(tmp_path).exists()
     compile_orchestration.assert_not_called()
 
-    assembled, _, _ = device_runner.compile_and_assemble(tmp_path, "a2a3sim")
+    assembled, _, _ = device_runner._compile_and_assemble(tmp_path, "a2a3sim")
 
     assert assembled is chip
     assert not cached_binary.exists()
@@ -388,7 +388,7 @@ def test_compile_and_assemble_serializes_same_work_dir(
 
     monkeypatch.setattr(device_runner, "_compile_and_assemble_locked", assemble_locked)
     process = process_context.Process(
-        target=device_runner.compile_and_assemble,
+        target=device_runner._compile_and_assemble,
         args=(tmp_path, "a2a3sim"),
     )
     process.start()

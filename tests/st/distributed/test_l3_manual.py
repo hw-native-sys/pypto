@@ -17,7 +17,7 @@ runtime API — no HOST-level DSL, no generated ``host_orch.py`` /
 The test exercises the public boundary that PyPTO's own
 ``DistributedCompiledProgram`` relies on:
 
-  * :func:`compile_and_assemble` to obtain a ``ChipCallable`` from an L2 build
+  * :func:`_compile_and_assemble` to obtain a ``ChipCallable`` from an L2 build
   * ``simpler.worker.Worker(level=3, ...)`` with manual ``register``/``init``/``run``
   * ``TaskArgs`` + ``make_tensor_arg`` + ``TensorArgType`` for argument marshalling
   * A Python SubWorker that **closes over host-side state** (``done_flag``) — a
@@ -35,7 +35,7 @@ import pypto.language as pl
 import pytest
 import torch
 from pypto import ir
-from pypto.runtime.device_runner import compile_and_assemble
+from pypto.runtime.device_runner import _compile_and_assemble
 from pypto.runtime.distributed_runner import _tensor_from_continuous
 
 
@@ -111,7 +111,7 @@ class TestL3Manual:
         # 2) Assemble the ChipCallable ourselves — the same call
         # ``_execute_distributed`` makes per next_levels/<name>/, but pointed at
         # the L2 root because no HOST-level outlining happened.
-        chip_callable, runtime_name, _ = compile_and_assemble(out_dir, platform=test_config.platform)
+        chip_callable, runtime_name, _ = _compile_and_assemble(out_dir, platform=test_config.platform)
 
         # 3) Host-side tensors. ``share_memory_()`` must happen before
         # ``Worker.init()`` so the chip/sub-worker child processes inherit the

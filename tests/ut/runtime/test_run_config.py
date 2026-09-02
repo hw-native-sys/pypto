@@ -685,22 +685,9 @@ class TestRunConfigCompileForwarding:
 
         assert set(kwargs) <= accepted
 
-    def test_execute_compiled_accepts_auto_scope_deps_switch(self, tmp_path, monkeypatch):
-        captured: dict = {}
+    def test_execute_compiled_accepts_auto_scope_deps_switch(self, tmp_path, stub_device_runner):
         config = RunConfig(platform="a2a3sim", ring_heap=1024 * 1024)
-
-        def fake_compile_and_assemble(_work_dir, platform):
-            captured["compile"] = {"platform": platform}
-            return object(), "fake_runtime", {}
-
-        def fake_execute_on_device(*args, **kwargs):
-            captured["execute"] = {"args": args, "kwargs": kwargs}
-
-        fake_device_runner = types.SimpleNamespace(
-            compile_and_assemble=fake_compile_and_assemble,
-            execute_on_device=fake_execute_on_device,
-        )
-        monkeypatch.setitem(sys.modules, "pypto.runtime.device_runner", fake_device_runner)
+        stub_device_runner._compile_and_assemble.return_value = (object(), "fake_runtime", {})
 
         _execute_compiled(
             tmp_path,
@@ -711,25 +698,17 @@ class TestRunConfigCompileForwarding:
             config=config,
         )
 
-        assert captured["compile"]["platform"] == "a2a3sim"
-        assert captured["execute"]["args"][3] == "fake_runtime"
-        assert captured["execute"]["kwargs"]["aicpu_thread_num"] is None
-        assert captured["execute"]["kwargs"]["config"] is config
+        assert stub_device_runner._compile_and_assemble.call_args.args[1] == "a2a3sim"
+        execute_call = stub_device_runner._execute_on_device.call_args
+        assert execute_call.args[3] == "fake_runtime"
+        assert execute_call.kwargs["aicpu_thread_num"] is None
+        assert execute_call.kwargs["config"] is config
 
-    def test_execute_compiled_serializes_ring_config_for_dep_capture(self, tmp_path, monkeypatch):
+    def test_execute_compiled_serializes_ring_config_for_dep_capture(
+        self, tmp_path, monkeypatch, stub_device_runner
+    ):
         captured: dict = {}
-
-        def fake_compile_and_assemble(_work_dir, _platform):
-            return object(), "fake_runtime", {}
-
-        def fake_execute_on_device(*_args, **kwargs):
-            captured["execute_config"] = kwargs["config"]
-
-        fake_device_runner = types.SimpleNamespace(
-            compile_and_assemble=fake_compile_and_assemble,
-            execute_on_device=fake_execute_on_device,
-        )
-        monkeypatch.setitem(sys.modules, "pypto.runtime.device_runner", fake_device_runner)
+        stub_device_runner._compile_and_assemble.return_value = (object(), "fake_runtime", {})
 
         import pypto.runtime.runner as runner_mod  # noqa: PLC0415
 
@@ -755,7 +734,7 @@ class TestRunConfigCompileForwarding:
             config=config,
         )
 
-        assert captured["execute_config"] is config
+        assert stub_device_runner._execute_on_device.call_args.kwargs["config"] is config
         assert captured["spec"]["ring_overrides"] == {
             "ring_task_window": [16, 32, 64, 128],
             "ring_heap": 512 * 1024 * 1024,
@@ -775,24 +754,18 @@ class TestRunConfigCompileForwarding:
         monkeypatch,
         runtime_config,
         expected_enable_sdma,
+        stub_device_runner,
     ):
-        captured: dict = {}
-
-        def fake_compile_and_assemble(_work_dir, _platform):
-            return object(), "fake_runtime", runtime_config
-
-        def fake_execute_on_device(*_args, **kwargs):
-            captured.update(kwargs)
-
-        fake_device_runner = types.SimpleNamespace(
-            compile_and_assemble=fake_compile_and_assemble,
-            execute_on_device=fake_execute_on_device,
+        stub_device_runner._compile_and_assemble.return_value = (
+            object(),
+            "fake_runtime",
+            runtime_config,
         )
-        monkeypatch.setitem(sys.modules, "pypto.runtime.device_runner", fake_device_runner)
 
         _execute_compiled(tmp_path, [], platform="a2a3sim", device_id=0)
 
-        assert captured["enable_sdma"] is expected_enable_sdma
+        kwargs = stub_device_runner._execute_on_device.call_args.kwargs
+        assert kwargs["enable_sdma"] is expected_enable_sdma
 
     def test_compile_kwargs_carry_the_codegen_target(self):
         """``platform`` and the ``backend_type`` it implies both reach compilation."""
@@ -802,7 +775,7 @@ class TestRunConfigCompileForwarding:
         assert kwargs["backend_type"] == BackendType.Ascend950
 
 
-# ``execute_on_device`` lives in ``device_runner`` which eagerly imports the
+# ``_execute_on_device`` lives in ``device_runner`` which eagerly imports the
 # ``simpler`` package (via ``task_interface``). Unit-tests CI runs without
 # ``simpler`` installed, so the import fails at collection time. Mirror the
 # skip pattern from ``test_worker_reuse.py``.
@@ -814,15 +787,15 @@ else:
     _has_simpler = True
 
 
-@pytest.mark.skipif(not _has_simpler, reason="execute_on_device requires the simpler package")
+@pytest.mark.skipif(not _has_simpler, reason="_execute_on_device requires the simpler package")
 class TestExecuteOnDeviceDfxValidation:
-    """Verify ``execute_on_device`` rejects DFX flags without ``output_prefix``."""
+    """Verify ``_execute_on_device`` rejects DFX flags without ``output_prefix``."""
 
     def test_dfx_without_output_prefix_raises_value_error(self):
-        from pypto.runtime.device_runner import execute_on_device  # noqa: PLC0415
+        from pypto.runtime.device_runner import _execute_on_device  # noqa: PLC0415
 
         with pytest.raises(ValueError, match="output_prefix is required"):
-            execute_on_device(
+            _execute_on_device(
                 chip_callable=MagicMock(),
                 orch_args=MagicMock(),
                 platform="a5sim",
@@ -833,7 +806,7 @@ class TestExecuteOnDeviceDfxValidation:
             )
 
     def test_dfx_without_output_prefix_raises_for_each_flag(self):
-        from pypto.runtime.device_runner import execute_on_device  # noqa: PLC0415
+        from pypto.runtime.device_runner import _execute_on_device  # noqa: PLC0415
 
         for flag in [
             {"enable_chip_swimlane": True},
@@ -843,7 +816,7 @@ class TestExecuteOnDeviceDfxValidation:
             {"enable_scope_stats": True},
         ]:
             with pytest.raises(ValueError, match="output_prefix is required"):
-                execute_on_device(
+                _execute_on_device(
                     chip_callable=MagicMock(),
                     orch_args=MagicMock(),
                     platform="a5sim",
@@ -864,7 +837,7 @@ class TestExecuteOnDeviceDfxValidation:
             # _PyptoWorker.current returns None → falls to the new-Worker path.
             # ``current`` lives on ``ChipWorker``, not the ABC base ``Worker``.
             with patch("pypto.runtime.worker.ChipWorker.current", return_value=None):
-                device_runner.execute_on_device(
+                device_runner._execute_on_device(
                     chip_callable=MagicMock(),
                     orch_args=MagicMock(),
                     platform="a5sim",
@@ -883,7 +856,7 @@ class TestExecuteOnDeviceDfxValidation:
         with patch.object(device_runner, "Worker") as worker_cls:
             worker = worker_cls.return_value
             with patch("pypto.runtime.worker.ChipWorker.current", return_value=None):
-                device_runner.execute_on_device(
+                device_runner._execute_on_device(
                     chip_callable=MagicMock(),
                     orch_args=MagicMock(),
                     platform="a5sim",

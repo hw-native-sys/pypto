@@ -2179,19 +2179,9 @@ class TestAssembleChipCallables:
             (nl / "_not_a_chip").mkdir(parents=True, exist_ok=True)
         return SimpleNamespace(output_dir=tmp_path, platform="a2a3sim")
 
-    @staticmethod
-    def _stub_device_runner(monkeypatch, ca) -> None:
-        """Inject a stub ``device_runner`` so ``_assemble_chip_callables`` can be
-        exercised without importing the real module (which pulls in the simpler
-        toolchain via ``kernel_compiler`` and is absent in the unit-test env)."""
-        monkeypatch.setitem(
-            sys.modules, "pypto.runtime.device_runner", SimpleNamespace(compile_and_assemble=ca)
-        )
-
-    def test_picks_up_chip_dirs_with_kernel_config(self, tmp_path, monkeypatch):
+    def test_picks_up_chip_dirs_with_kernel_config(self, tmp_path, stub_device_runner):
         compiled = self._build(tmp_path, ["chip_a", "chip_b"], stray=True)
-        ca = MagicMock(return_value=(MagicMock(name="ChipCallable"), "tensormap_and_ringbuffer", {}))
-        self._stub_device_runner(monkeypatch, ca)
+        ca = stub_device_runner._compile_and_assemble
         chip_callables, runtime_name, enable_sdma = _assemble_chip_callables(compiled)
 
         assert set(chip_callables) == {"chip_a", "chip_b"}  # stray dir skipped
@@ -2201,33 +2191,23 @@ class TestAssembleChipCallables:
         assert called_dirs == {tmp_path / "next_levels" / "chip_a", tmp_path / "next_levels" / "chip_b"}
         assert all(call.args[1] == "a2a3sim" for call in ca.call_args_list)
 
-    def test_aggregates_enable_sdma_across_chip_configs(self, tmp_path, monkeypatch):
+    def test_aggregates_enable_sdma_across_chip_configs(self, tmp_path, stub_device_runner):
         compiled = self._build(tmp_path, ["chip_a", "chip_b"])
-        ca = MagicMock(
-            side_effect=[
-                (MagicMock(name="ChipCallableA"), "tensormap_and_ringbuffer", {}),
-                (
-                    MagicMock(name="ChipCallableB"),
-                    "tensormap_and_ringbuffer",
-                    {"enable_sdma": True},
-                ),
-            ]
-        )
-        self._stub_device_runner(monkeypatch, ca)
+        stub_device_runner._compile_and_assemble.side_effect = [
+            (MagicMock(name="ChipCallableA"), "tensormap_and_ringbuffer", {}),
+            (MagicMock(name="ChipCallableB"), "tensormap_and_ringbuffer", {"enable_sdma": True}),
+        ]
 
         _, _, enable_sdma = _assemble_chip_callables(compiled)
 
         assert enable_sdma is True
 
-    def test_raises_on_inconsistent_runtime(self, tmp_path, monkeypatch):
+    def test_raises_on_inconsistent_runtime(self, tmp_path, stub_device_runner):
         compiled = self._build(tmp_path, ["chip_a", "chip_b"])
-        ca = MagicMock(
-            side_effect=[
-                (MagicMock(name="ChipCallable"), "rt_one", {}),
-                (MagicMock(name="ChipCallable"), "rt_two", {}),
-            ]
-        )
-        self._stub_device_runner(monkeypatch, ca)
+        stub_device_runner._compile_and_assemble.side_effect = [
+            (MagicMock(name="ChipCallable"), "rt_one", {}),
+            (MagicMock(name="ChipCallable"), "rt_two", {}),
+        ]
         with pytest.raises(RuntimeError, match="Inconsistent runtime"):
             _assemble_chip_callables(compiled)
 

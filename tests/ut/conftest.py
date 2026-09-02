@@ -12,8 +12,9 @@
 import importlib
 import os
 import sys
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Final
+from unittest.mock import MagicMock, patch
 
 import pytest
 from pypto import LogLevel, get_log_level, set_log_level
@@ -57,6 +58,36 @@ def device_runner(monkeypatch):
             setattr(runtime_package, "device_runner", previous_attribute)
         elif hasattr(runtime_package, "device_runner"):
             delattr(runtime_package, "device_runner")
+
+
+@pytest.fixture
+def stub_device_runner():
+    """Bind the assembly layer to mocks so a test can dispatch without a device.
+
+    Library code reaches ``pypto.runtime.device_runner`` through function-local
+    ``from ... import`` statements, because importing it eagerly would make the
+    device-only ``simpler`` package a hard dependency of ``pypto.runtime``.
+    Patching an attribute on the real module therefore requires importing it
+    first, which the unit-test runners cannot do; a stub module in
+    ``sys.modules`` lets those lazy imports bind to mocks on every platform.
+
+    This fixture is the one place in the test suite that names the assembly
+    layer's private functions, so renaming one stays a single edit here rather
+    than a sweep over every test that stubs a dispatch.
+
+    Yields the stub module. ``_compile_and_assemble`` returns a
+    ``(chip_callable, runtime_name, runtime_config)`` triple and
+    ``_execute_on_device`` returns ``None``; assign ``return_value`` /
+    ``side_effect`` on either mock to refine that.
+    """
+    stub = ModuleType("pypto.runtime.device_runner")
+    stub._compile_and_assemble = MagicMock(  # type: ignore[attr-defined]
+        name="_compile_and_assemble",
+        return_value=(MagicMock(name="chip_callable"), "tensormap_and_ringbuffer", {}),
+    )
+    stub._execute_on_device = MagicMock(name="_execute_on_device", return_value=None)  # type: ignore[attr-defined]
+    with patch.dict(sys.modules, {"pypto.runtime.device_runner": stub}):
+        yield stub
 
 
 @pytest.fixture

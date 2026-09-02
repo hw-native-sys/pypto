@@ -43,8 +43,8 @@ PyPTO 的编译与执行入口比它拥有的概念要多，而且好几个名�
 | `ir.compile` | 编译驱动 | [`ir/compile.py`](../../../python/pypto/ir/compile.py) |
 | `JITFunction.compile` | 特化 + 驱动 | [`jit/decorator.py`](../../../python/pypto/jit/decorator.py) |
 | `JITFunction.lower` | 只做特化，止于 `ir.Program` | 同上 |
-| `device_runner.compile_and_assemble` | 装配 | [`runtime/device_runner.py`](../../../python/pypto/runtime/device_runner.py) |
-| `device_runner.compile_single_kernel` / `compile_single_orchestration` | 装配 | 同上 |
+| `device_runner._compile_and_assemble` | 装配 | [`runtime/device_runner.py`](../../../python/pypto/runtime/device_runner.py) |
+| `device_runner._compile_single_kernel` / `_compile_single_orchestration` | 装配 | 同上 |
 | `KernelCompiler.compile_incore` | 调用 ptoas | [`runtime/kernel_compiler.py`](../../../python/pypto/runtime/kernel_compiler.py) |
 
 只有 `ir.compile` 是受支持的入口；表中其余项列在这里，是为了让 traceback 里出现的
@@ -71,7 +71,7 @@ from pypto.ir import CompiledProgram, DistributedCompiledProgram, DistributedCon
 | `CompiledProgram.from_dir` / `DistributedCompiledProgram.from_dir` | 产物 | 产物目录 | [`ir/compiled_program.py`](../../../python/pypto/ir/compiled_program.py) |
 | `runtime.execute_compiled`（已弃用） | 执行 | 产物目录 | [`runtime/runner.py`](../../../python/pypto/runtime/runner.py) |
 | `execute_distributed_compiled`（已弃用） | 执行 | 产物目录 | [`runtime/distributed_runner.py`](../../../python/pypto/runtime/distributed_runner.py) |
-| `device_runner.execute_on_device` | 装配 | 已装配的二进制 | [`runtime/device_runner.py`](../../../python/pypto/runtime/device_runner.py) |
+| `device_runner._execute_on_device` | 装配 | 已装配的二进制 | [`runtime/device_runner.py`](../../../python/pypto/runtime/device_runner.py) |
 | `execute_artifact_dir` / `execute_batch_manifest` | CLI | 产物目录 | [`runtime/execute_artifact.py`](../../../python/pypto/runtime/execute_artifact.py) |
 
 `run` 本身不说明你在哪一层，接收者才说明。`ChipWorker.run` 与
@@ -147,16 +147,19 @@ compiled(*tensors, config=config)
 以下没有稳定性保证。它们不在任何 `__all__` 中，PyPTO 之外的代码不应导入：
 
 - `pypto.ir.compile` —— `_ensure_orchestration_headers`
-- `pypto.runtime.runner` —— `_execute_compiled`
-- `pypto.runtime.distributed_runner` —— `_execute_distributed`
 - `pypto.ir.compiled_program` —— `CompiledProgram._build_orch_args`、
   `CompiledProgram._build_call_config`
-- `pypto.runtime.device_runner` —— `compile_and_assemble`、`compile_single_kernel`、
-  `compile_single_orchestration`、`execute_on_device`
+- `pypto.runtime.runner` —— `_execute_compiled`、`_execute_golden_case`、
+  `_build_call_config`、`_coerced_to_orch_args`、`_DfxOpts`
+- `pypto.runtime.distributed_runner` —— `_execute_distributed`
+- `pypto.runtime.device_runner` —— 整个装配层：`_compile_and_assemble`、
+  `_compile_single_kernel`、`_compile_single_orchestration`、`_execute_on_device`
 - `pypto.runtime.kernel_compiler` —— `KernelCompiler`、`compile_incore`
-- `pypto.runtime.runner` —— `_build_call_config`、`_coerced_to_orch_args`、
-  `_DfxOpts`
 - `pypto.runtime.tensor_arg`、`pypto.runtime.elf_parser`、`pypto.runtime._binary_cache`
+
+装配层带下划线，是为了让 traceback 一眼看出它来自边界的哪一侧：一个必须拼出 `_`
+的导入，是一个做过决定的导入。`KernelCompiler` / `compile_incore` 以及最后一行的三个
+模块是例外 —— 它们靠模块而非名字划为内部，稳定性保证同样为零。
 
 这两个实参构造器把用户实参编排成 simpler 的 `TaskArgs` 与 `CallConfig`。
 `ChipWorker.run` 与 `ChipWorker.register` 是抵达这条路径的受支持方式 —— 它们会替你调用

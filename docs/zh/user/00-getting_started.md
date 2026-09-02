@@ -94,7 +94,7 @@ finally:
     worker.close()                                   # cids + DeviceTensors released
 ```
 
-`worker.register(compiled)` 立即触发 `compile_and_assemble` + simpler `register`，
+`worker.register(compiled)` 立即触发 `_compile_and_assemble` + simpler `register`，
 配置错误会在这里抛出而不是到第一次 dispatch 才暴露。返回的 `RegistrationHandle` 是
 可调用的、支持 `with handle:` 作用域清理，也有 `handle.unregister()` 用于显式提前
 关闭。对同一个 `compiled.chip_callable` 多次 `register` 返回的是同一个 cid 的别名；

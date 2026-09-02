@@ -58,7 +58,7 @@ from pypto.runtime.runner import (
     RunConfig,
     RunResult,
     _DfxOpts,
-    _execute_on_device,
+    _execute_golden_case,
     validate_persisted_outputs,
 )
 from pypto.runtime.tensor_spec import TensorSpec as RuntimeTensorSpec
@@ -487,9 +487,9 @@ def _fused_compile_task(
                 resolved_platform=resolved,
                 error=None,
             )
-        from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
+        from pypto.runtime.device_runner import _compile_and_assemble  # noqa: PLC0415
 
-        chip_callable, runtime_name, runtime_config = compile_and_assemble(work_dir, resolved)
+        chip_callable, runtime_name, runtime_config = _compile_and_assemble(work_dir, resolved)
         enable_sdma = bool(runtime_config.get("enable_sdma", False))
         return CompileArtifact(
             work_dir=work_dir,
@@ -901,7 +901,7 @@ def _fused_execute_task(
     device_id = _device_pool.get()
     try:
         _executed_device[cache_key] = device_id
-        _execute_on_device(
+        _execute_golden_case(
             artifact.work_dir,
             artifact.work_dir / "golden.py",
             artifact.chip_callable,
@@ -1475,9 +1475,9 @@ class TestRunner:
                     execution_time=time.time() - start_time,
                 )
 
-            from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
+            from pypto.runtime.device_runner import _compile_and_assemble  # noqa: PLC0415
 
-            chip_callable, runtime_name, runtime_config = compile_and_assemble(
+            chip_callable, runtime_name, runtime_config = _compile_and_assemble(
                 work_dir,
                 resolved_platform,
             )
@@ -1516,9 +1516,9 @@ class TestRunner:
                     )
                 # Device run (--no-validate) persisted outputs; validate here.
                 return _validate_after_device_run(test_case, work_dir, time.time() - start_time)
-            # RunTiming was dropped (simpler #1177): _execute_on_device returns
+            # RunTiming was dropped (simpler #1177): _execute_golden_case returns
             # None now; timing is read from the runtime's [STRACE] log markers.
-            _execute_on_device(
+            _execute_golden_case(
                 work_dir,
                 golden_path,
                 chip_callable,

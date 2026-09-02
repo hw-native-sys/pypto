@@ -20,7 +20,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pypto.runtime import ChipWorker, RunConfig
 
-# ``execute_on_device`` is imported lazily inside individual tests to keep
+# ``_execute_on_device`` is imported lazily inside individual tests to keep
 # this module importable in environments where the underlying ``simpler``
 # package is not installed (e.g. unit-tests CI). ``device_runner`` eagerly
 # imports ``simpler.task_interface`` at module load.
@@ -305,11 +305,11 @@ class TestActiveChipWorkerLookup:
             )
 
 
-# ``execute_on_device`` lives in ``device_runner`` which eagerly imports the
+# ``_execute_on_device`` lives in ``device_runner`` which eagerly imports the
 # ``simpler`` package. The ChipWorker-only tests above mock just the
 # ``simpler.ChipWorker`` class via ``_SimplerWorker`` and do not need
 # ``device_runner`` loaded — but the tests in this class invoke
-# ``execute_on_device`` directly, so they are skipped when ``simpler`` is not
+# ``_execute_on_device`` directly, so they are skipped when ``simpler`` is not
 # installed (e.g. unit-tests CI).
 try:
     import simpler  # noqa: F401  # pyright: ignore[reportMissingImports]
@@ -319,12 +319,12 @@ else:
     _has_simpler = True
 
 
-@pytest.mark.skipif(not _has_simpler, reason="execute_on_device requires the simpler package")
+@pytest.mark.skipif(not _has_simpler, reason="_execute_on_device requires the simpler package")
 class TestExecuteOnDeviceReuse:
-    """Verify ``execute_on_device`` reuses an active ChipWorker rather than constructing a new one."""
+    """Verify ``_execute_on_device`` reuses an active ChipWorker rather than constructing a new one."""
 
     def test_reuse_skips_init_and_close(self, fake_simpler_worker):
-        from pypto.runtime.device_runner import execute_on_device  # noqa: PLC0415
+        from pypto.runtime.device_runner import _execute_on_device  # noqa: PLC0415
 
         chip_callable = MagicMock(name="chip_callable")
         orch_args = [MagicMock(name="host_tensor")]
@@ -340,7 +340,7 @@ class TestExecuteOnDeviceReuse:
                 patch("pypto.runtime.device_runner.CallConfig", MagicMock),
                 patch("pypto.runtime.runner._coerced_to_orch_args", return_value=wire_args) as pack,
             ):
-                execute_on_device(
+                _execute_on_device(
                     chip_callable,
                     orch_args,
                     platform="a2a3sim",
@@ -356,13 +356,13 @@ class TestExecuteOnDeviceReuse:
             assert fake_simpler_worker.close.call_count == 0
 
     def test_no_active_worker_uses_one_shot_path(self, fake_simpler_worker):
-        from pypto.runtime.device_runner import execute_on_device  # noqa: PLC0415
+        from pypto.runtime.device_runner import _execute_on_device  # noqa: PLC0415
 
         chip_callable = MagicMock(name="chip_callable")
         orch_args = [MagicMock(name="host_tensor")]
         wire_args = MagicMock(name="TaskArgs")
 
-        # No `with` block — execute_on_device must construct its own ChipWorker
+        # No `with` block — _execute_on_device must construct its own ChipWorker
         # (one init + one run + one close on the underlying simpler.ChipWorker).
         # The one-shot path imports simpler.ChipWorker directly into device_runner,
         # so patch that name in addition to the wrapper's _SimplerWorker.
@@ -372,7 +372,7 @@ class TestExecuteOnDeviceReuse:
             patch("pypto.runtime.device_runner.Worker", return_value=one_shot) as worker_cls,
             patch("pypto.runtime.runner._coerced_to_orch_args", return_value=wire_args) as pack,
         ):
-            execute_on_device(
+            _execute_on_device(
                 chip_callable,
                 orch_args,
                 platform="a2a3sim",
@@ -393,13 +393,13 @@ class TestExecuteOnDeviceReuse:
         assert one_shot.close.call_count == 1
 
     def test_no_active_worker_forwards_enabled_sdma(self, fake_simpler_worker):
-        from pypto.runtime.device_runner import execute_on_device  # noqa: PLC0415
+        from pypto.runtime.device_runner import _execute_on_device  # noqa: PLC0415
 
         with (
             patch("pypto.runtime.device_runner.CallConfig", MagicMock),
             patch("pypto.runtime.device_runner.Worker") as worker_cls,
         ):
-            execute_on_device(
+            _execute_on_device(
                 MagicMock(),
                 MagicMock(),
                 platform="a2a3",
@@ -417,7 +417,7 @@ class TestExecuteOnDeviceReuse:
         )
 
     def test_sdma_required_dispatch_rejects_ordinary_active_worker(self, fake_simpler_worker):
-        from pypto.runtime.device_runner import execute_on_device  # noqa: PLC0415
+        from pypto.runtime.device_runner import _execute_on_device  # noqa: PLC0415
 
         with (
             ChipWorker(config=RunConfig(platform="a2a3sim")),
@@ -428,7 +428,7 @@ class TestExecuteOnDeviceReuse:
                 RuntimeError,
                 match="active ChipWorker was created without enable_sdma=True",
             ):
-                execute_on_device(
+                _execute_on_device(
                     MagicMock(),
                     MagicMock(),
                     platform="a2a3sim",
@@ -440,12 +440,12 @@ class TestExecuteOnDeviceReuse:
         worker_cls.assert_not_called()
 
     def test_sdma_enabled_active_worker_runs_ordinary_dispatch(self, fake_simpler_worker):
-        from pypto.runtime.device_runner import execute_on_device  # noqa: PLC0415
+        from pypto.runtime.device_runner import _execute_on_device  # noqa: PLC0415
 
         with ChipWorker(config=RunConfig(platform="a2a3sim"), enable_sdma=True):
             fake_simpler_worker.run.reset_mock()
             with patch("pypto.runtime.device_runner.CallConfig", MagicMock):
-                execute_on_device(
+                _execute_on_device(
                     MagicMock(),
                     MagicMock(),
                     platform="a2a3sim",
@@ -456,10 +456,10 @@ class TestExecuteOnDeviceReuse:
         fake_simpler_worker.run.assert_called_once()
 
     def test_level_mismatch_rejected(self, fake_simpler_worker):
-        from pypto.runtime.device_runner import execute_on_device  # noqa: PLC0415
+        from pypto.runtime.device_runner import _execute_on_device  # noqa: PLC0415
 
         with pytest.raises(ValueError, match="only supports level=2"):
-            execute_on_device(
+            _execute_on_device(
                 MagicMock(),
                 MagicMock(),
                 platform="a2a3sim",

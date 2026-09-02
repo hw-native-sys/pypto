@@ -9,7 +9,7 @@
 
 """Unit tests for :mod:`pypto.runtime.execute_artifact`.
 
-``compile_and_assemble`` and ``_execute_on_device`` are mocked so these tests
+``_compile_and_assemble`` and ``_execute_golden_case`` are mocked so these tests
 run without a device, without ``simpler``, and without any compiled artifact.
 They pin the CLI contract the harness relies on: arg parsing, DFX passthrough,
 and the ``PYPTO_EXEC_RESULT`` marker + exit code on pass / fail.
@@ -17,8 +17,6 @@ and the ``PYPTO_EXEC_RESULT`` marker + exit code on pass / fail.
 
 import importlib
 import json
-import sys
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -31,18 +29,14 @@ execute_batch_manifest = execute_artifact.execute_batch_manifest
 
 
 @pytest.fixture
-def stub_compile_and_assemble():
-    """Inject a stub ``pypto.runtime.device_runner`` so these tests don't import it.
+def stub_compile_and_assemble(stub_device_runner):
+    """The assembly-layer mock these tests drive.
 
-    ``execute_artifact`` imports ``compile_and_assemble`` lazily from
-    ``pypto.runtime.device_runner``; importing that module pulls in the optional
-    ``simpler`` package, which is absent on the unit-test runners. A stub module
-    lets the lazy import resolve to a mock without it.
+    ``execute_artifact`` reaches it through a lazy import, so the stub module
+    ``stub_device_runner`` installs is what the import binds to; see that
+    fixture in ``tests/ut/conftest.py``.
     """
-    ca = MagicMock(return_value=(object(), "tensormap_and_ringbuffer", {}))
-    stub = SimpleNamespace(compile_and_assemble=ca)
-    with patch.dict(sys.modules, {"pypto.runtime.device_runner": stub}):
-        yield ca
+    return stub_device_runner._compile_and_assemble
 
 
 def _argv(work_dir, *extra):
@@ -88,7 +82,7 @@ def test_setup_error_prints_infra_marker_not_fail(tmp_path, capsys):
 
 
 def test_execute_artifact_dir_wraps_compile_failure_as_setup_error(tmp_path, stub_compile_and_assemble):
-    """A compile_and_assemble failure surfaces as ArtifactSetupError (infra)."""
+    """A _compile_and_assemble failure surfaces as ArtifactSetupError (infra)."""
     stub_compile_and_assemble.side_effect = RuntimeError("missing .so")
     with pytest.raises(execute_artifact.ArtifactSetupError):
         execute_artifact_dir(tmp_path, "a2a3", 0)
@@ -144,7 +138,7 @@ def test_execute_artifact_dir_wires_compile_then_execute(tmp_path, stub_compile_
         "tensormap_and_ringbuffer",
         {"enable_sdma": True},
     )
-    with patch.object(execute_artifact, "_execute_on_device") as exec_on_dev:
+    with patch.object(execute_artifact, "_execute_golden_case") as exec_on_dev:
         execute_artifact_dir(tmp_path, "a2a3", 1)
     stub_compile_and_assemble.assert_called_once_with(tmp_path, "a2a3")
     args, kwargs = exec_on_dev.call_args
@@ -159,7 +153,7 @@ def test_execute_artifact_dir_wires_compile_then_execute(tmp_path, stub_compile_
 
 
 def test_execute_artifact_dir_defaults_sdma_off(tmp_path, stub_compile_and_assemble):
-    with patch.object(execute_artifact, "_execute_on_device") as exec_on_dev:
+    with patch.object(execute_artifact, "_execute_golden_case") as exec_on_dev:
         execute_artifact_dir(tmp_path, "a2a3", 1)
 
     assert exec_on_dev.call_args.kwargs["enable_sdma"] is False
@@ -183,7 +177,7 @@ def test_execute_batch_runs_all_in_one_worker(tmp_path, capsys, stub_compile_and
     chipworker = MagicMock()
     with (
         patch("pypto.runtime.ChipWorker", return_value=chipworker) as cw,
-        patch.object(execute_artifact, "_execute_on_device") as on_dev,
+        patch.object(execute_artifact, "_execute_golden_case") as on_dev,
     ):
         all_ok = execute_batch_manifest(manifest, 3, validate=False)
     assert all_ok is True
@@ -211,7 +205,7 @@ def test_execute_batch_enables_sdma_worker_for_prefetch_artifact(
 
     with (
         patch("pypto.runtime.ChipWorker", return_value=MagicMock()) as worker_cls,
-        patch.object(execute_artifact, "_execute_on_device") as on_dev,
+        patch.object(execute_artifact, "_execute_golden_case") as on_dev,
     ):
         all_ok = execute_batch_manifest(manifest, 3, validate=False)
 
@@ -244,7 +238,7 @@ def test_execute_batch_mixed_sdma_capability_is_order_independent(
     stub_compile_and_assemble.side_effect = reconstruct
     with (
         patch("pypto.runtime.ChipWorker", return_value=MagicMock()) as worker_cls,
-        patch.object(execute_artifact, "_execute_on_device") as on_dev,
+        patch.object(execute_artifact, "_execute_golden_case") as on_dev,
     ):
         all_ok = execute_batch_manifest(manifest, 3, validate=False)
 
@@ -305,7 +299,7 @@ def test_execute_batch_ignores_fallback_artifact_for_shared_sdma_capability(
     stub_compile_and_assemble.side_effect = reconstruct
     with (
         patch("pypto.runtime.ChipWorker", return_value=MagicMock()) as worker_cls,
-        patch.object(execute_artifact, "_execute_on_device") as on_dev,
+        patch.object(execute_artifact, "_execute_golden_case") as on_dev,
     ):
         all_ok = execute_batch_manifest(manifest, 3, validate=False)
 
@@ -325,7 +319,7 @@ def test_execute_batch_one_failure_does_not_abort_rest(tmp_path, capsys, stub_co
     with (
         patch("pypto.runtime.ChipWorker", return_value=MagicMock()),
         # First artifact's device run fails; second still runs.
-        patch.object(execute_artifact, "_execute_on_device", side_effect=[RuntimeError("dev boom"), None]),
+        patch.object(execute_artifact, "_execute_golden_case", side_effect=[RuntimeError("dev boom"), None]),
     ):
         all_ok = execute_batch_manifest(manifest, 0, validate=False)
     assert all_ok is False
@@ -354,7 +348,7 @@ def test_execute_batch_first_rebind_failure_marks_infra_and_continues(
     stub_compile_and_assemble.side_effect = reconstruct
     with (
         patch("pypto.runtime.ChipWorker", return_value=MagicMock()),
-        patch.object(execute_artifact, "_execute_on_device"),
+        patch.object(execute_artifact, "_execute_golden_case"),
     ):
         all_ok = execute_batch_manifest(manifest, 0, validate=False)
     assert all_ok is False
@@ -379,7 +373,7 @@ def test_execute_batch_setup_failure_marks_infra_not_fail(tmp_path, capsys, stub
     stub_compile_and_assemble.side_effect = reconstruct
     with (
         patch("pypto.runtime.ChipWorker", return_value=MagicMock()),
-        patch.object(execute_artifact, "_execute_on_device"),
+        patch.object(execute_artifact, "_execute_golden_case"),
     ):
         all_ok = execute_batch_manifest(manifest, 0, validate=False)
     assert all_ok is False

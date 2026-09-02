@@ -38,16 +38,16 @@ from pypto.runtime import DeviceTensor, RunConfig
 
 @contextlib.contextmanager
 def _fake_compile_and_assemble(return_value):
-    """Stub ``pypto.runtime.device_runner.compile_and_assemble`` via a fake module.
+    """Stub ``pypto.runtime.device_runner._compile_and_assemble`` via a fake module.
 
     The real module imports ``simpler_setup`` (device-only), so it can't be loaded
     on host-only CI. Inserting a fake module into ``sys.modules`` lets the inner
-    ``from pypto.runtime.device_runner import compile_and_assemble`` resolve to the
+    ``from pypto.runtime.device_runner import _compile_and_assemble`` resolve to the
     mock on every platform. Yields the mock for call assertions.
     """
     mock = MagicMock(return_value=return_value)
     fake = types.ModuleType("pypto.runtime.device_runner")
-    setattr(fake, "compile_and_assemble", mock)
+    setattr(fake, "_compile_and_assemble", mock)
     with patch.dict(sys.modules, {"pypto.runtime.device_runner": fake}):
         yield mock
 
@@ -686,7 +686,7 @@ class TestCompiledProgramExtraction:
     """
 
     def _patch_assemble(self, chip_callable_name: str = "fake_chip"):
-        """Patch ``device_runner.compile_and_assemble`` and return the MagicMock.
+        """Patch ``device_runner._compile_and_assemble`` and return the MagicMock.
 
         The patch target is the *source* module — inner-scope ``from ... import``
         statements bind to the patched name at import time.
@@ -725,7 +725,7 @@ class TestCompiledProgramExtraction:
             assert cp.runtime_config == runtime_config
 
     def test_properties_cache_across_calls(self, tmp_path):
-        """All three properties together trigger exactly one compile_and_assemble call."""
+        """All three properties together trigger exactly one _compile_and_assemble call."""
         prog = _make_program_with_orchestration()
         cp = CompiledProgram(prog, str(tmp_path))
 

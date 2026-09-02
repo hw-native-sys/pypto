@@ -105,7 +105,7 @@ def _write_raw_pto(work_dir):
 
 def _missing_config_message(device_runner, work_dir):
     with pytest.raises(FileNotFoundError) as exc_info:
-        device_runner.compile_and_assemble(work_dir, "a2a3")
+        device_runner._compile_and_assemble(work_dir, "a2a3")
     return str(exc_info.value)
 
 

@@ -130,7 +130,7 @@ the precedence above.
 
 A ring sizing's runtime arena costs ~800 ms to build the first time it is used.
 Workers build it eagerly at `init` — `prepare(config)` / `ChipWorker` /
-`execute_on_device` — so the cold build lands in setup instead of inside the
+`_execute_on_device` — so the cold build lands in setup instead of inside the
 first (usually timed) dispatch.
 
 The arena cache is keyed on the **full per-ring sizing vector** (all four rings'

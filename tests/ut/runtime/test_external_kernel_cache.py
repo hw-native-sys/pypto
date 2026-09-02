@@ -133,7 +133,7 @@ def test_external_compile_ignores_source_sidecar(tmp_path):
     sidecar.write_bytes(b"stale wrong-core binary")
     compiler_stub = _Compiler()
 
-    raw, kernel_binary = device_runner.compile_single_kernel(
+    raw, kernel_binary = device_runner._compile_single_kernel(
         _kernel(source, "aiv", 7),
         compiler_stub,
         "a2a3sim",
@@ -159,7 +159,7 @@ def test_external_compile_forwards_descriptor_include_dirs(tmp_path):
     kernel["extra_include_dirs"] = [str(include_dir)]
     compiler_stub = _Compiler()
 
-    device_runner.compile_single_kernel(
+    device_runner._compile_single_kernel(
         kernel,
         compiler_stub,
         "a2a3sim",

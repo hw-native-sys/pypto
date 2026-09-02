@@ -486,7 +486,7 @@ class DistributedCompiledProgram:
     ) -> "DistributedWorker":
         """Prepare a reusable L3 execution handle (setup once, dispatch many).
 
-        Runs the expensive setup (``compile_and_assemble``, generated-module
+        Runs the expensive setup (``_compile_and_assemble``, generated-module
         loading, simpler ``Worker(level=3)`` construction + registration +
         ``init()``) exactly once and returns a :class:`DistributedWorker` that
         dispatches many times on the held worker. The handle also exposes

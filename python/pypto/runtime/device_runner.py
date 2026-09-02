@@ -12,9 +12,9 @@
 This module replaces Simpler's ``CodeRunner`` by providing PyPTO-internal
 implementations of:
 
-- :func:`compile_and_assemble`: Compile kernels + orchestration C++ → binaries,
+- :func:`_compile_and_assemble`: Compile kernels + orchestration C++ → binaries,
   assemble into ``ChipCallable``, locate runtime binaries.
-- :func:`execute_on_device`: Run a ``ChipCallable`` on device via ``ChipWorker``.
+- :func:`_execute_on_device`: Run a ``ChipCallable`` on device via ``ChipWorker``.
 - :func:`validate_golden`: Compare actual outputs against golden reference.
 
 These functions keep orchestration in PyPTO while relying on the installed
@@ -247,7 +247,7 @@ def _temporary_env(env_updates: dict[str, str]):
 # ---------------------------------------------------------------------------
 
 
-def compile_single_kernel(
+def _compile_single_kernel(
     kernel: dict,
     compiler: KernelCompiler,
     platform: str,
@@ -266,7 +266,7 @@ def compile_single_kernel(
     When *cache_dir* is provided, the final (possibly stripped) binary is
     additionally written under that directory using the function/core identity
     and, for external kernels, the content fingerprint. This is the pre-build
-    cache that :func:`compile_and_assemble` checks before calling this function.
+    cache that :func:`_compile_and_assemble` checks before calling this function.
 
     Args:
         kernel: Kernel descriptor dict with keys ``"source"``, ``"core_type"``,
@@ -313,7 +313,7 @@ def compile_single_kernel(
     return raw, kernel_bin
 
 
-def compile_single_orchestration(
+def _compile_single_orchestration(
     source: str | Path,
     compiler: KernelCompiler,
     runtime_name: str,
@@ -352,7 +352,7 @@ def compile_single_orchestration(
 
 
 # ---------------------------------------------------------------------------
-# compile_and_assemble
+# _compile_and_assemble
 # ---------------------------------------------------------------------------
 
 # ``hid`` (ELF Build-ID 64 of an orchestration ``.so``, lowercase hex) → that
@@ -490,7 +490,7 @@ def _missing_kernel_config_error(work_dir: Path) -> FileNotFoundError:
     )
 
 
-def compile_and_assemble(
+def _compile_and_assemble(
     work_dir: Path,
     platform: str,
 ) -> tuple[ChipCallable, str, dict[str, Any]]:
@@ -615,7 +615,7 @@ def _compile_and_assemble_locked(
             return (func_id, CoreCallable.build(signature=sig, binary=cached_bin))
 
         # Compile via shared function and populate the content-addressed cache.
-        _, kernel_bin = compile_single_kernel(
+        _, kernel_bin = _compile_single_kernel(
             kernel,
             compiler,
             platform,
@@ -638,7 +638,7 @@ def _compile_and_assemble_locked(
             return cached_bin
 
         # Compile via shared function; skip secondary prebuild cache write
-        return compile_single_orchestration(orchestration["source"], compiler, runtime_name)
+        return _compile_single_orchestration(orchestration["source"], compiler, runtime_name)
 
     max_workers = min(64, 1 + len(kernels))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -672,11 +672,11 @@ def _compile_and_assemble_locked(
 
 
 # ---------------------------------------------------------------------------
-# execute_on_device
+# _execute_on_device
 # ---------------------------------------------------------------------------
 
 
-def execute_on_device(  # noqa: PLR0913
+def _execute_on_device(  # noqa: PLR0913
     chip_callable: ChipCallable,
     orch_args: list[Any],
     platform: str,
@@ -769,7 +769,7 @@ def execute_on_device(  # noqa: PLR0913
     """
     if level != 2:
         raise ValueError(
-            f"execute_on_device currently only supports level=2; got level={level}. "
+            f"_execute_on_device currently only supports level=2; got level={level}. "
             f"L3 execution is not yet exposed at the pypto user-API layer."
         )
 
@@ -788,7 +788,7 @@ def execute_on_device(  # noqa: PLR0913
     )
     if any_dfx and not output_prefix:
         raise ValueError(
-            "execute_on_device: output_prefix is required when any DFX flag "
+            "_execute_on_device: output_prefix is required when any DFX flag "
             "(enable_chip_swimlane / enable_dump_args / enable_pmu / enable_dep_gen / "
             "enable_scope_stats) is enabled — runtime CallConfig::validate() would "
             "otherwise reject the call."
@@ -917,7 +917,7 @@ def validate_golden(
 # ---------------------------------------------------------------------------
 
 # Return type for build_orch_args_from_inputs. The first element deliberately
-# remains unmaterialized until execute_on_device has selected its owning Worker.
+# remains unmaterialized until _execute_on_device has selected its owning Worker.
 _OrchArgsTuple = tuple[list[Any], dict[str, Any], dict[str, torch.Tensor], dict[str, torch.Tensor]]
 
 
@@ -935,7 +935,7 @@ def _collect_orch_args(
 
     Returns:
         ``(orch_args, all_tensors, inputs, outputs)``. ``orch_args`` is an
-        ordered Python list; :func:`execute_on_device` turns it into
+        ordered Python list; :func:`_execute_on_device` turns it into
         address-free ``TaskArgs`` after selecting the Worker.
     """
     orch_args: list[Any] = []

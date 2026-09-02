@@ -22,7 +22,7 @@ The added value is:
    needed.
 2. Pre-flight invalidation of cached kernel/orchestration binaries so a
    hand-edited cpp is actually picked up on the next call. Without this,
-   ``compile_and_assemble`` would silently load a stale ``.so``/``.bin``
+   ``_compile_and_assemble`` would silently load a stale ``.so``/``.bin``
    built from the previous version of the cpp.
 
 CLI::
@@ -72,7 +72,7 @@ def invalidate_binary_cache(work_dir: Path | str) -> None:
 
     Both ``cache/*.bin`` (the pre-build cache written by ``prebuild_binaries``)
     and the sibling ``.so`` / ``.o`` files next to each cpp are deleted. CPP
-    sources are untouched, so the next ``compile_and_assemble`` rebuilds from
+    sources are untouched, so the next ``_compile_and_assemble`` rebuilds from
     source and picks up hand-edits.
 
     Handles both layouts: a single-chip / L2 build keeps ``cache/`` +

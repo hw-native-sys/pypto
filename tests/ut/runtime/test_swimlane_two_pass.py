@@ -19,8 +19,6 @@ host-register mappings between DFX runs. These tests drive
 
 import ctypes
 import json
-import sys
-import types
 from pathlib import Path
 
 import pypto.runtime.runner as _runner
@@ -148,19 +146,8 @@ def test_build_args_spec_rejects_unknown_type(tmp_path):
         _build_args_spec(["not an arg"], tmp_path)  # type: ignore[list-item]  # pyright: ignore[reportArgumentType]
 
 
-def test_dep_capture_reconstructs_ring_config(tmp_path, monkeypatch):
-    captured: dict = {}
-
-    def fake_compile_and_assemble(_work_dir, _platform):
-        return object(), "fake_runtime", {}
-
-    def fake_execute_on_device(*_args, **kwargs):
-        captured.update(kwargs)
-
-    fake_device_runner = types.ModuleType("pypto.runtime.device_runner")
-    fake_device_runner.compile_and_assemble = fake_compile_and_assemble  # type: ignore[attr-defined]
-    fake_device_runner.execute_on_device = fake_execute_on_device  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "pypto.runtime.device_runner", fake_device_runner)
+def test_dep_capture_reconstructs_ring_config(tmp_path, monkeypatch, stub_device_runner):
+    stub_device_runner._compile_and_assemble.return_value = (object(), "fake_runtime", {})
 
     spec_path = tmp_path / "capture.json"
     spec_path.write_text(
@@ -183,7 +170,7 @@ def test_dep_capture_reconstructs_ring_config(tmp_path, monkeypatch):
     )
 
     assert _dep_gen_capture.main([str(spec_path)]) == 0
-    config = captured["config"]
+    config = stub_device_runner._execute_on_device.call_args.kwargs["config"]
     assert config.ring_task_window == [16, 32, 64, 128]
     assert config.ring_heap == 512 * 1024 * 1024
     assert config.ring_dep_pool == [64, 0, 0, 256]
