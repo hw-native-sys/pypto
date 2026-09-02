@@ -146,7 +146,13 @@ void BindPass(nb::module_& m) {
              "Every tile.gemv/tile.gemv_acc/tile.gemv_bias with acc_phase=AccPhase.Final is paired in "
              "the "
              "same straight-line region with exactly one tile.store of that value using "
-             "st_phase=STPhase.Final, and every final store has such a live producer");
+             "st_phase=STPhase.Final, and every final store has such a live producer")
+      .value("NoScalarKernelReturn", IRProperty::NoScalarKernelReturn,
+             "No device function (InCore / AIC / AIV / Group / Spmd) returns a Scalar. Those types "
+             "mean a dispatchable task, and the runtime passes scalars in by value while returning "
+             "only tensors, so such a return has no carrier -- write the value into a [1] tensor "
+             "output and read it back with pl.tensor.read. Scalar[TASK_ID] is exempt, and a "
+             "device-side scalar helper belongs in an Inline function");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");

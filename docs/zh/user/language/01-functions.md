@@ -114,6 +114,29 @@ def good(x: pl.Tensor[[64, 64], pl.FP32], out: pl.Out[pl.Tensor[[64, 64], pl.FP3
 
 **3. `compile()` 收的是 kernel 自己的参数，不是编译选项。** 编译期开关走 `config=RunConfig(...)`；误写的 `compile(skip_ptoas=True)` 会拿去和 kernel 签名做绑定，并抛出 `TypeError: got an unexpected keyword argument`。`@pl.jit` 会自行检测 ptoas 是否可用，所以你不需要传 `skip_ptoas`。
 
+**设备 kernel 不能返回标量。** 运行时的两条任务参数通道是分离的：标量按值传**入**，回来的只有
+tensor。因此在 device 上算出、而调用方（派发它的 orchestration 函数，以及其外的 host）又要用的值，
+必须装在 tensor 里带回来。藏在 `pl.Tuple[...]` 返回值里的标量同样如此。
+
+```python
+@pl.jit.incore
+def bad(x: pl.Tensor[[64], pl.FP32]) -> pl.Scalar[pl.INDEX]:   # ✗ 这个返回值没有载体
+    ...
+
+@pl.jit.incore                                                  # ✓ 用一个 [1] 的 tensor 带回来
+def good(x: pl.Tensor[[64], pl.FP32], n_out: pl.Out[pl.Tensor[[1], pl.INT32]]):
+    ...
+# 然后在入口体里，派发之后：
+n = pl.tensor.read(n_out, [0])
+```
+
+同一条规则也适用于你在 `with pl.at(...)` **内部**赋值、在其之后读取的标量——那是变相的 kernel
+返回。当这个值只依赖入口体已有的东西（循环变量、标量参数）时，编译器会替你把该计算移出作用
+域；当它依赖 device 数据时，编译器会要求你按上面的方式经由 tensor 传递。
+
+**为** kernel 计算标量的辅助函数没有问题——把它写成 `@pl.jit.inline`（`FunctionType.Inline`）。
+它会在调用点被展开，因此不是一次任务派发，这条规则对它不适用。
+
 ### `@pl.function` 与 `@pl.program`
 
 写编译器测试用例时才会用到这种形式，写 kernel 时不会。它一比一地描述 IR：类就是程序，每个方法是一个函数，调用图是写出来的而非发现出来的。`@pl.jit` 特化成的正是这个形状 —— 打印一个编译好的程序，看到的就是 `@pl.program` 源码。
@@ -214,6 +237,8 @@ print("artifacts in:", compiled.output_dir)
 | **程序里少了第二个顶层 kernel** | 普通 `@pl.jit` 不发现其他 `@pl.jit` 入口 | 改用 `@pl.jit.host`，或把被调方改成 `.incore` / `.opaque` |
 | **`auto_scope=False` 被拒绝** | 用在了 `.incore` / `.opaque` 上 | 放到入口或 `.inline` 辅助函数上 |
 | **`@pl.program` 方法缺 `self`** | 每个方法都需要 | 补上 `self`；它会从 IR 中剥离 |
+| **`A task cannot return a scalar`** | device kernel 声明了 `pl.Scalar` 返回值 | 写入一个 `[1]` 的 tensor 输出，派发后用 `pl.tensor.read(t, [0])` 读回 |
+| **`cannot return a scalar` 并指名某个作用域内的变量** | 在 `pl.at(...)` 内赋值的标量在其之后被读取，且依赖 device 数据 | 经由 `[1]` tensor 传递，或把该计算移出作用域 |
 
 ## 配套示例
 

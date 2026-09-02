@@ -3581,28 +3581,38 @@ class TestGmLocalTensorConversion:
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Scalar[pl.FP32]:
+            def main_incore_0(
+                self, x: pl.Tensor[[64], pl.FP32], out: pl.Tensor[[4], pl.FP32]
+            ) -> pl.Tensor[[4], pl.FP32]:
                 t: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
                 v: pl.Scalar[pl.FP32] = pl.tensor.read(t, [0])
-                return v
+                pl.tensor.write(out, [0], v)
+                return out
 
             @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Scalar[pl.FP32]:
-                v: pl.Scalar[pl.FP32] = self.main_incore_0(x)
-                return v
+            def main(
+                self, x: pl.Tensor[[64], pl.FP32], out: pl.Tensor[[4], pl.FP32]
+            ) -> pl.Tensor[[4], pl.FP32]:
+                r: pl.Tensor[[4], pl.FP32] = self.main_incore_0(x, out)
+                return r
 
         @pl.program
         class Expected:
             @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Scalar[pl.FP32]:
+            def main_incore_0(
+                self, x: pl.Tensor[[64], pl.FP32], out: pl.Out[pl.Tensor[[4], pl.FP32]]
+            ) -> pl.Tensor[[4], pl.FP32]:
                 t_tile = pl.tile.create([64], dtype=pl.FP32)
                 v_tile = pl.tile.read(t_tile, [0])
-                return v_tile
+                pl.tensor.write(out, [0], v_tile)
+                return out
 
             @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Scalar[pl.FP32]:
-                v = self.main_incore_0(x)
-                return v
+            def main(
+                self, x: pl.Tensor[[64], pl.FP32], out: pl.Out[pl.Tensor[[4], pl.FP32]]
+            ) -> pl.Tensor[[4], pl.FP32]:
+                r = self.main_incore_0(x, out)
+                return r
 
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
@@ -3622,17 +3632,17 @@ class TestGmLocalTensorConversion:
                 self,
                 dst: pl.Tensor[[4], pl.FP32],
                 val: pl.Scalar[pl.FP32],
-            ) -> pl.Scalar[pl.FP32]:
+            ) -> pl.Tensor[[4], pl.FP32]:
                 pl.tensor.write(dst, [0], val)
-                return val
+                return dst
 
             @pl.function
             def main(
                 self,
                 dst: pl.Tensor[[4], pl.FP32],
                 val: pl.Scalar[pl.FP32],
-            ) -> pl.Scalar[pl.FP32]:
-                result: pl.Scalar[pl.FP32] = self.main_incore_0(dst, val)
+            ) -> pl.Tensor[[4], pl.FP32]:
+                result: pl.Tensor[[4], pl.FP32] = self.main_incore_0(dst, val)
                 return result
 
         @pl.program
@@ -3642,16 +3652,16 @@ class TestGmLocalTensorConversion:
                 self,
                 dst: pl.Out[pl.Tensor[[4], pl.FP32]],
                 val: pl.Scalar[pl.FP32],
-            ) -> pl.Scalar[pl.FP32]:
+            ) -> pl.Tensor[[4], pl.FP32]:
                 pl.tensor.write(dst, [0], val)
-                return val
+                return dst
 
             @pl.function
             def main(
                 self,
                 dst: pl.Out[pl.Tensor[[4], pl.FP32]],
                 val: pl.Scalar[pl.FP32],
-            ) -> pl.Scalar[pl.FP32]:
+            ) -> pl.Tensor[[4], pl.FP32]:
                 result = self.main_incore_0(dst, val)
                 return result
 
@@ -3690,7 +3700,7 @@ class TestGmLocalTensorConversion:
                 dst_index: pl.Tensor[[1, 32], pl.INT32],
                 values: pl.Tensor[[32], pl.INT32],
                 count: pl.Scalar[pl.INDEX],
-            ) -> pl.Scalar[pl.INDEX]:
+            ) -> pl.Tensor[[1, 32], pl.INT32]:
                 pos_fill = pl.full([1, 32], dtype=pl.INT32, value=0)
                 dst_pos[0:1, 0:32] = pos_fill
                 index_fill = pl.full([1, 32], dtype=pl.INT32, value=-1)
@@ -3700,7 +3710,7 @@ class TestGmLocalTensorConversion:
                         value = pl.tensor.read(values, [i])
                         pl.tensor.write(dst_pos, [0, i], value)
                         pl.tensor.write(dst_index, [0, i], pl.cast(i, pl.INT32))
-                return count
+                return dst_pos
 
         after = passes.convert_tensor_to_tile_ops()(Before)
         kernel = _require_function(after, "main_incore_0")
@@ -3718,12 +3728,12 @@ class TestGmLocalTensorConversion:
             def main_incore_0(
                 self,
                 dst: pl.Tensor[[32], pl.INT32],
-            ) -> pl.Scalar[pl.INT32]:
+            ) -> pl.Tensor[[32], pl.INT32]:
                 fill = pl.full([32], dtype=pl.INT32, value=-1)
                 dst[0:32] = fill
                 old = pl.tensor.read(dst, [0])
                 pl.tensor.write(dst, [1], old)
-                return old
+                return dst
 
         with pytest.raises(ValueError, match="mixes MTE3 and scalar stores"):
             passes.convert_tensor_to_tile_ops()(Before)
@@ -3873,37 +3883,55 @@ class TestGmLocalTensorConversion:
         class Before:
             @pl.function(type=pl.FunctionType.InCore)
             def main_incore_0(
-                self, a: pl.Tensor[[4], pl.FP32], b: pl.Tensor[[4], pl.FP32]
-            ) -> pl.Scalar[pl.FP32]:
+                self,
+                a: pl.Tensor[[4], pl.FP32],
+                b: pl.Tensor[[4], pl.FP32],
+                out: pl.Tensor[[4], pl.FP32],
+            ) -> pl.Tensor[[4], pl.FP32]:
                 t: pl.Tensor[[4], pl.FP32] = pl.add(a, b)
                 val: pl.Scalar[pl.FP32] = pl.tensor.read(a, [0])
                 pl.tensor.write(t, [0], val)
                 v: pl.Scalar[pl.FP32] = pl.tensor.read(t, [0])
-                return v
+                pl.tensor.write(out, [0], v)
+                return out
 
             @pl.function
-            def main(self, a: pl.Tensor[[4], pl.FP32], b: pl.Tensor[[4], pl.FP32]) -> pl.Scalar[pl.FP32]:
-                v: pl.Scalar[pl.FP32] = self.main_incore_0(a, b)
-                return v
+            def main(
+                self,
+                a: pl.Tensor[[4], pl.FP32],
+                b: pl.Tensor[[4], pl.FP32],
+                out: pl.Tensor[[4], pl.FP32],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                r: pl.Tensor[[4], pl.FP32] = self.main_incore_0(a, b, out)
+                return r
 
         @pl.program
         class Expected:
             @pl.function(type=pl.FunctionType.InCore)
             def main_incore_0(
-                self, a: pl.Tensor[[4], pl.FP32], b: pl.Tensor[[4], pl.FP32]
-            ) -> pl.Scalar[pl.FP32]:
+                self,
+                a: pl.Tensor[[4], pl.FP32],
+                b: pl.Tensor[[4], pl.FP32],
+                out: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
                 a_tile = pl.load(a, [0], [4])
                 b_tile = pl.load(b, [0], [4])
                 t_tile = pl.tile.add(a_tile, b_tile)
                 val = pl.tile.read(a_tile, [0])
                 pl.tile.write(t_tile, [0], val)
                 v = pl.tile.read(t_tile, [0])
-                return v
+                pl.tensor.write(out, [0], v)
+                return out
 
             @pl.function
-            def main(self, a: pl.Tensor[[4], pl.FP32], b: pl.Tensor[[4], pl.FP32]) -> pl.Scalar[pl.FP32]:
-                v = self.main_incore_0(a, b)
-                return v
+            def main(
+                self,
+                a: pl.Tensor[[4], pl.FP32],
+                b: pl.Tensor[[4], pl.FP32],
+                out: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                r = self.main_incore_0(a, b, out)
+                return r
 
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)

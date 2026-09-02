@@ -79,6 +79,13 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   // after InlineFunctions, so a final producer returned by an Inline helper is
   // analyzed in the same function and region as its consuming store.
   Register(IRProperty::AccStorePhaseValid, CreateAccStorePhaseValidPropertyVerifier);
+  // NoScalarKernelReturn (#631): the runtime has no scalar output channel, so a
+  // ScalarType in a device function's return_types_ is unrepresentable. Also in
+  // GetStructuralProperties(), so it fires at every pass boundary — rejecting a
+  // user-written signature at pipeline input and catching any pass that
+  // synthesises one.
+  Register(IRProperty::NoScalarKernelReturn, CreateNoScalarKernelReturnPropertyVerifier);
+
   Register(IRProperty::InlineFunctionsEliminated, CreateInlineFunctionsEliminatedPropertyVerifier);
   Register(IRProperty::OrchestrationReferencesResolved,
            CreateOrchestrationReferencesResolvedPropertyVerifier);

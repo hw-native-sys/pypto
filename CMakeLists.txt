@@ -271,6 +271,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/utils/pipeline_loop_utils.cpp
     src/ir/transforms/utils/return_lineage_utils.cpp
     src/ir/transforms/utils/result_alias_utils.cpp
+    src/ir/transforms/utils/scalar_output_hoist.cpp
     src/ir/transforms/utils/scope_outline_utils.cpp
     src/ir/transforms/utils/split_axis_utils.cpp
     src/ir/transforms/utils/stmt_dependency_analysis.cpp
@@ -289,6 +290,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/verify_acc_to_gm_store.cpp
     src/ir/verifier/verify_atomic_add_dtype.cpp
     src/ir/verifier/verify_acc_store_phase.cpp
+    src/ir/verifier/verify_no_scalar_kernel_return.cpp
     src/ir/verifier/warning_in_param_written.cpp
     src/ir/verifier/verify_ssa_pass.cpp
     src/ir/verifier/verify_no_nested_call_pass.cpp

@@ -43,6 +43,7 @@
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/result_alias_utils.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
+#include "pypto/ir/transforms/utils/scalar_output_hoist.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
@@ -745,7 +746,14 @@ std::unordered_set<const Var*> ScopeOutliner::ComputeFallbackUsedAfter(const Sco
   if (!inside_nested_scope_body_) {
     var_collectors::VarDefUseCollector def_collector;
     def_collector.VisitStmt(scope->body_);
-    used_after = def_collector.var_defs;
+    // Scalars are excluded from the defensive "export every definition"
+    // fallback. The runtime cannot return one, so exporting a scalar nobody
+    // asked for can only turn a harmless local into a hard error further down
+    // (the scalar-output hoist would have to lift it, or reject the scope).
+    for (const Var* var : def_collector.var_defs) {
+      if (As<ScalarType>(var->GetType())) continue;
+      used_after.insert(var);
+    }
   }
   used_after.insert(store_collector.store_targets.begin(), store_collector.store_targets.end());
   return used_after;
@@ -1413,16 +1421,38 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
            "must register its completion condition";
   }
 
+  // A Scalar live-out is unrepresentable in a device kernel's return set: the
+  // runtime passes scalars in by value and returns only tensors (#631). Move
+  // the ones the caller can compute out of the body *before* any of the
+  // analysis below runs, so they are simply not defined here any more — the
+  // output set then never sees them, and a body that still reads one captures
+  // it as an ordinary scalar parameter. Everything downstream analyses
+  // ``scope_body``, not ``op->body_``.
+  UpwardExposedUseCollector pre_hoist_live_in;
+  pre_hoist_live_in.VisitStmt(op->body_);
+  auto hoist = PlanScalarOutputHoist(op->body_, pre_hoist_live_in.ordered, used_after);
+  // Span source is the blocker itself, which the predicate guarantees non-null
+  // in the failure path.
+  CHECK_SPAN(hoist.blocker == nullptr, hoist.blocker != nullptr ? hoist.blocker->span_ : op->span_)
+      << "scope '" << outlined_func_name << "' computes scalar '"
+      << (hoist.blocker != nullptr ? hoist.blocker->name_hint_ : std::string())
+      << "' from device-side data and uses it after the scope, so the kernel would have to "
+         "return it. A device kernel cannot return a scalar: the runtime passes scalars in by "
+         "value and returns only tensors. Write the value into a [1] tensor output and read it "
+         "back outside the scope with pl.tensor.read(t, [0]), or move the computation out of the "
+         "scope so it depends only on values the caller already has";
+  const StmtPtr scope_body = hoist.new_body;
+
   // Definitions made by the scope body (before recursing) — the basis for the
   // output set below, and for the rebind check that follows the input set.
   var_collectors::VarDefUseCollector body_collector;
-  body_collector.VisitStmt(op->body_);
+  body_collector.VisitStmt(scope_body);
 
   // Store targets present in the scope body. Needed both for the captured
   // read-modify-write check below and, further down, to decide whether a
   // post-store alias's original target already appears in output_vars.
   StoreTargetCollector store_collector;
-  store_collector.VisitStmt(op->body_);
+  store_collector.VisitStmt(scope_body);
 
   // Inputs: the scope's live-in set — variables the body reads before it
   // (re)defines them, so their incoming value comes from the caller.
@@ -1435,7 +1465,7 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
   // input_vars[i].get() is the body pointer, the key used for both the body
   // substitution and the call-site lookup below.
   UpwardExposedUseCollector live_in;
-  live_in.VisitStmt(op->body_);
+  live_in.VisitStmt(scope_body);
 
   std::vector<VarPtr> input_vars;
   for (const Var* var_ptr : live_in.ordered) {
@@ -1468,12 +1498,12 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
 
   // Collect type info from scope body for output variables
   VarCollector scope_var_collector;
-  scope_var_collector.VisitStmt(op->body_);
+  scope_var_collector.VisitStmt(scope_body);
 
   // Map any SSA post-store alias (var_def bound to a tile.store call) back
   // to its store target so we don't export the same tensor twice.
   PostStoreAliasCollector post_store_collector;
-  post_store_collector.VisitStmt(op->body_);
+  post_store_collector.VisitStmt(scope_body);
 
   // Aliases deferred to the call-site emission: each pair maps a
   // scope-local SSA post-store alias (pointer identity in the scope body)
@@ -1568,7 +1598,7 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
   for (const auto& var : output_vars) {
     required_outputs_.insert(var.get());
   }
-  auto recursed_body = VisitStmt(op->body_);
+  auto recursed_body = VisitStmt(scope_body);
   func_name_ = saved_func_name;
   scope_counter_ = saved_scope_counter;
   var_types_ = saved_var_types;
@@ -1581,7 +1611,7 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
   // Create fresh parameters for the outlined function.
   // Infer param directions from the inner callee when possible (requires program_).
   std::vector<ParamDirection> inferred_directions =
-      InferParamDirections(input_vars, op->body_, store_output_set);
+      InferParamDirections(input_vars, scope_body, store_output_set);
   std::vector<VarPtr> input_params;
   std::vector<ParamDirection> input_param_directions;
   std::unordered_map<const Var*, VarPtr> var_substitution_map;
@@ -1876,7 +1906,7 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
   // (consumed at pass 21).
   auto append_split_aiv_attr = [&](SplitMode incore_split) {
     SplitAivModeSummaryFinder finder;
-    finder.VisitStmt(op->body_);
+    finder.VisitStmt(scope_body);
     if (!finder.found) return;
     // A function-level AUTO split (optimizations=[pl.split(mode)], carried as the
     // scope's own split_) and explicit pl.split_aiv region(s) are mutually
@@ -2241,6 +2271,25 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
       auto alias_it = var_objects_.find(alias_ptr);
       if (alias_it != var_objects_.end()) SetStoreTargetRename(alias_it->second, rename_it->second);
     }
+  }
+
+  // The hoisted scalar definitions belong to the caller now, ahead of the call:
+  // the body may capture one as a scalar arg, and the parent's later statements
+  // reference it directly. Register them in the outer symbol table first — the
+  // recursion above restored it, so these Vars are otherwise invisible to a
+  // sibling scope that captures one (same reason scope_task_id_var is
+  // registered when it is synthesised).
+  if (!hoist.hoisted.empty()) {
+    for (const auto& stmt : hoist.hoisted) {
+      auto assign = As<AssignStmt>(stmt);
+      INTERNAL_CHECK(assign) << "Internal error: scalar hoist produced a non-AssignStmt";
+      var_types_[assign->var_.get()] = assign->var_->GetType();
+      var_objects_[assign->var_.get()] = assign->var_;
+      known_names_.insert(assign->var_->name_hint_);
+    }
+    std::vector<StmtPtr> combined = hoist.hoisted;
+    combined.push_back(result);
+    result = SeqStmts::Flatten(std::move(combined), op->span_);
   }
   return result;
 }

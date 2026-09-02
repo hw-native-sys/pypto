@@ -3940,15 +3940,19 @@ class OrchestrationStmtCodegen : public CodegenBase {
       }
 
       if (!param_idx_opt) {
-        // Not a param writeback: a leading auxiliary value (e.g. an SPMD loop
-        // iv). They carry no runtime output. If such a scalar is referenced
-        // later, materialize a safe default so generated code stays compilable.
-        if (effective_uses_.count(elem.var)) {
-          std::string elem_name = ReserveVarEmitName(elem.var);
-          if (auto st = As<ScalarType>(elem.var->GetType())) {
-            EmitIndentedLine(st->dtype_.ToCTypeString() + " " + elem_name + " = 0;");
-          }
-        }
+        // Not a param writeback: the position carries no runtime output.
+        //
+        // A Scalar here has no carrier at all -- the runtime returns only
+        // tensors. IRProperty::NoScalarKernelReturn makes that unreachable: the
+        // scope outliner lifts a caller-computable scalar out of the scope body
+        // and rejects the ones it cannot, so no device function reaches codegen
+        // with a Scalar return. The old stop-gap emitted ``<ctype> x = 0;`` to
+        // keep the generated C++ compiling, which traded a compile error for a
+        // silently wrong value (#631) -- do not reinstate it.
+        INTERNAL_CHECK_SPAN(!As<ScalarType>(elem.var->GetType()), call->span_)
+            << "Internal error: tuple return element " << elem_pos << " of '" << call->op_->name_
+            << "' is a Scalar with no param writeback; IRProperty::NoScalarKernelReturn should "
+               "have rejected this callee";
         continue;
       }
 
@@ -4081,15 +4085,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
         if (out_pos < out_indices.size()) param_idx_opt = out_indices[out_pos];
       }
       if (!param_idx_opt) {
-        // Leading aux scalar / untraced position: no runtime output. If it is
-        // referenced later, materialize a safe scalar default so the generated
-        // code stays compilable (mirrors GenerateTupleReturnAliases).
-        if (effective_uses_.count(elem.var)) {
-          std::string elem_name = ReserveVarEmitName(elem.var);
-          if (auto st = As<ScalarType>(elem.var->GetType())) {
-            EmitIndentedLine(st->dtype_.ToCTypeString() + " " + elem_name + " = 0;");
-          }
-        }
+        // Untraced position: no runtime output. A Scalar is unreachable here for
+        // the same reason as in GenerateTupleReturnAliases -- see the comment
+        // there, and IRProperty::NoScalarKernelReturn.
+        INTERNAL_CHECK_SPAN(!As<ScalarType>(elem.var->GetType()), call->span_)
+            << "Internal error: submit return element " << elem_pos << " of '" << call->op_->name_
+            << "' is a Scalar with no param writeback; IRProperty::NoScalarKernelReturn should "
+               "have rejected this callee";
         continue;
       }
       if (!effective_uses_.count(elem.var)) continue;

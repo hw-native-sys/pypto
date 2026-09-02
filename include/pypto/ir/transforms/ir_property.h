@@ -124,7 +124,17 @@ enum class IRProperty : uint64_t {
                        ///< helper can be paired with its caller's store; a mismatch can leave the A2/A3
                        ///< accumulator unit flag set or wait forever on an unset flag, stalling device
                        ///< execution
-  kCount               ///< Sentinel (must be last)
+  NoScalarKernelReturn,  ///< No device function (InCore / AIC / AIV / Group / Spmd) has a ScalarType
+                         ///< anywhere in return_types_ -- including one nested in a pl.Tuple return,
+                         ///< which is a single TupleType entry. Those types mean "a dispatchable task",
+                         ///< and the runtime has no scalar output channel -- Arg::add_scalar passes a
+                         ///< scalar in by value and TaskOutputTensors returns only tensors -- so
+                         ///< orchestration codegen has no carrier to bind it to (#631). Scalar[TASK_ID]
+                         ///< is exempt: a scheduler handle, not data. A device-side scalar helper is
+                         ///< written FunctionType::Inline and spliced away by InlineFunctions. Decidable
+                         ///< on the user's own IR, so it is a structural property verified at every pass
+                         ///< boundary
+  kCount                 ///< Sentinel (must be last)
 };
 
 static_assert(
@@ -271,7 +281,7 @@ const IRPropertySet& GetVerifiedProperties();
  * in per-pass PassProperties. Returns {TypeChecked, BreakContinueValid,
  * NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore,
  * InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly,
- * AtomicAddDtypeValid}.
+ * AtomicAddDtypeValid, NoScalarKernelReturn}.
  */
 const IRPropertySet& GetStructuralProperties();
 

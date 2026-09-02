@@ -42,7 +42,8 @@ program_outlined = outline_pass(program)
    `InCoreScopeStmt` 节点
 2. **分析输入**：收集作用域的 *live-in*（活跃入口）集合——作用域体在（重新）定义
    某变量之前就读取它，说明该变量的入口值来自调用方
-3. **分析输出**：确定在作用域之后仍被使用的内部定义（在作用域内定义、在作用域外使用的变量）
+3. **分析输出**：确定在作用域之后仍被使用的内部定义（在作用域内定义、在作用域外使用
+   的变量）——此时下文的标量输出外提已经移走了调用方自己就能算出的那些 Scalar
 4. **创建函数**：将作用域体提取为新的 `Function(scope_type=InCore)`，其中：
    - 参数 = 输入变量
    - 返回值 = 输出变量
@@ -55,6 +56,37 @@ program_outlined = outline_pass(program)
 7. **添加到程序**：将提取的函数添加到程序的函数列表中
 8. **提升父函数**：至少提取出一个作用域的 Opaque 父函数将变为 `Orchestration`——
    并在此之前先折叠其参数动态维度读取（见下）
+
+**标量输出外提到调用方**：运行时没有标量输出通道——`Arg::add_scalar` 只把标量按
+值传**入**，`TaskOutputTensors` 只返回 tensor——因此提取函数的 `return_types_`
+中出现 `ScalarType` 是不可表达的。Orchestration codegen 没有任何载体可以绑定它，
+这正是这类返回值曾经在生成的 C++ 中变成未定义标识符、后来又变成静默错误的
+`= 0` 的原因（issue #631）。
+
+在任何输入/输出分析之前，`PlanScalarOutputHoist`
+（`utils/scalar_output_hoist.h`）会把每个 Scalar live-out 的定义语句移到调用方、
+放在调用之前：
+
+```python
+# 写法                                       # 提取之后
+with pl.at(pl.Level.CORE_GROUP):            off = base * 32
+    off = base * 32                         self.scaled(x, out)     # 只返回 tensor
+    out = self.produce(x, out)              tail = self.consume(x, off, tail)
+tail = self.consume(x, off, tail)
+```
+
+可外提的条件：语句是作用域体顶层的 `AssignStmt`，绑定一个 Scalar，且其值是对作用
+域 live-in 与已外提值的纯标量表达式（常量、`BinaryExpr` / `UnaryExpr`，含
+`Cast`）。Call 一律拒绝：对 device 数据的标量读取（`pl.read`）或 SPMD block 索引
+在调用方没有意义。只搬运 Scalar live-out 真正需要的那条链，因此函数体不会因此多
+出用不到的标量参数——而函数体仍要读的值会自然变成 live-in，也就是一个普通的标量
+入参。
+
+当某个 Scalar live-out **无法**外提时，该值只存在于 device 上，本 pass 会抛出面
+向用户的错误并指名该变量。修复方式是把它写入一个 `[1]` 的 tensor 输出、在调用之
+后用 `pl.tensor.read(t, [0])` 读回，或者把该计算移出作用域。
+`IRProperty::NoScalarKernelReturn` 会在每个 pass 边界校验由此得到的不变量——参见
+[验证器参考](99-verifier.md)。
 
 **参数动态维度读取在提升时折叠**：tensor 声明的 extent *就是*它的运行期
 extent，因此对以 `pl.dynamic` 符号为某一轴的参数调用 `pl.tensor.dim(a, 0)`，会

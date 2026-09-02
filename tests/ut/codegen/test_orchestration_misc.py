@@ -941,9 +941,13 @@ class TestScalarCarryPhiCodegen:
                 # Tensor carries out_b, out_c.  Before the fix, the Scalar carry
                 # phi was emitted as ``const Tensor&`` causing a C++ compile error.
                 for batch_idx in pl.parallel(0, N // TILE):
+                    # Reassigned in the orchestration body, outside the scope: a
+                    # device kernel cannot return a scalar (#631,
+                    # IRProperty.NoScalarKernelReturn), and the #1580 phi this
+                    # test pins is an orchestration-level loop carry either way.
+                    global_c_idx = batch_idx + 1  # noqa: F841
                     with pl.at(level=pl.Level.CORE_GROUP, name_hint="scope_b"):
                         for inner in pl.range(TILE):
-                            global_c_idx = batch_idx + inner  # noqa: F841
                             out_b, out_c = self.scope_b_kernel(x, out_b, out_c)
 
                 return out_b, out_c
@@ -1069,6 +1073,69 @@ class TestScalarCarryPhiCodegen:
 
         assert "acc" not in code, "trivial literal carry must not declare a carry variable\n" + code
         assert "< 4;" in code, "post-loop use of the trivial carry must emit the literal 4\n" + code
+
+
+class TestScalarScopeOutputCodegen:
+    """A scalar the caller reads after a scope is emitted from its real expression.
+
+    Regression for #631. The runtime has no scalar output channel, so the kernel
+    cannot hand the value back; ``ScopeOutliner`` moves the arithmetic into the
+    orchestration body instead. Codegen then emits it through the ordinary scalar
+    path — never the old ``<ctype> x = 0;`` stop-gap, which compiled but computed
+    the wrong thing.
+    """
+
+    def test_scope_scalar_is_emitted_from_its_expression(self):
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class ScopeScalarProg:
+            @pl.function(type=pl.FunctionType.AIV)
+            def produce(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                return pl.store(t, [0], out)
+
+            @pl.function(type=pl.FunctionType.AIV)
+            def consume(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                off: pl.Scalar[pl.INDEX],
+                tail: pl.Out[pl.Tensor[[32], pl.FP32]],
+            ) -> pl.Tensor[[32], pl.FP32]:
+                t: pl.Tile[[32], pl.FP32] = pl.load(x, [off], [32])
+                return pl.store(t, [0], tail)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+                tail: pl.Out[pl.Tensor[[32], pl.FP32]],
+                base: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[32], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="scaled"):
+                    off: pl.Scalar[pl.INDEX] = base * 32
+                    out = self.produce(x, out)
+                tail = self.consume(x, off, tail)
+                return tail
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        code = _generate_orch_code(pm.run_passes(ScopeScalarProg))
+
+        off_decls = [
+            line.strip() for line in code.splitlines() if re.match(r"int64_t off\w* =", line.strip())
+        ]
+        assert len(off_decls) == 1, "expected one materialized scalar declaration\n" + code
+        assert "= 0;" not in off_decls[0], (
+            "the scalar must be emitted from its own expression, not the removed "
+            "silently-wrong default\n" + code
+        )
+        assert "* 32" in off_decls[0], off_decls[0] + "\n" + code
 
 
 if __name__ == "__main__":

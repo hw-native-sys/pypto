@@ -43,7 +43,9 @@ program_outlined = outline_pass(program)
    Orchestration functions
 2. **Analyze Inputs**: Collect the scope's *live-in* set — variables the body reads
    before it (re)defines them, so their incoming value comes from the caller
-3. **Analyze Outputs**: Determine internal definitions used after scope (variables defined inside, used outside)
+3. **Analyze Outputs**: Determine internal definitions used after scope (variables
+   defined inside, used outside) — after the scalar-output hoist below has removed
+   the Scalars the caller can compute for itself
 4. **Create Function**: Extract scope body into new `Function(scope_type=InCore)` with:
    - Parameters = input variables
    - Returns = output variables
@@ -57,6 +59,41 @@ program_outlined = outline_pass(program)
 7. **Add to Program**: Add outlined function to program's function list
 8. **Promote the parent**: an Opaque parent that outlined at least one scope becomes
    `Orchestration` — and its param dyn-dim reads are folded first (below)
+
+**Scalar outputs are hoisted into the caller**: the runtime has no scalar output
+channel — `Arg::add_scalar` passes a scalar *in* by value and `TaskOutputTensors`
+returns only tensors — so a `ScalarType` in an outlined function's
+`return_types_` is unrepresentable. Orchestration codegen has nothing to bind it
+to, which is why such a return used to reach the generated C++ as an undefined
+identifier and later as a silently wrong `= 0` (issue #631).
+
+Before any input/output analysis runs, `PlanScalarOutputHoist`
+(`utils/scalar_output_hoist.h`) moves the defining statements of every Scalar
+live-out into the caller, ahead of the call:
+
+```python
+# as written                                # after outlining
+with pl.at(pl.Level.CORE_GROUP):            off = base * 32
+    off = base * 32                         self.scaled(x, out)     # returns tensors only
+    out = self.produce(x, out)              tail = self.consume(x, off, tail)
+tail = self.consume(x, off, tail)
+```
+
+A statement is hoistable when it is a top-level `AssignStmt` binding a Scalar
+whose value is a pure scalar expression (constants, `BinaryExpr` / `UnaryExpr`
+including `Cast`) over the scope's live-ins and values already hoisted. Calls are
+rejected wholesale: a scalar read of device data (`pl.read`) or an SPMD block
+index has no caller-side meaning. Only the chain a Scalar live-out actually needs
+is moved, so the body gains no scalar parameter it would not otherwise use — and
+a value the body still reads simply becomes a live-in, i.e. an ordinary scalar
+argument.
+
+When a Scalar live-out is *not* hoistable the value exists only on device, and
+the pass raises a user-facing error naming it. The fix is to write it into a `[1]`
+tensor output and read it back after the launch with `pl.tensor.read(t, [0])`, or
+to move the computation out of the scope. `IRProperty::NoScalarKernelReturn`
+verifies the resulting invariant at every pass boundary — see
+[the verifier reference](99-verifier.md).
 
 **Param dyn-dim reads fold on promotion**: a tensor's declared extent *is* its
 runtime extent, so `pl.tensor.dim(a, 0)` on a param whose axis is a `pl.dynamic`

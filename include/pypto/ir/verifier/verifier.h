@@ -123,6 +123,26 @@ PropertyVerifierPtr CreateAccCompactValidPropertyVerifier();
 PropertyVerifierPtr CreateAtomicAddDtypeValidPropertyVerifier();
 
 /**
+ * @brief Factory for the device-kernel scalar-return property verifier
+ *
+ * Rejects a ``ScalarType`` anywhere in the ``return_types_`` of any device
+ * function (``InCore`` / ``AIC`` / ``AIV`` / ``Group`` / ``Spmd``) -- those
+ * types mean "a dispatchable task". The search descends into ``TupleType``,
+ * since a ``-> pl.Tuple[...]`` annotation is one ``return_types_`` entry and a
+ * tuple element has no more of a carrier than a bare return does. The runtime
+ * has no scalar output channel:
+ * ``Arg::add_scalar`` passes a scalar *in* by value and ``TaskOutputTensors``
+ * returns only tensors, so orchestration codegen has no carrier to bind such a
+ * return to (#631). ``Scalar[TASK_ID]`` is exempt (a scheduler handle, not
+ * data), and a device-side scalar helper belongs in a ``FunctionType::Inline``
+ * function, which ``InlineFunctions`` splices away. Listed in
+ * ``GetStructuralProperties()``, so it is verified at every pass boundary --
+ * catching both user-written signatures and any pass that synthesises one.
+ * @return Shared pointer to NoScalarKernelReturn PropertyVerifier
+ */
+PropertyVerifierPtr CreateNoScalarKernelReturnPropertyVerifier();
+
+/**
  * @brief Factory for the InParamWritten warning verifier.
  *
  * Reports a parameter declared `In` that its own function body writes, where
