@@ -769,9 +769,9 @@ A position that is scratch only in *some* arities cannot be declared:
 and workspace in a 2-way one, and the arity is the positional argument count.
 Such a position stays unclassified and a full-width one is rejected.
 
-### Carries and dropped axes
+### Carries, merges and dropped axes
 
-Two places rewrite state *around* the halving rather than in it, and both must
+Three places rewrite state *around* the halving rather than in it, and each must
 follow the same axis and tracking rules or the conditions above misfire:
 
 - **Loop carries.** An `iter_arg` inherits its init value's tracking, so a halved
@@ -781,6 +781,17 @@ follow the same axis and tracking rules or the conditions above misfire:
   arm recurses through its own walk and cannot reach the explicit path's `ForStmt`
   branch, so without this a legal tile accumulator has its carry reported as a
   full-width operand.
+- **Branch merges.** An `IfStmt`'s merge variable (`return_vars_`, a `DefField`)
+  is lane-local exactly when the values its branches yield are. Left at its
+  declared full width it contradicts both `Yield` values *and* stays untracked,
+  so a following `tile.store` gets no lane offset and both AIV lanes write from
+  output row 0 — overlapping writes instead of a half each. `RepairIfReturnVars`
+  retypes it from the lowered branches, and both arms call it for the same reason
+  the loop carries need two call sites. The branches must agree: one yielding a
+  halved value while the other yields a full-width one has no single merge type,
+  and is rejected rather than resolved by picking a side. Both branches always
+  exist here: SSA requires an else wherever `return_vars_` are defined, and
+  `ConvertToSSA` synthesizes the else `Yield` for a source-level no-else phi.
 - **`tile.slice` with `drop_dims`.** `shape` / `offset` / `valid_shape` are
   indexed in the **pre-drop** rank, while the split dim indexes the result.
   `drop_dims` erases axes afterwards and pads back to 2D by *prepending* unit

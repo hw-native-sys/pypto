@@ -1403,9 +1403,17 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
       new_else = (new_else_stmts.size() == 1) ? new_else_stmts[0]
                                               : std::make_shared<SeqStmts>(new_else_stmts, if_stmt->span_);
     }
+    // Repair the merge the same way the ForStmt arm repairs its carry: a merge
+    // variable whose branches both yield a lane-local value is lane-local too.
+    // Left alone it contradicts both Yield values AND stays untracked, so a
+    // following tile.store gets no lane offset and both AIV lanes write from
+    // output row 0.
+    auto new_return_vars = RepairIfReturnVars(if_stmt->return_vars_, new_then_body, new_else, tile_vars,
+                                              var_replacements, subblock_idx, lane_stride, if_stmt->span_);
     auto new_if = MutableCopy(if_stmt);
     new_if->then_body_ = new_then_body;
     new_if->else_body_ = new_else;
+    new_if->return_vars_ = new_return_vars;
     return new_if;
   }
 
@@ -1495,6 +1503,79 @@ std::vector<VarPtr> RepairReturnVars(const std::vector<VarPtr>& return_vars,
           std::make_shared<Var>(new_return_vars[i]->name_hint_, new_type, new_return_vars[i]->span_);
       new_return_vars[i] = new_return_var;
       tile_vars[new_return_var.get()] = it->second;
+      var_replacements[return_vars[i].get()] = new_return_var;
+    }
+  }
+  return new_return_vars;
+}
+
+namespace {
+
+// The tile info a branch's Yield carries for merge slot ``index``, or nullopt
+// when that slot is not lane-local. A Yield value is left referencing the
+// pre-halving var (the trailing Substitute rewrites it later), and the halving
+// path registers BOTH the old and the new var in ``tile_vars`` -- so looking the
+// yielded value up there is what tells the two apart.
+std::optional<TileInfo> YieldedTileInfo(const YieldStmtPtr& yield, size_t index,
+                                        const std::unordered_map<const Var*, TileInfo>& tile_vars) {
+  if (!yield || index >= yield->value_.size()) return std::nullopt;
+  auto value_var = AsVarLike(yield->value_[index]);
+  if (!value_var) return std::nullopt;
+  auto it = tile_vars.find(value_var.get());
+  if (it == tile_vars.end()) return std::nullopt;
+  return it->second;
+}
+
+bool SameTileInfo(const TileInfo& a, const TileInfo& b) {
+  return a.split_dim == b.split_dim && structural_equal(a.half_dim_size, b.half_dim_size);
+}
+
+}  // namespace
+
+std::vector<VarPtr> RepairIfReturnVars(const std::vector<VarPtr>& return_vars, const StmtPtr& new_then_body,
+                                       const std::optional<StmtPtr>& new_else_body,
+                                       std::unordered_map<const Var*, TileInfo>& tile_vars,
+                                       std::unordered_map<const Var*, VarPtr>& var_replacements,
+                                       const ExprPtr& subblock_idx, const ExprPtr& lane_stride,
+                                       const Span& span) {
+  std::vector<VarPtr> new_return_vars = return_vars;
+  if (return_vars.empty()) return new_return_vars;
+
+  // An IfStmt that defines return_vars must have an else branch -- SSAVerifier
+  // rejects the else-less shape outright, and ConvertToSSA synthesizes the else
+  // Yield for a source-level no-else phi. So both definitions exist by the time
+  // this pass runs, and a missing one is a compiler bug rather than a shape to
+  // support.
+  INTERNAL_CHECK_SPAN(new_else_body.has_value(), span)
+      << "Internal error: LowerAutoVectorSplit found an IfStmt defining " << new_return_vars.size()
+      << " return var(s) with no else branch; SSA requires both branches to define the merge.";
+
+  auto then_yield = transform_utils::GetLastYieldStmt(new_then_body);
+  auto else_yield = transform_utils::GetLastYieldStmt(*new_else_body);
+
+  for (size_t i = 0; i < new_return_vars.size(); ++i) {
+    auto then_info = YieldedTileInfo(then_yield, i, tile_vars);
+    auto else_info = YieldedTileInfo(else_yield, i, tile_vars);
+
+    if (!then_info.has_value() && !else_info.has_value()) continue;
+    CHECK_SPAN(then_info.has_value() && else_info.has_value() && SameTileInfo(*then_info, *else_info), span)
+        << "LowerAutoVectorSplit: the branches of an if inside the automatically split vector region "
+           "disagree about merge variable '"
+        << new_return_vars[i]->name_hint_
+        << "': one yields a value the split made lane-local while the other does not (or they are split "
+           "along different axes). There is no single per-lane type for the merged value, and picking "
+           "either one silently gives one AIV lane the wrong extent. Make both branches yield values "
+           "derived the same way -- load or slice inside the region on both sides, or keep the value "
+           "shared by both lanes on both sides -- or move the if outside the automatically split region.";
+
+    tile_vars[new_return_vars[i].get()] = *then_info;
+    auto new_type = ApplyTrackedTileShape(new_return_vars[i]->GetType(), then_info->split_dim,
+                                          then_info->half_dim_size, subblock_idx, lane_stride);
+    if (new_type != new_return_vars[i]->GetType()) {
+      auto new_return_var =
+          std::make_shared<Var>(new_return_vars[i]->name_hint_, new_type, new_return_vars[i]->span_);
+      new_return_vars[i] = new_return_var;
+      tile_vars[new_return_var.get()] = *then_info;
       var_replacements[return_vars[i].get()] = new_return_var;
     }
   }

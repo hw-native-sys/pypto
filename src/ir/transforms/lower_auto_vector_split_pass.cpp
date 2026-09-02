@@ -582,9 +582,18 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
                                          var_replacements, used_names, lane_stride);
         new_else = loop_repair::MakeBody(new_else_stmts, if_stmt->span_);
       }
+      // Same merge repair as split_axis::ProcessStmt's IfStmt branch. This arm
+      // recurses through LowerStmts and cannot reach that branch, so without it
+      // a branch-merged tile keeps its full-width declared type and stays
+      // untracked -- both AIV lanes then write from output row 0.
+      auto new_then_body = loop_repair::MakeBody(new_then, if_stmt->span_);
+      auto new_return_vars =
+          split_axis::RepairIfReturnVars(if_stmt->return_vars_, new_then_body, new_else, tile_vars,
+                                         var_replacements, subblock_idx, lane_stride, if_stmt->span_);
       auto new_if = MutableCopy(if_stmt);
-      new_if->then_body_ = loop_repair::MakeBody(new_then, if_stmt->span_);
+      new_if->then_body_ = new_then_body;
       new_if->else_body_ = new_else;
+      new_if->return_vars_ = new_return_vars;
       result.push_back(new_if);
       continue;
     }

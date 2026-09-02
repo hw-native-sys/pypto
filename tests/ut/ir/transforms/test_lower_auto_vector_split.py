@@ -4209,5 +4209,123 @@ def test_e2e_none_region_c2v_crossing_lowers_to_split_zero_transport():
     assert "pl.tile.aiv_shard" not in aic and "pl.tile.aiv_shard" not in aiv
 
 
+def test_if_merge_variable_is_retyped_and_tracked():
+    """An IfStmt that merges a tile must carry the split through its merge var.
+
+    Both branches yield a value the split halved, so the merge variable is
+    lane-local too. Left at its declared full width it disagrees with both
+    ``Yield`` values, and — because it is never registered in ``tile_vars`` — a
+    following ``tile.store`` gets no lane offset, so both AIV lanes write from
+    output row 0 instead of taking a half each.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            cube_seed: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat],
+            data: pl.Tensor[[128, 128], pl.FP32],
+            flag: pl.Scalar[pl.INT64],
+            out_0: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            seed_vec = pl.tile.move(cube_seed, target_memory=pl.Mem.Vec)  # noqa: F841
+            v = pl.tile.load(data, [0, 0], [128, 128], target_memory=pl.Mem.Vec)
+            if flag > 0:
+                doubled = pl.tile.add(v, v)
+                merged: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.yield_(doubled)
+            else:
+                merged: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.yield_(v)
+            out_store = pl.tile.store(merged, [0, 0], out_0)
+            return out_store
+
+    printed = _lower(Before).as_python()
+    # The merge variable is halved with its branches...
+    assert "merged: pl.Tile[[64, 128], pl.FP32, pl.Mem.Vec]" in printed
+    # ...and the store that consumes it takes this lane's half of the output.
+    assert "pl.tile.store(merged, [0 + subblock_idx * 64, 0], out_0)" in printed
+
+
+def test_if_branches_disagreeing_on_the_merge_are_rejected():
+    """One halved branch and one full-width branch have no single merge type.
+
+    ``v`` is loaded inside the region and halved; ``shared`` is a full-width
+    parameter nothing partitions. Halving the merge variable would be wrong for
+    the else path and leaving it full width wrong for the then path, so neither
+    choice is a merge — take the rejection instead of silently giving one AIV
+    lane the wrong extent.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            cube_seed: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat],
+            data: pl.Tensor[[128, 128], pl.FP32],
+            shared: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec],
+            flag: pl.Scalar[pl.INT64],
+            out_0: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            seed_vec = pl.tile.move(cube_seed, target_memory=pl.Mem.Vec)  # noqa: F841
+            v = pl.tile.load(data, [0, 0], [128, 128], target_memory=pl.Mem.Vec)
+            if flag > 0:
+                merged: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.yield_(v)
+            else:
+                merged: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.yield_(shared)
+            out_store = pl.tile.store(merged, [0, 0], out_0)
+            return out_store
+
+    with pytest.raises(ValueError, match="disagree about merge variable") as exc_info:
+        _lower(Before)
+    assert "'merged'" in str(exc_info.value)
+
+
+def test_source_level_no_else_phi_still_merges_after_ssa_conversion():
+    """A source-level ``if`` with no ``else`` reaches this pass *with* one.
+
+    ``SSAVerifier::VerifyIfStmt`` rejects an ``IfStmt`` that defines
+    ``return_vars_`` without an else branch, and ``ConvertToSSA`` synthesizes the
+    else ``Yield`` (from the binding the merge shadows) precisely so the shape
+    below is legal by the time any later pass sees it. So the merge repair needs
+    no else-less special case — it only has to handle what SSA guarantees.
+
+    Running the real conversion here rather than hand-shaping the ``IfStmt`` is
+    the point: it is what proves the guarantee holds for the source form users
+    actually write.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            cube_seed: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat],
+            data: pl.Tensor[[128, 128], pl.FP32],
+            flag: pl.Scalar[pl.INT64],
+            out_0: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            seed_vec = pl.tile.move(cube_seed, target_memory=pl.Mem.Vec)  # noqa: F841
+            merged = pl.tile.load(data, [0, 0], [128, 128], target_memory=pl.Mem.Vec)
+            if flag > 0:
+                merged = pl.tile.add(merged, merged)
+            out_store = pl.tile.store(merged, [0, 0], out_0)
+            return out_store
+
+    in_ssa = passes.convert_to_ssa()(Before)
+    converted = in_ssa.get_function("split_auto")
+    assert converted is not None
+    body = converted.body
+    stmts = body.stmts if isinstance(body, ir.SeqStmts) else [body]
+    if_stmt = next(s for s in stmts if isinstance(s, ir.IfStmt))
+    # The guarantee this test rests on: the conversion supplied the else branch.
+    assert if_stmt.return_vars, "expected the rebind to become an IfStmt merge"
+    assert if_stmt.else_body is not None, "ConvertToSSA must synthesize the else for a no-else phi"
+
+    # SSA renames, so anchor on the merge's own name rather than the source spelling.
+    merge_name = if_stmt.return_vars[0].name_hint
+    printed = _lower(in_ssa).as_python()
+    assert f"{merge_name}: pl.Tile[[64, 128], pl.FP32, pl.Mem.Vec]" in printed
+    store_line = next(line for line in printed.splitlines() if "pl.tile.store(" in line)
+    assert f"pl.tile.store({merge_name}, [0 + subblock_idx * 64, 0]" in store_line
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

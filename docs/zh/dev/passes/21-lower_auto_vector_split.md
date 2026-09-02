@@ -648,9 +648,9 @@ picked = pl.tile.gather(src, indices, tmp)   # 被拒绝：表被折半了
 在 3/4 路归并里是第三个已排序输入、在 2 路里才是工作区，而 arity 由位置实参个数决定。
 这类位置保持未分类，全宽时按拒绝处理。
 
-### 循环携带值与被丢弃的轴
+### 循环携带值、分支归并与被丢弃的轴
 
-有两处是在折半**周围**改写状态而非折半本身，它们必须遵循同样的轴映射与跟踪规则，
+有三处是在折半**周围**改写状态而非折半本身，它们必须遵循同样的轴映射与跟踪规则，
 否则上面的条件会误判：
 
 - **循环携带值。** `iter_arg` 继承其 init 的跟踪信息，因此 init 被折半时携带值也变为
@@ -658,6 +658,14 @@ picked = pl.tile.gather(src, indices, tmp)   # 被拒绝：表被折半了
   显式路径与 AUTO 亲和性门控路径共用 `RepairIterArgs` / `RepairReturnVars`——AUTO 走的是
   自己的遍历，够不到显式路径的 `ForStmt` 分支，缺了这一步就会把合法的 tile 累加器的携带值
   当成全宽操作数报错。
+- **分支归并值。** `IfStmt` 的归并变量（`return_vars_`，一个 `DefField`）是否 lane 局部，
+  取决于两个分支 yield 的值是否 lane 局部。保持声明的全宽会同时与两个 `Yield` 矛盾，
+  而且因为它从不被登记进 `tile_vars`，后续 `tile.store` 拿不到 lane 偏移——**两条 AIV
+  lane 都从输出第 0 行开始写**，是覆盖写而不是各写一半。`RepairIfReturnVars` 依据降级后
+  的分支重新定型，两条路径都要调用它，原因和循环携带值需要两个调用点相同。两个分支必须
+  一致：一个 yield 被折半的值、另一个 yield 全宽值时不存在唯一的归并类型，此时直接拒绝，
+  而不是任选一边。这里两个分支必然都存在：只要定义了 `return_vars_`，SSA 就要求有 else，
+  而源码层没有 else 的 phi 会由 `ConvertToSSA` 合成 else `Yield`。
 - **带 `drop_dims` 的 `tile.slice`。** `shape` / `offset` / `valid_shape` 按**丢弃前**的
   rank 索引，而拆分维按结果索引。`drop_dims` 之后才擦除轴，并通过在前面补单元素轴回到 2D，
   因此 `slice([1, 256, 128], drop_dims=[0]) -> [256, 128]` 的结果维 0 对应源的维 1。

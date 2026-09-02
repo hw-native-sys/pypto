@@ -357,6 +357,23 @@ std::vector<VarPtr> RepairReturnVars(const std::vector<VarPtr>& return_vars,
                                      std::unordered_map<const Var*, VarPtr>& var_replacements,
                                      const ExprPtr& subblock_idx, const ExprPtr& lane_stride);
 
+/// Give each IfStmt merge variable the tile info its branches yield, so it stops
+/// contradicting them and a later tile.store on it gets the per-lane offset.
+/// Call AFTER lowering both branch bodies, with the LOWERED bodies: the merge is
+/// decided by what the branches actually yield, not by what they started as.
+///
+/// Both branches must exist and agree. SSA requires an else wherever return_vars
+/// are defined, so a missing one is a compiler bug. One branch yielding a halved
+/// value while the other yields a full-width one has no single merge type, and
+/// picking either silently gives one AIV lane the wrong extent -- so that is
+/// rejected rather than merged.
+std::vector<VarPtr> RepairIfReturnVars(const std::vector<VarPtr>& return_vars, const StmtPtr& new_then_body,
+                                       const std::optional<StmtPtr>& new_else_body,
+                                       std::unordered_map<const Var*, TileInfo>& tile_vars,
+                                       std::unordered_map<const Var*, VarPtr>& var_replacements,
+                                       const ExprPtr& subblock_idx, const ExprPtr& lane_stride,
+                                       const Span& span);
+
 std::vector<StmtPtr> ProcessStmts(const std::vector<StmtPtr>& stmts, SplitMode mode, int split_dim,
                                   std::unordered_map<const Var*, TileInfo>& tile_vars, bool is_aiv,
                                   const ExprPtr& subblock_idx,
