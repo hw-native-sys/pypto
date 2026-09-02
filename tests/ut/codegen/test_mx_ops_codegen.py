@@ -89,6 +89,60 @@ class TestMxMatmulCodegen:
         with pytest.raises(ValueError, match=r"matmul_mx.*only supported.*Ascend950.*a5.*a2a3"):
             _run_default_pipeline(Program, BackendType.Ascend910B)
 
+    def test_mx_scale_load_accepts_narrowed_valid_shape(self):
+        """Physical shapes stay fractal-aligned; valid_shape may narrow M."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a_s: pl.Tensor[[128, 8], pl.FP8E8M0, pl.MX_A_ZZ],
+            ):
+                _ = pl.load(
+                    a_s,
+                    [0, 0],
+                    [16, 2],
+                    valid_shape=[8, 2],
+                    target_memory=pl.Mem.Mat,
+                )
+
+        mlir = _emit_incore_mlir(Program)
+        assert "mx5d_view" in mlir
+        assert "pto.tload" in mlir
+        partitions = [line for line in mlir.splitlines() if "partition_view" in line]
+        # Physical TLoad box remains shapes=[16,2] -> one SFractal block row.
+        assert any(
+            "sizes = [%c1_index, %c1_index, %c1_index, %c16_index, %c2_index]" in line for line in partitions
+        ), mlir
+
+    def test_mx_scale_load_accepts_dynamic_narrowed_valid_shape(self):
+        """Dynamic valid_shape must not shrink the physical partition box."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a_s: pl.Tensor[[128, 8], pl.FP8E8M0, pl.MX_A_ZZ],
+                valid_rows: pl.Scalar[pl.INDEX],
+            ):
+                _ = pl.load(
+                    a_s,
+                    [0, 0],
+                    [16, 2],
+                    valid_shape=[valid_rows, 2],
+                    target_memory=pl.Mem.Mat,
+                )
+
+        mlir = _emit_incore_mlir(Program)
+        assert "mx5d_view" in mlir
+        assert "pto.tload" in mlir
+        partitions = [line for line in mlir.splitlines() if "partition_view" in line]
+        assert any(
+            "sizes = [%c1_index, %c1_index, %c1_index, %c16_index, %c2_index]" in line for line in partitions
+        ), mlir
+
     def test_emits_tmatmul_mx_and_tget(self):
         @pl.program
         class Program:

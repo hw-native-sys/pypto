@@ -119,14 +119,17 @@ int64_t CheckedMxMultiply(int64_t lhs, int64_t rhs, std::string_view name, const
 // explicit rank-5 view (and skip the generic parameter view — see
 // EmitMakeTensorViews).  The physical view is row-major; its strides match
 // pto-isa BaseShape2D for the corresponding MX layout.
+//
+// Physical partition sizes come from load *shapes* (fractal-aligned). A narrower
+// *valid_shape* is tile metadata only and must not shrink the TLoad box.
 MxPhysicalView EmitMxPhysicalView(const CallPtr& op, const ir::VarPtr& tensor,
                                   const ir::TensorTypePtr& tensor_type, const ir::MakeTuplePtr& offsets,
-                                  const ir::MakeTuplePtr& valid_shape, std::string_view pto_layout,
+                                  const ir::MakeTuplePtr& shapes, std::string_view pto_layout,
                                   codegen::PTOCodegen& codegen) {
   INTERNAL_CHECK_SPAN(tensor_type->shape_.size() == 2, op->span_)
       << "MX rank-5 tensor view requires a logical rank-2 tensor";
-  INTERNAL_CHECK_SPAN(offsets->elements_.size() == 2 && valid_shape->elements_.size() == 2, op->span_)
-      << "MX rank-5 tensor view requires rank-2 offsets and valid_shape";
+  INTERNAL_CHECK_SPAN(offsets->elements_.size() == 2 && shapes->elements_.size() == 2, op->span_)
+      << "MX rank-5 tensor view requires rank-2 offsets and shapes";
 
   const bool is_a = pto_layout == "mx_a_zz";
   INTERNAL_CHECK_SPAN(is_a || pto_layout == "mx_b_nn", op->span_)
@@ -140,10 +143,10 @@ MxPhysicalView EmitMxPhysicalView(const CallPtr& op, const ir::VarPtr& tensor,
                                                        "tensor block dimension", op->span_);
   const int64_t group_extent = GetStaticAlignedMxValue(tensor_type->shape_[group_axis], kSCols, kSCols,
                                                        "tensor group dimension", op->span_);
-  const int64_t block_size = GetStaticAlignedMxValue(valid_shape->elements_[block_axis], kSRows, kSRows,
-                                                     "load block size", op->span_);
-  const int64_t group_size = GetStaticAlignedMxValue(valid_shape->elements_[group_axis], kSCols, kSCols,
-                                                     "load group size", op->span_);
+  const int64_t block_size =
+      GetStaticAlignedMxValue(shapes->elements_[block_axis], kSRows, kSRows, "load block shape", op->span_);
+  const int64_t group_size =
+      GetStaticAlignedMxValue(shapes->elements_[group_axis], kSCols, kSCols, "load group shape", op->span_);
   const int64_t block_offset =
       GetStaticAlignedMxValue(offsets->elements_[block_axis], kSRows, 0, "load block offset", op->span_);
   const int64_t group_offset =
@@ -283,7 +286,7 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   std::string tensor_view_type;
   if (is_mx_load) {
     auto physical =
-        EmitMxPhysicalView(op, tensor, tensor_type, offsets_tuple, valid_shape_tuple, pto_layout, codegen);
+        EmitMxPhysicalView(op, tensor, tensor_type, offsets_tuple, shapes_tuple, pto_layout, codegen);
     tensor_view = std::move(physical.tensor_view);
     tensor_view_type = std::move(physical.tensor_view_type);
     partition_dims = std::move(physical.partition_dims);

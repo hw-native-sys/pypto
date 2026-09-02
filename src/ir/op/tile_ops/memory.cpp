@@ -215,12 +215,21 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
     const size_t block_axis = is_mx_a ? 0 : 1;
     const size_t group_axis = is_mx_a ? 1 : 0;
     const std::string layout_name = TensorLayoutToString(source_view.layout);
+    constexpr int64_t kRows = tile_view_semantics::kMXSFractalRows;
+    constexpr int64_t kCols = tile_view_semantics::kMXSFractalCols;
     // PTOAS / pto-isa special requirement (feeds EmitMxPhysicalView):
     //   Physical MX GlobalTensor needs SFractal axes [16, 2], so every logical
-    //   block/group extent, load size, and offset must be static and divisible
-    //   by 16 (block) / 2 (group).  Example: logical MX_A_ZZ [64, 4] load at
-    //   [0,0] size [64,4] -> physical [1,4,2,16,2]; a dynamic or misaligned
-    //   group size cannot form that box and A5 TLoad static_asserts.
+    //   block/group *extent*, physical *load shapes*, and *offset* must be
+    //   static and divisible by 16 (block) / 2 (group).  Example: logical
+    //   MX_A_ZZ [64, 4] load shapes [64,4] -> physical [1,4,2,16,2]; a dynamic
+    //   or misaligned shapes extent cannot form that box and A5 TLoad
+    //   static_asserts.
+    //
+    //   *valid_shape* may narrow the tile relative to shapes (partial M/N). The
+    //   hardware transfer still uses fractal-aligned shapes; tile metadata
+    //   carries the narrower valid region for consumers such as matmul_mx.
+    //   Bounds 0 < valid_shape[i] <= shapes[i] are enforced by
+    //   InferWindowReadValidShape.
     auto check_static_aligned = [&](const ExprPtr& expr, int64_t alignment, int64_t minimum, const char* name,
                                     const Span& span) {
       auto value = As<ConstInt>(expr);
@@ -230,12 +239,16 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
           << "The operator " << op_name << " of an " << layout_name << " tensor requires " << name
           << " >= " << minimum << " and divisible by " << alignment << ", but got " << value->value_;
     };
-    check_static_aligned(tensor_type->shape_[block_axis], 16, 16, "tensor block dimension", args[0]->span_);
-    check_static_aligned(tensor_type->shape_[group_axis], 2, 2, "tensor group dimension", args[0]->span_);
-    check_static_aligned(valid_shape_tuple->elements_[block_axis], 16, 16, "load block size", args[3]->span_);
-    check_static_aligned(valid_shape_tuple->elements_[group_axis], 2, 2, "load group size", args[3]->span_);
-    check_static_aligned(offsets_tuple->elements_[block_axis], 16, 0, "load block offset", args[1]->span_);
-    check_static_aligned(offsets_tuple->elements_[group_axis], 2, 0, "load group offset", args[1]->span_);
+    check_static_aligned(tensor_type->shape_[block_axis], kRows, kRows, "tensor block dimension",
+                         args[0]->span_);
+    check_static_aligned(tensor_type->shape_[group_axis], kCols, kCols, "tensor group dimension",
+                         args[0]->span_);
+    check_static_aligned(shapes_tuple->elements_[block_axis], kRows, kRows, "load block shape",
+                         args[2]->span_);
+    check_static_aligned(shapes_tuple->elements_[group_axis], kCols, kCols, "load group shape",
+                         args[2]->span_);
+    check_static_aligned(offsets_tuple->elements_[block_axis], kRows, 0, "load block offset", args[1]->span_);
+    check_static_aligned(offsets_tuple->elements_[group_axis], kCols, 0, "load group offset", args[1]->span_);
     // MX cube scale loads are Mat-only (TLoadMxCube*) and require the caller to
     // spell the target explicitly. The public load interface keeps its ordinary
     // Vec default, so an omitted target fails instead of being silently changed.
