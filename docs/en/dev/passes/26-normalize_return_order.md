@@ -31,7 +31,7 @@ This pass canonicalizes the contract so codegen can rely on
    `Out`/`InOut` parameter order, then rewrite both the return values and
    `Function::return_types_` accordingly.
 3. **Step B (call-site remap)** — for every non-InCore function
-   (Orchestration / Group / Spmd / opaque), rewrite every
+   (Orchestration / Group / Spmd / Graph / opaque), rewrite every
    `TupleGetItemExpr.index_` whose tuple operand is the result of a call
    to a function reordered in Step A. The new index is
    `permutation[old_index]`, so observers of the call result still see the

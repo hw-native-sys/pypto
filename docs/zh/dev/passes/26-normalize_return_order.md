@@ -25,7 +25,7 @@ i 个 `Out`/`InOut` 参数，并相应地重映射非 InCore 调用方中的
    `ReturnStmt::value_` 与声明的 `Out`/`InOut` 参数顺序一致的置换，然后同步
    重写返回值与 `Function::return_types_`。
 3. **Step B（调用端索引重映射）** —— 对每个非 InCore 函数（Orchestration /
-   Group / Spmd / opaque），重写所有 `TupleGetItemExpr.index_`，前提是它的
+   Group / Spmd / Graph / opaque），重写所有 `TupleGetItemExpr.index_`，前提是它的
    tuple 操作数来源于 Step A 中被重排序的函数调用结果。新索引为
    `permutation[old_index]`，因此调用结果上的观察者仍然把同名 SSA 变量绑
    定到同一物理输出。
