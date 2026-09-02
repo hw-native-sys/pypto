@@ -16,25 +16,21 @@ Verifies the simplest end-to-end @pl.jit kernel: load → add → store.
 import pytest
 import torch
 from examples.beginner.hello_world import tile_add
+from harness import st
 
 
-class TestHelloWorld:
-    """Hello World test suite — verifies the simplest PyPTO kernel."""
+def _add_case():
+    """Element-wise addition: c = a + b."""
+    a = torch.full((128, 128), 2.0, dtype=torch.float32)
+    b = torch.full((128, 128), 3.0, dtype=torch.float32)
+    c = torch.zeros((128, 128), dtype=torch.float32)
+    return st.case(tile_add, a, b, c, name="hello_world_add", golden=lambda _: a + b)
 
-    def test_hello_world_add(self, test_config):
-        """Compile and run element-wise addition; compare result to torch reference."""
-        tile_add._cache.clear()
 
-        a = torch.full((128, 128), 2.0, dtype=torch.float32)
-        b = torch.full((128, 128), 3.0, dtype=torch.float32)
-        c = torch.zeros((128, 128), dtype=torch.float32)
-
-        tile_add(a, b, c, config=test_config)
-
-        expected = a + b
-        assert torch.allclose(c, expected, rtol=1e-5, atol=1e-5), (
-            f"Hello world add failed: max diff = {(c - expected).abs().max().item()}"
-        )
+@st.cases(_add_case())
+def test_hello_world_add(case_run):
+    """Compile and run element-wise addition; compare result to torch reference."""
+    case_run.assert_passed()
 
 
 if __name__ == "__main__":

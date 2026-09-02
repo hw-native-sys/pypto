@@ -150,7 +150,7 @@ class JitKernel:
         self.entry: JITFunction = entry
         self.args = args
         self.kwargs = kwargs
-        self._classified: tuple[set[str], set[str]] | None = None
+        self._tensor_params: set[str] | None = None
 
     def build_program(self) -> Any:
         with program_build_lock:
@@ -160,8 +160,17 @@ class JitKernel:
         """Derive the tensor list from the kernel signature and sample args.
 
         A parameter is an output when the kernel annotates it ``pl.Out[...]``
-        or ``pl.InOut[...]``.  ``pl.InOut`` additionally keeps its incoming
-        data, so it is materialised from the sample tensor rather than zeroed.
+        or ``pl.InOut[...]``.
+
+        **Every** tensor is seeded from its sample argument, outputs included.
+        The sample argument is the buffer the test itself prepared, so its
+        contents are the test's statement of what the kernel starts from —
+        usually zeros, but not always. An atomic-add kernel accumulates onto
+        the destination it is handed, so zeroing a ``pl.Out`` buffer here
+        because the annotation says "output" would silently discard the
+        baseline the test set up and compare against a golden that assumed it.
+        Seeding costs one small host-to-device copy for a buffer the kernel
+        overwrites anyway.
 
         Returns ``None`` when the sample arguments do not cover every tensor
         parameter (annotation-only specialization) — the case declares its
@@ -171,20 +180,15 @@ class JitKernel:
         if bound is None:
             return None
         outputs = set(self.entry.output_param_names)
-        inout_names = self._classify()[0]
         specs: list[TensorSpec] = []
         for name, value in bound.items():
-            is_output = name in outputs
-            # An Out param's incoming buffer is scratch, so it is left to be
-            # zero-initialised; an InOut param's is live input and is seeded.
-            keep_input = not is_output or name in inout_names
             specs.append(
                 TensorSpec(
                     name=name,
                     shape=list(value.shape),
                     dtype=datatype_from_torch(value.dtype),
-                    init_value=value if keep_input else None,
-                    is_output=is_output,
+                    init_value=value,
+                    is_output=name in outputs,
                 )
             )
         return specs
@@ -202,21 +206,19 @@ class JitKernel:
                 parts.append(f"{name}_{value}")
         return "__".join(parts)
 
-    def _classify(self) -> "tuple[set[str], set[str]]":
-        """Return ``(inout_param_names, tensor_param_names)``, parsed once.
+    def _tensor_param_names(self) -> set[str]:
+        """Names of parameters that own a tensor slot, parsed once.
 
-        ``output_param_names`` already covers Out and InOut together; what it
-        cannot say is which of those *also* read their incoming data, and which
-        params own a tensor slot at all. Both come from the same annotation
-        walk, so it runs once per kernel and is cached.
+        A scalar parameter is specialized as a literal and owns no slot, so it
+        is not "missing" when no sample tensor is supplied for it.
+        ``param_names`` alone cannot tell the two apart.
         """
-        if self._classified is None:
+        if self._tensor_params is None:
             from pypto.jit.decorator import _get_func_def  # noqa: PLC0415
             from pypto.jit.specializer import _classify_params  # noqa: PLC0415
 
-            classified = _classify_params(_get_func_def(self.entry._func))
-            self._classified = (set(classified[1]), set(classified[2]))
-        return self._classified
+            self._tensor_params = set(_classify_params(_get_func_def(self.entry._func))[2])
+        return self._tensor_params
 
     def _bound_tensors(self) -> dict[str, torch.Tensor] | None:
         """Sample tensors keyed by parameter name, or ``None`` if incomplete."""
@@ -228,10 +230,8 @@ class JitKernel:
         for name, value in self.kwargs.items():
             if isinstance(value, torch.Tensor):
                 bound[name] = value
-        # Every *tensor* parameter must be covered. A scalar parameter is
-        # specialized as a literal and owns no tensor slot, so it is not
-        # missing when absent from ``bound``.
-        tensor_params = self._classify()[1]
+        # Every tensor parameter must be covered; see _tensor_param_names.
+        tensor_params = self._tensor_param_names()
         missing = [n for n in names if n not in bound and n in tensor_params]
         return None if missing else {n: bound[n] for n in names if n in bound}
 

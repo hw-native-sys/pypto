@@ -17,21 +17,21 @@ One tile reduction pattern is demonstrated:
 import pytest
 import torch
 from examples.intermediate.softmax import tile_softmax
+from harness import st
 
 
-class TestTileSoftmax:
-    """Row-wise softmax: output[i] = exp(a[i] - max(a[i])) / sum(exp(a[i] - max(a[i])))."""
+def _softmax_case():
+    """Row-wise softmax over a 64x64 tile."""
+    torch.manual_seed(0)
+    a = torch.randn(64, 64, dtype=torch.float32)
+    output = torch.zeros_like(a)
+    return st.case(tile_softmax, a, output, name="tile_softmax", golden=lambda _: torch.softmax(a, dim=-1))
 
-    def test_tile_softmax(self, test_config):
-        tile_softmax._cache.clear()
-        torch.manual_seed(0)
-        a = torch.randn(64, 64, dtype=torch.float32)
-        output = torch.zeros_like(a)
-        tile_softmax(a, output, config=test_config)
-        expected = torch.softmax(a, dim=-1)
-        assert torch.allclose(output, expected, rtol=1e-5, atol=1e-5), (
-            f"tile_softmax failed: max diff = {(output - expected).abs().max().item()}"
-        )
+
+@st.cases(_softmax_case())
+def test_tile_softmax(case_run):
+    """Row-wise softmax matches the torch reference."""
+    case_run.assert_passed()
 
 
 if __name__ == "__main__":

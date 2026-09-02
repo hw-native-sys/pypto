@@ -127,24 +127,66 @@ def case(  # noqa: PLR0913 — every knob mirrors one Case field; grouping them 
     )
 
 
-def cases(*case_objs: Case) -> Any:
-    """Parametrize a test over *case_objs*, one item per case.
+def _unwrap_entry(entry: Any) -> "tuple[Case, str]":
+    """Return ``(case, id)`` for one :func:`cases` entry.
+
+    An entry is either a bare :class:`Case` or a ``pytest.param(case, marks=...)``
+    wrapping one. ``pytest.param`` returns a ``ParameterSet`` namedtuple carrying
+    ``values`` / ``marks`` / ``id``; it is matched structurally rather than by
+    importing pytest's private class.
+    """
+    if isinstance(entry, Case):
+        return entry, entry.name
+    values = getattr(entry, "values", None)
+    if values is not None and hasattr(entry, "marks"):
+        if len(values) != 1 or not isinstance(values[0], Case):
+            raise ValueError(
+                "st.cases(): pytest.param(...) must wrap exactly one Case, got "
+                f"{[type(v).__name__ for v in values]}"
+            )
+        return values[0], entry.id or values[0].name
+    raise TypeError(
+        f"st.cases(): expected a Case or pytest.param(Case, marks=...), got {type(entry).__name__}"
+    )
+
+
+def cases(*entries: Any) -> Any:
+    """Parametrize a test over *entries*, one item per case.
+
+    Per-case markers go through pytest's own mechanism::
+
+        @st.cases(
+            st.case(kernel_a, x, out, golden=...),
+            pytest.param(
+                st.case(kernel_b, x, out, golden=...),
+                marks=pytest.mark.skip(reason="codegen bug: ..."),
+            ),
+        )
+        def test_kernels(case_run):
+            case_run.assert_passed()
+
+    A skipped case is also left out of pre-compilation, so it costs nothing.
+    Markers that apply to every case (``@pytest.mark.platforms``) stay on the
+    test function or its class as usual.
 
     Args:
-        *case_objs: The cases, each built by :func:`case`.
+        *entries: Each a :class:`Case` from :func:`case`, or a
+            ``pytest.param(case, marks=...)`` wrapping one.
 
     Returns:
         A ``pytest.mark.parametrize`` decorator binding the harness-owned
         ``_st_case`` argument; tests reach the case through ``case_run``.
 
     Raises:
-        ValueError: No cases were given, or two share a name — duplicate names
-            would collide in the artifact cache and produce indistinguishable
-            pytest ids.
+        ValueError: No entries were given, an entry wraps something other than a
+            single case, or two cases share a name — duplicate names would
+            collide in the artifact cache and produce indistinguishable ids.
+        TypeError: An entry is neither a Case nor a ``pytest.param``.
     """
-    if not case_objs:
+    if not entries:
         raise ValueError("st.cases() needs at least one case")
-    names = [c.name for c in case_objs]
+    unwrapped = [_unwrap_entry(e) for e in entries]
+    names = [c.name for c, _ in unwrapped]
     duplicates = sorted({n for n in names if names.count(n) > 1})
     if duplicates:
         raise ValueError(
@@ -153,9 +195,9 @@ def cases(*case_objs: Case) -> Any:
     # ``_st_case``, not ``case``: several suites already parametrize their own
     # ``case`` argument (test_expand_ops, the all_to_all_v skew tests), and a
     # harness-owned param must not collide with a test's own. Mirrors the
-    # existing ``_st_platform``. The pytest id still comes from ids=names, so
-    # the underscore never shows up in a node id.
-    return pytest.mark.parametrize("_st_case", list(case_objs), ids=names)
+    # existing ``_st_platform``. The pytest id still comes from ids, so the
+    # underscore never shows up in a node id.
+    return pytest.mark.parametrize("_st_case", list(entries), ids=[i for _, i in unwrapped])
 
 
 class CaseRun:

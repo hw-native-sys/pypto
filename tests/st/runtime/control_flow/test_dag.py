@@ -20,30 +20,27 @@ source of truth and ensure examples are guarded by tests.
 import pytest
 import torch
 from examples.models.vector_dag import golden, vector_dag
+from harness import st
 
 
-class TestDAGOperations:
-    """Test suite for DAG operations."""
+def _vector_dag_case():
+    """Vector DAG computation with 128x128 shape: f = (a + b + 1)(a + b + 2) + (a + b).
 
-    def test_vector_dag(self, test_config):
-        """Test vector DAG computation with 128x128 shape.
+    The example's own ``golden(tensors)`` is handed over unchanged: it already
+    writes the outputs in place and keys them by parameter name, which is the
+    contract a case golden may use. That keeps one source of truth for the
+    reference — the example — rather than a copy of it here.
+    """
+    a = torch.full((128, 128), 2.0, dtype=torch.float32)
+    b = torch.full((128, 128), 3.0, dtype=torch.float32)
+    f = torch.zeros((128, 128), dtype=torch.float32)
+    return st.case(vector_dag, a, b, f, name="vector_dag_128", golden=golden)
 
-        Implements: f = (a + b + 1)(a + b + 2) + (a + b)
-        """
-        vector_dag._cache.clear()
-        a = torch.full((128, 128), 2.0, dtype=torch.float32)
-        b = torch.full((128, 128), 3.0, dtype=torch.float32)
-        f = torch.zeros((128, 128), dtype=torch.float32)
 
-        vector_dag(a, b, f, config=test_config)
-
-        # Reference via the example's golden() function (single source of truth).
-        ref_tensors = {"a": a, "b": b, "f": torch.zeros_like(f)}
-        golden(ref_tensors)
-        expected = ref_tensors["f"]
-        assert torch.allclose(f, expected, rtol=1e-5, atol=1e-5), (
-            f"vector_dag failed: max diff = {(f - expected).abs().max().item()}"
-        )
+@st.cases(_vector_dag_case())
+def test_vector_dag(case_run):
+    """The DAG kernel matches the example's reference computation."""
+    case_run.assert_passed()
 
 
 if __name__ == "__main__":

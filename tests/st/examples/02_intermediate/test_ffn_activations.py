@@ -19,63 +19,58 @@ Three FFN patterns are demonstrated (all on 64x64 tiles):
 import pytest
 import torch
 from examples.models.ffn import ffn_gelu, ffn_relu, ffn_swiglu
+from harness import st
+
+SHAPE = (64, 64)
+# Two chained matmuls in FP32 on 64x64 — looser than the 1e-5 an elementwise
+# kernel gets, and unchanged from before the migration.
+TOL = {"rtol": 3e-3, "atol": 3e-3}
 
 
-class TestFFNActivationOperations:
-    """Test suite for FFN module operations."""
+def _ungated_case(kernel, name, activation):
+    """FFN whose gate projection feeds one activation: activation(hidden @ gate) @ down."""
+    torch.manual_seed(0)
+    hidden = torch.randn(*SHAPE, dtype=torch.float32)
+    gate = torch.randn(*SHAPE, dtype=torch.float32)
+    down = torch.randn(*SHAPE, dtype=torch.float32)
+    output = torch.zeros(*SHAPE, dtype=torch.float32)
+    return st.case(
+        kernel,
+        hidden,
+        gate,
+        down,
+        output,
+        name=name,
+        golden=lambda _: activation(hidden @ gate) @ down,
+        **TOL,
+    )
 
-    def test_ffn_gelu_64x64(self, test_config):
-        """Test FFN with GELU activation: GELU(hidden @ gate_proj) @ down_proj."""
-        ffn_gelu._cache.clear()
-        torch.manual_seed(0)
-        hidden = torch.randn(64, 64, dtype=torch.float32)
-        gate = torch.randn(64, 64, dtype=torch.float32)
-        down = torch.randn(64, 64, dtype=torch.float32)
-        output = torch.zeros(64, 64, dtype=torch.float32)
 
-        ffn_gelu(hidden, gate, down, output, config=test_config)
+def _swiglu_case():
+    """FFN + SwiGLU: (gate_out * sigmoid(gate_out) * up_out) @ down."""
+    torch.manual_seed(0)
+    hidden = torch.randn(*SHAPE, dtype=torch.float32)
+    gate = torch.randn(*SHAPE, dtype=torch.float32)
+    up = torch.randn(*SHAPE, dtype=torch.float32)
+    down = torch.randn(*SHAPE, dtype=torch.float32)
+    output = torch.zeros(*SHAPE, dtype=torch.float32)
 
-        gate_out = hidden @ gate
-        expected = (gate_out * torch.sigmoid(1.702 * gate_out)) @ down
-        assert torch.allclose(output, expected, rtol=3e-3, atol=3e-3), (
-            f"ffn_gelu failed: max diff = {(output - expected).abs().max().item()}"
-        )
-
-    def test_ffn_swiglu_64x64(self, test_config):
-        """Test FFN with SwiGLU activation: SwiGLU(gate, up) @ down_proj."""
-        ffn_swiglu._cache.clear()
-        torch.manual_seed(0)
-        hidden = torch.randn(64, 64, dtype=torch.float32)
-        gate = torch.randn(64, 64, dtype=torch.float32)
-        up = torch.randn(64, 64, dtype=torch.float32)
-        down = torch.randn(64, 64, dtype=torch.float32)
-        output = torch.zeros(64, 64, dtype=torch.float32)
-
-        ffn_swiglu(hidden, gate, up, down, output, config=test_config)
-
+    def golden(_):
         gate_out = hidden @ gate
         up_out = hidden @ up
-        expected = (gate_out * torch.sigmoid(gate_out) * up_out) @ down
-        assert torch.allclose(output, expected, rtol=3e-3, atol=3e-3), (
-            f"ffn_swiglu failed: max diff = {(output - expected).abs().max().item()}"
-        )
+        return (gate_out * torch.sigmoid(gate_out) * up_out) @ down
 
-    def test_ffn_relu_64x64(self, test_config):
-        """Test FFN with ReLU activation: ReLU(hidden @ gate_proj) @ down_proj."""
-        ffn_relu._cache.clear()
-        torch.manual_seed(0)
-        hidden = torch.randn(64, 64, dtype=torch.float32)
-        gate = torch.randn(64, 64, dtype=torch.float32)
-        down = torch.randn(64, 64, dtype=torch.float32)
-        output = torch.zeros(64, 64, dtype=torch.float32)
+    return st.case(ffn_swiglu, hidden, gate, up, down, output, name="ffn_swiglu_64x64", golden=golden, **TOL)
 
-        ffn_relu(hidden, gate, down, output, config=test_config)
 
-        gate_out = hidden @ gate
-        expected = torch.relu(gate_out) @ down
-        assert torch.allclose(output, expected, rtol=3e-3, atol=3e-3), (
-            f"ffn_relu failed: max diff = {(output - expected).abs().max().item()}"
-        )
+@st.cases(
+    _ungated_case(ffn_gelu, "ffn_gelu_64x64", lambda h: h * torch.sigmoid(1.702 * h)),
+    _swiglu_case(),
+    _ungated_case(ffn_relu, "ffn_relu_64x64", torch.relu),
+)
+def test_ffn_activation(case_run):
+    """Each FFN variant matches its torch reference."""
+    case_run.assert_passed()
 
 
 if __name__ == "__main__":

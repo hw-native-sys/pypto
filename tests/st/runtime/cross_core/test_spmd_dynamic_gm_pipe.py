@@ -33,6 +33,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 import pypto.language as pl  # noqa: E402
+from harness import st  # noqa: E402
 
 M_DYN = pl.dynamic("M_DYN")
 K = 64
@@ -67,25 +68,35 @@ def fused_matmul_epilogue_dyn(
     return out
 
 
-class TestSpmdDynamicGMPipe:
-    """Single-scope cube→vec fusion dispatched over a dynamic dim (issue #1768)."""
+def _fused_case():
+    """``pl.spmd(m // ROW_TILE)`` over a fused matmul+epilogue compiles and runs."""
+    torch.manual_seed(0)
+    a = torch.randn(M, K, dtype=torch.float32)
+    b = torch.randn(K, N, dtype=torch.float32)
+    out = torch.zeros(M, N, dtype=torch.float32)
 
-    def test_dynamic_token_dim_compiles_and_runs(self, test_config):
-        """``pl.spmd(m // ROW_TILE)`` over a fused matmul+epilogue compiles and runs."""
-        fused_matmul_epilogue_dyn._cache.clear()
-        torch.manual_seed(0)
-        a = torch.randn(M, K, dtype=torch.float32)
-        b = torch.randn(K, N, dtype=torch.float32)
-        out = torch.zeros(M, N, dtype=torch.float32)
-
-        fused_matmul_epilogue_dyn(a, b, out, config=test_config)
-
+    def golden(_):
         expected = torch.empty(M, N, dtype=torch.float32)
         for m0 in range(0, M, ROW_TILE):
             expected[m0 : m0 + ROW_TILE] = torch.matmul(a[m0 : m0 + ROW_TILE] + 1.0, b) + 1.0
-        assert torch.allclose(out, expected, rtol=1e-3, atol=1e-3), (
-            f"dynamic-dim cube→vec fusion: max diff = {(out - expected).abs().max().item()}"
-        )
+        return expected
+
+    return st.case(
+        fused_matmul_epilogue_dyn,
+        a,
+        b,
+        out,
+        name="spmd_dynamic_gm_pipe",
+        golden=golden,
+        rtol=1e-3,
+        atol=1e-3,
+    )
+
+
+@st.cases(_fused_case())
+def test_dynamic_token_dim_compiles_and_runs(case_run):
+    """Single-scope cube→vec fusion dispatched over a dynamic dim (issue #1768)."""
+    case_run.assert_passed()
 
 
 if __name__ == "__main__":

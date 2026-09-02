@@ -186,8 +186,30 @@ class TestDerivedTensorSpecs:
         assert [s.dtype for s in derived] == [s.dtype for s in expected]
         assert [s.is_output for s in derived] == [s.is_output for s in expected]
 
-    def test_out_param_is_not_seeded_but_inout_is(self):
-        """``pl.Out`` is scratch; ``pl.InOut`` carries live input."""
+    def test_every_tensor_is_seeded_from_its_sample_argument(self):
+        """Outputs included — the sample argument is the buffer the test prepared.
+
+        A kernel that accumulates onto its destination (atomic-add, and any
+        ``pl.InOut``) reads what it is handed, so the baseline a test fills in
+        must reach the device. Deciding from the annotation alone that a
+        ``pl.Out`` buffer is scratch would silently zero that baseline and
+        compare against a golden that assumed it.
+        """
+        baseline = torch.full((M, N), 7.0)
+        case_obj = st.case(
+            orchestrator,
+            torch.randn(M, N),
+            baseline,
+            name="abs_seeded_out",
+            golden=lambda t: torch.abs(t["a"]),
+        )
+        specs = {s.name: s for s in case_obj.tensor_specs}
+        assert specs["out"].is_output
+        assert specs["out"].init_value is baseline, "an Out buffer's contents are the test's statement"
+        assert specs["a"].init_value is not None
+
+    def test_inout_param_is_an_output_and_keeps_its_input(self):
+        """``pl.InOut`` is reported as an output and seeded."""
 
         @jit.incore
         def accumulate_k(x: pl.Tensor, acc: pl.InOut[pl.Tensor]):
@@ -211,8 +233,6 @@ class TestDerivedTensorSpecs:
         }
         assert specs["acc"].is_output and specs["acc"].init_value is not None, "InOut keeps its input"
         assert specs["x"].init_value is not None
-        out_spec = _jit_case().tensor_specs[-1]
-        assert out_spec.name == "out" and out_spec.is_output and out_spec.init_value is None
 
     def test_dtype_round_trips(self):
         """Every harness dtype this torch build supports maps back to itself."""

@@ -17,28 +17,31 @@ One RMS normalization pattern is demonstrated:
 import pytest
 import torch
 from examples.intermediate.normalization import rms_norm
+from harness import st
+
+HIDDEN_SIZE = 64
+EPS = 1e-5
 
 
-class TestRMSNormCore:
+def _rms_norm_case():
     """RMSNorm with 32x64 input: normalize by RMS across hidden dim, then scale by gamma."""
+    torch.manual_seed(0)
+    x = torch.randn(32, HIDDEN_SIZE, dtype=torch.float32)
+    gamma = torch.randn(1, HIDDEN_SIZE, dtype=torch.float32)
+    output = torch.zeros_like(x)
 
-    def test_rms_norm_core(self, test_config):
-        rms_norm._cache.clear()
-        torch.manual_seed(0)
-        x = torch.randn(32, 64, dtype=torch.float32)
-        gamma = torch.randn(1, 64, dtype=torch.float32)
-        output = torch.zeros_like(x)
-        rms_norm(x, gamma, output, config=test_config)
+    def golden(_):
+        mean_sq = (x**2).sum(dim=-1, keepdim=True) / HIDDEN_SIZE
+        rms = torch.sqrt(mean_sq + EPS)
+        return (x / rms) * gamma
 
-        hidden_size = 64
-        eps = 1e-5
-        mean_sq = (x**2).sum(dim=-1, keepdim=True) / hidden_size
-        rms = torch.sqrt(mean_sq + eps)
-        expected = (x / rms) * gamma
+    return st.case(rms_norm, x, gamma, output, name="rms_norm_core", golden=golden)
 
-        assert torch.allclose(output, expected, rtol=1e-5, atol=1e-5), (
-            f"rms_norm failed: max diff = {(output - expected).abs().max().item()}"
-        )
+
+@st.cases(_rms_norm_case())
+def test_rms_norm_core(case_run):
+    """RMSNorm matches the torch reference."""
+    case_run.assert_passed()
 
 
 if __name__ == "__main__":
