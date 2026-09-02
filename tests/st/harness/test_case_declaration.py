@@ -26,6 +26,7 @@ import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import pypto.language as pl
 import pytest
@@ -350,12 +351,18 @@ class TestCustomCompare:
         with pytest.raises(TypeError, match="compare must be callable"):
             _jit_case(name="abs_bad_compare", compare="nope")
 
-    def test_a_legacy_case_has_no_comparator(self):
-        """``PTOTestCase`` carries none, so it always takes the default path."""
+    def test_only_a_case_carries_a_comparator(self):
+        """Matched by type, so nothing else can look like it carries one.
+
+        ``PTOTestCase`` has no such attribute, and a ``Mock`` answers truthily
+        to *any* attribute — an attribute check would send it down the
+        persist-then-compare path with no artifacts to read, which is how this
+        was found.
+        """
         assert _case_comparator(AbsLegacyCase()) is None
+        assert _case_comparator(Mock()) is None, "a Mock must not look like it has a comparator"
         assert _case_comparator(_jit_case(name="abs_no_compare")) is None
-        marker = object()
-        assert _case_comparator(_jit_case(name="abs_has_compare", compare=lambda a, e: marker)) is not None
+        assert _case_comparator(_jit_case(name="abs_has_compare", compare=lambda a, e: None)) is not None
 
     @pytest.mark.skipif(not _ptoas_available(), reason="ptoas is required to generate kernel sources")
     def test_comparator_sees_the_persisted_outputs(self):

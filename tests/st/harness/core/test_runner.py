@@ -841,10 +841,15 @@ def _run_batch_via_task_submit(
 def _case_comparator(tc: Any) -> "Any | None":
     """Return the case's own output comparator, or ``None`` for the default check.
 
-    Only a ``Case`` can carry one; a ``PTOTestCase`` has no such attribute and
-    always takes the elementwise rtol/atol path.
+    Matched by type, not by attribute: a comparator is a ``Case`` concept and
+    nothing else defines one, while ``getattr(tc, "compare", None)`` answers
+    truthily for any object that auto-creates attributes — a ``Mock`` in a unit
+    test being the case that found this — and would send it down the
+    persist-then-compare path with no artifacts to read.
     """
-    return getattr(tc, "compare", None)
+    from harness.core.case import Case  # noqa: PLC0415 — avoids a module-level cycle
+
+    return tc.compare if isinstance(tc, Case) else None
 
 
 def _compare_persisted_outputs(work_dir: Path, comparator: Any) -> None:
