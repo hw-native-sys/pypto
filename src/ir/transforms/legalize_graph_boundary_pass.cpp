@@ -24,8 +24,14 @@
  * the body *derives* from a scalar parameter (`base = layer * 5120`) has no such
  * slot, so it is classified as static data and frozen at its first-call value —
  * with no warning on any later replay. Step A hoists those computations to the
- * call sites, where they become ordinary pass-through scalars, and rejects the
- * ones it cannot hoist.
+ * call sites, where they become ordinary pass-through scalars.
+ *
+ * Being frozen is only a *problem* when the value can differ between calls, so
+ * what Step A cannot hoist is not automatically illegal. A value that is the
+ * same on every replay — a constant-trip loop's induction variable, a boundary
+ * tensor's own extent — is left where it is and accepted, because the frozen
+ * copy is the correct one. `graph_replay::ReplayInvariantSet` draws that line;
+ * the class comment there explains why it is strictly weaker than hoistability.
  *
  * **Step D — boundary legality (silent fallback).** Almost every other runtime
  * constraint degrades to a silent non-graph fallback in a release build: the
@@ -65,6 +71,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/alloc_batching.h"
+#include "pypto/ir/transforms/utils/graph_replay_invariant.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/type.h"
 
@@ -91,10 +98,6 @@ constexpr size_t kMaxGraphNodes = 1024;      ///< GRAPH_MAX_NODES, common/host_b
 
 /// True when `type` is a scalar, i.e. a candidate boundary scalar.
 [[nodiscard]] bool IsScalarType(const TypePtr& type) { return As<ScalarType>(type) != nullptr; }
-
-/// True when `expr` is built entirely from literals. Defined below, next to the
-/// other replay-invariance helpers; declared here for the Step B shape check.
-[[nodiscard]] bool IsLiteralScalarExpr(const ExprPtr& expr);
 
 // ---------------------------------------------------------------------------
 // Step A — hoisting derived boundary scalars
@@ -134,6 +137,8 @@ struct GraphPlan {
   /// Position in the body of every hoisted and aliased variable, so the two
   /// lists can be merged back into definition order.
   std::unordered_map<const Var*, size_t> definition_index;
+  /// Scalar `alias = <name>` bindings the body rewrite deletes, alias -> target.
+  std::unordered_map<const Var*, VarPtr> scalar_aliases;
 };
 
 /// Collects scalar variables a Graph body derives from its own scalar params.
@@ -144,7 +149,7 @@ struct GraphPlan {
 /// or a tensor read is not, and is reported rather than silently frozen.
 class DerivedScalarCollector : public IRVisitor {
  public:
-  explicit DerivedScalarCollector(const FunctionPtr& func) : func_(func) {
+  explicit DerivedScalarCollector(const FunctionPtr& func) : func_(func), invariant_(func) {
     for (const auto& param : func->params_) {
       if (IsScalarType(param->GetType())) {
         scalar_params_.insert(param.get());
@@ -152,6 +157,11 @@ class DerivedScalarCollector : public IRVisitor {
         tensor_params_.insert(param.get());
       }
     }
+    // Collected up front, in its own walk: the three-way view decision below
+    // needs the whole body's invariant names available at every statement, and
+    // the two analyses classify different things (`IsDerivable` asks what the
+    // *call site* can rebuild, `IsInvariant` what *replay* can freeze).
+    invariant_.Collect(func->body_);
   }
 
   /// Body variables bound to a derivable expression, in definition order.
@@ -180,6 +190,15 @@ class DerivedScalarCollector : public IRVisitor {
   /// Step C: tensors the region allocates for itself, in definition order.
   [[nodiscard]] const std::vector<std::pair<VarPtr, ExprPtr>>& creates() const { return creates_; }
 
+  /// Scalar `alias = <name>` bindings, alias -> the name it copies.
+  ///
+  /// Distinct from `passthrough()`, which also carries tensor aliases and exists
+  /// to rebuild hoisted expressions at the call site. This one drives the body
+  /// rewrite that deletes the copy.
+  [[nodiscard]] const std::unordered_map<const Var*, VarPtr>& scalar_alias_target() const {
+    return scalar_alias_target_;
+  }
+
  protected:
   void VisitStmt_(const AssignStmtPtr& op) override {
     IRVisitor::VisitStmt_(op);
@@ -196,6 +215,15 @@ class DerivedScalarCollector : public IRVisitor {
         // call site, where what it names may itself be a hoist not yet bound.
         definition_index_[var.get()] = next_definition_++;
         passthrough_order_.emplace_back(var.get(), aliased);
+        // Also recorded for *body* substitution, which is a different problem
+        // from the call-site binding above. The name has to go away entirely:
+        // orchestration codegen emits a surviving scalar alias as a value copy
+        // (`int64_t n = batch;`), and recording matches a boundary scalar by the
+        // address of its argument slot, so the copy is classified as static data
+        // and frozen at the first call's value. `IsDerivable` has already proven
+        // the target is a scalar parameter or an earlier such alias, so every
+        // chain bottoms out somewhere that does own a slot.
+        scalar_alias_target_[var.get()] = aliased;
         return;
       }
       derived_vars_.insert(var.get());
@@ -212,6 +240,9 @@ class DerivedScalarCollector : public IRVisitor {
       auto root = RootBoundaryTensor(aliased);
       if (root != nullptr) {
         tensor_root_[var.get()] = root;
+        // An alias of a view that stayed in the region is itself unresolvable at
+        // the call site, so a view *of the alias* must not be hoisted either.
+        if (in_place_views_.count(aliased.get()) != 0) in_place_views_.insert(var.get());
         // Recorded like a scalar pass-through: the call site has no name for a
         // Graph-local alias, so a hoisted view written in terms of one must be
         // able to resolve it back to whatever the caller passed. Definition order
@@ -246,35 +277,67 @@ class DerivedScalarCollector : public IRVisitor {
     // can only name a source defined before it.
     const Var* root = source ? RootBoundaryTensor(source) : nullptr;
     if (root == nullptr) return;
-    // Every non-source operand must be reconstructible at the call site.
+    // Three outcomes, not two. Replay reads a `BOUNDARY_VIEW` back as
+    // `start_offset = boundary.start_offset + packed_offset`, where
+    // `packed_offset` is the delta *recorded on the first call*; only the buffer
+    // address, size, owner and version are patched. So the offset is frozen —
+    // which is wrong exactly when it can differ between calls:
     //
-    // Rejected rather than skipped: leaving such a view in the region is the
-    // silent path. Recording classifies it as a view of its boundary source and
-    // freezes the offset it computed on the first call; replay patches the
-    // source's address but never re-runs the body, so every later call reads the
-    // first call's offset from the right buffer.
+    // | Every non-source operand is | Outcome | Why |
+    // | --------------------------- | ------- | --- |
+    // | derivable | hoist to the call site | the caller can rebuild the view |
+    // | replay-invariant only | leave in place | frozen == correct, and the call site has no name for it |
+    // | neither, or a mix | reject | the frozen delta would be call one's |
+    //
+    // The mixed case is the one that matters: `off = layer_idx + i * TILE` can
+    // neither be hoisted (`i` does not exist at the call site) nor frozen
+    // (`layer_idx` is patched per call), and it is the shape a tiled decoder
+    // layer produces if the region indexes weights by both.
+    bool all_derivable = true;
+    bool all_invariant = true;
     for (size_t i = 1; i < call->args_.size(); ++i) {
-      CHECK_SPAN(IsDerivable(call->args_[i]), call->span_)
-          << "Graph function '" << func_->name_ << "' derives '" << var->name_hint_
-          << "' from boundary tensor '" << source->name_hint_
-          << "' using a value the call site cannot recompute. Replay patches the boundary tensor's "
-             "address but keeps the offset recorded on the first call, so the view would silently "
-             "address the first call's window. Take the view at the call site and pass it in.";
+      if (!IsDerivable(call->args_[i])) all_derivable = false;
+      if (!invariant_.IsInvariant(call->args_[i])) all_invariant = false;
     }
+    // A view *of* an in-place view cannot be hoisted however derivable its own
+    // operands are: its source has no name at the call site either.
+    const bool hoistable = all_derivable && in_place_views_.count(source.get()) == 0;
+    CHECK_SPAN(hoistable || all_invariant, call->span_)
+        << "Graph function '" << func_->name_ << "' derives '" << var->name_hint_
+        << "' from boundary tensor '" << source->name_hint_
+        << "' using a value that is neither reconstructible at the call site nor the same on every "
+           "replay. Replay patches the boundary tensor's address but keeps the offset recorded on the "
+           "first call, so the view would silently address the first call's window. Take the view at "
+           "the call site and pass it in, or index it only by constant-trip loop variables and "
+           "constants.";
     // The recording stores a view's shape and strides in the node template and
     // patches only the buffer address and start offset (`graph_rebind_tensor`).
-    // A shape built from a boundary scalar is therefore frozen at the first
-    // call's value and replayed against a later call's buffer.
+    // A shape that can differ between calls is therefore frozen at the first
+    // call's value and replayed against a later call's buffer. An invariant
+    // extent cannot differ, so freezing it is harmless.
     if (auto viewed = As<TensorType>(call->GetType())) {
       for (const auto& extent : viewed->shape_) {
-        CHECK_SPAN(IsLiteralScalarExpr(extent), call->span_)
+        // Anything this rejects reads a boundary scalar or a task output, so
+        // "not a compile-time constant" still describes every failure exactly;
+        // the widening only *accepts* more, and the remedy names both options.
+        CHECK_SPAN(invariant_.IsInvariant(extent), call->span_)
             << "Graph function '" << func_->name_ << "' takes a view '" << var->name_hint_
             << "' of boundary tensor '" << source->name_hint_
             << "' whose shape is not a compile-time constant. Recording freezes a view's shape and "
                "strides into the node and replay patches only its address, so a later call with a "
                "different extent would replay the first call's shape. Give the view a fixed shape — "
-               "a varying offset is fine — or take it at the call site.";
+               "a constant, or an extent of a boundary tensor, and a varying offset is fine — or "
+               "take it at the call site.";
       }
+    }
+    if (!hoistable) {
+      // Deliberately left in the region: an invariant offset makes the frozen
+      // `packed_offset` the right one on every replay, and there is nothing to
+      // hoist it *to*. Still recorded as a boundary root so a view of it is held
+      // to the same rule rather than escaping the check entirely.
+      tensor_root_[var.get()] = root;
+      in_place_views_.insert(var.get());
+      return;
     }
     slice_vars_.insert(var.get());
     tensor_root_[var.get()] = root;
@@ -336,16 +399,22 @@ class DerivedScalarCollector : public IRVisitor {
   }
 
   FunctionPtr func_;
+  graph_replay::ReplayInvariantSet invariant_;
   std::unordered_set<const Var*> scalar_params_;
   std::unordered_set<const Var*> tensor_params_;
   std::unordered_set<const Var*> derived_vars_;
   std::unordered_set<const Var*> passthrough_;
   std::vector<std::pair<const Var*, VarPtr>> passthrough_order_;
+  std::unordered_map<const Var*, VarPtr> scalar_alias_target_;
   std::unordered_map<const Var*, size_t> definition_index_;
   size_t next_definition_ = 0;
   std::vector<std::pair<VarPtr, ExprPtr>> derived_;
   /// Vars already collected as boundary views, so a view *of* one is collected too.
   std::unordered_set<const Var*> slice_vars_;
+  /// Boundary views left in the region because their offsets are only
+  /// replay-invariant, plus the aliases that name one. Nothing built on top of
+  /// these can be hoisted: the call site has no name for any of them.
+  std::unordered_set<const Var*> in_place_views_;
   /// Body tensor var -> the boundary parameter it derives from (alias or view).
   std::unordered_map<const Var*, const Var*> tensor_root_;
   std::vector<std::pair<VarPtr, ExprPtr>> slices_;
@@ -354,8 +423,12 @@ class DerivedScalarCollector : public IRVisitor {
 
 /// True when @p expr is built only from literals.
 ///
-/// Such a value is the same on every call, so freezing it into the recording is
-/// harmless. Anything that reads a variable is not.
+/// The strictest replay-invariance test, and the one two checks still use rather
+/// than `ReplayInvariantSet`: a launch's `core_num` and a region allocation's
+/// shape. An invariant value would in fact be safe for both — they need the same
+/// "identical on every replay" property — but no reported case needs it, and
+/// widening a check that governs block counts and buffer addresses buys nothing
+/// for the risk. Deliberate, not an oversight.
 [[nodiscard]] bool IsLiteralScalarExpr(const ExprPtr& expr) {
   if (!expr) return false;
   if (As<ConstInt>(expr) || As<ConstFloat>(expr) || As<ConstBool>(expr)) return true;
@@ -368,42 +441,33 @@ class DerivedScalarCollector : public IRVisitor {
   return false;
 }
 
-/// Rejects scalars a task consumes that Step A could not hoist.
+/// Rejects scalars a task consumes whose value replay cannot reproduce.
 ///
 /// Reaching a task with a value the runtime cannot anchor is the C4 failure:
 /// the value is silently frozen into the recorded Definition and every later
 /// replay reuses the first call's number.
+///
+/// Being frozen is only a *failure* when the value can differ between calls, so
+/// the test is replay-invariance, not hoistability. Step A's hoists and the
+/// boundary parameters are accepted because they have a real argument slot; a
+/// replay-invariant value is accepted because freezing it changes nothing.
+///
+/// A bare rename of a parameter is *not* on that list, even though the value is
+/// trivially reconstructible. Codegen emits a surviving alias as a value copy,
+/// which has no slot of its own — so the alias has to be gone by the time this
+/// runs, and `HoistedValueRewriter` deletes it. Reaching here with one left is a
+/// rewrite that did not happen, which this must report rather than wave through.
 class UnhoistableScalarChecker : public IRVisitor {
  public:
   UnhoistableScalarChecker(const FunctionPtr& func, const std::unordered_set<const Var*>& hoistable)
-      : func_(func), hoistable_(hoistable) {
+      : func_(func), hoistable_(hoistable), invariant_(func) {
     for (const auto& param : func->params_) {
       if (IsScalarType(param->GetType())) scalar_params_.insert(param.get());
     }
+    invariant_.Collect(func->body_);
   }
 
  protected:
-  /// A bare copy of something that already has a slot keeps that slot.
-  ///
-  /// Step A classifies `alias = <scalar param>` as a *pass-through* rather than a
-  /// hoist — there is nothing to compute at the call site — so the assignment
-  /// survives the rewrite. Rejecting it here would contradict that: the value is
-  /// trivially reconstructible, it *is* a parameter. `ConvertToSSA` produces this
-  /// shape routinely (`layer_idx__ssa_v1 = layer_idx`), so refusing it rejects
-  /// ordinary correct programs. Chains are followed, since an alias may name an
-  /// earlier alias.
-  void VisitStmt_(const AssignStmtPtr& op) override {
-    IRVisitor::VisitStmt_(op);
-    auto var = AsVarLike(op->var_);
-    if (!var || !IsScalarType(var->GetType())) return;
-    auto aliased = AsVarLike(op->value_);
-    if (!aliased) return;
-    if (scalar_params_.count(aliased.get()) != 0 || hoistable_.count(aliased.get()) != 0 ||
-        passthrough_.count(aliased.get()) != 0) {
-      passthrough_.insert(var.get());
-    }
-  }
-
   void VisitExpr_(const CallPtr& op) override {
     IRVisitor::VisitExpr_(op);
     CheckArgs(op->args_, op->span_);
@@ -418,6 +482,13 @@ class UnhoistableScalarChecker : public IRVisitor {
   void CheckArgs(const std::vector<ExprPtr>& args, const Span& span) const {  // NOLINT(readability-*)
     for (const auto& arg : args) {
       if (!arg || !IsScalarType(arg->GetType())) continue;
+      // A TaskId is never a boundary scalar — see `graph_replay::IsTaskIdScalar`.
+      // It reaches here because the check runs over every Call's arguments, so
+      // an `array.update_element` storing an id into a `pl.array` of TASK_ID
+      // looks like a task consuming a boundary scalar. The same id written
+      // straight into `deps=[...]` was always accepted, which is what makes this
+      // a misclassification rather than a rule.
+      if (graph_replay::IsTaskIdScalar(arg->GetType())) continue;
       auto var = AsVarLike(arg);
       if (!var) {
         // Not a bare name but an expression written inline at the call, e.g.
@@ -425,7 +496,7 @@ class UnhoistableScalarChecker : public IRVisitor {
         // so nothing rewrites this one and the task receives a computed value
         // with no boundary slot — the same silent freeze as the named case, and
         // previously waved through because the arg is not a Var.
-        CHECK_SPAN(IsLiteralScalarExpr(arg), span)
+        CHECK_SPAN(invariant_.IsInvariant(arg), span)
             << "Graph function '" << func_->name_
             << "' computes a scalar inline in a task argument. Under host_build_graph a boundary "
                "scalar is tracked by the address of its argument slot; a value computed inside the "
@@ -435,35 +506,52 @@ class UnhoistableScalarChecker : public IRVisitor {
                "to the call site automatically.";
         continue;
       }
-      if (scalar_params_.count(var.get()) != 0 || hoistable_.count(var.get()) != 0 ||
-          passthrough_.count(var.get()) != 0) {
-        continue;
-      }
+      if (scalar_params_.count(var.get()) != 0 || hoistable_.count(var.get()) != 0) continue;
+      // Frozen, but frozen at a value every replay would recompute identically:
+      // a constant-trip loop's induction variable, a boundary tensor's own
+      // extent, or scalar arithmetic over those.
+      if (invariant_.IsInvariant(arg)) continue;
       CHECK_SPAN(false, span)
           << "Graph function '" << func_->name_ << "' passes scalar '" << var->name_hint_
-          << "' to a task, but its value cannot be reconstructed at the call site. Under "
-             "host_build_graph a boundary scalar is tracked by the address of its argument slot; a "
-             "value computed inside the region has no slot, so the runtime would freeze the first "
-             "call's value into the recorded graph and silently reuse it on every replay. Compute '"
+          << "' to a task, but its value can differ between calls and has nowhere to be patched. "
+             "Under host_build_graph a boundary scalar is tracked by the address of its argument "
+             "slot; a value computed inside the region has no slot, so the runtime would freeze the "
+             "first call's value into the recorded graph and silently reuse it on every replay. "
+             "Compute '"
           << var->name_hint_
           << "' at the call site and pass it in, or derive it only from this function's scalar "
-             "parameters and constants.";
+             "parameters, constant-trip loop variables and constants.";
     }
   }
 
   FunctionPtr func_;
   const std::unordered_set<const Var*>& hoistable_;
+  graph_replay::ReplayInvariantSet invariant_;
   std::unordered_set<const Var*> scalar_params_;
-  /// Vars that are a bare copy of a parameter (or of another such copy).
-  std::unordered_set<const Var*> passthrough_;
 };
 
 /// Replaces hoisted body variables with their new parameters and erases the
 /// assignments that used to compute them — the value now arrives as an argument.
+///
+/// Also erases every scalar `alias = <name>` binding, redirecting its readers to
+/// whatever the chain bottoms out at. A surviving alias is not merely redundant:
+/// orchestration codegen emits it as `int64_t n = batch;`, and the recording
+/// classifies a scalar by the address of the argument slot it came from
+/// (`graph_scalar_source_ref` compares against `&boundary_args->scalar(i)`), so
+/// the copy has no matching slot, is recorded as `STATIC_VALUE`, and every later
+/// replay reuses the first call's number. Substituting the name away is what
+/// keeps `add_scalar(batch)` reading the slot itself.
 class HoistedValueRewriter : public IRMutator {
  public:
   explicit HoistedValueRewriter(const GraphPlan& plan) {
     for (const auto& h : plan.hoisted) replacement_[h.original.get()] = h.param;
+    // Resolved after the hoists are mapped, so an alias of a hoisted value lands
+    // on the new *parameter* rather than on a name the rewrite is about to
+    // delete. Each chain is walked to its root — `a = p; b = a;` sends both to
+    // `p` — so the result does not depend on the map's iteration order.
+    for (const auto& [alias, target] : plan.scalar_aliases) {
+      replacement_[alias] = ResolveAliasRoot(target, plan);
+    }
   }
 
  protected:
@@ -475,13 +563,36 @@ class HoistedValueRewriter : public IRMutator {
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     auto var = AsVarLike(op->var_);
     if (var && replacement_.count(var.get()) != 0) {
-      // The value now arrives as a parameter, so its computation is dead.
+      // Either the value now arrives as a parameter, or the binding was a bare
+      // rename whose readers have just been pointed at the original. Both leave
+      // the statement dead.
       return std::make_shared<SeqStmts>(std::vector<StmtPtr>{}, op->span_);
     }
     return IRMutator::VisitStmt_(op);
   }
 
  private:
+  /// The surviving name for @p target: its hoisted parameter, or the end of its
+  /// alias chain.
+  ///
+  /// A chain is finite and acyclic because the body is SSA in definition order —
+  /// an alias can only name something bound before it. The step bound is a
+  /// backstop against malformed IR, not an expected exit.
+  [[nodiscard]] VarPtr ResolveAliasRoot(const VarPtr& target, const GraphPlan& plan) const {
+    VarPtr current = target;
+    for (size_t steps = 0; steps <= plan.scalar_aliases.size(); ++steps) {
+      // `replacement_` already holds every hoist, and the alias entries are
+      // added after this runs, so a hit here is always a hoisted parameter.
+      auto hoisted = replacement_.find(current.get());
+      if (hoisted != replacement_.end()) return hoisted->second;
+      auto next = plan.scalar_aliases.find(current.get());
+      if (next == plan.scalar_aliases.end()) return current;
+      current = next->second;
+    }
+    INTERNAL_CHECK(false) << "Internal error: cyclic scalar alias chain in Graph '" << plan.name << "'";
+    return current;
+  }
+
   std::unordered_map<const Var*, VarPtr> replacement_;
 };
 
@@ -1069,6 +1180,7 @@ class GraphCallSiteChecker : public IRVisitor {
   }
   plan.passthrough = collector.passthrough();
   plan.definition_index = collector.definition_index();
+  plan.scalar_aliases = collector.scalar_alias_target();
   return plan;
 }
 
@@ -1330,7 +1442,12 @@ class CallSiteExtender : public IRMutator {
   for (const auto& [gvar, func] : program->functions_) {
     if (!func || func->func_type_ != FunctionType::Graph) continue;
     auto plan = BuildPlan(func);
-    if (!plan.hoisted.empty()) plans.emplace(func->name_, std::move(plan));
+    // An alias-only plan still has work to do: the body rewrite deletes the
+    // scalar copies even when nothing is hoisted. Its call sites are rebuilt
+    // with an unchanged argument list, which is a no-op by construction.
+    if (!plan.hoisted.empty() || !plan.scalar_aliases.empty()) {
+      plans.emplace(func->name_, std::move(plan));
+    }
   }
 
   std::map<GlobalVarPtr, FunctionPtr, GlobalVarPtrLess> rewritten;

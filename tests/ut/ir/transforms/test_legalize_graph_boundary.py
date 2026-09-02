@@ -630,6 +630,52 @@ class TestDerivedSliceHoisting:
 
         _legalize_outlined(Before)
 
+    def test_a_scalar_alias_is_substituted_away_rather_than_left_in_the_body(self):
+        """A rename does not inherit the parameter's argument slot.
+
+        Accepting the alias is not enough — it has to stop existing. Orchestration
+        codegen emits a survivor as a value copy (`int64_t n = batch;`) and then
+        `add_scalar(n)`, but recording matches a boundary scalar by the *address*
+        its value came from (`&boundary_args->scalar(i)`). The copy lives at a
+        different address, so it is recorded as static data and every later
+        replay reuses the first call's number — the exact silent freeze Step A
+        exists to prevent, reintroduced by a bare rename.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Graph)
+            def layer(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+                layer_idx: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                alias = layer_idx
+                again = alias
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [again, 0], [128, 128])
+                    pl.store(t, [0, 0], c)
+                return c
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                for i in pl.range(4):
+                    c = self.layer(a, c, i)
+                return c
+
+        layer = _graph_func(_legalize_outlined(Before), "layer")
+        printed = python_print(layer)
+        # The whole chain collapses onto the parameter, so the task reads the
+        # slot itself. Both names must be gone, not just the last one.
+        assert "alias" not in printed, printed
+        assert "again" not in printed, printed
+        assert "layer_idx" in printed, printed
+
     def test_a_region_local_slice_is_left_alone(self):
         """Only a view *of a boundary tensor* has to move out.
 
@@ -1617,6 +1663,248 @@ class TestBoundaryLegality:
                 return c
 
         with pytest.raises(ValueError, match="Nested graphs are not supported"):
+            _legalize_outlined(Before)
+
+
+# ---------------------------------------------------------------------------
+# Replay-invariant values — frozen, but frozen at the right value
+# ---------------------------------------------------------------------------
+
+
+class TestReplayInvariantScalars:
+    """Values Step A cannot hoist, yet replay reproduces exactly.
+
+    Hoistability answers "can the call site recompute this?"; the runtime only
+    needs "is this the same on every call?", which is strictly weaker. A value in
+    the gap has no argument slot and *is* frozen into the recording — and that is
+    harmless, because the frozen copy is the value every later replay would have
+    computed anyway. Rejecting these excluded every tiled kernel, since a slab
+    offset `i * TILE` cannot be hoisted: it does not exist at the call site.
+    """
+
+    def test_a_constant_trip_loop_offset_is_accepted(self):
+        """Recording bakes each iteration's literal into that iteration's node.
+
+        Constant bounds mean every later call walks the identical sequence, so
+        the baked literals stay correct. The offset must also stay *in* the
+        region — there is no call-site name to hoist it to.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Graph)
+            def tiled(
+                self,
+                w: pl.Tensor[[512, 256], pl.FP32],
+                acc: pl.InOut[pl.Tensor[[128, 256], pl.FP32]],
+                layer_idx: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[128, 256], pl.FP32]:
+                base = layer_idx * 128
+                for i in pl.range(2):
+                    off = i * 128
+                    with pl.at(level=pl.Level.CORE_GROUP):
+                        band: pl.Tile[[128, 128], pl.FP32] = pl.load(w, [base, off], [128, 128])
+                        cur: pl.Tile[[128, 128], pl.FP32] = pl.load(acc, [0, off], [128, 128])
+                        pl.store(pl.add(cur, band), [0, off], acc)
+                return acc
+
+            @pl.function
+            def main(
+                self,
+                w: pl.Tensor[[512, 256], pl.FP32],
+                acc: pl.InOut[pl.Tensor[[128, 256], pl.FP32]],
+            ) -> pl.Tensor[[128, 256], pl.FP32]:
+                self.tiled(w, acc, 0)
+                return acc
+
+        scalars = _scalar_param_names(_graph_func(_legalize_outlined(Before), "tiled"))
+        # `base` derives from a parameter, so it hoists as before...
+        assert "base" in scalars, scalars
+        # ...while the induction-derived offset stays put: hoisting it would ask
+        # the caller for a value that only exists inside the loop.
+        assert "off" not in scalars, scalars
+
+    def test_a_boundary_tensor_dim_read_is_accepted(self):
+        """`graph_boundary_matches` pins every boundary tensor's shape.
+
+        It compares `ndims`, `shapes` and `strides` against the recorded
+        `GraphBoundarySignature` and declines the cached graph on any mismatch,
+        so within one recording a boundary extent cannot change.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Graph)
+            def dim_read(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                rows = pl.tensor.dim(a, 0)
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [rows - 128, 0], [128, 128])
+                    pl.store(t, [0, 0], c)
+                return c
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                self.dim_read(a, c)
+                return c
+
+        scalars = _scalar_param_names(_graph_func(_legalize_outlined(Before), "dim_read"))
+        assert "rows" not in scalars, scalars
+
+    def test_a_task_id_stored_through_an_array_is_accepted(self):
+        """A TaskId is topology, never a boundary scalar.
+
+        The same id written straight into `deps=[...]` always compiled; only the
+        `pl.array` store looked like a task consuming a boundary scalar, because
+        the check runs over every call's arguments and an array store is a call.
+        The DSL has no other way to accumulate ids produced across a loop.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Graph)
+            def fenced(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                with pl.manual_scope():
+                    seed = pl.system.task_dummy(deps=[])
+                    seeds = pl.array.create(1, pl.TASK_ID)
+                    seeds[0] = seed
+                    with pl.at(level=pl.Level.CORE_GROUP, deps=[seeds[0]]):
+                        t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128])
+                        pl.store(t, [0, 0], c)
+                return c
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                self.fenced(a, c)
+                return c
+
+        # Compiling at all is the assertion: this used to raise on the array store.
+        assert _graph_func(_legalize_outlined(Before), "fenced") is not None
+
+    def test_a_scalar_read_from_a_tensor_is_still_rejected(self):
+        """The guard the widening must not dissolve.
+
+        A value read out of a tensor genuinely differs between calls — nothing
+        pins a buffer's *contents* — so it has neither an argument slot nor a
+        reproducible value, and freezing it is the silent wrong answer this whole
+        step exists to prevent.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Graph)
+            def layer(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                idx: pl.Tensor[[4], pl.INT32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                row: pl.Scalar[pl.INDEX] = pl.tensor.read(idx, [0])
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [row, 0], [128, 128])
+                    pl.store(t, [0, 0], c)
+                return c
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                idx: pl.Tensor[[4], pl.INT32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                self.layer(a, idx, c)
+                return c
+
+        with pytest.raises(ValueError, match="can differ between calls"):
+            _legalize_outlined(Before)
+
+    def test_a_view_offset_by_a_loop_variable_stays_in_the_region(self):
+        """Step B's third outcome: neither hoisted nor rejected.
+
+        Replay restores a `BOUNDARY_VIEW` as `boundary.start_offset +
+        packed_offset`, with `packed_offset` recorded on the first call. An
+        invariant offset makes that frozen delta the right one every time, and
+        the call site has no name for a loop variable to hoist it with.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Graph)
+            def tiled(
+                self,
+                w: pl.Tensor[[512, 256], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                for i in pl.range(2):
+                    off = i * 128
+                    band: pl.Tensor[[128, 128], pl.FP32] = pl.tensor.slice(w, [128, 128], [off, 0])
+                    with pl.at(level=pl.Level.CORE_GROUP):
+                        t: pl.Tile[[128, 128], pl.FP32] = pl.load(band, [0, 0], [128, 128])
+                        pl.store(t, [0, 0], c)
+                return c
+
+            @pl.function
+            def main(
+                self,
+                w: pl.Tensor[[512, 256], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                self.tiled(w, c)
+                return c
+
+        tensors = _tensor_param_names(_graph_func(_legalize_outlined(Before), "tiled"))
+        assert "band" not in tensors, tensors
+
+    def test_a_view_offset_mixing_a_boundary_scalar_and_a_loop_variable_is_rejected(self):
+        """The case that would genuinely freeze.
+
+        `layer_idx + i * 128` can be neither hoisted (`i` does not exist at the
+        call site) nor frozen (`layer_idx` is patched per call), so the recorded
+        delta would be call one's while the address is call two's.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Graph)
+            def tiled(
+                self,
+                w: pl.Tensor[[512, 256], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+                layer_idx: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                for i in pl.range(2):
+                    off = layer_idx + i * 128
+                    band: pl.Tensor[[128, 128], pl.FP32] = pl.tensor.slice(w, [128, 128], [off, 0])
+                    with pl.at(level=pl.Level.CORE_GROUP):
+                        t: pl.Tile[[128, 128], pl.FP32] = pl.load(band, [0, 0], [128, 128])
+                        pl.store(t, [0, 0], c)
+                return c
+
+            @pl.function
+            def main(
+                self,
+                w: pl.Tensor[[512, 256], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                self.tiled(w, c, 0)
+                return c
+
+        with pytest.raises(ValueError, match="nor the same on every replay"):
             _legalize_outlined(Before)
 
 

@@ -215,5 +215,161 @@ def test_runtime_shaped_allocation_is_reported():
     assert any("not a compile-time constant" in m for m in messages), messages
 
 
+# ---------------------------------------------------------------------------
+# Replay-invariant values — the audit must agree with the pass about these
+# ---------------------------------------------------------------------------
+
+
+def test_a_surviving_scalar_alias_of_a_boundary_parameter_is_reported():
+    """A rename does not inherit the parameter's argument slot.
+
+    Orchestration codegen emits a surviving `n = batch` as a value copy
+    (`int64_t n = batch;`) and then `add_scalar(n)`. Recording matches a boundary
+    scalar by the *address* its value came from, comparing against
+    `&boundary_args->scalar(i)`, so the copy has no match, is recorded as
+    `STATIC_VALUE`, and every later replay reuses the first call's number.
+
+    `LegalizeGraphBoundary` substitutes these away, so none should reach codegen.
+    The property is that none *survives*: this input is the pre-pass shape, and
+    the verifier must still call it a leak.
+    """
+    src = (
+        "@pl.program\n"
+        "class P:\n"
+        "    @pl.function(type=pl.FunctionType.Graph)\n"
+        "    def layer(self, a: pl.Tensor[[512, 128], pl.FP32], "
+        "c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]], batch: pl.Scalar[pl.INDEX]) "
+        "-> pl.Tensor[[128, 128], pl.FP32]:\n"
+        "        n = batch\n"
+        "        with pl.at(level=pl.Level.CORE_GROUP):\n"
+        "            t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [n, 0], [128, 128])\n"
+        "            pl.store(t, [0, 0], c)\n"
+        "        return c\n"
+        "    @pl.function\n"
+        "    def main(self, a: pl.Tensor[[512, 128], pl.FP32], "
+        "c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]) -> pl.Tensor[[128, 128], pl.FP32]:\n"
+        "        self.layer(a, c, 0)\n"
+        "        return c\n"
+    )
+    messages = [d.message for d in _graph_diags(pl.parse_program(src))]
+    assert any("no argument slot" in m for m in messages), messages
+
+
+def test_a_constant_trip_loop_offset_is_not_reported():
+    """Frozen at a value every replay recomputes identically.
+
+    The offset has no argument slot and does end up baked into the recording —
+    but constant loop bounds mean iteration `i` supplies the same literal on
+    every call, so the baked copy is the correct one.
+    """
+    src = (
+        "@pl.program\n"
+        "class P:\n"
+        "    @pl.function(type=pl.FunctionType.Graph)\n"
+        "    def layer(self, w: pl.Tensor[[128, 256], pl.FP32], "
+        "acc: pl.InOut[pl.Tensor[[128, 256], pl.FP32]]) -> pl.Tensor[[128, 256], pl.FP32]:\n"
+        "        for i in pl.range(2):\n"
+        "            off = i * 128\n"
+        "            with pl.at(level=pl.Level.CORE_GROUP):\n"
+        "                t: pl.Tile[[128, 128], pl.FP32] = pl.load(w, [0, off], [128, 128])\n"
+        "                pl.store(t, [0, off], acc)\n"
+        "        return acc\n"
+        "    @pl.function\n"
+        "    def main(self, w: pl.Tensor[[128, 256], pl.FP32], "
+        "acc: pl.InOut[pl.Tensor[[128, 256], pl.FP32]]) -> pl.Tensor[[128, 256], pl.FP32]:\n"
+        "        self.layer(w, acc)\n"
+        "        return acc\n"
+    )
+    diags = _graph_diags(pl.parse_program(src))
+    assert not diags, [d.message for d in diags]
+
+
+def test_a_scalar_read_from_a_tensor_is_reported():
+    """The leak the widening must still catch.
+
+    Nothing pins a boundary buffer's *contents*, so a value read out of one
+    genuinely differs between calls — and it has no argument slot to be patched
+    through, which is exactly the silent freeze this property exists to detect.
+    """
+    src = (
+        "@pl.program\n"
+        "class P:\n"
+        "    @pl.function(type=pl.FunctionType.Graph)\n"
+        "    def layer(self, a: pl.Tensor[[512, 128], pl.FP32], idx: pl.Tensor[[4], pl.INT32], "
+        "c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]) -> pl.Tensor[[128, 128], pl.FP32]:\n"
+        "        row: pl.Scalar[pl.INDEX] = pl.tensor.read(idx, [0])\n"
+        "        with pl.at(level=pl.Level.CORE_GROUP):\n"
+        "            t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [row, 0], [128, 128])\n"
+        "            pl.store(t, [0, 0], c)\n"
+        "        return c\n"
+        "    @pl.function\n"
+        "    def main(self, a: pl.Tensor[[512, 128], pl.FP32], idx: pl.Tensor[[4], pl.INT32], "
+        "c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]) -> pl.Tensor[[128, 128], pl.FP32]:\n"
+        "        self.layer(a, idx, c)\n"
+        "        return c\n"
+    )
+    messages = [d.message for d in _graph_diags(pl.parse_program(src))]
+    assert any("can differ between calls" in m for m in messages), messages
+
+
+def test_a_boundary_view_with_an_invariant_window_is_not_reported():
+    """A view the pass deliberately leaves in place is not a leak.
+
+    Replay restores it as `boundary.start_offset + packed_offset` with the delta
+    recorded on the first call; an invariant offset makes that delta right every
+    time, and there is no call site name to hoist the view to.
+    """
+    src = (
+        "@pl.program\n"
+        "class P:\n"
+        "    @pl.function(type=pl.FunctionType.Graph)\n"
+        "    def layer(self, w: pl.Tensor[[512, 256], pl.FP32], "
+        "c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]) -> pl.Tensor[[128, 128], pl.FP32]:\n"
+        "        for i in pl.range(2):\n"
+        "            off = i * 128\n"
+        "            band: pl.Tensor[[128, 128], pl.FP32] = pl.tensor.slice(w, [128, 128], [off, 0])\n"
+        "            with pl.at(level=pl.Level.CORE_GROUP):\n"
+        "                t: pl.Tile[[128, 128], pl.FP32] = pl.load(band, [0, 0], [128, 128])\n"
+        "                pl.store(t, [0, 0], c)\n"
+        "        return c\n"
+        "    @pl.function\n"
+        "    def main(self, w: pl.Tensor[[512, 256], pl.FP32], "
+        "c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]) -> pl.Tensor[[128, 128], pl.FP32]:\n"
+        "        self.layer(w, c)\n"
+        "        return c\n"
+    )
+    diags = _graph_diags(pl.parse_program(src))
+    assert not diags, [d.message for d in diags]
+
+
+def test_a_boundary_view_offset_by_a_boundary_scalar_is_reported():
+    """The window that really can move between calls.
+
+    A boundary scalar is patched per call, but the view's `packed_offset` is
+    not — so the replayed window is call one's while the address is call two's.
+    """
+    src = (
+        "@pl.program\n"
+        "class P:\n"
+        "    @pl.function(type=pl.FunctionType.Graph)\n"
+        "    def layer(self, w: pl.Tensor[[512, 256], pl.FP32], "
+        "c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]], row: pl.Scalar[pl.INDEX]) "
+        "-> pl.Tensor[[128, 128], pl.FP32]:\n"
+        "        band: pl.Tensor[[128, 128], pl.FP32] = pl.tensor.slice(w, [128, 128], [row, 0])\n"
+        "        with pl.at(level=pl.Level.CORE_GROUP):\n"
+        "            t: pl.Tile[[128, 128], pl.FP32] = pl.load(band, [0, 0], [128, 128])\n"
+        "            pl.store(t, [0, 0], c)\n"
+        "        return c\n"
+        "    @pl.function\n"
+        "    def main(self, w: pl.Tensor[[512, 256], pl.FP32], "
+        "c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]], row: pl.Scalar[pl.INDEX]) "
+        "-> pl.Tensor[[128, 128], pl.FP32]:\n"
+        "        self.layer(w, c, row)\n"
+        "        return c\n"
+    )
+    messages = [d.message for d in _graph_diags(pl.parse_program(src))]
+    assert any("window can differ between calls" in m for m in messages), messages
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

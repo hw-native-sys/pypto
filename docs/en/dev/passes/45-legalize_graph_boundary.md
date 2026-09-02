@@ -17,7 +17,7 @@ That makes two classes of problem possible, and both are silent at runtime:
 
 | Problem | What the runtime does | What this pass does |
 | ------- | --------------------- | ------------------- |
-| A boundary scalar is *derived* inside the region | Classifies it as static data and freezes the first call's value into the recording. No warning, ever. | **Step A** — hoists the computation to the call site |
+| A boundary scalar is *derived* inside the region | Classifies it as static data and freezes the first call's value into the recording. No warning, ever. | **Step A** — hoists the computation to the call site, or leaves it alone when the frozen value is provably the right one |
 | The boundary itself is not cacheable | Declines to cache and silently runs the region as ordinary tasks | **Step D** — rejects it at compile time |
 
 The first produces wrong answers. The second produces correct answers with none
@@ -54,12 +54,74 @@ since it already supplies those parameters. Scalar arithmetic in PyPTO is a
 `BinaryExpr` / `UnaryExpr` node rather than a `Call`, so the check recurses
 through those two base classes and treats everything else as a leaf.
 
-A scalar that reaches a task but is *not* hoistable — because it depends on a
-task output, a tensor read, or a runtime query — is rejected with a message
-naming the variable and explaining why the value cannot be reconstructed.
-
 New parameters are **appended**, not prepended: `CoreTaskArgs` requires every
 tensor argument to precede every scalar one.
+
+### A bare rename is deleted, not accepted
+
+`n = batch` computes nothing, so there is nothing to hoist — but leaving it alone
+reintroduces the very bug Step A exists to prevent. Codegen emits a surviving
+alias as a **value copy**:
+
+```cpp
+const uint64_t& batch = args.scalar(0);   // the slot, by reference
+int64_t n = batch;                        // a copy, at a different address
+g0_params_t0.add_scalar(n);               // the copy is what the task receives
+```
+
+Recording classifies a scalar by the *address its value came from*, comparing
+against `&boundary_args->scalar(i)`. The copy matches nothing, so it is recorded
+as `STATIC_VALUE` and every later replay reuses the first call's number.
+
+Step A therefore substitutes the name away and erases the binding, so the task
+reads `add_scalar(batch)` — the slot itself. Chains collapse to their root in one
+pass (`a = p; b = a;` sends both readers to `p`), and an alias of a *hoisted*
+value lands on that value's new parameter. A rename that somehow survives is
+rejected rather than waved through, by both Step D and the verifier.
+
+### Hoistable vs replay-invariant
+
+Not being hoistable is not the same as being illegal. Hoistability answers *"can
+the call site recompute this?"*; the runtime only needs *"is this the same on
+every call?"*, which is strictly weaker. Freezing a value into the recording is a
+wrong answer only when the value can **differ** between calls.
+
+| Property | Question | Consequence |
+| -------- | -------- | ----------- |
+| hoistable | can the call site recompute it? | Step A moves it out; it gets a real argument slot |
+| replay-invariant | is it the same on every call? | it stays where it is, frozen — correctly |
+
+`ReplayInvariantSet` (`utils/graph_replay_invariant.h`) draws the second line.
+Three seeds, closed under scalar arithmetic and over names bound to an invariant
+value:
+
+| Seed | Why replay reproduces it |
+| ---- | ------------------------ |
+| a literal | trivially |
+| the induction variable of a **constant-trip** loop | recording walks the loop once and bakes each iteration's literal into that iteration's own node; constant bounds mean every later call walks the identical sequence |
+| `tensor.dim` of a boundary tensor parameter, with a literal axis | `graph_boundary_matches` compares each boundary tensor's `ndims`, `shapes` and `strides` against the recorded `GraphBoundarySignature` and declines the cached graph on any mismatch, so a boundary shape cannot change within one recording |
+
+**Scalar parameters are deliberately excluded from the invariant set.** The
+runtime patches a boundary scalar's slot on every call — which is exactly what
+makes one a legal *task argument* and an illegal *frozen view offset*.
+
+This is what admits a tiled kernel at all. A slab offset `i * TILE` cannot be
+hoisted: the value does not exist at the call site. Every projection, MLP and
+attention loop in a decoder layer is indexed that way, so rejecting it excluded
+the whole shape.
+
+`DataType::TASK_ID` operands are skipped outright rather than classified. A task
+id is never a boundary scalar — the recording captures dependency structure
+itself, and `graph_boundary_matches` refuses any call carrying an explicit
+dependency (`explicit_dep_count() != 0`), so an id produced outside the region
+can never reach a replay. This matters because the scalar check runs over
+*every* call's arguments, so `seeds[0] = seed` — an `array.update_element` into a
+`pl.array` of `TASK_ID` — used to read as a task consuming a boundary scalar
+while the same id written straight into `deps=[...]` was accepted.
+
+A scalar that reaches a task and is neither hoistable, a boundary parameter, nor
+replay-invariant — because it depends on a task output or a tensor read — is
+rejected with a message naming the variable.
 
 ## Step B — derived slices of a boundary tensor
 
@@ -92,9 +154,27 @@ recorded on the first call.
 **A hoisted view must have a compile-time-constant shape.** Replay copies a
 view's `shapes` and `strides` straight from the recorded template and patches
 only `buffer_addr` and `start_offset`, so an extent read from a boundary scalar
-would apply the first call's shape to a later call's buffer. A view of a
-boundary tensor whose operands the call site cannot recompute is rejected for the
-same reason, rather than left in place.
+would apply the first call's shape to a later call's buffer. An extent that is
+replay-invariant is accepted for the same reason it is elsewhere: it cannot
+differ, so freezing it changes nothing.
+
+**A view has three outcomes, not two.** Replay restores a `BOUNDARY_VIEW` as
+`boundary.start_offset + packed_offset`, where `packed_offset` is the delta
+recorded on the **first** call; only the address, size, owner and version are
+patched. So the offset is frozen, and that is wrong exactly when it can move:
+
+| Every non-source operand is | Outcome | Why |
+| --------------------------- | ------- | --- |
+| derivable | hoisted to the call site | the caller can rebuild the view |
+| replay-invariant only | **left in place** | frozen == correct, and the call site has no name for it |
+| neither, or a mix of the two | rejected | the frozen delta would be call one's |
+
+The mixed case is the one that matters. `off = layer_idx + i * TILE` can neither
+be hoisted (`i` does not exist at the call site) nor frozen (`layer_idx` is
+patched per call), and it is what a tiled region produces if it indexes weights
+by both. Anything built on top of a view left in place — a view of it, or an
+alias — is held to the same rule rather than hoisted, since the call site has no
+name for any of them either.
 
 **A varying offset is fine, and that is not obvious.** Codegen clamps a runtime
 view to `min(declared, source.shapes[i] - offset[i])`, so the *actual* shape is
@@ -148,7 +228,7 @@ satisfy. Automating it needs that mapping reworked first.
 | Allocation shapes are compile-time constants | Recording copies the shape into the node and derives the buffer address from it; a shape reading a boundary scalar is frozen at the first call's value |
 | No `tensor.full` in the region | Orchestration codegen has no lowering for it and rejects it as a misplaced tensor op |
 | No launch under a runtime loop, `while` or `if` | The recording fixes the topology on the first call and replays it unchanged, so a launch count or branch that can differ between calls would silently replay call one's shape |
-| No scalar computed inline at a task argument | Step A hoists *named* derived values; an expression written inline at the call has no name to hoist and no boundary slot, so it would be frozen at the first call's value |
+| No *call-varying* scalar computed inline at a task argument | Step A hoists *named* derived values; an expression written inline at the call has no name to hoist and no boundary slot, so it would be frozen at the first call's value. A replay-invariant expression is accepted — the freeze is harmless |
 | No Graph calls a Graph | The runtime cannot record a graph from inside one it is already recording |
 | Every parameter supplied at the call site | A `Submit` may normally pass a prefix and let the runtime allocate the tail `Out` params; a Graph has no such tail |
 | No explicit dependencies on the launch | An explicit dependency edge makes the launch uncacheable, so the region would silently run as ordinary tasks |
@@ -172,6 +252,14 @@ no scope wrapper has been placed around the statements Step A moves.
 `CallDirectionsResolved` is re-declared because the pass rewrites call arguments
 and their direction attrs; `MaterializeRuntimeScopes`, which runs next, requires
 that property.
+
+The `GraphBoundaryLegalized` verifier re-derives the topology, node count and
+hoisting post-conditions independently, so a later pass that reintroduces a
+rejected state is caught. It shares exactly one thing with this pass:
+`ReplayInvariantSet`. That is not a decision this pass made and the verifier
+rubber-stamps — it is a reading of the runtime's own contract, and two
+hand-written copies of it could disagree, leaving the verifier rejecting IR the
+pass had just produced.
 
 ## Not yet handled
 
