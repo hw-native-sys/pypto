@@ -74,6 +74,26 @@ core levels:
 | `@pl.jit.opaque` | `Opaque` | A separate IR function that may hold orchestration loops and `pl.at` scopes |
 | `@pl.jit.graph` | `Graph` | A recordable orchestration fragment — the `host_build_graph` runtime records its task topology on the first call and replays it after, so N calls cost one graph build rather than N. Requires compiling under `RuntimeKind.HOST_BUILD_GRAPH` |
 
+`@pl.jit.graph` has a scope form: `with pl.graph("name"):` marks a region *in place*
+instead of splitting it into a function. The two compile to the same thing — the region is
+outlined into a Graph function named after `name` — so the choice is ergonomic. Use the
+decorator when the layer is already its own function; use the scope when the region is a
+slice of a larger orchestration body you would rather not split up:
+
+```python
+@pl.jit
+def decode(w: pl.Tensor, hidden: pl.InOut[pl.Tensor]):
+    for layer in pl.range(40):
+        with pl.graph("decoder_layer"):        # recorded once, replayed 39 times
+            ...
+    return hidden
+```
+
+The name is required and becomes the recorded graph's identity, so keep it stable. A Graph
+region cannot nest inside another Graph region, nor inside `pl.at` / `pl.cluster` /
+`pl.spmd` — those become a single device task, whereas a Graph region records a topology of
+them. All three are compile errors.
+
 Sub-function dependencies (`.incore` / `.inline` / `.opaque` / `.graph`) are auto-discovered from
 the entry's body — call them by name. The name you call is resolved in the entry's own
 namespace, so an aliased import (`from kernels import matmul as mm`, or a plain

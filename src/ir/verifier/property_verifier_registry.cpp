@@ -47,6 +47,7 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   Register(IRProperty::SplitIncoreOrch, CreateSplitIncoreOrchPropertyVerifier);
   Register(IRProperty::ClusterOutlined, CreateClusterOutlinedPropertyVerifier);
   Register(IRProperty::HierarchyOutlined, CreateHierarchyOutlinedPropertyVerifier);
+  Register(IRProperty::GraphOutlined, CreateGraphOutlinedPropertyVerifier);
   Register(IRProperty::HasMemRefs, CreateHasMemRefsPropertyVerifier);
   Register(IRProperty::IncoreTileOps, CreateIncoreTileOpsPropertyVerifier);
   Register(IRProperty::MixedKernelExpanded, CreateMixedKernelExpandedPropertyVerifier);

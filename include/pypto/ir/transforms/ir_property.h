@@ -46,6 +46,7 @@ enum class IRProperty : uint64_t {
   BreakContinueValid,       ///< Break/continue only in sequential/while loops
   UseAfterDef,              ///< All variable uses are dominated by a definition
   HierarchyOutlined,        ///< Hierarchy scopes outlined into level/role functions
+  GraphOutlined,            ///< Graph scopes outlined into FunctionType::Graph functions
   StructuredCtrlFlow,       ///< No BreakStmt/ContinueStmt — only structured control flow
   VectorKernelSplit,        ///< AIV functions with split mode have tpop shapes and store offsets adjusted
   OutParamNotShadowed,      ///< Out/InOut params are not reassigned with tensor-creating ops

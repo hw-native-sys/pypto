@@ -929,6 +929,17 @@ static IRNodePtr DeserializeClusterScopeStmt(const msgpack::object& fields_obj, 
                                             DeserializeScopeAttrs(fields_obj, ctx, zone));
 }
 
+// Deserialize GraphScopeStmt
+static IRNodePtr DeserializeGraphScopeStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
+                                           DeserializerContext& ctx) {
+  auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
+  auto name_hint = DeserializeScopeNameHint(fields_obj, ctx);
+  auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
+  return std::make_shared<GraphScopeStmt>(std::move(name_hint), body, span,
+                                          DeserializeLeadingComments(fields_obj),
+                                          DeserializeScopeAttrs(fields_obj, ctx, zone));
+}
+
 // Deserialize HierarchyScopeStmt
 static IRNodePtr DeserializeHierarchyScopeStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
                                                DeserializerContext& ctx) {
@@ -1338,6 +1349,7 @@ static TypeRegistrar _spmd_scope_stmt_registrar("SpmdScopeStmt", DeserializeSpmd
 static TypeRegistrar _split_aiv_scope_stmt_registrar("SplitAivScopeStmt", DeserializeSplitAivScopeStmt);
 static TypeRegistrar _runtime_scope_stmt_registrar("RuntimeScopeStmt", DeserializeRuntimeScopeStmt);
 static TypeRegistrar _comm_domain_scope_stmt_registrar("CommDomainScopeStmt", DeserializeCommDomainScopeStmt);
+static TypeRegistrar _graph_scope_stmt_registrar("GraphScopeStmt", DeserializeGraphScopeStmt);
 static TypeRegistrar _seq_stmts_registrar("SeqStmts", DeserializeSeqStmts);
 static TypeRegistrar _eval_stmt_registrar("EvalStmt", DeserializeEvalStmt);
 static TypeRegistrar _break_stmt_registrar("BreakStmt", DeserializeBreakStmt);

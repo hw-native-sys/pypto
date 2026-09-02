@@ -1302,7 +1302,7 @@ REGISTER_OP("tile.sel")
     .set_output_memory(MemorySpace::Vec)
     // TSEL reads the predicate mask (arg 0) and tmp scratch (arg 3) while
     // writing dst. Dead lhs/rhs value operands may be reused when lifetimes
-    // allow; mask/tmp stay forbidden via registry (see 34-memory_reuse.md).
+    // allow; mask/tmp stay forbidden via registry (see 35-memory_reuse.md).
     .forbid_output_alias(0)
     .forbid_output_alias(3)
     .set_lane_invariant_arg(3)

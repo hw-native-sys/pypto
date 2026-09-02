@@ -145,7 +145,7 @@ The packed canonical formulas (`BuildLogicalStridesFromLayout` in
 | ------ | ---------------- |
 | `ND` | `stride[n-1] = 1; stride[k] = stride[k+1] * shape[k+1]` |
 | `DN` (`n ≥ 2`) | `stride[n-2] = 1`; `stride[n-1] = shape[n-2]`; `stride[n-3] = shape[n-2] * shape[n-1]`; outer dims row-major |
-| `NZ` | row-major over the *blocked* rank-(r+2) shape `[..., C/c0, R/16, 16, c0]` — see [BlockNzTensorViews](../passes/14-block_nz_tensor_views.md) |
+| `NZ` | row-major over the *blocked* rank-(r+2) shape `[..., C/c0, R/16, 16, c0]` — see [BlockNzTensorViews](../passes/15-block_nz_tensor_views.md) |
 
 **Two ways to spell the same canonical TensorView**:
 
@@ -154,7 +154,7 @@ The packed canonical formulas (`BuildLogicalStridesFromLayout` in
   canonical for the carried layout.
 - **Explicit** — every dimension's stride is spelled out.
 
-The [`MaterializeTensorStrides`](../passes/31-materialize_tensor_strides.md)
+The [`MaterializeTensorStrides`](../passes/32-materialize_tensor_strides.md)
 pass rewrites every implicit form to its explicit packed canonical so
 codegen sees a single contract. The `TensorViewCanonical` `IRProperty` +
 verifier enforces this:

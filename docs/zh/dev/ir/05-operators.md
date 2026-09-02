@@ -154,7 +154,7 @@ AIC 上的那份副本可能在 AIV 通路的 TPUT 尚未把该信号所释放�
 请把该标记读作「不得在第二个核上运行」，而不是「不幂等」。
 
 读取该维度的查询是 `IsNoDuplicate()`。它唯一的消费者是 `LowerAutoVectorSplit`
-（pass 20）的 `pl.split_aiv` 区域放置标记：该 pass 恰好把区域内的 no-duplicate 调用
+（pass 22）的 `pl.split_aiv` 区域放置标记：该 pass 恰好把区域内的 no-duplicate 调用
 钉在 AIV 通路上。没有任何 verifier 在这个维度上做拒绝。
 
 被 `set_core_affinity(...)` 固定在单条通路上的算子本来就不会被复制，因此无需该标记。
@@ -286,7 +286,7 @@ init 操作数。由于 `matmul_acc` 是原地操作（`set_output_reuses_input(
 
 「字面量」涵盖常量谓词到达 emitter 时的**两种**形态：DSL 写法 `init_cond=True`/
 `False` 到达时是 BOOL 类型的 `ConstInt`，而被更早的 pass 折叠过的谓词到达时是
-`ConstBool` —— 当 [`LowerPipelineLoops`](../passes/29-lower_pipeline_loops.md)
+`ConstBool` —— 当 [`LowerPipelineLoops`](../passes/30-lower_pipeline_loops.md)
 复制 K-loop *且*外层循环被消除、每个副本的索引成为字面量时，生成的 `ko == 0` 正是
 这种形态。两者都会直接选定一个分支；若 emitter 只折叠其中一种，未覆盖到的每个 K
 block 都会发出双倍 MAD。
@@ -389,7 +389,7 @@ A5 会把左侧显式 FP4→FP8 tile cast 展开为 FP4→BF16→FP32→FP8E4M3F
 | shape-matched Mat→Scale `tmov` | flat `[1,G]` 须先 `treshape` 到 `[M,K/32]`（或 B 侧 shape） |
 | 顺序 | PyPTO 按源序发 Mat→scaling `tmov`；PTOAS `PTOA5NormalizeTMovPass` 把 `tget_scale_addr` 重排到它前面（ISA bind-before-fill） |
 | `#pto.layout` / mx load | `mx_a_zz` / `mx_b_nn` / …；codegen 发射逻辑 rank-2 `make_tensor_view`（PTOAS v0.60 InferPTOLayout / EmitC 映射物理 pack） |
-| 本阶段覆盖 | `pto.tmatmul.mx` / `.acc` / `.bias` + `pto.tget_scale_addr`；`pto.tquant.mx` 见 [LowerCompositeOps](../passes/12-lower_composite_ops.md) |
+| 本阶段覆盖 | `pto.tmatmul.mx` / `.acc` / `.bias` + `pto.tget_scale_addr`；`pto.tquant.mx` 见 [LowerCompositeOps](../passes/13-lower_composite_ops.md) |
 
 ### 仅 Tile 的 GEMV 家族（A2/A3）
 
@@ -600,7 +600,7 @@ with ib.function("tensor_example") as f:
 | **逐元素** | `tile.add/sub/mul/div` | Tile-Tile 操作 |
 | - | `tile.adds/subs/muls/divs` | Tile-Scalar 操作。**常量**标量操作数会采用 tile 的元素 dtype（裸整数字面量否则会被解析为 `index`，而任何 `pto.t*s` 算子都不接受它）——但整数 tile 上的浮点字面量仍保持 FP32，以保留类型提升语义。显式的 `pl.const(v, dtype)` 属于用户的有意标注，与任何非常量表达式一样保持不变；非常量的 `index` 标量（循环变量、`pl.dim`）会被拒绝——需用 `pl.cast` 转换。`tensor.*s` 同理。 |
 | **一元** | `tile.sqrt` | 逐元素平方根 |
-| **量化** | `tile.tquant_mx` / `pl.quant_mx` | 仅 Ascend950 支持的 **MXFP8** block-32 动态量化，返回 `{FP8E4M3FN quant, FP8E8M0 scale}`；`dtype` 必须为 `FP8E4M3FN`。`group_axis` 对齐 PTOAS `grpAxis`（`1` = A 侧 `[M,K]`，`0` = B 侧 `[N,K]` 并转置）。公开 scale shape 为 `[M,K/32]` / `[K/32,N]`；要求完整有效区域和 `K % 64 == 0`（axis1 还要求 `M % 16 == 0`，axis0 还要求 `N % 32 == 0`）。[Pass 12](../passes/12-lower_composite_ops.md) 生成分组 TQUANT 和 X-to-ZZ TMOV。结果经 GM 分期喂给 `matmul_mx`。MXFP4 quant 暂缓。 |
+| **量化** | `tile.tquant_mx` / `pl.quant_mx` | 仅 Ascend950 支持的 **MXFP8** block-32 动态量化，返回 `{FP8E4M3FN quant, FP8E8M0 scale}`；`dtype` 必须为 `FP8E4M3FN`。`group_axis` 对齐 PTOAS `grpAxis`（`1` = A 侧 `[M,K]`，`0` = B 侧 `[N,K]` 并转置）。公开 scale shape 为 `[M,K/32]` / `[K/32,N]`；要求完整有效区域和 `K % 64 == 0`（axis1 还要求 `M % 16 == 0`，axis0 还要求 `N % 32 == 0`）。[Pass 13](../passes/13-lower_composite_ops.md) 生成分组 TQUANT 和 X-to-ZZ TMOV。结果经 GM 分期喂给 `matmul_mx`。MXFP4 quant 暂缓。 |
 | **变换** | `tile.slice` | 提取子 tile，静态 shape，可选动态 valid_shape |
 | - | `tile.extract` | 从 `src` 在 `(index_row, index_col)` 处提取子 tile —— ISA TEXTRACT Variant 1（Mat→Left/Right，Acc→Mat）。结果 layout 取自 `target_memory` 的隐式 view；`Left`/`Right` 例外，使用 TEXTRACT 侧的 L0 格式（与 `tile.move` 的 TMOV 侧不同） |
 | - | `tile.reshape` | 重塑 tile 维度（元素总数须一致）。会把源的 `valid_shape` 带到结果上，且绝不扩大 —— 见[reshape 与有效区域（valid region）](#reshape-与有效区域valid-region) |
@@ -639,7 +639,7 @@ layout 来自目标，因为它描述的是目标缓冲区如何分块，由
 `tile.move` 自己把目标 `memory_space` 打到推导出的类型上（参见
 [类型](02-types.md#tiletype) 中的 `TileType` 契约），因此当结果 view 与目标 space 的
 implicit view 一致时会折叠为 `nullopt` —— 这与
-[`InferTileMemorySpace`](../passes/18-infer_tile_memory_space.md) 为重新定型的 tile
+[`InferTileMemorySpace`](../passes/19-infer_tile_memory_space.md) 为重新定型的 tile
 刷新的 per-space implicit view 是同一套。
 
 `tile.move` 不支持原地执行：在同一 memory space 内，源和结果必须解析到不同地址。

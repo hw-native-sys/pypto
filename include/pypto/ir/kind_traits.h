@@ -100,6 +100,7 @@ DEFINE_KIND_TRAIT(SpmdScopeStmt, ObjectKind::SpmdScopeStmt)
 DEFINE_KIND_TRAIT(SplitAivScopeStmt, ObjectKind::SplitAivScopeStmt)
 DEFINE_KIND_TRAIT(RuntimeScopeStmt, ObjectKind::RuntimeScopeStmt)
 DEFINE_KIND_TRAIT(CommDomainScopeStmt, ObjectKind::CommDomainScopeStmt)
+DEFINE_KIND_TRAIT(GraphScopeStmt, ObjectKind::GraphScopeStmt)
 DEFINE_KIND_TRAIT(SeqStmts, ObjectKind::SeqStmts)
 DEFINE_KIND_TRAIT(EvalStmt, ObjectKind::EvalStmt)
 DEFINE_KIND_TRAIT(BreakStmt, ObjectKind::BreakStmt)
@@ -156,6 +157,7 @@ struct KindTrait<Stmt> {
                                          ObjectKind::SplitAivScopeStmt,
                                          ObjectKind::RuntimeScopeStmt,
                                          ObjectKind::CommDomainScopeStmt,
+                                         ObjectKind::GraphScopeStmt,
                                          ObjectKind::SeqStmts,
                                          ObjectKind::EvalStmt,
                                          ObjectKind::BreakStmt,
@@ -164,13 +166,13 @@ struct KindTrait<Stmt> {
   static constexpr size_t count = sizeof(kinds) / sizeof(ObjectKind);
 };
 
-// ScopeStmt base class - matches any scope kind (7 derived classes)
+// ScopeStmt base class - matches any scope kind (8 derived classes)
 template <>
 struct KindTrait<ScopeStmt> {
-  static constexpr ObjectKind kinds[] = {ObjectKind::InCoreScopeStmt,    ObjectKind::ClusterScopeStmt,
-                                         ObjectKind::HierarchyScopeStmt, ObjectKind::SpmdScopeStmt,
-                                         ObjectKind::SplitAivScopeStmt,  ObjectKind::RuntimeScopeStmt,
-                                         ObjectKind::CommDomainScopeStmt};
+  static constexpr ObjectKind kinds[] = {ObjectKind::InCoreScopeStmt,     ObjectKind::ClusterScopeStmt,
+                                         ObjectKind::HierarchyScopeStmt,  ObjectKind::SpmdScopeStmt,
+                                         ObjectKind::SplitAivScopeStmt,   ObjectKind::RuntimeScopeStmt,
+                                         ObjectKind::CommDomainScopeStmt, ObjectKind::GraphScopeStmt};
   static constexpr size_t count = sizeof(kinds) / sizeof(ObjectKind);
 };
 

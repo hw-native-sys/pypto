@@ -140,34 +140,34 @@ a reason; none of them is interchangeable with the others.
 
 ```text
 pl.set_cache_policy(b, BYPASS)                 statement, consumed at parse
-  -> ScopeStmt.attrs_["cache_policy_vars"]     parse .. pass 8   (Var identity)
-  -> Function attr "cache_policy"              pass 8 .. pass 10 (param INDICES)
-  -> tile.load kwarg "cache"                   pass 10 .. codegen
+  -> ScopeStmt.attrs_["cache_policy_vars"]     parse .. pass 9   (Var identity)
+  -> Function attr "cache_policy"              pass 9 .. pass 11 (param INDICES)
+  -> tile.load kwarg "cache"                   pass 11 .. codegen
   -> codegen: warn, emit an ordinary cached access
 ```
 
 | Hop | Carrier | Payload type | Written by | Consumed by |
 | --- | ------- | ------------ | ---------- | ----------- |
-| 1 | `ScopeStmt.attrs_[kAttrCachePolicyVars]` | `vector<pair<VarPtr, int>>` | DSL parser | [`OutlineIncoreScopes`](../passes/08-outline_incore_scopes.md) (pass 8) |
-| 2 | `Function.attrs_[kAttrCachePolicyParams]` | `vector<pair<int32_t, int>>`, sorted by index | pass 8 | [`ConvertTensorToTileOps`](../passes/10-convert_tensor_to_tile_ops.md) (pass 10) |
-| 3 | `tile.load` kwarg `cache` | `int` (`ir::CachePolicy`) | pass 10 | PTO codegen |
+| 1 | `ScopeStmt.attrs_[kAttrCachePolicyVars]` | `vector<pair<VarPtr, int>>` | DSL parser | [`OutlineIncoreScopes`](../passes/09-outline_incore_scopes.md) (pass 9) |
+| 2 | `Function.attrs_[kAttrCachePolicyParams]` | `vector<pair<int32_t, int>>`, sorted by index | pass 9 | [`ConvertTensorToTileOps`](../passes/11-convert_tensor_to_tile_ops.md) (pass 11) |
+| 3 | `tile.load` kwarg `cache` | `int` (`ir::CachePolicy`) | pass 11 | PTO codegen |
 
 Design notes that keep the chain honest:
 
 - **Not a field on `TensorView`.** A plain kernel parameter has no
   `tensor_view_` at all, so stamping a policy there would force one into
   existence — dragging in the strict `TensorViewCanonical` verifier, and
-  [`MaterializeTensorStrides`](../passes/31-materialize_tensor_strides.md)
+  [`MaterializeTensorStrides`](../passes/32-materialize_tensor_strides.md)
   rebuilds the view through a positional constructor that would silently drop
   the field.
 - **Param indices are valid only across passes 8..10.** Only
   `OutlineClusterScopes` sits between them, and it does not mutate an outlined
   InCore param list. Downstream passes *do*:
-  [`InjectGMPipeBuffer`](../passes/23-inject_gm_pipe_buffer.md) and
-  [`MaterializeDistTensorCtx`](../passes/44-materialize_dist_tensor_ctx.md)
+  [`InjectGMPipeBuffer`](../passes/24-inject_gm_pipe_buffer.md) and
+  [`MaterializeDistTensorCtx`](../passes/45-materialize_dist_tensor_ctx.md)
   append, and
-  [`MaterializeValidShapeSymbols`](../passes/49-materialize_valid_shape_symbols.md)
-  *prepends*. That is why pass 10 erases the attr after converting it.
+  [`MaterializeValidShapeSymbols`](../passes/50-materialize_valid_shape_symbols.md)
+  *prepends*. That is why pass 11 erases the attr after converting it.
 - **The kwarg is an `int`, not the enum.** It follows `tile.store`'s `atomic`
   kwarg, so the serializer, deserializer, `structural_hash` and
   `structural_equal` need no new enum arm. `pl.CachePolicy` is bound
@@ -193,7 +193,7 @@ with pl.at(level=pl.Level.CORE_GROUP, name_hint="mm"):
 | Ordering | Position-normalising — markers always print first, however the author ordered them; the parser hoists them from anywhere in the body |
 | Spmd inline forms | Printed from the nested InCore carrier, whose `pl.at(...)` header the Spmd printer inlines away |
 | Otherwise-empty scope | A scope holding only a declaration prints the marker instead of `pass` |
-| Function attr (`cache_policy`) | Prints as a list of `(index, policy)` tuples, so a pass dump taken between pass 8 and pass 10 — the only window where it exists — re-parses |
+| Function attr (`cache_policy`) | Prints as a list of `(index, policy)` tuples, so a pass dump taken between pass 9 and pass 11 — the only window where it exists — re-parses |
 
 ## Current status
 
@@ -240,5 +240,5 @@ bypass-rooted tensor view, and nothing upstream of codegen changes.
 
 - [Statements and Control Flow](01-statements.md) — scope forms and the other
   parse-time markers (`pl.dump_tag`, `pl.static_assert`).
-- [OutlineIncoreScopes](../passes/08-outline_incore_scopes.md) — hop 1 → hop 2.
-- [ConvertTensorToTileOps](../passes/10-convert_tensor_to_tile_ops.md) — hop 2 → hop 3.
+- [OutlineIncoreScopes](../passes/09-outline_incore_scopes.md) — hop 1 → hop 2.
+- [ConvertTensorToTileOps](../passes/11-convert_tensor_to_tile_ops.md) — hop 2 → hop 3.

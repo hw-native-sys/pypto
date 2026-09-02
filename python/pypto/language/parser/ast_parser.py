@@ -5535,6 +5535,100 @@ class ASTParser:
                 self._discard_tail_block_comments(stmt.body, upper_line=stmt.end_lineno)
                 self.scope_manager.exit_scope(leak_vars=True)
 
+    #: Function types whose body is a device-side kernel, where a Graph region
+    #: has nothing to record. Opaque / Orchestration / Graph / Inline are allowed.
+    _GRAPH_FORBIDDEN_FUNC_TYPES = frozenset(
+        {
+            ir.FunctionType.InCore,
+            ir.FunctionType.AIC,
+            ir.FunctionType.AIV,
+            ir.FunctionType.Group,
+            ir.FunctionType.Spmd,
+        }
+    )
+
+    def _parse_graph_scope(self, stmt: ast.With, context_expr: ast.Call) -> None:
+        """Parse ``with pl.graph("name"):`` into a GraphScopeStmt.
+
+        The region name is positional and required: ``OutlineGraphScopes`` names
+        the outlined function after it, codegen derives the emitted symbol from
+        that name, and the runtime keys its recorded Definition on the symbol. An
+        auto-generated name would still work but would silently change whenever
+        an unrelated region was added, so the user owns it.
+        """
+        span = self.span_tracker.get_span(stmt)
+
+        # An Opaque body is orchestration that has not been classified yet (a plain
+        # ``@pl.function`` / ``@pl.jit`` parses Opaque and is promoted by the
+        # outlining passes), and an Inline body is spliced into its caller before
+        # OutlineGraphScopes runs — so the rejection set is the device-side kernel
+        # types, not "everything that is not Orchestration yet".
+        if self._func_type in self._GRAPH_FORBIDDEN_FUNC_TYPES:
+            raise ParserSyntaxError(
+                f"pl.graph() is not valid inside a {self._func_type.name} function",
+                span=span,
+                hint="A Graph region records orchestration task launches, so it belongs in the "
+                "@pl.jit entry (or another @pl.jit.graph function), not in a kernel body. To make a "
+                "whole function a Graph, decorate it with @pl.jit.graph instead.",
+            )
+
+        # Hierarchy is here for a different reason than the other three: a
+        # `pl.at(level=HOST)` region is distributed orchestration, and Graph x
+        # distributed is explicitly out of scope for now (RFC #2399), so reject it
+        # at the surface rather than let it reach a pass that has never seen it.
+        for device_kind, construct in (
+            (ir.ScopeKind.InCore, "pl.at(level=...)"),
+            (ir.ScopeKind.Hierarchy, "pl.at(level=..., role=...)"),
+            (ir.ScopeKind.Cluster, "pl.cluster()"),
+            (ir.ScopeKind.Spmd, "pl.spmd(...)"),
+        ):
+            if self._is_inside_scope(device_kind):
+                raise ParserSyntaxError(
+                    f"pl.graph() cannot be nested inside `{construct}`",
+                    span=span,
+                    hint=(
+                        "A Graph region records a topology of task launches, so it must sit "
+                        "around the dispatches rather than inside one. Move the "
+                        "`with pl.graph(...):` outside."
+                        if device_kind is not ir.ScopeKind.Hierarchy
+                        else "Graph regions inside a distributed hierarchy region are not "
+                        "supported yet. Move the `with pl.graph(...):` outside."
+                    ),
+                )
+
+        if self._is_inside_scope(ir.ScopeKind.Graph):
+            raise ParserSyntaxError(
+                "pl.graph() cannot be nested inside another pl.graph()",
+                span=span,
+                hint="The host_build_graph runtime cannot record a graph inside a graph. Mark "
+                "either the outer region or the inner one, not both.",
+            )
+
+        if len(context_expr.args) != 1:
+            raise ParserSyntaxError(
+                f"pl.graph() takes exactly one positional argument (the region name), "
+                f"got {len(context_expr.args)}",
+                span=span,
+                hint="Use 'with pl.graph(\"decoder_layer\"):'",
+            )
+        if context_expr.keywords:
+            unexpected = context_expr.keywords[0].arg or "**kwargs"
+            raise ParserSyntaxError(
+                f"pl.graph() got unexpected keyword argument '{unexpected}'",
+                span=span,
+                hint="pl.graph() takes only the region name: 'with pl.graph(\"decoder_layer\"):'",
+            )
+
+        name = self._parse_scope_name_hint(context_expr.args[0], "pl.graph()")
+        if not name:
+            raise ParserSyntaxError(
+                "pl.graph() region name must not be empty",
+                span=span,
+                hint="The name becomes the recorded graph's symbol: 'with pl.graph(\"decoder_layer\"):'",
+            )
+
+        self._parse_scope_body(stmt, ir.ScopeKind.Graph, span, name_hint=name)
+
     def _parse_at_scope(
         self, stmt: ast.With, context_expr: ast.Call, optional_vars: "ast.expr | None" = None
     ) -> None:
@@ -5986,6 +6080,7 @@ class ASTParser:
 
         Currently supports:
         - with pl.cluster(): ... (creates ScopeStmt with Cluster scope)
+        - with pl.graph("name"): ... (creates ScopeStmt with Graph scope)
         - with pl.at(level=..., role=...): ... (creates ScopeStmt with InCore/Hierarchy scope)
         - with pl.at(level=CORE_GROUP): ... (creates ScopeStmt with InCore scope)
         - with pl.at(level=CORE_GROUP, optimizations=[pl.split(pl.SplitMode.UP_DOWN)]): ...
@@ -6051,6 +6146,11 @@ class ASTParser:
                     )
                     return
 
+                # with pl.graph("name"): ...
+                if func.attr == "graph":
+                    self._parse_graph_scope(stmt, context_expr)
+                    return
+
                 # pl.at(level=..., role=..., deps=...) [as tid]
                 if func.attr == "at":
                     self._parse_at_scope(stmt, context_expr, optional_vars=optional_vars)
@@ -6061,8 +6161,8 @@ class ASTParser:
             "Unsupported context manager in with statement",
             span=self.span_tracker.get_span(stmt),
             hint="Supported: 'with pl.cluster():', 'with pl.spmd(...):',"
-            " 'with pl.at(level=..., optimizations=[...]):', 'with pl.scope():',"
-            " or 'with pl.manual_scope():'",
+            " 'with pl.at(level=..., optimizations=[...]):', 'with pl.graph(\"name\"):',"
+            " 'with pl.scope():', or 'with pl.manual_scope():'",
         )
 
     def parse_return(self, stmt: ast.Return) -> None:

@@ -152,5 +152,5 @@ static std::string MakeGatherCompareCodegenPTO(const CallPtr& op,
 - [算子系统](05-operators.md) —— 通用注册 API 与参数效应
 - [类型与示例](02-types.md) —— `TupleType` 及其余类型系统
 - [参数方向](08-param-directions.md) —— 一处未声明的写是如何丢掉它的依赖边的
-- [InitMemRef](../passes/32-init_memref.md) —— 拥有 tile 分配职责的 pass
-- [MemoryReuse](../passes/34-memory_reuse.md) —— 跨 tuple 元素的生命周期复用
+- [InitMemRef](../passes/33-init_memref.md) —— 拥有 tile 分配职责的 pass
+- [MemoryReuse](../passes/35-memory_reuse.md) —— 跨 tuple 元素的生命周期复用

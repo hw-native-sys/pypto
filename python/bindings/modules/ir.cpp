@@ -1631,6 +1631,7 @@ void BindIR(nb::module_& m) {
       .value("CommDomain", ScopeKind::CommDomain,
              "Comm-domain scope (with orch.allocate_domain(...) wrapper for host_orch window buffers)")
       .value("SplitAiv", ScopeKind::SplitAiv, "Explicit AIV-split region (pl.split_aiv)")
+      .value("Graph", ScopeKind::Graph, "Recordable orchestration region (pl.graph)")
       .export_values();
 
   // SplitMode enum
@@ -1724,6 +1725,20 @@ void BindIR(nb::module_& m) {
   cluster_scope_stmt_class.def_prop_ro(
       "attrs",
       [kwargs_to_pydict](const std::shared_ptr<const ClusterScopeStmt>& self) {
+        return kwargs_to_pydict(self->attrs_);
+      },
+      scope_attrs_doc);
+
+  // GraphScopeStmt
+  auto graph_scope_stmt_class = nb::class_<GraphScopeStmt, ScopeStmt>(
+      ir, "GraphScopeStmt", "Graph scope: a recordable orchestration region");
+  graph_scope_stmt_class.def(nb::init<std::string, const StmtPtr&, const Span&>(), nb::arg("name_hint"),
+                             nb::arg("body"), nb::arg("span"),
+                             "Create a Graph scope statement (name_hint is the region name)");
+  BindFields<GraphScopeStmt>(graph_scope_stmt_class);
+  graph_scope_stmt_class.def_prop_ro(
+      "attrs",
+      [kwargs_to_pydict](const std::shared_ptr<const GraphScopeStmt>& self) {
         return kwargs_to_pydict(self->attrs_);
       },
       scope_attrs_doc);

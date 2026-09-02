@@ -69,7 +69,8 @@ enum class ScopeKind : uint8_t {
   Spmd = 4,        ///< SPMD dispatch scope (core_num/sync_start on ScopeStmt)
   Runtime = 5,     ///< Runtime orchestration scope (SIMPLER_SCOPE wrapper, manual on/off)
   CommDomain = 6,  ///< CommDomain scope (with orch.allocate_domain(...) wrapper)
-  SplitAiv = 7     ///< Explicit AIV-split region (pl.split_aiv, nestable in loops/conditionals)
+  SplitAiv = 7,    ///< Explicit AIV-split region (pl.split_aiv, nestable in loops/conditionals)
+  Graph = 8        ///< Recordable orchestration region (pl.graph, outlined into a Graph function)
 };
 
 /**
@@ -244,7 +245,7 @@ inline ForKind StringToForKind(const std::string& str) {
  * @brief Convert ScopeKind to string
  * @param kind The scope kind
  * @return String representation ("InCore", "Cluster", "Hierarchy", "Spmd", "Runtime",
- *         or "CommDomain")
+ *         "CommDomain", "SplitAiv", or "Graph")
  */
 inline std::string ScopeKindToString(ScopeKind kind) {
   switch (kind) {
@@ -262,6 +263,8 @@ inline std::string ScopeKindToString(ScopeKind kind) {
       return "CommDomain";
     case ScopeKind::SplitAiv:
       return "SplitAiv";
+    case ScopeKind::Graph:
+      return "Graph";
   }
   throw pypto::TypeError("Unknown ScopeKind");
 }
@@ -679,11 +682,14 @@ using WhileStmtPtr = std::shared_ptr<const WhileStmt>;
  *   - `ClusterScopeStmt`: no extra fields
  *   - `HierarchyScopeStmt`: required `level_`, optional `role_`
  *   - `SpmdScopeStmt`: required `core_num_`, `sync_start_` (default false)
+ *   - `GraphScopeStmt`: no extra fields; `name_hint_` is the region name
  *
  * **Syntax:**
  * with pl.at(level=pl.Level.CORE_GROUP):    # InCore scope -> InCoreScopeStmt
  *     body
  * with pl.cluster():   # Cluster scope -> ClusterScopeStmt
+ *     body
+ * with pl.graph("layer"):  # Graph scope -> GraphScopeStmt
  *     body
  * with pl.at(level=pl.Level.HOST, role=pl.Role.SubWorker):  # -> HierarchyScopeStmt
  *     body
@@ -708,6 +714,7 @@ using WhileStmtPtr = std::shared_ptr<const WhileStmt>;
  * - OutlineIncoreScopes extracts InCore scopes into InCore functions
  * - OutlineClusterScopes extracts Cluster scopes into Group functions
  * - Hierarchy scopes are outlined into level-/role-annotated functions
+ * - OutlineGraphScopes extracts Graph scopes into Graph functions
  */
 class ScopeStmt : public Stmt {
  public:
@@ -815,6 +822,40 @@ class ClusterScopeStmt : public ScopeStmt {
 };
 
 using ClusterScopeStmtPtr = std::shared_ptr<const ClusterScopeStmt>;
+
+/**
+ * @brief Graph scope: a recordable orchestration region.
+ *
+ * Marks a region whose task topology the `host_build_graph` runtime records on
+ * its first execution and replays afterwards. `OutlineGraphScopes` extracts the
+ * region into a `FunctionType::Graph` function and leaves a `Call` behind, so
+ * the scope form is pure sugar over the function form: after that pass every
+ * downstream consumer — `LegalizeGraphBoundary`, the Graph verifier, codegen —
+ * sees exactly what `@pl.jit.graph` produces.
+ *
+ * `name_hint_` is the user-supplied region name and becomes the outlined
+ * function's name, which codegen turns into the emitted symbol and hence the
+ * runtime's graph key. It is therefore not optional the way it is on the other
+ * scope kinds: the parser requires it.
+ *
+ * No kind-specific fields; only inherits `name_hint_` and `body_` from base.
+ */
+class GraphScopeStmt : public ScopeStmt {
+ public:
+  GraphScopeStmt(std::string name_hint, StmtPtr body, Span span,
+                 std::vector<std::string> leading_comments = {},
+                 std::vector<std::pair<std::string, std::any>> attrs = {})
+      : ScopeStmt(std::move(name_hint), std::move(body), std::move(span), std::move(leading_comments),
+                  std::move(attrs)) {}
+
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::GraphScopeStmt; }
+  [[nodiscard]] ScopeKind GetScopeKind() const override { return ScopeKind::Graph; }
+  [[nodiscard]] std::string TypeName() const override { return "GraphScopeStmt"; }
+
+  static constexpr auto GetFieldDescriptors() { return ScopeStmt::GetFieldDescriptors(); }
+};
+
+using GraphScopeStmtPtr = std::shared_ptr<const GraphScopeStmt>;
 
 /**
  * @brief Hierarchy scope: distributed-hierarchy region.

@@ -16,6 +16,7 @@ from pypto import DataType, ir, passes
 
 TENSOR_ONLY_PASSES = [
     "OutlineHierarchyScopes",
+    "OutlineGraphScopes",
     "OutlineIncoreScopes",
     "OutlineClusterScopes",
     "ConvertTensorToTileOps",

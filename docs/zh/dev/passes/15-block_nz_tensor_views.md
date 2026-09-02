@@ -1,0 +1,229 @@
+# BlockNzTensorViews Pass
+
+## 概述
+
+`BlockNzTensorViews` 把*逻辑* `pl.NZ` 张量改写成 pto-isa `Layout::NZ`
+GlobalTensor 所要求的*分块*形式，并同步改写读取它的 `tile.load`。
+
+`pl.Tensor[[..., R, C], dtype, pl.NZ]` 标注是一条**关于 GM 中现有字节的断言**：
+这些字节已经按 PTO 原生 NZ 分形序存放。它**不是**"请帮我转换"的请求。DSL 层保持
+逻辑 shape 和逻辑切片不变，本 pass 负责补上后端需要的物理描述。
+
+收益是 matmul B 操作数的 `TLOAD` 从 ND→NZ 变成 NZ→NZ，去掉了每次权重载入时的
+在线分形转换。
+
+## 分块形式
+
+记 `c0` 为一条 32 字节 C0 线所含的元素个数（`256 / dtype 位宽`，`INT8` 时为 32），分形行数为 16。pto-isa 对 NZ
+缓冲的描述为（`pto/common/pto_tile.hpp` 中 `TileShape2D` / `BaseShape2D` 的
+`Layout::NZ` 特化）：
+
+```text
+shape   = [..., C/c0, R/16, 16, c0]
+strides = [..., C*R,  R*c0, 16*c0, c0, 1]
+```
+
+从内往外读：`c0` 个连续元素构成一条 32 字节 C0 线，16 行构成一个 `16 x c0` 分形
+（512 字节），`R/16` 个分形沿行轴排列，**最外层**才在列块之间步进。即"列块在外、
+行分形在内"——与 tile 侧的 `blayout=col_major, slayout=row_major, fractal=512`
+描述的是同一个字节序。
+
+### 为什么 NZ 不需要自己的 stride 规则
+
+对分块 shape 求普通行主序 stride，结果*就是* pto-isa 的 NZ stride：
+
+| 槽位 | 行主序推导 | `BaseShape2D<T, R, C, NZ>` |
+| ---- | ---------- | -------------------------- |
+| `c0` | `1` | `1` |
+| `16` | `c0` | `C0Size` |
+| `R/16` | `16*c0` | `FRACTAL_NZ_ROW*C0Size` |
+| `C/c0` | `(R/16)*16*c0 = R*c0` | `rows*C0Size` |
+| 前导维 | `(C/c0)*R*c0 = C*R` | `cols*rows` |
+
+因此一旦 shape 被分块，NZ 就是行主序家族的普通成员，
+`BuildLogicalStridesFromLayout` 通过与 ND 相同的 `BuildRowMajorStrides` 路径处理
+它。stride 由 `MaterializeTensorStrides`（pass 32）稍后填充；本 pass 只改写 shape。
+
+这修正了 RFC #1300 中"NZ 没有 logical-stride 表示"的结论——该结论对逻辑 2-D shape
+成立，对分块后的 rank-(r+2) shape 不成立。
+
+## 在流水线中的位置
+
+```text
+... -> LowerCompositeOps -> FlattenTileNdTo2D -> BlockNzTensorViews -> LegalizeTileCast -> ...
+```
+
+三条约束确定了这个位置：
+
+- **在 `ConvertTensorToTileOps` / `LowerCompositeOps` 之后**——阶段 2 要改写的
+  `tile.load` 必须已经存在。
+- **在 `FlattenTileNdTo2D` 之后**——目标 tile 必须已经是逻辑 2-D 操作数。对仍是
+  ND 秩的 tile 做分块，会产生类型标注与参数秩无法同时打印的 `tile.load`，破坏
+  printer 往返。
+- **在 `MaterializeTensorStrides` 之前**——该 pass 断言每个 NZ view 已分块，然后
+  填充其行主序 stride。
+
+`FlattenTileNdTo2D` 对 NZ 源跳过它的 ND2NZ 源窗口塌缩（该塌缩存在是因为 ND→NZ
+需要 2-D GlobalTensor，而 NZ→NZ 不需要），所以本 pass 运行时逻辑窗口仍然完整。
+
+## 行为
+
+**阶段 1 —— 对每个 NZ `TensorType` 的 shape 分块。**
+
+```text
+# before
+w: pl.Tensor[[32, 2048, 4096], pl.INT8, pl.NZ]
+
+# after  (c0 = 32:  4096/32 = 128,  2048/16 = 128)
+w: pl.Tensor[[32, 128, 128, 16, 32], pl.INT8, pl.NZ]
+```
+
+**阶段 2 —— 改写消费它的 `tile.load`。**
+
+```text
+# before （从 [E, N, K] 权重中切出 w[1:2, 256:512, 512:1024]）
+wt: pl.Tile[[256, 512], pl.INT8, pl.Mem.Mat] =
+    pl.tile.load(w, [1, 256, 512], [1, 256, 512], target_memory=pl.Mem.Mat)
+
+# after  （offsets -> [.., k0/c0, n0/16, 0, 0]；sizes -> 分块形式）
+wt: pl.Tile[[256, 512], pl.INT8, pl.Mem.Mat] =
+    pl.tile.load(w, [1, 16, 16, 0, 0], [1, 16, 16, 16, 32], target_memory=pl.Mem.Mat)
+```
+
+### 符号形式的末尾 offset
+
+末尾 offset 不必是常量，但它的对齐必须被**证明**，绝不允许假设。offset 到达本 pass
+时只是它被绑定到的那个 SSA 名字，产生它的算术在别处，因此
+`IsProvableMultipleOf`（`tensor_view_semantics.h`）会沿着本 pass 一次只读扫描收集到的
+两类绑定往回走：
+
+| 绑定形式 | 是轴因子的倍数 | 非负 |
+| -------- | -------------- | ---- |
+| `AssignStmt`（`n0 = nb * 256`） | 乘积中的某个因子是倍数 | 两个因子都非负 |
+| `ForStmt`（`for k0 in pl.pipeline(512, 4096, 512)`） | `start` 与 `step` 同时是倍数 | `start` 与 `step` 同时非负 |
+| `tile.get_block_idx` / `tile.get_block_num` | —— | lane 编号不可能为负 |
+| `ConstInt` | 该值本身是倍数 | 该值 `>= 0` |
+
+在此基础上，和与乘积可以组合；差能证明整除性但无法证明符号，因此被拒绝。**两列必须
+同时成立**——见[为什么符号也要证明](#为什么符号也要证明)。因此催生该特性的
+grouped-matmul 权重路径现在可以编译：
+
+```python
+for nb in pl.spmd(N // N_TILE):
+    n0 = nb * N_TILE                     # -> 行 fractal offset  n0 // 16
+    for k0 in pl.pipeline(K_TILE, K, K_TILE, stage=2):
+        wt = w[n0 : n0 + N_TILE, k0 : k0 + K_TILE]   # -> c0 block offset  k0 // c0
+```
+
+凡是走不通证明的表达式一律拒绝，并在诊断中列出可证明的形式。这种拒绝正是设计本身：
+NZ 张量一旦按猜出来的坐标寻址，就会读到错误的 fractal，而下游不会有任何地方发现。
+
+#### 为什么是整体相除，而不是代数重组
+
+被除的只是 offset 的**求值结果**（`FloorDiv(offset, divisor)`）。那个看起来很诱人的
+改写——把 `n0 = nb * 256` 变成 `nb * 16`，从而省掉运行期的除法——是不成立的：IR 的
+算术在其声明位宽上回绕，而重组后的形式不会在同一处回绕：
+
+```text
+x : INT32 = 1 << 24
+(x * 256) / 16   ==  0            # x * 256 在 i32 中回绕为 0
+x * (256 / 16)   ==  268435456    # 重组后：不回绕，读到错误的 fractal
+```
+
+位宽提升并不是元凶，按原位宽重建同样救不回来：对 `a * b = q * 2^W + r`，原表达式得到
+`r / d`，而任何重组都得到 `r / d + q * 2^(W - log2 d)`。把 offset 整体相除，才能完整
+保留它自己的 dtype 与溢出行为。
+
+证明本身能够在回绕下继续成立，是因为这里的除数一定是 2 的幂、因而整除 `2^W`：一个
+`d` 的倍数对 `2^W` 取模之后仍然是 `d` 的倍数。这一前提由 `INTERNAL_CHECK` 固定下来。
+
+另有一处限制是刻意保留的：`IterArg` 永远不会被解析——它的值每次迭代都在变，无论是初值
+还是为它记录的任何绑定，都无法描述某一次使用真正看到的值。
+
+#### 为什么符号也要证明
+
+只证明整除性并不足以保证坐标安全。`n0 = -16` 是 16 的整数倍，而 `FloorDiv(n0, 16)`
+等于 `-1`；codegen 随后会把 `pto.partition_view` 上的负 offset **钳位**到 0 而不是报错，
+于是这次 load 会读到 fractal 0 并返回静默错误的数据——正是 [#2543] 为行索引修掉的那种
+形态。
+
+常量路径本来就会拒绝负的字面量，所以如果符号形式只证明整除性，就会出现同一个值写成
+字面量被拦下、绑定成名字后却被放行的矛盾。`IsProvableNonNegative` 补上了这个缺口。
+
+[#2543]: https://github.com/hw-native-sys/pypto/pull/2543
+
+目标 `TileType` **原样保留**：GM 分区变成 rank-(r+2)，而 tile 保持逻辑 2-D 操作数。
+因此该 load 使用显式类型的 `Call` 构造函数重建，而不是 `OpRegistry::Create`——后者
+会从分块后的 shapes 参数重新推导出 rank-(r+2) 的 tile。
+
+本 pass 之后不再有逻辑 shape 的 NZ `TensorType` 存活，因此下游（包括 codegen）
+都不需要知道 NZ 的特殊性——codegen 会分别从 `TensorType::shape_` 推导
+`pto.make_tensor_view`、其 `!pto.tensor_view<>` 类型以及 `pto.partition_view` 的秩，
+三者必须一致。
+
+## 生成代码
+
+```mlir
+%w_view = pto.make_tensor_view %arg1,
+    shape = [%c16, %c16, %c16, %c32], strides = [%c8192, %c512, %c32, %c1]
+    {layout = #pto.layout<nz>} : !pto.tensor_view<?x?x?x?xi8>
+%w_pview = pto.partition_view %w_view,
+    offsets = [%c0, %c0, %c0, %c0], sizes = [%c16, %c16, %c16, %c32]
+    : !pto.tensor_view<?x?x?x?xi8> -> !pto.partition_tensor_view<16x16x16x32xi8>
+pto.tload ins(%w_pview : !pto.partition_tensor_view<16x16x16x32xi8>)
+          outs(%wt : !pto.tile_buf<loc=mat, dtype=i8, rows=256, cols=512,
+                                   blayout=col_major, slayout=row_major, fractal=512, ...>)
+```
+
+## 范围与拒绝项
+
+里程碑 1 的范围是刻意收窄的。范围之外一律报错并指明修复方式——NZ 张量绝不能被
+静默地错误寻址。
+
+| 条件 | 结果 |
+| ---- | ---- |
+| `shape[-2] % 16 != 0` | 拒绝——不完整的分形没有表示 |
+| `shape[-1] % c0 != 0` | 拒绝——不完整的 C0 线没有表示 |
+| `shape[-2]` / `shape[-1]` 为动态维 | 拒绝——无法静态证明整除 |
+| 切片偏移未对齐到分形边界 | 拒绝——没有分块表示 |
+| 末尾切片偏移为符号形式且对齐与符号均可证明 | 映射——见[符号形式的末尾 offset](#符号形式的末尾-offset) |
+| 末尾切片偏移为符号形式但对齐无法证明 | 拒绝——绝不基于「大概是对齐的」去做除法 |
+| 末尾切片偏移为符号形式但符号无法证明 | 拒绝——负 offset 在 partition view 上会被钳位而不是报错 |
+| rank < 2 | 拒绝 |
+| `target_memory != Mat`（或缺省） | 拒绝——NZ→NZ 是 cube 操作数路径 |
+| `tile.load` 之外的消费者 | 拒绝——此处 NZ 是只读的 |
+| 显式 stride 或部分 `valid_shape` | 拒绝 |
+| 分布式张量 | 拒绝——`remote_load` 没有 NZ 分块 |
+| 对 NZ 做 `tensor.view` / `tensor.reinterpret_view` | 在算子构造期拒绝 |
+
+sub-byte dtype（INT4 / UINT4 / FP4 / HF4 / BOOL）被拒绝，这是 **PyPTO 里程碑 1 的
+范围限制，不是硬件限制**——pto-isa 的 NZ 机制确实处理 FP4（`tload_common.hpp` 中有
+显式的 `caps::IsFP4` 分支，并断言 `staticShape[4] == C0_SIZE_BYTE / sizeof(DType)`）。
+`c0` 已按位宽推导，因此等 packed-nibble 寻址端到端验证完成后，算术部分即可直接复用。
+
+对齐类诊断是面向用户的（`CHECK_SPAN` → `ValueError`），位于 `BlockNzShape`。
+到了下游，*未分块*的 NZ view 属于 pass 顺序不变量（`INTERNAL_CHECK_SPAN`），由
+`MaterializeTensorStrides` 中的 `CheckNzViewIsBlocked` 和 `TensorViewCanonical`
+验证器强制执行。
+
+## 幂等性
+
+分块**不是**幂等的——对已分块的 shape 再分块是错的——而结构性的
+`IsBlockedNzShape` 判断无法区分"已分块的 shape"和"恰好以 `[16, c0]` 结尾的逻辑
+shape"。因此本 pass 会在每个改写过的函数上打 `nz_tensor_views_blocked` 标记，
+再次进入时直接返回。
+
+## 下游依赖
+
+PTOAS 通过结构推断 `make_tensor_view` 的 layout。分块 NZ 与 ND 在结构上完全相同
+（都是行主序），因此 PTOAS 目前会推断出 `nd` 并覆盖显式的 `nz` 标注，报
+`layout mismatch: user-specified layout=nz but inferred=nd`。这个失败是安全的而非
+静默的：在分块 shape 下，pto-isa 的 ND→NZ `TLOAD` 路径要求
+`staticShape[0..2] == 1`，而分块维度违反了它，所以生成的 C++ 会在 `static_assert`
+上编译失败，而不是算出错误结果。端到端可用需要等 PTOAS 信任显式标注。
+
+## 相关文档
+
+- [14-flatten_tile_nd_to_2d.md](14-flatten_tile_nd_to_2d.md) —— 对 NZ 源跳过 ND2NZ 窗口塌缩
+- [32-materialize_tensor_strides.md](32-materialize_tensor_strides.md) —— 填充分块 NZ stride
+- [../ir/02-types.md](../ir/02-types.md) —— `TensorLayout` 与 `TensorView`

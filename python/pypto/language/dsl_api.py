@@ -692,6 +692,68 @@ def cluster(*, name_hint: str = "") -> ClusterContext:
     return ClusterContext(name_hint=name_hint)
 
 
+class GraphContext:
+    """Context manager for a Graph scope.
+
+    Returned by ``pl.graph(name)``; the parser recognizes the pattern and builds
+    a ``GraphScopeStmt``.
+    """
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def __enter__(self) -> None:
+        """Enter the Graph scope context."""
+        pass
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Exit the Graph scope context."""
+        pass
+
+
+def graph(name: str) -> GraphContext:
+    """Mark a repeated region of orchestration as one recordable graph.
+
+    Under ``runtime="host_build_graph"`` the runtime records the region's task
+    topology the first time it executes and replays the recording on every later
+    execution. A decoder stack of N structurally identical layers therefore costs
+    one graph build instead of N, and occupies N outer task slots instead of
+    N x (tasks per layer).
+
+    ``pl.graph`` is the in-place form of ``@pl.jit.graph``: ``OutlineGraphScopes``
+    extracts the region into a Graph function named after ``name``, so the two
+    surfaces compile to the same thing. Reach for the scope form when the region
+    is a slice of a larger orchestration body that you would rather not split into
+    a separate function; reach for the decorator when the layer is already its own
+    function.
+
+    The recorded topology is fixed after the first execution: only tensor
+    addresses and boundary scalars are refreshed per replay. ``LegalizeGraphBoundary``
+    proves that statically and rejects at compile time whatever it cannot prove —
+    it never silently degrades to a wrong answer.
+
+    Args:
+        name: Region name. Must be a valid Python identifier; it becomes the
+            outlined function's name and hence the runtime's graph key, so keep
+            it stable across edits.
+
+    Returns:
+        Context manager for the Graph scope.
+
+    Raises:
+        ParserSyntaxError: if written in a device-kernel body (InCore / AIC /
+            AIV / Group / Spmd), nested inside ``pl.at`` / ``pl.cluster`` /
+            ``pl.spmd``, or nested inside another ``pl.graph``.
+
+    Examples:
+        >>> for layer in pl.range(40):
+        ...     with pl.graph("decoder_layer"):
+        ...         h = attention(x, wq, h)
+        ...         x = mlp(h, w1, x)
+    """
+    return GraphContext(name)
+
+
 class SpmdContext:
     """Context manager / loop iterator for SPMD dispatch scope.
 
@@ -1354,11 +1416,13 @@ __all__ = [
     "static_assert",
     "at",
     "cluster",
+    "graph",
     "spmd",
     "split_aiv",
     "RangeIterator",
     "WhileIterator",
     "ClusterContext",
+    "GraphContext",
     "SpmdContext",
     "SplitAivContext",
     "AtContext",

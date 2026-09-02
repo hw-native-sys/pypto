@@ -70,6 +70,37 @@ std::vector<CallWriteTarget> CallWriteTargets(const CallPtr& call) {
 namespace {
 
 /**
+ * @brief Whether a statement is, or contains, a scope of one particular kind.
+ *
+ * Answers the one question that decides whether the tail-use set of a block
+ * position is worth computing at all (see `ScopeOutliner::VisitStmt_` for
+ * `SeqStmts`). Stops at the first match — presence is all the caller needs.
+ */
+class ScopeKindPresenceChecker : public IRVisitor {
+ public:
+  explicit ScopeKindPresenceChecker(ScopeKind kind) : kind_(kind) {}
+
+  [[nodiscard]] bool Found() const { return found_; }
+
+  void VisitStmt(const StmtPtr& stmt) override {
+    if (found_ || !stmt) return;
+    // ``As<ScopeStmt>`` matches every scope kind: ``ScopeStmt`` is one of the
+    // base types whose ``KindTrait`` lists a ``kinds[]`` array, so this is not
+    // the exact-kind match ``.claude/rules/ir-kind-traits.md`` warns about.
+    auto scope = As<ScopeStmt>(stmt);
+    if (scope && scope->GetScopeKind() == kind_) {
+      found_ = true;
+      return;
+    }
+    IRVisitor::VisitStmt(stmt);
+  }
+
+ private:
+  ScopeKind kind_;
+  bool found_ = false;
+};
+
+/**
  * @brief Visitor to collect target tensors of tile.store calls (by pointer identity).
  *
  * These tensors are modified via side-effect inside scopes but are not
@@ -360,6 +391,21 @@ class ParamReadCollector : public IRVisitor {
     for (const auto& dep : op->deps_) {
       if (dep) VisitExpr(dep);
     }
+    // ``core_num_`` and ``predicate_`` are first-class SSA-bearing operands, not
+    // metadata, and this override replaces the base walk rather than extending
+    // it — so anything reachable only through them is invisible here unless it
+    // is visited explicitly. Both are pure reads: a block count sizes the launch
+    // and a predicate decides whether it runs; neither can be a destination.
+    //
+    // A predicate is `` (t[i] > 0) ``, so it genuinely names a *tensor*. Dropping
+    // it costs a real direction: a capture that a callee declares ``Out`` is
+    // skipped on the argument path above, so the predicate is its only read, and
+    // without it the parameter comes out ``Out`` instead of ``InOut`` — the
+    // runtime then has no input edge for the value the predicate must evaluate.
+    // The argument skip is what exposes this, so the two are only ever wrong
+    // together.
+    if (op->core_num_.has_value() && *op->core_num_) VisitExpr(*op->core_num_);
+    if (op->predicate_.has_value() && *op->predicate_) VisitExpr(*op->predicate_);
     for (const auto& [key, value] : op->attrs_) {
       if (!ShouldVisitScopeAttr(key)) continue;
       ForEachAttrExpr(value, [this](const ExprPtr& e) { VisitExpr(e); });
@@ -797,6 +843,28 @@ StmtPtr ScopeOutliner::VisitStmt_(const SeqStmtsPtr& op) {
     }
   }
 
+  // Which children are, or contain, a scope of the kind this outliner extracts.
+  //
+  // The tail-use set below is read by exactly two paths, and both are reached
+  // only from a target-kind scope: the ``used_after`` merge in this function,
+  // and ``required_outputs_`` in ``VisitScopeKind``. Propagating it into a child
+  // with no such scope anywhere inside therefore cannot change the result — the
+  // set is written, never read, and restored on the way out.
+  //
+  // That matters because the scan is a *subtree walk per following statement*,
+  // so running it at every position makes a block of M statements quadratic in
+  // M, against the O(N log N) bound in `.claude/rules/pass-complexity.md`. One
+  // linear presence walk reduces it to the handful of positions that can
+  // actually consume the answer, which for the shape that occurs in practice —
+  // a few scopes among many plain statements — is linear overall. A block whose
+  // every child holds a target scope costs exactly what it did before.
+  std::vector<bool> needs_tail_uses(op->stmts_.size(), false);
+  for (size_t i = 0; i < op->stmts_.size(); ++i) {
+    ScopeKindPresenceChecker presence(target_scope_kind_);
+    presence.VisitStmt(op->stmts_[i]);
+    needs_tail_uses[i] = presence.Found();
+  }
+
   for (size_t i = 0; i < op->stmts_.size(); ++i) {
     if (dropped_indices.count(i)) {
       // Skip the ``with pl.at(...) as tid:`` placeholder — OutlineScope
@@ -806,16 +874,19 @@ StmtPtr ScopeOutliner::VisitStmt_(const SeqStmtsPtr& op) {
       continue;
     }
     auto scope = std::dynamic_pointer_cast<const ScopeStmt>(op->stmts_[i]);
-    // Always compute what's used in the tail of this SeqStmts; this set is
-    // the "used_after" for a target scope at position i, and doubles as the
-    // required_outputs_ propagated into a non-target statement so any
-    // target-kind scope nested inside knows what needs to leak out.
-    var_collectors::VarDefUseCollector after_ref_collector;
-    for (size_t j = i + 1; j < op->stmts_.size(); ++j) {
-      if (dropped_indices.count(j)) continue;
-      after_ref_collector.VisitStmt(op->stmts_[j]);
+    // What's used in the tail of this SeqStmts: the "used_after" for a target
+    // scope at position i, and the required_outputs_ propagated into a
+    // non-target statement so any target-kind scope nested inside knows what
+    // needs to leak out. Empty when nothing at this position can read it.
+    std::unordered_set<const Var*> after_refs;
+    if (needs_tail_uses[i]) {
+      var_collectors::VarDefUseCollector after_ref_collector;
+      for (size_t j = i + 1; j < op->stmts_.size(); ++j) {
+        if (dropped_indices.count(j)) continue;
+        after_ref_collector.VisitStmt(op->stmts_[j]);
+      }
+      after_refs = after_ref_collector.GetAllVarRefs();
     }
-    auto after_refs = after_ref_collector.GetAllVarRefs();
 
     if (scope && scope->GetScopeKind() == target_scope_kind_) {
       // Also include variables required by parent scope
@@ -897,6 +968,8 @@ StmtPtr ScopeOutliner::VisitScopeKind(const std::shared_ptr<const ScopeT>& op) {
 StmtPtr ScopeOutliner::VisitStmt_(const InCoreScopeStmtPtr& op) { return VisitScopeKind(op); }
 
 StmtPtr ScopeOutliner::VisitStmt_(const ClusterScopeStmtPtr& op) { return VisitScopeKind(op); }
+
+StmtPtr ScopeOutliner::VisitStmt_(const GraphScopeStmtPtr& op) { return VisitScopeKind(op); }
 
 StmtPtr ScopeOutliner::VisitStmt_(const HierarchyScopeStmtPtr& op) { return VisitScopeKind(op); }
 

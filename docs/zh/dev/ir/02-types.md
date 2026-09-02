@@ -143,7 +143,7 @@ Packed canonical 公式（`BuildLogicalStridesFromLayout`，见
 | ------ | ---------------- |
 | `ND` | `stride[n-1] = 1; stride[k] = stride[k+1] * shape[k+1]` |
 | `DN`（`n ≥ 2`） | `stride[n-2] = 1`；`stride[n-1] = shape[n-2]`；`stride[n-3] = shape[n-2] * shape[n-1]`；外层按行主序 |
-| `NZ` | 对*分块*后的 rank-(r+2) shape `[..., C/c0, R/16, 16, c0]` 求行主序 —— 见 [BlockNzTensorViews](../passes/14-block_nz_tensor_views.md) |
+| `NZ` | 对*分块*后的 rank-(r+2) shape `[..., C/c0, R/16, 16, c0]` 求行主序 —— 见 [BlockNzTensorViews](../passes/15-block_nz_tensor_views.md) |
 
 **同一 canonical TensorView 的两种写法**：
 
@@ -151,7 +151,7 @@ Packed canonical 公式（`BuildLogicalStridesFromLayout`，见
   stride 为空，消费者按对应 layout 的 packed canonical 解释。
 - **显式** —— 每个维度的 stride 都已写出。
 
-[`MaterializeTensorStrides`](../passes/31-materialize_tensor_strides.md) Pass
+[`MaterializeTensorStrides`](../passes/32-materialize_tensor_strides.md) Pass
 将所有隐式形态展开为显式 packed canonical，让 codegen 看到单一契约。
 `TensorViewCanonical` IRProperty + verifier 强制此不变量：
 

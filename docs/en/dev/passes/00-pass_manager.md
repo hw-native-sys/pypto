@@ -44,6 +44,7 @@ Framework for organizing and executing IR transformation passes on Programs with
 | `BreakContinueValid` | Break/continue only in sequential/while loops |
 | `UseAfterDef` | All variable uses are dominated by a definition |
 | `HierarchyOutlined` | Hierarchy scopes outlined into level/role functions |
+| `GraphOutlined` | Graph scopes outlined into `FunctionType::Graph` functions |
 | `StructuredCtrlFlow` | No BreakStmt/ContinueStmt — only structured control flow |
 | `VectorKernelSplit` | AIV functions with a split mode have tpop shapes and store offsets adjusted |
 | `OutParamNotShadowed` | Out/InOut params are not reassigned with tensor-creating ops |
@@ -113,6 +114,7 @@ struct PassProperties {
 | NormalizeStmtStructure | — | NormalizedStmtStructure | — |
 | FlattenCallExpr | SSAForm, NormalizedStmtStructure | SSAForm, NoNestedCalls, NormalizedStmtStructure | — |
 | OutlineHierarchyScopes | SSAForm | SSAForm, HierarchyOutlined, OrchestrationReferencesResolved | — |
+| OutlineGraphScopes | SSAForm | SSAForm, GraphOutlined | — |
 | OutlineIncoreScopes | SSAForm | SSAForm, SplitIncoreOrch, AivSplitValid | — |
 | OutlineClusterScopes | SSAForm | SSAForm, ClusterOutlined | — |
 | ConvertTensorToTileOps | SSAForm, SplitIncoreOrch, NormalizedStmtStructure | SSAForm, IncoreTileOps, NormalizedStmtStructure, AivSplitValid | AivSplitValid |
@@ -411,7 +413,7 @@ The members of that set — and of `GetStructuralProperties()` and `GetDefaultVe
 | pipeline input | TypeChecked, BreakContinueValid, NoRedundantBlocks, InOutUseValid, ManualDepsOnSubmitOnly, AtomicAddDtypeValid |
 | ConvertToSSA | SSAForm |
 | OutlineIncoreScopes | AivSplitValid |
-| ConvertTensorToTileOps | AivSplitValid *(re-verified — the pass invalidates it, see [10](10-convert_tensor_to_tile_ops.md))* |
+| ConvertTensorToTileOps | AivSplitValid *(re-verified — the pass invalidates it, see [11](11-convert_tensor_to_tile_ops.md))* |
 | InferTileMemorySpace | AivSplitValid *(re-verified)*, TileMemoryInferred, AccToGmStoreValid, AccCompactValid |
 | ExpandMixedKernel | MixedKernelExpanded, HardSyncallOccupancyValid, AccCompactValid *(re-verified)* |
 | NormalizeReturnOrder | ReturnParamsExplicit |
@@ -477,46 +479,46 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 
 The PTO-oriented tile stage of `Default` is:
 
-1. [`LowerCompositeOps`](12-lower_composite_ops.md)
-2. [`FlattenTileNdTo2D`](13-flatten_tile_nd_to_2d.md)
-3. [`LegalizeTileCast`](15-legalize_tile_cast.md) (expands `tile.cast` pairs the target ISA cannot emit as one `pto.tcvt`)
-4. [`AutoTileMatmulL0`](16-auto_tile_matmul_l0.md)
-5. [`CanonicalizeTileSlice`](17-canonicalize_tile_slice.md)
+1. [`LowerCompositeOps`](13-lower_composite_ops.md)
+2. [`FlattenTileNdTo2D`](14-flatten_tile_nd_to_2d.md)
+3. [`LegalizeTileCast`](16-legalize_tile_cast.md) (expands `tile.cast` pairs the target ISA cannot emit as one `pto.tcvt`)
+4. [`AutoTileMatmulL0`](17-auto_tile_matmul_l0.md)
+5. [`CanonicalizeTileSlice`](18-canonicalize_tile_slice.md)
 6. `InferTileMemorySpace`
-7. [`InsertMxScaleAddr`](19-insert_mx_scale_addr.md) (Ascend950 MX path; inserts internal scale-address bindings after memory spaces are resolved)
-8. [`ResolveBackendOpLayouts`](20-resolve_backend_op_layouts.md) (self-normalizes statement structure internally)
-9. [`LowerAutoVectorSplit`](21-lower_auto_vector_split.md) (live auto-split lowering path; converts AUTO `pl.split` mixed InCore functions into the explicit `split_aiv` form before ExpandMixedKernel)
+7. [`InsertMxScaleAddr`](20-insert_mx_scale_addr.md) (Ascend950 MX path; inserts internal scale-address bindings after memory spaces are resolved)
+8. [`ResolveBackendOpLayouts`](21-resolve_backend_op_layouts.md) (self-normalizes statement structure internally)
+9. [`LowerAutoVectorSplit`](22-lower_auto_vector_split.md) (live auto-split lowering path; converts AUTO `pl.split` mixed InCore functions into the explicit `split_aiv` form before ExpandMixedKernel)
 10. `ExpandMixedKernel`
-11. [`InjectGMPipeBuffer`](23-inject_gm_pipe_buffer.md)
-12. [`SplitVectorKernel`](24-split_vector_kernel.md) (only stamps attrs for split_aiv functions + handles the no-split dual-AIV path)
-13. [`StampTfreeSplit`](25-stamp_tfree_split.md) (copies each cross-core tpop's split/pipe-id onto its matching tfree op)
+11. [`InjectGMPipeBuffer`](24-inject_gm_pipe_buffer.md)
+12. [`SplitVectorKernel`](25-split_vector_kernel.md) (only stamps attrs for split_aiv functions + handles the no-split dual-AIV path)
+13. [`StampTfreeSplit`](26-stamp_tfree_split.md) (copies each cross-core tpop's split/pipe-id onto its matching tfree op)
 14. `NormalizeReturnOrder`
-15. [`SkewCrossCorePipeline`](27-skew_cross_core_pipeline.md) (cross-core cube/vector software-pipeline skew; runs immediately before LowerPipelineLoops)
-16. [`LowerPipelineToSlots`](28-lower_pipeline_to_slots.md) (rotates an eligible `pl.pipeline` body through the slots of one allocation instead of replicating it; self-gated on `memory_planner=PTOAS`, and every loop it declines is left for `LowerPipelineLoops`)
-17. [`LowerPipelineLoops`](29-lower_pipeline_loops.md)
-18. [`CanonicalizeIOOrder`](30-canonicalize_io_order.md)
-19. [`MaterializeTensorStrides`](31-materialize_tensor_strides.md) — wired into the default pipeline starting from RFC #1300 P6
+15. [`SkewCrossCorePipeline`](28-skew_cross_core_pipeline.md) (cross-core cube/vector software-pipeline skew; runs immediately before LowerPipelineLoops)
+16. [`LowerPipelineToSlots`](29-lower_pipeline_to_slots.md) (rotates an eligible `pl.pipeline` body through the slots of one allocation instead of replicating it; self-gated on `memory_planner=PTOAS`, and every loop it declines is left for `LowerPipelineLoops`)
+17. [`LowerPipelineLoops`](30-lower_pipeline_loops.md)
+18. [`CanonicalizeIOOrder`](31-canonicalize_io_order.md)
+19. [`MaterializeTensorStrides`](32-materialize_tensor_strides.md) — wired into the default pipeline starting from RFC #1300 P6
 20. `InitMemRef`
-21. [`MaterializeSemanticAliases`](33-materialize_semantic_aliases.md) (semantics-required must-alias: loop-carry / in-place; always runs)
+21. [`MaterializeSemanticAliases`](34-materialize_semantic_aliases.md) (semantics-required must-alias: loop-carry / in-place; always runs)
 22. `MemoryReuse`
 23. `AllocateMemoryAddr`
-24. [`FoldNoOpReshape`](36-fold_no_op_reshape.md)
-25. [`FuseCreateAssembleToSlice`](37-fuse_create_assemble_to_slice.md)
-26. [`DeriveCallDirections`](38-derive_call_directions.md)
-27. [`AutoDeriveTaskDependencies`](39-auto_derive_task_dependencies.md) (compiler deps for runtime scopes; AUTO-scope analysis is opt-in)
-28. [`ExpandManualPhaseFence`](40-expand_manual_phase_fence.md) (manual-scope phase-fence TaskId dep compression)
-29. [`SynthesizeAllReduceSignals`](41-synthesize_allreduce_signals.md) (distributed: host allreduce optional signal -> explicit internal signal IR)
-30. [`MaterializeCommDomainScopes`](42-materialize_comm_domain_scopes.md) (distributed: WindowBuffer + CommDomainScopeStmt wrappers in each host_orch body; no-op for comm-less programs)
-31. [`LowerHostTensorCollectives`](43-lower_host_tensor_collectives.md) (host-level tensor collectives -> internal builtin chip dispatches)
-32. [`MaterializeDistTensorCtx`](44-materialize_dist_tensor_ctx.md) (explicit CommCtx params/args for DistributedTensor params)
+24. [`FoldNoOpReshape`](37-fold_no_op_reshape.md)
+25. [`FuseCreateAssembleToSlice`](38-fuse_create_assemble_to_slice.md)
+26. [`DeriveCallDirections`](39-derive_call_directions.md)
+27. [`AutoDeriveTaskDependencies`](40-auto_derive_task_dependencies.md) (compiler deps for runtime scopes; AUTO-scope analysis is opt-in)
+28. [`ExpandManualPhaseFence`](41-expand_manual_phase_fence.md) (manual-scope phase-fence TaskId dep compression)
+29. [`SynthesizeAllReduceSignals`](42-synthesize_allreduce_signals.md) (distributed: host allreduce optional signal -> explicit internal signal IR)
+30. [`MaterializeCommDomainScopes`](43-materialize_comm_domain_scopes.md) (distributed: WindowBuffer + CommDomainScopeStmt wrappers in each host_orch body; no-op for comm-less programs)
+31. [`LowerHostTensorCollectives`](44-lower_host_tensor_collectives.md) (host-level tensor collectives -> internal builtin chip dispatches)
+32. [`MaterializeDistTensorCtx`](45-materialize_dist_tensor_ctx.md) (explicit CommCtx params/args for DistributedTensor params)
 33. `Simplify`
-34. [`LegalizeGraphBoundary`](45-legalize_graph_boundary.md) (hoists values a Graph body derives from its boundary scalars to the call sites, and rejects the boundaries the host_build_graph runtime cannot record; no-op for programs with no Graph function)
-35. [`MaterializeRuntimeScopes`](46-materialize_runtime_scopes.md) (inserts AUTO RuntimeScopeStmt so orchestration codegen emits SIMPLER_SCOPE 1:1)
-36. [`ClassifyIterArgCarry`](47-classify_iter_arg_carry.md) (stamps each ForStmt iter_arg as trivial alias / rebind carry, and sizes manual-scope TaskId fence arrays)
-37. [`InsertCommFence`](48-insert_comm_fence.md) (inserts a whole-tensor system.cacheinvalid + GM system.fence between each publishing write and the pld.system.notify that releases it; runs after every statement-reordering pass so the inserted ops stay adjacent to their notify through codegen)
-38. [`MaterializeValidShapeSymbols`](49-materialize_valid_shape_symbols.md) (runs dead last; turns each device-kernel valid_shape symbol the kernel cannot bind into a leading Scalar[INDEX] param fed from the call site's actual valid extent)
+34. [`LegalizeGraphBoundary`](46-legalize_graph_boundary.md) (hoists values a Graph body derives from its boundary scalars to the call sites, and rejects the boundaries the host_build_graph runtime cannot record; no-op for programs with no Graph function)
+35. [`MaterializeRuntimeScopes`](47-materialize_runtime_scopes.md) (inserts AUTO RuntimeScopeStmt so orchestration codegen emits SIMPLER_SCOPE 1:1)
+36. [`ClassifyIterArgCarry`](48-classify_iter_arg_carry.md) (stamps each ForStmt iter_arg as trivial alias / rebind carry, and sizes manual-scope TaskId fence arrays)
+37. [`InsertCommFence`](49-insert_comm_fence.md) (inserts a whole-tensor system.cacheinvalid + GM system.fence between each publishing write and the pld.system.notify that releases it; runs after every statement-reordering pass so the inserted ops stay adjacent to their notify through codegen)
+38. [`MaterializeValidShapeSymbols`](50-materialize_valid_shape_symbols.md) (runs dead last; turns each device-kernel valid_shape symbol the kernel cannot bind into a leading Scalar[INDEX] param fed from the call site's actual valid extent)
 
-[`ResolveBackendOpLayouts`](20-resolve_backend_op_layouts.md) repairs
+[`ResolveBackendOpLayouts`](21-resolve_backend_op_layouts.md) repairs
 backend-constrained elementwise tile ops using registered layout metadata.
 For the current PTO row-major elementwise ops, it rewrites `[N, 1]` vector
 operands into `[1, N] row_major` `tile.reshape` operations at the
@@ -524,7 +526,7 @@ constrained use site, where row-major is inferred from the target shape.
 It then reshapes the result back to the original vector shape when
 needed.
 
-[`NormalizeReturnOrder`](26-normalize_return_order.md) reorders `ReturnStmt::value_` in InCore functions so that
+[`NormalizeReturnOrder`](27-normalize_return_order.md) reorders `ReturnStmt::value_` in InCore functions so that
 `return[i]` corresponds to the i-th `Out`/`InOut` parameter in declaration order,
 and updates `TupleGetItemExpr` indices at call sites accordingly. This lets
 orchestration codegen map tuple element indices to output parameters with a

@@ -462,7 +462,7 @@ inline ExprPtr ComputeAccumulatorSliceByteOffset(const std::vector<ExprPtr>& off
 ///    parent's. A row-narrowing window has NO correct standalone base address —
 ///    its box columns are strided by the parent's `rows`, its descriptor's by its
 ///    own — so it is left on the arithmetic it has always had rather than swapped
-///    for a differently wrong number. See docs/en/dev/passes/32-init_memref.md.
+///    for a differently wrong number. See docs/en/dev/passes/33-init_memref.md.
 ///  * a non-zero row origin, which is only reachable together with a narrowed row
 ///    extent and is unrepresentable for the same reason;
 ///  * a static column origin that is not a multiple of the 16-wide box. Such a

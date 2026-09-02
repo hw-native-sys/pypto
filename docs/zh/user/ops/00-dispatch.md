@@ -93,4 +93,4 @@ c = pl.add(a, 1.0)      # -> the scalar-operand form
 - [算子目录](01-catalog.md) —— 各命名空间里都有什么。
 - [内存与数据搬运](../language/03-memory.md) —— tile 专属搬运算子为何是那个形态。
 - [编程模型](../03-programming-model.md#quickstart一个程序里的三个层次) —— 同一个计算写在两个层级上。
-- [ConvertTensorToTileOps](../../dev/passes/10-convert_tensor_to_tile_ops.md) —— 把前者变成后者的 pass。
+- [ConvertTensorToTileOps](../../dev/passes/11-convert_tensor_to_tile_ops.md) —— 把前者变成后者的 pass。

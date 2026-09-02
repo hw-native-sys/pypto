@@ -161,6 +161,18 @@ inline const PassProperties kOutlineHierarchyScopesProperties{
     .produced = {IRProperty::SSAForm, IRProperty::HierarchyOutlined,
                  IRProperty::OrchestrationReferencesResolved}};
 
+// -- Graph outlining pass -----------------------------------------------------
+
+// InlineFunctionsEliminated is required, not incidental: the parser deliberately
+// permits `pl.graph` inside an Inline body (it is spliced into its orchestration
+// caller before this pass runs), and OutlineGraphScopes outlines only Opaque and
+// orchestration-like functions. Declaring the dependency makes a pipeline that
+// ordered the two passes the other way fail up front instead of producing a
+// GraphOutlined claim contradicted by a surviving GraphScopeStmt.
+inline const PassProperties kOutlineGraphScopesProperties{
+    .required = {IRProperty::SSAForm, IRProperty::InlineFunctionsEliminated},
+    .produced = {IRProperty::SSAForm, IRProperty::GraphOutlined}};
+
 // -- Tensor-to-tile conversion pass ------------------------------------------
 
 // Re-opens the AivSplitValid window. OutlineIncoreScopes establishes the property

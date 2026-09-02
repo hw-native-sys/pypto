@@ -168,6 +168,7 @@ class PassManager:
         )
         tensor_only_passes: tuple[PassFactory, ...] = (
             passes.outline_hierarchy_scopes,
+            passes.outline_graph_scopes,
             passes.outline_incore_scopes,
             passes.outline_cluster_scopes,
             passes.convert_tensor_to_tile_ops,

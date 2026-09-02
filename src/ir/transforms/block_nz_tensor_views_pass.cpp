@@ -42,7 +42,7 @@
  * ``GetTensorViewTypeString`` and the ``tile.load`` ``partition_view`` emitter
  * each read the rank independently and must agree.
  *
- * Ordering constraints (see docs/en/dev/passes/14-block_nz_tensor_views.md):
+ * Ordering constraints (see docs/en/dev/passes/15-block_nz_tensor_views.md):
  *   * after ConvertTensorToTileOps / LowerCompositeOps — the ``tile.load`` ops
  *     Phase 2 rewrites must already exist;
  *   * after FlattenTileNdTo2D — declared as a ``TileOps2D`` requirement. The

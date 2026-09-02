@@ -457,7 +457,7 @@ void CheckAccWindowContiguous(const CallPtr& call, const TileTypePtr& view, cons
       << "\n"
       // The window is not always spelled in the kernel, so the sentence above
       // must not be the only advice on offer — see
-      // `docs/en/dev/passes/17-canonicalize_tile_slice.md`.
+      // `docs/en/dev/passes/18-canonicalize_tile_slice.md`.
       << "Note: this window may not appear in the kernel source — a compiler pass can produce it. "
          "FlattenTileNdTo2D packs the pages of a batched accumulator along columns for exactly this "
          "reason, and rejects the batch shapes it cannot pack with its own diagnostic, so a "

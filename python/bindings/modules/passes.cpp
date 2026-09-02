@@ -67,6 +67,8 @@ void BindPass(nb::module_& m) {
       .value("UseAfterDef", IRProperty::UseAfterDef, "All variable uses are dominated by a definition")
       .value("HierarchyOutlined", IRProperty::HierarchyOutlined,
              "Hierarchy scopes outlined into level/role functions")
+      .value("GraphOutlined", IRProperty::GraphOutlined,
+             "Graph scopes outlined into FunctionType::Graph functions")
       .value("StructuredCtrlFlow", IRProperty::StructuredCtrlFlow,
              "No BreakStmt/ContinueStmt — only structured control flow")
       .value("VectorKernelSplit", IRProperty::VectorKernelSplit,
@@ -513,6 +515,8 @@ void BindPass(nb::module_& m) {
              "and standalone Spmd scopes into Spmd functions");
   passes.def("outline_hierarchy_scopes", &pass::OutlineHierarchyScopes,
              "Create a pass that outlines Hierarchy scopes into separate level/role functions");
+  passes.def("outline_graph_scopes", &pass::OutlineGraphScopes,
+             "Create a pass that outlines Graph scopes (pl.graph) into FunctionType::Graph functions");
   passes.def("convert_tensor_to_tile_ops", &pass::ConvertTensorToTileOps,
              "Create a pass that converts tensor ops to tile ops in InCore functions");
   passes.def("optimize_orch_tensors", &pass::OptimizeOrchTensors,

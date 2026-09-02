@@ -98,6 +98,7 @@ enum class ObjectKind {
   SplitAivScopeStmt,
   RuntimeScopeStmt,
   CommDomainScopeStmt,
+  GraphScopeStmt,
   SeqStmts,
   EvalStmt,
   BreakStmt,

@@ -230,6 +230,7 @@ class IRSerializer::Impl {
     SERIALIZE_FIELDS(SplitAivScopeStmt);
     SERIALIZE_FIELDS(RuntimeScopeStmt);
     SERIALIZE_FIELDS(CommDomainScopeStmt);
+    SERIALIZE_FIELDS(GraphScopeStmt);
     SERIALIZE_FIELDS(SeqStmts);
     SERIALIZE_FIELDS(EvalStmt);
     SERIALIZE_FIELDS(BreakStmt);

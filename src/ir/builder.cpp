@@ -322,6 +322,8 @@ void IRBuilder::BeginScope(ScopeKind scope_kind, const Span& span, std::optional
       << "Runtime scope requires manual flag at " << span.to_string();
   CHECK(scope_kind != ScopeKind::SplitAiv || split.has_value())
       << "SplitAiv scope requires a split mode at " << span.to_string();
+  CHECK(scope_kind != ScopeKind::Graph || !name_hint.empty())
+      << "Graph scope requires a name (pl.graph(\"<name>\")) at " << span.to_string();
   context_stack_.push_back(std::make_unique<ScopeContext>(scope_kind, span, level, role, split,
                                                           std::move(name_hint), std::move(core_num),
                                                           sync_start, manual, std::move(attrs)));
@@ -391,6 +393,15 @@ StmtPtr IRBuilder::EndScope(const Span& end_span) {
       CHECK(manual.has_value()) << "Runtime scope requires manual flag";
       scope_stmt = std::make_shared<const RuntimeScopeStmt>(
           *manual, std::move(name_hint), body, combined_span, std::vector<std::string>{}, std::move(attrs));
+      break;
+    case ScopeKind::Graph:
+      // The region name becomes the outlined Graph function's name, which
+      // codegen turns into the emitted symbol and hence the runtime's graph
+      // key — so unlike the other scope kinds it cannot be auto-generated.
+      CHECK(!name_hint.empty()) << "Graph scope requires a name (pl.graph(\"<name>\")) at "
+                                << combined_span.to_string();
+      scope_stmt = std::make_shared<const GraphScopeStmt>(std::move(name_hint), body, combined_span,
+                                                          std::vector<std::string>{}, std::move(attrs));
       break;
     case ScopeKind::CommDomain:
       // CommDomainScopeStmt is synthesized by MaterializeCommDomainScopes (no

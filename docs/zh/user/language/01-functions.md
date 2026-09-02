@@ -60,6 +60,24 @@ def entry(
 | `@pl.jit.opaque` | `Opaque` | 独立 IR 函数，可包含编排循环与 `pl.at` 作用域 |
 | `@pl.jit.graph` | `Graph` | 可录制的编排片段 —— `host_build_graph` runtime 在首次调用时录制其 task 拓扑、之后回放，因此 N 次调用只付一次建图代价。需要在 `RuntimeKind.HOST_BUILD_GRAPH` 下编译 |
 
+`@pl.jit.graph` 有一种作用域形式：`with pl.graph("name"):` 就地标记一个区域，而不必把它
+拆成独立函数。两者编译结果相同 —— 区域会被外提为一个以 `name` 命名的 Graph 函数 ——
+因此这只是书写习惯的选择。layer 本身已是独立函数时用装饰器；区域只是某个较大编排函数体
+中不愿拆出去的一段时用作用域：
+
+```python
+@pl.jit
+def decode(w: pl.Tensor, hidden: pl.InOut[pl.Tensor]):
+    for layer in pl.range(40):
+        with pl.graph("decoder_layer"):        # 录制一次，回放 39 次
+            ...
+    return hidden
+```
+
+名字是必填的，并且成为所录制图的身份，因此请保持稳定。Graph 区域不能嵌套在另一个 Graph
+区域内，也不能嵌套在 `pl.at` / `pl.cluster` / `pl.spmd` 内 —— 后者会变成单个设备 task，
+而 Graph 区域录制的是 task 的拓扑。三种情况都是编译期错误。
+
 子函数依赖（`.incore` / `.inline` / `.opaque` / `.graph`）从入口函数体自动发现 —— 按名字调用即可。这里的名字在入口函数自身的命名空间中解析，因此别名导入（`from kernels import matmul as mm`，或普通的 `mm = matmul` 重绑定）与其他绑定一样能被发现；生成的程序仍以其 `def` 名字命名该函数。`@pl.jit.host` 入口还会额外发现 `@pl.jit`（chip 编排）依赖，因此一个完整的分布式程序无需任何 `@pl.program` 类。
 
 下面这段只展示发现结构 —— kernel 体已省略，它用到的分布式类型见[分布式](../distributed/index.md)：

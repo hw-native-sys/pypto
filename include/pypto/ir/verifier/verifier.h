@@ -211,6 +211,12 @@ PropertyVerifierPtr CreateClusterOutlinedPropertyVerifier();
 PropertyVerifierPtr CreateHierarchyOutlinedPropertyVerifier();
 
 /**
+ * @brief Factory function for creating GraphOutlined property verifier
+ * @return Shared pointer to GraphOutlined PropertyVerifier
+ */
+PropertyVerifierPtr CreateGraphOutlinedPropertyVerifier();
+
+/**
  * @brief Factory function for creating HasMemRefs property verifier
  * @return Shared pointer to HasMemRefs PropertyVerifier
  */

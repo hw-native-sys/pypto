@@ -457,6 +457,27 @@ Pass OutlineHierarchyScopes();
 Pass OutlineClusterScopes();
 
 /**
+ * @brief Outline Graph scopes into separate `FunctionType::Graph` functions
+ *
+ * `with pl.graph("name"):` is sugar over `@pl.jit.graph`: this pass extracts the
+ * region into a Graph function named after the region and leaves a `Call` at the
+ * site, so from here on the two surfaces are indistinguishable. It runs
+ * immediately before `OutlineIncoreScopes`, which then outlines the InCore scopes
+ * inside the freshly minted Graph body exactly as it does for a hand-written
+ * `@pl.jit.graph` function.
+ *
+ * Requirements:
+ * - Input IR must be in SSA form (run ConvertToSSA first)
+ * - Only processes Opaque/Orchestration functions containing Graph scopes
+ * - Runs before OutlineIncoreScopes and OutlineClusterScopes
+ *
+ * The runtime contract on the resulting function (boundary shape, scalar
+ * pass-through, node budget) is not checked here — `LegalizeGraphBoundary` and
+ * the Graph verifier own it, and they see the outlined form either way.
+ */
+Pass OutlineGraphScopes();
+
+/**
  * @brief Convert tensor ops to tile ops in InCore functions
  *
  * Inserts tile.load at InCore function entry, converts tensor ops to tile ops

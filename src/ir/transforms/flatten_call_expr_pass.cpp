@@ -67,6 +67,7 @@ class FlattenCallExprMutator : public IRMutator {
   StmtPtr VisitStmt_(const SpmdScopeStmtPtr& op) override;
   StmtPtr VisitStmt_(const SplitAivScopeStmtPtr& op) override;
   StmtPtr VisitStmt_(const RuntimeScopeStmtPtr& op) override;
+  StmtPtr VisitStmt_(const GraphScopeStmtPtr& op) override;
 
   // Expression visitors
   ExprPtr VisitExpr_(const CallPtr& op) override;
@@ -424,6 +425,13 @@ StmtPtr FlattenCallExprMutator::VisitStmt_(const ClusterScopeStmtPtr& op) {
   if (new_body.get() == op->body_.get()) return op;
   return std::make_shared<const ClusterScopeStmt>(op->name_hint_, std::move(new_body), op->span_,
                                                   op->leading_comments_, op->attrs_);
+}
+
+StmtPtr FlattenCallExprMutator::VisitStmt_(const GraphScopeStmtPtr& op) {
+  auto new_body = FlattenScopeBody(op->body_);
+  if (new_body.get() == op->body_.get()) return op;
+  return std::make_shared<const GraphScopeStmt>(op->name_hint_, std::move(new_body), op->span_,
+                                                op->leading_comments_, op->attrs_);
 }
 
 StmtPtr FlattenCallExprMutator::VisitStmt_(const HierarchyScopeStmtPtr& op) {

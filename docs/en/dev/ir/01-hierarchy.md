@@ -208,7 +208,8 @@ field from the `Stmt` base class. See [Leading comments on statements](#leading-
 | **ClusterScopeStmt** | `name_hint_`, `body_` | Cluster region; outlined to `Function(Group)` |
 | **HierarchyScopeStmt** | `name_hint_`, `body_`, `level_`, `role_` (optional) | Pipeline-stage region for a given Level/Role |
 | **SpmdScopeStmt** | `name_hint_`, `body_`, `core_num_` (integer-typed `Expr`), `sync_start_` | SPMD launch region; outlined to `Function(Spmd)` |
-| **SplitAivScopeStmt** | `name_hint_`, `body_`, `split_` (`SplitMode`, never `None`), `count_` (= 2) | Explicit AIV-split region (`pl.split_aiv`); nestable; consumed and erased by `LowerAutoVectorSplit` (pass 20) |
+| **SplitAivScopeStmt** | `name_hint_`, `body_`, `split_` (`SplitMode`, never `None`), `count_` (= 2) | Explicit AIV-split region (`pl.split_aiv`); nestable; consumed and erased by `LowerAutoVectorSplit` (pass 22) |
+| **GraphScopeStmt** | `name_hint_`, `body_` | Recordable orchestration region (`pl.graph`); `name_hint_` is required — it names the function `OutlineGraphScopes` outlines it into, and hence the runtime's graph key |
 | **RuntimeScopeStmt** | `name_hint_`, `body_`, `manual_` | Orchestrator runtime region (`SIMPLER_SCOPE`); `manual_=true` selects manual dependency mode |
 | **YieldStmt** | `values_` | Yield values in loop iteration |
 | **EvalStmt** | `expr_` | Evaluate expression for side effects |
@@ -336,6 +337,9 @@ spmd = ir.SpmdScopeStmt(core_num=ir.ConstInt(8, DataType.INDEX, span),
 split_aiv = ir.SplitAivScopeStmt(split=ir.SplitMode.UP_DOWN, count=2,
                                  name_hint="", body=body, span=span)
 
+# with pl.graph("layer"): (recordable orchestration region)
+graph = ir.GraphScopeStmt(name_hint="layer", body=body, span=span)
+
 # with pl.manual_scope(): (orchestrator runtime region with manual dep mode)
 runtime = ir.RuntimeScopeStmt(manual=True, name_hint="", body=body, span=span)
 
@@ -368,10 +372,12 @@ runtime = ir.RuntimeScopeStmt(manual=True, name_hint="", body=body, span=span)
   - `OutlineClusterScopes` extracts `ClusterScopeStmt` into `Function(Group)`
     and standalone `SpmdScopeStmt` into `Function(Spmd)`
   - `OutlineHierarchyScopes` extracts `HierarchyScopeStmt`
+  - `OutlineGraphScopes` extracts `GraphScopeStmt` into `Function(Graph)`, so the
+    scope form and `@pl.jit.graph` converge before any later pass sees them
   - `SplitAivScopeStmt` is **non-outlined**: it is transparent to SSA and to the
     outliners (it survives inside an outlined `Function(InCore)` body), then is
-    consumed and **erased** by `LowerAutoVectorSplit` (pass 20). It never reaches
-    `ExpandMixedKernel` (pass 21) or codegen — those see only the per-op
+    consumed and **erased** by `LowerAutoVectorSplit` (pass 22). It never reaches
+    `ExpandMixedKernel` (pass 23) or codegen — those see only the per-op
     `aiv_shard` / `aic_gather` / `tpush` / `tpop` markers. A PTO codegen guard
     fails loudly if a `SplitAivScopeStmt` ever survives that far.
   - `SplitAivScopeStmt` is **nestable**: built via the generic
@@ -382,7 +388,7 @@ runtime = ir.RuntimeScopeStmt(manual=True, name_hint="", body=body, span=span)
     mode**: the regions are authoritative for vector placement, and the
     `AivSplitValid` verifier rejects vector compute outside every region (write
     a `mode=None` region per full-width phase — see
-    [LowerAutoVectorSplit](../passes/21-lower_auto_vector_split.md)). A
+    [LowerAutoVectorSplit](../passes/22-lower_auto_vector_split.md)). A
     top-level `for aiv_id in pl.split_aiv(...)` is wrapped by the parser in an
     enclosing `InCoreScopeStmt` (so `OutlineIncoreScopes` can outline it), i.e.
     `InCoreScopeStmt{ body: SplitAivScopeStmt{...} }`.
@@ -654,7 +660,7 @@ Functions stored in sorted map for deterministic ordering. GlobalVar names must 
 | **Unary Ops** | 5 | Abs, Neg, Not, BitNot, Cast |
 | **Call/Access** | 2 | Call, TupleGetItemExpr |
 | **Operations** | 2 | Op, GlobalVar |
-| **Statements** | 16 | AssignStmt, IfStmt, ForStmt, WhileStmt, ReturnStmt, InCoreScopeStmt, ClusterScopeStmt, HierarchyScopeStmt, SpmdScopeStmt, SplitAivScopeStmt, YieldStmt, EvalStmt, SeqStmts, BreakStmt, ContinueStmt, InlineStmt |
+| **Statements** | 17 | AssignStmt, IfStmt, ForStmt, WhileStmt, ReturnStmt, InCoreScopeStmt, ClusterScopeStmt, HierarchyScopeStmt, SpmdScopeStmt, SplitAivScopeStmt, GraphScopeStmt, YieldStmt, EvalStmt, SeqStmts, BreakStmt, ContinueStmt, InlineStmt |
 | **Types** | 6 | ScalarType, TensorType, TileType, TupleType, PipeType, UnknownType |
 | **Functions** | 2 | Function, Program |
 

@@ -2301,6 +2301,9 @@ class ScopeKind(enum.Enum):
     SplitAiv = 7
     """Explicit AIV-split region (pl.split_aiv, nestable in loops/conditionals)."""
 
+    Graph = 8
+    """Recordable orchestration region (pl.graph, outlined into a Graph function)."""
+
 class SplitMode(enum.Enum):
     """Split mode for cross-core data transfer."""
 
@@ -2428,7 +2431,8 @@ class ScopeStmt(Stmt):
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         """ScopeStmt is abstract — construct an InCoreScopeStmt, ClusterScopeStmt,
-        HierarchyScopeStmt, SplitAivScopeStmt, or SpmdScopeStmt instead."""
+        HierarchyScopeStmt, SplitAivScopeStmt, GraphScopeStmt, or SpmdScopeStmt
+        instead."""
 
 class InCoreScopeStmt(ScopeStmt):
     """InCore scope: AICore sub-graph region."""
@@ -2451,6 +2455,12 @@ class ClusterScopeStmt(ScopeStmt):
 
     def __init__(self, name_hint: str = "", *, body: Stmt, span: Span) -> None:
         """Create a Cluster scope statement."""
+
+class GraphScopeStmt(ScopeStmt):
+    """Graph scope: a recordable orchestration region."""
+
+    def __init__(self, name_hint: str, *, body: Stmt, span: Span) -> None:
+        """Create a Graph scope statement (``name_hint`` is the region name)."""
 
 class HierarchyScopeStmt(ScopeStmt):
     """Hierarchy scope: distributed-hierarchy region."""
@@ -3332,7 +3342,7 @@ class LaneInvariantArg(enum.Enum):
 
     Declared only for the arguments an operator's own ``f_deduce_type`` cannot
     speak about; ``LowerAutoVectorSplit`` decides every other operand by
-    re-deducing the halved call. See ``docs/en/dev/passes/21-lower_auto_vector_split.md``.
+    re-deducing the halved call. See ``docs/en/dev/passes/22-lower_auto_vector_split.md``.
     """
 
     Scratch = ...
@@ -4226,6 +4236,7 @@ class IRVisitor:
     def visit_while_stmt(self, op: WhileStmt) -> None: ...
     def visit_in_core_scope_stmt(self, op: InCoreScopeStmt) -> None: ...
     def visit_cluster_scope_stmt(self, op: ClusterScopeStmt) -> None: ...
+    def visit_graph_scope_stmt(self, op: GraphScopeStmt) -> None: ...
     def visit_hierarchy_scope_stmt(self, op: HierarchyScopeStmt) -> None: ...
     def visit_spmd_scope_stmt(self, op: SpmdScopeStmt) -> None: ...
     def visit_split_aiv_scope_stmt(self, op: SplitAivScopeStmt) -> None: ...
@@ -4308,6 +4319,7 @@ class IRMutator:
     def visit_while_stmt(self, op: WhileStmt) -> Stmt: ...
     def visit_in_core_scope_stmt(self, op: InCoreScopeStmt) -> Stmt: ...
     def visit_cluster_scope_stmt(self, op: ClusterScopeStmt) -> Stmt: ...
+    def visit_graph_scope_stmt(self, op: GraphScopeStmt) -> Stmt: ...
     def visit_hierarchy_scope_stmt(self, op: HierarchyScopeStmt) -> Stmt: ...
     def visit_spmd_scope_stmt(self, op: SpmdScopeStmt) -> Stmt: ...
     def visit_split_aiv_scope_stmt(self, op: SplitAivScopeStmt) -> Stmt: ...

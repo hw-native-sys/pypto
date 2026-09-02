@@ -130,30 +130,30 @@ IR 源码位置。
 
 ```text
 pl.set_cache_policy(b, BYPASS)                 statement, consumed at parse
-  -> ScopeStmt.attrs_["cache_policy_vars"]     parse .. pass 8   (Var identity)
-  -> Function attr "cache_policy"              pass 8 .. pass 10 (param INDICES)
-  -> tile.load kwarg "cache"                   pass 10 .. codegen
+  -> ScopeStmt.attrs_["cache_policy_vars"]     parse .. pass 9   (Var identity)
+  -> Function attr "cache_policy"              pass 9 .. pass 11 (param INDICES)
+  -> tile.load kwarg "cache"                   pass 11 .. codegen
   -> codegen: warn, emit an ordinary cached access
 ```
 
 | 跳 | 载体 | 负载类型 | 写入方 | 消费方 |
 | -- | ---- | -------- | ------ | ------ |
-| 1 | `ScopeStmt.attrs_[kAttrCachePolicyVars]` | `vector<pair<VarPtr, int>>` | DSL parser | [`OutlineIncoreScopes`](../passes/08-outline_incore_scopes.md)（pass 8） |
-| 2 | `Function.attrs_[kAttrCachePolicyParams]` | `vector<pair<int32_t, int>>`，按索引排序 | pass 8 | [`ConvertTensorToTileOps`](../passes/10-convert_tensor_to_tile_ops.md)（pass 10） |
-| 3 | `tile.load` 的 `cache` kwarg | `int`（`ir::CachePolicy`） | pass 10 | PTO codegen |
+| 1 | `ScopeStmt.attrs_[kAttrCachePolicyVars]` | `vector<pair<VarPtr, int>>` | DSL parser | [`OutlineIncoreScopes`](../passes/09-outline_incore_scopes.md)（pass 9） |
+| 2 | `Function.attrs_[kAttrCachePolicyParams]` | `vector<pair<int32_t, int>>`，按索引排序 | pass 9 | [`ConvertTensorToTileOps`](../passes/11-convert_tensor_to_tile_ops.md)（pass 11） |
+| 3 | `tile.load` 的 `cache` kwarg | `int`（`ir::CachePolicy`） | pass 11 | PTO codegen |
 
 保证这条链路不出错的几点设计考量：
 
 - **不放在 `TensorView` 的字段上。** 普通 kernel 参数根本没有 `tensor_view_`，在那里
   打策略会强行造出一个 TensorView —— 从而牵入严格的 `TensorViewCanonical` verifier；
-  而且 [`MaterializeTensorStrides`](../passes/31-materialize_tensor_strides.md) 会通过
+  而且 [`MaterializeTensorStrides`](../passes/32-materialize_tensor_strides.md) 会通过
   一个位置参数构造函数重建该 view，会静默丢掉这个字段。
-- **参数索引只在 pass 8..10 之间有效。** 二者之间只夹着 `OutlineClusterScopes`，它不会
+- **参数索引只在 pass 9..11 之间有效。** 二者之间只夹着 `OutlineClusterScopes`，它不会
   改动已外提 InCore 函数的参数列表。而下游的 pass *会*改：
-  [`InjectGMPipeBuffer`](../passes/23-inject_gm_pipe_buffer.md) 与
-  [`MaterializeDistTensorCtx`](../passes/44-materialize_dist_tensor_ctx.md) 追加参数，
-  [`MaterializeValidShapeSymbols`](../passes/49-materialize_valid_shape_symbols.md)
-  则在*前面插入*。这正是 pass 10 转换完成后必须擦除该 attr 的原因。
+  [`InjectGMPipeBuffer`](../passes/24-inject_gm_pipe_buffer.md) 与
+  [`MaterializeDistTensorCtx`](../passes/45-materialize_dist_tensor_ctx.md) 追加参数，
+  [`MaterializeValidShapeSymbols`](../passes/50-materialize_valid_shape_symbols.md)
+  则在*前面插入*。这正是 pass 11 转换完成后必须擦除该 attr 的原因。
 - **kwarg 是 `int` 而不是枚举。** 它沿用 `tile.store` 的 `atomic` kwarg 做法，因此
   序列化器、反序列化器、`structural_hash` 与 `structural_equal` 都无需新增枚举分支。
   出于同样的理由，`pl.CachePolicy` 绑定为可转 int（`nb::is_arithmetic`），DSL 直接
@@ -177,7 +177,7 @@ with pl.at(level=pl.Level.CORE_GROUP, name_hint="mm"):
 | 顺序 | 位置归一化 —— 无论作者原本把它们写在哪里，标记总是打印在最前面；parser 也会从 body 的任意位置把它们提升上来 |
 | Spmd 内联形态 | 从嵌套的 InCore 载体打印 —— 它的 `pl.at(...)` 头部被 Spmd printer 内联掉了 |
 | 其余为空的作用域 | 只含一条声明的作用域打印该标记，而不是 `pass` |
-| 函数 attr（`cache_policy`） | 打印为 `(索引, 策略)` 元组列表，因此在 pass 8 与 pass 10 之间 —— 它唯一存在的窗口 —— 抓取的 pass dump 可以重新解析 |
+| 函数 attr（`cache_policy`） | 打印为 `(索引, 策略)` 元组列表，因此在 pass 9 与 pass 11 之间 —— 它唯一存在的窗口 —— 抓取的 pass dump 可以重新解析 |
 
 ## 当前状态
 
@@ -221,5 +221,5 @@ tensor view，codegen 之上的一切都无需改动。
 
 - [语句与控制流](01-statements.md) —— 作用域形态，以及其它解析期标记
   （`pl.dump_tag`、`pl.static_assert`）。
-- [OutlineIncoreScopes](../passes/08-outline_incore_scopes.md) —— 第 1 跳 → 第 2 跳。
-- [ConvertTensorToTileOps](../passes/10-convert_tensor_to_tile_ops.md) —— 第 2 跳 → 第 3 跳。
+- [OutlineIncoreScopes](../passes/09-outline_incore_scopes.md) —— 第 1 跳 → 第 2 跳。
+- [ConvertTensorToTileOps](../passes/11-convert_tensor_to_tile_ops.md) —— 第 2 跳 → 第 3 跳。

@@ -78,6 +78,25 @@ def _band_total() -> float:
 # --- Kernels ---
 
 
+def _graph_boundary_arity(src: str) -> tuple[int, int]:
+    """(tensor params, scalar params) of the one Graph function in ``src``.
+
+    Parameter *order* differs between the two surfaces by construction, so the
+    comparable quantity is how many of each kind cross the boundary.
+    """
+    body = src[src.index("type=pl.FunctionType.Graph") :]
+    # Anchor on `def` first: the decorator `@pl.function(type=..., level=...)`
+    # closes its own paren before the signature opens one, so slicing from the
+    # first "(" to the first ")" yields an empty string and a vacuous (0, 0).
+    signature = body[body.index("def ") :]
+    signature = signature[signature.index("(") : signature.index(") ->")]
+    arity = signature.count("pl.Tensor"), signature.count("pl.Scalar")
+    # Guard the guard: a slice that stops matching the printer would make every
+    # comparison against this helper trivially true.
+    assert arity != (0, 0), f"failed to parse a Graph signature out of:\n{signature}"
+    return arity
+
+
 @pl.jit.graph
 def accumulate_band(w: pl.Tensor, acc: pl.InOut[pl.Tensor], layer_idx: pl.Scalar[pl.INDEX]):
     """``base`` is derived from the boundary scalar, so Step A hoists it out.
@@ -195,6 +214,26 @@ def two_distinct_graphs(a: pl.Tensor, acc: pl.InOut[pl.Tensor]):
     return acc
 
 
+@pl.jit
+def scope_form_accumulate(w: pl.Tensor, acc: pl.InOut[pl.Tensor]):
+    """``per_layer_accumulate`` written with the scope form instead.
+
+    Same arithmetic and the same Graph, expressed as `with pl.graph(...)` in
+    place rather than as a separate `@pl.jit.graph` function. OutlineGraphScopes
+    lifts the region back out, so this must reach the runtime as the same
+    program — which is what ``test_scope_form_matches_the_decorator_form``
+    checks, and what makes this case a real A/B rather than a second copy.
+    """
+    for i in pl.range(LAYERS):
+        with pl.graph("accumulate_band_scope"):
+            base = i * ROWS
+            with pl.at(level=pl.Level.CORE_GROUP):
+                band = pl.load(w, [base, 0], [ROWS, COLS])
+                cur = pl.load(acc, [0, 0], [ROWS, COLS])
+                pl.store(pl.add(cur, band), [0, 0], acc)
+    return acc
+
+
 @pl.jit.graph
 def scale_once(a: pl.Tensor, out: pl.InOut[pl.Tensor]):
     with pl.at(level=pl.Level.CORE_GROUP):
@@ -260,6 +299,25 @@ class TestGraphExecution:
         expected = torch.full((ROWS, COLS), _band_total())
         assert torch.allclose(acc, expected, rtol=1e-5, atol=1e-5), (
             f"max diff = {(acc - expected).abs().max().item()}"
+        )
+
+    def test_scope_form_accumulate(self, test_config, graph_runtime):
+        """The scope form must hit the same golden as the decorator form.
+
+        Shares ``test_per_layer_accumulate``'s shape on purpose: a frozen
+        per-layer offset gives 4.0 instead of 10.0, so this catches a Step A
+        regression reached through the scope path specifically.
+        """
+        scope_form_accumulate._cache.clear()
+        w = _banded_weights()
+        acc = torch.zeros((ROWS, COLS), dtype=torch.float32)
+
+        scope_form_accumulate(w, acc, config=test_config)
+
+        expected = torch.full((ROWS, COLS), _band_total())
+        assert torch.allclose(acc, expected, rtol=1e-5, atol=1e-5), (
+            f"max diff = {(acc - expected).abs().max().item()}; a frozen per-layer "
+            f"offset would give {float(LAYERS)} everywhere"
         )
 
     def test_boundary_view(self, test_config, graph_runtime):
@@ -364,6 +422,46 @@ class TestGraphIsNotSilentlyDroppedAtCompile:
         )
         entry = src[src.index("def per_layer_accumulate") :]
         assert f"* {ROWS}" in entry, entry
+
+    def test_scope_form_lowers_to_a_graph_function(self, test_config):
+        """`with pl.graph(...)` must reach codegen as a Graph, not inlined tasks.
+
+        A region that silently lowered to ordinary tasks is numerically correct,
+        so the device test above cannot tell — only the lowered IR can.
+        """
+        src = self._lower(
+            scope_form_accumulate,
+            torch.zeros(LAYERS * ROWS, COLS),
+            torch.zeros(ROWS, COLS),
+            config=test_config,
+        )
+        assert "type=pl.FunctionType.Graph" in src, src
+        assert "def accumulate_band_scope" in src, src
+
+    def test_scope_form_matches_the_decorator_form(self, test_config):
+        """Both surfaces lower to the same *shape*, which is the pass's contract.
+
+        Not the same text: the outliner orders a region's boundary parameters by
+        capture order while the decorator form uses the signature the user wrote,
+        so the two argument lists are permutations of each other. What must agree
+        is what the runtime sees — one Graph function, the same boundary arity,
+        and the derived per-layer offset computed at the caller (Step A) rather
+        than inside the region, where replay would freeze it.
+        """
+        args = (torch.zeros(LAYERS * ROWS, COLS), torch.zeros(ROWS, COLS))
+        scope_src = self._lower(scope_form_accumulate, *args, config=test_config)
+        decorator_src = self._lower(per_layer_accumulate, *args, config=test_config)
+
+        for src in (scope_src, decorator_src):
+            assert src.count("type=pl.FunctionType.Graph") == 1, src
+            # The hoisted multiply lands in the entry, outside the Graph body.
+            entry = src[src.rindex("type=pl.FunctionType.Orchestration") :]
+            assert f"* {ROWS}" in entry, entry
+
+        assert _graph_boundary_arity(scope_src) == _graph_boundary_arity(decorator_src), (
+            "the scope form and @pl.jit.graph no longer present the same boundary\n"
+            f"=== scope ===\n{scope_src}\n=== decorator ===\n{decorator_src}"
+        )
 
     def test_two_graphs_stay_two_functions(self, test_config):
         src = self._lower(

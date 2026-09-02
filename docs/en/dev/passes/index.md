@@ -25,48 +25,49 @@ a pipeline pass at all.
 | 05 | [Simplify](05-simplify.md) | Folds arithmetic, shape expressions, and scalar constant bindings |
 | 06 | [FlattenCallExpr](06-flatten_call_expr.md) | Flattens nested call expressions into three-address form |
 | 07 | [OutlineHierarchyScopes](07-outline_hierarchy_scopes.md) | Outlines Hierarchy scopes into functions carrying `level` / `role` metadata |
-| 08 | [OutlineIncoreScopes](08-outline_incore_scopes.md) | Outlines InCore scopes into separate functions |
-| 09 | [OutlineClusterScopes](09-outline_cluster_scopes.md) | Outlines Cluster scopes into Group functions and standalone Spmd scopes into Spmd functions |
-| 10 | [ConvertTensorToTileOps](10-convert_tensor_to_tile_ops.md) | Converts tensor ops to tile ops in InCore functions, updating orchestration call sites |
-| 11 | [OptimizeOrchTensors](11-optimize_orch_tensors.md) | Eliminates redundant orchestration allocations and improves data flow |
-| 12 | [LowerCompositeOps](12-lower_composite_ops.md) | Decomposes composite tile / distributed ops into primitives |
-| 13 | [FlattenTileNdTo2D](13-flatten_tile_nd_to_2d.md) | Flattens 3D+ tile operations to 2D by merging all but the last dimension |
-| 14 | [BlockNzTensorViews](14-block_nz_tensor_views.md) | Rewrites logical `pl.NZ` tensors into pto-isa's blocked rank-(r+2) form and retargets their `tile.load` coordinates |
-| 15 | [LegalizeTileCast](15-legalize_tile_cast.md) | Expands `tile.cast` pairs the ISA cannot emit as one instruction into the shortest native chain |
-| 16 | [AutoTileMatmulL0](16-auto_tile_matmul_l0.md) | Picks an L0 tile shape `(m, n, k)` from the backend's L0 capacities and tiles matmuls to it |
-| 17 | [CanonicalizeTileSlice](17-canonicalize_tile_slice.md) | Lowers `tile.slice` into the canonical `tile.extract` form |
-| 18 | [InferTileMemorySpace](18-infer_tile_memory_space.md) | Infers the on-chip `MemorySpace` of every tile and inserts `tile.move` to legalize mismatches |
-| 19 | [InsertMxScaleAddr](19-insert_mx_scale_addr.md) | Inserts `tile.tget_scale_addr` before MX matmul consumers after memory spaces are resolved |
-| 20 | [ResolveBackendOpLayouts](20-resolve_backend_op_layouts.md) | Repairs backend-required tile layouts for elementwise ops |
-| 21 | [LowerAutoVectorSplit](21-lower_auto_vector_split.md) | Converts AUTO `pl.split` mixed InCore functions into the explicit `split_aiv` form |
-| 22 | [ExpandMixedKernel](22-expand_mixed_kernel.md) | Splits mixed InCore functions into separate AIC (Cube) and AIV (Vector) kernels |
-| 23 | [InjectGMPipeBuffer](23-inject_gm_pipe_buffer.md) | Injects the `__gm_pipe_buffer` workspace for GM-routed cross-core pipes (Ascend910B) |
-| 24 | [SplitVectorKernel](24-split_vector_kernel.md) | Stamps split attributes and handles the no-split dual-AIV path |
-| 25 | [StampTfreeSplit](25-stamp_tfree_split.md) | Copies each cross-core tpop's split and pipe id onto its matching tfree op |
-| 26 | [NormalizeReturnOrder](26-normalize_return_order.md) | Reorders every InCore function's return tuple into the canonical order |
-| 27 | [SkewCrossCorePipeline](27-skew_cross_core_pipeline.md) | Software-pipelines mixed cube/vector loops so the two cores overlap |
-| 28 | [LowerPipelineToSlots](28-lower_pipeline_to_slots.md) | Rotates a `pl.pipeline` body through the slots of one allocation instead of replicating it (`memory_planner=PTOAS`) |
-| 29 | [LowerPipelineLoops](29-lower_pipeline_loops.md) | Replicates `pl.pipeline(N, stage=F)` bodies `F` times to enable ping-pong buffering |
-| 30 | [CanonicalizeIOOrder](30-canonicalize_io_order.md) | Reorders pipeline-body statements along the scalar → load → compute → store ladder |
-| 31 | [MaterializeTensorStrides](31-materialize_tensor_strides.md) | Fills in the packed canonical stride for every tensor view that carries none |
-| 32 | [InitMemRef](32-init_memref.md) | Initializes MemRefs and creates alloc operations with unallocated addresses |
-| 33 | [MaterializeSemanticAliases](33-materialize_semantic_aliases.md) | Forces buffers that program semantics require to be one allocation (loop-carry, in-place) |
-| 34 | [MemoryReuse](34-memory_reuse.md) | Reuses buffers by lifetime analysis and removes redundant allocs |
-| 35 | [AllocateMemoryAddr](35-allocate_memory_addr.md) | Assigns real addresses to existing alloc operations |
-| 36 | [FoldNoOpReshape](36-fold_no_op_reshape.md) | Folds `tile.reshape` calls that change neither physical shape nor allocation |
-| 37 | [FuseCreateAssembleToSlice](37-fuse_create_assemble_to_slice.md) | Fuses `tensor.create` + `tensor.assemble` into one `tensor.slice` view |
-| 38 | [DeriveCallDirections](38-derive_call_directions.md) | Materializes wrapper `ParamDirection`s, then derives a per-argument `ArgDirection` at every call |
-| 39 | [AutoDeriveTaskDependencies](39-auto_derive_task_dependencies.md) | Derives conservative task-to-task dependency edges |
-| 40 | [ExpandManualPhaseFence](40-expand_manual_phase_fence.md) | Compresses profitable full-array `TaskId` dependencies in manual scopes |
-| 41 | [SynthesizeAllReduceSignals](41-synthesize_allreduce_signals.md) | Turns a host allreduce's optional signal into explicit internal signal IR |
-| 42 | [MaterializeCommDomainScopes](42-materialize_comm_domain_scopes.md) | Assembles `WindowBuffer` and `CommDomainScopeStmt` wrappers in each host orchestration body |
-| 43 | [LowerHostTensorCollectives](43-lower_host_tensor_collectives.md) | Rewrites host-level tensor collectives into internal builtin chip dispatches |
-| 44 | [MaterializeDistTensorCtx](44-materialize_dist_tensor_ctx.md) | Materializes an explicit `CommCtx` parameter and argument per `DistributedTensor` |
-| 45 | [LegalizeGraphBoundary](45-legalize_graph_boundary.md) | Hoists the boundary scalars a `Graph` body derives out to its call sites, and rejects boundaries the `host_build_graph` runtime could not record |
-| 46 | [MaterializeRuntimeScopes](46-materialize_runtime_scopes.md) | Inserts AUTO `RuntimeScopeStmt` nodes so orchestration codegen emits `SIMPLER_SCOPE` 1:1 |
-| 47 | [ClassifyIterArgCarry](47-classify_iter_arg_carry.md) | Classifies each orchestration `ForStmt` iter_arg as a trivial alias or a materialised rebind carry |
-| 48 | [InsertCommFence](48-insert_comm_fence.md) | Marks each publishing write (region `system.cacheinvalid` + `system.fence` locally, fence only for a remote write, whole-GM for an opaque one) and each wait (whole-GM `system.cacheinvalid`); the notify itself gets no marker |
-| 49 | [MaterializeValidShapeSymbols](49-materialize_valid_shape_symbols.md) | Turns each device-kernel `valid_shape` symbol the kernel cannot bind into a leading `Scalar[INDEX]` parameter, fed the caller's actual valid extent |
+| 08 | [OutlineGraphScopes](08-outline_graph_scopes.md) | Outlines `pl.graph` regions into `FunctionType.Graph` functions, converging the scope form with `@pl.jit.graph` |
+| 09 | [OutlineIncoreScopes](09-outline_incore_scopes.md) | Outlines InCore scopes into separate functions |
+| 10 | [OutlineClusterScopes](10-outline_cluster_scopes.md) | Outlines Cluster scopes into Group functions and standalone Spmd scopes into Spmd functions |
+| 11 | [ConvertTensorToTileOps](11-convert_tensor_to_tile_ops.md) | Converts tensor ops to tile ops in InCore functions, updating orchestration call sites |
+| 12 | [OptimizeOrchTensors](12-optimize_orch_tensors.md) | Eliminates redundant orchestration allocations and improves data flow |
+| 13 | [LowerCompositeOps](13-lower_composite_ops.md) | Decomposes composite tile / distributed ops into primitives |
+| 13 | [FlattenTileNdTo2D](14-flatten_tile_nd_to_2d.md) | Flattens 3D+ tile operations to 2D by merging all but the last dimension |
+| 15 | [BlockNzTensorViews](15-block_nz_tensor_views.md) | Rewrites logical `pl.NZ` tensors into pto-isa's blocked rank-(r+2) form and retargets their `tile.load` coordinates |
+| 16 | [LegalizeTileCast](16-legalize_tile_cast.md) | Expands `tile.cast` pairs the ISA cannot emit as one instruction into the shortest native chain |
+| 16 | [AutoTileMatmulL0](17-auto_tile_matmul_l0.md) | Picks an L0 tile shape `(m, n, k)` from the backend's L0 capacities and tiles matmuls to it |
+| 18 | [CanonicalizeTileSlice](18-canonicalize_tile_slice.md) | Lowers `tile.slice` into the canonical `tile.extract` form |
+| 19 | [InferTileMemorySpace](19-infer_tile_memory_space.md) | Infers the on-chip `MemorySpace` of every tile and inserts `tile.move` to legalize mismatches |
+| 20 | [InsertMxScaleAddr](20-insert_mx_scale_addr.md) | Inserts `tile.tget_scale_addr` before MX matmul consumers after memory spaces are resolved |
+| 21 | [ResolveBackendOpLayouts](21-resolve_backend_op_layouts.md) | Repairs backend-required tile layouts for elementwise ops |
+| 22 | [LowerAutoVectorSplit](22-lower_auto_vector_split.md) | Converts AUTO `pl.split` mixed InCore functions into the explicit `split_aiv` form |
+| 23 | [ExpandMixedKernel](23-expand_mixed_kernel.md) | Splits mixed InCore functions into separate AIC (Cube) and AIV (Vector) kernels |
+| 24 | [InjectGMPipeBuffer](24-inject_gm_pipe_buffer.md) | Injects the `__gm_pipe_buffer` workspace for GM-routed cross-core pipes (Ascend910B) |
+| 25 | [SplitVectorKernel](25-split_vector_kernel.md) | Stamps split attributes and handles the no-split dual-AIV path |
+| 26 | [StampTfreeSplit](26-stamp_tfree_split.md) | Copies each cross-core tpop's split and pipe id onto its matching tfree op |
+| 27 | [NormalizeReturnOrder](27-normalize_return_order.md) | Reorders every InCore function's return tuple into the canonical order |
+| 28 | [SkewCrossCorePipeline](28-skew_cross_core_pipeline.md) | Software-pipelines mixed cube/vector loops so the two cores overlap |
+| 29 | [LowerPipelineToSlots](29-lower_pipeline_to_slots.md) | Rotates a `pl.pipeline` body through the slots of one allocation instead of replicating it (`memory_planner=PTOAS`) |
+| 30 | [LowerPipelineLoops](30-lower_pipeline_loops.md) | Replicates `pl.pipeline(N, stage=F)` bodies `F` times to enable ping-pong buffering |
+| 31 | [CanonicalizeIOOrder](31-canonicalize_io_order.md) | Reorders pipeline-body statements along the scalar → load → compute → store ladder |
+| 32 | [MaterializeTensorStrides](32-materialize_tensor_strides.md) | Fills in the packed canonical stride for every tensor view that carries none |
+| 33 | [InitMemRef](33-init_memref.md) | Initializes MemRefs and creates alloc operations with unallocated addresses |
+| 34 | [MaterializeSemanticAliases](34-materialize_semantic_aliases.md) | Forces buffers that program semantics require to be one allocation (loop-carry, in-place) |
+| 35 | [MemoryReuse](35-memory_reuse.md) | Reuses buffers by lifetime analysis and removes redundant allocs |
+| 36 | [AllocateMemoryAddr](36-allocate_memory_addr.md) | Assigns real addresses to existing alloc operations |
+| 37 | [FoldNoOpReshape](37-fold_no_op_reshape.md) | Folds `tile.reshape` calls that change neither physical shape nor allocation |
+| 38 | [FuseCreateAssembleToSlice](38-fuse_create_assemble_to_slice.md) | Fuses `tensor.create` + `tensor.assemble` into one `tensor.slice` view |
+| 39 | [DeriveCallDirections](39-derive_call_directions.md) | Materializes wrapper `ParamDirection`s, then derives a per-argument `ArgDirection` at every call |
+| 40 | [AutoDeriveTaskDependencies](40-auto_derive_task_dependencies.md) | Derives conservative task-to-task dependency edges |
+| 41 | [ExpandManualPhaseFence](41-expand_manual_phase_fence.md) | Compresses profitable full-array `TaskId` dependencies in manual scopes |
+| 42 | [SynthesizeAllReduceSignals](42-synthesize_allreduce_signals.md) | Turns a host allreduce's optional signal into explicit internal signal IR |
+| 43 | [MaterializeCommDomainScopes](43-materialize_comm_domain_scopes.md) | Assembles `WindowBuffer` and `CommDomainScopeStmt` wrappers in each host orchestration body |
+| 44 | [LowerHostTensorCollectives](44-lower_host_tensor_collectives.md) | Rewrites host-level tensor collectives into internal builtin chip dispatches |
+| 45 | [MaterializeDistTensorCtx](45-materialize_dist_tensor_ctx.md) | Materializes an explicit `CommCtx` parameter and argument per `DistributedTensor` |
+| 46 | [LegalizeGraphBoundary](46-legalize_graph_boundary.md) | Hoists the boundary scalars a `Graph` body derives out to its call sites, and rejects boundaries the `host_build_graph` runtime could not record |
+| 47 | [MaterializeRuntimeScopes](47-materialize_runtime_scopes.md) | Inserts AUTO `RuntimeScopeStmt` nodes so orchestration codegen emits `SIMPLER_SCOPE` 1:1 |
+| 48 | [ClassifyIterArgCarry](48-classify_iter_arg_carry.md) | Classifies each orchestration `ForStmt` iter_arg as a trivial alias or a materialised rebind carry |
+| 49 | [InsertCommFence](49-insert_comm_fence.md) | Marks each publishing write (region `system.cacheinvalid` + `system.fence` locally, fence only for a remote write, whole-GM for an opaque one) and each wait (whole-GM `system.cacheinvalid`); the notify itself gets no marker |
+| 50 | [MaterializeValidShapeSymbols](50-materialize_valid_shape_symbols.md) | Turns each device-kernel `valid_shape` symbol the kernel cannot bind into a leading `Scalar[INDEX]` parameter, fed the caller's actual valid extent |
 
 ## Outside the default pipeline
 

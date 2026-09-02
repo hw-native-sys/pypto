@@ -14,7 +14,7 @@ Codegen must be a **strict 1-to-1 translation** from IR to generated code. Each 
 
 **Why:** Codegen that embeds analysis becomes fragile — it duplicates logic that passes already handle, and it's harder to test in isolation. Keeping codegen a straightforward translation ensures it stays predictable and maintainable.
 
-**When analysis is found in codegen:** File a tracking issue and refactor it into a dedicated pass when bandwidth allows. [#814](https://github.com/hw-native-sys/pypto/issues/814) was an example: return-to-parameter tracing in orchestration codegen has been refactored into the [`NormalizeReturnOrder`](../passes/26-normalize_return_order.md) pass.
+**When analysis is found in codegen:** File a tracking issue and refactor it into a dedicated pass when bandwidth allows. [#814](https://github.com/hw-native-sys/pypto/issues/814) was an example: return-to-parameter tracing in orchestration codegen has been refactored into the [`NormalizeReturnOrder`](../passes/27-normalize_return_order.md) pass.
 
 ## Overview
 
@@ -217,8 +217,8 @@ or call `set_validshape` on the source tile before taking the view.
 
   `eL` is lane `L`'s **runtime** valid extent on the split axis — the ISA reads it off the popped
   tile (`popVecTileFromGMFiFo`), so the even codes require `e0 == e1` and the odd ones
-  `e0 == e1 + 1`. [LowerAutoVectorSplit](../passes/21-lower_auto_vector_split.md) materializes those
-  extents and [ExpandMixedKernel](../passes/22-expand_mixed_kernel.md) picks the matching code.
+  `e0 == e1 + 1`. [LowerAutoVectorSplit](../passes/22-lower_auto_vector_split.md) materializes those
+  extents and [ExpandMixedKernel](../passes/23-expand_mixed_kernel.md) picks the matching code.
 - The Cube-to-Vector FIFO carries a compacted rectangle: the producer stores its `valid_row` x
   `valid_col` block at a `valid_col` row pitch, and each consumer lane reads its band back with the
   same pitch (`gmStrideR = valid_col`, doubled for the left-right codes). A partial valid shape on
@@ -578,7 +578,7 @@ through — the per-variable declaration, the hoisted `extra_alloc_tiles`, and t
 control-flow paths alike — so the check sees exactly what is emitted and cannot
 drift from it. A tensor-level `pl.matmul` / `pl.matmul_acc` never trips it *on
 its M axis*, which is boxed for the user in
-[`ConvertTensorToTileOps`](../passes/10-convert_tensor_to_tile_ops.md#cube-operand-m-axis-boxing).
+[`ConvertTensorToTileOps`](../passes/11-convert_tensor_to_tile_ops.md#cube-operand-m-axis-boxing).
 The axes that remain the user's responsibility are `K` and `N`.
 
 ## Complete Example

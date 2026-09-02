@@ -343,6 +343,7 @@ class IRPythonPrinter : public IRVisitor {
   void VisitStmt_(const SplitAivScopeStmtPtr& op) override;
   void VisitStmt_(const RuntimeScopeStmtPtr& op) override;
   void VisitStmt_(const CommDomainScopeStmtPtr& op) override;
+  void VisitStmt_(const GraphScopeStmtPtr& op) override;
   void VisitStmt_(const SeqStmtsPtr& op) override;
   void VisitStmt_(const EvalStmtPtr& op) override;
   void VisitStmt_(const BreakStmtPtr& op) override;
@@ -2241,6 +2242,15 @@ void IRPythonPrinter::VisitStmt_(const ClusterScopeStmtPtr& op) {
     stream_ << "name_hint=\"" << op->name_hint_ << "\"";
   }
   stream_ << "):\n";
+  IncreaseIndent();
+  PrintStmtBlock(op->body_);
+  DecreaseIndent();
+}
+
+void IRPythonPrinter::VisitStmt_(const GraphScopeStmtPtr& op) {
+  // ``name_hint_`` is the region name the user wrote; the parser requires it,
+  // so it is printed positionally rather than as an optional keyword.
+  stream_ << "with " << prefix_ << ".graph(\"" << op->name_hint_ << "\"):\n";
   IncreaseIndent();
   PrintStmtBlock(op->body_);
   DecreaseIndent();

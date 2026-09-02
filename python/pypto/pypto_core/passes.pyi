@@ -34,6 +34,7 @@ class IRProperty(Enum):
     BreakContinueValid = ...
     UseAfterDef = ...
     HierarchyOutlined = ...
+    GraphOutlined = ...
     StructuredCtrlFlow = ...
     VectorKernelSplit = ...
     OutParamNotShadowed = ...
@@ -504,6 +505,9 @@ def outline_cluster_scopes() -> Pass:
 
 def outline_hierarchy_scopes() -> Pass:
     """Create a pass that outlines Hierarchy scopes into level/role functions."""
+
+def outline_graph_scopes() -> Pass:
+    """Create a pass that outlines Graph scopes (``pl.graph``) into Graph functions."""
 
 def convert_tensor_to_tile_ops() -> Pass:
     """Create a pass that converts tensor ops to tile ops in InCore functions."""
@@ -1030,6 +1034,7 @@ __all__ = [
     "outline_incore_scopes",
     "outline_cluster_scopes",
     "outline_hierarchy_scopes",
+    "outline_graph_scopes",
     "convert_tensor_to_tile_ops",
     "optimize_orch_tensors",
     "block_nz_tensor_views",

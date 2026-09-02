@@ -324,7 +324,7 @@ yields no value — no phi is materialized on the Acc tile.
 "Literal" covers **both** spellings a constant predicate arrives in: a DSL
 `init_cond=True`/`False` reaches the emitter as a BOOL-typed `ConstInt`, while a
 predicate an earlier pass folded reaches it as a `ConstBool` — which is what the
-generated `ko == 0` becomes when [`LowerPipelineLoops`](../passes/29-lower_pipeline_loops.md)
+generated `ko == 0` becomes when [`LowerPipelineLoops`](../passes/30-lower_pipeline_loops.md)
 replicates the K-loop *and* the enclosing loop is eliminated, so each replica's
 index is a literal. Both pick an arm outright, and an emitter that folded only
 one of the two would double the MADs of every K block it missed.
@@ -450,7 +450,7 @@ out of scope for this release (`pl.quant_mx` is MXFP8-only).
 | Shape-matched Mat→Scale `tmov` | Flat `[1,G]` must `treshape` to `[M,K/32]` (or B-side shape) first. |
 | Order | PyPTO emits Mat→scaling `tmov` in source order; PTOAS `PTOA5NormalizeTMovPass` reorders `tget_scale_addr` before it (ISA bind-then-fill). |
 | `#pto.layout` / mx load | `mx_a_zz` / `mx_b_nn` / …; codegen emits logical rank-2 `make_tensor_view` (PTOAS v0.60 InferPTOLayout / EmitC map the pack). |
-| Coverage | `pto.tmatmul.mx` / `.acc` / `.bias` + `pto.tget_scale_addr`; `pto.tquant.mx` via [LowerCompositeOps](../passes/12-lower_composite_ops.md). |
+| Coverage | `pto.tmatmul.mx` / `.acc` / `.bias` + `pto.tget_scale_addr`; `pto.tquant.mx` via [LowerCompositeOps](../passes/13-lower_composite_ops.md). |
 
 ### Tile-only GEMV family (A2/A3)
 
@@ -670,7 +670,7 @@ with ib.function("tensor_example") as f:
 | **Element-wise** | `tile.add/sub/mul/div` | Tile-Tile operations |
 | - | `tile.adds/subs/muls/divs` | Tile-Scalar operations. A **constant** scalar operand adopts the tile's element dtype (a bare int literal is otherwise parsed as `index`, which no `pto.t*s` op accepts) — except a float literal on an integer tile, which keeps FP32 so promotion is preserved. An explicit `pl.const(v, dtype)` is a deliberate annotation and is left as-is, as is any non-constant expression; a non-constant `index` scalar (loop var, `pl.dim`) is rejected — convert it with `pl.cast`. Same rule for `tensor.*s`. |
 | **Unary** | `tile.sqrt` | Element-wise square root |
-| **Quantization** | `tile.tquant_mx` / `pl.quant_mx` | Ascend950-only **MXFP8** block-32 dynamic quantization returning `{FP8E4M3FN quant, FP8E8M0 scale}`. `dtype` must be `FP8E4M3FN`. `group_axis` is PTOAS `grpAxis` (`1` = A-side `[M,K]`, `0` = B-side `[N,K]` with transpose). Public scale shapes are `[M,K/32]` / `[K/32,N]`; requires a full valid region and `K % 64 == 0` (plus axis1 `M % 16 == 0`, axis0 `N % 32 == 0`). [Pass 12](../passes/12-lower_composite_ops.md) emits grouped TQUANT plus X-to-ZZ TMOV. Results feed `matmul_mx` via GM staging. MXFP4 quant is deferred. |
+| **Quantization** | `tile.tquant_mx` / `pl.quant_mx` | Ascend950-only **MXFP8** block-32 dynamic quantization returning `{FP8E4M3FN quant, FP8E8M0 scale}`. `dtype` must be `FP8E4M3FN`. `group_axis` is PTOAS `grpAxis` (`1` = A-side `[M,K]`, `0` = B-side `[N,K]` with transpose). Public scale shapes are `[M,K/32]` / `[K/32,N]`; requires a full valid region and `K % 64 == 0` (plus axis1 `M % 16 == 0`, axis0 `N % 32 == 0`). [Pass 13](../passes/13-lower_composite_ops.md) emits grouped TQUANT plus X-to-ZZ TMOV. Results feed `matmul_mx` via GM staging. MXFP4 quant is deferred. |
 | **Transform** | `tile.slice` | Extract a sub-tile with static shape, optional dynamic valid_shape, and optional `drop_dims` (numpy-style rank reduction over static unit axes; result clamped to a 2D minimum) |
 | - | `tile.extract` | Extract a sub-tile from `src` at `(index_row, index_col)` — ISA TEXTRACT Variant 1 (Mat→Left/Right, Acc→Mat). The result's layout comes from `target_memory`'s implicit view, except `Left`/`Right`, which take the TEXTRACT-side L0 formats (these differ from `tile.move`'s TMOV-side ones) |
 | - | `tile.reshape` | Reshape tile to new dimensions (element count must match). Carries the source's `valid_shape` through without widening it — see [Reshape and the valid region](#reshape-and-the-valid-region) |
@@ -711,7 +711,7 @@ whose implicit `blayout` is `col_major`.
 `tile.move` stamps the destination `memory_space` itself (see the `TileType`
 contract in [Types](02-types.md#tiletype)), so a result view matching the
 destination's implicit view collapses to `nullopt` — the same per-space view
-[`InferTileMemorySpace`](../passes/18-infer_tile_memory_space.md) refreshes a
+[`InferTileMemorySpace`](../passes/19-infer_tile_memory_space.md) refreshes a
 retyped tile to.
 
 `tile.move` is not in-place safe: within one memory space, its source and result

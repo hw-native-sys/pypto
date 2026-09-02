@@ -207,6 +207,10 @@ class ScopeOutliner : public IRMutator {
   // descends into the body via VisitScopeKind's non-target branch, preserving
   // the nested SplitAivScopeStmt inside the outlined InCore function body.
   StmtPtr VisitStmt_(const SplitAivScopeStmtPtr& op) override;
+  // Graph is an outline target of its own pass (OutlineGraphScopes); for every
+  // other outliner this descends via VisitScopeKind's non-target branch, so a
+  // Graph region nested around, say, an InCore scope keeps its wrapper.
+  StmtPtr VisitStmt_(const GraphScopeStmtPtr& op) override;
 
   /**
    * @brief Thread store-target renames made inside a control-flow body out of it.
@@ -510,6 +514,7 @@ class ScopeKindAbsenceVerifier : public IRVisitor {
   void VisitStmt_(const HierarchyScopeStmtPtr& op) override { CheckKind(op); }
   void VisitStmt_(const SpmdScopeStmtPtr& op) override { CheckKind(op); }
   void VisitStmt_(const SplitAivScopeStmtPtr& op) override { CheckKind(op); }
+  void VisitStmt_(const GraphScopeStmtPtr& op) override { CheckKind(op); }
 
  private:
   std::vector<Diagnostic>& diagnostics_;

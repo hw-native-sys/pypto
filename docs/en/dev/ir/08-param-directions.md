@@ -64,12 +64,12 @@ original failure class, and it is not closed; see
 
 | Stage | Pass | Question it answers |
 | ----- | ---- | ------------------- |
-| [Outlining](#1-outlining-passes-79) | 7 / 8 / 9 | What directions does the function I am *creating* have? |
-| [Caller propagation](#2-caller-propagation-pass-10) | 10 | A callee writes this argument — does my own parameter behind it become `Out`? |
-| [Wrapper recovery + call sites](#3-wrapper-recovery-and-call-sites-pass-37) | 37 | What is each wrapper's *effective* signature, and what direction does each call-site argument have? |
+| [Outlining](#1-outlining-passes-710) | 7 / 8 / 9 | What directions does the function I am *creating* have? |
+| [Caller propagation](#2-caller-propagation-pass-11) | 10 | A callee writes this argument — does my own parameter behind it become `Out`? |
+| [Wrapper recovery + call sites](#3-wrapper-recovery-and-call-sites-pass-39) | 37 | What is each wrapper's *effective* signature, and what direction does each call-site argument have? |
 | [Consistency warning](#4-consistency-warning-postpipeline) | PostPipeline | Does any parameter still read `In` while its body writes it? |
 
-### 1. Outlining (passes 7–9)
+### 1. Outlining (passes 7–10)
 
 `ScopeOutliner::InferParamDirections` gives a freshly outlined scope function its
 signature. Four steps, each a *lower* bound on the accesses — no step may
@@ -97,9 +97,9 @@ dependency (issue #2415). The callee slots are accumulated as two independent
 flags — `In`/`InOut` marks a read, `Out`/`InOut` marks a write — and the
 direction is derived once at the end.
 
-See [Outline InCore Scopes](../passes/08-outline_incore_scopes.md).
+See [Outline InCore Scopes](../passes/09-outline_incore_scopes.md).
 
-### 2. Caller propagation (pass 10)
+### 2. Caller propagation (pass 11)
 
 `ConvertTensorToTileOps` phase 3 lifts a caller's parameter to `Out`/`InOut`
 when the caller forwards it into a callee slot the callee writes.
@@ -117,7 +117,7 @@ So the argument is resolved to the buffer it owns — via `BufferRootCollector` 
 before the parameter lookup. An argument that *is* the parameter resolves to
 itself, so this generalises the identity lookup rather than replacing it.
 
-### 3. Wrapper recovery and call sites (pass 37)
+### 3. Wrapper recovery and call sites (pass 39)
 
 `DeriveCallDirections` runs in two parts.
 
@@ -137,7 +137,7 @@ consumer one source of truth: `callee->param_directions_`.
 `Output`, `OutputExisting`, `InOut`, `NoDep`, `Scalar` — which is what
 dependency analysis and codegen actually consume.
 
-See [Derive Call Directions](../passes/38-derive_call_directions.md).
+See [Derive Call Directions](../passes/39-derive_call_directions.md).
 
 ### 4. Consistency warning (PostPipeline)
 
@@ -147,9 +147,9 @@ registry effects and a callee's `param_directions_` — and reports where they
 contradict the parameter.
 
 It is a **warning, not an `IRProperty`**, and that is forced rather than chosen:
-the check must run after `DeriveCallDirections` (pass 37), and `InitMemRef`
-(pass 31) invalidates `SSAForm` with nothing re-establishing it, so no pipeline
-position is both after pass 37 and in SSA form. Its buffer lineage is therefore
+the check must run after `DeriveCallDirections` (pass 39), and `InitMemRef`
+(pass 33) invalidates `SSAForm` with nothing re-establishing it, so no pipeline
+position is both after pass 39 and in SSA form. Its buffer lineage is therefore
 best-effort across control flow.
 
 See [Verifier — InParamWritten](../passes/99-verifier.md#inparamwritten).
@@ -204,7 +204,7 @@ pinned as a passing test.
 ## See Also
 
 - [Operator System](05-operators.md) — the declaration surface, in full.
-- [Outline InCore Scopes](../passes/08-outline_incore_scopes.md) — stage 1.
-- [Convert Tensor to Tile Ops](../passes/10-convert_tensor_to_tile_ops.md) — stage 2.
-- [Derive Call Directions](../passes/38-derive_call_directions.md) — stage 3.
+- [Outline InCore Scopes](../passes/09-outline_incore_scopes.md) — stage 1.
+- [Convert Tensor to Tile Ops](../passes/11-convert_tensor_to_tile_ops.md) — stage 2.
+- [Derive Call Directions](../passes/39-derive_call_directions.md) — stage 3.
 - [IR Verifier](../passes/99-verifier.md) — stage 4.
