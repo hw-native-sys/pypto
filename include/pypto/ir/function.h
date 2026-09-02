@@ -417,9 +417,9 @@ inline constexpr const char* kAttrSpmdUnwrapped = "spmd_unwrapped";
  * @brief Reserved Function attr key marking an AIV kernel that runs on BOTH
  * vector sub-lanes of a mixed kernel.
  *
- * Value type: ``bool``. Written by ``LowerAutoVectorSplit`` (pass 20) and
- * ``SplitVectorKernel`` (pass 23) onto the AIV lane, and by
- * ``ExpandMixedKernel`` (pass 21) for the backend-inferred no-split case
+ * Value type: ``bool``. Written by ``LowerAutoVectorSplit`` (pass 23) and
+ * ``SplitVectorKernel`` (pass 26) onto the AIV lane, and by
+ * ``ExpandMixedKernel`` (pass 24) for the backend-inferred no-split case
  * (``BackendHandler::RequiresNoSplitDualAivDispatch``). Read by PTO codegen
  * (``PTOCodegen::IsDualAivDispatchFunction`` — subblock-aware emission),
  * orchestration codegen (both-lanes MixedKernel dispatch) and
@@ -439,15 +439,15 @@ inline constexpr const char* kAttrDualAivDispatch = "dual_aiv_dispatch";
  *
  * Value type: ``bool``. Written by ``ScopeOutliner`` (pass 8) when it outlines a
  * CORE_GROUP scope containing ``SplitAivScopeStmt`` regions, and re-stamped by
- * ``LowerAutoVectorSplit`` (pass 20) on the functions it lowers. Read by
- * ``SplitVectorKernel`` (pass 23, to stamp ``dual_aiv_dispatch`` without
- * re-halving an already-lowered body), ``MemoryReuse`` (pass 33 — it gates the
+ * ``LowerAutoVectorSplit`` (pass 23) on the functions it lowers. Read by
+ * ``SplitVectorKernel`` (pass 26, to stamp ``dual_aiv_dispatch`` without
+ * re-halving an already-lowered body), ``MemoryReuse`` (pass 36 — it gates the
  * Ascend910B ``tile.load`` + ``tpop_from_aic`` in-place hazard guard) and
  * ``VerifyAivSplit`` (provenance for the boundary-op checks). Never stripped.
  *
  * ``MemoryReuse`` keys on this marker rather than on ``Function::GetSplitMode``
  * precisely because a multi-mode region function has no single function-level
- * mode once pass 20 has lowered and erased the per-region ones — dropping the
+ * mode once pass 23 has lowered and erased the per-region ones — dropping the
  * marker there silently disables a hardware-correctness guard.
  */
 inline constexpr const char* kAttrSplitAiv = "split_aiv";
@@ -456,9 +456,9 @@ inline constexpr const char* kAttrSplitAiv = "split_aiv";
  * @brief Reserved Function attr key recording that ``pl.split_aiv`` regions were
  * already transpose-hazard-checked per region.
  *
- * Value type: ``bool``. Written by ``LowerAutoVectorSplit`` (pass 20), which
+ * Value type: ``bool``. Written by ``LowerAutoVectorSplit`` (pass 23), which
  * validates each region against its own unambiguous mode. Read by
- * ``ExpandMixedKernel`` (pass 21) to skip its single-function-mode transpose
+ * ``ExpandMixedKernel`` (pass 24) to skip its single-function-mode transpose
  * check, which would otherwise mis-check a multi-mode function against whichever
  * mode happened to be stamped function-level. Never stripped.
  */
@@ -489,9 +489,9 @@ inline constexpr const char* kAttrExternalSource = "external_source";
  *
  * Value type: ``bool``; **absent means true**, so only the opt-out (``false``)
  * is ever stored. Written by the ``@pl.function(auto_scope=False)`` decorator and
- * by ``MaterializeRuntimeScopes`` (pass 44), which stamps ``false`` on the
+ * by ``MaterializeRuntimeScopes`` (pass 48), which stamps ``false`` on the
  * functions it has already processed. Read by that same pass (idempotence),
- * ``AutoDeriveTaskDependencies`` (pass 38), ``VerifyRuntimeScopesMaterialized``
+ * ``AutoDeriveTaskDependencies`` (pass 41), ``VerifyRuntimeScopesMaterialized``
  * and the Python printer.
  *
  * Decorator-only, for the same reason as ``kAttrExternalSource`` — see there.

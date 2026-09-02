@@ -277,7 +277,7 @@ SubblockInjectionResult InjectSubblockIdx(const FunctionPtr& func, bool is_aiv);
  * @brief Inject the per-subblock index binding at the head of a region body.
  *
  * Region-scoped analogue of ``InjectSubblockIdx`` for the explicit
- * ``SplitAivScopeStmt`` consumer in LowerAutoVectorSplit (pass 20). Prepends a
+ * ``SplitAivScopeStmt`` consumer in LowerAutoVectorSplit (pass 23). Prepends a
  * fresh ``subblock_idx = tile.get_subblock_idx()`` binding to ``region_stmts``
  * (a region is always an AIV lane, so the index is always injected) and returns
  * the rewritten body plus the index expr. ``used_names`` seeds the collision-free

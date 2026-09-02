@@ -239,7 +239,7 @@ TypePtr DeduceRemoteLoadType(const std::vector<ExprPtr>& args,
 //
 // Deriving the affinity from the resolved result-tile memory space looks like
 // the clean fix, but it is NOT safe as a general ClassifyCallAffinity rule:
-// LowerAutoVectorSplit (pass 20) treats a VECTOR-affine leaf as "route into the
+// LowerAutoVectorSplit (pass 23) treats a VECTOR-affine leaf as "route into the
 // halving machinery", and that machinery has no rewrite for this op's `offsets`
 // / `shape` tuples — it would shrink the result type while leaving the request
 // at full width. Fixing this properly means teaching the halving path about the

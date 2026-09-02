@@ -5280,7 +5280,7 @@ class ASTParser:
         ``if`` — and carries the requested ``SplitMode`` on
         ``SplitAivScopeStmt::split_``. The loop variable is bound to
         ``pl.tile.get_subblock_idx()`` (the AIV lane / sub-core index) as the
-        first statement of the region body. ``LowerAutoVectorSplit`` (pass 20)
+        first statement of the region body. ``LowerAutoVectorSplit`` (pass 23)
         consumes and erases the node; it never reaches codegen.
         """
         split_aiv_hint = (
@@ -5376,7 +5376,7 @@ class ASTParser:
 
         # Build a first-class SplitAivScopeStmt region. The region body begins
         # with ``aiv_id = pl.tile.get_subblock_idx()`` and carries the requested
-        # SplitMode on the node; LowerAutoVectorSplit (pass 20) consumes it.
+        # SplitMode on the node; LowerAutoVectorSplit (pass 23) consumes it.
         #
         # FLATTEN: when the region is ALREADY in a core context, emit it in place.
         # The wrapper below exists only to give OutlineIncoreScopes something to
@@ -5811,7 +5811,7 @@ class ASTParser:
                     hint="Move the predicate to the enclosing dispatch, or use a top-level "
                     "`with pl.at(level=pl.Level.CORE_GROUP, predicate=...):`.",
                 )
-        # ``OutlineIncoreScopes`` (pass 8) only rewrites ``Opaque`` and
+        # ``OutlineIncoreScopes`` (pass 9) only rewrites ``Opaque`` and
         # orchestration-like bodies; a Group / Spmd / InCore-family function is
         # left untouched, so a scope written there never becomes a dispatch and
         # the attr rides straight through to codegen. ``Inline`` is accepted:

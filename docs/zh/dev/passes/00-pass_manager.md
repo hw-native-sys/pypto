@@ -479,50 +479,52 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 
 1. [`LowerCompositeOps`](13-lower_composite_ops.md)
 2. [`FlattenTileNdTo2D`](14-flatten_tile_nd_to_2d.md)
-3. [`LegalizeTileCast`](16-legalize_tile_cast.md)（把目标 ISA 无法用单条 `pto.tcvt` 表达的 `tile.cast` 展开为原生 cast 链）
-4. [`AutoTileMatmulL0`](17-auto_tile_matmul_l0.md)
-5. [`CanonicalizeTileSlice`](18-canonicalize_tile_slice.md)
-6. `InferTileMemorySpace`
-7. [`InsertMxScaleAddr`](20-insert_mx_scale_addr.md)（Ascend950 MX 路径；在内存空间解析后插入内部 scale 地址绑定）
-8. [`ResolveBackendOpLayouts`](21-resolve_backend_op_layouts.md)（pass 内部已自动归一化语句结构）
-9. [`LowerAutoVectorSplit`](22-lower_auto_vector_split.md)（在用自动拆分下降路径；在 ExpandMixedKernel 之前把 AUTO `pl.split` 混合 InCore 函数转换为显式 `split_aiv` 形态）
-10. `ExpandMixedKernel`
-11. [`InjectGMPipeBuffer`](24-inject_gm_pipe_buffer.md)
-12. [`SplitVectorKernel`](25-split_vector_kernel.md)（仅为 split_aiv 函数打属性 + 处理无拆分双 AIV 路径）
-13. [`StampTfreeSplit`](26-stamp_tfree_split.md)（把每个跨核 tpop 的 split/pipe-id 复制到与之配对的 tfree 算子上）
-14. `NormalizeReturnOrder`
-15. [`SkewCrossCorePipeline`](28-skew_cross_core_pipeline.md)（cube/vector 跨核软流水 skew；紧接在 LowerPipelineLoops 之前运行）
-16. [`LowerPipelineToSlots`](29-lower_pipeline_to_slots.md)（把合格的 `pl.pipeline` 循环体改为轮转一个分配的多个 slot，而不是复制；自门控于 `memory_planner=PTOAS`，未处理的循环原样留给 `LowerPipelineLoops`）
-17. [`LowerPipelineLoops`](30-lower_pipeline_loops.md)
-18. [`CanonicalizeIOOrder`](31-canonicalize_io_order.md)
-19. [`MaterializeTensorStrides`](32-materialize_tensor_strides.md) —— 自 RFC #1300 P6 起接入默认 pipeline
-20. `InitMemRef`
-21. [`MaterializeSemanticAliases`](34-materialize_semantic_aliases.md)（语义强制别名：循环 carry / 原地；总是运行）
-22. `MemoryReuse`
-23. `AllocateMemoryAddr`
-24. [`FoldNoOpReshape`](37-fold_no_op_reshape.md)
-25. [`FuseCreateAssembleToSlice`](38-fuse_create_assemble_to_slice.md)
-26. [`DeriveCallDirections`](39-derive_call_directions.md)
-27. [`AutoDeriveTaskDependencies`](40-auto_derive_task_dependencies.md)（runtime scope 编译器依赖；AUTO-scope 分析需要显式开启）
-28. [`ExpandManualPhaseFence`](41-expand_manual_phase_fence.md)（manual-scope phase-fence TaskId 依赖压缩）
-29. [`SynthesizeAllReduceSignals`](42-synthesize_allreduce_signals.md)（分布式：host allreduce optional signal -> explicit internal signal IR）
-30. [`MaterializeCommDomainScopes`](43-materialize_comm_domain_scopes.md)（分布式：构造 WindowBuffer 并写 CommDomainScopeStmt wrappers in each host_orch body；无通信程序为 no-op）
-31. [`LowerHostTensorCollectives`](44-lower_host_tensor_collectives.md)（host-level tensor collectives -> internal builtin chip dispatches）
-32. [`MaterializeDistTensorCtx`](45-materialize_dist_tensor_ctx.md)（为 DistributedTensor 参数显式物化 CommCtx 参数/实参）
-33. `Simplify`
-34. [`LegalizeGraphBoundary`](46-legalize_graph_boundary.md)（把 Graph 体从边界标量派生出来的值上提到调用点，并拒绝 host_build_graph runtime 无法录制的边界；无 Graph 函数的程序为 no-op）
-35. [`MaterializeRuntimeScopes`](47-materialize_runtime_scopes.md)（插入 AUTO RuntimeScopeStmt，使 orchestration codegen 1:1 emit SIMPLER_SCOPE）
-36. [`ClassifyIterArgCarry`](48-classify_iter_arg_carry.md)（把每个 ForStmt iter_arg 标注为平凡别名 / 重绑定 carry，并为 manual-scope TaskId fence 数组定尺）
-37. [`InsertCommFence`](49-insert_comm_fence.md)（在每个发布性写入与释放它的 pld.system.notify 之间插入整张 tensor 的 system.cacheinvalid + GM system.fence；跑在所有语句重排 pass 之后，使插入的 op 一路到 codegen 都紧邻其 notify）
-38. [`MaterializeValidShapeSymbols`](50-materialize_valid_shape_symbols.md)（跑在最后；把设备侧 kernel 无法绑定的 valid_shape 符号转成前置的 Scalar[INDEX] 形参，由调用点传入实际有效范围）
+3. [`BlockNzTensorViews`](15-block_nz_tensor_views.md)
+4. [`BlockMxScaleTensorViews`](16-block_mx_scale_tensor_views.md)
+5. [`LegalizeTileCast`](17-legalize_tile_cast.md)（把目标 ISA 无法用单条 `pto.tcvt` 表达的 `tile.cast` 展开为原生 cast 链）
+6. [`AutoTileMatmulL0`](18-auto_tile_matmul_l0.md)
+7. [`CanonicalizeTileSlice`](19-canonicalize_tile_slice.md)
+8. `InferTileMemorySpace`
+9. [`InsertMxScaleAddr`](21-insert_mx_scale_addr.md)（Ascend950 MX 路径；在内存空间解析后插入内部 scale 地址绑定）
+10. [`ResolveBackendOpLayouts`](22-resolve_backend_op_layouts.md)（pass 内部已自动归一化语句结构）
+11. [`LowerAutoVectorSplit`](23-lower_auto_vector_split.md)（在用自动拆分下降路径；在 ExpandMixedKernel 之前把 AUTO `pl.split` 混合 InCore 函数转换为显式 `split_aiv` 形态）
+12. `ExpandMixedKernel`
+13. [`InjectGMPipeBuffer`](25-inject_gm_pipe_buffer.md)
+14. [`SplitVectorKernel`](26-split_vector_kernel.md)（仅为 split_aiv 函数打属性 + 处理无拆分双 AIV 路径）
+15. [`StampTfreeSplit`](27-stamp_tfree_split.md)（把每个跨核 tpop 的 split/pipe-id 复制到与之配对的 tfree 算子上）
+16. `NormalizeReturnOrder`
+17. [`SkewCrossCorePipeline`](29-skew_cross_core_pipeline.md)（cube/vector 跨核软流水 skew；紧接在 LowerPipelineLoops 之前运行）
+18. [`LowerPipelineToSlots`](30-lower_pipeline_to_slots.md)（把合格的 `pl.pipeline` 循环体改为轮转一个分配的多个 slot，而不是复制；自门控于 `memory_planner=PTOAS`，未处理的循环原样留给 `LowerPipelineLoops`）
+19. [`LowerPipelineLoops`](31-lower_pipeline_loops.md)
+20. [`CanonicalizeIOOrder`](32-canonicalize_io_order.md)
+21. [`MaterializeTensorStrides`](33-materialize_tensor_strides.md) —— 自 RFC #1300 P6 起接入默认 pipeline
+22. `InitMemRef`
+23. [`MaterializeSemanticAliases`](35-materialize_semantic_aliases.md)（语义强制别名：循环 carry / 原地；总是运行）
+24. `MemoryReuse`
+25. `AllocateMemoryAddr`
+26. [`FoldNoOpReshape`](38-fold_no_op_reshape.md)
+27. [`FuseCreateAssembleToSlice`](39-fuse_create_assemble_to_slice.md)
+28. [`DeriveCallDirections`](40-derive_call_directions.md)
+29. [`AutoDeriveTaskDependencies`](41-auto_derive_task_dependencies.md)（runtime scope 编译器依赖；AUTO-scope 分析需要显式开启）
+30. [`ExpandManualPhaseFence`](42-expand_manual_phase_fence.md)（manual-scope phase-fence TaskId 依赖压缩）
+31. [`SynthesizeAllReduceSignals`](43-synthesize_allreduce_signals.md)（分布式：host allreduce optional signal -> explicit internal signal IR）
+32. [`MaterializeCommDomainScopes`](44-materialize_comm_domain_scopes.md)（分布式：构造 WindowBuffer 并写 CommDomainScopeStmt wrappers in each host_orch body；无通信程序为 no-op）
+33. [`LowerHostTensorCollectives`](45-lower_host_tensor_collectives.md)（host-level tensor collectives -> internal builtin chip dispatches）
+34. [`MaterializeDistTensorCtx`](46-materialize_dist_tensor_ctx.md)（为 DistributedTensor 参数显式物化 CommCtx 参数/实参）
+35. `Simplify`
+36. [`LegalizeGraphBoundary`](47-legalize_graph_boundary.md)（把 Graph 体从边界标量派生出来的值上提到调用点，并拒绝 host_build_graph runtime 无法录制的边界；无 Graph 函数的程序为 no-op）
+37. [`MaterializeRuntimeScopes`](48-materialize_runtime_scopes.md)（插入 AUTO RuntimeScopeStmt，使 orchestration codegen 1:1 emit SIMPLER_SCOPE）
+38. [`ClassifyIterArgCarry`](49-classify_iter_arg_carry.md)（把每个 ForStmt iter_arg 标注为平凡别名 / 重绑定 carry，并为 manual-scope TaskId fence 数组定尺）
+39. [`InsertCommFence`](50-insert_comm_fence.md)（在每个发布性写入与释放它的 pld.system.notify 之间插入整张 tensor 的 system.cacheinvalid + GM system.fence；跑在所有语句重排 pass 之后，使插入的 op 一路到 codegen 都紧邻其 notify）
+40. [`MaterializeValidShapeSymbols`](51-materialize_valid_shape_symbols.md)（跑在最后；把设备侧 kernel 无法绑定的 valid_shape 符号转成前置的 Scalar[INDEX] 形参，由调用点传入实际有效范围）
 
-[`ResolveBackendOpLayouts`](21-resolve_backend_op_layouts.md) 会根据
+[`ResolveBackendOpLayouts`](22-resolve_backend_op_layouts.md) 会根据
 backend 注册的 layout 元数据修复受约束的逐元素 tile 操作。对于当前 PTO
 上要求 `row_major` 的逐元素算子，它会在受约束 use-site 把 `[N, 1]`
 向量操作数改写成 `[1, N]` 的 `tile.reshape`，其 layout 由目标 shape
 自动推导为 `row_major`，并在需要时把结果 reshape 回原始向量 shape。
 
-[`NormalizeReturnOrder`](27-normalize_return_order.md) 对 InCore 函数的 `ReturnStmt::value_` 重新排序，使
+[`NormalizeReturnOrder`](28-normalize_return_order.md) 对 InCore 函数的 `ReturnStmt::value_` 重新排序，使
 `return[i]` 对应声明顺序中第 i 个 `Out`/`InOut` 参数，并同步更新调用点的
 `TupleGetItemExpr` 索引。这样编排代码生成可以直接通过
 `out_indices[i]` 查找输出参数，而不需要追踪 `tile.store`/yield 链。该 pass

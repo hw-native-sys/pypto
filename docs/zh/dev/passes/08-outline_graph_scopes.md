@@ -177,6 +177,6 @@ def entry(self, w, acc):
 
 - [09-outline_incore_scopes.md](09-outline_incore_scopes.md) —— 紧接着运行；在提取
   Graph 函数体内的 InCore 作用域时保持其 `Graph` 类型
-- [46-legalize_graph_boundary.md](46-legalize_graph_boundary.md) —— 对提取出的函数
+- [46-legalize_graph_boundary.md](47-legalize_graph_boundary.md) —— 对提取出的函数
   强制执行运行时边界契约
 - [00-pass_manager.md](00-pass_manager.md) —— 属性表中的 `GraphOutlined` IRProperty

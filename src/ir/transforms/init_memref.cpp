@@ -621,7 +621,7 @@ class InitMemRefMutator : public IRMutator {
       // default, which is their correct home.
       if (auto tile_type = std::dynamic_pointer_cast<const TileType>(var_expr->GetType())) {
         if (IsInCoreType(func_type_)) {
-          // A device tile with no space after pass 17 is a compiler bug:
+          // A device tile with no space after pass 20 is a compiler bug:
           // InferTileMemorySpace covers every IsInCoreType function and is
           // declared to produce TileMemoryInferred.
           INTERNAL_CHECK_SPAN(tile_type->memory_space_.has_value(), var->span_)

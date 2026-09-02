@@ -71,7 +71,7 @@
  *
  *   - Two *distinct* tasks writing one tensor. Whether they overlap in time
  *     depends on the dependency graph, which `AutoDeriveTaskDependencies`
- *     (pass 38) builds much later; without it every producer/consumer pair would
+ *     (pass 41) builds much later; without it every producer/consumer pair would
  *     report.
  *   - A write guarded by a predicate that pins the instance index
  *     (`if blk == 0: pl.write(...)`), which is a single writer wearing

@@ -101,7 +101,7 @@ The flag is orthogonal to affinity (it constrains replication, not placement).
 Its only consumer is `LowerAutoVectorSplit`'s `pl.split_aiv` region placement
 stamp, which pins a region's no-duplicate calls to the AIV lane; see
 `docs/en/dev/ir/05-operators.md` and
-`docs/en/dev/passes/22-lower_auto_vector_split.md`.
+`docs/en/dev/passes/23-lower_auto_vector_split.md`.
 
 **Comm ops written outside every region are still duplicated onto both lanes,
 and nothing diagnoses it.** Putting the comm phase in a `pl.split_aiv` region is
@@ -528,7 +528,7 @@ dynamic physical target dimension is bound from that tensor parameter.
   every row of the signal afterward.
 
 Host-orchestrator user code may omit `signal` outside `for` and `while` loops;
-the [`SynthesizeAllReduceSignals`](passes/42-synthesize_allreduce_signals.md)
+the [`SynthesizeAllReduceSignals`](passes/43-synthesize_allreduce_signals.md)
 pass inserts a private INT32 signal window with semantic shape
 `[world_size, core_num]`
 for that call (mesh mode only — `mode="ring"` requires an explicit signal). The
@@ -691,11 +691,11 @@ than a PTO tensor view.
 ## Pipeline integration
 
 Comm domains and their slot allocations are materialised by the
-[`MaterializeCommDomainScopes`](passes/43-materialize_comm_domain_scopes.md) pass, which wraps each
+[`MaterializeCommDomainScopes`](passes/44-materialize_comm_domain_scopes.md) pass, which wraps each
 host_orch body in nested `CommDomainScopeStmt` nodes (one per inferred comm domain) and produces the
 per-window `WindowBuffer` records that the runtime binds physical buffers to.
 Host-level tensor collectives are then lowered by
-[`LowerHostTensorCollectives`](passes/44-lower_host_tensor_collectives.md) into internal builtin chip
+[`LowerHostTensorCollectives`](passes/45-lower_host_tensor_collectives.md) into internal builtin chip
 dispatches before the final `Simplify`.
 
 ## Testing

@@ -235,11 +235,11 @@ inline std::string IterArgArraySizeAttrKey(size_t idx) {
 // ---------------------------------------------------------------------------
 //
 // ``pl.split_aiv`` opens an explicit AIV region as a first-class
-// ``SplitAivScopeStmt``. ``LowerAutoVectorSplit`` (pass 20) lowers each region
-// and ERASES the wrapper, so by the time ``ExpandMixedKernel`` (pass 21)
+// ``SplitAivScopeStmt``. ``LowerAutoVectorSplit`` (pass 23) lowers each region
+// and ERASES the wrapper, so by the time ``ExpandMixedKernel`` (pass 24)
 // partitions the function into an AIC and an AIV lane the region node is gone
 // and nothing records that the author pinned those statements to the vector
-// lane. Without that record pass 21 duplicates every SHARED statement onto BOTH
+// lane. Without that record pass 24 duplicates every SHARED statement onto BOTH
 // lanes — which for a side effect that must not run on a second core, such as
 // ``pld.system.notify``, is wrong. The hazard is not double-counting but
 // PREMATURE RELEASE FROM THE WRONG LANE: the cube copy can publish the signal
@@ -247,12 +247,12 @@ inline std::string IterArgArraySizeAttrKey(size_t idx) {
 // the peer reads stale bytes. A ``NotifyOp::kSet`` fires that race as readily
 // as an atomic-add.
 //
-// Pass 20 therefore stamps ``attrs["core_placement"] = "aiv"`` on the region
+// Pass 23 therefore stamps ``attrs["core_placement"] = "aiv"`` on the region
 // calls whose lane the region DECIDES, and ``ClassifyCallAffinity`` reads it as
 // the placement authority. This is a plain string attr, exactly like the
 // per-op ``split`` ints and the function-level ``split_aiv_region_validated``
 // flag the same pass already stamps, so it needs no new IR concept and keeps
-// pass 21's "no live SplitAivScopeStmt survives" invariant intact.
+// pass 24's "no live SplitAivScopeStmt survives" invariant intact.
 //
 // The attr asserts a placement, so it is written only where the region is what
 // settles one: a call that STATES its own lane (`tile.create`, a
@@ -263,7 +263,7 @@ inline std::string IterArgArraySizeAttrKey(size_t idx) {
 // rule; in practice a mixed comm kernel gains exactly one of these, on the
 // notify.
 //
-// LIFECYCLE: strictly the pass 20 -> pass 21 window. ``ExpandMixedKernel``
+// LIFECYCLE: strictly the pass 23 -> pass 24 window. ``ExpandMixedKernel``
 // strips the attr from every function it emits once it has consumed it, so no
 // downstream pass, printed dump, ``.pto`` round-trip or structural comparison
 // ever sees it. (``Call::attrs_`` is a reflection ``UsualField`` and the python

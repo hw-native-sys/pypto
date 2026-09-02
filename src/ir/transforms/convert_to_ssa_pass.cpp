@@ -1042,7 +1042,7 @@ class SSAConverter {
     // boundary — its body shares SSA state with the enclosing function and
     // stays fully transparent. ``SplitAivScopeStmt`` is likewise transparent:
     // it is never outlined and is lowered in place by LowerAutoVectorSplit
-    // (pass 20), so its body shares SSA state with the enclosing function.
+    // (pass 23), so its body shares SSA state with the enclosing function.
     const bool is_outline_boundary = !As<RuntimeScopeStmt>(op) && !As<SplitAivScopeStmt>(op);
     std::unordered_set<const Var*> saved_future_needs;
     if (is_outline_boundary) {
@@ -1146,7 +1146,7 @@ class SSAConverter {
       return ExtractYield(scope->body_);
     }
     // SplitAivScopeStmt is likewise transparent: lowered in place by
-    // LowerAutoVectorSplit (pass 20), its body shares SSA state with the
+    // LowerAutoVectorSplit (pass 23), its body shares SSA state with the
     // enclosing function, so a for/if body whose trailing stmt is a region must
     // tunnel its carry-yield through the wrapper.
     if (auto scope = As<SplitAivScopeStmt>(s)) {

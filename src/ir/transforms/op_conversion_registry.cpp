@@ -833,7 +833,7 @@ void OpConversionRegistry::RegisterMemoryOps() {
         // from. Stamping Vec here would be an invention, and a load-bearing one
         // -- a matmul accumulator allocated with `pl.create_tensor` would arrive
         // at `tile.matmul_acc` in Vec, violating the op's declared Acc operand
-        // constraint. Leaving the space unset lets InferTileMemorySpace (pass 17)
+        // constraint. Leaving the space unset lets InferTileMemorySpace (pass 20)
         // place the tile from actual consumer demand, which resolves the
         // accumulator to Acc and every vector-fed tile to Vec as before.
         std::vector<std::pair<std::string, std::any>> new_kwargs;
@@ -863,7 +863,7 @@ void OpConversionRegistry::RegisterMemoryOps() {
               // The destination space is not decided yet (see above), so size the
               // tile against the largest on-chip buffer: anything over that cannot
               // fit anywhere and is worth catching early. The exact per-space check
-              // belongs to AllocateMemoryAddr (pass 34), once the space is known.
+              // belongs to AllocateMemoryAddr (pass 37), once the space is known.
               uint64_t mem_size = 0;
               for (MemorySpace space : {MemorySpace::Vec, MemorySpace::Mat, MemorySpace::Acc}) {
                 mem_size = std::max(mem_size, be->GetMemSize(space));
@@ -2866,7 +2866,7 @@ void OpConversionRegistry::RegisterDistributedOps() {
 // High-level (@pl.jit / pl.spmd) author-facing shard / gather emitted inside a
 // ``for aiv_id in pl.split_aiv(...)`` region. Each lowers 1:1 to its tile op
 // (tile.aiv_shard / tile.aic_gather) so the result is byte-identical to what the
-// AUTO ``pl.split`` path produces via LowerAutoVectorSplit (pass 20).
+// AUTO ``pl.split`` path produces via LowerAutoVectorSplit (pass 23).
 //
 // Boundary memory space. The tile-level split deducer (DeduceSplitReshape)
 // intentionally leaves it null (returns a TileType with a null memref / null

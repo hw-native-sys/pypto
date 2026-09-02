@@ -532,6 +532,13 @@ void BindPass(nb::module_& m) {
              "blocked coordinates while its logical 2-D destination TileType is preserved.\n"
              "Must run after ConvertTensorToTileOps and after FlattenTileNdTo2D (it\n"
              "requires TileOps2D: the destination tile must already be 2-D).");
+  passes.def("block_mx_scale_tensor_views", &pass::BlockMxScaleTensorViews,
+             "Create a pass that rewrites logical MX scale tensors into A5's packed rank-5 form\n\n"
+             "MX_A_ZZ [M, G] and MX_B_NN [G, N] become [1, block/16, group/2, 16, 2].\n"
+             "The pass rewrites tile.load windows and ND/MX backing aliases while preserving\n"
+             "logical tile result types. Symbolic offsets must be provably aligned and\n"
+             "non-negative. Must run after FlattenTileNdTo2D and before\n"
+             "MaterializeTensorStrides.");
   passes.def("flatten_tile_nd_to_2d", &pass::FlattenTileNdTo2D,
              "Create a pass that flattens ND tile ops to 2D in InCore functions\n\n"
              "Merges all dimensions except the last into a single dimension.\n"

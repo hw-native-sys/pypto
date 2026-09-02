@@ -55,9 +55,9 @@ REGISTER_OP("system.set_ffts")
 
 | 阶段 | Pass | 回答的问题 |
 | ---- | ---- | ---------- |
-| [Outline](#1-outlinepass-710) | 7 / 8 / 9 | 我**正在创建**的这个函数，参数方向是什么？ |
-| [调用方传播](#2-调用方传播pass-11) | 10 | 被调方写了这个实参——它背后我自己的参数是否要变成 `Out`？ |
-| [Wrapper 恢复与调用点](#3-wrapper-恢复与调用点pass-39) | 37 | 每个 wrapper 的**有效**签名是什么？每个调用点实参的方向是什么？ |
+| [Outline](#1-outlinepass-710) | 7 / 8 / 9 / 10 | 我**正在创建**的这个函数，参数方向是什么？ |
+| [调用方传播](#2-调用方传播pass-11) | 11 | 被调方写了这个实参——它背后我自己的参数是否要变成 `Out`？ |
+| [Wrapper 恢复与调用点](#3-wrapper-恢复与调用点pass-40) | 40 | 每个 wrapper 的**有效**签名是什么？每个调用点实参的方向是什么？ |
 | [一致性警告](#4-一致性警告postpipeline) | PostPipeline | 是否还有参数声明为 `In` 却被自身函数体写入？ |
 
 ### 1. Outline（pass 7–10）
@@ -103,7 +103,7 @@ for _ in pl.range(4):
 因此在查参数表之前，实参会先经 `BufferRootCollector` 解析到它所属的 buffer。实参
 本身就是参数时，它解析到自己——所以这是对指针恒等查找的**推广**，而非替换。
 
-### 3. Wrapper 恢复与调用点（pass 39）
+### 3. Wrapper 恢复与调用点（pass 40）
 
 `DeriveCallDirections` 分两部分。
 
@@ -121,7 +121,7 @@ for _ in pl.range(4):
 `OutputExisting`、`InOut`、`NoDep`、`Scalar`——这才是依赖分析与 codegen 实际消费的
 东西。
 
-参见 [Derive Call Directions](../passes/39-derive_call_directions.md)。
+参见 [Derive Call Directions](../passes/40-derive_call_directions.md)。
 
 ### 4. 一致性警告（PostPipeline）
 
@@ -130,8 +130,8 @@ for _ in pl.range(4):
 与该参数相矛盾之处。
 
 它是**警告而非 `IRProperty`**，且这是被迫而非选择：该检查必须在
-`DeriveCallDirections`（pass 39）之后运行，而 `InitMemRef`（pass 33）作废了
-`SSAForm` 且此后无人重建，因此流水线中不存在既在 pass 39 之后、又处于 SSA 形式的
+`DeriveCallDirections`（pass 40）之后运行，而 `InitMemRef`（pass 34）作废了
+`SSAForm` 且此后无人重建，因此流水线中不存在既在 pass 40 之后、又处于 SSA 形式的
 位置。它的 buffer lineage 在控制流上因而是尽力而为的。
 
 参见 [验证器 — InParamWritten](../passes/99-verifier.md#inparamwritten)。
@@ -181,5 +181,5 @@ t = buf2                                  # ……但映射说 t -> buf2
 - [算子系统](05-operators.md) —— 完整的声明面。
 - [Outline InCore Scopes](../passes/09-outline_incore_scopes.md) —— 阶段 1。
 - [Convert Tensor to Tile Ops](../passes/11-convert_tensor_to_tile_ops.md) —— 阶段 2。
-- [Derive Call Directions](../passes/39-derive_call_directions.md) —— 阶段 3。
+- [Derive Call Directions](../passes/40-derive_call_directions.md) —— 阶段 3。
 - [IR 验证器](../passes/99-verifier.md) —— 阶段 4。

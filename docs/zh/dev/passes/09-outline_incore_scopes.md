@@ -192,7 +192,7 @@ with pl.cluster():
 `Call` 处理函数，因此任务提交需要自己的规则；否则每个提交实参都算作读取，只传给 `Out`
 槽位的 capture 就会变成 `InOut`。`Submit` 的 `args_[i]` 按前缀映射到 `params_[i]`
 （`args_.size() <= params_.size()`，省略的尾部由运行时分配），而会破坏该 identity 的
-尾随 `CommCtx` 形参由第 43 个 pass 生成，远在任何 outliner 之后。它的 `deps_` 始终按
+尾随 `CommCtx` 形参由 `MaterializeDistTensorCtx`（pass 46）生成，远在任何 outliner 之后。它的 `deps_` 始终按
 读取处理——那是本次提交消费的 TaskId 值，绝非写入目的地。
 
 **Hierarchy 作用域是例外。** `OutlineScope` 对 `ScopeKind::Hierarchy` 有意保持
@@ -204,7 +204,7 @@ with pl.cluster():
 `DistributedCodegen::EmitCallToWorker`，后者按**被调函数**的方向为每个 rank 的
 chip dispatch 实参打标签，于是一个错误的 `InOut` 会把同一个 `pl.Out` tensor 上
 互不相交的各 rank 切片变成跨 rank 写依赖（issue #2415）。而只写参数真正需要的
-定序不会因此丢失：[`DeriveCallDirections`](39-derive_call_directions.md) 会重新
+定序不会因此丢失：[`DeriveCallDirections`](40-derive_call_directions.md) 会重新
 推导**调用点**方向——在顺序执行的外层循环内、在同一 root 的前序写者之后，或该
 root 是外层函数的 `InOut` 形参时，把被调函数的 `Out` 重新提升为 `InOut`。
 
@@ -248,9 +248,9 @@ root 是外层函数的 `InOut` 形参时，把被调函数的 `Out` 重新提�
 作用域 attr **在此处被消费，绝不向下传播**：从这里开始，函数 attr 是唯一载体，直到
 [`ConvertTensorToTileOps`](11-convert_tensor_to_tile_ops.md) 把它变成每条 `tile.load`
 上的 `cache` kwarg 并擦除它为止。参数索引仅在该窗口内有效 —— 后续 pass 既会向参数列表
-追加（[`InjectGMPipeBuffer`](24-inject_gm_pipe_buffer.md)、
-[`MaterializeDistTensorCtx`](45-materialize_dist_tensor_ctx.md)），也会向前插入
-（[`MaterializeValidShapeSymbols`](50-materialize_valid_shape_symbols.md)）。本 pass 用
+追加（[`InjectGMPipeBuffer`](25-inject_gm_pipe_buffer.md)、
+[`MaterializeDistTensorCtx`](46-materialize_dist_tensor_ctx.md)），也会向前插入
+（[`MaterializeValidShapeSymbols`](51-materialize_valid_shape_symbols.md)）。本 pass 用
 `CHECK_SPAN` 拒绝两类用户错误：声明所指的张量未被作用域 body 捕获（既不读也不写，因而
 没有参数承载该策略），以及对 `InferParamDirections` 判定为 `Out` / `InOut` 的参数声明
 `BYPASS`（对同一 kernel 自己会写的字节做 bypass 读取，是一致性缺陷）。该转换位于共享的
@@ -382,7 +382,7 @@ return out__rv_v1
 | 作用域位于函数顶层 | 保持不变——新名字本就在作用域内 |
 
 **代码生成不受影响。** yield 的值是被调函数在其返回的参数上的调用结果，因此
-[`ClassifyIterArgCarry`](48-classify_iter_arg_carry.md) 会把它归入该 iter_arg 的别名类
+[`ClassifyIterArgCarry`](49-classify_iter_arg_carry.md) 会把它归入该 iter_arg 的别名类
 （其被写实参规则与 `TupleGetItemExpr` 规则），并将该携带值标记为 **trivial**：
 iter_arg 与 return_var 都按初值的名字发射。这个携带值是 SSA 记账，而非新缓冲区。
 没有它同样不会编译错——编排层张量的每个 SSA 版本都指向同一块 GM 缓冲区——但 def-use
@@ -431,7 +431,7 @@ passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes, "Outline InCore 
 承载于作用域自身的 `split_`）与显式 `pl.split_aiv` 区域（`SplitAivScopeStmt`）不能在同一
 作用域共存（outliner 会把单个区域的模式桥接为函数级代表 `split`，从而与用户的
 `pl.split` 静默冲突）。幸存机制如何下降见
-[`LowerAutoVectorSplit`](22-lower_auto_vector_split.md)。
+[`LowerAutoVectorSplit`](23-lower_auto_vector_split.md)。
 
 **任何** `pl.split(...)` 都会被拒绝，包括 `SplitMode.NONE`（RFC #1820）。NONE 本身不
 携带拆分，但把它写在同时持有区域的作用域上，读起来仍像"在一个作用域里混用了自动与手动
@@ -466,7 +466,7 @@ passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes, "Outline InCore 
 `Function::GetSplitMode()` 把存储的 `0` 与缺失的键同样映射为 `nullopt`，因此
 `split=SplitMode.NONE` 这一项对所有消费方都不可见；而 parser 会在回读时丢弃它，导致
 print → parse 有损（`Kwargs size mismatch`）。权威的逐区域模式始终承载于
-`SplitAivScopeStmt::split_`，由 [`LowerAutoVectorSplit`](22-lower_auto_vector_split.md)
+`SplitAivScopeStmt::split_`，由 [`LowerAutoVectorSplit`](23-lower_auto_vector_split.md)
 消费。printer 以同一规则兜底：省略取值为 `SplitMode.NONE` 的 `split` 属性，使绕过本 Pass
 的 IR（此前写出的 `.pto`、以编程方式构造的 `Function`）依然以规范、可重新解析的形式打印。
 
@@ -480,5 +480,5 @@ print → parse 有损（`Kwargs size mismatch`）。权威的逐区域模式始
 
 `AivSplitValid` 的验证窗口从这里打开。本 Pass 在每个被外提的 InCore 函数内保留第一类
 `SplitAivScopeStmt` 区域，因此结构化区域 verifier 可以从此处一直运行到
-[`LowerAutoVectorSplit`](22-lower_auto_vector_split.md) 擦除该节点并使属性失效为止。
+[`LowerAutoVectorSplit`](23-lower_auto_vector_split.md) 擦除该节点并使属性失效为止。
 其间 `ConvertTensorToTileOps` 与 `InferTileMemorySpace` 会在边界内存变得可观察后各重新验证一次。

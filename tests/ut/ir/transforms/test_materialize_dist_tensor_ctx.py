@@ -91,10 +91,10 @@ def _apply(program: ir.Program) -> ir.Program:
 
 
 def _derive_and_materialize(program: ir.Program) -> ir.Program:
-    """DeriveCallDirections (pass 37) then MaterializeDistTensorCtx (pass 43).
+    """DeriveCallDirections (pass 40) then MaterializeDistTensorCtx (pass 46).
 
-    Pass 37 is what stamps ``arg_directions`` on each call, so running it first
-    lets a DSL-authored ``Before`` reach pass 43 in the shape the pipeline
+    Pass 40 is what stamps ``arg_directions`` on each call, so running it first
+    lets a DSL-authored ``Before`` reach pass 46 in the shape the pipeline
     actually delivers, with no hand-written direction attrs.
     """
     return passes.materialize_dist_tensor_ctx()(passes.derive_call_directions()(program))
@@ -151,7 +151,7 @@ def test_host_dispatch_materializes_comm_ctx_args():
 #
 # Every function takes the same DistributedTensor, so the pass must thread one
 # materialized ``data_ctx`` param through all three and forward it at both call
-# sites. ``derive_call_directions`` (pass 37) runs first, exactly as in the
+# sites. ``derive_call_directions`` (pass 40) runs first, exactly as in the
 # pipeline, so the Before programs carry no hand-written ``arg_directions``.
 #
 # Spmd and Group get their own program pair because ``@pl.function(type=...)``
@@ -739,7 +739,7 @@ def test_device_get_comm_ctx_is_replaced_by_materialized_context():
 # allocates a window inside a *chip* orchestration function, and the parser
 # rejects ``pld.alloc_window_buffer`` outside HOST orchestration with its own
 # diagnostic — which is a different error from the pass-level one this test
-# pins. Reaching pass 43 with that shape therefore requires raw ``ir.*``.
+# pins. Reaching pass 46 with that shape therefore requires raw ``ir.*``.
 # ---------------------------------------------------------------------------
 
 

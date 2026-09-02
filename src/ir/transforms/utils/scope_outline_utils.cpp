@@ -306,7 +306,7 @@ class ParamReadCollector : public IRVisitor {
   /// *prefix*, with ``args_.size() <= params_.size()`` — the omitted tail is
   /// runtime-allocated and never appears as an argument here. The trailing
   /// ``CommCtx`` params that would break that identity are materialised by
-  /// pass 43, long after any outliner runs, so the prefix mapping is exact at
+  /// pass 46, long after any outliner runs, so the prefix mapping is exact at
   /// this point (`.claude/rules/pass-submit-awareness.md`).
   ///
   /// Anything that fails those constraints — no program to resolve the callee,
@@ -1976,7 +1976,7 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
   // ``split`` mode from the region node — but only when the scope itself
   // carries no AUTO cross-core transfer split (``incore->split_``), which has
   // a separate meaning. The authoritative per-region mode is ``node->split_``
-  // (consumed at pass 21).
+  // (consumed at pass 23).
   auto append_split_aiv_attr = [&](SplitMode incore_split) {
     SplitAivModeSummaryFinder finder;
     finder.VisitStmt(scope_body);
@@ -2010,7 +2010,7 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
     // share one mode (``uniform_mode``) AND that mode is a real split. Differing
     // sibling modes have no single representative: leave the function-level mode
     // unset — the authoritative per-region mode rides ``node->split_`` (consumed
-    // at pass 20). No need to re-check incore_split here: the CHECK above
+    // at pass 23). No need to re-check incore_split here: the CHECK above
     // guarantees it is None.
     //
     // ``SplitMode::None`` is excluded for the same reason the sibling

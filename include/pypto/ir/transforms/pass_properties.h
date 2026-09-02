@@ -144,7 +144,7 @@ inline const PassProperties kLowerCompositeOpsProperties{};
 // OutlineIncoreScopes opens the AivSplitValid verification window: it preserves
 // the first-class SplitAivScopeStmt regions inside each outlined InCore function,
 // so the structural region verifier can run from here until LowerAutoVectorSplit
-// erases the node (pass 20).
+// erases the node (pass 23).
 inline const PassProperties kOutlineIncoreScopesProperties{
     .required = {IRProperty::SSAForm},
     .produced = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::AivSplitValid}};
@@ -209,6 +209,12 @@ inline const PassProperties kOptimizeOrchTensorsProperties{
 // the property check instead of failing obscurely later.
 
 inline const PassProperties kBlockNzTensorViewsProperties{
+    .required = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::TileOps2D,
+                 IRProperty::NormalizedStmtStructure},
+    .produced = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::TileOps2D,
+                 IRProperty::NormalizedStmtStructure}};
+
+inline const PassProperties kBlockMxScaleTensorViewsProperties{
     .required = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::TileOps2D,
                  IRProperty::NormalizedStmtStructure},
     .produced = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::TileOps2D,
@@ -336,7 +342,7 @@ inline const PassProperties kExpandMixedKernelProperties{
                  IRProperty::HardSyncallOccupancyValid, IRProperty::AccCompactValid},
     // The Cube->Vector boundary `tile.move` is rebuilt here as a tpush/tpop
     // pair with a freshly built consumer type, so the Acc compact contract has
-    // to be re-checked on that new IR rather than trusted from pass 17.
+    // to be re-checked on that new IR rather than trusted from pass 20.
     .invalidated = {IRProperty::AccCompactValid}};
 
 // -- GM pipe buffer injection pass (backend-gated; extracted from ExpandMixedKernel) --

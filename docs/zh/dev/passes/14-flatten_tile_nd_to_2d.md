@@ -56,7 +56,7 @@ program_2d = flatten_pass(program)
 | `tile.assemble`（>2D 目标） | 用与 `tile.load` 折叠 tensor-rank 偏移相同的行主序折叠，把 ND 偏移折进展平后的 `(row, col)` 空间（`row = ((o0*d1 + o1)*d2 + o2)*… + o[k-2]`，`col = o[k-1]`）；Tile 操作数本身由其定义处的算子展平。要求 source、target 与 offset 具有相同 rank，且写入区域能折叠为连续的行区间（`IsRowMajorCollapseContiguous`），否则在前置条件阶段报错。若不折叠，偏移会以 ND rank 残留在 2D Tile 上，而 codegen 只按位置读取 `elements[0]`/`elements[1]` 并忽略其余元素，从而静默地写到错误地址 |
 | `tile.transpose` | `pto.ttrans` scratch 物化的唯一归属。进入时为 3-arg（input, axis1, axis2）。**2D**：创建一块 scratch tile（shape = 源页，位于输入所在 memory），产出 codegen-ready 的 4-arg `tile.transpose(in, a1, a2, scratch)`。**>2D**（末两轴交换）：展开为逐 batch 的 2D transpose，每个都是 4-arg 形态，scratch 从扁平 `[batch*A, B]` 池中切片，再 assemble 进合并后的 2D 输出。交换 batch 轴属用户错误 |
 | `tile.batch_matmul` | 展开为逐 batch 的 2D `tile.matmul`，处理 batch broadcast。b_trans/a_trans 操作数以一个零拷贝 `tile.transpose_view`（覆盖在自然 load 之上）出现（不再 transpose-at-load、不搬数据）；tile 级算子本身无 transpose 语义。每个操作数处理方式一致（见下方操作数处理）。**当结果本身就是批量累加器**（下游 `tile.batch_matmul_acc` 会继续写它）时，各页改为通过 `tile.matmul_acc(window, lhs_b, rhs_b, init_cond=True)` 写入同一块按列打包的 `Acc` tile —— 见[批量累加器按列打包](#批量累加器按列打包) |
-| `tile.batch_matmul_acc` | 展开为逐 batch 的 2D `tile.matmul_acc`，按 batch 索引取（已展平的）累加器的一个窗口：链按列打包时取 `[M, B*N]` tile 的**列**窗口 `[0, b*N]`，否则取 `[B*M, N]` tile 的旧**行**窗口 `[b*M, 0]` —— 见[批量累加器按列打包](#批量累加器按列打包)。本 pass 未直接确定的内存空间决策（行打包累加器上的 Vec/Acc 来回搬运、上游 `tile.create` 的可重定向生产者改写、TileView 刷新）交由 `InferTileMemorySpace`（pass 19）负责 —— 本 pass 不发射任何 `tile.move` |
+| `tile.batch_matmul_acc` | 展开为逐 batch 的 2D `tile.matmul_acc`，按 batch 索引取（已展平的）累加器的一个窗口：链按列打包时取 `[M, B*N]` tile 的**列**窗口 `[0, b*N]`，否则取 `[B*M, N]` tile 的旧**行**窗口 `[b*M, 0]` —— 见[批量累加器按列打包](#批量累加器按列打包)。本 pass 未直接确定的内存空间决策（行打包累加器上的 Vec/Acc 来回搬运、上游 `tile.create` 的可重定向生产者改写、TileView 刷新）交由 `InferTileMemorySpace`（pass 20）负责 —— 本 pass 不发射任何 `tile.move` |
 | 其他 Tile 操作（>2D） | 替换变量，使用 2D 类型重新创建 |
 | 1D/2D Tile 操作 | 不变 |
 
@@ -106,12 +106,12 @@ batch 重发。
 是*跨步*的 —— 它的块间距是父 tile 的行数，而不是窗口自身的行数。pto-isa 的 MAD
 以裸指针紧凑写出 `[m, n]` 目标，没有目标跨步（hw-native-sys/pto-isa#253），所以按行
 打包的 `[B*M, N]` 形状根本没有正确的降级路径：每页只有前 16 列会落在正确位置。
-这正是 `CanonicalizeTileSlice`（pass 18）拒绝的形状，参见
-[18-canonicalize_tile_slice.md](18-canonicalize_tile_slice.md)。
+这正是 `CanonicalizeTileSlice`（pass 19）拒绝的形状，参见
+[18-canonicalize_tile_slice.md](19-canonicalize_tile_slice.md)。
 
 **列**窗口覆盖父 tile 的整个行范围，因此窗口自身的紧凑几何与父 tile 的几何一致，
 被丢弃的跨步也就无关紧要。`GetSliceAccumulatorGeometry` 正是给这种形状计算
-NZ 精确字节偏移（参见 [33-init_memref.md](33-init_memref.md)）。
+NZ 精确字节偏移（参见 [33-init_memref.md](34-init_memref.md)）。
 
 ### 生产者侧的变化
 

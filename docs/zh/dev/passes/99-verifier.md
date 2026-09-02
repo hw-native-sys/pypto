@@ -138,9 +138,9 @@ diagnostics = passes.DiagnosticCheckRegistry.run_checks(
 ```
 
 **为何不是属性。** 属性是编译器可以担保的论断，而这一条担保不了。该检查必须在
-`DeriveCallDirections`（pass 39）之后运行——在那之前 wrapper 的签名读作 `In` 是合法的；
-而 `InitMemRef`（pass 33）声明了 `.invalidated = {IRProperty::SSAForm}`，此后无人重建。
-**流水线中不存在既在 pass 37 之后、又处于 SSA 形式的位置。** 下文的 buffer lineage 在汇合点
+`DeriveCallDirections`（pass 40）之后运行——在那之前 wrapper 的签名读作 `In` 是合法的；
+而 `InitMemRef`（pass 34）声明了 `.invalidated = {IRProperty::SSAForm}`，此后无人重建。
+**流水线中不存在既在 pass 40 之后、又处于 SSA 形式的位置。** 下文的 buffer lineage 在汇合点
 不做合并，其精确性只在"每个名字一个定义"时成立，因此在它实际收到的 IR 上，两个方向都可能出错：
 
 - 分支内建立的 view 会把 lineage 泄漏过汇合点，分支之后的写入可能被归咎于只有该路径才命名的

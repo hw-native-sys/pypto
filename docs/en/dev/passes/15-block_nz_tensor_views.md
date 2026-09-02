@@ -46,7 +46,7 @@ Row-major strides over the blocked shape *are* pto-isa's NZ strides:
 
 So once the shape is blocked, NZ is an ordinary member of the row-major family
 and `BuildLogicalStridesFromLayout` handles it through the same
-`BuildRowMajorStrides` path as ND. `MaterializeTensorStrides` (pass 32) fills the
+`BuildRowMajorStrides` path as ND. `MaterializeTensorStrides` (pass 33) fills the
 stride later; this pass only rewrites the shape.
 
 This amends RFC #1300's claim that NZ has "no logical-stride representation" —
@@ -248,5 +248,5 @@ End-to-end use waits on PTOAS trusting the explicit annotation.
 ## Related
 
 - [14-flatten_tile_nd_to_2d.md](14-flatten_tile_nd_to_2d.md) — skips its ND2NZ window collapse for NZ sources
-- [32-materialize_tensor_strides.md](32-materialize_tensor_strides.md) — fills the blocked NZ stride
+- [32-materialize_tensor_strides.md](33-materialize_tensor_strides.md) — fills the blocked NZ stride
 - [../ir/02-types.md](../ir/02-types.md) — `TensorLayout` and `TensorView`

@@ -527,7 +527,7 @@ def _assert_split_aiv_lowered_and_codegen(transformed: _ir.Program, base_name: s
 
     # AssertNoSplitReshapeSurvives: ExpandMixedKernel must fold the split-reshape
     # ops into tpush/tpop on each lane. The high-level tensor.* forms are lowered
-    # 1:1 to tile.* at ConvertTensorToTileOps (pass 10), so neither namespace may
+    # 1:1 to tile.* at ConvertTensorToTileOps (pass 11), so neither namespace may
     # survive to the end of the pipeline.
     op_names = _iter_func_bodies_op_names(transformed)
     # Route the split-reshape op names through the registry getter so a typo raises
@@ -663,7 +663,7 @@ def test_split_aiv_fused_mixed_codegen_vs_golden(
 # are high-level ``pl.matmul`` calls that return a *Tensor*, and the C->V shard
 # (``pl.aiv_shard``) / V->C gather (``pl.aic_gather``) operate on that Tensor
 # inside a ``for aiv_id in pl.split_aiv(...)`` region. Those emit tensor.aiv_shard
-# / tensor.aic_gather, which ConvertTensorToTileOps (pass 10) lowers 1:1 to
+# / tensor.aic_gather, which ConvertTensorToTileOps (pass 11) lowers 1:1 to
 # tile.aiv_shard / tile.aic_gather (re-attaching the Vec boundary memory) — so
 # from ExpandMixedKernel onward the pipeline is byte-identical to the tile path.
 # This proves issue #1915's exact use case compiles and is numerically correct.

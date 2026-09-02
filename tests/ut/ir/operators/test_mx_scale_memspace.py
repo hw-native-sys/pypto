@@ -51,6 +51,19 @@ def _mx_tensor_var(name, rows, cols, layout=ir.TensorLayout.MX_A_ZZ, dtype=DataT
     )
 
 
+def _mx_blocked_tensor_var(name, shape, layout=ir.TensorLayout.MX_A_ZZ):
+    span = ir.Span.unknown()
+    return ir.Var(
+        name,
+        ir.TensorType(
+            [dim if isinstance(dim, ir.Expr) else ir.ConstInt(dim, DataType.INDEX, span) for dim in shape],
+            DataType.FP8E8M0,
+            tensor_view=ir.TensorView([], layout),
+        ),
+        span,
+    )
+
+
 class TestMxScaleMemSpaces:
     def test_leftscale_move_layout_row_major_fractal32(self):
         src = _tile_var(
@@ -142,6 +155,62 @@ class TestMxScaleMemSpaces:
         tensor = _mx_tensor_var("s", 16, 8)
         with pytest.raises(ValueError, match="2D load window"):
             tile.load(tensor, [0], [16], target_memory=ir.MemorySpace.Mat)
+
+    def test_blocked_mx_load_accepts_canonical_window_geometry(self):
+        tensor = _mx_blocked_tensor_var("s", [1, 2, 2, 16, 2])
+        call = tile.load(
+            tensor,
+            [0, 1, 1, 0, 0],
+            [1, 1, 1, 16, 2],
+            valid_shape=[1, 1, 1, 16, 2],
+            target_memory=ir.MemorySpace.Mat,
+        )
+        assert isinstance(call.type, ir.TileType)
+
+    @pytest.mark.parametrize(
+        ("field", "index", "value", "match"),
+        [
+            ("tensor_shape", 0, 2, "tensor shape"),
+            ("tensor_shape", 1, 0, "tensor shape"),
+            ("tensor_shape", 2, 0, "tensor shape"),
+            ("tensor_shape", 3, 8, "tensor shape"),
+            ("tensor_shape", 4, 1, "tensor shape"),
+            ("offsets", 0, 1, r"requires offsets \[0, block offset, group offset, 0, 0\]"),
+            ("offsets", 3, 1, r"requires offsets \[0, block offset, group offset, 0, 0\]"),
+            ("offsets", 4, 1, r"requires offsets \[0, block offset, group offset, 0, 0\]"),
+            ("shapes", 3, 8, "requires shapes"),
+            ("valid_shape", 4, 1, "physical valid_shape to equal shapes"),
+        ],
+    )
+    def test_blocked_mx_load_rejects_noncanonical_geometry(self, field, index, value, match):
+        geometry = {
+            "tensor_shape": [1, 2, 2, 16, 2],
+            "offsets": [0, 0, 0, 0, 0],
+            "shapes": [1, 1, 1, 16, 2],
+            "valid_shape": [1, 1, 1, 16, 2],
+        }
+        geometry[field][index] = value
+        tensor = _mx_blocked_tensor_var("s", geometry["tensor_shape"])
+        with pytest.raises(ValueError, match=match):
+            tile.load(
+                tensor,
+                geometry["offsets"],
+                geometry["shapes"],
+                valid_shape=geometry["valid_shape"],
+                target_memory=ir.MemorySpace.Mat,
+            )
+
+    def test_blocked_mx_load_rejects_dynamic_tensor_block_count(self):
+        span = ir.Span.unknown()
+        blocks = ir.Var("blocks", ir.ScalarType(DataType.INDEX), span)
+        tensor = _mx_blocked_tensor_var("s", [1, blocks, 1, 16, 2])
+        with pytest.raises(ValueError, match=r"blocked MX-layout tensor requires tensor shape"):
+            tile.load(
+                tensor,
+                [0, 0, 0, 0, 0],
+                [1, 1, 1, 16, 2],
+                target_memory=ir.MemorySpace.Mat,
+            )
 
     def test_scale_move_rejects_non_scale_dtype(self):
         src = _tile_var(
@@ -377,12 +446,14 @@ class TestMxScaleMemSpaces:
             builder.return_stmt(scale)
 
         program = ir.Program([function.get_result()], "mx_load_codegen", span)
+        program = passes.block_mx_scale_tensor_views()(program)
+        program = passes.materialize_tensor_strides()(program)
         pto = codegen.PTOCodegen().generate(program)
-        # MX param views are skipped; tile.load owns the packed rank-5 view
-        # (EmitMxPhysicalView) because PTOAS logical mx_* expansion is incomplete.
+        # The ordinary tensor-view path emits the packed rank-5 descriptor after
+        # BlockMxScaleTensorViews and MaterializeTensorStrides establish its contract.
         assert pto.count("pto.make_tensor_view") == 1
         assert "pto.make_tensor_view %arg0" in pto
-        assert "mx5d_view" in pto
+        assert "mx5d_view" not in pto
         # Logical [16, 2] MX_A_ZZ -> physical [1, 16/16, 2/2, 16, 2]
         assert "shape = [%c1_index, %c1_index, %c1_index, %c16_index, %c2_index]" in pto
         assert "strides = [%c32_index, %c32_index, %c32_index, %c2_index, %c1_index]" in pto

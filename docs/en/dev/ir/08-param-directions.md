@@ -64,9 +64,9 @@ original failure class, and it is not closed; see
 
 | Stage | Pass | Question it answers |
 | ----- | ---- | ------------------- |
-| [Outlining](#1-outlining-passes-710) | 7 / 8 / 9 | What directions does the function I am *creating* have? |
-| [Caller propagation](#2-caller-propagation-pass-11) | 10 | A callee writes this argument — does my own parameter behind it become `Out`? |
-| [Wrapper recovery + call sites](#3-wrapper-recovery-and-call-sites-pass-39) | 37 | What is each wrapper's *effective* signature, and what direction does each call-site argument have? |
+| [Outlining](#1-outlining-passes-710) | 7 / 8 / 9 / 10 | What directions does the function I am *creating* have? |
+| [Caller propagation](#2-caller-propagation-pass-11) | 11 | A callee writes this argument — does my own parameter behind it become `Out`? |
+| [Wrapper recovery + call sites](#3-wrapper-recovery-and-call-sites-pass-40) | 40 | What is each wrapper's *effective* signature, and what direction does each call-site argument have? |
 | [Consistency warning](#4-consistency-warning-postpipeline) | PostPipeline | Does any parameter still read `In` while its body writes it? |
 
 ### 1. Outlining (passes 7–10)
@@ -117,7 +117,7 @@ So the argument is resolved to the buffer it owns — via `BufferRootCollector` 
 before the parameter lookup. An argument that *is* the parameter resolves to
 itself, so this generalises the identity lookup rather than replacing it.
 
-### 3. Wrapper recovery and call sites (pass 39)
+### 3. Wrapper recovery and call sites (pass 40)
 
 `DeriveCallDirections` runs in two parts.
 
@@ -137,7 +137,7 @@ consumer one source of truth: `callee->param_directions_`.
 `Output`, `OutputExisting`, `InOut`, `NoDep`, `Scalar` — which is what
 dependency analysis and codegen actually consume.
 
-See [Derive Call Directions](../passes/39-derive_call_directions.md).
+See [Derive Call Directions](../passes/40-derive_call_directions.md).
 
 ### 4. Consistency warning (PostPipeline)
 
@@ -147,9 +147,9 @@ registry effects and a callee's `param_directions_` — and reports where they
 contradict the parameter.
 
 It is a **warning, not an `IRProperty`**, and that is forced rather than chosen:
-the check must run after `DeriveCallDirections` (pass 39), and `InitMemRef`
-(pass 33) invalidates `SSAForm` with nothing re-establishing it, so no pipeline
-position is both after pass 39 and in SSA form. Its buffer lineage is therefore
+the check must run after `DeriveCallDirections` (pass 40), and `InitMemRef`
+(pass 34) invalidates `SSAForm` with nothing re-establishing it, so no pipeline
+position is both after pass 40 and in SSA form. Its buffer lineage is therefore
 best-effort across control flow.
 
 See [Verifier — InParamWritten](../passes/99-verifier.md#inparamwritten).
@@ -206,5 +206,5 @@ pinned as a passing test.
 - [Operator System](05-operators.md) — the declaration surface, in full.
 - [Outline InCore Scopes](../passes/09-outline_incore_scopes.md) — stage 1.
 - [Convert Tensor to Tile Ops](../passes/11-convert_tensor_to_tile_ops.md) — stage 2.
-- [Derive Call Directions](../passes/39-derive_call_directions.md) — stage 3.
+- [Derive Call Directions](../passes/40-derive_call_directions.md) — stage 3.
 - [IR Verifier](../passes/99-verifier.md) — stage 4.

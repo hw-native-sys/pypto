@@ -944,7 +944,7 @@ using SpmdScopeStmtPtr = std::shared_ptr<const SpmdScopeStmt>;
  * Unlike the legacy whole-InCore-scope split, this is a structural region that
  * may appear anywhere in an InCore body — inside a pl.range/pl.pipeline loop or
  * an if. The region body begins with `aiv_id = tile.get_subblock_idx()`. The
- * node is consumed and erased by LowerAutoVectorSplit (pass 20); never reaches
+ * node is consumed and erased by LowerAutoVectorSplit (pass 23); never reaches
  * codegen.
  *
  * A function holding at least one region is in MANUAL MODE: the regions are

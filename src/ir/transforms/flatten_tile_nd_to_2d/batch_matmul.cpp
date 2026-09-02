@@ -961,7 +961,7 @@ BatchMatmulAccResult LowerBatchMatmulAcc(const AssignStmtPtr& assign, const Call
 
   // Memory-space concerns (Vec/Acc round-trips on the acc operand, retargetable
   // producer promotion of the loop-carried tile.create, and matching TileView
-  // layout refresh) belong to InferTileMemorySpace (pass 17, runs immediately
+  // layout refresh) belong to InferTileMemorySpace (pass 20, runs immediately
   // after this pass). See:
   //   * DemandCollector — propagates the matmul_acc Acc input_constraint back
   //     through inherit-input ops.

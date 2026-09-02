@@ -129,7 +129,7 @@ accumulating matmul, so each honours the predicate through the one handler:
 The odd codes are validated against the tile's RUNTIME valid extent, not its
 physical box: an even box with an odd valid extent (16 with `valid_shape` 15)
 is exactly the case they exist for. `lane_stride` rides along only when
-[LowerAutoVectorSplit](../passes/22-lower_auto_vector_split.md) rebalanced a
+[LowerAutoVectorSplit](../passes/23-lower_auto_vector_split.md) rebalanced a
 ragged boundary; the runtime then cuts the lanes there instead of at the box
 half. Odd codes are rejected on `push_to_aic` / `pop_from_aiv`, mirroring PTO
 codegen — pto-isa has no odd Vector-to-Cube transport.

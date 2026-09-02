@@ -104,9 +104,9 @@ def test_remote_load_classifies_shared_even_once_its_memory_space_is_resolved():
     """remote_load stays SHARED — the known gap, pinned deliberately.
 
     ``InferTileMemorySpace`` resolves the destination tile to ``Mem.Vec``, so
-    the information needed to place this op precisely *is* available by pass 17.
+    the information needed to place this op precisely *is* available by pass 20.
     It is still not used: classifying from the result tile would also change
-    what ``LowerAutoVectorSplit`` (pass 20) does, where a VECTOR-affine leaf is
+    what ``LowerAutoVectorSplit`` (pass 23) does, where a VECTOR-affine leaf is
     routed into the split-halving machinery. That machinery shrinks the result
     type but has no rewrite for this op's ``offsets`` / ``shape`` tuples, so the
     request would stay full-width while the destination halved.
@@ -130,7 +130,7 @@ def test_remote_load_is_shared_before_memory_space_is_resolved():
     """SHARED before InferTileMemorySpace too — for the more basic reason.
 
     Here the result tile's ``memory_space`` is not even resolved yet, so no rule
-    could place the op regardless. Pinned separately from the post-pass-17 case
+    could place the op regardless. Pinned separately from the post-pass-20 case
     so that a future fix which only handles one of the two windows shows up as a
     single failing test rather than silently half-working.
     """
@@ -268,7 +268,7 @@ def test_region_placement_does_not_drag_cube_work_onto_the_vector_lane():
 def test_region_placement_is_a_no_op_for_ordinary_vector_compute():
     """VECTOR is already the answer; the stamp only confirms it.
 
-    Pass 20 does not stamp these (their memory spec already places them), but
+    Pass 23 does not stamp these (their memory spec already places them), but
     the attr is ordinary IR that a hand-written program may carry, so the
     override must still give a defined — and unchanged — answer.
     """

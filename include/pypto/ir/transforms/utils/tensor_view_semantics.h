@@ -28,6 +28,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 
 namespace pypto::ir::tensor_view_semantics {
@@ -398,9 +399,27 @@ inline std::vector<ExprPtr> BlockNzOffsets(const std::vector<ExprPtr>& offsets, 
   return blocked;
 }
 
+/// True when ``shape`` is in canonical blocked MX form:
+/// ``[1, positive block count, positive group count, 16, 2]``.
+///
+/// Structural only — callers assert that a tensor *tagged* MX has been
+/// blocked, never infer that a tensor *is* MX from shape alone.
+inline bool IsBlockedMxShape(const std::vector<ExprPtr>& shape) {
+  if (shape.size() != 5) return false;
+  auto batch = As<ConstInt>(shape[0]);
+  auto block_count = As<ConstInt>(shape[1]);
+  auto group_count = As<ConstInt>(shape[2]);
+  auto fractal_rows = As<ConstInt>(shape[3]);
+  auto fractal_cols = As<ConstInt>(shape[4]);
+  return batch && block_count && group_count && fractal_rows && fractal_cols && batch->value_ == 1 &&
+         block_count->value_ > 0 && group_count->value_ > 0 &&
+         fractal_rows->value_ == tile_view_semantics::kMXSFractalRows &&
+         fractal_cols->value_ == tile_view_semantics::kMXSFractalCols;
+}
+
 /// Build packed canonical strides for the given (shape, layout).
 ///
-/// Definitions (per RFC #1300 §2.3, amended for NZ):
+/// Definitions (per RFC #1300 §2.3, amended for NZ / MX):
 ///   ND : strides[n-1] = 1; strides[k] = strides[k+1] * shape[k+1]
 ///   DN : strides[n-2] = 1; strides[n-1] = shape[n-2];
 ///        strides[n-3] = shape[n-2] * shape[n-1];
@@ -411,6 +430,9 @@ inline std::vector<ExprPtr> BlockNzOffsets(const std::vector<ExprPtr>& offsets, 
 ///        ordinary row-major and match pto-isa's ``BaseShape2D<..., NZ>``
 ///        exactly. Callers must block the shape first — ``CheckNzViewIsBlocked``
 ///        enforces that invariant downstream.
+///   MX : row-major over the blocked rank-5 shape. Logical rank-2 MX strides
+///        are not physical GM addressing; callers must block first, and
+///        ``IsBlockedMxShape`` enforces that invariant downstream.
 ///
 /// Throws ``pypto::ValueError`` for DN layout with rank < 2.
 inline std::vector<ExprPtr> BuildLogicalStridesFromLayout(const std::vector<ExprPtr>& shape,
@@ -418,8 +440,7 @@ inline std::vector<ExprPtr> BuildLogicalStridesFromLayout(const std::vector<Expr
   size_t ndim = shape.size();
   if (ndim == 0) return {};
 
-  // NZ joins the row-major family once its shape is blocked — see the NZ note
-  // above and ``BlockNzShape``.
+  // NZ / MX join the row-major family once their shapes are blocked.
   if (layout == TensorLayout::ND || layout == TensorLayout::NZ || IsMxTensorLayout(layout)) {
     return BuildRowMajorStrides(shape);
   }

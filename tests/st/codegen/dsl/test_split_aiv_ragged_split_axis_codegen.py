@@ -105,7 +105,7 @@ def ragged_rows_nested(
     """The same crossing, with the store nested in a branch.
 
     The shard itself stays at region top level — both lanes must pop the slot —
-    but its consumer sits inside control flow that survives to pass 20 (a
+    but its consumer sits inside control flow that survives to pass 23 (a
     ``pl.range`` with a small constant trip count would be unrolled away long
     before then).
     """

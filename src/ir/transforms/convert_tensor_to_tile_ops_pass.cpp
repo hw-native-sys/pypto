@@ -251,12 +251,12 @@ using CachePolicyByParam = std::unordered_map<const Var*, int>;
 /**
  * @brief Resolve an InCore function's ``cache_policy`` attr to its param Vars.
  *
- * ``OutlineIncoreScopes`` (pass 8) records ``pl.set_cache_policy`` declarations
+ * ``OutlineIncoreScopes`` (pass 9) records ``pl.set_cache_policy`` declarations
  * as (param index, policy) pairs, because at that point the param Vars are
  * freshly minted. Here the indices are turned back into Var identities — the
  * form every load site below matches its source arg against — and the attr is
  * erased on the way out (see ``EraseCachePolicyAttr``): param indices are only
- * valid across passes 8..10, since later passes both append to and prepend onto
+ * valid across passes 9..11, since later passes both append to and prepend onto
  * param lists.
  */
 CachePolicyByParam BuildCachePolicyByParam(const FunctionPtr& func) {
@@ -2300,10 +2300,10 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
     //
     // With no demand recorded, leave `target_memory` *absent*. It used to be
     // hard-coded to Vec, which is a guess this pass is not equipped to make --
-    // it sees only the ops it converts, while InferTileMemorySpace (pass 17)
+    // it sees only the ops it converts, while InferTileMemorySpace (pass 20)
     // sees the whole function and places the tile from actual consumer demand.
     // An unset space is the IR's "not decided yet", so stating Vec here would
-    // overwrite a real answer with a default and make pass 17 honour it (it
+    // overwrite a real answer with a default and make pass 20 honour it (it
     // never overrides a present kwarg).
     auto entry_req = consumer_collector.GetConsumerReq(var.get());
     // An Acc demand is not a load target either (see BridgeInputSpaces): a

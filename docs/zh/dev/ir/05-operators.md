@@ -154,7 +154,7 @@ AIC 上的那份副本可能在 AIV 通路的 TPUT 尚未把该信号所释放�
 请把该标记读作「不得在第二个核上运行」，而不是「不幂等」。
 
 读取该维度的查询是 `IsNoDuplicate()`。它唯一的消费者是 `LowerAutoVectorSplit`
-（pass 22）的 `pl.split_aiv` 区域放置标记：该 pass 恰好把区域内的 no-duplicate 调用
+（pass 23）的 `pl.split_aiv` 区域放置标记：该 pass 恰好把区域内的 no-duplicate 调用
 钉在 AIV 通路上。没有任何 verifier 在这个维度上做拒绝。
 
 被 `set_core_affinity(...)` 固定在单条通路上的算子本来就不会被复制，因此无需该标记。
@@ -286,7 +286,7 @@ init 操作数。由于 `matmul_acc` 是原地操作（`set_output_reuses_input(
 
 「字面量」涵盖常量谓词到达 emitter 时的**两种**形态：DSL 写法 `init_cond=True`/
 `False` 到达时是 BOOL 类型的 `ConstInt`，而被更早的 pass 折叠过的谓词到达时是
-`ConstBool` —— 当 [`LowerPipelineLoops`](../passes/30-lower_pipeline_loops.md)
+`ConstBool` —— 当 [`LowerPipelineLoops`](../passes/31-lower_pipeline_loops.md)
 复制 K-loop *且*外层循环被消除、每个副本的索引成为字面量时，生成的 `ko == 0` 正是
 这种形态。两者都会直接选定一个分支；若 emitter 只折叠其中一种，未覆盖到的每个 K
 block 都会发出双倍 MAD。
@@ -639,7 +639,7 @@ layout 来自目标，因为它描述的是目标缓冲区如何分块，由
 `tile.move` 自己把目标 `memory_space` 打到推导出的类型上（参见
 [类型](02-types.md#tiletype) 中的 `TileType` 契约），因此当结果 view 与目标 space 的
 implicit view 一致时会折叠为 `nullopt` —— 这与
-[`InferTileMemorySpace`](../passes/19-infer_tile_memory_space.md) 为重新定型的 tile
+[`InferTileMemorySpace`](../passes/20-infer_tile_memory_space.md) 为重新定型的 tile
 刷新的 per-space implicit view 是同一套。
 
 `tile.move` 不支持原地执行：在同一 memory space 内，源和结果必须解析到不同地址。

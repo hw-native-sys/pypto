@@ -478,7 +478,7 @@ void CheckSingleTransportClass(const FunctionSplitFacts& facts, std::vector<Diag
 // NOT CHECKED, DELIBERATELY: "a once-only side effect (pld.system.notify) sits
 // outside every region in a mixed kernel". Such a check was written and then
 // removed, because it cannot deliver the guarantee its diagnostic would
-// promise. Pinning the op to the AIV lane (which the pass 20 placement stamp
+// promise. Pinning the op to the AIV lane (which the pass 23 placement stamp
 // does, and which is kept) removes the CUBE-lane copy — but the AIV function
 // carries `dual_aiv_dispatch`, so its body still runs on BOTH AIV sub-lanes.
 // An un-sharded notify therefore lands twice whether or not it is in a region,
@@ -523,7 +523,7 @@ class SplitAivStructuralVerifier : public IRVisitor {
   // wrapped every top-level region, and would silently stop rejecting anything
   // once it stopped.
   //
-  // Reporting here rather than at LowerAutoVectorSplit (pass 20) puts the
+  // Reporting here rather than at LowerAutoVectorSplit (pass 23) puts the
   // diagnostic 12 passes closer to the source; that pass keeps its own guard as
   // the backstop for a region behind a scope the lowering walks cannot enter.
   void VisitStmt_(const SplitAivScopeStmtPtr& op) override {

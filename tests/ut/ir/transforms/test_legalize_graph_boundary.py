@@ -48,7 +48,7 @@ def _legalize_outlined(program: ir.Program) -> ir.Program:
     feature while ``_legalize`` still passes.
 
     ``NormalizeReturnOrder`` is in the chain for the same reason. It runs at
-    pass 26 and this pass at 45, and it is what establishes
+    pass 28 and this pass at 47, and it is what establishes
     ``IRProperty::ReturnParamsExplicit`` — the pointer-identity return -> param
     map the pass reads to carry boundary provenance across an in-place call
     (``tmp = kernel(a, tmp)``). Without it that map answers nullopt for every

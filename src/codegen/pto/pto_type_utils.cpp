@@ -199,7 +199,7 @@ void CheckBoxedTileExtents(const ir::TileType& tile_type, const TileTypeComponen
 
   // `ExtractTileTypeInfo` falls back to its struct default for a dimension that
   // is not a `ConstInt`, so a dynamic physical extent would be checked -- and
-  // emitted -- as that placeholder instead of as itself. `InitMemRef` (pass 32)
+  // emitted -- as that placeholder instead of as itself. `InitMemRef` (pass 34)
   // already refuses a dynamic `TileType::shape_`, so reaching codegen with one
   // is a pass bug, not user input.
   for (const auto& dim : tile_type.shape_) {

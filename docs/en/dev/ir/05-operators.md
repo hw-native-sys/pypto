@@ -178,7 +178,7 @@ vector lane would let the matmul race past the peer data it waits on. Read the
 flag as "must not run on a second core", not as "not idempotent".
 
 `IsNoDuplicate()` reads the axis. Its only consumer is `LowerAutoVectorSplit`'s
-`pl.split_aiv` region placement stamp (pass 20), which pins exactly the
+`pl.split_aiv` region placement stamp (pass 23), which pins exactly the
 no-duplicate calls inside a region to the AIV lane. No verifier rejects anything
 on this axis.
 
@@ -324,7 +324,7 @@ yields no value — no phi is materialized on the Acc tile.
 "Literal" covers **both** spellings a constant predicate arrives in: a DSL
 `init_cond=True`/`False` reaches the emitter as a BOOL-typed `ConstInt`, while a
 predicate an earlier pass folded reaches it as a `ConstBool` — which is what the
-generated `ko == 0` becomes when [`LowerPipelineLoops`](../passes/30-lower_pipeline_loops.md)
+generated `ko == 0` becomes when [`LowerPipelineLoops`](../passes/31-lower_pipeline_loops.md)
 replicates the K-loop *and* the enclosing loop is eliminated, so each replica's
 index is a literal. Both pick an arm outright, and an emitter that folded only
 one of the two would double the MADs of every K block it missed.
@@ -711,7 +711,7 @@ whose implicit `blayout` is `col_major`.
 `tile.move` stamps the destination `memory_space` itself (see the `TileType`
 contract in [Types](02-types.md#tiletype)), so a result view matching the
 destination's implicit view collapses to `nullopt` — the same per-space view
-[`InferTileMemorySpace`](../passes/19-infer_tile_memory_space.md) refreshes a
+[`InferTileMemorySpace`](../passes/20-infer_tile_memory_space.md) refreshes a
 retyped tile to.
 
 `tile.move` is not in-place safe: within one memory space, its source and result

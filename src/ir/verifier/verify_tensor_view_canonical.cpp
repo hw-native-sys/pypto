@@ -31,7 +31,7 @@ namespace ir {
 
 namespace {
 
-/// Walks every Var/IterArg/Call/Function-param/return type reachable from a
+/// Walks every Var/IterArg/Call/Submit/Function-param/return type reachable from a
 /// program and asserts the tensor-like canonical-view invariant on each
 /// TensorType / DistributedTensorType (including nested TupleTypes).
 class TensorViewCanonicalVisitor : public IRVisitor {
@@ -76,6 +76,11 @@ class TensorViewCanonicalVisitor : public IRVisitor {
     IRVisitor::VisitExpr_(op);
   }
 
+  void VisitExpr_(const SubmitPtr& op) override {
+    if (op) CheckType(op->GetType(), op->span_);
+    IRVisitor::VisitExpr_(op);
+  }
+
  private:
   void CheckTensorType(const TensorTypePtr& tensor_type, const Span& span) {
     if (!tensor_type) return;
@@ -93,6 +98,13 @@ class TensorViewCanonicalVisitor : public IRVisitor {
       Emit(span,
            "TensorType has an unblocked NZ layout (expected the blocked rank-(r+2) shape with "
            "trailing dims [16, c0] produced by BlockNzTensorViews)");
+      return;
+    }
+    if (IsMxTensorLayout(view.layout) && !tensor_view_semantics::IsBlockedMxShape(tensor_type->shape_)) {
+      Emit(span,
+           "TensorType has an unblocked MX layout (expected the blocked rank-5 shape "
+           "[1, positive block count, positive group count, 16, 2] produced by "
+           "BlockMxScaleTensorViews)");
       return;
     }
 

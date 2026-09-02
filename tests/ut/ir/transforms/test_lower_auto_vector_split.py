@@ -2675,7 +2675,7 @@ def _expected_region_program(stmts, params, return_types, *, name="split_explici
 
 
 def test_explicit_region_erased():
-    """Pass 21 consumes the region: no SplitAivScopeStmt survives, and the func is
+    """Pass 23 consumes the region: no SplitAivScopeStmt survives, and the func is
     stamped split_aiv + split_aiv_region_validated. The region body keeps its own
     ``aiv_id`` and gains the injected ``subblock_idx`` + halved load (Expected)."""
     span = ir.Span.unknown()
@@ -3853,7 +3853,7 @@ def test_scope_inside_region_body_is_rejected():
 
 
 def test_outlined_region_still_lowers_and_stamps():
-    """The canonical Opaque form is unaffected: pass 7 outlines, pass 18 lowers.
+    """The canonical Opaque form is unaffected: pass 7 outlines, pass 23 lowers.
 
     Guards the boundary of the rejection above — the scope must be gone by the
     time this pass runs, and when it is, the region lowers and the function is

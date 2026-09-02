@@ -885,7 +885,7 @@ class TestConvertTensorToTileOps:
         """``pld.tensor.allreduce(target, signal, op=...)`` upgrades both
         ``target`` and ``signal`` params from In to InOut.
 
-        ConvertTensorToTileOps runs upstream of LowerCompositeOps (pass 12),
+        ConvertTensorToTileOps runs upstream of LowerCompositeOps (pass 13),
         so it sees ``pld.tensor.allreduce`` as a single composite Call before
         the ready-plus-per-chunk decomposition exists. Without the explicit
         ``has_read | has_write`` marking, the param-direction analysis
@@ -5926,7 +5926,7 @@ class TestWindowSliceIncoreConversion:
     def test_barrier_upgrades_signal_to_inout(self):
         """``pld.tensor.barrier(signal)`` upgrades ``signal`` from In to InOut.
 
-        ConvertTensorToTileOps runs upstream of LowerCompositeOps (pass 12);
+        ConvertTensorToTileOps runs upstream of LowerCompositeOps (pass 13);
         without the explicit has_read|has_write marking, the param-direction
         analysis would leave the window param as In and a downstream reader
         would miss the RAW edge."""
@@ -6187,7 +6187,7 @@ class TestWindowSliceIncoreConversion:
 def _incore_only(program: ir.Program) -> ir.Program:
     """The program's single InCore function, as a one-function Program.
 
-    Expected covers that function only; the Orchestration caller pass 8 mints
+    Expected covers that function only; the Orchestration caller pass 9 mints
     alongside it is OutlineIncoreScopes' output, not this pass's.
     """
     incore = [f for f in program.functions.values() if f.func_type == ir.FunctionType.InCore]
@@ -6205,7 +6205,7 @@ class TestConvertCrossCoreSplitOps:
 
     Each Before is authored the way a user writes one — a plain ``@pl.function``
     (Opaque) holding a ``pl.at(level=CORE_GROUP)`` scope — and the pass input is
-    then **derived by running OutlineIncoreScopes** (pass 8). That is what makes
+    then **derived by running OutlineIncoreScopes** (pass 9). That is what makes
     the input the shape this pass really sees at pass 10: an InCore function
     whose region is *bare*, with the scope already consumed. Hand-writing the
     InCore function with a ``pl.at`` still around the region (as these tests
@@ -6223,13 +6223,13 @@ class TestConvertCrossCoreSplitOps:
     ``pl.tile.aiv_shard(x)`` / ``pl.tile.aic_gather(x)`` without ``split=``.
 
     Expected covers the InCore function only (see :func:`_incore_only`); the
-    Orchestration caller pass 8 mints alongside it is OutlineIncoreScopes'
+    Orchestration caller pass 9 mints alongside it is OutlineIncoreScopes'
     output, not this pass's.
     """
 
     @staticmethod
     def _outline(source: ir.Program) -> ir.Program:
-        """Derive this pass's input by running OutlineIncoreScopes (pass 8)."""
+        """Derive this pass's input by running OutlineIncoreScopes (pass 9)."""
         return passes.outline_incore_scopes()(source)
 
     @classmethod
@@ -6703,14 +6703,14 @@ class TestSynthesizedOpSpans:
 class TestCachePolicyConversion:
     """``pl.set_cache_policy`` reaches this pass as the outlined-function attr
     ``cache_policy`` — ``(param index, CachePolicy-as-int)`` pairs stamped by
-    OutlineIncoreScopes (pass 8) — and leaves it as a ``cache`` kwarg on every
+    OutlineIncoreScopes (pass 9) — and leaves it as a ``cache`` kwarg on every
     ``tile.load`` that reads a declared param. The attr itself is erased here:
     its indices go stale the moment a later pass grows the param list, so
     nothing downstream may see it.
 
     Each Before is authored in the shape pass 8 really hands over: a *bare*
     InCore function (the scope already consumed) carrying the resolved attr via
-    ``pl.func_attr``, plus the Orchestration caller pass 8 mints beside it.
+    ``pl.func_attr``, plus the Orchestration caller pass 9 mints beside it.
     Writing the ``pl.at`` scope here instead would re-test pass 8's translation
     rather than this pass's consumption of its output.
 

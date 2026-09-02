@@ -538,6 +538,16 @@ Pass OptimizeOrchTensors();
 Pass BlockNzTensorViews();
 
 /**
+ * @brief Rewrite logical MX scale tensor views into A5's packed rank-5 form
+ *
+ * Converts MX_A_ZZ ``[M, G]`` and MX_B_NN ``[G, N]`` TensorTypes and their
+ * tile.load windows to ``[1, block/16, group/2, 16, 2]``. Symbolic offsets
+ * are accepted only when their alignment and non-negativity can be proven.
+ * Must run after FlattenTileNdTo2D and before MaterializeTensorStrides.
+ */
+Pass BlockMxScaleTensorViews();
+
+/**
  * @brief Flatten ND tile ops to 2D in InCore functions
  *
  * Merges all dimensions except the last into a single dimension.

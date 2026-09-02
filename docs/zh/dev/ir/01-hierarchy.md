@@ -202,7 +202,7 @@ for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 | **ClusterScopeStmt** | `name_hint_`, `body_` | Cluster 区域；由 `OutlineClusterScopes` 提取为 `Function(Group)` |
 | **HierarchyScopeStmt** | `name_hint_`, `body_`, `level_`, `role_`（可选） | 给定 Level/Role 的流水线阶段区域 |
 | **SpmdScopeStmt** | `name_hint_`, `body_`, `core_num_`（整型 `Expr`）, `sync_start_` | SPMD 启动区域；提取为 `Function(Spmd)` |
-| **SplitAivScopeStmt** | `name_hint_`, `body_`, `split_`（`SplitMode`，永不为 `None`）, `count_`（= 2） | 显式 AIV 切分区域（`pl.split_aiv`）；可嵌套；由 `LowerAutoVectorSplit`（pass 22）消费并擦除 |
+| **SplitAivScopeStmt** | `name_hint_`, `body_`, `split_`（`SplitMode`，永不为 `None`）, `count_`（= 2） | 显式 AIV 切分区域（`pl.split_aiv`）；可嵌套；由 `LowerAutoVectorSplit`（pass 23）消费并擦除 |
 | **GraphScopeStmt** | `name_hint_`, `body_` | 可录制的编排区域（`pl.graph`）；`name_hint_` 必填 —— 它决定 `OutlineGraphScopes` 提取出的函数名，进而决定运行时的 graph key |
 | **RuntimeScopeStmt** | `name_hint_`, `body_`, `manual_` | Orchestrator 运行时区域（`SIMPLER_SCOPE`）；`manual_=true` 选择手工依赖模式 |
 | **YieldStmt** | `values_` | 在循环迭代中产出值 |
@@ -336,17 +336,17 @@ runtime = ir.RuntimeScopeStmt(manual=True, name_hint="", body=body, span=span)
     与 `@pl.jit.graph` 在任何后续 Pass 看到它们之前就已汇聚
   - `SplitAivScopeStmt` **不被提取**：它对 SSA 与各 outliner 透明（保留在被
     提取出的 `Function(InCore)` 体内），随后由 `LowerAutoVectorSplit`
-    （pass 22）消费并**擦除**。它永不到达 `ExpandMixedKernel`（pass 23）或
+    （pass 23）消费并**擦除**。它永不到达 `ExpandMixedKernel`（pass 24）或
     codegen——下游只看到逐算子的 `aiv_shard` / `aic_gather` / `tpush` /
     `tpop` 标记；若有 `SplitAivScopeStmt` 残留到此，PTO codegen 守卫会显式
     报错。
   - `SplitAivScopeStmt` **可嵌套**：经由通用的 `BeginScope`/`EndScope` 构建，
     可置于任意父上下文（`pl.range` / `pl.pipeline` 循环或 `if`）。同级区域可
-    携带**不同**的 `split_` 模式（多模式）；pass 20 的减半是按区域局部进行
+    携带**不同**的 `split_` 模式（多模式）；pass 23 的减半是按区域局部进行
     的，因此每个区域独立减半。持有至少一个区域的函数进入**手动模式**：区域对
     向量计算的放置具有决定权，`AivSplitValid` 验证器会拒绝所有区域之外的向量
     计算（每个全宽阶段请写一个 `mode=None` 区域，参见
-    [LowerAutoVectorSplit](../passes/22-lower_auto_vector_split.md)）。顶层
+    [LowerAutoVectorSplit](../passes/23-lower_auto_vector_split.md)）。顶层
     `for aiv_id in pl.split_aiv(...)` 会被 parser 包裹在外层
     `InCoreScopeStmt` 中（以便 `OutlineIncoreScopes` 提取），即
     `InCoreScopeStmt{ body: SplitAivScopeStmt{...} }`。

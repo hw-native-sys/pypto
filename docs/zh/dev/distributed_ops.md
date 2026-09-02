@@ -89,7 +89,7 @@ SSA 值而存在。
 该标记与亲和性正交（它约束的是复制而非放置位置）。它唯一的消费者是
 `LowerAutoVectorSplit` 的 `pl.split_aiv` 区域放置标记：该 pass 把区域内的
 no-duplicate 调用钉在 AIV 通路上；参见 `docs/zh/dev/ir/05-operators.md` 与
-`docs/zh/dev/passes/22-lower_auto_vector_split.md`。
+`docs/zh/dev/passes/23-lower_auto_vector_split.md`。
 
 **写在所有区域之外的通信算子仍然会被复制到两条通路上，且没有任何诊断会提示这一点。**
 把通信阶段放进 `pl.split_aiv` 区域是作者的职责；参见
@@ -458,7 +458,7 @@ chunk，Pass 会保留该元数据，并沿用单矩形路径只归约这个矩�
 
 host-orchestrator 用户代码可以省略 `signal`，包括在 `for` / `while`
 循环内；
-[`SynthesizeAllReduceSignals`](passes/42-synthesize_allreduce_signals.md) 阶段会为该 call 插入 private INT32 signal window，
+[`SynthesizeAllReduceSignals`](passes/43-synthesize_allreduce_signals.md) 阶段会为该 call 插入 private INT32 signal window，
 语义 shape 为 `[world_size, core_num]`（仅 mesh 模式 — `mode="ring"` 必须显式传入
 signal）。该阶段会先插入 standalone `world_size = pld.world_size()` binding，
 再用该变量构造 buffer size 和 window shape。自清理协议（参见
@@ -604,10 +604,10 @@ peer 算术；而*远程*操作数
 ## 流水线集成
 
 通信域与其槽位分配由
-[`MaterializeCommDomainScopes`](passes/43-materialize_comm_domain_scopes.md) pass 完成。该 pass 将每个
+[`MaterializeCommDomainScopes`](passes/44-materialize_comm_domain_scopes.md) pass 完成。该 pass 将每个
 host_orch 函数体包裹进嵌套的 `CommDomainScopeStmt` 节点（按推断出的通信域逐层嵌套），并产生运行时据以
 绑定物理缓冲的按窗口 `WindowBuffer` 记录。
-随后 [`LowerHostTensorCollectives`](passes/44-lower_host_tensor_collectives.md) 会在最终
+随后 [`LowerHostTensorCollectives`](passes/45-lower_host_tensor_collectives.md) 会在最终
 `Simplify` 之前把 host-level tensor collectives 降为内部 builtin chip dispatch。
 
 ## 测试

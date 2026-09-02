@@ -1138,7 +1138,7 @@ Pass InferTileMemorySpace() {
     for (const auto& [gvar, func] : program->functions_) {
       // Every InCore *variant*, not just InCore. AIC and AIV are user-writable
       // function types, not only pass-generated ones (ExpandMixedKernel creates
-      // them at pass 21, well after this pass), so a hand-authored AIV kernel
+      // them at pass 24, well after this pass), so a hand-authored AIV kernel
       // must have its tiles placed here too. Gating on InCore alone left those
       // tiles unset, and InitMemRef then defaulted them to DDR -- yielding a
       // vector op reading a DDR operand, which no hardware does.

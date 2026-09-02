@@ -731,7 +731,7 @@ class PTOCodegen : public CodegenBase {
  protected:
   // Statement-entry dispatch guard: rejects any SplitAivScopeStmt that survived
   // to PTO codegen (it must be lowered and erased by LowerAutoVectorSplit,
-  // pass 21). The base visitor would otherwise silently unwrap it.
+  // pass 23). The base visitor would otherwise silently unwrap it.
   void VisitStmt(const ir::StmtPtr& stmt) override;
 
   // Override visitor methods for code generation - Statements

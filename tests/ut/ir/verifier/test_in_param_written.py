@@ -30,7 +30,7 @@ consistent proves nothing. Calling it on unlowered IR is what exercises the
 
 **Best-effort, not a property.** This is a warning and nothing more. It runs
 `PostPipeline`, which is the earliest point after ``DeriveCallDirections``
-(pass 37) — and ``InitMemRef`` (pass 31) invalidates ``SSAForm`` with nothing
+(pass 40) — and ``InitMemRef`` (pass 34) invalidates ``SSAForm`` with nothing
 re-establishing it, so the IR it sees is not in SSA form and no pipeline
 position satisfies both. The buffer lineage has no merging at a join, which is
 exact only when each name has one definition, so it can both miss a write and

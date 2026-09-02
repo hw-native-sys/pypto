@@ -154,7 +154,7 @@ The packed canonical formulas (`BuildLogicalStridesFromLayout` in
   canonical for the carried layout.
 - **Explicit** — every dimension's stride is spelled out.
 
-The [`MaterializeTensorStrides`](../passes/32-materialize_tensor_strides.md)
+The [`MaterializeTensorStrides`](../passes/33-materialize_tensor_strides.md)
 pass rewrites every implicit form to its explicit packed canonical so
 codegen sees a single contract. The `TensorViewCanonical` `IRProperty` +
 verifier enforces this:

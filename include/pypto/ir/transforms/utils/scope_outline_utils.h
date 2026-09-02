@@ -229,7 +229,7 @@ class ScopeOutliner : public IRMutator {
    * tensor denotes the same GM buffer. The def-use edge is still wrong, so each
    * override rebuilds the statement with a real carry: the value on entry seeds a
    * new ``IterArg``, the body yields the fresh Var, and a new ``return_var``
-   * becomes the value visible afterwards. ``ClassifyIterArgCarry`` (pass 47) sees
+   * becomes the value visible afterwards. ``ClassifyIterArgCarry`` (pass 49) sees
    * the yield in the iter_arg's alias class (the Out-call and TupleGetItem rules)
    * and marks the carry *trivial*, so codegen is unchanged.
    */

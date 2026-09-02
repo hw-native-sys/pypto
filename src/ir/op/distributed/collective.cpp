@@ -14,7 +14,7 @@
  * @brief Distributed tensor-level collective ops — pld.tensor.* composites and builtin.tensor.* host
  * dispatches.
  *
- * Composite collective ops that lower through LowerCompositeOps (pass 12)
+ * Composite collective ops that lower through LowerCompositeOps (pass 13)
  * into notify/wait/remote_load/store primitives (InCore path), or through
  * LowerHostTensorCollectives into builtin.tensor.* chip dispatches (HOST path).
  * Each op registers a type deducer and an op description; the actual IR

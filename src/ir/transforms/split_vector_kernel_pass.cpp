@@ -646,7 +646,7 @@ Pass SplitVectorKernel() {
               WithSplitAttrs(func, explicit_mode.value(), func->func_type_ == FunctionType::AIV);
         } else {
           // Multi-mode explicit split_aiv: the per-region modes were lowered and
-          // erased by LowerAutoVectorSplit (pass 20); no single function-level mode
+          // erased by LowerAutoVectorSplit (pass 23); no single function-level mode
           // survives. The authoritative per-op "split" ints already sit on the
           // tpop/tpush pairs, so only the mode-agnostic dual_aiv_dispatch bool needs
           // stamping here (all RequiresDualAivDispatch consults).

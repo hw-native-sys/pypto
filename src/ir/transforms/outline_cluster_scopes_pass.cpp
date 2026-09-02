@@ -224,7 +224,7 @@ class LaunchSpecStamper : public IRMutator {
 ///
 /// A ``with pl.at(level=pl.Level.CORE_GROUP, predicate=...):`` nested inside
 /// ``pl.cluster()`` / ``pl.spmd()`` is outlined into a ``Submit`` by
-/// ``OutlineIncoreScopes`` (pass 8) and then swept into the wrapper function
+/// ``OutlineIncoreScopes`` (pass 9) and then swept into the wrapper function
 /// here. Orchestration codegen builds the task from the *outer* wrapper call
 /// (``BuildSpmdCallDispatchPlan`` / ``BuildAivOnlyGroupDispatchPlan`` /
 /// ``BuildMixedGroupDispatchPlan``), so the inner predicate has no runtime

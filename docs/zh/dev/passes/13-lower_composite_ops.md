@@ -55,7 +55,7 @@ src/ir/transforms/lower_composite_ops_pass.cpp
 
 降级创建 dtype 与源一致的 `max` / `scaling` 只写 workspace tile，再 `Bind` 值返回的 `tile.tquant_mx_raw(src, max, scaling)`，用 `TupleGetItem` 投影出 `TupleType{INT8 dst, UINT8 exp}`（与 `tile.gather_compare` 相同的 SSA 形态）。codegen 经 `ResolveTupleResultElements` 解析投影并发射带四个 outs 的 `pto.tquant.mx`。公开 `group_axis` 对齐 PTOAS `grpAxis`：axis1 保持 `[M,K]` 并返回 scale `[M,K/32]`；axis0 先把 `[N,K]` 转置为 `[K,N]` 再返回 `[K/32,N]`。两种形式再 `Bind` 值返回的 `tile.tmov_x2zz(exp, tmp)`。Axis1 tmp 容量为 `64 + ceil(rows/16)*cols` 字节（通常 32 字节对齐）；axis0 使用 `TMovDnTo2Zz` 所需的最小 32 字节 Vec pad。Axis0 遵循 pto-isa `TMovDnTo2Zz`（pin `be5ccb76`）：DN `[M̂,N]` → ZZ `[N,M̂]` row/row，再经零拷贝 `tile.transpose_view` 得到公开 `[M̂,N]` col/col scale。最后补上零拷贝 FP8 data alias 与 FP8E8M0 scale alias。workspace 参数上的 Write effect 保证公开结果未消费时 Call 也不会被 DCE 删掉。
 
-公开用法仍需把 `quant_mx` 与 `matmul_mx` 拆成独立 AIV/AIC kernel，经 GM 暂存；同一 InCore mixed task 内自动传 quant data+scale 留待后续（见 [ExpandMixedKernel](23-expand_mixed_kernel.md)）。
+公开用法仍需把 `quant_mx` 与 `matmul_mx` 拆成独立 AIV/AIC kernel，经 GM 暂存；同一 InCore mixed task 内自动传 quant data+scale 留待后续（见 [ExpandMixedKernel](24-expand_mixed_kernel.md)）。
 
 mutator 把本 Pass 产出的 `MakeTuple`（及其 SSA alias）记入私有 `composite_tuples_`，再折叠 `TupleGetItem`，避免滥用全局 `var_remap_` 去 inline 任意 `v = (a, b)`。内部 `tile.tquant_mx_raw` / `tile.tmov_x2zz` 不注册为组合规则，Pass 仍然幂等。
 

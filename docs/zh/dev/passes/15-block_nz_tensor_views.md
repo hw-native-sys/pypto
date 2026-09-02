@@ -42,7 +42,7 @@ strides = [..., C*R,  R*c0, 16*c0, c0, 1]
 
 因此一旦 shape 被分块，NZ 就是行主序家族的普通成员，
 `BuildLogicalStridesFromLayout` 通过与 ND 相同的 `BuildRowMajorStrides` 路径处理
-它。stride 由 `MaterializeTensorStrides`（pass 32）稍后填充；本 pass 只改写 shape。
+它。stride 由 `MaterializeTensorStrides`（pass 33）稍后填充；本 pass 只改写 shape。
 
 这修正了 RFC #1300 中"NZ 没有 logical-stride 表示"的结论——该结论对逻辑 2-D shape
 成立，对分块后的 rank-(r+2) shape 不成立。
@@ -225,5 +225,5 @@ PTOAS 通过结构推断 `make_tensor_view` 的 layout。分块 NZ 与 ND 在结
 ## 相关文档
 
 - [14-flatten_tile_nd_to_2d.md](14-flatten_tile_nd_to_2d.md) —— 对 NZ 源跳过 ND2NZ 窗口塌缩
-- [32-materialize_tensor_strides.md](32-materialize_tensor_strides.md) —— 填充分块 NZ stride
+- [32-materialize_tensor_strides.md](33-materialize_tensor_strides.md) —— 填充分块 NZ stride
 - [../ir/02-types.md](../ir/02-types.md) —— `TensorLayout` 与 `TensorView`

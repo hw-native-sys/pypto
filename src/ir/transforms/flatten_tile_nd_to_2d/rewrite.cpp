@@ -160,9 +160,9 @@ VarPtr EmitFlattenedTileAlloc(const CallPtr& call, const AssignStmtPtr& assign,
   }
 
   // The accumulator's only legal home is Acc, and stating it here (rather
-  // than leaving it to InferTileMemorySpace, pass 17) is what makes the
+  // than leaving it to InferTileMemorySpace, pass 20) is what makes the
   // per-page windows an Acc parent's windows from pass 13 onward — so
-  // CanonicalizeTileSlice (pass 16) sees them as accumulator windows and
+  // CanonicalizeTileSlice (pass 19) sees them as accumulator windows and
   // leaves them alone instead of materializing them as Vec extracts.
   auto create_kwargs = call->kwargs_;
   if (acc_plan) {

@@ -121,7 +121,7 @@ Easy to get wrong:
 - **`args_[i] ↔ params_[i]` breaks once `gap > 0` and `ctx > 0` coexist.** For
   params `[x, omitted_out, ctx]` the args are `[x, ctx]`, so `args_[1]` binds
   `params_[2]`, and indexing `param_directions_` by arg index is wrong.
-  `DeriveCallDirections` is safe only by ordering: pass 37 runs before
+  `DeriveCallDirections` is safe only by ordering: pass 40 runs before
   `MaterializeDistTensorCtx` (43) makes `ctx` non-zero.
 - **The gap comes from user source, not a pass.** `pl.submit(self.kernel, x)`
   against a kernel declaring a trailing `pl.Out` parses fine and carries the

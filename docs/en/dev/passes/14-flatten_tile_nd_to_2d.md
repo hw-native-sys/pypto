@@ -57,7 +57,7 @@ Per-statement handling:
 | `tile.assemble` (>2D target) | Fold the ND offset into the flattened `(row, col)` space with the same row-major collapse `tile.load` applies to its tensor-rank offsets (`row = ((o0*d1 + o1)*d2 + o2)*… + o[k-2]`, `col = o[k-1]`); the tile operands themselves are flattened by their defining ops. Requires source, target and offset to share one rank, and the written region to collapse to a contiguous row band (`IsRowMajorCollapseContiguous`) — both rejected in the precondition phase otherwise. Without the fold the offset would keep its ND rank on a 2D tile, and codegen (which reads `elements[0]`/`elements[1]` positionally and ignores the rest) would silently place the write at the wrong address |
 | `tile.transpose` | Sole owner of `pto.ttrans` scratch materialization. Arrives 3-arg (input, axis1, axis2). **2D**: create one scratch tile (shape = SOURCE page, in the input's memory space) and emit the codegen-ready 4-arg `tile.transpose(in, a1, a2, scratch)`. **>2D** (last-two-axes swap): unroll into per-batch 2D transposes, each a 4-arg form with scratch sliced from a flat `[batch*A, B]` pool, assembled into the merged 2D output. A batch-axis swap is a user error |
 | `tile.batch_matmul` | Expand to per-batch 2D `tile.matmul`, honoring batch broadcast. A b_trans/a_trans operand arrives as a zero-copy `tile.transpose_view` over a natural load (no transpose-at-load, no copy); the tile-level op carries no transpose semantic. Each operand is handled identically (see operand handling below). **When the result is itself a batched accumulator** (a downstream `tile.batch_matmul_acc` keeps writing it), the pages are written into ONE column-packed `Acc` tile with `tile.matmul_acc(window, lhs_b, rhs_b, init_cond=True)` instead — see [Batched accumulators pack along columns](#batched-accumulators-pack-along-columns) |
-| `tile.batch_matmul_acc` | Expand to per-batch 2D `tile.matmul_acc`, taking one window of the (already-flattened) accumulator per batch index: the **column** window `[0, b*N]` of an `[M, B*N]` tile when the chain is column-packed, the legacy **row** window `[b*M, 0]` of a `[B*M, N]` tile otherwise — see [Batched accumulators pack along columns](#batched-accumulators-pack-along-columns). Memory-space decisions the pass does not already state (Vec/Acc round-trips on a row-packed accumulator, retargetable producer promotion of an upstream `tile.create`, TileView refresh) are deferred to `InferTileMemorySpace` (pass 19) — flatten emits no inline `tile.move` |
+| `tile.batch_matmul_acc` | Expand to per-batch 2D `tile.matmul_acc`, taking one window of the (already-flattened) accumulator per batch index: the **column** window `[0, b*N]` of an `[M, B*N]` tile when the chain is column-packed, the legacy **row** window `[b*M, 0]` of a `[B*M, N]` tile otherwise — see [Batched accumulators pack along columns](#batched-accumulators-pack-along-columns). Memory-space decisions the pass does not already state (Vec/Acc round-trips on a row-packed accumulator, retargetable producer promotion of an upstream `tile.create`, TileView refresh) are deferred to `InferTileMemorySpace` (pass 20) — flatten emits no inline `tile.move` |
 | Other tile ops (>2D) | Substitute vars, re-create with 2D types |
 | 1D/2D tile ops | Unchanged |
 
@@ -122,13 +122,13 @@ the parent's row extent, not by the window's. pto-isa's MAD writes its `[m, n]`
 destination compactly from a bare pointer and carries no destination stride
 (hw-native-sys/pto-isa#253), so the row-packed `[B*M, N]` shape has no correct
 lowering at all: only the first 16 columns of each page would land right. That is
-the shape `CanonicalizeTileSlice` (pass 18) rejects; see
-[18-canonicalize_tile_slice.md](18-canonicalize_tile_slice.md).
+the shape `CanonicalizeTileSlice` (pass 19) rejects; see
+[18-canonicalize_tile_slice.md](19-canonicalize_tile_slice.md).
 
 A **column** window spans the parent's full row extent, so the window's own
 compact geometry and the parent's coincide and the discarded stride cannot
 matter. `GetSliceAccumulatorGeometry` gives exactly this shape its NZ-exact byte
-offset (see [33-init_memref.md](33-init_memref.md)).
+offset (see [33-init_memref.md](34-init_memref.md)).
 
 ### What changes on the producer
 

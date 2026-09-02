@@ -531,6 +531,19 @@ def block_nz_tensor_views() -> Pass:
     argument ranks cannot both be printed.
     """
 
+def block_mx_scale_tensor_views() -> Pass:
+    """Create a pass that physicalizes logical MX scale tensor views.
+
+    ``MX_A_ZZ [M, G]`` and ``MX_B_NN [G, N]`` become the packed rank-5
+    ``[1, block/16, group/2, 16, 2]`` form required by A5. The pass rewrites
+    ``tile.load`` windows and ND/MX backing aliases while preserving logical
+    tile result types. Symbolic offsets must be provably aligned and
+    non-negative.
+
+    Must run after ``flatten_tile_nd_to_2d`` and before
+    ``materialize_tensor_strides``.
+    """
+
 def flatten_tile_nd_to_2d() -> Pass:
     """Create a pass that flattens ND tile ops to 2D in InCore functions."""
 
@@ -1038,6 +1051,7 @@ __all__ = [
     "convert_tensor_to_tile_ops",
     "optimize_orch_tensors",
     "block_nz_tensor_views",
+    "block_mx_scale_tensor_views",
     "flatten_tile_nd_to_2d",
     "legalize_tile_cast",
     "auto_tile_matmul_l0",

@@ -1006,7 +1006,7 @@ class SplitAivContext:
     InCore body — inside a ``pl.range`` / ``pl.pipeline`` loop or an ``if``. The
     loop variable is bound to ``pl.tile.get_subblock_idx()`` (the AIV lane /
     sub-core index) at the region head. The node is consumed and erased by
-    LowerAutoVectorSplit (pass 20); it never reaches codegen.
+    LowerAutoVectorSplit (pass 23); it never reaches codegen.
     """
 
     def __init__(self, n: int, mode: ir.SplitMode) -> None:
@@ -1181,7 +1181,7 @@ def split_aiv(n: int, *, mode: ir.SplitMode) -> SplitAivContext:
 
     The region survives parse -> SSA -> ResolveBackendOpLayouts as a structural
     node (printer emits ``for aiv_id in pl.split_aiv(...):`` so parse->print->parse
-    is a fixpoint), then is consumed and erased by LowerAutoVectorSplit (pass 20);
+    is a fixpoint), then is consumed and erased by LowerAutoVectorSplit (pass 23);
     it never reaches ExpandMixedKernel or codegen.
 
     Args:

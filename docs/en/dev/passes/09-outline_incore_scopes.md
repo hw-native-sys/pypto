@@ -219,7 +219,7 @@ launch argument counts as a read and a capture handed only to an `Out` slot
 comes back `InOut`. `Submit` maps `args_[i]` to `params_[i]` over a prefix
 (`args_.size() <= params_.size()`; the omitted tail is runtime-allocated), and
 the trailing `CommCtx` params that would break that identity are materialised by
-pass 43, long after any outliner runs. Its `deps_` are always read — they are
+pass 46, long after any outliner runs. Its `deps_` are always read — they are
 TaskId values the launch consumes, never a write destination.
 
 **Hierarchy scopes are an exception.** `OutlineScope` deliberately leaves
@@ -235,7 +235,7 @@ approximation. The direction propagates into
 argument from the *callee's* direction, so a false `InOut` turns disjoint
 per-rank slices of one `pl.Out` tensor into a cross-rank write dependency
 (issue #2415). Ordering a write-only parameter genuinely needs is not lost:
-[`DeriveCallDirections`](39-derive_call_directions.md) re-derives the
+[`DeriveCallDirections`](40-derive_call_directions.md) re-derives the
 *call-site* direction and promotes a callee `Out` back to `InOut` under a
 sequential ancestor, behind a prior writer of the same root, or when the root is
 an enclosing `InOut` parameter.
@@ -292,9 +292,9 @@ function attr is the single carrier, until
 [`ConvertTensorToTileOps`](11-convert_tensor_to_tile_ops.md) turns it into a
 `cache` kwarg on each `tile.load` and erases it. Param indices are only valid
 across that window — later passes both append to
-([`InjectGMPipeBuffer`](24-inject_gm_pipe_buffer.md),
-[`MaterializeDistTensorCtx`](45-materialize_dist_tensor_ctx.md)) and prepend onto
-([`MaterializeValidShapeSymbols`](50-materialize_valid_shape_symbols.md)) param
+([`InjectGMPipeBuffer`](25-inject_gm_pipe_buffer.md),
+[`MaterializeDistTensorCtx`](46-materialize_dist_tensor_ctx.md)) and prepend onto
+([`MaterializeValidShapeSymbols`](51-materialize_valid_shape_symbols.md)) param
 lists. Two user errors are rejected here with `CHECK_SPAN`: a declaration naming
 a tensor the scope body does not capture (it is neither read nor written, so no parameter
 carries the policy), and `BYPASS` on a parameter `InferParamDirections` resolved
@@ -433,7 +433,7 @@ Rules the carry follows:
 
 **Codegen is unchanged.** The yielded value is the call's result on a parameter
 the callee returns, so
-[`ClassifyIterArgCarry`](48-classify_iter_arg_carry.md) puts it in the iter_arg's
+[`ClassifyIterArgCarry`](49-classify_iter_arg_carry.md) puts it in the iter_arg's
 alias class (its written-arg and `TupleGetItemExpr` rules) and marks the carry
 **trivial**: iter_arg and return_var both emit as the init value's name. The carry
 is SSA bookkeeping, not a new buffer. Nothing miscompiled without it either --
@@ -484,7 +484,7 @@ passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes, "Outline InCore 
 explicit `pl.split_aiv` regions (`SplitAivScopeStmt`) cannot coexist on one
 scope (the outliner bridges a single region's mode into a function-level
 representative `split`, which would silently collide with the user's
-`pl.split`). See [`LowerAutoVectorSplit`](22-lower_auto_vector_split.md) for how
+`pl.split`). See [`LowerAutoVectorSplit`](23-lower_auto_vector_split.md) for how
 the surviving mechanism is lowered.
 
 **Any** `pl.split(...)` is rejected, `SplitMode.NONE` included (RFC #1820). NONE
@@ -525,7 +525,7 @@ onto the function only when all regions agree *and* that mode is a real split:
 absent key, so a `split=SplitMode.NONE` entry was invisible to every consumer —
 and the parser drops it, which made print → parse lossy (`Kwargs size mismatch`).
 The authoritative per-region mode always rides `SplitAivScopeStmt::split_`, which
-[`LowerAutoVectorSplit`](22-lower_auto_vector_split.md) consumes. The printer
+[`LowerAutoVectorSplit`](23-lower_auto_vector_split.md) consumes. The printer
 applies the same rule as a backstop: it omits a `split` attr of `SplitMode.NONE`
 so IR that bypassed this pass (a pre-existing `.pto` blob, a programmatically
 built `Function`) still prints in the canonical, re-parsable form.
@@ -540,6 +540,6 @@ built `Function`) still prints in the canonical, re-parsable form.
 
 `AivSplitValid` opens here. The pass preserves the first-class `SplitAivScopeStmt` regions inside
 each outlined InCore function, so the structural region verifier can run from this point until
-[`LowerAutoVectorSplit`](22-lower_auto_vector_split.md) erases the node and invalidates the
+[`LowerAutoVectorSplit`](23-lower_auto_vector_split.md) erases the node and invalidates the
 property. `ConvertTensorToTileOps` and `InferTileMemorySpace` re-verify it in between, once the
 boundary's memory side becomes observable.
