@@ -41,6 +41,8 @@ std::string DiagnosticCheckToString(DiagnosticCheck check) {
       return "ScalarWriteLineShared";
     case DiagnosticCheck::InParamWritten:
       return "InParamWritten";
+    case DiagnosticCheck::CompositeInSpmdScope:
+      return "CompositeInSpmdScope";
     default:
       return "Unknown";
   }
@@ -107,6 +109,8 @@ DiagnosticCheckRegistry::DiagnosticCheckRegistry() {
   // gap to close later.
   Register(DiagnosticCheck::InParamWritten, DiagnosticSeverity::Warning, DiagnosticPhase::PostPipeline,
            /*hint_code=*/"", CreateInParamWrittenWarningVerifier);
+  Register(DiagnosticCheck::CompositeInSpmdScope, DiagnosticSeverity::Warning, DiagnosticPhase::PrePipeline,
+           /*hint_code=*/"", CreateCompositeInSpmdScopeWarningVerifier);
 
   // Performance hints (issue #1180) — run once at the end of the pipeline,
   // after tile shapes and memory layout are fully resolved.

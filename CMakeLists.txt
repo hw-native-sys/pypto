@@ -290,6 +290,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/verify_atomic_add_dtype.cpp
     src/ir/verifier/verify_acc_store_phase.cpp
     src/ir/verifier/warning_in_param_written.cpp
+    src/ir/verifier/warning_composite_in_spmd_scope.cpp
     src/ir/verifier/verify_ssa_pass.cpp
     src/ir/verifier/verify_no_nested_call_pass.cpp
     src/ir/verifier/verify_no_nested_incore.cpp

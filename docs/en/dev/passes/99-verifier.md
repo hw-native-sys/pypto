@@ -228,6 +228,51 @@ declared, and a cross-function writer is a user function with no `REGISTER_OP`
 block. A missing effect is the registry gap described above, which this check
 cannot see.
 
+### CompositeInSpmdScope
+
+**Warning**: `DiagnosticCheck::CompositeInSpmdScope` — an InCore composite
+collective (`pld.tensor.allreduce` / `allgather` / `reduce_scatter` /
+`broadcast` / `barrier` / `all_to_all` / `all_to_all_v`) sits inside a
+`pl.spmd` scope.
+
+A composite is a **rank-level** operation — one logical collective per rank.
+`pl.spmd(N)` is a **core-level** scope — N blocks within one rank. Nesting them
+only makes sense if the collective defines its own core decomposition, and the
+InCore rail has no such parameter: `core_num` on the HOST rail is the only
+multi-core knob that exists.
+
+`LowerCompositeOps` never reads the block index, so the emitted body is not a
+function of the enclosing width. The push loop's bounds are `nranks` and its put
+offsets are `my_rank`, so every block issues the **same** transfers to the
+**same** peers — the traffic is duplicated N times, not divided N ways. The
+barrier is affected too: its expected credit is the compile-time constant `1`
+while N blocks each notify `+1`, so it releases once a peer's *first* block has
+notified rather than its last.
+
+None of that fails a test. Every block writes byte-identical content, so an
+early reader still observes correct values, and the epilogue subtracts `-1` per
+block so the signal still returns to zero. Both properties are incidental to the
+current lowering — they would not survive a partitioned one — and until this
+check existed the only symptom was an N-fold traffic multiplier with no
+diagnostic anywhere.
+
+**How it runs.** Registered as `DiagnosticCheck::CompositeInSpmdScope`, a
+**warning** at **`PrePipeline`** — the composite `Call` must still exist, and
+`LowerCompositeOps` replaces it during the pipeline.
+
+```python
+checks = passes.DiagnosticCheckSet()
+checks.insert(passes.DiagnosticCheck.CompositeInSpmdScope)
+```
+
+**Why a warning and not an error.** A caller may guard the call so that only one
+block executes it (`if block_idx == 0: ...`). That is legitimate, and this check
+does not try to prove it. Erroring would forbid a valid pattern in order to
+catch an invalid one.
+
+**Fix**: issue the collective from a single-block scope, or guard it so one
+block executes it. For multi-core execution use `core_num` on the HOST rail.
+
 ### SSAVerify
 
 **Error types** (`ssa::ErrorType`):

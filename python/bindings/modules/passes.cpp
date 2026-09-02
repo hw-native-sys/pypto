@@ -232,7 +232,12 @@ void BindPass(nb::module_& m) {
              "pl.write from concurrent task instances may share a 64-byte cache line")
       .value("InParamWritten", DiagnosticCheck::InParamWritten,
              "A parameter declared In that its own function body writes. The write is invisible to "
-             "dependency analysis, so nothing is ordered against it");
+             "dependency analysis, so nothing is ordered against it")
+      .value("CompositeInSpmdScope", DiagnosticCheck::CompositeInSpmdScope,
+             "An InCore composite collective inside a pl.spmd scope. The lowering never reads the "
+             "block index, so every block runs the whole peer loop: the transfer is duplicated "
+             "rather than divided, and the barrier releases after a peer's first block. Multi-core "
+             "collectives are available on the HOST rail via core_num");
 
   // Bind DiagnosticCheckSet
   auto diagnostic_check_set =

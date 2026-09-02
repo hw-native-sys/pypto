@@ -492,7 +492,7 @@ data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, core_num=4)
 | 取值 | 编译期正整数，默认 `1`（与既有行为一致） |
 | 调度 | 仅 mesh —— `mode="ring"` 要求 `core_num == 1` |
 | 容量 | 不超过 backend 的 AIV 核数（经 `rt_submit_aiv_task` 提交，一个 block 对应一个 AIV 核） |
-| InCore | 必须保持 `1`，多核应使用外层 `pl.spmd(...)` |
+| InCore | 必须保持 `1`。外层 `pl.spmd(...)` **不会**并行化集合通信 —— lowering 不感知 block，所有 `N` 个 block 都会重复整个传输，且 barrier 会在对端第一个 block 通知后放行。仅限单 block 作用域 |
 
 **Signal 布局。** signal 是 peer-major、lane 连续的
 `[world_size, signal_stride]` 矩阵，且 `signal_stride >= core_num`。block `b` 在

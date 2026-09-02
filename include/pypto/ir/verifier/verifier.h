@@ -158,6 +158,16 @@ PropertyVerifierPtr CreateInParamWrittenWarningVerifier();
 PropertyVerifierPtr CreateAccStorePhaseValidPropertyVerifier();
 
 /**
+ * @brief Factory for the CompositeInSpmdScope warning verifier.
+ *
+ * Warns when an InCore composite collective sits inside a `pl.spmd` scope.
+ * The lowering is block-unaware, so every block runs the whole peer loop —
+ * the transfer is duplicated, not divided, and the barrier releases after a
+ * peer's first block. Runs PrePipeline, while the composite Call still exists.
+ */
+PropertyVerifierPtr CreateCompositeInSpmdScopeWarningVerifier();
+
+/**
  * @brief Factory function for creating NormalizedStmtStructure property verifier
  * @return Shared pointer to NormalizedStmtStructure PropertyVerifier
  */

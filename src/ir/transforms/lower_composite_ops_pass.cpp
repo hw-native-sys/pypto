@@ -1057,8 +1057,10 @@ ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>
 
   auto core_num = GetRequiredKwarg<int>(call->kwargs_, "core_num", "pld.tensor.allreduce");
   CHECK_SPAN(core_num == 1, span)
-      << "pld.tensor.allreduce core_num > 1 is supported only in a HOST orchestrator; "
-         "use an enclosing pl.spmd(...) for multi-core InCore execution";
+      << "pld.tensor.allreduce core_num > 1 is supported only in a HOST orchestrator. "
+         "An enclosing pl.spmd(...) is NOT a multi-core InCore path: this lowering never reads "
+         "the block index, so every block repeats the whole transfer instead of taking a share "
+         "of it. Issue the collective from a single-block scope.";
 
   // Mode dispatch: "ring" delegates to the chunked reduce-scatter + allgather
   // ring schedule; "mesh" (default) uses the direct-exchange lowering below.

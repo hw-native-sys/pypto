@@ -197,6 +197,43 @@ lineage **不**跨 phi（`return_vars_` / `iter_args_`）传递，因此分支�
 已经声明，而跨函数写入方是用户函数，根本没有 `REGISTER_OP` 块。缺失效应属于上文所述的
 注册表缺口，本检查看不见它。
 
+### CompositeInSpmdScope
+
+**警告**：`DiagnosticCheck::CompositeInSpmdScope` —— InCore 复合集合通信算子
+（`pld.tensor.allreduce` / `allgather` / `reduce_scatter` / `broadcast` /
+`barrier` / `all_to_all` / `all_to_all_v`）位于 `pl.spmd` 作用域内部。
+
+复合算子是**rank 级**操作 —— 每个 rank 一次逻辑集合通信；`pl.spmd(N)` 是**核级**
+作用域 —— 单个 rank 内的 N 个 block。二者嵌套只有在该集合通信自身定义了核间划分时
+才有意义，而 InCore 侧并没有这样的参数：HOST 侧的 `core_num` 是目前唯一的多核开关。
+
+`LowerCompositeOps` 从不读取 block index，因此发射出的循环体与外层宽度无关：push
+循环的边界是 `nranks`，put 偏移是 `my_rank`。于是每个 block 都会向**相同**的对端发出
+**相同**的传输 —— 流量被复制 N 份，而不是被划分为 N 份。barrier 同样受影响：其期望
+credit 是编译期常量 `1`，而 N 个 block 各自 notify `+1`，因此它会在对端**第一个**
+block 通知后就放行，而不是最后一个。
+
+这些都不会导致测试失败。所有 block 写入的字节完全相同，因此提前读取仍能得到正确值；
+epilogue 每个 block 减 `-1`，signal 依然会归零。这两个性质都只是当前 lowering 的
+巧合 —— 一旦改为分区实现就不再成立 —— 而在此检查出现之前，唯一的症状就是 N 倍的流量
+放大，且没有任何诊断信息。
+
+**运行方式。** 注册为 `DiagnosticCheck::CompositeInSpmdScope`，在 **`PrePipeline`**
+阶段以**警告**形式运行 —— 此时复合算子的 `Call` 必须仍然存在，因为
+`LowerCompositeOps` 会在流水线中将其替换。
+
+```python
+checks = passes.DiagnosticCheckSet()
+checks.insert(passes.DiagnosticCheck.CompositeInSpmdScope)
+```
+
+**为何是警告而非错误。** 调用方可以对该调用加保护，使得只有一个 block 执行
+（`if block_idx == 0: ...`）。这是合法写法，本检查并不尝试证明这一点；若报错则会为了
+拦截错误用法而禁止合法用法。
+
+**修复方式**：在单 block 作用域内发起集合通信，或加保护使其只由一个 block 执行；
+多核执行请在 HOST 侧使用 `core_num`。
+
 ### SSAVerify
 
 **错误类型** (`ssa::ErrorType`)：

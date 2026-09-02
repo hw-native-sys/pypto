@@ -568,7 +568,7 @@ data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, core_num=4)
 | Range | Positive compile-time integer, default `1` (pre-existing behavior) |
 | Schedule | Mesh only — `mode="ring"` requires `core_num == 1` |
 | Capacity | At most the backend's AIV core count (submitted via `rt_submit_aiv_task`, so one block = one AIV core) |
-| InCore | Must stay `1`; use an enclosing `pl.spmd(...)` for multi-core work |
+| InCore | Must stay `1`. An enclosing `pl.spmd(...)` does **not** parallelise the collective — the lowering is block-unaware, so all `N` blocks repeat the whole transfer and the barrier releases after a peer's first block. Single-block scope only |
 
 **Signal layout.** The signal is a peer-major, lane-contiguous
 `[world_size, signal_stride]` matrix with `signal_stride >= core_num`. Block `b`
