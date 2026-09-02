@@ -1660,27 +1660,35 @@ class TestOutlineSubmitTaskId:
         assert submits[1].allow_early_resolve is True
         assert len(submits[1].deps) == 1
 
-    def test_deferred_waiter_rejects_scalar_returning_helper_call(self):
-        """Scalar bookkeeping cannot hide arbitrary kernel side effects."""
+    def test_deferred_waiter_rejects_scalar_returning_op_call(self):
+        """Scalar bookkeeping cannot hide arbitrary kernel side effects.
+
+        The waiter registers conditions and returns; anything else in its body
+        either never runs or runs at the wrong time. Scalar arithmetic and casts
+        are their own IR expression nodes, so the only *call* a waiter needs is
+        the pre-registration ``tensor.read`` anchor. Every other scalar-producing
+        call is rejected without inspecting it — a new op may hide a blocking
+        wait, communication, or payload effects behind an innocuous scalar.
+
+        ``pl.get_block_idx()`` is the vehicle because it is an ordinary lowerable
+        op: the rejection has to come from the waiter contract, not from some
+        later limitation of the shape used to trigger it.
+        """
 
         @pl.program
         class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def scalar_helper(self, value: pl.Scalar[pl.INT32]) -> pl.Scalar[pl.INT32]:
-                return value
-
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(
                 self,
                 signal: pld.DistributedTensor[[1, 1], pl.INT32],
-                expected: pl.Scalar[pl.INT32],
             ):
                 with pl.at(level=pl.Level.CORE_GROUP, name_hint="deferred_wait"):
-                    hidden: pl.Scalar[pl.INT32] = self.scalar_helper(expected)
+                    hidden: pl.Scalar[pl.INT32] = pl.get_block_idx()
                     pld.system.defer_wait(signal, offsets=[0, 0], expected=hidden, cmp=pld.WaitCmp.Ge)
 
         with pytest.raises(ValueError, match="supports only a pre-registration tensor.read"):
             passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+
 
     def test_deferred_wait_accepts_static_conditional_registration_loop(self):
         """The MoE waiter is bounded and consumers use ordinary deps unchanged.
