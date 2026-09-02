@@ -2402,6 +2402,66 @@ class JITFunction:
         compiled, _ordered_args, _run_config = self._resolve_compiled(args, kwargs, allow_signature_mode=True)
         return compiled
 
+    def specialize(self, *args: Any, **kwargs: Any) -> _ir.Program:
+        """Specialize this JIT function and return its **pre-pass** IR.
+
+        The step [`lower`][pypto.language.JITFunction.lower] takes before it
+        runs the pass pipeline: entry and every transitive dep are specialized
+        into ``@pl.program`` source and parsed, and the parsed program is
+        returned untransformed. No passes, no code generation, no ``ptoas``, no
+        device, and the compiled-program cache is neither read nor written.
+
+        Use this to hand a JIT kernel to a consumer that wants to drive the
+        pass pipeline itself — most notably ``ir.compile(program,
+        output_dir=...)``, which runs passes *and* code generation and so must
+        be given the program before any pass has touched it. Passing
+        ``lower()``'s result there would run the pipeline a second time.
+
+        Two JIT kernels that specialize to the same program compare equal
+        *after* passes, not before: the specializer renames SSA-rebound locals
+        (``out`` becomes ``out_v1``), which canonicalization removes. Compare
+        ``lower()`` output when asserting equivalence against a hand-written
+        ``@pl.program``.
+
+        Args:
+            *args: Positional sample arguments matching the decorated function.
+                Omit tensor samples to specialize from the annotations, which
+                then must carry full shapes.
+            **kwargs: Keyword sample arguments. Unlike ``lower()`` there is no
+                ``config``: the pass pipeline never runs here, so a
+                ``RunConfig`` would have nothing to configure.
+
+        Returns:
+            The parsed ``ir.Program``, before any pass has run.
+        """
+        import pypto.language as pl  # noqa: PLC0415
+
+        specialization, _ = self._resolve_specialization(args, kwargs, allow_signature_mode=True)
+        return self._compile_to_program(
+            specialization.tensor_meta,
+            specialization.scalar_values,
+            specialization.scalar_dtypes,
+            specialization.per_func_dyn,
+            pl,
+        )
+
+    @property
+    def param_names(self) -> tuple[str, ...]:
+        """Declared parameter names, in signature order (``self`` excluded)."""
+        return tuple(self._param_names())
+
+    @property
+    def output_param_names(self) -> tuple[str, ...]:
+        """Parameters the kernel writes — ``pl.Out[...]`` and ``pl.InOut[...]``.
+
+        In declaration order, so the tuple stays aligned with the callee's
+        return order. A caller that materialises tensors for this kernel uses
+        it to decide which of them are results to validate.
+        """
+        out_params, inout_params, _, _, _ = _classify_params(_get_func_def(self._func))
+        written = set(out_params) | set(inout_params)
+        return tuple(p for p in self._param_names() if p in written)
+
     def lower(self, *args: Any, **kwargs: Any) -> _ir.Program:
         """Specialize this JIT function and return its post-pass IR.
 

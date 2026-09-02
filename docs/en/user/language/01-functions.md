@@ -250,6 +250,30 @@ check. Both accept `config=RunConfig(...)`, but `lower()` ignores the runtime an
 fields. Compile options are in [Compiling](../execution/00-compile.md) and the runtime surface in
 [Running](../execution/01-run.md).
 
+`specialize(*sample_args)` stops one stage earlier still: entry and deps are specialized
+into `@pl.program` source and parsed, and the **pre-pass** `ir.Program` comes back
+untransformed. Reach for it only when something downstream runs the pass pipeline itself
+— most of all `ir.compile(program, output_dir=...)`, which runs passes *and* code
+generation, so handing it `lower()`'s output would run the pipeline twice.
+
+```python
+program = my_kernel.specialize(sample_x, sample_w, sample_out)
+ir.compile(program, output_dir="build/out", backend_type=BackendType.Ascend910B)
+```
+
+It takes no `config=`: no pass runs here, so a `RunConfig` would have nothing to
+configure. Sample arguments may be omitted only when every tensor parameter is annotated
+with full shapes — a bare `pl.Tensor` has none to read.
+
+> Two kernels that specialize to the same program compare equal **after** passes, not
+> before: the specializer renames SSA-rebound locals (`out` becomes `out_v1`), and
+> canonicalization removes the difference. Compare `lower()` output when asserting
+> equivalence against a hand-written `@pl.program`.
+
+Three accessors describe the signature without specializing anything: `param_names` (in
+declaration order), `output_param_names` (the `pl.Out[...]` and `pl.InOut[...]` params,
+also in declaration order), and `__name__`.
+
 ### External C++ kernels
 
 A hand-written C++ kernel can be called like any other function. See

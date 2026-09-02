@@ -1,0 +1,322 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+"""Device-free tests for the ``st.case`` declaration surface.
+
+Covers the three things a case has to get right before any card is involved:
+
+1. a ``@pl.jit`` kernel and a ``@pl.program`` class produce the *same* compiled
+   artifact — the claim that lets one execution path serve both;
+2. the tensor list a JIT case derives from its sample arguments matches what a
+   hand-written ``define_tensors()`` would have declared;
+3. the golden callable is adapted to the pipeline's in-place contract, in every
+   return shape it accepts.
+
+Nothing here touches a device, and the compile check is skipped when ``ptoas``
+is unavailable.
+"""
+
+import shutil
+import tempfile
+from pathlib import Path
+from typing import Any
+
+import pypto.language as pl
+import pytest
+import torch
+from pypto.ir.pass_manager import OptimizationStrategy, PassManager
+from pypto.jit.decorator import _ptoas_available, jit
+from pypto.pypto_core import ir as _ir
+
+from harness import st
+from harness.core.case import Case, from_legacy
+from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from harness.core.kernel_source import JitKernel, ProgramKernel, datatype_from_torch
+from harness.core.test_runner import _compile_for_cache
+
+M = 16
+N = 16
+
+
+# ---------------------------------------------------------------------------
+# The same kernel, authored both ways. Function names match on purpose: they
+# are part of the IR, so a naming difference would mask a structural one.
+# ---------------------------------------------------------------------------
+
+
+@jit.incore
+def kernel(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+    tile_a = pl.load(a, [0, 0], [M, N])
+    return pl.store(pl.tile.abs(tile_a), [0, 0], out)
+
+
+@jit
+def orchestrator(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+    out = kernel(a, out)
+    return out
+
+
+@pl.program
+class AbsProgram:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[M, N], pl.FP32],
+        out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    ) -> pl.Tensor[[M, N], pl.FP32]:
+        tile_a = pl.load(a, [0, 0], [M, N])
+        out = pl.store(pl.tile.abs(tile_a), [0, 0], out)
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        a: pl.Tensor[[M, N], pl.FP32],
+        out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    ) -> pl.Tensor[[M, N], pl.FP32]:
+        out = self.kernel(a, out)
+        return out
+
+
+class AbsLegacyCase(PTOTestCase):
+    """The pre-``Case`` way of declaring the very same test."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "abs_legacy"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("a", [M, N], DataType.FP32, init_value=torch.randn(M, N)),
+            TensorSpec("out", [M, N], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return AbsProgram
+
+    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
+        tensors["out"][:] = torch.abs(tensors["a"])
+
+
+def _jit_case(**kwargs: Any) -> Case:
+    """A JIT-authored case over the shared ``a`` / ``out`` signature."""
+    kwargs.setdefault("name", "abs_jit")
+    kwargs.setdefault("golden", lambda t: torch.abs(t["a"]))
+    return st.case(orchestrator, torch.randn(M, N), torch.zeros(M, N), **kwargs)
+
+
+# ---------------------------------------------------------------------------
+
+
+class TestKernelSourceEquivalence:
+    """A JIT kernel and a @pl.program class compile to the same thing."""
+
+    def test_same_ir_after_passes(self):
+        """The two sources' programs are structurally equal once lowered."""
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        jit_program = JitKernel(orchestrator, torch.randn(M, N), torch.zeros(M, N)).build_program()
+        _ir.assert_structural_equal(pm.run_passes(jit_program), pm.run_passes(AbsProgram))
+
+    @pytest.mark.skipif(not _ptoas_available(), reason="ptoas is required to generate kernel sources")
+    def test_same_generated_artifacts(self):
+        """Both sources satisfy ``_compile_for_cache`` and emit the same files.
+
+        This is the integration claim: the existing compile task, unchanged,
+        accepts a ``Case`` whichever surface authored its kernel.
+        """
+        produced: dict[str, tuple[list[str], list[str], bool]] = {}
+        for label, case_obj in (
+            ("jit", _jit_case(platform="a2a3")),
+            (
+                "program",
+                st.case(
+                    AbsProgram,
+                    name="abs_program",
+                    platform="a2a3",
+                    tensors=AbsLegacyCase().define_tensors(),
+                    golden=lambda t: torch.abs(t["a"]),
+                ),
+            ),
+        ):
+            work_dir = Path(tempfile.mkdtemp(prefix=f"case_decl_{label}_"))
+            try:
+                _compile_for_cache(case_obj, work_dir, "a2a3", False, False, None)
+                produced[label] = (
+                    sorted(p.name for p in (work_dir / "kernels").rglob("*.cpp")),
+                    sorted(p.name for p in (work_dir / "orchestration").glob("*.cpp")),
+                    (work_dir / "golden.py").exists(),
+                )
+                # The golden ran in this process and was persisted for the child.
+                assert (work_dir / "data" / "out" / "out.pt").exists(), (
+                    f"{label}: golden outputs were not persisted to data/out/"
+                )
+            finally:
+                shutil.rmtree(work_dir, ignore_errors=True)
+
+        assert produced["jit"][0] == produced["program"][0], "kernel sources differ"
+        assert produced["jit"][1] == produced["program"][1], "orchestration sources differ"
+        assert produced["jit"][2] and produced["program"][2], "golden.py was not written"
+
+    def test_program_kernel_accepts_a_factory(self):
+        """``ProgramKernel`` invokes a plain callable, and passes a class through."""
+        assert ProgramKernel(AbsProgram).build_program() is AbsProgram
+        assert ProgramKernel(lambda: AbsProgram, name="factory").build_program() is AbsProgram
+
+    def test_jit_kernel_rejects_a_program_class(self):
+        """The natural mistake fails with a message naming the right source."""
+        with pytest.raises(TypeError, match="Use ProgramKernel"):
+            JitKernel(AbsProgram)
+
+
+class TestDerivedTensorSpecs:
+    """A JIT case derives the tensor list its author would have written."""
+
+    def test_matches_the_hand_written_declaration(self):
+        derived = _jit_case().tensor_specs
+        expected = AbsLegacyCase().define_tensors()
+        assert [s.name for s in derived] == [s.name for s in expected]
+        assert [s.shape for s in derived] == [s.shape for s in expected]
+        assert [s.dtype for s in derived] == [s.dtype for s in expected]
+        assert [s.is_output for s in derived] == [s.is_output for s in expected]
+
+    def test_out_param_is_not_seeded_but_inout_is(self):
+        """``pl.Out`` is scratch; ``pl.InOut`` carries live input."""
+
+        @jit.incore
+        def accumulate_k(x: pl.Tensor, acc: pl.InOut[pl.Tensor]):
+            total = pl.tile.add(pl.load(x, [0, 0], [M, N]), pl.load(acc, [0, 0], [M, N]))
+            return pl.store(total, [0, 0], acc)
+
+        @jit
+        def accumulate(x: pl.Tensor, acc: pl.InOut[pl.Tensor]):
+            acc = accumulate_k(x, acc)
+            return acc
+
+        specs = {
+            s.name: s
+            for s in st.case(
+                accumulate,
+                torch.randn(M, N),
+                torch.randn(M, N),
+                name="acc_inout",
+                golden=lambda t: t["x"] + t["acc"],
+            ).tensor_specs
+        }
+        assert specs["acc"].is_output and specs["acc"].init_value is not None, "InOut keeps its input"
+        assert specs["x"].init_value is not None
+        out_spec = _jit_case().tensor_specs[-1]
+        assert out_spec.name == "out" and out_spec.is_output and out_spec.init_value is None
+
+    def test_dtype_round_trips(self):
+        """Every harness dtype this torch build supports maps back to itself."""
+        for member in DataType:
+            try:
+                torch_dtype = member.torch_dtype
+            except ValueError:
+                continue  # optional MX dtype this build lacks
+            assert datatype_from_torch(torch_dtype).torch_dtype is torch_dtype
+
+    def test_unknown_dtype_names_what_is_available(self):
+        with pytest.raises(ValueError, match="No harness DataType for torch dtype"):
+            datatype_from_torch(torch.complex64)
+
+    def test_program_case_without_tensors_is_rejected(self):
+        """A @pl.program cannot derive its tensors, and the error says so."""
+        with pytest.raises(ValueError, match="pass tensors="):
+            st.case(AbsProgram, name="no_tensors", golden=lambda t: t["a"])
+
+
+class TestGoldenAdaptation:
+    """The golden callable reaches the pipeline's in-place contract."""
+
+    def _tensors(self) -> dict[str, torch.Tensor]:
+        return {"a": torch.randn(M, N), "out": torch.zeros(M, N)}
+
+    def test_returned_tensor_is_written_to_the_single_output(self):
+        case_obj = _jit_case()
+        tensors = self._tensors()
+        case_obj.compute_expected(tensors)
+        assert torch.equal(tensors["out"], torch.abs(tensors["a"]))
+
+    def test_closure_over_test_locals_is_allowed(self):
+        """The golden runs in this process, so it may capture anything."""
+        scale = 3.0
+        case_obj = _jit_case(name="abs_closure", golden=lambda t: torch.abs(t["a"]) * scale)
+        tensors = self._tensors()
+        case_obj.compute_expected(tensors)
+        assert torch.equal(tensors["out"], torch.abs(tensors["a"]) * scale)
+
+    def test_in_place_golden_is_left_alone(self):
+        def golden(t):
+            t["out"][:] = torch.abs(t["a"])
+
+        tensors = self._tensors()
+        _jit_case(name="abs_inplace", golden=golden).compute_expected(tensors)
+        assert torch.equal(tensors["out"], torch.abs(tensors["a"]))
+
+    def test_dict_return_must_name_the_outputs(self):
+        tensors = self._tensors()
+        _jit_case(name="abs_dict", golden=lambda t: {"out": torch.abs(t["a"])}).compute_expected(tensors)
+        assert torch.equal(tensors["out"], torch.abs(tensors["a"]))
+
+        with pytest.raises(ValueError, match="unknown output"):
+            bad = _jit_case(name="abs_bad_key", golden=lambda t: {"wrong": t["a"]})
+            bad.compute_expected(self._tensors())
+
+    def test_wrong_return_type_is_reported(self):
+        with pytest.raises(TypeError, match="expected a torch.Tensor"):
+            _jit_case(name="abs_bad_type", golden=lambda t: "nope").compute_expected(self._tensors())
+
+    def test_missing_golden_is_reported(self):
+        with pytest.raises(ValueError, match="has no golden"):
+            st.case(
+                orchestrator, torch.randn(M, N), torch.zeros(M, N), name="abs_no_golden"
+            ).compute_expected(self._tensors())
+
+
+class TestDeclaration:
+    """``st.cases`` and the legacy adapter."""
+
+    def test_duplicate_names_are_rejected(self):
+        with pytest.raises(ValueError, match="duplicate case name"):
+            st.cases(_jit_case(name="dup"), _jit_case(name="dup"))
+
+    def test_empty_declaration_is_rejected(self):
+        with pytest.raises(ValueError, match="at least one case"):
+            st.cases()
+
+    def test_from_legacy_preserves_the_case(self):
+        """A wrapped ``PTOTestCase`` keeps its program, tensors and golden."""
+        legacy = AbsLegacyCase()
+        wrapped = from_legacy(legacy)
+        assert wrapped.get_name() == legacy.get_name()
+        assert wrapped.get_program() is AbsProgram
+        assert [s.name for s in wrapped.tensor_specs] == [s.name for s in legacy.tensor_specs]
+
+        tensors = {"a": torch.randn(M, N), "out": torch.zeros(M, N)}
+        wrapped.compute_expected(tensors)
+        assert torch.equal(tensors["out"], torch.abs(tensors["a"]))
+
+    def test_platform_binding_respects_a_pin(self):
+        pinned = _jit_case(name="abs_pinned", platform="a5")
+        pinned.bind_platform("a2a3")
+        assert pinned.get_platform() == "a5", "an explicit pin wins over the item's platform"
+
+        floating = _jit_case(name="abs_floating")
+        floating.bind_platform("a2a3")
+        assert floating.get_platform() == "a2a3"
+
+    def test_unknown_platform_is_rejected(self):
+        with pytest.raises(ValueError, match="unknown platform"):
+            _jit_case(name="abs_bad_platform", platform="a9")
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

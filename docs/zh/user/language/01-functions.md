@@ -197,6 +197,19 @@ print("artifacts in:", compiled.output_dir)
 
 `lower(*sample_args)` 比它早停一站：只跑 Pass 并返回 Pass 后的 `ir.Program`，不做代码生成、不调 `ptoas`、不写产物、不写缓存。要读降级后的 IR 就用它；要检查代码生成本身就用 `compile()`。两者都接受 `config=RunConfig(...)`，但 `lower()` 会忽略其中的运行时与产物字段。编译选项见 [编译](../execution/00-compile.md)，运行时接口见 [运行](../execution/01-run.md)。
 
+`specialize(*sample_args)` 比它还要早停一站：把入口及其依赖特化成 `@pl.program` 源码并解析，返回**未经任何 Pass** 的 `ir.Program`。只有当下游要自己跑 Pass 流水线时才需要它 —— 最主要的场景是 `ir.compile(program, output_dir=...)`，它会同时跑 Pass 和代码生成，把 `lower()` 的结果喂给它会让流水线跑两遍。
+
+```python
+program = my_kernel.specialize(sample_x, sample_w, sample_out)
+ir.compile(program, output_dir="build/out", backend_type=BackendType.Ascend910B)
+```
+
+它不接受 `config=`：这里不跑任何 Pass，`RunConfig` 没有可配置的东西。只有当每个张量参数都带完整形状注解时才能省略采样实参 —— 裸 `pl.Tensor` 没有形状可读。
+
+> 两个特化出相同程序的 kernel，是在 **Pass 之后**才相等，而不是之前：特化器会重命名 SSA 重绑定的局部量（`out` 变成 `out_v1`），规范化会消除这个差异。要和手写 `@pl.program` 断言等价，请比较 `lower()` 的结果。
+
+另有三个访问器可以在不做任何特化的情况下读取签名：`param_names`（按声明顺序）、`output_param_names`（`pl.Out[...]` 与 `pl.InOut[...]` 参数，同样按声明顺序）、以及 `__name__`。
+
 ### 外部 C++ kernel
 
 手写的 C++ kernel 可以像普通函数一样被调用。见 [集成手写 C++ Kernel](../../dev/language/04-external-kernels.md)。

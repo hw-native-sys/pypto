@@ -64,6 +64,7 @@ from pypto.runtime.runner import (
 from pypto.runtime.tensor_spec import TensorSpec as RuntimeTensorSpec
 
 from harness.core.harness import PTOTestCase, platform_to_backend
+from harness.core.kernel_source import program_build_lock as _get_program_lock
 
 # tests/st/harness/core/test_runner.py -> tests/st/ -> project root
 _ST_DIR = Path(__file__).parent.parent.parent
@@ -136,10 +137,9 @@ _pipeline_ctx: dict = {}
 _MAX_TASK_SUBMIT_INFLIGHT = 512
 
 # set_backend_type is called once per backend-type group before the thread pool
-# starts.  Only get_program() needs serialisation because the @pl.program
-# decorator is not thread-safe; ir.compile() writes to isolated dirs and
-# runs concurrently.
-_get_program_lock = threading.Lock()
+# starts.  Only the program build needs serialisation, under the shared
+# ``program_build_lock`` imported above (which owns the rationale); ir.compile()
+# writes to isolated dirs and runs concurrently.
 
 
 def _cache_key(
@@ -1208,6 +1208,36 @@ def start_pipeline(  # noqa: PLR0913
             name="pypto-batch-submitter",
             daemon=True,
         ).start()
+
+
+def artifact_work_dir(test_case: Any) -> "Path | None":
+    """Return the compiled artifact directory for *test_case*, if it has one.
+
+    Where the generated kernels, ``golden.py``, ``data/`` and any
+    ``dfx_outputs/`` for this case live. Only populated for a case the
+    pre-compile pipeline picked up; a case that fell to the inline path
+    compiles into a directory it does not publish, so this returns ``None``.
+
+    Args:
+        test_case: The case to look up — anything with the ``get_name`` /
+            ``get_platform`` / ``get_memory_planner`` surface.
+
+    Returns:
+        The artifact directory, or ``None`` when the case was not pre-compiled
+        or its compile task failed.
+    """
+    try:
+        cache_k = _cache_key(test_case, None, _pipeline_ctx.get("memory_planner"))
+    except ValueError:
+        return None  # no platform bound yet — nothing was compiled for it
+    fut = _compile_futures.get(cache_k)
+    if fut is None or not fut.done():
+        return None
+    try:
+        artifact = fut.result()
+    except Exception:  # noqa: BLE001 — a crashed compile has no artifact to point at
+        return None
+    return artifact.work_dir if artifact.error is None else None
 
 
 def configure_inline_task_submit(

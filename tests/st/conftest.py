@@ -39,6 +39,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 import pytest  # noqa: E402
+from harness.core.case import Case  # noqa: E402
 from harness.core.environment import (  # noqa: E402
     get_simpler_python_path,
     get_simpler_scripts_path,
@@ -53,6 +54,10 @@ from harness.core.test_runner import (  # noqa: E402
     shutdown_pipeline,
     start_pipeline,
 )
+
+# ``case_run`` is re-exported here so pytest discovers it as a session-wide
+# fixture; the tests themselves import only ``harness.st``.
+from harness.st import case_run  # noqa: E402,F401
 from pypto import LogLevel  # noqa: E402
 from pypto.pypto_core import _clear_thread_log_level, _set_thread_log_level  # noqa: E402
 from pypto.pypto_core.passes import MemoryPlanner  # noqa: E402
@@ -759,7 +764,11 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     item carries that platform instead of falling back to the first CLI id.
     """
     direct = _direct_argnames(metafunc.function)
-    if "test_runner" not in direct:
+    # ``case_run`` reaches the runner too, and it is function-scoped, so a
+    # ``@st.cases(...)`` test expands over the matrix exactly like one taking
+    # ``test_runner`` directly. Without it those tests would silently run on
+    # the session's first platform only.
+    if not direct & {"test_runner", "case_run"}:
         return
     if "platform" in metafunc.fixturenames:
         return
@@ -939,13 +948,24 @@ def _collect_test_case_from_item(
     if any(m.name == "skip" for m in item.iter_markers()):
         return
 
+    callspec = getattr(item, "callspec", None)
+    params: dict[str, Any] = callspec.params if callspec else {}
+
+    # A case declared with ``@st.cases(...)`` is already a collection-time
+    # value: read it straight out of the parametrize params. No source parsing,
+    # no re-construction, and no silent fallback — if the declaration is there,
+    # this is the whole discovery step.
+    declared = params.get("_st_case")
+    if isinstance(declared, Case):
+        platform = params.get("platform") or params.get("_st_platform") or session_platform
+        declared.bind_platform(platform)
+        seen.setdefault(_cache_key(declared, platform, session_memory_planner), declared)
+        return
+
     module = item.module
     if module is None:
         return
     globalns = vars(module)
-
-    callspec = getattr(item, "callspec", None)
-    params: dict[str, Any] = callspec.params if callspec else {}
 
     try:
         source = textwrap.dedent(inspect.getsource(item.function))
