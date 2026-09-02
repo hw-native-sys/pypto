@@ -45,7 +45,8 @@ assert compiled.param_names == ["a", "b", "out"]
 
 ### `ir.compile` 的参数
 
-十七个，其中四个承担了大部分决策，其余的默认值你很少会动。
+十八个，其中四个承担了大部分决策，其余的默认值你很少会动。它们全部是关键字参数 ——
+只有 `program` 是位置参数。
 
 | 参数 | 默认 | 决定什么 |
 | ---- | ---- | -------- |
@@ -66,6 +67,7 @@ assert compiled.param_names == ["a", "b", "out"]
 | `enable_pypto_l0c_double_buffer` | `None` | L0C double buffer |
 | `emit_source_loc` | `None` | 把 DSL 源位置带进发出的 `.pto` |
 | `dump_ptoas_passes` | `False` | 同时 dump ptoas 自己的 pass IR |
+| `runtime` | `None` | 面向哪个 Simpler 运行时 ABI —— `TENSORMAP_AND_RINGBUFFER` 或 `HOST_BUILD_GRAPH`（`@pl.jit.graph` 需要它 —— [函数](../language/01-functions.md)）；`None` 继承当前 `PassContext`。派发它的 worker 必须与之匹配 |
 
 ### Pass dump
 

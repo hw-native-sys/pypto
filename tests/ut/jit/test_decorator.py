@@ -33,7 +33,6 @@ from pypto.jit.decorator import (
     _extract_tensor_meta,
     _resolve_dep_call_metadata,
     _rewrite_jit_error,
-    _run_config_compile_kwargs,
     _scan_dep_io,
     _scan_dynamic_dims,
     _SlicedArg,
@@ -2567,51 +2566,11 @@ class TestCompileKwargForwarding:
     Before this fix, ``_compile`` only forwarded ``skip_ptoas`` and
     ``platform`` — every other compile knob a user set on ``RunConfig``
     (``strategy``, ``dump_passes``, ...) was silently dropped on the JIT path.
+
+    The mapping itself is ``RunConfig.compile_kwargs`` and is tested in
+    ``tests/ut/runtime/test_run_config.py``; what these cases pin is that the
+    JIT path uses it rather than a second copy of it.
     """
-
-    def test_run_config_compile_kwargs_maps_fields(self, tmp_path):
-        """Compile-side RunConfig fields map onto the ir.compile() parameter names."""
-        artifacts_dir = tmp_path / "jit_artifacts"
-        cfg = RunConfig(
-            strategy=OptimizationStrategy.Default,
-            dump_passes=True,
-            dump_ptoas_passes=True,
-            compile_profiling=True,
-            save_kernels_dir=str(artifacts_dir),
-            analyze_auto_scopes_for_deps=True,
-        )
-        kwargs = _run_config_compile_kwargs(cfg)
-        assert kwargs["strategy"] == OptimizationStrategy.Default
-        assert kwargs["dump_passes"] is True
-        assert kwargs["dump_ptoas_passes"] is True
-        assert kwargs["profiling"] is True  # mapped from RunConfig.compile_profiling
-        assert kwargs["output_dir"] == str(artifacts_dir)  # from RunConfig.save_kernels_dir
-        assert kwargs["analyze_auto_scopes_for_deps"] is True
-        assert "diagnostic_phase" in kwargs
-        assert "disabled_diagnostics" in kwargs
-        # backend_type is derived from `platform` by ir.compile(); not forwarded.
-        assert "backend_type" not in kwargs
-
-    def test_run_config_compile_kwargs_omits_unset_output_dir(self):
-        """save_kernels_dir left unset omits output_dir so ir.compile()'s default applies."""
-        kwargs = _run_config_compile_kwargs(RunConfig())
-        assert "output_dir" not in kwargs
-
-    def test_run_config_compile_kwargs_forwards_distributed_config(self):
-        """A RunConfig.distributed_config is forwarded so @pl.jit.host kernels go distributed."""
-        from pypto.ir import DistributedConfig  # noqa: PLC0415
-
-        dc = DistributedConfig(device_ids=[0, 1])
-        kwargs = _run_config_compile_kwargs(RunConfig(distributed_config=dc))
-        # Forwarded verbatim (same object) so ir.compile() emits a
-        # DistributedCompiledProgram for the HOST-level entry.
-        assert kwargs["distributed_config"] is dc
-
-    def test_run_config_compile_kwargs_omits_unset_distributed_config(self):
-        """distributed_config left unset is omitted so ir.compile()'s single-chip default applies."""
-        kwargs = _run_config_compile_kwargs(RunConfig())
-        assert "distributed_config" not in kwargs
-        assert kwargs["analyze_auto_scopes_for_deps"] is False
 
     def test_make_cache_key_splits_on_distributed_config(self):
         """distributed_config participates in the cache key (distinct device_ids ≠ collide)."""
@@ -2815,8 +2774,7 @@ class TestCompileKwargForwarding:
             scalar_dtypes={},
             per_func_dyn={id(fwd_kernel._func): {}},
             pl=pl,
-            platform="a2a3sim",
-            **_run_config_compile_kwargs(cfg),
+            **cfg.compile_kwargs(),
         )
         assert result == "fake-compiled-program"
         assert captured["strategy"] == OptimizationStrategy.Default
@@ -2829,8 +2787,14 @@ class TestCompileKwargForwarding:
         # compile to a DistributedCompiledProgram and dispatch per-rank.
         assert captured["distributed_config"] is dc
 
-    def test_compile_without_kwargs_forwards_only_defaults(self, monkeypatch):
-        """_compile with no extra kwargs forwards only skip_ptoas + platform."""
+    def test_compile_without_kwargs_forwards_only_skip_ptoas(self, monkeypatch):
+        """_compile with no extra kwargs forwards only skip_ptoas.
+
+        ``platform`` rides in the ``RunConfig.compile_kwargs`` mapping, so with
+        no config there is nothing to forward and ``ir.compile``'s own default
+        applies — the same effective platform the old explicit ``platform=None``
+        produced.
+        """
         ir_compile_mod = importlib.import_module("pypto.ir.compile")
 
         @jit
@@ -2858,8 +2822,7 @@ class TestCompileKwargForwarding:
             per_func_dyn={id(plain_kernel._func): {}},
             pl=pl,
         )
-        assert set(captured) == {"skip_ptoas", "platform"}
-        assert captured["platform"] is None
+        assert set(captured) == {"skip_ptoas"}
 
 
 # ---------------------------------------------------------------------------

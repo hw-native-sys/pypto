@@ -49,7 +49,8 @@ PyPTO 的编译与执行入口比它拥有的概念要多，而且好几个名�
 
 只有 `ir.compile` 是受支持的入口；表中其余项列在这里，是为了让 traceback 里出现的
 名字能被定位到某一层。它还遮蔽了 Python 内置的 `compile`，因此更推荐
-`from pypto import ir` 后调用 `ir.compile`，而不是直接导入这个名字。
+`from pypto import ir` 后调用 `ir.compile`，而不是直接导入这个名字。它接受的每个
+选项都是关键字参数；`program` 是唯一的位置参数。
 
 它的参数在[编译](../user/execution/00-compile.md)中有说明。
 
@@ -139,8 +140,10 @@ compiled(*tensors, config=config)
 | 派发 | `device_id`、`aicpu_thread_num`、`ring_*` 覆写项（[Ring 尺寸](05-runtime-ring-sizing.md)）、DFX 开关（[DFX](03-runtime-dfx.md)） |
 | 仅系统测试 harness | `rtol`、`atol`、`golden_data_dir`、`save_kernels`、`codegen_only` |
 
-`@pl.jit` 路径保留了自己的映射 `jit.decorator._run_config_compile_kwargs`，
-它省略了 `platform` 与 `backend_type`，因为该路径会单独转发这两项。
+`compile_kwargs()` 是通往 `ir.compile` 参数的唯一映射。`@pl.jit` 路径过去另有一份
+副本，省略 `platform` 与 `backend_type` 并单独转发 platform；现在它和其他调用方一样
+调用 `compile_kwargs()`，于是给一边加的开关不会在另一边悄悄缺席。`lower()` 仍有自己
+那份更窄的映射 —— 它止步于 codegen 之前，对准的是 pass 流水线而不是 `ir.compile`。
 
 ## 哪些是内部实现
 

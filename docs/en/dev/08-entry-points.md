@@ -53,7 +53,8 @@ into loadable binaries. It is internal and has no supported entry point.
 `ir.compile` is the only supported one; the rest of the table is here so a name
 that turns up in a traceback can be placed on a layer. It also shadows the
 Python builtin `compile`, so prefer `from pypto import ir` and call
-`ir.compile` over importing the name directly.
+`ir.compile` over importing the name directly. Every option it takes is
+keyword-only; `program` is the one positional parameter.
 
 Its parameters are documented in [Compiling](../user/execution/00-compile.md).
 
@@ -150,9 +151,12 @@ Its fields split three ways:
 | Dispatch | `device_id`, `aicpu_thread_num`, the `ring_*` overrides ([Ring sizing](05-runtime-ring-sizing.md)), the DFX toggles ([DFX](03-runtime-dfx.md)) |
 | The system-test harness only | `rtol`, `atol`, `golden_data_dir`, `save_kernels`, `codegen_only` |
 
-The `@pl.jit` path keeps its own mapping in
-`jit.decorator._run_config_compile_kwargs`, which omits `platform` and
-`backend_type` because that path forwards them separately.
+`compile_kwargs()` is the only mapping onto `ir.compile`'s parameters. The
+`@pl.jit` path used to carry a second copy that omitted `platform` and
+`backend_type` and forwarded the platform separately; it now calls
+`compile_kwargs()` like every other caller, so a knob added to one is not
+silently missing from the other. `lower()` still has its own narrower mapping —
+it stops before codegen and targets the pass pipeline, not `ir.compile`.
 
 ## What is internal
 

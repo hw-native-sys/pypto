@@ -489,6 +489,11 @@ class RunConfig:
             compiled = ir.compile(program, **config.compile_kwargs())
             compiled(*tensors, config=config)
 
+        It is the only mapping onto ``ir.compile``'s parameters: the ``@pl.jit``
+        path calls it too, so a knob added here reaches both. (``lower()`` keeps
+        its own narrower mapping — it stops before codegen and targets the pass
+        pipeline rather than ``ir.compile``.)
+
         Dispatch-only fields (``device_id``, the DFX toggles, the ring-sizing
         overrides) are not compile inputs and are consumed by
         :meth:`~pypto.ir.CompiledProgram.__call__` instead. ``rtol`` / ``atol``

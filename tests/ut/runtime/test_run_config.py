@@ -774,6 +774,17 @@ class TestRunConfigCompileForwarding:
         assert kwargs["platform"] == "a5sim"
         assert kwargs["backend_type"] == BackendType.Ascend950
 
+    def test_compile_kwargs_forward_distributed_config_by_identity(self):
+        """A set ``distributed_config`` is forwarded as the same object.
+
+        ``ir.compile`` bakes it into the ``DistributedCompiledProgram`` and the
+        per-rank dispatch reads it back, so a copy would let the two disagree.
+        """
+        from pypto.ir import DistributedConfig  # noqa: PLC0415
+
+        dc = DistributedConfig(device_ids=[0, 1])
+        assert RunConfig(distributed_config=dc).compile_kwargs()["distributed_config"] is dc
+
 
 # ``_execute_on_device`` lives in ``device_runner`` which eagerly imports the
 # ``simpler`` package (via ``task_interface``). Unit-tests CI runs without

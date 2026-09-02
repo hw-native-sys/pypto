@@ -1513,57 +1513,13 @@ def _overlay_dep_declared_layouts(dep: JITFunction, dep_tensor_meta: dict[str, T
 
 
 # ---------------------------------------------------------------------------
-# RunConfig -> ir.compile() keyword forwarding
+# RunConfig -> pass-pipeline keyword forwarding
+#
+# The compile-side half has no counterpart here: ``RunConfig.compile_kwargs()``
+# is the single mapping onto ``ir.compile()``'s parameters, and the JIT path
+# calls it directly. ``lower()`` stops before codegen, so it needs its own
+# narrower mapping onto ``_run_pass_pipeline``.
 # ---------------------------------------------------------------------------
-
-
-def _run_config_compile_kwargs(run_config: Any) -> dict[str, Any]:
-    """Extract ``ir.compile()`` keyword arguments from a ``pypto.runtime.RunConfig``.
-
-    Maps the compile-side fields of ``RunConfig`` onto the parameters
-    ``ir.compile()`` accepts, so a ``@pl.jit`` kernel invoked with
-    ``config=RunConfig(...)`` honours the same compile knobs that
-    ``ir.compile(program, ...)`` does. Runtime-only fields (``device_id``,
-    ``rtol`` / ``atol``, DFX toggles, ...) are not compile inputs and are
-    consumed by ``CompiledProgram.__call__`` instead.
-
-    ``backend_type`` is intentionally omitted: ``ir.compile()`` derives the
-    codegen backend from ``platform``, which the JIT path already forwards;
-    passing ``backend_type`` as well would be redundant and could conflict.
-
-    ``output_dir`` is forwarded only when set, so an unset value defers to
-    ``ir.compile()``'s own default.
-
-    ``distributed_config`` is likewise forwarded only when set. When supplied it
-    makes ``ir.compile()`` emit a ``DistributedCompiledProgram`` (HOST-level
-    ``@pl.jit.host`` kernels), which ``__call__`` then dispatches per-rank. An
-    unset value defers to ``ir.compile()``'s default (a single-chip
-    ``CompiledProgram``) and keeps it out of the cache key for non-distributed
-    callers.
-
-    ``analyze_auto_scopes_for_deps`` is forwarded because it changes the pass
-    pipeline's dependency derivation and therefore the generated orchestration.
-
-    ``memory_planner`` is forwarded only when set: ``ir.compile()`` rejects an
-    explicit planner while a ``PassContext`` is active, and an unset value must
-    defer to that context (or to the ``PYPTO`` default when there is none).
-    """
-    kwargs: dict[str, Any] = {
-        "strategy": run_config.strategy,
-        "dump_passes": run_config.dump_passes,
-        "dump_ptoas_passes": run_config.dump_ptoas_passes,
-        "profiling": run_config.compile_profiling,
-        "diagnostic_phase": run_config.diagnostic_phase,
-        "disabled_diagnostics": run_config.disabled_diagnostics,
-        "analyze_auto_scopes_for_deps": run_config.analyze_auto_scopes_for_deps,
-    }
-    if run_config.save_kernels_dir is not None:
-        kwargs["output_dir"] = run_config.save_kernels_dir
-    if run_config.distributed_config is not None:
-        kwargs["distributed_config"] = run_config.distributed_config
-    if run_config.memory_planner is not None:
-        kwargs["memory_planner"] = run_config.memory_planner
-    return kwargs
 
 
 def _run_config_lower_kwargs(run_config: Any) -> dict[str, Any]:
@@ -1641,7 +1597,7 @@ class JITFunction:
             ``device=`` dispatch loop. End-to-end runtime dispatch works when
             the caller supplies ``config=RunConfig(distributed_config=...)``:
             the config is forwarded through ``_compile`` → ``ir.compile()``
-            (see ``_run_config_compile_kwargs``), which yields a
+            (see ``RunConfig.compile_kwargs``), which yields a
             ``DistributedCompiledProgram`` that ``__call__`` dispatches
             per-rank.
         _level: pl.Level or None.
@@ -2205,10 +2161,12 @@ class JITFunction:
             allow_signature_mode=allow_signature_mode,
         )
 
-        # Compile-side knobs (strategy, dump_passes, ...) come from the
-        # RunConfig. Forwarding them lets a @pl.jit kernel honour the same
-        # compile options as a direct ir.compile(program, ...) call.
-        compile_kwargs = _run_config_compile_kwargs(run_config) if run_config is not None else {}
+        # Compile-side knobs (platform, strategy, dump_passes, ...) come from
+        # the RunConfig, through the same mapping a direct
+        # ``ir.compile(program, **config.compile_kwargs())`` call uses. With no
+        # config there is nothing to forward and ir.compile()'s own defaults
+        # apply, platform included.
+        compile_kwargs = run_config.compile_kwargs() if run_config is not None else {}
 
         # Build cache key. Platform and strategy are included so artifacts
         # compiled for different targets or optimization strategies never
@@ -2261,7 +2219,6 @@ class JITFunction:
                 specialization.scalar_dtypes,
                 specialization.per_func_dyn,
                 pl,
-                platform=platform,
                 **compile_kwargs,
             )
 
@@ -2289,7 +2246,7 @@ class JITFunction:
         A ``config=RunConfig(...)`` keyword argument is consumed here rather
         than passed to the decorated function: its compile-side fields
         (``strategy``, ``dump_passes``, diagnostics, ...) are forwarded to
-        ``ir.compile()`` via ``_run_config_compile_kwargs``, and its
+        ``ir.compile()`` via ``RunConfig.compile_kwargs``, and its
         runtime fields drive on-device execution.  ``strategy`` also takes
         part in the cache key so artifacts compiled under different strategy
         values never share a cache entry.
@@ -2463,7 +2420,6 @@ class JITFunction:
         scalar_dtypes: dict[str, DataType],
         per_func_dyn: dict[int, dict[str, dict[int, DynDim]]],
         pl: Any,
-        platform: str | None = None,
         **ir_compile_kwargs: Any,
     ) -> Any:
         """Specialize entry + deps into @pl.program source, parse, and compile.
@@ -2478,9 +2434,9 @@ class JITFunction:
         doesn't re-walk the dep graph on every cache miss.
 
         ``ir_compile_kwargs`` are forwarded verbatim to ``ir.compile()`` —
-        compile-side knobs (``strategy``, ``dump_passes``, ``output_dir``,
-        ``profiling``, diagnostics, ...) that the JIT caller derives from a
-        ``RunConfig`` via ``_run_config_compile_kwargs``.
+        compile-side knobs (``platform``, ``strategy``, ``dump_passes``,
+        ``output_dir``, ``profiling``, diagnostics, ...) that the JIT caller
+        derives from a ``RunConfig`` via ``RunConfig.compile_kwargs``.
         """
         from pypto.ir.compile import compile as ir_compile  # noqa: PLC0415
 
@@ -2492,7 +2448,7 @@ class JITFunction:
         try:
             parsed = pl.parse(source, filename=self._diagnostic_filename, source_map=specializer.source_map)
             skip_ptoas = not _ptoas_available()
-            return ir_compile(parsed, skip_ptoas=skip_ptoas, platform=platform, **ir_compile_kwargs)
+            return ir_compile(parsed, skip_ptoas=skip_ptoas, **ir_compile_kwargs)
         except Exception as exc:
             rewritten = _rewrite_jit_error(exc, rename_map)
             if rewritten is exc:
