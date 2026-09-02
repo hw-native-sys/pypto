@@ -31,6 +31,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 import pypto.language as pl  # noqa: E402
+from harness import st  # noqa: E402
 
 M, N, K = 512, 512, 192
 
@@ -46,26 +47,36 @@ def matmul_512x512x192_bf16(a: pl.Tensor, b: pl.Tensor, out: pl.Out[pl.Tensor]):
     return out
 
 
+def _acc_coalesce_case():
+    """The peeled ``176 x 176`` fp32 accumulator coalesces to one L0C buffer.
+
+    So this shape compiles (no L0C overflow), ptoas accepts it (no Acc->Acc
+    ``tmov``), and the result matches the reference. bf16 operands with cube f32
+    accumulation, so the reference is f32 over the same bf16 inputs, and the
+    assertion is on the tensor's Frobenius relative error rather than per
+    element — accumulation order moves individual elements much further than it
+    moves the whole tensor.
+    """
+    torch.manual_seed(0)
+    a = torch.randn(M, K, dtype=torch.bfloat16)
+    b = torch.randn(K, N, dtype=torch.bfloat16)
+    out = torch.zeros((M, N), dtype=torch.float32)
+    return st.case(
+        matmul_512x512x192_bf16,
+        a,
+        b,
+        out,
+        name="matmul_512x512x192_bf16_acc_coalesce",
+        golden=lambda _: a.float() @ b.float(),
+        compare=st.rel_err_under(2e-2),
+    )
+
+
 @pytest.mark.platforms("a2a3", "a2a3sim")
-class TestMemoryReuseAccumulatorCoalesce:
+@st.cases(_acc_coalesce_case())
+def test_512x512x192_bf16_compiles_and_runs(case_run):
     """End-to-end device check for the peeled-accumulator coalescing fix."""
-
-    def test_512x512x192_bf16_compiles_and_runs(self, test_config):
-        """The peeled ``176 x 176`` fp32 accumulator coalesces to one L0C buffer,
-        so this shape compiles (no L0C overflow), ptoas accepts it (no Acc->Acc
-        ``tmov``), and the result matches the reference."""
-        matmul_512x512x192_bf16._cache.clear()
-        torch.manual_seed(0)
-        a = torch.randn(M, K, dtype=torch.bfloat16)
-        b = torch.randn(K, N, dtype=torch.bfloat16)
-        out = torch.zeros((M, N), dtype=torch.float32)
-
-        matmul_512x512x192_bf16(a, b, out, config=test_config)
-
-        # bf16 operands, cube f32 accumulation -> f32 reference on the same bf16 inputs.
-        expected = a.float() @ b.float()
-        rel_err = ((out - expected).norm() / expected.norm()).item()
-        assert rel_err < 2e-2, f"512x512x192 bf16 matmul Frobenius rel_err = {rel_err:.3e} exceeds 2e-2"
+    case_run.assert_passed()
 
 
 if __name__ == "__main__":

@@ -33,12 +33,17 @@ import torch
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.jit.decorator import _ptoas_available, jit
 from pypto.pypto_core import ir as _ir
+from pypto.runtime.runner import validate_persisted_outputs
 
 from harness import st
 from harness.core.case import Case, from_legacy
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
 from harness.core.kernel_source import JitKernel, ProgramKernel, datatype_from_torch
-from harness.core.test_runner import _compile_for_cache
+from harness.core.test_runner import (
+    _case_comparator,
+    _compare_persisted_outputs,
+    _compile_for_cache,
+)
 
 M = 16
 N = 16
@@ -336,6 +341,81 @@ class TestDeclaration:
     def test_unknown_platform_is_rejected(self):
         with pytest.raises(ValueError, match="unknown platform"):
             _jit_case(name="abs_bad_platform", platform="a9")
+
+
+class TestCustomCompare:
+    """``compare=`` replaces the elementwise check the harness performs."""
+
+    def test_non_callable_is_rejected(self):
+        with pytest.raises(TypeError, match="compare must be callable"):
+            _jit_case(name="abs_bad_compare", compare="nope")
+
+    def test_a_legacy_case_has_no_comparator(self):
+        """``PTOTestCase`` carries none, so it always takes the default path."""
+        assert _case_comparator(AbsLegacyCase()) is None
+        assert _case_comparator(_jit_case(name="abs_no_compare")) is None
+        marker = object()
+        assert _case_comparator(_jit_case(name="abs_has_compare", compare=lambda a, e: marker)) is not None
+
+    @pytest.mark.skipif(not _ptoas_available(), reason="ptoas is required to generate kernel sources")
+    def test_comparator_sees_the_persisted_outputs(self):
+        """It receives ``data/actual`` and ``data/out``, keyed by output name.
+
+        Compiled for real so the golden and ``golden.py``'s ``__outputs__`` are
+        the genuine artefacts; only the device run is stood in for, by writing
+        the actuals the run would have persisted.
+        """
+        case_obj = _jit_case(platform="a2a3")
+        work_dir = Path(tempfile.mkdtemp(prefix="case_compare_"))
+        try:
+            _compile_for_cache(case_obj, work_dir, "a2a3", False, False, None)
+            expected = torch.load(work_dir / "data" / "out" / "out.pt")
+
+            # Stand in for the device run: persist an output that is close but
+            # not elementwise-equal, so a comparator that looks at the whole
+            # tensor can accept what the default check would reject.
+            actual = expected + 1e-2
+            (work_dir / "data" / "actual").mkdir(parents=True, exist_ok=True)
+            torch.save(actual, work_dir / "data" / "actual" / "out.pt")
+
+            seen: dict[str, Any] = {}
+
+            def record(actual_map, expected_map):
+                seen["names"] = sorted(actual_map)
+                seen["match"] = torch.equal(actual_map["out"], actual) and torch.equal(
+                    expected_map["out"], expected
+                )
+
+            _compare_persisted_outputs(work_dir, record)
+            assert seen["names"] == ["out"], "keyed by the output names golden.py declares"
+            assert seen["match"], "the comparator receives the persisted tensors verbatim"
+
+            # The default check rejects this pair; a whole-tensor comparator accepts it.
+            with pytest.raises(AssertionError):
+                validate_persisted_outputs(work_dir, rtol=1e-5, atol=1e-5)
+
+            def rel_err_under(limit):
+                def compare(actual_map, expected_map):
+                    for name, got in actual_map.items():
+                        ref = expected_map[name].float()
+                        rel = (got.float() - ref).norm() / ref.norm()
+                        assert rel < limit, f"{name}: rel_err {rel:.3e} exceeds {limit}"
+
+                return compare
+
+            _compare_persisted_outputs(work_dir, rel_err_under(2e-2))
+            with pytest.raises(AssertionError, match="rel_err"):
+                _compare_persisted_outputs(work_dir, rel_err_under(1e-9))
+        finally:
+            shutil.rmtree(work_dir, ignore_errors=True)
+
+    def test_missing_persisted_outputs_are_reported(self):
+        empty = Path(tempfile.mkdtemp(prefix="case_compare_empty_"))
+        try:
+            with pytest.raises((AssertionError, FileNotFoundError)):
+                _compare_persisted_outputs(empty, lambda a, e: None)
+        finally:
+            shutil.rmtree(empty, ignore_errors=True)
 
 
 if __name__ == "__main__":

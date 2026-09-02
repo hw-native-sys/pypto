@@ -838,28 +838,69 @@ def _run_batch_via_task_submit(
     return results
 
 
+def _case_comparator(tc: Any) -> "Any | None":
+    """Return the case's own output comparator, or ``None`` for the default check.
+
+    Only a ``Case`` can carry one; a ``PTOTestCase`` has no such attribute and
+    always takes the elementwise rtol/atol path.
+    """
+    return getattr(tc, "compare", None)
+
+
+def _compare_persisted_outputs(work_dir: Path, comparator: Any) -> None:
+    """Read back the persisted outputs and hand them to *comparator*.
+
+    The device run leaves its actual outputs under ``data/actual`` and the
+    parent-computed golden under ``data/out``, both keyed by the output names
+    ``golden.py`` declares. This loads both and calls
+    ``comparator(actual, expected)``, which raises to fail the case.
+
+    Raises:
+        AssertionError: Either directory is missing its outputs, or the
+            comparator rejected them.
+    """
+    from pypto.runtime.runner import (  # noqa: PLC0415
+        _load_golden_from_data_dir,
+        _load_golden_module,
+    )
+
+    golden_module = _load_golden_module(work_dir / "golden.py")
+    output_names = set(getattr(golden_module, "__outputs__", []))
+    actual = _load_golden_from_data_dir(work_dir / "data" / "actual", output_names)
+    expected = _load_golden_from_data_dir(work_dir / "data" / "out", output_names)
+    if actual is None or expected is None:
+        raise AssertionError(
+            f"custom compare: missing persisted outputs under {work_dir}/data "
+            f"(actual={'ok' if actual else 'missing'}, expected={'ok' if expected else 'missing'})"
+        )
+    comparator(actual, expected)
+
+
 def _validate_after_device_run(
     tc: "PTOTestCase",
     work_dir: Path,
     execution_time: float,
 ) -> RunResult:
-    """Validate persisted device outputs with *tc*'s real tolerance (split path).
+    """Validate persisted device outputs with *tc*'s real check (split path).
 
     The task-submit device run is validation-free (``--no-validate``); it leaves
     the actual outputs under ``work_dir/data/actual``.  This compares them
-    against the golden using the test's ``RunConfig`` rtol/atol — the tolerance
-    is applied here, in pytest's per-item lifecycle, not in the eager run.
+    against the golden here, in pytest's per-item lifecycle rather than in the
+    eager run — with the case's own comparator when it has one, otherwise
+    elementwise at its ``RunConfig`` rtol/atol.
     """
+    comparator = _case_comparator(tc)
     try:
-        validate_persisted_outputs(work_dir, tc.config.rtol, tc.config.atol)
+        if comparator is not None:
+            _compare_persisted_outputs(work_dir, comparator)
+        else:
+            validate_persisted_outputs(work_dir, tc.config.rtol, tc.config.atol)
     except Exception as exc:  # noqa: BLE001 — surfaced as a test failure
+        how = "custom compare" if comparator is not None else f"rtol={tc.config.rtol}, atol={tc.config.atol}"
         return RunResult(
             passed=False,
             test_name=tc.get_name(),
-            error=(
-                f"golden validation failed (rtol={tc.config.rtol}, atol={tc.config.atol}):\n"
-                f"{exc}\n{traceback.format_exc()}"
-            ),
+            error=f"golden validation failed ({how}):\n{exc}\n{traceback.format_exc()}",
             execution_time=execution_time,
         )
     return RunResult(passed=True, test_name=tc.get_name(), execution_time=execution_time)
@@ -899,8 +940,14 @@ def _fused_execute_task(
     # task-submit's onboard device runs go through the batch submitter, not here.
     assert _device_pool is not None, "device pool not initialised"
     device_id = _device_pool.get()
+    comparator = _case_comparator(tc)
     try:
         _executed_device[cache_key] = device_id
+        # A case with its own comparator runs validation-free and persists the
+        # actual outputs, so the comparator sees the same (actual, expected)
+        # pair here as it does on the batched path. Without the split,
+        # _execute_golden_case would apply golden.py's elementwise rtol/atol and
+        # the comparator would never be consulted.
         _execute_golden_case(
             artifact.work_dir,
             artifact.work_dir / "golden.py",
@@ -910,7 +957,11 @@ def _fused_execute_task(
             device_id,
             dfx=_pipeline_ctx.get("dfx", _DfxOpts()),
             enable_sdma=artifact.enable_sdma,
+            validate=comparator is None,
+            actual_out_dir=(artifact.work_dir / "data" / "actual") if comparator is not None else None,
         )
+        if comparator is not None:
+            _compare_persisted_outputs(artifact.work_dir, comparator)
         return RunResult(
             passed=True,
             test_name=name,
@@ -1548,6 +1599,10 @@ class TestRunner:
                 return _validate_after_device_run(test_case, work_dir, time.time() - start_time)
             # RunTiming was dropped (simpler #1177): _execute_golden_case returns
             # None now; timing is read from the runtime's [STRACE] log markers.
+            # A case carrying its own comparator runs validation-free and
+            # persists its actual outputs, so the comparator sees the same
+            # (actual, expected) pair the batched path gives it.
+            comparator = _case_comparator(test_case)
             _execute_golden_case(
                 work_dir,
                 golden_path,
@@ -1557,7 +1612,11 @@ class TestRunner:
                 self.config.device_id,
                 dfx=_DfxOpts.from_run_config(self.config),
                 enable_sdma=enable_sdma,
+                validate=comparator is None,
+                actual_out_dir=(work_dir / "data" / "actual") if comparator is not None else None,
             )
+            if comparator is not None:
+                _compare_persisted_outputs(work_dir, comparator)
 
             return RunResult(
                 passed=True,

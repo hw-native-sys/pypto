@@ -64,6 +64,7 @@ def case(  # noqa: PLR0913 — every knob mirrors one Case field; grouping them 
     enable_pypto_l0c_double_buffer: bool | None = None,
     rtol: float = 1e-5,
     atol: float = 1e-5,
+    compare: Any | None = None,
 ) -> Case:
     """Build one :class:`~harness.core.case.Case`.
 
@@ -91,8 +92,23 @@ def case(  # noqa: PLR0913 — every knob mirrors one Case field; grouping them 
         strategy: Pass-pipeline optimization strategy.
         memory_planner: On-chip memory planner.
         enable_pypto_l0c_double_buffer: Opt in to dbC=2 under the PyPTO planner.
-        rtol: Relative tolerance for output comparison.
-        atol: Absolute tolerance for output comparison.
+        rtol: Relative tolerance for the default elementwise comparison.
+        atol: Absolute tolerance for the default elementwise comparison.
+        compare: Replace the elementwise comparison. Called in the parent as
+            ``compare(actual, expected)`` with dicts of output name to tensor,
+            and raises ``AssertionError`` to fail — the same ``assert`` the
+            test wrote before it became a case. For an assertion that is not
+            per-element, such as a Frobenius relative error::
+
+                def rel_err_under(limit):
+                    def compare(actual, expected):
+                        for name, got in actual.items():
+                            ref = expected[name].float()
+                            rel = (got.float() - ref).norm() / ref.norm()
+                            assert rel < limit, f"{name}: rel_err {rel:.3e} > {limit}"
+                    return compare
+
+            ``rtol`` / ``atol`` are ignored when this is set.
 
     Returns:
         The case, ready to hand to :func:`cases`.
@@ -124,6 +140,7 @@ def case(  # noqa: PLR0913 — every knob mirrors one Case field; grouping them 
         enable_pypto_l0c_double_buffer=enable_pypto_l0c_double_buffer,
         rtol=rtol,
         atol=atol,
+        compare=compare,
     )
 
 
@@ -200,6 +217,31 @@ def cases(*entries: Any) -> Any:
     return pytest.mark.parametrize("_st_case", list(entries), ids=[i for _, i in unwrapped])
 
 
+def rel_err_under(limit: float) -> Any:
+    """A :func:`case` ``compare=`` that bounds the Frobenius relative error.
+
+    ``‖actual - expected‖_F / ‖expected‖_F < limit``, per output. This is the
+    assertion a matmul-shaped test wants: accumulation order across cores and
+    tiles moves individual elements far more than it moves the tensor as a
+    whole, so an elementwise tolerance loose enough to pass would stop catching
+    anything.
+
+    Args:
+        limit: The exclusive upper bound on the relative error.
+
+    Returns:
+        A comparator for ``st.case(..., compare=...)``.
+    """
+
+    def compare(actual: "dict[str, Any]", expected: "dict[str, Any]") -> None:
+        for name, got in actual.items():
+            reference = expected[name].float()
+            rel_err = ((got.float() - reference).norm() / reference.norm()).item()
+            assert rel_err < limit, f"{name}: Frobenius rel_err {rel_err:.3e} exceeds {limit}"
+
+    return compare
+
+
 class CaseRun:
     """What a test asserts on after its case has run.
 
@@ -253,4 +295,4 @@ def case_run(_st_case: Case, test_runner: Any) -> CaseRun:
     return CaseRun(_st_case, test_runner.run(_st_case))
 
 
-__all__ = ["Case", "CaseRun", "case", "case_run", "cases", "from_legacy"]
+__all__ = ["Case", "CaseRun", "case", "case_run", "cases", "from_legacy", "rel_err_under"]

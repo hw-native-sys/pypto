@@ -62,8 +62,16 @@ class Case:
             parametrize variant (or the session ``--platform``) decide.
         strategy / memory_planner / enable_pypto_l0c_double_buffer: Compile
             knobs, applied identically whichever kernel source is used.
-        rtol / atol: Comparison tolerance, applied in the parent after the
-            device run persists its actual outputs.
+        rtol / atol: Comparison tolerance for the default elementwise check,
+            applied in the parent after the device run persists its actual
+            outputs. Ignored when *compare* is set.
+        compare: Replace the elementwise check entirely. Called in the parent
+            with ``(actual, expected)`` — both dicts of output name to tensor,
+            read back from ``data/actual`` and ``data/out`` — and raises
+            ``AssertionError`` to fail the case, exactly as the test's own
+            ``assert`` did before it became a case. Use it when the assertion is
+            not per-element: a Frobenius relative error over the whole tensor,
+            a rank or sparsity property, a tolerance that varies by region.
     """
 
     kernel: KernelSource
@@ -77,6 +85,7 @@ class Case:
     enable_pypto_l0c_double_buffer: bool | None = None
     rtol: float = 1e-5
     atol: float = 1e-5
+    compare: Any | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.kernel, (JitKernel, ProgramKernel, IRKernel)):
@@ -101,6 +110,11 @@ class Case:
             raise ValueError(
                 f"Case '{self.name}': no output tensor. Mark the result with is_output=True, "
                 "or annotate the kernel parameter pl.Out[...] / pl.InOut[...] so it is derived."
+            )
+        if self.compare is not None and not callable(self.compare):
+            raise TypeError(
+                f"Case '{self.name}': compare must be callable as compare(actual, expected), "
+                f"got {type(self.compare).__name__}"
             )
         self.config = RunConfig(rtol=self.rtol, atol=self.atol)
 
