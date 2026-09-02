@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pypto.backend import BackendType
 from pypto.pypto_core.passes import MemoryPlanner
-from pypto.runtime.runner import RunConfig, _DfxOpts, _execute_compiled
+from pypto.runtime.runner import CompileOptions, DfxOptions, RunConfig, RunOptions, _execute_compiled
 
 
 class TestRunConfigPlatformResolution:
@@ -136,11 +136,11 @@ class TestRunConfigDfxFlags:
             RunConfig(platform="a5", enable_chip_swimlane="full")  # pyright: ignore[reportArgumentType]
 
     def test_dfx_opts_normalizes_swimlane_bool(self):
-        # _DfxOpts is constructed directly by the harness and by the CLI, so it
+        # DfxOptions is constructed directly by the harness and by the CLI, so it
         # normalizes too — _dfx_to_cli stringifies this field.
-        assert _DfxOpts(enable_chip_swimlane=True).enable_chip_swimlane == 4
-        assert _DfxOpts(enable_chip_swimlane=2).enable_chip_swimlane == 2
-        assert _DfxOpts(enable_chip_swimlane=0).any() is False
+        assert DfxOptions(enable_chip_swimlane=True).enable_chip_swimlane == 4
+        assert DfxOptions(enable_chip_swimlane=2).enable_chip_swimlane == 2
+        assert DfxOptions(enable_chip_swimlane=0).any() is False
 
     def test_dfx_flags_are_independent(self):
         # Enabling one flag must not implicitly enable another.
@@ -163,7 +163,7 @@ class TestRunConfigDfxFlags:
         assert cfg.enable_pmu == 0
         assert cfg.enable_dep_gen is False
 
-    def test_dfx_opts_from_run_config_carries_all_five(self):
+    def test_dfx_options_carry_all_five(self):
         cfg = RunConfig(
             platform="a5",
             enable_chip_swimlane=True,
@@ -172,7 +172,7 @@ class TestRunConfigDfxFlags:
             enable_dep_gen=True,
             enable_scope_stats=True,
         )
-        opts = _DfxOpts.from_run_config(cfg)
+        opts = cfg.dfx_options()
         assert opts.enable_chip_swimlane == 4  # True normalizes to the full level
         assert opts.enable_dump_args == 2
         assert opts.enable_pmu == 2
@@ -181,11 +181,11 @@ class TestRunConfigDfxFlags:
         assert opts.any() is True
 
     def test_dfx_opts_any_true_for_scope_stats_only(self):
-        # _DfxOpts.any() must report True when scope_stats is the sole flag.
-        assert _DfxOpts(enable_scope_stats=True).any() is True
+        # DfxOptions.any() must report True when scope_stats is the sole flag.
+        assert DfxOptions(enable_scope_stats=True).any() is True
 
     def test_dfx_opts_any_false_when_all_off(self):
-        assert _DfxOpts().any() is False
+        assert DfxOptions().any() is False
 
 
 class TestSwimlaneAliasDeprecation:
@@ -730,7 +730,7 @@ class TestRunConfigCompileForwarding:
             [],
             platform="a2a3",
             device_id=0,
-            dfx=_DfxOpts(enable_chip_swimlane=True),
+            dfx=DfxOptions(enable_chip_swimlane=True),
             config=config,
         )
 
@@ -784,6 +784,87 @@ class TestRunConfigCompileForwarding:
 
         dc = DistributedConfig(device_ids=[0, 1])
         assert RunConfig(distributed_config=dc).compile_kwargs()["distributed_config"] is dc
+
+
+class TestOptionObjects:
+    """``RunConfig`` as an aggregate of ``CompileOptions`` / ``RunOptions`` / ``DfxOptions``."""
+
+    # RunConfig field -> the option-object field it becomes. Only the renames
+    # are listed; everything else keeps its name.
+    _COMPILE_RENAMES = {"save_kernels_dir": "output_dir", "compile_profiling": "profiling"}
+    _HARNESS_ONLY = {"rtol", "atol", "golden_data_dir", "save_kernels", "codegen_only"}
+
+    def test_every_run_config_field_is_claimed_by_exactly_one_concern(self):
+        """The split must stay total: a new field lands in a view, or in the harness set.
+
+        Without this, adding a field to ``RunConfig`` silently leaves it out of
+        both views — readable through the aggregate, invisible to any caller
+        that took the half it belongs to.
+        """
+        run_config_fields = {f.name for f in dataclasses.fields(RunConfig)}
+        compile_fields = {f.name for f in dataclasses.fields(CompileOptions)}
+        dispatch_fields = {f.name for f in dataclasses.fields(RunOptions) if f.name != "dfx"}
+        dispatch_fields |= {f.name for f in dataclasses.fields(DfxOptions)}
+
+        claimed = set()
+        for name in run_config_fields:
+            renamed = self._COMPILE_RENAMES.get(name, name)
+            if renamed in compile_fields or name in dispatch_fields:
+                claimed.add(name)
+
+        assert run_config_fields - claimed == self._HARNESS_ONLY
+
+    def test_compile_kwargs_is_the_compile_options_view(self):
+        """``compile_kwargs()`` must be exactly what the typed object produces."""
+        cfg = RunConfig(
+            platform="a5sim",
+            save_kernels_dir="/tmp/pypto-options",
+            compile_profiling=True,
+            memory_planner=MemoryPlanner.DSA_RP,
+        )
+        assert cfg.compile_kwargs() == cfg.compile_options().as_compile_kwargs()
+
+    def test_compile_options_use_the_compilers_field_names(self):
+        """``save_kernels_dir`` / ``compile_profiling`` are ``ir.compile``'s names here."""
+        options = RunConfig(save_kernels_dir="/tmp/pypto-options", compile_profiling=True).compile_options()
+
+        assert options.output_dir == "/tmp/pypto-options"
+        assert options.profiling is True
+
+    def test_compile_options_stand_alone_without_a_run_config(self):
+        """A caller that only compiles needs no ``RunConfig``."""
+        import inspect  # noqa: PLC0415
+
+        from pypto import ir  # noqa: PLC0415
+
+        kwargs = CompileOptions(platform="a5sim").as_compile_kwargs()
+
+        assert set(kwargs) <= set(inspect.signature(ir.compile).parameters)
+        assert kwargs["platform"] == "a5sim"
+        # Unset optionals stay absent so ir.compile's own defaults apply.
+        assert "memory_planner" not in kwargs
+        assert "output_dir" not in kwargs
+        assert "distributed_config" not in kwargs
+
+    def test_run_options_carry_the_dispatch_half_with_dfx_nested(self):
+        cfg = RunConfig(
+            platform="a2a3",
+            device_id=3,
+            aicpu_thread_num=7,
+            ring_heap=1024 * 1024,
+            enable_pmu=2,
+        )
+        options = cfg.run_options()
+
+        assert (options.platform, options.device_id, options.aicpu_thread_num) == ("a2a3", 3, 7)
+        assert options.ring_heap == 1024 * 1024
+        assert options.dfx == cfg.dfx_options()
+        assert options.dfx.enable_pmu == 2
+
+    def test_any_dfx_enabled_agrees_with_the_dfx_view(self):
+        """One predicate, not two: the aggregate answers through the view."""
+        for cfg in (RunConfig(), RunConfig(enable_scope_stats=True), RunConfig(enable_chip_swimlane=True)):
+            assert cfg.any_dfx_enabled() == cfg.dfx_options().any()
 
 
 # ``_execute_on_device`` lives in ``device_runner`` which eagerly imports the

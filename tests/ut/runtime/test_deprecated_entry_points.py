@@ -23,7 +23,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from pypto.runtime import DeviceTensor, RunConfig, execute_compiled, execute_distributed_compiled
-from pypto.runtime.runner import _DfxOpts
 
 _L3_FROM_DIR = "pypto.ir.distributed_compiled_program.DistributedCompiledProgram.from_dir"
 
@@ -39,7 +38,7 @@ def test_execute_compiled_warns_and_forwards(tmp_path):
                 args,
                 platform="a2a3sim",
                 device_id=2,
-                dfx=_DfxOpts.from_run_config(config),
+                dfx=config.dfx_options(),
                 config=config,
             )
 

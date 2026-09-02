@@ -51,7 +51,7 @@ from pypto.runtime.runner import (
     _SWIMLANE_CLI_HELP,
     _SWIMLANE_FULL_LEVEL,
     _SWIMLANE_MAX_LEVEL,
-    _DfxOpts,
+    DfxOptions,
     _execute_golden_case,
 )
 
@@ -79,7 +79,7 @@ def execute_artifact_dir(
     platform: str,
     device_id: int,
     *,
-    dfx: _DfxOpts = _DfxOpts(),
+    dfx: DfxOptions = DfxOptions(),
     validate: bool = True,
 ) -> None:
     """Rebuild the compiled artifact in *work_dir* and run it on *device_id*.
@@ -148,7 +148,7 @@ def _run_on_device(
     runtime_name: str,
     enable_sdma: bool,
     *,
-    dfx: _DfxOpts,
+    dfx: DfxOptions,
     validate: bool,
 ) -> None:
     """Device-run half shared by the single (:func:`execute_artifact_dir`) and
@@ -176,7 +176,7 @@ def execute_batch_manifest(
     manifest_path: Path,
     device_id: int,
     *,
-    dfx: _DfxOpts = _DfxOpts(),
+    dfx: DfxOptions = DfxOptions(),
     validate: bool = False,
 ) -> bool:
     """Run a batch of artifacts in ONE process, reusing the device session.
@@ -441,7 +441,7 @@ def main(argv: list[str] | None = None) -> int:
     """
     parser = _build_parser()
     args = parser.parse_args(argv)
-    dfx = _DfxOpts(
+    dfx = DfxOptions(
         enable_chip_swimlane=_resolve_swimlane_args(parser, args),
         enable_dump_args=args.dump_args,
         enable_pmu=args.enable_pmu,

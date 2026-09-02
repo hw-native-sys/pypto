@@ -707,11 +707,11 @@ def _make_call_config(
     call_config = CallConfig()
     call_config.aicpu_thread_num = dc.aicpu_thread_num
     if run_config is not None:
-        from .runner import _apply_ring_overrides, _DfxOpts  # noqa: PLC0415
+        from .runner import _apply_ring_overrides  # noqa: PLC0415
 
         _apply_ring_overrides(call_config, run_config)
 
-        dfx = _DfxOpts.from_run_config(run_config)
+        dfx = run_config.dfx_options()
         if dfx.any():
             if dfx_base is None:
                 raise ValueError("_make_call_config: dfx_base is required when a DFX flag is enabled on L3")
@@ -1367,9 +1367,7 @@ def _execute_distributed(
     # Scope DFX artifacts to this run: drop any stale ``rank*/d{k}`` dirs from an
     # earlier (possibly larger) run before the first dispatch writes new ones.
     if config is not None:
-        from .runner import _DfxOpts  # noqa: PLC0415
-
-        if _DfxOpts.from_run_config(config).any():
+        if config.dfx_options().any():
             _clear_dfx_dispatch_dirs(dfx_base)
 
     if config is not None and config.enable_chip_swimlane > 0 and not compiled.platform.endswith("sim"):
@@ -2918,9 +2916,7 @@ class DistributedWorker(Worker):
         # This worker reuses one output_dir across dispatches, so stale
         # ``rank*/d{k}`` dirs from an earlier, larger run must be cleared before
         # this run rewrites ``d0, d1, ...``.
-        from .runner import _DfxOpts  # noqa: PLC0415
-
-        if _DfxOpts.from_run_config(config).any():
+        if config.dfx_options().any():
             # Every dispatch writes below the same output directory. Finish
             # earlier work before clearing or repopulating those paths.
             self._drain_dispatch_handles()

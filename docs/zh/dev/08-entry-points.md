@@ -132,13 +132,30 @@ compiled = ir.compile(program, **config.compile_kwargs())
 compiled(*tensors, config=config)
 ```
 
-它的字段分三类：
+它的字段分三类，而每一类都是一个类型：
 
-| 由谁读取 | 字段 |
-| -------- | ---- |
-| `ir.compile`，经 `compile_kwargs()` | `strategy`、`backend_type`、`platform`、`memory_planner`、`dump_passes`、`dump_ptoas_passes`、`compile_profiling`、`diagnostic_phase`、`disabled_diagnostics`、`analyze_auto_scopes_for_deps`、`save_kernels_dir`（作为 `output_dir`）、`distributed_config` |
-| 派发 | `device_id`、`aicpu_thread_num`、`ring_*` 覆写项（[Ring 尺寸](05-runtime-ring-sizing.md)）、DFX 开关（[DFX](03-runtime-dfx.md)） |
-| 仅系统测试 harness | `rtol`、`atol`、`golden_data_dir`、`save_kernels`、`codegen_only` |
+| 由谁读取 | 类型 | 字段 |
+| -------- | ---- | ---- |
+| `ir.compile` | `CompileOptions` | `platform`、`backend_type`、`strategy`、`dump_passes`、`dump_ptoas_passes`、`profiling`（`compile_profiling`）、`diagnostic_phase`、`disabled_diagnostics`、`analyze_auto_scopes_for_deps`、`output_dir`（`save_kernels_dir`）、`memory_planner`、`distributed_config` |
+| 派发 | `RunOptions` | `platform`、`device_id`、`aicpu_thread_num`、`ring_*` 覆写项（[Ring 尺寸](05-runtime-ring-sizing.md)），以及内嵌的 `DfxOptions` |
+| 一次派发采集哪些诊断 | `DfxOptions` | `enable_chip_swimlane`、`enable_dump_args`、`enable_pmu`、`enable_dep_gen`、`enable_scope_stats`（[DFX](03-runtime-dfx.md)） |
+| 仅系统测试 harness | —— | `rtol`、`atol`、`golden_data_dir`、`save_kernels`、`codegen_only` |
+
+`RunConfig.compile_options()` / `run_options()` / `dfx_options()` 是这个聚合体上的视图，
+而 `compile_kwargs()` 就是 `compile_options().as_compile_kwargs()`。`CompileOptions`
+按 `ir.compile` 的叫法命名字段 —— 是 `output_dir` 而不是 `save_kernels_dir` ——
+因为它存在的意义就是用编译器自己的词汇说出编译侧；它也可以独立使用：
+
+```python
+from pypto.runtime import CompileOptions
+
+compiled = ir.compile(program, **CompileOptions(platform="a2a3").as_compile_kwargs())
+```
+
+`RunConfig` 保留全部字段与全部调用方；这三个类型是它底下的词汇。有一个单测把这个划分钉成
+**完备**的 —— 每个 `RunConfig` 字段要么被某个视图认领，要么属于那五个 harness 专用字段 ——
+于是以后新加的字段不会悄悄两边都不属于。把那五个挪去 harness 是本次**没有**做的一步：
+它们也出现在 `pypto-lib` 的构造调用里。
 
 `compile_kwargs()` 是通往 `ir.compile` 参数的唯一映射。`@pl.jit` 路径过去另有一份
 副本，省略 `platform` 与 `backend_type` 并单独转发 platform；现在它和其他调用方一样

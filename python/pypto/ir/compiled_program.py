@@ -683,7 +683,7 @@ def _invoke_compiled(
         args, param_infos, output_indices, return_types, caller_name=caller_name
     )
 
-    from pypto.runtime.runner import RunConfig, _DfxOpts, _execute_compiled  # noqa: PLC0415
+    from pypto.runtime.runner import RunConfig, _execute_compiled  # noqa: PLC0415
 
     execution_platform = platform if config is None else config.platform
     if config is None:
@@ -694,7 +694,7 @@ def _invoke_compiled(
         coerced,
         platform=execution_platform,
         device_id=config.device_id,
-        dfx=_DfxOpts.from_run_config(config),
+        dfx=config.dfx_options(),
         aicpu_thread_num=config.aicpu_thread_num,
         config=config,
     )

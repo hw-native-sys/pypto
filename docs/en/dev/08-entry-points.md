@@ -143,13 +143,33 @@ compiled = ir.compile(program, **config.compile_kwargs())
 compiled(*tensors, config=config)
 ```
 
-Its fields split three ways:
+Its fields split three ways, and each way is a type:
 
-| Read by | Fields |
-| ------- | ------ |
-| `ir.compile`, via `compile_kwargs()` | `strategy`, `backend_type`, `platform`, `memory_planner`, `dump_passes`, `dump_ptoas_passes`, `compile_profiling`, `diagnostic_phase`, `disabled_diagnostics`, `analyze_auto_scopes_for_deps`, `save_kernels_dir` (as `output_dir`), `distributed_config` |
-| Dispatch | `device_id`, `aicpu_thread_num`, the `ring_*` overrides ([Ring sizing](05-runtime-ring-sizing.md)), the DFX toggles ([DFX](03-runtime-dfx.md)) |
-| The system-test harness only | `rtol`, `atol`, `golden_data_dir`, `save_kernels`, `codegen_only` |
+| Read by | Type | Fields |
+| ------- | ---- | ------ |
+| `ir.compile` | `CompileOptions` | `platform`, `backend_type`, `strategy`, `dump_passes`, `dump_ptoas_passes`, `profiling` (`compile_profiling`), `diagnostic_phase`, `disabled_diagnostics`, `analyze_auto_scopes_for_deps`, `output_dir` (`save_kernels_dir`), `memory_planner`, `distributed_config` |
+| Dispatch | `RunOptions` | `platform`, `device_id`, `aicpu_thread_num`, the `ring_*` overrides ([Ring sizing](05-runtime-ring-sizing.md)), and a nested `DfxOptions` |
+| A dispatch's diagnostics | `DfxOptions` | `enable_chip_swimlane`, `enable_dump_args`, `enable_pmu`, `enable_dep_gen`, `enable_scope_stats` ([DFX](03-runtime-dfx.md)) |
+| The system-test harness only | — | `rtol`, `atol`, `golden_data_dir`, `save_kernels`, `codegen_only` |
+
+`RunConfig.compile_options()` / `run_options()` / `dfx_options()` are views onto
+the aggregate, and `compile_kwargs()` is `compile_options().as_compile_kwargs()`.
+`CompileOptions` names its fields the way `ir.compile` does — `output_dir`, not
+`save_kernels_dir` — because it exists to say the compile side in the compiler's
+own vocabulary, and it stands alone:
+
+```python
+from pypto.runtime import CompileOptions
+
+compiled = ir.compile(program, **CompileOptions(platform="a2a3").as_compile_kwargs())
+```
+
+`RunConfig` keeps every field and every caller; the three types are the
+vocabulary underneath it. A unit test pins the split as *total* — every
+`RunConfig` field is claimed by one of the views or is one of the five
+harness-only fields — so a field added later cannot quietly belong to neither.
+Moving those five out to the harness is the step this does not take: they reach
+`pypto-lib`'s constructor calls too.
 
 `compile_kwargs()` is the only mapping onto `ir.compile`'s parameters. The
 `@pl.jit` path used to carry a second copy that omitted `platform` and

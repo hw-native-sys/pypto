@@ -40,6 +40,14 @@ work, and forward to the same implementation, but each emits a
 ``dfx`` / ``aicpu_thread_num`` onto the :class:`RunConfig` first — see its
 docstring for why a plain rename changes where the run lands.
 
+``RunConfig`` aggregates three concerns, each also available on its own:
+:class:`CompileOptions` (what compilation reads, in ``ir.compile``'s
+vocabulary), :class:`RunOptions` (what a dispatch reads) and :class:`DfxOptions`
+(which diagnostics it collects, nested inside ``RunOptions``). ``RunConfig``
+keeps every field and every caller — ``compile_options()`` / ``run_options()`` /
+``dfx_options()`` are views onto it, and code that needs only one half should
+take that half.
+
 ``docs/en/dev/08-entry-points.md`` maps every compile and execution entry point
 to the layer it belongs to.
 """
@@ -56,7 +64,7 @@ from .log_config import _ensure_configured as _ensure_log_configured
 from .log_config import configure_log
 from .log_config import current_level as log_level
 from .pto_isa import ensure_pto_isa_root, pto_isa_include_dir
-from .runner import RunConfig, RunResult, execute_compiled
+from .runner import CompileOptions, DfxOptions, RunConfig, RunOptions, RunResult, execute_compiled
 from .runtime_base import Worker
 from .tensor_spec import ScalarSpec, TensorSpec
 from .worker import ChipWorker, RegistrationHandle
@@ -82,7 +90,10 @@ __all__ = [
     "DistributedRunHandle",
     "ReadOnlyHostTensor",
     "RegistrationHandle",
+    "CompileOptions",
+    "DfxOptions",
     "RunConfig",
+    "RunOptions",
     "RunResult",
     "ScalarSpec",
     "TensorSpec",

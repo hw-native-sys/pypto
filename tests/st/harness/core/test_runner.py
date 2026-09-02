@@ -55,9 +55,9 @@ from pypto.runtime.golden_writer import (
     generate_golden_source,
 )
 from pypto.runtime.runner import (
+    DfxOptions,
     RunConfig,
     RunResult,
-    _DfxOpts,
     _execute_golden_case,
     validate_persisted_outputs,
 )
@@ -525,7 +525,7 @@ def _fused_compile_task(
 _RESULT_MARKER_PREFIX = "PYPTO_EXEC_RESULT"
 
 
-def _dfx_to_cli(dfx: "_DfxOpts") -> list[str]:
+def _dfx_to_cli(dfx: "DfxOptions") -> list[str]:
     """Inverse of ``execute_artifact`` DFX arg parsing.
 
     Emits only the flags whose value differs from the off-default, so a plain
@@ -648,7 +648,7 @@ def _shell_quote_run(project_root: Path, inner: "list[str]") -> str:
     )
 
 
-def _build_execute_artifact_cmd(mode_args: "list[str]", dfx: "_DfxOpts") -> list[str]:
+def _build_execute_artifact_cmd(mode_args: "list[str]", dfx: "DfxOptions") -> list[str]:
     """Assemble the ``python -m pypto.runtime.execute_artifact`` child argv.
 
     *mode_args* selects single (``--work-dir`` / ``--platform``) vs batch
@@ -725,7 +725,7 @@ def _exec_task_submit(
 def _run_artifact_via_task_submit(
     work_dir: Path,
     platform: str,
-    dfx: "_DfxOpts",
+    dfx: "DfxOptions",
     max_time: int,
     queue_timeout: int,
     device: str = "auto",
@@ -753,7 +753,7 @@ def _run_batch_via_task_submit(
     entries: "list[tuple[Path, str]]",
     manifest_path: Path,
     device: str,
-    dfx: "_DfxOpts",
+    dfx: "DfxOptions",
     max_time: int,
     queue_timeout: int,
 ) -> "dict[str, tuple[bool, str | None, int | None]]":
@@ -908,7 +908,7 @@ def _fused_execute_task(
             artifact.runtime_name,
             artifact.resolved_platform,
             device_id,
-            dfx=_pipeline_ctx.get("dfx", _DfxOpts()),
+            dfx=_pipeline_ctx.get("dfx", DfxOptions()),
             enable_sdma=artifact.enable_sdma,
         )
         return RunResult(
@@ -986,7 +986,7 @@ def _batch_submitter(batch_size: int, cache_dir: Path) -> None:
     try:
         assert _execute_pool is not None, "execute pool not initialised"
         device = _pipeline_ctx.get("task_submit_device", "auto")
-        dfx = _pipeline_ctx.get("dfx", _DfxOpts())
+        dfx = _pipeline_ctx.get("dfx", DfxOptions())
         max_time = _pipeline_ctx.get("task_max_time", 600)
         queue_timeout = _pipeline_ctx.get("task_queue_timeout", 1800)
         # A 0 / negative batch size would never fill a batch (``len(pending) >= 0``
@@ -1117,7 +1117,7 @@ def start_pipeline(  # noqa: PLR0913
         "codegen_only": codegen_only,
         "analyze_auto_scopes_for_deps": analyze_auto_scopes_for_deps,
         "memory_planner": memory_planner,
-        "dfx": _DfxOpts(
+        "dfx": DfxOptions(
             enable_chip_swimlane=enable_chip_swimlane,
             enable_dump_args=enable_dump_args,
             enable_pmu=enable_pmu,
@@ -1497,7 +1497,7 @@ class TestRunner:
                 passed, error, device = _run_artifact_via_task_submit(
                     work_dir,
                     resolved_platform,
-                    _DfxOpts.from_run_config(self.config),
+                    self.config.dfx_options(),
                     _pipeline_ctx.get("task_max_time", 600),
                     _pipeline_ctx.get("task_queue_timeout", 1800),
                     _pipeline_ctx.get("task_submit_device", "auto"),
@@ -1525,7 +1525,7 @@ class TestRunner:
                 runtime_name,
                 resolved_platform,
                 self.config.device_id,
-                dfx=_DfxOpts.from_run_config(self.config),
+                dfx=self.config.dfx_options(),
                 enable_sdma=enable_sdma,
             )
 
