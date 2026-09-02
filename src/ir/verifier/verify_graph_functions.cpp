@@ -32,6 +32,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -49,6 +50,7 @@
 #include "pypto/ir/transforms/utils/alloc_batching.h"
 #include "pypto/ir/transforms/utils/graph_replay_invariant.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
 
@@ -386,12 +388,59 @@ class GraphBodyChecker : public IRVisitor {
 
   /// An allocation outside any statement list — a loop body that is a single
   /// assign, say — is a batch of one.
-  /// Boundary provenance: a parameter is its own root, an alias inherits one.
+  /// Boundary provenance: a parameter is its own root, an alias inherits one,
+  /// and so does the result of a call that writes through a boundary argument.
+  ///
+  /// The call case is not decoration. `tmp = kernel(a, tmp)` rebinds the buffer
+  /// to a fresh SSA name, and a view of *that* name is still a view of a
+  /// boundary tensor. Tracking only bare aliases would let it slip past
+  /// `CheckBoundaryView` with a window that can move between calls — the very
+  /// thing this verifier exists to catch, reached by a name it could not see
+  /// through.
   void TrackTensorAlias(const AssignStmtPtr& op) {
     auto var = AsVarLike(op->var_);
     if (!var || As<ScalarType>(var->GetType()) != nullptr) return;
     auto aliased = AsVarLike(op->value_);
-    if (aliased && tensor_root_.count(aliased.get()) != 0) tensor_root_.insert(var.get());
+    if (aliased && tensor_root_.count(aliased.get()) != 0) {
+      tensor_root_.insert(var.get());
+      return;
+    }
+    if (auto element = As<TupleGetItemExpr>(op->value_)) {
+      auto tuple_var = AsVarLike(element->tuple_);
+      auto it = tuple_var ? tuple_result_.find(tuple_var.get()) : tuple_result_.end();
+      if (it != tuple_result_.end() && element->index_ >= 0) {
+        TrackWriteback(var, it->second, static_cast<size_t>(element->index_));
+      }
+      return;
+    }
+    auto call = transform_utils::AsCallOrSubmitView(op->value_);
+    if (!call) return;
+    if (As<TupleType>(op->value_->GetType()) != nullptr) {
+      tuple_result_[var.get()] = call;
+      return;
+    }
+    TrackWriteback(var, call, /*return_position=*/0);
+  }
+
+  /// Insert @p var as a boundary root when @p call writes it through one.
+  ///
+  /// Re-derived from `ExplicitReturnedParamIndices` rather than shared with the
+  /// pass, like every other rule here: the point is to disagree if a later
+  /// rewrite reintroduces a state the pass ruled out.
+  void TrackWriteback(const VarPtr& var, const CallPtr& call, size_t return_position) {
+    auto gvar = As<GlobalVar>(call->op_);
+    if (!gvar || !program_) return;
+    auto callee = program_->GetFunction(gvar->name_);
+    if (!callee) return;
+    const auto ret_map = return_lineage::ExplicitReturnedParamIndices(callee);
+    if (return_position >= ret_map.size()) return;
+    // Named before the guard; see the matching comment in `LegalizeGraphBoundary`.
+    const auto& returned_param = ret_map[return_position];
+    if (!returned_param.has_value()) return;
+    // The caller-supplied prefix of a `Submit` maps positionally even when it
+    // omits a runtime-allocated `Out` tail; see `Submit::args_` in ir/expr.h.
+    auto source = AsVarLike(transform_utils::CallerSuppliedArg(call, callee, *returned_param));
+    if (source && tensor_root_.count(source.get()) != 0) tensor_root_.insert(var.get());
   }
 
   void VisitStmt_(const AssignStmtPtr& op) override {
@@ -598,6 +647,9 @@ class GraphBodyChecker : public IRVisitor {
   std::unordered_set<const Var*> tensor_params_;
   /// Tensor vars that derive from a boundary parameter, directly or by alias.
   std::unordered_set<const Var*> tensor_root_;
+  /// Tuple-valued call/submit results, so `TupleGetItemExpr` can resolve back
+  /// to the callee argument each element writes through.
+  std::unordered_map<const Var*, CallPtr> tuple_result_;
   size_t count_ = 0;
   std::unordered_set<const Stmt*> batched_;
 };

@@ -1,8 +1,8 @@
 # LegalizeGraphBoundary Pass
 
 让每个 `FunctionType::Graph` 函数都能被 `host_build_graph` runtime 合法地录制与
-回放：把 Graph 函数体内派生出来的边界标量外提到调用点，并拒绝那些 runtime 不会
-缓存的边界形态。
+回放：把 Graph 函数体内派生出来的边界标量、取出的边界视图、以及自己分配的中间
+张量都外提到调用点，并拒绝那些 runtime 不会缓存的边界形态。
 
 ## 概述
 
@@ -10,15 +10,18 @@
 录制。回放只 patch 两样东西：边界张量的地址，以及边界标量的值。其余一切 —— 节点
 数、形状、依赖边、block 数 —— 都被烙进录制下来的 Definition。
 
-由此产生两类问题，而且在 runtime 侧都是静默的：
+由此产生四类问题，而且在 runtime 侧都是静默的：
 
 | 问题 | runtime 的行为 | 本 pass 的处理 |
 | ---- | -------------- | -------------- |
 | 边界标量在区域内被**派生**出来 | 归类为静态数据，把第一次调用的值冻进录制。永远不告警。 | **Step A** —— 把计算外提到调用点；当冻结下来的值可证明就是正确值时，原地保留 |
+| 边界张量的视图在区域**内部**取出 | 冻结第一次调用的偏移，只 patch 地址，于是后续调用读到的是第一次调用的窗口 | **Step B** —— 把视图外提到调用点；当其窗口对回放不变时，原地保留 |
+| 区域自己分配中间张量 | 能正确录制，但分配在一块运行期间从不回收的堆上，于是活跃集随提交次数增长 | **Step C** —— 把分配外提到调用点，成为 `InOut` 边界张量 |
 | 边界本身不可缓存 | 拒绝缓存，静默地按普通任务执行该区域 | **Step D** —— 编译期拒绝 |
 
-前者产生错误结果。后者结果正确但完全没有预期的加速 —— 任何数值测试都看不见，这
-正是这些检查放在这里、而不是交给一条 runtime 日志的原因。
+前两类产生错误结果。第三类结果正确，但随着层数增长会耗尽内存、或者只是变慢。最
+后一类结果正确但完全没有预期的加速 —— 任何数值测试都看不见，这正是这些检查放在
+这里、而不是交给一条 runtime 日志的原因。
 
 ## Step A —— 派生的边界标量
 
@@ -130,6 +133,21 @@ Step B 把这个切片搬出去，把结果作为一个新的边界张量传进�
 一次前向遍历就能走完整条链 —— 一个 view 只能引用在它之前定义的源。把 `wr` 留在原地是
 静默的：`graph_rebind_tensor` 会用 `wl` patch buffer 地址，但保留第一次调用时录下的偏移。
 
+**provenance 要穿过原地写回的调用。** `tmp = kernel(a, tmp)` 把同一块 buffer 重新
+绑定到一个新的 SSA 名字上，而对*那个*名字取的 view 仍然是对边界张量取的 view。若只
+跟踪 `alias = var` 这种裸别名，root 就在这里断了，Step B 会直接跳过该 view —— 既不外
+提也不检查 —— 于是一个逐次变化的偏移留在区域内，冻结的是第一次调用的窗口。这里通过
+[`ExplicitReturnedParamIndices`](26-normalize_return_order.md) 跟过去，也就是
+orchestration codegen 给调用结果做别名时用的同一张「返回位 -> 形参」表，因此
+provenance 与 codegen 不会对「这个结果指向哪块 buffer」产生分歧。这一点对边界*形参*
+和 Step C 的分配同样适用。
+
+该映射指向的实参由 `CallerSuppliedArg` 解析，它按 `ir/expr.h` 里 `Submit::args_` 契约
+划分的三个区域来取。`Submit` 合法地可以省略由 runtime 分配的 `Out` 尾巴，而它调用方
+提供的前缀仍然按位置一一对应，所以要求实参与形参数量完全相等，会让每一个这样的 launch
+都静默丢掉 provenance。落在 runtime 分配区间的形参则正确地取不到实参：那块 buffer 由
+runtime 创建，没有可继承的调用方 root。
+
 **被外提的 view 形状必须是编译期常量。** 回放直接从录制模板里抄 view 的 `shapes` 和
 `strides`，只 patch `buffer_addr` 和 `start_offset`，所以从边界标量读出来的 extent 会把
 第一次调用的形状套到后续调用的 buffer 上。回放不变的 extent 会被接受，理由和别处一样：
@@ -162,20 +180,78 @@ Step B 把这个切片搬出去，把结果作为一个新的边界张量传进�
 
 ## Step C —— 区域内的分配
 
-区域内**允许** `pl.create_tensor`，但有一条约束：它的 shape 必须是编译期常量。
+区域顶层的 `pl.create_tensor` 会被**外提到调用点**，成为 `InOut` 边界张量：
 
-codegen 会把它降级成批量 `alloc_tensors`，runtime 把这个记成一个无 kernel 的节点
-（和 `submit_dummy_task` 记录的形状相同），所以并不会毒化录制。但它会计入节点上限；
-放在运行时循环或分支里则意味着拓扑随调用变化——这两点都归 Step D 管。
+```python
+# 外提前
+@pl.jit.graph
+def layer(a: pl.Tensor, acc: pl.InOut[pl.Tensor]):
+    tmp = pl.create_tensor([ROWS, COLS], pl.FP32)   # 每次提交都分配一次
+    ...
+    return acc
 
-录制无法复现的是从边界标量读出来的 **shape**：extent 会被抄进节点、缓冲区地址由它
-推出，而回放不会重新执行函数体，所以后续调用即使 extent 更大，拿到的仍是第一次调用
-的 buffer —— 这是错误的地址布局，不是 fallback。Step D 会拒绝这种写法，也会直接拒绝
-`tensor.full`（orchestration codegen 根本没有它的降级路径）。
+# 外提后 —— buffer 归调用点所有
+def layer(a, acc, tmp: pl.InOut[pl.Tensor]): ...
+tmp__graph_arg0 = pl.tensor.create([ROWS, COLS], pl.FP32)
+acc = layer(a, acc, tmp__graph_arg0)
+```
 
-区域局部分配**不会**被自动外提成边界形参：那会新增第二个 `InOut` 形参，而返回值别名
-映射要求被调方的 `ReturnStmt` 直接指名某个形参，才能确定张量返回值别名到哪一个 ——
-合成出来的形参不满足这个不变量。要自动化，得先把那套映射改造掉。
+原地录制本身是**正确**的 —— codegen 把 create 降级成批量 `alloc_tensors`，runtime
+把它记成一个无 kernel 的节点（和 `submit_dummy_task` 记录的形状相同）—— 但 buffer
+来自 **graph 堆**，而 `task_allocator.h` 在整轮运行结束前从不回收它（"The whole
+graph must fit at once; nothing is reclaimed mid-run"）。于是活跃集随提交次数增长
+而不是保持恒定：一个持有 14 个中间张量的 decoder layer，录制 N 层就要占 14 × N 份。
+外提之后 buffer 回到普通的可回收堆上，区域内也不再有任何分配节点。
+
+simpler 手写的 `examples/a2a3/host_build_graph/qwen3_14b_decode` 场景就是手工这么
+做的，理由也写在它的 README 里 —— "This keeps the temporary live set flat in layer
+count and fits the default ring configuration."
+
+形参是 `InOut`，绝不能是 `In`：区域会**写**这块 buffer；声明成 `In` 时 codegen 发射
+`add_input`，这次 launch 永远不会被登记为该 buffer 的写者，调用方若把分配提出自己的
+循环，前后两次 launch 之间就没有任何定序。`Out` 也不可用 —— 在 Graph 边界上它表示
+"由 runtime 分配"，而 `rt_graph_args_cacheable` 会直接拒绝。
+
+被外提的分配**就是**边界张量，所以对它取的视图同样要走上面 Step B 的规则，而不是原
+地放过。这不是可选的整理：`GraphBoundaryLegalized` verifier 把每个张量形参都当作
+boundary root，因此一个窗口可变、却被留在原地的视图，会让本 pass 产出连自己的
+verifier 都拒绝的 IR。
+
+有两类分配是刻意留在原地的：
+
+| 留在原地 | 原因 |
+| -------- | ---- |
+| `tensor.full` | orchestration codegen 在调用点同样没有它的降级路径，外提只是把失败挪个地方。Step D 直接拒绝它 |
+| 循环内的 create | 它是**每次迭代一份**的新 buffer。把 N 份塌缩成一个形参会让各迭代互相别名，而本该重新串行化它们的跨任务依赖边，是更早的 [`AutoDeriveTaskDependencies`](39-auto_derive_task_dependencies.md) 推导出来的 |
+
+无论外提与否，录制都无法复现从边界标量读出来的 **shape**：extent 会被抄进节点、缓冲
+区地址由它推出，而回放不会重新执行函数体，所以后续调用即使 extent 更大，拿到的仍是
+第一次调用的 buffer —— 这是错误的地址布局，不是 fallback。Step D 在 Step C 之前就拒
+绝这种写法，因此 Step C 外提的每个分配的 shape 都是编译期常量。
+
+### 前置条件：Graph 的返回值必须直接指名形参
+
+Step B 和 Step C 都会**追加** `InOut` 形参，而这正是自动化这次外提为什么是一次改造、
+而不是接根线的原因。orchestration codegen 通过
+`return_lineage::ExplicitReturnedParamIndices`（对被调方 `ReturnStmt` 的指针同一性读
+取）把调用结果映射到被调方的某个 `Out`/`InOut` 形参上，只有当该映射给不出结果时，才
+退回到"被调方唯一的那个 `Out`/`InOut` 形参"：
+
+```cpp
+// GenerateSingleReturnAlias, orchestration_codegen.cpp
+INTERNAL_CHECK_SPAN(returned_idx.has_value() || out_indices.size() == 1, call->span_)
+```
+
+`OutlineIncoreScopes` 跑完之后，Graph 函数体是 `c_1 = layer_incore_0(a, c); return
+c_1` —— 返回的是重绑定而不是形参本身，所以 Graph 一直依赖那条退路；而第二个 `InOut`
+形参一出现，这条退路就不存在了。
+
+外提所需要的东西由 [`NormalizeReturnOrder`](26-normalize_return_order.md) 提供：它会
+像处理 kernel 与 wrapper 那样规范化 Graph 的张量返回值（**只**规范化，不重排 Graph 的
+返回顺序），并且 `IRProperty::ReturnParamsExplicit` 覆盖了 `Graph`，使得从那里到这里的
+十九个 pass 无法悄悄破坏它。这部分是在 #2618 中单独落地的。本步骤是**依赖**它而不是
+提供它 —— 这也是单元测试里 `_legalize_outlined` 要跑 `NormalizeReturnOrder` 的原因：
+不跑的话那张表全是 nullopt，外提会静默地什么都不做。
 
 ## Step D —— 边界合法性
 
@@ -188,7 +264,7 @@ codegen 会把它降级成批量 `alloc_tensors`，runtime 把这个记成一个
 | 不允许 `Out` 张量形参 | `Out` 意味着 runtime 分配该 buffer；被录制的 graph 其边界张量必须已存在，回放才能 patch 地址 |
 | 标量形参必须是 `In` | 边界标量按值传入、由调用点回放 |
 | 只能返回自己的形参 | `rt_submit_graph` 只在缓存**命中**时才返回有效 task id，所以任何东西都不能依赖 graph 调用的结果。`return c`（`c` 为 `InOut` 形参）是原地写的写法，可以；返回计算出的新值不行 |
-| 被拉起的任务数在 1..1024 之间 | `graph_execution_storage_layout` 既拒绝 0 个节点，也拒绝超过 `GRAPH_MAX_NODES` 的。循环内的 launch 按迭代次数计入而非按词法调用点计 1；`system.task_dummy` 也计入——它 lower 成 `rt_submit_dummy_task`，且 `ExpandManualPhaseFence` 会自动插入。分配同样会记节点，按**上界**计——通过这项检查即意味着 runtime 会接受该 Graph。codegen 会收集一个语句列表里所有符合条件的 create（中间夹着 launch 不会打断批次），再按每次 `alloc_tensors` 最多 `kAllocTensorsArgs`（16）个打包。它的三条不合格规则里有两条在这里不可能触发（shape 读局部变量已被按非常量拒绝；SSA 下不可能出现已声明的 var），这些 create 是**精确**计数的。第三条可能触发——被注入的 GM pipe buffer 在其 `core_num` 读到 body-local 时会离开共享批次，而这只有 emitter 的 use-resolution 才知道——所以这类按最坏情况各计 1 个节点。批量大小和 GM-pipe 判定与 emitter 共用 `utils/alloc_batching.h`，而非各自重述 |
+| 被拉起的任务数在 1..1024 之间 | `graph_execution_storage_layout` 既拒绝 0 个节点，也拒绝超过 `GRAPH_MAX_NODES` 的。循环内的 launch 按迭代次数计入而非按词法调用点计 1；`system.task_dummy` 也计入——它 lower 成 `rt_submit_dummy_task`，且 `ExpandManualPhaseFence` 会自动插入。分配同样会记节点，按**上界**计——通过这项检查即意味着 runtime 会接受该 Graph。codegen 会收集一个语句列表里所有符合条件的 create（中间夹着 launch 不会打断批次），再按每次 `alloc_tensors` 最多 `kAllocTensorsArgs`（16）个打包。它的三条不合格规则里有两条在这里不可能触发（shape 读局部变量已被按非常量拒绝；SSA 下不可能出现已声明的 var），这些 create 是**精确**计数的。第三条可能触发——被注入的 GM pipe buffer 在其 `core_num` 读到 body-local 时会离开共享批次，而这只有 emitter 的 use-resolution 才知道——所以这类按最坏情况各计 1 个节点。批量大小和 GM-pipe 判定与 emitter 共用 `utils/alloc_batching.h`，而非各自重述。与本表其他检查不同，这一项在外提步骤**之后**才计数：Step C 会*移除*分配节点，按外提前的函数体计会拒掉本来放得下的 Graph，也会与 verifier 不一致——后者是从改写后的 IR 重新推导同一个计数的 |
 | 运行时循环 / 分支内不得有分配 | 每次分配都记一个节点，所以数量随调用变化就是拓扑随调用变化 |
 | 分配的 shape 必须是编译期常量 | 录制会把 shape 抄进节点并据此推出缓冲区地址；读取边界标量的 shape 会被冻结在首次调用的值上 |
 | 区域内不得有 `tensor.full` | orchestration codegen 没有它的 lowering，会按 misplaced tensor op 拒绝 |
@@ -224,8 +300,13 @@ verifier 拒绝本 pass 刚刚产出的 IR。
 
 ## 尚未处理
 
-把区域内的局部分配自动外提为边界形参——分配本身是允许的，受上面的常量 shape
-规则约束——以及把超过 128 个张量的边界自动打包进 scratch arena。
+外提**循环内**的分配 —— 它是每次迭代一份的新 buffer，调用点得分配一组而不是一个
+（见 Step C）。外提 shape 读自边界标量的分配 —— Step D 直接拒绝，而不是在调用点重
+建它。以及把超过 128 个张量的边界自动打包进 scratch arena。
+
+也没有任何东西会把调用点的分配提出调用方自己的循环：create 落在 launch 的紧前面，
+所以每次调用仍然拿到自己的 buffer。收益在于这块 buffer 现在来自普通的可回收堆而不
+是 graph 堆，这与调用方把它放在哪里无关。
 
 ## 另见
 

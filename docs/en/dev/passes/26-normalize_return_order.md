@@ -37,9 +37,11 @@ This pass canonicalizes the contract so codegen can rely on
    `permutation[old_index]`, so observers of the call result still see the
    same SSA values bound to the same names.
 
-The pass is a **no-op** for any function whose return order already matches
-its `Out`/`InOut` parameter order, and a no-op for any program with no
-InCore functions.
+The pass is a **no-op** for any function whose tensor returns already name
+their parameters and whose return order already matches its `Out`/`InOut`
+parameter order, and a no-op for any program with no `InCore`, `Group`,
+`Spmd`, or `Graph` function — Step A0 covers all four, so "no InCore
+functions" alone no longer implies the pass does nothing.
 
 **Pipeline position**: slot #20 in the `Default` strategy — after
 `SplitVectorKernel` (#19) and before `LowerPipelineLoops` (#21). It runs

@@ -46,10 +46,19 @@ def _legalize_outlined(program: ir.Program) -> ir.Program:
     That is the shape every Graph body actually has by the time this pass runs,
     so a check written against the pre-outlining shape can reject the entire
     feature while ``_legalize`` still passes.
+
+    ``NormalizeReturnOrder`` is in the chain for the same reason. It runs at
+    pass 26 and this pass at 45, and it is what establishes
+    ``IRProperty::ReturnParamsExplicit`` — the pointer-identity return -> param
+    map the pass reads to carry boundary provenance across an in-place call
+    (``tmp = kernel(a, tmp)``). Without it that map answers nullopt for every
+    callee, the propagation cannot fire, and a test asserting on it passes for
+    the wrong reason.
     """
     with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
         ssa = passes.convert_to_ssa()(program)
-        return passes.legalize_graph_boundary()(passes.outline_incore_scopes()(ssa))
+        outlined = passes.outline_incore_scopes()(ssa)
+        return passes.legalize_graph_boundary()(passes.normalize_return_order()(outlined))
 
 
 def _graph_func(program: ir.Program, name: str) -> ir.Function:
@@ -550,6 +559,11 @@ def _tensor_param_names(func: ir.Function) -> list[str]:
     ]
 
 
+def _param_directions(func: ir.Function) -> dict[str, ir.ParamDirection]:
+    """Parameter name (SSA suffix stripped) -> declared direction."""
+    return {re.sub(r"__ssa_v\d+$", "", p.name_hint): d for p, d in zip(func.params, func.param_directions)}
+
+
 class TestDerivedSliceHoisting:
     def test_slice_of_a_boundary_tensor_becomes_a_parameter(self):
         """Replay patches a boundary tensor's address, not a view derived inside.
@@ -676,11 +690,15 @@ class TestDerivedSliceHoisting:
         assert "again" not in printed, printed
         assert "layer_idx" in printed, printed
 
-    def test_a_region_local_slice_is_left_alone(self):
-        """Only a view *of a boundary tensor* has to move out.
+    def test_a_view_of_a_hoisted_allocation_moves_out_with_it(self):
+        """A region allocation is a boundary tensor, so its views are too.
 
-        A view of a tensor the region allocated is re-derived from that tensor,
-        which the recording owns, so it is replay-stable where it stands.
+        Once Step C hoists ``local``, it is a boundary parameter — and a view of
+        a boundary tensor taken *inside* the region is exactly what Step B
+        exists to move out. Leaving ``lv`` behind would also make this pass
+        produce IR its own ``GraphBoundaryLegalized`` verifier rejects: that
+        verifier treats every tensor parameter as a boundary root and holds any
+        in-region view of one to the replay-invariant-window rule.
         """
 
         @pl.program
@@ -708,8 +726,10 @@ class TestDerivedSliceHoisting:
                 return c
 
         layer = _graph_func(_legalize_outlined(Before), "layer")
-        # `lv` is derived from a region-local tensor, so it stays put.
-        assert _tensor_param_names(layer) == ["w", "c"]
+        # The allocation first, then the view of it — both appended as InOut.
+        assert _tensor_param_names(layer) == ["w", "c", "local", "lv"]
+        assert _param_directions(layer)["local"] == ir.ParamDirection.InOut
+        assert _param_directions(layer)["lv"] == ir.ParamDirection.InOut
 
     def test_slice_of_a_local_tensor_is_left_alone(self):
         """Only views *of a boundary tensor* need hoisting."""
@@ -940,6 +960,475 @@ class TestDerivedSliceHoisting:
 
         with pytest.raises(ValueError, match="shape is not a compile-time constant"):
             _legalize_outlined(Before)
+
+
+# ---------------------------------------------------------------------------
+# Step C — allocations the region makes for itself
+# ---------------------------------------------------------------------------
+
+
+class TestRegionAllocationHoisting:
+    """A `pl.create_tensor` in the region comes off the graph heap.
+
+    `task_allocator.h` reclaims nothing there until the run ends, so a region
+    that allocates for itself holds one buffer per *submission* rather than one
+    per program: a decoder layer with 14 intermediates recorded over N layers
+    holds 14 x N. Step C moves each one to the call site, where it is an
+    ordinary reclaimable allocation.
+    """
+
+    def test_region_allocation_becomes_an_inout_parameter(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Graph)
+            def layer(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                tmp: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128])
+                    pl.store(t, [0, 0], tmp)
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    u: pl.Tile[[128, 128], pl.FP32] = pl.load(tmp, [0, 0], [128, 128])
+                    pl.store(u, [0, 0], c)
+                return c
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                c = self.layer(a, c)
+                return c
+
+        layer = _graph_func(_legalize_outlined(Before), "layer")
+        assert _tensor_param_names(layer) == ["a", "c", "tmp"]
+        # `InOut`, not `In`: the region writes it. Declared `In`, codegen emits
+        # `add_input`, the launch never registers as a writer of the buffer, and
+        # a caller that hoisted the allocation out of its own loop would get no
+        # ordering between successive launches over it. `Out` is illegal on a
+        # Graph boundary — it means the *runtime* allocates.
+        assert _param_directions(layer)["tmp"] == ir.ParamDirection.InOut
+        # The region no longer allocates at all.
+        assert "pl.tensor.create" not in python_print(layer), python_print(layer)
+
+    def test_the_call_site_takes_over_the_allocation(self):
+        """The buffer has to be created somewhere; the caller is that somewhere.
+
+        Bound to a local ahead of the launch rather than written inline into the
+        argument list: orchestration codegen accepts only a Var or a literal as
+        an argument.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Graph)
+            def layer(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                tmp: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128])
+                    pl.store(t, [0, 0], tmp)
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    u: pl.Tile[[128, 128], pl.FP32] = pl.load(tmp, [0, 0], [128, 128])
+                    pl.store(u, [0, 0], c)
+                return c
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                c = self.layer(a, c)
+                return c
+
+        After = _legalize_outlined(Before)
+        main = _graph_func(After, "main")
+        printed = python_print(main)
+        assert "pl.tensor.create" in printed, printed
+        assert "__graph_arg" in printed, printed
+        # Every parameter supplied: a Graph has no runtime-allocated tail.
+        assert len(_graph_func(After, "layer").params) == 3
+
+    def test_a_view_of_a_hoisted_allocation_with_a_moving_window_is_rejected(self):
+        """Hoisting the allocation subjects its views to the Step B rule.
+
+        Recording stores a `BOUNDARY_VIEW`'s offset as the delta seen on the
+        first call and patches only the buffer address, so an offset that can
+        differ between calls replays call one's window. That is now reachable
+        for a view of a region allocation, because the allocation is a boundary
+        tensor — and it is rejected here rather than left for the runtime to get
+        silently wrong.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Graph)
+            def layer(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+                n: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                tmp: pl.Tensor[[512, 128], pl.FP32] = pl.create_tensor([512, 128], pl.FP32)
+                for i in pl.range(4):
+                    off = n + i * 128
+                    tv: pl.Tensor[[128, 128], pl.FP32] = pl.tensor.slice(tmp, [128, 128], [off, 0])
+                    with pl.at(level=pl.Level.CORE_GROUP):
+                        t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128])
+                        pl.store(t, [0, 0], tv)
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    u: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128])
+                    pl.store(u, [0, 0], c)
+                return c
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+                n: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                c = self.layer(a, c, n)
+                return c
+
+        with pytest.raises(ValueError, match="neither reconstructible at the call site nor the same"):
+            _legalize_outlined(Before)
+
+    def test_an_allocation_under_a_loop_stays_in_the_region(self):
+        """A loop-nested create is a *fresh* buffer per iteration.
+
+        Hoisting it would collapse N buffers into one parameter, so iterations
+        that used to write disjoint memory would alias — and the cross-task
+        edges that would have to re-serialise them were derived by
+        `AutoDeriveTaskDependencies`, well upstream of this pass.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                out: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                t: pl.Tile[[128, 128], pl.FP32] = pl.load(
+                    a, [0, 0], [128, 128], target_memory=pl.MemorySpace.Vec
+                )
+                return pl.store(t, [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.Graph)
+            def layer(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                for _ in pl.range(4):
+                    tmp: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+                    tmp = self.kernel(a, tmp)
+                    c = self.kernel(tmp, c)
+                return c
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                c = self.layer(a, c)
+                return c
+
+        layer = _graph_func(_legalize_outlined(Before), "layer")
+        assert _tensor_param_names(layer) == ["a", "c"]
+        assert "pl.tensor.create" in python_print(layer), python_print(layer)
+
+    def test_a_view_of_an_inout_rebound_allocation_moves_out_with_it(self):
+        """Provenance has to survive the SSA rebind an in-place call creates.
+
+        ``tmp = self.kernel(a, tmp)`` binds a *fresh* name to the same buffer.
+        Tracking only bare `alias = var` assignments loses the boundary root
+        there, so Step B skips the view of the rebound name outright — no hoist
+        and no check — and a call-varying offset stays in the region with the
+        first call's window frozen into the recording.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.InOut[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                t: pl.Tile[[128, 128], pl.FP32] = pl.load(
+                    a, [0, 0], [128, 128], target_memory=pl.MemorySpace.Vec
+                )
+                out = pl.store(t, [0, 0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Graph)
+            def layer(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+                n: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                tmp: pl.Tensor[[512, 128], pl.FP32] = pl.create_tensor([512, 128], pl.FP32)
+                tmp = self.kernel(a, tmp)
+                tv: pl.Tensor[[128, 128], pl.FP32] = pl.tensor.slice(tmp, [128, 128], [n, 0])
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(tv, [0, 0], [128, 128])
+                    pl.store(t, [0, 0], c)
+                return c
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+                n: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                c = self.layer(a, c, n)
+                return c
+
+        layer = _graph_func(_legalize_outlined(Before), "layer")
+        # Both the allocation and the view of its rebound name are boundary
+        # tensors now; neither is left for the recording to freeze.
+        assert _tensor_param_names(layer) == ["a", "c", "tmp", "tv"]
+        assert "pl.tensor.slice" not in python_print(layer), python_print(layer)
+
+    def test_a_view_of_an_inout_rebound_parameter_moves_out_with_it(self):
+        """The same rebind on a plain boundary parameter — no allocation involved.
+
+        Step B has always had this hole: it is the `tensor_root_` lookup that
+        fails, not anything specific to Step C. Pinned separately so a future
+        change to the allocation path cannot quietly take the parameter path
+        back down with it.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.InOut[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                t: pl.Tile[[128, 128], pl.FP32] = pl.load(
+                    a, [0, 0], [128, 128], target_memory=pl.MemorySpace.Vec
+                )
+                out = pl.store(t, [0, 0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Graph)
+            def layer(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                w: pl.InOut[pl.Tensor[[512, 128], pl.FP32]],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+                n: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                w = self.kernel(a, w)
+                wl: pl.Tensor[[128, 128], pl.FP32] = pl.tensor.slice(w, [128, 128], [n, 0])
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(wl, [0, 0], [128, 128])
+                    pl.store(t, [0, 0], c)
+                return c
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                w: pl.InOut[pl.Tensor[[512, 128], pl.FP32]],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+                n: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                c = self.layer(a, w, c, n)
+                return c
+
+        layer = _graph_func(_legalize_outlined(Before), "layer")
+        assert _tensor_param_names(layer) == ["a", "w", "c", "wl"]
+        assert "pl.tensor.slice" not in python_print(layer), python_print(layer)
+
+    def test_a_view_of_a_prefix_submit_result_moves_out_with_it(self):
+        """A `Submit` may omit a runtime-allocated `Out` tail, and still writes back.
+
+        `pl.submit(self.kernel, a, w)` against a callee declaring a trailing
+        `pl.Out` is ordinary DSL: the runtime allocates the omitted parameter.
+        The caller-supplied prefix still maps positionally, so the returned `w`
+        is the boundary tensor the callee wrote through.
+
+        Demanding full arity before reading that mapping would drop provenance
+        for every such submit — the exact shape `Submit::args_` in `ir/expr.h`
+        documents as legal — and the dynamic view below would stay in the
+        region with the first invocation's window frozen.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                w: pl.InOut[pl.Tensor[[512, 128], pl.FP32]],
+                scratch: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                t: pl.Tile[[128, 128], pl.FP32] = pl.load(
+                    a, [0, 0], [128, 128], target_memory=pl.MemorySpace.Vec
+                )
+                scratch = pl.store(t, [0, 0], scratch)
+                w = pl.store(t, [0, 0], w)
+                return w
+
+            @pl.function(type=pl.FunctionType.Graph)
+            def layer(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                w: pl.InOut[pl.Tensor[[512, 128], pl.FP32]],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+                n: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                with pl.manual_scope():
+                    # `scratch` omitted — the runtime allocates it.
+                    w, _tid = pl.submit(self.kernel, a, w)
+                wl: pl.Tensor[[128, 128], pl.FP32] = pl.tensor.slice(w, [128, 128], [n, 0])
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(wl, [0, 0], [128, 128])
+                    pl.store(t, [0, 0], c)
+                return c
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                w: pl.InOut[pl.Tensor[[512, 128], pl.FP32]],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+                n: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                c = self.layer(a, w, c, n)
+                return c
+
+        layer = _graph_func(_legalize_outlined(Before), "layer")
+        assert _tensor_param_names(layer) == ["a", "w", "c", "wl"]
+        assert "pl.tensor.slice" not in python_print(layer), python_print(layer)
+
+    def test_a_rebound_view_with_a_moving_window_is_rejected(self):
+        """Seeing through the rebind also restores the *check*, not just the hoist.
+
+        ``n + i * 128`` can neither be rebuilt at the call site (``i`` does not
+        exist there) nor frozen (``n`` is patched every call). Before provenance
+        crossed the rebind this was skipped in silence; now it reaches the same
+        three-way decision every other boundary view faces, and is rejected.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.InOut[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                t: pl.Tile[[128, 128], pl.FP32] = pl.load(
+                    a, [0, 0], [128, 128], target_memory=pl.MemorySpace.Vec
+                )
+                out = pl.store(t, [0, 0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Graph)
+            def layer(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                w: pl.InOut[pl.Tensor[[512, 128], pl.FP32]],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+                n: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                w = self.kernel(a, w)
+                for i in pl.range(2):
+                    off = n + i * 128
+                    wl: pl.Tensor[[128, 128], pl.FP32] = pl.tensor.slice(w, [128, 128], [off, 0])
+                    with pl.at(level=pl.Level.CORE_GROUP):
+                        t: pl.Tile[[128, 128], pl.FP32] = pl.load(wl, [0, 0], [128, 128])
+                        pl.store(t, [0, 0], c)
+                return c
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                w: pl.InOut[pl.Tensor[[512, 128], pl.FP32]],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+                n: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                c = self.layer(a, w, c, n)
+                return c
+
+        with pytest.raises(ValueError, match="neither reconstructible at the call site nor the same"):
+            _legalize_outlined(Before)
+
+    def test_a_graph_return_names_its_parameter_directly(self):
+        """Guards the dependency that makes a second `InOut` parameter legal.
+
+        `NormalizeReturnOrder` canonicalizing a Graph's returns is not this
+        pass's work — it landed in #2618 — but Steps B and C are unusable
+        without it. Orchestration codegen maps a call result onto one of the
+        callee's Out/InOut params through `ExplicitReturnedParamIndices`, a
+        pointer-identity read, and falls back to "the single Out/InOut param"
+        only when that map yields nothing; a Graph body is
+        `c_1 = layer_incore_0(a, c); return c_1` after the scope outliner, so
+        the fallback is all it ever had, and it stops existing at the second
+        `InOut`.
+
+        Pinned here, in the consumer, rather than left to #2618's own tests:
+        narrowing that gate would break the hoists silently, and this is where
+        that shows up.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Graph)
+            def layer(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128])
+                    pl.store(t, [0, 0], c)
+                return c
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                c = self.layer(a, c)
+                return c
+
+        with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+            ssa = passes.convert_to_ssa()(Before)
+            outlined = passes.outline_incore_scopes()(ssa)
+            before = _graph_func(outlined, "layer")
+            normalized = passes.normalize_return_order()(outlined)
+
+        # The outliner leaves the return on the rebind, which resolves to
+        # nothing under a pointer-identity read.
+        assert "return c__ssa_v1" in python_print(before), python_print(before)
+
+        layer = _graph_func(normalized, "layer")
+        printed = python_print(layer)
+        # Now the parameter itself, by name and so by pointer identity.
+        assert f"return {layer.params[1].name_hint}" in printed, printed
+        # The rebind is still computed — it is a task launch with side effects.
+        assert "= layer_incore_0(" in printed, printed
 
 
 # ---------------------------------------------------------------------------
@@ -1362,9 +1851,15 @@ class TestBoundaryLegality:
     def test_allocations_count_toward_the_node_limit(self):
         """A Graph at the launch limit is over it once it also allocates.
 
-        1024 launches plus one create is at least 1025 recorded nodes. Leaving
-        allocations out of the total entirely would pass this and leave the
-        runtime to decline the cache silently.
+        1024 launches plus a two-trip loop holding one create is 1026 recorded
+        nodes. Leaving allocations out of the total entirely would pass this and
+        leave the runtime to decline the cache silently.
+
+        The create sits under a loop so that it stays in the region: Step C
+        hoists a *top-level* allocation to the call site, and one it hoists is a
+        node the emitted region no longer has. Two trips rather than one because
+        `Simplify` collapses a single-trip loop into its body, which would put
+        the create back at the top level in the real pipeline.
         """
 
         @pl.program
@@ -1386,7 +1881,8 @@ class TestBoundaryLegality:
                 a: pl.Tensor[[128, 128], pl.FP32],
                 c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
             ) -> pl.Tensor[[128, 128], pl.FP32]:
-                _s: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
+                for _ in pl.range(2):
+                    _s: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
                 for _ in pl.range(1024):
                     c = self.kernel(a, c)
                 return c
@@ -1400,7 +1896,7 @@ class TestBoundaryLegality:
                 c = self.layer(a, c)
                 return c
 
-        with pytest.raises(ValueError, match="launches 1025 tasks, over the runtime's per-graph limit"):
+        with pytest.raises(ValueError, match="launches 1026 tasks, over the runtime's per-graph limit"):
             _legalize_outlined(Before)
 
     def test_interleaved_allocations_batch_across_the_statement_list(self):
@@ -1414,9 +1910,16 @@ class TestBoundaryLegality:
         passing, because both this and the adjacent-run counting it replaced
         accept a small Graph — the two only diverge in the number. Here:
 
-            launches  = 20 interleaved + 1024 in the loop + 1 for the scope
-            batched   = ceil(20 / 16) = 2      -> 1047
-            per-create= 20                     -> 1065
+        The interleaved run sits under a two-trip loop so that Step C leaves it
+        in the region — it hoists a *top-level* allocation to the call site, and
+        one it hoists is a node the emitted region no longer has. The loop body
+        is still one statement list, which is what the batching rule is about.
+        Two trips rather than one because `Simplify` collapses a single-trip
+        loop into its body.
+
+            per iteration = 20 interleaved launches + ceil(20 / 16) = 2 batched
+            total         = 2 * 22 + 1024 in the loop + 1 for the scope -> 1069
+            per-create    = 2 * 40 + 1025                               -> 1105
 
         so the reported total is what distinguishes them.
         """
@@ -1441,46 +1944,47 @@ class TestBoundaryLegality:
                 c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
                 d: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
             ) -> pl.Tensor[[128, 128], pl.FP32]:
-                _s0: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
-                d = self.kernel(a, d)
-                _s1: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
-                d = self.kernel(a, d)
-                _s2: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
-                d = self.kernel(a, d)
-                _s3: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
-                d = self.kernel(a, d)
-                _s4: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
-                d = self.kernel(a, d)
-                _s5: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
-                d = self.kernel(a, d)
-                _s6: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
-                d = self.kernel(a, d)
-                _s7: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
-                d = self.kernel(a, d)
-                _s8: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
-                d = self.kernel(a, d)
-                _s9: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
-                d = self.kernel(a, d)
-                _s10: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
-                d = self.kernel(a, d)
-                _s11: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
-                d = self.kernel(a, d)
-                _s12: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
-                d = self.kernel(a, d)
-                _s13: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
-                d = self.kernel(a, d)
-                _s14: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
-                d = self.kernel(a, d)
-                _s15: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
-                d = self.kernel(a, d)
-                _s16: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
-                d = self.kernel(a, d)
-                _s17: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
-                d = self.kernel(a, d)
-                _s18: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
-                d = self.kernel(a, d)
-                _s19: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
-                d = self.kernel(a, d)
+                for _ in pl.range(2):
+                    _s0: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
+                    d = self.kernel(a, d)
+                    _s1: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
+                    d = self.kernel(a, d)
+                    _s2: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
+                    d = self.kernel(a, d)
+                    _s3: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
+                    d = self.kernel(a, d)
+                    _s4: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
+                    d = self.kernel(a, d)
+                    _s5: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
+                    d = self.kernel(a, d)
+                    _s6: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
+                    d = self.kernel(a, d)
+                    _s7: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
+                    d = self.kernel(a, d)
+                    _s8: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
+                    d = self.kernel(a, d)
+                    _s9: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
+                    d = self.kernel(a, d)
+                    _s10: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
+                    d = self.kernel(a, d)
+                    _s11: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
+                    d = self.kernel(a, d)
+                    _s12: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
+                    d = self.kernel(a, d)
+                    _s13: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
+                    d = self.kernel(a, d)
+                    _s14: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
+                    d = self.kernel(a, d)
+                    _s15: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
+                    d = self.kernel(a, d)
+                    _s16: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
+                    d = self.kernel(a, d)
+                    _s17: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
+                    d = self.kernel(a, d)
+                    _s18: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
+                    d = self.kernel(a, d)
+                    _s19: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)
+                    d = self.kernel(a, d)
                 for _ in pl.range(1024):
                     d = self.kernel(a, d)
                 with pl.at(level=pl.Level.CORE_GROUP):
@@ -1498,7 +2002,7 @@ class TestBoundaryLegality:
                 c = self.layer(a, c, d)
                 return c
 
-        with pytest.raises(ValueError, match="launches 1047 tasks"):
+        with pytest.raises(ValueError, match="launches 1069 tasks"):
             _legalize_outlined(Before)
 
     def test_batchable_gm_pipe_allocations_are_not_charged_individually(self):
@@ -1517,9 +2021,14 @@ class TestBoundaryLegality:
         Pinned through the over-limit total, since both countings accept a small
         Graph:
 
-            launches = 1024 in the loop + 1 for the scope
-            batched  = ceil(40 / 16) = 3        -> 1028
-            per-create = 40                     -> 1065
+        The run sits under a two-trip loop so that Step C leaves it in the
+        region — it hoists a *top-level* allocation to the call site, and one it
+        hoists is a node the emitted region no longer has. The loop body is
+        still one statement list, and two trips rather than one because
+        `Simplify` collapses a single-trip loop into its body.
+
+            batched    = 2 * ceil(40 / 16) = 6 + 1024 + 1 for the scope -> 1031
+            per-create = 2 * 40 = 80 + 1025                             -> 1105
         """
 
         @pl.program
@@ -1542,46 +2051,47 @@ class TestBoundaryLegality:
                 c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
                 d: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
             ) -> pl.Tensor[[128, 128], pl.FP32]:
-                gm_pipe_buffer_0: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_1: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_2: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_3: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_4: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_5: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_6: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_7: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_8: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_9: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_10: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_11: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_12: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_13: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_14: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_15: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_16: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_17: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_18: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_19: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_20: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_21: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_22: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_23: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_24: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_25: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_26: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_27: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_28: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_29: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_30: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_31: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_32: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_33: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_34: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_35: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_36: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_37: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_38: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
-                gm_pipe_buffer_39: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                for _ in pl.range(2):
+                    gm_pipe_buffer_0: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_1: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_2: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_3: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_4: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_5: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_6: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_7: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_8: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_9: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_10: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_11: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_12: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_13: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_14: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_15: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_16: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_17: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_18: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_19: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_20: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_21: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_22: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_23: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_24: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_25: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_26: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_27: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_28: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_29: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_30: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_31: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_32: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_33: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_34: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_35: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_36: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_37: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_38: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
+                    gm_pipe_buffer_39: pl.Tensor[[16], pl.FP32] = pl.create_tensor([16], pl.FP32)  # noqa: F841
                 for _ in pl.range(1024):
                     d = self.kernel(a, d)
                 with pl.at(level=pl.Level.CORE_GROUP):
@@ -1599,7 +2109,7 @@ class TestBoundaryLegality:
                 c = self.layer(a, c, d)
                 return c
 
-        with pytest.raises(ValueError, match="launches 1028 tasks"):
+        with pytest.raises(ValueError, match="launches 1031 tasks"):
             _legalize_outlined(Before)
 
     def test_constant_shaped_allocation_is_allowed(self):

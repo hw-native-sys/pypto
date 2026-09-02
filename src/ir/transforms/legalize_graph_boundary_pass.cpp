@@ -15,8 +15,8 @@
  *
  * The host_build_graph runtime records a Graph function's task topology on the
  * first call and replays it afterwards, patching only buffer addresses and
- * boundary scalars. Two classes of problem follow from that, and this pass
- * exists to catch both at compile time:
+ * boundary scalars. Three classes of problem follow from that, and this pass
+ * exists to catch all three at compile time:
  *
  * **Step A — derived boundary scalars (silent wrong answers).** A boundary
  * scalar is tracked by *pointer identity*: the runtime anchors the address of
@@ -32,6 +32,15 @@
  * tensor's own extent — is left where it is and accepted, because the frozen
  * copy is the correct one. `graph_replay::ReplayInvariantSet` draws that line;
  * the class comment there explains why it is strictly weaker than hoistability.
+ *
+ * **Step C — region allocations (unbounded memory).** A `tensor.create` inside
+ * the region records a kernel-less `alloc_tensors` node, so it replays
+ * correctly — but the buffer comes off the graph heap, which `task_allocator.h`
+ * never reclaims mid-run. The live set then grows with the number of
+ * submissions rather than staying flat: a decoder layer holding 14 intermediates
+ * costs 14 x N over N recorded layers. Step C moves each one to the call site as
+ * an `InOut` boundary tensor, which is what simpler's hand-written
+ * `qwen3_14b_decode` scene does by hand and for the same stated reason.
  *
  * **Step D — boundary legality (silent fallback).** Almost every other runtime
  * constraint degrades to a silent non-graph fallback in a release build: the
@@ -73,6 +82,7 @@
 #include "pypto/ir/transforms/utils/alloc_batching.h"
 #include "pypto/ir/transforms/utils/graph_replay_invariant.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -149,7 +159,8 @@ struct GraphPlan {
 /// or a tensor read is not, and is reported rather than silently frozen.
 class DerivedScalarCollector : public IRVisitor {
  public:
-  explicit DerivedScalarCollector(const FunctionPtr& func) : func_(func), invariant_(func) {
+  DerivedScalarCollector(const FunctionPtr& func, ProgramPtr program)
+      : func_(func), program_(std::move(program)), invariant_(func) {
     for (const auto& param : func->params_) {
       if (IsScalarType(param->GetType())) {
         scalar_params_.insert(param.get());
@@ -188,7 +199,18 @@ class DerivedScalarCollector : public IRVisitor {
   [[nodiscard]] const std::unordered_map<const Var*, const Var*>& tensor_root() const { return tensor_root_; }
 
   /// Step C: tensors the region allocates for itself, in definition order.
+  ///
+  /// Only the ones the call site can take over: a `tensor.create` at the top
+  /// level of the body. See `VisitStmt_(AssignStmtPtr)` for what is left behind
+  /// and why.
   [[nodiscard]] const std::vector<std::pair<VarPtr, ExprPtr>>& creates() const { return creates_; }
+
+  /// The vars in `creates()`, for direction lookup.
+  ///
+  /// A hoisted allocation is `InOut`, and so is any view of it — but it is not a
+  /// parameter of the *original* signature, so `BuildPlan`'s parameter-direction
+  /// map cannot answer for it.
+  [[nodiscard]] const std::unordered_set<const Var*>& created_vars() const { return created_vars_; }
 
   /// Scalar `alias = <name>` bindings, alias -> the name it copies.
   ///
@@ -253,14 +275,74 @@ class DerivedScalarCollector : public IRVisitor {
       return;
     }
 
+    // A tuple result, remembered so the `TupleGetItemExpr` that unpacks it can
+    // resolve element `i` back to the argument the callee writes through.
+    // `pl.submit` / `pl.spmd_submit` bind their results this way.
+    if (auto call_like = transform_utils::AsCallOrSubmitView(op->value_)) {
+      if (As<TupleType>(op->value_->GetType()) != nullptr) {
+        tuple_result_[var.get()] = call_like;
+        return;
+      }
+    }
+
+    if (auto element = As<TupleGetItemExpr>(op->value_)) {
+      auto tuple_var = AsVarLike(element->tuple_);
+      auto it = tuple_var ? tuple_result_.find(tuple_var.get()) : tuple_result_.end();
+      if (it != tuple_result_.end() && element->index_ >= 0) {
+        PropagateRootThroughCallResult(var, it->second, static_cast<size_t>(element->index_));
+      }
+      return;
+    }
+
     auto call = As<Call>(op->value_);
     if (!call) return;
 
-    // Step C: an allocation inside the region. Codegen lowers `tensor.create`
-    // into a batched `alloc_tensors`, and a bare `alloc_tensors` anywhere in a
-    // recorded region poisons the recording outright.
+    // Step C: an allocation inside the region, hoisted to the call site.
+    //
+    // Codegen lowers `tensor.create` into a batched `alloc_tensors`, which the
+    // runtime records as a kernel-less node — so it does not poison the
+    // recording, but the buffer comes off the *graph* heap, and
+    // `task_allocator.h` reclaims nothing there until the run ends. A region
+    // that allocates for itself therefore holds one buffer per submission
+    // instead of one per program: a decoder layer with 14 intermediates recorded
+    // over N layers holds 14 x N. Hoisting the create to the call site moves it
+    // back onto the ordinary reclaimable heap and empties the region of
+    // allocation nodes.
+    //
+    // Two allocations are deliberately left where they are:
+    //
+    // * `tensor.full` — orchestration codegen has no lowering for it at the call
+    //   site either, so hoisting would only move the failure.
+    //   `RegionAllocationChecker` has already rejected it before `BuildPlan`
+    //   runs, which is why this branch never reaches a live one.
+    // * one under a loop — it is a *fresh* buffer per iteration. Collapsing N
+    //   buffers into one parameter would make iterations alias, and the
+    //   cross-task edges that would have to re-serialise them were derived by
+    //   `AutoDeriveTaskDependencies`, well upstream of here.
     if (IsOp(call, "tensor.create") || IsOp(call, "tensor.full")) {
-      creates_.emplace_back(var, op->value_);
+      if (loop_depth_ == 0 && IsOp(call, "tensor.create")) {
+        // Its own boundary root: once hoisted it *is* a boundary tensor, so a
+        // view of it has to face the same Step B rule as a view of any other —
+        // the verifier holds every tensor parameter to it, and one left in place
+        // with a moving window would make this pass produce IR its own property
+        // verifier rejects.
+        tensor_root_[var.get()] = var.get();
+        created_vars_.insert(var.get());
+        definition_index_[var.get()] = next_definition_++;
+        creates_.emplace_back(var, op->value_);
+      }
+      return;
+    }
+
+    // An in-place call rebinds the buffer to a fresh SSA name — `tmp =
+    // kernel(a, tmp)` — and the result still *is* the boundary tensor the
+    // callee wrote through. Provenance has to follow, or `RootBoundaryTensor`
+    // answers null for the new name, Step B skips a view of it outright, and a
+    // call-varying offset stays in the region with its first call's window
+    // frozen. That is the exact failure Step B exists to prevent, reached by a
+    // name it could not see through.
+    if (As<GlobalVar>(call->op_) != nullptr) {
+      PropagateRootThroughCallResult(var, call, /*return_position=*/0);
       return;
     }
 
@@ -345,10 +427,86 @@ class DerivedScalarCollector : public IRVisitor {
     slices_.emplace_back(var, op->value_);
   }
 
+  // Step C hoists only what the call site can bind once per launch, so it needs
+  // to know whether the statement it is looking at runs once. Tracked over both
+  // loop kinds rather than `ForStmt` alone: a `while` around an allocation is
+  // rejected further on, and depending on that rejection to keep this collector
+  // correct would couple two checks that read independently today.
+  void VisitStmt_(const ForStmtPtr& op) override {
+    ++loop_depth_;
+    IRVisitor::VisitStmt_(op);
+    --loop_depth_;
+  }
+
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    ++loop_depth_;
+    IRVisitor::VisitStmt_(op);
+    --loop_depth_;
+  }
+
  private:
+  /// Carry boundary provenance across a call that writes through an argument.
+  ///
+  /// @p return_position selects which returned value @p var binds — 0 for a
+  /// single result, the `TupleGetItemExpr` index for an unpacked one.
+  ///
+  /// The return-position -> parameter map is the one orchestration codegen
+  /// aliases on (`ExplicitReturnedParamIndices`, a pointer-identity read of the
+  /// callee's `ReturnStmt` that `NormalizeReturnOrder` establishes), so
+  /// provenance follows exactly the edge the emitted C++ follows. Deriving it
+  /// some other way here would let the two disagree about which buffer a result
+  /// names.
+  void PropagateRootThroughCallResult(const VarPtr& var, const CallPtr& call, size_t return_position) {
+    auto gvar = As<GlobalVar>(call->op_);
+    if (!gvar || !program_) return;
+    auto callee = program_->GetFunction(gvar->name_);
+    if (!callee) return;
+
+    const auto& ret_map = ReturnedParamsFor(gvar->name_, callee);
+    if (return_position >= ret_map.size()) return;
+    // Bound to a name before the guard: the optional-access analysis does not
+    // track a value through a subscript, so testing `ret_map[i].has_value()`
+    // and then dereferencing `ret_map[i]` reads to it as an unchecked access.
+    const auto& returned_param = ret_map[return_position];
+    if (!returned_param.has_value()) return;
+
+    // Not an arity check. A `Submit` legally omits a runtime-allocated `Out`
+    // tail, and its caller-supplied prefix still maps positionally; demanding
+    // full arity would drop provenance for every one of those and leave the
+    // silent-window bug this guard exists to close. Null here means the
+    // parameter genuinely has no caller argument — the runtime creates it, so
+    // there is no boundary root to inherit.
+    auto source = AsVarLike(transform_utils::CallerSuppliedArg(call, callee, *returned_param));
+    const Var* root = source ? RootBoundaryTensor(source) : nullptr;
+    if (root == nullptr) return;
+
+    tensor_root_[var.get()] = root;
+    // Whatever the argument could not offer, the rebind cannot either.
+    if (in_place_views_.count(source.get()) != 0) in_place_views_.insert(var.get());
+    // Bound like a bare alias: the rebound name denotes the same buffer as the
+    // argument, so a hoisted view written in terms of it resolves at the call
+    // site to whatever the caller passed. Without this the call site would keep
+    // a name only the region has, and the printer would mark it `__FREE_VAR`.
+    definition_index_[var.get()] = next_definition_++;
+    passthrough_order_.emplace_back(var.get(), source);
+  }
+
+  /// `ExplicitReturnedParamIndices(callee)`, memoized by callee name.
+  ///
+  /// The collector visits each statement once, so an un-memoized lookup would
+  /// re-read a callee's `ReturnStmt` per call site and make the walk quadratic
+  /// in a body that launches the same kernel repeatedly.
+  [[nodiscard]] const std::vector<std::optional<size_t>>& ReturnedParamsFor(const std::string& name,
+                                                                            const FunctionPtr& callee) {
+    auto it = returned_params_.find(name);
+    if (it != returned_params_.end()) return it->second;
+    return returned_params_.emplace(name, return_lineage::ExplicitReturnedParamIndices(callee)).first->second;
+  }
+
   /// The boundary tensor parameter @p var derives from, or null.
   ///
-  /// A parameter is its own root; an alias or a collected view inherits one.
+  /// A parameter is its own root; an alias, a rebind or a collected view
+  /// inherits one.
   [[nodiscard]] const Var* RootBoundaryTensor(const VarPtr& var) const {
     if (!var) return nullptr;
     if (tensor_params_.count(var.get()) != 0) return var.get();
@@ -399,7 +557,13 @@ class DerivedScalarCollector : public IRVisitor {
   }
 
   FunctionPtr func_;
+  ProgramPtr program_;
   graph_replay::ReplayInvariantSet invariant_;
+  /// Tuple-valued call/submit results, so `TupleGetItemExpr` can resolve back
+  /// to the callee argument each element writes through.
+  std::unordered_map<const Var*, CallPtr> tuple_result_;
+  /// `ExplicitReturnedParamIndices` per callee name; see `ReturnedParamsFor`.
+  std::unordered_map<std::string, std::vector<std::optional<size_t>>> returned_params_;
   std::unordered_set<const Var*> scalar_params_;
   std::unordered_set<const Var*> tensor_params_;
   std::unordered_set<const Var*> derived_vars_;
@@ -416,9 +580,16 @@ class DerivedScalarCollector : public IRVisitor {
   /// these can be hoisted: the call site has no name for any of them.
   std::unordered_set<const Var*> in_place_views_;
   /// Body tensor var -> the boundary parameter it derives from (alias or view).
+  ///
+  /// A hoisted region allocation is its own root: it becomes a boundary tensor.
   std::unordered_map<const Var*, const Var*> tensor_root_;
   std::vector<std::pair<VarPtr, ExprPtr>> slices_;
   std::vector<std::pair<VarPtr, ExprPtr>> creates_;
+  /// The vars in `creates_`, for the direction lookup `BuildPlan` cannot make
+  /// from the original signature.
+  std::unordered_set<const Var*> created_vars_;
+  /// How many loops enclose the statement being visited.
+  size_t loop_depth_ = 0;
 };
 
 /// True when @p expr is built only from literals.
@@ -1138,12 +1309,12 @@ class GraphCallSiteChecker : public IRVisitor {
 ///
 /// Tensors are appended before scalars so the resulting signature keeps
 /// `CoreTaskArgs`' tensor-before-scalar ordering, which the runtime enforces.
-[[nodiscard]] GraphPlan BuildPlan(const FunctionPtr& func) {
+[[nodiscard]] GraphPlan BuildPlan(const FunctionPtr& func, const ProgramPtr& program) {
   GraphPlan plan;
   plan.name = func->name_;
   if (!func->body_) return plan;
 
-  DerivedScalarCollector collector(func);
+  DerivedScalarCollector collector(func, program);
   collector.VisitStmt(func->body_);
 
   auto add = [&plan](const VarPtr& var, const ExprPtr& value, ParamDirection dir, bool is_tensor) {
@@ -1160,17 +1331,42 @@ class GraphCallSiteChecker : public IRVisitor {
   // carry wider access than the tensor it views, so the root's own direction is
   // both sufficient and never an under-declaration.
   const auto& roots = collector.tensor_root();
+  const auto& created = collector.created_vars();
   std::unordered_map<const Var*, ParamDirection> param_direction;
   for (size_t i = 0; i < func->params_.size(); ++i) {
     param_direction[func->params_[i].get()] =
         i < func->param_directions_.size() ? func->param_directions_[i] : ParamDirection::In;
   }
+  // Step C: a region allocation becomes an `InOut` boundary tensor.
+  //
+  // `Out` is what it would be by dataflow — nothing reads it before the region
+  // writes it — but `Out` on a Graph boundary means "the runtime allocates
+  // this", which `rt_graph_args_cacheable` refuses outright. `InOut` is the
+  // spelling for a buffer the caller owns and the region writes, and it is what
+  // `CheckGraphSignature` accepts. `In` would under-declare: codegen would emit
+  // `add_input`, the launch would never register as a writer, and a caller that
+  // hoisted the create out of its own loop would get no ordering between
+  // successive launches over the same buffer.
+  //
+  // Ahead of Step B so that a view of a hoisted allocation is appended after the
+  // allocation it views. Parameter order is otherwise free — the call site binds
+  // in definition order, not parameter order — but keeping the two consistent
+  // makes a printed signature readable.
+  for (const auto& [var, value] : collector.creates()) {
+    add(var, value, ParamDirection::InOut, /*is_tensor=*/true);
+  }
   for (const auto& [var, value] : collector.slices()) {
     ParamDirection dir = ParamDirection::In;
     auto root = roots.find(var.get());
     if (root != roots.end()) {
-      auto it = param_direction.find(root->second);
-      if (it != param_direction.end()) dir = it->second;
+      // A view rooted at a hoisted allocation, whose direction is not in the
+      // original signature to look up. It is `InOut` for the same reason the
+      // allocation is: the region writes through it.
+      if (created.count(root->second) != 0) {
+        dir = ParamDirection::InOut;
+      } else if (auto it = param_direction.find(root->second); it != param_direction.end()) {
+        dir = it->second;
+      }
     }
     add(var, value, dir, /*is_tensor=*/true);
   }
@@ -1424,24 +1620,13 @@ class CallSiteExtender : public IRMutator {
     nested.VisitStmt(func->body_);
 
     CheckGraphReturns(func, program);
-
-    GraphNodeCounter counter(func, program);
-    counter.VisitStmt(func->body_);
-    CHECK_SPAN(counter.count() >= 1, func->span_)
-        << "Graph function '" << func->name_
-        << "' launches no tasks. `graph_execution_storage_layout` refuses a node count of zero, so "
-           "the region would never be cached; call it directly instead of marking it a Graph.";
-    CHECK_SPAN(counter.count() <= kMaxGraphNodes, func->span_)
-        << "Graph function '" << func->name_ << "' launches " << counter.count()
-        << " tasks, over the runtime's per-graph limit of " << kMaxGraphNodes
-        << ". Split the region into several graphs.";
   }
 
   // Step A: plan, then rewrite bodies and call sites together.
   std::unordered_map<std::string, GraphPlan> plans;
   for (const auto& [gvar, func] : program->functions_) {
     if (!func || func->func_type_ != FunctionType::Graph) continue;
-    auto plan = BuildPlan(func);
+    auto plan = BuildPlan(func, program);
     // An alias-only plan still has work to do: the body rewrite deletes the
     // scalar copies even when nothing is hoisted. Its call sites are rebuilt
     // with an unchanged argument list, which is a no-op by construction.
@@ -1484,6 +1669,24 @@ class CallSiteExtender : public IRMutator {
       // argument.
       LaunchSpecChecker launch_spec(func, result);
       launch_spec.VisitStmt(func->body_);
+
+      // Counted here rather than in part 1 because Step C *removes* nodes: every
+      // region allocation it hoists is an `alloc_tensors` operand the emitted
+      // region no longer carries. Counting the pre-hoist body would reject a
+      // Graph that fits — and disagree with `GraphBoundaryLegalized`, which
+      // re-derives the same count from this rewritten IR. The message still
+      // names the user's own function: `ExtendGraphSignature` carries `name_`
+      // and `span_` through unchanged.
+      GraphNodeCounter counter(func, result);
+      counter.VisitStmt(func->body_);
+      CHECK_SPAN(counter.count() >= 1, func->span_)
+          << "Graph function '" << func->name_
+          << "' launches no tasks. `graph_execution_storage_layout` refuses a node count of zero, so "
+             "the region would never be cached; call it directly instead of marking it a Graph.";
+      CHECK_SPAN(counter.count() <= kMaxGraphNodes, func->span_)
+          << "Graph function '" << func->name_ << "' launches " << counter.count()
+          << " tasks, over the runtime's per-graph limit of " << kMaxGraphNodes
+          << ". Split the region into several graphs.";
       continue;
     }
     GraphCallSiteChecker call_checker(func, result);

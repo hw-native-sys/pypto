@@ -1,9 +1,9 @@
 # LegalizeGraphBoundary Pass
 
 Makes every `FunctionType::Graph` function legal for the `host_build_graph`
-runtime to record and replay: hoists the boundary scalars a Graph body derives
-out to its call sites, and rejects the boundaries the runtime would decline to
-cache.
+runtime to record and replay: hoists the boundary scalars a Graph body derives,
+the boundary views it takes and the intermediates it allocates out to its call
+sites, and rejects the boundaries the runtime would decline to cache.
 
 ## Overview
 
@@ -13,16 +13,21 @@ things: the addresses of the boundary tensors, and the values of the boundary
 scalars. Everything else — node count, shapes, dependency edges, block counts —
 is frozen into the recorded Definition.
 
-That makes two classes of problem possible, and both are silent at runtime:
+That makes four classes of problem possible, and every one of them is silent at
+runtime:
 
 | Problem | What the runtime does | What this pass does |
 | ------- | --------------------- | ------------------- |
 | A boundary scalar is *derived* inside the region | Classifies it as static data and freezes the first call's value into the recording. No warning, ever. | **Step A** — hoists the computation to the call site, or leaves it alone when the frozen value is provably the right one |
+| A view of a boundary tensor is taken *inside* the region | Freezes the first call's offset and patches only the address, so a later call reads call one's window | **Step B** — hoists the view to the call site, or accepts it when its window is replay-invariant |
+| The region allocates its own intermediates | Records them correctly, on a heap it never reclaims mid-run, so the live set grows with the number of submissions | **Step C** — hoists the allocation to the call site as an `InOut` boundary tensor |
 | The boundary itself is not cacheable | Declines to cache and silently runs the region as ordinary tasks | **Step D** — rejects it at compile time |
 
-The first produces wrong answers. The second produces correct answers with none
-of the intended speedup — invisible to any numerical test, which is why the
-checks live here rather than being left to a runtime log line.
+The first two produce wrong answers. The third produces correct answers that run
+out of memory, or merely slower, as the layer count grows. The last produces
+correct answers with none of the intended speedup — invisible to any numerical
+test, which is why the checks live here rather than being left to a runtime log
+line.
 
 ## Step A — derived boundary scalars
 
@@ -151,6 +156,25 @@ can only name a source defined before it. Leaving `wr` behind is silent:
 `graph_rebind_tensor` patches the buffer address from `wl` but keeps the offset
 recorded on the first call.
 
+**Provenance crosses an in-place call.** `tmp = kernel(a, tmp)` rebinds the
+buffer to a fresh SSA name, and a view of *that* name is still a view of a
+boundary tensor. Tracking only bare `alias = var` assignments loses the root
+there, and Step B then skips the view outright — no hoist and no check — so a
+call-varying offset stays in the region with the first call's window frozen. The
+rebind is followed through
+[`ExplicitReturnedParamIndices`](26-normalize_return_order.md), the same
+return-position -> parameter map orchestration codegen aliases a call result on,
+so provenance and codegen cannot disagree about which buffer a result names.
+This applies to a boundary *parameter* just as much as to a Step C allocation.
+
+The argument that map points at is resolved with `CallerSuppliedArg`, which
+splits the three regions of the `Submit::args_` contract in `ir/expr.h`. A
+`Submit` legally omits a runtime-allocated `Out` tail, and its caller-supplied
+prefix still maps positionally, so requiring full arity would silently drop
+provenance for every such launch. A parameter in the runtime-allocated gap
+correctly yields nothing: the runtime creates that buffer, so there is no
+caller-side root to inherit.
+
 **A hoisted view must have a compile-time-constant shape.** Replay copies a
 view's `shapes` and `strides` straight from the recorded template and patches
 only `buffer_addr` and `start_offset`, so an extent read from a boundary scalar
@@ -190,27 +214,90 @@ motivating case, a per-layer `layer_idx * 5120`.
 
 ## Step C — allocations inside the region
 
-`pl.create_tensor` **is allowed** in the region, subject to one rule: its shape
-must be a compile-time constant.
+`pl.create_tensor` at the top level of the region is **hoisted to the call
+site**, where it becomes an `InOut` boundary tensor:
 
-Codegen lowers it into a batched `alloc_tensors`, and the runtime records that as
-a kernel-less node — the same shape `submit_dummy_task` records — so it does not
-poison the recording. It does count toward the node limit, and one under a
-runtime loop or branch is a topology that varies between calls; both are Step D's
-concern.
+```python
+# Before
+@pl.jit.graph
+def layer(a: pl.Tensor, acc: pl.InOut[pl.Tensor]):
+    tmp = pl.create_tensor([ROWS, COLS], pl.FP32)   # allocated per submission
+    ...
+    return acc
 
-What recording cannot reproduce is a *shape* read from a boundary scalar. The
-extent is copied into the node and the buffer's address derived from it, and
-replay never re-runs the body, so a later call with a larger extent is handed the
-first call's buffer — a wrong address layout rather than a fallback. Step D
-rejects that, and `tensor.full` outright, which orchestration codegen has no
-lowering for.
+# After — the call site owns the buffer
+def layer(a, acc, tmp: pl.InOut[pl.Tensor]): ...
+tmp__graph_arg0 = pl.tensor.create([ROWS, COLS], pl.FP32)
+acc = layer(a, acc, tmp__graph_arg0)
+```
 
-Hoisting a region-local allocation to a boundary parameter is *not* done: it
-would add a second `InOut` parameter, and the return-alias mapping requires the
-callee's `ReturnStmt` to name a parameter directly in order to disambiguate which
-one a tensor return aliases — an invariant a synthesised parameter does not
-satisfy. Automating it needs that mapping reworked first.
+Recording it in place is *correct* — codegen lowers a create into a batched
+`alloc_tensors` and the runtime records that as a kernel-less node, the same
+shape `submit_dummy_task` records — but the buffer comes off the **graph heap**,
+which `task_allocator.h` never reclaims mid-run ("The whole graph must fit at
+once; nothing is reclaimed mid-run"). The live set then grows with the number of
+submissions rather than staying flat: a decoder layer holding 14 intermediates
+costs 14 × N over N recorded layers. Hoisting puts the buffer back on the
+ordinary reclaimable heap and empties the region of allocation nodes.
+
+simpler's hand-written `examples/a2a3/host_build_graph/qwen3_14b_decode` scene
+does the same thing by hand, for the same stated reason — "This keeps the
+temporary live set flat in layer count and fits the default ring configuration."
+
+The parameter is `InOut`, never `In`: the region *writes* the buffer, and
+declared `In` codegen would emit `add_input`, the launch would never register as
+a writer, and a caller that hoisted the allocation out of its own loop would get
+no ordering between successive launches over it. `Out` is not available — on a
+Graph boundary it means the runtime allocates, which `rt_graph_args_cacheable`
+refuses.
+
+A hoisted allocation **is a boundary tensor**, so a view of it is held to the
+Step B rule above rather than left alone. That is not optional bookkeeping: the
+`GraphBoundaryLegalized` verifier treats every tensor parameter as a boundary
+root, so a view left in place with a window that can move would make this pass
+produce IR its own verifier rejects.
+
+Two allocations are deliberately left where they are:
+
+| Left in place | Why |
+| ------------- | --- |
+| `tensor.full` | Orchestration codegen has no lowering for it at the call site either, so hoisting would only move the failure. Step D rejects it outright |
+| A create under a loop | It is a *fresh* buffer per iteration. Collapsing N buffers into one parameter would make iterations alias, and the cross-task edges that would have to re-serialise them were derived by [`AutoDeriveTaskDependencies`](39-auto_derive_task_dependencies.md), well upstream of here |
+
+What recording cannot reproduce either way is a *shape* read from a boundary
+scalar. The extent is copied into the node and the buffer's address derived from
+it, and replay never re-runs the body, so a later call with a larger extent is
+handed the first call's buffer — a wrong address layout rather than a fallback.
+Step D rejects that, before Step C runs, so every allocation Step C hoists has a
+compile-time-constant shape.
+
+### Prerequisite: a Graph's returns name their parameters
+
+Step B and Step C both *append* an `InOut` parameter, and that is what made
+automating this hoist a rework rather than a wiring job. Orchestration codegen
+maps a call result onto one of the callee's `Out`/`InOut` params through
+`return_lineage::ExplicitReturnedParamIndices` — a pointer-identity read of the
+callee's `ReturnStmt` — and falls back to "the single `Out`/`InOut` param" only
+when that map yields nothing:
+
+```cpp
+// GenerateSingleReturnAlias, orchestration_codegen.cpp
+INTERNAL_CHECK_SPAN(returned_idx.has_value() || out_indices.size() == 1, call->span_)
+```
+
+A Graph body is `c_1 = layer_incore_0(a, c); return c_1` once
+`OutlineIncoreScopes` has run — a rebind, not the parameter — so a Graph has
+always relied on that fallback, and the fallback stops existing at the second
+`InOut` parameter.
+
+[`NormalizeReturnOrder`](26-normalize_return_order.md) supplies what the hoists
+need: it canonicalizes a Graph's tensor returns the way it already did for
+kernels and wrappers (canonicalization only — no Graph return is *reordered*),
+and `IRProperty::ReturnParamsExplicit` covers `Graph`, so the nineteen passes
+between there and here cannot quietly undo it. That landed separately in
+PR #2618, so this step depends on it rather than providing it — which is why
+`_legalize_outlined` in the unit tests runs `NormalizeReturnOrder`: without it
+the map is all-nullopt and the hoists silently do nothing.
 
 ## Step D — boundary legality
 
@@ -223,7 +310,7 @@ satisfy. Automating it needs that mapping reworked first.
 | No `Out` tensor parameter | `Out` means the runtime allocates the buffer; a recorded graph's boundary tensors must already exist so replay can patch their addresses |
 | Scalar parameters are `In` | A boundary scalar is passed by value and replayed from the call site |
 | Returns only its own parameters | `rt_submit_graph` yields a valid task id only on a cache *hit*, so nothing can depend on a graph call's result. `return c` for an `InOut` parameter is the in-place spelling and is fine; a computed value is not |
-| Between 1 and 1024 launched tasks | `graph_execution_storage_layout` refuses a node count of zero as well as one over `GRAPH_MAX_NODES`. A launch in a loop counts once per iteration, not once per call site, and `system.task_dummy` counts too — it lowers to `rt_submit_dummy_task`, and `ExpandManualPhaseFence` inserts them automatically. Allocations record nodes too, counted as an *upper* bound so that passing this check means the runtime will accept the Graph. Codegen collects every eligible create in a statement list — an intervening launch does not close the batch — and packs them at most `kAllocTensorsArgs` (16) to an `alloc_tensors`. Two of its three ineligibility rules cannot fire here (a shape reading a local is already rejected as non-constant; an already-declared var cannot recur under SSA), so those creates are counted exactly. The third can — an injected GM pipe buffer leaves the shared batch when its `core_num` reads a body-local, which only the emitter's use-resolution knows — so each of those is charged its worst case of one node. The batch size and the GM-pipe predicate are shared with the emitter in `utils/alloc_batching.h` rather than restated here |
+| Between 1 and 1024 launched tasks | `graph_execution_storage_layout` refuses a node count of zero as well as one over `GRAPH_MAX_NODES`. A launch in a loop counts once per iteration, not once per call site, and `system.task_dummy` counts too — it lowers to `rt_submit_dummy_task`, and `ExpandManualPhaseFence` inserts them automatically. Allocations record nodes too, counted as an *upper* bound so that passing this check means the runtime will accept the Graph. Codegen collects every eligible create in a statement list — an intervening launch does not close the batch — and packs them at most `kAllocTensorsArgs` (16) to an `alloc_tensors`. Two of its three ineligibility rules cannot fire here (a shape reading a local is already rejected as non-constant; an already-declared var cannot recur under SSA), so those creates are counted exactly. The third can — an injected GM pipe buffer leaves the shared batch when its `core_num` reads a body-local, which only the emitter's use-resolution knows — so each of those is charged its worst case of one node. The batch size and the GM-pipe predicate are shared with the emitter in `utils/alloc_batching.h` rather than restated here. Counted **after** the hoisting steps, unlike every other check in this table: Step C *removes* allocation nodes, so the pre-hoist body would reject a Graph that fits and disagree with the verifier, which re-derives the same count from the rewritten IR |
 | No allocation under a runtime loop or branch | Each records a node, so a count that varies between calls is a topology that varies |
 | Allocation shapes are compile-time constants | Recording copies the shape into the node and derives the buffer address from it; a shape reading a boundary scalar is frozen at the first call's value |
 | No `tensor.full` in the region | Orchestration codegen has no lowering for it and rejects it as a misplaced tensor op |
@@ -263,9 +350,16 @@ pass had just produced.
 
 ## Not yet handled
 
-Automatically hoisting a region-local allocation to a boundary parameter — one
-is allowed in place, subject to the constant-shape rule above — and packing a
-boundary of more than 128 tensors into a scratch arena.
+Hoisting an allocation made **under a loop** — it is a fresh buffer per
+iteration, so the call site would have to allocate an array of them rather than
+one (see Step C). Hoisting one whose shape reads a boundary scalar, which Step D
+rejects rather than rebuilding at the call site. And packing a boundary of more
+than 128 tensors into a scratch arena.
+
+Neither does anything hoist a call-site allocation out of the caller's own loop:
+a create lands immediately before the launch, so each call still gets its own
+buffer. The win is that the buffer now comes off the ordinary reclaimable heap
+instead of the graph heap, which is independent of where the caller puts it.
 
 ## See also
 

@@ -30,8 +30,10 @@ i 个 `Out`/`InOut` 参数，并相应地重映射非 InCore 调用方中的
    `permutation[old_index]`，因此调用结果上的观察者仍然把同名 SSA 变量绑
    定到同一物理输出。
 
-对于返回顺序已经与 `Out`/`InOut` 参数声明顺序匹配的函数，本 Pass 是
-**no-op**；对于不含 InCore 函数的程序也是 no-op。
+对于 tensor 返回值已经直接指名形参、且返回顺序已经与 `Out`/`InOut` 参数声
+明顺序匹配的函数，本 Pass 是 **no-op**；对于不含 `InCore`、`Group`、`Spmd`、
+`Graph` 函数的程序也是 no-op —— Step A0 覆盖这四类，所以「不含 InCore 函数」
+本身已不足以说明本 Pass 什么都不做。
 
 **流水线位置**: `Default` 策略中 #20 —— 位于 `SplitVectorKernel`（#19）之
 后、`LowerPipelineLoops`（#21）之前。这样既保证所有 kernel 拆分 / tile 结构
