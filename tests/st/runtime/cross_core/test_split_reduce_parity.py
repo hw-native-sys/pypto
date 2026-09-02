@@ -49,6 +49,7 @@ import sys
 import pypto.language as pl
 import pytest
 import torch
+from harness import st
 
 T_TILE = 16
 C = 512
@@ -150,38 +151,50 @@ def _golden_y(x: torch.Tensor) -> torch.Tensor:
     return (xf * inv).to(torch.bfloat16)
 
 
-def _run(kernel, test_config) -> tuple[torch.Tensor, torch.Tensor]:
-    """Run a repro kernel on device; return (actual_y, golden_y)."""
-    kernel._cache.clear()
+def _parity_case(key: str):
+    """One repro kernel: per-token row-normalize, compared against the torch golden.
+
+    ``dummy_out`` is an output of the kernel but nothing checks it — the dummy
+    matmul exists only to engage the UP_DOWN split — so its golden is all-NaN,
+    which ``validate_golden`` treats as don't-care. That states the contract
+    rather than leaving the buffer silently compared against zeros.
+    """
     torch.manual_seed(0)
     x = (torch.randn(T, C) * 0.5 + 2.0).to(torch.bfloat16)  # strictly positive -> stable recip
     y = torch.zeros(T, C, dtype=torch.bfloat16)
     dummy_out = torch.zeros(NTASK * MM_M, MM_N, dtype=torch.bfloat16)
-    kernel(x, y, dummy_out, config=test_config)
-    return y, _golden_y(x)
+    return st.case(
+        _KERNELS[key],
+        x,
+        y,
+        dummy_out,
+        name=f"split_reduce_parity_{key}",
+        golden=lambda _: {
+            "y": _golden_y(x),
+            "dummy_out": torch.full_like(dummy_out, float("nan")),
+        },
+        rtol=1.0 / 128,
+        atol=1e-2,
+    )
 
 
-class TestSplitReduceParity:
-    """gh#1864: a row reduction inside an UP_DOWN split scope must not miscompile."""
+@pytest.mark.platforms("a2a3")
+@st.cases(_parity_case("none_reshape"), _parity_case("none_direct"))
+def test_none_split_row_sum_is_correct(case_run):
+    """Baseline: under SplitMode.NONE both reduce forms match the golden."""
+    case_run.assert_passed()
 
-    @pytest.mark.platforms("a2a3")
-    @pytest.mark.parametrize("form", ["reshape", "direct"])
-    def test_none_split_row_sum_is_correct(self, test_config, form):
-        """Baseline: under SplitMode.NONE both reduce forms match the golden."""
-        actual, golden = _run(_KERNELS[f"none_{form}"], test_config)
-        torch.testing.assert_close(actual.float(), golden.float(), rtol=1.0 / 128, atol=1e-2)
 
-    @pytest.mark.platforms("a2a3")
-    @pytest.mark.parametrize("form", ["reshape", "direct"])
-    def test_updown_split_row_sum_matches_none(self, test_config, form):
-        """UP_DOWN must equal the golden (gh#1864 regression).
+@pytest.mark.platforms("a2a3")
+@st.cases(_parity_case("updown_reshape"), _parity_case("updown_direct"))
+def test_updown_split_row_sum_matches_none(case_run):
+    """UP_DOWN must equal the golden (gh#1864 regression).
 
-        Pre-fix, the column reshape that feeds the reciprocal kept its stale
-        full width after the split, so each lane read garbage columns and emitted
-        inf. SplitVectorKernel now migrates the split axis through the reshape.
-        """
-        actual, golden = _run(_KERNELS[f"updown_{form}"], test_config)
-        torch.testing.assert_close(actual.float(), golden.float(), rtol=1.0 / 128, atol=1e-2)
+    Pre-fix, the column reshape that feeds the reciprocal kept its stale
+    full width after the split, so each lane read garbage columns and emitted
+    inf. SplitVectorKernel now migrates the split axis through the reshape.
+    """
+    case_run.assert_passed()
 
 
 if __name__ == "__main__":

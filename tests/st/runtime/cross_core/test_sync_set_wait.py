@@ -30,6 +30,7 @@ signal the event, AIC consumes all 255 logical columns in a matrix multiply.
 import pypto.language as pl
 import pytest
 import torch
+from harness import st
 
 ROWS = 5
 LANE0_ROWS = 2
@@ -203,55 +204,83 @@ def sync_set_wait_odd_last_axis(
     return output
 
 
-class TestSyncSetWait:
-    """Explicit cross-core sync event system test."""
+def _odd_shape_case():
+    """Synchronize one 2/3-row two-AIV GM write with one AIC wait.
 
-    @pytest.mark.platforms("a2a3")
-    def test_static_event_id_on_board(self, test_config):
-        """Synchronize one 2/3-row two-AIV GM write with one AIC wait."""
-        sync_set_wait_odd_shape._cache.clear()
-        torch.manual_seed(0)
-        a = torch.randn(ROWS, K, dtype=torch.float32)
-        b = torch.randn(ROWS, K, dtype=torch.float32)
-        weight = torch.randn(K, N, dtype=torch.float32)
-        transfer = torch.zeros(CUBE_PHYSICAL_ROWS, K, dtype=torch.float32)
-        ffts_workspace = torch.zeros(FFTS_WORKSPACE_ELEMENTS, dtype=torch.int64)
-        output = torch.zeros(CUBE_PHYSICAL_ROWS, N, dtype=torch.float32)
+    ``output`` is ``InOut``, so the whole 16-row tensor is compared: the kernel
+    fills the first ``ROWS`` and the rest must still hold the zeros the caller
+    staged. ``transfer`` is the GM staging buffer — an output of the kernel that
+    nothing checks — so its golden is all-NaN, which ``validate_golden`` treats
+    as don't-care.
+    """
+    torch.manual_seed(0)
+    a = torch.randn(ROWS, K, dtype=torch.float32)
+    b = torch.randn(ROWS, K, dtype=torch.float32)
+    weight = torch.randn(K, N, dtype=torch.float32)
+    transfer = torch.zeros(CUBE_PHYSICAL_ROWS, K, dtype=torch.float32)
+    ffts_workspace = torch.zeros(FFTS_WORKSPACE_ELEMENTS, dtype=torch.int64)
+    output = torch.zeros(CUBE_PHYSICAL_ROWS, N, dtype=torch.float32)
 
-        sync_set_wait_odd_shape(a, b, weight, transfer, ffts_workspace, output, config=test_config)
-
+    def golden(_):
         expected = torch.zeros_like(output)
         expected[:ROWS] = torch.matmul(a + b, weight)
-        assert torch.allclose(output, expected, rtol=1e-3, atol=1e-3), (
-            f"odd-shape sync_set/sync_wait max diff = {(output - expected).abs().max().item()}"
-        )
+        return {"output": expected, "transfer": torch.full_like(transfer, float("nan"))}
 
-    @pytest.mark.platforms("a2a3")
-    def test_odd_last_axis_left_right_on_board(self, test_config):
-        """Synchronize explicit 127/128-column AIV shards before AIC consumes them."""
-        sync_set_wait_odd_last_axis._cache.clear()
-        torch.manual_seed(1)
-        input_tensor = torch.randn(LR_ROWS, LR_COLS, dtype=torch.float16)
-        weight = torch.randn(LR_CUBE_COLS, LR_OUTPUT_COLS, dtype=torch.float16)
-        # Keep padding non-zero so the golden catches accidental inclusion of
-        # transfer column 255 in the logical K=255 contraction.
-        transfer = torch.ones(LR_CUBE_ROWS, LR_CUBE_COLS, dtype=torch.float16)
-        ffts_workspace = torch.zeros(FFTS_WORKSPACE_ELEMENTS, dtype=torch.int64)
-        output = torch.zeros(LR_CUBE_ROWS, LR_OUTPUT_COLS, dtype=torch.float32)
+    return st.case(
+        sync_set_wait_odd_shape,
+        a,
+        b,
+        weight,
+        transfer,
+        ffts_workspace,
+        output,
+        name="sync_set_wait_odd_shape",
+        golden=golden,
+        rtol=1e-3,
+        atol=1e-3,
+    )
 
-        sync_set_wait_odd_last_axis(
-            input_tensor,
-            weight,
-            transfer,
-            ffts_workspace,
-            output,
-            config=test_config,
-        )
 
-        expected = torch.matmul(input_tensor.float(), weight[:LR_COLS].float())
-        assert torch.allclose(output[:LR_ROWS], expected, rtol=1e-3, atol=1e-3), (
-            f"odd-last-axis sync_set/sync_wait max diff = {(output[:LR_ROWS] - expected).abs().max().item()}"
-        )
+def _odd_last_axis_case():
+    """Synchronize explicit 127/128-column AIV shards before AIC consumes them.
+
+    ``output`` is a pure ``Out`` here and only ``output[:LR_ROWS]`` is defined,
+    so the padded tail — and the ``transfer`` staging buffer — are NaN
+    don't-care rather than silently compared against zeros.
+    """
+    torch.manual_seed(1)
+    input_tensor = torch.randn(LR_ROWS, LR_COLS, dtype=torch.float16)
+    weight = torch.randn(LR_CUBE_COLS, LR_OUTPUT_COLS, dtype=torch.float16)
+    # Keep padding non-zero so the golden catches accidental inclusion of
+    # transfer column 255 in the logical K=255 contraction.
+    transfer = torch.ones(LR_CUBE_ROWS, LR_CUBE_COLS, dtype=torch.float16)
+    ffts_workspace = torch.zeros(FFTS_WORKSPACE_ELEMENTS, dtype=torch.int64)
+    output = torch.zeros(LR_CUBE_ROWS, LR_OUTPUT_COLS, dtype=torch.float32)
+
+    def golden(_):
+        expected = torch.full_like(output, float("nan"))
+        expected[:LR_ROWS] = torch.matmul(input_tensor.float(), weight[:LR_COLS].float())
+        return {"output": expected, "transfer": torch.full_like(transfer, float("nan"))}
+
+    return st.case(
+        sync_set_wait_odd_last_axis,
+        input_tensor,
+        weight,
+        transfer,
+        ffts_workspace,
+        output,
+        name="sync_set_wait_odd_last_axis",
+        golden=golden,
+        rtol=1e-3,
+        atol=1e-3,
+    )
+
+
+@pytest.mark.platforms("a2a3")
+@st.cases(_odd_shape_case(), _odd_last_axis_case())
+def test_sync_set_wait_on_board(case_run):
+    """Explicit cross-core sync event system test."""
+    case_run.assert_passed()
 
 
 if __name__ == "__main__":
