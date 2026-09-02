@@ -772,6 +772,54 @@ class TestReturnParamsAreStructurallyExplicit:
         assert len(values) == 1
         assert values[0] is params[1]
 
+    def test_graph_returns_reference_their_params(self):
+        """A Graph is a callee whose returns codegen aliases, so it needs the form too.
+
+        A Graph body is written ``out = core(..., out, ...); return out``, which
+        reaches this pass as a ``TupleGetItem`` rebind rather than the param.
+        While Graph was excluded from Step A0, orchestration codegen got an
+        all-``nullopt`` map, fell back to "return j is the j-th Out/InOut param",
+        and silently bound every result to the wrong call-site tensor whenever the
+        return order differed from the parameter order (#2601).
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def core(
+                self,
+                a: pl.Tensor[[64], pl.FP32],
+                x: pl.InOut[pl.Tensor[[64], pl.FP32]],
+                y: pl.InOut[pl.Tensor[[64], pl.FP32]],
+            ) -> tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
+                t: pl.Tile[[64], pl.FP32] = pl.load(a, [0], [64])
+                r0: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], x)
+                r1: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], y)
+                return r0, r1
+
+            @pl.function(type=pl.FunctionType.Graph)
+            def layer(
+                self,
+                a: pl.Tensor[[64], pl.FP32],
+                x: pl.InOut[pl.Tensor[[64], pl.FP32]],
+                y: pl.InOut[pl.Tensor[[64], pl.FP32]],
+            ) -> tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
+                x2, y2 = self.core(a, x, y)
+                # Reversed relative to the parameter order.
+                return y2, x2
+
+        values, _params = self._return_values(Before, "layer")
+        # Before: SSA renames produced by the tuple unpack, not the params.
+        assert all(isinstance(v, ir.Var) for v in values)
+        assert not any(v is p for v in values for p in _params)
+
+        After = _run_normalize_direct(Before)
+        values, params = self._return_values(After, "layer")
+        # After: position 0 is param `y` (index 2), position 1 is param `x` (index 1).
+        # Getting this backwards is exactly the #2601 mis-binding.
+        assert values[0] is params[2]
+        assert values[1] is params[1]
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -408,7 +408,17 @@ Pass NormalizeReturnOrder() {
 
     for (const auto& [gvar, func] : program->functions_) {
       const bool is_wrapper = IsWrapperType(func->func_type_);
-      if (IsInCoreType(func->func_type_) || is_wrapper) {
+      // A Graph is a *callee* whose returns orchestration codegen aliases to
+      // call-site tensors, exactly like an InCore kernel or a Group/Spmd
+      // wrapper, so it needs the same explicit-param form. Its body is written
+      // ``out = core(..., out, ...); return out``, and the outliner turns that
+      // into a TupleGetItem rebind, so the return reaches codegen as an SSA
+      // rename. Left un-canonicalized, ExplicitReturnedParamIndices comes back
+      // all-nullopt, IsReturnedParamMapPrecise rejects the map, and codegen
+      // falls back to a positional heuristic that is only right when the return
+      // order happens to match the parameter order -- silently binding every
+      // result to the wrong tensor otherwise (#2601).
+      if (IsInCoreType(func->func_type_) || is_wrapper || func->func_type_ == FunctionType::Graph) {
         // Step A0: make every tensor return an explicit param reference.
         FunctionPtr current = func;
         if (auto canonical = CanonicalizeReturnValues(current, program)) {

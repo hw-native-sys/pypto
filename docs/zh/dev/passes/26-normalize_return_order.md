@@ -18,7 +18,7 @@ i 个 `Out`/`InOut` 参数，并相应地重映射非 InCore 调用方中的
 本 Pass 把契约规范化为「按位置 `return[k] ↔ out_indices[k]`」，分两步进行：
 
 1. **Step A0（返回值参数化规范化）** —— 对每个 `InCore`、`Group`、
-   `Spmd` 函数，把每个属于参数回写（param writeback）的 tensor 返回值改写为
+   `Spmd`、`Graph` 函数，把每个属于参数回写（param writeback）的 tensor 返回值改写为
    直接引用对应参数（指针同一性），追踪由共享的 `return_lineage` 工具完成。
    kernel 内部分配的输出（无法追踪到任何参数）和标量返回不受影响。
 2. **Step A（InCore 函数重写）** —— 对每个 `InCore` 函数，计算一个使
@@ -62,7 +62,7 @@ result = passes.normalize_return_order()(program)
 证函数体使用 tile 操作，从而 Step A 所依赖的
 `tile.store(_, _, out_param)` 信号一定存在。本 Pass 产出
 `ReturnParamsExplicit`（由 `verify_return_params_explicit.cpp` 校验）：每个
-InCore/Group/Spmd 函数中属于参数回写的 tensor 返回值都以指针同一性引用对应
+InCore/Group/Spmd/Graph 函数中属于参数回写的 tensor 返回值都以指针同一性引用对应
 参数，编排代码生成因此只需查表即可建立返回值到实参的映射。本 Pass 不使任何
 属性失效 —— SSA、规范化语句结构、内存推断等所有上游属性均被保留。
 
@@ -70,7 +70,7 @@ InCore/Group/Spmd 函数中属于参数回写的 tensor 返回值都以指针同
 
 ### Step A0 —— 把返回值规范化为参数引用
 
-对每个 `InCore` / `Group` / `Spmd` 函数，`CanonicalizeReturnValues` 调用
+对每个 `InCore` / `Group` / `Spmd` / `Graph` 函数，`CanonicalizeReturnValues` 调用
 `return_lineage::ReturnedParamIndices`（可追踪 Var 到 Var 别名、循环携带、
 builtin 回写、tuple 调用的 `TupleGetItem`，以及 Group/Spmd 包装函数调用），
 把每个可追踪到参数的 tensor 返回值替换为参数 `Var` 本身。无法追踪的值
@@ -84,6 +84,14 @@ builtin 回写、tuple 调用的 `TupleGetItem`，以及 Group/Spmd 包装函数
 取"，而不再重跑跨函数追踪器。`ReturnedParamIndices` 只保留给：在该属性建立**之
 前**运行的调用方（`ExpandMixedKernel`、scope outliner）、本 pass 自身，以及必须
 独立重新推导才能起到校验作用的属性验证器。
+
+`Graph` 被纳入该集合的理由与包装函数相同：编排代码生成正是通过这张映射把 Graph
+调用的结果别名到调用端张量。Graph 的函数体写作 `out = core(..., out, ...); return
+out`，outliner 会把它变成 `TupleGetItem` 重绑定，因此返回值到达 codegen 时是一个
+SSA 重命名。在 Graph 被排除期间，这张映射全部返回 `nullopt`，codegen 退回到位置
+启发式（返回位置 `j` ↦ 第 `j` 个 `Out`/`InOut` 参数）；一旦某个 Graph 的返回顺序
+与参数顺序不一致，它的每个结果都会被静默绑定到错误的张量，且没有任何诊断
+（#2601）。
 
 由于它是 codegen 的前置条件，手工构造 IR 并直接调用 orchestration codegen 的测试
 必须先运行本 pass（见 `tests/ut/codegen/_orchestration_codegen_common.py`），正如
@@ -141,7 +149,7 @@ builtin 回写、tuple 调用的 `TupleGetItem`，以及 Group/Spmd 包装函数
 
 | 约束 | 原因 |
 | ---- | ---- |
-| Step A 仅重写 `InCore` 函数 | 其他函数类型（`Orchestration` / `Group` / `Spmd` / opaque）遵循用户声明的返回形态；它们的调用端在 Step B 中被重映射。`Group`/`Spmd` 的返回值在 Step A0 中仍会被规范化为参数引用，但不会被重排 |
+| Step A 仅重写 `InCore` 函数 | 其他函数类型（`Orchestration` / `Group` / `Spmd` / `Graph` / opaque）遵循用户声明的返回形态；它们的调用端在 Step B 中被重映射。`Group`/`Spmd`/`Graph` 的返回值在 Step A0 中仍会被规范化为参数引用，但不会被重排 |
 | Step A0 不改动 kernel 内部分配的输出与标量 | 只有参数回写必须显式化；没有参数血缘的返回值没有可引用的参数 |
 | `out_indices.size() > ret_to_param.size()` 时跳过 | 不完整分析不能产生越界置换 —— 保留原状，让 verifier 捕获不一致 |
 | 恒等置换 ⇒ 不重写 | 避免不必要的 `Function` 克隆，使 Pass 幂等 |

@@ -22,8 +22,8 @@ This pass canonicalizes the contract so codegen can rely on
 `return[k] ↔ out_indices[k]` by position alone:
 
 1. **Step A0 (param-return canonicalization)** — for every `InCore`,
-   `Group`, and `Spmd` function, rewrite each tensor return value that is a
-   param writeback to reference the parameter directly (pointer identity),
+   `Group`, `Spmd`, and `Graph` function, rewrite each tensor return value that
+   is a param writeback to reference the parameter directly (pointer identity),
    using the shared `return_lineage` utility. Kernel-allocated outputs (not
    traceable to any param) and scalar returns are exempt and stay unchanged.
 2. **Step A (InCore rewrite)** — for every `InCore` function, compute a
@@ -72,7 +72,7 @@ result = passes.normalize_return_order()(program)
 own functions; `IncoreTileOps` guarantees the body uses tile ops, so the
 `tile.store(_, _, out_param)` signal that drives Step A is present. The
 pass produces `ReturnParamsExplicit` (verified by
-`verify_return_params_explicit.cpp`): every InCore/Group/Spmd tensor
+`verify_return_params_explicit.cpp`): every InCore/Group/Spmd/Graph tensor
 return value that is a param writeback references the param by pointer
 identity, so orchestration codegen maps returns to args with a lookup.
 It invalidates nothing — SSA form, normalized statement structure, memory
@@ -82,7 +82,7 @@ inference, and every other upstream property are preserved.
 
 ### Step A0 — Canonicalize return values to params
 
-For each `InCore` / `Group` / `Spmd` function, `CanonicalizeReturnValues`
+For each `InCore` / `Group` / `Spmd` / `Graph` function, `CanonicalizeReturnValues`
 calls `return_lineage::ReturnedParamIndices` (which traces var-to-var
 aliases, loop carries, builtin writebacks, `TupleGetItem` of tuple calls,
 and Group/Spmd wrapper calls) and replaces every tensor return value that
@@ -99,6 +99,15 @@ rather than re-running the interprocedural tracer. Reserve
 `ReturnedParamIndices` for callers that run *before* the property exists
 (`ExpandMixedKernel`, the scope outliner), for this pass itself, and for the
 property verifier, which must re-derive independently to have anything to check.
+
+`Graph` is in this set for the same reason the wrappers are: orchestration
+codegen aliases a Graph call's results to call-site tensors through this map. A
+Graph body is written `out = core(..., out, ...); return out`, which the
+outliner turns into a `TupleGetItem` rebind, so the return reaches codegen as an
+SSA rename. While Graph was excluded, that map came back all-`nullopt`, codegen
+fell back to a positional heuristic (return `j` ↦ the `j`-th `Out`/`InOut`
+param), and a Graph whose return order differed from its parameter order had
+every result bound to the wrong tensor with no diagnostic (#2601).
 
 Because it is a codegen precondition, a test that hand-builds IR and calls
 orchestration codegen directly must run this pass first (see
@@ -163,7 +172,7 @@ buffer, just under a new index.
 
 | Constraint | Reason |
 | ---------- | ------ |
-| Only `InCore` functions are rewritten in Step A | Other function kinds (`Orchestration` / `Group` / `Spmd` / opaque) follow the user's declared return shape; their callers are remapped in Step B. `Group`/`Spmd` returns are still canonicalized to params in Step A0, but never reordered |
+| Only `InCore` functions are rewritten in Step A | Other function kinds (`Orchestration` / `Group` / `Spmd` / `Graph` / opaque) follow the user's declared return shape; their callers are remapped in Step B. `Group`/`Spmd`/`Graph` returns are still canonicalized to params in Step A0, but never reordered |
 | Step A0 leaves kernel-allocated outputs and scalars untouched | Only param writebacks must be explicit; a return value with no param lineage has no param to reference |
 | Skips functions where `out_indices.size() > ret_to_param.size()` | An incomplete analysis must not produce an out-of-bounds permutation — leave the function as-is so the verifier can flag the inconsistency |
 | Permutation is identity ⇒ no rewrite | Avoids spurious `Function` clones and keeps the pass idempotent |

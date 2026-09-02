@@ -167,6 +167,21 @@ class InOutUseDisciplineChecker : public IRVisitor {
     }
   }
 
+  void VisitStmt_(const ReturnStmtPtr&) override {
+    // A return value is a writeback identity, not a read. `NormalizeReturnOrder`
+    // canonicalizes a param-writeback return to reference the param itself, so a
+    // body shaped `x_1 = core(a, x); return x` returns the very var the call
+    // marked dead -- yet nothing reads its contents: codegen aliases the result
+    // to that same buffer. Counting it as a read made the two properties
+    // contradict each other, which is why `verify_inout_use.cpp` skips Group/Spmd
+    // wrappers wholesale ("they return their params explicitly"). Exempting the
+    // return here states that rule once, at its source, instead of exempting
+    // whole function kinds -- so a Graph body, which is real orchestration code
+    // rather than a 1:1 forwarder, keeps discipline checking everywhere else
+    // (#2601). Without it `CanonicalizeIOOrder` would also silently decline to
+    // reorder every Graph function.
+  }
+
   void VisitStmt_(const IfStmtPtr& op) override {
     // Then- and else-branches are mutually exclusive at runtime, so a
     // post-call mark added in one branch must not bleed into the other.

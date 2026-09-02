@@ -62,7 +62,7 @@ Framework for organizing and executing IR transformation passes on Programs with
 | `RuntimeScopesMaterialized` | Orchestration functions carry explicit RuntimeScopeStmt nodes, so codegen emits no implicit `SIMPLER_SCOPE()` wrappers |
 | `AssignTypeSymmetry` | Every AssignStmt has `structural_equal(var->GetType(), value->GetType())` (memref excluded as an allocation detail) |
 | `ManualDepsOnSubmitOnly` | No plain cross-function Call carries `attrs["manual_dep_edges"]` — manual edges live in `Submit::deps_` |
-| `ReturnParamsExplicit` | InCore/Group/Spmd tensor returns reference function params by pointer identity (#1702) |
+| `ReturnParamsExplicit` | InCore/Group/Spmd/Graph tensor returns reference function params by pointer identity (#1702, #2601) |
 | `UnrollResolved` | No `ForKind::Unroll` survives; produced by UnrollLoops |
 | `AivSplitValid` | SplitAivScopeStmt regions are structurally valid: no cube compute or split-axis reduce inside a region, boundary ops only inside one |
 | `HardSyncallOccupancyValid` | Every hard (FFTS) `system.syncall` is launched at full occupancy — a partial or over launch deadlocks on device (507018) |

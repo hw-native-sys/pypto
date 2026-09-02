@@ -514,5 +514,85 @@ def test_graph_allocations_are_packed_sixteen_to_a_node():
     assert body.count("rt_submit_") == 21, body
 
 
+@pl.program
+class _SwappedReturns:
+    """A Graph returning its two InOut params in the reverse of their declared order.
+
+    `InOutUseDiscipline` requires the caller to read a written param through the
+    call's return value, so a Graph that writes several InOut params returns them
+    all -- and nothing forces that return order to match the parameter order.
+    """
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(
+        self,
+        a: pl.Tensor[[128, 128], pl.FP32],
+        x: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+        y: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+    ) -> tuple[pl.Tensor[[128, 128], pl.FP32], pl.Tensor[[128, 128], pl.FP32]]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128])
+            pl.store(t, [0, 0], x)
+            u: pl.Tile[[128, 128], pl.FP32] = pl.add(t, t)
+            pl.store(u, [0, 0], y)
+        return y, x
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def consume(
+        self,
+        u: pl.Tensor[[128, 128], pl.FP32],
+        v: pl.Tensor[[128, 128], pl.FP32],
+        o: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
+        tu: pl.Tile[[128, 128], pl.FP32] = pl.load(u, [0, 0], [128, 128])
+        tv: pl.Tile[[128, 128], pl.FP32] = pl.load(v, [0, 0], [128, 128])
+        s: pl.Tile[[128, 128], pl.FP32] = pl.add(tu, tv)
+        return pl.store(s, [0, 0], o)
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        a: pl.Tensor[[128, 128], pl.FP32],
+        out: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
+        # Freshly created region tensors, not entry params: with entry params the
+        # compiler resolves the aliasing without emitting a binding at all, and
+        # the mis-binding stays invisible.
+        for _i in pl.range(2):
+            p: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+            q: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+            qq, pp = self.layer(a, p, q)
+            out = self.consume(qq, pp, out)
+        return out
+
+
+def _task_args(entry: str, params_var: str) -> list[str]:
+    """The `add_input` / `add_inout` operands of the @p params_var argument block."""
+    block = re.search(rf"{params_var};(.*?)rt_submit_", entry, re.S)
+    assert block is not None, entry
+    return re.findall(r"add_(?:input|inout)\((\w+)\)", block.group(1))
+
+
+def test_multi_param_graph_returns_bind_to_the_right_call_site_tensors():
+    """Return position j binds the arg of the param j *returns*, not the j-th Out param.
+
+    `layer` returns `(y, x)`, so `qq, pp = layer(a, p, q)` means `qq` aliases `q`
+    and `pp` aliases `p`. While Graph was excluded from `NormalizeReturnOrder`'s
+    param-return canonicalization, the return->param map came back all-nullopt and
+    codegen guessed positionally -- return 0 to the first Out/InOut param (`x`) --
+    binding every result to the wrong tensor with no diagnostic (#2601). Both
+    sides are same-shaped tensors, so nothing downstream notices; the numbers just
+    come out wrong.
+    """
+    entry = _entry_body(_compile_orch(_SwappedReturns))
+
+    # The launch itself is unremarkable: args in parameter order.
+    assert _task_args(entry, "GraphTaskArgs params_t0")[1:] == ["p", "q"], entry
+
+    # The consumer is where the mapping shows. `consume(qq, pp, out)` must read
+    # qq -> q and pp -> p; `["p", "q"]` here is exactly the swap this fixes.
+    assert _task_args(entry, "CoreTaskArgs params_t1")[:2] == ["q", "p"], entry
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

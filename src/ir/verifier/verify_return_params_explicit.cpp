@@ -26,7 +26,7 @@
 namespace pypto {
 namespace ir {
 
-/// Verifies IRProperty::ReturnParamsExplicit: in every InCore/Group/Spmd
+/// Verifies IRProperty::ReturnParamsExplicit: in every InCore/Group/Spmd/Graph
 /// function, each tensor return value that is a param writeback references
 /// the param by pointer identity instead of an SSA alias of it. Scalar
 /// returns and kernel-allocated tensors (untraceable to any param; they only
@@ -43,8 +43,14 @@ class ReturnParamsExplicitVerifierImpl : public PropertyVerifier {
       // implementation lives in the hand-written source named by "external_source".
       // They legitimately have no ReturnStmt, so exempt them from this property.
       if (func->HasAttr(kAttrExternalSource)) continue;
+      // Graph is in scope for the same reason InCore and the wrappers are:
+      // orchestration codegen reads its return->param map off the ReturnStmt to
+      // alias call results to call-site tensors. Exempting it made the property
+      // pass vacuously while codegen quietly guessed the map positionally
+      // (#2601), which is precisely the silent mis-binding this verifier exists
+      // to turn into an error.
       const bool applies = IsInCoreType(func->func_type_) || func->func_type_ == FunctionType::Group ||
-                           func->func_type_ == FunctionType::Spmd;
+                           func->func_type_ == FunctionType::Spmd || func->func_type_ == FunctionType::Graph;
       if (!applies) continue;
 
       bool has_tensor_return = false;
