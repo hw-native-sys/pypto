@@ -1011,8 +1011,13 @@ void DistributedCodegen::VisitExpr_(const ir::CallPtr& op) {
 
 void DistributedCodegen::VisitExpr_(const ir::SubmitPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null Submit";
-  INTERNAL_CHECK_SPAN(TryEmitHierarchyCall(op), op->span_)
-      << "Internal error: distributed codegen only supports Submit for hierarchy calls";
+  // Evaluated outside the check macro: TryEmitHierarchyCall *emits* the
+  // dispatch, so it must not read as a check condition.
+  const bool emitted = TryEmitHierarchyCall(op);
+  CHECK_SPAN(emitted, op->span_)
+      << "pl.submit(...) in a distributed HOST orchestrator only supports next-level dispatch of "
+         "an Orchestration function; declare the callee with "
+         "@pl.function(type=pl.FunctionType.Orchestration)";
 }
 
 void DistributedCodegen::VisitExpr_(const ir::VarPtr& op) {
@@ -1071,10 +1076,28 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
              call->span_)
       << "Distributed HOST pl.submit(...) supports explicit deps only; core_num, sync_start, "
          "allow_early_resolve, and predicate are not available for L3 TaskHandle submissions";
+  // Stays INTERNAL: an argument-count check in an emitter is internal by
+  // convention (`error-checking.md`, enforced by
+  // tests/lint/check_emitter_check_classification.py rule B). The user-facing
+  // form of this rule — "a distributed HOST submit must pass every callee
+  // argument, including Out/InOut tensors" — is reported by the N3 parser at
+  // the call site, so reaching codegen with a gap is a compiler-side failure.
   INTERNAL_CHECK_SPAN(!submit || call->args_.size() == callee->params_.size(), call->span_)
       << "Internal error: distributed HOST Submit must cover every callee parameter; got "
       << call->args_.size() << " arguments for " << callee->params_.size() << " parameters in '"
       << callee->name_ << "'";
+  // A ``-> pl.Tuple[T1, T2]`` callee declares ONE return type (a TupleType), so
+  // the Submit's return tuple is [TupleType(T1, T2), TaskId] — element 0 is the
+  // whole inner tuple, which the Out-param-ordinal aliasing below cannot model
+  // (it would alias element 0 to just the first Out param). Orchestration
+  // codegen does not model this shape either and no pass flattens it, so reject
+  // it here with an actionable message instead of mis-aliasing.
+  CHECK_SPAN(!submit || callee->return_types_.size() != 1 ||
+                 !std::dynamic_pointer_cast<const ir::TupleType>(callee->return_types_.front()),
+             call->span_)
+      << "Distributed HOST pl.submit(...) does not support a callee declaring a nested "
+         "`-> pl.Tuple[...]` return; declare it as `-> tuple[...]` so each result is its own "
+         "return value";
 
   // ``device=`` attr (set by N3 parser) is the single source of truth for
   // both the per-rank ``__comm_d0[<r>]`` subscript (used by DistributedTensor
@@ -1262,10 +1285,21 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
     const std::string submit_expr = "_submit_chip(orch, callables[\"" + callee->name_ + "\"], " + ta_var +
                                     ", config, " + worker_arg + ")";
     if (submit) {
+      // The producer TaskId is the LAST element of the Submit's own return
+      // tuple (the parser builds ``TupleType([*callee returns, Scalar[TASK_ID]])``).
+      // Derive the index from that type rather than from
+      // ``callee->return_types_``: the two agree only because each declared
+      // return contributes one entry to both, which is a coincidence of the
+      // shapes accepted here, not a rule. Mirrors ``n_outs`` in orchestration
+      // codegen's ``GenerateSubmitReturnAliases``.
+      const auto submit_ret = ir::As<ir::TupleType>(submit->GetType());
+      INTERNAL_CHECK_SPAN(submit_ret && !submit_ret->types_.empty(), submit->span_)
+          << "Internal error: distributed Submit return type must be a non-empty TupleType, got "
+          << submit->GetType()->TypeName();
+      const int task_id_index = static_cast<int>(submit_ret->types_.size()) - 1;
       const std::string task_handle = ta_var + "_handle";
       emitter_.EmitLine(task_handle + " = " + submit_expr);
-      tuple_element_task_handles_[std::make_pair(target, static_cast<int>(callee->return_types_.size()))] =
-          task_handle;
+      tuple_element_task_handles_[std::make_pair(target, task_id_index)] = task_handle;
     } else {
       emitter_.EmitLine(submit_expr);
     }

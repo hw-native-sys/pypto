@@ -754,6 +754,50 @@ def test_host_submit_requires_explicit_output_arguments():
                 return 0
 
 
+def test_host_submit_rejects_nested_tuple_return():
+    """A ``-> pl.Tuple[...]`` callee has no modellable per-element aliasing.
+
+    ``-> pl.Tuple[A, B]`` declares ONE return type, so the Submit's return tuple
+    is ``[TupleType(A, B), TaskId]`` — element 0 is the whole inner tuple, which
+    the Out-param-ordinal aliasing cannot express. Reject it with an actionable
+    message instead of aliasing element 0 to just the first Out param.
+    """
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            data: pl.Tensor[[SIZE], pl.FP32],
+            out_a: pl.Out[pl.Tensor[[SIZE], pl.FP32]],
+            out_b: pl.Out[pl.Tensor[[SIZE], pl.FP32]],
+        ) -> pl.Tuple[pl.Tensor[[SIZE], pl.FP32], pl.Tensor[[SIZE], pl.FP32]]:
+            return self.chip_worker(data, out_a, out_b)
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def chip_worker(
+            self,
+            data: pl.Tensor[[SIZE], pl.FP32],
+            out_a: pl.Out[pl.Tensor[[SIZE], pl.FP32]],
+            out_b: pl.Out[pl.Tensor[[SIZE], pl.FP32]],
+        ) -> tuple[pl.Tensor[[SIZE], pl.FP32], pl.Tensor[[SIZE], pl.FP32]]:
+            tile = pl.load(data, [0], [SIZE])
+            return pl.store(tile, [0], out_a), pl.store(tile, [0], out_b)
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(
+            self,
+            data: pl.Tensor[[SIZE], pl.FP32],
+            out_a: pl.Out[pl.Tensor[[SIZE], pl.FP32]],
+            out_b: pl.Out[pl.Tensor[[SIZE], pl.FP32]],
+        ):
+            _packed, _task = pl.submit(self.chip_orch, data, out_a, out_b, device=0)
+            return 0
+
+    with pytest.raises(ValueError, match=r"nested\s+`-> pl\.Tuple\[\.\.\.\]` return"):
+        _lower(Prog)
+
+
 def test_host_allreduce_builtin_codegen_uses_next_level_callable_key():
     @pl.program
     class Prog:

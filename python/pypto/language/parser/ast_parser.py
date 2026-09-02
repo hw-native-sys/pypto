@@ -6821,6 +6821,68 @@ class ASTParser:
             arg_idx += 1
         return callee_params, paired_args
 
+    def _validate_kernel_call_arity(
+        self,
+        method_name: str,
+        func_obj: Any,
+        n_args: int,
+        span: ir.Span,
+        as_submit: bool,
+    ) -> None:
+        """Check a ``self.<method>(...)`` call site's positional-argument count.
+
+        One place decides the call flavour; the resulting ``(lo, hi)`` window
+        then covers all three checks — an exact-arity check is just ``lo == hi``.
+
+        Args:
+            method_name: Callee name, for the diagnostic.
+            func_obj: The callee ``ir.Function``.
+            n_args: Positional argument count at the call site.
+            span: Source span of the call.
+            as_submit: Whether the site is ``pl.submit`` / ``pl.spmd_submit``.
+
+        Raises:
+            ParserTypeError: The argument count is outside the callee's window.
+        """
+        n_params = len(func_obj.params)
+        if as_submit and self._func_level == ir.Level.HOST:
+            # A distributed HOST submit dispatches to L3, which allocates no
+            # output tensors, so it cannot omit Out/InOut params the way an
+            # Orchestration-level submit can.
+            flavour, lo, hi = "host_submit", n_params, n_params
+        elif as_submit:
+            # For submit (pl.submit / pl.spmd_submit), Out- and InOut-directed
+            # parameters are runtime-allocated outputs that MAY be omitted at
+            # the call site. The lower bound is the count of non-Out/InOut
+            # params; the upper bound is all params (when Out params are passed
+            # explicitly).
+            flavour = "submit"
+            lo = sum(
+                1
+                for d in func_obj.param_directions
+                if d not in (ir.ParamDirection.Out, ir.ParamDirection.InOut)
+            )
+            hi = n_params
+        else:
+            flavour, lo, hi = "call", n_params, n_params
+
+        if lo <= n_args <= hi:
+            return
+
+        param_info = [f"{p.name_hint}: {d.name}" for p, d in zip(func_obj.params, func_obj.param_directions)]
+        hint = f"Parameters: {param_info}"
+        if flavour == "host_submit":
+            message = (
+                "Distributed HOST pl.submit(...) requires every callee argument, including "
+                f"Out/InOut tensors; function '{method_name}' expects {hi} argument(s), got {n_args}"
+            )
+        elif flavour == "submit":
+            message = f"Function '{method_name}' expects {lo}..{hi} argument(s), got {n_args}"
+            hint += ". Out/InOut params may be omitted in submit calls."
+        else:
+            message = f"Function '{method_name}' expects {hi} argument(s), got {n_args}"
+        raise ParserTypeError(message, span=span, hint=hint)
+
     def _parse_kernel_call(
         self,
         method_attr: ast.Attribute,
@@ -6873,47 +6935,7 @@ class ASTParser:
 
         # Validate argument count before parsing args to fail fast.
         if func_obj is not None:
-            host_submit = as_submit and self._func_level == ir.Level.HOST
-            if as_submit and not host_submit:
-                # For submit (pl.submit / pl.spmd_submit), Out- and InOut-
-                # directed parameters are runtime-allocated outputs that
-                # MAY be omitted at the call site. The lower bound is the
-                # count of non-Out/InOut params; the upper bound is all
-                # params (when Out params are passed explicitly).
-                expected_lo = sum(
-                    1
-                    for d in func_obj.param_directions
-                    if d not in (ir.ParamDirection.Out, ir.ParamDirection.InOut)
-                )
-                expected_hi = len(func_obj.params)
-                ok = expected_lo <= len(arg_nodes) <= expected_hi
-            else:
-                expected_hi = len(func_obj.params)
-                expected_lo = expected_hi
-                ok = len(arg_nodes) == expected_hi
-            if not ok:
-                param_info = [
-                    f"{p.name_hint}: {d.name}" for p, d in zip(func_obj.params, func_obj.param_directions)
-                ]
-                hint = (
-                    f"Parameters: {param_info}. Out/InOut params may be omitted in submit calls."
-                    if as_submit and not host_submit
-                    else f"Parameters: {param_info}"
-                )
-                message = (
-                    "Distributed HOST pl.submit(...) requires every callee argument, including "
-                    f"Out/InOut tensors; function '{method_name}' expects {expected_hi} argument(s), "
-                    f"got {len(arg_nodes)}"
-                    if host_submit
-                    else f"Function '{method_name}' expects "
-                    + (f"{expected_lo}..{expected_hi}" if as_submit else f"{expected_hi}")
-                    + f" argument(s), got {len(arg_nodes)}"
-                )
-                raise ParserTypeError(
-                    message,
-                    span=span,
-                    hint=hint,
-                )
+            self._validate_kernel_call_arity(method_name, func_obj, len(arg_nodes), span, as_submit)
 
         arg_directions = self._extract_arg_directions_from_attrs(method_name, keywords, len(arg_nodes), span)
         if arg_directions is None:
