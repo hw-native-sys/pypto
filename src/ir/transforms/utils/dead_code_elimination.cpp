@@ -21,6 +21,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
@@ -468,7 +469,8 @@ bool IsRemovableScalarAssign(const StmtPtr& stmt) {
 }
 
 // ============================================================================
-// EliminateDeadIfReturnVars — drop IfStmt phi return_vars with no Var* user.
+// EliminateDeadYieldSlots — drop yielded slots with no Var* user: IfStmt phi
+// return_vars, and ForStmt / WhileStmt loop-carried slots.
 // ============================================================================
 
 /// Filter a branch's trailing YieldStmt in place, keeping only `kept_indices`.
@@ -529,13 +531,83 @@ StmtPtr RebuildScopeWithBody(const std::shared_ptr<const ScopeStmt>& scope_stmt,
   return scope_stmt;
 }
 
-/// Walk `stmts` and rewrite each IfStmt by dropping return_vars_[i] whose Var*
-/// is not in `live_uses`, plus the matching slot from each branch's trailing
-/// YieldStmt. Recurses into nested branches, scope bodies, and loop bodies.
-/// Sets `*changed` when any IfStmt was rewritten (used by the fixed-point
-/// loop in EliminateDeadIfReturnVars).
-std::vector<StmtPtr> RewriteDeadIfPhisOnce(const std::vector<StmtPtr>& stmts,
-                                           const std::unordered_set<const Var*>& live_uses, bool* changed) {
+/// Walk `stmts` and drop every yielded slot whose consuming Var* is not in
+/// `live_uses`: an IfStmt's `return_vars_[i]`, or a loop's carried slot (both
+/// `iter_args_[i]` and `return_vars_[i]` unused), plus the matching slot from
+/// the trailing YieldStmt that feeds it. Recurses into nested branches, scope
+/// bodies, and loop bodies. Sets `*changed` when any node was rewritten (used
+/// by the fixed-point loop in EliminateDeadYieldSlots).
+std::vector<StmtPtr> RewriteDeadYieldSlotsOnce(const std::vector<StmtPtr>& stmts,
+                                               const std::unordered_set<const Var*>& live_uses,
+                                               bool* changed);
+
+/// A TaskId carry is a scheduling channel, not data: `AutoDeriveTaskDependencies`
+/// and `ExpandManualPhaseFence` read the *shape* of a `Scalar[TASK_ID]` /
+/// `Array[TASK_ID]` carry — a task id produced in a loop and carried out is how
+/// the compiler learns to fan every iteration's handle in to a later consumer —
+/// so no ordinary Var use marks it live. Pruning one silently drops the
+/// dependency edges those passes would have derived, so keep every such slot.
+bool IsTaskIdCarrier(const TypePtr& type) {
+  if (!type) return false;
+  if (auto scalar_type = As<ScalarType>(type)) return scalar_type->dtype_ == DataType::TASK_ID;
+  if (auto array_type = As<ArrayType>(type)) return array_type->dtype_ == DataType::TASK_ID;
+  return false;
+}
+
+/// Prune dead carried slots from one loop node. `LoopT` is `ForStmt` or
+/// `WhileStmt`; both expose `iter_args_`, `body_` and `return_vars_`.
+///
+/// A carried slot has two consumers — the `IterArg` read inside the body and
+/// the `return_var` read after the loop — so it survives if *either* is used.
+/// A body that assigns the carried name before reading it (the same Python
+/// local reused across scopes) uses neither: SSA seeds the loop with the
+/// incoming value, every trip overwrites it, and nothing downstream reads the
+/// result. That spurious carry is what makes an earlier device scope look like
+/// it must return the scalar (see `PlanScalarOutputHoist`).
+template <typename LoopT>
+StmtPtr RewriteLoopCarrySlots(const std::shared_ptr<const LoopT>& loop,
+                              const std::unordered_set<const Var*>& live_uses, bool* changed) {
+  auto original = FlattenBody(loop->body_);
+  auto rewritten = RewriteDeadYieldSlotsOnce(original, live_uses, changed);
+
+  INTERNAL_CHECK_SPAN(loop->iter_args_.size() == loop->return_vars_.size(), loop->span_)
+      << "Internal error: loop carries " << loop->iter_args_.size() << " iter_args but "
+      << loop->return_vars_.size() << " return_vars";
+
+  std::vector<size_t> kept_indices;
+  std::vector<IterArgPtr> new_iter_args;
+  std::vector<VarPtr> new_return_vars;
+  kept_indices.reserve(loop->iter_args_.size());
+  new_iter_args.reserve(loop->iter_args_.size());
+  new_return_vars.reserve(loop->return_vars_.size());
+  for (size_t i = 0; i < loop->iter_args_.size(); ++i) {
+    if (live_uses.count(loop->iter_args_[i].get()) || live_uses.count(loop->return_vars_[i].get()) ||
+        IsTaskIdCarrier(loop->iter_args_[i]->GetType())) {
+      kept_indices.push_back(i);
+      new_iter_args.push_back(loop->iter_args_[i]);
+      new_return_vars.push_back(loop->return_vars_[i]);
+    }
+  }
+  const bool dropped_any = kept_indices.size() < loop->iter_args_.size();
+
+  if (!dropped_any && SameFlattenedBody(rewritten, original)) return loop;
+
+  if (dropped_any) {
+    FilterTrailingYieldSlots(rewritten, kept_indices);
+    *changed = true;
+  }
+  auto new_loop = MutableCopy(loop);
+  new_loop->body_ = MakeBody(rewritten, loop->span_);
+  if (dropped_any) {
+    new_loop->iter_args_ = std::move(new_iter_args);
+    new_loop->return_vars_ = std::move(new_return_vars);
+  }
+  return new_loop;
+}
+
+std::vector<StmtPtr> RewriteDeadYieldSlotsOnce(const std::vector<StmtPtr>& stmts,
+                                               const std::unordered_set<const Var*>& live_uses,
+                                               bool* changed) {
   std::vector<StmtPtr> result;
   result.reserve(stmts.size());
   for (const auto& stmt : stmts) {
@@ -544,7 +616,7 @@ std::vector<StmtPtr> RewriteDeadIfPhisOnce(const std::vector<StmtPtr>& stmts,
       // pass also gets cleared. The outer fixed-point still iterates until
       // convergence; the inner recursion just shortens the iteration count.
       auto then_stmts = FlattenBody(if_stmt->then_body_);
-      auto new_then = RewriteDeadIfPhisOnce(then_stmts, live_uses, changed);
+      auto new_then = RewriteDeadYieldSlotsOnce(then_stmts, live_uses, changed);
       std::optional<std::vector<StmtPtr>> else_stmts;
       std::optional<std::vector<StmtPtr>> new_else;
       // Both optionals are engaged together, so compare them here: a branch with
@@ -552,7 +624,7 @@ std::vector<StmtPtr> RewriteDeadIfPhisOnce(const std::vector<StmtPtr>& stmts,
       bool else_unchanged = true;
       if (if_stmt->else_body_.has_value()) {
         else_stmts = FlattenBody(if_stmt->else_body_.value());
-        new_else = RewriteDeadIfPhisOnce(*else_stmts, live_uses, changed);
+        new_else = RewriteDeadYieldSlotsOnce(*else_stmts, live_uses, changed);
         else_unchanged = SameFlattenedBody(*new_else, *else_stmts);
       }
 
@@ -597,28 +669,12 @@ std::vector<StmtPtr> RewriteDeadIfPhisOnce(const std::vector<StmtPtr>& stmts,
       }
       result.push_back(new_if);
     } else if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-      auto original = FlattenBody(for_stmt->body_);
-      auto rewritten = RewriteDeadIfPhisOnce(original, live_uses, changed);
-      if (SameFlattenedBody(rewritten, original)) {
-        result.push_back(stmt);
-        continue;
-      }
-      auto new_for = MutableCopy(for_stmt);
-      new_for->body_ = MakeBody(rewritten, for_stmt->span_);
-      result.push_back(new_for);
+      result.push_back(RewriteLoopCarrySlots(for_stmt, live_uses, changed));
     } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-      auto original = FlattenBody(while_stmt->body_);
-      auto rewritten = RewriteDeadIfPhisOnce(original, live_uses, changed);
-      if (SameFlattenedBody(rewritten, original)) {
-        result.push_back(stmt);
-        continue;
-      }
-      auto new_while = MutableCopy(while_stmt);
-      new_while->body_ = MakeBody(rewritten, while_stmt->span_);
-      result.push_back(new_while);
+      result.push_back(RewriteLoopCarrySlots(while_stmt, live_uses, changed));
     } else if (auto scope_stmt = std::dynamic_pointer_cast<const ScopeStmt>(stmt)) {
       auto original = FlattenBody(scope_stmt->body_);
-      auto rewritten = RewriteDeadIfPhisOnce(original, live_uses, changed);
+      auto rewritten = RewriteDeadYieldSlotsOnce(original, live_uses, changed);
       if (SameFlattenedBody(rewritten, original)) {
         result.push_back(stmt);
         continue;
@@ -641,7 +697,7 @@ std::vector<StmtPtr> EliminateDeadScalarAssignments(const std::vector<StmtPtr>& 
   return EliminateDeadCodeCore(stmts, IsRemovableScalarAssign);
 }
 
-std::vector<StmtPtr> EliminateDeadIfReturnVars(const std::vector<StmtPtr>& stmts) {
+std::vector<StmtPtr> EliminateDeadYieldSlots(const std::vector<StmtPtr>& stmts) {
   std::vector<StmtPtr> cur = stmts;
   while (true) {
     // Collect every Var* that appears as a use anywhere in `cur`. The base
@@ -652,7 +708,7 @@ std::vector<StmtPtr> EliminateDeadIfReturnVars(const std::vector<StmtPtr>& stmts
     for (const auto& s : cur) collector.VisitStmt(s);
 
     bool changed = false;
-    auto next = RewriteDeadIfPhisOnce(cur, collector.var_uses, &changed);
+    auto next = RewriteDeadYieldSlotsOnce(cur, collector.var_uses, &changed);
     if (!changed) return cur;
     cur = std::move(next);
   }

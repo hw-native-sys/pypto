@@ -1927,6 +1927,95 @@ class TestDeadIfReturnVarsDCE:
         assert has_tensor_write(else_stmts), "tensor.write side-effect in else branch must survive phi-prune"
 
 
+class TestDeadLoopCarryDCE:
+    """Loop-carried slots (``iter_args_[i]`` / ``return_vars_[i]``) with no
+    reader on either end are dropped, together with the matching yield slot.
+
+    This is the loop half of the dead-phi rule above. Reusing one Python local
+    across two scopes is what produces the shape: SSA seeds the second loop
+    with the first scope's value, the body overwrites it on every trip, and
+    nobody reads either end. Left in place, the carry makes the *earlier*
+    scope's value live-out, which for a device scope forces a Scalar into the
+    outlined kernel's return set — a shape the runtime cannot carry at all.
+    """
+
+    @staticmethod
+    def _only_for_stmt(program):
+        func = next(iter(program.functions.values()))
+        for_stmts = [s for s in ir.flatten_to_stmts(func.body) if isinstance(s, ir.ForStmt)]
+        assert len(for_stmts) == 1
+        return for_stmts[0]
+
+    def test_drops_dead_carry_from_reused_scalar_name(self):
+        """``t`` is bound before the loop and rebound in the body before any
+        read, with no post-loop use: the carry is dead on both ends and the
+        ForStmt keeps no iter_arg for it.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, n: pl.Scalar[pl.INDEX], out: pl.Tensor[[8], pl.INDEX]):
+                t: pl.Scalar[pl.INDEX] = n * 2
+                pl.tensor.write(out, [0], t)
+                for i in pl.range(4):
+                    t: pl.Scalar[pl.INDEX] = i * 2
+                    pl.tensor.write(out, [1], t)
+
+        after = passes.simplify()(passes.convert_to_ssa()(Before))
+        for_stmt = self._only_for_stmt(after)
+        assert len(for_stmt.iter_args) == 0, (
+            "a carry the body overwrites before reading, with no post-loop "
+            f"reader, must be dropped; got iter_args={for_stmt.iter_args}"
+        )
+        assert len(for_stmt.return_vars) == 0, (
+            f"return_vars must be dropped in lockstep; got {for_stmt.return_vars}"
+        )
+
+    def test_keeps_carry_read_in_body(self):
+        """An accumulator reads the incoming value each trip — the carry is
+        live inside the body even though nothing reads it after the loop.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, n: pl.Scalar[pl.INDEX], out: pl.Tensor[[8], pl.INDEX]):
+                acc: pl.Scalar[pl.INDEX] = n
+                for i in pl.range(4):
+                    acc: pl.Scalar[pl.INDEX] = acc + i
+                    pl.tensor.write(out, [1], acc)
+
+        after = passes.simplify()(passes.convert_to_ssa()(Before))
+        for_stmt = self._only_for_stmt(after)
+        assert len(for_stmt.iter_args) == 1, (
+            f"an accumulator carry must survive; got iter_args={for_stmt.iter_args}"
+        )
+
+    def test_keeps_carry_used_after_loop(self):
+        """The body rebinds without reading, but the final value is read after
+        the loop — the ``return_var`` end keeps the slot alive.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, n: pl.Scalar[pl.INDEX], out: pl.Tensor[[8], pl.INDEX]):
+                t: pl.Scalar[pl.INDEX] = n * 2
+                for i in pl.range(4):
+                    t: pl.Scalar[pl.INDEX] = i * 2
+                pl.tensor.write(out, [0], t)
+
+        after = passes.simplify()(passes.convert_to_ssa()(Before))
+        for_stmt = self._only_for_stmt(after)
+        assert len(for_stmt.iter_args) == 1, (
+            f"a carry read after the loop must survive; got iter_args={for_stmt.iter_args}"
+        )
+        assert len(for_stmt.return_vars) == 1, (
+            f"return_vars must survive in lockstep; got {for_stmt.return_vars}"
+        )
+
+
 class TestDistributedWindowBufferRemap:
     def test_window_buffer_remapped_in_lockstep_with_scope_slot(self):
         """Simplify folding a synthesized signal's window-buffer size

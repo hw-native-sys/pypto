@@ -945,7 +945,11 @@ class TestScalarCarryPhiCodegen:
                     # device kernel cannot return a scalar (#631,
                     # IRProperty.NoScalarKernelReturn), and the #1580 phi this
                     # test pins is an orchestration-level loop carry either way.
-                    global_c_idx = batch_idx + 1  # noqa: F841
+                    # The new value reads the incoming one, so the carry is live
+                    # on the IterArg end -- a carry neither end reads is dropped
+                    # by Simplify's dead yield-slot prune and would leave this
+                    # test with no phi to pin.
+                    global_c_idx = global_c_idx + batch_idx + 1  # noqa: F841
                     with pl.at(level=pl.Level.CORE_GROUP, name_hint="scope_b"):
                         for inner in pl.range(TILE):
                             out_b, out_c = self.scope_b_kernel(x, out_b, out_c)

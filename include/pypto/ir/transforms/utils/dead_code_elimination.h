@@ -57,25 +57,45 @@ std::vector<StmtPtr> EliminateDeadCode(const std::vector<StmtPtr>& stmts);
 /// bindings (`a = 5; b = a + 1; c = b + 1` with `c` unused) collapse fully.
 std::vector<StmtPtr> EliminateDeadScalarAssignments(const std::vector<StmtPtr>& stmts);
 
-/// Drop `IfStmt::return_vars_` entries whose Var has no use anywhere in the
-/// surrounding statement list, and the matching slot from each branch's
-/// trailing `YieldStmt`. Recurses into nested control-flow and scope bodies,
-/// iterating to a fixed point so cascading deaths (outer phi drop → inner
-/// phi becomes dead) are fully collapsed.
+/// Drop the yielded slots nobody reads, and the matching slot from every
+/// trailing `YieldStmt` that feeds them. Two node kinds carry such slots:
 ///
-/// The helper is type-agnostic: Scalar, Tile, and Tensor return_vars are all
-/// candidates when no direct Var* use exists. Side effects in the branch
-/// bodies are preserved by `EliminateDeadScalarAssignments` (Call/Submit
-/// RHS conservatively kept) when this helper is composed with it; only the
-/// yield slot and the `return_vars_[i]` entry are removed.
+///   - `IfStmt`: slot `i` is dead when `return_vars_[i]` has no use in the
+///     surrounding statement list.
+///   - `ForStmt` / `WhileStmt`: a loop-carried slot has *two* consumers —
+///     `iter_args_[i]` inside the body and `return_vars_[i]` after the loop —
+///     so slot `i` is dead only when neither is used. A body that assigns the
+///     carried name before reading it (the same Python local reused across two
+///     scopes) leaves exactly this shape: SSA seeds the loop with the earlier
+///     value, the body overwrites it on every trip, and nothing reads either
+///     end. Dropping the slot removes the spurious live-out — which for a
+///     device scope is what would otherwise force a Scalar into the outlined
+///     kernel's return set (see `PlanScalarOutputHoist`).
 ///
-/// Liveness is purely identity-based: a `return_vars_[i]` is dead iff
-/// `var.get()` is not collected by `VarDefUseCollector` over the entire
-/// statement list. That collector already handles ScopeStmt attrs
-/// (`manual_dep_edges` / `task_id_var` / `arg_direction_overrides_vars`),
-/// `Submit::deps_`, and every `YieldStmt::value_` slot — so all known
-/// channels through which a Var can be referenced are covered.
-std::vector<StmtPtr> EliminateDeadIfReturnVars(const std::vector<StmtPtr>& stmts);
+/// Recurses into nested control-flow and scope bodies, iterating to a fixed
+/// point so cascading deaths (outer slot drop → inner slot becomes dead) are
+/// fully collapsed.
+///
+/// A `Scalar[TASK_ID]` / `Array[TASK_ID]` carry is exempt. It is a scheduling
+/// channel, not data: `AutoDeriveTaskDependencies` and `ExpandManualPhaseFence`
+/// read the *shape* of such a carry — a task id produced in a loop and carried
+/// out is how the compiler learns to fan every iteration's handle in to a later
+/// consumer — so no ordinary Var use marks it live, and dropping it silently
+/// deletes the dependency edges those passes would have derived.
+///
+/// The helper is type-agnostic: Scalar, Tile, and Tensor slots are all
+/// candidates when no direct Var* use exists. Side effects in the bodies are
+/// preserved by `EliminateDeadScalarAssignments` (Call/Submit RHS
+/// conservatively kept) when this helper is composed with it; only the yield
+/// slot and the header entries are removed.
+///
+/// Liveness is purely identity-based: a slot is dead iff none of its Vars is
+/// collected by `VarDefUseCollector` over the entire statement list. That
+/// collector already handles ScopeStmt attrs (`manual_dep_edges` /
+/// `task_id_var` / `arg_direction_overrides_vars`), `Submit::deps_`, and every
+/// `YieldStmt::value_` slot — so all known channels through which a Var can be
+/// referenced are covered.
+std::vector<StmtPtr> EliminateDeadYieldSlots(const std::vector<StmtPtr>& stmts);
 
 }  // namespace dce
 }  // namespace ir
