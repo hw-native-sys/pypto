@@ -34,7 +34,8 @@ import torch
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.jit.decorator import _ptoas_available, jit
 from pypto.pypto_core import ir as _ir
-from pypto.runtime.runner import validate_persisted_outputs
+from pypto.pypto_core.passes import MemoryPlanner
+from pypto.runtime.runner import RunConfig, validate_persisted_outputs
 
 from harness import st
 from harness.core.case import Case, from_legacy
@@ -329,6 +330,26 @@ class TestDeclaration:
         tensors = {"a": torch.randn(M, N), "out": torch.zeros(M, N)}
         wrapped.compute_expected(tensors)
         assert torch.equal(tensors["out"], torch.abs(tensors["a"]))
+
+    def test_from_legacy_preserves_a_run_config_memory_planner(self):
+        """A planner carried only by the legacy ``RunConfig`` survives the wrap.
+
+        ``_resolve_case_memory_planner`` reads ``get_memory_planner()`` first
+        and the case's own ``RunConfig`` second. A ``Case`` rebuilds that
+        ``RunConfig`` from the tolerances alone, so without folding the second
+        channel into the first the wrapped case would silently fall through to
+        the session planner.
+        """
+        legacy = AbsLegacyCase(RunConfig(memory_planner=MemoryPlanner.DSA_RP))
+        assert legacy.get_memory_planner() is None, "the planner rides on the config only"
+        assert from_legacy(legacy).get_memory_planner() == MemoryPlanner.DSA_RP
+
+    def test_from_legacy_prefers_the_explicit_planner(self):
+        """``get_memory_planner()`` still outranks the config's planner."""
+        legacy = AbsLegacyCase(
+            RunConfig(memory_planner=MemoryPlanner.DSA_RP), memory_planner=MemoryPlanner.PYPTO
+        )
+        assert from_legacy(legacy).get_memory_planner() == MemoryPlanner.PYPTO
 
     def test_platform_binding_respects_a_pin(self):
         pinned = _jit_case(name="abs_pinned", platform="a5")

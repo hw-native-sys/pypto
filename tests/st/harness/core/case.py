@@ -241,6 +241,21 @@ class Case:
         return f"Case({self.name!r}, {self.kernel!r})"
 
 
+def _legacy_memory_planner(test_case: PTOTestCase) -> MemoryPlanner | None:
+    """Return the planner a legacy case selects, by the harness's own precedence.
+
+    ``_resolve_case_memory_planner`` reads two channels: ``get_memory_planner()``
+    first, then a planner carried on the case's own ``RunConfig``. A ``Case``
+    rebuilds that ``RunConfig`` from ``rtol`` / ``atol`` alone, so the second
+    channel has to be folded into the first here or the wrapped case would
+    silently fall through to the session planner.
+    """
+    planner = test_case.get_memory_planner()
+    if planner is not None:
+        return planner
+    return getattr(getattr(test_case, "config", None), "memory_planner", None)
+
+
 def from_legacy(test_case: PTOTestCase) -> Case:
     """Wrap an existing ``PTOTestCase`` instance as a :class:`Case`.
 
@@ -257,7 +272,7 @@ def from_legacy(test_case: PTOTestCase) -> Case:
         scalars=list(test_case.scalar_specs),
         platform=test_case.get_platform(),
         strategy=test_case.get_strategy(),
-        memory_planner=test_case.get_memory_planner(),
+        memory_planner=_legacy_memory_planner(test_case),
         enable_pypto_l0c_double_buffer=test_case.get_enable_pypto_l0c_double_buffer(),
         rtol=test_case.config.rtol,
         atol=test_case.config.atol,
