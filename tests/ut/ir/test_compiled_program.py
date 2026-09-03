@@ -13,6 +13,7 @@ import contextlib
 import ctypes
 import json
 import os
+import pathlib
 import sys
 import types
 import warnings
@@ -677,6 +678,47 @@ class TestCompiledProgramDeviceTensor:
 
         with pytest.raises(TypeError, match="expects dtype"):
             cp(a, bad_b, c)
+
+
+class TestParamInfoIsALeaf:
+    """``pypto.ir.param_info`` must not depend on ``pypto.runtime``.
+
+    The parameter metadata used to live in ``compiled_program``, which reaches
+    forward into ``pypto.runtime``. Its consumer
+    ``pypto.runtime.debug.run_script_writer`` imports the metadata back, so the
+    two modules formed a genuine cycle: hoisting that import to module scope
+    failed with ``cannot import name 'ParamInfo' from partially initialized
+    module``. Splitting the metadata into a leaf removed the back edge. Pulling
+    a runtime import into the leaf would restore it.
+    """
+
+    def _imported_modules(self, path):
+        import ast  # noqa: PLC0415
+
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                yield from (alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                yield node.module
+
+    def test_param_info_imports_nothing_from_the_runtime(self):
+        from pypto.ir import param_info  # noqa: PLC0415
+
+        source = pathlib.Path(param_info.__file__)
+        offenders = [m for m in self._imported_modules(source) if m.split(".")[:2] == ["pypto", "runtime"]]
+
+        assert offenders == []
+
+    def test_the_run_script_writer_takes_metadata_from_the_leaf(self):
+        """The consumer that closed the cycle must read the leaf, not the god-module."""
+        from pypto.runtime.debug import run_script_writer  # noqa: PLC0415
+
+        source = pathlib.Path(run_script_writer.__file__)
+        ir_imports = {m for m in self._imported_modules(source) if m.startswith("pypto.ir")}
+
+        assert "pypto.ir.param_info" in ir_imports
+        assert "pypto.ir.compiled_program" not in ir_imports
 
 
 class TestCompiledProgramExtraction:

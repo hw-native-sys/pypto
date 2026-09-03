@@ -28,7 +28,7 @@ from pathlib import Path
 
 import torch
 
-from pypto.ir.compiled_program import ParamInfo, _to_torch_dtype
+from pypto.ir.param_info import ParamInfo, _to_torch_dtype
 from pypto.pypto_core.ir import ParamDirection
 
 _TORCH_DTYPE_NAMES: dict[torch.dtype, str] = {

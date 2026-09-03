@@ -162,6 +162,35 @@ compiled = ir.compile(program, **CompileOptions(platform="a2a3").as_compile_kwar
 调用 `compile_kwargs()`，于是给一边加的开关不会在另一边悄悄缺席。`lower()` 仍有自己
 那份更窄的映射 —— 它止步于 codegen 之前，对准的是 pass 流水线而不是 `ir.compile`。
 
+## 层与层之间的箭头朝哪
+
+`ir` 产出产物，`runtime` 派发它。两者之间的箭头本该单向，而且大体上是单向的 ——
+但 `CompiledProgram` 既是编译**产物**又是执行**句柄**，于是
+`pypto.ir.compiled_program` 通过十处函数内 import 反向伸向 `pypto.runtime`。
+
+这些延迟导入通常被说成是为了打破导入环。逐个实测下来，真正如此的只有一处：
+
+| 延迟导入 | 能提到模块级吗？ | 真实原因 |
+| -------- | ---------------- | -------- |
+| `runtime.runner`（6 处） | 能 | 分层选择 —— 不让派发层进入 `pypto.ir` 的导入图 |
+| `runtime.distributed_runner`（2 处） | 能 | 同上 |
+| `runtime.debug.run_script_writer` | **现在**能了 | 曾是真环：它把 `ParamInfo` 从 `compiled_program` 读回去 |
+| `runtime.device_runner` | 不能 | 它在导入期就需要可选的 `simpler` 包 |
+
+那唯一的真环已经消除。参数元数据移到了
+[`ir/param_info.py`](../../../python/pypto/ir/param_info.py) —— 一个不从
+`pypto.runtime` 导入任何东西的叶子模块 —— 重放脚本生成器改从那里读；
+`compiled_program` 重新导出这些名字，所以别处什么都不用动。有一个单测把这个叶子性质
+钉住，因为往里拉进任何一个 runtime 导入都会让环回来。
+
+`pypto.runtime` 直接导入 `pypto.ir.distributed_compiled_program` —— 箭头唯一反向的
+那一处 —— **确实**是为了避开导入环，保持原样。
+
+彻底反转这个依赖，是比这些 import 语句大得多的问题。它意味着 `CompiledProgram` 不再可调用、
+`ir.compile` 改为返回一个由 `runtime` 包装的描述符 —— 那会改掉每个 example 和两个下游仓库
+都在用的 API 返回类型。这份 import 清单是那个双重身份的症状而非成因；而把那八处能提的都提到
+模块级，只会让耦合**更强** —— 那等于把 `pypto.runtime.runner` 放上 `import pypto.ir` 的关键路径。
+
 ## 哪些是内部实现
 
 以下没有稳定性保证。它们不在任何 `__all__` 中，PyPTO 之外的代码不应导入：

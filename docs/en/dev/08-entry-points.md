@@ -178,6 +178,40 @@ Moving those five out to the harness is the step this does not take: they reach
 silently missing from the other. `lower()` still has its own narrower mapping —
 it stops before codegen and targets the pass pipeline, not `ir.compile`.
 
+## Which way the layers point
+
+`ir` produces the artifact; `runtime` dispatches it. The arrow between them
+should point one way, and mostly does — but `CompiledProgram` is both the
+compilation artifact *and* the execution handle, so `pypto.ir.compiled_program`
+reaches forward into `pypto.runtime` through ten function-local imports.
+
+Those deferrals are usually described as breaking an import cycle. Measured, one
+at a time, that was true of exactly one of them:
+
+| Deferred import | Hoists cleanly? | Actual reason |
+| --------------- | --------------- | ------------- |
+| `runtime.runner` (6 sites) | Yes | Layering choice — keeps the dispatch layer out of `pypto.ir`'s import graph |
+| `runtime.distributed_runner` (2 sites) | Yes | Same |
+| `runtime.debug.run_script_writer` | Yes, *now* | Was a real cycle: it read `ParamInfo` back out of `compiled_program` |
+| `runtime.device_runner` | No | Needs the optional `simpler` package at import time |
+
+The one real cycle is gone. The parameter metadata moved to
+[`ir/param_info.py`](../../../python/pypto/ir/param_info.py), a leaf that imports
+nothing from `pypto.runtime`, and the replay-script writer reads it there;
+`compiled_program` re-exports the names, so nothing else moved. A unit test pins
+the leaf, because pulling one runtime import into it restores the cycle.
+
+`pypto.runtime` importing `pypto.ir.distributed_compiled_program` directly — the
+one place the arrow points back — *is* cycle-avoidance, and stays.
+
+Fully inverting the dependency is a larger question than the import statements.
+It means `CompiledProgram` stops being callable and `ir.compile` returns a
+descriptor that `runtime` wraps, which changes the return type of the API every
+example and both downstream repositories use. The import list is a symptom of
+that double role, not the cause, and hoisting the eight that hoist cleanly would
+make the coupling *stronger*, not weaker — it would put `pypto.runtime.runner`
+on `import pypto.ir`'s critical path.
+
 ## What is internal
 
 These have no stability guarantee. They are not in any `__all__`, and code

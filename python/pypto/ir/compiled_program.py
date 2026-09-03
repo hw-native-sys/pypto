@@ -16,13 +16,27 @@ torch tensors::
     compiled(a, b, c)                    # in-place on default sim, device 0
     c = compiled(a, b)                   # return style
     compiled(a, b, c, device=1)          # specify device at call time
+
+**Why the ``pypto.runtime`` imports are function-local.** This module is both
+the compilation artifact and the execution handle, so it reaches forward into
+the layer below it. Each deferral has its own reason, and they are not the same:
+
+- ``device_runner`` needs the optional ``simpler`` package at import time.
+  Hoisting it would make ``simpler`` a hard requirement of ``import pypto.ir``,
+  which the unit-test runners do not have.
+- ``runner``, ``debug.run_script_writer`` and (in the L3 sibling)
+  ``distributed_runner`` import cleanly at module scope; they stay deferred to
+  keep ``pypto.ir``'s own import graph free of the dispatch layer, not because
+  hoisting them fails.
+
+The one import that genuinely could not be hoisted was the metadata the replay
+writer reads back — that cycle is gone: it lives in the ``param_info`` leaf now.
 """
 
 import ctypes
 import json
 import os
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +55,15 @@ from pypto.pypto_core.ir import (
     ShapedType,
 )
 from pypto.runtime.device_tensor import DeviceTensor, StackedDeviceTensor
+
+# Re-exported: these moved to a leaf module so a consumer of the metadata can
+# depend on it without depending on this module. See ``param_info``.
+from .param_info import (  # noqa: F401  -- re-export
+    _DATATYPE_TO_TORCH,
+    ParamInfo,
+    _ParamInfo,
+    _to_torch_dtype,
+)
 
 # Type alias for arguments accepted by CompiledProgram.__call__().
 # Tensor params accept ``torch.Tensor`` (host), :class:`DeviceTensor`
@@ -86,42 +109,6 @@ _BUILD_KIND_MARKERS = (
     "orchestration/host_orch.py",
 )
 
-# IR DataType -> torch.dtype mapping.
-# Keyed by string because nanobind DataType instances are not singletons,
-# so dict lookup by object identity / hash may fail even for equal values.
-_DATATYPE_TO_TORCH: dict[str, torch.dtype] = {
-    "fp16": torch.float16,
-    "fp32": torch.float32,
-    "fp64": torch.float64,
-    "bfloat16": torch.bfloat16,
-    "int8": torch.int8,
-    "int16": torch.int16,
-    "int32": torch.int32,
-    "int64": torch.int64,
-    "uint8": torch.uint8,
-    "bool": torch.bool,
-    "index": torch.int64,
-}
-# uint16/32/64 were added in PyTorch 2.3; register only if available
-for _name in ("uint16", "uint32", "uint64"):
-    _torch_dtype = getattr(torch, _name, None)
-    if _torch_dtype is not None:
-        _DATATYPE_TO_TORCH[_name] = _torch_dtype
-del _name, _torch_dtype
-# Float8 / MX scale dtypes (PyTorch 2.1+ / 2.3+ / 2.7+); map IR string → torch.dtype.
-# Packed MXFP4 (fp4 ↔ float4_e2m1fn_x2) must be here so return-style execution
-# can allocate FP4 outputs after JIT specialization accepts the torch dtype.
-for _ir_name, _torch_name in (
-    ("fp8e4m3fn", "float8_e4m3fn"),
-    ("fp8e5m2", "float8_e5m2"),
-    ("fp8e8m0", "float8_e8m0fnu"),
-    ("fp4", "float4_e2m1fn_x2"),
-):
-    _torch_dtype = getattr(torch, _torch_name, None)
-    if _torch_dtype is not None:
-        _DATATYPE_TO_TORCH[_ir_name] = _torch_dtype
-del _ir_name, _torch_name, _torch_dtype
-
 # IR DataType -> ctypes scalar constructor mapping.
 # Used to wrap Python int/float/bool values into the correct ctypes scalar
 # when calling a compiled program with scalar parameters.
@@ -141,11 +128,6 @@ _DATATYPE_TO_CTYPE: dict[str, type[ctypes._SimpleCData]] = {
     "bool": ctypes.c_bool,
     "index": ctypes.c_int64,
 }
-
-
-def _to_torch_dtype(dtype: DataType) -> torch.dtype | None:
-    """Convert an IR DataType to the corresponding torch.dtype."""
-    return _DATATYPE_TO_TORCH.get(str(dtype))
 
 
 def _to_runtime_shape(shape: list[int], dtype: DataType) -> list[int]:
@@ -173,16 +155,6 @@ def _validate_fp4_carrier_shape(shape: Sequence[int], info: "_ParamInfo") -> Non
             f"Packed FP4 parameter {info.name!r} requires a positive runtime x2 carrier last dimension; "
             f"got shape {tuple(shape)}"
         )
-
-
-@dataclass
-class _ParamInfo:
-    """Metadata for a single orchestration function parameter."""
-
-    name: str
-    direction: ParamDirection
-    shape: list[int] | None  # None for scalar params
-    dtype: DataType
 
 
 # Reverse map ``str(DataType) -> DataType`` for JSON round-tripping (e.g. the L3
@@ -1518,5 +1490,5 @@ class _SubChipCallable(_RuntimeFacade):
 
 # Public re-exports for callers (e.g. ir.compile()) that need orchestration
 # parameter metadata without instantiating a full CompiledProgram.
-ParamInfo = _ParamInfo
+
 extract_param_infos = _extract_param_infos
