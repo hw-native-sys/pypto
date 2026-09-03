@@ -57,6 +57,7 @@ TENSOR_OPTIMIZATION_PASSES = [
     "AllocateMemoryAddr",
     "FoldNoOpReshape",
     "FuseCreateAssembleToSlice",
+    "LowerL2TensorCollectives",
     "DeriveCallDirections",
     "AutoDeriveTaskDependencies",
     "ExpandManualPhaseFence",

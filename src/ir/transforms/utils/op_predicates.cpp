@@ -86,6 +86,14 @@ bool IsBuiltinOp(const std::string& op_name) {
          op_name == "pld.system.get_comm_ctx";
 }
 
+bool IsManagedTensorCollective(const OpPtr& op) {
+  if (!op) return false;
+  return IsOp(op, "pld.tensor.allgather") || IsOp(op, "pld.tensor.allreduce") ||
+         IsOp(op, "pld.tensor.barrier") || IsOp(op, "pld.tensor.broadcast") ||
+         IsOp(op, "pld.tensor.reduce_scatter") || IsOp(op, "pld.tensor.all_to_all") ||
+         IsOp(op, "pld.tensor.all_to_all_v");
+}
+
 bool IsPublishingWrite(const CallPtr& call) {
   if (!call || !call->op_) return false;
   // Remote writes always publish into a peer's window.

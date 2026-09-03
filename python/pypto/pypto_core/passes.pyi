@@ -748,6 +748,21 @@ def materialize_comm_domain_scopes() -> Pass:
 def lower_host_tensor_collectives() -> Pass:
     """Lower host-level ``pld.tensor.allreduce`` calls to builtin collective dispatches."""
 
+def lower_l2_tensor_collectives() -> Pass:
+    """Lower managed collectives written in a CHIP/L2 orchestration body.
+
+    The CHIP counterpart of :func:`lower_host_tensor_collectives`: instead of
+    fanning the collective out into one chip dispatch per device (a nested L2
+    orchestration task), the call is rewritten into a call to a synthesized AIV
+    kernel backed by the same hand-written builtin template source. The kernel
+    joins the caller's own task DAG, so ``compute -> collective -> consume`` is
+    ordered by ordinary TensorMap dependencies.
+
+    Runs immediately before :func:`derive_call_directions` so the emitted call
+    gets its argument directions and task edges derived like any kernel call.
+    Today only ``pld.tensor.all_to_all_v`` with ``core_num=1`` is supported.
+    """
+
 def materialize_dist_tensor_ctx() -> Pass:
     """Materialize CommCtx parameters and arguments for DistributedTensor function parameters."""
 

@@ -222,7 +222,7 @@ verifier 都拒绝的 IR。
 | 留在原地 | 原因 |
 | -------- | ---- |
 | `tensor.full` | orchestration codegen 在调用点同样没有它的降级路径，外提只是把失败挪个地方。Step D 直接拒绝它 |
-| 循环内的 create | 它是**每次迭代一份**的新 buffer。把 N 份塌缩成一个形参会让各迭代互相别名，而本该重新串行化它们的跨任务依赖边，是更早的 [`AutoDeriveTaskDependencies`](39-auto_derive_task_dependencies.md) 推导出来的 |
+| 循环内的 create | 它是**每次迭代一份**的新 buffer。把 N 份塌缩成一个形参会让各迭代互相别名，而本该重新串行化它们的跨任务依赖边，是更早的 [`AutoDeriveTaskDependencies`](40-auto_derive_task_dependencies.md) 推导出来的 |
 
 无论外提与否，录制都无法复现从边界标量读出来的 **shape**：extent 会被抄进节点、缓冲
 区地址由它推出，而回放不会重新执行函数体，所以后续调用即使 extent 更大，拿到的仍是
@@ -278,7 +278,7 @@ c_1` —— 返回的是重绑定而不是形参本身，所以 Graph 一直依�
 ## 在流水线中的位置
 
 跑在最后一个 `Simplify` 之后、
-[`MaterializeRuntimeScopes`](46-materialize_runtime_scopes.md) 之前。
+[`MaterializeRuntimeScopes`](47-materialize_runtime_scopes.md) 之前。
 
 这个位置是两边夹出来的。`DeriveCallDirections` 和 `AutoDeriveTaskDependencies`
 必须已经跑完，这样实参方向与跨任务边才是已知的；而 `MaterializeRuntimeScopes`
@@ -311,4 +311,4 @@ verifier 拒绝本 pass 刚刚产出的 IR。
 ## 另见
 
 - [Pass Manager](00-pass_manager.md) —— 完整流水线顺序
-- [MaterializeRuntimeScopes](46-materialize_runtime_scopes.md) —— 紧随其后运行
+- [MaterializeRuntimeScopes](47-materialize_runtime_scopes.md) —— 紧随其后运行

@@ -204,7 +204,7 @@ with pl.cluster():
 `DistributedCodegen::EmitCallToWorker`，后者按**被调函数**的方向为每个 rank 的
 chip dispatch 实参打标签，于是一个错误的 `InOut` 会把同一个 `pl.Out` tensor 上
 互不相交的各 rank 切片变成跨 rank 写依赖（issue #2415）。而只写参数真正需要的
-定序不会因此丢失：[`DeriveCallDirections`](38-derive_call_directions.md) 会重新
+定序不会因此丢失：[`DeriveCallDirections`](39-derive_call_directions.md) 会重新
 推导**调用点**方向——在顺序执行的外层循环内、在同一 root 的前序写者之后，或该
 root 是外层函数的 `InOut` 形参时，把被调函数的 `Out` 重新提升为 `InOut`。
 
@@ -249,8 +249,8 @@ root 是外层函数的 `InOut` 形参时，把被调函数的 `Out` 重新提�
 [`ConvertTensorToTileOps`](10-convert_tensor_to_tile_ops.md) 把它变成每条 `tile.load`
 上的 `cache` kwarg 并擦除它为止。参数索引仅在该窗口内有效 —— 后续 pass 既会向参数列表
 追加（[`InjectGMPipeBuffer`](23-inject_gm_pipe_buffer.md)、
-[`MaterializeDistTensorCtx`](44-materialize_dist_tensor_ctx.md)），也会向前插入
-（[`MaterializeValidShapeSymbols`](49-materialize_valid_shape_symbols.md)）。本 pass 用
+[`MaterializeDistTensorCtx`](45-materialize_dist_tensor_ctx.md)），也会向前插入
+（[`MaterializeValidShapeSymbols`](50-materialize_valid_shape_symbols.md)）。本 pass 用
 `CHECK_SPAN` 拒绝两类用户错误：声明所指的张量未被作用域 body 捕获（既不读也不写，因而
 没有参数承载该策略），以及对 `InferParamDirections` 判定为 `Out` / `InOut` 的参数声明
 `BYPASS`（对同一 kernel 自己会写的字节做 bypass 读取，是一致性缺陷）。该转换位于共享的
@@ -382,7 +382,7 @@ return out__rv_v1
 | 作用域位于函数顶层 | 保持不变——新名字本就在作用域内 |
 
 **代码生成不受影响。** yield 的值是被调函数在其返回的参数上的调用结果，因此
-[`ClassifyIterArgCarry`](47-classify_iter_arg_carry.md) 会把它归入该 iter_arg 的别名类
+[`ClassifyIterArgCarry`](48-classify_iter_arg_carry.md) 会把它归入该 iter_arg 的别名类
 （其被写实参规则与 `TupleGetItemExpr` 规则），并将该携带值标记为 **trivial**：
 iter_arg 与 return_var 都按初值的名字发射。这个携带值是 SSA 记账，而非新缓冲区。
 没有它同样不会编译错——编排层张量的每个 SSA 版本都指向同一块 GM 缓冲区——但 def-use

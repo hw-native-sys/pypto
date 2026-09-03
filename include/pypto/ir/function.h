@@ -484,6 +484,33 @@ inline constexpr const char* kAttrSplitAivRegionValidated = "split_aiv_region_va
 inline constexpr const char* kAttrExternalSource = "external_source";
 
 /**
+ * @brief Reserved Function attr key naming the builtin template package that
+ * supplies a compiler-synthesized kernel's hand-written C++ source.
+ *
+ * Value type: ``std::string`` — an OpRegistry-style package-resource handle
+ * (``":pypto.runtime.builtins.collectives.all_to_all_v"``), the same form
+ * ``OpRegistryEntry::set_template_dir`` uses.
+ *
+ * Written by ``LowerL2TensorCollectives`` on the AIV function it synthesizes
+ * for a managed CHIP/L2 collective; read by the PTO backend, which renders the
+ * package's ``templates/kernel.cpp.in`` into the chip sub-build and lists the
+ * result in ``kernel_config.py``. Like ``kAttrExternalSource``, the function
+ * carries no PyPTO-generated kernel body, so ptoas is skipped for it.
+ */
+inline constexpr const char* kAttrBuiltinTemplateDir = "builtin_template_dir";
+
+/**
+ * @brief Reserved Function attr key carrying the substitutions used to render
+ * the template named by ``kAttrBuiltinTemplateDir``.
+ *
+ * Value type: ``std::string`` — a comma-separated ``key=value`` list (e.g.
+ * ``"dtype_cpp=float,ctx_arg_index=5"``). A flat string keeps the payload to a
+ * type the printer, serializer and attr binding already round-trip; the backend
+ * splits it back into the template variable map.
+ */
+inline constexpr const char* kAttrBuiltinTemplateVars = "builtin_template_vars";
+
+/**
  * @brief Reserved Function attr key opting a function out of automatic
  * ``RuntimeScopeStmt`` materialization.
  *

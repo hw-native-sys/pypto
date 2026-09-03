@@ -38,6 +38,7 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/transforms/utils/tile_conversion_utils.h"
 #include "pypto/ir/type.h"
@@ -2286,6 +2287,14 @@ ExprPtr LowerTensorAllToAllVRule(const CallPtr& call, const std::vector<ExprPtr>
   const auto& send_counts = args[3];
   const auto& recv_counts = args[4];
 
+  // The composite rail expands into point-to-point primitives inside one
+  // kernel, so it is single-core by construction. A multi-AIV request belongs
+  // on the managed CHIP/L2 rail, which submits a gang of AIV blocks instead.
+  const auto core_num = call->GetKwarg<int>("core_num", 1);
+  CHECK_SPAN(core_num == 1, span)
+      << "InCore pld.tensor.all_to_all_v requires core_num=1, got core_num=" << core_num
+      << "; call it from a CHIP Orchestration function to use the managed multi-AIV path";
+
   // input may be a plain Tensor or a window (DistributedTensor) — pld.tile.put
   // accepts Tensor-like sources via AsTensorTypeLike.
   auto input_type = AsTensorTypeLike(input->GetType());
@@ -2504,8 +2513,8 @@ CompositeLoweringFn LookupCompositeRule(const std::string& op_name) {
 // ============================================================================
 class LowerCompositeOpsMutator : public IRMutator {
  public:
-  explicit LowerCompositeOpsMutator(bool skip_host_collectives = false)
-      : skip_host_collectives_(skip_host_collectives) {}
+  explicit LowerCompositeOpsMutator(bool skip_managed_collectives = false)
+      : skip_managed_collectives_(skip_managed_collectives) {}
 
   ExprPtr VisitExpr_(const TupleGetItemExprPtr& op) override {
     auto tuple = VisitExpr(op->tuple_);
@@ -2642,26 +2651,23 @@ class LowerCompositeOpsMutator : public IRMutator {
   }
 
  private:
-  /// True for every ``pld.tensor.*`` cross-rank collective. Add new collectives
-  /// here so they inherit the HOST-deferral skip.
+  /// True for every ``pld.tensor.*`` cross-rank collective, via the shared
+  /// predicate — the CHIP rail's post-condition and the orchestration-reference
+  /// verifier must agree with this set, so all three read one list.
   [[nodiscard]] static bool IsTensorCollective(const CallPtr& call) {
-    if (!call || !call->op_) return false;
-    return IsOp(call, "pld.tensor.allgather") || IsOp(call, "pld.tensor.allreduce") ||
-           IsOp(call, "pld.tensor.barrier") || IsOp(call, "pld.tensor.broadcast") ||
-           IsOp(call, "pld.tensor.reduce_scatter") || IsOp(call, "pld.tensor.all_to_all") ||
-           IsOp(call, "pld.tensor.all_to_all_v");
+    return call && op_predicates::IsManagedTensorCollective(call->op_);
   }
 
-  [[nodiscard]] static bool ShouldSkipHostCollective(const CallPtr& call) {
-    // HOST vs InCore is a function-context property, decided authoritatively by
-    // the outer skip_host_collectives_ flag (set for HOST orchestration
-    // functions), not by arg count or arg[0] type.  Every collective is skipped
+  [[nodiscard]] static bool ShouldSkipManagedCollective(const CallPtr& call) {
+    // Managed vs InCore is a function-context property, decided authoritatively
+    // by the outer skip_managed_collectives_ flag (set for every Orchestration
+    // function), not by arg count or arg[0] type.  Every collective is skipped
     // uniformly here so the flag alone governs which functions defer lowering.
     return IsTensorCollective(call);
   }
 
   [[nodiscard]] CompositeLoweringFn LookupRule(const CallPtr& call) const {
-    if (skip_host_collectives_ && ShouldSkipHostCollective(call)) {
+    if (skip_managed_collectives_ && ShouldSkipManagedCollective(call)) {
       return nullptr;
     }
     return call && call->op_ ? LookupCompositeRule(call->op_->name_) : nullptr;
@@ -2690,17 +2696,22 @@ class LowerCompositeOpsMutator : public IRMutator {
   }
 
   std::size_t temp_counter_ = 0;
-  bool skip_host_collectives_{false};
+  bool skip_managed_collectives_{false};
   /// MakeTuples produced by composite lowering rules (and their SSA aliases).
   /// Used only to fold TupleGetItem projections; does not affect global var_remap_.
   std::unordered_map<const Expr*, MakeTuplePtr> composite_tuples_;
 };
 
+/// A managed collective is one written in an *orchestration* body — HOST/L3 or
+/// CHIP/L2. Neither is tile-lowered, so the composite expansion (which emits
+/// tensor-level put/notify/wait) would be illegal there; both defer to their
+/// own rail: LowerHostTensorCollectives for HOST, LowerL2TensorCollectives for
+/// CHIP. Only an InCore body still expands here.
 FunctionPtr TransformLowerCompositeOps(const FunctionPtr& func) {
-  const bool skip_host_collectives = func && func->level_.has_value() && *func->level_ == Level::HOST &&
-                                     (func->func_type_ == FunctionType::Orchestration ||
-                                      (func->role_.has_value() && *func->role_ == Role::Orchestrator));
-  LowerCompositeOpsMutator mutator(skip_host_collectives);
+  const bool skip_managed_collectives =
+      func && (func->func_type_ == FunctionType::Orchestration ||
+               (func->role_.has_value() && *func->role_ == Role::Orchestrator));
+  LowerCompositeOpsMutator mutator(skip_managed_collectives);
   return mutator.VisitFunction(func);
 }
 

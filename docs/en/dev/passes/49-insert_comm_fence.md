@@ -152,7 +152,7 @@ It runs after every statement-reordering pass in the Default pipeline
 (`SkewCrossCorePipeline`, `LowerPipelineLoops`, `CanonicalizeIOOrder`, ...). The
 inserted ops have no operands and no dependency edges, so an earlier insertion
 could be moved away from its notify/wait; running here keeps them adjacent through
-codegen. Only [`MaterializeValidShapeSymbols`](49-materialize_valid_shape_symbols.md)
+codegen. Only [`MaterializeValidShapeSymbols`](50-materialize_valid_shape_symbols.md)
 follows, and it rewrites device-kernel signatures rather than reordering statements. The passes before it only touch orchestration bodies (`Orchestration` and
 `Graph`), so the InCore IR
 this pass sees is exactly what codegen lowers.

@@ -262,7 +262,7 @@ Two allocations are deliberately left where they are:
 | Left in place | Why |
 | ------------- | --- |
 | `tensor.full` | Orchestration codegen has no lowering for it at the call site either, so hoisting would only move the failure. Step D rejects it outright |
-| A create under a loop | It is a *fresh* buffer per iteration. Collapsing N buffers into one parameter would make iterations alias, and the cross-task edges that would have to re-serialise them were derived by [`AutoDeriveTaskDependencies`](39-auto_derive_task_dependencies.md), well upstream of here |
+| A create under a loop | It is a *fresh* buffer per iteration. Collapsing N buffers into one parameter would make iterations alias, and the cross-task edges that would have to re-serialise them were derived by [`AutoDeriveTaskDependencies`](40-auto_derive_task_dependencies.md), well upstream of here |
 
 What recording cannot reproduce either way is a *shape* read from a boundary
 scalar. The extent is copied into the node and the buffer's address derived from
@@ -324,7 +324,7 @@ the map is all-nullopt and the hoists silently do nothing.
 ## Position in the pipeline
 
 Runs after the final `Simplify` and immediately before
-[`MaterializeRuntimeScopes`](46-materialize_runtime_scopes.md).
+[`MaterializeRuntimeScopes`](47-materialize_runtime_scopes.md).
 
 That position is forced from both sides. `DeriveCallDirections` and
 `AutoDeriveTaskDependencies` must already have run, so argument directions and
@@ -364,4 +364,4 @@ instead of the graph heap, which is independent of where the caller puts it.
 ## See also
 
 - [Pass Manager](00-pass_manager.md) — full pipeline order
-- [MaterializeRuntimeScopes](46-materialize_runtime_scopes.md) — runs immediately after
+- [MaterializeRuntimeScopes](47-materialize_runtime_scopes.md) — runs immediately after

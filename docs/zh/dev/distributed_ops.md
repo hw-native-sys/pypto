@@ -27,7 +27,7 @@ TPUT/TGET 在该侧只需要一段可读/可写的*本地* GM 区域。窗口绑
 | `pld.tensor.reduce_scatter` | 跨 rank 规约并分散 | `DistributedTensorType`（同 src） | builtin collective |
 | `pld.tensor.allgather` | 从所有 rank 收集数据到窗口 | `DistributedTensorType`（同 src） | builtin collective |
 | `pld.tensor.all_to_all` | 基于推送的对称个性化交换——每个 rank 通过 `pld.tensor.put`（TPUT）将自己的各目标 block 推送到每个对等方的窗口中，返回窗口作为结果 | `DistributedTensorType`（同 src） | composite / HOST builtin |
-| `pld.tensor.all_to_all_v` | 变长 all-to-all（MPI_Alltoallv）——按每个目标推送 `clamp(send_counts[dest], 0, MAX_RECV)` 行，写入平面 2D 暂存窗口（传输大小是运行时行数，因此填充不会经过链路），同时通过 `pld.system.notify`（Set）把同一钳制后的计数发布到对端 `recv_counts[my_rank, 0]`，使接收方知道哪些行有效；返回窗口作为结果（与对称 `all_to_all` 相同的窗口即结果模式） | `DistributedTensorType`（与 target 相同） | composite / HOST builtin |
+| `pld.tensor.all_to_all_v` | 变长 all-to-all（MPI_Alltoallv）——按每个目标推送 `clamp(send_counts[dest], 0, MAX_RECV)` 行，写入平面 2D 暂存窗口（传输大小是运行时行数，因此填充不会经过链路），同时通过 `pld.system.notify`（Set）把同一钳制后的计数发布到对端 `recv_counts[my_rank, 0]`，使接收方知道哪些行有效；返回窗口作为结果（与对称 `all_to_all` 相同的窗口即结果模式） | `DistributedTensorType`（与 target 相同） | composite / HOST builtin / CHIP builtin |
 | `pld.system.notify` | 给 peer 的槽位发信号 | `Unknown`（副作用） | TNOTIFY |
 | `pld.system.wait` | 在自身槽位上阻塞 | `Unknown`（副作用） | TWAIT |
 | `pld.system.defer_wait` | 让本任务的逻辑完成等待本地 counter | `Unknown`（副作用） | Simpler completion runtime（无 PTOAS wait op） |
@@ -351,7 +351,7 @@ full-slice `get` 要求 `dst` / `src` 形状一致；subregion `get` 允许完�
 
 ```text
 pld.tensor.all_to_all_v(
-    input, target, signal, send_counts, recv_counts
+    input, target, signal, send_counts, recv_counts, *, core_num: int = 1
 ) -> DistributedTensorType(target)
 ```
 
@@ -362,6 +362,10 @@ pld.tensor.all_to_all_v(
 - `signal` — DistributedTensor INT32 `[NR, 1]`（自清理信用屏障；可在多次调用间复用）
 - `send_counts` — Tensor-like INT32 `[NR]` 或 `[NR, 1]`（运行时每目标行数）
 - `recv_counts` — DistributedTensor INT32 `[NR, 1]`（InOut recvcounts）
+
+`input` 和 `target` 都以扁平元素算术寻址，因此两者都必须是紧凑行主序视图，且必须是
+两个不同的 buffer。静态可证的违规——非 ND 布局、与紧凑步长不符的 stride 向量、比
+shape 更窄的 `valid_shape`，或同一个操作数同时充当两种角色——由类型推导直接拒绝。
 
 `MAX_RECV = target.shape[0] // NR`。降级在运行时读取 `send_counts[dest]`、钳制到
 `[0, MAX_RECV]`，并把**钳制后**的计数通过 `pld.system.notify`（Set）写入对端
@@ -394,6 +398,17 @@ InCore 路径是一个 `pld.tile.put`，其传输形状为运行时计数，通�
 
 **InCore composite**（`LowerCompositeOps`）：上述原语在芯片内核中被分解为
 `pld.tile.put` + `pld.system.notify`/`wait`。
+
+`core_num` 是请求的 AIV block 上限。目前所有路径都是单 block，因此只接受
+`core_num=1`；该参数存在是因为多 AIV 启动将落在托管 CHIP 路径上。InCore 路径会
+直接拒绝其他取值，并在诊断信息中指明 CHIP 路径。
+
+**CHIP builtin**（`LowerL2TensorCollectives`）：同样的调用写在下一层——CHIP
+`Orchestration` 函数体中，而不是 `host_orch` 中。它会被改写成对合成 AIV kernel 的
+调用，该 kernel 由 HOST 路径使用的*同一份* builtin 模板渲染而来，因此链路行为完全
+一致，差别只在派发结构：该集合通信成为调用方自身 pipeline 中的一个 AIV task——不按
+设备扇出，也不产生嵌套 L2 dispatch——并通过普通 TensorMap 依赖与前后计算排序。参见
+[`38-lower_l2_tensor_collectives.md`](passes/38-lower_l2_tensor_collectives.md)。
 
 **HOST builtin**（`LowerHostTensorCollectives`）：同样的 5 参数调用，在
 `host_orch` 函数中发起时，会按设备下降为 `builtin.tensor.all_to_all_v`——
@@ -458,7 +473,7 @@ chunk，Pass 会保留该元数据，并沿用单矩形路径只归约这个矩�
 
 host-orchestrator 用户代码可以省略 `signal`，包括在 `for` / `while`
 循环内；
-[`SynthesizeAllReduceSignals`](passes/41-synthesize_allreduce_signals.md) 阶段会为该 call 插入 private INT32 signal window，
+[`SynthesizeAllReduceSignals`](passes/42-synthesize_allreduce_signals.md) 阶段会为该 call 插入 private INT32 signal window，
 语义 shape 为 `[world_size, core_num]`（仅 mesh 模式 — `mode="ring"` 必须显式传入
 signal）。该阶段会先插入 standalone `world_size = pld.world_size()` binding，
 再用该变量构造 buffer size 和 window shape。自清理协议（参见
@@ -604,10 +619,10 @@ peer 算术；而*远程*操作数
 ## 流水线集成
 
 通信域与其槽位分配由
-[`MaterializeCommDomainScopes`](passes/42-materialize_comm_domain_scopes.md) pass 完成。该 pass 将每个
+[`MaterializeCommDomainScopes`](passes/43-materialize_comm_domain_scopes.md) pass 完成。该 pass 将每个
 host_orch 函数体包裹进嵌套的 `CommDomainScopeStmt` 节点（按推断出的通信域逐层嵌套），并产生运行时据以
 绑定物理缓冲的按窗口 `WindowBuffer` 记录。
-随后 [`LowerHostTensorCollectives`](passes/43-lower_host_tensor_collectives.md) 会在最终
+随后 [`LowerHostTensorCollectives`](passes/44-lower_host_tensor_collectives.md) 会在最终
 `Simplify` 之前把 host-level tensor collectives 降为内部 builtin chip dispatch。
 
 ## 测试
@@ -627,7 +642,8 @@ host_orch 函数体包裹进嵌套的 `CommDomainScopeStmt` 节点（按推断�
   `test_l3_host_tensor_allreduce.py`、`test_l3_host_tensor_allreduce_ring.py`、
   `test_l3_ep_dispatch_combine.py`、`test_l3_notify_wait.py`、
   `test_l3_tensor_all_to_all_v_intrinsic.py`（InCore composite）、
-  `test_l3_host_tensor_all_to_all_v.py`（HOST builtin），以及
+  `test_l3_host_tensor_all_to_all_v.py`（HOST builtin）、
+  `test_l2_tensor_all_to_all_v.py`（CHIP builtin），以及
   `tests/st/distributed/` 下其他 L3 ST。**Put/Get 端到端权威契约** 已启用：
   `test_l3_put.py`（环形覆写、行偏移 put、原子加 put、分块/流水 transfer ✅）、
   `test_l3_get.py`（环形读、行偏移 get ✅）、以及 `test_l3_remote_store.py`

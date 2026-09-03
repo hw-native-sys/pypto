@@ -285,7 +285,7 @@ def normalize_return_order() -> Pass:
   各自认领自己处理的流水线循环
 - [`LowerPipelineLoops`](29-lower_pipeline_loops.md) —— 展开上述两个 pass 未接手的
   流水线作用域时，消费规范化后的返回值
-- [`DeriveCallDirections`](38-derive_call_directions.md) —— 后续基于本
+- [`DeriveCallDirections`](39-derive_call_directions.md) —— 后续基于本
   Pass 规范化的返回形态分析调用签名
 - [PTO 代码生成总览](../codegen/00-pto_codegen.md) 与
   [编排代码生成](../codegen/01-orchestration_codegen.md) —— 直接消费规范

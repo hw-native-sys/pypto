@@ -625,6 +625,11 @@ void BindPass(nb::module_& m) {
              "LowerHostTensorCollectives, while the host dispatch chain is still intact.");
   passes.def("lower_host_tensor_collectives", &pass::LowerHostTensorCollectives,
              "Lower host-level pld.tensor.allreduce calls to builtin tensor collective dispatches.");
+  passes.def("lower_l2_tensor_collectives", &pass::LowerL2TensorCollectives,
+             "Lower managed pld.tensor.* collectives written in a CHIP/L2 orchestration body\n"
+             "into one local builtin AIV task (no per-device fan-out, no nested L2 dispatch).\n"
+             "Runs immediately before DeriveCallDirections so the emitted call gets its\n"
+             "argument directions and TensorMap task edges derived like any kernel call.");
   passes.def("materialize_dist_tensor_ctx", &pass::MaterializeDistTensorCtx,
              "Materialize CommCtx parameters and arguments for DistributedTensor function parameters.");
   passes.def("legalize_graph_boundary", &pass::LegalizeGraphBoundary,

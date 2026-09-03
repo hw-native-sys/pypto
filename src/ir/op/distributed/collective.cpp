@@ -553,15 +553,69 @@ REGISTER_OP("pld.tensor.all_to_all")
 
 namespace {
 
+/// Reject an `all_to_all_v` operand view that is *provably* not a packed
+/// row-major buffer.
+///
+/// Every operand is addressed with flat element arithmetic, not through its
+/// declared strides: the payload as `dest * MAX_RECV * SIZE + ...`, and the
+/// control operands as `send_counts_base[dest]`, `signal_base + peer` and
+/// `recv_counts_base + my_rank`. A strided, transposed or partial view would
+/// therefore silently read the wrong count or wait on the wrong signal cell —
+/// so all five are checked, not just the two payload buffers. A view is
+/// rejected only when the mismatch is decidable at compile time: a non-ND
+/// layout, a `valid_shape` statically smaller than the shape, or a static
+/// stride vector that differs from the packed row-major one. Dynamic extents
+/// are left to the runtime contract.
+void CheckStaticContiguousPayload(const TensorTypePtr& type, const char* role) {
+  if (!type->tensor_view_.has_value()) return;  // no view => packed by construction
+  const auto& view = *type->tensor_view_;
+  CHECK(view.layout == TensorLayout::ND)
+      << "pld.tensor.all_to_all_v " << role
+      << " must be a packed row-major (ND) view; a blocked/NZ layout cannot be addressed with the "
+         "flat element arithmetic both lowering rails use";
+  for (size_t i = 0; i < view.valid_shape.size() && i < type->shape_.size(); ++i) {
+    auto valid = As<ConstInt>(view.valid_shape[i]);
+    auto extent = As<ConstInt>(type->shape_[i]);
+    if (!valid || !extent) continue;
+    CHECK(valid->value_ == extent->value_)
+        << "pld.tensor.all_to_all_v " << role << " must be a full, packed view; dim " << i
+        << " has valid_shape " << valid->value_ << " < shape " << extent->value_
+        << ", so the payload is not contiguous";
+  }
+  if (view.stride.empty()) return;
+  if (view.stride.size() != type->shape_.size()) return;
+  // Packed row-major strides, computed right to left. Bail out (rather than
+  // reject) as soon as a dynamic extent makes the expected stride unknown.
+  int64_t expected = 1;
+  for (size_t i = type->shape_.size(); i-- > 0;) {
+    auto actual = As<ConstInt>(view.stride[i]);
+    if (!actual) return;
+    CHECK(actual->value_ == expected)
+        << "pld.tensor.all_to_all_v " << role << " must be a packed row-major contiguous view; dim " << i
+        << " has stride " << actual->value_ << ", expected " << expected;
+    auto extent = As<ConstInt>(type->shape_[i]);
+    if (!extent) return;
+    expected *= extent->value_;
+  }
+}
+
 TypePtr DeduceTensorAllToAllVType(const std::vector<ExprPtr>& args,
                                   const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  (void)kwargs;
   CHECK(args.size() == 5) << "pld.tensor.all_to_all_v requires 5 args "
                              "(input, target, signal, send_counts, recv_counts), but got "
                           << args.size();
   for (size_t i = 0; i < args.size(); ++i) {
     CHECK(args[i]) << "pld.tensor.all_to_all_v positional argument #" << i << " must not be null";
   }
+
+  // core_num is the requested AIV block limit for the managed CHIP/L2 rail.
+  // The InCore composite rail requires 1; LowerCompositeOps enforces that, so
+  // the deducer only rejects a value no rail could honour. Optional with a
+  // default of 1: every rail is single-core unless asked otherwise, so IR built
+  // without the kwarg (hand-built calls, programs deserialized from a .pto
+  // written before it existed) keeps its original meaning.
+  auto core_num = GetKwargOr<int>(kwargs, "core_num", 1);
+  CHECK(core_num > 0) << "pld.tensor.all_to_all_v core_num must be positive, got " << core_num;
 
   // input: flattened send buffer [NR*MAX_RECV, SIZE] — Tensor or DistributedTensor
   // (same Tensor-like contract as symmetric all_to_all / send_counts).
@@ -588,6 +642,24 @@ TypePtr DeduceTensorAllToAllVType(const std::vector<ExprPtr>& args,
   CHECK(target_type->dtype_ == input_type->dtype_)
       << "pld.tensor.all_to_all_v target dtype " << target_type->dtype_.ToString()
       << " must match input dtype " << input_type->dtype_.ToString();
+
+  // Buffer contract: both payload buffers are addressed by flat element
+  // arithmetic, and `input` is read while `target` is written by incoming
+  // pushes — so a provably strided view, or the same buffer in both roles, is
+  // rejected here rather than silently moving the wrong bytes at runtime.
+  CheckStaticContiguousPayload(input_type, "input");
+  CheckStaticContiguousPayload(target_type, "target");
+  CHECK(args[0].get() != args[1].get())
+      << "pld.tensor.all_to_all_v input and target must be two distinct buffers; in-place reuse races "
+         "this rank's outgoing reads against incoming peer pushes";
+  auto input_dist_type = As<DistributedTensorType>(args[0]->GetType());
+  if (input_dist_type && input_dist_type->window_buffer_.has_value() &&
+      target_type->window_buffer_.has_value()) {
+    CHECK(input_dist_type->window_buffer_->get() != target_type->window_buffer_->get())
+        << "pld.tensor.all_to_all_v input and target must be views of two distinct window buffers, got "
+           "two views of '"
+        << (*target_type->window_buffer_)->name_hint_ << "'";
+  }
 
   // signal: DistributedTensor INT32 [NR, 1].  Restricted to the 2-D form because
   // the composite lowering always emits MakeSignalOffsets(rank) → [rank, 0];
@@ -672,6 +744,12 @@ TypePtr DeduceTensorAllToAllVType(const std::vector<ExprPtr>& args,
       << "pld.tensor.all_to_all_v recv_counts dim 0 (" << recv_dim0->value_
       << ") must equal signal dim 0 (NR = " << signal_dim0->value_ << ")";
 
+  // The control operands are indexed just as flatly as the payload, so they
+  // are held to the same packed-view contract.
+  CheckStaticContiguousPayload(signal_type, "signal");
+  CheckStaticContiguousPayload(counts_type, "send_counts");
+  CheckStaticContiguousPayload(recv_type, "recv_counts");
+
   // Window-as-result: return target
   return target_type;
 }
@@ -713,6 +791,7 @@ REGISTER_OP("pld.tensor.all_to_all_v")
     .add_argument("recv_counts",
                   "Window-bound INT32 DistributedTensor [NR, 1] — after the barrier, "
                   "recv_counts[src, 0] holds how many rows src sent to this rank (InOut)")
+    .set_attr<int>("core_num")
     .no_memory_spec()
     // stays read-only.
     // Composite collective — the data destination is overwritten, not updated:

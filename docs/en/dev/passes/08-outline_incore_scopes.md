@@ -235,7 +235,7 @@ approximation. The direction propagates into
 argument from the *callee's* direction, so a false `InOut` turns disjoint
 per-rank slices of one `pl.Out` tensor into a cross-rank write dependency
 (issue #2415). Ordering a write-only parameter genuinely needs is not lost:
-[`DeriveCallDirections`](38-derive_call_directions.md) re-derives the
+[`DeriveCallDirections`](39-derive_call_directions.md) re-derives the
 *call-site* direction and promotes a callee `Out` back to `InOut` under a
 sequential ancestor, behind a prior writer of the same root, or when the root is
 an enclosing `InOut` parameter.
@@ -293,8 +293,8 @@ function attr is the single carrier, until
 `cache` kwarg on each `tile.load` and erases it. Param indices are only valid
 across that window — later passes both append to
 ([`InjectGMPipeBuffer`](23-inject_gm_pipe_buffer.md),
-[`MaterializeDistTensorCtx`](44-materialize_dist_tensor_ctx.md)) and prepend onto
-([`MaterializeValidShapeSymbols`](49-materialize_valid_shape_symbols.md)) param
+[`MaterializeDistTensorCtx`](45-materialize_dist_tensor_ctx.md)) and prepend onto
+([`MaterializeValidShapeSymbols`](50-materialize_valid_shape_symbols.md)) param
 lists. Two user errors are rejected here with `CHECK_SPAN`: a declaration naming
 a tensor the scope body does not capture (it is neither read nor written, so no parameter
 carries the policy), and `BYPASS` on a parameter `InferParamDirections` resolved
@@ -433,7 +433,7 @@ Rules the carry follows:
 
 **Codegen is unchanged.** The yielded value is the call's result on a parameter
 the callee returns, so
-[`ClassifyIterArgCarry`](47-classify_iter_arg_carry.md) puts it in the iter_arg's
+[`ClassifyIterArgCarry`](48-classify_iter_arg_carry.md) puts it in the iter_arg's
 alias class (its written-arg and `TupleGetItemExpr` rules) and marks the carry
 **trivial**: iter_arg and return_var both emit as the init value's name. The carry
 is SSA bookkeeping, not a new buffer. Nothing miscompiled without it either --

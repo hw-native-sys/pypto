@@ -31,8 +31,12 @@ void submit_all_to_all_v_kernel(const ChipTaskArgs &orch_args) {
   params.add_inout(signal);
   params.add_input(send_counts);
   params.add_inout(recv_counts);
-  params.add_scalar(orch_args.scalar(0));  // nranks
-  params.add_scalar(orch_args.scalar(1));  // CommContext device pointer
+  // No rank-count scalar: the kernel reads CommContext::rankNum, which is the
+  // same number (the context is per comm domain, so its rankNum *is* the
+  // domain size). Dropping it makes this rail's kernel argument layout
+  // identical to the managed CHIP/L2 rail's, so both render one byte-identical
+  // kernel source from the shared template.
+  params.add_scalar(orch_args.scalar(0));  // CommContext device pointer
   rt_submit_aiv_task(0, params);
 }
 
@@ -44,7 +48,8 @@ __attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_c
     const ChipTaskArgs &orch_args) {
   (void)orch_args;
   return OrchestrationConfig{
-      .expected_arg_count = 7,
+      // 5 window tensors + 1 CommContext scalar.
+      .expected_arg_count = 6,
   };
 }
 
