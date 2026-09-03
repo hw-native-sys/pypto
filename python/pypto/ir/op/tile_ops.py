@@ -2690,7 +2690,8 @@ def col_sum(tile: Expr, tmp_tile: Expr | None = None, span: Span | None = None) 
     Args:
         tile: Input tile (TileType [M, N])
         tmp_tile: Optional scratch tile (TileType, same shape/dtype as input) that
-            activates binary-tree reduction.
+            activates binary-tree reduction. Unlike the arg reductions, this is
+            not enforced by type deduction -- pass the input's shape and dtype.
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -2791,7 +2792,8 @@ def col_argmax(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
 
     Args:
         tile: Input tile (TileType [M, N])
-        tmp_tile: Temporary tile (TileType)
+        tmp_tile: Scratch tile (TileType) with exactly the same shape and dtype as
+            ``tile`` -- the kernel reads the column count from the tmp/src extent
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -2809,7 +2811,8 @@ def col_argmin(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
 
     Args:
         tile: Input tile (TileType [M, N])
-        tmp_tile: Temporary tile (TileType)
+        tmp_tile: Scratch tile (TileType) with exactly the same shape and dtype as
+            ``tile`` -- the kernel reads the column count from the tmp/src extent
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:

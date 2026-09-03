@@ -863,6 +863,94 @@ class TestTileReductionOps:
         assert isinstance(call.type, ir.TileType)
         assert call.type.dtype == DataType.INT32
 
+    @pytest.mark.parametrize("op", [tile.col_argmax, tile.col_argmin])
+    @pytest.mark.parametrize("tmp_shape", [[8, 256], [8, 640], [16, 512]])
+    def test_tile_col_arg_reduction_rejects_non_exact_tmp_shape(self, op, tmp_shape):
+        """Column arg reductions need the same exact scratch the row forms need.
+
+        pto-isa's TCOLARGMAX / TCOLARGMIN read the column count from the tmp/src
+        extent, so an oversized tmp walks past the valid columns and can return
+        the wrong index per column — a silent wrong answer with nothing
+        downstream to catch it.
+        """
+        span = ir.Span.unknown()
+        input_tile = ir.Var("input_tile", ir.TileType([8, 512], DataType.FP32), span)
+        tmp_tile = ir.Var("tmp_tile", ir.TileType(tmp_shape, DataType.FP32), span)
+
+        with pytest.raises(ValueError, match="requires tmp_tile shape to exactly match the input shape"):
+            op(input_tile, tmp_tile)
+
+    @pytest.mark.parametrize("op", [tile.col_argmax, tile.col_argmin])
+    def test_tile_col_arg_reduction_rejects_mismatched_tmp_rank(self, op):
+        """Rank is checked before the per-dimension extents, and reports as rank."""
+        span = ir.Span.unknown()
+        input_tile = ir.Var("input_tile", ir.TileType([8, 512], DataType.FP32), span)
+        tmp_tile = ir.Var("tmp_tile", ir.TileType([8, 512, 1], DataType.FP32), span)
+
+        with pytest.raises(ValueError, match="requires tmp_tile to have the same rank as the input"):
+            op(input_tile, tmp_tile)
+
+    @pytest.mark.parametrize("op_name", ["tile.col_argmax", "tile.col_argmin"])
+    def test_tile_col_arg_reduction_rejects_no_arguments(self, op_name):
+        """An empty operand list must raise, not read past the end of the list.
+
+        The deducer reads ``args[0]`` to get the input type; guarding the count
+        only afterwards made ``create_op_call(op, [])`` index an empty vector,
+        which segfaulted the interpreter instead of raising.
+        """
+        with pytest.raises(ValueError, match="requires at least 1 argument"):
+            ir.create_op_call(op_name, [], {}, ir.Span.unknown())
+
+    @pytest.mark.parametrize("op", [tile.col_argmax, tile.col_argmin])
+    def test_tile_col_arg_reduction_rejects_mismatched_tmp_dtype(self, op):
+        """Column arg reductions require scratch storage with the input element type."""
+        span = ir.Span.unknown()
+        input_tile = ir.Var("input_tile", ir.TileType([8, 512], DataType.FP32), span)
+        tmp_tile = ir.Var("tmp_tile", ir.TileType([8, 512], DataType.FP16), span)
+
+        with pytest.raises(ValueError, match="requires tmp_tile dtype to match input dtype"):
+            op(input_tile, tmp_tile)
+
+    @pytest.mark.parametrize("op", [tile.col_argmax, tile.col_argmin])
+    def test_tile_col_arg_reduction_accepts_exact_tmp_shape(self, op):
+        """The exact form every in-tree caller already passes still lowers.
+
+        Both producers build the scratch from the input's own shape: the
+        tensor->tile conversion (``MakeArgReductionConv``) and the tile-level
+        DSL call sites.
+        """
+        span = ir.Span.unknown()
+        input_tile = ir.Var("input_tile", ir.TileType([8, 512], DataType.FP32), span)
+        tmp_tile = ir.Var("tmp_tile", ir.TileType([8, 512], DataType.FP32), span)
+
+        call = op(input_tile, tmp_tile)
+
+        assert isinstance(call.type, ir.TileType)
+        assert call.type.dtype == DataType.INT32
+        assert isinstance(call.type.shape[0], ir.ConstInt)
+        assert isinstance(call.type.shape[1], ir.ConstInt)
+        assert [call.type.shape[0].value, call.type.shape[1].value] == [1, 512]
+
+    def test_tile_col_sum_tmp_is_not_validated_by_the_arg_form_check(self):
+        """gh#2615's exact-shape check does not widen to col_sum.
+
+        This pins the SCOPE of that change, not a contract: col_sum's tmp drives a
+        binary-tree reduction rather than an arg scan, and its docstrings still ask
+        callers for the input's shape and dtype. Type deduction simply does not
+        enforce it, and this test exists so that staying unenforced is a decision
+        rather than an accident — flip it deliberately if col_sum is tightened too.
+        """
+        span = ir.Span.unknown()
+        input_tile = ir.Var("input_tile", ir.TileType([8, 512], DataType.FP32), span)
+        wider_tmp = ir.Var("tmp_tile", ir.TileType([8, 640], DataType.FP32), span)
+
+        call = tile.col_sum(input_tile, wider_tmp)
+
+        assert isinstance(call.type, ir.TileType)
+        assert isinstance(call.type.shape[0], ir.ConstInt)
+        assert isinstance(call.type.shape[1], ir.ConstInt)
+        assert [call.type.shape[0].value, call.type.shape[1].value] == [1, 512]
+
     @pytest.mark.parametrize("dtype", [DataType.INT16, DataType.INT32, DataType.FP16, DataType.FP32])
     def test_tile_row_min_accepts_exact_pto_contract(self, dtype):
         """tile.row_min accepts every PTO dtype and produces a DN column vector."""

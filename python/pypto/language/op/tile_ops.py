@@ -1766,7 +1766,8 @@ def col_sum(tile: Tile, tmp_tile: Tile | None = None) -> Tile:
     Args:
         tile: Input tile
         tmp_tile: Optional scratch tile (same shape/dtype as input) that selects
-            the binary-tree reduction path.
+            the binary-tree reduction path. Unlike the arg reductions, this is not
+            enforced by type deduction -- pass the input's shape and dtype.
 
     Returns:
         Tile wrapping the col_sum operation
@@ -1861,7 +1862,7 @@ def col_argmax(tile: Tile, tmp_tile: Tile) -> Tile:
 
     Args:
         tile: Input tile
-        tmp_tile: Temporary tile
+        tmp_tile: Scratch tile with exactly the same shape and dtype as ``tile``
 
     Returns:
         Tile wrapping the col_argmax operation
@@ -1878,7 +1879,7 @@ def col_argmin(tile: Tile, tmp_tile: Tile) -> Tile:
 
     Args:
         tile: Input tile
-        tmp_tile: Temporary tile
+        tmp_tile: Scratch tile with exactly the same shape and dtype as ``tile``
 
     Returns:
         Tile wrapping the col_argmin operation
