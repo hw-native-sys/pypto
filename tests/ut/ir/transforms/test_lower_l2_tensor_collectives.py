@@ -324,11 +324,12 @@ def test_collective_in_a_graph_body_is_lowered():
 def test_unsupported_collective_in_a_chip_body_is_named():
     """A collective this rail cannot lower is reported here, by name.
 
-    The orchestration-reference verifier exempts the whole ``pld.`` operator
-    namespace (a `pld.*` callee is not a function reference), so this pass is
-    the only place that answers "may this collective appear in this body". An
-    unsupported one must fail here rather than reach codegen as an unknown
-    operator.
+    The orchestration-reference verifier exempts this operator family (a
+    managed collective is an operator, not a function reference, so the Program
+    is not expected to define it) and answers nothing beyond that, so this pass
+    is the only place that answers "may this collective appear in this body". An
+    unsupported one must fail here rather than ride that exemption to codegen
+    and surface as an unknown operator.
     """
 
     @pl.program

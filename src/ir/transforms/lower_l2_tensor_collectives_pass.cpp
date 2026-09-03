@@ -304,6 +304,30 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
         << "LowerL2TensorCollectives: pld.tensor.all_to_all_v target must be DistributedTensorType";
 
     auto spec = MakeAllToAllVKernelSpec(target_type->dtype_, call->span_);
+    // One kernel per dtype, shared by every call site in the Program. The
+    // kernel reads each extent from the runtime `Tensor` descriptor
+    // (`target_tensor->shapes[]`, `ndims`), so shape is deliberately *not* part
+    // of the variant key: two exchanges of different sizes reusing one kernel
+    // is the intent, not an oversight.
+    //
+    // The cost is that the signature below carries whichever shape the first
+    // call site happened to have, and nothing in the pipeline checks a later
+    // call's argument shapes against its callee's parameters. That is safe only
+    // because everything the signature actually feeds downstream is pinned
+    // elsewhere:
+    //
+    //   dtype  - the variant name IS the target dtype, and the deducer forces
+    //            input == target plus INT32 on the three control operands, so
+    //            two call sites cannot reach one variant with different dtypes.
+    //   kind   - `spec.param_distributed` is a constant, so the Tensor /
+    //            DistributedTensor split never follows the call site. The
+    //            CommCtx suffix MaterializeDistTensorCtx appends is driven by
+    //            the callee's params, so args and params cannot disagree on it.
+    //   rank   - the deducer pins every operand but send_counts to 2D, and
+    //            send_counts is addressed flatly (`send_counts_base[dest]`).
+    //
+    // Relaxing any of those - a second dtype variant, a rank-3 payload - breaks
+    // the sharing itself, not just this comment.
     auto inserted = kernels_->find(spec.function_name);
     if (inserted == kernels_->end()) {
       kernels_->emplace(spec.function_name, MakeBuiltinKernelFunction(spec, call));
@@ -322,9 +346,11 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
 /// 26 passes earlier — re-reporting them here would blame the wrong pass.
 ///
 /// This is the only check that answers "may this collective appear in this
-/// body": the orchestration-reference verifier exempts the whole `pld.`
-/// operator namespace, so an unsupported collective would otherwise reach
-/// codegen as an unknown operator.
+/// body". The orchestration-reference verifier exempts this operator family —
+/// a managed collective is an operator, not a function reference, so the
+/// Program is not expected to define it — and deliberately answers nothing
+/// beyond that. Without this check an unsupported collective would ride that
+/// exemption all the way to codegen and surface as an unknown operator.
 class ResidualCollectiveChecker : public IRVisitor {
  public:
   explicit ResidualCollectiveChecker(std::string func_name) : func_name_(std::move(func_name)) {}
