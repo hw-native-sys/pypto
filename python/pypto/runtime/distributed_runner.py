@@ -61,6 +61,12 @@ _DTYPE_MAP: dict[str, tuple[type, torch.dtype]] = {
 }
 
 
+# The library's own choice when a caller passes ``persistent=None`` (the default across
+# ``prepare()`` / ``DistributedWorker`` / ``benchmark()``). Kept as one module-level seam so a
+# future default flip touches this single line, not every call site's fallback logic.
+_PERSISTENT_DEFAULT = False
+
+
 def _resolve_persistent_window_reset(persistent: bool, reset_persistent_windows: bool | None) -> bool:
     """Resolve the retained-window reset policy.
 
@@ -1567,7 +1573,7 @@ class DistributedWorker(Worker):
         compiled: DistributedCompiledProgram | Sequence[DistributedCompiledProgram],
         config: RunConfig | None = None,
         *,
-        persistent: bool = False,
+        persistent: bool | None = None,
         reset_persistent_windows: bool | None = None,
         callbacks: dict[str, Callable[..., Any]] | None = None,
         sub_worker_overrides: dict[str, Callable[..., Any]] | None = None,
@@ -1581,7 +1587,14 @@ class DistributedWorker(Worker):
         # attached to DeviceTensor for address-free wire TaskArgs.
         self._device_buffers: dict[tuple[int, int], Any] = {}
         callbacks = _coalesce_callbacks(callbacks, sub_worker_overrides)
-        reset_persistent_windows = _resolve_persistent_window_reset(persistent, reset_persistent_windows)
+        # ``None`` defers to the library default; an explicit bool is a hard requirement that
+        # must raise (not silently fall back) if an artifact cannot honor it — see the
+        # ``persistent_explicit`` branch below, at the ``_domain_provider`` hook check.
+        persistent_explicit = persistent is not None
+        resolved_persistent = _PERSISTENT_DEFAULT if persistent is None else persistent
+        reset_persistent_windows = _resolve_persistent_window_reset(
+            resolved_persistent, reset_persistent_windows
+        )
         inherited, self._inherited_host_spans = self._resolve_inherited_host_tensors(inherited_host_tensors)
         self._inherited_host_tensors = inherited
         # `is_shared()` is kept as a one-way signal: True confirms a torch-managed shared
@@ -1607,7 +1620,7 @@ class DistributedWorker(Worker):
         # Minting and first creation are not atomic while `alloc_stacked_tensor` runs one thread
         # per chip through this path, so the cache, owner, and counter are guarded together.
         self._named_host_buffer_mu = threading.Lock()
-        self._persistent = bool(persistent)
+        self._persistent = resolved_persistent
         self._reset_persistent_windows = reset_persistent_windows
         self._persistent_error: BaseException | None = None
         self._persistent_error_reported = False
@@ -1689,10 +1702,24 @@ class DistributedWorker(Worker):
                     "persistent_id": f"p{program_index}",
                 }
                 if self._persistent and "_domain_provider" not in inspect.signature(entry_fn).parameters:
-                    raise ValueError(
-                        "persistent distributed execution requires regenerated host orchestration "
-                        "with the internal _domain_provider hook"
+                    if persistent_explicit:
+                        raise ValueError(
+                            "persistent distributed execution requires regenerated host orchestration "
+                            "with the internal _domain_provider hook"
+                        )
+                    # persistent=True only because it's the library default, not a caller
+                    # requirement: a caller who never asked for persistence must not see this
+                    # artifact start raising. Fall back to transient dispatch for every program on
+                    # this worker (self._persistent is worker-wide, not per-program) instead.
+                    warnings.warn(
+                        f"DistributedWorker: {prog.output_dir} predates persistent-domain codegen "
+                        "support (_domain_provider hook missing) — falling back to transient "
+                        "dispatch for every program on this worker. Recompile via ir.compile() to "
+                        "enable persistence and its execute_s win.",
+                        RuntimeWarning,
+                        stacklevel=3,
                     )
+                    self._persistent = False
                 loaded.append((prog, chip_callables, sub_worker_fns))
 
             unconsumed = sorted(set(callbacks) - consumed)
@@ -1910,16 +1937,10 @@ class DistributedWorker(Worker):
         """Fail before worker initialization when Simpler cannot retain domains."""
         if not self._persistent:
             return
-        live_domains = getattr(self._w, "_live_domains", None)
-        missing = []
-        if not isinstance(live_domains, dict):
-            missing.append("_live_domains")
-        if not hasattr(self._w, "_building_run_resources"):
-            missing.append("_building_run_resources")
-        if missing:
+        if not hasattr(self._w, "detach_persistent_domain"):
             raise RuntimeError(
-                "persistent distributed execution requires Simpler's private retention hooks: "
-                + ", ".join(missing)
+                "persistent distributed execution requires a Simpler version exposing "
+                "Worker.detach_persistent_domain"
             )
 
     def _reset_persistent_domains(
@@ -1993,32 +2014,11 @@ class DistributedWorker(Worker):
     def _detach_persistent_domain(self, handle: Any) -> None:
         """Transfer one CommDomain from the current run to Worker ownership.
 
-        Simpler records a newly allocated domain in both the current
-        ``_RunResources.live_domains`` journal and ``Worker._live_domains``.
-        Remove only the run-local claim: the global entry must remain reachable
-        so ``Worker.close()`` can reclaim it if request finalization is
-        interrupted before the run is retired.
+        Delegates to Simpler's public ``Worker.detach_persistent_domain``, which
+        keeps the domain reachable via ``Worker.live_domains`` so ``close()`` can
+        reclaim it if request finalization is interrupted before the run retires.
         """
-        live_domains = getattr(self._w, "_live_domains", None)
-        resources = getattr(self._w, "_building_run_resources", None)
-        run_live_domains = getattr(resources, "live_domains", None)
-        domain_lock = getattr(resources, "domain_lock", None)
-        if (
-            not isinstance(live_domains, dict)
-            or not isinstance(run_live_domains, dict)
-            or domain_lock is None
-        ):
-            raise RuntimeError(
-                "persistent distributed execution requires Simpler's active per-run CommDomain journal"
-            )
-        with domain_lock:
-            if bool(getattr(resources, "retired", False)):
-                raise RuntimeError("persistent CommDomain cannot be retained from an already-retired run")
-            if live_domains.get(handle.name) is not handle or run_live_domains.get(handle.name) is not handle:
-                raise RuntimeError(
-                    "persistent distributed execution could not transfer the CommDomain's run-local ownership"
-                )
-            del run_live_domains[handle.name]
+        self._w.detach_persistent_domain(handle)
 
     def _release_persistent_domains(
         self,

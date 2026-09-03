@@ -477,7 +477,7 @@ class DistributedCompiledProgram:
         config: "RunConfig | None" = None,
         *,
         extra_compiled: Sequence["DistributedCompiledProgram"] = (),
-        persistent: bool = False,
+        persistent: bool | None = None,
         reset_persistent_windows: bool | None = None,
         callbacks: dict[str, Callable[..., Any]] | None = None,
         sub_worker_overrides: dict[str, Callable[..., Any]] | None = None,
@@ -521,9 +521,14 @@ class DistributedCompiledProgram:
             persistent: Retain each compiled program's CommDomains across
                 dispatches. Every request still runs through its own
                 ``Worker.run`` completion fence. Retained windows are restored
-                to zero before reuse by default. Requires artifacts generated
-                by a PyPTO version that supports the internal domain-provider
-                hook.
+                to zero before reuse by default. ``None`` (the default) defers
+                to pypto's own choice and, on an artifact predating the internal
+                domain-provider hook, silently falls back to transient dispatch
+                with a ``RuntimeWarning`` instead of raising — a caller who
+                never asked for persistence should not see one. Pass an
+                explicit ``True`` to require it: an incompatible artifact then
+                raises ``ValueError`` instead of falling back, so recompile via
+                ``ir.compile()`` to pick up the hook.
             reset_persistent_windows: Whether to restore retained CommDomain
                 windows to zero before every reuse. ``None`` (the default)
                 enables reset in persistent mode. Set to ``False`` only when

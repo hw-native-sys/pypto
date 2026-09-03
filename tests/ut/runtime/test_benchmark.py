@@ -1111,8 +1111,10 @@ def test_benchmark_l3_dispatches_via_distributed_worker():
     # prepare() gets the dispatch config, so it prewarms the runtime arena with
     # the ring sizing the loop dispatches with (here: None -> baseline sizing).
     assert compiled.prepare_config is None
+    # persistent=None (not False) forwards unresolved — DistributedWorker.__init__
+    # is where the None -> _PERSISTENT_DEFAULT resolution happens, not prepare().
     assert compiled.prepare_kwargs == {
-        "persistent": False,
+        "persistent": None,
         "reset_persistent_windows": None,
     }
     # The parser is told this is a distributed run.

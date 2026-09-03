@@ -1273,7 +1273,7 @@ def benchmark(
     platform: str | None = None,
     device_id: int | None = None,
     config: RunConfig | None = None,
-    persistent: bool = False,
+    persistent: bool | None = None,
     reset_persistent_windows: bool | None = None,
 ) -> BenchmarkStats:
     """Register *compiled* once and dispatch *rounds* timed launches.
@@ -1331,6 +1331,10 @@ def benchmark(
             ``ring_dep_pool``); ``None`` reuses the prepared baseline.
         persistent: L3 only. Reuse retained CommDomains across all warmup and
             measured dispatches while fencing each launch with ``Worker.run``.
+            ``None`` (the default) defers to pypto's own choice and falls back
+            to transient dispatch with a warning on an artifact that predates
+            the domain-provider hook; pass ``True`` to require it instead (see
+            ``DistributedCompiledProgram.prepare``).
         reset_persistent_windows: L3 persistent mode only. Restore retained
             windows to zero before reuse. ``None`` (the default) enables reset
             in persistent mode. Set to ``False`` only when the benchmarked

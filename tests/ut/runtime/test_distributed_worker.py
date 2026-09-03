@@ -2846,6 +2846,7 @@ class _PersistentOrch:
         self.handles: list[_PersistentDomainHandle] = []
         self.resources: list[_PersistentRunResources] = []
         self.worker.close.side_effect = self._close_live_domains
+        self.worker.detach_persistent_domain = self._detach_persistent_domain
 
     def _begin_run(self) -> _PersistentRunResources:
         resources = _PersistentRunResources()
@@ -2907,6 +2908,23 @@ class _PersistentOrch:
         payload = ctypes.string_at(int(src.base), int(src.nbytes))
         self.copy_calls.append((dst, src, payload))
 
+    def _detach_persistent_domain(self, handle: _PersistentDomainHandle) -> None:
+        """Model Simpler's ``Worker.detach_persistent_domain`` against this fake."""
+        resources = self.worker._building_run_resources
+        if resources is None:
+            raise RuntimeError("detach_persistent_domain: no run resources are being built")
+        with resources.domain_lock:
+            if resources.retired:
+                raise RuntimeError("detach_persistent_domain: run resources are already retired")
+            if (
+                self.worker._live_domains.get(handle.name) is not handle
+                or resources.live_domains.get(handle.name) is not handle
+            ):
+                raise RuntimeError(
+                    "detach_persistent_domain: handle is not this run's live claim on this domain"
+                )
+            del resources.live_domains[handle.name]
+
     def _close_live_domains(self) -> None:
         first_error: BaseException | None = None
         for handle in list(self.worker._live_domains.values())[::-1]:
@@ -2955,6 +2973,41 @@ def _persistent_entry(
     return entry
 
 
+def _persistent_entry_variable_size(window_sizes: list[int], seen_handles: list[Any]):
+    """Like ``_persistent_entry``, but requests a different ``window_size`` on
+    each successive call — models a program whose CommDomain size depends on a
+    runtime scalar (e.g. a decode loop's sequence length), which
+    ``distributed_codegen.cpp``'s ``GetCommSlotSizeAsCode`` supports emitting.
+    """
+    calls = {"n": 0}
+
+    def entry(
+        orch,
+        _args,
+        config,
+        *,
+        tensors,
+        callables,
+        sub_ids,
+        _keep,
+        world_size,
+        _domain_provider=None,
+    ):
+        del orch, _args, config, tensors, callables, sub_ids, _keep
+        assert _domain_provider is not None
+        size = window_sizes[calls["n"]]
+        calls["n"] += 1
+        with _domain_provider(
+            name="comm_d0",
+            workers=[*range(world_size)],
+            window_size=size,
+            buffers=[SimpleNamespace(name="buffer_0", dtype="opaque", count=size, nbytes=size)],
+        ) as domain:
+            seen_handles.append(domain)
+
+    return entry
+
+
 class TestPersistentDistributedWorker:
     def test_window_reset_requires_persistent_mode(self):
         compiled = _fake_compiled([_param("a", [16, 16])], [])
@@ -2966,17 +3019,35 @@ class TestPersistentDistributedWorker:
         with pytest.raises(ValueError, match="requires regenerated host orchestration"):
             DistributedWorker(compiled, persistent=True)
 
-    @pytest.mark.parametrize("attribute", ["_live_domains", "_building_run_resources"])
-    def test_rejects_missing_persistent_runtime_hooks_before_init(self, patched_setup, attribute):
+    def test_implicit_default_falls_back_on_artifact_without_domain_provider_hook(self, patched_setup):
+        """persistent=None (unset) must warn and fall back, never raise.
+
+        A caller who did not ask for persistence must not see one just because the
+        library's own default happens to resolve to True and this artifact predates
+        the domain-provider hook (`persistent=True` explicit, above, still raises).
+
+        ``_PERSISTENT_DEFAULT`` is ``False`` today, so the fallback branch this test
+        targets is unreachable through the real default until a later Phase A flips
+        it — patch the constant to exercise the fallback mechanism itself now.
+        """
+        compiled = _fake_compiled([_param("a", [16, 16])], [])
+
+        with patch("pypto.runtime.distributed_runner._PERSISTENT_DEFAULT", True):
+            with pytest.warns(RuntimeWarning, match="predates persistent-domain codegen"):
+                rt = DistributedWorker(compiled)
+
+            assert rt._persistent is False
+            a = _resident(rt, (16, 16))
+            rt(a)  # falls back to ordinary transient dispatch, does not raise
+            rt.close()
+
+    def test_rejects_missing_persistent_runtime_hooks_before_init(self, patched_setup):
         m = patched_setup
-        if attribute == "_live_domains":
-            m["worker"]._live_domains = None
-        else:
-            del m["worker"]._building_run_resources
+        del m["worker"].detach_persistent_domain
         m["load_entry"].return_value = (_persistent_entry(64, []), None)
         compiled = _fake_compiled([_param("a", [16, 16])], [])
 
-        with pytest.raises(RuntimeError, match=attribute):
+        with pytest.raises(RuntimeError, match="detach_persistent_domain"):
             DistributedWorker(compiled, persistent=True)
 
         m["worker"].init.assert_not_called()
@@ -3461,6 +3532,79 @@ class TestPersistentDistributedWorker:
         assert len(errors) == 1
         assert isinstance(errors[0], RuntimeError)
         assert str(errors[0]) == "persistent dispatch failed before cleanup"
+        rt.close()
+
+
+class TestPersistentDomainShapeChangePolicy:
+    """A retained CommDomain's spec (workers, window_size, buffers) is an identity.
+
+    Deliberate policy, not a gap: a compiled program's window_size can depend on
+    a runtime scalar (distributed_codegen.cpp emits dynamic size expressions),
+    so a shape change across dispatches of the same persistent worker is a real
+    scenario, not hypothetical. Silently reallocating mid-request is unsafe —
+    a single dispatch can declare multiple CommDomains in sequence, and an
+    earlier one may already be entered (with real device-side effects issued
+    against it) by the time a later one's mismatch is discovered, so there is
+    no safe point to swap the mismatched domain in isolation. The policy is
+    therefore to raise, and to raise for every subsequent call too (poison the
+    whole worker) rather than leave it in a partially-abandoned state. A caller
+    whose workload legitimately varies shape should pass persistent=False, or
+    pad requests to one fixed window size.
+    """
+
+    def test_shape_change_raises_with_a_clear_message(self, patched_setup):
+        m = patched_setup
+        m["worker"]._live_domains = {}
+        seen_handles: list[Any] = []
+        m["load_entry"].return_value = (_persistent_entry_variable_size([64, 128], seen_handles), None)
+        compiled = _fake_compiled([_param("a", [16, 16])], [])
+
+        rt = DistributedWorker(compiled, persistent=True)
+        try:
+            arg = _resident(rt, (16, 16))
+            rt(arg)  # first call: window_size=64, allocates and detaches cleanly
+            with pytest.raises(ValueError, match="changed specification"):
+                rt(arg)  # second call: window_size=128, mismatches the retained spec
+        finally:
+            rt.close()
+
+    def test_shape_mismatch_poisons_subsequent_calls_including_the_original_shape(self, patched_setup):
+        m = patched_setup
+        m["worker"]._live_domains = {}
+        seen_handles: list[Any] = []
+        # Third call reverts to the ORIGINAL matching window_size (64) — still
+        # must raise, because the worker is poisoned by the second call's
+        # mismatch, not because 64 itself is invalid.
+        m["load_entry"].return_value = (_persistent_entry_variable_size([64, 128, 64], seen_handles), None)
+        compiled = _fake_compiled([_param("a", [16, 16])], [])
+
+        rt = DistributedWorker(compiled, persistent=True)
+        try:
+            arg = _resident(rt, (16, 16))
+            rt(arg)
+            with pytest.raises(ValueError, match="changed specification") as first:
+                rt(arg)
+            with pytest.raises(ValueError, match="changed specification") as second:
+                rt(arg)
+            # The exact same stored error is redelivered, not a fresh evaluation.
+            assert second.value is first.value
+        finally:
+            rt.close()
+
+    def test_close_after_a_shape_mismatch_does_not_hang_or_reraise(self, patched_setup):
+        m = patched_setup
+        m["worker"]._live_domains = {}
+        seen_handles: list[Any] = []
+        m["load_entry"].return_value = (_persistent_entry_variable_size([64, 128], seen_handles), None)
+        compiled = _fake_compiled([_param("a", [16, 16])], [])
+
+        rt = DistributedWorker(compiled, persistent=True)
+        arg = _resident(rt, (16, 16))
+        rt(arg)
+        with pytest.raises(ValueError, match="changed specification"):
+            rt(arg)
+
+        # Already delivered to the caller above — close() must not raise it again.
         rt.close()
 
 

@@ -13,7 +13,12 @@ with decode.prepare(persistent=True) as worker:
         worker(x, weights, output)
 ```
 
-The persistent path is opt-in. The default `prepare()` behavior is unchanged.
+`persistent` defaults to `None`, which defers to pypto's own choice (today,
+non-persistent — unchanged from the prior `False` default). Pass an explicit
+`True` to require persistence: on an artifact that predates the
+`_domain_provider` hook this raises `ValueError` rather than silently
+dispatching non-persistently. Leaving `persistent` unset never raises for that
+reason — see "Artifact compatibility" below.
 
 ## Lifecycle
 
@@ -31,6 +36,24 @@ keyword. Normal dispatch leaves it unset and continues to call
 `orch.allocate_domain`. Persistent dispatch supplies a provider keyed by the
 compiled program and generated domain name. Existing generated artifacts must
 be regenerated before they can use persistent execution.
+
+## Artifact compatibility
+
+`DistributedWorker` detects the `_domain_provider` hook on the loaded
+orchestration entry at `prepare()` time, before any dispatch. What happens on
+a missing hook depends on whether persistence was requested explicitly:
+
+- `persistent=True` (explicit): raises `ValueError` naming the missing hook.
+  Recompile via `ir.compile()` to pick it up.
+- `persistent=None` (the default, or forwarded unset through `benchmark()`):
+  warns with `RuntimeWarning` and falls back to transient dispatch for every
+  program on the worker, instead of raising. A caller who never asked for
+  persistence should not see a hard failure just because pypto's own default
+  happens to want it.
+
+A worker preparing multiple programs (`extra_compiled=[...]`) shares one
+`persistent` flag: if any program's artifact lacks the hook, the whole worker
+falls back (or raises, if requested explicitly) — not just that program.
 
 ## Window contents
 
@@ -71,6 +94,30 @@ destination offset nor a public Buffer subview. Generated PyPTO domains cover
 their windows exactly with named buffers. Reset rejects artifacts with unnamed
 window slack because the Buffer API cannot restore that slack to fresh-window
 state.
+
+## Shape stability
+
+A retained CommDomain's spec — its worker set, `window_size`, and named buffer
+sizes — is an identity, fixed by its first dispatch. A compiled program's
+`window_size` can depend on a runtime scalar (a decode loop's sequence length,
+for example), so two dispatches of the same persistent worker *can* legitimately
+request different sizes for the same generated domain. When that happens,
+persistent dispatch raises `ValueError` instead of silently reallocating.
+
+This is deliberate, not a limitation to work around with a retry: a single
+dispatch can declare more than one CommDomain in sequence, and by the time a
+later domain's mismatch is discovered, an earlier one in the same request may
+already be entered with real device-side effects issued against it. There is
+no safe point to swap out just the mismatched domain, so the failure poisons
+the whole persistent worker — every subsequent call raises the same stored
+error, including one that reverts to the original, previously-matching shape.
+`close()` after such a failure still releases every retained domain cleanly.
+
+A workload whose shape genuinely varies across calls should pass
+`persistent=False` explicitly, or pad requests to one fixed window size so the
+retained spec never changes. Leaving `persistent` unset does not avoid this —
+the fallback in "Artifact compatibility" only covers a missing `_domain_provider`
+hook, not a shape change once persistence is active.
 
 ## Multiple compiled programs
 
