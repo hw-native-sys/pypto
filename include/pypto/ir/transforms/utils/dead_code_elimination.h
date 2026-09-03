@@ -76,6 +76,13 @@ std::vector<StmtPtr> EliminateDeadScalarAssignments(const std::vector<StmtPtr>& 
 /// point so cascading deaths (outer slot drop → inner slot becomes dead) are
 /// fully collapsed.
 ///
+/// A slot whose `IterArg::initValue_` or yielded value contains a `Call` /
+/// `Submit` is kept whatever its liveness: dropping the slot deletes that
+/// expression, and before `FlattenCallExpr` a yielded value can still BE a
+/// call — a task launch or any other effectful op. This mirrors
+/// `EliminateDeadScalarAssignments`, which never drops a call-backed
+/// assignment, for the same reason: the IR carries no purity annotations.
+///
 /// A `Scalar[TASK_ID]` / `Array[TASK_ID]` carry is exempt. It is a scheduling
 /// channel, not data: `AutoDeriveTaskDependencies` and `ExpandManualPhaseFence`
 /// read the *shape* of such a carry — a task id produced in a loop and carried

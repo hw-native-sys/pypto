@@ -494,6 +494,21 @@ void FilterTrailingYieldSlots(std::vector<StmtPtr>& branch, const std::vector<si
   branch.back() = std::make_shared<YieldStmt>(std::move(new_values), yield->span_);
 }
 
+/// True when the trailing `YieldStmt` of @p body feeds slot @p slot with an
+/// expression containing a `Call` / `Submit`.
+///
+/// Dropping a slot deletes that expression, and until `FlattenCallExpr` runs a
+/// yielded value can still BE a call — a task launch or any other effectful op.
+/// The IR has no purity annotations, so an effect there keeps the slot alive,
+/// matching how `IsRemovableScalarAssign` refuses to drop a call-backed
+/// assignment.
+bool YieldSlotHasCallLike(const std::vector<StmtPtr>& body, size_t slot) {
+  if (body.empty()) return false;
+  auto yield = std::dynamic_pointer_cast<const YieldStmt>(body.back());
+  if (!yield || slot >= yield->value_.size()) return false;
+  return ExprContainsCallLike(yield->value_[slot]);
+}
+
 /// MutableCopy + replace body, dispatching on concrete ScopeStmt subtype.
 /// Mirrors the dispatch in FilterDeadCodeImpl below.
 StmtPtr RebuildScopeWithBody(const std::shared_ptr<const ScopeStmt>& scope_stmt, const StmtPtr& new_body) {
@@ -582,7 +597,8 @@ StmtPtr RewriteLoopCarrySlots(const std::shared_ptr<const LoopT>& loop,
   new_return_vars.reserve(loop->return_vars_.size());
   for (size_t i = 0; i < loop->iter_args_.size(); ++i) {
     if (live_uses.count(loop->iter_args_[i].get()) || live_uses.count(loop->return_vars_[i].get()) ||
-        IsTaskIdCarrier(loop->iter_args_[i]->GetType())) {
+        IsTaskIdCarrier(loop->iter_args_[i]->GetType()) ||
+        ExprContainsCallLike(loop->iter_args_[i]->initValue_) || YieldSlotHasCallLike(rewritten, i)) {
       kept_indices.push_back(i);
       new_iter_args.push_back(loop->iter_args_[i]);
       new_return_vars.push_back(loop->return_vars_[i]);
@@ -634,7 +650,9 @@ std::vector<StmtPtr> RewriteDeadYieldSlotsOnce(const std::vector<StmtPtr>& stmts
       kept_indices.reserve(if_stmt->return_vars_.size());
       new_return_vars.reserve(if_stmt->return_vars_.size());
       for (size_t i = 0; i < if_stmt->return_vars_.size(); ++i) {
-        if (live_uses.count(if_stmt->return_vars_[i].get())) {
+        const bool branch_effect =
+            YieldSlotHasCallLike(new_then, i) || (new_else.has_value() && YieldSlotHasCallLike(*new_else, i));
+        if (live_uses.count(if_stmt->return_vars_[i].get()) || branch_effect) {
           kept_indices.push_back(i);
           new_return_vars.push_back(if_stmt->return_vars_[i]);
         }
