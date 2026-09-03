@@ -343,6 +343,40 @@ class TestDeclaration:
         with pytest.raises(ValueError, match="unknown platform"):
             _jit_case(name="abs_bad_platform", platform="a9")
 
+    def test_for_platform_binds_each_variant_independently(self):
+        """One declared case serves N platform variants without cross-talk.
+
+        ``st.cases`` hands the *same* object to every variant of a
+        multi-platform item, so binding in place would pin the first variant's
+        platform for all of them — and a case's own platform outranks the
+        item's, so every variant would go on to compile and run that first
+        platform's artifact.
+        """
+        declared = _jit_case(name="abs_matrix")
+        variants = {p: declared.for_platform(p) for p in ("a2a3", "a2a3sim", "a5", "a5sim")}
+
+        assert declared.get_platform() is None, "the declaration itself stays unbound"
+        for platform, bound in variants.items():
+            assert bound is not declared
+            assert bound.get_platform() == platform
+        assert len({id(v) for v in variants.values()}) == 4, "one case object per variant"
+
+    def test_for_platform_keeps_a_pin_and_its_identity(self):
+        """A pinned case is returned as-is: the pin must keep outranking the item."""
+        pinned = _jit_case(name="abs_pinned_matrix", platform="a5")
+        assert pinned.for_platform("a2a3") is pinned
+        assert pinned.get_platform() == "a5"
+
+    def test_for_platform_carries_the_declaration_over(self):
+        """The copy differs in platform alone — every other field is the case's."""
+        declared = _jit_case(name="abs_carry", rtol=1e-3, atol=1e-2)
+        bound = declared.for_platform("a5")
+        assert bound.name == declared.name
+        assert bound.kernel is declared.kernel
+        assert bound.golden is declared.golden
+        assert bound.tensor_specs == declared.tensor_specs
+        assert (bound.config.rtol, bound.config.atol) == (1e-3, 1e-2)
+
 
 class TestCustomCompare:
     """``compare=`` replaces the elementwise check the harness performs."""

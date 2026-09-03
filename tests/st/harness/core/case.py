@@ -29,6 +29,7 @@ unchanged. That is deliberate: the pipeline was never the thing that required
 subclassing.
 """
 
+import copy
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -154,6 +155,37 @@ class Case:
             raise ValueError(f"Unknown platform '{platform}'. Expected one of {ALL_PLATFORM_IDS}.")
         if self.platform is None:
             self.platform = platform
+
+    def for_platform(self, platform: str) -> "Case":
+        """Return this case bound to *platform*, without mutating the original.
+
+        A case is declared once, at collection time, and pytest hands that same
+        object to every platform variant of the item. Binding onto it in place
+        would pin the *first* variant's platform for all of them — and a case's
+        own platform outranks the item's in ``_resolve_platform``, so every
+        variant would then key, compile and run the first platform's artifact
+        instead of its own. Each variant therefore gets its own copy, exactly
+        as the legacy ``PTOTestCase`` path gets a freshly constructed instance
+        per item.
+
+        A case that pinned a platform itself is returned unchanged: the pin is
+        the author's statement that this case runs nowhere else, and it must
+        keep outranking the item.
+
+        Args:
+            platform: The platform resolved for the item being bound.
+
+        Returns:
+            ``self`` when the case pinned a platform, otherwise a copy bound to
+            *platform*. The copy differs in that one field only; the kernel
+            source, tensors and golden are deliberately shared, since they are
+            read-only for the duration of a run.
+        """
+        if self.platform is not None:
+            return self
+        bound = copy.copy(self)
+        bound.bind_platform(platform)
+        return bound
 
     # -- golden -------------------------------------------------------------
 

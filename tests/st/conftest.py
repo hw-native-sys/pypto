@@ -958,8 +958,16 @@ def _collect_test_case_from_item(
     declared = params.get("_st_case")
     if isinstance(declared, Case):
         platform = params.get("platform") or params.get("_st_platform") or session_platform
-        declared.bind_platform(platform)
-        seen.setdefault(_cache_key(declared, platform, session_memory_planner), declared)
+        # One Case object is declared per st.cases() entry and pytest hands that
+        # same object to every platform variant of the item, so the binding goes
+        # onto a per-item copy (see Case.for_platform) and the copy replaces the
+        # shared declaration in this item's params. Binding in place would pin
+        # the first variant's platform for all of them, and every variant would
+        # compile and run that first platform's artifact.
+        bound = declared.for_platform(platform)
+        if bound is not declared and callspec is not None:
+            callspec.params["_st_case"] = bound
+        seen.setdefault(_cache_key(bound, platform, session_memory_planner), bound)
         return
 
     module = item.module
