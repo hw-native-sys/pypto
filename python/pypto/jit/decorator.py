@@ -2433,9 +2433,20 @@ class JITFunction:
 
         Returns:
             The parsed ``ir.Program``, before any pass has run.
+
+        Raises:
+            TypeError: ``config=`` was passed. Accepting it silently would let
+                a caller believe a strategy or diagnostics setting shaped the
+                returned IR, when no pass ran to read it.
         """
         import pypto.language as pl  # noqa: PLC0415
 
+        if "config" in kwargs:
+            raise TypeError(
+                f"@pl.jit function '{self.__name__}': specialize() does not accept config=. "
+                "No pass runs here, so a RunConfig would have nothing to configure. Use "
+                "lower(config=...) for post-pass IR, or compile(config=...) to build an artifact."
+            )
         specialization, _ = self._resolve_specialization(args, kwargs, allow_signature_mode=True)
         return self._compile_to_program(
             specialization.tensor_meta,

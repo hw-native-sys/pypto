@@ -25,6 +25,7 @@ import torch
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.jit.decorator import jit
 from pypto.pypto_core import ir
+from pypto.runtime.runner import RunConfig
 
 M = 16
 N = 16
@@ -145,6 +146,21 @@ class TestSpecialize:
         program = _shaped_entry.specialize()
         assert isinstance(program, ir.Program)
         assert len(list(program.functions)) == 2
+
+    def test_rejects_config(self):
+        """``config=`` is refused rather than silently discarded.
+
+        No pass runs here, so nothing would read a ``RunConfig``. Consuming it
+        quietly would let a caller believe a strategy or diagnostics setting
+        shaped the returned IR.
+        """
+        with pytest.raises(TypeError, match="specialize\\(\\) does not accept config="):
+            _abs_entry.specialize(torch.randn(M, N), torch.zeros(M, N), config=RunConfig())
+
+    def test_rejects_config_in_signature_mode(self):
+        """The same refusal applies with no sample arguments at all."""
+        with pytest.raises(TypeError, match="specialize\\(\\) does not accept config="):
+            _shaped_entry.specialize(config=RunConfig(strategy=OptimizationStrategy.Default))
 
 
 class TestParamAccessors:
