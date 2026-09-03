@@ -181,6 +181,12 @@ class DemandCollector : public IRVisitor {
 
   void RecordInheritInputEdge(const VarPtr& dst, const CallPtr& call) {
     if (!dst) return;
+    // Deliberately the raw `OutputMemoryInheritsInput()` flag, NOT
+    // `op_predicates::IsBufferAliasingViewOp`. This pass propagates the memory
+    // *space*, which is exactly what the flag declares; aliasing the input's
+    // *buffer* is the stricter `inherit && IsInplaceSafe()`. `tile.transpose` is
+    // the case that separates them: it lands in its input's space (so it needs
+    // this edge) while permuting into a fresh buffer (so it is not a view).
     auto& reg = OpRegistry::GetInstance();
     if (!reg.IsRegistered(call->op_->name_)) return;
     if (!reg.GetEntry(call->op_->name_).OutputMemoryInheritsInput()) return;

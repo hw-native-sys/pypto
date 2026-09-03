@@ -737,9 +737,7 @@ class TopDownRetargeter {
       auto call = As<Call>(assign->value_);
       if (!call || !call->op_ || !registry.IsRegistered(call->op_->name_)) continue;
       if (!op_predicates::OutputInheritsSourceBuffer(call->op_->name_)) continue;
-      const auto& entry = registry.GetEntry(call->op_->name_);
-      if (auto reuse_idx = entry.GetOutputReusesInputArg();
-          reuse_idx.has_value() && *reuse_idx < call->args_.size()) {
+      if (auto reuse_idx = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size())) {
         if (auto source = AsVarLike(call->args_[*reuse_idx])) {
           alias_source_[var] = source;
           inplace_source_[var] = source;
@@ -910,10 +908,8 @@ class TopDownRetargeter {
       }
       auto call = As<Call>(assign->value_);
       if (!call || !call->op_) break;
-      const auto& registry = OpRegistry::GetInstance();
-      if (!registry.IsRegistered(call->op_->name_)) break;
-      auto reuse_idx = registry.GetEntry(call->op_->name_).GetOutputReusesInputArg();
-      if (!reuse_idx.has_value() || *reuse_idx >= call->args_.size()) break;
+      auto reuse_idx = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
+      if (!reuse_idx.has_value()) break;
       result = AsVarLike(call->args_[*reuse_idx]);
       break;
     }
@@ -1155,10 +1151,9 @@ class TopDownRetargeter {
     if (!reg.IsRegistered(call->op_->name_)) return false;
     const auto& entry = reg.GetEntry(call->op_->name_);
 
-    auto reuse_idx = entry.GetOutputReusesInputArg();
+    auto reuse_idx = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
     if (reuse_idx.has_value()) {
       // Pinned output: can't change this stmt's LHS MemRef; recurse onto pinned input.
-      if (*reuse_idx >= call->args_.size()) return false;
       auto input_var = AsVarLike(call->args_[*reuse_idx]);
       if (!input_var) return false;
       if (!TryRetargetVar(input_var, target, target_memory)) return false;
@@ -1169,9 +1164,17 @@ class TopDownRetargeter {
 
     // Decline retargeting for ops whose output memory is not fully captured
     // by the LHS type alone:
-    //   1. View ops (set_output_memory_inherit_input) — output MemRef
-    //      inherits the input's view byte_offset_ / size_, which rewriting
-    //      with target's full MemRef would silently drop.
+    //   1. Buffer-aliasing view ops — output MemRef inherits the input's view
+    //      byte_offset_ / size_, which rewriting with target's full MemRef
+    //      would silently drop.  `tile.transpose` is declined here too, even
+    //      though it permutes into a fresh buffer and so has no inherited view
+    //      offset to lose: `set_output_memory_inherit_input()` also pins its
+    //      output's memory SPACE to its input's, and nothing below enforces
+    //      that — case 4 reads a null `deduce_output_memory` for an
+    //      inherit-input op and never fires, and case 3 compares MemRef bases,
+    //      not spaces.  Retyping its LHS onto a different-space target would
+    //      contradict the relation InferTileMemorySpace established.  Making
+    //      transpose retargetable needs that space guard first.
     //   2. Ops that encode output memory in a `target_memory` kwarg (e.g.
     //      tile.create / tile.move / tile.load) — retyping the LHS to a
     //      different memory_space would require rewriting the kwarg too.
@@ -1190,7 +1193,7 @@ class TopDownRetargeter {
     //      different buffer than its init, which YieldFixupMutator reconciles
     //      with a real move (see AlignLoopCarriesToInitMutator's contract).
     //      Same-space targets are unaffected: only the MemRef base moves.
-    if (IsOutputMemoryInheritInput(entry)) {
+    if (entry.OutputMemoryInheritsInput()) {
       // Most view ops can carry a sub-region offset, so retargeting their LHS
       // directly would lose view-relative addressing. tile.set_validshape is
       // the narrow exception: it is a zero-offset, shape-preserving alias of
@@ -1236,13 +1239,6 @@ class TopDownRetargeter {
       c.VisitExpr(call.args_[i]);
     }
     return c.bases.count(target_base) > 0;
-  }
-
-  /// True when the op is registered with set_output_memory_inherit_input.
-  /// Delegates to the shared OpRegistryEntry predicate so passes that reason
-  /// about pass-through ops (here and InferTileMemorySpace) agree on the set.
-  static bool IsOutputMemoryInheritInput(const OpRegistryEntry& entry) {
-    return entry.OutputMemoryInheritsInput();
   }
 
   static bool HasKwarg(const Call& call, const std::string& key) {
@@ -1516,12 +1512,8 @@ class RetypeApplier : public IRMutator {
   /// view whose input was retargeted (caller then falls back to the default visit).
   StmtPtr FollowRetargetedViewInput(const AssignStmtPtr& op) {
     auto orig_call = As<Call>(op->value_);
-    if (!orig_call || orig_call->args_.empty()) return nullptr;
-    const auto& reg = OpRegistry::GetInstance();
-    if (!reg.IsRegistered(orig_call->op_->name_) ||
-        !reg.GetEntry(orig_call->op_->name_).OutputMemoryInheritsInput()) {
-      return nullptr;
-    }
+    if (!orig_call || !orig_call->op_ || orig_call->args_.empty()) return nullptr;
+    if (!op_predicates::IsBufferAliasingViewOp(orig_call->op_->name_)) return nullptr;
     auto in_var = AsVarLike(orig_call->args_[0]);
     if (!in_var) return nullptr;
     auto sub = var_substitution_.find(in_var);
@@ -1534,11 +1526,10 @@ class RetypeApplier : public IRMutator {
     const auto& in_old = *in_old_opt;
     const auto& in_new = *in_new_opt;
     // Use the ORIGINAL (pre-mutation) types: a view inherited its input's buffer
-    // iff its output base equalled the input base in the input IR.  This naturally
-    // excludes the one inherit-input op that does NOT always inherit — a
-    // data-permuting tile.transpose over a sub-region input gets a fresh buffer
-    // (output base != input base from the start), so it is left untouched.  Fire
-    // only when the view inherited AND the input actually moved to another buffer.
+    // iff its output base equalled the input base in the input IR.  Fire only
+    // when the view inherited AND the input actually moved to another buffer.
+    // (tile.transpose is already excluded by IsBufferAliasingViewOp above — it
+    // inherits the memory space but permutes into a fresh buffer.)
     if (out_mr->base_.get() != in_old->base_.get() || in_new->base_.get() == in_old->base_.get()) {
       return nullptr;
     }
@@ -2140,8 +2131,28 @@ static const Var* TileMemRefBase(const VarPtr& v) {
   return nullptr;
 }
 
-/// Op names whose output aliases the input MemRef and lowers to a PTO view
-/// instruction — kept in sync with the PTO buffer-reuse view allowlist.
+/// Ops through which a `tile.load` result's taint reaches the writer below.
+///
+/// This is deliberately NOT one of the registry alias predicates, and the
+/// distinction is the whole point.  Those answer a *semantic* question — does
+/// this operator declare that its result names an argument's buffer.  The taint
+/// closure needs a *physical* one — can this result end up occupying the load's
+/// buffer — and after opportunistic reuse the two differ.  `tile.fillpad`
+/// declares no aliasing at all, yet it is in-place safe, so `RetargetAssign`
+/// may coalesce its output straight onto its input's buffer; that is asserted
+/// by `test_fillpad_output_can_reuse_input`.  Deriving this set from the
+/// registry drops `tile.fillpad` and reopens
+/// `load -> fillpad -> writer(result, tpop_from_aic)`.
+///
+/// The list is therefore kept as-is, and it is an approximation with two known
+/// gaps, both pre-existing:
+///   * it omits `tile.assemble` / `tile.set_validshape` / `tile.tget_scale_addr`,
+///     which do declare aliasing, so a load reaching the writer through one of
+///     them is not tainted; and
+///   * it omits every other in-place-safe op (`tile.add`, ...) whose output
+///     `RetargetAssign` may likewise coalesce onto a load buffer.
+/// Closing either needs the taint to follow post-reuse physical bases rather
+/// than op names, which is a change to the reuse decision itself.
 static bool IsLegalTileViewOp(const OpPtr& op) {
   return IsOp(op, "tile.reshape") || IsOp(op, "tile.extract") || IsOp(op, "tile.slice") ||
          IsOp(op, "tile.fillpad") || IsOp(op, "tile.fillpad_inplace") || IsOp(op, "tile.transpose_view") ||
@@ -4273,11 +4284,9 @@ class NormalizeIdentityCopyBuffersMutator : public IRMutator {
   /// traversal. Returns nullptr when the allocation already agrees.
   StmtPtr ReanchorInplaceOutput(const AssignStmtPtr& op) {
     auto call = As<Call>(op->value_);
-    if (!call) return nullptr;
-    const auto& reg = OpRegistry::GetInstance();
-    if (!reg.IsRegistered(call->op_->name_)) return nullptr;
-    auto reuse_idx = reg.GetEntry(call->op_->name_).GetOutputReusesInputArg();
-    if (!reuse_idx.has_value() || *reuse_idx >= call->args_.size()) return nullptr;
+    if (!call || !call->op_) return nullptr;
+    auto reuse_idx = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
+    if (!reuse_idx.has_value()) return nullptr;
     auto in_var = AsVarLike(call->args_[*reuse_idx]);
     if (!in_var) return nullptr;
     auto new_in = AsVarLike(VisitExpr(in_var));  // follow prior subst_ renames

@@ -439,7 +439,11 @@ bool ShareOneMemRefWindow(const std::shared_ptr<const TileType>& lhs,
 //   * `IsInPlaceInput0DpsOp` — ops whose in-place-ness is a codegen-lowering fact.
 //     Gated on a shared base memref only, which is the long-standing behaviour.
 //
-//   * the registry (`set_output_reuses_input`) — the declared, op-level truth.
+//   * `BuiltinWritebackArgIndex` — the declared, op-level truth: the registry's
+//     `set_output_reuses_input` slot. Deliberately not `ResultAliasedArgIndex`,
+//     which answers the *lineage* question (which argument does the result
+//     name) and additionally covers host-level ops whose result is a window,
+//     not a buffer this emitter may alias.
 //     This is what lets `tile.matmul_acc` accumulate directly into its
 //     accumulator operand: when that operand is a `tile.slice` of a larger Acc
 //     tile its SSA is a `pto.subview`, so the MAD writes straight into the
@@ -474,9 +478,7 @@ bool ShouldAliasResultToInPlaceInput(const AssignStmtPtr& stmt) {
     return result_memref && input_memref && result_memref->base_.get() == input_memref->base_.get();
   }
 
-  auto& registry = ir::OpRegistry::GetInstance();
-  if (!registry.IsRegistered(call->op_->name_)) return false;
-  auto declared = registry.GetEntry(call->op_->name_).GetOutputReusesInputArg();
+  auto declared = ir::op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
   if (!declared.has_value()) return false;
   auto input_tile_type = input_tile_type_at(*declared);
   if (!input_tile_type) return false;

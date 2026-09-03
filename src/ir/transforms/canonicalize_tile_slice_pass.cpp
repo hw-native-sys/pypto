@@ -347,19 +347,16 @@ bool NamesSameWindowExtent(const TileTypePtr& lhs, const TileTypePtr& rhs) {
   return true;
 }
 
-/// The accumulator operand of `call` — the argument the op registry declares as
-/// the in-place destination via `set_output_reuses_input`.  Null when the call
-/// is not an accumulator op (or carries no Var there).
+/// The accumulator operand of `call` — the argument whose buffer the result
+/// names.  Null when the call is not an accumulator op (or carries no Var there).
 ///
-/// Reading the relation from the registry — rather than naming
-/// `tile.matmul_acc` / `tile.gemv_acc` / `tile.matmul_mx_acc` — is what lets the
-/// guard below cover any future accumulator op for free.
+/// Asking `BuiltinWritebackArgIndex` — rather than naming `tile.matmul_acc` /
+/// `tile.gemv_acc` / `tile.matmul_mx_acc` — is what lets the guard below cover
+/// any future accumulator op for free.
 VarPtr AccumulatorOperand(const CallPtr& call) {
   if (!call || !call->op_) return nullptr;
-  auto& reg = OpRegistry::GetInstance();
-  if (!reg.IsRegistered(call->op_->name_)) return nullptr;
-  auto declared = reg.GetEntry(call->op_->name_).GetOutputReusesInputArg();
-  if (!declared.has_value() || *declared >= call->args_.size()) return nullptr;
+  auto declared = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
+  if (!declared.has_value()) return nullptr;
   return AsVarLike(call->args_[*declared]);
 }
 
