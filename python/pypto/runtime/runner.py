@@ -114,6 +114,18 @@ _SWIMLANE_CLI_HELP = (
 )
 
 
+def _backend_type_for_platform(platform: str) -> BackendType:
+    """Return the codegen backend a runtime platform string selects."""
+    return BackendType.Ascend950 if platform.startswith("a5") else BackendType.Ascend910B
+
+
+_BACKEND_TYPE_DEPRECATION = (
+    "RunConfig(backend_type=...) is deprecated and has never taken effect: the backend is "
+    "derived from platform, which wins. Drop the argument, or pass the platform that implies "
+    "the backend you want. Reading RunConfig.backend_type still reports what platform selected."
+)
+
+
 _SWIMLANE_ALIAS_DEPRECATION = (
     "RunConfig.enable_l2_swimlane is deprecated; use enable_chip_swimlane instead. "
     "Same values and semantics — Simpler renamed the L2 layer to 'chip', and the "
@@ -178,9 +190,9 @@ class RunConfig:
         platform: Target execution platform — ``"a2a3sim"`` / ``"a2a3"``
             (Ascend 910B) or ``"a5sim"`` / ``"a5"`` (Ascend 950).
         device_id: Hardware device index (ignored for simulator).
-        backend_type: **Derived, not an input.** Set from ``platform`` during
-            construction; supplying one that disagrees warns and is discarded.
-            Read it to learn which backend a platform selected.
+        backend_type: **Not a field** — a read-only property derived from
+            ``platform``. Accepted as a deprecated constructor keyword, which
+            warns and is discarded when it contradicts the platform.
         rtol: Relative tolerance for result comparison.
         atol: Absolute tolerance for result comparison.
         strategy: PyPTO optimisation strategy applied during compilation.
@@ -343,9 +355,6 @@ class RunConfig:
     rtol: float = 1e-5
     atol: float = 1e-5
     strategy: OptimizationStrategy = field(default_factory=lambda: OptimizationStrategy.Default)
-    # Derived from ``platform`` in ``__post_init__``; ``None`` means "not supplied".
-    # Typed as the concrete enum because every reader sees it after that runs.
-    backend_type: BackendType = None  # type: ignore[assignment]
     dump_passes: bool | PassDumpLevel = False
     save_kernels: bool = False
     save_kernels_dir: str | None = None
@@ -381,21 +390,6 @@ class RunConfig:
             raise ValueError(
                 f"Invalid platform {self.platform!r}. Expected 'a2a3sim', 'a2a3', 'a5sim', or 'a5'."
             )
-        # ``platform`` is the single source of truth for the target: it selects
-        # both the codegen backend and the runtime toolchain, and they must
-        # agree. ``backend_type`` is therefore derived, never an input -- a
-        # supplied one has always been discarded here, silently. Say so instead.
-        derived = BackendType.Ascend950 if self.platform.startswith("a5") else BackendType.Ascend910B
-        if self.backend_type is not None and self.backend_type != derived:
-            warnings.warn(
-                f"RunConfig(backend_type={self.backend_type!r}) is ignored: the backend is derived "
-                f"from platform={self.platform!r}, which selects {derived!r}. Drop the argument, or "
-                f"pass the platform that implies the backend you want.",
-                DeprecationWarning,
-                stacklevel=3,
-            )
-        self.backend_type = derived
-
         backend = _backend_core.get_backend_instance(self.backend_type)
         expected_arch = backend.get_handler().get_pto_target_arch()
         if not self.platform.startswith(expected_arch):
@@ -563,6 +557,16 @@ class RunConfig:
         )
 
     @property
+    def backend_type(self) -> BackendType:
+        """The codegen backend :attr:`platform` selects. Derived, never stored.
+
+        ``platform`` is the single source of truth for the target, so there is
+        nothing to keep in sync: ``a5`` / ``a5sim`` are Ascend950 and the rest
+        are Ascend910B. Read it to learn which backend a platform chose.
+        """
+        return _backend_type_for_platform(self.platform)
+
+    @property
     def enable_l2_swimlane(self) -> int:
         """Deprecated alias for :attr:`enable_chip_swimlane`.
 
@@ -580,7 +584,7 @@ class RunConfig:
 
 
 # ---------------------------------------------------------------------------
-# Deprecated ``enable_l2_swimlane`` spelling
+# Deprecated constructor keywords: ``enable_l2_swimlane`` and ``backend_type``
 # ---------------------------------------------------------------------------
 # Simpler's Worker/Chip/Core naming migration renamed the L2 layer to "chip"
 # (``L2Swimlane*`` -> ``ChipSwimlane*``, ``l2_swimlane_records.json`` ->
@@ -596,13 +600,27 @@ class RunConfig:
 # silently overridden by the stale alias. Keeping the alias off the field list
 # leaves ``replace``, ``fields()``, ``asdict()`` and ``repr()`` clean, and routes
 # the old name through an ``__init__`` wrapper plus a property instead.
+#
+# ``backend_type`` is off the field list for the same reason, plus one of its
+# own. It is derived from ``platform``, so a caller-supplied value has never
+# taken effect. As a field it would come back through ``replace()``:
+# ``replace(cfg, platform="a5")`` re-supplies the *old* platform's backend, and
+# nothing can tell that echo from a caller who typed a contradicting value —
+# so a plain platform switch would warn, and fail outright under
+# warnings-as-errors.
 
 _RUN_CONFIG_INIT = RunConfig.__init__
 
 
 @functools.wraps(_RUN_CONFIG_INIT)
 def _run_config_init(self: RunConfig, *args: Any, **kwargs: Any) -> None:
-    """``RunConfig.__init__`` that also accepts the deprecated alias."""
+    """``RunConfig.__init__`` that also accepts the deprecated keywords."""
+    if "backend_type" in kwargs:
+        supplied = kwargs.pop("backend_type")
+        platform = kwargs.get("platform", "a2a3sim")
+        if supplied is not None and supplied != _backend_type_for_platform(platform):
+            warnings.warn(_BACKEND_TYPE_DEPRECATION, DeprecationWarning, stacklevel=2)
+
     alias = kwargs.pop("enable_l2_swimlane", None)
     if alias is not None:
         warnings.warn(_SWIMLANE_ALIAS_DEPRECATION, DeprecationWarning, stacklevel=2)

@@ -151,15 +151,18 @@ Its fields split three ways, and each way is a type:
 | Dispatch | `RunOptions` | `platform`, `device_id`, `aicpu_thread_num`, the `ring_*` overrides ([Ring sizing](05-runtime-ring-sizing.md)), and a nested `DfxOptions` |
 | A dispatch's diagnostics | `DfxOptions` | `enable_chip_swimlane`, `enable_dump_args`, `enable_pmu`, `enable_dep_gen`, `enable_scope_stats` ([DFX](03-runtime-dfx.md)) |
 | The system-test harness only | — | `rtol`, `atol`, `golden_data_dir`, `save_kernels`, `codegen_only` |
-| Nobody — derived | — | `backend_type`, set from `platform` during construction |
+| Nobody — derived | — | `backend_type`, a read-only property over `platform`, not a field |
 
 **`platform` names the target once.** `RunConfig` derives `backend_type` from it
 during construction, and `ir.compile` lets `platform` win whenever one is given,
 so a `backend_type` that disagrees has never taken effect — passing one to
 `RunConfig` now warns and is discarded. `CompileOptions` therefore does not carry
 it at all: the object always passes a platform, so a second spelling of the same
-decision could only ever be redundant or wrong. `ir.compile` keeps its
-`backend_type` parameter for the lower-level callers that pass no platform.
+decision could only ever be redundant or wrong. On `RunConfig` it is a read-only
+property rather than a field, so `dataclasses.replace(cfg, platform=...)` cannot
+re-supply the previous platform's backend and trip its own warning.
+`ir.compile` keeps its `backend_type` parameter for the lower-level callers that
+pass no platform.
 
 `RunConfig.compile_options()` / `run_options()` / `dfx_options()` are views onto
 the aggregate, and `compile_kwargs()` is `compile_options().as_compile_kwargs()`.

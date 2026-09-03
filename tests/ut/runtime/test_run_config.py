@@ -12,6 +12,7 @@
 import dataclasses
 import sys
 import types
+import warnings
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -784,10 +785,29 @@ class TestRunConfigCompileForwarding:
 
     def test_a_backend_type_that_contradicts_the_platform_warns(self):
         """It was always discarded here; now it says so."""
-        with pytest.warns(DeprecationWarning, match=r"derived from platform='a5sim'"):
+        with pytest.warns(DeprecationWarning, match=r"backend_type=\.\.\.\) is deprecated"):
             cfg = RunConfig(platform="a5sim", backend_type=BackendType.Ascend910B)
 
         assert cfg.backend_type == BackendType.Ascend950
+
+    def test_replace_can_switch_platform_without_warning(self):
+        """``backend_type`` must not be a field, or ``replace`` re-supplies a stale one.
+
+        ``dataclasses.replace`` passes every field of the existing instance back
+        to ``__init__``. As a field, ``backend_type`` would arrive holding the
+        *old* platform's backend, indistinguishable from a caller who typed a
+        contradicting value — so switching platform would warn, and raise under
+        warnings-as-errors.
+        """
+        assert "backend_type" not in {f.name for f in dataclasses.fields(RunConfig)}
+
+        cfg = RunConfig(platform="a2a3")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            switched = dataclasses.replace(cfg, platform="a5")
+
+        assert switched.platform == "a5"
+        assert switched.backend_type == BackendType.Ascend950
 
     def test_a_backend_type_that_agrees_with_the_platform_is_silent(self):
         import warnings  # noqa: PLC0415
@@ -817,8 +837,6 @@ class TestOptionObjects:
     # are listed; everything else keeps its name.
     _COMPILE_RENAMES = {"save_kernels_dir": "output_dir", "compile_profiling": "profiling"}
     _HARNESS_ONLY = {"rtol", "atol", "golden_data_dir", "save_kernels", "codegen_only"}
-    # Derived from ``platform`` rather than carried: no view claims it.
-    _DERIVED = {"backend_type"}
 
     def test_every_run_config_field_is_claimed_by_exactly_one_concern(self):
         """The split must stay total: a new field lands in a view, or in the harness set.
@@ -838,7 +856,7 @@ class TestOptionObjects:
             if renamed in compile_fields or name in dispatch_fields:
                 claimed.add(name)
 
-        assert run_config_fields - claimed == self._HARNESS_ONLY | self._DERIVED
+        assert run_config_fields - claimed == self._HARNESS_ONLY
 
     def test_compile_kwargs_is_the_compile_options_view(self):
         """``compile_kwargs()`` must be exactly what the typed object produces."""
