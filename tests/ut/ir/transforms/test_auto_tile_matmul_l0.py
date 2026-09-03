@@ -2507,6 +2507,112 @@ class TestAutoTileMatmulL0MNTiling:
             f"B-stationary numerics mismatch: max abs diff {(out - expected).abs().max().item():.3e}"
         )
 
+    @pytest.mark.parametrize(
+        ("planner", "dense_is_k_tiled"),
+        [
+            (passes.MemoryPlanner.PYPTO, True),
+            (passes.MemoryPlanner.DSA_RP, False),
+            (passes.MemoryPlanner.PTOAS, False),
+        ],
+    )
+    def test_multiple_geometries_limit_full_l0b_panel_only_for_legacy_pypto(self, planner, dense_is_k_tiled):
+        """#2633: only PYPTO needs compatible whole-buffer L0 geometries.
+
+        A5 chooses a full-64 KiB B-stationary panel for the dense matmul. The
+        16-row sibling uses a two-slot 32 KiB output-stationary layout. Legacy
+        PYPTO cannot subdivide the expired dense panel, so it must re-choose
+        the dense call output-stationary. DSA_RP and PTOAS place independent
+        buffers at overlapping subranges and keep the unconstrained choice.
+        """
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend950)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[64, 128], pl.INT8],
+                tail: pl.Tensor[[16, 128], pl.INT8],
+                rhs: pl.Tensor[[128, 512], pl.INT8],
+                out: pl.Out[pl.Tensor[[64, 512], pl.INT32]],
+                out_tail: pl.Out[pl.Tensor[[16, 512], pl.INT32]],
+            ) -> tuple[pl.Tensor[[64, 512], pl.INT32], pl.Tensor[[16, 512], pl.INT32]]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [64, 128], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [128, 512], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul(lhs_mat, rhs_mat)
+                out = pl.store(c, [0, 0], out)
+                tail_mat = pl.tile.load(tail, [0, 0], [16, 128], target_memory=pl.Mem.Mat)
+                c_tail = pl.tile.matmul(tail_mat, rhs_mat)
+                out_tail = pl.store(c_tail, [0, 0], out_tail)
+                return out, out_tail
+
+        with passes.PassContext([], memory_planner=planner):
+            After = passes.auto_tile_matmul_l0()(Before)
+        printed = ir.python_print(After)
+        dense_k_loop = "pl.pipeline(0, 128, 64,"
+        assert (printed.count(dense_k_loop) == 2) == dense_is_k_tiled
+        _assert_ssa_valid(After, f"test_multiple_geometry_panel_{planner}")
+
+    def test_multiple_geometries_fit_l0b_through_default_pypto_pipeline(self):
+        """The production pipeline packs #2633's two geometries into 64 KiB."""
+        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend950)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[64, 128], pl.INT8],
+                tail: pl.Tensor[[16, 128], pl.INT8],
+                rhs: pl.Tensor[[128, 512], pl.INT8],
+                out: pl.Out[pl.Tensor[[64, 512], pl.INT32]],
+                out_tail: pl.Out[pl.Tensor[[16, 512], pl.INT32]],
+            ) -> tuple[pl.Tensor[[64, 512], pl.INT32], pl.Tensor[[16, 512], pl.INT32]]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [64, 128], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [128, 512], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul(lhs_mat, rhs_mat)
+                out = pl.store(c, [0, 0], out)
+                tail_mat = pl.tile.load(tail, [0, 0], [16, 128], target_memory=pl.Mem.Mat)
+                c_tail = pl.tile.matmul(tail_mat, rhs_mat)
+                out_tail = pl.store(c_tail, [0, 0], out_tail)
+                return out, out_tail
+
+        lowered = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+        right = [
+            int(size)
+            for size in re.findall(r"pl\.tile\.alloc\(pl\.Mem\.Right, (\d+)\)", ir.python_print(lowered))
+        ]
+        assert right and max(right) <= 32 * 1024 and sum(right) <= 64 * 1024
+
+    def test_same_geometry_matmul_acc_chain_keeps_full_l0b_panel_under_pypto(self):
+        """Operation spelling does not turn one split-K geometry into two."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend950)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[64, 128], pl.INT8],
+                rhs: pl.Tensor[[128, 512], pl.INT8],
+                out: pl.Out[pl.Tensor[[64, 512], pl.INT32]],
+            ) -> pl.Tensor[[64, 512], pl.INT32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [64, 128], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [128, 512], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul(lhs_mat, rhs_mat)
+                c_acc = pl.tile.matmul_acc(c, lhs_mat, rhs_mat)
+                out = pl.store(c_acc, [0, 0], out)
+                return out
+
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO):
+            After = passes.auto_tile_matmul_l0()(Before)
+        ir.assert_structural_equal(After, Before)
+
     @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
     @pytest.mark.parametrize(
         ("M", "K", "N", "tile_k"),
