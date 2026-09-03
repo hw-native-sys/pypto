@@ -18,7 +18,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pypto.backend import BackendType
 from pypto.pypto_core.passes import MemoryPlanner
-from pypto.runtime.runner import CompileOptions, DfxOptions, RunConfig, RunOptions, _execute_compiled
+from pypto.runtime.runner import (
+    CompileOptions,
+    DfxOptions,
+    ExecutionMode,
+    RunConfig,
+    RunOptions,
+    _execute_compiled,
+)
 
 
 class TestRunConfigPlatformResolution:
@@ -835,7 +842,17 @@ class TestOptionObjects:
 
     # RunConfig field -> the option-object field it becomes. Only the renames
     # are listed; everything else keeps its name.
-    _COMPILE_RENAMES = {"save_kernels_dir": "output_dir", "compile_profiling": "profiling"}
+    #
+    # ``arch`` and ``execution_mode`` are the two axes ``RunConfig`` chooses;
+    # the views carry the wire spelling that serializes them, so both map onto
+    # ``platform``. The split stops at the class that *chooses* a target — the
+    # views, the artifact and the worker only *carry* one.
+    _COMPILE_RENAMES = {
+        "save_kernels_dir": "output_dir",
+        "compile_profiling": "profiling",
+        "arch": "platform",
+        "execution_mode": "platform",
+    }
     _HARNESS_ONLY = {"rtol", "atol", "golden_data_dir", "save_kernels", "codegen_only"}
 
     def test_every_run_config_field_is_claimed_by_exactly_one_concern(self):
@@ -904,6 +921,109 @@ class TestOptionObjects:
         assert options.ring_heap == 1024 * 1024
         assert options.dfx == cfg.dfx_options()
         assert options.dfx.enable_pmu == 2
+
+    def test_the_two_axes_are_independent_fields(self):
+        """``platform`` is a serialization of two fields, not a field itself.
+
+        Packed into one string, the axes could disagree with each other and with
+        the backend, which is what the old ``__post_init__`` spent a validation
+        and a rebuild guarding against. As separate fields that state is simply
+        unrepresentable.
+        """
+        names = {f.name for f in dataclasses.fields(RunConfig)}
+        assert {"arch", "execution_mode"} <= names
+        assert "platform" not in names
+
+        cfg = RunConfig(arch=BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD)
+        assert cfg.platform == "a5"
+        assert cfg.backend_type == BackendType.Ascend950
+
+    def test_platform_keyword_sets_both_axes(self):
+        """The wire spelling stays constructible: 238 call sites use it."""
+        cfg = RunConfig(platform="a2a3sim")
+
+        assert cfg.arch == BackendType.Ascend910B
+        assert cfg.execution_mode is ExecutionMode.SIM
+        assert cfg.platform == "a2a3sim"
+
+    def test_a_non_enum_execution_mode_is_rejected(self):
+        """``execution_mode="sim"`` must not read as ONBOARD.
+
+        The packed string used to be checked against four literals. Splitting it
+        made a *disagreeing* platform unrepresentable but not a nonsensical one:
+        anything that is not ``ExecutionMode.SIM`` fails the identity test, so a
+        plausible-looking ``"sim"`` would have turned a simulator request into a
+        hardware run — silently, and named ``a2a3`` rather than ``a2a3sim``.
+        """
+        for bad in ("sim", True, 1, None):
+            with pytest.raises(TypeError, match=r"execution_mode must be an ExecutionMode"):
+                RunConfig(execution_mode=bad)  # pyright: ignore[reportArgumentType]
+
+    def test_a_non_backend_type_arch_is_rejected_at_construction(self):
+        """Otherwise it fails later, inside a nanobind call, far from the caller."""
+        for bad in ("a5", "Ascend950", 0):
+            with pytest.raises(TypeError, match=r"arch must be a BackendType"):
+                RunConfig(arch=bad)  # pyright: ignore[reportArgumentType]
+
+    def test_the_axes_are_keyword_only(self):
+        """``platform=`` can only win over an axis if the axis is a keyword.
+
+        The wrapper rewrites ``kwargs``. A positional ``arch`` would reach the
+        generated ``__init__`` alongside the rewritten keyword and raise
+        "multiple values for argument", contradicting the documented precedence.
+        No call site passes positionally, so the class is ``kw_only``.
+        """
+        with pytest.raises(TypeError, match=r"positional argument"):
+            RunConfig(BackendType.Ascend950)  # pyright: ignore[reportCallIssue]
+
+        assert RunConfig(arch=BackendType.Ascend950, platform="a2a3sim").platform == "a2a3sim"
+
+    def test_platform_is_visible_to_introspection(self):
+        """``platform=`` must appear in the signature, not just work.
+
+        ``functools.wraps`` on the ``__init__`` wrapper copies the
+        dataclass-generated signature, which lists the two axes and not the
+        spelling almost every call site uses. Doc tools and IDEs read that
+        signature, so an accepted-but-unadvertised keyword reads as unsupported.
+        """
+        import inspect  # noqa: PLC0415
+
+        params = inspect.signature(RunConfig).parameters
+        assert "platform" in params
+        assert {"arch", "execution_mode"} <= set(params)
+        assert RunConfig(platform="a5sim").platform == "a5sim"
+
+    def test_replace_by_either_axis_or_by_platform(self):
+        """``replace`` works through both spellings, and neither warns.
+
+        ``replace(cfg, platform=...)`` re-supplies both axes from the instance
+        alongside the new platform. The platform has to win over that echo —
+        there is no way to tell it from a caller contradicting themselves, the
+        same ambiguity the deprecated keywords carry.
+        """
+        cfg = RunConfig(arch=BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            assert dataclasses.replace(cfg, arch=BackendType.Ascend910B).platform == "a2a3"
+            assert dataclasses.replace(cfg, execution_mode=ExecutionMode.SIM).platform == "a5sim"
+            assert dataclasses.replace(cfg, platform="a2a3sim").platform == "a2a3sim"
+
+    def test_an_invalid_platform_string_still_names_the_four_spellings(self):
+        with pytest.raises(ValueError, match=r"Invalid platform 'bogus'"):
+            RunConfig(platform="bogus")
+
+    def test_the_arch_name_comes_from_the_backend_handler(self):
+        """The wire arch string has one owner: the C++ handler that stamps it.
+
+        ``pto.target_arch`` in the emitted ``.pto`` is the same string, so a
+        second copy in Python would be a second thing to keep in step.
+        """
+        from pypto.pypto_core import backend as backend_core  # noqa: PLC0415
+
+        for arch in (BackendType.Ascend910B, BackendType.Ascend950):
+            handler_name = backend_core.get_backend_instance(arch).get_handler().get_pto_target_arch()
+            assert RunConfig(arch=arch, execution_mode=ExecutionMode.ONBOARD).platform == handler_name
 
     def test_only_the_option_types_something_accepts_are_exported(self):
         """An exported option type must be one a caller can actually hand somewhere.

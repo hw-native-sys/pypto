@@ -34,6 +34,7 @@ Compilation is :func:`pypto.ir.compile`'s job; nothing here compiles for you.
 
 import functools
 import importlib.util
+import inspect
 import json
 import shlex
 import subprocess
@@ -44,6 +45,7 @@ from collections.abc import Callable
 from ctypes import _SimpleCData
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from enum import Enum, auto
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -114,9 +116,55 @@ _SWIMLANE_CLI_HELP = (
 )
 
 
+class ExecutionMode(Enum):
+    """Whether a run reaches real silicon or the simulator.
+
+    One of the two axes a ``platform`` string packs. It decides how kernels are
+    assembled (``.so`` for the simulator, ``.o`` plus a text-section extract for
+    silicon) and whether the two-pass swimlane capture applies; it never reaches
+    codegen, which sees only the architecture.
+    """
+
+    ONBOARD = auto()
+    SIM = auto()
+
+
+_ARCHES: tuple[BackendType, ...] = (BackendType.Ascend910B, BackendType.Ascend950)
+
+
+def _arch_name(arch: BackendType) -> str:
+    """Return the wire name of an architecture (``"a2a3"`` / ``"a5"``).
+
+    Asks the backend handler rather than mapping it here: the C++ side already
+    owns this string — it is what codegen stamps as ``pto.target_arch`` — and a
+    second copy in Python is a second thing to keep in step.
+    """
+    return _backend_core.get_backend_instance(arch).get_handler().get_pto_target_arch()
+
+
+def _platform_string(arch: BackendType, execution_mode: ExecutionMode) -> str:
+    """Join the two axes into the wire spelling the runtime and CLI take."""
+    return f"{_arch_name(arch)}{'sim' if execution_mode is ExecutionMode.SIM else ''}"
+
+
+def _parse_platform(platform: str) -> tuple[BackendType, ExecutionMode]:
+    """Split a wire platform string back into its two axes.
+
+    The single place that sniffs the string. Everything else asks the axes.
+    """
+    for arch in _ARCHES:
+        name = _arch_name(arch)
+        if platform == name:
+            return arch, ExecutionMode.ONBOARD
+        if platform == f"{name}sim":
+            return arch, ExecutionMode.SIM
+    expected = ", ".join(f"{_arch_name(a)!r}, {_arch_name(a) + 'sim'!r}" for a in _ARCHES)
+    raise ValueError(f"Invalid platform {platform!r}. Expected {expected}.")
+
+
 def _backend_type_for_platform(platform: str) -> BackendType:
     """Return the codegen backend a runtime platform string selects."""
-    return BackendType.Ascend950 if platform.startswith("a5") else BackendType.Ascend910B
+    return _parse_platform(platform)[0]
 
 
 _BACKEND_TYPE_DEPRECATION = (
@@ -171,7 +219,7 @@ def _normalize_swimlane_level(value: int | bool, source: str) -> int:
     return value
 
 
-@dataclass
+@dataclass(kw_only=True)
 class RunConfig:
     """Configuration for compiling and dispatching a program.
 
@@ -187,8 +235,12 @@ class RunConfig:
     does not execute or write compilation artifacts.
 
     Attributes:
-        platform: Target execution platform — ``"a2a3sim"`` / ``"a2a3"``
-            (Ascend 910B) or ``"a5sim"`` / ``"a5"`` (Ascend 950).
+        arch: Target architecture, as the codegen backend that names it —
+            ``BackendType.Ascend910B`` (a2a3) or ``BackendType.Ascend950`` (a5).
+        execution_mode: :class:`ExecutionMode.SIM` or ``ONBOARD``.
+        platform: **Not a field** — the wire spelling of the two axes above
+            (``"a2a3sim"`` / ``"a2a3"`` / ``"a5sim"`` / ``"a5"``), derived on
+            read. Accepted as a constructor keyword, where it sets both axes.
         device_id: Hardware device index (ignored for simulator).
         backend_type: **Not a field** — a read-only property derived from
             ``platform``. Accepted as a deprecated constructor keyword, which
@@ -350,7 +402,8 @@ class RunConfig:
 
     __test__ = False  # Not a pytest test class
 
-    platform: str = "a2a3sim"
+    arch: BackendType = field(default_factory=lambda: BackendType.Ascend910B)
+    execution_mode: ExecutionMode = ExecutionMode.SIM
     device_id: int = 0
     rtol: float = 1e-5
     atol: float = 1e-5
@@ -386,15 +439,24 @@ class RunConfig:
     dump_ptoas_passes: bool = False
 
     def __post_init__(self) -> None:
-        if self.platform not in ("a2a3sim", "a2a3", "a5sim", "a5"):
-            raise ValueError(
-                f"Invalid platform {self.platform!r}. Expected 'a2a3sim', 'a2a3', 'a5sim', or 'a5'."
+        # The two axes replace what used to be a membership test on the packed
+        # platform string. They make a *disagreeing* platform unrepresentable,
+        # but not a nonsensical one: ``execution_mode="sim"`` is not
+        # ``ExecutionMode.SIM``, and silently reading it as ONBOARD would turn a
+        # simulator request into a hardware run. Reject it here, where the value
+        # is still attached to the name the caller typed.
+        if not isinstance(self.arch, BackendType):
+            raise TypeError(
+                f"RunConfig.arch must be a BackendType, got {type(self.arch).__name__} "
+                f"({self.arch!r}). Pass BackendType.Ascend910B / Ascend950, or use "
+                f"platform='a2a3sim' to set both axes from the wire spelling."
             )
-        backend = _backend_core.get_backend_instance(self.backend_type)
-        expected_arch = backend.get_handler().get_pto_target_arch()
-        if not self.platform.startswith(expected_arch):
-            sim_suffix = "sim" if self.platform.endswith("sim") else ""
-            self.platform = f"{expected_arch}{sim_suffix}"
+        if not isinstance(self.execution_mode, ExecutionMode):
+            raise TypeError(
+                f"RunConfig.execution_mode must be an ExecutionMode, got "
+                f"{type(self.execution_mode).__name__} ({self.execution_mode!r}). Pass "
+                f"ExecutionMode.SIM / ONBOARD, or use platform='a2a3sim' to set both axes."
+            )
 
         # Chip swimlane is levelled; normalize ``bool``/int to an explicit
         # level before ``any_dfx_enabled()`` and the CLI round-trip read it.
@@ -557,14 +619,24 @@ class RunConfig:
         )
 
     @property
-    def backend_type(self) -> BackendType:
-        """The codegen backend :attr:`platform` selects. Derived, never stored.
+    def platform(self) -> str:
+        """The wire spelling of :attr:`arch` + :attr:`execution_mode`.
 
-        ``platform`` is the single source of truth for the target, so there is
-        nothing to keep in sync: ``a5`` / ``a5sim`` are Ascend950 and the rest
-        are Ascend910B. Read it to learn which backend a platform chose.
+        Derived, never stored. It is what the simpler ``Worker``, the artifact
+        sidecars and ``--platform`` all take, so it stays a plain ``str`` — but
+        it is a serialization of the two axes rather than a field anything can
+        set out of step with them.
         """
-        return _backend_type_for_platform(self.platform)
+        return _platform_string(self.arch, self.execution_mode)
+
+    @property
+    def backend_type(self) -> BackendType:
+        """The codegen backend, which is :attr:`arch` under the compiler's name.
+
+        Kept as a read accessor because the artifact metadata and downstream
+        callers read it; :attr:`arch` is the field to set.
+        """
+        return self.arch
 
     @property
     def enable_l2_swimlane(self) -> int:
@@ -614,11 +686,22 @@ _RUN_CONFIG_INIT = RunConfig.__init__
 
 @functools.wraps(_RUN_CONFIG_INIT)
 def _run_config_init(self: RunConfig, *args: Any, **kwargs: Any) -> None:
-    """``RunConfig.__init__`` that also accepts the deprecated keywords."""
+    """``RunConfig.__init__`` that also accepts ``platform=`` and the deprecated keywords."""
+    if "platform" in kwargs:
+        # ``platform=`` is the wire spelling of the two axes, and setting it
+        # sets both. It deliberately wins over an ``arch=`` / ``execution_mode=``
+        # in the same call rather than reporting a conflict -- the class is
+        # ``kw_only`` so an axis can only arrive as a keyword, and this rewrite
+        # therefore reaches every spelling of it: ``replace(cfg,
+        # platform=...)`` re-supplies both axes from the existing instance, and
+        # nothing can tell that echo from a caller who typed a contradicting
+        # value -- the same ambiguity documented for the deprecated keywords
+        # below. Rejecting the pair would break every ``replace`` by platform.
+        kwargs["arch"], kwargs["execution_mode"] = _parse_platform(kwargs.pop("platform"))
+
     if "backend_type" in kwargs:
         supplied = kwargs.pop("backend_type")
-        platform = kwargs.get("platform", "a2a3sim")
-        if supplied is not None and supplied != _backend_type_for_platform(platform):
+        if supplied is not None and supplied != kwargs.get("arch", BackendType.Ascend910B):
             warnings.warn(_BACKEND_TYPE_DEPRECATION, DeprecationWarning, stacklevel=2)
 
     alias = kwargs.pop("enable_l2_swimlane", None)
@@ -634,6 +717,25 @@ def _run_config_init(self: RunConfig, *args: Any, **kwargs: Any) -> None:
 
 
 RunConfig.__init__ = _run_config_init  # type: ignore[method-assign]
+
+# ``functools.wraps`` copies the dataclass-generated signature, which lists the
+# two axes but not the ``platform=`` spelling the wrapper accepts -- so
+# ``inspect.signature(RunConfig)``, and every doc tool and IDE reading it, would
+# report a keyword the overwhelming majority of call sites use as unsupported.
+# Advertise it. The deprecated keywords stay out on purpose: they are accepted
+# for compatibility, not offered.
+_RUN_CONFIG_SIGNATURE = inspect.signature(_RUN_CONFIG_INIT)
+RunConfig.__signature__ = _RUN_CONFIG_SIGNATURE.replace(  # type: ignore[attr-defined]
+    parameters=[
+        *(p for name, p in _RUN_CONFIG_SIGNATURE.parameters.items() if name != "self"),
+        inspect.Parameter(
+            "platform",
+            inspect.Parameter.KEYWORD_ONLY,
+            default=None,
+            annotation="str | None",
+        ),
+    ]
+)
 
 
 @dataclass

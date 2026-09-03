@@ -142,13 +142,27 @@ compiled(*tensors, config=config)
 | 仅系统测试 harness | —— | `rtol`、`atol`、`golden_data_dir`、`save_kernels`、`codegen_only` |
 | 无人读取 —— 派生 | —— | `backend_type`，是 `platform` 上的只读属性，不是字段 |
 
-**目标只由 `platform` 说一次。** `RunConfig` 在构造时由它推导出 `backend_type`，而
-`ir.compile` 只要拿到 platform 就让 platform 胜出 —— 所以一个与之矛盾的 `backend_type`
-从来就没有生效过；现在把它传给 `RunConfig` 会告警并被丢弃。`CompileOptions` 因此干脆
-不带这个字段：它总是会传 platform，同一个决策的第二种写法只可能是冗余或错误。在 `RunConfig`
-上它是只读属性而非字段，这样 `dataclasses.replace(cfg, platform=...)` 就不会把上一个
-platform 的 backend 重新塞回来、触发它自己的告警。`ir.compile` 保留 `backend_type`
-参数，供那些完全不传 platform 的底层调用方使用。
+**`platform` 是两个决策，所以 `RunConfig` 存两个字段。** 这个字符串打包了架构
+（`a2a3` / `a5`）和执行模式（`sim` 后缀），而两者各由不同的消费者读取：编译只取架构 ——
+codegen 根本看不到这个字符串 —— 装配层按后缀选 `.so` 还是 `.o`，worker 则比对整个 token。
+因此 `RunConfig` 携带 `arch: BackendType` 与 `execution_mode: ExecutionMode`，
+`platform` 降为把二者序列化出来的派生属性：
+
+```python
+RunConfig(arch=BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD).platform  # "a5"
+RunConfig(platform="a5").arch                                                         # Ascend950
+```
+
+`platform=` 仍然可以构造（238 处调用点在用），并会同时设置两个轴。其余一切不动：
+`cfg.platform` 依旧是普通 `str`，所以产物 sidecar、`--platform`、simpler 的
+`Worker(platform=...)` 都无感。拆分只落在**选择**目标的地方；产物、worker 与装配层
+只是**携带**它，继续用字符串。
+
+随之消失两样东西：`__post_init__` 不再拿四个字面量校验字符串、也不再用它蕴含的 backend
+把字符串重拼一遍 —— 一个与自身架构矛盾的 platform 已经不是能被构造出来的值。而 `arch`
+的类型就是 `BackendType`、不是第三个枚举，所以 `backend_type` 只是这个字段在编译器词汇下的
+名字，而非与之竞争的输入：`CompileOptions` 不带它，`ir.compile` 保留该参数仅供完全不传
+platform 的调用方使用。
 
 `RunConfig.compile_options()` / `run_options()` / `dfx_options()` 是这个聚合体上的视图，
 而 `compile_kwargs()` 就是 `compile_options().as_compile_kwargs()`。`CompileOptions`

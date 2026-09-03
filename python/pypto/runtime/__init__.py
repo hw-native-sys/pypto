@@ -70,7 +70,14 @@ from .log_config import _ensure_configured as _ensure_log_configured
 from .log_config import configure_log
 from .log_config import current_level as log_level
 from .pto_isa import ensure_pto_isa_root, pto_isa_include_dir
-from .runner import CompileOptions, DfxOptions, RunConfig, RunResult, execute_compiled
+from .runner import (
+    CompileOptions,
+    DfxOptions,
+    ExecutionMode,
+    RunConfig,
+    RunResult,
+    execute_compiled,
+)
 from .runtime_base import Worker
 from .tensor_spec import ScalarSpec, TensorSpec
 from .worker import ChipWorker, RegistrationHandle
@@ -98,6 +105,7 @@ __all__ = [
     "RegistrationHandle",
     "CompileOptions",
     "DfxOptions",
+    "ExecutionMode",
     "RunConfig",
     "RunResult",
     "ScalarSpec",

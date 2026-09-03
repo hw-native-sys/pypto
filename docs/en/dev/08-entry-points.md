@@ -153,16 +153,32 @@ Its fields split three ways, and each way is a type:
 | The system-test harness only | — | `rtol`, `atol`, `golden_data_dir`, `save_kernels`, `codegen_only` |
 | Nobody — derived | — | `backend_type`, a read-only property over `platform`, not a field |
 
-**`platform` names the target once.** `RunConfig` derives `backend_type` from it
-during construction, and `ir.compile` lets `platform` win whenever one is given,
-so a `backend_type` that disagrees has never taken effect — passing one to
-`RunConfig` now warns and is discarded. `CompileOptions` therefore does not carry
-it at all: the object always passes a platform, so a second spelling of the same
-decision could only ever be redundant or wrong. On `RunConfig` it is a read-only
-property rather than a field, so `dataclasses.replace(cfg, platform=...)` cannot
-re-supply the previous platform's backend and trip its own warning.
-`ir.compile` keeps its `backend_type` parameter for the lower-level callers that
-pass no platform.
+**`platform` is two decisions, so `RunConfig` stores two fields.** The string
+packs an architecture (`a2a3` / `a5`) and an execution mode (the `sim` suffix),
+and each is read by a different consumer: compilation takes only the
+architecture — codegen never sees the string — while assembly picks `.so` vs
+`.o` from the suffix and the worker compares the whole token. `RunConfig`
+therefore carries `arch: BackendType` and `execution_mode: ExecutionMode`, with
+`platform` a derived property that serializes them:
+
+```python
+RunConfig(arch=BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD).platform  # "a5"
+RunConfig(platform="a5").arch                                                         # Ascend950
+```
+
+`platform=` stays constructible — 238 call sites use it — and sets both axes.
+Nothing else moves: `cfg.platform` is still a plain `str`, so the artifact
+sidecars, `--platform`, and simpler's `Worker(platform=...)` are untouched. The
+split lands where a target is *chosen*; the artifact, the worker and the
+assembly layer only *carry* one, and keep the string.
+
+Two things disappear with it. `__post_init__` no longer validates the string
+against four literals or rebuilds it from the backend it implied — a platform
+that disagrees with its own architecture is no longer a value that can be made.
+And `arch` is `BackendType`, not a third enum, so `backend_type` is that field
+under the compiler's name rather than a competing input: `CompileOptions` does
+not carry it, and `ir.compile` keeps its parameter only for callers that pass no
+platform.
 
 `RunConfig.compile_options()` / `run_options()` / `dfx_options()` are views onto
 the aggregate, and `compile_kwargs()` is `compile_options().as_compile_kwargs()`.
