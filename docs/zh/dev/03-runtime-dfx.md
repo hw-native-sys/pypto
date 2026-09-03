@@ -295,7 +295,7 @@ python runtime/tools/scope_stats_plot.py \
 | ------ | ---- | ----------- |
 | `RunConfig` 字段定义 | [runner.py](../../../python/pypto/runtime/runner.py) | `RunConfig` dataclass + `any_dfx_enabled()` |
 | `CallConfig` 透传 | [device_runner.py](../../../python/pypto/runtime/device_runner.py) | `_execute_on_device(..., enable_*, output_prefix)` |
-| 流水线打包 | [runner.py](../../../python/pypto/runtime/runner.py) | `_DfxOpts` dataclass + `_DfxOpts.from_run_config` |
+| 流水线打包 | [runner.py](../../../python/pypto/runtime/runner.py) | `DfxOptions` dataclass + `RunConfig.dfx_options()` |
 | 按 flag 后处理分发 | [runner.py](../../../python/pypto/runtime/runner.py) | `_collect_dfx_artifacts` |
 | kernel 名称映射合成 | [runner.py](../../../python/pypto/runtime/runner.py) | `_write_name_map` |
 | L3 每次 dispatch 的 program 标记 | [distributed_runner.py](../../../python/pypto/runtime/distributed_runner.py) | `_record_dispatch_program` / `_read_dispatch_program` |

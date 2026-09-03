@@ -168,7 +168,7 @@ def get_backend_instance(backend_type: BackendType) -> Backend:
     :class:`BackendType` regardless of the global configuration.
 
     This is useful for callers that already know which backend they want
-    (for example, :class:`RunOptions.backend_type` may differ from the
+    (for example, :attr:`CompileOptions.backend_type` may differ from the
     globally-configured type when running multiple backends in sequence).
     """
     ...

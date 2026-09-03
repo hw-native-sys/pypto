@@ -152,6 +152,14 @@ from pypto.runtime import CompileOptions
 compiled = ir.compile(program, **CompileOptions(platform="a2a3").as_compile_kwargs())
 ```
 
+**三个里只导出两个**，因为只有两个是调用方真能交出去的东西。`CompileOptions` 如上，
+解包进 `ir.compile`；`DfxOptions` 是 `execute_compiled`、`execute_artifact_dir`、
+`execute_batch_manifest` 的 `dfx=` 参数。`RunOptions` 两者都不是：每个派发入口 ——
+`CompiledProgram.__call__`、`ChipWorker.run` 以及分布式那一对 —— 收的都是 `RunConfig`，
+再自己经 `run_options()` 取派发侧那一半。直接把它交进去会抛 `AttributeError`，
+所以在那些签名放宽之前，它保持内部（`pypto.runtime.runner.RunOptions`）。放宽本身是另一件
+迁移：那意味着主派发 API 的 `config=` 参数要变成联合类型，而只改一部分入口比不改更糟。
+
 `RunConfig` 保留全部字段与全部调用方；这三个类型是它底下的词汇。有一个单测把这个划分钉成
 **完备**的 —— 每个 `RunConfig` 字段要么被某个视图认领，要么属于那五个 harness 专用字段 ——
 于是以后新加的字段不会悄悄两边都不属于。把那五个挪去 harness 是本次**没有**做的一步：
@@ -199,7 +207,7 @@ compiled = ir.compile(program, **CompileOptions(platform="a2a3").as_compile_kwar
 - `pypto.ir.compiled_program` —— `CompiledProgram._build_orch_args`、
   `CompiledProgram._build_call_config`
 - `pypto.runtime.runner` —— `_execute_compiled`、`_execute_golden_case`、
-  `_build_call_config`、`_coerced_to_orch_args`、`_DfxOpts`
+  `_build_call_config`、`_coerced_to_orch_args`、`RunOptions`
 - `pypto.runtime.distributed_runner` —— `_execute_distributed`
 - `pypto.runtime.device_runner` —— 整个装配层：`_compile_and_assemble`、
   `_compile_single_kernel`、`_compile_single_orchestration`、`_execute_on_device`

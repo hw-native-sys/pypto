@@ -861,6 +861,31 @@ class TestOptionObjects:
         assert options.dfx == cfg.dfx_options()
         assert options.dfx.enable_pmu == 2
 
+    def test_only_the_option_types_something_accepts_are_exported(self):
+        """An exported option type must be one a caller can actually hand somewhere.
+
+        ``CompileOptions`` unpacks into ``ir.compile`` and ``DfxOptions`` is the
+        ``dfx=`` parameter of ``execute_compiled``. ``RunOptions`` is neither:
+        every dispatch entry point takes a ``RunConfig`` and calls
+        ``run_options()`` itself, so handing one in raises ``AttributeError``.
+        Exporting it would advertise an entry point that does not exist.
+        """
+        import inspect  # noqa: PLC0415
+
+        from pypto import runtime  # noqa: PLC0415
+
+        assert "CompileOptions" in runtime.__all__
+        assert "DfxOptions" in runtime.__all__
+        assert isinstance(inspect.signature(runtime.execute_compiled).parameters["dfx"].default, DfxOptions)
+
+        assert "RunOptions" not in runtime.__all__
+        assert not hasattr(runtime, "RunOptions")
+
+    def test_dispatch_still_requires_a_run_config(self):
+        """Records why ``RunOptions`` stays internal: the dispatch path calls back into it."""
+        with pytest.raises(AttributeError, match="dfx_options"):
+            RunOptions(platform="a2a3sim").dfx_options()  # pyright: ignore[reportAttributeAccessIssue]
+
     def test_any_dfx_enabled_agrees_with_the_dfx_view(self):
         """One predicate, not two: the aggregate answers through the view."""
         for cfg in (RunConfig(), RunConfig(enable_scope_stats=True), RunConfig(enable_chip_swimlane=True)):

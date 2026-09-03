@@ -310,7 +310,7 @@ class RunConfig:
             to the runtime's compile-time default.
         distributed_config: Optional L3 distributed-execution config, consumed
             only on the ``@pl.jit`` path. When set, it is forwarded to
-            ``ir.compile()`` (via :func:`~pypto.jit.decorator._run_config_compile_kwargs`)
+            ``ir.compile()`` (via :meth:`RunConfig.compile_kwargs`)
             so a HOST-level ``@pl.jit.host`` kernel compiles to a
             :class:`~pypto.ir.distributed_compiled_program.DistributedCompiledProgram`
             and dispatches per-rank. ``None`` (default) compiles a regular
@@ -708,6 +708,14 @@ class RunOptions:
     ``platform`` appears in both halves because it is genuinely two decisions
     that must agree: the target codegen builds for, and the device the worker
     opens. A worker rejects an artifact whose platform differs from its own.
+
+    **Not exported from** ``pypto.runtime``, and deliberately so: no dispatch
+    entry point accepts one yet. ``CompiledProgram.__call__``,
+    ``ChipWorker.run`` and their distributed counterparts all take a
+    :class:`RunConfig`, and reach it through ``run_options()``. Until those
+    signatures widen, this is the internal shape the dispatch plumbing reads,
+    not a configuration a caller can hand in — exporting it would advertise an
+    entry point that does not exist.
     """
 
     platform: str = "a2a3sim"

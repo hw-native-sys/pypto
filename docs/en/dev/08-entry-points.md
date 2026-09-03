@@ -164,6 +164,18 @@ from pypto.runtime import CompileOptions
 compiled = ir.compile(program, **CompileOptions(platform="a2a3").as_compile_kwargs())
 ```
 
+**Only two of the three are exported**, because only two are things a caller can
+hand somewhere. `CompileOptions` unpacks into `ir.compile`, above.
+`DfxOptions` is the `dfx=` parameter of `execute_compiled`, `execute_artifact_dir`
+and `execute_batch_manifest`. `RunOptions` is neither: every dispatch entry point
+— `CompiledProgram.__call__`, `ChipWorker.run`, and the distributed pair — takes
+a `RunConfig` and reaches the dispatch half through `run_options()` itself.
+Handing one in raises `AttributeError`, so it stays internal
+(`pypto.runtime.runner.RunOptions`) until those signatures widen. Widening them
+is a migration of its own: it means a union type on the `config=` parameter of
+the primary dispatch API, and doing it to some entry points and not others would
+be worse than not doing it.
+
 `RunConfig` keeps every field and every caller; the three types are the
 vocabulary underneath it. A unit test pins the split as *total* — every
 `RunConfig` field is claimed by one of the views or is one of the five
@@ -221,7 +233,7 @@ outside PyPTO should not import them:
 - `pypto.ir.compiled_program` — `CompiledProgram._build_orch_args`,
   `CompiledProgram._build_call_config`
 - `pypto.runtime.runner` — `_execute_compiled`, `_execute_golden_case`,
-  `_build_call_config`, `_coerced_to_orch_args`, `_DfxOpts`
+  `_build_call_config`, `_coerced_to_orch_args`, `RunOptions`
 - `pypto.runtime.distributed_runner` — `_execute_distributed`
 - `pypto.runtime.device_runner` — the whole assembly layer:
   `_compile_and_assemble`, `_compile_single_kernel`,
