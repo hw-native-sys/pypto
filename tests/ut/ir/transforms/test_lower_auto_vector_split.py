@@ -4393,5 +4393,86 @@ def test_loop_backedge_yielding_a_lane_local_value_into_a_shared_carry_is_reject
     assert "'halved'" in str(exc_info.value)
 
 
+def test_slice_drop_dims_maps_the_tracked_source_axis_onto_the_result_axis():
+    """The split axis lives on the OPERAND; the halving path indexes the RESULT.
+
+    ``drop_dims`` erases axes and then clamps back to 2D by *prepending* unit
+    axes, so the tracked source's axis 0 lands on result axis 1 here. Reading the
+    result at the source's axis instead found the synthetic unit axis, took the
+    singleton early-return, and passed the slice through untouched while its
+    source was halved underneath it — a 16-row window over an 8-row source.
+
+    This is the mirror of ``test_slice_drop_dims_maps_the_result_axis_back_to_the_source_axis``:
+    that one maps result → source for an *untracked* source, this one maps
+    source → result for a *tracked* one. Both directions are needed.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            cube_seed: pl.Tile[[16, 4], pl.FP32, pl.Mem.Mat],
+            data: pl.Tensor[[16, 4], pl.FP32],
+            out_0: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+        ) -> pl.Tensor[[1, 16], pl.FP32]:
+            seed_vec = pl.tile.move(cube_seed, target_memory=pl.Mem.Vec)  # noqa: F841
+            v = pl.tile.load(data, [0, 0], [16, 4], target_memory=pl.Mem.Vec)
+            sl = pl.tile.slice(v, [16, 1], [0, 0], drop_dims=[1])
+            out_store = pl.tile.store(sl, [0, 0], out_0)
+            return out_store
+
+    @pl.program
+    class Expected:
+        @pl.function(
+            type=pl.FunctionType.InCore,
+            attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": True},
+        )
+        def split_auto(
+            cube_seed: pl.Tile[[16, 4], pl.FP32, pl.Mem.Mat],
+            data: pl.Tensor[[16, 4], pl.FP32],
+            out_0: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+        ) -> pl.Tensor[[1, 16], pl.FP32]:
+            subblock_idx = pl.tile.get_subblock_idx()
+            seed_vec = pl.tile.aiv_shard(cube_seed, split=1)  # noqa: F841
+            v = pl.tile.load(data, [0 + subblock_idx * 8, 0], [8, 4], [8, 4], target_memory=pl.Mem.Vec)
+            # The window follows the source onto its own axis: 8 rows, not 16.
+            sl = pl.tile.slice(v, [8, 1], [0, 0], [], [1])
+            # The store lands on result axis 1, where the split axis now lives.
+            out_store = pl.tile.store(sl, [0, 0 + subblock_idx * 8], out_0)
+            return out_store
+
+    ir.assert_structural_equal(_lower(Before), Expected)
+
+
+def test_slice_dropping_the_tracked_split_axis_is_rejected():
+    """``drop_dims``' unit requirement is on the WINDOW, not on the source.
+
+    A tracked ``[16, 4]`` source windowed ``[1, 4]`` may drop axis 0, so the axis
+    the split partitions can be erased while it is still live. Each lane would
+    then take that window from its own half — lane 1 selects source row 8 where
+    the program asked for row 0 — and the result carries no axis left to tell the
+    lanes apart, so the following store cannot give them separate destinations
+    either. Both lanes would write the same place with different data.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            cube_seed: pl.Tile[[16, 4], pl.FP32, pl.Mem.Mat],
+            data: pl.Tensor[[16, 4], pl.FP32],
+            out_0: pl.Out[pl.Tensor[[1, 4], pl.FP32]],
+        ) -> pl.Tensor[[1, 4], pl.FP32]:
+            seed_vec = pl.tile.move(cube_seed, target_memory=pl.Mem.Vec)  # noqa: F841
+            v = pl.tile.load(data, [0, 0], [16, 4], target_memory=pl.Mem.Vec)
+            sl = pl.tile.slice(v, [1, 4], [0, 0], drop_dims=[0])
+            out_store = pl.tile.store(sl, [0, 0], out_0)
+            return out_store
+
+    with pytest.raises(ValueError, match="the axis the automatic split partitions") as exc_info:
+        _lower(Before)
+    assert "drops dim 0" in str(exc_info.value)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

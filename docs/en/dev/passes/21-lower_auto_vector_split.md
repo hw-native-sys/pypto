@@ -803,12 +803,28 @@ follow the same axis and tracking rules or the conditions above misfire:
   and is rejected rather than resolved by picking a side. Both branches always
   exist here: SSA requires an else wherever `return_vars_` are defined, and
   `ConvertToSSA` synthesizes the else `Yield` for a source-level no-else phi.
-- **`tile.slice` with `drop_dims`.** `shape` / `offset` / `valid_shape` are
-  indexed in the **pre-drop** rank, while the split dim indexes the result.
-  `drop_dims` erases axes afterwards and pads back to 2D by *prepending* unit
-  axes, so `slice([1, 256, 128], drop_dims=[0]) -> [256, 128]` puts the result's
-  dim 0 on the source's dim 1. The result axis is mapped back before any tuple is
-  touched.
+- **`tile.slice` with `drop_dims`.** This op has *two* axis spaces, and the pass
+  crosses between them in both directions. `shape` / `offset` / `valid_shape` are
+  indexed in the **pre-drop** rank; the result is those axes minus `drop_dims`,
+  clamped back to 2D by *prepending* unit axes. So
+  `slice([1, 256, 128], drop_dims=[0]) -> [256, 128]` puts the result's dim 0 on
+  the source's dim 1, and conversely a source dim 0 can land on result dim 1.
+
+  | Direction | Used for |
+  | --------- | -------- |
+  | result axis → pre-drop axis | rewriting the `shape` / `offset` / `valid_shape` tuples, which are indexed pre-drop |
+  | pre-drop axis → result axis | turning a *tracked* source's split axis into the axis that indexes the result type |
+
+  The second direction is the one a tracked source needs: the split axis is
+  carried on the **operand**, while the halving path indexes the **result**.
+  Assuming they coincide made a source axis 0 read the result's synthetic unit
+  axis, take the singleton early-return, and pass the slice through untouched
+  while its source was halved underneath it — a 16-row window over an 8-row
+  source. Both mappings are expressed over the same surviving-axis list, so they
+  are inverses **over the surviving axes**. The synthetic unit axes the 2D clamp
+  prepends have no pre-drop counterpart: result → pre-drop returns them
+  unchanged, and pre-drop → result never produces them, so neither round-trips
+  through the other there.
 
 ## The affinity gate
 

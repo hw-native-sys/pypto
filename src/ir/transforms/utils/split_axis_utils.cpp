@@ -15,6 +15,7 @@
 #include <any>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -311,22 +312,25 @@ FullWidthOperand FindFullWidthOperand(const CallPtr& call, int result_split_dim,
 // the rule it is inverting. A result axis that is one of the synthetic padded
 // unit axes has no pre-drop counterpart; it is singleton, so the halving path
 // never asks about it, and returning the identity keeps callers total.
-int MapResultAxisToSliceArgAxis(const CallPtr& call, int result_axis) {
-  if (call->args_.size() < 5) return result_axis;
+// The tile.slice source axes that survive drop_dims, ascending; nullopt when the
+// call carries no usable drop_dims and the two axis spaces coincide.
+//
+// ParseSliceDropDims returns the axes ASCENDING, in range and each at most once,
+// so the survivors fall out of a single merge against them -- no per-axis lookup
+// into drop_dims. Walking the two in step also makes the ordering assumption
+// explicit at the one place that depends on it.
+std::optional<std::vector<int>> SliceKeptAxes(const CallPtr& call) {
+  if (call->args_.size() < 5) return std::nullopt;
   auto shape_tuple = std::dynamic_pointer_cast<const MakeTuple>(call->args_[1]);
-  if (!shape_tuple) return result_axis;
+  if (!shape_tuple) return std::nullopt;
   std::vector<int64_t> drop_dims;
   try {
     drop_dims = ParseSliceDropDims(call->args_[4], shape_tuple->elements_, "tile.slice");
   } catch (const pypto::Error&) {
-    return result_axis;
+    return std::nullopt;
   }
-  if (drop_dims.empty()) return result_axis;
+  if (drop_dims.empty()) return std::nullopt;
 
-  // ParseSliceDropDims returns the axes ASCENDING, in range and each at most
-  // once, so the surviving axes fall out of a single merge against them -- no
-  // per-axis lookup into drop_dims. Walking the two in step also makes the
-  // ordering assumption explicit at the one place that depends on it.
   std::vector<int> kept;
   kept.reserve(shape_tuple->elements_.size());
   size_t next_drop = 0;
@@ -337,12 +341,37 @@ int MapResultAxisToSliceArgAxis(const CallPtr& call, int result_axis) {
     }
     kept.push_back(d);
   }
-  // Sub-2D results are clamped back to 2D with leading unit axes, which shifts
-  // every surviving axis right by that padding.
-  const int pad = static_cast<int>(kept.size()) < 2 ? 2 - static_cast<int>(kept.size()) : 0;
-  const int kept_index = result_axis - pad;
-  if (kept_index < 0 || kept_index >= static_cast<int>(kept.size())) return result_axis;
-  return kept[kept_index];
+  return kept;
+}
+
+// Sub-2D results are clamped back to 2D with leading unit axes, which shifts
+// every surviving axis right by that padding.
+int SliceResultPadding(size_t kept_count) { return kept_count < 2 ? static_cast<int>(2 - kept_count) : 0; }
+
+int MapResultAxisToSliceArgAxis(const CallPtr& call, int result_axis) {
+  auto kept = SliceKeptAxes(call);
+  if (!kept.has_value()) return result_axis;
+  const int kept_index = result_axis - SliceResultPadding(kept->size());
+  if (kept_index < 0 || kept_index >= static_cast<int>(kept->size())) return result_axis;
+  return (*kept)[kept_index];
+}
+
+// The inverse: which RESULT axis a pre-drop source axis ends up on, or -1 when
+// drop_dims erases it.
+//
+// The two directions are inverses over the SURVIVING axes only, which is why
+// both are expressed over the same SliceKeptAxes: the split axis is carried on
+// the OPERAND, while the halving path indexes the RESULT type with it, and
+// conflating the two put a 16-row window over an 8-row source (gh#2614). A
+// synthetic padded result axis has no pre-drop counterpart, so the result->arg
+// direction returns the identity for it while the arg->result direction never
+// produces it; neither round-trips through the other there.
+int MapSliceArgAxisToResultAxis(const CallPtr& call, int arg_axis) {
+  auto kept = SliceKeptAxes(call);
+  if (!kept.has_value()) return arg_axis;
+  auto it = std::lower_bound(kept->begin(), kept->end(), arg_axis);
+  if (it == kept->end() || *it != arg_axis) return -1;
+  return SliceResultPadding(kept->size()) + static_cast<int>(std::distance(kept->begin(), it));
 }
 
 std::string DescribeSplitExtent(const ExprPtr& dim_size) {
@@ -1076,7 +1105,43 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
 
       // Result split dim: follow the tracked input's (possibly migrated) dim; root
       // ops with no tracked input use the global split dim.
-      const int result_split_dim = (in_split_dim >= 0) ? in_split_dim : split_dim;
+      //
+      // in_split_dim is an axis of the OPERAND, and indexing the RESULT type with
+      // it is only valid while the two share an axis correspondence. A
+      // rank-changing view breaks that: tile.slice with drop_dims erases axes and
+      // then clamps back to 2D by PREPENDING unit axes, so a source axis 0 can
+      // land on result axis 1. Reading the result at the source's axis then found
+      // the synthetic unit axis, took the singleton early-return below, and passed
+      // the slice through untouched while its source was halved underneath it --
+      // a 16-row window over an 8-row source (gh#2614). Map through the op's own
+      // rule instead of assuming identity.
+      int result_split_dim = (in_split_dim >= 0) ? in_split_dim : split_dim;
+      if (in_split_dim >= 0 && IsOp(call, "tile.slice")) {
+        const int mapped = MapSliceArgAxisToResultAxis(call, in_split_dim);
+        if (mapped >= 0) {
+          result_split_dim = mapped;
+        } else {
+          // drop_dims erased the very axis the split partitions. Its unit-extent
+          // requirement is on the slice WINDOW, not on the source, so a tracked
+          // [16, 4] source windowed [1, 4] reaches here with a live split axis.
+          // The result then carries no axis distinguishing the lanes, while each
+          // lane's window sits in its own half -- lane 1 selects source row 8
+          // where the program asked for row 0, and the untracked result gets no
+          // store offset, so both lanes write the same place with different data.
+          // Only a singleton source axis is safe: both lanes then hold the same
+          // single row, so dropping it loses nothing.
+          const bool axis_is_shared = in_tt && in_split_dim < static_cast<int>(in_tt->shape_.size()) &&
+                                      IsSingletonDim(in_tt->shape_[in_split_dim]);
+          CHECK_SPAN(axis_is_shared, call->span_)
+              << "LowerAutoVectorSplit: '" << op_name << "' drops dim " << in_split_dim
+              << ", which is the axis the automatic split partitions its source along. Each AIV lane "
+                 "would select that window from its own half -- lane 1 reads a different row of the "
+                 "original than the program asked for -- and the result carries no axis left to tell the "
+                 "lanes apart, so a later store cannot give them separate destinations. Slice the axis "
+                 "before the split region, keep the dropped axis out of the split axis, or move the "
+                 "slice outside the automatically split region.";
+        }
+      }
       if (tt && result_split_dim < static_cast<int>(tt->shape_.size())) {
         if (IsSingletonDim(tt->shape_[result_split_dim])) {
           return stmt;
