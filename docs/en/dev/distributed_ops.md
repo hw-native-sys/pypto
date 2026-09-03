@@ -30,7 +30,7 @@ There are **fifteen ops** and **four ABI enums**:
 | `pld.tensor.reduce_scatter` | reduce and scatter chunks across ranks | `DistributedTensorType` (same as src) | builtin collective |
 | `pld.tensor.allgather` | gather data from all ranks via window | `DistributedTensorType` (same as src) | builtin collective |
 | `pld.tensor.all_to_all` | push-based symmetric personalized exchange — every rank pushes its per-destination chunks to every peer's window via `pld.tensor.put` (TPUT), returns window as result | `DistributedTensorType` (same as src) | composite / HOST builtin |
-| `pld.tensor.all_to_all_v` | variable-size all-to-all (MPI_Alltoallv) — pushes `clamp(send_counts[dest], 0, MAX_RECV)` rows per destination into a flat 2D staging window (transfer size is the runtime row count, so padding never crosses the wire), and publishes that same clamped count into peer `recv_counts[my_rank, 0]` via `pld.system.notify` (Set) so the receiver knows which rows are valid; returns window as result (same window-as-result pattern as symmetric `all_to_all`) | `DistributedTensorType` (same as target) | composite / HOST builtin |
+| `pld.tensor.all_to_all_v` | variable-size all-to-all (MPI_Alltoallv) — pushes `clamp(send_counts[dest], 0, MAX_RECV)` rows per destination into a flat 2D staging window (transfer size is the runtime row count, so padding never crosses the wire), and publishes that same clamped count into peer `recv_counts[my_rank, 0]` via `pld.system.notify` (Set) so the receiver knows which rows are valid; returns window as result (same window-as-result pattern as symmetric `all_to_all`) | `DistributedTensorType` (same as target) | composite / HOST builtin / CHIP builtin |
 | `pld.system.notify` | signal a peer's slot | `Unknown` (side effect) | TNOTIFY |
 | `pld.system.wait` | block on own slot | `Unknown` (side effect) | TWAIT |
 | `pld.system.defer_wait` | defer this task's logical completion on a local counter | `Unknown` (side effect) | Simpler completion runtime (no PTOAS wait op) |
@@ -399,7 +399,7 @@ keyword attributes.
 
 ```text
 pld.tensor.all_to_all_v(
-    input, target, signal, send_counts, recv_counts
+    input, target, signal, send_counts, recv_counts, *, core_num: int = 1
 ) -> DistributedTensorType(target)
 ```
 
@@ -410,6 +410,12 @@ Variable-size all-to-all (MPI_Alltoallv). Flat 2D layouts:
 - `signal` — DistributedTensor INT32 `[NR, 1]` (self-clearing credit barrier; reusable across calls)
 - `send_counts` — Tensor-like INT32 `[NR]` or `[NR, 1]` (runtime rows per dest)
 - `recv_counts` — DistributedTensor INT32 `[NR, 1]` (InOut recvcounts)
+
+`input` and `target` are addressed by flat element arithmetic, so both must be
+packed row-major views and must be two distinct buffers. A statically provable
+violation — a non-ND layout, a stride vector that is not the packed one, a
+`valid_shape` narrower than the shape, or the same operand in both roles — is
+rejected by the type deducer.
 
 `MAX_RECV = target.shape[0] // NR`. Lowering reads `send_counts[dest]` at
 runtime, clamps it to `[0, MAX_RECV]`, and publishes the **clamped** count into
@@ -450,6 +456,20 @@ actually running. Both rails apply the identical two-sided clamp and the same
 
 **InCore composite** (`LowerCompositeOps`): the primitive above, decomposed
 into `pld.tile.put` + `pld.system.notify`/`wait` inside a chip kernel.
+
+`core_num` is the requested AIV block limit. Every rail is single-block today,
+so only `core_num=1` is accepted; the parameter exists because the managed CHIP
+rail is where a multi-AIV launch will land. The InCore rail rejects anything
+else outright, naming the CHIP rail in the diagnostic.
+
+**CHIP builtin** (`LowerL2TensorCollectives`): the same call written one level
+down, in a CHIP `Orchestration` body rather than in `host_orch`. It is rewritten
+into a call to a synthesized AIV kernel rendered from the *same* builtin
+template the HOST rail uses, so the wire behaviour is identical and only the
+dispatch structure differs: the collective becomes one AIV task of the caller's
+own pipeline — no per-device fan-out, no nested L2 dispatch — ordered against
+the surrounding compute by ordinary TensorMap dependencies. See
+[`38-lower_l2_tensor_collectives.md`](passes/38-lower_l2_tensor_collectives.md).
 
 **HOST builtin** (`LowerHostTensorCollectives`): the same 5-arg call, made
 from a `host_orch` function, lowers per-device to `builtin.tensor.all_to_all_v`
@@ -528,7 +548,7 @@ dynamic physical target dimension is bound from that tensor parameter.
   every row of the signal afterward.
 
 Host-orchestrator user code may omit `signal` outside `for` and `while` loops;
-the [`SynthesizeAllReduceSignals`](passes/41-synthesize_allreduce_signals.md)
+the [`SynthesizeAllReduceSignals`](passes/42-synthesize_allreduce_signals.md)
 pass inserts a private INT32 signal window with semantic shape
 `[world_size, core_num]`
 for that call (mesh mode only — `mode="ring"` requires an explicit signal). The
@@ -691,11 +711,11 @@ than a PTO tensor view.
 ## Pipeline integration
 
 Comm domains and their slot allocations are materialised by the
-[`MaterializeCommDomainScopes`](passes/42-materialize_comm_domain_scopes.md) pass, which wraps each
+[`MaterializeCommDomainScopes`](passes/43-materialize_comm_domain_scopes.md) pass, which wraps each
 host_orch body in nested `CommDomainScopeStmt` nodes (one per inferred comm domain) and produces the
 per-window `WindowBuffer` records that the runtime binds physical buffers to.
 Host-level tensor collectives are then lowered by
-[`LowerHostTensorCollectives`](passes/43-lower_host_tensor_collectives.md) into internal builtin chip
+[`LowerHostTensorCollectives`](passes/44-lower_host_tensor_collectives.md) into internal builtin chip
 dispatches before the final `Simplify`.
 
 ## Testing
@@ -715,7 +735,8 @@ dispatches before the final `Simplify`.
   `test_l3_host_tensor_allreduce_ring.py`,
   `test_l3_ep_dispatch_combine.py`, `test_l3_notify_wait.py`,
   `test_l3_tensor_all_to_all_v_intrinsic.py` (InCore composite),
-  `test_l3_host_tensor_all_to_all_v.py` (HOST builtin), and related L3 STs
+  `test_l3_host_tensor_all_to_all_v.py` (HOST builtin),
+  `test_l2_tensor_all_to_all_v.py` (CHIP builtin), and related L3 STs
   under `tests/st/distributed/`. **Put/get canonical e2e contracts** are now
   enabled: `test_l3_put.py` (ring overwrite, row-offset put, atomic-add put, and
   chunked/pipelined transfers ✅), `test_l3_get.py` (ring read, row-offset get ✅),

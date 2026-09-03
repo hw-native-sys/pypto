@@ -250,6 +250,21 @@ Pass MaterializeCommDomainScopes();
 Pass LowerHostTensorCollectives();
 
 /**
+ * @brief Lower managed collectives written in a CHIP/L2 orchestration body into
+ *        one local builtin AIV task.
+ *
+ * The CHIP counterpart of ``LowerHostTensorCollectives``: instead of fanning the
+ * collective out into one chip dispatch per device (a nested L2 orchestration
+ * task), it rewrites the call into a call to a synthesized AIV kernel backed by
+ * the same hand-written builtin template source. The kernel joins the caller's
+ * own task DAG, so ``compute -> collective -> consume`` is ordered by ordinary
+ * TensorMap dependencies and the host dispatches one pipeline per rank.
+ *
+ * Today only ``pld.tensor.all_to_all_v`` with ``core_num=1`` is supported.
+ */
+Pass LowerL2TensorCollectives();
+
+/**
  * @brief Materialize one CommCtx parameter/argument per DistributedTensor parameter.
  */
 Pass MaterializeDistTensorCtx();
