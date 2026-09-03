@@ -356,18 +356,19 @@ nav:
           - en/dev/passes/35-allocate_memory_addr.md
           - en/dev/passes/36-fold_no_op_reshape.md
           - en/dev/passes/37-fuse_create_assemble_to_slice.md
-          - en/dev/passes/38-derive_call_directions.md
-          - en/dev/passes/39-auto_derive_task_dependencies.md
-          - en/dev/passes/40-expand_manual_phase_fence.md
-          - en/dev/passes/41-synthesize_allreduce_signals.md
-          - en/dev/passes/42-materialize_comm_domain_scopes.md
-          - en/dev/passes/43-lower_host_tensor_collectives.md
-          - en/dev/passes/44-materialize_dist_tensor_ctx.md
-          - en/dev/passes/45-legalize_graph_boundary.md
-          - en/dev/passes/46-materialize_runtime_scopes.md
-          - en/dev/passes/47-classify_iter_arg_carry.md
-          - en/dev/passes/48-insert_comm_fence.md
-          - en/dev/passes/49-materialize_valid_shape_symbols.md
+          - en/dev/passes/38-lower_l2_tensor_collectives.md
+          - en/dev/passes/39-derive_call_directions.md
+          - en/dev/passes/40-auto_derive_task_dependencies.md
+          - en/dev/passes/41-expand_manual_phase_fence.md
+          - en/dev/passes/42-synthesize_allreduce_signals.md
+          - en/dev/passes/43-materialize_comm_domain_scopes.md
+          - en/dev/passes/44-lower_host_tensor_collectives.md
+          - en/dev/passes/45-materialize_dist_tensor_ctx.md
+          - en/dev/passes/46-legalize_graph_boundary.md
+          - en/dev/passes/47-materialize_runtime_scopes.md
+          - en/dev/passes/48-classify_iter_arg_carry.md
+          - en/dev/passes/49-insert_comm_fence.md
+          - en/dev/passes/50-materialize_valid_shape_symbols.md
           - en/dev/passes/91-utility_passes.md
           - en/dev/passes/92-diagnostics.md
           - en/dev/passes/99-verifier.md

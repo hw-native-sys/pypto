@@ -151,8 +151,8 @@ pl.set_cache_policy(b, BYPASS)                 statement, consumed at parse
 - **参数索引只在 pass 8..10 之间有效。** 二者之间只夹着 `OutlineClusterScopes`，它不会
   改动已外提 InCore 函数的参数列表。而下游的 pass *会*改：
   [`InjectGMPipeBuffer`](../passes/23-inject_gm_pipe_buffer.md) 与
-  [`MaterializeDistTensorCtx`](../passes/44-materialize_dist_tensor_ctx.md) 追加参数，
-  [`MaterializeValidShapeSymbols`](../passes/49-materialize_valid_shape_symbols.md)
+  [`MaterializeDistTensorCtx`](../passes/45-materialize_dist_tensor_ctx.md) 追加参数，
+  [`MaterializeValidShapeSymbols`](../passes/50-materialize_valid_shape_symbols.md)
   则在*前面插入*。这正是 pass 10 转换完成后必须擦除该 attr 的原因。
 - **kwarg 是 `int` 而不是枚举。** 它沿用 `tile.store` 的 `atomic` kwarg 做法，因此
   序列化器、反序列化器、`structural_hash` 与 `structural_equal` 都无需新增枚举分支。
