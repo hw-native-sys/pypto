@@ -419,30 +419,44 @@ bool HasSupportedMatmulArity(MatmulKind kind, size_t arity) {
   return arity == expected || (kind == MatmulKind::kAccumulate && arity == expected + 1u);
 }
 
-/// Source geometry that determines one matmul's chooser-visible L0 operand
-/// allocation classes. The operation spelling is deliberately absent:
-/// ``matmul`` and ``matmul_acc`` steps of one logical split-K reduction have
-/// identical geometry and must count once.
-struct MatmulGeometry {
+/// Chooser-visible constraints that determine one matmul's L0 allocation
+/// class. ``matmul`` and ``matmul_acc`` deliberately share the unbiased class:
+/// steps of one logical split-K reduction must count once. ``matmul_bias`` is
+/// distinct because operand boxing, Bias capacity, and Bias residency restrict
+/// its legal design space even when M/K/N and the element widths are identical.
+struct MatmulChooserSignature {
   int64_t M = 0;
   int64_t K = 0;
   int64_t N = 0;
   uint32_t bytes_a = 0;
   uint32_t bytes_b = 0;
   uint32_t bytes_c = 0;
+  int l0c_align_m = 0;
+  bool is_bias = false;
+  bool bias_from_mat = false;
+  int64_t lhs_box_rows = 0;
+  int64_t lhs_box_cols = 0;
+  int64_t rhs_box_rows = 0;
+  int64_t rhs_box_cols = 0;
+  uint32_t bias_capacity_bytes = 0;
 
-  bool operator==(const MatmulGeometry& other) const {
+  bool operator==(const MatmulChooserSignature& other) const {
     return M == other.M && K == other.K && N == other.N && bytes_a == other.bytes_a &&
-           bytes_b == other.bytes_b && bytes_c == other.bytes_c;
+           bytes_b == other.bytes_b && bytes_c == other.bytes_c && l0c_align_m == other.l0c_align_m &&
+           is_bias == other.is_bias && bias_from_mat == other.bias_from_mat &&
+           lhs_box_rows == other.lhs_box_rows && lhs_box_cols == other.lhs_box_cols &&
+           rhs_box_rows == other.rhs_box_rows && rhs_box_cols == other.rhs_box_cols &&
+           bias_capacity_bytes == other.bias_capacity_bytes;
   }
 };
 
-/// Return the geometry of a matmul that reaches AutoTile's chooser-facing
-/// Mat/Vec residency boundary. This mirrors AnalyzeMatmul's operation arity,
-/// static-shape, accumulator, bias, and source-memory checks. Later
+/// Return the allocation-constraint signature of a matmul that reaches
+/// AutoTile's chooser-facing Mat/Vec residency boundary. This mirrors
+/// AnalyzeMatmul's operation arity, static-shape, accumulator, bias, and
+/// source-memory checks. Later
 /// source-provenance checks may still defer a particular rewrite; counting it
 /// here is intentionally conservative because the untouched call still uses L0.
-std::optional<MatmulGeometry> GetAutoTileMatmulGeometry(const AssignStmtPtr& assign) {
+std::optional<MatmulChooserSignature> GetAutoTileMatmulChooserSignature(const AssignStmtPtr& assign) {
   auto call = assign ? As<Call>(assign->value_) : nullptr;
   auto kind = GetMatmulKind(call);
   if (!kind || !HasSupportedMatmulArity(*kind, call->args_.size())) return std::nullopt;
@@ -469,10 +483,11 @@ std::optional<MatmulGeometry> GetAutoTileMatmulGeometry(const AssignStmtPtr& ass
       !IsStatic2DInSpaces(rhs_tile, {MemorySpace::Mat}, K_rhs, N) || K_lhs != K_rhs) {
     return std::nullopt;
   }
+  TileTypePtr bias_tile;
   if (*kind == MatmulKind::kBias) {
     if (lhs_tile->GetMemorySpace() != MemorySpace::Mat) return std::nullopt;
     auto bias = AsVarLike(call->args_[2]);
-    auto bias_tile = bias ? As<TileType>(bias->GetType()) : nullptr;
+    bias_tile = bias ? As<TileType>(bias->GetType()) : nullptr;
     int64_t bias_m = 0;
     int64_t bias_n = 0;
     if (!IsStatic2DInSpaces(bias_tile, {MemorySpace::Mat, MemorySpace::Bias}, bias_m, bias_n) ||
@@ -485,7 +500,33 @@ std::optional<MatmulGeometry> GetAutoTileMatmulGeometry(const AssignStmtPtr& ass
   const uint32_t bytes_b = DTypeBytes(rhs_tile->dtype_);
   const uint32_t bytes_c = DTypeBytes(out_tile->dtype_);
   if (bytes_a == 0 || bytes_b == 0 || bytes_c == 0) return std::nullopt;
-  return MatmulGeometry{M, K_lhs, N, bytes_a, bytes_b, bytes_c};
+
+  const auto* ctx = PassContext::Current();
+  const auto* handler = ctx ? ctx->GetBackendHandler() : pypto::backend::GetBackend()->GetHandler();
+  INTERNAL_CHECK(handler) << "Internal error: BackendHandler is null";
+
+  MatmulChooserSignature signature;
+  signature.M = M;
+  signature.K = K_lhs;
+  signature.N = N;
+  signature.bytes_a = bytes_a;
+  signature.bytes_b = bytes_b;
+  signature.bytes_c = bytes_c;
+  signature.l0c_align_m = handler->GetL0cMAlignment(out_tile->dtype_);
+  signature.is_bias = *kind == MatmulKind::kBias;
+  if (signature.is_bias) {
+    const auto lhs_alignment = tile_view_semantics::GetBoxedTileAlignment(*lhs_tile);
+    const auto rhs_alignment = tile_view_semantics::GetBoxedTileAlignment(*rhs_tile);
+    // AnalyzeMatmul defers an unknown boxed alignment. Keep a stable sentinel
+    // here so such a call still counts as a distinct L0 user conservatively.
+    signature.lhs_box_rows = lhs_alignment ? lhs_alignment->rows : -1;
+    signature.lhs_box_cols = lhs_alignment ? lhs_alignment->cols : -1;
+    signature.rhs_box_rows = rhs_alignment ? rhs_alignment->rows : -1;
+    signature.rhs_box_cols = rhs_alignment ? rhs_alignment->cols : -1;
+    signature.bias_from_mat = bias_tile->GetMemorySpace() == MemorySpace::Mat;
+    signature.bias_capacity_bytes = handler->GetBiasCapacityBytes();
+  }
+  return signature;
 }
 
 struct KLoopRewrite {
@@ -962,7 +1003,7 @@ bool ExceedsPyptoL0PanelShare(const utils::L0TileResult& res, const utils::L0Til
 std::optional<MatmulTiling> AnalyzeMatmul(
     const AssignStmtPtr& assign, std::vector<Diagnostic>& hints, bool force_output_stationary = false,
     std::optional<tile_view_semantics::BoxedTileAlignment> output_box_alignment = std::nullopt,
-    const DirectDefMap* direct_defs = nullptr, bool has_multiple_l0_geometries = false) {
+    const DirectDefMap* direct_defs = nullptr, bool has_multiple_l0_signatures = false) {
   auto call = As<Call>(assign->value_);
   if (!call || !call->op_) return std::nullopt;
 
@@ -1304,7 +1345,7 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   // succeeded with the same capacities, disabling only A/B stationarity cannot
   // make this second call fail; do not catch and silently restore the unsafe
   // untouched panel if that invariant ever changes.
-  if (memory_planner == MemoryPlanner::PyPTO && has_multiple_l0_geometries && !force_output_stationary &&
+  if (memory_planner == MemoryPlanner::PyPTO && has_multiple_l0_signatures && !force_output_stationary &&
       ExceedsPyptoL0PanelShare(res, cfg)) {
     cfg.allow_a_stationary = false;
     cfg.allow_b_stationary = false;
@@ -3099,9 +3140,9 @@ std::unordered_set<const ForStmt*> BuildPipelineDbCPlan(const FunctionPtr& func)
 
 class AutoTileMutator : public IRMutator {
  public:
-  AutoTileMutator(std::unordered_set<const ForStmt*> pipeline_dbc_plan, bool has_multiple_l0_geometries)
+  AutoTileMutator(std::unordered_set<const ForStmt*> pipeline_dbc_plan, bool has_multiple_l0_signatures)
       : pipeline_dbc_plan_(std::move(pipeline_dbc_plan)),
-        has_multiple_l0_geometries_(has_multiple_l0_geometries) {}
+        has_multiple_l0_signatures_(has_multiple_l0_signatures) {}
 
   std::vector<Diagnostic> hints;
 
@@ -3318,7 +3359,7 @@ class AutoTileMutator : public IRMutator {
       if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(current)) {
         if (auto tiling = AnalyzeMatmul(assign, hints, /*force_output_stationary=*/false,
                                         /*output_box_alignment=*/std::nullopt, &direct_defs,
-                                        has_multiple_l0_geometries_)) {
+                                        has_multiple_l0_signatures_)) {
           if (!tiling->needs_mn_tiling()) {
             // Whole output fits L0c — tile K only.  k < K here (k == K with
             // m == M, n == N needs no matmul tiling and was skipped by
@@ -3468,23 +3509,24 @@ class AutoTileMutator : public IRMutator {
 
  private:
   std::unordered_set<const ForStmt*> pipeline_dbc_plan_;
-  bool has_multiple_l0_geometries_ = false;
+  bool has_multiple_l0_signatures_ = false;
 };
 
 /// Detect whether a function contains more than one chooser-facing matmul
-/// geometry. Only the first geometry is retained: finding one different value
-/// answers the predicate, keeping this pre-analysis O(N) with constant memory.
-class MatmulGeometryDiversityCollector : public IRVisitor {
+/// allocation signature. Only the first signature is retained: finding one
+/// different value answers the predicate, keeping this pre-analysis O(N) with
+/// constant memory.
+class MatmulChooserDiversityCollector : public IRVisitor {
  public:
   [[nodiscard]] bool has_multiple() const { return has_multiple_; }
 
  protected:
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (!has_multiple_) {
-      if (auto geometry = GetAutoTileMatmulGeometry(op)) {
+      if (auto signature = GetAutoTileMatmulChooserSignature(op)) {
         if (!first_) {
-          first_ = *geometry;
-        } else if (!(*first_ == *geometry)) {
+          first_ = *signature;
+        } else if (!(*first_ == *signature)) {
           has_multiple_ = true;
         }
       }
@@ -3493,7 +3535,7 @@ class MatmulGeometryDiversityCollector : public IRVisitor {
   }
 
  private:
-  std::optional<MatmulGeometry> first_;
+  std::optional<MatmulChooserSignature> first_;
   bool has_multiple_ = false;
 };
 
@@ -3504,9 +3546,9 @@ FunctionPtr TransformFunction(const FunctionPtr& func, std::vector<Diagnostic>& 
   // and loop identities. Rewrite it first so the #2131 dbC capacity/placement
   // plan is computed from the exact IR the ordinary AutoTile phase will visit.
   auto canonical = RewriteCanonicalSplitKAcc(func, hints);
-  MatmulGeometryDiversityCollector geometry_collector;
-  geometry_collector.VisitStmt(canonical->body_);
-  AutoTileMutator mutator(BuildPipelineDbCPlan(canonical), geometry_collector.has_multiple());
+  MatmulChooserDiversityCollector chooser_collector;
+  chooser_collector.VisitStmt(canonical->body_);
+  AutoTileMutator mutator(BuildPipelineDbCPlan(canonical), chooser_collector.has_multiple());
   auto new_body = mutator.VisitStmt(canonical->body_);
   for (auto& d : mutator.hints) hints.push_back(std::move(d));
   if (new_body == canonical->body_) return canonical;

@@ -2588,6 +2588,74 @@ class TestAutoTileMatmulL0MNTiling:
         ]
         assert right and max(right) <= 32 * 1024 and sum(right) <= 64 * 1024
 
+    def test_mixed_matmul_bias_constraints_fit_l0b_under_pypto(self):
+        """Equal M/K/N does not conflate plain and Bias-constrained choices."""
+        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[64, 128], pl.INT8],
+                rhs: pl.Tensor[[128, 512], pl.INT8],
+                bias: pl.Tensor[[1, 512], pl.INT32],
+                plain_out: pl.Out[pl.Tensor[[64, 512], pl.INT32]],
+                bias_out: pl.Out[pl.Tensor[[64, 512], pl.INT32]],
+            ) -> tuple[pl.Tensor[[64, 512], pl.INT32], pl.Tensor[[64, 512], pl.INT32]]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [64, 128], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [128, 512], target_memory=pl.Mem.Mat)
+                plain = pl.tile.matmul(lhs_mat, rhs_mat)
+                plain_out = pl.store(plain, [0, 0], plain_out)
+                bias_mat = pl.tile.load(bias, [0, 0], [1, 512], target_memory=pl.Mem.Mat)
+                biased = pl.tile.matmul_bias(lhs_mat, rhs_mat, bias_mat)
+                bias_out = pl.store(biased, [0, 0], bias_out)
+                return plain_out, bias_out
+
+        lowered = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+        right = [
+            int(size)
+            for size in re.findall(r"pl\.tile\.alloc\(pl\.Mem\.Right, (\d+)\)", ir.python_print(lowered))
+        ]
+        assert right and max(right) <= 32 * 1024 and sum(right) <= 64 * 1024
+
+    def test_multiple_geometries_fit_l0a_through_default_pypto_pipeline(self):
+        """The symmetric #2633 schedule packs two L0A slots into 64 KiB."""
+        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend950)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[512, 128], pl.INT8],
+                rhs: pl.Tensor[[128, 64], pl.INT8],
+                tail_rhs: pl.Tensor[[128, 16], pl.INT8],
+                out: pl.Out[pl.Tensor[[512, 64], pl.INT32]],
+                out_tail: pl.Out[pl.Tensor[[512, 16], pl.INT32]],
+            ) -> tuple[pl.Tensor[[512, 64], pl.INT32], pl.Tensor[[512, 16], pl.INT32]]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [512, 128], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [128, 64], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul(lhs_mat, rhs_mat)
+                out = pl.store(c, [0, 0], out)
+                tail_rhs_mat = pl.tile.load(tail_rhs, [0, 0], [128, 16], target_memory=pl.Mem.Mat)
+                c_tail = pl.tile.matmul(lhs_mat, tail_rhs_mat)
+                out_tail = pl.store(c_tail, [0, 0], out_tail)
+                return out, out_tail
+
+        lowered = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+        left = [
+            int(size)
+            for size in re.findall(r"pl\.tile\.alloc\(pl\.Mem\.Left, (\d+)\)", ir.python_print(lowered))
+        ]
+        assert left and max(left) <= 32 * 1024 and sum(left) <= 64 * 1024
+
     def test_same_geometry_matmul_acc_chain_keeps_full_l0b_panel_under_pypto(self):
         """Operation spelling does not turn one split-K geometry into two."""
         _backend.reset_for_testing()
