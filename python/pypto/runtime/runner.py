@@ -178,10 +178,12 @@ class RunConfig:
         platform: Target execution platform — ``"a2a3sim"`` / ``"a2a3"``
             (Ascend 910B) or ``"a5sim"`` / ``"a5"`` (Ascend 950).
         device_id: Hardware device index (ignored for simulator).
+        backend_type: **Derived, not an input.** Set from ``platform`` during
+            construction; supplying one that disagrees warns and is discarded.
+            Read it to learn which backend a platform selected.
         rtol: Relative tolerance for result comparison.
         atol: Absolute tolerance for result comparison.
         strategy: PyPTO optimisation strategy applied during compilation.
-        backend_type: Code-generation backend (:attr:`BackendType.Ascend910B` by default).
         dump_passes: Per-pass IR dump control. A :class:`~pypto.ir.PassDumpLevel`
             (``NONE`` / ``CONCISE`` / ``EXPLICIT``) or a ``bool``
             (``True`` -> ``CONCISE``, ``False`` -> ``NONE``). ``EXPLICIT`` resolves
@@ -341,7 +343,9 @@ class RunConfig:
     rtol: float = 1e-5
     atol: float = 1e-5
     strategy: OptimizationStrategy = field(default_factory=lambda: OptimizationStrategy.Default)
-    backend_type: BackendType = field(default_factory=lambda: BackendType.Ascend910B)
+    # Derived from ``platform`` in ``__post_init__``; ``None`` means "not supplied".
+    # Typed as the concrete enum because every reader sees it after that runs.
+    backend_type: BackendType = None  # type: ignore[assignment]
     dump_passes: bool | PassDumpLevel = False
     save_kernels: bool = False
     save_kernels_dir: str | None = None
@@ -377,14 +381,20 @@ class RunConfig:
             raise ValueError(
                 f"Invalid platform {self.platform!r}. Expected 'a2a3sim', 'a2a3', 'a5sim', or 'a5'."
             )
-        # A caller-provided platform is the public source of truth for runtime
-        # toolchain selection. Keep backend_type synchronized with it so codegen
-        # and execution target the same architecture, rather than silently
-        # rewriting the requested platform back to the default backend.
-        if self.platform.startswith("a5"):
-            self.backend_type = BackendType.Ascend950
-        else:
-            self.backend_type = BackendType.Ascend910B
+        # ``platform`` is the single source of truth for the target: it selects
+        # both the codegen backend and the runtime toolchain, and they must
+        # agree. ``backend_type`` is therefore derived, never an input -- a
+        # supplied one has always been discarded here, silently. Say so instead.
+        derived = BackendType.Ascend950 if self.platform.startswith("a5") else BackendType.Ascend910B
+        if self.backend_type is not None and self.backend_type != derived:
+            warnings.warn(
+                f"RunConfig(backend_type={self.backend_type!r}) is ignored: the backend is derived "
+                f"from platform={self.platform!r}, which selects {derived!r}. Drop the argument, or "
+                f"pass the platform that implies the backend you want.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+        self.backend_type = derived
 
         backend = _backend_core.get_backend_instance(self.backend_type)
         expected_arch = backend.get_handler().get_pto_target_arch()
@@ -514,7 +524,6 @@ class RunConfig:
         """
         return CompileOptions(
             platform=self.platform,
-            backend_type=self.backend_type,
             strategy=self.strategy,
             dump_passes=self.dump_passes,
             dump_ptoas_passes=self.dump_ptoas_passes,
@@ -745,10 +754,16 @@ class CompileOptions:
     spells ``save_kernels_dir`` and ``compile_profiling`` are ``output_dir`` and
     ``profiling`` here, because this object exists to name the compile side as
     the compiler names it.
+
+    ``platform`` is the only way to name the target. ``ir.compile`` also takes a
+    ``backend_type``, but derives it from ``platform`` whenever one is given, so
+    carrying both here would offer a pairing that cannot take effect: set them
+    to disagree and the platform silently wins. ``ir.compile`` keeps its
+    parameter for callers that pass no platform at all; this object always
+    passes one.
     """
 
     platform: str = "a2a3sim"
-    backend_type: BackendType = field(default_factory=lambda: BackendType.Ascend910B)
     strategy: OptimizationStrategy = field(default_factory=lambda: OptimizationStrategy.Default)
     dump_passes: bool | PassDumpLevel = False
     dump_ptoas_passes: bool = False
@@ -768,7 +783,6 @@ class CompileOptions:
         """Return these options as :func:`pypto.ir.compile` keyword arguments."""
         kwargs: dict[str, Any] = {
             "platform": self.platform,
-            "backend_type": self.backend_type,
             "strategy": self.strategy,
             "dump_passes": self.dump_passes,
             "dump_ptoas_passes": self.dump_ptoas_passes,

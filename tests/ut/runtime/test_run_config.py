@@ -767,12 +767,36 @@ class TestRunConfigCompileForwarding:
         kwargs = stub_device_runner._execute_on_device.call_args.kwargs
         assert kwargs["enable_sdma"] is expected_enable_sdma
 
-    def test_compile_kwargs_carry_the_codegen_target(self):
-        """``platform`` and the ``backend_type`` it implies both reach compilation."""
-        kwargs = RunConfig(platform="a5sim").compile_kwargs()
+    def test_compile_kwargs_name_the_target_once(self):
+        """Only ``platform`` is forwarded; ``ir.compile`` derives the backend from it.
+
+        Forwarding both would offer a pairing that cannot take effect —
+        ``ir.compile`` lets ``platform`` win whenever one is given — so the
+        config states the target once and the compiler resolves it.
+        """
+        cfg = RunConfig(platform="a5sim")
+        kwargs = cfg.compile_kwargs()
 
         assert kwargs["platform"] == "a5sim"
-        assert kwargs["backend_type"] == BackendType.Ascend950
+        assert "backend_type" not in kwargs
+        # Still readable on the config, as the backend that platform selected.
+        assert cfg.backend_type == BackendType.Ascend950
+
+    def test_a_backend_type_that_contradicts_the_platform_warns(self):
+        """It was always discarded here; now it says so."""
+        with pytest.warns(DeprecationWarning, match=r"derived from platform='a5sim'"):
+            cfg = RunConfig(platform="a5sim", backend_type=BackendType.Ascend910B)
+
+        assert cfg.backend_type == BackendType.Ascend950
+
+    def test_a_backend_type_that_agrees_with_the_platform_is_silent(self):
+        import warnings  # noqa: PLC0415
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            cfg = RunConfig(platform="a5sim", backend_type=BackendType.Ascend950)
+
+        assert cfg.backend_type == BackendType.Ascend950
 
     def test_compile_kwargs_forward_distributed_config_by_identity(self):
         """A set ``distributed_config`` is forwarded as the same object.
@@ -793,6 +817,8 @@ class TestOptionObjects:
     # are listed; everything else keeps its name.
     _COMPILE_RENAMES = {"save_kernels_dir": "output_dir", "compile_profiling": "profiling"}
     _HARNESS_ONLY = {"rtol", "atol", "golden_data_dir", "save_kernels", "codegen_only"}
+    # Derived from ``platform`` rather than carried: no view claims it.
+    _DERIVED = {"backend_type"}
 
     def test_every_run_config_field_is_claimed_by_exactly_one_concern(self):
         """The split must stay total: a new field lands in a view, or in the harness set.
@@ -812,7 +838,7 @@ class TestOptionObjects:
             if renamed in compile_fields or name in dispatch_fields:
                 claimed.add(name)
 
-        assert run_config_fields - claimed == self._HARNESS_ONLY
+        assert run_config_fields - claimed == self._HARNESS_ONLY | self._DERIVED
 
     def test_compile_kwargs_is_the_compile_options_view(self):
         """``compile_kwargs()`` must be exactly what the typed object produces."""

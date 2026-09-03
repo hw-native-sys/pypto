@@ -136,10 +136,17 @@ compiled(*tensors, config=config)
 
 | 由谁读取 | 类型 | 字段 |
 | -------- | ---- | ---- |
-| `ir.compile` | `CompileOptions` | `platform`、`backend_type`、`strategy`、`dump_passes`、`dump_ptoas_passes`、`profiling`（`compile_profiling`）、`diagnostic_phase`、`disabled_diagnostics`、`analyze_auto_scopes_for_deps`、`output_dir`（`save_kernels_dir`）、`memory_planner`、`distributed_config` |
+| `ir.compile` | `CompileOptions` | `platform`、`strategy`、`dump_passes`、`dump_ptoas_passes`、`profiling`（`compile_profiling`）、`diagnostic_phase`、`disabled_diagnostics`、`analyze_auto_scopes_for_deps`、`output_dir`（`save_kernels_dir`）、`memory_planner`、`distributed_config` |
 | 派发 | `RunOptions` | `platform`、`device_id`、`aicpu_thread_num`、`ring_*` 覆写项（[Ring 尺寸](05-runtime-ring-sizing.md)），以及内嵌的 `DfxOptions` |
 | 一次派发采集哪些诊断 | `DfxOptions` | `enable_chip_swimlane`、`enable_dump_args`、`enable_pmu`、`enable_dep_gen`、`enable_scope_stats`（[DFX](03-runtime-dfx.md)） |
 | 仅系统测试 harness | —— | `rtol`、`atol`、`golden_data_dir`、`save_kernels`、`codegen_only` |
+| 无人读取 —— 派生 | —— | `backend_type`，构造时由 `platform` 推导 |
+
+**目标只由 `platform` 说一次。** `RunConfig` 在构造时由它推导出 `backend_type`，而
+`ir.compile` 只要拿到 platform 就让 platform 胜出 —— 所以一个与之矛盾的 `backend_type`
+从来就没有生效过；现在把它传给 `RunConfig` 会告警并被丢弃。`CompileOptions` 因此干脆
+不带这个字段：它总是会传 platform，同一个决策的第二种写法只可能是冗余或错误。
+`ir.compile` 保留 `backend_type` 参数，供那些完全不传 platform 的底层调用方使用。
 
 `RunConfig.compile_options()` / `run_options()` / `dfx_options()` 是这个聚合体上的视图，
 而 `compile_kwargs()` 就是 `compile_options().as_compile_kwargs()`。`CompileOptions`
