@@ -1372,6 +1372,9 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
     INTERNAL_CHECK_SPAN(for_stmt->iter_args_.size() == for_stmt->return_vars_.size(), for_stmt->span_)
         << "Internal error: ForStmt iter_args and return_vars sizes must match, got "
         << for_stmt->iter_args_.size() << " vs " << for_stmt->return_vars_.size();
+    // The backedge is the third edge of the carry, and the only one the two
+    // Repair* helpers do not touch.
+    ValidateCarryBackedge(new_body, new_iter_args, tile_vars, for_stmt->span_);
     new_return_vars = RepairReturnVars(for_stmt->return_vars_, new_iter_args, tile_vars, var_replacements,
                                        subblock_idx, lane_stride);
     return loop_repair::RebuildForStmt(for_stmt, new_iter_args, new_body, new_return_vars);
@@ -1531,6 +1534,41 @@ bool SameTileInfo(const TileInfo& a, const TileInfo& b) {
 }
 
 }  // namespace
+
+void ValidateCarryBackedge(const StmtPtr& new_body, const std::vector<IterArgPtr>& new_iter_args,
+                           const std::unordered_map<const Var*, TileInfo>& tile_vars, const Span& span) {
+  if (new_iter_args.empty()) return;
+  auto yield = transform_utils::GetLastYieldStmt(new_body);
+  // A loop that carries state ends in a Yield feeding every slot; anything else
+  // is malformed IR the SSA verifier rejects, so there is nothing to compare.
+  if (!yield || yield->value_.size() != new_iter_args.size()) return;
+
+  for (size_t i = 0; i < new_iter_args.size(); ++i) {
+    auto carry_it = tile_vars.find(new_iter_args[i].get());
+    const bool carry_is_lane_local = carry_it != tile_vars.end();
+    auto yielded = YieldedTileInfo(yield, i, tile_vars);
+
+    if (!carry_is_lane_local && !yielded.has_value()) continue;
+    if (carry_is_lane_local && yielded.has_value() && SameTileInfo(carry_it->second, *yielded)) continue;
+
+    auto yielded_var = AsVarLike(yield->value_[i]);
+    const std::string yielded_name =
+        yielded_var ? " '" + yielded_var->name_hint_ + "'" : std::string(" the yielded value");
+    CHECK_SPAN(false, span)
+        << "LowerAutoVectorSplit: the loop carry '" << new_iter_args[i]->name_hint_
+        << "' inside the automatically split vector region "
+        << (carry_is_lane_local
+                ? "is lane-local (the split halved its init value), but the body yields" + yielded_name +
+                      " back into it, which no lane owns a half of. The carry's declared per-lane type "
+                      "would contradict the value flowing into it on every iteration after the first."
+                : "is full width, but the body yields" + yielded_name +
+                      " back into it, which the split made lane-local. The carry cannot hold a per-lane "
+                      "value under a full-width declared type.")
+        << " Derive both the same way -- load or slice the value inside the split region on both the "
+           "init and the backedge, or keep both shared by the two lanes -- or move the loop outside the "
+           "automatically split region.";
+  }
+}
 
 std::vector<VarPtr> RepairIfReturnVars(const std::vector<VarPtr>& return_vars, const StmtPtr& new_then_body,
                                        const std::optional<StmtPtr>& new_else_body,

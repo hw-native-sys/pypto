@@ -653,11 +653,18 @@ picked = pl.tile.gather(src, indices, tmp)   # 被拒绝：表被折半了
 有三处是在折半**周围**改写状态而非折半本身，它们必须遵循同样的轴映射与跟踪规则，
 否则上面的条件会误判：
 
-- **循环携带值。** `iter_arg` 继承其 init 的跟踪信息，因此 init 被折半时携带值也变为
-  lane 局部；循环出口的 `return_var` 再继承之，使后续 `tile.store` 拿到 per-lane 偏移。
-  显式路径与 AUTO 亲和性门控路径共用 `RepairIterArgs` / `RepairReturnVars`——AUTO 走的是
-  自己的遍历，够不到显式路径的 `ForStmt` 分支，缺了这一步就会把合法的 tile 累加器的携带值
-  当成全宽操作数报错。
+- **循环携带值。** 一个携带值有三条边，三者必须一致。`iter_arg` 继承其 init 的跟踪信息，
+  因此 init 被折半时携带值也变为 lane 局部；循环出口的 `return_var` 再继承之，使后续
+  `tile.store` 拿到 per-lane 偏移。显式路径与 AUTO 亲和性门控路径共用 `RepairIterArgs` /
+  `RepairReturnVars`——AUTO 走的是自己的遍历，够不到显式路径的 `ForStmt` 分支，缺了这一步
+  就会把合法的 tile 累加器的携带值当成全宽操作数报错。
+- **循环回边。** 第三条边是循环体 yield 回携带值的那个值，由 `ValidateCarryBackedge` 负责
+  校验：yield 的值当且仅当携带值是 lane 局部时才可以是 lane 局部。被折半的携带值收到一个
+  全宽值，就会声明一个与第二轮起流入它的值相矛盾的 per-lane 类型——和未分片操作数是同一个
+  缺陷，但所有操作数检查都看不见它，因为那些检查读的是 `Call` 的实参，而这里是 `Yield`。
+  该校验是对称的，因此把 lane 局部的值 yield 进全宽携带值同样会被拒绝。它只校验、不修复：
+  yield 的值若已被跟踪，尾部的 `Substitute` 本就会换上折半替身；若未被跟踪，则根本不存在
+  可替换的折半版本。
 - **分支归并值。** `IfStmt` 的归并变量（`return_vars_`，一个 `DefField`）是否 lane 局部，
   取决于两个分支 yield 的值是否 lane 局部。保持声明的全宽会同时与两个 `Yield` 矛盾，
   而且因为它从不被登记进 `tile_vars`，后续 `tile.store` 拿不到 lane 偏移——**两条 AIV

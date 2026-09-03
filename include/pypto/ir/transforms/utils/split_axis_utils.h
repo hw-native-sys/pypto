@@ -367,6 +367,23 @@ std::vector<VarPtr> RepairReturnVars(const std::vector<VarPtr>& return_vars,
 /// value while the other yields a full-width one has no single merge type, and
 /// picking either silently gives one AIV lane the wrong extent -- so that is
 /// rejected rather than merged.
+/// Check a loop's BACKEDGE against its carry: the value the body yields back
+/// into slot ``i`` must be lane-local exactly when that carry is. Call AFTER
+/// lowering the body, with the LOWERED body and the repaired iter_args.
+///
+/// RepairIterArgs and RepairReturnVars cover the carry's entry and exit only, so
+/// without this a body yielding a full-width value into a halved carry emits a
+/// Yield whose declared type contradicts its value -- the gh#2203 defect on the
+/// carry path, which no operand check sees because those inspect a Call's
+/// arguments and this is a Yield.
+///
+/// Validate rather than repair: when the yielded value IS tracked the trailing
+/// Substitute already swaps in its halved replacement, and when it is not there
+/// is no halved version to substitute, so a diagnostic naming the carry is the
+/// only correct answer.
+void ValidateCarryBackedge(const StmtPtr& new_body, const std::vector<IterArgPtr>& new_iter_args,
+                           const std::unordered_map<const Var*, TileInfo>& tile_vars, const Span& span);
+
 std::vector<VarPtr> RepairIfReturnVars(const std::vector<VarPtr>& return_vars, const StmtPtr& new_then_body,
                                        const std::optional<StmtPtr>& new_else_body,
                                        std::unordered_map<const Var*, TileInfo>& tile_vars,

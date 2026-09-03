@@ -2064,8 +2064,11 @@ def test_loop_carried_tile_accumulator_is_tracked():
     # The carry and everything derived from it are lane-local.
     assert "pl.tile.add(acc_it, acc_it)" in printed
     assert printed.count("[64, 128]") >= 3
-    # The store on the loop-exit var picks up the per-lane offset.
-    assert "subblock_idx * 64" in printed
+    # The store on the loop-exit var picks up the per-lane offset. Assert it on the
+    # store LINE: a bare `"subblock_idx * 64" in printed` also matches the tile.load
+    # above, so it passed whether or not the store was offset at all.
+    store_line = next(line for line in printed.splitlines() if "pl.tile.store(" in line)
+    assert "pl.tile.store(acc_loop, [0 + subblock_idx * 64, 0]" in store_line
 
 
 def test_slice_drop_dims_maps_the_result_axis_back_to_the_source_axis():
@@ -4325,6 +4328,69 @@ def test_source_level_no_else_phi_still_merges_after_ssa_conversion():
     assert f"{merge_name}: pl.Tile[[64, 128], pl.FP32, pl.Mem.Vec]" in printed
     store_line = next(line for line in printed.splitlines() if "pl.tile.store(" in line)
     assert f"pl.tile.store({merge_name}, [0 + subblock_idx * 64, 0]" in store_line
+
+
+def test_loop_backedge_yielding_a_full_width_value_is_rejected():
+    """The backedge must agree with the carry it feeds.
+
+    ``RepairIterArgs`` / ``RepairReturnVars`` repair the carry's entry and exit,
+    but nothing looked at the value the body yields back into it. With a halved
+    init and a body that yields a full-width parameter, the carry is retyped to
+    ``[64, 128]`` while the yielded value stays ``[128, 128]`` — the gh#2203
+    "declared type contradicts the value" defect on the carry path, which no
+    operand check sees because it inspects a ``Call``'s arguments and this is a
+    ``Yield``.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            cube_seed: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat],
+            data: pl.Tensor[[128, 128], pl.FP32],
+            full: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec],
+            out_0: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            seed_vec = pl.tile.move(cube_seed, target_memory=pl.Mem.Vec)  # noqa: F841
+            accum = pl.tile.load(data, [0, 0], [128, 128], target_memory=pl.Mem.Vec)
+            for i, (acc_it,) in pl.range(2, init_values=(accum,)):  # noqa: B007
+                acc_loop = pl.yield_(full)
+            out_store = pl.tile.store(acc_loop, [0, 0], out_0)
+            return out_store
+
+    with pytest.raises(ValueError, match="yields") as exc_info:
+        _lower(Before)
+    assert "acc" in str(exc_info.value)
+
+
+def test_loop_backedge_yielding_a_lane_local_value_into_a_shared_carry_is_rejected():
+    """The mismatch is rejected in both directions.
+
+    Here the carry's init is a full-width parameter, so nothing halved it, while
+    the body yields a value the split made lane-local. A per-lane value cannot
+    live in a full-width carry any more than the converse, and the check is
+    symmetric so neither direction silently survives.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            cube_seed: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat],
+            data: pl.Tensor[[128, 128], pl.FP32],
+            full: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec],
+            out_0: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            seed_vec = pl.tile.move(cube_seed, target_memory=pl.Mem.Vec)  # noqa: F841
+            for i, (acc_it,) in pl.range(2, init_values=(full,)):  # noqa: B007
+                halved = pl.tile.load(data, [0, 0], [128, 128], target_memory=pl.Mem.Vec)
+                acc_loop = pl.yield_(halved)
+            out_store = pl.tile.store(acc_loop, [0, 0], out_0)
+            return out_store
+
+    with pytest.raises(ValueError, match="is full width, but the body yields") as exc_info:
+        _lower(Before)
+    assert "'halved'" in str(exc_info.value)
 
 
 if __name__ == "__main__":

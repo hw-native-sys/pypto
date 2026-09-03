@@ -565,6 +565,8 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
       auto body = transform_utils::FlattenToStmts(for_stmt->body_);
       auto new_body = LowerStmts(body, mode, split_dim, tile_vars, subblock_idx, var_replacements, used_names,
                                  lane_stride);
+      split_axis::ValidateCarryBackedge(loop_repair::MakeBody(new_body, for_stmt->span_), new_iter_args,
+                                        tile_vars, for_stmt->span_);
       auto new_return_vars = split_axis::RepairReturnVars(for_stmt->return_vars_, new_iter_args, tile_vars,
                                                           var_replacements, subblock_idx, lane_stride);
       result.push_back(loop_repair::RebuildForStmt(
@@ -604,6 +606,8 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
       auto body = transform_utils::FlattenToStmts(while_stmt->body_);
       auto new_body = LowerStmts(body, mode, split_dim, tile_vars, subblock_idx, var_replacements, used_names,
                                  lane_stride);
+      split_axis::ValidateCarryBackedge(loop_repair::MakeBody(new_body, while_stmt->span_), new_iter_args,
+                                        tile_vars, while_stmt->span_);
       auto new_return_vars = split_axis::RepairReturnVars(while_stmt->return_vars_, new_iter_args, tile_vars,
                                                           var_replacements, subblock_idx, lane_stride);
       result.push_back(loop_repair::RebuildWhileStmt(

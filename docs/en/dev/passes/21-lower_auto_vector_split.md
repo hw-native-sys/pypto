@@ -774,13 +774,24 @@ Such a position stays unclassified and a full-width one is rejected.
 Three places rewrite state *around* the halving rather than in it, and each must
 follow the same axis and tracking rules or the conditions above misfire:
 
-- **Loop carries.** An `iter_arg` inherits its init value's tracking, so a halved
-  init makes the carry lane-local; the loop-exit `return_var` inherits it in turn
-  so a later `tile.store` gets the per-lane offset. Both the explicit and the
-  AUTO affinity-gated arms share `RepairIterArgs` / `RepairReturnVars` — the AUTO
-  arm recurses through its own walk and cannot reach the explicit path's `ForStmt`
+- **Loop carries.** A carry has three edges, and all three must agree. An
+  `iter_arg` inherits its init value's tracking, so a halved init makes the carry
+  lane-local; the loop-exit `return_var` inherits it in turn so a later
+  `tile.store` gets the per-lane offset. Both the explicit and the AUTO
+  affinity-gated arms share `RepairIterArgs` / `RepairReturnVars` — the AUTO arm
+  recurses through its own walk and cannot reach the explicit path's `ForStmt`
   branch, so without this a legal tile accumulator has its carry reported as a
   full-width operand.
+- **The loop backedge.** The third edge is the value the body yields back into
+  the carry, and `ValidateCarryBackedge` is what checks it: the yielded value
+  must be lane-local exactly when the carry is. A halved carry fed a full-width
+  value declares a per-lane type that contradicts the value flowing into it on
+  every iteration after the first — the same defect as an un-sharded operand,
+  which no operand check sees because those inspect a `Call`'s arguments and this
+  is a `Yield`. The check is symmetric, so a lane-local value yielded into a
+  full-width carry is rejected too. It validates rather than repairs: when the
+  yielded value is tracked the trailing `Substitute` already swaps in its halved
+  replacement, and when it is not there is no halved version to substitute.
 - **Branch merges.** An `IfStmt`'s merge variable (`return_vars_`, a `DefField`)
   is lane-local exactly when the values its branches yield are. Left at its
   declared full width it contradicts both `Yield` values *and* stays untracked,
