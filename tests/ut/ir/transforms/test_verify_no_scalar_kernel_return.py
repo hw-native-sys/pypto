@@ -18,7 +18,10 @@ silently wrong ``= 0``.
 The check is on the declaration because ``FunctionType.InCore`` / ``AIC`` /
 ``AIV`` / ``Group`` / ``Spmd`` *means* "a dispatchable task": a helper meant to
 run inside a kernel is written ``FunctionType.Inline`` and spliced away before
-codegen. Only ``Scalar[TASK_ID]`` is exempt — a scheduler handle, not data.
+codegen. ``Scalar[TASK_ID]`` is rejected too: the scheduler handle is appended
+to the *call's* tuple type and bound at the call site, so a declaration that
+carries one has no carrier either — and makes codegen read an ordinary call to
+it as a task launch.
 
 A ``-> pl.Tuple[...]`` annotation is a *single* ``return_types_`` entry holding
 a ``TupleType``, so the check descends into tuple elements: a scalar hidden in
@@ -91,11 +94,33 @@ def test_scalar_returning_device_function_is_rejected(func_type):
     assert "kernel" in errors[0]
 
 
-def test_task_id_return_is_exempt():
-    """A TASK_ID is a scheduler handle, not a value the runtime has to carry."""
+def test_task_id_return_is_rejected():
+    """A TaskId rides the *call*, never the callee's declaration.
+
+    ``pl.submit`` and the outliner append the trailing ``Scalar[TASK_ID]`` to
+    the Submit's tuple type and bind it at the call site; the callee's
+    ``return_types_`` stay untouched. A declaration that carries one is not
+    merely uncarried, it is misread: orchestration codegen's ``IsSubmitCall``
+    keys on "TupleType whose last element is ``Scalar[TASK_ID]``".
+    """
     kernel = _returning("kernel", ir.ScalarType(ir.DataType.TASK_ID), ir.FunctionType.AIV)
 
-    assert _errors(ir.Program([kernel], "TaskIdReturn", _SPAN)) == []
+    errors = _errors(ir.Program([kernel], "TaskIdReturn", _SPAN))
+    assert len(errors) == 1
+    assert "Scalar[TASK_ID]" in errors[0]
+    assert "pl.submit" in errors[0], f"the TaskId diagnostic must name the call-site fix: {errors[0]}"
+
+
+def test_task_id_tail_of_a_tuple_return_is_rejected():
+    """The exact shape ``IsSubmitCall`` keys on: an ordinary multi-output kernel
+    whose declared tuple ends in a TaskId would be lowered as a task launch.
+    """
+    tuple_type = ir.TupleType([ir.TensorType([64], ir.DataType.FP32), ir.ScalarType(ir.DataType.TASK_ID)])
+    kernel = _returning("kernel", tuple_type, ir.FunctionType.AIV)
+
+    errors = _errors(ir.Program([kernel], "TupleTaskIdReturn", _SPAN))
+    assert len(errors) == 1
+    assert "#0 element #1" in errors[0]
 
 
 def test_scalar_nested_in_a_tuple_return_is_rejected():
@@ -123,14 +148,6 @@ def test_scalar_nested_in_a_tuple_return_is_rejected():
     assert "cannot return a scalar" in errors[0]
     # The diagnostic names the offending element, not just the return slot.
     assert "#0 element #1" in errors[0], errors[0]
-
-
-def test_task_id_nested_in_a_tuple_return_is_exempt():
-    """The exemption follows the scalar down, so a Submit-shaped tuple passes."""
-    tuple_type = ir.TupleType([ir.TensorType([64], ir.DataType.FP32), ir.ScalarType(ir.DataType.TASK_ID)])
-    kernel = _returning("kernel", tuple_type, ir.FunctionType.AIV)
-
-    assert _errors(ir.Program([kernel], "TupleTaskIdReturn", _SPAN)) == []
 
 
 @pytest.mark.parametrize(

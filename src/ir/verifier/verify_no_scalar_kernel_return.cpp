@@ -32,10 +32,17 @@
  * ``OutlineIncoreScopes``, so a call-site rule would miss every launch written
  * before that pass.
  *
- * ``Scalar[TASK_ID]`` is exempt. It is a scheduler handle rather than data: it
- * never travels through ``add_scalar`` / ``TaskOutputTensors`` at all, and the
- * outliner appends it to a *Submit's* tuple type, binding it at the call site
- * from ``task_<n>_outs.task_id()``.
+ * ``Scalar[TASK_ID]`` is rejected like any other scalar, because a declaration
+ * is not where a TaskId ever legitimately appears. The handle is attached to
+ * the *call*: ``pl.submit`` and the outliner append the trailing element to the
+ * Submit's tuple type and bind it at the call site from
+ * ``task_<n>_outs.task_id()``, leaving the callee's own ``return_types_``
+ * untouched (see ``ScopeOutliner``, which builds the outlined Function from
+ * ``return_types`` and only the call from ``effective_return_types``). A device
+ * function that nonetheless declares one is not merely uncarried but actively
+ * misread: orchestration codegen's ``IsSubmitCall`` keys on "TupleType whose
+ * last element is ``Scalar[TASK_ID]``", so an ordinary call to such a callee is
+ * lowered as a task launch.
  *
  * The property is decidable on the user's own IR, so it sits in
  * ``GetStructuralProperties()`` and is verified at every pass boundary: it
@@ -79,18 +86,22 @@ bool IsDeviceFunctionType(FunctionType type) { return IsInCoreType(type) || IsWr
 /// TypeContainsArray; Tensor / Tile elements cannot carry a ScalarType, so
 /// TupleType is the only container worth descending into.
 ///
-/// ``Scalar[TASK_ID]`` is exempt at every depth: it is a scheduler handle
-/// rather than data -- see the file comment.
-bool FindUnsupportedScalar(const TypePtr& type, const std::string& path, std::string* found_path) {
+/// Every ScalarType is unsupported at every depth, ``TASK_ID`` included -- a
+/// TaskId rides the call node, never the callee's declaration; see the file
+/// comment. ``is_task_id`` reports which of the two it was, so the diagnostic
+/// can name the right fix.
+bool FindUnsupportedScalar(const TypePtr& type, const std::string& path, std::string* found_path,
+                           bool* is_task_id) {
   if (!type) return false;
   if (auto scalar_type = As<ScalarType>(type)) {
-    if (scalar_type->dtype_ == DataType::TASK_ID) return false;
     *found_path = path;
+    *is_task_id = scalar_type->dtype_ == DataType::TASK_ID;
     return true;
   }
   if (auto tuple_type = As<TupleType>(type)) {
     for (size_t i = 0; i < tuple_type->types_.size(); ++i) {
-      if (FindUnsupportedScalar(tuple_type->types_[i], path + " element #" + std::to_string(i), found_path)) {
+      if (FindUnsupportedScalar(tuple_type->types_[i], path + " element #" + std::to_string(i), found_path,
+                                is_task_id)) {
         return true;
       }
     }
@@ -109,13 +120,25 @@ class NoScalarKernelReturnVerifierImpl : public PropertyVerifier {
       if (!func || !IsDeviceFunctionType(func->func_type_)) continue;
       for (size_t i = 0; i < func->return_types_.size(); ++i) {
         std::string path;
-        if (!FindUnsupportedScalar(func->return_types_[i], "#" + std::to_string(i), &path)) continue;
+        bool is_task_id = false;
+        if (!FindUnsupportedScalar(func->return_types_[i], "#" + std::to_string(i), &path, &is_task_id)) {
+          continue;
+        }
         std::ostringstream msg;
-        msg << "Device function '" << func->name_ << "' return type " << path
-            << " is a Scalar. A task cannot return a scalar: the runtime passes scalars in by "
-               "value and returns only tensors, so there is no carrier for this value. Write it "
-               "into a [1] tensor output inside the kernel and read it back after the launch with "
-               "pl.tensor.read(t, [0]).";
+        msg << "Device function '" << func->name_ << "' return type " << path << " is a Scalar"
+            << (is_task_id ? "[TASK_ID]" : "") << ". A task cannot return a scalar: the runtime "
+            << "passes scalars in by value and returns only tensors, so there is no carrier for "
+            << "this value. ";
+        if (is_task_id) {
+          msg << "A TaskId is produced by the launch, not by the callee: capture it at the call "
+                 "site with 'out, tid = pl.submit(kernel, ...)' or 'with pl.at(...) as tid', "
+                 "which appends the handle to the call's tuple and leaves this signature alone. "
+                 "Declaring one here also makes orchestration codegen read an ordinary call to "
+                 "this function as a task launch.";
+        } else {
+          msg << "Write it into a [1] tensor output inside the kernel and read it back after the "
+                 "launch with pl.tensor.read(t, [0]).";
+        }
         diagnostics.emplace_back(DiagnosticSeverity::Error, "NoScalarKernelReturn",
                                  /*error_code=*/0, msg.str(), func->span_);
       }
