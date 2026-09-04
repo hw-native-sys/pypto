@@ -1860,7 +1860,7 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
         << "The declared allocation 'pl.MemRef(\"" << base->name_hint_ << "\", slots=" << candidate.count
         << ")' cannot be lowered to a ptoas multi-buffer region because " << candidate.blocker
         << ". Under memory_planner=PTOAS the slots have no other way to stay apart — adjust the "
-           "declaration, or compile with the default PyPTO memory planner.";
+           "declaration, or compile with the default DSA_RP memory planner.";
     compatibilities.emplace(
         base, std::make_tuple(FormatMultiTileBufTypeString(candidate.slot_type_str, candidate.count),
                               candidate.valid_row, candidate.valid_col));
