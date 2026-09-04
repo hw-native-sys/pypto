@@ -63,6 +63,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
@@ -507,6 +508,19 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
                 << "would emit a tile.move whose result shape contradicts its operand";
           }
           if (move_tile->GetMemorySpace() == MemorySpace::Mat) {
+            // ExpandMixedKernel realizes an op-driven V->C pop with Mat's
+            // implicit layout and preserves only the authored valid_shape.
+            // Rebinding that pop to a destination carrying any other view
+            // would silently discard the move's layout/data semantics.
+            const TileView move_view = tile_view_semantics::GetEffectiveTileView(*move_tile);
+            TileView realizable_view =
+                tile_view_semantics::GetImplicitTileView(move_tile->shape_, MemorySpace::Mat);
+            realizable_view.valid_shape = move_view.valid_shape;
+            CHECK_SPAN(move_view == realizable_view, call->span_)
+                << "LowerAutoVectorSplit: a V->C tile.move into Mat carries a tile view that "
+                   "tile.aic_gather cannot realize directly. The gather can preserve valid_shape "
+                   "over Mat's implicit layout only; remove the explicit layout/stride/pad/offset "
+                   "or place the gathered Mat tile into a supported cube operand memory.";
             // ExpandMixedKernel lowers aic_gather to a tpop_from_aiv whose
             // destination is already Mat. Assign it to the original boundary
             // variable so no unsupported Mat -> Mat tmov survives into PTO.

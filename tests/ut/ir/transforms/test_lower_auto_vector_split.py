@@ -1355,6 +1355,38 @@ def test_vc_boundary_becomes_aic_gather_without_redundant_mat_move():
     ir.assert_structural_equal(_lower(Before), Expected)
 
 
+def test_vc_boundary_rejects_mat_view_the_gather_cannot_realize():
+    """Direct Mat reuse must not discard an explicit destination layout.
+
+    ExpandMixedKernel materializes an op-driven V->C gather in Mat's implicit
+    col-major/row-major view. A row-major/none-box destination therefore cannot
+    be represented by removing the authored move; reject it before lowering
+    instead of silently changing the result type.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            cube_seed: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat],
+            data: pl.Tensor[[128, 128], pl.FP32],
+            out_0: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            seed_vec = pl.tile.move(cube_seed, target_memory=pl.Mem.Vec)  # noqa: F841
+            v = pl.tile.load(data, [0, 0], [128, 128], target_memory=pl.Mem.Vec)
+            gathered = pl.tile.move(  # noqa: F841 - V->C boundary
+                v,
+                target_memory=pl.Mem.Mat,
+                blayout=pl.TileLayout.row_major,
+                slayout=pl.TileLayout.none_box,
+            )
+            out_store = pl.tile.store(v, [0, 0], out_0)
+            return out_store
+
+    with pytest.raises(ValueError, match="tile view that tile.aic_gather cannot realize directly"):
+        _lower(Before)
+
+
 def test_vc_boundary_rejects_unhalved_vector_operand():
     """A full-width vector value at a V->C boundary has no half to gather.
 
