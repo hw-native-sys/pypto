@@ -688,6 +688,15 @@ def pytest_configure(config):
         "step); the split is by fixture usage, so new tests self-classify with no "
         "ci.yml change.",
     )
+    config.addinivalue_line(
+        "markers",
+        "swimlane: the test asserts on a chip-swimlane record, so it needs "
+        "`--enable-chip-swimlane` and skips without it. CI selects the whole set "
+        "with `-m swimlane` in one flagged step, and the batched shards exclude "
+        "it — otherwise these run there only to skip, and a real skip is lost in "
+        "the noise. Mark the class, not each method: the swimlane fixture is "
+        "class- or module-scoped.",
+    )
 
     # Set the PyPTO runtime log level independently of the per-ST-item C++ logger.
     try:

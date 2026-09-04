@@ -222,6 +222,7 @@ def manual_scope_swimlane_data(manual_scope_swimlane_file: Path) -> dict:
     return json.loads(manual_scope_swimlane_file.read_text())
 
 
+@pytest.mark.swimlane
 class TestManualScopeSwimlane:
     """Validate the on-board execution graph encoded in the swimlane JSON.
 
@@ -532,6 +533,7 @@ def phase_fence_auto_swimlane_data(phase_fence_auto_swimlane_file: Path) -> dict
     return json.loads(phase_fence_auto_swimlane_file.read_text())
 
 
+@pytest.mark.swimlane
 class TestPhaseFenceSwimlane:
     """Validate the manual-scope phase-fence ordering in the runtime swimlane.
 
@@ -582,6 +584,7 @@ class TestPhaseFenceSwimlane:
         )
 
 
+@pytest.mark.swimlane
 class TestPhaseFenceAutoSwimlane:
     """Basic runtime validation for the auto-scope phase-fence control case."""
 
@@ -734,6 +737,7 @@ def branch_chain_swimlane_data(branch_chain_swimlane_file: Path) -> dict:
     return json.loads(branch_chain_swimlane_file.read_text())
 
 
+@pytest.mark.swimlane
 class TestBranchChainSwimlane:
     """Validate per-branch linear chain + cross-branch parallelism."""
 
@@ -957,6 +961,7 @@ def original_kv_proj_swimlane_data(original_kv_proj_swimlane_file: Path) -> dict
     return json.loads(original_kv_proj_swimlane_file.read_text())
 
 
+@pytest.mark.swimlane
 class TestOriginalKVProjOuterParallelSwimlane:
     """Validate that the original kv_proj case emits a basic swimlane artifact."""
 

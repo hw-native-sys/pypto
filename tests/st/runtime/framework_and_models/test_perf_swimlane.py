@@ -117,6 +117,7 @@ def swimlane_data(swimlane_file: Path) -> dict:
     return read_perf_data(str(swimlane_file))
 
 
+@pytest.mark.swimlane
 class TestSwimlaneOutput:
     """Validate the structure and content of chip_swimlane_records.json."""
 

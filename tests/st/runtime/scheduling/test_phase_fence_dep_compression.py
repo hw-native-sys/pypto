@@ -977,6 +977,7 @@ class TestPhaseFenceDepCompressionCorrectness:
         assert result.passed, f"manual-dummy chained snapshot phase-fence failed: {result.error}"
 
 
+@pytest.mark.swimlane
 class TestPhaseFenceDepCompressionSwimlane:
     def test_multiloop_chain_default(self, test_runner):
         data = _new_swimlane_json(test_runner, _multiloop_chain_case(), label="multi-loop chain phase-fence")

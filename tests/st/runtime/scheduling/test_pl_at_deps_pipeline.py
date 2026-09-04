@@ -213,6 +213,7 @@ def pl_at_deps_swimlane_data(pl_at_deps_swimlane_file: Path) -> dict:
     return json.loads(pl_at_deps_swimlane_file.read_text())
 
 
+@pytest.mark.swimlane
 class TestPlAtDepsSwimlane:
     """Validate the on-board execution graph for the pl.at-block pipeline.
 
@@ -430,6 +431,7 @@ def phase_fence_pl_at_swimlane_data(phase_fence_pl_at_swimlane_file: Path) -> di
     return json.loads(phase_fence_pl_at_swimlane_file.read_text())
 
 
+@pytest.mark.swimlane
 class TestPhaseFencePlAtSwimlane:
     """Validate phase-fence ordering using the pl.at-deps interface.
 
@@ -655,6 +657,7 @@ def _reconstruct_linear_chains(tasks: list[dict], *, expected: int) -> list[list
     return chains
 
 
+@pytest.mark.swimlane
 class TestBranchChainPlAtSwimlane:
     """Validate per-branch linear chain + cross-branch parallelism (pl.at-deps)."""
 
