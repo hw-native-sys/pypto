@@ -616,8 +616,12 @@ Pass LegalizeTileCast();
  * double-buffering is enabled automatically under DSA_RP and PTOAS and is an
  * opt-in under the legacy PYPTO planner.  Under PYPTO, chained Mat-scratch
  * producers remain output-stationary to avoid the allocator offset-packing
- * limitation tracked by issue #1908; some dbC-enabled layouts can still exceed
- * operand capacity there.
+ * limitation tracked by issue #1908. For the same reason, a PYPTO-planned
+ * function with multiple chooser-relevant matmul configurations re-chooses any schedule whose
+ * single-buffered operand panel occupies more than half of L0A/L0B with
+ * A/B-stationary choices disabled (issue #2633). Single-configuration functions
+ * retain their full-panel choices; some dbC-enabled layouts can still exceed
+ * operand capacity under PYPTO.
  * DSA_RP and PTOAS retain operand-stationary choices because their lifetime-aware
  * placement can subdivide the released operand range.
  *

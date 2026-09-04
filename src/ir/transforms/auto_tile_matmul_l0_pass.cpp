@@ -405,6 +405,130 @@ enum class MatmulKind {
   kBias,
 };
 
+std::optional<MatmulKind> GetMatmulKind(const CallPtr& call) {
+  if (IsOp(call, "tile.matmul")) return MatmulKind::kFresh;
+  if (IsOp(call, "tile.matmul_acc")) return MatmulKind::kAccumulate;
+  if (IsOp(call, "tile.matmul_bias")) return MatmulKind::kBias;
+  return std::nullopt;
+}
+
+size_t MatmulExpectedArity(MatmulKind kind) { return kind == MatmulKind::kFresh ? 2u : 3u; }
+
+bool HasSupportedMatmulArity(MatmulKind kind, size_t arity) {
+  const size_t expected = MatmulExpectedArity(kind);
+  return arity == expected || (kind == MatmulKind::kAccumulate && arity == expected + 1u);
+}
+
+/// Chooser-visible constraints that determine one matmul's L0 allocation
+/// class. ``matmul`` and ``matmul_acc`` deliberately share the unbiased class:
+/// steps of one logical split-K reduction must count once. ``matmul_bias`` is
+/// distinct because operand boxing, Bias capacity, and Bias residency restrict
+/// its legal design space even when M/K/N and the element widths are identical.
+struct MatmulChooserSignature {
+  int64_t M = 0;
+  int64_t K = 0;
+  int64_t N = 0;
+  uint32_t bytes_a = 0;
+  uint32_t bytes_b = 0;
+  uint32_t bytes_c = 0;
+  int l0c_align_m = 0;
+  bool is_bias = false;
+  bool bias_from_mat = false;
+  int64_t lhs_box_rows = 0;
+  int64_t lhs_box_cols = 0;
+  int64_t rhs_box_rows = 0;
+  int64_t rhs_box_cols = 0;
+  uint32_t bias_capacity_bytes = 0;
+
+  bool operator==(const MatmulChooserSignature& other) const {
+    return M == other.M && K == other.K && N == other.N && bytes_a == other.bytes_a &&
+           bytes_b == other.bytes_b && bytes_c == other.bytes_c && l0c_align_m == other.l0c_align_m &&
+           is_bias == other.is_bias && bias_from_mat == other.bias_from_mat &&
+           lhs_box_rows == other.lhs_box_rows && lhs_box_cols == other.lhs_box_cols &&
+           rhs_box_rows == other.rhs_box_rows && rhs_box_cols == other.rhs_box_cols &&
+           bias_capacity_bytes == other.bias_capacity_bytes;
+  }
+};
+
+/// Return the allocation-constraint signature of a matmul that reaches
+/// AutoTile's chooser-facing Mat/Vec residency boundary. This mirrors
+/// AnalyzeMatmul's operation arity, static-shape, accumulator, bias, and
+/// source-memory checks. Later
+/// source-provenance checks may still defer a particular rewrite; counting it
+/// here is intentionally conservative because the untouched call still uses L0.
+std::optional<MatmulChooserSignature> GetAutoTileMatmulChooserSignature(const AssignStmtPtr& assign) {
+  auto call = assign ? As<Call>(assign->value_) : nullptr;
+  auto kind = GetMatmulKind(call);
+  if (!kind || !HasSupportedMatmulArity(*kind, call->args_.size())) return std::nullopt;
+
+  const size_t lhs_idx = *kind == MatmulKind::kAccumulate ? 1u : 0u;
+  auto lhs = AsVarLike(call->args_[lhs_idx]);
+  auto rhs = AsVarLike(call->args_[lhs_idx + 1u]);
+  auto lhs_tile = lhs ? As<TileType>(lhs->GetType()) : nullptr;
+  auto rhs_tile = rhs ? As<TileType>(rhs->GetType()) : nullptr;
+  auto out_tile = As<TileType>(call->GetType());
+  if (!lhs_tile || !rhs_tile || !out_tile) return std::nullopt;
+
+  if (*kind == MatmulKind::kAccumulate) {
+    auto acc = AsVarLike(call->args_[0]);
+    auto acc_tile = acc ? As<TileType>(acc->GetType()) : nullptr;
+    if (!acc_tile || acc_tile->shape_.size() != 2) return std::nullopt;
+  }
+
+  int64_t M = 0;
+  int64_t K_lhs = 0;
+  int64_t K_rhs = 0;
+  int64_t N = 0;
+  if (!IsStatic2DInSpaces(lhs_tile, {MemorySpace::Mat, MemorySpace::Vec}, M, K_lhs) ||
+      !IsStatic2DInSpaces(rhs_tile, {MemorySpace::Mat}, K_rhs, N) || K_lhs != K_rhs) {
+    return std::nullopt;
+  }
+  TileTypePtr bias_tile;
+  if (*kind == MatmulKind::kBias) {
+    if (lhs_tile->GetMemorySpace() != MemorySpace::Mat) return std::nullopt;
+    auto bias = AsVarLike(call->args_[2]);
+    bias_tile = bias ? As<TileType>(bias->GetType()) : nullptr;
+    int64_t bias_m = 0;
+    int64_t bias_n = 0;
+    if (!IsStatic2DInSpaces(bias_tile, {MemorySpace::Mat, MemorySpace::Bias}, bias_m, bias_n) ||
+        bias_m != 1 || bias_n != N) {
+      return std::nullopt;
+    }
+  }
+
+  const uint32_t bytes_a = DTypeBytes(lhs_tile->dtype_);
+  const uint32_t bytes_b = DTypeBytes(rhs_tile->dtype_);
+  const uint32_t bytes_c = DTypeBytes(out_tile->dtype_);
+  if (bytes_a == 0 || bytes_b == 0 || bytes_c == 0) return std::nullopt;
+
+  const auto* ctx = PassContext::Current();
+  const auto* handler = ctx ? ctx->GetBackendHandler() : pypto::backend::GetBackend()->GetHandler();
+  INTERNAL_CHECK(handler) << "Internal error: BackendHandler is null";
+
+  MatmulChooserSignature signature;
+  signature.M = M;
+  signature.K = K_lhs;
+  signature.N = N;
+  signature.bytes_a = bytes_a;
+  signature.bytes_b = bytes_b;
+  signature.bytes_c = bytes_c;
+  signature.l0c_align_m = handler->GetL0cMAlignment(out_tile->dtype_);
+  signature.is_bias = *kind == MatmulKind::kBias;
+  if (signature.is_bias) {
+    const auto lhs_alignment = tile_view_semantics::GetBoxedTileAlignment(*lhs_tile);
+    const auto rhs_alignment = tile_view_semantics::GetBoxedTileAlignment(*rhs_tile);
+    // AnalyzeMatmul defers an unknown boxed alignment. Keep a stable sentinel
+    // here so such a call still counts as a distinct L0 user conservatively.
+    signature.lhs_box_rows = lhs_alignment ? lhs_alignment->rows : -1;
+    signature.lhs_box_cols = lhs_alignment ? lhs_alignment->cols : -1;
+    signature.rhs_box_rows = rhs_alignment ? rhs_alignment->rows : -1;
+    signature.rhs_box_cols = rhs_alignment ? rhs_alignment->cols : -1;
+    signature.bias_from_mat = bias_tile->GetMemorySpace() == MemorySpace::Mat;
+    signature.bias_capacity_bytes = handler->GetBiasCapacityBytes();
+  }
+  return signature;
+}
+
 struct KLoopRewrite {
   AssignStmtPtr original;
   MatmulKind kind = MatmulKind::kFresh;
@@ -844,6 +968,34 @@ KLoopRewrite MakeKLoop(const MatmulTiling& t, ExprPtr mi, ExprPtr ni, int64_t m_
   return r;
 }
 
+bool PanelUsesMoreThanHalf(int rows, int cols, uint32_t element_bytes, uint32_t capacity_bytes) {
+  // Match the chooser's operand-footprint accounting. This guard addresses
+  // incompatible buffer classes selected by that chooser; general physical
+  // layout accounting belongs in L0TileConfig/ChooseL0Tile rather than in a
+  // planner-specific post-selection rule.
+  INTERNAL_CHECK(rows > 0 && cols > 0 && element_bytes > 0)
+      << "Internal error: an L0 operand panel must have a positive static footprint";
+  const uint64_t row_count = static_cast<uint64_t>(rows);
+  const uint64_t col_count = static_cast<uint64_t>(cols);
+  if (row_count > std::numeric_limits<uint64_t>::max() / col_count) return true;
+  const uint64_t elements = row_count * col_count;
+  if (elements > std::numeric_limits<uint64_t>::max() / element_bytes) return true;
+  return elements * element_bytes > static_cast<uint64_t>(capacity_bytes) / 2;
+}
+
+/// Whether a chooser result creates a monolithic operand panel that the legacy
+/// PyPTO planner cannot subdivide for another matmul geometry. Operand-
+/// stationary schedules single-buffer the held operand. An untiled result is
+/// also single-buffered in practice because AutoTile emits no pipeline and
+/// InferTileMemorySpace moves each whole operand into L0 once.
+bool ExceedsPyptoL0PanelShare(const utils::L0TileResult& res, const utils::L0TileConfig& cfg) {
+  const bool untiled = res.m == cfg.M && res.n == cfg.N && res.k == cfg.K;
+  const bool a_single = untiled || res.stationarity == utils::Stationarity::kAStationary;
+  const bool b_single = untiled || res.stationarity == utils::Stationarity::kBStationary;
+  return (a_single && PanelUsesMoreThanHalf(res.m, res.k, cfg.bytes_a, cfg.l0a_bytes)) ||
+         (b_single && PanelUsesMoreThanHalf(res.k, res.n, cfg.bytes_b, cfg.l0b_bytes));
+}
+
 /// Decide whether `assign` is a Mat-resident matmul we know how to tile, and if
 /// so which L0 tile shape to use.  Returns the tiling plan on success;
 /// otherwise nullopt and (when useful) appends a PerfHint.  The caller
@@ -851,23 +1003,16 @@ KLoopRewrite MakeKLoop(const MatmulTiling& t, ExprPtr mi, ExprPtr ni, int64_t m_
 std::optional<MatmulTiling> AnalyzeMatmul(
     const AssignStmtPtr& assign, std::vector<Diagnostic>& hints, bool force_output_stationary = false,
     std::optional<tile_view_semantics::BoxedTileAlignment> output_box_alignment = std::nullopt,
-    const DirectDefMap* direct_defs = nullptr) {
+    const DirectDefMap* direct_defs = nullptr, bool has_multiple_l0_signatures = false) {
   auto call = As<Call>(assign->value_);
   if (!call || !call->op_) return std::nullopt;
 
   // Plain, accumulating, and bias matmuls share the L0 tile chooser. Parse the
   // operation kind once so operand indexing and later legality decisions cannot
   // drift into inconsistent combinations of boolean flags.
-  MatmulKind kind;
-  if (IsOp(call, "tile.matmul")) {
-    kind = MatmulKind::kFresh;
-  } else if (IsOp(call, "tile.matmul_acc")) {
-    kind = MatmulKind::kAccumulate;
-  } else if (IsOp(call, "tile.matmul_bias")) {
-    kind = MatmulKind::kBias;
-  } else {
-    return std::nullopt;
-  }
+  const auto kind_opt = GetMatmulKind(call);
+  if (!kind_opt) return std::nullopt;
+  const MatmulKind kind = *kind_opt;
   const bool is_acc = kind == MatmulKind::kAccumulate;
   const bool is_bias = kind == MatmulKind::kBias;
   const std::string& op_name = call->op_->name_;
@@ -876,11 +1021,11 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   // matmul_acc; (lhs, rhs, bias) for matmul_bias.
   // Use ``AsVarLike`` for the operands so IterArg (Var subclass) is accepted —
   // this is the common case for the accumulator inside a pipelined K-loop.
-  const size_t expected_arity = kind == MatmulKind::kFresh ? 2u : 3u;
+  const size_t expected_arity = MatmulExpectedArity(kind);
   // Only the accumulate kind carries init_cond (arity 4); a fresh matmul has no
   // accumulator to predicate and matmul_bias has no init_cond operand.
   const bool has_init_cond = is_acc && call->args_.size() == expected_arity + 1u;
-  if (call->args_.size() != expected_arity && !has_init_cond) return std::nullopt;
+  if (!HasSupportedMatmulArity(kind, call->args_.size())) return std::nullopt;
   const size_t lhs_idx = is_acc ? 1u : 0u;
   auto lhs = AsVarLike(call->args_[lhs_idx]);
   auto rhs = AsVarLike(call->args_[lhs_idx + 1u]);
@@ -1185,6 +1330,26 @@ std::optional<MatmulTiling> AnalyzeMatmul(
                        op_name + ": ChooseL0Tile rejected configuration — left untouched. " + e.what(),
                        assign->span_);
     return std::nullopt;
+  }
+
+  // #1908/#2633, operand-panel case: one matmul may choose a monolithic
+  // single-buffered L0A/L0B panel while another geometry in the same function
+  // needs two smaller buffers. PyPTO's legacy MemoryReuse aliases whole buffer
+  // identities and cannot place both smaller buffers at disjoint offsets inside
+  // the expired panel, so its sequential allocator can exceed capacity even
+  // though the true peak fits. Re-choose output-stationary, which budgets both
+  // operands at half capacity. DSA_RP and PTOAS place independent buffers from
+  // their actual lifetimes and retain the chooser's faster stationary result.
+  //
+  // ChooseL0Tile always scores output-stationary first. Since the call above
+  // succeeded with the same capacities, disabling only A/B stationarity cannot
+  // make this second call fail; do not catch and silently restore the unsafe
+  // untouched panel if that invariant ever changes.
+  if (memory_planner == MemoryPlanner::PyPTO && has_multiple_l0_signatures && !force_output_stationary &&
+      ExceedsPyptoL0PanelShare(res, cfg)) {
+    cfg.allow_a_stationary = false;
+    cfg.allow_b_stationary = false;
+    res = utils::ChooseL0Tile(cfg);
   }
 
   // Already L0-sized — nothing to do.
@@ -2975,8 +3140,9 @@ std::unordered_set<const ForStmt*> BuildPipelineDbCPlan(const FunctionPtr& func)
 
 class AutoTileMutator : public IRMutator {
  public:
-  explicit AutoTileMutator(std::unordered_set<const ForStmt*> pipeline_dbc_plan)
-      : pipeline_dbc_plan_(std::move(pipeline_dbc_plan)) {}
+  AutoTileMutator(std::unordered_set<const ForStmt*> pipeline_dbc_plan, bool has_multiple_l0_signatures)
+      : pipeline_dbc_plan_(std::move(pipeline_dbc_plan)),
+        has_multiple_l0_signatures_(has_multiple_l0_signatures) {}
 
   std::vector<Diagnostic> hints;
 
@@ -3192,7 +3358,8 @@ class AutoTileMutator : public IRMutator {
       // ForStmt bodies still get rewritten by the recursive visit.
       if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(current)) {
         if (auto tiling = AnalyzeMatmul(assign, hints, /*force_output_stationary=*/false,
-                                        /*output_box_alignment=*/std::nullopt, &direct_defs)) {
+                                        /*output_box_alignment=*/std::nullopt, &direct_defs,
+                                        has_multiple_l0_signatures_)) {
           if (!tiling->needs_mn_tiling()) {
             // Whole output fits L0c — tile K only.  k < K here (k == K with
             // m == M, n == N needs no matmul tiling and was skipped by
@@ -3342,6 +3509,34 @@ class AutoTileMutator : public IRMutator {
 
  private:
   std::unordered_set<const ForStmt*> pipeline_dbc_plan_;
+  bool has_multiple_l0_signatures_ = false;
+};
+
+/// Detect whether a function contains more than one chooser-facing matmul
+/// allocation signature. Only the first signature is retained: finding one
+/// different value answers the predicate, keeping this pre-analysis O(N) with
+/// constant memory.
+class MatmulChooserDiversityCollector : public IRVisitor {
+ public:
+  [[nodiscard]] bool has_multiple() const { return has_multiple_; }
+
+ protected:
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (!has_multiple_) {
+      if (auto signature = GetAutoTileMatmulChooserSignature(op)) {
+        if (!first_) {
+          first_ = *signature;
+        } else if (!(*first_ == *signature)) {
+          has_multiple_ = true;
+        }
+      }
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  std::optional<MatmulChooserSignature> first_;
+  bool has_multiple_ = false;
 };
 
 FunctionPtr TransformFunction(const FunctionPtr& func, std::vector<Diagnostic>& hints) {
@@ -3351,7 +3546,9 @@ FunctionPtr TransformFunction(const FunctionPtr& func, std::vector<Diagnostic>& 
   // and loop identities. Rewrite it first so the #2131 dbC capacity/placement
   // plan is computed from the exact IR the ordinary AutoTile phase will visit.
   auto canonical = RewriteCanonicalSplitKAcc(func, hints);
-  AutoTileMutator mutator(BuildPipelineDbCPlan(canonical));
+  MatmulChooserDiversityCollector chooser_collector;
+  chooser_collector.VisitStmt(canonical->body_);
+  AutoTileMutator mutator(BuildPipelineDbCPlan(canonical), chooser_collector.has_multiple());
   auto new_body = mutator.VisitStmt(canonical->body_);
   for (auto& d : mutator.hints) hints.push_back(std::move(d));
   if (new_body == canonical->body_) return canonical;
