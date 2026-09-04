@@ -852,7 +852,7 @@ KLoopRewrite MakeKLoop(const MatmulTiling& t, ExprPtr mi, ExprPtr ni, int64_t m_
 std::optional<MatmulTiling> AnalyzeMatmul(
     const AssignStmtPtr& assign, std::vector<Diagnostic>& hints, bool force_output_stationary = false,
     std::optional<tile_view_semantics::BoxedTileAlignment> output_box_alignment = std::nullopt,
-    const DirectDefMap* direct_defs = nullptr) {
+    const DirectDefMap* direct_defs = nullptr, bool disable_double_buffer_c = false) {
   auto call = As<Call>(assign->value_);
   if (!call || !call->op_) return std::nullopt;
 
@@ -1151,10 +1151,11 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   // but the underlying smell remains. The durable design is a first-class co-live /
   // no-coalesce Acc-buffer-pair IR property set once at emit and honoured by BOTH
   // planners. Tracked as a follow-up.
-  const MemoryPlanner memory_planner = ctx ? ctx->GetMemoryPlanner() : MemoryPlanner::PyPTO;
+  const MemoryPlanner memory_planner = ctx ? ctx->GetMemoryPlanner() : kDefaultMemoryPlanner;
   const bool pypto_dbc =
       memory_planner == MemoryPlanner::PyPTO && ctx && ctx->GetEnablePyptoL0cDoubleBuffer();
-  cfg.allow_double_buffer_c = memory_planner != MemoryPlanner::PyPTO || pypto_dbc;
+  cfg.allow_double_buffer_c =
+      !disable_double_buffer_c && (memory_planner != MemoryPlanner::PyPTO || pypto_dbc);
   // tile.matmul_acc threads the caller's accumulator into the K-loop's
   // iter-arg, so each invocation reads C from L1 at start and writes back at
   // end (gamma_c = 2 in the chooser's traffic model).  Plain tile.matmul
@@ -2909,7 +2910,7 @@ std::optional<PipelineAccumulatorCandidate> AnalyzePipelineAccumulator(
 /// cannot turn a previously fitting function into an L0C overflow.
 std::unordered_set<const ForStmt*> BuildPipelineDbCPlan(const FunctionPtr& func) {
   const auto* ctx = PassContext::Current();
-  const MemoryPlanner planner = ctx ? ctx->GetMemoryPlanner() : MemoryPlanner::PyPTO;
+  const MemoryPlanner planner = ctx ? ctx->GetMemoryPlanner() : kDefaultMemoryPlanner;
   // #2131 explicitly targets the PyPTO planner. PTOAS already gives the
   // reproduced loop four distinct Acc placements and showed no measurable
   // benefit from this source-level marker.
@@ -3277,7 +3278,7 @@ class AutoTileMutator : public IRMutator {
           const MatmulTiling* fold_tiling = &*tiling;
           std::optional<MatmulTiling> os_tiling;
           const auto* ctx = PassContext::Current();
-          const MemoryPlanner planner = ctx ? ctx->GetMemoryPlanner() : MemoryPlanner::PyPTO;
+          const MemoryPlanner planner = ctx ? ctx->GetMemoryPlanner() : kDefaultMemoryPlanner;
           if (planner == MemoryPlanner::PyPTO &&
               tiling->stationarity != utils::Stationarity::kOutputStationary) {
             std::vector<Diagnostic> discard;  // the first AnalyzeMatmul already emitted the hints
@@ -3326,6 +3327,28 @@ class AutoTileMutator : public IRMutator {
               pending_folds.emplace(static_cast<const Stmt*>(fold->store), std::move(*fold));
               changed = true;
               continue;  // drop the matmul; sub-tile stmts emit at the store site
+            }
+          }
+          // dbC is an optional throughput optimization, not a legality
+          // requirement. Budgeting two accumulators can turn a K-only plan into
+          // an M/N-tiled plan; if this result has no supported M/N destination,
+          // retry with the full L0C budget before giving up. This preserves the
+          // preferred dbC plan whenever either the Mat-scratch or direct-store
+          // fold above can realize it, while keeping reshape/other on-chip
+          // consumers compilable through the existing K-only rewrite.
+          if (tiling->double_buffer_c) {
+            std::vector<Diagnostic> discard;
+            auto single_c = AnalyzeMatmul(assign, discard, /*force_output_stationary=*/false,
+                                          /*output_box_alignment=*/std::nullopt, &direct_defs,
+                                          /*disable_double_buffer_c=*/true);
+            if (single_c && !single_c->needs_mn_tiling() && single_c->k < single_c->K) {
+              auto rewrite = BuildKLoopRewrite(MakeKLoop(*single_c, /*mi=*/nullptr, /*ni=*/nullptr,
+                                                         single_c->m, single_c->n,
+                                                         /*name_base=*/""));
+              remap[assign->var_.get()] = rewrite.return_var;
+              for (auto& s : rewrite.stmts) out.push_back(std::move(s));
+              changed = true;
+              continue;
             }
           }
           // M/N tiling not applicable — fall through and leave it untouched.

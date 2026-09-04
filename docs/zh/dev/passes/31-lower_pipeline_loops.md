@@ -7,8 +7,8 @@
 > **`pl.pipeline` 有两条下降路径，这是其中之一。**
 > [`LowerPipelineToSlots`](30-lower_pipeline_to_slots.md) 紧接在本 pass 之前运行，在
 > `memory_planner=PTOAS` 下把能处理的循环改为单份循环体轮转同一分配的多个槽位。它会把接手的
-> 循环全部降级，因此本 pass 看到并复制的，只有它拒绝的循环，以及默认 PyPTO planner 下的全部
-> 循环。复制仍然是通用路径。
+> 循环全部降级，因此本 pass 看到并复制的，只有它拒绝的循环，以及进程内 planner
+>（默认的 `DSA_RP` 或旧版 `PYPTO`）下的全部循环。复制仍然是通用路径。
 
 `pl.unroll(N)` 在 SSA 之前的 slot #1 完整展开循环为 `N` 份副本。用户使用它通常并非需要 `N` 份副本，而是希望获得不同的 tile MemRef —— 否则 `MemoryReuse` 会把生命周期相邻的 tile 合并为同一缓冲区，导致 ping-pong 失效。
 

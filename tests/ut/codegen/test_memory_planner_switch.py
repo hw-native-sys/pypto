@@ -20,7 +20,8 @@ The three product modes exercise different ownership boundaries:
    ``addr`` operand on ``pto.alloc_tile`` (required at ptoas
    ``--pto-level=level2``, which rejects any ``addr`` operand).
 
-The default (``MemoryPlanner.PYPTO``) preserves the pre-existing behaviour:
+The default (``MemoryPlanner.DSA_RP``) uses the in-tree capacity-constrained
+planner. ``MemoryPlanner.PYPTO`` preserves the legacy behaviour explicitly:
 both passes run and codegen bakes ``addr`` for ``--pto-level=level3``.
 """
 
@@ -148,6 +149,16 @@ def _run_pipeline(
     return optimized, list(pm.pass_names)
 
 
+def _run_default_pipeline(program: ir.Program = ElementwiseAdd) -> tuple[ir.Program, list[str]]:
+    """Run the Default pipeline without overriding PassContext's planner."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+    with passes.PassContext([]):
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program)
+    return optimized, list(pm.pass_names)
+
+
 def _codegen(optimized: ir.Program, *, emit_tile_addr: bool) -> str:
     func = next(f for f in optimized.functions.values() if f.name == "kernel")
     single = ir.Program([func], "kernel", optimized.span)
@@ -159,9 +170,20 @@ def _codegen(optimized: ir.Program, *, emit_tile_addr: bool) -> str:
 # ---------------------------------------------------------------------------
 
 
-def test_pass_context_default_planner_is_pypto():
+def test_pass_context_default_planner_is_dsa_rp():
+    assert passes.get_default_memory_planner() == passes.MemoryPlanner.DSA_RP
     ctx = passes.PassContext([])
-    assert ctx.get_memory_planner() == passes.MemoryPlanner.PYPTO
+    assert ctx.get_memory_planner() == passes.MemoryPlanner.DSA_RP
+
+
+def test_default_pipeline_matches_explicit_dsa_rp():
+    default_program, default_pass_names = _run_default_pipeline()
+    explicit_program, explicit_pass_names = _run_pipeline(passes.MemoryPlanner.DSA_RP)
+
+    assert default_pass_names == explicit_pass_names
+    assert "MemoryReuse" not in default_pass_names
+    assert "AllocateMemoryAddr" in default_pass_names
+    assert ir.python_print(default_program) == ir.python_print(explicit_program)
 
 
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS])
