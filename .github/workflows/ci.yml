@@ -1200,7 +1200,12 @@ jobs:
           # compile + golden card-free, device run BATCHED via task-submit. The
           # `not device_batch` (direct @pl.jit / config=test_config) tests for
           # ALL dirs run in the `system-tests-direct` job.
-          python -m pytest tests/st -v -m device_batch \
+          #
+          # `not swimlane` because those assert on a chip-swimlane record and
+          # skip without `--enable-chip-swimlane`, which this step does not pass.
+          # They ran here only to skip, and 35 silent skips buried the real ones;
+          # the flagged steps in `system-tests-direct` run them for real.
+          python -m pytest tests/st -v -m "device_batch and not swimlane" \
             --ignore=tests/st/distributed \
             --ignore=tests/st/codegen \
             --ignore=tests/st/runtime/ops \
@@ -1376,6 +1381,26 @@ jobs:
           source activate.sh
           task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 600 \
             --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest tests/st/runtime/framework_and_models/test_perf_swimlane.py -v --device=\$TASK_DEVICE --platform=a2a3 --enable-chip-swimlane --forked"
+
+      - name: Test scheduling swimlane assertions
+        # The 35 swimlane assertions under runtime/scheduling had never run: they
+        # gate on `--enable-chip-swimlane`, which CI passed only to
+        # test_perf_swimlane.py, so every one of them skipped in the batched
+        # shard. Same mechanism as the step above (the fixture globs
+        # build_output/*/dfx_outputs/chip_swimlane_records.json), selected by the
+        # `swimlane` marker rather than by path so the correctness tests sharing
+        # these files are not re-run here.
+        #
+        # No `--forked`, unlike the step above: these hang their swimlane record
+        # off class- or module-scoped fixtures, so one process reuses each
+        # record across the class instead of re-running the device case per
+        # test — about 20 device runs rather than 35.
+        run: |
+          source activate.sh
+          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 1200 \
+            --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest \
+              tests/st/runtime/scheduling -v -m swimlane \
+              --device=\$TASK_DEVICE --platform=a2a3 --enable-chip-swimlane"
 
       - name: Test Graph record-and-replay (one process per test)
         # --forked because a ChipWorker binds one (platform, device_id, runtime):

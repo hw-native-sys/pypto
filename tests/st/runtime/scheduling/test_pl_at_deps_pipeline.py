@@ -50,7 +50,6 @@ How to run
     # numerical correctness is checked.
 """
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +57,7 @@ import pypto.language as pl
 import pytest
 import torch
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
+from harness.swimlane import read_swimlane
 from pypto.ir.pass_manager import OptimizationStrategy
 
 _BUILD_OUTPUT_DIR = Path(__file__).resolve().parents[4] / "build_output"
@@ -210,9 +210,10 @@ def pl_at_deps_swimlane_file(test_runner) -> Path:
 
 @pytest.fixture(scope="module")
 def pl_at_deps_swimlane_data(pl_at_deps_swimlane_file: Path) -> dict:
-    return json.loads(pl_at_deps_swimlane_file.read_text())
+    return read_swimlane(pl_at_deps_swimlane_file)
 
 
+@pytest.mark.swimlane
 class TestPlAtDepsSwimlane:
     """Validate the on-board execution graph for the pl.at-block pipeline.
 
@@ -427,9 +428,10 @@ def phase_fence_pl_at_swimlane_file(test_runner) -> Path:
 
 @pytest.fixture(scope="module")
 def phase_fence_pl_at_swimlane_data(phase_fence_pl_at_swimlane_file: Path) -> dict:
-    return json.loads(phase_fence_pl_at_swimlane_file.read_text())
+    return read_swimlane(phase_fence_pl_at_swimlane_file)
 
 
+@pytest.mark.swimlane
 class TestPhaseFencePlAtSwimlane:
     """Validate phase-fence ordering using the pl.at-deps interface.
 
@@ -616,7 +618,7 @@ def branch_chain_pl_at_swimlane_file(test_runner) -> Path:
 
 @pytest.fixture(scope="module")
 def branch_chain_pl_at_swimlane_data(branch_chain_pl_at_swimlane_file: Path) -> dict:
-    return json.loads(branch_chain_pl_at_swimlane_file.read_text())
+    return read_swimlane(branch_chain_pl_at_swimlane_file)
 
 
 def _reconstruct_linear_chains(tasks: list[dict], *, expected: int) -> list[list[dict]]:
@@ -655,6 +657,7 @@ def _reconstruct_linear_chains(tasks: list[dict], *, expected: int) -> list[list
     return chains
 
 
+@pytest.mark.swimlane
 class TestBranchChainPlAtSwimlane:
     """Validate per-branch linear chain + cross-branch parallelism (pl.at-deps)."""
 
