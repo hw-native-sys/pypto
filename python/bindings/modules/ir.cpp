@@ -754,14 +754,25 @@ void BindIR(nb::module_& m) {
       "Tile view representation with valid shape, stride, start offset, layouts, fractal, pad, and "
       "compact mode. "
       "Immutable from Python — set all fields at construction time.")
-      .def(nb::init<const std::vector<ExprPtr>&, const std::vector<ExprPtr>&, ExprPtr, TileLayout, TileLayout,
-                    uint64_t, PadValue, CompactMode>(),
-           nb::arg("valid_shape") = std::vector<ExprPtr>{}, nb::arg("stride") = std::vector<ExprPtr>{},
-           nb::arg("start_offset") = ExprPtr{}, nb::arg("blayout") = TileLayout::row_major,
-           nb::arg("slayout") = TileLayout::none_box, nb::arg("fractal") = static_cast<uint64_t>(512),
-           nb::arg("pad") = PadValue::null, nb::arg("compact") = CompactMode::null,
-           "Create a tile view; fields default to empty/null/row_major/none_box/512/null/null. "
-           "fractal is a size in bytes, not elements.")
+      .def(nb::init<>(), "Create a tile view with the C++ default field values.")
+      .def(
+          "__init__",
+          [](nb::pointer_and_handle<TileView> instance, const std::vector<ExprPtr>& valid_shape,
+             const std::vector<ExprPtr>& stride, const nb::object& start_offset, TileLayout blayout,
+             TileLayout slayout, uint64_t fractal, PadValue pad, CompactMode compact) {
+            ExprPtr offset;
+            if (!start_offset.is_none()) {
+              offset = nb::cast<ExprPtr>(start_offset);
+            }
+            new (instance.p)
+                TileView(valid_shape, stride, std::move(offset), blayout, slayout, fractal, pad, compact);
+          },
+          nb::arg("valid_shape") = std::vector<ExprPtr>{}, nb::arg("stride") = std::vector<ExprPtr>{},
+          nb::arg("start_offset") = nb::none(), nb::arg("blayout") = TileLayout::row_major,
+          nb::arg("slayout") = TileLayout::none_box, nb::arg("fractal") = static_cast<uint64_t>(512),
+          nb::arg("pad") = PadValue::null, nb::arg("compact") = CompactMode::null,
+          "Create a tile view; fields default to empty/null/row_major/none_box/512/null/null. "
+          "fractal is a size in bytes, not elements.")
       .def(nb::init<const std::vector<int64_t>&, const std::vector<int64_t>&, ExprPtr, TileLayout, TileLayout,
                     uint64_t, PadValue, CompactMode>(),
            nb::arg("valid_shape"), nb::arg("stride"), nb::arg("start_offset"),
