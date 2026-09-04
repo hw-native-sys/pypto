@@ -76,6 +76,12 @@ _temp_precompile_dirs: list[Path] = []
 # session end via ``pytest_terminal_summary``.
 _device_counter: Counter[int] = Counter()
 
+# Node ids that use ``test_runner`` but that collection could not turn into a
+# case, so each compiles inline instead of in the pool. Reported at session end
+# by ``pytest_terminal_summary``; a ``@st.cases`` declaration is never in here,
+# because it is read rather than guessed.
+_undiscovered_items: list[str] = []
+
 
 @pytest.fixture(scope="session", autouse=True)
 def setup_simpler_dependency(request):
@@ -452,6 +458,21 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config) -> None:  # no
     clean log, so this is the one place the borrowed-card batched execution is
     made visible: how many batches ran and how the runs spread across cards.
     """
+    if _undiscovered_items:
+        terminalreporter.write_sep(
+            "=", f"{len(_undiscovered_items)} case(s) compiled inline, not in the pool"
+        )
+        terminalreporter.write_line(
+            "These reach test_runner but collection could not read a case from them, so each "
+            "compiles on its own thread of control while the pre-compile pool idles. Declare "
+            "them with @st.cases(st.case(...)) or @st.cases(st.from_legacy(...)) to batch them."
+        )
+        shown = _undiscovered_items[:20]
+        for node_id in shown:
+            terminalreporter.write_line(f"  {node_id}")
+        if len(_undiscovered_items) > len(shown):
+            terminalreporter.write_line(f"  ... and {len(_undiscovered_items) - len(shown)} more")
+
     batch_lines = execution_summary_lines()
     if not _device_counter and not batch_lines:
         return
@@ -952,32 +973,20 @@ def _eval_arg_node(
     raise _Unresolvable(ast.dump(node))
 
 
-def _collect_test_case_from_item(
-    item: pytest.Item,
+def _collect_declared_case(
+    callspec: Any,
+    params: dict[str, Any],
     seen: dict[str, PTOTestCase],
     session_memory_planner: MemoryPlanner | None,
     session_platform: str,
-) -> None:
-    """Inspect *item* and add any discovered PTOTestCase instances to *seen*.
+) -> bool:
+    """Read a ``@st.cases(...)`` declaration out of this item's parametrize params.
 
-    Parses the test body and resolves every ``SomeCase(...)`` constructor call
-    (callee + all positional/keyword args) against this item's parametrize
-    params, locals assigned earlier in the body, and the test module globals,
-    then instantiates it exactly as the body would.  This reconstructs the case
-    regardless of parametrize→__init__ name renames (``valid`` →
-    ``valid_shape``), hard-coded literal args (``dtype=DataType.FP16``),
-    positional args, the class-as-parameter pattern (``op_cls(...)``), or a
-    locally-built config (``cfg = RunConfig(...); run(Case(config=cfg))``) — so
-    the case is pre-compiled and batched instead of falling to the per-case
-    inline path.  Cases whose args genuinely can't be resolved (built in a loop,
-    arithmetic on params) are left for the inline path.
+    Split out of :func:`_collect_test_case_from_item` because the two discovery
+    routes share nothing: this one reads a value pytest already holds, the other
+    parses the test's source and rebuilds the constructor call. Returns ``True``
+    when a declaration was found and filed.
     """
-    if any(m.name == "skip" for m in item.iter_markers()):
-        return
-
-    callspec = getattr(item, "callspec", None)
-    params: dict[str, Any] = callspec.params if callspec else {}
-
     # A case declared with ``@st.cases(...)`` is already a collection-time
     # value: read it straight out of the parametrize params. No source parsing,
     # no re-construction, and no silent fallback — if the declaration is there,
@@ -1003,18 +1012,55 @@ def _collect_test_case_from_item(
         # variants a pin excludes; this keeps the surviving one keyed by what it
         # will actually be built for.
         seen.setdefault(_cache_key(bound, bound.get_platform() or platform, session_memory_planner), bound)
-        return
+        return True
+    return False
 
+
+def _collect_test_case_from_item(
+    item: pytest.Item,
+    seen: dict[str, PTOTestCase],
+    session_memory_planner: MemoryPlanner | None,
+    session_platform: str,
+) -> bool:
+    """Inspect *item* and add any discovered PTOTestCase instances to *seen*.
+
+    Parses the test body and resolves every ``SomeCase(...)`` constructor call
+    (callee + all positional/keyword args) against this item's parametrize
+    params, locals assigned earlier in the body, and the test module globals,
+    then instantiates it exactly as the body would.  This reconstructs the case
+    regardless of parametrize→__init__ name renames (``valid`` →
+    ``valid_shape``), hard-coded literal args (``dtype=DataType.FP16``),
+    positional args, the class-as-parameter pattern (``op_cls(...)``), or a
+    locally-built config (``cfg = RunConfig(...); run(Case(config=cfg))``) — so
+    the case is pre-compiled and batched instead of falling to the per-case
+    inline path.  Cases whose args genuinely can't be resolved (built in a loop,
+    arithmetic on params) are left for the inline path.
+
+    Returns:
+        ``True`` when this item contributed a case. ``False`` means it will
+        compile inline, one case at a time, instead of in the pool — which is a
+        silent slowdown, so ``pytest_collection_finish`` counts the misses and
+        names them. A ``@st.cases`` declaration always returns ``True``: it is
+        read, never guessed.
+    """
+    if any(m.name == "skip" for m in item.iter_markers()):
+        return False
+
+    callspec = getattr(item, "callspec", None)
+    params: dict[str, Any] = callspec.params if callspec else {}
+
+    if _collect_declared_case(callspec, params, seen, session_memory_planner, session_platform):
+        return True
     module = item.module
     if module is None:
-        return
+        return False
     globalns = vars(module)
 
     try:
         source = textwrap.dedent(inspect.getsource(item.function))
         tree = ast.parse(source)
     except (OSError, TypeError, SyntaxError):
-        return
+        return False
 
     # Build a local namespace from simple ``name = <expr>`` assignments, in
     # source order, so a constructor arg referencing a local (``config=cfg``)
@@ -1069,6 +1115,31 @@ def _collect_test_case_from_item(
             _cache_key(instance, instance.get_platform() or platform, session_memory_planner),
             instance,
         )
+        return True
+    return False
+
+
+def _discover_cases(
+    session: pytest.Session,
+    seen: dict[str, PTOTestCase],
+    session_memory_planner: MemoryPlanner | None,
+    session_platform: str,
+) -> None:
+    """Fill *seen* from every collected item, and record the ones that miss.
+
+    An item that reaches ``test_runner`` but contributes no case compiles
+    inline, one at a time, while the pre-compile pool sits idle. Nothing
+    reported that, so a test whose constructor arguments the source-parsing
+    route cannot resolve only ever showed up as a slower run. The misses are
+    named in the terminal summary instead.
+    """
+    for item in session.items:
+        found = _collect_test_case_from_item(item, seen, session_memory_planner, session_platform)
+        if found or "test_runner" not in getattr(item, "fixturenames", ()):
+            continue
+        if any(m.name == "skip" for m in item.iter_markers()):
+            continue
+        _undiscovered_items.append(item.nodeid)
 
 
 def pytest_collection_finish(session: pytest.Session) -> None:
@@ -1095,8 +1166,7 @@ def pytest_collection_finish(session: pytest.Session) -> None:
     session_platform: str = platform_filter[0] if platform_filter else "a2a3"
     seen: dict[str, PTOTestCase] = {}  # effective cache_key → instance (deduped)
 
-    for item in session.items:
-        _collect_test_case_from_item(item, seen, session_memory_planner, session_platform)
+    _discover_cases(session, seen, session_memory_planner, session_platform)
 
     # Read the task-submit / pipeline options *before* the empty-discovery guard:
     # a suite that only creates PTOTestCases dynamically leaves ``seen`` empty yet
