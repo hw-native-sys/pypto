@@ -53,7 +53,6 @@ How to run
     # numerical correctness is checked.
 """
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +60,7 @@ import pypto.language as pl
 import pytest
 import torch
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
+from harness.swimlane import read_swimlane
 from pypto.ir.pass_manager import OptimizationStrategy
 
 _BUILD_OUTPUT_DIR = Path(__file__).resolve().parents[4] / "build_output"
@@ -219,7 +219,7 @@ def manual_scope_swimlane_file(test_runner) -> Path:
 
 @pytest.fixture(scope="module")
 def manual_scope_swimlane_data(manual_scope_swimlane_file: Path) -> dict:
-    return json.loads(manual_scope_swimlane_file.read_text())
+    return read_swimlane(manual_scope_swimlane_file)
 
 
 @pytest.mark.swimlane
@@ -512,7 +512,7 @@ def phase_fence_swimlane_file(test_runner) -> Path:
 
 @pytest.fixture(scope="module")
 def phase_fence_swimlane_data(phase_fence_swimlane_file: Path) -> dict:
-    return json.loads(phase_fence_swimlane_file.read_text())
+    return read_swimlane(phase_fence_swimlane_file)
 
 
 @pytest.fixture(scope="module")
@@ -530,7 +530,7 @@ def phase_fence_auto_swimlane_file(test_runner) -> Path:
 
 @pytest.fixture(scope="module")
 def phase_fence_auto_swimlane_data(phase_fence_auto_swimlane_file: Path) -> dict:
-    return json.loads(phase_fence_auto_swimlane_file.read_text())
+    return read_swimlane(phase_fence_auto_swimlane_file)
 
 
 @pytest.mark.swimlane
@@ -734,7 +734,7 @@ def branch_chain_swimlane_file(test_runner) -> Path:
 
 @pytest.fixture(scope="module")
 def branch_chain_swimlane_data(branch_chain_swimlane_file: Path) -> dict:
-    return json.loads(branch_chain_swimlane_file.read_text())
+    return read_swimlane(branch_chain_swimlane_file)
 
 
 @pytest.mark.swimlane
@@ -958,7 +958,7 @@ def original_kv_proj_swimlane_file(test_runner) -> Path:
 
 @pytest.fixture(scope="module")
 def original_kv_proj_swimlane_data(original_kv_proj_swimlane_file: Path) -> dict:
-    return json.loads(original_kv_proj_swimlane_file.read_text())
+    return read_swimlane(original_kv_proj_swimlane_file)
 
 
 @pytest.mark.swimlane

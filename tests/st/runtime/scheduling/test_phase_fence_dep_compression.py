@@ -15,7 +15,6 @@ all tasks in flattened stage k+1 must start after all tasks in flattened stage k
 finish.
 """
 
-import json
 import os
 from pathlib import Path
 from typing import Any
@@ -24,6 +23,7 @@ import pypto.language as pl
 import pytest
 import torch
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
+from harness.swimlane import read_swimlane
 from pypto.ir.pass_manager import OptimizationStrategy
 
 from examples.utils.phase_fence_dep_compression import (
@@ -139,7 +139,7 @@ def _new_swimlane_file(test_runner, case: PTOTestCase, *, label: str) -> Path:
 
 def _new_swimlane_json(test_runner, case: PTOTestCase, *, label: str) -> dict:
     path = _new_swimlane_file(test_runner, case, label=label)
-    return json.loads(path.read_text())
+    return read_swimlane(path)
 
 
 def _build_submit_flattened_program(*, epochs: int, layers: int, phases: int):
