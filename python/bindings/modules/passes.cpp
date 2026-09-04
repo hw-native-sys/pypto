@@ -837,7 +837,8 @@ void BindPass(nb::module_& m) {
       "Inputs to ChooseL0Tile: problem dims + hardware + schedule knobs. max_n caps the logical chosen "
       "tile-N extent (not the problem N); max_n_pipelined may tighten that bound when N moves through "
       "a full-K output pipeline, and max_n_nested_pipelined handles two nested pipeline levels. Zero "
-      "means unbounded.")
+      "means unbounded. enclosing_operand_copies is the minimum co-live L0A/L0B depth imposed by "
+      "source pipelines around the matmul.")
       .def(nb::init<>())
       .def_rw("M", &utils::L0TileConfig::M)
       .def_rw("N", &utils::L0TileConfig::N)
@@ -848,6 +849,7 @@ void BindPass(nb::module_& m) {
       .def_rw("bytes_a", &utils::L0TileConfig::bytes_a)
       .def_rw("bytes_b", &utils::L0TileConfig::bytes_b)
       .def_rw("bytes_c", &utils::L0TileConfig::bytes_c)
+      .def_rw("enclosing_operand_copies", &utils::L0TileConfig::enclosing_operand_copies)
       .def_rw("min_m", &utils::L0TileConfig::min_m)
       .def_rw("min_n", &utils::L0TileConfig::min_n)
       .def_rw("min_k", &utils::L0TileConfig::min_k)

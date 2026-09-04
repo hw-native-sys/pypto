@@ -948,6 +948,8 @@ class l0_tile_chooser:
         used under one level of a full-K output-grid pipeline, while
         ``max_n_nested_pipelined`` covers two nested pipeline levels. A value
         of zero leaves the corresponding bound disabled.
+        ``enclosing_operand_copies`` is the minimum co-live L0A/L0B depth
+        imposed by source pipelines around the matmul.
         """
 
         M: int
@@ -959,6 +961,7 @@ class l0_tile_chooser:
         bytes_a: int
         bytes_b: int
         bytes_c: int
+        enclosing_operand_copies: int
         min_m: int
         min_n: int
         min_k: int

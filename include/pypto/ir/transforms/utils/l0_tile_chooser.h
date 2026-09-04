@@ -61,6 +61,15 @@ struct L0TileConfig {
   uint32_t bytes_b = 2;
   uint32_t bytes_c = 4;
 
+  // Minimum number of co-live copies of each generated L0 operand imposed by
+  // source pipelines enclosing the matmul. The effective operand depth is the
+  // maximum of this value and the chooser's stationarity-derived dbA/dbB depth:
+  // nested lowering schedules each stage's inner operand pipeline in turn, so
+  // the two depths do not multiply. This does not apply to L0C: ordinary cube
+  // accumulators are serialized by pipeline lowering, while explicit
+  // accumulator ping-pong is represented separately by dbC.
+  uint64_t enclosing_operand_copies = 1;
+
   // Lower bounds and alignment for the L0 tile shape (m, n, k).
   // Defaults reflect the cube fractal across Ascend AI Core generations.
   int min_m = 16;
