@@ -167,15 +167,15 @@ for lowering/compiler plumbing, plus other dialects such as VPTO, VMI, and SIMT.
 | pto.tsel | TSEL | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.tsels | TSELS | tile | ✅ | ✅ | ❌ | ✅ | — | canonical 4-input path; verified on A2/A3 hardware, A5 hardware verification pending |
 | **Bitwise Operations (11)** |  |  |  |  |  |  |  |  |
-| pto.tand | TAND | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
-| pto.tor | TOR | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
-| pto.txor | TXOR | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
+| pto.tand | TAND | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A2/A3 hardware passes signed/unsigned 8/16-bit patterns across full, row-tail, column-tail, and combined-tail shapes; A5 hardware verification pending |
+| pto.tor | TOR | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A2/A3 hardware passes signed/unsigned 8/16-bit patterns across full, row-tail, column-tail, and combined-tail shapes; A5 hardware verification pending |
+| pto.txor | TXOR | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A2/A3 hardware passes signed/unsigned 8/16-bit patterns with explicit tmp across all four shape classes; IR UT covers alias rejection; A5 hardware verification pending |
 | pto.tshl | TSHL | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
 | pto.tshr | TSHR | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
-| pto.tnot | TNOT | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
-| pto.tands | TANDS | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
-| pto.tors | TORS | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
-| pto.txors | TXORS | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
+| pto.tnot | TNOT | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | covered by the pre-existing same-name `tile.not` ST |
+| pto.tands | TANDS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A2/A3 hardware passes signed/unsigned 8/16-bit tiles with immediate/SSA scalars across all four shape classes; A5 hardware verification pending |
+| pto.tors | TORS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A2/A3 hardware passes signed/unsigned 8/16-bit tiles with immediate/SSA scalars across all four shape classes; A5 hardware verification pending |
+| pto.txors | TXORS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A2/A3 hardware passes signed/unsigned 8/16-bit tiles with immediate/SSA scalars and explicit tmp across all four shape classes; IR UT covers alias rejection; A5 hardware verification pending |
 | pto.tshls | TSHLS | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
 | pto.tshrs | TSHRS | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
 | **Data Rearrangement (15)** |  |  |  |  |  |  |  |  |
@@ -274,6 +274,6 @@ for lowering/compiler plumbing, plus other dialects such as VPTO, VMI, and SIMT.
 | pto.tassign | TASSIGN | internal | ✅ | — | — | — | — | inactive backend hook; no standalone ST |
 
 **Stats**: 204 public/compatibility PTOAS ops; 113 have a pypto tile frontend and 75 have a tensor frontend
-(plus four non-tile/tensor `pl.prefetch.*` ops); 115 have same-name ST coverage
-(111 regular STs and 4 distributed STs); 57 lack same-name ST coverage (47 regular and 10 distributed);
-within these 204, another 32 ops are not suitable for standalone STs.
+(plus four non-tile/tensor `pl.prefetch.*` ops); 121 have same-name ST coverage
+(117 regular STs and 4 distributed STs); 51 lack same-name ST coverage (41 regular and 10 distributed);
+the remaining 32 ops are not suitable for standalone STs.

@@ -39,6 +39,7 @@ from ..utils import (
     _normalize_const_to_dtype,
     _normalize_expr,
     _normalize_scalar_operand,
+    _normalize_signless_same_width_scalar_operand,
     _to_int32_scalar,
     _to_make_tuple,
     resolve_cast_mode,
@@ -77,28 +78,6 @@ def _create_tile_binary_call(
     if isinstance(rhs_expr.type, ScalarType):
         return _ir_core.create_op_call(scalar_op_name, [lhs, rhs_expr], {}, span)
     return _ir_core.create_op_call(tile_op_name, [lhs, rhs_expr], {}, span)
-
-
-def _normalize_sels_scalar_operand(src: Expr, scalar: int | float | Expr, span: Span) -> Expr:
-    """Normalize TSELS scalar constants to the PTOAS-compatible element dtype."""
-    scalar_expr = _normalize_scalar_operand(src, scalar, span, retype_constants=True)
-    src_type = src.type
-    if not isinstance(src_type, _ir_core.TileType) or not isinstance(scalar_expr, ConstInt):
-        return scalar_expr
-
-    signed_dtype_and_bits = {
-        DataType.UINT8: (DataType.INT8, 8),
-        DataType.UINT16: (DataType.INT16, 16),
-        DataType.UINT32: (DataType.INT32, 32),
-    }.get(src_type.dtype)
-    if signed_dtype_and_bits is None:
-        return scalar_expr
-
-    signed_dtype, bits = signed_dtype_and_bits
-    value = scalar_expr.value
-    if value >= 1 << (bits - 1):
-        value -= 1 << bits
-    return ConstInt(value, signed_dtype, span)
 
 
 # ============================================================================
@@ -1303,14 +1282,14 @@ def ands(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
 
     Args:
         lhs: Tile (TileType)
-        rhs: Scalar (int/Expr with INT32 ScalarType)
+        rhs: Same-width signless integer scalar (int/Expr)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for element-wise bitwise AND with scalar
     """
     actual_span = _get_span_or_capture(span)
-    rhs_expr = _normalize_scalar_operand(lhs, rhs, actual_span)
+    rhs_expr = _normalize_signless_same_width_scalar_operand(lhs, rhs, actual_span)
     return _ir_core.create_op_call("tile.ands", [lhs, rhs_expr], {}, actual_span)
 
 
@@ -1338,14 +1317,14 @@ def ors(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
 
     Args:
         lhs: Tile (TileType)
-        rhs: Scalar (int/Expr with INT32 ScalarType)
+        rhs: Same-width signless integer scalar (int/Expr)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for element-wise bitwise OR with scalar
     """
     actual_span = _get_span_or_capture(span)
-    rhs_expr = _normalize_scalar_operand(lhs, rhs, actual_span)
+    rhs_expr = _normalize_signless_same_width_scalar_operand(lhs, rhs, actual_span)
     return _ir_core.create_op_call("tile.ors", [lhs, rhs_expr], {}, actual_span)
 
 
@@ -1374,7 +1353,7 @@ def xors(lhs: Expr, rhs: int | Expr, tmp: Expr, span: Span | None = None) -> Cal
 
     Args:
         lhs: Tile (TileType)
-        rhs: Scalar (int/Expr with INT32 ScalarType)
+        rhs: Same-width signless integer scalar (int/Expr)
         tmp: Temporary tile (TileType) required by the hardware
         span: Optional source span for debugging (auto-captured if not provided)
 
@@ -1382,7 +1361,7 @@ def xors(lhs: Expr, rhs: int | Expr, tmp: Expr, span: Span | None = None) -> Cal
         Call expression for element-wise bitwise XOR with scalar
     """
     actual_span = _get_span_or_capture(span)
-    rhs_expr = _normalize_scalar_operand(lhs, rhs, actual_span)
+    rhs_expr = _normalize_signless_same_width_scalar_operand(lhs, rhs, actual_span)
     return _ir_core.create_op_call("tile.xors", [lhs, rhs_expr, tmp], {}, actual_span)
 
 
@@ -1542,7 +1521,12 @@ def sels(
         Call expression for per-element tile/scalar selection
     """
     actual_span = _get_span_or_capture(span)
-    scalar_expr = _normalize_sels_scalar_operand(src, scalar, actual_span)
+    scalar_expr = _normalize_signless_same_width_scalar_operand(
+        src,
+        scalar,
+        actual_span,
+        retype_constants=True,
+    )
     return _ir_core.create_op_call("tile.sels", [mask, src, tmp, scalar_expr], {}, actual_span)
 
 

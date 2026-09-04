@@ -34,6 +34,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
@@ -104,6 +105,18 @@ static bool IsRemainderDataType(DataType dtype) {
   // the 16-bit and unsigned integer forms.
   return dtype == DataType::INT16 || dtype == DataType::UINT16 || dtype == DataType::INT32 ||
          dtype == DataType::UINT32 || dtype == DataType::FP16 || dtype == DataType::FP32;
+}
+
+static bool IsBitwiseDataType(DataType dtype) {
+  return dtype == DataType::INT8 || dtype == DataType::UINT8 || dtype == DataType::INT16 ||
+         dtype == DataType::UINT16 || dtype == DataType::INT32 || dtype == DataType::UINT32;
+}
+
+static DataType GetBitwiseScalarDataType(DataType tile_dtype) {
+  if (tile_dtype == DataType::UINT8) return DataType::INT8;
+  if (tile_dtype == DataType::UINT16) return DataType::INT16;
+  if (tile_dtype == DataType::UINT32) return DataType::INT32;
+  return tile_dtype;
 }
 
 static std::shared_ptr<TileType> MakePackedPredicateTileType(
@@ -428,6 +441,123 @@ TypePtr DeduceTileScalarRemainderType(const std::vector<ExprPtr>& args,
     auto tmp = As<TileType>(args[2]->GetType());
     CHECK(tmp) << "The operator " << op_name << " requires third argument (tmp) to be a TileType";
     CheckRemainderTmpContract(src, tmp, 1, op_name);
+  }
+
+  TileView tile_view;
+  tile_view.valid_shape = GetValidShape(src);
+  InheritTileViewLayout(tile_view, src);
+  return std::make_shared<TileType>(src->shape_, src->dtype_, std::nullopt, tile_view);
+}
+
+static void CheckBitwiseTileMatches(const std::shared_ptr<const TileType>& reference,
+                                    const std::shared_ptr<const TileType>& candidate,
+                                    const std::string& candidate_name, const std::string& op_name) {
+  CHECK(candidate->dtype_ == reference->dtype_)
+      << "The operator " << op_name << " requires all tile operands and dst to have the same dtype, but "
+      << candidate_name << " has " << candidate->dtype_.ToString() << " and src has "
+      << reference->dtype_.ToString();
+
+  CHECK(candidate->shape_.size() == reference->shape_.size())
+      << "The operator " << op_name
+      << " requires all tile operands and dst to have the same physical shape rank";
+  for (size_t i = 0; i < reference->shape_.size(); ++i) {
+    CHECK(DimensionsEqual(reference->shape_[i], candidate->shape_[i]))
+        << "The operator " << op_name
+        << " requires all tile operands and dst to have the same physical shape, but " << candidate_name
+        << " differs at dimension " << i;
+  }
+
+  const auto reference_valid_shape = GetValidShape(reference);
+  const auto candidate_valid_shape = GetValidShape(candidate);
+  CHECK(candidate_valid_shape.size() == reference_valid_shape.size())
+      << "The operator " << op_name
+      << " requires all tile operands and dst to have the same valid_shape rank";
+  for (size_t i = 0; i < reference_valid_shape.size(); ++i) {
+    CHECK(ProveValidExtentEqual(reference_valid_shape[i], candidate_valid_shape[i]) == ProofResult::kTrue)
+        << "The operator " << op_name
+        << " requires all tile operands and dst to have the same valid_shape, but " << candidate_name
+        << " differs at dimension " << i;
+  }
+}
+
+static bool BitwiseOperandsMayAlias(const ExprPtr& lhs, const ExprPtr& rhs) {
+  const auto lhs_var = AsVarLike(lhs);
+  const auto rhs_var = AsVarLike(rhs);
+  if (lhs_var && rhs_var && lhs_var.get() == rhs_var.get()) return true;
+
+  const auto lhs_tile = As<TileType>(lhs->GetType());
+  const auto rhs_tile = As<TileType>(rhs->GetType());
+  if (!lhs_tile || !rhs_tile || !lhs_tile->memref_.has_value() || !rhs_tile->memref_.has_value() ||
+      !lhs_tile->memref_.value() || !rhs_tile->memref_.value()) {
+    return false;
+  }
+  return MemRef::MayAlias(lhs_tile->memref_.value(), rhs_tile->memref_.value());
+}
+
+TypePtr DeduceTileOpBitwiseBinaryType(const std::vector<ExprPtr>& args,
+                                      const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                      const std::string& op_name, bool has_tmp = false) {
+  const size_t expected_args = has_tmp ? 3 : 2;
+  CHECK(args.size() == expected_args) << "The operator " << op_name << " requires exactly " << expected_args
+                                      << " arguments, but got " << args.size();
+
+  auto src0 = As<TileType>(args[0]->GetType());
+  auto src1 = As<TileType>(args[1]->GetType());
+  CHECK(src0) << "The operator " << op_name << " requires first argument to be a TileType, but got "
+              << args[0]->GetType()->TypeName();
+  CHECK(src1) << "The operator " << op_name << " requires second argument to be a TileType, but got "
+              << args[1]->GetType()->TypeName();
+  CHECK(IsBitwiseDataType(src0->dtype_))
+      << "The operator " << op_name
+      << " requires dtype in {INT8, UINT8, INT16, UINT16, INT32, UINT32}, but got "
+      << src0->dtype_.ToString();
+  CheckBitwiseTileMatches(src0, src1, "src1", op_name);
+
+  if (has_tmp) {
+    auto tmp = As<TileType>(args[2]->GetType());
+    CHECK(tmp) << "The operator " << op_name << " requires third argument (tmp) to be a TileType, but got "
+               << args[2]->GetType()->TypeName();
+    CheckBitwiseTileMatches(src0, tmp, "tmp", op_name);
+    CHECK(!BitwiseOperandsMayAlias(args[2], args[0]) && !BitwiseOperandsMayAlias(args[2], args[1]))
+        << "The operator " << op_name << " requires tmp to be distinct from src operands";
+  }
+
+  TileView tile_view;
+  tile_view.valid_shape = GetValidShape(src0);
+  InheritTileViewLayout(tile_view, src0);
+  return std::make_shared<TileType>(src0->shape_, src0->dtype_, std::nullopt, tile_view);
+}
+
+TypePtr DeduceTileOpBitwiseScalarType(const std::vector<ExprPtr>& args,
+                                      const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                      const std::string& op_name, bool has_tmp = false) {
+  const size_t expected_args = has_tmp ? 3 : 2;
+  CHECK(args.size() == expected_args) << "The operator " << op_name << " requires exactly " << expected_args
+                                      << " arguments, but got " << args.size();
+
+  auto src = As<TileType>(args[0]->GetType());
+  auto scalar = As<ScalarType>(args[1]->GetType());
+  CHECK(src) << "The operator " << op_name << " requires first argument to be a TileType, but got "
+             << args[0]->GetType()->TypeName();
+  CHECK(scalar) << "The operator " << op_name << " requires second argument to be a ScalarType, but got "
+                << args[1]->GetType()->TypeName();
+  CHECK(IsBitwiseDataType(src->dtype_))
+      << "The operator " << op_name
+      << " requires tile dtype in {INT8, UINT8, INT16, UINT16, INT32, UINT32}, but got "
+      << src->dtype_.ToString();
+  const auto expected_scalar_dtype = GetBitwiseScalarDataType(src->dtype_);
+  CHECK(scalar->dtype_ == expected_scalar_dtype)
+      << "The operator " << op_name << " requires a same-width signless scalar encoding for tile dtype "
+      << src->dtype_.ToString() << ", but got " << scalar->dtype_.ToString() << "; expected "
+      << expected_scalar_dtype.ToString();
+
+  if (has_tmp) {
+    auto tmp = As<TileType>(args[2]->GetType());
+    CHECK(tmp) << "The operator " << op_name << " requires third argument (tmp) to be a TileType, but got "
+               << args[2]->GetType()->TypeName();
+    CheckBitwiseTileMatches(src, tmp, "tmp", op_name);
+    CHECK(!BitwiseOperandsMayAlias(args[2], args[0]))
+        << "The operator " << op_name << " requires tmp to be distinct from src";
   }
 
   TileView tile_view;
@@ -790,7 +920,7 @@ REGISTER_OP("tile.minimums")
 REGISTER_OP("tile.and")
     .set_op_category("TileOp")
     .functional_execution_memory_access()
-    .set_description("Element-wise bitwise AND of two tiles with broadcasting")
+    .set_description("Element-wise bitwise AND of two tiles with matching dtype and shape")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
     .set_input_memory(0, MemorySpace::Vec)
@@ -798,7 +928,7 @@ REGISTER_OP("tile.and")
     .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.and", true);
+      return DeduceTileOpBitwiseBinaryType(args, kwargs, "tile.and");
     });
 
 REGISTER_OP("tile.ands")
@@ -812,13 +942,13 @@ REGISTER_OP("tile.ands")
     .not_inplace_safe()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileOpIntScalarBinaryType(args, kwargs, "tile.ands");
+      return DeduceTileOpBitwiseScalarType(args, kwargs, "tile.ands");
     });
 
 REGISTER_OP("tile.or")
     .set_op_category("TileOp")
     .functional_execution_memory_access()
-    .set_description("Element-wise bitwise OR of two tiles with broadcasting")
+    .set_description("Element-wise bitwise OR of two tiles with matching dtype and shape")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
     .set_input_memory(0, MemorySpace::Vec)
@@ -826,7 +956,7 @@ REGISTER_OP("tile.or")
     .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.or", true);
+      return DeduceTileOpBitwiseBinaryType(args, kwargs, "tile.or");
     });
 
 REGISTER_OP("tile.ors")
@@ -840,7 +970,7 @@ REGISTER_OP("tile.ors")
     .not_inplace_safe()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileOpIntScalarBinaryType(args, kwargs, "tile.ors");
+      return DeduceTileOpBitwiseScalarType(args, kwargs, "tile.ors");
     });
 
 // Tile-tile ternary ops with a tmp buffer as the third argument.
@@ -1011,42 +1141,9 @@ TypePtr DeduceTileOpCarryScalarType(const std::vector<ExprPtr>& args,
   return std::make_shared<TileType>(tile_type1->shape_, tile_type1->dtype_, std::nullopt, tile_view);
 }
 
-TypePtr DeduceTileOpXorScalarType(const std::vector<ExprPtr>& args,
-                                  const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                  const std::string& op_name) {
-  CHECK(args.size() == 3) << "The operator " << op_name << " requires exactly 3 arguments, but got "
-                          << args.size();
-
-  auto tile_type = As<TileType>(args[0]->GetType());
-  CHECK(tile_type) << "The operator " << op_name << " requires first argument to be a TileType, but got "
-                   << args[0]->GetType()->TypeName();
-  CHECK(tile_type->dtype_.IsInt()) << "The operator " << op_name << " requires integer tile dtype, but got "
-                                   << tile_type->dtype_.ToString();
-
-  // Second argument must be ScalarType with an integer dtype per ISA spec:
-  //   %dst = txors %src, %scalar : !pto.tile<...>, i32
-  // The IR allows any integer width (INT8/16/32/64, UINT variants); codegen casts to i32.
-  auto scalar_type = As<ScalarType>(args[1]->GetType());
-  CHECK(scalar_type) << "The operator " << op_name << " requires second argument to be a ScalarType, but got "
-                     << args[1]->GetType()->TypeName();
-  CHECK(scalar_type->dtype_.IsInt()) << "The operator " << op_name
-                                     << " requires scalar to be an integer type, but got "
-                                     << scalar_type->dtype_.ToString();
-
-  CHECK(As<TileType>(args[2]->GetType()))
-      << "The operator " << op_name << " requires third argument to be a TileType, but got "
-      << args[2]->GetType()->TypeName();
-
-  // Result has the same shape and dtype as the input tile; bitwise ops do not change element type.
-  TileView tile_view;
-  tile_view.valid_shape = GetValidShape(tile_type);
-  InheritTileViewLayout(tile_view, tile_type);
-  return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
-}
-
 REGISTER_OP("tile.xor")
     .set_op_category("TileOp")
-    .set_description("Element-wise bitwise XOR of two tiles with broadcasting")
+    .set_description("Element-wise bitwise XOR of two tiles using an explicit scratch tile")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
     .add_argument("tmp", "Temporary tile (TileType)")
@@ -1054,10 +1151,10 @@ REGISTER_OP("tile.xor")
     .set_input_memory(1, MemorySpace::Vec)
     .set_input_memory(2, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
-    .set_lane_invariant_arg(2)
+    .not_inplace_safe()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileOpTernaryType(args, kwargs, "tile.xor", true);
+      return DeduceTileOpBitwiseBinaryType(args, kwargs, "tile.xor", true);
     });
 
 REGISTER_OP("tile.xors")
@@ -1070,10 +1167,9 @@ REGISTER_OP("tile.xors")
     .set_input_memory(2, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     .not_inplace_safe()
-    .set_lane_invariant_arg(2)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileOpXorScalarType(args, kwargs, "tile.xors");
+      return DeduceTileOpBitwiseScalarType(args, kwargs, "tile.xors", true);
     });
 
 // Type deduction for tile.prelu (Src x Slope x Tmp -> Tile).

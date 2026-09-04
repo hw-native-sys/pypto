@@ -260,7 +260,11 @@ void PTOCodegen::VisitExpr_(const ir::CastPtr& op) {
   } else if (src_is_float && dst_is_float) {
     mlir_op = (dst_dtype.GetBit() > src_dtype.GetBit()) ? "arith.extf" : "arith.truncf";
   } else if (!src_is_float && !dst_is_float) {
-    if (dst_dtype.GetBit() > src_dtype.GetBit()) {
+    if (dst_dtype.GetBit() == src_dtype.GetBit()) {
+      // MLIR arithmetic casts only change integer width and require signless
+      // operands. Preserve the bits when crossing between uiN and iN.
+      mlir_op = "builtin.unrealized_conversion_cast";
+    } else if (dst_dtype.GetBit() > src_dtype.GetBit()) {
       mlir_op = src_is_uint ? "arith.extui" : "arith.extsi";
     } else {
       mlir_op = "arith.trunci";

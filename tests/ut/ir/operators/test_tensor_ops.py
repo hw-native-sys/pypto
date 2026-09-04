@@ -5160,6 +5160,33 @@ def test_tensor_bitwise_scalar(builder_name, op_name):
     assert _const_int_values(result_type.shape) == [64, 128]
 
 
+@pytest.mark.parametrize("builder_name", ["ands", "ors", "xors"])
+@pytest.mark.parametrize(
+    ("tensor_dtype", "scalar_dtype", "all_ones"),
+    [
+        (DataType.UINT8, DataType.INT8, 0xFF),
+        (DataType.UINT16, DataType.INT16, 0xFFFF),
+        (DataType.UINT32, DataType.INT32, 0xFFFFFFFF),
+    ],
+)
+def test_tensor_bitwise_unsigned_scalar_uses_same_width_signless_encoding(
+    builder_name, tensor_dtype, scalar_dtype, all_ones
+):
+    """Unsigned tensor masks lower through their same-width signed IR companion."""
+    span = ir.Span.unknown()
+    lhs = _bitwise_tensor_var([64], dtype=tensor_dtype, name="lhs")
+
+    literal_call = getattr(ir.op.tensor, builder_name)(lhs, all_ones)
+    explicit_call = getattr(ir.op.tensor, builder_name)(lhs, ir.ConstInt(0x55, scalar_dtype, span))
+    assert isinstance(literal_call.args[1], ir.ConstInt)
+    assert literal_call.args[1].dtype == scalar_dtype
+    assert literal_call.args[1].value == -1
+    assert explicit_call.args[1].type.dtype == scalar_dtype
+
+    with pytest.raises(ValueError, match=r"same-width signless scalar"):
+        getattr(ir.op.tensor, builder_name)(lhs, ir.ConstInt(1, tensor_dtype, span))
+
+
 @pytest.mark.parametrize(("builder_name", "op_name"), _BITWISE_SCALAR_VALID_SHAPE_OPS)
 def test_tensor_bitwise_scalar_preserves_partial_valid_shape(builder_name, op_name):
     """The dtype-preserving scalar path must also keep content validity."""
@@ -5254,6 +5281,26 @@ def test_tensor_bitwise_rejects_float_rhs(builder_name, op_name):
         getattr(ir.op.tensor, builder_name)(_bitwise_tensor_var([64]), float_var)
 
 
+@pytest.mark.parametrize("builder_name", ["and_", "or_", "xor"])
+@pytest.mark.parametrize("dtype", [DataType.INT64, DataType.UINT64])
+def test_tensor_bitwise_binary_rejects_unsupported_64bit_dtype(builder_name, dtype):
+    """Tensor bitwise dtypes must be implementable by the strict tile lowering."""
+    value = _bitwise_tensor_var([64], dtype=dtype)
+
+    with pytest.raises(ValueError, match=r"INT8.*INT32"):
+        getattr(ir.op.tensor, builder_name)(value, value)
+
+
+@pytest.mark.parametrize("builder_name", ["ands", "ors", "xors"])
+@pytest.mark.parametrize("dtype", [DataType.INT64, DataType.UINT64])
+def test_tensor_bitwise_scalar_rejects_unsupported_64bit_dtype(builder_name, dtype):
+    """Tensor-scalar bitwise calls reject widths unavailable in tile PTOAS."""
+    value = _bitwise_tensor_var([64], dtype=dtype)
+
+    with pytest.raises(ValueError, match=r"INT8.*INT32"):
+        getattr(ir.op.tensor, builder_name)(value, 1)
+
+
 @pytest.mark.parametrize(("builder_name", "op_name"), _BITWISE_BINARY_OPS)
 def test_tensor_bitwise_rejects_broadcast(builder_name, op_name):
     """There is no tile.row_expand_and, so a broadcasting pair cannot lower."""
@@ -5307,15 +5354,14 @@ def test_tensor_bitwise_scalar_rejects_float_tensor(builder_name, op_name):
         getattr(ir.op.tensor, builder_name)(float_var, 4)
 
 
-@pytest.mark.parametrize("op_name", ["and_", "or_"])
-def test_tensor_bitwise_promotes_mixed_integer_widths(op_name):
-    """and/or promote across integer widths, matching tile.and / tile.or."""
+@pytest.mark.parametrize("op_name", ["and_", "or_", "xor"])
+def test_tensor_bitwise_rejects_mixed_integer_widths(op_name):
+    """Tensor AND/OR/XOR require the exact dtype equality enforced by tile lowering."""
     lhs = _bitwise_tensor_var([64], dtype=DataType.INT16, name="lhs")
     rhs = _bitwise_tensor_var([64], dtype=DataType.INT32, name="rhs")
 
-    result_type = getattr(ir.op.tensor, op_name)(lhs, rhs).type
-    assert isinstance(result_type, ir.TensorType)
-    assert result_type.dtype == DataType.INT32
+    with pytest.raises(ValueError, match=r"same dtype"):
+        getattr(ir.op.tensor, op_name)(lhs, rhs)
 
 
 @pytest.mark.parametrize("op_name", ["shl", "shr"])

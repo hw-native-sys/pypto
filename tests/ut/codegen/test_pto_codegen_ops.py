@@ -638,6 +638,84 @@ class TestCarryFamilyCodegen:
             )
 
 
+class TestBitwiseScalarFamilyCodegen:
+    """PTOAS bitwise scalars keep the tile width and use signless iN types."""
+
+    @pytest.mark.parametrize(
+        "tile_dtype,scalar_dtype,scalar_mlir_type",
+        [
+            (pl.INT8, pl.INT8, "i8"),
+            (pl.UINT8, pl.INT8, "i8"),
+            (pl.INT16, pl.INT16, "i16"),
+            (pl.UINT16, pl.INT16, "i16"),
+            (pl.INT32, pl.INT32, "i32"),
+            (pl.UINT32, pl.INT32, "i32"),
+        ],
+    )
+    def test_bitwise_scalar_ops_emit_same_width_signless_scalar(
+        self, tile_dtype, scalar_dtype, scalar_mlir_type
+    ):
+        @pl.program
+        class BitwiseScalarPrograms:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_ands(
+                self,
+                src: pl.Tensor[[16, 16], tile_dtype],
+                out: pl.Tensor[[16, 16], tile_dtype],
+            ) -> pl.Tensor[[16, 16], tile_dtype]:
+                src_tile = pl.load(src, [0, 0], [16, 16])
+                return pl.store(pl.tile.ands(src_tile, 0x55), [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_ors(
+                self,
+                src: pl.Tensor[[16, 16], tile_dtype],
+                scalar_src: pl.Tensor[[1], tile_dtype],
+                out: pl.Tensor[[16, 16], tile_dtype],
+            ) -> pl.Tensor[[16, 16], tile_dtype]:
+                scalar: pl.Scalar[scalar_dtype] = pl.cast(pl.read(scalar_src, [0]), scalar_dtype)
+                src_tile = pl.load(src, [0, 0], [16, 16])
+                return pl.store(pl.tile.ors(src_tile, scalar), [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_xors(
+                self,
+                src: pl.Tensor[[16, 16], tile_dtype],
+                scalar_src: pl.Tensor[[1], tile_dtype],
+                out: pl.Tensor[[16, 16], tile_dtype],
+            ) -> pl.Tensor[[16, 16], tile_dtype]:
+                scalar: pl.Scalar[scalar_dtype] = pl.cast(pl.read(scalar_src, [0]), scalar_dtype)
+                src_tile = pl.load(src, [0, 0], [16, 16])
+                tmp = pl.tile.create([16, 16], dtype=tile_dtype, target_memory=pl.MemorySpace.Vec)
+                return pl.store(pl.tile.xors(src_tile, scalar, tmp), [0, 0], out)
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(BitwiseScalarPrograms)
+        expected_ops = {
+            "kernel_ands": "pto.tands",
+            "kernel_ors": "pto.tors",
+            "kernel_xors": "pto.txors",
+        }
+
+        for func in optimized.functions.values():
+            expected_op = expected_ops[func.name]
+            single = ir.Program([func], func.name, optimized.span)
+            mlir = codegen.PTOCodegen().generate(single)
+            op_line = next((line for line in mlir.splitlines() if expected_op in line), "")
+            assert op_line, f"{expected_op} not found in MLIR:\n{mlir}"
+            ins_types = op_line.split("ins(", 1)[1].split(")", 1)[0].split(":", 1)[1]
+            assert re.search(rf"(?:^|, ){scalar_mlir_type}(?:,|$)", ins_types.strip()), (
+                f"{expected_op} must keep the same-width signless scalar type {scalar_mlir_type}: {op_line}"
+            )
+            if tile_dtype in (pl.UINT8, pl.UINT16, pl.UINT32) and func.name != "kernel_ands":
+                assert "builtin.unrealized_conversion_cast" in mlir
+                assert f": u{scalar_mlir_type} to {scalar_mlir_type}" in mlir
+                assert not any(
+                    "arith.trunci" in line and f"u{scalar_mlir_type}" in line for line in mlir.splitlines()
+                )
+
+
 class TestRsqrtHighPrecisionCodegen:
     """Tests for the high-precision path of tile.rsqrt (2-arg form)."""
 

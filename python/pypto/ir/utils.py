@@ -415,6 +415,44 @@ def _normalize_scalar_operand(
     return _normalize_expr(scalar, span, int_dtype=fallback_int_dtype, float_dtype=fallback_float_dtype)
 
 
+def _normalize_signless_same_width_scalar_operand(
+    operand: _ir.Expr,
+    scalar: int | float | _ir.Expr,
+    span: _ir.Span,
+    *,
+    retype_constants: bool = False,
+) -> _ir.Expr:
+    """Normalize constants to PTOAS's same-width signless scalar encoding."""
+    is_placeholder = not isinstance(scalar, _ir.Expr) or (
+        isinstance(scalar, _ir.ConstInt) and scalar.dtype == DataType.INDEX
+    )
+    scalar_expr = _normalize_scalar_operand(
+        operand,
+        scalar,
+        span,
+        retype_constants=retype_constants,
+    )
+    if not is_placeholder and not retype_constants:
+        return scalar_expr
+    operand_dtype = _elem_dtype(operand)
+    if operand_dtype is None or not isinstance(scalar_expr, _ir.ConstInt):
+        return scalar_expr
+
+    signed_dtype_and_bits = {
+        DataType.UINT8: (DataType.INT8, 8),
+        DataType.UINT16: (DataType.INT16, 16),
+        DataType.UINT32: (DataType.INT32, 32),
+    }.get(operand_dtype)
+    if signed_dtype_and_bits is None:
+        return scalar_expr
+
+    signed_dtype, bits = signed_dtype_and_bits
+    value = scalar_expr.value
+    if value >= 1 << (bits - 1):
+        value -= 1 << bits
+    return _ir.ConstInt(value, signed_dtype, span)
+
+
 def _normalize_const_to_dtype(
     scalar: int | float | _ir.Expr,
     dtype: DataType,

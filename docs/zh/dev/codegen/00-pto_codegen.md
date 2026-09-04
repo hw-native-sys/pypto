@@ -144,6 +144,9 @@ print(pto_code)
 | `tile.addsc(src0, scalar, carry)` | `pto.taddsc`（`src0 + scalar + carry`） |
 | `tile.subsc(src0, scalar, carry)` | `pto.tsubsc`（`src0 - scalar + carry`） |
 | `tile.adds(tile, scalar)` | `pto.tadds` (Tile + 标量) |
+| `tile.and_(lhs, rhs)` / `tile.ands(lhs, scalar)` | `pto.tand` / `pto.tands`；scalar 使用同位宽 signless `iN` |
+| `tile.or_(lhs, rhs)` / `tile.ors(lhs, scalar)` | `pto.tor` / `pto.tors`；scalar 使用同位宽 signless `iN` |
+| `tile.xor(lhs, rhs, tmp)` / `tile.xors(lhs, scalar, tmp)` | `pto.txor` / `pto.txors`；scalar 使用同位宽 signless `iN` |
 | `tile.fillpad_expand(src, shape)` | `pto.tfillpad_expand ins(%src) outs(%dst)`（`shape` 元组仅用于类型推导；更大的 `dst` 及其 pad 来自结果类型） |
 
 **`tile.slice` / `tile.assemble` 下沉细节。** 两个 op 都通过 `pto.subview`

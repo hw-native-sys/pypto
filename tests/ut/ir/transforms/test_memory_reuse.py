@@ -1897,6 +1897,31 @@ class TestInplaceOps:
         After = _run_pipeline(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_xor_output_does_not_alias_sources_or_tmp(self):
+        """TXOR decomposition requires four distinct live buffers."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                input_a: pl.Tensor[[16, 16], pl.INT16],
+                input_b: pl.Tensor[[16, 16], pl.INT16],
+                input_tmp: pl.Tensor[[16, 16], pl.INT16],
+                output: pl.Out[pl.Tensor[[16, 16], pl.INT16]],
+            ) -> pl.Tensor[[16, 16], pl.INT16]:
+                lhs: pl.Tile[[16, 16], pl.INT16, pl.MemorySpace.Vec] = pl.load(input_a, [0, 0], [16, 16])
+                rhs: pl.Tile[[16, 16], pl.INT16, pl.MemorySpace.Vec] = pl.load(input_b, [0, 0], [16, 16])
+                tmp: pl.Tile[[16, 16], pl.INT16, pl.MemorySpace.Vec] = pl.load(input_tmp, [0, 0], [16, 16])
+                dst: pl.Tile[[16, 16], pl.INT16, pl.MemorySpace.Vec] = pl.xor(lhs, rhs, tmp)
+                return pl.store(dst, [0, 0], output)
+
+        after = _run_pipeline(Before)
+        bases = _collect_tile_memref_bases(after)
+        for name in ("lhs", "rhs", "tmp", "dst"):
+            assert name in bases, f"missing {name}; got {bases}"
+        assert len({bases["lhs"], bases["rhs"], bases["tmp"], bases["dst"]}) == 4
+
     def test_inplace_unsafe_two_level_transitive_chain(self):
         """tile.recip must not reuse a buffer occupied by its input via a two-level chain.
 

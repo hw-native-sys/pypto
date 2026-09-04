@@ -108,6 +108,9 @@ static bool RequiresRowMajorLayout(std::string_view op_name) {
       // Gather operands and result are linearly addressed.
       "tile.gatherb",
       "tile.rems",
+      "tile.ands",
+      "tile.ors",
+      "tile.xors",
       // Ternary scalar ops (Tile x Scalar x Tile)
       "tile.addsc",
       "tile.subsc",
@@ -816,9 +819,9 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.subs",            "pto.tsubs",            2},
     {"tile.muls",            "pto.tmuls",            2},
     {"tile.divs",            "pto.tdivs",            2},
-    {"tile.ands",            "pto.tands",            2, 1},
-    {"tile.ors",             "pto.tors",             2, 1},
-    {"tile.xors",            "pto.txors",            3, 1},  // src0, scalar, tmp
+    {"tile.ands",            "pto.tands",            2},
+    {"tile.ors",             "pto.tors",             2},
+    {"tile.xors",            "pto.txors",            3},  // src0, scalar, tmp
     {"tile.shls",            "pto.tshls",            2, 1},
     {"tile.shrs",            "pto.tshrs",            2, 1},
     {"tile.maximums",        "pto.tmaxs",            2},

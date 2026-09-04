@@ -30,6 +30,7 @@ from ..utils import (
     _get_span_or_capture,
     _normalize_expr,
     _normalize_scalar_operand,
+    _normalize_signless_same_width_scalar_operand,
     _to_int32_scalar,
     _to_make_tuple,
     resolve_cast_mode,
@@ -783,7 +784,10 @@ def _bitwise_dispatch(
         Call expression for the selected operator
     """
     actual_span = _get_span_or_capture(span)
-    rhs_expr = _normalize_scalar_operand(lhs, rhs, actual_span)
+    if scalar_op in {"tensor.ands", "tensor.ors", "tensor.xors"}:
+        rhs_expr = _normalize_signless_same_width_scalar_operand(lhs, rhs, actual_span)
+    else:
+        rhs_expr = _normalize_scalar_operand(lhs, rhs, actual_span)
     chosen = scalar_op if isinstance(rhs_expr.type, ScalarType) else tensor_op
     return _ir_core.create_op_call(chosen, [lhs, rhs_expr], {}, actual_span)
 
@@ -791,7 +795,10 @@ def _bitwise_dispatch(
 def _bitwise_scalar(op_name: str, lhs: Expr, rhs: int | Expr, span: Span | None) -> Call:
     """Build a tensor-scalar bitwise/shift call (the explicit ``*s`` entry points)."""
     actual_span = _get_span_or_capture(span)
-    rhs_expr = _normalize_scalar_operand(lhs, rhs, actual_span)
+    if op_name in {"tensor.ands", "tensor.ors", "tensor.xors"}:
+        rhs_expr = _normalize_signless_same_width_scalar_operand(lhs, rhs, actual_span)
+    else:
+        rhs_expr = _normalize_scalar_operand(lhs, rhs, actual_span)
     return _ir_core.create_op_call(op_name, [lhs, rhs_expr], {}, actual_span)
 
 
@@ -817,7 +824,7 @@ def ands(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
 
     Args:
         lhs: Left-hand side tensor (integer dtype)
-        rhs: Right-hand side integer scalar (int/Expr with integer ScalarType)
+        rhs: Same-width signless integer scalar (int/Expr)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -848,7 +855,7 @@ def ors(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
 
     Args:
         lhs: Left-hand side tensor (integer dtype)
-        rhs: Right-hand side integer scalar (int/Expr with integer ScalarType)
+        rhs: Same-width signless integer scalar (int/Expr)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -882,7 +889,7 @@ def xors(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
 
     Args:
         lhs: Left-hand side tensor (integer dtype)
-        rhs: Right-hand side integer scalar (int/Expr with integer ScalarType)
+        rhs: Same-width signless integer scalar (int/Expr)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:

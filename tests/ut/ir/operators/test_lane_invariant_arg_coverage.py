@@ -109,8 +109,6 @@ EXPECTED_BLIND_ARGS = {
     ("tile.sel", 3),
     ("tile.sels", 2),
     ("tile.sort32", 2),
-    ("tile.xor", 2),
-    ("tile.xors", 2),
     # --- declared IndexAddressedSource: a lane-shared table read at absolute indices ---
     ("tile.gather", 0),
     ("tile.gatherb", 0),
