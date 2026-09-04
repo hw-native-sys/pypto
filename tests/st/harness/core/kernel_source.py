@@ -194,16 +194,33 @@ class JitKernel:
         return specs
 
     def cache_id(self) -> str:
+        """Stable identity for this kernel's specialization.
+
+        Covers **every** bound argument, in declaration order, because every one
+        of them shapes the specialized program: a tensor through its shape and
+        dtype, anything else through its type and value.
+
+        A scalar passed *positionally* used to be omitted entirely -- only
+        keyword scalars were recorded -- so two declarations differing solely in
+        such a scalar produced the same id. That id is the default ``Case``
+        name, and the name is the artifact cache key, so the second declaration
+        silently reused the first one's compiled artifact and could pass against
+        a specialization that was never built for it.
+
+        The type is part of the id rather than the value alone: ``1`` and
+        ``1.0`` specialize to different dtypes and must not collide.
+        """
         parts = [self.entry.__name__]
-        bound = self._bound_tensors() or {}
+        bound = self._bound_arguments()
         for name in self.entry.param_names:
-            value = bound.get(name)
-            if value is not None:
+            if name not in bound:
+                continue
+            value = bound[name]
+            if isinstance(value, torch.Tensor):
                 shape = "x".join(str(d) for d in value.shape)
                 parts.append(f"{name}_{shape}_{datatype_from_torch(value.dtype).value}")
-        for name, value in sorted(self.kwargs.items()):
-            if not isinstance(value, torch.Tensor):
-                parts.append(f"{name}_{value}")
+            else:
+                parts.append(f"{name}_{type(value).__name__}_{value}")
         return "__".join(parts)
 
     def _tensor_param_names(self) -> set[str]:
@@ -219,6 +236,17 @@ class JitKernel:
 
             self._tensor_params = set(_classify_params(_get_func_def(self.entry._func))[2])
         return self._tensor_params
+
+    def _bound_arguments(self) -> "dict[str, Any]":
+        """Every supplied argument keyed by parameter name, positional and keyword.
+
+        :meth:`_bound_tensors` keeps only tensors, which is the right question
+        for the tensor list and the wrong one for identity: a scalar
+        specializes the kernel into different IR whichever way it was passed.
+        """
+        bound: dict[str, Any] = dict(zip(self.entry.param_names, self.args))
+        bound.update(self.kwargs)
+        return bound
 
     def _bound_tensors(self) -> dict[str, torch.Tensor] | None:
         """Sample tensors keyed by parameter name, or ``None`` if incomplete."""

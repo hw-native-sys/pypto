@@ -112,6 +112,19 @@ class AbsLegacyCase(PTOTestCase):
         tensors["out"][:] = torch.abs(tensors["a"])
 
 
+@jit.incore
+def scaled_kernel(a: pl.Tensor, out: pl.Out[pl.Tensor], scale: float):
+    """Abs then scale — gives the declaration surface a scalar to specialize on."""
+    return pl.store(pl.tile.abs(pl.load(a, [0, 0], [M, N])) * scale, [0, 0], out)
+
+
+@jit
+def scaled_entry(a: pl.Tensor, out: pl.Out[pl.Tensor], scale: float):
+    """Entry over :func:`scaled_kernel`."""
+    out = scaled_kernel(a, out, scale)
+    return out
+
+
 def _jit_case(**kwargs: Any) -> Case:
     """A JIT-authored case over the shared ``a`` / ``out`` signature."""
     kwargs.setdefault("name", "abs_jit")
@@ -387,6 +400,33 @@ class TestDeclaration:
         pinned = _jit_case(name="abs_pinned_matrix", platform="a5")
         assert pinned.for_platform("a2a3") is pinned
         assert pinned.get_platform() == "a5"
+
+    def test_cache_id_separates_positional_scalars(self):
+        """A scalar passed positionally must change the identity.
+
+        It reaches the specializer exactly as a keyword scalar does, and the
+        id is the default case name -- which is the artifact cache key, so a
+        collision makes the second declaration reuse the first one's artifact.
+        """
+        a, out = torch.randn(M, N), torch.zeros(M, N)
+        one = JitKernel(scaled_entry, a, out, 1.0)
+        two = JitKernel(scaled_entry, a, out, 2.0)
+        assert one.cache_id() != two.cache_id(), f"positional scalar dropped from the id: {one.cache_id()}"
+
+    def test_cache_id_separates_scalar_types(self):
+        """``1`` and ``1.0`` specialize differently and must not collide."""
+        a, out = torch.randn(M, N), torch.zeros(M, N)
+        assert JitKernel(scaled_entry, a, out, 1).cache_id() != (
+            JitKernel(scaled_entry, a, out, 1.0).cache_id()
+        )
+
+    def test_cache_id_agrees_across_binding_styles(self):
+        """The same scalar gives the same id positionally or by keyword."""
+        a, out = torch.randn(M, N), torch.zeros(M, N)
+        assert (
+            JitKernel(scaled_entry, a, out, 2.0).cache_id()
+            == JitKernel(scaled_entry, a, out, scale=2.0).cache_id()
+        )
 
     def test_for_platform_carries_the_declaration_over(self):
         """The copy differs in platform alone — every other field is the case's."""
