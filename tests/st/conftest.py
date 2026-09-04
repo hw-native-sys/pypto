@@ -844,6 +844,11 @@ def pytest_collection_modifyitems(config, items):
     the variant's own platform must lie inside the effective allowed set.
     Items without a platform parameter pass as long as the effective set is
     non-empty.
+
+    A third layer applies to a declared ``Case`` that pinned its own platform:
+    since that pin outranks the item's, only the matrix variant the pin names
+    is kept. Without it the other variants would run the pinned platform and
+    report themselves as covering one they never touched.
     """
     cli_platforms = _parse_platform_filter(config.getoption("--platform"))
     cli_filter = set(cli_platforms or ALL_PLATFORM_IDS)
@@ -863,6 +868,19 @@ def pytest_collection_modifyitems(config, items):
         callspec = getattr(item, "callspec", None)
         params = callspec.params if callspec else {}
         platform_param = params.get("platform") or params.get("_st_platform")
+
+        # A declared case may pin its own platform, and that pin outranks the
+        # item's in `_resolve_platform`. Left alone, every variant of such a
+        # case would compile and run the pinned platform while reporting itself
+        # as the variant's -- an A2A3 item claiming coverage it never had. Keep
+        # only the variant the pin names. This runs before
+        # `pytest_collection_finish`, so `_st_case` is still the author's
+        # declaration and `get_platform()` is exactly the pin, or None.
+        declared_case = params.get("_st_case")
+        case_pin = declared_case.get_platform() if isinstance(declared_case, Case) else None
+        if case_pin is not None and platform_param is not None and case_pin != platform_param:
+            deselected.append(item)
+            continue
 
         if platform_param is not None:
             if platform_param in allowed:
@@ -967,7 +985,15 @@ def _collect_test_case_from_item(
         bound = declared.for_platform(platform)
         if bound is not declared and callspec is not None:
             callspec.params["_st_case"] = bound
-        seen.setdefault(_cache_key(bound, platform, session_memory_planner), bound)
+        # Key on the case's *effective* platform, not the item's. A case that
+        # pinned one keeps it, and `_resolve_platform` lets that pin outrank the
+        # item -- so keying by the item's platform would file one object under a
+        # key per matrix variant, and the pipeline would then resolve every one
+        # of them back to the pin and compile the same artifact directory
+        # concurrently. `pytest_collection_modifyitems` already drops the
+        # variants a pin excludes; this keeps the surviving one keyed by what it
+        # will actually be built for.
+        seen.setdefault(_cache_key(bound, bound.get_platform() or platform, session_memory_planner), bound)
         return
 
     module = item.module
@@ -1027,7 +1053,13 @@ def _collect_test_case_from_item(
         # on the session platform, which is what the pipeline resolves for it.
         platform = params.get("platform") or params.get("_st_platform") or session_platform
         instance.bind_platform(platform)
-        seen.setdefault(_cache_key(instance, platform, session_memory_planner), instance)
+        # Effective platform, for the same reason as the declared branch above:
+        # a case constructed with platform=... keeps its own, and bind_platform
+        # leaves it alone.
+        seen.setdefault(
+            _cache_key(instance, instance.get_platform() or platform, session_memory_planner),
+            instance,
+        )
 
 
 def pytest_collection_finish(session: pytest.Session) -> None:

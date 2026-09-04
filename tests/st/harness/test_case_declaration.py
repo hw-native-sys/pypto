@@ -439,6 +439,119 @@ class TestDeclaration:
         assert (bound.config.rtol, bound.config.atol) == (1e-3, 1e-2)
 
 
+class TestPlatformMatrixCollection:
+    """A declared case against the multi-platform CLI, through the real hooks.
+
+    Both halves are driven here because they fail independently: the collection
+    hook decides what gets compiled and under which key, and the deselect hook
+    decides which items exist at all. A pin that is honoured by one and ignored
+    by the other still reports coverage it does not have.
+    """
+
+    PLATFORMS = ("a2a3", "a2a3sim", "a5", "a5sim")
+
+    @staticmethod
+    def _conftest() -> Any:
+        """Load ``tests/st/conftest.py`` as a module; it is not importable by name."""
+        import importlib.util  # noqa: PLC0415
+
+        path = Path(__file__).resolve().parents[1] / "conftest.py"
+        spec = importlib.util.spec_from_file_location("_st_conftest_under_test", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    @classmethod
+    def _items(cls, case_obj: Case) -> "list[Any]":
+        """One stub item per matrix variant, shaped like the pytest items."""
+
+        class _CallSpec:
+            def __init__(self, params: dict) -> None:
+                self.params = params
+
+        class _Item:
+            module = None
+
+            def __init__(self, params: dict, name: str) -> None:
+                self.callspec = _CallSpec(params)
+                self.name = name
+
+            def iter_markers(self, name: str | None = None) -> Any:
+                return iter(())
+
+        return [_Item({"_st_case": case_obj, "_st_platform": p}, f"test_it[{p}]") for p in cls.PLATFORMS]
+
+    @staticmethod
+    def _config(platform_opt: str) -> Any:
+        class _Hook:
+            def __init__(self) -> None:
+                self.deselected: list[Any] = []
+
+            def pytest_deselected(self, items: "list[Any]") -> None:
+                self.deselected.extend(items)
+
+        class _Config:
+            def __init__(self) -> None:
+                self.hook = _Hook()
+
+            def getoption(self, name: str) -> Any:
+                assert name == "--platform", name
+                return platform_opt
+
+        return _Config()
+
+    def test_a_pinned_case_keeps_only_its_own_matrix_variant(self):
+        """The other three variants would run A5 while claiming to be themselves."""
+        conf = self._conftest()
+        items = self._items(_jit_case(name="abs_pin_deselect", platform="a5"))
+        config = self._config(",".join(self.PLATFORMS))
+
+        kept = list(items)
+        conf.pytest_collection_modifyitems(config, kept)
+
+        assert [i.name for i in kept] == ["test_it[a5]"]
+        assert [i.name for i in config.hook.deselected] == [
+            "test_it[a2a3]",
+            "test_it[a2a3sim]",
+            "test_it[a5sim]",
+        ]
+
+    def test_a_pinned_case_is_collected_once_under_its_pin(self):
+        """Keyed by the pin, not by the item — even with no deselect in front.
+
+        Keying by the item's platform filed one object under a key per variant.
+        The pipeline resolves each of them back to the pin, so it compiled the
+        same artifact directory once per variant, concurrently.
+        """
+        conf = self._conftest()
+        pinned = _jit_case(name="abs_pin_key", platform="a5")
+
+        seen: dict[str, Any] = {}
+        for item in self._items(pinned):
+            conf._collect_test_case_from_item(item, seen, None, "a2a3")
+
+        assert list(seen) == ["abs_pin_key@a5@default"]
+        assert all(c is pinned for c in seen.values()), "a pinned case is never copied"
+
+    def test_an_unpinned_case_still_spans_the_matrix(self):
+        """The pin path must not narrow a case that never asked for one."""
+        conf = self._conftest()
+        declared = _jit_case(name="abs_free_key")
+
+        seen: dict[str, Any] = {}
+        items = self._items(declared)
+        for item in items:
+            conf._collect_test_case_from_item(item, seen, None, "a2a3")
+
+        assert sorted(seen) == [f"abs_free_key@{p}@default" for p in sorted(self.PLATFORMS)]
+        assert len({id(c) for c in seen.values()}) == 4
+        assert declared.get_platform() is None, "the declaration itself stays unbound"
+
+        kept = list(items)
+        conf.pytest_collection_modifyitems(self._config(",".join(self.PLATFORMS)), kept)
+        assert len(kept) == 4, "an unpinned case keeps every variant"
+
+
 class TestCustomCompare:
     """``compare=`` replaces the elementwise check the harness performs."""
 
