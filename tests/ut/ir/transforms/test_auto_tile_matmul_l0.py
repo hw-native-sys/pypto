@@ -46,6 +46,22 @@ from pypto import ir, passes
 from pypto.backend import BackendType
 
 
+def _planner_context(planner):
+    """Preserve the verification fixture while selecting a test's planner policy."""
+    current = passes.PassContext.current()
+    if current is None:
+        return passes.PassContext([], memory_planner=planner)
+    return passes.PassContext(
+        current.get_instruments(),
+        current.get_verification_level(),
+        current.get_diagnostic_phase(),
+        current.get_disabled_diagnostics(),
+        planner,
+        current.get_enable_pypto_l0c_double_buffer(),
+        current.get_runtime(),
+    )
+
+
 class TestAutoTileMatmulL0ExplicitL0Diagnostics:
     """Actionable failures for manual L0 operands that cannot fit."""
 
@@ -999,6 +1015,12 @@ class TestAutoTileMatmulL0FractalBoundary:
     with no boundary special case in the pass.
     """
 
+    @pytest.fixture(autouse=True)
+    def _legacy_planner_policy(self):
+        """Pin exact chooser-shape assertions to their original planner policy."""
+        with _planner_context(passes.MemoryPlanner.PYPTO):
+            yield
+
     @pytest.mark.parametrize("m_dim", [1, 17, 40, 100, 250])
     def test_no_sub_fractal_cube_rows_at_any_m(self, m_dim):
         k_dim, n_dim = 256, 512
@@ -1374,6 +1396,12 @@ class TestAutoTileMatmulL0MNTiling:
     direct-store / DDR-output path).  The output tensor is chained through the
     per-sub-tile stores in SSA form.
     """
+
+    @pytest.fixture(autouse=True)
+    def _legacy_planner_policy(self):
+        """Pin exact chooser-shape assertions to their original planner policy."""
+        with _planner_context(passes.MemoryPlanner.PYPTO):
+            yield
 
     def test_matmul_bias_mn_and_k_tiling_slices_bias_by_n(self):
         """Each output-column tile reloads one Bias window and applies it once."""
@@ -2896,7 +2924,7 @@ class TestAutoTileMatmulL0MNTiling:
         Under ``memory_planner=PTOAS`` a dbC=2-eligible full-K grid emits the
         two-accumulator ping-pong: ``CanonicalizeIOOrder`` floats **both** stores below
         **both** matmuls (``matmul, matmul, store, store``), so two L0C accumulators are
-        live at once. Under the default PyPTO planner the *same shape* stays dbC=1 and
+        live at once. Under the explicit legacy PyPTO planner the *same shape* stays dbC=1 and
         interleaves each store with its matmul (``matmul, store, …``). This pins the
         co-live ordering (subtle -- the nested-context bug silently disabled it once) and
         the planner gate in one test.
@@ -2990,7 +3018,9 @@ class TestAutoTileMatmulL0MNTiling:
         _backend.reset_for_testing()
         _backend.set_backend_type(BackendType.Ascend910B)
         with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO):
-            assert acc_buffer_count() == 1, "PyPTO default must keep a single L0C accumulator (dbC=1)"
+            assert acc_buffer_count() == 1, (
+                "Legacy PYPTO without the opt-in must keep a single L0C accumulator (dbC=1)"
+            )
 
         _backend.reset_for_testing()
         _backend.set_backend_type(BackendType.Ascend910B)
@@ -3119,6 +3149,12 @@ class TestAutoTileMatmulL0MNTiling:
 
 class TestAutoTileMatmulL0ExistingPipelineDbC:
     """Automatic L0C ping-pong for a user-authored pipeline of L0 matmuls."""
+
+    @pytest.fixture(autouse=True)
+    def _legacy_planner_policy(self):
+        """The existing-pipeline recognizer is a legacy-PyPTO optimization."""
+        with _planner_context(passes.MemoryPlanner.PYPTO):
+            yield
 
     @staticmethod
     def _single_matmul_pipeline(tile_m: int = 16, tile_n: int = 128, inner_stage: int = 2, width: int = 512):
@@ -4196,6 +4232,12 @@ class TestAutoTileMatmulL0MatScratch:
     consumer, instead of the direct-GM store path. Split-K uses a constant-offset
     grid; full-K uses pipelined loop-variable offsets."""
 
+    @pytest.fixture(autouse=True)
+    def _legacy_planner_policy(self):
+        """Pin unparameterized chooser assertions to their original policy."""
+        with _planner_context(passes.MemoryPlanner.PYPTO):
+            yield
+
     def test_matmul_bias_producer_uses_mat_scratch(self):
         """An oversized biased producer may stay on-chip for one later matmul."""
         _backend.reset_for_testing()
@@ -4481,7 +4523,7 @@ class TestAutoTileMatmulL0MatScratch:
                 return out
 
         lowered = _lower_to_tile_ops(Before)
-        with passes.PassContext([ir.make_roundtrip_instrument()]):
+        with passes.PassContext([ir.make_roundtrip_instrument()], memory_planner=passes.MemoryPlanner.PYPTO):
             After = passes.auto_tile_matmul_l0()(lowered)
 
         printed = ir.python_print(After)

@@ -8,8 +8,8 @@ Lowers `pl.pipeline(N, stage=F)` at the tile level: replicates the loop body `F`
 > [`LowerPipelineToSlots`](30-lower_pipeline_to_slots.md) runs immediately before this pass
 > and, under `memory_planner=PTOAS`, multi-buffers what it can by rotating a single body
 > through the slots of one allocation. It demotes every loop it takes, so this pass sees —
-> and replicates — only the loops it declined, plus every loop under the default PyPTO
-> planner. Replication remains the general path.
+> and replicates — only the loops it declined, plus every loop under either in-tree
+> planner (`DSA_RP`, the default, or legacy `PYPTO`). Replication remains the general path.
 
 `pl.unroll(N)` fully expands a loop into `N` body copies at slot #1 (before SSA). Users reach for this not because they want `N` copies but because they need distinct tile MemRefs — `MemoryReuse` would otherwise coalesce sequentially-live tiles into a single buffer, defeating ping-pong execution.
 

@@ -67,7 +67,7 @@ move. All are keyword-only — only `program` is positional.
 | `platform` | `None` | Execution platform the artifact is built for; must match the worker that dispatches it |
 | `skip_ptoas` | `False` | Stop at `.pto` (MLIR) instead of building the device binary |
 | `verification_level` | `None` | `NONE` / `BASIC` / `ROUNDTRIP`; `None` defers to `PYPTO_VERIFY_LEVEL`, else `BASIC` |
-| `memory_planner` | `None` | `PYPTO` / `DSA_RP` / `PTOAS` — who plans on-chip buffers ([Memory](../performance/05-memory.md)) |
+| `memory_planner` | `None` → `DSA_RP` | `PYPTO` / `DSA_RP` / `PTOAS` — who plans on-chip buffers ([Memory](../performance/05-memory.md)); an active `PassContext` overrides the fallback |
 | `diagnostic_phase` | `None` | Which phase warnings and perf hints are gated at |
 | `disabled_diagnostics` | `None` | Silence specific checks rather than all of them |
 | `profiling` | `False` | Per-stage compile timing into `report/pipeline_profile.{txt,json}` |

@@ -98,7 +98,8 @@ check(explicit_slots)
 
 | 规划器 | slot 的下降形式 | 一次迭代内两个 slot 同时存活 |
 | ------ | --------------- | ---------------------------- |
-| `PYPTO`（默认） | 烘焙地址（`alloc_tile`） | 支持 |
+| `PYPTO` | 烘焙地址（`alloc_tile`） | 支持 |
+| `DSA_RP`（默认） | 容量受限的烘焙地址（`alloc_tile`） | 支持 |
 | `PTOAS` | 一个 `alloc_multi_tile` 区域 + 每次使用一个 `multi_tile_get` | **codegen 拒绝** |
 
 PTOAS 的这个拒绝是刻意的，在你围绕它做设计之前值得理解：ptoas 只保护一次迭代里的**第一个** `multi_tile_get`，于是第二个 slot 会在下一次迭代覆盖它的同时被读。这件事在 codegen 开始拒绝之前，是在设备上被实测出错的。**一次迭代一个 slot 存活**才是区域形式存在的目的，也是你如果可能换规划器时该写的形状。

@@ -21,8 +21,8 @@ PyPTO 面向两代 Ascend。`backend_type` 在编译期选择其一，它同时�
 
 | 规划器 | 谁来分配 | 备注 |
 | ------ | -------- | ---- |
-| `PYPTO`（默认） | `MemoryReuse` + `AllocateMemoryAddr` 烘焙地址 | [内存图](../tools/02-memory-map.md)能画出结果 |
-| `DSA_RP` | PyPTO 自带的容量受限规划器 | |
+| `PYPTO` | 旧版 `MemoryReuse` + `AllocateMemoryAddr` 烘焙地址 | [内存图](../tools/02-memory-map.md)能画出结果 |
+| `DSA_RP`（默认） | PyPTO 自带的容量受限规划器 | [内存图](../tools/02-memory-map.md)能画出结果 |
 | `PTOAS` | ptoas `PlanMemory` 负责复用与寻址 | PyPTO 的分配 pass 被跳过，因此 pass dump 里没有偏移 |
 
 ## 校验级别

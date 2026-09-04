@@ -220,7 +220,7 @@ def _run_pass_pipeline(  # noqa: PLR0913
         )
         dphase = diagnostic_phase if diagnostic_phase is not None else _passes.get_default_diagnostic_phase()
         disabled = disabled_diagnostics if disabled_diagnostics is not None else default_disabled
-        mplan = memory_planner if memory_planner is not None else _passes.MemoryPlanner.PYPTO
+        mplan = memory_planner if memory_planner is not None else _passes.get_default_memory_planner()
         dbc_flag = enable_pypto_l0c_double_buffer if enable_pypto_l0c_double_buffer is not None else False
         rt = runtime if runtime is not None else _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
     ctx = _passes.PassContext(instruments, vlevel, dphase, disabled, mplan, dbc_flag, rt)
@@ -321,11 +321,11 @@ def compile(  # noqa: PLR0913
             warnings and performance hints). None uses the default
             (UnusedControlFlowResult disabled, perf hints enabled).
         memory_planner: Who plans on-chip buffer memory. ``None`` uses the
-            default (``MemoryPlanner.PYPTO`` — PyPTO's AllocateMemoryAddr bakes
-            physical addresses and ptoas runs at ``--pto-level=level3``).
-            ``MemoryPlanner.DSA_RP`` keeps memory planning in PyPTO but replaces
-            opportunistic coalescing with capacity-constrained DSA and
-            automatically recognized reuse penalties.
+            default (``MemoryPlanner.DSA_RP`` — PyPTO's capacity-constrained DSA
+            with automatically recognized reuse penalties bakes physical
+            addresses and ptoas runs at ``--pto-level=level3``).
+            ``MemoryPlanner.PYPTO`` selects the legacy opportunistic-coalescing
+            allocator explicitly.
             ``MemoryPlanner.PTOAS`` skips the opportunistic lifetime reuse
             (MemoryReuse) and address assignment (AllocateMemoryAddr), emits no
             ``pto.alloc_tile addr``, and lets the ptoas PlanMemory pass do both at

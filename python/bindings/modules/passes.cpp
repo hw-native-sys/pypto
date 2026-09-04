@@ -202,6 +202,8 @@ void BindPass(nb::module_& m) {
              "PyPTO's in-tree DSA planner minimizes recognized reuse penalties within capacity")
       .value("PTOAS", MemoryPlanner::PtoAS,
              "Skip pypto allocation passes; ptoas PlanMemory allocates (--pto-level=level2)");
+  passes.def("get_default_memory_planner", &GetDefaultMemoryPlanner,
+             "Get the default on-chip memory planner");
 
   nb::enum_<RuntimeKind>(passes, "RuntimeKind", "Which Simpler runtime ABI a compilation targets")
       .value("TENSORMAP_AND_RINGBUFFER", RuntimeKind::TensorMapAndRingBuffer,
@@ -341,7 +343,7 @@ void BindPass(nb::module_& m) {
            nb::arg("instruments"), nb::arg("verification_level") = VerificationLevel::Basic,
            nb::arg("diagnostic_phase") = DiagnosticPhase::PrePipeline,
            nb::arg("disabled_diagnostics") = DiagnosticCheckSet{DiagnosticCheck::UnusedControlFlowResult},
-           nb::arg("memory_planner") = MemoryPlanner::PyPTO,
+           nb::arg("memory_planner") = kDefaultMemoryPlanner,
            nb::arg("enable_pypto_l0c_double_buffer") = false, nb::arg("runtime") = kDefaultRuntimeKind,
            "Create a PassContext with instruments, verification level, diagnostic phase gate, "
            "optional disabled diagnostic checks, memory planner selection, the experimental "

@@ -228,7 +228,7 @@ class PTOTestCase(ABC):
             memory_planner: Override the on-chip memory planner
                 (PYPTO/DSA_RP/PTOAS).
                 If None, falls back to ``get_memory_planner()`` (which returns
-                None, deferring to ir.compile's PYPTO default).
+                None, deferring to ir.compile's DSA_RP default).
         """
         self.config = config or RunConfig()
         self._override_platform = platform
@@ -281,8 +281,8 @@ class PTOTestCase(ABC):
 
         If *memory_planner* was passed to the constructor, that value takes
         precedence. Otherwise returns None, deferring to ir.compile's default
-        (``MemoryPlanner.PYPTO``). Subclasses may override this method to select
-        ``MemoryPlanner.DSA_RP`` or ``MemoryPlanner.PTOAS`` explicitly.
+        (``MemoryPlanner.DSA_RP``). Subclasses may override this method to select
+        ``MemoryPlanner.PYPTO`` or ``MemoryPlanner.PTOAS`` explicitly.
         """
         return self._override_memory_planner
 

@@ -1770,7 +1770,7 @@ def _resolve_memory_planner(run_config: Any) -> _passes.MemoryPlanner:
     """Resolve the planner a compile would actually use, for the cache key.
 
     Mirrors ``ir.compile()``'s own precedence — explicit argument, then the
-    active ``PassContext``, then ``PYPTO``. Reading the context matters: the
+    active ``PassContext``, then ``DSA_RP``. Reading the context matters: the
     planner is most often selected by wrapping a call in
     ``with PassContext([], memory_planner=...)``, which never reaches
     ``RunConfig`` at all. Keying only on the ``RunConfig`` field would let a
@@ -1781,7 +1781,7 @@ def _resolve_memory_planner(run_config: Any) -> _passes.MemoryPlanner:
     ctx = _passes.PassContext.current()
     if ctx is not None:
         return ctx.get_memory_planner()
-    return _passes.MemoryPlanner.PYPTO
+    return _passes.get_default_memory_planner()
 
 
 def _resolve_enable_pypto_l0c_double_buffer() -> bool:

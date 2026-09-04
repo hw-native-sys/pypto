@@ -164,7 +164,7 @@ def pytest_addoption(parser):
         choices=["default", "pypto", "dsa-rp", "ptoas"],
         help=(
             "Session-wide memory planner for test cases that do not select one explicitly: "
-            "default (defer to PyPTO), pypto, dsa-rp, or ptoas. An explicit planner on a "
+            "default (defer to DSA_RP), pypto, dsa-rp, or ptoas. An explicit planner on a "
             "PTOTestCase takes precedence (default: default)."
         ),
     )

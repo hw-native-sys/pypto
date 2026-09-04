@@ -13,6 +13,7 @@
 #include <any>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -495,9 +496,43 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
   return memref_pairs;
 }
 
+std::string ObviousDsaCapacityOverflow(const dsa::DsaProblem& problem,
+                                       const ReserveBufferResolution& reserve_resolution,
+                                       const std::string& func_name) {
+  for (const dsa::Pool& pool : problem.pools) {
+    uint64_t reserved_end = 0;
+    for (const dsa::AddressRange& range : pool.reserved_ranges) {
+      reserved_end = std::max(reserved_end, range.end);
+    }
+
+    uint64_t minimum_end = reserved_end;
+    for (const dsa::Buffer& buffer : problem.buffers) {
+      if (buffer.pool != pool.id) continue;
+      const uint64_t alignment = std::max<uint64_t>(1, buffer.alignment);
+      const uint64_t remainder = reserved_end % alignment;
+      const uint64_t padding = remainder == 0 ? 0 : alignment - remainder;
+      if (reserved_end > std::numeric_limits<uint64_t>::max() - padding ||
+          reserved_end + padding > std::numeric_limits<uint64_t>::max() - buffer.size) {
+        minimum_end = std::numeric_limits<uint64_t>::max();
+        break;
+      }
+      minimum_end = std::max(minimum_end, reserved_end + padding + buffer.size);
+    }
+    if (minimum_end <= pool.capacity) continue;
+
+    const auto space = static_cast<MemorySpace>(pool.id);
+    std::ostringstream message;
+    message << MemorySpaceToString(space) << " buffer usage (" << minimum_end
+            << " bytes) exceeds platform limit (" << pool.capacity << " bytes)"
+            << ReservedBytesNote(reserve_resolution, space, func_name);
+    return message.str();
+  }
+  return "";
+}
+
 std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithDsaRP(
     const FunctionPtr& func, const MemoryAllocatorPolicy& policy,
-    const ReservedEndBySpace& reserved_end_by_space, const std::vector<MemRefWithSpace>& memrefs) {
+    const ReserveBufferResolution& reserve_resolution, const std::vector<MemRefWithSpace>& memrefs) {
   const dsa_adapter::AllocationPlan allocation_plan = dsa_adapter::BuildDsaAllocationPlan(func);
   if (allocation_plan.intervals.empty()) return {};
 
@@ -513,7 +548,7 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithDsaRP(
   }
 
   const dsa_adapter::PreparedProblem prepared = dsa_adapter::BuildProblem(
-      func, allocation_plan, policy, reserved_end_by_space, pool_caps, active_backend);
+      func, allocation_plan, policy, reserve_resolution.reserved_end_by_space, pool_caps, active_backend);
   if (prepared.strict_problem.buffers.empty()) return {};
 
   const dsa::CanonicalGreedySolver solver;
@@ -527,8 +562,13 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithDsaRP(
   INTERNAL_CHECK_SPAN(result.status != dsa::SolveStatus::kInvalidProblem, func->span_)
       << "DSA-RP constructed or produced invalid state for '" << func->name_ << "'"
       << (result.diagnostics.empty() ? std::string() : ": " + result.diagnostics.front());
+  const std::string obvious_overflow =
+      result.status == dsa::SolveStatus::kNoFit
+          ? ObviousDsaCapacityOverflow(solved_problem, reserve_resolution, func->name_)
+          : std::string();
   CHECK_SPAN(result.status == dsa::SolveStatus::kFeasible, func->span_)
       << "DSA-RP could not find a placement for '" << func->name_ << "' within the on-chip memory capacities"
+      << (obvious_overflow.empty() ? std::string() : ": " + obvious_overflow)
       << (result.diagnostics.empty() ? std::string() : ": " + result.diagnostics.front());
   INTERNAL_CHECK_SPAN(result.solution.has_value(), func->span_)
       << "DSA-RP reported a feasible result without a placement";
@@ -584,12 +624,12 @@ FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
   auto memrefs = memref_collectors::CollectMemRefsWithSpace(func->body_);
 
   const PassContext* context = PassContext::Current();
-  const MemoryPlanner planner = context == nullptr ? MemoryPlanner::PyPTO : context->GetMemoryPlanner();
+  const MemoryPlanner planner = context == nullptr ? kDefaultMemoryPlanner : context->GetMemoryPlanner();
 
   // Step 3: use the selected in-tree allocator. PTOAS never reaches this pass.
   std::vector<std::pair<const MemRef*, MemRefPtr>> memref_pairs;
   if (planner == MemoryPlanner::DsaRP) {
-    memref_pairs = PlanWithDsaRP(func, *policy, reserve_resolution.reserved_end_by_space, memrefs);
+    memref_pairs = PlanWithDsaRP(func, *policy, reserve_resolution, memrefs);
   } else {
     // Declared allocations are the only ones that may take a dynamic address
     // (a runtime slot index).

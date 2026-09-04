@@ -87,6 +87,22 @@ def _alloc_lines(program: ir.Program) -> list[str]:
     return [line.strip() for line in program.as_python().splitlines() if ".alloc(pl.Mem." in line]
 
 
+def _planner_context(planner):
+    """Preserve the verification fixture while selecting a test's planner policy."""
+    current = passes.PassContext.current()
+    if current is None:
+        return passes.PassContext([], memory_planner=planner)
+    return passes.PassContext(
+        current.get_instruments(),
+        current.get_verification_level(),
+        current.get_diagnostic_phase(),
+        current.get_disabled_diagnostics(),
+        planner,
+        current.get_enable_pypto_l0c_double_buffer(),
+        current.get_runtime(),
+    )
+
+
 def _run_memory_pipeline(program: ir.Program) -> ir.Program:
     """init_mem_ref -> materialize_semantic_aliases -> memory_reuse, as in the real pipeline."""
     return passes.memory_reuse()(passes.materialize_semantic_aliases()(passes.init_mem_ref()(program)))
@@ -1434,8 +1450,9 @@ class Collide:
                     y = pl.yield_(nxt)
                 return y
 
-        with pytest.raises(ValueError, match="live at the same time"):
-            _run_full_pipeline(Before, "MemoryReuse")
+        with _planner_context(passes.MemoryPlanner.PYPTO):
+            with pytest.raises(ValueError, match="live at the same time"):
+                _run_full_pipeline(Before, "MemoryReuse")
 
     def test_rejects_overlapping_lifetimes(self, ascend_backend):
         """Two co-live tiles on one allocation would corrupt data, not reuse it."""
