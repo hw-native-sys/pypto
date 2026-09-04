@@ -499,10 +499,14 @@ std::optional<Candidate> EnumerateBest(const L0TileConfig& cfg, const Regime& re
 // Operand (L0A/L0B) element budgets for a regime: stationary operand uses the
 // full buffer (depth 1), the moving operand is halved (depth 2).
 int64_t L0aBudget(const L0TileConfig& cfg, const OperandDB& db) {
-  return static_cast<int64_t>(cfg.l0a_bytes) / (static_cast<int64_t>(cfg.bytes_a) * (db.a ? 2 : 1));
+  const uint64_t elements = static_cast<uint64_t>(cfg.l0a_bytes) / cfg.bytes_a;
+  const uint64_t copies = std::max<uint64_t>(cfg.enclosing_operand_copies, db.a ? 2 : 1);
+  return static_cast<int64_t>(elements / copies);
 }
 int64_t L0bBudget(const L0TileConfig& cfg, const OperandDB& db) {
-  return static_cast<int64_t>(cfg.l0b_bytes) / (static_cast<int64_t>(cfg.bytes_b) * (db.b ? 2 : 1));
+  const uint64_t elements = static_cast<uint64_t>(cfg.l0b_bytes) / cfg.bytes_b;
+  const uint64_t copies = std::max<uint64_t>(cfg.enclosing_operand_copies, db.b ? 2 : 1);
+  return static_cast<int64_t>(elements / copies);
 }
 // L0C element budget per accumulator: halved for dbC=2. Candidate legality
 // additionally applies caller-side m/n boxing and then rounds m up to
@@ -521,6 +525,8 @@ L0TileResult ChooseL0Tile(const L0TileConfig& cfg) {
       << "ChooseL0Tile: L0 capacities must be positive";
   CHECK(cfg.bytes_a > 0 && cfg.bytes_b > 0 && cfg.bytes_c > 0)
       << "ChooseL0Tile: element byte sizes must be positive";
+  CHECK(cfg.enclosing_operand_copies > 0)
+      << "ChooseL0Tile: enclosing_operand_copies must be positive, got " << cfg.enclosing_operand_copies;
   CHECK(cfg.min_m > 0 && cfg.min_n > 0 && cfg.min_k > 0)
       << "ChooseL0Tile: minimum tile dimensions must be positive";
   CHECK(cfg.max_n == 0 || cfg.max_n >= cfg.min_n)

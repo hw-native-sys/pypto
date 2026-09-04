@@ -372,6 +372,62 @@ class TestAutoTileMatmulL0KOnly:
         After = passes.auto_tile_matmul_l0()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_source_pipeline_retiles_matmul_acc_operands(self):
+        """A source stage-2 pipeline is part of L0 operand capacity planning.
+
+        On A5, ignoring the outer stage copies lets the richer DSA_RP chooser
+        prefer an M/N-tiled, full-K B-stationary point. A standalone
+        ``matmul_acc`` cannot realize that M/N grid and used to remain as two
+        co-live full-L0B panels. The realizable fallback keeps the caller's
+        accumulator whole and splits K to 64.
+        """
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend950)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[256, 512], pl.BF16],
+                rhs: pl.Tensor[[512, 128], pl.BF16],
+                acc_init: pl.Tile[[256, 128], pl.FP32, pl.Mem.Acc],
+                out: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+            ) -> pl.Tensor[[256, 128], pl.FP32]:
+                for kb, (acc_iter,) in pl.pipeline(0, 512, 256, stage=2, init_values=(acc_init,)):
+                    lhs_mat = pl.tile.load(lhs, [0, kb], [256, 256], target_memory=pl.Mem.Mat)
+                    rhs_mat = pl.tile.load(rhs, [kb, 0], [256, 128], target_memory=pl.Mem.Mat)
+                    acc_next = pl.tile.matmul_acc(acc_iter, lhs_mat, rhs_mat)
+                    acc = pl.yield_(acc_next)
+                out = pl.tile.store(acc, [0, 0], out)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[256, 512], pl.BF16],
+                rhs: pl.Tensor[[512, 128], pl.BF16],
+                acc_init: pl.Tile[[256, 128], pl.FP32, pl.Mem.Acc],
+                out: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+            ) -> pl.Tensor[[256, 128], pl.FP32]:
+                for kb, (acc_iter,) in pl.pipeline(0, 512, 256, stage=2, init_values=(acc_init,)):
+                    lhs_mat = pl.tile.load(lhs, [0, kb], [256, 256], target_memory=pl.Mem.Mat)
+                    rhs_mat = pl.tile.load(rhs, [kb, 0], [256, 128], target_memory=pl.Mem.Mat)
+                    for ko, (acc_l0_iter,) in pl.pipeline(0, 256, 64, stage=2, init_values=(acc_iter,)):
+                        lhs_l0 = pl.tile.extract(lhs_mat, 0, ko, [256, 64], target_memory=pl.Mem.Left)
+                        rhs_l0 = pl.tile.extract(rhs_mat, ko, 0, [64, 128], target_memory=pl.Mem.Right)
+                        acc_l0_next = pl.tile.matmul_acc(acc_l0_iter, lhs_l0, rhs_l0)
+                        acc_next = pl.yield_(acc_l0_next)
+                    acc = pl.yield_(acc_next)
+                out = pl.tile.store(acc, [0, 0], out)
+                return out
+
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.DSA_RP):
+            After = passes.auto_tile_matmul_l0()(Before)
+        ir.assert_structural_equal(After, Expected)
+
     def test_vec_fed_lhs_staged_to_mat_and_tiled(self):
         """Fused-attention PV / ``score·V`` pattern: the left operand is
         Vec-resident (softmax/``exp`` output crossing the cube↔vector boundary)

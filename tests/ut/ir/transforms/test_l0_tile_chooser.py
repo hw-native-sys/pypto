@@ -42,6 +42,7 @@ def _default_config(M: int, N: int, K: int) -> passes.l0_tile_chooser.L0TileConf
     cfg.bytes_a = 2  # BF16
     cfg.bytes_b = 2  # BF16
     cfg.bytes_c = 4  # FP32 accumulator
+    cfg.enclosing_operand_copies = 1
     cfg.min_m = cfg.min_n = cfg.min_k = 16
     cfg.align_m = cfg.align_n = cfg.align_k = 16
     cfg.l0c_align_m = 16
@@ -66,8 +67,8 @@ def _capacities_ok(
     dba/dbb/dbc are the chosen per-operand double-buffer depths (true == depth 2,
     halving that buffer).
     """
-    a0 = cfg.l0a_bytes // (cfg.bytes_a * (2 if dba else 1))
-    b0 = cfg.l0b_bytes // (cfg.bytes_b * (2 if dbb else 1))
+    a0 = cfg.l0a_bytes // (cfg.bytes_a * max(cfg.enclosing_operand_copies, 2 if dba else 1))
+    b0 = cfg.l0b_bytes // (cfg.bytes_b * max(cfg.enclosing_operand_copies, 2 if dbb else 1))
     c0 = cfg.l0c_bytes // (cfg.bytes_c * (2 if dbc else 1))
     boxed_m = _cdiv(m, cfg.box_align_m) * cfg.box_align_m
     boxed_n = _cdiv(n, cfg.box_align_n) * cfg.box_align_n
@@ -216,6 +217,29 @@ class TestL0TilingEdgeCases:
         # Same tile shape (capacity-bound, not traffic-bound for square cases)
         # but traffic estimate must include the extra C read.
         assert result_read.estimated_traffic_bytes > result_no_read.estimated_traffic_bytes
+
+    def test_enclosing_pipeline_rejects_full_stationary_operand(self):
+        """A source stage-2 pipeline replicates an otherwise stationary panel.
+
+        Without that enclosing pipeline, the model prefers a full-K
+        B-stationary tile. Under stage=2, B has two co-live copies just like a
+        moving operand, so the full 64 KiB panel is illegal and the chooser
+        falls back to output-stationary K tiling.
+        """
+        cfg = _default_config(M=256, N=256, K=256)
+        cfg.allow_a_stationary = True
+        cfg.allow_b_stationary = True
+        cfg.allow_double_buffer_c = True
+
+        unreplicated = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        assert unreplicated.stationarity == passes.l0_tile_chooser.Stationarity.BStationary
+        assert unreplicated.k == cfg.K
+
+        cfg.enclosing_operand_copies = 2
+        replicated = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        assert (replicated.m, replicated.n, replicated.k) == (128, 256, 64)
+        assert replicated.stationarity == passes.l0_tile_chooser.Stationarity.OutputStationary
+        assert _capacities_ok(replicated.m, replicated.n, replicated.k, cfg)
 
     @pytest.mark.parametrize(
         ("M", "N", "expected_tile", "rows_outer"),
@@ -616,8 +640,8 @@ def _enumerate_best(cfg, stat: str, dbc: bool, require_inner_pair: bool, require
     """Exhaustively score the legal aligned (m, n, k) grid for one regime; best
     (key, tile). Every legal k per (m, n) is scored (not a largest-k shortcut)."""
     dba, dbb = _derive_db(stat)
-    a0 = cfg.l0a_bytes // (cfg.bytes_a * (2 if dba else 1))
-    b0 = cfg.l0b_bytes // (cfg.bytes_b * (2 if dbb else 1))
+    a0 = cfg.l0a_bytes // (cfg.bytes_a * max(cfg.enclosing_operand_copies, 2 if dba else 1))
+    b0 = cfg.l0b_bytes // (cfg.bytes_b * max(cfg.enclosing_operand_copies, 2 if dbb else 1))
     c0 = cfg.l0c_bytes // (cfg.bytes_c * (2 if dbc else 1))
     best = None
     m = cfg.min_m

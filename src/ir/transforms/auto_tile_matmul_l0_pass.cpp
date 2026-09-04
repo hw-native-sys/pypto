@@ -851,7 +851,8 @@ KLoopRewrite MakeKLoop(const MatmulTiling& t, ExprPtr mi, ExprPtr ni, int64_t m_
 std::optional<MatmulTiling> AnalyzeMatmul(
     const AssignStmtPtr& assign, std::vector<Diagnostic>& hints, bool force_output_stationary = false,
     std::optional<tile_view_semantics::BoxedTileAlignment> output_box_alignment = std::nullopt,
-    const DirectDefMap* direct_defs = nullptr) {
+    const DirectDefMap* direct_defs = nullptr, uint64_t enclosing_operand_copies = 1,
+    bool require_full_output = false) {
   auto call = As<Call>(assign->value_);
   if (!call || !call->op_) return std::nullopt;
 
@@ -1033,6 +1034,7 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   cfg.bytes_a = bytes_a;
   cfg.bytes_b = bytes_b;
   cfg.bytes_c = bytes_c;
+  cfg.enclosing_operand_copies = enclosing_operand_copies;
   cfg.align_m = handler->GetL0FractalAlignment();
   cfg.align_n = handler->GetL0FractalAlignment();
   cfg.align_k = handler->GetL0FractalAlignment();
@@ -1092,6 +1094,14 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   cfg.min_m = handler->GetMinL0TileDim();
   cfg.min_n = handler->GetMinL0TileDim();
   cfg.min_k = handler->GetMinL0TileDim();
+  // Some call sites cannot realize an M/N grid (for example, a matmul_acc with
+  // a caller-owned accumulator, or a plain matmul without a foldable store or
+  // Mat-scratch consumer). Their fallback analysis restricts the chooser to a
+  // full output tile so it can still select a legal K-only schedule.
+  if (require_full_output) {
+    cfg.min_m = static_cast<int>(M);
+    cfg.min_n = static_cast<int>(N);
+  }
   if (is_bias) {
     cfg.min_m = std::max(cfg.min_m, cfg.align_m);
     cfg.min_n = std::max(cfg.min_n, cfg.align_n);
@@ -2982,10 +2992,22 @@ class AutoTileMutator : public IRMutator {
 
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
     const bool should_double_buffer_c = pipeline_dbc_plan_.count(op.get()) != 0;
+    const uint64_t saved_enclosing_operand_copies = enclosing_operand_copies_;
+    if (op->kind_ == ForKind::Pipeline) {
+      const int stages = op->GetAttr<int>(kPipelineStagesAttr, 0);
+      if (stages > 1) {
+        const uint64_t stage_count = static_cast<uint64_t>(stages);
+        enclosing_operand_copies_ =
+            enclosing_operand_copies_ > std::numeric_limits<uint64_t>::max() / stage_count
+                ? std::numeric_limits<uint64_t>::max()
+                : enclosing_operand_copies_ * stage_count;
+      }
+    }
     // Recurse first: nested pipelines make their own local dbC decision. An
     // enclosing pipeline does not inherit the marker and therefore does not
     // multiply the accumulator buffering depth.
     auto visited = IRMutator::VisitStmt_(op);
+    enclosing_operand_copies_ = saved_enclosing_operand_copies;
     auto loop = As<ForStmt>(visited);
     if (!should_double_buffer_c || !loop) return visited;
 
@@ -3191,20 +3213,25 @@ class AutoTileMutator : public IRMutator {
       // visitation happens after rewrite-rejection so nested matmuls inside
       // ForStmt bodies still get rewritten by the recursive visit.
       if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(current)) {
+        auto emit_k_only = [&](const MatmulTiling& plan) {
+          // Whole output fits L0c — tile K only. k < K here (k == K with
+          // m == M, n == N needs no matmul tiling and was skipped by
+          // AnalyzeMatmul); the chooser may return a non-divisor k that
+          // BuildKLoopRewrite peels.
+          INTERNAL_CHECK_SPAN(!plan.needs_mn_tiling() && plan.k < plan.K, plan.assign->span_)
+              << "Internal error: K-only tiling expects m=M, n=N, and k<K (m=" << plan.m << ", M=" << plan.M
+              << ", n=" << plan.n << ", N=" << plan.N << ", k=" << plan.k << ", K=" << plan.K << ")";
+          auto rewrite = BuildKLoopRewrite(
+              MakeKLoop(plan, /*mi=*/nullptr, /*ni=*/nullptr, plan.m, plan.n, /*name_base=*/""));
+          remap[assign->var_.get()] = rewrite.return_var;
+          for (auto& s : rewrite.stmts) out.push_back(std::move(s));
+        };
+
         if (auto tiling = AnalyzeMatmul(assign, hints, /*force_output_stationary=*/false,
-                                        /*output_box_alignment=*/std::nullopt, &direct_defs)) {
+                                        /*output_box_alignment=*/std::nullopt, &direct_defs,
+                                        enclosing_operand_copies_)) {
           if (!tiling->needs_mn_tiling()) {
-            // Whole output fits L0c — tile K only.  k < K here (k == K with
-            // m == M, n == N needs no matmul tiling and was skipped by
-            // AnalyzeMatmul); the chooser may return a non-divisor k that
-            // BuildKLoopRewrite peels.
-            INTERNAL_CHECK_SPAN(tiling->k < tiling->K, tiling->assign->span_)
-                << "Internal error: K-only tiling expects k < K (K=" << tiling->K << ", k=" << tiling->k
-                << ")";
-            auto rewrite = BuildKLoopRewrite(
-                MakeKLoop(*tiling, /*mi=*/nullptr, /*ni=*/nullptr, tiling->m, tiling->n, /*name_base=*/""));
-            remap[assign->var_.get()] = rewrite.return_var;
-            for (auto& s : rewrite.stmts) out.push_back(std::move(s));
+            emit_k_only(*tiling);
             changed = true;
             continue;
           }
@@ -3272,8 +3299,9 @@ class AutoTileMutator : public IRMutator {
           if (planner == MemoryPlanner::PyPTO &&
               tiling->stationarity != utils::Stationarity::kOutputStationary) {
             std::vector<Diagnostic> discard;  // the first AnalyzeMatmul already emitted the hints
-            os_tiling = AnalyzeMatmul(assign, discard, /*force_output_stationary=*/true,
-                                      /*output_box_alignment=*/std::nullopt, &direct_defs);
+            os_tiling =
+                AnalyzeMatmul(assign, discard, /*force_output_stationary=*/true,
+                              /*output_box_alignment=*/std::nullopt, &direct_defs, enclosing_operand_copies_);
             if (os_tiling) fold_tiling = &*os_tiling;
           }
           if (auto ms = TryFoldMatScratch(*fold_tiling, result_uses, operand_uses, scratch_dtype, hints)) {
@@ -3319,7 +3347,23 @@ class AutoTileMutator : public IRMutator {
               continue;  // drop the matmul; sub-tile stmts emit at the store site
             }
           }
-          // M/N tiling not applicable — fall through and leave it untouched.
+          // The globally cheapest design point needs an M/N grid, but this
+          // call site cannot realize one. Re-run the same chooser over the
+          // realizable K-only subspace instead of leaving an oversized
+          // original call for InitMemRef. This is especially important for a
+          // matmul_acc nested in a source pipeline: DSA_RP may prefer a
+          // full-K operand-stationary grid, while the legal fallback keeps the
+          // caller-owned accumulator whole and splits only K.
+          std::vector<Diagnostic> discard;
+          if (auto fallback_tiling = AnalyzeMatmul(assign, discard, /*force_output_stationary=*/false,
+                                                   /*output_box_alignment=*/std::nullopt, &direct_defs,
+                                                   enclosing_operand_copies_, /*require_full_output=*/true)) {
+            emit_k_only(*fallback_tiling);
+            changed = true;
+            continue;
+          }
+          // Neither the M/N grid nor a K-only schedule is applicable — fall
+          // through and leave the call untouched with the earlier diagnostic.
         }
       }
       auto visited = VisitStmt(current);
@@ -3342,6 +3386,7 @@ class AutoTileMutator : public IRMutator {
 
  private:
   std::unordered_set<const ForStmt*> pipeline_dbc_plan_;
+  uint64_t enclosing_operand_copies_ = 1;
 };
 
 FunctionPtr TransformFunction(const FunctionPtr& func, std::vector<Diagnostic>& hints) {
