@@ -3554,7 +3554,7 @@ class TestMrgSortCodegen:
     )
     @pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
     def test_sort32_dynamic_valid_width_emits_level3_scratch(self, src_dtype, output_cols, backend_type):
-        """With level3 sort32 scratch disabled, dynamic width stays 2-ins (no tmp)."""
+        """A runtime valid width keeps logical output bounds and uses static TSORT capacity."""
 
         @pl.program
         class Prog:
@@ -3574,8 +3574,14 @@ class TestMrgSortCodegen:
         mlir = self._generate_mlir(Prog, backend_type)
         line = next(line for line in mlir.splitlines() if "pto.tsort32" in line)
         ins = line.split("ins(", 1)[1].split(":", 1)[0]
-        assert ins.count(",") == 1, line
-        assert "sort32_tmp" not in line, line
+        assert ins.count(",") == 2, line
+        assert "%sort32_tmp_view" in line and "%sort32_dst_view" in line, line
+        outs = line.split("outs(", 1)[1]
+        assert f"cols={output_cols}" in outs and f"v_col={output_cols}" in outs, line
+        assert "v_col=?" not in outs, line
+        tstore_line = next(line for line in mlir.splitlines() if "pto.tstore" in line)
+        assert "%sorted_tile" in tstore_line and "%sort32_dst_view" not in tstore_line, tstore_line
+        assert "arith.muli" in mlir, mlir
 
     @pytest.mark.parametrize(
         ("backend_type", "emit_tile_addr"),
@@ -3600,16 +3606,10 @@ class TestMrgSortCodegen:
 
         mlir = self._generate_mlir(Prog, backend_type, emit_tile_addr=emit_tile_addr)
         line = next(line for line in mlir.splitlines() if "pto.tsort32" in line)
-        if backend_type == BackendType.Ascend910B:
-            # #2523 level3 sort32 static-view bridge disabled with ptoas v0.57 revert.
-            assert "sort32_tmp" not in line, line
-            ins = line.split("ins(", 1)[1].split(":", 1)[0]
-            assert ins.count(",") == 1, line
-        else:
-            assert "%sort32_src_view" in line and "%sort32_idx_view" in line, line
-            assert "%sort32_dst_view" in line, line
-            assert "sort32_tmp" not in line, line
-            assert "v_row=?" not in line and "v_col=?" not in line, line
+        assert "%sort32_src_view" in line and "%sort32_idx_view" in line, line
+        assert "%sort32_dst_view" in line, line
+        assert "sort32_tmp" not in line, line
+        assert "v_row=?" not in line and "v_col=?" not in line, line
 
 
 class TestConstDtypeCodegen:
@@ -3698,9 +3698,8 @@ class TestLevel3StaticViewCodegen:
 
         mlir = self._generate_mlir(Prog)
         tci_line = next(line for line in mlir.splitlines() if "pto.tci" in line)
-        # Level3 static-view bridge is off with RequiresLevel3TmpScratch=false;
-        # caller-provided tmp is still emitted as a second ins operand.
-        assert "ins(" in tci_line and tci_line.split("ins(", 1)[1].split(":", 1)[0].count(",") == 1, tci_line
+        assert "%ci_tmp_view" in tci_line and "%ci_dst_view" in tci_line, tci_line
+        assert "v_row=?" not in tci_line and "v_col=?" not in tci_line, tci_line
 
     def test_tcvt_emits_static_view_for_explicit_tmp(self):
         @pl.program
@@ -3721,10 +3720,8 @@ class TestLevel3StaticViewCodegen:
 
         mlir = self._generate_mlir(Prog)
         tcvt_line = next(line for line in mlir.splitlines() if "pto.tcvt" in line)
-        # Level3 tcvt scratch disabled: 1-arg form (no tmp view).
-        ins = tcvt_line.split("ins(", 1)[1].split(":", 1)[0]
-        assert "," not in ins, tcvt_line
-        assert "tcvt_tmp" not in tcvt_line, tcvt_line
+        assert "%tcvt_tmp_view" in tcvt_line and "%tcvt_dst_view" in tcvt_line, tcvt_line
+        assert "v_row=?" not in tcvt_line and "v_col=?" not in tcvt_line, tcvt_line
 
     def test_tcolsum_binary_emits_static_view_for_tmp(self):
         @pl.program
@@ -3744,9 +3741,7 @@ class TestLevel3StaticViewCodegen:
 
         mlir = self._generate_mlir(Prog)
         tcolsum_line = next(line for line in mlir.splitlines() if "pto.tcolsum" in line)
-        # Level3 static-view bridge off; explicit tmp still appears as second ins.
-        ins = tcolsum_line.split("ins(", 1)[1].split(":", 1)[0]
-        assert ins.count(",") == 1, tcolsum_line
+        assert "%colsum_tmp_view" in tcolsum_line and "%colsum_dst_view" in tcolsum_line, tcolsum_line
         assert "isBinary = true" in tcolsum_line, tcolsum_line
 
 

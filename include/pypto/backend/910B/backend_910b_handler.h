@@ -42,9 +42,7 @@ class Ascend910BHandler : public BackendHandler {
 
   [[nodiscard]] bool RequiresGMPipeBuffer() const override { return true; }
   [[nodiscard]] bool RequiresSplitLoadTpopWorkaround() const override { return true; }
-  // Temporarily false: #2523 A2/A3 level3 explicit-tmp + ptoas v0.60 couples with
-  // packed-prefill NaN on tile.ci (pypto#2558). PTOAS is pinned back to v0.57.
-  [[nodiscard]] bool RequiresLevel3TmpScratch() const override { return false; }
+  [[nodiscard]] bool RequiresLevel3TmpScratch() const override { return true; }
   [[nodiscard]] bool RequiresVtoCFractalAdapt() const override { return false; }
   [[nodiscard]] bool RequiresRuntimeSubblockBridge() const override { return true; }
   [[nodiscard]] bool RequiresNoSplitDualAivDispatch() const override { return true; }
