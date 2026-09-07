@@ -210,14 +210,15 @@ def get_active_profiler() -> CompileProfiler | None:
     1. An explicit ``CompileProfiler`` on the thread-local stack.
     2. The ``PYPTO_COMPILE_PROFILING`` environment variable.
 
-    Returns ``None`` when profiling is not enabled.
+    Returns ``None`` when profiling is not enabled. Disabling the environment
+    variable releases its thread-local binding; explicit contexts stay active.
     """
+    global _env_profiler  # noqa: PLW0603
     prof = CompileProfiler.current()
-    if prof is not None:
+    if prof is not None and prof is not _env_profiler:
         return prof
 
     if os.environ.get(_ENV_VAR, "").strip() in ("1", "true", "yes"):
-        global _env_profiler  # noqa: PLW0603
         if _env_profiler is None:
             with _env_profiler_lock:
                 if _env_profiler is None:
@@ -226,6 +227,8 @@ def get_active_profiler() -> CompileProfiler | None:
         CompileProfiler._local.current = _env_profiler
         return _env_profiler
 
+    if prof is not None:
+        CompileProfiler._local.current = None
     return None
 
 

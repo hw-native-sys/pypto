@@ -237,6 +237,35 @@ class TestGetActiveProfiler:
             CompileProfiler._local.current = None
             _compile_profiling_mod._env_profiler = None
 
+    @pytest.mark.parametrize("disabled", [None, "0", "false"])
+    def test_disabling_environment_releases_its_profiler(self, monkeypatch, disabled):
+        """Turning off environment profiling clears its implicit thread binding."""
+        monkeypatch.setattr(_compile_profiling_mod, "_env_profiler", None)
+        monkeypatch.setattr(CompileProfiler._local, "current", None, raising=False)
+        monkeypatch.setenv("PYPTO_COMPILE_PROFILING", "1")
+        environment_profiler = get_active_profiler()
+        assert environment_profiler is not None
+        if disabled is None:
+            monkeypatch.delenv("PYPTO_COMPILE_PROFILING")
+        else:
+            monkeypatch.setenv("PYPTO_COMPILE_PROFILING", disabled)
+        assert get_active_profiler() is None
+        assert CompileProfiler.current() is None
+        monkeypatch.setenv("PYPTO_COMPILE_PROFILING", "1")
+        assert get_active_profiler() is environment_profiler
+
+    def test_explicit_context_survives_disabling_environment(self, monkeypatch):
+        """An explicit profiler retains scope even when the environment turns off."""
+        monkeypatch.setattr(_compile_profiling_mod, "_env_profiler", None)
+        monkeypatch.setattr(CompileProfiler._local, "current", None, raising=False)
+        monkeypatch.setenv("PYPTO_COMPILE_PROFILING", "1")
+        assert get_active_profiler() is not None
+        with CompileProfiler() as explicit:
+            monkeypatch.delenv("PYPTO_COMPILE_PROFILING")
+            assert get_active_profiler() is explicit
+        assert get_active_profiler() is None
+        assert CompileProfiler.current() is None
+
     def test_env_var_binds_to_thread_local_every_call(self, monkeypatch):
         """get_active_profiler() should always bind the env profiler to thread-local."""
         monkeypatch.setenv("PYPTO_COMPILE_PROFILING", "1")

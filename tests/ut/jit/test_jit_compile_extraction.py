@@ -889,6 +889,27 @@ def test_real_profile_contains_compile_stages_after_cache_hit(kernel):
     assert kernel.compile() is cached
 
 
+@pytest.mark.parametrize("fail", [False, True])
+def test_disabling_environment_profiling_restores_warm_cache(kernel, monkeypatch, fail):
+    """Real successful and failed compiles must not make profiling sticky."""
+    cached = kernel.compile()
+    monkeypatch.setenv("PYPTO_COMPILE_PROFILING", "1")
+    if fail:
+
+        def fail_parse(*_args, **_kwargs):
+            raise ValueError("profiling compilation failed")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(pl, "parse", fail_parse)
+            with pytest.raises(ValueError, match="profiling compilation failed"):
+                kernel.compile()
+    else:
+        assert kernel.compile() is not cached
+    monkeypatch.delenv("PYPTO_COMPILE_PROFILING")
+    assert kernel.compile() is cached
+    assert CompileProfiler.current() is None
+
+
 def test_warm_cache_hit_does_not_probe_toolchain(kernel, monkeypatch):
     cached = kernel.compile()
 

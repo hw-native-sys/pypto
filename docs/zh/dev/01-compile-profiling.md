@@ -11,6 +11,10 @@ Pass、代码生成到上板执行。
 PYPTO_COMPILE_PROFILING=1 python3 my_program.py
 ```
 
+取消此环境变量（或设为 `0`）后，下一次查询会解除环境变量创建的 profiler 绑定，
+普通 JIT 调用即可恢复缓存复用。显式的 `with CompileProfiler()` 上下文独立于
+此环境变量，仍会持续到作用域结束。
+
 ### 方式 2：`ir.compile()` 参数
 
 ```python

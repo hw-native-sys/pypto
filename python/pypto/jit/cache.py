@@ -192,7 +192,8 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
             because it changes generated orchestration dependencies.
         emit_source_loc: Whether codegen emits source locations, resolved from
             the environment before key construction and passed to the compiler.
-            Diagnostic-only controls bypass caching and do not enter the key.
+            Changing this option changes generated code and splits the key.
+            Dump, profiling, and other cache-bypass controls are excluded.
         memory_planner: Effective on-chip memory planner (``PYPTO``,
             ``DSA_RP``, or ``PTOAS``) as resolved from the ``RunConfig`` field
             and any active ``PassContext``. Included in the key because it
