@@ -135,6 +135,45 @@ silently folding into one program.
 
 `@pl.jit.host` rejects `level=` (HOST is implicit).
 
+### What a sub-function hands back keeps its shape and dtype
+
+Specialization stamps every generated parameter with a concrete shape and dtype, so a
+tensor a sub-function returns must be traceable to one. Both conventions work, and you can
+mix them in the same entry:
+
+```python
+@pl.jit.inline
+def make_pair(x: pl.Tensor[[1, 8], pl.FP32]):
+    a = pl.create_tensor([1, 8], dtype=pl.FP32)   # helper allocates its own results
+    b = pl.create_tensor([1, 8], dtype=pl.FP32)
+    with pl.at(level=pl.Level.CORE_GROUP):
+        a[:, :] = x[:, :]
+        b[:, :] = pl.mul(x[:, :], 2.0)
+    return a, b
+
+@pl.jit.incore
+def relu_kernel(x: pl.Tensor, out: pl.Out[pl.Tensor]):   # caller allocates, kernel fills
+    ...
+
+@pl.jit
+def entry(x: pl.Tensor[[1, 8], pl.FP32], out: pl.Out[pl.Tensor[[1, 8], pl.FP32]]):
+    a, b = make_pair(x)          # metas read out of make_pair's own body
+    buf = pl.create_tensor([1, 8], dtype=pl.FP32)
+    mid = relu_kernel(a, buf)    # mid aliases buf, so it inherits buf's meta
+    ...
+```
+
+A device kernel (`@pl.jit.incore`) cannot allocate, so it always takes the second form —
+`pl.create_tensor` belongs on the control plane. An `@pl.jit.inline` helper is spliced into
+the caller, so either form is available to it.
+
+What does *not* resolve is a returned tensor whose shape no static rule can reach — a
+`pl.create_tensor` sized from a value only the device knows, or a result rebound through an
+operation the specializer does not model. That surfaces as
+`missing inferred tensor metadata for parameter '<name>'` at the *next* call that consumes
+it; annotate the producing allocation with static extents, or pass the buffer in as a
+`pl.Out[...]` parameter.
+
 ### Three constraints that decide whether a jit kernel compiles
 
 These are the failures new `@pl.jit` code hits, in the order it hits them.

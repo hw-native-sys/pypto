@@ -760,7 +760,10 @@ def _scan_dep_io(
 
     Used by ``_extract_local_tensor_metas`` to propagate metas through
     ``v1, ..., vk = dep(args)`` assignments (each ``vi`` inherits the meta of
-    the caller arg bound to the i-th output-like parameter).
+    the caller arg bound to the i-th output-like parameter). A dep with no
+    output-like params is still recorded: ``_dep_return_metas`` needs
+    ``param_names`` to bind the call site's args when it descends into the
+    callee's body.
 
     ``output_param_names`` covers both ``pl.Out[...]`` and ``pl.InOut[...]``
     params — a caller can capture either from ``v = dep(...)`` — and is kept in
@@ -783,11 +786,54 @@ def _scan_dep_io(
     return out
 
 
+class _DepScan(NamedTuple):
+    """Everything the local-meta walk needs to know about one caller's deps.
+
+    ``io`` and ``funcs`` are both keyed by the name the caller's *source*
+    calls the dep by (see :class:`_DepBinding`). ``seen`` holds the ``id()`` of
+    every Python function already on the extraction stack, so the recursive
+    descent :func:`_dep_return_metas` performs cannot loop.
+    """
+
+    io: dict[str, tuple[list[str], list[str]]]
+    funcs: dict[str, JITFunction]
+    seen: frozenset[int]
+
+
+def _target_names(target: ast.expr) -> list[str]:
+    """Return the bound names of ``v = ...`` / ``v1, ..., vk = ...``.
+
+    Empty for any other target shape (a subscript, an attribute, a nested
+    unpack) — those are not local tensor rebindings this extractor models.
+    """
+    if isinstance(target, ast.Name):
+        return [target.id]
+    if isinstance(target, ast.Tuple) and all(isinstance(e, ast.Name) for e in target.elts):
+        return [e.id for e in target.elts if isinstance(e, ast.Name)]
+    return []
+
+
+def _return_element_names(func_def: ast.FunctionDef) -> list[str]:
+    """Return the names a function's first value-carrying ``return`` hands back.
+
+    ``return a, b`` → ``["a", "b"]``; ``return a`` → ``["a"]``. An element that
+    is not a bare ``Name`` (a call, a subscript, a literal) yields ``""`` so the
+    positional alignment with the caller's targets survives — the empty name
+    simply resolves to no meta.
+    """
+    for node in ast.walk(func_def):
+        if not (isinstance(node, ast.Return) and node.value is not None):
+            continue
+        elts = node.value.elts if isinstance(node.value, ast.Tuple) else [node.value]
+        return [e.id if isinstance(e, ast.Name) else "" for e in elts]
+    return []
+
+
 def _dep_out_metas(
     call: ast.Call,
     dep_name: str,
     target: ast.expr,
-    dep_io: dict[str, tuple[list[str], list[str]]],
+    deps: _DepScan,
     local: dict[str, TensorMeta],
 ) -> dict[str, TensorMeta]:
     """For ``v1, ..., vk = dep(args)`` where ``dep`` has ``k`` ``Out`` params,
@@ -795,16 +841,12 @@ def _dep_out_metas(
     parameter.
 
     Mapping handles both positional and keyword args. No-op when the dep has
-    no ``Out`` params or when target/arity don't match.
+    no ``Out`` params or when target/arity don't match — ``_dep_return_metas``
+    then covers the callee-allocated case.
     """
-    dep_params, out_params = dep_io[dep_name]
-    if isinstance(target, ast.Name):
-        names = [target.id]
-    elif isinstance(target, ast.Tuple) and all(isinstance(e, ast.Name) for e in target.elts):
-        names = [e.id for e in target.elts if isinstance(e, ast.Name)]
-    else:
-        return {}
-    if not out_params or len(names) != len(out_params):
+    dep_params, out_params = deps.io[dep_name]
+    names = _target_names(target)
+    if not names or not out_params or len(names) != len(out_params):
         return {}
     mapping: dict[str, str | None] = {}
     for i, arg in enumerate(call.args):
@@ -819,6 +861,62 @@ def _dep_out_metas(
         if caller_arg is not None and caller_arg in local:
             result[vname] = local[caller_arg]
     return result
+
+
+def _dep_return_metas(
+    call: ast.Call,
+    dep_name: str,
+    target: ast.expr,
+    deps: _DepScan,
+    local: dict[str, TensorMeta],
+    scalars: Mapping[str, int | float | bool],
+) -> dict[str, TensorMeta]:
+    """For ``v1, ..., vk = dep(args)`` where ``dep`` returns tensors it created
+    itself, resolve each ``vi`` from the callee's own ``return`` statement.
+
+    ``_dep_out_metas`` covers the in-place convention, where every returned
+    tensor is also an ``Out`` parameter the *caller* allocated, so its meta is
+    already in the caller's pool. A helper may instead ``pl.create_tensor`` its
+    results and hand them back — the classic ``a, b = make_pair(x)`` inline
+    preparation step — and then the shape and dtype exist only inside the
+    callee. Re-run the extractor over the callee's body, seeded with the params
+    this call site binds, and read the returned names' metas off that.
+
+    Returns ``{}`` (leaving the clear ``_build_params`` error) when the callee's
+    source is unavailable, its return arity doesn't match the target, or it is
+    already on the extraction stack.
+    """
+    dep = deps.funcs.get(dep_name)
+    names = _target_names(target)
+    if dep is None or not names or id(dep._func) in deps.seen:
+        return {}
+    try:
+        ret_names = _return_element_names(_get_func_def(dep._func))
+    except OSError:
+        return {}
+    if len(ret_names) != len(names):
+        return {}
+    dep_params, _ = deps.io[dep_name]
+    seed_meta: dict[str, TensorMeta] = {}
+    seed_scalars: dict[str, int | float | bool] = {}
+    for dep_param, caller_arg in _build_param_mapping(dep_params, _call_arg_refs(call)).items():
+        # A ``_SlicedArg`` (``chip_orch(x[r], ...)``) seeds nothing: that
+        # per-rank dispatch form returns through ``Out`` params, so the
+        # descent below never needs the sliced param's meta.
+        if not isinstance(caller_arg, str):
+            continue
+        if caller_arg in local:
+            seed_meta[dep_param] = local[caller_arg]
+        elif caller_arg in scalars:
+            seed_scalars[dep_param] = scalars[caller_arg]
+    callee_metas = _extract_local_tensor_metas(
+        dep._func,
+        seed_meta=seed_meta,
+        seed_scalars=seed_scalars,
+        caller_func_type=dep._func_type,
+        dep_seen=deps.seen,
+    )
+    return {v: callee_metas[r] for v, r in zip(names, ret_names, strict=True) if r in callee_metas}
 
 
 def _fold_int_arith(op: ast.operator, lhs: int, rhs: int) -> int | None:
@@ -946,9 +1044,10 @@ def _update_local_tensor_meta(
     stmt: ast.stmt,
     local: dict[str, TensorMeta],
     dim_aliases: dict[str, tuple[str, int]],
-    dep_io: dict[str, tuple[list[str], list[str]]],
+    deps: _DepScan,
     resolve_int: Callable[[ast.expr], int | None],
     pl_attr_handlers: dict[str, Callable[[ast.Call, str | None], TensorMeta | None]],
+    scalars: Mapping[str, int | float | bool],
 ) -> None:
     """Apply one assignment's metadata effects to the source-ordered state."""
     parts = _assignment_parts(stmt)
@@ -981,13 +1080,19 @@ def _update_local_tensor_meta(
                 # result metadata this extractor does not model (for example,
                 # same-shaped pl.assemble rebindings).
                 preserve_existing = True
-        elif isinstance(fn, ast.Name) and fn.id in dep_io:
-            dep_target_metas = [_dep_out_metas(value, fn.id, target, dep_io, local) for target in targets]
-            # Preserve the existing dependency-result behavior when the
-            # callee has no explicit Out/InOut metadata: an already-known
-            # target keeps its metadata until a later supported rebinding can
-            # refine it. This is how bare inline helpers propagate same-shaped
-            # results today.
+        elif isinstance(fn, ast.Name) and fn.id in deps.io:
+            # The in-place ``Out``-param convention first; a callee that
+            # allocates its own results falls through to its return statement.
+            dep_target_metas = [
+                _dep_out_metas(value, fn.id, target, deps, local)
+                or _dep_return_metas(value, fn.id, target, deps, local, scalars)
+                for target in targets
+            ]
+            # Preserve the existing dependency-result behavior when neither
+            # rule resolves the callee's results: an already-known target keeps
+            # its metadata until a later supported rebinding can refine it.
+            # This is how bare inline helpers propagate same-shaped results
+            # today.
             preserve_existing = True
 
     alias = _extract_dim_alias(value)
@@ -1016,15 +1121,16 @@ def _walk_local_tensor_meta_stmts(
     stop_at_dep: str | None,
     local: dict[str, TensorMeta],
     dim_aliases: dict[str, tuple[str, int]],
-    dep_io: dict[str, tuple[list[str], list[str]]],
+    deps: _DepScan,
     resolve_int: Callable[[ast.expr], int | None],
     pl_attr_handlers: dict[str, Callable[[ast.Call, str | None], TensorMeta | None]],
+    scalars: Mapping[str, int | float | bool],
 ) -> bool:
     """Walk supported DSL scopes in source order until the selected call."""
     for stmt in stmts:
         if _stmt_calls_dep(stmt, stop_at_dep):
             return True
-        _update_local_tensor_meta(stmt, local, dim_aliases, dep_io, resolve_int, pl_attr_handlers)
+        _update_local_tensor_meta(stmt, local, dim_aliases, deps, resolve_int, pl_attr_handlers, scalars)
         for attr in ("body", "orelse", "finalbody"):
             nested = getattr(stmt, attr, None)
             if isinstance(nested, list) and _walk_local_tensor_meta_stmts(
@@ -1032,9 +1138,10 @@ def _walk_local_tensor_meta_stmts(
                 stop_at_dep,
                 local,
                 dim_aliases,
-                dep_io,
+                deps,
                 resolve_int,
                 pl_attr_handlers,
+                scalars,
             ):
                 return True
     return False
@@ -1046,6 +1153,7 @@ def _extract_local_tensor_metas(
     seed_scalars: dict[str, int | float | bool] | None = None,
     caller_func_type: str = "orchestration",
     stop_at_dep: str | None = None,
+    dep_seen: frozenset[int] = frozenset(),
 ) -> dict[str, TensorMeta]:
     """Infer ``TensorMeta`` for the local tensor variables in ``func``'s body.
 
@@ -1077,6 +1185,12 @@ def _extract_local_tensor_metas(
        argument bound to the i-th ``Out`` parameter (the in-place-output
        convention every such kernel follows, and the same heuristic
        ``_infer_return_type`` uses on the callee side).
+    4. ``v1, ..., vk = jit_dep(args)`` where ``jit_dep`` instead allocates its
+       own results (``a = pl.create_tensor(...); ...; return a, b``) — the
+       extractor descends into the callee's body, seeded with the params this
+       call site binds, and each ``vi`` takes the meta of the i-th returned
+       name (see :func:`_dep_return_metas`). ``dep_seen`` carries the ``id()``
+       of every function already on that stack so the descent cannot loop.
 
     ``seed_meta`` pre-populates the table with the caller's parameter metas
     (including any ``DynDim`` entries those carry) so a ``pl.slice`` of a
@@ -1277,7 +1391,11 @@ def _extract_local_tensor_metas(
             dims.append(v if v is not None else parent_dim)
         return TensorMeta(shape=tuple(dims), dtype=src_meta.dtype, layout=src_meta.layout)
 
-    dep_io = _scan_dep_io(func, caller_func_type)
+    deps = _DepScan(
+        io=_scan_dep_io(func, caller_func_type),
+        funcs={b.call_name: b.dep for b in _discover_dep_bindings(func, caller_func_type)},
+        seen=dep_seen | {id(func)},
+    )
 
     # Dispatch table: pl.<attr>(...) → meta extraction function.
     # Replaces sequential if-chains, reducing branch and statement counts.
@@ -1293,9 +1411,10 @@ def _extract_local_tensor_metas(
         stop_at_dep,
         local,
         dim_aliases,
-        dep_io,
+        deps,
         _resolve_int,
         _pl_attr_handlers,
+        scalars,
     )
     return local
 
@@ -1369,13 +1488,19 @@ def _extract_call_args_for_dep(
     ]
     if not calls:
         return None
-    node = min(calls, key=lambda call: (call.lineno, call.col_offset))
+    return _call_arg_refs(min(calls, key=lambda call: (call.lineno, call.col_offset)))
+
+
+def _call_arg_refs(node: ast.Call) -> list[tuple[str | None, str | _SlicedArg | None]]:
+    """Unify one call node's positional and keyword args into ``(param, ref)`` pairs.
+
+    ``param`` is ``None`` for a positional argument (paired with the callee's
+    parameter list by index in :func:`_build_param_mapping`) and the keyword
+    name otherwise. ``**kwargs`` splats are skipped — they carry no name to
+    bind against.
+    """
     result: list[tuple[str | None, str | _SlicedArg | None]] = [(None, _arg_ref(arg)) for arg in node.args]
-    result.extend(
-        (kw.arg, _arg_ref(kw.value))
-        for kw in node.keywords
-        if kw.arg is not None  # skip **kwargs splats
-    )
+    result.extend((kw.arg, _arg_ref(kw.value)) for kw in node.keywords if kw.arg is not None)
     return result
 
 

@@ -1035,6 +1035,49 @@ def _callsite_metadata_kernel(x: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor
     return out
 
 
+# --- Callee-allocated dep results -------------------------------------------
+# A helper that allocates its own outputs and returns them, rather than writing
+# into pl.Out params the caller allocated. Its results' shape/dtype live only in
+# its body, so the caller's metadata pool has to descend into it.
+
+
+@jit.inline
+def _make_pair_inline(x: pl.Tensor):
+    """Inline helper returning two tensors it created itself."""
+    a = pl.create_tensor([1, 8], dtype=pl.FP32)
+    b = pl.create_tensor([16, 8], dtype=pl.FP16)
+    with pl.at(level=pl.Level.CORE_GROUP):
+        a[:, :] = x[0:1, :]
+        b[:, :] = pl.cast(x[0:16, :], pl.FP16)
+    return a, b
+
+
+def _tuple_dep_return_body(x: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+    """Plain (undecorated) caller: unpacks a tuple of callee-allocated tensors."""
+    a, b = _make_pair_inline(x)  # noqa: F841 — the metas under test
+    return out
+
+
+@jit.inline
+def _widen_inline(src: pl.Tensor):
+    """Inline helper whose own allocation is sized off its parameter."""
+    cols = pl.tensor.dim(src, 1)
+    wide = pl.create_tensor([2, cols], dtype=pl.FP32)
+    return wide
+
+
+def _param_sized_dep_body(x: pl.Tensor) -> pl.Tensor:
+    """Plain (undecorated) caller: the callee sizes its result from the arg."""
+    wide = _widen_inline(x)
+    return wide
+
+
+def _arity_mismatch_body(x: pl.Tensor) -> pl.Tensor:
+    """Plain (undecorated) caller: one target against a two-element return."""
+    only_one = _make_pair_inline(x)
+    return only_one
+
+
 # --- Runtime-sized local extents (synthesized DynDim) ------------------------
 # Fixtures for the tests covering a local tensor whose extent is only known at
 # runtime: one decorated dep, then plain (undecorated) caller bodies fed straight
@@ -1279,6 +1322,89 @@ class TestSliceAndDepReturnMetadata:
         out = torch.empty(16, 32)
         program = split_entry.lower(src, out)
         assert isinstance(program, ir.Program)
+
+    def test_extract_local_tensor_metas_callee_allocated_tuple_return(self):
+        """A dep with no ``Out`` params still resolves: its returned locals'
+        metas are read out of the callee's own body."""
+        seed = {
+            "x": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
+            "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
+        }
+        metas = _extract_local_tensor_metas(_tuple_dep_return_body, seed_meta=seed)
+        # Each target takes the pl.create_tensor meta of the matching returned
+        # name — including the dtype, which differs between the two.
+        assert metas["a"] == TensorMeta(shape=(1, 8), dtype=DataType.FP32)
+        assert metas["b"] == TensorMeta(shape=(16, 8), dtype=DataType.FP16)
+
+    def test_callee_allocated_tuple_return_flows_into_next_dep(self):
+        """The reported failure: two tensors an inline helper created itself are
+        unpacked and passed to a second inline helper, whose params then have no
+        inferred metadata."""
+        torch = pytest.importorskip("torch")
+
+        @jit.inline
+        def make_pair(x: pl.Tensor[[1, 8], pl.FP32]):
+            a = pl.create_tensor([1, 8], dtype=pl.FP32)
+            b = pl.create_tensor([1, 8], dtype=pl.FP32)
+            with pl.at(level=pl.Level.CORE_GROUP):
+                a[:, :] = x[:, :]
+                b[:, :] = pl.mul(x[:, :], 2.0)
+            return a, b
+
+        @jit.inline
+        def consume_pair(a: pl.Tensor, b: pl.Tensor, out: pl.Tensor):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                out[:, :] = pl.add(a[:, :], b[:, :])
+
+        @jit
+        def pair_entry(x: pl.Tensor[[1, 8], pl.FP32], out: pl.Out[pl.Tensor[[1, 8], pl.FP32]]):
+            a, b = make_pair(x)
+            consume_pair(a, b, out)
+
+        program = pair_entry.lower(torch.randn(1, 8), torch.empty(1, 8))
+        assert isinstance(program, ir.Program)
+
+    def test_callee_allocated_single_return_flows_into_next_dep(self):
+        """The single-value shape of the same rule: ``buf = helper(x)`` where
+        ``helper`` allocates ``buf`` itself."""
+        torch = pytest.importorskip("torch")
+
+        @jit.inline
+        def double_inline(x: pl.Tensor[[1, 8], pl.FP32]):
+            scaled = pl.create_tensor([1, 8], dtype=pl.FP32)
+            with pl.at(level=pl.Level.CORE_GROUP):
+                scaled[:, :] = pl.mul(x[:, :], 2.0)
+            return scaled
+
+        @jit.inline
+        def copy_inline(src: pl.Tensor, out: pl.Tensor):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                out[:, :] = src[:, :]
+
+        @jit
+        def single_entry(x: pl.Tensor[[1, 8], pl.FP32], out: pl.Out[pl.Tensor[[1, 8], pl.FP32]]):
+            scaled = double_inline(x)
+            copy_inline(scaled, out)
+
+        program = single_entry.lower(torch.randn(1, 8), torch.empty(1, 8))
+        assert isinstance(program, ir.Program)
+
+    def test_callee_allocated_return_sized_from_its_param(self):
+        """A callee whose allocation is sized off a parameter resolves through
+        the call site: the seed metas descend with the recursion."""
+        seed = {"x": TensorMeta(shape=(4, 64), dtype=DataType.FP16)}
+        metas = _extract_local_tensor_metas(_param_sized_dep_body, seed_meta=seed)
+        # ``pl.create_tensor(..., dtype=pl.FP32)`` sized by ``pl.tensor.dim(src, 1)``
+        # of the caller's ``x``.
+        assert metas["wide"] == TensorMeta(shape=(2, 64), dtype=DataType.FP32)
+
+    def test_callee_return_arity_mismatch_resolves_nothing(self):
+        """A target that does not line up with the callee's return list is
+        declined rather than mis-paired — the clear ``_build_params`` error
+        beats a wrong shape."""
+        seed = {"x": TensorMeta(shape=(16, 8), dtype=DataType.FP32)}
+        metas = _extract_local_tensor_metas(_arity_mismatch_body, seed_meta=seed)
+        assert "only_one" not in metas
 
     def test_runtime_sized_slice_uses_static_parent_dim(self):
         """A pl.slice with a runtime-scalar width is advertised to the consuming
