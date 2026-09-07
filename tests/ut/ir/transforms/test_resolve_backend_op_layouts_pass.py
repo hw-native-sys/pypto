@@ -307,6 +307,106 @@ class TestResolveBackendOpLayouts:
         After = _run_pass(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_rewrites_column_vector_minimums_through_row_major_reshape(self):
+        """`tile.minimums` repairs a col-major vector, exactly like `tile.maximums`.
+
+        The two are one operator family — `pto.tmins` and `pto.tmaxs` address
+        their operands identically — but only `tile.maximums` used to declare the
+        row-major requirement. An `[M, 1]` carrier put through `pl.minimum` was
+        therefore handed to PTOAS still `col_major`, and every row but the first
+        came back holding whatever the flat reading found there. Nothing faulted:
+        a downstream `pl.row_expand_*` broadcast the wrong values and the kernel
+        returned wrong numbers.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def repro(
+                self,
+                out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                chunk: pl.Tile[[16, 256], pl.FP32] = pl.tile.create(
+                    [16, 256], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                tmp: pl.Tile[[16, 256], pl.FP32] = pl.tile.create(
+                    [16, 256], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                partial: pl.Tile[[16, 1], pl.FP32] = pl.tile.row_sum(chunk, tmp)
+                clipped: pl.Tile[[16, 1], pl.FP32] = pl.tile.minimums(partial, 2.0)
+                stored: pl.Tensor[[16, 1], pl.FP32] = pl.store(clipped, [0, 0], out)
+                return stored
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def repro(
+                self,
+                out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                chunk: pl.Tile[[16, 256], pl.FP32, pl.MemorySpace.Vec] = pl.tile.create(
+                    [16, 256], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                tmp: pl.Tile[[16, 256], pl.FP32, pl.MemorySpace.Vec] = pl.tile.create(
+                    [16, 256], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                partial: pl.Tile[[16, 1], pl.FP32, pl.MemorySpace.Vec] = pl.tile.row_sum(chunk, tmp)
+                partial_rm: pl.Tile[[1, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.reshape(partial, [1, 16])
+                clipped_rm: pl.Tile[[1, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.minimums(partial_rm, 2.0)
+                clipped: pl.Tile[[16, 1], pl.FP32, pl.MemorySpace.Vec] = pl.tile.reshape(clipped_rm, [16, 1])
+                stored: pl.Tensor[[16, 1], pl.FP32] = pl.store(clipped, [0, 0], out)
+                return stored
+
+        After = _run_pass(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    @pytest.mark.parametrize(
+        "op_name",
+        [
+            "tile.addc",
+            "tile.ands",
+            "tile.minimums",
+            "tile.neg",
+            "tile.ors",
+            "tile.selc",
+            "tile.shls",
+            "tile.shrs",
+            "tile.subc",
+            "tile.xors",
+        ],
+    )
+    def test_linear_elementwise_family_declares_row_major(self, op_name):
+        """Every linearly addressed elementwise operator must constrain arg 0.
+
+        These all shipped without the requirement their own siblings declared —
+        `tile.minimums` beside `tile.maximums`, `tile.ands` beside `tile.and`,
+        `tile.neg` beside `tile.abs`. Asserting the declaration rather than a
+        rewritten program keeps operators in reach whose dtype rules (the bitwise
+        family) or arity (the carry family) make a full DSL program awkward.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        try:
+            assert backend.get_input_tile_layout(op_name, 0) == pl.TileLayout.row_major
+        finally:
+            backend.reset_for_testing()
+
+    @pytest.mark.parametrize("op_name", ["tile.row_expand_sub", "tile.row_sum", "tile.matmul"])
+    def test_layout_aware_op_declares_no_input_constraint(self, op_name):
+        """The complement: an operator that reads the layout must not be repaired.
+
+        A `row_expand` carrier's layout selects the broadcast rule, a reduction
+        produces a `col_major` column, and matmul addresses fractals — rewriting
+        any of them to row-major would change what the operator computes.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        try:
+            assert backend.get_input_tile_layout(op_name, 0) is None
+            assert backend.get_input_tile_layout(op_name, 1) is None
+        finally:
+            backend.reset_for_testing()
+
     def test_rewrites_matrix_exp_through_row_major_move(self):
         """`tile.exp` on a non-vector col_major tile should be repaired through `tile.move`."""
 

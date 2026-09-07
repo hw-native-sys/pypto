@@ -4,7 +4,7 @@ Repairs backend-required tile layouts for elementwise ops. `[N, 1]` col-major ve
 
 ## Overview
 
-After `FlattenTileNdTo2D` and `InferTileMemorySpace`, every tile op is in 2-D form with a known layout. Several PTO elementwise ops (registered in `src/backend/common/pto_ops_common.cpp`) require their tile operands and result to be `row_major`. This pass repairs those local violations at the consumer:
+After `FlattenTileNdTo2D` and `InferTileMemorySpace`, every tile op is in 2-D form with a known layout. Several PTO elementwise ops (registered in `src/backend/common/pto_ops_elementwise.cpp`) require their tile operands and result to be `row_major`. This pass repairs those local violations at the consumer:
 
 1. For each `AssignStmt` / `EvalStmt` whose RHS is a `Call`, query `Backend::GetTileLayoutSpec(op_name)`.
 2. Skip if no spec is registered, or if all constrained tile inputs and output already use `row_major`.
@@ -12,7 +12,7 @@ After `FlattenTileNdTo2D` and `InferTileMemorySpace`, every tile op is in 2-D fo
 4. For other non-row-major tile inputs, insert `tile.move(arg, target_memory=<same>, blayout=row_major, slayout=none_box)` before the call.
 5. For `AssignStmt` results whose original result type is not row-major, assign the repaired call to a row-major temporary, then restore the original result layout with either `tile.reshape` for column vectors or `tile.move` for general matrix tiles.
 
-The pass is **backend-driven**: the set of constrained ops and their per-input requirements come from each op's `BackendOpRegistryEntry` (see `set_input_layout` / `set_output_layout` in `pto_ops_common.cpp`). The pass code itself stays backend-agnostic — adding a new constrained op only requires registering its layout spec, not editing this pass.
+The pass is **backend-driven**: the set of constrained ops and their per-input requirements come from each op's `BackendOpRegistryEntry` (see `set_input_layout` / `set_output_layout` in `pto_ops_elementwise.cpp`). The pass code itself stays backend-agnostic — adding a new constrained op only requires registering its layout spec, not editing this pass.
 
 **Requirements**:
 
@@ -151,7 +151,16 @@ class After:
 | `python/pypto/pypto_core/passes.pyi` (`resolve_backend_op_layouts`) | Type stub |
 | `tests/ut/ir/transforms/test_resolve_backend_op_layouts_pass.py` | Unit tests (binary, unary, scalar-binary on `[N, 1]` vectors, plus matrix layout coercion through `tile.move`) |
 
-Layout constraints are registered per op via `BackendOpRegistryEntry::set_input_layout` / `set_output_layout` in `src/backend/common/pto_ops_common.cpp` (e.g. row-major elementwise ops listed in `RequiresRowMajorLayout`, `tile.cast`, `tile.rsqrt`, `tile.cmps`, `tile.sort32`, `tile.mscatter`, ...).
+Layout constraints are registered per op via `BackendOpRegistryEntry::set_input_layout` / `set_output_layout` in `src/backend/common/pto_ops_elementwise.cpp` (e.g. row-major elementwise ops listed in `RowMajorOps()`, `tile.cast`, `tile.rsqrt`, `tile.cmps`, `tile.sort32`, `tile.mscatter`, ...).
+
+Every entry of that file's `kSimpleOps` table must name itself in exactly one of two sets, and `CheckSimpleOpLayoutClassified` fails registration otherwise:
+
+| Set | Meaning | Examples |
+| --- | ------- | -------- |
+| `RowMajorOps()` | The PTOAS lowering walks every operand and the result as one flat run of elements, so a `col_major` operand must be repaired first | `tile.add`, `tile.minimums`, `tile.neg`, `tile.xors` |
+| `LayoutAwareOps()` | The lowering reads the operand layout itself, so repairing it would change what the op computes | `tile.row_expand_sub`, `tile.row_sum`, `tile.matmul`, `tile.fillpad` |
+
+The classification is per operator **family**: an operator and its scalar / carry variants address memory identically, so `tile.maximum`, `tile.maximums`, `tile.minimum` and `tile.minimums` all belong to the same set. Splitting a family is how a `col_major` carrier reached `pto.tmins` unrepaired and silently computed wrong numbers for every row but the first.
 
 Key helpers in the pass source:
 

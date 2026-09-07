@@ -67,7 +67,19 @@ using pto_ops_detail::MaterializeSubviewOperandIfNeeded;
 using pto_ops_detail::RequireStaticValidShapeForPtoas;
 using pto_ops_detail::round_modes;
 
-static bool RequiresRowMajorLayout(std::string_view op_name) {
+/// Operators whose PTOAS lowering walks every operand and the result as one flat
+/// run of elements. A `col_major` operand reaching such an op is read with the
+/// wrong address arithmetic and silently computes garbage, so
+/// `ResolveBackendOpLayouts` must repair it first (an `[M, 1]` operand through a
+/// `[1, M] row_major` reshape, anything else through a `tile.move`).
+///
+/// Membership is decided per operator family, not per operator: an operator and
+/// its scalar / carry variants address memory identically, so `tile.maximum`,
+/// `tile.maximums`, `tile.minimum` and `tile.minimums` all belong here.
+/// `kLayoutAwareOps` below holds the complement, and
+/// `CheckSimpleOpLayoutClassified` makes every `kSimpleOps` entry name itself in
+/// exactly one of the two -- a new operator cannot join the table unclassified.
+static const std::unordered_set<std::string_view>& RowMajorOps() {
   static const std::unordered_set<std::string_view> kRowMajorOps = {
       // Tile x Tile binary ops
       "tile.add",
@@ -81,6 +93,9 @@ static bool RequiresRowMajorLayout(std::string_view op_name) {
       "tile.part_max",
       "tile.part_min",
       "tile.part_mul",
+      "tile.partadd",
+      "tile.partmax",
+      "tile.partmin",
       "tile.rem",
       "tile.shl",
       "tile.shr",
@@ -89,27 +104,111 @@ static bool RequiresRowMajorLayout(std::string_view op_name) {
       // Unary ops
       "tile.abs",
       "tile.exp",
+      "tile.neg",
       "tile.sqrt",
       "tile.not",
       "tile.prelu",
       "tile.relu",
+      // Ternary ops (Tile x Tile x Tile)
+      "tile.addc",
+      "tile.subc",
       // Tile x Scalar ops
       "tile.adds",
+      "tile.ands",
       "tile.subs",
       "tile.muls",
       "tile.divs",
       "tile.fmods",
       "tile.maximums",
+      "tile.minimums",
       "tile.lrelu",
+      "tile.ors",
       "tile.sels",
+      "tile.shls",
+      "tile.shrs",
+      "tile.xors",
       // Gather operands and result are linearly addressed.
       "tile.gatherb",
       "tile.rems",
       // Ternary scalar ops (Tile x Scalar x Tile)
       "tile.addsc",
+      "tile.selc",
       "tile.subsc",
   };
-  return kRowMajorOps.count(op_name) > 0;
+  return kRowMajorOps;
+}
+
+/// The complement of `RowMajorOps()`: operators whose own lowering reads the
+/// operand layout, so rewriting it would change what the operator means.
+///
+/// * the `row_expand` / `col_expand` families broadcast a `[M, 1]` / `[1, N]`
+///   carrier, and a `row_major` carrier instead selects the packed 32-byte
+///   lane-block reading (see `tile.row_expand_add`'s contract);
+/// * the axis reductions and argmin/argmax produce a `col_major` column result;
+/// * matmul / concat / fillpad / move_fp / gather address fractals, windows or
+///   indices rather than a flat run.
+static const std::unordered_set<std::string_view>& LayoutAwareOps() {
+  static const std::unordered_set<std::string_view> kLayoutAwareOps = {
+      // Axis reductions: [M, N] -> [M, 1] / [1, N] column or row results.
+      "tile.row_sum",
+      "tile.row_max",
+      "tile.row_min",
+      "tile.row_prod",
+      "tile.col_max",
+      "tile.col_min",
+      "tile.col_prod",
+      "tile.row_argmax",
+      "tile.row_argmin",
+      "tile.col_argmax",
+      "tile.col_argmin",
+      // Broadcast families: the carrier's layout selects the broadcast rule.
+      "tile.col_expand_mul",
+      "tile.col_expand_add",
+      "tile.col_expand_div",
+      "tile.col_expand_sub",
+      "tile.col_expand_max",
+      "tile.col_expand_min",
+      "tile.col_expand_expdif",
+      "tile.row_expand_div",
+      "tile.row_expand_mul",
+      "tile.row_expand_sub",
+      "tile.row_expand_max",
+      "tile.row_expand_min",
+      "tile.row_expand_expdif",
+      // Padding writes the tile's physical edge.
+      "tile.fillpad",
+      "tile.fillpad_inplace",
+      // Fractal / window / index addressed.
+      "tile.matmul",
+      "tile.matmul_mx",
+      "tile.matmul_mx_bias",
+      "tile.matmul_bias",
+      "tile.concat",
+      "tile.move_fp",
+      "tile.gather",
+  };
+  return kLayoutAwareOps;
+}
+
+/// Fail registration when a `kSimpleOps` entry names neither set. Both readings
+/// of an operand are silent at runtime -- a mis-read `col_major` tile computes
+/// wrong numbers rather than faulting -- so an unclassified operator must not
+/// reach codegen.
+static void CheckSimpleOpLayoutClassified(std::string_view op_name) {
+  const bool row_major = RowMajorOps().count(op_name) > 0;
+  const bool layout_aware = LayoutAwareOps().count(op_name) > 0;
+  INTERNAL_CHECK(row_major != layout_aware)
+      << "Internal error: backend operator '" << op_name << "' is "
+      << (row_major ? "in both RowMajorOps() and LayoutAwareOps()"
+                    : "in neither RowMajorOps() nor LayoutAwareOps()")
+      << ". Every kSimpleOps entry must declare whether its PTOAS lowering addresses its operands "
+         "linearly (RowMajorOps, so ResolveBackendOpLayouts repairs a col_major operand) or reads "
+         "their layout itself (LayoutAwareOps, so the layout is left alone).";
+}
+
+static bool RequiresRowMajorLayout(std::string_view op_name) {
+  CheckSimpleOpLayoutClassified(op_name);
+  return RowMajorOps().count(op_name) > 0;
 }
 
 // Helper function for N-ary operations (unary, binary, ternary, etc.)
@@ -1064,10 +1163,20 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
                                        codegen);
   });
 
-  reg("tile.cmp", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-    return MakeModalCodegenPTO("pto.tcmp", 2, "cmp_type", cmp_modes, "Tile cmp", "cmpMode", "cmp", op,
-                               codegen);
-  });
+  // tile.cmp (TCMP): tile inputs and output must be row_major per ISA, exactly
+  // as for its scalar sibling tile.cmps below. Both walk their operands as one
+  // flat run of elements, so a col_major operand is read at the wrong addresses
+  // and silently yields a wrong mask.
+  if (exclude_ops.count("tile.cmp") == 0) {
+    backend.RegisterOp("tile.cmp")
+        .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+          return MakeModalCodegenPTO("pto.tcmp", 2, "cmp_type", cmp_modes, "Tile cmp", "cmpMode", "cmp", op,
+                                     codegen);
+        })
+        .set_input_layout(0, ir::TileLayout::row_major)
+        .set_input_layout(1, ir::TileLayout::row_major)
+        .set_output_layout(ir::TileLayout::row_major);
+  }
 
   // tile.cast (TCVT): pto.tcvt mis-orders elements on a col_major source, so per
   // ISA the input and output must be row_major (see #1549).
