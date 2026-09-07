@@ -1038,5 +1038,56 @@ def test_orch_task_id_array_store_after_nested_scope_closed_is_rejected():
     assert "Move the store inside that `pl.scope()`" in msg, msg
 
 
+def test_orch_task_id_phi_from_if_is_publishable_to_array():
+    """A TaskId merged by an ``if`` stays live after the branches close.
+
+    The phi is declared *outside* the branches and each arm's yield assigns
+    into it, so publishing it into a ``pl.array`` afterwards names a live C++
+    local — unlike a producer id left behind in a closed scope. Codegen must
+    seed the phi with the sentinel and register it, so the publish resolves
+    instead of tripping the closed-scope diagnostic.
+    """
+
+    rows, cols, tile_r = 128, 16, 16
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def stripe(
+            self,
+            data: pl.Tensor[[rows, cols], pl.FP32],
+            row_offset: pl.Scalar[pl.INDEX],
+            out: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
+        ) -> pl.Tensor[[rows, cols], pl.FP32]:
+            t: pl.Tile[[tile_r, cols], pl.FP32] = pl.load(data, [row_offset, 0], [tile_r, cols])
+            return pl.store(pl.add(t, 1.0), [row_offset, 0], out)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            data: pl.Tensor[[rows, cols], pl.FP32],
+            out: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
+        ) -> pl.Tensor[[rows, cols], pl.FP32]:
+            with pl.manual_scope():
+                tids = pl.array.create(4, pl.TASK_ID)
+                for branch in pl.parallel(4):
+                    row: pl.Scalar[pl.INDEX] = branch * tile_r
+                    if branch >= 2:
+                        out, tid = pl.submit(self.stripe, data, row, out)
+                    else:
+                        out, tid = pl.submit(self.stripe, data, row, out, deps=[tids])
+                    tids[branch] = tid
+            return out
+
+    code = _compile_orch(Prog)
+
+    # The phi is seeded with the sentinel at the enclosing level, so an arm that
+    # leaves it unassigned yields an invalid id rather than reading garbage.
+    phi = re.search(r"TaskId\s+(\w*tid\w*)\s*=\s*TaskId::invalid\(\);", code)
+    assert phi, code
+    # ...and the publish after the branches close resolves to that same local.
+    assert f"tids[branch] = {phi.group(1)};" in code or f"tids[branch] = {phi.group(1)}" in code, code
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

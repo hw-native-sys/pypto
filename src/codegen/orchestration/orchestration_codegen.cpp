@@ -1055,6 +1055,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
       // not. Storage counts as enclosing exactly when some pre-entry carry
       // already named it.
       std::set<std::string> enclosing_arrays;
+      // NOLINTNEXTLINE(bugprone-nondeterministic-pointer-iteration-order) — the
+      // pointer keys are ignored; only the names are collected, into an ordered set.
       for (const auto& [_, entry] : saved_array_carry) enclosing_arrays.insert(entry.array_name);
       PreserveEnclosingArrayCarries(&saved_array_carry, &saved_map, [&](const std::string& name) {
         return enclosing_arrays.count(name) == 0;
@@ -1291,6 +1293,19 @@ class OrchestrationStmtCodegen : public CodegenBase {
         // merges stay in-block). The phi init (a param or a pre-if Var) must be
         // enclosing-scope-valid, or the decl stays in place (EmitMutableTensorCarryDecl).
         EmitMutableTensorCarryDecl(emit_name, tensor_phi_init);
+      } else if (auto sty = As<ScalarType>(rv->GetType()); sty && sty->dtype_ == DataType::TASK_ID) {
+        // A TaskId phi is declared HERE, outside the branches, and each arm's
+        // yield assigns into it — so unlike a branch-local producer id it is
+        // still live after the ``if`` closes. Seed it with the sentinel (a
+        // default-constructed ``TaskId`` is uninitialised, and an arm may leave
+        // it unassigned) and register it at this enclosing level, mirroring
+        // ``InstallArrayPhiBindings`` below: a registration made inside a branch
+        // body would be dropped by that branch's scope restore. Without it a
+        // downstream ``deps=[phi]`` cannot resolve and an ``arr[i] = phi``
+        // publish looks like a store of a closed-scope local.
+        EmitIndentedLine(cpp_type + " " + emit_name + " = TaskId::invalid();");
+        manual_task_id_map_[rv.get()] = emit_name;
+        manual_task_id_map_by_key_[TaskIdHoistKey(rv.get())] = emit_name;
       } else {
         EmitIndentedLine(cpp_type + " " + emit_name + ";");
       }
