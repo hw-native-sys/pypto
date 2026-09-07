@@ -12,6 +12,20 @@ x: pl.INT64 = expr
 y: pl.Tensor[[4], pl.FP32] = tensor_op(a)
 ```
 
+不支持 `acc += ...` 和 `acc[...] += ...` 等增量赋值（augmented assignment）。
+解析器会标出原语句，并提示使用显式赋值。矩阵归约应使用带 `init_cond` 的
+`matmul_acc`：
+
+```python
+acc[t0 : t0 + R, :] = pl.matmul_acc(
+    acc[t0 : t0 + R, :], x_k, w_k, b_trans=True, init_cond=(k0 == 0)
+)
+```
+
+第一个 K 步只覆盖该窗口，后续步骤在该窗口内累加，其他窗口保留原值。
+编译器可将局部累加器中大小一致的行窗口打包为连续的 L0C 窗口；参见
+[累加器逻辑行窗口](../passes/14-flatten_tile_nd_to_2d.md#累加器逻辑行窗口)。
+
 ### If 语句 (SSA 风格)
 
 ```python

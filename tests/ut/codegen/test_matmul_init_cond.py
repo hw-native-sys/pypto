@@ -33,6 +33,7 @@ from pypto import backend, codegen
 from pypto.backend import BackendType
 from pypto.ir import OptimizationStrategy, PassManager
 from pypto.language.parser.diagnostics import InvalidOperationError
+from pypto.runtime import RunConfig
 
 PTOCodegen = codegen.PTOCodegen
 
@@ -458,6 +459,42 @@ def test_gemv_non_boolean_init_cond_is_rejected():
                 return pl.store(out_tile, [0, 0], output)
 
         _ = BadGemvInitCond
+
+
+@pytest.mark.parametrize("runtime_bound", [False, True])
+def test_shared_row_accumulator_compiles_without_acc_to_acc_copy(tmp_path, runtime_bound):
+    @pl.jit
+    def kernel(
+        x: pl.Tensor[[64, 1024], pl.INT8],
+        w: pl.Tensor[[128, 1024], pl.INT8],
+        out: pl.Out[pl.Tensor[[64, 128], pl.INT32]],
+        n_tiles: pl.Scalar[pl.INDEX],
+    ):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            acc = pl.create_tensor([64, 128], dtype=pl.INT32)
+            for k0 in pl.pipeline(0, 1024, 512, stage=2):
+                w_k = w[:, k0 : k0 + 512]
+                for t in pl.range(n_tiles):
+                    t0 = t * 16
+                    x_k = x[t0 : t0 + 16, k0 : k0 + 512]
+                    acc[t0 : t0 + 16, :] = pl.matmul_acc(
+                        acc[t0 : t0 + 16, :], x_k, w_k, b_trans=True, init_cond=(k0 == 0)
+                    )
+            out[:, :] = acc
+        return out
+
+    kernel.compile(
+        n_tiles=pl.RUNTIME if runtime_bound else 4,
+        config=RunConfig(codegen_only=True, save_kernels=True, save_kernels_dir=str(tmp_path)),
+    )
+    files = list(tmp_path.rglob("*.pto"))
+    assert files
+    mlir = "\n".join(file.read_text() for file in files)
+    assert "rows=16, cols=512" in mlir
+    assert "pto.tmatmul.acc" in mlir
+    assert "pto.tmatmul ins" in mlir
+    assert not any("pto.tmov" in line and line.count("loc=acc") == 2 for line in mlir.splitlines())
+    assert sum("pto.tstore " in line for line in mlir.splitlines()) == 4
 
 
 if __name__ == "__main__":

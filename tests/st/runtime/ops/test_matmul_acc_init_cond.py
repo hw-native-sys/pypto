@@ -17,10 +17,9 @@ whatever L0C held) and that a window write lands where the parent expects it.
 
 ``TestMatmulAccWindowInitCond`` is the shape that motivated the feature: one
 accumulator shared by several output column tiles, each accumulating its own K
-reduction in place. Note the accumulator is sliced along **columns** — a row
-window of a multi-block-column ``Acc`` tile is rejected by
-``CanonicalizeTileSlice``, because the MAD has no destination stride
-(hw-native-sys/pto-isa#253).
+reduction in place. The tensor-level row-window case exercises the compiler's
+packing of logical row windows into physical column windows, followed by stores
+that restore the logical row order.
 """
 
 from typing import Any
@@ -28,6 +27,7 @@ from typing import Any
 import pypto.language as pl
 import pytest
 import torch
+from harness import st
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
 
 # Same rationale as tests/st/runtime/ops/test_matmul.py: the cube reduces K in a
@@ -204,6 +204,52 @@ class TestMatmulAccInitCondOperations:
         """Column windows of one shared ``Acc`` tile, each accumulating over K."""
         result = test_runner.run(TestMatmulAccWindowInitCond(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
+
+
+@pl.jit
+def matmul_acc_row_windows(
+    x: pl.Tensor[[64, 1024], pl.INT8],
+    w: pl.Tensor[[128, 1024], pl.INT8],
+    n_tiles_t: pl.Tensor[[1, 1], pl.INT32],
+    out: pl.Out[pl.Tensor[[64, 128], pl.INT32]],
+):
+    n_tiles = pl.read(n_tiles_t, [0, 0])
+    with pl.at(level=pl.Level.CORE_GROUP, name_hint="row_windows"):
+        acc = pl.create_tensor([64, 128], dtype=pl.INT32)
+        for k0 in pl.pipeline(0, 1024, 512, stage=2):
+            w_k = w[:, k0 : k0 + 512]
+            for t in pl.range(n_tiles):
+                t0 = t * 16
+                x_k = x[t0 : t0 + 16, k0 : k0 + 512]
+                acc[t0 : t0 + 16, :] = pl.matmul_acc(
+                    acc[t0 : t0 + 16, :], x_k, w_k, b_trans=True, init_cond=(k0 == 0)
+                )
+        out[:, :] = acc
+    return out
+
+
+def _row_window_case():
+    generator = torch.Generator().manual_seed(0)
+    x = torch.randint(-3, 4, (64, 1024), dtype=torch.int8, generator=generator)
+    w = torch.randint(-3, 4, (128, 1024), dtype=torch.int8, generator=generator)
+    return st.case(
+        matmul_acc_row_windows,
+        x,
+        w,
+        torch.tensor([[4]], dtype=torch.int32),
+        torch.zeros((64, 128), dtype=torch.int32),
+        name="matmul_acc_shared_row_windows",
+        golden=lambda _: x.int() @ w.int().T,
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
+@pytest.mark.platforms("a2a3", "a2a3sim")
+@st.cases(_row_window_case())
+def test_matmul_acc_shared_row_windows(case_run):
+    """Each runtime-selected row window retains its partial sum across K steps."""
+    case_run.assert_passed()
 
 
 if __name__ == "__main__":

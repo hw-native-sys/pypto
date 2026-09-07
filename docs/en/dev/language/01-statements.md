@@ -13,6 +13,21 @@ x: pl.INT64 = expr
 y: pl.Tensor[[4], pl.FP32] = tensor_op(a)
 ```
 
+Augmented assignments such as `acc += ...` and `acc[...] += ...` are not
+supported. The parser reports the source statement and an explicit-assignment
+hint. For matrix reductions, use `matmul_acc` with `init_cond`:
+
+```python
+acc[t0 : t0 + R, :] = pl.matmul_acc(
+    acc[t0 : t0 + R, :], x_k, w_k, b_trans=True, init_cond=(k0 == 0)
+)
+```
+
+The first K step overwrites only that window; later steps accumulate into it.
+Other windows retain their values. The compiler can pack equal-size row windows
+of a local accumulator into contiguous L0C windows; see
+[accumulator row windows](../passes/14-flatten_tile_nd_to_2d.md#logical-accumulator-row-windows).
+
 ### If Statement (SSA-style)
 
 ```python

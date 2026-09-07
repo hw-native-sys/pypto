@@ -16,7 +16,7 @@ import warnings
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, TypeGuard, cast
+from typing import TYPE_CHECKING, Any, NoReturn, TypeGuard, cast
 
 from pypto._function_attrs import AUTO_SCOPE_ATTR, EXTERNAL_SOURCE_ATTR
 from pypto.ir import IRBuilder
@@ -1368,6 +1368,8 @@ class ASTParser:
             self.parse_annotated_assignment(stmt)
         elif isinstance(stmt, ast.Assign):
             self.parse_assignment(stmt)
+        elif isinstance(stmt, ast.AugAssign):
+            self._reject_augmented_assignment(stmt)
         elif isinstance(stmt, ast.For):
             self.parse_for_loop(stmt)
         elif isinstance(stmt, ast.While):
@@ -1401,6 +1403,21 @@ class ASTParser:
         residue = self.builder.pop_pending_leading_comments()
         if residue:
             self._requeue_comments_after(stmt, residue)
+
+    def _reject_augmented_assignment(self, stmt: ast.AugAssign) -> NoReturn:
+        target = ast.unparse(stmt.target)
+        hint = f"Use an explicit assignment to {target}."
+        if isinstance(stmt.op, ast.Add):
+            hint += (
+                f" For matrix accumulation, write {target} = pl.matmul_acc("
+                f"{target}, lhs, rhs, init_cond=(k0 == 0)); init_cond selects "
+                "overwrite on the first reduction step."
+            )
+        raise UnsupportedFeatureError(
+            f"Augmented assignment is not supported in DSL functions: {ast.unparse(stmt)}",
+            span=self.span_tracker.get_span(stmt),
+            hint=hint,
+        )
 
     def _parse_body_siblings(self, body: Sequence[ast.stmt]) -> None:
         """Parse a block's body stmts, applying stale-pending sweeps between siblings.

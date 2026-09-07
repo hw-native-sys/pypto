@@ -150,8 +150,13 @@ static std::string MakeTileAssembleCodegenPTO(const CallPtr& op, codegen::Codege
     const bool src_is_2d = source_tile_type->shape_.size() >= 2;
     auto src_rows = src_is_2d ? ir::As<ir::ConstInt>(source_tile_type->shape_[0]) : nullptr;
     auto src_cols = src_is_2d ? ir::As<ir::ConstInt>(source_tile_type->shape_[1]) : nullptr;
-    const bool same_window =
-        src_view->source_ssa == dst && src_view->row_off_ssa == row_off && src_view->col_off_ssa == col_off;
+    const bool same_row =
+        src_view->row_off_ssa == row_off ||
+        (src_view->row_offset && ir::AreExprsEqual(src_view->row_offset, offset_tuple->elements_[0]));
+    const bool same_col =
+        src_view->col_off_ssa == col_off ||
+        (src_view->col_offset && ir::AreExprsEqual(src_view->col_offset, offset_tuple->elements_[1]));
+    const bool same_window = src_view->source_ssa == dst && same_row && same_col;
     // The subview must cover the whole window the assemble writes, not part of
     // it — otherwise the bytes outside the source's extent still need the move.
     const bool covers_window = src_rows && src_cols && src_view->view_rows == src_rows->value_ &&
@@ -1269,6 +1274,8 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     mat_info.source_type = src_type;
     mat_info.row_off_ssa = row_off;
     mat_info.col_off_ssa = col_off;
+    mat_info.row_offset = offset_tuple->elements_[0];
+    mat_info.col_offset = offset_tuple->elements_[1];
     mat_info.materialize_target_ssa = result_target;
     mat_info.materialize_target_type = result_type;
     mat_info.source_memory_space = source_tile_type->memory_space_;

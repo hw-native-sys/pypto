@@ -496,6 +496,10 @@ class PTOCodegen : public CodegenBase {
     std::string source_type;
     std::string row_off_ssa;
     std::string col_off_ssa;
+    /// Original pure index expressions. Equal expressions can emit different
+    /// scalar SSAs, but still name the same slice/writeback window.
+    ir::ExprPtr row_offset;
+    ir::ExprPtr col_offset;
     std::string materialize_target_ssa;
     std::string materialize_target_type;
     std::optional<ir::MemorySpace> source_memory_space;

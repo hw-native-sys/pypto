@@ -136,6 +136,27 @@ class TestErrorCases:
                     result: pl.Tensor[[64], pl.FP32] = x
                 return result
 
+    @pytest.mark.parametrize("target", ["acc", "acc[0:16, :]"])
+    def test_augmented_matmul_assignment_reports_explicit_accumulation(self, target):
+        source = f"""
+import pypto.language as pl
+
+@pl.program
+class Program:
+    @pl.function
+    def main(self, acc: pl.Tensor[[16, 32], pl.FP32],
+             a: pl.Tensor[[16, 64], pl.FP16],
+             b: pl.Tensor[[64, 32], pl.FP16]):
+        {target} += pl.matmul(a, b)
+        return acc
+"""
+        with pytest.raises(UnsupportedFeatureError, match="Augmented assignment") as exc:
+            pl.parse_program(source)
+        assert exc.value.hint is not None
+        assert "matmul_acc" in exc.value.hint
+        assert "init_cond" in exc.value.hint
+        assert exc.value.span is not None
+
     def test_invalid_range_usage(self):
         """Test error when for loop doesn't use pl.range()."""
 
