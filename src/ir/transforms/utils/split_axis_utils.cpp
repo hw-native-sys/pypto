@@ -1127,13 +1127,38 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
           tuple_type && in_split_dim >= 0) {
         const auto probe_args = BuildHalvedCallArgs(call->args_, var_replacements);
         TypePtr deduced;
+        std::string refusal;
         try {
           deduced =
               OpRegistry::GetInstance().Create(op_name, probe_args, call->kwargs_, call->span_)->GetType();
-        } catch (const pypto::Error&) {
-          deduced = nullptr;  // The operator refuses the halved arguments outright.
+        } catch (const pypto::Error& err) {
+          refusal = err.what();  // The operator refuses the halved arguments outright.
         }
-        auto splits = deduced ? DiscoverTupleElementSplits(tuple_type, deduced) : std::nullopt;
+
+        // The two ways this fails are different diagnoses, so do not merge them.
+        //
+        // REFUSED: the operator threw. Either a constraint does not survive halving
+        // (tile.tquant_mx requires M % 16 == 0, which a per-lane M can break), or a
+        // workspace was sized from the FULL source -- after LowerCompositeOps decomposes
+        // it, tile.tquant_mx_raw requires its [1, groups] scratch to match a count
+        // derived from src, and that singleton dim 0 keeps the generic path from halving
+        // it. Repartitioning such a workspace is not implemented: its extent lives in the
+        // deducer, and its producing tile.create was already emitted at full width.
+        // Quote the operator rather than guessing which of the two it was.
+        CHECK_SPAN(deduced != nullptr, call->span_)
+            << "LowerAutoVectorSplit: '" << op_name
+            << "' returns a tuple of tiles and consumes an operand the split already partitioned, but it "
+               "REFUSES the halved arguments: "
+            << refusal
+            << "\nA workspace operand sized from the full source is the usual cause -- the split cannot "
+               "resize one, because its extent is derived inside the operator and its allocation was "
+               "already emitted at full width. Allocate the workspace at the per-lane size yourself, or "
+               "move the operation outside the automatically split region.";
+
+        // ACCEPTED but an element did not move: the operator produced a full-width output
+        // from an operand each lane owns half of, so its shape is right and its contents
+        // are wrong -- which type consistency alone cannot see.
+        auto splits = DiscoverTupleElementSplits(tuple_type, deduced);
         CHECK_SPAN(splits.has_value(), call->span_)
             << "LowerAutoVectorSplit: '" << op_name
             << "' returns a tuple of tiles and consumes an operand the split already partitioned, but its "

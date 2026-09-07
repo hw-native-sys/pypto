@@ -2002,6 +2002,44 @@ def test_arity_dependent_scratch_needs_no_declaration():
         _lower(FullWidthWorkspace)
 
 
+def test_tuple_result_op_refusing_the_halved_arguments_says_so():
+    """A refused halving is diagnosed as a refusal, not as a stationary element.
+
+    An operator can fail the tuple path two ways: it *refuses* the halved arguments,
+    or it *accepts* them and returns an element that did not move. Only the second is
+    "an element keeps its full extent", so one message cannot serve both.
+
+    ``tile.tquant_mx`` requires ``M % 16 == 0``. With ``M = 48`` the un-split call is
+    legal and the per-lane ``M = 24`` is not, so the operator throws. Quoting it is
+    what tells the author which constraint broke — the generic wording would send
+    them looking for a full-width operand that does not exist.
+    """
+
+    M, K = 48, 128  # M % 16 == 0 holds; the halved 24 does not
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            t: pl.Tensor[[M, K], pl.FP16],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_0: pl.Out[pl.Tensor[[M, K], pl.FP8E4M3FN]],
+        ) -> pl.Tensor[[M, K], pl.FP8E4M3FN]:
+            src = pl.tile.load(t, [0, 0], [M, K], target_memory=pl.Mem.Vec)
+            quant, _scale = pl.tile.quant_mx(src, group_axis=1)
+            seed = pl.tile.move(rhs, target_memory=pl.Mem.Mat)  # noqa: F841
+            out_store = pl.tile.store(quant, [0, 0], out_0)
+            return out_store
+
+    with pytest.raises(ValueError, match="REFUSES the halved arguments") as exc_info:
+        _lower(Before)
+    message = str(exc_info.value)
+    # The operator's own words, so the reader learns WHICH constraint broke ...
+    assert "requires M divisible by 16" in message
+    # ... and the explanation that does not apply is not offered.
+    assert "keeps its full extent" not in message
+
+
 def test_tuple_result_op_whose_elements_do_not_move_is_rejected():
     """An element that keeps its full extent is the unsafe case, not the harmless one.
 

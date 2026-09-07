@@ -181,10 +181,15 @@ TypePtr DeduceTileColExpandType(const std::vector<ExprPtr>& args,
   auto col_type = As<TileType>(args[1]->GetType());
   CHECK(col_type) << "The operator " << op_name << " requires second argument to be a TileType, but got "
                   << args[1]->GetType()->TypeName();
-  CHECK(!col_type->shape_.empty()) << "The operator " << op_name
-                                   << " requires second argument to have at least 1 dimension";
-  CHECK(!target_type->shape_.empty())
-      << "The operator " << op_name << " requires first argument to have at least 1 dimension";
+  // Both operands are 2D-or-higher, matching the row_expand family. A rank-1 operand
+  // has no row axis at all, so "the single row" below would be vacuous for it and a
+  // bare [cols] vector -- which is not the documented shape -- would slip through.
+  CHECK(col_type->shape_.size() >= 2)
+      << "The operator " << op_name << " requires second argument to have at least 2 dimensions, but got "
+      << col_type->shape_.size();
+  CHECK(target_type->shape_.size() >= 2)
+      << "The operator " << op_name << " requires first argument to have at least 2 dimensions, but got "
+      << target_type->shape_.size();
 
   // The vector operand is a per-column scalar row: dst[i, j] = target[i, j] OP col[0, j].
   // Enforce that [1, cols] contract here rather than leaving it to codegen. Two reasons:

@@ -1539,6 +1539,20 @@ class TestTileBroadcastOps:
         with pytest.raises(ValueError, match="last dimension to match the target"):
             tile.col_expand(target, narrow_col)
 
+    def test_col_expand_rejects_a_rank_one_vector(self):
+        """A bare ``[cols]`` is not the documented ``[1, cols]``.
+
+        Rank 1 has no row axis, so the "single row" check below is vacuous for it and
+        the operand would slip through on the last-dimension match alone. The
+        ``row_expand`` family already requires rank 2; this keeps the pair consistent.
+        """
+        span = ir.Span.unknown()
+        target = ir.Var("target", ir.TileType([32, 32], DataType.FP32), span)
+        rank1_col = ir.Var("col", ir.TileType([32], DataType.FP32), span)
+
+        with pytest.raises(ValueError, match="at least 2 dimensions"):
+            tile.col_expand(target, rank1_col)
+
     def test_col_expand_vector_must_be_a_single_row(self):
         """A full-height second operand is not a column vector, whatever its width."""
         span = ir.Span.unknown()

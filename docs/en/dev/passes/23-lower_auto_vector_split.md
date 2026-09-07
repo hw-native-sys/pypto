@@ -768,31 +768,36 @@ row split those two elements do **not** move along the same axis: `dst` halves o
 dim 0, while `cdst` — a single contiguous row of per-row counts — halves on dim 1.
 There is no single result axis to follow, so the generic path cannot express it.
 
-The mapping is **discovered, not declared**: re-deduce the call from the arguments
-the halved node will carry, and read which axis of each element moved. A new
-tuple-returning operator therefore needs no registration, and the mapping cannot go
-stale the way per-operator metadata did (gh#2612). Re-deduction supplies only the
-*axis*; `HalveTileShape` still halves, so odd extents localize per lane as usual.
+The mapping is **discovered, not declared**: re-deduce the call from the arguments the
+halved node will carry, and read which axis of each element moved. A new tuple-returning
+operator needs no registration, and the mapping cannot go stale the way per-operator
+metadata did (gh#2612). Re-deduction supplies only the *axis*; `HalveTileShape` still
+halves, so odd extents localize per lane as usual.
 
-Every element must halve on exactly one axis. An element that comes back
-**unchanged** is the dangerous case, not the harmless one — the operator produced a
-full-width output from an operand each lane owns only half of, so neither lane holds
-the whole answer while the shape still looks right. That is what correctly rejects a
-LEFT_RIGHT split of `tile.gather_compare`: both its outputs are sized from the
-source's *rows*, so halving the columns moves neither.
+Every element must halve on exactly one axis. An element that comes back **unchanged**
+is the dangerous case, not the harmless one — the operator produced a full-width output
+from an operand each lane owns only half of, so neither lane holds the whole answer while
+the shape still looks right. That is what correctly rejects a LEFT_RIGHT
+`tile.gather_compare`: both its outputs are sized from the source's *rows*.
 
-`split_axis::RetypeTupleProjection` retypes the `x = tup[i]` projections from the
-halved tuple and records each element's own axis, so a later `tile.store` offsets the
-right dimension. **Both** lowering arms call it — the AUTO arm's affinity gate only
-routes leaf *calls* into `ProcessStmts`, so a projection left to its pass-through
-fallback would keep a full-width declared type over a halved tuple.
+`split_axis::RetypeTupleProjection` retypes the `x = tup[i]` projections from the halved
+tuple and records each element's own axis, so a later `tile.store` offsets the right
+dimension. **Both** lowering arms call it — the AUTO arm's affinity gate only routes leaf
+*calls* into `ProcessStmts`, so a projection left to its pass-through fallback would keep
+a full-width declared type over a halved tuple.
 
-Condition 2 (the blind-operand backstop) is written against a single result axis and
-does not run here. "Every element must move" covers a *primary* per-lane operand left
-full width, but not a *secondary* one no element's shape depends on. No registered
-tuple-returning operator has one (their other tile operands are declared workspaces),
-and a new one surfaces in `test_lane_invariant_arg_coverage.py`'s blind inventory
-first, which forces the question to be answered.
+Two different failures end in a rejection, and the diagnostics keep them apart — one
+message cannot explain both:
+
+| The operator... | Cause | Diagnostic |
+| --------------- | ----- | ---------- |
+| **refuses** the halved arguments | a constraint does not survive halving (`tile.tquant_mx` needs `M % 16 == 0`); or a workspace sized from the full source — after `LowerCompositeOps` decomposes it, `tile.tquant_mx_raw` needs its `[1, groups]` scratch to match a count derived from `src`, and that singleton dim 0 keeps the generic path from halving it. Repartitioning one is **not implemented**: the extent lives in the deducer, and the allocation was already emitted at full width | quote the operator rather than guess which |
+| **accepts** them, but an element did not move | the wrong-contents case above | name the stationary element |
+
+Condition 2 (the blind-operand backstop) is written against a single result axis and does
+not run here. "Every element must move" covers a *primary* per-lane operand left full
+width, but not a *secondary* one no element's shape depends on; no registered
+tuple-returning operator has one, and a new one surfaces in the blind inventory first.
 
 A position that is scratch only in *some* arities cannot be declared:
 `tile.mrgsort_format2`'s `tmp_or_src2` is a third sorted input in a 3/4-way merge
