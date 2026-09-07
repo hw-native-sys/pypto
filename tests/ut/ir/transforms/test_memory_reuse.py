@@ -5913,7 +5913,7 @@ class TestForbidOutputAlias:
             )
 
     def test_ci_output_does_not_alias_compiler_scratch(self):
-        """With #2523 level3 ci scratch disabled, tile.ci stays 2-arg (no compiler tmp)."""
+        """InitMemRef must append tile.ci tmp on 910B; MemoryReuse forbids dst alias tmp."""
 
         @pl.program
         class Before:
@@ -5940,7 +5940,16 @@ class TestForbidOutputAlias:
                 super().visit_call(call)
 
         _CiCollector().visit_program(After)
-        assert len(ci_calls) == 1 and len(ci_calls[0].args) == 2
+        assert len(ci_calls) == 1 and len(ci_calls[0].args) == 3
+        tmp_type = ci_calls[0].args[2].type
+        assert isinstance(tmp_type, ir.TileType) and tmp_type.memref is not None
+
+        bases = _collect_tile_memref_bases(After)
+        assert "seq" in bases, f"Expected seq in After IR; got bases: {bases}"
+        tmp_base = tmp_type.memref.base_.name_hint
+        assert bases["seq"] != tmp_base, (
+            f"tile.ci output must not alias its tmp buffer, but both bind to {tmp_base}"
+        )
 
     def test_sel_output_does_not_alias_mask_or_tmp(self):
         """dst skips the mask/tmp buffers while remaining free to reuse a value operand."""
