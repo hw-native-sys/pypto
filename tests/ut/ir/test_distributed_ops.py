@@ -328,6 +328,21 @@ def test_tensor_allreduce_accepts_dynamic_shape():
     assert call.type is src.type
 
 
+def test_tensor_allreduce_ring_accepts_dynamic_shape():
+    """HOST ring allreduce type-deduces a dynamic-extent src (issue #2242).
+
+    The ring builtin partitions src into NR balanced, potentially ragged chunks
+    at runtime, so a dynamic extent needs no compile-time guard — mirror the
+    mesh analogue above, with the ring's rank-2 ``[2*(NR-1) + 1, NR]`` signal
+    (NR=4 -> ``[7, 4]``)."""
+    span = ir.Span.unknown()
+    n = ir.Var("n", ir.ScalarType(DataType.INT64), span)
+    src = ir.Var("src", ir.DistributedTensorType([n], DataType.FP32), span)
+    signal = _make_distributed_tensor_var("signal", [7, 4], DataType.INT32, span)
+    call = dist_tensor_ops.allreduce(src, signal, op=ir.ReduceOp.Sum, mode="ring", span=span)
+    assert call.type is src.type
+
+
 def test_tensor_allreduce_rejects_plain_tensor_src():
     span = ir.Span.unknown()
     src = ir.Var("src", ir.TensorType([ir.ConstInt(16, DataType.INT64, span)], DataType.FP32), span)

@@ -34,8 +34,6 @@ the 910B bf16 ``pto.tinsert`` FIXPIPE path (the f32 accumulator is downcast into
 scratch); the a5 f32 converting-``pto.tmov`` assemble is a separate lowering.
 """
 
-import dataclasses
-
 import pypto.language as pl
 import pytest
 import torch
@@ -47,6 +45,7 @@ from examples.advanced.auto_tile_matmul import (
     mat_full_k,
     mat_split_k,
 )
+from harness import st
 from pypto.pypto_core.passes import MemoryPlanner
 
 # AutoTileMatmulL0 predates memory_planner=PTOAS and was initially validated under
@@ -279,265 +278,436 @@ def matmul_bias_a2a3_int_direct(
     return out
 
 
-def _cfg(test_config, planner):
-    """Return the session config with the requested planner selected explicitly."""
-    return dataclasses.replace(test_config, memory_planner=planner)
+# ---------------------------------------------------------------------------
+# Cases
+# ---------------------------------------------------------------------------
+#
+# Each original test crossed its kernel with the planner matrix and re-seeded
+# per item, so every planner saw identical inputs; the builders below keep that
+# by seeding inside each builder. A planner that was skipped by a run-time
+# ``pytest.skip`` in the body is now a collection-time mark, so the case is not
+# pre-compiled either.
+#
+# Three kinds of comparison, all preserved:
+#   * ``rtol``/``atol``          — the elementwise default (DDR direct-store)
+#   * ``rtol=atol=0``            — the exact integer checks (``torch.equal``)
+#   * ``st.rel_err_under(x)``    — the Frobenius bound the bf16 matmul chains use,
+#                                  where near-zero cancellation elements make a
+#                                  per-element tolerance meaningless
+
+
+def _expand(build, planners=_PLANNERS):
+    """Expand *build(planner, planner_id)* over a planner matrix.
+
+    Each entry of the matrix is a ``pytest.param``; its id becomes part of the
+    case name and its marks (e.g. the PTOAS skip in
+    ``_N_BOUNDARY_RETILES_K_PLANNERS``) carry over to the case.
+    """
+    expanded = []
+    for entry in planners:
+        planner = entry.values[0]
+        case_obj = build(planner, entry.id)
+        expanded.append(pytest.param(case_obj, marks=entry.marks) if entry.marks else case_obj)
+    return expanded
+
+
+_PTOAS_ONLY_SKIPS = {
+    "mat_scratch_bias": "PTOAS planner path currently fails this Mat-scratch kernel on device",
+    "mn_boundaries": "PTOAS currently fails this partial M/N boundary kernel on device",
+}
+
+
+def _without_ptoas(planners, reason_key):
+    """The planner matrix with PTOAS marked skip rather than skipped in the body."""
+    kept = []
+    for entry in planners:
+        if entry.values[0] is MemoryPlanner.PTOAS:
+            kept.append(
+                pytest.param(
+                    entry.values[0],
+                    id=entry.id,
+                    marks=pytest.mark.skip(reason=_PTOAS_ONLY_SKIPS[reason_key]),
+                )
+            )
+        else:
+            kept.append(entry)
+    return kept
+
+
+def _bias_case(kernel, name, planner, pid, m, k, n, seed):
+    """``a @ b + bias`` with bf16 operands and an fp32 row bias."""
+    torch.manual_seed(seed)
+    a = torch.randn(m, k, dtype=torch.bfloat16)
+    b = torch.randn(k, n, dtype=torch.bfloat16)
+    bias = torch.randn((1, n), dtype=torch.float32)
+    out = torch.zeros((m, n), dtype=torch.float32)
+    return st.case(
+        kernel,
+        a,
+        b,
+        bias,
+        out,
+        name=f"{name}_{pid}",
+        memory_planner=planner,
+        golden=lambda _: a.float() @ b.float() + bias,
+        compare=st.rel_err_under(2e-2),
+    )
+
+
+def _int_acc_case(kernel, name, planner, pid, m, k, n, seed):
+    """INT8 x INT8 -> INT32 split-K. Integer accumulation is exact, so rtol=atol=0."""
+    torch.manual_seed(seed)
+    a = torch.randint(-3, 4, (m, k), dtype=torch.int8)
+    b = torch.randint(-3, 4, (k, n), dtype=torch.int8)
+    out = torch.zeros((m, n), dtype=torch.int32)
+    return st.case(
+        kernel,
+        a,
+        b,
+        out,
+        name=f"{name}_{pid}",
+        memory_planner=planner,
+        golden=lambda _: a.int() @ b.int(),
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
+def _chained_case(kernel, name, planner, pid, m, k, n, out_n, limit):
+    """``(a @ b) @ e`` with a bf16 on-chip intermediate (FIXPIPE downcast)."""
+    torch.manual_seed(0)
+    a = torch.randn(m, k, dtype=torch.bfloat16)
+    b = torch.randn(k, n, dtype=torch.bfloat16)
+    e = torch.randn(n, out_n, dtype=torch.bfloat16)
+    out = torch.zeros((m, out_n), dtype=torch.float32)
+
+    def golden(_):
+        c_bf16 = (a.float() @ b.float()).to(torch.bfloat16).float()  # FIXPIPE downcast
+        return c_bf16 @ e.float()
+
+    return st.case(
+        kernel,
+        a,
+        b,
+        e,
+        out,
+        name=f"{name}_{pid}",
+        memory_planner=planner,
+        golden=golden,
+        compare=st.rel_err_under(limit),
+    )
+
+
+def _ddr_case(kernel, planner, pid, k):
+    """``a @ b`` -> ``[256, 256]`` fp32 stored straight to DDR."""
+    torch.manual_seed(0)
+    a = torch.randn(256, k, dtype=torch.float32)
+    b = torch.randn(k, 256, dtype=torch.float32)
+    out = torch.zeros((256, 256), dtype=torch.float32)
+    return st.case(
+        kernel,
+        a,
+        b,
+        out,
+        name=f"{kernel.__name__}_ddr_{pid}",
+        memory_planner=planner,
+        golden=lambda _: a @ b,
+        rtol=1e-3,
+        atol=1e-3,
+    )
+
+
+def _int_bias_case(planner, pid):
+    """A2/A3 applies INT32 bias once across an INT8 M/N+K tiled GEMM. Exact."""
+    torch.manual_seed(10)
+    a = torch.randint(-3, 4, (_BIAS_INT_M, _BIAS_INT_K), dtype=torch.int8)
+    b = torch.randint(-3, 4, (_BIAS_INT_K, _BIAS_INT_N), dtype=torch.int8)
+    bias = torch.randint(-20, 21, (1, _BIAS_INT_N), dtype=torch.int32)
+    out = torch.zeros((_BIAS_INT_M, _BIAS_INT_N), dtype=torch.int32)
+    return st.case(
+        matmul_bias_a2a3_int_direct,
+        a,
+        b,
+        bias,
+        out,
+        name=f"matmul_bias_a2a3_int_direct_{pid}",
+        memory_planner=planner,
+        golden=lambda _: a.int() @ b.int() + bias,
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
+def _bias_scratch_case(planner, pid):
+    """A biased producer tiled into Mat scratch for its sole matmul consumer."""
+    torch.manual_seed(12)
+    a = torch.randn(_BIAS_SCRATCH_M, _BIAS_SCRATCH_K, dtype=torch.bfloat16)
+    b = torch.randn(_BIAS_SCRATCH_K, _BIAS_SCRATCH_N, dtype=torch.bfloat16)
+    bias = torch.randn((1, _BIAS_SCRATCH_N), dtype=torch.float32)
+    e = torch.randn(_BIAS_SCRATCH_N, _BIAS_SCRATCH_OUT_N, dtype=torch.bfloat16)
+    out = torch.zeros((_BIAS_SCRATCH_M, _BIAS_SCRATCH_OUT_N), dtype=torch.float32)
+
+    def golden(_):
+        intermediate = (a.float() @ b.float() + bias).to(torch.bfloat16).float()
+        return intermediate @ e.float()
+
+    return st.case(
+        matmul_bias_mn_k_scratch,
+        a,
+        b,
+        bias,
+        e,
+        out,
+        name=f"matmul_bias_mn_k_scratch_{pid}",
+        memory_planner=planner,
+        golden=golden,
+        compare=st.rel_err_under(2e-2),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tests — one per original test function, so the platform markers stay attached
+# to exactly the cases they governed.
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.platforms("a2a3", "a2a3sim")
-class TestAutoTileMatmulL0:
-    """End-to-end device checks for the placement x K-strategy x planner matrix."""
+@st.cases(
+    *_expand(lambda planner, pid: _ddr_case(ddr_split_k, planner, pid, 128)),
+    *_expand(lambda planner, pid: _ddr_case(ddr_full_k, planner, pid, 32)),
+)
+def test_ddr_direct_store(case_run):
+    """``a @ b`` -> ``[256, 256]`` stored to DDR (direct-store); split-K (K=128) and
+    full-K (K=32).  Run under all three planners: the oversized grid reuses the L0C
+    accumulator across output tiles, but the Acc->GM ``tile.store`` drain WAR is synced
+    correctly by ptoas, so oversized direct-store works under PTOAS too."""
+    case_run.assert_passed()
 
-    @pytest.mark.parametrize("planner", _PLANNERS)
-    @pytest.mark.parametrize("kernel, K", [(ddr_split_k, 128), (ddr_full_k, 32)])
-    def test_ddr_direct_store(self, test_config, kernel, K, planner):
-        """``a @ b`` -> ``[256, 256]`` stored to DDR (direct-store); split-K (K=128) and
-        full-K (K=32).  Run under all three planners: the oversized grid reuses the L0C
-        accumulator across output tiles, but the Acc->GM ``tile.store`` drain WAR is synced
-        correctly by ptoas, so oversized direct-store works under PTOAS too."""
-        kernel._cache.clear()
-        torch.manual_seed(0)
-        a = torch.randn(256, K, dtype=torch.float32)
-        b = torch.randn(K, 256, dtype=torch.float32)
-        out = torch.zeros((256, 256), dtype=torch.float32)
 
-        kernel(a, b, out, config=_cfg(test_config, planner))
+@pytest.mark.platforms("a2a3", "a2a3sim")
+@st.cases(*_expand(_int_bias_case))
+def test_matmul_bias_a2a3_int_direct_store(case_run):
+    """A2/A3 applies INT32 bias once across an INT8 M/N+K tiled GEMM."""
+    case_run.assert_passed()
 
-        expected = a @ b
-        assert torch.allclose(out, expected, rtol=1e-3, atol=1e-3), (
-            f"{kernel.__name__} (DDR direct-store) max abs diff = {(out - expected).abs().max().item():.3e}"
+
+@pytest.mark.platforms("a2a3", "a2a3sim", "a5", "a5sim")
+@st.cases(
+    *_expand(
+        lambda planner, pid: _bias_case(
+            matmul_bias_mn_k_direct, "matmul_bias_mn_k_direct", planner, pid, _BIAS_M, _BIAS_K, _BIAS_N, 11
         )
+    )
+)
+def test_matmul_bias_mn_k_direct_store(case_run):
+    """Bias is applied once while M/N sub-tiles complete a split-K reduction."""
+    case_run.assert_passed()
 
-    @pytest.mark.parametrize("planner", _PLANNERS)
-    def test_matmul_bias_a2a3_int_direct_store(self, test_config, planner):
-        """A2/A3 applies INT32 bias once across an INT8 M/N+K tiled GEMM."""
-        matmul_bias_a2a3_int_direct._cache.clear()
-        torch.manual_seed(10)
-        a = torch.randint(-3, 4, (_BIAS_INT_M, _BIAS_INT_K), dtype=torch.int8)
-        b = torch.randint(-3, 4, (_BIAS_INT_K, _BIAS_INT_N), dtype=torch.int8)
-        bias = torch.randint(-20, 21, (1, _BIAS_INT_N), dtype=torch.int32)
-        out = torch.zeros((_BIAS_INT_M, _BIAS_INT_N), dtype=torch.int32)
 
-        matmul_bias_a2a3_int_direct(a, b, bias, out, config=_cfg(test_config, planner))
+@pytest.mark.platforms("a2a3", "a2a3sim", "a5", "a5sim")
+@st.cases(*_expand(_bias_scratch_case, _without_ptoas(_PLANNERS, "mat_scratch_bias")))
+def test_matmul_bias_mn_k_mat_scratch(case_run):
+    """A biased producer is tiled into Mat scratch for its sole matmul consumer."""
+    case_run.assert_passed()
 
-        assert torch.equal(out, a.int() @ b.int() + bias)
 
-    @pytest.mark.platforms("a2a3", "a2a3sim", "a5", "a5sim")
-    @pytest.mark.parametrize("planner", _PLANNERS)
-    def test_matmul_bias_mn_k_direct_store(self, test_config, planner):
-        """Bias is applied once while M/N sub-tiles complete a split-K reduction."""
-        matmul_bias_mn_k_direct._cache.clear()
-        torch.manual_seed(11)
-        a = torch.randn(_BIAS_M, _BIAS_K, dtype=torch.bfloat16)
-        b = torch.randn(_BIAS_K, _BIAS_N, dtype=torch.bfloat16)
-        bias = torch.randn((1, _BIAS_N), dtype=torch.float32)
-        out = torch.zeros((_BIAS_M, _BIAS_N), dtype=torch.float32)
+@pytest.mark.platforms("a2a3", "a2a3sim", "a5", "a5sim")
+@st.cases(
+    *_expand(
+        lambda planner, pid: _bias_case(
+            matmul_bias_mn_boundary_direct,
+            "matmul_bias_mn_boundary_direct",
+            planner,
+            pid,
+            _BIAS_BOUNDARY_M,
+            _BIAS_BOUNDARY_K,
+            _BIAS_BOUNDARY_N,
+            13,
+        ),
+        _without_ptoas(_PLANNERS, "mn_boundaries"),
+    )
+)
+def test_matmul_bias_mn_boundaries(case_run):
+    """Partial M/N tiles preserve the logical Bias and output regions."""
+    case_run.assert_passed()
 
-        matmul_bias_mn_k_direct(a, b, bias, out, config=_cfg(test_config, planner))
 
-        expected = a.float() @ b.float() + bias
-        rel_err = ((out - expected).norm() / expected.norm()).item()
-        assert rel_err < 2e-2, f"direct matmul_bias rel_err {rel_err:.3e} exceeds 2e-2"
-
-    @pytest.mark.platforms("a2a3", "a2a3sim", "a5", "a5sim")
-    @pytest.mark.parametrize("planner", _PLANNERS)
-    def test_matmul_bias_mn_k_mat_scratch(self, test_config, planner):
-        """A biased producer is tiled into Mat scratch for its sole matmul consumer."""
-        if planner == MemoryPlanner.PTOAS:
-            pytest.skip("PTOAS planner path currently fails this Mat-scratch kernel on device")
-        matmul_bias_mn_k_scratch._cache.clear()
-        torch.manual_seed(12)
-        a = torch.randn(_BIAS_SCRATCH_M, _BIAS_SCRATCH_K, dtype=torch.bfloat16)
-        b = torch.randn(_BIAS_SCRATCH_K, _BIAS_SCRATCH_N, dtype=torch.bfloat16)
-        bias = torch.randn((1, _BIAS_SCRATCH_N), dtype=torch.float32)
-        e = torch.randn(_BIAS_SCRATCH_N, _BIAS_SCRATCH_OUT_N, dtype=torch.bfloat16)
-        out = torch.zeros((_BIAS_SCRATCH_M, _BIAS_SCRATCH_OUT_N), dtype=torch.float32)
-
-        matmul_bias_mn_k_scratch(a, b, bias, e, out, config=_cfg(test_config, planner))
-
-        intermediate = (a.float() @ b.float() + bias).to(torch.bfloat16).float()
-        expected = intermediate @ e.float()
-        rel_err = ((out - expected).norm() / expected.norm()).item()
-        assert rel_err < 2e-2, f"Mat-scratch matmul_bias rel_err {rel_err:.3e} exceeds 2e-2"
-
-    @pytest.mark.platforms("a2a3", "a2a3sim", "a5", "a5sim")
-    @pytest.mark.parametrize("planner", _PLANNERS)
-    def test_matmul_bias_mn_boundaries(self, test_config, planner):
-        """Partial M/N tiles preserve the logical Bias and output regions."""
-        if planner == MemoryPlanner.PTOAS:
-            pytest.skip("PTOAS currently fails this partial M/N boundary kernel on device")
-        matmul_bias_mn_boundary_direct._cache.clear()
-        torch.manual_seed(13)
-        a = torch.randn(_BIAS_BOUNDARY_M, _BIAS_BOUNDARY_K, dtype=torch.bfloat16)
-        b = torch.randn(_BIAS_BOUNDARY_K, _BIAS_BOUNDARY_N, dtype=torch.bfloat16)
-        bias = torch.randn((1, _BIAS_BOUNDARY_N), dtype=torch.float32)
-        out = torch.zeros((_BIAS_BOUNDARY_M, _BIAS_BOUNDARY_N), dtype=torch.float32)
-
-        matmul_bias_mn_boundary_direct(a, b, bias, out, config=_cfg(test_config, planner))
-
-        expected = a.float() @ b.float() + bias
-        rel_err = ((out - expected).norm() / expected.norm()).item()
-        assert rel_err < 2e-2, f"boundary matmul_bias rel_err {rel_err:.3e} exceeds 2e-2"
-
-    @pytest.mark.platforms("a2a3", "a2a3sim", "a5", "a5sim")
-    @pytest.mark.parametrize("planner", _PLANNERS)
-    def test_matmul_bias_nondivisor_k_tail(self, test_config, planner):
-        """The peeled final K block accumulates without applying bias twice."""
-        matmul_bias_nondivisor_k_tail._cache.clear()
-        torch.manual_seed(14)
-        a = torch.randn(_BIAS_PEEL_M, _BIAS_PEEL_K, dtype=torch.bfloat16)
-        b = torch.randn(_BIAS_PEEL_K, _BIAS_PEEL_N, dtype=torch.bfloat16)
-        bias = torch.randn((1, _BIAS_PEEL_N), dtype=torch.float32)
-        out = torch.zeros((_BIAS_PEEL_M, _BIAS_PEEL_N), dtype=torch.float32)
-
-        matmul_bias_nondivisor_k_tail(a, b, bias, out, config=_cfg(test_config, planner))
-
-        expected = a.float() @ b.float() + bias
-        rel_err = ((out - expected).norm() / expected.norm()).item()
-        assert rel_err < 2e-2, f"peeled-K matmul_bias rel_err {rel_err:.3e} exceeds 2e-2"
-
-    @pytest.mark.platforms("a2a3", "a2a3sim", "a5", "a5sim")
-    @pytest.mark.parametrize("planner", _PLANNERS)
-    def test_matmul_bias_m_only_bias_resident(self, test_config, planner):
-        """M-only tiling reuses a full Bias-resident source without subwindowing."""
-        matmul_bias_m_only_bias_resident._cache.clear()
-        torch.manual_seed(15)
-        a = torch.randn(_BIAS_M_ONLY_M, _BIAS_M_ONLY_K, dtype=torch.bfloat16)
-        b = torch.randn(_BIAS_M_ONLY_K, _BIAS_M_ONLY_N, dtype=torch.bfloat16)
-        bias = torch.randn((1, _BIAS_M_ONLY_N), dtype=torch.float32)
-        out = torch.zeros((_BIAS_M_ONLY_M, _BIAS_M_ONLY_N), dtype=torch.float32)
-
-        matmul_bias_m_only_bias_resident(a, b, bias, out, config=_cfg(test_config, planner))
-
-        expected = a.float() @ b.float() + bias
-        rel_err = ((out - expected).norm() / expected.norm()).item()
-        assert rel_err < 2e-2, f"M-only matmul_bias rel_err {rel_err:.3e} exceeds 2e-2"
-
-    @pytest.mark.parametrize("planner", _PLANNERS)
-    def test_loop_carried_matmul_acc_mn_tiling(self, test_config, planner):
-        """Issue #2232: each output tile must finish all eight source K blocks.
-
-        The logical ``[16, 1152]`` INT32 result is only 72 KiB, but its physical
-        32-row L0C footprint is 144 KiB. Run both planners and compare exactly:
-        integer accumulation has no numerical tolerance.
-        """
-        matmul_acc_mn_issue_2232._cache.clear()
-        torch.manual_seed(0)
-        a = torch.randint(-3, 4, (_ACC_M, _ACC_K), dtype=torch.int8)
-        b = torch.randint(-3, 4, (_ACC_K, _ACC_N_TOTAL), dtype=torch.int8)
-        out = torch.zeros((_ACC_M, _ACC_N_TOTAL), dtype=torch.int32)
-
-        matmul_acc_mn_issue_2232(a, b, out, config=_cfg(test_config, planner))
-
-        expected = a.int() @ b.int()
-        assert torch.equal(out, expected), (
-            f"matmul_acc M/N tiling mismatch: max abs diff = {(out - expected).abs().max().item()}"
+@pytest.mark.platforms("a2a3", "a2a3sim", "a5", "a5sim")
+@st.cases(
+    *_expand(
+        lambda planner, pid: _bias_case(
+            matmul_bias_nondivisor_k_tail,
+            "matmul_bias_nondivisor_k_tail",
+            planner,
+            pid,
+            _BIAS_PEEL_M,
+            _BIAS_PEEL_K,
+            _BIAS_PEEL_N,
+            14,
         )
+    )
+)
+def test_matmul_bias_nondivisor_k_tail(case_run):
+    """The peeled final K block accumulates without applying bias twice."""
+    case_run.assert_passed()
 
-    @pytest.mark.parametrize("planner", _PLANNERS)
-    def test_loop_carried_matmul_acc_both_mn_boundaries(self, test_config, planner):
-        """General #2232 rewrite: exact INT8→INT32 split-K with partial tiles
-        on both output axes, under both memory planners."""
-        matmul_acc_mn_boundaries._cache.clear()
-        torch.manual_seed(1)
-        a = torch.randint(-3, 4, (_BOUNDARY_M, _BOUNDARY_K), dtype=torch.int8)
-        b = torch.randint(-3, 4, (_BOUNDARY_K, _BOUNDARY_N), dtype=torch.int8)
-        out = torch.zeros((_BOUNDARY_M, _BOUNDARY_N), dtype=torch.int32)
 
-        matmul_acc_mn_boundaries(a, b, out, config=_cfg(test_config, planner))
-
-        expected = a.int() @ b.int()
-        assert torch.equal(out, expected), (
-            f"matmul_acc both-boundary tiling mismatch: max abs diff = {(out - expected).abs().max().item()}"
+@pytest.mark.platforms("a2a3", "a2a3sim", "a5", "a5sim")
+@st.cases(
+    *_expand(
+        lambda planner, pid: _bias_case(
+            matmul_bias_m_only_bias_resident,
+            "matmul_bias_m_only_bias_resident",
+            planner,
+            pid,
+            _BIAS_M_ONLY_M,
+            _BIAS_M_ONLY_K,
+            _BIAS_M_ONLY_N,
+            15,
         )
+    )
+)
+def test_matmul_bias_m_only_bias_resident(case_run):
+    """M-only tiling reuses a full Bias-resident source without subwindowing."""
+    case_run.assert_passed()
 
-    @pytest.mark.parametrize("planner", _N_BOUNDARY_RETILES_K_PLANNERS)
-    def test_loop_carried_matmul_acc_n_boundary_retiles_k(self, test_config, planner):
-        """A padded N tail remains valid through secondary inner-K tiling."""
-        matmul_acc_n_boundary_retiles_k._cache.clear()
-        torch.manual_seed(2)
-        a = torch.randint(-3, 4, (_BOUNDARY_M, _COMPOSE_K), dtype=torch.int8)
-        b = torch.randint(-3, 4, (_COMPOSE_K, _BOUNDARY_N), dtype=torch.int8)
-        out = torch.zeros((_BOUNDARY_M, _BOUNDARY_N), dtype=torch.int32)
 
-        matmul_acc_n_boundary_retiles_k(a, b, out, config=_cfg(test_config, planner))
-
-        expected = a.int() @ b.int()
-        assert torch.equal(out, expected), (
-            f"matmul_acc padded-N + K-tiling mismatch: max abs diff = {(out - expected).abs().max().item()}"
+@pytest.mark.platforms("a2a3", "a2a3sim")
+@st.cases(
+    *_expand(
+        lambda planner, pid: _int_acc_case(
+            matmul_acc_mn_issue_2232,
+            "matmul_acc_mn_issue_2232",
+            planner,
+            pid,
+            _ACC_M,
+            _ACC_K,
+            _ACC_N_TOTAL,
+            0,
         )
+    )
+)
+def test_loop_carried_matmul_acc_mn_tiling(case_run):
+    """Issue #2232: each output tile must finish all eight source K blocks.
 
-    @pytest.mark.parametrize("planner", _PLANNERS)
-    @pytest.mark.parametrize("kernel, K", [(mat_split_k, 192), (mat_full_k, 32)])
-    def test_mat_scratch(self, test_config, kernel, K, planner):
-        """``(a @ b) @ e`` with a bf16 ``[256, 256]`` intermediate kept on-chip in an
-        L1/Mat scratch (Acc->Mat ``pto.tinsert``); split-K K=192 and full-K K=32.
+    The logical ``[16, 1152]`` INT32 result is only 72 KiB, but its physical
+    32-row L0C footprint is 144 KiB. Run all planners and compare exactly:
+    integer accumulation has no numerical tolerance."""
+    case_run.assert_passed()
 
-        Run under all three planners.  The PTOAS variants provide regression coverage
-        for #1995: the chained consumer's K-reduction accumulator if-phi must reuse
-        the dominating accumulator handle so all partial sums land in one L0C buffer.
 
-        K=192 is the common cross-planner split point: all planners choose an
-        output-stationary producer with k=64, so its L0 buffers pack against the
-        consumer's. K=128 is planner-dependent (PyPTO splits while PTOAS can keep full K)
-        and can select a monolithic A/B-stationary buffer that the legacy PYPTO
-        allocator cannot pack against the consumer's pipelined buffers. This case
-        remains output-stationary under every planner: PYPTO enforces the issue-1908
-        guard, while DSA_RP/PTOAS reach the same chooser result without the guard.
-
-        Operands are bf16 and the on-chip intermediate is bf16 — the cube's FIXPIPE
-        writeback to L1 downcasts the f32 accumulator, which is also the cube's native
-        operand precision. The golden models that downcast; compare by global relative
-        norm because cancellation-near-zero elements make per-element ``allclose``
-        unstable for this chained reduction."""
-        kernel._cache.clear()
-        torch.manual_seed(0)
-        a = torch.randn(256, K, dtype=torch.bfloat16)
-        b = torch.randn(K, 256, dtype=torch.bfloat16)
-        e = torch.randn(256, 64, dtype=torch.bfloat16)
-        out = torch.zeros((256, 64), dtype=torch.float32)
-
-        kernel(a, b, e, out, config=_cfg(test_config, planner))
-
-        c_bf16 = (a.float() @ b.float()).to(torch.bfloat16).float()  # FIXPIPE downcast
-        expected = c_bf16 @ e.float()
-        rel_err = ((out - expected).norm() / expected.norm()).item()
-        assert rel_err < 2e-2, (
-            f"{kernel.__name__} (Mat-scratch) Frobenius rel_err = {rel_err:.3e} exceeds 2e-2"
+@pytest.mark.platforms("a2a3", "a2a3sim")
+@st.cases(
+    *_expand(
+        lambda planner, pid: _int_acc_case(
+            matmul_acc_mn_boundaries,
+            "matmul_acc_mn_boundaries",
+            planner,
+            pid,
+            _BOUNDARY_M,
+            _BOUNDARY_K,
+            _BOUNDARY_N,
+            1,
         )
+    )
+)
+def test_loop_carried_matmul_acc_both_mn_boundaries(case_run):
+    """General #2232 rewrite: exact INT8->INT32 split-K with partial tiles on both
+    output axes, under every memory planner."""
+    case_run.assert_passed()
 
-    @pytest.mark.parametrize("planner", _PLANNERS)
-    @pytest.mark.parametrize("kernel, K", [(fits_l0c_full_k, 64), (fits_l0c_split_k, 512)])
-    def test_fits_l0c_cast_fold(self, test_config, kernel, K, planner):
-        """``(a @ b) @ e`` with a ``[128, 128]`` intermediate that *fits* L0c (no M/N
-        tiling): the autotiler folds ``pl.cast`` into a single full-window Acc->Mat
-        ``pto.tinsert`` (cube downcast) rather than a Vector ``pto.tcvt``. full-K (K=64,
-        no K-loop) and split-K (K=512, K-loop). Same bf16 FIXPIPE golden as Mat-scratch.
 
-        Run under all three planners: because the intermediate fits L0c there is exactly ONE
-        Acc->Mat assemble (no cross-tile L0C reuse and no drain/MAD WAR fence).
+@pytest.mark.platforms("a2a3", "a2a3sim")
+@st.cases(
+    *_expand(
+        lambda planner, pid: _int_acc_case(
+            matmul_acc_n_boundary_retiles_k,
+            "matmul_acc_n_boundary_retiles_k",
+            planner,
+            pid,
+            _BOUNDARY_M,
+            _COMPOSE_K,
+            _BOUNDARY_N,
+            2,
+        ),
+        _N_BOUNDARY_RETILES_K_PLANNERS,
+    )
+)
+def test_loop_carried_matmul_acc_n_boundary_retiles_k(case_run):
+    """A padded N tail remains valid through secondary inner-K tiling."""
+    case_run.assert_passed()
 
-        On-device proof that the fold is numerically correct (the FIXPIPE bf16 rounding
-        matches the reference) AND that it compiles — the un-folded Vector cast overflows
-        the Vec buffer at this ``[128, 128]`` shape."""
-        kernel._cache.clear()
-        torch.manual_seed(0)
-        a = torch.randn(128, K, dtype=torch.bfloat16)
-        b = torch.randn(K, 128, dtype=torch.bfloat16)
-        e = torch.randn(128, 64, dtype=torch.bfloat16)
-        out = torch.zeros((128, 64), dtype=torch.float32)
 
-        kernel(a, b, e, out, config=_cfg(test_config, planner))
-
-        c_bf16 = (a.float() @ b.float()).to(torch.bfloat16).float()  # FIXPIPE downcast
-        expected = c_bf16 @ e.float()
-        # Frobenius relative error, not allclose: a bf16 ``(a @ b) @ e`` chain has
-        # near-zero cancellation elements where the absolute bf16 rounding error (~0.7 on
-        # operand magnitudes of ~500) dwarfs the small true value, so a per-element atol
-        # fails on a numerically-correct result. The global relative norm is the robust
-        # metric (the unit tests use the same). K=512 makes the intermediate magnitudes
-        # large enough to bite; K=64 happens to pass allclose, but both use one metric.
-        rel_err = ((out - expected).norm() / expected.norm()).item()
-        assert rel_err < 5e-2, (
-            f"{kernel.__name__} (fits-L0c cast-fold) Frobenius rel_err = {rel_err:.3e} exceeds 5e-2"
+@pytest.mark.platforms("a2a3", "a2a3sim")
+@st.cases(
+    *_expand(
+        lambda planner, pid: _chained_case(
+            mat_split_k, "mat_split_k_scratch", planner, pid, 256, 192, 256, 64, 2e-2
         )
+    ),
+    *_expand(
+        lambda planner, pid: _chained_case(
+            mat_full_k, "mat_full_k_scratch", planner, pid, 256, 32, 256, 64, 2e-2
+        )
+    ),
+)
+def test_mat_scratch(case_run):
+    """``(a @ b) @ e`` with a bf16 ``[256, 256]`` intermediate kept on-chip in an
+    L1/Mat scratch (Acc->Mat ``pto.tinsert``); split-K K=192 and full-K K=32.
+
+    Run under all three planners.  The PTOAS variants provide regression coverage
+    for #1995: the chained consumer's K-reduction accumulator if-phi must reuse
+    the dominating accumulator handle so all partial sums land in one L0C buffer.
+
+    K=192 is the common cross-planner split point: all planners choose an
+    output-stationary producer with k=64, so its L0 buffers pack against the
+    consumer's. K=128 is planner-dependent (PyPTO splits while PTOAS can keep full K)
+    and can select a monolithic A/B-stationary buffer that the legacy PYPTO
+    allocator cannot pack against the consumer's pipelined buffers. This case
+    remains output-stationary under every planner: PYPTO enforces the issue-1908
+    guard, while DSA_RP/PTOAS reach the same chooser result without the guard.
+
+    Operands are bf16 and the on-chip intermediate is bf16 — the cube's FIXPIPE
+    writeback to L1 downcasts the f32 accumulator, which is also the cube's native
+    operand precision. The golden models that downcast; the comparison is a global
+    relative norm because cancellation-near-zero elements make per-element
+    ``allclose`` unstable for this chained reduction."""
+    case_run.assert_passed()
+
+
+@pytest.mark.platforms("a2a3", "a2a3sim")
+@st.cases(
+    *_expand(
+        lambda planner, pid: _chained_case(
+            fits_l0c_full_k, "fits_l0c_full_k", planner, pid, 128, 64, 128, 64, 5e-2
+        )
+    ),
+    *_expand(
+        lambda planner, pid: _chained_case(
+            fits_l0c_split_k, "fits_l0c_split_k", planner, pid, 128, 512, 128, 64, 5e-2
+        )
+    ),
+)
+def test_fits_l0c_cast_fold(case_run):
+    """``(a @ b) @ e`` with a ``[128, 128]`` intermediate that *fits* L0c (no M/N
+    tiling): the autotiler folds ``pl.cast`` into a single full-window Acc->Mat
+    ``pto.tinsert`` (cube downcast) rather than a Vector ``pto.tcvt``. full-K (K=64,
+    no K-loop) and split-K (K=512, K-loop). Same bf16 FIXPIPE golden as Mat-scratch.
+
+    Run under all three planners: because the intermediate fits L0c there is exactly ONE
+    Acc->Mat assemble (no cross-tile L0C reuse and no drain/MAD WAR fence).
+
+    On-device proof that the fold is numerically correct (the FIXPIPE bf16 rounding
+    matches the reference) AND that it compiles — the un-folded Vector cast overflows
+    the Vec buffer at this ``[128, 128]`` shape.
+
+    The bound is looser (5e-2) than Mat-scratch: a bf16 ``(a @ b) @ e`` chain has
+    near-zero cancellation elements where the absolute bf16 rounding error (~0.7 on
+    operand magnitudes of ~500) dwarfs the small true value, so a per-element atol
+    fails on a numerically-correct result. K=512 makes the intermediate magnitudes
+    large enough to bite; K=64 happens to pass allclose, but both use one metric."""
+    case_run.assert_passed()
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

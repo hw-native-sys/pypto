@@ -147,13 +147,12 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
     enable_pypto_l0c_double_buffer: bool = False,
     tensor_layouts: dict[str, "TensorLayout | None"] | None = None,
     dep_layouts: tuple[tuple[str, str, str], ...] = (),
-    closure_constants: tuple[tuple[str, str, str], ...] = (),
     runtime: RuntimeKind = RuntimeKind.TENSORMAP_AND_RINGBUFFER,
 ) -> CacheKey:
     """Build a cache key for a JIT call site.
 
     Args:
-        source_hash: Hash of function source code (and all dep sources).
+        source_hash: Hash of captured source dependencies, including folded constants.
         param_names: Ordered list of all parameter names (preserves arg order).
         tensor_shapes: Concrete shape per tensor parameter name.
         tensor_dtypes: DataType per tensor parameter name.
@@ -165,14 +164,6 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
             ``tensor_layouts``, one call deeper: they shape the generated dep
             signatures but appear in no entry-parameter meta, and a postponed
             annotation hides a rebind from ``source_hash``.
-        closure_constants: ``(function name, free variable, repr of value)``
-            triples for the closure constants folded into the generated source.
-            Same reasoning again: the folder inlines them as literals, so they
-            change the artifact, but they live in ``__closure__`` rather than in
-            the function text — rebinding a cell (``nonlocal rows = 96``) leaves
-            ``source_hash`` identical and would otherwise hand the next call the
-            previous value's artifact. ``repr`` keeps the component hashable and
-            keeps ``1``, ``1.0``, and ``True`` distinct.
         dynamic_dims: Set of (param_name, dim_index) pairs that are dynamic.
             Dynamic dims are stored as None in the cache key so different
             concrete values for that dimension produce the same cache entry.
@@ -256,7 +247,6 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
         ("memory_planner", None if memory_planner is None else str(memory_planner)),
         ("enable_pypto_l0c_double_buffer", effective_pypto_dbc),
         ("dep_layouts", dep_layouts),
-        ("closure_constants", closure_constants),
         ("runtime", runtime_kind_to_name(runtime)),
     )
     return (

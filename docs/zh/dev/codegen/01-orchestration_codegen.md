@@ -4,9 +4,9 @@
 
 编排代码生成遵循与 [PTO 代码生成](00-pto_codegen.md#设计原则严格的-1-to-1-映射)相同的原则：从 IR 到生成 C++ 代码的**严格 1-to-1 转换**。代码生成不应执行优化、分析或间接转换——此类工作属于前置 Pass。
 
-例如，返回值到参数的追踪（将被调用者返回值映射回 `Out` 参数）是分析工作，应由代码生成之前的 Pass 解决。[`NormalizeReturnOrder`](../passes/26-normalize_return_order.md) pass 现在会在代码生成之前完成此规范化，使编排代码生成可以直接将 `return[i]` 映射到 `out_indices[i]`，无需追踪 `tile.store`/yield 链。
+例如，返回值到参数的追踪（将被调用者返回值映射回 `Out` 参数）是分析工作，应由代码生成之前的 Pass 解决。[`NormalizeReturnOrder`](../passes/28-normalize_return_order.md) pass 现在会在代码生成之前完成此规范化，使编排代码生成可以直接将 `return[i]` 映射到 `out_indices[i]`，无需追踪 `tile.store`/yield 链。
 
-同样，判断一个 `ForStmt` iter_arg 是否需要物化 carry 变量，过去要在循环体上跑别名等价不动点。[`ClassifyIterArgCarry`](../passes/47-classify_iter_arg_carry.md) pass 现在把该判定（以及 TaskId fence 数组的 extent）打在 `ForStmt::attrs_` 上，codegen 直接读 `iter_arg_rebind_<i>` / `iter_arg_array_size_<i>`，不再自行推导。
+同样，判断一个 `ForStmt` iter_arg 是否需要物化 carry 变量，过去要在循环体上跑别名等价不动点。[`ClassifyIterArgCarry`](../passes/49-classify_iter_arg_carry.md) pass 现在把该判定（以及 TaskId fence 数组的 extent）打在 `ForStmt::attrs_` 上，codegen 直接读 `iter_arg_rebind_<i>` / `iter_arg_array_size_<i>`，不再自行推导。
 
 ## 概述
 
@@ -108,7 +108,7 @@ const ChipTensor& tmp = alloc_0.get_ref(0);
 ### 阶段 6–8：任务提交与控制流
 
 所有任务提交包裹在顶层 `SIMPLER_SCOPE()` 中。codegen 不再依据 `for` / `if` 结构
-决定 scope 位置：[MaterializeRuntimeScopes](../passes/46-materialize_runtime_scopes.md)
+决定 scope 位置：[MaterializeRuntimeScopes](../passes/48-materialize_runtime_scopes.md)
 pass 会向 IR 中插入显式的 AUTO `RuntimeScopeStmt` 节点（函数体以及每个
 `for` / `if` 体），codegen 从这些节点 1:1 地 emit `SIMPLER_SCOPE`（manual scope
 降级为 `SIMPLER_SCOPE(ScopeMode::MANUAL)`）：
@@ -138,6 +138,8 @@ SIMPLER_SCOPE() {
 | 内部 | 函数体中的 `pl.create_tensor(...)` | `TensorCreateInfo var_ci(...)` + scope 入口处 `alloc_tensors(...)` | `<name>`（无前缀） |
 
 外部张量借用通过 `ChipTaskArgs` 传入的设备侧描述符。内部张量在 scope 入口处通过 `alloc_tensors()` 预分配——同一 scope（函数体、for 循环体、if 分支体）中的所有 `tensor.create` 被批量合并为一条 `alloc_tensors` 调用。预分配的张量随后通过 `add_output(const ChipTensor&)`（OUTPUT_EXISTING 重载）传递给核函数。
+
+只有尺寸在 scope 入口处已经可见（entry-valid）的 create 才会被提升到入口。若尺寸读取了函数体自身定义的值——普通局部变量，或 `if` / `for` / `while` 的 return_var（其 C++ 声明在对应语句处才emit）——该 create 会保留在语句顺序上，从而保证生成的 C++ 不会在声明之前使用某个名字。`__gm_pipe_buffer` 占位符同样适用此规则：它的真实尺寸是 `slot_bytes * core_num`，而非其 IR shape。
 
 ### 参数方向
 
@@ -190,7 +192,7 @@ params_t1.add_input(ext_output);  // result -> ext_output（无别名声明）
 
 结果别名到哪个 `Out`/`InOut` 参数是查表而非启发式——也不是分析。
 `ReturnParamsExplicit` 属性
-（[`NormalizeReturnOrder`](../passes/26-normalize_return_order.md)）保证：
+（[`NormalizeReturnOrder`](../passes/28-normalize_return_order.md)）保证：
 每个"写回参数"的张量返回值**就是**该参数本身（指针同一性）。因此 codegen 直接
 从被调用者的 `ReturnStmt` 上读取"返回位置 → 参数下标"映射
 （`ir::return_lineage::ExplicitReturnedParamIndices`）：无需 SSA 遍历、无需递归
@@ -216,7 +218,7 @@ IR 层，只服务于在该属性建立**之前**运行的那些 pass。
 | `Vec`（默认） | VECTOR (AIV) | `rt_submit_aiv_task` |
 
 **例外 —— 双 AIV 核函数。** 带 `dual_aiv_dispatch` 标记的 AIV 核函数（即任何 `split_aiv`
-核函数，参见 [`SplitVectorKernel`](../passes/24-split_vector_kernel.md)）必须在一个 cluster 的
+核函数，参见 [`SplitVectorKernel`](../passes/26-split_vector_kernel.md)）必须在一个 cluster 的
 **两个**向量核上同时运行 —— `pl.split_aiv` 区域通过 `aiv_id` 给每条 lane 分派互不相交的工作。
 而 `rt_submit_aiv_task` 只填 AIV0 槽位，运行时会把它调度为 *AIV 形状*的任务 —— 每个 block 一个
 AIV 核：第二条 lane 根本不会启动，而唯一启动的那条读到的 `get_sub_block_id()`，运行时明确说明在
@@ -394,6 +396,19 @@ void aicpu_orchestration_entry(const ChipTaskArgs& orch_args) {
 | 张量参数索引 | `orch_args.tensor(N)` | `orch_args.tensor(0)` |
 | 标量参数索引 | `orch_args.scalar(N)` | `orch_args.scalar(0)` |
 
+### Graph 函数体
+
+`FunctionType.Graph` 的函数体由第二个 `OrchestrationStmtCodegen` 实例生成，它
+的参数是在辅助函数开头绑定的普通 C++ 参数（`const Tensor& c =
+args.tensor(1).ref();`），而非入口参数。因此它的 `param_name_set` 为空——
+`GetExternalTensorName` 不应把它们改写成 `ext_<name>`——但这些名字仍要通过
+`ReserveDeclaredNames` 预留。
+
+两者缺一不可。若不预留，函数体中该参数的第一个 SSA 重命名就会占用参数自身的
+名字；当它是在 `pl.manual_scope` 内被预留时，该名字随后会被当作作用域局部名，
+之后每一次回写都会在块内生成 `const Tensor& c__ssa_vN = c;` 别名，而不是重映射
+到参数上，于是块之后的任务启动引用到的标识符已经脱离了 C++ 作用域。
+
 ## 控制流生成
 
 ### ForStmt
@@ -541,7 +556,7 @@ parser：parser 把用户的 `pl.submit(..., deps=[tid1, tid2])` kwarg 写入类
 `manual_dep_edges` 的形态已不存在——ManualDepsOnSubmitOnly 结构性属性会校验
 任何跨函数 `Call` 都不携带它；只有 `system.task_dummy` barrier op 作为 fanin
 契约保留该 attr。编译器推导的依赖边来自
-[`AutoDeriveTaskDependencies`](../passes/39-auto_derive_task_dependencies.md)，
+[`AutoDeriveTaskDependencies`](../passes/41-auto_derive_task_dependencies.md)，
 保存在 `Call.attrs["compiler_manual_dep_edges"]`（独立的 key，允许出现在普通
 call 上）。该 pass 从不分析用户写的 MANUAL scope——在 `pl.manual_scope()` 内，
 显式的 `deps=[...]` 仍是唯一的依赖边来源。它只分析 AUTO 区域，且仅当编译期开关
@@ -584,6 +599,13 @@ MANUAL）在进入时快照 `manual_task_id_map_` 与 `array_carry_vars_`、退�
 因此在某作用域内产生的绑定不会泄漏到外层作用域（否则其标识符会超出 C++ 作用域）。
 循环 / 分支的 carry 在其 body 的 `SIMPLER_SCOPE` *之前*声明，因此能正确地在块结束后存活。
 
+**例外：基于外层存储的 array carry。** 作用域内的 `arr[i] = tid` 注册的 carry，其底层
+`TaskId[N]` 声明在更外层。槽位写入就地生成，但该 *carry* 是在闭合花括号之后、由外层循环的
+yield 读取的。把它恢复掉会让该 yield 把 Array 值误判为标量 TaskId，因此
+`PreserveEnclosingArrayCarries` 会保留所有底层数组生命周期长于该块的 carry——两种作用域
+形态皆然。局部性判定按形态区分：MANUAL 作用域会提升自己的分配，因此直接知道其局部名字集合；
+AUTO 作用域不做任何提升，故仅当进入前已有 carry 命名了该存储时，才视其为外层存储。
+
 ### 无法解析的依赖边
 
 上述生命周期规则带来一个结果：若某条依赖边引用的 TaskId 产生于一个**已经关闭**的
@@ -594,10 +616,11 @@ MANUAL）在进入时快照 `manual_task_id_map_` 与 `array_carry_vars_`、退�
 | -------- | ---------------- |
 | 编译器推导（`compiler_manual_dep_edges`） | 静默跳过。这类边是尽力而为的 hazard 补丁；`PrepareCrossScopeTaskIdHoists` 已对能处理的部分做了 LCA 提升，丢弃其余是安全的，因为该 pass 只会*增加*定序 |
 | 用户书写（`deps=[...]`） | **硬报错**——`CHECK_SPAN` 抛出 `pypto::ValueError`，并指出该 TaskId 与对应的 DSL 源码行 |
+| 数组发布（`arr[i] = tid`） | **硬报错**——`CheckTaskIdSlotValueInScope` 抛出 `pypto::ValueError`，提示用户把该写入移进产生该 TaskId 的 `pl.scope()` 内。与依赖边不同，槽位写入是无条件生成的，因此若放行，就会生成宿主编译器以 `'<tid>' was not declared in this scope` 拒绝的编排代码——而 `--compile-only` 根本走不到那一步 |
 
 来源由 attr key 判定。注意 `attrs["dummy_task"]` **不是**作者身份标记：parser 会把
 它打在用户书写的 `pl.system.task_dummy(deps=[...])` 上，与
-[`ExpandManualPhaseFence`](../passes/40-expand_manual_phase_fence.md) 给自己合成的
+[`ExpandManualPhaseFence`](../passes/42-expand_manual_phase_fence.md) 给自己合成的
 barrier 打的完全相同，因此所有 `manual_dep_edges` 载体一律强制校验。合成的 barrier
 只会引用其所改写的 manual scope 内仍然活跃的 TaskId，故其 fanin 必然可解析。
 

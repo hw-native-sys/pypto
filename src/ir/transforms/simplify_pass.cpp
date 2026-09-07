@@ -1040,13 +1040,17 @@ FunctionPtr TransformSimplify(const FunctionPtr& func) {
   SimplifyMutator mutator(analyzer.get(), std::move(collector.multi_assigned), &escapes);
   auto new_body = mutator.VisitStmt(func->body_);
 
-  // Final step: drop dead IfStmt phi return_vars + matching yield slots, with
-  // conservative scalar DCE on either side so both cascade directions resolve
-  // in one Simplify invocation. The pre-prune scalar DCE removes dead scalar
-  // bindings that were the phi's only consumer (so the now-dead phi becomes
-  // visible to the phi-prune step); the post-prune scalar DCE removes the
-  // branch-body scalar assigns orphaned by phi pruning (fixes #1603 —
-  // outlining was capturing dead phi as a spurious Scalar[INDEX] return).
+  // Final step: drop every dead yielded slot — IfStmt phi return_vars and
+  // loop-carried iter_arg / return_var pairs — plus the matching yield slots,
+  // with conservative scalar DCE on either side so both cascade directions
+  // resolve in one Simplify invocation. The pre-prune scalar DCE removes dead
+  // scalar bindings that were the slot's only consumer (so the now-dead slot
+  // becomes visible to the prune step); the post-prune scalar DCE removes the
+  // body scalar assigns orphaned by pruning (fixes #1603 — outlining was
+  // capturing dead phi as a spurious Scalar[INDEX] return; the loop-carry half
+  // is the same defect one node kind over, where SSA seeds a loop with a value
+  // the body overwrites before reading and outlining then had to hand the
+  // scalar back out of a device kernel).
   // Call-backed assignments are preserved because the IR has no purity
   // annotations yet — a Call may have observable side effects we cannot reason
   // about. A scalar consumed only by an SPMD ``core_num`` needs no special
@@ -1054,8 +1058,8 @@ FunctionPtr TransformSimplify(const FunctionPtr& func) {
   // the Call's Expr-valued attrs, so it is an ordinary use.
   auto flat = transform_utils::FlattenToStmts(new_body);
   auto pre_pruned = dce::EliminateDeadScalarAssignments(flat);
-  auto phi_pruned = dce::EliminateDeadIfReturnVars(pre_pruned);
-  auto pruned = dce::EliminateDeadScalarAssignments(phi_pruned);
+  auto slot_pruned = dce::EliminateDeadYieldSlots(pre_pruned);
+  auto pruned = dce::EliminateDeadScalarAssignments(slot_pruned);
   bool dce_changed = pruned.size() != flat.size() ||
                      !std::equal(pruned.begin(), pruned.end(), flat.begin(),
                                  [](const StmtPtr& a, const StmtPtr& b) { return a.get() == b.get(); });

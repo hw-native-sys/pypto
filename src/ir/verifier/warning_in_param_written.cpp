@@ -23,12 +23,12 @@
  *
  * It runs `PostPipeline` (`DiagnosticCheck::InParamWritten`) rather than after
  * any one pass: a Group/Spmd wrapper's signature legitimately reads `In` for a
- * parameter its inner kernel writes, until `DeriveCallDirections` (pass 37)
+ * parameter its inner kernel writes, until `DeriveCallDirections` (pass 40)
  * materialises the effective directions back into the IR.
  *
- * **Best-effort, and deliberately not an `IRProperty`.** `InitMemRef` (pass 31)
+ * **Best-effort, and deliberately not an `IRProperty`.** `InitMemRef` (pass 34)
  * declares `.invalidated = {IRProperty::SSAForm}` and nothing re-establishes it,
- * so the IR here is not in SSA form — and since pass 37 is the earliest this can
+ * so the IR here is not in SSA form — and since pass 40 is the earliest this can
  * run, no pipeline position satisfies both. The buffer lineage below is a single
  * environment with no merging at a join, which is exact only when each name has
  * one definition. Without that it is wrong in both directions:

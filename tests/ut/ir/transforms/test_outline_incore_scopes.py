@@ -1660,23 +1660,30 @@ class TestOutlineSubmitTaskId:
         assert submits[1].allow_early_resolve is True
         assert len(submits[1].deps) == 1
 
-    def test_deferred_waiter_rejects_scalar_returning_helper_call(self):
-        """Scalar bookkeeping cannot hide arbitrary kernel side effects."""
+    def test_deferred_waiter_rejects_scalar_returning_op_call(self):
+        """Scalar bookkeeping cannot hide arbitrary kernel side effects.
+
+        The waiter registers conditions and returns; anything else in its body
+        either never runs or runs at the wrong time. Scalar arithmetic and casts
+        are their own IR expression nodes, so the only *call* a waiter needs is
+        the pre-registration ``tensor.read`` anchor. Every other scalar-producing
+        call is rejected without inspecting it — a new op may hide a blocking
+        wait, communication, or payload effects behind an innocuous scalar.
+
+        ``pl.get_block_idx()`` is the vehicle because it is an ordinary lowerable
+        op: the rejection has to come from the waiter contract, not from some
+        later limitation of the shape used to trigger it.
+        """
 
         @pl.program
         class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def scalar_helper(self, value: pl.Scalar[pl.INT32]) -> pl.Scalar[pl.INT32]:
-                return value
-
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(
                 self,
                 signal: pld.DistributedTensor[[1, 1], pl.INT32],
-                expected: pl.Scalar[pl.INT32],
             ):
                 with pl.at(level=pl.Level.CORE_GROUP, name_hint="deferred_wait"):
-                    hidden: pl.Scalar[pl.INT32] = self.scalar_helper(expected)
+                    hidden: pl.Scalar[pl.INT32] = pl.get_block_idx()
                     pld.system.defer_wait(signal, offsets=[0, 0], expected=hidden, cmp=pld.WaitCmp.Ge)
 
         with pytest.raises(ValueError, match="supports only a pre-registration tensor.read"):
@@ -2781,7 +2788,7 @@ class TestOutlineNoDepArgs:
         LEFT_RIGHT) in one CORE_GROUP scope: the outlined function gets
         split_aiv=True but NO function-level ``split`` mode — there is no single
         representative mode. The authoritative per-region mode rides each
-        SplitAivScopeStmt (consumed at LowerAutoVectorSplit, pass 21); downstream
+        SplitAivScopeStmt (consumed at LowerAutoVectorSplit, pass 23); downstream
         readers key on the split_aiv marker / per-op split, not a func mode.
         """
 
@@ -2858,7 +2865,7 @@ class TestOutlineNoDepArgs:
     def test_split_aiv_preserved_in_outlined_func(self):
         """OutlineIncoreScopes outlines the enclosing InCore scope but preserves
         the nested ``SplitAivScopeStmt`` region inside the outlined function body
-        (SplitAiv is never an outline target — it is lowered in place at pass 21).
+        (SplitAiv is never an outline target — it is lowered in place at pass 23).
 
         The Expected pins the outlined two-function form: the region lives in the
         InCore ``main_incore_0`` body and the Orchestration ``main`` only carries
@@ -3493,7 +3500,7 @@ class TestOutlineCachePolicy:
 
     The Var form is *consumed* here — it must not survive onto the synthesised
     call or onto either function. Param indices are a carrier with a deliberately
-    short life: they stay valid only until ConvertTensorToTileOps (pass 10) turns
+    short life: they stay valid only until ConvertTensorToTileOps (pass 11) turns
     them into per-``tile.load`` ``cache`` kwargs, because passes after that both
     append to param lists (InjectGMPipeBuffer, MaterializeDistTensorCtx) and
     prepend onto them (MaterializeValidShapeSymbols).
@@ -4050,6 +4057,207 @@ class TestOutlineScopeInControlFlow:
 
         stmts = self._stmts(After.get_function("main"))
         assert self._name(self._call_args(stmts[2])[0]) == self._bound_name(stmts[1])
+
+
+class TestOutlineScalarOutputHoist:
+    """A scope must not hand a Scalar back to its caller (#631).
+
+    The runtime has no scalar output channel: ``Arg::add_scalar`` passes a scalar
+    *in* by value and ``TaskOutputTensors`` returns only tensors. So a Scalar the
+    scope body defines and the caller reads has to be produced in the caller
+    instead. ``ScopeOutliner`` moves the defining statements out of the body when
+    the value is a pure function of the scope's live-ins, and rejects the launch
+    when it is not.
+    """
+
+    @staticmethod
+    def _outline(program) -> ir.Program:
+        return passes.outline_incore_scopes()(passes.convert_to_ssa()(program))
+
+    @staticmethod
+    def _func(program: ir.Program, name: str) -> ir.Function:
+        func = program.get_function(name)
+        assert func is not None, f"expected a function named {name!r}, got {python_print(program)}"
+        return func
+
+    @staticmethod
+    def _scalar_returns(func: ir.Function) -> int:
+        return sum(1 for t in func.return_types if isinstance(t, ir.ScalarType))
+
+    @staticmethod
+    def _scalar_params(func: ir.Function) -> int:
+        return sum(1 for p in func.params if isinstance(p.type, ir.ScalarType))
+
+    @staticmethod
+    def _scalar_defs(func: ir.Function) -> list[ir.AssignStmt]:
+        body = func.body
+        stmts = body.stmts if isinstance(body, ir.SeqStmts) else [body]
+        return [
+            st for st in stmts if isinstance(st, ir.AssignStmt) and isinstance(st.var.type, ir.ScalarType)
+        ]
+
+    def test_caller_computable_scalar_is_hoisted_out_of_the_kernel(self):
+        """``off = base * 32`` moves to the caller; the kernel returns only tensors."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def produce(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                return pl.store(t, [0], out)
+
+            @pl.function(type=pl.FunctionType.AIV)
+            def consume(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                off: pl.Scalar[pl.INDEX],
+                tail: pl.Out[pl.Tensor[[32], pl.FP32]],
+            ) -> pl.Tensor[[32], pl.FP32]:
+                t: pl.Tile[[32], pl.FP32] = pl.load(x, [off], [32])
+                return pl.store(t, [0], tail)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+                tail: pl.Out[pl.Tensor[[32], pl.FP32]],
+                base: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[32], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="scaled"):
+                    off: pl.Scalar[pl.INDEX] = base * 32
+                    out = self.produce(x, out)
+                tail = self.consume(x, off, tail)
+                return tail
+
+        After = self._outline(Before)
+
+        kernel = self._func(After, "scaled")
+        assert self._scalar_returns(kernel) == 0, python_print(After)
+        # The arithmetic itself is now a statement of the caller, not a
+        # TupleGetItem unpacking a (nonexistent) scalar return.
+        defs = self._scalar_defs(self._func(After, "main"))
+        assert len(defs) == 1, python_print(After)
+        assert isinstance(defs[0].value, ir.Mul), python_print(After)
+
+    def test_hoisted_scalar_still_read_by_the_body_becomes_a_param(self):
+        """A hoisted value the body also reads comes back in as a scalar arg."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def produce(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                off: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[32], pl.FP32]],
+            ) -> pl.Tensor[[32], pl.FP32]:
+                t: pl.Tile[[32], pl.FP32] = pl.load(x, [off], [32])
+                return pl.store(t, [0], out)
+
+            @pl.function(type=pl.FunctionType.AIV)
+            def consume(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                off: pl.Scalar[pl.INDEX],
+                tail: pl.Out[pl.Tensor[[32], pl.FP32]],
+            ) -> pl.Tensor[[32], pl.FP32]:
+                t: pl.Tile[[32], pl.FP32] = pl.load(x, [off], [32])
+                return pl.store(t, [0], tail)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[32], pl.FP32]],
+                tail: pl.Out[pl.Tensor[[32], pl.FP32]],
+                base: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[32], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="scaled"):
+                    off: pl.Scalar[pl.INDEX] = base * 8
+                    out = self.produce(x, off, out)
+                tail = self.consume(x, off, tail)
+                return tail
+
+        After = self._outline(Before)
+
+        kernel = self._func(After, "scaled")
+        assert self._scalar_returns(kernel) == 0, python_print(After)
+        assert self._scalar_params(kernel) == 1, python_print(kernel)
+
+    def test_device_computed_scalar_live_out_is_rejected(self):
+        """A scalar read out of a tensor on device has no way back to the caller."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def produce(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                return pl.store(t, [0], out)
+
+            @pl.function(type=pl.FunctionType.AIV)
+            def consume(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                off: pl.Scalar[pl.INT32],
+                tail: pl.Out[pl.Tensor[[32], pl.FP32]],
+            ) -> pl.Tensor[[32], pl.FP32]:
+                t: pl.Tile[[32], pl.FP32] = pl.load(x, [off], [32])
+                return pl.store(t, [0], tail)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                idx: pl.Tensor[[8, 1], pl.INT32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+                tail: pl.Out[pl.Tensor[[32], pl.FP32]],
+            ) -> pl.Tensor[[32], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="scaled"):
+                    off: pl.Scalar[pl.INT32] = pl.read(idx, [0, 0])
+                    out = self.produce(x, out)
+                tail = self.consume(x, off, tail)
+                return tail
+
+        with pytest.raises(ValueError, match="cannot return a scalar"):
+            self._outline(Before)
+
+    def test_unused_scalar_local_is_not_exported(self):
+        """A scope-local scalar nobody reads is left alone, not turned into a return."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def produce(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                off: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[32], pl.FP32]],
+            ) -> pl.Tensor[[32], pl.FP32]:
+                t: pl.Tile[[32], pl.FP32] = pl.load(x, [off], [32])
+                return pl.store(t, [0], out)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[32], pl.FP32]],
+            ) -> pl.Tensor[[32], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="scaled"):
+                    local: pl.Scalar[pl.INDEX] = pl.const(8, pl.INDEX)
+                    out = self.produce(x, local, out)
+                return out
+
+        After = self._outline(Before)
+        assert self._scalar_returns(self._func(After, "scaled")) == 0, python_print(After)
 
 
 if __name__ == "__main__":

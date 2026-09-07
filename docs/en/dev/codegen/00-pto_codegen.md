@@ -14,7 +14,7 @@ Codegen must be a **strict 1-to-1 translation** from IR to generated code. Each 
 
 **Why:** Codegen that embeds analysis becomes fragile — it duplicates logic that passes already handle, and it's harder to test in isolation. Keeping codegen a straightforward translation ensures it stays predictable and maintainable.
 
-**When analysis is found in codegen:** File a tracking issue and refactor it into a dedicated pass when bandwidth allows. [#814](https://github.com/hw-native-sys/pypto/issues/814) was an example: return-to-parameter tracing in orchestration codegen has been refactored into the [`NormalizeReturnOrder`](../passes/26-normalize_return_order.md) pass.
+**When analysis is found in codegen:** File a tracking issue and refactor it into a dedicated pass when bandwidth allows. [#814](https://github.com/hw-native-sys/pypto/issues/814) was an example: return-to-parameter tracing in orchestration codegen has been refactored into the [`NormalizeReturnOrder`](../passes/28-normalize_return_order.md) pass.
 
 ## Overview
 
@@ -141,7 +141,10 @@ print(pto_code)
 | `tile.assemble(target, source, [row, col])` | (optional) `pto.tmov target -> dst` + `pto.subview dst[row, col] sizes [src.rows, src.cols]` + `pto.tmov src -> dst_view` |
 | `tile.set_validshape(tile, vr, vc)` | `pto.set_validshape`; a view operand is rejected (see below) |
 | `tile.mul(lhs, rhs)` | `pto.tmul` |
-| `tile.add(a, b, c)` | `pto.taddc` (3-operand add) |
+| `tile.addc(src0, src1, carry)` | `pto.taddc` (`src0 + src1 + carry`) |
+| `tile.subc(src0, src1, carry)` | `pto.tsubc` (`src0 - src1 + carry`) |
+| `tile.addsc(src0, scalar, carry)` | `pto.taddsc` (`src0 + scalar + carry`) |
+| `tile.subsc(src0, scalar, carry)` | `pto.tsubsc` (`src0 - scalar + carry`) |
 | `tile.adds(tile, scalar)` | `pto.tadds` (tile + scalar) |
 | `tile.fillpad_expand(src, shape)` | `pto.tfillpad_expand ins(%src) outs(%dst)` (the `shape` tuple is type-deduction only; the larger `dst` and its pad come from the result type) |
 
@@ -214,8 +217,8 @@ or call `set_validshape` on the source tile before taking the view.
 
   `eL` is lane `L`'s **runtime** valid extent on the split axis — the ISA reads it off the popped
   tile (`popVecTileFromGMFiFo`), so the even codes require `e0 == e1` and the odd ones
-  `e0 == e1 + 1`. [LowerAutoVectorSplit](../passes/21-lower_auto_vector_split.md) materializes those
-  extents and [ExpandMixedKernel](../passes/22-expand_mixed_kernel.md) picks the matching code.
+  `e0 == e1 + 1`. [LowerAutoVectorSplit](../passes/23-lower_auto_vector_split.md) materializes those
+  extents and [ExpandMixedKernel](../passes/24-expand_mixed_kernel.md) picks the matching code.
 - The Cube-to-Vector FIFO carries a compacted rectangle: the producer stores its `valid_row` x
   `valid_col` block at a `valid_col` row pitch, and each consumer lane reads its band back with the
   same pitch (`gmStrideR = valid_col`, doubled for the left-right codes). A partial valid shape on
@@ -575,7 +578,7 @@ through — the per-variable declaration, the hoisted `extra_alloc_tiles`, and t
 control-flow paths alike — so the check sees exactly what is emitted and cannot
 drift from it. A tensor-level `pl.matmul` / `pl.matmul_acc` never trips it *on
 its M axis*, which is boxed for the user in
-[`ConvertTensorToTileOps`](../passes/10-convert_tensor_to_tile_ops.md#cube-operand-m-axis-boxing).
+[`ConvertTensorToTileOps`](../passes/11-convert_tensor_to_tile_ops.md#cube-operand-m-axis-boxing).
 The axes that remain the user's responsibility are `K` and `N`.
 
 ## Complete Example
@@ -905,11 +908,22 @@ scheduler stores in `GlobalContext.sub_block_id`) and appends
 `__pypto_spmd_subblock_idx` after any block-identity args. It deliberately
 reads the runtime lane id rather than the ccec `get_subblockid()` register,
 which returns a stale value under the `tensormap_and_ringbuffer` dispatch.
-This is independent of — and coexists with — the `get_subblockid()` macro
-bridge (`pypto_runtime_subblock_id`) that A2A3 dual-AIV wrappers install for
-ptoas-*internal* pipe-slot offsets. Like block identity, it is emitted
-unconditionally (no `__CPU_SIM` fork) because `GlobalContext.sub_block_id` is
-populated by the scheduler on every platform.
+
+Split AIV FIFO endpoints use that runtime value even when the tensor program
+does not call `tile.get_subblock_idx()`: after PTOAS lowers a split endpoint,
+the wrapper backend forwards the lane as the third argument of PTO-ISA's
+explicit `TPUSH(pipe, tile, subblock_id)` / `TPOP(...)` overload. If the
+function has no synthetic subblock parameter already, the backend adds a
+private trailing parameter to the generated function. The explicit overload
+derives the byte offset from each call's actual tile type, so one automatic
+pipe can safely carry differently sized sequential transfers. Like block
+identity, the wrapper resolves the runtime lane unconditionally because
+`GlobalContext.sub_block_id` is populated by the scheduler on every platform.
+The endpoint argument is build-guarded: device builds pass the lane to the
+explicit overload, while CPU simulation and in-core cost-model builds retain
+PTO-ISA's normal two-argument endpoint because those implementations already
+model their lane context and do not expose the device-only explicit-lane
+overload.
 
 **Detection scope.** Both layers detect SPMD usage on a per-function basis:
 
@@ -918,7 +932,9 @@ populated by the scheduler on every platform.
   block / subblock params to a given function's signature.
 - `_uses_spmd_block_ops` / `_uses_dynamic_subblock_id` (Python,
   `python/pypto/backend/pto_backend.py`) drive whether the wrapper appends the
-  matching locals to the inner call site.
+  matching locals to the inner call site. Split `TPUSH` / `TPOP` endpoints are
+  additionally detected by `_runtime_split_fifo_endpoint_counts`; they reuse
+  that subblock argument or request the private one described above.
 
 For non-SPMD sibling functions in an SPMD group (`group_uses_spmd=True` but
 the function itself does not call `tile.get_block_*`), the wrapper still
@@ -928,7 +944,7 @@ the inner call, matching the function's MLIR signature.
 
 This replaces the earlier macro-shadow + `[[block_local]] static` /
 `static thread_local` bridge plus `#pragma push_macro` / `#undef` /
-`pop_macro` dance. Block identity now flows through the call graph like
+`pop_macro` dance. Block and lane identity now flow through the call graph like
 every other per-launch value (tensor pointers, scalar args, dynamic dims).
 
 ### Implementation

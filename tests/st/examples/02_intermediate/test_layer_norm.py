@@ -17,31 +17,34 @@ One layer normalization pattern is demonstrated:
 import pytest
 import torch
 from examples.intermediate.normalization import layer_norm
+from harness import st
+
+HIDDEN_SIZE = 64
+EPS = 1e-5
 
 
-class TestLayerNormCore:
+def _layer_norm_case():
     """LayerNorm with 32x64 input: normalize across hidden dim, then scale and shift."""
+    torch.manual_seed(0)
+    x = torch.randn(32, HIDDEN_SIZE, dtype=torch.float32)
+    gamma = torch.randn(1, HIDDEN_SIZE, dtype=torch.float32)
+    beta = torch.randn(1, HIDDEN_SIZE, dtype=torch.float32)
+    output = torch.zeros_like(x)
 
-    def test_layer_norm_core(self, test_config):
-        layer_norm._cache.clear()
-        torch.manual_seed(0)
-        x = torch.randn(32, 64, dtype=torch.float32)
-        gamma = torch.randn(1, 64, dtype=torch.float32)
-        beta = torch.randn(1, 64, dtype=torch.float32)
-        output = torch.zeros_like(x)
-        layer_norm(x, gamma, beta, output, config=test_config)
-
-        hidden_size = 64
-        eps = 1e-5
-        mean = x.sum(dim=-1, keepdim=True) / hidden_size
+    def golden(_):
+        mean = x.sum(dim=-1, keepdim=True) / HIDDEN_SIZE
         centered = x - mean
-        var = (centered**2).sum(dim=-1, keepdim=True) / hidden_size
-        std = torch.sqrt(var + eps)
-        expected = (centered / std) * gamma + beta
+        var = (centered**2).sum(dim=-1, keepdim=True) / HIDDEN_SIZE
+        std = torch.sqrt(var + EPS)
+        return (centered / std) * gamma + beta
 
-        assert torch.allclose(output, expected, rtol=1e-5, atol=1e-5), (
-            f"layer_norm failed: max diff = {(output - expected).abs().max().item()}"
-        )
+    return st.case(layer_norm, x, gamma, beta, output, name="layer_norm_core", golden=golden)
+
+
+@st.cases(_layer_norm_case())
+def test_layer_norm_core(case_run):
+    """LayerNorm matches the torch reference."""
+    case_run.assert_passed()
 
 
 if __name__ == "__main__":

@@ -2227,11 +2227,7 @@ class _SpyDfxConfig:
 
 
 class _RecordingOrch:
-    """Records the ``output_prefix`` observed at each ``submit_next_level``.
-
-    Captures the prefix *at submit time* (not after) so tests can prove
-    ``_submit_chip`` applied the per-dispatch suffix before the task was queued.
-    """
+    """Records the ``output_prefix`` each ``submit_next_level`` was handed."""
 
     def __init__(self, chip_count: int | None = None) -> None:
         self.calls: list[tuple[Any, int, str]] = []
@@ -2251,60 +2247,54 @@ class _RecordingOrch:
 
 
 class TestSubmitChip:
-    """``_submit_chip`` namespaces per-dispatch DFX ``output_prefix`` then restores it."""
+    """``_submit_chip`` derives each dispatch's DFX dir; the runtime applies it."""
 
-    def test_suffixes_prefix_at_submit_and_restores(self):
+    def test_forwards_the_base_prefix_unchanged(self):
         orch = _RecordingOrch()
         cfg = _SpyDfxConfig(output_prefix="/work/dfx_outputs")
         ret = _submit_chip(orch, "chip_a", "ta", cfg, 3)
-        # Card + the card's 0th dispatch was visible to the runtime at submit
-        # time...
-        assert orch.calls == [("chip_a", 3, "/work/dfx_outputs/rank3/d0")]
-        # ...and the shared config is restored afterward.
+        # The ChipWorker child appends ``rank{r}/d{k}``; this side must not.
+        assert orch.calls == [("chip_a", 3, "/work/dfx_outputs")]
         assert cfg.output_prefix == "/work/dfx_outputs"
         assert ret == "submitted"
 
-    def test_distinct_ranks_get_distinct_dirs(self):
+    def test_distinct_ranks_get_distinct_dirs(self, tmp_path):
+        chip_cids = {"chip": object()}
         orch = _RecordingOrch()
-        cfg = _SpyDfxConfig(output_prefix="/work/dfx_outputs")
+        _reset_dfx_dispatch_state(orch, chip_cids)
+        cfg = _SpyDfxConfig(output_prefix=str(tmp_path))
         for r in (0, 1, 2):
-            _submit_chip(orch, "chip", "ta", cfg, r)
-        # Each card's first dispatch is ``d0``.
-        assert [c[2] for c in orch.calls] == [
-            "/work/dfx_outputs/rank0/d0",
-            "/work/dfx_outputs/rank1/d0",
-            "/work/dfx_outputs/rank2/d0",
-        ]
-        assert cfg.output_prefix == "/work/dfx_outputs"
+            _submit_chip(orch, chip_cids["chip"], "ta", cfg, r)
+        # Each card's first dispatch is ``d0``, named by where the marker lands.
+        for r in (0, 1, 2):
+            assert (tmp_path / f"rank{r}" / "d0" / "dispatch_program.json").is_file()
+        assert [c[2] for c in orch.calls] == [str(tmp_path)] * 3
 
-    def test_multiple_dispatches_same_card_get_distinct_dirs(self):
-        # The bug this fix targets: several dispatches to ONE card must not
-        # share a dir (the runtime rewrites fixed-name artifacts per run, so a
-        # shared dir means all-but-the-last are clobbered). Each gets ``d{k}``.
+    def test_multiple_dispatches_same_card_get_distinct_dirs(self, tmp_path):
+        # Several dispatches to ONE card must not share a dir (the runtime
+        # rewrites fixed-name artifacts per run, so a shared dir means
+        # all-but-the-last are clobbered). Each gets ``d{k}``.
+        chip_cids = {"chip_a": object(), "chip_b": object()}
         orch = _RecordingOrch()
-        cfg = _SpyDfxConfig(output_prefix="/work/dfx_outputs")
-        _submit_chip(orch, "chip_a", "ta", cfg, 0)
-        _submit_chip(orch, "chip_b", "ta", cfg, 0)  # different program, same card
-        _submit_chip(orch, "chip_a", "ta", cfg, 0)  # repeat dispatch, same card
-        assert [c[2] for c in orch.calls] == [
-            "/work/dfx_outputs/rank0/d0",
-            "/work/dfx_outputs/rank0/d1",
-            "/work/dfx_outputs/rank0/d2",
-        ]
-        assert cfg.output_prefix == "/work/dfx_outputs"
+        _reset_dfx_dispatch_state(orch, chip_cids)
+        cfg = _SpyDfxConfig(output_prefix=str(tmp_path))
+        _submit_chip(orch, chip_cids["chip_a"], "ta", cfg, 0)
+        _submit_chip(orch, chip_cids["chip_b"], "ta", cfg, 0)  # different program, same card
+        _submit_chip(orch, chip_cids["chip_a"], "ta", cfg, 0)  # repeat dispatch, same card
+        assert sorted(d.name for d in (tmp_path / "rank0").iterdir()) == ["d0", "d1", "d2"]
+        assert [c[2] for c in orch.calls] == [str(tmp_path)] * 3
 
-    def test_counter_resets_when_orch_dispatch_idx_cleared(self):
+    def test_counter_resets_when_orch_dispatch_idx_cleared(self, tmp_path):
         # ``orch_fn`` clears ``_dfx_dispatch_idx`` at the top of every run, so a
         # given card's dispatch numbering matches across the swimlane two-pass.
+        chip_cids = {"chip": object()}
         orch = _RecordingOrch()
-        cfg = _SpyDfxConfig(output_prefix="/work/dfx_outputs")
-        _submit_chip(orch, "chip", "ta", cfg, 0)  # pass 1: d0
+        _reset_dfx_dispatch_state(orch, chip_cids)
+        cfg = _SpyDfxConfig(output_prefix=str(tmp_path))
+        _submit_chip(orch, chip_cids["chip"], "ta", cfg, 0)  # pass 1: d0
         orch._dfx_dispatch_idx = {}  # what orch_fn does between passes
-        _submit_chip(orch, "chip", "ta", cfg, 0)  # pass 2: d0 again
-        assert [c[2] for c in orch.calls] == [
-            "/work/dfx_outputs/rank0/d0",
-            "/work/dfx_outputs/rank0/d0",
-        ]
+        _submit_chip(orch, chip_cids["chip"], "ta", cfg, 0)  # pass 2: d0 again
+        assert [d.name for d in (tmp_path / "rank0").iterdir()] == ["d0"]
 
     def test_dfx_off_forwards_unchanged(self):
         orch = _RecordingOrch()
@@ -2313,23 +2303,22 @@ class TestSubmitChip:
         assert orch.calls == [("chip", 5, "")]
         assert cfg.output_prefix == ""
 
-    def test_commless_dispatches_round_robin_over_chips(self):
+    def test_commless_dispatches_round_robin_over_chips(self, tmp_path):
         # A comm-less dispatch (``worker=None``) names no chip, but simpler
         # #1436 requires an exact target, so consecutive ones are handed out
         # round-robin over the program's chips — a host_orch with one comm-less
         # dispatch per chip still spreads across them.
+        chip_cids = {"chip": object()}
         orch = _RecordingOrch(chip_count=2)
-        cfg = _SpyDfxConfig(output_prefix="/work/dfx_outputs")
+        _reset_dfx_dispatch_state(orch, chip_cids)
+        cfg = _SpyDfxConfig(output_prefix=str(tmp_path))
         for _ in range(3):
-            _submit_chip(orch, "chip", "ta", cfg, None)
+            _submit_chip(orch, chip_cids["chip"], "ta", cfg, None)
         assert [c[1] for c in orch.calls] == [0, 1, 0]
         # Each resolved chip gets its own dispatch counter.
-        assert [c[2] for c in orch.calls] == [
-            "/work/dfx_outputs/rank0/d0",
-            "/work/dfx_outputs/rank1/d0",
-            "/work/dfx_outputs/rank0/d1",
-        ]
-        assert cfg.output_prefix == "/work/dfx_outputs"
+        for rel in ("rank0/d0", "rank1/d0", "rank0/d1"):
+            assert (tmp_path / rel / "dispatch_program.json").is_file()
+        assert [c[2] for c in orch.calls] == [str(tmp_path)] * 3
 
     def test_commless_dispatch_without_chip_count_falls_back_to_chip_zero(self):
         # A caller that bypassed ``orch_fn`` leaves no chip count on ``orch``;
@@ -2380,7 +2369,7 @@ class TestSubmitChip:
 
         _submit_chip(orch, "chip_a", "ta", cfg, 0)
 
-        assert orch.calls == [("chip_a", 0, f"{tmp_path}/rank0/d0")]
+        assert orch.calls == [("chip_a", 0, str(tmp_path))]
         assert not (tmp_path / "rank0" / "d0" / "dispatch_program.json").exists()
 
 

@@ -55,7 +55,7 @@ bool HasStatedLane(const CallPtr& call);
 /// True when this call was spliced out of a `pl.split_aiv` region by
 /// LowerAutoVectorSplit, i.e. the author placed it on the vector lane. See
 /// `kCorePlacementAttr` (transforms/utils/attrs.h) for the carrier and its
-/// pass 20 -> pass 21 lifetime.
+/// pass 23 -> pass 24 lifetime.
 bool IsAivRegionPlaced(const CallPtr& call);
 
 /// The lane this call runs on, BEFORE the `pl.split_aiv` region placement

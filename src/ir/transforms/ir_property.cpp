@@ -55,6 +55,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "UseAfterDef";
     case IRProperty::HierarchyOutlined:
       return "HierarchyOutlined";
+    case IRProperty::GraphOutlined:
+      return "GraphOutlined";
     case IRProperty::StructuredCtrlFlow:
       return "StructuredCtrlFlow";
     case IRProperty::VectorKernelSplit:
@@ -111,6 +113,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "GraphBoundaryLegalized";
     case IRProperty::AccStorePhaseValid:
       return "AccStorePhaseValid";
+    case IRProperty::NoScalarKernelReturn:
+      return "NoScalarKernelReturn";
     default:
       return "Unknown";
   }
@@ -195,7 +199,7 @@ const IRPropertySet& GetStructuralProperties() {
                                    IRProperty::OutParamNotShadowed, IRProperty::NoNestedInCore,
                                    IRProperty::InOutUseValid,       IRProperty::PipelineLoopValid,
                                    IRProperty::ArrayNotEscaped,     IRProperty::ManualDepsOnSubmitOnly,
-                                   IRProperty::AtomicAddDtypeValid};
+                                   IRProperty::AtomicAddDtypeValid, IRProperty::NoScalarKernelReturn};
   return props;
 }
 

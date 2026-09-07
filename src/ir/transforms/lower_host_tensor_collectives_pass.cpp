@@ -178,38 +178,6 @@ void CheckStaticSignalCapacity(const CallPtr& call, const ExprPtr& signal_expr, 
       << ") must be at least the participating device count (" << required_slots << ")";
 }
 
-void CheckRingChunkConstraints(const CallPtr& call, const ExprPtr& src_expr, size_t world_size) {
-  auto src_type = As<DistributedTensorType>(src_expr->GetType());
-  INTERNAL_CHECK_SPAN(src_type, call->span_)
-      << "LowerHostTensorCollectives: ring allreduce src must be DistributedTensorType";
-  if (src_type->shape_.empty()) return;
-
-  // The ring kernel partitions src into NR contiguous compile-time chunks
-  // (chunk_elems = numel / NR), so the host-ring path requires a
-  // statically-known src shape.  A dynamic extent would let a runtime numel
-  // that is not divisible by NR reach the kernel, which silently returns
-  // unreduced data instead of failing — reject dynamic host-ring extents here.
-  int64_t src_numel = 1;
-  for (const auto& dim : src_type->shape_) {
-    auto extent = As<ConstInt>(dim);
-    CHECK_SPAN(extent, call->span_)
-        << "LowerHostTensorCollectives: ring allreduce requires a statically-known "
-           "src shape (dynamic host-ring extents are not supported; the ring "
-           "schedule partitions src into NR compile-time chunks)";
-    src_numel *= extent->value_;
-  }
-
-  int64_t nr = static_cast<int64_t>(world_size);
-
-  // Divisibility: the host builtin ring schedule partitions data into NR
-  // contiguous chunks of chunk_elems = numel // NR.  A non-divisible numel
-  // would produce a trailing partial chunk that the kernel cannot handle.
-  CHECK_SPAN(src_numel % nr == 0, call->span_)
-      << "LowerHostTensorCollectives: ring allreduce requires the per-rank data size (product of src shape = "
-      << src_numel << ") to be an exact multiple of the rank count (" << nr << "); got a remainder of "
-      << (src_numel % nr);
-}
-
 void CheckRingSignalCapacity(const CallPtr& call, const ExprPtr& signal_expr, size_t world_size) {
   auto signal_type = As<DistributedTensorType>(signal_expr->GetType());
   INTERNAL_CHECK_SPAN(signal_type, call->span_)
@@ -287,9 +255,6 @@ void CheckAllReduceSignalCapacity(const CallPtr& call, const ExprPtr& signal_exp
     CHECK_SPAN(world_size <= kMaxSupportedRanks, call->span_)
         << "LowerHostTensorCollectives: ring allreduce requires " << static_cast<int>(kMaxSupportedRanks)
         << " or fewer participating devices, got " << world_size;
-    INTERNAL_CHECK_SPAN(call->args_.size() >= 1, call->span_)
-        << "LowerHostTensorCollectives: ring allreduce requires a src arg";
-    CheckRingChunkConstraints(call, call->args_[0], world_size);
     return;
   }
   CheckAllReduceCoreCapacity(call, core_num);
@@ -316,6 +281,12 @@ void CheckAllReduceSignalCapacity(const CallPtr& call, const ExprPtr& signal_exp
   INTERNAL_CHECK_SPAN(src_type, call->span_)
       << "LowerHostTensorCollectives: pld.tensor.allreduce src must be DistributedTensorType";
   auto op_value = call->GetKwarg<int>("op");
+  // The host builtin ring kernel partitions src into NR balanced, potentially
+  // ragged chunks at runtime — chunk r spans [floor(numel*r/NR), floor(numel*(r+1)/NR))
+  // — and narrows every TPUT transfer to the chunk's exact extent via the staging
+  // tile's valid_shape (ColMaskInternal). No compile-time static-shape or
+  // divisibility requirement remains: dynamic extents and a non-divisible numel
+  // are handled by the kernel (issue #2242).
   const bool as_ring = ShouldLowerAllReduceAsRing(call);
   std::vector<std::pair<std::string, std::any>> kwargs = {
       {"op", op_value},

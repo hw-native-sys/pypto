@@ -181,6 +181,12 @@ class DemandCollector : public IRVisitor {
 
   void RecordInheritInputEdge(const VarPtr& dst, const CallPtr& call) {
     if (!dst) return;
+    // Deliberately the raw `OutputMemoryInheritsInput()` flag, NOT
+    // `op_predicates::IsBufferAliasingViewOp`. This pass propagates the memory
+    // *space*, which is exactly what the flag declares; aliasing the input's
+    // *buffer* is the stricter `inherit && IsInplaceSafe()`. `tile.transpose` is
+    // the case that separates them: it lands in its input's space (so it needs
+    // this edge) while permuting into a fresh buffer (so it is not a view).
     auto& reg = OpRegistry::GetInstance();
     if (!reg.IsRegistered(call->op_->name_)) return;
     if (!reg.GetEntry(call->op_->name_).OutputMemoryInheritsInput()) return;
@@ -1132,7 +1138,7 @@ Pass InferTileMemorySpace() {
     for (const auto& [gvar, func] : program->functions_) {
       // Every InCore *variant*, not just InCore. AIC and AIV are user-writable
       // function types, not only pass-generated ones (ExpandMixedKernel creates
-      // them at pass 21, well after this pass), so a hand-authored AIV kernel
+      // them at pass 24, well after this pass), so a hand-authored AIV kernel
       // must have its tiles placed here too. Gating on InCore alone left those
       // tiles unset, and InitMemRef then defaulted them to DDR -- yielding a
       // vector op reading a DDR operand, which no hardware does.

@@ -503,11 +503,13 @@ static std::string MakeNotifyCodegenPTO(const CallPtr& op, codegen::CodegenBase&
                       << op->args_[3]->GetType()->TypeName();
   value_ssa = codegen.EmitCastToI32(op->args_[3], value_ssa);
   std::string value_type = codegen.GetTypeString(DataType::INT32);
-  // A notify publishes completion to a peer. Drain every local pipeline first
-  // so the peer cannot observe the signal before preceding VEC work or GM
-  // accesses are complete. PTOAS's TNOTIFY lowering only drains MTE2/MTE3,
-  // which is insufficient for read-complete barriers following VEC operations.
-  codegen.Emit("pto.barrier <PIPE_ALL>");
+  // A notify publishes completion to a peer. Pipeline synchronisation before
+  // TNOTIFY is PTOAS's responsibility — its TNotify lowering drains what it
+  // issued (MTE2/MTE3) and owns the ordering. Do NOT emit a pto.barrier here:
+  // a conservative catch-all reads as a workaround, and a minimal-scope drain
+  // (e.g. PIPE_V) would assert a claim about PTOAS's internals that the layer
+  // above must not depend on. Validated on-device: the notify/wait ST set
+  // passes with no barrier at all — see the PR thread.
   std::ostringstream tnotify;
   tnotify << "pto.comm.tnotify(" << partition_view << ", " << value_ssa << " : " << partition_type << ", "
           << value_type << ") {notifyOp = #pto<notify_op " << notify_attr << ">}";

@@ -152,7 +152,7 @@ bool RegionBodyHasExplicitBoundary(const StmtPtr& body) {
 // statement onto BOTH lanes, double-firing a non-idempotent side effect such as
 // pld.system.notify. The stamp is that carrier; ``ClassifyCallAffinity`` reads
 // it as the placement authority. See kCorePlacementAttr (attrs.h) for the
-// pass 20 -> pass 21 lifetime, and ExpandMixedKernel for where it is stripped.
+// pass 23 -> pass 24 lifetime, and ExpandMixedKernel for where it is stripped.
 //
 // WHAT GETS STAMPED. The attr asserts a placement — "this call runs on the AIV
 // lane" — so it is written exactly where the region is what DECIDES that, and
@@ -338,7 +338,7 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
         // split_axis::LocalizeExplicitBoundaryValid). A fully-valid split axis is
         // returned untouched, so the common case is a no-op walk.
         auto localized = split_axis::LocalizeExplicitBoundaryValid(region_stmts, rdim, reg->span_);
-        // Still region-placed, so pass 21 must be told.
+        // Still region-placed, so pass 24 must be told.
         for (auto& s : StampRegionPlacement(localized)) result.push_back(s);
         continue;
       }
@@ -565,6 +565,8 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
       auto body = transform_utils::FlattenToStmts(for_stmt->body_);
       auto new_body = LowerStmts(body, mode, split_dim, tile_vars, subblock_idx, var_replacements, used_names,
                                  lane_stride);
+      split_axis::ValidateCarryBackedge(loop_repair::MakeBody(new_body, for_stmt->span_), new_iter_args,
+                                        tile_vars, for_stmt->span_);
       auto new_return_vars = split_axis::RepairReturnVars(for_stmt->return_vars_, new_iter_args, tile_vars,
                                                           var_replacements, subblock_idx, lane_stride);
       result.push_back(loop_repair::RebuildForStmt(
@@ -582,9 +584,18 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
                                          var_replacements, used_names, lane_stride);
         new_else = loop_repair::MakeBody(new_else_stmts, if_stmt->span_);
       }
+      // Same merge repair as split_axis::ProcessStmt's IfStmt branch. This arm
+      // recurses through LowerStmts and cannot reach that branch, so without it
+      // a branch-merged tile keeps its full-width declared type and stays
+      // untracked -- both AIV lanes then write from output row 0.
+      auto new_then_body = loop_repair::MakeBody(new_then, if_stmt->span_);
+      auto new_return_vars =
+          split_axis::RepairIfReturnVars(if_stmt->return_vars_, new_then_body, new_else, tile_vars,
+                                         var_replacements, subblock_idx, lane_stride, if_stmt->span_);
       auto new_if = MutableCopy(if_stmt);
-      new_if->then_body_ = loop_repair::MakeBody(new_then, if_stmt->span_);
+      new_if->then_body_ = new_then_body;
       new_if->else_body_ = new_else;
+      new_if->return_vars_ = new_return_vars;
       result.push_back(new_if);
       continue;
     }
@@ -595,6 +606,8 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
       auto body = transform_utils::FlattenToStmts(while_stmt->body_);
       auto new_body = LowerStmts(body, mode, split_dim, tile_vars, subblock_idx, var_replacements, used_names,
                                  lane_stride);
+      split_axis::ValidateCarryBackedge(loop_repair::MakeBody(new_body, while_stmt->span_), new_iter_args,
+                                        tile_vars, while_stmt->span_);
       auto new_return_vars = split_axis::RepairReturnVars(while_stmt->return_vars_, new_iter_args, tile_vars,
                                                           var_replacements, subblock_idx, lane_stride);
       result.push_back(loop_repair::RebuildWhileStmt(
@@ -1022,7 +1035,7 @@ ScopeStmtPtr FindFirstScope(const StmtPtr& body) {
 // halve only the vector compute inside each region (region-local), leave
 // out-of-region compute full-width, drop each scope wrapper, and stamp
 // ``split_aiv`` (idempotent — already bridged at OutlineIncoreScopes) plus
-// ``split_aiv_region_validated`` (signals ExpandMixedKernel (pass 21) to skip its func-mode check).
+// ``split_aiv_region_validated`` (signals ExpandMixedKernel (pass 24) to skip its func-mode check).
 //
 // Region lowering deliberately does NOT cross a ``ScopeStmt``: a scope carries
 // outlining and name-visibility semantics that region-local halving must not
@@ -1089,7 +1102,7 @@ FunctionPtr LowerExplicitRegionFunction(const FunctionPtr& func) {
   (void)clone_map_unused;
 
   // Earned only now: the guard above proves every region was actually lowered,
-  // so ``split_aiv_region_validated`` is a true claim and pass 21
+  // so ``split_aiv_region_validated`` is a true claim and pass 24
   // (ExpandMixedKernel) may skip its own single-func-mode check on its strength.
   auto attrs = func->attrs_;
   attrs.erase(std::remove_if(attrs.begin(), attrs.end(),

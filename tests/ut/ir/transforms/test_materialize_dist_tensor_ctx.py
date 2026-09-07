@@ -91,10 +91,10 @@ def _apply(program: ir.Program) -> ir.Program:
 
 
 def _derive_and_materialize(program: ir.Program) -> ir.Program:
-    """DeriveCallDirections (pass 37) then MaterializeDistTensorCtx (pass 43).
+    """DeriveCallDirections (pass 40) then MaterializeDistTensorCtx (pass 46).
 
-    Pass 37 is what stamps ``arg_directions`` on each call, so running it first
-    lets a DSL-authored ``Before`` reach pass 43 in the shape the pipeline
+    Pass 40 is what stamps ``arg_directions`` on each call, so running it first
+    lets a DSL-authored ``Before`` reach pass 46 in the shape the pipeline
     actually delivers, with no hand-written direction attrs.
     """
     return passes.materialize_dist_tensor_ctx()(passes.derive_call_directions()(program))
@@ -151,7 +151,7 @@ def test_host_dispatch_materializes_comm_ctx_args():
 #
 # Every function takes the same DistributedTensor, so the pass must thread one
 # materialized ``data_ctx`` param through all three and forward it at both call
-# sites. ``derive_call_directions`` (pass 37) runs first, exactly as in the
+# sites. ``derive_call_directions`` (pass 40) runs first, exactly as in the
 # pipeline, so the Before programs carry no hand-written ``arg_directions``.
 #
 # Spmd and Group get their own program pair because ``@pl.function(type=...)``
@@ -363,10 +363,10 @@ def test_returned_mixed_values_use_reordered_distributed_param_contexts():
         def reorder(
             self,
             first: pl.InOut[pld.DistributedTensor[[4], pl.FP32]],
-            marker: pl.Scalar[pl.INT32],
+            marker: pl.InOut[pl.Tensor[[4], pl.INT32]],
             second: pl.InOut[pld.DistributedTensor[[4], pl.FP32]],
         ) -> tuple[
-            pl.Scalar[pl.INT32],
+            pl.Tensor[[4], pl.INT32],
             pld.DistributedTensor[[4], pl.FP32],
             pld.DistributedTensor[[4], pl.FP32],
         ]:
@@ -381,7 +381,7 @@ def test_returned_mixed_values_use_reordered_distributed_param_contexts():
             self,
             first: pl.InOut[pld.DistributedTensor[[4], pl.FP32]],
             second: pl.InOut[pld.DistributedTensor[[4], pl.FP32]],
-            marker: pl.Scalar[pl.INT32],
+            marker: pl.InOut[pl.Tensor[[4], pl.INT32]],
         ):
             result = self.reorder(first, marker, second)
             returned_second = result[1]
@@ -395,12 +395,12 @@ def test_returned_mixed_values_use_reordered_distributed_param_contexts():
         def reorder(
             self,
             first: pl.InOut[pld.DistributedTensor[[4], pl.FP32]],
-            marker: pl.Scalar[pl.INT32],
+            marker: pl.InOut[pl.Tensor[[4], pl.INT32]],
             second: pl.InOut[pld.DistributedTensor[[4], pl.FP32]],
             first_ctx: pld.CommCtx,
             second_ctx: pld.CommCtx,
         ) -> tuple[
-            pl.Scalar[pl.INT32],
+            pl.Tensor[[4], pl.INT32],
             pld.DistributedTensor[[4], pl.FP32],
             pld.DistributedTensor[[4], pl.FP32],
         ]:
@@ -415,7 +415,7 @@ def test_returned_mixed_values_use_reordered_distributed_param_contexts():
             self,
             first: pl.InOut[pld.DistributedTensor[[4], pl.FP32]],
             second: pl.InOut[pld.DistributedTensor[[4], pl.FP32]],
-            marker: pl.Scalar[pl.INT32],
+            marker: pl.InOut[pl.Tensor[[4], pl.INT32]],
             first_ctx: pld.CommCtx,
             second_ctx: pld.CommCtx,
         ):
@@ -428,7 +428,7 @@ def test_returned_mixed_values_use_reordered_distributed_param_contexts():
                 attrs={
                     "arg_directions": [
                         pl.adir.inout,
-                        pl.adir.scalar,
+                        pl.adir.inout,
                         pl.adir.inout,
                         pl.adir.scalar,
                         pl.adir.scalar,
@@ -739,21 +739,22 @@ def test_device_get_comm_ctx_is_replaced_by_materialized_context():
 # allocates a window inside a *chip* orchestration function, and the parser
 # rejects ``pld.alloc_window_buffer`` outside HOST orchestration with its own
 # diagnostic — which is a different error from the pass-level one this test
-# pins. Reaching pass 43 with that shape therefore requires raw ``ir.*``.
+# pins. Reaching pass 46 with that shape therefore requires raw ``ir.*``.
 # ---------------------------------------------------------------------------
 
 
 def test_device_call_without_materialized_context_rejects_synthesized_prefix():
     span = ir.Span("test_materialize_dist_tensor_ctx.py", 1, 1)
     data_ty = ir.DistributedTensorType([4], pl.FP32)
-    bool_ty = ir.ScalarType(DataType.BOOL)
 
+    # Returns nothing: a task cannot return a scalar (#631), and this fixture is
+    # about the missing communication context, not about the return value.
     predicate_data = ir.Var("data", data_ty, span)
     predicate = ir.Function(
         "predicate",
         [(predicate_data, ir.ParamDirection.In)],
-        [bool_ty],
-        ir.ReturnStmt([ir.ConstBool(True, span)], span),
+        [],
+        ir.ReturnStmt([], span),
         span,
         ir.FunctionType.InCore,
     )
@@ -778,7 +779,7 @@ def test_device_call_without_materialized_context_rejects_synthesized_prefix():
         [local_data],
         {},
         {"arg_directions": [ir.ArgDirection.Input]},
-        bool_ty,
+        ir.TupleType([]),
         span,
     )
     main = ir.Function(
@@ -862,11 +863,13 @@ def test_return_call_reuses_returned_param_ctx():
             return source_data
 
         @pl.function(type=pl.FunctionType.InCore)
-        def callee(self, data: pld.DistributedTensor[[4], pl.FP32]) -> pl.Scalar[pl.INDEX]:
-            return pl.const(0, pl.INDEX)
+        def callee(self, data: pld.DistributedTensor[[4], pl.FP32]) -> pld.DistributedTensor[[4], pl.FP32]:
+            return data
 
         @pl.function(type=pl.FunctionType.Orchestration)
-        def main(self, source_data: pld.DistributedTensor[[4], pl.FP32]) -> pl.Scalar[pl.INDEX]:
+        def main(
+            self, source_data: pld.DistributedTensor[[4], pl.FP32]
+        ) -> pld.DistributedTensor[[4], pl.FP32]:
             data = self.producer(source_data)
             return self.callee(data)
 
@@ -881,13 +884,13 @@ def test_return_call_reuses_returned_param_ctx():
         @pl.function(type=pl.FunctionType.InCore)
         def callee(
             self, data: pld.DistributedTensor[[4], pl.FP32], data_ctx: pld.CommCtx
-        ) -> pl.Scalar[pl.INDEX]:
-            return pl.const(0, pl.INDEX)
+        ) -> pld.DistributedTensor[[4], pl.FP32]:
+            return data
 
         @pl.function(type=pl.FunctionType.Orchestration)
         def main(
             self, source_data: pld.DistributedTensor[[4], pl.FP32], source_data_ctx: pld.CommCtx
-        ) -> pl.Scalar[pl.INDEX]:
+        ) -> pld.DistributedTensor[[4], pl.FP32]:
             data: pld.DistributedTensor[[4], pl.FP32] = self.producer(
                 source_data, source_data_ctx, attrs={"arg_directions": [pl.adir.input, pl.adir.scalar]}
             )

@@ -2458,7 +2458,7 @@ class TestInferTileMemorySpaceDemandBackprop:
           the only buffer a tload can fill that MTE1 can then move into
           L0A/L0B.
         - `x_sl = tile.slice` inherits Mat from `x_tile` (a Mat-resident slice
-          is first-class; pass 16 folds it into `tile.extract`); `y_tile`
+          is first-class; pass 19 folds it into `tile.extract`); `y_tile`
           carries a Right demand and likewise resolves to Mat.
         - matmul demands Left/Right but the operands are Mat, so Phase 2/3
           insert `x_sl_Left` and `y_tile_Right` moves before the matmul, which

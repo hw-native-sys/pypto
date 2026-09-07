@@ -1766,7 +1766,8 @@ def col_sum(tile: Tile, tmp_tile: Tile | None = None) -> Tile:
     Args:
         tile: Input tile
         tmp_tile: Optional scratch tile (same shape/dtype as input) that selects
-            the binary-tree reduction path.
+            the binary-tree reduction path. Unlike the arg reductions, this is not
+            enforced by type deduction -- pass the input's shape and dtype.
 
     Returns:
         Tile wrapping the col_sum operation
@@ -1861,7 +1862,7 @@ def col_argmax(tile: Tile, tmp_tile: Tile) -> Tile:
 
     Args:
         tile: Input tile
-        tmp_tile: Temporary tile
+        tmp_tile: Scratch tile with exactly the same shape and dtype as ``tile``
 
     Returns:
         Tile wrapping the col_argmax operation
@@ -1878,7 +1879,7 @@ def col_argmin(tile: Tile, tmp_tile: Tile) -> Tile:
 
     Args:
         tile: Input tile
-        tmp_tile: Temporary tile
+        tmp_tile: Scratch tile with exactly the same shape and dtype as ``tile``
 
     Returns:
         Tile wrapping the col_argmin operation
@@ -2845,14 +2846,14 @@ def not_(tile: Tile) -> Tile:
 
 
 def addc(lhs: Tile, rhs: Tile, rhs2: Tile) -> Tile:
-    """Element-wise addition of three tiles.
+    """Element-wise carry addition of three tiles.
 
-    Computes lhs + rhs + rhs2 element-wise. Maps to the TADDC hardware intrinsic.
+    Computes ``src0 + src1 + carry`` element-wise. Maps to TADDC.
 
     Args:
-        lhs: Left-hand side tile
-        rhs: Right-hand side tile
-        rhs2: Third tile
+        lhs: First source tile
+        rhs: Second source tile
+        rhs2: Per-element carry-in tile, normally containing 0 or 1
 
     Returns:
         Tile wrapping the addc operation
@@ -2862,14 +2863,14 @@ def addc(lhs: Tile, rhs: Tile, rhs2: Tile) -> Tile:
 
 
 def subc(lhs: Tile, rhs: Tile, rhs2: Tile) -> Tile:
-    """Element-wise subtraction of three tiles.
+    """Element-wise carry subtraction of three tiles.
 
-    Computes lhs - rhs - rhs2 element-wise. Maps to the TSUBC hardware intrinsic.
+    Computes ``src0 - src1 + carry`` element-wise. Maps to TSUBC.
 
     Args:
-        lhs: Left-hand side tile
-        rhs: Right-hand side tile
-        rhs2: Third tile
+        lhs: Minuend tile
+        rhs: Subtrahend tile
+        rhs2: Per-element carry-in tile, normally containing 0 or 1
 
     Returns:
         Tile wrapping the subc operation
@@ -2879,14 +2880,14 @@ def subc(lhs: Tile, rhs: Tile, rhs2: Tile) -> Tile:
 
 
 def addsc(lhs: Tile, rhs: int | float | Expr | Scalar, rhs2: Tile) -> Tile:
-    """Element-wise addition of tile, scalar, and tile.
+    """Element-wise scalar carry addition.
 
-    Computes lhs + rhs + rhs2 element-wise. Maps to the TADDSC hardware intrinsic.
+    Computes ``src0 + scalar + carry`` element-wise. Maps to TADDSC.
 
     Args:
-        lhs: Left-hand side tile
-        rhs: Scalar value
-        rhs2: Third tile
+        lhs: Source tile
+        rhs: Scalar addend with the same dtype as ``lhs``
+        rhs2: Per-element carry-in tile, normally containing 0 or 1
 
     Returns:
         Tile wrapping the addsc operation
@@ -2897,14 +2898,14 @@ def addsc(lhs: Tile, rhs: int | float | Expr | Scalar, rhs2: Tile) -> Tile:
 
 
 def subsc(lhs: Tile, rhs: int | float | Expr | Scalar, rhs2: Tile) -> Tile:
-    """Element-wise subtraction of tile, scalar, and tile.
+    """Element-wise scalar carry subtraction.
 
-    Computes lhs - rhs - rhs2 element-wise. Maps to the TSUBSC hardware intrinsic.
+    Computes ``src0 - scalar + carry`` element-wise. Maps to TSUBSC.
 
     Args:
-        lhs: Left-hand side tile
-        rhs: Scalar value
-        rhs2: Third tile
+        lhs: Minuend tile
+        rhs: Scalar subtrahend with the same dtype as ``lhs``
+        rhs2: Per-element carry-in tile, normally containing 0 or 1
 
     Returns:
         Tile wrapping the subsc operation

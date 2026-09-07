@@ -95,10 +95,10 @@ lowering/compiler plumbing 使用的额外内部 op 未纳入，也不列 VPTO�
 | pto.tmaxs | TMAXS | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.tmins | TMINS | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.trems | TREMS | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 FP32 及 `[-2^24, 2^24]` 内的 INT32 scalar 同名真机 ST 已通过，覆盖 INT32 正负边界、负值与尾部 valid shape；A5 真机待验证 |
-| pto.taddc | TADD + TADD | tile | ✅ | ✅ | ❌ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
-| pto.tsubc | TSUB + TADD | tile | ✅ | ✅ | ❌ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
-| pto.taddsc | TADDS + TADD | tile | ✅ | ✅ | ❌ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
-| pto.tsubsc | TSUBS + TADD | tile | ✅ | ✅ | ❌ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
+| pto.taddc | TADD + TADD | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 真机已验证，覆盖溢出、完整/尾部 valid shape 及 result/src0 复用与不复用路径；A5 真机待验证 |
+| pto.tsubc | TSUB + TADD | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 真机已验证，覆盖借位、完整/尾部 valid shape 及 result/src0 复用与不复用路径；A5 真机待验证 |
+| pto.taddsc | TADDS + TADD | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 真机的完整、列尾及行列组合尾部场景已通过，覆盖 result/src0 复用与不复用路径；PTO ISA v0.57 的全列行尾快速路径严格预期失败；A5 真机待验证 |
+| pto.tsubsc | TSUBS + TADD | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 真机的完整、列尾及行列组合尾部场景已通过，覆盖 result/src0 复用与不复用路径；PTO ISA v0.57 的全列行尾快速路径严格预期失败；A5 真机待验证 |
 | pto.tabs | TABS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tneg | TNEG | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.texp | TEXP | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
@@ -260,6 +260,6 @@ lowering/compiler plumbing 使用的额外内部 op 未纳入，也不列 VPTO�
 | pto.tassign | TASSIGN | internal | ✅ | — | — | — | — | 失活 backend hook，不独立建 ST |
 
 **统计**：共 204 个 PTOAS 公共/兼容 op；pypto tile 前端 113 个，tensor 前端 75 个
-（另有 `pl.prefetch.*` 一族 4 个非 tile/tensor op）；同名 ST 覆盖 111 个
-（普通 ST 107，distributed ST 4）；无同名 ST 61 个（普通 51，distributed 10）；
+（另有 `pl.prefetch.*` 一族 4 个非 tile/tensor op）；同名 ST 覆盖 115 个
+（普通 ST 111，distributed ST 4）；无同名 ST 57 个（普通 47，distributed 10）；
 这 204 个中另有 32 个 op 不适合独立 ST。

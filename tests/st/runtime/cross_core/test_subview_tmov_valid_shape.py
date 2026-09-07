@@ -26,6 +26,7 @@ this case. This test guards that the matmul -> vec-epilogue -> sub-column-slice
 import pypto.language as pl
 import pytest
 import torch
+from harness import st
 
 M, K, N, SUB = 16, 128, 32, 8
 
@@ -46,25 +47,33 @@ def cube_slice(
     return out
 
 
-class TestSubviewTmovValidShape:
-    """End-to-end @pl.jit compile + execute for the gh#1649 repro."""
+def _cube_slice_case():
+    """End-to-end @pl.jit compile + execute for the gh#1649 repro.
 
-    def test_cube_slice_subcolumn(self, test_config):
-        cube_slice._cache.clear()
+    Compiling alone reproduces the ptoas non-mat tmov rejection if present;
+    running proves the sliced sub-column result as well.
+    """
+    torch.manual_seed(0)
+    x = torch.randn((M, K), dtype=torch.bfloat16)
+    w = torch.randn((N, K), dtype=torch.float32)
+    out = torch.zeros((M, SUB), dtype=torch.float32)
+    # out = 2 * (x_f @ w^T)[:, :SUB]; columns 0..SUB-1 are within w_s valid 24 rows.
+    return st.case(
+        cube_slice,
+        x,
+        w,
+        out,
+        name="cube_slice_subcolumn",
+        golden=lambda _: 2.0 * (x.float() @ w.t())[:, :SUB],
+        rtol=2e-2,
+        atol=2e-2,
+    )
 
-        torch.manual_seed(0)
-        x = torch.randn((M, K), dtype=torch.bfloat16)
-        w = torch.randn((N, K), dtype=torch.float32)
-        out = torch.zeros((M, SUB), dtype=torch.float32)
 
-        # Compiling alone reproduces the ptoas non-mat tmov rejection if present.
-        cube_slice(x, w, out, config=test_config)
-
-        # out = 2 * (x_f @ w^T)[:, :SUB]; columns 0..SUB-1 are within w_s valid 24 rows.
-        expected = 2.0 * (x.float() @ w.t())[:, :SUB]
-        assert torch.allclose(out, expected, rtol=2e-2, atol=2e-2), (
-            f"max diff = {(out - expected).abs().max().item()}"
-        )
+@st.cases(_cube_slice_case())
+def test_cube_slice_subcolumn(case_run):
+    """The sliced cube sub-column matches the torch reference."""
+    case_run.assert_passed()
 
 
 if __name__ == "__main__":

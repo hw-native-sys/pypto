@@ -60,7 +60,6 @@ from pypto.runtime.runner import (
     _SWIMLANE_FULL_LEVEL,
     _SWIMLANE_MAX_LEVEL,
     RunConfig,
-    _DfxOpts,
     _execute_compiled,
 )
 
@@ -217,7 +216,7 @@ def replay(
             list(tensors),
             platform=config.platform,
             device_id=config.device_id,
-            dfx=_DfxOpts.from_run_config(config),
+            dfx=config.dfx_options(),
             config=config,
         )
 

@@ -115,8 +115,9 @@ EXPECTED_BLIND_ARGS = {
     ("tile.gather", 0),
     ("tile.gatherb", 0),
     # --- undeclared: per-lane data, so the pass requires it to be sharded ---
-    ("tile.col_argmax", 1),
-    ("tile.col_argmin", 1),
+    # (tile.col_argmax / col_argmin arg 1 used to sit here; gh#2615 gave their
+    # deducer the row forms' exact-shape check, so type consistency decides them
+    # now and no declaration is reachable for either.)
     ("tile.col_expand", 1),
     ("tile.col_expand_add", 1),
     ("tile.col_expand_div", 1),

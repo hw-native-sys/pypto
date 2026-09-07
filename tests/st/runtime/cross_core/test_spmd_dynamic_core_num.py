@@ -31,6 +31,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 import pypto.language as pl  # noqa: E402
+from harness import st  # noqa: E402
 
 B_DYN = pl.dynamic("B_DYN")
 B = 8  # concrete batch size used by the tests
@@ -68,33 +69,49 @@ def spmd_core_num_floordiv(
     return out
 
 
-class TestSpmdDynamicCoreNum:
+def _dyn_mul_case():
+    """``pl.spmd(b_dim * 3 // 4)`` compiles and casts the dispatched rows.
+
+    Only rows ``[0, cores)`` are dispatched and written; the tail is undefined by
+    contract, so the golden marks it NaN — ``validate_golden`` treats a NaN
+    golden element as don't-care, which is the same region the original
+    ``out[:cores]`` slice compared.
+    """
+    torch.manual_seed(0)
+    x = torch.randn(B, 64, 64, dtype=torch.bfloat16)
+    out = torch.zeros(B, 64, 64, dtype=torch.float32)
+    cores = B * 3 // 4
+
+    def golden(_):
+        expected = torch.full((B, 64, 64), float("nan"), dtype=torch.float32)
+        expected[:cores] = x.float()[:cores]
+        return expected
+
+    return st.case(
+        spmd_core_num_mul, x, out, name="spmd_core_num_dyn_mul", golden=golden, rtol=1e-3, atol=1e-3
+    )
+
+
+def _dyn_floordiv_case():
+    """``pl.spmd(b_dim // 2)`` compiles and casts every element."""
+    torch.manual_seed(0)
+    x = torch.randn(B, 64, 64, dtype=torch.bfloat16)
+    out = torch.zeros(B, 64, 64, dtype=torch.float32)
+    return st.case(
+        spmd_core_num_floordiv,
+        x,
+        out,
+        name="spmd_core_num_dyn_floordiv",
+        golden=lambda _: x.float(),
+        rtol=1e-3,
+        atol=1e-3,
+    )
+
+
+@st.cases(_dyn_mul_case(), _dyn_floordiv_case())
+def test_spmd_dynamic_core_num(case_run):
     """``pl.spmd`` dispatched with a composite dynamic ``core_num`` (issue #1579)."""
-
-    def test_core_num_dyn_mul(self, test_config):
-        """``pl.spmd(b_dim * 3 // 4)`` compiles and casts the dispatched rows."""
-        spmd_core_num_mul._cache.clear()
-        torch.manual_seed(0)
-        x = torch.randn(B, 64, 64, dtype=torch.bfloat16)
-        out = torch.zeros(B, 64, 64, dtype=torch.float32)
-        spmd_core_num_mul(x, out, config=test_config)
-        cores = B * 3 // 4  # only rows [0, cores) are dispatched/written
-        expected = x.float()[:cores]
-        assert torch.allclose(out[:cores], expected, rtol=1e-3, atol=1e-3), (
-            f"dyn*static core_num: max diff = {(out[:cores] - expected).abs().max().item()}"
-        )
-
-    def test_core_num_dyn_floordiv(self, test_config):
-        """``pl.spmd(b_dim // 2)`` compiles and casts every element."""
-        spmd_core_num_floordiv._cache.clear()
-        torch.manual_seed(0)
-        x = torch.randn(B, 64, 64, dtype=torch.bfloat16)
-        out = torch.zeros(B, 64, 64, dtype=torch.float32)
-        spmd_core_num_floordiv(x, out, config=test_config)
-        expected = x.float()
-        assert torch.allclose(out, expected, rtol=1e-3, atol=1e-3), (
-            f"dyn//static core_num: max diff = {(out - expected).abs().max().item()}"
-        )
+    case_run.assert_passed()
 
 
 if __name__ == "__main__":

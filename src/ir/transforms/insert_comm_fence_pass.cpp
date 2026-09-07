@@ -33,7 +33,7 @@
  * offsets) region it invalidates that sub-region; with no argument it
  * invalidates the whole GM address space (`... cacheinvalid all ...`).
  *
- * So a single structural traversal inserts, per op, with no control-flow state:
+ * So a single structural traversal inserts, per op:
  *
  *   - after each **local publishing write** (window-bound `tile.store`, or `get`
  *     into a local destination): a whole-tensor region `system.cacheinvalid` of
@@ -46,7 +46,12 @@
  *     fence, however, is always an explicit `system.fence` op inserted here — the
  *     codegen must not embed it. (TODO: a first-class IR representation of the
  *     peer-region cacheinvalid would let the pass own the whole marker.)
- *   - after each **wait**: a no-arg (whole-GM) `system.cacheinvalid`.
+ *   - after each **wait**: a no-arg (whole-GM) `system.cacheinvalid`. Batched:
+ *     a *pure wait-loop* (a for/while whose body contains only waits through
+ *     seq/if nesting, with memory-inert control expressions) and a run of
+ *     consecutive waits each share ONE whole-GM cacheinvalid after the loop/run
+ *     instead of one after every wait — nothing memory-touching happens between
+ *     the waits, so after the last is equivalent to after every wait.
  *   - **notify**: nothing.
  *
  * Example shapes (`cacheinvalid(peer)` shown in brackets is codegen-only, not IR):
@@ -68,6 +73,7 @@
 #include <cstddef>
 #include <memory>
 #include <optional>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -197,6 +203,39 @@ bool IsCacheInvalidAll(const StmtPtr& stmt) {
   return call && IsOp(call, "system.cacheinvalid") && call->args_.empty();
 }
 
+// True if evaluating `expr` can perform a memory read (a cached GM scalar load).
+// Control expressions (if conditions, loop bounds/conditions) that read GM
+// disqualify a wait-loop from being "pure": the consume-side whole-GM
+// cacheinvalid cannot be deferred past a read that could observe stale peer
+// data (an InCore `tensor.read` lowers to a cached `pto.load_scalar`).
+bool ExprMayRead(const ExprPtr& expr) {
+  if (!expr) return false;
+  if (auto call = As<Call>(expr)) {
+    if (IsOp(call, "tensor.read")) return true;
+    for (const auto& arg : call->args_) {
+      if (ExprMayRead(arg)) return true;
+    }
+    return false;
+  }
+  if (auto bin = As<BinaryExpr>(expr)) {
+    if (ExprMayRead(bin->left_)) return true;
+    return ExprMayRead(bin->right_);
+  }
+  if (auto un = As<UnaryExpr>(expr)) {
+    return ExprMayRead(un->operand_);
+  }
+  if (auto tuple = As<MakeTuple>(expr)) {
+    for (const auto& el : tuple->elements_) {
+      if (ExprMayRead(el)) return true;
+    }
+    return false;
+  }
+  if (auto get = As<TupleGetItemExpr>(expr)) {
+    return ExprMayRead(get->tuple_);
+  }
+  return false;
+}
+
 // Whole-tensor cacheinvalid for `target`: region = the target's full shape at
 // all-zero offsets. Reuses the tensor type's dim exprs (in scope — the target
 // was just written), so no per-write offset SSA is needed.
@@ -245,7 +284,15 @@ class InsertCommMarkers : public IRMutator {
     for (size_t i = 0; i < stmts.size(); ++i) {
       const StmtPtr& child = stmts[i];
       const Effect eff = StmtEffect(child);
+      // A pure wait-loop (the mesh composite's `for src: if src != me: wait`)
+      // performs no memory access between the waits, so ONE whole-GM
+      // cacheinvalid after the loop replaces the per-wait invalidates inside
+      // it. Suppress the per-wait insertion while visiting such a loop's body.
+      const bool pure_wait_loop = IsPureWaitLoop(child);
+      const bool saved_pwl = in_pure_wait_loop_;
+      if (pure_wait_loop) in_pure_wait_loop_ = true;
       auto new_child = VisitStmt(child);
+      in_pure_wait_loop_ = saved_pwl;
       if (new_child.get() != child.get()) changed = true;
       out.push_back(std::move(new_child));
       // Publish side, local write: a region cacheinvalid + fence after it.
@@ -276,10 +323,21 @@ class InsertCommMarkers : public IRMutator {
           changed = true;
         }
       }
-      // Consume side: a whole-GM cacheinvalid after each wait.
-      if (eff == Effect::kWait && !(i + 1 < stmts.size() && IsCacheInvalidAll(stmts[i + 1]))) {
-        out.push_back(MakeCacheInvalidAll(child->span_));
-        changed = true;
+      // Consume side: a whole-GM cacheinvalid after waits, batched. A pure
+      // wait-loop gets one after the loop; a run of consecutive waits shares
+      // one after the run (no memory access between the waits in either case).
+      if (pure_wait_loop) {
+        if (!(i + 1 < stmts.size() && IsCacheInvalidAll(stmts[i + 1]))) {
+          out.push_back(MakeCacheInvalidAll(child->span_));
+          changed = true;
+        }
+      } else if (eff == Effect::kWait && !in_pure_wait_loop_) {
+        const bool next_is_wait = i + 1 < stmts.size() && StmtEffect(stmts[i + 1]) == Effect::kWait;
+        const bool already = i + 1 < stmts.size() && IsCacheInvalidAll(stmts[i + 1]);
+        if (!next_is_wait && !already) {
+          out.push_back(MakeCacheInvalidAll(child->span_));
+          changed = true;
+        }
       }
     }
     if (!changed) return op;
@@ -310,7 +368,17 @@ class InsertCommMarkers : public IRMutator {
   StmtPtr MarkBody(const StmtPtr& body) {
     if (As<SeqStmts>(body)) return VisitStmt(body);
     const Effect eff = StmtEffect(body);
+    // A bare body that is itself a pure wait-loop (a single-loop function or an
+    // if/for body) must suppress the per-wait invalidates while its body is
+    // visited — exactly like the SeqStmts path does for a pure loop child — and
+    // emit ONE whole-GM cacheinvalid after the loop below. Without the
+    // suppression the bare-body shape would keep a per-iteration flush and add
+    // a flush after the loop, defeating the batching.
+    const bool pure_wait_loop = IsPureWaitLoop(body);
+    const bool saved_pwl = in_pure_wait_loop_;
+    if (pure_wait_loop) in_pure_wait_loop_ = true;
     auto visited = VisitStmt(body);
+    in_pure_wait_loop_ = saved_pwl;
     std::vector<StmtPtr> out{visited};
     if (auto target = WriteTargetToInvalidate(body)) {
       out.push_back(MakeCacheInvalid(target, body->span_));
@@ -322,7 +390,10 @@ class InsertCommMarkers : public IRMutator {
       out.push_back(MakeCacheInvalidAll(body->span_));
       out.push_back(MakeNoArgOp("system.fence", body->span_));
     }
-    if (eff == Effect::kWait) out.push_back(MakeCacheInvalidAll(body->span_));
+    if (eff == Effect::kWait && !saved_pwl) out.push_back(MakeCacheInvalidAll(body->span_));
+    // A bare body that is itself a pure wait-loop (e.g. a single-loop function
+    // or if/for body): one whole-GM cacheinvalid after the loop.
+    if (!saved_pwl && pure_wait_loop) out.push_back(MakeCacheInvalidAll(body->span_));
     if (out.size() == 1) return visited;
     return SeqStmts::Flatten(std::move(out), body->span_);
   }
@@ -335,6 +406,93 @@ class InsertCommMarkers : public IRMutator {
     result->body_ = std::move(new_body);
     return result;
   }
+
+  // True if `stmt` is a for/while whose body (through seq/if/for/while nesting)
+  // contains only `pld.system.wait` leaves — and at least one — and whose
+  // control expressions are memory-inert. No read or write can occur between
+  // the waits, so a single consume-side whole-GM cacheinvalid after the loop is
+  // equivalent to one after every wait — turning (P-1) whole-cache flushes into
+  // 1 per barrier generation in the mesh composite.
+  bool IsPureWaitLoop(const StmtPtr& stmt) {
+    if (auto for_ = As<ForStmt>(stmt)) {
+      return ClassifyWaitPurity(for_->body_) == WaitPurity::kPureWithWait;
+    }
+    if (auto while_ = As<WhileStmt>(stmt)) {
+      return ClassifyWaitPurity(while_->body_) == WaitPurity::kPureWithWait;
+    }
+    return false;
+  }
+
+  // Wait-only structure, optionally with at least one wait. The third state
+  // exists because a wait-free body is NOT a "pure wait-loop" for batching:
+  // an empty SeqStmts (or an empty IfStmt branch) is vacuously "wait-only", so
+  // a boolean cannot express the distinction — and treating it as pure would
+  // make the pass append a whole-GM cacheinvalid after a loop that emitted
+  // nothing before, a regression in a pass whose point is removing flushes.
+  enum class WaitPurity { kNotPure, kPureNoWait, kPureWithWait };
+
+  // Memoized purity. Without the memo, every enclosing SeqStmts/MarkBody would
+  // re-scan the whole descendant subtree of a nested pure wait-loop before the
+  // mutator traversal does the same for each inner loop — O(N²) for N nested
+  // loops. Each node is classified once per pass.
+  WaitPurity ClassifyWaitPurity(const StmtPtr& stmt) {
+    if (!stmt) return WaitPurity::kPureNoWait;
+    auto it = purity_cache_.find(stmt.get());
+    if (it != purity_cache_.end()) return it->second;
+    const WaitPurity result = ClassifyWaitPurityImpl(stmt);
+    purity_cache_.emplace(stmt.get(), result);
+    return result;
+  }
+
+  WaitPurity ClassifyWaitPurityImpl(const StmtPtr& stmt) {
+    if (auto seq = As<SeqStmts>(stmt)) {
+      bool any_wait = false;
+      for (const auto& s : seq->stmts_) {
+        const WaitPurity c = ClassifyWaitPurity(s);
+        if (c == WaitPurity::kNotPure) return WaitPurity::kNotPure;
+        if (c == WaitPurity::kPureWithWait) any_wait = true;
+      }
+      return any_wait ? WaitPurity::kPureWithWait : WaitPurity::kPureNoWait;
+    }
+    if (auto iff = As<IfStmt>(stmt)) {
+      if (ExprMayRead(iff->condition_)) return WaitPurity::kNotPure;
+      const WaitPurity then_p = ClassifyWaitPurity(iff->then_body_);
+      if (then_p == WaitPurity::kNotPure) return WaitPurity::kNotPure;
+      // `if c: wait` with no else stays pure: on the fall-through path the body
+      // performs no memory access, so the loop may wait on some iterations and
+      // skip others without ever touching memory in between.
+      if (!iff->else_body_.has_value()) return then_p;
+      const WaitPurity else_p = ClassifyWaitPurity(iff->else_body_.value());
+      if (else_p == WaitPurity::kNotPure) return WaitPurity::kNotPure;
+      // Pure in both branches AND at least one branch contains a wait. An empty
+      // else (kPureNoWait) must not disqualify an otherwise-waiting if.
+      return (then_p == WaitPurity::kPureWithWait || else_p == WaitPurity::kPureWithWait)
+                 ? WaitPurity::kPureWithWait
+                 : WaitPurity::kPureNoWait;
+    }
+    if (auto for_ = As<ForStmt>(stmt)) {
+      // Loop bounds are control expressions evaluated each iteration; a GM read
+      // there must disqualify the loop — the deferred invalidate could otherwise
+      // be observed by a stale cached load.
+      if (ExprMayRead(for_->start_) || ExprMayRead(for_->stop_) || ExprMayRead(for_->step_)) {
+        return WaitPurity::kNotPure;
+      }
+      return ClassifyWaitPurity(for_->body_);
+    }
+    if (auto while_ = As<WhileStmt>(stmt)) {
+      if (ExprMayRead(while_->condition_)) return WaitPurity::kNotPure;
+      return ClassifyWaitPurity(while_->body_);
+    }
+    return IsLeafOp(stmt, "pld.system.wait") ? WaitPurity::kPureWithWait : WaitPurity::kNotPure;
+  }
+
+  /// Set while visiting a pure wait-loop's body: suppresses the per-wait
+  /// consume-side cacheinvalid (the loop's containing sequence emits one
+  /// whole-GM cacheinvalid after the loop instead).
+  bool in_pure_wait_loop_ = false;
+
+  /// Purity memo keyed by original node pointer (see `ClassifyWaitPurity`).
+  std::unordered_map<const Stmt*, WaitPurity> purity_cache_;
 };
 
 }  // namespace

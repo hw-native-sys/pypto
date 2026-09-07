@@ -3,6 +3,49 @@
 Function declaration forms, parameter directions, cross-module reuse, and how to
 print IR back to Python syntax.
 
+## JIT constants and compilation reuse
+
+`@pl.jit` includes referenced `int`, `float`, and `bool` globals and closure
+bindings in its compilation key, including constants used by transitive JIT
+helpers and source annotations. Rebinding a referenced constant causes a new
+specialization; changing an unrelated global or a name shadowed by a body-local
+variable does not invalidate the body dependency key.
+
+```python
+BLOCK = 32
+
+@pl.jit
+def slice_kernel(x: pl.Tensor[[128, 128], pl.FP32]) -> pl.Tensor[[BLOCK, 128], pl.FP32]:
+    with pl.at(level=pl.Level.CORE_GROUP):
+        result = pl.slice(x, [BLOCK, 128], [0, 0])
+    return result
+
+first = slice_kernel.compile()
+BLOCK = 64
+second = slice_kernel.compile()  # A distinct specialization with 64 rows.
+```
+
+Name resolution, key construction, and specialization share a per-call namespace
+snapshot. Constants rebound after capture affect the next call, not the artifact
+being compiled. Each helper retains its own namespace, even when constants have
+the same name. Rebinding a referenced JIT helper also refreshes the dependency
+graph. Each concurrent call retains its captured graph throughout key construction
+and specialization. The hash also includes each helper's function type, level, and
+`auto_scope` setting, so rebinding an identically sourced function with different
+compilation attributes cannot reuse the old artifact.
+
+Each module's globals are copied once per request; helpers use closure overlays
+on that shared snapshot. An empty closure cell still shadows a same-named global.
+Validated graphs retain their Python source hashes, and declared layouts are
+reused while their annotation bindings stay unchanged. External source files are
+still checked on each request. Referenced closure constants are covered by the
+source dependency hash without a separate closure-key component.
+
+The snapshot copies bindings only: mutating arbitrary configuration objects
+or editing compiler/source files during compilation is not supported by this
+constant-tracking mechanism. This behavior does not enable persistent artifact
+caching; compiled objects are still reused within the process.
+
 ## Functions
 
 ```python

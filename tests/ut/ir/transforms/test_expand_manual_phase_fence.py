@@ -648,14 +648,17 @@ def test_non_orchestration_function_is_ignored():
         def kernel(self) -> pl.Scalar[pl.TASK_ID]:
             return pl.system.task_invalid()
 
+        # A device function may not declare a Scalar return, TASK_ID included
+        # (IRProperty.NoScalarKernelReturn) -- the handle rides the call, not
+        # the signature. The AIV type is what this test pins; the sibling
+        # fixtures' TaskId return is Orchestration-only scaffolding.
         @pl.function(type=pl.FunctionType.AIV)
-        def main(self) -> pl.Scalar[pl.TASK_ID]:
+        def main(self):
             with pl.manual_scope():
                 tids = pl.array.create(4, pl.TASK_ID)
                 for p in pl.parallel(4):
                     a, a_tid = pl.submit(self.kernel, deps=[tids])
                     b, b_tid = pl.submit(self.kernel, deps=[tids])
-            return pl.system.task_invalid()
 
     @pl.program
     class Expected:
@@ -664,13 +667,12 @@ def test_non_orchestration_function_is_ignored():
             return pl.system.task_invalid()
 
         @pl.function(type=pl.FunctionType.AIV)
-        def main(self) -> pl.Scalar[pl.TASK_ID]:
+        def main(self):
             with pl.manual_scope():
                 tids = pl.array.create(4, pl.TASK_ID)
                 for p in pl.parallel(4):
                     a, a_tid = pl.submit(self.kernel, deps=[tids])
                     b, b_tid = pl.submit(self.kernel, deps=[tids])
-            return pl.system.task_invalid()
 
     _assert_expands(Before, Expected)
 

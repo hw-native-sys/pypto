@@ -20,9 +20,10 @@
 //   scalar(0) = nranks
 //   scalar(1) = CommContext device pointer
 //
-// Each rank's data buffer holds SIZE elements (product of tensor shapes). The
-// ring partitions data into NR contiguous chunks of chunk_elems = SIZE // NR
-// and performs RS+AG in-place on those chunk slots. The signal holds one row
+// Each rank's data buffer holds numel elements (product of tensor shapes). The
+// ring partitions data into NR balanced, potentially ragged chunks — chunk r
+// spans [floor(numel*r/NR), floor(numel*(r+1)/NR)) — and performs RS+AG in-place
+// on those chunk slots. The signal holds one row
 // per ring round (2*(NR-1) rounds) plus a final row for the return barrier.
 //
 // Data movement is PUSH (remote write) via pto::comm::TPUT, mirroring the
@@ -68,6 +69,15 @@ static constexpr int64_t kTileCount = 256;
 // NeighborBarrier is enabled by default since the push model provides the
 // ordering the pull model lacked.
 static constexpr bool kUseNeighborBarrier = true;
+
+// Balanced ragged segment start for chunk r: floor(numel * r / nranks).
+// The ring partitions the per-rank buffer into NR contiguous chunks with these
+// boundaries, so chunk lengths differ by at most one element and the trailing
+// chunk may be shorter (mirrors the InCore composite ring's floor(i * SIZE / NR)
+// segment boundaries — #2161).
+AICORE inline int64_t RingChunkStart(int64_t numel, int nranks, int r) {
+  return (numel * static_cast<int64_t>(r)) / static_cast<int64_t>(nranks);
+}
 
 template <typename T>
 AICORE inline __gm__ T *CommRemotePtr(__gm__ CommContext *ctx, __gm__ T *local_ptr, int pe) {
@@ -195,15 +205,18 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
 
   // Soft guards: on any unsupported shape the kernel drains its pipes and
   // returns without touching data. The host lowering pass and the builtin
-  // type deducer validate divisibility at compile time, so a well-formed
-  // program never hits these early returns; they exist only to keep the
-  // device kernel memory-safe if invoked directly.
-  if (nranks <= 1 || nranks > kMaxSupportedRanks || numel <= 0 || (numel % nranks) != 0) {
+  // type deducer no longer enforce divisibility — ragged numel is handled by
+  // the balanced RingChunkStart geometry below — so these early returns exist
+  // only to keep the device kernel memory-safe if invoked directly.
+  if (nranks <= 1 || nranks > kMaxSupportedRanks || numel <= 0) {
     pipe_barrier(PIPE_ALL);
     return;
   }
 
-  const int64_t chunk_elems = numel / nranks;
+  // Ragged chunk geometry: chunk r spans [RingChunkStart(numel, nranks, r),
+  // RingChunkStart(numel, nranks, r+1)).  The staging tile must cover the
+  // largest chunk (ceil(numel / nranks)) but no more.
+  const int64_t max_chunk_elems = (numel + nranks - 1) / nranks;
 
   const int expected_rounds = 2 * (nranks - 1) + 1;
   if (signal_rows < expected_rounds || signal_cols < nranks) {
@@ -228,7 +241,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // (ColMaskInternal), NOT the GlobalTensor shape, so the tile's column mask
   // is narrowed to each chunk's exact extent below; a 256-col tile with a
   // shorter transfer would over-read/overwrite adjacent chunk slots.
-  const int tile_cols = static_cast<int>(chunk_elems < kTileCount ? chunk_elems : kTileCount);
+  const int tile_cols = static_cast<int>(max_chunk_elems < kTileCount ? max_chunk_elems : kTileCount);
   TileData send_tile(1, tile_cols);
   TASSIGN(send_tile, 0x10000);
 
@@ -249,17 +262,19 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
 
     const int right = (my_rank + 1) % nranks;
     const int send_idx = (my_rank - step + nranks) % nranks;
+    const int64_t send_base = RingChunkStart(numel, nranks, send_idx);
+    const int64_t send_end = RingChunkStart(numel, nranks, send_idx + 1);
+    const int64_t send_len = send_end - send_base;
 
-    for (int64_t tile_off = 0; tile_off < chunk_elems; tile_off += tile_cols) {
-      int64_t remain64 = chunk_elems - tile_off;
+    for (int64_t tile_off = 0; tile_off < send_len; tile_off += tile_cols) {
+      int64_t remain64 = send_len - tile_off;
       int tile_elems = static_cast<int>(remain64 < tile_cols ? remain64 : tile_cols);
       send_tile.ColMaskInternal = tile_elems;
 
       ShapeDyn tile_shape(1, 1, 1, 1, tile_elems);
       StrideDyn tile_stride(tile_elems, tile_elems, tile_elems, tile_elems, 1);
 
-      __gm__ {{dtype_cpp}} *src_ptr =
-          chunks + static_cast<size_t>(send_idx * chunk_elems + tile_off);
+      __gm__ {{dtype_cpp}} *src_ptr = chunks + static_cast<size_t>(send_base + tile_off);
       __gm__ {{dtype_cpp}} *dst_ptr = CommRemotePtr(comm_ctx, src_ptr, right);
       Global src_g(src_ptr, tile_shape, tile_stride);
       Global dst_g(dst_ptr, tile_shape, tile_stride);
@@ -282,17 +297,19 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
 
     const int right = (my_rank + 1) % nranks;
     const int send_idx = (my_rank - step + 1 + nranks) % nranks;
+    const int64_t send_base = RingChunkStart(numel, nranks, send_idx);
+    const int64_t send_end = RingChunkStart(numel, nranks, send_idx + 1);
+    const int64_t send_len = send_end - send_base;
 
-    for (int64_t tile_off = 0; tile_off < chunk_elems; tile_off += tile_cols) {
-      int64_t remain64 = chunk_elems - tile_off;
+    for (int64_t tile_off = 0; tile_off < send_len; tile_off += tile_cols) {
+      int64_t remain64 = send_len - tile_off;
       int tile_elems = static_cast<int>(remain64 < tile_cols ? remain64 : tile_cols);
       send_tile.ColMaskInternal = tile_elems;
 
       ShapeDyn tile_shape(1, 1, 1, 1, tile_elems);
       StrideDyn tile_stride(tile_elems, tile_elems, tile_elems, tile_elems, 1);
 
-      __gm__ {{dtype_cpp}} *src_ptr =
-          chunks + static_cast<size_t>(send_idx * chunk_elems + tile_off);
+      __gm__ {{dtype_cpp}} *src_ptr = chunks + static_cast<size_t>(send_base + tile_off);
       __gm__ {{dtype_cpp}} *dst_ptr = CommRemotePtr(comm_ctx, src_ptr, right);
       Global src_g(src_ptr, tile_shape, tile_stride);
       Global dst_g(dst_ptr, tile_shape, tile_stride);

@@ -20,7 +20,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
-from pypto.runtime.runner import _DfxOpts
+from pypto.runtime.runner import DfxOptions
 
 execute_artifact = importlib.import_module("pypto.runtime.execute_artifact")
 main = execute_artifact.main
@@ -104,7 +104,7 @@ def test_dfx_flags_parsed_into_dfx_opts(tmp_path):
         )
     assert rc == 0
     _, kwargs = run.call_args
-    assert kwargs["dfx"] == _DfxOpts(
+    assert kwargs["dfx"] == DfxOptions(
         enable_chip_swimlane=True,
         enable_dump_args=2,
         enable_pmu=5,
@@ -117,7 +117,7 @@ def test_plain_run_has_default_dfx(tmp_path):
     with patch.object(execute_artifact, "execute_artifact_dir") as run:
         main(_argv(tmp_path))
     _, kwargs = run.call_args
-    assert kwargs["dfx"] == _DfxOpts()
+    assert kwargs["dfx"] == DfxOptions()
     # Default (manual repro): validate in-process.
     assert kwargs["validate"] is True
 

@@ -306,3 +306,104 @@ def test_scope_form_operator_mapping(written, expected_op):
     code = _emit_scope_predicate(written)
     assert f".op = PredicateOp::{expected_op};" in code, code
     assert ".target = 3;" in code, code
+
+
+# ---------------------------------------------------------------------------
+# Scope form — ``with pl.at(level=pl.Level.CORE_GROUP, predicate=...)``
+# ---------------------------------------------------------------------------
+#
+# Same rail as the pl.spmd scope form, one pass earlier (OutlineIncoreScopes
+# rather than OutlineClusterScopes). The interesting difference is the operand's
+# provenance: a pl.at body writes ``rc`` with ``pl.store``, so the outliner
+# exports it under a fresh call-site Var and the attr must be resolved through
+# ``store_target_renames_`` — otherwise the Submit reads a Var that no longer
+# exists in the parent function and the ``ext_rc`` reference never materialises.
+
+_AT_PREDICATE_SRC = """
+import pypto.language as pl
+
+
+@pl.program
+class Prog:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        x: pl.Tensor[[512, 128], pl.FP32],
+        out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+        rc: pl.Out[pl.Tensor[[512, 128], pl.INT32]],
+    ) -> pl.Tensor[[512, 128], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP) as g_tid:
+            g = pl.load(rc, [0, 0], [128, 128])
+            rc = pl.store(g, [0, 0], rc)
+        with pl.at(level=pl.Level.CORE_GROUP, deps=[g_tid], predicate=({PRED}){WINDOWIZE}) as t:
+            v = pl.load(x, [0, 0], [128, 128])
+            out = pl.store(v, [0, 0], out)
+        return out
+"""
+
+
+def _emit_at_predicate(predicate_src: str, *, windowize: bool = False) -> str:
+    """Compile a program whose ``with pl.at(...)`` scope carries ``predicate_src``."""
+    src = _AT_PREDICATE_SRC.replace("{PRED}", predicate_src).replace(
+        "{WINDOWIZE}", ", windowize=True" if windowize else ""
+    )
+    return _generate_orch_full_pipeline(pl.parse_program(src), allow_relaxed_verification=True)
+
+
+def test_at_form_emits_set_predicate_block():
+    """The pl.at form lowers to the same runtime sequence as pl.spmd_submit."""
+    code = _emit_at_predicate("rc[0, 0] > 0")
+    assert "CoreTaskPredicate" in code, code
+    # The store-produced operand resolved to the orchestration ext_ reference
+    # rather than to the dropped scope-local post-store alias.
+    assert ".operand.tensor = &ext_rc;" in code, code
+    assert ".operand.ndims = 2;" in code, code
+    assert ".op = PredicateOp::GT;" in code, code
+    assert ".target = 0;" in code, code
+    # Exactly one predicated task (the second scope), not the gate scope.
+    assert code.count("set_predicate(") == 1, code
+
+
+def test_at_form_set_predicate_precedes_task_submit():
+    code = _emit_at_predicate("rc[1, 2] > 0")
+    set_pred_at = code.index(".set_predicate(")
+    submit_after = code.index("rt_submit_", set_pred_at)
+    assert set_pred_at < submit_after, "set_predicate must be emitted before the task's rt_submit_*"
+
+
+def test_at_form_index_order_is_preserved():
+    code = _emit_at_predicate("rc[1, 2] > 0")
+    assert ".operand.indices[0] = 1;" in code, code
+    assert ".operand.indices[1] = 2;" in code, code
+
+
+@pytest.mark.parametrize(
+    "written,expected_op",
+    [
+        ("rc[1, 2] >= 3", "GE"),
+        ("rc[1, 2] != 3", "NE"),
+        # Constant on the left — codegen flips so the tensor is the operand.
+        ("3 < rc[1, 2]", "GT"),
+        ("3 >= rc[1, 2]", "LE"),
+    ],
+)
+def test_at_form_operator_mapping(written, expected_op):
+    """The pl.at route feeds codegen the same unmodified comparison Expr."""
+    code = _emit_at_predicate(written)
+    assert f".op = PredicateOp::{expected_op};" in code, code
+    assert ".target = 3;" in code, code
+
+
+def test_at_form_predicate_survives_window_externalization():
+    """``windowize=True`` is pl.at-only, and it rebuilds the Submit.
+
+    ``WindowExternalization`` rewrites a Submit through ``SubmitToCallView`` and
+    reconstructs it, dropping the keys the view synthesises from first-class
+    fields (``kViewSynthesizedKeys``) and rethreading the fields explicitly. Get
+    that filter wrong and the predicate is either duplicated as a stale attr or
+    lost. No other DSL surface reaches this combination, so this is the only
+    end-to-end cover for the predicate entry in that filter.
+    """
+    code = _emit_at_predicate("rc[0, 0] > 0", windowize=True)
+    assert code.count("set_predicate(") == 1, code
+    assert ".op = PredicateOp::GT;" in code, code

@@ -10,7 +10,7 @@
 """
 Activation Function System Tests for PyPTO.
 
-Four activation patterns are demonstrated:
+Four activation patterns are demonstrated, all on 32x128 input:
   1. SiLU   — x * sigmoid(x)
   2. GELU   — x * sigmoid(1.702 * x)
   3. SwiGLU — gate * sigmoid(gate) * up
@@ -20,68 +20,37 @@ Four activation patterns are demonstrated:
 import pytest
 import torch
 from examples.beginner.activation import geglu, gelu, silu, swiglu
+from harness import st
+
+SHAPE = (32, 128)
 
 
-class TestSiluActivation:
-    """SiLU (Swish) activation with 32x128 input: output = x * sigmoid(x)."""
-
-    def test_silu_activation(self, test_config):
-        silu._cache.clear()
-        torch.manual_seed(0)
-        x = torch.randn(32, 128, dtype=torch.float32)
-        output = torch.zeros_like(x)
-        silu(x, output, config=test_config)
-        expected = x * torch.sigmoid(x)
-        assert torch.allclose(output, expected, rtol=1e-5, atol=1e-5), (
-            f"silu failed: max diff = {(output - expected).abs().max().item()}"
-        )
+def _unary_case(kernel, name, golden_of_x):
+    """A one-input activation: output = f(x)."""
+    torch.manual_seed(0)
+    x = torch.randn(*SHAPE, dtype=torch.float32)
+    output = torch.zeros_like(x)
+    return st.case(kernel, x, output, name=name, golden=lambda _: golden_of_x(x))
 
 
-class TestGeluActivation:
-    """GELU activation with 32x128 input: output = x * sigmoid(1.702 * x)."""
-
-    def test_gelu_activation(self, test_config):
-        gelu._cache.clear()
-        torch.manual_seed(0)
-        x = torch.randn(32, 128, dtype=torch.float32)
-        output = torch.zeros_like(x)
-        gelu(x, output, config=test_config)
-        expected = x * torch.sigmoid(1.702 * x)
-        assert torch.allclose(output, expected, rtol=1e-5, atol=1e-5), (
-            f"gelu failed: max diff = {(output - expected).abs().max().item()}"
-        )
+def _gated_case(kernel, name, golden_of_gate_up):
+    """A gated activation: output = f(gate, up)."""
+    torch.manual_seed(0)
+    gate = torch.randn(*SHAPE, dtype=torch.float32)
+    up = torch.randn(*SHAPE, dtype=torch.float32)
+    output = torch.zeros_like(gate)
+    return st.case(kernel, gate, up, output, name=name, golden=lambda _: golden_of_gate_up(gate, up))
 
 
-class TestSwigluActivation:
-    """SwiGLU activation with 32x128 input: output = gate * sigmoid(gate) * up."""
-
-    def test_swiglu_activation(self, test_config):
-        swiglu._cache.clear()
-        torch.manual_seed(0)
-        gate = torch.randn(32, 128, dtype=torch.float32)
-        up = torch.randn(32, 128, dtype=torch.float32)
-        output = torch.zeros_like(gate)
-        swiglu(gate, up, output, config=test_config)
-        expected = gate * torch.sigmoid(gate) * up
-        assert torch.allclose(output, expected, rtol=1e-5, atol=1e-5), (
-            f"swiglu failed: max diff = {(output - expected).abs().max().item()}"
-        )
-
-
-class TestGegluActivation:
-    """GeGLU activation with 32x128 input: output = gate * sigmoid(1.702 * gate) * up."""
-
-    def test_geglu_activation(self, test_config):
-        geglu._cache.clear()
-        torch.manual_seed(0)
-        gate = torch.randn(32, 128, dtype=torch.float32)
-        up = torch.randn(32, 128, dtype=torch.float32)
-        output = torch.zeros_like(gate)
-        geglu(gate, up, output, config=test_config)
-        expected = gate * torch.sigmoid(1.702 * gate) * up
-        assert torch.allclose(output, expected, rtol=1e-5, atol=1e-5), (
-            f"geglu failed: max diff = {(output - expected).abs().max().item()}"
-        )
+@st.cases(
+    _unary_case(silu, "silu", lambda x: x * torch.sigmoid(x)),
+    _unary_case(gelu, "gelu", lambda x: x * torch.sigmoid(1.702 * x)),
+    _gated_case(swiglu, "swiglu", lambda gate, up: gate * torch.sigmoid(gate) * up),
+    _gated_case(geglu, "geglu", lambda gate, up: gate * torch.sigmoid(1.702 * gate) * up),
+)
+def test_activation(case_run):
+    """Each activation kernel matches its torch reference."""
+    case_run.assert_passed()
 
 
 if __name__ == "__main__":

@@ -359,10 +359,10 @@ class LoopResidencyInventory : public IRVisitor {
     if (AsVarLike(value)) return false;
     auto call = As<Call>(value);
     if (!call || !call->op_) return true;
-    if (op_predicates::IsBufferAliasingViewOp(call->op_->name_)) return false;
-    auto& registry = OpRegistry::GetInstance();
-    if (!registry.IsRegistered(call->op_->name_)) return true;
-    return !registry.GetEntry(call->op_->name_).GetOutputReusesInputArg().has_value();
+    // "Does this result get to choose its own buffer" is exactly the question
+    // OutputInheritsSourceBuffer answers (zero-copy view OR declared in-place
+    // reuse); an unregistered op name is a user function, which owns its result.
+    return !op_predicates::OutputInheritsSourceBuffer(call->op_->name_);
   }
 
   void RecordOwnedTileFootprint(const VarPtr& var, const ExprPtr& value) {

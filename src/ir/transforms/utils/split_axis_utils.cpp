@@ -15,6 +15,7 @@
 #include <any>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -311,22 +312,25 @@ FullWidthOperand FindFullWidthOperand(const CallPtr& call, int result_split_dim,
 // the rule it is inverting. A result axis that is one of the synthetic padded
 // unit axes has no pre-drop counterpart; it is singleton, so the halving path
 // never asks about it, and returning the identity keeps callers total.
-int MapResultAxisToSliceArgAxis(const CallPtr& call, int result_axis) {
-  if (call->args_.size() < 5) return result_axis;
+// The tile.slice source axes that survive drop_dims, ascending; nullopt when the
+// call carries no usable drop_dims and the two axis spaces coincide.
+//
+// ParseSliceDropDims returns the axes ASCENDING, in range and each at most once,
+// so the survivors fall out of a single merge against them -- no per-axis lookup
+// into drop_dims. Walking the two in step also makes the ordering assumption
+// explicit at the one place that depends on it.
+std::optional<std::vector<int>> SliceKeptAxes(const CallPtr& call) {
+  if (call->args_.size() < 5) return std::nullopt;
   auto shape_tuple = std::dynamic_pointer_cast<const MakeTuple>(call->args_[1]);
-  if (!shape_tuple) return result_axis;
+  if (!shape_tuple) return std::nullopt;
   std::vector<int64_t> drop_dims;
   try {
     drop_dims = ParseSliceDropDims(call->args_[4], shape_tuple->elements_, "tile.slice");
   } catch (const pypto::Error&) {
-    return result_axis;
+    return std::nullopt;
   }
-  if (drop_dims.empty()) return result_axis;
+  if (drop_dims.empty()) return std::nullopt;
 
-  // ParseSliceDropDims returns the axes ASCENDING, in range and each at most
-  // once, so the surviving axes fall out of a single merge against them -- no
-  // per-axis lookup into drop_dims. Walking the two in step also makes the
-  // ordering assumption explicit at the one place that depends on it.
   std::vector<int> kept;
   kept.reserve(shape_tuple->elements_.size());
   size_t next_drop = 0;
@@ -337,12 +341,37 @@ int MapResultAxisToSliceArgAxis(const CallPtr& call, int result_axis) {
     }
     kept.push_back(d);
   }
-  // Sub-2D results are clamped back to 2D with leading unit axes, which shifts
-  // every surviving axis right by that padding.
-  const int pad = static_cast<int>(kept.size()) < 2 ? 2 - static_cast<int>(kept.size()) : 0;
-  const int kept_index = result_axis - pad;
-  if (kept_index < 0 || kept_index >= static_cast<int>(kept.size())) return result_axis;
-  return kept[kept_index];
+  return kept;
+}
+
+// Sub-2D results are clamped back to 2D with leading unit axes, which shifts
+// every surviving axis right by that padding.
+int SliceResultPadding(size_t kept_count) { return kept_count < 2 ? static_cast<int>(2 - kept_count) : 0; }
+
+int MapResultAxisToSliceArgAxis(const CallPtr& call, int result_axis) {
+  auto kept = SliceKeptAxes(call);
+  if (!kept.has_value()) return result_axis;
+  const int kept_index = result_axis - SliceResultPadding(kept->size());
+  if (kept_index < 0 || kept_index >= static_cast<int>(kept->size())) return result_axis;
+  return (*kept)[kept_index];
+}
+
+// The inverse: which RESULT axis a pre-drop source axis ends up on, or -1 when
+// drop_dims erases it.
+//
+// The two directions are inverses over the SURVIVING axes only, which is why
+// both are expressed over the same SliceKeptAxes: the split axis is carried on
+// the OPERAND, while the halving path indexes the RESULT type with it, and
+// conflating the two put a 16-row window over an 8-row source (gh#2614). A
+// synthetic padded result axis has no pre-drop counterpart, so the result->arg
+// direction returns the identity for it while the arg->result direction never
+// produces it; neither round-trips through the other there.
+int MapSliceArgAxisToResultAxis(const CallPtr& call, int arg_axis) {
+  auto kept = SliceKeptAxes(call);
+  if (!kept.has_value()) return arg_axis;
+  auto it = std::lower_bound(kept->begin(), kept->end(), arg_axis);
+  if (it == kept->end() || *it != arg_axis) return -1;
+  return SliceResultPadding(kept->size()) + static_cast<int>(std::distance(kept->begin(), it));
 }
 
 std::string DescribeSplitExtent(const ExprPtr& dim_size) {
@@ -1076,7 +1105,43 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
 
       // Result split dim: follow the tracked input's (possibly migrated) dim; root
       // ops with no tracked input use the global split dim.
-      const int result_split_dim = (in_split_dim >= 0) ? in_split_dim : split_dim;
+      //
+      // in_split_dim is an axis of the OPERAND, and indexing the RESULT type with
+      // it is only valid while the two share an axis correspondence. A
+      // rank-changing view breaks that: tile.slice with drop_dims erases axes and
+      // then clamps back to 2D by PREPENDING unit axes, so a source axis 0 can
+      // land on result axis 1. Reading the result at the source's axis then found
+      // the synthetic unit axis, took the singleton early-return below, and passed
+      // the slice through untouched while its source was halved underneath it --
+      // a 16-row window over an 8-row source (gh#2614). Map through the op's own
+      // rule instead of assuming identity.
+      int result_split_dim = (in_split_dim >= 0) ? in_split_dim : split_dim;
+      if (in_split_dim >= 0 && IsOp(call, "tile.slice")) {
+        const int mapped = MapSliceArgAxisToResultAxis(call, in_split_dim);
+        if (mapped >= 0) {
+          result_split_dim = mapped;
+        } else {
+          // drop_dims erased the very axis the split partitions. Its unit-extent
+          // requirement is on the slice WINDOW, not on the source, so a tracked
+          // [16, 4] source windowed [1, 4] reaches here with a live split axis.
+          // The result then carries no axis distinguishing the lanes, while each
+          // lane's window sits in its own half -- lane 1 selects source row 8
+          // where the program asked for row 0, and the untracked result gets no
+          // store offset, so both lanes write the same place with different data.
+          // Only a singleton source axis is safe: both lanes then hold the same
+          // single row, so dropping it loses nothing.
+          const bool axis_is_shared = in_tt && in_split_dim < static_cast<int>(in_tt->shape_.size()) &&
+                                      IsSingletonDim(in_tt->shape_[in_split_dim]);
+          CHECK_SPAN(axis_is_shared, call->span_)
+              << "LowerAutoVectorSplit: '" << op_name << "' drops dim " << in_split_dim
+              << ", which is the axis the automatic split partitions its source along. Each AIV lane "
+                 "would select that window from its own half -- lane 1 reads a different row of the "
+                 "original than the program asked for -- and the result carries no axis left to tell the "
+                 "lanes apart, so a later store cannot give them separate destinations. Slice the axis "
+                 "before the split region, keep the dropped axis out of the split axis, or move the "
+                 "slice outside the automatically split region.";
+        }
+      }
       if (tt && result_split_dim < static_cast<int>(tt->shape_.size())) {
         if (IsSingletonDim(tt->shape_[result_split_dim])) {
           return stmt;
@@ -1372,6 +1437,9 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
     INTERNAL_CHECK_SPAN(for_stmt->iter_args_.size() == for_stmt->return_vars_.size(), for_stmt->span_)
         << "Internal error: ForStmt iter_args and return_vars sizes must match, got "
         << for_stmt->iter_args_.size() << " vs " << for_stmt->return_vars_.size();
+    // The backedge is the third edge of the carry, and the only one the two
+    // Repair* helpers do not touch.
+    ValidateCarryBackedge(new_body, new_iter_args, tile_vars, for_stmt->span_);
     new_return_vars = RepairReturnVars(for_stmt->return_vars_, new_iter_args, tile_vars, var_replacements,
                                        subblock_idx, lane_stride);
     return loop_repair::RebuildForStmt(for_stmt, new_iter_args, new_body, new_return_vars);
@@ -1403,9 +1471,17 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
       new_else = (new_else_stmts.size() == 1) ? new_else_stmts[0]
                                               : std::make_shared<SeqStmts>(new_else_stmts, if_stmt->span_);
     }
+    // Repair the merge the same way the ForStmt arm repairs its carry: a merge
+    // variable whose branches both yield a lane-local value is lane-local too.
+    // Left alone it contradicts both Yield values AND stays untracked, so a
+    // following tile.store gets no lane offset and both AIV lanes write from
+    // output row 0.
+    auto new_return_vars = RepairIfReturnVars(if_stmt->return_vars_, new_then_body, new_else, tile_vars,
+                                              var_replacements, subblock_idx, lane_stride, if_stmt->span_);
     auto new_if = MutableCopy(if_stmt);
     new_if->then_body_ = new_then_body;
     new_if->else_body_ = new_else;
+    new_if->return_vars_ = new_return_vars;
     return new_if;
   }
 
@@ -1495,6 +1571,114 @@ std::vector<VarPtr> RepairReturnVars(const std::vector<VarPtr>& return_vars,
           std::make_shared<Var>(new_return_vars[i]->name_hint_, new_type, new_return_vars[i]->span_);
       new_return_vars[i] = new_return_var;
       tile_vars[new_return_var.get()] = it->second;
+      var_replacements[return_vars[i].get()] = new_return_var;
+    }
+  }
+  return new_return_vars;
+}
+
+namespace {
+
+// The tile info a branch's Yield carries for merge slot ``index``, or nullopt
+// when that slot is not lane-local. A Yield value is left referencing the
+// pre-halving var (the trailing Substitute rewrites it later), and the halving
+// path registers BOTH the old and the new var in ``tile_vars`` -- so looking the
+// yielded value up there is what tells the two apart.
+std::optional<TileInfo> YieldedTileInfo(const YieldStmtPtr& yield, size_t index,
+                                        const std::unordered_map<const Var*, TileInfo>& tile_vars) {
+  if (!yield || index >= yield->value_.size()) return std::nullopt;
+  auto value_var = AsVarLike(yield->value_[index]);
+  if (!value_var) return std::nullopt;
+  auto it = tile_vars.find(value_var.get());
+  if (it == tile_vars.end()) return std::nullopt;
+  return it->second;
+}
+
+bool SameTileInfo(const TileInfo& a, const TileInfo& b) {
+  return a.split_dim == b.split_dim && structural_equal(a.half_dim_size, b.half_dim_size);
+}
+
+}  // namespace
+
+void ValidateCarryBackedge(const StmtPtr& new_body, const std::vector<IterArgPtr>& new_iter_args,
+                           const std::unordered_map<const Var*, TileInfo>& tile_vars, const Span& span) {
+  if (new_iter_args.empty()) return;
+  auto yield = transform_utils::GetLastYieldStmt(new_body);
+  // A loop that carries state ends in a Yield feeding every slot; anything else
+  // is malformed IR the SSA verifier rejects, so there is nothing to compare.
+  if (!yield || yield->value_.size() != new_iter_args.size()) return;
+
+  for (size_t i = 0; i < new_iter_args.size(); ++i) {
+    auto carry_it = tile_vars.find(new_iter_args[i].get());
+    const bool carry_is_lane_local = carry_it != tile_vars.end();
+    auto yielded = YieldedTileInfo(yield, i, tile_vars);
+
+    if (!carry_is_lane_local && !yielded.has_value()) continue;
+    if (carry_is_lane_local && yielded.has_value() && SameTileInfo(carry_it->second, *yielded)) continue;
+
+    auto yielded_var = AsVarLike(yield->value_[i]);
+    const std::string yielded_name =
+        yielded_var ? " '" + yielded_var->name_hint_ + "'" : std::string(" the yielded value");
+    CHECK_SPAN(false, span)
+        << "LowerAutoVectorSplit: the loop carry '" << new_iter_args[i]->name_hint_
+        << "' inside the automatically split vector region "
+        << (carry_is_lane_local
+                ? "is lane-local (the split halved its init value), but the body yields" + yielded_name +
+                      " back into it, which no lane owns a half of. The carry's declared per-lane type "
+                      "would contradict the value flowing into it on every iteration after the first."
+                : "is full width, but the body yields" + yielded_name +
+                      " back into it, which the split made lane-local. The carry cannot hold a per-lane "
+                      "value under a full-width declared type.")
+        << " Derive both the same way -- load or slice the value inside the split region on both the "
+           "init and the backedge, or keep both shared by the two lanes -- or move the loop outside the "
+           "automatically split region.";
+  }
+}
+
+std::vector<VarPtr> RepairIfReturnVars(const std::vector<VarPtr>& return_vars, const StmtPtr& new_then_body,
+                                       const std::optional<StmtPtr>& new_else_body,
+                                       std::unordered_map<const Var*, TileInfo>& tile_vars,
+                                       std::unordered_map<const Var*, VarPtr>& var_replacements,
+                                       const ExprPtr& subblock_idx, const ExprPtr& lane_stride,
+                                       const Span& span) {
+  std::vector<VarPtr> new_return_vars = return_vars;
+  if (return_vars.empty()) return new_return_vars;
+
+  // An IfStmt that defines return_vars must have an else branch -- SSAVerifier
+  // rejects the else-less shape outright, and ConvertToSSA synthesizes the else
+  // Yield for a source-level no-else phi. So both definitions exist by the time
+  // this pass runs, and a missing one is a compiler bug rather than a shape to
+  // support.
+  INTERNAL_CHECK_SPAN(new_else_body.has_value(), span)
+      << "Internal error: LowerAutoVectorSplit found an IfStmt defining " << new_return_vars.size()
+      << " return var(s) with no else branch; SSA requires both branches to define the merge.";
+
+  auto then_yield = transform_utils::GetLastYieldStmt(new_then_body);
+  auto else_yield = transform_utils::GetLastYieldStmt(*new_else_body);
+
+  for (size_t i = 0; i < new_return_vars.size(); ++i) {
+    auto then_info = YieldedTileInfo(then_yield, i, tile_vars);
+    auto else_info = YieldedTileInfo(else_yield, i, tile_vars);
+
+    if (!then_info.has_value() && !else_info.has_value()) continue;
+    CHECK_SPAN(then_info.has_value() && else_info.has_value() && SameTileInfo(*then_info, *else_info), span)
+        << "LowerAutoVectorSplit: the branches of an if inside the automatically split vector region "
+           "disagree about merge variable '"
+        << new_return_vars[i]->name_hint_
+        << "': one yields a value the split made lane-local while the other does not (or they are split "
+           "along different axes). There is no single per-lane type for the merged value, and picking "
+           "either one silently gives one AIV lane the wrong extent. Make both branches yield values "
+           "derived the same way -- load or slice inside the region on both sides, or keep the value "
+           "shared by both lanes on both sides -- or move the if outside the automatically split region.";
+
+    tile_vars[new_return_vars[i].get()] = *then_info;
+    auto new_type = ApplyTrackedTileShape(new_return_vars[i]->GetType(), then_info->split_dim,
+                                          then_info->half_dim_size, subblock_idx, lane_stride);
+    if (new_type != new_return_vars[i]->GetType()) {
+      auto new_return_var =
+          std::make_shared<Var>(new_return_vars[i]->name_hint_, new_type, new_return_vars[i]->span_);
+      new_return_vars[i] = new_return_var;
+      tile_vars[new_return_var.get()] = *then_info;
       var_replacements[return_vars[i].get()] = new_return_var;
     }
   }
@@ -2328,8 +2512,8 @@ namespace {
 
 // Mirrors the (formerly file-local) hazard finder in ExpandMixedKernel: records
 // the first tile.transpose whose source carries the split axis and whose
-// transpose actually swaps it. Shared so the explicit per-region check in pass 20
-// and the AUTO whole-function check in pass 21 use one detector.
+// transpose actually swaps it. Shared so the explicit per-region check in pass 23
+// and the AUTO whole-function check in pass 24 use one detector.
 class TransposeSplitHazardFinder : public IRVisitor {
  public:
   explicit TransposeSplitHazardFinder(int split_dim) : split_dim_(split_dim) {}

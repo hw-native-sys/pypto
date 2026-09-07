@@ -220,7 +220,8 @@ _TMP_ROW_REDUCTION_REQUIREMENT = (
 )
 _TMP_ROW_ARG_REDUCTION_REQUIREMENT = "tmp_tile with exactly the same shape and dtype as the input"
 _TMP_COL_ARG_REDUCTION_REQUIREMENT = (
-    "tmp_tile — the tile form takes caller-owned scratch, unlike pl.col_max / pl.col_min"
+    "tmp_tile with exactly the same shape and dtype as the input — the tile form takes "
+    "caller-owned scratch, unlike pl.col_max / pl.col_min"
 )
 
 
@@ -1319,8 +1320,11 @@ def col_argmax(input: Tile, tmp_tile: Tile) -> Tile: ...
 def col_argmax(input, tmp_tile: Tile | None = None):
     """Column-wise argmax (per-column max index, int32), dispatched by input type.
 
-    For Tile inputs, tmp_tile is required (unlike col_max). Tensor inputs must
-    omit it — the conversion injects the tmp tile — and passing one raises.
+    For Tile inputs, tmp_tile is required (unlike col_max) and must have exactly
+    the same shape and dtype as the input: the pto-isa kernel reads the column
+    count from the tmp/src extent, so an oversized scratch walks past the valid
+    columns. Tensor inputs must omit it — the conversion injects the tmp tile —
+    and passing one raises.
     """
     if isinstance(input, Tensor):
         _reject_tmp_for_tensor("col_argmax", tmp_tile, "tmp_tile")
@@ -1338,8 +1342,11 @@ def col_argmin(input: Tile, tmp_tile: Tile) -> Tile: ...
 def col_argmin(input, tmp_tile: Tile | None = None):
     """Column-wise argmin (per-column min index, int32), dispatched by input type.
 
-    For Tile inputs, tmp_tile is required (unlike col_min). Tensor inputs must
-    omit it — the conversion injects the tmp tile — and passing one raises.
+    For Tile inputs, tmp_tile is required (unlike col_min) and must have exactly
+    the same shape and dtype as the input: the pto-isa kernel reads the column
+    count from the tmp/src extent, so an oversized scratch walks past the valid
+    columns. Tensor inputs must omit it — the conversion injects the tmp tile —
+    and passing one raises.
     """
     if isinstance(input, Tensor):
         _reject_tmp_for_tensor("col_argmin", tmp_tile, "tmp_tile")

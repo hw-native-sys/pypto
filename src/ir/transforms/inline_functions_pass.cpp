@@ -452,6 +452,7 @@ class InlineDumpVarTransfer : public IRMutator {
   StmtPtr VisitStmt_(const ClusterScopeStmtPtr& op) override { return Attach<ClusterScopeStmt>(op); }
   StmtPtr VisitStmt_(const SpmdScopeStmtPtr& op) override { return Attach<SpmdScopeStmt>(op); }
   StmtPtr VisitStmt_(const SplitAivScopeStmtPtr& op) override { return Attach<SplitAivScopeStmt>(op); }
+  StmtPtr VisitStmt_(const GraphScopeStmtPtr& op) override { return Attach<GraphScopeStmt>(op); }
 
   ExprPtr VisitExpr_(const CallPtr& op) override {
     // Recurse first so nested args (this pass runs pre-flatten, so a call arg

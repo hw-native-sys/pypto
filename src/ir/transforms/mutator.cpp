@@ -940,6 +940,18 @@ StmtPtr IRMutator::VisitStmt_(const ClusterScopeStmtPtr& op) {
   return op;
 }
 
+StmtPtr IRMutator::VisitStmt_(const GraphScopeStmtPtr& op) {
+  INTERNAL_CHECK_SPAN(op->body_, op->span_) << "GraphScopeStmt has null body";
+  auto new_body = StmtFunctor<StmtPtr>::VisitStmt(op->body_);
+  INTERNAL_CHECK_SPAN(new_body, op->span_) << "GraphScopeStmt body mutated to null";
+  if (new_body.get() != op->body_.get()) {
+    auto result = MutableCopy(op);
+    result->body_ = std::move(new_body);
+    return result;
+  }
+  return op;
+}
+
 StmtPtr IRMutator::VisitStmt_(const HierarchyScopeStmtPtr& op) {
   INTERNAL_CHECK_SPAN(op->body_, op->span_) << "HierarchyScopeStmt has null body";
   auto new_body = StmtFunctor<StmtPtr>::VisitStmt(op->body_);

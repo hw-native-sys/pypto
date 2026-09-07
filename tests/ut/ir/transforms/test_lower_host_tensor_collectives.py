@@ -1945,8 +1945,11 @@ def test_host_allreduce_ring_rejects_mismatched_signal_shape():
         passes.lower_host_tensor_collectives()(program)
 
 
-def test_host_allreduce_ring_rejects_nondivisible_numel():
-    """Ring allreduce rejects numel that is not an exact multiple of NR at P=4."""
+def test_host_allreduce_ring_accepts_nondivisible_numel():
+    """Ragged HOST ring allreduce: numel that is not an exact multiple of NR is
+    accepted (#2242). The kernel partitions src into
+    NR balanced, potentially ragged chunks at runtime instead of rejecting it —
+    the lowering emits the ring builtin for SIZE=27 at P=4 (27 % 4 != 0)."""
     SIZE = 27  # 27 % 4 != 0
 
     @pl.program
@@ -1961,16 +1964,69 @@ def test_host_allreduce_ring_rejects_nondivisible_numel():
             signal_buf = pld.alloc_window_buffer(7 * 4 * pl.INT32.get_byte())
             data = pld.window(data_buf, [SIZE], dtype=pl.FP32)
             signal = pld.window(signal_buf, [7, 4], dtype=pl.INT32)
-            self.chip_orch(data, device=0)
-            self.chip_orch(data, device=1)
-            self.chip_orch(data, device=2)
-            self.chip_orch(data, device=3)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(data, device=r)
             pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, mode="ring")
             return 0
 
-    program = passes.materialize_comm_domain_scopes()(P)
-    with pytest.raises(ValueError, match=r"exact multiple of the rank count"):
-        passes.lower_host_tensor_collectives()(program)
+    program = cast(ir.Program, passes.materialize_comm_domain_scopes()(P))
+    result = cast(ir.Program, passes.lower_host_tensor_collectives()(program))
+
+    _assert_builtin_dispatch(
+        result,
+        "builtin.tensor.allreduce_ring",
+        arg_names=["data", "signal"],
+        arg_directions=[ir.ArgDirection.InOut, ir.ArgDirection.InOut],
+        kwargs={"op": int(pld.ReduceOp.Sum), "dtype": pl.FP32},
+        attrs={"op": int(pld.ReduceOp.Sum), "dtype": pl.FP32},
+    )
+
+
+def test_host_allreduce_ring_accepts_dynamic_src_extent():
+    """Dynamic-extent HOST ring allreduce src is accepted (#2242).
+
+    The ring kernel accumulates ``numel`` at runtime from the tensor descriptor
+    shapes and partitions it into NR balanced, potentially ragged chunks, so a
+    ``src`` whose leading extent is only known at runtime needs no compile-time
+    guard. ``pld.world_size()`` as a window dim is a ``pld.system.world_size``
+    Call rather than a ``ConstInt``, which is exactly the shape the removed
+    static-shape check used to reject.
+
+    This is the lowering-side companion to
+    ``test_tensor_allreduce_ring_accepts_dynamic_shape``: only the lowering
+    reaches ``builtin.tensor.allreduce_ring``'s type deducer, since the builtin
+    is internal-only and is constructed solely by this pass.
+    """
+    SIZE = 64
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(self, data: pld.DistributedTensor[[4, SIZE], pl.FP32]):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            data_buf = pld.alloc_window_buffer(pld.world_size() * SIZE * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(7 * 4 * pl.INT32.get_byte())
+            data = pld.window(data_buf, [pld.world_size(), SIZE], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [7, 4], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(data, device=r)
+            pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, mode="ring")
+            return 0
+
+    program = cast(ir.Program, passes.materialize_comm_domain_scopes()(P))
+    result = cast(ir.Program, passes.lower_host_tensor_collectives()(program))
+
+    _assert_builtin_dispatch(
+        result,
+        "builtin.tensor.allreduce_ring",
+        arg_names=["data", "signal"],
+        arg_directions=[ir.ArgDirection.InOut, ir.ArgDirection.InOut],
+        kwargs={"op": int(pld.ReduceOp.Sum), "dtype": pl.FP32},
+        attrs={"op": int(pld.ReduceOp.Sum), "dtype": pl.FP32},
+    )
 
 
 def test_host_allreduce_ring_rejects_too_many_ranks():

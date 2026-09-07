@@ -43,6 +43,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 import pypto.language as pl  # noqa: E402
+from harness import st  # noqa: E402
 
 # Acc case: [M, K] @ [K, N] in NT column tiles. One fp32 slot is M * TN * 4 = 16 KB,
 # so the pair fits L0C with room to spare.
@@ -104,36 +105,56 @@ def vector_slot_pingpong(
             pl.store(s, [i * TR, 0], out)
 
 
+def _acc_pingpong_case():
+    """L0C ping-pong: each slot keeps its own matmul, so the two outputs differ.
+
+    The golden returns a dict because the kernel has two outputs, each with its
+    own reference — the whole point of the test is that ``out2`` is ``a2 @ b``
+    and not a second copy of ``a @ b``.
+    """
+    torch.manual_seed(0)
+    a = torch.randn(M, K, dtype=torch.float32)
+    a2 = torch.randn(M, K, dtype=torch.float32)
+    b = torch.randn(K, N, dtype=torch.float32)
+    out1 = torch.zeros((M, N), dtype=torch.float32)
+    out2 = torch.zeros((M, N), dtype=torch.float32)
+    return st.case(
+        matmul_slot_pingpong,
+        a,
+        a2,
+        b,
+        out1,
+        out2,
+        name="matmul_acc_slot_pingpong",
+        golden=lambda _: {"out1": a @ b, "out2": a2 @ b},
+        rtol=1e-3,
+        atol=1e-3,
+    )
+
+
+def _vec_pingpong_case():
+    """UB ping-pong: the sum is ``a + b``, not ``b + b``."""
+    torch.manual_seed(0)
+    a = torch.randn(ROWS, TC, dtype=torch.float32)
+    b = torch.randn(ROWS, TC, dtype=torch.float32)
+    out = torch.zeros((ROWS, TC), dtype=torch.float32)
+    return st.case(
+        vector_slot_pingpong,
+        a,
+        b,
+        out,
+        name="vector_slot_pingpong",
+        golden=lambda _: a + b,
+        rtol=1e-3,
+        atol=1e-3,
+    )
+
+
 @pytest.mark.platforms("a2a3", "a2a3sim")
-class TestMemRefSlots:
+@st.cases(_acc_pingpong_case(), _vec_pingpong_case())
+def test_slots_rotate_at_runtime(case_run):
     """Runtime-indexed slots of one declared allocation, on device."""
-
-    def test_acc_slots_rotate_at_runtime(self, test_config):
-        """L0C ping-pong: each slot keeps its own matmul, so the two outputs differ."""
-        matmul_slot_pingpong._cache.clear()
-        torch.manual_seed(0)
-        a = torch.randn(M, K, dtype=torch.float32)
-        a2 = torch.randn(M, K, dtype=torch.float32)
-        b = torch.randn(K, N, dtype=torch.float32)
-        out1 = torch.zeros((M, N), dtype=torch.float32)
-        out2 = torch.zeros((M, N), dtype=torch.float32)
-
-        matmul_slot_pingpong(a, a2, b, out1, out2, config=test_config)
-
-        torch.testing.assert_close(out1, a @ b, rtol=1e-3, atol=1e-3)
-        torch.testing.assert_close(out2, a2 @ b, rtol=1e-3, atol=1e-3)
-
-    def test_vec_slots_rotate_at_runtime(self, test_config):
-        """UB ping-pong: the sum is `a + b`, not `b + b`."""
-        vector_slot_pingpong._cache.clear()
-        torch.manual_seed(0)
-        a = torch.randn(ROWS, TC, dtype=torch.float32)
-        b = torch.randn(ROWS, TC, dtype=torch.float32)
-        out = torch.zeros((ROWS, TC), dtype=torch.float32)
-
-        vector_slot_pingpong(a, b, out, config=test_config)
-
-        torch.testing.assert_close(out, a + b, rtol=1e-3, atol=1e-3)
+    case_run.assert_passed()
 
 
 if __name__ == "__main__":

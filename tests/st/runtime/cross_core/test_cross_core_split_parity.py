@@ -418,7 +418,7 @@ class TestSplitParityRuntime:
 # and multi-mode (two sibling regions with different SplitModes).
 #
 # These exercise the nestable ``SplitAivScopeStmt`` IR node end-to-end. The
-# region is consumed and erased by LowerAutoVectorSplit (pass 20); the cube ops
+# region is consumed and erased by LowerAutoVectorSplit (pass 23); the cube ops
 # (load Mat -> move Left/Right -> matmul -> Acc) live OUTSIDE the loop and the
 # region shards the Acc tile via ``pl.aiv_shard`` (the C->V boundary).
 # ExpandMixedKernel folds the shard into the cross-core tpush/tpop machinery,
@@ -496,7 +496,7 @@ def _build_split_aiv_multi_mode_program() -> Any:
 
     The UP_DOWN region shards on rows (dim0) writing ``out_ud = (a @ b) * 2``;
     the LEFT_RIGHT region shards on cols (dim1) writing ``out_lr = (a @ b) * 3``.
-    Each region carries its own mode (region-scoped pass-21 halving), so they
+    Each region carries its own mode (region-scoped pass-23 halving), so they
     halve independently with no cross-region leak.
     """
 

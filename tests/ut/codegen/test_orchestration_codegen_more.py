@@ -254,6 +254,114 @@ class TestOrchestrationMore:
         assert m_name in size_decl.group(1), (m_name, size_decl.group(1))
         assert code.index(f"int64_t {m_name} =") < code.index("gm_pipe_buffer"), code
 
+    def test_clamped_gm_pipe_buffer_alloc_follows_its_phi(self):
+        """A GM pipe buffer sized from an ``if``-clamped scalar must follow the phi decl.
+
+        Same shape as the branch-free case above, except the ``pl.spmd`` extent is
+        clamped, so the value sizing the buffer is an ``IfStmt`` return_var rather
+        than a plain assignment. Its C++ declaration is emitted where the ``if``
+        sits, so hoisting the alloc to the scope top emits a use before the
+        declaration (``'m_clamped' was not declared in this scope``).
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        K = 64
+        SPMD_N = 16
+        ROW_TILE = 16
+        CAP = 128
+        M_DYN = pl.dynamic("M_DYN")
+
+        @pl.program
+        class ClampedDynPipeProgram:
+            @pl.function(type=pl.FunctionType.Opaque)
+            def main(
+                self,
+                a: pl.Tensor[[M_DYN, K], pl.FP32],
+                b: pl.Tensor[[K, SPMD_N], pl.FP32],
+                out: pl.Tensor[[M_DYN, SPMD_N], pl.FP32],
+            ) -> pl.Tensor[[M_DYN, SPMD_N], pl.FP32]:
+                m = pl.tensor.dim(a, 0)
+                if m > CAP:
+                    m_clamped: pl.Scalar[pl.INDEX] = pl.yield_(CAP)
+                else:
+                    m_clamped: pl.Scalar[pl.INDEX] = pl.yield_(m)
+                for ob in pl.spmd(m_clamped // ROW_TILE, name_hint="hc"):
+                    m0 = ob * ROW_TILE
+                    a_slice = pl.slice(a, [ROW_TILE, K], [m0, 0])
+                    a_add = pl.add(a_slice, 1.0)  # vector produces matmul operand (V->C)
+                    c_tile = pl.matmul(a_add, b)  # cube
+                    c_vec = pl.add(c_tile, 1.0)  # vector consumes matmul result (C->V)
+                    out = pl.assemble(out, c_vec, [m0, 0])
+                return out
+
+        program = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(ClampedDynPipeProgram)
+        orch_func = next(
+            f for f in program.functions.values() if f.func_type == ir.FunctionType.Orchestration
+        )
+        code = codegen.generate_orchestration(program, orch_func).code
+
+        # The size must genuinely reference the phi, or the test passes vacuously.
+        size_decl = re.search(r"gm_pipe_buffer_\w+_ci_shapes\[1\] = \{(.+?)\};", code)
+        assert size_decl is not None, code
+        phi_decl = re.search(r"int64_t (\w*m_clamped\w*);", code)
+        assert phi_decl is not None, code
+        phi_name = phi_decl.group(1)
+        assert phi_name in size_decl.group(1), (phi_name, size_decl.group(1))
+        assert code.index(f"int64_t {phi_name};") < code.index("gm_pipe_buffer"), code
+
+    def test_clamped_tensor_create_alloc_follows_its_phi(self):
+        """A ``tensor.create`` whose shape reads an ``if`` phi must not be hoisted above it.
+
+        The generic hoist guard (``ShapeDependsOnLocalVars``) shares the
+        body-local set with the GM-pipe guard, so an ordinary dynamically-shaped
+        allocation sized from a clamped scalar breaks the same way.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        N = 16
+        CAP = 128
+        M_DYN = pl.dynamic("M_DYN")
+
+        @pl.program
+        class ClampedCreateProgram:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                a: pl.Tensor[[16, N], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, N], pl.FP32]],
+            ) -> pl.Tensor[[16, N], pl.FP32]:
+                t = pl.load(a, [0, 0], [16, N])
+                out = pl.store(t, [0, 0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[M_DYN, N], pl.FP32],
+            ) -> pl.Tensor[[16, N], pl.FP32]:
+                m = pl.tensor.dim(a, 0)
+                if m > CAP:
+                    m_clamped: pl.Scalar[pl.INDEX] = pl.yield_(CAP)
+                else:
+                    m_clamped: pl.Scalar[pl.INDEX] = pl.yield_(m)
+                scratch: pl.Tensor[[M_DYN, N], pl.FP32] = pl.create_tensor([m_clamped, N], dtype=pl.FP32)
+                a_slice = pl.slice(a, [16, N], [0, 0])
+                s_slice = pl.slice(scratch, [16, N], [0, 0])
+                s_slice = self.kernel(a_slice, s_slice)
+                return s_slice
+
+        code = _generate_orch_code(ClampedCreateProgram)
+
+        shape_decl = re.search(r"uint32_t scratch_ci_shapes\[2\] = \{(.+?)\};", code)
+        assert shape_decl is not None, code
+        phi_decl = re.search(r"int64_t (\w*m_clamped\w*);", code)
+        assert phi_decl is not None, code
+        phi_name = phi_decl.group(1)
+        assert phi_name in shape_decl.group(1), (phi_name, shape_decl.group(1))
+        assert code.index(f"int64_t {phi_name};") < code.index("scratch_ci_shapes"), code
+
     def test_for_loop_with_slice(self):
         """Test for loop + tensor.slice: simplified paged attention pattern.
 

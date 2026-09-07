@@ -254,6 +254,7 @@ def _run_pass_pipeline(  # noqa: PLR0913
 
 def compile(  # noqa: PLR0913
     program: _ir_core.Program,
+    *,
     output_dir: str | None = None,
     strategy: OptimizationStrategy = OptimizationStrategy.Default,
     dump_passes: bool | PassDumpLevel = True,
@@ -270,8 +271,6 @@ def compile(  # noqa: PLR0913
     analyze_auto_scopes_for_deps: bool = False,
     emit_source_loc: bool | None = None,
     dump_ptoas_passes: bool = False,
-    # Appended, not inserted: every parameter above is positional, so slotting a
-    # new one in the middle would silently rebind existing positional callers.
     runtime: _passes.RuntimeKind | None = None,
 ) -> "CompiledProgram | DistributedCompiledProgram":
     """Compile a Program through passes and codegen.
@@ -281,6 +280,12 @@ def compile(  # noqa: PLR0913
     2. Optionally dumps IR before and after each pass (if dump_passes=True)
     3. Generates code via selected backend
     4. Saves all artifacts to a unified output directory
+
+    Every option is keyword-only. The list has grown to eighteen and reads as a
+    flat bag rather than an ordered signature, so binding one by position was
+    never how a call site stayed readable — and it made the order load-bearing:
+    a new option could only be appended, never slotted in beside the one it
+    belongs with, or it would silently rebind an existing positional caller.
 
     Args:
         program: Input Program to compile

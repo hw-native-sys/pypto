@@ -46,6 +46,7 @@ enum class IRProperty : uint64_t {
   BreakContinueValid,       ///< Break/continue only in sequential/while loops
   UseAfterDef,              ///< All variable uses are dominated by a definition
   HierarchyOutlined,        ///< Hierarchy scopes outlined into level/role functions
+  GraphOutlined,            ///< Graph scopes outlined into FunctionType::Graph functions
   StructuredCtrlFlow,       ///< No BreakStmt/ContinueStmt — only structured control flow
   VectorKernelSplit,        ///< AIV functions with split mode have tpop shapes and store offsets adjusted
   OutParamNotShadowed,      ///< Out/InOut params are not reassigned with tensor-creating ops
@@ -77,8 +78,9 @@ enum class IRProperty : uint64_t {
   ManualDepsOnSubmitOnly,           ///< No plain cross-function Call (GlobalVar callee) carries
                                     ///< attrs["manual_dep_edges"] — manual dependency edges live in the
                                     ///< typed Submit::deps_ field. Op calls (system.task_dummy) are exempt
-  ReturnParamsExplicit,             ///< InCore/Group/Spmd tensor returns reference function params by
-                                    ///< pointer identity, so the return->param map is a lookup (#1702)
+  ReturnParamsExplicit,             ///< InCore/Group/Spmd/Graph tensor returns reference function params
+                                    ///< by pointer identity, so the return->param map is a lookup
+                                    ///< (#1702, #2601)
   UnrollResolved,                   ///< No ForKind::Unroll survives; produced by UnrollLoops
   AivSplitValid,                    ///< SplitAivScopeStmt regions are structurally valid: no cube compute
                                     ///< or split-axis reduce inside a region, boundary ops only inside one
@@ -123,7 +125,17 @@ enum class IRProperty : uint64_t {
                        ///< helper can be paired with its caller's store; a mismatch can leave the A2/A3
                        ///< accumulator unit flag set or wait forever on an unset flag, stalling device
                        ///< execution
-  kCount               ///< Sentinel (must be last)
+  NoScalarKernelReturn,  ///< No device function (InCore / AIC / AIV / Group / Spmd) has a ScalarType
+                         ///< anywhere in return_types_ -- including one nested in a pl.Tuple return,
+                         ///< which is a single TupleType entry. Those types mean "a dispatchable task",
+                         ///< and the runtime has no scalar output channel -- Arg::add_scalar passes a
+                         ///< scalar in by value and TaskOutputTensors returns only tensors -- so
+                         ///< orchestration codegen has no carrier to bind it to (#631). Scalar[TASK_ID]
+                         ///< is exempt: a scheduler handle, not data. A device-side scalar helper is
+                         ///< written FunctionType::Inline and spliced away by InlineFunctions. Decidable
+                         ///< on the user's own IR, so it is a structural property verified at every pass
+                         ///< boundary
+  kCount                 ///< Sentinel (must be last)
 };
 
 static_assert(
@@ -270,7 +282,7 @@ const IRPropertySet& GetVerifiedProperties();
  * in per-pass PassProperties. Returns {TypeChecked, BreakContinueValid,
  * NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore,
  * InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly,
- * AtomicAddDtypeValid}.
+ * AtomicAddDtypeValid, NoScalarKernelReturn}.
  */
 const IRPropertySet& GetStructuralProperties();
 

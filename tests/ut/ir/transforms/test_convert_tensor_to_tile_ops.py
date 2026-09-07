@@ -885,7 +885,7 @@ class TestConvertTensorToTileOps:
         """``pld.tensor.allreduce(target, signal, op=...)`` upgrades both
         ``target`` and ``signal`` params from In to InOut.
 
-        ConvertTensorToTileOps runs upstream of LowerCompositeOps (pass 12),
+        ConvertTensorToTileOps runs upstream of LowerCompositeOps (pass 13),
         so it sees ``pld.tensor.allreduce`` as a single composite Call before
         the ready-plus-per-chunk decomposition exists. Without the explicit
         ``has_read | has_write`` marking, the param-direction analysis
@@ -3581,28 +3581,38 @@ class TestGmLocalTensorConversion:
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Scalar[pl.FP32]:
+            def main_incore_0(
+                self, x: pl.Tensor[[64], pl.FP32], out: pl.Tensor[[4], pl.FP32]
+            ) -> pl.Tensor[[4], pl.FP32]:
                 t: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
                 v: pl.Scalar[pl.FP32] = pl.tensor.read(t, [0])
-                return v
+                pl.tensor.write(out, [0], v)
+                return out
 
             @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Scalar[pl.FP32]:
-                v: pl.Scalar[pl.FP32] = self.main_incore_0(x)
-                return v
+            def main(
+                self, x: pl.Tensor[[64], pl.FP32], out: pl.Tensor[[4], pl.FP32]
+            ) -> pl.Tensor[[4], pl.FP32]:
+                r: pl.Tensor[[4], pl.FP32] = self.main_incore_0(x, out)
+                return r
 
         @pl.program
         class Expected:
             @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Scalar[pl.FP32]:
+            def main_incore_0(
+                self, x: pl.Tensor[[64], pl.FP32], out: pl.Out[pl.Tensor[[4], pl.FP32]]
+            ) -> pl.Tensor[[4], pl.FP32]:
                 t_tile = pl.tile.create([64], dtype=pl.FP32)
                 v_tile = pl.tile.read(t_tile, [0])
-                return v_tile
+                pl.tensor.write(out, [0], v_tile)
+                return out
 
             @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Scalar[pl.FP32]:
-                v = self.main_incore_0(x)
-                return v
+            def main(
+                self, x: pl.Tensor[[64], pl.FP32], out: pl.Out[pl.Tensor[[4], pl.FP32]]
+            ) -> pl.Tensor[[4], pl.FP32]:
+                r = self.main_incore_0(x, out)
+                return r
 
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
@@ -3622,17 +3632,17 @@ class TestGmLocalTensorConversion:
                 self,
                 dst: pl.Tensor[[4], pl.FP32],
                 val: pl.Scalar[pl.FP32],
-            ) -> pl.Scalar[pl.FP32]:
+            ) -> pl.Tensor[[4], pl.FP32]:
                 pl.tensor.write(dst, [0], val)
-                return val
+                return dst
 
             @pl.function
             def main(
                 self,
                 dst: pl.Tensor[[4], pl.FP32],
                 val: pl.Scalar[pl.FP32],
-            ) -> pl.Scalar[pl.FP32]:
-                result: pl.Scalar[pl.FP32] = self.main_incore_0(dst, val)
+            ) -> pl.Tensor[[4], pl.FP32]:
+                result: pl.Tensor[[4], pl.FP32] = self.main_incore_0(dst, val)
                 return result
 
         @pl.program
@@ -3642,16 +3652,16 @@ class TestGmLocalTensorConversion:
                 self,
                 dst: pl.Out[pl.Tensor[[4], pl.FP32]],
                 val: pl.Scalar[pl.FP32],
-            ) -> pl.Scalar[pl.FP32]:
+            ) -> pl.Tensor[[4], pl.FP32]:
                 pl.tensor.write(dst, [0], val)
-                return val
+                return dst
 
             @pl.function
             def main(
                 self,
                 dst: pl.Out[pl.Tensor[[4], pl.FP32]],
                 val: pl.Scalar[pl.FP32],
-            ) -> pl.Scalar[pl.FP32]:
+            ) -> pl.Tensor[[4], pl.FP32]:
                 result = self.main_incore_0(dst, val)
                 return result
 
@@ -3690,7 +3700,7 @@ class TestGmLocalTensorConversion:
                 dst_index: pl.Tensor[[1, 32], pl.INT32],
                 values: pl.Tensor[[32], pl.INT32],
                 count: pl.Scalar[pl.INDEX],
-            ) -> pl.Scalar[pl.INDEX]:
+            ) -> pl.Tensor[[1, 32], pl.INT32]:
                 pos_fill = pl.full([1, 32], dtype=pl.INT32, value=0)
                 dst_pos[0:1, 0:32] = pos_fill
                 index_fill = pl.full([1, 32], dtype=pl.INT32, value=-1)
@@ -3700,7 +3710,7 @@ class TestGmLocalTensorConversion:
                         value = pl.tensor.read(values, [i])
                         pl.tensor.write(dst_pos, [0, i], value)
                         pl.tensor.write(dst_index, [0, i], pl.cast(i, pl.INT32))
-                return count
+                return dst_pos
 
         after = passes.convert_tensor_to_tile_ops()(Before)
         kernel = _require_function(after, "main_incore_0")
@@ -3718,12 +3728,12 @@ class TestGmLocalTensorConversion:
             def main_incore_0(
                 self,
                 dst: pl.Tensor[[32], pl.INT32],
-            ) -> pl.Scalar[pl.INT32]:
+            ) -> pl.Tensor[[32], pl.INT32]:
                 fill = pl.full([32], dtype=pl.INT32, value=-1)
                 dst[0:32] = fill
                 old = pl.tensor.read(dst, [0])
                 pl.tensor.write(dst, [1], old)
-                return old
+                return dst
 
         with pytest.raises(ValueError, match="mixes MTE3 and scalar stores"):
             passes.convert_tensor_to_tile_ops()(Before)
@@ -3873,37 +3883,55 @@ class TestGmLocalTensorConversion:
         class Before:
             @pl.function(type=pl.FunctionType.InCore)
             def main_incore_0(
-                self, a: pl.Tensor[[4], pl.FP32], b: pl.Tensor[[4], pl.FP32]
-            ) -> pl.Scalar[pl.FP32]:
+                self,
+                a: pl.Tensor[[4], pl.FP32],
+                b: pl.Tensor[[4], pl.FP32],
+                out: pl.Tensor[[4], pl.FP32],
+            ) -> pl.Tensor[[4], pl.FP32]:
                 t: pl.Tensor[[4], pl.FP32] = pl.add(a, b)
                 val: pl.Scalar[pl.FP32] = pl.tensor.read(a, [0])
                 pl.tensor.write(t, [0], val)
                 v: pl.Scalar[pl.FP32] = pl.tensor.read(t, [0])
-                return v
+                pl.tensor.write(out, [0], v)
+                return out
 
             @pl.function
-            def main(self, a: pl.Tensor[[4], pl.FP32], b: pl.Tensor[[4], pl.FP32]) -> pl.Scalar[pl.FP32]:
-                v: pl.Scalar[pl.FP32] = self.main_incore_0(a, b)
-                return v
+            def main(
+                self,
+                a: pl.Tensor[[4], pl.FP32],
+                b: pl.Tensor[[4], pl.FP32],
+                out: pl.Tensor[[4], pl.FP32],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                r: pl.Tensor[[4], pl.FP32] = self.main_incore_0(a, b, out)
+                return r
 
         @pl.program
         class Expected:
             @pl.function(type=pl.FunctionType.InCore)
             def main_incore_0(
-                self, a: pl.Tensor[[4], pl.FP32], b: pl.Tensor[[4], pl.FP32]
-            ) -> pl.Scalar[pl.FP32]:
+                self,
+                a: pl.Tensor[[4], pl.FP32],
+                b: pl.Tensor[[4], pl.FP32],
+                out: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
                 a_tile = pl.load(a, [0], [4])
                 b_tile = pl.load(b, [0], [4])
                 t_tile = pl.tile.add(a_tile, b_tile)
                 val = pl.tile.read(a_tile, [0])
                 pl.tile.write(t_tile, [0], val)
                 v = pl.tile.read(t_tile, [0])
-                return v
+                pl.tensor.write(out, [0], v)
+                return out
 
             @pl.function
-            def main(self, a: pl.Tensor[[4], pl.FP32], b: pl.Tensor[[4], pl.FP32]) -> pl.Scalar[pl.FP32]:
-                v = self.main_incore_0(a, b)
-                return v
+            def main(
+                self,
+                a: pl.Tensor[[4], pl.FP32],
+                b: pl.Tensor[[4], pl.FP32],
+                out: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                r = self.main_incore_0(a, b, out)
+                return r
 
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
@@ -5898,7 +5926,7 @@ class TestWindowSliceIncoreConversion:
     def test_barrier_upgrades_signal_to_inout(self):
         """``pld.tensor.barrier(signal)`` upgrades ``signal`` from In to InOut.
 
-        ConvertTensorToTileOps runs upstream of LowerCompositeOps (pass 12);
+        ConvertTensorToTileOps runs upstream of LowerCompositeOps (pass 13);
         without the explicit has_read|has_write marking, the param-direction
         analysis would leave the window param as In and a downstream reader
         would miss the RAW edge."""
@@ -6159,7 +6187,7 @@ class TestWindowSliceIncoreConversion:
 def _incore_only(program: ir.Program) -> ir.Program:
     """The program's single InCore function, as a one-function Program.
 
-    Expected covers that function only; the Orchestration caller pass 8 mints
+    Expected covers that function only; the Orchestration caller pass 9 mints
     alongside it is OutlineIncoreScopes' output, not this pass's.
     """
     incore = [f for f in program.functions.values() if f.func_type == ir.FunctionType.InCore]
@@ -6177,7 +6205,7 @@ class TestConvertCrossCoreSplitOps:
 
     Each Before is authored the way a user writes one — a plain ``@pl.function``
     (Opaque) holding a ``pl.at(level=CORE_GROUP)`` scope — and the pass input is
-    then **derived by running OutlineIncoreScopes** (pass 8). That is what makes
+    then **derived by running OutlineIncoreScopes** (pass 9). That is what makes
     the input the shape this pass really sees at pass 10: an InCore function
     whose region is *bare*, with the scope already consumed. Hand-writing the
     InCore function with a ``pl.at`` still around the region (as these tests
@@ -6195,13 +6223,13 @@ class TestConvertCrossCoreSplitOps:
     ``pl.tile.aiv_shard(x)`` / ``pl.tile.aic_gather(x)`` without ``split=``.
 
     Expected covers the InCore function only (see :func:`_incore_only`); the
-    Orchestration caller pass 8 mints alongside it is OutlineIncoreScopes'
+    Orchestration caller pass 9 mints alongside it is OutlineIncoreScopes'
     output, not this pass's.
     """
 
     @staticmethod
     def _outline(source: ir.Program) -> ir.Program:
-        """Derive this pass's input by running OutlineIncoreScopes (pass 8)."""
+        """Derive this pass's input by running OutlineIncoreScopes (pass 9)."""
         return passes.outline_incore_scopes()(source)
 
     @classmethod
@@ -6675,14 +6703,14 @@ class TestSynthesizedOpSpans:
 class TestCachePolicyConversion:
     """``pl.set_cache_policy`` reaches this pass as the outlined-function attr
     ``cache_policy`` — ``(param index, CachePolicy-as-int)`` pairs stamped by
-    OutlineIncoreScopes (pass 8) — and leaves it as a ``cache`` kwarg on every
+    OutlineIncoreScopes (pass 9) — and leaves it as a ``cache`` kwarg on every
     ``tile.load`` that reads a declared param. The attr itself is erased here:
     its indices go stale the moment a later pass grows the param list, so
     nothing downstream may see it.
 
     Each Before is authored in the shape pass 8 really hands over: a *bare*
     InCore function (the scope already consumed) carrying the resolved attr via
-    ``pl.func_attr``, plus the Orchestration caller pass 8 mints beside it.
+    ``pl.func_attr``, plus the Orchestration caller pass 9 mints beside it.
     Writing the ``pl.at`` scope here instead would re-test pass 8's translation
     rather than this pass's consumption of its output.
 

@@ -1405,14 +1405,14 @@ def prelu(tile: Expr, slope: Expr, tmp: Expr, span: Span | None = None) -> Call:
 
 
 def addc(lhs: Expr, rhs: Expr, rhs2: Expr, span: Span | None = None) -> Call:
-    """Element-wise addition of three tiles.
+    """Element-wise carry addition of three tiles.
 
-    Computes lhs + rhs + rhs2 element-wise. Maps to the TADDC hardware intrinsic.
+    Computes ``src0 + src1 + carry`` element-wise. Maps to TADDC.
 
     Args:
-        lhs: Left-hand side tile (TileType)
-        rhs: Right-hand side tile (TileType)
-        rhs2: Third tile (TileType)
+        lhs: First source tile (TileType)
+        rhs: Second source tile (TileType)
+        rhs2: Per-element carry-in tile (TileType), normally containing 0 or 1
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -1423,14 +1423,14 @@ def addc(lhs: Expr, rhs: Expr, rhs2: Expr, span: Span | None = None) -> Call:
 
 
 def subc(lhs: Expr, rhs: Expr, rhs2: Expr, span: Span | None = None) -> Call:
-    """Element-wise subtraction of three tiles.
+    """Element-wise carry subtraction of three tiles.
 
-    Computes lhs - rhs - rhs2 element-wise. Maps to the TSUBC hardware intrinsic.
+    Computes ``src0 - src1 + carry`` element-wise. Maps to TSUBC.
 
     Args:
-        lhs: Left-hand side tile (TileType)
-        rhs: Right-hand side tile (TileType)
-        rhs2: Third tile (TileType)
+        lhs: Minuend tile (TileType)
+        rhs: Subtrahend tile (TileType)
+        rhs2: Per-element carry-in tile (TileType), normally containing 0 or 1
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -1441,14 +1441,14 @@ def subc(lhs: Expr, rhs: Expr, rhs2: Expr, span: Span | None = None) -> Call:
 
 
 def addsc(lhs: Expr, rhs: int | float | Expr, rhs2: Expr, span: Span | None = None) -> Call:
-    """Element-wise addition of tile, scalar, and tile.
+    """Element-wise scalar carry addition.
 
-    Computes lhs + rhs + rhs2 element-wise. Maps to the TADDSC hardware intrinsic.
+    Computes ``src0 + scalar + carry`` element-wise. Maps to TADDSC.
 
     Args:
-        lhs: Left-hand side tile (TileType)
-        rhs: Scalar (int/float/Expr with ScalarType)
-        rhs2: Third tile (TileType)
+        lhs: Source tile (TileType)
+        rhs: Scalar addend with the same dtype as ``lhs``
+        rhs2: Per-element carry-in tile (TileType), normally containing 0 or 1
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -1460,14 +1460,14 @@ def addsc(lhs: Expr, rhs: int | float | Expr, rhs2: Expr, span: Span | None = No
 
 
 def subsc(lhs: Expr, rhs: int | float | Expr, rhs2: Expr, span: Span | None = None) -> Call:
-    """Element-wise subtraction of tile, scalar, and tile.
+    """Element-wise scalar carry subtraction.
 
-    Computes lhs - rhs - rhs2 element-wise. Maps to the TSUBSC hardware intrinsic.
+    Computes ``src0 - scalar + carry`` element-wise. Maps to TSUBSC.
 
     Args:
-        lhs: Left-hand side tile (TileType)
-        rhs: Scalar (int/float/Expr with ScalarType)
-        rhs2: Third tile (TileType)
+        lhs: Minuend tile (TileType)
+        rhs: Scalar subtrahend with the same dtype as ``lhs``
+        rhs2: Per-element carry-in tile (TileType), normally containing 0 or 1
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -2690,7 +2690,8 @@ def col_sum(tile: Expr, tmp_tile: Expr | None = None, span: Span | None = None) 
     Args:
         tile: Input tile (TileType [M, N])
         tmp_tile: Optional scratch tile (TileType, same shape/dtype as input) that
-            activates binary-tree reduction.
+            activates binary-tree reduction. Unlike the arg reductions, this is
+            not enforced by type deduction -- pass the input's shape and dtype.
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -2791,7 +2792,8 @@ def col_argmax(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
 
     Args:
         tile: Input tile (TileType [M, N])
-        tmp_tile: Temporary tile (TileType)
+        tmp_tile: Scratch tile (TileType) with exactly the same shape and dtype as
+            ``tile`` -- the kernel reads the column count from the tmp/src extent
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -2809,7 +2811,8 @@ def col_argmin(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
 
     Args:
         tile: Input tile (TileType [M, N])
-        tmp_tile: Temporary tile (TileType)
+        tmp_tile: Scratch tile (TileType) with exactly the same shape and dtype as
+            ``tile`` -- the kernel reads the column count from the tmp/src extent
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:

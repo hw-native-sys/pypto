@@ -25,7 +25,7 @@
  *
  *   Phase 1 — every TensorType tagged ``TensorLayout::NZ`` gets its shape
  *             replaced by ``BlockNzShape``. The stride slot is left empty for
- *             ``MaterializeTensorStrides`` (pass 30) to fill; because a blocked
+ *             ``MaterializeTensorStrides`` (pass 33) to fill; because a blocked
  *             NZ shape's row-major strides *are* pto-isa's NZ strides, that
  *             pass needs no NZ-specific rule.
  *
@@ -42,7 +42,7 @@
  * ``GetTensorViewTypeString`` and the ``tile.load`` ``partition_view`` emitter
  * each read the rank independently and must agree.
  *
- * Ordering constraints (see docs/en/dev/passes/14-block_nz_tensor_views.md):
+ * Ordering constraints (see docs/en/dev/passes/15-block_nz_tensor_views.md):
  *   * after ConvertTensorToTileOps / LowerCompositeOps — the ``tile.load`` ops
  *     Phase 2 rewrites must already exist;
  *   * after FlattenTileNdTo2D — declared as a ``TileOps2D`` requirement. The

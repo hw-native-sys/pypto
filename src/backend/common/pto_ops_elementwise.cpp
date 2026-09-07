@@ -101,6 +101,9 @@ static const std::unordered_set<std::string_view>& RowMajorOps() {
       "tile.shr",
       "tile.sub",
       "tile.xor",
+      // Ternary tile ops
+      "tile.addc",
+      "tile.subc",
       // Unary ops
       "tile.abs",
       "tile.exp",

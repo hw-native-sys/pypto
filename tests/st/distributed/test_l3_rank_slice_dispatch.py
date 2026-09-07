@@ -22,7 +22,7 @@ generated ``host_orch.py`` referenced the rank-slice temporaries (``t__tmp_v1``,
 runtime with ``KeyError: 't__tmp_v1'`` before the child task could run. Adding an
 unused dummy distributed-window argument used to be the only workaround.
 
-Root cause was in ``FlattenCallExpr`` (pass 07): the ForStmt visitor discarded
+Root cause was in ``FlattenCallExpr`` (pass 06): the ForStmt visitor discarded
 hoisted temporaries for a single-statement (non-``SeqStmts``) loop body, so the
 ``x[r]`` / ``y[r]`` rank slices became undefined free vars. The fix routes the
 loop body through ``FlattenScopeBody``, which wraps the body together with its

@@ -67,6 +67,8 @@ void BindPass(nb::module_& m) {
       .value("UseAfterDef", IRProperty::UseAfterDef, "All variable uses are dominated by a definition")
       .value("HierarchyOutlined", IRProperty::HierarchyOutlined,
              "Hierarchy scopes outlined into level/role functions")
+      .value("GraphOutlined", IRProperty::GraphOutlined,
+             "Graph scopes outlined into FunctionType::Graph functions")
       .value("StructuredCtrlFlow", IRProperty::StructuredCtrlFlow,
              "No BreakStmt/ContinueStmt — only structured control flow")
       .value("VectorKernelSplit", IRProperty::VectorKernelSplit,
@@ -146,7 +148,13 @@ void BindPass(nb::module_& m) {
              "Every tile.gemv/tile.gemv_acc/tile.gemv_bias with acc_phase=AccPhase.Final is paired in "
              "the "
              "same straight-line region with exactly one tile.store of that value using "
-             "st_phase=STPhase.Final, and every final store has such a live producer");
+             "st_phase=STPhase.Final, and every final store has such a live producer")
+      .value("NoScalarKernelReturn", IRProperty::NoScalarKernelReturn,
+             "No device function (InCore / AIC / AIV / Group / Spmd) returns a Scalar. Those types "
+             "mean a dispatchable task, and the runtime passes scalars in by value while returning "
+             "only tensors, so such a return has no carrier -- write the value into a [1] tensor "
+             "output and read it back with pl.tensor.read. Scalar[TASK_ID] is exempt, and a "
+             "device-side scalar helper belongs in an Inline function");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");
@@ -507,6 +515,8 @@ void BindPass(nb::module_& m) {
              "and standalone Spmd scopes into Spmd functions");
   passes.def("outline_hierarchy_scopes", &pass::OutlineHierarchyScopes,
              "Create a pass that outlines Hierarchy scopes into separate level/role functions");
+  passes.def("outline_graph_scopes", &pass::OutlineGraphScopes,
+             "Create a pass that outlines Graph scopes (pl.graph) into FunctionType::Graph functions");
   passes.def("convert_tensor_to_tile_ops", &pass::ConvertTensorToTileOps,
              "Create a pass that converts tensor ops to tile ops in InCore functions");
   passes.def("optimize_orch_tensors", &pass::OptimizeOrchTensors,
@@ -522,6 +532,13 @@ void BindPass(nb::module_& m) {
              "blocked coordinates while its logical 2-D destination TileType is preserved.\n"
              "Must run after ConvertTensorToTileOps and after FlattenTileNdTo2D (it\n"
              "requires TileOps2D: the destination tile must already be 2-D).");
+  passes.def("block_mx_scale_tensor_views", &pass::BlockMxScaleTensorViews,
+             "Create a pass that rewrites logical MX scale tensors into A5's packed rank-5 form\n\n"
+             "MX_A_ZZ [M, G] and MX_B_NN [G, N] become [1, block/16, group/2, 16, 2].\n"
+             "The pass rewrites tile.load windows and ND/MX backing aliases while preserving\n"
+             "logical tile result types. Symbolic offsets must be provably aligned and\n"
+             "non-negative. Must run after FlattenTileNdTo2D and before\n"
+             "MaterializeTensorStrides.");
   passes.def("flatten_tile_nd_to_2d", &pass::FlattenTileNdTo2D,
              "Create a pass that flattens ND tile ops to 2D in InCore functions\n\n"
              "Merges all dimensions except the last into a single dimension.\n"

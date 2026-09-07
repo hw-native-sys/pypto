@@ -144,7 +144,18 @@ TypePtr DeduceTileRowReductionType(const std::vector<ExprPtr>& args,
 TypePtr DeduceTileColReductionType(const std::vector<ExprPtr>& args,
                                    const std::vector<std::pair<std::string, std::any>>& kwargs,
                                    const std::string& op_name,
-                                   std::optional<DataType> out_dtype = std::nullopt) {
+                                   std::optional<DataType> out_dtype = std::nullopt,
+                                   bool require_exact_tmp_shape = false) {
+  // Guard the operand count BEFORE touching args[0]. Indexing an empty vector is
+  // undefined behaviour, and here it segfaulted the interpreter rather than
+  // raising -- `create_op_call("tile.col_argmax", [])` died with SIGSEGV. Every
+  // other registration using this deducer guards arity in its own lambda; doing
+  // it here covers them all and cannot be forgotten by the next one.
+  CHECK(!args.empty()) << "The operator " << op_name << " requires at least 1 argument, but got 0";
+  if (require_exact_tmp_shape) {
+    CHECK(args.size() == 2) << "The operator " << op_name << " requires 2 arguments, but got " << args.size();
+  }
+
   // First argument must be TileType
   auto tile_type = As<TileType>(args[0]->GetType());
   CHECK(tile_type) << "The operator " << op_name << " requires first argument to be a TileType, but got "
@@ -154,6 +165,37 @@ TypePtr DeduceTileColReductionType(const std::vector<ExprPtr>& args,
   int64_t input_ndim = static_cast<int64_t>(input_shape.size());
   CHECK(input_ndim >= 2) << "The operator " << op_name << " requires at least a 2D tile, but got "
                          << input_ndim << " dimensions";
+
+  // The column ARG reductions need a scratch tile shaped exactly like the source:
+  // pto-isa's TCOLARGMAX / TCOLARGMIN read the column count from the tmp/src
+  // extent, so a wider tmp walks past the valid columns and can return the wrong
+  // index per column -- a silent wrong answer with nothing downstream to catch
+  // it. The row forms enforce this already; this is the column half (gh#2615).
+  //
+  // Only the arg forms opt in. col_sum's optional tmp drives a binary-tree
+  // reduction with different sizing semantics and is deliberately left alone.
+  if (require_exact_tmp_shape) {
+    auto tmp_type = As<TileType>(args[1]->GetType());
+    CHECK_SPAN(tmp_type, args[1]->span_)
+        << "The operator " << op_name << " requires tmp_tile to be a TileType, but got "
+        << args[1]->GetType()->TypeName();
+    CHECK_SPAN(tmp_type->dtype_ == tile_type->dtype_, args[1]->span_)
+        << "The operator " << op_name
+        << " requires tmp_tile dtype to match input dtype, but got tmp_tile dtype "
+        << tmp_type->dtype_.ToString() << " and input dtype " << tile_type->dtype_.ToString();
+    CHECK_SPAN(tmp_type->shape_.size() == input_shape.size(), args[1]->span_)
+        << "The operator " << op_name << " requires tmp_tile to have the same rank as the input, but got "
+        << "tmp_tile shape " << FormatShape(tmp_type->shape_) << " and input shape "
+        << FormatShape(input_shape);
+    for (size_t i = 0; i < input_shape.size(); ++i) {
+      CHECK_SPAN(ProveValidExtentEqual(input_shape[i], tmp_type->shape_[i]) == ProofResult::kTrue,
+                 args[1]->span_)
+          << "The operator " << op_name
+          << " requires tmp_tile shape to exactly match the input shape, but dimension " << i
+          << " differs; got tmp_tile shape " << FormatShape(tmp_type->shape_) << " and input shape "
+          << FormatShape(input_shape);
+    }
+  }
 
   // Output shape: [1, ...remaining] — reduce along first axis with keepdim=True
   std::vector<ExprPtr> output_shape;
@@ -377,7 +419,7 @@ REGISTER_OP("tile.col_argmax")
     .set_op_category("TileOp")
     .set_description("Column-wise argmax: row index of the per-column maximum (maps to TCOLARGMAX)")
     .add_argument("tile", "Input tile (TileType)")
-    .add_argument("tmp_tile", "Temporary tile (TileType)")
+    .add_argument("tmp_tile", "Same-dtype scratch tile shaped EXACTLY like the input (TileType)")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
@@ -385,39 +427,31 @@ REGISTER_OP("tile.col_argmax")
     // output must not alias an input (the tmp-bearing column variants share the
     // row-reduction in-place hazard, unlike the 1-arg col_max/col_min).
     .not_inplace_safe()
-    // NOT declared lane-invariant: argmax/argmin need a tmp shaped EXACTLY like
-    // the source (the TROWARGMAX/TCOLARGMAX kernels read the column count from
-    // the tmp/src extent), so a wider tmp walks past the valid columns and can
-    // return the wrong index per column. Unlike the row forms,
-    // DeduceTileColReductionType never inspects args[1] (gh#2615), so type
-    // deduction is BLIND here -- leaving it undeclared is what makes automatic
-    // AIV splitting treat it as per-lane data and reject a full-width one.
+    // NOT declared lane-invariant, and it must not be: the deducer below runs
+    // with require_exact_tmp_shape, so it already rejects a full-width tmp beside
+    // a halved input. Automatic AIV splitting consults a declaration only where
+    // type deduction is silent, so one here could never be reached.
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      CHECK(args.size() == 2) << "The operator tile.col_argmax requires 2 arguments, but got " << args.size();
-      return DeduceTileColReductionType(args, kwargs, "tile.col_argmax", DataType(DataType::INT32));
+      return DeduceTileColReductionType(args, kwargs, "tile.col_argmax", DataType(DataType::INT32), true);
     });
 
 REGISTER_OP("tile.col_argmin")
     .set_op_category("TileOp")
     .set_description("Column-wise argmin: row index of the per-column minimum (maps to TCOLARGMIN)")
     .add_argument("tile", "Input tile (TileType)")
-    .add_argument("tmp_tile", "Temporary tile (TileType)")
+    .add_argument("tmp_tile", "Same-dtype scratch tile shaped EXACTLY like the input (TileType)")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     .not_inplace_safe()
-    // NOT declared lane-invariant: argmax/argmin need a tmp shaped EXACTLY like
-    // the source (the TROWARGMAX/TCOLARGMAX kernels read the column count from
-    // the tmp/src extent), so a wider tmp walks past the valid columns and can
-    // return the wrong index per column. Unlike the row forms,
-    // DeduceTileColReductionType never inspects args[1] (gh#2615), so type
-    // deduction is BLIND here -- leaving it undeclared is what makes automatic
-    // AIV splitting treat it as per-lane data and reject a full-width one.
+    // NOT declared lane-invariant, and it must not be: the deducer below runs
+    // with require_exact_tmp_shape, so it already rejects a full-width tmp beside
+    // a halved input. Automatic AIV splitting consults a declaration only where
+    // type deduction is silent, so one here could never be reached.
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      CHECK(args.size() == 2) << "The operator tile.col_argmin requires 2 arguments, but got " << args.size();
-      return DeduceTileColReductionType(args, kwargs, "tile.col_argmin", DataType(DataType::INT32));
+      return DeduceTileColReductionType(args, kwargs, "tile.col_argmin", DataType(DataType::INT32), true);
     });
 
 }  // namespace ir

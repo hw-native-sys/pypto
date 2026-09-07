@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "pypto/core/error.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -154,6 +155,71 @@ StmtPtr FoldParamDimReads(const std::vector<VarPtr>& params, const StmtPtr& body
   return folder.folded_any() ? folded : body;
 }
 
+/// Assert every dispatch predicate left in @p func still has a runtime carrier.
+///
+/// After this pass a ``pl.at`` predicate must sit on a ``Submit`` in a body that
+/// orchestration codegen dispatches from. Two residues say it does not:
+///
+///   * an ``InCoreScopeStmt`` still carrying ``kAttrPredicate``. This pass
+///     consumes every InCore scope it processes, so a survivor means the scope
+///     sits in a body the pass skips (``Group`` / ``Spmd`` / an InCore-family
+///     kernel) and nothing downstream turns it into a dispatch.
+///   * a ``Submit`` carrying ``predicate_`` inside such a skipped body. That is
+///     the shape a predicated ``pl.at`` nested in ``pl.spmd(...)`` or in another
+///     CORE_GROUP ``pl.at`` collapses to: the predicate rides into device code,
+///     which never dispatches tasks.
+///
+/// ``ASTParser._parse_at_predicate`` rejects both where it can see them. It
+/// cannot see through an ``@pl.function(type=Inline)`` helper: the helper body
+/// parses on its own, and only ``InlineFunctions`` (pass 1) reveals which call
+/// site it lands in. So these fire on user input as readily as on hand-built or
+/// deserialized IR, and report as ``CHECK`` rather than ``INTERNAL_CHECK``.
+///
+/// The ``pl.cluster()`` nesting is deliberately NOT covered here — at this
+/// point its Submit is still in the orchestration body and only moves into the
+/// Group wrapper at ``OutlineClusterScopes``, where
+/// ``AssertNoInnerDispatchPredicate`` picks it up.
+void AssertDispatchPredicatesHaveACarrier(const FunctionPtr& func) {
+  // The same condition the pass loop uses to decide whether to rewrite a body.
+  const bool rewritten_here =
+      func->func_type_ == FunctionType::Opaque || IsOrchestrationLike(func->func_type_);
+
+  class PredicateResidueFinder : public IRVisitor {
+   public:
+    PredicateResidueFinder(std::string func_name, bool rewritten_here)
+        : func_name_(std::move(func_name)), rewritten_here_(rewritten_here) {}
+
+   protected:
+    void VisitStmt_(const InCoreScopeStmtPtr& op) override {
+      CHECK_SPAN(!op->GetAttr<ExprPtr>(kAttrPredicate, nullptr), op->span_)
+          << "pl.at(..., predicate=(...)) is not supported in the body of function '" << func_name_
+          << "'. OutlineIncoreScopes only rewrites Opaque and orchestration-like bodies, so this "
+             "scope never becomes a task dispatch and the predicate would be silently dropped. "
+             "Write the predicated pl.at in the orchestration function that launches this kernel.";
+      IRVisitor::VisitStmt_(op);
+    }
+
+    void VisitExpr_(const SubmitPtr& op) override {
+      CHECK_SPAN(rewritten_here_ || !op->predicate_.has_value(), op->span_)
+          << "pl.at(..., predicate=(...)) is not supported nested inside pl.spmd() or another "
+             "pl.at(level=pl.Level.CORE_GROUP). It ended up in function '"
+          << func_name_
+          << "', which is device code, so nothing dispatches it as a task and the predicate "
+             "would be silently dropped. Write the predicated pl.at at orchestration top level. "
+             "Written directly this is rejected at parse time; it reaches here through an "
+             "@pl.function(type=Inline) helper, whose call site the parser cannot see.";
+      IRVisitor::VisitExpr_(op);
+    }
+
+   private:
+    std::string func_name_;
+    bool rewritten_here_;
+  };
+
+  PredicateResidueFinder finder(func->name_, rewritten_here);
+  finder.VisitStmt(func->body_);
+}
+
 }  // namespace
 
 namespace pass {
@@ -268,6 +334,13 @@ Pass OutlineIncoreScopes() {
 
     // Add all outlined functions before the originals
     all_outlined_functions.insert(all_outlined_functions.end(), new_functions.begin(), new_functions.end());
+
+    // Every dispatch predicate that survives this pass must have landed on a
+    // Submit in a body that dispatches. Swept over the final function list so
+    // the bodies the loop above skipped are covered too.
+    for (const auto& fn : all_outlined_functions) {
+      if (fn && fn->body_) AssertDispatchPredicatesHaveACarrier(fn);
+    }
 
     // Create new program with all functions
     return std::make_shared<Program>(all_outlined_functions, program->name_, program->span_);

@@ -260,7 +260,6 @@ def test_source_hash_tracks_cpp_edits(tmp_path):
 
     h1 = entry._get_source_hash()
     cpp.write_text(_KERNEL_SRC + "\n// changed\n")
-    entry._source_hash = None  # force recompute (normally a fresh interpreter)
     h2 = entry._get_source_hash()
     assert h1 != h2
 

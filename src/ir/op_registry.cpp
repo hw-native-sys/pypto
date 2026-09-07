@@ -57,11 +57,11 @@ std::string FormatAllowedSpaces(const std::vector<MemorySpace>& allowed) {
 /// Three states, three outcomes:
 ///
 ///  * **unset** — always legal. `nullopt` is the IR's "not decided yet", and
-///    `InferTileMemorySpace` (pass 17) places the tile from consumer demand.
+///    `InferTileMemorySpace` (pass 20) places the tile from consumer demand.
 ///    The `TileMemoryInferred` verifier checks the outcome afterwards.
 ///  * **set and allowed** — legal, nothing to do.
 ///  * **set, not allowed, but reachable by a `tile.move`** — also legal here.
-///    Pass 17's MoveCollector inserts the move. This is the ordinary case for
+///    Pass 20's MoveCollector inserts the move. This is the ordinary case for
 ///    `tile.matmul`'s Left/Right operands, reached from Mat by an MTE1 tmov.
 ///  * **set, not allowed, and unreachable** — a user error, reported here.
 ///
@@ -109,7 +109,7 @@ void CheckOperandMemorySpaceReachable(const OpMemorySpaceSpec& spec, const std::
     if (std::find(allowed.begin(), allowed.end(), *space) != allowed.end()) continue;
 
     // Reachable from ANY on-chip space, not just this operand's: that is what
-    // distinguishes "this particular hop is missing" (leave it to pass 17) from
+    // distinguishes "this particular hop is missing" (leave it to pass 20) from
     // "this destination has no inbound edge at all" (unfixable, reject now).
     const bool destination_ever_reachable =
         std::any_of(allowed.begin(), allowed.end(), [](MemorySpace target) {

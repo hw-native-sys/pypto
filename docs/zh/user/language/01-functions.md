@@ -60,6 +60,24 @@ def entry(
 | `@pl.jit.opaque` | `Opaque` | 独立 IR 函数，可包含编排循环与 `pl.at` 作用域 |
 | `@pl.jit.graph` | `Graph` | 可录制的编排片段 —— `host_build_graph` runtime 在首次调用时录制其 task 拓扑、之后回放，因此 N 次调用只付一次建图代价。需要在 `RuntimeKind.HOST_BUILD_GRAPH` 下编译 |
 
+`@pl.jit.graph` 有一种作用域形式：`with pl.graph("name"):` 就地标记一个区域，而不必把它
+拆成独立函数。两者编译结果相同 —— 区域会被外提为一个以 `name` 命名的 Graph 函数 ——
+因此这只是书写习惯的选择。layer 本身已是独立函数时用装饰器；区域只是某个较大编排函数体
+中不愿拆出去的一段时用作用域：
+
+```python
+@pl.jit
+def decode(w: pl.Tensor, hidden: pl.InOut[pl.Tensor]):
+    for layer in pl.range(40):
+        with pl.graph("decoder_layer"):        # 录制一次，回放 39 次
+            ...
+    return hidden
+```
+
+名字是必填的，并且成为所录制图的身份，因此请保持稳定。Graph 区域不能嵌套在另一个 Graph
+区域内，也不能嵌套在 `pl.at` / `pl.cluster` / `pl.spmd` 内 —— 后者会变成单个设备 task，
+而 Graph 区域录制的是 task 的拓扑。三种情况都是编译期错误。
+
 子函数依赖（`.incore` / `.inline` / `.opaque` / `.graph`）从入口函数体自动发现 —— 按名字调用即可。这里的名字在入口函数自身的命名空间中解析，因此别名导入（`from kernels import matmul as mm`，或普通的 `mm = matmul` 重绑定）与其他绑定一样能被发现；生成的程序仍以其 `def` 名字命名该函数。`@pl.jit.host` 入口还会额外发现 `@pl.jit`（chip 编排）依赖，因此一个完整的分布式程序无需任何 `@pl.program` 类。
 
 下面这段只展示发现结构 —— kernel 体已省略，它用到的分布式类型见[分布式](../distributed/index.md)：
@@ -113,6 +131,29 @@ def good(x: pl.Tensor[[64, 64], pl.FP32], out: pl.Out[pl.Tensor[[64, 64], pl.FP3
 **2. `JITFunction` 没有 `as_python()`。** 在特化发生之前 IR 并不存在。调用 `lower(*args)` 拿 Pass 后的 `ir.Program`，或调用 `compile(*args)` 后读 `compiled.program.as_python()` 拿特化后、Pass 前的 IR。
 
 **3. `compile()` 收的是 kernel 自己的参数，不是编译选项。** 编译期开关走 `config=RunConfig(...)`；误写的 `compile(skip_ptoas=True)` 会拿去和 kernel 签名做绑定，并抛出 `TypeError: got an unexpected keyword argument`。`@pl.jit` 会自行检测 ptoas 是否可用，所以你不需要传 `skip_ptoas`。
+
+**设备 kernel 不能返回标量。** 运行时的两条任务参数通道是分离的：标量按值传**入**，回来的只有
+tensor。因此在 device 上算出、而调用方（派发它的 orchestration 函数，以及其外的 host）又要用的值，
+必须装在 tensor 里带回来。藏在 `pl.Tuple[...]` 返回值里的标量同样如此。
+
+```python
+@pl.jit.incore
+def bad(x: pl.Tensor[[64], pl.FP32]) -> pl.Scalar[pl.INDEX]:   # ✗ 这个返回值没有载体
+    ...
+
+@pl.jit.incore                                                  # ✓ 用一个 [1] 的 tensor 带回来
+def good(x: pl.Tensor[[64], pl.FP32], n_out: pl.Out[pl.Tensor[[1], pl.INT32]]):
+    ...
+# 然后在入口体里，派发之后：
+n = pl.tensor.read(n_out, [0])
+```
+
+同一条规则也适用于你在 `with pl.at(...)` **内部**赋值、在其之后读取的标量——那是变相的 kernel
+返回。当这个值只依赖入口体已有的东西（循环变量、标量参数）时，编译器会替你把该计算移出作用
+域；当它依赖 device 数据时，编译器会要求你按上面的方式经由 tensor 传递。
+
+**为** kernel 计算标量的辅助函数没有问题——把它写成 `@pl.jit.inline`（`FunctionType.Inline`）。
+它会在调用点被展开，因此不是一次任务派发，这条规则对它不适用。
 
 ### `@pl.function` 与 `@pl.program`
 
@@ -197,6 +238,19 @@ print("artifacts in:", compiled.output_dir)
 
 `lower(*sample_args)` 比它早停一站：只跑 Pass 并返回 Pass 后的 `ir.Program`，不做代码生成、不调 `ptoas`、不写产物、不写缓存。要读降级后的 IR 就用它；要检查代码生成本身就用 `compile()`。两者都接受 `config=RunConfig(...)`，但 `lower()` 会忽略其中的运行时与产物字段。编译选项见 [编译](../execution/00-compile.md)，运行时接口见 [运行](../execution/01-run.md)。
 
+`specialize(*sample_args)` 比它还要早停一站：把入口及其依赖特化成 `@pl.program` 源码并解析，返回**未经任何 Pass** 的 `ir.Program`。只有当下游要自己跑 Pass 流水线时才需要它 —— 最主要的场景是 `ir.compile(program, output_dir=...)`，它会同时跑 Pass 和代码生成，把 `lower()` 的结果喂给它会让流水线跑两遍。
+
+```python
+program = my_kernel.specialize(sample_x, sample_w, sample_out)
+ir.compile(program, output_dir="build/out", backend_type=BackendType.Ascend910B)
+```
+
+它不接受 `config=`：这里不跑任何 Pass，`RunConfig` 没有可配置的东西。只有当每个张量参数都带完整形状注解时才能省略采样实参 —— 裸 `pl.Tensor` 没有形状可读。
+
+> 两个特化出相同程序的 kernel，是在 **Pass 之后**才相等，而不是之前：特化器会重命名 SSA 重绑定的局部量（`out` 变成 `out_v1`），规范化会消除这个差异。要和手写 `@pl.program` 断言等价，请比较 `lower()` 的结果。
+
+另有三个访问器可以在不做任何特化的情况下读取签名：`param_names`（按声明顺序）、`output_param_names`（`pl.Out[...]` 与 `pl.InOut[...]` 参数，同样按声明顺序）、以及 `__name__`。
+
 ### 外部 C++ kernel
 
 手写的 C++ kernel 可以像普通函数一样被调用。见 [集成手写 C++ Kernel](../../dev/language/04-external-kernels.md)。
@@ -214,6 +268,8 @@ print("artifacts in:", compiled.output_dir)
 | **程序里少了第二个顶层 kernel** | 普通 `@pl.jit` 不发现其他 `@pl.jit` 入口 | 改用 `@pl.jit.host`，或把被调方改成 `.incore` / `.opaque` |
 | **`auto_scope=False` 被拒绝** | 用在了 `.incore` / `.opaque` 上 | 放到入口或 `.inline` 辅助函数上 |
 | **`@pl.program` 方法缺 `self`** | 每个方法都需要 | 补上 `self`；它会从 IR 中剥离 |
+| **`A task cannot return a scalar`** | device kernel 声明了 `pl.Scalar` 返回值 | 写入一个 `[1]` 的 tensor 输出，派发后用 `pl.tensor.read(t, [0])` 读回 |
+| **`cannot return a scalar` 并指名某个作用域内的变量** | 在 `pl.at(...)` 内赋值的标量在其之后被读取，且依赖 device 数据 | 经由 `[1]` tensor 传递，或把该计算移出作用域 |
 
 ## 配套示例
 

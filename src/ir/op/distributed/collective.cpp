@@ -14,7 +14,7 @@
  * @brief Distributed tensor-level collective ops — pld.tensor.* composites and builtin.tensor.* host
  * dispatches.
  *
- * Composite collective ops that lower through LowerCompositeOps (pass 12)
+ * Composite collective ops that lower through LowerCompositeOps (pass 13)
  * into notify/wait/remote_load/store primitives (InCore path), or through
  * LowerHostTensorCollectives into builtin.tensor.* chip dispatches (HOST path).
  * Each op registers a type deducer and an op description; the actual IR
@@ -167,25 +167,11 @@ TypePtr DeduceBuiltinTensorAllReduceRingType(const std::vector<ExprPtr>& args,
         << " for NR = " << sig_shape1_const->value_;
   }
 
-  // Compile-time validation: the host builtin ring kernel partitions src into
-  // NR contiguous compile-time chunks, so the src shape must be statically
-  // known — a dynamic extent could reach the kernel with a runtime numel that
-  // is not divisible by NR and silently return unreduced data.  A non-divisible
-  // numel would produce a trailing partial chunk the schedule cannot handle.
-  if (sig_shape1_const && sig_shape1_const->value_ > 0) {
-    int64_t src_numel = 1;
-    for (const auto& dim : src_type->shape_) {
-      auto extent = As<ConstInt>(dim);
-      CHECK(extent) << kOpName
-                    << " requires a statically-known src shape (dynamic host-ring extents are not "
-                       "supported; the ring schedule partitions src into NR compile-time chunks)";
-      src_numel *= extent->value_;
-    }
-    const int64_t nr = sig_shape1_const->value_;
-    CHECK(src_numel % nr == 0) << kOpName << " requires the src data size (product of shape = " << src_numel
-                               << ") to be an exact multiple of the rank count (" << nr
-                               << "); got a remainder of " << (src_numel % nr);
-  }
+  // The host builtin ring kernel partitions src into NR balanced, potentially
+  // ragged chunks at runtime (chunk r spans [floor(numel*r/NR), floor(numel*(r+1)/NR)))
+  // and narrows every TPUT transfer to the chunk's exact extent via the staging
+  // tile's valid_shape — no compile-time static-shape or divisibility
+  // requirement remains (issue #2242).
 
   auto op_value = GetRequiredKwarg<int>(kwargs, "op", kOpName);
   auto dtype = GetRequiredKwarg<DataType>(kwargs, "dtype", kOpName);

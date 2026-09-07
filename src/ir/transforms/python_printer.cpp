@@ -343,6 +343,7 @@ class IRPythonPrinter : public IRVisitor {
   void VisitStmt_(const SplitAivScopeStmtPtr& op) override;
   void VisitStmt_(const RuntimeScopeStmtPtr& op) override;
   void VisitStmt_(const CommDomainScopeStmtPtr& op) override;
+  void VisitStmt_(const GraphScopeStmtPtr& op) override;
   void VisitStmt_(const SeqStmtsPtr& op) override;
   void VisitStmt_(const EvalStmtPtr& op) override;
   void VisitStmt_(const BreakStmtPtr& op) override;
@@ -492,7 +493,8 @@ class IRPythonPrinter : public IRVisitor {
   // PrintScopeAllowEarlyResolveAttr — the outliner reads the predicate off the
   // scope and threads it onto the synthesised ``Submit``, so it must survive a
   // print/reparse roundtrip while the scope still exists. The comparison Expr
-  // prints itself, so there is no bespoke syntax.
+  // prints itself, so there is no bespoke syntax. Shared by the ``pl.spmd``
+  // scope printers and the ``pl.at`` (InCore / Hierarchy) ones.
   bool PrintScopePredicateAttr(const ScopeStmtPtr& op);
 
   // Emit ``windowize=True`` for an explicitly opted-in InCore scope.
@@ -2194,6 +2196,11 @@ void IRPythonPrinter::VisitStmt_(const HierarchyScopeStmtPtr& op) {
   PrintScopeNoDepsAttr(op);
   PrintScopeDumpAttr(op);
   PrintScopeAllowEarlyResolveAttr(op);
+  // The parser rejects ``pl.at(level != CORE_GROUP, predicate=...)`` and
+  // ScopeOutliner asserts the same for hand-built IR, so a Hierarchy scope
+  // should never carry one. Print it anyway rather than silently dropping
+  // state from a mid-pipeline dump of such IR.
+  PrintScopePredicateAttr(op);
   PrintScopeWindowizeAttr(op);
   stream_ << ")";
   PrintScopeTaskIdVarSuffix(op);
@@ -2218,6 +2225,7 @@ void IRPythonPrinter::VisitStmt_(const InCoreScopeStmtPtr& op) {
   PrintScopeNoDepsAttr(op);
   PrintScopeDumpAttr(op);
   PrintScopeAllowEarlyResolveAttr(op);
+  PrintScopePredicateAttr(op);
   PrintScopeWindowizeAttr(op);
   stream_ << ")";
   PrintScopeTaskIdVarSuffix(op);
@@ -2234,6 +2242,15 @@ void IRPythonPrinter::VisitStmt_(const ClusterScopeStmtPtr& op) {
     stream_ << "name_hint=\"" << op->name_hint_ << "\"";
   }
   stream_ << "):\n";
+  IncreaseIndent();
+  PrintStmtBlock(op->body_);
+  DecreaseIndent();
+}
+
+void IRPythonPrinter::VisitStmt_(const GraphScopeStmtPtr& op) {
+  // ``name_hint_`` is the region name the user wrote; the parser requires it,
+  // so it is printed positionally rather than as an optional keyword.
+  stream_ << "with " << prefix_ << ".graph(\"" << op->name_hint_ << "\"):\n";
   IncreaseIndent();
   PrintStmtBlock(op->body_);
   DecreaseIndent();

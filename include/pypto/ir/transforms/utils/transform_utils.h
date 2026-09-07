@@ -24,11 +24,13 @@
 #include <vector>
 
 #include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/utils/attrs.h"
+#include "pypto/ir/type.h"
 
 namespace pypto::ir::transform_utils {
 
@@ -170,6 +172,43 @@ inline CallPtr AsCallOrSubmitView(const ExprPtr& expr) {
   if (auto call = As<Call>(expr)) return call;
   if (auto submit = As<Submit>(expr)) return SubmitToCallView(submit);
   return nullptr;
+}
+
+/// Number of trailing ``CommCtxType`` parameters on @p callee.
+///
+/// ``MaterializeDistTensorCtx`` appends these, and they are what makes a
+/// ``Submit``'s argument mapping stop being positional identity. See the
+/// ``Submit::args_`` comment in ``ir/expr.h`` for the full contract.
+[[nodiscard]] inline size_t TrailingCommCtxParamCount(const FunctionPtr& callee) {
+  size_t count = 0;
+  while (count < callee->params_.size() &&
+         IsA<CommCtxType>(callee->params_[callee->params_.size() - 1 - count]->GetType())) {
+    ++count;
+  }
+  return count;
+}
+
+/// The argument @p call passes for callee parameter @p param_index, or null.
+///
+/// Resolves region 1 of the ``Submit::args_`` mapping documented on
+/// ``ir/expr.h`` — the caller-supplied prefix, where ``args_[i]`` binds
+/// ``params_[i]`` by identity. Null means the parameter has no caller argument:
+/// either it sits in the runtime-allocated gap a ``Submit`` may leave (so the
+/// value is created by the runtime and has no caller-side provenance), or it is
+/// part of the ``CommCtx`` suffix.
+///
+/// Requiring full arity instead would be wrong, not merely conservative: a
+/// ``Submit`` that omits a runtime-allocated ``Out`` tail is ordinary DSL, and
+/// its caller-supplied prefix still maps positionally. Orchestration codegen
+/// splits the same three regions in ``GenerateSubmitReturnAliases``.
+[[nodiscard]] inline ExprPtr CallerSuppliedArg(const CallPtr& call, const FunctionPtr& callee,
+                                               size_t param_index) {
+  if (!call || !callee) return nullptr;
+  const size_t ctx = TrailingCommCtxParamCount(callee);
+  if (call->args_.size() < ctx || call->args_.size() > callee->params_.size()) return nullptr;
+  const size_t caller_supplied = call->args_.size() - ctx;
+  if (param_index >= caller_supplied) return nullptr;
+  return call->args_[param_index];
 }
 
 /// Constant-evaluate @p expr if it is a ``ConstInt``, or a ``Neg`` of one;

@@ -40,6 +40,7 @@ import functools
 import inspect
 import textwrap
 import warnings
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -48,6 +49,8 @@ from pypto._function_attrs import DUAL_AIV_DISPATCH_ATTR
 from pypto.language.typing.array import Array as _LangArray
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import TensorLayout
+
+from ._source import function_namespace
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -137,14 +140,10 @@ class SpecializeContext:
             call name that differs from the function it resolves to. The body
             transformer consults it when rewriting ``kern(...)`` into
             ``self.kernel(...)``; an absent entry means the two agree.
-        py_globals: Every name visible to the originating function — its
-            ``__globals__`` merged with its closure free vars, as built by
-            :func:`func_name_lookup`. The specializer uses this to resolve
-            int/float/bool constants (``BATCH`` imported from a config module,
-            a factory's captured rank count) by inlining them at the use site.
-            Closure free vars must be included: the generated program is
-            ``exec``'d in a fresh module, so a captured name that survives
-            unfolded is undefined there (#2449).
+        py_globals: A snapshot of the originating function's globals and closure
+            bindings. During JIT compilation this is the same namespace used
+            for cache-key construction and annotation resolution. The specializer
+            inlines referenced int/float/bool constants at their use sites.
         orig_file: Path to the user's real source file (``inspect.getsourcefile``),
             or ``None`` when the function has no on-disk source (REPL / exec).
             Used to map generated diagnostics back to the user's ``.py`` (#1612).
@@ -170,7 +169,7 @@ class SpecializeContext:
     scalar_values: dict[str, int | float | bool]
     scalar_dtypes: dict[str, DataType]
     dep_names: list[str] = field(default_factory=list)
-    py_globals: dict[str, Any] = field(default_factory=dict)
+    py_globals: Mapping[str, Any] = field(default_factory=dict)
     orig_file: str | None = None
     orig_start_line: int = 1
     orig_col_offset: int = 0
@@ -227,7 +226,7 @@ class SpecializeContext:
 # ---------------------------------------------------------------------------
 
 
-def func_name_lookup(func: Any) -> dict[str, Any]:
+def func_name_lookup(func: Any) -> Mapping[str, Any]:
     """Return ``func.__globals__`` merged with closure free-var bindings.
 
     A function defined inside a factory, a test method, or any other enclosing
@@ -242,16 +241,7 @@ def func_name_lookup(func: Any) -> dict[str, Any]:
     static shape resolution and body constant-folding therefore resolve against
     this mapping rather than ``__globals__`` alone.
     """
-    out: dict[str, Any] = dict(getattr(func, "__globals__", {}))
-    co_freevars = getattr(getattr(func, "__code__", None), "co_freevars", ())
-    closure = getattr(func, "__closure__", None) or ()
-    for fv_name, cell in zip(co_freevars, closure, strict=True):
-        try:
-            out[fv_name] = cell.cell_contents
-        except ValueError:
-            # Unbound closure cell — skip silently (matches _discover_deps).
-            pass
-    return out
+    return function_namespace(func)
 
 
 # ---------------------------------------------------------------------------
@@ -559,7 +549,7 @@ class _BodyTransformer(ast.NodeTransformer):
         dep_names: set[str],
         param_names: list[str] | None = None,
         initial_used_names: set[str] | None = None,
-        py_globals: dict[str, Any] | None = None,
+        py_globals: Mapping[str, Any] | None = None,
         dep_param_names: dict[str, list[str]] | None = None,
         dep_func_names: dict[str, str] | None = None,
     ) -> None:
@@ -1209,7 +1199,7 @@ class _BodyTransformer(ast.NodeTransformer):
 # ---------------------------------------------------------------------------
 
 
-def _fold_const_names(node: ast.expr, py_globals: dict[str, Any]) -> ast.expr:
+def _fold_const_names(node: ast.expr, py_globals: Mapping[str, Any]) -> ast.expr:
     """Replace ``Name`` nodes bound to module int/float/bool constants with literals.
 
     An explicit tuple / scalar return annotation is copied into the generated
@@ -1239,7 +1229,7 @@ def _infer_return_type(
     tensor_meta: dict[str, TensorMeta],
     out_params: list[str],
     distributed_params: set[str] | None = None,
-    py_globals: dict[str, Any] | None = None,
+    py_globals: Mapping[str, Any] | None = None,
 ) -> str | None:
     """Infer the return type annotation string from the return statement.
 
@@ -2173,9 +2163,6 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
         dep_names=dep_names,
         dep_func_names=dep_func_names or {},
         auto_scope=auto_scope,
-        # Closure-aware: a factory-defined kernel captures its constants as free
-        # vars, which never appear in __globals__. Folding must see them or they
-        # survive verbatim into the generated source and are undefined there.
         py_globals=func_name_lookup(func),
         orig_file=orig_file,
         orig_start_line=orig_start_line,

@@ -12,12 +12,20 @@
 import dataclasses
 import sys
 import types
+import warnings
 from unittest.mock import MagicMock, patch
 
 import pytest
 from pypto.backend import BackendType
 from pypto.pypto_core.passes import MemoryPlanner
-from pypto.runtime.runner import RunConfig, _DfxOpts, _execute_compiled
+from pypto.runtime.runner import (
+    CompileOptions,
+    DfxOptions,
+    ExecutionMode,
+    RunConfig,
+    RunOptions,
+    _execute_compiled,
+)
 
 
 class TestRunConfigPlatformResolution:
@@ -136,11 +144,11 @@ class TestRunConfigDfxFlags:
             RunConfig(platform="a5", enable_chip_swimlane="full")  # pyright: ignore[reportArgumentType]
 
     def test_dfx_opts_normalizes_swimlane_bool(self):
-        # _DfxOpts is constructed directly by the harness and by the CLI, so it
+        # DfxOptions is constructed directly by the harness and by the CLI, so it
         # normalizes too — _dfx_to_cli stringifies this field.
-        assert _DfxOpts(enable_chip_swimlane=True).enable_chip_swimlane == 4
-        assert _DfxOpts(enable_chip_swimlane=2).enable_chip_swimlane == 2
-        assert _DfxOpts(enable_chip_swimlane=0).any() is False
+        assert DfxOptions(enable_chip_swimlane=True).enable_chip_swimlane == 4
+        assert DfxOptions(enable_chip_swimlane=2).enable_chip_swimlane == 2
+        assert DfxOptions(enable_chip_swimlane=0).any() is False
 
     def test_dfx_flags_are_independent(self):
         # Enabling one flag must not implicitly enable another.
@@ -163,7 +171,7 @@ class TestRunConfigDfxFlags:
         assert cfg.enable_pmu == 0
         assert cfg.enable_dep_gen is False
 
-    def test_dfx_opts_from_run_config_carries_all_five(self):
+    def test_dfx_options_carry_all_five(self):
         cfg = RunConfig(
             platform="a5",
             enable_chip_swimlane=True,
@@ -172,7 +180,7 @@ class TestRunConfigDfxFlags:
             enable_dep_gen=True,
             enable_scope_stats=True,
         )
-        opts = _DfxOpts.from_run_config(cfg)
+        opts = cfg.dfx_options()
         assert opts.enable_chip_swimlane == 4  # True normalizes to the full level
         assert opts.enable_dump_args == 2
         assert opts.enable_pmu == 2
@@ -181,11 +189,11 @@ class TestRunConfigDfxFlags:
         assert opts.any() is True
 
     def test_dfx_opts_any_true_for_scope_stats_only(self):
-        # _DfxOpts.any() must report True when scope_stats is the sole flag.
-        assert _DfxOpts(enable_scope_stats=True).any() is True
+        # DfxOptions.any() must report True when scope_stats is the sole flag.
+        assert DfxOptions(enable_scope_stats=True).any() is True
 
     def test_dfx_opts_any_false_when_all_off(self):
-        assert _DfxOpts().any() is False
+        assert DfxOptions().any() is False
 
 
 class TestSwimlaneAliasDeprecation:
@@ -730,7 +738,7 @@ class TestRunConfigCompileForwarding:
             [],
             platform="a2a3",
             device_id=0,
-            dfx=_DfxOpts(enable_chip_swimlane=True),
+            dfx=DfxOptions(enable_chip_swimlane=True),
             config=config,
         )
 
@@ -767,12 +775,285 @@ class TestRunConfigCompileForwarding:
         kwargs = stub_device_runner._execute_on_device.call_args.kwargs
         assert kwargs["enable_sdma"] is expected_enable_sdma
 
-    def test_compile_kwargs_carry_the_codegen_target(self):
-        """``platform`` and the ``backend_type`` it implies both reach compilation."""
-        kwargs = RunConfig(platform="a5sim").compile_kwargs()
+    def test_compile_kwargs_name_the_target_once(self):
+        """Only ``platform`` is forwarded; ``ir.compile`` derives the backend from it.
+
+        Forwarding both would offer a pairing that cannot take effect —
+        ``ir.compile`` lets ``platform`` win whenever one is given — so the
+        config states the target once and the compiler resolves it.
+        """
+        cfg = RunConfig(platform="a5sim")
+        kwargs = cfg.compile_kwargs()
 
         assert kwargs["platform"] == "a5sim"
-        assert kwargs["backend_type"] == BackendType.Ascend950
+        assert "backend_type" not in kwargs
+        # Still readable on the config, as the backend that platform selected.
+        assert cfg.backend_type == BackendType.Ascend950
+
+    def test_a_backend_type_that_contradicts_the_platform_warns(self):
+        """It was always discarded here; now it says so."""
+        with pytest.warns(DeprecationWarning, match=r"backend_type=\.\.\.\) is deprecated"):
+            cfg = RunConfig(platform="a5sim", backend_type=BackendType.Ascend910B)
+
+        assert cfg.backend_type == BackendType.Ascend950
+
+    def test_replace_can_switch_platform_without_warning(self):
+        """``backend_type`` must not be a field, or ``replace`` re-supplies a stale one.
+
+        ``dataclasses.replace`` passes every field of the existing instance back
+        to ``__init__``. As a field, ``backend_type`` would arrive holding the
+        *old* platform's backend, indistinguishable from a caller who typed a
+        contradicting value — so switching platform would warn, and raise under
+        warnings-as-errors.
+        """
+        assert "backend_type" not in {f.name for f in dataclasses.fields(RunConfig)}
+
+        cfg = RunConfig(platform="a2a3")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            switched = dataclasses.replace(cfg, platform="a5")
+
+        assert switched.platform == "a5"
+        assert switched.backend_type == BackendType.Ascend950
+
+    def test_a_backend_type_that_agrees_with_the_platform_is_silent(self):
+        import warnings  # noqa: PLC0415
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            cfg = RunConfig(platform="a5sim", backend_type=BackendType.Ascend950)
+
+        assert cfg.backend_type == BackendType.Ascend950
+
+    def test_compile_kwargs_forward_distributed_config_by_identity(self):
+        """A set ``distributed_config`` is forwarded as the same object.
+
+        ``ir.compile`` bakes it into the ``DistributedCompiledProgram`` and the
+        per-rank dispatch reads it back, so a copy would let the two disagree.
+        """
+        from pypto.ir import DistributedConfig  # noqa: PLC0415
+
+        dc = DistributedConfig(device_ids=[0, 1])
+        assert RunConfig(distributed_config=dc).compile_kwargs()["distributed_config"] is dc
+
+
+class TestOptionObjects:
+    """``RunConfig`` as an aggregate of ``CompileOptions`` / ``RunOptions`` / ``DfxOptions``."""
+
+    # RunConfig field -> the option-object field it becomes. Only the renames
+    # are listed; everything else keeps its name.
+    #
+    # ``arch`` and ``execution_mode`` are the two axes ``RunConfig`` chooses;
+    # the views carry the wire spelling that serializes them, so both map onto
+    # ``platform``. The split stops at the class that *chooses* a target — the
+    # views, the artifact and the worker only *carry* one.
+    _COMPILE_RENAMES = {
+        "save_kernels_dir": "output_dir",
+        "compile_profiling": "profiling",
+        "arch": "platform",
+        "execution_mode": "platform",
+    }
+    _HARNESS_ONLY = {"rtol", "atol", "golden_data_dir", "save_kernels", "codegen_only"}
+
+    def test_every_run_config_field_is_claimed_by_exactly_one_concern(self):
+        """The split must stay total: a new field lands in a view, or in the harness set.
+
+        Without this, adding a field to ``RunConfig`` silently leaves it out of
+        both views — readable through the aggregate, invisible to any caller
+        that took the half it belongs to.
+        """
+        run_config_fields = {f.name for f in dataclasses.fields(RunConfig)}
+        compile_fields = {f.name for f in dataclasses.fields(CompileOptions)}
+        dispatch_fields = {f.name for f in dataclasses.fields(RunOptions) if f.name != "dfx"}
+        dispatch_fields |= {f.name for f in dataclasses.fields(DfxOptions)}
+
+        claimed = set()
+        for name in run_config_fields:
+            renamed = self._COMPILE_RENAMES.get(name, name)
+            if renamed in compile_fields or name in dispatch_fields:
+                claimed.add(name)
+
+        assert run_config_fields - claimed == self._HARNESS_ONLY
+
+    def test_compile_kwargs_is_the_compile_options_view(self):
+        """``compile_kwargs()`` must be exactly what the typed object produces."""
+        cfg = RunConfig(
+            platform="a5sim",
+            save_kernels_dir="/tmp/pypto-options",
+            compile_profiling=True,
+            memory_planner=MemoryPlanner.DSA_RP,
+        )
+        assert cfg.compile_kwargs() == cfg.compile_options().as_compile_kwargs()
+
+    def test_compile_options_use_the_compilers_field_names(self):
+        """``save_kernels_dir`` / ``compile_profiling`` are ``ir.compile``'s names here."""
+        options = RunConfig(save_kernels_dir="/tmp/pypto-options", compile_profiling=True).compile_options()
+
+        assert options.output_dir == "/tmp/pypto-options"
+        assert options.profiling is True
+
+    def test_compile_options_stand_alone_without_a_run_config(self):
+        """A caller that only compiles needs no ``RunConfig``."""
+        import inspect  # noqa: PLC0415
+
+        from pypto import ir  # noqa: PLC0415
+
+        kwargs = CompileOptions(platform="a5sim").as_compile_kwargs()
+
+        assert set(kwargs) <= set(inspect.signature(ir.compile).parameters)
+        assert kwargs["platform"] == "a5sim"
+        # Unset optionals stay absent so ir.compile's own defaults apply.
+        assert "memory_planner" not in kwargs
+        assert "output_dir" not in kwargs
+        assert "distributed_config" not in kwargs
+
+    def test_run_options_carry_the_dispatch_half_with_dfx_nested(self):
+        cfg = RunConfig(
+            platform="a2a3",
+            device_id=3,
+            aicpu_thread_num=7,
+            ring_heap=1024 * 1024,
+            enable_pmu=2,
+        )
+        options = cfg.run_options()
+
+        assert (options.platform, options.device_id, options.aicpu_thread_num) == ("a2a3", 3, 7)
+        assert options.ring_heap == 1024 * 1024
+        assert options.dfx == cfg.dfx_options()
+        assert options.dfx.enable_pmu == 2
+
+    def test_the_two_axes_are_independent_fields(self):
+        """``platform`` is a serialization of two fields, not a field itself.
+
+        Packed into one string, the axes could disagree with each other and with
+        the backend, which is what the old ``__post_init__`` spent a validation
+        and a rebuild guarding against. As separate fields that state is simply
+        unrepresentable.
+        """
+        names = {f.name for f in dataclasses.fields(RunConfig)}
+        assert {"arch", "execution_mode"} <= names
+        assert "platform" not in names
+
+        cfg = RunConfig(arch=BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD)
+        assert cfg.platform == "a5"
+        assert cfg.backend_type == BackendType.Ascend950
+
+    def test_platform_keyword_sets_both_axes(self):
+        """The wire spelling stays constructible: 238 call sites use it."""
+        cfg = RunConfig(platform="a2a3sim")
+
+        assert cfg.arch == BackendType.Ascend910B
+        assert cfg.execution_mode is ExecutionMode.SIM
+        assert cfg.platform == "a2a3sim"
+
+    def test_a_non_enum_execution_mode_is_rejected(self):
+        """``execution_mode="sim"`` must not read as ONBOARD.
+
+        The packed string used to be checked against four literals. Splitting it
+        made a *disagreeing* platform unrepresentable but not a nonsensical one:
+        anything that is not ``ExecutionMode.SIM`` fails the identity test, so a
+        plausible-looking ``"sim"`` would have turned a simulator request into a
+        hardware run — silently, and named ``a2a3`` rather than ``a2a3sim``.
+        """
+        for bad in ("sim", True, 1, None):
+            with pytest.raises(TypeError, match=r"execution_mode must be an ExecutionMode"):
+                RunConfig(execution_mode=bad)  # pyright: ignore[reportArgumentType]
+
+    def test_a_non_backend_type_arch_is_rejected_at_construction(self):
+        """Otherwise it fails later, inside a nanobind call, far from the caller."""
+        for bad in ("a5", "Ascend950", 0):
+            with pytest.raises(TypeError, match=r"arch must be a BackendType"):
+                RunConfig(arch=bad)  # pyright: ignore[reportArgumentType]
+
+    def test_the_axes_are_keyword_only(self):
+        """``platform=`` can only win over an axis if the axis is a keyword.
+
+        The wrapper rewrites ``kwargs``. A positional ``arch`` would reach the
+        generated ``__init__`` alongside the rewritten keyword and raise
+        "multiple values for argument", contradicting the documented precedence.
+        No call site passes positionally, so the class is ``kw_only``.
+        """
+        with pytest.raises(TypeError, match=r"positional argument"):
+            RunConfig(BackendType.Ascend950)  # pyright: ignore[reportCallIssue]
+
+        assert RunConfig(arch=BackendType.Ascend950, platform="a2a3sim").platform == "a2a3sim"
+
+    def test_platform_is_visible_to_introspection(self):
+        """``platform=`` must appear in the signature, not just work.
+
+        ``functools.wraps`` on the ``__init__`` wrapper copies the
+        dataclass-generated signature, which lists the two axes and not the
+        spelling almost every call site uses. Doc tools and IDEs read that
+        signature, so an accepted-but-unadvertised keyword reads as unsupported.
+        """
+        import inspect  # noqa: PLC0415
+
+        params = inspect.signature(RunConfig).parameters
+        assert "platform" in params
+        assert {"arch", "execution_mode"} <= set(params)
+        assert RunConfig(platform="a5sim").platform == "a5sim"
+
+    def test_replace_by_either_axis_or_by_platform(self):
+        """``replace`` works through both spellings, and neither warns.
+
+        ``replace(cfg, platform=...)`` re-supplies both axes from the instance
+        alongside the new platform. The platform has to win over that echo —
+        there is no way to tell it from a caller contradicting themselves, the
+        same ambiguity the deprecated keywords carry.
+        """
+        cfg = RunConfig(arch=BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            assert dataclasses.replace(cfg, arch=BackendType.Ascend910B).platform == "a2a3"
+            assert dataclasses.replace(cfg, execution_mode=ExecutionMode.SIM).platform == "a5sim"
+            assert dataclasses.replace(cfg, platform="a2a3sim").platform == "a2a3sim"
+
+    def test_an_invalid_platform_string_still_names_the_four_spellings(self):
+        with pytest.raises(ValueError, match=r"Invalid platform 'bogus'"):
+            RunConfig(platform="bogus")
+
+    def test_the_arch_name_comes_from_the_backend_handler(self):
+        """The wire arch string has one owner: the C++ handler that stamps it.
+
+        ``pto.target_arch`` in the emitted ``.pto`` is the same string, so a
+        second copy in Python would be a second thing to keep in step.
+        """
+        from pypto.pypto_core import backend as backend_core  # noqa: PLC0415
+
+        for arch in (BackendType.Ascend910B, BackendType.Ascend950):
+            handler_name = backend_core.get_backend_instance(arch).get_handler().get_pto_target_arch()
+            assert RunConfig(arch=arch, execution_mode=ExecutionMode.ONBOARD).platform == handler_name
+
+    def test_only_the_option_types_something_accepts_are_exported(self):
+        """An exported option type must be one a caller can actually hand somewhere.
+
+        ``CompileOptions`` unpacks into ``ir.compile`` and ``DfxOptions`` is the
+        ``dfx=`` parameter of ``execute_compiled``. ``RunOptions`` is neither:
+        every dispatch entry point takes a ``RunConfig`` and calls
+        ``run_options()`` itself, so handing one in raises ``AttributeError``.
+        Exporting it would advertise an entry point that does not exist.
+        """
+        import inspect  # noqa: PLC0415
+
+        from pypto import runtime  # noqa: PLC0415
+
+        assert "CompileOptions" in runtime.__all__
+        assert "DfxOptions" in runtime.__all__
+        assert isinstance(inspect.signature(runtime.execute_compiled).parameters["dfx"].default, DfxOptions)
+
+        assert "RunOptions" not in runtime.__all__
+        assert not hasattr(runtime, "RunOptions")
+
+    def test_dispatch_still_requires_a_run_config(self):
+        """Records why ``RunOptions`` stays internal: the dispatch path calls back into it."""
+        with pytest.raises(AttributeError, match="dfx_options"):
+            RunOptions(platform="a2a3sim").dfx_options()  # pyright: ignore[reportAttributeAccessIssue]
+
+    def test_any_dfx_enabled_agrees_with_the_dfx_view(self):
+        """One predicate, not two: the aggregate answers through the view."""
+        for cfg in (RunConfig(), RunConfig(enable_scope_stats=True), RunConfig(enable_chip_swimlane=True)):
+            assert cfg.any_dfx_enabled() == cfg.dfx_options().any()
 
 
 # ``_execute_on_device`` lives in ``device_runner`` which eagerly imports the

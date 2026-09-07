@@ -1166,8 +1166,12 @@ def test_notify_emits_comm_tnotify_with_attr():
     assert "#pto<notify_op set>" in mlir
     lines = mlir.splitlines()
     notify_idx = next(i for i, line in enumerate(lines) if "pto.comm.tnotify(" in line)
-    assert "pto.barrier <PIPE_ALL>" in lines[notify_idx - 1], (
-        f"expected a PIPE_ALL drain immediately before tnotify, got: {lines[notify_idx - 1]}"
+    # No pto.barrier may precede tnotify. Pipeline synchronisation before TNOTIFY
+    # is PTOAS's responsibility (its TNotify lowering drains what it issued), so
+    # PyPTO must not assert PTOAS's internals with a pipe-scoped barrier. Pinned
+    # here so the removal cannot be silently reintroduced.
+    assert not lines[notify_idx - 1].lstrip().startswith("pto.barrier"), (
+        f"expected NO pto.barrier immediately before tnotify, got: {lines[notify_idx - 1]}"
     )
     # AtomicAdd variant should also lower correctly.
 

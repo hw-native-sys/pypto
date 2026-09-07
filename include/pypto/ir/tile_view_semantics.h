@@ -37,7 +37,8 @@ inline constexpr int kMXScaleFractal = 32;
 /// MX block-32 quantization group size: elements sharing one E8M0 exponent.
 inline constexpr int64_t kMXGroupSize = 32;
 
-/// Physical SFractal box for packed MX GM scale GlobalTensors (EmitMxPhysicalView).
+/// Physical SFractal box for packed MX GM scale GlobalTensors
+/// (``BlockMxScaleTensorViews``).
 inline constexpr int64_t kMXSFractalRows = 16;
 inline constexpr int64_t kMXSFractalCols = 2;
 

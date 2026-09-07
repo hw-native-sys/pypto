@@ -31,6 +31,7 @@ from unittest import mock
 
 import pypto.language as pl
 import pytest
+from _orchestration_codegen_common import _out_of_scope_tensor_refs
 from pypto.ir.compile import compile as ir_compile
 from pypto.pypto_core import passes
 
@@ -377,6 +378,11 @@ class _BatchedAllocs:
     The interleaving is the point: a launch between two creates does not close
     the batch, so codegen packs all 20 into ``ceil(20 / 16) = 2``
     ``alloc_tensors`` calls -- two recorded nodes, not twenty.
+
+    Under a constant-trip loop so the allocations stay in the region: Step C of
+    ``LegalizeGraphBoundary`` hoists a *top-level* region allocation out to the
+    call site, which is what ``_RegionAllocs`` below covers. The loop body is
+    still one statement list, which is what the batching rule is about.
     """
 
     @pl.function(type=pl.FunctionType.AIV)
@@ -395,47 +401,87 @@ class _BatchedAllocs:
     ) -> pl.Tensor[[128, 128], pl.FP32]:
         # Chained so every buffer stays live: an unused create would be folded
         # away and the batch would never reach the packing boundary.
+        for _ in pl.range(2):
+            s0: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+            s0 = self.kernel(a, s0)
+            s1: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+            s1 = self.kernel(s0, s1)
+            s2: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+            s2 = self.kernel(s1, s2)
+            s3: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+            s3 = self.kernel(s2, s3)
+            s4: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+            s4 = self.kernel(s3, s4)
+            s5: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+            s5 = self.kernel(s4, s5)
+            s6: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+            s6 = self.kernel(s5, s6)
+            s7: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+            s7 = self.kernel(s6, s7)
+            s8: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+            s8 = self.kernel(s7, s8)
+            s9: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+            s9 = self.kernel(s8, s9)
+            s10: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+            s10 = self.kernel(s9, s10)
+            s11: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+            s11 = self.kernel(s10, s11)
+            s12: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+            s12 = self.kernel(s11, s12)
+            s13: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+            s13 = self.kernel(s12, s13)
+            s14: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+            s14 = self.kernel(s13, s14)
+            s15: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+            s15 = self.kernel(s14, s15)
+            s16: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+            s16 = self.kernel(s15, s16)
+            s17: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+            s17 = self.kernel(s16, s17)
+            s18: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+            s18 = self.kernel(s17, s18)
+            s19: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+            s19 = self.kernel(s18, s19)
+            c = self.kernel(s19, c)
+        return c
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        a: pl.Tensor[[128, 128], pl.FP32],
+        c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
+        c = self.layer(a, c)
+        return c
+
+
+@pl.program
+class _RegionAllocs:
+    """A Graph whose body allocates two scratch tensors at the top level.
+
+    Step C hoists both to the call site, so the recorded region carries no
+    allocation node at all and the entry allocates the buffers instead.
+    """
+
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(
+        self, x: pl.Tensor[[128, 128], pl.FP32], o: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
+        t: pl.Tile[[128, 128], pl.FP32] = pl.load(x, [0, 0], [128, 128])
+        o = pl.store(t, [0, 0], o)
+        return o
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(
+        self,
+        a: pl.Tensor[[128, 128], pl.FP32],
+        c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
         s0: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
         s0 = self.kernel(a, s0)
         s1: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
         s1 = self.kernel(s0, s1)
-        s2: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
-        s2 = self.kernel(s1, s2)
-        s3: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
-        s3 = self.kernel(s2, s3)
-        s4: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
-        s4 = self.kernel(s3, s4)
-        s5: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
-        s5 = self.kernel(s4, s5)
-        s6: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
-        s6 = self.kernel(s5, s6)
-        s7: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
-        s7 = self.kernel(s6, s7)
-        s8: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
-        s8 = self.kernel(s7, s8)
-        s9: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
-        s9 = self.kernel(s8, s9)
-        s10: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
-        s10 = self.kernel(s9, s10)
-        s11: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
-        s11 = self.kernel(s10, s11)
-        s12: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
-        s12 = self.kernel(s11, s12)
-        s13: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
-        s13 = self.kernel(s12, s13)
-        s14: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
-        s14 = self.kernel(s13, s14)
-        s15: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
-        s15 = self.kernel(s14, s15)
-        s16: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
-        s16 = self.kernel(s15, s16)
-        s17: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
-        s17 = self.kernel(s16, s17)
-        s18: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
-        s18 = self.kernel(s17, s18)
-        s19: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
-        s19 = self.kernel(s18, s19)
-        c = self.kernel(s19, c)
+        c = self.kernel(s1, c)
         return c
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -512,6 +558,191 @@ def test_graph_allocations_are_packed_sixteen_to_a_node():
     # allocation nodes. A launch that stopped being emitted would make the
     # batching assertion above pass while the totals still diverged.
     assert body.count("rt_submit_") == 21, body
+
+
+@pl.program
+class _SwappedReturns:
+    """A Graph returning its two InOut params in the reverse of their declared order.
+
+    `InOutUseDiscipline` requires the caller to read a written param through the
+    call's return value, so a Graph that writes several InOut params returns them
+    all -- and nothing forces that return order to match the parameter order.
+    """
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(
+        self,
+        a: pl.Tensor[[128, 128], pl.FP32],
+        x: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+        y: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+    ) -> tuple[pl.Tensor[[128, 128], pl.FP32], pl.Tensor[[128, 128], pl.FP32]]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128])
+            pl.store(t, [0, 0], x)
+            u: pl.Tile[[128, 128], pl.FP32] = pl.add(t, t)
+            pl.store(u, [0, 0], y)
+        return y, x
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def consume(
+        self,
+        u: pl.Tensor[[128, 128], pl.FP32],
+        v: pl.Tensor[[128, 128], pl.FP32],
+        o: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
+        tu: pl.Tile[[128, 128], pl.FP32] = pl.load(u, [0, 0], [128, 128])
+        tv: pl.Tile[[128, 128], pl.FP32] = pl.load(v, [0, 0], [128, 128])
+        s: pl.Tile[[128, 128], pl.FP32] = pl.add(tu, tv)
+        return pl.store(s, [0, 0], o)
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        a: pl.Tensor[[128, 128], pl.FP32],
+        out: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
+        # Freshly created region tensors, not entry params: with entry params the
+        # compiler resolves the aliasing without emitting a binding at all, and
+        # the mis-binding stays invisible.
+        for _i in pl.range(2):
+            p: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+            q: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], pl.FP32)
+            qq, pp = self.layer(a, p, q)
+            out = self.consume(qq, pp, out)
+        return out
+
+
+def _task_args(entry: str, params_var: str) -> list[str]:
+    """The `add_input` / `add_inout` operands of the @p params_var argument block."""
+    block = re.search(rf"{params_var};(.*?)rt_submit_", entry, re.S)
+    assert block is not None, entry
+    return re.findall(r"add_(?:input|inout)\((\w+)\)", block.group(1))
+
+
+def test_multi_param_graph_returns_bind_to_the_right_call_site_tensors():
+    """Return position j binds the arg of the param j *returns*, not the j-th Out param.
+
+    `layer` returns `(y, x)`, so `qq, pp = layer(a, p, q)` means `qq` aliases `q`
+    and `pp` aliases `p`. While Graph was excluded from `NormalizeReturnOrder`'s
+    param-return canonicalization, the return->param map came back all-nullopt and
+    codegen guessed positionally -- return 0 to the first Out/InOut param (`x`) --
+    binding every result to the wrong tensor with no diagnostic (#2601). Both
+    sides are same-shaped tensors, so nothing downstream notices; the numbers just
+    come out wrong.
+    """
+    entry = _entry_body(_compile_orch(_SwappedReturns))
+
+    # The launch itself is unremarkable: args in parameter order.
+    assert _task_args(entry, "GraphTaskArgs params_t0")[1:] == ["p", "q"], entry
+
+    # The consumer is where the mapping shows. `consume(qq, pp, out)` must read
+    # qq -> q and pp -> p; `["p", "q"]` here is exactly the swap this fixes.
+    assert _task_args(entry, "CoreTaskArgs params_t1")[:2] == ["q", "p"], entry
+
+
+def test_a_region_allocation_is_hoisted_to_the_call_site():
+    """Step C: the recorded region allocates nothing; the entry does it instead.
+
+    The graph heap is never reclaimed mid-run, so an allocation the region makes
+    for itself is held for the whole run and the live set grows with the number
+    of submissions. Moving it to the call site puts it back on the ordinary
+    reclaimable heap.
+
+    Asserted on the emitted C++ rather than on the pass's parameter list because
+    the two halves have to agree: the buffer has to leave the region *and*
+    arrive as a boundary tensor the launch declares as an output. Declared
+    ``add_input``, the launch would not register as a writer of it.
+    """
+    orch = _compile_orch(_RegionAllocs)
+    body = _graph_body(orch)
+    assert "alloc_tensors(" not in body, body
+    # Both scratch buffers arrive as boundary tensors, after the two the user
+    # wrote. They are appended, so the original indices do not move.
+    assert "const Tensor& a = args.tensor(0).ref();" in body, body
+    assert "const Tensor& c = args.tensor(1).ref();" in body, body
+    assert "const Tensor& s0 = args.tensor(2).ref();" in body, body
+    assert "const Tensor& s1 = args.tensor(3).ref();" in body, body
+
+    entry = _entry_body(orch)
+    assert "alloc_tensors(" in entry, entry
+    # `InOut`, not `Input`: the region writes them, and a caller that hoisted the
+    # allocation out of its own loop needs successive launches ordered.
+    assert entry.count(".add_inout(s0") == 1, entry
+    assert entry.count(".add_inout(s1") == 1, entry
+
+
+@pl.program
+class _ScopeEscapingWriteback:
+    """A Graph whose boundary tensor is written twice inside a ``manual_scope``
+    and then read by a launch placed *after* the block."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def accum(
+        self,
+        c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+        a: pl.Tensor[[512, 128], pl.FP32],
+        base: pl.Scalar[pl.INDEX],
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
+        t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [base, 0], [128, 128])
+        pl.store(t, [0, 0], c)
+        return c
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def sink(
+        self,
+        c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+        a: pl.Tensor[[512, 128], pl.FP32],
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
+        t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [256, 0], [128, 128])
+        pl.store(t, [0, 0], c)
+        return c
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(
+        self,
+        a: pl.Tensor[[512, 128], pl.FP32],
+        c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+        layer_idx: pl.Scalar[pl.INDEX],
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
+        with pl.manual_scope():
+            c, t0 = pl.submit(self.accum, c, a, 0)
+            c, _t1 = pl.submit(self.accum, c, a, 128, deps=[t0])
+        c = self.sink(c, a)
+        return c
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        a: pl.Tensor[[512, 128], pl.FP32],
+        c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
+        for i in pl.range(4):
+            c = self.layer(a, c, i)
+        return c
+
+
+def test_a_boundary_writeback_never_becomes_a_block_scoped_rename():
+    """Issue #2605: the second writer's rename fell out of C++ scope.
+
+    A Graph body is emitted with an empty ``param_name_set``, so its parameter
+    names were absent from ``declared_var_names_``. The first writeback SSA
+    rename of ``c`` then took the parameter's own name and — because it was
+    reserved inside a ``pl.manual_scope`` — registered it in
+    ``manual_local_names_``. From there the parameter read as scope-*local*, so
+    the second writeback could no longer collapse onto it and minted
+    ``const Tensor& c__ssa_v2 = c;`` inside the block. The post-block launch
+    named it, and the orchestration ``.cpp`` failed to compile with
+    ``'c__ssa_v2' was not declared in this scope``.
+
+    Every reference must resolve to the parameter, which is what the same kernel
+    emits on the non-Graph path.
+    """
+    orch = _compile_orch(_ScopeEscapingWriteback)
+    body = _graph_body(orch)
+    assert _out_of_scope_tensor_refs(orch) == [], orch
+    # No alias is minted at all: writer and post-block reader name the parameter.
+    assert not re.search(r"const Tensor&\s+c__\w+\s*=", body), body
+    assert body.count("add_inout(c);") == 3, body
 
 
 if __name__ == "__main__":

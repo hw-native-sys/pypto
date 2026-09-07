@@ -299,6 +299,11 @@ void IRVisitor::VisitStmt_(const ClusterScopeStmtPtr& op) {
   VisitStmt(op->body_);
 }
 
+void IRVisitor::VisitStmt_(const GraphScopeStmtPtr& op) {
+  INTERNAL_CHECK_SPAN(op->body_, op->span_) << "GraphScopeStmt has null body";
+  VisitStmt(op->body_);
+}
+
 void IRVisitor::VisitStmt_(const HierarchyScopeStmtPtr& op) {
   INTERNAL_CHECK_SPAN(op->body_, op->span_) << "HierarchyScopeStmt has null body";
   VisitScopeAttrs(op);

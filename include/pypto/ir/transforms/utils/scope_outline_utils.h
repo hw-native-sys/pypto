@@ -207,6 +207,10 @@ class ScopeOutliner : public IRMutator {
   // descends into the body via VisitScopeKind's non-target branch, preserving
   // the nested SplitAivScopeStmt inside the outlined InCore function body.
   StmtPtr VisitStmt_(const SplitAivScopeStmtPtr& op) override;
+  // Graph is an outline target of its own pass (OutlineGraphScopes); for every
+  // other outliner this descends via VisitScopeKind's non-target branch, so a
+  // Graph region nested around, say, an InCore scope keeps its wrapper.
+  StmtPtr VisitStmt_(const GraphScopeStmtPtr& op) override;
 
   /**
    * @brief Thread store-target renames made inside a control-flow body out of it.
@@ -225,7 +229,7 @@ class ScopeOutliner : public IRMutator {
    * tensor denotes the same GM buffer. The def-use edge is still wrong, so each
    * override rebuilds the statement with a real carry: the value on entry seeds a
    * new ``IterArg``, the body yields the fresh Var, and a new ``return_var``
-   * becomes the value visible afterwards. ``ClassifyIterArgCarry`` (pass 47) sees
+   * becomes the value visible afterwards. ``ClassifyIterArgCarry`` (pass 49) sees
    * the yield in the iter_arg's alias class (the Out-call and TupleGetItem rules)
    * and marks the carry *trivial*, so codegen is unchanged.
    */
@@ -510,6 +514,7 @@ class ScopeKindAbsenceVerifier : public IRVisitor {
   void VisitStmt_(const HierarchyScopeStmtPtr& op) override { CheckKind(op); }
   void VisitStmt_(const SpmdScopeStmtPtr& op) override { CheckKind(op); }
   void VisitStmt_(const SplitAivScopeStmtPtr& op) override { CheckKind(op); }
+  void VisitStmt_(const GraphScopeStmtPtr& op) override { CheckKind(op); }
 
  private:
   std::vector<Diagnostic>& diagnostics_;

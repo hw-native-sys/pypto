@@ -590,9 +590,9 @@ class ChipWorker(Worker):
         self._run_chip(compiled.chip_callable, orch_args, cfg)
 
         if dfx_dir is not None:
-            from .runner import _collect_dfx_artifacts, _DfxOpts  # noqa: PLC0415
+            from .runner import _collect_dfx_artifacts  # noqa: PLC0415
 
-            _collect_dfx_artifacts(dfx_dir, self.platform, _DfxOpts.from_run_config(rc))
+            _collect_dfx_artifacts(dfx_dir, self.platform, rc.dfx_options())
 
         if not return_style:
             return None

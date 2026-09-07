@@ -5765,6 +5765,67 @@ class TestAscend910BLoadTpopHazard:
         )
 
 
+class TestCarryOutputAlias:
+    """Native carry ops remain safe when MemoryReuse aliases dst with src0."""
+
+    def test_all_carry_variants_reuse_their_dead_src0_buffer(self):
+        """TADDC/TSUBC/TADDSC/TSUBSC are per-element and support dst == src0."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[8, 16], pl.FP32],
+                b: pl.Tensor[[8, 16], pl.FP32],
+                carry: pl.Tensor[[8, 16], pl.FP32],
+                out_addc: pl.Out[pl.Tensor[[8, 16], pl.FP32]],
+                out_subc: pl.Out[pl.Tensor[[8, 16], pl.FP32]],
+                out_addsc: pl.Out[pl.Tensor[[8, 16], pl.FP32]],
+                out_subsc: pl.Out[pl.Tensor[[8, 16], pl.FP32]],
+            ) -> pl.Tensor[[8, 16], pl.FP32]:
+                addc_src0: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(a, [0, 0], [8, 16])
+                addc_src1: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(b, [0, 0], [8, 16])
+                addc_carry: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(carry, [0, 0], [8, 16])
+                addc_dst: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.addc(
+                    addc_src0, addc_src1, addc_carry
+                )
+                _stored_addc: pl.Tensor[[8, 16], pl.FP32] = pl.store(addc_dst, [0, 0], out_addc)
+
+                subc_src0: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(a, [0, 0], [8, 16])
+                subc_src1: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(b, [0, 0], [8, 16])
+                subc_carry: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(carry, [0, 0], [8, 16])
+                subc_dst: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.subc(
+                    subc_src0, subc_src1, subc_carry
+                )
+                _stored_subc: pl.Tensor[[8, 16], pl.FP32] = pl.store(subc_dst, [0, 0], out_subc)
+
+                addsc_src0: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(a, [0, 0], [8, 16])
+                addsc_carry: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(carry, [0, 0], [8, 16])
+                addsc_dst: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.addsc(
+                    addsc_src0, 1.0, addsc_carry
+                )
+                _stored_addsc: pl.Tensor[[8, 16], pl.FP32] = pl.store(addsc_dst, [0, 0], out_addsc)
+
+                subsc_src0: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(a, [0, 0], [8, 16])
+                subsc_carry: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(carry, [0, 0], [8, 16])
+                subsc_dst: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.subsc(
+                    subsc_src0, 1.0, subsc_carry
+                )
+                result: pl.Tensor[[8, 16], pl.FP32] = pl.store(subsc_dst, [0, 0], out_subsc)
+                return result
+
+        after = _run_pipeline(Before)
+        bases = _collect_tile_memref_bases(after)
+        for op_name in ("addc", "subc", "addsc", "subsc"):
+            src0 = f"{op_name}_src0"
+            dst = f"{op_name}_dst"
+            assert src0 in bases and dst in bases, f"missing {op_name} tile vars; got {bases}"
+            assert bases[dst] == bases[src0], (
+                f"{op_name} dst should safely reuse dead src0, got dst={bases[dst]} src0={bases[src0]}"
+            )
+
+
 class TestForbidOutputAlias:
     """Outputs must not alias operand buffers that the hardware still reads.
 
@@ -5772,6 +5833,84 @@ class TestForbidOutputAlias:
     operands whose lifetimes end at an op from operands safe for its output to
     overwrite.
     """
+
+    def test_carry_outputs_do_not_alias_carry(self):
+        """Carry ops may reuse src0, but their final TADD still reads carry."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[8, 16], pl.FP32],
+                b: pl.Tensor[[8, 16], pl.FP32],
+                carry: pl.Tensor[[8, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[8, 16], pl.FP32]],
+            ) -> pl.Tensor[[8, 16], pl.FP32]:
+                addc_src0: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(a, [0, 0], [8, 16])
+                addc_src1: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(b, [0, 0], [8, 16])
+                addc_carry: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(carry, [0, 0], [8, 16])
+                addc_dst: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.addc(
+                    addc_src0, addc_src1, addc_carry
+                )
+                addc_keep_src0_live: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.add(
+                    addc_src0, addc_dst
+                )
+                addc_keep_sources_live: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.add(
+                    addc_src1, addc_keep_src0_live
+                )
+
+                subc_src0: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(a, [0, 0], [8, 16])
+                subc_src1: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(b, [0, 0], [8, 16])
+                subc_carry: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(carry, [0, 0], [8, 16])
+                subc_dst: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.subc(
+                    subc_src0, subc_src1, subc_carry
+                )
+                subc_keep_src0_live: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.add(
+                    subc_src0, subc_dst
+                )
+                subc_keep_sources_live: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.add(
+                    subc_src1, subc_keep_src0_live
+                )
+
+                addsc_src0: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(a, [0, 0], [8, 16])
+                addsc_carry: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(carry, [0, 0], [8, 16])
+                addsc_dst: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.addsc(
+                    addsc_src0, 1.0, addsc_carry
+                )
+                addsc_keep_src0_live: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.add(
+                    addsc_src0, addsc_dst
+                )
+
+                subsc_src0: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(b, [0, 0], [8, 16])
+                subsc_carry: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(carry, [0, 0], [8, 16])
+                subsc_dst: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.subsc(
+                    subsc_src0, 1.0, subsc_carry
+                )
+                subsc_keep_src0_live: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.add(
+                    subsc_src0, subsc_dst
+                )
+                combined_tile: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.add(
+                    addc_keep_sources_live, subc_keep_sources_live
+                )
+                combined_scalar: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.add(
+                    addsc_keep_src0_live, subsc_keep_src0_live
+                )
+                combined: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.add(
+                    combined_tile, combined_scalar
+                )
+                result: pl.Tensor[[8, 16], pl.FP32] = pl.store(combined, [0, 0], out)
+                return result
+
+        after = _run_pipeline(Before)
+        bases = _collect_tile_memref_bases(after)
+        for op_name in ("addc", "subc", "addsc", "subsc"):
+            dst = f"{op_name}_dst"
+            carry = f"{op_name}_carry"
+            assert dst in bases and carry in bases, f"missing {op_name} tile vars; got {bases}"
+            assert bases[dst] != bases[carry], (
+                f"tile.{op_name} output must not alias carry, but both bind to {bases[dst]}"
+            )
 
     def test_ci_output_does_not_alias_compiler_scratch(self):
         """With #2523 level3 ci scratch disabled, tile.ci stays 2-arg (no compiler tmp)."""
@@ -6352,7 +6491,7 @@ class TestCapacityGatedReuse:
     afford it; when it cannot, the shed / force_legacy floor merges them (the
     fa_fused 8->1 collapse in miniature). The success metric is WAR distance /
     overlap, *never* sync-flag count (see the pipeline-stage guard in
-    docs/en/dev/passes/34-memory_reuse.md). The operands are ``tile.move``
+    docs/en/dev/passes/35-memory_reuse.md). The operands are ``tile.move``
     results (not loads), so the legacy load-only guard never protected them either.
     """
 
@@ -6827,7 +6966,7 @@ class TestCapacityGatedReuse:
 
     def test_composes_with_matmul_acc_carry(self):
         """Carry composition (#1352; see the loop-carry re-alignment in
-        docs/en/dev/passes/34-memory_reuse.md): the gate only ever *adds* separation and
+        docs/en/dev/passes/35-memory_reuse.md): the gate only ever *adds* separation and
         excludes loop carries from the packer, so capacity-gated reuse must not disturb a
         matmul_acc accumulator chain. These operands carry no pipeline_membership tags,
         so they never trip the gated residue constraint and behave like legacy. The pass

@@ -598,6 +598,260 @@ def test_notify_wait_read_handshake():
     ir.assert_structural_equal(_apply(Before), Expected)
 
 
+def test_pure_wait_loop_gets_single_whole_gm_cacheinvalid():
+    # A wait-all loop (`for src: if src != me: wait(...)`, the mesh composite's
+    # per-barrier wait loop) performs no memory access between the waits, so ONE
+    # whole-GM cacheinvalid after the loop is equivalent to one after every wait
+    # — and (P-1) whole-cache flushes become 1 per barrier generation.
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            signal: pld.DistributedTensor[[1, N], pl.INT32],
+            nranks: pl.Scalar[pl.INT32],
+            me: pl.Scalar[pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ):
+            for src in pl.range(nranks):
+                if src != me:
+                    pld.system.wait(signal=signal, offsets=[0, src], expected=1, cmp=pld.WaitCmp.Ge)
+            val: pl.Scalar[pl.INT32] = pl.read(signal, [0, 0])
+            pl.write(out, [0, 0], val)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            signal: pld.DistributedTensor[[1, N], pl.INT32],
+            nranks: pl.Scalar[pl.INT32],
+            me: pl.Scalar[pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ):
+            for src in pl.range(nranks):
+                if src != me:
+                    pld.system.wait(signal=signal, offsets=[0, src], expected=1, cmp=pld.WaitCmp.Ge)
+            pl.system.cacheinvalid()
+            val: pl.Scalar[pl.INT32] = pl.read(signal, [0, 0])
+            pl.write(out, [0, 0], val)
+
+    ir.assert_structural_equal(_apply(Before), Expected)
+
+
+def test_consecutive_waits_share_one_whole_gm_cacheinvalid():
+    # Two consecutive waits with no intervening memory access share ONE
+    # whole-GM cacheinvalid after the run.
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            signal: pld.DistributedTensor[[1, 2], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ):
+            pld.system.wait(signal=signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
+            pld.system.wait(signal=signal, offsets=[0, 1], expected=1, cmp=pld.WaitCmp.Ge)
+            val: pl.Scalar[pl.INT32] = pl.read(signal, [0, 0])
+            pl.write(out, [0, 0], val)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            signal: pld.DistributedTensor[[1, 2], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ):
+            pld.system.wait(signal=signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
+            pld.system.wait(signal=signal, offsets=[0, 1], expected=1, cmp=pld.WaitCmp.Ge)
+            pl.system.cacheinvalid()
+            val: pl.Scalar[pl.INT32] = pl.read(signal, [0, 0])
+            pl.write(out, [0, 0], val)
+
+    ir.assert_structural_equal(_apply(Before), Expected)
+
+
+def test_bare_pure_wait_loop_batches_to_single_invalidate():
+    # A pure wait-loop as the SOLE body of the function (no enclosing SeqStmts)
+    # must still batch: the per-wait invalidates inside the loop are suppressed
+    # while visiting the bare body, and exactly ONE whole-GM cacheinvalid lands
+    # after the loop — not one per wait plus one after.
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            signal: pld.DistributedTensor[[1, N], pl.INT32],
+            nranks: pl.Scalar[pl.INT32],
+            me: pl.Scalar[pl.INT32],
+        ):
+            for src in pl.range(nranks):
+                if src != me:
+                    pld.system.wait(signal=signal, offsets=[0, src], expected=1, cmp=pld.WaitCmp.Ge)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            signal: pld.DistributedTensor[[1, N], pl.INT32],
+            nranks: pl.Scalar[pl.INT32],
+            me: pl.Scalar[pl.INT32],
+        ):
+            for src in pl.range(nranks):
+                if src != me:
+                    pld.system.wait(signal=signal, offsets=[0, src], expected=1, cmp=pld.WaitCmp.Ge)
+            pl.system.cacheinvalid()
+
+    ir.assert_structural_equal(_apply(Before), Expected)
+
+
+def test_control_expression_read_prevents_batching():
+    # A wait-loop whose control expression reads GM (an `if` condition on
+    # `pl.read`, which lowers to a cached `tensor.read`) is NOT pure: deferring
+    # the consume-side invalidate past the control read could let it observe
+    # stale peer data. Each wait keeps its own whole-GM cacheinvalid.
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            signal: pld.DistributedTensor[[1, N], pl.INT32],
+            nranks: pl.Scalar[pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ):
+            for src in pl.range(nranks):
+                if pl.read(signal, [0, src]) != 0:
+                    pld.system.wait(signal=signal, offsets=[0, src], expected=1, cmp=pld.WaitCmp.Ge)
+            val: pl.Scalar[pl.INT32] = pl.read(signal, [0, 0])
+            pl.write(out, [0, 0], val)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            signal: pld.DistributedTensor[[1, N], pl.INT32],
+            nranks: pl.Scalar[pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ):
+            for src in pl.range(nranks):
+                if pl.read(signal, [0, src]) != 0:
+                    pld.system.wait(signal=signal, offsets=[0, src], expected=1, cmp=pld.WaitCmp.Ge)
+                    pl.system.cacheinvalid()
+            val: pl.Scalar[pl.INT32] = pl.read(signal, [0, 0])
+            pl.write(out, [0, 0], val)
+
+    ir.assert_structural_equal(_apply(Before), Expected)
+
+
+def test_wait_free_loop_is_left_untouched():
+    # A loop whose body has NO wait anywhere (here: empty) is not a pure
+    # wait-loop. Before the tri-state fix the empty SeqStmts body was vacuously
+    # "wait-only", so the pass appended a whole-GM cacheinvalid after it — a new
+    # ENTIRE_DATA_CACHE flush where the pre-pass code emitted nothing, in a pass
+    # whose point is removing flushes. It must be left untouched.
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            nranks: pl.Scalar[pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ):
+            for _ in pl.range(nranks):
+                pass
+            val: pl.Scalar[pl.INT32] = pl.read(out, [0, 0])
+            pl.write(out, [0, 0], val)
+
+    ir.assert_structural_equal(_apply(Before), Before)
+
+
+def test_wait_free_loop_as_bare_body_is_left_untouched():
+    # Same guarantee when the wait-free loop is the SOLE body of the function
+    # (no enclosing SeqStmts): the bare-body path must not add a whole-GM
+    # cacheinvalid after it either.
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            signal: pld.DistributedTensor[[1, N], pl.INT32],
+            nranks: pl.Scalar[pl.INT32],
+            me: pl.Scalar[pl.INT32],
+        ):
+            for _ in pl.range(nranks):
+                pass
+
+    ir.assert_structural_equal(_apply(Before), Before)
+
+
+def test_if_with_empty_branches_is_left_untouched():
+    # `if c: pass` has no wait either (the empty then-branch is vacuously
+    # wait-only), so the loop must not be treated as a pure wait-loop.
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            nranks: pl.Scalar[pl.INT32],
+            cond: pl.Scalar[pl.BOOL],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ):
+            for _ in pl.range(nranks):
+                if cond:
+                    pass
+            val: pl.Scalar[pl.INT32] = pl.read(out, [0, 0])
+            pl.write(out, [0, 0], val)
+
+    ir.assert_structural_equal(_apply(Before), Before)
+
+
+def test_if_with_wait_and_empty_else_is_still_pure():
+    # `if c: wait else: <empty>` must stay a pure wait-loop: the empty else
+    # classifies kPureNoWait and must NOT disqualify the loop (no memory access
+    # occurs on that path either). ONE whole-GM cacheinvalid after the loop.
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            signal: pld.DistributedTensor[[1, N], pl.INT32],
+            nranks: pl.Scalar[pl.INT32],
+            me: pl.Scalar[pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ):
+            for src in pl.range(nranks):
+                if src != me:
+                    pld.system.wait(signal=signal, offsets=[0, src], expected=1, cmp=pld.WaitCmp.Ge)
+                else:
+                    pass
+            val: pl.Scalar[pl.INT32] = pl.read(signal, [0, 0])
+            pl.write(out, [0, 0], val)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            signal: pld.DistributedTensor[[1, N], pl.INT32],
+            nranks: pl.Scalar[pl.INT32],
+            me: pl.Scalar[pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ):
+            for src in pl.range(nranks):
+                if src != me:
+                    pld.system.wait(signal=signal, offsets=[0, src], expected=1, cmp=pld.WaitCmp.Ge)
+                else:
+                    pass
+            pl.system.cacheinvalid()
+            val: pl.Scalar[pl.INT32] = pl.read(signal, [0, 0])
+            pl.write(out, [0, 0], val)
+
+    ir.assert_structural_equal(_apply(Before), Expected)
+
+
 def test_bare_barrier_notify_no_marker():
     # A pure barrier notify (no data) needs nothing.
     @pl.program

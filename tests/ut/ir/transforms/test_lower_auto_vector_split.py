@@ -2064,8 +2064,11 @@ def test_loop_carried_tile_accumulator_is_tracked():
     # The carry and everything derived from it are lane-local.
     assert "pl.tile.add(acc_it, acc_it)" in printed
     assert printed.count("[64, 128]") >= 3
-    # The store on the loop-exit var picks up the per-lane offset.
-    assert "subblock_idx * 64" in printed
+    # The store on the loop-exit var picks up the per-lane offset. Assert it on the
+    # store LINE: a bare `"subblock_idx * 64" in printed` also matches the tile.load
+    # above, so it passed whether or not the store was offset at all.
+    store_line = next(line for line in printed.splitlines() if "pl.tile.store(" in line)
+    assert "pl.tile.store(acc_loop, [0 + subblock_idx * 64, 0]" in store_line
 
 
 def test_slice_drop_dims_maps_the_result_axis_back_to_the_source_axis():
@@ -2672,7 +2675,7 @@ def _expected_region_program(stmts, params, return_types, *, name="split_explici
 
 
 def test_explicit_region_erased():
-    """Pass 21 consumes the region: no SplitAivScopeStmt survives, and the func is
+    """Pass 23 consumes the region: no SplitAivScopeStmt survives, and the func is
     stamped split_aiv + split_aiv_region_validated. The region body keeps its own
     ``aiv_id`` and gains the injected ``subblock_idx`` + halved load (Expected)."""
     span = ir.Span.unknown()
@@ -3850,7 +3853,7 @@ def test_scope_inside_region_body_is_rejected():
 
 
 def test_outlined_region_still_lowers_and_stamps():
-    """The canonical Opaque form is unaffected: pass 7 outlines, pass 18 lowers.
+    """The canonical Opaque form is unaffected: pass 7 outlines, pass 23 lowers.
 
     Guards the boundary of the rejection above — the scope must be gone by the
     time this pass runs, and when it is, the region lowers and the function is
@@ -4207,6 +4210,268 @@ def test_e2e_none_region_c2v_crossing_lowers_to_split_zero_transport():
     assert "pl.tile.tpop_from_aic(split=0)" in aiv
     assert "pl.Tile[[64, 64], pl.FP32" in aiv
     assert "pl.tile.aiv_shard" not in aic and "pl.tile.aiv_shard" not in aiv
+
+
+def test_if_merge_variable_is_retyped_and_tracked():
+    """An IfStmt that merges a tile must carry the split through its merge var.
+
+    Both branches yield a value the split halved, so the merge variable is
+    lane-local too. Left at its declared full width it disagrees with both
+    ``Yield`` values, and — because it is never registered in ``tile_vars`` — a
+    following ``tile.store`` gets no lane offset, so both AIV lanes write from
+    output row 0 instead of taking a half each.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            cube_seed: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat],
+            data: pl.Tensor[[128, 128], pl.FP32],
+            flag: pl.Scalar[pl.INT64],
+            out_0: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            seed_vec = pl.tile.move(cube_seed, target_memory=pl.Mem.Vec)  # noqa: F841
+            v = pl.tile.load(data, [0, 0], [128, 128], target_memory=pl.Mem.Vec)
+            if flag > 0:
+                doubled = pl.tile.add(v, v)
+                merged: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.yield_(doubled)
+            else:
+                merged: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.yield_(v)
+            out_store = pl.tile.store(merged, [0, 0], out_0)
+            return out_store
+
+    printed = _lower(Before).as_python()
+    # The merge variable is halved with its branches...
+    assert "merged: pl.Tile[[64, 128], pl.FP32, pl.Mem.Vec]" in printed
+    # ...and the store that consumes it takes this lane's half of the output.
+    assert "pl.tile.store(merged, [0 + subblock_idx * 64, 0], out_0)" in printed
+
+
+def test_if_branches_disagreeing_on_the_merge_are_rejected():
+    """One halved branch and one full-width branch have no single merge type.
+
+    ``v`` is loaded inside the region and halved; ``shared`` is a full-width
+    parameter nothing partitions. Halving the merge variable would be wrong for
+    the else path and leaving it full width wrong for the then path, so neither
+    choice is a merge — take the rejection instead of silently giving one AIV
+    lane the wrong extent.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            cube_seed: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat],
+            data: pl.Tensor[[128, 128], pl.FP32],
+            shared: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec],
+            flag: pl.Scalar[pl.INT64],
+            out_0: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            seed_vec = pl.tile.move(cube_seed, target_memory=pl.Mem.Vec)  # noqa: F841
+            v = pl.tile.load(data, [0, 0], [128, 128], target_memory=pl.Mem.Vec)
+            if flag > 0:
+                merged: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.yield_(v)
+            else:
+                merged: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.yield_(shared)
+            out_store = pl.tile.store(merged, [0, 0], out_0)
+            return out_store
+
+    with pytest.raises(ValueError, match="disagree about merge variable") as exc_info:
+        _lower(Before)
+    assert "'merged'" in str(exc_info.value)
+
+
+def test_source_level_no_else_phi_still_merges_after_ssa_conversion():
+    """A source-level ``if`` with no ``else`` reaches this pass *with* one.
+
+    ``SSAVerifier::VerifyIfStmt`` rejects an ``IfStmt`` that defines
+    ``return_vars_`` without an else branch, and ``ConvertToSSA`` synthesizes the
+    else ``Yield`` (from the binding the merge shadows) precisely so the shape
+    below is legal by the time any later pass sees it. So the merge repair needs
+    no else-less special case — it only has to handle what SSA guarantees.
+
+    Running the real conversion here rather than hand-shaping the ``IfStmt`` is
+    the point: it is what proves the guarantee holds for the source form users
+    actually write.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            cube_seed: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat],
+            data: pl.Tensor[[128, 128], pl.FP32],
+            flag: pl.Scalar[pl.INT64],
+            out_0: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            seed_vec = pl.tile.move(cube_seed, target_memory=pl.Mem.Vec)  # noqa: F841
+            merged = pl.tile.load(data, [0, 0], [128, 128], target_memory=pl.Mem.Vec)
+            if flag > 0:
+                merged = pl.tile.add(merged, merged)
+            out_store = pl.tile.store(merged, [0, 0], out_0)
+            return out_store
+
+    in_ssa = passes.convert_to_ssa()(Before)
+    converted = in_ssa.get_function("split_auto")
+    assert converted is not None
+    body = converted.body
+    stmts = body.stmts if isinstance(body, ir.SeqStmts) else [body]
+    if_stmt = next(s for s in stmts if isinstance(s, ir.IfStmt))
+    # The guarantee this test rests on: the conversion supplied the else branch.
+    assert if_stmt.return_vars, "expected the rebind to become an IfStmt merge"
+    assert if_stmt.else_body is not None, "ConvertToSSA must synthesize the else for a no-else phi"
+
+    # SSA renames, so anchor on the merge's own name rather than the source spelling.
+    merge_name = if_stmt.return_vars[0].name_hint
+    printed = _lower(in_ssa).as_python()
+    assert f"{merge_name}: pl.Tile[[64, 128], pl.FP32, pl.Mem.Vec]" in printed
+    store_line = next(line for line in printed.splitlines() if "pl.tile.store(" in line)
+    assert f"pl.tile.store({merge_name}, [0 + subblock_idx * 64, 0]" in store_line
+
+
+def test_loop_backedge_yielding_a_full_width_value_is_rejected():
+    """The backedge must agree with the carry it feeds.
+
+    ``RepairIterArgs`` / ``RepairReturnVars`` repair the carry's entry and exit,
+    but nothing looked at the value the body yields back into it. With a halved
+    init and a body that yields a full-width parameter, the carry is retyped to
+    ``[64, 128]`` while the yielded value stays ``[128, 128]`` — the gh#2203
+    "declared type contradicts the value" defect on the carry path, which no
+    operand check sees because it inspects a ``Call``'s arguments and this is a
+    ``Yield``.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            cube_seed: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat],
+            data: pl.Tensor[[128, 128], pl.FP32],
+            full: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec],
+            out_0: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            seed_vec = pl.tile.move(cube_seed, target_memory=pl.Mem.Vec)  # noqa: F841
+            accum = pl.tile.load(data, [0, 0], [128, 128], target_memory=pl.Mem.Vec)
+            for i, (acc_it,) in pl.range(2, init_values=(accum,)):  # noqa: B007
+                acc_loop = pl.yield_(full)
+            out_store = pl.tile.store(acc_loop, [0, 0], out_0)
+            return out_store
+
+    with pytest.raises(ValueError, match="yields") as exc_info:
+        _lower(Before)
+    assert "acc" in str(exc_info.value)
+
+
+def test_loop_backedge_yielding_a_lane_local_value_into_a_shared_carry_is_rejected():
+    """The mismatch is rejected in both directions.
+
+    Here the carry's init is a full-width parameter, so nothing halved it, while
+    the body yields a value the split made lane-local. A per-lane value cannot
+    live in a full-width carry any more than the converse, and the check is
+    symmetric so neither direction silently survives.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            cube_seed: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat],
+            data: pl.Tensor[[128, 128], pl.FP32],
+            full: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec],
+            out_0: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            seed_vec = pl.tile.move(cube_seed, target_memory=pl.Mem.Vec)  # noqa: F841
+            for i, (acc_it,) in pl.range(2, init_values=(full,)):  # noqa: B007
+                halved = pl.tile.load(data, [0, 0], [128, 128], target_memory=pl.Mem.Vec)
+                acc_loop = pl.yield_(halved)
+            out_store = pl.tile.store(acc_loop, [0, 0], out_0)
+            return out_store
+
+    with pytest.raises(ValueError, match="is full width, but the body yields") as exc_info:
+        _lower(Before)
+    assert "'halved'" in str(exc_info.value)
+
+
+def test_slice_drop_dims_maps_the_tracked_source_axis_onto_the_result_axis():
+    """The split axis lives on the OPERAND; the halving path indexes the RESULT.
+
+    ``drop_dims`` erases axes and then clamps back to 2D by *prepending* unit
+    axes, so the tracked source's axis 0 lands on result axis 1 here. Reading the
+    result at the source's axis instead found the synthetic unit axis, took the
+    singleton early-return, and passed the slice through untouched while its
+    source was halved underneath it — a 16-row window over an 8-row source.
+
+    This is the mirror of ``test_slice_drop_dims_maps_the_result_axis_back_to_the_source_axis``:
+    that one maps result → source for an *untracked* source, this one maps
+    source → result for a *tracked* one. Both directions are needed.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            cube_seed: pl.Tile[[16, 4], pl.FP32, pl.Mem.Mat],
+            data: pl.Tensor[[16, 4], pl.FP32],
+            out_0: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+        ) -> pl.Tensor[[1, 16], pl.FP32]:
+            seed_vec = pl.tile.move(cube_seed, target_memory=pl.Mem.Vec)  # noqa: F841
+            v = pl.tile.load(data, [0, 0], [16, 4], target_memory=pl.Mem.Vec)
+            sl = pl.tile.slice(v, [16, 1], [0, 0], drop_dims=[1])
+            out_store = pl.tile.store(sl, [0, 0], out_0)
+            return out_store
+
+    @pl.program
+    class Expected:
+        @pl.function(
+            type=pl.FunctionType.InCore,
+            attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": True},
+        )
+        def split_auto(
+            cube_seed: pl.Tile[[16, 4], pl.FP32, pl.Mem.Mat],
+            data: pl.Tensor[[16, 4], pl.FP32],
+            out_0: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+        ) -> pl.Tensor[[1, 16], pl.FP32]:
+            subblock_idx = pl.tile.get_subblock_idx()
+            seed_vec = pl.tile.aiv_shard(cube_seed, split=1)  # noqa: F841
+            v = pl.tile.load(data, [0 + subblock_idx * 8, 0], [8, 4], [8, 4], target_memory=pl.Mem.Vec)
+            # The window follows the source onto its own axis: 8 rows, not 16.
+            sl = pl.tile.slice(v, [8, 1], [0, 0], [], [1])
+            # The store lands on result axis 1, where the split axis now lives.
+            out_store = pl.tile.store(sl, [0, 0 + subblock_idx * 8], out_0)
+            return out_store
+
+    ir.assert_structural_equal(_lower(Before), Expected)
+
+
+def test_slice_dropping_the_tracked_split_axis_is_rejected():
+    """``drop_dims``' unit requirement is on the WINDOW, not on the source.
+
+    A tracked ``[16, 4]`` source windowed ``[1, 4]`` may drop axis 0, so the axis
+    the split partitions can be erased while it is still live. Each lane would
+    then take that window from its own half — lane 1 selects source row 8 where
+    the program asked for row 0 — and the result carries no axis left to tell the
+    lanes apart, so the following store cannot give them separate destinations
+    either. Both lanes would write the same place with different data.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            cube_seed: pl.Tile[[16, 4], pl.FP32, pl.Mem.Mat],
+            data: pl.Tensor[[16, 4], pl.FP32],
+            out_0: pl.Out[pl.Tensor[[1, 4], pl.FP32]],
+        ) -> pl.Tensor[[1, 4], pl.FP32]:
+            seed_vec = pl.tile.move(cube_seed, target_memory=pl.Mem.Vec)  # noqa: F841
+            v = pl.tile.load(data, [0, 0], [16, 4], target_memory=pl.Mem.Vec)
+            sl = pl.tile.slice(v, [1, 4], [0, 0], drop_dims=[0])
+            out_store = pl.tile.store(sl, [0, 0], out_0)
+            return out_store
+
+    with pytest.raises(ValueError, match="the axis the automatic split partitions") as exc_info:
+        _lower(Before)
+    assert "drops dim 0" in str(exc_info.value)
 
 
 if __name__ == "__main__":

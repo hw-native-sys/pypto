@@ -4,9 +4,9 @@
 
 Orchestration codegen follows the same principle as [PTO codegen](00-pto_codegen.md#design-principle-strict-1-to-1-mapping): a **strict 1-to-1 translation** from IR to generated C++ code. The codegen should not perform optimization, analysis, or indirection — such work belongs in earlier passes.
 
-For example, return-to-parameter tracing (mapping callee return values back to `Out` parameters) is analysis that should be resolved by a pass before codegen sees the IR. The [`NormalizeReturnOrder`](../passes/26-normalize_return_order.md) pass now canonicalizes this before codegen, so orchestration codegen maps `return[i]` directly to `out_indices[i]` without tracing through `tile.store`/yield chains.
+For example, return-to-parameter tracing (mapping callee return values back to `Out` parameters) is analysis that should be resolved by a pass before codegen sees the IR. The [`NormalizeReturnOrder`](../passes/28-normalize_return_order.md) pass now canonicalizes this before codegen, so orchestration codegen maps `return[i]` directly to `out_indices[i]` without tracing through `tile.store`/yield chains.
 
-Likewise, deciding whether a `ForStmt` iter_arg needs a materialised carry variable used to require an alias-equivalence fixpoint over the loop body. The [`ClassifyIterArgCarry`](../passes/47-classify_iter_arg_carry.md) pass now stamps that decision (and the TaskId fence-array extent) onto `ForStmt::attrs_`, so codegen reads `iter_arg_rebind_<i>` / `iter_arg_array_size_<i>` instead of deriving them.
+Likewise, deciding whether a `ForStmt` iter_arg needs a materialised carry variable used to require an alias-equivalence fixpoint over the loop body. The [`ClassifyIterArgCarry`](../passes/49-classify_iter_arg_carry.md) pass now stamps that decision (and the TaskId fence-array extent) onto `ForStmt::attrs_`, so codegen reads `iter_arg_rebind_<i>` / `iter_arg_array_size_<i>` instead of deriving them.
 
 ## Overview
 
@@ -109,7 +109,7 @@ const ChipTensor& tmp = alloc_0.get_ref(0);
 
 All task submission is wrapped in a top-level `SIMPLER_SCOPE()`. Codegen no longer
 decides scope placement from the `for` / `if` structure: the
-[MaterializeRuntimeScopes](../passes/46-materialize_runtime_scopes.md) pass
+[MaterializeRuntimeScopes](../passes/48-materialize_runtime_scopes.md) pass
 inserts explicit AUTO `RuntimeScopeStmt` nodes (the function body and each
 `for` / `if` body) into the IR, and codegen emits `SIMPLER_SCOPE` 1:1 from those
 nodes (manual scopes lower to `SIMPLER_SCOPE(ScopeMode::MANUAL)`):
@@ -139,6 +139,8 @@ SIMPLER_SCOPE() {
 | Internal | `pl.create_tensor(...)` in function body | `TensorCreateInfo var_ci(...)` + `alloc_tensors(...)` at scope entry | `<name>` (no prefix) |
 
 External tensors borrow chip-resident descriptors passed through `ChipTaskArgs`. Internal tensors are pre-allocated at scope entry via `alloc_tensors()` — all `tensor.create` calls within the same scope (function body, for body, if body) are batched into a single `alloc_tensors` invocation. Pre-allocated tensors are then passed to kernels via `add_output(const ChipTensor&)` (OUTPUT_EXISTING overload).
+
+A create is only hoisted to scope entry when its size is *entry-valid*. A size that reads a value the body itself defines — a plain local, or an `if` / `for` / `while` return_var, whose C++ declaration is emitted where that statement sits — keeps the create in body order instead, so the emitted C++ never uses a name before its declaration. The same rule covers the `__gm_pipe_buffer` placeholder, whose real size is `slot_bytes * core_num` rather than its IR shape.
 
 ### Parameter Direction
 
@@ -193,7 +195,7 @@ params_t1.add_input(ext_output);  // `result` -> ext_output (no alias decl)
 
 Which `Out`/`InOut` param a result aliases is a lookup, not a heuristic — and
 not an analysis either. `ReturnParamsExplicit`
-([`NormalizeReturnOrder`](../passes/26-normalize_return_order.md)) guarantees
+([`NormalizeReturnOrder`](../passes/28-normalize_return_order.md)) guarantees
 that every tensor param-writeback return value *is* the param, by pointer
 identity. Codegen therefore reads the return-position → param-index map straight
 off the callee's `ReturnStmt` via `ir::return_lineage::ExplicitReturnedParamIndices`;
@@ -223,7 +225,7 @@ The codegen determines whether to submit to AIC (CUBE) or AIV (VECTOR) based on 
 | `Vec` (default) | VECTOR (AIV) | `rt_submit_aiv_task` |
 
 **Exception — dual-AIV kernels.** An AIV kernel stamped `dual_aiv_dispatch` (any
-`split_aiv` kernel; see [`SplitVectorKernel`](../passes/24-split_vector_kernel.md))
+`split_aiv` kernel; see [`SplitVectorKernel`](../passes/26-split_vector_kernel.md))
 must run on **both** vector lanes of a cluster — a `pl.split_aiv` region hands each
 lane disjoint work selected by `aiv_id`. `rt_submit_aiv_task` fills only the AIV0
 slot, so the runtime schedules an *AIV-shape* task — one AIV core per block: the second
@@ -407,6 +409,21 @@ names in the output), but never for identity decisions.
 | Tensor arg index | `orch_args.tensor(N)` | `orch_args.tensor(0)` |
 | Scalar arg index | `orch_args.scalar(N)` | `orch_args.scalar(0)` |
 
+### Graph function bodies
+
+A `FunctionType.Graph` body is emitted by a second `OrchestrationStmtCodegen`
+instance whose parameters are ordinary C++ parameters bound at the top of the
+helper (`const Tensor& c = args.tensor(1).ref();`), not entry arguments. So its
+`param_name_set` is empty — `GetExternalTensorName` must not rewrite them to
+`ext_<name>` — but the names are still reserved via `ReserveDeclaredNames`.
+
+Both halves are load-bearing. Without the reservation, the first body SSA rename
+of a parameter takes the parameter's own name; reserved inside a
+`pl.manual_scope`, that name then reads as scope-local, every later writeback
+mints a block-scoped `const Tensor& c__ssa_vN = c;` alias instead of remapping
+onto the parameter, and a launch placed after the block names an identifier that
+has fallen out of C++ scope.
+
 ## Control Flow Generation
 
 ### ForStmt
@@ -567,7 +584,7 @@ carriers of `manual_dep_edges` no longer exist — the
 ManualDepsOnSubmitOnly structural property verifies that no cross-function
 `Call` carries it; only the `system.task_dummy` barrier op keeps the attr as
 its fanin contract. Compiler-derived edges come from
-[`AutoDeriveTaskDependencies`](../passes/39-auto_derive_task_dependencies.md)
+[`AutoDeriveTaskDependencies`](../passes/41-auto_derive_task_dependencies.md)
 in `Call.attrs["compiler_manual_dep_edges"]` (a separate key, allowed on plain
 calls). That pass never analyzes a user-written MANUAL scope — inside
 `pl.manual_scope()` the explicit `deps=[...]` list stays the only source of
@@ -616,6 +633,16 @@ produced inside a scope does not leak to an enclosing scope where its identifier
 would be out of C++ scope. Loop / branch carries are declared *before* their
 body's `SIMPLER_SCOPE`, so they correctly survive the block.
 
+**Exception: array carries over enclosing storage.** An `arr[i] = tid` inside a
+scope registers a carry whose backing `TaskId[N]` was declared further out. The
+slot write is emitted in place, but the *carry* is read after the closing brace,
+by the enclosing loop's yield. Restoring it away makes that yield misread an
+Array value as a scalar TaskId, so `PreserveEnclosingArrayCarries` keeps any
+carry whose backing array outlives the block — for both scope kinds. Locality is
+decided per kind: a MANUAL scope hoists its allocations and knows its local
+names outright; an AUTO scope hoists nothing, so storage counts as enclosing
+exactly when a pre-entry carry already named it.
+
 ### Unresolvable dep edges
 
 A consequence of that lifetime rule: a dep edge naming a TaskId produced in a
@@ -626,11 +653,12 @@ on scope exit. Codegen's response depends on the edge's provenance:
 | --------------- | -------------------------- |
 | Compiler-derived (`compiler_manual_dep_edges`) | Silently skipped. These are a best-effort hazard patch; `PrepareCrossScopeTaskIdHoists` already LCA-hoists the ones it can, and dropping the rest is safe because the pass only ever *adds* ordering |
 | User-written (`deps=[...]`) | **Hard error** — `CHECK_SPAN` raises a `pypto::ValueError` naming the TaskId and the DSL source line |
+| Array publish (`arr[i] = tid`) | **Hard error** — `CheckTaskIdSlotValueInScope` raises a `pypto::ValueError` telling the user to move the store inside the `pl.scope()` that produced the TaskId. Unlike a dep edge, the slot write is emitted unconditionally, so accepting it would emit orchestration the host compiler rejects with `'<tid>' was not declared in this scope` — a failure `--compile-only` never reaches |
 
 Provenance is the attr key. Note that `attrs["dummy_task"]` is *not* an
 authorship marker: the parser stamps it on a user-written
 `pl.system.task_dummy(deps=[...])` exactly as
-[`ExpandManualPhaseFence`](../passes/40-expand_manual_phase_fence.md) does on the
+[`ExpandManualPhaseFence`](../passes/42-expand_manual_phase_fence.md) does on the
 barriers it synthesises, so every `manual_dep_edges` carrier is enforced. The
 synthesised barrier only ever names a TaskId live in the manual scope it
 rewrites, so its fanin always resolves.

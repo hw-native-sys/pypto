@@ -1555,7 +1555,7 @@ def test_dsl_shard_carried_across_loop_back_edge_fails():
     errors = _errors(ssa)
     assert len(errors) == 1
     assert "across a loop back-edge" in errors[0].message
-    # The pass-20 message this one displaces was factually wrong about the tile
+    # The pass-23 message this one displaces was factually wrong about the tile
     # being full width; make sure it is not what the author sees any more.
     assert "plain full-width vector op" not in errors[0].message
 

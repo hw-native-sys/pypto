@@ -336,6 +336,51 @@ def test_tile_compute_ops():
     assert "torch.add(a, b)" in code
 
 
+@pytest.mark.parametrize(
+    ("op_name", "expected_expr"),
+    [
+        ("addc", "(a + b + carry)"),
+        ("subc", "(a - b + carry)"),
+        ("addsc", "(a + 2.0 + carry)"),
+        ("subsc", "(a - 2.0 + carry)"),
+    ],
+)
+def test_tile_carry_codegen_and_execution(op_name, expected_expr):
+    """Carry-in debug references use ``+ carry`` for add and subtract forms."""
+    a = _tile_var("a", [2, 2])
+    carry = _tile_var("carry", [2, 2])
+    out = _tile_var("out", [2, 2])
+    if op_name in {"addc", "subc"}:
+        b = _tile_var("b", [2, 2])
+        args: list[ir.Expr] = [a, b, carry]
+        params: list[ir.Var] = [a, b, carry]
+    else:
+        args = [a, _float(2.0), carry]
+        params = [a, carry]
+
+    call = _op_call(f"tile.{op_name}", args)
+    body = ir.SeqStmts(
+        [ir.AssignStmt(out, call, _span()), ir.ReturnStmt([out], _span())],
+        _span(),
+    )
+    func = _simple_function("carry_ref", params, body, [out.type])
+    code = torch_codegen(func)
+    assert expected_expr in code
+
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102
+    a_value = torch.tensor([[5.0, -3.0], [8.0, 1.0]])
+    carry_value = torch.tensor([[0.0, 1.0], [1.0, 0.0]])
+    if op_name in {"addc", "subc"}:
+        b_value = torch.tensor([[2.0, 4.0], [-1.0, 3.0]])
+        actual = ns["carry_ref"](a_value, b_value, carry_value)
+        expected = a_value + b_value + carry_value if op_name == "addc" else a_value - b_value + carry_value
+    else:
+        actual = ns["carry_ref"](a_value, carry_value)
+        expected = a_value + 2.0 + carry_value if op_name == "addsc" else a_value - 2.0 + carry_value
+    assert torch.equal(actual, expected)
+
+
 # (op leaf, expected torch snippet) for the integer bitwise / shift family. The
 # reference map registers these for the `tensor` and `tile` prefixes from one shared
 # loop, so both namespaces are asserted below (issue #2216).

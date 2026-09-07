@@ -34,6 +34,7 @@ class IRProperty(Enum):
     BreakContinueValid = ...
     UseAfterDef = ...
     HierarchyOutlined = ...
+    GraphOutlined = ...
     StructuredCtrlFlow = ...
     VectorKernelSplit = ...
     OutParamNotShadowed = ...
@@ -62,6 +63,7 @@ class IRProperty(Enum):
     AccCompactValid = ...
     GraphBoundaryLegalized = ...
     AccStorePhaseValid = ...
+    NoScalarKernelReturn = ...
 
 class IRPropertySet:
     """A set of IR properties backed by a bitset."""
@@ -504,6 +506,9 @@ def outline_cluster_scopes() -> Pass:
 def outline_hierarchy_scopes() -> Pass:
     """Create a pass that outlines Hierarchy scopes into level/role functions."""
 
+def outline_graph_scopes() -> Pass:
+    """Create a pass that outlines Graph scopes (``pl.graph``) into Graph functions."""
+
 def convert_tensor_to_tile_ops() -> Pass:
     """Create a pass that converts tensor ops to tile ops in InCore functions."""
 
@@ -524,6 +529,19 @@ def block_nz_tensor_views() -> Pass:
     ``flatten_tile_nd_to_2d`` — it requires ``TileOps2D``, because blocking a
     load whose tile is still ND-rank yields a call whose type annotation and
     argument ranks cannot both be printed.
+    """
+
+def block_mx_scale_tensor_views() -> Pass:
+    """Create a pass that physicalizes logical MX scale tensor views.
+
+    ``MX_A_ZZ [M, G]`` and ``MX_B_NN [G, N]`` become the packed rank-5
+    ``[1, block/16, group/2, 16, 2]`` form required by A5. The pass rewrites
+    ``tile.load`` windows and ND/MX backing aliases while preserving logical
+    tile result types. Symbolic offsets must be provably aligned and
+    non-negative.
+
+    Must run after ``flatten_tile_nd_to_2d`` and before
+    ``materialize_tensor_strides``.
     """
 
 def flatten_tile_nd_to_2d() -> Pass:
@@ -1029,9 +1047,11 @@ __all__ = [
     "outline_incore_scopes",
     "outline_cluster_scopes",
     "outline_hierarchy_scopes",
+    "outline_graph_scopes",
     "convert_tensor_to_tile_ops",
     "optimize_orch_tensors",
     "block_nz_tensor_views",
+    "block_mx_scale_tensor_views",
     "flatten_tile_nd_to_2d",
     "legalize_tile_cast",
     "auto_tile_matmul_l0",

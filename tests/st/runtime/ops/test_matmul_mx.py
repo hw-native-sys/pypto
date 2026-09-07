@@ -23,13 +23,6 @@ import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
 from pypto.runtime.runner import RunConfig
 
-pytestmark = pytest.mark.skip(
-    reason=(
-        "PTOAS temporarily pinned to v0.57 (revert #2523 level3 TMP for pypto#2558); "
-        "MX pack/layout requires PTOAS v0.60 — re-enable after tile.ci root-cause fix"
-    ),
-)
-
 _REQUIRED_TORCH_DTYPES = ("float4_e2m1fn_x2", "float8_e4m3fn", "float8_e8m0fnu")
 if not all(hasattr(torch, name) for name in _REQUIRED_TORCH_DTYPES):
     pytest.skip("torch MXFP4/MXFP8/E8M0 dtypes required", allow_module_level=True)

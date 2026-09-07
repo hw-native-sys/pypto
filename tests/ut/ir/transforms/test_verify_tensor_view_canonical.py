@@ -58,6 +58,14 @@ def _program_with_param_type(tensor_type):
     return ir.Program([func], "p", span)
 
 
+def _program_with_submit_type(submit_type):
+    """Build a function whose only occurrence of ``submit_type`` is on Submit."""
+    span = _span()
+    submit = ir.Submit(ir.GlobalVar("worker"), [], [], submit_type, span)
+    func = ir.Function("f", [], [], ir.EvalStmt(submit, span), span)
+    return ir.Program([func], "p", span)
+
+
 def _verify(program, *, require_materialized: bool = False):
     return _passes.verify_tensor_view_canonical(program, require_materialized)
 
@@ -169,6 +177,47 @@ def test_blocked_nz_layout_accepted():
     t = ir.TensorType(_shape(16, 16, 16, 32), DataType.INT8, None, view)
     diags = _verify(_program_with_param_type(t), require_materialized=True)
     assert diags == []
+
+
+# ============================================================================
+# MX on TensorType — logical rank-2 is always rejected after pass 15
+# ============================================================================
+
+
+def test_unblocked_mx_layout_rejected_weak():
+    view = ir.TensorView(_stride(4, 1), ir.TensorLayout.MX_A_ZZ)
+    t = ir.TensorType(_shape(32, 4), DataType.FP8E8M0, None, view)
+    diags = _verify(_program_with_param_type(t))
+    assert len(diags) == 1
+    assert "MX" in diags[0].message
+    assert "unblocked" in diags[0].message
+
+
+def test_unblocked_mx_layout_rejected_strict():
+    view = ir.TensorView([], ir.TensorLayout.MX_B_NN)
+    t = ir.TensorType(_shape(4, 32), DataType.FP8E8M0, None, view)
+    diags = _verify(_program_with_param_type(t), require_materialized=True)
+    assert len(diags) == 1
+    assert "unblocked MX" in diags[0].message
+
+
+def test_blocked_mx_layout_accepted():
+    view = ir.TensorView(_stride(128, 64, 32, 2, 1), ir.TensorLayout.MX_A_ZZ)
+    t = ir.TensorType(_shape(1, 2, 2, 16, 2), DataType.FP8E8M0, None, view)
+    assert _verify(_program_with_param_type(t), require_materialized=True) == []
+
+
+def test_submit_return_type_is_checked():
+    mx = ir.TensorType(
+        _shape(32, 4),
+        DataType.FP8E8M0,
+        None,
+        ir.TensorView(_stride(4, 1), ir.TensorLayout.MX_A_ZZ),
+    )
+    submit_type = ir.TupleType([mx, ir.ScalarType(DataType.TASK_ID)])
+    diags = _verify(_program_with_submit_type(submit_type))
+    assert len(diags) == 1
+    assert "unblocked MX" in diags[0].message
 
 
 # ============================================================================

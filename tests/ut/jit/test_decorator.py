@@ -33,7 +33,6 @@ from pypto.jit.decorator import (
     _extract_tensor_meta,
     _resolve_dep_call_metadata,
     _rewrite_jit_error,
-    _run_config_compile_kwargs,
     _scan_dep_io,
     _scan_dynamic_dims,
     _SlicedArg,
@@ -2567,51 +2566,11 @@ class TestCompileKwargForwarding:
     Before this fix, ``_compile`` only forwarded ``skip_ptoas`` and
     ``platform`` — every other compile knob a user set on ``RunConfig``
     (``strategy``, ``dump_passes``, ...) was silently dropped on the JIT path.
+
+    The mapping itself is ``RunConfig.compile_kwargs`` and is tested in
+    ``tests/ut/runtime/test_run_config.py``; what these cases pin is that the
+    JIT path uses it rather than a second copy of it.
     """
-
-    def test_run_config_compile_kwargs_maps_fields(self, tmp_path):
-        """Compile-side RunConfig fields map onto the ir.compile() parameter names."""
-        artifacts_dir = tmp_path / "jit_artifacts"
-        cfg = RunConfig(
-            strategy=OptimizationStrategy.Default,
-            dump_passes=True,
-            dump_ptoas_passes=True,
-            compile_profiling=True,
-            save_kernels_dir=str(artifacts_dir),
-            analyze_auto_scopes_for_deps=True,
-        )
-        kwargs = _run_config_compile_kwargs(cfg)
-        assert kwargs["strategy"] == OptimizationStrategy.Default
-        assert kwargs["dump_passes"] is True
-        assert kwargs["dump_ptoas_passes"] is True
-        assert kwargs["profiling"] is True  # mapped from RunConfig.compile_profiling
-        assert kwargs["output_dir"] == str(artifacts_dir)  # from RunConfig.save_kernels_dir
-        assert kwargs["analyze_auto_scopes_for_deps"] is True
-        assert "diagnostic_phase" in kwargs
-        assert "disabled_diagnostics" in kwargs
-        # backend_type is derived from `platform` by ir.compile(); not forwarded.
-        assert "backend_type" not in kwargs
-
-    def test_run_config_compile_kwargs_omits_unset_output_dir(self):
-        """save_kernels_dir left unset omits output_dir so ir.compile()'s default applies."""
-        kwargs = _run_config_compile_kwargs(RunConfig())
-        assert "output_dir" not in kwargs
-
-    def test_run_config_compile_kwargs_forwards_distributed_config(self):
-        """A RunConfig.distributed_config is forwarded so @pl.jit.host kernels go distributed."""
-        from pypto.ir import DistributedConfig  # noqa: PLC0415
-
-        dc = DistributedConfig(device_ids=[0, 1])
-        kwargs = _run_config_compile_kwargs(RunConfig(distributed_config=dc))
-        # Forwarded verbatim (same object) so ir.compile() emits a
-        # DistributedCompiledProgram for the HOST-level entry.
-        assert kwargs["distributed_config"] is dc
-
-    def test_run_config_compile_kwargs_omits_unset_distributed_config(self):
-        """distributed_config left unset is omitted so ir.compile()'s single-chip default applies."""
-        kwargs = _run_config_compile_kwargs(RunConfig())
-        assert "distributed_config" not in kwargs
-        assert kwargs["analyze_auto_scopes_for_deps"] is False
 
     def test_make_cache_key_splits_on_distributed_config(self):
         """distributed_config participates in the cache key (distinct device_ids ≠ collide)."""
@@ -2815,8 +2774,7 @@ class TestCompileKwargForwarding:
             scalar_dtypes={},
             per_func_dyn={id(fwd_kernel._func): {}},
             pl=pl,
-            platform="a2a3sim",
-            **_run_config_compile_kwargs(cfg),
+            **cfg.compile_kwargs(),
         )
         assert result == "fake-compiled-program"
         assert captured["strategy"] == OptimizationStrategy.Default
@@ -2829,8 +2787,14 @@ class TestCompileKwargForwarding:
         # compile to a DistributedCompiledProgram and dispatch per-rank.
         assert captured["distributed_config"] is dc
 
-    def test_compile_without_kwargs_forwards_only_defaults(self, monkeypatch):
-        """_compile with no extra kwargs forwards only skip_ptoas + platform."""
+    def test_compile_without_kwargs_forwards_only_skip_ptoas(self, monkeypatch):
+        """_compile with no extra kwargs forwards only skip_ptoas.
+
+        ``platform`` rides in the ``RunConfig.compile_kwargs`` mapping, so with
+        no config there is nothing to forward and ``ir.compile``'s own default
+        applies — the same effective platform the old explicit ``platform=None``
+        produced.
+        """
         ir_compile_mod = importlib.import_module("pypto.ir.compile")
 
         @jit
@@ -2858,8 +2822,7 @@ class TestCompileKwargForwarding:
             per_func_dyn={id(plain_kernel._func): {}},
             pl=pl,
         )
-        assert set(captured) == {"skip_ptoas", "platform"}
-        assert captured["platform"] is None
+        assert set(captured) == {"skip_ptoas"}
 
 
 # ---------------------------------------------------------------------------
@@ -3051,9 +3014,9 @@ class TestClosureConstantFolding:
     def test_rebound_closure_cell_splits_the_cache(self):
         """A rebound cell must not silently reuse the previous artifact.
 
-        ``_get_source_hash`` hashes the function *text*, which a ``nonlocal``
-        rebind leaves byte-identical, so the closure values have to enter the
-        key separately. Two distinct factory instances would not catch this —
+        A ``nonlocal`` rebind leaves the function text byte-identical, so the
+        source dependency hash must capture the changed value.
+        Two distinct factory instances would not catch this —
         they are different ``JITFunction`` objects with their own caches.
         """
         torch = pytest.importorskip("torch")
@@ -3063,17 +3026,12 @@ class TestClosureConstantFolding:
         out = torch.zeros(64, 64, dtype=torch.float32)
 
         del a, out
-        before = entry._folded_closure_constants()
         source_hash_before = entry._get_source_hash()
+        static_hash_before = entry._get_static_source_hash()
         set_rows(96)
-        after = entry._folded_closure_constants()
 
-        # The text-based hash cannot see the rebind — that is the whole problem.
-        assert entry._get_source_hash() == source_hash_before
-        # The closure component does, so the composed key differs.
-        assert before != after
-        assert ("entry", "rows", "64") in before
-        assert ("entry", "rows", "96") in after
+        assert entry._get_static_source_hash() == static_hash_before
+        assert entry._get_source_hash() != source_hash_before
 
     def test_rebound_closure_cell_recompiles_instead_of_reusing(self):
         """The observable consequence: ``compile()`` must not hand back the
@@ -3098,26 +3056,20 @@ class TestClosureConstantFolding:
         assert entry.compile(a, out, config=RunConfig(platform="a2a3sim")) is compiled_after
         assert len(entry._cache) == 2
 
-    def test_closure_constants_key_component_is_stable_and_typed(self):
-        """Equal state yields an equal component (so a genuine re-call still
-        hits the cache), and ``repr`` keeps look-alike values apart."""
-        from pypto.jit.cache import make_cache_key  # noqa: PLC0415
+    def test_closure_source_hash_is_stable_and_typed(self):
+        """The source hash distinguishes folded closure types and stays stable."""
 
-        def key_for(closure_constants):
-            return make_cache_key(
-                source_hash="h",
-                param_names=["x"],
-                tensor_shapes={"x": (64, 64)},
-                tensor_dtypes={"x": DataType.FP32},
-                dynamic_dims=set(),
-                scalar_values={},
-                closure_constants=closure_constants,
-            )
+        def make_entry(value: int | float | bool):
+            @jit
+            def entry(x):
+                return pl.add(x, value)
 
-        base = key_for((("entry", "rows", "1"),))
-        assert base == key_for((("entry", "rows", "1"),))
-        # 1 / 1.0 / True all fold, and all produce different literals.
-        assert len({base, key_for((("entry", "rows", "1.0"),)), key_for((("entry", "rows", "True"),))}) == 3
+            return entry
+
+        entry = make_entry(1)
+        base = entry._get_source_hash()
+        assert base == entry._get_source_hash()
+        assert len({base, *(make_entry(value)._get_source_hash() for value in (1.0, True))}) == 3
 
     def test_module_globals_still_fold(self):
         """Closure bindings are merged on top of globals, not instead of them."""

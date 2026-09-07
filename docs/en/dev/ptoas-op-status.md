@@ -109,10 +109,10 @@ for lowering/compiler plumbing, plus other dialects such as VPTO, VMI, and SIMT.
 | pto.tmaxs | TMAXS | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.tmins | TMINS | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.trems | TREMS | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 exact-op hardware ST passed for FP32 and INT32 scalar forms within `[-2^24, 2^24]`, including both INT32 boundaries, negative values, and tail valid shapes; A5 hardware pending |
-| pto.taddc | TADD + TADD | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
-| pto.tsubc | TSUB + TADD | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
-| pto.taddsc | TADDS + TADD | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
-| pto.tsubsc | TSUBS + TADD | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
+| pto.taddc | TADD + TADD | tile | ✅ | ✅ | ❌ | ✅ | — | verified on A2/A3 hardware, including overflow, full/tail valid shapes, and result/src0 alias and non-alias paths; A5 hardware verification pending |
+| pto.tsubc | TSUB + TADD | tile | ✅ | ✅ | ❌ | ✅ | — | verified on A2/A3 hardware, including borrow, full/tail valid shapes, and result/src0 alias and non-alias paths; A5 hardware verification pending |
+| pto.taddsc | TADDS + TADD | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 hardware passes full, column-tail, and combined-tail shapes with result/src0 alias and non-alias paths; PTO ISA v0.57's full-column row-tail fast path is a strict expected failure; A5 hardware verification pending |
+| pto.tsubsc | TSUBS + TADD | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 hardware passes full, column-tail, and combined-tail shapes with result/src0 alias and non-alias paths; PTO ISA v0.57's full-column row-tail fast path is a strict expected failure; A5 hardware verification pending |
 | pto.tabs | TABS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tneg | TNEG | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.texp | TEXP | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
@@ -274,6 +274,6 @@ for lowering/compiler plumbing, plus other dialects such as VPTO, VMI, and SIMT.
 | pto.tassign | TASSIGN | internal | ✅ | — | — | — | — | inactive backend hook; no standalone ST |
 
 **Stats**: 204 public/compatibility PTOAS ops; 113 have a pypto tile frontend and 75 have a tensor frontend
-(plus four non-tile/tensor `pl.prefetch.*` ops); 111 have same-name ST coverage
-(107 regular STs and 4 distributed STs); 61 lack same-name ST coverage (51 regular and 10 distributed);
+(plus four non-tile/tensor `pl.prefetch.*` ops); 115 have same-name ST coverage
+(111 regular STs and 4 distributed STs); 57 lack same-name ST coverage (47 regular and 10 distributed);
 within these 204, another 32 ops are not suitable for standalone STs.

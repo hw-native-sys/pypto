@@ -52,7 +52,6 @@ from collections.abc import Sequence
 import pypto.language as pl
 import torch
 from pypto import ir
-from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 from pypto.runtime import RunConfig
 
@@ -797,7 +796,6 @@ def main():
         device_id=args.device,
         strategy=OptimizationStrategy.Default,
         dump_passes=True,
-        backend_type=BackendType.Ascend950 if args.platform.startswith("a5") else BackendType.Ascend910B,
         enable_chip_swimlane=args.enable_chip_swimlane,
     )
     compiled = ir.compile(program, **run_config.compile_kwargs())

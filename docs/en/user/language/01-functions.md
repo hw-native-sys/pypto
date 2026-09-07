@@ -74,6 +74,26 @@ core levels:
 | `@pl.jit.opaque` | `Opaque` | A separate IR function that may hold orchestration loops and `pl.at` scopes |
 | `@pl.jit.graph` | `Graph` | A recordable orchestration fragment — the `host_build_graph` runtime records its task topology on the first call and replays it after, so N calls cost one graph build rather than N. Requires compiling under `RuntimeKind.HOST_BUILD_GRAPH` |
 
+`@pl.jit.graph` has a scope form: `with pl.graph("name"):` marks a region *in place*
+instead of splitting it into a function. The two compile to the same thing — the region is
+outlined into a Graph function named after `name` — so the choice is ergonomic. Use the
+decorator when the layer is already its own function; use the scope when the region is a
+slice of a larger orchestration body you would rather not split up:
+
+```python
+@pl.jit
+def decode(w: pl.Tensor, hidden: pl.InOut[pl.Tensor]):
+    for layer in pl.range(40):
+        with pl.graph("decoder_layer"):        # recorded once, replayed 39 times
+            ...
+    return hidden
+```
+
+The name is required and becomes the recorded graph's identity, so keep it stable. A Graph
+region cannot nest inside another Graph region, nor inside `pl.at` / `pl.cluster` /
+`pl.spmd` — those become a single device task, whereas a Graph region records a topology of
+them. All three are compile errors.
+
 Sub-function dependencies (`.incore` / `.inline` / `.opaque` / `.graph`) are auto-discovered from
 the entry's body — call them by name. The name you call is resolved in the entry's own
 namespace, so an aliased import (`from kernels import matmul as mm`, or a plain
@@ -145,6 +165,34 @@ knobs go through `config=RunConfig(...)`. A stray `compile(skip_ptoas=True)` is 
 against the kernel's signature and raises `TypeError: got an unexpected keyword argument`.
 `@pl.jit` detects whether `ptoas` is available on its own, so `skip_ptoas` is not something
 you need to pass.
+
+**A device kernel cannot return a scalar.** The runtime's two task-argument channels are
+disjoint: scalars go *in* by value, and only tensors come back. So a value computed on
+device and needed by the caller — the orchestration function that launched the kernel, and
+the host beyond it — has to travel in a tensor. That covers a scalar tucked inside a
+`pl.Tuple[...]` return, too.
+
+```python
+@pl.jit.incore
+def bad(x: pl.Tensor[[64], pl.FP32]) -> pl.Scalar[pl.INDEX]:   # ✗ no carrier for the return
+    ...
+
+@pl.jit.incore                                                  # ✓ hand it back in a [1] tensor
+def good(x: pl.Tensor[[64], pl.FP32], n_out: pl.Out[pl.Tensor[[1], pl.INT32]]):
+    ...
+# then, in the entry body, after the launch:
+n = pl.tensor.read(n_out, [0])
+```
+
+The same rule applies to a scalar you assign *inside* `with pl.at(...)` and read after it —
+that is a kernel return in disguise. When the value only depends on things the entry body
+already has (a loop variable, a scalar parameter), the compiler moves the computation out
+of the scope for you; when it depends on device data, it asks you to route it through a
+tensor as above.
+
+A helper that computes a scalar *for* the kernel is fine — write it `@pl.jit.inline`
+(`FunctionType.Inline`). It is spliced at the call site, so it is not a task and the rule
+does not apply to it.
 
 ### `@pl.function` and `@pl.program`
 
@@ -250,6 +298,30 @@ check. Both accept `config=RunConfig(...)`, but `lower()` ignores the runtime an
 fields. Compile options are in [Compiling](../execution/00-compile.md) and the runtime surface in
 [Running](../execution/01-run.md).
 
+`specialize(*sample_args)` stops one stage earlier still: entry and deps are specialized
+into `@pl.program` source and parsed, and the **pre-pass** `ir.Program` comes back
+untransformed. Reach for it only when something downstream runs the pass pipeline itself
+— most of all `ir.compile(program, output_dir=...)`, which runs passes *and* code
+generation, so handing it `lower()`'s output would run the pipeline twice.
+
+```python
+program = my_kernel.specialize(sample_x, sample_w, sample_out)
+ir.compile(program, output_dir="build/out", backend_type=BackendType.Ascend910B)
+```
+
+It takes no `config=`: no pass runs here, so a `RunConfig` would have nothing to
+configure. Sample arguments may be omitted only when every tensor parameter is annotated
+with full shapes — a bare `pl.Tensor` has none to read.
+
+> Two kernels that specialize to the same program compare equal **after** passes, not
+> before: the specializer renames SSA-rebound locals (`out` becomes `out_v1`), and
+> canonicalization removes the difference. Compare `lower()` output when asserting
+> equivalence against a hand-written `@pl.program`.
+
+Three accessors describe the signature without specializing anything: `param_names` (in
+declaration order), `output_param_names` (the `pl.Out[...]` and `pl.InOut[...]` params,
+also in declaration order), and `__name__`.
+
 ### External C++ kernels
 
 A hand-written C++ kernel can be called like any other function. See
@@ -271,6 +343,8 @@ A hand-written C++ kernel can be called like any other function. See
 | **A second top-level kernel is missing from the program** | Plain `@pl.jit` does not discover other `@pl.jit` entries | Use `@pl.jit.host`, or make the callee `.incore` / `.opaque` |
 | **`auto_scope=False` rejected** | Used on `.incore` / `.opaque` | Put it on the entry or on an `.inline` helper |
 | **`self` missing from a `@pl.program` method** | Every method needs it | Add `self`; it is stripped from the IR |
+| **`A task cannot return a scalar`** | A device kernel declares a `pl.Scalar` return | Write it into a `[1]` tensor output and `pl.tensor.read(t, [0])` after the launch |
+| **`cannot return a scalar` naming a variable in a scope** | A scalar assigned inside `pl.at(...)` is read after it, and depends on device data | Route it through a `[1]` tensor, or move the computation out of the scope |
 
 ## Worked example
 

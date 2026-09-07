@@ -49,7 +49,8 @@ PyPTO 的编译与执行入口比它拥有的概念要多，而且好几个名�
 
 只有 `ir.compile` 是受支持的入口；表中其余项列在这里，是为了让 traceback 里出现的
 名字能被定位到某一层。它还遮蔽了 Python 内置的 `compile`，因此更推荐
-`from pypto import ir` 后调用 `ir.compile`，而不是直接导入这个名字。
+`from pypto import ir` 后调用 `ir.compile`，而不是直接导入这个名字。它接受的每个
+选项都是关键字参数；`program` 是唯一的位置参数。
 
 它的参数在[编译](../user/execution/00-compile.md)中有说明。
 
@@ -131,16 +132,95 @@ compiled = ir.compile(program, **config.compile_kwargs())
 compiled(*tensors, config=config)
 ```
 
-它的字段分三类：
+它的字段分三类，而每一类都是一个类型：
 
-| 由谁读取 | 字段 |
-| -------- | ---- |
-| `ir.compile`，经 `compile_kwargs()` | `strategy`、`backend_type`、`platform`、`memory_planner`、`dump_passes`、`dump_ptoas_passes`、`compile_profiling`、`diagnostic_phase`、`disabled_diagnostics`、`analyze_auto_scopes_for_deps`、`save_kernels_dir`（作为 `output_dir`）、`distributed_config` |
-| 派发 | `device_id`、`aicpu_thread_num`、`ring_*` 覆写项（[Ring 尺寸](05-runtime-ring-sizing.md)）、DFX 开关（[DFX](03-runtime-dfx.md)） |
-| 仅系统测试 harness | `rtol`、`atol`、`golden_data_dir`、`save_kernels`、`codegen_only` |
+| 由谁读取 | 类型 | 字段 |
+| -------- | ---- | ---- |
+| `ir.compile` | `CompileOptions` | `platform`、`strategy`、`dump_passes`、`dump_ptoas_passes`、`profiling`（`compile_profiling`）、`diagnostic_phase`、`disabled_diagnostics`、`analyze_auto_scopes_for_deps`、`output_dir`（`save_kernels_dir`）、`memory_planner`、`distributed_config` |
+| 派发 | `RunOptions` | `platform`、`device_id`、`aicpu_thread_num`、`ring_*` 覆写项（[Ring 尺寸](05-runtime-ring-sizing.md)），以及内嵌的 `DfxOptions` |
+| 一次派发采集哪些诊断 | `DfxOptions` | `enable_chip_swimlane`、`enable_dump_args`、`enable_pmu`、`enable_dep_gen`、`enable_scope_stats`（[DFX](03-runtime-dfx.md)） |
+| 仅系统测试 harness | —— | `rtol`、`atol`、`golden_data_dir`、`save_kernels`、`codegen_only` |
+| 无人读取 —— 派生 | —— | `backend_type`，是 `platform` 上的只读属性，不是字段 |
 
-`@pl.jit` 路径保留了自己的映射 `jit.decorator._run_config_compile_kwargs`，
-它省略了 `platform` 与 `backend_type`，因为该路径会单独转发这两项。
+**`platform` 是两个决策，所以 `RunConfig` 存两个字段。** 这个字符串打包了架构
+（`a2a3` / `a5`）和执行模式（`sim` 后缀），而两者各由不同的消费者读取：编译只取架构 ——
+codegen 根本看不到这个字符串 —— 装配层按后缀选 `.so` 还是 `.o`，worker 则比对整个 token。
+因此 `RunConfig` 携带 `arch: BackendType` 与 `execution_mode: ExecutionMode`，
+`platform` 降为把二者序列化出来的派生属性：
+
+```python
+RunConfig(arch=BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD).platform  # "a5"
+RunConfig(platform="a5").arch                                                         # Ascend950
+```
+
+`platform=` 仍然可以构造（238 处调用点在用），并会同时设置两个轴。其余一切不动：
+`cfg.platform` 依旧是普通 `str`，所以产物 sidecar、`--platform`、simpler 的
+`Worker(platform=...)` 都无感。拆分只落在**选择**目标的地方；产物、worker 与装配层
+只是**携带**它，继续用字符串。
+
+随之消失两样东西：`__post_init__` 不再拿四个字面量校验字符串、也不再用它蕴含的 backend
+把字符串重拼一遍 —— 一个与自身架构矛盾的 platform 已经不是能被构造出来的值。而 `arch`
+的类型就是 `BackendType`、不是第三个枚举，所以 `backend_type` 只是这个字段在编译器词汇下的
+名字，而非与之竞争的输入：`CompileOptions` 不带它，`ir.compile` 保留该参数仅供完全不传
+platform 的调用方使用。
+
+`RunConfig.compile_options()` / `run_options()` / `dfx_options()` 是这个聚合体上的视图，
+而 `compile_kwargs()` 就是 `compile_options().as_compile_kwargs()`。`CompileOptions`
+按 `ir.compile` 的叫法命名字段 —— 是 `output_dir` 而不是 `save_kernels_dir` ——
+因为它存在的意义就是用编译器自己的词汇说出编译侧；它也可以独立使用：
+
+```python
+from pypto.runtime import CompileOptions
+
+compiled = ir.compile(program, **CompileOptions(platform="a2a3").as_compile_kwargs())
+```
+
+**三个里只导出两个**，因为只有两个是调用方真能交出去的东西。`CompileOptions` 如上，
+解包进 `ir.compile`；`DfxOptions` 是 `execute_compiled`、`execute_artifact_dir`、
+`execute_batch_manifest` 的 `dfx=` 参数。`RunOptions` 两者都不是：每个派发入口 ——
+`CompiledProgram.__call__`、`ChipWorker.run` 以及分布式那一对 —— 收的都是 `RunConfig`，
+再自己经 `run_options()` 取派发侧那一半。直接把它交进去会抛 `AttributeError`，
+所以在那些签名放宽之前，它保持内部（`pypto.runtime.runner.RunOptions`）。放宽本身是另一件
+迁移：那意味着主派发 API 的 `config=` 参数要变成联合类型，而只改一部分入口比不改更糟。
+
+`RunConfig` 保留全部字段与全部调用方；这三个类型是它底下的词汇。有一个单测把这个划分钉成
+**完备**的 —— 每个 `RunConfig` 字段要么被某个视图认领，要么属于那五个 harness 专用字段 ——
+于是以后新加的字段不会悄悄两边都不属于。把那五个挪去 harness 是本次**没有**做的一步：
+它们也出现在 `pypto-lib` 的构造调用里。
+
+`compile_kwargs()` 是通往 `ir.compile` 参数的唯一映射。`@pl.jit` 路径过去另有一份
+副本，省略 `platform` 与 `backend_type` 并单独转发 platform；现在它和其他调用方一样
+调用 `compile_kwargs()`，于是给一边加的开关不会在另一边悄悄缺席。`lower()` 仍有自己
+那份更窄的映射 —— 它止步于 codegen 之前，对准的是 pass 流水线而不是 `ir.compile`。
+
+## 层与层之间的箭头朝哪
+
+`ir` 产出产物，`runtime` 派发它。两者之间的箭头本该单向，而且大体上是单向的 ——
+但 `CompiledProgram` 既是编译**产物**又是执行**句柄**，于是
+`pypto.ir.compiled_program` 通过十处函数内 import 反向伸向 `pypto.runtime`。
+
+这些延迟导入通常被说成是为了打破导入环。逐个实测下来，真正如此的只有一处：
+
+| 延迟导入 | 能提到模块级吗？ | 真实原因 |
+| -------- | ---------------- | -------- |
+| `runtime.runner`（6 处） | 能 | 分层选择 —— 不让派发层进入 `pypto.ir` 的导入图 |
+| `runtime.distributed_runner`（2 处） | 能 | 同上 |
+| `runtime.debug.run_script_writer` | **现在**能了 | 曾是真环：它把 `ParamInfo` 从 `compiled_program` 读回去 |
+| `runtime.device_runner` | 不能 | 它在导入期就需要可选的 `simpler` 包 |
+
+那唯一的真环已经消除。参数元数据移到了
+[`ir/param_info.py`](../../../python/pypto/ir/param_info.py) —— 一个不从
+`pypto.runtime` 导入任何东西的叶子模块 —— 重放脚本生成器改从那里读；
+`compiled_program` 重新导出这些名字，所以别处什么都不用动。有一个单测把这个叶子性质
+钉住，因为往里拉进任何一个 runtime 导入都会让环回来。
+
+`pypto.runtime` 直接导入 `pypto.ir.distributed_compiled_program` —— 箭头唯一反向的
+那一处 —— **确实**是为了避开导入环，保持原样。
+
+彻底反转这个依赖，是比这些 import 语句大得多的问题。它意味着 `CompiledProgram` 不再可调用、
+`ir.compile` 改为返回一个由 `runtime` 包装的描述符 —— 那会改掉每个 example 和两个下游仓库
+都在用的 API 返回类型。这份 import 清单是那个双重身份的症状而非成因；而把那八处能提的都提到
+模块级，只会让耦合**更强** —— 那等于把 `pypto.runtime.runner` 放上 `import pypto.ir` 的关键路径。
 
 ## 哪些是内部实现
 
@@ -150,7 +230,7 @@ compiled(*tensors, config=config)
 - `pypto.ir.compiled_program` —— `CompiledProgram._build_orch_args`、
   `CompiledProgram._build_call_config`
 - `pypto.runtime.runner` —— `_execute_compiled`、`_execute_golden_case`、
-  `_build_call_config`、`_coerced_to_orch_args`、`_DfxOpts`
+  `_build_call_config`、`_coerced_to_orch_args`、`RunOptions`
 - `pypto.runtime.distributed_runner` —— `_execute_distributed`
 - `pypto.runtime.device_runner` —— 整个装配层：`_compile_and_assemble`、
   `_compile_single_kernel`、`_compile_single_orchestration`、`_execute_on_device`

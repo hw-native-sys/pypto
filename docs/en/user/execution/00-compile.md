@@ -54,7 +54,8 @@ assert compiled.param_names == ["a", "b", "out"]
 
 ### `ir.compile` parameters
 
-Seventeen, of which four carry most decisions. The rest have defaults you rarely move.
+Eighteen, of which four carry most decisions. The rest have defaults you rarely
+move. All are keyword-only — only `program` is positional.
 
 | Parameter | Default | What it decides |
 | --------- | ------- | --------------- |
@@ -75,6 +76,7 @@ Seventeen, of which four carry most decisions. The rest have defaults you rarely
 | `enable_pypto_l0c_double_buffer` | `None` | L0C double buffering |
 | `emit_source_loc` | `None` | Carry DSL source locations into the emitted `.pto` |
 | `dump_ptoas_passes` | `False` | Also dump ptoas's own pass IR |
+| `runtime` | `None` | Simpler runtime ABI to target — `TENSORMAP_AND_RINGBUFFER` or `HOST_BUILD_GRAPH` (what `@pl.jit.graph` needs — [Functions](../language/01-functions.md)); `None` inherits the active `PassContext`. The worker must match it |
 
 ### Pass dumps
 

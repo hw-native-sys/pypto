@@ -26,20 +26,20 @@ import pytest
 import torch
 from pypto.runtime import _dep_gen_capture
 from pypto.runtime.device_tensor import DeviceTensor
-from pypto.runtime.runner import _build_args_spec, _DfxOpts, _execute_dfx_passes, _generate_swimlane
+from pypto.runtime.runner import DfxOptions, _build_args_spec, _execute_dfx_passes, _generate_swimlane
 
 
-def _drive(dfx: _DfxOpts, platform: str) -> tuple[list[_DfxOpts], int]:
+def _drive(dfx: DfxOptions, platform: str) -> tuple[list[DfxOptions], int]:
     """Run the helper with stubs that record each in-process pass and capture.
 
     Returns ``(in_process_passes, capture_calls)``. ``_execute_dfx_passes``
     returns ``None`` (per-run timing is no longer a return value — simpler PR
     #1177); the protocol it drives is asserted via the recorded passes/captures.
     """
-    seen: list[_DfxOpts] = []
+    seen: list[DfxOptions] = []
     captures = {"n": 0}
 
-    def run_pass(pass_dfx: _DfxOpts) -> None:
+    def run_pass(pass_dfx: DfxOptions) -> None:
         seen.append(pass_dfx)
 
     def capture_deps() -> None:
@@ -50,7 +50,7 @@ def _drive(dfx: _DfxOpts, platform: str) -> tuple[list[_DfxOpts], int]:
 
 
 def test_onboard_swimlane_captures_deps_then_times_in_process():
-    seen, captures = _drive(_DfxOpts(enable_chip_swimlane=True), "a2a3")
+    seen, captures = _drive(DfxOptions(enable_chip_swimlane=True), "a2a3")
     # deps captured once (subprocess), one in-process timing pass.
     assert captures == 1
     assert len(seen) == 1
@@ -62,7 +62,7 @@ def test_onboard_swimlane_captures_deps_then_times_in_process():
 def test_onboard_swimlane_preserves_requested_level():
     # Regression (issue #2385): the two-pass split must carry the requested
     # collection level through to the timing pass, not re-derive an on/off flag.
-    seen, captures = _drive(_DfxOpts(enable_chip_swimlane=2), "a2a3")
+    seen, captures = _drive(DfxOptions(enable_chip_swimlane=2), "a2a3")
     assert captures == 1
     assert len(seen) == 1
     assert seen[0].enable_chip_swimlane == 2
@@ -72,7 +72,7 @@ def test_onboard_swimlane_preserves_requested_level():
 def test_onboard_swimlane_with_explicit_dep_gen_still_one_capture():
     # An explicit --enable-dep-gen alongside swimlane must NOT add an in-process
     # dep_gen run: the subprocess capture already produced deps.json.
-    seen, captures = _drive(_DfxOpts(enable_chip_swimlane=True, enable_dep_gen=True), "a2a3")
+    seen, captures = _drive(DfxOptions(enable_chip_swimlane=True, enable_dep_gen=True), "a2a3")
     assert captures == 1
     assert len(seen) == 1
     assert seen[0].enable_chip_swimlane == 4 and seen[0].enable_dep_gen is False
@@ -81,7 +81,7 @@ def test_onboard_swimlane_with_explicit_dep_gen_still_one_capture():
 def test_onboard_swimlane_timing_dfx_ride_the_in_process_pass():
     # PMU / args-dump / scope-stats are timing-sensitive: they ride the clean
     # in-process timing pass (the subprocess capture is dep_gen-only).
-    dfx = _DfxOpts(
+    dfx = DfxOptions(
         enable_chip_swimlane=True,
         enable_pmu=2,
         enable_dump_args=1,
@@ -97,7 +97,7 @@ def test_onboard_swimlane_timing_dfx_ride_the_in_process_pass():
 
 
 def test_only_dep_gen_is_single_pass_no_capture():
-    seen, captures = _drive(_DfxOpts(enable_dep_gen=True), "a2a3")
+    seen, captures = _drive(DfxOptions(enable_dep_gen=True), "a2a3")
     assert captures == 0
     assert len(seen) == 1
     assert seen[0].enable_dep_gen is True
@@ -105,15 +105,15 @@ def test_only_dep_gen_is_single_pass_no_capture():
 
 
 def test_no_dfx_is_single_pass_no_capture():
-    seen, captures = _drive(_DfxOpts(), "a2a3")
+    seen, captures = _drive(DfxOptions(), "a2a3")
     assert captures == 0
     assert len(seen) == 1
-    assert seen[0] == _DfxOpts()
+    assert seen[0] == DfxOptions()
 
 
 def test_sim_swimlane_stays_single_pass_no_capture():
     # Simulator skips swimlane conversion anyway, so no capture / second run.
-    seen, captures = _drive(_DfxOpts(enable_chip_swimlane=True), "a2a3sim")
+    seen, captures = _drive(DfxOptions(enable_chip_swimlane=True), "a2a3sim")
     assert captures == 0
     assert len(seen) == 1
     assert seen[0].enable_chip_swimlane == 4

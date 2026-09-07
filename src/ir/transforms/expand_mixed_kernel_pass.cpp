@@ -1421,7 +1421,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
   // user controls this perf decision (drop the split, or remove the transpose).
   //
   // Explicit ``pl.split_aiv`` regions are validated per-region by
-  // LowerAutoVectorSplit (pass 20), where each region's mode is unambiguous; skip
+  // LowerAutoVectorSplit (pass 23), where each region's mode is unambiguous; skip
   // the single-func-mode check for them. A multi-mode function carries no single
   // ``func->GetSplitMode()`` and this whole-function check would mis-check the
   // other region's axis (critique #2).

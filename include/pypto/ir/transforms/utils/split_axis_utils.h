@@ -277,7 +277,7 @@ SubblockInjectionResult InjectSubblockIdx(const FunctionPtr& func, bool is_aiv);
  * @brief Inject the per-subblock index binding at the head of a region body.
  *
  * Region-scoped analogue of ``InjectSubblockIdx`` for the explicit
- * ``SplitAivScopeStmt`` consumer in LowerAutoVectorSplit (pass 20). Prepends a
+ * ``SplitAivScopeStmt`` consumer in LowerAutoVectorSplit (pass 23). Prepends a
  * fresh ``subblock_idx = tile.get_subblock_idx()`` binding to ``region_stmts``
  * (a region is always an AIV lane, so the index is always injected) and returns
  * the rewritten body plus the index expr. ``used_names`` seeds the collision-free
@@ -356,6 +356,40 @@ std::vector<VarPtr> RepairReturnVars(const std::vector<VarPtr>& return_vars,
                                      std::unordered_map<const Var*, TileInfo>& tile_vars,
                                      std::unordered_map<const Var*, VarPtr>& var_replacements,
                                      const ExprPtr& subblock_idx, const ExprPtr& lane_stride);
+
+/// Give each IfStmt merge variable the tile info its branches yield, so it stops
+/// contradicting them and a later tile.store on it gets the per-lane offset.
+/// Call AFTER lowering both branch bodies, with the LOWERED bodies: the merge is
+/// decided by what the branches actually yield, not by what they started as.
+///
+/// Both branches must exist and agree. SSA requires an else wherever return_vars
+/// are defined, so a missing one is a compiler bug. One branch yielding a halved
+/// value while the other yields a full-width one has no single merge type, and
+/// picking either silently gives one AIV lane the wrong extent -- so that is
+/// rejected rather than merged.
+/// Check a loop's BACKEDGE against its carry: the value the body yields back
+/// into slot ``i`` must be lane-local exactly when that carry is. Call AFTER
+/// lowering the body, with the LOWERED body and the repaired iter_args.
+///
+/// RepairIterArgs and RepairReturnVars cover the carry's entry and exit only, so
+/// without this a body yielding a full-width value into a halved carry emits a
+/// Yield whose declared type contradicts its value -- the gh#2203 defect on the
+/// carry path, which no operand check sees because those inspect a Call's
+/// arguments and this is a Yield.
+///
+/// Validate rather than repair: when the yielded value IS tracked the trailing
+/// Substitute already swaps in its halved replacement, and when it is not there
+/// is no halved version to substitute, so a diagnostic naming the carry is the
+/// only correct answer.
+void ValidateCarryBackedge(const StmtPtr& new_body, const std::vector<IterArgPtr>& new_iter_args,
+                           const std::unordered_map<const Var*, TileInfo>& tile_vars, const Span& span);
+
+std::vector<VarPtr> RepairIfReturnVars(const std::vector<VarPtr>& return_vars, const StmtPtr& new_then_body,
+                                       const std::optional<StmtPtr>& new_else_body,
+                                       std::unordered_map<const Var*, TileInfo>& tile_vars,
+                                       std::unordered_map<const Var*, VarPtr>& var_replacements,
+                                       const ExprPtr& subblock_idx, const ExprPtr& lane_stride,
+                                       const Span& span);
 
 std::vector<StmtPtr> ProcessStmts(const std::vector<StmtPtr>& stmts, SplitMode mode, int split_dim,
                                   std::unordered_map<const Var*, TileInfo>& tile_vars, bool is_aiv,

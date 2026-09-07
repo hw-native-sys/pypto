@@ -14,7 +14,7 @@ PTO 代码生成 (CodeGen) (`PTOCodegen`) 从 PyPTO 中间表示 (IR) 生成 PTO
 
 **原因：** 嵌入分析逻辑的代码生成会变得脆弱——它重复了 Pass 已有的逻辑，且更难以独立测试。保持代码生成为直接的转换，确保其可预测性和可维护性。
 
-**当发现代码生成中存在分析逻辑时：** 创建跟踪 Issue，在有带宽时将其重构为专用 Pass。[#814](https://github.com/hw-native-sys/pypto/issues/814) 就是一个实例：编排代码生成中的返回值到参数追踪逻辑已重构为 [`NormalizeReturnOrder`](../passes/26-normalize_return_order.md) pass。
+**当发现代码生成中存在分析逻辑时：** 创建跟踪 Issue，在有带宽时将其重构为专用 Pass。[#814](https://github.com/hw-native-sys/pypto/issues/814) 就是一个实例：编排代码生成中的返回值到参数追踪逻辑已重构为 [`NormalizeReturnOrder`](../passes/28-normalize_return_order.md) pass。
 
 ## 概述
 
@@ -139,7 +139,10 @@ print(pto_code)
 | `tile.assemble(target, source, [row, col])` | （可选）`pto.tmov target -> dst` + `pto.subview dst[row, col] sizes [src.rows, src.cols]` + `pto.tmov src -> dst_view` |
 | `tile.set_validshape(tile, vr, vc)` | 发 `pto.set_validshape`；操作数是视图时报错（见下） |
 | `tile.mul(lhs, rhs)` | `pto.tmul` |
-| `tile.add(a, b, c)` | `pto.taddc` (三操作数加法) |
+| `tile.addc(src0, src1, carry)` | `pto.taddc`（`src0 + src1 + carry`） |
+| `tile.subc(src0, src1, carry)` | `pto.tsubc`（`src0 - src1 + carry`） |
+| `tile.addsc(src0, scalar, carry)` | `pto.taddsc`（`src0 + scalar + carry`） |
+| `tile.subsc(src0, scalar, carry)` | `pto.tsubsc`（`src0 - scalar + carry`） |
 | `tile.adds(tile, scalar)` | `pto.tadds` (Tile + 标量) |
 | `tile.fillpad_expand(src, shape)` | `pto.tfillpad_expand ins(%src) outs(%dst)`（`shape` 元组仅用于类型推导；更大的 `dst` 及其 pad 来自结果类型） |
 
@@ -208,8 +211,8 @@ tile 调用 `set_validshape`。
   `eL` 是 lane `L` 在切分轴上的**运行时** valid extent——ISA 直接从被弹出的 tile 上读取
   （`popVecTileFromGMFiFo`），因此偶数 code 要求 `e0 == e1`，奇数 code 要求
   `e0 == e1 + 1`。这些 extent 由
-  [LowerAutoVectorSplit](../passes/21-lower_auto_vector_split.md) 物化，
-  [ExpandMixedKernel](../passes/22-expand_mixed_kernel.md) 选择匹配的 code。
+  [LowerAutoVectorSplit](../passes/23-lower_auto_vector_split.md) 物化，
+  [ExpandMixedKernel](../passes/24-expand_mixed_kernel.md) 选择匹配的 code。
 - Cube-to-Vector FIFO 搬运的是紧凑矩形：producer 以 `valid_col` 为行间距写入
   `valid_row` x `valid_col` 数据块，每个消费 lane 再以相同间距读回自己的数据段
   （`gmStrideR = valid_col`，左右切分的 code 下加倍）。因此若传输两侧的 valid shape
@@ -534,7 +537,7 @@ allocate 112 on that axis and declare 100 as the tile's valid_shape ...
 `ComputeAllocTileFields` 是所有分配的唯一收口——逐变量声明、被提升出来的
 `extra_alloc_tiles`、以及控制流路径都经过它——因此校验看到的正是最终发射的内容，不会与之
 漂移。张量层的 `pl.matmul` / `pl.matmul_acc` 不会因 *M 轴*触发它：M 轴已由
-[`ConvertTensorToTileOps`](../passes/10-convert_tensor_to_tile_ops.md#cube-operand-m-axis-boxing)
+[`ConvertTensorToTileOps`](../passes/11-convert_tensor_to_tile_ops.md#cube-operand-m-axis-boxing)
 自动对齐；仍需用户自行保证的是 `K` 与 `N`。
 
 ## 完整示例
@@ -858,11 +861,18 @@ wrapper 从 `intrinsic.h::get_sub_block_id(args)`(调度器写入
 `GlobalContext.sub_block_id` 的运行时 per-core lane id)解析出值,并把
 `__pypto_spmd_subblock_idx` 追加在 block 身份实参之后。它刻意读取运行时
 lane id,而非 ccec `get_subblockid()` 寄存器 -- 后者在
-`tensormap_and_ringbuffer` 调度下返回过期值。这与 A2A3 dual-AIV wrapper 为
-ptoas **内部** pipe-slot 偏移安装的 `get_subblockid()` 宏桥接
-(`pypto_runtime_subblock_id`)相互独立、并存。与 block 身份一样,它无条件发射
-(无 `__CPU_SIM` 分叉),因为 `GlobalContext.sub_block_id` 在每个平台都由调度器
-填充。
+`tensormap_and_ringbuffer` 调度下返回过期值。
+
+即使张量程序没有调用 `tile.get_subblock_idx()`，split AIV FIFO 端点也会使用这个
+运行时值：PTOAS 下沉 split 端点后，wrapper 后端把 lane 作为 PTO-ISA 显式重载
+`TPUSH(pipe, tile, subblock_id)` / `TPOP(...)` 的第三个实参传入。如果函数还没有
+合成的 subblock 形参，后端会给生成函数增加一个私有尾随形参。显式重载根据每次调用
+的实际 tile 类型推导字节偏移，因此同一个自动 pipe 可以安全承载大小不同的连续传输。
+与 block 身份一样，wrapper 会无条件解析运行时 lane，因为
+`GlobalContext.sub_block_id` 在每个平台都由调度器填充。端点实参则受构建条件保护：
+device 构建会把 lane 传给显式重载，而 CPU simulation 和 in-core cost-model 构建保留
+PTO-ISA 的普通双实参端点，因为这些实现已经对 lane context 建模，且不提供仅用于
+device 的显式 lane 重载。
 
 **检测范围。** 两层各自基于函数体独立检测 SPMD usage:
 
@@ -871,7 +881,9 @@ ptoas **内部** pipe-slot 偏移安装的 `get_subblockid()` 宏桥接
   block / subblock 形参。
 - `_uses_spmd_block_ops` / `_uses_dynamic_subblock_id`(Python，位于
   `python/pypto/backend/pto_backend.py`)决定 wrapper 是否把相应局部变量追加到
-  对内函数调用末尾。
+  对内函数调用末尾。split `TPUSH` / `TPOP` 端点还由
+  `_runtime_split_fifo_endpoint_counts` 检测；它们复用该 subblock 实参，或请求上述
+  私有形参。
 
 对于 SPMD 组内自身不调用 `tile.get_block_*` 的 sibling 函数
 (`group_uses_spmd=True` 但函数本身不用 SPMD ops)，wrapper 仍会声明这两个
@@ -880,7 +892,7 @@ ptoas **内部** pipe-slot 偏移安装的 `get_subblockid()` 宏桥接
 
 此设计替换了旧的宏 shadow + `[[block_local]] static` /
 `static thread_local` 桥接以及 `#pragma push_macro` / `#undef` /
-`pop_macro` 舞步。block 身份现在与张量指针、标量参数、动态维一样
+`pop_macro` 舞步。block 和 lane 身份现在与张量指针、标量参数、动态维一样
 通过调用图正常传递。
 
 ### 实现

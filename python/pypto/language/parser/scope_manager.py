@@ -45,12 +45,18 @@ class ScopeManager:
         scope_id = len(self.scopes) - 1
         self.yielded_vars[scope_id] = set()
 
-    def exit_scope(self, leak_vars: bool = False) -> dict[str, Any]:
+    def exit_scope(
+        self,
+        leak_vars: bool = False,
+        exclude_names: set[str] | None = None,
+    ) -> dict[str, Any]:
         """Exit current scope and return defined variables.
 
         Args:
             leak_vars: If True, copy all variables from exiting scope to parent scope.
                        Used for plain syntax where variables should be visible after for/if.
+            exclude_names: Variable names that must remain local when ``leak_vars``
+                is True.
 
         Returns:
             Dictionary of variables defined in the exited scope
@@ -67,6 +73,8 @@ class ScopeManager:
         if leak_vars and self.scopes:
             parent_scope = self.scopes[-1]
             for name, value in scope_vars.items():
+                if exclude_names is not None and name in exclude_names:
+                    continue
                 parent_scope[name] = value
 
         # Clean up yielded vars tracking

@@ -218,5 +218,72 @@ class TestScopePredicatedDispatch:
         assert result.passed, f"scope predicated dispatch (gate={gate_value}) failed: {result.error}"
 
 
+# ---------------------------------------------------------------------------
+# Scope form — ``with pl.at(level=pl.Level.CORE_GROUP, predicate=...) as tid:``
+# ---------------------------------------------------------------------------
+#
+# Same task chain and expected values again; the third and last authoring form.
+# It rides the same scope-attr rail as ``pl.spmd`` but is outlined one pass
+# earlier (``OutlineIncoreScopes``), and — unlike either form above — the bodies
+# here are inline, so the tensors they write leave the scope as *store targets*
+# rather than as call results. The outliner must resolve the predicate operand
+# through the same rename map it uses for the synthesised call's args; on board
+# that is the difference between reading the gate and reading garbage.
+#
+# ``gate`` is a host-initialised input with no in-function producer, so
+# ``deps=[xp_tid]`` alone satisfies the operand-ordering contract.
+
+
+def _build_at_program():
+    R, C = _R, _C
+    SENTINEL, POISON = _SENTINEL, _POISON
+
+    @pl.program
+    class AtPredicatedDispatchProgram:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            x: pl.Out[pl.Tensor[[R, C], pl.FP32]],
+            gate: pl.Tensor[[R, C], pl.INT32],
+            out: pl.Out[pl.Tensor[[R, C], pl.FP32]],
+        ) -> pl.Tensor[[R, C], pl.FP32]:
+            with pl.at(level=pl.Level.CORE_GROUP) as xp_tid:
+                t: pl.Tile[[R, C], pl.FP32] = pl.tile.full([R, C], dtype=pl.FP32, value=SENTINEL)
+                x = pl.store(t, [0, 0], x)
+            # Predicated clobber authored as a pl.at scope: the predicate rides
+            # on the InCoreScopeStmt and is moved onto the Submit by the outliner.
+            with pl.at(level=pl.Level.CORE_GROUP, deps=[xp_tid], predicate=(gate[0, 0] > 0)) as clobber_tid:
+                p: pl.Tile[[R, C], pl.FP32] = pl.tile.full([R, C], dtype=pl.FP32, value=POISON)
+                x = pl.store(p, [0, 0], x)
+            with pl.at(level=pl.Level.CORE_GROUP, deps=[clobber_tid]):
+                c: pl.Tile[[R, C], pl.FP32] = pl.load(x, [0, 0], [R, C])
+                out = pl.store(c, [0, 0], out)
+            return out
+
+    return AtPredicatedDispatchProgram
+
+
+class _AtPredicatedDispatchPTO(_PredicatedDispatchPTO):
+    """Same chain as _PredicatedDispatchPTO, authored with the pl.at scope form."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return f"at_predicated_dispatch_gate{self._gate_value}_{_R}x{_C}"
+
+    def get_program(self) -> Any:
+        return _build_at_program()
+
+
+class TestAtPredicatedDispatch:
+    """``with pl.at(..., predicate=...)`` must behave exactly like the submit form."""
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    @pytest.mark.parametrize("gate_value", [0, 1], ids=["predicate_false_skips", "predicate_true_dispatches"])
+    def test_at_predicated_dispatch(self, test_runner, platform, gate_value):
+        result = test_runner.run(_AtPredicatedDispatchPTO(gate_value=gate_value, platform=platform))
+        assert result.passed, f"pl.at predicated dispatch (gate={gate_value}) failed: {result.error}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

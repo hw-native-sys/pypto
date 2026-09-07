@@ -692,6 +692,68 @@ def cluster(*, name_hint: str = "") -> ClusterContext:
     return ClusterContext(name_hint=name_hint)
 
 
+class GraphContext:
+    """Context manager for a Graph scope.
+
+    Returned by ``pl.graph(name)``; the parser recognizes the pattern and builds
+    a ``GraphScopeStmt``.
+    """
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def __enter__(self) -> None:
+        """Enter the Graph scope context."""
+        pass
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Exit the Graph scope context."""
+        pass
+
+
+def graph(name: str) -> GraphContext:
+    """Mark a repeated region of orchestration as one recordable graph.
+
+    Under ``runtime="host_build_graph"`` the runtime records the region's task
+    topology the first time it executes and replays the recording on every later
+    execution. A decoder stack of N structurally identical layers therefore costs
+    one graph build instead of N, and occupies N outer task slots instead of
+    N x (tasks per layer).
+
+    ``pl.graph`` is the in-place form of ``@pl.jit.graph``: ``OutlineGraphScopes``
+    extracts the region into a Graph function named after ``name``, so the two
+    surfaces compile to the same thing. Reach for the scope form when the region
+    is a slice of a larger orchestration body that you would rather not split into
+    a separate function; reach for the decorator when the layer is already its own
+    function.
+
+    The recorded topology is fixed after the first execution: only tensor
+    addresses and boundary scalars are refreshed per replay. ``LegalizeGraphBoundary``
+    proves that statically and rejects at compile time whatever it cannot prove —
+    it never silently degrades to a wrong answer.
+
+    Args:
+        name: Region name. Must be a valid Python identifier; it becomes the
+            outlined function's name and hence the runtime's graph key, so keep
+            it stable across edits.
+
+    Returns:
+        Context manager for the Graph scope.
+
+    Raises:
+        ParserSyntaxError: if written in a device-kernel body (InCore / AIC /
+            AIV / Group / Spmd), nested inside ``pl.at`` / ``pl.cluster`` /
+            ``pl.spmd``, or nested inside another ``pl.graph``.
+
+    Examples:
+        >>> for layer in pl.range(40):
+        ...     with pl.graph("decoder_layer"):
+        ...         h = attention(x, wq, h)
+        ...         x = mlp(h, w1, x)
+    """
+    return GraphContext(name)
+
+
 class SpmdContext:
     """Context manager / loop iterator for SPMD dispatch scope.
 
@@ -944,7 +1006,7 @@ class SplitAivContext:
     InCore body — inside a ``pl.range`` / ``pl.pipeline`` loop or an ``if``. The
     loop variable is bound to ``pl.tile.get_subblock_idx()`` (the AIV lane /
     sub-core index) at the region head. The node is consumed and erased by
-    LowerAutoVectorSplit (pass 20); it never reaches codegen.
+    LowerAutoVectorSplit (pass 23); it never reaches codegen.
     """
 
     def __init__(self, n: int, mode: ir.SplitMode) -> None:
@@ -1119,7 +1181,7 @@ def split_aiv(n: int, *, mode: ir.SplitMode) -> SplitAivContext:
 
     The region survives parse -> SSA -> ResolveBackendOpLayouts as a structural
     node (printer emits ``for aiv_id in pl.split_aiv(...):`` so parse->print->parse
-    is a fixpoint), then is consumed and erased by LowerAutoVectorSplit (pass 20);
+    is a fixpoint), then is consumed and erased by LowerAutoVectorSplit (pass 23);
     it never reaches ExpandMixedKernel or codegen.
 
     Args:
@@ -1176,6 +1238,7 @@ class AtContext:
         no_dep_args: list[Any] | None = None,
         dumps: list[Any] | None = None,
         allow_early_resolve: bool = False,
+        predicate: Any = None,
         name_hint: str = "",
         windowize: bool = False,
     ) -> None:
@@ -1186,6 +1249,7 @@ class AtContext:
         self.no_dep_args = no_dep_args
         self.dumps = dumps
         self.allow_early_resolve = allow_early_resolve
+        self.predicate = predicate
         self.name_hint = name_hint
         self.windowize = windowize
 
@@ -1211,6 +1275,7 @@ def at(
     no_dep_args: list[Any] | None = None,
     dumps: list[Any] | None = None,
     allow_early_resolve: bool = False,
+    predicate: Any = None,
     name_hint: str = "",
     windowize: bool = False,
 ) -> AtContext:
@@ -1268,6 +1333,33 @@ def at(
             scope to lower to an ``ir.Submit`` (even without ``as tid``) so the
             flag can ride to codegen, where it emits
             ``Arg::set_allow_early_resolve(true)``. Pure scheduling hint.
+        predicate: Optional **dispatch predicate** — a single comparison of one
+            tensor element against an integer literal, e.g.
+            ``predicate=(row_count[e] > 0)``. Same surface, validation and
+            lowering as ``pl.submit(..., predicate=...)`` / ``pl.spmd(...,
+            predicate=...)``: the scheduler evaluates it at the dispatch point
+            (after this scope's dependencies are satisfied, so the value is
+            current) and retires the task inline — never dispatching it to a
+            core — when it is false, while still settling fanin/fanout so
+            downstream consumers unlock. The comparison is parsed but **never
+            evaluated** in orchestration; reading it there would stall on
+            ``wait_for_tensor_ready``, exactly what the predicate avoids. Like
+            ``allow_early_resolve`` it forces the scope to lower to an
+            ``ir.Submit`` (even without ``as tid``).
+
+            **Only valid with ``level=pl.Level.CORE_GROUP``** and only on a
+            scope that is not nested inside ``pl.cluster()`` / ``pl.spmd()`` /
+            another ``pl.at(level=pl.Level.CORE_GROUP)``. Every other placement
+            either never lowers to a ``Submit`` (Hierarchy scopes are not
+            outlined into a task dispatch) or is folded into an enclosing
+            wrapper dispatch, so the predicate would be silently dropped; the
+            parser rejects those instead.
+
+            **Contract:** the operand tensor's producing task must be one of
+            ``deps=`` — otherwise the predicate may read a stale value. Unlike
+            ``pl.spmd``, ``deps=`` is available on every ``pl.at`` form. The
+            parser makes a best-effort check (see ``pl.submit``); getting
+            ``deps=`` right remains the author's responsibility.
         name_hint: Optional name hint for the outlined function (must be a
             valid identifier).
         windowize: Explicitly allow local windowization for the outlined InCore
@@ -1289,6 +1381,14 @@ def at(
         >>> # Hierarchy scope (unchanged behavior):
         >>> with pl.at(level=pl.Level.HOST, role=pl.Role.SubWorker):
         ...     y = pl.add(x, x)
+
+        >>> # Conditionally dispatched InCore scope — the scheduler reads
+        >>> # rc[0, 0] at the dispatch point and skips the task when it is 0:
+        >>> with pl.at(level=pl.Level.CORE_GROUP) as gate_tid:
+        ...     rc = pl.store(pl.load(rc, [0, 0], [128, 128]), [0, 0], rc)
+        >>> with pl.at(level=pl.Level.CORE_GROUP,
+        ...            deps=[gate_tid], predicate=(rc[0, 0] > 0)) as tid:
+        ...     out = pl.store(pl.load(x, [0, 0], [128, 128]), [0, 0], out)
     """
     return AtContext(
         level,
@@ -1298,6 +1398,7 @@ def at(
         no_dep_args=no_dep_args,
         dumps=dumps,
         allow_early_resolve=allow_early_resolve,
+        predicate=predicate,
         name_hint=name_hint,
         windowize=windowize,
     )
@@ -1315,11 +1416,13 @@ __all__ = [
     "static_assert",
     "at",
     "cluster",
+    "graph",
     "spmd",
     "split_aiv",
     "RangeIterator",
     "WhileIterator",
     "ClusterContext",
+    "GraphContext",
     "SpmdContext",
     "SplitAivContext",
     "AtContext",

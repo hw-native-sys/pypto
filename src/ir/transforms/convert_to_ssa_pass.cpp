@@ -465,7 +465,7 @@ class SSAConverter {
     if (kind == ObjectKind::InCoreScopeStmt || kind == ObjectKind::ClusterScopeStmt ||
         kind == ObjectKind::HierarchyScopeStmt || kind == ObjectKind::SpmdScopeStmt ||
         kind == ObjectKind::RuntimeScopeStmt || kind == ObjectKind::SplitAivScopeStmt ||
-        kind == ObjectKind::CommDomainScopeStmt) {
+        kind == ObjectKind::CommDomainScopeStmt || kind == ObjectKind::GraphScopeStmt) {
       return ConvertScope(As<ScopeStmt>(s));
     }
     return s;
@@ -1021,7 +1021,7 @@ class SSAConverter {
     // Block escaping-var promotion across non-Runtime scope boundaries (#1351).
     //
     // ``HierarchyScopeStmt`` / ``InCoreScopeStmt`` / ``ClusterScopeStmt`` /
-    // ``SpmdScopeStmt`` separate the loops *inside*
+    // ``SpmdScopeStmt`` / ``GraphScopeStmt`` separate the loops *inside*
     // their body from the use-site of any variable defined further down the
     // *outer* sequence. The inner loops cannot manufacture a working init
     // value for such a use (FindInitValue typically falls back to an
@@ -1042,7 +1042,7 @@ class SSAConverter {
     // boundary — its body shares SSA state with the enclosing function and
     // stays fully transparent. ``SplitAivScopeStmt`` is likewise transparent:
     // it is never outlined and is lowered in place by LowerAutoVectorSplit
-    // (pass 20), so its body shares SSA state with the enclosing function.
+    // (pass 23), so its body shares SSA state with the enclosing function.
     const bool is_outline_boundary = !As<RuntimeScopeStmt>(op) && !As<SplitAivScopeStmt>(op);
     std::unordered_set<const Var*> saved_future_needs;
     if (is_outline_boundary) {
@@ -1086,6 +1086,7 @@ class SSAConverter {
     if (auto runtime_scope = As<RuntimeScopeStmt>(op)) return rewrite(runtime_scope);
     if (auto split_aiv = As<SplitAivScopeStmt>(op)) return rewrite(split_aiv);
     if (auto comm_domain = As<CommDomainScopeStmt>(op)) return rewrite(comm_domain);
+    if (auto graph = As<GraphScopeStmt>(op)) return rewrite(graph);
     INTERNAL_UNREACHABLE_SPAN(op->span_) << "Unknown ScopeStmt subclass: " << op->TypeName();
     return op;
   }
@@ -1145,7 +1146,7 @@ class SSAConverter {
       return ExtractYield(scope->body_);
     }
     // SplitAivScopeStmt is likewise transparent: lowered in place by
-    // LowerAutoVectorSplit (pass 20), its body shares SSA state with the
+    // LowerAutoVectorSplit (pass 23), its body shares SSA state with the
     // enclosing function, so a for/if body whose trailing stmt is a region must
     // tunnel its carry-yield through the wrapper.
     if (auto scope = As<SplitAivScopeStmt>(s)) {

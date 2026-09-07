@@ -29,6 +29,7 @@ this module exercises the end-to-end execution path on device/simulator.
 import pypto.language as pl
 import pytest
 import torch
+from harness import st
 
 # ---------------------------------------------------------------------------
 # Kernels: pl.store(..., atomic=AtomicType.Add)
@@ -191,179 +192,141 @@ def matmul_split_k_atomic_fp16(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor])
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+#
+# Every tensor a case declares is staged to the device, outputs included, which
+# is what these kernels need: an atomic-add accumulates onto the destination it
+# is handed, so ``out`` arrives holding the test's baseline rather than zeros.
+#
+# The integer cases pass rtol=atol=0 to keep the bit-exact assertion they had
+# before the migration; integer atomic accumulation is exact regardless of the
+# order the cores land in. The bf16/fp16 goldens are stored at the output's own
+# dtype, so a fp32 reference is rounded once (<=0.4% relative) before the
+# comparison — far inside the tolerances these cases already carried.
 
 
-class TestAtomicAddStore:
+def _store_case(kernel, name, x, baseline, **kwargs):
+    """``out`` starts at *baseline* everywhere; the kernel atomic-adds ``x`` onto it."""
+    out = torch.full(tuple(x.shape), baseline, dtype=x.dtype)
+    return st.case(kernel, x, out, name=name, golden=lambda _: baseline + x.float(), **kwargs)
+
+
+def _split_k_case(kernel, name, a, b, out_dtype, **kwargs):
+    """Split-K matmul: SPLIT parallel cores atomic-add their partials into ``c``."""
+    c = torch.zeros((_SPLIT_K_M, _SPLIT_K_N), dtype=out_dtype)
+    return st.case(kernel, a, b, c, name=name, golden=lambda _: a.float() @ b.float(), **kwargs)
+
+
+def _seeded(fn, *args, **kwargs):
+    """Draw *fn* from a freshly seeded generator, as each original test did."""
+    torch.manual_seed(0)
+    return fn(*args, **kwargs)
+
+
+_EXACT = {"rtol": 0.0, "atol": 0.0}
+
+
+@st.cases(
+    _store_case(atomic_add_store_fp32, "atomic_add_store_fp32", _seeded(torch.randn, 16, 16), 1.0),
+    _store_case(
+        atomic_add_store_int32,
+        "atomic_add_store_int32",
+        _seeded(torch.randint, -100, 100, (16, 16), dtype=torch.int32),
+        5,
+        **_EXACT,
+    ),
+    # bf16 atomic-add is A2/A3-only; codegen rejects it on A5.
+    pytest.param(
+        _store_case(
+            atomic_add_store_bf16,
+            "atomic_add_store_bf16",
+            _seeded(torch.randn, 16, 16, dtype=torch.bfloat16),
+            1.0,
+            rtol=2e-2,
+            atol=2e-2,
+        ),
+        marks=pytest.mark.platforms("a2a3", "a2a3sim", reason="bf16 atomic-add is A2/A3-only"),
+    ),
+    _store_case(
+        atomic_add_store_fp16,
+        "atomic_add_store_fp16",
+        _seeded(torch.randn, 16, 16, dtype=torch.float16),
+        1.0,
+        rtol=5e-3,
+        atol=5e-3,
+    ),
+    _store_case(
+        atomic_add_store_int16,
+        "atomic_add_store_int16",
+        _seeded(torch.randint, -100, 100, (16, 16), dtype=torch.int16),
+        5,
+        **_EXACT,
+    ),
+    # int8 needs a 32-col tile: the row byte size (cols * 1) must be 32-byte
+    # aligned, so 16 cols is rejected by ptoas. Values stay small so the int8
+    # accumulation cannot overflow.
+    _store_case(
+        atomic_add_store_int8,
+        "atomic_add_store_int8",
+        _seeded(torch.randint, -20, 20, (16, 32), dtype=torch.int8),
+        1,
+        **_EXACT,
+    ),
+)
+def test_atomic_add_store(case_run):
     """``pl.store(..., atomic=AtomicType.Add)`` accumulates a tile onto a baseline."""
-
-    def test_atomic_add_store_fp32(self, test_config):
-        """FP32: ``out`` starts at 1.0 everywhere; kernel atomic-adds ``x`` onto it."""
-        atomic_add_store_fp32._cache.clear()
-        torch.manual_seed(0)
-        x = torch.randn(16, 16, dtype=torch.float32)
-        baseline = 1.0
-        out = torch.full((16, 16), baseline, dtype=torch.float32)
-        atomic_add_store_fp32(x, out, config=test_config)
-        expected = baseline + x
-        assert torch.allclose(out, expected, rtol=1e-5, atol=1e-5), (
-            f"FP32 atomic-add store mismatch: max diff = {(out - expected).abs().max().item()}"
-        )
-
-    def test_atomic_add_store_int32(self, test_config):
-        """INT32: ``out`` starts at 5 everywhere; kernel atomic-adds ``x`` onto it."""
-        atomic_add_store_int32._cache.clear()
-        torch.manual_seed(0)
-        x = torch.randint(-100, 100, (16, 16), dtype=torch.int32)
-        baseline = 5
-        out = torch.full((16, 16), baseline, dtype=torch.int32)
-        atomic_add_store_int32(x, out, config=test_config)
-        expected = baseline + x
-        assert torch.equal(out, expected), (
-            f"INT32 atomic-add store mismatch: max abs diff = {(out - expected).abs().max().item()}"
-        )
-
-    @pytest.mark.platforms("a2a3", "a2a3sim")
-    def test_atomic_add_store_bf16(self, test_config):
-        """BF16 (A2/A3, VECTOR path): ``out`` starts at 1.0; kernel atomic-adds ``x``.
-
-        bf16 atomic-add is A2/A3-only; on A5 it is rejected in codegen, so this
-        test is restricted to the a2a3 platforms.
-
-        Uses a loose tolerance because bf16 has ~8 mantissa bits — the single
-        accumulation ``1.0 + x`` is exact up to bf16 rounding of the operands.
-        """
-        atomic_add_store_bf16._cache.clear()
-        torch.manual_seed(0)
-        x = torch.randn(16, 16, dtype=torch.bfloat16)
-        baseline = 1.0
-        out = torch.full((16, 16), baseline, dtype=torch.bfloat16)
-        atomic_add_store_bf16(x, out, config=test_config)
-        expected = (baseline + x.float()).bfloat16()
-        diff = (out.float() - expected.float()).abs().max().item()
-        assert torch.allclose(out.float(), expected.float(), rtol=2e-2, atol=2e-2), (
-            f"BF16 atomic-add store mismatch: max diff = {diff}"
-        )
-
-    def test_atomic_add_store_fp16(self, test_config):
-        """FP16 (VECTOR path): ``out`` starts at 1.0; kernel atomic-adds ``x`` (set_atomic_f16)."""
-        atomic_add_store_fp16._cache.clear()
-        torch.manual_seed(0)
-        x = torch.randn(16, 16, dtype=torch.float16)
-        baseline = 1.0
-        out = torch.full((16, 16), baseline, dtype=torch.float16)
-        atomic_add_store_fp16(x, out, config=test_config)
-        expected = (baseline + x.float()).half()
-        diff = (out.float() - expected.float()).abs().max().item()
-        assert torch.allclose(out.float(), expected.float(), rtol=5e-3, atol=5e-3), (
-            f"FP16 atomic-add store mismatch: max diff = {diff}"
-        )
-
-    def test_atomic_add_store_int16(self, test_config):
-        """INT16 (VECTOR path): ``out`` starts at 5; kernel atomic-adds ``x`` (set_atomic_s16); exact."""
-        atomic_add_store_int16._cache.clear()
-        torch.manual_seed(0)
-        x = torch.randint(-100, 100, (16, 16), dtype=torch.int16)
-        baseline = 5
-        out = torch.full((16, 16), baseline, dtype=torch.int16)
-        atomic_add_store_int16(x, out, config=test_config)
-        expected = baseline + x
-        assert torch.equal(out, expected), (
-            f"INT16 atomic-add store mismatch: max abs diff = {(out - expected).abs().max().item()}"
-        )
-
-    def test_atomic_add_store_int8(self, test_config):
-        """INT8 (VECTOR path): ``out`` starts at 1; kernel atomic-adds ``x`` (set_atomic_s8); exact.
-
-        Values are kept small so the int8 accumulation cannot overflow.
-        """
-        atomic_add_store_int8._cache.clear()
-        torch.manual_seed(0)
-        x = torch.randint(-20, 20, (16, 32), dtype=torch.int8)
-        baseline = 1
-        out = torch.full((16, 32), baseline, dtype=torch.int8)
-        atomic_add_store_int8(x, out, config=test_config)
-        expected = baseline + x
-        assert torch.equal(out, expected), (
-            f"INT8 atomic-add store mismatch: max abs diff = {(out - expected).abs().max().item()}"
-        )
+    case_run.assert_passed()
 
 
-class TestAtomicAddAssemble:
-    """``pl.assemble(..., atomic=AtomicType.Add)`` atomically accumulates into a shared tensor."""
-
-    def test_split_k_matmul_atomic_add_fp32(self, test_config):
-        """Split-K matmul: ``SPLIT`` parallel cores atomic-add their partials into ``c``."""
-        matmul_split_k_atomic._cache.clear()
-        torch.manual_seed(0)
-        a = torch.randn(_SPLIT_K_M, _SPLIT_K_K, dtype=torch.float32)
-        b = torch.randn(_SPLIT_K_K, _SPLIT_K_N, dtype=torch.float32)
-        c = torch.zeros((_SPLIT_K_M, _SPLIT_K_N), dtype=torch.float32)
-        matmul_split_k_atomic(a, b, c, config=test_config)
-        expected = a @ b
-        # Atomic-add accumulation order across cores is non-deterministic at
-        # ULP level for floating-point, so allow a small tolerance.
-        assert torch.allclose(c, expected, rtol=1e-3, atol=1e-3), (
-            f"Split-K atomic-add mismatch: max diff = {(c - expected).abs().max().item()}"
-        )
-
-    @pytest.mark.platforms("a2a3", "a2a3sim")
-    def test_split_k_matmul_atomic_add_bf16(self, test_config):
-        """BF16 (A2/A3, CUBE path): parallel cores atomic-add bf16 partials into ``c``.
-
-        bf16 atomic-add is A2/A3-only (rejected in codegen on A5), so this test is
-        restricted to the a2a3 platforms.
-
-        Each core's fp32 accumulator is cast to bf16 and atomic-added directly into
-        the shared bf16 output (set_atomic_bf16). Inputs are scaled down so the
-        accumulated magnitude stays O(1), keeping bf16 rounding within tolerance.
-        """
-        matmul_split_k_atomic_bf16._cache.clear()
-        torch.manual_seed(0)
-        # Scale so partial/accumulated magnitudes are small — bf16 has ~2-3
-        # decimal digits, so large sums would exceed a sane tolerance.
-        a = (torch.randn(_SPLIT_K_M, _SPLIT_K_K) * 0.05).bfloat16()
-        b = (torch.randn(_SPLIT_K_K, _SPLIT_K_N) * 0.05).bfloat16()
-        c = torch.zeros((_SPLIT_K_M, _SPLIT_K_N), dtype=torch.bfloat16)
-        matmul_split_k_atomic_bf16(a, b, c, config=test_config)
-        expected = a.float() @ b.float()
-        assert torch.allclose(c.float(), expected, rtol=5e-2, atol=5e-2), (
-            f"BF16 split-K atomic-add mismatch: max diff = {(c.float() - expected).abs().max().item()}"
-        )
-
-    def test_split_k_matmul_atomic_add_int32(self, test_config):
-        """INT32 (CUBE): int8 x int8 -> int32 partials atomic-added into ``c``; exact.
-
-        Integer atomic accumulation is exact regardless of core-ordering, so this
-        asserts bit-exact equality against the reference int32 matmul.
-        """
-        matmul_split_k_atomic_int32._cache.clear()
-        torch.manual_seed(0)
-        a = torch.randint(-4, 4, (_SPLIT_K_M, _SPLIT_K_K), dtype=torch.int8)
-        b = torch.randint(-4, 4, (_SPLIT_K_K, _SPLIT_K_N), dtype=torch.int8)
-        c = torch.zeros((_SPLIT_K_M, _SPLIT_K_N), dtype=torch.int32)
-        matmul_split_k_atomic_int32(a, b, c, config=test_config)
-        expected = a.to(torch.int32) @ b.to(torch.int32)
-        assert torch.equal(c, expected), (
-            f"INT32 split-K atomic-add mismatch: max abs diff = {(c - expected).abs().max().item()}"
-        )
-
-    def test_split_k_matmul_atomic_add_fp16(self, test_config):
-        """FP16 (CUBE path): fp32 partials atomic-added directly into fp16 ``c`` (set_atomic_f16).
-
-        Inputs are scaled down so the fp16 accumulated magnitude stays O(1).
-        """
-        matmul_split_k_atomic_fp16._cache.clear()
-        torch.manual_seed(0)
-        a = (torch.randn(_SPLIT_K_M, _SPLIT_K_K) * 0.1).half()
-        b = (torch.randn(_SPLIT_K_K, _SPLIT_K_N) * 0.1).half()
-        c = torch.zeros((_SPLIT_K_M, _SPLIT_K_N), dtype=torch.float16)
-        matmul_split_k_atomic_fp16(a, b, c, config=test_config)
-        expected = a.float() @ b.float()
-        assert torch.allclose(c.float(), expected, rtol=2e-2, atol=2e-2), (
-            f"FP16 split-K atomic-add mismatch: max diff = {(c.float() - expected).abs().max().item()}"
-        )
+@st.cases(
+    # Atomic-add accumulation order across cores is non-deterministic at ULP
+    # level for floating point, hence the loosened tolerance.
+    _split_k_case(
+        matmul_split_k_atomic,
+        "split_k_atomic_fp32",
+        _seeded(torch.randn, _SPLIT_K_M, _SPLIT_K_K),
+        torch.randn(_SPLIT_K_K, _SPLIT_K_N),
+        torch.float32,
+        rtol=1e-3,
+        atol=1e-3,
+    ),
+    # Inputs are scaled down so the accumulated magnitude stays O(1) — bf16 has
+    # ~2-3 decimal digits, so large sums would exceed a sane tolerance.
+    pytest.param(
+        _split_k_case(
+            matmul_split_k_atomic_bf16,
+            "split_k_atomic_bf16",
+            (_seeded(torch.randn, _SPLIT_K_M, _SPLIT_K_K) * 0.05).bfloat16(),
+            (torch.randn(_SPLIT_K_K, _SPLIT_K_N) * 0.05).bfloat16(),
+            torch.bfloat16,
+            rtol=5e-2,
+            atol=5e-2,
+        ),
+        marks=pytest.mark.platforms("a2a3", "a2a3sim", reason="bf16 atomic-add is A2/A3-only"),
+    ),
+    _split_k_case(
+        matmul_split_k_atomic_int32,
+        "split_k_atomic_int32",
+        _seeded(torch.randint, -4, 4, (_SPLIT_K_M, _SPLIT_K_K), dtype=torch.int8),
+        torch.randint(-4, 4, (_SPLIT_K_K, _SPLIT_K_N), dtype=torch.int8),
+        torch.int32,
+        **_EXACT,
+    ),
+    _split_k_case(
+        matmul_split_k_atomic_fp16,
+        "split_k_atomic_fp16",
+        (_seeded(torch.randn, _SPLIT_K_M, _SPLIT_K_K) * 0.1).half(),
+        (torch.randn(_SPLIT_K_K, _SPLIT_K_N) * 0.1).half(),
+        torch.float16,
+        rtol=2e-2,
+        atol=2e-2,
+    ),
+)
+def test_split_k_matmul_atomic_add(case_run):
+    """``pl.assemble(..., atomic=AtomicType.Add)`` accumulates into a shared tensor."""
+    case_run.assert_passed()
 
 
 if __name__ == "__main__":

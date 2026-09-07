@@ -2,6 +2,42 @@
 
 函数声明形式、参数方向、跨模块复用，以及如何把 IR 打印回 Python 语法。
 
+## JIT 常量与编译复用
+
+`@pl.jit` 的编译键（compilation key）包含被引用的 `int`、`float` 和 `bool`
+全局变量及闭包绑定，包括传递 JIT helper 和源码注解中使用的常量。
+重新绑定被引用的常量会产生新的专门化（specialization）；修改无关全局变量，
+或修改被正文局部变量遮蔽的同名全局变量，不会使正文依赖键失效。
+
+```python
+BLOCK = 32
+
+@pl.jit
+def slice_kernel(x: pl.Tensor[[128, 128], pl.FP32]) -> pl.Tensor[[BLOCK, 128], pl.FP32]:
+    with pl.at(level=pl.Level.CORE_GROUP):
+        result = pl.slice(x, [BLOCK, 128], [0, 0])
+    return result
+
+first = slice_kernel.compile()
+BLOCK = 64
+second = slice_kernel.compile()  # A distinct specialization with 64 rows.
+```
+
+名称解析、键构造和专门化共用一次调用的命名空间快照（namespace snapshot）。
+捕获后重新绑定的常量影响下一次调用，不影响正在编译的产物。
+即使常量同名，各 helper 也保留各自的命名空间。重新绑定被引用的 JIT helper
+还会刷新依赖图。各并发调用在键构造和专门化期间始终使用自己捕获的依赖图。
+哈希还包含各 helper 的函数类型、层级和 `auto_scope` 设置，因此即使函数源码相同，
+重新绑定到具有不同编译属性的 helper 后也不会复用旧产物。
+
+每次请求只复制一次各模块的全局命名空间，各 helper 通过闭包覆盖层共享这份快照。
+未绑定的闭包 cell 仍会遮蔽同名全局变量。验证后的依赖图保留 Python 源码哈希；
+注解绑定不变时，复用已解析的布局。外部源码文件仍在每次请求时检查。
+被引用的闭包常量由源码依赖哈希覆盖，无需单独的闭包键组件。
+
+快照仅复制绑定：此常量跟踪机制不支持编译期间修改任意配置对象
+内部状态，或修改编译器/源码文件。本改动不启用持久产物缓存，编译对象仍在进程内复用。
+
 ## 函数
 
 ```python

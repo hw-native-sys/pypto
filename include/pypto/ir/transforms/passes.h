@@ -457,6 +457,27 @@ Pass OutlineHierarchyScopes();
 Pass OutlineClusterScopes();
 
 /**
+ * @brief Outline Graph scopes into separate `FunctionType::Graph` functions
+ *
+ * `with pl.graph("name"):` is sugar over `@pl.jit.graph`: this pass extracts the
+ * region into a Graph function named after the region and leaves a `Call` at the
+ * site, so from here on the two surfaces are indistinguishable. It runs
+ * immediately before `OutlineIncoreScopes`, which then outlines the InCore scopes
+ * inside the freshly minted Graph body exactly as it does for a hand-written
+ * `@pl.jit.graph` function.
+ *
+ * Requirements:
+ * - Input IR must be in SSA form (run ConvertToSSA first)
+ * - Only processes Opaque/Orchestration functions containing Graph scopes
+ * - Runs before OutlineIncoreScopes and OutlineClusterScopes
+ *
+ * The runtime contract on the resulting function (boundary shape, scalar
+ * pass-through, node budget) is not checked here — `LegalizeGraphBoundary` and
+ * the Graph verifier own it, and they see the outlined form either way.
+ */
+Pass OutlineGraphScopes();
+
+/**
  * @brief Convert tensor ops to tile ops in InCore functions
  *
  * Inserts tile.load at InCore function entry, converts tensor ops to tile ops
@@ -515,6 +536,16 @@ Pass OptimizeOrchTensors();
  *   so the logical window is still intact here.
  */
 Pass BlockNzTensorViews();
+
+/**
+ * @brief Rewrite logical MX scale tensor views into A5's packed rank-5 form
+ *
+ * Converts MX_A_ZZ ``[M, G]`` and MX_B_NN ``[G, N]`` TensorTypes and their
+ * tile.load windows to ``[1, block/16, group/2, 16, 2]``. Symbolic offsets
+ * are accepted only when their alignment and non-negativity can be proven.
+ * Must run after FlattenTileNdTo2D and before MaterializeTensorStrides.
+ */
+Pass BlockMxScaleTensorViews();
 
 /**
  * @brief Flatten ND tile ops to 2D in InCore functions

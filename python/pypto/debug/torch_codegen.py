@@ -1140,9 +1140,9 @@ def _register_ops() -> None:  # noqa: PLR0915
 
     # tile ternary add/sub with carry
     m["tile.addc"] = lambda a, _kw: f"({a[0]} + {a[1]} + {a[2]})"
-    m["tile.subc"] = lambda a, _kw: f"({a[0]} - {a[1]} - {a[2]})"
+    m["tile.subc"] = lambda a, _kw: f"({a[0]} - {a[1]} + {a[2]})"
     m["tile.addsc"] = lambda a, _kw: f"({a[0]} + {a[1]} + {a[2]})"
-    m["tile.subsc"] = lambda a, _kw: f"({a[0]} - {a[1]} - {a[2]})"
+    m["tile.subsc"] = lambda a, _kw: f"({a[0]} - {a[1]} + {a[2]})"
 
     # --- Cross-core pipe ops ---
     m["tile.tpush_to_aiv"] = _handle_tpush_to_aiv

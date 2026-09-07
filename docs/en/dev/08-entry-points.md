@@ -53,7 +53,8 @@ into loadable binaries. It is internal and has no supported entry point.
 `ir.compile` is the only supported one; the rest of the table is here so a name
 that turns up in a traceback can be placed on a layer. It also shadows the
 Python builtin `compile`, so prefer `from pypto import ir` and call
-`ir.compile` over importing the name directly.
+`ir.compile` over importing the name directly. Every option it takes is
+keyword-only; `program` is the one positional parameter.
 
 Its parameters are documented in [Compiling](../user/execution/00-compile.md).
 
@@ -142,17 +143,114 @@ compiled = ir.compile(program, **config.compile_kwargs())
 compiled(*tensors, config=config)
 ```
 
-Its fields split three ways:
+Its fields split three ways, and each way is a type:
 
-| Read by | Fields |
-| ------- | ------ |
-| `ir.compile`, via `compile_kwargs()` | `strategy`, `backend_type`, `platform`, `memory_planner`, `dump_passes`, `dump_ptoas_passes`, `compile_profiling`, `diagnostic_phase`, `disabled_diagnostics`, `analyze_auto_scopes_for_deps`, `save_kernels_dir` (as `output_dir`), `distributed_config` |
-| Dispatch | `device_id`, `aicpu_thread_num`, the `ring_*` overrides ([Ring sizing](05-runtime-ring-sizing.md)), the DFX toggles ([DFX](03-runtime-dfx.md)) |
-| The system-test harness only | `rtol`, `atol`, `golden_data_dir`, `save_kernels`, `codegen_only` |
+| Read by | Type | Fields |
+| ------- | ---- | ------ |
+| `ir.compile` | `CompileOptions` | `platform`, `strategy`, `dump_passes`, `dump_ptoas_passes`, `profiling` (`compile_profiling`), `diagnostic_phase`, `disabled_diagnostics`, `analyze_auto_scopes_for_deps`, `output_dir` (`save_kernels_dir`), `memory_planner`, `distributed_config` |
+| Dispatch | `RunOptions` | `platform`, `device_id`, `aicpu_thread_num`, the `ring_*` overrides ([Ring sizing](05-runtime-ring-sizing.md)), and a nested `DfxOptions` |
+| A dispatch's diagnostics | `DfxOptions` | `enable_chip_swimlane`, `enable_dump_args`, `enable_pmu`, `enable_dep_gen`, `enable_scope_stats` ([DFX](03-runtime-dfx.md)) |
+| The system-test harness only | — | `rtol`, `atol`, `golden_data_dir`, `save_kernels`, `codegen_only` |
+| Nobody — derived | — | `backend_type`, a read-only property over `platform`, not a field |
 
-The `@pl.jit` path keeps its own mapping in
-`jit.decorator._run_config_compile_kwargs`, which omits `platform` and
-`backend_type` because that path forwards them separately.
+**`platform` is two decisions, so `RunConfig` stores two fields.** The string
+packs an architecture (`a2a3` / `a5`) and an execution mode (the `sim` suffix),
+and each is read by a different consumer: compilation takes only the
+architecture — codegen never sees the string — while assembly picks `.so` vs
+`.o` from the suffix and the worker compares the whole token. `RunConfig`
+therefore carries `arch: BackendType` and `execution_mode: ExecutionMode`, with
+`platform` a derived property that serializes them:
+
+```python
+RunConfig(arch=BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD).platform  # "a5"
+RunConfig(platform="a5").arch                                                         # Ascend950
+```
+
+`platform=` stays constructible — 238 call sites use it — and sets both axes.
+Nothing else moves: `cfg.platform` is still a plain `str`, so the artifact
+sidecars, `--platform`, and simpler's `Worker(platform=...)` are untouched. The
+split lands where a target is *chosen*; the artifact, the worker and the
+assembly layer only *carry* one, and keep the string.
+
+Two things disappear with it. `__post_init__` no longer validates the string
+against four literals or rebuilds it from the backend it implied — a platform
+that disagrees with its own architecture is no longer a value that can be made.
+And `arch` is `BackendType`, not a third enum, so `backend_type` is that field
+under the compiler's name rather than a competing input: `CompileOptions` does
+not carry it, and `ir.compile` keeps its parameter only for callers that pass no
+platform.
+
+`RunConfig.compile_options()` / `run_options()` / `dfx_options()` are views onto
+the aggregate, and `compile_kwargs()` is `compile_options().as_compile_kwargs()`.
+`CompileOptions` names its fields the way `ir.compile` does — `output_dir`, not
+`save_kernels_dir` — because it exists to say the compile side in the compiler's
+own vocabulary, and it stands alone:
+
+```python
+from pypto.runtime import CompileOptions
+
+compiled = ir.compile(program, **CompileOptions(platform="a2a3").as_compile_kwargs())
+```
+
+**Only two of the three are exported**, because only two are things a caller can
+hand somewhere. `CompileOptions` unpacks into `ir.compile`, above.
+`DfxOptions` is the `dfx=` parameter of `execute_compiled`, `execute_artifact_dir`
+and `execute_batch_manifest`. `RunOptions` is neither: every dispatch entry point
+— `CompiledProgram.__call__`, `ChipWorker.run`, and the distributed pair — takes
+a `RunConfig` and reaches the dispatch half through `run_options()` itself.
+Handing one in raises `AttributeError`, so it stays internal
+(`pypto.runtime.runner.RunOptions`) until those signatures widen. Widening them
+is a migration of its own: it means a union type on the `config=` parameter of
+the primary dispatch API, and doing it to some entry points and not others would
+be worse than not doing it.
+
+`RunConfig` keeps every field and every caller; the three types are the
+vocabulary underneath it. A unit test pins the split as *total* — every
+`RunConfig` field is claimed by one of the views or is one of the five
+harness-only fields — so a field added later cannot quietly belong to neither.
+Moving those five out to the harness is the step this does not take: they reach
+`pypto-lib`'s constructor calls too.
+
+`compile_kwargs()` is the only mapping onto `ir.compile`'s parameters. The
+`@pl.jit` path used to carry a second copy that omitted `platform` and
+`backend_type` and forwarded the platform separately; it now calls
+`compile_kwargs()` like every other caller, so a knob added to one is not
+silently missing from the other. `lower()` still has its own narrower mapping —
+it stops before codegen and targets the pass pipeline, not `ir.compile`.
+
+## Which way the layers point
+
+`ir` produces the artifact; `runtime` dispatches it. The arrow between them
+should point one way, and mostly does — but `CompiledProgram` is both the
+compilation artifact *and* the execution handle, so `pypto.ir.compiled_program`
+reaches forward into `pypto.runtime` through ten function-local imports.
+
+Those deferrals are usually described as breaking an import cycle. Measured, one
+at a time, that was true of exactly one of them:
+
+| Deferred import | Hoists cleanly? | Actual reason |
+| --------------- | --------------- | ------------- |
+| `runtime.runner` (6 sites) | Yes | Layering choice — keeps the dispatch layer out of `pypto.ir`'s import graph |
+| `runtime.distributed_runner` (2 sites) | Yes | Same |
+| `runtime.debug.run_script_writer` | Yes, *now* | Was a real cycle: it read `ParamInfo` back out of `compiled_program` |
+| `runtime.device_runner` | No | Needs the optional `simpler` package at import time |
+
+The one real cycle is gone. The parameter metadata moved to
+[`ir/param_info.py`](../../../python/pypto/ir/param_info.py), a leaf that imports
+nothing from `pypto.runtime`, and the replay-script writer reads it there;
+`compiled_program` re-exports the names, so nothing else moved. A unit test pins
+the leaf, because pulling one runtime import into it restores the cycle.
+
+`pypto.runtime` importing `pypto.ir.distributed_compiled_program` directly — the
+one place the arrow points back — *is* cycle-avoidance, and stays.
+
+Fully inverting the dependency is a larger question than the import statements.
+It means `CompiledProgram` stops being callable and `ir.compile` returns a
+descriptor that `runtime` wraps, which changes the return type of the API every
+example and both downstream repositories use. The import list is a symptom of
+that double role, not the cause, and hoisting the eight that hoist cleanly would
+make the coupling *stronger*, not weaker — it would put `pypto.runtime.runner`
+on `import pypto.ir`'s critical path.
 
 ## What is internal
 
@@ -163,7 +261,7 @@ outside PyPTO should not import them:
 - `pypto.ir.compiled_program` — `CompiledProgram._build_orch_args`,
   `CompiledProgram._build_call_config`
 - `pypto.runtime.runner` — `_execute_compiled`, `_execute_golden_case`,
-  `_build_call_config`, `_coerced_to_orch_args`, `_DfxOpts`
+  `_build_call_config`, `_coerced_to_orch_args`, `RunOptions`
 - `pypto.runtime.distributed_runner` — `_execute_distributed`
 - `pypto.runtime.device_runner` — the whole assembly layer:
   `_compile_and_assemble`, `_compile_single_kernel`,

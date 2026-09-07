@@ -1631,6 +1631,7 @@ void BindIR(nb::module_& m) {
       .value("CommDomain", ScopeKind::CommDomain,
              "Comm-domain scope (with orch.allocate_domain(...) wrapper for host_orch window buffers)")
       .value("SplitAiv", ScopeKind::SplitAiv, "Explicit AIV-split region (pl.split_aiv)")
+      .value("Graph", ScopeKind::Graph, "Recordable orchestration region (pl.graph)")
       .export_values();
 
   // SplitMode enum
@@ -1728,6 +1729,20 @@ void BindIR(nb::module_& m) {
       },
       scope_attrs_doc);
 
+  // GraphScopeStmt
+  auto graph_scope_stmt_class = nb::class_<GraphScopeStmt, ScopeStmt>(
+      ir, "GraphScopeStmt", "Graph scope: a recordable orchestration region");
+  graph_scope_stmt_class.def(nb::init<std::string, const StmtPtr&, const Span&>(), nb::arg("name_hint"),
+                             nb::arg("body"), nb::arg("span"),
+                             "Create a Graph scope statement (name_hint is the region name)");
+  BindFields<GraphScopeStmt>(graph_scope_stmt_class);
+  graph_scope_stmt_class.def_prop_ro(
+      "attrs",
+      [kwargs_to_pydict](const std::shared_ptr<const GraphScopeStmt>& self) {
+        return kwargs_to_pydict(self->attrs_);
+      },
+      scope_attrs_doc);
+
   // HierarchyScopeStmt
   auto hierarchy_scope_stmt_class = nb::class_<HierarchyScopeStmt, ScopeStmt>(
       ir, "HierarchyScopeStmt", "Hierarchy scope: distributed-hierarchy region");
@@ -1775,7 +1790,7 @@ void BindIR(nb::module_& m) {
       "Explicit AIV-split region across 2 subblocks. mode=NONE is task-parallel "
       "(no halving; both lanes run the full body via aiv_id); UP_DOWN/LEFT_RIGHT "
       "halve vector compute on the split axis. Erased by LowerAutoVectorSplit "
-      "(pass 20); never reaches codegen.");
+      "(pass 23); never reaches codegen.");
   split_aiv_scope_stmt_class.def(nb::init<SplitMode, int, std::string, const StmtPtr&, const Span&>(),
                                  nb::arg("split"), nb::arg("count") = 2, nb::arg("name_hint") = "",
                                  nb::arg("body"), nb::arg("span"), "Create an AIV-split scope statement");

@@ -830,8 +830,8 @@ inline constexpr const char* kAttrCachePolicyVars = "cache_policy_vars";
  * cache-policy declarations. Holds ``std::vector<std::pair<int32_t, int>>``
  * (param index, ``CachePolicy``-as-int), sorted by index.
  *
- * Written by the scope outliner (pass 8) and consumed by
- * ``ConvertTensorToTileOps`` (pass 10), which turns each entry into a
+ * Written by ``OutlineIncoreScopes`` (pass 9) and consumed by
+ * ``ConvertTensorToTileOps`` (pass 11), which turns each entry into a
  * ``cache`` kwarg on the matching ``tile.load`` and erases the attr. Param
  * indices are only valid across that window: later passes append to and
  * prepend onto param lists.
