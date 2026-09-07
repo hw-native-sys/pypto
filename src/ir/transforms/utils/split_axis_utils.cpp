@@ -783,23 +783,60 @@ ExprPtr AdjustOffsets(const ExprPtr& offsets_expr, int split_dim, const ExprPtr&
   return std::make_shared<MakeTuple>(std::move(new_elements), offsets->span_);
 }
 
+// The axis @p after was halved along relative to @p before, or nullopt when the two
+// are the same width. Exactly one axis may differ: this reads back a halving that
+// already happened, it does not decide one.
+std::optional<TileInfo> SplitInfoFromHalvedType(const TypePtr& before_type, const TypePtr& after_type) {
+  auto before = std::dynamic_pointer_cast<const TileType>(before_type);
+  auto after = std::dynamic_pointer_cast<const TileType>(after_type);
+  if (!before || !after || before->shape_.size() != after->shape_.size()) return std::nullopt;
+  for (size_t d = 0; d < before->shape_.size(); ++d) {
+    if (structural_equal(before->shape_[d], after->shape_[d])) continue;
+    return TileInfo{ComputeHalfDimSize(before->shape_[d]), static_cast<int>(d)};
+  }
+  return std::nullopt;
+}
+
 // A `tile.store` of a tracked (halved) tile, rebuilt with its destination offset
 // moved to this lane's half, or nullptr when @p call is not such a store.
 //
 // The tile itself is swapped for its halved replacement by the trailing Substitute;
 // this is the other half of that rewrite. Without it the two AIV lanes write the
 // SAME rows from different data and lane 1's half is silently lost.
+//
+// The stored operand is a Var in the common case, but it is NOT always one. A tuple
+// projection consumed inline -- `pl.tile.store(pair[0], [0, 0], out)`, which the DSL
+// produces verbatim because neither the parser nor FlattenCallExpr hoists a projection
+// into its own binding -- arrives as a TupleGetItemExpr. Substitute still rewrites the
+// tuple underneath it to the halved one, so matching only Var here left exactly the
+// silent overlapping write this function exists to prevent. Read the element's axis
+// back off the halved tuple type instead.
 CallPtr LocalizeStoreOffset(const CallPtr& call, const std::unordered_map<const Var*, TileInfo>& tile_vars,
+                            const std::unordered_map<const Var*, VarPtr>& var_replacements,
                             const ExprPtr& subblock_idx, const ExprPtr& lane_stride) {
   if (!IsOp(call, "tile.store") || call->args_.size() < 3) return nullptr;
-  auto tile_var = std::dynamic_pointer_cast<const Var>(call->args_[0]);
-  if (!tile_var) return nullptr;
-  auto it = tile_vars.find(tile_var.get());
-  if (it == tile_vars.end()) return nullptr;
+
+  std::optional<TileInfo> info;
+  if (auto tile_var = std::dynamic_pointer_cast<const Var>(call->args_[0])) {
+    if (auto it = tile_vars.find(tile_var.get()); it != tile_vars.end()) {
+      info = it->second;
+    }
+  } else if (auto get_item = std::dynamic_pointer_cast<const TupleGetItemExpr>(call->args_[0])) {
+    auto tuple_var = AsVarLike(get_item->tuple_);
+    auto replaced = tuple_var ? var_replacements.find(tuple_var.get()) : var_replacements.end();
+    if (replaced != var_replacements.end()) {
+      auto halved = std::dynamic_pointer_cast<const TupleType>(replaced->second->GetType());
+      const auto index = static_cast<size_t>(get_item->index_);
+      if (halved && get_item->index_ >= 0 && index < halved->types_.size()) {
+        info = SplitInfoFromHalvedType(get_item->GetType(), halved->types_[index]);
+      }
+    }
+  }
+  if (!info) return nullptr;
 
   std::vector<ExprPtr> new_args = call->args_;
-  new_args[1] = AdjustOffsets(call->args_[1], it->second.split_dim,
-                              LaneStep(lane_stride, it->second.half_dim_size), subblock_idx);
+  new_args[1] = AdjustOffsets(call->args_[1], info->split_dim, LaneStep(lane_stride, info->half_dim_size),
+                              subblock_idx);
   return std::make_shared<Call>(call->op_, std::move(new_args), call->kwargs_, call->GetType(), call->span_);
 }
 
@@ -1050,7 +1087,8 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
 
     // AIV only: tile.store — adjust offset using tracked tile info
     if (is_aiv) {
-      if (auto localized = LocalizeStoreOffset(call, tile_vars, subblock_idx, lane_stride)) {
+      if (auto localized =
+              LocalizeStoreOffset(call, tile_vars, var_replacements, subblock_idx, lane_stride)) {
         return std::make_shared<AssignStmt>(assign->var_, localized, assign->span_);
       }
     }
@@ -1500,7 +1538,8 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
     }
 
     if (is_aiv) {
-      if (auto localized = LocalizeStoreOffset(call, tile_vars, subblock_idx, lane_stride)) {
+      if (auto localized =
+              LocalizeStoreOffset(call, tile_vars, var_replacements, subblock_idx, lane_stride)) {
         return std::make_shared<EvalStmt>(localized, eval->span_);
       }
     }
@@ -1514,8 +1553,8 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
   // writing from row 0 while each holds a different half. Binding the store first
   // was never meant to be load-bearing.
   if (auto ret = std::dynamic_pointer_cast<const ReturnStmt>(stmt); ret && is_aiv) {
-    if (auto localized = LocalizeReturnStores(ret, tile_vars, subblock_idx, lane_stride)) return localized;
-    return stmt;
+    auto localized = LocalizeReturnStores(ret, tile_vars, var_replacements, subblock_idx, lane_stride);
+    return localized ? localized : stmt;
   }
 
   if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
@@ -2086,13 +2125,14 @@ ExprPtr ComputeHalfDimSize(const ExprPtr& dim_size) {
 
 StmtPtr LocalizeReturnStores(const std::shared_ptr<const ReturnStmt>& ret,
                              const std::unordered_map<const Var*, TileInfo>& tile_vars,
+                             const std::unordered_map<const Var*, VarPtr>& var_replacements,
                              const ExprPtr& subblock_idx, const ExprPtr& lane_stride) {
   std::vector<ExprPtr> new_values = ret->value_;
   bool changed = false;
   for (auto& value : new_values) {
     auto call = std::dynamic_pointer_cast<const Call>(value);
     if (!call || !call->op_) continue;
-    if (auto localized = LocalizeStoreOffset(call, tile_vars, subblock_idx, lane_stride)) {
+    if (auto localized = LocalizeStoreOffset(call, tile_vars, var_replacements, subblock_idx, lane_stride)) {
       value = localized;
       changed = true;
     }
@@ -2126,12 +2166,9 @@ StmtPtr RetypeTupleProjection(const std::shared_ptr<const AssignStmt>& assign,
   // each lane its own destination, and the elements of one tuple need not agree on it:
   // tile.gather_compare answers a row split with `dst` halved on dim 0 and `cdst`
   // ([1, rows]) halved on dim 1.
-  for (size_t d = 0; d < before->shape_.size(); ++d) {
-    if (structural_equal(before->shape_[d], after->shape_[d])) continue;
-    const TileInfo info{ComputeHalfDimSize(before->shape_[d]), static_cast<int>(d)};
-    tile_vars[assign->var_.get()] = info;
-    tile_vars[new_var.get()] = info;
-    break;
+  if (auto info = SplitInfoFromHalvedType(assign->var_->GetType(), new_get->GetType())) {
+    tile_vars[assign->var_.get()] = *info;
+    tile_vars[new_var.get()] = *info;
   }
   var_replacements[assign->var_.get()] = new_var;
   return std::make_shared<AssignStmt>(new_var, new_get, assign->span_);

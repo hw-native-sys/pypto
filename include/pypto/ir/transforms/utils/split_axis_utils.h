@@ -402,6 +402,7 @@ std::vector<VarPtr> RepairIfReturnVars(const std::vector<VarPtr>& return_vars, c
 /// the same reason they must call RetypeTupleProjection.
 StmtPtr LocalizeReturnStores(const std::shared_ptr<const ReturnStmt>& ret,
                              const std::unordered_map<const Var*, TileInfo>& tile_vars,
+                             const std::unordered_map<const Var*, VarPtr>& var_replacements,
                              const ExprPtr& subblock_idx, const ExprPtr& lane_stride);
 
 /// Retype an ``x = tup[i]`` projection whose tuple was halved, or nullptr when

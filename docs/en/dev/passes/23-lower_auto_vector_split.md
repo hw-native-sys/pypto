@@ -786,6 +786,13 @@ dimension. **Both** lowering arms call it — the AUTO arm's affinity gate only 
 *calls* into `ProcessStmts`, so a projection left to its pass-through fallback would keep
 a full-width declared type over a halved tuple.
 
+A projection need not be bound at all: `pl.tile.store(pair[0], [0, 0], out)` passes the
+`TupleGetItemExpr` **inline**, and nothing hoists it — so anything matching only `Var` on
+a tile operand misses it. That cost two defects at once: `GetFirstTileArgMemory`
+classified the store SHARED (replicated onto both lanes, never routed here), and
+`LocalizeStoreOffset` left its offset alone. Both read the operand's *type* now, and
+`LocalizeStoreOffset` recovers the element's axis from the halved tuple type.
+
 Two different failures end in a rejection, and the diagnostics keep them apart — one
 message cannot explain both:
 

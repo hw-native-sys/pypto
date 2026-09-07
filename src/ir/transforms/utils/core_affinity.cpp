@@ -30,12 +30,21 @@ namespace core_affinity {
 
 bool IsCubeMemorySpace(MemorySpace ms) { return ms != MemorySpace::DDR && ms != MemorySpace::Vec; }
 
+// The memory space of the first tile-typed argument, whatever expression carries it.
+//
+// Matching only Var was wrong: a tuple projection consumed inline --
+// `pl.tile.store(pair[0], [0, 0], out)`, which the DSL produces verbatim because
+// neither the parser nor FlattenCallExpr hoists a projection into its own binding --
+// is a TupleGetItemExpr, so the whole call fell through to SHARED. That is not a
+// missing optimization: a vector store classified SHARED is replicated onto BOTH
+// lanes by ExpandMixedKernel and never reaches the split pass's offset localization,
+// so the two AIV lanes write the same rows. The question here is what the argument's
+// TYPE says, and every expression has one.
 std::optional<MemorySpace> GetFirstTileArgMemory(const CallPtr& call) {
   for (const auto& arg : call->args_) {
-    if (auto var = std::dynamic_pointer_cast<const Var>(arg)) {
-      if (auto tile_type = std::dynamic_pointer_cast<const TileType>(var->GetType())) {
-        return tile_type->memory_space_;
-      }
+    if (!arg) continue;
+    if (auto tile_type = std::dynamic_pointer_cast<const TileType>(arg->GetType())) {
+      return tile_type->memory_space_;
     }
   }
   return std::nullopt;

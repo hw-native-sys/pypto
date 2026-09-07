@@ -2002,6 +2002,49 @@ def test_arity_dependent_scratch_needs_no_declaration():
         _lower(FullWidthWorkspace)
 
 
+def test_both_tuple_elements_stored_inline_get_their_own_lane_offsets():
+    """A projection consumed inline must offset exactly like a bound one.
+
+    ``pl.tile.gather_compare`` hands back two ``Tile``s wrapping
+    ``TupleGetItemExpr``, so ``pl.tile.store(pair[0], ...)`` passes the projection
+    *inline* — neither the parser nor ``FlattenCallExpr`` hoists it into its own
+    binding. That shape used to break twice over:
+
+    * ``GetFirstTileArgMemory`` matched only ``Var``, so the store classified SHARED
+      instead of VECTOR — replicated onto both lanes and never routed to the split
+      pass at all; and
+    * ``LocalizeStoreOffset`` matched only ``Var``, so even once routed it left the
+      offset alone.
+
+    ``Substitute`` still swapped the tuple for the halved one underneath, so both AIV
+    lanes wrote the SAME rows holding different halves. Both elements are stored here
+    because they halve along *different* axes, which is what makes a single shared
+    offset impossible to fake.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            t: pl.Tensor[[256, 128], pl.FP32],
+            tmp: pl.Tile[[256, 128], pl.FP32, pl.Mem.Vec],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_0: pl.Out[pl.Tensor[[256, 16], pl.INT32]],
+            out_1: pl.Out[pl.Tensor[[1, 256], pl.INT32]],
+        ) -> pl.Tensor[[1, 256], pl.INT32]:
+            src = pl.tile.load(t, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            pair = pl.tile.gather_compare(src, pl.const(1.0, pl.FP32), tmp, cmp_mode="eq", out_cols=16)
+            seed = pl.tile.move(rhs, target_memory=pl.Mem.Mat)  # noqa: F841
+            d_store = pl.tile.store(pair[0], [0, 0], out_0)  # noqa: F841
+            return pl.tile.store(pair[1], [0, 0], out_1)
+
+    printed = _lower(Before).as_python()
+
+    # `dst` halves on dim 0, `cdst` ([1, rows]) on dim 1 — each store offsets its own.
+    assert "pl.tile.store(pair[0], [0 + subblock_idx * 128, 0], out_0)" in printed
+    assert "pl.tile.store(pair[1], [0, 0 + subblock_idx * 128], out_1)" in printed
+
+
 def test_tuple_result_op_refusing_the_halved_arguments_says_so():
     """A refused halving is diagnosed as a refusal, not as a stationary element.
 

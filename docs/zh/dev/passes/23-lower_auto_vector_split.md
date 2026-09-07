@@ -664,6 +664,13 @@ lane 只拥有一半的操作数产生了全宽输出，于是两个 lane 都没
 的亲和性门只把叶子 *call* 送进 `ProcessStmts`，投影若落到其"原样透传"兜底分支，就会在已折半
 的 tuple 之上保留全宽的声明类型。
 
+投影也可以完全不绑定：`pl.tile.store(pair[0], [0, 0], out)` 直接**内联**传入
+`TupleGetItemExpr`，没有任何环节会把它提取成变量。因此任何在 tile 操作数上只匹配 `Var` 的
+代码都会漏掉它——这一次同时造成两个缺陷：`GetFirstTileArgMemory` 把该 store 判成 SHARED
+（被复制到两条 lane，且根本不会进入本 pass），而 `LocalizeStoreOffset` 也不会调整它的偏移。
+现在两者都读操作数的**类型**；当操作数是内联投影时，`LocalizeStoreOffset` 从折半后的 tuple
+类型里反查该元素的轴。
+
 这里有**两种**不同的失败都会以拒绝告终，诊断信息把它们分开。一是算子**直接拒绝**折半后的
 实参：可能是某条约束在折半后不再成立（`tile.tquant_mx` 要求 `M % 16 == 0`，而 per-lane 的
 `M` 可能破坏它），也可能是 workspace 按完整源尺寸分配——`LowerCompositeOps` 分解之后，

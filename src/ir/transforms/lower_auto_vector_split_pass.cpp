@@ -627,7 +627,8 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
     // without this the ordinary `return pl.tile.store(v, [0, 0], out)` spelling left
     // both AIV lanes writing from row 0 while each held a different half.
     if (auto ret = std::dynamic_pointer_cast<const ReturnStmt>(stmt)) {
-      if (auto localized = split_axis::LocalizeReturnStores(ret, tile_vars, subblock_idx, lane_stride)) {
+      if (auto localized =
+              split_axis::LocalizeReturnStores(ret, tile_vars, var_replacements, subblock_idx, lane_stride)) {
         result.push_back(localized);
         continue;
       }
