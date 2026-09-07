@@ -49,14 +49,6 @@ _EXTRA_SWIMLANE_ENV = "PYPTO_PHASE_FENCE_EXTRA_SWIMLANE"
 _CHAINED_SNAPSHOT_BRANCHES_ENV = "PYPTO_PHASE_FENCE_CHAINED_SNAPSHOT_BRANCHES"
 
 
-def _require_extra_swimlane_case(label: str) -> None:
-    if os.environ.get(_EXTRA_SWIMLANE_ENV) != "1":
-        pytest.skip(
-            f"{label} is a manual profiling witness; set {_EXTRA_SWIMLANE_ENV}=1 "
-            "and run this test node by itself"
-        )
-
-
 def _assert_flattened_stage_strict(swimlane_data: dict, *, stages: int, branches: int) -> None:
     expected = stages * branches
     tasks = swimlane_data["tasks"]
@@ -970,33 +962,33 @@ class TestPhaseFenceDepCompressionSwimlane:
         swimlane = case_run.swimlane()
         _assert_flattened_stage_strict(swimlane, stages=2 * 3, branches=_BRANCHES)
 
+    @pytest.mark.extra_swimlane("three-level pl.at swimlane")
     @st.cases(st.from_legacy(_pl_at_case(epochs=2, phases=3, name="phase_fence_pl_at_3l_swimlane")))
     def test_pl_at_three_level_strict(self, case_run):
-        _require_extra_swimlane_case("three-level pl.at swimlane")
         swimlane = case_run.swimlane()
         _assert_flattened_stage_strict(swimlane, stages=2 * 3, branches=_BRANCHES)
 
+    @pytest.mark.extra_swimlane("reset-per-outer swimlane")
     @st.cases(st.from_legacy(_reset_case()))
     def test_reset_per_outer_generates_swimlane(self, case_run):
-        _require_extra_swimlane_case("reset-per-outer swimlane")
         swimlane = case_run.swimlane()
         _assert_min_task_count(swimlane, expected=2 * 2 * _BRANCHES)
 
+    @pytest.mark.extra_swimlane("sibling-loop swimlane")
     @st.cases(st.from_legacy(_sibling_loops_case()))
     def test_sibling_loops_strict(self, case_run):
-        _require_extra_swimlane_case("sibling-loop swimlane")
         swimlane = case_run.swimlane()
         _assert_flattened_stage_strict(swimlane, stages=2, branches=_BRANCHES)
 
+    @pytest.mark.extra_swimlane("if-consumer swimlane")
     @st.cases(st.from_legacy(_if_consumer_case()))
     def test_if_consumer_strict(self, case_run):
-        _require_extra_swimlane_case("if-consumer swimlane")
         swimlane = case_run.swimlane()
         _assert_flattened_stage_strict(swimlane, stages=2, branches=_BRANCHES)
 
+    @pytest.mark.extra_swimlane("if-mixed-fallback swimlane")
     @st.cases(st.from_legacy(_if_mixed_fallback_case()))
     def test_if_mixed_fallback_swimlane(self, case_run):
-        _require_extra_swimlane_case("if-mixed-fallback swimlane")
         swimlane = case_run.swimlane()
         _assert_min_task_count(swimlane, expected=3 * _BRANCHES)
 
@@ -1005,15 +997,15 @@ class TestPhaseFenceDepCompressionSwimlane:
         swimlane = case_run.swimlane()
         _assert_min_task_count(swimlane, expected=3 * _BRANCHES)
 
+    @pytest.mark.extra_swimlane("dense mixed swimlane")
     @st.cases(st.from_legacy(_dense_mixed_case(branches=_DENSE_SWIMLANE_BRANCHES)))
     def test_dense_mixed_extra(self, case_run):
-        _require_extra_swimlane_case("dense mixed swimlane")
         swimlane = case_run.swimlane()
         _assert_dense_mixed_shape(swimlane, branches=_DENSE_SWIMLANE_BRANCHES)
 
+    @pytest.mark.extra_swimlane("partial-reduce chain swimlane")
     @st.cases(st.from_legacy(_partial_reduce_chain_case()))
     def test_partial_reduce_chain_strict(self, case_run):
-        _require_extra_swimlane_case("partial-reduce chain swimlane")
         swimlane = case_run.swimlane()
         _assert_min_task_count(swimlane, expected=2 * _BRANCHES + 1)
         tasks = sorted(swimlane["tasks"], key=lambda t: t["start_time_us"])[: 2 * _BRANCHES + 1]
@@ -1033,6 +1025,7 @@ class TestPhaseFenceDepCompressionSwimlane:
             f"before reducer ends at {reducer_end:.2f}us"
         )
 
+    @pytest.mark.extra_swimlane("chained snapshot swimlane")
     @st.cases(
         st.from_legacy(
             _chained_snapshot_case(
@@ -1042,7 +1035,6 @@ class TestPhaseFenceDepCompressionSwimlane:
         )
     )
     def test_chained_snapshot_strict(self, case_run):
-        _require_extra_swimlane_case("chained snapshot swimlane")
         swimlane = case_run.swimlane()
         _assert_flattened_stage_strict(swimlane, stages=4, branches=_SNAPSHOT_SWIMLANE_BRANCHES)
 

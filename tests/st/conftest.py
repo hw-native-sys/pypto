@@ -16,6 +16,7 @@ harness package (migrated from pto-testing-framework).
 
 import ast
 import inspect
+import os
 import queue
 import shutil
 import sys
@@ -736,6 +737,13 @@ def pytest_configure(config):
     )
     config.addinivalue_line(
         "markers",
+        "extra_swimlane(label): a manual profiling witness, run only with "
+        "PYPTO_PHASE_FENCE_EXTRA_SWIMLANE=1. Declared rather than checked in the body, "
+        "because the body runs after `case_run` has already put the case on a card: a "
+        "body check skips a test that has just cost 12s of device time.",
+    )
+    config.addinivalue_line(
+        "markers",
         "multi_card(n): the test needs n devices. Declared rather than checked in the "
         "body, so the requirement is visible to selection: `-m multi_card` routes these "
         "to the job that borrows enough cards, and the single-card steps deselect them "
@@ -904,6 +912,14 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
             pytest.skip(f"pass {option} to collect the artifact this test asserts on")
         if item.config.getoption("--codegen-only"):
             pytest.skip("--codegen-only skips device execution, so no DFX artifact is written")
+
+    witness = item.get_closest_marker("extra_swimlane")
+    if witness is not None and os.environ.get("PYPTO_PHASE_FENCE_EXTRA_SWIMLANE") != "1":
+        label = witness.kwargs.get("label") or (witness.args[0] if witness.args else item.name)
+        pytest.skip(
+            f"{label} is a manual profiling witness; set PYPTO_PHASE_FENCE_EXTRA_SWIMLANE=1 "
+            "and run this test node by itself"
+        )
 
     cards = item.get_closest_marker("multi_card")
     if cards is not None:
