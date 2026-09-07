@@ -303,6 +303,17 @@ def pytest_addoption(parser):
         help="Deprecated alias for --enable-chip-swimlane.",
     )
     parser.addoption(
+        "--allow-inline-cases",
+        action="store_true",
+        default=False,
+        help="Do not fail collection when a test reaches test_runner without a case "
+        "collection could read. Every system test declares its case today, so an "
+        "undeclared one is a regression -- the pool cannot see it and it compiles one "
+        "at a time. This is an ad-hoc local escape; a case that permanently cannot be "
+        "a collection-time value carries @pytest.mark.inline_case(reason=...) instead, "
+        "which exempts that one test rather than the whole session.",
+    )
+    parser.addoption(
         "--dump-args",
         nargs="?",
         type=int,
@@ -451,6 +462,28 @@ def _report_device(request) -> None:
     _device_counter[device_id] += 1
 
 
+def _undiscovered_report(config: pytest.Config) -> str:
+    """Explain the inline-compiled items, listing at most 20 and filing the rest.
+
+    Shared by the collection-time guard and the end-of-session summary so the
+    two never drift. The full list goes to a file rather than only a truncated
+    tail: reading "... and 56 more" as the whole inventory is exactly the
+    mistake this report exists to prevent.
+    """
+    lines = [
+        "These reach test_runner but collection could not read a case from them, so each",
+        "compiles on its own thread of control while the pre-compile pool idles. Declare",
+        "them with @st.cases(st.case(...)) or @st.cases(st.from_legacy(...)) to batch them.",
+    ]
+    shown = _undiscovered_items[:20]
+    lines += [f"  {node_id}" for node_id in shown]
+    if len(_undiscovered_items) > len(shown):
+        report = Path(config.rootpath) / "undiscovered_cases.txt"
+        report.write_text("\n".join(_undiscovered_items) + "\n")
+        lines.append(f"  ... and {len(_undiscovered_items) - len(shown)} more; full list in {report}")
+    return "\n".join(lines)
+
+
 def pytest_terminal_summary(terminalreporter, exitstatus, config) -> None:  # noqa: ARG001
     """Emit a per-device test count + task-submit batch summary at session end.
 
@@ -462,23 +495,8 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config) -> None:  # no
         terminalreporter.write_sep(
             "=", f"{len(_undiscovered_items)} case(s) compiled inline, not in the pool"
         )
-        terminalreporter.write_line(
-            "These reach test_runner but collection could not read a case from them, so each "
-            "compiles on its own thread of control while the pre-compile pool idles. Declare "
-            "them with @st.cases(st.case(...)) or @st.cases(st.from_legacy(...)) to batch them."
-        )
-        shown = _undiscovered_items[:20]
-        for node_id in shown:
-            terminalreporter.write_line(f"  {node_id}")
-        if len(_undiscovered_items) > len(shown):
-            # The full list goes to a file, not just a truncated tail: reading
-            # "... and 56 more" as the whole inventory is exactly the mistake
-            # this summary exists to prevent.
-            report = Path(terminalreporter.config.rootpath) / "undiscovered_cases.txt"
-            report.write_text("\n".join(_undiscovered_items) + "\n")
-            terminalreporter.write_line(
-                f"  ... and {len(_undiscovered_items) - len(shown)} more; full list in {report}"
-            )
+        for line in _undiscovered_report(terminalreporter.config).splitlines():
+            terminalreporter.write_line(line)
 
     batch_lines = execution_summary_lines()
     if not _device_counter and not batch_lines:
@@ -715,6 +733,14 @@ def pytest_configure(config):
         "`-m device_batch` (batched step) vs `-m 'not device_batch'` (in-process "
         "step); the split is by fixture usage, so new tests self-classify with no "
         "ci.yml change.",
+    )
+    config.addinivalue_line(
+        "markers",
+        "inline_case(reason): this test's case cannot be a collection-time value, so it "
+        "compiles inline instead of in the pre-compile pool. Exempts the test from the "
+        "collection guard, which otherwise fails the session. A reason is required — an "
+        "unexplained exemption is indistinguishable from a test nobody got round to "
+        "declaring, which is what let the count reach 76.",
     )
     config.addinivalue_line(
         "markers",
@@ -1159,6 +1185,26 @@ def _collect_test_case_from_item(
     return False
 
 
+def _inline_case_reason(item: pytest.Item) -> str | None:
+    """Return the ``inline_case`` marker's reason, or None when unmarked.
+
+    Raises:
+        pytest.UsageError: The marker carries no reason. The marker is the one
+            way to keep a case out of the pool on purpose, so it has to say why
+            — otherwise it reads exactly like a test nobody declared yet.
+    """
+    marker = item.get_closest_marker("inline_case")
+    if marker is None:
+        return None
+    reason = marker.kwargs.get("reason") or (marker.args[0] if marker.args else None)
+    if not reason:
+        raise pytest.UsageError(
+            f"{item.nodeid}: @pytest.mark.inline_case needs a reason explaining why this "
+            "case cannot be declared with @st.cases(...)."
+        )
+    return str(reason)
+
+
 def _discover_cases(
     session: pytest.Session,
     seen: dict[str, PTOTestCase],
@@ -1179,7 +1225,23 @@ def _discover_cases(
             continue
         if any(m.name == "skip" for m in item.iter_markers()):
             continue
+        if _inline_case_reason(item) is not None:
+            continue
         _undiscovered_items.append(item.nodeid)
+
+    # Fail here rather than only reporting at the end. tests/st is at zero
+    # inline-compiled cases, and that is a property worth keeping: an undeclared
+    # case is invisible to the pool, so it costs a serial compile that no
+    # summary line reliably gets anyone to fix -- the previous, advisory-only
+    # version of this report sat unread while the count grew to 76. Collection
+    # is also the right moment: nothing has run yet, so the failure is about the
+    # declaration and not about a device.
+    if _undiscovered_items and not session.config.getoption("--allow-inline-cases"):
+        raise pytest.UsageError(
+            f"{len(_undiscovered_items)} test(s) reach test_runner with no case collection "
+            f"could read.\n{_undiscovered_report(session.config)}\n"
+            "Pass --allow-inline-cases to run anyway."
+        )
 
 
 def pytest_collection_finish(session: pytest.Session) -> None:

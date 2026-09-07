@@ -670,5 +670,59 @@ class TestCustomCompare:
             shutil.rmtree(empty, ignore_errors=True)
 
 
+class TestInlineCaseGuard:
+    """Collection fails when a test reaches the runner with no declared case.
+
+    tests/st is at zero inline-compiled cases. Keeping it there needs a hard
+    failure rather than a summary line: the advisory-only version of this report
+    sat unread while the count reached 76.
+    """
+
+    @staticmethod
+    def _conftest() -> Any:
+        return TestPlatformMatrixCollection._conftest()
+
+    @staticmethod
+    def _item(node_id: str, markers: "list[Any]") -> Any:
+        class _Item:
+            nodeid = node_id
+            name = node_id.rsplit("::", 1)[-1]
+            module = None
+            fixturenames = ("test_runner",)
+
+            def iter_markers(self, name: str | None = None) -> Any:
+                return iter([m for m in markers if name is None or m.name == name])
+
+            def get_closest_marker(self, name: str) -> Any:
+                return next((m for m in markers if m.name == name), None)
+
+        return _Item()
+
+    @staticmethod
+    def _marker(name: str, *args: Any, **kwargs: Any) -> Any:
+        class _Marker:
+            pass
+
+        m = _Marker()
+        m.name, m.args, m.kwargs = name, args, kwargs
+        return m
+
+    def test_an_unmarked_reason_is_refused(self):
+        """A bare `inline_case` reads exactly like a test nobody declared."""
+        conf = self._conftest()
+        item = self._item("t.py::test_bare", [self._marker("inline_case")])
+        with pytest.raises(pytest.UsageError, match="needs a reason"):
+            conf._inline_case_reason(item)
+
+    def test_a_reasoned_marker_exempts_the_test(self):
+        conf = self._conftest()
+        item = self._item("t.py::test_ok", [self._marker("inline_case", reason="probes the card first")])
+        assert conf._inline_case_reason(item) == "probes the card first"
+
+    def test_an_unmarked_test_is_not_exempt(self):
+        conf = self._conftest()
+        assert conf._inline_case_reason(self._item("t.py::test_plain", [])) is None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
