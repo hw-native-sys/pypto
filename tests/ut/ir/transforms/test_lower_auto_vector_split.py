@@ -2045,6 +2045,80 @@ def test_both_tuple_elements_stored_inline_get_their_own_lane_offsets():
     assert "pl.tile.store(pair[1], [0, 0 + subblock_idx * 128], out_1)" in printed
 
 
+def test_inline_tuple_projection_feeding_a_generic_op_carries_its_split():
+    """An inline projection is a tracked operand for EVERY op, not just `tile.store`.
+
+    The generic path finds the tracked input by scanning the arguments, so matching
+    only ``Var`` left ``y = tile.add(pair[1], pair[1])`` with no tracked input at all:
+    it fell back to the global split dim (0), found the result's dim 0 was the
+    singleton of ``cdst``'s ``[1, rows]``, and passed the statement through. The
+    trailing ``Substitute`` then rewrote the operands to ``[1, 128]`` under a result
+    still declared ``[1, 256]`` — type-inconsistent IR, and a store with no offset.
+
+    ``pair[1]`` is deliberately the element that halves on dim **1**, since following
+    the global dim 0 is precisely what produced the wrong answer.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            t: pl.Tensor[[256, 128], pl.FP32],
+            tmp: pl.Tile[[256, 128], pl.FP32, pl.Mem.Vec],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_1: pl.Out[pl.Tensor[[1, 256], pl.INT32]],
+        ) -> pl.Tensor[[1, 256], pl.INT32]:
+            src = pl.tile.load(t, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            pair = pl.tile.gather_compare(src, pl.const(1.0, pl.FP32), tmp, cmp_mode="eq", out_cols=16)
+            seed = pl.tile.move(rhs, target_memory=pl.Mem.Mat)  # noqa: F841
+            y = pl.tile.add(pair[1], pair[1])
+            return pl.tile.store(y, [0, 0], out_1)
+
+    printed = _lower(Before).as_python()
+    assert "y: pl.Tile[[1, 128], pl.INT32, pl.Mem.Vec] = pl.tile.add(pair[1], pair[1])" in printed
+    assert "pl.tile.store(y, [0, 0 + subblock_idx * 128], out_1)" in printed
+
+
+def test_tuple_merged_across_branches_adopts_the_halved_type():
+    """A tuple crossing an if-merge must carry the split like a tile does.
+
+    ``RepairIfReturnVars`` reads ``tile_vars``, and a tuple var is never in it — tuples
+    are not tiles. So both branches halved their tuple while the merge variable kept its
+    full-width declared type, contradicting both ``Yield``s, and projections after the
+    merge got no split information.
+
+    Reachable from ordinary source: the DSL cannot annotate a tuple merge, but
+    ``ConvertToSSA`` synthesizes exactly this phi for a tuple reassigned in a branch.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            t: pl.Tensor[[256, 128], pl.FP32],
+            tmp: pl.Tile[[256, 128], pl.FP32, pl.Mem.Vec],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            flag: pl.Scalar[pl.INT64],
+            out_1: pl.Out[pl.Tensor[[1, 256], pl.INT32]],
+        ) -> pl.Tensor[[1, 256], pl.INT32]:
+            seed = pl.tile.move(rhs, target_memory=pl.Mem.Mat)  # noqa: F841
+            src = pl.tile.load(t, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            pair = pl.tile.gather_compare(src, pl.const(1.0, pl.FP32), tmp, cmp_mode="eq", out_cols=16)
+            if flag > 0:
+                pair = pl.tile.gather_compare(src, pl.const(2.0, pl.FP32), tmp, cmp_mode="lt", out_cols=16)
+            return pl.tile.store(pair[1], [0, 0], out_1)
+
+    with passes.PassContext([make_roundtrip_instrument()]):
+        printed = passes.lower_auto_vector_split()(passes.convert_to_ssa()(Before)).as_python()
+
+    halved = "pl.Tuple[pl.Tile[[128, 16], pl.INT32, pl.Mem.Vec], pl.Tile[[1, 128], pl.INT32, pl.Mem.Vec]]"
+    # Both branch definitions AND the phi that merges them carry the halved type.
+    assert printed.count(halved) >= 3, printed
+    assert "pl.Tuple[pl.Tile[[256, 16]" not in printed
+    # The projection off the merged tuple still offsets its own axis.
+    assert "[0, 0 + subblock_idx * 128]" in printed
+
+
 def test_tuple_result_op_refusing_the_halved_arguments_says_so():
     """A refused halving is diagnosed as a refusal, not as a stationary element.
 

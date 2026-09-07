@@ -788,10 +788,22 @@ a full-width declared type over a halved tuple.
 
 A projection need not be bound at all: `pl.tile.store(pair[0], [0, 0], out)` passes the
 `TupleGetItemExpr` **inline**, and nothing hoists it — so anything matching only `Var` on
-a tile operand misses it. That cost two defects at once: `GetFirstTileArgMemory`
-classified the store SHARED (replicated onto both lanes, never routed here), and
-`LocalizeStoreOffset` left its offset alone. Both read the operand's *type* now, and
-`LocalizeStoreOffset` recovers the element's axis from the halved tuple type.
+a tile operand misses it, and the operand is still substituted afterwards, leaving a
+full-width declared type over per-lane data. `split_axis::OperandSplitInfo` is the single
+answer to "did the split partition this operand, and along which axis"; it handles a
+bound `Var` and an inline projection alike, and `BuildHalvedCallArgs` rebuilds the
+projection over the halved tuple so the type-consistency probe sees per-lane operands
+too. Every consumer goes through them — the generic path's tracked-input scan,
+`LocalizeStoreOffset`, and `GetFirstTileArgMemory` (which reads the operand's *type*, so
+a vector op is no longer misclassified SHARED and replicated onto both lanes).
+
+A tuple can also cross an **if-merge**. `RepairIfReturnVars` reads `tile_vars`, which
+never holds a tuple var, so both branches halved their tuple while the merge kept its
+full-width type. A tuple merge adopts the branches' halved type instead — its elements
+already carry the per-element split, so there is no single axis to record — and the
+branches must agree, on the same doctrine as the `TileType` case. The DSL cannot
+annotate a tuple merge, but `ConvertToSSA` synthesizes exactly this phi for a tuple
+reassigned in a branch.
 
 Two different failures end in a rejection, and the diagnostics keep them apart — one
 message cannot explain both:

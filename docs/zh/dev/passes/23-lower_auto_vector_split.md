@@ -666,10 +666,18 @@ lane 只拥有一半的操作数产生了全宽输出，于是两个 lane 都没
 
 投影也可以完全不绑定：`pl.tile.store(pair[0], [0, 0], out)` 直接**内联**传入
 `TupleGetItemExpr`，没有任何环节会把它提取成变量。因此任何在 tile 操作数上只匹配 `Var` 的
-代码都会漏掉它——这一次同时造成两个缺陷：`GetFirstTileArgMemory` 把该 store 判成 SHARED
-（被复制到两条 lane，且根本不会进入本 pass），而 `LocalizeStoreOffset` 也不会调整它的偏移。
-现在两者都读操作数的**类型**；当操作数是内联投影时，`LocalizeStoreOffset` 从折半后的 tuple
-类型里反查该元素的轴。
+代码都会漏掉它，而该操作数之后仍会被替换，于是在逐 lane 数据之上留下全宽的声明类型。
+`split_axis::OperandSplitInfo` 是"这个操作数是否被拆分、沿哪条轴"的唯一答案，绑定的 `Var`
+与内联投影一视同仁；`BuildHalvedCallArgs` 则在折半后的 tuple 之上重建投影，使类型一致性探测
+也看到逐 lane 的操作数。所有消费者都走它们——通用路径的被跟踪输入扫描、`LocalizeStoreOffset`，
+以及 `GetFirstTileArgMemory`（它现在读操作数的**类型**，向量算子不会再被误判成 SHARED 并复制
+到两条 lane）。
+
+tuple 还可能穿过 **if 合并**。`RepairIfReturnVars` 读的是 `tile_vars`，而其中从不包含 tuple
+变量，于是两个分支各自折半了 tuple、合并变量却保持全宽。现在 tuple 合并直接采用分支折半后的
+类型——它的元素本就带着逐元素的拆分，没有单一的轴可记录——并且要求两个分支一致，与 `TileType`
+情形同一套原则。DSL 无法为 tuple 合并写注解，但 `ConvertToSSA` 会为"在分支里被重新赋值的
+tuple"合成正是这种 phi。
 
 这里有**两种**不同的失败都会以拒绝告终，诊断信息把它们分开。一是算子**直接拒绝**折半后的
 实参：可能是某条约束在折半后不再成立（`tile.tquant_mx` 要求 `M % 16 == 0`，而 per-lane 的

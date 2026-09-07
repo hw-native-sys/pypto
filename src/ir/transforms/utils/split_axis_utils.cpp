@@ -405,14 +405,32 @@ std::string FullWidthOperandDiagnostic(const std::string& op_name, const FullWid
 // tuples already halved for the ops that describe their own shape) with each
 // tracked operand swapped for the halved replacement the trailing Substitute
 // installs.
+// The replacement for one operand, or nullptr when nothing replaces it.
+//
+// A bound operand is replaced directly. An INLINE tuple projection is not in the
+// map at all -- the tuple underneath it is -- so rebuild the projection over the
+// replacement, which re-derives the element type from the halved tuple.
+ExprPtr ReplacedOperand(const ExprPtr& arg, const std::unordered_map<const Var*, VarPtr>& var_replacements) {
+  if (auto arg_var = AsVarLike(arg)) {
+    auto it = var_replacements.find(arg_var.get());
+    return it != var_replacements.end() ? it->second : nullptr;
+  }
+  if (auto get_item = std::dynamic_pointer_cast<const TupleGetItemExpr>(arg)) {
+    auto tuple_var = AsVarLike(get_item->tuple_);
+    auto it = tuple_var ? var_replacements.find(tuple_var.get()) : var_replacements.end();
+    if (it == var_replacements.end()) return nullptr;
+    return std::make_shared<TupleGetItemExpr>(it->second, get_item->index_, get_item->span_);
+  }
+  return nullptr;
+}
+
 std::vector<ExprPtr> BuildHalvedCallArgs(const std::vector<ExprPtr>& new_args,
                                          const std::unordered_map<const Var*, VarPtr>& var_replacements) {
   std::vector<ExprPtr> probe_args;
   probe_args.reserve(new_args.size());
   for (const auto& arg : new_args) {
-    auto arg_var = AsVarLike(arg);
-    auto it = arg_var ? var_replacements.find(arg_var.get()) : var_replacements.end();
-    probe_args.push_back(it != var_replacements.end() ? it->second : arg);
+    auto replaced = ReplacedOperand(arg, var_replacements);
+    probe_args.push_back(replaced ? replaced : arg);
   }
   return probe_args;
 }
@@ -797,6 +815,39 @@ std::optional<TileInfo> SplitInfoFromHalvedType(const TypePtr& before_type, cons
   return std::nullopt;
 }
 
+// The split the pass has already applied to ONE OPERAND, whatever expression carries
+// it, or nullopt when the operand is not lane-local.
+//
+// This is the single answer to "did the split partition this operand, and along which
+// axis" and every consumer must go through it. A bound operand is looked up in
+// ``tile_vars``; an INLINE tuple projection -- `pl.tile.store(pair[0], ...)`,
+// `pl.tile.add(pair[1], pair[1])`, which the DSL emits verbatim because nothing hoists
+// a projection into its own binding -- is not a Var and never appears there, so its
+// axis is read back off the halved tuple type instead.
+//
+// Matching only Var here is a SILENT wrong answer, not a missed optimization: the
+// operand still gets substituted for its halved replacement afterwards, so the
+// consuming node keeps a full-width declared type over per-lane data.
+std::optional<TileInfo> OperandSplitInfo(const ExprPtr& arg,
+                                         const std::unordered_map<const Var*, TileInfo>& tile_vars,
+                                         const std::unordered_map<const Var*, VarPtr>& var_replacements) {
+  if (!arg) return std::nullopt;
+  if (auto arg_var = AsVarLike(arg)) {
+    auto it = tile_vars.find(arg_var.get());
+    return it != tile_vars.end() ? std::optional<TileInfo>{it->second} : std::nullopt;
+  }
+  if (auto get_item = std::dynamic_pointer_cast<const TupleGetItemExpr>(arg)) {
+    auto tuple_var = AsVarLike(get_item->tuple_);
+    auto it = tuple_var ? var_replacements.find(tuple_var.get()) : var_replacements.end();
+    if (it == var_replacements.end()) return std::nullopt;
+    auto halved = std::dynamic_pointer_cast<const TupleType>(it->second->GetType());
+    const auto index = static_cast<size_t>(get_item->index_);
+    if (!halved || get_item->index_ < 0 || index >= halved->types_.size()) return std::nullopt;
+    return SplitInfoFromHalvedType(get_item->GetType(), halved->types_[index]);
+  }
+  return std::nullopt;
+}
+
 // A `tile.store` of a tracked (halved) tile, rebuilt with its destination offset
 // moved to this lane's half, or nullptr when @p call is not such a store.
 //
@@ -816,22 +867,7 @@ CallPtr LocalizeStoreOffset(const CallPtr& call, const std::unordered_map<const 
                             const ExprPtr& subblock_idx, const ExprPtr& lane_stride) {
   if (!IsOp(call, "tile.store") || call->args_.size() < 3) return nullptr;
 
-  std::optional<TileInfo> info;
-  if (auto tile_var = std::dynamic_pointer_cast<const Var>(call->args_[0])) {
-    if (auto it = tile_vars.find(tile_var.get()); it != tile_vars.end()) {
-      info = it->second;
-    }
-  } else if (auto get_item = std::dynamic_pointer_cast<const TupleGetItemExpr>(call->args_[0])) {
-    auto tuple_var = AsVarLike(get_item->tuple_);
-    auto replaced = tuple_var ? var_replacements.find(tuple_var.get()) : var_replacements.end();
-    if (replaced != var_replacements.end()) {
-      auto halved = std::dynamic_pointer_cast<const TupleType>(replaced->second->GetType());
-      const auto index = static_cast<size_t>(get_item->index_);
-      if (halved && get_item->index_ >= 0 && index < halved->types_.size()) {
-        info = SplitInfoFromHalvedType(get_item->GetType(), halved->types_[index]);
-      }
-    }
-  }
+  auto info = OperandSplitInfo(call->args_[0], tile_vars, var_replacements);
   if (!info) return nullptr;
 
   std::vector<ExprPtr> new_args = call->args_;
@@ -1104,13 +1140,10 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
       int in_split_dim = -1;
       std::shared_ptr<const TileType> in_tt;
       for (const auto& a : call->args_) {
-        if (auto v = AsVarLike(a)) {
-          auto it = tile_vars.find(v.get());
-          if (it != tile_vars.end()) {
-            in_split_dim = it->second.split_dim;
-            in_tt = std::dynamic_pointer_cast<const TileType>(a->GetType());
-            break;
-          }
+        if (auto info = OperandSplitInfo(a, tile_vars, var_replacements)) {
+          in_split_dim = info->split_dim;
+          in_tt = std::dynamic_pointer_cast<const TileType>(a->GetType());
+          break;
         }
       }
 
@@ -1742,6 +1775,21 @@ std::optional<TileInfo> YieldedTileInfo(const YieldStmtPtr& yield, size_t index,
   return it->second;
 }
 
+// The halved TupleType a branch yields at @p index, or nullptr when that position is
+// not a tuple the split rewrote.
+//
+// Tuple vars never enter ``tile_vars`` -- they are not tiles -- so the TileInfo lookup
+// above cannot see them, and a merge whose branches both produce a tuple would keep its
+// original full-width declared type while both Yields carry halved ones.
+std::shared_ptr<const TupleType> YieldedHalvedTupleType(
+    const YieldStmtPtr& yield, size_t index, const std::unordered_map<const Var*, VarPtr>& var_replacements) {
+  if (!yield || index >= yield->value_.size()) return nullptr;
+  auto value_var = AsVarLike(yield->value_[index]);
+  auto it = value_var ? var_replacements.find(value_var.get()) : var_replacements.end();
+  if (it == var_replacements.end()) return nullptr;
+  return std::dynamic_pointer_cast<const TupleType>(it->second->GetType());
+}
+
 bool SameTileInfo(const TileInfo& a, const TileInfo& b) {
   return a.split_dim == b.split_dim && structural_equal(a.half_dim_size, b.half_dim_size);
 }
@@ -1805,6 +1853,28 @@ std::vector<VarPtr> RepairIfReturnVars(const std::vector<VarPtr>& return_vars, c
   auto else_yield = transform_utils::GetLastYieldStmt(*new_else_body);
 
   for (size_t i = 0; i < new_return_vars.size(); ++i) {
+    // A TUPLE merge. Its element types carry the per-element split, so adopting the
+    // yielded type is the whole repair -- there is no single axis to record, and the
+    // projections downstream read each element's axis back off this type.
+    auto then_tuple = YieldedHalvedTupleType(then_yield, i, var_replacements);
+    auto else_tuple = YieldedHalvedTupleType(else_yield, i, var_replacements);
+    if (then_tuple || else_tuple) {
+      CHECK_SPAN(then_tuple && else_tuple && structural_equal(then_tuple, else_tuple), span)
+          << "LowerAutoVectorSplit: the branches of an if inside the automatically split vector region "
+             "disagree about tuple merge variable '"
+          << new_return_vars[i]->name_hint_
+          << "': the split halved the tuple one branch yields differently from the other's (or halved "
+             "only one of them). There is no single per-lane type for the merged tuple, and picking "
+             "either one silently gives one AIV lane the wrong extent on some element. Make both "
+             "branches produce the tuple the same way, or move the if outside the automatically split "
+             "region.";
+      auto new_return_var =
+          std::make_shared<Var>(new_return_vars[i]->name_hint_, then_tuple, new_return_vars[i]->span_);
+      var_replacements[return_vars[i].get()] = new_return_var;
+      new_return_vars[i] = new_return_var;
+      continue;
+    }
+
     auto then_info = YieldedTileInfo(then_yield, i, tile_vars);
     auto else_info = YieldedTileInfo(else_yield, i, tile_vars);
 
