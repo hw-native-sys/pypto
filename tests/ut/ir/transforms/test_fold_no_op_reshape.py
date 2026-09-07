@@ -124,6 +124,34 @@ class TestFoldNoOpReshape:
         ExpectedIR = _run_prereqs_only(Before)
         ir.assert_structural_equal(After, ExpectedIR)
 
+    def test_same_allocation_different_window_is_kept(self):
+        """Equal signatures do not make sibling subranges the same value.
+
+        Capacity-overflow reuse can give two tiles one allocation base while
+        keeping them at distinct byte offsets. Folding this reshape would turn
+        a real PTO operation into an alias of the wrong half of the buffer.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                input_a: pl.Tensor[[16, 64], pl.FP32],
+                output: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                tile_a: pl.Tile[[16, 64], pl.FP32, pl.MemRef("shared", 0, 4096), pl.MemorySpace.Vec] = (
+                    pl.tile.load(input_a, [0, 0], [16, 64])
+                )
+                tile_b: pl.Tile[[16, 64], pl.FP32, pl.MemRef("shared", 4096, 4096), pl.MemorySpace.Vec] = (
+                    pl.tile.reshape(tile_a, [16, 64])
+                )
+                result: pl.Tensor[[16, 64], pl.FP32] = pl.tile.store(tile_b, [0, 0], output)
+                return result
+
+        after = passes.fold_no_op_reshape()(Before)
+        ir.assert_structural_equal(after, Before)
+
     def test_pass_runs_without_error_on_simple_kernel(self):
         """Smoke test: pass should not crash on a kernel without trivial reshapes."""
 

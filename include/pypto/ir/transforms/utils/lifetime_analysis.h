@@ -51,6 +51,11 @@ struct LifetimeAnalysisResult {
   std::map<const Var*, std::pair<int, int>> var_liveness;
   std::map<const Var*, std::vector<std::pair<int32_t, int32_t>>> pipeline_membership;
   std::set<const Var*> pipeline_load_tiles;
+  // Sharing-group representatives with a dynamic-offset member that PTO cannot
+  // reconstruct from the view op's operands. Any memory space containing one
+  // must keep the legacy whole-buffer layout: subdividing other groups could
+  // otherwise make an unsafe program reach codegen instead of overflowing.
+  std::set<const Var*> subrange_unsafe_groups;
 };
 
 /**

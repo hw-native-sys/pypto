@@ -21,6 +21,7 @@ import re
 import pypto.language as pl
 import pytest
 from pypto import DataType, InternalError, backend, codegen, ir, passes, testing
+from pypto.arith import Analyzer
 from pypto.backend import BackendType
 from pypto.ir.op import tile
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
@@ -5342,6 +5343,275 @@ class TestL0CrossShapeReuse:
     differ — unlike Vec/Acc/Mat buffers, which keep the strict shape match.
     This is what lets fused-attention reuse the QK Right buffer ([k, SEQ]) for
     the PV Right buffer ([k', HEAD]) (issue #1595)."""
+
+    def test_capacity_overflow_subdivides_dead_right_buffer(self):
+        """A dead 64 KiB L0B panel backs two later co-live 32 KiB panels."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                large_lhs: pl.Tensor[[16, 128], pl.BF16],
+                large_rhs: pl.Tensor[[128, 256], pl.BF16],
+                small_lhs: pl.Tensor[[16, 64], pl.BF16],
+                small_rhs0: pl.Tensor[[64, 256], pl.BF16],
+                small_rhs1: pl.Tensor[[64, 256], pl.BF16],
+                out_large: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
+                out_small0: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
+                out_small1: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
+            ) -> pl.Tensor[[16, 256], pl.FP32]:
+                large_lhs_mat = pl.tile.load(large_lhs, [0, 0], [16, 128], target_memory=pl.Mem.Mat)
+                large_rhs_mat = pl.tile.load(large_rhs, [0, 0], [128, 256], target_memory=pl.Mem.Mat)
+                large_l = pl.tile.move(large_lhs_mat, target_memory=pl.Mem.Left)
+                large_r = pl.tile.move(large_rhs_mat, target_memory=pl.Mem.Right)
+                large_acc = pl.tile.matmul(large_l, large_r)
+                _stored_large = pl.tile.store(large_acc, [0, 0], out_large)
+
+                small_lhs_mat = pl.tile.load(small_lhs, [0, 0], [16, 64], target_memory=pl.Mem.Mat)
+                small_rhs0_mat = pl.tile.load(small_rhs0, [0, 0], [64, 256], target_memory=pl.Mem.Mat)
+                small_rhs1_mat = pl.tile.load(small_rhs1, [0, 0], [64, 256], target_memory=pl.Mem.Mat)
+                small_l = pl.tile.move(small_lhs_mat, target_memory=pl.Mem.Left)
+                small_r0 = pl.tile.move(small_rhs0_mat, target_memory=pl.Mem.Right)
+                small_r1 = pl.tile.move(small_rhs1_mat, target_memory=pl.Mem.Right)
+                small_acc0 = pl.tile.matmul(small_l, small_r0)
+                _stored_small0 = pl.tile.store(small_acc0, [0, 0], out_small0)
+                small_acc1 = pl.tile.matmul(small_l, small_r1)
+                stored_small1 = pl.tile.store(small_acc1, [0, 0], out_small1)
+                return stored_small1
+
+        after_reuse = _run_pipeline(Before)
+        ranges = _collect_named_tile_memrefs(after_reuse, {"large_r", "small_r0", "small_r1"})
+        assert ranges["large_r"].base_ is ranges["small_r0"].base_
+        assert ranges["large_r"].base_ is ranges["small_r1"].base_
+
+        relative = {}
+        for name, memref in ranges.items():
+            assert isinstance(memref.byte_offset_, ir.ConstInt)
+            relative[name] = (memref.byte_offset_.value, memref.size_)
+        assert relative == {
+            "large_r": (0, 65536),
+            "small_r0": (0, 32768),
+            "small_r1": (32768, 32768),
+        }
+        small0_offset, small0_size = relative["small_r0"]
+        small1_offset, _ = relative["small_r1"]
+        assert small0_offset + small0_size <= small1_offset
+
+        allocated = passes.allocate_memory_addr()(after_reuse)
+        physical = _collect_named_tile_memrefs(allocated, {"large_r", "small_r0", "small_r1"})
+        physical_ranges = {}
+        for name, memref in physical.items():
+            assert isinstance(memref.byte_offset_, ir.ConstInt)
+            physical_ranges[name] = (memref.byte_offset_.value, memref.size_)
+        assert physical_ranges == relative
+
+    def test_capacity_overflow_subdivides_root_with_dynamic_view(self):
+        """A dynamic view keeps its relative offset when its 32 KiB root is placed at 32 KiB."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                large_lhs: pl.Tensor[[16, 128], pl.BF16],
+                large_rhs: pl.Tensor[[128, 256], pl.BF16],
+                small_lhs: pl.Tensor[[16, 64], pl.BF16],
+                small_rhs0: pl.Tensor[[64, 256], pl.BF16],
+                small_rhs1: pl.Tensor[[64, 256], pl.BF16],
+                k_offset: pl.Scalar[pl.INDEX],
+                out_large: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
+                out_small0: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
+                out_small1: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
+            ) -> pl.Tensor[[16, 256], pl.FP32]:
+                large_lhs_mat = pl.tile.load(large_lhs, [0, 0], [16, 128], target_memory=pl.Mem.Mat)
+                large_rhs_mat = pl.tile.load(large_rhs, [0, 0], [128, 256], target_memory=pl.Mem.Mat)
+                large_l = pl.tile.move(large_lhs_mat, target_memory=pl.Mem.Left)
+                large_r = pl.tile.move(large_rhs_mat, target_memory=pl.Mem.Right)
+                large_acc = pl.tile.matmul(large_l, large_r)
+                _stored_large = pl.tile.store(large_acc, [0, 0], out_large)
+
+                small_lhs_mat = pl.tile.load(small_lhs, [0, 0], [16, 64], target_memory=pl.Mem.Mat)
+                small_rhs0_mat = pl.tile.load(small_rhs0, [0, 0], [64, 256], target_memory=pl.Mem.Mat)
+                small_rhs1_mat = pl.tile.load(small_rhs1, [0, 0], [64, 256], target_memory=pl.Mem.Mat)
+                small_l = pl.tile.move(small_lhs_mat, target_memory=pl.Mem.Left)
+                small_r0 = pl.tile.move(small_rhs0_mat, target_memory=pl.Mem.Right)
+                small_r1 = pl.tile.move(small_rhs1_mat, target_memory=pl.Mem.Right)
+                small_acc0 = pl.tile.matmul(small_l, small_r0)
+                _stored_small0 = pl.tile.store(small_acc0, [0, 0], out_small0)
+                small_l_view = pl.tile.slice(small_l, [16, 32], [0, 0])
+                small_r1_view = pl.tile.slice(small_r1, [32, 256], [k_offset, 0])
+                small_acc1 = pl.tile.matmul(small_l_view, small_r1_view)
+                stored_small1 = pl.tile.store(small_acc1, [0, 0], out_small1)
+                return stored_small1
+
+        initialized = passes.init_mem_ref()(Before)
+        before_view = _collect_named_tile_memrefs(initialized, {"small_r1_view"})["small_r1_view"]
+        assert not isinstance(before_view.byte_offset_, ir.ConstInt)
+
+        after_reuse = passes.memory_reuse()(passes.materialize_semantic_aliases()(initialized))
+        ranges = _collect_named_tile_memrefs(
+            after_reuse, {"large_r", "small_r0", "small_r1", "small_r1_view"}
+        )
+        assert ranges["large_r"].base_ is ranges["small_r0"].base_
+        assert ranges["large_r"].base_ is ranges["small_r1"].base_
+        assert ranges["large_r"].base_ is ranges["small_r1_view"].base_
+        assert isinstance(ranges["small_r1"].byte_offset_, ir.ConstInt)
+        assert ranges["small_r1"].byte_offset_.value == 32768
+        assert ranges["small_r1_view"].size_ == before_view.size_
+
+        displacement = Analyzer().simplify(
+            ir.Sub(
+                ranges["small_r1_view"].byte_offset_,
+                before_view.byte_offset_,
+                DataType.INDEX,
+                ir.Span.unknown(),
+            )
+        )
+        assert isinstance(displacement, ir.ConstInt)
+        assert displacement.value == 32768
+
+        allocated = passes.allocate_memory_addr()(after_reuse)
+        physical = _collect_named_tile_memrefs(
+            allocated, {"large_r", "small_r0", "small_r1", "small_r1_view"}
+        )
+        assert physical["large_r"].base_ is physical["small_r0"].base_
+        assert physical["large_r"].base_ is physical["small_r1"].base_
+        assert physical["large_r"].base_ is physical["small_r1_view"].base_
+        assert isinstance(physical["large_r"].byte_offset_, ir.ConstInt)
+        assert physical["large_r"].byte_offset_.value == 0
+        assert physical["large_r"].size_ == 65536
+        assert isinstance(physical["small_r0"].byte_offset_, ir.ConstInt)
+        assert physical["small_r0"].byte_offset_.value == 0
+        assert isinstance(physical["small_r1"].byte_offset_, ir.ConstInt)
+        assert physical["small_r1"].byte_offset_.value == 32768
+        # Pure tile.slice addresses deliberately collapse to the bare base here;
+        # PTO derives the runtime window from the placed source tile below.
+        assert isinstance(physical["small_r1_view"].byte_offset_, ir.ConstInt)
+        assert physical["small_r1_view"].byte_offset_.value == 0
+
+        mlir = codegen.PTOCodegen().generate(allocated)
+        small_r1_alloc = next(
+            line for line in mlir.splitlines() if line.strip().startswith("%small_r1 = pto.alloc_tile")
+        )
+        assert "addr = %c32768_i64" in small_r1_alloc
+        dynamic_subview = next(line for line in mlir.splitlines() if "pto.subview %small_r1[" in line)
+        assert re.search(r"pto\.subview %small_r1\[%arg\d+, %c0_index\]", dynamic_subview)
+
+    def test_dynamic_transpose_view_disables_subrange_for_space(self):
+        """A dynamic-offset view without offset operands disables Mat subdivision.
+
+        The two co-live 192 KiB roots could otherwise occupy the two halves of
+        the expired 384 KiB root, leaving the dynamic-view 128 KiB root beside
+        that arena and making the 512 KiB Mat space fit.  ``transpose_view``
+        cannot reconstruct the dynamic slice offset from its own operands,
+        though, so AllocateMemoryAddr would collapse its address to the root
+        base and PTO codegen would silently read the wrong bytes.  Keep the
+        whole space on the legacy layout and surface the original overflow.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                large: pl.Tensor[[192, 1024], pl.BF16],
+                small0: pl.Tensor[[96, 1024], pl.BF16],
+                small1: pl.Tensor[[96, 1024], pl.BF16],
+                dynamic: pl.Tensor[[64, 1024], pl.BF16],
+                row: pl.Scalar[pl.INDEX],
+                out_large: pl.Out[pl.Tensor[[32, 1024], pl.BF16]],
+                out_small0: pl.Out[pl.Tensor[[96, 1024], pl.BF16]],
+                out_small1: pl.Out[pl.Tensor[[96, 1024], pl.BF16]],
+                out_dynamic: pl.Out[pl.Tensor[[1024, 32], pl.BF16]],
+            ) -> pl.Tensor[[1024, 32], pl.BF16]:
+                large_mat = pl.tile.load(large, [0, 0], [192, 1024], target_memory=pl.Mem.Mat)
+                large_slice = pl.tile.slice(large_mat, [32, 1024], [0, 0])
+                large_vec = pl.tile.move(large_slice, target_memory=pl.Mem.Vec)
+                _stored_large = pl.tile.store(large_vec, [0, 0], out_large)
+
+                small_mat0 = pl.tile.load(small0, [0, 0], [96, 1024], target_memory=pl.Mem.Mat)
+                small_mat1 = pl.tile.load(small1, [0, 0], [96, 1024], target_memory=pl.Mem.Mat)
+                dynamic_mat = pl.tile.load(dynamic, [0, 0], [64, 1024], target_memory=pl.Mem.Mat)
+                dynamic_slice = pl.tile.slice(dynamic_mat, [32, 1024], [row, 0])
+                transposed = pl.tile.transpose_view(dynamic_slice)
+                small_vec0 = pl.tile.move(small_mat0, target_memory=pl.Mem.Vec)
+                _stored_small0 = pl.tile.store(small_vec0, [0, 0], out_small0)
+                small_vec1 = pl.tile.move(small_mat1, target_memory=pl.Mem.Vec)
+                _stored_small1 = pl.tile.store(small_vec1, [0, 0], out_small1)
+                dynamic_vec = pl.tile.move(transposed, target_memory=pl.Mem.Vec)
+                stored_dynamic = pl.tile.store(dynamic_vec, [0, 0], out_dynamic)
+                return stored_dynamic
+
+        after_reuse = _run_pipeline(Before)
+        ranges = _collect_named_tile_memrefs(
+            after_reuse, {"large_mat", "small_mat0", "small_mat1", "dynamic_mat", "transposed"}
+        )
+        assert ranges["large_mat"].base_ is ranges["small_mat0"].base_
+        assert ranges["large_mat"].base_ is not ranges["small_mat1"].base_
+        assert ranges["large_mat"].base_ is not ranges["dynamic_mat"].base_
+        assert ranges["dynamic_mat"].base_ is ranges["transposed"].base_
+
+        with pytest.raises(ValueError, match=r"Mat buffer usage .* exceeds platform limit"):
+            passes.allocate_memory_addr()(after_reuse)
+
+    def test_static_transpose_view_keeps_subrange_enabled(self):
+        """A constant-offset transpose view keeps its root eligible for subdivision."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                large: pl.Tensor[[256, 1024], pl.BF16],
+                small0: pl.Tensor[[128, 1024], pl.BF16],
+                small1: pl.Tensor[[128, 1024], pl.BF16],
+                out_large: pl.Out[pl.Tensor[[64, 1024], pl.BF16]],
+                out_small0: pl.Out[pl.Tensor[[64, 1024], pl.BF16]],
+                out_transposed: pl.Out[pl.Tensor[[1024, 64], pl.BF16]],
+            ) -> pl.Tensor[[1024, 64], pl.BF16]:
+                large_mat = pl.tile.load(large, [0, 0], [256, 1024], target_memory=pl.Mem.Mat)
+                large_slice = pl.tile.slice(large_mat, [64, 1024], [0, 0])
+                large_vec = pl.tile.move(large_slice, target_memory=pl.Mem.Vec)
+                _stored_large = pl.tile.store(large_vec, [0, 0], out_large)
+
+                small_mat0 = pl.tile.load(small0, [0, 0], [128, 1024], target_memory=pl.Mem.Mat)
+                small_mat1 = pl.tile.load(small1, [0, 0], [128, 1024], target_memory=pl.Mem.Mat)
+                small1_slice = pl.tile.slice(small_mat1, [64, 1024], [64, 0])
+                transposed = pl.tile.transpose_view(small1_slice)
+                small0_slice = pl.tile.slice(small_mat0, [64, 1024], [0, 0])
+                small0_vec = pl.tile.move(small0_slice, target_memory=pl.Mem.Vec)
+                _stored_small0 = pl.tile.store(small0_vec, [0, 0], out_small0)
+                transposed_vec = pl.tile.move(transposed, target_memory=pl.Mem.Vec)
+                stored_transposed = pl.tile.store(transposed_vec, [0, 0], out_transposed)
+                return stored_transposed
+
+        after_reuse = _run_pipeline(Before)
+        ranges = _collect_named_tile_memrefs(
+            after_reuse, {"large_mat", "small_mat0", "small_mat1", "transposed"}
+        )
+        assert ranges["large_mat"].base_ is ranges["small_mat0"].base_
+        assert ranges["large_mat"].base_ is ranges["small_mat1"].base_
+        assert ranges["large_mat"].base_ is ranges["transposed"].base_
+        assert isinstance(ranges["small_mat1"].byte_offset_, ir.ConstInt)
+        assert ranges["small_mat1"].byte_offset_.value == 256 * 1024
+        assert isinstance(ranges["transposed"].byte_offset_, ir.ConstInt)
+        assert ranges["transposed"].byte_offset_.value == 384 * 1024
+
+        allocated = passes.allocate_memory_addr()(after_reuse)
+        physical = _collect_named_tile_memrefs(allocated, {"small_mat1", "transposed"})
+        assert isinstance(physical["small_mat1"].byte_offset_, ir.ConstInt)
+        assert physical["small_mat1"].byte_offset_.value == 256 * 1024
+        assert isinstance(physical["transposed"].byte_offset_, ir.ConstInt)
+        assert physical["transposed"].byte_offset_.value == 384 * 1024
 
     def test_right_buffers_different_shapes_reuse(self):
         """``rb`` ([64, 256] Right) is dead before ``rd`` ([128, 128] Right) is

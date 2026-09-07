@@ -1976,6 +1976,7 @@ LifetimeAnalysisResult AnalyzeAllocationLifetimesImpl(const StmtPtr& func_body,
   // the subset whose defining op is a load (vs compute).
   std::map<const Var*, std::vector<std::pair<int32_t, int32_t>>> pipeline_membership;
   std::set<const Var*> pipeline_load_tiles;
+  std::set<const Var*> subrange_unsafe_groups;
 
   for (const auto& var : result.ordered_defs) {
     if (processed_vars.count(var)) {
@@ -2020,6 +2021,28 @@ LifetimeAnalysisResult AnalyzeAllocationLifetimesImpl(const StmtPtr& func_body,
         << "TileType with MemRef must have memory_space for reuse analysis";
     interval.memory_space = *memory_space;
     interval.size = GetDefinedMemRef(representative_tile_type)->size_;
+
+    // A direct dynamic tile.slice is lowered through pto.subview, which rebuilds
+    // its runtime address from the source tile and slice operands. Every other
+    // dynamic-offset member is unsafe for capacity-triggered subdivision:
+    // reshape/reinterpret/transpose views have no offset operand, and an unknown
+    // producer must fail closed. Mark the complete sharing group so the packer
+    // can keep its whole memory space on the legacy layout. Restricting only
+    // this interval is insufficient — subdividing other roots can make the
+    // space fit and let this pre-existing dynamic address loss reach codegen.
+    for (const auto& group_var : sharing_group) {
+      auto member_memref = GetTypeMemRef(group_var->GetType());
+      if (!member_memref.has_value() || !*member_memref || As<ConstInt>((*member_memref)->byte_offset_)) {
+        continue;
+      }
+      auto dit = result.var_def_stmt.find(group_var);
+      auto assign = dit != result.var_def_stmt.end() ? As<AssignStmt>(dit->second) : nullptr;
+      auto call = assign ? As<Call>(assign->value_) : nullptr;
+      if (!call || !IsOp(call, "tile.slice")) {
+        subrange_unsafe_groups.insert(interval.variable.get());
+        break;
+      }
+    }
 
     lifetimes.push_back(interval);
 
@@ -2068,7 +2091,8 @@ LifetimeAnalysisResult AnalyzeAllocationLifetimesImpl(const StmtPtr& func_body,
           std::move(result.phi_family_ids),
           std::move(var_liveness),
           std::move(pipeline_membership),
-          std::move(pipeline_load_tiles)};
+          std::move(pipeline_load_tiles),
+          std::move(subrange_unsafe_groups)};
 }
 
 // NOTE: The former tile-type reuse-compatibility gate (AreTileTypesCompatible)
@@ -2607,16 +2631,34 @@ std::map<const Var*, uint64_t> CollectPinnedAllocSizes(const StmtPtr& body, cons
   return pinned_allocations;
 }
 
-std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
+struct ReusePlacement {
+  VarPtr representative;
+  uint64_t byte_offset = 0;
+};
+
+using ReuseMap = std::map<VarPtr, ReusePlacement>;
+
+struct PackedMember {
+  size_t interval_index = 0;
+  uint64_t byte_offset = 0;
+};
+
+struct PackedBuffer {
+  std::vector<PackedMember> members;
+  uint64_t capacity = 0;
+  bool pinned = false;
+};
+
+ReuseMap IdentifyReuseOpportunities(
     const std::vector<LifetimeInterval>& lifetimes, const HazardInputs& hazard,
     const ForbidAliasMap& forbid_alias, const std::map<const Var*, std::set<int>>& phi_family_ids,
     const std::map<VarPtr, std::vector<VarPtr>>& sharing_groups,
     const std::map<const Var*, std::pair<int, int>>& var_liveness,
     const std::map<const Var*, std::vector<std::pair<int32_t, int32_t>>>& pipeline_membership,
-    const std::set<const Var*>& pipeline_load_tiles,
+    const std::set<const Var*>& pipeline_load_tiles, const std::set<const Var*>& subrange_unsafe_groups,
     const std::map<MemorySpace, uint64_t>& reserved_end_by_space, const std::set<const Var*>& pinned_bases,
     const FunctionPtr& func, std::vector<Diagnostic>* out_hints) {
-  std::map<VarPtr, VarPtr> reuse_map;
+  ReuseMap reuse_map;
 
   // A declared allocation (`pl.Tile[..., pl.MemRef("name"), ...]`) has exactly the membership
   // the kernel author wrote. The packer neither adds tiles to it nor moves its
@@ -2720,7 +2762,7 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
   // reuse onto its representative, then chase base coalescing / VIEW inheritance.
   auto physical_base = [&](const VarPtr& v) -> const Var* {
     VarPtr root = v;
-    while (reuse_map.count(root)) root = reuse_map.at(root);
+    while (reuse_map.count(root)) root = reuse_map.at(root).representative;
     return resolve_base(TileMemRefBase(root));
   };
 
@@ -2928,51 +2970,130 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
       return a < b;
     });
 
-    // First-fit-decreasing pack with the current per-group residue counts (pipeline_blocks reads the
-    // mutable F_g). Each buffer is a list of interval indices, element 0 the representative (largest,
-    // earliest on ties). Pure — it does NOT touch reuse_map, since the shed loop below may re-pack.
-    auto pack = [&]() {
-      std::vector<std::vector<size_t>> buffers;
-      // Parallel to `buffers`: a declared allocation's membership is fixed by the author,
-      // so it opens its own slot and never takes another tile. Handling it here
-      // rather than as a `can_share` gate keeps the check out of the O(M^2) inner
-      // loop, and skips the whole buffer scan for a pinned candidate.
-      std::vector<char> buffer_pinned;
+    // Dynamic non-slice views lose their symbolic address in
+    // AllocateMemoryAddr and cannot reconstruct it in PTO codegen. Disable
+    // subdivision for the complete space: compacting an unrelated group can be
+    // enough to turn a legacy overflow into silently wrong generated code.
+    const bool subrange_space_safe = std::none_of(indices.begin(), indices.end(), [&](size_t idx) {
+      return subrange_unsafe_groups.count(lifetimes[idx].variable.get()) != 0;
+    });
+
+    // Subrange placement moves the complete root allocation, not the live
+    // windows of its alias/view members.  The root must therefore have a static
+    // allocation offset, while a symbolic member offset is safe: rebasing keeps
+    // that expression relative to the root and the packer continues to reserve
+    // the root's complete [placement, placement + size) range.  Constant member
+    // offsets are still checked here so malformed static ranges fail closed.
+    std::vector<bool> whole_root_subrange_eligible(lifetimes.size(), false);
+    for (size_t idx : indices) {
+      if (subrange_unsafe_groups.count(lifetimes[idx].variable.get()) != 0) continue;
+      const auto root_memref = GetTypeMemRef(lifetimes[idx].variable->GetType());
+      if (!root_memref.has_value() || !*root_memref) continue;
+      const auto root_offset = As<ConstInt>((*root_memref)->byte_offset_);
+      if (!root_offset || root_offset->value_ < 0) continue;
+      bool eligible = true;
+      const auto* members = group_members(lifetimes[idx].variable);
+      const std::vector<VarPtr> singleton =
+          members ? std::vector<VarPtr>{} : std::vector<VarPtr>{lifetimes[idx].variable};
+      for (const VarPtr& member : (members ? *members : singleton)) {
+        const auto member_memref = GetTypeMemRef(member->GetType());
+        if (!member_memref.has_value() || !*member_memref ||
+            (*member_memref)->base_.get() != (*root_memref)->base_.get()) {
+          eligible = false;
+          break;
+        }
+        const auto member_offset = As<ConstInt>((*member_memref)->byte_offset_);
+        // A remaining dynamic member is a direct tile.slice: it does not expose
+        // holes to the packer, and PTO rebuilds its address from the translated
+        // source root plus the slice operands.
+        if (!member_offset) continue;
+        const __int128 relative = static_cast<__int128>(member_offset->value_) - root_offset->value_;
+        const __int128 end = relative + (*member_memref)->size_;
+        if (relative < 0 || end > lifetimes[idx].size) {
+          eligible = false;
+          break;
+        }
+      }
+      whole_root_subrange_eligible[idx] = eligible;
+    }
+
+    // First-fit-decreasing pack with the current per-group residue counts
+    // (pipeline_blocks reads the mutable F_g). The ordinary mode reproduces the
+    // legacy whole-buffer FFD exactly. Subrange mode instead treats members that
+    // cannot share bytes with the candidate as address blockers and picks the
+    // lowest aligned gap. Members stay sorted by offset, so one candidate scans
+    // each arena once and the pack remains O(M^2).
+    auto pack = [&](bool allow_subranges) {
+      std::vector<PackedBuffer> buffers;
       for (size_t idx : indices) {
         if (is_pinned[idx]) {
-          buffers.push_back({idx});
-          buffer_pinned.push_back(1);
+          buffers.push_back(PackedBuffer{{PackedMember{idx, 0}}, lifetimes[idx].size, true});
           continue;
         }
         const auto& cand = lifetimes[idx];
         bool placed = false;
-        for (size_t b = 0; b < buffers.size(); ++b) {
-          if (buffer_pinned[b] != 0) continue;
-          bool fits = true;
-          for (size_t member_idx : buffers[b]) {
-            if (!can_share(cand, lifetimes[member_idx])) {
-              fits = false;
-              break;
+        for (PackedBuffer& buffer : buffers) {
+          if (buffer.pinned || cand.size > buffer.capacity) continue;
+
+          std::optional<uint64_t> chosen_offset;
+          if (!allow_subranges || !whole_root_subrange_eligible[idx] ||
+              !whole_root_subrange_eligible[buffer.members.front().interval_index]) {
+            bool fits_at_zero = true;
+            for (const PackedMember& member : buffer.members) {
+              if (!can_share(cand, lifetimes[member.interval_index])) {
+                fits_at_zero = false;
+                break;
+              }
+            }
+            if (fits_at_zero) chosen_offset = 0;
+          } else {
+            uint64_t cursor = 0;
+            for (const PackedMember& member : buffer.members) {
+              if (can_share(cand, lifetimes[member.interval_index])) continue;
+              const uint64_t start = member.byte_offset;
+              INTERNAL_CHECK_SPAN(
+                  lifetimes[member.interval_index].size <= std::numeric_limits<uint64_t>::max() - start,
+                  lifetimes[member.interval_index].variable->span_)
+                  << "Internal error: reuse placement range overflows uint64";
+              const uint64_t end = start + lifetimes[member.interval_index].size;
+              const uint64_t aligned = alloc_policy->AlignAddress(cursor, space);
+              if (aligned <= start && cand.size <= start - aligned) {
+                chosen_offset = aligned;
+                break;
+              }
+              cursor = std::max(cursor, end);
+            }
+            if (!chosen_offset.has_value()) {
+              const uint64_t aligned = alloc_policy->AlignAddress(cursor, space);
+              if (aligned <= buffer.capacity && cand.size <= buffer.capacity - aligned) {
+                chosen_offset = aligned;
+              }
             }
           }
-          if (!fits) continue;
-          buffers[b].push_back(idx);
+
+          if (!chosen_offset.has_value()) continue;
+          const PackedMember placement{idx, *chosen_offset};
+          auto pos = std::upper_bound(buffer.members.begin(), buffer.members.end(), placement,
+                                      [](const PackedMember& lhs, const PackedMember& rhs) {
+                                        return lhs.byte_offset < rhs.byte_offset;
+                                      });
+          buffer.members.insert(pos, placement);
           placed = true;
           break;
         }
         if (!placed) {
-          buffers.push_back({idx});
-          buffer_pinned.push_back(0);
+          buffers.push_back(PackedBuffer{{PackedMember{idx, 0}}, cand.size, false});
         }
       }
       return buffers;
     };
 
-    std::vector<std::vector<size_t>> buffers = pack();
+    std::vector<PackedBuffer> buffers = pack(/*allow_subranges=*/false);
 
-    // Graceful cross-group depth shed: while the space's exact allocator footprint (SpaceFootprint,
-    // Primitive A) overflows, lower the largest-slot group's depth by one residue and re-pack. Re-running
-    // the FFD (not merging in place) avoids in-place non-monotonicity, but the FFD is still not monotone
+    // Capacity relief uses the exact allocator footprint (SpaceFootprint, Primitive A). First retry with
+    // subranges; while that still overflows, lower the largest-slot pipeline group's depth by one residue
+    // and re-pack. Re-running the FFD (not merging in place) avoids in-place non-monotonicity, but the FFD
+    // is still not monotone
     // under the *relaxed* (F_g==1) predicate, so exhausting the shed does NOT guarantee a fit: the loop
     // ends in a from-scratch legacy re-pack + diagnostic (see the `!shed_group` branch below), which
     // guarantees no fit regression vs legacy. The shed objective is MaxRelief (largest slot first, tie
@@ -2981,15 +3102,21 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
       const uint64_t cap = pack_be->GetMemSize(space);
       auto rit = reserved_end_by_space.find(space);
       const uint64_t reserved_start = rit != reserved_end_by_space.end() ? rit->second : 0;
-      auto footprint = [&](const std::vector<std::vector<size_t>>& bufs) {
+      auto footprint = [&](const std::vector<PackedBuffer>& bufs) {
         SpaceFootprint fp(space, *alloc_policy, reserved_start);
         for (const auto& buf : bufs) {
-          uint64_t slot = 0;
-          for (size_t idx : buf) slot = std::max(slot, lifetimes[idx].size);
-          (void)fp.OpenBuffer(slot);
+          (void)fp.OpenBuffer(buf.capacity);
         }
         return fp.HighWater();
       };
+      auto retry_with_subranges = [&]() {
+        if (!subrange_space_safe || cap == 0 || footprint(buffers) <= cap) return;
+        auto subdivided = pack(/*allow_subranges=*/true);
+        if (footprint(subdivided) < footprint(buffers)) buffers = std::move(subdivided);
+      };
+      // Preserve the legacy layout whenever it fits. Only an actual overflow
+      // enables subdivision, before sacrificing software-pipeline depth.
+      retry_with_subranges();
       // Bound the shed re-packs so the loop stays within the pass-complexity budget
       // (.claude/rules/pass-complexity.md). A legitimate shed converges in Σ_g(F_g−1) steps over the few
       // co-live groups, but the pipeline-group count can grow with generated IR, so cap the full re-packs
@@ -3024,7 +3151,8 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
           // legacy also overflows it is a genuine overflow legacy would hit too (AllocateMemoryAddr surfaces
           // it).
           force_legacy = true;
-          buffers = pack();
+          buffers = pack(/*allow_subranges=*/false);
+          retry_with_subranges();
           force_legacy = false;
           force_legacy_spaces.insert(space);
           // Fold into the diagnostic channel (Warning) so all capacity-degradation signals go through one
@@ -3039,12 +3167,8 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
             // with a fallback warning that suggests reuse or stage count is
             // responsible.  Keep warning for aggregate pressure: every buffer
             // fits individually, but their required co-residency does not.
-            const bool has_intrinsically_oversized_buffer =
-                std::any_of(buffers.begin(), buffers.end(), [&](const std::vector<size_t>& buf) {
-                  uint64_t slot = 0;
-                  for (size_t idx : buf) slot = std::max(slot, lifetimes[idx].size);
-                  return slot > cap;
-                });
+            const bool has_intrinsically_oversized_buffer = std::any_of(
+                buffers.begin(), buffers.end(), [&](const PackedBuffer& buf) { return buf.capacity > cap; });
             const std::string why =
                 within_budget ? "at any double-buffering depth" : "within the shed-repack budget";
             if (!has_intrinsically_oversized_buffer) {
@@ -3060,17 +3184,21 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
           break;
         }
         group_depth[std::make_pair(space, *shed_group)] -= 1;
-        buffers = pack();
+        buffers = pack(/*allow_subranges=*/false);
+        retry_with_subranges();
       }
     }
 
-    // Commit the final packing: members [1..] reuse the representative [0]'s MemRef. The base coalescing
-    // lets resolve_base() chase a view whose owning tile is reused onto the representative's buffer.
+    // Commit the final packing. Every member maps directly to the arena owner;
+    // byte_offset is zero for legacy whole-buffer reuse and may be non-zero only
+    // for the overflow-triggered subrange fallback.
     for (const auto& buf : buffers) {
-      const VarPtr& representative = lifetimes[buf.front()].variable;
-      for (size_t m = 1; m < buf.size(); ++m) {
-        const auto& cand = lifetimes[buf[m]];
-        reuse_map[cand.variable] = representative;
+      const size_t representative_index = buf.members.front().interval_index;
+      const VarPtr& representative = lifetimes[representative_index].variable;
+      for (const PackedMember& member : buf.members) {
+        if (member.interval_index == representative_index) continue;
+        const auto& cand = lifetimes[member.interval_index];
+        reuse_map[cand.variable] = ReusePlacement{representative, member.byte_offset};
         if (const Var* cb = TileMemRefBase(cand.variable)) {
           if (const Var* rb = physical_base(representative)) {
             if (cb != rb) base_remap[cb] = rb;
@@ -3142,19 +3270,23 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
 /**
  * @brief Apply MemRef sharing to the statement tree
  */
-StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const std::map<VarPtr, VarPtr>& reuse_map,
+StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const ReuseMap& reuse_map,
                            const std::map<VarPtr, std::vector<VarPtr>>& var_sharing_groups) {
   // Custom IRMutator for MemRef sharing
   class MemRefSharingMutator : public IRMutator {
    public:
-    explicit MemRefSharingMutator(const std::map<VarPtr, VarPtr>& reuse_map,
+    explicit MemRefSharingMutator(const ReuseMap& reuse_map,
                                   const std::map<VarPtr, std::vector<VarPtr>>& sharing_groups)
         : reuse_map_(reuse_map), sharing_groups_(sharing_groups) {}
 
     StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
       // Check if this variable should reuse another's MemRef
       if (reuse_map_.count(op->var_)) {
-        VarPtr source_var = reuse_map_.at(op->var_);
+        const ReusePlacement& placement = reuse_map_.at(op->var_);
+        INTERNAL_CHECK_SPAN(
+            placement.byte_offset <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()), op->span_)
+            << "Internal error: reuse placement offset does not fit an INDEX ConstInt";
+        VarPtr source_var = placement.representative;
 
         // Get source's TileType and MemRef
         auto source_tile_type = As<TileType>(source_var->GetType());
@@ -3200,20 +3332,24 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const std::map<VarPtr, VarPtr>& 
             } else {
               relative = MakeSub(old->byte_offset_, curr_memref->byte_offset_, old->span_);
             }
-            auto rebased_offset = AddByteOffsets((*source_memref)->byte_offset_, relative);
+            auto placement_expr = std::make_shared<ConstInt>(static_cast<int64_t>(placement.byte_offset),
+                                                             DataType::INDEX, Span::unknown());
+            auto target_offset = AddByteOffsets((*source_memref)->byte_offset_, placement_expr);
+            auto rebased_offset = AddByteOffsets(target_offset, relative);
             return std::make_shared<MemRef>((*source_memref)->base_, rebased_offset, old->size_, old->span_,
                                             (*source_memref)->is_pinned_, (*source_memref)->slot_count_,
                                             (*source_memref)->slot_index_);
           }
           const __int128 wide_rel = static_cast<__int128>(old_off->value_) - curr_off->value_;
+          const __int128 wide_placement = placement.byte_offset;
           INTERNAL_CHECK_SPAN(wide_rel >= 0 && wide_rel <= std::numeric_limits<int64_t>::max() &&
-                                  wide_rel + old->size_ <= (*source_memref)->size_,
+                                  wide_placement + wide_rel + old->size_ <= (*source_memref)->size_,
                               old->span_)
               << "Internal error: sharing-group member offset " << old_off->value_
               << " cannot be represented inside reuse target (size " << (*source_memref)->size_ << ")";
-          const int64_t rel = static_cast<int64_t>(wide_rel);
-          if (rel == 0 && old->size_ == (*source_memref)->size_) return source_memref;
-          auto rel_expr = std::make_shared<ConstInt>(rel, DataType::INDEX, Span::unknown());
+          const int64_t placed_rel = static_cast<int64_t>(wide_placement + wide_rel);
+          if (placed_rel == 0 && old->size_ == (*source_memref)->size_) return source_memref;
+          auto rel_expr = std::make_shared<ConstInt>(placed_rel, DataType::INDEX, Span::unknown());
           return std::make_shared<MemRef>((*source_memref)->base_,
                                           AddByteOffsets((*source_memref)->byte_offset_, rel_expr),
                                           old->size_, old->span_, (*source_memref)->is_pinned_,
@@ -3280,7 +3416,7 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const std::map<VarPtr, VarPtr>& 
     }
 
    private:
-    const std::map<VarPtr, VarPtr>& reuse_map_;
+    const ReuseMap& reuse_map_;
     const std::map<VarPtr, std::vector<VarPtr>>& sharing_groups_;  // var -> sharing group
     // Maps old variable objects to new variable objects (with reused MemRef)
     // This is needed because IR nodes are immutable, so we create new Var objects
@@ -4457,7 +4593,8 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   auto reuse_map = IdentifyReuseOpportunities(
       analysis_result.lifetimes, hazard, forbid_alias, analysis_result.phi_family_ids,
       analysis_result.var_sharing_groups, analysis_result.var_liveness, analysis_result.pipeline_membership,
-      analysis_result.pipeline_load_tiles, reserved_end_by_space, pinned_bases, func, &hints);
+      analysis_result.pipeline_load_tiles, analysis_result.subrange_unsafe_groups, reserved_end_by_space,
+      pinned_bases, func, &hints);
   // Surface capacity-forced pipeline-depth reductions (perf hints) and legacy-fallback overflows
   // (warnings) through the unified diagnostic channel → perf_hints.log / stderr.
   if (!hints.empty()) EmitDiagnostics(hints, "MemoryReuse");
