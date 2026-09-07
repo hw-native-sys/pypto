@@ -391,6 +391,22 @@ std::vector<VarPtr> RepairIfReturnVars(const std::vector<VarPtr>& return_vars, c
                                        const ExprPtr& subblock_idx, const ExprPtr& lane_stride,
                                        const Span& span);
 
+/// Retype an ``x = tup[i]`` projection whose tuple was halved, or nullptr when
+/// @p assign is not such a projection.
+///
+/// A tuple-returning op has one split axis PER ELEMENT (tile.gather_compare answers a
+/// row split with a ``dst`` halved on dim 0 and a ``cdst`` -- shaped ``[1, rows]`` --
+/// halved on dim 1), so the projection cannot inherit a single result split dim. It
+/// reads the mapping back off the halved tuple type instead, and records the axis that
+/// moved in @p tile_vars so a later ``tile.store`` offsets each lane.
+///
+/// Both lowering arms must call this: the AUTO arm's affinity gate only routes leaf
+/// *calls* into ProcessStmts, so a projection left to its "pass through unchanged"
+/// fallback keeps a full-width declared type over a halved tuple.
+StmtPtr RetypeTupleProjection(const std::shared_ptr<const AssignStmt>& assign,
+                              std::unordered_map<const Var*, TileInfo>& tile_vars,
+                              std::unordered_map<const Var*, VarPtr>& var_replacements);
+
 std::vector<StmtPtr> ProcessStmts(const std::vector<StmtPtr>& stmts, SplitMode mode, int split_dim,
                                   std::unordered_map<const Var*, TileInfo>& tile_vars, bool is_aiv,
                                   const ExprPtr& subblock_idx,

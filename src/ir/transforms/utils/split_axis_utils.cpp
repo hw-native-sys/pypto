@@ -589,6 +589,57 @@ TypePtr HalveTileShape(const TypePtr& type, int dim, const ExprPtr& subblock_idx
   return std::make_shared<TileType>(new_shape, tt->dtype_, tt->memref_, new_tile_view, tt->memory_space_);
 }
 
+// Which axis of one tuple element the split partitions, and the per-lane extent
+// on it.
+struct TupleElementSplit {
+  int split_dim = -1;
+  ExprPtr half_dim_size;
+};
+
+// The per-element split mapping for a call whose result is a TupleType, or
+// nullopt when the operator's answer is not a halving this pass can emit.
+//
+// A tuple-returning op has no single "result split dim" to follow: tile.gather_compare
+// answers a row split with a `dst` halved on dim 0 and a `cdst` ([1, rows]) halved on
+// dim 1. Rather than declare that mapping per operator -- the metadata that kept going
+// stale (gh#2612) -- ASK the operator: re-deduce from the arguments the halved call
+// will carry and read which axis of each element moved. The mapping is then whatever
+// the operator itself says it is, and a new tuple-returning op needs no registration.
+//
+// Every element must halve on exactly one axis. An element that comes back UNCHANGED is
+// the dangerous case, not the harmless one: the operator produced a full-width output
+// from an operand each lane owns only half of, so both lanes hold a value derived from
+// half the data and neither is the whole answer. The shape is right and the contents are
+// wrong, which is precisely what type consistency cannot see -- so it is refused. That
+// is also what correctly rejects a COLUMN split of tile.gather_compare, whose two
+// outputs are both sized from the source's rows and so do not move at all.
+std::optional<std::vector<TupleElementSplit>> DiscoverTupleElementSplits(
+    const std::shared_ptr<const TupleType>& original, const TypePtr& deduced_type) {
+  auto deduced = std::dynamic_pointer_cast<const TupleType>(deduced_type);
+  if (!deduced || deduced->types_.size() != original->types_.size()) return std::nullopt;
+
+  std::vector<TupleElementSplit> splits;
+  splits.reserve(original->types_.size());
+  for (size_t i = 0; i < original->types_.size(); ++i) {
+    auto before = std::dynamic_pointer_cast<const TileType>(original->types_[i]);
+    auto after = std::dynamic_pointer_cast<const TileType>(deduced->types_[i]);
+    if (!before || !after || before->shape_.size() != after->shape_.size()) return std::nullopt;
+
+    TupleElementSplit split;
+    for (size_t d = 0; d < before->shape_.size(); ++d) {
+      if (structural_equal(before->shape_[d], after->shape_[d])) continue;
+      if (split.split_dim >= 0) return std::nullopt;  // Two axes moved: not a halving.
+      auto half = ComputeHalfDimSize(before->shape_[d]);
+      if (!structural_equal(after->shape_[d], half)) return std::nullopt;
+      split.split_dim = static_cast<int>(d);
+      split.half_dim_size = half;
+    }
+    if (split.split_dim < 0) return std::nullopt;  // Element unchanged -- see above.
+    splits.push_back(split);
+  }
+  return splits;
+}
+
 ExprPtr HalveTupleElement(const ExprPtr& tuple_expr, int dim) {
   auto tuple = std::dynamic_pointer_cast<const MakeTuple>(tuple_expr);
   if (!tuple || dim < 0 || dim >= static_cast<int>(tuple->elements_.size())) return tuple_expr;
@@ -900,6 +951,8 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
                     const ExprPtr& subblock_idx, std::unordered_map<const Var*, VarPtr>& var_replacements,
                     const ExprPtr& lane_stride) {
   if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+    if (auto projected = RetypeTupleProjection(assign, tile_vars, var_replacements)) return projected;
+
     auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
     if (!call || !call->op_) return stmt;
 
@@ -1061,21 +1114,50 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
                "lower to a tile.load feeding the tile op, so loading it inside the region hits this too.";
       }
 
-      // A TupleType result cannot be halved by the generic path below, which
-      // only understands a single TileType. Left alone that would be harmless --
-      // except the trailing Substitute still rewrites this call's arguments, so
-      // a halved operand ends up under a result type nobody re-derived:
-      // tile.gather_compare over a halved [128, 128] src keeps declaring
-      // Tuple[[256, out_cols], [1, 256]]. That is illegal IR and misallocates.
-      // Reject it; per-element split mapping for tuple results is not implemented.
-      if (auto tuple_type = std::dynamic_pointer_cast<const TupleType>(call->GetType()); tuple_type) {
-        CHECK_SPAN(in_split_dim < 0, call->span_)
+      // A TupleType result carries one split axis PER ELEMENT, so the generic path
+      // below -- which follows a single result_split_dim -- cannot express it.
+      // Doing nothing is not an option either: the trailing Substitute still
+      // rewrites this call's arguments, so a halved operand would end up under a
+      // result type nobody re-derived (tile.gather_compare over a halved [128, 128]
+      // src keeps declaring Tuple[[256, out_cols], [1, 256]] -- illegal IR that
+      // misallocates). Halve each element on the axis the OPERATOR moves it along.
+      if (auto tuple_type = std::dynamic_pointer_cast<const TupleType>(call->GetType());
+          tuple_type && in_split_dim >= 0) {
+        const auto probe_args = BuildHalvedCallArgs(call->args_, var_replacements);
+        TypePtr deduced;
+        try {
+          deduced =
+              OpRegistry::GetInstance().Create(op_name, probe_args, call->kwargs_, call->span_)->GetType();
+        } catch (const pypto::Error&) {
+          deduced = nullptr;  // The operator refuses the halved arguments outright.
+        }
+        auto splits = deduced ? DiscoverTupleElementSplits(tuple_type, deduced) : std::nullopt;
+        CHECK_SPAN(splits.has_value(), call->span_)
             << "LowerAutoVectorSplit: '" << op_name
-            << "' returns a tuple of tiles, which this pass cannot halve, but it consumes an operand the "
-               "split already partitioned. The call's declared result type is not re-derived, so it "
-               "would keep describing full-width tiles over a per-lane input -- IR that no later "
-               "consumer can trust. Move the operation outside the automatically split region, or feed "
-               "it only values that are shared by both lanes.";
+            << "' returns a tuple of tiles and consumes an operand the split already partitioned, but its "
+               "own type inference does not answer the halved arguments with one halved axis per tuple "
+               "element. An element that keeps its full extent was computed from an operand each AIV lane "
+               "owns only half of, so neither lane holds the whole answer -- its shape would still look "
+               "right. Move the operation outside the automatically split region, or feed it only values "
+               "that are shared by both lanes.";
+
+        // Halve through the same machinery the single-TileType path uses, so an odd
+        // extent is localized per lane identically. Re-deduction only discovered WHICH
+        // axis; DiscoverTupleElementSplits already checked the two agree on the extent.
+        std::vector<TypePtr> new_elements;
+        new_elements.reserve(splits->size());
+        for (size_t i = 0; i < splits->size(); ++i) {
+          new_elements.push_back(
+              HalveTileShape(tuple_type->types_[i], (*splits)[i].split_dim, subblock_idx, lane_stride));
+        }
+        auto new_result_type = std::make_shared<TupleType>(std::move(new_elements));
+        // Emit the original args and let the trailing Substitute swap the halved
+        // operands in, exactly as the single-TileType path below does.
+        auto new_call =
+            std::make_shared<Call>(call->op_, call->args_, call->kwargs_, new_result_type, call->span_);
+        auto new_var = std::make_shared<Var>(assign->var_->name_hint_, new_result_type, assign->var_->span_);
+        var_replacements[assign->var_.get()] = new_var;
+        return std::make_shared<AssignStmt>(new_var, new_call, assign->span_);
       }
 
       auto tt = std::dynamic_pointer_cast<const TileType>(call->GetType());
@@ -1973,6 +2055,42 @@ ExprPtr ComputeHalfDimSize(const ExprPtr& dim_size) {
   }
   auto two = std::make_shared<ConstInt>(2, GetScalarDtype(dim_size), dim_size->span_);
   return MakeFloorDiv(dim_size, two, dim_size->span_);
+}
+
+StmtPtr RetypeTupleProjection(const std::shared_ptr<const AssignStmt>& assign,
+                              std::unordered_map<const Var*, TileInfo>& tile_vars,
+                              std::unordered_map<const Var*, VarPtr>& var_replacements) {
+  auto get_item = std::dynamic_pointer_cast<const TupleGetItemExpr>(assign->value_);
+  if (!get_item) return nullptr;
+  auto tuple_var = AsVarLike(get_item->tuple_);
+  auto replaced = tuple_var ? var_replacements.find(tuple_var.get()) : var_replacements.end();
+  if (replaced == var_replacements.end()) return nullptr;
+
+  // The halved tuple type already carries the per-element mapping its producing call
+  // discovered, so rebuilding the access against it is what gives this var its
+  // per-lane element type -- TupleGetItemExpr derives its own type from the tuple.
+  auto new_get = std::make_shared<TupleGetItemExpr>(replaced->second, get_item->index_, get_item->span_);
+  auto new_var = std::make_shared<Var>(assign->var_->name_hint_, new_get->GetType(), assign->var_->span_);
+  auto before = std::dynamic_pointer_cast<const TileType>(assign->var_->GetType());
+  auto after = std::dynamic_pointer_cast<const TileType>(new_get->GetType());
+  INTERNAL_CHECK_SPAN(before && after && before->shape_.size() == after->shape_.size(), assign->span_)
+      << "Internal error: halving a tuple result changed element " << get_item->index_ << " of '"
+      << (tuple_var ? tuple_var->name_hint_ : "") << "' from " << assign->var_->GetType()->TypeName()
+      << " to " << new_get->GetType()->TypeName();
+
+  // Track the axis that moved. It is what a later tile.store needs in order to give
+  // each lane its own destination, and the elements of one tuple need not agree on it:
+  // tile.gather_compare answers a row split with `dst` halved on dim 0 and `cdst`
+  // ([1, rows]) halved on dim 1.
+  for (size_t d = 0; d < before->shape_.size(); ++d) {
+    if (structural_equal(before->shape_[d], after->shape_[d])) continue;
+    const TileInfo info{ComputeHalfDimSize(before->shape_[d]), static_cast<int>(d)};
+    tile_vars[assign->var_.get()] = info;
+    tile_vars[new_var.get()] = info;
+    break;
+  }
+  var_replacements[assign->var_.get()] = new_var;
+  return std::make_shared<AssignStmt>(new_var, new_get, assign->span_);
 }
 
 std::optional<std::pair<int64_t, int64_t>> StaticLaneExtents(const TypePtr& full_type, int split_dim,

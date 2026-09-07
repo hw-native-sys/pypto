@@ -1858,16 +1858,15 @@ def test_gather_partitioned_table_is_rejected_even_with_a_singleton_result():
     assert "source operand 'src'" in str(exc_info.value)
 
 
-def test_tuple_result_op_over_a_partitioned_operand_is_rejected():
-    """A tuple result is not halveable, and its operands are substituted anyway.
+def test_tuple_result_op_halves_each_element_on_its_own_axis():
+    """A tuple result carries one split axis PER ELEMENT, discovered from the operator.
 
-    ``tile.gather_compare`` returns ``Tuple[dst[rows, out_cols], cdst[1, rows]]``,
-    so the generic path — which only understands a single ``TileType`` — skips it
-    entirely: no full-width check, no type consistency, no halving. But the
-    trailing ``Substitute`` still rewrites its arguments, so the call ends up
-    declaring full-width tuple elements over a halved ``[128, 128]`` input. That
-    is illegal IR and would misallocate, so it is rejected; per-element split
-    mapping for tuple results is not implemented.
+    ``tile.gather_compare`` returns ``Tuple[dst[rows, out_cols], cdst[1, rows]]``.
+    Under a row split those two do not move along the same axis: ``dst`` halves on
+    dim 0 while ``cdst`` — laid out as a single contiguous row of per-row counts —
+    halves on dim 1. Re-deducing from the halved arguments is what supplies that
+    mapping, so no per-operator metadata declares it, and each projection is
+    tracked on its own axis so its store offsets the right dimension.
     """
 
     @pl.program
@@ -1878,14 +1877,112 @@ def test_tuple_result_op_over_a_partitioned_operand_is_rejected():
             tmp: pl.Tile[[256, 128], pl.FP32, pl.Mem.Vec],
             rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
             out_0: pl.Out[pl.Tensor[[256, 16], pl.INT32]],
-        ) -> pl.Tensor[[256, 16], pl.INT32]:
+            out_1: pl.Out[pl.Tensor[[1, 256], pl.INT32]],
+        ) -> pl.Tensor[[1, 256], pl.INT32]:
             src = pl.tile.load(t, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            dst, cdst = pl.tile.gather_compare(src, pl.const(1.0, pl.FP32), tmp, cmp_mode="eq", out_cols=16)
+            seed = pl.tile.move(rhs, target_memory=pl.Mem.Mat)  # noqa: F841
+            dst_store = pl.tile.store(dst, [0, 0], out_0)  # noqa: F841
+            cdst_store = pl.tile.store(cdst, [0, 0], out_1)
+            return cdst_store
+
+    printed = _lower(Before).as_python()
+
+    # The call now declares per-lane tuple elements over the halved [128, 128] source.
+    assert (
+        "pl.Tuple[pl.Tile[[128, 16], pl.INT32, pl.Mem.Vec], pl.Tile[[1, 128], pl.INT32, pl.Mem.Vec]]"
+        in printed
+    )
+    # Each projection is retyped to its own element ...
+    assert "dst: pl.Tile[[128, 16], pl.INT32, pl.Mem.Vec] = _tuple_tmp[0]" in printed
+    assert "cdst: pl.Tile[[1, 128], pl.INT32, pl.Mem.Vec] = _tuple_tmp[1]" in printed
+    # ... and each store offsets the axis THAT element was halved along.
+    assert "pl.tile.store(dst, [0 + subblock_idx * 128, 0], out_0)" in printed
+    assert "pl.tile.store(cdst, [0, 0 + subblock_idx * 128], out_1)" in printed
+
+
+def test_arity_dependent_scratch_needs_no_declaration():
+    """A position that is scratch only at *some* arities still gets the right answer.
+
+    ``tile.mrgsort_format2`` takes ``(src0..srcN-1, tmp)``, so position 2 is the
+    workspace in a 2-way merge and a third sorted input in a 3/4-way one. A
+    per-position registry declaration cannot express that — but none is needed: the
+    deducer sizes the result from whichever position holds ``tmp`` (always the last),
+    so type consistency decides that position at every arity, and the remaining
+    positions are real per-lane data the full-width check requires to be sharded.
+
+    Here the 2-way form lowers when its workspace is produced inside the region and
+    halves with the sources, and is refused when the workspace stays full width —
+    which is correct, because the result *is* the workspace.
+    """
+
+    @pl.program
+    class Halved:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            a: pl.Tensor[[256, 128], pl.FP32],
+            b: pl.Tensor[[256, 128], pl.FP32],
+            wt: pl.Tensor[[256, 128], pl.FP32],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_0: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+        ) -> pl.Tensor[[256, 128], pl.FP32]:
+            s0 = pl.tile.load(a, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            s1 = pl.tile.load(b, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            w = pl.tile.load(wt, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            merged = pl.tile.mrgsort_format2(s0, s1, w)
+            seed = pl.tile.move(rhs, target_memory=pl.Mem.Mat)  # noqa: F841
+            out_store = pl.tile.store(merged, [0, 0], out_0)
+            return out_store
+
+    printed = _lower(Halved).as_python()
+    assert "merged: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.tile.mrgsort_format2(s0, s1, w" in printed
+
+    @pl.program
+    class FullWidthWorkspace:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            a: pl.Tensor[[256, 128], pl.FP32],
+            b: pl.Tensor[[256, 128], pl.FP32],
+            w: pl.Tile[[256, 128], pl.FP32, pl.Mem.Vec],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_0: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+        ) -> pl.Tensor[[256, 128], pl.FP32]:
+            s0 = pl.tile.load(a, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            s1 = pl.tile.load(b, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            merged = pl.tile.mrgsort_format2(s0, s1, w)
+            seed = pl.tile.move(rhs, target_memory=pl.Mem.Mat)  # noqa: F841
+            out_store = pl.tile.store(merged, [0, 0], out_0)
+            return out_store
+
+    with pytest.raises(ValueError, match="full-width operand 'w'"):
+        _lower(FullWidthWorkspace)
+
+
+def test_tuple_result_op_whose_elements_do_not_move_is_rejected():
+    """An element that keeps its full extent is the unsafe case, not the harmless one.
+
+    Both of ``tile.gather_compare``'s outputs are sized from the source's ROWS, so a
+    LEFT_RIGHT split — which halves the source's columns — leaves them unchanged. Each
+    lane would then scan half the columns and declare a full-width count: right shape,
+    wrong contents, which is exactly what type consistency cannot see. Refuse it.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.LEFT_RIGHT})
+        def split_auto(
+            t: pl.Tensor[[128, 256], pl.FP32],
+            tmp: pl.Tile[[128, 256], pl.FP32, pl.Mem.Vec],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_0: pl.Out[pl.Tensor[[128, 16], pl.INT32]],
+        ) -> pl.Tensor[[128, 16], pl.INT32]:
+            src = pl.tile.load(t, [0, 0], [128, 256], target_memory=pl.Mem.Vec)
             dst, cdst = pl.tile.gather_compare(src, pl.const(1.0, pl.FP32), tmp, cmp_mode="eq", out_cols=16)
             seed = pl.tile.move(rhs, target_memory=pl.Mem.Mat)  # noqa: F841
             out_store = pl.tile.store(dst, [0, 0], out_0)
             return out_store
 
-    with pytest.raises(ValueError, match="returns a tuple of tiles") as exc_info:
+    with pytest.raises(ValueError, match="one halved axis per tuple element") as exc_info:
         _lower(Before)
     assert "tile.gather_compare" in str(exc_info.value)
 

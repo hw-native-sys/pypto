@@ -529,6 +529,13 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
     // --- Affinity gate: only halve VECTOR-affine leaf stmts. ---
     CallPtr leaf_call;
     if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+      // A tuple projection carries no call, so the gate below would drop it into the
+      // pass-through fallback and leave a full-width declared type over a halved
+      // tuple. Retype it here, the same way split_axis::ProcessStmt does.
+      if (auto projected = split_axis::RetypeTupleProjection(assign, tile_vars, var_replacements)) {
+        result.push_back(projected);
+        continue;
+      }
       leaf_call = AsCall(assign->value_);
     } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
       leaf_call = AsCall(eval->expr_);

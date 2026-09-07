@@ -181,8 +181,8 @@ TypePtr DeduceTileColExpandType(const std::vector<ExprPtr>& args,
   auto col_type = As<TileType>(args[1]->GetType());
   CHECK(col_type) << "The operator " << op_name << " requires second argument to be a TileType, but got "
                   << args[1]->GetType()->TypeName();
-  CHECK(!col_type->shape_.empty())
-      << "The operator " << op_name << " requires second argument to have at least 1 dimension";
+  CHECK(!col_type->shape_.empty()) << "The operator " << op_name
+                                   << " requires second argument to have at least 1 dimension";
   CHECK(!target_type->shape_.empty())
       << "The operator " << op_name << " requires first argument to have at least 1 dimension";
 

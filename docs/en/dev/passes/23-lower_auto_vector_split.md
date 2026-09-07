@@ -758,16 +758,43 @@ the trailing `Substitute` rewrites the argument even where nothing is halved:
 - a **singleton result** returns early — `gather` with `[1, N]` indices yields a
   `[1, N]` result, so the result is untouched while the table under it is still
   halved;
-- a **tuple result** skips the block entirely. `tile.gather_compare` returns
-  `Tuple[dst, cdst]`, which the generic path (single `TileType` only) cannot
-  halve — so it would keep declaring full-width elements over a halved input.
-  A tuple-returning op that consumes a partitioned operand is rejected;
-  per-element split mapping for tuple results is not implemented.
+- a **tuple result** takes its own path (below), because the generic block follows
+  one `result_split_dim` and a tuple has one *per element*.
+
+### Tuple results — one split axis per element
+
+`tile.gather_compare` returns `Tuple[dst[rows, out_cols], cdst[1, rows]]`. Under a
+row split those two elements do **not** move along the same axis: `dst` halves on
+dim 0, while `cdst` — a single contiguous row of per-row counts — halves on dim 1.
+There is no single result axis to follow, so the generic path cannot express it.
+
+The mapping is **discovered, not declared**: re-deduce the call from the arguments
+the halved node will carry, and read which axis of each element moved. A new
+tuple-returning operator therefore needs no registration, and the mapping cannot go
+stale the way per-operator metadata did (see the gh#2612 discussion). Re-deduction
+only supplies the *axis*; `HalveTileShape` still performs the halving, so an odd
+extent is localized per lane exactly as on the single-`TileType` path.
+
+Every element must halve on exactly one axis. An element that comes back
+**unchanged** is the dangerous case, not the harmless one — the operator produced a
+full-width output from an operand each lane owns only half of, so neither lane holds
+the whole answer while the shape still looks right. That is what correctly rejects a
+LEFT_RIGHT split of `tile.gather_compare`: both its outputs are sized from the
+source's *rows*, so halving the columns moves neither.
+
+The `x = tup[i]` projections are retyped from the halved tuple by
+`split_axis::RetypeTupleProjection`, which also records each element's own axis so a
+later `tile.store` offsets the right dimension. **Both** lowering arms call it: the
+AUTO arm's affinity gate only routes leaf *calls* into `ProcessStmts`, so a
+projection left to its pass-through fallback would keep a full-width declared type
+over a halved tuple.
 
 A position that is scratch only in *some* arities cannot be declared:
 `tile.mrgsort_format2`'s `tmp_or_src2` is a third sorted input in a 3/4-way merge
-and workspace in a 2-way one, and the arity is the positional argument count.
-Such a position stays unclassified and a full-width one is rejected.
+and workspace in a 2-way one, and the arity is the positional argument count. It
+needs no declaration in practice — the deducer sizes the result from whichever
+position holds `tmp` (always the last), so type consistency decides that position at
+every arity, and the remaining positions are real sorted inputs that must be sharded.
 
 ### Carries, merges and dropped axes
 
