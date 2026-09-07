@@ -718,6 +718,12 @@ def pytest_configure(config):
     )
     config.addinivalue_line(
         "markers",
+        "dump_args: the test asserts on an args-dump manifest, so it needs "
+        "`--dump-args` and skips without it. Same contract as `swimlane`, "
+        "applied by pytest_runtest_setup; CI runs it in its own flagged step.",
+    )
+    config.addinivalue_line(
+        "markers",
         "swimlane: the test asserts on a chip-swimlane record, so it needs "
         "`--enable-chip-swimlane` and skips without it. CI selects the whole set "
         "with `-m swimlane` in one flagged step, and the batched shards exclude "
@@ -848,13 +854,22 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
     """
     set_current_item_platform(_resolve_item_platform(item, item.config))
 
-    # The `swimlane` marker has always meant "needs --enable-chip-swimlane and
-    # skips without it", but each swimlane fixture implemented that skip itself.
-    # A test that declares its case instead has no such fixture, so enforce the
-    # marker's own contract here -- otherwise it runs without a record to read
-    # and fails where it used to skip.
-    if item.get_closest_marker("swimlane") and not _resolve_swimlane_option(item.config):
-        pytest.skip("pass --enable-chip-swimlane to collect the record this test asserts on")
+    # A DFX marker has always meant "needs its collection flag and skips without
+    # it", but each DFX fixture implemented that skip itself. A test that
+    # declares its case instead has no such fixture, so enforce the marker's own
+    # contract here -- otherwise it runs with no artifact to read and fails where
+    # it used to skip. `--codegen-only` is the same condition by another route:
+    # nothing executes, so nothing is written.
+    for marker, flag, option in (
+        ("swimlane", _resolve_swimlane_option(item.config), "--enable-chip-swimlane"),
+        ("dump_args", item.config.getoption("--dump-args"), "--dump-args"),
+    ):
+        if not item.get_closest_marker(marker):
+            continue
+        if not flag:
+            pytest.skip(f"pass {option} to collect the artifact this test asserts on")
+        if item.config.getoption("--codegen-only"):
+            pytest.skip("--codegen-only skips device execution, so no DFX artifact is written")
 
     marker = item.get_closest_marker("platform_xfail")
     if marker is None:

@@ -124,6 +124,11 @@ def _snapshot_swimlane_branches_from_env() -> int:
     return branches
 
 
+# Read at import rather than inside the test: the chained-snapshot case is
+# declared, and a declared case has to exist before the pre-compile pool starts.
+_SNAPSHOT_SWIMLANE_BRANCHES = _snapshot_swimlane_branches_from_env()
+
+
 def _new_swimlane_file(test_runner, case: PTOTestCase, *, label: str) -> Path:
     if not test_runner.config.enable_chip_swimlane:
         pytest.skip(f"pass --enable-chip-swimlane to validate {label}")
@@ -953,77 +958,65 @@ class TestPhaseFenceDepCompressionCorrectness:
 
 @pytest.mark.swimlane
 class TestPhaseFenceDepCompressionSwimlane:
-    def test_multiloop_chain_default(self, test_runner):
-        data = _new_swimlane_json(test_runner, _multiloop_chain_case(), label="multi-loop chain phase-fence")
-        _assert_multiloop_chain_shape(data)
+    @st.cases(st.from_legacy(_multiloop_chain_case()))
+    def test_multiloop_chain_default(self, case_run):
+        swimlane = case_run.swimlane()
+        _assert_multiloop_chain_shape(swimlane)
 
-    def test_submit_three_level_strict(self, test_runner):
-        data = _new_swimlane_json(
-            test_runner,
-            _submit_case(epochs=2, layers=1, phases=3, name="phase_fence_submit_3l_swimlane"),
-            label="three-level submit phase-fence",
-        )
-        _assert_flattened_stage_strict(data, stages=2 * 3, branches=_BRANCHES)
+    @st.cases(
+        st.from_legacy(_submit_case(epochs=2, layers=1, phases=3, name="phase_fence_submit_3l_swimlane"))
+    )
+    def test_submit_three_level_strict(self, case_run):
+        swimlane = case_run.swimlane()
+        _assert_flattened_stage_strict(swimlane, stages=2 * 3, branches=_BRANCHES)
 
-    def test_pl_at_three_level_strict(self, test_runner):
+    @st.cases(st.from_legacy(_pl_at_case(epochs=2, phases=3, name="phase_fence_pl_at_3l_swimlane")))
+    def test_pl_at_three_level_strict(self, case_run):
         _require_extra_swimlane_case("three-level pl.at swimlane")
-        data = _new_swimlane_json(
-            test_runner,
-            _pl_at_case(epochs=2, phases=3, name="phase_fence_pl_at_3l_swimlane"),
-            label="three-level pl.at phase-fence",
-        )
-        _assert_flattened_stage_strict(data, stages=2 * 3, branches=_BRANCHES)
+        swimlane = case_run.swimlane()
+        _assert_flattened_stage_strict(swimlane, stages=2 * 3, branches=_BRANCHES)
 
-    def test_reset_per_outer_generates_swimlane(self, test_runner):
+    @st.cases(st.from_legacy(_reset_case()))
+    def test_reset_per_outer_generates_swimlane(self, case_run):
         _require_extra_swimlane_case("reset-per-outer swimlane")
-        data = _new_swimlane_json(test_runner, _reset_case(), label="reset-per-outer phase-fence")
-        _assert_min_task_count(data, expected=2 * 2 * _BRANCHES)
+        swimlane = case_run.swimlane()
+        _assert_min_task_count(swimlane, expected=2 * 2 * _BRANCHES)
 
-    def test_sibling_loops_strict(self, test_runner):
+    @st.cases(st.from_legacy(_sibling_loops_case()))
+    def test_sibling_loops_strict(self, case_run):
         _require_extra_swimlane_case("sibling-loop swimlane")
-        data = _new_swimlane_json(test_runner, _sibling_loops_case(), label="sibling-loop phase-fence")
-        _assert_flattened_stage_strict(data, stages=2, branches=_BRANCHES)
+        swimlane = case_run.swimlane()
+        _assert_flattened_stage_strict(swimlane, stages=2, branches=_BRANCHES)
 
-    def test_if_consumer_strict(self, test_runner):
+    @st.cases(st.from_legacy(_if_consumer_case()))
+    def test_if_consumer_strict(self, case_run):
         _require_extra_swimlane_case("if-consumer swimlane")
-        data = _new_swimlane_json(test_runner, _if_consumer_case(), label="if-consumer phase-fence")
-        _assert_flattened_stage_strict(data, stages=2, branches=_BRANCHES)
+        swimlane = case_run.swimlane()
+        _assert_flattened_stage_strict(swimlane, stages=2, branches=_BRANCHES)
 
-    def test_if_mixed_fallback_swimlane(self, test_runner):
+    @st.cases(st.from_legacy(_if_mixed_fallback_case()))
+    def test_if_mixed_fallback_swimlane(self, case_run):
         _require_extra_swimlane_case("if-mixed-fallback swimlane")
-        data = _new_swimlane_json(
-            test_runner,
-            _if_mixed_fallback_case(),
-            label="if-mixed-fallback phase-fence",
-        )
-        _assert_min_task_count(data, expected=3 * _BRANCHES)
+        swimlane = case_run.swimlane()
+        _assert_min_task_count(swimlane, expected=3 * _BRANCHES)
 
-    def test_manual_dummy_auto_mix_generates_swimlane(self, test_runner):
-        data = _new_swimlane_json(
-            test_runner,
-            _manual_dummy_auto_mix_case(),
-            label="manual-dummy/auto phase-fence mix",
-        )
-        _assert_min_task_count(data, expected=3 * _BRANCHES)
+    @st.cases(st.from_legacy(_manual_dummy_auto_mix_case()))
+    def test_manual_dummy_auto_mix_generates_swimlane(self, case_run):
+        swimlane = case_run.swimlane()
+        _assert_min_task_count(swimlane, expected=3 * _BRANCHES)
 
-    def test_dense_mixed_extra(self, test_runner):
+    @st.cases(st.from_legacy(_dense_mixed_case(branches=_DENSE_SWIMLANE_BRANCHES)))
+    def test_dense_mixed_extra(self, case_run):
         _require_extra_swimlane_case("dense mixed swimlane")
-        data = _new_swimlane_json(
-            test_runner,
-            _dense_mixed_case(branches=_DENSE_SWIMLANE_BRANCHES),
-            label="dense mixed phase-fence",
-        )
-        _assert_dense_mixed_shape(data, branches=_DENSE_SWIMLANE_BRANCHES)
+        swimlane = case_run.swimlane()
+        _assert_dense_mixed_shape(swimlane, branches=_DENSE_SWIMLANE_BRANCHES)
 
-    def test_partial_reduce_chain_strict(self, test_runner):
+    @st.cases(st.from_legacy(_partial_reduce_chain_case()))
+    def test_partial_reduce_chain_strict(self, case_run):
         _require_extra_swimlane_case("partial-reduce chain swimlane")
-        data = _new_swimlane_json(
-            test_runner,
-            _partial_reduce_chain_case(),
-            label="partial-reduce chain phase-fence",
-        )
-        _assert_min_task_count(data, expected=2 * _BRANCHES + 1)
-        tasks = sorted(data["tasks"], key=lambda t: t["start_time_us"])[: 2 * _BRANCHES + 1]
+        swimlane = case_run.swimlane()
+        _assert_min_task_count(swimlane, expected=2 * _BRANCHES + 1)
+        tasks = sorted(swimlane["tasks"], key=lambda t: t["start_time_us"])[: 2 * _BRANCHES + 1]
         producers = tasks[:_BRANCHES]
         reducer = tasks[_BRANCHES : _BRANCHES + 1]
         consumers = tasks[_BRANCHES + 1 :]
@@ -1040,18 +1033,18 @@ class TestPhaseFenceDepCompressionSwimlane:
             f"before reducer ends at {reducer_end:.2f}us"
         )
 
-    def test_chained_snapshot_strict(self, test_runner):
-        _require_extra_swimlane_case("chained snapshot swimlane")
-        branches = _snapshot_swimlane_branches_from_env()
-        data = _new_swimlane_json(
-            test_runner,
+    @st.cases(
+        st.from_legacy(
             _chained_snapshot_case(
-                branches=branches,
-                name=f"phase_fence_chained_snapshot_b{branches}_swimlane",
-            ),
-            label="chained snapshot phase-fence",
+                branches=_SNAPSHOT_SWIMLANE_BRANCHES,
+                name=f"phase_fence_chained_snapshot_b{_SNAPSHOT_SWIMLANE_BRANCHES}_swimlane",
+            )
         )
-        _assert_flattened_stage_strict(data, stages=4, branches=branches)
+    )
+    def test_chained_snapshot_strict(self, case_run):
+        _require_extra_swimlane_case("chained snapshot swimlane")
+        swimlane = case_run.swimlane()
+        _assert_flattened_stage_strict(swimlane, stages=4, branches=_SNAPSHOT_SWIMLANE_BRANCHES)
 
 
 if __name__ == "__main__":

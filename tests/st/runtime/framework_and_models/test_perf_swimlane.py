@@ -23,6 +23,7 @@ from typing import Any
 import pypto.language as pl
 import pytest
 import torch
+from harness import st
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
 from pypto.ir.pass_manager import OptimizationStrategy
 
@@ -83,49 +84,22 @@ class _MatmulPTO(PTOTestCase):
         tensors["c"][:] = torch.matmul(tensors["a"], tensors["b"])
 
 
-@pytest.fixture(scope="session")
-def swimlane_file(test_runner) -> Path:
-    """Run matmul once with profiling and return the generated swimlane file.
-
-    Skips the entire test session (all dependent tests) when
-    --enable-chip-swimlane is not passed.
-    """
-    if not test_runner.config.enable_chip_swimlane:
-        pytest.skip("pass --enable-chip-swimlane to run swimlane tests")
-
-    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/chip_swimlane_records.json"))
-
-    result = test_runner.run(_MatmulPTO())
-    assert result.passed, f"Matmul execution failed: {result.error}"
-
-    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/chip_swimlane_records.json"))
-    new_files = after - before
-    assert new_files, "No chip_swimlane_records.json was generated in build_output/*/dfx_outputs/"
-
-    return max(new_files, key=lambda p: p.stat().st_mtime)
-
-
-@pytest.fixture(scope="session")
-def swimlane_data(swimlane_file: Path) -> dict:
-    # Runtime JSON v2 (simpler #985): the host now dumps raw cycle-domain
-    # streams (``aicore_tasks`` / ``aicpu_tasks`` + ``metadata``); the unified
-    # ``tasks`` view (cycle→us conversion, AICore/AICPU join) is rebuilt in
-    # Python by the canonical ``swimlane_converter.read_perf_data``. Validate
-    # the consumed view rather than the raw on-disk dump.
-    from simpler_setup.tools.swimlane_converter import read_perf_data  # noqa: PLC0415
-
-    return read_perf_data(str(swimlane_file))
+_MATMUL_CASE = st.from_legacy(_MatmulPTO())
 
 
 @pytest.mark.swimlane
 class TestSwimlaneOutput:
     """Validate the structure and content of chip_swimlane_records.json."""
 
-    def test_file_generated(self, swimlane_file: Path):
+    @st.cases(_MATMUL_CASE)
+    def test_file_generated(self, case_run):
         """A chip_swimlane_records.json file is created in build_output/*/dfx_outputs/."""
-        assert swimlane_file.exists(), f"Swimlane file not found: {swimlane_file}"
+        # `dfx` asserts existence itself, naming the path and the flag that
+        # collects it; calling it is the whole assertion.
+        case_run.dfx("chip_swimlane_records.json")
 
-    def test_name_map_generated(self, swimlane_file: Path):
+    @st.cases(_MATMUL_CASE)
+    def test_name_map_generated(self, case_run):
         """A name_map_*.json (func_id→kernel name) is written next to the records.
 
         pypto does not use simpler's SceneTest harness, so it synthesises the
@@ -136,22 +110,24 @@ class TestSwimlaneOutput:
         """
         import json  # noqa: PLC0415
 
-        dfx_dir = swimlane_file.parent
+        dfx_dir = case_run.dfx("chip_swimlane_records.json").parent
         name_maps = list(dfx_dir.glob("name_map_*.json"))
         assert name_maps, f"No name_map_*.json generated in {dfx_dir}"
         data = json.loads(name_maps[0].read_text(encoding="utf-8"))
         assert data.get("callable_id_to_name"), f"name_map {name_maps[0].name} has empty callable_id_to_name"
 
-    def test_top_level_structure(self, swimlane_data: dict):
+    @st.cases(_MATMUL_CASE)
+    def test_top_level_structure(self, case_run):
         """Top-level 'chip_swimlane_level' and 'tasks' fields are present and valid."""
-        assert "chip_swimlane_level" in swimlane_data, "Missing top-level field: 'chip_swimlane_level'"
-        assert swimlane_data["chip_swimlane_level"] in (1, 2, 3, 4), (
-            f"Unexpected chip_swimlane_level: {swimlane_data['chip_swimlane_level']} (expected 1-4)"
+        assert "chip_swimlane_level" in case_run.swimlane(), "Missing top-level field: 'chip_swimlane_level'"
+        assert case_run.swimlane()["chip_swimlane_level"] in (1, 2, 3, 4), (
+            f"Unexpected chip_swimlane_level: {case_run.swimlane()['chip_swimlane_level']} (expected 1-4)"
         )
-        assert "tasks" in swimlane_data, "Missing top-level field: 'tasks'"
-        assert len(swimlane_data["tasks"]) > 0, "tasks list is empty"
+        assert "tasks" in case_run.swimlane(), "Missing top-level field: 'tasks'"
+        assert len(case_run.swimlane()["tasks"]) > 0, "tasks list is empty"
 
-    def test_task_required_fields(self, swimlane_data: dict):
+    @st.cases(_MATMUL_CASE)
+    def test_task_required_fields(self, case_run):
         """Each task contains all required fields with the correct types.
 
         Fields are the cross-platform intersection of the
@@ -172,7 +148,7 @@ class TestSwimlaneOutput:
             "dispatch_time_us": (int, float),
             "finish_time_us": (int, float),
         }
-        for task in swimlane_data["tasks"]:
+        for task in case_run.swimlane()["tasks"]:
             for field, expected_type in required.items():
                 assert field in task, f"task_id={task.get('task_id')}: missing field '{field}'"
                 assert isinstance(task[field], expected_type), (

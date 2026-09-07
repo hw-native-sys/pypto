@@ -51,6 +51,7 @@ from typing import Any
 import pypto.language as pl
 import pytest
 import torch
+from harness import st
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
 from pypto.ir.pass_manager import OptimizationStrategy
 
@@ -392,43 +393,27 @@ class TestSubmitDumpsCorrectness:
         assert result.passed, f"submit dumps= pipeline execution failed: {result.error}"
 
 
-@pytest.fixture(scope="module")
-def submit_dumps_manifest_file(test_runner) -> Path:
-    """Run the submit pipeline once with --dump-args and return the manifest path."""
-    if not test_runner.config.enable_dump_args:
-        pytest.skip("pass --dump-args to validate the submit dumps= manifest")
-    if test_runner.config.codegen_only:
-        pytest.skip("--codegen-only skips device execution; no manifest is written")
-
-    pattern = "*/dfx_outputs/args_dump/args_dump.json"
-    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob(pattern))
-    result = test_runner.run(_SubmitDumpsPipelinePTO())
-    assert result.passed, f"submit dumps= pipeline failed: {result.error}"
-
-    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob(pattern))
-    new_files = after - before
-    assert new_files, "No args_dump.json was generated for the submit dumps= run"
-    return max(new_files, key=lambda p: p.stat().st_mtime)
+_SUBMIT_DUMPS_CASE = st.from_legacy(_SubmitDumpsPipelinePTO())
 
 
-@pytest.fixture(scope="module")
-def submit_dumps_manifest(submit_dumps_manifest_file: Path) -> list[dict]:
-    """Parse ``args_dump.json`` and return the entry list (the ``args`` key)."""
-    manifest = json.loads(submit_dumps_manifest_file.read_text())
-    assert isinstance(manifest, dict), (
-        f"{submit_dumps_manifest_file}: expected a dict, got {type(manifest).__name__}"
-    )
+def _submit_dumps_entries(case_run) -> list[dict]:
+    """Parse ``args_dump.json`` from this run and return its ``args`` entries."""
+    path = case_run.dfx("args_dump/args_dump.json")
+    manifest = json.loads(path.read_text())
+    assert isinstance(manifest, dict), f"{path}: expected a dict, got {type(manifest).__name__}"
     entries = manifest.get("args")
     assert isinstance(entries, list) and entries, (
-        f"{submit_dumps_manifest_file}: 'args' missing or empty — dump pipeline produced no entries"
+        f"{path}: 'args' missing or empty — dump pipeline produced no entries"
     )
     return entries
 
 
+@pytest.mark.dump_args
 class TestSubmitDumpsManifest:
     """Manifest validation for ``dumps=`` — only runs when ``--dump-args`` is enabled."""
 
-    def test_only_dumped_submit_appears(self, submit_dumps_manifest):
+    @st.cases(_SUBMIT_DUMPS_CASE)
+    def test_only_dumped_submit_appears(self, case_run):
         """Selective dump must drop stage2 entirely.
 
         Only stage1 carries ``dumps=[x, scratch]``; stage2 has no ``dumps=``,
@@ -438,16 +423,17 @@ class TestSubmitDumpsManifest:
         identifies each dispatch by ``task_id``; ``func_id`` / ``subtask_id``
         are runtime-internal and not surfaced per manifest entry.
         """
-        entries = submit_dumps_manifest
+        entries = _submit_dumps_entries(case_run)
         task_ids = {e["task_id"] for e in entries}
         assert len(task_ids) == 1, (
             f"selective dump should retain entries from a single submitted kernel, "
             f"found {len(task_ids)} task_ids={sorted(task_ids)}"
         )
 
-    def test_dumped_roles_cover_input_and_inout(self, submit_dumps_manifest):
+    @st.cases(_SUBMIT_DUMPS_CASE)
+    def test_dumped_roles_cover_input_and_inout(self, case_run):
         """``dumps=[x, scratch]`` dumps one input (x) and one inout (scratch) slot."""
-        roles = {e["role"] for e in submit_dumps_manifest}
+        roles = {e["role"] for e in _submit_dumps_entries(case_run)}
         assert "input" in roles, f"missing role=input entries; have {sorted(roles)}"
         assert "inout" in roles, f"missing role=inout entries; have {sorted(roles)}"
 
