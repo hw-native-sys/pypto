@@ -616,6 +616,16 @@ produced inside a scope does not leak to an enclosing scope where its identifier
 would be out of C++ scope. Loop / branch carries are declared *before* their
 body's `SIMPLER_SCOPE`, so they correctly survive the block.
 
+**Exception: array carries over enclosing storage.** An `arr[i] = tid` inside a
+scope registers a carry whose backing `TaskId[N]` was declared further out. The
+slot write is emitted in place, but the *carry* is read after the closing brace,
+by the enclosing loop's yield. Restoring it away makes that yield misread an
+Array value as a scalar TaskId, so `PreserveEnclosingArrayCarries` keeps any
+carry whose backing array outlives the block — for both scope kinds. Locality is
+decided per kind: a MANUAL scope hoists its allocations and knows its local
+names outright; an AUTO scope hoists nothing, so storage counts as enclosing
+exactly when a pre-entry carry already named it.
+
 ### Unresolvable dep edges
 
 A consequence of that lifetime rule: a dep edge naming a TaskId produced in a
@@ -626,6 +636,7 @@ on scope exit. Codegen's response depends on the edge's provenance:
 | --------------- | -------------------------- |
 | Compiler-derived (`compiler_manual_dep_edges`) | Silently skipped. These are a best-effort hazard patch; `PrepareCrossScopeTaskIdHoists` already LCA-hoists the ones it can, and dropping the rest is safe because the pass only ever *adds* ordering |
 | User-written (`deps=[...]`) | **Hard error** — `CHECK_SPAN` raises a `pypto::ValueError` naming the TaskId and the DSL source line |
+| Array publish (`arr[i] = tid`) | **Hard error** — `CheckTaskIdSlotValueInScope` raises a `pypto::ValueError` telling the user to move the store inside the `pl.scope()` that produced the TaskId. Unlike a dep edge, the slot write is emitted unconditionally, so accepting it would emit orchestration the host compiler rejects with `'<tid>' was not declared in this scope` — a failure `--compile-only` never reaches |
 
 Provenance is the attr key. Note that `attrs["dummy_task"]` is *not* an
 authorship marker: the parser stamps it on a user-written

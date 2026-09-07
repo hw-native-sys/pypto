@@ -584,6 +584,13 @@ MANUAL）在进入时快照 `manual_task_id_map_` 与 `array_carry_vars_`、退�
 因此在某作用域内产生的绑定不会泄漏到外层作用域（否则其标识符会超出 C++ 作用域）。
 循环 / 分支的 carry 在其 body 的 `SIMPLER_SCOPE` *之前*声明，因此能正确地在块结束后存活。
 
+**例外：基于外层存储的 array carry。** 作用域内的 `arr[i] = tid` 注册的 carry，其底层
+`TaskId[N]` 声明在更外层。槽位写入就地生成，但该 *carry* 是在闭合花括号之后、由外层循环的
+yield 读取的。把它恢复掉会让该 yield 把 Array 值误判为标量 TaskId，因此
+`PreserveEnclosingArrayCarries` 会保留所有底层数组生命周期长于该块的 carry——两种作用域
+形态皆然。局部性判定按形态区分：MANUAL 作用域会提升自己的分配，因此直接知道其局部名字集合；
+AUTO 作用域不做任何提升，故仅当进入前已有 carry 命名了该存储时，才视其为外层存储。
+
 ### 无法解析的依赖边
 
 上述生命周期规则带来一个结果：若某条依赖边引用的 TaskId 产生于一个**已经关闭**的
@@ -594,6 +601,7 @@ MANUAL）在进入时快照 `manual_task_id_map_` 与 `array_carry_vars_`、退�
 | -------- | ---------------- |
 | 编译器推导（`compiler_manual_dep_edges`） | 静默跳过。这类边是尽力而为的 hazard 补丁；`PrepareCrossScopeTaskIdHoists` 已对能处理的部分做了 LCA 提升，丢弃其余是安全的，因为该 pass 只会*增加*定序 |
 | 用户书写（`deps=[...]`） | **硬报错**——`CHECK_SPAN` 抛出 `pypto::ValueError`，并指出该 TaskId 与对应的 DSL 源码行 |
+| 数组发布（`arr[i] = tid`） | **硬报错**——`CheckTaskIdSlotValueInScope` 抛出 `pypto::ValueError`，提示用户把该写入移进产生该 TaskId 的 `pl.scope()` 内。与依赖边不同，槽位写入是无条件生成的，因此若放行，就会生成宿主编译器以 `'<tid>' was not declared in this scope` 拒绝的编排代码——而 `--compile-only` 根本走不到那一步 |
 
 来源由 attr key 判定。注意 `attrs["dummy_task"]` **不是**作者身份标记：parser 会把
 它打在用户书写的 `pl.system.task_dummy(deps=[...])` 上，与

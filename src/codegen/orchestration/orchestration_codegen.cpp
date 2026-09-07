@@ -253,6 +253,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
     bool user_written;
   };
 
+  /// Backing storage of one TaskId array carry — see ``array_carry_vars_``.
+  struct ArrayCarryEntry {
+    std::string array_name;
+    int64_t size;
+  };
+
   explicit OrchestrationStmtCodegen(const ProgramPtr& prog, std::map<std::string, int>* func_ids,
                                     std::map<std::string, CoreType>* core_types,
                                     std::map<std::string, std::vector<std::string>>* func_signatures,
@@ -1044,6 +1050,16 @@ class OrchestrationStmtCodegen : public CodegenBase {
       }
       EmitIndentedLine("}");
 
+      // An AUTO scope hoists nothing, so a backing array declared inside the
+      // block dies at its closing brace while one declared further out does
+      // not. Storage counts as enclosing exactly when some pre-entry carry
+      // already named it.
+      std::set<std::string> enclosing_arrays;
+      for (const auto& [_, entry] : saved_array_carry) enclosing_arrays.insert(entry.array_name);
+      PreserveEnclosingArrayCarries(&saved_array_carry, &saved_map, [&](const std::string& name) {
+        return enclosing_arrays.count(name) == 0;
+      });
+
       manual_task_id_map_ = std::move(saved_map);
       array_carry_vars_ = std::move(saved_array_carry);
       return;
@@ -1108,19 +1124,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // that names a manual-scope-local C++ identifier (e.g. ``TaskId prev =
     // arr[k];``) dies at the closing brace and must not leak (issue #1577).
     // BUT an array carry registered inside the scope can reuse a backing array
-    // declared in the ENCLOSING scope — e.g. a ``pl.parallel`` TaskId array
-    // carry threaded from an outer sequential loop's backing store. That carry
-    // survives the brace and is referenced by the enclosing loop's yield, which
-    // is emitted AFTER this block; wiping it would drop the loop-carried tids
-    // and trip the scalar-yield branch (issue #1811). Preserve such entries —
-    // identified by backing storage that is NOT this scope's local name set.
-    for (const auto& [var, entry] : array_carry_vars_) {
-      if (saved_array_carry.count(var)) continue;         // outer entry — keep outer value
-      if (local_names.count(entry.array_name)) continue;  // scope-local storage — drop
-      saved_array_carry[var] = entry;                     // enclosing-valid carry — preserve
-      auto tid_it = manual_task_id_map_.find(var);        // keep its per-slot dep names in sync
-      if (tid_it != manual_task_id_map_.end()) saved_map[var] = tid_it->second;
-    }
+    // declared in the ENCLOSING scope (issue #1811) — see
+    // ``PreserveEnclosingArrayCarries``. A manual scope hoists its allocations,
+    // so it knows its own local storage names outright.
+    PreserveEnclosingArrayCarries(&saved_array_carry, &saved_map,
+                                  [&](const std::string& name) { return local_names.count(name) != 0; });
 
     manual_task_id_map_ = std::move(saved_map);
     array_carry_vars_ = std::move(saved_array_carry);
@@ -4153,6 +4161,35 @@ class OrchestrationStmtCodegen : public CodegenBase {
     emit_name_map_[assign->var_.get()] = target_name;
   }
 
+  /// Reject an ``arr[i] = tid`` whose TaskId was produced in a scope that has
+  /// already closed.
+  ///
+  /// The slot write is emitted in place, but the value names a C++ local
+  /// declared inside the ``SIMPLER_SCOPE { }`` that produced it. Writing it
+  /// after that block closes compiles here and is then rejected by the host
+  /// compiler with ``'<tid>' was not declared in this scope`` — a failure the
+  /// user cannot trace back to their source, and one ``--compile-only`` never
+  /// reaches. Diagnose it at the DSL level instead.
+  ///
+  /// A stale value is identified positively: ``emit_name_map_`` still holds the
+  /// name it was bound to (never scope-restored), while ``manual_task_id_map_``
+  /// does not (restored at each closing brace — see
+  /// ``VisitStmt_(RuntimeScopeStmtPtr)``). A TaskId this codegen never bound to
+  /// a local has no entry in either and is left alone.
+  void CheckTaskIdSlotValueInScope(const CallPtr& call, const std::string& array_name) {
+    auto value_var = AsVarLike(call->args_[2]);
+    if (!value_var) return;
+    auto scalar_ty = As<ScalarType>(value_var->GetType());
+    if (!scalar_ty || scalar_ty->dtype_ != DataType::TASK_ID) return;
+    if (manual_task_id_map_.count(value_var.get())) return;
+    if (!emit_name_map_.count(value_var.get())) return;
+    CHECK_SPAN(false, call->span_)
+        << "Task id '" << value_var->name_hint_ << "' is stored into array '" << array_name
+        << "' after the `pl.scope()` that produced it has closed, so the store has no runtime "
+           "value to name. Move the store inside that `pl.scope()`, where the task id is still "
+           "live.";
+  }
+
   void HandleArrayUpdateElementAssign(const AssignStmtPtr& assign, const CallPtr& call) {
     // array.update_element(array, index, value) -> ArrayType.
     // The SSA-functional return value shares storage with the first arg; alias
@@ -4160,6 +4197,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     INTERNAL_CHECK_SPAN(call->args_.size() == 3, call->span_)
         << "Internal error: array.update_element expects 3 arguments";
     std::string array_name = GenerateExprString(call->args_[0]);
+    CheckTaskIdSlotValueInScope(call, array_name);
     emit_name_map_[assign->var_.get()] = array_name;
     // Propagate ``array_carry_vars_`` and ``manual_task_id_map_`` from the
     // input array to the LHS: they share storage, so a downstream
@@ -4250,6 +4288,35 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return emit_name;
   }
 
+  /// Keep the array carries a just-closed scope minted over storage that
+  /// outlives it, when restoring the entry snapshot.
+  ///
+  /// ``array.update_element`` is SSA-functional: it aliases its LHS onto the
+  /// input array's storage (``HandleArrayUpdateElementAssign``) and emits the
+  /// C++ slot write in place, at the statement's own position. The *carry* it
+  /// registers is read later though — by the enclosing loop's yield, emitted
+  /// after this block's closing brace. Restoring the snapshot wholesale drops
+  /// that carry, and the yield then misreads an Array value as a scalar TaskId
+  /// (issue #1811 for a manual scope; the same for an AUTO ``pl.scope()``).
+  ///
+  /// Only carries whose backing storage outlives the block may be kept, so each
+  /// scope kind supplies its own ``is_scope_local`` test over the array's emit
+  /// name — a manual scope hoists its allocations and knows its local names
+  /// outright; an AUTO scope hoists nothing, so storage is enclosing exactly
+  /// when a pre-entry carry already named it.
+  template <typename IsScopeLocal>
+  void PreserveEnclosingArrayCarries(std::unordered_map<const Var*, ArrayCarryEntry>* saved_array_carry,
+                                     std::unordered_map<const Var*, ManualTaskIdBinding>* saved_map,
+                                     const IsScopeLocal& is_scope_local) {
+    for (const auto& [var, entry] : array_carry_vars_) {
+      if (saved_array_carry->count(var)) continue;     // outer entry — keep outer value
+      if (is_scope_local(entry.array_name)) continue;  // scope-local storage — drop
+      (*saved_array_carry)[var] = entry;               // enclosing-valid carry — preserve
+      auto tid_it = manual_task_id_map_.find(var);     // keep its per-slot dep names in sync
+      if (tid_it != manual_task_id_map_.end()) (*saved_map)[var] = tid_it->second;
+    }
+  }
+
   /// Register ``var`` as backed by ``array_name[size]``; also populates the
   /// ``manual_task_id_map_`` with the per-slot expressions so EmitManualDeps
   /// emits one ``add_dep`` per slot when this Var appears as a deps source.
@@ -4319,10 +4386,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// a ``ForStmt`` return_var (when used as a yield target). For each key the
   /// recorded ``array_name`` is the C++ identifier of the underlying
   /// ``TaskId[N]`` array and ``size`` is the slot count ``N``.
-  struct ArrayCarryEntry {
-    std::string array_name;
-    int64_t size;
-  };
   std::unordered_map<const Var*, ArrayCarryEntry> array_carry_vars_;
   /// In-flight ArrayType ``IfStmt`` return_vars (phis). An ArrayType SSA value
   /// names one backing C-stack array rather than a copyable value, so a phi is
