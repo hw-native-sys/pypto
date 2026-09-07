@@ -1558,11 +1558,18 @@ class TestTileBroadcastOps:
         assert result_type.shape == [32, 32]
 
     def test_col_expand_symbolic_extent_is_not_rejected(self):
-        """An undecidable relation is left to the backend rather than refused here."""
+        """An undecidable relation is left to the backend rather than refused here.
+
+        Two *distinct* symbols, so the analyzer can prove neither equality nor
+        inequality — the case that must stay accepted.
+        """
         span = ir.Span.unknown()
-        cols = ir.Var("cols", ir.ScalarType(DataType.INDEX), span)
-        target = ir.Var("target", ir.TileType([32, cols], DataType.FP32), span)
-        col = ir.Var("col", ir.TileType([1, cols], DataType.FP32), span)
+        one = ir.ConstInt(1, DataType.INDEX, span)
+        rows = ir.ConstInt(32, DataType.INDEX, span)
+        target_cols = ir.Var("target_cols", ir.ScalarType(DataType.INDEX), span)
+        col_cols = ir.Var("col_cols", ir.ScalarType(DataType.INDEX), span)
+        target = ir.Var("target", ir.TileType([rows, target_cols], DataType.FP32), span)
+        col = ir.Var("col", ir.TileType([one, col_cols], DataType.FP32), span)
 
         assert isinstance(tile.col_expand_sub(target, col).type, ir.TileType)
 
@@ -8086,7 +8093,6 @@ class TestTileSort32Ops:
         assert isinstance(valid_width.right, ir.ConstInt)
         assert valid_width.right.value == factor
 
-
     def test_idx_shape_must_match_src(self):
         """idx carries one index per src element, so a mismatched extent is rejected."""
         span = ir.Span.unknown()
@@ -8105,11 +8111,17 @@ class TestTileSort32Ops:
             tile.sort32(src, rank1_idx)
 
     def test_symbolic_idx_extent_is_not_rejected(self):
-        """An undecidable relation is left to the backend rather than refused here."""
+        """An undecidable relation is left to the backend rather than refused here.
+
+        Two *distinct* symbols, so the analyzer can prove neither equality nor
+        inequality — the case that must stay accepted.
+        """
         span = ir.Span.unknown()
-        cols = ir.Var("cols", ir.ScalarType(DataType.INDEX), span)
-        src = ir.Var("src", ir.TileType([1, cols], DataType.FP32), span)
-        idx = ir.Var("idx", ir.TileType([1, cols], DataType.UINT32), span)
+        one = ir.ConstInt(1, DataType.INDEX, span)
+        src_cols = ir.Var("src_cols", ir.ScalarType(DataType.INDEX), span)
+        idx_cols = ir.Var("idx_cols", ir.ScalarType(DataType.INDEX), span)
+        src = ir.Var("src", ir.TileType([one, src_cols], DataType.FP32), span)
+        idx = ir.Var("idx", ir.TileType([one, idx_cols], DataType.UINT32), span)
 
         assert isinstance(tile.sort32(src, idx).type, ir.TileType)
 

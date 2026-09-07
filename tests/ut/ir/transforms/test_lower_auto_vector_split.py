@@ -1973,7 +1973,7 @@ def test_arity_dependent_scratch_needs_no_declaration():
             s0 = pl.tile.load(a, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
             s1 = pl.tile.load(b, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
             w = pl.tile.load(wt, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
-            merged = pl.tile.mrgsort_format2(s0, s1, w)
+            merged = pl.tile.mrgsort(s0, s1, tmp=w)
             seed = pl.tile.move(rhs, target_memory=pl.Mem.Mat)  # noqa: F841
             out_store = pl.tile.store(merged, [0, 0], out_0)
             return out_store
@@ -1993,7 +1993,7 @@ def test_arity_dependent_scratch_needs_no_declaration():
         ) -> pl.Tensor[[256, 128], pl.FP32]:
             s0 = pl.tile.load(a, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
             s1 = pl.tile.load(b, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
-            merged = pl.tile.mrgsort_format2(s0, s1, w)
+            merged = pl.tile.mrgsort(s0, s1, tmp=w)
             seed = pl.tile.move(rhs, target_memory=pl.Mem.Mat)  # noqa: F841
             out_store = pl.tile.store(merged, [0, 0], out_0)
             return out_store

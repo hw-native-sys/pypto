@@ -13,6 +13,7 @@
 #define PYPTO_IR_TRANSFORMS_UTILS_SPLIT_AXIS_UTILS_H_
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
