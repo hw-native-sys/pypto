@@ -11,6 +11,7 @@
 
 #include "pypto/codegen/pto/pto_type_utils.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <sstream>
