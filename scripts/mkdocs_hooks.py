@@ -164,6 +164,11 @@ def on_page_markdown(markdown: str, page: Any, config: Any, files: Any) -> str:
 # GitHub mirror supplies the snapshot; no copied manuals are committed to PyPTO.
 _PTOAS_REPO = "https://github.com/hw-native-sys/PTOAS"
 _PTOAS_PREFIX = "reference/ptoas/source/"
+_PTOAS_DESIGNS = {
+    "Event ID Synchronization": "docs/designs/ptoas-auto-sync-design.md",
+    "Buffer ID Synchronization (A5)": "docs/bufid_sync_a5_design.md",
+    "Memory Planning": "docs/designs/ptoas-largest-first-fit-four-gates-memplan-design.md",
+}
 
 
 @dataclass
@@ -206,34 +211,34 @@ def on_config(config: Any) -> Any:
         text=True,
         timeout=10,
     ).stdout.strip()
-    paths = [root / "docs/PTO_IR_manual.md", root / "docs/vpto-spec.md"]
-    paths.extend(sorted((root / "docs/isa").rglob("*")))
+    paths = [root / "docs/PTO_IR_manual.md", *(root / path for path in _PTOAS_DESIGNS.values())]
+    for path in paths:
+        if not path.is_file():
+            raise ValueError(f"Required PTOAS documentation is missing: {path}")
+    paths.extend(sorted((root / "docs/isa/vmi-isa").rglob("*")))
     _PTOAS.files = {}
     for path in paths:
         if path.is_file():
             if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()):
                 raise ValueError(f"PTOAS documentation must stay inside the checkout: {path}")
             _PTOAS.files[path.relative_to(root).as_posix()] = path
-    nav = ["en/reference/ptoas/index.md"]
-    nav.extend(
-        [
-            {"PTO IR Manual": f"en/{_PTOAS_PREFIX}docs/PTO_IR_manual.md"},
-            {"micro Architecture": f"en/{_PTOAS_PREFIX}docs/vpto-spec.md"},
-        ]
-    )
-    for folder, title in [
-        ("tile-op", "Tile Instructions"),
-        ("micro-isa", "micro Instructions"),
-        ("vmi-isa", "VMI Instructions"),
-    ]:
-        pages = [
-            {_manual_title(_PTOAS.files[path]): f"en/{_PTOAS_PREFIX}{path}"}
-            for path in _PTOAS.files
-            if path.startswith(f"docs/isa/{folder}/") and path.endswith(".md")
-        ]
-        if not pages:
-            raise ValueError(f"PTOAS instruction section is empty: {folder}")
-        nav.append({title: pages})
+    vmi_pages = [
+        {_manual_title(path): f"en/{_PTOAS_PREFIX}{source}"}
+        for source, path in _PTOAS.files.items()
+        if source.startswith("docs/isa/vmi-isa/") and source.endswith(".md")
+    ]
+    if not vmi_pages:
+        raise ValueError("PTOAS VMI instruction section is empty")
+    nav: list[Any] = [
+        "en/reference/ptoas/index.md",
+        {"PTO IR Manual": f"en/{_PTOAS_PREFIX}docs/PTO_IR_manual.md"},
+        {"VMI Instructions": vmi_pages},
+        {
+            "Pass Designs": [
+                {title: f"en/{_PTOAS_PREFIX}{source}"} for title, source in _PTOAS_DESIGNS.items()
+            ]
+        },
+    ]
     for entry in config.nav:
         if "PTOAS" in entry:
             entry["PTOAS"] = nav
@@ -250,7 +255,7 @@ def _imported_file(source: str, path: Path, locale: str, config: Any) -> File:
             "Shown in its original language.\n\n"
         )
         content = (note + content.decode("utf-8")).encode("utf-8")
-    generated = File.generated(config, uri, content=content)
+    generated: Any = File.generated(config, uri, content=content)
     if locale == "en":
         generated.dest_uri = generated.dest_uri.removeprefix("en/")
         generated.url = generated.url.removeprefix("en/")
@@ -267,7 +272,7 @@ def on_files(files: Any, config: Any) -> Any:
     locale = config.plugins["i18n"].current_language
     for source, path in _PTOAS.files.items():
         alternates = {lang: _imported_file(source, path, lang, config) for lang in ("en", "zh")}
-        generated = alternates[locale]
+        generated: Any = alternates[locale]
         generated.alternates = alternates
         files.append(generated)
     return files

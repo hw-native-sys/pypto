@@ -1,6 +1,5 @@
 # Documentation updates
 
-
 The site checks out the mirror's `master` branch at build time. The existing Docs
 workflow publishes on `main` pushes and manual runs; a daily run also picks up
 mirrored PTOAS changes. A failed build keeps the last successful deployment live.
