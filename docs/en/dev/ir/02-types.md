@@ -85,13 +85,24 @@ on `DistributedTensor`.
 this rank's local GM, so the ordinary tensor ops read and write it like any
 other GM tensor. Those ops match their operand with
 [`AsTensorTypeLike`](../../../../include/pypto/ir/kind_traits.h) (both kinds)
-rather than the exact-kind `As<TensorType>`: `tensor.slice` / `tensor.assemble`,
-the element-wise and unary families, the reductions, and `tensor.matmul` /
-`tensor.matmul_acc`. Only `tensor.slice` and `tensor.assemble` propagate the
-window kind — a slice of a window is still a view into the same comm-group
-allocation. Every computing op returns a plain `TensorType`, because its result
-is fresh local data rather than a window view. `tensor.reinterpret_view` is the
-documented exception: it still rejects a window outright.
+rather than the exact-kind `As<TensorType>`. What the result type is depends on
+whether the op yields a *view of* the window or *new data*:
+
+| Ops accepting a window | Result kind |
+| ---------------------- | ----------- |
+| `tensor.slice`, `tensor.assemble`, `tensor.view`, `tensor.write` | `DistributedTensorType` — still a view into the same comm-group allocation |
+| the element-wise and unary families, the reductions, `tensor.matmul`, `tensor.matmul_acc` (`lhs` / `rhs` only) | plain `TensorType` — the result is fresh local data |
+| `tensor.read` | `ScalarType` — one element, no view |
+
+Two documented rejections: `tensor.reinterpret_view` refuses a window outright,
+and `tensor.matmul_acc`'s **`acc`** operand must be a plain `TensorType` — only
+the matrix unit writes L0C, so there is no data path from a window into a Cube
+accumulator. Accumulate locally and store into the window afterwards.
+
+Many other tensor ops still reject a window although they read or write plain
+GM (all the broadcasts, `reshape`, `transpose`, `concat`, the gather / scatter
+family, …). `tests/ut/ir/operators/test_window_operand_acceptance.py` holds the
+authoritative per-operator classification and keeps it honest.
 
 ### TensorType with TensorView
 

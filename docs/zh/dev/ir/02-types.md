@@ -82,12 +82,23 @@ op 所绑定的 `ir.WindowBuffer`（`Var` 子类）上。通过
 **在 window 上做本地计算。** 在 InCore scope 内，一个 window 切片*就是*本 rank 的
 本地 GM，因此普通 tensor op 可以像读写任何 GM tensor 一样读写它。这些 op 用
 [`AsTensorTypeLike`](../../../../include/pypto/ir/kind_traits.h)（同时匹配两种
-kind）而不是精确匹配的 `As<TensorType>` 来匹配操作数：`tensor.slice` /
-`tensor.assemble`、逐元素与一元族、各类 reduction，以及 `tensor.matmul` /
-`tensor.matmul_acc`。其中只有 `tensor.slice` 和 `tensor.assemble` 会传播 window
-kind —— window 的切片仍然是同一个 comm-group 分配上的视图。所有计算类 op 都返回
-普通 `TensorType`，因为其结果是新产生的本地数据，而不是 window 视图。
-`tensor.reinterpret_view` 是已记录的例外：它仍然直接拒绝 window。
+kind）而不是精确匹配的 `As<TensorType>` 来匹配操作数。结果类型取决于该 op 产生的
+是 window 的*视图*还是*新数据*：
+
+| 接受 window 的 op | 结果 kind |
+| ----------------- | --------- |
+| `tensor.slice`、`tensor.assemble`、`tensor.view`、`tensor.write` | `DistributedTensorType` —— 仍然是同一个 comm-group 分配上的视图 |
+| 逐元素与一元族、各类 reduction、`tensor.matmul`、`tensor.matmul_acc`（仅 `lhs` / `rhs`） | 普通 `TensorType` —— 结果是新产生的本地数据 |
+| `tensor.read` | `ScalarType` —— 单个元素，没有视图 |
+
+两处已记录的拒绝：`tensor.reinterpret_view` 直接拒绝 window；`tensor.matmul_acc`
+的 **`acc`** 操作数必须是普通 `TensorType` —— 只有矩阵单元会写 L0C，因此不存在从
+window 到 Cube 累加器的数据通路。请先在本地累加，再把结果存回 window。
+
+还有不少读写普通 GM 的 tensor op 目前仍然拒绝 window（全部 broadcast、`reshape`、
+`transpose`、`concat`、gather / scatter 族等）。
+`tests/ut/ir/operators/test_window_operand_acceptance.py` 保存了逐算子的权威分类，
+并负责保证它与实现一致。
 
 ### 带 TensorView 的 TensorType
 

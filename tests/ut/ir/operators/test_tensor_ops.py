@@ -330,7 +330,7 @@ def test_tensor_matmul_accepts_window_operand(window_side):
 
 
 def test_tensor_matmul_acc_accepts_window_operand():
-    """matmul_acc accumulates from a window operand, same rule as matmul."""
+    """matmul_acc reads a window lhs/rhs from GM, same rule as matmul."""
     acc = _tensor_var("acc", [16, 64], DataType.FP32)
     lhs = _window_tensor_var("a", [16, 32], DataType.BF16)
     rhs = _tensor_var("b", [32, 64], DataType.BF16)
@@ -340,6 +340,21 @@ def test_tensor_matmul_acc_accepts_window_operand():
     assert call.op.name == ir.get_op("tensor.matmul_acc").name
     assert _const_shape(call) == [16, 64]
     assert not isinstance(call.type, ir.DistributedTensorType)
+
+
+def test_tensor_matmul_acc_rejects_window_accumulator():
+    """The accumulator is the one matmul operand a window can never be.
+
+    Nothing but the matrix unit writes L0C, so there is no data path from GM into a Cube
+    accumulator; the tile-level op would reject it as "acc must be a TileType". Report the
+    limitation at the call site instead, with a remedy.
+    """
+    acc = _window_tensor_var("acc", [16, 64], DataType.FP32)
+    lhs = _tensor_var("a", [16, 32], DataType.BF16)
+    rhs = _tensor_var("b", [32, 64], DataType.BF16)
+
+    with pytest.raises(ValueError, match="cannot be a Cube accumulator"):
+        ir.op.tensor.matmul_acc(acc, lhs, rhs)
 
 
 def test_tensor_row_max_accepts_window_source():

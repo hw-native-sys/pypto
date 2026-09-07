@@ -295,6 +295,8 @@ PROBES.update(
         # tensor.not accepts only 16-bit integer operands.
         ir.get_op("tensor.not").name: lambda: t.not_(W(dtype=DT.INT16)),
         ir.get_op("tensor.matmul").name: lambda: t.matmul(W(dtype=DT.BF16), T(shape=(32, 16), dtype=DT.BF16)),
+        # The window goes in `lhs`: `acc` is the one operand a window can never be (no data
+        # path from GM into L0C), and the deducer rejects it there with its own message.
         ir.get_op("tensor.matmul_acc").name: lambda: t.matmul_acc(
             T(shape=(16, 16)), W(dtype=DT.BF16), T(shape=(32, 16), dtype=DT.BF16)
         ),

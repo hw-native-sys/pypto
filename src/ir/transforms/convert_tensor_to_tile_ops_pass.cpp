@@ -154,7 +154,10 @@ int64_t ResolveCubeMAlignment(const CallPtr& call,
   const auto& arg_type = call->args_[decider_idx]->GetType();
   std::vector<ExprPtr> shape;
   DataType dtype = DataType::FP32;
-  if (auto tensor_type = As<TensorType>(arg_type)) {
+  // ``AsTensorTypeLike`` so a ``DistributedTensorType`` operand is boxed like the plain GM
+  // tensor it is. Falling through to the ``return 0`` below would leave a non-fractal window
+  // operand unboxed, and it would reach the cube with a physical geometry ptoas rejects.
+  if (auto tensor_type = AsTensorTypeLike(arg_type)) {
     shape = tensor_type->shape_;
     dtype = tensor_type->dtype_;
   } else if (auto tile_type = As<TileType>(arg_type)) {
@@ -204,7 +207,8 @@ int64_t ResolveCubeNAlignment(const CallPtr& call, const InputSpaceReq& req, siz
   const auto& arg_type = call->args_[idx]->GetType();
   std::vector<ExprPtr> shape;
   DataType dtype = DataType::FP32;
-  if (auto tensor_type = As<TensorType>(arg_type)) {
+  // Window operands are boxed like plain GM tensors here too -- see ResolveCubeMAlignment.
+  if (auto tensor_type = AsTensorTypeLike(arg_type)) {
     shape = tensor_type->shape_;
     dtype = tensor_type->dtype_;
   } else if (auto tile_type = As<TileType>(arg_type)) {

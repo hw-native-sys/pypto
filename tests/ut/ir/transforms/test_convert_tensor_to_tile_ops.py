@@ -5990,6 +5990,63 @@ class TestWindowSliceIncoreConversion:
             )
         assert _find_first_call_to(kernel, "tensor.matmul") is None
 
+    def test_non_fractal_window_operand_is_row_boxed_like_a_plain_tensor(self):
+        """A window cube operand must get the same M boxing a plain GM tensor gets.
+
+        ``ResolveCubeMAlignment`` / ``ResolveCubeNAlignment`` decide the physical extent the
+        bridged load allocates. They matched only the exact ``TensorType``, so a window
+        returned alignment 0 and ``emit_load`` skipped the boxing: a 17-row BF16 operand
+        loaded as a physical ``[17, 32]`` tile instead of the ``[32, 32]`` box with
+        ``valid_shape=[17, 32]``, and reached the Cube with a geometry ptoas rejects.
+        """
+
+        @pl.program
+        class Plain:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[17, 32], pl.BF16],
+                w: pl.Tensor[[32, 16], pl.BF16],
+                out: pl.InOut[pl.Tensor[[17, 16], pl.FP32]],
+            ):
+                prod = pl.matmul(src, w)
+                out[0:17, 0:16] = prod
+                return  # noqa: PLR1711  (DSL return terminator)
+
+        @pl.program
+        class Window:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pld.DistributedTensor[[17, 32], pl.BF16],
+                w: pl.Tensor[[32, 16], pl.BF16],
+                out: pl.InOut[pl.Tensor[[17, 16], pl.FP32]],
+            ):
+                prod = pl.matmul(src, w)
+                out[0:17, 0:16] = prod
+                return  # noqa: PLR1711  (DSL return terminator)
+
+        def lhs_physical_shape(program):
+            kernel = passes.convert_tensor_to_tile_ops()(program).get_function("kernel")
+            assert kernel is not None, "kernel function missing after conversion"
+            mm = _find_first_call_to(kernel, "tile.matmul")
+            assert mm is not None, "matmul must lower to tile.matmul"
+            lhs_type = mm.args[0].type
+            assert isinstance(lhs_type, ir.TileType)
+            dims = []
+            for dim in lhs_type.shape:
+                assert isinstance(dim, ir.ConstInt), f"expected a static extent, got {dim}"
+                dims.append(dim.value)
+            return dims
+
+        plain_shape = lhs_physical_shape(Plain)
+        window_shape = lhs_physical_shape(Window)
+        assert plain_shape == [32, 32], f"plain operand must be row-boxed, got {plain_shape}"
+        assert window_shape == plain_shape, (
+            f"window operand must be boxed identically to a plain tensor: "
+            f"got {window_shape}, plain gets {plain_shape}"
+        )
+
     def test_row_max_on_window_param_without_slice(self):
         """A window param feeding an op with no ``input_reqs`` needs a Phase-1 load.
 
