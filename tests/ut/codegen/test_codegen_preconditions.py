@@ -209,10 +209,10 @@ def test_sub_fractal_rows_are_accepted_where_pto_exempts_them():
         ("one_by_four_fp16", 1, 4, pl.FP16, "column", 4, 2, 16),
     ],
 )
-def test_sub_32_byte_flat_tile_is_rejected_by_pypto(
-    name, rows, cols, dtype, axis, extent, elem_bytes, padded
+def test_sub_32_byte_flat_tile_is_reported_by_pypto(
+    name, rows, cols, dtype, axis, extent, elem_bytes, padded, capfd
 ):
-    """An unboxed tile under 32 bytes on its contiguous axis is refused here.
+    """An unboxed tile under 32 bytes on its contiguous axis is reported here.
 
     PTO walks a ``none_box`` tile as a flat run of bytes, taking the contiguous
     axis in 32-byte steps, so an FP32 tile needs 8 elements there. PTOAS does
@@ -221,6 +221,11 @@ def test_sub_32_byte_flat_tile_is_rejected_by_pypto(
     names its own type internals, offers no remedy, and -- because it says
     "row-major ... row byte size" of a one-row tile -- reads as if the tile
     being a vector were the problem. It is not: ``[4, 4]`` fails identically.
+
+    Reported as a warning rather than a hard failure: the default pipeline
+    still emits tiles that break the rule (a ragged FP16 ring tail lands
+    physically ``[1, 17]``), so failing here would reject the compiler's own
+    output. PTOAS remains the gate; this adds the location and the remedy.
     """
 
     @pl.program
@@ -239,9 +244,11 @@ def test_sub_32_byte_flat_tile_is_rejected_by_pypto(
     backend.set_backend_type(BackendType.Ascend910B)
     optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Prog)
 
-    with pytest.raises(ValueError) as excinfo:
-        codegen.PTOCodegen().generate(optimized)
-    message = str(excinfo.value)
+    # Codegen must still succeed -- the diagnostic informs, it does not gate.
+    assert codegen.PTOCodegen().generate(optimized)
+    message = capfd.readouterr().err
+
+    assert "FlatTileExtents" in message, message
     assert f"its {axis} extent" in message, message
     assert f"{extent} x {elem_bytes} = {extent * elem_bytes} bytes is not" in message, message
     # The remedy must name the extent to reach, where to declare the real one,

@@ -280,22 +280,31 @@ void CheckFlatTileExtents(const ir::TileType& tile_type, const TileTypeComponent
   const int64_t padded = (extent + per_unit - 1) / per_unit * per_unit;
   const char* axis_name = row_major ? "column" : "row";
 
-  CHECK_SPAN(false, span != nullptr ? *span : ir::Span("", 0, 0))
-      << "a " << where << " tile of physical shape [" << components.rows << ", " << components.cols
-      << "] and dtype " << dtype.ToString() << " is addressed as a flat run of bytes, so its " << axis_name
-      << " extent must span a whole number of " << kBoxAlignedBytes << "-byte units, but " << extent << " x "
-      << elem_bytes << " = " << extent_bytes << " bytes is not. PTO takes the contiguous axis ("
-      << (row_major ? "row_major" : "col_major") << " makes that the " << axis_name << "s) in "
-      << kBoxAlignedBytes << "-byte steps, so " << per_unit << " elements of " << dtype.ToString()
-      << " is the smallest addressable extent -- a [1, 1], [2, 2] "
-         "or [4, 4] FP32 tile is equally unallocatable, this is not about the shape being a vector. "
-         "The *logical* extent is free: allocate "
-      << padded << " on that axis and declare " << extent
-      << " as the tile's valid_shape (`valid_shape=` on pl.load / pl.tile.create + pl.set_validshape), "
-         "which moves and computes only the real data. A single-element operand is usually better read "
-         "as a scalar instead -- `pl.read(t, [i, 0])` feeds the scalar form of the op (pl.mul, pl.adds, "
-         "...) with no tile at all, which is the spelling to reach for when the tile exists only to "
-         "carry one value into a broadcast.";
+  // A warning, not a CHECK. The rule is real and PTOAS enforces it, but the
+  // default pipeline still emits tiles that break it -- a ragged FP16 ring tail
+  // lands physically [1, 17] rather than padded to [1, 32]. Hard-failing here
+  // would reject the compiler's own output, so PTOAS stays the gate and PyPTO
+  // adds the location and the remedy that its message lacks. Promote this to
+  // CHECK_SPAN once the producer passes pad their physical extents; the
+  // accompanying tests already pin both readings.
+  const ir::Span where_span = span != nullptr ? *span : ir::Span("", 0, 0);
+  LOG_WARN << "[FlatTileExtents] " << where_span.to_string() << ": "
+           << "a " << where << " tile of physical shape [" << components.rows << ", " << components.cols
+           << "] and dtype " << dtype.ToString() << " is addressed as a flat run of bytes, so its "
+           << axis_name << " extent must span a whole number of " << kBoxAlignedBytes << "-byte units, but "
+           << extent << " x " << elem_bytes << " = " << extent_bytes
+           << " bytes is not. PTO takes the contiguous axis (" << (row_major ? "row_major" : "col_major")
+           << " makes that the " << axis_name << "s) in " << kBoxAlignedBytes << "-byte steps, so "
+           << per_unit << " elements of " << dtype.ToString()
+           << " is the smallest addressable extent -- a [1, 1], [2, 2] "
+              "or [4, 4] FP32 tile is equally unallocatable, this is not about the shape being a vector. "
+              "The *logical* extent is free: allocate "
+           << padded << " on that axis and declare " << extent
+           << " as the tile's valid_shape (`valid_shape=` on pl.load / pl.tile.create + pl.set_validshape), "
+              "which moves and computes only the real data. A single-element operand is usually better read "
+              "as a scalar instead -- `pl.read(t, [i, 0])` feeds the scalar form of the op (pl.mul, pl.adds, "
+              "...) with no tile at all, which is the spelling to reach for when the tile exists only to "
+              "carry one value into a broadcast.";
 }
 
 TileTypeComponents ExtractTileTypeInfo(const ir::TileType& tile_type, const std::string& dtype_str_override) {
