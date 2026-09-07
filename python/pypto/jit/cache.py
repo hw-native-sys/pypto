@@ -142,7 +142,7 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
     strategy: "OptimizationStrategy | None" = None,
     distributed_config: Any = None,
     analyze_auto_scopes_for_deps: bool = False,
-    dump_ptoas_passes: bool = False,
+    emit_source_loc: bool = True,
     memory_planner: "MemoryPlanner | None" = None,
     enable_pypto_l0c_double_buffer: bool = False,
     tensor_layouts: dict[str, "TensorLayout | None"] | None = None,
@@ -190,9 +190,9 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
         analyze_auto_scopes_for_deps: Compile-side switch for deriving explicit
             task dependencies from AUTO runtime scopes. Included in the key
             because it changes generated orchestration dependencies.
-        dump_ptoas_passes: Whether ptoas writes intermediate IR after every
-            pass. Included in the key so enabling dumps cannot reuse an
-            artifact compiled without the requested dump output.
+        emit_source_loc: Whether codegen emits source locations, resolved from
+            the environment before key construction and passed to the compiler.
+            Diagnostic-only controls bypass caching and do not enter the key.
         memory_planner: Effective on-chip memory planner (``PYPTO``,
             ``DSA_RP``, or ``PTOAS``) as resolved from the ``RunConfig`` field
             and any active ``PassContext``. Included in the key because it
@@ -243,7 +243,7 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
     )
     compile_opts = (
         ("analyze_auto_scopes_for_deps", analyze_auto_scopes_for_deps),
-        ("dump_ptoas_passes", dump_ptoas_passes),
+        ("emit_source_loc", emit_source_loc),
         ("memory_planner", None if memory_planner is None else str(memory_planner)),
         ("enable_pypto_l0c_double_buffer", effective_pypto_dbc),
         ("dep_layouts", dep_layouts),

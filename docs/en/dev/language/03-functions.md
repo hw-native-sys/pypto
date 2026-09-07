@@ -46,6 +46,44 @@ or editing compiler/source files during compilation is not supported by this
 constant-tracking mechanism. This behavior does not enable persistent artifact
 caching; compiled objects are still reused within the process.
 
+### Compile options and diagnostic requests
+
+JIT calls and `kernel.compile()` resolve compile options before looking up an
+in-process artifact. Omitting `config` uses the same defaults as `RunConfig()`:
+`a2a3sim`, the default optimization strategy, and pass dumps disabled. Semantic
+options (including the effective planner, runtime ABI, and source-location
+emission controlled by `PYPTO_EMIT_PTO_LOC`) participate in the key. Runtime
+controls such as `device_id`, `codegen_only`, and `save_kernels` alone do not.
+
+The following requests compile afresh on every call, without reading or adding
+an entry in the artifact cache:
+
+- `dump_passes=True` or a dump level other than `PassDumpLevel.NONE`, and
+  `dump_ptoas_passes=True`.
+- `compile_profiling=True`, an active `CompileProfiler`, or profiling enabled
+  through `PYPTO_COMPILE_PROFILING`.
+- An explicit `save_kernels_dir`, or a nonempty `PYPTO_PROG_BUILD_DIR`.
+- Explicit diagnostic settings, or an active `PassContext` with instruments
+  or verification/diagnostic settings different from the pipeline defaults.
+
+This ensures a warm kernel still emits requested dumps and reports. Repeating
+a request regenerates the output; a failed diagnostic compile leaves ordinary
+cached entries intact. Automatically allocated JIT output directories are unique
+per compilation, so fresh diagnostics cannot overwrite a cached artifact.
+Explicit output directories are used as requested. Diagnostic controls do not
+split compilation keys.
+Conflicting explicit settings and an active `PassContext` raise the same error
+on cache hits as on fresh compilation. A plain planner/runtime context can
+still reuse a matching cached artifact.
+
+```python
+from pypto.runtime import RunConfig
+
+cached = slice_kernel.compile()
+slice_kernel.compile(config=RunConfig(dump_passes=True, save_kernels_dir="debug_kernel"))
+assert slice_kernel.compile() is cached
+```
+
 ## Functions
 
 ```python

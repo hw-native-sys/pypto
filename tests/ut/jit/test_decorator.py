@@ -14,6 +14,7 @@ import importlib
 import inspect
 import re
 import warnings
+from pathlib import Path
 
 import pypto.language as pl
 import pypto.language.distributed as pld
@@ -2699,7 +2700,7 @@ class TestCompileKwargForwarding:
         assert first != second
         assert third == first
 
-    def test_resolve_compiled_splits_cache_on_ptoas_pass_dump(self, monkeypatch):
+    def test_resolve_compiled_bypasses_cache_on_ptoas_pass_dump(self, monkeypatch):
         """Enabling ptoas pass dumps cannot reuse an artifact compiled without them."""
         torch = pytest.importorskip("torch")
 
@@ -2725,11 +2726,13 @@ class TestCompileKwargForwarding:
 
         first = resolve(False)
         second = resolve(True)
+        repeated_dump = resolve(True)
         third = resolve(False)
 
-        assert compile_calls["n"] == 2
-        assert len(cfg_kernel._cache) == 2
+        assert compile_calls["n"] == 3
+        assert len(cfg_kernel._cache) == 1
         assert first != second
+        assert second != repeated_dump
         assert third == first
 
     def test_compile_forwards_run_config_kwargs(self, monkeypatch):
@@ -2787,14 +2790,8 @@ class TestCompileKwargForwarding:
         # compile to a DistributedCompiledProgram and dispatch per-rank.
         assert captured["distributed_config"] is dc
 
-    def test_compile_without_kwargs_forwards_only_skip_ptoas(self, monkeypatch):
-        """_compile with no extra kwargs forwards only skip_ptoas.
-
-        ``platform`` rides in the ``RunConfig.compile_kwargs`` mapping, so with
-        no config there is nothing to forward and ``ir.compile``'s own default
-        applies — the same effective platform the old explicit ``platform=None``
-        produced.
-        """
+    def test_compile_without_output_dir_allocates_one(self, monkeypatch):
+        """Each JIT compilation owns an automatic directory when none is supplied."""
         ir_compile_mod = importlib.import_module("pypto.ir.compile")
 
         @jit
@@ -2822,7 +2819,8 @@ class TestCompileKwargForwarding:
             per_func_dyn={id(plain_kernel._func): {}},
             pl=pl,
         )
-        assert set(captured) == {"skip_ptoas"}
+        assert set(captured) == {"skip_ptoas", "output_dir"}
+        assert Path(captured["output_dir"]).is_dir()
 
 
 # ---------------------------------------------------------------------------

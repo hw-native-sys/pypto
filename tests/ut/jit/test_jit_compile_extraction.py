@@ -19,7 +19,8 @@ import importlib
 
 import pypto.language as pl
 import pytest
-from pypto.ir import OptimizationStrategy
+from pypto.compile_profiling import CompileProfiler
+from pypto.ir import OptimizationStrategy, PassDumpLevel
 from pypto.ir.compiled_program import CompiledProgram
 from pypto.jit.decorator import jit
 from pypto.language.parser.diagnostics.exceptions import ParserTypeError
@@ -693,6 +694,209 @@ class TestNzOnTensorIsNotJitSpecific:
         assert isinstance(param_type, ir.TensorType)
         assert param_type.tensor_view is not None
         assert param_type.tensor_view.layout == ir.TensorLayout.NZ
+
+
+def _request_kernel(x: pl.Tensor[[32, 32], pl.FP32]) -> pl.Tensor[[32, 32], pl.FP32]:
+    with pl.at(level=pl.Level.CORE_GROUP):
+        result = pl.add(x, x)
+    return result
+
+
+@pytest.fixture
+def kernel(monkeypatch):
+    monkeypatch.delenv("PYPTO_COMPILE_PROFILING", raising=False)
+    monkeypatch.setattr(CompileProfiler._local, "current", None, raising=False)
+    return pl.jit(_request_kernel)
+
+
+@pytest.fixture
+def compile_calls(kernel, monkeypatch):
+    calls = []
+
+    def record_compile(*_args, **kwargs):
+        artifact = object()
+        calls.append((kwargs, artifact))
+        return artifact
+
+    monkeypatch.setattr(kernel, "_compile", record_compile)
+    return calls
+
+
+def test_default_and_runtime_only_requests_share_cache(kernel, compile_calls):
+    cached = kernel.compile()
+    for config in (
+        RunConfig(),
+        RunConfig(dump_passes=PassDumpLevel.NONE),
+        RunConfig(device_id=3, codegen_only=True, save_kernels=True),
+    ):
+        assert kernel.compile(config=config) is cached
+    with passes.PassContext([]):
+        assert kernel.compile() is cached
+    assert len(compile_calls) == 1
+    kwargs = compile_calls[0][0]
+    assert kwargs["platform"] == "a2a3sim"
+    assert kwargs["dump_passes"] is PassDumpLevel.NONE
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"dump_passes": True},
+        {"dump_passes": PassDumpLevel.EXPLICIT},
+        {"dump_ptoas_passes": True},
+        {"compile_profiling": True},
+        {"save_kernels_dir": "requested-output"},
+        {"diagnostic_phase": passes.DiagnosticPhase.PRE_PIPELINE},
+        {"disabled_diagnostics": passes.DiagnosticCheckSet()},
+    ],
+)
+@pytest.mark.parametrize("warm", [False, True])
+def test_diagnostic_requests_neither_lookup_nor_insert(kernel, compile_calls, monkeypatch, options, warm):
+    cached = kernel.compile() if warm else None
+    before = dict(kernel._cache)
+
+    def fail_key():
+        pytest.fail("diagnostic request constructed a cache key")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(kernel, "_get_source_hash", fail_key)
+        first = kernel.compile(config=RunConfig(**options))
+        second = kernel.compile(config=RunConfig(**options))
+    assert first is not second
+    assert kernel._cache == before
+    assert len(compile_calls) == (3 if warm else 2)
+    if warm:
+        assert kernel.compile() is cached
+
+
+@pytest.mark.parametrize("env_name", ["PYPTO_PROG_BUILD_DIR", "PYPTO_COMPILE_PROFILING"])
+def test_environment_request_bypasses_warm_cache(kernel, compile_calls, monkeypatch, tmp_path, env_name):
+    kernel.compile()
+    before = dict(kernel._cache)
+    monkeypatch.setenv(env_name, "1" if env_name == "PYPTO_COMPILE_PROFILING" else str(tmp_path))
+    first = kernel.compile()
+    assert kernel.compile() is not first
+    assert len(compile_calls) == 3
+    assert kernel._cache == before
+
+
+def test_active_profiler_bypasses_warm_cache(kernel, compile_calls):
+    cached = kernel.compile()
+    with CompileProfiler():
+        assert kernel.compile() is not cached
+        assert kernel.compile() is not cached
+    assert kernel.compile() is cached
+    assert len(compile_calls) == 3
+
+
+@pytest.mark.parametrize(
+    "context_options",
+    [
+        {"verification_level": passes.VerificationLevel.ROUNDTRIP},
+        {"diagnostic_phase": passes.DiagnosticPhase.POST_PASS},
+        {"disabled_diagnostics": passes.DiagnosticCheckSet()},
+    ],
+)
+def test_custom_pass_checks_bypass_warm_cache(kernel, compile_calls, context_options):
+    cached = kernel.compile()
+    with passes.PassContext([], **context_options):
+        assert kernel.compile() is not cached
+        assert kernel.compile() is not cached
+    assert kernel.compile() is cached
+    assert len(compile_calls) == 3
+
+
+def test_pass_context_conflict_is_rejected_before_cache_lookup(kernel, compile_calls):
+    config = RunConfig(memory_planner=passes.MemoryPlanner.PYPTO)
+    kernel.compile(config=config)
+    with passes.PassContext([]), pytest.raises(RuntimeError, match="memory_planner.*PassContext"):
+        kernel.compile(config=config)
+    assert len(compile_calls) == 1
+
+
+def test_failed_diagnostic_compile_preserves_ordinary_entry(kernel, compile_calls, monkeypatch):
+    cached = kernel.compile()
+
+    def fail_compile(*_args, **_kwargs):
+        raise ValueError("diagnostic compilation failed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(kernel, "_compile", fail_compile)
+        with pytest.raises(ValueError, match="diagnostic compilation failed"):
+            kernel.compile(config=RunConfig(dump_passes=True))
+    assert kernel.compile() is cached
+    assert len(compile_calls) == 1
+
+
+def test_source_locations_use_captured_effective_option(kernel, compile_calls, monkeypatch):
+    monkeypatch.setenv("PYPTO_EMIT_PTO_LOC", "0")
+    without_locations = kernel.compile()
+    monkeypatch.setenv("PYPTO_EMIT_PTO_LOC", "1")
+    original_hash = kernel._get_source_hash
+
+    def change_environment_after_resolution():
+        monkeypatch.setenv("PYPTO_EMIT_PTO_LOC", "0")
+        return original_hash()
+
+    monkeypatch.setattr(kernel, "_get_source_hash", change_environment_after_resolution)
+    assert kernel.compile() is not without_locations
+    assert [kwargs["emit_source_loc"] for kwargs, _ in compile_calls] == [False, True]
+    assert kernel.compile() is without_locations
+
+
+def test_real_dumps_are_regenerated_after_ordinary_cache_hit(kernel, tmp_path):
+    cached = kernel.compile()
+    assert not (cached.output_dir / "passes_dump").exists()
+    for name in ("first", "second"):
+        output = tmp_path / name
+        config = RunConfig(save_kernels_dir=str(output), dump_passes=True)
+        compiled = kernel.compile(config=config)
+        assert compiled.output_dir == output
+        dumps = list((output / "passes_dump").glob("*.py"))
+        assert dumps
+        dump = dumps[0]
+        expected = dump.read_bytes()
+        dump.unlink()
+        assert kernel.compile(config=config) is not compiled
+        assert dump.read_bytes() == expected
+    assert kernel.compile() is cached
+
+
+def test_real_outer_instrument_runs_after_ordinary_cache_hit(kernel, tmp_path):
+    cached = kernel.compile()
+    calls = []
+    callback = passes.CallbackInstrument(
+        before_pass=lambda pass_obj, _program: calls.append(pass_obj.get_name()), name="observer"
+    )
+    with passes.PassContext([callback, passes.ReportInstrument(str(tmp_path))]):
+        first = kernel.compile()
+        assert first.output_dir != cached.output_dir
+        assert calls
+        calls.clear()
+        second = kernel.compile()
+        assert second.output_dir not in (cached.output_dir, first.output_dir)
+        assert calls
+    assert (tmp_path / "perf_hints.log").is_file()
+    assert kernel.compile() is cached
+
+
+def test_real_profile_contains_compile_stages_after_cache_hit(kernel):
+    cached = kernel.compile()
+    with CompileProfiler() as profiler:
+        compiled = kernel.compile()
+        assert compiled.output_dir != cached.output_dir
+    assert profiler.to_dict()["stages"]
+    assert kernel.compile() is cached
+
+
+def test_warm_cache_hit_does_not_probe_toolchain(kernel, monkeypatch):
+    cached = kernel.compile()
+
+    def fail_discovery():
+        pytest.fail("warm cache hit probed the toolchain")
+
+    monkeypatch.setattr(importlib.import_module("pypto.jit.decorator"), "find_ptoas_binary", fail_discovery)
+    assert kernel.compile() is cached
 
 
 if __name__ == "__main__":

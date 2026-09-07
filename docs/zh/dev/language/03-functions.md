@@ -38,6 +38,39 @@ second = slice_kernel.compile()  # A distinct specialization with 64 rows.
 快照仅复制绑定：此常量跟踪机制不支持编译期间修改任意配置对象
 内部状态，或修改编译器/源码文件。本改动不启用持久产物缓存，编译对象仍在进程内复用。
 
+### 编译选项与诊断请求
+
+JIT 调用和 `kernel.compile()` 在查找进程内产物之前解析编译选项。
+省略 `config` 时使用与 `RunConfig()` 相同的默认值：`a2a3sim`、默认优化策略，
+以及关闭 pass dump。影响产物的选项进入缓存键，包括实际内存规划器、运行时 ABI，
+以及由 `PYPTO_EMIT_PTO_LOC` 控制的源码位置输出。
+`device_id`、`codegen_only` 和单独的 `save_kernels` 等运行控制不进入键。
+
+以下请求每次都重新编译，不读取或添加产物缓存条目：
+
+- `dump_passes=True` 或除 `PassDumpLevel.NONE` 外的 dump 级别，
+  以及 `dump_ptoas_passes=True`。
+- `compile_profiling=True`、活跃的 `CompileProfiler`，或通过
+  `PYPTO_COMPILE_PROFILING` 启用的编译性能分析。
+- 显式指定 `save_kernels_dir`，或非空的 `PYPTO_PROG_BUILD_DIR`。
+- 显式诊断设置，或包含 instrument、验证/诊断设置不同于流水线默认值的活跃
+  `PassContext`。
+
+因此已有缓存的 kernel 仍会输出请求的 dump 和报告；重复请求会重新生成输出。
+诊断编译失败不会改变普通缓存条目。JIT 为每次编译自动分配唯一输出目录，
+避免新的诊断请求覆盖缓存产物；显式指定的输出目录按请求使用。
+诊断控制不进入编译键。
+显式设置与活跃 `PassContext` 冲突时，缓存命中与首次编译都会报告相同错误。
+仅选择规划器或运行时的普通上下文仍能复用匹配的缓存产物。
+
+```python
+from pypto.runtime import RunConfig
+
+cached = slice_kernel.compile()
+slice_kernel.compile(config=RunConfig(dump_passes=True, save_kernels_dir="debug_kernel"))
+assert slice_kernel.compile() is cached
+```
+
 ## 函数
 
 ```python

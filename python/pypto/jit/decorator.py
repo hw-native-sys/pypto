@@ -49,9 +49,10 @@ JITFunction.__call__ flow
 2. Classify args: tensor vs scalar.
 3. Extract TensorMeta from torch.Tensor arguments.
 4. Scan entry + dep ASTs for bind_dynamic declarations.
-5. Build CacheKey including referenced constants (dynamic dims → None in shape tuple).
-6. Cache hit  → execute cached CompiledProgram on device → return result.
-7. Cache miss → specialize (entry + deps) → pl.parse() → ir.compile() → cache → execute → return.
+5. Resolve compile options; bypass caching for diagnostics or explicit output requests.
+6. Build CacheKey including referenced constants (dynamic dims → None in shape tuple).
+7. Cache hit  → execute cached CompiledProgram on device → return result.
+8. Cache miss → specialize (entry + deps) → pl.parse() → ir.compile() → cache → execute → return.
 """
 
 from __future__ import annotations
@@ -64,6 +65,7 @@ import json
 import os
 import re
 import struct
+import tempfile
 import textwrap
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -71,6 +73,10 @@ from typing import Any, NamedTuple
 
 from pypto._external_source import external_source_digest
 from pypto.backend._ptoas_locate import find_ptoas_binary
+from pypto.backend.pto_backend import emit_source_loc_default
+from pypto.compile_profiling import get_active_profiler
+from pypto.ir.compile import _validate_pass_context_conflicts
+from pypto.ir.pass_manager import PassDumpLevel, coerce_dump_level
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir
 from pypto.pypto_core import passes as _passes
@@ -1620,6 +1626,54 @@ def _resolve_runtime() -> _passes.RuntimeKind:
     return ctx.get_runtime() if ctx is not None else _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
 
 
+def _resolve_compile_request(run_config: Any) -> tuple[dict[str, Any], bool]:
+    """Resolve compiler arguments and whether this call requires fresh compilation.
+
+    RunConfig's compile mapping is the source for both codegen and cache keys.
+    Diagnostics are requests to run the compiler, so decide bypass before any
+    cache lookup (including source-key construction). Tool discovery remains
+    on the compile path and adds no filesystem probes to ordinary cache hits.
+    """
+    if run_config is None:
+        from pypto.runtime import CompileOptions  # noqa: PLC0415
+
+        kwargs = CompileOptions().as_compile_kwargs()
+    else:
+        kwargs = run_config.compile_kwargs()
+    kwargs["dump_passes"] = coerce_dump_level(kwargs["dump_passes"])
+    kwargs["emit_source_loc"] = emit_source_loc_default()
+    outer = _validate_pass_context_conflicts(
+        operation="compile",
+        verification_level=kwargs.get("verification_level"),
+        diagnostic_phase=kwargs.get("diagnostic_phase"),
+        memory_planner=kwargs.get("memory_planner"),
+        runtime=kwargs.get("runtime"),
+    )
+    bypass = (
+        kwargs["dump_passes"] is not PassDumpLevel.NONE
+        or kwargs["dump_ptoas_passes"]
+        or kwargs["profiling"]
+        or get_active_profiler() is not None
+        or kwargs.get("output_dir") is not None
+        or bool(os.environ.get("PYPTO_PROG_BUILD_DIR"))
+        or kwargs.get("verification_level") is not None
+        or kwargs["diagnostic_phase"] is not None
+        or kwargs["disabled_diagnostics"] is not None
+    )
+    if not bypass and outer is not None:
+        # Match the pipeline defaults: ordinary planner/runtime contexts can
+        # reuse artifacts, but instruments and custom checks must actually run.
+        default_disabled = _passes.DiagnosticCheckSet()
+        default_disabled.insert(_passes.DiagnosticCheck.UnusedControlFlowResult)
+        bypass = (
+            bool(outer.get_instruments())
+            or outer.get_verification_level() != _passes.get_default_verification_level()
+            or outer.get_diagnostic_phase() != _passes.get_default_diagnostic_phase()
+            or outer.get_disabled_diagnostics() != default_disabled
+        )
+    return kwargs, bypass
+
+
 # ---------------------------------------------------------------------------
 
 
@@ -2242,34 +2296,21 @@ class JITFunction:
             allow_signature_mode=allow_signature_mode,
         )
 
-        # Compile-side knobs (platform, strategy, dump_passes, ...) come from
-        # the RunConfig, through the same mapping a direct
-        # ``ir.compile(program, **config.compile_kwargs())`` call uses. With no
-        # config there is nothing to forward and ir.compile()'s own defaults
-        # apply, platform included.
-        compile_kwargs = run_config.compile_kwargs() if run_config is not None else {}
+        compile_kwargs, bypass_cache = _resolve_compile_request(run_config)
+        ordered_args = [
+            specialization.arguments[n] for n in specialization.param_names if n in specialization.arguments
+        ]
+        if bypass_cache:
+            compiled = self._compile(
+                specialization.tensor_meta,
+                specialization.scalar_values,
+                specialization.scalar_dtypes,
+                specialization.per_func_dyn,
+                pl,
+                **compile_kwargs,
+            )
+            return compiled, ordered_args, run_config
 
-        # Build cache key. Platform and strategy are included so artifacts
-        # compiled for different targets or optimization strategies never
-        # collide in the same cache. With no RunConfig the strategy is
-        # normalized to ir.compile()'s own default so the key holds the
-        # effective strategy rather than a None sentinel.
-        from pypto.ir.pass_manager import OptimizationStrategy  # noqa: PLC0415
-
-        platform = run_config.platform if run_config is not None else None
-        strategy = run_config.strategy if run_config is not None else OptimizationStrategy.Default
-        # distributed_config is baked into the DistributedCompiledProgram and
-        # drives per-rank dispatch, so it must split the cache: two @pl.jit.host
-        # calls with different device_ids compile to distinct artifacts.
-        distributed_config = run_config.distributed_config if run_config is not None else None
-        analyze_auto_scopes_for_deps = (
-            run_config.analyze_auto_scopes_for_deps if run_config is not None else False
-        )
-        dump_ptoas_passes = run_config.dump_ptoas_passes if run_config is not None else False
-        # The planner decides whether physical addresses are baked into the
-        # artifact, so it must split the cache: compiling one kernel under both
-        # planners must not hand the second call the first one's artifact.
-        memory_planner = _resolve_memory_planner(run_config)
         key = make_cache_key(
             source_hash=self._get_source_hash(),
             param_names=specialization.param_names,
@@ -2281,12 +2322,12 @@ class JITFunction:
                 (n, i) for n, m in specialization.tensor_meta.items() for i in m.dynamic_dim_indices()
             },
             scalar_values=specialization.scalar_values,
-            platform=platform,
-            strategy=strategy,
-            distributed_config=distributed_config,
-            analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
-            dump_ptoas_passes=dump_ptoas_passes,
-            memory_planner=memory_planner,
+            platform=compile_kwargs["platform"],
+            strategy=compile_kwargs["strategy"],
+            distributed_config=compile_kwargs.get("distributed_config"),
+            analyze_auto_scopes_for_deps=compile_kwargs["analyze_auto_scopes_for_deps"],
+            emit_source_loc=compile_kwargs["emit_source_loc"],
+            memory_planner=compile_kwargs.get("memory_planner", _resolve_memory_planner(None)),
             enable_pypto_l0c_double_buffer=_resolve_enable_pypto_l0c_double_buffer(),
             runtime=_resolve_runtime(),
         )
@@ -2302,14 +2343,7 @@ class JITFunction:
                 **compile_kwargs,
             )
 
-        # Use bound.arguments (in signature order) so keyword-style calls
-        # like kernel(a=x, b=y) are routed correctly regardless of how the
-        # caller passed them.
-        compiled = self._cache[key]
-        ordered_args = [
-            specialization.arguments[n] for n in specialization.param_names if n in specialization.arguments
-        ]
-        return compiled, ordered_args, run_config
+        return self._cache[key], ordered_args, run_config
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         """Specialize, compile (or serve from cache), and execute on device.
@@ -2318,7 +2352,8 @@ class JITFunction:
         specialized into ``@pl.program`` source, parsed, and compiled via
         ``ir.compile()`` (passes + codegen).  The resulting ``CompiledProgram``
         is stored in the L1 in-memory cache so subsequent calls with the same
-        specialization key skip compilation entirely.
+        specialization key skip compilation entirely. Diagnostic and explicit
+        output requests bypass both cache lookup and insertion on every call.
 
         The compiled kernel is then executed on the NPU device with the given
         torch tensor arguments (Triton-like API).
@@ -2371,7 +2406,10 @@ class JITFunction:
 
         Subsequent calls (either ``__call__`` or [`compile`][pypto.language.JITFunction.compile]) with the
         same specialization key hit the L1 cache and return the same
-        ``CompiledProgram`` instance.
+        ``CompiledProgram`` instance. Dump, compile-profiling, explicit output,
+        and custom pass-diagnostic requests always compile afresh, preserving
+        ordinary cached entries. Omitting ``config`` uses ``RunConfig`` defaults,
+        including disabled dumps.
 
         **Compiling without tensors.** When called with **no tensor
         arguments** — neither positional nor keyword — the shape/dtype contract
@@ -2590,6 +2628,8 @@ class JITFunction:
         compile-side knobs (``platform``, ``strategy``, ``dump_passes``,
         ``output_dir``, ``profiling``, diagnostics, ...) that the JIT caller
         derives from a ``RunConfig`` via ``RunConfig.compile_kwargs``.
+        If no output directory is supplied, allocate one for this compilation
+        so a fresh diagnostic request cannot overwrite a cached artifact.
         """
         from pypto.ir.compile import compile as ir_compile  # noqa: PLC0415
 
@@ -2601,6 +2641,10 @@ class JITFunction:
         try:
             parsed = pl.parse(source, filename=self._diagnostic_filename, source_map=specializer.source_map)
             skip_ptoas = not _ptoas_available()
+            if ir_compile_kwargs.get("output_dir") is None:
+                output_root = os.environ.get("PYPTO_PROG_BUILD_DIR") or "build_output"
+                os.makedirs(output_root, exist_ok=True)
+                ir_compile_kwargs["output_dir"] = tempfile.mkdtemp(prefix=f"{parsed.name}_", dir=output_root)
             return ir_compile(parsed, skip_ptoas=skip_ptoas, **ir_compile_kwargs)
         except Exception as exc:
             rewritten = _rewrite_jit_error(exc, rename_map)
