@@ -247,6 +247,56 @@ void CheckBoxedTileExtents(const ir::TileType& tile_type, const TileTypeComponen
   }
 }
 
+void CheckFlatTileExtents(const ir::TileType& tile_type, const TileTypeComponents& components,
+                          const ir::Span* span) {
+  // The boxed rule owns everything else; these two partition the tiles.
+  if (components.slayout != ir::TileLayout::none_box) return;
+
+  const DataType& dtype = tile_type.dtype_;
+  const int64_t bits = static_cast<int64_t>(ir::storage_size::GetStorageBitWidth(dtype));
+  if (bits <= 0 || bits % 8 != 0) return;  // sub-byte carrier: not this rule
+  const int64_t elem_bytes = bits / 8;
+
+  // `blayout` names the contiguous axis: row_major runs along the columns,
+  // col_major along the rows. Any other value is a layout this rule does not
+  // model, so leave it to PTOAS rather than guess.
+  const bool row_major = components.blayout == ir::TileLayout::row_major;
+  if (!row_major && components.blayout != ir::TileLayout::col_major) return;
+
+  // `ExtractTileTypeInfo` substitutes its struct default for a non-ConstInt
+  // dimension, so checking one would report the placeholder rather than the
+  // tile. Only a statically known extent is this check's business.
+  const size_t axis = row_major ? 1 : 0;
+  if (tile_type.shape_.size() <= axis || !As<ir::ConstInt>(tile_type.shape_[axis])) return;
+
+  const int64_t extent = row_major ? components.cols : components.rows;
+  const int64_t extent_bytes = extent * elem_bytes;
+  if (extent_bytes > 0 && extent_bytes % kBoxAlignedBytes == 0) return;
+
+  const auto space = tile_type.GetMemorySpace();
+  const std::string where = space.has_value() ? ir::MemorySpaceToString(*space) : std::string("unresolved");
+  const int64_t per_unit = kBoxAlignedBytes / elem_bytes;  // elem_bytes divides 32 for every byte dtype
+  const int64_t padded = (extent + per_unit - 1) / per_unit * per_unit;
+  const char* axis_name = row_major ? "column" : "row";
+
+  CHECK_SPAN(false, span != nullptr ? *span : ir::Span("", 0, 0))
+      << "a " << where << " tile of physical shape [" << components.rows << ", " << components.cols
+      << "] and dtype " << dtype.ToString() << " is addressed as a flat run of bytes, so its " << axis_name
+      << " extent must span a whole number of " << kBoxAlignedBytes << "-byte units, but " << extent << " x "
+      << elem_bytes << " = " << extent_bytes << " bytes is not. PTO takes the contiguous axis ("
+      << (row_major ? "row_major" : "col_major") << " makes that the " << axis_name << "s) in "
+      << kBoxAlignedBytes << "-byte steps, so " << per_unit << " elements of " << dtype.ToString()
+      << " is the smallest addressable extent -- a [1, 1], [2, 2] "
+         "or [4, 4] FP32 tile is equally unallocatable, this is not about the shape being a vector. "
+         "The *logical* extent is free: allocate "
+      << padded << " on that axis and declare " << extent
+      << " as the tile's valid_shape (`valid_shape=` on pl.load / pl.tile.create + pl.set_validshape), "
+         "which moves and computes only the real data. A single-element operand is usually better read "
+         "as a scalar instead -- `pl.read(t, [i, 0])` feeds the scalar form of the op (pl.mul, pl.adds, "
+         "...) with no tile at all, which is the spelling to reach for when the tile exists only to "
+         "carry one value into a broadcast.";
+}
+
 TileTypeComponents ExtractTileTypeInfo(const ir::TileType& tile_type, const std::string& dtype_str_override) {
   TileTypeComponents c;
   c.dtype_str = dtype_str_override.empty() ? DataTypeToMLIR(tile_type.dtype_) : dtype_str_override;

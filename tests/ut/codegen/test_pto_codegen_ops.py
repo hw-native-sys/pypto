@@ -655,38 +655,40 @@ class TestBitwiseScalarFamilyCodegen:
     def test_bitwise_scalar_ops_emit_same_width_signless_scalar(
         self, tile_dtype, scalar_dtype, scalar_mlir_type
     ):
+        # 32 columns, not 16: at 8 bits per element a 16-column tile spans
+        # 16 bytes, and an unboxed tile is addressed in whole 32-byte units.
         @pl.program
         class BitwiseScalarPrograms:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel_ands(
                 self,
-                src: pl.Tensor[[16, 16], tile_dtype],
-                out: pl.Tensor[[16, 16], tile_dtype],
-            ) -> pl.Tensor[[16, 16], tile_dtype]:
-                src_tile = pl.load(src, [0, 0], [16, 16])
+                src: pl.Tensor[[16, 32], tile_dtype],
+                out: pl.Tensor[[16, 32], tile_dtype],
+            ) -> pl.Tensor[[16, 32], tile_dtype]:
+                src_tile = pl.load(src, [0, 0], [16, 32])
                 return pl.store(pl.tile.ands(src_tile, 0x55), [0, 0], out)
 
             @pl.function(type=pl.FunctionType.InCore)
             def kernel_ors(
                 self,
-                src: pl.Tensor[[16, 16], tile_dtype],
+                src: pl.Tensor[[16, 32], tile_dtype],
                 scalar_src: pl.Tensor[[1], tile_dtype],
-                out: pl.Tensor[[16, 16], tile_dtype],
-            ) -> pl.Tensor[[16, 16], tile_dtype]:
+                out: pl.Tensor[[16, 32], tile_dtype],
+            ) -> pl.Tensor[[16, 32], tile_dtype]:
                 scalar: pl.Scalar[scalar_dtype] = pl.cast(pl.read(scalar_src, [0]), scalar_dtype)
-                src_tile = pl.load(src, [0, 0], [16, 16])
+                src_tile = pl.load(src, [0, 0], [16, 32])
                 return pl.store(pl.tile.ors(src_tile, scalar), [0, 0], out)
 
             @pl.function(type=pl.FunctionType.InCore)
             def kernel_xors(
                 self,
-                src: pl.Tensor[[16, 16], tile_dtype],
+                src: pl.Tensor[[16, 32], tile_dtype],
                 scalar_src: pl.Tensor[[1], tile_dtype],
-                out: pl.Tensor[[16, 16], tile_dtype],
-            ) -> pl.Tensor[[16, 16], tile_dtype]:
+                out: pl.Tensor[[16, 32], tile_dtype],
+            ) -> pl.Tensor[[16, 32], tile_dtype]:
                 scalar: pl.Scalar[scalar_dtype] = pl.cast(pl.read(scalar_src, [0]), scalar_dtype)
-                src_tile = pl.load(src, [0, 0], [16, 16])
-                tmp = pl.tile.create([16, 16], dtype=tile_dtype, target_memory=pl.MemorySpace.Vec)
+                src_tile = pl.load(src, [0, 0], [16, 32])
+                tmp = pl.tile.create([16, 32], dtype=tile_dtype, target_memory=pl.MemorySpace.Vec)
                 return pl.store(pl.tile.xors(src_tile, scalar, tmp), [0, 0], out)
 
         backend.reset_for_testing()
@@ -1042,18 +1044,21 @@ class TestB02SelectionAndPreluCodegen:
         assert "i32" in line
 
     def test_tsels_rejects_int8_on_a2a3(self):
+        # 32 INT8 columns, not 16: an unboxed tile is addressed in 32-byte
+        # steps, so a [16, 16] INT8 tile has no allocation and the tsels
+        # rejection under test would never be reached.
         @pl.program
         class Prog:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
-                src: pl.Tensor[[16, 16], pl.INT8],
-                out: pl.Tensor[[16, 16], pl.INT8],
-            ) -> pl.Tensor[[16, 16], pl.INT8]:
-                src_tile: pl.Tile[[16, 16], pl.INT8] = pl.load(src, [0, 0], [16, 16])
+                src: pl.Tensor[[16, 32], pl.INT8],
+                out: pl.Tensor[[16, 32], pl.INT8],
+            ) -> pl.Tensor[[16, 32], pl.INT8]:
+                src_tile: pl.Tile[[16, 32], pl.INT8] = pl.load(src, [0, 0], [16, 32])
                 mask: pl.Tile[[16, 32], pl.UINT8] = pl.tile.cmps(src_tile, 0, cmp_type=4)
-                tmp: pl.Tile[[1, 1], pl.UINT8] = pl.tile.create([1, 1], dtype=pl.UINT8)
-                result: pl.Tile[[16, 16], pl.INT8] = pl.tile.sels(mask, src_tile, tmp, -3)
+                tmp: pl.Tile[[1, 32], pl.UINT8] = pl.tile.create([1, 32], dtype=pl.UINT8)
+                result: pl.Tile[[16, 32], pl.INT8] = pl.tile.sels(mask, src_tile, tmp, -3)
                 return pl.store(result, [0, 0], out)
 
         with pytest.raises(ValueError, match="only supported on the 'a5' backend"):
@@ -1249,7 +1254,9 @@ class TestB02SelectionAndPreluCodegen:
             ) -> pl.Tensor[[16, 16], pl.FP32]:
                 src_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(src, [0, 0], [16, 16])
                 slope_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(slope, [0, 0], [16, 16])
-                tmp: pl.Tile[[1, 1], pl.UINT8] = pl.tile.create([1, 1], dtype=pl.UINT8)
+                # One row (still undersized, which is what this asserts) but 32
+                # bytes wide, so the tmp can actually be allocated.
+                tmp: pl.Tile[[1, 32], pl.UINT8] = pl.tile.create([1, 32], dtype=pl.UINT8)
                 result: pl.Tile[[16, 16], pl.FP32] = pl.tile.prelu(src_tile, slope_tile, tmp)
                 return pl.store(result, [0, 0], out)
 

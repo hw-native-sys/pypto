@@ -105,7 +105,10 @@ class TestCompileReturnsCompiledProgram:
 
     def test_compile_keeps_outer_report_instrument(self, tmp_path):
         torch = pytest.importorskip("torch")
-        x = torch.zeros(19, 19)
+        # 32 columns, not 19: an unboxed FP32 tile is addressed in whole
+        # 32-byte units, and this test is about the report instrument, not
+        # the shape.
+        x = torch.zeros(19, 32)
 
         with passes.PassContext([passes.ReportInstrument(str(tmp_path))]):
             compiled = add_kernel.compile(x, x, torch.empty_like(x))
