@@ -673,11 +673,22 @@ lane 只拥有一半的操作数产生了全宽输出，于是两个 lane 都没
 以及 `GetFirstTileArgMemory`（它现在读操作数的**类型**，向量算子不会再被误判成 SHARED 并复制
 到两条 lane）。
 
-tuple 还可能穿过 **if 合并**。`RepairIfReturnVars` 读的是 `tile_vars`，而其中从不包含 tuple
-变量，于是两个分支各自折半了 tuple、合并变量却保持全宽。现在 tuple 合并直接采用分支折半后的
-类型——它的元素本就带着逐元素的拆分，没有单一的轴可记录——并且要求两个分支一致，与 `TileType`
-情形同一套原则。DSL 无法为 tuple 合并写注解，但 `ConvertToSSA` 会为"在分支里被重新赋值的
-tuple"合成正是这种 phi。
+所有"这个操作数是否被拆分"的提问都走 `OperandSplitInfo`，包括两个本身不做折半的闸门：
+**绝对索引**检查（`tile.gather` 的表若是内联投影就是被拆分过的，而其他机制都抓不到它——
+`gather` 的结果形状取自 `indices`，无论表发生什么类型一致性都成立）；以及**视图**路径
+（`tile.reshape` / `tile.reinterpret_view` 靠同一个提问区分"取整块再逐 lane 切片"与
+"生产者已经拆过了"，对投影答"全宽"就会在一个即将被折半的操作数上再加一次切片）。
+
+tuple 还会穿过**分支合并与循环携带**，两者都不从 `tile_vars` 读取拆分信息——tuple 变量从不
+在其中。两者改为直接采用折半后的**类型**，其元素本就带着逐元素拆分，没有单一的轴可记录：
+
+| 形态 | 修复者 | 一致性规则 |
+| ---- | ------ | ---------- |
+| `if` 合并 | `RepairIfReturnVars` | 两个分支必须产出相同的折半 tuple |
+| 循环携带 + 出口 | `RepairIterArgs` / `RepairReturnVars` | 回边 `Yield` 必须与携带值一致 |
+
+DSL 对两者都无法写注解，但 `ConvertToSSA` 会为"在分支里被重新赋值的 tuple"合成正是这种 phi，
+而 `pl.range(..., init_values=(tup,))` 可以直接携带一个 tuple。
 
 这里有**两种**不同的失败都会以拒绝告终，诊断信息把它们分开。一是算子**直接拒绝**折半后的
 实参：可能是某条约束在折半后不再成立（`tile.tquant_mx` 要求 `M % 16 == 0`，而 per-lane 的

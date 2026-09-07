@@ -797,13 +797,27 @@ too. Every consumer goes through them — the generic path's tracked-input scan,
 `LocalizeStoreOffset`, and `GetFirstTileArgMemory` (which reads the operand's *type*, so
 a vector op is no longer misclassified SHARED and replicated onto both lanes).
 
-A tuple can also cross an **if-merge**. `RepairIfReturnVars` reads `tile_vars`, which
-never holds a tuple var, so both branches halved their tuple while the merge kept its
-full-width type. A tuple merge adopts the branches' halved type instead — its elements
-already carry the per-element split, so there is no single axis to record — and the
-branches must agree, on the same doctrine as the `TileType` case. The DSL cannot
-annotate a tuple merge, but `ConvertToSSA` synthesizes exactly this phi for a tuple
-reassigned in a branch.
+Everything that asks "was this operand partitioned" goes through `OperandSplitInfo`,
+including the two gates that do not halve anything themselves: the **absolute-index**
+check (a `tile.gather` whose table is an inline projection is partitioned, and nothing
+else catches it — `gather` takes its result shape from `indices`, so type consistency is
+satisfied whatever happens to the table) and the **view** path (`tile.reshape` /
+`tile.reinterpret_view` ask the same question to tell "lift a full tile, then slice per
+lane" from "the producer already partitioned this"; answering *full width* for a
+projection emits a slice on top of an operand that is about to be halved).
+
+A tuple also crosses **merges and loop carries**, and neither reads its split from
+`tile_vars` — a tuple var is never in it. Both adopt the halved *type* instead, whose
+elements already carry the per-element split, so there is no single axis to record:
+
+| Shape | Repaired by | Agreement rule |
+| ----- | ----------- | -------------- |
+| `if` merge | `RepairIfReturnVars` | both branches must yield the same halved tuple |
+| loop carry + exit | `RepairIterArgs` / `RepairReturnVars` | the backedge `Yield` must match the carry |
+
+The DSL cannot annotate either, but `ConvertToSSA` synthesizes exactly the merge phi for
+a tuple reassigned in a branch, and `pl.range(..., init_values=(tup,))` carries one
+directly.
 
 Two different failures end in a rejection, and the diagnostics keep them apart — one
 message cannot explain both:

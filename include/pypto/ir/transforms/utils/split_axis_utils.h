@@ -383,7 +383,8 @@ std::vector<VarPtr> RepairReturnVars(const std::vector<VarPtr>& return_vars,
 /// is no halved version to substitute, so a diagnostic naming the carry is the
 /// only correct answer.
 void ValidateCarryBackedge(const StmtPtr& new_body, const std::vector<IterArgPtr>& new_iter_args,
-                           const std::unordered_map<const Var*, TileInfo>& tile_vars, const Span& span);
+                           const std::unordered_map<const Var*, TileInfo>& tile_vars,
+                           const std::unordered_map<const Var*, VarPtr>& var_replacements, const Span& span);
 
 std::vector<VarPtr> RepairIfReturnVars(const std::vector<VarPtr>& return_vars, const StmtPtr& new_then_body,
                                        const std::optional<StmtPtr>& new_else_body,
