@@ -107,24 +107,34 @@ constexpr int64_t kAccBoxDim = 16;
 /// The element width `kAccFractal` implies for a 16x16 box: 1024 / 256 bytes.
 constexpr uint64_t kAccElementBits = 32;
 
-/// Can `mad` write an `rows`-tall window of a `parent_dims` accumulator as it
-/// stands, with no repacking?
+/// Can `mad` write this row window as it stands, with no repacking?
 ///
-/// Mirrors pto-isa's `MadAccStrideCompatible` (`TMatmul.hpp`, identical on
-/// a2a3/a5/a6/kirin9030) for the two branches a plain accumulator can hit:
+/// The question is settled by the WINDOW's column extent, never the parent's.
+/// ptoas resolves a `pto.subview` asymmetrically: a row window keeps the
+/// parent's physical `Rows` and narrows `ValidRow`, while `Cols` comes from the
+/// window itself. A `[16, 128]` window of a `[16, 512]` accumulator emits
+/// `Tile<Acc, int32_t, 16, 128, ...>`, not `..., 512, ...`. pto-isa's
+/// `MadAccStrideCompatible` (`TMatmul.hpp`, identical on a2a3/a5/a6/kirin9030)
+/// then returns true on `Cols <= FRACTAL_NZ_ROW`: a single block column has no
+/// second column for the compact write to mis-stride.
 ///
-///   * a parent at most one 16-column box wide has no second block column for
-///     the compact write to mis-stride, so any row window is addressable;
-///   * a window whose 16-rounded height equals the parent's height is written
-///     at exactly the parent's pitch.
+/// Width alone is not enough, for the reason `CheckAccWindowContiguous`
+/// (`canonicalize_tile_slice_pass.cpp`) already states: a 16-wide window at
+/// column offset 8 straddles two blocks and corrupts the parent exactly like a
+/// wider one, and a dynamic offset cannot be proven. This predicate must stay
+/// in step with that guard — a window this one exempts but that one rejects is
+/// left unpacked only to be refused two passes later.
 ///
-/// Such a chain must NOT be seeded for packing. Packing it is unnecessary, and
-/// a seeded chain that later proves unpackable is rejected outright — which
-/// would turn a kernel the hardware accepts today into a hard error.
-bool MadCanAddressRowWindow(int64_t rows, const std::vector<int64_t>& parent_dims) {
-  if (rows <= 0 || parent_dims.size() != 2) return false;
-  if (parent_dims.back() <= kAccBoxDim) return true;
-  return (rows + kAccBoxDim - 1) / kAccBoxDim * kAccBoxDim == parent_dims[0];
+/// An exempt chain must NOT be seeded. Packing it is unnecessary, and a seeded
+/// chain that later proves unpackable is rejected outright — which would turn a
+/// kernel the hardware accepts today into a hard error.
+bool MadCanAddressRowWindow(const std::vector<int64_t>& view_dims, const ExprPtr& column_offset) {
+  if (view_dims.size() != 2) return false;
+  const int64_t view_cols = view_dims[1];
+  if (view_cols <= 0 || view_cols > kAccBoxDim) return false;
+  auto offset = As<ConstInt>(column_offset);
+  if (!offset || offset->value_ < 0) return false;
+  return offset->value_ / kAccBoxDim == (offset->value_ + view_cols - 1) / kAccBoxDim;
 }
 
 /// L0C byte budget. Mirrors `GetMatBudgetBytes` in rewrite_utils.cpp: without a
@@ -479,7 +489,11 @@ class ChainCollector {
       if (!parent_dims || !view_dims || view_dims->size() != 2) continue;
       const int64_t rows = (*view_dims)[0];
       if (rows >= (*parent_dims)[0]) continue;
-      if (MadCanAddressRowWindow(rows, *parent_dims)) continue;
+      auto window_offsets = call->args_.size() >= 3 ? As<MakeTuple>(call->args_[2]) : nullptr;
+      if (window_offsets && window_offsets->elements_.size() == 2 &&
+          MadCanAddressRowWindow(*view_dims, window_offsets->elements_[1])) {
+        continue;
+      }
       CHECK_SPAN((*parent_dims)[0] % rows == 0, call->span_)
           << "matmul_acc accumulator row windows must evenly divide the parent row extent; got " << rows
           << " rows in a " << (*parent_dims)[0] << "-row accumulator";

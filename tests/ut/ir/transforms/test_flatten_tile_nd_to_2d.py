@@ -4579,7 +4579,7 @@ class TestRowWindowAccumulatorPacking:
         ir.assert_structural_equal(after, Expected)
 
     def test_narrow_accumulator_row_windows_are_left_unpacked(self):
-        """A parent at most one 16-column box wide needs no packing at all.
+        """A window at most one 16-column box wide needs no packing at all.
 
         pto-isa's ``MadAccStrideCompatible`` returns true on ``Cols <= 16``
         before it looks at ``ValidRow``: there is no second block column for
@@ -4629,6 +4629,39 @@ class TestRowWindowAccumulatorPacking:
                 hi = pl.tile.slice(acc1, [16, 16], [32, 0])
                 hi_part = pl.tile.matmul_acc(hi, a16, b, init_cond=True)
                 acc2 = pl.tile.assemble(acc1, hi_part, [32, 0])
+                result = pl.tile.store(acc2, [0, 0], out)
+                return result
+
+        after = passes.flatten_tile_nd_to_2d()(Before)
+        ir.assert_structural_equal(after, Before)
+
+    def test_narrow_windows_of_a_wide_parent_are_left_unpacked(self):
+        """The exemption reads the window's column extent, not the parent's.
+
+        ptoas resolves a row window to the parent's physical ``Rows`` but the
+        window's ``Cols``, so a 16-column window inside one block is a single
+        L0C block column however wide its parent is. Two such windows in
+        separate blocks of a ``[48, 32]`` accumulator are addressable at unequal
+        heights, and ``CheckAccWindowContiguous`` accepts them downstream.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a16: pl.Tile[[16, 64], pl.FP16, pl.Mem.Mat],
+                a32: pl.Tile[[32, 64], pl.FP16, pl.Mem.Mat],
+                b: pl.Tile[[64, 16], pl.FP16, pl.Mem.Mat],
+                out: pl.Out[pl.Tensor[[48, 32], pl.FP32]],
+            ) -> pl.Tensor[[48, 32], pl.FP32]:
+                acc = pl.tile.create([48, 32], pl.FP32)
+                lo = pl.tile.slice(acc, [32, 16], [0, 0])
+                lo_part = pl.tile.matmul_acc(lo, a32, b, init_cond=True)
+                acc1 = pl.tile.assemble(acc, lo_part, [0, 0])
+                hi = pl.tile.slice(acc1, [16, 16], [32, 16])
+                hi_part = pl.tile.matmul_acc(hi, a16, b, init_cond=True)
+                acc2 = pl.tile.assemble(acc1, hi_part, [32, 16])
                 result = pl.tile.store(acc2, [0, 0], out)
                 return result
 

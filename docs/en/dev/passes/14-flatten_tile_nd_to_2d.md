@@ -260,12 +260,18 @@ whole-accumulator store becomes one store per packed window at logical row
 offset `t * R`. This preserves the K-outer, row-inner loop order and its weight
 reuse, including runtime row-loop bounds.
 
-Only windows the MAD cannot already address are packed. An accumulator at most
-16 columns wide has a single L0C block column, and a window whose 16-rounded
-height equals the parent's height writes at the parent's own pitch — pto-isa's
-`MadAccStrideCompatible` accepts both. Those chains pass through untouched, and
-none of the requirements below apply to them: seeding a chain the hardware
-already accepts would subject a working kernel to the rejections listed here.
+Only windows the MAD cannot already address are packed. A window at most 16
+columns wide that lies inside one 16-column block is a single L0C block column,
+so there is no second column for the compact write to mis-stride and pto-isa's
+`MadAccStrideCompatible` accepts it. The window's own column extent decides
+this, not the parent's: ptoas resolves a row window to the parent's physical
+`Rows` but the window's `Cols`, so a `[16, 16]` window of a `[48, 32]`
+accumulator is addressable. Those chains pass through untouched, and none of
+the requirements below apply to them — seeding a chain the hardware already
+accepts would subject a working kernel to the rejections listed here. The
+exemption deliberately matches `CanonicalizeTileSlice`'s
+`CheckAccWindowContiguous`, so a window left unpacked here is not refused two
+passes later.
 
 Packing requires one compiler-allocated buffer; equal, static row-window
 heights that divide the parent height; provably aligned row offsets; full valid
