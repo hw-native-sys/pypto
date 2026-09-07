@@ -783,6 +783,26 @@ ExprPtr AdjustOffsets(const ExprPtr& offsets_expr, int split_dim, const ExprPtr&
   return std::make_shared<MakeTuple>(std::move(new_elements), offsets->span_);
 }
 
+// A `tile.store` of a tracked (halved) tile, rebuilt with its destination offset
+// moved to this lane's half, or nullptr when @p call is not such a store.
+//
+// The tile itself is swapped for its halved replacement by the trailing Substitute;
+// this is the other half of that rewrite. Without it the two AIV lanes write the
+// SAME rows from different data and lane 1's half is silently lost.
+CallPtr LocalizeStoreOffset(const CallPtr& call, const std::unordered_map<const Var*, TileInfo>& tile_vars,
+                            const ExprPtr& subblock_idx, const ExprPtr& lane_stride) {
+  if (!IsOp(call, "tile.store") || call->args_.size() < 3) return nullptr;
+  auto tile_var = std::dynamic_pointer_cast<const Var>(call->args_[0]);
+  if (!tile_var) return nullptr;
+  auto it = tile_vars.find(tile_var.get());
+  if (it == tile_vars.end()) return nullptr;
+
+  std::vector<ExprPtr> new_args = call->args_;
+  new_args[1] = AdjustOffsets(call->args_[1], it->second.split_dim,
+                              LaneStep(lane_stride, it->second.half_dim_size), subblock_idx);
+  return std::make_shared<Call>(call->op_, std::move(new_args), call->kwargs_, call->GetType(), call->span_);
+}
+
 TypePtr ApplyTrackedTileShape(const TypePtr& type, int dim, const ExprPtr& half_dim_size,
                               const ExprPtr& subblock_idx, const ExprPtr& lane_stride) {
   auto tt = std::dynamic_pointer_cast<const TileType>(type);
@@ -1029,19 +1049,9 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
     }
 
     // AIV only: tile.store — adjust offset using tracked tile info
-    if (is_aiv && IsOp(call, "tile.store") && call->args_.size() >= 3) {
-      auto tile_var = std::dynamic_pointer_cast<const Var>(call->args_[0]);
-      if (tile_var) {
-        auto it = tile_vars.find(tile_var.get());
-        if (it != tile_vars.end()) {
-          auto new_offsets = AdjustOffsets(call->args_[1], it->second.split_dim,
-                                           LaneStep(lane_stride, it->second.half_dim_size), subblock_idx);
-          std::vector<ExprPtr> new_args = call->args_;
-          new_args[1] = new_offsets;
-          auto new_call = std::make_shared<Call>(call->op_, std::move(new_args), call->kwargs_,
-                                                 call->GetType(), call->span_);
-          return std::make_shared<AssignStmt>(assign->var_, new_call, assign->span_);
-        }
+    if (is_aiv) {
+      if (auto localized = LocalizeStoreOffset(call, tile_vars, subblock_idx, lane_stride)) {
+        return std::make_shared<AssignStmt>(assign->var_, localized, assign->span_);
       }
     }
 
@@ -1464,22 +1474,22 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
       return std::make_shared<EvalStmt>(new_call, eval->span_);
     }
 
-    if (is_aiv && IsOp(call, "tile.store") && call->args_.size() >= 3) {
-      auto tile_var = std::dynamic_pointer_cast<const Var>(call->args_[0]);
-      if (tile_var) {
-        auto it = tile_vars.find(tile_var.get());
-        if (it != tile_vars.end()) {
-          auto new_offsets = AdjustOffsets(call->args_[1], it->second.split_dim,
-                                           LaneStep(lane_stride, it->second.half_dim_size), subblock_idx);
-          std::vector<ExprPtr> new_args = call->args_;
-          new_args[1] = new_offsets;
-          auto new_call = std::make_shared<Call>(call->op_, std::move(new_args), call->kwargs_,
-                                                 call->GetType(), call->span_);
-          return std::make_shared<EvalStmt>(new_call, eval->span_);
-        }
+    if (is_aiv) {
+      if (auto localized = LocalizeStoreOffset(call, tile_vars, subblock_idx, lane_stride)) {
+        return std::make_shared<EvalStmt>(localized, eval->span_);
       }
     }
 
+    return stmt;
+  }
+
+  // A store reached as a RETURN EXPRESSION takes neither of the arms above, and the
+  // trailing Substitute swaps in the halved tile regardless -- so without this the
+  // ordinary `return pl.tile.store(v, [0, 0], out)` spelling leaves both AIV lanes
+  // writing from row 0 while each holds a different half. Binding the store first
+  // was never meant to be load-bearing.
+  if (auto ret = std::dynamic_pointer_cast<const ReturnStmt>(stmt); ret && is_aiv) {
+    if (auto localized = LocalizeReturnStores(ret, tile_vars, subblock_idx, lane_stride)) return localized;
     return stmt;
   }
 
@@ -2047,6 +2057,23 @@ ExprPtr ComputeHalfDimSize(const ExprPtr& dim_size) {
   }
   auto two = std::make_shared<ConstInt>(2, GetScalarDtype(dim_size), dim_size->span_);
   return MakeFloorDiv(dim_size, two, dim_size->span_);
+}
+
+StmtPtr LocalizeReturnStores(const std::shared_ptr<const ReturnStmt>& ret,
+                             const std::unordered_map<const Var*, TileInfo>& tile_vars,
+                             const ExprPtr& subblock_idx, const ExprPtr& lane_stride) {
+  std::vector<ExprPtr> new_values = ret->value_;
+  bool changed = false;
+  for (auto& value : new_values) {
+    auto call = std::dynamic_pointer_cast<const Call>(value);
+    if (!call || !call->op_) continue;
+    if (auto localized = LocalizeStoreOffset(call, tile_vars, subblock_idx, lane_stride)) {
+      value = localized;
+      changed = true;
+    }
+  }
+  if (!changed) return nullptr;
+  return std::make_shared<ReturnStmt>(std::move(new_values), ret->span_, ret->leading_comments_);
 }
 
 StmtPtr RetypeTupleProjection(const std::shared_ptr<const AssignStmt>& assign,

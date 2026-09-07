@@ -771,9 +771,8 @@ There is no single result axis to follow, so the generic path cannot express it.
 The mapping is **discovered, not declared**: re-deduce the call from the arguments
 the halved node will carry, and read which axis of each element moved. A new
 tuple-returning operator therefore needs no registration, and the mapping cannot go
-stale the way per-operator metadata did (see the gh#2612 discussion). Re-deduction
-only supplies the *axis*; `HalveTileShape` still performs the halving, so an odd
-extent is localized per lane exactly as on the single-`TileType` path.
+stale the way per-operator metadata did (gh#2612). Re-deduction supplies only the
+*axis*; `HalveTileShape` still halves, so odd extents localize per lane as usual.
 
 Every element must halve on exactly one axis. An element that comes back
 **unchanged** is the dangerous case, not the harmless one — the operator produced a
@@ -782,21 +781,18 @@ the whole answer while the shape still looks right. That is what correctly rejec
 LEFT_RIGHT split of `tile.gather_compare`: both its outputs are sized from the
 source's *rows*, so halving the columns moves neither.
 
-The `x = tup[i]` projections are retyped from the halved tuple by
-`split_axis::RetypeTupleProjection`, which also records each element's own axis so a
-later `tile.store` offsets the right dimension. **Both** lowering arms call it: the
-AUTO arm's affinity gate only routes leaf *calls* into `ProcessStmts`, so a
-projection left to its pass-through fallback would keep a full-width declared type
-over a halved tuple.
+`split_axis::RetypeTupleProjection` retypes the `x = tup[i]` projections from the
+halved tuple and records each element's own axis, so a later `tile.store` offsets the
+right dimension. **Both** lowering arms call it — the AUTO arm's affinity gate only
+routes leaf *calls* into `ProcessStmts`, so a projection left to its pass-through
+fallback would keep a full-width declared type over a halved tuple.
 
-Condition 2 (the blind-operand backstop) does not run on this path — it is written
-against a single result axis. The "every element must move" rule covers the common
-case, since a *primary* per-lane operand left full width stops the elements moving
-and is refused. It would not catch a *secondary* per-lane operand that no element's
-shape depends on; no registered tuple-returning operator has one (their remaining
-tile operands are declared workspaces), and a new one would surface in
-`test_lane_invariant_arg_coverage.py`'s blind inventory, which forces the question to
-be answered before it can be added.
+Condition 2 (the blind-operand backstop) is written against a single result axis and
+does not run here. "Every element must move" covers a *primary* per-lane operand left
+full width, but not a *secondary* one no element's shape depends on. No registered
+tuple-returning operator has one (their other tile operands are declared workspaces),
+and a new one surfaces in `test_lane_invariant_arg_coverage.py`'s blind inventory
+first, which forces the question to be answered.
 
 A position that is scratch only in *some* arities cannot be declared:
 `tile.mrgsort_format2`'s `tmp_or_src2` is a third sorted input in a 3/4-way merge
@@ -807,8 +803,17 @@ every arity, and the remaining positions are real sorted inputs that must be sha
 
 ### Carries, merges and dropped axes
 
-Three places rewrite state *around* the halving rather than in it, and each must
+Four places rewrite state *around* the halving rather than in it, and each must
 follow the same axis and tracking rules or the conditions above misfire:
+
+- **A store reached as the return expression.** `LocalizeStoreOffset` moves a
+  `tile.store` of a tracked tile to this lane's half, and the *statement shape*
+  decides whether it is reached. `return pl.tile.store(v, [0, 0], out)` is ordinary
+  DSL — nothing normalizes it into an assignment — yet it is neither an `AssignStmt`
+  nor an `EvalStmt`, and the AUTO arm's affinity gate skips it too (no leaf call of
+  its own). `Substitute` still swaps in the halved tile, so both lanes wrote the same
+  rows from different data. `LocalizeReturnStores` covers it from both arms; binding
+  the store to a name first was never meant to be load-bearing.
 
 - **Loop carries.** A carry has three edges, and all three must agree. An
   `iter_arg` inherits its init value's tracking, so a halved init makes the carry

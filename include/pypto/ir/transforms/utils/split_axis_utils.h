@@ -391,6 +391,18 @@ std::vector<VarPtr> RepairIfReturnVars(const std::vector<VarPtr>& return_vars, c
                                        const ExprPtr& subblock_idx, const ExprPtr& lane_stride,
                                        const Span& span);
 
+/// Rebuild @p ret with every ``tile.store`` of a tracked tile moved to this lane's
+/// half of the destination, or nullptr when it carries no such store.
+///
+/// A store that IS the return expression takes neither the AssignStmt nor the
+/// EvalStmt offset-localization arm, while the trailing Substitute swaps in the
+/// halved tile regardless. Both AIV lanes then write the same rows from different
+/// data and lane 1's half is silently lost. Both lowering arms must call this, for
+/// the same reason they must call RetypeTupleProjection.
+StmtPtr LocalizeReturnStores(const std::shared_ptr<const ReturnStmt>& ret,
+                             const std::unordered_map<const Var*, TileInfo>& tile_vars,
+                             const ExprPtr& subblock_idx, const ExprPtr& lane_stride);
+
 /// Retype an ``x = tup[i]`` projection whose tuple was halved, or nullptr when
 /// @p assign is not such a projection.
 ///

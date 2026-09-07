@@ -622,7 +622,18 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
       continue;
     }
 
-    // SHARED leaf / ReturnStmt / anything else: pass through unchanged.
+    // A store that IS the return expression reaches neither the affinity gate (it
+    // carries no leaf call of its own) nor split_axis's offset-localization arms, so
+    // without this the ordinary `return pl.tile.store(v, [0, 0], out)` spelling left
+    // both AIV lanes writing from row 0 while each held a different half.
+    if (auto ret = std::dynamic_pointer_cast<const ReturnStmt>(stmt)) {
+      if (auto localized = split_axis::LocalizeReturnStores(ret, tile_vars, subblock_idx, lane_stride)) {
+        result.push_back(localized);
+        continue;
+      }
+    }
+
+    // SHARED leaf / anything else: pass through unchanged.
     result.push_back(stmt);
   }
 

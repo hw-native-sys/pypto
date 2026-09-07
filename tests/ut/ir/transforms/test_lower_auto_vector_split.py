@@ -257,6 +257,50 @@ def test_store_offset_at_nonzero_base_localizes_additively():
     ir.assert_structural_equal(_lower(Before), Expected)
 
 
+def test_store_as_the_return_expression_gets_the_same_offset_as_the_bound_form():
+    """Binding the store to a name first was never meant to be load-bearing.
+
+    ``return pl.tile.store(...)`` is ordinary DSL — nothing normalizes it into an
+    assignment — but such a store reaches neither the ``AssignStmt`` nor the
+    ``EvalStmt`` offset-localization arm, and the AUTO arm's affinity gate does not
+    route it either (it carries no leaf call of its own). The trailing ``Substitute``
+    swapped in the halved tile regardless, so both AIV lanes wrote the SAME rows from
+    different data and lane 1's half was silently lost.
+
+    Assert the two spellings agree, which is the property that was broken.
+    """
+
+    @pl.program
+    class ReturnExpression:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            qk: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat],
+            out_0: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+        ) -> pl.Tensor[[256, 128], pl.FP32]:
+            popped = pl.tile.move(qk, target_memory=pl.Mem.Vec)
+            y = pl.tile.add(popped, popped)
+            return pl.tile.store(y, [0, 0], out_0)
+
+    @pl.program
+    class BoundFirst:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            qk: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat],
+            out_0: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+        ) -> pl.Tensor[[256, 128], pl.FP32]:
+            popped = pl.tile.move(qk, target_memory=pl.Mem.Vec)
+            y = pl.tile.add(popped, popped)
+            out_store = pl.tile.store(y, [0, 0], out_0)
+            return out_store
+
+    returned = _lower(ReturnExpression).as_python()
+    bound = _lower(BoundFirst).as_python()
+
+    assert "return pl.tile.store(y, [0 + subblock_idx * 64, 0], out_0)" in returned
+    # Same destination arithmetic either way — only the binding differs.
+    assert "pl.tile.store(y, [0 + subblock_idx * 64, 0], out_0)" in bound
+
+
 # ---------------------------------------------------------------------------
 # Vector sub-region per-op halving (migrated from test_split_vector_kernel.py).
 #
