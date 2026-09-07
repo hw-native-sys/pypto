@@ -1377,30 +1377,37 @@ jobs:
             --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest tests/st/distributed/test_l2_multi_orch.py -v --device=\$TASK_DEVICE"
 
       - name: Test swimlane output
+        # --precompile-workers is what gives these tests an artifact directory at
+        # all: they read the record through `case_run.dfx(...)`, which resolves
+        # inside the case's own work_dir, and conftest returns early -- no pool,
+        # no work_dir -- when the flag is absent.
+        #
+        # No --forked, which it used to pass: a forked child cannot resolve the
+        # parent's compile futures, and the step hung until the 900s task cap
+        # when the two were combined. Unforked it is 4 passed in 11s.
         run: |
           source activate.sh
           task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 600 \
-            --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest tests/st/runtime/framework_and_models/test_perf_swimlane.py -v --device=\$TASK_DEVICE --platform=a2a3 --enable-chip-swimlane --forked"
+            --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest tests/st/runtime/framework_and_models/test_perf_swimlane.py -v --device=\$TASK_DEVICE --platform=a2a3 --enable-chip-swimlane --precompile-workers=8"
 
       - name: Test scheduling swimlane assertions
         # The 35 swimlane assertions under runtime/scheduling had never run: they
         # gate on `--enable-chip-swimlane`, which CI passed only to
         # test_perf_swimlane.py, so every one of them skipped in the batched
-        # shard. Same mechanism as the step above (the fixture globs
-        # build_output/*/dfx_outputs/chip_swimlane_records.json), selected by the
-        # `swimlane` marker rather than by path so the correctness tests sharing
-        # these files are not re-run here.
+        # shard. Selected by the `swimlane` marker rather than by path, so the
+        # correctness cases sharing these files are not re-run here.
         #
-        # No `--forked`, unlike the step above: these hang their swimlane record
-        # off class- or module-scoped fixtures, so one process reuses each
-        # record across the class instead of re-running the device case per
-        # test — about 20 device runs rather than 35.
+        # --precompile-workers, and no --forked, for the reasons on the two steps
+        # above: each test reads its record through `case_run.dfx(...)`, which
+        # needs the pool to have published a work_dir, and several tests sharing
+        # one declared case then share its single device run.
         run: |
           source activate.sh
           task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 1200 \
             --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest \
               tests/st/runtime/scheduling -v -m swimlane \
-              --device=\$TASK_DEVICE --platform=a2a3 --enable-chip-swimlane"
+              --device=\$TASK_DEVICE --platform=a2a3 --enable-chip-swimlane \
+              --precompile-workers=8"
 
       - name: Test Graph record-and-replay (one process per test)
         # --forked because a ChipWorker binds one (platform, device_id, runtime):
@@ -1412,10 +1419,12 @@ jobs:
             --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest tests/st/runtime/framework_and_models/test_graph_execution.py -v --device=\$TASK_DEVICE --platform=a2a3 --forked"
 
       - name: Test dump-args output
+        # Pool for the same reason as the swimlane steps, and --forked dropped
+        # with it: 8 passed in 3s unforked against 19s forked.
         run: |
           source activate.sh
           task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 600 \
-            --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest tests/st/runtime/framework_and_models/test_dump_tag.py -v --device=\$TASK_DEVICE --platform=a2a3 --dump-args --forked"
+            --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest tests/st/runtime/framework_and_models/test_dump_tag.py -v --device=\$TASK_DEVICE --platform=a2a3 --dump-args --precompile-workers=8"
 
       - name: Kill orphaned task-submit tasks
         if: always()
