@@ -303,6 +303,54 @@ def test_tensor_matmul_acc_nd_acc_batch_mismatch_fails():
         ir.op.tensor.matmul_acc(acc, lhs, rhs)
 
 
+def _window_tensor_var(name: str, shape: list[int], dtype: DataType = DataType.BF16) -> ir.Var:
+    """Build a Var of DistributedTensorType (an HCCL window view) with a static shape."""
+    span = ir.Span.unknown()
+    dims = [ir.ConstInt(d, DataType.INT32, span) for d in shape]
+    return ir.Var(name, ir.DistributedTensorType(dims, dtype), span)
+
+
+@pytest.mark.parametrize("window_side", ["lhs", "rhs", "both"])
+def test_tensor_matmul_accepts_window_operand(window_side):
+    """A window operand is this rank's local GM, so matmul must accept it.
+
+    Slicing a ``pld.DistributedTensor`` keeps ``DistributedTensorType``, so the
+    high-level matmul has to match it the way the elementwise ops already do.
+    The product is fresh local data, so the deduced result is a plain
+    ``TensorType`` -- never a window view.
+    """
+    make_lhs = _window_tensor_var if window_side in ("lhs", "both") else _tensor_var
+    make_rhs = _window_tensor_var if window_side in ("rhs", "both") else _tensor_var
+
+    call = ir.op.tensor.matmul(make_lhs("a", [16, 32], DataType.BF16), make_rhs("b", [32, 64], DataType.BF16))
+
+    assert call.op.name == ir.get_op("tensor.matmul").name
+    assert _const_shape(call) == [16, 64]
+    assert not isinstance(call.type, ir.DistributedTensorType)
+
+
+def test_tensor_matmul_acc_accepts_window_operand():
+    """matmul_acc accumulates from a window operand, same rule as matmul."""
+    acc = _tensor_var("acc", [16, 64], DataType.FP32)
+    lhs = _window_tensor_var("a", [16, 32], DataType.BF16)
+    rhs = _tensor_var("b", [32, 64], DataType.BF16)
+
+    call = ir.op.tensor.matmul_acc(acc, lhs, rhs)
+
+    assert call.op.name == ir.get_op("tensor.matmul_acc").name
+    assert _const_shape(call) == [16, 64]
+    assert not isinstance(call.type, ir.DistributedTensorType)
+
+
+def test_tensor_row_max_accepts_window_source():
+    """A reduction reads a window as local GM; the reduced result is local data."""
+    call = ir.op.tensor.row_max(_window_tensor_var("t", [16, 32], DataType.FP32))
+
+    assert call.op.name == ir.get_op("tensor.row_max").name
+    assert _const_shape(call) == [16, 1]
+    assert not isinstance(call.type, ir.DistributedTensorType)
+
+
 def test_tensor_row_max():
     """Test tensor.row_max reduction."""
     span = ir.Span.unknown()

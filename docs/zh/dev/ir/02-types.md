@@ -79,6 +79,16 @@ op 所绑定的 `ir.WindowBuffer`（`Var` 子类）上。通过
 `None`）。Tile 类型没有 distributed 变体；跨 rank op 始终作用在
 `DistributedTensor` 上。
 
+**在 window 上做本地计算。** 在 InCore scope 内，一个 window 切片*就是*本 rank 的
+本地 GM，因此普通 tensor op 可以像读写任何 GM tensor 一样读写它。这些 op 用
+[`AsTensorTypeLike`](../../../../include/pypto/ir/kind_traits.h)（同时匹配两种
+kind）而不是精确匹配的 `As<TensorType>` 来匹配操作数：`tensor.slice` /
+`tensor.assemble`、逐元素与一元族、各类 reduction，以及 `tensor.matmul` /
+`tensor.matmul_acc`。其中只有 `tensor.slice` 和 `tensor.assemble` 会传播 window
+kind —— window 的切片仍然是同一个 comm-group 分配上的视图。所有计算类 op 都返回
+普通 `TensorType`，因为其结果是新产生的本地数据，而不是 window 视图。
+`tensor.reinterpret_view` 是已记录的例外：它仍然直接拒绝 window。
+
 ### 带 TensorView 的 TensorType
 
 带有布局和步长信息的张量，用于优化内存访问。

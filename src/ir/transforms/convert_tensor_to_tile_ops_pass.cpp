@@ -408,7 +408,7 @@ class TensorArgsInConvertedOpsCollector : public IRVisitor {
       for (const auto& [iter_arg_ptr, init_expr] : iter_arg_to_init_) {
         if (used_.count(iter_arg_ptr) == 0) continue;
         if (auto var = As<Var>(init_expr)) {
-          if (As<TensorType>(var->GetType()) && used_.insert(var.get()).second) {
+          if (AsTensorTypeLike(var->GetType()) && used_.insert(var.get()).second) {
             changed = true;
           }
         }
@@ -441,10 +441,15 @@ class TensorArgsInConvertedOpsCollector : public IRVisitor {
       for (size_t i = 0; i < call->args_.size(); ++i) {
         if (conv_entry->input_reqs.count(i)) continue;
         const auto& arg = call->args_[i];
+        // ``AsTensorTypeLike`` also collects ``DistributedTensorType`` params: inside
+        // an InCore scope a window is this rank's local GM, so an op with no
+        // input_req (e.g. tensor.row_max) needs the same Phase-1 entry load a plain
+        // tensor param gets. The exact-kind ``As<TensorType>`` skipped it, and the
+        // converter then saw an unbridged tensor operand.
         if (auto iter_arg = As<IterArg>(arg)) {
-          if (As<TensorType>(iter_arg->GetType())) used_.insert(iter_arg.get());
+          if (AsTensorTypeLike(iter_arg->GetType())) used_.insert(iter_arg.get());
         } else if (auto var = As<Var>(arg)) {
-          if (As<TensorType>(var->GetType())) used_.insert(var.get());
+          if (AsTensorTypeLike(var->GetType())) used_.insert(var.get());
         }
       }
     }
@@ -1255,7 +1260,12 @@ class TensorToTileMutator : public TypePropagatingMutator {
       // path into Acc memory" diagnostic, which names the real limitation.
       if (req.demanded_space.Get() == MemorySpace::Acc) continue;
       const bool use_view = req.trans_kwarg ? call->GetKwarg<bool>(*req.trans_kwarg, false) : false;
-      auto tensor_type = As<TensorType>(args[idx]->GetType());
+      // A window operand bridges exactly like a plain GM tensor (issue #1694):
+      // ``AsTensorTypeLike`` matches both kinds. With the exact-kind
+      // ``As<TensorType>`` a ``pld.DistributedTensor`` reaching a matmul directly
+      // fell through to the tile branch, passed through unbridged, and tripped the
+      // converter's unreachable guard.
+      auto tensor_type = AsTensorTypeLike(args[idx]->GetType());
 
       if (tensor_type) {
         // GM operand: load NATURAL (2D and ND alike), then reinterpret as its
@@ -2284,7 +2294,9 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   const auto& params_used_by_converted_ops = collector.GetUsed();
 
   for (const auto& var : func->params_) {
-    auto tensor_type = As<TensorType>(var->GetType());
+    // ``AsTensorTypeLike`` covers ``DistributedTensorType`` window params too --
+    // the entry load reads this rank's local GM, same as for a plain tensor.
+    auto tensor_type = AsTensorTypeLike(var->GetType());
     if (!tensor_type) continue;
 
     if (params_used_by_converted_ops.find(var.get()) == params_used_by_converted_ops.end()) continue;

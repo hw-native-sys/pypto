@@ -110,9 +110,14 @@ TypePtr DeduceTensorReductionType(const std::vector<ExprPtr>& args,
   CHECK(args.size() == 1) << "The operator " << op_name << " requires exactly 1 argument, but got "
                           << args.size();
 
-  // First argument must be TensorType
-  auto tensor_type = As<TensorType>(args[0]->GetType());
-  CHECK(tensor_type) << "The operator " << op_name << " requires first argument to be a TensorType, but got "
+  // First argument must be tensor-shaped. ``AsTensorTypeLike`` accepts a
+  // ``DistributedTensorType`` (window) source the same as a plain tensor (issue
+  // #1694): inside an InCore scope a window is this rank's local GM, so the
+  // reduction reads it through the same ``tile.load``. The reduced result is
+  // fresh local data, so ``MakeReductionResultType`` returns a plain TensorType.
+  auto tensor_type = AsTensorTypeLike(args[0]->GetType());
+  CHECK(tensor_type) << "The operator " << op_name
+                     << " requires first argument to be a TensorType or DistributedTensorType, but got "
                      << args[0]->GetType()->TypeName();
 
   const auto& input_shape = tensor_type->shape_;
@@ -170,7 +175,13 @@ REGISTER_OP("tensor.row_min")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       auto result_type = DeduceTensorReductionType(args, kwargs, "tensor.row_min");
-      auto input_type = As<TensorType>(args[0]->GetType());
+      // The shared deducer above already validated the operand, so this second cast must use
+      // the same matcher: with the exact-kind ``As<TensorType>`` a window operand yielded null
+      // and the unguarded ``input_type->dtype_`` below dereferenced it.
+      auto input_type = AsTensorTypeLike(args[0]->GetType());
+      INTERNAL_CHECK_SPAN(input_type, args[0]->span_)
+          << "Internal error: tensor.row_min input passed reduction deduction but is not "
+          << "tensor-shaped: " << args[0]->GetType()->TypeName();
       CHECK_SPAN(IsPtoRowMinDtype(input_type->dtype_), args[0]->span_)
           << "The operator tensor.row_min requires input dtype in {INT16, INT32, FP16, FP32}, but got "
           << input_type->dtype_.ToString();
@@ -197,8 +208,10 @@ TypePtr DeduceTensorColReductionType(const std::vector<ExprPtr>& args,
   CHECK(args.size() == 1) << "The operator " << op_name << " requires exactly 1 argument, but got "
                           << args.size();
 
-  auto tensor_type = As<TensorType>(args[0]->GetType());
-  CHECK(tensor_type) << "The operator " << op_name << " requires first argument to be a TensorType, but got "
+  // Window sources are accepted here for the same reason as in the row form above.
+  auto tensor_type = AsTensorTypeLike(args[0]->GetType());
+  CHECK(tensor_type) << "The operator " << op_name
+                     << " requires first argument to be a TensorType or DistributedTensorType, but got "
                      << args[0]->GetType()->TypeName();
 
   const auto& input_shape = tensor_type->shape_;

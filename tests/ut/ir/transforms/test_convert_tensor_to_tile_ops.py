@@ -5889,6 +5889,139 @@ class TestWindowSliceIncoreConversion:
         assert _find_first_call_to(kernel, "tensor.add") is None
         assert _find_first_call_to(kernel, "tensor.slice") is None
 
+    def test_matmul_on_window_slice(self):
+        """A window slice feeding ``pl.matmul`` must load straight into Mat.
+
+        The consumer-driven load (``HandleConsumerDrivenLoad``) already accepts a
+        window source; the gate that rejected this case was the *type* deducer.
+        Locking in the lowering shape here proves the Cube operand path is the
+        same one a plain GM tensor takes -- one ``tile.load`` with
+        ``target_memory=Mat``, no Vec round trip.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                win: pld.DistributedTensor[[16, 32], pl.BF16],
+                w: pl.Tensor[[32, 16], pl.BF16],
+                out: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            ):
+                a = pl.tensor.slice(win, [16, 32], [0, 0])
+                prod = pl.matmul(a, w)
+                out[0:16, 0:16] = prod
+                return  # noqa: PLR1711  (DSL return terminator)
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        kernel = After.get_function("kernel")
+        assert kernel is not None, "kernel function missing after conversion"
+        mm = _find_first_call_to(kernel, "tile.matmul")
+        assert mm is not None, "matmul over a window slice must lower to tile.matmul"
+        # Both operands arrive as Mat-resident tiles.
+        for operand in mm.args:
+            operand_type = operand.type
+            assert isinstance(operand_type, ir.TileType), (
+                f"tile.matmul operand must be a tile, got {type(operand_type).__name__}"
+            )
+            assert operand_type.memory_space == ir.MemorySpace.Mat, (
+                f"tile.matmul operand must be Mat-resident, got {operand_type.memory_space}"
+            )
+        assert _find_first_call_to(kernel, "tensor.matmul") is None
+        assert _find_first_call_to(kernel, "tensor.slice") is None
+
+    def test_matmul_acc_on_window_slice(self):
+        """``pl.matmul_acc`` accumulates a window-derived operand (split-K idiom)."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                win: pld.DistributedTensor[[16, 32], pl.BF16],
+                w: pl.Tensor[[32, 16], pl.BF16],
+                out: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            ):
+                acc = pl.create_tensor([16, 16], dtype=pl.FP32)
+                a = pl.tensor.slice(win, [16, 32], [0, 0])
+                acc2 = pl.matmul_acc(acc, a, w, init_cond=True)
+                out[0:16, 0:16] = acc2
+                return  # noqa: PLR1711  (DSL return terminator)
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        kernel = After.get_function("kernel")
+        assert kernel is not None, "kernel function missing after conversion"
+        assert _find_first_call_to(kernel, "tile.matmul_acc") is not None, (
+            "matmul_acc over a window slice must lower to tile.matmul_acc"
+        )
+        assert _find_first_call_to(kernel, "tensor.matmul_acc") is None
+        assert _find_first_call_to(kernel, "tensor.slice") is None
+
+    def test_matmul_on_window_param_without_slice(self):
+        """A window *parameter* fed straight to matmul must be auto-bridged.
+
+        No ``tensor.slice`` stands between the parameter and the matmul, so the
+        Mat load can only come from ``BridgeInputSpaces``. With the exact-kind
+        cast there the window fell through to the tile branch and reached the
+        converter unbridged, tripping its ``INTERNAL_UNREACHABLE`` guard.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                win: pld.DistributedTensor[[16, 32], pl.BF16],
+                w: pl.Tensor[[32, 16], pl.BF16],
+                out: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            ):
+                prod = pl.matmul(win, w)
+                out[0:16, 0:16] = prod
+                return  # noqa: PLR1711  (DSL return terminator)
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        kernel = After.get_function("kernel")
+        assert kernel is not None, "kernel function missing after conversion"
+        mm = _find_first_call_to(kernel, "tile.matmul")
+        assert mm is not None, "matmul over a window param must lower to tile.matmul"
+        for operand in mm.args:
+            assert isinstance(operand.type, ir.TileType), (
+                "every tile.matmul operand must be bridged to a tile"
+            )
+        assert _find_first_call_to(kernel, "tensor.matmul") is None
+
+    def test_row_max_on_window_param_without_slice(self):
+        """A window param feeding an op with no ``input_reqs`` needs a Phase-1 load.
+
+        ``tensor.row_max`` declares no input space requirement, so its operand is
+        loaded by the entry-load phase rather than by ``BridgeInputSpaces``. That
+        phase collected only exact ``TensorType`` params, so the window reached
+        the converter as a tensor and failed its ``input must be TileType`` check.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                win: pld.DistributedTensor[[16, 32], pl.FP32],
+                out: pl.InOut[pl.Tensor[[16, 1], pl.FP32]],
+            ):
+                r = pl.row_max(win)
+                out[0:16, 0:1] = r
+                return  # noqa: PLR1711  (DSL return terminator)
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        kernel = After.get_function("kernel")
+        assert kernel is not None, "kernel function missing after conversion"
+        assert _find_first_call_to(kernel, "tile.load") is not None, (
+            "the window param must get an entry tile.load"
+        )
+        assert _find_first_call_to(kernel, "tile.row_max") is not None, (
+            "row_max over a window param must lower to tile.row_max"
+        )
+        assert _find_first_call_to(kernel, "tensor.row_max") is None
+
     # ------------------------------------------------------------------
     # Composite intrinsic param-direction upgrade tests
     # ------------------------------------------------------------------

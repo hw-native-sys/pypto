@@ -1216,7 +1216,9 @@ void OpConversionRegistry::RegisterMatmulOps() {
   // tile- or tensor-typed.
   auto rank_of = [](const ExprPtr& e) -> size_t {
     if (auto t = As<TileType>(e->GetType())) return t->shape_.size();
-    if (auto t = As<TensorType>(e->GetType())) return t->shape_.size();
+    // ``AsTensorTypeLike`` so a window operand BridgeInputSpaces left tensor-typed
+    // (Acc reqs are never bridged) reports its rank instead of tripping the guard.
+    if (auto t = AsTensorTypeLike(e->GetType())) return t->shape_.size();
     INTERNAL_UNREACHABLE << "matmul conversion: argument has unexpected type " << e->GetType()->TypeName();
   };
 

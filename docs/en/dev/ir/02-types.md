@@ -81,6 +81,18 @@ like `pld.DistributedTensor[[shape], dtype]` leave this field as `None`.
 Tile types do not have a distributed variant; cross-rank ops always operate
 on `DistributedTensor`.
 
+**Local compute over a window.** Inside an InCore scope a window slice *is*
+this rank's local GM, so the ordinary tensor ops read and write it like any
+other GM tensor. Those ops match their operand with
+[`AsTensorTypeLike`](../../../../include/pypto/ir/kind_traits.h) (both kinds)
+rather than the exact-kind `As<TensorType>`: `tensor.slice` / `tensor.assemble`,
+the element-wise and unary families, the reductions, and `tensor.matmul` /
+`tensor.matmul_acc`. Only `tensor.slice` and `tensor.assemble` propagate the
+window kind — a slice of a window is still a view into the same comm-group
+allocation. Every computing op returns a plain `TensorType`, because its result
+is fresh local data rather than a window view. `tensor.reinterpret_view` is the
+documented exception: it still rejects a window outright.
+
 ### TensorType with TensorView
 
 Tensor with layout and stride information for optimized memory access.

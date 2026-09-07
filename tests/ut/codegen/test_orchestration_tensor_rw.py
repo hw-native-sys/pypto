@@ -12,6 +12,7 @@
 import re
 
 import pypto.language as pl
+import pypto.language.distributed as pld
 import pytest
 from _orchestration_codegen_common import (
     _generate_orch_code,
@@ -1241,6 +1242,46 @@ class TestTensorReadWriteOffsetCodegen:
         task_add_text = "\n".join(task_add_lines)
         for expected in ("ext_q", "ext_sink", "ext_out", "gm_pipe_buffer_0", "task"):
             assert expected in task_add_text, code
+
+
+class TestWindowScalarReadWriteCodegen:
+    """``tensor.read`` / ``tensor.write`` on a ``pld.DistributedTensor`` window.
+
+    ``ConvertTensorToTileOps`` deliberately leaves these two ops unconverted for a window
+    operand (see its ``IncoreTileOps`` verifier), so orchestration codegen is where they
+    lower. The emitter matched its operand with the exact-kind ``As<TensorType>``, which a
+    window never satisfies, so that documented path aborted in codegen with
+    ``tensor.read input must be TensorType`` -- a late failure the type deducer had already
+    accepted. Both emitters now match with ``AsTensorTypeLike``.
+    """
+
+    @staticmethod
+    def _program():
+        @pl.program
+        class WindowScalarRW:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                win: pl.InOut[pld.DistributedTensor[[4, 8], pl.FP32]],
+            ) -> pld.DistributedTensor[[4, 8], pl.FP32]:
+                v: pl.Scalar[pl.FP32] = pl.tensor.read(win, [0, 0])
+                pl.tensor.write(win, [1, 2], v)
+                return win
+
+        return WindowScalarRW
+
+    def test_window_scalar_read_write_emit_runtime_accessors(self):
+        # A DistributedTensor param gets its CommCtx companion from pass 44; codegen
+        # asserts the two are in step, so a hand-built program has to run it here.
+        with passes.PassContext([]):
+            program = passes.materialize_dist_tensor_ctx()(self._program())
+        code = _generate_orch_code(program)
+        assert "get_tensor_data<float>" in code, (
+            f"tensor.read on a window must emit the runtime accessor:\n{code}"
+        )
+        assert "set_tensor_data<float>" in code, (
+            f"tensor.write on a window must emit the runtime accessor:\n{code}"
+        )
 
 
 if __name__ == "__main__":
