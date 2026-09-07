@@ -70,10 +70,27 @@ TypePtr DeduceTileSort32Type(const std::vector<ExprPtr>& args,
       << "The operator " << op_name << " requires src dtype to be FP16 or FP32, but got "
       << src_type->dtype_.ToString();
 
-  // Second arg: idx tile
+  // Second arg: idx tile — one index per src element, so it is shaped like src.
+  // TSORT32 pairs src[i] with idx[i] positionally; an idx that does not cover src
+  // reads past its own buffer, and a wider one silently ignores the tail. State the
+  // relation in the type so it is enforced once here instead of per consumer
+  // (gh#2612 -- LowerAutoVectorSplit is otherwise blind to this operand and cannot
+  // tell a legal full-width one from per-lane data left un-sharded).
+  //
+  // Only a PROVABLE mismatch is an error; an undecidable symbolic relation is left
+  // to the backend, so dynamic extents keep working exactly as before.
   auto idx_type = As<TileType>(args[1]->GetType());
   CHECK(idx_type) << "The operator " << op_name << " requires second argument to be a TileType, but got "
                   << args[1]->GetType()->TypeName();
+  CHECK(idx_type->shape_.size() == src_type->shape_.size())
+      << "The operator " << op_name << " requires idx to have the same rank as src (one index per element), "
+      << "but got idx rank " << idx_type->shape_.size() << " against src rank " << src_type->shape_.size();
+  for (size_t d = 0; d < src_type->shape_.size(); ++d) {
+    CHECK(ProveValidExtentEqual(idx_type->shape_[d], src_type->shape_[d]) != ProofResult::kFalse)
+        << "The operator " << op_name << " requires idx to have the same shape as src (one index per "
+        << "element), but got idx shape " << FormatShape(idx_type->shape_) << " against src shape "
+        << FormatShape(src_type->shape_);
+  }
 
   if (args.size() == 3) {
     auto tmp_type = As<TileType>(args[2]->GetType());
