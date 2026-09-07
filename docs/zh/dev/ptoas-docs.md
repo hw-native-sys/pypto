@@ -15,4 +15,4 @@ mkdocs build --strict
 更新已有来源目录时，在构建前执行
 `git -C .cache/ptoas-docs pull --ff-only`。
 
-PyPTO 当前生成的操作见 [PTOAS 算子状态矩阵](../../dev/ptoas-op-status.md)。
+PyPTO 当前生成的操作见 [PTOAS 算子状态矩阵](ptoas-op-status.md)。

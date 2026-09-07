@@ -15,5 +15,5 @@ mkdocs build --strict
 To update an existing source checkout, run
 `git -C .cache/ptoas-docs pull --ff-only` before rebuilding.
 
-See also the [PTOAS op status matrix](../../dev/ptoas-op-status.md) for the
+See also the [PTOAS op status matrix](ptoas-op-status.md) for the
 operations currently emitted by PyPTO.
