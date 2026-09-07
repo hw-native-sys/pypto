@@ -19,7 +19,14 @@ from typing import Any
 import pypto.language as pl
 import pytest
 import torch
-from harness.core.harness import ONBOARD_PLATFORMS, DataType, PTOTestCase, TensorSpec
+from harness import st
+from harness.core.harness import (
+    ONBOARD_PLATFORM_IDS,
+    ONBOARD_PLATFORMS,
+    DataType,
+    PTOTestCase,
+    TensorSpec,
+)
 
 _PL_DT = {
     DataType.INT8: pl.INT8,
@@ -294,6 +301,15 @@ class TileSelsMaskCarrierTestCase(PTOTestCase):
         tensors["out"][:] = expected
 
 
+# (m, n) physical tile, and the valid extent when it is narrower than the tile.
+_BOUNDARY_PHYSICAL_SHAPES = (
+    ((1, 64), None),
+    ((64, 16), None),
+    ((2, 256), None),
+    ((2, 264), (2, 257)),
+)
+
+
 class TestTileSels:
     """TSELS semantic branches on every onboard platform."""
 
@@ -420,26 +436,30 @@ class TestTileSels:
         result = test_runner.run(TileSelsTestCase(valid_shape=valid_shape, platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize("platform", ONBOARD_PLATFORMS)
-    @pytest.mark.parametrize(
-        "physical_shape,valid_shape",
-        [
-            pytest.param((1, 64), None, id="one-row"),
-            pytest.param((64, 16), None, id="tall-narrow"),
-            pytest.param((2, 256), None, id="packed-32-byte-boundary"),
-            pytest.param((2, 264), (2, 257), id="packed-33-byte-boundary"),
-        ],
-    )
-    def test_boundary_physical_shapes(self, test_runner, platform, physical_shape, valid_shape):
-        result = test_runner.run(
-            TileSelsTestCase(
-                m=physical_shape[0],
-                n=physical_shape[1],
-                valid_shape=valid_shape,
-                platform=platform,
-            )
+    # Declared rather than built in the body: the constructor indexed a
+    # parametrize value (``physical_shape[0]``), which collection's
+    # source-parsing route cannot evaluate, so these four compiled one at a time
+    # instead of in the pool.
+    #
+    # The platform stays a constructor argument rather than moving to the
+    # harness matrix, because this case reads it at construction time:
+    # ``_tmp_dtype`` defaults to the src/dst dtype on A2/A3 and to UINT8
+    # elsewhere, and A2/A3 rejects a tsels whose tmp element type differs from
+    # src and dst. The matrix binds a platform only after the object exists,
+    # which is too late to pick the dtype. So the product is spelled out here;
+    # each case pins its platform, and the matrix drops the variants the pin
+    # excludes -- yielding the same item set the ``ONBOARD_PLATFORMS``
+    # parametrize did. The tmp dtype is part of the case name, so the two
+    # platforms' names never collide.
+    @st.cases(
+        *(
+            st.from_legacy(TileSelsTestCase(m=m, n=n, valid_shape=valid, platform=platform))
+            for platform in ONBOARD_PLATFORM_IDS
+            for (m, n), valid in _BOUNDARY_PHYSICAL_SHAPES
         )
-        assert result.passed, f"Test failed: {result.error}"
+    )
+    def test_boundary_physical_shapes(self, case_run):
+        case_run.assert_passed()
 
 
 if __name__ == "__main__":

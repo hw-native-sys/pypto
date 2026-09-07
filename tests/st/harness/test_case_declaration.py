@@ -516,6 +516,43 @@ class TestPlatformMatrixCollection:
             "test_it[a5sim]",
         ]
 
+    @classmethod
+    def _unexpanded_item(cls, case_obj: Case) -> "list[Any]":
+        """The single-platform shape: no matrix, so no platform param at all."""
+        items = cls._items(case_obj)[:1]
+        del items[0].callspec.params["_st_platform"]
+        items[0].name = "test_it"
+        return items
+
+    def test_a_pinned_case_is_deselected_when_the_only_platform_is_not_its_own(self):
+        """The matrix expands only for a multi-platform CLI.
+
+        A plain ``--platform=a2a3`` run -- the shape CI uses -- grows no
+        variants, so the pin had no platform param to disagree with and every
+        pinned case survived. An A5-pinned case would then have been handed an
+        A2A3 card.
+        """
+        conf = self._conftest()
+        items = self._unexpanded_item(_jit_case(name="abs_pin_single", platform="a5"))
+        config = self._config("a2a3")
+
+        kept = list(items)
+        conf.pytest_collection_modifyitems(config, kept)
+
+        assert kept == []
+        assert [i.name for i in config.hook.deselected] == ["test_it"]
+
+    def test_a_pinned_case_survives_a_single_platform_run_naming_its_pin(self):
+        conf = self._conftest()
+        items = self._unexpanded_item(_jit_case(name="abs_pin_single_kept", platform="a5"))
+        config = self._config("a5")
+
+        kept = list(items)
+        conf.pytest_collection_modifyitems(config, kept)
+
+        assert [i.name for i in kept] == ["test_it"]
+        assert config.hook.deselected == []
+
     def test_a_pinned_case_is_collected_once_under_its_pin(self):
         """Keyed by the pin, not by the item — even with no deselect in front.
 

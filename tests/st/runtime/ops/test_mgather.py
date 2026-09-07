@@ -14,6 +14,7 @@ from typing import Any
 import pypto.language as pl
 import pytest
 import torch
+from harness import st
 from harness.core.harness import ONBOARD_PLATFORMS, DataType, PTOTestCase, TensorSpec
 
 ROWS = 64
@@ -541,12 +542,21 @@ class TestMgather:
         )
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize("platform", ONBOARD_PLATFORMS)
-    def test_gm_to_mat_elem_accepts_oversized_scratch(self, test_runner, platform):
-        result = test_runner.run(
-            MgatherMatTestCase(coalesce="elem", scratch_elements=MAT_M * MAT_N + MAT_N, platform=platform)
-        )
-        assert result.passed, f"Test failed: {result.error}"
+    # Declared rather than built in the body: ``scratch_elements`` is an
+    # arithmetic expression, which collection's source-parsing route cannot
+    # evaluate, so this case compiled on its own instead of in the pool. The
+    # platform moves from an explicit parametrize to the harness matrix --
+    # ``MgatherMatTestCase`` only forwards it to ``PTOTestCase`` and never reads
+    # it -- held to the on-board ids by the marker so the coverage is the
+    # ``ONBOARD_PLATFORMS`` list it replaces.
+    @pytest.mark.platforms(
+        "a2a3",
+        "a5",
+        reason="oversized-scratch acceptance is an on-board property; the simulator does not model it",
+    )
+    @st.cases(st.from_legacy(MgatherMatTestCase(coalesce="elem", scratch_elements=MAT_M * MAT_N + MAT_N)))
+    def test_gm_to_mat_elem_accepts_oversized_scratch(self, case_run):
+        case_run.assert_passed()
 
 
 if __name__ == "__main__":

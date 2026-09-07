@@ -878,7 +878,9 @@ def pytest_collection_modifyitems(config, items):
     A third layer applies to a declared ``Case`` that pinned its own platform:
     since that pin outranks the item's, only the matrix variant the pin names
     is kept. Without it the other variants would run the pinned platform and
-    report themselves as covering one they never touched.
+    report themselves as covering one they never touched. A single-platform run
+    grows no matrix variants at all, so there the pin is checked against the
+    allowed set directly.
     """
     cli_platforms = _parse_platform_filter(config.getoption("--platform"))
     cli_filter = set(cli_platforms or ALL_PLATFORM_IDS)
@@ -908,9 +910,17 @@ def pytest_collection_modifyitems(config, items):
         # declaration and `get_platform()` is exactly the pin, or None.
         declared_case = params.get("_st_case")
         case_pin = declared_case.get_platform() if isinstance(declared_case, Case) else None
-        if case_pin is not None and platform_param is not None and case_pin != platform_param:
-            deselected.append(item)
-            continue
+        if case_pin is not None:
+            # The matrix only expands when the CLI names more than one platform,
+            # so a single-platform run leaves `platform_param` None. Comparing
+            # the pin against the allowed set covers both shapes; without the
+            # second arm a pinned case survived every single-platform run, which
+            # is the shape CI uses -- an A5-pinned case would have been handed an
+            # A2A3 card.
+            unwanted = case_pin != platform_param if platform_param is not None else case_pin not in allowed
+            if unwanted:
+                deselected.append(item)
+                continue
 
         if platform_param is not None:
             if platform_param in allowed:

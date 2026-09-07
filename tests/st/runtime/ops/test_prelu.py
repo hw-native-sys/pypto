@@ -14,6 +14,7 @@ from typing import Any
 import pypto.language as pl
 import pytest
 import torch
+from harness import st
 from harness.core.harness import ONBOARD_PLATFORMS, DataType, PTOTestCase, TensorSpec
 from pypto.runtime.runner import RunConfig
 
@@ -180,6 +181,9 @@ class TilePreluTestCase(PTOTestCase):
         tensors["out"][:] = expected
 
 
+_BOUNDARY_PHYSICAL_SHAPES = ((1, 256), (64, 16))
+
+
 class TestTilePrelu:
     """TPRELU dtype, scratch, and valid-shape branches on hardware."""
 
@@ -226,19 +230,18 @@ class TestTilePrelu:
         result = test_runner.run(TilePreluTestCase(a5_placeholder_tmp=True, platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize("platform", ONBOARD_PLATFORMS)
-    @pytest.mark.parametrize(
-        "physical_shape",
-        [
-            pytest.param((1, 256), id="one-row-wide"),
-            pytest.param((64, 16), id="tall-narrow"),
-        ],
+    # Same reason as test_sels: indexing a parametrize value put these past what
+    # collection can evaluate from source, so they compiled one at a time. The
+    # marker holds the harness matrix to the on-board ids the explicit
+    # ``ONBOARD_PLATFORMS`` parametrize used to name.
+    @pytest.mark.platforms(
+        "a2a3",
+        "a5",
+        reason="a physical-shape boundary is an on-board packing property; the simulator does not model it",
     )
-    def test_boundary_physical_shapes(self, test_runner, platform, physical_shape):
-        result = test_runner.run(
-            TilePreluTestCase(m=physical_shape[0], n=physical_shape[1], platform=platform)
-        )
-        assert result.passed, f"Test failed: {result.error}"
+    @st.cases(*(st.from_legacy(TilePreluTestCase(m=m, n=n)) for m, n in _BOUNDARY_PHYSICAL_SHAPES))
+    def test_boundary_physical_shapes(self, case_run):
+        case_run.assert_passed()
 
 
 if __name__ == "__main__":

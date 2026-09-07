@@ -37,6 +37,7 @@ from typing import Any
 import pypto.language as pl
 import pytest
 import torch
+from harness import st
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
 from pypto.runtime.runner import RunConfig
 
@@ -69,6 +70,12 @@ def _gemv_output_dtype(dtype: DataType) -> DataType:
 
 def _cfg() -> RunConfig:
     return RunConfig(rtol=_RTOL, atol=_ATOL)
+
+
+# The Cube GEMV lhs needs a whole 512-byte block of physical K, so the aligned
+# contraction length is a function of the operand dtype.
+_AB_DTYPES = (DataType.BF16, DataType.FP16, DataType.INT8)
+_ALIGNED_K = {DataType.BF16: 256, DataType.FP16: 256, DataType.INT8: 512}
 
 
 # ===========================================================================
@@ -207,10 +214,13 @@ class TestMatmulBias:
         result = test_runner.run(MatmulBiasTestCase(narrow=narrow, config=_cfg()))
         assert result.passed, f"Test failed: {result.error}"
 
+    # Declared rather than built in the body: ``out_m=2 * M`` is arithmetic on a
+    # name, which collection's source-parsing route cannot evaluate, so this
+    # case used to compile on its own instead of in the pool.
     @pytest.mark.platforms("a2a3")
-    def test_tile_matmul_bias_offset(self, test_runner):
-        result = test_runner.run(MatmulBiasTestCase(out_m=2 * M, off_row=M, config=_cfg()))
-        assert result.passed, f"Test failed: {result.error}"
+    @st.cases(st.from_legacy(MatmulBiasTestCase(out_m=2 * M, off_row=M, config=_cfg())))
+    def test_tile_matmul_bias_offset(self, case_run):
+        case_run.assert_passed()
 
 
 # ===========================================================================
@@ -449,12 +459,19 @@ class TestGemvBias:
         result = test_runner.run(GemvTestCase(k=128, bias=True, narrow="K", config=_cfg()))
         assert result.passed, f"Test failed: {result.error}"
 
+    # The K that keeps the physical Cube block whole depends on the dtype, and a
+    # conditional expression bound to a local is past what collection can
+    # evaluate from source -- so the dtype axis moves into the declaration and
+    # the K comes from a table. Same shape in ``test_tile_gemv_acc_dtype``.
     @pytest.mark.platforms("a2a3")
-    @pytest.mark.parametrize("ab_dtype", [DataType.BF16, DataType.FP16, DataType.INT8])
-    def test_tile_gemv_bias_dtype(self, test_runner, ab_dtype):
-        k = 512 if ab_dtype == DataType.INT8 else 256
-        result = test_runner.run(GemvTestCase(k=k, n=64, bias=True, ab_dtype=ab_dtype, config=_cfg()))
-        assert result.passed, f"Test failed: {result.error}"
+    @st.cases(
+        *(
+            st.from_legacy(GemvTestCase(k=_ALIGNED_K[d], n=64, bias=True, ab_dtype=d, config=_cfg()))
+            for d in _AB_DTYPES
+        )
+    )
+    def test_tile_gemv_bias_dtype(self, case_run):
+        case_run.assert_passed()
 
     @pytest.mark.platforms("a2a3")
     def test_tile_gemv_bias_final_phase(self, test_runner):
@@ -701,11 +718,14 @@ class TestGemvAcc:
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.platforms("a2a3")
-    @pytest.mark.parametrize("ab_dtype", [DataType.BF16, DataType.FP16, DataType.INT8])
-    def test_tile_gemv_acc_dtype(self, test_runner, ab_dtype):
-        k_chunk = 512 if ab_dtype == DataType.INT8 else 256
-        result = test_runner.run(GemvAccTestCase(k_chunk=k_chunk, n=64, ab_dtype=ab_dtype, config=_cfg()))
-        assert result.passed, f"Test failed: {result.error}"
+    @st.cases(
+        *(
+            st.from_legacy(GemvAccTestCase(k_chunk=_ALIGNED_K[d], n=64, ab_dtype=d, config=_cfg()))
+            for d in _AB_DTYPES
+        )
+    )
+    def test_tile_gemv_acc_dtype(self, case_run):
+        case_run.assert_passed()
 
     @pytest.mark.platforms("a2a3")
     def test_tile_gemv_acc_partial_final_phases(self, test_runner):
