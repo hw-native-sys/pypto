@@ -167,12 +167,20 @@ A device kernel (`@pl.jit.incore`) cannot allocate, so it always takes the secon
 `pl.create_tensor` belongs on the control plane. An `@pl.jit.inline` helper is spliced into
 the caller, so either form is available to it.
 
-What does *not* resolve is a returned tensor whose shape no static rule can reach — a
-`pl.create_tensor` sized from a value only the device knows, or a result rebound through an
-operation the specializer does not model. That surfaces as
+An extent the specializer cannot compute statically is *not* by itself a problem. A
+`pl.create_tensor` sized from a value only the device knows — `pl.tensor.read(cfg, [0])`,
+`pld.world_size()` — becomes a dynamic dimension and keeps flowing, and the shared pass
+pipeline judges whatever the program then does with it (loading the whole tensor as a tile,
+say, gets you `InitMemRef requires static shape` — the same error the equivalent
+`@pl.program` earns).
+
+What does not resolve is a returned tensor whose shape the specializer cannot *reach* at
+all: a `pl.reshape` whose target shape is not static (a reshape is constrained by its
+source's element count, so no dynamic dimension can stand in for it), or a result rebound
+through an operation the specializer does not model. That surfaces as
 `missing inferred tensor metadata for parameter '<name>'` at the *next* call that consumes
-it; annotate the producing allocation with static extents, or pass the buffer in as a
-`pl.Out[...]` parameter.
+it — the error names the consumer, but the fix belongs at the producer: give the producing
+statement a statically inferable shape, or pass the buffer in as a `pl.Out[...]` parameter.
 
 ### Three constraints that decide whether a jit kernel compiles
 

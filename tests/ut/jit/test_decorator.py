@@ -1078,6 +1078,27 @@ def _arity_mismatch_body(x: pl.Tensor) -> pl.Tensor:
     return only_one
 
 
+@jit.inline
+def _mixed_pair_inline(x: pl.Tensor):
+    """Inline helper returning one typeable local and one the extractor declines.
+
+    ``pl.reshape`` with a non-static shape is strict on purpose (a reshape's
+    dims are constrained by the source's element count), so ``opaque`` has no
+    meta on the callee side either.
+    """
+    opaque = pl.reshape(x, [2, pl.tensor.dim(x, 1)])
+    known = pl.create_tensor([4, 4], dtype=pl.FP16)
+    return opaque, known
+
+
+def _mixed_pair_body(x: pl.Tensor) -> pl.Tensor:
+    """Plain (undecorated) caller: rebinds a known local through a helper that
+    returns one typeable result and one it cannot type."""
+    a = pl.create_tensor([16, 8], dtype=pl.FP32)
+    a, b = _mixed_pair_inline(a)
+    return b
+
+
 # --- Runtime-sized local extents (synthesized DynDim) ------------------------
 # Fixtures for the tests covering a local tensor whose extent is only known at
 # runtime: one decorated dep, then plain (undecorated) caller bodies fed straight
@@ -1336,11 +1357,19 @@ class TestSliceAndDepReturnMetadata:
         assert metas["a"] == TensorMeta(shape=(1, 8), dtype=DataType.FP32)
         assert metas["b"] == TensorMeta(shape=(16, 8), dtype=DataType.FP16)
 
-    def test_callee_allocated_tuple_return_flows_into_next_dep(self):
+    def test_callee_allocated_tuple_return_flows_into_next_dep(self, monkeypatch, tmp_path):
         """The reported failure: two tensors an inline helper created itself are
         unpacked and passed to a second inline helper, whose params then have no
-        inferred metadata."""
+        inferred metadata.
+
+        Driven through ``compile()``, not ``lower()``: ``lower()`` stops after
+        the passes, so a codegen precondition the metadata affects would not
+        fire here. ``PTOAS_ROOT`` is pointed at nothing so the run stays
+        source-only and needs no assembler (the
+        ``test_jit_compile_extraction`` pattern).
+        """
         torch = pytest.importorskip("torch")
+        monkeypatch.setenv("PTOAS_ROOT", str(tmp_path / "missing_ptoas"))
 
         @jit.inline
         def make_pair(x: pl.Tensor[[1, 8], pl.FP32]):
@@ -1361,13 +1390,15 @@ class TestSliceAndDepReturnMetadata:
             a, b = make_pair(x)
             consume_pair(a, b, out)
 
-        program = pair_entry.lower(torch.randn(1, 8), torch.empty(1, 8))
-        assert isinstance(program, ir.Program)
+        compiled = pair_entry.compile(torch.randn(1, 8), torch.empty(1, 8))
+        assert isinstance(compiled, CompiledProgram)
 
-    def test_callee_allocated_single_return_flows_into_next_dep(self):
+    def test_callee_allocated_single_return_flows_into_next_dep(self, monkeypatch, tmp_path):
         """The single-value shape of the same rule: ``buf = helper(x)`` where
-        ``helper`` allocates ``buf`` itself."""
+        ``helper`` allocates ``buf`` itself. Compiled, not just lowered, for the
+        reason given above."""
         torch = pytest.importorskip("torch")
+        monkeypatch.setenv("PTOAS_ROOT", str(tmp_path / "missing_ptoas"))
 
         @jit.inline
         def double_inline(x: pl.Tensor[[1, 8], pl.FP32]):
@@ -1386,8 +1417,8 @@ class TestSliceAndDepReturnMetadata:
             scaled = double_inline(x)
             copy_inline(scaled, out)
 
-        program = single_entry.lower(torch.randn(1, 8), torch.empty(1, 8))
-        assert isinstance(program, ir.Program)
+        compiled = single_entry.compile(torch.randn(1, 8), torch.empty(1, 8))
+        assert isinstance(compiled, CompiledProgram)
 
     def test_callee_allocated_return_sized_from_its_param(self):
         """A callee whose allocation is sized off a parameter resolves through
@@ -1397,6 +1428,19 @@ class TestSliceAndDepReturnMetadata:
         # ``pl.create_tensor(..., dtype=pl.FP32)`` sized by ``pl.tensor.dim(src, 1)``
         # of the caller's ``x``.
         assert metas["wide"] == TensorMeta(shape=(2, 64), dtype=DataType.FP32)
+
+    def test_partially_resolved_tuple_clears_the_unresolved_target(self):
+        """A target the callee rebinds to something untypeable must not keep the
+        metadata it carried *before* the call — that shape describes a tensor
+        the helper already replaced, and the next dep would silently receive it.
+        Clearing it restores the clear ``_build_params`` error."""
+        seed = {"x": TensorMeta(shape=(16, 8), dtype=DataType.FP32)}
+        metas = _extract_local_tensor_metas(_mixed_pair_body, seed_meta=seed)
+        # ``b`` still resolves from the callee's own pl.create_tensor ...
+        assert metas["b"] == TensorMeta(shape=(4, 4), dtype=DataType.FP16)
+        # ... while ``a`` drops its stale pre-call [16, 8] FP32 rather than
+        # advertising it to whatever consumes ``a`` next.
+        assert "a" not in metas
 
     def test_callee_return_arity_mismatch_resolves_nothing(self):
         """A target that does not line up with the callee's return list is

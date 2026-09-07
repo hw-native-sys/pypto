@@ -139,10 +139,18 @@ def entry(x: pl.Tensor[[1, 8], pl.FP32], out: pl.Out[pl.Tensor[[1, 8], pl.FP32]]
 设备 kernel（`@pl.jit.incore`）不能分配内存，所以它只能用第二种写法 —— `pl.create_tensor`
 属于控制平面。`@pl.jit.inline` helper 会被拼接进调用方，两种写法都可以用。
 
-无法解析的情况是：返回的张量其 shape 没有任何静态规则能推导 —— 例如由只有设备才知道的值
-决定尺寸的 `pl.create_tensor`，或者经过特化器未建模的操作重新绑定的结果。它会在**下一个**
-消费该张量的调用处报出 `missing inferred tensor metadata for parameter '<name>'`；
-请为产生该分配的语句标注静态维度，或者把缓冲区作为 `pl.Out[...]` 参数传入。
+特化器无法静态计算某个维度本身**不是**问题。由只有设备才知道的值决定尺寸的
+`pl.create_tensor` —— `pl.tensor.read(cfg, [0])`、`pld.world_size()` —— 会变成一个动态
+维度并继续向下传递，之后由共享的 pass 流水线来判定程序对它做了什么（例如把整个张量作为
+tile 加载，就会得到 `InitMemRef requires static shape` —— 与等价的 `@pl.program` 写法
+报出的错误完全相同）。
+
+真正无法解析的情况是：返回张量的 shape 特化器根本**触及不到** —— 例如目标 shape 非静态的
+`pl.reshape`（reshape 受源张量元素总数约束，因此不能用动态维度顶替），或者经过特化器未
+建模的操作重新绑定的结果。它会在**下一个**消费该张量的调用处报出
+`missing inferred tensor metadata for parameter '<name>'` —— 错误指向的是消费方，但要改的
+是生产方：让产生该张量的语句具有可静态推导的 shape，或者把缓冲区作为 `pl.Out[...]`
+参数传入。
 
 ### 决定 jit kernel 能否编译的三条约束
 

@@ -863,6 +863,23 @@ def _dep_out_metas(
     return result
 
 
+class _DepReturn(NamedTuple):
+    """What descending into a callee's ``return`` statement established.
+
+    ``metas`` are the targets the descent typed. ``stale`` are the targets it
+    proved it *cannot* type: the callee returns a named local its own extractor
+    declined, so whatever the caller knew about that name before the call no
+    longer describes it. Both are empty when the descent did not happen at all,
+    which leaves the caller's pre-call fallback in charge.
+    """
+
+    metas: dict[str, TensorMeta]
+    stale: frozenset[str]
+
+
+_DEP_RETURN_DECLINED = _DepReturn({}, frozenset())
+
+
 def _dep_return_metas(
     call: ast.Call,
     dep_name: str,
@@ -870,7 +887,7 @@ def _dep_return_metas(
     deps: _DepScan,
     local: dict[str, TensorMeta],
     scalars: Mapping[str, int | float | bool],
-) -> dict[str, TensorMeta]:
+) -> _DepReturn:
     """For ``v1, ..., vk = dep(args)`` where ``dep`` returns tensors it created
     itself, resolve each ``vi`` from the callee's own ``return`` statement.
 
@@ -882,20 +899,27 @@ def _dep_return_metas(
     callee. Re-run the extractor over the callee's body, seeded with the params
     this call site binds, and read the returned names' metas off that.
 
-    Returns ``{}`` (leaving the clear ``_build_params`` error) when the callee's
-    source is unavailable, its return arity doesn't match the target, or it is
-    already on the extraction stack.
+    A returned element that is a *named* callee local the descent could not type
+    comes back in ``stale`` rather than silently absent. The caller would
+    otherwise keep the meta the target carried before the call — demonstrably
+    the wrong tensor, since the callee rebinds it — and hand that shape to the
+    next dep. An element that is not a bare ``Name`` (a call, a literal)
+    establishes nothing either way and is simply left out.
+
+    Returns :data:`_DEP_RETURN_DECLINED` when the callee's source is
+    unavailable, its return arity doesn't match the target, or it is already on
+    the extraction stack.
     """
     dep = deps.funcs.get(dep_name)
     names = _target_names(target)
     if dep is None or not names or id(dep._func) in deps.seen:
-        return {}
+        return _DEP_RETURN_DECLINED
     try:
         ret_names = _return_element_names(_get_func_def(dep._func))
     except OSError:
-        return {}
+        return _DEP_RETURN_DECLINED
     if len(ret_names) != len(names):
-        return {}
+        return _DEP_RETURN_DECLINED
     dep_params, _ = deps.io[dep_name]
     seed_meta: dict[str, TensorMeta] = {}
     seed_scalars: dict[str, int | float | bool] = {}
@@ -916,7 +940,40 @@ def _dep_return_metas(
         caller_func_type=dep._func_type,
         dep_seen=deps.seen,
     )
-    return {v: callee_metas[r] for v, r in zip(names, ret_names, strict=True) if r in callee_metas}
+    resolved = {v: callee_metas[r] for v, r in zip(names, ret_names, strict=True) if r in callee_metas}
+    stale = {v for v, r in zip(names, ret_names, strict=True) if r and r not in callee_metas}
+    return _DepReturn(resolved, frozenset(stale))
+
+
+def _dep_out_metas_or_return(
+    call: ast.Call,
+    dep_name: str,
+    target: ast.expr,
+    deps: _DepScan,
+    local: dict[str, TensorMeta],
+    scalars: Mapping[str, int | float | bool],
+) -> _DepReturn:
+    """Resolve one ``v1, ..., vk = dep(args)`` target, ``Out`` convention first.
+
+    The ``Out`` rule needs nothing but the caller's own pool, and where both
+    rules apply they agree — a returned ``Out`` param resolves to the same
+    caller buffer either way — so it wins and never marks a target stale.
+    """
+    out_metas = _dep_out_metas(call, dep_name, target, deps, local)
+    if out_metas:
+        return _DepReturn(out_metas, frozenset())
+    return _dep_return_metas(call, dep_name, target, deps, local, scalars)
+
+
+def _apply_dep_return(local: dict[str, TensorMeta], dep_return: _DepReturn) -> None:
+    """Fold one dep-call target's resolution into the source-ordered pool.
+
+    Resolved names land; names the descent proved stale are dropped, so the
+    caller's pre-call fallback cannot hand a replaced tensor's shape onward.
+    """
+    local.update(dep_return.metas)
+    for name in dep_return.stale:
+        local.pop(name, None)
 
 
 def _fold_int_arith(op: ast.operator, lhs: int, rhs: int) -> int | None:
@@ -1058,7 +1115,7 @@ def _update_local_tensor_meta(
     has_named_target = named_target is not None
     meta: TensorMeta | None = None
     preserve_existing = False
-    dep_target_metas: list[dict[str, TensorMeta]] = [{} for _ in targets]
+    dep_returns: list[_DepReturn] = [_DEP_RETURN_DECLINED for _ in targets]
 
     # Python evaluates the RHS once before assigning any target. Infer all RHS
     # effects from the same pre-assignment state so a self-referential chained
@@ -1083,21 +1140,20 @@ def _update_local_tensor_meta(
         elif isinstance(fn, ast.Name) and fn.id in deps.io:
             # The in-place ``Out``-param convention first; a callee that
             # allocates its own results falls through to its return statement.
-            dep_target_metas = [
-                _dep_out_metas(value, fn.id, target, deps, local)
-                or _dep_return_metas(value, fn.id, target, deps, local, scalars)
-                for target in targets
+            dep_returns = [
+                _dep_out_metas_or_return(value, fn.id, target, deps, local, scalars) for target in targets
             ]
             # Preserve the existing dependency-result behavior when neither
             # rule resolves the callee's results: an already-known target keeps
             # its metadata until a later supported rebinding can refine it.
             # This is how bare inline helpers propagate same-shaped results
-            # today.
+            # today. A target the return descent proved stale is exempt — see
+            # ``_dep_return_metas``.
             preserve_existing = True
 
     alias = _extract_dim_alias(value)
-    for target, target_metas in zip(targets, dep_target_metas, strict=True):
-        local.update(target_metas)
+    for target, dep_return in zip(targets, dep_returns, strict=True):
+        _apply_dep_return(local, dep_return)
         named = target if isinstance(target, ast.Name) else None
 
         if named is None:
