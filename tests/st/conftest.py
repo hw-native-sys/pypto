@@ -471,7 +471,14 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config) -> None:  # no
         for node_id in shown:
             terminalreporter.write_line(f"  {node_id}")
         if len(_undiscovered_items) > len(shown):
-            terminalreporter.write_line(f"  ... and {len(_undiscovered_items) - len(shown)} more")
+            # The full list goes to a file, not just a truncated tail: reading
+            # "... and 56 more" as the whole inventory is exactly the mistake
+            # this summary exists to prevent.
+            report = Path(terminalreporter.config.rootpath) / "undiscovered_cases.txt"
+            report.write_text("\n".join(_undiscovered_items) + "\n")
+            terminalreporter.write_line(
+                f"  ... and {len(_undiscovered_items) - len(shown)} more; full list in {report}"
+            )
 
     batch_lines = execution_summary_lines()
     if not _device_counter and not batch_lines:

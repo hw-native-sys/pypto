@@ -22,7 +22,8 @@ from typing import Any
 import pypto.language as pl
 import pytest
 import torch
-from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
+from harness import st
+from harness.core.harness import DataType, PTOTestCase, TensorSpec
 from harness.swimlane import read_swimlane
 from pypto.ir.pass_manager import OptimizationStrategy
 
@@ -899,82 +900,55 @@ class TestPhaseFenceDepCompressionCorrectness:
                 "correctness cases run without --enable-chip-swimlane; swimlane mode runs profiling witnesses"
             )
 
-    @pytest.mark.parametrize("platform", PLATFORMS)
-    def test_submit_three_level_correctness(self, test_runner, platform):
-        result = test_runner.run(
-            _submit_case(epochs=2, layers=1, phases=3, name="phase_fence_submit_3l", platform=platform)
-        )
-        assert result.passed, f"three-level submit phase-fence failed: {result.error}"
+    @st.cases(st.from_legacy(_submit_case(epochs=2, layers=1, phases=3, name="phase_fence_submit_3l")))
+    def test_submit_three_level_correctness(self, case_run):
+        case_run.assert_passed()
 
-    @pytest.mark.parametrize("platform", PLATFORMS)
-    def test_pl_at_three_level_correctness(self, test_runner, platform):
-        result = test_runner.run(
-            _pl_at_case(epochs=2, phases=3, name="phase_fence_pl_at_3l", platform=platform)
-        )
-        assert result.passed, f"three-level pl.at phase-fence failed: {result.error}"
+    @st.cases(st.from_legacy(_pl_at_case(epochs=2, phases=3, name="phase_fence_pl_at_3l")))
+    def test_pl_at_three_level_correctness(self, case_run):
+        case_run.assert_passed()
 
-    @pytest.mark.parametrize("platform", PLATFORMS)
-    def test_reset_per_outer_correctness(self, test_runner, platform):
-        result = test_runner.run(_reset_case(platform=platform))
-        assert result.passed, f"reset-per-outer phase-fence failed: {result.error}"
+    @st.cases(st.from_legacy(_reset_case()))
+    def test_reset_per_outer_correctness(self, case_run):
+        case_run.assert_passed()
 
-    @pytest.mark.parametrize("platform", PLATFORMS)
-    def test_sibling_loops_correctness(self, test_runner, platform):
-        result = test_runner.run(_sibling_loops_case(platform=platform))
-        assert result.passed, f"sibling-loop phase-fence failed: {result.error}"
+    @st.cases(st.from_legacy(_sibling_loops_case()))
+    def test_sibling_loops_correctness(self, case_run):
+        case_run.assert_passed()
 
-    @pytest.mark.parametrize("platform", PLATFORMS)
-    def test_manual_dummy_auto_mix_correctness(self, test_runner, platform):
-        result = test_runner.run(_manual_dummy_auto_mix_case(platform=platform))
-        assert result.passed, f"manual-dummy/auto phase-fence mix failed: {result.error}"
+    @st.cases(st.from_legacy(_manual_dummy_auto_mix_case()))
+    def test_manual_dummy_auto_mix_correctness(self, case_run):
+        case_run.assert_passed()
 
-    @pytest.mark.parametrize("platform", PLATFORMS)
-    def test_if_consumer_correctness(self, test_runner, platform):
-        result = test_runner.run(_if_consumer_case(platform=platform))
-        assert result.passed, f"if-consumer phase-fence failed: {result.error}"
+    @st.cases(st.from_legacy(_if_consumer_case()))
+    def test_if_consumer_correctness(self, case_run):
+        case_run.assert_passed()
 
-    @pytest.mark.parametrize("platform", PLATFORMS)
-    def test_if_mixed_fallback_correctness(self, test_runner, platform):
-        result = test_runner.run(_if_mixed_fallback_case(platform=platform))
-        assert result.passed, f"if-mixed-fallback phase-fence failed: {result.error}"
+    @st.cases(st.from_legacy(_if_mixed_fallback_case()))
+    def test_if_mixed_fallback_correctness(self, case_run):
+        case_run.assert_passed()
 
-    @pytest.mark.parametrize("platform", PLATFORMS)
-    def test_multiloop_chain_correctness(self, test_runner, platform):
-        result = test_runner.run(_multiloop_chain_case(platform=platform))
-        assert result.passed, f"multi-loop chain phase-fence failed: {result.error}"
+    @st.cases(st.from_legacy(_multiloop_chain_case()))
+    def test_multiloop_chain_correctness(self, case_run):
+        case_run.assert_passed()
 
-    @pytest.mark.parametrize("platform", PLATFORMS)
-    def test_dense_mixed_phase_graph_correctness(self, test_runner, platform):
-        result = test_runner.run(_dense_mixed_case(platform=platform))
-        assert result.passed, f"dense mixed phase-fence failed: {result.error}"
+    @st.cases(st.from_legacy(_dense_mixed_case()))
+    def test_dense_mixed_phase_graph_correctness(self, case_run):
+        case_run.assert_passed()
 
-    @pytest.mark.parametrize("platform", PLATFORMS)
-    def test_partial_reduce_chain_correctness(self, test_runner, platform):
-        result = test_runner.run(_partial_reduce_chain_case(platform=platform))
-        assert result.passed, f"partial-reduce chain phase-fence failed: {result.error}"
+    @st.cases(st.from_legacy(_partial_reduce_chain_case()))
+    def test_partial_reduce_chain_correctness(self, case_run):
+        case_run.assert_passed()
 
-    @pytest.mark.parametrize("platform", PLATFORMS)
-    def test_chained_snapshot_correctness(self, test_runner, platform):
-        result = test_runner.run(
-            _chained_snapshot_case(
-                branches=_BRANCHES,
-                name="phase_fence_chained_snapshot",
-                platform=platform,
-            )
-        )
-        assert result.passed, f"chained snapshot phase-fence failed: {result.error}"
+    @st.cases(st.from_legacy(_chained_snapshot_case(branches=_BRANCHES, name="phase_fence_chained_snapshot")))
+    def test_chained_snapshot_correctness(self, case_run):
+        case_run.assert_passed()
 
-    @pytest.mark.parametrize("platform", PLATFORMS)
-    def test_chained_snapshot_manual_dummy_correctness(self, test_runner, platform):
-        # Unlike test_chained_snapshot_correctness, this case uses user-written
-        # pl.system.task_dummy barriers instead of auto phase-fence compression.
-        result = test_runner.run(
-            _chained_snapshot_manual_dummy_case(
-                branches=_BRANCHES,
-                platform=platform,
-            )
-        )
-        assert result.passed, f"manual-dummy chained snapshot phase-fence failed: {result.error}"
+    # Unlike test_chained_snapshot_correctness, this case uses user-written
+    # pl.system.task_dummy barriers instead of auto phase-fence compression.
+    @st.cases(st.from_legacy(_chained_snapshot_manual_dummy_case(branches=_BRANCHES)))
+    def test_chained_snapshot_manual_dummy_correctness(self, case_run):
+        case_run.assert_passed()
 
 
 @pytest.mark.swimlane
