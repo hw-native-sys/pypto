@@ -736,6 +736,14 @@ def pytest_configure(config):
     )
     config.addinivalue_line(
         "markers",
+        "multi_card(n): the test needs n devices. Declared rather than checked in the "
+        "body, so the requirement is visible to selection: `-m multi_card` routes these "
+        "to the job that borrows enough cards, and the single-card steps deselect them "
+        "instead of running them only to skip. A body check cannot do either — it is "
+        "how test_benchmark_l3_surfaces_per_rank_timing sat skipped in every CI run.",
+    )
+    config.addinivalue_line(
+        "markers",
         "inline_case(reason): this test's case cannot be a collection-time value, so it "
         "compiles inline instead of in the pre-compile pool. Exempts the test from the "
         "collection guard, which otherwise fails the session. A reason is required — an "
@@ -896,6 +904,17 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
             pytest.skip(f"pass {option} to collect the artifact this test asserts on")
         if item.config.getoption("--codegen-only"):
             pytest.skip("--codegen-only skips device execution, so no DFX artifact is written")
+
+    cards = item.get_closest_marker("multi_card")
+    if cards is not None:
+        wanted = cards.kwargs.get("n") or (cards.args[0] if cards.args else None)
+        if not isinstance(wanted, int) or wanted < 2:
+            raise pytest.UsageError(
+                f"{item.nodeid}: @pytest.mark.multi_card needs an integer device count >= 2, got {wanted!r}."
+            )
+        available = _parse_device_option(item.config.getoption("--device"))
+        if len(available) < wanted:
+            pytest.skip(f"needs {wanted} devices, this run has {available or 'none'}")
 
     marker = item.get_closest_marker("platform_xfail")
     if marker is None:

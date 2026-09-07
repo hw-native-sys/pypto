@@ -169,6 +169,7 @@ def _build_per_rank_add_one():
     return PerRankAddOne
 
 
+@pytest.mark.multi_card(2)
 def test_benchmark_l3_surfaces_per_rank_timing(test_config, device_ids):
     """``benchmark`` on an L3 program aggregates per-rank ``[STRACE]`` markers.
 
@@ -180,8 +181,6 @@ def test_benchmark_l3_surfaces_per_rank_timing(test_config, device_ids):
     ``per_rank("device")`` carries one list per rank.
     """
     n_ranks = 2
-    if len(device_ids) < n_ranks:
-        pytest.skip(f"L3 benchmark needs >= {n_ranks} devices, got {device_ids}")
 
     program = _build_per_rank_add_one()
     compiled = ir.compile(

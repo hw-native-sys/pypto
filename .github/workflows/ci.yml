@@ -1205,7 +1205,7 @@ jobs:
           # skip without `--enable-chip-swimlane`, which this step does not pass.
           # They ran here only to skip, and 35 silent skips buried the real ones;
           # the flagged steps in `system-tests-direct` run them for real.
-          python -m pytest tests/st -v -m "device_batch and not swimlane" \
+          python -m pytest tests/st -v -m "device_batch and not swimlane and not multi_card" \
             --ignore=tests/st/distributed \
             --ignore=tests/st/codegen \
             --ignore=tests/st/runtime/ops \
@@ -1226,7 +1226,7 @@ jobs:
     #      runtime/ops + runtime/cross_core. These have many tests but cheap
     #      compiles (~80s measured vs ~404s for the heavy dirs in `system-tests`),
     #      so they are paired here with the direct + DFX tail.
-    #   2. Direct-device (mechanism B): `-m 'not device_batch'` over ALL of
+    #   2. Direct-device (mechanism B): `-m 'not device_batch and not multi_card'` over ALL of
     #      tests/st (the in-process @pl.jit / config=test_config tests, including
     #      the direct tests under the heavy dirs that `system-tests` skips).
     #   3. DFX steps: paged-attention / multi-orch L2 / swimlane / dump-args.
@@ -1324,7 +1324,7 @@ jobs:
 
       - name: Test direct-device (mechanism B — one card, in-process)
         timeout-minutes: 30
-        # ALL `-m 'not device_batch'` tests across tests/st (both shards' dirs):
+        # ALL `-m 'not device_batch and not multi_card'` tests across tests/st (both shards' dirs):
         # direct @pl.jit kernel calls / config=test_config (and no-fixture device
         # tests), which execute the device synchronously in-process and cannot be
         # batched. Wrap them whole in ONE task-submit card session and run
@@ -1346,7 +1346,7 @@ jobs:
           test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
           task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 1800 \
             --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest \
-              tests/st -v -m 'not device_batch' \
+              tests/st -v -m 'not device_batch and not multi_card' \
               --ignore=tests/st/distributed \
               --ignore=tests/st/codegen \
               --ignore=tests/st/runtime/framework_and_models/test_perf_swimlane.py \
@@ -1550,6 +1550,19 @@ jobs:
           source activate.sh
           task-submit --device "$DEVICE_ID" --device-num 2 --timeout 3600 --max-time 1800 \
             --run "cd $GITHUB_WORKSPACE/dist-checkout && source activate.sh && python -m pytest tests/st/distributed -v --device=\$TASK_DEVICE --ignore=tests/st/distributed/test_l2_multi_orch.py"
+
+      - name: Test multi-card cases outside tests/st/distributed
+        # Multi-card used to be selected by directory, so a test needing two
+        # cards anywhere else was collected by a single-card step and skipped
+        # itself from the body. `@pytest.mark.multi_card(n)` makes the
+        # requirement selectable, and this step is where those tests get the
+        # cards: test_benchmark_l3_surfaces_per_rank_timing had never once run.
+        run: |
+          source activate.sh
+          task-submit --device "$DEVICE_ID" --device-num 2 --timeout 3600 --max-time 900 \
+            --run "cd $GITHUB_WORKSPACE/dist-checkout && source activate.sh && python -m pytest \
+              tests/st -v -m multi_card --ignore=tests/st/distributed \
+              --device=\$TASK_DEVICE --platform=a2a3"
 
       - name: Kill orphaned task-submit tasks
         if: always()
