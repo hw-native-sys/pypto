@@ -1054,9 +1054,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
       // block dies at its closing brace while one declared further out does
       // not. Storage counts as enclosing exactly when some pre-entry carry
       // already named it.
+      // Iteration order does not reach the result: the pointer keys are ignored
+      // and only the names are collected, into an ordered set.
       std::set<std::string> enclosing_arrays;
-      // NOLINTNEXTLINE(bugprone-nondeterministic-pointer-iteration-order) — the
-      // pointer keys are ignored; only the names are collected, into an ordered set.
+      // NOLINTNEXTLINE(bugprone-nondeterministic-pointer-iteration-order)
       for (const auto& [_, entry] : saved_array_carry) enclosing_arrays.insert(entry.array_name);
       PreserveEnclosingArrayCarries(&saved_array_carry, &saved_map, [&](const std::string& name) {
         return enclosing_arrays.count(name) == 0;
