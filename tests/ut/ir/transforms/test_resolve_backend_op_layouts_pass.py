@@ -391,6 +391,47 @@ class TestResolveBackendOpLayouts:
         finally:
             backend.reset_for_testing()
 
+    @pytest.mark.parametrize("op_name", ["tile.cmp", "tile.cmps"])
+    def test_packed_mask_column_vector_repairs_through_move_not_reshape(self, op_name):
+        """A packed-predicate result must keep its shape across the repair.
+
+        The `[M, 1] -> [1, M]` operand reshape is a shortcut that assumes the
+        operator's result shape is transparent to it. `tile.cmp` / `tile.cmps`
+        derive their mask width from the operand's *column* count, so reshaping
+        a `[16, 1]` operand turns the `[16, 32]` mask into a `[1, 32]` one that
+        neither restoration path can put back — the pass used to assign that
+        differently-shaped value straight to the `[16, 32]` target. The repair
+        must fall back to the shape-preserving `tile.move`.
+        """
+        src = f"""
+import pypto.language as pl
+
+
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def repro(out: pl.Out[pl.Tensor[[16, 32], pl.UINT8]]) -> pl.Tensor[[16, 32], pl.UINT8]:
+        chunk: pl.Tile[[16, 256], pl.FP32] = pl.tile.create(
+            [16, 256], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+        )
+        tmp: pl.Tile[[16, 256], pl.FP32] = pl.tile.create(
+            [16, 256], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+        )
+        a: pl.Tile[[16, 1], pl.FP32] = pl.tile.row_sum(chunk, tmp)
+        m: pl.Tile[[16, 32], pl.UINT8] = {
+            "pl.tile.cmp(a, a, cmp_type=0)" if op_name == "tile.cmp" else "pl.tile.cmps(a, 0.0, cmp_type=0)"
+        }
+        stored: pl.Tensor[[16, 32], pl.UINT8] = pl.store(m, [0, 0], out)
+        return stored
+"""
+        After = _run_pass(pl.parse_program(src))
+        printed = str(After)
+        # No column-vector reshape shortcut: the operands stay [16, 1].
+        assert "pl.tile.reshape" not in printed
+        assert "pl.tile.move" in printed
+        # Every packed mask in the repaired body keeps the target's [16, 32] shape.
+        assert "[1, 32]" not in printed
+
     @pytest.mark.parametrize("op_name", ["tile.row_expand_sub", "tile.row_sum", "tile.matmul"])
     def test_layout_aware_op_declares_no_input_constraint(self, op_name):
         """The complement: an operator that reads the layout must not be repaired.

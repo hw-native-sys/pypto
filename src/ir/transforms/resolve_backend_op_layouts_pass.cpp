@@ -36,6 +36,7 @@
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -147,6 +148,28 @@ bool NeedsRepair(const CallPtr& call, const TileTypePtr& result_tile_type,
   return NeedsInputRepair(call, spec) || NeedsOutputRepair(result_tile_type, spec);
 }
 
+/// Shape the repaired call must still produce for the restoration below to be
+/// able to hand @p result_tile_type back to the assignment target.
+///
+/// The `[M, 1]` -> `[1, M]` operand reshape is a shortcut over `tile.move`,
+/// and it silently assumes the operator's result shape is *transparent* to it:
+/// true for the elementwise families, whose result shape is their operand
+/// shape, and false for an operator that derives its result extent from the
+/// operand's column count. `tile.cmp` / `tile.cmps` are the latter -- their
+/// packed predicate mask is `[M, round_up(ceil(N/8), 32)]`, so reshaping a
+/// `[16, 1]` operand to `[1, 16]` turns a `[16, 32]` mask into a `[1, 32]` one,
+/// and neither restoration path can put that back: the reshape arm is only
+/// reached for a column-vector result, and the `tile.move` arm preserves the
+/// shape it is given. The caller compares against this and retries without the
+/// shortcut, which keeps every operand at its original extent.
+std::vector<ExprPtr> ExpectedRepairedResultShape(const TileTypePtr& result_tile_type,
+                                                 bool restoration_reshapes_result) {
+  if (restoration_reshapes_result) {
+    return MakeRowVectorShape(result_tile_type);
+  }
+  return result_tile_type->shape_;
+}
+
 class BackendLayoutRepairMutator : public IRMutator {
  public:
   std::string NextTempName(const std::string& base, const std::vector<std::string>& qualifiers) {
@@ -169,42 +192,71 @@ class BackendLayoutRepairMutator : public IRMutator {
     INTERNAL_CHECK_SPAN(result_tile_type, op->span_)
         << "ResolveBackendOpLayouts expects constrained op assignment targets to be TileType";
 
+    const bool restoration_reshapes_result =
+        NeedsOutputRepair(result_tile_type, *layout_spec) && IsColumnVector(result_tile_type);
+    const std::vector<ExprPtr> expected_result_shape =
+        ExpectedRepairedResultShape(result_tile_type, restoration_reshapes_result);
+
     std::vector<StmtPtr> rewritten;
-    std::vector<ExprPtr> new_args = call->args_;
+    std::vector<ExprPtr> new_args;
+    CallPtr repaired_call;
 
-    for (size_t i = 0; i < layout_spec->input_layouts.size() && i < call->args_.size(); ++i) {
-      const auto& required_layout = layout_spec->input_layouts[i];
-      if (!RequiresRowMajor(required_layout)) {
-        continue;
+    // Try the cheap column-vector reshape first, then fall back to a
+    // shape-preserving tile.move when the operator's result shape did not
+    // survive it (see ExpectedRepairedResultShape).
+    for (const bool allow_vector_reshape : {true, false}) {
+      rewritten.clear();
+      new_args = call->args_;
+
+      for (size_t i = 0; i < layout_spec->input_layouts.size() && i < call->args_.size(); ++i) {
+        const auto& required_layout = layout_spec->input_layouts[i];
+        if (!RequiresRowMajor(required_layout)) {
+          continue;
+        }
+
+        auto tile_type = As<TileType>(call->args_[i]->GetType());
+        if (!tile_type || IsRowMajor(tile_type)) {
+          continue;
+        }
+
+        auto repair_var_name =
+            NextTempName(op->var_->name_hint_, {auto_name::RowMajorQualifier(), auto_name::ArgQualifier(i)});
+        if (allow_vector_reshape && IsColumnVectorColMajor(tile_type)) {
+          auto reshape_call = CreateReshapeCall(call->args_[i], MakeRowVectorShape(tile_type), call->span_);
+          auto reshape_var = std::make_shared<Var>(repair_var_name, reshape_call->GetType(), call->span_);
+          rewritten.push_back(std::make_shared<AssignStmt>(reshape_var, reshape_call, op->span_));
+          new_args[i] = reshape_var;
+          continue;
+        }
+
+        auto move_call = CreateLayoutMoveCall(call->args_[i], GetRepairTargetMemory(tile_type),
+                                              TileLayout::row_major, TileLayout::none_box, call->span_);
+        auto move_var = std::make_shared<Var>(repair_var_name, move_call->GetType(), call->span_);
+        rewritten.push_back(std::make_shared<AssignStmt>(move_var, move_call, op->span_));
+        new_args[i] = move_var;
       }
 
-      auto tile_type = As<TileType>(call->args_[i]->GetType());
-      if (!tile_type || IsRowMajor(tile_type)) {
-        continue;
-      }
+      auto repaired_expr =
+          OpRegistry::GetInstance().Create(call->op_->name_, new_args, call->kwargs_, call->span_);
+      repaired_call = As<Call>(repaired_expr);
+      INTERNAL_CHECK_SPAN(repaired_call, call->span_)
+          << "ResolveBackendOpLayouts: repaired consumer must remain a Call";
 
-      auto repair_var_name =
-          NextTempName(op->var_->name_hint_, {auto_name::RowMajorQualifier(), auto_name::ArgQualifier(i)});
-      if (IsColumnVectorColMajor(tile_type)) {
-        auto reshape_call = CreateReshapeCall(call->args_[i], MakeRowVectorShape(tile_type), call->span_);
-        auto reshape_var = std::make_shared<Var>(repair_var_name, reshape_call->GetType(), call->span_);
-        rewritten.push_back(std::make_shared<AssignStmt>(reshape_var, reshape_call, op->span_));
-        new_args[i] = reshape_var;
-        continue;
+      auto repaired_result = As<TileType>(repaired_call->GetType());
+      if (!repaired_result ||
+          tile_view_semantics::ShapeExprListsEquivalent(repaired_result->shape_, expected_result_shape)) {
+        break;
       }
-
-      auto move_call = CreateLayoutMoveCall(call->args_[i], GetRepairTargetMemory(tile_type),
-                                            TileLayout::row_major, TileLayout::none_box, call->span_);
-      auto move_var = std::make_shared<Var>(repair_var_name, move_call->GetType(), call->span_);
-      rewritten.push_back(std::make_shared<AssignStmt>(move_var, move_call, op->span_));
-      new_args[i] = move_var;
+      // The tile.move round has no shortcut left to drop, so a mismatch there
+      // is the operator disagreeing with its own declared result -- a bug in
+      // the layout declaration, not something the pass can repair.
+      INTERNAL_CHECK_SPAN(allow_vector_reshape, call->span_)
+          << "Internal error: ResolveBackendOpLayouts repaired " << call->op_->name_
+          << " into a call whose result shape " << FormatShape(repaired_result->shape_)
+          << " does not match the assignment target's " << FormatShape(expected_result_shape)
+          << " even with every operand kept at its original extent. The operator's row_major "
+             "declaration and its type deduction disagree.";
     }
-
-    auto repaired_expr =
-        OpRegistry::GetInstance().Create(call->op_->name_, new_args, call->kwargs_, call->span_);
-    auto repaired_call = As<Call>(repaired_expr);
-    INTERNAL_CHECK_SPAN(repaired_call, call->span_)
-        << "ResolveBackendOpLayouts: repaired consumer must remain a Call";
 
     if (NeedsOutputRepair(result_tile_type, *layout_spec)) {
       auto row_major_var = std::make_shared<Var>(NextTempName(op->var_->name_hint_, {"row_major"}),
