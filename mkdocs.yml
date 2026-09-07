@@ -292,6 +292,7 @@ nav:
       - en/dev/index.md
       - en/dev/00-ecosystem.md
       - en/dev/01-compile-profiling.md
+      - en/dev/08-artifact-identity.md
       - en/dev/02-error-handling.md
       - en/dev/03-logging.md
       - en/dev/03-runtime-dfx.md
