@@ -59,6 +59,7 @@ from typing import Any
 import pypto.language as pl
 import pytest
 import torch
+from harness import st
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
 from harness.swimlane import read_swimlane
 from pypto.ir.pass_manager import OptimizationStrategy
@@ -201,25 +202,7 @@ class TestManualScopePipeline:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(scope="module")
-def manual_scope_swimlane_file(test_runner) -> Path:
-    """Run the pipeline once with profiling and return the swimlane JSON."""
-    if not test_runner.config.enable_chip_swimlane:
-        pytest.skip("pass --enable-chip-swimlane to validate the manual_scope swimlane")
-
-    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/chip_swimlane_records.json"))
-    result = test_runner.run(_ManualScopePipelinePTO())
-    assert result.passed, f"Manual-scope pipeline failed: {result.error}"
-
-    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/chip_swimlane_records.json"))
-    new_files = after - before
-    assert new_files, "No chip_swimlane_records.json was generated for the manual_scope run"
-    return max(new_files, key=lambda p: p.stat().st_mtime)
-
-
-@pytest.fixture(scope="module")
-def manual_scope_swimlane_data(manual_scope_swimlane_file: Path) -> dict:
-    return read_swimlane(manual_scope_swimlane_file)
+_MANUAL_SCOPE_CASE = st.from_legacy(_ManualScopePipelinePTO())
 
 
 @pytest.mark.swimlane
@@ -232,9 +215,10 @@ class TestManualScopeSwimlane:
     actually does.
     """
 
-    def test_total_task_count(self, manual_scope_swimlane_data: dict):
+    @st.cases(_MANUAL_SCOPE_CASE)
+    def test_total_task_count(self, case_run):
         """Each of the ``M * N`` tiles submits 2 kernel tasks (stage1 + stage2)."""
-        tasks = manual_scope_swimlane_data["tasks"]
+        tasks = case_run.swimlane()["tasks"]
         # The tile grid runs ``M * N`` iterations of (stage1 + stage2). Some
         # platforms may emit extra runtime/setup tasks; the lower bound is
         # the only safe assertion.
@@ -242,7 +226,8 @@ class TestManualScopeSwimlane:
             f"expected at least {_M * _N * 2} tasks (M*N tiles x 2 stages), got {len(tasks)}"
         )
 
-    def test_inner_parallel_loop_runs_concurrently(self, manual_scope_swimlane_data: dict):
+    @st.cases(_MANUAL_SCOPE_CASE)
+    def test_inner_parallel_loop_runs_concurrently(self, case_run):
         """Inner ``pl.parallel(N)`` iterations must overlap across cores.
 
         With manual_scope and no cross-iteration dependency edge, the runtime
@@ -252,7 +237,7 @@ class TestManualScopeSwimlane:
         in fact parallelize). On a 1-core simulator this assertion is
         relaxed automatically.
         """
-        tasks = manual_scope_swimlane_data["tasks"]
+        tasks = case_run.swimlane()["tasks"]
         core_ids = {t["core_id"] for t in tasks}
         # On a multi-core target the inner parallel loop should spread work
         # across cores; on single-core simulators just check we ran at all.
@@ -262,7 +247,8 @@ class TestManualScopeSwimlane:
                 f"only saw core_ids={sorted(core_ids)}"
             )
 
-    def test_no_blocking_serialization_chain(self, manual_scope_swimlane_data: dict):
+    @st.cases(_MANUAL_SCOPE_CASE)
+    def test_no_blocking_serialization_chain(self, case_run):
         """No single task may fan out to more than the necessary downstream count.
 
         If the codegen mistakenly cross-linked iterations,
@@ -272,7 +258,7 @@ class TestManualScopeSwimlane:
         stage2). The threshold below allows for runtime-injected sync
         tasks but catches grossly serialized graphs.
         """
-        tasks = manual_scope_swimlane_data["tasks"]
+        tasks = case_run.swimlane()["tasks"]
         _skip_if_no_fanout(tasks)
         max_fanout = max((t["fanout_count"] for t in tasks), default=0)
         assert max_fanout <= 4, (

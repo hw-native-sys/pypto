@@ -722,8 +722,8 @@ def pytest_configure(config):
         "`--enable-chip-swimlane` and skips without it. CI selects the whole set "
         "with `-m swimlane` in one flagged step, and the batched shards exclude "
         "it — otherwise these run there only to skip, and a real skip is lost in "
-        "the noise. Mark the class, not each method: the swimlane fixture is "
-        "class- or module-scoped.",
+        "the noise. The skip is applied by pytest_runtest_setup, so a class that "
+        "declares its case with @st.cases needs no fixture to enforce it.",
     )
 
     # Set the PyPTO runtime log level independently of the per-ST-item C++ logger.
@@ -847,6 +847,14 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
         pytest.UsageError: The marker names no/unknown platforms, or no reason.
     """
     set_current_item_platform(_resolve_item_platform(item, item.config))
+
+    # The `swimlane` marker has always meant "needs --enable-chip-swimlane and
+    # skips without it", but each swimlane fixture implemented that skip itself.
+    # A test that declares its case instead has no such fixture, so enforce the
+    # marker's own contract here -- otherwise it runs without a record to read
+    # and fails where it used to skip.
+    if item.get_closest_marker("swimlane") and not _resolve_swimlane_option(item.config):
+        pytest.skip("pass --enable-chip-swimlane to collect the record this test asserts on")
 
     marker = item.get_closest_marker("platform_xfail")
     if marker is None:

@@ -276,6 +276,37 @@ class CaseRun:
 
         return artifact_work_dir(self.case)
 
+    def dfx(self, relpath: str) -> Path:
+        """Path to one file this run's DFX collection wrote, asserted to exist.
+
+        Relative to ``work_dir/dfx_outputs``. Reading the artifact from the
+        case's own directory is what makes a DFX assertion safe to run
+        concurrently: the previous route globbed a shared ``build_output`` for
+        files that appeared during the run and took the newest by mtime, which
+        silently picks up another case's record whenever two runs overlap.
+        """
+        assert self.work_dir is not None, (
+            f"{self.case.name}: no artifact directory -- the case was not pre-compiled, "
+            "so its DFX output cannot be located. Declare it with @st.cases(...)."
+        )
+        path = self.work_dir / "dfx_outputs" / relpath
+        assert path.exists(), (
+            f"{self.case.name}: expected DFX output at {path}. "
+            "Pass --enable-chip-swimlane (or --dump-args) to collect it."
+        )
+        return path
+
+    def swimlane(self) -> dict[str, Any]:
+        """This run's chip swimlane record, read through the runtime's converter.
+
+        The runtime writes the record as raw ``aicore_tasks`` / ``aicpu_tasks``
+        plus ``metadata``; the unified ``tasks`` view every assertion reads is
+        rebuilt by the converter, never present in the file itself.
+        """
+        from harness.swimlane import read_swimlane  # noqa: PLC0415
+
+        return read_swimlane(self.dfx("chip_swimlane_records.json"))
+
     def assert_passed(self) -> None:
         """Fail the test with the harness's own error when the case did not pass."""
         assert self.passed, f"{self.case.name} failed: {self.error}"

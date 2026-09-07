@@ -118,6 +118,18 @@ _batch_stats: "list[tuple[str, int, int, int | None]]" = []
 # fixture via _last_device.
 _executed_device: dict[str, int] = {}
 
+# Device runs already scheduled, keyed the same way as the compile cache, each
+# with the tolerance its golden.py was written for.
+#
+# Several test functions may declare one case -- a swimlane group asserts a
+# dozen different things about a single profiled run. Without this they would
+# each schedule their own execution of an artifact that is already shared, so
+# the group costs a device run per assertion. The task-submit path has never had
+# that problem: `_case_to_batch` hands every test sharing a case the same batch
+# future. This gives the device-pool path the same property.
+_execute_futures: "dict[str, tuple[Future, tuple[float, float]]]" = {}
+_execute_futures_lock = threading.Lock()
+
 # Single-slot stash of the device id the most-recently-resolved test ran on.
 # pytest's item loop is single-threaded, so one slot is enough: TestRunner.run
 # writes, _report_device fixture reads.
@@ -995,11 +1007,31 @@ def _schedule_exec_after_golden(
     ``PTOTestCase`` (no ``RunConfig``) and therefore uses default 1e-5
     tolerances; rewriting here picks up the real ``RunConfig`` passed by
     the test body.
+
+    Memoised on *cache_key*, so several test functions declaring one case share
+    a single device run and a single ``dfx_outputs/`` -- see
+    :data:`_execute_futures`.
     """
-    if artifact.error is None and not _pipeline_ctx.get("codegen_only"):
-        _write_golden_for_test_case(tc, artifact.work_dir / "golden.py")
-    assert _execute_pool is not None, "execute pool not initialised"
-    return _execute_pool.submit(_fused_execute_task, tc, cache_key, artifact)
+    tolerance = (tc.config.rtol, tc.config.atol)
+    with _execute_futures_lock:
+        memo = _execute_futures.get(cache_key)
+        if memo is not None:
+            fut, ran_with = memo
+            # Same key, different tolerance means two distinct cases share a
+            # name. They already share the compile artifact and its golden.py,
+            # so reusing the run would silently validate one case against the
+            # other's threshold. Name the collision instead.
+            assert ran_with == tolerance, (
+                f"two cases named {tc.get_name()!r} on the same platform disagree on tolerance: "
+                f"rtol/atol {ran_with} already ran, {tolerance} requested. Give them distinct names."
+            )
+            return fut
+        if artifact.error is None and not _pipeline_ctx.get("codegen_only"):
+            _write_golden_for_test_case(tc, artifact.work_dir / "golden.py")
+        assert _execute_pool is not None, "execute pool not initialised"
+        fut = _execute_pool.submit(_fused_execute_task, tc, cache_key, artifact)
+        _execute_futures[cache_key] = (fut, tolerance)
+        return fut
 
 
 def _await_all_batches() -> None:
@@ -1337,6 +1369,10 @@ def shutdown_pipeline() -> None:
         _execute_pool.shutdown(wait=False, cancel_futures=True)
     _execute_pool = None
     _case_to_batch.clear()
+    # The memoised futures belong to the pool just shut down; a later session in
+    # this process must schedule its own runs rather than await dead ones.
+    with _execute_futures_lock:
+        _execute_futures.clear()
     _batches_ready.clear()
     # NOTE: _batch_stats is intentionally NOT cleared here — pytest_terminal_summary
     # runs *after* sessionfinish (which calls this) and reads it. It is reset at
