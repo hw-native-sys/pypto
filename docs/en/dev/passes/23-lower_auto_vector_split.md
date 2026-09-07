@@ -789,6 +789,15 @@ AUTO arm's affinity gate only routes leaf *calls* into `ProcessStmts`, so a
 projection left to its pass-through fallback would keep a full-width declared type
 over a halved tuple.
 
+Condition 2 (the blind-operand backstop) does not run on this path — it is written
+against a single result axis. The "every element must move" rule covers the common
+case, since a *primary* per-lane operand left full width stops the elements moving
+and is refused. It would not catch a *secondary* per-lane operand that no element's
+shape depends on; no registered tuple-returning operator has one (their remaining
+tile operands are declared workspaces), and a new one would surface in
+`test_lane_invariant_arg_coverage.py`'s blind inventory, which forces the question to
+be answered before it can be added.
+
 A position that is scratch only in *some* arities cannot be declared:
 `tile.mrgsort_format2`'s `tmp_or_src2` is a third sorted input in a 3/4-way merge
 and workspace in a 2-way one, and the arity is the positional argument count. It

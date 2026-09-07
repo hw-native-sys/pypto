@@ -589,14 +589,8 @@ TypePtr HalveTileShape(const TypePtr& type, int dim, const ExprPtr& subblock_idx
   return std::make_shared<TileType>(new_shape, tt->dtype_, tt->memref_, new_tile_view, tt->memory_space_);
 }
 
-// Which axis of one tuple element the split partitions, and the per-lane extent
-// on it.
-struct TupleElementSplit {
-  int split_dim = -1;
-  ExprPtr half_dim_size;
-};
-
-// The per-element split mapping for a call whose result is a TupleType, or
+// The per-element split mapping for a call whose result is a TupleType -- one axis
+// index per tuple element -- or
 // nullopt when the operator's answer is not a halving this pass can emit.
 //
 // A tuple-returning op has no single "result split dim" to follow: tile.gather_compare
@@ -613,31 +607,29 @@ struct TupleElementSplit {
 // wrong, which is precisely what type consistency cannot see -- so it is refused. That
 // is also what correctly rejects a COLUMN split of tile.gather_compare, whose two
 // outputs are both sized from the source's rows and so do not move at all.
-std::optional<std::vector<TupleElementSplit>> DiscoverTupleElementSplits(
-    const std::shared_ptr<const TupleType>& original, const TypePtr& deduced_type) {
+std::optional<std::vector<int>> DiscoverTupleElementSplits(const std::shared_ptr<const TupleType>& original,
+                                                           const TypePtr& deduced_type) {
   auto deduced = std::dynamic_pointer_cast<const TupleType>(deduced_type);
   if (!deduced || deduced->types_.size() != original->types_.size()) return std::nullopt;
 
-  std::vector<TupleElementSplit> splits;
-  splits.reserve(original->types_.size());
+  std::vector<int> split_dims;
+  split_dims.reserve(original->types_.size());
   for (size_t i = 0; i < original->types_.size(); ++i) {
     auto before = std::dynamic_pointer_cast<const TileType>(original->types_[i]);
     auto after = std::dynamic_pointer_cast<const TileType>(deduced->types_[i]);
     if (!before || !after || before->shape_.size() != after->shape_.size()) return std::nullopt;
 
-    TupleElementSplit split;
+    int split_dim = -1;
     for (size_t d = 0; d < before->shape_.size(); ++d) {
       if (structural_equal(before->shape_[d], after->shape_[d])) continue;
-      if (split.split_dim >= 0) return std::nullopt;  // Two axes moved: not a halving.
-      auto half = ComputeHalfDimSize(before->shape_[d]);
-      if (!structural_equal(after->shape_[d], half)) return std::nullopt;
-      split.split_dim = static_cast<int>(d);
-      split.half_dim_size = half;
+      if (split_dim >= 0) return std::nullopt;  // Two axes moved: not a halving.
+      if (!structural_equal(after->shape_[d], ComputeHalfDimSize(before->shape_[d]))) return std::nullopt;
+      split_dim = static_cast<int>(d);
     }
-    if (split.split_dim < 0) return std::nullopt;  // Element unchanged -- see above.
-    splits.push_back(split);
+    if (split_dim < 0) return std::nullopt;  // Element unchanged -- see above.
+    split_dims.push_back(split_dim);
   }
-  return splits;
+  return split_dims;
 }
 
 ExprPtr HalveTupleElement(const ExprPtr& tuple_expr, int dim) {
@@ -1148,7 +1140,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
         new_elements.reserve(splits->size());
         for (size_t i = 0; i < splits->size(); ++i) {
           new_elements.push_back(
-              HalveTileShape(tuple_type->types_[i], (*splits)[i].split_dim, subblock_idx, lane_stride));
+              HalveTileShape(tuple_type->types_[i], (*splits)[i], subblock_idx, lane_stride));
         }
         auto new_result_type = std::make_shared<TupleType>(std::move(new_elements));
         // Emit the original args and let the trailing Substitute swap the halved
