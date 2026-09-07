@@ -71,6 +71,15 @@ def test_records_are_stable_across_process_hash_seeds():
     assert outputs[0] == outputs[1] == digest_record({key: key for key in ("alpha", "beta", "gamma")})
 
 
+def test_unicode_code_points_do_not_collide_with_explicit_surrogates():
+    character = "\U0001f600"
+    surrogates = "\ud83d\ude00"
+    assert character != surrogates
+    assert encode_record(character) != encode_record(surrogates)
+    assert digest_record({character: 1}) != digest_record({surrogates: 1})
+    assert digest_record({character: 1, surrogates: 2}) == digest_record({surrogates: 2, character: 1})
+
+
 @pytest.mark.parametrize("value", [object(), Path("input"), {1: "value"}, {1, 2}])
 def test_unsupported_values_are_not_stringified(value):
     with pytest.raises(TypeError, match="identity record|Identity record"):
@@ -172,6 +181,27 @@ def test_relative_roots_capture_the_callers_working_directory(tmp_path, monkeypa
     assert fingerprint_content((root,)) == before
 
 
+@pytest.mark.parametrize("relative", [False, True])
+def test_parent_component_after_symlink_preserves_filesystem_meaning(tmp_path, monkeypatch, relative):
+    actual = tmp_path / "actual"
+    (actual / "child").mkdir(parents=True)
+    (tmp_path / "link").symlink_to(actual / "child", target_is_directory=True)
+    source = actual / "kernel.py"
+    source.write_text("rows = 32\n")
+    decoy = tmp_path / "kernel.py"
+    decoy.write_text("rows = 99\n")
+    monkeypatch.chdir(tmp_path)
+    supplied = Path("link/../kernel.py")
+    root = ContentRoot(supplied if relative else tmp_path / supplied)
+    assert root.path.read_bytes() == source.read_bytes()
+    before = fingerprint_content((root,))
+    assert before.digest is not None
+    decoy.write_text("rows = 88\n")
+    assert fingerprint_content((root,)) == before
+    source.write_text("rows = 64\n")
+    assert fingerprint_content((root,)).digest != before.digest
+
+
 def test_missing_inputs_do_not_shrink_an_inventory(tmp_path):
     present = tmp_path / "present.py"
     missing = tmp_path / "missing.py"
@@ -232,6 +262,30 @@ def test_symlinks_track_target_contents_and_reject_cycles(tmp_path):
     identity = fingerprint_content(roots)
     assert identity.digest is None
     assert identity.failure is not None and "cycle" in identity.failure
+
+
+@pytest.mark.parametrize("name", ["plugins", "plugin.py", "plugin.data"])
+def test_extra_source_filter_cannot_hide_broken_symlinks(tmp_path, name):
+    (tmp_path / name).symlink_to(tmp_path / "missing-directory", target_is_directory=True)
+    identity = fingerprint_extra_sources((tmp_path,))
+    assert identity.digest is None
+    assert identity.failure is not None and "missing-directory" in identity.failure
+
+
+def test_extra_source_filter_cannot_hide_unreadable_subtrees(tmp_path, monkeypatch):
+    directory = tmp_path / "plugins"
+    directory.mkdir()
+    original_stat = Path.stat
+
+    def stat_with_unreadable_directory(path, *args, **kwargs):
+        if path == directory:
+            raise PermissionError("Cannot inspect plugins")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat_with_unreadable_directory)
+    identity = fingerprint_extra_sources((tmp_path,))
+    assert identity.digest is None
+    assert identity.failure is not None and "Cannot inspect plugins" in identity.failure
 
 
 def test_special_files_are_rejected_without_opening_them(tmp_path):

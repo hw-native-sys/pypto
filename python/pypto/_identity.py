@@ -43,7 +43,9 @@ def _typed_record(value: Any, ancestors: frozenset[int] = frozenset()) -> list[A
     if type(value) is float:
         return ["float64", struct.pack(">d", value).hex()]
     if type(value) is str:
-        return ["str", value]
+        # JSON escapes a non-BMP character and its explicit surrogate pair
+        # identically. Preserve Python code points before entering JSON.
+        return ["str", value.encode("utf-8", errors="surrogatepass").hex()]
     if type(value) is bytes:
         return ["bytes", value.hex()]
     if id(value) in ancestors:
@@ -54,7 +56,10 @@ def _typed_record(value: Any, ancestors: frozenset[int] = frozenset()) -> list[A
     if type(value) is dict:
         if any(type(key) is not str for key in value):
             raise TypeError("Identity record dictionary keys must be strings")
-        return ["dict", [[key, _typed_record(value[key], nested)] for key in sorted(value)]]
+        return [
+            "dict",
+            [[_typed_record(key, nested), _typed_record(value[key], nested)] for key in sorted(value)],
+        ]
     raise TypeError(f"Unsupported identity record type: {type(value).__module__}.{type(value).__qualname__}")
 
 
@@ -94,7 +99,9 @@ class ContentRoot:
     python_only: bool = False
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "path", Path(os.path.abspath(self.path)))
+        # abspath/normpath would collapse symlink/.. before the filesystem can
+        # resolve it, potentially selecting a different file.
+        object.__setattr__(self, "path", Path.cwd() / self.path)
 
 
 @dataclass(frozen=True)
@@ -162,7 +169,12 @@ def _content_entries(
                 continue
             child = path / name
             child_relative = f"{relative}/{name}" if relative else name
-            if not child.is_dir() and (
+            # is_dir() returns False for dangling links, which must not turn
+            # an unavailable source subtree into an excluded non-Python file.
+            child_mode = child.resolve(strict=True).stat().st_mode
+            if not (stat.S_ISDIR(child_mode) or stat.S_ISREG(child_mode)):
+                raise ValueError(f"Identity input is not a regular file or directory: {child}")
+            if stat.S_ISREG(child_mode) and (
                 child.suffix in _IGNORED_SUFFIXES or (python_only and child.suffix != ".py")
             ):
                 continue

@@ -60,7 +60,7 @@ repos:
           name: check-environment-inputs
           entry: python tests/lint/check_environment_inputs.py
           language: python
-          language_version: python3
+          language_version: python3.10
           pass_filenames: false
 
         - id: check-emitter-check-classification

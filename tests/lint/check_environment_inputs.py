@@ -35,12 +35,12 @@ class EnvironmentRead(NamedTuple):
     function: str
 
 
-def _qualified(node: ast.AST, aliases: dict[str, str]) -> str:
+def _qualified(node: ast.AST, aliases: dict[str, set[str]]) -> set[str]:
     if isinstance(node, ast.Name):
-        return aliases.get(node.id, node.id)
+        return aliases.get(node.id, set())
     if isinstance(node, ast.Attribute):
-        return f"{_qualified(node.value, aliases)}.{node.attr}"
-    return ""
+        return {f"{name}.{node.attr}" for name in _qualified(node.value, aliases)}
+    return set()
 
 
 def _string(node: ast.AST | None, constants: dict[str, str]) -> str | None:
@@ -56,49 +56,79 @@ def _string(node: ast.AST | None, constants: dict[str, str]) -> str | None:
     return None
 
 
-def _import_aliases(tree: ast.Module) -> dict[str, str]:
-    aliases: dict[str, str] = {}
-    for node in ast.walk(tree):
+_SCOPES = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+
+
+def _scope_nodes(scope: ast.AST) -> list[ast.AST]:
+    """Collect one lexical scope, including control flow but not nested bodies."""
+    nodes = []
+    pending = list(reversed(list(ast.iter_child_nodes(scope))))
+    while pending:
+        node = pending.pop()
+        nodes.append(node)
+        if not isinstance(node, _SCOPES):
+            pending.extend(reversed(list(ast.iter_child_nodes(node))))
+    return nodes
+
+
+def _bound_names(node: ast.AST) -> set[str]:
+    if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+        return {node.id}
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return {node.name}
+    if isinstance(node, ast.arg):
+        return {node.arg}
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        return {alias.asname or alias.name.split(".")[0] for alias in node.names}
+    if isinstance(node, ast.ExceptHandler) and node.name is not None:
+        return {node.name}
+    return set()
+
+
+def _bindings(scope: ast.AST, inherited: dict[str, set[str]]) -> tuple[dict[str, set[str]], dict[str, str]]:
+    nodes = _scope_nodes(scope)
+    stores: dict[str, int] = {}
+    for node in nodes:
+        for name in _bound_names(node):
+            stores[name] = stores.get(name, 0) + 1
+    aliases = {name: values.copy() for name, values in inherited.items() if name not in stores}
+    # Keep every possible imported/environment alias in this scope. A later
+    # assignment must not erase an earlier read, or a conditional read path.
+    for node in nodes:
         if isinstance(node, ast.Import):
             for alias in node.names:
-                aliases[alias.asname or alias.name] = alias.name
+                name = alias.asname or alias.name.split(".")[0]
+                aliases.setdefault(name, set()).add(alias.name if alias.asname else name)
         elif isinstance(node, ast.ImportFrom) and node.module == "os":
             for alias in node.names:
-                aliases[alias.asname or alias.name] = f"os.{alias.name}"
-    return aliases
+                aliases.setdefault(alias.asname or alias.name, set()).add(f"os.{alias.name}")
+    for node in nodes:
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            qualified = {name for name in _qualified(node.value, aliases) if name.startswith("os.")}
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Name) and qualified:
+                    aliases.setdefault(target.id, set()).update(qualified)
+    return aliases, _scope_constants(scope, stores)
 
 
-def _bindings(tree: ast.Module) -> tuple[dict[str, str], dict[str, str]]:
-    aliases = _import_aliases(tree)
+def _scope_constants(scope: ast.AST, stores: dict[str, int]) -> dict[str, str]:
+    """Accept module constants only when no other write can change the name."""
     constants: dict[str, str] = {}
-    for node in tree.body:
+    body = scope.body if isinstance(scope, (ast.Module, ast.ClassDef)) else []
+    for node in body:
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             for target in targets:
-                if isinstance(target, ast.Name):
+                if isinstance(target, ast.Name) and stores.get(target.id) == 1:
                     value = _string(node.value, constants)
                     if value is not None:
                         constants[target.id] = value
-                    else:
-                        constants.pop(target.id, None)
-                    qualified = _qualified(node.value, aliases) if node.value is not None else ""
-                    if qualified.startswith("os."):
-                        aliases[target.id] = qualified
-    # Local aliases need recognition too; otherwise assigning env=os.environ
-    # inside a function would hide every later env.get() from the inventory.
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Assign, ast.AnnAssign)):
-            qualified = _qualified(node.value, aliases) if node.value is not None else ""
-            if qualified.startswith("os."):
-                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                for target in targets:
-                    if isinstance(target, ast.Name):
-                        aliases[target.id] = qualified
-    for node in ast.walk(tree):
+    for node in ast.walk(scope):
         if isinstance(node, ast.Global):
             for name in node.names:
                 constants.pop(name, None)
-    return aliases, constants
+    return constants
 
 
 def _function_constants(node: ast.AST, constants: dict[str, str]) -> dict[str, str]:
@@ -113,15 +143,36 @@ def _function_constants(node: ast.AST, constants: dict[str, str]) -> dict[str, s
 def python_reads(source: str) -> list[EnvironmentRead]:
     """Find static and unresolved environment reads in Python source."""
     tree = ast.parse(source)
-    aliases, constants = _bindings(tree)
+    aliases, constants = _bindings(tree, {})
     parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    scope_aliases: dict[ast.AST, dict[str, set[str]]] = {tree: aliases}
+
+    def aliases_for(scope: ast.AST) -> dict[str, set[str]]:
+        if scope not in scope_aliases:
+            parent = parents[scope]
+            while not isinstance(parent, _SCOPES):
+                parent = parents[parent]
+            # Method bodies use enclosing function/module globals, not class
+            # attributes; a class body itself still sees its own assignments.
+            if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                while isinstance(parent, ast.ClassDef):
+                    parent = parents[parent]
+                    while not isinstance(parent, _SCOPES):
+                        parent = parents[parent]
+            scope_aliases[scope] = _bindings(scope, aliases_for(parent))[0]
+        return scope_aliases[scope]
+
     reads = []
     for node in ast.walk(tree):
+        scope = parents.get(node, tree)
+        while not isinstance(scope, _SCOPES):
+            scope = parents[scope]
+        aliases = aliases_for(scope)
         argument: ast.AST | None = None
         matched = False
         if isinstance(node, ast.Call):
-            name = _qualified(node.func, aliases)
-            if name in {
+            names = _qualified(node.func, aliases)
+            if names & {
                 "os.getenv",
                 "os.getenvb",
                 "os.environ.get",
@@ -137,13 +188,13 @@ def python_reads(source: str) -> list[EnvironmentRead]:
                     else next((keyword.value for keyword in node.keywords if keyword.arg == "key"), None)
                 )
                 matched = True
-            elif name.startswith(("os.environ.", "os.environb.")):
+            elif any(name.startswith(("os.environ.", "os.environb.")) for name in names):
                 matched = True
         elif isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load):
-            if _qualified(node.value, aliases) in {"os.environ", "os.environb"}:
+            if _qualified(node.value, aliases) & {"os.environ", "os.environb"}:
                 argument = node.slice
                 matched = True
-        elif _qualified(node, aliases) in {"os.environ", "os.environb"}:
+        elif _qualified(node, aliases) & {"os.environ", "os.environb"}:
             parent = parents.get(node)
             # Accesses handled above. Storing the mapping in an alias is also
             # recognized; passing/iterating/copying it is a dynamic bulk read.
@@ -153,8 +204,10 @@ def python_reads(source: str) -> list[EnvironmentRead]:
             function = "<module>"
             effective_constants = constants
             while current is not None:
-                if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    if function == "<module>":
+                if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+                    if function == "<module>" and isinstance(
+                        current, (ast.FunctionDef, ast.AsyncFunctionDef)
+                    ):
                         function = current.name
                     effective_constants = _function_constants(current, effective_constants)
                 current = parents.get(current)

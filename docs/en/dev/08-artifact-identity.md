@@ -27,6 +27,8 @@ assert digest_record({"rows": 32, "cols": 64}) == digest_record({"cols": 64, "ro
 ```
 
 Floats retain their IEEE-754 bits, including signed zero and NaN payloads.
+String values and dictionary keys preserve Python code points, distinguishing
+non-BMP characters from explicit surrogate pairs before JSON serialization.
 Unsupported objects, non-string dictionary keys, and cycles raise errors;
 there is no `str()`/`repr()` fallback. Adapters must explicitly normalize enum,
 path, and configuration values, preserving their semantic types. Bump the
@@ -34,7 +36,8 @@ identity schema when changing this encoding.
 
 ## File and directory inputs
 
-`ContentRoot` captures an absolute path when constructed. `fingerprint_content()`
+`ContentRoot` captures an absolute path when constructed, preserving `..` so
+the filesystem resolves preceding symlinks correctly. `fingerprint_content()`
 hashes the bytes of each supplied file and recursively enumerates directory
 inputs in sorted order. Root order and boundaries are retained. Paths remain
 part of identity until the compiler supplies stable source-location and include
@@ -101,7 +104,9 @@ described in [JIT functions](language/03-functions.md#compile-options-and-diagno
 native extension. It checks Python reads and C++ `getenv`/`secure_getenv` calls
 under `python/pypto`, `python/bindings`, `src`, and `include`. Recognized Python
 forms include imports, aliases, module string constants, mapping reads, and
-bulk reads. Dynamic reads need an exact file/function exception and a reason;
+bulk reads. Aliases are scoped to their lexical context; ambiguous module
+constant assignments, including control-flow writes, remain dynamic.
+The hook uses Python 3.10. Dynamic reads need an exact file/function exception and a reason;
 that exception cannot hide a new literal variable. Unused exceptions fail.
 
 This static check does not certify dependencies inside downstream tools or

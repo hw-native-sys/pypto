@@ -84,6 +84,66 @@ def test_shadowing_and_reassignment_cannot_hide_dynamic_inputs(lint, source):
     assert [read.variable for read in lint.python_reads(source)] == [None]
 
 
+@pytest.mark.parametrize(
+    "assignment",
+    [
+        'if enabled:\n    _ENV = "PYPTO_NEW"',
+        "for _ENV in names:\n    pass",
+        'try:\n    _ENV = "PYPTO_NEW"\nexcept RuntimeError:\n    pass',
+        'with context():\n    _ENV = "PYPTO_NEW"',
+        '_ENV += "_NEW"',
+    ],
+)
+def test_module_control_flow_cannot_hide_unclassified_inputs(lint, tmp_path, assignment):
+    directory = tmp_path / "python/pypto"
+    directory.mkdir(parents=True)
+    (directory / "compiler.py").write_text(
+        f'import os\n_ENV = "PYPTO_KNOWN"\n{assignment}\nos.getenv(_ENV)\n'
+    )
+    errors = lint.check_tree(tmp_path, _registry())
+    assert len(errors) == 1 and "dynamic read" in errors[0]
+
+
+def test_later_assignment_cannot_relabel_an_earlier_read(lint):
+    source = 'import os\n_ENV = "PYPTO_NEW"\nos.getenv(_ENV)\n_ENV = "PYPTO_KNOWN"'
+    assert [read.variable for read in lint.python_reads(source)] == [None]
+
+
+def test_import_aliases_do_not_leak_between_functions(lint):
+    source = """def compiler():
+    import os as platform
+    return platform.getenv("PYPTO_NEW")
+def unrelated():
+    import sys as platform
+    return platform.version
+"""
+    assert [(read.variable, read.function) for read in lint.python_reads(source)] == [
+        ("PYPTO_NEW", "compiler")
+    ]
+
+
+def test_aliases_follow_closures_but_respect_parameter_shadowing(lint):
+    source = """import os as platform
+def outer():
+    read = platform.getenv
+    def inner():
+        return read("PYPTO_NEW")
+def unrelated(platform):
+    return platform.getenv("NOT_AN_ENVIRONMENT_READ")
+"""
+    assert [(read.variable, read.function) for read in lint.python_reads(source)] == [("PYPTO_NEW", "inner")]
+
+
+def test_conditional_import_aliases_preserve_all_environment_reads(lint):
+    source = """if enabled:
+    import os as platform
+else:
+    import sys as platform
+platform.getenv("PYPTO_NEW")
+"""
+    assert [read.variable for read in lint.python_reads(source)] == ["PYPTO_NEW"]
+
+
 def test_cpp_comments_strings_and_concatenated_literals(lint):
     source = """// getenv("COMMENT")
 /* getenv("BLOCK_COMMENT") */

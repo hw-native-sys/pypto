@@ -23,12 +23,14 @@ assert digest_record({"rows": 32, "cols": 64}) == digest_record({"cols": 64, "ro
 ```
 
 浮点数保留 IEEE-754 位表示，包括有符号零和 NaN payload。
+字符串值和字典键保留 Python 码点，在 JSON 序列化前区分非 BMP 字符和显式代理对。
 不支持的对象、非字符串字典键及循环引用会报错，不使用 `str()`/`repr()` 兜底。
 适配层必须显式转换枚举、路径和有效配置，并保留语义类型；修改编码时需提升身份 schema 版本。
 
 ## 文件和目录输入
 
-`ContentRoot` 在构造时捕获绝对路径。`fingerprint_content()` 读取文件原始字节，
+`ContentRoot` 在构造时捕获绝对路径，保留 `..`，让文件系统正确解析前面的符号链接。
+`fingerprint_content()` 读取文件原始字节，
 并按排序后的路径递归枚举目录，保留输入根顺序及边界。
 在编译器提供稳定的源码位置和 include 路径映射之前，路径仍参与身份；
 相同内容位于不同路径时可能不命中。
@@ -80,7 +82,9 @@ assert digest_record({"rows": 32, "cols": 64}) == digest_record({"cols": 64, "ro
 `tests/lint/check_environment_inputs.py` 在 pre-commit 中运行，不加载原生扩展。
 它检查 `python/pypto`、`python/bindings`、`src` 和 `include` 中的 Python 读取，
 以及 C++ `getenv`/`secure_getenv` 调用。识别的 Python 写法包括导入、别名、
-模块字符串常量、映射读取和批量读取。动态读取必须有精确文件/函数及理由的例外；
+模块字符串常量、映射读取和批量读取。别名按词法作用域解析；
+存在歧义的模块常量赋值（包括控制流内的写入）仍按动态读取处理。
+该 hook 使用 Python 3.10。动态读取必须有精确文件/函数及理由的例外；
 该例外不能隐藏新出现的字面量变量，未使用的例外也会导致检查失败。
 
 静态检查不能证明下游工具或任意 Python 反射代码的依赖完整性。
