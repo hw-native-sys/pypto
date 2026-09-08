@@ -753,10 +753,15 @@ and `[16, 8]` cannot regroup that way, so it is rejected. `tensor.reshape`'s
 optional third `valid_shape` operand may only *narrow* the derived region, never
 claim data outside it.
 
-Runs whose extents are not compile-time constants are where the rule stays
-conservative: a single run carries a symbolic free extent through unchanged when
-a target dimension keeps its row size, and anything more is rejected rather than
-guessed.
+A symbolic extent narrows what the rule can prove, but does not by itself
+reject. **Any** run may carry a symbolic *valid* extent through unchanged, onto a
+dimension of its own run whose step is exactly that run's trailing volume — so
+`[4, 2, 8]` valid `[v, 1, 8]` maps to `[4, 16]` valid `[v, 8]` even though it
+cuts into the two runs `4 | 16`. What has to be static is the *physical* geometry
+the region is measured against: the target extents, the extents below each run's
+free axis, the free axis itself on the symbolic path (its dimension must be
+provably wide enough), and — once the region cuts into more than one run — each
+run's volume. Anything less is rejected rather than guessed.
 
 An **identity** `tile.reshape` — one whose target shape equals the source's —
 additionally keeps the source's layout triple (`blayout` / `slayout` / `fractal`) and its

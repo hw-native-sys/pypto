@@ -3346,6 +3346,36 @@ class TestTileSliceReshapeOps:
 
         assert _valid_of(result_type) == [2, 2]
 
+    def test_tile_reshape_carries_a_symbolic_extent_through_a_multi_run_region(self):
+        """A run's free extent may be symbolic even when the region cuts into several runs.
+
+        What has to be static is the physical geometry the region is measured
+        against -- here the run volumes 4 and 16 and the target extents. The
+        symbolic valid extent lands on the target dimension whose step is
+        exactly its run's trailing volume, and carries over unchanged.
+        """
+        span = ir.Span.unknown()
+        vrow = ir.Var("vrow", ir.ScalarType(DataType.INDEX), span)
+        src = _partial_tile(
+            [4, 2, 8], [vrow, ir.ConstInt(1, DataType.INDEX, span), ir.ConstInt(8, DataType.INDEX, span)]
+        )
+
+        valid = _valid_of(tile.reshape(src, [4, 16]).type)
+
+        assert valid[0] is vrow  # the dynamic extent carries over unchanged
+        assert valid[1:] == [8]
+
+    def test_tile_reshape_rejects_a_symbolic_extent_no_target_row_size_matches(self):
+        """[2, 2, 16] splits the first run's 4 rows, so the runtime extent cannot follow."""
+        span = ir.Span.unknown()
+        vrow = ir.Var("vrow", ir.ScalarType(DataType.INDEX), span)
+        src = _partial_tile(
+            [4, 2, 8], [vrow, ir.ConstInt(1, DataType.INDEX, span), ir.ConstInt(8, DataType.INDEX, span)]
+        )
+
+        with pytest.raises(ValueError, match="has the matching row size"):
+            tile.reshape(src, [2, 2, 16])
+
     def test_tile_reshape_rejects_a_non_prefix_region_the_target_cannot_cut(self):
         """{0, 1, 4, 5} needs a dimension boundary every 4 elements, and [8] has none."""
         with pytest.raises(ValueError, match="real data is scattered across the buffer"):

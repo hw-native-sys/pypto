@@ -551,10 +551,14 @@ void ValidateDropDimsValidExtents(const std::vector<int64_t>& drop_dims,
  * rather than mapped against the wrong flat order. Cases 1-3 relabel axes
  * without consulting flat positions and hold under any layout.
  *
- * A run whose extents are not compile-time constants is the one place case 4
- * stays conservative: a single run carries a symbolic free extent through
- * unchanged when a target dimension keeps its row size, and anything more is
- * rejected rather than guessed.
+ * A symbolic extent narrows what case 4 can prove, but does not by itself
+ * reject: *any* run may carry a symbolic **valid** extent through unchanged,
+ * onto a target dimension of its own run whose step is exactly that run's
+ * trailing volume. What has to be static is the **physical** geometry the region
+ * is measured against -- the target extents, the extents below each run's free
+ * axis, the free axis itself on the symbolic path (its dimension has to be
+ * provably wide enough), and, once the region cuts into more than one run, each
+ * run's volume. Anything less is rejected rather than guessed.
  *
  * @param src_valid Effective valid shape of the source, resolved by ``GetValidShape``
  * @param in_shape Physical shape of the source, same rank as @p src_valid
