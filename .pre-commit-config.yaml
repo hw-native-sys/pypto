@@ -15,23 +15,20 @@ repos:
         - id: check-headers
           name: check-headers
           entry: python tests/lint/check_headers.py
-          language: python
-          language_version: python3
+          language: system
           pass_filenames: false
 
         - id: check-english-only
           name: check-english-only
           entry: python tests/lint/check_english_only.py
-          language: python
-          language_version: python3
+          language: system
           pass_filenames: false
           exclude: ^(3rdparty/|docs/zh/|README\.zh-CN\.md)
 
         - id: check-docs-en-zh-parity
           name: check-docs-en-zh-parity
           entry: python tests/lint/check_docs_en_zh_parity.py
-          language: python
-          language_version: python3
+          language: system
           pass_filenames: false
 
         - id: check-docs-nav
@@ -45,64 +42,55 @@ repos:
         - id: check-docs-symbol-coverage
           name: check-docs-symbol-coverage
           entry: python tests/lint/check_docs_symbol_coverage.py
-          language: python
-          language_version: python3
+          language: system
           pass_filenames: false
 
         - id: check-no-broad-raises
           name: check-no-broad-raises
           entry: python tests/lint/check_no_broad_raises.py
-          language: python
-          language_version: python3
+          language: system
           pass_filenames: false
 
         - id: check-environment-inputs
           name: check-environment-inputs
           entry: python tests/lint/check_environment_inputs.py
-          language: python
-          language_version: python3.10
+          language: system
           pass_filenames: false
 
         - id: check-emitter-check-classification
           name: check-emitter-check-classification
           entry: python tests/lint/check_emitter_check_classification.py
-          language: python
-          language_version: python3
+          language: system
           pass_filenames: false
 
         - id: check-op-name-literals
           name: check-op-name-literals
           entry: python tests/lint/check_op_name_literals.py
-          language: python
-          language_version: python3
+          language: system
           pass_filenames: false
 
         - id: check-function-attr-key-parity
           name: check-function-attr-key-parity
           entry: python tests/lint/check_function_attr_key_parity.py
-          language: python
-          language_version: python3
+          language: system
           pass_filenames: false
 
         - id: check-op-docstring-parity
           name: check-op-docstring-parity
           entry: python tests/lint/check_op_docstring_parity.py
-          language: python
-          language_version: python3
+          language: system
           pass_filenames: false
 
         - id: check-ir-property-parity
           name: check-ir-property-parity
           entry: python tests/lint/check_ir_property_parity.py
-          language: python
-          language_version: python3
+          language: system
           pass_filenames: false
 
         - id: check-property-set-doc-parity
           name: check-property-set-doc-parity
           entry: python tests/lint/check_property_set_doc_parity.py
-          language: python
-          language_version: python3
+          language: system
           pass_filenames: false
 
     - repo: https://github.com/pre-commit/pre-commit-hooks
