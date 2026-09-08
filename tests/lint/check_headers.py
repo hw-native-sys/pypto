@@ -11,9 +11,10 @@ Script to check copyright headers in source files.
 """
 
 import argparse
-import subprocess
 import sys
 from pathlib import Path
+
+from _scan import resolve
 
 # Define the expected headers
 PY_HEADER = """
@@ -67,31 +68,6 @@ FILE_NAME_HEADERS = {
     ".clang-format": PY_HEADER,
     ".clang-tidy": PY_HEADER,
 }
-
-
-def get_git_tracked_files(root_dir: Path) -> list[Path]:
-    """Get list of files tracked by git."""
-    try:
-        result = subprocess.run(
-            ["git", "ls-files"],
-            cwd=root_dir,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        files = []
-        for line in result.stdout.strip().split("\n"):
-            if line:
-                file_path = root_dir / line
-                if file_path.is_file():
-                    files.append(file_path)
-        return files
-    except subprocess.CalledProcessError as e:
-        print(f"Error: Failed to get git tracked files: {e}", file=sys.stderr)
-        sys.exit(1)
-    except FileNotFoundError:
-        print("Error: git command not found", file=sys.stderr)
-        sys.exit(1)
 
 
 def check_file_header(file_path: Path) -> tuple[bool, str]:
@@ -148,27 +124,33 @@ def main():
     """Main function."""
     parser = argparse.ArgumentParser(description="Check copyright headers in git-tracked source files")
     parser.add_argument(
-        "path",
-        nargs="?",
-        default=".",
-        help="Path to git repository (default: current directory)",
+        "--root",
+        type=Path,
+        default=Path(__file__).resolve().parents[2],
+        help="Repository root (defaults to the repo containing this script)",
+    )
+    parser.add_argument(
+        "files",
+        nargs="*",
+        type=Path,
+        help="Files to check (default: every git-tracked file in the repo)",
     )
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
 
     args = parser.parse_args()
 
-    root_path = Path(args.path).resolve()
+    root_path = args.root.resolve()
 
     if not root_path.exists():
         print(f"Error: Path '{root_path}' does not exist", file=sys.stderr)
         return 1
 
+    # A worktree's .git is a file rather than a directory, so test existence, not is_dir().
     if not (root_path / ".git").exists():
         print(f"Error: '{root_path}' is not a git repository", file=sys.stderr)
         return 1
 
-    # Get all git-tracked files
-    all_files = get_git_tracked_files(root_path)
+    all_files = resolve(root_path, args.files)
 
     # Filter out excluded directories
     excluded_patterns = ["reference"]

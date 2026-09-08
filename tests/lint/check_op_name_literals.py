@@ -61,9 +61,10 @@ Scope and deliberate limits:
 import argparse
 import ast
 import re
-import subprocess
 import sys
 from pathlib import Path
+
+from _scan import resolve
 
 # Sites that legitimately compare a bare literal. Scoped to the exact class or function -- not the
 # whole file -- so an unrelated bare comparison added to one of these files later is still reported.
@@ -89,31 +90,6 @@ COLLECTION_BUILDERS = frozenset({"frozenset", "set", "list", "tuple"})
 
 LITERAL_OPS = (ast.Eq, ast.NotEq)
 MEMBERSHIP_OPS = (ast.In, ast.NotIn)
-
-
-def get_git_tracked_files(root_dir: Path) -> list[Path]:
-    """Get list of git-tracked Python files under the scanned roots."""
-    try:
-        result = subprocess.run(
-            ["git", "ls-files", "--", *SCAN_ROOTS],
-            cwd=root_dir,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-    except subprocess.CalledProcessError as e:
-        print(f"Error: Failed to get git tracked files: {e}", file=sys.stderr)
-        sys.exit(1)
-    except FileNotFoundError:
-        print("Error: git command not found", file=sys.stderr)
-        sys.exit(1)
-
-    files = []
-    for line in result.stdout.splitlines():
-        path = root_dir / line
-        if line.endswith(".py") and path.is_file():
-            files.append(path)
-    return files
 
 
 def _is_op_name_access(node: ast.expr) -> bool:
@@ -341,11 +317,17 @@ def main() -> int:
         default=Path(__file__).resolve().parents[2],
         help="Repository root (defaults to the repo containing this script)",
     )
+    parser.add_argument(
+        "files",
+        nargs="*",
+        type=Path,
+        help=f"Files to check (default: every git-tracked .py under {'/, '.join(SCAN_ROOTS)}/)",
+    )
     args = parser.parse_args()
     root_dir = args.root.resolve()
 
     total = 0
-    for path in get_git_tracked_files(root_dir):
+    for path in resolve(root_dir, args.files, SCAN_ROOTS, {".py"}):
         rel = path.relative_to(root_dir).as_posix()
         if rel == f"tests/lint/{Path(__file__).name}":
             continue

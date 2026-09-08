@@ -42,9 +42,10 @@ both hides real checks after the literal and can report text inside one as code.
 
 import argparse
 import re
-import subprocess
 import sys
 from pathlib import Path
+
+from _scan import resolve
 
 # Trees that run after verification. Everything here is post-verification by construction.
 SCANNED_DIRS = ("src/codegen", "src/backend")
@@ -70,31 +71,6 @@ _ARITY_ALIAS_RE = re.compile(
 _IDENT_RE = re.compile(r"\b[A-Za-z_]\w*\b")
 
 _INTERNAL_MARKER = "internal error"
-
-
-def get_git_tracked_sources(root_dir: Path) -> list[Path]:
-    """Get the git-tracked C++ sources under the scanned emitter trees."""
-    try:
-        result = subprocess.run(
-            ["git", "ls-files", "--", *SCANNED_DIRS],
-            cwd=root_dir,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-    except subprocess.CalledProcessError as e:
-        print(f"Error: Failed to get git tracked files: {e}", file=sys.stderr)
-        sys.exit(1)
-    except FileNotFoundError:
-        print("Error: git command not found", file=sys.stderr)
-        sys.exit(1)
-
-    files = []
-    for line in result.stdout.splitlines():
-        path = root_dir / line
-        if Path(line).suffix in SOURCE_SUFFIXES and path.is_file():
-            files.append(path)
-    return sorted(files)
 
 
 def _blank_line_comment(text: str, out: list[str], i: int, n: int) -> int:
@@ -285,11 +261,17 @@ def main() -> int:
         default=Path(__file__).resolve().parents[2],
         help="Repository root (defaults to the repo containing this script)",
     )
+    parser.add_argument(
+        "files",
+        nargs="*",
+        type=Path,
+        help=f"Files to check (default: every git-tracked C++ source under {', '.join(SCANNED_DIRS)})",
+    )
     args = parser.parse_args()
     root_dir = args.root.resolve()
 
     total = 0
-    for path in get_git_tracked_sources(root_dir):
+    for path in resolve(root_dir, args.files, SCANNED_DIRS, SOURCE_SUFFIXES):
         rel = path.relative_to(root_dir).as_posix()
         for line, rule, detail in find_violations(path):
             if f"{rel}:{line}" in ALLOWLIST:
