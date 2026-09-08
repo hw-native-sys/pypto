@@ -1820,8 +1820,16 @@ class JITFunction:
         annotations are unchanged. Retain the bindings themselves and compare
         identity, avoiding overloaded equality and recycled object IDs.
 
+        Keyed by the *generated* name, not ``dep.__name__``: the triples are
+        sorted, so position is not carried, and two same-named deps swapping
+        layouts (``helper`` from two modules going ``NZ``/``ND`` -> ``ND``/``NZ``)
+        would otherwise produce the same sorted set and hand the second call the
+        first one's artifact. The generated name is the disambiguator the
+        emitted signatures already carry.
+
         Returns:
-            Sorted ``(dep name, parameter, layout)`` triples for the cache key.
+            Sorted ``(generated dep name, parameter, layout)`` triples for the
+            cache key.
         """
         state = self._get_dep_graph_state()
         bindings = tuple(
@@ -1830,10 +1838,15 @@ class JITFunction:
         cached = state.layouts
         if cached is not None and all(a is b for a, b in zip(bindings, cached.bindings, strict=True)):
             return cached.layouts
+        # Same list ``_build_contexts`` allocates from, so the names agree with
+        # the ones the generated program actually uses.
+        gen_names = _allocate_generated_names(self, state.graph.deps)
         layouts = tuple(
             sorted(
-                (dep.__name__, param, str(layout))
+                (gen_names[id(dep._func)], param, str(layout))
                 for dep in state.graph.deps
+                # ``dep.__name__`` here is the diagnostic name only — a layout
+                # error should name the user's own function.
                 for param, layout in _param_layouts(dep._func, dep.__name__).items()
             )
         )

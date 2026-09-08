@@ -159,11 +159,13 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
         tensor_layouts: Annotated layout per tensor parameter name, where the
             annotation declares one. See :class:`TensorCacheInfo.layout` for
             why the layout has to split the key on its own.
-        dep_layouts: ``(dep name, parameter, layout)`` triples for layouts the
-            reachable deps declare themselves. Same reasoning as
+        dep_layouts: ``(generated dep name, parameter, layout)`` triples for
+            layouts the reachable deps declare themselves. Same reasoning as
             ``tensor_layouts``, one call deeper: they shape the generated dep
             signatures but appear in no entry-parameter meta, and a postponed
-            annotation hides a rebind from ``source_hash``.
+            annotation hides a rebind from ``source_hash``. The name is the
+            *generated* one, so two same-named deps stay distinguishable in
+            this sorted, position-free tuple.
         dynamic_dims: Set of (param_name, dim_index) pairs that are dynamic.
             Dynamic dims are stored as None in the cache key so different
             concrete values for that dimension produce the same cache entry.

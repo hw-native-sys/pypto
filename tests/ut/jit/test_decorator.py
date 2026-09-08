@@ -1000,6 +1000,72 @@ class TestDuplicateDepNames:
         assert entry_ctx.dep_func_names == {"dep": "entry__2"}
         assert isinstance(pl.parse(Specializer("_jit_entry", contexts).specialize()), ir.Program)
 
+    def test_dep_layouts_cache_key_tracks_which_dep_declared_which_layout(self):
+        """Swapping two same-named deps' layouts must change the cache key.
+
+        ``dep_layouts`` is a *sorted* tuple, so it carries no position — keyed
+        by ``__name__`` it collapsed, and the second call got the first call's
+        artifact even though the generated signatures differ.
+        """
+        import importlib.util  # noqa: PLC0415
+        import types  # noqa: PLC0415
+        from pathlib import Path  # noqa: PLC0415
+
+        fixture_path = Path(__file__).parent / "_dup_layout_fixture.py"
+
+        def _load(mod_name):
+            """Load the fixture, returning ``(helper, its globals dict)``.
+
+            A postponed annotation is resolved against the function's own
+            globals, so rebinding ``LAYOUT`` there is what changes the layout
+            the dep declares — the module's ``__dict__`` is that same mapping.
+            """
+            spec = importlib.util.spec_from_file_location(mod_name, fixture_path)
+            assert spec is not None and spec.loader is not None
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module.helper, module.__dict__
+
+        (left, left_globals), (right, right_globals) = (
+            _load("_dup_layout_left"),
+            _load("_dup_layout_right"),
+        )
+
+        def _entry_raw(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+            left(a, c)  # noqa: F821  # pyright: ignore[reportUndefinedVariable]
+            right(a, c)  # noqa: F821  # pyright: ignore[reportUndefinedVariable]
+            return c
+
+        new_globals = {**_entry_raw.__globals__, "left": left, "right": right}
+        entry = JITFunction(
+            types.FunctionType(
+                _entry_raw.__code__,
+                new_globals,
+                _entry_raw.__name__,
+                _entry_raw.__defaults__,
+                _entry_raw.__closure__,
+            ),
+            func_type="orchestration",
+        )
+
+        left_globals["LAYOUT"], right_globals["LAYOUT"] = ir.TensorLayout.NZ, ir.TensorLayout.ND
+        first = entry._dep_declared_layouts()
+
+        left_globals["LAYOUT"], right_globals["LAYOUT"] = ir.TensorLayout.ND, ir.TensorLayout.NZ
+        second = entry._dep_declared_layouts()
+
+        # Each triple names the generated function whose signature carries the
+        # layout, so the swap is visible.
+        assert first == (
+            ("helper", "src", str(ir.TensorLayout.NZ)),
+            ("helper__2", "src", str(ir.TensorLayout.ND)),
+        )
+        assert second == (
+            ("helper", "src", str(ir.TensorLayout.ND)),
+            ("helper__2", "src", str(ir.TensorLayout.NZ)),
+        )
+        assert first != second
+
 
 class TestAllocateGeneratedNames:
     """Unit coverage for the generated-name allocator itself."""
