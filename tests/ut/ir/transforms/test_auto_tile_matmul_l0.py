@@ -2967,7 +2967,7 @@ class TestAutoTileMatmulL0MNTiling:
             ptoas_seq[i : i + 4] == ["matmul", "matmul", "store", "store"] for i in range(len(ptoas_seq) - 3)
         ), f"dbC=2 (PTOAS) must float both stores below both matmuls (matmul,matmul,store,store): {ptoas_seq}"
 
-        # Default PyPTO planner: dbC=1 -> every matmul is immediately followed by its store
+        # Explicit legacy PyPTO planner: dbC=1 -> every matmul is immediately followed by its store
         # (no two co-live accumulators), for the SAME shape.
         pypto_seq = self._colive_seq(Before)
         mm2 = [i for i, op in enumerate(pypto_seq) if op == "matmul"]
@@ -3152,9 +3152,30 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
 
     @pytest.fixture(autouse=True)
     def _legacy_planner_policy(self):
-        """The existing-pipeline recognizer is a legacy-PyPTO optimization."""
+        """Retain legacy-PyPTO expectations unless a test selects another planner."""
         with _planner_context(passes.MemoryPlanner.PYPTO):
             yield
+
+    @staticmethod
+    def _physical_ranges(program, memory_space):
+        """Return distinct physical ranges assigned to one tile memory space."""
+        ranges = set()
+
+        class _Collector(ir.IRVisitor):
+            def visit_assign_stmt(self, stmt):  # type: ignore[override]
+                tile_type = stmt.var.type
+                if (
+                    isinstance(tile_type, ir.TileType)
+                    and tile_type.memory_space == memory_space
+                    and tile_type.memref is not None
+                ):
+                    offset = tile_type.memref.byte_offset_
+                    assert isinstance(offset, ir.ConstInt)
+                    ranges.add((offset.value, tile_type.memref.size_))
+                super().visit_assign_stmt(stmt)
+
+        _Collector().visit_program(program)
+        return ranges
 
     @staticmethod
     def _single_matmul_pipeline(tile_m: int = 16, tile_n: int = 128, inner_stage: int = 2, width: int = 512):
@@ -3299,8 +3320,8 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
             f"expected the dbC drain-overlap schedule, got: {seq}"
         )
 
-        # PyPTO must preserve the two Acc slots without requiring the chooser's
-        # experimental enable_pypto_l0c_double_buffer flag.
+        # Legacy PyPTO must preserve the two Acc slots without requiring the
+        # chooser's experimental enable_pypto_l0c_double_buffer flag.
         allocated = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
         allocated_text = ir.python_print(allocated)
 
@@ -3315,6 +3336,23 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
         assert len(alloc_bases("Right")) == 2, "the moving b operand must remain the pipeline's L0B ping-pong"
         acc_bases = alloc_bases("Acc")
         assert len(acc_bases) == 2, f"expected two L0C ping-pong buffers, got: {acc_bases}"
+
+    def test_dsa_rp_preserves_existing_pipeline_ping_pong_ranges(self):
+        """The default DSA-RP planner retains two physical operand/Acc slots."""
+        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+        Before = self._single_matmul_pipeline()
+
+        with _planner_context(passes.MemoryPlanner.DSA_RP):
+            tiled = passes.auto_tile_matmul_l0()(Before)
+            allocated = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+
+        assert ir.python_print(tiled).count("pipeline_double_buffer_c") == 1
+        assert len(self._physical_ranges(allocated, ir.MemorySpace.Left)) == 1
+        assert len(self._physical_ranges(allocated, ir.MemorySpace.Right)) == 2
+        assert len(self._physical_ranges(allocated, ir.MemorySpace.Acc)) == 2
 
     @pytest.mark.parametrize(
         ("inner_stage", "width", "expected"),

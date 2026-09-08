@@ -51,10 +51,11 @@ namespace {
 // maintenance cost O(N log N). Candidate enumeration visits only
 // lifetime-compatible allocations in a different backend pipe bucket. E can be
 // quadratic in the number of reusable allocations. This output-sensitive
-// exception is inherent in the opt-in explicit pairwise DSA-RP model: a kernel
-// can genuinely produce Theta(B^2) penalty edges for B buffers. No access-pair
-// antichain or per-pair dependency walk is performed beyond materializing those
-// relations.
+// exception is inherent in the explicit pairwise DSA-RP model: a kernel can
+// genuinely produce Theta(B^2) penalty edges for B buffers. DSA-RP is the
+// default planner, but this work is scoped to the allocation identities of one
+// InCore function; no access-pair antichain or per-pair dependency walk is
+// performed beyond materializing those relations.
 
 enum class AccessKind : uint8_t {
   Read,
