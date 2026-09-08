@@ -1408,14 +1408,15 @@ jobs:
         # needs the pool to have published a work_dir, and several tests sharing
         # one declared case then share its single device run.
         #
-        # --device-num 4 because the device-pool path runs one case per card in
-        # --device, and these 19 cases are the shape that scales: measured on
-        # a2a3, 122s on one card, 66s on two, 35s on four. Concurrency here was
-        # unreachable until the pre-submitter, and unsafe until the device-init
-        # lock in pypto.runtime.worker -- four-way now runs clean.
+        # --device-num 2 because the device-pool path runs one case per card in
+        # --device. Measured on a2a3 over these 19 cases: 122s on one card, 66s
+        # on two, 35s on four. Two is the setting, not four: the extra 31s does
+        # not justify holding four of a shared pool's cards for the length of
+        # this step. Concurrency here was unreachable until the pre-submitter,
+        # and unsafe until the device-init lock in pypto.runtime.worker.
         run: |
           source activate.sh
-          task-submit --device "$DEVICE_ID" --device-num 4 --timeout 3600 --max-time 1200 \
+          task-submit --device "$DEVICE_ID" --device-num 2 --timeout 3600 --max-time 1200 \
             --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest \
               tests/st/runtime/scheduling -v -m swimlane \
               --device=\$TASK_DEVICE --platform=a2a3 --enable-chip-swimlane \
