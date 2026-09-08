@@ -304,6 +304,15 @@ def pytest_addoption(parser):
         help="Deprecated alias for --enable-chip-swimlane.",
     )
     parser.addoption(
+        "--execute-workers",
+        type=int,
+        default=0,
+        help="Cap on concurrent device runs in the local device-pool path. 0 (the default) "
+        "means one per card in --device. Lower it for a host that cannot sustain that; the "
+        "device-context race that used to force a cap is fixed in "
+        "pypto.runtime.worker._device_init_lock.",
+    )
+    parser.addoption(
         "--allow-inline-cases",
         action="store_true",
         default=False,
@@ -870,6 +879,56 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
         metafunc.parametrize("_st_platform", allowed, ids=list(allowed), indirect=True)
 
 
+def marker_skip_reason(item: pytest.Item) -> str | None:
+    """Why *item*'s markers say it cannot run here, or None if it can.
+
+    Read at two moments that must agree. ``pytest_runtest_setup`` applies it, so
+    the skip lands before fixtures build and no case reaches a card for a test
+    that was never going to assert on it. Collection reads it too: a case whose
+    every test is skipped is not registered, so the pool neither compiles it nor
+    (once the device-pool path submits ahead) runs it.
+
+    Splitting these two into separate copies of the conditions is how a case
+    ends up compiled and executed for a test that skips in its first line --
+    which is exactly what the ``extra_swimlane`` witnesses used to do, at 12s of
+    card time each.
+
+    Raises:
+        pytest.UsageError: ``multi_card`` carries no usable device count.
+    """
+    for name, flag, option in (
+        ("swimlane", _resolve_swimlane_option(item.config), "--enable-chip-swimlane"),
+        ("dump_args", item.config.getoption("--dump-args"), "--dump-args"),
+    ):
+        if not item.get_closest_marker(name):
+            continue
+        if not flag:
+            return f"pass {option} to collect the artifact this test asserts on"
+        if item.config.getoption("--codegen-only"):
+            return "--codegen-only skips device execution, so no DFX artifact is written"
+
+    witness = item.get_closest_marker("extra_swimlane")
+    if witness is not None and os.environ.get("PYPTO_PHASE_FENCE_EXTRA_SWIMLANE") != "1":
+        label = witness.kwargs.get("label") or (witness.args[0] if witness.args else item.name)
+        return (
+            f"{label} is a manual profiling witness; set PYPTO_PHASE_FENCE_EXTRA_SWIMLANE=1 "
+            "and run this test node by itself"
+        )
+
+    cards = item.get_closest_marker("multi_card")
+    if cards is not None:
+        wanted = cards.kwargs.get("n") or (cards.args[0] if cards.args else None)
+        if not isinstance(wanted, int) or wanted < 2:
+            raise pytest.UsageError(
+                f"{item.nodeid}: @pytest.mark.multi_card needs an integer device count >= 2, got {wanted!r}."
+            )
+        available = _parse_device_option(item.config.getoption("--device"))
+        if len(available) < wanted:
+            return f"needs {wanted} devices, this run has {available or 'none'}"
+
+    return None
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtest_setup(item: pytest.Item) -> None:
     """Publish this item's platform, then apply ``@pytest.mark.platform_xfail``.
@@ -902,35 +961,9 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
     # contract here -- otherwise it runs with no artifact to read and fails where
     # it used to skip. `--codegen-only` is the same condition by another route:
     # nothing executes, so nothing is written.
-    for marker, flag, option in (
-        ("swimlane", _resolve_swimlane_option(item.config), "--enable-chip-swimlane"),
-        ("dump_args", item.config.getoption("--dump-args"), "--dump-args"),
-    ):
-        if not item.get_closest_marker(marker):
-            continue
-        if not flag:
-            pytest.skip(f"pass {option} to collect the artifact this test asserts on")
-        if item.config.getoption("--codegen-only"):
-            pytest.skip("--codegen-only skips device execution, so no DFX artifact is written")
-
-    witness = item.get_closest_marker("extra_swimlane")
-    if witness is not None and os.environ.get("PYPTO_PHASE_FENCE_EXTRA_SWIMLANE") != "1":
-        label = witness.kwargs.get("label") or (witness.args[0] if witness.args else item.name)
-        pytest.skip(
-            f"{label} is a manual profiling witness; set PYPTO_PHASE_FENCE_EXTRA_SWIMLANE=1 "
-            "and run this test node by itself"
-        )
-
-    cards = item.get_closest_marker("multi_card")
-    if cards is not None:
-        wanted = cards.kwargs.get("n") or (cards.args[0] if cards.args else None)
-        if not isinstance(wanted, int) or wanted < 2:
-            raise pytest.UsageError(
-                f"{item.nodeid}: @pytest.mark.multi_card needs an integer device count >= 2, got {wanted!r}."
-            )
-        available = _parse_device_option(item.config.getoption("--device"))
-        if len(available) < wanted:
-            pytest.skip(f"needs {wanted} devices, this run has {available or 'none'}")
+    reason = marker_skip_reason(item)
+    if reason is not None:
+        pytest.skip(reason)
 
     marker = item.get_closest_marker("platform_xfail")
     if marker is None:
@@ -1253,9 +1286,27 @@ def _discover_cases(
     reported that, so a test whose constructor arguments the source-parsing
     route cannot resolve only ever showed up as a slower run. The misses are
     named in the terminal summary instead.
+
+    A case is registered only from items that will actually run. A test its
+    markers already exclude — no ``--enable-chip-swimlane``, a profiling
+    witness, not enough cards — must not put its case in the pool: the pool
+    would compile it, and the device-pool submitter would run it, for a test
+    that skips before asserting anything. A case several tests share survives as
+    long as one of them runs, which is the right rule and falls out of only
+    registering from the ones that do.
+
+    Detection is deliberately *not* narrowed the same way. Whether a test
+    declared its case is a property of the test, not of this run's flags, so the
+    guard still sees an undeclared swimlane test in a run with no
+    ``--enable-chip-swimlane``. Skipped items therefore collect into a throwaway
+    dict: the answer is computed, the case is not kept.
     """
+    discarded: dict[str, PTOTestCase] = {}
     for item in session.items:
-        found = _collect_test_case_from_item(item, seen, session_memory_planner, session_platform)
+        runs = marker_skip_reason(item) is None
+        found = _collect_test_case_from_item(
+            item, seen if runs else discarded, session_memory_planner, session_platform
+        )
         if found or "test_runner" not in getattr(item, "fixturenames", ()):
             continue
         if any(m.name == "skip" for m in item.iter_markers()):
@@ -1315,6 +1366,7 @@ def pytest_collection_finish(session: pytest.Session) -> None:
     task_queue_timeout: int = session.config.getoption("--task-queue-timeout")
     task_submit_device: str = (session.config.getoption("--task-submit-device") or "").strip()
     execute_batch_size: int = session.config.getoption("--execute-batch-size")
+    execute_workers: int = session.config.getoption("--execute-workers")
 
     # Guard against a silently-wrong card. ``--task-submit-device="$DEVICE_RANGE"``
     # with an *unset* DEVICE_RANGE (e.g. the var didn't propagate to a de-dockered
@@ -1436,6 +1488,7 @@ def pytest_collection_finish(session: pytest.Session) -> None:
             task_queue_timeout=task_queue_timeout,
             task_submit_device=task_submit_device,
             execute_batch_size=execute_batch_size,
+            execute_workers=execute_workers,
             memory_planner=session_memory_planner,
         )
     finally:

@@ -1401,6 +1401,11 @@ jobs:
         # above: each test reads its record through `case_run.dfx(...)`, which
         # needs the pool to have published a work_dir, and several tests sharing
         # one declared case then share its single device run.
+        #
+        # The device-pool path now runs one case per card in --device, so this
+        # step scales the moment the FLIP TO PROD above lends it more than the
+        # single pinned card it gets today. Measured on a2a3 over these 19
+        # cases: 122s on one card, 66s on two, 35s on four.
         run: |
           source activate.sh
           task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 1200 \

@@ -148,6 +148,10 @@ _pipeline_ctx: dict = {}
 # very large suites (the excess simply queues in the pool, then task-submit).
 _MAX_TASK_SUBMIT_INFLIGHT = 512
 
+# Concurrent device runs allowed on the local device-pool path. 0 means "as many
+# as ``--device`` names"; a positive value caps it below that.
+_DEFAULT_EXECUTE_WORKERS = 0
+
 # set_backend_type is called once per backend-type group before the thread pool
 # starts.  Only the program build needs serialisation, under the shared
 # ``program_build_lock`` imported above (which owns the rationale); ir.compile()
@@ -1166,6 +1170,7 @@ def start_pipeline(  # noqa: PLR0913
     task_queue_timeout: int = 1800,
     task_submit_device: str = "auto",
     execute_batch_size: int = 64,
+    execute_workers: int = _DEFAULT_EXECUTE_WORKERS,
     memory_planner: MemoryPlanner | None = None,
 ) -> None:
     """Spin up the compile pipeline and populate :data:`_compile_futures`.
@@ -1232,13 +1237,32 @@ def start_pipeline(  # noqa: PLR0913
         n_batches = max(1, math.ceil(len(test_cases) / max(1, execute_batch_size)))
         n_exec = min(n_batches, _MAX_TASK_SUBMIT_INFLIGHT)
     else:
-        n_exec = max(1, device_pool.qsize())
+        # One worker per card by default. Concurrency here was unreachable before
+        # the pre-submitter -- pytest's item loop submitted one execution at a
+        # time and awaited it -- so extra cards sat idle however many --device
+        # named.
+        #
+        # Reaching it first surfaced `simpler_init failed with code 507018` /
+        # `107000` on a different case each run. That is a device-context race
+        # in one process, not a host limit: four separate processes opening the
+        # same four contexts are clean. `pypto.runtime.worker._device_init_lock`
+        # serialises the open and carries the evidence; with it, four-way is
+        # clean over five runs and 19 profiled cases go 122s -> 35s.
+        #
+        # --execute-workers still caps it, for a host that wants less.
+        n_exec = device_pool.qsize() or 1
+        if execute_workers > 0:
+            n_exec = max(1, min(n_exec, execute_workers))
     _execute_pool = ThreadPoolExecutor(
         max_workers=n_exec,
         thread_name_prefix="pypto-exec",
         initializer=_set_thread_log_level,
         initargs=(pypto_log_level,),
     )
+
+    # Keyed exactly as the compile cache is, so the device-pool submitter can
+    # pair a resolved compile future back to the case that golden.py needs.
+    pool_cases: dict[str, PTOTestCase] = {}
 
     groups: dict[BackendType, list[PTOTestCase]] = {}
     for tc in test_cases:
@@ -1262,6 +1286,7 @@ def start_pipeline(  # noqa: PLR0913
         group_futs: list[Future] = []
         for tc in group:
             key = _cache_key(tc, _resolve_platform(session_platform, tc), memory_planner)
+            pool_cases[key] = tc
             cfut = compile_pool.submit(
                 _fused_compile_task,
                 tc,
@@ -1296,6 +1321,51 @@ def start_pipeline(  # noqa: PLR0913
             name="pypto-batch-submitter",
             daemon=True,
         ).start()
+    elif not codegen_only:
+        # device-pool mode: without this, submission is driven by pytest's
+        # sequential item loop -- ``run`` submits one execution and immediately
+        # awaits it, so the pool never holds more than one task and every card
+        # past the first sits idle. Measured over 19 swimlane cases: 123.9s on
+        # one card, 122.2s on four.
+        threading.Thread(
+            target=_pool_submitter,
+            args=(pool_cases,),
+            name="pypto-pool-submitter",
+            daemon=True,
+        ).start()
+
+
+def _pool_submitter(cases: "dict[str, PTOTestCase]") -> None:
+    """Submit every compiled case's device run, in compile-completion order.
+
+    The device-pool counterpart of :func:`_batch_submitter`, and it exists for
+    the same reason: the card should start working while later cases are still
+    compiling, and several cards should work at once. Concurrency is bounded
+    where it already was -- the execute pool is sized to the card count and
+    ``_fused_execute_task`` blocks on ``_device_pool.get()`` -- so this only
+    fills a queue that was never allowed to hold more than one entry.
+
+    ``_schedule_exec_after_golden`` is memoised on the cache key, so a case
+    submitted here and then reached by ``run`` yields the same future: the test
+    awaits work that is already flying rather than starting its own.
+
+    Nothing is raised out of this daemon thread. A compile that failed, or a
+    case with no artifact, is left to ``run``, which reports it against the test
+    that asked for it -- the same division of labour ``_batch_submitter`` uses.
+    """
+    pending = {cfut: key for key, cfut in _compile_futures.items() if key in cases}
+    for cfut in as_completed(list(pending)):
+        key = pending[cfut]
+        try:
+            artifact = cfut.result()
+        except Exception:  # noqa: BLE001 — surfaces on the case's own run()
+            continue
+        if artifact.error is not None:
+            continue
+        try:
+            _schedule_exec_after_golden(cases[key], key, artifact)
+        except Exception:  # noqa: BLE001 — likewise; run() re-raises in context
+            continue
 
 
 def artifact_work_dir(test_case: Any) -> "Path | None":
