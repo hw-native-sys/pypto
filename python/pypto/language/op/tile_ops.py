@@ -424,8 +424,9 @@ def load(
             be an integer scalar — one extent per dimension, not a nested
             ``[start, extent]`` pair.
         target_memory: Target memory space (MemorySpace.Vec or MemorySpace.Mat).
-            ``None`` (the default) leaves the space unset for the compiler to place.
-            MX-layout tensors require an explicit MemorySpace.Mat.
+            ``None`` (the default) leaves an ordinary load unset for the compiler
+            to place. MX-layout tensors default to MemorySpace.Mat so they can be
+            passed directly to ``matmul_mx`` and placed from its operand position.
         clamp: Sanction a read that runs off the end of the source. By default a
             load asserts ``offsets + valid_shape`` stays inside the source and is
             rejected when that provably fails; ``clamp=True`` cuts the request back

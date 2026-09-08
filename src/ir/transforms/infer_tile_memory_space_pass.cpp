@@ -1037,8 +1037,52 @@ class TileMemorySpaceMutator : public IRMutator {
         required_slayout = TileLayout::none_box;
       }
 
-      InsertMoveStmt(stmts, var, key.second, span, required_blayout, required_slayout);
+      const bool needs_mx_scale_staging =
+          producer_mem_it != var_memory_.end() && producer_mem_it->second == MemorySpace::Vec &&
+          (key.second == MemorySpace::LeftScale || key.second == MemorySpace::RightScale);
+      if (needs_mx_scale_staging) {
+        InsertScaleMxMoveStmt(stmts, var, key.second, span, required_blayout, required_slayout);
+      } else {
+        InsertMoveStmt(stmts, var, key.second, span, required_blayout, required_slayout);
+      }
       changed = true;
+    }
+  }
+
+  void InsertScaleMxMoveStmt(std::vector<StmtPtr>& stmts, const VarPtr& original_var,
+                             MemorySpace scale_target, const Span& span,
+                             std::optional<TileLayout> required_blayout = std::nullopt,
+                             std::optional<TileLayout> required_slayout = std::nullopt) {
+    auto producer_type = As<TileType>(original_var->GetType());
+    INTERNAL_CHECK_SPAN(producer_type, span)
+        << "Internal error: MX scale staging requires a TileType producer";
+
+    MoveKey mat_key = {original_var, MemorySpace::Mat};
+    auto mat_it = created_moves_.find(mat_key);
+    if (mat_it == created_moves_.end()) {
+      const TileView scale_view =
+          tile_view_semantics::GetImplicitTileView(producer_type->shape_, scale_target);
+      InsertMoveStmt(stmts, original_var, MemorySpace::Mat, span, scale_view.blayout, scale_view.slayout);
+      mat_it = created_moves_.find(mat_key);
+    }
+    INTERNAL_CHECK_SPAN(mat_it != created_moves_.end(), span)
+        << "Internal error: failed to create the Mat staging move for an MX scale";
+    auto staged = AsVarLike(mat_it->second);
+    INTERNAL_CHECK_SPAN(staged, span) << "Internal error: the Mat-staged MX scale is not a Var expression";
+
+    MoveKey staged_scale_key = {staged, scale_target};
+    auto scale_it = created_moves_.find(staged_scale_key);
+    if (scale_it == created_moves_.end()) {
+      InsertMoveStmt(stmts, staged, scale_target, span, required_blayout, required_slayout);
+      scale_it = created_moves_.find(staged_scale_key);
+    }
+    INTERNAL_CHECK_SPAN(scale_it != created_moves_.end(), span)
+        << "Internal error: failed to create the final MX scale move";
+
+    MoveKey original_scale_key = {original_var, scale_target};
+    created_moves_[original_scale_key] = scale_it->second;
+    if (!scope_inserted_stack_.empty()) {
+      scope_inserted_stack_.back().push_back(original_scale_key);
     }
   }
 

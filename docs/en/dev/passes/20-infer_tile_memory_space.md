@@ -86,9 +86,10 @@ For each `IfStmt` with `return_vars_`, the analyzer likewise records each TileTy
 | `HasRetargetableMemoryKwarg()` op (e.g. `tile.load`, `tile.create`) and resolver returned `None` (kwarg absent) | Phase-0 demand if it is `Vec` or `Mat`; a cube-operand demand (`Left`, `Right`, `LeftScale`, `RightScale`, `Bias`) resolves to `Mat`; otherwise input-inherit; else `Vec` |
 | `tile.*` op with `deduce_output_memory` returning `None` and not retargetable / not inherit | Input-inherit; else `Vec` |
 
-`tile.load` of a `TensorLayout.MX_A_ZZ` / `MX_B_NN` source must carry an
-explicit `target_memory=Mat`; type deduction rejects an omitted or different
-target before this pass runs.
+The public Python load builder normalizes an omitted target on a
+`TensorLayout.MX_A_ZZ` / `MX_B_NN` source to `target_memory=Mat`. Raw
+`tile.load` IR must still carry that target; type deduction rejects a missing
+or different target before this pass runs.
 
 The clamp to `{Vec, Mat}` on retargetable producers is deliberate: a DDR-facing `tile.load` cannot directly produce `Left`/`Right`/`Acc`/`Bias`, so even when downstream demand is one of those, the producer must stop at `Mat` (or `Vec`) and Phase 2 inserts a `tile.move` to reach the specialized space.
 

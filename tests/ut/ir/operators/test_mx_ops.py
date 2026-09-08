@@ -190,6 +190,14 @@ class TestMatmulMxTypes:
         bias_call = ir.op.tile.matmul_mx_bias(lhs, lhs_scale, rhs, rhs_scale, bias, span)
         assert bias_call.op.name == ir.get_op("tile.matmul_mx_bias").name
 
+    def test_rejects_reused_scale_between_operands(self):
+        """A/B scales require distinct operand tiles and layouts."""
+        span = ir.Span.unknown()
+        lhs, scale, rhs, _ = self._mx_operands(span, m=32, k=1024, n=32)
+
+        with pytest.raises(ValueError, match="requires distinct lhs_scale and rhs_scale tiles"):
+            ir.op.tile.matmul_mx(lhs, scale, rhs, scale, span)
+
     def test_rejects_native_mxfp4_and_requires_cast(self):
         span = ir.Span.unknown()
         fp4_operands = self._mx_operands(span, n=64, dtype=DataType.FP4)

@@ -93,7 +93,7 @@ fixed-width expression's evaluation before division.
 | unprovable or negative offset | rejected |
 | partial tensor-level `valid_shape` | rejected |
 | narrowed load-level `valid_shape` | kept as tile metadata; physical box stays complete |
-| `target_memory != Mat` or missing | rejected |
+| `target_memory != Mat` or missing in raw IR | rejected; public `pl.load` fills omitted target with `Mat` |
 | MX tensor used by an unsupported operator or store | rejected |
 | shaped FP8E8M0 ND/MX backing alias | rewritten |
 | distributed MX tensor | rejected |

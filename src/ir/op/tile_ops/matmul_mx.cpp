@@ -87,6 +87,8 @@ TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
   CHECK(args.size() == 4) << "The operator " << op_name
                           << " requires exactly 4 arguments (lhs, lhs_scale, rhs, rhs_scale), but got "
                           << args.size();
+  CHECK(args[1].get() != args[3].get())
+      << "The operator " << op_name << " requires distinct lhs_scale and rhs_scale tiles";
 
   auto lhs_type = As<TileType>(args[0]->GetType());
   auto lhs_scale_type = As<TileType>(args[1]->GetType());

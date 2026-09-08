@@ -83,20 +83,11 @@ def staged_cube_matmul(
 ) -> pl.Tensor[[M, N], pl.FP32]:
     """Run matmul_mx on AIC using the GM-staged quantization outputs."""
     a_scale_mx = pl.tensor.view(a_scale, [M, GROUPS], layout=pl.MX_A_ZZ)
-    lhs = pl.move(
-        pl.load(a_quant, [0, 0], [M, K], target_memory=pl.Mem.Mat),
-        target_memory=pl.Mem.Left,
-    )
-    lhs_scale = pl.move(
-        pl.load(a_scale_mx, [0, 0], [M, GROUPS], target_memory=pl.Mem.Mat),
-        target_memory=pl.Mem.LeftScale,
-    )
+    lhs = pl.load(a_quant, [0, 0], [M, K])
+    lhs_scale = pl.load(a_scale_mx, [0, 0], [M, GROUPS])
     b_scale_mx = pl.tensor.view(b_scale, [GROUPS, N], layout=pl.MX_B_NN)
-    rhs = pl.move(pl.load(b, [0, 0], [K, N], target_memory=pl.Mem.Mat), target_memory=pl.Mem.Right)
-    rhs_scale = pl.move(
-        pl.load(b_scale_mx, [0, 0], [GROUPS, N], target_memory=pl.Mem.Mat),
-        target_memory=pl.Mem.RightScale,
-    )
+    rhs = pl.load(b, [0, 0], [K, N])
+    rhs_scale = pl.load(b_scale_mx, [0, 0], [GROUPS, N])
     return pl.store(pl.matmul_mx(lhs, lhs_scale, rhs, rhs_scale), [0, 0], out)
 
 
@@ -158,35 +149,11 @@ def mixed_quant_matmul_mx_kernel(
     out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
 ) -> pl.Tensor[[M, N], pl.FP32]:
     """Carry quantized A data and its scale directly from AIV to AIC."""
-    quant, scale = pl.quant_mx(pl.load(a, [0, 0], [M, K]), group_axis=1)
-    lhs = pl.move(
-        pl.move(
-            quant,
-            target_memory=pl.Mem.Mat,
-            blayout=pl.TileLayout.col_major,
-            slayout=pl.TileLayout.row_major,
-        ),
-        target_memory=pl.Mem.Left,
-    )
-    lhs_scale = pl.move(
-        pl.move(
-            scale,
-            target_memory=pl.Mem.Mat,
-            blayout=pl.TileLayout.row_major,
-            slayout=pl.TileLayout.row_major,
-        ),
-        target_memory=pl.Mem.LeftScale,
-    )
+    lhs, lhs_scale = pl.quant_mx(pl.load(a, [0, 0], [M, K]), group_axis=1)
 
     b_scale_mx = pl.tensor.view(b_scale, [GROUPS, N], layout=pl.MX_B_NN)
-    rhs = pl.move(
-        pl.load(b, [0, 0], [K, N], target_memory=pl.Mem.Mat),
-        target_memory=pl.Mem.Right,
-    )
-    rhs_scale = pl.move(
-        pl.load(b_scale_mx, [0, 0], [GROUPS, N], target_memory=pl.Mem.Mat),
-        target_memory=pl.Mem.RightScale,
-    )
+    rhs = pl.load(b, [0, 0], [K, N])
+    rhs_scale = pl.load(b_scale_mx, [0, 0], [GROUPS, N])
     out = pl.store(pl.matmul_mx(lhs, lhs_scale, rhs, rhs_scale), [0, 0], out)
     return out
 
@@ -235,35 +202,11 @@ def mixed_quant_rhs_matmul_mx_kernel(
     out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
 ) -> pl.Tensor[[M, N], pl.FP32]:
     """Carry group_axis=0 quantized B data and col/col scale from AIV to AIC."""
-    quant, scale = pl.quant_mx(pl.load(b, [0, 0], [N, K]), group_axis=0)
-    rhs = pl.move(
-        pl.move(
-            quant,
-            target_memory=pl.Mem.Mat,
-            blayout=pl.TileLayout.col_major,
-            slayout=pl.TileLayout.row_major,
-        ),
-        target_memory=pl.Mem.Right,
-    )
-    rhs_scale = pl.move(
-        pl.move(
-            scale,
-            target_memory=pl.Mem.Mat,
-            blayout=pl.TileLayout.col_major,
-            slayout=pl.TileLayout.col_major,
-        ),
-        target_memory=pl.Mem.RightScale,
-    )
+    rhs, rhs_scale = pl.quant_mx(pl.load(b, [0, 0], [N, K]), group_axis=0)
 
     a_scale_mx = pl.tensor.view(a_scale, [M, GROUPS], layout=pl.MX_A_ZZ)
-    lhs = pl.move(
-        pl.load(a, [0, 0], [M, K], target_memory=pl.Mem.Mat),
-        target_memory=pl.Mem.Left,
-    )
-    lhs_scale = pl.move(
-        pl.load(a_scale_mx, [0, 0], [M, GROUPS], target_memory=pl.Mem.Mat),
-        target_memory=pl.Mem.LeftScale,
-    )
+    lhs = pl.load(a, [0, 0], [M, K])
+    lhs_scale = pl.load(a_scale_mx, [0, 0], [M, GROUPS])
     return pl.store(pl.matmul_mx(lhs, lhs_scale, rhs, rhs_scale), [0, 0], out)
 
 

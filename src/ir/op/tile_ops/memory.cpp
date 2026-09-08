@@ -255,9 +255,9 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
           << "The operator " << op_name
           << " of a blocked MX-layout tensor requires physical valid_shape to equal shapes";
     }
-    // MX cube scale loads are Mat-only (TLoadMxCube*) and require the caller to
-    // spell the target explicitly. The public load interface keeps its ordinary
-    // Vec default, so an omitted target fails instead of being silently changed.
+    // MX cube scale loads are Mat-only (TLoadMxCube*). The public load builder
+    // normalizes an omitted target to Mat; raw tile.load IR must carry that
+    // explicit Mat target.
     CHECK_SPAN(target_memory_opt.has_value() && *target_memory_opt == MemorySpace::Mat, args[0]->span_)
         << "The operator " << op_name << " of an MX-layout tensor requires target_memory=MemorySpace.Mat";
   }

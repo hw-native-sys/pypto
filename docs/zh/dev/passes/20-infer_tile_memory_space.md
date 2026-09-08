@@ -105,8 +105,9 @@ yield 查表与 init 载体查表都使用 `AsVarLike` 而非 `As<Var>`。原样
 
 阶段 1 **从不**覆盖已有的 `target_memory` kwarg。如果用户写了 `pl.load(..., target_memory=Mat)`，而下游 `matmul` 需要 `Left`，则 load 仍保持 `Mat`，并由后续插入 `tile.move`。
 
-源类型为 `TensorLayout.MX_A_ZZ` / `MX_B_NN` 的 `tile.load` 必须显式携带
-`target_memory=Mat`；如果省略或传入其他目标，类型推导会在本 pass 运行前报错。
+公开 Python load builder 会把 `TensorLayout.MX_A_ZZ` / `MX_B_NN` 源上省略的
+target 规范化为 `target_memory=Mat`。原始 `tile.load` IR 仍必须携带该 target；
+如果缺失或传入其他目标，类型推导会在本 pass 运行前报错。
 
 ### 阶段 2 — Move 收集（`MoveCollector`）
 

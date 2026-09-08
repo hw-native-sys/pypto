@@ -95,12 +95,11 @@ class TestQuantMxTypes:
         with pytest.raises(ValueError, match="group_axis must be 0 or 1"):
             pl.quant_mx(src, group_axis=2)
 
-    def test_public_rejects_unsupported_dtype(self):
+    @pytest.mark.parametrize("dtype", [pl.FP8E5M2, pl.FP4])
+    def test_public_rejects_unsupported_dtype(self, dtype):
         src = pl.Tile(expr=_tile("src", (16, 64), pl.FP16))
         with pytest.raises(ValueError, match="supports only FP8E4M3FN"):
-            pl.quant_mx(src, group_axis=1, dtype=pl.FP8E5M2)
-        with pytest.raises(ValueError, match="supports only FP8E4M3FN"):
-            pl.quant_mx(src, group_axis=1, dtype=pl.FP4)
+            pl.quant_mx(src, group_axis=1, dtype=dtype)
 
     @pytest.mark.parametrize(
         ("shape", "dtype", "group_axis", "message"),

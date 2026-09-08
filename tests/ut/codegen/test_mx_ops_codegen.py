@@ -214,15 +214,11 @@ class TestMxMatmulCodegen:
                 b_s: pl.Tensor[[2, 64], pl.FP8E8M0, pl.MX_B_NN],
                 out: pl.Tensor[[128, 64], pl.FP32],
             ):
-                ta = pl.load(a, [0, 0], [128, 64], target_memory=pl.Mem.Mat)
-                tas = pl.load(a_s, [0, 0], [128, 2], target_memory=pl.Mem.Mat)
-                tb = pl.load(b, [0, 0], [64, 64], target_memory=pl.Mem.Mat)
-                tbs = pl.load(b_s, [0, 0], [2, 64], target_memory=pl.Mem.Mat)
-                la = pl.move(ta, target_memory=pl.Mem.Left)
-                las = pl.move(tas, target_memory=pl.Mem.LeftScale)
-                rb = pl.move(tb, target_memory=pl.Mem.Right)
-                rbs = pl.move(tbs, target_memory=pl.Mem.RightScale)
-                c = pl.matmul_mx(la, las, rb, rbs)
+                ta = pl.load(a, [0, 0], [128, 64])
+                tas = pl.load(a_s, [0, 0], [128, 2])
+                tb = pl.load(b, [0, 0], [64, 64])
+                tbs = pl.load(b_s, [0, 0], [2, 64])
+                c = pl.matmul_mx(ta, tas, tb, tbs)
                 pl.store(c, [0, 0], out)
 
         mlir = _emit_incore_mlir(Program)
@@ -301,14 +297,10 @@ class TestMxMatmulCodegen:
                 out: pl.Tensor[[128, 64], pl.FP32],
             ):
                 ta = pl.cast(pl.load(a, [0, 0], [128, 64]), pl.FP8E4M3FN)
-                tas = pl.load(a_s, [0, 0], [128, 2], target_memory=pl.Mem.Mat)
-                tb = pl.load(b, [0, 0], [64, 64], target_memory=pl.Mem.Mat)
-                tbs = pl.load(b_s, [0, 0], [2, 64], target_memory=pl.Mem.Mat)
-                la = pl.move(ta, target_memory=pl.Mem.Left)
-                las = pl.move(tas, target_memory=pl.Mem.LeftScale)
-                rb = pl.move(tb, target_memory=pl.Mem.Right)
-                rbs = pl.move(tbs, target_memory=pl.Mem.RightScale)
-                pl.store(pl.matmul_mx(la, las, rb, rbs), [0, 0], out)
+                tas = pl.load(a_s, [0, 0], [128, 2])
+                tb = pl.load(b, [0, 0], [64, 64])
+                tbs = pl.load(b_s, [0, 0], [2, 64])
+                pl.store(pl.matmul_mx(ta, tas, tb, tbs), [0, 0], out)
 
         mlir = _emit_incore_mlir(Program)
         assert mlir.count("pto.tcvt") == 3

@@ -85,7 +85,7 @@ callee 参数必须在每一个 caller 中都可证明。调用映射缺失或�
 | 无法证明或为负的 offset | 拒绝 |
 | tensor 级部分 `valid_shape` | 拒绝 |
 | load 级缩窄 `valid_shape` | 保留为 tile 元数据；物理 box 仍完整 |
-| `target_memory != Mat` 或缺失 | 拒绝 |
+| 原始 IR 中 `target_memory != Mat` 或缺失 | 拒绝；公开 `pl.load` 会将省略的 target 补为 `Mat` |
 | MX tensor 被不支持的算子使用或作为 store 目标 | 拒绝 |
 | 有 shape 的 FP8E8M0 ND/MX backing alias | 改写 |
 | distributed MX tensor | 拒绝 |

@@ -132,6 +132,54 @@ class TestInsertMxScaleAddr:
             ):
                 assert src_space == tgt, f"wrong scale-side move: {src_space} -> {tgt}"
 
+    def test_quant_mx_scale_stages_from_vec_through_mat(self):
+        """A quant_mx scale crosses AIV/AIC as Vec→Mat before entering LeftScale."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[16, 64], pl.FP32],
+                b: pl.Tensor[[64, 32], pl.FP8E4M3FN],
+                b_s: pl.Tensor[[2, 32], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
+            ) -> pl.Tensor[[16, 32], pl.FP32]:
+                lhs, lhs_scale = pl.quant_mx(pl.load(a, [0, 0], [16, 64]), group_axis=1)
+                rhs = pl.load(b, [0, 0], [64, 32], target_memory=pl.Mem.Mat)
+                rhs_scale = pl.load(b_s, [0, 0], [2, 32])
+                result = pl.matmul_mx(lhs, lhs_scale, rhs, rhs_scale)
+                return pl.store(result, [0, 0], out)
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.FP32],
+                b: pl.Tensor[[64, 32], pl.FP8E4M3FN],
+                b_s: pl.Tensor[[2, 32], pl.FP8E8M0, pl.MX_B_NN],
+            ) -> pl.Tensor[[16, 32], pl.FP32]:
+                out = pl.create_tensor([16, 32], dtype=pl.FP32)
+                return self.kernel(a, b, b_s, out)
+
+        after = self._run(passes.lower_composite_ops()(Before))
+        moves = self._collect_calls(after, "tile.move")
+        scale_path = [
+            (move.args[0].type.memory_space, move.kwargs["target_memory"])
+            for move in moves
+            if move.args[0].type.dtype == pl.FP8E8M0
+        ]
+        assert (pl.MemorySpace.Vec, pl.MemorySpace.Mat) in scale_path
+        assert (pl.MemorySpace.Mat, pl.MemorySpace.LeftScale) in scale_path
+        assert (pl.MemorySpace.Vec, pl.MemorySpace.LeftScale) not in scale_path
+
+        mx = self._collect_calls(after, "tile.matmul_mx")[0]
+        assert [arg.type.memory_space for arg in mx.args] == [
+            pl.MemorySpace.Left,
+            pl.MemorySpace.LeftScale,
+            pl.MemorySpace.Right,
+            pl.MemorySpace.RightScale,
+        ]
+
     def test_repeated_pass_rebinds_generated_bound_results(self):
         """Bound results still alias mutable buffers and must be rebound on another pass run."""
 

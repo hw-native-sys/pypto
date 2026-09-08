@@ -345,10 +345,10 @@ dtype。PyPTO 在 Ascend950 上通过 `matmul_mx` 算子族支持 host-prequant 
 
 | IR / DSL | 说明 |
 | -------- | ---- |
-| `tile.load` 读取 `pl.Tensor[..., pl.MX_A_ZZ \| pl.MX_B_NN]` | 源 TensorLayout 携带 MX scale GM layout。dtype 为 FP8E8M0 或 UINT8，必须指定 `target_memory=Mat`，且不支持 strided source。 |
+| `tile.load` 读取 `pl.Tensor[..., pl.MX_A_ZZ \| pl.MX_B_NN]` | 源 TensorLayout 携带 MX scale GM layout。dtype 为 FP8E8M0，且不支持 strided source。公开 `pl.load` 在省略 target 时默认为 `Mat`；原始 IR 必须携带 `target_memory=Mat`。 |
 | `tile.move(..., target_memory=LeftScale/RightScale)` | Mat→Scale move；硬件 layout 固定为左侧 row/row/32、右侧 col/col/32，源 Mat tile 与 layout override 必须完全匹配。 |
 | `tile.create(..., target_memory=LeftScale/RightScale)` | 不支持；应先把 MX scale 数据加载到 Mat，再 move 到 scale 内存。 |
-| `tile.matmul_mx` / `pl.matmul_mx` | `Left, LeftScale, Right, RightScale → Acc`；进入算子的两块 data operand 必须都是 `FP8E4M3FN`，scale 为 `FP8E8M0`。支持的 FP4 输入形式仅为左侧 FP4×右侧 FP8，且必须先显式写 `pl.cast(fp4, pl.FP8E4M3FN)`；原生 FP4×FP4 与反向 FP8×FP4 会被拒绝。Physical M/K/N、valid K 与 scale-group 数均以 cast 后进入算子的 FP8 tile extent 为准，不使用 packed x2 carrier shape。Physical `M % 16 == 0`、`K % 64 == 0`、`N % 32 == 0`；valid K 必须满足 `ceil(validK/32) == ceil(physicalK/32)`。对齐与 scale-group 数值检查仅作用于常量维；符号维跳过数值校验，回退到声明的 scale tile 几何（后续仍由 PTOAS 验证）。 |
+| `tile.matmul_mx` / `pl.matmul_mx` | `Left, LeftScale, Right, RightScale → Acc`；操作数位置驱动自动放置，包括为 `quant_mx` scale 生成 Vec→Mat→LeftScale/RightScale staging。进入算子的两块 data operand 必须都是 `FP8E4M3FN`，scale 为 `FP8E8M0`；`lhs_scale` 与 `rhs_scale` 必须是不同的 tile。支持的 FP4 输入形式仅为左侧 FP4×右侧 FP8，且必须先显式写 `pl.cast(fp4, pl.FP8E4M3FN)`；原生 FP4×FP4 与反向 FP8×FP4 会被拒绝。Physical M/K/N、valid K 与 scale-group 数均以 cast 后进入算子的 FP8 tile extent 为准，不使用 packed x2 carrier shape。Physical `M % 16 == 0`、`K % 64 == 0`、`N % 32 == 0`；valid K 必须满足 `ceil(validK/32) == ceil(physicalK/32)`。对齐与 scale-group 数值检查仅作用于常量维；符号维跳过数值校验，回退到声明的 scale tile 几何（后续仍由 PTOAS 验证）。 |
 | `tile.matmul_mx_acc` / `pl.matmul_mx_acc` | `Acc, Left, LeftScale, Right, RightScale → Acc`；通过 `set_output_reuses_input(0)` 原地执行；accumulator 的 physical/valid M、N 必须与 matmul 输出一致。 |
 | `tile.matmul_mx_bias` / `pl.matmul_mx_bias` | `Left, LeftScale, Right, RightScale, Bias → Acc`；bias 为 `[1, N]` FP32。 |
 | `tile.tget_scale_addr` | 编译器生成的 A5 绑定，接受 `LeftScale↔Left` 或 `RightScale↔Right`；对 `dst_scale` 原地 DPS。用户只编写 `matmul_mx` 算子族。 |

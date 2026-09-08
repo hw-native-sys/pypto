@@ -131,6 +131,70 @@ def _matmul_mx_golden(
     return torch.matmul(a_scaled, b_scaled).to(torch.float32)
 
 
+@pl.jit.incore
+def mxfp8_matmul_kernel(
+    a: pl.Tensor[[M, K], pl.FP8E4M3FN],
+    a_scale: pl.Tensor[[M, K // 32], pl.FP8E8M0, pl.MX_A_ZZ],
+    b: pl.Tensor[[K, N], pl.FP8E4M3FN],
+    b_scale: pl.Tensor[[K // 32, N], pl.FP8E8M0, pl.MX_B_NN],
+    out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    out_acc: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+) -> tuple[pl.Tensor[[M, N], pl.FP32], pl.Tensor[[M, N], pl.FP32]]:
+    lhs = pl.load(a, [0, 0], [M, K])
+    lhs_scale = pl.load(a_scale, [0, 0], [M, K // 32])
+    rhs = pl.load(b, [0, 0], [K, N])
+    rhs_scale = pl.load(b_scale, [0, 0], [K // 32, N])
+    base = pl.matmul_mx(lhs, lhs_scale, rhs, rhs_scale)
+    out = pl.store(base, [0, 0], out)
+    accumulated = pl.matmul_mx_acc(base, lhs, lhs_scale, rhs, rhs_scale)
+    out_acc = pl.store(accumulated, [0, 0], out_acc)
+    return out, out_acc
+
+
+@pl.jit
+def mxfp8_matmul(
+    a: pl.Tensor[[M, K], pl.FP8E4M3FN],
+    a_scale: pl.Tensor[[M, K // 32], pl.FP8E8M0, pl.MX_A_ZZ],
+    b: pl.Tensor[[K, N], pl.FP8E4M3FN],
+    b_scale: pl.Tensor[[K // 32, N], pl.FP8E8M0, pl.MX_B_NN],
+    out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    out_acc: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+) -> tuple[pl.Tensor[[M, N], pl.FP32], pl.Tensor[[M, N], pl.FP32]]:
+    return mxfp8_matmul_kernel(a, a_scale, b, b_scale, out, out_acc)
+
+
+@pl.jit.incore
+def mxfp4_fp8_matmul_kernel(
+    a: pl.Tensor[[M, K], pl.FP4],
+    a_scale: pl.Tensor[[M, K // 32], pl.FP8E8M0, pl.MX_A_ZZ],
+    b: pl.Tensor[[K, N], pl.FP8E4M3FN],
+    b_scale: pl.Tensor[[K // 32, N], pl.FP8E8M0, pl.MX_B_NN],
+    out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    out_acc: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+) -> tuple[pl.Tensor[[M, N], pl.FP32], pl.Tensor[[M, N], pl.FP32]]:
+    lhs = pl.cast(pl.load(a, [0, 0], [M, K]), pl.FP8E4M3FN)
+    lhs_scale = pl.load(a_scale, [0, 0], [M, K // 32])
+    rhs = pl.load(b, [0, 0], [K, N])
+    rhs_scale = pl.load(b_scale, [0, 0], [K // 32, N])
+    base = pl.matmul_mx(lhs, lhs_scale, rhs, rhs_scale)
+    out = pl.store(base, [0, 0], out)
+    accumulated = pl.matmul_mx_acc(base, lhs, lhs_scale, rhs, rhs_scale)
+    out_acc = pl.store(accumulated, [0, 0], out_acc)
+    return out, out_acc
+
+
+@pl.jit
+def mxfp4_fp8_matmul(
+    a: pl.Tensor[[M, K], pl.FP4],
+    a_scale: pl.Tensor[[M, K // 32], pl.FP8E8M0, pl.MX_A_ZZ],
+    b: pl.Tensor[[K, N], pl.FP8E4M3FN],
+    b_scale: pl.Tensor[[K // 32, N], pl.FP8E8M0, pl.MX_B_NN],
+    out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    out_acc: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+) -> tuple[pl.Tensor[[M, N], pl.FP32], pl.Tensor[[M, N], pl.FP32]]:
+    return mxfp4_fp8_matmul_kernel(a, a_scale, b, b_scale, out, out_acc)
+
+
 class MatmulMxTestCase(PTOTestCase):
     """One host-prequantized MX dtype combination with base+acc outputs."""
 
@@ -169,111 +233,6 @@ class MatmulMxTestCase(PTOTestCase):
         b_scale = _pack_b_scale(b_scale_codes).view(torch.float8_e8m0fnu)
         return a, a_scale, b, b_scale
 
-    @staticmethod
-    def _build_mxfp8_program():
-        """Build the homogeneous MXFP8×MXFP8 base+acc baseline."""
-
-        @pl.program
-        class MatmulMxHomogeneousProgram:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                a: pl.Tensor[[M, K], pl.FP8E4M3FN],
-                a_scale: pl.Tensor[[M, K // 32], pl.FP8E8M0, pl.MX_A_ZZ],
-                b: pl.Tensor[[K, N], pl.FP8E4M3FN],
-                b_scale: pl.Tensor[[K // 32, N], pl.FP8E8M0, pl.MX_B_NN],
-                out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
-                out_acc: pl.Out[pl.Tensor[[M, N], pl.FP32]],
-            ) -> tuple[pl.Tensor[[M, N], pl.FP32], pl.Tensor[[M, N], pl.FP32]]:
-                lhs = pl.move(
-                    pl.load(a, [0, 0], [M, K], target_memory=pl.Mem.Mat),
-                    target_memory=pl.Mem.Left,
-                )
-                lhs_scale = pl.move(
-                    pl.load(a_scale, [0, 0], [M, K // 32], target_memory=pl.Mem.Mat),
-                    target_memory=pl.Mem.LeftScale,
-                )
-                rhs = pl.move(
-                    pl.load(b, [0, 0], [K, N], target_memory=pl.Mem.Mat),
-                    target_memory=pl.Mem.Right,
-                )
-                rhs_scale = pl.move(
-                    pl.load(b_scale, [0, 0], [K // 32, N], target_memory=pl.Mem.Mat),
-                    target_memory=pl.Mem.RightScale,
-                )
-                base = pl.matmul_mx(lhs, lhs_scale, rhs, rhs_scale)
-                out = pl.store(base, [0, 0], out)
-                accumulated = pl.matmul_mx_acc(base, lhs, lhs_scale, rhs, rhs_scale)
-                out_acc = pl.store(accumulated, [0, 0], out_acc)
-                return out, out_acc
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def orchestrator(
-                self,
-                a: pl.Tensor[[M, K], pl.FP8E4M3FN],
-                a_scale: pl.Tensor[[M, K // 32], pl.FP8E8M0, pl.MX_A_ZZ],
-                b: pl.Tensor[[K, N], pl.FP8E4M3FN],
-                b_scale: pl.Tensor[[K // 32, N], pl.FP8E8M0, pl.MX_B_NN],
-                out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
-                out_acc: pl.Out[pl.Tensor[[M, N], pl.FP32]],
-            ) -> tuple[pl.Tensor[[M, N], pl.FP32], pl.Tensor[[M, N], pl.FP32]]:
-                out, out_acc = self.kernel(a, a_scale, b, b_scale, out, out_acc)
-                return out, out_acc
-
-        return MatmulMxHomogeneousProgram
-
-    @staticmethod
-    def _build_fp4_fp8_program():
-        """Build MXFP4×MXFP8 base+acc coverage with an explicit lhs cast."""
-
-        @pl.program
-        class MatmulMxFp4Fp8Program:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                a: pl.Tensor[[M, K], pl.FP4],
-                a_scale: pl.Tensor[[M, K // 32], pl.FP8E8M0, pl.MX_A_ZZ],
-                b: pl.Tensor[[K, N], pl.FP8E4M3FN],
-                b_scale: pl.Tensor[[K // 32, N], pl.FP8E8M0, pl.MX_B_NN],
-                out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
-                out_acc: pl.Out[pl.Tensor[[M, N], pl.FP32]],
-            ) -> tuple[pl.Tensor[[M, N], pl.FP32], pl.Tensor[[M, N], pl.FP32]]:
-                lhs_fp8 = pl.cast(pl.load(a, [0, 0], [M, K]), pl.FP8E4M3FN)
-                lhs_mat = pl.move(lhs_fp8, target_memory=pl.Mem.Mat)
-                lhs = pl.move(lhs_mat, target_memory=pl.Mem.Left)
-                lhs_scale = pl.move(
-                    pl.load(a_scale, [0, 0], [M, K // 32], target_memory=pl.Mem.Mat),
-                    target_memory=pl.Mem.LeftScale,
-                )
-                rhs = pl.move(
-                    pl.load(b, [0, 0], [K, N], target_memory=pl.Mem.Mat),
-                    target_memory=pl.Mem.Right,
-                )
-                rhs_scale = pl.move(
-                    pl.load(b_scale, [0, 0], [K // 32, N], target_memory=pl.Mem.Mat),
-                    target_memory=pl.Mem.RightScale,
-                )
-                base = pl.matmul_mx(lhs, lhs_scale, rhs, rhs_scale)
-                out = pl.store(base, [0, 0], out)
-                accumulated = pl.matmul_mx_acc(base, lhs, lhs_scale, rhs, rhs_scale)
-                out_acc = pl.store(accumulated, [0, 0], out_acc)
-                return out, out_acc
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def orchestrator(
-                self,
-                a: pl.Tensor[[M, K], pl.FP4],
-                a_scale: pl.Tensor[[M, K // 32], pl.FP8E8M0, pl.MX_A_ZZ],
-                b: pl.Tensor[[K, N], pl.FP8E4M3FN],
-                b_scale: pl.Tensor[[K // 32, N], pl.FP8E8M0, pl.MX_B_NN],
-                out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
-                out_acc: pl.Out[pl.Tensor[[M, N], pl.FP32]],
-            ) -> tuple[pl.Tensor[[M, N], pl.FP32], pl.Tensor[[M, N], pl.FP32]]:
-                out, out_acc = self.kernel(a, a_scale, b, b_scale, out, out_acc)
-                return out, out_acc
-
-        return MatmulMxFp4Fp8Program
-
     def __init__(self, lhs_dtype: DataType, rhs_dtype: DataType):
         if lhs_dtype not in _MX_DATA_DTYPES or rhs_dtype != DataType.FP8E4M3FN:
             raise ValueError(
@@ -301,8 +260,8 @@ class MatmulMxTestCase(PTOTestCase):
 
     def get_program(self) -> Any:
         if self._lhs_fp4:
-            return self._build_fp4_fp8_program()
-        return self._build_mxfp8_program()
+            return mxfp4_fp8_matmul.specialize()
+        return mxfp8_matmul.specialize()
 
     def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
         a = _decode_fp4_data(tensors["a"], M, K) if self._lhs_fp4 else tensors["a"].to(torch.float64)
