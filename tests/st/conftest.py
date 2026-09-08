@@ -939,8 +939,39 @@ def _eval_arg_node(
         kw = {k.arg: _eval_arg_node(k.value, params, localns, globalns) for k in node.keywords if k.arg}
         if any(k.arg is None for k in node.keywords):
             raise _Unresolvable("**kwargs")
-        return fn(*a, **kw)
+        # This is the one place discovery *runs* code out of a test body, so it
+        # is the one place that can raise anything the body could — including
+        # pytest's own control-flow exceptions (``pytest.importorskip`` raises
+        # ``Skipped``), which derive from ``BaseException`` and would sail
+        # straight past the ``except Exception`` guards at both call sites. A
+        # ``Skipped`` escaping ``pytest_collection_finish`` is not a skip: under
+        # xdist it becomes a session-wide INTERNALERROR that reports zero tests.
+        # A call we cannot evaluate is just an unresolvable node.
+        try:
+            return fn(*a, **kw)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:  # noqa: BLE001 — best-effort evaluation, never abort collection
+            raise _Unresolvable(f"{ast.unparse(node)}: {exc!r}") from exc
     raise _Unresolvable(ast.dump(node))
+
+
+def _is_st_item(item: pytest.Item) -> bool:
+    """Is *item* an ST test — i.e. was it collected from under ``tests/st/``?
+
+    ``pytest_collection_finish`` is a *session* hook, so once this conftest is
+    loaded it fires for every collected item, not just the ones underneath it.
+    In a combined ``pytest tests/ut tests/st`` run that means handing unit-test
+    bodies to a walk that parses and partially *evaluates* them, hunting for
+    ``PTOTestCase`` constructors they cannot contain. Scope the walk instead.
+    """
+    path = getattr(item, "path", None) or getattr(item, "fspath", None)
+    if path is None:
+        return False
+    try:
+        return Path(str(path)).resolve().is_relative_to(_ST_DIR.resolve())
+    except (OSError, ValueError):
+        return False
 
 
 def _collect_test_case_from_item(
@@ -1044,8 +1075,14 @@ def _collect_test_case_from_item(
             args = [_eval_arg_node(a, params, localns, globalns) for a in node.args]
             kwargs = {kw.arg: _eval_arg_node(kw.value, params, localns, globalns) for kw in node.keywords}
             instance = func(*args, **kwargs)
-        except Exception:
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:  # noqa: BLE001
             # _Unresolvable arg, or a constructor mismatch — leave for inline.
+            # BaseException for the same reason as the invoke in
+            # ``_eval_arg_node``: this runs a constructor out of a test body, and
+            # a ``pytest.skip`` guard inside one must fall through to the inline
+            # path, not abort the whole collection.
             continue
         # Bind the item's platform so each matrix variant compiles its own
         # artefact; without this the variants share one cache key and only the
@@ -1087,6 +1124,8 @@ def pytest_collection_finish(session: pytest.Session) -> None:
     seen: dict[str, PTOTestCase] = {}  # effective cache_key → instance (deduped)
 
     for item in session.items:
+        if not _is_st_item(item):
+            continue
         _collect_test_case_from_item(item, seen, session_memory_planner, session_platform)
 
     # Read the task-submit / pipeline options *before* the empty-discovery guard:
