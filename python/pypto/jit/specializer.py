@@ -125,7 +125,9 @@ class SpecializeContext:
     on demand via the :attr:`dynamic_dims` property.
 
     Attributes:
-        func_name: Python function name.
+        func_name: Name of the generated ``@pl.function`` method. Normally the
+            Python function's ``__name__``, but the JIT layer uniquifies it
+            when two distinct deps share a name (see ``source_func_name``).
         source: Dedented source code of the function.
         func_type: 'orchestration' | 'incore' | 'inline' | 'opaque' | 'graph' | None (auto).
         level: pl.Level value or None.
@@ -189,6 +191,17 @@ class SpecializeContext:
     # Also appended at the tail (see above): ``call name -> generated function
     # name`` for the deps this function reaches under a different name.
     dep_func_names: dict[str, str] = field(default_factory=dict)
+    # Name of the ``def`` inside ``source`` — the Python ``__name__``. It differs
+    # from ``func_name`` whenever the JIT layer had to uniquify the generated
+    # name (two deps sharing a ``__name__``). Anything that looks the definition
+    # up in the *original* source must use ``source_def_name``; anything naming
+    # the *generated* function uses ``func_name``.
+    source_func_name: str | None = None
+
+    @property
+    def source_def_name(self) -> str:
+        """Name of the ``def`` to find in :attr:`source` (the Python name)."""
+        return self.source_func_name or self.func_name
 
     @property
     def dynamic_dims(self) -> set[tuple[str, int]]:
@@ -1545,7 +1558,7 @@ def _original_def_line(ctx: SpecializeContext) -> int | None:
         tree = ast.parse(textwrap.dedent(ctx.source))
     except SyntaxError:
         return None
-    node = _find_func_def(tree, ctx.func_name)
+    node = _find_func_def(tree, ctx.source_def_name)
     return None if node is None else node.lineno
 
 
@@ -1724,8 +1737,8 @@ class Specializer:
         # Parse the source to AST
         src = textwrap.dedent(ctx.source)
         tree = ast.parse(src)
-        func_def = _find_func_def(tree, ctx.func_name)
-        assert func_def is not None, f"specialize: no def named {ctx.func_name!r} in its own source"
+        func_def = _find_func_def(tree, ctx.source_def_name)
+        assert func_def is not None, f"specialize: no def named {ctx.source_def_name!r} in its own source"
 
         # Classify parameters
         out_params, inout_params, tensor_params, scalar_dtype_strs, distributed_params = _classify_params(
@@ -1741,7 +1754,7 @@ class Specializer:
         is_inline = ctx.func_type == "inline"
         if is_inline and (out_params or inout_params):
             warnings.warn(
-                f"@pl.jit.inline helper '{ctx.func_name}' uses pl.Out[...]/pl.InOut[...] on "
+                f"@pl.jit.inline helper '{ctx.source_def_name}' uses pl.Out[...]/pl.InOut[...] on "
                 f"parameter(s) {(out_params + inout_params)!r}. Direction annotations are "
                 f"deprecated for inline helpers because the body is spliced at the call "
                 f"site before SSA conversion — the parameter is already an "
@@ -2108,7 +2121,10 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
 
     Args:
         func: The original Python function object.
-        func_name: The function name.
+        func_name: Name for the generated ``@pl.function``. Normally
+            ``func.__name__``; the JIT layer passes a uniquified name when two
+            distinct deps share a ``__name__``. The ``def`` is located in
+            ``func``'s own source by ``func.__name__`` either way.
         func_type: 'orchestration', 'incore', or None.
         level: pl.Level enum or None.
         tensor_meta: TensorMeta per tensor param name.
@@ -2153,6 +2169,7 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
 
     return SpecializeContext(
         func_name=func_name,
+        source_func_name=func.__name__,
         source=source,
         func_type=func_type,
         level=level,

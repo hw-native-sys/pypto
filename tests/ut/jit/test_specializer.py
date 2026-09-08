@@ -2054,5 +2054,58 @@ class TestTensorLayoutAnnotation:
         assert "c: pl.Out[pl.Tensor[[64, 128], pl.FP16]]" in out
 
 
+class TestRenamedGeneratedFunction:
+    """``func_name`` names the generated method; ``source_func_name`` the ``def``.
+
+    The two diverge when the JIT layer uniquifies a dep name (two distinct deps
+    sharing a ``__name__``). Everything that reads the *original* source must
+    still find the ``def`` under the Python name.
+    """
+
+    @staticmethod
+    def _renamed_ctx():
+        ctx = _make_ctx(
+            func_name="helper__2",
+            func_type="incore",
+            source=textwrap.dedent(
+                """
+                def helper(src: pl.Tensor, dst: pl.Out[pl.Tensor]):
+                    return dst
+                """
+            ),
+            param_names=["src", "dst"],
+            tensor_meta={
+                "src": TensorMeta((64, 64), DataType.FP32),
+                "dst": TensorMeta((64, 64), DataType.FP32),
+            },
+        )
+        ctx.source_func_name = "helper"
+        return ctx
+
+    def test_source_def_name_falls_back_to_func_name(self):
+        """A context that never renamed anything keeps one name for both roles."""
+        ctx = _make_ctx(func_name="kernel")
+        assert ctx.source_func_name is None
+        assert ctx.source_def_name == "kernel"
+
+    def test_generated_method_uses_the_renamed_name(self):
+        out = specialize("_T", [self._renamed_ctx()])
+        assert "def helper__2(self, src" in out
+        assert "def helper(self" not in out
+
+    def test_inline_deprecation_names_the_python_function(self):
+        """The user's own name is what they can act on, not the generated one."""
+        ctx = self._renamed_ctx()
+        ctx.func_type = "inline"
+        ctx.source = textwrap.dedent(
+            """
+            def helper(src: pl.Tensor, dst: pl.Out[pl.Tensor]):
+                return dst
+            """
+        )
+        with pytest.warns(DeprecationWarning, match="helper' uses pl.Out"):
+            specialize("_T", [ctx])
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

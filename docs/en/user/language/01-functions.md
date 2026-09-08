@@ -98,7 +98,10 @@ Sub-function dependencies (`.incore` / `.inline` / `.opaque` / `.graph`) are aut
 the entry's body — call them by name. The name you call is resolved in the entry's own
 namespace, so an aliased import (`from kernels import matmul as mm`, or a plain
 `mm = matmul` rebinding) is discovered like any other binding; the generated program still
-names the function after its `def`. A `@pl.jit.host` entry additionally discovers
+names the function after its `def`. When two distinct sub-functions share that name — two
+modules each defining `helper`, or two kernels from one factory — the second one generated
+is suffixed (`helper`, `helper__2`), so both specializations survive; the entry keeps its
+own name. A `@pl.jit.host` entry additionally discovers
 `@pl.jit` chip-orchestration dependencies, so a full distributed program needs no
 `@pl.program` class.
 
