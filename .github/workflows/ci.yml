@@ -265,6 +265,11 @@ jobs:
   # ---------------------------------------------------------------------------
   pre-commit:
     runs-on: ubuntu-latest
+    permissions:
+      # `pull-requests: read` is what the PR files API below needs; `contents: read`
+      # is for the checkout.
+      contents: read
+      pull-requests: read
 
     steps:
     - name: Checkout
@@ -273,10 +278,94 @@ jobs:
       uses: actions/setup-python@v5
       with:
         python-version: '3.10'
+
+    # LINT SCOPE — a pull request lints the files it changed; everything else
+    # (a push to main, workflow_dispatch) sweeps the whole tree.
+    #
+    # The median pull request here touches 4 files out of ~1660 tracked, so
+    # `--all-files` was doing roughly four hundred times the necessary work, and
+    # doing it on the critical path: every other job lists this one in `needs`.
+    # pyright dominates that cost and is the part diff-scoping actually removes --
+    # it declares `require_serial: true` (it type-checks across files, so sharding
+    # it re-resolves the import graph per shard), which is why it cannot be
+    # parallelised the way the local hooks now are. Measured on real commits from
+    # this history, on a four-core runner: 51.7s over the whole tree against
+    # 2.8s / 7.6s / 9.2s over 2- / 6- / 34-file diffs.
+    #
+    # The file list comes from the PR files API rather than a `git diff`, matching
+    # the `changes` job above: it needs no fetch-depth: 0 clone and already reports
+    # the merge-base diff GitHub shows in the PR.
+    #
+    # Every uncertain path falls back to `--all-files`, never to a narrower run --
+    # a lint gate that silently checked less than it claimed would be worse than a
+    # slow one. That includes the case this scoping genuinely cannot cover: a
+    # change to a rule or to the hook config can make files the pull request never
+    # touched non-compliant, and only a full sweep would see them, so those pull
+    # requests get one.
+    - name: Decide lint scope
+      id: scope
+      env:
+        GH_TOKEN: ${{ github.token }}
+        EVENT_NAME: ${{ github.event_name }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+      run: |
+        set -euo pipefail
+
+        sweep() {
+          echo 'args=--all-files' >> "$GITHUB_OUTPUT"
+          echo "$1 -> --all-files"
+          exit 0
+        }
+
+        if [ "$EVENT_NAME" != 'pull_request' ]; then
+          sweep "event '$EVENT_NAME' is not a pull request"
+        fi
+
+        # Read the PR's own count first, so a truncated list is detectable below.
+        if ! expected="$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.changed_files')"; then
+          sweep 'PR metadata request failed'
+        fi
+        if ! files="$(gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate \
+                        --jq '.[].filename')"; then
+          sweep 'PR files request failed'
+        fi
+        if [ -z "$files" ]; then
+          sweep 'no changed files reported'
+        fi
+
+        # The endpoint caps out at 3000 files, and a truncated list is still
+        # non-empty -- the unreported files would go unlinted in silence.
+        retrieved="$(printf '%s\n' "$files" | wc -l)"
+        if [ "$retrieved" -ne "$expected" ]; then
+          sweep "file list truncated ($retrieved of $expected)"
+        fi
+
+        if printf '%s\n' "$files" | grep -qE '^(tests/lint/|\.pre-commit-config\.yaml$)'; then
+          sweep 'a lint rule or the hook config changed'
+        fi
+
+        # A deleted or renamed-away path is in the API list but not in the
+        # checkout, and pre-commit would be handed a file that is not there.
+        # The test must be an `if` and not `[ -f "$f" ] && ...`: under `set -e` a
+        # trailing false test would make the whole substitution fail, so a pull
+        # request that only deletes files would fail the step rather than sweep.
+        existing="$(printf '%s\n' "$files" | while IFS= read -r f; do
+          if [ -f "$f" ]; then printf '%s\n' "$f"; fi
+        done)"
+        if [ -z "$existing" ]; then
+          sweep 'every changed path was deleted or renamed away'
+        fi
+
+        # No tracked path in this repository contains whitespace, so the list is
+        # safe to pass as a plain argument vector.
+        echo "args=--files $(printf '%s ' $existing)" >> "$GITHUB_OUTPUT"
+        printf '%s file(s) -> --files\n' "$(printf '%s\n' "$existing" | wc -l)"
+
     - name: pre-commit
       uses: pre-commit/action@v3.0.0
       with:
-        extra_args: --all-files
+        extra_args: ${{ steps.scope.outputs.args }}
 
   clang-tidy:
     # Build inputs come from build-constraints.txt rather than from whatever
