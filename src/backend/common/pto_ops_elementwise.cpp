@@ -403,11 +403,11 @@ static std::string MakePrecisionCodegenPTO(const std::string& pto_op_name, size_
 // static-valid views the same way tprelu / tcolsum do.
 //
 // Both forms carry the same config attr-dict, so the rounding mode and the
-// destination saturation are rendered once, before the form splits. `satmode` is
-// always emitted, including for a cast that carries no `saturation_mode` kwarg:
-// the IR records only a deviation from `kDefaultSaturationMode`, so reading the
-// default through here is what makes the emitted instruction state its own
-// behavior instead of deferring to whatever the assembler would have picked.
+// destination saturation are rendered once, before the form splits. The IR
+// records only a deviation from the destination's default, so the default is
+// read through here -- an integer destination emits an explicit `satmode` even
+// when the cast said nothing, while a float destination emits none and keeps the
+// target's own IEEE overflow behavior.
 static std::string MakeTcvtCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
   INTERNAL_CHECK_SPAN(op->args_.size() == 1 || op->args_.size() == 2, op->span_)
@@ -416,12 +416,14 @@ static std::string MakeTcvtCodegenPTO(const CallPtr& op, codegen::CodegenBase& c
   const int mode = op->GetKwarg<int>("mode");
   INTERNAL_CHECK_SPAN(mode >= 0 && mode < static_cast<int>(round_modes.size()), op->span_)
       << "Internal error: tile.cast round mode out of range: " << mode;
-  const int saturation_mode = ir::GetSaturationMode(op);
-  INTERNAL_CHECK_SPAN(ir::IsValidSaturationMode(saturation_mode), op->span_)
-      << "Internal error: tile.cast saturation_mode out of range: " << saturation_mode;
-  const std::string config_attr = "{rmode = #pto<round_mode " + round_modes.at(mode) +
-                                  ">, satmode = #pto<saturation_mode " +
-                                  ir::SaturationModeToPTOString(saturation_mode) + ">}";
+  std::string config_attr = "{rmode = #pto<round_mode " + round_modes.at(mode) + ">";
+  if (const auto saturation_mode = ir::GetSaturationMode(op)) {
+    INTERNAL_CHECK_SPAN(ir::IsValidSaturationMode(*saturation_mode), op->span_)
+        << "Internal error: tile.cast saturation_mode out of range: " << *saturation_mode;
+    config_attr +=
+        ", satmode = #pto<saturation_mode " + ir::SaturationModeToPTOString(*saturation_mode) + ">";
+  }
+  config_attr += "}";
 
   if (op->args_.size() == 2 && codegen.GetBackendHandler()->RequiresLevel3TmpScratch()) {
     auto src_type = ir::As<ir::TileType>(op->args_[0]->GetType());

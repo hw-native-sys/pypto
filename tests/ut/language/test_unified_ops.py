@@ -2045,10 +2045,10 @@ class TestCastSaturationMode:
     @pytest.mark.parametrize("kind", ["tensor", "tile"])
     @pytest.mark.parametrize("saturation_mode", [None, "on", 1])
     def test_the_default_is_recorded_by_absence(self, kind, saturation_mode):
-        """Omitting it, and asking for the default explicitly, produce the same call.
+        """For an integer destination, omitting it and naming it produce the same call.
 
-        The IR records only a *deviation* from ``DEFAULT_SATURATION_MODE``. That
-        is what lets a pass-synthesized cast -- which never sets the kwarg -- print
+        The IR records only a *deviation* from the applicable default. That is
+        what lets a pass-synthesized cast -- which never sets the kwarg -- print
         and re-parse to structurally equal IR; a stamped default would make the two
         forms differ with no semantic difference between them.
         """
@@ -2056,6 +2056,41 @@ class TestCastSaturationMode:
         call = unified_ops.cast(self._value(kind), DataType.INT8, saturation_mode=saturation_mode).unwrap()
         assert isinstance(call, ir.Call)
         assert "saturation_mode" not in call.kwargs
+
+    @pytest.mark.parametrize("kind", ["tensor", "tile"])
+    def test_a_float_destination_is_left_to_the_target(self, kind):
+        """Only an integer destination defaults to saturating.
+
+        A float destination already has an answer -- IEEE says an out-of-range
+        narrowing yields an infinity, and ``docs/en/user/precision/00-workflow.md``
+        asserts PyPTO matches ``torch`` bit-for-bit on ``INT32 -> FP16``. So the
+        default must not reach it: an omitted mode records nothing *and* means
+        something different here than it does for an int destination, while an
+        explicit request is still honoured and therefore still recorded.
+        """
+        defaulted = unified_ops.cast(self._value(kind), DataType.FP32).unwrap()
+        assert isinstance(defaulted, ir.Call)
+        assert "saturation_mode" not in defaulted.kwargs
+
+        asked = unified_ops.cast(self._value(kind), DataType.FP32, saturation_mode="on").unwrap()
+        assert isinstance(asked, ir.Call)
+        assert asked.kwargs["saturation_mode"] == 1, "an explicit request on a float dst is a deviation"
+
+    @pytest.mark.parametrize(
+        "dtype, expected",
+        [
+            (DataType.INT8, 1),
+            (DataType.UINT8, 1),
+            (DataType.INT32, 1),
+            (DataType.FP16, None),
+            (DataType.FP32, None),
+            (DataType.BF16, None),
+            (None, None),
+        ],
+    )
+    def test_default_is_selected_by_destination_kind(self, dtype, expected):
+        """The rule itself: integer destinations saturate, float ones are left alone."""
+        assert pypto_ir_utils.default_saturation_mode_for(dtype) == expected
 
     @pytest.mark.parametrize("kind", ["tensor", "tile"])
     def test_unified_matches_the_explicit_surface(self, kind):

@@ -200,17 +200,48 @@ SATURATION_MODE_NAMES: dict[str, int] = {
     "on": 1,
 }
 
-#: What a cast does when it carries no ``saturation_mode`` kwarg. ``"on"`` clamps
-#: an out-of-range result to the destination range; the alternative wraps, with
-#: architecture-defined behavior. Clamping is the safer of the two to get by
-#: accident, and on A2/A3 it is also the one the assembler converts natively
-#: rather than emulating.
+#: What a cast does when it carries no ``saturation_mode`` kwarg, for an
+#: **integer** destination. That is where the two modes are a genuine choice: no
+#: standard fixes what a float-to-int or a narrowing int-to-int overflow
+#: produces, clamping is the safer of the two to get by accident, and on A2/A3 it
+#: is also the conversion the assembler performs natively rather than emulating.
 #:
-#: Only a *deviation* from this is recorded on the call, so a cast that wants the
-#: default carries no kwarg — the same shape a pass-synthesized cast has, which is
-#: what keeps a printed cast re-parsing to the same IR. Mirrors
-#: ``ir::kDefaultSaturationMode`` in ``include/pypto/ir/cast_saturation.h``.
+#: A **float** destination has no default here — see
+#: :func:`default_saturation_mode_for`.
+#:
+#: Only a *deviation* from the applicable default is recorded on the call, so a
+#: cast that wants it carries no kwarg — the same shape a pass-synthesized cast
+#: has, which is what keeps a printed cast re-parsing to the same IR. Mirrors
+#: ``ir::DefaultSaturationModeFor`` in ``include/pypto/ir/cast_saturation.h``.
 DEFAULT_SATURATION_MODE: str = "on"
+
+
+def default_saturation_mode_for(target_dtype: DataType | int | None) -> int | None:
+    """The saturation a cast to ``target_dtype`` gets when it does not ask, or None.
+
+    None means "whatever the target does": no ``satmode`` is emitted and the
+    lowering is exactly what it was before this kwarg existed. Only an integer
+    destination defaults to saturating.
+
+    A float destination is a different question with an existing answer: IEEE says
+    an out-of-range narrowing yields an infinity, ``torch`` agrees, and
+    ``docs/en/user/precision/00-workflow.md`` asserts PyPTO matches them
+    bit-for-bit on ``INT32 -> FP16``. Defaulting those to saturating broke that
+    block on the a2a3 simulator (65520 clamped to 65504 instead of overflowing to
+    inf), so float destinations keep the target's own behavior unless asked.
+
+    Args:
+        target_dtype: The cast's destination dtype, or None when unknown
+
+    Returns:
+        The default saturation int, or None to leave it to the target
+    """
+    if target_dtype is None:
+        return None
+    dtype = DataType(target_dtype) if isinstance(target_dtype, int) else target_dtype
+    if not dtype.is_int():
+        return None
+    return SATURATION_MODE_NAMES[DEFAULT_SATURATION_MODE]
 
 
 def resolve_saturation_mode(saturation_mode: str | int) -> int:
@@ -245,27 +276,32 @@ def resolve_saturation_mode(saturation_mode: str | int) -> int:
     return value
 
 
-def resolve_saturation_deviation(saturation_mode: str | int | None) -> int | None:
+def resolve_saturation_deviation(
+    saturation_mode: str | int | None, target_dtype: DataType | int | None = None
+) -> int | None:
     """The ``saturation_mode`` int to record on a cast, or None to record nothing.
 
-    A cast carries the kwarg only when it *deviates* from
-    :data:`DEFAULT_SATURATION_MODE`, so this is the single place the
-    record-a-deviation rule lives. ``None`` requests the default, as does naming
-    it explicitly — both leave the call bare.
+    A cast carries the kwarg only when it *deviates* from what the destination
+    already defaults to, so this is the single place the record-a-deviation rule
+    lives. Asking for None, or naming the destination's own default explicitly,
+    both leave the call bare — which is also the shape a pass-synthesized cast
+    has, so the two print and re-parse alike.
 
     Args:
-        saturation_mode: "off"/"on", 0/1, or None for the default
+        saturation_mode: "off"/"on", 0/1, or None to take the destination default
+        target_dtype: The cast's destination dtype, which selects that default
 
     Returns:
-        The int to store, or None when the request is the default
+        The int to store, or None when the request is already the default
 
     Raises:
         ValueError: If the value is not a valid name and not 0 or 1
     """
-    requested = resolve_saturation_mode(
-        DEFAULT_SATURATION_MODE if saturation_mode is None else saturation_mode
-    )
-    return None if requested == SATURATION_MODE_NAMES[DEFAULT_SATURATION_MODE] else requested
+    default = default_saturation_mode_for(target_dtype)
+    if saturation_mode is None:
+        return None
+    requested = resolve_saturation_mode(saturation_mode)
+    return None if requested == default else requested
 
 
 def has_partial_valid_region(expr: _ir.Expr) -> bool:
@@ -556,6 +592,7 @@ def _normalize_const_to_dtype(
 __all__ = [
     "CAST_MODE_NAMES",
     "DEFAULT_SATURATION_MODE",
+    "default_saturation_mode_for",
     "SATURATION_MODE_NAMES",
     "_get_span_or_capture",
     "_normalize_const_to_dtype",

@@ -33,22 +33,32 @@ range. `"off"` selects the target's non-saturating conversion, whose overflow
 and non-finite behaviour is architecture-defined. A `Scalar` input rejects the
 option.
 
-**`"on"` is the default.** Clamping is the safer of the two to get by accident,
-and on A2/A3 it is also the one the assembler converts natively rather than
-emulating with a chunked vector sequence — so the default is both the safer and
-the faster lowering. Pass `"off"` where wrapping is the kernel's contract.
+**`"on"` is the default for an integer destination.** That is where the two
+modes are a genuine choice: nothing standard fixes what an overflowing
+conversion to an integer produces, clamping is the safer of the two to get by
+accident, and on A2/A3 it is also the one the assembler converts natively rather
+than emulating with a chunked vector sequence — so the default is both the safer
+and the faster lowering. Pass `"off"` where wrapping is the kernel's contract.
 
-The IR records only a *deviation* from that default: a cast that wants `"on"`
-carries no `saturation_mode` kwarg, which is the same shape a pass-synthesized
-cast has. That is what keeps a printed cast re-parsing to structurally equal IR —
-stamping the default would make two forms differ with no semantic difference
-between them. Codegen reads the default through, so the emitted `pto.tcvt` always
-carries an explicit `satmode` either way and a reader of the MLIR never has to
-know what the assembler would have picked.
+**A float destination keeps the target's own behaviour** unless the author asks
+otherwise. That question already has an answer: IEEE says an out-of-range
+narrowing yields an infinity, `torch` agrees, and
+[the precision workflow](../../user/precision/00-workflow.md) asserts PyPTO
+matches them bit-for-bit on `INT32 -> FP16`. Defaulting those to `"on"` broke
+that block on the a2a3 simulator — 65520 clamped to 65504 instead of overflowing
+to `inf` — so the default is deliberately scoped to integer destinations.
 
-The two modes agree only on values the destination can already represent, so this
-default is a behavioural choice, not a no-op: a kernel that relied on wrapping
-must now say `"off"`.
+The IR records only a *deviation* from whichever default applies: a cast that
+wants it carries no `saturation_mode` kwarg, which is the same shape a
+pass-synthesized cast has. That is what keeps a printed cast re-parsing to
+structurally equal IR — stamping the default would make two forms differ with no
+semantic difference between them. Codegen reads the default through, so an
+integer-destination `pto.tcvt` carries an explicit `satmode` even when the cast
+said nothing, while a float-destination one emits none.
+
+The two modes agree only on values the destination can already represent, so for
+integer destinations this default is a behavioural choice, not a no-op: a kernel
+that relied on wrapping must now say `"off"`.
 
 **Legalized chains: the request rides the final hop.** Saturation names the
 *destination* range, and only the last hop reaches the destination dtype;
@@ -70,9 +80,10 @@ onto the final hop, which is the narrowing one.
 **A2/A3 scratch.** `InitMemRef` synthesises a scratch tile only for the
 *non-saturating* narrowing `pto.tcvt`, whose PTOAS lowering emulates the
 target's overflow behaviour with a chunked vector sequence. Saturating selects
-the native conversion, which reads no scratch — so with `"on"` as the default,
-only a cast that explicitly opted out allocates a tile at all. A caller-supplied
-`tmp` is never dropped.
+the native conversion, which reads no scratch. Every pair that needs the buffer
+narrows to an integer, so the applicable default is `"on"` and only a cast that
+explicitly opted out allocates a tile at all. A caller-supplied `tmp` is never
+dropped.
 
 ## Native casts vs legalized chains
 

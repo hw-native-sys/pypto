@@ -10,6 +10,7 @@
 """Tests for python/pypto/jit/specializer.py — AST transformation correctness."""
 
 import ast
+import math
 import textwrap
 import warnings
 
@@ -659,6 +660,11 @@ class TestRenderFreeValue:
             ((1, 64), "(1, 64)"),
             ([[1, 2], [3, 4]], "[[1, 2], [3, 4]]"),
             ([pl.INT8, pl.FP32], "[pl.INT8, pl.FP32]"),
+            # Non-finite floats: ast.unparse writes evaluable expressions, not the
+            # bare names inf / nan, so a fill or padding value bound to one folds
+            # like any other float.
+            (float("inf"), "1e309"),
+            (float("-inf"), "-1e309"),
         ],
     )
     def test_renders_to_evaluable_source(self, value, expected):
@@ -673,6 +679,8 @@ class TestRenderFreeValue:
             (pl.Mem.Vec, pl.Mem.Vec),
             (pl.NZ, pl.NZ),
             ([1, 64], [1, 64]),
+            (float("inf"), float("inf")),
+            (float("-inf"), float("-inf")),
         ],
     )
     def test_rendered_source_evaluates_back_to_the_value(self, value, expected):
@@ -689,6 +697,12 @@ class TestRenderFreeValue:
     def test_declines_values_with_no_source_form(self, value):
         """Declining is the safe answer: the name survives and the parser reports it."""
         assert _render_free_value(value) is None
+
+    def test_nan_renders_as_a_nan_producing_expression(self):
+        """NaN has no literal, but ast.unparse still writes something evaluable."""
+        rendered = _render_free_value(float("nan"))
+        assert rendered is not None
+        assert math.isnan(eval(ast.unparse(rendered), {"__builtins__": {}}))  # noqa: S307
 
 
 # ---------------------------------------------------------------------------

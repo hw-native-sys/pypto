@@ -39,7 +39,6 @@ import copy
 import enum
 import functools
 import inspect
-import math
 import textwrap
 import types
 import warnings
@@ -328,12 +327,12 @@ def _render_free_value(value: Any) -> ast.expr | None:
     if isinstance(value, enum.Enum):
         path = _pl_symbol_path(value)
         return ast.parse(path, mode="eval").body if path else None
-    if isinstance(value, float) and not math.isfinite(value):
-        # ``ast.unparse`` writes these as the bare names ``inf`` / ``nan``, which
-        # are undefined in the generated source. Decline instead of emitting a
-        # name that reads as a typo in the user's own kernel.
-        return None
     if value is None or isinstance(value, (bool, int, float, str)):
+        # Non-finite floats included: ``ast.unparse`` writes them as evaluable
+        # expressions (``1e309``, ``-1e309``, ``(1e309-1e309)``), not as the bare
+        # names ``inf`` / ``nan``, so a fill or padding value bound to one folds
+        # like any other float. Declining them here would have regressed support
+        # that predates this function.
         return ast.Constant(value=value)
     if isinstance(value, (list, tuple)):
         elements = [_render_free_value(element) for element in value]

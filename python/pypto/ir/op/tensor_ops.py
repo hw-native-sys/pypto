@@ -1696,11 +1696,10 @@ def cast(
         span: Optional source span for debugging (auto-captured if not provided)
         saturation_mode: Destination saturation — "on" (1) clamps out-of-range
               results to the destination range, "off" (0) selects the target's
-              non-saturating conversion. ``None`` selects
-              ``DEFAULT_SATURATION_MODE`` ("on"). Only a deviation from that
-              default is recorded on the call, so requesting "on" leaves the
-              kwarg absent — codegen reads the default through and still emits an
-              explicit ``satmode``.
+              non-saturating conversion. ``None`` takes the destination's
+              own default — ``DEFAULT_SATURATION_MODE`` ("on") for an integer
+              destination, the target's own behavior for a float one. Only a
+              deviation from that default is recorded on the call.
 
     Returns:
         Call expression for type casting
@@ -1714,7 +1713,7 @@ def cast(
         "target_type": target_type,
         "mode": mode_val,
     }
-    deviation = resolve_saturation_deviation(saturation_mode)
+    deviation = resolve_saturation_deviation(saturation_mode, target_type)
     if deviation is not None:
         kwargs["saturation_mode"] = deviation
 

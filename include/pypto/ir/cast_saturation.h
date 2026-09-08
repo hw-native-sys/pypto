@@ -13,11 +13,13 @@
 #define PYPTO_IR_CAST_SATURATION_H_
 
 #include <any>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "pypto/core/any_cast.h"
+#include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -40,18 +42,37 @@ enum class SaturationMode : int {
   kOn = 1,
 };
 
-/// What a cast means when it carries no `saturation_mode` kwarg.
+/// What a cast means when it carries no `saturation_mode` kwarg, given where it
+/// is converting *to*. `nullopt` means "whatever the target does" -- no `satmode`
+/// is emitted and the lowering is exactly what it was before this kwarg existed.
 ///
-/// Clamping is the safer of the two to get by accident, and on A2/A3 it is also
-/// the one the assembler converts natively rather than emulating with a chunked
-/// vector sequence. Only a *deviation* is recorded, so the kwarg is absent from
-/// every cast that wants the default -- including the ones passes synthesize,
-/// which is what keeps a printed cast re-parsing to the same IR.
-inline constexpr SaturationMode kDefaultSaturationMode = SaturationMode::kOn;
+/// The default is only ON for an **integer** destination. That is where the two
+/// modes are a genuine choice: no standard fixes what a float-to-int or a
+/// narrowing int-to-int overflow produces, clamping is the safer of the two to
+/// get by accident, and on A2/A3 it is also the conversion the assembler
+/// performs natively rather than emulating with a chunked vector sequence.
+///
+/// A **float** destination is a different question with an existing answer: IEEE
+/// says an out-of-range narrowing yields an infinity, `torch` agrees, and
+/// `docs/en/user/precision/00-workflow.md` asserts PyPTO matches them
+/// bit-for-bit on `INT32 -> FP16`. Defaulting those to ON broke that block on
+/// the a2a3 simulator (65520 clamped to 65504 instead of overflowing to inf), so
+/// float destinations keep the target's own behavior unless the author asks
+/// otherwise.
+inline std::optional<SaturationMode> DefaultSaturationModeFor(DataType dst) {
+  if (!dst.IsInt()) return std::nullopt;
+  return SaturationMode::kOn;
+}
 
-/// The effective mode of a cast, reading the default through for an absent kwarg.
-inline int GetSaturationMode(const CallPtr& call) {
-  return call->GetKwarg<int>("saturation_mode", static_cast<int>(kDefaultSaturationMode));
+/// The effective mode of a cast, reading the destination's default through for an
+/// absent kwarg. `nullopt` means no `satmode` should be emitted.
+inline std::optional<int> GetSaturationMode(const CallPtr& call) {
+  constexpr int kAbsent = -1;
+  const int explicit_mode = call->GetKwarg<int>("saturation_mode", kAbsent);
+  if (explicit_mode != kAbsent) return explicit_mode;
+  const auto fallback = DefaultSaturationModeFor(call->GetKwarg<DataType>("target_type"));
+  if (!fallback.has_value()) return std::nullopt;
+  return static_cast<int>(*fallback);
 }
 
 inline bool IsValidSaturationMode(int value) {

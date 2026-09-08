@@ -3830,6 +3830,30 @@ class TestLevel3StaticViewCodegen:
         assert "satmode = #pto<saturation_mode ON>" in tcvt_line, tcvt_line
         assert "tcvt_tmp_view" not in tcvt_line, tcvt_line
 
+    def test_tcvt_to_a_float_destination_emits_no_satmode(self):
+        """A float destination keeps the target's IEEE overflow, so nothing is stamped.
+
+        docs/en/user/precision/00-workflow.md asserts INT32 -> FP16 is bit-identical
+        to torch, which means 65520 must overflow to inf rather than clamp to 65504.
+        Emitting satmode ON here broke exactly that block on the a2a3 simulator.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[8, 256], pl.INT32],
+                out: pl.Tensor[[8, 256], pl.FP16],
+            ) -> pl.Tensor[[8, 256], pl.FP16]:
+                tile_in = pl.load(src, [0, 0], [8, 256])
+                result = pl.cast(tile_in, pl.FP16)
+                return pl.store(result, [0, 0], out)
+
+        mlir = self._generate_mlir(Prog)
+        tcvt_line = next(line for line in mlir.splitlines() if "pto.tcvt" in line)
+        assert "satmode" not in tcvt_line, tcvt_line
+
     def test_tcvt_saturation_preserves_explicit_scratch(self):
         """Only compiler-generated scratch is dropped; the explicit-tmp form still emits both."""
 

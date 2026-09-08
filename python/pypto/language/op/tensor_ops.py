@@ -1906,11 +1906,14 @@ def cast(
               rounded value that falls outside the destination range to that
               range; ``"off"`` (0) keeps the target's non-saturating
               conversion, including its overflow and non-finite behavior.
-              **Defaults to** ``"on"``: clamping is the safer of the two to get
-              by accident, and it is what the hardware converts natively. Pass
-              ``"off"`` where wrapping is the kernel's contract. When the cast
-              lowers to a chain of native conversions, the mode applies to the
-              final hop.
+              **Defaults to** ``"on"`` **for an integer destination**:
+              nothing standard fixes what an overflowing conversion to an
+              integer produces, clamping is the safer of the two to get by
+              accident, and it is what the hardware converts natively. A float
+              destination keeps the target's own IEEE behavior (an out-of-range
+              narrowing yields an infinity) unless you ask otherwise. When the
+              cast lowers to a chain of native conversions, the mode applies to
+              the final hop.
 
     Returns:
         Tensor wrapping the cast operation
