@@ -38,7 +38,12 @@ except ImportError:  # pragma: no cover - fallback for older interpreters
 from typing import Any
 
 from pypto._external_source import EXTERNAL_INCLUDE_DIRS_ATTR, decode_external_include_dirs
-from pypto._function_attrs import DUAL_AIV_DISPATCH_ATTR, EXTERNAL_SOURCE_ATTR
+from pypto._function_attrs import (
+    BUILTIN_TEMPLATE_DIR_ATTR,
+    BUILTIN_TEMPLATE_VARS_ATTR,
+    DUAL_AIV_DISPATCH_ATTR,
+    EXTERNAL_SOURCE_ATTR,
+)
 from pypto.backend._ptoas_locate import PTOAS_RELATIVE_PATHS as _PTOAS_RELATIVE_PATHS
 from pypto.backend._ptoas_locate import find_ptoas_binary as _find_ptoas_binary
 from pypto.backend._ptoas_preprocess import preprocess_ptoas_output as _preprocess_ptoas_output
@@ -1376,6 +1381,56 @@ def _external_include_dirs_of(func: _ir_core.Function) -> tuple[str, ...]:
         raise RuntimeError(f"Invalid external include metadata on function '{func.name}': {e}") from e
 
 
+def _builtin_template_of(func: _ir_core.Function) -> tuple[str, dict[str, str]] | None:
+    """Return ``(template_dir, variables)`` for a builtin-template kernel, else None.
+
+    ``LowerL2TensorCollectives`` synthesizes an AIV function per managed CHIP/L2
+    collective whose implementation is the hand-written builtin kernel the HOST
+    rail also renders — named indirectly by ``builtin_template_dir`` (a
+    package-resource handle) plus a ``key=value`` substitution list. Like an
+    external kernel it gets no PyPTO codegen; unlike one it is *generated*, so
+    the rendered source is written to ``kernels/<ct>/<name>.cpp`` under the
+    artifact dir, which is exactly where the manifest already points.
+    """
+    attrs = dict(func.attrs)
+    template_dir = attrs.get(BUILTIN_TEMPLATE_DIR_ATTR)
+    if template_dir is None:
+        return None
+    variables: dict[str, str] = {}
+    raw = attrs.get(BUILTIN_TEMPLATE_VARS_ATTR, "")
+    for item in filter(None, (part.strip() for part in raw.split(","))):
+        key, sep, value = item.partition("=")
+        if not sep:
+            raise RuntimeError(
+                f"Invalid {BUILTIN_TEMPLATE_VARS_ATTR} entry {item!r} on function '{func.name}': "
+                "expected 'key=value'"
+            )
+        variables[key.strip()] = value.strip()
+    return template_dir, variables
+
+
+def _render_builtin_kernel_sources(program: _ir_core.Program) -> dict[str, str]:
+    """Render every builtin-template kernel in *program* into artifact sources."""
+    rendered: dict[str, str] = {}
+    for func in program.functions.values():
+        spec = _builtin_template_of(func)
+        if spec is None:
+            continue
+        template_dir, variables = spec
+        templates_dir = _resolve_builtin_template_dir(template_dir) / "templates"
+        kernel_template = templates_dir / "kernel.cpp.in"
+        if not kernel_template.is_file():
+            raise FileNotFoundError(
+                f"builtin template_dir {template_dir!r} has no templates/kernel.cpp.in for "
+                f"function '{func.name}'"
+            )
+        core_type = "aic" if func.func_type == _ir_core.FunctionType.AIC else "aiv"
+        rendered[f"kernels/{core_type}/{func.name}.cpp"] = _render_builtin_template(
+            kernel_template, {"template_package": template_dir.lstrip(":"), **variables}
+        )
+    return rendered
+
+
 def _compile_pto_module(
     pto_code: str,
     unit_name: str,
@@ -2059,9 +2114,17 @@ def _generate_single_chip(
 
     groups, ungrouped = _build_group_mapping(transformed_program)
 
+    # Builtin-template kernels are generated from a template rather than by
+    # PyPTO codegen, so they are skipped in the same places external kernels are
+    # — but their source is written into this artifact, not referenced in place.
+    def _skips_pto_codegen(func: _ir_core.Function) -> bool:
+        return _external_source_of(func) is not None or _builtin_template_of(func) is not None
+
+    result_files.update(_render_builtin_kernel_sources(transformed_program))
+
     emitted_incore_funcs = [
-        func for members in groups.values() for func in members if _external_source_of(func) is None
-    ] + [func for func in ungrouped if _external_source_of(func) is None]
+        func for members in groups.values() for func in members if not _skips_pto_codegen(func)
+    ] + [func for func in ungrouped if not _skips_pto_codegen(func)]
 
     # External kernels are referenced at their original path in the manifest
     # (kept beside their sibling sources so relative #include "../..." resolve),
@@ -2120,9 +2183,10 @@ def _generate_single_chip(
 
     for func in ungrouped:
         try:
-            # External kernel: referenced in place (see the manifest map);
-            # skip PyPTO codegen.
-            if _external_source_of(func) is not None:
+            # External kernel: referenced in place (see the manifest map).
+            # Builtin-template kernel: already rendered into this artifact.
+            # Either way, skip PyPTO codegen.
+            if _skips_pto_codegen(func):
                 continue
             peer_names = _extract_peer_function_names(func)
             peer_funcs: list[_ir_core.Function] = []
@@ -2168,12 +2232,13 @@ def _generate_single_chip(
                 f"// Generated by PyPTO IR Compiler\n\n"
                 f"{orch_result.code}"
             )
-            # An all-external graph has no PTOAS phase to skip. It still needs
-            # the manifest so the runtime can compile those sources with CCEC
-            # and assemble the orchestration.
-            all_kernels_external = all(
-                name in func_name_to_external_source for name in orch_result.func_name_to_id
-            )
+            # A graph with no PyPTO-generated kernel has no PTOAS phase to skip.
+            # It still needs the manifest so the runtime can compile those
+            # sources with CCEC and assemble the orchestration.
+            codegen_free_kernels = {
+                f.name for f in transformed_program.functions.values() if _skips_pto_codegen(f)
+            }
+            all_kernels_external = all(name in codegen_free_kernels for name in orch_result.func_name_to_id)
             if not skip_ptoas or all_kernels_external:
                 result_files["kernel_config.py"] = _generate_config_file(
                     orch_func.name,

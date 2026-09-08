@@ -81,6 +81,29 @@ like `pld.DistributedTensor[[shape], dtype]` leave this field as `None`.
 Tile types do not have a distributed variant; cross-rank ops always operate
 on `DistributedTensor`.
 
+**Local compute over a window.** Inside an InCore scope a window slice *is*
+this rank's local GM, so the ordinary tensor ops read and write it like any
+other GM tensor. Those ops match their operand with
+[`AsTensorTypeLike`](../../../../include/pypto/ir/kind_traits.h) (both kinds)
+rather than the exact-kind `As<TensorType>`. What the result type is depends on
+whether the op yields a *view of* the window or *new data*:
+
+| Ops accepting a window | Result kind |
+| ---------------------- | ----------- |
+| `tensor.slice`, `tensor.assemble`, `tensor.view`, `tensor.write` | `DistributedTensorType` — still a view into the same comm-group allocation |
+| the element-wise and unary families, the reductions, `tensor.matmul`, `tensor.matmul_acc` (`lhs` / `rhs` only) | plain `TensorType` — the result is fresh local data |
+| `tensor.read` | `ScalarType` — one element, no view |
+
+Two documented rejections: `tensor.reinterpret_view` refuses a window outright,
+and `tensor.matmul_acc`'s **`acc`** operand must be a plain `TensorType` — only
+the matrix unit writes L0C, so there is no data path from a window into a Cube
+accumulator. Accumulate locally and store into the window afterwards.
+
+Many other tensor ops still reject a window although they read or write plain
+GM (all the broadcasts, `reshape`, `transpose`, `concat`, the gather / scatter
+family, …). `tests/ut/ir/operators/test_window_operand_acceptance.py` holds the
+authoritative per-operator classification and keeps it honest.
+
 ### TensorType with TensorView
 
 Tensor with layout and stride information for optimized memory access.

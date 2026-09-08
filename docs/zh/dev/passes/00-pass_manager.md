@@ -504,19 +504,20 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 25. `AllocateMemoryAddr`
 26. [`FoldNoOpReshape`](38-fold_no_op_reshape.md)
 27. [`FuseCreateAssembleToSlice`](39-fuse_create_assemble_to_slice.md)
-28. [`DeriveCallDirections`](40-derive_call_directions.md)
-29. [`AutoDeriveTaskDependencies`](41-auto_derive_task_dependencies.md)（runtime scope 编译器依赖；AUTO-scope 分析需要显式开启）
-30. [`ExpandManualPhaseFence`](42-expand_manual_phase_fence.md)（manual-scope phase-fence TaskId 依赖压缩）
-31. [`SynthesizeAllReduceSignals`](43-synthesize_allreduce_signals.md)（分布式：host allreduce optional signal -> explicit internal signal IR）
-32. [`MaterializeCommDomainScopes`](44-materialize_comm_domain_scopes.md)（分布式：构造 WindowBuffer 并写 CommDomainScopeStmt wrappers in each host_orch body；无通信程序为 no-op）
-33. [`LowerHostTensorCollectives`](45-lower_host_tensor_collectives.md)（host-level tensor collectives -> internal builtin chip dispatches）
-34. [`MaterializeDistTensorCtx`](46-materialize_dist_tensor_ctx.md)（为 DistributedTensor 参数显式物化 CommCtx 参数/实参）
-35. `Simplify`
-36. [`LegalizeGraphBoundary`](47-legalize_graph_boundary.md)（把 Graph 体从边界标量派生出来的值上提到调用点，并拒绝 host_build_graph runtime 无法录制的边界；无 Graph 函数的程序为 no-op）
-37. [`MaterializeRuntimeScopes`](48-materialize_runtime_scopes.md)（插入 AUTO RuntimeScopeStmt，使 orchestration codegen 1:1 emit SIMPLER_SCOPE）
-38. [`ClassifyIterArgCarry`](49-classify_iter_arg_carry.md)（把每个 ForStmt iter_arg 标注为平凡别名 / 重绑定 carry，并为 manual-scope TaskId fence 数组定尺）
-39. [`InsertCommFence`](50-insert_comm_fence.md)（在每个发布性写入与释放它的 pld.system.notify 之间插入整张 tensor 的 system.cacheinvalid + GM system.fence；跑在所有语句重排 pass 之后，使插入的 op 一路到 codegen 都紧邻其 notify）
-40. [`MaterializeValidShapeSymbols`](51-materialize_valid_shape_symbols.md)（跑在最后；把设备侧 kernel 无法绑定的 valid_shape 符号转成前置的 Scalar[INDEX] 形参，由调用点传入实际有效范围）
+28. [`LowerL2TensorCollectives`](40-lower_l2_tensor_collectives.md)（分布式：写在 CHIP orchestration 函数体里的托管集合通信 -> 一个本地 builtin AIV task；放在此处是为了让改写后的调用像任何 kernel 调用一样推导出实参方向与 TensorMap 任务依赖边）
+29. [`DeriveCallDirections`](41-derive_call_directions.md)
+30. [`AutoDeriveTaskDependencies`](42-auto_derive_task_dependencies.md)（runtime scope 编译器依赖；AUTO-scope 分析需要显式开启）
+31. [`ExpandManualPhaseFence`](43-expand_manual_phase_fence.md)（manual-scope phase-fence TaskId 依赖压缩）
+32. [`SynthesizeAllReduceSignals`](44-synthesize_allreduce_signals.md)（分布式：host allreduce optional signal -> explicit internal signal IR）
+33. [`MaterializeCommDomainScopes`](45-materialize_comm_domain_scopes.md)（分布式：构造 WindowBuffer 并写 CommDomainScopeStmt wrappers in each host_orch body；无通信程序为 no-op）
+34. [`LowerHostTensorCollectives`](46-lower_host_tensor_collectives.md)（host-level tensor collectives -> internal builtin chip dispatches）
+35. [`MaterializeDistTensorCtx`](47-materialize_dist_tensor_ctx.md)（为 DistributedTensor 参数显式物化 CommCtx 参数/实参）
+36. `Simplify`
+37. [`LegalizeGraphBoundary`](48-legalize_graph_boundary.md)（把 Graph 体从边界标量派生出来的值上提到调用点，并拒绝 host_build_graph runtime 无法录制的边界；无 Graph 函数的程序为 no-op）
+38. [`MaterializeRuntimeScopes`](49-materialize_runtime_scopes.md)（插入 AUTO RuntimeScopeStmt，使 orchestration codegen 1:1 emit SIMPLER_SCOPE）
+39. [`ClassifyIterArgCarry`](50-classify_iter_arg_carry.md)（把每个 ForStmt iter_arg 标注为平凡别名 / 重绑定 carry，并为 manual-scope TaskId fence 数组定尺）
+40. [`InsertCommFence`](51-insert_comm_fence.md)（在每个发布性写入与释放它的 pld.system.notify 之间插入整张 tensor 的 system.cacheinvalid + GM system.fence；跑在所有语句重排 pass 之后，使插入的 op 一路到 codegen 都紧邻其 notify）
+41. [`MaterializeValidShapeSymbols`](52-materialize_valid_shape_symbols.md)（跑在最后；把设备侧 kernel 无法绑定的 valid_shape 符号转成前置的 Scalar[INDEX] 形参，由调用点传入实际有效范围）
 
 [`ResolveBackendOpLayouts`](22-resolve_backend_op_layouts.md) 会根据
 backend 注册的 layout 元数据修复受约束的逐元素 tile 操作。对于当前 PTO

@@ -135,8 +135,15 @@ REGISTER_ORCHESTRATION_OP(tensor_read, ("tensor.read")) {
   std::string input_name = codegen.TryGetVarName(op->args_[0]);
   CHECK(!input_name.empty()) << "tensor.read input must be a variable";
 
-  auto input_type = As<TensorType>(op->args_[0]->GetType());
-  CHECK(input_type) << "tensor.read input must be TensorType";
+  // ``AsTensorTypeLike`` also matches a ``DistributedTensorType``: the deducer
+  // accepts a window source, and ConvertTensorToTileOps deliberately leaves
+  // ``tensor.read`` on a window unconverted so it lowers here as a local-rank
+  // scalar read. The exact-kind ``As<TensorType>`` made that documented path
+  // abort in codegen instead.
+  auto input_type = AsTensorTypeLike(op->args_[0]->GetType());
+  INTERNAL_CHECK_SPAN(input_type, op->span_)
+      << "Internal error: tensor.read input must be TensorType or DistributedTensorType, got "
+      << op->args_[0]->GetType()->TypeName();
 
   auto result_type = As<ScalarType>(op->GetType());
   CHECK(result_type) << "tensor.read must return ScalarType";
@@ -184,8 +191,11 @@ REGISTER_ORCHESTRATION_OP(tensor_write, ("tensor.write")) {
   std::string input_name = codegen.TryGetVarName(op->args_[0]);
   CHECK(!input_name.empty()) << "tensor.write input must be a variable";
 
-  auto input_type = As<TensorType>(op->args_[0]->GetType());
-  CHECK(input_type) << "tensor.write input must be TensorType";
+  // A window destination is accepted for the same reason as in tensor.read above.
+  auto input_type = AsTensorTypeLike(op->args_[0]->GetType());
+  INTERNAL_CHECK_SPAN(input_type, op->span_)
+      << "Internal error: tensor.write input must be TensorType or DistributedTensorType, got "
+      << op->args_[0]->GetType()->TypeName();
 
   std::string tensor_ref = codegen.GetExternalTensorName(input_name);
 

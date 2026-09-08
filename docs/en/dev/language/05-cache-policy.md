@@ -164,9 +164,9 @@ Design notes that keep the chain honest:
   `OutlineClusterScopes` sits between them, and it does not mutate an outlined
   InCore param list. Downstream passes *do*:
   [`InjectGMPipeBuffer`](../passes/25-inject_gm_pipe_buffer.md) and
-  [`MaterializeDistTensorCtx`](../passes/46-materialize_dist_tensor_ctx.md)
+  [`MaterializeDistTensorCtx`](../passes/47-materialize_dist_tensor_ctx.md)
   append, and
-  [`MaterializeValidShapeSymbols`](../passes/51-materialize_valid_shape_symbols.md)
+  [`MaterializeValidShapeSymbols`](../passes/52-materialize_valid_shape_symbols.md)
   *prepends*. That is why pass 11 erases the attr after converting it.
 - **The kwarg is an `int`, not the enum.** It follows `tile.store`'s `atomic`
   kwarg, so the serializer, deserializer, `structural_hash` and

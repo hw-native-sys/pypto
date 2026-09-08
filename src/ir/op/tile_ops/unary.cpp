@@ -30,6 +30,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/cast_saturation.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
@@ -127,6 +128,8 @@ TypePtr DeduceTileCastType(const std::vector<ExprPtr>& args,
                     << " requires optional second argument 'tmp' to be a TileType, but got "
                     << args[1]->GetType()->TypeName();
   }
+
+  ValidateCastSaturationModeKwarg(kwargs, op_name);
 
   // Read target_type from kwargs
   bool found_target_type = false;
@@ -291,6 +294,9 @@ REGISTER_OP("tile.cast")
     .add_argument("tmp", "Optional A2/A3 scratch tile for non-saturating narrowing pto.tcvt")
     .set_attr<DataType>("target_type")
     .set_attr<int>("mode")  // Round Mode: None(0), RINT(1), ROUND(2), FLOOR(3), CEIL(4), TRUNC(5), ODD(6)
+    // Optional destination saturation: OFF(0) / ON(1). Absent means "keep the
+    // backend default" — see include/pypto/ir/cast_saturation.h.
+    .set_attr<int>("saturation_mode")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)

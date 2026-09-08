@@ -253,6 +253,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
     bool user_written;
   };
 
+  /// Backing storage of one TaskId array carry — see ``array_carry_vars_``.
+  struct ArrayCarryEntry {
+    std::string array_name;
+    int64_t size;
+  };
+
   explicit OrchestrationStmtCodegen(const ProgramPtr& prog, std::map<std::string, int>* func_ids,
                                     std::map<std::string, CoreType>* core_types,
                                     std::map<std::string, std::vector<std::string>>* func_signatures,
@@ -299,6 +305,26 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// in the same file — legal C++, since they are separate function scopes, but
   /// it makes every generated identifier ambiguous to read and to grep.
   void SetTaskVarPrefix(std::string prefix) { task_var_prefix_ = std::move(prefix); }
+
+  /// Reserve identifiers the emitted C++ function already declares outside the
+  /// body this instance generates, so no body Var can be handed one of them.
+  ///
+  /// The entry gets this for free: its ``param_name_set`` seeds
+  /// ``declared_var_names_``. A Graph function passes an empty set (its
+  /// parameters must not be ``ext_``-rewritten), so without this its
+  /// ``const Tensor& <p> = args.tensor(i).ref();`` prologue names are invisible
+  /// to ``ReserveVarEmitName``. The first body SSA rename of a parameter then
+  /// takes the parameter's own name — shadowing the prologue decl and, when it
+  /// happens inside a ``pl.manual_scope``, recording that name in
+  /// ``manual_local_names_`` as if it were scope-local. ``IsEnclosingScopeValid``
+  /// then reports the *parameter* as unreachable from outside the block, so
+  /// every later writeback mints a block-scoped ``const Tensor& <p>__ssa_vN =
+  /// <p>;`` alias instead of remapping onto the parameter — and a task placed
+  /// after the block references an identifier that has fallen out of C++ scope
+  /// (issue #2605).
+  void ReserveDeclaredNames(const std::set<std::string>& names) {
+    declared_var_names_.insert(names.begin(), names.end());
+  }
 
   void SetEffectiveUses(std::unordered_set<const Var*> uses) { effective_uses_ = std::move(uses); }
   [[nodiscard]] bool NeedsVectorInclude() const { return needs_vector_include_; }
@@ -1044,6 +1070,19 @@ class OrchestrationStmtCodegen : public CodegenBase {
       }
       EmitIndentedLine("}");
 
+      // An AUTO scope hoists nothing, so a backing array declared inside the
+      // block dies at its closing brace while one declared further out does
+      // not. Storage counts as enclosing exactly when some pre-entry carry
+      // already named it.
+      // Iteration order does not reach the result: the pointer keys are ignored
+      // and only the names are collected, into an ordered set.
+      std::set<std::string> enclosing_arrays;
+      // NOLINTNEXTLINE(bugprone-nondeterministic-pointer-iteration-order)
+      for (const auto& [_, entry] : saved_array_carry) enclosing_arrays.insert(entry.array_name);
+      PreserveEnclosingArrayCarries(&saved_array_carry, &saved_map, [&](const std::string& name) {
+        return enclosing_arrays.count(name) == 0;
+      });
+
       manual_task_id_map_ = std::move(saved_map);
       array_carry_vars_ = std::move(saved_array_carry);
       return;
@@ -1108,19 +1147,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // that names a manual-scope-local C++ identifier (e.g. ``TaskId prev =
     // arr[k];``) dies at the closing brace and must not leak (issue #1577).
     // BUT an array carry registered inside the scope can reuse a backing array
-    // declared in the ENCLOSING scope — e.g. a ``pl.parallel`` TaskId array
-    // carry threaded from an outer sequential loop's backing store. That carry
-    // survives the brace and is referenced by the enclosing loop's yield, which
-    // is emitted AFTER this block; wiping it would drop the loop-carried tids
-    // and trip the scalar-yield branch (issue #1811). Preserve such entries —
-    // identified by backing storage that is NOT this scope's local name set.
-    for (const auto& [var, entry] : array_carry_vars_) {
-      if (saved_array_carry.count(var)) continue;         // outer entry — keep outer value
-      if (local_names.count(entry.array_name)) continue;  // scope-local storage — drop
-      saved_array_carry[var] = entry;                     // enclosing-valid carry — preserve
-      auto tid_it = manual_task_id_map_.find(var);        // keep its per-slot dep names in sync
-      if (tid_it != manual_task_id_map_.end()) saved_map[var] = tid_it->second;
-    }
+    // declared in the ENCLOSING scope (issue #1811) — see
+    // ``PreserveEnclosingArrayCarries``. A manual scope hoists its allocations,
+    // so it knows its own local storage names outright.
+    PreserveEnclosingArrayCarries(&saved_array_carry, &saved_map,
+                                  [&](const std::string& name) { return local_names.count(name) != 0; });
 
     manual_task_id_map_ = std::move(saved_map);
     array_carry_vars_ = std::move(saved_array_carry);
@@ -1283,6 +1314,19 @@ class OrchestrationStmtCodegen : public CodegenBase {
         // merges stay in-block). The phi init (a param or a pre-if Var) must be
         // enclosing-scope-valid, or the decl stays in place (EmitMutableTensorCarryDecl).
         EmitMutableTensorCarryDecl(emit_name, tensor_phi_init);
+      } else if (auto sty = As<ScalarType>(rv->GetType()); sty && sty->dtype_ == DataType::TASK_ID) {
+        // A TaskId phi is declared HERE, outside the branches, and each arm's
+        // yield assigns into it — so unlike a branch-local producer id it is
+        // still live after the ``if`` closes. Seed it with the sentinel (a
+        // default-constructed ``TaskId`` is uninitialised, and an arm may leave
+        // it unassigned) and register it at this enclosing level, mirroring
+        // ``InstallArrayPhiBindings`` below: a registration made inside a branch
+        // body would be dropped by that branch's scope restore. Without it a
+        // downstream ``deps=[phi]`` cannot resolve and an ``arr[i] = phi``
+        // publish looks like a store of a closed-scope local.
+        EmitIndentedLine(cpp_type + " " + emit_name + " = TaskId::invalid();");
+        manual_task_id_map_[rv.get()] = emit_name;
+        manual_task_id_map_by_key_[TaskIdHoistKey(rv.get())] = emit_name;
       } else {
         EmitIndentedLine(cpp_type + " " + emit_name + ";");
       }
@@ -4158,6 +4202,35 @@ class OrchestrationStmtCodegen : public CodegenBase {
     emit_name_map_[assign->var_.get()] = target_name;
   }
 
+  /// Reject an ``arr[i] = tid`` whose TaskId was produced in a scope that has
+  /// already closed.
+  ///
+  /// The slot write is emitted in place, but the value names a C++ local
+  /// declared inside the ``SIMPLER_SCOPE { }`` that produced it. Writing it
+  /// after that block closes compiles here and is then rejected by the host
+  /// compiler with ``'<tid>' was not declared in this scope`` — a failure the
+  /// user cannot trace back to their source, and one ``--compile-only`` never
+  /// reaches. Diagnose it at the DSL level instead.
+  ///
+  /// A stale value is identified positively: ``emit_name_map_`` still holds the
+  /// name it was bound to (never scope-restored), while ``manual_task_id_map_``
+  /// does not (restored at each closing brace — see
+  /// ``VisitStmt_(RuntimeScopeStmtPtr)``). A TaskId this codegen never bound to
+  /// a local has no entry in either and is left alone.
+  void CheckTaskIdSlotValueInScope(const CallPtr& call, const std::string& array_name) {
+    auto value_var = AsVarLike(call->args_[2]);
+    if (!value_var) return;
+    auto scalar_ty = As<ScalarType>(value_var->GetType());
+    if (!scalar_ty || scalar_ty->dtype_ != DataType::TASK_ID) return;
+    if (manual_task_id_map_.count(value_var.get())) return;
+    if (!emit_name_map_.count(value_var.get())) return;
+    CHECK_SPAN(false, call->span_)
+        << "Task id '" << value_var->name_hint_ << "' is stored into array '" << array_name
+        << "' after the `pl.scope()` that produced it has closed, so the store has no runtime "
+           "value to name. Move the store inside that `pl.scope()`, where the task id is still "
+           "live.";
+  }
+
   void HandleArrayUpdateElementAssign(const AssignStmtPtr& assign, const CallPtr& call) {
     // array.update_element(array, index, value) -> ArrayType.
     // The SSA-functional return value shares storage with the first arg; alias
@@ -4165,6 +4238,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     INTERNAL_CHECK_SPAN(call->args_.size() == 3, call->span_)
         << "Internal error: array.update_element expects 3 arguments";
     std::string array_name = GenerateExprString(call->args_[0]);
+    CheckTaskIdSlotValueInScope(call, array_name);
     emit_name_map_[assign->var_.get()] = array_name;
     // Propagate ``array_carry_vars_`` and ``manual_task_id_map_`` from the
     // input array to the LHS: they share storage, so a downstream
@@ -4255,6 +4329,35 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return emit_name;
   }
 
+  /// Keep the array carries a just-closed scope minted over storage that
+  /// outlives it, when restoring the entry snapshot.
+  ///
+  /// ``array.update_element`` is SSA-functional: it aliases its LHS onto the
+  /// input array's storage (``HandleArrayUpdateElementAssign``) and emits the
+  /// C++ slot write in place, at the statement's own position. The *carry* it
+  /// registers is read later though — by the enclosing loop's yield, emitted
+  /// after this block's closing brace. Restoring the snapshot wholesale drops
+  /// that carry, and the yield then misreads an Array value as a scalar TaskId
+  /// (issue #1811 for a manual scope; the same for an AUTO ``pl.scope()``).
+  ///
+  /// Only carries whose backing storage outlives the block may be kept, so each
+  /// scope kind supplies its own ``is_scope_local`` test over the array's emit
+  /// name — a manual scope hoists its allocations and knows its local names
+  /// outright; an AUTO scope hoists nothing, so storage is enclosing exactly
+  /// when a pre-entry carry already named it.
+  template <typename IsScopeLocal>
+  void PreserveEnclosingArrayCarries(std::unordered_map<const Var*, ArrayCarryEntry>* saved_array_carry,
+                                     std::unordered_map<const Var*, ManualTaskIdBinding>* saved_map,
+                                     const IsScopeLocal& is_scope_local) {
+    for (const auto& [var, entry] : array_carry_vars_) {
+      if (saved_array_carry->count(var)) continue;     // outer entry — keep outer value
+      if (is_scope_local(entry.array_name)) continue;  // scope-local storage — drop
+      (*saved_array_carry)[var] = entry;               // enclosing-valid carry — preserve
+      auto tid_it = manual_task_id_map_.find(var);     // keep its per-slot dep names in sync
+      if (tid_it != manual_task_id_map_.end()) (*saved_map)[var] = tid_it->second;
+    }
+  }
+
   /// Register ``var`` as backed by ``array_name[size]``; also populates the
   /// ``manual_task_id_map_`` with the per-slot expressions so EmitManualDeps
   /// emits one ``add_dep`` per slot when this Var appears as a deps source.
@@ -4324,10 +4427,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// a ``ForStmt`` return_var (when used as a yield target). For each key the
   /// recorded ``array_name`` is the C++ identifier of the underlying
   /// ``TaskId[N]`` array and ``size`` is the slot count ``N``.
-  struct ArrayCarryEntry {
-    std::string array_name;
-    int64_t size;
-  };
   std::unordered_map<const Var*, ArrayCarryEntry> array_carry_vars_;
   /// In-flight ArrayType ``IfStmt`` return_vars (phis). An ArrayType SSA value
   /// names one backing C-stack array rather than a copyable value, so a phi is
@@ -4498,7 +4597,10 @@ std::string GenerateDynamicDimDefs(const std::vector<VarPtr>& params, const std:
 /// * ``param_name_set`` is empty. `GetExternalTensorName` rewrites any name in
 ///   that set to ``ext_<name>``, which is right for the entry (whose parameters
 ///   arrive through ``orch_args``) and wrong here, where they are ordinary
-///   function parameters bound at the top of the body.
+///   function parameters bound at the top of the body. The parameter names are
+///   still handed to `ReserveDeclaredNames`, which is the other half of what
+///   ``param_name_set`` does for the entry: it keeps a body Var from taking a
+///   name the prologue already declares (issue #2605).
 /// * A task-var prefix, because this instance's counters restart at 0.
 ///
 /// Boundary scalars are bound as ``const uint64_t&``, never by value. The
@@ -4529,14 +4631,21 @@ std::string GenerateGraphFunctions(const ProgramPtr& program, const FunctionPtr&
     // the two disagree the body would reference a symbol the header never
     // declared. Seeding makes them agree by construction.
     std::unordered_map<const Var*, std::string> emit_name_map;
+    std::set<std::string> param_emit_names;
     for (const auto& param : graph_func->params_) {
-      emit_name_map[param.get()] = auto_name::GetCompatibleBaseName(param->name_hint_);
+      std::string name = auto_name::GetCompatibleBaseName(param->name_hint_);
+      emit_name_map[param.get()] = name;
+      param_emit_names.insert(std::move(name));
     }
     OrchestrationStmtCodegen body_codegen(program, func_name_to_id, func_name_to_core_type,
                                           func_name_to_signature, next_func_id, std::move(emit_name_map),
                                           /*param_name_set=*/{}, /*param_name_to_orch_index=*/{},
                                           /*packed_fp4_axis=*/{}, /*dist_param_to_ctx_param=*/{});
     body_codegen.SetTaskVarPrefix("g" + std::to_string(graph_index) + "_");
+    // The prologue below declares one C++ name per parameter. They are not in
+    // ``param_name_set``, so reserve them explicitly or a body SSA rename will
+    // shadow one (issue #2605; see ReserveDeclaredNames).
+    body_codegen.ReserveDeclaredNames(param_emit_names);
     body_codegen.SetCallTupleElements(graph_info.call_tuple_elements);
     body_codegen.SetTupleVarToKey(graph_info.tuple_var_to_key);
     body_codegen.SetEffectiveUses(std::move(use_collector.var_uses));

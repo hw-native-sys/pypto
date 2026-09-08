@@ -119,9 +119,24 @@ std::string ArgDirectionToTensorArgType(ir::ArgDirection dir) {
   }
 }
 
+/// Emit the per-device chip dispatch for a builtin tensor collective.
+///
+/// The scalar tail is, in order: the comm-domain rank count (unless
+/// ``emit_rank_count`` is false), the device CommContext pointer, and — only
+/// for the builtins that launch an SPMD grid — ``core_num``.
+///
+/// ``emit_rank_count=false`` drops the leading rank-count scalar for a builtin
+/// whose kernel reads ``CommContext::rankNum`` instead. The two are the same
+/// number by construction (``comm_derive_context`` builds a per-domain context
+/// whose ``rankNum`` is that domain's rank count, and ``domain_size`` is
+/// ``len(workers)``), so the scalar is pure redundancy for such a kernel — and
+/// carrying it would force that kernel's source to differ between this rail and
+/// the managed CHIP rail, whose argument layout has no scalar tail before the
+/// CommCtx params.
 void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const CallPtr& call,
                                          const std::string& variant,
-                                         std::optional<int> core_num = std::nullopt) {
+                                         std::optional<int> core_num = std::nullopt,
+                                         bool emit_rank_count = true) {
   INTERNAL_CHECK(call && call->op_)
       << "Internal error: builtin tensor collective dispatch needs a valid Call";
 
@@ -192,7 +207,9 @@ void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const Call
   codegen.Emit(ta_var + ".add_tensor(make_tensor_arg(orch._worker, tensors[\"" + *handle_var + "_ord\"][" +
                rank_expr + "]), TensorArgType.INOUT)");
 
-  codegen.Emit(ta_var + ".add_scalar(" + *handle_var + "[" + rank_expr + "].domain_size)");
+  if (emit_rank_count) {
+    codegen.Emit(ta_var + ".add_scalar(" + *handle_var + "[" + rank_expr + "].domain_size)");
+  }
   codegen.Emit(ta_var + ".add_scalar(" + *handle_var + "[" + rank_expr + "].device_ctx)");
   if (core_num.has_value()) {
     codegen.Emit(ta_var + ".add_scalar(" + std::to_string(*core_num) + ")");
@@ -396,7 +413,12 @@ REGISTER_DISTRIBUTED_OP(builtin_tensor_all_to_all_v, "builtin.tensor.all_to_all_
   if (dist_codegen->MarkBuiltinEmitted(variant)) {
     dist_codegen->RecordBuiltinNextLevel(op, variant, {{"dtype_cpp", Fp32TypeCpp(dtype)}});
   }
-  EmitBuiltinWindowCollectiveDispatch(*dist_codegen, op, variant);
+  // No rank-count scalar: this kernel reads CommContext::rankNum, which is the
+  // same number (see EmitBuiltinWindowCollectiveDispatch). Dropping it makes
+  // this rail's kernel argument layout identical to the managed CHIP rail's, so
+  // both render one byte-identical source from the shared template.
+  EmitBuiltinWindowCollectiveDispatch(*dist_codegen, op, variant, /*core_num=*/std::nullopt,
+                                      /*emit_rank_count=*/false);
   return "";
 }
 

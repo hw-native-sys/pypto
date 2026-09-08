@@ -153,15 +153,15 @@ lowering/compiler plumbing 使用的额外内部 op 未纳入，也不列 VPTO�
 | pto.tsel | TSEL | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.tsels | TSELS | tile | ✅ | ✅ | ❌ | ✅ | — | 已补齐规范 4 输入链路；A2/A3 真机已验证，A5 真机待验证 |
 | **位运算（11）** |  |  |  |  |  |  |  |  |
-| pto.tand | TAND | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
-| pto.tor | TOR | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
-| pto.txor | TXOR | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
+| pto.tand | TAND | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A2/A3 真机通过有/无符号 8/16 位 pattern 的完整、行尾、列尾及行列组合尾部场景；A5 真机待验证 |
+| pto.tor | TOR | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A2/A3 真机通过有/无符号 8/16 位 pattern 的完整、行尾、列尾及行列组合尾部场景；A5 真机待验证 |
+| pto.txor | TXOR | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A2/A3 真机通过有/无符号 8/16 位 pattern、显式 tmp 及四类 shape；IR UT 覆盖 alias 拒绝场景；A5 真机待验证 |
 | pto.tshl | TSHL | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
 | pto.tshr | TSHR | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
-| pto.tnot | TNOT | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
-| pto.tands | TANDS | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
-| pto.tors | TORS | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
-| pto.txors | TXORS | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
+| pto.tnot | TNOT | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | 已由既有同名 `tile.not` ST 覆盖 |
+| pto.tands | TANDS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A2/A3 真机通过有/无符号 8/16 位 tile、immediate/SSA scalar 及四类 shape；A5 真机待验证 |
+| pto.tors | TORS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A2/A3 真机通过有/无符号 8/16 位 tile、immediate/SSA scalar 及四类 shape；A5 真机待验证 |
+| pto.txors | TXORS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A2/A3 真机通过有/无符号 8/16 位 tile、immediate/SSA scalar、显式 tmp 及四类 shape；IR UT 覆盖 alias 拒绝场景；A5 真机待验证 |
 | pto.tshls | TSHLS | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
 | pto.tshrs | TSHRS | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
 | **数据重排（15）** |  |  |  |  |  |  |  |  |
@@ -260,6 +260,6 @@ lowering/compiler plumbing 使用的额外内部 op 未纳入，也不列 VPTO�
 | pto.tassign | TASSIGN | internal | ✅ | — | — | — | — | 失活 backend hook，不独立建 ST |
 
 **统计**：共 204 个 PTOAS 公共/兼容 op；pypto tile 前端 113 个，tensor 前端 75 个
-（另有 `pl.prefetch.*` 一族 4 个非 tile/tensor op）；同名 ST 覆盖 115 个
-（普通 ST 111，distributed ST 4）；无同名 ST 57 个（普通 47，distributed 10）；
-这 204 个中另有 32 个 op 不适合独立 ST。
+（另有 `pl.prefetch.*` 一族 4 个非 tile/tensor op）；同名 ST 覆盖 121 个
+（普通 ST 117，distributed ST 4）；无同名 ST 51 个（普通 41，distributed 10）；
+其余 32 个 op 不适合独立 ST。

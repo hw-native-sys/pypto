@@ -195,6 +195,115 @@ def resolve_cast_mode(mode: str | int) -> int:
     return mode_val
 
 
+SATURATION_MODE_NAMES: dict[str, int] = {
+    "off": 0,
+    "on": 1,
+}
+
+#: What a cast does when it carries no ``saturation_mode`` kwarg, for an
+#: **integer** destination. That is where the two modes are a genuine choice: no
+#: standard fixes what a float-to-int or a narrowing int-to-int overflow
+#: produces, clamping is the safer of the two to get by accident, and on A2/A3 it
+#: is also the conversion the assembler performs natively rather than emulating.
+#:
+#: A **float** destination has no default here — see
+#: :func:`default_saturation_mode_for`.
+#:
+#: Only a *deviation* from the applicable default is recorded on the call, so a
+#: cast that wants it carries no kwarg — the same shape a pass-synthesized cast
+#: has, which is what keeps a printed cast re-parsing to the same IR. Mirrors
+#: ``ir::DefaultSaturationModeFor`` in ``include/pypto/ir/cast_saturation.h``.
+DEFAULT_SATURATION_MODE: str = "on"
+
+
+def default_saturation_mode_for(target_dtype: DataType | int | None) -> int | None:
+    """The saturation a cast to ``target_dtype`` gets when it does not ask, or None.
+
+    None means "whatever the target does": no ``satmode`` is emitted and the
+    lowering is exactly what it was before this kwarg existed. Only an integer
+    destination defaults to saturating.
+
+    A float destination is a different question with an existing answer: IEEE says
+    an out-of-range narrowing yields an infinity, ``torch`` agrees, and
+    ``docs/en/user/precision/00-workflow.md`` asserts PyPTO matches them
+    bit-for-bit on ``INT32 -> FP16``. Defaulting those to saturating broke that
+    block on the a2a3 simulator (65520 clamped to 65504 instead of overflowing to
+    inf), so float destinations keep the target's own behavior unless asked.
+
+    Args:
+        target_dtype: The cast's destination dtype, or None when unknown
+
+    Returns:
+        The default saturation int, or None to leave it to the target
+    """
+    if target_dtype is None:
+        return None
+    dtype = DataType(target_dtype) if isinstance(target_dtype, int) else target_dtype
+    if not dtype.is_int():
+        return None
+    return SATURATION_MODE_NAMES[DEFAULT_SATURATION_MODE]
+
+
+def resolve_saturation_mode(saturation_mode: str | int) -> int:
+    """Resolve destination saturation to int, accepting both names and int values.
+
+    Args:
+        saturation_mode: String name ("off", "on") or int (0 or 1)
+
+    Returns:
+        Integer saturation mode value
+
+    Raises:
+        ValueError: If the value is not a valid name and not 0 or 1
+    """
+    if isinstance(saturation_mode, bool):
+        # ``True``/``False`` read as 1/0 but say nothing about saturation; refuse
+        # them so a stray predicate cannot silently select a conversion mode.
+        raise ValueError(
+            f"Invalid saturation_mode {saturation_mode!r}. Expected one of "
+            f"{list(SATURATION_MODE_NAMES.keys())} or an int in (0, 1)."
+        )
+    if isinstance(saturation_mode, int):
+        if saturation_mode not in SATURATION_MODE_NAMES.values():
+            raise ValueError(f"Invalid saturation_mode {saturation_mode}. Expected int 0 (off) or 1 (on).")
+        return saturation_mode
+    value = SATURATION_MODE_NAMES.get(saturation_mode) if isinstance(saturation_mode, str) else None
+    if value is None:
+        raise ValueError(
+            f"Invalid saturation_mode {saturation_mode!r}. "
+            f"Expected one of {list(SATURATION_MODE_NAMES.keys())} or an int in (0, 1)."
+        )
+    return value
+
+
+def resolve_saturation_deviation(
+    saturation_mode: str | int | None, target_dtype: DataType | int | None = None
+) -> int | None:
+    """The ``saturation_mode`` int to record on a cast, or None to record nothing.
+
+    A cast carries the kwarg only when it *deviates* from what the destination
+    already defaults to, so this is the single place the record-a-deviation rule
+    lives. Asking for None, or naming the destination's own default explicitly,
+    both leave the call bare — which is also the shape a pass-synthesized cast
+    has, so the two print and re-parse alike.
+
+    Args:
+        saturation_mode: "off"/"on", 0/1, or None to take the destination default
+        target_dtype: The cast's destination dtype, which selects that default
+
+    Returns:
+        The int to store, or None when the request is already the default
+
+    Raises:
+        ValueError: If the value is not a valid name and not 0 or 1
+    """
+    default = default_saturation_mode_for(target_dtype)
+    if saturation_mode is None:
+        return None
+    requested = resolve_saturation_mode(saturation_mode)
+    return None if requested == default else requested
+
+
 def has_partial_valid_region(expr: _ir.Expr) -> bool:
     """Whether a tensor/tile value already declares less valid data than it can hold.
 
@@ -415,6 +524,44 @@ def _normalize_scalar_operand(
     return _normalize_expr(scalar, span, int_dtype=fallback_int_dtype, float_dtype=fallback_float_dtype)
 
 
+def _normalize_signless_same_width_scalar_operand(
+    operand: _ir.Expr,
+    scalar: int | float | _ir.Expr,
+    span: _ir.Span,
+    *,
+    retype_constants: bool = False,
+) -> _ir.Expr:
+    """Normalize constants to PTOAS's same-width signless scalar encoding."""
+    is_placeholder = not isinstance(scalar, _ir.Expr) or (
+        isinstance(scalar, _ir.ConstInt) and scalar.dtype == DataType.INDEX
+    )
+    scalar_expr = _normalize_scalar_operand(
+        operand,
+        scalar,
+        span,
+        retype_constants=retype_constants,
+    )
+    if not is_placeholder and not retype_constants:
+        return scalar_expr
+    operand_dtype = _elem_dtype(operand)
+    if operand_dtype is None or not isinstance(scalar_expr, _ir.ConstInt):
+        return scalar_expr
+
+    signed_dtype_and_bits = {
+        DataType.UINT8: (DataType.INT8, 8),
+        DataType.UINT16: (DataType.INT16, 16),
+        DataType.UINT32: (DataType.INT32, 32),
+    }.get(operand_dtype)
+    if signed_dtype_and_bits is None:
+        return scalar_expr
+
+    signed_dtype, bits = signed_dtype_and_bits
+    value = scalar_expr.value
+    if value >= 1 << (bits - 1):
+        value -= 1 << bits
+    return _ir.ConstInt(value, signed_dtype, span)
+
+
 def _normalize_const_to_dtype(
     scalar: int | float | _ir.Expr,
     dtype: DataType,
@@ -444,6 +591,9 @@ def _normalize_const_to_dtype(
 
 __all__ = [
     "CAST_MODE_NAMES",
+    "DEFAULT_SATURATION_MODE",
+    "default_saturation_mode_for",
+    "SATURATION_MODE_NAMES",
     "_get_span_or_capture",
     "_normalize_const_to_dtype",
     "_normalize_expr",
@@ -453,5 +603,7 @@ __all__ = [
     "_to_make_tuple",
     "has_partial_valid_region",
     "resolve_cast_mode",
+    "resolve_saturation_deviation",
+    "resolve_saturation_mode",
     "use_parser_span",
 ]

@@ -26,8 +26,8 @@ the `pl.parallel` loop that owns the array; a `Sequential` loop threading that
 array through an inner `pl.parallel` inherits the inner extent.
 
 **When to use**: in the `Default` strategy, immediately after
-[`MaterializeRuntimeScopes`](48-materialize_runtime_scopes.md) and immediately
-before [`InsertCommFence`](50-insert_comm_fence.md). Running this late means the
+[`MaterializeRuntimeScopes`](49-materialize_runtime_scopes.md) and immediately
+before [`InsertCommFence`](51-insert_comm_fence.md). Running this late means the
 classified IR is exactly the IR codegen lowers — `InsertCommFence` only adds
 InCore fence ops and never touches Orchestration `ForStmt` iter_args.
 
@@ -146,6 +146,6 @@ collection when that trip count is dynamic.
 
 ## See also
 
-- [MaterializeRuntimeScopes](48-materialize_runtime_scopes.md) — the pass that runs immediately before
+- [MaterializeRuntimeScopes](49-materialize_runtime_scopes.md) — the pass that runs immediately before
 - [Orchestration codegen](../codegen/01-orchestration_codegen.md) — the consumer of the stamped plan
 - [Pass manager](00-pass_manager.md)

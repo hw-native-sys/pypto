@@ -523,16 +523,26 @@ void ValidateDropDimsValidExtents(const std::vector<int64_t>& drop_dims,
  * 1. source fully valid                  -> new_shape
  * 2. source provably empty               -> all-zero box
  * 3. only full unit axes added / removed -> surviving axes map 1:1
- * 4. contiguous flat prefix              -> rectangular box under new_shape
+ * 4. target cuts the buffer the same way -> box under new_shape
  * 5. otherwise                           -> reject
  * ```
  *
  * Cases 2 and 3 are exact because neither repartitions data: the empty set stays
  * empty under every reshape, and inserting or removing a provably-full physical
  * unit axis is a coordinate-only rank change that preserves an arbitrary
- * rectangle. Case 4 is the general rule: a region that occupies a contiguous
- * flat prefix of the buffer maps to whatever rectangle spans that same prefix in
- * the target shape, provided one exists. Tensor and tile reshape share this rule.
+ * rectangle. Case 4 is the general rule, and for a static region it is *exact*:
+ * it accepts a region if and only if some box under @p new_shape denotes the
+ * very same flat cells. Tensor and tile reshape share this rule.
+ *
+ * Case 4 reads the region as the runs of elements it fills. Neighbouring source
+ * axes belong to one run while the lower one is fully valid or the upper one is
+ * pinned to a single coordinate; anywhere else the upper axis's stride survives
+ * into the region and cuts it. Each run holds a flat prefix of its own volume,
+ * so the region maps exactly when @p new_shape groups its own dimensions into
+ * the same runs and each run's prefix falls on a dimension boundary there. A
+ * flat prefix of the whole buffer is the one-run case; ``[2, 2, 2]`` valid
+ * ``[2, 1, 2]`` is the two-run case ``2 | 4``, which ``[2, 4]`` spells as valid
+ * ``[2, 2]`` and ``[8]`` cannot spell at all.
  *
  * Case 4 is the only one that reasons about flat positions, so it is the only
  * one that depends on storage order. Pass @p row_major_contiguous false for a
@@ -540,6 +550,15 @@ void ValidateDropDimsValidExtents(const std::vector<int64_t>& drop_dims,
  * ``DN`` / ``NZ`` tensor) and a partial region that needs case 4 is rejected
  * rather than mapped against the wrong flat order. Cases 1-3 relabel axes
  * without consulting flat positions and hold under any layout.
+ *
+ * A symbolic extent narrows what case 4 can prove, but does not by itself
+ * reject: *any* run may carry a symbolic **valid** extent through unchanged,
+ * onto a target dimension of its own run whose step is exactly that run's
+ * trailing volume. What has to be static is the **physical** geometry the region
+ * is measured against -- the target extents, the extents below each run's free
+ * axis, the free axis itself on the symbolic path (its dimension has to be
+ * provably wide enough), and, once the region cuts into more than one run, each
+ * run's volume. Anything less is rejected rather than guessed.
  *
  * @param src_valid Effective valid shape of the source, resolved by ``GetValidShape``
  * @param in_shape Physical shape of the source, same rank as @p src_valid

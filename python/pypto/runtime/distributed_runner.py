@@ -733,7 +733,7 @@ def _make_call_config(
             )
             call_config.enable_scope_stats = dfx.enable_scope_stats
             call_config.enable_chip_swimlane = dfx.enable_chip_swimlane
-            # Base dir shared by every chip; ``_submit_chip`` namespaces it per
+            # Base dir shared by every chip; the runtime namespaces it per
             # dispatch (``<dfx_base>/rank{worker}/d{k}``) so per-dispatch
             # artifacts (pmu.csv, deps.json, chip_swimlane_records.json, ...) don't
             # overwrite each other — even when one card runs multiple dispatches.
@@ -796,11 +796,11 @@ def _run_l3_swimlane_two_pass(
 
 
 # A dispatch's DFX artifacts live at ``<dfx_base>/<rank label>/d{k}``. The
-# producer (``_submit_chip``) and the consumers (``_clear_dfx_dispatch_dirs``,
+# producer (the ChipWorker child) and the consumers (``_clear_dfx_dispatch_dirs``,
 # ``_collect_l3_swimlane``) must agree on that scheme, and drift between them is
 # *silent* — a glob that no longer matches simply clears/converts nothing rather
 # than raising. The globs below are what the two consumers share; the label
-# builder names the producer's half of the contract in one place.
+# builder names this side's half of the contract in one place.
 _RANK_DIR_GLOB = "rank*"
 _DISPATCH_DIR_GLOB = "d[0-9]*"
 
@@ -896,7 +896,7 @@ def _record_dispatch_program(orch: Any, callable_id: Any, disp_dir: Path) -> Non
 
 
 def _submit_chip(orch: Any, callable_id: Any, task_args: Any, config: Any, worker: int | None) -> Any:
-    """``orch.submit_next_level`` with per-dispatch DFX ``output_prefix`` isolation.
+    """``orch.submit_next_level`` that stamps each dispatch's DFX directory.
 
     The runtime path helpers root every diagnostic artifact at a fixed filename
     under ``output_prefix`` (``<prefix>/pmu.csv`` etc.), so any two dispatches
@@ -904,21 +904,19 @@ def _submit_chip(orch: Any, callable_id: Any, task_args: Any, config: Any, worke
     enough: one card may receive several dispatches in a single host_orch run
     (pipeline stages, expert kernels, or genuinely different chip programs all
     pinned to the same ``device``), and each re-init+finalize of the runtime's
-    per-run collector rewrites the fixed-name file. So this wrapper appends
-    ``/rank{worker}/d{k}`` — card *and* the card's k-th dispatch — for the
-    duration of the submit, then restores the shared ``config``. The restore is
-    safe because ``submit_next_level`` copies the ``CallConfig`` into the task
-    slot synchronously (orchestrator ``s.config = config``) before it returns,
-    so it never races the already-queued task.
+    per-run collector rewrites the fixed-name file.
+
+    The ChipWorker child applies that ``rank{worker}/d{k}`` split itself, so
+    this wrapper only derives the same directory — for the marker below and the
+    offline post-pass — and forwards ``config`` untouched.
 
     ``k`` comes from a per-card counter on ``orch`` reset at the top of every
     run (see :func:`_reset_dfx_dispatch_state`), so the numbering is
-    deterministic and matches across the swimlane two-pass. The dispatched
-    program is stamped into the same directory by
+    deterministic, matches across the swimlane two-pass, and tracks the child's
+    own counter. The dispatched program is stamped into that directory by
     :func:`_record_dispatch_program`, so the offline post-pass can label the
     records with the right program's kernel names.
 
-    Every dispatch is namespaced ``rank{worker}/d{k}`` by the chip it runs on.
     When DFX is off (``output_prefix`` unset) the call is forwarded unchanged.
 
     The codegen routes every chip dispatch through this wrapper — a rank-pinned
@@ -938,12 +936,8 @@ def _submit_chip(orch: Any, callable_id: Any, task_args: Any, config: Any, worke
     rank_label = _dfx_rank_label(worker)
     k = idx_map.get(rank_label, 0)
     idx_map[rank_label] = k + 1
-    config.output_prefix = f"{base}/{rank_label}/d{k}"
-    _record_dispatch_program(orch, callable_id, Path(config.output_prefix))
-    try:
-        return orch.submit_next_level(callable_id, task_args, config, worker=worker)
-    finally:
-        config.output_prefix = base
+    _record_dispatch_program(orch, callable_id, Path(f"{base}/{rank_label}/d{k}"))
+    return orch.submit_next_level(callable_id, task_args, config, worker=worker)
 
 
 def _clear_dfx_dispatch_dirs(dfx_base: Path) -> None:
@@ -1034,8 +1028,8 @@ def _collect_l3_swimlane(output_dir: Path, platform: str) -> None:
 
     The runtime writes ``rank{r}/d{k}/deps.json`` in the graph pass and
     ``rank{r}/d{k}/chip_swimlane_records.json`` in the clean timing pass
-    (``_submit_chip`` namespaces the directory by card *and* the card's k-th
-    dispatch, and both passes reset that counter). Globbing ``rank*`` — rather
+    (the directory is namespaced by card *and* the card's k-th dispatch, and
+    both passes restart that numbering). Globbing ``rank*`` — rather
     than iterating a rank count — picks up
     whichever cards actually ran, so a comm-less / single-card L3 program (which never
     creates ``rank{0..n}``) still has its records converted. This best-effort
@@ -1087,7 +1081,7 @@ def _collect_l3_swimlane(output_dir: Path, platform: str) -> None:
     rank_dirs = sorted(d for d in dfx_base.glob(_RANK_DIR_GLOB) if d.is_dir())
     for rank_dir in rank_dirs:
         # One card may have run several dispatches: ``<rank>/d0``, ``d1``, ...
-        # Match only ``d`` + digits (the names ``_submit_chip`` emits) so an
+        # Match only ``d`` + digits (the names the runtime emits) so an
         # unrelated diagnostic dir under rank_dir is never picked up.
         dispatch_dirs = sorted(d for d in rank_dir.glob(_DISPATCH_DIR_GLOB) if d.is_dir())
         for disp_dir in dispatch_dirs:
@@ -1170,8 +1164,8 @@ def _make_dispatch_orchestration(
 
     def orch_fn(orch, _unused_args, _unused_cfg):
         # Reset the per-card DFX dispatch counter at the start of every run so
-        # ``_submit_chip`` numbers a card's dispatches ``d0, d1, ...`` fresh each
-        # pass. Two-pass swimlane reissues the same dispatch order, so pass 1
+        # a card's dispatches are numbered ``d0, d1, ...`` fresh each pass.
+        # Two-pass swimlane reissues the same dispatch order, so pass 1
         # (deps.json) and pass 2 (records) land the same dispatch in the same
         # ``rank{w}/d{k}`` dir — letting the converter join them. The same call
         # publishes the callable -> L2 program names ``_submit_chip`` stamps into

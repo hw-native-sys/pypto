@@ -13,6 +13,21 @@ x: pl.INT64 = expr
 y: pl.Tensor[[4], pl.FP32] = tensor_op(a)
 ```
 
+Augmented assignments such as `acc += ...` and `acc[...] += ...` are not
+supported. The parser reports the source statement and an explicit-assignment
+hint. For matrix reductions, use `matmul_acc` with `init_cond`:
+
+```python
+acc[t0 : t0 + R, :] = pl.matmul_acc(
+    acc[t0 : t0 + R, :], x_k, w_k, b_trans=True, init_cond=(k0 == 0)
+)
+```
+
+The first K step overwrites only that window; later steps accumulate into it.
+Other windows retain their values. The compiler can pack equal-size row windows
+of a local accumulator into contiguous L0C windows; see
+[accumulator row windows](../passes/14-flatten_tile_nd_to_2d.md#logical-accumulator-row-windows).
+
 ### If Statement (SSA-style)
 
 ```python
@@ -101,7 +116,7 @@ for (x,) in pl.while_(init_values=(x_init,)):
 | `pl.spmd(N, optimizations=[pl.split(MODE)])` | `Spmd(InCore(split=MODE))` | Split hint applies to the inner InCore (both forms) |
 | `pl.spmd(N, optimizations=[pl.cross_core_slot(slot_num=N)])` | `Spmd(InCore(slot_num=N))` | Slot count applies to the inner InCore (both forms); combinable with `pl.split(MODE)` |
 | `pl.scope(mode=pl.ScopeMode.MANUAL)` / `pl.manual_scope()` | `Runtime(manual=true)` | Orchestrator MANUAL scope — user manages task ordering. Allowed in either `auto_scope` mode (it is a dependency-semantics choice). See [Manual dependency primitives](02-manual_dependencies.md#manual-dependency-primitives) |
-| `pl.scope()` | `Runtime(manual=false)` | Orchestrator AUTO scope (`SIMPLER_SCOPE()`). Hand-placing one requires `@pl.function(auto_scope=False)` (in the default `auto_scope=True` the compiler owns AUTO placement). See [MaterializeRuntimeScopes](../passes/48-materialize_runtime_scopes.md) |
+| `pl.scope()` | `Runtime(manual=false)` | Orchestrator AUTO scope (`SIMPLER_SCOPE()`). Hand-placing one requires `@pl.function(auto_scope=False)` (in the default `auto_scope=True` the compiler owns AUTO placement). See [MaterializeRuntimeScopes](../passes/49-materialize_runtime_scopes.md) |
 
 See [Scopes and Placement](../../user/language/04-scopes.md) for examples.
 

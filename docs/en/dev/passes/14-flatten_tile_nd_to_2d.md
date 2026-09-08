@@ -235,6 +235,53 @@ accumulator at most 16 columns wide, which fits a single L0C block column and
 needs no packing.
 ```
 
+## Logical accumulator row windows
+
+The same packing supports a local 2D accumulator updated through
+`acc[...] = pl.matmul_acc(acc[...], lhs, rhs, init_cond=...)`. The DSL keeps its
+logical row coordinates. For a `[T*R, N]` accumulator partitioned into `R`-row
+windows, the physical allocation becomes `[R, T*N]`:
+
+```python
+# Logical window
+win = pl.tile.slice(acc, [16, 32], [16, 0])
+part = pl.tile.matmul_acc(win, a, b, init_cond=True)
+acc_updated = pl.tile.assemble(acc, part, [16, 0])
+
+# Packed window: acc's allocation changes from [32, 32] to [16, 64]
+win = pl.tile.slice(acc, [16, 32], [0, 32])
+part = pl.tile.matmul_acc(win, a, b, init_cond=True)
+acc_updated = pl.tile.assemble(acc, part, [0, 32])
+```
+
+For runtime `t0`, the column offset is `(t0 // R) * N + n0`. The writeback
+retains the computation's def-use edge and needs no L0C-to-L0C copy. A final
+whole-accumulator store becomes one store per packed window at logical row
+offset `t * R`. This preserves the K-outer, row-inner loop order and its weight
+reuse, including runtime row-loop bounds.
+
+Only windows the MAD cannot already address are packed. A window at most 16
+columns wide that lies inside one 16-column block is a single L0C block column,
+so there is no second column for the compact write to mis-stride and pto-isa's
+`MadAccStrideCompatible` accepts it. The window's own column extent decides
+this, not the parent's: ptoas resolves a row window to the parent's physical
+`Rows` but the window's `Cols`, so a `[16, 16]` window of a `[48, 32]`
+accumulator is addressable. Those chains pass through untouched, and none of
+the requirements below apply to them — seeding a chain the hardware already
+accepts would subject a working kernel to the rejections listed here. The
+exemption deliberately matches `CanonicalizeTileSlice`'s
+`CheckAccWindowContiguous`, so a window left unpacked here is not refused two
+passes later.
+
+Packing requires one compiler-allocated buffer; equal, static row-window
+heights that divide the parent height; provably aligned row offsets; full valid
+shapes; FP32/INT32 elements; 16-aligned window height and parent width; and a
+packed allocation that fits L0C after the target's physical row alignment.
+Runtime alignment proofs currently cover power-of-two window heights. Each
+assemble must write a `matmul_acc` result back to the same window it read.
+Explicit MemRefs and consumers requiring the whole logical accumulator in a
+different layout are rejected with a diagnostic rather than silently repacked.
+
 ## Example
 
 **Before**:

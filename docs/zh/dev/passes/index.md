@@ -54,18 +54,19 @@ pass；`91` 及以后保留给"在多个位置运行的 pass"以及"根本不是
 | 37 | [AllocateMemoryAddr](37-allocate_memory_addr.md) | 为已有 alloc 操作分配真实地址 |
 | 38 | [FoldNoOpReshape](38-fold_no_op_reshape.md) | 折叠既不改变物理形状也不改变分配的 `tile.reshape` |
 | 39 | [FuseCreateAssembleToSlice](39-fuse_create_assemble_to_slice.md) | 把 `tensor.create` + `tensor.assemble` 融合为单个 `tensor.slice` 视图 |
-| 40 | [DeriveCallDirections](40-derive_call_directions.md) | 先物化包装函数的 `ParamDirection`，再为每个调用逐实参推导 `ArgDirection` |
-| 41 | [AutoDeriveTaskDependencies](41-auto_derive_task_dependencies.md) | 推导保守的任务间依赖边 |
-| 42 | [ExpandManualPhaseFence](42-expand_manual_phase_fence.md) | 压缩 manual scope 中收益明确的全数组 `TaskId` 依赖 |
-| 43 | [SynthesizeAllReduceSignals](43-synthesize_allreduce_signals.md) | 把 host allreduce 的可选 signal 转为显式的内部 signal IR |
-| 44 | [MaterializeCommDomainScopes](44-materialize_comm_domain_scopes.md) | 在每个 host 编排函数体内装配 `WindowBuffer` 与 `CommDomainScopeStmt` 包装 |
-| 45 | [LowerHostTensorCollectives](45-lower_host_tensor_collectives.md) | 把 host 级 tensor 集合通信改写为内部 builtin chip 派发 |
-| 46 | [MaterializeDistTensorCtx](46-materialize_dist_tensor_ctx.md) | 为每个 `DistributedTensor` 物化显式的 `CommCtx` 参数与实参 |
-| 47 | [LegalizeGraphBoundary](47-legalize_graph_boundary.md) | 把 `Graph` 函数体内派生的边界标量外提到调用点，并拒绝 `host_build_graph` runtime 无法录制的边界 |
-| 48 | [MaterializeRuntimeScopes](48-materialize_runtime_scopes.md) | 插入 AUTO `RuntimeScopeStmt` 使编排 codegen 能 1:1 发射 `SIMPLER_SCOPE` |
-| 49 | [ClassifyIterArgCarry](49-classify_iter_arg_carry.md) | 把编排层 `ForStmt` 的每个 iter_arg 分类为平凡别名或需物化的重绑定携带 |
-| 50 | [InsertCommFence](50-insert_comm_fence.md) | 为每个发布性写入打标记（本地：region `system.cacheinvalid` + `system.fence`；远端写：仅 fence；opaque 写：whole-GM），并为每个 wait 插入 whole-GM `system.cacheinvalid`；notify 本身不加任何标记 |
-| 51 | [MaterializeValidShapeSymbols](51-materialize_valid_shape_symbols.md) | 将设备 kernel 中无法绑定的 `valid_shape` 符号转换为前置的 `Scalar[INDEX]` 参数，并传入调用方的实际有效范围 |
+| 40 | [LowerL2TensorCollectives](40-lower_l2_tensor_collectives.md) | 把写在 CHIP orchestration 函数体里的托管集合通信改写成一个本地 builtin AIV task，不按设备扇出，也不产生嵌套 L2 dispatch |
+| 41 | [DeriveCallDirections](41-derive_call_directions.md) | 先物化包装函数的 `ParamDirection`，再为每个调用逐实参推导 `ArgDirection` |
+| 42 | [AutoDeriveTaskDependencies](42-auto_derive_task_dependencies.md) | 推导保守的任务间依赖边 |
+| 43 | [ExpandManualPhaseFence](43-expand_manual_phase_fence.md) | 压缩 manual scope 中收益明确的全数组 `TaskId` 依赖 |
+| 44 | [SynthesizeAllReduceSignals](44-synthesize_allreduce_signals.md) | 把 host allreduce 的可选 signal 转为显式的内部 signal IR |
+| 45 | [MaterializeCommDomainScopes](45-materialize_comm_domain_scopes.md) | 在每个 host 编排函数体内装配 `WindowBuffer` 与 `CommDomainScopeStmt` 包装 |
+| 46 | [LowerHostTensorCollectives](46-lower_host_tensor_collectives.md) | 把 host 级 tensor 集合通信改写为内部 builtin chip 派发 |
+| 47 | [MaterializeDistTensorCtx](47-materialize_dist_tensor_ctx.md) | 为每个 `DistributedTensor` 物化显式的 `CommCtx` 参数与实参 |
+| 48 | [LegalizeGraphBoundary](48-legalize_graph_boundary.md) | 把 `Graph` 函数体内派生的边界标量外提到调用点，并拒绝 `host_build_graph` runtime 无法录制的边界 |
+| 49 | [MaterializeRuntimeScopes](49-materialize_runtime_scopes.md) | 插入 AUTO `RuntimeScopeStmt` 使编排 codegen 能 1:1 发射 `SIMPLER_SCOPE` |
+| 50 | [ClassifyIterArgCarry](50-classify_iter_arg_carry.md) | 把编排层 `ForStmt` 的每个 iter_arg 分类为平凡别名或需物化的重绑定携带 |
+| 51 | [InsertCommFence](51-insert_comm_fence.md) | 为每个发布性写入打标记（本地：region `system.cacheinvalid` + `system.fence`；远端写：仅 fence；opaque 写：whole-GM），并为每个 wait 插入 whole-GM `system.cacheinvalid`；notify 本身不加任何标记 |
+| 52 | [MaterializeValidShapeSymbols](52-materialize_valid_shape_symbols.md) | 将设备 kernel 中无法绑定的 `valid_shape` 符号转换为前置的 `Scalar[INDEX]` 参数，并传入调用方的实际有效范围 |
 
 ## 默认流水线之外
 

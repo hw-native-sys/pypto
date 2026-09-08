@@ -310,9 +310,20 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
     // row_major -- an explicit claim contradicting InferImplicitTileLayoutFromShape,
     // which makes it col_major. Because the two disagreed the view could not
     // canonicalize away, and a downstream row_expand_add read the wrong layout.
-  } else if (auto last_dim = As<ConstInt>(shapes_tuple->elements_.back());
-             last_dim && last_dim->value_ == 1) {
-    tile_view.blayout = TileLayout::col_major;
+    //
+    // Derive the layout from the shared helper rather than re-deriving it here.
+    // A hand-rolled `shape.back() == 1` test agrees with the helper only on a
+    // rank-2 shape whose rows exceed one, and diverges on exactly the shapes
+    // the helper excludes: a `[1, 1]` tile (the helper needs rows > 1 for a
+    // column to mean anything) and any rank != 2 shape ending in 1. On those
+    // the stamp was an explicit col_major the helper contradicts, so it could
+    // not canonicalize away and rode into codegen, where `pto.alloc_tile`
+    // rejects a col-major none_box tile whose column byte size
+    // (rows * sizeof(dtype)) is not 32-byte aligned -- 4 bytes for a one-row
+    // FP32 carrier. Routing both through one helper is what keeps them from
+    // drifting again.
+  } else {
+    tile_view.blayout = tile_view_semantics::InferImplicitTileLayoutFromShape(shapes_tuple->elements_);
   }
 
   // Build tile shape from shapes tuple (always in source-tensor coordinates).

@@ -146,6 +146,9 @@ print(pto_code)
 | `tile.addsc(src0, scalar, carry)` | `pto.taddsc` (`src0 + scalar + carry`) |
 | `tile.subsc(src0, scalar, carry)` | `pto.tsubsc` (`src0 - scalar + carry`) |
 | `tile.adds(tile, scalar)` | `pto.tadds` (tile + scalar) |
+| `tile.and_(lhs, rhs)` / `tile.ands(lhs, scalar)` | `pto.tand` / `pto.tands`; scalar is same-width signless `iN` |
+| `tile.or_(lhs, rhs)` / `tile.ors(lhs, scalar)` | `pto.tor` / `pto.tors`; scalar is same-width signless `iN` |
+| `tile.xor(lhs, rhs, tmp)` / `tile.xors(lhs, scalar, tmp)` | `pto.txor` / `pto.txors`; scalar is same-width signless `iN` |
 | `tile.fillpad_expand(src, shape)` | `pto.tfillpad_expand ins(%src) outs(%dst)` (the `shape` tuple is type-deduction only; the larger `dst` and its pad come from the result type) |
 
 **`tile.slice` / `tile.assemble` lowering details.**  Both ops are lowered

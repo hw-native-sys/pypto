@@ -12,6 +12,20 @@ x: pl.INT64 = expr
 y: pl.Tensor[[4], pl.FP32] = tensor_op(a)
 ```
 
+不支持 `acc += ...` 和 `acc[...] += ...` 等增量赋值（augmented assignment）。
+解析器会标出原语句，并提示使用显式赋值。矩阵归约应使用带 `init_cond` 的
+`matmul_acc`：
+
+```python
+acc[t0 : t0 + R, :] = pl.matmul_acc(
+    acc[t0 : t0 + R, :], x_k, w_k, b_trans=True, init_cond=(k0 == 0)
+)
+```
+
+第一个 K 步只覆盖该窗口，后续步骤在该窗口内累加，其他窗口保留原值。
+编译器可将局部累加器中大小一致的行窗口打包为连续的 L0C 窗口；参见
+[累加器逻辑行窗口](../passes/14-flatten_tile_nd_to_2d.md#累加器逻辑行窗口)。
+
 ### If 语句 (SSA 风格)
 
 ```python
@@ -100,7 +114,7 @@ for (x,) in pl.while_(init_values=(x_init,)):
 | `pl.spmd(N, optimizations=[pl.split(MODE)])` | `Spmd(InCore(split=MODE))` | split 提示作用于内层 InCore（两种形式均适用） |
 | `pl.spmd(N, optimizations=[pl.cross_core_slot(slot_num=N)])` | `Spmd(InCore(slot_num=N))` | 槽位数作用于内层 InCore（两种形式均适用），可与 `pl.split(MODE)` 组合 |
 | `pl.scope(mode=pl.ScopeMode.MANUAL)` / `pl.manual_scope()` | `Runtime(manual=true)` | orchestrator 的 MANUAL scope——由用户管理任务排序。两种 `auto_scope` 模式下都可用（它是依赖语义选择）。见[手工依赖原语](02-manual_dependencies.md#手工依赖原语) |
-| `pl.scope()` | `Runtime(manual=false)` | orchestrator 的 AUTO scope（`SIMPLER_SCOPE()`）。手写它需要 `@pl.function(auto_scope=False)`（默认 `auto_scope=True` 下由编译器决定 AUTO 放置）。见 [MaterializeRuntimeScopes](../passes/48-materialize_runtime_scopes.md) |
+| `pl.scope()` | `Runtime(manual=false)` | orchestrator 的 AUTO scope（`SIMPLER_SCOPE()`）。手写它需要 `@pl.function(auto_scope=False)`（默认 `auto_scope=True` 下由编译器决定 AUTO 放置）。见 [MaterializeRuntimeScopes](../passes/49-materialize_runtime_scopes.md) |
 
 #### `pl.spmd` 多 block 派发
 

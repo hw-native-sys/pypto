@@ -313,15 +313,18 @@ def pytest_addoption(parser):
         "pypto.runtime.worker._device_init_lock.",
     )
     parser.addoption(
-        "--allow-inline-cases",
+        "--strict-case-discovery",
         action="store_true",
         default=False,
-        help="Do not fail collection when a test reaches test_runner without a case "
-        "collection could read. Every system test declares its case today, so an "
-        "undeclared one is a regression -- the pool cannot see it and it compiles one "
-        "at a time. This is an ad-hoc local escape; a case that permanently cannot be "
-        "a collection-time value carries @pytest.mark.inline_case(reason=...) instead, "
-        "which exempts that one test rather than the whole session.",
+        help="Fail collection when a test reaches test_runner without a case collection "
+        "could read. Every system test declares its case today, so an undeclared one is "
+        "a regression: the pool cannot see it and it compiles one at a time. Off by "
+        "default because discovery legitimately gives up on some bodies -- a "
+        "`pytest.importorskip` for an absent module raises out of the walk and is "
+        "recovered as 'unresolvable' -- and a developer's run must not abort over that. "
+        "CI turns it on for the steps where an undeclared case costs real time. A case "
+        "that permanently cannot be a collection-time value carries "
+        "@pytest.mark.inline_case(reason=...), which exempts that one test either way.",
     )
     parser.addoption(
         "--dump-args",
@@ -1107,8 +1110,39 @@ def _eval_arg_node(
         kw = {k.arg: _eval_arg_node(k.value, params, localns, globalns) for k in node.keywords if k.arg}
         if any(k.arg is None for k in node.keywords):
             raise _Unresolvable("**kwargs")
-        return fn(*a, **kw)
+        # This is the one place discovery *runs* code out of a test body, so it
+        # is the one place that can raise anything the body could — including
+        # pytest's own control-flow exceptions (``pytest.importorskip`` raises
+        # ``Skipped``), which derive from ``BaseException`` and would sail
+        # straight past the ``except Exception`` guards at both call sites. A
+        # ``Skipped`` escaping ``pytest_collection_finish`` is not a skip: under
+        # xdist it becomes a session-wide INTERNALERROR that reports zero tests.
+        # A call we cannot evaluate is just an unresolvable node.
+        try:
+            return fn(*a, **kw)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:  # noqa: BLE001 — best-effort evaluation, never abort collection
+            raise _Unresolvable(f"{ast.unparse(node)}: {exc!r}") from exc
     raise _Unresolvable(ast.dump(node))
+
+
+def _is_st_item(item: pytest.Item) -> bool:
+    """Is *item* an ST test — i.e. was it collected from under ``tests/st/``?
+
+    ``pytest_collection_finish`` is a *session* hook, so once this conftest is
+    loaded it fires for every collected item, not just the ones underneath it.
+    In a combined ``pytest tests/ut tests/st`` run that means handing unit-test
+    bodies to a walk that parses and partially *evaluates* them, hunting for
+    ``PTOTestCase`` constructors they cannot contain. Scope the walk instead.
+    """
+    path = getattr(item, "path", None) or getattr(item, "fspath", None)
+    if path is None:
+        return False
+    try:
+        return Path(str(path)).resolve().is_relative_to(_ST_DIR.resolve())
+    except (OSError, ValueError):
+        return False
 
 
 def _collect_declared_case(
@@ -1237,8 +1271,14 @@ def _collect_test_case_from_item(
             args = [_eval_arg_node(a, params, localns, globalns) for a in node.args]
             kwargs = {kw.arg: _eval_arg_node(kw.value, params, localns, globalns) for kw in node.keywords}
             instance = func(*args, **kwargs)
-        except Exception:
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:  # noqa: BLE001
             # _Unresolvable arg, or a constructor mismatch — leave for inline.
+            # BaseException for the same reason as the invoke in
+            # ``_eval_arg_node``: this runs a constructor out of a test body, and
+            # a ``pytest.skip`` guard inside one must fall through to the inline
+            # path, not abort the whole collection.
             continue
         # Bind the item's platform so each matrix variant compiles its own
         # artefact; without this the variants share one cache key and only the
@@ -1307,6 +1347,9 @@ def _discover_cases(
     """
     discarded: dict[str, PTOTestCase] = {}
     for item in session.items:
+        # Session hook: without this it walks tests/ut bodies too. See _is_st_item.
+        if not _is_st_item(item):
+            continue
         runs = marker_skip_reason(item) is None
         found = _collect_test_case_from_item(
             item, seen if runs else discarded, session_memory_planner, session_platform
@@ -1326,11 +1369,18 @@ def _discover_cases(
     # version of this report sat unread while the count grew to 76. Collection
     # is also the right moment: nothing has run yet, so the failure is about the
     # declaration and not about a device.
-    if _undiscovered_items and not session.config.getoption("--allow-inline-cases"):
+    #
+    # Opt-in, though. Discovery gives up on some bodies for reasons that are not
+    # the author's fault -- `pytest.importorskip` for an absent module raises
+    # out of the walk and lands here as an undiscovered item -- and aborting a
+    # developer's session over that is exactly what #2676 fixed. CI passes the
+    # flag on the steps that pay for a serial compile; the end-of-run summary
+    # reports the same list everywhere else.
+    if _undiscovered_items and session.config.getoption("--strict-case-discovery"):
         raise pytest.UsageError(
             f"{len(_undiscovered_items)} test(s) reach test_runner with no case collection "
             f"could read.\n{_undiscovered_report(session.config)}\n"
-            "Pass --allow-inline-cases to run anyway."
+            "Declare them, or mark one @pytest.mark.inline_case(reason=...)."
         )
 
 

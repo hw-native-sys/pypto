@@ -31,6 +31,7 @@ from unittest import mock
 
 import pypto.language as pl
 import pytest
+from _orchestration_codegen_common import _out_of_scope_tensor_refs
 from pypto.ir.compile import compile as ir_compile
 from pypto.pypto_core import passes
 
@@ -668,6 +669,80 @@ def test_a_region_allocation_is_hoisted_to_the_call_site():
     # allocation out of its own loop needs successive launches ordered.
     assert entry.count(".add_inout(s0") == 1, entry
     assert entry.count(".add_inout(s1") == 1, entry
+
+
+@pl.program
+class _ScopeEscapingWriteback:
+    """A Graph whose boundary tensor is written twice inside a ``manual_scope``
+    and then read by a launch placed *after* the block."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def accum(
+        self,
+        c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+        a: pl.Tensor[[512, 128], pl.FP32],
+        base: pl.Scalar[pl.INDEX],
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
+        t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [base, 0], [128, 128])
+        pl.store(t, [0, 0], c)
+        return c
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def sink(
+        self,
+        c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+        a: pl.Tensor[[512, 128], pl.FP32],
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
+        t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [256, 0], [128, 128])
+        pl.store(t, [0, 0], c)
+        return c
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(
+        self,
+        a: pl.Tensor[[512, 128], pl.FP32],
+        c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+        layer_idx: pl.Scalar[pl.INDEX],
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
+        with pl.manual_scope():
+            c, t0 = pl.submit(self.accum, c, a, 0)
+            c, _t1 = pl.submit(self.accum, c, a, 128, deps=[t0])
+        c = self.sink(c, a)
+        return c
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        a: pl.Tensor[[512, 128], pl.FP32],
+        c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
+        for i in pl.range(4):
+            c = self.layer(a, c, i)
+        return c
+
+
+def test_a_boundary_writeback_never_becomes_a_block_scoped_rename():
+    """Issue #2605: the second writer's rename fell out of C++ scope.
+
+    A Graph body is emitted with an empty ``param_name_set``, so its parameter
+    names were absent from ``declared_var_names_``. The first writeback SSA
+    rename of ``c`` then took the parameter's own name and — because it was
+    reserved inside a ``pl.manual_scope`` — registered it in
+    ``manual_local_names_``. From there the parameter read as scope-*local*, so
+    the second writeback could no longer collapse onto it and minted
+    ``const Tensor& c__ssa_v2 = c;`` inside the block. The post-block launch
+    named it, and the orchestration ``.cpp`` failed to compile with
+    ``'c__ssa_v2' was not declared in this scope``.
+
+    Every reference must resolve to the parameter, which is what the same kernel
+    emits on the non-Graph path.
+    """
+    orch = _compile_orch(_ScopeEscapingWriteback)
+    body = _graph_body(orch)
+    assert _out_of_scope_tensor_refs(orch) == [], orch
+    # No alias is minted at all: writer and post-block reader name the parameter.
+    assert not re.search(r"const Tensor&\s+c__\w+\s*=", body), body
+    assert body.count("add_inout(c);") == 3, body
 
 
 if __name__ == "__main__":

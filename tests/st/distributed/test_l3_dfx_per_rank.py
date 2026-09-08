@@ -24,8 +24,8 @@ separate. Each rank here runs exactly one dispatch, so the dir is ``d0``:
       rank1/d0/scope_stats/scope_stats.jsonl
 
 This exercises the driver wiring (``_make_call_config`` setting the DFX flags +
-base ``output_prefix``) and the codegen wiring (``_submit_chip`` appending the
-``/rank{worker}/d{k}`` suffix per dispatch).
+base ``output_prefix``) and the runtime wiring that splits it into
+``/rank{worker}/d{k}`` per dispatch.
 
 ``enable_chip_swimlane`` is also covered: on L3 it co-enables dep_gen and emits
 ``rank{r}/d{k}/chip_swimlane_records.json`` + ``rank{r}/d{k}/deps.json`` per

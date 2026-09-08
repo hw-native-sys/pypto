@@ -36,10 +36,13 @@ from __future__ import annotations
 
 import ast
 import copy
+import enum
 import functools
 import inspect
 import textwrap
+import types
 import warnings
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -48,6 +51,8 @@ from pypto._function_attrs import DUAL_AIV_DISPATCH_ATTR
 from pypto.language.typing.array import Array as _LangArray
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import TensorLayout
+
+from ._source import _UNBOUND, function_namespace
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -122,7 +127,9 @@ class SpecializeContext:
     on demand via the :attr:`dynamic_dims` property.
 
     Attributes:
-        func_name: Python function name.
+        func_name: Name of the generated ``@pl.function`` method. Normally the
+            Python function's ``__name__``, but the JIT layer uniquifies it
+            when two distinct deps share a name (see ``source_func_name``).
         source: Dedented source code of the function.
         func_type: 'orchestration' | 'incore' | 'inline' | 'opaque' | 'graph' | None (auto).
         level: pl.Level value or None.
@@ -137,14 +144,10 @@ class SpecializeContext:
             call name that differs from the function it resolves to. The body
             transformer consults it when rewriting ``kern(...)`` into
             ``self.kernel(...)``; an absent entry means the two agree.
-        py_globals: Every name visible to the originating function — its
-            ``__globals__`` merged with its closure free vars, as built by
-            :func:`func_name_lookup`. The specializer uses this to resolve
-            int/float/bool constants (``BATCH`` imported from a config module,
-            a factory's captured rank count) by inlining them at the use site.
-            Closure free vars must be included: the generated program is
-            ``exec``'d in a fresh module, so a captured name that survives
-            unfolded is undefined there (#2449).
+        py_globals: A snapshot of the originating function's globals and closure
+            bindings. During JIT compilation this is the same namespace used
+            for cache-key construction and annotation resolution. The specializer
+            inlines referenced int/float/bool constants at their use sites.
         orig_file: Path to the user's real source file (``inspect.getsourcefile``),
             or ``None`` when the function has no on-disk source (REPL / exec).
             Used to map generated diagnostics back to the user's ``.py`` (#1612).
@@ -170,7 +173,7 @@ class SpecializeContext:
     scalar_values: dict[str, int | float | bool]
     scalar_dtypes: dict[str, DataType]
     dep_names: list[str] = field(default_factory=list)
-    py_globals: dict[str, Any] = field(default_factory=dict)
+    py_globals: Mapping[str, Any] = field(default_factory=dict)
     orig_file: str | None = None
     orig_start_line: int = 1
     orig_col_offset: int = 0
@@ -190,6 +193,17 @@ class SpecializeContext:
     # Also appended at the tail (see above): ``call name -> generated function
     # name`` for the deps this function reaches under a different name.
     dep_func_names: dict[str, str] = field(default_factory=dict)
+    # Name of the ``def`` inside ``source`` — the Python ``__name__``. It differs
+    # from ``func_name`` whenever the JIT layer had to uniquify the generated
+    # name (two deps sharing a ``__name__``). Anything that looks the definition
+    # up in the *original* source must use ``source_def_name``; anything naming
+    # the *generated* function uses ``func_name``.
+    source_func_name: str | None = None
+
+    @property
+    def source_def_name(self) -> str:
+        """Name of the ``def`` to find in :attr:`source` (the Python name)."""
+        return self.source_func_name or self.func_name
 
     @property
     def dynamic_dims(self) -> set[tuple[str, int]]:
@@ -227,7 +241,7 @@ class SpecializeContext:
 # ---------------------------------------------------------------------------
 
 
-def func_name_lookup(func: Any) -> dict[str, Any]:
+def func_name_lookup(func: Any) -> Mapping[str, Any]:
     """Return ``func.__globals__`` merged with closure free-var bindings.
 
     A function defined inside a factory, a test method, or any other enclosing
@@ -242,16 +256,142 @@ def func_name_lookup(func: Any) -> dict[str, Any]:
     static shape resolution and body constant-folding therefore resolve against
     this mapping rather than ``__globals__`` alone.
     """
-    out: dict[str, Any] = dict(getattr(func, "__globals__", {}))
-    co_freevars = getattr(getattr(func, "__code__", None), "co_freevars", ())
-    closure = getattr(func, "__closure__", None) or ()
-    for fv_name, cell in zip(co_freevars, closure, strict=True):
+    return function_namespace(func)
+
+
+# ---------------------------------------------------------------------------
+# Free-name folding
+# ---------------------------------------------------------------------------
+#
+# The generated ``@pl.program`` source is parsed in a namespace holding only
+# ``pl`` and ``pld``, so any name the body inherits from its own module or an
+# enclosing function is undefined by the time the parser reads it. Such a name
+# has to be replaced, at its use site, by source text that evaluates back to the
+# same value -- there is nowhere else to put it, because a multi-function
+# ``@pl.jit`` program merges deps that may come from different modules and whose
+# namespaces can therefore disagree about a name.
+#
+# Everything below answers one question: can this value be written as generated
+# source? Values that cannot be are left alone, so the name survives and the
+# parser reports it exactly as before.
+
+
+@functools.lru_cache(maxsize=1)
+def _pl_symbol_index() -> tuple[dict[int, str], dict[Any, str]]:
+    """``pl``'s public namespace, indexed for rendering a value back to source.
+
+    Returns ``(enum_classes, values)``: ``id(EnumClass) -> "Mem"`` for every enum
+    type ``pl`` exports (members render as ``pl.Mem.Vec``), and ``value ->
+    "pl.INT8"`` for every exported singleton that is not an enum member -- in
+    practice the ``DataType`` constants. Names are visited in sorted order and
+    the first wins, so an alias pair resolves deterministically to the shorter
+    spelling (``pl.Mem``, not ``pl.MemorySpace``) -- the same one the IR printer
+    emits, which keeps generated and round-tripped source consistent.
+
+    Callables, classes and modules are excluded: a body naming one is not naming
+    a *value* the DSL can consume, and folding it would only turn a clear
+    "undefined name" into a confusing type error further in.
+    """
+    import pypto.language as pl  # noqa: PLC0415 — avoids a circular import at module load
+
+    enum_classes: dict[int, str] = {}
+    values: dict[Any, str] = {}
+    for attr in sorted(dir(pl)):
+        if attr.startswith("_"):
+            continue
+        value = getattr(pl, attr, None)
+        if isinstance(value, type):
+            if issubclass(value, enum.Enum):
+                enum_classes.setdefault(id(value), attr)
+            continue
+        # Enum members go through their class (above); literals render as
+        # literals; callables and modules are not values.
+        if isinstance(value, (enum.Enum, types.ModuleType, bool, int, float, str)) or callable(value):
+            continue
         try:
-            out[fv_name] = cell.cell_contents
-        except ValueError:
-            # Unbound closure cell — skip silently (matches _discover_deps).
-            pass
-    return out
+            values.setdefault(value, f"pl.{attr}")
+        except TypeError:
+            continue  # unhashable — not reachable by value lookup
+    return enum_classes, values
+
+
+def _pl_symbol_path(value: Any) -> str | None:
+    """The ``pl.`` path that evaluates to ``value``, or None if there is none."""
+    enum_classes, values = _pl_symbol_index()
+    if isinstance(value, enum.Enum):
+        cls_name = enum_classes.get(id(type(value)))
+        return f"pl.{cls_name}.{value.name}" if cls_name else None
+    try:
+        return values.get(value)
+    except TypeError:
+        return None  # unhashable, or a type whose __eq__ rejects the comparison
+
+
+def _render_free_value(value: Any) -> ast.expr | None:
+    """Render ``value`` as generated-source AST, or None when it cannot be written.
+
+    Covers what a DSL body actually passes to an operator: literals, the ``pl``
+    enum and ``DataType`` constants, and (possibly nested) lists/tuples of those
+    -- a shape held in a module constant, for instance. A sequence renders only
+    when every element does, so a half-rendered list can never reach the parser.
+    """
+    if isinstance(value, type):
+        return None
+    if isinstance(value, enum.Enum):
+        path = _pl_symbol_path(value)
+        return ast.parse(path, mode="eval").body if path else None
+    if value is None or isinstance(value, (bool, int, float, str)):
+        # Non-finite floats included: ``ast.unparse`` writes them as evaluable
+        # expressions (``1e309``, ``-1e309``, ``(1e309-1e309)``), not as the bare
+        # names ``inf`` / ``nan``, so a fill or padding value bound to one folds
+        # like any other float. Declining them here would have regressed support
+        # that predates this function.
+        return ast.Constant(value=value)
+    if isinstance(value, (list, tuple)):
+        elements = [_render_free_value(element) for element in value]
+        if any(element is None for element in elements):
+            return None
+        rendered = cast("list[ast.expr]", elements)
+        if isinstance(value, list):
+            return ast.List(elts=rendered, ctx=ast.Load())
+        return ast.Tuple(elts=rendered, ctx=ast.Load())
+    path = _pl_symbol_path(value)
+    return ast.parse(path, mode="eval").body if path else None
+
+
+def _bind_free_name(name: str, py_globals: Mapping[str, Any]) -> ast.expr | None:
+    """Render what ``name`` is bound to in ``py_globals``, or None if it does not fold.
+
+    None covers all three ways a name can fail to fold: it is not bound here, it
+    is an unbound closure cell, or its value has no source form.
+    """
+    if name not in py_globals:
+        return None
+    value = py_globals[name]
+    if value is _UNBOUND:
+        return None
+    return _render_free_value(value)
+
+
+def free_name_source(name: str, py_globals: Mapping[str, Any]) -> str | None:
+    """The generated-source text ``name`` folds to, or None when it does not fold.
+
+    The JIT cache key reads this so that a constant can never reach the generated
+    source without also reaching the hash: rebinding ``MODE`` from ``"trunc"`` to
+    ``"round"`` must invalidate the artifact exactly as rebinding an ``int``
+    extent does. Hashing the rendered *text* rather than the value keeps the two
+    definitions from drifting — the key depends on precisely what gets emitted.
+    """
+    rendered = _bind_free_name(name, py_globals)
+    return None if rendered is None else ast.unparse(rendered)
+
+
+def _fold_free_name(name: str, py_globals: Mapping[str, Any], node: ast.expr) -> ast.expr | None:
+    """:func:`_bind_free_name`, positioned at ``node`` so spans survive."""
+    rendered = _bind_free_name(name, py_globals)
+    if rendered is None:
+        return None
+    return ast.fix_missing_locations(ast.copy_location(rendered, node))
 
 
 # ---------------------------------------------------------------------------
@@ -559,7 +699,7 @@ class _BodyTransformer(ast.NodeTransformer):
         dep_names: set[str],
         param_names: list[str] | None = None,
         initial_used_names: set[str] | None = None,
-        py_globals: dict[str, Any] | None = None,
+        py_globals: Mapping[str, Any] | None = None,
         dep_param_names: dict[str, list[str]] | None = None,
         dep_func_names: dict[str, str] | None = None,
     ) -> None:
@@ -864,7 +1004,7 @@ class _BodyTransformer(ast.NodeTransformer):
 
     def visit_Name(self, node: ast.Name) -> ast.expr:
         """Replace scalar param references, inlined shape constants, renamed rebindings,
-        DynVar runtime references, and module-level int/float/bool constants from globals."""
+        DynVar runtime references, and free names bound to renderable values."""
         if isinstance(node.ctx, ast.Load):
             # Check active renames first — a rebinding supersedes any earlier inlining.
             if node.id in self._var_renames:
@@ -887,15 +1027,14 @@ class _BodyTransformer(ast.NodeTransformer):
             if node.id in self._dynvar_anchors and node.id not in self._used_names:
                 pname, dim_idx = self._dynvar_anchors[node.id]
                 return self._dyn_dim_expr(pname, dim_idx)
-            # Module-level constant inlining: only when the name is not also a
-            # local (function param or assigned-in-body) — those take priority.
+            # Free-name inlining: only when the name is not also a local (function
+            # param or assigned-in-body) — those take priority. ``_py_globals``
+            # is the defining function's own globals plus its closure cells, so a
+            # constant from an enclosing factory folds the same as a module one.
             if node.id not in self._used_names:
-                value = self._py_globals.get(node.id)
-                # Accept int/float (excluding bool, which would otherwise be picked
-                # up here despite being a separate semantic — but also bool is
-                # commonly used as a literal flag, so include it).
-                if isinstance(value, (int, float, bool)) and not isinstance(value, type):
-                    return ast.Constant(value=value)
+                folded = _fold_free_name(node.id, self._py_globals, node)
+                if folded is not None:
+                    return folded
         return node
 
     def visit_Attribute(self, node: ast.Attribute) -> ast.expr:
@@ -1209,16 +1348,18 @@ class _BodyTransformer(ast.NodeTransformer):
 # ---------------------------------------------------------------------------
 
 
-def _fold_const_names(node: ast.expr, py_globals: dict[str, Any]) -> ast.expr:
-    """Replace ``Name`` nodes bound to module int/float/bool constants with literals.
+def _fold_const_names(node: ast.expr, py_globals: Mapping[str, Any]) -> ast.expr:
+    """Replace ``Name`` nodes bound to renderable free values with their source form.
 
     An explicit tuple / scalar return annotation is copied into the generated
     ``@pl.program`` source verbatim (the return element has no ``TensorMeta`` to
     render from). Without folding, a symbolic shape dim (e.g.
     ``pl.Tensor[[BATCH, VOCAB], pl.FP32]``) would reach the parser as an
     unresolved name (``NameError: name 'BATCH' is not defined``). Fold the
-    function's own module constants — the same names the body transformer inlines
-    at use sites — so the emitted annotation carries concrete extents.
+    function's own free names — the same ones the body transformer inlines at use
+    sites, through the same :func:`_render_free_value` — so the emitted annotation
+    carries concrete extents and a dtype held in a constant (``pl.Tensor[[64],
+    DTYPE]``) survives too.
 
     The input AST is left untouched (a deep copy is transformed) because
     ``func_def`` is shared with the body specialization pass.
@@ -1226,10 +1367,7 @@ def _fold_const_names(node: ast.expr, py_globals: dict[str, Any]) -> ast.expr:
 
     class _Folder(ast.NodeTransformer):
         def visit_Name(self, name: ast.Name) -> ast.expr:
-            value = py_globals.get(name.id)
-            if isinstance(value, (int, float, bool)) and not isinstance(value, type):
-                return ast.copy_location(ast.Constant(value=value), name)
-            return name
+            return _fold_free_name(name.id, py_globals, name) or name
 
     return _Folder().visit(copy.deepcopy(node))
 
@@ -1239,7 +1377,7 @@ def _infer_return_type(
     tensor_meta: dict[str, TensorMeta],
     out_params: list[str],
     distributed_params: set[str] | None = None,
-    py_globals: dict[str, Any] | None = None,
+    py_globals: Mapping[str, Any] | None = None,
 ) -> str | None:
     """Infer the return type annotation string from the return statement.
 
@@ -1555,7 +1693,7 @@ def _original_def_line(ctx: SpecializeContext) -> int | None:
         tree = ast.parse(textwrap.dedent(ctx.source))
     except SyntaxError:
         return None
-    node = _find_func_def(tree, ctx.func_name)
+    node = _find_func_def(tree, ctx.source_def_name)
     return None if node is None else node.lineno
 
 
@@ -1734,8 +1872,8 @@ class Specializer:
         # Parse the source to AST
         src = textwrap.dedent(ctx.source)
         tree = ast.parse(src)
-        func_def = _find_func_def(tree, ctx.func_name)
-        assert func_def is not None, f"specialize: no def named {ctx.func_name!r} in its own source"
+        func_def = _find_func_def(tree, ctx.source_def_name)
+        assert func_def is not None, f"specialize: no def named {ctx.source_def_name!r} in its own source"
 
         # Classify parameters
         out_params, inout_params, tensor_params, scalar_dtype_strs, distributed_params = _classify_params(
@@ -1751,7 +1889,7 @@ class Specializer:
         is_inline = ctx.func_type == "inline"
         if is_inline and (out_params or inout_params):
             warnings.warn(
-                f"@pl.jit.inline helper '{ctx.func_name}' uses pl.Out[...]/pl.InOut[...] on "
+                f"@pl.jit.inline helper '{ctx.source_def_name}' uses pl.Out[...]/pl.InOut[...] on "
                 f"parameter(s) {(out_params + inout_params)!r}. Direction annotations are "
                 f"deprecated for inline helpers because the body is spliced at the call "
                 f"site before SSA conversion — the parameter is already an "
@@ -2118,7 +2256,10 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
 
     Args:
         func: The original Python function object.
-        func_name: The function name.
+        func_name: Name for the generated ``@pl.function``. Normally
+            ``func.__name__``; the JIT layer passes a uniquified name when two
+            distinct deps share a ``__name__``. The ``def`` is located in
+            ``func``'s own source by ``func.__name__`` either way.
         func_type: 'orchestration', 'incore', or None.
         level: pl.Level enum or None.
         tensor_meta: TensorMeta per tensor param name.
@@ -2163,6 +2304,7 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
 
     return SpecializeContext(
         func_name=func_name,
+        source_func_name=func.__name__,
         source=source,
         func_type=func_type,
         level=level,
@@ -2173,9 +2315,6 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
         dep_names=dep_names,
         dep_func_names=dep_func_names or {},
         auto_scope=auto_scope,
-        # Closure-aware: a factory-defined kernel captures its constants as free
-        # vars, which never appear in __globals__. Folding must see them or they
-        # survive verbatim into the generated source and are undefined there.
         py_globals=func_name_lookup(func),
         orig_file=orig_file,
         orig_start_line=orig_start_line,

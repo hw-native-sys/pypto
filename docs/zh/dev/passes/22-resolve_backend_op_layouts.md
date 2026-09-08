@@ -4,7 +4,7 @@
 
 ## 概述
 
-经过 `FlattenTileNdTo2D` 和 `InferTileMemorySpace` 之后，所有 tile op 都已是 2-D 形式且带有明确的 layout。多个 PTO elementwise op（在 `src/backend/common/pto_ops_common.cpp` 中注册）要求其 tile 操作数与结果均为 `row_major`。本 Pass 在使用点局部修复这些约束违反：
+经过 `FlattenTileNdTo2D` 和 `InferTileMemorySpace` 之后，所有 tile op 都已是 2-D 形式且带有明确的 layout。多个 PTO elementwise op（在 `src/backend/common/pto_ops_elementwise.cpp` 中注册）要求其 tile 操作数与结果均为 `row_major`。本 Pass 在使用点局部修复这些约束违反：
 
 1. 对每个 RHS 是 `Call` 的 `AssignStmt` / `EvalStmt`，调用 `Backend::GetTileLayoutSpec(op_name)` 查询约束。
 2. 若没有注册约束，或者所有受约束的 tile 输入与输出都已经是 `row_major`，则跳过。
@@ -12,7 +12,7 @@
 4. 对其他非 row-major tile 输入，在 call 前插入 `tile.move(arg, target_memory=<same>, blayout=row_major, slayout=none_box)`。
 5. 对原始结果类型不是 row-major 的 `AssignStmt`，先把修复后的 call 赋给一个 row-major 临时变量，再用 `tile.reshape`（列向量）或 `tile.move`（一般矩阵 tile）恢复原始结果 layout。
 
-本 Pass 是 **后端驱动** 的：被约束的 op 集合及其逐输入要求来自每个 op 的 `BackendOpRegistryEntry`（参见 `pto_ops_common.cpp` 中的 `set_input_layout` / `set_output_layout`）。Pass 自身保持后端无关——新增一个被约束的 op 只需登记它的 layout spec，无需修改本 Pass。
+本 Pass 是 **后端驱动** 的：被约束的 op 集合及其逐输入要求来自每个 op 的 `BackendOpRegistryEntry`（参见 `pto_ops_elementwise.cpp` 中的 `set_input_layout` / `set_output_layout`）。Pass 自身保持后端无关——新增一个被约束的 op 只需登记它的 layout spec，无需修改本 Pass。
 
 **前置要求**：
 
@@ -151,7 +151,16 @@ class After:
 | `python/pypto/pypto_core/passes.pyi`（`resolve_backend_op_layouts`） | 类型存根 |
 | `tests/ut/ir/transforms/test_resolve_backend_op_layouts_pass.py` | 单元测试（`[N, 1]` 向量上的 binary、unary、tile×scalar，以及通过 `tile.move` 进行矩阵 layout 修复） |
 
-Layout 约束通过 `BackendOpRegistryEntry::set_input_layout` / `set_output_layout` 在 `src/backend/common/pto_ops_common.cpp` 中按 op 注册（如 `RequiresRowMajorLayout` 列表中的 row-major elementwise op、`tile.cast`、`tile.rsqrt`、`tile.cmps`、`tile.sort32`、`tile.mscatter` 等）。
+Layout 约束通过 `BackendOpRegistryEntry::set_input_layout` / `set_output_layout` 在 `src/backend/common/pto_ops_elementwise.cpp` 中按 op 注册（如 `RowMajorOps()` 列表中的 row-major elementwise op、`tile.cast`、`tile.rsqrt`、`tile.cmps`、`tile.sort32`、`tile.mscatter` 等）。
+
+该文件 `kSimpleOps` 表中的每个条目都必须恰好归入下面两个集合之一，否则 `CheckSimpleOpLayoutClassified` 会让注册失败：
+
+| 集合 | 含义 | 示例 |
+| ---- | ---- | ---- |
+| `RowMajorOps()` | PTOAS 下降时把所有操作数与结果当作一段连续元素线性遍历，因此 `col_major` 操作数必须先被修复 | `tile.add`、`tile.minimums`、`tile.neg`、`tile.xors` |
+| `LayoutAwareOps()` | 下降过程自身读取操作数 layout，改写 layout 会改变该 op 的语义 | `tile.row_expand_sub`、`tile.row_sum`、`tile.matmul`、`tile.fillpad` |
+
+归类以算子**族**为单位：一个算子与它的标量 / 进位变体寻址方式相同，所以 `tile.maximum`、`tile.maximums`、`tile.minimum`、`tile.minimums` 同属一个集合。正是因为把一个族拆开，`col_major` 载体才会未经修复直达 `pto.tmins`，并在除首行外的每一行静默算出错误结果。
 
 Pass 源文件中的关键 helper：
 

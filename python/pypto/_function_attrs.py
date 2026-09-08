@@ -36,12 +36,25 @@ SPLIT_AIV_REGION_VALIDATED_ATTR = "split_aiv_region_validated"
 # (see pto_backend).
 EXTERNAL_SOURCE_ATTR = "external_source"
 
+# Package-resource handle (":pypto.runtime.builtins.collectives.<op>") naming the
+# builtin template package that supplies a compiler-synthesized kernel's C++
+# source (str). Written by LowerL2TensorCollectives on the AIV function it
+# synthesizes for a managed CHIP/L2 collective; the backend renders the package's
+# ``templates/kernel.cpp.in`` instead of running PyPTO codegen for that function.
+BUILTIN_TEMPLATE_DIR_ATTR = "builtin_template_dir"
+
+# Comma-separated ``key=value`` substitutions for the template named by
+# ``BUILTIN_TEMPLATE_DIR_ATTR`` (str), e.g. "dtype_cpp=float,ctx_arg_index=5".
+BUILTIN_TEMPLATE_VARS_ATTR = "builtin_template_vars"
+
 # Opt-out of automatic ``RuntimeScopeStmt`` materialization (bool). Absent means
 # True, so only the opt-out (False) is ever stored.
 AUTO_SCOPE_ATTR = "auto_scope"
 
 __all__ = [
     "AUTO_SCOPE_ATTR",
+    "BUILTIN_TEMPLATE_DIR_ATTR",
+    "BUILTIN_TEMPLATE_VARS_ATTR",
     "DUAL_AIV_DISPATCH_ATTR",
     "EXTERNAL_SOURCE_ATTR",
     "SPLIT_AIV_ATTR",

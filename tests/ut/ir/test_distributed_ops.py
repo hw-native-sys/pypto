@@ -2580,5 +2580,112 @@ def test_all_to_all_v_rejects_non_divisible_target_rows():
         ir.create_op_call("pld.tensor.all_to_all_v", args, {}, span)
 
 
+def test_all_to_all_v_core_num_defaults_to_one():
+    """An absent core_num means the single-block launch every rail starts from.
+
+    Keeping it optional is what lets IR built before the kwarg existed — hand-built
+    calls, programs deserialized from an older ``.pto`` — keep its meaning.
+    """
+    span = ir.Span.unknown()
+    call = ir.create_op_call("pld.tensor.all_to_all_v", _make_all_to_all_v_args(span), {}, span)
+    assert dict(call.kwargs).get("core_num", 1) == 1
+
+
+def test_all_to_all_v_carries_core_num_kwarg():
+    """An explicit core_num reaches the Call for the lowering rails to read."""
+    span = ir.Span.unknown()
+    call = ir.create_op_call("pld.tensor.all_to_all_v", _make_all_to_all_v_args(span), {"core_num": 4}, span)
+    assert dict(call.kwargs)["core_num"] == 4
+
+
+@pytest.mark.parametrize("core_num", [0, -1])
+def test_all_to_all_v_rejects_non_positive_core_num(core_num):
+    """No rail can launch zero or fewer blocks."""
+    span = ir.Span.unknown()
+    with pytest.raises(ValueError, match="core_num must be positive"):
+        ir.create_op_call(
+            "pld.tensor.all_to_all_v", _make_all_to_all_v_args(span), {"core_num": core_num}, span
+        )
+
+
+def test_all_to_all_v_rejects_input_target_alias():
+    """input is read while target receives incoming pushes — they must differ.
+
+    Reusing one buffer races this rank's outgoing reads against peers' writes,
+    so the two roles cannot be served by the same operand.
+    """
+    span = ir.Span.unknown()
+    args = _make_all_to_all_v_args(span)
+    args[0] = args[1]
+    with pytest.raises(ValueError, match="must be two distinct buffers"):
+        ir.create_op_call("pld.tensor.all_to_all_v", args, {}, span)
+
+
+def _strided_tensor_type(shape: list[int], stride: list[int], span: ir.Span) -> ir.TensorType:
+    shape_exprs: list[ir.Expr] = [ir.ConstInt(v, DataType.INT64, span) for v in shape]
+    stride_exprs: list[ir.Expr] = [ir.ConstInt(v, DataType.INT64, span) for v in stride]
+    view = ir.TensorView(stride_exprs, ir.TensorLayout.ND)
+    return ir.TensorType(shape_exprs, DataType.FP32, None, view)
+
+
+def test_all_to_all_v_accepts_packed_row_major_input_view():
+    """A view whose strides *are* the packed ones stays acceptable."""
+    span = ir.Span.unknown()
+    args = _make_all_to_all_v_args(span)
+    packed = _strided_tensor_type([_AAV_TOTAL, _AAV_SIZE], [_AAV_SIZE, 1], span)
+    args[0] = ir.Var("inp", packed, span)
+    call = ir.create_op_call("pld.tensor.all_to_all_v", args, {}, span)
+    assert isinstance(call.type, ir.DistributedTensorType)
+
+
+def test_all_to_all_v_rejects_statically_strided_input():
+    """Both rails address the payload with flat element arithmetic.
+
+    A gapped view would move the wrong bytes, so a stride vector that is
+    provably not the packed row-major one is rejected at construction.
+    """
+    span = ir.Span.unknown()
+    args = _make_all_to_all_v_args(span)
+    gapped = _strided_tensor_type([_AAV_TOTAL, _AAV_SIZE], [2 * _AAV_SIZE, 1], span)
+    args[0] = ir.Var("inp", gapped, span)
+    with pytest.raises(ValueError, match="packed row-major contiguous view"):
+        ir.create_op_call("pld.tensor.all_to_all_v", args, {}, span)
+
+
+@pytest.mark.parametrize(
+    ("index", "role", "shape"),
+    [(2, "signal", [_AAV_NR, 1]), (3, "send_counts", [_AAV_NR, 1]), (4, "recv_counts", [_AAV_NR, 1])],
+)
+def test_all_to_all_v_rejects_strided_control_operands(index, role, shape):
+    """The control operands are indexed as flatly as the payload.
+
+    The kernel reads `send_counts_base[dest]`, `signal_base + peer` and
+    `recv_counts_base + my_rank` without applying declared strides, so a gapped
+    view would read the wrong count or wait on the wrong signal cell.
+    """
+    span = ir.Span.unknown()
+    args = _make_all_to_all_v_args(span)
+    shape_exprs: list[ir.Expr] = [ir.ConstInt(v, DataType.INT64, span) for v in shape]
+    stride_exprs: list[ir.Expr] = [ir.ConstInt(v, DataType.INT64, span) for v in (4, 1)]
+    view = ir.TensorView(stride_exprs, ir.TensorLayout.ND)
+    gapped = ir.DistributedTensorType(shape_exprs, DataType.INT32, None, view)
+    args[index] = ir.Var(role, gapped, span)
+    with pytest.raises(ValueError, match="packed row-major contiguous view"):
+        ir.create_op_call("pld.tensor.all_to_all_v", args, {}, span)
+
+
+def test_all_to_all_v_rejects_partial_valid_shape_target():
+    """A valid_shape narrower than the shape is not a dense payload block."""
+    span = ir.Span.unknown()
+    args = _make_all_to_all_v_args(span)
+    shape_exprs: list[ir.Expr] = [ir.ConstInt(v, DataType.INT64, span) for v in (_AAV_TOTAL, _AAV_SIZE)]
+    stride_exprs: list[ir.Expr] = [ir.ConstInt(v, DataType.INT64, span) for v in (_AAV_SIZE, 1)]
+    valid_exprs: list[ir.Expr] = [ir.ConstInt(v, DataType.INT64, span) for v in (_AAV_TOTAL, _AAV_SIZE // 2)]
+    view = ir.TensorView(stride_exprs, ir.TensorLayout.ND, valid_exprs)
+    args[1] = ir.Var("target", ir.DistributedTensorType(shape_exprs, DataType.FP32, None, view), span)
+    with pytest.raises(ValueError, match="full, packed view"):
+        ir.create_op_call("pld.tensor.all_to_all_v", args, {}, span)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

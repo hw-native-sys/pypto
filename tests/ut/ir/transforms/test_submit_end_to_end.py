@@ -15,7 +15,7 @@ implicit tuple-augmented return type — visually indistinguishable from
 a plain function call. With the Submit IR kind plus the parser flip,
 those mid-pipeline dumps now use the source-level
 ``pl.submit(self.stage1, ..., deps=[...])`` form, matching what users
-write in the DSL. DeriveCallDirections (pass 40) lowers Submit → Call
+write in the DSL. DeriveCallDirections (pass 41) lowers Submit → Call
 so late passes and codegen are unaffected.
 """
 

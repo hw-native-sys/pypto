@@ -2,6 +2,83 @@
 
 函数声明形式、参数方向、跨模块复用，以及如何把 IR 打印回 Python 语法。
 
+## JIT 常量与编译复用
+
+`@pl.jit` 的函数体会被转写成 `@pl.program` 源码，并在只含 `pl` 与 `pld` 的命名空间中
+重新解析；因此函数体从所在模块或外层函数继承的名字，必须在其使用处被替换成能求值回
+同一个值的源码文本。可替换的范围包括：字面量（`int`、`float`、`bool`、`str`、`None`）、
+`pl` 的 dtype 与枚举常量（`pl.INT8`、`pl.Mem.Vec`、`pl.PadValue.zero`、`pl.NZ`），
+以及由它们嵌套构成的 list / tuple——例如放在常量里的 shape 或舍入模式。没有源码形式的
+值保持原样，于是该名字得以保留，由解析器报错。
+
+所有可替换的名字同时进入编译键（compilation key），包括传递 JIT helper 和源码注解中使用
+的常量。编译键直接对每个名字*实际生成的文本*取哈希，且与 specializer 使用同一个函数，
+因此两者不会脱节：改变生成源码的常量必然改变键，不可替换的值则不贡献任何内容。
+重新绑定被引用的常量会产生新的专门化（specialization）；修改无关全局变量，
+或修改被正文局部变量遮蔽的同名全局变量，不会使正文依赖键失效。
+
+```python
+BLOCK = 32
+
+@pl.jit
+def slice_kernel(x: pl.Tensor[[128, 128], pl.FP32]) -> pl.Tensor[[BLOCK, 128], pl.FP32]:
+    with pl.at(level=pl.Level.CORE_GROUP):
+        result = pl.slice(x, [BLOCK, 128], [0, 0])
+    return result
+
+first = slice_kernel.compile()
+BLOCK = 64
+second = slice_kernel.compile()  # A distinct specialization with 64 rows.
+```
+
+名称解析、键构造和专门化共用一次调用的命名空间快照（namespace snapshot）。
+捕获后重新绑定的常量影响下一次调用，不影响正在编译的产物。
+即使常量同名，各 helper 也保留各自的命名空间。重新绑定被引用的 JIT helper
+还会刷新依赖图。各并发调用在键构造和专门化期间始终使用自己捕获的依赖图。
+哈希还包含各 helper 的函数类型、层级和 `auto_scope` 设置，因此即使函数源码相同，
+重新绑定到具有不同编译属性的 helper 后也不会复用旧产物。
+
+每次请求只复制一次各模块的全局命名空间，各 helper 通过闭包覆盖层共享这份快照。
+未绑定的闭包 cell 仍会遮蔽同名全局变量。验证后的依赖图保留 Python 源码哈希；
+注解绑定不变时，复用已解析的布局。外部源码文件仍在每次请求时检查。
+被引用的闭包常量由源码依赖哈希覆盖，无需单独的闭包键组件。
+
+快照仅复制绑定：此常量跟踪机制不支持编译期间修改任意配置对象
+内部状态，或修改编译器/源码文件。本改动不启用持久产物缓存，编译对象仍在进程内复用。
+
+### 编译选项与诊断请求
+
+JIT 调用和 `kernel.compile()` 在查找进程内产物之前解析编译选项。
+省略 `config` 时使用与 `RunConfig()` 相同的默认值：`a2a3sim`、默认优化策略，
+以及关闭 pass dump。影响产物的选项进入缓存键，包括实际内存规划器、运行时 ABI，
+以及由 `PYPTO_EMIT_PTO_LOC` 控制的源码位置输出。
+`device_id`、`codegen_only` 和单独的 `save_kernels` 等运行控制不进入键。
+
+以下请求每次都重新编译，不读取或添加产物缓存条目：
+
+- `dump_passes=True` 或除 `PassDumpLevel.NONE` 外的 dump 级别，
+  以及 `dump_ptoas_passes=True`。
+- `compile_profiling=True`、活跃的 `CompileProfiler`，或通过
+  `PYPTO_COMPILE_PROFILING` 启用的编译性能分析。
+- 显式指定 `save_kernels_dir`，或非空的 `PYPTO_PROG_BUILD_DIR`。
+- 显式诊断设置，或包含 instrument、验证/诊断设置不同于流水线默认值的活跃
+  `PassContext`。
+
+因此已有缓存的 kernel 仍会输出请求的 dump 和报告；重复请求会重新生成输出。
+诊断编译失败不会改变普通缓存条目。JIT 为每次编译自动分配唯一输出目录，
+避免新的诊断请求覆盖缓存产物；显式指定的输出目录按请求使用。
+诊断控制不进入编译键。
+显式设置与活跃 `PassContext` 冲突时，缓存命中与首次编译都会报告相同错误。
+仅选择规划器或运行时的普通上下文仍能复用匹配的缓存产物。
+
+```python
+from pypto.runtime import RunConfig
+
+cached = slice_kernel.compile()
+slice_kernel.compile(config=RunConfig(dump_passes=True, save_kernels_dir="debug_kernel"))
+assert slice_kernel.compile() is cached
+```
+
 ## 函数
 
 ```python

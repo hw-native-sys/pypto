@@ -409,6 +409,14 @@ void CheckHostWindowBoundArg(const ExprPtr& expr, const char* op_name, const cha
   INTERNAL_CHECK_SPAN(target_type, call->span_)
       << "LowerHostTensorCollectives: pld.tensor.all_to_all_v target must be DistributedTensorType";
 
+  // The HOST builtin runs a single block per rank; multi-AIV AllToAllV is a
+  // CHIP/L2 capability (LowerL2TensorCollectives), so a HOST call that asks for
+  // more cores would silently get one.
+  const auto core_num = call->GetKwarg<int>("core_num", 1);
+  CHECK_SPAN(core_num == 1, call->span_)
+      << "HOST pld.tensor.all_to_all_v does not support core_num > 1, got core_num=" << core_num
+      << "; call it from a CHIP Orchestration function for the multi-AIV managed path";
+
   return MakeBuiltinCallWithAttrs(
       "builtin.tensor.all_to_all_v", call,
       {call->args_[0], call->args_[1], call->args_[2], call->args_[3], call->args_[4]},

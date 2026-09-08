@@ -47,8 +47,22 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   __gm__ Tensor *signal_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
   __gm__ Tensor *send_counts_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
   __gm__ Tensor *recv_counts_tensor = reinterpret_cast<__gm__ Tensor *>(args[4]);
-  int nranks = static_cast<int>(args[5]);
-  __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[6]);
+  // args[5] is the CommContext on BOTH rails, and the rank count comes from the
+  // context rather than from a scalar argument:
+  //
+  //   HOST/L3 builtin dispatch : args[5] = CommContext* (the dispatch emits no
+  //                              rank-count scalar for this builtin)
+  //   CHIP/L2 managed task     : args[5] = CommContext* — MaterializeDistTensorCtx
+  //                              appends one ctx per DistributedTensor param;
+  //                              all of them hold the same pointer, and args[6..]
+  //                              are the unread duplicates
+  //
+  // `rankNum` is the domain's rank count: the context is derived per comm
+  // domain, so it is exactly the `domain_size` the dispatch used to pass. One
+  // GM load at entry buys an argument layout — and therefore a kernel source —
+  // that is identical on both rails.
+  __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[5]);
+  int nranks = static_cast<int>(comm_ctx->rankNum);
 
   if (nranks <= 0 || nranks > kMaxSupportedRanks) {
     pipe_barrier(PIPE_ALL);

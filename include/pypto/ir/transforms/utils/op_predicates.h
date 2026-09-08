@@ -95,6 +95,25 @@ bool OutputInheritsSourceBuffer(const std::string& op_name);
 /// predicate that was previously copy-pasted across the IR and codegen layers.
 bool IsBuiltinOp(const std::string& op_name);
 
+/// True for a public managed `pld.tensor.*` collective — the seven ops a user
+/// writes and a lowering rail later expands (composite in an InCore body,
+/// builtin dispatch in a HOST orchestrator, one local AIV task in a CHIP
+/// orchestration).
+///
+/// These are the only `pld.` operators that legitimately *survive* inside an
+/// orchestration body: they are written there by the user and live until their
+/// rail runs. Every other `pld.` op is either InCore-only (`pld.tile.put`,
+/// `pld.system.notify`, ...) or HOST-only (`pld.tensor.alloc_window_buffer`,
+/// `pld.tensor.window`), so an orchestration body holding one is an error the
+/// reference verifier still reports.
+///
+/// Matched by name through `IsOp`, so a typo fails loudly at the comparison
+/// site (see `operator-identity-checks.md`). Shared rather than duplicated
+/// because three sites must agree on the same set: the composite rail's
+/// deferral, the CHIP rail's post-condition, and the reference verifier's
+/// exemption.
+bool IsManagedTensorCollective(const OpPtr& op);
+
 /// True if the Call publishes data that a peer rank may read after a subsequent
 /// `pld.system.notify`, so a GM `system.fence` must separate it from that notify:
 ///   - remote writes: `pld.tile.remote_store` / `pld.tile.put` / `pld.tensor.put`;

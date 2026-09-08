@@ -225,6 +225,19 @@ VarPtr EmitPackedAccumulatorDrain(const AccPackingPlan& plan, const CallPtr& cal
     auto page_var = std::make_shared<Var>("acc_drain_" + suffix, page->GetType(), span);
     result->push_back(std::make_shared<AssignStmt>(page_var, page, assign->span_));
 
+    if (plan.row_windows) {
+      auto row = MakeCanonicalIndexAdd(
+          offsets->elements_[0], std::make_shared<ConstInt>(batch * plan.rows, DataType::INDEX, span), span);
+      auto store_offsets =
+          std::make_shared<MakeTuple>(std::vector<ExprPtr>{row, offsets->elements_[1]}, span);
+      auto page_store =
+          op_registry.Create("tile.store", {page_var, store_offsets, out_tensor}, call->kwargs_, span);
+      last_store = std::make_shared<Var>(assign->var_->name_hint_ + "_" + suffix, page_store->GetType(),
+                                         assign->var_->span_);
+      result->push_back(std::make_shared<AssignStmt>(last_store, page_store, assign->span_));
+      out_tensor = last_store;
+      continue;
+    }
     auto batch_indices = BuildBatchIndices(batch, plan.batch_dims);
     auto store_offsets = std::make_shared<MakeTuple>(
         BuildBatchAdjustedOffsets(offsets->elements_, batch_indices, batch_rank, span), span);
@@ -240,6 +253,26 @@ VarPtr EmitPackedAccumulatorDrain(const AccPackingPlan& plan, const CallPtr& cal
   INTERNAL_CHECK_SPAN(last_store, span)
       << "Internal error: a column-packed accumulator always has at least one page";
   return last_store;
+}
+
+/// Map a logical row-window origin into the packed accumulator. Evaluate the
+/// original offset before dividing, preserving fixed-width scalar arithmetic.
+ExprPtr PackedRowWindowOffsets(const AccPackingPlan& plan, const ExprPtr& offsets, const FlattenContext& ctx,
+                               const Span& span) {
+  auto tuple = As<MakeTuple>(Substitute(offsets, ctx.var_map));
+  INTERNAL_CHECK_SPAN(tuple && tuple->elements_.size() == 2, span)
+      << "Internal error: a packed accumulator window must have two offsets";
+  ExprPtr column;
+  if (auto row = As<ConstInt>(tuple->elements_[0])) {
+    column = std::make_shared<ConstInt>((row->value_ / plan.rows) * plan.cols, DataType::INDEX, span);
+  } else {
+    auto rows = std::make_shared<ConstInt>(plan.rows, DataType::INDEX, span);
+    auto cols = std::make_shared<ConstInt>(plan.cols, DataType::INDEX, span);
+    column = MakeMul(MakeFloorDiv(tuple->elements_[0], rows, span), cols, span);
+  }
+  column = MakeCanonicalIndexAdd(column, tuple->elements_[1], span);
+  return std::make_shared<MakeTuple>(
+      std::vector<ExprPtr>{std::make_shared<ConstInt>(0, DataType::INDEX, span), column}, span);
 }
 
 /**
@@ -1013,7 +1046,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
     // ---- tile.create / tile.full with >2D shape: flatten shape directly ----
     if (IsOp(call, "tile.create") || IsOp(call, "tile.full")) {
       auto result_tile = As<TileType>(call->GetType());
-      if (result_tile && result_tile->shape_.size() > 2) {
+      if (result_tile && (result_tile->shape_.size() > 2 || ctx.AccPackingForVar(assign->var_))) {
         ctx.Insert(assign->var_, EmitFlattenedTileAlloc(call, assign, result_tile, op_name, ctx, op_registry,
                                                         span, &result));
         continue;
@@ -1048,6 +1081,25 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
     if (IsOp(call, "tile.transpose") && batch_matmul_only_vars.count(assign->var_.get()) != 0) {
       ctx.Insert(assign->var_, assign->var_);  // identity mapping for safety
       continue;
+    }
+
+    // Logical 2-D accumulator windows keep their shape; only the parent and
+    // coordinates change. The same translation is used for slice and writeback.
+    if (IsOp(call, "tile.slice") || IsOp(call, "tile.assemble")) {
+      const auto* plan = ctx.AccPackingFor(call->args_[0]);
+      if (plan && plan->row_windows) {
+        std::vector<ExprPtr> args;
+        for (const auto& arg : call->args_) args.push_back(Substitute(arg, ctx.var_map));
+        args[2] = PackedRowWindowOffsets(*plan, call->args_[2], ctx, span);
+        auto rewritten = op_registry.Create(op_name, args, call->kwargs_, span);
+        auto new_call = std::make_shared<Call>(rewritten->op_, rewritten->args_, rewritten->kwargs_,
+                                               call->attrs_, rewritten->GetType(), span);
+        auto new_var =
+            std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
+        result.push_back(std::make_shared<AssignStmt>(new_var, new_call, assign->span_));
+        ctx.Insert(assign->var_, new_var);
+        continue;
+      }
     }
 
     // ---- standalone tile.transpose: this pass solely owns scratch materialization ----

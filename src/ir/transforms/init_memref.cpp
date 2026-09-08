@@ -29,6 +29,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/cast_saturation.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -320,6 +321,17 @@ class MaterializePtoLevel3ScratchMutator : public IRMutator {
       INTERNAL_CHECK_SPAN(src_type, span) << "tile.cast source must be TileType before InitMemRef";
       const DataType dst = call->GetKwarg<DataType>("target_type");
       if (!TcvtNeedsLevel3Scratch(src_type->dtype_, dst)) return std::nullopt;
+      // The scratch exists only for PTOAS's *non-saturating* narrowing helper,
+      // which emulates the target's overflow behavior with a chunked vector
+      // sequence. A saturating cast is a native conversion that takes no tmp, so
+      // synthesizing one would allocate Vec memory the emitted `pto.tcvt` never
+      // reads. Every pair reaching here narrows to an integer, whose default is
+      // saturating, so only a cast that explicitly opted out needs the buffer. A
+      // caller-supplied tmp is untouched either way: this arm only runs for the
+      // 1-argument form.
+      if (GetSaturationMode(call) != static_cast<int>(SaturationMode::kOff)) {
+        return std::nullopt;
+      }
       const int64_t bytes = TcvtScratchCapacityBytes(src_type, dst, span);
       return PtoScratchSpec{MakeStaticShape({1, bytes}, span), DataType::INT8, "tcvt"};
     }
@@ -1039,15 +1051,9 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
   // PTOAS level2 owns implicit-tmp materialization as part of PlanMemory. PyPTO
   // and DSA-RP instead emit fixed addresses and invoke level3. CI/TCVT scratch
   // remains restricted to A2/A3, while TSORT32 scratch is level-driven.
-  //
-  // Temporarily disabled: #2523 compiler-owned level3 scratch (tile.ci / narrowing
-  // cast / sort32) + ptoas v0.60 caused packed-prefill NaN (pypto#2558 /
-  // pypto-lib#1072). PTOAS is pinned to v0.57; do not synthesize those tmps until
-  // the 3-arg tile.ci / PIPE_S vs PIPE_V mismatch is fixed upstream.
   const MemoryPlanner planner = ctx ? ctx->GetMemoryPlanner() : MemoryPlanner::PyPTO;
-  if (handler != nullptr && handler->RequiresLevel3TmpScratch() &&
-      (planner == MemoryPlanner::PyPTO || planner == MemoryPlanner::DsaRP)) {
-    MaterializePtoLevel3ScratchMutator materializer(/*materialize_a2a3_scratch=*/true);
+  if (handler != nullptr && (planner == MemoryPlanner::PyPTO || planner == MemoryPlanner::DsaRP)) {
+    MaterializePtoLevel3ScratchMutator materializer(handler->RequiresLevel3TmpScratch());
     normalized_func = materializer.VisitFunction(normalized_func);
   }
 

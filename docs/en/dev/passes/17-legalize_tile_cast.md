@@ -19,6 +19,74 @@ Unreachable pairs hard-fail with src/dst/arch in the diagnostic.
 
 **Requires / Produces / Invalidates**: none (empty `PassProperties`).
 
+## Destination saturation
+
+`pl.cast`, `pl.tensor.cast` and `pl.tile.cast` take a keyword-only
+`saturation_mode`, spelled `"on"` / `"off"` or `1` / `0`:
+
+```python
+quantized = pl.cast(rounded_fp16, pl.INT8, mode="trunc", saturation_mode="on")
+```
+
+`"on"` clamps a rounded value that falls outside the destination range to that
+range. `"off"` selects the target's non-saturating conversion, whose overflow
+and non-finite behaviour is architecture-defined. A `Scalar` input rejects the
+option.
+
+**`"on"` is the default for an integer destination.** That is where the two
+modes are a genuine choice: nothing standard fixes what an overflowing
+conversion to an integer produces, clamping is the safer of the two to get by
+accident, and on A2/A3 it is also the one the assembler converts natively rather
+than emulating with a chunked vector sequence — so the default is both the safer
+and the faster lowering. Pass `"off"` only when the selected target's documented
+non-saturating behaviour is the one the kernel needs — it is *not* a promise of
+wrapping, and what it does with an overflow is the architecture's to define.
+
+**A float destination keeps the target's own behaviour** unless the author asks
+otherwise. That question already has an answer: IEEE says an out-of-range
+narrowing yields an infinity, `torch` agrees, and
+[the precision workflow](../../user/precision/00-workflow.md) asserts PyPTO
+matches them bit-for-bit on `INT32 -> FP16`. Defaulting those to `"on"` broke
+that block on the a2a3 simulator — 65520 clamped to 65504 instead of overflowing
+to `inf` — so the default is deliberately scoped to integer destinations.
+
+The IR records only a *deviation* from whichever default applies: a cast that
+wants it carries no `saturation_mode` kwarg, which is the same shape a
+pass-synthesized cast has. That is what keeps a printed cast re-parsing to
+structurally equal IR — stamping the default would make two forms differ with no
+semantic difference between them. Codegen reads the default through, so an
+integer-destination `pto.tcvt` carries an explicit `satmode` even when the cast
+said nothing, while a float-destination one emits none.
+
+The two modes agree only on values the destination can already represent, so for
+integer destinations this default is a behavioural choice, not a no-op: a kernel
+that relied on the target's own non-saturating overflow must now say `"off"`.
+
+**Legalized chains: the request rides the final hop.** Saturation names the
+*destination* range, and only the last hop reaches the destination dtype;
+stamping an intermediate would clamp to a range the author never named.
+Intermediates therefore keep exactly their previous behaviour — the original
+rounding mode and nothing else.
+
+Deferring costs nothing, because the BFS above already refuses any intermediate
+that narrows relative to the destination: every value the destination *can*
+represent reaches the final hop exactly, so `"on"` and `"off"` still agree there.
+A value the destination cannot represent is out of range at both ends of the
+chain — an intermediate float may overflow it to an infinity, but with its sign
+intact, so it clamps to the same endpoint a hypothetical single-step conversion
+would have picked. Non-finite inputs remain outside what either mode defines.
+
+The same rule carries an explicit `pl.tile.cast(..., tmp=...)` scratch operand
+onto the final hop, which is the narrowing one.
+
+**A2/A3 scratch.** `InitMemRef` synthesises a scratch tile only for the
+*non-saturating* narrowing `pto.tcvt`, whose PTOAS lowering emulates the
+target's overflow behaviour with a chunked vector sequence. Saturating selects
+the native conversion, which reads no scratch. Every pair that needs the buffer
+narrows to an integer, so the applicable default is `"on"` and only a cast that
+explicitly opted out allocates a tile at all. A caller-supplied `tmp` is never
+dropped.
+
 ## Native casts vs legalized chains
 
 `pl.cast` does not always compile to one instruction. Whether a given

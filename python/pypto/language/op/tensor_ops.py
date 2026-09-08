@@ -1892,6 +1892,8 @@ def cast(
     input: Tensor,
     target_type: int | DataType,
     mode: str | int = "round",
+    *,
+    saturation_mode: str | int | None = None,
 ) -> Tensor:
     """Type casting operation.
 
@@ -1900,12 +1902,24 @@ def cast(
         target_type: Target data type
         mode: Rounding mode — string name ("none", "rint", "round", "floor",
               "ceil", "trunc", "odd") or int (0–6)
+        saturation_mode: Destination saturation — ``"on"`` (1) clamps a
+              rounded value that falls outside the destination range to that
+              range; ``"off"`` (0) keeps the target's non-saturating
+              conversion, including its overflow and non-finite behavior.
+              **Defaults to** ``"on"`` **for an integer destination**:
+              nothing standard fixes what an overflowing conversion to an
+              integer produces, clamping is the safer of the two to get by
+              accident, and it is what the hardware converts natively. A float
+              destination keeps the target's own IEEE behavior (an out-of-range
+              narrowing yields an infinity) unless you ask otherwise. When the
+              cast lowers to a chain of native conversions, the mode applies to
+              the final hop.
 
     Returns:
         Tensor wrapping the cast operation
     """
     input_expr = input.unwrap()
-    call_expr = _ir_ops.cast(input_expr, target_type, mode)
+    call_expr = _ir_ops.cast(input_expr, target_type, mode, saturation_mode=saturation_mode)
     return Tensor(expr=call_expr)
 
 

@@ -91,7 +91,7 @@ def _apply(program: ir.Program) -> ir.Program:
 
 
 def _derive_and_materialize(program: ir.Program) -> ir.Program:
-    """DeriveCallDirections (pass 40) then MaterializeDistTensorCtx (pass 46).
+    """DeriveCallDirections (pass 41) then MaterializeDistTensorCtx (pass 47).
 
     Pass 40 is what stamps ``arg_directions`` on each call, so running it first
     lets a DSL-authored ``Before`` reach pass 46 in the shape the pipeline
@@ -151,7 +151,7 @@ def test_host_dispatch_materializes_comm_ctx_args():
 #
 # Every function takes the same DistributedTensor, so the pass must thread one
 # materialized ``data_ctx`` param through all three and forward it at both call
-# sites. ``derive_call_directions`` (pass 40) runs first, exactly as in the
+# sites. ``derive_call_directions`` (pass 41) runs first, exactly as in the
 # pipeline, so the Before programs carry no hand-written ``arg_directions``.
 #
 # Spmd and Group get their own program pair because ``@pl.function(type=...)``

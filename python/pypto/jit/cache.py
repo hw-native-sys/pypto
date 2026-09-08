@@ -142,37 +142,30 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
     strategy: "OptimizationStrategy | None" = None,
     distributed_config: Any = None,
     analyze_auto_scopes_for_deps: bool = False,
-    dump_ptoas_passes: bool = False,
+    emit_source_loc: bool = True,
     memory_planner: "MemoryPlanner | None" = None,
     enable_pypto_l0c_double_buffer: bool = False,
     tensor_layouts: dict[str, "TensorLayout | None"] | None = None,
     dep_layouts: tuple[tuple[str, str, str], ...] = (),
-    closure_constants: tuple[tuple[str, str, str], ...] = (),
     runtime: RuntimeKind = RuntimeKind.TENSORMAP_AND_RINGBUFFER,
 ) -> CacheKey:
     """Build a cache key for a JIT call site.
 
     Args:
-        source_hash: Hash of function source code (and all dep sources).
+        source_hash: Hash of captured source dependencies, including folded constants.
         param_names: Ordered list of all parameter names (preserves arg order).
         tensor_shapes: Concrete shape per tensor parameter name.
         tensor_dtypes: DataType per tensor parameter name.
         tensor_layouts: Annotated layout per tensor parameter name, where the
             annotation declares one. See :class:`TensorCacheInfo.layout` for
             why the layout has to split the key on its own.
-        dep_layouts: ``(dep name, parameter, layout)`` triples for layouts the
-            reachable deps declare themselves. Same reasoning as
+        dep_layouts: ``(generated dep name, parameter, layout)`` triples for
+            layouts the reachable deps declare themselves. Same reasoning as
             ``tensor_layouts``, one call deeper: they shape the generated dep
             signatures but appear in no entry-parameter meta, and a postponed
-            annotation hides a rebind from ``source_hash``.
-        closure_constants: ``(function name, free variable, repr of value)``
-            triples for the closure constants folded into the generated source.
-            Same reasoning again: the folder inlines them as literals, so they
-            change the artifact, but they live in ``__closure__`` rather than in
-            the function text — rebinding a cell (``nonlocal rows = 96``) leaves
-            ``source_hash`` identical and would otherwise hand the next call the
-            previous value's artifact. ``repr`` keeps the component hashable and
-            keeps ``1``, ``1.0``, and ``True`` distinct.
+            annotation hides a rebind from ``source_hash``. The name is the
+            *generated* one, so two same-named deps stay distinguishable in
+            this sorted, position-free tuple.
         dynamic_dims: Set of (param_name, dim_index) pairs that are dynamic.
             Dynamic dims are stored as None in the cache key so different
             concrete values for that dimension produce the same cache entry.
@@ -199,9 +192,10 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
         analyze_auto_scopes_for_deps: Compile-side switch for deriving explicit
             task dependencies from AUTO runtime scopes. Included in the key
             because it changes generated orchestration dependencies.
-        dump_ptoas_passes: Whether ptoas writes intermediate IR after every
-            pass. Included in the key so enabling dumps cannot reuse an
-            artifact compiled without the requested dump output.
+        emit_source_loc: Whether codegen emits source locations, resolved from
+            the environment before key construction and passed to the compiler.
+            Changing this option changes generated code and splits the key.
+            Dump, profiling, and other cache-bypass controls are excluded.
         memory_planner: Effective on-chip memory planner (``PYPTO``,
             ``DSA_RP``, or ``PTOAS``) as resolved from the ``RunConfig`` field
             and any active ``PassContext``. Included in the key because it
@@ -252,11 +246,10 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
     )
     compile_opts = (
         ("analyze_auto_scopes_for_deps", analyze_auto_scopes_for_deps),
-        ("dump_ptoas_passes", dump_ptoas_passes),
+        ("emit_source_loc", emit_source_loc),
         ("memory_planner", None if memory_planner is None else str(memory_planner)),
         ("enable_pypto_l0c_double_buffer", effective_pypto_dbc),
         ("dep_layouts", dep_layouts),
-        ("closure_constants", closure_constants),
         ("runtime", runtime_kind_to_name(runtime)),
     )
     return (

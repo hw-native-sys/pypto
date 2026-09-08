@@ -123,6 +123,28 @@ struct TileTypeComponents {
 void CheckBoxedTileExtents(const ir::TileType& tile_type, const TileTypeComponents& components,
                            const ir::Span* span);
 
+/// Reject an unboxed (``none_box``) tile whose contiguous axis is not a whole
+/// number of 32-byte units, which PTO cannot address.
+///
+/// The complement of ``CheckBoxedTileExtents``: a boxed tile is addressed one
+/// fractal box at a time, an unboxed one as a flat run of bytes whose stride
+/// along the contiguous axis PTO takes in 32-byte units. ``blayout`` picks that
+/// axis -- ``row_major`` makes it the columns, ``col_major`` the rows -- so an
+/// FP32 tile needs 8 elements there, and ``[1, 1]``, ``[2, 2]`` and ``[4, 4]``
+/// are all equally unallocatable.
+///
+/// PTOAS does diagnose this, but names its own type internals and points at
+/// whichever line the location happened to carry; reporting it here gives the
+/// shape the author wrote, the axis at fault, and a remedy that compiles.
+///
+/// @param tile_type  Tile being allocated; supplies the dtype and memory space.
+/// @param components Rendered tile geometry, as it will appear in the emitted
+///                   ``!pto.tile_buf<...>`` type string.
+/// @param span       IR location reported on failure; may be null when the
+///                   emitter has no statement in scope.
+void CheckFlatTileExtents(const ir::TileType& tile_type, const TileTypeComponents& components,
+                          const ir::Span* span);
+
 TileTypeComponents ExtractTileTypeInfo(const ir::TileType& tile_type,
                                        const std::string& dtype_str_override = "");
 

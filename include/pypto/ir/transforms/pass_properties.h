@@ -60,6 +60,18 @@ inline const PassProperties kLowerHostTensorCollectivesProperties{
     .required = {IRProperty::CommDomainScopesMaterialized},
     .produced = {IRProperty::CommDomainScopesMaterialized}};
 
+// -- LowerL2TensorCollectives pass (runs immediately before DeriveCallDirections)
+//    Rewrites a managed collective written in a CHIP/L2 orchestration body into a
+//    call to a synthesized AIV kernel backed by the builtin template source. It
+//    must run before DeriveCallDirections / AutoDeriveTaskDependencies so the
+//    emitted call gets its argument directions and task edges derived like any
+//    other kernel call — that is what orders compute -> collective -> consume.
+//    That ordering constraint is a pipeline-position fact, not an IRProperty.
+//    The rewrite swaps one call for another within the existing vocabulary, and
+//    the synthesized function returns its InOut `target` parameter through an
+//    explicit ReturnStmt, so no property is required, produced or invalidated.
+inline const PassProperties kLowerL2TensorCollectivesProperties{};
+
 // Resolves a returned DistributedTensor to the parameter it writes back via
 // return_lineage::ExplicitReturnedParamIndices, which is a pointer-identity read
 // of the ReturnStmt and only meaningful once NormalizeReturnOrder has

@@ -98,7 +98,10 @@ Sub-function dependencies (`.incore` / `.inline` / `.opaque` / `.graph`) are aut
 the entry's body — call them by name. The name you call is resolved in the entry's own
 namespace, so an aliased import (`from kernels import matmul as mm`, or a plain
 `mm = matmul` rebinding) is discovered like any other binding; the generated program still
-names the function after its `def`. A `@pl.jit.host` entry additionally discovers
+names the function after its `def`. When two distinct sub-functions share that name — two
+modules each defining `helper`, or two kernels from one factory — the second one generated
+is suffixed (`helper`, `helper__2`), so both specializations survive; the entry keeps its
+own name. A `@pl.jit.host` entry additionally discovers
 `@pl.jit` chip-orchestration dependencies, so a full distributed program needs no
 `@pl.program` class.
 
@@ -134,6 +137,53 @@ reaches across the chip boundary. That keeps two unrelated top-level kernels fro
 silently folding into one program.
 
 `@pl.jit.host` rejects `level=` (HOST is implicit).
+
+### What a sub-function hands back keeps its shape and dtype
+
+Specialization stamps every generated parameter with a concrete shape and dtype, so a
+tensor a sub-function returns must be traceable to one. Both conventions work, and you can
+mix them in the same entry:
+
+```python
+@pl.jit.inline
+def make_pair(x: pl.Tensor[[1, 8], pl.FP32]):
+    a = pl.create_tensor([1, 8], dtype=pl.FP32)   # helper allocates its own results
+    b = pl.create_tensor([1, 8], dtype=pl.FP32)
+    with pl.at(level=pl.Level.CORE_GROUP):
+        a[:, :] = x[:, :]
+        b[:, :] = pl.mul(x[:, :], 2.0)
+    return a, b
+
+@pl.jit.incore
+def relu_kernel(x: pl.Tensor, out: pl.Out[pl.Tensor]):   # caller allocates, kernel fills
+    ...
+
+@pl.jit
+def entry(x: pl.Tensor[[1, 8], pl.FP32], out: pl.Out[pl.Tensor[[1, 8], pl.FP32]]):
+    a, b = make_pair(x)          # metas read out of make_pair's own body
+    buf = pl.create_tensor([1, 8], dtype=pl.FP32)
+    mid = relu_kernel(a, buf)    # mid aliases buf, so it inherits buf's meta
+    ...
+```
+
+A device kernel (`@pl.jit.incore`) cannot allocate, so it always takes the second form —
+`pl.create_tensor` belongs on the control plane. An `@pl.jit.inline` helper is spliced into
+the caller, so either form is available to it.
+
+An extent the specializer cannot compute statically is *not* by itself a problem. A
+`pl.create_tensor` sized from a value only the device knows — `pl.tensor.read(cfg, [0])`,
+`pld.world_size()` — becomes a dynamic dimension and keeps flowing, and the shared pass
+pipeline judges whatever the program then does with it (loading the whole tensor as a tile,
+say, gets you `InitMemRef requires static shape` — the same error the equivalent
+`@pl.program` earns).
+
+What does not resolve is a returned tensor whose shape the specializer cannot *reach* at
+all: a `pl.reshape` whose target shape is not static (a reshape is constrained by its
+source's element count, so no dynamic dimension can stand in for it), or a result rebound
+through an operation the specializer does not model. That surfaces as
+`missing inferred tensor metadata for parameter '<name>'` at the *next* call that consumes
+it — the error names the consumer, but the fix belongs at the producer: give the producing
+statement a statically inferable shape, or pass the buffer in as a `pl.Out[...]` parameter.
 
 ### Three constraints that decide whether a jit kernel compiles
 

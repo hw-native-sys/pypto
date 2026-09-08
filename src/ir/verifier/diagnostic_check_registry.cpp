@@ -102,7 +102,7 @@ DiagnosticCheckRegistry::DiagnosticCheckRegistry() {
   // done. A warning, and deliberately not an `IRProperty`: by the time it runs,
   // `InitMemRef` has invalidated `SSAForm` and nothing re-establishes it, so its
   // buffer lineage is best-effort across control flow. There is no pipeline
-  // position that is both after `DeriveCallDirections` (pass 40) and still in
+  // position that is both after `DeriveCallDirections` (pass 41) and still in
   // SSA (invalidated at pass 34), so this is a property of the placement, not a
   // gap to close later.
   Register(DiagnosticCheck::InParamWritten, DiagnosticSeverity::Warning, DiagnosticPhase::PostPipeline,

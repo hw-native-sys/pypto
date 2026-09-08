@@ -23,7 +23,7 @@
  *
  * It runs `PostPipeline` (`DiagnosticCheck::InParamWritten`) rather than after
  * any one pass: a Group/Spmd wrapper's signature legitimately reads `In` for a
- * parameter its inner kernel writes, until `DeriveCallDirections` (pass 40)
+ * parameter its inner kernel writes, until `DeriveCallDirections` (pass 41)
  * materialises the effective directions back into the IR.
  *
  * **Best-effort, and deliberately not an `IRProperty`.** `InitMemRef` (pass 34)

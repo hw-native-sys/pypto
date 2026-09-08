@@ -206,6 +206,45 @@ accumulator at most 16 columns wide, which fits a single L0C block column and
 needs no packing.
 ```
 
+## 累加器逻辑行窗口
+
+同一打包机制支持通过
+`acc[...] = pl.matmul_acc(acc[...], lhs, rhs, init_cond=...)` 更新局部二维累加器。
+DSL 保留逻辑行坐标；对划分为 `R` 行窗口的 `[T*R, N]` 累加器，物理分配变为
+`[R, T*N]`：
+
+```python
+# Logical window
+win = pl.tile.slice(acc, [16, 32], [16, 0])
+part = pl.tile.matmul_acc(win, a, b, init_cond=True)
+acc_updated = pl.tile.assemble(acc, part, [16, 0])
+
+# Packed window: acc's allocation changes from [32, 32] to [16, 64]
+win = pl.tile.slice(acc, [16, 32], [0, 32])
+part = pl.tile.matmul_acc(win, a, b, init_cond=True)
+acc_updated = pl.tile.assemble(acc, part, [0, 32])
+```
+
+运行时 `t0` 对应的列偏移为 `(t0 // R) * N + n0`。回写保留计算的定义使用关系，
+无需 L0C 到 L0C 的复制。最终对整个累加器的存储拆成逐窗口存储，目标逻辑行偏移为
+`t * R`。K 外层、行内层的循环顺序及权重复用保持不变，行循环次数可以在运行时决定。
+
+只有 MAD 本身无法寻址的窗口才会被打包。列数不超过 16 且完整落在同一个 16 列块内的
+窗口只占一个 L0C 块列，紧凑写回不存在会被错误跨步的第二个块列，pto-isa 的
+`MadAccStrideCompatible` 因此接受它。判据取自**窗口自身**的列范围而非父累加器：
+ptoas 解析行窗口时保留父累加器的物理 `Rows`，`Cols` 则取自窗口，所以 `[48, 32]`
+累加器上的 `[16, 16]` 窗口是可寻址的。这类链原样通过，下面的要求对它们一律不适用
+—— 把硬件本就接受的链纳入打包，只会让原本可用的 kernel 落入下列拒绝条件。该豁免
+条件与 `CanonicalizeTileSlice` 的 `CheckAccWindowContiguous` 保持一致，因此这里
+放行的窗口不会在两个 pass 之后被拒绝。
+
+打包要求：单个由编译器分配的缓冲区；统一的静态窗口行数且整除父累加器行数；
+可证明对齐的行偏移；完整有效形状；FP32/INT32 元素；窗口行数和父累加器列数均为
+16 的倍数；按目标物理行对齐后仍能放入 L0C。运行时对齐证明目前覆盖窗口高度为
+2 的幂的情况。每个 assemble 必须将 `matmul_acc` 结果写回其读取的原窗口。
+显式绑定的 MemRef，以及要求以其他布局读取整个逻辑累加器的消费者，会得到明确诊断，
+不会被静默重排。
+
 ## 示例
 
 **之前**：

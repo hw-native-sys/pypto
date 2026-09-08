@@ -3,6 +3,99 @@
 Function declaration forms, parameter directions, cross-module reuse, and how to
 print IR back to Python syntax.
 
+## JIT constants and compilation reuse
+
+A `@pl.jit` body is parsed into `@pl.program` source and re-parsed in a namespace
+holding only `pl` and `pld`, so any name it inherits from its own module or an
+enclosing function must be replaced, at its use site, by source text that
+evaluates back to the same value. That covers literals (`int`, `float`, `bool`,
+`str`, `None`), the `pl` dtype and enum constants (`pl.INT8`, `pl.Mem.Vec`,
+`pl.PadValue.zero`, `pl.NZ`), and lists/tuples nested from those — a shape or a
+rounding mode held in a constant, for instance. A value with no source form is
+left alone, so the name survives and the parser reports it.
+
+Every name that folds is also in the compilation key, including constants used by
+transitive JIT helpers and source annotations. The key hashes the *emitted text*
+for each name, straight from the function the specializer folds with, so the two
+cannot drift: a constant that changes the generated source changes the key by
+construction, and one that does not fold contributes nothing. Rebinding a
+referenced constant causes a new specialization; changing an unrelated global or a
+name shadowed by a body-local variable does not invalidate the body dependency
+key.
+
+```python
+BLOCK = 32
+
+@pl.jit
+def slice_kernel(x: pl.Tensor[[128, 128], pl.FP32]) -> pl.Tensor[[BLOCK, 128], pl.FP32]:
+    with pl.at(level=pl.Level.CORE_GROUP):
+        result = pl.slice(x, [BLOCK, 128], [0, 0])
+    return result
+
+first = slice_kernel.compile()
+BLOCK = 64
+second = slice_kernel.compile()  # A distinct specialization with 64 rows.
+```
+
+Name resolution, key construction, and specialization share a per-call namespace
+snapshot. Constants rebound after capture affect the next call, not the artifact
+being compiled. Each helper retains its own namespace, even when constants have
+the same name. Rebinding a referenced JIT helper also refreshes the dependency
+graph. Each concurrent call retains its captured graph throughout key construction
+and specialization. The hash also includes each helper's function type, level, and
+`auto_scope` setting, so rebinding an identically sourced function with different
+compilation attributes cannot reuse the old artifact.
+
+Each module's globals are copied once per request; helpers use closure overlays
+on that shared snapshot. An empty closure cell still shadows a same-named global.
+Validated graphs retain their Python source hashes, and declared layouts are
+reused while their annotation bindings stay unchanged. External source files are
+still checked on each request. Referenced closure constants are covered by the
+source dependency hash without a separate closure-key component.
+
+The snapshot copies bindings only: mutating arbitrary configuration objects
+or editing compiler/source files during compilation is not supported by this
+constant-tracking mechanism. This behavior does not enable persistent artifact
+caching; compiled objects are still reused within the process.
+
+### Compile options and diagnostic requests
+
+JIT calls and `kernel.compile()` resolve compile options before looking up an
+in-process artifact. Omitting `config` uses the same defaults as `RunConfig()`:
+`a2a3sim`, the default optimization strategy, and pass dumps disabled. Semantic
+options (including the effective planner, runtime ABI, and source-location
+emission controlled by `PYPTO_EMIT_PTO_LOC`) participate in the key. Runtime
+controls such as `device_id`, `codegen_only`, and `save_kernels` alone do not.
+
+The following requests compile afresh on every call, without reading or adding
+an entry in the artifact cache:
+
+- `dump_passes=True` or a dump level other than `PassDumpLevel.NONE`, and
+  `dump_ptoas_passes=True`.
+- `compile_profiling=True`, an active `CompileProfiler`, or profiling enabled
+  through `PYPTO_COMPILE_PROFILING`.
+- An explicit `save_kernels_dir`, or a nonempty `PYPTO_PROG_BUILD_DIR`.
+- Explicit diagnostic settings, or an active `PassContext` with instruments
+  or verification/diagnostic settings different from the pipeline defaults.
+
+This ensures a warm kernel still emits requested dumps and reports. Repeating
+a request regenerates the output; a failed diagnostic compile leaves ordinary
+cached entries intact. Automatically allocated JIT output directories are unique
+per compilation, so fresh diagnostics cannot overwrite a cached artifact.
+Explicit output directories are used as requested. Diagnostic controls do not
+split compilation keys.
+Conflicting explicit settings and an active `PassContext` raise the same error
+on cache hits as on fresh compilation. A plain planner/runtime context can
+still reuse a matching cached artifact.
+
+```python
+from pypto.runtime import RunConfig
+
+cached = slice_kernel.compile()
+slice_kernel.compile(config=RunConfig(dump_passes=True, save_kernels_dir="debug_kernel"))
+assert slice_kernel.compile() is cached
+```
+
 ## Functions
 
 ```python

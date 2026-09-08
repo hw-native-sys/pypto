@@ -55,6 +55,7 @@ struct AccPackingPlan {
   DataType dtype = DataType::FP32;  ///< 4-byte accumulator element type.
   std::vector<int64_t> batch_dims;  ///< The ND batch dims, for per-page drain offsets.
   std::vector<int64_t> nd_shape;    ///< The full pre-flatten ND accumulator shape.
+  bool row_windows = false;         ///< Logical 2-D row windows, drained back along rows.
 };
 
 /// Which (pre-rewrite) Vars name a column-packed accumulator, and with what

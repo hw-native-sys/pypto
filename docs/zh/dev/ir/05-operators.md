@@ -544,7 +544,7 @@ UINT32 + INT32 → INT32 (signed precedence)
 **位置**：`src/ir/op/tensor_ops/`
 **Python API**：`from pypto.ir.op import tensor`
 
-**操作：** `tensor.add/sub/mul/div`（逐元素，支持完整 N 维广播），`tensor.maximum/minimum`（逐元素 max/min；rhs 可为 tensor 或 scalar — `ConvertTensorToTileOps` 根据 rhs 类型分发到 `tile.maximum/minimum` 或 `tile.maximums/minimums`），`tensor.set_validshape`（更新 valid_shape 元数据，不搬移数据；也可通过 `pl.set_validshape` 使用），`tensor.sort32` / `tensor.mrgsort_format1` / `tensor.mrgsort_format2`（排序；分别对应 `tile.sort32` / `tile.mrgsort` 的 tensor 层接口，由 `ConvertTensorToTileOps` 转换为 tile 操作），`tensor.gather`（按维索引；MVP 仅支持 2D 输入 + `dim=-1`，由 `ConvertTensorToTileOps` 按后端分策略下降 —— A5（Ascend950）将末维 gather 展开为对扁平元素偏移 `flat[i, j] = i * src_cols + index[i, j]` 的单次整块 `tile.gather`，并在此之前把带 stride 的 tile 源（如 `tile.slice` 视图）物化为连续 tile，使扁平索引能正确寻址；A2A3（Ascend910B）保留 legacy 的按行 `tile.gather` 循环，此时每个单行切片内的列索引即等于扁平索引），`tensor.gather_mask`（掩码模式选择；对应 `tile.gather_mask`，支持可选同位宽 `output_dtype`；见[掩码模式](#掩码模式)），`tensor.scatter`（按列散布；`tensor.gather` 的按列逆操作，MVP 仅支持 2D 输入 + `dim=-1` —— `out[b, index[b, k]] = src[b, k]`，`index` 与 `src` 同形状 —— 由 `ConvertTensorToTileOps` 下降到 `tile.scatter`），`tensor.scatter_mask`（按掩码模式散布；对应 `tile.scatter_mask`，将紧凑 `input` 按掩码扩展到 `dst` 的对应列 —— 见[掩码模式](#掩码模式)），`tensor.ci` / `tensor.arange`（生成连续整数序列，下层降到 `tile.ci`；同时通过 `pl.arange` 暴露在顶层 namespace），`tensor.and/ands/or/ors/xor/xors/not/shl/shls/shr/shrs`（仅整数的位运算与移位。此处列出的是注册的 *IR* 名称；其中名字本身是 Python 关键字的三个，其 Python 拼写带尾部下划线 —— `tensor.and_`、`tensor.or_`、`tensor.not_` —— printer 也按该形式输出，以保证 IR 能往返为合法 Python；对应同名 `tile.*` 操作。张量-张量形式的两个操作数形状必须相同 —— 硬件没有 `tile.row_expand_and`，因此广播在类型推导阶段即被拒绝，而不是延迟到 pass 中失败。`tensor.not` 仅支持 int16/uint16，与 `tile.not`/TNOT 一致。移位保持 lhs 的元素类型；`and`/`or`/`xor` 按整数位宽提升，与其 tile 版本行为一致。`ConvertTensorToTileOps` 将其中九个 1:1 下降，并为 `tensor.xor`/`tensor.xors` 合成 `pto.txor` 所需的临时操作数，使 tensor 层调用者无需提供 `tmp`）
+**操作：** `tensor.add/sub/mul/div`（逐元素，支持完整 N 维广播），`tensor.maximum/minimum`（逐元素 max/min；rhs 可为 tensor 或 scalar — `ConvertTensorToTileOps` 根据 rhs 类型分发到 `tile.maximum/minimum` 或 `tile.maximums/minimums`），`tensor.set_validshape`（更新 valid_shape 元数据，不搬移数据；也可通过 `pl.set_validshape` 使用），`tensor.sort32` / `tensor.mrgsort_format1` / `tensor.mrgsort_format2`（排序；分别对应 `tile.sort32` / `tile.mrgsort` 的 tensor 层接口，由 `ConvertTensorToTileOps` 转换为 tile 操作），`tensor.gather`（按维索引；MVP 仅支持 2D 输入 + `dim=-1`，由 `ConvertTensorToTileOps` 按后端分策略下降 —— A5（Ascend950）将末维 gather 展开为对扁平元素偏移 `flat[i, j] = i * src_cols + index[i, j]` 的单次整块 `tile.gather`，并在此之前把带 stride 的 tile 源（如 `tile.slice` 视图）物化为连续 tile，使扁平索引能正确寻址；A2A3（Ascend910B）保留 legacy 的按行 `tile.gather` 循环，此时每个单行切片内的列索引即等于扁平索引），`tensor.gather_mask`（掩码模式选择；对应 `tile.gather_mask`，支持可选同位宽 `output_dtype`；见[掩码模式](#掩码模式)），`tensor.scatter`（按列散布；`tensor.gather` 的按列逆操作，MVP 仅支持 2D 输入 + `dim=-1` —— `out[b, index[b, k]] = src[b, k]`，`index` 与 `src` 同形状 —— 由 `ConvertTensorToTileOps` 下降到 `tile.scatter`），`tensor.scatter_mask`（按掩码模式散布；对应 `tile.scatter_mask`，将紧凑 `input` 按掩码扩展到 `dst` 的对应列 —— 见[掩码模式](#掩码模式)），`tensor.ci` / `tensor.arange`（生成连续整数序列，下层降到 `tile.ci`；同时通过 `pl.arange` 暴露在顶层 namespace），`tensor.and/ands/or/ors/xor/xors/not/shl/shls/shr/shrs`（仅整数的位运算与移位。此处列出的是注册的 *IR* 名称；其中名字本身是 Python 关键字的三个，其 Python 拼写带尾部下划线 —— `tensor.and_`、`tensor.or_`、`tensor.not_` —— printer 也按该形式输出，以保证 IR 能往返为合法 Python；对应同名 `tile.*` 操作。张量-张量形式的两个操作数形状必须相同 —— 硬件没有 `tile.row_expand_and`，因此广播在类型推导阶段即被拒绝，而不是延迟到 pass 中失败。`tensor.not` 仅支持 int16/uint16，与 `tile.not`/TNOT 一致。移位保持 lhs 的元素类型；`and`/`or`/`xor` 要求操作数使用相同的 8/16/32 位 dtype，scalar 形式使用 tile 下沉要求的同位宽 signless `iN` 编码。`ConvertTensorToTileOps` 将其中九个 1:1 下降，并为 `tensor.xor`/`tensor.xors` 合成 `pto.txor` 所需的临时操作数，使 tensor 层调用者无需提供 `tmp`）
 
 `tensor.view` 是只修改元数据的零拷贝 shape/layout 重新解释操作。它注册为 `TensorOp`，并在 `ConvertTensorToTileOps` 中作为 passthrough 处理；PTO in-core codegen 会将其降级为基于原始 base pointer 的 `pto.make_tensor_view`。目标 rank 至少为 1（DN 至少为 2）。编排层通常仅支持 ND shape 重新解释，且不能同时改变 layout；FP8E8M0 dynamic scale storage 还允许在 packed ND 与 `MX_A_ZZ` 或 `MX_B_NN` 之间建立元素数相同的 shaped alias，编排层保留同一个 runtime tensor，不调用 `reshape`。对部分有效的源张量进行 shape 重新解释时，仅支持把 packed ND 的 leading dimensions 折叠为 2D，或把连续前缀线性折叠为 `[1, product(shape)]`；两种形式都必须显式提供目标 `valid_shape`，并会保留源张量类型及其底层元数据。
 
@@ -657,15 +657,31 @@ reshape 是零拷贝视图，无法凭空产生数据：`tensor.reshape` 与 `ti
 | 完全有效 | `new_shape` —— 会被规范化掉，不产生 view，已有程序不受影响 |
 | 可证明为空 | 全零矩形框 |
 | 仅增删完全有效的单位轴 | 保留的轴按 1:1 映射，可精确保留任意矩形 |
-| 连续的扁平前缀 | `new_shape` 中覆盖同一批元素的矩形（若存在） |
+| 目标 shape 以同样方式切分缓冲区 | `new_shape` 中覆盖同一批元素的矩形框（若存在） |
 | 其他情况 | **拒绝** —— `valid_shape` 无法描述 reshape 后的区域 |
 
-因此 `[8, 16]` valid `[5, 16]`（80 个元素的扁平前缀）可映射为 `[16, 8]` valid
-`[10, 8]` 或 `[128]` valid `[80]`，而 `[4, 32]` 会被拒绝 —— 80 个元素不是整数行
-（每行 32）。`[1, 8, 16]` valid `[1, 8, 5]` 根本不是扁平前缀，但映射到 `[8, 16]`
-valid `[8, 5]` 是精确的，因为丢弃完全有效的单位轴不改变行列关系。
-`tensor.reshape` 可选的第三个 `valid_shape` 操作数只能*收窄*推导出的区域，
+最后一条规则把有效区域读作它填充的若干**连续段（run）**。相邻的源轴只要满足
+“低位轴完全有效”或“高位轴被钉死在单个坐标上”，就属于同一段；否则高位轴的
+stride 会残留在区域中并把它切开。每一段都是自身容量的一个扁平前缀，因此当
+`new_shape` 把自己的维度分成同样的段、且每段前缀都落在维度边界上时，区域即可
+精确映射。对于静态区域这条规则是**精确的**：当且仅当 `new_shape` 下存在某个矩形框
+表示完全相同的元素集合时才接受。
+
+因此 `[8, 16]` valid `[5, 16]` 是单段情形（80 个元素的扁平前缀），可映射为
+`[16, 8]` valid `[10, 8]` 或 `[128]` valid `[80]`，而 `[4, 32]` 会被拒绝 ——
+80 个元素不是整数行（每行 32）。`[2, 2, 2]` valid `[2, 1, 2]` 是两段情形
+`2 | 4` —— 扁平元素集合为 `{0, 1, 4, 5}`，根本不是前缀 —— `[2, 4]` 可以把它写成
+valid `[2, 2]`，而 `[8]` 没有每 4 个元素一次的维度边界，无法表示。
+`[8, 16]` valid `[8, 5]` 切分为 `8 | 16`，`[16, 8]` 无法按同样方式重新分组，因此
+被拒绝。`tensor.reshape` 可选的第三个 `valid_shape` 操作数只能*收窄*推导出的区域，
 不能声称拥有该区域之外的数据。
+
+符号化 extent 会削弱规则能证明的范围，但本身并不导致拒绝：**任何**一段都可以原样
+携带符号化的*有效* extent —— 只要它所在段的目标维度步长恰好等于该段的 trailing
+volume。因此 `[4, 2, 8]` valid `[v, 1, 8]` 即便切分为 `4 | 16` 两段，仍可映射为
+`[4, 16]` valid `[v, 8]`。必须是静态的是用来度量区域的*物理*几何：目标各维 extent、
+每段自由轴以下的各维 extent、符号化路径上自由轴本身（其维度必须可证明足够宽），
+以及区域切分为多段时每一段的容量。达不到这些条件时一律拒绝而不做猜测。
 
 **恒等** `tile.reshape`（目标形状与源形状相同）还会保留源的 layout 三元组
 （`blayout` / `slayout` / `fractal`）及其已解析的内存空间，而不是按形状重新推导 layout。

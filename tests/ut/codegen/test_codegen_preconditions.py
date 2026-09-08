@@ -197,6 +197,98 @@ def test_sub_fractal_rows_are_accepted_where_pto_exempts_them():
     assert codegen.PTOCodegen().generate(optimized)
 
 
+@pytest.mark.parametrize(
+    ("name", "rows", "cols", "dtype", "axis", "extent", "elem_bytes", "padded"),
+    [
+        # The reported case: a one-element FP32 broadcast carrier.
+        ("one_by_one_fp32", 1, 1, pl.FP32, "column", 1, 4, 8),
+        # Not a vector at all -- a square tile fails on exactly the same rule,
+        # which is the part the PTOAS message never conveys.
+        ("square_fp32", 4, 4, pl.FP32, "column", 4, 4, 8),
+        # Halving the element width doubles the reachable extent.
+        ("one_by_four_fp16", 1, 4, pl.FP16, "column", 4, 2, 16),
+    ],
+)
+def test_sub_32_byte_flat_tile_is_reported_by_pypto(
+    name, rows, cols, dtype, axis, extent, elem_bytes, padded, capfd
+):
+    """An unboxed tile under 32 bytes on its contiguous axis is reported here.
+
+    PTO walks a ``none_box`` tile as a flat run of bytes, taking the contiguous
+    axis in 32-byte steps, so an FP32 tile needs 8 elements there. PTOAS does
+    enforce it, but its message (``expects result row-major none_box tile row
+    byte size (cols * sizeof(dtype)) to be 32-byte aligned, but got 4 bytes``)
+    names its own type internals, offers no remedy, and -- because it says
+    "row-major ... row byte size" of a one-row tile -- reads as if the tile
+    being a vector were the problem. It is not: ``[4, 4]`` fails identically.
+
+    Reported as a warning rather than a hard failure: the default pipeline
+    still emits tiles that break the rule (a ragged FP16 ring tail lands
+    physically ``[1, 17]``), so failing here would reject the compiler's own
+    output. PTOAS remains the gate; this adds the location and the remedy.
+    """
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.AIV)
+        def kern(
+            self,
+            x: pl.Tensor[[64, 64], dtype],
+            out: pl.Out[pl.Tensor[[64, 64], dtype]],
+        ) -> pl.Tensor[[64, 64], dtype]:
+            t: pl.Tile[[rows, cols], dtype] = pl.load(x, [0, 0], [rows, cols])
+            t = pl.add(t, t)
+            return pl.store(t, [0, 0], out)
+
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+    optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Prog)
+
+    # Codegen must still succeed -- the diagnostic informs, it does not gate.
+    assert codegen.PTOCodegen().generate(optimized)
+    message = capfd.readouterr().err
+
+    assert "FlatTileExtents" in message, message
+    assert f"its {axis} extent" in message, message
+    assert f"{extent} x {elem_bytes} = {extent * elem_bytes} bytes is not" in message, message
+    # The remedy must name the extent to reach, where to declare the real one,
+    # and the scalar spelling that avoids the tile entirely.
+    assert f"allocate {padded} on that axis" in message, message
+    assert "valid_shape" in message, message
+    assert "pl.read" in message, message
+    # The message must not let the reader conclude this is about vectors.
+    assert "[4, 4] FP32 tile is equally unallocatable" in message, message
+
+
+@pytest.mark.parametrize(
+    ("name", "rows", "cols", "dtype"),
+    [
+        ("exactly_32_bytes_fp32", 1, 8, pl.FP32),
+        ("exactly_32_bytes_fp16", 1, 16, pl.FP16),
+        ("wide_row", 4, 64, pl.FP32),
+    ],
+)
+def test_32_byte_aligned_flat_tile_still_lowers(name, rows, cols, dtype):
+    """The guard does not over-reach: a tile that fills whole 32-byte units lowers."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.AIV)
+        def kern(
+            self,
+            x: pl.Tensor[[64, 64], dtype],
+            out: pl.Out[pl.Tensor[[64, 64], dtype]],
+        ) -> pl.Tensor[[64, 64], dtype]:
+            t: pl.Tile[[rows, cols], dtype] = pl.load(x, [0, 0], [rows, cols])
+            t = pl.add(t, t)
+            return pl.store(t, [0, 0], out)
+
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+    optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Prog)
+    assert codegen.PTOCodegen().generate(optimized)
+
+
 def test_device_kernel_accepts_ascending_loop():
     """The ascending counterpart of the descending-loop rejection still lowers.
 

@@ -103,6 +103,6 @@ params_t0.add_scalar(valid_len);
 
 ## 参见
 
-- [45-materialize_dist_tensor_ctx.md](46-materialize_dist_tensor_ctx.md) ——
+- [47-materialize_dist_tensor_ctx.md](47-materialize_dist_tensor_ctx.md) ——
   针对 `CommCtxType` 的同类「签名 + 调用点」改写
 - [00-pass_manager.md](00-pass_manager.md) —— pass 顺序

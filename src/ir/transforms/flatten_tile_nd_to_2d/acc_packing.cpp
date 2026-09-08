@@ -10,8 +10,8 @@
  */
 
 /// @file acc_packing.cpp
-/// Whole-function decision: which batched `Acc` accumulators are packed along
-/// COLUMNS instead of rows.
+/// Whole-function decision: which batched `Acc` accumulators and logical 2-D
+/// accumulator row windows are packed along columns instead of rows.
 ///
 /// ## Why the decision has to be whole-function
 ///
@@ -42,6 +42,12 @@
 /// | `v` -- `w` | plain SSA alias `v = w` |
 /// | `iter_arg` -- `init` / `iter_arg` -- `yield[i]` / `return_var[i]` -- `iter_arg[i]` | loop carry |
 /// | `return_var[i]` -- `then_yield[i]` / `else_yield[i]` | `IfStmt` merge |
+/// | `v` -- `a` | `v = tile.assemble(a, window, offset)` (same parent buffer) |
+///
+/// A 2-D row window has its own component, joined through `tile.matmul_acc`
+/// and loop carries. Its `tile.slice` definition connects that component to
+/// the parent geometrically, without unioning the differently shaped values.
+/// This also proves that each writeback updates the same window it read.
 ///
 /// A chain is column-packed only when EVERY member is produced and consumed by a
 /// form this pass rewrites page-wise, and the geometry is one L0C can address:
@@ -79,6 +85,8 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/storage_size.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/utils/l0c_footprint.h"
+#include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "src/ir/transforms/flatten_tile_nd_to_2d/rewrite_internal.h"
@@ -99,6 +107,36 @@ constexpr int64_t kAccBoxDim = 16;
 /// The element width `kAccFractal` implies for a 16x16 box: 1024 / 256 bytes.
 constexpr uint64_t kAccElementBits = 32;
 
+/// Can `mad` write this row window as it stands, with no repacking?
+///
+/// The question is settled by the WINDOW's column extent, never the parent's.
+/// ptoas resolves a `pto.subview` asymmetrically: a row window keeps the
+/// parent's physical `Rows` and narrows `ValidRow`, while `Cols` comes from the
+/// window itself. A `[16, 128]` window of a `[16, 512]` accumulator emits
+/// `Tile<Acc, int32_t, 16, 128, ...>`, not `..., 512, ...`. pto-isa's
+/// `MadAccStrideCompatible` (`TMatmul.hpp`, identical on a2a3/a5/a6/kirin9030)
+/// then returns true on `Cols <= FRACTAL_NZ_ROW`: a single block column has no
+/// second column for the compact write to mis-stride.
+///
+/// Width alone is not enough, for the reason `CheckAccWindowContiguous`
+/// (`canonicalize_tile_slice_pass.cpp`) already states: a 16-wide window at
+/// column offset 8 straddles two blocks and corrupts the parent exactly like a
+/// wider one, and a dynamic offset cannot be proven. This predicate must stay
+/// in step with that guard — a window this one exempts but that one rejects is
+/// left unpacked only to be refused two passes later.
+///
+/// An exempt chain must NOT be seeded. Packing it is unnecessary, and a seeded
+/// chain that later proves unpackable is rejected outright — which would turn a
+/// kernel the hardware accepts today into a hard error.
+bool MadCanAddressRowWindow(const std::vector<int64_t>& view_dims, const ExprPtr& column_offset) {
+  if (view_dims.size() != 2) return false;
+  const int64_t view_cols = view_dims[1];
+  if (view_cols <= 0 || view_cols > kAccBoxDim) return false;
+  auto offset = As<ConstInt>(column_offset);
+  if (!offset || offset->value_ < 0) return false;
+  return offset->value_ / kAccBoxDim == (offset->value_ + view_cols - 1) / kAccBoxDim;
+}
+
 /// L0C byte budget. Mirrors `GetMatBudgetBytes` in rewrite_utils.cpp: without a
 /// configured backend (most unit tests) every shape "fits", so the decision is
 /// driven purely by geometry and stays reproducible off-device. A backend that
@@ -109,13 +147,15 @@ uint64_t GetAccBudgetBytes() {
   return size == 0 ? std::numeric_limits<uint64_t>::max() : size;
 }
 
-/// How a member Var is consumed. Only the first three are rewritable page-wise;
+/// How a member Var is consumed. Drains and windows are rewritten page-wise;
 /// `kOther` disqualifies the whole chain.
 enum class UseKind {
   kAccumulate,  ///< argument 0 of `tile.batch_matmul_acc` — the in-place destination.
   kDrainStore,  ///< argument 0 of `tile.store` — drained one page per batch index.
   kDrainMove,   ///< argument 0 of `tile.move` — drained one page per batch index.
   kCarry,       ///< a loop/branch carry edge or a plain SSA alias — buffer-preserving.
+  kWindow,      ///< A logical row window of a 2-D accumulator.
+  kInsert,      ///< Write back the updated window to its parent.
   kOther,       ///< anything else: the chain cannot be column-packed.
 };
 
@@ -124,7 +164,7 @@ struct UseRecord {
   CallPtr call;  ///< The consuming call for kAccumulate / kDrainStore; null otherwise.
 };
 
-/// One `tile.batch_matmul_acc` that demands a batched accumulator.
+/// A batched accumulator, or a parent whose row window feeds `tile.matmul_acc`.
 struct AccSeed {
   CallPtr call;
   AssignStmtPtr assign;
@@ -135,6 +175,7 @@ struct AccSeed {
   DataType dtype = DataType::FP32;
   std::vector<int64_t> batch_dims;
   std::vector<int64_t> nd_shape;
+  bool row_windows = false;
 };
 
 /// Static shape, or nullopt when any dimension is symbolic.
@@ -192,6 +233,7 @@ class ChainCollector {
       Poison(param.get());
     }
     Walk(FlattenToStmts(func->body_));
+    RecordRowWindowSeeds();
   }
 
   // --- Results ---------------------------------------------------------------
@@ -239,6 +281,37 @@ class ChainCollector {
     return it == var_nodes_.end() ? nullptr : it->second;
   }
   bool IsDeclaredReturnVar(const Var* var) const { return declared_return_vars_.count(var) != 0; }
+
+  bool HasAlignedRowOffset(const ExprPtr& offset, int64_t rows) const {
+    if (auto ci = As<ConstInt>(offset)) return ci->value_ >= 0 && ci->value_ % rows == 0;
+    if (rows <= 0 || (rows & (rows - 1)) != 0) return false;
+    tensor_view_semantics::NzOffsetFacts facts;
+    facts.definition = [this](const VarPtr& var) -> ExprPtr {
+      auto def = DefOf(var.get());
+      return def ? def->value_ : nullptr;
+    };
+    int budget = tensor_view_semantics::kNzDivideStepBudget;
+    return tensor_view_semantics::IsProvableMultipleOf(offset, rows, facts, &budget);
+  }
+
+  bool IsWindowWriteback(const CallPtr& insert) {
+    auto target = AsVarLike(insert->args_[0]);
+    auto source = AsVarLike(insert->args_[1]);
+    auto offsets = As<MakeTuple>(insert->args_[2]);
+    if (!target || !source || !offsets) return false;
+    auto it = accumulated_windows_.find(Find(source.get()));
+    if (it == accumulated_windows_.end() || it->second.size() != 1) return false;
+    // Every recorded window is a tile.slice def, so the cast holds today; guard
+    // it anyway, the way the operand casts above are guarded, so a future caller
+    // that records a different definition form fails the check instead of the
+    // process.
+    auto window = As<Call>(it->second.front()->value_);
+    if (!window || window->args_.size() < 3) return false;
+    auto base = AsVarLike(window->args_[0]);
+    auto window_offsets = As<MakeTuple>(window->args_[2]);
+    return base && Find(base.get()) == Find(target.get()) && window_offsets &&
+           tile_view_semantics::ShapeExprListsEquivalent(offsets->elements_, window_offsets->elements_);
+  }
 
  private:
   // --- Graph bookkeeping -----------------------------------------------------
@@ -363,6 +436,9 @@ class ChainCollector {
     const bool is_acc = IsOp(call, "tile.batch_matmul_acc");
     const bool is_store = IsOp(call, "tile.store");
     const bool is_move = IsOp(call, "tile.move");
+    const bool is_matmul_acc = IsOp(call, "tile.matmul_acc");
+    const bool is_window = IsOp(call, "tile.slice");
+    const bool is_insert = IsOp(call, "tile.assemble");
     for (size_t i = 0; i < call->args_.size(); ++i) {
       auto operand = AsVarLike(call->args_[i]);
       if (!operand) {
@@ -370,8 +446,13 @@ class ChainCollector {
         continue;
       }
       NoteVar(operand);
-      if (is_acc && i == 0) {
+      if ((is_acc || is_matmul_acc) && i == 0) {
         AddUse(operand.get(), UseKind::kAccumulate, call);
+        Union(assign->var_.get(), operand.get());
+      } else if (is_window && i == 0) {
+        AddUse(operand.get(), UseKind::kWindow, call);
+      } else if (is_insert && i == 0) {
+        AddUse(operand.get(), UseKind::kInsert, call);
         Union(assign->var_.get(), operand.get());
       } else if (is_store && i == 0) {
         AddUse(operand.get(), UseKind::kDrainStore, call);
@@ -384,7 +465,55 @@ class ChainCollector {
       }
     }
     if (is_acc) RecordSeed(assign, call);
+    if (is_window) window_defs_.push_back(assign);
+    if (is_matmul_acc) matmul_acc_defs_.push_back(assign);
   }
+
+  void RecordRowWindowSeeds() {
+    std::unordered_set<const Var*> accumulated;
+    for (const auto& assign : matmul_acc_defs_) {
+      accumulated.insert(Find(assign->var_.get()));
+    }
+    for (const auto& assign : window_defs_) {
+      const auto* root = Find(assign->var_.get());
+      if (accumulated.count(root) == 0) continue;
+      accumulated_windows_[root].push_back(assign);
+      auto call = As<Call>(assign->value_);
+      if (!call || call->args_.empty()) continue;
+      auto parent = AsVarLike(call->args_[0]);
+      auto parent_type = parent ? As<TileType>(parent->GetType()) : nullptr;
+      auto view_type = As<TileType>(assign->var_->GetType());
+      if (!parent_type || !view_type || parent_type->shape_.size() != 2) continue;
+      auto parent_dims = StaticShape(parent_type->shape_);
+      auto view_dims = StaticShape(view_type->shape_);
+      if (!parent_dims || !view_dims || view_dims->size() != 2) continue;
+      const int64_t rows = (*view_dims)[0];
+      if (rows >= (*parent_dims)[0]) continue;
+      auto window_offsets = call->args_.size() >= 3 ? As<MakeTuple>(call->args_[2]) : nullptr;
+      if (window_offsets && window_offsets->elements_.size() == 2 &&
+          MadCanAddressRowWindow(*view_dims, window_offsets->elements_[1])) {
+        continue;
+      }
+      CHECK_SPAN((*parent_dims)[0] % rows == 0, call->span_)
+          << "matmul_acc accumulator row windows must evenly divide the parent row extent; got " << rows
+          << " rows in a " << (*parent_dims)[0] << "-row accumulator";
+      AccSeed seed;
+      seed.call = call;
+      seed.assign = assign;
+      seed.acc = parent.get();
+      seed.nd_shape = *parent_dims;
+      seed.rows = rows;
+      seed.cols = parent_dims->back();
+      seed.dtype = parent_type->dtype_;
+      seed.batch_count = (*parent_dims)[0] / rows;
+      seed.row_windows = true;
+      seeds_.push_back(std::move(seed));
+    }
+  }
+
+  std::vector<AssignStmtPtr> window_defs_;
+  std::vector<AssignStmtPtr> matmul_acc_defs_;
+  std::unordered_map<const Var*, std::vector<AssignStmtPtr>> accumulated_windows_;
 
   void RecordSeed(const AssignStmtPtr& assign, const CallPtr& call) {
     auto acc_type = As<TileType>(call->args_[0]->GetType());
@@ -556,10 +685,17 @@ ChainVerdict JudgeChain(ChainCollector& graph, const std::vector<const Var*>& me
       verdict.reason = "the accumulator operand is not a named value, so its chain cannot be tracked";
       return verdict;
     }
-    if (seed->nd_shape != head.nd_shape || seed->dtype != head.dtype) {
+    if (seed->nd_shape != head.nd_shape || seed->dtype != head.dtype || seed->rows != head.rows ||
+        seed->cols != head.cols || seed->row_windows != head.row_windows) {
+      // A row-window chain carries no batch dimension and no tile.batch_matmul_acc,
+      // so the batched wording below would name constructs the kernel never used.
       verdict.reason =
-          "the same accumulator is written by two tile.batch_matmul_acc calls with different "
-          "batch geometries, so there is no single packed shape for it";
+          head.row_windows
+              ? "the same accumulator is written through row windows of different heights (" +
+                    std::to_string(head.rows) + " and " + std::to_string(seed->rows) +
+                    " rows), so there is no single packed shape for it"
+              : "the same accumulator is written by two tile.batch_matmul_acc calls with different "
+                "batch geometries, so there is no single packed shape for it";
       return verdict;
     }
   }
@@ -632,6 +768,18 @@ ChainVerdict JudgeChain(ChainCollector& graph, const std::vector<const Var*>& me
     return verdict;
   }
 
+  if (head.row_windows) {
+    auto packed_type =
+        std::make_shared<TileType>(Make2DShapeExprs(rows, batch_count * cols, head.call->span_), head.dtype);
+    const auto* handler =
+        backend::BackendConfig::IsConfigured() ? backend::GetBackend()->GetHandler() : nullptr;
+    auto physical_bytes = utils::StaticPhysicalAllocationBytes(packed_type, MemorySpace::Acc, handler);
+    if (!physical_bytes || *physical_bytes > budget) {
+      verdict.reason = "the packed row windows exceed the target's physical L0C capacity after row alignment";
+      return verdict;
+    }
+  }
+
   for (const auto* member : members) {
     if (graph.IsPoisoned(member)) {
       verdict.reason =
@@ -651,6 +799,11 @@ ChainVerdict JudgeChain(ChainCollector& graph, const std::vector<const Var*>& me
       verdict.reason =
           "the accumulator carries a partial valid_shape, which has no equivalent once the pages sit "
           "side by side in one tile";
+      return verdict;
+    }
+    if (head.row_windows && member_type->memref_.has_value()) {
+      verdict.reason =
+          "the accumulator has an explicitly bound MemRef whose physical layout cannot be repacked";
       return verdict;
     }
     // Packing commits the buffer to Acc. An explicit annotation to any other
@@ -677,8 +830,15 @@ ChainVerdict JudgeChain(ChainCollector& graph, const std::vector<const Var*>& me
       auto def_call = As<Call>(def->value_);
       const bool ok = AsVarLike(def->value_) != nullptr ||  // plain SSA alias
                       IsOp(def_call, "tile.batch_matmul_acc") || IsBatchMatmulProducer(def, head.nd_shape) ||
+                      (head.row_windows && IsOp(def_call, "tile.assemble")) ||
                       (IsOp(def_call, "tile.create") && !def_call->args_.empty());
       if (!ok) {
+        if (head.row_windows) {
+          const std::string producer = def_call && def_call->op_ ? def_call->op_->name_ : "a non-call value";
+          verdict.reason = "the parent accumulator is produced by " + producer +
+                           "; row-window packing requires tile.create followed by slice writebacks";
+          return verdict;
+        }
         // Not a packing problem, and not a batch problem: no op outside the
         // matmul family can write Acc at all, so the same accumulator fails the
         // same way at batch 1. The rejection still has to happen here -- pass 13
@@ -706,6 +866,26 @@ ChainVerdict JudgeChain(ChainCollector& graph, const std::vector<const Var*>& me
     if (member_uses == nullptr) continue;
     for (const auto& use : *member_uses) {
       if (use.kind == UseKind::kCarry || use.kind == UseKind::kAccumulate) continue;
+      if (head.row_windows && (use.kind == UseKind::kWindow || use.kind == UseKind::kInsert)) {
+        auto window_call = use.call;
+        auto window_type = use.kind == UseKind::kWindow ? As<TileType>(window_call->GetType())
+                                                        : As<TileType>(window_call->args_[1]->GetType());
+        auto window_dims = window_type ? StaticShape(window_type->shape_) : std::nullopt;
+        auto offsets = As<MakeTuple>(window_call->args_[2]);
+        if (!window_dims || window_dims->size() != 2 || (*window_dims)[0] != rows || !offsets ||
+            offsets->elements_.size() != 2 || !graph.HasAlignedRowOffset(offsets->elements_[0], rows) ||
+            HasPartialValidShape(window_type)) {
+          verdict.reason =
+              "a row window does not have the common static row extent and an aligned row offset";
+          return verdict;
+        }
+        if (use.kind == UseKind::kInsert && !graph.IsWindowWriteback(window_call)) {
+          verdict.reason =
+              "the slice assignment does not write a matmul_acc result back to its original window";
+          return verdict;
+        }
+        continue;
+      }
       if (use.kind == UseKind::kDrainStore) {
         auto store = use.call;
         auto offsets = store->args_.size() >= 2 ? As<MakeTuple>(store->args_[1]) : nullptr;
@@ -767,6 +947,7 @@ ChainVerdict JudgeChain(ChainCollector& graph, const std::vector<const Var*>& me
   plan->dtype = head.dtype;
   plan->batch_dims = head.batch_dims;
   plan->nd_shape = head.nd_shape;
+  plan->row_windows = head.row_windows;
   verdict.plan = std::move(plan);
   return verdict;
 }
@@ -782,6 +963,12 @@ ChainVerdict JudgeChain(ChainCollector& graph, const std::vector<const Var*>& me
 /// page width and at batch 1 too; both get their own remedy instead, because
 /// telling those users about 16-column pages would be wrong.
 void RejectChain(const AccSeed& seed, const ChainVerdict& verdict) {
+  if (seed.row_windows) {
+    CHECK_SPAN(false, seed.call->span_)
+        << "matmul_acc: cannot lower the shared accumulator's row slices because " << verdict.reason
+        << ". Use acc[...] = pl.matmul_acc(acc[...], lhs, rhs, init_cond=...) with equal-size, "
+           "aligned row windows of one locally allocated accumulator, and store the result after reduction.";
+  }
   const int64_t packed_cols = seed.batch_count * seed.cols;
   const uint64_t packed_bytes = static_cast<uint64_t>(seed.batch_count) * static_cast<uint64_t>(seed.rows) *
                                 static_cast<uint64_t>(seed.cols) * (kAccElementBits / 8);
@@ -860,8 +1047,9 @@ AccPackingMapPtr BuildAccPackingMap(const FunctionPtr& func) {
     // the merge) and a definition that cannot write Acc at all. Rejecting them
     // here rather than downstream also keeps CanonicalizeTileSlice's guard note
     // honest -- it tells users a batch_matmul_acc never reaches that limit.
-    const bool row_packing_still_works =
-        !verdict.force_reject && these_seeds.front()->cols <= kAccBoxDim && !verdict.has_batch_producer;
+    const bool row_packing_still_works = !these_seeds.front()->row_windows && !verdict.force_reject &&
+                                         these_seeds.front()->cols <= kAccBoxDim &&
+                                         !verdict.has_batch_producer;
     if (!row_packing_still_works) RejectChain(*these_seeds.front(), verdict);
   }
 

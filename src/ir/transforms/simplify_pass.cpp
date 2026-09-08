@@ -126,9 +126,9 @@ class ReturnVarEscapeIndex : public IRVisitor {
   /// only case this leaves unhandled is a restore-scope *within* the clone
   /// standing between such a fold and a later use of its return var -- possible
   /// only pre-SSA, and no worse than the behaviour before this index existed.
-  /// Re-indexing each clone would fix it at the cost of an O(N^2) walk over
-  /// nested single-trip loops, which `.claude/rules/pass-complexity.md` rules
-  /// out.
+  /// Re-indexing each clone would close it. It is left open because the gap is
+  /// pre-SSA-only and the pipeline runs Simplify only after ConvertToSSA, so
+  /// nothing but a direct pre-SSA caller can reach it.
   bool Escapes(const Stmt* folded, const Var* rv) const {
     auto site = sites_.find(folded);
     if (site == sites_.end()) return false;  // never indexed -> keep substituting
@@ -430,7 +430,10 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
         }
         return loop_repair::MakeBody(out, sp);
       }
-      if (trips == 1) {
+      // The depth cap keeps a chain of nested single-trip loops from cloning
+      // the remaining nest once per level (see kMaxNestedSingleTripFolds); past
+      // it the loop falls through to the general path and stays a ForStmt.
+      if (trips == 1 && fold_b_depth_ < kMaxNestedSingleTripFolds) {
         // Exactly one iteration: substitute loop_var → start and each
         // iter_arg → its init value via DeepClone (matches the substitution
         // pattern used by LoopUnrollMutator in unroll_loops_pass.cpp), then
@@ -475,8 +478,14 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
         auto baseline_remap = var_remap_;
 
         // Re-visit so any algebraic patterns exposed by the substitution
-        // (e.g. `0 + 64 → 64`) fold in this same Simplify run.
-        auto unrolled_body = VisitStmt(cloned.cloned_body);
+        // (e.g. `0 + 64 → 64`) fold in this same Simplify run. The depth guard
+        // is what keeps the clone above off the quadratic path — see
+        // kMaxNestedSingleTripFolds.
+        StmtPtr unrolled_body;
+        {
+          FoldBDepthGuard fold_guard(fold_b_depth_);
+          unrolled_body = VisitStmt(cloned.cloned_body);
+        }
 
         var_remap_ = std::move(baseline_remap);
         return LiftBodyToReturnVars(unrolled_body, op->return_vars_, op.get());
@@ -880,6 +889,16 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     ScopeDepthGuard& operator=(const ScopeDepthGuard&) = delete;
   };
 
+  /// RAII increment of fold_b_depth_ for the lifetime of the guard. Wrapped
+  /// around the re-visit of a Fold B clone. See kMaxNestedSingleTripFolds.
+  struct FoldBDepthGuard {
+    int& depth;
+    explicit FoldBDepthGuard(int& d) : depth(d) { ++depth; }
+    ~FoldBDepthGuard() { --depth; }
+    FoldBDepthGuard(const FoldBDepthGuard&) = delete;
+    FoldBDepthGuard& operator=(const FoldBDepthGuard&) = delete;
+  };
+
   /// Bind a scalar Var to a constant @p value (full substitution across all
   /// sub-analyzers) and log it so the enclosing scope can unbind it on exit.
   /// See VisitStmt_(AssignStmtPtr).
@@ -1027,6 +1046,32 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   /// each enclosing loop / if-branch / while / spmd body. Gates full constant
   /// substitution in VisitStmt_(AssignStmtPtr).
   int scope_depth_ = 0;
+
+  /// How many Fold B clones are on the stack above the statement being
+  /// visited. 0 in the original function body; incremented for each enclosing
+  /// re-visit of a Fold B clone. Gates further single-trip collapses, bounding
+  /// the pass's cloning cost — see kMaxNestedSingleTripFolds.
+  int fold_b_depth_ = 0;
+
+  /// Cap on Fold B's substitution depth: how many levels of *nested* single-trip
+  /// loops one Simplify run collapses.
+  ///
+  /// Fold B lifts a one-trip body by DeepCloning it with `loop_var → start`
+  /// substituted, then re-visits the clone so nested folds land in the same run.
+  /// When the body is itself a single-trip loop, that re-visit clones again —
+  /// so an unbounded chain clones the remaining nest once per level and the
+  /// clone sizes run N, N-1, ..., 1. That is O(N^2), over the O(N log N) ceiling
+  /// `.claude/rules/pass-complexity.md` sets.
+  ///
+  /// The cap restores a linear bound. Folds at one depth sit at disjoint
+  /// positions, so they clone at most N nodes between them; across at most
+  /// kMaxNestedSingleTripFolds depths the run clones O(N) nodes in total.
+  ///
+  /// Declining is always sound: a single-trip ForStmt is well-formed IR, and a
+  /// later Simplify run collapses the next chunk of the chain. The value is far
+  /// above any real nest of *provably* one-trip pure loops (a handful at most),
+  /// so no kernel in the pipeline reaches it.
+  static constexpr int kMaxNestedSingleTripFolds = 16;
 };
 
 FunctionPtr TransformSimplify(const FunctionPtr& func) {

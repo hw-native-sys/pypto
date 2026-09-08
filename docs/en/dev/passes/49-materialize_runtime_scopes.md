@@ -41,10 +41,10 @@ under `auto_scope=False` (the parser rejects hand-placed AUTO scopes in the
 default mode, where the compiler owns placement).
 
 **When to use**: in the `Default` strategy, immediately after
-[`LegalizeGraphBoundary`](47-legalize_graph_boundary.md) — which follows the
+[`LegalizeGraphBoundary`](48-legalize_graph_boundary.md) — which follows the
 final `Simplify` — and before
-[`ClassifyIterArgCarry`](49-classify_iter_arg_carry.md) and
-[`InsertCommFence`](50-insert_comm_fence.md). Running after every rewriting
+[`ClassifyIterArgCarry`](50-classify_iter_arg_carry.md) and
+[`InsertCommFence`](51-insert_comm_fence.md). Running after every rewriting
 transform means none of them has to reason about the inserted scope wrappers.
 
 **Scope**: orchestration bodies — `Orchestration` and `Graph` — are modified.

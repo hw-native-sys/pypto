@@ -29,6 +29,7 @@ namespace ir {
 namespace {
 
 using op_predicates::IsBuiltinOp;
+using op_predicates::IsManagedTensorCollective;
 
 class OrchestrationCallTargetChecker : public IRVisitor {
  public:
@@ -57,6 +58,26 @@ class OrchestrationCallTargetChecker : public IRVisitor {
   void CheckCallee(const OpPtr& op, const Span& span) const {
     if (!op) return;
     if (IsBuiltinOp(op->name_)) return;
+    // A public managed collective is an operator, not a function reference, and
+    // it legitimately lives in an orchestration body until its lowering rail
+    // runs — so the Program is not expected to define it.
+    //
+    // This stayed hidden while every `pld.tensor.*` collective sat either in an
+    // InCore body (not checked here) or in a HOST orchestrator — which is
+    // declared `level=HOST, role=Orchestrator`, so its func_type is Opaque,
+    // `IsOrchestrationLike` is false, and this verifier skips it. The managed
+    // CHIP/L2 rail put a collective in a genuine `FunctionType::Orchestration`
+    // body for the first time, where it lives until LowerL2TensorCollectives.
+    //
+    // Exempting only this family — rather than the whole `pld.` namespace —
+    // keeps the guard on every other distributed op. `pld.tensor.window` or
+    // `pld.tensor.alloc_window_buffer` in a CHIP orchestration is an error
+    // (windows are allocated at HOST), and it is still reported here.
+    //
+    // Whether a *collective* in this family may appear in this particular body
+    // is a separate question this verifier does not answer; the CHIP rail's own
+    // post-condition does, by name.
+    if (IsManagedTensorCollective(op)) return;
     if (program_ && program_->GetFunction(op->name_)) return;
 
     std::ostringstream oss;

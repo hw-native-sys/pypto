@@ -292,6 +292,7 @@ nav:
       - en/dev/index.md
       - en/dev/00-ecosystem.md
       - en/dev/01-compile-profiling.md
+      - en/dev/08-artifact-identity.md
       - en/dev/02-error-handling.md
       - en/dev/03-logging.md
       - en/dev/03-runtime-dfx.md
@@ -358,18 +359,19 @@ nav:
           - en/dev/passes/37-allocate_memory_addr.md
           - en/dev/passes/38-fold_no_op_reshape.md
           - en/dev/passes/39-fuse_create_assemble_to_slice.md
-          - en/dev/passes/40-derive_call_directions.md
-          - en/dev/passes/41-auto_derive_task_dependencies.md
-          - en/dev/passes/42-expand_manual_phase_fence.md
-          - en/dev/passes/43-synthesize_allreduce_signals.md
-          - en/dev/passes/44-materialize_comm_domain_scopes.md
-          - en/dev/passes/45-lower_host_tensor_collectives.md
-          - en/dev/passes/46-materialize_dist_tensor_ctx.md
-          - en/dev/passes/47-legalize_graph_boundary.md
-          - en/dev/passes/48-materialize_runtime_scopes.md
-          - en/dev/passes/49-classify_iter_arg_carry.md
-          - en/dev/passes/50-insert_comm_fence.md
-          - en/dev/passes/51-materialize_valid_shape_symbols.md
+          - en/dev/passes/40-lower_l2_tensor_collectives.md
+          - en/dev/passes/41-derive_call_directions.md
+          - en/dev/passes/42-auto_derive_task_dependencies.md
+          - en/dev/passes/43-expand_manual_phase_fence.md
+          - en/dev/passes/44-synthesize_allreduce_signals.md
+          - en/dev/passes/45-materialize_comm_domain_scopes.md
+          - en/dev/passes/46-lower_host_tensor_collectives.md
+          - en/dev/passes/47-materialize_dist_tensor_ctx.md
+          - en/dev/passes/48-legalize_graph_boundary.md
+          - en/dev/passes/49-materialize_runtime_scopes.md
+          - en/dev/passes/50-classify_iter_arg_carry.md
+          - en/dev/passes/51-insert_comm_fence.md
+          - en/dev/passes/52-materialize_valid_shape_symbols.md
           - en/dev/passes/91-utility_passes.md
           - en/dev/passes/92-diagnostics.md
           - en/dev/passes/99-verifier.md

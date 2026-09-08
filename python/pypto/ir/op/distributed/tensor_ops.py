@@ -464,6 +464,7 @@ def all_to_all_v(
     send_counts: Expr,
     recv_counts: Expr,
     *,
+    core_num: int = 1,
     span: Span | None = None,
 ) -> Call:
     """Build a ``pld.tensor.all_to_all_v(...)`` Call.
@@ -496,10 +497,22 @@ def all_to_all_v(
        guaranteed zeroed — those bytes are *uninitialised* and may decode as
        **NaN or Inf**. Trim to ``recv_counts`` **before** computing over the
        dense ``[NR*MAX_RECV, SIZE]`` block, or NaN propagates into valid rows.
+
+    ``core_num`` is the requested AIV block limit for the managed CHIP/L2 rail
+    (``LowerL2TensorCollectives``); the InCore composite rail requires
+    ``core_num == 1`` and is rejected otherwise by ``LowerCompositeOps``.
     """
+    if not isinstance(core_num, int) or isinstance(core_num, bool):
+        raise TypeError(
+            "pld.tensor.all_to_all_v core_num must be a positive compile-time int, "
+            f"got {type(core_num).__name__}"
+        )
+    if core_num <= 0:
+        raise ValueError(f"pld.tensor.all_to_all_v core_num must be positive, got {core_num}")
+
     actual_span = _get_span_or_capture(span, frame_offset=1)
     _args: list[Expr] = [input, target, signal, send_counts, recv_counts]
-    return _ir_core.create_op_call("pld.tensor.all_to_all_v", _args, {}, actual_span)
+    return _ir_core.create_op_call("pld.tensor.all_to_all_v", _args, {"core_num": core_num}, actual_span)
 
 
 __all__ = [

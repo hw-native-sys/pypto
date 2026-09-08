@@ -294,10 +294,13 @@ class TestL3HostTensorAllToAllVSkew:
     golden — so a wire divergence between the rails surfaces as a golden
     mismatch in one file or the other.
 
-    **Coverage caveat:** the surplus-row tail check below skips ``src == rank``
-    on this rail only (see #2546). Payload rows and ``recv_counts`` are still
-    checked for every ``(rank, src)`` pair; the InCore file checks the tail on
-    all pairs including its self slot.
+    Every ``(rank, src)`` pair is checked on all three counts — ``recv_counts``,
+    the payload rows, and the surplus-row tail — including the self slot. The
+    self slot was excluded once (#2546) because the rank's own staged input
+    surfaced there even when nothing was transferred, but that was the undefined
+    tail of the write-only ``out`` buffer, not the window; the consume loop now
+    mirrors the whole window into ``out``, so the tail check is meaningful on
+    every pair.
     """
 
     @pytest.mark.parametrize("case", sorted(_SKEW_CASES))

@@ -37,6 +37,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/cast_saturation.h"
 #include "pypto/ir/comm.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
@@ -1423,6 +1424,11 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
         stream_ << prefix_ << ".PipeType." << PipeTypeToString(static_cast<PipeType>(int_val));
       } else if (key == "mode") {
         stream_ << "'" << CastModeToString(int_val) << "'";
+      } else if (key == "saturation_mode") {
+        // Print the DSL spelling ('off'/'on') rather than the raw code, the
+        // same way `mode` is restored, so a printed cast reparses as the call
+        // the author would have written.
+        stream_ << "'" << SaturationModeToName(int_val) << "'";
       } else if (key == "atomic") {
         // Stored as int (the DSL casts AtomicType -> int before stashing on
         // kwargs_; nb::isinstance<AtomicType> in bindings does the same). The
@@ -3022,7 +3028,10 @@ static std::unordered_map<const Var*, std::string> CollectDynVarMapping(const Pr
   };
 
   std::function<void(const TypePtr&)> collect_from_type = [&](const TypePtr& type) {
-    if (auto tensor_type = As<TensorType>(type)) {
+    // AsTensorTypeLike, not As<TensorType>: DistributedTensorType has its own
+    // ObjectKind, so the exact-match As<TensorType> misses it and the symbols a
+    // pld.DistributedTensor annotation declares never reach dyn_var_rename_map_.
+    if (auto tensor_type = AsTensorTypeLike(type)) {
       for (const auto& dim : tensor_type->shape_) {
         collect_vars_from_expr(dim);
       }

@@ -4514,5 +4514,188 @@ class TestFlattenTileNdTo2DSpans:
                 )
 
 
+class TestRowWindowAccumulatorPacking:
+    @pytest.mark.parametrize(
+        "read_row,write_row,message",
+        [(8, 8, "aligned row offset"), (0, 16, "original window")],
+    )
+    def test_row_window_packing_rejects_unrepresentable_writeback(self, read_row, write_row, message):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tile[[16, 64], pl.FP16, pl.Mem.Mat],
+                b: pl.Tile[[64, 32], pl.FP16, pl.Mem.Mat],
+                out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                acc = pl.tile.create([32, 32], pl.FP32)
+                win = pl.tile.slice(acc, [16, 32], [read_row, 0])
+                part = pl.tile.matmul_acc(win, a, b, init_cond=True)
+                acc_updated = pl.tile.assemble(acc, part, [write_row, 0])
+                result = pl.tile.store(acc_updated, [0, 0], out)
+                return result
+
+        with pytest.raises(ValueError, match=message):
+            passes.flatten_tile_nd_to_2d()(Before)
+
+    def test_row_windows_pack_columns_and_restore_store_rows(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tile[[16, 64], pl.FP16, pl.Mem.Mat],
+                b: pl.Tile[[64, 32], pl.FP16, pl.Mem.Mat],
+                out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                acc = pl.tile.create([32, 32], pl.FP32)
+                win = pl.tile.slice(acc, [16, 32], [16, 0])
+                part = pl.tile.matmul_acc(win, a, b, init_cond=True)
+                acc_updated = pl.tile.assemble(acc, part, [16, 0])
+                result = pl.tile.store(acc_updated, [0, 0], out)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tile[[16, 64], pl.FP16, pl.Mem.Mat],
+                b: pl.Tile[[64, 32], pl.FP16, pl.Mem.Mat],
+                out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                acc = pl.tile.create([16, 64], pl.FP32, target_memory=pl.Mem.Acc)
+                win = pl.tile.slice(acc, [16, 32], [0, 32])
+                part = pl.tile.matmul_acc(win, a, b, init_cond=True)
+                acc_updated = pl.tile.assemble(acc, part, [0, 32])
+                page0 = pl.tile.slice(acc_updated, [16, 32], [0, 0])
+                out0 = pl.tile.store(page0, [0, 0], out)
+                page1 = pl.tile.slice(acc_updated, [16, 32], [0, 32])
+                out1 = pl.tile.store(page1, [16, 0], out0)
+                return out1
+
+        after = passes.flatten_tile_nd_to_2d()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_narrow_accumulator_row_windows_are_left_unpacked(self):
+        """A window at most one 16-column box wide needs no packing at all.
+
+        pto-isa's ``MadAccStrideCompatible`` returns true on ``Cols <= 16``
+        before it looks at ``ValidRow``: there is no second block column for
+        the compact write to mis-stride. Packing such a chain is unnecessary,
+        and seeding it would subject a kernel the hardware already accepts to
+        the packer's rejection rules.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tile[[16, 64], pl.FP16, pl.Mem.Mat],
+                b: pl.Tile[[64, 16], pl.FP16, pl.Mem.Mat],
+                out: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
+            ) -> pl.Tensor[[32, 16], pl.FP32]:
+                acc = pl.tile.create([32, 16], pl.FP32)
+                win = pl.tile.slice(acc, [16, 16], [16, 0])
+                part = pl.tile.matmul_acc(win, a, b, init_cond=True)
+                acc_updated = pl.tile.assemble(acc, part, [16, 0])
+                result = pl.tile.store(acc_updated, [0, 0], out)
+                return result
+
+        after = passes.flatten_tile_nd_to_2d()(Before)
+        ir.assert_structural_equal(after, Before)
+
+    def test_narrow_accumulator_accepts_mixed_row_window_heights(self):
+        """Windows of different heights have no single packed shape, but a
+        single-block-column accumulator does not need one — the pass must leave
+        it alone rather than reject it."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a16: pl.Tile[[16, 64], pl.FP16, pl.Mem.Mat],
+                a32: pl.Tile[[32, 64], pl.FP16, pl.Mem.Mat],
+                b: pl.Tile[[64, 16], pl.FP16, pl.Mem.Mat],
+                out: pl.Out[pl.Tensor[[48, 16], pl.FP32]],
+            ) -> pl.Tensor[[48, 16], pl.FP32]:
+                acc = pl.tile.create([48, 16], pl.FP32)
+                lo = pl.tile.slice(acc, [32, 16], [0, 0])
+                lo_part = pl.tile.matmul_acc(lo, a32, b, init_cond=True)
+                acc1 = pl.tile.assemble(acc, lo_part, [0, 0])
+                hi = pl.tile.slice(acc1, [16, 16], [32, 0])
+                hi_part = pl.tile.matmul_acc(hi, a16, b, init_cond=True)
+                acc2 = pl.tile.assemble(acc1, hi_part, [32, 0])
+                result = pl.tile.store(acc2, [0, 0], out)
+                return result
+
+        after = passes.flatten_tile_nd_to_2d()(Before)
+        ir.assert_structural_equal(after, Before)
+
+    def test_narrow_windows_of_a_wide_parent_are_left_unpacked(self):
+        """The exemption reads the window's column extent, not the parent's.
+
+        ptoas resolves a row window to the parent's physical ``Rows`` but the
+        window's ``Cols``, so a 16-column window inside one block is a single
+        L0C block column however wide its parent is. Two such windows in
+        separate blocks of a ``[48, 32]`` accumulator are addressable at unequal
+        heights, and ``CheckAccWindowContiguous`` accepts them downstream.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a16: pl.Tile[[16, 64], pl.FP16, pl.Mem.Mat],
+                a32: pl.Tile[[32, 64], pl.FP16, pl.Mem.Mat],
+                b: pl.Tile[[64, 16], pl.FP16, pl.Mem.Mat],
+                out: pl.Out[pl.Tensor[[48, 32], pl.FP32]],
+            ) -> pl.Tensor[[48, 32], pl.FP32]:
+                acc = pl.tile.create([48, 32], pl.FP32)
+                lo = pl.tile.slice(acc, [32, 16], [0, 0])
+                lo_part = pl.tile.matmul_acc(lo, a32, b, init_cond=True)
+                acc1 = pl.tile.assemble(acc, lo_part, [0, 0])
+                hi = pl.tile.slice(acc1, [16, 16], [32, 16])
+                hi_part = pl.tile.matmul_acc(hi, a16, b, init_cond=True)
+                acc2 = pl.tile.assemble(acc1, hi_part, [32, 16])
+                result = pl.tile.store(acc2, [0, 0], out)
+                return result
+
+        after = passes.flatten_tile_nd_to_2d()(Before)
+        ir.assert_structural_equal(after, Before)
+
+    def test_mixed_row_window_heights_are_reported_as_row_windows(self):
+        """A row-window chain carries no batch dimension: the rejection must not
+        blame ``tile.batch_matmul_acc`` or a batch geometry the kernel never had."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a16: pl.Tile[[16, 64], pl.FP16, pl.Mem.Mat],
+                a32: pl.Tile[[32, 64], pl.FP16, pl.Mem.Mat],
+                b: pl.Tile[[64, 32], pl.FP16, pl.Mem.Mat],
+                out: pl.Out[pl.Tensor[[64, 32], pl.FP32]],
+            ) -> pl.Tensor[[64, 32], pl.FP32]:
+                acc = pl.tile.create([64, 32], pl.FP32)
+                lo = pl.tile.slice(acc, [32, 32], [0, 0])
+                lo_part = pl.tile.matmul_acc(lo, a32, b, init_cond=True)
+                acc1 = pl.tile.assemble(acc, lo_part, [0, 0])
+                hi = pl.tile.slice(acc1, [16, 32], [32, 0])
+                hi_part = pl.tile.matmul_acc(hi, a16, b, init_cond=True)
+                acc2 = pl.tile.assemble(acc1, hi_part, [32, 0])
+                result = pl.tile.store(acc2, [0, 0], out)
+                return result
+
+        with pytest.raises(ValueError, match="row windows of different heights") as exc:
+            passes.flatten_tile_nd_to_2d()(Before)
+        assert "batch_matmul_acc" not in str(exc.value)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

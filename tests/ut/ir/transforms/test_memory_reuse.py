@@ -1897,6 +1897,31 @@ class TestInplaceOps:
         After = _run_pipeline(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_xor_output_does_not_alias_sources_or_tmp(self):
+        """TXOR decomposition requires four distinct live buffers."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                input_a: pl.Tensor[[16, 16], pl.INT16],
+                input_b: pl.Tensor[[16, 16], pl.INT16],
+                input_tmp: pl.Tensor[[16, 16], pl.INT16],
+                output: pl.Out[pl.Tensor[[16, 16], pl.INT16]],
+            ) -> pl.Tensor[[16, 16], pl.INT16]:
+                lhs: pl.Tile[[16, 16], pl.INT16, pl.MemorySpace.Vec] = pl.load(input_a, [0, 0], [16, 16])
+                rhs: pl.Tile[[16, 16], pl.INT16, pl.MemorySpace.Vec] = pl.load(input_b, [0, 0], [16, 16])
+                tmp: pl.Tile[[16, 16], pl.INT16, pl.MemorySpace.Vec] = pl.load(input_tmp, [0, 0], [16, 16])
+                dst: pl.Tile[[16, 16], pl.INT16, pl.MemorySpace.Vec] = pl.xor(lhs, rhs, tmp)
+                return pl.store(dst, [0, 0], output)
+
+        after = _run_pipeline(Before)
+        bases = _collect_tile_memref_bases(after)
+        for name in ("lhs", "rhs", "tmp", "dst"):
+            assert name in bases, f"missing {name}; got {bases}"
+        assert len({bases["lhs"], bases["rhs"], bases["tmp"], bases["dst"]}) == 4
+
     def test_inplace_unsafe_two_level_transitive_chain(self):
         """tile.recip must not reuse a buffer occupied by its input via a two-level chain.
 
@@ -5913,7 +5938,7 @@ class TestForbidOutputAlias:
             )
 
     def test_ci_output_does_not_alias_compiler_scratch(self):
-        """With #2523 level3 ci scratch disabled, tile.ci stays 2-arg (no compiler tmp)."""
+        """InitMemRef must append tile.ci tmp on 910B; MemoryReuse forbids dst alias tmp."""
 
         @pl.program
         class Before:
@@ -5940,7 +5965,16 @@ class TestForbidOutputAlias:
                 super().visit_call(call)
 
         _CiCollector().visit_program(After)
-        assert len(ci_calls) == 1 and len(ci_calls[0].args) == 2
+        assert len(ci_calls) == 1 and len(ci_calls[0].args) == 3
+        tmp_type = ci_calls[0].args[2].type
+        assert isinstance(tmp_type, ir.TileType) and tmp_type.memref is not None
+
+        bases = _collect_tile_memref_bases(After)
+        assert "seq" in bases, f"Expected seq in After IR; got bases: {bases}"
+        tmp_base = tmp_type.memref.base_.name_hint
+        assert bases["seq"] != tmp_base, (
+            f"tile.ci output must not alias its tmp buffer, but both bind to {tmp_base}"
+        )
 
     def test_sel_output_does_not_alias_mask_or_tmp(self):
         """dst skips the mask/tmp buffers while remaining free to reuse a value operand."""

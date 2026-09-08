@@ -269,6 +269,10 @@ jobs:
     steps:
     - name: Checkout
       uses: actions/checkout@v4
+    - name: Set up Python for lint hooks
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
     - name: pre-commit
       uses: pre-commit/action@v3.0.0
       with:
@@ -1211,7 +1215,8 @@ jobs:
             --ignore=tests/st/runtime/ops \
             --ignore=tests/st/runtime/cross_core \
             --ignore=tests/st/runtime/framework_and_models/test_dump_tag.py \
-            --precompile-workers=32 --execute-via-task-submit --execute-batch-size=64 \
+            --precompile-workers=32 --strict-case-discovery \
+            --execute-via-task-submit --execute-batch-size=64 \
             --task-queue-timeout=1800 --task-max-time=600 --task-submit-device="$DEVICE_ID"
 
       - name: Kill orphaned task-submit tasks
@@ -1319,7 +1324,8 @@ jobs:
           test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
           python -m pytest tests/st/runtime/ops tests/st/runtime/cross_core \
             -v -m device_batch \
-            --precompile-workers=32 --execute-via-task-submit --execute-batch-size=64 \
+            --precompile-workers=32 --strict-case-discovery \
+            --execute-via-task-submit --execute-batch-size=64 \
             --task-queue-timeout=1800 --task-max-time=600 --task-submit-device="$DEVICE_ID"
 
       - name: Test direct-device (mechanism B — one card, in-process)
@@ -1413,7 +1419,7 @@ jobs:
             --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest \
               tests/st/runtime/scheduling -v -m swimlane \
               --device=\$TASK_DEVICE --platform=a2a3 --enable-chip-swimlane \
-              --precompile-workers=8"
+              --precompile-workers=8 --strict-case-discovery"
 
       - name: Test Graph record-and-replay (one process per test)
         # --forked because a ChipWorker binds one (platform, device_id, runtime):

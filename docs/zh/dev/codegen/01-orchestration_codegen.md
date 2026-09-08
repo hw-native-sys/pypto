@@ -6,7 +6,7 @@
 
 例如，返回值到参数的追踪（将被调用者返回值映射回 `Out` 参数）是分析工作，应由代码生成之前的 Pass 解决。[`NormalizeReturnOrder`](../passes/28-normalize_return_order.md) pass 现在会在代码生成之前完成此规范化，使编排代码生成可以直接将 `return[i]` 映射到 `out_indices[i]`，无需追踪 `tile.store`/yield 链。
 
-同样，判断一个 `ForStmt` iter_arg 是否需要物化 carry 变量，过去要在循环体上跑别名等价不动点。[`ClassifyIterArgCarry`](../passes/49-classify_iter_arg_carry.md) pass 现在把该判定（以及 TaskId fence 数组的 extent）打在 `ForStmt::attrs_` 上，codegen 直接读 `iter_arg_rebind_<i>` / `iter_arg_array_size_<i>`，不再自行推导。
+同样，判断一个 `ForStmt` iter_arg 是否需要物化 carry 变量，过去要在循环体上跑别名等价不动点。[`ClassifyIterArgCarry`](../passes/50-classify_iter_arg_carry.md) pass 现在把该判定（以及 TaskId fence 数组的 extent）打在 `ForStmt::attrs_` 上，codegen 直接读 `iter_arg_rebind_<i>` / `iter_arg_array_size_<i>`，不再自行推导。
 
 ## 概述
 
@@ -108,7 +108,7 @@ const ChipTensor& tmp = alloc_0.get_ref(0);
 ### 阶段 6–8：任务提交与控制流
 
 所有任务提交包裹在顶层 `SIMPLER_SCOPE()` 中。codegen 不再依据 `for` / `if` 结构
-决定 scope 位置：[MaterializeRuntimeScopes](../passes/48-materialize_runtime_scopes.md)
+决定 scope 位置：[MaterializeRuntimeScopes](../passes/49-materialize_runtime_scopes.md)
 pass 会向 IR 中插入显式的 AUTO `RuntimeScopeStmt` 节点（函数体以及每个
 `for` / `if` 体），codegen 从这些节点 1:1 地 emit `SIMPLER_SCOPE`（manual scope
 降级为 `SIMPLER_SCOPE(ScopeMode::MANUAL)`）：
@@ -396,6 +396,19 @@ void aicpu_orchestration_entry(const ChipTaskArgs& orch_args) {
 | 张量参数索引 | `orch_args.tensor(N)` | `orch_args.tensor(0)` |
 | 标量参数索引 | `orch_args.scalar(N)` | `orch_args.scalar(0)` |
 
+### Graph 函数体
+
+`FunctionType.Graph` 的函数体由第二个 `OrchestrationStmtCodegen` 实例生成，它
+的参数是在辅助函数开头绑定的普通 C++ 参数（`const Tensor& c =
+args.tensor(1).ref();`），而非入口参数。因此它的 `param_name_set` 为空——
+`GetExternalTensorName` 不应把它们改写成 `ext_<name>`——但这些名字仍要通过
+`ReserveDeclaredNames` 预留。
+
+两者缺一不可。若不预留，函数体中该参数的第一个 SSA 重命名就会占用参数自身的
+名字；当它是在 `pl.manual_scope` 内被预留时，该名字随后会被当作作用域局部名，
+之后每一次回写都会在块内生成 `const Tensor& c__ssa_vN = c;` 别名，而不是重映射
+到参数上，于是块之后的任务启动引用到的标识符已经脱离了 C++ 作用域。
+
 ## 控制流生成
 
 ### ForStmt
@@ -543,7 +556,7 @@ parser：parser 把用户的 `pl.submit(..., deps=[tid1, tid2])` kwarg 写入类
 `manual_dep_edges` 的形态已不存在——ManualDepsOnSubmitOnly 结构性属性会校验
 任何跨函数 `Call` 都不携带它；只有 `system.task_dummy` barrier op 作为 fanin
 契约保留该 attr。编译器推导的依赖边来自
-[`AutoDeriveTaskDependencies`](../passes/41-auto_derive_task_dependencies.md)，
+[`AutoDeriveTaskDependencies`](../passes/42-auto_derive_task_dependencies.md)，
 保存在 `Call.attrs["compiler_manual_dep_edges"]`（独立的 key，允许出现在普通
 call 上）。该 pass 从不分析用户写的 MANUAL scope——在 `pl.manual_scope()` 内，
 显式的 `deps=[...]` 仍是唯一的依赖边来源。它只分析 AUTO 区域，且仅当编译期开关
@@ -586,6 +599,13 @@ MANUAL）在进入时快照 `manual_task_id_map_` 与 `array_carry_vars_`、退�
 因此在某作用域内产生的绑定不会泄漏到外层作用域（否则其标识符会超出 C++ 作用域）。
 循环 / 分支的 carry 在其 body 的 `SIMPLER_SCOPE` *之前*声明，因此能正确地在块结束后存活。
 
+**例外：基于外层存储的 array carry。** 作用域内的 `arr[i] = tid` 注册的 carry，其底层
+`TaskId[N]` 声明在更外层。槽位写入就地生成，但该 *carry* 是在闭合花括号之后、由外层循环的
+yield 读取的。把它恢复掉会让该 yield 把 Array 值误判为标量 TaskId，因此
+`PreserveEnclosingArrayCarries` 会保留所有底层数组生命周期长于该块的 carry——两种作用域
+形态皆然。局部性判定按形态区分：MANUAL 作用域会提升自己的分配，因此直接知道其局部名字集合；
+AUTO 作用域不做任何提升，故仅当进入前已有 carry 命名了该存储时，才视其为外层存储。
+
 ### 无法解析的依赖边
 
 上述生命周期规则带来一个结果：若某条依赖边引用的 TaskId 产生于一个**已经关闭**的
@@ -596,10 +616,11 @@ MANUAL）在进入时快照 `manual_task_id_map_` 与 `array_carry_vars_`、退�
 | -------- | ---------------- |
 | 编译器推导（`compiler_manual_dep_edges`） | 静默跳过。这类边是尽力而为的 hazard 补丁；`PrepareCrossScopeTaskIdHoists` 已对能处理的部分做了 LCA 提升，丢弃其余是安全的，因为该 pass 只会*增加*定序 |
 | 用户书写（`deps=[...]`） | **硬报错**——`CHECK_SPAN` 抛出 `pypto::ValueError`，并指出该 TaskId 与对应的 DSL 源码行 |
+| 数组发布（`arr[i] = tid`） | **硬报错**——`CheckTaskIdSlotValueInScope` 抛出 `pypto::ValueError`，提示用户把该写入移进产生该 TaskId 的 `pl.scope()` 内。与依赖边不同，槽位写入是无条件生成的，因此若放行，就会生成宿主编译器以 `'<tid>' was not declared in this scope` 拒绝的编排代码——而 `--compile-only` 根本走不到那一步 |
 
 来源由 attr key 判定。注意 `attrs["dummy_task"]` **不是**作者身份标记：parser 会把
 它打在用户书写的 `pl.system.task_dummy(deps=[...])` 上，与
-[`ExpandManualPhaseFence`](../passes/42-expand_manual_phase_fence.md) 给自己合成的
+[`ExpandManualPhaseFence`](../passes/43-expand_manual_phase_fence.md) 给自己合成的
 barrier 打的完全相同，因此所有 `manual_dep_edges` 载体一律强制校验。合成的 barrier
 只会引用其所改写的 manual scope 内仍然活跃的 TaskId，故其 fanin 必然可解析。
 

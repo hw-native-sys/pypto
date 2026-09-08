@@ -638,6 +638,86 @@ class TestCarryFamilyCodegen:
             )
 
 
+class TestBitwiseScalarFamilyCodegen:
+    """PTOAS bitwise scalars keep the tile width and use signless iN types."""
+
+    @pytest.mark.parametrize(
+        "tile_dtype,scalar_dtype,scalar_mlir_type",
+        [
+            (pl.INT8, pl.INT8, "i8"),
+            (pl.UINT8, pl.INT8, "i8"),
+            (pl.INT16, pl.INT16, "i16"),
+            (pl.UINT16, pl.INT16, "i16"),
+            (pl.INT32, pl.INT32, "i32"),
+            (pl.UINT32, pl.INT32, "i32"),
+        ],
+    )
+    def test_bitwise_scalar_ops_emit_same_width_signless_scalar(
+        self, tile_dtype, scalar_dtype, scalar_mlir_type
+    ):
+        # 32 columns, not 16: at 8 bits per element a 16-column tile spans
+        # 16 bytes, and an unboxed tile is addressed in whole 32-byte units.
+        @pl.program
+        class BitwiseScalarPrograms:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_ands(
+                self,
+                src: pl.Tensor[[16, 32], tile_dtype],
+                out: pl.Tensor[[16, 32], tile_dtype],
+            ) -> pl.Tensor[[16, 32], tile_dtype]:
+                src_tile = pl.load(src, [0, 0], [16, 32])
+                return pl.store(pl.tile.ands(src_tile, 0x55), [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_ors(
+                self,
+                src: pl.Tensor[[16, 32], tile_dtype],
+                scalar_src: pl.Tensor[[1], tile_dtype],
+                out: pl.Tensor[[16, 32], tile_dtype],
+            ) -> pl.Tensor[[16, 32], tile_dtype]:
+                scalar: pl.Scalar[scalar_dtype] = pl.cast(pl.read(scalar_src, [0]), scalar_dtype)
+                src_tile = pl.load(src, [0, 0], [16, 32])
+                return pl.store(pl.tile.ors(src_tile, scalar), [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_xors(
+                self,
+                src: pl.Tensor[[16, 32], tile_dtype],
+                scalar_src: pl.Tensor[[1], tile_dtype],
+                out: pl.Tensor[[16, 32], tile_dtype],
+            ) -> pl.Tensor[[16, 32], tile_dtype]:
+                scalar: pl.Scalar[scalar_dtype] = pl.cast(pl.read(scalar_src, [0]), scalar_dtype)
+                src_tile = pl.load(src, [0, 0], [16, 32])
+                tmp = pl.tile.create([16, 32], dtype=tile_dtype, target_memory=pl.MemorySpace.Vec)
+                return pl.store(pl.tile.xors(src_tile, scalar, tmp), [0, 0], out)
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(BitwiseScalarPrograms)
+        expected_ops = {
+            "kernel_ands": "pto.tands",
+            "kernel_ors": "pto.tors",
+            "kernel_xors": "pto.txors",
+        }
+
+        for func in optimized.functions.values():
+            expected_op = expected_ops[func.name]
+            single = ir.Program([func], func.name, optimized.span)
+            mlir = codegen.PTOCodegen().generate(single)
+            op_line = next((line for line in mlir.splitlines() if expected_op in line), "")
+            assert op_line, f"{expected_op} not found in MLIR:\n{mlir}"
+            ins_types = op_line.split("ins(", 1)[1].split(")", 1)[0].split(":", 1)[1]
+            assert re.search(rf"(?:^|, ){scalar_mlir_type}(?:,|$)", ins_types.strip()), (
+                f"{expected_op} must keep the same-width signless scalar type {scalar_mlir_type}: {op_line}"
+            )
+            if tile_dtype in (pl.UINT8, pl.UINT16, pl.UINT32) and func.name != "kernel_ands":
+                assert "builtin.unrealized_conversion_cast" in mlir
+                assert f": u{scalar_mlir_type} to {scalar_mlir_type}" in mlir
+                assert not any(
+                    "arith.trunci" in line and f"u{scalar_mlir_type}" in line for line in mlir.splitlines()
+                )
+
+
 class TestRsqrtHighPrecisionCodegen:
     """Tests for the high-precision path of tile.rsqrt (2-arg form)."""
 
@@ -964,18 +1044,21 @@ class TestB02SelectionAndPreluCodegen:
         assert "i32" in line
 
     def test_tsels_rejects_int8_on_a2a3(self):
+        # 32 INT8 columns, not 16: an unboxed tile is addressed in 32-byte
+        # steps, so a [16, 16] INT8 tile has no allocation and the tsels
+        # rejection under test would never be reached.
         @pl.program
         class Prog:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
-                src: pl.Tensor[[16, 16], pl.INT8],
-                out: pl.Tensor[[16, 16], pl.INT8],
-            ) -> pl.Tensor[[16, 16], pl.INT8]:
-                src_tile: pl.Tile[[16, 16], pl.INT8] = pl.load(src, [0, 0], [16, 16])
+                src: pl.Tensor[[16, 32], pl.INT8],
+                out: pl.Tensor[[16, 32], pl.INT8],
+            ) -> pl.Tensor[[16, 32], pl.INT8]:
+                src_tile: pl.Tile[[16, 32], pl.INT8] = pl.load(src, [0, 0], [16, 32])
                 mask: pl.Tile[[16, 32], pl.UINT8] = pl.tile.cmps(src_tile, 0, cmp_type=4)
-                tmp: pl.Tile[[1, 1], pl.UINT8] = pl.tile.create([1, 1], dtype=pl.UINT8)
-                result: pl.Tile[[16, 16], pl.INT8] = pl.tile.sels(mask, src_tile, tmp, -3)
+                tmp: pl.Tile[[1, 32], pl.UINT8] = pl.tile.create([1, 32], dtype=pl.UINT8)
+                result: pl.Tile[[16, 32], pl.INT8] = pl.tile.sels(mask, src_tile, tmp, -3)
                 return pl.store(result, [0, 0], out)
 
         with pytest.raises(ValueError, match="only supported on the 'a5' backend"):
@@ -1171,7 +1254,9 @@ class TestB02SelectionAndPreluCodegen:
             ) -> pl.Tensor[[16, 16], pl.FP32]:
                 src_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(src, [0, 0], [16, 16])
                 slope_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(slope, [0, 0], [16, 16])
-                tmp: pl.Tile[[1, 1], pl.UINT8] = pl.tile.create([1, 1], dtype=pl.UINT8)
+                # One row (still undersized, which is what this asserts) but 32
+                # bytes wide, so the tmp can actually be allocated.
+                tmp: pl.Tile[[1, 32], pl.UINT8] = pl.tile.create([1, 32], dtype=pl.UINT8)
                 result: pl.Tile[[16, 16], pl.FP32] = pl.tile.prelu(src_tile, slope_tile, tmp)
                 return pl.store(result, [0, 0], out)
 
@@ -3554,7 +3639,7 @@ class TestMrgSortCodegen:
     )
     @pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
     def test_sort32_dynamic_valid_width_emits_level3_scratch(self, src_dtype, output_cols, backend_type):
-        """With level3 sort32 scratch disabled, dynamic width stays 2-ins (no tmp)."""
+        """A runtime valid width keeps logical output bounds and uses static TSORT capacity."""
 
         @pl.program
         class Prog:
@@ -3574,8 +3659,14 @@ class TestMrgSortCodegen:
         mlir = self._generate_mlir(Prog, backend_type)
         line = next(line for line in mlir.splitlines() if "pto.tsort32" in line)
         ins = line.split("ins(", 1)[1].split(":", 1)[0]
-        assert ins.count(",") == 1, line
-        assert "sort32_tmp" not in line, line
+        assert ins.count(",") == 2, line
+        assert "%sort32_tmp_view" in line and "%sort32_dst_view" in line, line
+        outs = line.split("outs(", 1)[1]
+        assert f"cols={output_cols}" in outs and f"v_col={output_cols}" in outs, line
+        assert "v_col=?" not in outs, line
+        tstore_line = next(line for line in mlir.splitlines() if "pto.tstore" in line)
+        assert "%sorted_tile" in tstore_line and "%sort32_dst_view" not in tstore_line, tstore_line
+        assert "arith.muli" in mlir, mlir
 
     @pytest.mark.parametrize(
         ("backend_type", "emit_tile_addr"),
@@ -3600,16 +3691,10 @@ class TestMrgSortCodegen:
 
         mlir = self._generate_mlir(Prog, backend_type, emit_tile_addr=emit_tile_addr)
         line = next(line for line in mlir.splitlines() if "pto.tsort32" in line)
-        if backend_type == BackendType.Ascend910B:
-            # #2523 level3 sort32 static-view bridge disabled with ptoas v0.57 revert.
-            assert "sort32_tmp" not in line, line
-            ins = line.split("ins(", 1)[1].split(":", 1)[0]
-            assert ins.count(",") == 1, line
-        else:
-            assert "%sort32_src_view" in line and "%sort32_idx_view" in line, line
-            assert "%sort32_dst_view" in line, line
-            assert "sort32_tmp" not in line, line
-            assert "v_row=?" not in line and "v_col=?" not in line, line
+        assert "%sort32_src_view" in line and "%sort32_idx_view" in line, line
+        assert "%sort32_dst_view" in line, line
+        assert "sort32_tmp" not in line, line
+        assert "v_row=?" not in line and "v_col=?" not in line, line
 
 
 class TestConstDtypeCodegen:
@@ -3698,9 +3783,108 @@ class TestLevel3StaticViewCodegen:
 
         mlir = self._generate_mlir(Prog)
         tci_line = next(line for line in mlir.splitlines() if "pto.tci" in line)
-        # Level3 static-view bridge is off with RequiresLevel3TmpScratch=false;
-        # caller-provided tmp is still emitted as a second ins operand.
-        assert "ins(" in tci_line and tci_line.split("ins(", 1)[1].split(":", 1)[0].count(",") == 1, tci_line
+        assert "%ci_tmp_view" in tci_line and "%ci_dst_view" in tci_line, tci_line
+        assert "v_row=?" not in tci_line and "v_col=?" not in tci_line, tci_line
+
+    @pytest.mark.parametrize("saturation_mode", ["on", "off"])
+    def test_tcvt_saturation_selects_form_and_emits_satmode(self, saturation_mode):
+        """satmode reaches PTOAS, and ON drops the non-saturating helper's scratch.
+
+        A2/A3 FP16->INT8 is exactly the pair whose OFF lowering needs a scratch
+        tile: requesting ON selects the native conversion, so the emitted tcvt
+        takes one operand and no `tcvt_tmp_view` bridge is generated.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[8, 256], pl.FP16],
+                out: pl.Tensor[[8, 256], pl.INT8],
+            ) -> pl.Tensor[[8, 256], pl.INT8]:
+                tile_in = pl.load(src, [0, 0], [8, 256])
+                result = pl.cast(tile_in, pl.INT8, mode="trunc", saturation_mode=saturation_mode)
+                return pl.store(result, [0, 0], out)
+
+        mlir = self._generate_mlir(Prog)
+        tcvt_line = next(line for line in mlir.splitlines() if "pto.tcvt" in line)
+        assert f"satmode = #pto<saturation_mode {saturation_mode.upper()}>" in tcvt_line, tcvt_line
+        assert "rmode = #pto<round_mode TRUNC>" in tcvt_line, tcvt_line
+        assert ("tcvt_tmp_view" in tcvt_line) == (saturation_mode == "off"), tcvt_line
+
+    def test_tcvt_without_an_explicit_mode_still_states_the_default(self):
+        """An omitted kwarg is the default, and the instruction says so rather than implying it.
+
+        The IR leaves the default implicit; codegen reads it through, so a reader
+        of the emitted MLIR never has to know what the assembler would have picked.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[8, 256], pl.FP16],
+                out: pl.Tensor[[8, 256], pl.INT8],
+            ) -> pl.Tensor[[8, 256], pl.INT8]:
+                tile_in = pl.load(src, [0, 0], [8, 256])
+                result = pl.cast(tile_in, pl.INT8, mode="trunc")
+                return pl.store(result, [0, 0], out)
+
+        mlir = self._generate_mlir(Prog)
+        tcvt_line = next(line for line in mlir.splitlines() if "pto.tcvt" in line)
+        assert "satmode = #pto<saturation_mode ON>" in tcvt_line, tcvt_line
+        assert "tcvt_tmp_view" not in tcvt_line, tcvt_line
+
+    def test_tcvt_to_a_float_destination_emits_no_satmode(self):
+        """A float destination keeps the target's IEEE overflow, so nothing is stamped.
+
+        docs/en/user/precision/00-workflow.md asserts INT32 -> FP16 is bit-identical
+        to torch, which means 65520 must overflow to inf rather than clamp to 65504.
+        Emitting satmode ON here broke exactly that block on the a2a3 simulator.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[8, 256], pl.INT32],
+                out: pl.Tensor[[8, 256], pl.FP16],
+            ) -> pl.Tensor[[8, 256], pl.FP16]:
+                tile_in = pl.load(src, [0, 0], [8, 256])
+                result = pl.cast(tile_in, pl.FP16)
+                return pl.store(result, [0, 0], out)
+
+        mlir = self._generate_mlir(Prog)
+        tcvt_line = next(line for line in mlir.splitlines() if "pto.tcvt" in line)
+        assert "satmode" not in tcvt_line, tcvt_line
+
+    def test_tcvt_saturation_preserves_explicit_scratch(self):
+        """Only compiler-generated scratch is dropped; the explicit-tmp form still emits both."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[8, 256], pl.FP16],
+                out: pl.Tensor[[8, 256], pl.INT8],
+            ) -> pl.Tensor[[8, 256], pl.INT8]:
+                tile_in = pl.load(src, [0, 0], [8, 256])
+                tmp: pl.Tile[[1, 256], pl.INT8, pl.Mem.Vec] = pl.tile.create(
+                    [1, 256], dtype=pl.INT8, target_memory=pl.Mem.Vec
+                )
+                result: pl.Tile[[8, 256], pl.INT8, pl.Mem.Vec] = pl.tile.cast(
+                    tile_in, pl.INT8, mode="trunc", tmp=tmp, saturation_mode="on"
+                )
+                return pl.store(result, [0, 0], out)
+
+        mlir = self._generate_mlir(Prog)
+        tcvt_line = next(line for line in mlir.splitlines() if "pto.tcvt" in line)
+        assert "satmode = #pto<saturation_mode ON>" in tcvt_line, tcvt_line
+        assert "tcvt_tmp_view" in tcvt_line, tcvt_line
 
     def test_tcvt_emits_static_view_for_explicit_tmp(self):
         @pl.program
@@ -3715,16 +3899,14 @@ class TestLevel3StaticViewCodegen:
                     src, [0, 0], [16, 16], target_memory=pl.Mem.Vec
                 )
                 result: pl.Tile[[16, 16], pl.INT16, pl.Mem.Vec] = pl.tile.cast(
-                    tile_in, target_type=pl.INT16, mode="round"
+                    tile_in, target_type=pl.INT16, mode="round", saturation_mode="off"
                 )
                 return pl.store(result, [0, 0], out)
 
         mlir = self._generate_mlir(Prog)
         tcvt_line = next(line for line in mlir.splitlines() if "pto.tcvt" in line)
-        # Level3 tcvt scratch disabled: 1-arg form (no tmp view).
-        ins = tcvt_line.split("ins(", 1)[1].split(":", 1)[0]
-        assert "," not in ins, tcvt_line
-        assert "tcvt_tmp" not in tcvt_line, tcvt_line
+        assert "%tcvt_tmp_view" in tcvt_line and "%tcvt_dst_view" in tcvt_line, tcvt_line
+        assert "v_row=?" not in tcvt_line and "v_col=?" not in tcvt_line, tcvt_line
 
     def test_tcolsum_binary_emits_static_view_for_tmp(self):
         @pl.program
@@ -3744,9 +3926,7 @@ class TestLevel3StaticViewCodegen:
 
         mlir = self._generate_mlir(Prog)
         tcolsum_line = next(line for line in mlir.splitlines() if "pto.tcolsum" in line)
-        # Level3 static-view bridge off; explicit tmp still appears as second ins.
-        ins = tcolsum_line.split("ins(", 1)[1].split(":", 1)[0]
-        assert ins.count(",") == 1, tcolsum_line
+        assert "%colsum_tmp_view" in tcolsum_line and "%colsum_dst_view" in tcolsum_line, tcolsum_line
         assert "isBinary = true" in tcolsum_line, tcolsum_line
 
 

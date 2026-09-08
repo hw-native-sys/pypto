@@ -152,7 +152,7 @@ diagnostics = passes.DiagnosticCheckRegistry.run_checks(
 
 **Why it is not a property.** A property is a claim the compiler can stand
 behind, and this one cannot be. The check has to run after `DeriveCallDirections`
-(pass 40) — a wrapper's signature legitimately reads `In` until then — and
+(pass 41) — a wrapper's signature legitimately reads `In` until then — and
 `InitMemRef` (pass 34) declares `.invalidated = {IRProperty::SSAForm}` with
 nothing re-establishing it. **No pipeline position is both after pass 40 and in
 SSA form.** The buffer lineage below has no merging at a join, which is exact

@@ -105,14 +105,18 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
   // tensor.matmul requires exactly 2 Expr arguments (lhs, rhs)
   CHECK(args.size() == 2) << "tensor.matmul requires exactly 2 arguments (lhs, rhs), but got " << args.size();
 
-  // First two arguments must be TensorType
-  auto lhs_type = As<TensorType>(args[0]->GetType());
-  auto rhs_type = As<TensorType>(args[1]->GetType());
+  // Both operands must be tensor-shaped. ``AsTensorTypeLike`` accepts a
+  // ``DistributedTensorType`` (window) operand the same as a plain tensor
+  // (issue #1694): inside an InCore scope a window is just this rank's local GM,
+  // so the Cube loads it through the same ``tile.load``. The product is fresh
+  // local data, so the result below is a plain ``TensorType``, never a window view.
+  auto lhs_type = AsTensorTypeLike(args[0]->GetType());
+  auto rhs_type = AsTensorTypeLike(args[1]->GetType());
 
-  CHECK(lhs_type) << "tensor.matmul requires first argument to be a TensorType, but got "
-                  << args[0]->GetType()->TypeName();
-  CHECK(rhs_type) << "tensor.matmul requires second argument to be a TensorType, but got "
-                  << args[1]->GetType()->TypeName();
+  CHECK(lhs_type) << "tensor.matmul requires first argument to be a TensorType or "
+                  << "DistributedTensorType, but got " << args[0]->GetType()->TypeName();
+  CHECK(rhs_type) << "tensor.matmul requires second argument to be a TensorType or "
+                  << "DistributedTensorType, but got " << args[1]->GetType()->TypeName();
 
   // Extract shapes
   const auto& lhs_shape = lhs_type->shape_;
@@ -256,16 +260,24 @@ TypePtr DeduceTensorMatMulAccType(const std::vector<ExprPtr>& args,
       << "predicate, but got " << args.size();
   CheckMatmulInitCond(args, 3, "tensor.matmul_acc");
 
+  // lhs / rhs take a window operand for the same reason as in tensor.matmul above: the Cube
+  // loads them from GM. The accumulator does NOT -- it is never loaded at all (nothing but the
+  // matrix unit writes L0C), so a window has no data path into it and ConvertTensorToTileOps
+  // would reject it as "tile.matmul_acc requires acc to be a TileType". Keep the exact-kind
+  // match here so that limitation is reported at the call site, with a remedy.
   auto acc_type = As<TensorType>(args[0]->GetType());
-  auto lhs_type = As<TensorType>(args[1]->GetType());
-  auto rhs_type = As<TensorType>(args[2]->GetType());
+  auto lhs_type = AsTensorTypeLike(args[1]->GetType());
+  auto rhs_type = AsTensorTypeLike(args[2]->GetType());
 
   CHECK(acc_type) << "tensor.matmul_acc requires first argument (acc) to be a TensorType, but got "
-                  << args[0]->GetType()->TypeName();
-  CHECK(lhs_type) << "tensor.matmul_acc requires second argument (lhs) to be a TensorType, but got "
-                  << args[1]->GetType()->TypeName();
-  CHECK(rhs_type) << "tensor.matmul_acc requires third argument (rhs) to be a TensorType, but got "
-                  << args[2]->GetType()->TypeName();
+                  << args[0]->GetType()->TypeName()
+                  << ". A distributed window cannot be a Cube accumulator: only the matrix unit "
+                     "writes L0C, so there is no data path from GM into it. Accumulate into a "
+                     "local tensor and store the result into the window afterwards.";
+  CHECK(lhs_type) << "tensor.matmul_acc requires second argument (lhs) to be a TensorType or "
+                  << "DistributedTensorType, but got " << args[1]->GetType()->TypeName();
+  CHECK(rhs_type) << "tensor.matmul_acc requires third argument (rhs) to be a TensorType or "
+                  << "DistributedTensorType, but got " << args[2]->GetType()->TypeName();
 
   const auto& acc_shape = acc_type->shape_;
   const auto& lhs_shape = lhs_type->shape_;

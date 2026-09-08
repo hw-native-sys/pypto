@@ -1478,8 +1478,9 @@ PTOCodegen::AllocTileFields PTOCodegen::ComputeAllocTileFields(
   // place a physically illegal box grid can be caught with the IR location and
   // an actionable remedy -- rather than by PTOAS, whose message names its own
   // internals and points at whichever line the location happened to carry.
-  CheckBoxedTileExtents(*tile_type, ExtractTileTypeInfo(*tile_type, GetTypeString(tile_type->dtype_)),
-                        current_span_);
+  const auto alloc_components = ExtractTileTypeInfo(*tile_type, GetTypeString(tile_type->dtype_));
+  CheckBoxedTileExtents(*tile_type, alloc_components, current_span_);
+  CheckFlatTileExtents(*tile_type, alloc_components, current_span_);
 
   // Cast a non-index integer SSA to `index` (PTOAS expects index typed
   // valid_row / valid_col operands). Floating-point operands are rejected.
@@ -1638,6 +1639,15 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
       candidate.count = memref->slot_count_;
     }
     if (candidate.reference_tile || !memref->slot_index_.has_value() || !*memref->slot_index_) continue;
+    // A multi-buffer region's slots never pass through ComputeAllocTileFields:
+    // the whole region is emitted as one `pto.alloc_multi_tile` by
+    // EmitMultiBufferRegionAllocs, which takes only the rendered strings. Run
+    // the flat-extent check on the reference tile, which describes every slot,
+    // so a slotted tile gets the same PyPTO diagnostic as a plain one instead
+    // of reaching PTOAS. (The boxed-extent rule has the same gap here, but it
+    // predates this check and widening it is not this change's business.)
+    CheckFlatTileExtents(*tile_type, ExtractTileTypeInfo(*tile_type, GetTypeString(tile_type->dtype_)),
+                         &tile_var->span_);
     candidate.slot_type_str = GetTileBufTypeStringFromTileType(tile_type);
     const auto reference_extents = StaticValidExtents(tile_type);
     candidate.has_extents = reference_extents.has_value();

@@ -263,21 +263,18 @@ class TestL3TensorAllToAllVSkew:
     """Boundary coverage for the runtime-sized transfer: 0, 1, capacity, over, negative.
 
     Together with the identical cases in the HOST rail's
-    ``test_l3_host_tensor_all_to_all_v.py``, this is the wire-parity gate: both
+    ``test_l3_host_tensor_all_to_all_v.py`` and the managed CHIP rail's
+    ``test_l2_tensor_all_to_all_v.py``, this is the wire-parity gate: all three
     lowering paths are driven with the same counts and checked against the same
-    golden, so a divergence in either shows up as a golden mismatch.
+    golden, so a divergence in any of them shows up as a golden mismatch.
 
-    **The two rails are not coverage-identical.** This file checks the
-    surplus-row tail on every ``(rank, src)`` pair including the self slot; the
-    HOST file skips ``src == rank`` (see #2546 — on that slot the rank's own
-    staged data is indistinguishable from an arrival, so the check cannot
-    separate them). Parity therefore holds on payload rows and ``recv_counts``
-    for all pairs, and on the tail for every pair *except* HOST self.
-
-    That exclusion is a ``continue`` inside the per-pair loop rather than an
-    ``xfail``: the uncovered slot is one iteration of a loop within a test that
-    otherwise passes, so it cannot be surfaced as a separate test outcome
-    without splitting the parametrisation per ``(rank, src)``.
+    All three files are coverage-identical, and every ``(rank, src)`` pair is
+    checked on ``recv_counts``, the payload rows and the surplus-row tail —
+    including the self slot. The HOST file excluded its self slot once (#2546)
+    because the rank's own staged input surfaced there even when nothing was
+    transferred, but that was the undefined tail of the write-only ``out``
+    buffer, not the window; every rail's consume loop now mirrors the whole
+    window into ``out``.
     """
 
     @pytest.mark.parametrize("case", sorted(_SKEW_CASES))

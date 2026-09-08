@@ -1,0 +1,164 @@
+{
+  "dynamic_reads": [
+    {
+      "function": "_temporary_env",
+      "path": "python/pypto/runtime/device_runner.py",
+      "reason": "Restores caller-provided runtime overrides; each actual compilation input still needs classification at its consumer."
+    }
+  ],
+  "schema": 1,
+  "variables": {
+    "ASCEND_HOME_PATH": {
+      "category": "tool_resolution",
+      "reason": "Selects compiler, linker, SDK headers and libraries through simpler env_manager."
+    },
+    "CC": {
+      "category": "tool_resolution",
+      "reason": "Runtime build-tool selection; direct kernel compilation uses its selected toolchain object."
+    },
+    "COMPILER_PATH": {
+      "category": "tool_resolution",
+      "reason": "Can redirect compiler subprograms; resolve their contents."
+    },
+    "CPATH": {
+      "category": "tool_resolution",
+      "reason": "Additional implicit include roots; inventory ordered roots and contents."
+    },
+    "CPLUS_INCLUDE_PATH": {
+      "category": "tool_resolution",
+      "reason": "Additional C++ include roots; inventory ordered roots and contents."
+    },
+    "CXX": {
+      "category": "tool_resolution",
+      "reason": "Runtime build-tool selection and injected flags; do not substitute this for resolved tools."
+    },
+    "C_INCLUDE_PATH": {
+      "category": "tool_resolution",
+      "reason": "Additional C include roots; inventory ordered roots and contents."
+    },
+    "FORCE_COLOR": {
+      "category": "nonsemantic",
+      "reason": "Controls diagnostic terminal rendering only."
+    },
+    "GCC_EXEC_PREFIX": {
+      "category": "tool_resolution",
+      "reason": "Can redirect compiler subprograms and resources; resolve their contents."
+    },
+    "LANG": {
+      "category": "semantic",
+      "reason": "Tool locale can affect parsing and generated diagnostics; resolve with LC_ALL precedence."
+    },
+    "LC_ALL": {
+      "category": "semantic",
+      "reason": "Overrides tool locale; account for the effective compiler environment."
+    },
+    "LC_CTYPE": {
+      "category": "semantic",
+      "reason": "Character interpretation in compiler subprocesses; account for locale precedence."
+    },
+    "LD_AUDIT": {
+      "category": "tool_resolution",
+      "reason": "Injected loader code requires a complete dependency inventory or unavailable identity."
+    },
+    "LD_LIBRARY_PATH": {
+      "category": "tool_resolution",
+      "reason": "Dynamic dependency search input; fingerprint the libraries actually selected."
+    },
+    "LD_PRELOAD": {
+      "category": "tool_resolution",
+      "reason": "Injected dynamic code requires a complete dependency inventory or unavailable identity."
+    },
+    "LIBRARY_PATH": {
+      "category": "tool_resolution",
+      "reason": "Can change linker inputs; inventory the selected libraries."
+    },
+    "NO_COLOR": {
+      "category": "nonsemantic",
+      "reason": "Controls diagnostic terminal rendering only."
+    },
+    "PATH": {
+      "category": "tool_resolution",
+      "reason": "Executable search input; fingerprint resolved tools and their resources."
+    },
+    "PTOAS_ROOT": {
+      "category": "tool_resolution",
+      "reason": "Use the shared ptoas resolver; inventory the selected launcher and its dependencies."
+    },
+    "PTO_BACKTRACE": {
+      "category": "nonsemantic",
+      "reason": "Controls parser traceback presentation only."
+    },
+    "PTO_ISA_ROOT": {
+      "category": "tool_resolution",
+      "reason": "Derived runtime hint; the pinned PTO-ISA resolver owns the actual include root."
+    },
+    "PYPTO_AUTO_DEPS_LOOP_CARRY_DEBUG": {
+      "category": "nonsemantic",
+      "reason": "Diagnostic tracing of loop carry dependency analysis only."
+    },
+    "PYPTO_CODEGEN_MAX_WORKERS": {
+      "category": "nonsemantic",
+      "reason": "Bounds parallel codegen workers; does not select generated operations."
+    },
+    "PYPTO_COMPILE_PROFILING": {
+      "category": "fresh_request",
+      "reason": "Enabled compilation profiling must run compiler stages on each request."
+    },
+    "PYPTO_EMIT_DEBUG_RUNNER": {
+      "category": "fresh_request",
+      "reason": "Controls generated replay files; integration must honor output requests."
+    },
+    "PYPTO_EMIT_PTO_LOC": {
+      "category": "semantic",
+      "reason": "Resolve effective source-location emission into compilation options."
+    },
+    "PYPTO_LOG_LEVEL": {
+      "category": "nonsemantic",
+      "reason": "Logging threshold; does not select compiler transformations."
+    },
+    "PYPTO_PROG_BUILD_DIR": {
+      "category": "fresh_request",
+      "reason": "An explicit nonempty output root requests fresh JIT artifacts."
+    },
+    "PYPTO_REBUILD_FROM_PTO": {
+      "category": "fresh_request",
+      "reason": "Explicitly rebuilds edited artifacts; incompatible with immutable reuse."
+    },
+    "PYPTO_RUNTIME_LOG": {
+      "category": "nonsemantic",
+      "reason": "Runtime Python logging threshold only."
+    },
+    "PYPTO_RUNTIME_LOG_SYNC": {
+      "category": "nonsemantic",
+      "reason": "Synchronizes runtime and compiler logging thresholds only."
+    },
+    "PYPTO_VERIFY_LEVEL": {
+      "category": "fresh_request",
+      "reason": "C++ captures its default once; use the effective verification policy."
+    },
+    "PYPTO_WARNING_LEVEL": {
+      "category": "fresh_request",
+      "reason": "C++ captures its default once; use the effective diagnostic policy."
+    },
+    "PYTHONHASHSEED": {
+      "category": "semantic",
+      "reason": "Compiler Python hash iteration order must be audited before reuse across seeds."
+    },
+    "PYTHONHOME": {
+      "category": "tool_resolution",
+      "reason": "Interpreter resource selection; inventory the actual interpreter installation."
+    },
+    "PYTHONPATH": {
+      "category": "tool_resolution",
+      "reason": "Import search input; inventory actual imported compiler and runtime modules."
+    },
+    "SOURCE_DATE_EPOCH": {
+      "category": "semantic",
+      "reason": "Compiler date/time macro and reproducibility input; include the effective value."
+    },
+    "TERM": {
+      "category": "nonsemantic",
+      "reason": "Controls diagnostic terminal rendering only."
+    }
+  }
+}

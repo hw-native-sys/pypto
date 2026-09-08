@@ -12,6 +12,11 @@ passes and code generation to on-device execution.
 PYPTO_COMPILE_PROFILING=1 python3 my_program.py
 ```
 
+Unsetting this variable (or setting it to `0`) releases the environment-created
+profiler on the next lookup, so ordinary JIT calls can reuse cached artifacts
+again. An explicit `with CompileProfiler()` context remains active until its
+scope ends, independently of the environment variable.
+
 ### Option 2: `ir.compile()` Parameter
 
 ```python

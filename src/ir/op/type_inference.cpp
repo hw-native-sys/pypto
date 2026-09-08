@@ -898,6 +898,88 @@ std::optional<std::vector<ExprPtr>> MapUnitAxisRankChange(const std::vector<Expr
   return std::nullopt;
 }
 
+// Spell one flat prefix of `free_valid * trailing_volume` elements as a box over
+// the target axes `[begin, end)`, whose own volume the prefix is measured
+// against.
+//
+// The box is pinned to a single coordinate above its free axis and full below
+// it -- the target-shape spelling of "a flat prefix". A static prefix lands on
+// the outermost axis whose step divides it, so that the prefix is a whole number
+// of that axis's steps. A dynamic prefix cannot be divided, so it survives only
+// on an axis whose step is exactly the source's trailing volume: the free extent
+// then carries over unchanged. That axis has to have room for the whole free
+// dimension, which is knowable only if the free dimension is itself static -- a
+// requirement of the dynamic case alone.
+//
+// Writes the block's extents into `out[begin, end)` and reports whether the
+// prefix maps. An empty run of axes spans exactly one element, so it can only
+// carry a prefix of one.
+bool MapPrefixOntoAxes(const std::vector<ExprPtr>& new_shape, const std::vector<int64_t>& target,
+                       size_t begin, size_t end, const ExprPtr& free_valid, int64_t trailing_volume,
+                       const std::optional<int64_t>& free_physical, const Span& span,
+                       std::vector<ExprPtr>* out) {
+  const size_t width = end - begin;
+  const auto free_extent = GetConstantDimension(free_valid);
+  if (width == 0) {
+    return free_extent.has_value() && *free_extent * trailing_volume == 1;
+  }
+
+  // Row-major volume below each target axis of the block: the number of elements
+  // one step along that axis advances by.
+  std::vector<int64_t> suffix(width, 1);
+  for (size_t i = width; i-- > 0;) {
+    suffix[i] = i + 1 < width ? suffix[i + 1] * target[begin + i + 1] : 1;
+  }
+
+  const ExprPtr pinned = std::make_shared<ConstInt>(1, DataType::INDEX, span);
+  auto build_box = [&](size_t free_axis, const ExprPtr& extent) {
+    for (size_t i = 0; i < width; ++i) {
+      (*out)[begin + i] = i < free_axis ? pinned : (i == free_axis ? extent : new_shape[begin + i]);
+    }
+  };
+
+  if (free_extent.has_value()) {
+    const int64_t prefix_elements = *free_extent * trailing_volume;
+    for (size_t i = 0; i < width; ++i) {
+      if (suffix[i] == 0 || prefix_elements % suffix[i] != 0) continue;
+      const int64_t axis_extent = prefix_elements / suffix[i];
+      if (axis_extent <= target[begin + i]) {
+        build_box(i, std::make_shared<ConstInt>(axis_extent, DataType::INDEX, span));
+        return true;
+      }
+    }
+    return false;
+  }
+  if (free_physical.has_value()) {
+    for (size_t i = 0; i < width; ++i) {
+      if (suffix[i] == trailing_volume && *free_physical <= target[begin + i]) {
+        build_box(i, free_valid);
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// One run of source axes that holds a flat prefix of its own volume: pinned to a
+// single coordinate above `free_dim`, free at it, and provably full below.
+struct SourceRun {
+  size_t lo;                // first axis of the run
+  size_t hi;                // last axis of the run, inclusive
+  size_t free_dim;          // the one axis carrying the run's free extent
+  int64_t trailing_volume;  // elements spanned by the axes below `free_dim`
+};
+
+// Format an element-count list the way FormatShape formats extents.
+std::string FormatVolumes(const std::vector<int64_t>& volumes) {
+  std::string out = "[";
+  for (size_t i = 0; i < volumes.size(); ++i) {
+    if (i != 0) out += ", ";
+    out += std::to_string(volumes[i]);
+  }
+  return out + "]";
+}
+
 }  // namespace
 
 std::vector<ExprPtr> ComputeReshapeValidShape(const std::vector<ExprPtr>& src_valid,
@@ -928,27 +1010,29 @@ std::vector<ExprPtr> ComputeReshapeValidShape(const std::vector<ExprPtr>& src_va
   }
 
   // (2) The empty set stays empty under every reshape. This is settled before
-  // the prefix proof below because a box such as [1, 0, N] is not a flat prefix
-  // by that syntactic form, yet it denotes no cells and so has an exact
-  // representation in every target shape.
+  // the run proof below because a box such as [1, 0, N] fills no run of the
+  // buffer by that syntactic form, yet it denotes no cells at all and so has an
+  // exact representation in every target shape.
   if (std::any_of(src_valid.begin(), src_valid.end(), IsProvablyEmptyExtent)) {
     return std::vector<ExprPtr>(new_shape.size(), IndexZero());
   }
 
   // (3) A pure rank change over provably-full unit axes preserves an arbitrary
-  // rectangle, which the flat-prefix rule cannot see.
+  // rectangle without measuring flat positions, so it holds under any storage
+  // order -- which the run rule below, reading row-major offsets, cannot.
   std::vector<char> unit_axis_failed((in_shape.size() + 1) * (new_shape.size() + 1), 0);
   if (auto unit_mapped = MapUnitAxisRankChange(src_valid, in_shape, new_shape, 0, 0, &unit_axis_failed)) {
     return *unit_mapped;
   }
 
-  // (4) Otherwise the region has to occupy a contiguous flat prefix of the
-  // buffer, so that some rectangle of the target shape spans exactly the same
-  // cells. Everything below walks flat positions in row-major order, so a
-  // source stored any other way would be measured against the wrong offsets:
-  // a col_major [2, 3] valid [1, 3] really occupies flat {0, 2, 4}, and the
-  // row-major reading would hand back a box covering {0, 1, 2} -- marking two
-  // padding elements as real. Reject instead of guessing.
+  // (4) Otherwise the source region has to cut the buffer into runs of elements
+  // that the target shape cuts the same way, so that a box under the target
+  // shape spans exactly the same cells. Everything below walks flat positions in
+  // row-major order, so a source stored any other way would be measured against
+  // the wrong offsets: a col_major [2, 3] valid [1, 3] really occupies flat
+  // {0, 2, 4}, and the row-major reading would hand back a box covering
+  // {0, 1, 2} -- marking two padding elements as real. Reject instead of
+  // guessing.
   CHECK_SPAN(row_major_contiguous, span)
       << op_name << ": cannot reshape " << FormatShape(in_shape) << " to " << FormatShape(new_shape)
       << " because only part of it holds real data (valid_shape " << FormatShape(src_valid)
@@ -956,41 +1040,80 @@ std::vector<ExprPtr> ComputeReshapeValidShape(const std::vector<ExprPtr>& src_va
          "run that the new shape can describe. Reshape the full extent and narrow afterwards, or copy "
          "the real data out first (pl.slice / pl.store).";
 
-  // Leading axes pinned to a single valid coordinate contribute nothing to the
-  // extent; the first remaining axis carries the prefix's one free extent, and
-  // every axis below it must be full.
-  const size_t input_rank = src_valid.size();
-  size_t free_dim = 0;
-  while (free_dim + 1 < input_rank && IsConstValue(src_valid[free_dim], 1)) {
-    ++free_dim;
+  // Drop provably-full unit physical axes first. They hold no data of their own
+  // and separate nothing, yet they read as both "full" and "pinned to a single
+  // coordinate", which would hide a cut below: [2, 1, 4] valid [2, 1, 2] denotes
+  // the very same cells as [2, 4] valid [2, 2]. Erasing them is the move case
+  // (3) already makes, so the region is unchanged.
+  std::vector<ExprPtr> shape;
+  std::vector<ExprPtr> valid;
+  std::vector<size_t> source_axis;  // back into `in_shape`, for diagnostics
+  for (size_t i = 0; i < in_shape.size(); ++i) {
+    if (IsConstValue(in_shape[i], 1) && ExtentsProvablyEqual(src_valid[i], in_shape[i])) continue;
+    shape.push_back(in_shape[i]);
+    valid.push_back(src_valid[i]);
+    source_axis.push_back(i);
+  }
+  INTERNAL_CHECK_SPAN(!shape.empty(), span)
+      << "Internal error: " << op_name << " dropped every axis of " << FormatShape(in_shape)
+      << " as a provably-full unit axis, which case (1) already returned on";
+
+  // Cut the remaining axes into the coarsest runs that each hold a flat prefix
+  // of their own volume. Two neighbours stay in one run when the lower axis is
+  // fully valid (the upper extent then scales cleanly by the lower volume) or
+  // the upper axis is pinned to a single coordinate (its stride then drops out
+  // of the region); otherwise the upper axis's stride survives into the region
+  // and forces a cut. [8, 16] valid [8, 5] cuts into 8 | 16 -- five real cells
+  // out of every sixteen, eight times over -- while [2, 2, 2] valid [2, 1, 2]
+  // cuts into 2 | 4, a full outer axis over a half-full run of four, which is a
+  // box again under [2, 4].
+  std::vector<SourceRun> runs;
+  size_t run_lo = 0;
+  for (size_t d = 0; d + 1 < shape.size(); ++d) {
+    if (!ExtentsProvablyEqual(valid[d + 1], shape[d + 1]) && !IsConstValue(valid[d], 1)) {
+      runs.push_back({run_lo, d, run_lo, 1});
+      run_lo = d + 1;
+    }
+  }
+  runs.push_back({run_lo, shape.size() - 1, run_lo, 1});
+
+  for (auto& run : runs) {
+    // Leading axes pinned to a single valid coordinate contribute nothing to the
+    // extent; the first remaining axis carries the run's one free extent, and
+    // every axis below it must be full. The cut rule above already implies that,
+    // except where a symbolic extent is provably one without being spelled as a
+    // constant -- so prove it rather than assume it.
+    while (run.free_dim < run.hi && IsConstValue(valid[run.free_dim], 1)) {
+      ++run.free_dim;
+    }
+    for (size_t i = run.free_dim + 1; i <= run.hi; ++i) {
+      const ProofResult full = ProveValidExtentEqual(valid[i], shape[i]);
+      CHECK_SPAN(ExtentsProvablyEqual(valid[i], shape[i]), span)
+          << op_name << ": cannot reshape " << FormatShape(in_shape) << " to " << FormatShape(new_shape)
+          << " because only part of it holds real data (valid_shape " << FormatShape(src_valid)
+          << "). Dimension " << source_axis[i] << " is valid for " << PythonPrint(valid[i]) << " of "
+          << PythonPrint(shape[i])
+          << (full == ProofResult::kUnknown ? " (a runtime extent that cannot be proven equal)" : "")
+          << ", so the real data is scattered across the buffer rather than filling it from the start, "
+             "and no region of the new shape describes the same cells. Reshape the full extent and "
+             "narrow afterwards, or copy the real data out first (pl.slice / pl.store).";
+    }
+
+    // A run's prefix is measured in elements, so every extent it spans has to be
+    // a compile-time constant.
+    for (size_t i = run.free_dim + 1; i <= run.hi; ++i) {
+      const auto extent = GetConstantDimension(shape[i]);
+      CHECK_SPAN(extent.has_value(), span)
+          << op_name << ": cannot reshape a partially-valid " << FormatShape(in_shape)
+          << " because dimension " << source_axis[i] << " has the runtime extent " << PythonPrint(shape[i])
+          << ". Mapping the real data into " << FormatShape(new_shape)
+          << " needs its size at compile time; use a static shape, or reshape before narrowing.";
+      run.trailing_volume *= *extent;
+    }
   }
 
-  for (size_t i = free_dim + 1; i < input_rank; ++i) {
-    const bool full_axis = ExtentsProvablyEqual(src_valid[i], in_shape[i]);
-    const ProofResult full = ProveValidExtentEqual(src_valid[i], in_shape[i]);
-    CHECK_SPAN(full_axis, span)
-        << op_name << ": cannot reshape " << FormatShape(in_shape) << " to " << FormatShape(new_shape)
-        << " because only part of it holds real data (valid_shape " << FormatShape(src_valid)
-        << "). Dimension " << i << " is valid for " << PythonPrint(src_valid[i]) << " of "
-        << PythonPrint(in_shape[i])
-        << (full == ProofResult::kUnknown ? " (a runtime extent that cannot be proven equal)" : "")
-        << ", so the real data is scattered across the buffer rather than filling it from the start, and "
-           "no region of the new shape describes the same cells. Reshape the full extent and narrow "
-           "afterwards, or copy the real data out first (pl.slice / pl.store).";
-  }
-
-  // The prefix is measured in elements, so every extent it spans has to be a
-  // compile-time constant.
-  int64_t trailing_volume = 1;
-  for (size_t i = free_dim + 1; i < input_rank; ++i) {
-    const auto extent = GetConstantDimension(in_shape[i]);
-    CHECK_SPAN(extent.has_value(), span)
-        << op_name << ": cannot reshape a partially-valid " << FormatShape(in_shape) << " because dimension "
-        << i << " has the runtime extent " << PythonPrint(in_shape[i]) << ". Mapping the real data into "
-        << FormatShape(new_shape)
-        << " needs its size at compile time; use a static shape, or reshape before narrowing.";
-    trailing_volume *= *extent;
-  }
+  // The region is measured against the target extents, so those have to be
+  // compile-time constants too.
   std::vector<int64_t> target(new_shape.size());
   for (size_t i = 0; i < new_shape.size(); ++i) {
     const auto extent = GetConstantDimension(new_shape[i]);
@@ -1003,73 +1126,123 @@ std::vector<ExprPtr> ComputeReshapeValidShape(const std::vector<ExprPtr>& src_va
     target[i] = *extent;
   }
 
-  // Row-major volume below each target axis: the number of elements one step
-  // along that axis advances by.
-  std::vector<int64_t> suffix(target.size(), 1);
-  for (size_t i = target.size(); i-- > 0;) {
-    suffix[i] = i + 1 < target.size() ? suffix[i + 1] * target[i + 1] : 1;
+  // Match each source run to the target axes covering the same elements. Both
+  // shapes describe one buffer in one order, so the match is the greedy one: a
+  // target axis that straddles a cut cannot be split, and the region dies with
+  // it. A single run needs no matching at all -- it is the whole buffer, and so
+  // is the whole target shape.
+  std::vector<std::pair<size_t, size_t>> blocks;
+  std::vector<int64_t> run_volumes;
+  blocks.reserve(runs.size());
+  if (runs.size() == 1) {
+    blocks.emplace_back(0, new_shape.size());
+  } else {
+    run_volumes.reserve(runs.size());
+    for (const auto& run : runs) {
+      int64_t volume = 1;
+      for (size_t i = run.lo; i <= run.hi; ++i) {
+        const auto extent = GetConstantDimension(shape[i]);
+        CHECK_SPAN(extent.has_value(), span)
+            << op_name << ": cannot reshape a partially-valid " << FormatShape(in_shape)
+            << " because dimension " << source_axis[i] << " has the runtime extent " << PythonPrint(shape[i])
+            << ". Its real data is scattered across the buffer, and mapping "
+            << "the runs into " << FormatShape(new_shape)
+            << " needs their sizes at compile time; use a static shape, or reshape before narrowing.";
+        volume *= *extent;
+      }
+      run_volumes.push_back(volume);
+    }
+    size_t cursor = 0;
+    for (const int64_t volume : run_volumes) {
+      const size_t begin = cursor;
+      int64_t covered = 1;
+      while (cursor < target.size() && covered < volume) {
+        covered *= target[cursor];
+        ++cursor;
+      }
+      CHECK_SPAN(covered == volume, span)
+          << op_name << ": cannot reshape " << FormatShape(in_shape) << " to " << FormatShape(new_shape)
+          << " because only part of it holds real data (valid_shape " << FormatShape(src_valid)
+          << "), so the real data is scattered across the buffer rather than filling it from the "
+             "start, and "
+          << FormatShape(new_shape) << " does not divide it the same way: its dimensions would have "
+          << "to group into runs of " << FormatVolumes(run_volumes)
+          << " elements. Reshape the full extent and narrow afterwards, or copy the real data out "
+             "first (pl.slice / pl.store).";
+      blocks.emplace_back(begin, cursor);
+    }
+    // Whatever target axes are left once every run is matched have to multiply
+    // to one -- both shapes span the same buffer. A degenerate target extent is
+    // the one way they do not, and the op-level volume check waves it through
+    // (its product is not positive), so report it here rather than trusting it.
+    // The unit axes that do remain go to the last block, which spells them full,
+    // i.e. one.
+    for (size_t i = cursor; i < target.size(); ++i) {
+      CHECK_SPAN(target[i] == 1, span)
+          << op_name << ": cannot reshape " << FormatShape(in_shape) << " to " << FormatShape(new_shape)
+          << " because only part of it holds real data (valid_shape " << FormatShape(src_valid) << "), and "
+          << FormatShape(new_shape)
+          << " does not span the same buffer: its dimensions cover the source runs of "
+          << FormatVolumes(run_volumes) << " elements already at dimension " << i << ", which spans "
+          << target[i] << " elements rather than 1.";
+    }
+    blocks.back().second = new_shape.size();
   }
 
-  // The result box is full below its own free axis and pinned to one coordinate
-  // above it -- the target-shape spelling of "a flat prefix".
-  const ExprPtr pinned = std::make_shared<ConstInt>(1, DataType::INDEX, span);
-  auto build_box = [&](size_t output_free_dim, const ExprPtr& free_extent) {
-    std::vector<ExprPtr> output(new_shape.size());
-    for (size_t i = 0; i < new_shape.size(); ++i) {
-      if (i < output_free_dim) {
-        output[i] = pinned;
-      } else if (i == output_free_dim) {
-        output[i] = free_extent;
-      } else {
-        output[i] = new_shape[i];
-      }
+  // Spell each run's prefix as a box over its own target axes. The runs tile the
+  // buffer in order and the blocks tile the target shape in the same order, so
+  // the per-run boxes concatenate into one box under the target shape.
+  std::vector<ExprPtr> output(new_shape.size());
+  for (size_t r = 0; r < runs.size(); ++r) {
+    const SourceRun& run = runs[r];
+    const ExprPtr& free_valid = valid[run.free_dim];
+    if (MapPrefixOntoAxes(new_shape, target, blocks[r].first, blocks[r].second, free_valid,
+                          run.trailing_volume, GetConstantDimension(shape[run.free_dim]), span, &output)) {
+      continue;
     }
-    return output;
-  };
 
-  const ExprPtr& free_valid = src_valid[free_dim];
-  if (const auto extent = GetConstantDimension(free_valid)) {
-    // A static prefix maps onto the outermost target axis whose suffix volume
-    // divides it -- the prefix is then a whole number of that axis's steps.
-    const int64_t prefix_elements = *extent * trailing_volume;
-    for (size_t i = 0; i < new_shape.size(); ++i) {
-      if (suffix[i] == 0 || prefix_elements % suffix[i] != 0) continue;
-      const int64_t output_extent = prefix_elements / suffix[i];
-      if (output_extent <= target[i]) {
-        return build_box(i, std::make_shared<ConstInt>(output_extent, DataType::INDEX, span));
+    const auto free_extent = GetConstantDimension(free_valid);
+    if (free_extent.has_value()) {
+      const int64_t prefix_elements = *free_extent * run.trailing_volume;
+      if (runs.size() == 1) {
+        CHECK_SPAN(false, span)
+            << op_name << ": cannot reshape " << FormatShape(in_shape) << " to " << FormatShape(new_shape)
+            << " because only " << prefix_elements << " of its "
+            << (prefix_elements == 1 ? "element" : "elements") << " hold real data (valid_shape "
+            << FormatShape(src_valid) << "), and no region of " << FormatShape(new_shape)
+            << " covers exactly those " << prefix_elements
+            << " elements -- they do not fill a whole number of rows there. Pick a target shape "
+               "whose trailing dimensions divide it, or copy the real data out first (pl.slice / "
+               "pl.store).";
       }
+      CHECK_SPAN(false, span)
+          << op_name << ": cannot reshape " << FormatShape(in_shape) << " to " << FormatShape(new_shape)
+          << " because only part of it holds real data (valid_shape " << FormatShape(src_valid)
+          << "): the real cells fill the first " << prefix_elements << " of every " << run_volumes[r]
+          << " elements, and dimensions " << blocks[r].first << ".." << (blocks[r].second - 1) << " of "
+          << FormatShape(new_shape)
+          << " cover exactly that run but they do not fill a whole number of rows there. Pick a "
+             "target shape whose trailing dimensions divide it, or copy the real data out first "
+             "(pl.slice / pl.store).";
+    }
+    if (runs.size() == 1) {
+      CHECK_SPAN(false, span)
+          << op_name << ": cannot reshape " << FormatShape(in_shape) << " to " << FormatShape(new_shape)
+          << " because its real data extends a runtime number of rows (" << PythonPrint(free_valid)
+          << ") and no dimension of " << FormatShape(new_shape) << " has the matching row size of "
+          << run.trailing_volume
+          << " elements. Keep that dimension intact in the target shape, or copy the real data out "
+             "first (pl.slice / pl.store).";
     }
     CHECK_SPAN(false, span)
         << op_name << ": cannot reshape " << FormatShape(in_shape) << " to " << FormatShape(new_shape)
-        << " because only " << prefix_elements << " of its "
-        << (prefix_elements == 1 ? "element" : "elements") << " hold real data (valid_shape "
-        << FormatShape(src_valid) << "), and no region of " << FormatShape(new_shape)
-        << " covers exactly those " << prefix_elements
-        << " elements -- they do not fill a whole number of rows there. Pick a target shape whose "
-           "trailing dimensions divide it, or copy the real data out first (pl.slice / pl.store).";
+        << " because its real data extends a runtime number of rows (" << PythonPrint(free_valid)
+        << ") and no dimension " << blocks[r].first << ".." << (blocks[r].second - 1) << " of "
+        << FormatShape(new_shape) << " has the matching row size of " << run.trailing_volume
+        << " elements. Keep that dimension intact in the target shape, or copy the real data out first "
+           "(pl.slice / pl.store).";
   }
-
-  // A dynamic prefix cannot be divided, so it survives only on a target axis
-  // whose step is exactly the input's trailing volume: the free extent then
-  // carries over unchanged. That axis has to have room for the whole free
-  // dimension, which is knowable only if the free dimension is itself static --
-  // a requirement of this branch alone, not of the static one above.
-  const auto free_physical = GetConstantDimension(in_shape[free_dim]);
-  if (free_physical.has_value()) {
-    for (size_t i = 0; i < new_shape.size(); ++i) {
-      if (suffix[i] == trailing_volume && *free_physical <= target[i]) {
-        return build_box(i, free_valid);
-      }
-    }
-  }
-  CHECK_SPAN(false, span)
-      << op_name << ": cannot reshape " << FormatShape(in_shape) << " to " << FormatShape(new_shape)
-      << " because its real data extends a runtime number of rows (" << PythonPrint(free_valid)
-      << ") and no dimension of " << FormatShape(new_shape) << " has the matching row size of "
-      << trailing_volume
-      << " elements. Keep that dimension intact in the target shape, or copy the real data out first "
-         "(pl.slice / pl.store).";
-  return {};
+  return output;
 }
 
 // ============================================================================

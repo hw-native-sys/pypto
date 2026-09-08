@@ -22,7 +22,9 @@ Nothing here touches a device, and the compile check is skipped when ``ptoas``
 is unavailable.
 """
 
+import ast
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -668,6 +670,80 @@ class TestCustomCompare:
                 _compare_persisted_outputs(empty, lambda a, e: None)
         finally:
             shutil.rmtree(empty, ignore_errors=True)
+
+
+def _body_that_skips_on_a_missing_optional_dep():
+    """Stand-in for a unit-test body guarding an optional dependency.
+
+    ``pytest.importorskip`` raises ``Skipped``, which derives from
+    ``BaseException`` — the exact shape that used to escape discovery.
+    """
+    msgpack = pytest.importorskip("_pypto_no_such_optional_module")
+    return msgpack
+
+
+class TestCollectionIsNeverAbortedByADiscoveredCall:
+    """Discovery runs code out of test bodies; it must never take the session down.
+
+    ``_eval_arg_node`` resolves a constructor argument by *invoking* the callee,
+    so a body containing ``pytest.importorskip("...")`` for an absent module
+    raised ``Skipped`` inside ``pytest_collection_finish``. ``Skipped`` is a
+    ``BaseException``, so both call sites' ``except Exception`` guards missed it,
+    and a skip escaping a collection hook is not a skip — under xdist it is a
+    session-wide INTERNALERROR that reports zero tests.
+    """
+
+    @staticmethod
+    def _conftest() -> Any:
+        return TestPlatformMatrixCollection._conftest()
+
+    @staticmethod
+    def _item(func: Any) -> Any:
+        """A stub item shaped like the attributes discovery actually reads."""
+
+        class _Item:
+            module = sys.modules[__name__]
+            callspec = None
+
+            def __init__(self) -> None:
+                self.function = func
+                self.path = Path(__file__)
+
+            def iter_markers(self, name: str | None = None) -> Any:
+                return iter(())
+
+        return _Item()
+
+    def test_a_call_that_raises_skipped_is_merely_unresolvable(self):
+        """The BaseException is converted at the one place discovery invokes code."""
+        conf = self._conftest()
+        node = ast.parse('pytest.importorskip("_pypto_no_such_optional_module")').body[0].value
+
+        with pytest.raises(conf._Unresolvable):
+            conf._eval_arg_node(node, {}, {}, {"pytest": pytest})
+
+    def test_such_a_body_leaves_collection_intact(self):
+        """End to end: the body is walked, nothing is discovered, nothing raises."""
+        conf = self._conftest()
+        seen: dict[str, Any] = {}
+
+        item = self._item(_body_that_skips_on_a_missing_optional_dep)
+        conf._collect_test_case_from_item(item, seen, None, "a2a3")
+
+        assert seen == {}, "no PTOTestCase in that body — and no crash reaching that conclusion"
+
+    def test_only_items_under_tests_st_are_walked(self):
+        """A session hook fires for every item; only ST bodies are ours to parse."""
+        conf = self._conftest()
+        tests_dir = Path(__file__).resolve().parents[2]
+
+        class _PathItem:
+            def __init__(self, path: Path) -> None:
+                self.path = path
+
+        ut_case = tests_dir / "ut" / "ir" / "expressions" / "test_call_arg_directions.py"
+        assert conf._is_st_item(_PathItem(Path(__file__)))
+        assert not conf._is_st_item(_PathItem(ut_case))
 
 
 class TestInlineCaseGuard:

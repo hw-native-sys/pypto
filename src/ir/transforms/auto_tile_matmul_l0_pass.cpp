@@ -173,6 +173,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/cast_saturation.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -2437,7 +2438,15 @@ bool CastFoldableToFixpipeMat(const CallPtr& cast, const TileTypePtr& src_ty, Da
   constexpr int kRoundRint = 1;
   constexpr int kRoundRound = 2;
   const int mode = cast->GetKwarg<int>("mode", kRoundRound);
-  return mode == kRoundRint;
+  if (mode != kRoundRint) return false;
+  // `pto.tinsert` carries no `satmode` either, so FIXPIPE cannot reproduce a cast
+  // that asked for a specific destination saturation: folding one would make
+  // `saturation_mode="on"` and `"off"` compile to the same instruction even though
+  // the API defines different finite-overflow results for them. A float
+  // destination has no default saturation, so an *absent* effective mode is the
+  // "did not ask" case and stays foldable; anything else keeps the Vector
+  // `pto.tcvt`, which is the only path that honors the request.
+  return !GetSaturationMode(cast).has_value();
 }
 
 /// Try to fold a Mat-resident plain ``tile.matmul`` whose [M, N] output exceeds

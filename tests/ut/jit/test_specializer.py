@@ -10,6 +10,7 @@
 """Tests for python/pypto/jit/specializer.py — AST transformation correctness."""
 
 import ast
+import math
 import textwrap
 import warnings
 
@@ -28,6 +29,7 @@ from pypto.jit.specializer import (
     _collect_dynvar_names,
     _infer_return_type,
     _layout_str,
+    _render_free_value,
     specialize,
 )
 from pypto.pypto_core import DataType, ir
@@ -559,6 +561,148 @@ class TestBodyTransformer:
         # The constant is inlined in BOTH the annotation and the value expression.
         assert "W_PAD" not in out
         assert "pl.Tile[[1, 96], pl.FP32]" in out
+
+    def test_string_constant_is_inlined_as_a_literal(self):
+        """A free name holding a str must render as a quoted literal.
+
+        Operator kwargs are commonly strings (``mode="trunc"``,
+        ``saturation_mode="on"``). Left un-inlined the name reaches the parser as
+        an undefined identifier, so a kernel factory could not be parameterized
+        by mode at all.
+        """
+        src = """
+            def f(a: pl.Tensor):
+                t = pl.load(a, [0, 0], [1, 64])
+                q = pl.cast(t, pl.INT8, mode=MODE)
+        """
+        out = self._transform_with_globals(
+            src,
+            tensor_meta={"a": TensorMeta((1, 64), DataType.FP16)},
+            py_globals={"MODE": "trunc"},
+        )
+        assert "mode='trunc'" in out
+        assert "MODE" not in out
+
+    def test_dtype_and_enum_constants_render_as_pl_paths(self):
+        """``DataType`` / enum values render as the ``pl.`` spelling that evaluates back to them."""
+        src = """
+            def f(a: pl.Tensor):
+                t = pl.load(a, [0, 0], [1, 64], target_memory=MEM)
+                q = pl.cast(t, DTYPE, mode='trunc')
+        """
+        out = self._transform_with_globals(
+            src,
+            tensor_meta={"a": TensorMeta((1, 64), DataType.FP16)},
+            py_globals={"DTYPE": pl.INT8, "MEM": pl.Mem.Vec},
+        )
+        assert "pl.INT8" in out
+        assert "pl.Mem.Vec" in out
+        assert "DTYPE" not in out and "MEM" not in out
+
+    def test_sequence_constant_renders_elementwise(self):
+        """A shape held in a module constant is a list of ints, not a scalar."""
+        src = """
+            def f(a: pl.Tensor):
+                t = pl.load(a, [0, 0], SHAPE)
+        """
+        out = self._transform_with_globals(
+            src,
+            tensor_meta={"a": TensorMeta((1, 64), DataType.FP16)},
+            py_globals={"SHAPE": [1, 64]},
+        )
+        assert "pl.load(a, [0, 0], [1, 64])" in out
+
+    def test_unrenderable_value_leaves_the_name_alone(self):
+        """A value with no source form must not be folded — the parser's error is the diagnostic."""
+        src = """
+            def f(a: pl.Tensor):
+                t = pl.load(a, [0, 0], [1, 64], target_memory=WIDGET)
+        """
+        out = self._transform_with_globals(
+            src,
+            tensor_meta={"a": TensorMeta((1, 64), DataType.FP16)},
+            py_globals={"WIDGET": object()},
+        )
+        assert "WIDGET" in out
+
+    def test_a_local_still_shadows_a_free_name(self):
+        """Folding is skipped for a name the body assigns — the local wins, as in Python."""
+        src = """
+            def f(a: pl.Tensor):
+                MODE = pl.load(a, [0, 0], [1, 64])
+                q = pl.cast(MODE, pl.INT8, mode='trunc')
+        """
+        out = self._transform_with_globals(
+            src,
+            tensor_meta={"a": TensorMeta((1, 64), DataType.FP16)},
+            py_globals={"MODE": "trunc"},
+        )
+        assert "pl.cast(MODE, pl.INT8, mode='trunc')" in out
+
+
+class TestRenderFreeValue:
+    """``_render_free_value`` — the single answer to "can this value be written as source?"."""
+
+    @pytest.mark.parametrize(
+        "value, expected",
+        [
+            (7, "7"),
+            (1.5, "1.5"),
+            (True, "True"),
+            (None, "None"),
+            ("trunc", "'trunc'"),
+            (pl.INT8, "pl.INT8"),
+            (pl.FP32, "pl.FP32"),
+            (pl.Mem.Vec, "pl.Mem.Vec"),
+            (pl.PadValue.zero, "pl.PadValue.zero"),
+            (pl.NZ, "pl.TensorLayout.NZ"),
+            ([1, 64], "[1, 64]"),
+            ((1, 64), "(1, 64)"),
+            ([[1, 2], [3, 4]], "[[1, 2], [3, 4]]"),
+            ([pl.INT8, pl.FP32], "[pl.INT8, pl.FP32]"),
+            # Non-finite floats: ast.unparse writes evaluable expressions, not the
+            # bare names inf / nan, so a fill or padding value bound to one folds
+            # like any other float.
+            (float("inf"), "1e309"),
+            (float("-inf"), "-1e309"),
+        ],
+    )
+    def test_renders_to_evaluable_source(self, value, expected):
+        rendered = _render_free_value(value)
+        assert rendered is not None
+        assert ast.unparse(rendered) == expected
+
+    @pytest.mark.parametrize(
+        "value, expected",
+        [
+            (pl.INT8, pl.INT8),
+            (pl.Mem.Vec, pl.Mem.Vec),
+            (pl.NZ, pl.NZ),
+            ([1, 64], [1, 64]),
+            (float("inf"), float("inf")),
+            (float("-inf"), float("-inf")),
+        ],
+    )
+    def test_rendered_source_evaluates_back_to_the_value(self, value, expected):
+        """The rendered text is only useful if ``pl`` can evaluate it back."""
+        rendered = _render_free_value(value)
+        assert rendered is not None
+        assert eval(ast.unparse(rendered), {"pl": pl}) == expected  # noqa: S307
+
+    @pytest.mark.parametrize(
+        "value",
+        [object(), pl.Tensor, pl.load, [1, object()], {"a": 1}],
+        ids=["opaque", "class", "function", "list-with-opaque", "dict"],
+    )
+    def test_declines_values_with_no_source_form(self, value):
+        """Declining is the safe answer: the name survives and the parser reports it."""
+        assert _render_free_value(value) is None
+
+    def test_nan_renders_as_a_nan_producing_expression(self):
+        """NaN has no literal, but ast.unparse still writes something evaluable."""
+        rendered = _render_free_value(float("nan"))
+        assert rendered is not None
+        assert math.isnan(eval(ast.unparse(rendered), {"__builtins__": {}}))  # noqa: S307
 
 
 # ---------------------------------------------------------------------------
@@ -2052,6 +2196,59 @@ class TestTensorLayoutAnnotation:
         assert "a: pl.Tensor[[64, 128], pl.FP16, pl.NZ]" in out
         # The un-annotated param keeps the plain two-slot form.
         assert "c: pl.Out[pl.Tensor[[64, 128], pl.FP16]]" in out
+
+
+class TestRenamedGeneratedFunction:
+    """``func_name`` names the generated method; ``source_func_name`` the ``def``.
+
+    The two diverge when the JIT layer uniquifies a dep name (two distinct deps
+    sharing a ``__name__``). Everything that reads the *original* source must
+    still find the ``def`` under the Python name.
+    """
+
+    @staticmethod
+    def _renamed_ctx():
+        ctx = _make_ctx(
+            func_name="helper__2",
+            func_type="incore",
+            source=textwrap.dedent(
+                """
+                def helper(src: pl.Tensor, dst: pl.Out[pl.Tensor]):
+                    return dst
+                """
+            ),
+            param_names=["src", "dst"],
+            tensor_meta={
+                "src": TensorMeta((64, 64), DataType.FP32),
+                "dst": TensorMeta((64, 64), DataType.FP32),
+            },
+        )
+        ctx.source_func_name = "helper"
+        return ctx
+
+    def test_source_def_name_falls_back_to_func_name(self):
+        """A context that never renamed anything keeps one name for both roles."""
+        ctx = _make_ctx(func_name="kernel")
+        assert ctx.source_func_name is None
+        assert ctx.source_def_name == "kernel"
+
+    def test_generated_method_uses_the_renamed_name(self):
+        out = specialize("_T", [self._renamed_ctx()])
+        assert "def helper__2(self, src" in out
+        assert "def helper(self" not in out
+
+    def test_inline_deprecation_names_the_python_function(self):
+        """The user's own name is what they can act on, not the generated one."""
+        ctx = self._renamed_ctx()
+        ctx.func_type = "inline"
+        ctx.source = textwrap.dedent(
+            """
+            def helper(src: pl.Tensor, dst: pl.Out[pl.Tensor]):
+                return dst
+            """
+        )
+        with pytest.warns(DeprecationWarning, match="helper' uses pl.Out"):
+            specialize("_T", [ctx])
 
 
 if __name__ == "__main__":

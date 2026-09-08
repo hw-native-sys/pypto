@@ -5889,6 +5889,196 @@ class TestWindowSliceIncoreConversion:
         assert _find_first_call_to(kernel, "tensor.add") is None
         assert _find_first_call_to(kernel, "tensor.slice") is None
 
+    def test_matmul_on_window_slice(self):
+        """A window slice feeding ``pl.matmul`` must load straight into Mat.
+
+        The consumer-driven load (``HandleConsumerDrivenLoad``) already accepts a
+        window source; the gate that rejected this case was the *type* deducer.
+        Locking in the lowering shape here proves the Cube operand path is the
+        same one a plain GM tensor takes -- one ``tile.load`` with
+        ``target_memory=Mat``, no Vec round trip.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                win: pld.DistributedTensor[[16, 32], pl.BF16],
+                w: pl.Tensor[[32, 16], pl.BF16],
+                out: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            ):
+                a = pl.tensor.slice(win, [16, 32], [0, 0])
+                prod = pl.matmul(a, w)
+                out[0:16, 0:16] = prod
+                return  # noqa: PLR1711  (DSL return terminator)
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        kernel = After.get_function("kernel")
+        assert kernel is not None, "kernel function missing after conversion"
+        mm = _find_first_call_to(kernel, "tile.matmul")
+        assert mm is not None, "matmul over a window slice must lower to tile.matmul"
+        # Both operands arrive as Mat-resident tiles.
+        for operand in mm.args:
+            operand_type = operand.type
+            assert isinstance(operand_type, ir.TileType), (
+                f"tile.matmul operand must be a tile, got {type(operand_type).__name__}"
+            )
+            assert operand_type.memory_space == ir.MemorySpace.Mat, (
+                f"tile.matmul operand must be Mat-resident, got {operand_type.memory_space}"
+            )
+        assert _find_first_call_to(kernel, "tensor.matmul") is None
+        assert _find_first_call_to(kernel, "tensor.slice") is None
+
+    def test_matmul_acc_on_window_slice(self):
+        """``pl.matmul_acc`` accumulates a window-derived operand (split-K idiom)."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                win: pld.DistributedTensor[[16, 32], pl.BF16],
+                w: pl.Tensor[[32, 16], pl.BF16],
+                out: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            ):
+                acc = pl.create_tensor([16, 16], dtype=pl.FP32)
+                a = pl.tensor.slice(win, [16, 32], [0, 0])
+                acc2 = pl.matmul_acc(acc, a, w, init_cond=True)
+                out[0:16, 0:16] = acc2
+                return  # noqa: PLR1711  (DSL return terminator)
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        kernel = After.get_function("kernel")
+        assert kernel is not None, "kernel function missing after conversion"
+        assert _find_first_call_to(kernel, "tile.matmul_acc") is not None, (
+            "matmul_acc over a window slice must lower to tile.matmul_acc"
+        )
+        assert _find_first_call_to(kernel, "tensor.matmul_acc") is None
+        assert _find_first_call_to(kernel, "tensor.slice") is None
+
+    def test_matmul_on_window_param_without_slice(self):
+        """A window *parameter* fed straight to matmul must be auto-bridged.
+
+        No ``tensor.slice`` stands between the parameter and the matmul, so the
+        Mat load can only come from ``BridgeInputSpaces``. With the exact-kind
+        cast there the window fell through to the tile branch and reached the
+        converter unbridged, tripping its ``INTERNAL_UNREACHABLE`` guard.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                win: pld.DistributedTensor[[16, 32], pl.BF16],
+                w: pl.Tensor[[32, 16], pl.BF16],
+                out: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            ):
+                prod = pl.matmul(win, w)
+                out[0:16, 0:16] = prod
+                return  # noqa: PLR1711  (DSL return terminator)
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        kernel = After.get_function("kernel")
+        assert kernel is not None, "kernel function missing after conversion"
+        mm = _find_first_call_to(kernel, "tile.matmul")
+        assert mm is not None, "matmul over a window param must lower to tile.matmul"
+        for operand in mm.args:
+            assert isinstance(operand.type, ir.TileType), (
+                "every tile.matmul operand must be bridged to a tile"
+            )
+        assert _find_first_call_to(kernel, "tensor.matmul") is None
+
+    def test_non_fractal_window_operand_is_row_boxed_like_a_plain_tensor(self):
+        """A window cube operand must get the same M boxing a plain GM tensor gets.
+
+        ``ResolveCubeMAlignment`` / ``ResolveCubeNAlignment`` decide the physical extent the
+        bridged load allocates. They matched only the exact ``TensorType``, so a window
+        returned alignment 0 and ``emit_load`` skipped the boxing: a 17-row BF16 operand
+        loaded as a physical ``[17, 32]`` tile instead of the ``[32, 32]`` box with
+        ``valid_shape=[17, 32]``, and reached the Cube with a geometry ptoas rejects.
+        """
+
+        @pl.program
+        class Plain:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[17, 32], pl.BF16],
+                w: pl.Tensor[[32, 16], pl.BF16],
+                out: pl.InOut[pl.Tensor[[17, 16], pl.FP32]],
+            ):
+                prod = pl.matmul(src, w)
+                out[0:17, 0:16] = prod
+                return  # noqa: PLR1711  (DSL return terminator)
+
+        @pl.program
+        class Window:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pld.DistributedTensor[[17, 32], pl.BF16],
+                w: pl.Tensor[[32, 16], pl.BF16],
+                out: pl.InOut[pl.Tensor[[17, 16], pl.FP32]],
+            ):
+                prod = pl.matmul(src, w)
+                out[0:17, 0:16] = prod
+                return  # noqa: PLR1711  (DSL return terminator)
+
+        def lhs_physical_shape(program):
+            kernel = passes.convert_tensor_to_tile_ops()(program).get_function("kernel")
+            assert kernel is not None, "kernel function missing after conversion"
+            mm = _find_first_call_to(kernel, "tile.matmul")
+            assert mm is not None, "matmul must lower to tile.matmul"
+            lhs_type = mm.args[0].type
+            assert isinstance(lhs_type, ir.TileType)
+            dims = []
+            for dim in lhs_type.shape:
+                assert isinstance(dim, ir.ConstInt), f"expected a static extent, got {dim}"
+                dims.append(dim.value)
+            return dims
+
+        plain_shape = lhs_physical_shape(Plain)
+        window_shape = lhs_physical_shape(Window)
+        assert plain_shape == [32, 32], f"plain operand must be row-boxed, got {plain_shape}"
+        assert window_shape == plain_shape, (
+            f"window operand must be boxed identically to a plain tensor: "
+            f"got {window_shape}, plain gets {plain_shape}"
+        )
+
+    def test_row_max_on_window_param_without_slice(self):
+        """A window param feeding an op with no ``input_reqs`` needs a Phase-1 load.
+
+        ``tensor.row_max`` declares no input space requirement, so its operand is
+        loaded by the entry-load phase rather than by ``BridgeInputSpaces``. That
+        phase collected only exact ``TensorType`` params, so the window reached
+        the converter as a tensor and failed its ``input must be TileType`` check.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                win: pld.DistributedTensor[[16, 32], pl.FP32],
+                out: pl.InOut[pl.Tensor[[16, 1], pl.FP32]],
+            ):
+                r = pl.row_max(win)
+                out[0:16, 0:1] = r
+                return  # noqa: PLR1711  (DSL return terminator)
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        kernel = After.get_function("kernel")
+        assert kernel is not None, "kernel function missing after conversion"
+        assert _find_first_call_to(kernel, "tile.load") is not None, (
+            "the window param must get an entry tile.load"
+        )
+        assert _find_first_call_to(kernel, "tile.row_max") is not None, (
+            "row_max over a window param must lower to tile.row_max"
+        )
+        assert _find_first_call_to(kernel, "tensor.row_max") is None
+
     # ------------------------------------------------------------------
     # Composite intrinsic param-direction upgrade tests
     # ------------------------------------------------------------------
@@ -7274,6 +7464,56 @@ class TestCalleeDirectionPropagationThroughCarries:
             p.name_hint.split("__ssa_v")[0]: d for p, d in zip(after.params, after.param_directions)
         }
         assert directions["dst"] == ir.ParamDirection.Out
+
+
+class TestTensorCastConversion:
+    def test_saturation_mode_survives_tensor_to_tile_lowering(self):
+        """tensor.cast -> tile.cast must carry an opt-out across.
+
+        Losing it here would silently re-saturate a cast whose author asked for
+        wrapping, with no diagnostic anywhere downstream.
+        """
+        saturation_mode = "off"
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, x: pl.Tensor[[8, 256], pl.FP16]) -> pl.Tensor[[8, 256], pl.INT8]:
+                q: pl.Tensor[[8, 256], pl.INT8] = pl.cast(
+                    x, pl.INT8, mode="trunc", saturation_mode=saturation_mode
+                )
+                return q
+
+            @pl.function
+            def main(self, x: pl.Tensor[[8, 256], pl.FP16]) -> pl.Tensor[[8, 256], pl.INT8]:
+                q: pl.Tensor[[8, 256], pl.INT8] = self.main_incore_0(x)
+                return q
+
+        after = passes.convert_tensor_to_tile_ops()(Before)
+        cast_calls = _find_calls_to(_require_function(after, "main_incore_0"), "tile.cast")
+        assert len(cast_calls) == 1
+        assert cast_calls[0].kwargs["saturation_mode"] == 0
+        assert cast_calls[0].kwargs["mode"] == 5
+
+    def test_default_cast_gains_no_saturation_kwarg(self):
+        """Conversion must not stamp the default onto a cast that left it implicit."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, x: pl.Tensor[[8, 256], pl.FP16]) -> pl.Tensor[[8, 256], pl.INT8]:
+                q: pl.Tensor[[8, 256], pl.INT8] = pl.cast(x, pl.INT8, mode="trunc")
+                return q
+
+            @pl.function
+            def main(self, x: pl.Tensor[[8, 256], pl.FP16]) -> pl.Tensor[[8, 256], pl.INT8]:
+                q: pl.Tensor[[8, 256], pl.INT8] = self.main_incore_0(x)
+                return q
+
+        after = passes.convert_tensor_to_tile_ops()(Before)
+        cast_calls = _find_calls_to(_require_function(after, "main_incore_0"), "tile.cast")
+        assert len(cast_calls) == 1
+        assert "saturation_mode" not in cast_calls[0].kwargs
 
 
 if __name__ == "__main__":

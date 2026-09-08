@@ -40,3 +40,10 @@ def pass_verification_context():
     means pass verification now works correctly.
     """
     yield
+
+
+@pytest.fixture(autouse=True)
+def _redirect_prog_build_dir(tmp_path, monkeypatch):
+    """Isolate artifacts without an explicit output request that bypasses JIT caching."""
+    monkeypatch.delenv("PYPTO_PROG_BUILD_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)

@@ -1050,22 +1050,19 @@ def test_pto_codegen_tile_int_literal_scalar_is_not_index():
 
 
 @pytest.mark.parametrize(
-    ("op_name", "pto_op_name", "needs_tmp"),
+    ("op_name", "pto_op_name"),
     [
-        ("tile.ands", "pto.tands", False),
-        ("tile.ors", "pto.tors", False),
-        ("tile.xors", "pto.txors", True),
-        ("tile.shls", "pto.tshls", False),
-        ("tile.shrs", "pto.tshrs", False),
+        ("tile.shls", "pto.tshls"),
+        ("tile.shrs", "pto.tshrs"),
     ],
 )
-def test_pto_codegen_tile_bitwise_scalar_index_operand_is_cast_to_i32(op_name, pto_op_name, needs_tmp):
-    """Tile-scalar bitwise codegen must never pass an index operand to PTOAS.
+def test_pto_codegen_tile_shift_scalar_index_operand_is_cast_to_i32(op_name, pto_op_name):
+    """Tile-scalar shift codegen must never pass an index operand to PTOAS.
 
-    Python wrappers normalize bare literals before constructing the call, but
-    deserialized or directly constructed IR can still carry an INDEX scalar.
-    The backend contract for all five instructions requires the scalar operand
-    to be emitted as i32.
+    Shift amounts have an i32 PTOAS contract independent of the tile dtype, so
+    deserialized or directly constructed INDEX operands are widened here. The
+    bitwise scalar family instead requires a same-width signless scalar and is
+    covered separately.
     """
     span = ir.Span.unknown()
     tensor_type = ir.TensorType([32, 32], DataType.INT32)
@@ -1076,8 +1073,6 @@ def test_pto_codegen_tile_bitwise_scalar_index_operand_is_cast_to_i32(op_name, p
         input_tile = ib.let("input_tile", tile.load(input_tensor, [0, 0], [32, 32]))
         scalar = ir.ConstInt(5, DataType.INDEX, span)
         args = [input_tile, scalar]
-        if needs_tmp:
-            args.append(ib.let("tmp", tile.create([32, 32], DataType.INT32)))
         result_tile = ib.let("result_tile", ir.create_op_call(op_name, args, {}, span))
         result = ib.let("result", tile.store(result_tile, [0, 0], output_tensor))
         f.return_type(tensor_type)
@@ -1094,8 +1089,8 @@ def test_pto_codegen_tile_bitwise_scalar_index_operand_is_cast_to_i32(op_name, p
     assert any("arith.index_cast" in line and "index to i32" in line for line in lines)
 
 
-def test_pto_codegen_tile_bitwise_unsigned_scalar_is_bridged_to_i32():
-    """A UINT32 Tile–Scalar operand must be bridged to signless i32 for PTOAS."""
+def test_pto_codegen_tile_bitwise_unsigned_scalar_is_normalized_without_bridge():
+    """UINT32 literal sugar directly creates the same-width signless i32 operand."""
 
     @pl.program
     class UIntAndsProgram:
@@ -1109,7 +1104,27 @@ def test_pto_codegen_tile_bitwise_unsigned_scalar_is_bridged_to_i32():
     tands = _single_line(lines, "pto.tands")
     assert ", ui32) outs" not in tands, f"scalar operand is still unsigned: {tands}"
     assert ", i32) outs" in tands, f"scalar operand is not i32: {tands}"
-    assert any("builtin.unrealized_conversion_cast" in line and "ui32 to i32" in line for line in lines)
+    assert not any("builtin.unrealized_conversion_cast" in line and "ui32 to i32" in line for line in lines)
+
+
+def test_pto_codegen_tensor_bitwise_unsigned_ssa_scalar_keeps_i16():
+    """Tensor-to-tile lowering forwards an explicit signless companion scalar unchanged."""
+
+    @pl.program
+    class UIntOrsSSAProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def ors_test(
+            self,
+            src: pl.Tensor[[32, 32], pl.UINT16],
+            scalar_src: pl.Tensor[[1], pl.INT16],
+        ) -> pl.Tensor[[32, 32], pl.UINT16]:
+            scalar: pl.Scalar[pl.INT16] = pl.read(scalar_src, [0])
+            return pl.tensor.ors(src, scalar)
+
+    lines = _get_mlir_lines(_generate_default_mlir(UIntOrsSSAProgram))
+    tors = _single_line(lines, "pto.tors")
+    assert ", i16) outs" in tors, f"scalar operand is not same-width i16: {tors}"
+    assert not any("i16 to i32" in line for line in lines)
 
 
 def test_pto_codegen_tensor_int_literal_scalar_is_not_index():
