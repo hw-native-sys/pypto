@@ -3213,6 +3213,23 @@ def test_tensor_reshape_carries_pad_alongside_the_mapped_region():
     assert _valid_of(result_type) == [10, 8]
 
 
+def test_tensor_reshape_maps_a_region_that_is_not_a_flat_prefix():
+    """Tensor reshape shares the rule: [2, 2, 2] valid [2, 1, 2] is [2, 4] valid [2, 2].
+
+    Both denote flat cells {0, 1, 4, 5}, so the region survives the repartition
+    even though it never was a prefix of the buffer.
+    """
+    result_type = ir.op.tensor.reshape(_partial_tensor_var([2, 2, 2], [2, 1, 2]), [2, 4]).type
+
+    assert _valid_of(result_type) == [2, 2]
+
+
+def test_tensor_reshape_rejects_a_non_prefix_region_the_target_cannot_cut():
+    """{0, 1, 4, 5} needs a dimension boundary every 4 elements, and [8] has none."""
+    with pytest.raises(ValueError, match="real data is scattered across the buffer"):
+        ir.op.tensor.reshape(_partial_tensor_var([2, 2, 2], [2, 1, 2]), [8])
+
+
 def test_tensor_reshape_rejects_region_that_is_not_a_flat_prefix():
     """Valid columns leave gaps between real rows, so no target rectangle spans them."""
     with pytest.raises(ValueError, match="real data is scattered across the buffer"):

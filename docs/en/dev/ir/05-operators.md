@@ -731,15 +731,32 @@ not every source region survives a repartition — the rule maps what it can:
 | Fully valid | `new_shape` — canonicalized away, so no view survives and no existing program changes |
 | Provably empty | An all-zero box |
 | Only full unit axes added / removed | Surviving axes map 1:1; an arbitrary rectangle is preserved exactly |
-| A contiguous flat prefix | The rectangle of `new_shape` spanning those same cells, if one exists |
+| One the target shape cuts the same way | The box of `new_shape` spanning those same cells, if one exists |
 | Anything else | **Rejected** — `valid_shape` cannot describe the reshaped region |
 
-So `[8, 16]` valid `[5, 16]` (a flat prefix of 80 cells) maps to `[16, 8]` valid
-`[10, 8]` and to `[128]` valid `[80]`, while `[4, 32]` is rejected — 80 cells is
-not a whole number of 32-wide rows. `[1, 8, 16]` valid `[1, 8, 5]` is not a flat
-prefix at all, yet `[8, 16]` valid `[8, 5]` is exact, because dropping a full
-unit axis keeps rows as rows. `tensor.reshape`'s optional third `valid_shape`
-operand may only *narrow* the derived region, never claim data outside it.
+The last rule reads the region as the **runs** of elements it fills.
+Neighbouring source axes stay in one run while the lower one is fully valid or
+the upper one is pinned to a single coordinate; anywhere else the upper axis's
+stride survives into the region and cuts it. Each run then holds a flat prefix
+of its own volume, and the region maps exactly when `new_shape` groups its own
+dimensions into the same runs and each prefix falls on a dimension boundary
+there. For a static region the rule is **exact**: it accepts if and only if some
+box of `new_shape` denotes the very same cells.
+
+So `[8, 16]` valid `[5, 16]` is the one-run case (a flat prefix of 80 cells): it
+maps to `[16, 8]` valid `[10, 8]` and to `[128]` valid `[80]`, while `[4, 32]` is
+rejected — 80 cells is not a whole number of 32-wide rows. `[2, 2, 2]` valid
+`[2, 1, 2]` is the two-run case `2 | 4` — flat cells `{0, 1, 4, 5}`, no prefix at
+all — which `[2, 4]` spells as valid `[2, 2]` and `[8]` cannot spell, having no
+dimension boundary every 4 elements. `[8, 16]` valid `[8, 5]` cuts into `8 | 16`
+and `[16, 8]` cannot regroup that way, so it is rejected. `tensor.reshape`'s
+optional third `valid_shape` operand may only *narrow* the derived region, never
+claim data outside it.
+
+Runs whose extents are not compile-time constants are where the rule stays
+conservative: a single run carries a symbolic free extent through unchanged when
+a target dimension keeps its row size, and anything more is rejected rather than
+guessed.
 
 An **identity** `tile.reshape` — one whose target shape equals the source's —
 additionally keeps the source's layout triple (`blayout` / `slayout` / `fractal`) and its

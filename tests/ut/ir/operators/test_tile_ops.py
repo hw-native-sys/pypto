@@ -3316,6 +3316,46 @@ class TestTileSliceReshapeOps:
 
         assert _valid_of(result_type) == [0, 0]
 
+    def test_tile_reshape_maps_a_region_that_is_not_a_flat_prefix(self):
+        """A non-prefix region still maps when the target shape cuts the buffer the same way.
+
+        Row-major [2, 2, 2] valid [2, 1, 2] occupies flat cells {0, 1, 4, 5} --
+        no prefix -- yet under [2, 4] those same cells are exactly the box
+        valid [2, 2]. The full outer axis and the half-full run of four survive
+        as their own target dimensions.
+        """
+        result_type = tile.reshape(_partial_tile([2, 2, 2], [2, 1, 2]), [2, 4]).type
+
+        assert _valid_of(result_type) == [2, 2]
+
+    def test_tile_reshape_maps_a_non_prefix_region_across_a_merged_axis(self):
+        """The run below the cut may still be repartitioned: 8 real cells of every 16."""
+        result_type = tile.reshape(_partial_tile([4, 2, 8], [4, 1, 8]), [4, 16]).type
+
+        assert _valid_of(result_type) == [4, 8]
+
+    def test_tile_reshape_maps_a_non_prefix_region_with_a_partial_outer_axis(self):
+        """Both cuts can be partial: 2 of 4 outer rows, 8 real cells of every 16."""
+        result_type = tile.reshape(_partial_tile([4, 2, 8], [2, 1, 8]), [4, 16]).type
+
+        assert _valid_of(result_type) == [2, 8]
+
+    def test_tile_reshape_maps_a_non_prefix_region_over_a_full_unit_axis(self):
+        """A provably full unit axis is erased first, so [2, 1, 4] reads as [2, 4]."""
+        result_type = tile.reshape(_partial_tile([2, 1, 4], [2, 1, 2]), [2, 4]).type
+
+        assert _valid_of(result_type) == [2, 2]
+
+    def test_tile_reshape_rejects_a_non_prefix_region_the_target_cannot_cut(self):
+        """{0, 1, 4, 5} needs a dimension boundary every 4 elements, and [8] has none."""
+        with pytest.raises(ValueError, match="real data is scattered across the buffer"):
+            tile.reshape(_partial_tile([2, 2, 2], [2, 1, 2]), [8])
+
+    def test_tile_reshape_rejects_a_non_prefix_region_whose_run_does_not_regroup(self):
+        """[2, 3, 4] valid [2, 2, 4] runs 8 real of every 12; [6, 4] cuts every 4."""
+        with pytest.raises(ValueError, match="real data is scattered across the buffer"):
+            tile.reshape(_partial_tile([2, 3, 4], [2, 2, 4]), [6, 4])
+
     def test_tile_reshape_rejects_region_that_is_not_a_flat_prefix(self):
         """Valid columns leave gaps between real rows, so no target rectangle spans them."""
         with pytest.raises(ValueError, match="real data is scattered across the buffer"):
