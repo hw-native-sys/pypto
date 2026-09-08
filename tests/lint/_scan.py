@@ -33,7 +33,7 @@ import sys
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 
-__all__ = ["resolve", "tracked_files"]
+__all__ = ["resolve", "select", "tracked_files"]
 
 
 def tracked_files(root: Path, scan_roots: Sequence[str] = ()) -> list[Path]:
@@ -76,6 +76,38 @@ def _within(path: Path, root: Path, scan_roots: Sequence[str]) -> bool:
     return any(relative == r or relative.startswith(f"{r.rstrip('/')}/") for r in scan_roots)
 
 
+def select(
+    root: Path,
+    selected: Iterable[Path],
+    scan_roots: Sequence[str] = (),
+    suffixes: Iterable[str] | None = None,
+) -> list[Path]:
+    """The subset of *selected* that a whole-tree run over the same scope would have visited.
+
+    Anything outside the repo or the scan roots, carrying an unwanted suffix, or no longer on
+    disk (a file deleted in the same commit) is dropped rather than checked on different terms.
+
+    Args:
+        root: Repository root. Relative arguments are resolved against it, matching how
+            pre-commit passes them, rather than against the process working directory.
+        selected: Paths passed on the command line.
+        scan_roots: Repo-relative directories the checker is scoped to; empty means the whole repo.
+        suffixes: File suffixes to keep, e.g. ``{".py"}``; ``None`` keeps every suffix.
+
+    Returns:
+        Absolute paths, sorted and de-duplicated.
+    """
+    keep = set(suffixes) if suffixes is not None else None
+    return sorted(
+        {
+            path
+            for raw in selected
+            for path in [raw if raw.is_absolute() else root / raw]
+            if path.is_file() and (keep is None or path.suffix in keep) and _within(path, root, scan_roots)
+        }
+    )
+
+
 def resolve(
     root: Path,
     selected: Iterable[Path] | None,
@@ -96,20 +128,8 @@ def resolve(
     Returns:
         Absolute paths, sorted and de-duplicated.
     """
-    keep = set(suffixes) if suffixes is not None else None
-
-    def wanted(path: Path) -> bool:
-        return keep is None or path.suffix in keep
-
     selected = list(selected or ())
-    if not selected:
-        return [path for path in tracked_files(root, scan_roots) if wanted(path)]
-
-    resolved = {
-        path
-        for raw in selected
-        # A relative argument is repo-relative, matching how pre-commit passes it.
-        for path in [raw if raw.is_absolute() else root / raw]
-        if path.is_file() and wanted(path) and _within(path, root, scan_roots)
-    }
-    return sorted(resolved)
+    if selected:
+        return select(root, selected, scan_roots, suffixes)
+    keep = set(suffixes) if suffixes is not None else None
+    return [path for path in tracked_files(root, scan_roots) if keep is None or path.suffix in keep]

@@ -66,6 +66,7 @@ import sys
 from pathlib import Path
 
 from _cpp_text import strip_cpp_comments
+from _scan import select
 
 # Declaration sites, relative to the repo root.
 CPP_DECL = "include/pypto/ir/function.h"
@@ -73,6 +74,9 @@ PY_DECL = "python/pypto/_function_attrs.py"
 
 # Directories scanned for bare literals, relative to the repo root.
 SCAN_ROOTS = ("include", "src", "python")
+
+CPP_SUFFIXES = frozenset({".h", ".hpp", ".cpp", ".cc"})
+SCANNED_SUFFIXES = CPP_SUFFIXES | {".py"}
 
 # Paths exempt from the bare-literal scan: the two declaration sites, which necessarily spell each
 # key once. ``.pyi`` stubs are outside the scan by construction -- only ``.py`` is parsed.
@@ -249,9 +253,32 @@ def scan_py(path: Path, rel: str, keys: dict[str, str | None]) -> list[str]:
     return scanner.errors
 
 
+def scanned_sources(root: Path, selected: list[Path]) -> list[Path]:
+    """The files to scan for bare key literals.
+
+    With no selection this enumerates the scan roots by ``rglob`` -- not ``git ls-files`` --
+    so a source not yet added to the index is still scanned. A selection (pre-commit passing
+    the commit's files) is filtered down to that same scope.
+    """
+    if selected:
+        return select(root, selected, SCAN_ROOTS, SCANNED_SUFFIXES)
+    files: list[Path] = []
+    for scan_root in SCAN_ROOTS:
+        base = root / scan_root
+        if base.is_dir():
+            files.extend(sorted(p for p in base.rglob("*") if p.is_file()))
+    return files
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default=None, help="Repository root (default: inferred)")
+    parser.add_argument(
+        "files",
+        nargs="*",
+        type=Path,
+        help=f"Files to scan (default: every source under {'/, '.join(SCAN_ROOTS)}/)",
+    )
     args = parser.parse_args()
 
     root = Path(args.root).resolve() if args.root else Path(__file__).resolve().parents[2]
@@ -271,20 +298,14 @@ def main() -> int:
     py_by_key = {key: ident for ident, key in py.items()}
     py_keys: dict[str, str | None] = {key: py_by_key.get(key) for key in cpp_keys}
 
-    for scan_root in SCAN_ROOTS:
-        base = root / scan_root
-        if not base.is_dir():
+    for path in scanned_sources(root, args.files):
+        rel = path.relative_to(root).as_posix()
+        if rel in EXEMPT:
             continue
-        for path in sorted(base.rglob("*")):
-            if not path.is_file():
-                continue
-            rel = path.relative_to(root).as_posix()
-            if rel in EXEMPT:
-                continue
-            if path.suffix in (".h", ".hpp", ".cpp", ".cc"):
-                errors.extend(scan_cpp(path, rel, cpp_keys))
-            elif path.suffix == ".py":
-                errors.extend(scan_py(path, rel, py_keys))
+        if path.suffix in CPP_SUFFIXES:
+            errors.extend(scan_cpp(path, rel, cpp_keys))
+        elif path.suffix == ".py":
+            errors.extend(scan_py(path, rel, py_keys))
 
     if errors:
         print(

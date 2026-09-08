@@ -16,6 +16,7 @@ line-window or regex implementation gets wrong.
 """
 
 import importlib.util
+import sys
 from pathlib import Path
 from types import ModuleType
 
@@ -23,7 +24,13 @@ import pytest
 
 
 def _load_lint() -> ModuleType:
-    path = Path(__file__).resolve().parents[2] / "lint" / "check_emitter_check_classification.py"
+    directory = Path(__file__).resolve().parents[2] / "lint"
+    # The checkers import their siblings bare (`from _scan import ...`), which resolves when a
+    # script is run directly because its own directory leads sys.path. Loading one by file path
+    # skips that, so put the directory on the path first.
+    if str(directory) not in sys.path:
+        sys.path.insert(0, str(directory))
+    path = directory / "check_emitter_check_classification.py"
     spec = importlib.util.spec_from_file_location("pypto_check_emitter_check_classification", path)
     assert spec is not None
     assert spec.loader is not None
@@ -140,7 +147,7 @@ def test_repository_is_clean() -> None:
     root = Path(__file__).resolve().parents[3]
     offenders = [
         f"{path.relative_to(root).as_posix()}:{line}: [rule {rule}] {detail}"
-        for path in lint.get_git_tracked_sources(root)
+        for path in lint.resolve(root, None, lint.SCANNED_DIRS, lint.SOURCE_SUFFIXES)
         for line, rule, detail in lint.find_violations(path)
         if f"{path.relative_to(root).as_posix()}:{line}" not in lint.ALLOWLIST
     ]

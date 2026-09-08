@@ -56,8 +56,17 @@ repos:
           name: check-environment-inputs
           entry: python tests/lint/check_environment_inputs.py
           language: system
+          files: ^(python/pypto/|python/bindings/|src/|include/).*\.(py|cpp|h)$
+
+        # The same script with no arguments, which additionally reports registry
+        # exceptions that no source uses -- a question only a whole-tree sweep can
+        # answer. Gated on the registry itself, the commit that can introduce one.
+        - id: check-environment-registry
+          name: check-environment-registry
+          entry: python tests/lint/check_environment_inputs.py
+          language: system
           pass_filenames: false
-          files: ^(python/pypto/|python/bindings/|src/|include/|tests/lint/check_environment_inputs\.py$)
+          files: ^(python/pypto/_environment\.json|tests/lint/check_environment_inputs\.py)$
 
         - id: check-emitter-check-classification
           name: check-emitter-check-classification
@@ -75,8 +84,7 @@ repos:
           name: check-function-attr-key-parity
           entry: python tests/lint/check_function_attr_key_parity.py
           language: system
-          pass_filenames: false
-          files: ^(include/|src/|python/|tests/lint/check_function_attr_key_parity\.py$)
+          files: ^(include/|src/|python/).*\.(h|hpp|cpp|cc|py)$
 
         - id: check-op-docstring-parity
           name: check-op-docstring-parity

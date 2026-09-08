@@ -17,9 +17,11 @@ PyPTO consumers; implicit tool inputs in the registry need separate toolchain
 dependency discovery and are not certified by this source scan.
 """
 
+import argparse
 import ast
 import json
 import re
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -27,6 +29,16 @@ from _cpp_text import strip_cpp_comments
 
 _ROOT = Path(__file__).resolve().parents[2]
 _CATEGORIES = {"semantic", "tool_resolution", "fresh_request", "nonsemantic"}
+
+# Scan root -> the file suffixes audited under it. python/pypto holds the Python
+# sources; src, include and python/bindings hold the C++ ones. python/bindings is a
+# sibling of python/pypto, so the two never overlap.
+SCAN_ROOTS: dict[str, frozenset[str]] = {
+    "python/pypto": frozenset({".py"}),
+    "src": frozenset({".cpp", ".h"}),
+    "include": frozenset({".cpp", ".h"}),
+    "python/bindings": frozenset({".cpp", ".h"}),
+}
 
 
 class EnvironmentRead(NamedTuple):
@@ -251,16 +263,59 @@ def check_registry(registry: dict[str, Any]) -> None:
             raise ValueError("Dynamic-read exceptions must name an exact relative path and function")
 
 
-def check_tree(root: Path, registry: dict[str, Any]) -> list[str]:
-    """Report every unclassified read in PyPTO Python/C++ production sources."""
+def all_sources(root: Path) -> list[Path]:
+    """Every production source the registry governs.
+
+    The scan roots carry different suffixes -- ``python/pypto`` holds the Python sources,
+    the other three the C++ ones -- so :data:`SCAN_ROOTS` maps each root to its own set
+    rather than applying one filter to all four. Enumeration is by ``rglob`` rather than
+    ``git ls-files`` so that a source not yet added to the index is still audited.
+    """
+    files: list[Path] = []
+    for directory, suffixes in SCAN_ROOTS.items():
+        files.extend(sorted(p for p in (root / directory).rglob("*") if p.suffix in suffixes))
+    return files
+
+
+def selected_sources(root: Path, selected: Iterable[Path]) -> list[Path]:
+    """The subset of *selected* that :func:`all_sources` would have visited.
+
+    pre-commit hands this script the files in the commit; anything outside the scan roots,
+    or carrying a suffix that root does not scan, must be dropped rather than audited on
+    different terms from a whole-tree run.
+    """
+    keep = []
+    for raw in selected:
+        path = raw if raw.is_absolute() else root / raw
+        if not path.is_file():
+            continue
+        try:
+            relative = path.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        for directory, suffixes in SCAN_ROOTS.items():
+            if relative.startswith(f"{directory}/") and path.suffix in suffixes:
+                keep.append(path)
+                break
+    return sorted(set(keep))
+
+
+def check_tree(root: Path, registry: dict[str, Any], files: list[Path] | None = None) -> list[str]:
+    """Report every unclassified read in PyPTO Python/C++ production sources.
+
+    Args:
+        root: Repository root.
+        registry: Parsed ``_environment.json``.
+        files: Sources to audit. ``None`` means the whole tree, which additionally reports
+            dynamic-read exceptions that no source uses -- a question only a full sweep can
+            answer, since a file-scoped run cannot tell "unused" from "used elsewhere".
+    """
     check_registry(registry)
     exceptions = {(item["path"], item["function"]) for item in registry.get("dynamic_reads", [])}
+    whole_tree = files is None
     used = set()
     errors = []
-    files = sorted((root / "python" / "pypto").rglob("*.py"))
-    for directory in ("src", "include", "python/bindings"):
-        files.extend(sorted(path for path in (root / directory).rglob("*") if path.suffix in {".cpp", ".h"}))
-    for path in files:
+    for path in all_sources(root) if whole_tree else files or []:
         relative = path.relative_to(root).as_posix()
         reads = python_reads(path.read_text()) if path.suffix == ".py" else cpp_reads(path.read_text())
         for read in reads:
@@ -269,15 +324,27 @@ def check_tree(root: Path, registry: dict[str, Any]) -> list[str]:
             elif read.variable not in registry["variables"]:
                 name = read.variable or f"dynamic read in {read.function}"
                 errors.append(f"{relative}:{read.line}: unclassified environment input: {name}")
-    errors.extend(
-        f"Unused dynamic-read exception: {path}:{function}" for path, function in sorted(exceptions - used)
-    )
+    if whole_tree:
+        errors.extend(
+            f"Unused dynamic-read exception: {path}:{function}"
+            for path, function in sorted(exceptions - used)
+        )
     return errors
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description="Check that environment reads are registered.")
+    parser.add_argument(
+        "files",
+        nargs="*",
+        type=Path,
+        help="Sources to audit (default: the whole tree, which also reports unused exceptions)",
+    )
+    args = parser.parse_args()
+
     registry = json.loads((_ROOT / "python/pypto/_environment.json").read_text())
-    errors = check_tree(_ROOT, registry)
+    files = selected_sources(_ROOT, args.files) if args.files else None
+    errors = check_tree(_ROOT, registry, files)
     for error in errors:
         print(error)
     return int(bool(errors))
