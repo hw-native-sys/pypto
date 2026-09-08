@@ -27,6 +27,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/cast_saturation.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/type.h"
@@ -201,6 +202,8 @@ TypePtr DeduceTensorCastType(const std::vector<ExprPtr>& args,
                         "but got "
                      << args[0]->GetType()->TypeName();
 
+  ValidateCastSaturationModeKwarg(kwargs, "tensor.cast");
+
   // Read target_type from kwargs
   bool found_target_type = false;
   DataType target_dtype;
@@ -368,6 +371,9 @@ REGISTER_OP("tensor.cast")
     .add_argument("input", "Input tensor (TensorType)")
     .set_attr<DataType>("target_type")
     .set_attr<int>("mode")
+    // Optional destination saturation: OFF(0) / ON(1). Absent means "keep the
+    // backend default" — see include/pypto/ir/cast_saturation.h.
+    .set_attr<int>("saturation_mode")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorCastType(args, kwargs);

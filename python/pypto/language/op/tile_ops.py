@@ -1296,6 +1296,7 @@ def cast(
     mode: str | int = "round",
     *,
     tmp: Tile | None = None,
+    saturation_mode: str | int | None = None,
 ) -> Tile:
     """Cast tile to target data type (element-wise).
 
@@ -1304,7 +1305,20 @@ def cast(
         target_type: Target data type (DataType)
         mode: Rounding mode — string name ("none", "rint", "round", "floor",
               "ceil", "trunc", "odd") or int (0–6)
-        tmp: Optional A2/A3 PTOAS scratch tile. Normally compiler-generated.
+        tmp: Optional A2/A3 PTOAS scratch tile. Normally compiler-generated,
+             and only for a cast that opted out of saturation — the saturating
+             form is native and reads none.
+        saturation_mode: Destination saturation — ``"on"`` (1) clamps a
+             rounded value that falls outside the destination range to that
+             range; ``"off"`` (0) keeps the target's non-saturating
+             conversion, including its overflow and non-finite behavior.
+             **Defaults to** ``"on"``: clamping is the safer of the two to get
+             by accident, and it is what the hardware converts natively. Pass
+             ``"off"`` where wrapping is the kernel's contract. When the cast
+             lowers to a chain of native conversions, the mode applies to the
+             final hop. On A2/A3 an ``"on"`` narrowing cast needs no ``tmp``, so
+             the compiler generates none; a caller-supplied ``tmp`` is still
+             honored.
 
     Returns:
         Tile wrapping the cast operation
@@ -1313,7 +1327,7 @@ def cast(
         >>> tile_fp32 = pl.tile.cast(tile_bf16, pl.FP32)
     """
     tmp_expr = None if tmp is None else tmp.unwrap()
-    call_expr = _ir_ops.cast(tile.unwrap(), target_type, mode, tmp=tmp_expr)
+    call_expr = _ir_ops.cast(tile.unwrap(), target_type, mode, tmp=tmp_expr, saturation_mode=saturation_mode)
     return Tile(expr=call_expr)
 
 

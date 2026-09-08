@@ -1306,6 +1306,13 @@ class TestPtoLevel3Scratch:
 
     @staticmethod
     def _cast_program(src_dtype, dst_dtype):
+        """A narrowing cast that opts out of saturation — the only shape that needs scratch.
+
+        The scratch backs PTOAS's non-saturating helper, and saturating is the
+        default, so a cast has to ask for the non-saturating lowering before this
+        pass has anything to materialize.
+        """
+
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.InCore)
@@ -1317,7 +1324,7 @@ class TestPtoLevel3Scratch:
                     src, [0, 0], [16, 16], target_memory=pl.Mem.Vec
                 )
                 result: pl.Tile[[16, 16], dst_dtype, pl.Mem.Vec] = pl.tile.cast(
-                    tile, target_type=dst_dtype, mode="round"
+                    tile, target_type=dst_dtype, mode="round", saturation_mode="off"
                 )
                 return result
 
@@ -1337,6 +1344,7 @@ class TestPtoLevel3Scratch:
         assert tmp.memref is not None
 
     def test_non_narrowing_cast_has_no_scratch(self):
+        """Widening needs no helper, so opting out changes nothing."""
         after = self._run(self._cast_program(pl.FP32, pl.FP16), BackendType.Ascend910B)
         assert len(self._calls(after, ir.get_op("tile.cast").name)[0].args) == 1
 
@@ -1348,6 +1356,84 @@ class TestPtoLevel3Scratch:
         """FP16->INT4 uses native vconv without PTOAS level-3 tcvt tmp."""
         after = self._run(self._cast_program(pl.FP16, pl.INT4), BackendType.Ascend910B)
         assert len(self._calls(after, ir.get_op("tile.cast").name)[0].args) == 1
+
+    @staticmethod
+    def _saturating_cast_program(src_dtype, dst_dtype, saturation_mode):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[16, 16], src_dtype],
+            ) -> pl.Tile[[16, 16], dst_dtype, pl.Mem.Vec]:
+                tile: pl.Tile[[16, 16], src_dtype, pl.Mem.Vec] = pl.tile.load(
+                    src, [0, 0], [16, 16], target_memory=pl.Mem.Vec
+                )
+                result: pl.Tile[[16, 16], dst_dtype, pl.Mem.Vec] = pl.tile.cast(
+                    tile, target_type=dst_dtype, mode="round", saturation_mode=saturation_mode
+                )
+                return result
+
+        return Before
+
+    @staticmethod
+    def _saturating_cast_program_with_tmp(src_dtype, dst_dtype, saturation_mode):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[16, 16], src_dtype],
+            ) -> pl.Tile[[16, 16], dst_dtype, pl.Mem.Vec]:
+                tile: pl.Tile[[16, 16], src_dtype, pl.Mem.Vec] = pl.tile.load(
+                    src, [0, 0], [16, 16], target_memory=pl.Mem.Vec
+                )
+                tmp: pl.Tile[[1, 160], pl.INT8, pl.Mem.Vec] = pl.tile.create(
+                    [1, 160], dtype=pl.INT8, target_memory=pl.Mem.Vec
+                )
+                result: pl.Tile[[16, 16], dst_dtype, pl.Mem.Vec] = pl.tile.cast(
+                    tile,
+                    target_type=dst_dtype,
+                    mode="round",
+                    tmp=tmp,
+                    saturation_mode=saturation_mode,
+                )
+                return result
+
+        return Before
+
+    @pytest.mark.parametrize("saturation_mode", ["on", None], ids=["explicit-on", "default"])
+    def test_a2a3_saturating_narrowing_cast_gets_no_compiler_scratch(self, saturation_mode):
+        """A saturating cast -- which is the default -- must not allocate scratch.
+
+        Saturation selects PTOAS's native conversion, which reads no tmp;
+        synthesizing one would reserve Vec memory the emitted pto.tcvt never
+        touches. ``None`` and an explicit "on" are the same cast, so both check.
+        """
+        after = self._run(
+            self._saturating_cast_program(pl.FP16, pl.INT8, saturation_mode), BackendType.Ascend910B
+        )
+        assert len(self._calls(after, ir.get_op("tile.cast").name)[0].args) == 1
+        assert not self._calls(after, ir.get_op("tile.create").name)
+
+    def test_a2a3_non_saturating_narrowing_cast_still_gets_scratch(self):
+        """Opting out keeps the compiler-owned scratch the non-saturating helper needs."""
+        after = self._run(self._saturating_cast_program(pl.FP16, pl.INT8, "off"), BackendType.Ascend910B)
+        cast_call = self._calls(after, ir.get_op("tile.cast").name)[0]
+        assert len(cast_call.args) == 2
+        tmp = cast(ir.TileType, cast_call.args[1].type)
+        assert tmp.shape == [1, 160]
+        assert tmp.dtype == ir.DataType.INT8
+
+    def test_a2a3_saturating_cast_preserves_a_caller_supplied_scratch(self):
+        """Only the compiler-generated scratch is dropped; an explicit tmp is the author's."""
+        after = self._run(
+            self._saturating_cast_program_with_tmp(pl.FP16, pl.INT8, "on"),
+            BackendType.Ascend910B,
+        )
+        cast_call = self._calls(after, ir.get_op("tile.cast").name)[0]
+        assert len(cast_call.args) == 2
+        assert len(self._calls(after, ir.get_op("tile.create").name)) == 1
 
     @staticmethod
     def _narrowing_cast_program(rows: int, cols: int, src_dtype, dst_dtype):
@@ -1362,7 +1448,7 @@ class TestPtoLevel3Scratch:
                     src, [0, 0], [rows, cols], target_memory=pl.Mem.Vec
                 )
                 result: pl.Tile[[rows, cols], dst_dtype, pl.Mem.Vec] = pl.tile.cast(
-                    tile, target_type=dst_dtype, mode="round"
+                    tile, target_type=dst_dtype, mode="round", saturation_mode="off"
                 )
                 return result
 

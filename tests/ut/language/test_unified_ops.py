@@ -2015,5 +2015,127 @@ class TestUnifiedSlicePadValue:
         assert not ir.structural_equal(unified, unpadded)
 
 
+class TestCastSaturationMode:
+    """``saturation_mode`` on the unified / tensor / tile cast surfaces."""
+
+    @staticmethod
+    def _tensor() -> Tensor:
+        span = ir.Span.unknown()
+        return Tensor(expr=ir.Var("x", ir.TensorType([8, 256], DataType.FP16), span))
+
+    @staticmethod
+    def _tile() -> Tile:
+        span = ir.Span.unknown()
+        return Tile(expr=ir.Var("x", ir.TileType([8, 256], DataType.FP16), span))
+
+    @classmethod
+    def _value(cls, kind: str) -> Tensor | Tile:
+        return cls._tensor() if kind == "tensor" else cls._tile()
+
+    @pytest.mark.parametrize("kind", ["tensor", "tile"])
+    @pytest.mark.parametrize("saturation_mode", ["off", 0])
+    def test_opting_out_is_recorded_on_the_call(self, kind, saturation_mode):
+        """Both spellings of OFF land on the call as the int the IR declares."""
+        value = self._value(kind)
+        call = unified_ops.cast(value, DataType.INT8, mode="trunc", saturation_mode=saturation_mode).unwrap()
+        assert isinstance(call, ir.Call)
+        assert call.kwargs["saturation_mode"] == 0
+        assert call.kwargs["mode"] == 5
+
+    @pytest.mark.parametrize("kind", ["tensor", "tile"])
+    @pytest.mark.parametrize("saturation_mode", [None, "on", 1])
+    def test_the_default_is_recorded_by_absence(self, kind, saturation_mode):
+        """Omitting it, and asking for the default explicitly, produce the same call.
+
+        The IR records only a *deviation* from ``DEFAULT_SATURATION_MODE``. That
+        is what lets a pass-synthesized cast -- which never sets the kwarg -- print
+        and re-parse to structurally equal IR; a stamped default would make the two
+        forms differ with no semantic difference between them.
+        """
+        assert pypto_ir_utils.DEFAULT_SATURATION_MODE == "on"
+        call = unified_ops.cast(self._value(kind), DataType.INT8, saturation_mode=saturation_mode).unwrap()
+        assert isinstance(call, ir.Call)
+        assert "saturation_mode" not in call.kwargs
+
+    @pytest.mark.parametrize("kind", ["tensor", "tile"])
+    def test_unified_matches_the_explicit_surface(self, kind):
+        """``pl.cast`` forwards the kwarg to the same op the explicit surface builds."""
+        if kind == "tensor":
+            tensor_value = self._tensor()
+            unified = unified_ops.cast(tensor_value, DataType.INT8, saturation_mode="off").unwrap()
+            explicit = language_op.tensor.cast(tensor_value, DataType.INT8, saturation_mode="off").unwrap()
+        else:
+            tile_value = self._tile()
+            unified = unified_ops.cast(tile_value, DataType.INT8, saturation_mode="off").unwrap()
+            explicit = language_op.tile.cast(tile_value, DataType.INT8, saturation_mode="off").unwrap()
+        assert ir.structural_equal(unified, explicit)
+
+    @pytest.mark.parametrize("saturation_mode", [True, False, -1, 2, "ON", "invalid", 0.5, []])
+    def test_invalid_values_are_rejected(self, saturation_mode):
+        """Anything outside {"off", "on", 0, 1} is a ValueError -- bools included.
+
+        ``True`` / ``False`` read as 1 / 0 but say nothing about saturation, so a
+        stray predicate must not silently select a conversion mode.
+        """
+        with pytest.raises(ValueError, match="Invalid saturation_mode"):
+            unified_ops.cast(self._value("tile"), DataType.INT8, saturation_mode=saturation_mode)
+
+    def test_scalar_rejects_saturation(self):
+        """Scalars have no tcvt lowering, so an explicit request is a TypeError...
+
+        ...while a value that is not a mode at all stays a ValueError, matching how
+        ``mode`` orders its two failures on this same path.
+        """
+        span = ir.Span.unknown()
+        scalar = Scalar(expr=ir.Var("s", ir.ScalarType(DataType.FP32), span))
+
+        with pytest.raises(TypeError, match="Scalar inputs do not support saturation_mode"):
+            unified_ops.cast(scalar, DataType.INT32, saturation_mode="on")
+
+        with pytest.raises(ValueError, match="Invalid saturation_mode"):
+            unified_ops.cast(scalar, DataType.INT32, saturation_mode="maybe")
+
+        # Omitting it leaves the Scalar path working exactly as before.
+        assert isinstance(unified_ops.cast(scalar, DataType.INT32), Scalar)
+
+    def test_out_of_contract_value_is_rejected_by_the_ir_op(self):
+        """The C++ deducers own the contract too, so a builder bypassing the DSL still fails."""
+        span = ir.Span.unknown()
+        tile = ir.Var("x", ir.TileType([8, 256], DataType.FP16), span)
+        tensor = ir.Var("y", ir.TensorType([8, 256], DataType.FP16), span)
+
+        for name, arg in (("tile.cast", tile), ("tensor.cast", tensor)):
+            with pytest.raises(ValueError, match="saturation_mode must be off"):
+                ir.create_op_call(
+                    name,
+                    [arg],
+                    {"target_type": DataType.INT8, "mode": 5, "saturation_mode": 2},
+                    span,
+                )
+
+    @pytest.mark.parametrize("saturation_mode", ["off", "on", None])
+    def test_printed_cast_round_trips_through_the_parser(self, saturation_mode):
+        """An opt-out prints in its DSL spelling; the default prints as nothing.
+
+        Either way the printed source must re-parse to structurally equal IR --
+        which is the property that makes "absence means the default" workable.
+        """
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            x: pl.Tensor[[8, 256], pl.FP16], out: pl.Tensor[[8, 256], pl.INT8]
+        ) -> pl.Tensor[[8, 256], pl.INT8]:
+            t = pl.load(x, [0, 0], [8, 256])
+            q = pl.cast(t, pl.INT8, mode="trunc", saturation_mode=saturation_mode)
+            return pl.store(q, [0, 0], out)
+
+        printed = ir.python_print(kernel)
+        if saturation_mode == "off":
+            assert 'saturation_mode="off"' in printed
+        else:
+            assert "saturation_mode" not in printed
+        ir.assert_structural_equal(pl.parse(printed), kernel)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

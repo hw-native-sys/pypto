@@ -45,7 +45,7 @@ program_with_memrefs = init_pass(program)
 ## 算法
 
 1. **规范化结构**：调用 `NormalizeStmtStructure` 确保 `SeqStmts` 为扁平结构
-2. **物化 level3 scratch**：在 PyPTO 或 DSA-RP 规划模式下，为缺失的编译器 scratch 插入普通 Vec `tile.create`。`tile.ci` 与窄化 `tile.cast` 仍仅适用于 A2/A3，必要的 `tile.sort32` scratch 则同时适用于 A2/A3 和 A5。`tile.sel` / `tile.sels` / `tile.prelu` 的 caller tmp 原样保留。PTOAS 规划器保持不变，由其 level-2 `PlanMemory` 管理隐式 scratch。
+2. **物化 level3 scratch**：在 PyPTO 或 DSA-RP 规划模式下，为缺失的编译器 scratch 插入普通 Vec `tile.create`。`tile.ci` 与窄化 `tile.cast` 仍仅适用于 A2/A3，必要的 `tile.sort32` scratch 则同时适用于 A2/A3 和 A5。`tile.sel` / `tile.sels` / `tile.prelu` 的 caller tmp 原样保留。窄化 `tile.cast` **仅在**显式携带 `saturation_mode=0` 时才分配 scratch：该缓冲区是为 PTOAS 的非饱和实现准备的，而饱和形式（即默认值，也是 Pass 合成 cast 的形状）走原生转换，从不读取它（参见 [LegalizeTileCast](17-legalize_tile_cast.md)）。PTOAS 规划器保持不变，由其 level-2 `PlanMemory` 管理隐式 scratch。
 3. **解析声明式分配**：收集所有单参数 `pl.MemRef(...)` 声明，并从绑定的 tile 推导出每块分配的大小与内存空间（见[声明式分配](#声明式分配)）
 4. **初始化 MemRef**：从 `TileType` 读取 `memory_space`（由 InferTileMemorySpace 设置），创建 MemRef 对象（addr=-1）并附加到变量类型
    - **tile.store**：结果与输出 tensor 参数共享 MemRef（由 `output_reuses_input_arg` 注册表属性指定）

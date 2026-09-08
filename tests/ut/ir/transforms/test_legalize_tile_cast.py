@@ -332,5 +332,114 @@ def test_native_table_is_owned_by_the_backend_handler(backend_type, src, dst, ex
         assert _cast_pairs(_run(Before, backend_type)) == expected
 
 
+def _saturation_modes(program) -> list[int | None]:
+    """Each tile.cast's saturation_mode in visitation order; None where left implicit.
+
+    None is the *default* (saturating), not "unspecified": the IR records only a
+    deviation from ``ir::kDefaultSaturationMode``.
+    """
+
+    class _Collector(ir.IRVisitor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.modes: list[int | None] = []
+
+        def visit_call(self, op: ir.Call) -> None:
+            if op.op.name == _TILE_CAST:
+                mode = op.kwargs.get("saturation_mode")
+                assert mode is None or isinstance(mode, int)
+                self.modes.append(mode)
+            super().visit_call(op)
+
+    collector = _Collector()
+    collector.visit_program(program)
+    return collector.modes
+
+
+def test_an_opt_out_applies_only_to_the_final_legalized_hop():
+    """A2/A3 FP32→INT8 expands via FP16; saturation names the destination, so it rides the last hop.
+
+    Only the final hop reaches the dtype the author named, so an opt-out belongs
+    there. The widening intermediate keeps the default: it converts into a dtype
+    the author never named, and every value INT8 can represent passes through FP16
+    exactly either way.
+    """
+    saturation_mode = "off"
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[16, 64], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 64], pl.INT8]],
+        ) -> pl.Tensor[[16, 64], pl.INT8]:
+            t = pl.load(x, [0, 0], [16, 64])
+            c = pl.cast(t, pl.INT8, mode="trunc", saturation_mode=saturation_mode)
+            return pl.store(c, [0, 0], out)
+
+    after = _run(Before, BackendType.Ascend910B)
+    assert _cast_pairs(after) == [("fp32", "fp16"), ("fp16", "int8")]
+    assert _saturation_modes(after) == [None, 0], "intermediate defaulted, final opted out"
+
+
+def test_native_cast_keeps_its_saturation_unchanged():
+    """A single-hop cast is not rewritten, so its opt-out must survive untouched."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[16, 64], pl.FP16],
+            out: pl.Out[pl.Tensor[[16, 64], pl.INT8]],
+        ) -> pl.Tensor[[16, 64], pl.INT8]:
+            t = pl.load(x, [0, 0], [16, 64])
+            c = pl.cast(t, pl.INT8, mode="trunc", saturation_mode="off")
+            return pl.store(c, [0, 0], out)
+
+    after = _run(Before, BackendType.Ascend910B)
+    assert _cast_pairs(after) == [("fp16", "int8")]
+    assert _saturation_modes(after) == [0]
+
+
+def test_legalized_chain_keeps_a_caller_supplied_tmp_on_the_final_hop():
+    """An explicit scratch operand belongs to the narrowing hop, which is the last one.
+
+    The intermediate widening hop needs no scratch, and dropping the operand
+    would silently discard the tile the author allocated for the cast.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[16, 64], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 64], pl.INT8]],
+        ) -> pl.Tensor[[16, 64], pl.INT8]:
+            t = pl.load(x, [0, 0], [16, 64])
+            tmp = pl.tile.create([1, 256], dtype=pl.INT8, target_memory=pl.Mem.Vec)
+            c = pl.tile.cast(t, pl.INT8, mode="trunc", tmp=tmp)
+            return pl.store(c, [0, 0], out)
+
+    after = _run(Before, BackendType.Ascend910B)
+    assert _cast_pairs(after) == [("fp32", "fp16"), ("fp16", "int8")]
+
+    class _ArityCollector(ir.IRVisitor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.arities: list[int] = []
+
+        def visit_call(self, op: ir.Call) -> None:
+            if op.op.name == _TILE_CAST:
+                self.arities.append(len(op.args))
+            super().visit_call(op)
+
+    collector = _ArityCollector()
+    collector.visit_program(after)
+    assert collector.arities == [1, 2]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

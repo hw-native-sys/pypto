@@ -43,6 +43,7 @@ from ..utils import (
     _to_int32_scalar,
     _to_make_tuple,
     resolve_cast_mode,
+    resolve_saturation_deviation,
 )
 from ._pad_value import normalize_pad_value
 
@@ -1762,6 +1763,7 @@ def cast(
     span: Span | None = None,
     *,
     tmp: Expr | None = None,
+    saturation_mode: str | int | None = None,
 ) -> Call:
     """Cast tile to target data type (element-wise).
 
@@ -1771,8 +1773,16 @@ def cast(
         mode: Rounding mode — string name ("none", "rint", "round", "floor",
               "ceil", "trunc", "odd") or int (0–6)
         span: Optional source span for debugging (auto-captured if not provided)
-        tmp: Optional A2/A3 PTOAS scratch tile for non-saturating narrowing
-             tcvt. Normally compiler-generated.
+        tmp: Optional A2/A3 PTOAS scratch tile for a non-saturating narrowing
+             tcvt. Normally compiler-generated, and only for a cast that opted
+             out of saturation — the saturating form is native and reads none.
+        saturation_mode: Destination saturation — "on" (1) clamps out-of-range
+             results to the destination range, "off" (0) selects the target's
+             non-saturating conversion. ``None`` selects
+             ``DEFAULT_SATURATION_MODE`` ("on"). Only a deviation from that
+             default is recorded on the call, so requesting "on" leaves the kwarg
+             absent — codegen reads the default through and still emits an
+             explicit ``satmode``.
 
     Returns:
         Call expression for element-wise cast to target dtype
@@ -1784,7 +1794,10 @@ def cast(
     mode_val = resolve_cast_mode(mode)
 
     actual_span = _get_span_or_capture(span)
+    deviation = resolve_saturation_deviation(saturation_mode)
     kwargs: dict[str, Any] = {"target_type": target_type, "mode": mode_val}
+    if deviation is not None:
+        kwargs["saturation_mode"] = deviation
     args: list[Expr] = [tile] if tmp is None else [tile, tmp]
     return _ir_core.create_op_call("tile.cast", args, kwargs, actual_span)
 

@@ -195,6 +195,79 @@ def resolve_cast_mode(mode: str | int) -> int:
     return mode_val
 
 
+SATURATION_MODE_NAMES: dict[str, int] = {
+    "off": 0,
+    "on": 1,
+}
+
+#: What a cast does when it carries no ``saturation_mode`` kwarg. ``"on"`` clamps
+#: an out-of-range result to the destination range; the alternative wraps, with
+#: architecture-defined behavior. Clamping is the safer of the two to get by
+#: accident, and on A2/A3 it is also the one the assembler converts natively
+#: rather than emulating.
+#:
+#: Only a *deviation* from this is recorded on the call, so a cast that wants the
+#: default carries no kwarg — the same shape a pass-synthesized cast has, which is
+#: what keeps a printed cast re-parsing to the same IR. Mirrors
+#: ``ir::kDefaultSaturationMode`` in ``include/pypto/ir/cast_saturation.h``.
+DEFAULT_SATURATION_MODE: str = "on"
+
+
+def resolve_saturation_mode(saturation_mode: str | int) -> int:
+    """Resolve destination saturation to int, accepting both names and int values.
+
+    Args:
+        saturation_mode: String name ("off", "on") or int (0 or 1)
+
+    Returns:
+        Integer saturation mode value
+
+    Raises:
+        ValueError: If the value is not a valid name and not 0 or 1
+    """
+    if isinstance(saturation_mode, bool):
+        # ``True``/``False`` read as 1/0 but say nothing about saturation; refuse
+        # them so a stray predicate cannot silently select a conversion mode.
+        raise ValueError(
+            f"Invalid saturation_mode {saturation_mode!r}. Expected one of "
+            f"{list(SATURATION_MODE_NAMES.keys())} or an int in (0, 1)."
+        )
+    if isinstance(saturation_mode, int):
+        if saturation_mode not in SATURATION_MODE_NAMES.values():
+            raise ValueError(f"Invalid saturation_mode {saturation_mode}. Expected int 0 (off) or 1 (on).")
+        return saturation_mode
+    value = SATURATION_MODE_NAMES.get(saturation_mode) if isinstance(saturation_mode, str) else None
+    if value is None:
+        raise ValueError(
+            f"Invalid saturation_mode {saturation_mode!r}. "
+            f"Expected one of {list(SATURATION_MODE_NAMES.keys())} or an int in (0, 1)."
+        )
+    return value
+
+
+def resolve_saturation_deviation(saturation_mode: str | int | None) -> int | None:
+    """The ``saturation_mode`` int to record on a cast, or None to record nothing.
+
+    A cast carries the kwarg only when it *deviates* from
+    :data:`DEFAULT_SATURATION_MODE`, so this is the single place the
+    record-a-deviation rule lives. ``None`` requests the default, as does naming
+    it explicitly — both leave the call bare.
+
+    Args:
+        saturation_mode: "off"/"on", 0/1, or None for the default
+
+    Returns:
+        The int to store, or None when the request is the default
+
+    Raises:
+        ValueError: If the value is not a valid name and not 0 or 1
+    """
+    requested = resolve_saturation_mode(
+        DEFAULT_SATURATION_MODE if saturation_mode is None else saturation_mode
+    )
+    return None if requested == SATURATION_MODE_NAMES[DEFAULT_SATURATION_MODE] else requested
+
+
 def has_partial_valid_region(expr: _ir.Expr) -> bool:
     """Whether a tensor/tile value already declares less valid data than it can hold.
 
@@ -482,6 +555,8 @@ def _normalize_const_to_dtype(
 
 __all__ = [
     "CAST_MODE_NAMES",
+    "DEFAULT_SATURATION_MODE",
+    "SATURATION_MODE_NAMES",
     "_get_span_or_capture",
     "_normalize_const_to_dtype",
     "_normalize_expr",
@@ -491,5 +566,7 @@ __all__ = [
     "_to_make_tuple",
     "has_partial_valid_region",
     "resolve_cast_mode",
+    "resolve_saturation_deviation",
+    "resolve_saturation_mode",
     "use_parser_span",
 ]

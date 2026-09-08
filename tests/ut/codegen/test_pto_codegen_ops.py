@@ -3779,6 +3779,82 @@ class TestLevel3StaticViewCodegen:
         assert "%ci_tmp_view" in tci_line and "%ci_dst_view" in tci_line, tci_line
         assert "v_row=?" not in tci_line and "v_col=?" not in tci_line, tci_line
 
+    @pytest.mark.parametrize("saturation_mode", ["on", "off"])
+    def test_tcvt_saturation_selects_form_and_emits_satmode(self, saturation_mode):
+        """satmode reaches PTOAS, and ON drops the non-saturating helper's scratch.
+
+        A2/A3 FP16->INT8 is exactly the pair whose OFF lowering needs a scratch
+        tile: requesting ON selects the native conversion, so the emitted tcvt
+        takes one operand and no `tcvt_tmp_view` bridge is generated.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[8, 256], pl.FP16],
+                out: pl.Tensor[[8, 256], pl.INT8],
+            ) -> pl.Tensor[[8, 256], pl.INT8]:
+                tile_in = pl.load(src, [0, 0], [8, 256])
+                result = pl.cast(tile_in, pl.INT8, mode="trunc", saturation_mode=saturation_mode)
+                return pl.store(result, [0, 0], out)
+
+        mlir = self._generate_mlir(Prog)
+        tcvt_line = next(line for line in mlir.splitlines() if "pto.tcvt" in line)
+        assert f"satmode = #pto<saturation_mode {saturation_mode.upper()}>" in tcvt_line, tcvt_line
+        assert "rmode = #pto<round_mode TRUNC>" in tcvt_line, tcvt_line
+        assert ("tcvt_tmp_view" in tcvt_line) == (saturation_mode == "off"), tcvt_line
+
+    def test_tcvt_without_an_explicit_mode_still_states_the_default(self):
+        """An omitted kwarg is the default, and the instruction says so rather than implying it.
+
+        The IR leaves the default implicit; codegen reads it through, so a reader
+        of the emitted MLIR never has to know what the assembler would have picked.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[8, 256], pl.FP16],
+                out: pl.Tensor[[8, 256], pl.INT8],
+            ) -> pl.Tensor[[8, 256], pl.INT8]:
+                tile_in = pl.load(src, [0, 0], [8, 256])
+                result = pl.cast(tile_in, pl.INT8, mode="trunc")
+                return pl.store(result, [0, 0], out)
+
+        mlir = self._generate_mlir(Prog)
+        tcvt_line = next(line for line in mlir.splitlines() if "pto.tcvt" in line)
+        assert "satmode = #pto<saturation_mode ON>" in tcvt_line, tcvt_line
+        assert "tcvt_tmp_view" not in tcvt_line, tcvt_line
+
+    def test_tcvt_saturation_preserves_explicit_scratch(self):
+        """Only compiler-generated scratch is dropped; the explicit-tmp form still emits both."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[8, 256], pl.FP16],
+                out: pl.Tensor[[8, 256], pl.INT8],
+            ) -> pl.Tensor[[8, 256], pl.INT8]:
+                tile_in = pl.load(src, [0, 0], [8, 256])
+                tmp: pl.Tile[[1, 256], pl.INT8, pl.Mem.Vec] = pl.tile.create(
+                    [1, 256], dtype=pl.INT8, target_memory=pl.Mem.Vec
+                )
+                result: pl.Tile[[8, 256], pl.INT8, pl.Mem.Vec] = pl.tile.cast(
+                    tile_in, pl.INT8, mode="trunc", tmp=tmp, saturation_mode="on"
+                )
+                return pl.store(result, [0, 0], out)
+
+        mlir = self._generate_mlir(Prog)
+        tcvt_line = next(line for line in mlir.splitlines() if "pto.tcvt" in line)
+        assert "satmode = #pto<saturation_mode ON>" in tcvt_line, tcvt_line
+        assert "tcvt_tmp_view" in tcvt_line, tcvt_line
+
     def test_tcvt_emits_static_view_for_explicit_tmp(self):
         @pl.program
         class Prog:
@@ -3792,7 +3868,7 @@ class TestLevel3StaticViewCodegen:
                     src, [0, 0], [16, 16], target_memory=pl.Mem.Vec
                 )
                 result: pl.Tile[[16, 16], pl.INT16, pl.Mem.Vec] = pl.tile.cast(
-                    tile_in, target_type=pl.INT16, mode="round"
+                    tile_in, target_type=pl.INT16, mode="round", saturation_mode="off"
                 )
                 return pl.store(result, [0, 0], out)
 

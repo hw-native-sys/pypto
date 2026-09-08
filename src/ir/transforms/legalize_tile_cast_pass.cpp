@@ -272,6 +272,18 @@ class LegalizeTileCastMutator : public IRMutator {
 
     // Intermediate hops use the original mode (matches model-side INT32→FP32→FP16
     // chains where the narrow step carries mode="round"). Final hop also keeps it.
+    //
+    // Everything else the author wrote — the optional destination
+    // `saturation_mode`, an explicit `tmp` scratch operand — rides on the final
+    // hop only, because the final hop is the one that actually reaches the
+    // destination dtype. Saturation names the *destination* range, so stamping
+    // it on an intermediate would clamp to a range the author never asked
+    // about. Deferring is also safe: BFS already refuses any intermediate that
+    // narrows relative to the destination (NarrowsRelativeTo above), so every
+    // value the destination *can* represent reaches the final hop exactly. A
+    // value it cannot is out of range at both ends of the chain -- an
+    // intermediate float may overflow it to an infinity, but with its sign
+    // intact, so it clamps to the same endpoint either way.
     ExprPtr cur = VisitExpr(call->args_[0]);
     std::vector<StmtPtr> stmts;
     stmts.reserve(chain.size());
@@ -286,8 +298,19 @@ class LegalizeTileCastMutator : public IRMutator {
       cur = mid_var;
     }
 
+    // The final hop *is* the caller's cast, retargeted onto the last chain dtype
+    // (identical to it when the cast was already single-hop), so it carries the
+    // original kwargs and any operand past the source.
+    auto final_kwargs = call->kwargs_;
+    for (auto& [key, value] : final_kwargs) {
+      if (key == "target_type") value = chain.back();
+    }
+    std::vector<ExprPtr> final_args{cur};
+    for (size_t i = 1; i < call->args_.size(); ++i) {
+      final_args.push_back(VisitExpr(call->args_[i]));
+    }
     auto final_assign = MutableCopy(op);
-    final_assign->value_ = MakeCast(cur, chain.back(), mode, op->span_);
+    final_assign->value_ = OpRegistry::GetInstance().Create("tile.cast", final_args, final_kwargs, op->span_);
     stmts.push_back(std::move(final_assign));
 
     if (stmts.size() == 1) return stmts.front();

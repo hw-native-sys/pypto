@@ -34,6 +34,7 @@ from ..utils import (
     _to_int32_scalar,
     _to_make_tuple,
     resolve_cast_mode,
+    resolve_saturation_deviation,
 )
 from ._pad_value import normalize_pad_value
 from .tile_ops import resolve_gather_compare_cmp_mode
@@ -1682,6 +1683,8 @@ def cast(
     target_type: int | DataType,
     mode: str | int = "round",
     span: Span | None = None,
+    *,
+    saturation_mode: str | int | None = None,
 ) -> Call:
     """Type casting operation.
 
@@ -1691,6 +1694,13 @@ def cast(
         mode: Rounding mode — string name ("none", "rint", "round", "floor",
               "ceil", "trunc", "odd") or int (0–6)
         span: Optional source span for debugging (auto-captured if not provided)
+        saturation_mode: Destination saturation — "on" (1) clamps out-of-range
+              results to the destination range, "off" (0) selects the target's
+              non-saturating conversion. ``None`` selects
+              ``DEFAULT_SATURATION_MODE`` ("on"). Only a deviation from that
+              default is recorded on the call, so requesting "on" leaves the
+              kwarg absent — codegen reads the default through and still emits an
+              explicit ``satmode``.
 
     Returns:
         Call expression for type casting
@@ -1704,6 +1714,9 @@ def cast(
         "target_type": target_type,
         "mode": mode_val,
     }
+    deviation = resolve_saturation_deviation(saturation_mode)
+    if deviation is not None:
+        kwargs["saturation_mode"] = deviation
 
     return _ir_core.create_op_call("tensor.cast", args, kwargs, actual_span)
 

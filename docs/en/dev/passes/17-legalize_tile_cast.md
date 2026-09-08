@@ -19,6 +19,61 @@ Unreachable pairs hard-fail with src/dst/arch in the diagnostic.
 
 **Requires / Produces / Invalidates**: none (empty `PassProperties`).
 
+## Destination saturation
+
+`pl.cast`, `pl.tensor.cast` and `pl.tile.cast` take a keyword-only
+`saturation_mode`, spelled `"on"` / `"off"` or `1` / `0`:
+
+```python
+quantized = pl.cast(rounded_fp16, pl.INT8, mode="trunc", saturation_mode="on")
+```
+
+`"on"` clamps a rounded value that falls outside the destination range to that
+range. `"off"` selects the target's non-saturating conversion, whose overflow
+and non-finite behaviour is architecture-defined. A `Scalar` input rejects the
+option.
+
+**`"on"` is the default.** Clamping is the safer of the two to get by accident,
+and on A2/A3 it is also the one the assembler converts natively rather than
+emulating with a chunked vector sequence — so the default is both the safer and
+the faster lowering. Pass `"off"` where wrapping is the kernel's contract.
+
+The IR records only a *deviation* from that default: a cast that wants `"on"`
+carries no `saturation_mode` kwarg, which is the same shape a pass-synthesized
+cast has. That is what keeps a printed cast re-parsing to structurally equal IR —
+stamping the default would make two forms differ with no semantic difference
+between them. Codegen reads the default through, so the emitted `pto.tcvt` always
+carries an explicit `satmode` either way and a reader of the MLIR never has to
+know what the assembler would have picked.
+
+The two modes agree only on values the destination can already represent, so this
+default is a behavioural choice, not a no-op: a kernel that relied on wrapping
+must now say `"off"`.
+
+**Legalized chains: the request rides the final hop.** Saturation names the
+*destination* range, and only the last hop reaches the destination dtype;
+stamping an intermediate would clamp to a range the author never named.
+Intermediates therefore keep exactly their previous behaviour — the original
+rounding mode and nothing else.
+
+Deferring costs nothing, because the BFS above already refuses any intermediate
+that narrows relative to the destination: every value the destination *can*
+represent reaches the final hop exactly, so `"on"` and `"off"` still agree there.
+A value the destination cannot represent is out of range at both ends of the
+chain — an intermediate float may overflow it to an infinity, but with its sign
+intact, so it clamps to the same endpoint a hypothetical single-step conversion
+would have picked. Non-finite inputs remain outside what either mode defines.
+
+The same rule carries an explicit `pl.tile.cast(..., tmp=...)` scratch operand
+onto the final hop, which is the narrowing one.
+
+**A2/A3 scratch.** `InitMemRef` synthesises a scratch tile only for the
+*non-saturating* narrowing `pto.tcvt`, whose PTOAS lowering emulates the
+target's overflow behaviour with a chunked vector sequence. Saturating selects
+the native conversion, which reads no scratch — so with `"on"` as the default,
+only a cast that explicitly opted out allocates a tile at all. A caller-supplied
+`tmp` is never dropped.
+
 ## Native casts vs legalized chains
 
 `pl.cast` does not always compile to one instruction. Whether a given

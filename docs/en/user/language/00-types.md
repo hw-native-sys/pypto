@@ -295,6 +295,14 @@ behaviour, not a defect — see
 [LegalizeTileCast](../../dev/passes/17-legalize_tile_cast.md) for the per-architecture
 tables.
 
+`pl.cast` also takes a keyword-only `saturation_mode` (`"on"` / `"off"`, or `1` / `0`) for
+`Tensor` and `Tile` inputs. `"on"` clamps an out-of-range result to the destination range;
+`"off"` keeps the target's non-saturating conversion, whose overflow behaviour is
+architecture-defined. **`"on"` is the default** — clamping is the safer thing to get by
+accident, and on A2/A3 it is also the conversion the hardware performs natively. Pass
+`"off"` where wrapping is the kernel's contract. A multi-hop cast applies the mode to its
+final hop, which is the one that reaches the dtype you named.
+
 ## See Also
 
 - [Functions and Programs](01-functions.md) — where these annotations appear, and what a signature means to the caller.

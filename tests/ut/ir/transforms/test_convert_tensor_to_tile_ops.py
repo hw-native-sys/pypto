@@ -7276,5 +7276,55 @@ class TestCalleeDirectionPropagationThroughCarries:
         assert directions["dst"] == ir.ParamDirection.Out
 
 
+class TestTensorCastConversion:
+    def test_saturation_mode_survives_tensor_to_tile_lowering(self):
+        """tensor.cast -> tile.cast must carry an opt-out across.
+
+        Losing it here would silently re-saturate a cast whose author asked for
+        wrapping, with no diagnostic anywhere downstream.
+        """
+        saturation_mode = "off"
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, x: pl.Tensor[[8, 256], pl.FP16]) -> pl.Tensor[[8, 256], pl.INT8]:
+                q: pl.Tensor[[8, 256], pl.INT8] = pl.cast(
+                    x, pl.INT8, mode="trunc", saturation_mode=saturation_mode
+                )
+                return q
+
+            @pl.function
+            def main(self, x: pl.Tensor[[8, 256], pl.FP16]) -> pl.Tensor[[8, 256], pl.INT8]:
+                q: pl.Tensor[[8, 256], pl.INT8] = self.main_incore_0(x)
+                return q
+
+        after = passes.convert_tensor_to_tile_ops()(Before)
+        cast_calls = _find_calls_to(_require_function(after, "main_incore_0"), "tile.cast")
+        assert len(cast_calls) == 1
+        assert cast_calls[0].kwargs["saturation_mode"] == 0
+        assert cast_calls[0].kwargs["mode"] == 5
+
+    def test_default_cast_gains_no_saturation_kwarg(self):
+        """Conversion must not stamp the default onto a cast that left it implicit."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, x: pl.Tensor[[8, 256], pl.FP16]) -> pl.Tensor[[8, 256], pl.INT8]:
+                q: pl.Tensor[[8, 256], pl.INT8] = pl.cast(x, pl.INT8, mode="trunc")
+                return q
+
+            @pl.function
+            def main(self, x: pl.Tensor[[8, 256], pl.FP16]) -> pl.Tensor[[8, 256], pl.INT8]:
+                q: pl.Tensor[[8, 256], pl.INT8] = self.main_incore_0(x)
+                return q
+
+        after = passes.convert_tensor_to_tile_ops()(Before)
+        cast_calls = _find_calls_to(_require_function(after, "main_incore_0"), "tile.cast")
+        assert len(cast_calls) == 1
+        assert "saturation_mode" not in cast_calls[0].kwargs
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
