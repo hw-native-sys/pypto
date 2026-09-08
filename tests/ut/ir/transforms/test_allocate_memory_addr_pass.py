@@ -551,7 +551,7 @@ def test_allocated_memory_addr_verifier_errors_when_vec_exceeds_safe_cap():
             set_backend_type(prior_type)
 
 
-def _overflowing_mat_program(buffer_name):
+def _overflowing_mat_program(buffer_name, reserve_size=524288):
     """AIC function reserving 512KB under ``buffer_name`` plus one 8192-byte Mat
     tile above it — Mat high-water 532480 > the 524288 limit.
 
@@ -574,7 +574,7 @@ def _overflowing_mat_program(buffer_name):
             input_a: pl.Tensor[[64, 64], pl.BF16],
             out_0: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            _ = pl.reserve_buffer(name=buffer_name, size=524288)
+            _ = pl.reserve_buffer(name=buffer_name, size=reserve_size)
             tile_a: pl.Tile[[64, 64], pl.BF16] = pl.load(
                 input_a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat
             )
@@ -623,6 +623,20 @@ def test_overflow_diagnostic_attributes_the_cross_core_pipe_ring(ascend_backend)
     # explicitly based buffer or an alignment gap makes the floor exceed the
     # summed sizes, and the floor is what this overflow was charged.
     assert "The first 524288 bytes of that space are reserved by system.reserve_buffer" in message
+    assert "cross-core pipe ring" in message
+    assert "pl.cross_core_slot(slot_num=N)" in message
+
+
+def test_overflowing_reserve_is_reported_as_capacity_error(ascend_backend):
+    """A reserve prefix larger than the pool is a user allocation error.
+
+    DSA-RP considers a reserved range beyond the pool capacity an invalid input.
+    AllocateMemoryAddr must diagnose the capacity overflow before invoking the
+    solver, preserving the actionable reserve-buffer attribution.
+    """
+    message = _overflow_message(_overflowing_mat_program("kernel_v2c_slot_buffer", reserve_size=1048576))
+    assert re.search(r"Mat buffer usage \(1056768 bytes\) exceeds platform limit \(524288 bytes\)", message)
+    assert "The first 1048576 bytes of that space are reserved by system.reserve_buffer" in message
     assert "cross-core pipe ring" in message
     assert "pl.cross_core_slot(slot_num=N)" in message
 

@@ -558,6 +558,15 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithDsaRP(
       func, allocation_plan, policy, reserve_resolution.reserved_end_by_space, pool_caps, active_backend);
   if (prepared.strict_problem.buffers.empty()) return {};
 
+  // Reject capacity failures that are provable without searching before they
+  // reach the solver. In particular, a reserve_buffer prefix may itself exceed
+  // the pool capacity, which is an invalid DSA problem but a user-facing
+  // allocation error. Keeping this check at the compiler boundary also
+  // preserves the reserve-buffer attribution in the diagnostic.
+  const std::string obvious_overflow =
+      ObviousDsaCapacityOverflow(prepared.strict_problem, reserve_resolution, func->name_);
+  CHECK_SPAN(obvious_overflow.empty(), func->span_) << obvious_overflow;
+
   const dsa::CanonicalGreedySolver solver;
   dsa::DsaProblem solved_problem = prepared.strict_problem;
   dsa::DsaResult result = solver.Solve(solved_problem);
@@ -569,13 +578,8 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithDsaRP(
   INTERNAL_CHECK_SPAN(result.status != dsa::SolveStatus::kInvalidProblem, func->span_)
       << "DSA-RP constructed or produced invalid state for '" << func->name_ << "'"
       << (result.diagnostics.empty() ? std::string() : ": " + result.diagnostics.front());
-  const std::string obvious_overflow =
-      result.status == dsa::SolveStatus::kNoFit
-          ? ObviousDsaCapacityOverflow(solved_problem, reserve_resolution, func->name_)
-          : std::string();
   CHECK_SPAN(result.status == dsa::SolveStatus::kFeasible, func->span_)
       << "DSA-RP could not find a placement for '" << func->name_ << "' within the on-chip memory capacities"
-      << (obvious_overflow.empty() ? std::string() : ": " + obvious_overflow)
       << (result.diagnostics.empty() ? std::string() : ": " + result.diagnostics.front());
   INTERNAL_CHECK_SPAN(result.solution.has_value(), func->span_)
       << "DSA-RP reported a feasible result without a placement";
