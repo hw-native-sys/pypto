@@ -32,8 +32,11 @@ namespace {
 
 // The explicit DSA-RP input can contain Theta(B^2) lifetime conflicts and
 // penalty relations for B buffers. BuildSearchSpace materializes that graph in
-// O(B^2 + E) time; this is an output-sensitive exception used only by the
-// opt-in DSA-RP planner, not an implicit nested scan over arbitrary IR nodes.
+// O(B^2 + E) time. The fixed number of canonical placement orders processes
+// O(B) candidate boundaries for each buffer, for O(B^2 log B) total solver
+// time and O(B^2) space. This documented exception belongs to the default
+// DSA-RP planner and is bounded to one InCore function; it is not an implicit
+// nested scan over arbitrary IR nodes or an unbounded search.
 
 using NodePair = std::pair<size_t, size_t>;
 

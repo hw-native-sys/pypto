@@ -47,7 +47,8 @@ alloc_pass = passes.allocate_memory_addr()
 program_with_addrs = alloc_pass(program)
 ```
 
-编译时显式选择 DSA-RP：
+`DSA_RP` 是默认 planner。当编译不能继承外层 `PassContext` 的策略时，
+可以显式选择它：
 
 ```python
 from pypto.ir import compile
@@ -88,9 +89,12 @@ buffer，带有字节大小、对齐和保守的半开生命周期。问题包�
 有歧义的 route 会被跳过。recognizer 只消费这些 backend 元数据，不在 IR
 transform 中重复维护架构 route 表，也不调用或模拟 ptoas 的同步 pass。
 
-显式 pair 模型是 output-sensitive 的：对于 `B` 个可复用 buffer，一个 kernel 最坏可包含
-`Theta(B^2)` 个生命周期冲突或候选 penalty pair，因此 recognizer 与 solver graph 构造
-最坏为二次复杂度。该复杂度例外仅限 opt-in 的 `DSA_RP` planner；默认 planner 不变。
+显式 pair 模型是 output-sensitive 的：对于一个 InCore 函数内的 `B` 个可复用 buffer，
+一个 kernel 最坏可包含 `Theta(B^2)` 个生命周期冲突或候选 penalty pair。因此识别与
+graph 构造需要 `O(N log N + B^2)` 时间，固定数量的 canonical 放置顺序需要
+`O(B^2 log B)` 时间和 `O(B^2)` 空间。这是默认 `DSA_RP` planner 对通用 pass
+复杂度策略的已记录例外；其范围限于单个函数，并使用固定数量的 restart，而非无界搜索。
+显式选择的旧版 `PYPTO` planner 仍使用顺序分配路径。
 
 Canonical greedy 尝试偏移 `0`、预留范围末尾，以及已放置硬/软邻居的对齐顶部。
 每个 buffer 先选择增量惩罚最低的候选，再选最低地址。它评估多种确定性顺序，并保留

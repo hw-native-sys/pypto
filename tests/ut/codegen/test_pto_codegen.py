@@ -26,7 +26,7 @@ import subprocess
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
-from pypto import DataType, arith, backend, codegen, ir
+from pypto import DataType, arith, backend, codegen, ir, passes
 from pypto.backend import BackendType, pto_backend
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.backend.pto_backend import (
@@ -2440,6 +2440,7 @@ AICORE void split_vec() {
             "unused grouped pto",
             str(tmp_path),
             skip_ptoas=False,
+            memory_planner=passes.MemoryPlanner.DSA_RP,
         )
 
         split_cube_wrapper = next(

@@ -208,6 +208,7 @@ The test framework provides extensive configuration through pytest command-line 
 | `--platform` | `a2a3` | Comma-separated allowlist of target platforms. Each runtime test case is parametrized over `a2a3`, `a5`, `a2a3sim`, `a5sim`; only variants whose id appears here run. |
 | `--device` | `0` | Device ID for hardware tests (0, 1, 2, ...) |
 | `--strategy` | `Default` | PyPTO optimization strategy (`Default` is the only supported value) |
+| `--memory-planner` | `default` | On-chip memory planner: `default` (currently `DSA_RP`), `pypto`, `dsa-rp`, or `ptoas` |
 | `--save-kernels` | `False` | Save generated kernels and artifacts to disk |
 | `--kernels-dir` | `build_output/{testName}_{timestamp}/` | Custom output directory for saved kernels |
 | `--dump-passes` | `False` | Dump intermediate IR after each compiler pass |
