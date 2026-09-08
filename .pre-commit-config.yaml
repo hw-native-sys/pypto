@@ -58,12 +58,13 @@ repos:
           language: system
           files: ^(python/pypto/|python/bindings/|src/|include/).*\.(py|cpp|h)$
 
-        # The same script with no arguments, which additionally reports registry
-        # exceptions that no source uses -- a question only a whole-tree sweep can
-        # answer. Gated on the registry itself, the commit that can introduce one.
+        # The half of the same script that no file-scoped run can answer: whether
+        # some registry exception is now unused. An exception names one exact file,
+        # so this reads only those, never the tree. Gated on the registry itself,
+        # the commit that can introduce an unused one.
         - id: check-environment-registry
           name: check-environment-registry
-          entry: python tests/lint/check_environment_inputs.py
+          entry: python tests/lint/check_environment_inputs.py --unused-exceptions-only
           language: system
           pass_filenames: false
           files: ^(python/pypto/_environment\.json|tests/lint/check_environment_inputs\.py)$

@@ -300,6 +300,44 @@ def selected_sources(root: Path, selected: Iterable[Path]) -> list[Path]:
     return sorted(set(keep))
 
 
+def _reads(path: Path) -> list[EnvironmentRead]:
+    """Every environment read in *path*, parsed per its language."""
+    text = path.read_text()
+    return python_reads(text) if path.suffix == ".py" else cpp_reads(text)
+
+
+def _exception_set(registry: dict[str, Any]) -> set[tuple[str, str]]:
+    return {(item["path"], item["function"]) for item in registry.get("dynamic_reads", [])}
+
+
+def _unused_report(exceptions: set[tuple[str, str]], used: set[tuple[str, str]]) -> list[str]:
+    return [
+        f"Unused dynamic-read exception: {path}:{function}" for path, function in sorted(exceptions - used)
+    ]
+
+
+def unused_exceptions(root: Path, registry: dict[str, Any]) -> list[str]:
+    """Report dynamic-read exceptions that no source uses.
+
+    ``check_registry`` rejects a wildcard or absolute exception path, so an exception names
+    one exact file and only *that* file can mark it used. Reading just those files answers
+    the question exactly as a whole-tree sweep would, without re-reading the ~526 sources
+    the file-scoped audit has already read.
+
+    ``selected_sources`` applies the same root and suffix filter :func:`all_sources` does,
+    so an exception naming a path outside the audited scope stays unused here, as before.
+    """
+    check_registry(registry)
+    exceptions = _exception_set(registry)
+    used = set()
+    for path in selected_sources(root, [Path(relative) for relative, _ in exceptions]):
+        relative = path.relative_to(root).as_posix()
+        for read in _reads(path):
+            if read.variable is None and (relative, read.function) in exceptions:
+                used.add((relative, read.function))
+    return _unused_report(exceptions, used)
+
+
 def check_tree(root: Path, registry: dict[str, Any], files: list[Path] | None = None) -> list[str]:
     """Report every unclassified read in PyPTO Python/C++ production sources.
 
@@ -307,28 +345,25 @@ def check_tree(root: Path, registry: dict[str, Any], files: list[Path] | None = 
         root: Repository root.
         registry: Parsed ``_environment.json``.
         files: Sources to audit. ``None`` means the whole tree, which additionally reports
-            dynamic-read exceptions that no source uses -- a question only a full sweep can
-            answer, since a file-scoped run cannot tell "unused" from "used elsewhere".
+            unused dynamic-read exceptions -- free there, since the sweep already visits
+            every file that could mark one used. A file-scoped run cannot answer that
+            question; :func:`unused_exceptions` answers it on its own.
     """
     check_registry(registry)
-    exceptions = {(item["path"], item["function"]) for item in registry.get("dynamic_reads", [])}
+    exceptions = _exception_set(registry)
     whole_tree = files is None
     used = set()
     errors = []
     for path in all_sources(root) if whole_tree else files or []:
         relative = path.relative_to(root).as_posix()
-        reads = python_reads(path.read_text()) if path.suffix == ".py" else cpp_reads(path.read_text())
-        for read in reads:
+        for read in _reads(path):
             if read.variable is None and (relative, read.function) in exceptions:
                 used.add((relative, read.function))
             elif read.variable not in registry["variables"]:
                 name = read.variable or f"dynamic read in {read.function}"
                 errors.append(f"{relative}:{read.line}: unclassified environment input: {name}")
     if whole_tree:
-        errors.extend(
-            f"Unused dynamic-read exception: {path}:{function}"
-            for path, function in sorted(exceptions - used)
-        )
+        errors.extend(_unused_report(exceptions, used))
     return errors
 
 
@@ -340,11 +375,21 @@ def main() -> int:
         type=Path,
         help="Sources to audit (default: the whole tree, which also reports unused exceptions)",
     )
+    parser.add_argument(
+        "--unused-exceptions-only",
+        action="store_true",
+        help="Only report unused dynamic-read exceptions, reading just the files they name",
+    )
     args = parser.parse_args()
+    if args.unused_exceptions_only and args.files:
+        parser.error("--unused-exceptions-only takes no file arguments")
 
     registry = json.loads((_ROOT / "python/pypto/_environment.json").read_text())
-    files = selected_sources(_ROOT, args.files) if args.files else None
-    errors = check_tree(_ROOT, registry, files)
+    if args.unused_exceptions_only:
+        errors = unused_exceptions(_ROOT, registry)
+    else:
+        files = selected_sources(_ROOT, args.files) if args.files else None
+        errors = check_tree(_ROOT, registry, files)
     for error in errors:
         print(error)
     return int(bool(errors))

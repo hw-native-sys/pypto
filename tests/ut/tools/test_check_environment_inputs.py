@@ -204,6 +204,75 @@ def test_stale_dynamic_exceptions_fail(lint, tmp_path):
     ]
 
 
+def _write(tmp_path, files):
+    for relative, text in files.items():
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    return tmp_path
+
+
+# A source that uses the exception, one that does not, and one under a root the audit
+# does not cover. Each registry below is checked both ways; see the test's docstring.
+_SOURCES = {
+    "python/pypto/compiler.py": "import os\ndef restore(name):\n    os.getenv(name)\n",
+    "python/pypto/other.py": 'import os\nos.getenv("PYPTO_KNOWN")\n',
+    "tests/lint/helper.py": "import os\ndef restore(name):\n    os.getenv(name)\n",
+}
+
+
+@pytest.mark.parametrize(
+    "path, function",
+    [
+        # Used: the named file really does hold that dynamic read.
+        ("python/pypto/compiler.py", "restore"),
+        # Unused: right file, wrong function.
+        ("python/pypto/compiler.py", "absent"),
+        # Unused: the file does not exist.
+        ("python/pypto/removed.py", "restore"),
+        # Unused: the read exists but sits outside the audited roots, so a whole-tree
+        # sweep never sees it either.
+        ("tests/lint/helper.py", "restore"),
+    ],
+)
+def test_unused_exceptions_agrees_with_the_whole_tree_sweep(lint, tmp_path, path, function):
+    """The cheap path must reach the verdict the sweep it replaces would reach.
+
+    ``unused_exceptions`` reads only the files the exceptions name, on the grounds that
+    ``check_registry`` forbids a wildcard or absolute path so no other file can mark one
+    used. That reasoning is what this pins: for each shape of exception, its answer must
+    equal the unused-exception lines of a full ``check_tree`` sweep.
+    """
+    root = _write(tmp_path, _SOURCES)
+    registry = _registry()
+    registry["dynamic_reads"] = [{"path": path, "function": function, "reason": "Test."}]
+
+    swept = [e for e in lint.check_tree(root, registry) if e.startswith("Unused dynamic-read")]
+    assert lint.unused_exceptions(root, registry) == swept
+
+
+def test_unused_exceptions_does_not_read_files_no_exception_names(lint, tmp_path):
+    """The performance property, asserted rather than assumed.
+
+    An unparseable source makes the whole-tree sweep raise, because it reads every file.
+    ``unused_exceptions`` must not, which is only true if it never opens that file.
+    """
+    root = _write(tmp_path, {**_SOURCES, "python/pypto/broken.py": "def (((\n"})
+    registry = _registry()
+    registry["dynamic_reads"] = [
+        {"path": "python/pypto/compiler.py", "function": "restore", "reason": "Test."}
+    ]
+
+    with pytest.raises(SyntaxError):
+        lint.check_tree(root, registry)
+    assert lint.unused_exceptions(root, registry) == []
+
+
+def test_unused_exceptions_reports_nothing_when_the_registry_has_none(lint, tmp_path):
+    root = _write(tmp_path, _SOURCES)
+    assert lint.unused_exceptions(root, _registry()) == []
+
+
 @pytest.mark.parametrize("category, reason", [("unknown", "Some input"), ("semantic", "")])
 def test_registry_requires_a_supported_category_and_reason(lint, category, reason):
     registry = _registry()
