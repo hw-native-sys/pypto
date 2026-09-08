@@ -3022,7 +3022,10 @@ static std::unordered_map<const Var*, std::string> CollectDynVarMapping(const Pr
   };
 
   std::function<void(const TypePtr&)> collect_from_type = [&](const TypePtr& type) {
-    if (auto tensor_type = As<TensorType>(type)) {
+    // AsTensorTypeLike, not As<TensorType>: DistributedTensorType has its own
+    // ObjectKind, so the exact-match As<TensorType> misses it and the symbols a
+    // pld.DistributedTensor annotation declares never reach dyn_var_rename_map_.
+    if (auto tensor_type = AsTensorTypeLike(type)) {
       for (const auto& dim : tensor_type->shape_) {
         collect_vars_from_expr(dim);
       }

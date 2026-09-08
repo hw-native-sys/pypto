@@ -12,6 +12,7 @@
 import ast
 
 import pypto.language as pl
+import pypto.language.distributed as pld
 import pytest
 from pypto import DataType, ir, passes
 from pypto.ir.printer import python_print
@@ -367,6 +368,28 @@ class TestDynVarAndSSARename:
 
         src = Prog.as_python()
         assert 'N = pl.dynamic("N")' in src
+
+    def test_dyn_var_declared_by_distributed_tensor_param(self):
+        """A symbol declared only by a pld.DistributedTensor annotation still gets pl.dynamic().
+
+        DistributedTensorType subclasses TensorType but carries its own ObjectKind, so the
+        printer's exact-match As<TensorType> used to miss it: the symbol never reached
+        dyn_var_rename_map_, printed as ``N__FREE_VAR`` in both the signature and the body,
+        and the program failed to re-parse.
+        """
+        N = pl.dynamic("N")
+
+        @pl.program
+        class Prog:
+            @pl.function
+            def view(self, arg: pld.DistributedTensor[[N, 64], pl.FP32]):
+                return pl.tensor.slice(arg, [N, 64], [0, 0], valid_shape=[N - 1, 64])
+
+        src = Prog.as_python()
+        assert 'N = pl.dynamic("N")' in src
+        assert "__FREE_VAR" not in src
+        # The declaration makes the printed program valid standalone Python again.
+        pl.parse_program(src)
 
     def test_dyn_var_same_name_different_identity_disambiguated(self):
         """Two distinct Var objects with same name_hint_ get disambiguated (issue #618)."""
