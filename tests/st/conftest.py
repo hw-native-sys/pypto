@@ -896,13 +896,17 @@ def marker_skip_reason(item: pytest.Item) -> str | None:
     Raises:
         pytest.UsageError: ``multi_card`` carries no usable device count.
     """
-    for name, flag, option in (
-        ("swimlane", _resolve_swimlane_option(item.config), "--enable-chip-swimlane"),
-        ("dump_args", item.config.getoption("--dump-args"), "--dump-args"),
+    # The flag is read only once its marker is present. Reading both eagerly --
+    # as a tuple of (name, flag, option) triples does -- asks every item in the
+    # session for options it has no reason to care about, and fails outright
+    # against a config that only exposes the ones its own test needs.
+    for name, option, read_flag in (
+        ("swimlane", "--enable-chip-swimlane", lambda: _resolve_swimlane_option(item.config)),
+        ("dump_args", "--dump-args", lambda: item.config.getoption("--dump-args")),
     ):
         if not item.get_closest_marker(name):
             continue
-        if not flag:
+        if not read_flag():
             return f"pass {option} to collect the artifact this test asserts on"
         if item.config.getoption("--codegen-only"):
             return "--codegen-only skips device execution, so no DFX artifact is written"
