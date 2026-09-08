@@ -1250,6 +1250,11 @@ def _collect_test_case_from_item(
             except Exception:  # noqa: BLE001 — best-effort; unresolved locals just stay unknown
                 continue
 
+    # Every constructor in the body is filed, not just the first: a test that
+    # runs two distinct cases needs a compile future for both, and returning
+    # early would hand the second to the serial inline path while reporting
+    # ``True`` -- so the miss would not even reach the undiscovered inventory.
+    found = False
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -1293,8 +1298,8 @@ def _collect_test_case_from_item(
             _cache_key(instance, instance.get_platform() or platform, session_memory_planner),
             instance,
         )
-        return True
-    return False
+        found = True
+    return found
 
 
 def _inline_case_reason(item: pytest.Item) -> str | None:

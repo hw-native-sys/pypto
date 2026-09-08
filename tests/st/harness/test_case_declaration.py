@@ -672,6 +672,25 @@ class TestCustomCompare:
             shutil.rmtree(empty, ignore_errors=True)
 
 
+class _TwoNameCase(AbsLegacyCase):
+    """A legacy case whose name is an argument, so one body can build two."""
+
+    __test__ = False
+
+    def __init__(self, name: str) -> None:
+        super().__init__()
+        self._name = name
+
+    def get_name(self) -> str:
+        return self._name
+
+
+def _body_that_runs_two_distinct_cases(test_runner):
+    """Stand-in for a test body that runs more than one case."""
+    test_runner.run(_TwoNameCase("first_of_two"))
+    test_runner.run(_TwoNameCase("second_of_two"))
+
+
 def _body_that_skips_on_a_missing_optional_dep():
     """Stand-in for a unit-test body guarding an optional dependency.
 
@@ -731,6 +750,23 @@ class TestCollectionIsNeverAbortedByADiscoveredCall:
         conf._collect_test_case_from_item(item, seen, None, "a2a3")
 
         assert seen == {}, "no PTOTestCase in that body — and no crash reaching that conclusion"
+
+    def test_every_constructor_in_a_body_is_filed(self):
+        """Not just the first. A body running two cases needs a future for both.
+
+        Returning after the first left the second to the serial inline path
+        *and* reported ``True``, so the undiscovered inventory never named it --
+        the miss was invisible to the very guard meant to catch it.
+        """
+        conf = self._conftest()
+        seen: dict[str, Any] = {}
+
+        found = conf._collect_test_case_from_item(
+            self._item(_body_that_runs_two_distinct_cases), seen, None, "a2a3"
+        )
+
+        assert found is True
+        assert sorted(c.get_name() for c in seen.values()) == ["first_of_two", "second_of_two"]
 
     def test_only_items_under_tests_st_are_walked(self):
         """A session hook fires for every item; only ST bodies are ours to parse."""
