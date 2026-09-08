@@ -77,6 +77,30 @@ class LoopCarriedAdd:
 
 
 @pl.program
+class ConsecutiveLoopCarriedAdd:
+    """Two update loops whose return values share one carried allocation."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[64, 64], pl.FP32],
+        b: pl.Tensor[[64, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+    ) -> pl.Tensor[[64, 64], pl.FP32]:
+        seed: pl.Tile[[64, 64], pl.FP32] = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Vec)
+        for _i, (first_i,) in pl.range(2, init_values=(seed,)):
+            first_next: pl.Tile[[64, 64], pl.FP32] = pl.add(first_i, first_i)
+            first_result = pl.yield_(first_next)
+        for _j, (second_i,) in pl.range(2, init_values=(first_result,)):
+            second_next: pl.Tile[[64, 64], pl.FP32] = pl.add(second_i, second_i)
+            second_result = pl.yield_(second_next)
+        residual: pl.Tile[[64, 64], pl.FP32] = pl.load(b, [0, 0], [64, 64], target_memory=pl.MemorySpace.Vec)
+        final: pl.Tile[[64, 64], pl.FP32] = pl.add(second_result, residual)
+        out: pl.Tensor[[64, 64], pl.FP32] = pl.store(final, [0, 0], output)
+        return out
+
+
+@pl.program
 class StationaryMatmulLoop:
     """Tensor-level QK loop whose LHS should become one resident Mat panel."""
 
@@ -314,6 +338,21 @@ def test_dsa_rp_loop_carry_is_in_place_with_resolved_address():
         handle in addr_by_handle and addr_by_handle[handle] == addr_by_handle[out_handle]
         for handle in in_handles
     ), f"DSA_RP must place the loop-carried input and output at one physical address:\n{mlir}"
+
+
+def test_dsa_rp_consecutive_loop_return_keeps_carried_buffer_live():
+    """A later load must not overwrite a carry returned through two loops."""
+
+    optimized, _ = _run_pipeline(passes.MemoryPlanner.DSA_RP, ConsecutiveLoopCarriedAdd)
+    mlir = _codegen(optimized, emit_tile_addr=True)
+    alloc_lines = [line for line in mlir.splitlines() if "pto.alloc_tile" in line]
+    seed_alloc = next(line for line in alloc_lines if "%seed" in line)
+    residual_alloc = next(line for line in alloc_lines if "%residual" in line)
+    seed_addr = seed_alloc.split("addr =")[1].split()[0]
+    residual_addr = residual_alloc.split("addr =")[1].split()[0]
+    assert seed_addr != residual_addr, (
+        f"the load after the second loop must not clobber its still-live carried result:\n{mlir}"
+    )
 
 
 @pytest.mark.parametrize(
