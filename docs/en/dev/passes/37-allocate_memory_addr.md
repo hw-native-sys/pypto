@@ -87,7 +87,11 @@ and a conservative half-open lifetime. The problem has:
   Author-declared `pl.MemRef` allocations
   are also hard-separated from every other allocation in their memory space.
   A multi-slot declaration is placed as one buffer covering its full declared
-  extent, while each member retains its constant or runtime-selected slot offset;
+  extent, while each member retains its constant or runtime-selected slot offset.
+  For operations explicitly registered as supporting functional in-place
+  execution, the final input read may share the operation boundary with the
+  output write, but the two physical ranges must be either identical or
+  disjoint; staggered partial overlap remains forbidden;
 - **soft unit-weight pairs** for lifetime-compatible physical reuse that the
   built-in recognizer identifies as a cross-pipe WAR or WAW handoff; and
 - a hard arena-capacity bound. Capacity and correctness are never traded for a
@@ -107,32 +111,36 @@ The explicit pair model is output-sensitive. With `B` reusable buffers in one
 InCore function, a kernel can contain `Theta(B^2)` lifetime conflicts or
 candidate penalty pairs. Recognition and graph construction therefore take
 `O(N log N + B^2)` time, while the fixed set of canonical placement orders
-takes `O(B^2 log B)` time and `O(B^2)` space. This is a documented exception to
-the general pass-complexity policy for the default `DSA_RP` planner; it is
-function-local and uses a fixed number of restarts rather than an unbounded
-search. The explicit legacy `PYPTO` planner retains its sequential allocation
-path.
+takes `O(B^2 log B)` time and `O(B^2)` space. If every constructive order
+fails, a feasibility-only exact fallback explores aligned placements up to a
+fixed 100,000-candidate work budget. This is a documented exception to the
+general pass-complexity policy for the default `DSA_RP` planner; it is
+function-local, uses a fixed number of constructive restarts, and bounds the
+otherwise exponential fallback explicitly. The explicit legacy `PYPTO`
+planner retains its sequential allocation path.
 
 Canonical greedy tries offset zero, reserved-range ends, and aligned tops of
 already placed hard or soft neighbors. For each buffer it chooses the candidate
 with the lowest incremental penalty, then the lowest address. It evaluates
 several deterministic orders and retains a feasible penalty-blind first-fit
 placement as an incumbent. Every selected placement is checked by an
-independent validator before writeback.
+independent validator before writeback. If no constructive order finds a
+placement, the exact fallback either returns a feasible witness, proves that no
+placement exists, or reports that its fixed search budget was exhausted. Budget
+exhaustion is diagnosed separately and is not reported as insufficient memory.
 
 Pipeline intent uses a strict-then-soft policy:
 
-1. Run the bounded canonical-greedy search with every requested cross-stage
-   pipeline separation hard.
-2. If that search finds no fitting placement—this is not a proof that the
-   strict mathematical problem is infeasible—relax only pairs whose sole hard
-   reason is pipeline intent, add unit reuse penalties for them, and search
-   again.
+1. Run canonical greedy and its bounded exact fallback with every requested
+   cross-stage pipeline separation hard.
+2. If the strict problem is proven not to fit, or if the exact fallback reaches
+   its work budget, relax only pairs whose sole hard reason is pipeline intent,
+   add unit reuse penalties for them, and search again.
 3. If the selected placement overlaps a relaxed pair, emit the
    `PH-DSA-001` performance diagnostic. All semantic and target-hazard
-   separations remain hard. If the relaxed bounded search also finds no fit,
-   report a compile-time OOM/no-fit error; this remains a search failure, not
-   an infeasibility certificate.
+   separations remain hard. If the relaxed exact search proves no fit, report a
+   compile-time OOM/no-fit error. If it reaches the fixed work budget first,
+   report search exhaustion without claiming that capacity is insufficient.
 
 > **Toolchain requirement:** `DSA_RP` relies on ptoas InsertSync recognizing
 > physical range overlap across distinct allocation roots. Use a modern ptoas
@@ -241,7 +249,9 @@ passes.def("allocate_memory_addr", &pass::AllocateMemoryAddr,
 - Tests DSA-RP geometry, capacity, hard constraints, penalty activation,
   deterministic canonical-greedy placement, and independent validation
 - Tests exact pre-solver recognized-edge sets as well as their final placement geometry
-- Characterizes that canonical-greedy `kNoFit` is a bounded-search result, not an infeasibility proof
+- Tests the exact fallback's feasible witness, proven-no-fit, and bounded
+  search-exhaustion outcomes
+- Tests exact-or-disjoint placement for optional in-place execution
 
 ## Allocation Policy
 

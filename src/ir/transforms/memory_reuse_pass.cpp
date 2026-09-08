@@ -1831,30 +1831,33 @@ class LifetimeAnalyzer : public IRVisitor {
     loop_scopes_.push_back({loop_start, loop_end});
   }
 
-  /// Resolve a loop carry's init to the variable that actually owns the buffer.
+  /// Resolve a loop carry or return value to the tracked allocation root.
   ///
   /// A nested loop seeds its carry from the *enclosing* loop's IterArg, and an
   /// IterArg is an alias of its own init rather than a definition in its own
   /// right -- like return_vars, iter-args are deliberately absent from
   /// `ordered_defs_` / `var_def_order_`, so they carry no lifetime of their own.
-  /// Walking the carry chain to the first non-IterArg therefore lands on the
-  /// AssignStmt-defined tile whose buffer the whole loop nest shares, which is
-  /// the variable a use of any return_var in that nest has to keep alive.
+  /// Walking IterArg init links and previously registered return-var links lands
+  /// on the AssignStmt-defined tile whose buffer the loop chain shares. This is
+  /// needed both for nested loops and for consecutive update loops.
   ///
-  /// Returns nullptr when the chain does not end at a tracked carrier; the
-  /// caller then records no mapping, exactly as before.
-  [[nodiscard]] VarPtr ResolveCarryInitCarrier(const ExprPtr& init_value) const {
-    auto var = AsVarLike(init_value);
-    // An init is always defined before its own loop, so the chain is acyclic in
-    // well-formed IR; the visited set bounds it anyway rather than hanging.
+  [[nodiscard]] std::optional<VarPtr> ResolveTrackedAllocationRoot(const ExprPtr& value) const {
+    auto var = AsVarLike(value);
     std::set<const Var*> seen;
-    while (var) {
-      auto iter_arg = As<IterArg>(var);
-      if (!iter_arg) return var;
-      if (!seen.insert(var.get()).second) return nullptr;
-      var = AsVarLike(iter_arg->initValue_);
+    while (var && var_def_order_.count(var) == 0) {
+      INTERNAL_CHECK_SPAN(seen.insert(var.get()).second, var->span_)
+          << "Internal error: cycle in loop return-variable allocation provenance at '" << var->name_hint_
+          << "'";
+      if (auto iter_arg = As<IterArg>(var)) {
+        var = AsVarLike(iter_arg->initValue_);
+        continue;
+      }
+      const auto mapped = return_var_to_init_var_.find(var);
+      if (mapped == return_var_to_init_var_.end()) return std::nullopt;
+      var = mapped->second;
     }
-    return nullptr;
+    if (!var || var_def_order_.count(var) == 0) return std::nullopt;
+    return var;
   }
 
   void RegisterReturnVars(const std::vector<IterArgPtr>& iter_args, const std::vector<VarPtr>& return_vars) {
@@ -1868,9 +1871,12 @@ class LifetimeAnalyzer : public IRVisitor {
       // We do NOT register return_vars in ordered_defs_ -- they must not
       // participate in sharing group computation, which would inflate
       // group lifetimes and block unrelated reuse opportunities.
-      auto init_var = ResolveCarryInitCarrier(iter_args[i]->initValue_);
-      if (init_var && var_def_order_.count(init_var)) {
-        return_var_to_init_var_[rv] = init_var;
+      if (auto root = ResolveTrackedAllocationRoot(iter_args[i]->initValue_)) {
+        // Store the canonical root, not merely the immediate loop return. A
+        // sequence of update loops commonly feeds one loop's return_var into
+        // the next loop. Keeping a one-hop mapping drops uses of the final
+        // return because intermediate return_vars are deliberately untracked.
+        return_var_to_init_var_[rv] = *root;
       }
     }
   }
@@ -1886,17 +1892,14 @@ class LifetimeAnalyzer : public IRVisitor {
       return;
     }
 
-    // If var is a loop return_var, redirect the use to its initValue var.
-    // YieldFixup will alias the return_var to the initValue's MemRef,
-    // so keeping the initValue live prevents premature buffer reuse.
-    auto it = return_var_to_init_var_.find(var);
-    const VarPtr& target = (it != return_var_to_init_var_.end()) ? it->second : var;
-
-    if (!var_def_order_.count(target)) {
-      return;
-    }
+    // If var is a loop return_var, redirect the use through any sequence of
+    // loop returns to the tracked allocation root. YieldFixup aliases every
+    // return value to that buffer, so the root must remain live until the final
+    // return's last read.
+    const auto target = ResolveTrackedAllocationRoot(var);
+    if (!target) return;
     // operator[] default-inserts 0 for missing keys; use_order is always >= 0.
-    var_raw_last_use_[target] = std::max(var_raw_last_use_[target], use_order);
+    var_raw_last_use_[*target] = std::max(var_raw_last_use_[*target], use_order);
   }
 
   /**
@@ -2326,6 +2329,7 @@ class HazardInputCollector : public IRVisitor {
 // the *physical buffer* it ends up on (following both reuse-map reassignment and
 // VIEW inheritance) and blocks the output from landing there — see the use site.
 using ForbidAliasMap = AllocationForbidAliasMap;
+using ExactOrDisjointAliasMap = AllocationExactOrDisjointMap;
 
 class ForbidAliasCollector : public IRVisitor {
  public:
@@ -2351,7 +2355,13 @@ class ForbidAliasCollector : public IRVisitor {
     if (const auto get_item = As<TupleGetItemExpr>(op->value_)) {
       if (const VarPtr tuple = AsVarLike(get_item->tuple_)) {
         const auto pending = tuple_forbidden_.find(tuple.get());
-        if (pending != tuple_forbidden_.end()) RecordForOutput(op->var_, pending->second);
+        if (pending != tuple_forbidden_.end()) {
+          RecordForOutput(op->var_, pending->second, &forbidden_, &tuple_forbidden_);
+        }
+        const auto exact = tuple_exact_or_disjoint_.find(tuple.get());
+        if (exact != tuple_exact_or_disjoint_.end()) {
+          RecordForOutput(op->var_, exact->second, &exact_or_disjoint_, &tuple_exact_or_disjoint_);
+        }
       }
     }
 
@@ -2360,7 +2370,9 @@ class ForbidAliasCollector : public IRVisitor {
       if (reg.IsRegistered(call->op_->name_)) {
         const auto& entry = reg.GetEntry(call->op_->name_);
         std::vector<VarPtr> forbidden_inputs;
+        std::set<size_t> forbidden_indices;
         auto forbid_arg = [&](size_t i) {
+          forbidden_indices.insert(i);
           if (i < call->args_.size()) {
             if (auto v = AsVarLike(call->args_[i])) forbidden_inputs.push_back(v);
           }
@@ -2385,7 +2397,18 @@ class ForbidAliasCollector : public IRVisitor {
           auto in_t = As<TileType>(call->args_[0]->GetType());
           if (out_t && in_t && out_t->dtype_.GetBit() > in_t->dtype_.GetBit()) forbid_arg(0);
         }
-        RecordForOutput(op->var_, forbidden_inputs);
+        std::vector<VarPtr> exact_or_disjoint_inputs;
+        if (entry.IsInplaceSafe() &&
+            entry.GetExecutionMemoryAccessEvidence() == ExecutionMemoryAccessEvidence::Functional) {
+          for (size_t i = 0; i < call->args_.size(); ++i) {
+            if (forbidden_indices.count(i) != 0) continue;
+            if (auto input = AsVarLike(call->args_[i]); input && As<TileType>(input->GetType())) {
+              exact_or_disjoint_inputs.push_back(std::move(input));
+            }
+          }
+        }
+        RecordForOutput(op->var_, forbidden_inputs, &forbidden_, &tuple_forbidden_);
+        RecordForOutput(op->var_, exact_or_disjoint_inputs, &exact_or_disjoint_, &tuple_exact_or_disjoint_);
         // tile.transpose is registered not_inplace_safe(), so its output is
         // already forbidden from aliasing any input above (pto.ttrans writes
         // dst directly from src on the scalar path — dst == src corrupts).
@@ -2394,24 +2417,29 @@ class ForbidAliasCollector : public IRVisitor {
     IRVisitor::VisitStmt_(op);
   }
 
-  ForbidAliasMap Take() { return std::move(forbidden_); }
+  ForbidAliasMap TakeForbidden() { return std::move(forbidden_); }
+  ExactOrDisjointAliasMap TakeExactOrDisjoint() { return std::move(exact_or_disjoint_); }
 
  private:
-  void RecordForOutput(const VarPtr& output, const std::vector<VarPtr>& forbidden_inputs) {
-    if (!output || forbidden_inputs.empty()) return;
+  void RecordForOutput(const VarPtr& output, const std::vector<VarPtr>& inputs,
+                       std::map<const Var*, std::vector<VarPtr>>* recorded_by_output,
+                       std::map<const Var*, std::vector<VarPtr>>* pending_by_tuple) {
+    if (!output || inputs.empty()) return;
     if (As<TupleType>(output->GetType())) {
-      tuple_forbidden_[output.get()] = forbidden_inputs;
+      (*pending_by_tuple)[output.get()] = inputs;
       return;
     }
     if (!As<TileType>(output->GetType())) return;
     const auto rep_it = member_to_rep_.find(output.get());
     const Var* out_key = rep_it != member_to_rep_.end() ? rep_it->second : output.get();
-    auto& recorded = forbidden_[out_key];
-    recorded.insert(recorded.end(), forbidden_inputs.begin(), forbidden_inputs.end());
+    auto& recorded = (*recorded_by_output)[out_key];
+    recorded.insert(recorded.end(), inputs.begin(), inputs.end());
   }
 
   ForbidAliasMap forbidden_;
+  ExactOrDisjointAliasMap exact_or_disjoint_;
   std::map<const Var*, std::vector<VarPtr>> tuple_forbidden_;
+  std::map<const Var*, std::vector<VarPtr>> tuple_exact_or_disjoint_;
   std::map<const Var*, const Var*> member_to_rep_;  ///< sharing-group member -> representative
 };
 
@@ -4695,7 +4723,8 @@ AllocationConstraintAnalysis AnalyzeAllocationConstraints(const FunctionPtr& fun
 
   ForbidAliasCollector forbid_collector(lifetimes.var_sharing_groups);
   forbid_collector.VisitStmt(func->body_);
-  result.forbid_alias = forbid_collector.Take();
+  result.forbid_alias = forbid_collector.TakeForbidden();
+  result.exact_or_disjoint_alias = forbid_collector.TakeExactOrDisjoint();
   return result;
 }
 

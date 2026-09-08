@@ -570,13 +570,19 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithDsaRP(
   const dsa::CanonicalGreedySolver solver;
   dsa::DsaProblem solved_problem = prepared.strict_problem;
   dsa::DsaResult result = solver.Solve(solved_problem);
-  if (result.status == dsa::SolveStatus::kNoFit && !prepared.pipeline_pairs.empty()) {
+  const bool strict_search_failed =
+      result.status == dsa::SolveStatus::kNoFit || result.status == dsa::SolveStatus::kSearchExhausted;
+  if (strict_search_failed && !prepared.pipeline_pairs.empty()) {
     solved_problem = dsa_adapter::RelaxPipelineIntent(prepared);
     result = solver.Solve(solved_problem);
   }
 
   INTERNAL_CHECK_SPAN(result.status != dsa::SolveStatus::kInvalidProblem, func->span_)
       << "DSA-RP constructed or produced invalid state for '" << func->name_ << "'"
+      << (result.diagnostics.empty() ? std::string() : ": " + result.diagnostics.front());
+  CHECK_SPAN(result.status != dsa::SolveStatus::kSearchExhausted, func->span_)
+      << "DSA-RP placement search reached its bounded work limit for '" << func->name_
+      << "'; this does not prove that the on-chip memory capacity is insufficient"
       << (result.diagnostics.empty() ? std::string() : ": " + result.diagnostics.front());
   CHECK_SPAN(result.status == dsa::SolveStatus::kFeasible, func->span_)
       << "DSA-RP could not find a placement for '" << func->name_ << "' within the on-chip memory capacities"

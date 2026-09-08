@@ -167,10 +167,63 @@ AllocationPlan BuildDsaAllocationPlan(const FunctionPtr& func) {
     }
   }
 
+  // In-place capability is optional, not mandatory aliasing. At a producer /
+  // final-consumer boundary, shorten the input lifetime only when the op
+  // registry explicitly permits in-place execution. The accompanying
+  // geometric constraint permits byte-identical ranges or disjoint ranges,
+  // but never staggered partial overlap. Explicit no-alias rules win.
+  std::set<std::pair<size_t, size_t>> exact_or_disjoint_pairs;
+  for (size_t output = 0; output < intervals.size(); ++output) {
+    const auto candidates = constraints.exact_or_disjoint_alias.find(intervals[output].variable.get());
+    if (candidates == constraints.exact_or_disjoint_alias.end()) continue;
+    for (const VarPtr& operand : candidates->second) {
+      const auto memref = GetTypeMemRef(operand->GetType());
+      if (!memref.has_value() || !memref.value()) continue;
+      const auto input = base_to_index.find(memref.value()->base_.get());
+      if (input == base_to_index.end() || input->second == output) continue;
+      if (intervals[input->second].memory_space != intervals[output].memory_space ||
+          intervals[input->second].last_use_point != intervals[output].def_point) {
+        continue;
+      }
+      size_t first = input->second;
+      size_t second = output;
+      if (second < first) std::swap(first, second);
+      if (separation_reasons.count({first, second}) != 0) continue;
+      exact_or_disjoint_pairs.emplace(first, second);
+      plan.read_before_write_inputs.insert(input->second);
+    }
+  }
+
+  // Shortening an input's execution lifetime exposes the same write boundary
+  // to every result born there. Only registry-supported candidate results may
+  // use it; all sibling results remain hard-separated from that input.
+  using BirthKey = std::pair<MemorySpace, int>;
+  std::map<BirthKey, std::vector<size_t>> births;
+  for (size_t index = 0; index < intervals.size(); ++index) {
+    births[{intervals[index].memory_space, intervals[index].def_point}].push_back(index);
+  }
+  for (size_t input : plan.read_before_write_inputs) {
+    const auto born = births.find({intervals[input].memory_space, intervals[input].last_use_point});
+    INTERNAL_CHECK(born != births.end()) << "Missing DSA birth bucket for in-place boundary";
+    for (size_t output : born->second) {
+      if (output == input) continue;
+      size_t first = input;
+      size_t second = output;
+      if (second < first) std::swap(first, second);
+      if (exact_or_disjoint_pairs.count({first, second}) == 0) {
+        add_separation(first, second, AllocationSeparationReason::SemanticNoAlias);
+      }
+    }
+  }
+
   plan.separations.reserve(separation_reasons.size());
   for (const auto& [indices, reasons] : separation_reasons) {
     plan.separations.push_back({indices.first, indices.second,
                                 std::vector<AllocationSeparationReason>(reasons.begin(), reasons.end())});
+  }
+  plan.no_partial_overlaps.reserve(exact_or_disjoint_pairs.size());
+  for (const auto& [first, second] : exact_or_disjoint_pairs) {
+    plan.no_partial_overlaps.push_back({first, second});
   }
   return plan;
 }
