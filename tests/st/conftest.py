@@ -772,9 +772,10 @@ def pytest_configure(config):
     )
     config.addinivalue_line(
         "markers",
-        "dump_args: the test asserts on an args-dump manifest, so it needs "
-        "`--dump-args` and skips without it. Same contract as `swimlane`, "
-        "applied by pytest_runtest_setup; CI runs it in its own flagged step.",
+        "without_swimlane(reason): the inverse of `swimlane` — the test must NOT run "
+        "while the record is being collected. A marker rather than an autouse fixture "
+        "because collection cannot see a fixture's skip, and the device-pool submitter "
+        "runs every registered case before the item loop starts.",
     )
     config.addinivalue_line(
         "markers",
@@ -899,20 +900,29 @@ def marker_skip_reason(item: pytest.Item) -> str | None:
     Raises:
         pytest.UsageError: ``multi_card`` carries no usable device count.
     """
-    # The flag is read only once its marker is present. Reading both eagerly --
-    # as a tuple of (name, flag, option) triples does -- asks every item in the
-    # session for options it has no reason to care about, and fails outright
-    # against a config that only exposes the ones its own test needs.
-    for name, option, read_flag in (
-        ("swimlane", "--enable-chip-swimlane", lambda: _resolve_swimlane_option(item.config)),
-        ("dump_args", "--dump-args", lambda: item.config.getoption("--dump-args")),
-    ):
-        if not item.get_closest_marker(name):
-            continue
-        if not read_flag():
-            return f"pass {option} to collect the artifact this test asserts on"
+    # The option is read only once its marker is present: asking every item in
+    # the session for an option it has no reason to care about fails outright
+    # against a config that exposes only the ones its own test needs.
+    if item.get_closest_marker("swimlane"):
+        if not _resolve_swimlane_option(item.config):
+            return "pass --enable-chip-swimlane to collect the record this test asserts on"
         if item.config.getoption("--codegen-only"):
-            return "--codegen-only skips device execution, so no DFX artifact is written"
+            return "--codegen-only skips device execution, so no record is written"
+
+    # The mirror image: a test that must NOT run while the record is being
+    # collected. Stated as a marker rather than an autouse fixture because a
+    # fixture's skip is invisible to collection, and the device-pool submitter
+    # runs every registered case before the item loop starts -- so the case
+    # would be compiled and put on a card for a test that then skips.
+    excluded = item.get_closest_marker("without_swimlane")
+    if excluded is not None and _resolve_swimlane_option(item.config):
+        reason = excluded.kwargs.get("reason") or (excluded.args[0] if excluded.args else None)
+        if not reason:
+            raise pytest.UsageError(
+                f"{item.nodeid}: @pytest.mark.without_swimlane needs a reason explaining why "
+                "this test cannot run while the swimlane record is being collected."
+            )
+        return str(reason)
 
     witness = item.get_closest_marker("extra_swimlane")
     if witness is not None and os.environ.get("PYPTO_PHASE_FENCE_EXTRA_SWIMLANE") != "1":
@@ -1322,6 +1332,28 @@ def _inline_case_reason(item: pytest.Item) -> str | None:
     return str(reason)
 
 
+def _will_not_run(item: pytest.Item) -> bool:
+    """Will *item* be skipped before it can assert on a case?
+
+    Collection-only. ``pytest_runtest_setup`` applies :func:`marker_skip_reason`
+    and nothing else, so this stays a superset used for two decisions here: a
+    case is registered only from items that will run, and only a running item
+    can be reported as undiscovered.
+
+    ``skip`` and ``skipif`` are folded in because the pool now *executes* what it
+    registers -- the device-pool submitter puts every registered case on a card
+    before the item loop starts -- so a case behind either marker would be
+    compiled and run for a test pytest never intends to call. ``skipif``'s
+    condition is not evaluated: treating a conditional skip as "may skip" costs
+    at most a serial inline compile, while guessing the other way costs a device
+    run. ``iter_markers`` reports the two under different names, and matching
+    only ``"skip"`` misses ``skipif`` entirely.
+    """
+    if any(m.name in ("skip", "skipif") for m in item.iter_markers()):
+        return True
+    return marker_skip_reason(item) is not None
+
+
 def _discover_cases(
     session: pytest.Session,
     seen: dict[str, PTOTestCase],
@@ -1355,13 +1387,13 @@ def _discover_cases(
         # Session hook: without this it walks tests/ut bodies too. See _is_st_item.
         if not _is_st_item(item):
             continue
-        runs = marker_skip_reason(item) is None
+        runs = not _will_not_run(item)
         found = _collect_test_case_from_item(
             item, seen if runs else discarded, session_memory_planner, session_platform
         )
         if found or "test_runner" not in getattr(item, "fixturenames", ()):
             continue
-        if any(m.name == "skip" for m in item.iter_markers()):
+        if _will_not_run(item):
             continue
         if _inline_case_reason(item) is not None:
             continue

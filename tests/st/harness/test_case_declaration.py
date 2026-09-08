@@ -27,6 +27,7 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
 
@@ -795,12 +796,20 @@ class TestInlineCaseGuard:
         return TestPlatformMatrixCollection._conftest()
 
     @staticmethod
-    def _item(node_id: str, markers: "list[Any]") -> Any:
+    def _item(node_id: str, markers: "list[Any]", swimlane_level: int = 0) -> Any:
+        opts = {
+            "--chip-swimlane-level": swimlane_level,
+            "--enable-chip-swimlane": swimlane_level,
+            "--codegen-only": False,
+            "--device": "0",
+        }
+
         class _Item:
             nodeid = node_id
             name = node_id.rsplit("::", 1)[-1]
             module = None
             fixturenames = ("test_runner",)
+            config = SimpleNamespace(getoption=lambda n, default=None: opts.get(n, default))
 
             def iter_markers(self, name: str | None = None) -> Any:
                 return iter([m for m in markers if name is None or m.name == name])
@@ -818,6 +827,42 @@ class TestInlineCaseGuard:
         m = _Marker()
         m.name, m.args, m.kwargs = name, args, kwargs
         return m
+
+    def test_a_fixture_shaped_skip_is_stated_as_a_marker(self):
+        """`without_swimlane` is the inverse of `swimlane`, and readable at collection.
+
+        As an autouse fixture this condition was invisible to `_will_not_run`,
+        so the class's cases were registered -- and the device-pool submitter
+        puts every registered case on a card before the item loop starts. The
+        case was compiled and run for a test that then skipped.
+        """
+        conf = self._conftest()
+        marker = self._marker("without_swimlane", reason="runs without the record")
+
+        on = self._item("t.py::test_x", [marker], swimlane_level=4)
+        off = self._item("t.py::test_x", [marker], swimlane_level=0)
+
+        assert conf.marker_skip_reason(on) == "runs without the record"
+        assert conf.marker_skip_reason(off) is None
+
+    def test_a_reasonless_exclusion_is_refused(self):
+        conf = self._conftest()
+        item = self._item("t.py::test_x", [self._marker("without_swimlane")], swimlane_level=4)
+        with pytest.raises(pytest.UsageError, match="needs a reason"):
+            conf.marker_skip_reason(item)
+
+    def test_skipif_counts_as_will_not_run(self):
+        """`iter_markers` names it `skipif`; matching only `skip` missed it.
+
+        Registering a case behind either marker now costs a device run, not just
+        a compile, because the submitter runs what the pool holds.
+        """
+        conf = self._conftest()
+        for name in ("skip", "skipif"):
+            item = self._item(f"t.py::test_{name}", [self._marker(name)], swimlane_level=0)
+            assert conf._will_not_run(item), name
+        plain = self._item("t.py::test_plain", [], swimlane_level=0)
+        assert not conf._will_not_run(plain)
 
     def test_an_unmarked_reason_is_refused(self):
         """A bare `inline_case` reads exactly like a test nobody declared."""

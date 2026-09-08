@@ -889,14 +889,10 @@ def _chained_snapshot_manual_dummy_case(*, branches: int = _BRANCHES, platform: 
     )
 
 
+@pytest.mark.without_swimlane(
+    reason="correctness cases run without --enable-chip-swimlane; swimlane mode runs profiling witnesses"
+)
 class TestPhaseFenceDepCompressionCorrectness:
-    @pytest.fixture(autouse=True)
-    def _skip_when_collecting_l2_swimlane(self, test_runner):
-        if test_runner.config.enable_chip_swimlane:
-            pytest.skip(
-                "correctness cases run without --enable-chip-swimlane; swimlane mode runs profiling witnesses"
-            )
-
     @st.cases(st.from_legacy(_submit_case(epochs=2, layers=1, phases=3, name="phase_fence_submit_3l")))
     def test_submit_three_level_correctness(self, case_run):
         case_run.assert_passed()
