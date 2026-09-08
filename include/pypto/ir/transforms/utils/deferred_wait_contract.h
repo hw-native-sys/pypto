@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <utility>
 
 #include "pypto/core/logging.h"
@@ -46,6 +47,44 @@ namespace outline_utils {
    protected:
     void VisitExpr_(const CallPtr& call) override {
       if (IsOp(call, "pld.system.defer_wait")) found = true;
+      IRVisitor::VisitExpr_(call);
+    }
+  };
+
+  Finder finder;
+  finder.VisitStmt(body);
+  return finder.found;
+}
+
+/**
+ * @brief True when @p call is a single-barrier mesh collective with ``defer=True``.
+ *
+ * OutlineIncoreScopes runs before LowerCompositeOps, so a deferred composite is
+ * still a Call at outline time. These ops expand to ``defer_wait`` later and must
+ * stamp ``deferred_completion_waiter`` up front the same way a hand-written
+ * waiter does.
+ */
+[[nodiscard]] inline bool IsDeferredCompositeCall(const CallPtr& call) {
+  if (!call || !call->op_) return false;
+  const std::string& name = call->op_->name_;
+  if (name != "pld.tensor.allgather" && name != "pld.tensor.all_to_all" &&
+      name != "pld.tensor.all_to_all_v" && name != "pld.tensor.broadcast" && name != "pld.tensor.barrier") {
+    return false;
+  }
+  return call->GetKwarg<bool>("defer", false);
+}
+
+/**
+ * @brief Return whether @p body contains a ``defer=True`` mesh composite Call.
+ */
+[[nodiscard]] inline bool ContainsDeferredCompositeDefer(const StmtPtr& body) {
+  class Finder : public IRVisitor {
+   public:
+    bool found = false;
+
+   protected:
+    void VisitExpr_(const CallPtr& call) override {
+      if (IsDeferredCompositeCall(call)) found = true;
       IRVisitor::VisitExpr_(call);
     }
   };
@@ -245,15 +284,25 @@ class DeferredWaitContractValidator {
     CHECK_SPAN(!AsTensorTypeLike(expr->GetType()), span)
         << "deferred waiter scalar bookkeeping cannot produce a tensor value";
     if (auto call = As<Call>(expr)) {
-      const bool permitted_anchor = allow_tensor_read && IsOp(call, "tensor.read");
+      const bool permitted_tensor_read = allow_tensor_read && IsOp(call, "tensor.read");
+      // Composite ``defer=True`` lowering clones the EmitCommSetup prologue into
+      // the waiter kernel. These system queries are scalar bookkeeping (no
+      // payload), so allow them before registration the same way tensor.read is.
+      const bool permitted_system_query = IsOp(call, "pld.system.get_comm_ctx") ||
+                                          IsOp(call, "pld.system.nranks") || IsOp(call, "pld.system.rank");
       // Fail closed: a scalar-returning GlobalVar or newly added op may still
       // hide communication, a blocking wait, or payload effects. V1 needs only
-      // an explicit pre-registration tensor.read anchor; scalar arithmetic and
-      // casts are represented by their own IR expression nodes.
-      CHECK_SPAN(permitted_anchor, span)
-          << "deferred waiter scalar bookkeeping supports only a pre-registration tensor.read call; "
-             "unexpected operation '"
+      // an explicit pre-registration tensor.read / system-query anchor; scalar
+      // arithmetic and casts are represented by their own IR expression nodes.
+      CHECK_SPAN(permitted_tensor_read || permitted_system_query, span)
+          << "deferred waiter scalar bookkeeping supports only a pre-registration tensor.read or "
+             "pld.system.{get_comm_ctx,nranks,rank} call; unexpected operation '"
           << call->op_->name_ << "'";
+      if (permitted_system_query) {
+        // get_comm_ctx takes a DistributedTensor / window operand; do not recurse
+        // into tensor-typed args as scalar expressions.
+        return ScalarEffect::kTensorRead;
+      }
       // The first tensor.read argument is the tensor source. Skip that
       // position, not every ExprPtr that happens to alias it.
       for (size_t i = 1; i < call->args_.size(); ++i) {

@@ -43,6 +43,7 @@ TENSOR_OPTIMIZATION_PASSES = [
     "InsertMxScaleAddr",
     "ResolveBackendOpLayouts",
     "LowerAutoVectorSplit",
+    "SplitDeferredCompositeKernels",
     "ExpandMixedKernel",
     "InjectGMPipeBuffer",
     "SplitVectorKernel",

@@ -464,13 +464,50 @@ class LoweringBuilder {
 
   // ---- Self-clearing credit barrier protocol (see the file-header comment) ----
 
-  /// Emit one complete cross-rank barrier on ``signal``: ``AtomicAdd(1)`` into
-  /// every peer's cell, then wait for this call's generation on every peer's
-  /// cell. Returns the generation waited for (1-based, scoped to *this call*
-  /// only — every fresh ``LoweringBuilder`` starts counting at 0), so a rule
-  /// that fans out further barriers (the mesh allreduce's per-chunk barriers)
-  /// can continue the sequence from it, and so the rule can compute the total
-  /// credit count its ``EmitEpilogueReset`` call must subtract.
+  /// Advance the call-local generation counter (top-level only). Shared by
+  /// ``EmitBarrier`` and ``defer=True`` lowering so both halves stay in sync.
+  int64_t NextBarrierGeneration(const Span& span) {
+    INTERNAL_CHECK_SPAN(!nested_, span)
+        << "Internal error: barrier generation accounting must only run from a top-level lowering "
+           "rule, not from inside EmitFor / EmitIf / EmitIfExpr bodies.";
+    return ++barrier_count_;
+  }
+
+  /// Notify half of a credit barrier: ``AtomicAdd(credit)`` into every peer cell.
+  /// ``credit`` defaults to ``ConstInt(1)`` when null. Does not bump
+  /// ``barrier_count_`` — callers that need a generation use
+  /// ``NextBarrierGeneration`` / ``EmitBarrier``.
+  void EmitBarrierNotify(const ExprPtr& signal, const CommSetup& comm, const ExprPtr& credit,
+                         const std::string& suffix, const Span& span) {
+    INTERNAL_CHECK_SPAN(!nested_, span)
+        << "Internal error: EmitBarrierNotify must only be called from a top-level lowering rule, "
+           "not from inside EmitFor / EmitIf / EmitIfExpr bodies.";
+    auto credit_i32 = credit ? credit : std::make_shared<ConstInt>(1, DataType::INT32, span);
+    EmitNotifyAll(signal, comm.nranks_idx, comm.my_rank, NotifyOp::kAtomicAdd, credit_i32, suffix, span);
+  }
+
+  /// Wait half of a credit barrier: wait ``Ge(expected)`` on every peer cell.
+  /// ``expected_or_credit_scale`` is the absolute expected value (already scaled
+  /// by credit/participants when the caller wants ``generation * credit``).
+  void EmitBarrierWait(const ExprPtr& signal, const CommSetup& comm, const ExprPtr& expected_or_credit_scale,
+                       const std::string& suffix, const Span& span) {
+    INTERNAL_CHECK_SPAN(!nested_, span)
+        << "Internal error: EmitBarrierWait must only be called from a top-level lowering rule, "
+           "not from inside EmitFor / EmitIf / EmitIfExpr bodies.";
+    EmitWaitAll(signal, comm.nranks_idx, comm.my_rank, expected_or_credit_scale, suffix, span);
+  }
+
+  /// Emit one complete cross-rank barrier on ``signal``: ``AtomicAdd(credit)``
+  /// into every peer's cell, then wait for ``generation * credit`` on every
+  /// peer's cell. Returns the generation waited for (1-based, scoped to *this
+  /// call* only — every fresh ``LoweringBuilder`` starts counting at 0), so a
+  /// rule that fans out further barriers (the mesh allreduce's per-chunk
+  /// barriers) can continue the sequence from it, and so the rule can compute
+  /// the total credit count its ``EmitEpilogueReset`` call must subtract.
+  ///
+  /// ``credit`` defaults to ``ConstInt(1)`` when null. Only the wait scales by
+  /// credit/participants relative to a bare generation; existing call sites
+  /// that omit ``credit`` keep today's ``+1`` / ``Ge(generation)`` semantics.
   ///
   /// Call this only from a rule's straight-line code — one call consumes exactly
   /// one generation, so invoking it inside an ``EmitFor`` body would reserve a
@@ -478,16 +515,75 @@ class LoweringBuilder {
   /// barriers must emit notify/wait by hand with a call-local expected value
   /// (see the ring / mesh-chunked rules below).
   int64_t EmitBarrier(const ExprPtr& signal, const CommSetup& comm, const std::string& suffix,
-                      const Span& span) {
+                      const Span& span, const ExprPtr& credit = nullptr) {
     INTERNAL_CHECK_SPAN(!nested_, span)
         << "Internal error: EmitBarrier must only be called from a top-level lowering rule, not from inside "
         << "EmitFor / EmitIf / EmitIfExpr bodies. Loop- or condition-resident barriers must "
         << "emit notify/wait by hand with a call-local expected value.";
-    const int64_t generation = ++barrier_count_;
+    const int64_t generation = NextBarrierGeneration(span);
+    auto credit_i32 = credit ? credit : std::make_shared<ConstInt>(1, DataType::INT32, span);
+    EmitBarrierNotify(signal, comm, credit_i32, suffix, span);
+    ExprPtr expected_i32;
+    if (auto c = As<ConstInt>(credit_i32); c && c->value_ == 1) {
+      expected_i32 = std::make_shared<ConstInt>(generation, DataType::INT32, span);
+    } else {
+      auto gen_i32 = std::make_shared<ConstInt>(generation, DataType::INT32, span);
+      expected_i32 = MakeMul(gen_i32, credit_i32, span);
+    }
+    EmitBarrierWait(signal, comm, expected_i32, suffix, span);
+    return generation;
+  }
+
+  /// Like ``EmitWaitAll`` but registers ``pld.system.defer_wait`` (cmp=Ge) instead
+  /// of a blocking wait. ``nranks_idx`` should be a statically known INDEX extent
+  /// when the enclosing body is a deferred-completion waiter (condition budget).
+  void EmitDeferWaitAll(const ExprPtr& signal, const ExprPtr& nranks_idx, const ExprPtr& my_rank,
+                        const ExprPtr& expected, const std::string& suffix, const Span& span) {
+    auto zero_idx = std::make_shared<ConstInt>(0, DataType::INDEX, span);
+    auto one_idx = std::make_shared<ConstInt>(1, DataType::INDEX, span);
+
+    EmitFor(
+        "src" + suffix, zero_idx, nranks_idx, one_idx,
+        [&](LoweringBuilder& body, const VarPtr& src) {
+          auto src_offsets = tile_conversion_utils::MakeSignalOffsets(src, span);
+          body.EmitIf(
+              body.NotEq(src, my_rank, span),
+              [&](LoweringBuilder& then_body) {
+                auto call =
+                    OpRegistry::GetInstance().Create("pld.system.defer_wait", {signal, src_offsets, expected},
+                                                     {{"cmp", static_cast<int>(WaitCmp::kGe)}}, span);
+                // Side-effect only — DeferredWaitContractValidator rejects
+                // assign-bound defer_wait (must be a standalone EvalStmt).
+                then_body.EmitEval(call, span);
+              },
+              /*else_fn=*/nullptr, span);
+        },
+        span);
+  }
+
+  /// Fused barrier, or ``defer=True`` split: notify + ``defer_wait``. Returns the
+  /// generation / total credit count for this call. Does **not** emit the
+  /// epilogue — callers still call ``EmitEpilogueReset`` once after any
+  /// post-barrier work (e.g. broadcast's ``tile.get``). ``defer=True`` requires
+  /// a statically known signal NR (waiter budget).
+  int64_t EmitFusedOrDeferredBarrier(const CallPtr& call, const ExprPtr& signal,
+                                     const DistributedTensorTypePtr& signal_type, const CommSetup& comm,
+                                     const Span& span) {
+    const bool defer = call->GetKwarg<bool>("defer", false);
+    if (!defer) {
+      return EmitBarrier(signal, comm, "", span);
+    }
+    auto nr_const = As<ConstInt>(signal_type->shape_[0]);
+    CHECK_SPAN(nr_const && nr_const->value_ > 0, span)
+        << call->op_->name_
+        << "(..., defer=True) requires a statically known positive signal NR so the deferred-waiter "
+           "condition budget can be proved";
+    const int64_t generation = NextBarrierGeneration(span);
     auto one_i32 = std::make_shared<ConstInt>(1, DataType::INT32, span);
     auto expected_i32 = std::make_shared<ConstInt>(generation, DataType::INT32, span);
-    EmitNotifyAll(signal, comm.nranks_idx, comm.my_rank, NotifyOp::kAtomicAdd, one_i32, suffix, span);
-    EmitWaitAll(signal, comm.nranks_idx, comm.my_rank, expected_i32, suffix, span);
+    auto nranks_static = std::make_shared<ConstInt>(nr_const->value_, DataType::INDEX, span);
+    EmitBarrierNotify(signal, comm, one_i32, "", span);
+    EmitDeferWaitAll(signal, nranks_static, comm.my_rank, expected_i32, "", span);
     return generation;
   }
 
@@ -1037,6 +1133,9 @@ ExprPtr LowerTensorRingAllReduceRule(const CallPtr& call, const std::vector<Expr
 
 ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>& args, LoweringBuilder& b) {
   const Span& span = call->span_;
+  CHECK_SPAN(!call->GetKwarg<bool>("defer", false), span)
+      << "pld.tensor.allreduce does not support defer=True (multi-generation barrier; use a "
+         "single-barrier mesh collective such as allgather/all_to_all/broadcast/barrier)";
   // Host-orchestrator calls may omit the signal and get one synthesized before
   // host collective lowering. InCore/composite lowering keeps the old explicit
   // signal contract so users get a direct error instead of an internal assert.
@@ -1833,8 +1932,8 @@ ExprPtr LowerTensorBroadcastRule(const CallPtr& call, const std::vector<ExprPtr>
 
   auto root_expr = std::make_shared<ConstInt>(root_value, DataType::INT32, span);
 
-  // ---- Phase 2: barrier ----
-  const int64_t generation = b.EmitBarrier(signal, comm, "", span);
+  // ---- Phase 2: barrier (or defer=True notify + defer_wait) ----
+  const int64_t generation = b.EmitFusedOrDeferredBarrier(call, signal, signal_type, comm, span);
 
   // ---- Phase 3: pld.tile.get(root's data → local target slot) ----
   // Emit tile.create + pld.tile.get directly (the tensor-level get has no
@@ -1978,8 +2077,8 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
       },
       span);
 
-  // ---- Phase 2: barrier ----
-  const int64_t generation = b.EmitBarrier(signal, comm, "", span);
+  // ---- Phase 2: barrier (or defer=True notify + defer_wait) ----
+  const int64_t generation = b.EmitFusedOrDeferredBarrier(call, signal, signal_type, comm, span);
 
   // Self-clearing epilogue: exactly one credit per peer this call.
   auto total_i32 = std::make_shared<ConstInt>(generation, DataType::INT32, span);
@@ -2009,6 +2108,9 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
 ExprPtr LowerTensorReduceScatterRule(const CallPtr& call, const std::vector<ExprPtr>& args,
                                      LoweringBuilder& b) {
   const Span& span = call->span_;
+  CHECK_SPAN(!call->GetKwarg<bool>("defer", false), span)
+      << "pld.tensor.reduce_scatter does not support defer=True (multi-generation barrier; use a "
+         "single-barrier mesh collective such as allgather/all_to_all/broadcast/barrier)";
   INTERNAL_CHECK_SPAN(args.size() == 2, span)
       << "pld.tensor.reduce_scatter rule expects 2 args, got " << args.size();
   const auto& target = args[0];
@@ -2103,8 +2205,8 @@ ExprPtr LowerTensorBarrierRule(const CallPtr& call, const std::vector<ExprPtr>& 
 
   auto comm = b.EmitCommSetup(signal, span);
 
-  // ---- AtomicAdd cell[my_rank, 0] on each peer, then wait cell[src, 0] >= gen ----
-  const int64_t generation = b.EmitBarrier(signal, comm, "", span);
+  // ---- AtomicAdd cell[my_rank, 0] on each peer, then wait / defer_wait ----
+  const int64_t generation = b.EmitFusedOrDeferredBarrier(call, signal, signal_type, comm, span);
 
   // Self-clearing epilogue: exactly one credit per peer this call.
   auto total_i32 = std::make_shared<ConstInt>(generation, DataType::INT32, span);
@@ -2213,8 +2315,8 @@ ExprPtr LowerTensorAllToAllRule(const CallPtr& call, const std::vector<ExprPtr>&
       },
       span);
 
-  // ---- Phase 2: barrier ----
-  const int64_t generation = b.EmitBarrier(signal, comm, "", span);
+  // ---- Phase 2: barrier (or defer=True notify + defer_wait) ----
+  const int64_t generation = b.EmitFusedOrDeferredBarrier(call, signal, signal_type, comm, span);
 
   // Self-clearing epilogue: exactly one credit per peer this call.
   auto total_i32 = std::make_shared<ConstInt>(generation, DataType::INT32, span);
@@ -2441,8 +2543,8 @@ ExprPtr LowerTensorAllToAllVRule(const CallPtr& call, const std::vector<ExprPtr>
       },
       span);
 
-  // ---- Phase 2: self-clearing credit barrier ----
-  const int64_t generation = b.EmitBarrier(signal, comm, "", span);
+  // ---- Phase 2: self-clearing credit barrier (or defer=True notify + defer_wait) ----
+  const int64_t generation = b.EmitFusedOrDeferredBarrier(call, signal, signal_type, comm, span);
 
   // Self-clearing epilogue: exactly one credit per peer this call.
   auto total_i32 = std::make_shared<ConstInt>(generation, DataType::INT32, span);

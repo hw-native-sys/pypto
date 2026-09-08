@@ -225,6 +225,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/outline_hierarchy_scopes_pass.cpp
     src/ir/transforms/outline_graph_scopes_pass.cpp
     src/ir/transforms/expand_mixed_kernel_pass.cpp
+    src/ir/transforms/split_deferred_composite_kernels_pass.cpp
     src/ir/transforms/lower_auto_vector_split_pass.cpp
     src/ir/transforms/split_vector_kernel_pass.cpp
     src/ir/transforms/auto_tile_matmul_l0_pass.cpp
@@ -294,6 +295,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/verify_atomic_add_dtype.cpp
     src/ir/verifier/verify_acc_store_phase.cpp
     src/ir/verifier/verify_no_scalar_kernel_return.cpp
+    src/ir/verifier/verify_deferred_composite_placement.cpp
     src/ir/verifier/warning_in_param_written.cpp
     src/ir/verifier/verify_ssa_pass.cpp
     src/ir/verifier/verify_no_nested_call_pass.cpp

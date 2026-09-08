@@ -24,7 +24,7 @@ MX_A_ZZ [M, G] -> [1, M/16, G/2, 16, 2]
 MX_B_NN [G, N] -> [1, N/16, G/2, 16, 2]
 ```
 
-The trailing `[16, 2]` is one 32-byte FP8E8M0 scale box. Row-major strides over
+The trailing `[16, 2]` is one 33-byte FP8E8M0 scale box. Row-major strides over
 the blocked shape are the physical GlobalTensor strides, so
 `MaterializeTensorStrides` can use its ordinary packed-stride path after this
 pass.
@@ -105,5 +105,5 @@ state from a shape that might coincidentally look blocked.
 ## See also
 
 - [BlockNzTensorViews](15-block_nz_tensor_views.md)
-- [MaterializeTensorStrides](33-materialize_tensor_strides.md)
+- [MaterializeTensorStrides](34-materialize_tensor_strides.md)
 - [InsertMxScaleAddr](21-insert_mx_scale_addr.md)

@@ -357,6 +357,13 @@ inline const PassProperties kExpandMixedKernelProperties{
     // to be re-checked on that new IR rather than trusted from pass 20.
     .invalidated = {IRProperty::AccCompactValid}};
 
+// Split ``defer=True`` composite bodies (puts+notify+defer_wait+epilogue) into
+// push / wait / epi before ExpandMixedKernel's registration-only waiter check.
+inline const PassProperties kSplitDeferredCompositeKernelsProperties{
+    .required = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch,
+                 IRProperty::TileOps2D, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure},
+    .produced = {IRProperty::SSAForm, IRProperty::NormalizedStmtStructure}};
+
 // -- GM pipe buffer injection pass (backend-gated; extracted from ExpandMixedKernel) --
 
 inline const PassProperties kInjectGMPipeBufferProperties{

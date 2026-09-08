@@ -111,7 +111,7 @@ batch 重发。
 
 **列**窗口覆盖父 tile 的整个行范围，因此窗口自身的紧凑几何与父 tile 的几何一致，
 被丢弃的跨步也就无关紧要。`GetSliceAccumulatorGeometry` 正是给这种形状计算
-NZ 精确字节偏移（参见 [33-init_memref.md](34-init_memref.md)）。
+NZ 精确字节偏移（参见 [34-init_memref.md](35-init_memref.md)）。
 
 ### 生产者侧的变化
 

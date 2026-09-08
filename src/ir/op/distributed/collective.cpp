@@ -226,7 +226,6 @@ namespace {
 
 TypePtr DeduceTensorBarrierType(const std::vector<ExprPtr>& args,
                                 const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  (void)kwargs;
   CHECK(args.size() == 1) << "pld.tensor.barrier requires exactly 1 positional argument (signal), but got "
                           << args.size();
   CHECK(args[0]) << "pld.tensor.barrier positional argument #0 must not be null";
@@ -239,6 +238,9 @@ TypePtr DeduceTensorBarrierType(const std::vector<ExprPtr>& args,
          "got dtype "
       << signal_type->dtype_.ToString();
 
+  // Optional InCore split-phase kwarg (ignored on the HOST builtin path).
+  static_cast<void>(GetKwargOr<bool>(kwargs, "defer", false));
+
   // Return signal's type — the rebind idiom lets users write
   // ``sig = pld.tensor.barrier(sig)``, matching allreduce.
   return args[0]->GetType();
@@ -250,9 +252,12 @@ REGISTER_OP("pld.tensor.barrier")
     .set_description(
         "`signal` is a window-bound INT32 matrix used as the cross-rank synchronisation (one slot "
         "per rank). InCore path: lowered to notify-all/wait-all by LowerCompositeOps. "
+        "Optional `defer=True` registers the wait as pld.system.defer_wait on the enclosing "
+        "InCore task (split-phase). "
         "HOST builtin path: lowered to builtin.tensor.barrier per chip by LowerHostTensorCollectives.")
     .set_op_category("DistributedOp")
     .add_argument("signal", "Window-bound INT32 DistributedTensor used as cross-rank barrier (InOut)")
+    .set_attr<bool>("defer")
     .no_memory_spec()
     // Composite collective — signal is written by the notify phase and read by the wait phase.
     .set_arg_effect(0, ArgEffect::ReadWrite)
@@ -288,6 +293,9 @@ TypePtr DeduceTensorBroadcastType(const std::vector<ExprPtr>& args,
   auto root_value = GetRequiredKwarg<int>(kwargs, "root", "pld.tensor.broadcast");
   CHECK(root_value >= 0) << "pld.tensor.broadcast root rank must be non-negative, got " << root_value;
 
+  // Optional InCore split-phase kwarg.
+  static_cast<void>(GetKwargOr<bool>(kwargs, "defer", false));
+
   // Result type: same as target (in-place rebind — every rank's slot now
   // holds root's data).
   return args[0]->GetType();
@@ -301,13 +309,15 @@ REGISTER_OP("pld.tensor.broadcast")
         "`target` is a window-bound DistributedTensor (each rank writes its own data before the "
         "call; root's data is read and replicated by all non-root ranks). `signal` is a "
         "window-bound INT32 matrix used as the cross-rank barrier. `root` (int kwarg) selects "
-        "the source rank. InCore path: lowered to notify-all/wait-all + remote_load from root "
-        "by LowerCompositeOps. HOST builtin path: lowered to builtin.tensor.broadcast per chip "
-        "by LowerHostTensorCollectives.")
+        "the source rank. Optional `defer=True` registers the wait as pld.system.defer_wait on "
+        "the enclosing InCore task (split-phase). InCore path: lowered to notify-all/wait-all + "
+        "remote_load from root by LowerCompositeOps. HOST builtin path: lowered to "
+        "builtin.tensor.broadcast per chip by LowerHostTensorCollectives.")
     .set_op_category("DistributedOp")
     .add_argument("target", "Window-bound DistributedTensor (InOut)")
     .add_argument("signal", "Window-bound INT32 DistributedTensor used as cross-rank barrier (InOut)")
     .set_attr<int>("root")
+    .set_attr<bool>("defer")
     .no_memory_spec()
     // Composite collective — target is read on the root and written on every rank; signal is notify+wait.
     .set_arg_effect(0, ArgEffect::ReadWrite)
@@ -338,7 +348,6 @@ void CheckDimAgreesIfStatic(const ExprPtr& lhs, const ExprPtr& rhs, const std::s
 
 TypePtr DeduceTensorAllGatherType(const std::vector<ExprPtr>& args,
                                   const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  (void)kwargs;
   CHECK(args.size() == 3) << "pld.tensor.allgather requires exactly 3 args (input, target, signal), but got "
                           << args.size();
   for (size_t i = 0; i < args.size(); ++i) {
@@ -404,6 +413,9 @@ TypePtr DeduceTensorAllGatherType(const std::vector<ExprPtr>& args,
   CheckDimAgreesIfStatic(signal_type->shape_[0], target_type->shape_[0], "pld.tensor.allgather", "signal",
                          "target");
 
+  // Optional InCore split-phase kwarg.
+  static_cast<void>(GetKwargOr<bool>(kwargs, "defer", false));
+
   // Return target in-place (window-as-result).
   return target_type;
 }
@@ -419,6 +431,8 @@ REGISTER_OP("pld.tensor.allgather")
         "DistributedTensor[NR, SIZE] that receives the gathered result in-place "
         "— after the barrier `target[src, :]` holds the chunk from rank `src`; "
         "`signal` is a window-bound INT32 barrier tensor.  "
+        "Optional `defer=True` registers the wait as pld.system.defer_wait on the "
+        "enclosing InCore task (split-phase). "
         "InCore is lowered by LowerCompositeOps into a push decomposition "
         "(pld.tile.put this rank's chunk into every peer's `target` + "
         "notify-all/wait-all); HOST is lowered by LowerHostTensorCollectives to "
@@ -430,6 +444,7 @@ REGISTER_OP("pld.tensor.allgather")
                   "window (HOST) (Input)")
     .add_argument("target", "Window-bound DistributedTensor[NR, SIZE] — gathered result in-place (InOut)")
     .add_argument("signal", "Window-bound INT32 DistributedTensor used as cross-rank barrier (InOut)")
+    .set_attr<bool>("defer")
     .no_memory_spec()
     // notify+wait.
     // Composite collective — the data destination is overwritten, not updated:
@@ -450,7 +465,6 @@ namespace {
 
 TypePtr DeduceTensorAllToAllType(const std::vector<ExprPtr>& args,
                                  const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  (void)kwargs;
   CHECK(args.size() == 3)
       << "pld.tensor.all_to_all requires 3 args (input, target, signal) for InCore composite, but got "
       << args.size();
@@ -512,6 +526,9 @@ TypePtr DeduceTensorAllToAllType(const std::vector<ExprPtr>& args,
   CheckDimAgreesIfStatic(signal_type->shape_[0], input_type->shape_[0], "pld.tensor.all_to_all", "signal",
                          "input");
 
+  // Optional InCore split-phase kwarg.
+  static_cast<void>(GetKwargOr<bool>(kwargs, "defer", false));
+
   // Return target in-place (window-as-result, same idiom as reduce_scatter / broadcast).
   return target_type;
 }
@@ -528,13 +545,16 @@ REGISTER_OP("pld.tensor.all_to_all")
         "window-bound DistributedTensor [NR, SIZE] that receives the result "
         "in-place — after the barrier ``target[src, :]`` holds the chunk "
         "received from rank ``src``.  ``signal`` is a window-bound INT32 "
-        "barrier tensor.  Lowered by LowerCompositeOps into a 2-phase push "
+        "barrier tensor.  Optional `defer=True` registers the wait as "
+        "pld.system.defer_wait on the enclosing InCore task (split-phase).  "
+        "Lowered by LowerCompositeOps into a 2-phase push "
         "decomposition (push → barrier → return target).")
     .set_op_category("DistributedOp")
     .add_argument("input", "Plain Tensor [NR, SIZE] with per-destination chunks (Input)")
     .add_argument("target",
                   "Window-bound DistributedTensor [NR, SIZE] — receives the result in-place (InOut)")
     .add_argument("signal", "Window-bound INT32 DistributedTensor used as cross-rank barrier (InOut)")
+    .set_attr<bool>("defer")
     .no_memory_spec()
     // is notify+wait.
     // Composite collective — the data destination is overwritten, not updated:
@@ -765,6 +785,9 @@ TypePtr DeduceTensorAllToAllVType(const std::vector<ExprPtr>& args,
   CheckStaticContiguousPayload(counts_type, "send_counts");
   CheckStaticContiguousPayload(recv_type, "recv_counts");
 
+  // Optional InCore split-phase kwarg.
+  static_cast<void>(GetKwargOr<bool>(kwargs, "defer", false));
+
   // Window-as-result: return target
   return target_type;
 }
@@ -807,6 +830,7 @@ REGISTER_OP("pld.tensor.all_to_all_v")
                   "Window-bound INT32 DistributedTensor [NR, 1] — after the barrier, "
                   "recv_counts[src, 0] holds how many rows src sent to this rank (InOut)")
     .set_attr<int>("core_num")
+    .set_attr<bool>("defer")
     .no_memory_spec()
     // stays read-only.
     // Composite collective — the data destination is overwritten, not updated:
@@ -853,6 +877,9 @@ TypePtr DeduceTensorReduceScatterType(const std::vector<ExprPtr>& args,
   CHECK(op_value >= static_cast<int>(ReduceOp::kSum) && op_value <= static_cast<int>(ReduceOp::kProd))
       << "pld.tensor.reduce_scatter op must be ReduceOp.Sum, Max, Min, or Prod (got int " << op_value << ")";
 
+  CHECK(!GetKwargOr<bool>(kwargs, "defer", false))
+      << "pld.tensor.reduce_scatter does not support defer=True (multi-generation barrier)";
+
   // Result type: same as target (in-place rebind — rank r's row now holds
   // the reduced chunk r).
   return args[0]->GetType();
@@ -867,6 +894,7 @@ REGISTER_OP("pld.tensor.reduce_scatter")
         "all NR chunks before the call. After the call, rank r's row [r, 0:SIZE] holds the "
         "reduced value of chunk r. `signal` is a window-bound INT32 matrix for the cross-rank "
         "barrier. `op` selects the reduction operator (Sum, Max, Min, Prod). "
+        "`defer=True` is rejected (multi-generation barrier). "
         "InCore path: lowered to a 5-phase decomposition by LowerCompositeOps. "
         "HOST builtin path: lowered to builtin.tensor.reduce_scatter per chip by "
         "LowerHostTensorCollectives.")
@@ -874,6 +902,7 @@ REGISTER_OP("pld.tensor.reduce_scatter")
     .add_argument("target", "Window-bound DistributedTensor[NR, SIZE] (InOut)")
     .add_argument("signal", "Window-bound INT32 DistributedTensor used as cross-rank barrier (InOut)")
     .set_attr<int>("op")
+    .set_attr<bool>("defer")
     .no_memory_spec()
     // Composite collective — same five-phase shape as allreduce.
     .set_arg_effect(0, ArgEffect::ReadWrite)

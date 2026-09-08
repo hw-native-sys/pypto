@@ -1565,7 +1565,12 @@ class TestOutlineSubmitTaskId:
             passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
 
     def test_terminal_deferred_waiter_needs_no_task_id_capture(self):
-        """A fire-and-forget terminal waiter is a valid ordinary task dispatch."""
+        """A fire-and-forget terminal waiter is a valid ordinary task dispatch.
+
+        Source DSL may omit ``as tid``; outline still emits ``Submit`` with a
+        synthetic TaskId so deferred waiters share one launch shape with
+        split-phase composites (plain Call cannot carry chained deps).
+        """
 
         @pl.program
         class Before:
@@ -1581,16 +1586,17 @@ class TestOutlineSubmitTaskId:
 
         main = after.get_function("main")
         assert main is not None
-        calls: list[ir.Call] = []
+        submits: list[ir.Submit] = []
 
-        class _CallCollector(ir.IRVisitor):
-            def visit_call(self, op):
-                if isinstance(op.op, ir.GlobalVar):
-                    calls.append(op)
-                super().visit_call(op)
+        class _SubmitCollector(ir.IRVisitor):
+            def visit_submit(self, op):
+                submits.append(op)
+                super().visit_submit(op)
 
-        _CallCollector().visit_stmt(main.body)
-        assert len(calls) == 1
+        _SubmitCollector().visit_stmt(main.body)
+        assert len(submits) == 1
+        assert isinstance(submits[0].op, ir.GlobalVar)
+        assert submits[0].op.name == "terminal_waiter"
 
     def test_deferred_waiter_rejects_nested_early_resolve_launch(self):
         """An outer launch must not silently own waiter scheduling semantics."""

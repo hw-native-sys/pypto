@@ -96,5 +96,5 @@ pass 完成后会给函数写入 `mx_tensor_views_blocked` 属性。这一来源
 ## 另请参阅
 
 - [BlockNzTensorViews](15-block_nz_tensor_views.md)
-- [MaterializeTensorStrides](33-materialize_tensor_strides.md)
+- [MaterializeTensorStrides](34-materialize_tensor_strides.md)
 - [InsertMxScaleAddr](21-insert_mx_scale_addr.md)

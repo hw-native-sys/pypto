@@ -135,7 +135,13 @@ enum class IRProperty : uint64_t {
                          ///< written FunctionType::Inline and spliced away by InlineFunctions. Decidable
                          ///< on the user's own IR, so it is a structural property verified at every pass
                          ///< boundary
-  kCount                 ///< Sentinel (must be last)
+  DeferredCompositePlacementValid,  ///< Every ``pld.tensor.*(defer=True)`` Call sits in a task-level
+                                    ///< ``pl.at(CORE_GROUP)`` body without ``allow_early_resolve`` or a
+                                    ///< dispatch predicate (deferred-placement check). Decidable on the
+                                    ///< user's own IR, so it is a structural property verified at pipeline
+                                    ///< input — catching bare Orchestration placements that
+                                    ///< LowerCompositeOps would otherwise skip
+  kCount                            ///< Sentinel (must be last)
 };
 
 static_assert(
@@ -270,7 +276,8 @@ enum class VerificationLevel {
  * AivSplitValid, TileMemoryInferred, HardSyncallOccupancyValid,
  * IterArgCarryClassified, RuntimeScopesMaterialized,
  * DistTensorCtxMaterialized, GraphBoundaryLegalized, AccToGmStoreValid,
- * AccCompactValid, AtomicAddDtypeValid, AccStorePhaseValid} —
+ * AccCompactValid, AtomicAddDtypeValid, AccStorePhaseValid,
+ * DeferredCompositePlacementValid} —
  * lightweight checks that catch the most common IR errors.
  */
 const IRPropertySet& GetVerifiedProperties();
@@ -282,7 +289,7 @@ const IRPropertySet& GetVerifiedProperties();
  * in per-pass PassProperties. Returns {TypeChecked, BreakContinueValid,
  * NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore,
  * InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly,
- * AtomicAddDtypeValid, NoScalarKernelReturn}.
+ * AtomicAddDtypeValid, NoScalarKernelReturn, DeferredCompositePlacementValid}.
  */
 const IRPropertySet& GetStructuralProperties();
 

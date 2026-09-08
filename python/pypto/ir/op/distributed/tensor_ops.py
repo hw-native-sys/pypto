@@ -343,6 +343,7 @@ def allreduce(
 def barrier(
     signal: Expr,
     *,
+    defer: bool = False,
     span: Span | None = None,
 ) -> Call:
     """Build a ``pld.tensor.barrier(signal)`` Call.
@@ -354,10 +355,12 @@ def barrier(
     as :func:`allreduce`).
 
     LowerCompositeOps expands this into a notify-all / wait-all sequence;
-    this Call never survives past that pass.
+    this Call never survives past that pass.  ``defer=True`` registers the
+    wait as ``pld.system.defer_wait`` on the enclosing InCore task.
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    return _ir_core.create_op_call("pld.tensor.barrier", [signal], {}, actual_span)
+    kwargs: dict = {"defer": defer} if defer else {}
+    return _ir_core.create_op_call("pld.tensor.barrier", [signal], kwargs, actual_span)
 
 
 def broadcast(
@@ -365,6 +368,7 @@ def broadcast(
     signal: Expr,
     root: int,
     *,
+    defer: bool = False,
     span: Span | None = None,
 ) -> Call:
     """Build a ``pld.tensor.broadcast(target, signal, root=...)`` Call.
@@ -374,10 +378,14 @@ def broadcast(
     ``target``'s :class:`ir.DistributedTensorType` (in-place rebind).
 
     LowerCompositeOps expands this into notify-all / wait-all + tile.create +
-    pld.tile.get; this Call never survives past that pass.
+    pld.tile.get; this Call never survives past that pass.  ``defer=True``
+    registers the wait as ``pld.system.defer_wait`` on the enclosing InCore task.
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    return _ir_core.create_op_call("pld.tensor.broadcast", [target, signal], {"root": root}, actual_span)
+    kwargs: dict = {"root": root}
+    if defer:
+        kwargs["defer"] = True
+    return _ir_core.create_op_call("pld.tensor.broadcast", [target, signal], kwargs, actual_span)
 
 
 def allgather(
@@ -385,6 +393,7 @@ def allgather(
     target: Expr,
     signal: Expr,
     *,
+    defer: bool = False,
     span: Span | None = None,
 ) -> Call:
     """Build a ``pld.tensor.allgather(input, target, signal)`` Call.
@@ -403,15 +412,21 @@ def allgather(
     **HOST builtin:** distinct input/target windows; lowered to
     ``builtin.tensor.allgather`` per chip (in-kernel TPUT push + barrier).
 
+    ``defer=True`` (InCore only): push+notify run in the enclosing task; the
+    wait is registered as ``pld.system.defer_wait`` so consumers can overlap
+    via ``deps=[tid]``.
+
     Args:
         local_data: This rank's single chunk — Tensor [1, SIZE] (InCore) or
             [1, SIZE] DistributedTensor staging window (HOST).
         target: DistributedTensor [NR, SIZE] result window (window-as-result).
         signal: Window-bound INT32 barrier tensor.
+        defer: If True, split-phase wait on the enclosing InCore task.
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     _args: list[Expr] = [local_data, target, signal]
-    return _ir_core.create_op_call("pld.tensor.allgather", _args, {}, actual_span)
+    kwargs: dict = {"defer": True} if defer else {}
+    return _ir_core.create_op_call("pld.tensor.allgather", _args, kwargs, actual_span)
 
 
 def reduce_scatter(
@@ -443,6 +458,7 @@ def all_to_all(
     target: Expr,
     signal: Expr,
     *,
+    defer: bool = False,
     span: Span | None = None,
 ) -> Call:
     """Build a ``pld.tensor.all_to_all(...)`` Call.
@@ -451,10 +467,14 @@ def all_to_all(
     [NR, SIZE] target (window-as-result), INT32 barrier signal.  Lowered by
     LowerCompositeOps into a 2-phase push decomposition (push via
     ``pld.tensor.put`` / TPUT → barrier → return target).
+
+    ``defer=True`` registers the wait as ``pld.system.defer_wait`` on the
+    enclosing InCore task (split-phase).
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     _args: list[Expr] = [input, target, signal]
-    return _ir_core.create_op_call("pld.tensor.all_to_all", _args, {}, actual_span)
+    kwargs: dict = {"defer": True} if defer else {}
+    return _ir_core.create_op_call("pld.tensor.all_to_all", _args, kwargs, actual_span)
 
 
 def all_to_all_v(
@@ -465,6 +485,7 @@ def all_to_all_v(
     recv_counts: Expr,
     *,
     core_num: int = 1,
+    defer: bool = False,
     span: Span | None = None,
 ) -> Call:
     """Build a ``pld.tensor.all_to_all_v(...)`` Call.
@@ -512,7 +533,10 @@ def all_to_all_v(
 
     actual_span = _get_span_or_capture(span, frame_offset=1)
     _args: list[Expr] = [input, target, signal, send_counts, recv_counts]
-    return _ir_core.create_op_call("pld.tensor.all_to_all_v", _args, {"core_num": core_num}, actual_span)
+    kwargs: dict = {"core_num": core_num}
+    if defer:
+        kwargs["defer"] = True
+    return _ir_core.create_op_call("pld.tensor.all_to_all_v", _args, kwargs, actual_span)
 
 
 __all__ = [

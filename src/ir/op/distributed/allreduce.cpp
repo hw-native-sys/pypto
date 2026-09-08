@@ -110,6 +110,9 @@ TypePtr DeduceTensorAllReduceType(const std::vector<ExprPtr>& args,
   auto core_num = GetRequiredKwarg<int>(kwargs, "core_num", "pld.tensor.allreduce");
   CHECK(core_num > 0) << "pld.tensor.allreduce core_num must be positive, got " << core_num;
 
+  CHECK(!GetKwargOr<bool>(kwargs, "defer", false))
+      << "pld.tensor.allreduce does not support defer=True (multi-generation barrier)";
+
   // Result type: same DistributedTensorType as the input target (in-place
   // reduce — the same view holds the reduced value on every rank). Preserve
   // the window_buffer_ back-reference so downstream passes still see the
@@ -139,6 +142,7 @@ REGISTER_OP("pld.tensor.allreduce")
     .set_attr<int>("op")
     .set_attr<std::string>("mode")
     .set_attr<int>("core_num")
+    .set_attr<bool>("defer")
     .no_memory_spec()
     // Composite collective — target is reduced in place per chunk; signal is written by notify and read by
     // wait.

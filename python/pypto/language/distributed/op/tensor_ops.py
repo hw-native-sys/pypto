@@ -770,6 +770,8 @@ def allreduce(
 
 def barrier(
     signal: DistributedTensor,
+    *,
+    defer: bool = False,
 ) -> DistributedTensor:
     """Cross-rank barrier synchronisation.
 
@@ -787,17 +789,21 @@ def barrier(
     that restarts at generation 1, so ``sig`` may be reused for back-to-back
     barriers, including inside ``for`` / ``while`` / ``if``.
 
+    ``defer=True`` registers the wait as ``pld.system.defer_wait`` on the
+    enclosing ``pl.at`` task so a later scope can depend via ``deps=[tid]``.
+
     Args:
         signal: Window-bound INT32 :class:`pld.DistributedTensor` whose
             shape provides one cell per rank — rank-1 ``[world_size]`` or
             rank-2 ``[world_size, 1]``.
+        defer: If True, split-phase wait on the enclosing InCore task.
 
     Returns:
         The rebound :class:`pld.DistributedTensor` view of ``signal``.
     """
     signal_expr: Expr
     (signal_expr,) = _unwrap_distributed_tensors("pld.tensor.barrier", signal=signal)
-    call = _ir_tensor.barrier(signal_expr)
+    call = _ir_tensor.barrier(signal_expr, defer=defer)
     return DistributedTensor(expr=call)
 
 
@@ -806,6 +812,7 @@ def broadcast(
     signal: DistributedTensor,
     *,
     root: int,
+    defer: bool = False,
 ) -> DistributedTensor:
     """Broadcast root rank's data to all ranks.
 
@@ -846,7 +853,7 @@ def broadcast(
     target_expr, signal_expr = _unwrap_distributed_tensors(
         "pld.tensor.broadcast", target=target, signal=signal
     )
-    call = _ir_tensor.broadcast(target_expr, signal_expr, root)
+    call = _ir_tensor.broadcast(target_expr, signal_expr, root, defer=defer)
     return DistributedTensor(expr=call)
 
 
@@ -854,6 +861,8 @@ def allgather(
     local_data: Tensor | DistributedTensor,
     target: DistributedTensor,
     signal: DistributedTensor,
+    *,
+    defer: bool = False,
 ) -> DistributedTensor:
     """All-gather: gather data from all ranks (push-based).
 
@@ -884,6 +893,9 @@ def allgather(
             tensor — rank-1 ``[world_size]`` or rank-2 ``[world_size, 1]``.
             Reusable across calls — see :func:`allreduce` for the
             shared barrier protocol.
+        defer: If True, push+notify run in the enclosing ``pl.at`` task and
+            the wait is registered as ``pld.system.defer_wait`` so later
+            scopes can overlap via ``deps=[tid]``.
 
     Returns:
         The ``target`` :class:`pld.DistributedTensor` (window-as-result).
@@ -892,7 +904,7 @@ def allgather(
         "pld.tensor.allgather", target=target, signal=signal
     )
     input_expr = _unwrap(local_data)
-    call = _ir_tensor.allgather(input_expr, target_expr, signal_expr)
+    call = _ir_tensor.allgather(input_expr, target_expr, signal_expr, defer=defer)
     return DistributedTensor(expr=call)
 
 
@@ -942,6 +954,8 @@ def all_to_all(
     input: Tensor | DistributedTensor,
     target: DistributedTensor,
     signal: DistributedTensor,
+    *,
+    defer: bool = False,
 ) -> DistributedTensor:
     """All-to-all: symmetric personalized exchange (push-based).
 
@@ -980,7 +994,7 @@ def all_to_all(
         "pld.tensor.all_to_all", target=target, signal=signal
     )
     input_expr = _unwrap(input)
-    call = _ir_tensor.all_to_all(input_expr, target_expr, signal_expr)
+    call = _ir_tensor.all_to_all(input_expr, target_expr, signal_expr, defer=defer)
     return DistributedTensor(expr=call)
 
 
@@ -992,6 +1006,7 @@ def all_to_all_v(
     recv_counts: DistributedTensor,
     *,
     core_num: int = 1,
+    defer: bool = False,
 ) -> DistributedTensor:
     """All-to-all: variable-size personalized exchange (push-based, window-as-result).
 
@@ -1084,7 +1099,13 @@ def all_to_all_v(
     input_expr = _unwrap(input)
     counts_expr = _unwrap(send_counts)
     call = _ir_tensor.all_to_all_v(
-        input_expr, target_expr, signal_expr, counts_expr, recv_expr, core_num=core_num
+        input_expr,
+        target_expr,
+        signal_expr,
+        counts_expr,
+        recv_expr,
+        core_num=core_num,
+        defer=defer,
     )
     return DistributedTensor(expr=call)
 

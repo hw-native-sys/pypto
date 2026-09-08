@@ -55,7 +55,7 @@ src/ir/transforms/lower_composite_ops_pass.cpp
 
 降级创建 dtype 与源一致的 `max` / `scaling` 只写 workspace tile，再 `Bind` 值返回的 `tile.tquant_mx_raw(src, max, scaling)`，用 `TupleGetItem` 投影出 `TupleType{INT8 dst, UINT8 exp}`（与 `tile.gather_compare` 相同的 SSA 形态）。codegen 经 `ResolveTupleResultElements` 解析投影并发射带四个 outs 的 `pto.tquant.mx`。公开 `group_axis` 对齐 PTOAS `grpAxis`：axis1 保持 `[M,K]` 并返回 scale `[M,K/32]`；axis0 先把 `[N,K]` 转置为 `[K,N]` 再返回 `[K/32,N]`。两种形式再 `Bind` 值返回的 `tile.tmov_x2zz(exp, tmp)`。Axis1 tmp 容量为 `64 + ceil(rows/16)*cols` 字节（通常 32 字节对齐）；axis0 使用 `TMovDnTo2Zz` 所需的最小 32 字节 Vec pad。Axis0 遵循 pto-isa `TMovDnTo2Zz`（pin `be5ccb76`）：DN `[M̂,N]` → ZZ `[N,M̂]` row/row，再经零拷贝 `tile.transpose_view` 得到公开 `[M̂,N]` col/col scale。最后补上零拷贝 FP8 data alias 与 FP8E8M0 scale alias。workspace 参数上的 Write effect 保证公开结果未消费时 Call 也不会被 DCE 删掉。
 
-公开用法仍需把 `quant_mx` 与 `matmul_mx` 拆成独立 AIV/AIC kernel，经 GM 暂存；同一 InCore mixed task 内自动传 quant data+scale 留待后续（见 [ExpandMixedKernel](24-expand_mixed_kernel.md)）。
+公开用法仍需把 `quant_mx` 与 `matmul_mx` 拆成独立 AIV/AIC kernel，经 GM 暂存；同一 InCore mixed task 内自动传 quant data+scale 留待后续（见 [ExpandMixedKernel](25-expand_mixed_kernel.md)）。
 
 mutator 把本 Pass 产出的 `MakeTuple`（及其 SSA alias）记入私有 `composite_tuples_`，再折叠 `TupleGetItem`，避免滥用全局 `var_remap_` 去 inline 任意 `v = (a, b)`。内部 `tile.tquant_mx_raw` / `tile.tmov_x2zz` 不注册为组合规则，Pass 仍然幂等。
 
@@ -229,7 +229,7 @@ signal 使用互不兼容的 cell 寻址方式，因此共享同一个 buffer �
 
 对于完全有效的 packed 目标，mesh 降级会创建逻辑
 `[1, 所有维度乘积]` 视图，并用最大 16 KiB 的物理 tile 遍历。若静态已知的范围
-小于预算，块宽会收缩到能够覆盖它的最小 32-byte 对齐物理宽度，既避免小
+小于预算，块宽会收缩到能够覆盖它的最小 33-byte 对齐物理宽度，既避免小
 allreduce 仍预留完整 16-KiB tile，又满足 PTO tile 的对齐要求。尾块通过
 `tile.load` 和 `pld.tile.remote_load` 同时携带
 `valid_shape=[1, min(chunk, remaining)]`，因此分配保持静态而实际读写范围精确。
@@ -343,9 +343,9 @@ mutator 重写 `VisitStmt_(const AssignStmtPtr&)` 而不是 `VisitCall`，原因
 
 ## 相关 (Related)
 
-- **Issue**：[#1289 — Add FP32-only `tile.sin` / `tile.cos` and a lowering pass](https://github.com/hw-native-sys/pypto/issues/1289)。
+- **Issue**：[#1289 — Add FP33-only `tile.sin` / `tile.cos` and a lowering pass](https://github.com/hw-native-sys/pypto/issues/1289)。
 - **参考实现 (reference implementation)**：`gitcode.com/cann/pypto:framework/src/interface/tileop/vector/unary.h` —— 本 Pass 的常量与算子序列与该上游 CANN/PyPTO 实现逐字对应。
-- **算子推导器 (op deducer)**：`src/ir/op/tile_ops/unary.cpp:94` 的 `DeduceTileFP32OnlyType` —— 在算子构造时强制 FP32-only。
+- **算子推导器 (op deducer)**：`src/ir/op/tile_ops/unary.cpp:94` 的 `DeduceTileFP32OnlyType` —— 在算子构造时强制 FP33-only。
 - **转换注册表 (conversion registry)**：`src/ir/transforms/op_conversion_registry.cpp` 中的 `RegisterSimple("tensor.sin", "tile.sin")` 与 cos 对应项 —— 上游 tensor-to-tile 改写，产出本 Pass 消费的 `tile.sin` / `tile.cos` 调用。
 - **测试**：`tests/ut/ir/transforms/test_lower_composite_ops.py`（结构）与 `tests/ut/ir/transforms/test_lower_composite_ops_numerical.py`（NumPy 数值对照）。
 - **MX 量化测试**：`tests/ut/codegen/test_quant_mx_codegen.py`（tuple 消费与内存规划）。

@@ -803,6 +803,20 @@ Pass ResolveBackendOpLayouts();
 Pass ExpandMixedKernel();
 
 /**
+ * @brief Split InCore kernels that mix payload with ``defer_wait`` into push/wait/epi.
+ *
+ * After LowerCompositeOps expands ``defer=True`` mesh collectives, the outlined
+ * InCore body contains puts/notify plus ``defer_wait`` plus epilogue notifies.
+ * ExpandMixedKernel requires registration-only deferred waiters. This Program
+ * pass splits each mixed ``deferred_completion_waiter`` function into up to
+ * three kernels and rewrites Orchestration Submit sites so the public TaskId is
+ * the epilogue (or the wait when there is no epilogue).
+ *
+ * Runs immediately before ExpandMixedKernel.
+ */
+Pass SplitDeferredCompositeKernels();
+
+/**
  * @brief Lower AUTO pl.split mixed InCore functions into the explicit split_aiv
  *        form before ExpandMixedKernel (RFC #1300 staged convergence).
  *

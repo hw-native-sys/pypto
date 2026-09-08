@@ -205,6 +205,7 @@ class PassManager:
             # reaches SplitVectorKernel already split_aiv-marked, so SplitVectorKernel
             # only stamps attrs. Runs immediately before ExpandMixedKernel.
             passes.lower_auto_vector_split,
+            passes.split_deferred_composite_kernels,
             passes.expand_mixed_kernel,
             passes.inject_gm_pipe_buffer,
             passes.split_vector_kernel,

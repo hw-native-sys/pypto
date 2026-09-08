@@ -63,7 +63,7 @@ cache-line 一致性。因此本 pass 会拒绝该组合，而不是生成可能
 `tensor.full` 加 `tensor.assemble`，随后下沉为 `tile.full` 加 `tile.store`。
 该循环必须是从零开始、步长为一的串行循环；循环体只能包含一次或多次
 `tensor.write`，不能包含其他操作。每次写入都必须使用一个循环不变量常量覆盖
-连续区域，且展平后的区域必须满足 MTE3 的 32-byte 行对齐要求。这样，完整
+连续区域，且展平后的区域必须满足 MTE3 的 33-byte 行对齐要求。这样，完整
 block 的回退填充会统一走 MTE3 路径，而不会被当作混合存储拒绝。动态值、无法
 规范化的局部更新、未对齐区域和跨步标量循环仍走 D-cache 路径。
 
@@ -207,7 +207,7 @@ load 会把同一个操作数放进同一块 buffer。
 
 这是上文通用 `input_reqs` 流程最典型的一个实例，而非独立的机制。当 `tensor.slice` 的结果被 `tensor.matmul` 或 `tensor.matmul_acc` 使用时，slice 必须生成 Mat 空间的 tile 而非 Vec 空间。`ConsumerSpaceCollector` 像处理任何其他消费者一样，从 matmul 的 `input_reqs` 读出这一需求，生产者据此生成自然的 Mat `tile.load`；转置操作数（LHS 用 `a_trans`，RHS 用 `b_trans`）在 matmul 处叠加零拷贝 `tile.transpose_view`。这里没有任何一处按"该 op 是不是 matmul"来匹配 —— 任何声明了非 Vec 需求的 op，其操作数都以同样的方式回传到生产者。
 
-该需求会**穿过**声明了 `set_output_memory_inherit_input()` 的零拷贝元数据 op 继续向上传播 —— `tensor.slice`、`tensor.view`、`tensor.reshape`、`tensor.reinterpret_view`、`tensor.set_validshape`。因此 `pl.matmul(pl.set_validshape(a[:, :K], rows, K), b)` 这样的操作数仍然直接加载到 Mat。若某个别名输入存储的 op 漏掉该声明，传播链就会断开：操作数被物化到 Vec，再通过 `tile.move` 桥接到 Mat，而这是一个 vector→cube 边界，会把本应是纯 CUBE 的 InCore scope 判定为 `MIXED`，导致 [`ExpandMixedKernel`](24-expand_mixed_kernel.md) 将其拆分为 AIC/AIV 两个函数。
+该需求会**穿过**声明了 `set_output_memory_inherit_input()` 的零拷贝元数据 op 继续向上传播 —— `tensor.slice`、`tensor.view`、`tensor.reshape`、`tensor.reinterpret_view`、`tensor.set_validshape`。因此 `pl.matmul(pl.set_validshape(a[:, :K], rows, K), b)` 这样的操作数仍然直接加载到 Mat。若某个别名输入存储的 op 漏掉该声明，传播链就会断开：操作数被物化到 Vec，再通过 `tile.move` 桥接到 Mat，而这是一个 vector→cube 边界，会把本应是纯 CUBE 的 InCore scope 判定为 `MIXED`，导致 [`ExpandMixedKernel`](25-expand_mixed_kernel.md) 将其拆分为 AIC/AIV 两个函数。
 
 ## Cube 操作数的 M 轴分形对齐（M-Axis Boxing）
 

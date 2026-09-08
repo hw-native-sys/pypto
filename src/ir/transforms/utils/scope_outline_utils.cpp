@@ -1482,15 +1482,20 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
   }
 
   auto deferred_wait = DeferredWaitContractValidator::Validate(op->body_, op->span_);
-  if (deferred_wait.has_deferred_wait) {
+  const bool has_deferred_composite = ContainsDeferredCompositeDefer(op->body_);
+  const bool deferred_waiter_candidate = deferred_wait.has_deferred_wait || has_deferred_composite;
+  if (deferred_waiter_candidate) {
     CHECK_SPAN(op->GetScopeKind() == ScopeKind::InCore, op->span_)
-        << "pld.system.defer_wait must be the body of a CORE_GROUP / InCore task";
+        << (has_deferred_composite ? "pld.tensor.*(defer=True)" : "pld.system.defer_wait")
+        << " must be the body of a CORE_GROUP / InCore task";
     CHECK_SPAN(!inside_nested_scope_body_, op->span_)
-        << "pld.system.defer_wait must be in a task-level pl.at(CORE_GROUP) scope; nesting the "
+        << (has_deferred_composite ? "pld.tensor.*(defer=True)" : "pld.system.defer_wait")
+        << " must be in a task-level pl.at(CORE_GROUP) scope; nesting the "
            "waiter under pl.spmd or another task-launch scope is unsupported because the outer "
            "launch owns dispatch predicate and early-resolve semantics";
     CHECK_SPAN(!op->GetAttr<ExprPtr>(kAttrPredicate, nullptr), op->span_)
-        << "pld.system.defer_wait task cannot use a dispatch predicate; every submitted waiter "
+        << (has_deferred_composite ? "pld.tensor.*(defer=True)" : "pld.system.defer_wait")
+        << " task cannot use a dispatch predicate; every submitted waiter "
            "must register its completion condition";
   }
 
@@ -1926,7 +1931,7 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
     }
   };
   auto append_deferred_completion_waiter_attr = [&]() {
-    if (deferred_wait.has_deferred_wait) {
+    if (deferred_wait.has_deferred_wait || has_deferred_composite) {
       outlined_attrs.emplace_back(kAttrDeferredCompletionWaiter, true);
     }
   };
@@ -2105,9 +2110,11 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
   // Threaded onto the synthesised Submit below — same hint as
   // ``pl.submit(..., allow_early_resolve=True)``.
   bool scope_allow_early_resolve = op->GetAttr<bool>("allow_early_resolve", false);
-  CHECK_SPAN(!deferred_wait.has_deferred_wait || !scope_allow_early_resolve, op->span_)
-      << "pl.at(...) containing pld.system.defer_wait cannot use "
-         "allow_early_resolve=True; the waiter's TaskId must remain unresolved until its "
+  CHECK_SPAN(!(deferred_wait.has_deferred_wait || has_deferred_composite) || !scope_allow_early_resolve,
+             op->span_)
+      << "pl.at(...) containing "
+      << (has_deferred_composite ? "pld.tensor.*(defer=True)" : "pld.system.defer_wait")
+      << " cannot use allow_early_resolve=True; the waiter's TaskId must remain unresolved until its "
          "registered signal condition is satisfied";
   // Dispatch predicate (``with pl.spmd(..., predicate=(t[i] > 0)):`` or
   // ``with pl.at(level=pl.Level.CORE_GROUP, predicate=...):``). Rides on the
@@ -2133,11 +2140,16 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
   // Dependency edges (or an early-resolve flag, or a dispatch predicate)
   // force the Submit shape: deps live in the typed ``Submit::deps_`` field,
   // the flag in ``Submit::allow_early_resolve_`` and the predicate in
-  // ``Submit::predicate_`` — none has a plain-Call carrier. A scope written
+  // ``Submit::predicate_`` — none has a plain-Call carrier. Deferred-completion
+  // waiters (``defer_wait`` / ``pld.tensor.*(defer=True)``) also force Submit:
+  // ``SplitDeferredCompositeKernels`` rewrites the launch into push→wait→epi
+  // with chained TaskId deps, which a plain Call cannot carry. A scope written
   // without ``as tid`` gets a synthetic (unused) TaskId Var; DCE keeps the
   // Submit itself alive (task launches are effectful) and codegen skips the
   // unconsumed trailing tuple element.
-  if ((!scope_dep_edges.empty() || scope_allow_early_resolve || scope_predicate) && !scope_task_id_var) {
+  if ((!scope_dep_edges.empty() || scope_allow_early_resolve || scope_predicate ||
+       deferred_wait.has_deferred_wait || has_deferred_composite) &&
+      !scope_task_id_var) {
     scope_task_id_var = std::make_shared<Var>(GenerateFreshSSAName("tid"),
                                               std::make_shared<ScalarType>(DataType::TASK_ID), op->span_);
     var_types_[scope_task_id_var.get()] = scope_task_id_var->GetType();

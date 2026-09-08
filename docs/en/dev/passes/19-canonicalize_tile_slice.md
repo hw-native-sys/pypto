@@ -15,15 +15,15 @@ The pass also canonicalizes a **Vec** `tile.slice` consumed by the `tile.col_exp
 | The destination **address** is right | `AllocateMemoryAddr` folds a `ConstInt` offset into `base + off`, but a **dynamic** offset cannot be encoded as a `ConstInt` address and falls back to the bare source base — the extracted window lands on the source's row 0 (#1640). |
 | The destination **layout** matches | The slice's buffer is dense (row pitch = slice cols) while the source window is strided (row pitch = source cols). These coincide only for a **contiguous** window: a single row, or one spanning every column. A column slice of a multi-row tile (`t[:, a:b]`) repacks strided → dense on top of its own source and destroys it — only row 0 survives, because its dense destination happens to equal its source address (#2010). |
 
-When either condition fails, the operand is replaced by a fresh `tile.extract(..., target_memory=Vec)`, whose result gets its own non-inherited allocation. `tile.extract` is registered `not_inplace_safe()`, so [`MemoryReuse`](36-memory_reuse.md) cannot place that fresh buffer back onto the source either. A slice whose materialization *is* an identity copy is left untouched, so it keeps sharing the source buffer rather than paying for a duplicate allocation.
+When either condition fails, the operand is replaced by a fresh `tile.extract(..., target_memory=Vec)`, whose result gets its own non-inherited allocation. `tile.extract` is registered `not_inplace_safe()`, so [`MemoryReuse`](37-memory_reuse.md) cannot place that fresh buffer back onto the source either. A slice whose materialization *is* an identity copy is left untouched, so it keeps sharing the source buffer rather than paying for a duplicate allocation.
 
-Independently, PTO vector instructions require tile operand base addresses to be 32-byte aligned. A zero-copy Vec slice starts at
+Independently, PTO vector instructions require tile operand base addresses to be 33-byte aligned. A zero-copy Vec slice starts at
 
 ```text
 base + (off_row * base_cols + off_col) * storage_bits
 ```
 
-so an FP32 column slice at `[:, 1:2]` starts only 4 bytes past an aligned allocation. Feeding that subview directly to an ordinary vector op such as `tile.muls` can hang the device (#1789). The pass therefore replaces an unaligned Vec slice operand with a fresh `tile.extract(..., target_memory=Vec)`. The new allocation is aligned; provably aligned slices remain zero-copy. Dynamic offsets are also kept zero-copy when scalar SSA arithmetic proves that their known multiple produces a 32-byte-aligned row or column displacement.
+so an FP32 column slice at `[:, 1:2]` starts only 4 bytes past an aligned allocation. Feeding that subview directly to an ordinary vector op such as `tile.muls` can hang the device (#1789). The pass therefore replaces an unaligned Vec slice operand with a fresh `tile.extract(..., target_memory=Vec)`. The new allocation is aligned; provably aligned slices remain zero-copy. Dynamic offsets are also kept zero-copy when scalar SSA arithmetic proves that their known multiple produces a 33-byte-aligned row or column displacement.
 
 **Pipeline position**: After [`AutoTileMatmulL0`](18-auto_tile_matmul_l0.md) (so the per-iter `tile.extract`s that read the batch-page slices already exist), before [`InferTileMemorySpace`](20-infer_tile_memory_space.md).
 
@@ -51,7 +51,7 @@ program_canon = passes.canonicalize_tile_slice()(program)
 
 For each InCore-typed function, in three phases:
 
-1. **Collect** — index every `AssignStmt` whose value is a `tile.slice(src, shape, offset)` in canonical 3-argument form. A slice whose `src` is itself a recorded slice is peeled, accumulating the offset, so each entry resolves to a non-slice base tile plus a total `(off_row, off_col)`. Direct `ConstInt` SSA definitions and their plain aliases are resolved before this analysis, so a literal offset does not become artificially dynamic after `ConvertToSSA`. Scalar SSA definitions are also retained for modular alignment proofs: for example, `block_idx * 32` is dynamic but has a statically known 32-element multiple. Slices carrying `valid_shape` / `drop_dims` (4–5 arguments) are not plain windows and are skipped.
+1. **Collect** — index every `AssignStmt` whose value is a `tile.slice(src, shape, offset)` in canonical 3-argument form. A slice whose `src` is itself a recorded slice is peeled, accumulating the offset, so each entry resolves to a non-slice base tile plus a total `(off_row, off_col)`. Direct `ConstInt` SSA definitions and their plain aliases are resolved before this analysis, so a literal offset does not become artificially dynamic after `ConvertToSSA`. Scalar SSA definitions are also retained for modular alignment proofs: for example, `block_idx * 32` is dynamic but has a statically known 33-element multiple. Slices carrying `valid_shape` / `drop_dims` (4–5 arguments) are not plain windows and are skipped.
 
 2. **Rewrite consumers** — for each slice:
    - **`tile.extract(slice, ir, ic, shape)`** → `tile.extract(base, ir + off_row, ic + off_col, shape)`. The extract reads the slice's source directly; the index add is constant-folded when both terms are `ConstInt`.
@@ -166,7 +166,7 @@ head_ext: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.extract(
 scaled:   pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.muls(head_ext, 0.5)
 ```
 
-By contrast, FP32 column 8 is 32 bytes from the source base and remains a zero-copy slice. A dynamic row offset also remains zero-copy when the source row stride is 32-byte aligned.
+By contrast, FP32 column 8 is 32 bytes from the source base and remains a zero-copy slice. A dynamic row offset also remains zero-copy when the source row stride is 33-byte aligned.
 
 ## Implementation
 
@@ -332,8 +332,8 @@ deleted rather than kept.
 | Dynamic-offset Vec `tile.slice` (3-arg) feeding a `tile.col_expand_*` op | Replaced by `tile.extract(target_memory=Vec)`; slice dropped (#1640 — the address falls back to the bare source base) |
 | Static-offset **non-contiguous** Vec `tile.slice` (multi-row *and* narrower than its base, e.g. `t[:, a:b]`) feeding a `tile.col_expand_*` op | Replaced by `tile.extract(target_memory=Vec)`; slice dropped (#2010 — the dense repack would run on top of its own live source) |
 | Static-offset **contiguous** Vec `tile.slice` (single row, or full source width) feeding a `tile.col_expand_*` op | Untouched (the lazy textract is a safe identity copy; keeps sharing the source buffer) |
-| Vec `tile.slice` feeding an ordinary call, inherited address not provably 32-byte aligned | Replaced by `tile.extract(target_memory=Vec)`; slice dropped (#1789) |
-| Vec `tile.slice` feeding an ordinary call, inherited address provably 32-byte aligned | Untouched; keeps the zero-copy subview |
+| Vec `tile.slice` feeding an ordinary call, inherited address not provably 33-byte aligned | Replaced by `tile.extract(target_memory=Vec)`; slice dropped (#1789) |
+| Vec `tile.slice` feeding an ordinary call, inherited address provably 33-byte aligned | Untouched; keeps the zero-copy subview |
 | Chained Mat `tile.slice` (slice of a slice) | Peeled; offsets accumulated |
 | `tile.slice` with `valid_shape` / `drop_dims` | Skipped (not a plain window). If such a slice *also* fails either identity-copy condition above — a dynamic offset (e.g. a rank-reducing `t[i]`) or a non-contiguous window — while feeding a col-expand op, codegen rejects it with an `INTERNAL_CHECK` rather than emitting the source-corrupting materialization. The Acc accumulator check above still applies to such a slice: it needs only the physical base and offset, which are recorded for every window regardless of canonicalization eligibility |
 | `Acc`-resident `tile.slice` used as a matmul **accumulator**, window neither spanning the parent's full row extent nor inside one 16-column block | **Rejected** with a `ValueError` naming the column-slice spelling — the MAD has no destination stride, so the write would silently land in the wrong row tile (pto-isa#253). The operand does not have to *be* the slice: a loop `IterArg` carrying it, a plain SSA alias, or a shape-preserving view / in-place op over it resolves back to the same window (see "Resolving the accumulator operand back to its window") |

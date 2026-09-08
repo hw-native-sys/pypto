@@ -18,7 +18,7 @@ For example, `down_proj_residual` depends on:
 - an 80-slot `resid1_tile` TaskId array from an earlier loop;
 - the current iteration's scalar `down_acc` TaskId.
 
-Before this fix, the 40-trip consumer loop emitted `80 + 1` deps per iteration:
+Before this fix, the 41-trip consumer loop emitted `80 + 1` deps per iteration:
 
 ```text
 40 * 81 = 3240 dependency entries

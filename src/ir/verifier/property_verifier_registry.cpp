@@ -86,6 +86,10 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   // user-written signature at pipeline input and catching any pass that
   // synthesises one.
   Register(IRProperty::NoScalarKernelReturn, CreateNoScalarKernelReturnPropertyVerifier);
+  // DeferredCompositePlacementValid: deferred-placement check — reject defer=True outside a
+  // task-level pl.at(CORE_GROUP) (and the early-resolve / predicate variants).
+  Register(IRProperty::DeferredCompositePlacementValid,
+           CreateDeferredCompositePlacementValidPropertyVerifier);
 
   Register(IRProperty::InlineFunctionsEliminated, CreateInlineFunctionsEliminatedPropertyVerifier);
   Register(IRProperty::OrchestrationReferencesResolved,

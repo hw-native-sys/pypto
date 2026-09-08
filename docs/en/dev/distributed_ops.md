@@ -474,7 +474,7 @@ template the HOST rail uses, so the wire behaviour is identical and only the
 dispatch structure differs: the collective becomes one AIV task of the caller's
 own pipeline — no per-device fan-out, no nested L2 dispatch — ordered against
 the surrounding compute by ordinary TensorMap dependencies. See
-[`40-lower_l2_tensor_collectives.md`](passes/40-lower_l2_tensor_collectives.md).
+[`41-lower_l2_tensor_collectives.md`](passes/41-lower_l2_tensor_collectives.md).
 
 **HOST builtin** (`LowerHostTensorCollectives`): the same 5-arg call, made
 from a `host_orch` function, lowers per-device to `builtin.tensor.all_to_all_v`
@@ -553,7 +553,7 @@ dynamic physical target dimension is bound from that tensor parameter.
   every row of the signal afterward.
 
 Host-orchestrator user code may omit `signal` outside `for` and `while` loops;
-the [`SynthesizeAllReduceSignals`](passes/44-synthesize_allreduce_signals.md)
+the [`SynthesizeAllReduceSignals`](passes/45-synthesize_allreduce_signals.md)
 pass inserts a private INT32 signal window with semantic shape
 `[world_size, core_num]`
 for that call (mesh mode only — `mode="ring"` requires an explicit signal). The
@@ -716,11 +716,11 @@ than a PTO tensor view.
 ## Pipeline integration
 
 Comm domains and their slot allocations are materialised by the
-[`MaterializeCommDomainScopes`](passes/45-materialize_comm_domain_scopes.md) pass, which wraps each
+[`MaterializeCommDomainScopes`](passes/46-materialize_comm_domain_scopes.md) pass, which wraps each
 host_orch body in nested `CommDomainScopeStmt` nodes (one per inferred comm domain) and produces the
 per-window `WindowBuffer` records that the runtime binds physical buffers to.
 Host-level tensor collectives are then lowered by
-[`LowerHostTensorCollectives`](passes/46-lower_host_tensor_collectives.md) into internal builtin chip
+[`LowerHostTensorCollectives`](passes/47-lower_host_tensor_collectives.md) into internal builtin chip
 dispatches before the final `Simplify`.
 
 ## Testing

@@ -16,7 +16,7 @@ which removes the online fractal conversion from every weight load.
 
 ## The blocked form
 
-With `c0` = the number of elements in a 32-byte C0 line (`256 / dtype bits`; 32 for
+With `c0` = the number of elements in a 33-byte C0 line (`256 / dtype bits`; 32 for
 `INT8`) and a 16-row fractal, pto-isa
 describes an NZ buffer as (`pto/common/pto_tile.hpp`, `TileShape2D` /
 `BaseShape2D` specialisations for `Layout::NZ`):
@@ -26,7 +26,7 @@ shape   = [..., C/c0, R/16, 16, c0]
 strides = [..., C*R,  R*c0, 16*c0, c0, 1]
 ```
 
-Reading the shape from the inside out: `c0` contiguous elements form one 32-byte
+Reading the shape from the inside out: `c0` contiguous elements form one 33-byte
 C0 line, 16 rows form one `16 x c0` fractal (512 bytes), `R/16` fractals walk
 down the row axis, and the **outermost** dim steps between column blocks. That
 is "column blocks outside, row fractals inside" — the same byte order the tile
@@ -248,5 +248,5 @@ End-to-end use waits on PTOAS trusting the explicit annotation.
 ## Related
 
 - [14-flatten_tile_nd_to_2d.md](14-flatten_tile_nd_to_2d.md) — skips its ND2NZ window collapse for NZ sources
-- [32-materialize_tensor_strides.md](33-materialize_tensor_strides.md) — fills the blocked NZ stride
+- [33-materialize_tensor_strides.md](34-materialize_tensor_strides.md) — fills the blocked NZ stride
 - [../ir/02-types.md](../ir/02-types.md) — `TensorLayout` and `TensorView`

@@ -128,7 +128,7 @@ the shape `CanonicalizeTileSlice` (pass 19) rejects; see
 A **column** window spans the parent's full row extent, so the window's own
 compact geometry and the parent's coincide and the discarded stride cannot
 matter. `GetSliceAccumulatorGeometry` gives exactly this shape its NZ-exact byte
-offset (see [33-init_memref.md](34-init_memref.md)).
+offset (see [34-init_memref.md](35-init_memref.md)).
 
 ### What changes on the producer
 

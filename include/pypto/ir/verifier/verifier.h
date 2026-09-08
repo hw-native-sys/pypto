@@ -143,6 +143,18 @@ PropertyVerifierPtr CreateAtomicAddDtypeValidPropertyVerifier();
 PropertyVerifierPtr CreateNoScalarKernelReturnPropertyVerifier();
 
 /**
+ * @brief Factory for the deferred-composite placement property verifier
+ *
+ * Rejects ``pld.tensor.{allgather,all_to_all,all_to_all_v,broadcast,barrier}(...,
+ * defer=True)`` Calls that are not the body of a task-level
+ * ``pl.at(level=CORE_GROUP)`` scope, or that sit under ``allow_early_resolve`` /
+ * a dispatch predicate. Listed in ``GetStructuralProperties()`` so illegal
+ * placements fail at pipeline input with the user's source span (deferred-placement check).
+ * @return Shared pointer to DeferredCompositePlacementValid PropertyVerifier
+ */
+PropertyVerifierPtr CreateDeferredCompositePlacementValidPropertyVerifier();
+
+/**
  * @brief Factory for the InParamWritten warning verifier.
  *
  * Reports a parameter declared `In` that its own function body writes, where

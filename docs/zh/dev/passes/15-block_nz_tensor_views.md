@@ -225,5 +225,5 @@ PTOAS 通过结构推断 `make_tensor_view` 的 layout。分块 NZ 与 ND 在结
 ## 相关文档
 
 - [14-flatten_tile_nd_to_2d.md](14-flatten_tile_nd_to_2d.md) —— 对 NZ 源跳过 ND2NZ 窗口塌缩
-- [32-materialize_tensor_strides.md](33-materialize_tensor_strides.md) —— 填充分块 NZ stride
+- [33-materialize_tensor_strides.md](34-materialize_tensor_strides.md) —— 填充分块 NZ stride
 - [../ir/02-types.md](../ir/02-types.md) —— `TensorLayout` 与 `TensorView`
