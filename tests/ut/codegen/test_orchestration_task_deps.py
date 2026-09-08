@@ -876,15 +876,15 @@ def test_mixed_in_and_out_of_scope_deps_reports_user_error():
     assert "Internal error" not in msg, msg
 
 
-def test_user_dep_edge_out_of_compiler_inserted_loop_scope_is_rejected():
-    """The boundary need not be user-written to swallow a ``deps=[...]`` edge.
+def test_user_dep_edge_on_loop_carried_task_id_after_range_is_honored():
+    """A loop-carried TaskId remains usable in ``deps=[...]`` after ``pl.range``.
 
     ``MaterializeRuntimeScopes`` wraps every ``ForStmt`` body in its own AUTO
-    ``SIMPLER_SCOPE``, so a TaskId produced in the loop body and depended on after
-    the loop crosses a closed scope even though the source names no scope at
-    all. The loop-carry machinery does hoist a valid C++ ``TaskId`` to the
-    outer level, but the dep binding is not visible there, so the edge would be
-    dropped — reject instead.
+    ``SIMPLER_SCOPE``. The sequential TaskId carry is declared outside that
+    body, so depending on it after the loop names a live C++ local — the same
+    registration that keeps issue #2677's inline republish legal. Previously
+    the carry was only registered under ``manual_scope``, so this edge was
+    rejected even though the hoist already existed.
     """
 
     @pl.program
@@ -909,9 +909,14 @@ def test_user_dep_edge_out_of_compiler_inserted_loop_scope_is_rejected():
             b, _ = pl.submit(self.k2, x, deps=[loop_tid])
             return b
 
-    msg = _assert_dep_edge_rejected(P, "loop_tid")
-    # The message points at loop bodies / branches as scope openers.
-    assert "pl.range" in msg, msg
+    code = _generate_orch_full_pipeline(P, allow_relaxed_verification=True)
+
+    # Live sequential carry outside the per-iteration AUTO scope.
+    assert re.search(r"TaskId\s+loop_tid\w*\s*=\s*TaskId::invalid\(\);", code), code
+    # Post-loop consumer still wires the carried id into set_dependencies.
+    assert ".set_dependencies(" in code, code
+    assert re.search(r"if \(loop_tid\w*\.is_valid\(\)\)", code), code
+    assert re.search(r"\] = loop_tid\w*;", code), code
 
 
 def test_spmd_grid_tid_dep_across_manual_scope_boundary_is_rejected():

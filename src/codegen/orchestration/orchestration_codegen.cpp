@@ -279,6 +279,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
         packed_fp4_axis_(std::move(packed_fp4_axis)),
         dist_param_to_ctx_param_(std::move(dist_param_to_ctx_param)) {
     declared_var_names_ = param_name_set_;
+    // Function ``Scalar[TASK_ID]`` parameters (and lineage aliases seeded into
+    // ``emit_name_map_`` before construction) are live for the whole body.
+    // Register them in the TaskId binding maps / live-emit set so
+    // ``FindClosedScopeTaskId`` does not treat a branch/loop yield of a
+    // parameter as a producer local from a closed scope.
+    RegisterFunctionTaskIdParams();
     CollectCompilerDepTaskIds(program_);
   }
 
@@ -916,11 +922,19 @@ class OrchestrationStmtCodegen : public CodegenBase {
         emit_name_map_[return_var.get()] = carry_name;
         emit_name_map_[iter_arg.get()] = carry_name;
         // Sequential TaskId carry: register both endpoints in the task-id
-        // map so EmitManualDeps and yield writes can find the carry name.
+        // map so EmitManualDeps / yield writes / CheckTaskIdSlotValueInScope
+        // can find the live carry name. Must not gate on manual_scope depth:
+        // AUTO-scope loops (and inlined callees that re-publish the incoming
+        // carry into a pl.array) still need the binding, otherwise the
+        // closed-scope store diagnostic false-positives on a legal loop-carried
+        // TaskId (issue #2677).
         auto sty = As<ScalarType>(iter_arg->GetType());
-        if (in_manual_scope_depth_ > 0 && sty && sty->dtype_ == DataType::TASK_ID) {
+        if (sty && sty->dtype_ == DataType::TASK_ID) {
           manual_task_id_map_[iter_arg.get()] = carry_name;
           manual_task_id_map_[return_var.get()] = carry_name;
+          manual_task_id_map_by_key_[TaskIdHoistKey(iter_arg.get())] = carry_name;
+          manual_task_id_map_by_key_[TaskIdHoistKey(return_var.get())] = carry_name;
+          NoteLiveManualTaskIdEmitName(carry_name);
         }
       } else {
         // Trivial yield: preserve the legacy aliasing — both names route to
@@ -1054,7 +1068,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // produced by tasks emitted in the enclosing (auto or outer) scope. Loop /
     // branch carries are registered *before* their body's SIMPLER_SCOPE (outside
     // this frame), so they correctly survive the block.
+    //
+    // ``manual_task_id_map_by_key_`` is snapshotted with the pointer map: UniqueId
+    // entries added inside the block must die with it, or
+    // ``ResolveManualTaskIdBinding`` / ``CheckTaskIdSlotValueInScope`` would treat
+    // a dead loop-carry local as still live after the closing brace.
     auto saved_map = manual_task_id_map_;
+    auto saved_map_by_key = manual_task_id_map_by_key_;
     auto saved_array_carry = array_carry_vars_;
 
     if (!scope->manual_) {
@@ -1079,12 +1099,14 @@ class OrchestrationStmtCodegen : public CodegenBase {
       std::set<std::string> enclosing_arrays;
       // NOLINTNEXTLINE(bugprone-nondeterministic-pointer-iteration-order)
       for (const auto& [_, entry] : saved_array_carry) enclosing_arrays.insert(entry.array_name);
-      PreserveEnclosingArrayCarries(&saved_array_carry, &saved_map, [&](const std::string& name) {
-        return enclosing_arrays.count(name) == 0;
-      });
+      PreserveEnclosingArrayCarries(
+          &saved_array_carry, &saved_map, &saved_map_by_key,
+          [&](const std::string& name) { return enclosing_arrays.count(name) == 0; });
 
       manual_task_id_map_ = std::move(saved_map);
+      manual_task_id_map_by_key_ = std::move(saved_map_by_key);
       array_carry_vars_ = std::move(saved_array_carry);
+      RebuildLiveManualTaskIdEmitNames();
       return;
     }
 
@@ -1150,11 +1172,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // declared in the ENCLOSING scope (issue #1811) — see
     // ``PreserveEnclosingArrayCarries``. A manual scope hoists its allocations,
     // so it knows its own local storage names outright.
-    PreserveEnclosingArrayCarries(&saved_array_carry, &saved_map,
+    PreserveEnclosingArrayCarries(&saved_array_carry, &saved_map, &saved_map_by_key,
                                   [&](const std::string& name) { return local_names.count(name) != 0; });
 
     manual_task_id_map_ = std::move(saved_map);
+    manual_task_id_map_by_key_ = std::move(saved_map_by_key);
     array_carry_vars_ = std::move(saved_array_carry);
+    RebuildLiveManualTaskIdEmitNames();
   }
 
   /// Mark each ArrayType ``IfStmt`` return_var (a phi) as bound-by-yield, so no
@@ -1327,6 +1351,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         EmitIndentedLine(cpp_type + " " + emit_name + " = TaskId::invalid();");
         manual_task_id_map_[rv.get()] = emit_name;
         manual_task_id_map_by_key_[TaskIdHoistKey(rv.get())] = emit_name;
+        NoteLiveManualTaskIdEmitName(emit_name);
       } else {
         EmitIndentedLine(cpp_type + " " + emit_name + ";");
       }
@@ -1602,6 +1627,15 @@ class OrchestrationStmtCodegen : public CodegenBase {
         continue;
       }
       const auto& rv = current_return_vars_[i];
+      // A carry may be declared outside the loop/branch while its yielded
+      // producer was local to a nested scope that has already closed.
+      if (auto stale_tid = FindClosedScopeTaskId(yield_stmt->value_[i])) {
+        CHECK_SPAN(false, yield_stmt->span_)
+            << "Task id '" << stale_tid->name_hint_
+            << "' is yielded after the `pl.scope()` that produced it has closed, so the yield "
+               "has no runtime value to name. Publish the task id into an array declared outside "
+               "that scope before it closes, then yield a read of that array element.";
+      }
       // ArrayType IfStmt phi: record the backing array this branch yields; the
       // enclosing IfStmt binds it once both branches are emitted. Nothing is
       // emitted — the branch already mutated that array in place.
@@ -4202,28 +4236,37 @@ class OrchestrationStmtCodegen : public CodegenBase {
     emit_name_map_[assign->var_.get()] = target_name;
   }
 
-  /// Reject an ``arr[i] = tid`` whose TaskId was produced in a scope that has
-  /// already closed.
-  ///
-  /// The slot write is emitted in place, but the value names a C++ local
-  /// declared inside the ``SIMPLER_SCOPE { }`` that produced it. Writing it
-  /// after that block closes compiles here and is then rejected by the host
-  /// compiler with ``'<tid>' was not declared in this scope`` — a failure the
-  /// user cannot trace back to their source, and one ``--compile-only`` never
-  /// reaches. Diagnose it at the DSL level instead.
+  /// Return the TaskId producer local if ``value`` names one from a closed
+  /// scope. Both array stores and yields must reject these reads before the
+  /// host compiler encounters an out-of-scope C++ identifier.
   ///
   /// A stale value is identified positively: ``emit_name_map_`` still holds the
   /// name it was bound to (never scope-restored), while ``manual_task_id_map_``
   /// does not (restored at each closing brace — see
-  /// ``VisitStmt_(RuntimeScopeStmtPtr)``). A TaskId this codegen never bound to
-  /// a local has no entry in either and is left alone.
-  void CheckTaskIdSlotValueInScope(const CallPtr& call, const std::string& array_name) {
-    auto value_var = AsVarLike(call->args_[2]);
-    if (!value_var) return;
+  /// ``VisitStmt_(RuntimeScopeStmtPtr)``). Function ``Scalar[TASK_ID]``
+  /// parameters are registered at construction (``RegisterFunctionTaskIdParams``)
+  /// so yielding / storing them is not mistaken for a closed-scope producer. A
+  /// TaskId this codegen never bound to a local has no entry in either map and
+  /// is left alone.
+  VarPtr FindClosedScopeTaskId(const ExprPtr& value) const {
+    auto value_var = AsVarLike(value);
+    if (!value_var) return nullptr;
     auto scalar_ty = As<ScalarType>(value_var->GetType());
-    if (!scalar_ty || scalar_ty->dtype_ != DataType::TASK_ID) return;
-    if (manual_task_id_map_.count(value_var.get())) return;
-    if (!emit_name_map_.count(value_var.get())) return;
+    if (!scalar_ty || scalar_ty->dtype_ != DataType::TASK_ID) return nullptr;
+    // Resolve through pointer and UniqueId maps (both scope-restored together).
+    // A live sequential / phi carry or function parameter stays registered; a
+    // producer local from a closed scope does not (issue #2677 / #2659).
+    if (ResolveManualTaskIdBinding(value_var.get())) return nullptr;
+    auto emit_it = emit_name_map_.find(value_var.get());
+    if (emit_it == emit_name_map_.end()) return nullptr;
+    // Emit-name alias of a still-registered live carry (SSA rename after inline).
+    if (live_manual_task_id_emit_names_.count(emit_it->second)) return nullptr;
+    return value_var;
+  }
+
+  void CheckTaskIdSlotValueInScope(const CallPtr& call, const std::string& array_name) {
+    auto value_var = FindClosedScopeTaskId(call->args_[2]);
+    if (!value_var) return;
     CHECK_SPAN(false, call->span_)
         << "Task id '" << value_var->name_hint_ << "' is stored into array '" << array_name
         << "' after the `pl.scope()` that produced it has closed, so the store has no runtime "
@@ -4348,13 +4391,47 @@ class OrchestrationStmtCodegen : public CodegenBase {
   template <typename IsScopeLocal>
   void PreserveEnclosingArrayCarries(std::unordered_map<const Var*, ArrayCarryEntry>* saved_array_carry,
                                      std::unordered_map<const Var*, ManualTaskIdBinding>* saved_map,
+                                     std::unordered_map<uint64_t, ManualTaskIdBinding>* saved_map_by_key,
                                      const IsScopeLocal& is_scope_local) {
     for (const auto& [var, entry] : array_carry_vars_) {
       if (saved_array_carry->count(var)) continue;     // outer entry — keep outer value
       if (is_scope_local(entry.array_name)) continue;  // scope-local storage — drop
       (*saved_array_carry)[var] = entry;               // enclosing-valid carry — preserve
       auto tid_it = manual_task_id_map_.find(var);     // keep its per-slot dep names in sync
-      if (tid_it != manual_task_id_map_.end()) (*saved_map)[var] = tid_it->second;
+      if (tid_it != manual_task_id_map_.end()) {
+        (*saved_map)[var] = tid_it->second;
+        (*saved_map_by_key)[TaskIdHoistKey(var)] = tid_it->second;
+      }
+    }
+  }
+
+  /// Rebuild the O(1) reverse index of live scalar TaskId emit names from the
+  /// current pointer / UniqueId maps (call after every scope restore).
+  void RebuildLiveManualTaskIdEmitNames() {
+    live_manual_task_id_emit_names_.clear();
+    auto note = [&](const ManualTaskIdBinding& binding) {
+      if (const auto* name = std::get_if<std::string>(&binding)) {
+        live_manual_task_id_emit_names_.insert(*name);
+      }
+    };
+    for (const auto& [_, binding] : manual_task_id_map_) note(binding);
+    for (const auto& [_, binding] : manual_task_id_map_by_key_) note(binding);
+  }
+
+  /// Note a scalar TaskId emit name as live (kept in sync with map inserts).
+  void NoteLiveManualTaskIdEmitName(const std::string& name) { live_manual_task_id_emit_names_.insert(name); }
+
+  /// Bind every ``Scalar[TASK_ID]`` already present in ``emit_name_map_`` (function
+  /// parameters and their lineage aliases seeded before construction) as a live
+  /// TaskId for the whole orchestration / Graph body.
+  void RegisterFunctionTaskIdParams() {
+    for (const auto& [var, emit_name] : emit_name_map_) {
+      if (!var) continue;
+      auto scalar_ty = As<ScalarType>(var->GetType());
+      if (!scalar_ty || scalar_ty->dtype_ != DataType::TASK_ID) continue;
+      manual_task_id_map_[var] = emit_name;
+      manual_task_id_map_by_key_[TaskIdHoistKey(var)] = emit_name;
+      NoteLiveManualTaskIdEmitName(emit_name);
     }
   }
 
@@ -4417,6 +4494,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// inner block — are discarded once the manual scope exits.
   std::unordered_map<const Var*, ManualTaskIdBinding> manual_task_id_map_;
   std::unordered_map<uint64_t, ManualTaskIdBinding> manual_task_id_map_by_key_;
+  /// Reverse index of scalar ``TaskId`` emit names currently present in
+  /// ``manual_task_id_map_`` / ``manual_task_id_map_by_key_``. Kept in sync on
+  /// registration and rebuilt after every scope restore so
+  /// ``CheckTaskIdSlotValueInScope`` can test emit-name aliases in O(1).
+  std::unordered_set<std::string> live_manual_task_id_emit_names_;
   /// Records the C++ array allocation backing a TaskId carry that holds an
   /// array of task ids (not a scalar). Used by ``YieldStmt`` to decide how
   /// to write into the carry:

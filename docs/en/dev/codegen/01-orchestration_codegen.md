@@ -627,8 +627,8 @@ TaskId keeps the guard. Array-carry iter_args fill one guarded slot per element.
 
 **Lexical-scope lifetime.** TaskId bindings name C++ locals (`TaskId tid
 = ...`) declared inside the generated `SIMPLER_SCOPE { ... }` block they are
-produced in. Each `SIMPLER_SCOPE` (AUTO or MANUAL) snapshots `manual_task_id_map_`
-and `array_carry_vars_` on entry and restores them on exit, so a binding
+produced in. Each `SIMPLER_SCOPE` (AUTO or MANUAL) snapshots `manual_task_id_map_`,
+`manual_task_id_map_by_key_`, and `array_carry_vars_` on entry and restores them on exit, so a binding
 produced inside a scope does not leak to an enclosing scope where its identifier
 would be out of C++ scope. Loop / branch carries are declared *before* their
 body's `SIMPLER_SCOPE`, so they correctly survive the block.
@@ -654,6 +654,7 @@ on scope exit. Codegen's response depends on the edge's provenance:
 | Compiler-derived (`compiler_manual_dep_edges`) | Silently skipped. These are a best-effort hazard patch; `PrepareCrossScopeTaskIdHoists` already LCA-hoists the ones it can, and dropping the rest is safe because the pass only ever *adds* ordering |
 | User-written (`deps=[...]`) | **Hard error** — `CHECK_SPAN` raises a `pypto::ValueError` naming the TaskId and the DSL source line |
 | Array publish (`arr[i] = tid`) | **Hard error** — `CheckTaskIdSlotValueInScope` raises a `pypto::ValueError` telling the user to move the store inside the `pl.scope()` that produced the TaskId. Unlike a dep edge, the slot write is emitted unconditionally, so accepting it would emit orchestration the host compiler rejects with `'<tid>' was not declared in this scope` — a failure `--compile-only` never reaches |
+| Loop / branch yield | **Hard error** — `FindClosedScopeTaskId` checks the source before emitting the yield. A live destination carry does not make a producer local from a closed nested scope readable. Publish the TaskId into an array declared outside that scope before it closes, then yield a read of the array element |
 
 Provenance is the attr key. Note that `attrs["dummy_task"]` is *not* an
 authorship marker: the parser stamps it on a user-written
@@ -670,11 +671,14 @@ both `CountManualDeps` (array sizing) and `EmitManualDeps` (array fill) route
 through, so the two can never disagree on which edges survive.
 
 The scope that closed need not be user-written. `MaterializeRuntimeScopes` wraps
-every `ForStmt` body and every `IfStmt` branch body in its own AUTO scope, so
-this fires on ordinary orchestration code with no `pl.scope()` / `pl.manual_scope()`
-in sight — e.g. a TaskId captured inside a `pl.range` body and depended on after
-the loop. The fix is to keep the consumer in the producer's scope, or hoist the
-producer outward.
+`ForStmt` and `IfStmt` bodies in AUTO scopes outside manual regions. Sequential
+TaskId carries and branch phis remain usable after those bodies close because
+their declarations and bindings live outside the bodies. Function
+`Scalar[TASK_ID]` parameters are registered as live at codegen construction for
+the same reason — yielding or storing a parameter must not look like a producer
+from a closed scope. Their yield sources must still be live at the assignment: a
+producer inside a nested `pl.scope()` that closes before the yield must first be
+published through an enclosing array.
 
 One exception applies to the `array_carry_vars_` restore on a `MANUAL` scope: an
 array carry registered *inside* the scope whose backing array was declared in

@@ -22,7 +22,9 @@ import pytest
 from _orchestration_codegen_common import _finalize_handbuilt_for_codegen
 from _pto_loc_common import strip_loc
 from pypto import codegen, passes
+from pypto.jit.decorator import jit
 from pypto.pypto_core import DataType, ir
+from pypto.runtime import RunConfig
 
 
 def _generate_orch(src: str) -> str:
@@ -1087,6 +1089,114 @@ def test_orch_task_id_phi_from_if_is_publishable_to_array():
     assert phi, code
     # ...and the publish after the branches close resolves to that same local.
     assert f"tids[branch] = {phi.group(1)};" in code or f"tids[branch] = {phi.group(1)}" in code, code
+
+
+@pytest.mark.parametrize(
+    "control_flow",
+    ["for i in pl.range(2)", "for i in pl.parallel(2)", "if flag > 0"],
+    ids=["sequential", "parallel", "if_phi"],
+)
+def test_orch_task_id_yield_after_nested_scope_closed_is_rejected(control_flow):
+    """A live carry cannot be assigned a producer local from a closed scope."""
+    prog = pl.parse_program(f"""
+@pl.program
+class P:
+    @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+    def main(
+        self, x: pl.Tensor[[64], pl.FP32], flag: pl.Scalar[pl.INT64]
+    ) -> pl.Tensor[[64], pl.FP32]:
+        tids = pl.array.create(1, pl.TASK_ID)
+        dep = pl.system.task_invalid()
+        {control_flow}:
+            with pl.scope():
+                dep = pl.system.task_dummy(deps=[])
+            # Keep the implicit yield outside the producer's scope.
+            _fence = pl.system.task_dummy(deps=[])
+        tids[0] = dep
+        return x
+""")
+
+    with pytest.raises(ValueError, match="is yielded after") as excinfo:
+        _compile_orch(prog)
+
+    msg = str(excinfo.value)
+    assert "dep" in msg, msg
+    assert "after the `pl.scope()` that produced it has closed" in msg, msg
+    assert "array declared outside" in msg, msg
+    assert "Internal error" not in msg, msg
+
+
+def test_orch_branch_yield_of_task_id_parameter_is_accepted():
+    """A ``pl.Scalar[TASK_ID]`` function parameter stays live across branch yields.
+
+    Parameters are seeded into ``emit_name_map_`` at codegen construction but are
+    not producer locals of a nested ``pl.scope()``. Yielding one into an ``if``
+    phi must not trip ``FindClosedScopeTaskId`` — the parameter is valid for the
+    whole function body.
+    """
+    prog = pl.parse_program("""
+@pl.program
+class P:
+    @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+    def main(
+        self,
+        x: pl.Tensor[[64], pl.FP32],
+        seed: pl.Scalar[pl.TASK_ID],
+        flag: pl.Scalar[pl.INT64],
+    ) -> pl.Tensor[[64], pl.FP32]:
+        dep = seed
+        if flag > 0:
+            dep = seed
+        else:
+            dep = seed
+        _ = pl.system.task_dummy(deps=[dep])
+        return x
+""")
+
+    code = _compile_orch(prog)
+    # Both arms yield the parameter into the phi; the dep edge must name that
+    # live id (parameter or phi), never raise the closed-scope diagnostic.
+    assert "TaskId::invalid()" in code, code
+    assert "task_dummy" in code or "set_dependencies" in code, code
+
+
+def test_orch_loop_carried_task_id_republished_via_inline_callee():
+    """Loop-carried TaskId returned from an inlined callee may re-enter a slot.
+
+    Regression for issue #2677: a TaskId produced inside a nested ``pl.scope()``,
+    returned from ``@pl.jit.inline``, and carried across a caller ``pl.range``
+    must stay nameable when the next iteration stores it into a ``pl.array`` at
+    the callee entry. The closed-scope diagnostic must not false-positive on
+    that legal carry — two iterations are the minimum that crosses a closed
+    scope.
+    """
+    torch = pytest.importorskip("torch")
+
+    rows, cols = 16, 128
+
+    @jit.inline(auto_scope=False)
+    def stage(out: pl.Tensor[[rows, cols], pl.FP32], incoming: pl.Scalar[pl.TASK_ID]):
+        carry = pl.array.create(1, pl.TASK_ID)
+        carry[0] = incoming
+        with pl.scope():
+            with pl.spmd(rows, name_hint="stage_body", deps=[carry[0]]) as body_tid:
+                row = pl.tile.get_block_idx()
+                out[row : row + 1, 0:cols] = pl.full([1, cols], dtype=pl.FP32, value=1.0)
+            carry[0] = body_tid
+        return carry[0]
+
+    # Entry must also be auto_scope=False: after InlineFunctions splices the
+    # callee, the hand-placed ``pl.scope()`` lives in the orchestration body.
+    @jit(auto_scope=False)
+    def prog(out: pl.Tensor[[rows, cols], pl.FP32]):
+        dep = pl.system.task_dummy(deps=[])
+        for _ in pl.range(2):
+            dep = stage(out, dep)
+        return out
+
+    # Compile-only: the bug fires in orchestration codegen before any runtime.
+    out = torch.empty(rows, cols, dtype=torch.float32)
+    prog.compile(out, config=RunConfig(platform="a2a3sim"))
 
 
 if __name__ == "__main__":

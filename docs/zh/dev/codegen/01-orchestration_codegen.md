@@ -595,7 +595,8 @@ call 上）。该 pass 从不分析用户写的 MANUAL scope——在 `pl.manual
 
 **词法作用域生命周期。** TaskId 绑定命名的是在其产生所在的 `SIMPLER_SCOPE { ... }`
 块内声明的 C++ 局部变量（`TaskId tid = ...`）。每个 `SIMPLER_SCOPE`（AUTO 或
-MANUAL）在进入时快照 `manual_task_id_map_` 与 `array_carry_vars_`、退出时恢复，
+MANUAL）在进入时快照 `manual_task_id_map_`、`manual_task_id_map_by_key_` 与
+`array_carry_vars_`、退出时恢复，
 因此在某作用域内产生的绑定不会泄漏到外层作用域（否则其标识符会超出 C++ 作用域）。
 循环 / 分支的 carry 在其 body 的 `SIMPLER_SCOPE` *之前*声明，因此能正确地在块结束后存活。
 
@@ -617,6 +618,7 @@ AUTO 作用域不做任何提升，故仅当进入前已有 carry 命名了该�
 | 编译器推导（`compiler_manual_dep_edges`） | 静默跳过。这类边是尽力而为的 hazard 补丁；`PrepareCrossScopeTaskIdHoists` 已对能处理的部分做了 LCA 提升，丢弃其余是安全的，因为该 pass 只会*增加*定序 |
 | 用户书写（`deps=[...]`） | **硬报错**——`CHECK_SPAN` 抛出 `pypto::ValueError`，并指出该 TaskId 与对应的 DSL 源码行 |
 | 数组发布（`arr[i] = tid`） | **硬报错**——`CheckTaskIdSlotValueInScope` 抛出 `pypto::ValueError`，提示用户把该写入移进产生该 TaskId 的 `pl.scope()` 内。与依赖边不同，槽位写入是无条件生成的，因此若放行，就会生成宿主编译器以 `'<tid>' was not declared in this scope` 拒绝的编排代码——而 `--compile-only` 根本走不到那一步 |
+| 循环 / 分支 yield | **硬报错**——`FindClosedScopeTaskId` 在生成 yield 前检查源值。目标携带变量（carry）仍存活，并不意味着已关闭的嵌套作用域中的生产者局部变量可读。应在该作用域关闭前，把 TaskId 写入声明于其外部的数组，再读取数组元素作为 yield 的源值 |
 
 来源由 attr key 判定。注意 `attrs["dummy_task"]` **不是**作者身份标记：parser 会把
 它打在用户书写的 `pl.system.task_dummy(deps=[...])` 上，与
@@ -629,11 +631,13 @@ barrier 打的完全相同，因此所有 `manual_dep_edges` 载体一律强制�
 解析并校验入口，`CountManualDeps`（数组定长）与 `EmitManualDeps`（数组填充）都经由
 它，因此两者对"哪些边存活"的判断绝不会不一致。
 
-被关闭的作用域不一定由用户书写。`MaterializeRuntimeScopes` 会把每个 `ForStmt`
-body 和每个 `IfStmt` 分支 body 各自包进一个 AUTO 作用域，因此在完全没有出现
-`pl.scope()` / `pl.manual_scope()` 的普通编排代码中也会触发——例如在 `pl.range`
-body 内捕获 TaskId、却在循环之后依赖它。修复方式是把消费者放到生产者所在的
-作用域内，或把生产者外提。
+被关闭的作用域不一定由用户书写。`MaterializeRuntimeScopes` 会在 manual 区域之外，
+把 `ForStmt` 和 `IfStmt` 的 body 包进 AUTO 作用域。顺序循环的 TaskId 携带变量（carry）
+和分支合流变量（phi）的声明与绑定位于 body 外部，因此在 body 关闭后仍可使用。
+函数的 `Scalar[TASK_ID]` 参数在 codegen 构造时即注册为存活绑定，同理——对参数的
+yield 或存入数组不得被误判为来自已关闭作用域的生产者。但 yield 的源值在赋值时
+必须仍存活：若生产者位于嵌套的 `pl.scope()` 内，且该作用域在 yield 之前已关闭，
+就必须先通过外层数组发布该 TaskId。
 
 对 `MANUAL` 作用域的 `array_carry_vars_` 恢复有一个例外：在该作用域 *内部* 注册、
 但其底层数组声明于 *外层* 作用域的 array carry 必须在恢复后存活。这就是将
