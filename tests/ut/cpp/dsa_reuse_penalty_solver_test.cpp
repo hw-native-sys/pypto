@@ -56,7 +56,7 @@ void TestFeasiblePackingAndTemporalConflict() {
           "solver result must pass independent validation");
 }
 
-void TestNoFitDoesNotProveInfeasibility() {
+void TestExactFallbackRecoversGreedyMiss() {
   dsa::DsaProblem problem;
   problem.pools = {{0, 16, {}}};
   problem.buffers = {
@@ -65,15 +65,36 @@ void TestNoFitDoesNotProveInfeasibility() {
   };
 
   // Independently verified strict witness. Canonical greedy's bounded order
-  // set misses it; kNoFit therefore means search failure, not infeasibility.
+  // set misses it, so the exact fallback must recover a feasible placement.
   dsa::DsaSolution witness;
   witness.offsets = {{0, 4}, {1, 10}, {2, 0}, {3, 0}, {4, 0}, {5, 2}};
   Require(dsa::ValidateSolution(problem, witness).empty(),
           "strict witness must prove that the characterization instance fits");
 
   const dsa::DsaResult result = dsa::CanonicalGreedySolver().Solve(problem);
-  Require(result.status == dsa::SolveStatus::kNoFit && !result.solution.has_value(),
-          "bounded canonical greedy is expected to miss the strict witness");
+  Require(result.status == dsa::SolveStatus::kFeasible && result.solution.has_value(),
+          "exact fallback must recover a witness missed by canonical greedy");
+  Require(result.statistics.exact_fallback_used && result.statistics.exact_search_complete,
+          "the characterization instance must exercise a complete exact fallback");
+  Require(dsa::ValidateSolution(problem, RequireSolution(result, "expected exact solution")).empty(),
+          "exact fallback witness must pass independent validation");
+}
+
+void TestExactFallbackReportsBudgetExhaustion() {
+  dsa::DsaProblem problem;
+  problem.pools = {{0, 16, {}}};
+  problem.buffers = {
+      {0, 6, 2, 0, {3, 5}}, {1, 6, 2, 0, {2, 7}}, {2, 4, 4, 0, {4, 5}},
+      {3, 8, 4, 0, {0, 3}}, {4, 2, 2, 0, {5, 7}}, {5, 1, 1, 0, {5, 10}},
+  };
+
+  const dsa::CanonicalGreedyOptions options{0, 4, 1};
+  const dsa::DsaResult result = dsa::CanonicalGreedySolver(options).Solve(problem);
+  Require(result.status == dsa::SolveStatus::kSearchExhausted && !result.solution.has_value(),
+          "a truncated exact fallback must not report a false capacity failure");
+  Require(result.statistics.exact_fallback_used && !result.statistics.exact_search_complete &&
+              result.statistics.exact_candidates_evaluated == 1,
+          "search-exhaustion statistics must expose the bounded fallback");
 }
 
 void TestExplicitHardSeparation() {
@@ -91,6 +112,30 @@ void TestExplicitHardSeparation() {
   Require(OffsetOf(RequireSolution(result, "expected solution"), 0) !=
               OffsetOf(RequireSolution(result, "expected solution"), 1),
           "explicit separation must prevent address reuse");
+}
+
+void TestExactOrDisjointPlacement() {
+  dsa::DsaProblem problem;
+  problem.pools = {{0, 96, {}}};
+  problem.buffers = {
+      {0, 64, 32, 0, {0, 2}},
+      {1, 64, 32, 0, {2, 4}},
+  };
+  problem.no_partial_overlaps = {{0, 1}};
+
+  const dsa::DsaResult result = dsa::CanonicalGreedySolver().Solve(problem);
+  Require(result.status == dsa::SolveStatus::kFeasible && result.solution.has_value(),
+          "exact in-place reuse must fit when disjoint placement does not");
+  const dsa::DsaSolution& solution = RequireSolution(result, "expected solution");
+  Require(OffsetOf(solution, 0) == OffsetOf(solution, 1),
+          "exact-or-disjoint relation must permit identical ranges");
+  Require(dsa::ValidateSolution(problem, solution).empty(),
+          "exact in-place placement must pass independent validation");
+
+  dsa::DsaSolution corrupted = solution;
+  corrupted.offsets[1] = 32;
+  Require(!dsa::ValidateSolution(problem, corrupted).empty(),
+          "independent validation must reject staggered overlap");
 }
 
 void TestWeightedPenaltyAvoidance() {
@@ -130,6 +175,8 @@ void TestCapacityNoFit() {
   const dsa::DsaResult result = dsa::CanonicalGreedySolver().Solve(problem);
   Require(result.status == dsa::SolveStatus::kNoFit && !result.solution.has_value(),
           "three co-live 64-byte buffers cannot fit in 128 bytes");
+  Require(result.statistics.exact_fallback_used && result.statistics.exact_search_complete,
+          "kNoFit must be backed by a complete exact search");
 }
 
 void TestAlignmentAndReservedRanges() {
@@ -318,8 +365,10 @@ void TestIndependentValidationRejectsCorruption() {
 int main() {
   try {
     TestFeasiblePackingAndTemporalConflict();
-    TestNoFitDoesNotProveInfeasibility();
+    TestExactFallbackRecoversGreedyMiss();
+    TestExactFallbackReportsBudgetExhaustion();
     TestExplicitHardSeparation();
+    TestExactOrDisjointPlacement();
     TestWeightedPenaltyAvoidance();
     TestCapacityNoFit();
     TestAlignmentAndReservedRanges();
