@@ -25,6 +25,7 @@ import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
 from pypto import ir, passes
+from pypto.pypto_core import DataType
 
 _OP_PLD_TENSOR_ALLREDUCE = ir.get_op("pld.tensor.allreduce").name
 
@@ -1460,6 +1461,93 @@ class TestSingleTripLoopCollapse:
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Before)
+
+
+# ============================================================================
+# Fold B's substitution-depth cap (kMaxNestedSingleTripFolds in
+# simplify_pass.cpp). Fold B lifts a one-trip body by DeepCloning it and
+# re-visiting the clone; an unbounded chain of nested one-trip loops therefore
+# clones the remaining nest once per level, which is O(N^2) in the nest depth
+# and over the ceiling `.claude/rules/pass-complexity.md` sets. The cap bounds
+# one run to a fixed number of levels; the surplus stays a well-formed ForStmt
+# that the next Simplify run collapses.
+#
+# Built with raw ``ir.*`` rather than the DSL: CPython's compiler rejects more
+# than 20 statically nested blocks, so a nest past the cap has no @pl.program
+# spelling.
+# ============================================================================
+
+_FOLD_B_MAX_NESTED_SINGLE_TRIP_FOLDS = 16
+
+
+def _one_trip_nest(depth: int) -> ir.Program:
+    """A ``depth``-level nest of pure one-trip loops around a scalar assign."""
+    span = ir.Span.unknown()
+    index_ty = ir.ScalarType(DataType.INDEX)
+
+    def const(value: int) -> ir.Expr:
+        return ir.ConstInt(value, DataType.INDEX, span)
+
+    body: ir.Stmt = ir.SeqStmts([ir.AssignStmt(ir.Var("inner", index_ty, span), const(0), span)], span)
+    for level in reversed(range(depth)):
+        loop = ir.ForStmt(
+            ir.Var(f"k{level}", index_ty, span),
+            const(0),
+            const(1),
+            const(1),
+            [],
+            body,
+            [],
+            span,
+        )
+        body = ir.SeqStmts([loop], span)
+    func = ir.Function("main", [], [], body, span)
+    return ir.Program([func], "one_trip_nest", span)
+
+
+def _main_body(program: ir.Program) -> ir.Stmt:
+    main = program.get_function("main")
+    assert main is not None
+    return main.body
+
+
+def _count_for_stmts(stmt: ir.Stmt) -> int:
+    """Number of ForStmt nodes in the ``_one_trip_nest`` shape (For / SeqStmts only)."""
+    if isinstance(stmt, ir.ForStmt):
+        return 1 + _count_for_stmts(stmt.body)
+    if isinstance(stmt, ir.SeqStmts):
+        return sum(_count_for_stmts(inner) for inner in stmt.stmts)
+    return 0
+
+
+class TestSingleTripFoldDepthCap:
+    def test_nest_at_the_cap_collapses_fully(self):
+        """A nest exactly ``kMaxNestedSingleTripFolds`` deep folds in one run."""
+        before = _one_trip_nest(_FOLD_B_MAX_NESTED_SINGLE_TRIP_FOLDS)
+        assert _count_for_stmts(_main_body(before)) == _FOLD_B_MAX_NESTED_SINGLE_TRIP_FOLDS
+
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            after = passes.simplify()(before)
+        assert _count_for_stmts(_main_body(after)) == 0
+
+    def test_nest_past_the_cap_keeps_the_surplus_and_folds_it_next_run(self):
+        """One run past the cap leaves the surplus loops; the next run takes them.
+
+        Declining is sound rather than a missed obligation: the survivors are
+        ordinary single-trip ``ForStmt``s, so re-running Simplify collapses the
+        next ``kMaxNestedSingleTripFolds`` levels.
+        """
+        surplus = 3
+        depth = _FOLD_B_MAX_NESTED_SINGLE_TRIP_FOLDS + surplus
+        before = _one_trip_nest(depth)
+
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            after = passes.simplify()(before)
+        assert _count_for_stmts(_main_body(after)) == surplus
+
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            after_twice = passes.simplify()(after)
+        assert _count_for_stmts(_main_body(after_twice)) == 0
 
 
 # ============================================================================

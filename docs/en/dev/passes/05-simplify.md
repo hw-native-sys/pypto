@@ -73,7 +73,7 @@ Implemented by `TransformSimplify` in `src/ir/transforms/simplify_pass.cpp` in f
 Two folds run inside the `SimplifyMutator` traversal so they share the analyzer's constraint stack with the surrounding expression-level work:
 
 - **Fold A — constant-condition `IfStmt` collapse.** After the condition is simplified, query the analyzer with `CanProve(cond)` and `CanProve(Not(cond))`. On a proof of either polarity, drop the dead branch and lift the kept branch into the parent scope. When `return_vars_` is non-empty, the kept branch's trailing `YieldStmt` is stripped and each `return_vars[i]` is bound in `var_remap_` to the corresponding yielded value so subsequent siblings (and the function `ReturnStmt`) read the value directly. Symmetric for true / false; the only edge case is "always-false with no else and empty return_vars," which collapses to an empty body.
-- **Fold B — pure single/zero-trip `ForStmt` collapse.** Fires only on *pure* sequential loops: `attrs_` empty, `kind_ == ForKind::Sequential`. For these, query the analyzer for the trip count using `CanProveGreaterEqual(step, 1)` plus `CanProve(stop <= start)` (zero trips) or `CanProve(start < stop && stop <= start + step)` (one trip). On zero trips, emit one `AssignStmt(return_vars[i], iter_args[i].initValue_)` per return var and drop the body. On one trip, `DeepClone` the body with `loop_var → start` and `iter_args[i] → init_values[i]` substitutions, re-visit the cloned body so further folds happen in the same pass, then strip the trailing `YieldStmt` and bind each `return_vars[i] → yielded_value[i]` in `var_remap_` (same propagation mechanism as Fold A's lift).
+- **Fold B — pure single/zero-trip `ForStmt` collapse.** Fires only on *pure* sequential loops: `attrs_` empty, `kind_ == ForKind::Sequential`. For these, query the analyzer for the trip count using `CanProveGreaterEqual(step, 1)` plus `CanProve(stop <= start)` (zero trips) or `CanProve(start < stop && stop <= start + step)` (one trip). On zero trips, emit one `AssignStmt(return_vars[i], iter_args[i].initValue_)` per return var and drop the body. On one trip, `DeepClone` the body with `loop_var → start` and `iter_args[i] → init_values[i]` substitutions, re-visit the cloned body so further folds happen in the same pass, then strip the trailing `YieldStmt` and bind each `return_vars[i] → yielded_value[i]` in `var_remap_` (same propagation mechanism as Fold A's lift). The one-trip path is capped at `kMaxNestedSingleTripFolds` (16) levels of *nested* single-trip loops per run — see [Substitution-depth cap](#substitution-depth-cap-fold-b).
 
 `DeepClone` with `clone_def_vars=true` is used (rather than an in-place `var_remap_` override on the body) so the unrolled body gets fresh `Var` identities at every DefField, matching `LoopUnrollMutator`. This keeps the lifted copy structurally independent of the original (discarded) loop body and lets the re-visit bind the body's scalars on identities distinct from the surrounding scope.
 
@@ -85,7 +85,7 @@ A substitution only reaches uses visited while its `var_remap_` entry is live, a
 
 `ReturnVarEscapeIndex` (a pre-pass in `simplify_pass.cpp`) decides this per fold site. It walks the function body once, numbering the restoring scopes in pre-order so a scope owns the contiguous id range `[id, end)` of its subtree; "every use of `v` sits inside scope `S`" is then two integer comparisons. A monotonic tick orders uses against the fold site, so a use *preceding* it inside the same scope counts as escaping too. One walk plus O(1) lookups per fold keeps Simplify within its O(N log N) budget.
 
-Statements the index has never seen answer "does not escape", keeping the substitution. That covers folds nested inside a body Fold B `DeepClone`d, whose `Var` identities are minted after indexing. A clone's Vars are unreachable from outside it, so the only unhandled case is a restore-scope *within* a clone standing between such a fold and a later use of its return var — pre-SSA only, and no worse than the behaviour before this index existed. Re-indexing each clone would close it, but nested single-trip loops would then pay an O(N²) walk.
+Statements the index has never seen answer "does not escape", keeping the substitution. That covers folds nested inside a body Fold B `DeepClone`d, whose `Var` identities are minted after indexing. A clone's Vars are unreachable from outside it, so the only unhandled case is a restore-scope *within* a clone standing between such a fold and a later use of its return var — pre-SSA only, and no worse than the behaviour before this index existed. Re-indexing each clone would close it. It is left open because the gap is pre-SSA-only and the pipeline runs Simplify only after `ConvertToSSA`, so nothing but a direct pre-SSA caller can reach it.
 
 For an escaping `return_vars[i]`, `LiftBodyToReturnVars` emits `AssignStmt(return_vars[i], yielded_value[i])` at the fold site instead of recording the remap. The assignment stays *inside* the region being lifted — the yielded value may name body-local `Var`s, so it cannot be hoisted past the loop, and in leak-mode semantics the last iteration writing last is exactly what a post-loop read expects.
 
@@ -275,6 +275,19 @@ first_iter(0)
 The trip count proof `start < stop && stop <= start + step` succeeds for `pl.range(0, 128, 128)`, so Fold B substitutes `ko → 0` (via `DeepClone`) and lifts the body. The substitution turns the inner `if ko == 0` into `if 0 == 0`, which `analyzer_->Simplify` reduces to `ConstBool(true)`. Fold A then drops the dead else branch — both folds compose in the same Simplify pass. The same path handles zero-trip loops by emitting `AssignStmt`s for each `return_vars[i] = iter_args[i].initValue_` and dropping the body entirely.
 
 Loops with `attrs_` or non-Sequential `kind_` are skipped — those forms participate in execution-model contracts (Parallel/Unroll/Pipeline scheduling) that downstream passes may depend on observing as a `ForStmt`.
+
+#### Substitution-depth cap (Fold B)
+
+`DeepClone` copies the whole loop body. When that body is itself a pure single-trip loop, the re-visit folds it by cloning *its* body, and so on — clone sizes run N, N-1, …, 1, so a nest of N single-trip loops costs O(N²), above the O(N log N) ceiling `.claude/rules/pass-complexity.md` sets.
+
+`kMaxNestedSingleTripFolds` (16, in `simplify_pass.cpp`) caps how many *nested* single-trip loops one run collapses. `fold_b_depth_` counts the Fold B clones currently on the stack; past the cap the loop falls through to the general path and stays a `ForStmt`. Folds at one depth sit at disjoint positions and so clone at most N nodes between them, which bounds the run's total cloning at O(N).
+
+Declining is sound, not a missed obligation: the survivors are ordinary single-trip `ForStmt`s, and the next Simplify run takes the next 16 levels. No kernel in the pipeline nests *provably* one-trip pure loops anywhere near 16 deep, so the cap never fires on real input.
+
+| Nest depth | Loops left after one run |
+| ---------- | ------------------------ |
+| ≤ 16 | 0 |
+| 19 | 3 |
 
 ## Implementation
 
