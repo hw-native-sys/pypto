@@ -28,6 +28,7 @@ from pypto.jit.specializer import (
     _collect_dynvar_names,
     _infer_return_type,
     _layout_str,
+    _render_free_value,
     specialize,
 )
 from pypto.pypto_core import DataType, ir
@@ -559,6 +560,135 @@ class TestBodyTransformer:
         # The constant is inlined in BOTH the annotation and the value expression.
         assert "W_PAD" not in out
         assert "pl.Tile[[1, 96], pl.FP32]" in out
+
+    def test_string_constant_is_inlined_as_a_literal(self):
+        """A free name holding a str must render as a quoted literal.
+
+        Operator kwargs are commonly strings (``mode="trunc"``,
+        ``saturation_mode="on"``). Left un-inlined the name reaches the parser as
+        an undefined identifier, so a kernel factory could not be parameterized
+        by mode at all.
+        """
+        src = """
+            def f(a: pl.Tensor):
+                t = pl.load(a, [0, 0], [1, 64])
+                q = pl.cast(t, pl.INT8, mode=MODE)
+        """
+        out = self._transform_with_globals(
+            src,
+            tensor_meta={"a": TensorMeta((1, 64), DataType.FP16)},
+            py_globals={"MODE": "trunc"},
+        )
+        assert "mode='trunc'" in out
+        assert "MODE" not in out
+
+    def test_dtype_and_enum_constants_render_as_pl_paths(self):
+        """``DataType`` / enum values render as the ``pl.`` spelling that evaluates back to them."""
+        src = """
+            def f(a: pl.Tensor):
+                t = pl.load(a, [0, 0], [1, 64], target_memory=MEM)
+                q = pl.cast(t, DTYPE, mode='trunc')
+        """
+        out = self._transform_with_globals(
+            src,
+            tensor_meta={"a": TensorMeta((1, 64), DataType.FP16)},
+            py_globals={"DTYPE": pl.INT8, "MEM": pl.Mem.Vec},
+        )
+        assert "pl.INT8" in out
+        assert "pl.Mem.Vec" in out
+        assert "DTYPE" not in out and "MEM" not in out
+
+    def test_sequence_constant_renders_elementwise(self):
+        """A shape held in a module constant is a list of ints, not a scalar."""
+        src = """
+            def f(a: pl.Tensor):
+                t = pl.load(a, [0, 0], SHAPE)
+        """
+        out = self._transform_with_globals(
+            src,
+            tensor_meta={"a": TensorMeta((1, 64), DataType.FP16)},
+            py_globals={"SHAPE": [1, 64]},
+        )
+        assert "pl.load(a, [0, 0], [1, 64])" in out
+
+    def test_unrenderable_value_leaves_the_name_alone(self):
+        """A value with no source form must not be folded — the parser's error is the diagnostic."""
+        src = """
+            def f(a: pl.Tensor):
+                t = pl.load(a, [0, 0], [1, 64], target_memory=WIDGET)
+        """
+        out = self._transform_with_globals(
+            src,
+            tensor_meta={"a": TensorMeta((1, 64), DataType.FP16)},
+            py_globals={"WIDGET": object()},
+        )
+        assert "WIDGET" in out
+
+    def test_a_local_still_shadows_a_free_name(self):
+        """Folding is skipped for a name the body assigns — the local wins, as in Python."""
+        src = """
+            def f(a: pl.Tensor):
+                MODE = pl.load(a, [0, 0], [1, 64])
+                q = pl.cast(MODE, pl.INT8, mode='trunc')
+        """
+        out = self._transform_with_globals(
+            src,
+            tensor_meta={"a": TensorMeta((1, 64), DataType.FP16)},
+            py_globals={"MODE": "trunc"},
+        )
+        assert "pl.cast(MODE, pl.INT8, mode='trunc')" in out
+
+
+class TestRenderFreeValue:
+    """``_render_free_value`` — the single answer to "can this value be written as source?"."""
+
+    @pytest.mark.parametrize(
+        "value, expected",
+        [
+            (7, "7"),
+            (1.5, "1.5"),
+            (True, "True"),
+            (None, "None"),
+            ("trunc", "'trunc'"),
+            (pl.INT8, "pl.INT8"),
+            (pl.FP32, "pl.FP32"),
+            (pl.Mem.Vec, "pl.Mem.Vec"),
+            (pl.PadValue.zero, "pl.PadValue.zero"),
+            (pl.NZ, "pl.TensorLayout.NZ"),
+            ([1, 64], "[1, 64]"),
+            ((1, 64), "(1, 64)"),
+            ([[1, 2], [3, 4]], "[[1, 2], [3, 4]]"),
+            ([pl.INT8, pl.FP32], "[pl.INT8, pl.FP32]"),
+        ],
+    )
+    def test_renders_to_evaluable_source(self, value, expected):
+        rendered = _render_free_value(value)
+        assert rendered is not None
+        assert ast.unparse(rendered) == expected
+
+    @pytest.mark.parametrize(
+        "value, expected",
+        [
+            (pl.INT8, pl.INT8),
+            (pl.Mem.Vec, pl.Mem.Vec),
+            (pl.NZ, pl.NZ),
+            ([1, 64], [1, 64]),
+        ],
+    )
+    def test_rendered_source_evaluates_back_to_the_value(self, value, expected):
+        """The rendered text is only useful if ``pl`` can evaluate it back."""
+        rendered = _render_free_value(value)
+        assert rendered is not None
+        assert eval(ast.unparse(rendered), {"pl": pl}) == expected  # noqa: S307
+
+    @pytest.mark.parametrize(
+        "value",
+        [object(), pl.Tensor, pl.load, [1, object()], {"a": 1}],
+        ids=["opaque", "class", "function", "list-with-opaque", "dict"],
+    )
+    def test_declines_values_with_no_source_form(self, value):
+        """Declining is the safe answer: the name survives and the parser reports it."""
+        assert _render_free_value(value) is None
 
 
 # ---------------------------------------------------------------------------

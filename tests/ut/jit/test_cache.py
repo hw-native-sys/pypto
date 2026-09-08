@@ -15,6 +15,7 @@ import inspect
 import types
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event, current_thread
+from typing import Any
 
 import pypto.language as pl
 import pytest
@@ -515,6 +516,31 @@ def _global_slice(x: pl.Tensor[[128, 128], pl.FP32]) -> pl.Tensor[[_CACHE_BLOCK,
     return y
 
 
+_CACHE_MODE = "trunc"
+_CACHE_DTYPE = pl.INT8
+_CACHE_MEM = pl.Mem.Vec
+_CACHE_SHAPE = [1, 64]
+# Deliberately typed ``Any``: this stands for any value the specializer cannot
+# render as source, and the point is what the *cache key* does with it.
+_CACHE_OPAQUE: Any = object()
+
+
+def _global_cast(x: pl.Tensor[[1, 64], pl.FP16], out: pl.Out[pl.Tensor[[1, 64], pl.INT8]]):
+    """Names a str, a DataType, an enum and a list constant — every foldable kind."""
+    with pl.at(level=pl.Level.CORE_GROUP):
+        t = pl.load(x, [0, 0], _CACHE_SHAPE, target_memory=_CACHE_MEM)
+        q = pl.cast(t, _CACHE_DTYPE, mode=_CACHE_MODE)
+        y = pl.store(q, [0, 0], out)
+    return y
+
+
+def _global_opaque(x: pl.Tensor[[1, 64], pl.FP16]):
+    """Names a value with no source form, so specializing it would fail."""
+    with pl.at(level=pl.Level.CORE_GROUP):
+        y = pl.load(x, [0, 0], [1, 64], target_memory=_CACHE_OPAQUE)
+    return y
+
+
 def _with_globals(func, **values):
     cloned = types.FunctionType(func.__code__, {**func.__globals__, **values}, func.__name__)
     cloned.__annotations__ = func.__annotations__.copy()
@@ -564,6 +590,34 @@ class TestGlobalDependencies:
         a = pl.jit(_with_globals(add_constant, _CACHE_BLOCK=first))
         b = pl.jit(_with_globals(add_constant, _CACHE_BLOCK=second))
         assert a._get_source_hash() != b._get_source_hash()
+
+    @pytest.mark.parametrize(
+        "name, first, second",
+        [
+            ("_CACHE_MODE", "trunc", "round"),
+            ("_CACHE_DTYPE", pl.INT8, pl.INT16),
+            ("_CACHE_MEM", pl.Mem.Vec, pl.Mem.Mat),
+            ("_CACHE_SHAPE", [1, 64], [1, 32]),
+        ],
+        ids=["str", "dtype", "enum", "list"],
+    )
+    def test_every_foldable_constant_kind_invalidates(self, name, first, second):
+        """A constant the specializer folds must also move the key.
+
+        These four kinds only became foldable alongside this test; before that a
+        body could not name them at all. Had the key not been extended with them,
+        rebinding one would silently hand back an artifact built from the old
+        value — the failure mode the int/float/bool tracking already prevents.
+        """
+        a = pl.jit(_with_globals(_global_cast, **{name: first}))
+        b = pl.jit(_with_globals(_global_cast, **{name: second}))
+        assert a._get_source_hash() != b._get_source_hash()
+
+    def test_unfoldable_constant_does_not_invalidate(self):
+        """A value with no source form cannot change the generated source, so it cannot change the key."""
+        a = pl.jit(_with_globals(_global_opaque, _CACHE_OPAQUE=object()))
+        b = pl.jit(_with_globals(_global_opaque, _CACHE_OPAQUE=object()))
+        assert a._get_source_hash() == b._get_source_hash()
 
     def test_closure_constant_uses_current_snapshot(self, compile_programs):
         block = 32

@@ -64,7 +64,6 @@ import inspect
 import json
 import os
 import re
-import struct
 import tempfile
 import textwrap
 from collections.abc import Callable, Mapping, Sequence
@@ -93,6 +92,7 @@ from .specializer import (
     _collect_annotation_dynamic_dims,
     _collect_dynvar_names,
     build_specialize_context,
+    free_name_source,
     func_name_lookup,
 )
 
@@ -1952,23 +1952,26 @@ class JITFunction:
 
     @capture_namespaces()
     def _get_source_hash(self) -> str:
-        """Hash source structure and the current values of referenced constants."""
+        """Hash source structure and the current values of referenced constants.
+
+        Each referenced name contributes the exact text the specializer will fold
+        it into, straight from ``free_name_source``. Reading the emitted form —
+        rather than re-deciding here which types count — is what keeps the key in
+        step with the folding rule: a constant that changes the generated source
+        changes this hash by construction, and one that does not fold (an opaque
+        object, a JIT dep, ``pl`` itself) contributes nothing because it leaves
+        the source unchanged.
+        """
         source_hash = self._get_static_source_hash()
         records = []
         for index, jit_func in enumerate([self, *self._get_deps()]):
             func = jit_func._func
             namespace = func_name_lookup(func)
             for name in _constant_dependency_names(func):
-                value = namespace.get(name)
-                if not isinstance(value, (int, float, bool)):
+                folded = free_name_source(name, namespace)
+                if folded is None:
                     continue
-                if isinstance(value, bool):
-                    kind, encoded = "bool", str(value)
-                elif isinstance(value, int):
-                    kind, encoded = "int", str(value)
-                else:
-                    kind, encoded = "float", struct.pack("!d", value).hex()
-                records.append((index, func.__module__, func.__qualname__, name, kind, encoded))
+                records.append((index, func.__module__, func.__qualname__, name, folded))
         return compute_source_hash([source_hash, json.dumps(records, separators=(",", ":"))])
 
     @cache_in_snapshot

@@ -5,11 +5,23 @@ print IR back to Python syntax.
 
 ## JIT constants and compilation reuse
 
-`@pl.jit` includes referenced `int`, `float`, and `bool` globals and closure
-bindings in its compilation key, including constants used by transitive JIT
-helpers and source annotations. Rebinding a referenced constant causes a new
-specialization; changing an unrelated global or a name shadowed by a body-local
-variable does not invalidate the body dependency key.
+A `@pl.jit` body is parsed into `@pl.program` source and re-parsed in a namespace
+holding only `pl` and `pld`, so any name it inherits from its own module or an
+enclosing function must be replaced, at its use site, by source text that
+evaluates back to the same value. That covers literals (`int`, `float`, `bool`,
+`str`, `None`), the `pl` dtype and enum constants (`pl.INT8`, `pl.Mem.Vec`,
+`pl.PadValue.zero`, `pl.NZ`), and lists/tuples nested from those — a shape or a
+rounding mode held in a constant, for instance. A value with no source form is
+left alone, so the name survives and the parser reports it.
+
+Every name that folds is also in the compilation key, including constants used by
+transitive JIT helpers and source annotations. The key hashes the *emitted text*
+for each name, straight from the function the specializer folds with, so the two
+cannot drift: a constant that changes the generated source changes the key by
+construction, and one that does not fold contributes nothing. Rebinding a
+referenced constant causes a new specialization; changing an unrelated global or a
+name shadowed by a body-local variable does not invalidate the body dependency
+key.
 
 ```python
 BLOCK = 32
