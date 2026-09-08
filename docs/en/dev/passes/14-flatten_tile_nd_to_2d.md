@@ -51,7 +51,7 @@ Per-statement handling:
 | Tile op | Transformation |
 | ------- | -------------- |
 | `tile.load` (>2D) | Rebuild the result tile as 2D. For a natural NZ Mat load, also insert a shape-only 2D `tensor.view` on the source tensor, collapse leading offsets/shapes/valid_shape to the 2D source window, and require that window to be row-major contiguous. Vec loads and transposed Mat loads keep the original rank>2 source window and only flatten the result tile |
-| `tile.store` (rank>2 tensor) | Inject the original tensor-rank partition `shapes` as an extra 4th operand in the transformed IR so backend codegen can reconstruct the `partition_view`; the DSL source is unchanged. If the tile operand itself is still rank>2, insert a `tile.reshape` to flatten the tile operand to 2D first — a safety net for hand-built IR, since the `tile.load` and `tile.reshape` branches now flatten every producer the DSL can write — the codegen requires a 2D tile while the original tile shape still flows through as the `shapes` partition operand |
+| `tile.store` (rank>2 tensor) | Inject the tensor-rank partition `shapes` as an extra 4th operand in the transformed IR so backend codegen can reconstruct the `partition_view`; the DSL source is unchanged. The window is a **box the destination contains**, anchored at the store's offsets — see [The store partition window](#the-store-partition-window). If the tile operand itself is still rank>2, insert a `tile.reshape` to flatten the tile operand to 2D first — a safety net for hand-built IR, since the `tile.load` and `tile.reshape` branches now flatten every producer the DSL can write — the codegen requires a 2D tile while the tile shape still flows through as the `shapes` partition operand |
 | `tile.store` (2D tensor) | Pass through unchanged |
 | `tile.create`/`tile.full` (>2D) | Rebuild with flattened 2D shape directly |
 | `tile.assemble` (>2D target) | Fold the ND offset into the flattened `(row, col)` space with the same row-major collapse `tile.load` applies to its tensor-rank offsets (`row = ((o0*d1 + o1)*d2 + o2)*… + o[k-2]`, `col = o[k-1]`); the tile operands themselves are flattened by their defining ops. Requires source, target and offset to share one rank, and the written region to collapse to a contiguous row band (`IsRowMajorCollapseContiguous`) — both rejected in the precondition phase otherwise. Without the fold the offset would keep its ND rank on a 2D tile, and codegen (which reads `elements[0]`/`elements[1]` positionally and ignores the rest) would silently place the write at the wrong address |
@@ -315,9 +315,43 @@ class After:
 
 The 3D tile `[2, 3, 4]` is flattened to `[6, 4]`. `tile.load` directly produces a 2D tile —
 no `tile.reshape` is inserted. `tile.store` accepts the 2D tile and writes to the original rank>2 tensor. For
-rank>2 tensors, the pass injects the original partition `shapes` as an extra 4th operand into the
+rank>2 tensors, the pass injects the partition `shapes` as an extra 4th operand into the
 transformed IR (e.g. `pl.store(y_tile, [0, 0, 0], out_0, (2, 3, 4))`); this operand is only
 present in the transformed IR and is not part of the source DSL.
+
+### The store partition window
+
+The `shapes` operand is a **box in destination coordinates** — every size within
+its own axis's extent, anchored at the store's offsets. Codegen turns it into
+`pto.partition_view`, which can describe nothing else.
+
+Aligning the tile's dims against the tensor's trailing dims and padding the front
+with 1s produces that box whenever each tile dim *is* the tensor dim it lands on:
+tensor `[B, M, N]` written from an `[M, N]` tile gives `[1, M, N]`.
+
+It stops working once the tile's leading extent is a **collapse** of several
+tensor dims, which is what `tensor.gather` lowering produces — a `[2, 3, 8]`
+result becomes a `[6, 8]` tile. Padding would give `[1, 6, 8]`, asking for 6 of
+an axis whose extent is 3. That is not a box the destination contains; it reached
+the intended bytes only while the outer stride happened to be contiguous, and
+PTOAS >= 0.61 rejects it:
+
+```text
+error: 'pto.partition_view' op size at dim 1 (6) exceeds static source dim (3)
+```
+
+The window is therefore built by walking the leading axes outward from the
+innermost, consuming each whole while the row count still spans it: `[2, 3, 8]`.
+
+**Not every collapsed store has a window.** A flattened store writes `rows`
+*consecutive* row-major positions starting at its offsets, and a box matches that
+run only when every axis the row count consumes is consumed whole and starts at
+0. A `[12, 8]` tile over `[2, 2, 4, 8]` has `[2, 2, 3, 8]` available as an
+in-bounds box that multiplies back to 12 rows, but it covers flat positions
+`{0,1,2, 4,5,6, 8,9,10, 12,13,14}` while the store means `{0..11}`. The pass
+rejects such a store rather than retargeting it onto memory the author did not
+name. The innermost axis is exempt — it carries the tile's columns, so a partial
+column range is still rectangular and only has to fit.
 
 ## Dynamic tile dimensions (issue #1578)
 

@@ -1183,6 +1183,178 @@ class TestFlattenTileNdTo2DReshapedStore:
 
 
 # ----------------------------------------------------------------------------
+# Collapsed 2D tile feeding a rank>2 tile.store: the partition window must stay
+# inside the tensor
+# ----------------------------------------------------------------------------
+
+
+class TestFlattenTileNdTo2DCollapsedStore:
+    """A 2D tile whose rows are a COLLAPSE of several leading tensor dims.
+
+    ``tensor.gather`` lowering reduces a ``[2, 3, 8]`` result to a ``[6, 8]``
+    tile before this pass runs, so ``tile.store`` sees a 2D tile against a
+    rank-3 tensor. Padding the front with 1s and appending the tile's dims —
+    the rule that is right when each tile dim IS the tensor dim it lands on —
+    would emit ``shapes=[1, 6, 8]``, asking for 6 of a dim whose extent is 3.
+
+    That window is not a sub-box of the tensor. It addresses the right bytes
+    only when the outer stride happens to be contiguous, and PTOAS >= 0.61
+    rejects it outright:
+
+        error: 'pto.partition_view' op size at dim 1 (6) exceeds static
+               source dim (3)
+
+    The window must instead distribute the tile's rows over the leading tensor
+    dims: ``[2, 3, 8]``.
+
+    The distribution is not free to pick any in-bounds box. A flattened store
+    writes ``rows`` CONSECUTIVE row-major positions, so an axis the row count
+    consumes must be consumed whole and start at 0. Stores where that does not
+    hold have no window at all and are rejected, rather than retargeted onto a
+    box that fits but covers different elements.
+    """
+
+    def test_collapsed_2d_tile_store_distributes_rows_over_leading_dims(self):
+        """`tile.reshape([6, 8]) -> tile.store([2, 3, 8] tensor)` keeps the window in bounds."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[2, 3, 8], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[2, 3, 8], pl.FP32]],
+            ) -> pl.Tensor[[2, 3, 8], pl.FP32]:
+                x_tile: pl.Tile[[2, 3, 8], pl.FP32] = pl.load(x, [0, 0, 0], [2, 3, 8])
+                y_tile: pl.Tile[[2, 3, 8], pl.FP32] = pl.tile.exp(x_tile)
+                flat: pl.Tile[[6, 8], pl.FP32] = pl.tile.reshape(y_tile, [6, 8])
+                out_0: pl.Tensor[[2, 3, 8], pl.FP32] = pl.tile.store(flat, [0, 0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[2, 3, 8], pl.FP32]) -> pl.Tensor[[2, 3, 8], pl.FP32]:
+                out_0: pl.Tensor[[2, 3, 8], pl.FP32] = pl.create_tensor([2, 3, 8], dtype=pl.FP32)
+                y: pl.Tensor[[2, 3, 8], pl.FP32] = self.main_incore_0(x, out_0)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[2, 3, 8], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[2, 3, 8], pl.FP32]],
+            ) -> pl.Tensor[[2, 3, 8], pl.FP32]:
+                x_tile: pl.Tile[[6, 8], pl.FP32] = pl.tile.load(x, [0, 0, 0], [2, 3, 8], [2, 3, 8])
+                y_tile = pl.tile.exp(x_tile)
+                # Already 2D, so the pass inserts no flattening reshape of its own.
+                flat = pl.tile.reshape(y_tile, [6, 8])
+                # NOT [1, 6, 8]: the tile's 6 rows are dims 0 and 1 of the tensor.
+                out_0_1 = pl.tile.store(flat, [0, 0, 0], out_0, [2, 3, 8])
+                return out_0_1
+
+            @pl.function
+            def main(self, x: pl.Tensor[[2, 3, 8], pl.FP32]) -> pl.Tensor[[2, 3, 8], pl.FP32]:
+                out_0 = pl.create_tensor([2, 3, 8], dtype=pl.FP32)
+                y = self.main_incore_0(x, out_0)
+                return y
+
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_partial_innermost_leading_dim_keeps_the_outer_dims_at_one(self):
+        """3 rows over a ``[4, 3, 8]`` tensor become ``[1, 3, 8]``.
+
+        The row count fits inside the innermost leading axis, so it lands there
+        whole and the outer axis stays 1. Nothing is redistributed outward.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[3, 8], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[4, 3, 8], pl.FP32]],
+            ) -> pl.Tensor[[4, 3, 8], pl.FP32]:
+                x_tile: pl.Tile[[3, 8], pl.FP32] = pl.load(x, [0, 0], [3, 8])
+                out_0: pl.Tensor[[4, 3, 8], pl.FP32] = pl.tile.store(x_tile, [0, 0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[3, 8], pl.FP32]) -> pl.Tensor[[4, 3, 8], pl.FP32]:
+                out_0: pl.Tensor[[4, 3, 8], pl.FP32] = pl.create_tensor([4, 3, 8], dtype=pl.FP32)
+                y: pl.Tensor[[4, 3, 8], pl.FP32] = self.main_incore_0(x, out_0)
+                return y
+
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        stores = [line for line in pypto.ir.python_print(After).splitlines() if "pl.tile.store" in line]
+        assert len(stores) == 1, stores
+        assert "[1, 3, 8]" in stores[0], stores[0]
+
+    def test_row_count_that_is_not_a_whole_number_of_axes_is_rejected(self):
+        """A ``[12, 8]`` tile over ``[2, 2, 4, 8]`` has no window at all.
+
+        ``[2, 2, 3, 8]`` is in bounds and multiplies back to 12 rows, so a
+        purely arithmetic factorisation would accept it — but it covers flat
+        positions ``{0,1,2, 4,5,6, 8,9,10, 12,13,14}`` while the store means the
+        consecutive run ``{0..11}``. Writing the wrong elements silently is
+        worse than refusing, so the pass refuses.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[12, 8], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[2, 2, 4, 8], pl.FP32]],
+            ) -> pl.Tensor[[2, 2, 4, 8], pl.FP32]:
+                x_tile: pl.Tile[[12, 8], pl.FP32] = pl.load(x, [0, 0], [12, 8])
+                out_0: pl.Tensor[[2, 2, 4, 8], pl.FP32] = pl.tile.store(x_tile, [0, 0, 0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[12, 8], pl.FP32]) -> pl.Tensor[[2, 2, 4, 8], pl.FP32]:
+                out_0: pl.Tensor[[2, 2, 4, 8], pl.FP32] = pl.create_tensor([2, 2, 4, 8], dtype=pl.FP32)
+                y: pl.Tensor[[2, 2, 4, 8], pl.FP32] = self.main_incore_0(x, out_0)
+                return y
+
+        with pytest.raises(ValueError, match=r"must fill axis 1 \(extent 2\) a whole number of times"):
+            passes.flatten_tile_nd_to_2d()(Before)
+
+    def test_nonzero_offset_on_a_fully_consumed_axis_is_rejected(self):
+        """A ``[6, 8]`` tile at ``[0, 2, 0]`` into ``[4, 4, 8]`` has no window.
+
+        6 rows do not fill axis 1 (extent 4) a whole number of times, so the
+        run it means — ``(0,2), (0,3), (1,0), (1,1), (1,2), (1,3)`` — is not a
+        box. ``[3, 2, 8]`` fits and is in bounds, but it covers
+        ``(0,2), (0,3), (1,2), (1,3), (2,2), (2,3)`` instead.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[6, 8], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[4, 4, 8], pl.FP32]],
+            ) -> pl.Tensor[[4, 4, 8], pl.FP32]:
+                x_tile: pl.Tile[[6, 8], pl.FP32] = pl.load(x, [0, 0], [6, 8])
+                out_0: pl.Tensor[[4, 4, 8], pl.FP32] = pl.tile.store(x_tile, [0, 2, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[6, 8], pl.FP32]) -> pl.Tensor[[4, 4, 8], pl.FP32]:
+                out_0: pl.Tensor[[4, 4, 8], pl.FP32] = pl.create_tensor([4, 4, 8], dtype=pl.FP32)
+                y: pl.Tensor[[4, 4, 8], pl.FP32] = self.main_incore_0(x, out_0)
+                return y
+
+        with pytest.raises(ValueError, match=r"must fill axis 1 \(extent 4\) a whole number of times"):
+            passes.flatten_tile_nd_to_2d()(Before)
+
+
+# ----------------------------------------------------------------------------
 # User-written ND tile.assemble: the offset must be flattened with the tiles
 # ----------------------------------------------------------------------------
 

@@ -99,6 +99,142 @@ ExprPtr MakeShapeTupleFromInts(const std::vector<int64_t>& dims, const Span& spa
   return std::make_shared<MakeTuple>(elems, span);
 }
 
+/// Build the ``tile.store`` partition window over a rank>2 output tensor.
+///
+/// Aligning the tile's dims against the tensor's trailing dims and padding the
+/// front with 1s is right whenever each tile dim IS the tensor dim it lands on
+/// — tensor ``[B, M, N]`` written from an ``[M, N]`` tile gives ``[1, M, N]``.
+/// That window is returned unchanged.
+///
+/// It stops being right once the tile's leading extent is a COLLAPSE of several
+/// tensor dims, which is what ``tensor.gather`` lowering produces: a ``[2, 3,
+/// 8]`` result becomes a ``[6, 8]`` tile, and the aligned rule would emit
+/// ``[1, 6, 8]`` — 6 of a dim whose extent is 3. PTOAS >= 0.61 rejects that
+/// outright, and it only ever reached the intended bytes because the outer
+/// stride happened to be contiguous.
+///
+/// **The collapsed form is not free to pick any in-bounds box.** A flattened
+/// store writes ``rows`` CONSECUTIVE positions in row-major order over the
+/// leading axes, starting at ``offsets``. ``pto.partition_view`` can only
+/// describe a box, and the two coincide exactly when every axis the row count
+/// consumes whole is covered whole *and* starts at 0. Where they do not, no
+/// window writes the right elements — a ``[12, 8]`` tile over ``[2, 2, 4, 8]``
+/// has ``[2, 2, 3, 8]`` available as an in-bounds box, but that box covers
+/// flat positions {0,1,2, 4,5,6, 8,9,10, 12,13,14} while the store means
+/// {0..11}. Such a store is rejected rather than silently retargeted.
+///
+/// The innermost axis is exempt from the consecutiveness rule: it carries the
+/// tile's columns, so a partial column range is still rectangular. It only has
+/// to fit.
+///
+/// @param tile_shape Pre-substitution tile dims (static; see ComputeMergedShape)
+/// @param tensor_shape Output tensor dims, possibly dynamic
+/// @param offsets Store offsets, one per tensor dim, possibly dynamic
+/// @param span Source location for the emitted ConstInts
+/// @return One size per tensor dim
+std::vector<ExprPtr> ComputeStorePartitionShape(const std::vector<ExprPtr>& tile_shape,
+                                                const std::vector<ExprPtr>& tensor_shape,
+                                                const std::vector<ExprPtr>& offsets, const Span& span) {
+  const size_t tensor_rank = tensor_shape.size();
+  const size_t tile_rank = tile_shape.size();
+  INTERNAL_CHECK_SPAN(tile_rank > 0 && tile_rank <= tensor_rank, span)
+      << "Internal error: tile.store tile rank " << tile_rank << " must be in [1, " << tensor_rank
+      << "] (the output tensor's rank)";
+  INTERNAL_CHECK_SPAN(offsets.size() == tensor_rank, span)
+      << "Internal error: tile.store has " << offsets.size() << " offsets for a rank-" << tensor_rank
+      << " output tensor";
+
+  // The aligned window: 1s for the leading tensor dims the tile does not
+  // reach, then the tile's own dims. Each 1 is its own node rather than a
+  // shared one — IR consumers match by value, but a node reused across
+  // positions is a needless aliasing hazard.
+  std::vector<ExprPtr> aligned;
+  aligned.reserve(tensor_rank);
+  for (size_t i = tile_rank; i < tensor_rank; ++i) {
+    aligned.push_back(std::make_shared<ConstInt>(1, DataType::INDEX, span));
+  }
+  aligned.insert(aligned.end(), tile_shape.begin(), tile_shape.end());
+
+  // Keep it whenever it is already a sub-box. A dim is only rejected when both
+  // sides are static and the size provably overflows, so dynamic tensor dims
+  // take this path unchanged.
+  auto overflows = [](const ExprPtr& size, const ExprPtr& extent) {
+    auto size_ci = As<ConstInt>(size);
+    auto extent_ci = As<ConstInt>(extent);
+    return size_ci && extent_ci && size_ci->value_ > extent_ci->value_;
+  };
+  bool is_collapsed = false;
+  for (size_t i = 0; i < tensor_rank; ++i) {
+    if (overflows(aligned[i], tensor_shape[i])) {
+      is_collapsed = true;
+      break;
+    }
+  }
+  if (!is_collapsed) return aligned;
+
+  const std::string context = "tile.store partition window";
+  const auto [rows, cols] = ComputeMergedShape(tile_shape, context);
+  auto is_const_zero = [](const ExprPtr& e) {
+    auto ci = As<ConstInt>(e);
+    return ci && ci->value_ == 0;
+  };
+
+  // The innermost axis carries the tile's columns and only has to fit.
+  const int64_t last_extent = GetStaticDim(tensor_shape.back(), context);
+  if (auto last_offset = As<ConstInt>(offsets.back())) {
+    CHECK_SPAN(last_offset->value_ + cols <= last_extent, span)
+        << "tile.store writes " << cols << " columns at offset " << last_offset->value_
+        << " of an axis whose extent is " << last_extent << "; the write runs past the tensor";
+  }
+
+  // Walk the leading axes outward from the innermost. While the row count is
+  // larger than an axis it must consume that axis whole, at offset 0, or the
+  // consecutive run it means is not the box this would describe.
+  std::vector<int64_t> window(tensor_rank, 1);
+  window.back() = cols;
+  int64_t remaining = rows;
+  for (size_t axis = tensor_rank - 1; axis > 0; --axis) {
+    const size_t i = axis - 1;
+    const int64_t extent = GetStaticDim(tensor_shape[i], context);
+    if (remaining <= extent) {
+      // This axis takes what is left; outer axes stay 1 and their offsets pick
+      // a single slice, which is rectangular whatever they are.
+      if (auto offset = As<ConstInt>(offsets[i])) {
+        CHECK_SPAN(offset->value_ + remaining <= extent, span)
+            << "tile.store writes " << remaining << " rows at offset " << offset->value_ << " of axis " << i
+            << ", whose extent is " << extent << "; the write runs past the tensor";
+      }
+      window[i] = remaining;
+      remaining = 1;
+      break;
+    }
+    CHECK_SPAN(remaining % extent == 0, span)
+        << "tile.store cannot lower a " << rows << "x" << cols
+        << " tile into this tensor: its rows span several axes, so they must fill axis " << i << " (extent "
+        << extent << ") a whole number of times, but " << remaining
+        << " rows remain. A flattened store writes consecutive row-major positions, and no "
+           "partition window describes that here. Store one whole axis at a time (loop the outer "
+           "axis with pl.range/pl.parallel), or reshape the destination so the tile's rows are a "
+           "single axis";
+    CHECK_SPAN(is_const_zero(offsets[i]), span)
+        << "tile.store fills axis " << i << " (extent " << extent
+        << ") completely, so it must start at offset 0; a non-zero offset there would make the "
+           "written region a non-contiguous run that no partition window describes";
+    window[i] = extent;
+    remaining /= extent;
+  }
+  // Falling out of the loop with rows left over means the tile has more rows
+  // than the destination's leading axes hold at all.
+  CHECK_SPAN(remaining == 1, span) << "tile.store writes a " << rows << "x" << cols
+                                   << " tile into a tensor whose leading axes hold only "
+                                   << (rows / remaining) << " rows; the write runs past the tensor";
+
+  std::vector<ExprPtr> result;
+  result.reserve(tensor_rank);
+  for (auto dim : window) result.push_back(std::make_shared<ConstInt>(dim, DataType::INDEX, span));
+  return result;
+}
+
 /**
  * @brief Build a 2D shape vector from merged dimensions.
  */

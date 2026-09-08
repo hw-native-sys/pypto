@@ -1116,20 +1116,17 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
 
       auto out_tensor_type = As<TensorType>(new_args[2]->GetType());
       if (orig_tile_type && out_tensor_type && out_tensor_type->shape_.size() > 2) {
-        // Inject the original tensor-rank partition shape tuple as the 4th argument.
-        // The partition shape has the same rank as the tensor, with 1s for
-        // batch dims that are not covered by the tile, followed by the tile dims.
-        const size_t tensor_rank = out_tensor_type->shape_.size();
-        const size_t tile_rank = orig_tile_type->shape_.size();
-        std::vector<ExprPtr> partition_shape;
-        partition_shape.reserve(tensor_rank);
-        for (size_t i = tile_rank; i < tensor_rank; ++i) {
-          partition_shape.push_back(std::make_shared<ConstInt>(1, DataType::INDEX, span));
-        }
-        for (const auto& dim : orig_tile_type->shape_) {
-          partition_shape.push_back(dim);
-        }
-        new_args.push_back(std::make_shared<MakeTuple>(partition_shape, span));
+        // Inject the tensor-rank partition shape tuple as the 4th argument. It
+        // must be a box the destination actually contains, and the offsets are
+        // part of deciding that — see ComputeStorePartitionShape for why
+        // aligning the tile's dims against the tensor's trailing dims is not
+        // enough once the tile's leading extent collapses several tensor dims.
+        auto store_offsets = As<MakeTuple>(new_args[1]);
+        INTERNAL_CHECK_SPAN(store_offsets, span) << "Internal error: tile.store offsets must be a tuple";
+        new_args.push_back(std::make_shared<MakeTuple>(
+            ComputeStorePartitionShape(orig_tile_type->shape_, out_tensor_type->shape_,
+                                       store_offsets->elements_, span),
+            span));
       }
 
       // Construct call directly: store result type = output tensor type (args[2])

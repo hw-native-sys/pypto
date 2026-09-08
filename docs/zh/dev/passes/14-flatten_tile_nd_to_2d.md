@@ -50,7 +50,7 @@ program_2d = flatten_pass(program)
 | Tile 操作 | 变换方式 |
 | --------- | -------- |
 | `tile.load`（>2D） | 将结果 tile 重建为 2D。对于 natural NZ Mat load，还会在源张量上插入 shape-only 的 2D `tensor.view`，把 leading offsets/shapes/valid_shape 折叠到 2D 源窗口，并要求该窗口按 row-major 连续可折叠。Vec load 和 transposed Mat load 保留原始 rank>2 源窗口，只展平结果 tile |
-| `tile.store`（rank>2 张量） | 在转换后 IR 中注入原始张量 rank 对应的分区 `shapes` 作为额外的第 4 个操作数，供后端 codegen 重建 `partition_view`；DSL 源码不变。若 tile 操作数本身仍是 rank>2，pass 会先插入一个 `tile.reshape` 把 tile 操作数压回 2D —— 这是给手工构造 IR 的兜底，因为 `tile.load` 与 `tile.reshape` 分支现在已经展平了 DSL 能写出的每一种生产者 —— codegen 要求 tile 必须是 2D,而原始 tile shape 仍由 `shapes` 分区操作数携带 |
+| `tile.store`（rank>2 张量） | 在转换后 IR 中注入张量 rank 对应的分区 `shapes` 作为额外的第 4 个操作数，供后端 codegen 重建 `partition_view`；DSL 源码不变。该窗口是**目标张量所包含的 box**，以 store 自身的 offsets 为原点 —— 见 [store 的分区窗口](#store-的分区窗口)。若 tile 操作数本身仍是 rank>2，pass 会先插入一个 `tile.reshape` 把 tile 操作数压回 2D —— 这是给手工构造 IR 的兜底，因为 `tile.load` 与 `tile.reshape` 分支现在已经展平了 DSL 能写出的每一种生产者 —— codegen 要求 tile 必须是 2D,而 tile shape 仍由 `shapes` 分区操作数携带 |
 | `tile.store`（2D 张量） | 直接透传 |
 | `tile.create`/`tile.full`（>2D） | 直接使用展平的 2D 形状重建 |
 | `tile.assemble`（>2D 目标） | 用与 `tile.load` 折叠 tensor-rank 偏移相同的行主序折叠，把 ND 偏移折进展平后的 `(row, col)` 空间（`row = ((o0*d1 + o1)*d2 + o2)*… + o[k-2]`，`col = o[k-1]`）；Tile 操作数本身由其定义处的算子展平。要求 source、target 与 offset 具有相同 rank，且写入区域能折叠为连续的行区间（`IsRowMajorCollapseContiguous`），否则在前置条件阶段报错。若不折叠，偏移会以 ND rank 残留在 2D Tile 上，而 codegen 只按位置读取 `elements[0]`/`elements[1]` 并忽略其余元素，从而静默地写到错误地址 |
@@ -276,7 +276,23 @@ class After:
         return out_0
 ```
 
-3D Tile `[2, 3, 4]` 被展平为 `[6, 4]`。`tile.load` 直接产生 2D tile，无需插入 `tile.reshape`。`tile.store` 接受 2D tile 并写入原始的 rank>2 张量。对于 rank>2 张量，Pass 会在转换后 IR 中将原始分区 `shapes` 注入为额外的第 4 个操作数（例如 `pl.store(y_tile, [0, 0, 0], out_0, (2, 3, 4))`）；该操作数仅存在于转换后的 IR 中，不属于 DSL 源码。
+3D Tile `[2, 3, 4]` 被展平为 `[6, 4]`。`tile.load` 直接产生 2D tile，无需插入 `tile.reshape`。`tile.store` 接受 2D tile 并写入原始的 rank>2 张量。对于 rank>2 张量，Pass 会在转换后 IR 中将分区 `shapes` 注入为额外的第 4 个操作数（例如 `pl.store(y_tile, [0, 0, 0], out_0, (2, 3, 4))`）；该操作数仅存在于转换后的 IR 中，不属于 DSL 源码。
+
+### store 的分区窗口
+
+`shapes` 操作数是**目标坐标系下的一个 box** —— 每个尺寸都不超过所在轴的 extent，以 store 自身的 offsets 为原点。Codegen 把它转成 `pto.partition_view`，而后者只能表达 box。
+
+当 tile 的每个维度**就是**它所落到的那个张量维度时，"前面补 1 + 接上 tile 各维"正好得到这个 box：张量 `[B, M, N]` 由 `[M, N]` tile 写入，得到 `[1, M, N]`。
+
+一旦 tile 的前导 extent 是若干张量维度的**折叠**，这条规则就失效了 —— `tensor.gather` 的下降正是如此：`[2, 3, 8]` 的结果变成 `[6, 8]` 的 tile。补 1 会得到 `[1, 6, 8]`，即向一个 extent 为 3 的轴索要 6。这不是目标张量所包含的 box；它此前之所以能写对字节，只是因为外层 stride 恰好连续，而 PTOAS >= 0.61 会直接拒绝：
+
+```text
+error: 'pto.partition_view' op size at dim 1 (6) exceeds static source dim (3)
+```
+
+因此窗口改为从最内侧的前导轴向外走，在行数仍然跨越该轴时将其整轴吃掉：`[2, 3, 8]`。
+
+**并非每个折叠 store 都存在窗口。** 展平后的 store 写的是从 offsets 起、行主序**连续**的 `rows` 个位置，而 box 只有在"行数吃掉的每个轴都被整轴吃掉且从 0 开始"时才与该连续段重合。`[12, 8]` 的 tile 写入 `[2, 2, 4, 8]`，存在一个 in-bounds 且行数相乘为 12 的 box `[2, 2, 3, 8]`，但它覆盖的扁平位置是 `{0,1,2, 4,5,6, 8,9,10, 12,13,14}`，而 store 的语义是 `{0..11}`。此时 Pass 选择拒绝，而不是把写入重定向到作者并未指定的内存。最内侧轴不受此约束 —— 它承载 tile 的列，部分列区间仍然是矩形，只需放得下即可。
 
 ## 动态 Tile 维度（issue #1578）
 

@@ -462,17 +462,22 @@ TypePtr DeduceTileStoreType(const std::vector<ExprPtr>& args,
   const std::vector<ExprPtr>& dest_shape = output_tensor_type->shape_;
   const size_t dest_rank = dest_shape.size();
 
-  // The optional ``shapes`` operand carries FlattenTileNdTo2D's ND partition,
-  // which is a *collapsed-dims* descriptor rather than a rectangle in
-  // destination coordinates: it is built as leading 1s followed by the
-  // pre-flatten tile shape, whose leading extent may be the product of several
-  // destination axes. A [2, 3, 8] gather, for one, stores its collapsed [6, 8]
-  // tile as partition [1, 6, 8], where 6 spans two axes of a destination whose
-  // own axis 1 is only 3. Codegen consumes that through pto.partition_view,
-  // which understands the collapse; reading it as an origin-anchored rectangle
-  // here would both mis-bound the write and place the union on the wrong axes.
-  // So the ND form keeps the destination type it had — recovering the written
-  // region on ND axes is the ND-to-2D mapping problem, not this rule's.
+  // The optional ``shapes`` operand carries FlattenTileNdTo2D's ND partition
+  // window. It IS a rectangle in destination coordinates: a box the destination
+  // contains, anchored at the store's own offsets. It used to be a
+  // *collapsed-dims* descriptor instead — leading 1s followed by the pre-flatten
+  // tile shape, so a [2, 3, 8] gather stored its collapsed [6, 8] tile as
+  // [1, 6, 8], where 6 spanned two axes of a destination whose own axis 1 is
+  // only 3. That form was not lowerable: pto.partition_view describes a box and
+  // nothing else, and PTOAS >= 0.61 rejects an out-of-bounds size outright. The
+  // pass now emits [2, 3, 8] there and refuses the stores that have no box at
+  // all. See ComputeStorePartitionShape.
+  //
+  // Deriving the valid-region union from that rectangle is now possible in
+  // principle, but it is a separate change: the union below is written against
+  // the tile's own extent, and an ND partition covers a window the 2D tile only
+  // describes after the flatten mapping. So the ND form still keeps the
+  // destination type it had.
   if (shapes_tuple) {
     return output_tensor_type;
   }

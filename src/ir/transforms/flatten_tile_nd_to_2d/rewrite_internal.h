@@ -116,6 +116,9 @@ bool IsNdTile(const TileTypePtr& tile_type);
 int64_t GetStaticDim(const ExprPtr& expr, const std::string& context);
 std::pair<int64_t, int64_t> ComputeMergedShape(const std::vector<ExprPtr>& shape, const std::string& context);
 ExprPtr MakeShapeTupleFromInts(const std::vector<int64_t>& dims, const Span& span);
+std::vector<ExprPtr> ComputeStorePartitionShape(const std::vector<ExprPtr>& tile_shape,
+                                                const std::vector<ExprPtr>& tensor_shape,
+                                                const std::vector<ExprPtr>& offsets, const Span& span);
 std::vector<ExprPtr> Make2DShapeExprs(int64_t merged, int64_t last, const Span& span);
 std::vector<ExprPtr> ComputeMergedValidShape(const std::vector<ExprPtr>& valid, const Span& span);
 ExprPtr MakeCanonicalIndexAdd(const ExprPtr& lhs, const ExprPtr& rhs, const Span& span);
