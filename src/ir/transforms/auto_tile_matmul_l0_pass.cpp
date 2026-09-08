@@ -2911,10 +2911,10 @@ std::optional<PipelineAccumulatorCandidate> AnalyzePipelineAccumulator(
 std::unordered_set<const ForStmt*> BuildPipelineDbCPlan(const FunctionPtr& func) {
   const auto* ctx = PassContext::Current();
   const MemoryPlanner planner = ctx ? ctx->GetMemoryPlanner() : kDefaultMemoryPlanner;
-  // #2131 explicitly targets the PyPTO planner. PTOAS already gives the
-  // reproduced loop four distinct Acc placements and showed no measurable
-  // benefit from this source-level marker.
-  if (planner != MemoryPlanner::PyPTO) return {};
+  // PyPTO-owned planners preserve this source-level two-slot L0C policy.
+  // PTOAS already gives the reproduced loop four distinct Acc placements and
+  // showed no measurable benefit from this marker.
+  if (planner == MemoryPlanner::PtoAS) return {};
 
   // Profitability and capacity are backend-specific. Direct pass invocation
   // without a configured backend must leave an already-L0 pipeline unchanged,

@@ -1322,7 +1322,7 @@ def _build_group_mapping(
 
 
 def _get_ptoas_flags(
-    memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.DSA_RP,
+    memory_planner: _passes.MemoryPlanner,
     passes_dump_dir: str | None = None,
 ) -> list[str]:
     """Build the common ptoas flag list for kernel compilation.
@@ -1435,7 +1435,7 @@ def _compile_pto_module(
     pto_code: str,
     unit_name: str,
     output_dir: str,
-    memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.DSA_RP,
+    memory_planner: _passes.MemoryPlanner,
     dump_ptoas_passes: bool = False,
 ) -> str:
     """Run ptoas for one MLIR module and return the generated C++."""
@@ -1468,7 +1468,7 @@ def _emit_single_function_output(
     pto_code: str,
     output_dir: str,
     skip_ptoas: bool,
-    memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.DSA_RP,
+    memory_planner: _passes.MemoryPlanner,
     dump_ptoas_passes: bool = False,
 ) -> None:
     """Emit output files for one InCore function."""
@@ -1498,7 +1498,7 @@ def _emit_group_output(
     pto_code: str,
     output_dir: str,
     skip_ptoas: bool,
-    memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.DSA_RP,
+    memory_planner: _passes.MemoryPlanner,
     dump_ptoas_passes: bool = False,
 ) -> None:
     """Emit output files for one grouped MLIR module."""
@@ -1580,7 +1580,7 @@ def _emit_unit(
     unit: _CodegenUnit,
     output_dir: str,
     skip_ptoas: bool,
-    memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.DSA_RP,
+    memory_planner: _passes.MemoryPlanner,
     dump_ptoas_passes: bool = False,
 ) -> _EmitResult:
     """Run ptoas + wrapper generation for one codegen unit.
@@ -1653,7 +1653,7 @@ def _run_ptoas_phase(
     prof: CompileProfiler | None,
     result_files: dict[str, str],
     errors: list[tuple[str, Exception]],
-    memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.DSA_RP,
+    memory_planner: _passes.MemoryPlanner,
     dump_ptoas_passes: bool = False,
 ) -> None:
     """Phase 2: run ptoas for all codegen units, sequentially or in parallel."""
@@ -1807,7 +1807,7 @@ def _generate_with_distributed(
     output_dir: str,
     skip_ptoas: bool,
     *,
-    memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.DSA_RP,
+    memory_planner: _passes.MemoryPlanner,
     emit_source_loc: bool = True,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind = _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
@@ -2047,7 +2047,7 @@ def _generate_multi_chip(
     output_dir: str,
     skip_ptoas: bool = False,
     *,
-    memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.DSA_RP,
+    memory_planner: _passes.MemoryPlanner,
     emit_source_loc: bool = True,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind = _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
@@ -2087,7 +2087,7 @@ def _generate_single_chip(
     output_dir: str,
     skip_ptoas: bool = False,
     *,
-    memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.DSA_RP,
+    memory_planner: _passes.MemoryPlanner,
     emit_source_loc: bool = True,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind = _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,

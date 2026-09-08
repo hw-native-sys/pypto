@@ -594,12 +594,10 @@ def _overflowing_mat_program(buffer_name):
 def _overflow_message(program):
     """Run init_mem_ref + allocate_memory_addr and return the capacity diagnostic.
 
-    A reserve-buffer overflow is caught by AllocateMemoryAddresses' own in-pass
-    ``CHECK`` (it owns the only exact footprint), which raises ``pypto::ValueError``
-    -> a builtin ``ValueError``. That is a different exception type from the
-    ``AllocatedMemoryAddr`` verifier's ``pypto.Error`` used by the tile-only
-    overflow test above — the two checks report the same condition through
-    different mechanisms, so each test asserts the type its own path raises.
+    The default DSA-RP planner rejects this no-fit problem in the allocation
+    pass and preserves the reserve-buffer attribution in its ``ValueError``.
+    The tile-only test above instead exercises the post-pass verifier's
+    ``pypto.Error`` path, so each test asserts the exception type it reaches.
     """
     program = passes.init_mem_ref()(program)
     pipeline = passes.PassPipeline()
@@ -686,7 +684,7 @@ def test_allocate_memory_addr_uses_default_policy_without_backend():
     """Test that AllocateMemoryAddr falls back to DefaultMemoryAllocatorPolicy when no backend is configured.
 
     Without a backend, the pass should still produce correct 32-byte aligned
-    addresses using the default policy (skip DDR, sort by id, 32-byte alignment).
+    addresses using the default policy (skip DDR and use 32-byte alignment).
     """
     was_configured = is_backend_configured()
     if was_configured:

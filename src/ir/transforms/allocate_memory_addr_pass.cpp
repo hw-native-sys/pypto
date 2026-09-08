@@ -66,6 +66,13 @@ namespace ir {
 
 namespace {
 
+// Complexity: the legacy sequential policy is O(N log N). The default DSA-RP
+// policy builds an explicit conflict/penalty graph for the B reusable buffers
+// of one InCore function and invokes a fixed-order canonical search, requiring
+// O(N log N + B^2 log B) time and O(B^2) space. A function can genuinely expose
+// Theta(B^2) pair relations, so this is the documented graph-model exception
+// to the pass-complexity policy; the search has a fixed restart bound.
+
 using MemRefWithSpace = std::pair<MemRefPtr, MemorySpace>;
 // ReserveBufferBaseMap / ReservedEndBySpace / ResolveReserveBufferBases now live in the shared
 // reserve_buffer_utils.h so AllocateMemoryAddr and MemoryReuse resolve the reserved region identically.

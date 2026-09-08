@@ -52,7 +52,8 @@ alloc_pass = passes.allocate_memory_addr()
 program_with_addrs = alloc_pass(program)
 ```
 
-Select the opt-in DSA-RP mode at compilation:
+`DSA_RP` is the default. Select it explicitly when the compilation must not
+inherit a surrounding `PassContext` policy:
 
 ```python
 from pypto.ir import compile
@@ -102,11 +103,15 @@ Unsupported or ambiguous routes are skipped. The recognizer consumes that backen
 and does not duplicate an architecture route table, invoke ptoas, or simulate
 its synchronization pass.
 
-The explicit pair model is output-sensitive. With `B` reusable buffers, a
-kernel can contain `Theta(B^2)` lifetime conflicts or candidate penalty pairs,
-so recognition and solver graph construction are quadratic in the worst case.
-This documented complexity exception is confined to the opt-in `DSA_RP`
-planner; the default planner is unchanged.
+The explicit pair model is output-sensitive. With `B` reusable buffers in one
+InCore function, a kernel can contain `Theta(B^2)` lifetime conflicts or
+candidate penalty pairs. Recognition and graph construction therefore take
+`O(N log N + B^2)` time, while the fixed set of canonical placement orders
+takes `O(B^2 log B)` time and `O(B^2)` space. This is a documented exception to
+the general pass-complexity policy for the default `DSA_RP` planner; it is
+function-local and uses a fixed number of restarts rather than an unbounded
+search. The explicit legacy `PYPTO` planner retains its sequential allocation
+path.
 
 Canonical greedy tries offset zero, reserved-range ends, and aligned tops of
 already placed hard or soft neighbors. For each buffer it chooses the candidate
