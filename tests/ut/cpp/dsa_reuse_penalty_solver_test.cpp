@@ -114,23 +114,23 @@ void TestExplicitHardSeparation() {
           "explicit separation must prevent address reuse");
 }
 
-void TestExactOrDisjointPlacement() {
+void TestSameBaseOrDisjointPlacement() {
   dsa::DsaProblem problem;
   problem.pools = {{0, 96, {}}};
   problem.buffers = {
       {0, 64, 32, 0, {0, 2}},
-      {1, 64, 32, 0, {2, 4}},
+      {1, 48, 32, 0, {2, 4}},
   };
-  problem.no_partial_overlaps = {{0, 1}};
+  problem.same_base_or_disjoint = {{0, 1}};
 
   const dsa::DsaResult result = dsa::CanonicalGreedySolver().Solve(problem);
   Require(result.status == dsa::SolveStatus::kFeasible && result.solution.has_value(),
-          "exact in-place reuse must fit when disjoint placement does not");
+          "same-base in-place reuse must fit when unequal extents cannot fit disjointly");
   const dsa::DsaSolution& solution = RequireSolution(result, "expected solution");
   Require(OffsetOf(solution, 0) == OffsetOf(solution, 1),
-          "exact-or-disjoint relation must permit identical ranges");
+          "same-base-or-disjoint relation must permit unequal extents at one base");
   Require(dsa::ValidateSolution(problem, solution).empty(),
-          "exact in-place placement must pass independent validation");
+          "same-base in-place placement must pass independent validation");
 
   dsa::DsaSolution corrupted = solution;
   corrupted.offsets[1] = 32;
@@ -368,7 +368,7 @@ int main() {
     TestExactFallbackRecoversGreedyMiss();
     TestExactFallbackReportsBudgetExhaustion();
     TestExplicitHardSeparation();
-    TestExactOrDisjointPlacement();
+    TestSameBaseOrDisjointPlacement();
     TestWeightedPenaltyAvoidance();
     TestCapacityNoFit();
     TestAlignmentAndReservedRanges();
