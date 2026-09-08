@@ -27,7 +27,7 @@ The empty `PassProperties` contract (`kSimplifyProperties` in `include/pypto/ir/
 
 - After SSA conversion to propagate scalar constants into types/shapes before the tile pipeline inspects them.
 - At the end of the tile pipeline as a cleanup pass so that downstream artifacts (printed IR, codegen) are not littered with `K + 0` or `idx * 1` residue.
-- Anywhere else a pass produces fresh expressions that may be foldable; Simplify is cheap and idempotent so it is safe to insert defensively.
+- Anywhere else a pass produces fresh expressions that may be foldable; Simplify is cheap and idempotent so it is safe to insert defensively. The one bounded exception is a chain of more than 16 *nested* single-trip loops, where a second run folds further — see [Substitution-depth cap](#substitution-depth-cap-fold-b). No pipeline input reaches that depth.
 
 ## API
 
