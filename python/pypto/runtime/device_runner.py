@@ -795,6 +795,7 @@ def _execute_on_device(  # noqa: PLR0913
         )
 
     from .worker import ChipWorker as _PyptoWorker  # noqa: PLC0415
+    from .worker import _device_init_lock  # noqa: PLC0415
 
     cfg = CallConfig()
     if aicpu_thread_num is not None:
@@ -831,17 +832,20 @@ def _execute_on_device(  # noqa: PLR0913
             wire_args = _coerced_to_orch_args(orch_args, active._impl)
             active._run_chip(chip_callable, wire_args, cfg)
             return
-        worker = Worker(
-            level=level,
-            device_id=device_id,
-            platform=platform,
-            runtime=runtime_name,
-            enable_sdma=enable_sdma,
-        )
-        # Prewarm with this dispatch's own config so the single run below hits the
-        # prebuilt runtime-arena cache instead of paying the ~800ms cold build
-        # inside the timed dispatch. No-op without a prebuilt arena.
-        worker.init(prewarm_config=cfg)
+        # The one-shot path opens its own device context, so it takes the same
+        # lock ChipWorker.init() does -- see _device_init_lock's rationale.
+        with _device_init_lock:
+            worker = Worker(
+                level=level,
+                device_id=device_id,
+                platform=platform,
+                runtime=runtime_name,
+                enable_sdma=enable_sdma,
+            )
+            # Prewarm with this dispatch's own config so the single run below hits the
+            # prebuilt runtime-arena cache instead of paying the ~800ms cold build
+            # inside the timed dispatch. No-op without a prebuilt arena.
+            worker.init(prewarm_config=cfg)
         try:
             from .runner import _coerced_to_orch_args  # noqa: PLC0415
 

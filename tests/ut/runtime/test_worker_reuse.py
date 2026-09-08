@@ -15,6 +15,7 @@ run without a device. The reuse path is observed by counting ``init`` /
 """
 
 import gc
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -467,6 +468,50 @@ class TestExecuteOnDeviceReuse:
                 device_id=0,
                 level=3,
             )
+
+
+class TestDeviceInitSerialisation:
+    """Device-context opening is serialised across threads in one process.
+
+    ``simpler_init`` levels CANN's process-global dlog and then opens the device
+    context, and CANN snapshots that global state at context-open time — so two
+    threads opening at once can each capture the other's half-applied state. On
+    a2a3 that surfaced as ``simpler_init failed with code 507018`` / ``107000``
+    on a different case each time, only when the inits shared a process: four
+    separate processes doing the same four inits were clean.
+
+    Asserted on overlap rather than on a lock object, so the property survives a
+    change of mechanism.
+    """
+
+    def test_two_inits_never_overlap(self, fake_simpler_worker):
+        import threading  # noqa: PLC0415
+
+        inside = 0
+        overlapped = False
+        seen = threading.Lock()
+
+        def slow_init(*_args, **_kwargs):
+            nonlocal inside, overlapped
+            with seen:
+                inside += 1
+                if inside > 1:
+                    overlapped = True
+            time.sleep(0.02)
+            with seen:
+                inside -= 1
+
+        fake_simpler_worker.init.side_effect = slow_init
+
+        workers = [ChipWorker(RunConfig(device_id=i), auto_init=False) for i in range(4)]
+        threads = [threading.Thread(target=w.init) for w in workers]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not overlapped, "two device-context opens ran at once"
+        assert fake_simpler_worker.init.call_count == 4, "every worker still initialised"
 
 
 if __name__ == "__main__":
