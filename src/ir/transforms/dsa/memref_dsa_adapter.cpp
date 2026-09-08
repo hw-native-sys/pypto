@@ -61,7 +61,7 @@ dsa::Interval ConvertLifetime(const LifetimeInterval& lifetime, bool allow_read_
 
   // Reads happen at 2*p and writes at 2*p+1. Inputs remain live through the
   // write by default. Only an explicitly supported in-place candidate may end
-  // at the intervening boundary, guarded by an exact-or-disjoint relation.
+  // at the intervening boundary, guarded by a same-base-or-disjoint relation.
   const int64_t begin = 2 * static_cast<int64_t>(lifetime.def_point) + 1;
   const int64_t final_read_end =
       2 * static_cast<int64_t>(lifetime.last_use_point) + (allow_read_before_write_reuse ? 1 : 2);
@@ -163,10 +163,10 @@ PreparedProblem BuildProblem(const FunctionPtr& func, const AllocationPlan& allo
     }
   }
 
-  std::set<BufferPair> exact_or_disjoint;
-  for (const AllocationNoPartialOverlap& relation : allocation_plan.no_partial_overlaps) {
+  std::set<BufferPair> same_base_or_disjoint;
+  for (const AllocationSameBaseOrDisjoint& relation : allocation_plan.same_base_or_disjoint) {
     INTERNAL_CHECK(relation.first < buffer_by_interval.size() && relation.second < buffer_by_interval.size())
-        << "DSA-RP exact-or-disjoint relation references an out-of-range interval";
+        << "DSA-RP same-base-or-disjoint relation references an out-of-range interval";
     const auto& first_id = buffer_by_interval[relation.first];
     const auto& second_id = buffer_by_interval[relation.second];
     if (!first_id.has_value() || !second_id.has_value()) continue;
@@ -175,10 +175,10 @@ PreparedProblem BuildProblem(const FunctionPtr& func, const AllocationPlan& allo
         prepared.strict_problem.buffers[pair.second].pool) {
       continue;
     }
-    exact_or_disjoint.insert(pair);
+    same_base_or_disjoint.insert(pair);
   }
-  for (const BufferPair& pair : exact_or_disjoint) {
-    prepared.strict_problem.no_partial_overlaps.push_back({pair.first, pair.second});
+  for (const BufferPair& pair : same_base_or_disjoint) {
+    prepared.strict_problem.same_base_or_disjoint.push_back({pair.first, pair.second});
   }
 
   std::map<BufferPair, uint64_t> penalty_weights;

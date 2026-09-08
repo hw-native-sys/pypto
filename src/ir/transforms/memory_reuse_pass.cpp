@@ -2329,7 +2329,7 @@ class HazardInputCollector : public IRVisitor {
 // the *physical buffer* it ends up on (following both reuse-map reassignment and
 // VIEW inheritance) and blocks the output from landing there — see the use site.
 using ForbidAliasMap = AllocationForbidAliasMap;
-using ExactOrDisjointAliasMap = AllocationExactOrDisjointMap;
+using SameBaseOrDisjointAliasMap = AllocationSameBaseOrDisjointMap;
 
 class ForbidAliasCollector : public IRVisitor {
  public:
@@ -2358,9 +2358,10 @@ class ForbidAliasCollector : public IRVisitor {
         if (pending != tuple_forbidden_.end()) {
           RecordForOutput(op->var_, pending->second, &forbidden_, &tuple_forbidden_);
         }
-        const auto exact = tuple_exact_or_disjoint_.find(tuple.get());
-        if (exact != tuple_exact_or_disjoint_.end()) {
-          RecordForOutput(op->var_, exact->second, &exact_or_disjoint_, &tuple_exact_or_disjoint_);
+        const auto same_base = tuple_same_base_or_disjoint_.find(tuple.get());
+        if (same_base != tuple_same_base_or_disjoint_.end()) {
+          RecordForOutput(op->var_, same_base->second, &same_base_or_disjoint_,
+                          &tuple_same_base_or_disjoint_);
         }
       }
     }
@@ -2397,18 +2398,19 @@ class ForbidAliasCollector : public IRVisitor {
           auto in_t = As<TileType>(call->args_[0]->GetType());
           if (out_t && in_t && out_t->dtype_.GetBit() > in_t->dtype_.GetBit()) forbid_arg(0);
         }
-        std::vector<VarPtr> exact_or_disjoint_inputs;
+        std::vector<VarPtr> same_base_or_disjoint_inputs;
         if (entry.IsInplaceSafe() &&
             entry.GetExecutionMemoryAccessEvidence() == ExecutionMemoryAccessEvidence::Functional) {
           for (size_t i = 0; i < call->args_.size(); ++i) {
             if (forbidden_indices.count(i) != 0) continue;
             if (auto input = AsVarLike(call->args_[i]); input && As<TileType>(input->GetType())) {
-              exact_or_disjoint_inputs.push_back(std::move(input));
+              same_base_or_disjoint_inputs.push_back(std::move(input));
             }
           }
         }
         RecordForOutput(op->var_, forbidden_inputs, &forbidden_, &tuple_forbidden_);
-        RecordForOutput(op->var_, exact_or_disjoint_inputs, &exact_or_disjoint_, &tuple_exact_or_disjoint_);
+        RecordForOutput(op->var_, same_base_or_disjoint_inputs, &same_base_or_disjoint_,
+                        &tuple_same_base_or_disjoint_);
         // tile.transpose is registered not_inplace_safe(), so its output is
         // already forbidden from aliasing any input above (pto.ttrans writes
         // dst directly from src on the scalar path — dst == src corrupts).
@@ -2418,7 +2420,7 @@ class ForbidAliasCollector : public IRVisitor {
   }
 
   ForbidAliasMap TakeForbidden() { return std::move(forbidden_); }
-  ExactOrDisjointAliasMap TakeExactOrDisjoint() { return std::move(exact_or_disjoint_); }
+  SameBaseOrDisjointAliasMap TakeSameBaseOrDisjoint() { return std::move(same_base_or_disjoint_); }
 
  private:
   void RecordForOutput(const VarPtr& output, const std::vector<VarPtr>& inputs,
@@ -2437,9 +2439,9 @@ class ForbidAliasCollector : public IRVisitor {
   }
 
   ForbidAliasMap forbidden_;
-  ExactOrDisjointAliasMap exact_or_disjoint_;
+  SameBaseOrDisjointAliasMap same_base_or_disjoint_;
   std::map<const Var*, std::vector<VarPtr>> tuple_forbidden_;
-  std::map<const Var*, std::vector<VarPtr>> tuple_exact_or_disjoint_;
+  std::map<const Var*, std::vector<VarPtr>> tuple_same_base_or_disjoint_;
   std::map<const Var*, const Var*> member_to_rep_;  ///< sharing-group member -> representative
 };
 
@@ -4724,7 +4726,7 @@ AllocationConstraintAnalysis AnalyzeAllocationConstraints(const FunctionPtr& fun
   ForbidAliasCollector forbid_collector(lifetimes.var_sharing_groups);
   forbid_collector.VisitStmt(func->body_);
   result.forbid_alias = forbid_collector.TakeForbidden();
-  result.exact_or_disjoint_alias = forbid_collector.TakeExactOrDisjoint();
+  result.same_base_or_disjoint_alias = forbid_collector.TakeSameBaseOrDisjoint();
   return result;
 }
 

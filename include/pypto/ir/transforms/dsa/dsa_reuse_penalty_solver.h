@@ -82,13 +82,13 @@ struct Separation {
 };
 
 /**
- * @brief Allow two buffers to use exactly the same byte range or disjoint ranges.
+ * @brief Allow two buffers to use the same base address or disjoint ranges.
  *
- * This represents an operation-supported in-place choice. Staggered or
- * containment overlap is forbidden because it would overwrite only part of an
- * operand while the same instruction is still reading it.
+ * This represents an operation-supported in-place choice. Same-base reuse can
+ * have unequal extents, as for a safe narrowing cast. Staggered overlap is
+ * forbidden because it can overwrite an unread part of an operand.
  */
-struct NoPartialOverlap {
+struct SameBaseOrDisjoint {
   BufferId first = 0;
   BufferId second = 0;
 };
@@ -103,7 +103,7 @@ struct DsaProblem {
   std::vector<Pool> pools;
   std::vector<Buffer> buffers;
   std::vector<Separation> separations;
-  std::vector<NoPartialOverlap> no_partial_overlaps;
+  std::vector<SameBaseOrDisjoint> same_base_or_disjoint;
   std::vector<ReusePenalty> reuse_penalties;
 };
 

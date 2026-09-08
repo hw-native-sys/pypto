@@ -170,12 +170,12 @@ AllocationPlan BuildDsaAllocationPlan(const FunctionPtr& func) {
   // In-place capability is optional, not mandatory aliasing. At a producer /
   // final-consumer boundary, shorten the input lifetime only when the op
   // registry explicitly permits in-place execution. The accompanying
-  // geometric constraint permits byte-identical ranges or disjoint ranges,
-  // but never staggered partial overlap. Explicit no-alias rules win.
-  std::set<std::pair<size_t, size_t>> exact_or_disjoint_pairs;
+  // geometric constraint permits a shared base (including safe narrowing) or
+  // disjoint ranges, but never staggered overlap. Explicit no-alias rules win.
+  std::set<std::pair<size_t, size_t>> same_base_or_disjoint_pairs;
   for (size_t output = 0; output < intervals.size(); ++output) {
-    const auto candidates = constraints.exact_or_disjoint_alias.find(intervals[output].variable.get());
-    if (candidates == constraints.exact_or_disjoint_alias.end()) continue;
+    const auto candidates = constraints.same_base_or_disjoint_alias.find(intervals[output].variable.get());
+    if (candidates == constraints.same_base_or_disjoint_alias.end()) continue;
     for (const VarPtr& operand : candidates->second) {
       const auto memref = GetTypeMemRef(operand->GetType());
       if (!memref.has_value() || !memref.value()) continue;
@@ -189,7 +189,7 @@ AllocationPlan BuildDsaAllocationPlan(const FunctionPtr& func) {
       size_t second = output;
       if (second < first) std::swap(first, second);
       if (separation_reasons.count({first, second}) != 0) continue;
-      exact_or_disjoint_pairs.emplace(first, second);
+      same_base_or_disjoint_pairs.emplace(first, second);
       plan.read_before_write_inputs.insert(input->second);
     }
   }
@@ -210,7 +210,7 @@ AllocationPlan BuildDsaAllocationPlan(const FunctionPtr& func) {
       size_t first = input;
       size_t second = output;
       if (second < first) std::swap(first, second);
-      if (exact_or_disjoint_pairs.count({first, second}) == 0) {
+      if (same_base_or_disjoint_pairs.count({first, second}) == 0) {
         add_separation(first, second, AllocationSeparationReason::SemanticNoAlias);
       }
     }
@@ -221,9 +221,9 @@ AllocationPlan BuildDsaAllocationPlan(const FunctionPtr& func) {
     plan.separations.push_back({indices.first, indices.second,
                                 std::vector<AllocationSeparationReason>(reasons.begin(), reasons.end())});
   }
-  plan.no_partial_overlaps.reserve(exact_or_disjoint_pairs.size());
-  for (const auto& [first, second] : exact_or_disjoint_pairs) {
-    plan.no_partial_overlaps.push_back({first, second});
+  plan.same_base_or_disjoint.reserve(same_base_or_disjoint_pairs.size());
+  for (const auto& [first, second] : same_base_or_disjoint_pairs) {
+    plan.same_base_or_disjoint.push_back({first, second});
   }
   return plan;
 }

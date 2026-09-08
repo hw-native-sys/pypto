@@ -39,7 +39,7 @@ struct AllocationSeparation {
   std::vector<AllocationSeparationReason> reasons;
 };
 
-struct AllocationNoPartialOverlap {
+struct AllocationSameBaseOrDisjoint {
   size_t first;
   size_t second;
 };
@@ -50,10 +50,10 @@ struct AllocationNoPartialOverlap {
 struct AllocationPlan {
   std::vector<LifetimeInterval> intervals;
   std::vector<AllocationSeparation> separations;
-  std::vector<AllocationNoPartialOverlap> no_partial_overlaps;
+  std::vector<AllocationSameBaseOrDisjoint> same_base_or_disjoint;
   /// Inputs whose final read may share an operation boundary with an
   /// explicitly in-place-safe result. Every such candidate is additionally
-  /// constrained to exact aliasing or disjoint ranges.
+  /// constrained to same-base aliasing or disjoint ranges.
   std::set<size_t> read_before_write_inputs;
   /// Full byte extent of each author-declared allocation. This can exceed any
   /// member MemRef when the declaration contains multiple runtime-selected

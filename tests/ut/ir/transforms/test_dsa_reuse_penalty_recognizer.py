@@ -168,13 +168,11 @@ def test_dsa_rp_preserves_not_inplace_safe_semantic_separation():
     assert not _overlap(ranges["source"], ranges["result"])
 
 
-def test_dsa_rp_inplace_safe_narrowing_cast_is_exact_or_disjoint():
-    """Optional in-place reuse must never become a partial byte-range overlap.
+def test_dsa_rp_inplace_safe_narrowing_cast_is_same_base_or_disjoint(ascend_backend):
+    """A narrowing cast may reuse its input at the same base, but not staggered.
 
-    A narrowing cast is registry-marked in-place-safe, but its smaller BF16
-    result cannot occupy only the prefix of the still-read FP32 allocation.
-    The DSA may reuse an input only when the physical ranges are identical;
-    unequal extents must therefore be disjoint.
+    The FP32 input plus BF16 result exceed the A2A3 Vec capacity when disjoint,
+    so this also covers the model-sized case that requires safe in-place reuse.
     """
 
     @pl.program
@@ -182,15 +180,16 @@ def test_dsa_rp_inplace_safe_narrowing_cast_is_exact_or_disjoint():
         @pl.function(type=pl.FunctionType.AIV)
         def main(
             self,
-            input_a: pl.Tensor[[16, 128], pl.FP32],
-            output: pl.Tensor[[16, 128], pl.BF16],
-        ) -> pl.Tensor[[16, 128], pl.BF16]:
-            source = pl.load(input_a, [0, 0], [16, 128], target_memory=pl.Mem.Vec)
+            input_a: pl.Tensor[[128, 256], pl.FP32],
+            output: pl.Tensor[[128, 256], pl.BF16],
+        ) -> pl.Tensor[[128, 256], pl.BF16]:
+            source = pl.load(input_a, [0, 0], [128, 256], target_memory=pl.Mem.Vec)
             result = pl.cast(source, target_type=pl.BF16)
             return pl.store(result, [0, 0], output)
 
     ranges = _tile_ranges(_plan_with_dsa_rp(Before))
-    assert not _overlap(ranges["source"], ranges["result"])
+    assert ranges["source"][0] == ranges["result"][0]
+    assert ranges["result"][1] < ranges["source"][1]
 
 
 def test_dsa_rp_preserves_tile_move_semantic_separation():

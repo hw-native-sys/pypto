@@ -53,7 +53,7 @@ struct SearchSpace {
   std::vector<SearchNode> nodes;
   std::unordered_map<BufferId, size_t> node_by_buffer;
   std::vector<std::set<size_t>> hard_neighbors;
-  std::vector<std::set<size_t>> exact_or_disjoint_neighbors;
+  std::vector<std::set<size_t>> same_base_or_disjoint_neighbors;
   std::map<NodePair, uint64_t> soft_weights;
   std::vector<std::vector<std::pair<size_t, uint64_t>>> soft_neighbors;
 };
@@ -124,7 +124,7 @@ struct WeightedBoundary {
 
   const size_t count = search.nodes.size();
   search.hard_neighbors.resize(count);
-  search.exact_or_disjoint_neighbors.resize(count);
+  search.same_base_or_disjoint_neighbors.resize(count);
   search.soft_neighbors.resize(count);
 
   for (size_t first = 0; first < count; ++first) {
@@ -144,11 +144,11 @@ struct WeightedBoundary {
     search.hard_neighbors[second].insert(first);
   }
 
-  for (const NoPartialOverlap& relation : problem.no_partial_overlaps) {
+  for (const SameBaseOrDisjoint& relation : problem.same_base_or_disjoint) {
     const size_t first = search.node_by_buffer.at(relation.first);
     const size_t second = search.node_by_buffer.at(relation.second);
-    search.exact_or_disjoint_neighbors[first].insert(second);
-    search.exact_or_disjoint_neighbors[second].insert(first);
+    search.same_base_or_disjoint_neighbors[first].insert(second);
+    search.same_base_or_disjoint_neighbors[second].insert(first);
   }
 
   for (const ReusePenalty& penalty : problem.reuse_penalties) {
@@ -296,7 +296,7 @@ struct WeightedBoundary {
       candidates.insert(offsets[other] + search.nodes[other].size);
     }
   }
-  for (size_t other : search.exact_or_disjoint_neighbors[current]) {
+  for (size_t other : search.same_base_or_disjoint_neighbors[current]) {
     if (placed[other] && search.nodes[other].pool == node.pool &&
         !AddOverflows(offsets[other], search.nodes[other].size)) {
       candidates.insert(offsets[other]);
@@ -319,15 +319,15 @@ struct WeightedBoundary {
   return aligned;
 }
 
-[[nodiscard]] bool RespectsExactOrDisjoint(const SearchSpace& search, const std::vector<bool>& placed,
-                                           const std::vector<uint64_t>& offsets, size_t current,
-                                           uint64_t offset) {
+[[nodiscard]] bool RespectsSameBaseOrDisjoint(const SearchSpace& search, const std::vector<bool>& placed,
+                                              const std::vector<uint64_t>& offsets, size_t current,
+                                              uint64_t offset) {
   const SearchNode& node = search.nodes[current];
-  for (size_t other : search.exact_or_disjoint_neighbors[current]) {
+  for (size_t other : search.same_base_or_disjoint_neighbors[current]) {
     if (!placed[other] || search.nodes[other].pool != node.pool) continue;
     const SearchNode& other_node = search.nodes[other];
     if (!RangesOverlap(offset, node.size, offsets[other], other_node.size)) continue;
-    if (offset != offsets[other] || node.size != other_node.size) return false;
+    if (offset != offsets[other]) return false;
   }
   return true;
 }
@@ -365,7 +365,7 @@ struct WeightedBoundary {
       const bool hard_conflict = std::any_of(
           blocked.begin(), blocked.end(),
           [offset, end](const AddressRange& range) { return range.begin < end && offset < range.end; });
-      if (hard_conflict || !RespectsExactOrDisjoint(search, placed, offsets, current, offset)) continue;
+      if (hard_conflict || !RespectsSameBaseOrDisjoint(search, placed, offsets, current, offset)) continue;
       selected = offset;
       break;
     }
@@ -407,7 +407,7 @@ struct WeightedBoundary {
         ++blocked_index;
       }
       if (blocked_index < blocked.size() && blocked[blocked_index].begin < candidate_end) continue;
-      if (!RespectsExactOrDisjoint(search, placed, offsets, current, offset)) continue;
+      if (!RespectsSameBaseOrDisjoint(search, placed, offsets, current, offset)) continue;
 
       while (start_index < soft_starts.size() && soft_starts[start_index].position < candidate_end) {
         started_weight += soft_starts[start_index].weight;
@@ -448,7 +448,7 @@ enum class ExactSearchStatus : uint8_t { kFound, kNoFit, kExhausted };
       return false;
     }
   }
-  return RespectsExactOrDisjoint(search, placed, offsets, current, offset);
+  return RespectsSameBaseOrDisjoint(search, placed, offsets, current, offset);
 }
 
 [[nodiscard]] uint64_t ExactDomainSize(const SearchNode& node, const Pool& pool) {
@@ -578,8 +578,8 @@ std::vector<std::string> ValidateProblem(const DsaProblem& problem) {
   for (const Separation& separation : problem.separations) {
     validate_pair(separation.first, separation.second, "separation");
   }
-  for (const NoPartialOverlap& relation : problem.no_partial_overlaps) {
-    validate_pair(relation.first, relation.second, "exact-or-disjoint relation");
+  for (const SameBaseOrDisjoint& relation : problem.same_base_or_disjoint) {
+    validate_pair(relation.first, relation.second, "same-base-or-disjoint relation");
   }
   uint64_t total_penalty_weight = 0;
   for (const ReusePenalty& penalty : problem.reuse_penalties) {
@@ -640,9 +640,9 @@ std::vector<std::string> ValidateSolution(const DsaProblem& problem, const DsaSo
   for (const Separation& separation : problem.separations) {
     separations.insert(CanonicalBufferPair(separation.first, separation.second));
   }
-  std::set<std::pair<BufferId, BufferId>> exact_or_disjoint;
-  for (const NoPartialOverlap& relation : problem.no_partial_overlaps) {
-    exact_or_disjoint.insert(CanonicalBufferPair(relation.first, relation.second));
+  std::set<std::pair<BufferId, BufferId>> same_base_or_disjoint;
+  for (const SameBaseOrDisjoint& relation : problem.same_base_or_disjoint) {
+    same_base_or_disjoint.insert(CanonicalBufferPair(relation.first, relation.second));
   }
   for (size_t first = 0; first < problem.buffers.size(); ++first) {
     for (size_t second = first + 1; second < problem.buffers.size(); ++second) {
@@ -661,7 +661,7 @@ std::vector<std::string> ValidateSolution(const DsaProblem& problem, const DsaSo
       }
     }
   }
-  for (const auto& pair : exact_or_disjoint) {
+  for (const auto& pair : same_base_or_disjoint) {
     const Buffer* first = buffers.at(pair.first);
     const Buffer* second = buffers.at(pair.second);
     const uint64_t* first_offset = solution.Find(pair.first);
@@ -670,9 +670,9 @@ std::vector<std::string> ValidateSolution(const DsaProblem& problem, const DsaSo
         !RangesOverlap(*first_offset, first->size, *second_offset, second->size)) {
       continue;
     }
-    if (*first_offset != *second_offset || first->size != second->size) {
-      errors.push_back("exact-or-disjoint buffers " + std::to_string(pair.first) + "," +
-                       std::to_string(pair.second) + " partially overlap in address");
+    if (*first_offset != *second_offset) {
+      errors.push_back("same-base-or-disjoint buffers " + std::to_string(pair.first) + "," +
+                       std::to_string(pair.second) + " overlap at different base addresses");
     }
   }
   return errors;

@@ -90,8 +90,9 @@ and a conservative half-open lifetime. The problem has:
   extent, while each member retains its constant or runtime-selected slot offset.
   For operations explicitly registered as supporting functional in-place
   execution, the final input read may share the operation boundary with the
-  output write, but the two physical ranges must be either identical or
-  disjoint; staggered partial overlap remains forbidden;
+  output write, but the allocations must either share a base address or be
+  disjoint. A shared base permits safe unequal-size operations such as
+  narrowing casts; staggered overlap remains forbidden;
 - **soft unit-weight pairs** for lifetime-compatible physical reuse that the
   built-in recognizer identifies as a cross-pipe WAR or WAW handoff; and
 - a hard arena-capacity bound. Capacity and correctness are never traded for a
@@ -251,7 +252,8 @@ passes.def("allocate_memory_addr", &pass::AllocateMemoryAddr,
 - Tests exact pre-solver recognized-edge sets as well as their final placement geometry
 - Tests the exact fallback's feasible witness, proven-no-fit, and bounded
   search-exhaustion outcomes
-- Tests exact-or-disjoint placement for optional in-place execution
+- Tests same-base-or-disjoint placement for optional in-place execution,
+  including unequal-size narrowing casts
 
 ## Allocation Policy
 
