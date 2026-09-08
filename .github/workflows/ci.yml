@@ -1425,12 +1425,14 @@ jobs:
             --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest tests/st/runtime/framework_and_models/test_graph_execution.py -v --device=\$TASK_DEVICE --platform=a2a3 --forked"
 
       - name: Test dump-args output
-        # Pool for the same reason as the swimlane steps, and --forked dropped
-        # with it: 8 passed in 3s unforked against 19s forked.
+        # No pool and --forked, unlike the swimlane steps: this file's cases stay
+        # fixture-driven (see TestSubmitDumpsManifest's inline_case marker), and
+        # --forked is what keeps TestDumpTagManifest's module fixture in a
+        # process of its own.
         run: |
           source activate.sh
           task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 600 \
-            --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest tests/st/runtime/framework_and_models/test_dump_tag.py -v --device=\$TASK_DEVICE --platform=a2a3 --dump-args --precompile-workers=8"
+            --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest tests/st/runtime/framework_and_models/test_dump_tag.py -v --device=\$TASK_DEVICE --platform=a2a3 --dump-args --forked"
 
       - name: Kill orphaned task-submit tasks
         if: always()
