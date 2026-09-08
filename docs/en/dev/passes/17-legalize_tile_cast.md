@@ -38,7 +38,9 @@ modes are a genuine choice: nothing standard fixes what an overflowing
 conversion to an integer produces, clamping is the safer of the two to get by
 accident, and on A2/A3 it is also the one the assembler converts natively rather
 than emulating with a chunked vector sequence — so the default is both the safer
-and the faster lowering. Pass `"off"` where wrapping is the kernel's contract.
+and the faster lowering. Pass `"off"` only when the selected target's documented
+non-saturating behaviour is the one the kernel needs — it is *not* a promise of
+wrapping, and what it does with an overflow is the architecture's to define.
 
 **A float destination keeps the target's own behaviour** unless the author asks
 otherwise. That question already has an answer: IEEE says an out-of-range
@@ -58,7 +60,7 @@ said nothing, while a float-destination one emits none.
 
 The two modes agree only on values the destination can already represent, so for
 integer destinations this default is a behavioural choice, not a no-op: a kernel
-that relied on wrapping must now say `"off"`.
+that relied on the target's own non-saturating overflow must now say `"off"`.
 
 **Legalized chains: the request rides the final hop.** Saturation names the
 *destination* range, and only the last hop reaches the destination dtype;

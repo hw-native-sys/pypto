@@ -1344,7 +1344,11 @@ class TestPtoLevel3Scratch:
         assert tmp.memref is not None
 
     def test_non_narrowing_cast_has_no_scratch(self):
-        """Widening needs no helper, so opting out changes nothing."""
+        """FP32->FP16 narrows, but natively — no helper, so opting out changes nothing.
+
+        Only the pairs `TcvtNeedsLevel3Scratch` lists get the emulated lowering;
+        this one is a single native tcvt whichever saturation it carries.
+        """
         after = self._run(self._cast_program(pl.FP32, pl.FP16), BackendType.Ascend910B)
         assert len(self._calls(after, ir.get_op("tile.cast").name)[0].args) == 1
 
