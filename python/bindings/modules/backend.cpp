@@ -176,6 +176,8 @@ void BindBackend(nb::module_& m) {
   // ========== Backend abstract base class ==========
   nb::class_<Backend>(backend_mod, "Backend", "Abstract backend base class")
       .def("get_type_name", &Backend::GetTypeName, "Get backend type name")
+      .def("get_registered_op_names", &Backend::GetRegisteredOpNames,
+           "Get a sorted snapshot of this backend's registered operator names")
       .def("get_handler", &Backend::GetHandler, nb::rv_policy::reference,
            "Get the per-backend BackendHandler singleton")
       .def("export_to_file", &Backend::ExportToFile, nb::arg("path"), "Export backend to msgpack file")
