@@ -12,6 +12,7 @@
 #ifndef PYPTO_IR_COMM_H_
 #define PYPTO_IR_COMM_H_
 
+#include <cstdint>
 #include <string>
 
 #include "pypto/core/error.h"
@@ -72,6 +73,22 @@ enum class ReduceOp : int {
   kMin = 2,
   kProd = 3,
 };
+
+/// Extra trailing FP16 elements an internal `pld.tile.remote_load` may read
+/// past a window's logical width when `allow_physical_tail_padding` is set.
+///
+/// FP16 peer MTE transfers need a 32-byte-aligned final span on A2/A3, so
+/// `LowerCompositeOps` rounds the remote read up to a 16-element boundary —
+/// at most 15 elements beyond the logical tail. The comm domain reserves one
+/// extra 32-byte block to cover it.
+///
+/// Two places must agree on this number: `pld.tile.remote_load`'s type
+/// deducer, which widens the source's physical width so the result tile's
+/// valid_shape is legal, and PTO codegen, which must emit a peer
+/// `make_tensor_view` wide enough to contain the `partition_view` it then
+/// slices. They diverged once already: codegen kept the logical width, so the
+/// emitted view was narrower than its own slice, which PTOAS >= 0.61 rejects.
+inline constexpr int64_t kRemoteLoadFp16TailPaddingElements = 15;
 
 // Convert AtomicType to the matching Python enum member name. The Python
 // member is `None_` (trailing underscore) because `None` is a reserved word —

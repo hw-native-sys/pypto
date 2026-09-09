@@ -50,6 +50,7 @@
 
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/comm.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
@@ -160,7 +161,8 @@ TypePtr DeduceRemoteLoadType(const std::vector<ExprPtr>& args,
         << "pld.tile.remote_load allow_physical_tail_padding requires a flattened rank-2 target";
     CHECK(has_requested_valid)
         << "pld.tile.remote_load allow_physical_tail_padding requires an explicit valid_shape";
-    auto padding_elements = std::make_shared<ConstInt>(15, DataType::INDEX, args[0]->span_);
+    auto padding_elements =
+        std::make_shared<ConstInt>(kRemoteLoadFp16TailPaddingElements, DataType::INDEX, args[0]->span_);
     source_physical[1] = MakeAdd(source_physical[1], padding_elements, args[0]->span_);
     source_valid = source_physical;
   }

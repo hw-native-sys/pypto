@@ -49,7 +49,9 @@ from pypto import DataType, backend, codegen, ir, passes
 from pypto.backend import BackendType
 from pypto.ir.builder import IRBuilder
 from pypto.ir.instruments import make_roundtrip_instrument
+from pypto.ir.op import tile as tile_ops
 from pypto.ir.op.distributed import system_ops as dist_system
+from pypto.ir.op.distributed import tile_ops as dist_tile_ops
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import passes as _core_passes
 
@@ -2082,6 +2084,69 @@ def test_split_aiv_region_keeps_notify_off_the_cube_lane():
     incore = [f for f in optimized.functions.values() if ir.is_incore_type(f.func_type)]
     mlir = codegen.PTOCodegen().generate(ir.Program(incore, "kernel", optimized.span))
     assert mlir.count("pto.comm.tnotify(") == 1, mlir
+
+
+def test_remote_load_fp16_tail_padding_widens_the_peer_view_not_its_strides():
+    """The peer view must declare the reserved tail its own slice reaches into.
+
+    An FP16 ``remote_load`` carrying ``allow_physical_tail_padding`` is the
+    allreduce chunk loop rounding its read up to a 32-byte boundary, so the
+    partition it takes may reach up to 15 elements past the window's logical
+    width — into the block the comm domain reserves for exactly this. The op's
+    type deducer already widens the source that way.
+
+    Codegen used to build the peer ``make_tensor_view`` from the logical width
+    alone, so the emitted view was narrower than the ``partition_view`` sliced
+    out of it. PTOAS >= 0.61 verifies a partition against its source and
+    rejects that:
+
+        error: 'pto.partition_view' op size at dim 1 (32) exceeds static
+               source dim (17)
+
+    The widening applies to the declared extent only. Strides are the real
+    memory layout and must not move.
+    """
+    ty = ir.DistributedTensorType([1, 17], DataType.FP16)
+
+    ib = IRBuilder()
+    with ib.function("tail_pad", type=ir.FunctionType.InCore) as f:
+        data = f.param("data", ty)
+        f.param("data_ctx", ir.CommCtxType.get())
+        peer = f.param("peer", ir.ScalarType(DataType.INT32))
+        out = f.param("out", ir.TensorType([1, 32], DataType.FP16))
+        tile = ib.let(
+            "recv",
+            dist_tile_ops._remote_load_with_physical_tail_padding(
+                data, peer, [0, 0], [1, 32], [1, 32], span=ir.Span.unknown()
+            ),
+        )
+        ib.let("stored", tile_ops.store(tile, [0, 0], out))
+        ib.return_stmt()
+
+    program = ir.Program([f.get_result()], "tail_pad", ir.Span.unknown())
+    # Hand-built IR carries no memory space; codegen requires one on every tile.
+    program = passes.infer_tile_memory_space()(program)
+    mlir = codegen.PTOCodegen().generate(program)
+
+    peer_partition = next(
+        line for line in mlir.splitlines() if "pto.partition_view" in line and "_peer" in line
+    )
+    assert "sizes = [%c1_index, %c32_index]" in peer_partition, peer_partition
+
+    # The peer view itself is an anonymous temp, so find it by the SSA name the
+    # partition slices from.
+    source_ssa = peer_partition.split("pto.partition_view", 1)[1].split(",", 1)[0].strip()
+    peer_view = next(
+        line
+        for line in mlir.splitlines()
+        if "pto.make_tensor_view" in line and line.strip().startswith(f"{source_ssa} =")
+    )
+    # 17 logical + 15 reserved: the partition above asks for 32, so the source
+    # has to be at least that wide or it is out of bounds.
+    assert "shape = [%c1_index, %c32_index]" in peer_view, peer_view
+    # Row stride stays the logical width — widening the declared extent must
+    # not relocate row 1.
+    assert "strides = [%c17_index, %c1_index]" in peer_view, peer_view
 
 
 if __name__ == "__main__":

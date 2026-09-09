@@ -143,11 +143,21 @@ struct PeerViewInfo {
   std::string ptr_ssa;
 };
 
+/// @param tail_padding_elements Extra elements to add to the innermost dim of
+///        the emitted view. Non-zero only for an internal FP16
+///        `remote_load` carrying `allow_physical_tail_padding`, whose slice is
+///        rounded up to a 32-byte boundary and so may reach past the window's
+///        logical width into the block the comm domain reserves for it. The
+///        view has to declare that reach: `pto.partition_view` is verified
+///        against its source, and a source narrower than its own slice is
+///        rejected by PTOAS >= 0.61. See `kRemoteLoadFp16TailPaddingElements`.
 PeerViewInfo EmitCommRemoteView(const DistTensorBinding& target, const ExprPtr& peer_expr,
-                                codegen::PTOCodegen& codegen) {
+                                codegen::PTOCodegen& codegen, int64_t tail_padding_elements = 0) {
   const auto& shape = target.type->shape_;
   const size_t rank = shape.size();
   CHECK(rank >= 1) << "DistributedTensor must have rank >= 1 for peer view emission";
+  INTERNAL_CHECK(tail_padding_elements >= 0)
+      << "Internal error: negative peer-view tail padding " << tail_padding_elements;
   const std::string dtype_str = codegen.GetTypeString(target.type->dtype_);
   const std::string ptr_type = "!pto.ptr<" + dtype_str + ">";
 
@@ -274,11 +284,28 @@ PeerViewInfo EmitCommRemoteView(const DistTensorBinding& target, const ExprPtr& 
   }
   view_type << "x" << dtype_str << ">";
 
+  // The declared extent of the innermost dim, which may reach past the logical
+  // width into the reserved tail (see `tail_padding_elements`). Kept separate
+  // from `shape_ssa`: the strides above are the real memory layout and must NOT
+  // move when the declared extent grows.
+  std::vector<std::string> view_shape_ssa = shape_ssa;
+  if (tail_padding_elements > 0) {
+    const size_t last = rank - 1;
+    if (auto ci = As<ir::ConstInt>(shape[last])) {
+      view_shape_ssa[last] = codegen.GetOrEmitConstant(ci->value_ + tail_padding_elements, DataType::INDEX);
+    } else {
+      std::string pad = codegen.GetOrEmitConstant(tail_padding_elements, DataType::INDEX);
+      std::string widened = codegen.NewTemp();
+      codegen.Emit(widened + " = arith.addi " + shape_ssa[last] + ", " + pad + " : index");
+      view_shape_ssa[last] = widened;
+    }
+  }
+
   std::ostringstream mv;
   mv << peer_view << " = pto.make_tensor_view " << peer_ptr << ", shape = [";
   for (size_t i = 0; i < rank; ++i) {
     if (i > 0) mv << ", ";
-    mv << shape_ssa[i];
+    mv << view_shape_ssa[i];
   }
   mv << "], strides = [";
   for (size_t i = 0; i < rank; ++i) {
@@ -315,7 +342,15 @@ static std::string MakeRemoteLoadCodegenPTO(const CallPtr& op, codegen::CodegenB
   auto result_tile_type = As<ir::TileType>(op->GetType());
   INTERNAL_CHECK_SPAN(result_tile_type, op->span_) << "pld.tile.remote_load result must be a TileType";
 
-  auto peer_view = EmitCommRemoteView(binding, op->args_[1], codegen);
+  // An internal FP16 remote_load may have had its read rounded up to a 32-byte
+  // boundary by LowerCompositeOps, so the slice below can reach up to
+  // `kRemoteLoadFp16TailPaddingElements` past the window's logical width, into
+  // the block the comm domain reserves. The op's type deducer already widens
+  // the source that way; the emitted view must say the same thing, or it is
+  // narrower than the partition_view taken from it.
+  const int64_t tail_padding =
+      op->GetKwarg<bool>("allow_physical_tail_padding", false) ? ir::kRemoteLoadFp16TailPaddingElements : 0;
+  auto peer_view = EmitCommRemoteView(binding, op->args_[1], codegen, tail_padding);
 
   const std::string dtype_str = codegen.GetTypeString(binding.type->dtype_);
   const auto result_tile_view = ir::tile_view_semantics::GetEffectiveTileView(*result_tile_type);
