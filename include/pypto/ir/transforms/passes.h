@@ -288,6 +288,17 @@ Pass MaterializeDistTensorCtx();
 Pass MaterializeValidShapeSymbols();
 
 /**
+ * @brief Replace planned device Tile storage with explicit Buffer IR.
+ *
+ * Runs last, after storage legalization, address placement and signature
+ * materialization. The initial recipe covers dense static rank-2 Vec FP32
+ * allocations, GM transfers, add/mul and copies in straight-line kernels.
+ * Unsupported recipes fail explicitly. Verifies storage closure even when
+ * automatic verification is disabled, and verifies BufferIR after conversion.
+ */
+Pass LowerTileToBuffer();
+
+/**
  * @brief Make every FunctionType::Graph function legal to record and replay
  *
  * Hoists each boundary scalar a Graph body *derives* out to its call sites: the

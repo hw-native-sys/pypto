@@ -110,7 +110,8 @@ class InParamWriteFinder : public IRVisitor {
       // ``ReadWrite`` effect on it, so filtering it out here made a whole
       // parameter kind invisible to a check whose entire job is to notice
       // exactly that. ``ArrayType`` is in the union for the same reason.
-      if (!As<ShapedType>(func->params_[i]->GetType())) continue;
+      const auto& type = func->params_[i]->GetType();
+      if (!As<ShapedType>(type) && !As<BufferType>(type) && !As<MultiBufferType>(type)) continue;
       in_params_.emplace(func->params_[i].get(), func->params_[i]);
     }
   }

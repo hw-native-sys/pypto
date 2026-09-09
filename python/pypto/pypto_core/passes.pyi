@@ -822,6 +822,16 @@ def materialize_valid_shape_symbols() -> Pass:
     at every call/submit site.
     """
 
+def lower_tile_to_buffer() -> Pass:
+    """Replace planned device Tile storage with explicit Buffer IR.
+
+    Runs last, after storage legalization, address placement and signature materialization.
+    The initial recipe covers dense static rank-2 Vec FP32 allocations, GM transfers,
+    add/mul and copies in straight-line kernels. Unsupported recipes fail explicitly.
+    Verifies storage closure even when automatic verification is disabled, and verifies
+    BufferIR after conversion.
+    """
+
 def stamp_tfree_split() -> Pass:
     """Copy each cross-core tpop's split/pipe-id onto its matching tfree op.
 
@@ -1099,6 +1109,7 @@ __all__ = [
     "materialize_dist_tensor_ctx",
     "legalize_graph_boundary",
     "materialize_valid_shape_symbols",
+    "lower_tile_to_buffer",
     "flatten_call_expr",
     "inline_functions",
     "normalize_stmt_structure",

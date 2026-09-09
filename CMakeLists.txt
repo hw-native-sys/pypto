@@ -204,6 +204,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/materialize_dist_tensor_ctx_pass.cpp
     src/ir/transforms/legalize_graph_boundary_pass.cpp
     src/ir/transforms/materialize_valid_shape_symbols_pass.cpp
+    src/ir/transforms/lower_tile_to_buffer_pass.cpp
     src/ir/transforms/optimize_orch_tensors_pass.cpp
     src/ir/transforms/derive_call_directions_pass.cpp
     src/ir/transforms/auto_derive_task_dependencies_pass.cpp
