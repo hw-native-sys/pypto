@@ -31,11 +31,20 @@ def read_kernel_config(path: Path) -> ModuleType:
     return module
 
 
+def _external_path(path: Path) -> Path:
+    """Reject links whose lexical include topology cannot be preserved by copying."""
+    normalized = Path(os.path.abspath(path))
+    resolved = path.resolve(strict=True)
+    if normalized != resolved:
+        raise ValueError(f"Symbolic links in extern inputs require private compilation: {path}")
+    return resolved
+
+
 def _external_files(source: Path, include_dirs: tuple[Path, ...]) -> dict[Path, bytes]:
     files: dict[Path, bytes] = {}
 
     def visit(path: Path) -> None:
-        path = path.resolve(strict=True)
+        path = _external_path(path)
         if path in files:
             return
         data = path.read_bytes()
@@ -61,8 +70,8 @@ def _external_files(source: Path, include_dirs: tuple[Path, ...]) -> dict[Path, 
 
 
 def _package_external(root: Path, kernel: dict[str, Any], index: int) -> None:
-    source = Path(kernel["source"]).resolve(strict=True)
-    includes = tuple(Path(p).resolve(strict=True) for p in kernel.get("extra_include_dirs", ()))
+    source = _external_path(Path(kernel["source"]))
+    includes = tuple(_external_path(Path(p)) for p in (kernel.get("extra_include_dirs") or ()))
     files = _external_files(source, includes)
     common = Path(os.path.commonpath([str(p.parent) for p in files] + [str(p) for p in includes]))
     destination = root / "extern" / str(index)
@@ -136,7 +145,11 @@ def validate_generated_sources(directory: Path, kind: BuildKind) -> None:
         config = read_kernel_config(chip / "kernel_config.py")
         for entry in [*config.KERNELS, config.ORCHESTRATION]:
             _local_source(chip, entry["source"])
-            for include in entry.get("extra_include_dirs", ()):
-                path = Path(include).resolve(strict=True)
+            for include in entry.get("extra_include_dirs") or ():
+                # Empty include directories have no payload and are intentionally
+                # omitted by ArtifactStore. A missing -I directory is harmless.
+                path = Path(include).resolve()
                 if path != chip and chip not in path.parents:
                     raise ValueError(f"External include directory is outside the artifact: {path}")
+                if path.exists() and not path.is_dir():
+                    raise ValueError(f"External include path is not a directory: {path}")

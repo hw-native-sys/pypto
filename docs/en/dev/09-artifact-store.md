@@ -207,11 +207,17 @@ the parent without live IR. Persist supported individual children instead.
 
 1. Validate the handle against its exact key and spec before executing any
    generated configuration. Compute the ready spec, listing the parent marker,
-   every child marker, orchestration binary, and kernel binary.
+   every child marker, orchestration binary, and kernel binary. The generated
+   spec must declare every required chip configuration: missing declared files
+   fail store validation. Auxiliary directories without `kernel_config.py` are
+   skipped, matching ordinary distributed replay.
 2. Look up `BINARY_READY` through `ArtifactStore.get_or_build`. On a miss,
    materialize the generated handle into a private directory. The lock order is
    artifact key lock, then private runtime build lock.
-3. Compile all chip builds with the existing runtime compiler. Record the exact
+3. Compile all chip builds with the existing runtime compiler, bypassing inherited
+   mutable binary caches and source-adjacent binaries even when their legacy
+   context stamp matches. A generated identity does not certify those bytes.
+   Record the exact
    final kernel bytes handed to `CoreCallable.build` and orchestration bytes
    handed to `ChipCallable.build`. Compilation and assembly do not execute on a
    device. Only after all children succeed may the store publish ready output.
@@ -252,8 +258,11 @@ while compiled objects or workers reference them.
 
 Extern packaging supports recursively resolved literal local includes, retaining
 relative include topology and ordered explicit include directories. It rejects
-macro includes, absolute includes, and unresolved quoted includes. Unresolved
-angle includes are supplied by the separately identified SDK/toolchain. Other
+macro includes, absolute includes, unresolved quoted includes, and symbolic
+links in extern input paths (dereferencing a link would change include topology).
+Unresolved angle includes are supplied by the separately identified SDK/toolchain. Empty
+include directories may disappear during publication; their missing `-I` paths
+remain valid, and `extra_include_dirs=None` is normalized to an empty list. Other
 file-bearing preprocessor or assembler constructs are not supported. The caller
 must establish complete input identity before publication; this packager does
 not discover a toolchain inventory or make an arbitrary C++ build hermetic.

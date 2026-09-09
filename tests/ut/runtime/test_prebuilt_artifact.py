@@ -112,7 +112,12 @@ def _generated(root: Path, kind: BuildKind) -> None:
 
 def _spec(kind=BuildKind.SINGLE_CHIP):
     metadata = "compiled_meta.json" if kind is BuildKind.SINGLE_CHIP else "distributed_meta.json"
-    return ArtifactSpec(ArtifactState.GENERATED, kind, (metadata,))
+    configs = (
+        ("kernel_config.py",)
+        if kind is BuildKind.SINGLE_CHIP
+        else ("next_levels/left/kernel_config.py", "next_levels/right/kernel_config.py")
+    )
+    return ArtifactSpec(ArtifactState.GENERATED, kind, (metadata, *configs))
 
 
 @pytest.fixture
@@ -429,12 +434,85 @@ def test_altered_handle_fails_before_source_execution(tmp_path, fake_runtime):
     fake_runtime.runner._compile_and_assemble.assert_not_called()
 
 
-def test_distributed_missing_child_config_cannot_claim_readiness(tmp_path, fake_runtime):
-    _generated(tmp_path, BuildKind.DISTRIBUTED)
-    (tmp_path / "next_levels/right/kernel_config.py").unlink()
-    with pytest.raises(ValueError, match="chip lacks kernel_config"):
-        _prebuilt.prepare_prebuilt(tmp_path, "a2a3sim", BuildKind.DISTRIBUTED)
+def test_distributed_missing_declared_child_config_cannot_be_published(tmp_path, fake_runtime):
+    store = ArtifactStore(tmp_path / "cache", private_root=tmp_path / "private")
+
+    def incomplete(root):
+        _generated(root, BuildKind.DISTRIBUTED)
+        (root / "next_levels/right/kernel_config.py").unlink()
+
+    with pytest.raises(ValueError, match="missing required files.*right/kernel_config"):
+        store.get_or_build(_key(), _spec(BuildKind.DISTRIBUTED), incomplete)
     fake_runtime.runner._compile_and_assemble.assert_not_called()
+
+
+def test_distributed_auxiliary_directories_are_not_chip_builds(tmp_path, fake_runtime):
+    def generated(root):
+        _generated(root, BuildKind.DISTRIBUTED)
+        _write(root / "next_levels/scratch/notes.txt", "auxiliary data")
+        package_generated_sources(root, BuildKind.DISTRIBUTED)
+
+    store = ArtifactStore(tmp_path / "cache", private_root=tmp_path / "private")
+    result = store.get_or_build(_key(), _spec(BuildKind.DISTRIBUTED), generated)
+    assert result.handle is not None
+    runtime = ArtifactRuntime(store, result.handle, "a2a3sim", tmp_path / "run")
+    assert set(runtime.load()) == {"left", "right"}
+    assert fake_runtime.runner._compile_and_assemble.call_count == 2
+    assert (runtime.directory / "next_levels/scratch/notes.txt").is_file()
+
+
+@pytest.mark.parametrize("include_dirs", ["empty", "none"])
+def test_packaged_extern_promotes_after_store_drops_empty_directories(tmp_path, fake_runtime, include_dirs):
+    external = tmp_path / "extern-source"
+    _write(external / "kernel.cpp", "// external kernel")
+    empty = external / "empty"
+    empty.mkdir()
+    configured = [str(empty)] if include_dirs == "empty" else None
+
+    def generated(root):
+        _generated(root, BuildKind.SINGLE_CHIP)
+        with (root / "kernel_config.py").open("a") as stream:
+            stream.write(
+                f"\nKERNELS[0].update(external=True, source={str(external / 'kernel.cpp')!r}, "
+                f"extra_include_dirs={configured!r})\n"
+            )
+        package_generated_sources(root, BuildKind.SINGLE_CHIP)
+
+    store = ArtifactStore(tmp_path / "cache", private_root=tmp_path / "private")
+    result = store.get_or_build(_key(), _spec(), generated)
+    assert result.handle is not None
+    shutil.rmtree(external)
+    runtime = ArtifactRuntime(store, result.handle, "a2a3sim", tmp_path / "run")
+    assert runtime.load()["."][1] == "test_runtime"
+    assert runtime.handle.spec.state is ArtifactState.BINARY_READY
+
+
+@pytest.mark.parametrize("link_kind", ["header", "include_dir", "parent_traversal"])
+def test_extern_symlinks_fail_before_generated_publication(tmp_path, fake_runtime, link_kind):
+    external = tmp_path / "extern-source"
+    _write(external / "kernel.cpp", '#include "alias/header.hpp"')
+    _write(external / "real/header.hpp", "// header")
+    if link_kind == "parent_traversal":
+        (external / "real/deep").mkdir()
+        (external / "alias").symlink_to(external / "real/deep", target_is_directory=True)
+        _write(external / "header.hpp", "// wrong lexical parent")
+        _write(external / "kernel.cpp", '#include "alias/../header.hpp"')
+    elif link_kind == "include_dir":
+        (external / "alias").symlink_to(external / "real", target_is_directory=True)
+    else:
+        (external / "alias").mkdir()
+        (external / "alias/header.hpp").symlink_to(external / "real/header.hpp")
+
+    def generated(root):
+        _generated(root, BuildKind.SINGLE_CHIP)
+        with (root / "kernel_config.py").open("a") as stream:
+            stream.write(f"\nKERNELS[0].update(external=True, source={str(external / 'kernel.cpp')!r})\n")
+        package_generated_sources(root, BuildKind.SINGLE_CHIP)
+
+    store = ArtifactStore(tmp_path / "cache", private_root=tmp_path / "private")
+    with pytest.raises(ValueError, match="Symbolic links in extern inputs"):
+        store.get_or_build(_key(), _spec(), generated)
+    assert store.lookup(_key(), _spec()).status is LookupStatus.MISS
 
 
 if __name__ == "__main__":

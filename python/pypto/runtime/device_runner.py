@@ -256,6 +256,8 @@ def _compile_single_kernel(
     pto_isa_root: str,
     runtime_name: str,
     cache_dir: Path | None = None,
+    *,
+    force_rebuild: bool = False,
 ) -> tuple[bytes, bytes]:
     """Compile a single incore kernel with binary caching.
 
@@ -281,6 +283,7 @@ def _compile_single_kernel(
             :meth:`KernelCompiler.compile_incore` for include-dir resolution.
         cache_dir: Optional directory to write the final kernel binary for
             pre-build caching.
+        force_rebuild: Ignore inherited source-adjacent binaries during artifact promotion.
 
     Returns:
         ``(raw_binary, kernel_binary)`` where *raw_binary* is the compiled
@@ -294,7 +297,7 @@ def _compile_single_kernel(
     is_external = bool(kernel.get("external", False))
     output_file = None if is_external else source.with_suffix(ext)
 
-    raw = None if output_file is None else _load_binary(output_file)
+    raw = None if force_rebuild or output_file is None else _load_binary(output_file)
     if raw is None:
         raw = compiler.compile_incore(
             kernel["source"],
@@ -320,6 +323,8 @@ def _compile_single_orchestration(
     compiler: KernelCompiler,
     runtime_name: str,
     cache_dir: Path | None = None,
+    *,
+    force_rebuild: bool = False,
 ) -> bytes:
     """Compile orchestration source to a shared library with binary caching.
 
@@ -334,6 +339,7 @@ def _compile_single_orchestration(
         compiler: Configured :class:`KernelCompiler` instance.
         runtime_name: Runtime name (e.g. ``"tensormap_and_ringbuffer"``).
         cache_dir: Optional directory to write the binary for pre-build caching.
+        force_rebuild: Ignore inherited source-adjacent binaries during artifact promotion.
 
     Returns:
         Orchestration ``.so`` binary bytes.
@@ -341,7 +347,7 @@ def _compile_single_orchestration(
     source_path = Path(source)
     output_file = source_path.with_suffix(".so")
 
-    raw = _load_binary(output_file)
+    raw = None if force_rebuild else _load_binary(output_file)
     if raw is None:
         raw = compiler.compile_orchestration(runtime_name, str(source))
         _save_binary(raw, output_file)
@@ -573,7 +579,8 @@ def _compile_and_assemble_locked(
             runtime_name,
             compiler,
         )
-        cached_bin = _load_binary(cache_file)
+        # GENERATED carries source identity, not proof for inherited mutable binaries.
+        cached_bin = None if save_prebuilt else _load_binary(cache_file)
         if cached_bin is not None:
             sig = kernel.get("signature", [])
             return (func_id, CoreCallable.build(signature=sig, binary=cached_bin), cached_bin)
@@ -586,6 +593,7 @@ def _compile_and_assemble_locked(
             pto_isa_root,
             runtime_name,
             cache_dir=prebuild_cache,
+            force_rebuild=save_prebuilt,
         )
 
         sig = kernel.get("signature", [])
@@ -597,12 +605,18 @@ def _compile_and_assemble_locked(
         # Check cache/ for pre-built binary (written by prebuild_binaries)
         prebuild_cache = work_dir / "cache"
         cache_file = prebuild_cache / f"orch_{source.stem}.bin"
-        cached_bin = _load_binary(cache_file)
+        # GENERATED carries source identity, not proof for inherited mutable binaries.
+        cached_bin = None if save_prebuilt else _load_binary(cache_file)
         if cached_bin is not None:
             return cached_bin
 
         # Compile via shared function; skip secondary prebuild cache write
-        return _compile_single_orchestration(orchestration["source"], compiler, runtime_name)
+        return _compile_single_orchestration(
+            orchestration["source"],
+            compiler,
+            runtime_name,
+            force_rebuild=save_prebuilt,
+        )
 
     max_workers = min(64, 1 + len(kernels))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:

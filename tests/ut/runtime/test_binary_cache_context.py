@@ -437,5 +437,41 @@ def test_prebuilt_records_final_bytes_only_after_complete_assembly(
         assert record["orchestration"]["binary"] == b"orchestration binary"
 
 
+@pytest.mark.parametrize("cache_form", ["final", "sidecar"])
+def test_ready_promotion_ignores_inherited_mutable_binaries(device_runner, monkeypatch, tmp_path, cache_form):
+    _real_orchestration_compiler = device_runner._compile_single_orchestration
+    context = _stub_assembly(device_runner, monkeypatch, tmp_path, Mock(return_value=object()))
+    # Use sources outside the conventional kernels/ directory as well: the
+    # manifest, not an output-directory naming convention, defines each source.
+    source = _touch(tmp_path / "generated/updated.cpp", b"// new kernel")
+    with (tmp_path / "kernel_config.py").open("a") as stream:
+        stream.write(
+            f"KERNELS = [dict(func_id=3, name='updated', core_type='aiv', source={str(source)!r})]\n"
+        )
+    kernel_cache = tmp_path / "cache/kernel.bin"
+    if cache_form == "final":
+        _touch(kernel_cache, b"old kernel")
+        _touch(tmp_path / "cache/orch_main.bin", b"old orchestration")
+    else:
+        _touch(source.with_suffix(".so"), b"old kernel")
+        _touch(tmp_path / "orchestration/main.so", b"old orchestration")
+    record_binary_context(tmp_path, context)
+    compiler = SimpleNamespace(
+        compile_incore=Mock(return_value=b"new kernel"),
+        compile_orchestration=Mock(return_value=b"new orchestration"),
+    )
+    monkeypatch.setattr(device_runner, "KernelCompiler", Mock(return_value=compiler))
+    monkeypatch.setattr(device_runner, "_kernel_cache_file", Mock(return_value=kernel_cache))
+    monkeypatch.setattr(device_runner, "CoreCallable", SimpleNamespace(build=Mock(return_value=object())))
+    # _stub_assembly stubs this helper; restore it to exercise source-sidecar reuse.
+    monkeypatch.setattr(device_runner, "_compile_single_orchestration", _real_orchestration_compiler)
+    device_runner._compile_and_assemble(tmp_path, "a2a3sim", save_prebuilt=True)
+    record = read_prebuilt(tmp_path, "a2a3sim", BuildKind.SINGLE_CHIP)["."]
+    assert record["kernels"][0]["binary"] == b"new kernel"
+    assert record["orchestration"]["binary"] == b"new orchestration"
+    compiler.compile_incore.assert_called_once()
+    compiler.compile_orchestration.assert_called_once()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

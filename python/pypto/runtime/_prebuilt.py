@@ -108,10 +108,11 @@ def chip_directories(directory: Path, kind: BuildKind) -> dict[str, Path]:
     children = directory / "next_levels"
     result = {}
     for child in sorted(children.iterdir()):
-        if not child.is_dir():
+        # Match ordinary distributed replay: auxiliary directories are not chips.
+        # The generated spec declares required configurations; the store catches
+        # missing declared children before promotion. READY also checks its chip list.
+        if not child.is_dir() or not (child / "kernel_config.py").is_file():
             continue
-        if not (child / "kernel_config.py").is_file():
-            raise ValueError(f"Distributed chip lacks kernel_config.py: {child}")
         result[child.name] = child
     if not result:
         raise ValueError(f"Distributed artifact has no chip builds: {children}")

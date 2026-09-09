@@ -169,10 +169,14 @@ restored.load()  # Validates metadata and bytes; does not compile or execute.
 ### 阶段晋级与加载
 
 1. 执行任何生成配置前，按精确 key 和 spec 校验句柄。计算 ready spec，列出父标记、
-   每个子标记、orchestration 二进制和每个 kernel 二进制。
+   每个子标记、orchestration 二进制和每个 kernel 二进制。Generated spec 必须声明
+   所有必需的芯片配置；声明的文件缺失时存储校验失败。不含 `kernel_config.py` 的
+   辅助目录会被跳过，与普通分布式重放保持一致。
 2. 通过 `ArtifactStore.get_or_build` 查找 `BINARY_READY`。未命中时，将 generated
    句柄物化到私有目录。加锁顺序是产物 key 锁，再到私有运行时构建锁。
-3. 使用现有运行时编译器完成全部芯片构建，记录传给 `CoreCallable.build` 的最终 kernel
+3. 使用现有运行时编译器完成全部芯片构建。即使旧上下文标记匹配，也跳过继承的可变
+   二进制缓存和源码旁的二进制文件：generated 身份不能证明这些字节有效。
+   记录传给 `CoreCallable.build` 的最终 kernel
    字节和传给 `ChipCallable.build` 的 orchestration 字节。编译和组装不会在设备上执行；
    只有全部子构建成功后才能发布 ready 产物。
 4. 读取带版本的 `binary_manifest.json`，在构造任何 callable 前校验所有子项。
@@ -201,8 +205,11 @@ DFX 输出、依赖捕获和泳道转换写入独立的 `run_directory`。并发
 编译对象或 worker 持有引用期间，已发布产物必须保持存在且不变。
 
 Extern 打包支持递归解析的字面量本地 include，保留相对 include 拓扑和显式 include
-目录顺序；拒绝宏 include、绝对路径 include 和未解析的引号 include。未解析的尖括号
-include 由单独标识的 SDK/工具链提供。其他引用文件的预处理器或汇编构造不在支持范围内。
+目录顺序；拒绝宏 include、绝对路径 include、未解析的引号 include，以及 extern 输入
+路径中的符号链接（直接解引用会改变 include 拓扑）。未解析的尖括号
+include 由单独标识的 SDK/工具链提供。空 include 目录可以在发布时消失，对应缺失的
+`-I` 路径仍然有效；`extra_include_dirs=None` 会规范化为空列表。
+其他引用文件的预处理器或汇编构造不在支持范围内。
 调用方必须在发布前建立完整输入身份；打包器不会发现工具链清单，也不会让任意 C++ 构建
 自动成为封闭构建。不支持的输入应走普通私有编译路径。受支持产物一旦 ready，即可迁移并
 在原始 extern 源码目录不存在时加载。
