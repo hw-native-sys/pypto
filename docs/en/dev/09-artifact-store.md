@@ -19,8 +19,10 @@ completeness of the adapter's source/toolchain inventories.
 
 `ArtifactSpec` identifies `GENERATED` or `BINARY_READY`, the single-chip or
 distributed build kind, and a nonempty, unique list of required relative files.
-The adapter must include its effective build kind in specialization identity.
-It must enumerate all required source/configuration files for generated output,
+The store includes a digest of the state, build kind, and sorted required-file
+list in the slot path. A changed spec therefore selects a new slot and misses
+cleanly, independently of the adapter's specialization digest. Existing specs
+remain reusable. The adapter must enumerate all required source/configuration files for generated output,
 and all binaries plus complete loader metadata for binary-ready output. Merely
 labeling a directory `BINARY_READY` does not establish runtime readiness.
 
@@ -37,21 +39,30 @@ rebinding and eventual cleanup. Hits return an `ArtifactHandle` with no builder
 value or private directory. Lookup reports `HIT`, `MISS`, `INVALID`, or
 `STORAGE_ERROR`, with diagnostic reasons for invalid or unavailable storage.
 
+Overlapping calls in one process with the same root, private root, read-only
+policy, key, and spec share one in-flight operation, even across store instances.
+This includes `INVALID`, `STORAGE_ERROR`, read-only misses, and lock/publication
+failures. A private result shares its builder value and directory among waiters,
+so matching builders must be interchangeable and their values safe to share.
+Compiler errors, including cancellation, wake all waiters and propagate. Results
+and errors are removed from the coordinator when the operation finishes;
+subsequent private requests build again. This is not a private-object cache.
+
 ## Layout and validation
 
 ```text
 <root>/
   locks/<key>.lock
-  artifacts/<environment-digest>/<key>/
-    generated/artifact_manifest.json
-    ready/artifact_manifest.json
+  artifacts/<environment-digest>/<key>/<spec-digest>/
+    <state>/artifact_manifest.json
     .tmp.<random>/
 ```
 
-Each published stage contains its payload beside `artifact_manifest.json`.
+The state is `generated` or `ready`; each has its own spec digest. Each
+published stage contains its payload beside `artifact_manifest.json`.
 The completion marker contains the schema, full key and components, state,
 build kind, required-file list, and a sorted inventory of every payload file's
-relative path, byte size, SHA-256 digest, and execute permission bits. It is bounded to
+relative path, byte size, SHA-256 digest, and owner-executable flag. It is bounded to
 16 MiB. Readers verify the entire inventory against the exact request; no
 timestamps substitute for content hashes. Unexpected files, duplicate JSON
 fields, altered metadata, missing files, and malformed markers invalidate the
@@ -61,10 +72,11 @@ Manifest paths are never used to open files: validation enumerates the actual
 tree and compares its canonical record to the marker. Absolute, non-normalized,
 parent-traversing, and backslash paths are rejected. Payload links, special
 files, and symlinked cache descendants are rejected. The explicitly configured
-root is resolved once to its canonical path. Read/write permission changes do
-not invalidate unchanged payloads, allowing a prewarmed cache to be sealed with
-`chmod`. Payload copies are owner-readable and owner-writable and preserve
-execute bits; setuid/setgid/sticky bits are not propagated to published files.
+root is resolved once to its canonical path. Only the owner's execute bit is
+part of the artifact contract. Read/write bits and group/other execute bits are
+access policy: changing them does not invalidate unchanged payloads. Payload
+copies are owner-readable and owner-writable and preserve the owner execute bit;
+group/other and setuid/setgid/sticky bits are not propagated to published files.
 
 The root must have trusted writers: digests detect corruption, not malicious
 replacement of executable code and its matching manifest. Writers must not
@@ -74,8 +86,9 @@ an atomic filesystem snapshot or a defense against a hostile cache owner.
 ## Publication and recovery
 
 1. Lookup reads and validates the requested stage without writing anything.
-2. On a writable miss, acquire `flock` on the persistent key lock and recheck.
-   Both stages share that lock. Independent keys can build concurrently.
+2. For every non-hit in writable mode, acquire `flock` on the persistent key
+   lock when available and recheck. Both stages and all specs share that lock.
+   Independent keys can build concurrently.
 3. Build outside the cache root. Validate all required private output files.
 4. Copy payload to a unique staging directory beside the final slot, using
    separate files rather than hardlinks. Revalidate the copy, sync payload files
@@ -90,12 +103,43 @@ The kernel releases a dead process's lock. Lock files are never unlinked, so
 waiting processes continue synchronizing on the same inode.
 
 Invalid final slots are never repaired or overwritten online. Such requests
-build privately until offline cleanup removes the invalid slot. If publication
+build privately until offline cleanup removes the invalid slot. Across processes,
+file locking only eliminates duplicate compilation when the first process can
+publish a reusable artifact. It serializes private builds when available, but
+does not share their results. If storage or locking remains unavailable, distinct
+processes still build independently. Cross-process private-result reuse would
+require an additional shared fallback publication protocol, which is not
+implemented here. If publication
 succeeds but the final parent sync fails, the private result is retained and
 the valid published slot is left intact. Unsupported no-replace rename or
 unavailable writable storage also yields private output. Writers require a
 Linux filesystem honoring `flock` and atomic no-replace rename; network
 filesystems must establish those semantics before use.
+
+## Sharing permissions
+
+By default, reuse is limited to the publishing UID. A published stage inherits
+the staging directory's `0700`; payload files use `0600`, or `0700` when owner
+execution is required. Intermediate directories and completion markers follow
+the process umask, but cannot make the enclosing `0700` stage traversable by
+another UID. There is no mode option or umask-based override for stage/payload
+permissions. Concurrent writers with different UIDs are not supported.
+
+To expose prewarmed artifacts to other UIDs as read-only consumers, stop all
+writers and consumers, set `CACHE_ROOT` to the intended cache root, and grant
+read access explicitly. The following policy grants all local users read access;
+use an administrator-managed group/ACL policy if that is too broad:
+
+```bash
+chmod a+rx,go-w -- "$CACHE_ROOT"
+chmod -R a+rX,a-w -- "$CACHE_ROOT/artifacts"
+```
+
+Every ancestor of the root must also be searchable by the intended readers.
+Consumers must use `readonly=True`; this does not grant them access to writer
+locks or permission to publish. The commands preserve owner execute bits.
+Adding or removing group/other execute bits, as with `a+rX` or `go-x`, also
+preserves artifact identity; removing the owner execute bit does not.
 
 ## Read-only use and stage promotion
 
@@ -114,7 +158,8 @@ into an empty directory outside the entire shared cache root, including when
 the destination is reached through a symlink. It excludes the old marker and
 uses no hardlinks. Copies are owner-writable even when the cached payload is
 read-only. Binary compilation can modify the private files freely; publication
-creates a separate `ready/` slot and leaves `generated/` intact. The runtime
+creates a separate `ready/` slot under its own spec digest and leaves
+`generated/` intact. The runtime
 adapter is responsible for path rebinding and complete binary/metadata coverage.
 
 There is no online garbage collection, diagnostic index, global cache statistics,

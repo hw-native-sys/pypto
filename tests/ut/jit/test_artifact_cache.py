@@ -12,8 +12,9 @@
 import json
 import multiprocessing
 import os
+import subprocess
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
@@ -22,7 +23,7 @@ from pypto._fslock import file_lock
 from pypto._identity import ToolchainIdentity, digest_record
 from pypto.jit import artifact_cache
 from pypto.jit._artifact_manifest import MANIFEST_NAME, ArtifactKey, ArtifactSpec, ArtifactState, BuildKind
-from pypto.jit.artifact_cache import ArtifactStore, BuildDisposition, LookupStatus
+from pypto.jit.artifact_cache import ArtifactLookup, ArtifactStore, BuildDisposition, LookupStatus
 
 
 def _key(source="source"):
@@ -65,7 +66,10 @@ def test_publish_then_hit_preserves_private_value_and_records(store, state, kind
     assert result.value.read_bytes() == b"generated code"
     assert result.private_directory in result.value.parents
     handle = result.handle
-    assert handle.directory == store.root / "artifacts" / key.environment.digest / key.digest / state.value
+    assert (
+        handle.directory
+        == store.root / "artifacts" / key.environment.digest / key.digest / spec.digest / state.value
+    )
     marker = json.loads((handle.directory / MANIFEST_NAME).read_text())
     assert marker["components"] == key.record()
     assert marker["build_kind"] == kind.value
@@ -74,6 +78,42 @@ def test_publish_then_hit_preserves_private_value_and_records(store, state, kind
     assert hit.disposition is BuildDisposition.HIT
     assert hit.handle == handle
     assert hit.value is None and hit.private_directory is None
+
+
+def test_changed_spec_gets_an_independent_reusable_slot(store):
+    key = _key()
+    original = _spec()
+    extended = replace(original, required_files=(*original.required_files, "extra.json"))
+    distributed = replace(original, build_kind=BuildKind.DISTRIBUTED)
+
+    def build(directory):
+        value = _builder(directory)
+        (directory / "extra.json").write_text("{}")
+        return value
+
+    handles = []
+    for spec in (original, extended, distributed):
+        assert store.lookup(key, spec).status is LookupStatus.MISS
+        result = store.get_or_build(key, spec, build)
+        assert result.disposition is BuildDisposition.PUBLISHED
+        handles.append(result.handle)
+    assert len({handle.directory for handle in handles}) == 3
+    for spec, handle in zip((original, extended, distributed), handles):
+        assert store.get_or_build(key, spec, _unexpected_builder).handle == handle
+    assert (
+        replace(original, required_files=tuple(reversed(original.required_files))).digest == original.digest
+    )
+
+
+def test_invalid_slot_does_not_poison_another_spec(store):
+    original = _spec()
+    changed = replace(original, build_kind=BuildKind.DISTRIBUTED)
+    directory = store.get_or_build(_key(), original, _builder).handle.directory
+    (directory / MANIFEST_NAME).write_bytes(b"damaged marker")
+    assert store.lookup(_key(), original).status is LookupStatus.INVALID
+    assert store.lookup(_key(), changed).status is LookupStatus.MISS
+    assert store.get_or_build(_key(), changed, _builder).disposition is BuildDisposition.PUBLISHED
+    assert (directory / MANIFEST_NAME).read_bytes() == b"damaged marker"
 
 
 def test_key_requires_complete_full_digests():
@@ -261,7 +301,7 @@ def test_readonly_payload_materializes_writable_private_files(store, tmp_path):
     result.handle.materialize(destination)
     copied = destination / "kernel/source.pto"
     assert copied.stat().st_mode & 0o200
-    assert (destination / "kernel_config.py").stat().st_mode & 0o111 == 0o111
+    assert (destination / "kernel_config.py").stat().st_mode & 0o111 == 0o100
     copied.write_bytes(b"adapted source")
     assert (result.handle.directory / "kernel/source.pto").read_bytes() == b"generated code"
 
@@ -282,6 +322,26 @@ def test_materialization_rejects_all_shared_cache_destinations(store, tmp_path, 
         handle.materialize(destination)
     assert list(shared.iterdir()) == []
     assert store.lookup(key, spec).status is LookupStatus.HIT
+
+
+@pytest.mark.parametrize("source_mode", [0o700, 0o755])
+def test_sharing_chmod_preserves_owner_execute_contract(store, source_mode):
+    def build(directory):
+        value = _builder(directory)
+        value.chmod(source_mode)
+        return value
+
+    key, spec = _key(), _spec()
+    handle = store.get_or_build(key, spec, build).handle
+    assert handle.directory.stat().st_mode & 0o777 == 0o700
+    assert (handle.directory / "kernel/source.pto").stat().st_mode & 0o777 == 0o700
+    assert (handle.directory / "kernel_config.py").stat().st_mode & 0o777 == 0o600
+    for permissions in ("a+rX", "go-x"):
+        subprocess.run(["chmod", "-R", permissions, "--", str(handle.directory)], check=True)
+        assert store.lookup(key, spec).status is LookupStatus.HIT
+    source = handle.directory / "kernel/source.pto"
+    source.chmod(source.stat().st_mode & ~0o100)
+    assert store.lookup(key, spec).status is LookupStatus.INVALID
 
 
 def test_missing_private_root_allows_hits_without_probing_temporary_directories(store, monkeypatch):
@@ -463,6 +523,166 @@ def test_same_key_threads_build_once(store):
     assert len(calls) == 1
     assert results.count(BuildDisposition.PUBLISHED) == 1
     assert results.count(BuildDisposition.HIT) == 3
+
+
+def _join_build_waiters(monkeypatch):
+    joined = threading.Barrier(4)
+
+    class WaitingFuture(Future):
+        def result(self, timeout=None):
+            joined.wait(timeout=20)
+            return super().result(timeout)
+
+    monkeypatch.setattr(artifact_cache, "Future", WaitingFuture)
+    return joined
+
+
+@pytest.mark.parametrize("failure", ["invalid", "storage_error", "readonly", "lock", "publication"])
+def test_private_builds_coalesce_across_store_instances(store, monkeypatch, failure):
+    key, spec = _key(), _spec()
+    if failure == "invalid":
+        store._slot(key, spec).mkdir(parents=True)
+    elif failure == "storage_error":
+        monkeypatch.setattr(
+            ArtifactStore,
+            "lookup",
+            lambda self, key, spec: ArtifactLookup(LookupStatus.STORAGE_ERROR, reason="unreadable cache"),
+        )
+
+    def fail(*args):
+        raise OSError("storage failure")
+
+    if failure == "lock":
+        monkeypatch.setattr(artifact_cache, "file_lock", fail)
+    elif failure == "publication":
+        monkeypatch.setattr(artifact_cache, "_rename_noreplace", fail)
+    joined = _join_build_waiters(monkeypatch)
+    calls = []
+
+    def build(directory):
+        calls.append(directory)
+        joined.wait(timeout=20)
+        return _builder(directory)
+
+    def invoke():
+        instance = ArtifactStore(store.root, private_root=store.private_root, readonly=failure == "readonly")
+        return instance.get_or_build(key, spec, build)
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(lambda _: invoke(), range(4)))
+    assert len(calls) == 1
+    assert all(result is results[0] for result in results)
+    assert results[0].disposition is BuildDisposition.PRIVATE
+    assert results[0].value is not None
+    assert results[0].value.read_bytes() == b"generated code"
+    assert not artifact_cache._build_flights.pending
+    if failure == "readonly":
+        assert not store.root.exists()
+    if failure == "invalid":
+        assert list(store._slot(key, spec).iterdir()) == []
+    # A completed cohort is not an unbounded private-object cache.
+    monkeypatch.setattr(artifact_cache, "Future", Future)
+    instance = ArtifactStore(store.root, private_root=store.private_root, readonly=failure == "readonly")
+    again = instance.get_or_build(key, spec, _builder)
+    assert again.private_directory != results[0].private_directory
+
+
+class _BuildCancelled(BaseException):
+    pass
+
+
+@pytest.mark.parametrize("error_type", [OSError, _BuildCancelled])
+def test_coalesced_compiler_errors_wake_waiters_and_allow_retry(store, monkeypatch, error_type):
+    joined = _join_build_waiters(monkeypatch)
+    failure = error_type("compiler cancelled or failed")
+    calls = []
+
+    def build(directory):
+        calls.append(directory)
+        joined.wait(timeout=20)
+        raise failure
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(store.get_or_build, _key(), _spec(), build) for _ in range(4)]
+        for future in futures:
+            with pytest.raises(error_type) as error:
+                future.result(timeout=30)
+            assert error.value is failure
+    assert len(calls) == 1
+    assert not artifact_cache._build_flights.pending
+    monkeypatch.setattr(artifact_cache, "Future", Future)
+    assert store.get_or_build(_key(), _spec(), _builder).disposition is BuildDisposition.PUBLISHED
+
+
+def test_coalescing_rejects_recursive_requests_without_leaking_state(store):
+    def recurse(directory):
+        return store.get_or_build(_key(), _spec(), _builder)
+
+    with pytest.raises(RuntimeError, match="recursively requested"):
+        store.get_or_build(_key(), _spec(), recurse)
+    assert not artifact_cache._build_flights.pending
+    assert store.get_or_build(_key(), _spec(), _builder).disposition is BuildDisposition.PUBLISHED
+
+
+@pytest.mark.parametrize("change", ["spec", "private_root", "readonly"])
+def test_coalescing_keeps_distinct_requests_independent(store, tmp_path, change):
+    joined = threading.Barrier(2)
+    first = ArtifactStore(store.root, private_root=store.private_root, readonly=True)
+    second = ArtifactStore(
+        store.root,
+        private_root=tmp_path / "other-private" if change == "private_root" else store.private_root,
+        readonly=change != "readonly",
+    )
+    other_spec = replace(_spec(), build_kind=BuildKind.DISTRIBUTED) if change == "spec" else _spec()
+
+    def build(directory):
+        joined.wait(timeout=20)
+        return _builder(directory)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        a = pool.submit(first.get_or_build, _key(), _spec(), build)
+        b = pool.submit(second.get_or_build, _key(), other_spec, build)
+        assert a.result(timeout=30).private_directory != b.result(timeout=30).private_directory
+
+
+def _fork_private_build(root, private_root, sender):
+    store = ArtifactStore(Path(root), private_root=Path(private_root), readonly=True)
+    result = store.get_or_build(_key(), _spec(), _builder)
+    sender.send(result.private_directory)
+    sender.close()
+
+
+def test_forked_child_does_not_wait_for_parent_build(store):
+    started, release = threading.Event(), threading.Event()
+    readonly = ArtifactStore(store.root, private_root=store.private_root, readonly=True)
+
+    def build(directory):
+        started.set()
+        assert release.wait(timeout=30)
+        return _builder(directory)
+
+    ctx = multiprocessing.get_context("fork")
+    receiver, sender = ctx.Pipe(duplex=False)
+    child = ctx.Process(target=_fork_private_build, args=(str(store.root), str(store.private_root), sender))
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        parent = pool.submit(readonly.get_or_build, _key(), _spec(), build)
+        try:
+            assert started.wait(timeout=20)
+            child.start()
+            sender.close()
+            assert receiver.poll(timeout=20)
+            child_directory = receiver.recv()
+            child.join(timeout=10)
+            assert child.exitcode == 0
+            release.set()
+            assert child_directory != parent.result(timeout=10).private_directory
+        finally:
+            release.set()
+            if child.is_alive():
+                child.kill()
+                child.join(timeout=10)
+            receiver.close()
+            sender.close()
 
 
 def test_different_keys_build_concurrently(store):

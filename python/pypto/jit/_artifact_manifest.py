@@ -121,6 +121,11 @@ class ArtifactSpec:
             raise ValueError(f"Artifact required files must be nonempty and unique, got {required!r}")
         object.__setattr__(self, "required_files", required)
 
+    @property
+    def digest(self) -> str:
+        """Address distinct stage contracts independently of the caller's key."""
+        return digest_record((self.state.value, self.build_kind.value, self.required_files))
+
 
 def check_directory(path: Path) -> None:
     """Reject non-directory ancestors, including symbolic links."""
@@ -154,7 +159,7 @@ def inventory(directory: Path) -> list[dict[str, Any]]:
                         "path": _relative_path(relative),
                         "size": size,
                         "sha256": digest,
-                        "execute_bits": mode & 0o111,
+                        "executable": bool(mode & stat.S_IXUSR),
                     }
                 )
             else:

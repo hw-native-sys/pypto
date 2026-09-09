@@ -19,7 +19,9 @@ import errno
 import os
 import shutil
 import tempfile
+import threading
 from collections.abc import Callable
+from concurrent.futures import Future
 from contextlib import ExitStack
 from dataclasses import dataclass
 from enum import Enum
@@ -77,7 +79,7 @@ class ArtifactHandle:
         """Copy validated payload to an empty private directory, without hardlinks.
 
         Use this when building BINARY_READY from GENERATED. The old completion
-        marker is excluded. Copies are owner-writable and preserve execute bits.
+        marker is excluded. Copies are owner-writable and preserve owner execute permission.
         On failure, the caller owns the partial destination.
         """
         destination = destination.resolve()
@@ -116,6 +118,58 @@ class ArtifactBuild(Generic[T]):
     reason: str | None = None
 
 
+_BuildRequest = tuple[Path, Path | None, bool, str, str]
+
+
+@dataclass(frozen=True)
+class _BuildFlight:
+    owner: int
+    result: Future[ArtifactBuild[Any]]
+
+
+class _BuildFlights:
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        """A forked child cannot wait on builders that only exist in its parent."""
+        self.lock = threading.Lock()
+        self.pending: dict[_BuildRequest, _BuildFlight] = {}
+
+    def run(
+        self, request: _BuildRequest, operation: Callable[[], ArtifactBuild[T]]
+    ) -> tuple[ArtifactBuild[T], bool]:
+        """Share one in-flight result or exception, retaining no completed entries."""
+        with self.lock:
+            flight = self.pending.get(request)
+            leader = flight is None
+            if flight is None:
+                flight = _BuildFlight(threading.get_ident(), Future())
+                self.pending[request] = flight
+            elif flight.owner == threading.get_ident():
+                raise RuntimeError("Artifact builder recursively requested its own in-flight build")
+        if not leader:
+            return flight.result.result(), False
+        try:
+            result = operation()
+        except BaseException as exc:
+            # Wake every waiter even for cancellation, then preserve the original
+            # compiler exception. This is coordination, not a cache-error fallback.
+            flight.result.set_exception(exc)
+            raise
+        else:
+            flight.result.set_result(result)
+            return result, True
+        finally:
+            with self.lock:
+                if self.pending.get(request) is flight:
+                    del self.pending[request]
+
+
+_build_flights = _BuildFlights()
+os.register_at_fork(after_in_child=_build_flights.reset)
+
+
 def _mkdir(path: Path) -> None:
     # Check existing ancestors before mkdir can follow a corrupt cache symlink.
     for ancestor in (*reversed(path.parents), path):
@@ -133,9 +187,9 @@ def _copy_payload(source: Path, destination: Path, manifest: dict[str, Any]) -> 
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source / entry["path"], target, follow_symlinks=False)
         # Read/write policy may change when sealing a prewarmed cache. Only
-        # execute bits affect the artifact contract; private copies must remain
+        # owner execute permission affects the contract; private copies remain
         # writable for the next compilation stage.
-        target.chmod(0o600 | entry["execute_bits"])
+        target.chmod(0o700 if entry["executable"] else 0o600)
 
 
 def _sync_directory(path: Path) -> None:
@@ -201,7 +255,14 @@ class ArtifactStore:
             _check_private_path(self.private_root, self.root)
 
     def _slot(self, key: ArtifactKey, spec: ArtifactSpec) -> Path:
-        return self.root / "artifacts" / str(key.environment.digest) / key.digest / spec.state.value
+        return (
+            self.root
+            / "artifacts"
+            / str(key.environment.digest)
+            / key.digest
+            / spec.digest
+            / spec.state.value
+        )
 
     def lookup(self, key: ArtifactKey, spec: ArtifactSpec) -> ArtifactLookup:
         """Validate all bytes and metadata, without creating directories or locks."""
@@ -225,16 +286,29 @@ class ArtifactStore:
     def get_or_build(
         self, key: ArtifactKey, spec: ArtifactSpec, builder: Callable[[Path], T]
     ) -> ArtifactBuild[T]:
-        """Recheck under a per-key lock, build privately, then publish atomically.
+        """Coalesce overlapping calls, recheck under a lock, and publish output.
 
         Builder and invalid-build errors propagate, including builder OSError.
         Storage failures return the completed private build with a reason.
+        Within one process, matching root/private-root/readonly/key/spec calls
+        share a private result, including its value. Their builders must be
+        interchangeable and their values safe to share between waiting callers.
+        Completed private results are not memoized for subsequent requests.
         Builders must not recursively acquire the same key's lock.
         """
+        request = (self.root, self.private_root, self.readonly, key.digest, spec.digest)
+        result, leader = _build_flights.run(request, lambda: self._get_or_build(key, spec, builder))
+        if not leader and result.handle is not None:
+            return ArtifactBuild(BuildDisposition.HIT, handle=result.handle)
+        return result
+
+    def _get_or_build(
+        self, key: ArtifactKey, spec: ArtifactSpec, builder: Callable[[Path], T]
+    ) -> ArtifactBuild[T]:
         lookup = self.lookup(key, spec)
         if lookup.status is LookupStatus.HIT:
             return ArtifactBuild(BuildDisposition.HIT, handle=lookup.handle)
-        if self.readonly or lookup.status is not LookupStatus.MISS:
+        if self.readonly:
             return self._build_private(key, spec, builder, lookup.reason or "Artifact cache is read-only")
         with ExitStack() as stack:
             try:
