@@ -54,10 +54,75 @@ rule at construction, including when attributes are attached with
 
 These types support construction, structural comparison, and binary serialization.
 Buffer type dumps use native `pypto.ir.BufferType(...)` constructors and preserve
-the complete descriptors. Buffer operators, representation verification, and
-PTO emission will be integrated separately. Automatic tile-to-buffer lowering
-is not enabled; the public Tile DSL and default pipeline still use `TileType`.
-Reparsing complete buffer-program dumps through the DSL parser is not supported.
+the complete descriptors. Internal buffer operators use the contracts below.
+Representation verification and PTO emission will be integrated separately.
+Automatic tile-to-buffer lowering is not enabled; the public Tile DSL and default
+pipeline still use `TileType`. Reparsing complete buffer-program dumps through
+the DSL parser is not supported.
+
+#### Buffer operator contracts
+
+Registrations default to `OpIRStage::Functional`. Internal buffer operators
+explicitly select `OpIRStage::Buffer` and `set_internal_only()`. Their output
+arity is declared: zero requires `VoidType`, one a native result, and multiple
+results a matching `TupleType`. Functional registrations still require at least
+one result under the existing contract.
+
+Every buffer operand declares data and metadata access separately with
+`set_buffer_arg_effect(i, data, metadata)`; scalar operands use
+`set_buffer_non_memory_arg(i)`. Both access dimensions use `BufferAccess`
+(`None`, `Read`, `Write`, `ReadWrite`). No declaration defaults to read access.
+`set_buffer_result_behavior(...)` classifies results as allocation, alias,
+borrowed handle, or native value; void calls declare `None`. Alias and borrowed
+results name their source operand. `Allocate` declares a root handle; an explicit
+address may overlap other roots. It does not prove freshness or initialization.
+Descriptor and memory-space legality remain part of each operator's type
+deduction or explicit result validation.
+
+`buffer.alloc` uses `f_validate_explicit_type(...)` instead of a deducer: its
+physical descriptor exists only in `Call.type`. These mutually exclusive modes
+prevent a second copy of the descriptor in kwargs. The private IR builder
+accepts the result type before the span:
+
+```python
+from pypto.pypto_core import ir as _ir
+
+span = ir.Span.unknown()
+valid_rows = ir.Var("valid_rows", ir.ScalarType(DataType.INDEX), span)
+descriptor = ir.BufferType([32, 64], DataType.FP32, ir.Mem.Vec, valid_shape=[-1, 64])
+allocation = _ir._create_internal_op_call(
+    "buffer.alloc", [ir.MakeTuple([valid_rows], span)], {}, descriptor, span
+)
+```
+
+The first operand is always a `MakeTuple` containing just the runtime valid
+extents, in the order of the descriptor's `-1` dimensions. Static descriptors
+use an empty tuple. The optional second operand is the final effective byte
+address, with no additional base or offset. An omitted address requests fresh
+storage; an explicit zero is a valid addressed allocation. Negative constant
+addresses, including `-1`, are rejected. Both operands are non-memory values.
+Runtime values must be integer or `INDEX` scalars. Constant valid extents must
+lie between zero and their physical extent; runtime bounds and address
+nonnegativity are preconditions when they cannot be checked statically.
+
+`buffer.set_validshape(buffer, valid_extents)` returns `VoidType` and writes
+metadata only. Its `MakeTuple` operand includes **all** dimensions. Dimensions
+marked `-1` may change within their physical bounds; static valid dimensions
+must be supplied as matching constants. The operation changes neither the
+immutable type nor buffer identity. Lowering must select a dynamic descriptor
+in advance for any valid dimension that changes over a handle's lifetime.
+
+`OpRegistry::ValidateBufferCall` validates an existing call against the same
+schema as creation, including its original result type and kwargs. Storage
+lifetime, overlap, and initialization proofs belong to subsequent verification.
+
+The initial `buffer.copy(src, dst)` and `buffer.mul(lhs, rhs, dst)` operations
+write their explicit destination and return `VoidType`. They currently require
+matching Vec buffer descriptors. A write effect does not imply that all bytes
+are initialized. Exact input/destination aliases are allowed; equality of
+runtime valid extents and legalization of partially overlapping views are
+preconditions for constructing these calls. Existing Functional-stage `ArgEffect` queries deliberately
+reject buffer operators; buffer consumers must use `GetBufferArgEffect`.
 
 ### TensorType
 

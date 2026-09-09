@@ -49,10 +49,66 @@ Void call 应放在 `EvalStmt` 中，不能绑定变量、用作操作数、放�
 在构造时即进行校验，通过 `ir.set_call_attrs` 附加属性时也会校验。
 
 这些类型支持构造、结构比较和二进制序列化。Buffer 类型 dump 使用原生
-`pypto.ir.BufferType(...)` 构造表达式，并保留完整描述符。Buffer 算子、
-表示验证和 PTO 代码生成将分别集成。自动 tile-to-buffer lowering 尚未启用，
-公开 Tile DSL 和默认流水线仍使用 `TileType`。目前不支持通过 DSL parser
-重新解析完整的 buffer 程序 dump。
+`pypto.ir.BufferType(...)` 构造表达式，并保留完整描述符。内部 buffer 算子
+使用下文契约；表示验证和 PTO 代码生成将分别集成。自动 tile-to-buffer
+lowering 尚未启用，公开 Tile DSL 和默认流水线仍使用 `TileType`。
+目前不支持通过 DSL parser 重新解析完整的 buffer 程序 dump。
+
+#### Buffer 算子契约
+
+算子注册默认为 `OpIRStage::Functional`。内部 buffer 算子显式选择
+`OpIRStage::Buffer` 并调用 `set_internal_only()`。结果数量必须声明：
+零结果要求 `VoidType`，单结果使用原生类型，多结果使用数量匹配的
+`TupleType`。Functional 注册仍按现有契约要求至少一个结果。
+
+每个 buffer 操作数通过 `set_buffer_arg_effect(i, data, metadata)`
+分别声明数据与元数据访问；标量操作数使用 `set_buffer_non_memory_arg(i)`。
+两个访问维度都使用 `BufferAccess`（`None`、`Read`、`Write`、`ReadWrite`），
+缺少声明不会默认视为读取。`set_buffer_result_behavior(...)` 将结果分类为
+分配、别名、借用句柄或原生值，void call 声明 `None`。别名和借用结果
+需要指定来源操作数。`Allocate` 声明 root 句柄；指定地址的 root 可以相互
+重叠，因此它不证明存储独立或已初始化。描述符及内存空间合法性由各算子的
+类型推导或显式结果验证检查。
+
+`buffer.alloc` 使用 `f_validate_explicit_type(...)`，不使用类型推导器：
+物理描述符只存在于 `Call.type` 中。两种模式互斥，避免在 kwargs 中重复
+存储描述符。私有 IR 构造器在 span 前接收结果类型：
+
+```python
+from pypto.pypto_core import ir as _ir
+
+span = ir.Span.unknown()
+valid_rows = ir.Var("valid_rows", ir.ScalarType(DataType.INDEX), span)
+descriptor = ir.BufferType([32, 64], DataType.FP32, ir.Mem.Vec, valid_shape=[-1, 64])
+allocation = _ir._create_internal_op_call(
+    "buffer.alloc", [ir.MakeTuple([valid_rows], span)], {}, descriptor, span
+)
+```
+
+第一个操作数始终是 `MakeTuple`，只包含描述符中 `-1` 维度对应的运行时
+valid extent，按维度顺序排列。静态描述符使用空 tuple。可选的第二个操作数
+是最终有效字节地址，不再叠加 base 或 offset。省略地址表示请求独立存储；
+显式零地址是合法的指定地址分配。负常量地址（包括 `-1`）会被拒绝。
+两个操作数都属于非内存值，运行时值必须是整数或 `INDEX` 标量。
+常量 valid extent 必须介于零和对应物理维度之间；无法静态检查时，运行时
+extent 的边界及地址非负性属于构造调用的前置条件。
+
+`buffer.set_validshape(buffer, valid_extents)` 返回 `VoidType`，只写入元数据。
+其 `MakeTuple` 操作数包含**所有**维度。标记为 `-1` 的维度可在物理边界内
+变化；静态 valid 维度必须传入与描述符一致的常量。该操作不改变不可变类型
+或 buffer 身份。对于句柄生命周期内会变化的 valid 维度，lowering 必须提前
+选择动态描述符。
+
+`OpRegistry::ValidateBufferCall` 按创建调用时的同一 schema 检查已有 call，
+包括其原始结果类型和 kwargs。存储生命周期、重叠和初始化证明属于后续验证。
+
+首批 `buffer.copy(src, dst)` 和 `buffer.mul(lhs, rhs, dst)` 写入显式
+destination 并返回 `VoidType`，目前要求所有参数的 Vec buffer 描述符
+相同。写效应并不表示所有字节都已初始化。允许输入和 destination 是同一
+句柄；构造调用前需要保证运行时 valid extent 一致，并完成部分重叠 view
+的合法化。现有 Functional 阶段的
+`ArgEffect` 查询会显式拒绝 buffer 算子，buffer 消费方必须使用
+`GetBufferArgEffect`。
 
 ### TensorType
 

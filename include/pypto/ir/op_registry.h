@@ -53,6 +53,30 @@ namespace ir {
 class Call;
 using CallPtr = std::shared_ptr<const Call>;
 
+/// The representation an operator consumes and produces. Existing operators
+/// keep their functional SSA contract; buffer operators name mutable storage.
+enum class OpIRStage : uint8_t { Functional, Buffer };
+
+/// Access to buffer data or descriptor metadata. None is explicit: an
+/// unclassified buffer argument must never silently become a read-only one.
+enum class BufferAccess : uint8_t { None, Read, Write, ReadWrite };
+
+struct BufferArgEffect {
+  BufferAccess data;
+  BufferAccess metadata;
+  bool non_memory;
+};
+
+/// Ownership of each actual SSA result. Allocate defines a storage root without
+/// initializing data or promising disjoint storage: explicitly addressed roots
+/// may overlap. Alias and Borrow reference storage named by an ordinary operand.
+enum class BufferResultBehavior : uint8_t { None, Allocate, Alias, Borrow, Value };
+
+struct BufferResultSpec {
+  BufferResultBehavior behavior;
+  std::optional<size_t> alias_arg;
+};
+
 /// Full memory space specification for one operator.
 struct OpMemorySpaceSpec {
   /// Required memory spaces per input arg index.
@@ -360,7 +384,7 @@ class OpRegistryEntry {
    * - description: Must be set via set_description()
    * - op_category: Must be set via set_op_category()
    * - arguments: Must be set via add_argument() or no_argument()
-   * - deduce_type: Must be set via f_deduce_type()
+   * - Result typing: f_deduce_type(), or f_validate_explicit_type() for internal Buffer ops
    *
    * @return Const reference to the operator pointer
    * @throws ValueError if any required field is not set
@@ -382,10 +406,11 @@ class OpRegistryEntry {
         << "Operator '" + name_ +
                "' has no argument definition. Use .add_argument() or .no_argument() to define arguments.";
 
-    // Check deduce_type is set
-    CHECK(deduce_type_.has_value())
-        << "Operator '" + name_ + "' has no type deduction function. Use .f_deduce_type() to provide one.";
+    CHECK(deduce_type_.has_value() || validate_explicit_type_.has_value())
+        << "Operator '" + name_ + "' has no type deduction function or explicit type validator. "
+        << "Use .f_deduce_type(), or .f_validate_explicit_type() for an internal Buffer operator.";
 
+    ValidateIRStage();
     return op_;
   }
 
@@ -432,6 +457,9 @@ class OpRegistryEntry {
     CHECK(deduce_type_.has_value()) << "Operator '" + name_ + "' has no type deduction function";
     return *deduce_type_;
   }
+
+  /// Whether this operator's result descriptor must be supplied by its creator.
+  [[nodiscard]] bool RequiresExplicitType() const { return validate_explicit_type_.has_value(); }
 
   /**
    * @brief Set the operator description
@@ -520,8 +548,30 @@ class OpRegistryEntry {
       std::function<TypePtr(const std::vector<ExprPtr>&,
                             const std::vector<std::pair<std::string, std::any>>&)>
           dt) {
+    CHECK(!validate_explicit_type_.has_value())
+        << "Operator '" << name_ << "' cannot combine type deduction with explicit type validation";
     CHECK(!deduce_type_.has_value()) << "Operator '" + name_ + "' type deduction function is already set";
     deduce_type_ = std::move(dt);
+    return *this;
+  }
+
+  /**
+   * @brief Validate a creator-supplied result descriptor for an internal Buffer operator.
+   *
+   * Mutually exclusive with f_deduce_type(). The descriptor lives only in
+   * Call::type_; addresses and runtime extents remain ordinary operands.
+   * The callback must validate operand types and their relation to the result.
+   */
+  inline OpRegistryEntry& f_validate_explicit_type(
+      std::function<void(const std::vector<ExprPtr>&, const std::vector<std::pair<std::string, std::any>>&,
+                         const TypePtr&)>
+          validator) {
+    CHECK(!deduce_type_.has_value()) << "Operator '" << name_
+                                     << "' cannot combine type deduction with explicit type validation";
+    CHECK(!validate_explicit_type_.has_value())
+        << "Operator '" << name_ << "' explicit type validator is already set";
+    CHECK(validator) << "Operator '" << name_ << "' explicit type validator must not be empty";
+    validate_explicit_type_ = std::move(validator);
     return *this;
   }
 
@@ -880,11 +930,44 @@ class OpRegistryEntry {
   /// output: destination tiles must NOT appear in `add_argument()`, because a
   /// caller cannot pre-allocate a buffer that `InitMemRef` owns. Default 1.
   inline OpRegistryEntry& set_output_arity(size_t arity) {
-    CHECK(arity >= 1) << "Operator '" << name_ << "' declared output arity " << arity
-                      << "; every operator produces at least one value";
+    CHECK(arity >= 1 || ir_stage_ == OpIRStage::Buffer)
+        << "Operator '" << name_ << "' declared output arity " << arity
+        << "; functional operators produce at least one value. Select Buffer stage before declaring zero";
     output_arity_ = arity;
+    output_arity_declared_ = true;
     return *this;
   }
+
+  inline OpRegistryEntry& set_ir_stage(OpIRStage stage) {
+    CHECK(stage == OpIRStage::Buffer || output_arity_ > 0)
+        << "Operator '" << name_ << "' cannot give a zero-result operator Functional stage";
+    ir_stage_ = stage;
+    return *this;
+  }
+
+  [[nodiscard]] OpIRStage GetIRStage() const { return ir_stage_; }
+
+  /// Classify both data and metadata explicitly, including a view that only
+  /// reads metadata or an allocation address that names no buffer at all.
+  OpRegistryEntry& set_buffer_arg_effect(size_t arg_index, BufferAccess data, BufferAccess metadata);
+  OpRegistryEntry& set_buffer_non_memory_arg(size_t arg_index);
+
+  /// Declare one result's storage behavior. The shorthand names result zero;
+  /// a zero-result operator explicitly declares None at that position.
+  OpRegistryEntry& set_buffer_result_behavior(BufferResultBehavior behavior,
+                                              std::optional<size_t> alias_arg = std::nullopt) {
+    return set_buffer_result_behavior(0, behavior, alias_arg);
+  }
+  OpRegistryEntry& set_buffer_result_behavior(size_t result_index, BufferResultBehavior behavior,
+                                              std::optional<size_t> alias_arg = std::nullopt);
+
+  [[nodiscard]] const BufferArgEffect& GetBufferArgEffect(size_t arg_index) const;
+  [[nodiscard]] const BufferResultSpec& GetBufferResultSpec(size_t result_index = 0) const;
+
+  /// Validate registrations separately from call types. Both are public so
+  /// tools can inspect a contract without mutating the global registry.
+  void ValidateIRStage() const;
+  void ValidateCall(const std::vector<ExprPtr>& args, const TypePtr& result_type, const Span& span) const;
 
   /// Declare argument `arg_index` to be compiler-supplied scratch: the hardware
   /// writes it, but it carries no result the caller reads. This is what
@@ -917,6 +1000,8 @@ class OpRegistryEntry {
   /// `Read` for any argument the operator did not name.
   [[nodiscard]] ArgEffect GetArgEffect(size_t arg_index,
                                        const std::vector<std::pair<std::string, std::any>>& kwargs) const {
+    CHECK(ir_stage_ == OpIRStage::Functional)
+        << "Operator '" << name_ << "' requires GetBufferArgEffect to inspect data and metadata effects";
     if (!arg_effects_.has_value()) return ArgEffect::Read;
     auto resolver = arg_effects_->kwarg_dependent.find(arg_index);
     if (resolver != arg_effects_->kwarg_dependent.end()) return resolver->second(kwargs);
@@ -947,6 +1032,8 @@ class OpRegistryEntry {
   /// to run a kwarg-dependent resolver against — a resolver is entitled to
   /// reject kwargs no real call would carry.
   [[nodiscard]] bool MayWriteArg(size_t arg_index) const {
+    CHECK(ir_stage_ == OpIRStage::Functional)
+        << "Operator '" << name_ << "' requires GetBufferArgEffect to inspect data and metadata effects";
     if (!arg_effects_.has_value()) return false;
     if (arg_effects_->kwarg_dependent.count(arg_index) > 0) return true;
     if (arg_index >= arg_effects_->per_arg.size()) return false;
@@ -956,6 +1043,8 @@ class OpRegistryEntry {
   /// True when this operator writes through at least one argument under some
   /// kwargs. Cheap pre-filter for analyses that only care about writers.
   [[nodiscard]] bool WritesAnyArg() const {
+    CHECK(ir_stage_ == OpIRStage::Functional)
+        << "Operator '" << name_ << "' requires GetBufferArgEffect to inspect data and metadata effects";
     if (!arg_effects_.has_value()) return false;
     if (!arg_effects_->kwarg_dependent.empty()) return true;
     return std::any_of(arg_effects_->per_arg.begin(), arg_effects_->per_arg.end(), ArgEffectWrites);
@@ -1047,7 +1136,11 @@ class OpRegistryEntry {
       arguments_;  ///< Argument specifications (name, description)
   std::optional<std::function<TypePtr(const std::vector<ExprPtr>&,
                                       const std::vector<std::pair<std::string, std::any>>&)>>
-      deduce_type_;                               ///< Type deduction function
+      deduce_type_;  ///< Type deduction function
+  std::optional<
+      std::function<void(const std::vector<ExprPtr>&, const std::vector<std::pair<std::string, std::any>>&,
+                         const TypePtr&)>>
+      validate_explicit_type_;  ///< Validation for an explicit internal Buffer result descriptor
   std::optional<OpMemorySpaceSpec> memory_spec_;  ///< Memory space specification
   std::optional<OpArgEffectSpec> arg_effects_;    ///< Per-argument execution effects; nullopt = unclassified
   std::optional<OpLaneInvariantArgSpec>
@@ -1057,10 +1150,14 @@ class OpRegistryEntry {
   std::set<size_t> forbid_output_alias_args_;  ///< Input args whose buffer the output must not reuse
   std::optional<core_affinity::CoreAffinity> core_affinity_;     ///< Explicit core-affinity override
   std::optional<core_affinity::CrossCoreRole> cross_core_role_;  ///< Cross-core role (for predicates)
-  bool no_duplicate_{false};         ///< True when the op must not run on a second core (set_no_duplicate)
-  bool internal_only_{false};        ///< True for compiler-created ops only.
-  size_t output_arity_{1};           ///< Values produced; > 1 means a TupleType result
-  std::set<size_t> workspace_args_;  ///< Args written as scratch rather than as results
+  bool no_duplicate_{false};   ///< True when the op must not run on a second core (set_no_duplicate)
+  bool internal_only_{false};  ///< True for compiler-created ops only.
+  size_t output_arity_{1};     ///< Values produced; > 1 means a TupleType result
+  OpIRStage ir_stage_{OpIRStage::Functional};
+  bool output_arity_declared_{false};
+  std::map<size_t, BufferArgEffect> buffer_arg_effects_;
+  std::map<size_t, BufferResultSpec> buffer_results_;
+  std::set<size_t> workspace_args_;          ///< Args written as scratch rather than as results
   std::optional<std::string> template_dir_;  ///< Package resource for builtin templates.
 };
 
@@ -1165,6 +1262,11 @@ class OpRegistry {
                                        const std::vector<std::pair<std::string, std::any>>& kwargs,
                                        Span span) const;
 
+  /// Create an internal Buffer call whose registered schema requires an explicit result descriptor.
+  [[nodiscard]] CallPtr CreateInternal(const std::string& op_name, const std::vector<ExprPtr>& args,
+                                       const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                       const TypePtr& result_type, Span span) const;
+
   /**
    * @brief Check if an operator is registered
    *
@@ -1248,13 +1350,25 @@ class OpRegistry {
    */
   void ValidateMultiOutputOps() const;
 
+  /// Buffer-stage registrations must declare complete effects and ownership.
+  void ValidateBufferOps() const;
+
+  /// Validate the original Buffer call, including its stored type, without rebuilding it.
+  /// This also checks calls produced by deserialization or direct Call construction.
+  void ValidateBufferCall(const CallPtr& call) const;
+
  private:
   OpRegistry() = default;
   ~OpRegistry() = default;
 
   [[nodiscard]] CallPtr CreateImpl(const std::string& op_name, const std::vector<ExprPtr>& args,
                                    const std::vector<std::pair<std::string, std::any>>& kwargs, Span span,
-                                   bool allow_internal) const;
+                                   bool allow_internal, const TypePtr& explicit_type = nullptr) const;
+
+  [[nodiscard]] TypePtr ResolveAndValidateCallType(
+      const OpRegistryEntry& entry, const std::vector<ExprPtr>& args,
+      const std::vector<std::pair<std::string, std::any>>& kwargs, const TypePtr& explicit_type,
+      const Span& span) const;
 
   std::unordered_map<std::string, OpRegistryEntry> registry_;
 };

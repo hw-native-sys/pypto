@@ -80,4 +80,7 @@ NB_MODULE(pypto_core, m) {
   // a destination tile in the argument list makes the caller pre-allocate a
   // buffer InitMemRef owns, and hides the write from direction inference
   pypto::ir::OpRegistry::GetInstance().ValidateMultiOutputOps();
+
+  // Buffer ops carry explicit data/metadata effects and result ownership.
+  pypto::ir::OpRegistry::GetInstance().ValidateBufferOps();
 }
