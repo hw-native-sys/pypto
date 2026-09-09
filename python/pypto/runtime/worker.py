@@ -604,7 +604,9 @@ class ChipWorker(Worker):
 
         dfx_dir: Path | None = None
         if rc.any_dfx_enabled():
-            dfx_dir = Path(compiled.output_dir) / "dfx_outputs"
+            from ._artifact_runtime import runtime_output_directory  # noqa: PLC0415
+
+            dfx_dir = runtime_output_directory(compiled) / "dfx_outputs"
             dfx_dir.mkdir(parents=True, exist_ok=True)
 
         orch_args, coerced, return_style = compiled._build_orch_args(*args, worker=self._impl)
@@ -614,7 +616,13 @@ class ChipWorker(Worker):
         if dfx_dir is not None:
             from .runner import _collect_dfx_artifacts  # noqa: PLC0415
 
-            _collect_dfx_artifacts(dfx_dir, self.platform, rc.dfx_options())
+            runtime = vars(compiled).get("_artifact_runtime")
+            if runtime is None:
+                _collect_dfx_artifacts(dfx_dir, self.platform, rc.dfx_options())
+            else:
+                _collect_dfx_artifacts(
+                    dfx_dir, self.platform, rc.dfx_options(), prebuilt_directory=runtime.directory
+                )
 
         if not return_style:
             return None

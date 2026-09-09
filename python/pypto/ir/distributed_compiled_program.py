@@ -52,6 +52,7 @@ from .compiled_program import (
 _META_SCHEMA = 2
 
 if TYPE_CHECKING:
+    from pypto.runtime._artifact_runtime import ArtifactRuntime
     from pypto.runtime.distributed_runner import DistributedWorker, ReadOnlyHostTensor
     from pypto.runtime.runner import RunConfig
 
@@ -190,6 +191,7 @@ class DistributedCompiledProgram:
     """
 
     __test__ = False
+    _artifact_runtime: "ArtifactRuntime | None" = None
 
     def __init__(
         self,

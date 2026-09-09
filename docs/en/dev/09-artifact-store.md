@@ -5,8 +5,9 @@ of [RFC #2653](https://github.com/hw-native-sys/pypto/issues/2653). It provides
 validated manifests, per-key locking, immutable publication, and private-build
 fallback. It is not connected to JIT dispatch. The complete automatic toolchain
 inventories described in [Artifact Identity Foundations](08-artifact-identity.md),
-runtime loader integration, public cache configuration, and warmup remain
-separate milestones.
+public cache configuration, and warmup remain separate milestones. The explicit
+runtime adapter described below implements device-stage promotion and read-only
+loading; it does not enable automatic persistent caching.
 
 ## Adapter contract
 
@@ -166,3 +167,95 @@ There is no online garbage collection, diagnostic index, global cache statistics
 or automatic stage preference in this layer. Cleanup is offline with all
 consumers stopped. Later integration must select ready before generated output
 and keep live object paths valid throughout their lifetime.
+
+## Explicit runtime adapter
+
+The internal `pypto.runtime._artifact_runtime` module bridges validated handles
+and compiled programs. It is the runtime milestone of RFC #2653, not a public
+cache configuration API. Callers must supply a complete `ArtifactKey`, a matching
+input snapshot, and an `ArtifactSpec` listing all required generated files.
+Do not substitute placeholder identity digests in production.
+
+Before publishing `GENERATED`, the builder calls
+`package_generated_sources(private_directory, build_kind)` from
+`pypto.runtime._artifact_sources`. This normalizes generated configuration paths
+and packages supported extern dependencies into the private tree. The store then
+validates and publishes that self-contained tree.
+
+```python
+from pypto.runtime._artifact_runtime import bind_artifact, restore_artifact
+
+# generated_handle is a validated ArtifactHandle for this compiled input snapshot.
+# run_directory is a Path outside store.root, owned by this runtime session.
+bind_artifact(compiled, store, generated_handle, run_directory)
+compiled.load()  # Single-chip: promotes if needed, then assembles live callables.
+ready_handle = compiled._artifact_runtime.handle
+
+# A different process may look up the ready key/spec in a read-only ArtifactStore.
+restored = restore_artifact(readonly_store, ready_handle, another_run_directory)
+restored.load()  # Validates metadata and bytes; does not compile or execute.
+```
+
+For a distributed program, binding/restoration works the same way; its existing
+runner or worker lazily requests every child callable. `compiled.load()` above
+is the single-chip interface. The adapter currently supports one single-chip
+build or a distributed parent with chip children. It rejects single-chip
+multi-orchestration parents, whose current `from_dir` protocol cannot reconstruct
+the parent without live IR. Persist supported individual children instead.
+
+### Stage transition and loading
+
+1. Validate the handle against its exact key and spec before executing any
+   generated configuration. Compute the ready spec, listing the parent marker,
+   every child marker, orchestration binary, and kernel binary.
+2. Look up `BINARY_READY` through `ArtifactStore.get_or_build`. On a miss,
+   materialize the generated handle into a private directory. The lock order is
+   artifact key lock, then private runtime build lock.
+3. Compile all chip builds with the existing runtime compiler. Record the exact
+   final kernel bytes handed to `CoreCallable.build` and orchestration bytes
+   handed to `ChipCallable.build`. Compilation and assembly do not execute on a
+   device. Only after all children succeed may the store publish ready output.
+4. Load the versioned `binary_manifest.json` and validate every child before
+   constructing any callable. Records include relative binary paths, sizes,
+   SHA-256 digests, platform, runtime configuration, function IDs, signatures,
+   and diagnostic names. Distributed parents list their complete chip set.
+5. Reconstruct callables from bytes. Ready loading does not resolve PTO-ISA,
+   construct a compiler, acquire a writable cache lock, rewrite headers, execute
+   `kernel_config.py`, or write binary-context stamps or bytecode. It still
+   requires the compatible runtime libraries identified by the supplied key.
+
+The enclosing store manifest remains authoritative for the full identity and
+payload inventory. A binary marker alone is insufficient to attach a handle.
+Missing or corrupt handles fail before execution. The adapter does not catch a
+device execution error and retry the operation.
+
+Storage/publication failures retain a usable private directory and live callables
+for the adapter's lifetime. `handle` remains the generated handle in this case;
+`directory` identifies the private binary output. Overlapping promotions share
+the store's in-process operation, including private fallback. Across processes,
+private results remain independent as described above. Private directories are
+not automatically deleted; their owner must release all users before cleanup.
+
+### Paths, diagnostics, and extern inputs
+
+Attachment keeps a fresh compiled object's live IR. Restoring from persisted
+metadata has `program is None`. Attachment rebinds its source path once, before
+worker registration; later promotion changes only the runtime binary handle.
+The compiled object's path and hash stay stable for worker registries. Ordinary
+unattached `from_dir` replay retains its existing mutable compilation behavior.
+
+DFX output, dependency capture, and swimlane conversion use the separate
+`run_directory`. Each concurrent runtime session must choose its own directory.
+Labels come from binary records; loading generated host orchestration avoids
+Python bytecode caching. Published artifacts must remain alive and unchanged
+while compiled objects or workers reference them.
+
+Extern packaging supports recursively resolved literal local includes, retaining
+relative include topology and ordered explicit include directories. It rejects
+macro includes, absolute includes, and unresolved quoted includes. Unresolved
+angle includes are supplied by the separately identified SDK/toolchain. Other
+file-bearing preprocessor or assembler constructs are not supported. The caller
+must establish complete input identity before publication; this packager does
+not discover a toolchain inventory or make an arbitrary C++ build hermetic.
+Unsupported inputs must use the ordinary private compilation path. Once ready,
+the supported artifact can relocate and load without its original extern tree.

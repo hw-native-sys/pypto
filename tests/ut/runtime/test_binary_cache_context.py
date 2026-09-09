@@ -21,12 +21,14 @@ from unittest.mock import Mock
 
 import pypto.runtime._binary_cache as binary_cache
 import pytest
+from pypto.jit._artifact_manifest import BuildKind
 from pypto.runtime._binary_cache import (
     BinaryCacheContext,
     binary_context_path,
     prepare_binary_context,
     record_binary_context,
 )
+from pypto.runtime._prebuilt import BINARY_MANIFEST, read_prebuilt
 
 _RUNTIME_OLD = "a" * 40
 _RUNTIME_NEW = "b" * 40
@@ -411,6 +413,28 @@ def test_compile_and_assemble_serializes_same_work_dir(
         if process.is_alive():
             process.terminate()
         process.join(timeout=5)
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_prebuilt_records_final_bytes_only_after_complete_assembly(
+    device_runner, monkeypatch, tmp_path, fail
+):
+    chip_build = Mock(side_effect=RuntimeError("assembly failed")) if fail else Mock(return_value=object())
+    _stub_assembly(device_runner, monkeypatch, tmp_path, chip_build)
+    with (tmp_path / "kernel_config.py").open("a") as stream:
+        stream.write("KERNELS = [dict(func_id=3, name='final', source='kernel.cpp')]\n")
+    monkeypatch.setattr(device_runner, "_kernel_cache_file", Mock(return_value=tmp_path / "cache.bin"))
+    monkeypatch.setattr(device_runner, "_compile_single_kernel", Mock(return_value=(3, b"stripped kernel")))
+    monkeypatch.setattr(device_runner, "CoreCallable", SimpleNamespace(build=Mock(return_value=object())))
+    if fail:
+        with pytest.raises(RuntimeError, match="assembly failed"):
+            device_runner._compile_and_assemble(tmp_path, "a2a3sim", save_prebuilt=True)
+        assert not (tmp_path / BINARY_MANIFEST).exists()
+    else:
+        device_runner._compile_and_assemble(tmp_path, "a2a3sim", save_prebuilt=True)
+        record = read_prebuilt(tmp_path, "a2a3sim", BuildKind.SINGLE_CHIP)["."]
+        assert record["kernels"][0]["binary"] == b"stripped kernel"
+        assert record["orchestration"]["binary"] == b"orchestration binary"
 
 
 if __name__ == "__main__":

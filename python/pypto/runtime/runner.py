@@ -1376,6 +1376,8 @@ def _collect_dfx_artifacts(
     dfx_dir: Path,
     platform: str,
     dfx: "DfxOptions",
+    *,
+    prebuilt_directory: Path | None = None,
 ) -> None:
     """Dispatch post-run DFX converters per enabled flag.
 
@@ -1394,7 +1396,10 @@ def _collect_dfx_artifacts(
     # consumers); harmless no-op when no kernel names are available.
     name_map_path: Path | None = None
     if dfx.enable_chip_swimlane or dfx.enable_dep_gen:
-        name_map_path = _write_name_map(dfx_dir.parent, dfx_dir)
+        if prebuilt_directory is None:
+            name_map_path = _write_name_map(dfx_dir.parent, dfx_dir)
+        else:
+            name_map_path = _write_name_map(prebuilt_directory, dfx_dir, prebuilt=True)
 
     chip_swimlane_records = dfx_dir / _CHIP_SWIMLANE_RECORDS_NAME
     if dfx.enable_chip_swimlane and chip_swimlane_records.exists():
@@ -1457,7 +1462,7 @@ def _collect_dfx_artifacts(
         )
 
 
-def _write_name_map(work_dir: Path, dfx_dir: Path) -> Path | None:
+def _write_name_map(work_dir: Path, dfx_dir: Path, *, prebuilt: bool = False) -> Path | None:
     """Synthesise a ``name_map_*.json`` in *dfx_dir* from ``kernel_config.py``.
 
     The profiling tools render human-readable kernel names (``QK(rXtY)``
@@ -1481,11 +1486,16 @@ def _write_name_map(work_dir: Path, dfx_dir: Path) -> Path | None:
     if not kernel_config_path.exists():
         return None
     try:
-        from simpler_setup.tools.swimlane_converter import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
-            load_kernel_config,
-        )
+        if prebuilt:
+            from ._prebuilt import kernel_name_map  # noqa: PLC0415
 
-        func_id_to_name = load_kernel_config(str(kernel_config_path))
+            func_id_to_name = kernel_name_map(work_dir)
+        else:
+            from simpler_setup.tools.swimlane_converter import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
+                load_kernel_config,
+            )
+
+            func_id_to_name = load_kernel_config(str(kernel_config_path))
     except Exception as e:  # noqa: BLE001 - best-effort diagnostics, never fatal
         print(f"Skipping name_map generation ({type(e).__name__}: {e})")
         return None
@@ -1589,6 +1599,7 @@ def _execute_compiled(  # noqa: PLR0913
     aicpu_thread_num: int | None = None,
     analyze_auto_scopes_for_deps: bool = False,
     config: RunConfig | None = None,
+    artifact_runtime: Any = None,
 ) -> None:
     """Execute a pre-compiled program with user-provided tensors and scalars.
 
@@ -1642,14 +1653,21 @@ def _execute_compiled(  # noqa: PLR0913
     # orchestration cpp was hand-edited for a replay, still builds.
     from pypto.ir.compile import _ensure_orchestration_headers  # noqa: PLC0415
 
-    _ensure_orchestration_headers(str(work_dir))
+    if artifact_runtime is None:
+        _ensure_orchestration_headers(str(work_dir))
 
     from .device_runner import (  # noqa: PLC0415
         _compile_and_assemble,
         _execute_on_device,
     )
 
-    chip_callable, runtime_name, runtime_config = _compile_and_assemble(work_dir, platform)
+    if artifact_runtime is None:
+        chip_callable, runtime_name, runtime_config = _compile_and_assemble(work_dir, platform)
+    else:
+        if platform != artifact_runtime.platform:
+            raise ValueError("Cannot override the platform of an immutable runtime artifact")
+        chip_callable, runtime_name, runtime_config = artifact_runtime.load()["."]
+        work_dir = artifact_runtime.run_directory
     enable_sdma = bool(runtime_config.get("enable_sdma", False))
 
     # Caller-supplied values take precedence over the RUNTIME_CONFIG baked
@@ -1693,6 +1711,7 @@ def _execute_compiled(  # noqa: PLR0913
         _capture_deps_subprocess(
             {
                 "mode": "argspec",
+                **({"prebuilt": str(artifact_runtime.directory)} if artifact_runtime is not None else {}),
                 "args": _build_args_spec(args, dfx_dir, run_id),
                 "work_dir": str(work_dir),
                 "platform": platform,
@@ -1718,7 +1737,10 @@ def _execute_compiled(  # noqa: PLR0913
     # Original ``dfx`` drives collection so swimlane conversion auto-joins
     # ``deps.json`` and the deps-render hint fires only on explicit dep_gen.
     if dfx_dir is not None:
-        _collect_dfx_artifacts(dfx_dir, platform, dfx)
+        if artifact_runtime is None:
+            _collect_dfx_artifacts(dfx_dir, platform, dfx)
+        else:
+            _collect_dfx_artifacts(dfx_dir, platform, dfx, prebuilt_directory=artifact_runtime.directory)
 
 
 _EXECUTE_COMPILED_DEPRECATION = (

@@ -107,7 +107,16 @@ def main(argv: list[str]) -> int:
     dfx_dir = Path(spec["dfx_dir"])
     level = int(spec.get("level", 2))
 
-    chip_callable, runtime_name, runtime_config = _compile_and_assemble(work_dir, platform)
+    if "prebuilt" in spec:
+        from pypto.jit._artifact_manifest import BuildKind  # noqa: PLC0415
+
+        from ._prebuilt import load_prebuilt  # noqa: PLC0415
+
+        chip_callable, runtime_name, runtime_config = load_prebuilt(
+            Path(spec["prebuilt"]), platform, BuildKind.SINGLE_CHIP
+        )["."]
+    else:
+        chip_callable, runtime_name, runtime_config = _compile_and_assemble(work_dir, platform)
     enable_sdma = bool(runtime_config.get("enable_sdma", False))
 
     if spec["mode"] == "golden":

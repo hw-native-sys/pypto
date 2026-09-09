@@ -324,7 +324,8 @@ def _load_generated_module(path: Path) -> Any:
         raise RuntimeError(f"Cannot load generated module from {path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
-    spec.loader.exec_module(module)
+    # Read source directly: a published artifact must never acquire __pycache__.
+    exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)
     # Generated modules live only in ``sys.modules`` — there is no
     # ``_pypto_generated`` package on disk to re-import them by name. The
     # runtime cloudpickles every registered callable to derive its hashid
@@ -347,6 +348,23 @@ def _load_generated_module(path: Path) -> Any:
     return module
 
 
+def _run_directory(compiled: Any) -> Path:
+    from ._artifact_runtime import runtime_output_directory  # noqa: PLC0415
+
+    return runtime_output_directory(compiled)
+
+
+def _collect_program_swimlane(compiled: Any) -> None:
+    if vars(compiled).get("_artifact_runtime") is None:
+        _collect_l3_swimlane(compiled.output_dir, compiled.platform)
+    else:
+        _collect_l3_swimlane(
+            vars(compiled)["_artifact_runtime"].directory,
+            compiled.platform,
+            run_directory=_run_directory(compiled),
+        )
+
+
 # ---------------------------------------------------------------------------
 # Setup steps shared by the one-shot ``_execute_distributed`` path and the
 # reusable ``DistributedWorker`` handle. Keeping them as free functions lets
@@ -366,6 +384,14 @@ def _assemble_chip_callables(
     it works identically for a freshly-compiled program and one reconstructed via
     :meth:`DistributedCompiledProgram.from_dir` (the ``runtime_dir`` replay path).
     """
+    artifact_runtime = vars(compiled).get("_artifact_runtime")
+    if artifact_runtime is not None:
+        chips = artifact_runtime.load()
+        return (
+            {name: value[0] for name, value in chips.items()},
+            next(iter(chips.values()))[1],
+            any(bool(value[2].get("enable_sdma", False)) for value in chips.values()),
+        )
     chip_callables: dict[str, Any] = {}
     runtime_name: str | None = None
     enable_sdma = False
@@ -981,7 +1007,9 @@ def _read_dispatch_program(disp_dir: Path) -> str | None:
     return str(program)
 
 
-def _write_dispatch_name_map(disp_dir: Path, chip_dir: Path, cache: dict[str, dict[str, str]]) -> Path | None:
+def _write_dispatch_name_map(
+    disp_dir: Path, chip_dir: Path, cache: dict[str, dict[str, str]], *, prebuilt: bool = False
+) -> Path | None:
     """Write *disp_dir*'s ``name_map.json`` from *chip_dir*'s ``kernel_config.py``.
 
     The map is the one the L2 path synthesises (:func:`~pypto.runtime.runner._write_name_map`),
@@ -1001,11 +1029,16 @@ def _write_dispatch_name_map(disp_dir: Path, chip_dir: Path, cache: dict[str, di
         table: dict[str, str] = {}
         if kc.exists():
             try:
-                from simpler_setup.tools.swimlane_converter import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
-                    load_kernel_config,
-                )
+                if prebuilt:
+                    from ._prebuilt import kernel_name_map  # noqa: PLC0415
 
-                table = load_kernel_config(str(kc))
+                    table = kernel_name_map(chip_dir)
+                else:
+                    from simpler_setup.tools.swimlane_converter import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
+                        load_kernel_config,
+                    )
+
+                    table = load_kernel_config(str(kc))
             except Exception as e:  # noqa: BLE001 - best-effort label resolution, never fatal
                 print(
                     f"Skipping L3 swimlane name_map for {program} ({type(e).__name__}: {e}); "
@@ -1023,7 +1056,7 @@ def _write_dispatch_name_map(disp_dir: Path, chip_dir: Path, cache: dict[str, di
     return name_map_path
 
 
-def _collect_l3_swimlane(output_dir: Path, platform: str) -> None:
+def _collect_l3_swimlane(output_dir: Path, platform: str, *, run_directory: Path | None = None) -> None:
     """Convert each dispatch's swimlane records into a ``merged_swimlane_*.json``.
 
     The runtime writes ``rank{r}/d{k}/deps.json`` in the graph pass and
@@ -1075,7 +1108,7 @@ def _collect_l3_swimlane(output_dir: Path, platform: str) -> None:
     # ``_write_dispatch_name_map`` so each config is loaded once per run.
     name_map_cache: dict[str, dict[str, str]] = {}
 
-    dfx_base = output_dir / "dfx_outputs"
+    dfx_base = (output_dir if run_directory is None else run_directory) / "dfx_outputs"
     # See the docstring for why we glob rather than iterate a rank count.
     # 3.10-safe dir filter (``glob`` directory filtering is only reliable on 3.11+).
     rank_dirs = sorted(d for d in dfx_base.glob(_RANK_DIR_GLOB) if d.is_dir())
@@ -1124,7 +1157,15 @@ def _collect_l3_swimlane(output_dir: Path, platform: str) -> None:
                     # ``name_map`` passed as ``func_names`` takes precedence —
                     # both must name the program that ran this dispatch.
                     work_dir = chip_dirs[program]
-                    name_map_path = _write_dispatch_name_map(disp_dir, work_dir, name_map_cache)
+                    if run_directory is None:
+                        name_map_path = _write_dispatch_name_map(disp_dir, work_dir, name_map_cache)
+                    else:
+                        name_map_path = _write_dispatch_name_map(
+                            disp_dir, work_dir, name_map_cache, prebuilt=True
+                        )
+                if run_directory is not None:
+                    # Never pass immutable Python sources to the converter's bytecode loader.
+                    work_dir = run_directory
                 _generate_swimlane(work_dir, disp_dir, records, func_names=name_map_path)
             except Exception as e:  # noqa: BLE001 - best-effort post-pass, never fatal
                 print(
@@ -1355,7 +1396,7 @@ def _execute_distributed(
             if w is not None:
                 _close_local_worker(w)
 
-    dfx_base = output_dir / "dfx_outputs"
+    dfx_base = _run_directory(compiled) / "dfx_outputs"
     swimlane = config is not None and config.enable_chip_swimlane > 0
 
     # Scope DFX artifacts to this run: drop any stale ``rank*/d{k}`` dirs from an
@@ -1374,7 +1415,7 @@ def _execute_distributed(
 
     # Offline post-pass (reads the per-dispatch deps.json + records on disk).
     if swimlane:
-        _collect_l3_swimlane(output_dir, compiled.platform)
+        _collect_program_swimlane(compiled)
 
 
 _EXECUTE_DISTRIBUTED_COMPILED_DEPRECATION = (
@@ -1724,7 +1765,7 @@ class DistributedWorker(Worker):
             prewarm_cc = self._states[primary]["call_config"]
             if config is not None:
                 prewarm_cc = _make_call_config(
-                    primary._distributed_config, config, dfx_base=primary.output_dir / "dfx_outputs"
+                    primary._distributed_config, config, dfx_base=_run_directory(primary) / "dfx_outputs"
                 )
             self._w.init(prewarm_config=prewarm_cc)
 
@@ -2865,7 +2906,7 @@ class DistributedWorker(Worker):
                         frame.keepalive,
                     ),
                 )
-                _collect_l3_swimlane(compiled.output_dir, compiled.platform)
+                _collect_program_swimlane(compiled)
                 self._release_unpublished_dispatch_frame(frame)
                 return DistributedRunHandle._completed(self)
 
@@ -2873,7 +2914,7 @@ class DistributedWorker(Worker):
             if config is not None and config.enable_chip_swimlane > 0:
 
                 def collect_swimlane() -> None:
-                    _collect_l3_swimlane(compiled.output_dir, compiled.platform)
+                    _collect_program_swimlane(compiled)
 
                 postprocess = collect_swimlane
             handle = DistributedRunHandle(self, None, frame, dispatch_id, postprocess)
@@ -2901,7 +2942,7 @@ class DistributedWorker(Worker):
         if config is None:
             return _make_call_config(compiled._distributed_config), None, False
 
-        dfx_base = compiled.output_dir / "dfx_outputs"
+        dfx_base = _run_directory(compiled) / "dfx_outputs"
         two_pass_swimlane = config.enable_chip_swimlane > 0 and not compiled.platform.endswith("sim")
         call_config = None
         if not two_pass_swimlane:

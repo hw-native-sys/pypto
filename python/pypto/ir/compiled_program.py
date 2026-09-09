@@ -38,7 +38,7 @@ import json
 import os
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -72,6 +72,10 @@ from .param_info import (  # noqa: F401  -- re-export
 # Scalar params accept Python primitives or ctypes scalars (which are
 # coerced to the correct ctypes type internally).
 CallArg = torch.Tensor | DeviceTensor | StackedDeviceTensor | int | float | bool | ctypes._SimpleCData
+
+if TYPE_CHECKING:
+    from pypto.runtime._artifact_runtime import ArtifactRuntime
+
 
 # Filename of the small JSON sidecar persisted alongside the build artifacts so
 # a single-orchestration program can be reconstructed (``from_dir``) without the
@@ -637,6 +641,7 @@ def _invoke_compiled(
     args: tuple["CallArg", ...],
     config: Any,
     caller_name: str,
+    artifact_runtime: Any = None,
 ) -> "torch.Tensor | tuple[torch.Tensor, ...] | None":
     """Shared dispatch: coerce args, call the runtime, pack outputs.
 
@@ -669,6 +674,7 @@ def _invoke_compiled(
         dfx=config.dfx_options(),
         aicpu_thread_num=config.aicpu_thread_num,
         config=config,
+        **({"artifact_runtime": artifact_runtime} if artifact_runtime is not None else {}),
     )
 
     if not return_style:
@@ -748,9 +754,13 @@ class _RuntimeFacade:
         if self._chip_callable is not None:
             return
         self._check_runtime_access()
-        from pypto.runtime.device_runner import _compile_and_assemble  # noqa: PLC0415
+        artifact_runtime = getattr(self, "_artifact_runtime", None)
+        if artifact_runtime is None:
+            from pypto.runtime.device_runner import _compile_and_assemble  # noqa: PLC0415
 
-        cc, rn, rc = _compile_and_assemble(self._output_dir, self._platform)
+            cc, rn, rc = _compile_and_assemble(self._output_dir, self._platform)
+        else:
+            cc, rn, rc = artifact_runtime.load()["."]
         # Publish the "loaded" sentinel (_chip_callable) last so a reader can
         # never observe it set while _runtime_name / _runtime_config are None.
         self._runtime_name = rn
@@ -815,6 +825,7 @@ class CompiledProgram(_RuntimeFacade):
     """
 
     __test__ = False  # Not a pytest test class
+    _artifact_runtime: "ArtifactRuntime | None" = None
 
     def __init__(
         self,
@@ -1385,6 +1396,7 @@ class CompiledProgram(_RuntimeFacade):
             args=args,
             config=config,
             caller_name="CompiledProgram",
+            artifact_runtime=getattr(self, "_artifact_runtime", None),
         )
 
 
