@@ -28,12 +28,23 @@
 namespace pypto {
 namespace ir {
 
+void detail::CheckValueOperand(const ExprPtr& expr, const Span& span, const char* context) {
+  if (expr) CheckValueType(expr->GetType(), span.is_valid() ? span : expr->span_, context);
+}
+
+void detail::CheckValueOperands(const std::vector<ExprPtr>& exprs, const Span& span, const char* context) {
+  for (const auto& expr : exprs) {
+    CheckValueOperand(expr, span, context);
+  }
+}
+
 MakeTuple::MakeTuple(std::vector<ExprPtr> elements, Span span)
     : Expr(std::move(span)), elements_(std::move(elements)) {
   // Collect types from all element expressions
   std::vector<TypePtr> element_types;
   element_types.reserve(elements_.size());
   for (const auto& elem : elements_) {
+    detail::CheckValueOperand(elem, span_, "MakeTuple element");
     element_types.push_back(elem->GetType());
   }
 

@@ -25,6 +25,7 @@
 #include "pypto/ir/core.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/reflection/field_traits.h"
+#include "pypto/ir/span.h"
 
 namespace pypto {
 namespace ir {
@@ -98,6 +99,39 @@ inline UnknownTypePtr GetUnknownType() {
   static const auto unknown_type = std::make_shared<UnknownType>();
   return unknown_type;
 }
+
+/**
+ * @brief Known absence of an SSA result
+ *
+ * Unlike UnknownType, this type does not stand for an unresolved value. It is
+ * the result type of statement-only operations, and cannot describe a value
+ * bound by an assignment, passed as an operand, or yielded by control flow.
+ */
+class VoidType : public Type {
+ public:
+  VoidType() = default;
+
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::VoidType; }
+  [[nodiscard]] std::string TypeName() const override { return "VoidType"; }
+
+  static constexpr auto GetFieldDescriptors() { return Type::GetFieldDescriptors(); }
+};
+
+using VoidTypePtr = std::shared_ptr<const VoidType>;
+
+/** @brief Get the shared singleton representing a known absence of results. */
+inline VoidTypePtr GetVoidType() {
+  static const auto void_type = std::make_shared<VoidType>();
+  return void_type;
+}
+
+namespace detail {
+
+/// Reject a known absence of values at a value-bearing type position.
+/// UnknownType and existing null handling are deliberately unchanged.
+void CheckValueType(const TypePtr& type, const Span& span, const char* context);
+
+}  // namespace detail
 
 /**
  * @brief Scalar type representation
@@ -208,8 +242,7 @@ struct TensorView {
    * @param pad Pad mode (optional, defaults to PadValue::null)
    */
   TensorView(std::vector<ExprPtr> stride, TensorLayout layout, std::vector<ExprPtr> valid_shape = {},
-             PadValue pad = PadValue::null)
-      : stride(std::move(stride)), layout(layout), valid_shape(std::move(valid_shape)), pad(pad) {}
+             PadValue pad = PadValue::null);
 
   /**
    * @brief Constructor with integer stride and valid_shape (auto-converted to ConstInt)
@@ -282,6 +315,82 @@ std::string CompactModeToString(CompactMode mode);
 CompactMode StringToCompactMode(const std::string& str);
 
 /**
+ * @brief Physical descriptor of an explicit on-chip buffer reference
+ *
+ * A BufferType describes mutable storage referenced by an immutable SSA value.
+ * It is deliberately independent of ShapedType: there is no MemRef binding,
+ * storage address, or runtime expression in the descriptor. Allocation and
+ * view operations supply ownership, addresses, offsets, and runtime valid
+ * extents as ordinary operands.
+ *
+ * Physical shape is currently static and measured in elements of dtype.
+ * Each valid_shape entry is either a static extent or -1 for a runtime extent;
+ * an omitted valid_shape is normalized to the physical shape. Layout and
+ * packing constraints specific to a target belong to buffer op verification.
+ */
+class BufferType : public Type {
+ public:
+  std::vector<int64_t> shape_;        ///< Positive static physical extents
+  DataType dtype_;                    ///< Element type, including sub-byte packing
+  MemorySpace memory_space_;          ///< Resolved on-chip tile memory space
+  std::vector<int64_t> valid_shape_;  ///< Static extents, or -1 for dynamic valid state
+  TileLayout blayout_;                ///< Resolved block layout
+  TileLayout slayout_;                ///< Scatter layout
+  uint64_t fractal_;                  ///< Fractal size in bytes
+  PadValue pad_;                      ///< Padding interpretation
+  CompactMode compact_;               ///< Partial-tile compact mode
+
+  BufferType(std::vector<int64_t> shape, DataType dtype, MemorySpace memory_space,
+             std::vector<int64_t> valid_shape = {}, TileLayout blayout = TileLayout::row_major,
+             TileLayout slayout = TileLayout::none_box, uint64_t fractal = 512, PadValue pad = PadValue::null,
+             CompactMode compact = CompactMode::null);
+
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::BufferType; }
+  [[nodiscard]] std::string TypeName() const override { return "BufferType"; }
+
+  static constexpr auto GetFieldDescriptors() {
+    return std::tuple_cat(Type::GetFieldDescriptors(),
+                          std::make_tuple(reflection::UsualField(&BufferType::shape_, "shape"),
+                                          reflection::UsualField(&BufferType::dtype_, "dtype"),
+                                          reflection::UsualField(&BufferType::memory_space_, "memory_space"),
+                                          reflection::UsualField(&BufferType::valid_shape_, "valid_shape"),
+                                          reflection::UsualField(&BufferType::blayout_, "blayout"),
+                                          reflection::UsualField(&BufferType::slayout_, "slayout"),
+                                          reflection::UsualField(&BufferType::fractal_, "fractal"),
+                                          reflection::UsualField(&BufferType::pad_, "pad"),
+                                          reflection::UsualField(&BufferType::compact_, "compact")));
+  }
+};
+
+using BufferTypePtr = std::shared_ptr<const BufferType>;
+
+/**
+ * @brief Descriptor of an explicit multi-slot buffer allocation
+ *
+ * Every slot has the same immutable BufferType. Selecting a slot produces a
+ * BufferType reference; the slot index is an operation operand, not type state.
+ */
+class MultiBufferType : public Type {
+ public:
+  BufferTypePtr element_type_;  ///< Physical descriptor shared by every slot
+  int64_t slot_count_;          ///< Positive number of slots
+
+  MultiBufferType(BufferTypePtr element_type, int64_t slot_count);
+
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::MultiBufferType; }
+  [[nodiscard]] std::string TypeName() const override { return "MultiBufferType"; }
+
+  static constexpr auto GetFieldDescriptors() {
+    return std::tuple_cat(
+        Type::GetFieldDescriptors(),
+        std::make_tuple(reflection::UsualField(&MultiBufferType::element_type_, "element_type"),
+                        reflection::UsualField(&MultiBufferType::slot_count_, "slot_count")));
+  }
+};
+
+using MultiBufferTypePtr = std::shared_ptr<const MultiBufferType>;
+
+/**
  * @brief Tile view representation
  *
  * Represents the view information for a tile, including valid shape,
@@ -329,15 +438,7 @@ struct TileView {
    */
   TileView(std::vector<ExprPtr> valid_shape, std::vector<ExprPtr> stride, ExprPtr start_offset,
            TileLayout blayout = TileLayout::row_major, TileLayout slayout = TileLayout::none_box,
-           uint64_t fractal = 512, PadValue pad = PadValue::null, CompactMode compact = CompactMode::null)
-      : valid_shape(std::move(valid_shape)),
-        stride(std::move(stride)),
-        start_offset(std::move(start_offset)),
-        blayout(blayout),
-        slayout(slayout),
-        fractal(fractal),
-        pad(pad),
-        compact(compact) {}
+           uint64_t fractal = 512, PadValue pad = PadValue::null, CompactMode compact = CompactMode::null);
 
   /**
    * @brief Constructor with integer valid_shape and stride (auto-converted to ConstInt)
@@ -713,7 +814,7 @@ class TupleType : public Type {
    *
    * @param types List of types in the tuple
    */
-  explicit TupleType(std::vector<TypePtr> types) : types_(std::move(types)) {}
+  explicit TupleType(std::vector<TypePtr> types);
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::TupleType; }
   [[nodiscard]] std::string TypeName() const override { return "TupleType"; }

@@ -331,7 +331,9 @@ class AssignStmt : public Stmt {
    * @param span Source location
    */
   AssignStmt(VarPtr var, ExprPtr value, Span span, std::vector<std::string> leading_comments = {})
-      : Stmt(std::move(span), std::move(leading_comments)), var_(std::move(var)), value_(std::move(value)) {}
+      : Stmt(std::move(span), std::move(leading_comments)), var_(std::move(var)), value_(std::move(value)) {
+    detail::CheckValueOperand(value_, span_, "AssignStmt value");
+  }
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::AssignStmt; }
   [[nodiscard]] std::string TypeName() const override { return "AssignStmt"; }
@@ -373,7 +375,9 @@ class IfStmt : public Stmt {
         condition_(std::move(condition)),
         then_body_(std::move(then_body)),
         else_body_(std::move(else_body)),
-        return_vars_(std::move(return_vars)) {}
+        return_vars_(std::move(return_vars)) {
+    detail::CheckValueOperand(condition_, span_, "IfStmt condition");
+  }
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::IfStmt; }
   [[nodiscard]] std::string TypeName() const override { return "IfStmt"; }
@@ -415,7 +419,9 @@ class YieldStmt : public Stmt {
    * @param span Source location
    */
   YieldStmt(std::vector<ExprPtr> value, Span span, std::vector<std::string> leading_comments = {})
-      : Stmt(std::move(span), std::move(leading_comments)), value_(std::move(value)) {}
+      : Stmt(std::move(span), std::move(leading_comments)), value_(std::move(value)) {
+    detail::CheckValueOperands(value_, span_, "YieldStmt value");
+  }
 
   /**
    * @brief Create a yield statement without values
@@ -459,7 +465,9 @@ class ReturnStmt : public Stmt {
    * @param span Source location
    */
   ReturnStmt(std::vector<ExprPtr> value, Span span, std::vector<std::string> leading_comments = {})
-      : Stmt(std::move(span), std::move(leading_comments)), value_(std::move(value)) {}
+      : Stmt(std::move(span), std::move(leading_comments)), value_(std::move(value)) {
+    detail::CheckValueOperands(value_, span_, "ReturnStmt value");
+  }
 
   /**
    * @brief Create a return statement without values
@@ -537,7 +545,11 @@ class ForStmt : public Stmt {
         body_(std::move(body)),
         return_vars_(std::move(return_vars)),
         kind_(kind),
-        attrs_(std::move(attrs)) {}
+        attrs_(std::move(attrs)) {
+    detail::CheckValueOperand(start_, span_, "ForStmt start");
+    detail::CheckValueOperand(stop_, span_, "ForStmt stop");
+    detail::CheckValueOperand(step_, span_, "ForStmt step");
+  }
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::ForStmt; }
   [[nodiscard]] std::string TypeName() const override { return "ForStmt"; }
@@ -642,7 +654,9 @@ class WhileStmt : public Stmt {
         condition_(std::move(condition)),
         iter_args_(std::move(iter_args)),
         body_(std::move(body)),
-        return_vars_(std::move(return_vars)) {}
+        return_vars_(std::move(return_vars)) {
+    detail::CheckValueOperand(condition_, span_, "WhileStmt condition");
+  }
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::WhileStmt; }
   [[nodiscard]] std::string TypeName() const override { return "WhileStmt"; }
@@ -911,6 +925,7 @@ class SpmdScopeStmt : public ScopeStmt {
         core_num_(std::move(core_num)),
         sync_start_(sync_start) {
     INTERNAL_CHECK(core_num_ != nullptr) << "SpmdScopeStmt core_num must not be null";
+    detail::CheckValueOperand(core_num_, span_, "SpmdScopeStmt core_num");
   }
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::SpmdScopeStmt; }

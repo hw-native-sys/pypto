@@ -21,6 +21,38 @@ float_type = ir.ScalarType(DataType.FP32)
 >
 > **Note:** `TASK_ID` is an opaque 64-bit handle (type code `0x50`) representing a runtime `TaskId`. It is **not** a numeric type — no arithmetic is defined on it. A `Scalar[TASK_ID]` value is produced by `pl.submit(...)` (the second tuple element it returns names the producer task) inside `with pl.manual_scope():` regions. The Python literal `None` is the "no producer yet" sentinel — it seeds a TaskId loop iter_arg and is accepted as a `deps=[None]` entry; in a TaskId position it lowers to the [`system.task_invalid`](05-operators.md#syncop-synchronization-operations) builtin → `TaskId::invalid()`. TaskId values are passed in the `deps=[tid1, tid2]` kwarg of `pl.submit(...)`. Codegen lowers `TASK_ID` to `TaskId`.
 
+### Internal buffer types
+
+`BufferType` describes a mutable on-chip buffer in the final device IR. It
+inherits directly from `Type`: it has no `MemRef`, base pointer, address, or
+runtime expression fields. Storage identity belongs to the defining SSA value;
+ownership is declared by the defining operator.
+
+```python
+buffer_type = ir.BufferType(
+    [32, 64], DataType.FP32, ir.Mem.Vec, valid_shape=[-1, 64]
+)
+multi_type = ir.MultiBufferType(buffer_type, slot_count=2)
+```
+
+Physical extents must currently be static positive integers. `valid_shape`
+contains static extents between zero and the physical extent, or `-1` to mark
+a runtime valid extent supplied as an operator operand. Omitting it means the
+full physical shape. Layout, fractal size in bytes, padding, and compact mode
+are explicit descriptor fields. `MultiBufferType` describes identical slots of
+one multi-buffer allocation; its slot count must be positive.
+
+`VoidType` means a known absence of an SSA result, distinct from `UnknownType`.
+Void calls belong in `EvalStmt`; they cannot be bound to variables, passed as
+operands, packed into tuples, yielded, or returned as values.
+
+These types support construction, structural comparison, and binary serialization.
+Buffer type dumps use native `pypto.ir.BufferType(...)` constructors and preserve
+the complete descriptors. Buffer operators, representation verification, and
+PTO emission will be integrated separately. Automatic tile-to-buffer lowering
+is not enabled; the public Tile DSL and default pipeline still use `TileType`.
+Reparsing complete buffer-program dumps through the DSL parser is not supported.
+
 ### TensorType
 
 Multi-dimensional tensor with optional memory reference.
@@ -512,6 +544,9 @@ tile_type = ir.TileType(shape, DataType.FP16, memref, tile_view, ir.Mem.Left)
 | **ScalarType** | 0 | - | Single values |
 | **TensorType** | N (any) | Optional MemRef | General tensors |
 | **TileType** | N (any)* | Optional MemRef + TileView | Hardware-optimized tiles |
+| **BufferType** | Static physical dimensions | Defining SSA handle | Explicit device storage |
+| **MultiBufferType** | Element BufferType | Native slot group | Uniform buffer slots |
+| **VoidType** | - | - | Known absence of an SSA result |
 | **TupleType** | - | - | Multiple return values |
 | **PipeType** | - | - | Hardware synchronization |
 | **UnknownType** | - | - | Type inference placeholder |

@@ -1285,6 +1285,33 @@ bool StructuralEqualImpl<AssertMode>::EqualType(const TypePtr& lhs, const TypePt
       return false;
     }
     return true;
+  } else if (auto lhs_buffer = As<BufferType>(lhs)) {
+    auto rhs_buffer = As<BufferType>(rhs);
+    INTERNAL_CHECK(rhs_buffer) << "Internal error: BufferType kind mismatch after type-name comparison";
+    const bool equal = lhs_buffer->shape_ == rhs_buffer->shape_ && lhs_buffer->dtype_ == rhs_buffer->dtype_ &&
+                       lhs_buffer->memory_space_ == rhs_buffer->memory_space_ &&
+                       lhs_buffer->valid_shape_ == rhs_buffer->valid_shape_ &&
+                       lhs_buffer->blayout_ == rhs_buffer->blayout_ &&
+                       lhs_buffer->slayout_ == rhs_buffer->slayout_ &&
+                       lhs_buffer->fractal_ == rhs_buffer->fractal_ && lhs_buffer->pad_ == rhs_buffer->pad_ &&
+                       lhs_buffer->compact_ == rhs_buffer->compact_;
+    if constexpr (AssertMode) {
+      if (!equal) {
+        ThrowMismatch("BufferType physical descriptor mismatch", IRNodePtr(), IRNodePtr(), "", "");
+      }
+    }
+    return equal;
+  } else if (auto lhs_multi_buffer = As<MultiBufferType>(lhs)) {
+    auto rhs_multi_buffer = As<MultiBufferType>(rhs);
+    INTERNAL_CHECK(rhs_multi_buffer)
+        << "Internal error: MultiBufferType kind mismatch after type-name comparison";
+    if (lhs_multi_buffer->slot_count_ != rhs_multi_buffer->slot_count_) {
+      if constexpr (AssertMode) {
+        ThrowMismatch("MultiBufferType slot_count mismatch", IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    return EqualType(lhs_multi_buffer->element_type_, rhs_multi_buffer->element_type_);
   } else if (auto lhs_tuple = As<TupleType>(lhs)) {
     auto rhs_tuple = As<TupleType>(rhs);
     if (!rhs_tuple) {
@@ -1330,7 +1357,7 @@ bool StructuralEqualImpl<AssertMode>::EqualType(const TypePtr& lhs, const TypePt
       return false;
     }
     return true;
-  } else if (IsA<MemRefType>(lhs) || IsA<UnknownType>(lhs) || IsA<PtrType>(lhs) ||
+  } else if (IsA<MemRefType>(lhs) || IsA<UnknownType>(lhs) || IsA<VoidType>(lhs) || IsA<PtrType>(lhs) ||
              IsA<WindowBufferType>(lhs) || IsA<CommCtxType>(lhs) || IsA<PrefetchAsyncContextType>(lhs) ||
              IsA<AsyncEventType>(lhs) || IsA<AsyncSessionType>(lhs)) {
     return true;  // Singleton type, both being same type kind is sufficient

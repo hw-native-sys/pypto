@@ -353,6 +353,7 @@ _SHARED_WINDOW_BUFFER = ir.WindowBuffer(
 # checked against two independently-built values.
 _TYPE_FACTORIES: dict[str, Callable[[], ir.Type]] = {
     "UnknownType": lambda: ir.UnknownType(),
+    "VoidType": lambda: ir.VoidType(),
     "ScalarType": lambda: ir.ScalarType(DataType.FP32),
     "TensorType": lambda: ir.TensorType([64, 128], DataType.FP32),
     "TensorType_view": lambda: ir.TensorType(
@@ -381,6 +382,19 @@ _TYPE_FACTORIES: dict[str, Callable[[], ir.Type]] = {
             start_offset=ir.ConstInt(0, DataType.INDEX, _span()),
         ),
     ),
+    "BufferType": lambda: ir.BufferType([64, 128], DataType.FP16, ir.Mem.Vec),
+    "BufferType_descriptor": lambda: ir.BufferType(
+        [64, 128],
+        DataType.FP16,
+        ir.Mem.Acc,
+        valid_shape=[-1, 64],
+        blayout=ir.TileLayout.col_major,
+        slayout=ir.TileLayout.row_major,
+        fractal=1024,
+        pad=ir.PadValue.zero,
+        compact=ir.CompactMode.normal,
+    ),
+    "MultiBufferType": lambda: ir.MultiBufferType(ir.BufferType([64, 128], DataType.FP16, ir.Mem.Vec), 2),
     "ArrayType": lambda: ir.ArrayType(DataType.INT32, 16),
     "TupleType": lambda: ir.TupleType([ir.ScalarType(DataType.INT64), ir.ArrayType(DataType.INT32, 8)]),
     "PtrType": lambda: ir.PtrType(),
@@ -462,6 +476,56 @@ class TestHashTypeLadderParity:
 
     def test_array_type_dtype_participates_in_the_hash(self):
         assert hash(ir.ArrayType(DataType.INT32, 16)) != hash(ir.ArrayType(DataType.INT64, 16))
+
+    def test_void_hashes_apart_from_unknown(self):
+        assert not ir.structural_equal(ir.VoidType(), ir.UnknownType())
+        assert hash(ir.VoidType()) != hash(ir.UnknownType())
+
+    @pytest.mark.parametrize(
+        "make_changed",
+        [
+            pytest.param(lambda: ir.BufferType([32, 128], DataType.FP16, ir.Mem.Vec), id="shape"),
+            pytest.param(lambda: ir.BufferType([64, 128], DataType.FP32, ir.Mem.Vec), id="dtype"),
+            pytest.param(lambda: ir.BufferType([64, 128], DataType.FP16, ir.Mem.Mat), id="memory_space"),
+            pytest.param(
+                lambda: ir.BufferType([64, 128], DataType.FP16, ir.Mem.Vec, valid_shape=[-1, 128]),
+                id="valid_shape",
+            ),
+            pytest.param(
+                lambda: ir.BufferType([64, 128], DataType.FP16, ir.Mem.Vec, blayout=ir.TileLayout.col_major),
+                id="blayout",
+            ),
+            pytest.param(
+                lambda: ir.BufferType([64, 128], DataType.FP16, ir.Mem.Vec, slayout=ir.TileLayout.row_major),
+                id="slayout",
+            ),
+            pytest.param(
+                lambda: ir.BufferType([64, 128], DataType.FP16, ir.Mem.Vec, fractal=1024), id="fractal"
+            ),
+            pytest.param(
+                lambda: ir.BufferType([64, 128], DataType.FP16, ir.Mem.Vec, pad=ir.PadValue.zero), id="pad"
+            ),
+            pytest.param(
+                lambda: ir.BufferType([64, 128], DataType.FP16, ir.Mem.Vec, compact=ir.CompactMode.normal),
+                id="compact",
+            ),
+        ],
+    )
+    def test_buffer_descriptor_fields_participate_in_the_hash(
+        self, make_changed: Callable[[], ir.BufferType]
+    ):
+        plain = _TYPE_FACTORIES["BufferType"]()
+        changed = make_changed()
+        assert not ir.structural_equal(plain, changed)
+        assert hash(plain) != hash(changed)
+
+    def test_multi_buffer_element_and_slot_count_participate_in_the_hash(self):
+        plain = _TYPE_FACTORIES["MultiBufferType"]()
+        changed_element = ir.MultiBufferType(ir.BufferType([32, 128], DataType.FP16, ir.Mem.Vec), 2)
+        changed_count = ir.MultiBufferType(ir.BufferType([64, 128], DataType.FP16, ir.Mem.Vec), 3)
+        for changed in (changed_element, changed_count):
+            assert not ir.structural_equal(plain, changed)
+            assert hash(plain) != hash(changed)
 
     def test_distributed_tensor_type_hashes_apart_from_plain_tensor_type(self):
         """The two kinds are distinguished only by ``ObjectKind``.

@@ -80,6 +80,14 @@ class Expr : public IRNode {
 
 using ExprPtr = std::shared_ptr<const Expr>;
 
+namespace detail {
+
+/// Validate only the VoidType no-value contract for a value-bearing operand.
+void CheckValueOperand(const ExprPtr& expr, const Span& span, const char* context);
+void CheckValueOperands(const std::vector<ExprPtr>& exprs, const Span& span, const char* context);
+
+}  // namespace detail
+
 // Forward declarations for enum types defined elsewhere
 enum class MemorySpace;
 enum class PadValue;
@@ -226,7 +234,9 @@ class Var : public Expr {
   Var(std::string name_hint, TypePtr type, Span span)
       : Expr(std::move(span), std::move(type)),
         name_hint_(std::move(name_hint)),
-        unique_id_(next_unique_id_.fetch_add(1, std::memory_order_relaxed)) {}
+        unique_id_(next_unique_id_.fetch_add(1, std::memory_order_relaxed)) {
+    detail::CheckValueType(type_, span_, "Var type");
+  }
 
   /**
    * @brief Get the unique identity of this variable
@@ -304,7 +314,9 @@ class IterArg : public Var {
    * @param span Source location
    */
   IterArg(std::string name_hint, TypePtr type, ExprPtr initValue, Span span)
-      : Var(std::move(name_hint), std::move(type), std::move(span)), initValue_(std::move(initValue)) {}
+      : Var(std::move(name_hint), std::move(type), std::move(span)), initValue_(std::move(initValue)) {
+    detail::CheckValueOperand(initValue_, span_, "IterArg initial value");
+  }
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::IterArg; }
   [[nodiscard]] std::string TypeName() const override { return "IterArg"; }
@@ -440,7 +452,7 @@ class Call : public Expr {
    * @param span Source location
    */
   Call(OpPtr op, std::vector<ExprPtr> args, Span span)
-      : Expr(std::move(span)), op_(std::move(op)), args_(std::move(args)), attrs_(), kwargs_() {}
+      : Call(std::move(op), std::move(args), {}, {}, GetUnknownType(), std::move(span)) {}
 
   /**
    * @brief Create a function call expression with explicit type
@@ -451,11 +463,7 @@ class Call : public Expr {
    * @param span Source location
    */
   Call(OpPtr op, std::vector<ExprPtr> args, TypePtr type, Span span)
-      : Expr(std::move(span), std::move(type)),
-        op_(std::move(op)),
-        args_(std::move(args)),
-        attrs_(),
-        kwargs_() {}
+      : Call(std::move(op), std::move(args), {}, {}, std::move(type), std::move(span)) {}
 
   /**
    * @brief Create a function call expression with kwargs
@@ -466,11 +474,7 @@ class Call : public Expr {
    * @param span Source location
    */
   Call(OpPtr op, std::vector<ExprPtr> args, std::vector<std::pair<std::string, std::any>> kwargs, Span span)
-      : Expr(std::move(span)),
-        op_(std::move(op)),
-        args_(std::move(args)),
-        attrs_(),
-        kwargs_(std::move(kwargs)) {}
+      : Call(std::move(op), std::move(args), std::move(kwargs), {}, GetUnknownType(), std::move(span)) {}
 
   /**
    * @brief Create a function call expression with kwargs and explicit type
@@ -483,11 +487,7 @@ class Call : public Expr {
    */
   Call(OpPtr op, std::vector<ExprPtr> args, std::vector<std::pair<std::string, std::any>> kwargs,
        TypePtr type, Span span)
-      : Expr(std::move(span), std::move(type)),
-        op_(std::move(op)),
-        args_(std::move(args)),
-        attrs_(),
-        kwargs_(std::move(kwargs)) {}
+      : Call(std::move(op), std::move(args), std::move(kwargs), {}, std::move(type), std::move(span)) {}
 
   /**
    * @brief Create a function call expression with attrs, kwargs, and explicit type
@@ -509,6 +509,7 @@ class Call : public Expr {
         args_(std::move(args)),
         attrs_(std::move(attrs)),
         kwargs_(std::move(kwargs)) {
+    detail::CheckValueOperands(args_, span_, "Call argument");
     ValidateArgDirectionsAttr();
   }
 
@@ -1180,12 +1181,7 @@ class Submit : public Expr {
    * @brief Create a Submit with the minimum fields.
    */
   Submit(OpPtr op, std::vector<ExprPtr> args, std::vector<ExprPtr> deps, TypePtr type, Span span)
-      : Expr(std::move(span), std::move(type)),
-        op_(std::move(op)),
-        args_(std::move(args)),
-        deps_(std::move(deps)),
-        attrs_(),
-        kwargs_() {}
+      : Submit(std::move(op), std::move(args), std::move(deps), {}, {}, std::move(type), std::move(span)) {}
 
   /**
    * @brief Create a Submit with attrs and kwargs.
@@ -1213,6 +1209,9 @@ class Submit : public Expr {
         predicate_(std::move(predicate)),
         attrs_(std::move(attrs)),
         kwargs_(std::move(kwargs)) {
+    detail::CheckValueType(type_, span_, "Submit result type");
+    detail::CheckValueOperands(args_, span_, "Submit argument");
+    detail::CheckValueOperands(deps_, span_, "Submit dependency");
     ValidateArgDirectionsAttr();
     ValidateLaunchSpec();
     ValidatePredicate();
@@ -1297,6 +1296,7 @@ class Submit : public Expr {
     // C++/Python construction would otherwise let a float/bool expr through).
     // Only reject a *typed* non-integer scalar; leave other expr shapes alone.
     if (core_num_.has_value()) {
+      detail::CheckValueOperand(*core_num_, span_, "Submit core_num");
       if (auto scalar = std::dynamic_pointer_cast<const ScalarType>((*core_num_)->GetType())) {
         if (!scalar->dtype_.IsInt() && !scalar->dtype_.IsIndexLike()) {
           throw pypto::TypeError("Submit core_num must be an integer/index expression (SPMD block count)");
@@ -1316,6 +1316,9 @@ class Submit : public Expr {
   void ValidatePredicate() const {
     if (predicate_.has_value() && !*predicate_) {
       throw pypto::ValueError("Submit predicate must be a non-null Expr when present");
+    }
+    if (predicate_.has_value()) {
+      detail::CheckValueOperand(*predicate_, span_, "Submit predicate");
     }
   }
 

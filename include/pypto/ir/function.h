@@ -568,6 +568,9 @@ class Function : public IRNode {
         role_(role),
         attrs_(std::move(attrs)),
         requires_runtime_binding_(requires_runtime_binding) {
+    for (const auto& return_type : return_types_) {
+      detail::CheckValueType(return_type, span_, "Function return type; use an empty return_types list");
+    }
     CHECK(params_.size() == param_directions_.size())
         << "params and param_directions must have same size, got " << params_.size() << " vs "
         << param_directions_.size();

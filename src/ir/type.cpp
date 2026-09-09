@@ -24,6 +24,7 @@
 #include "pypto/core/error.h"
 #include "pypto/core/hash.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
@@ -34,6 +35,11 @@
 
 namespace pypto {
 namespace ir {
+
+void detail::CheckValueType(const TypePtr& type, const Span& span, const char* context) {
+  CHECK_SPAN(!type || type->GetKind() != ObjectKind::VoidType, span)
+      << context << " cannot use VoidType: it represents no value; execute a void call with EvalStmt";
+}
 
 namespace {
 
@@ -75,12 +81,24 @@ void ClearRedundantFullValidShape(std::vector<ExprPtr>& valid_shape, const std::
   }
 }
 
+void ValidateTensorViewValues(const TensorView& view) {
+  detail::CheckValueOperands(view.stride, Span::unknown(), "TensorView stride");
+  detail::CheckValueOperands(view.valid_shape, Span::unknown(), "TensorView valid_shape");
+}
+
+void ValidateTileViewValues(const TileView& view) {
+  detail::CheckValueOperands(view.valid_shape, Span::unknown(), "TileView valid_shape");
+  detail::CheckValueOperands(view.stride, Span::unknown(), "TileView stride");
+  detail::CheckValueOperand(view.start_offset, Span::unknown(), "TileView start_offset");
+}
+
 void CanonicalizeTensorViewInPlace(std::optional<TensorView>& tensor_view,
                                    const std::vector<ExprPtr>& shape) {
   if (!tensor_view.has_value()) {
     return;
   }
 
+  ValidateTensorViewValues(*tensor_view);
   ClearRedundantFullValidShape(tensor_view->valid_shape, shape);
   if (tensor_view->stride.empty() && tensor_view->layout == TensorLayout::ND &&
       tensor_view->valid_shape.empty() && tensor_view->pad == PadValue::null) {
@@ -94,6 +112,7 @@ void CanonicalizeTileViewInPlace(std::optional<TileView>& tile_view, const std::
     return;
   }
 
+  ValidateTileViewValues(*tile_view);
   ClearRedundantFullValidShape(tile_view->valid_shape, shape);
   if (tile_view_semantics::IsImplicitPrintedTileView(*tile_view, shape, memory_space)) {
     tile_view.reset();
@@ -252,8 +271,76 @@ CompactMode StringToCompactMode(const std::string& str) {
   throw TypeError("Unknown CompactMode string: " + str);
 }
 
+BufferType::BufferType(std::vector<int64_t> shape, DataType dtype, MemorySpace memory_space,
+                       std::vector<int64_t> valid_shape, TileLayout blayout, TileLayout slayout,
+                       uint64_t fractal, PadValue pad, CompactMode compact)
+    : shape_(std::move(shape)),
+      dtype_(dtype),
+      memory_space_(memory_space),
+      valid_shape_(valid_shape.empty() ? shape_ : std::move(valid_shape)),
+      blayout_(blayout),
+      slayout_(slayout),
+      fractal_(fractal),
+      pad_(pad),
+      compact_(compact) {
+  CHECK(!shape_.empty()) << "BufferType physical shape must have at least one dimension";
+  CHECK(dtype_.GetBit() > 0 && dtype_ != DataType::TASK_ID)
+      << "BufferType requires an element data type, got " << dtype_.ToString();
+  CHECK(valid_shape_.size() == shape_.size()) << "BufferType valid_shape rank " << valid_shape_.size()
+                                              << " must match physical shape rank " << shape_.size();
+  for (size_t i = 0; i < shape_.size(); ++i) {
+    CHECK(shape_[i] > 0) << "BufferType physical extent at dimension " << i
+                         << " must be positive and static, got " << shape_[i];
+    CHECK(valid_shape_[i] == -1 || (valid_shape_[i] >= 0 && valid_shape_[i] <= shape_[i]))
+        << "BufferType valid extent at dimension " << i << " must be -1 (dynamic) or between 0 and "
+        << shape_[i] << ", got " << valid_shape_[i];
+  }
+  switch (memory_space_) {
+    case MemorySpace::Vec:
+    case MemorySpace::Mat:
+    case MemorySpace::Left:
+    case MemorySpace::Right:
+    case MemorySpace::Acc:
+    case MemorySpace::Bias:
+    case MemorySpace::LeftScale:
+    case MemorySpace::RightScale:
+      break;
+    default:
+      CHECK(false) << "BufferType requires an on-chip tile memory space, got "
+                   << static_cast<int>(memory_space_);
+  }
+  CHECK(blayout_ == TileLayout::row_major || blayout_ == TileLayout::col_major)
+      << "BufferType block layout must be row_major or col_major";
+  CHECK(slayout_ == TileLayout::none_box || slayout_ == TileLayout::row_major ||
+        slayout_ == TileLayout::col_major)
+      << "BufferType scatter layout must be none_box, row_major, or col_major";
+  CHECK(fractal_ > 0) << "BufferType fractal size in bytes must be positive";
+  CHECK(pad_ == PadValue::null || pad_ == PadValue::zero || pad_ == PadValue::max || pad_ == PadValue::min)
+      << "BufferType pad must be null, zero, max, or min";
+  CHECK(compact_ == CompactMode::null || compact_ == CompactMode::normal)
+      << "BufferType compact mode must be null or normal";
+}
+
+MultiBufferType::MultiBufferType(BufferTypePtr element_type, int64_t slot_count)
+    : element_type_(std::move(element_type)), slot_count_(slot_count) {
+  CHECK(element_type_) << "MultiBufferType element_type must not be null";
+  CHECK(slot_count_ > 0) << "MultiBufferType slot_count must be positive, got " << slot_count_;
+}
+
+TupleType::TupleType(std::vector<TypePtr> types) : types_(std::move(types)) {
+  for (const auto& type : types_) {
+    detail::CheckValueType(type, Span::unknown(), "TupleType element");
+  }
+}
+
 ShapedType::ShapedType(DataType dtype, const std::vector<int64_t>& shape, std::optional<MemRefPtr> memref)
     : ShapedType(dtype, MakeShapeExprs(shape), std::move(memref)) {}
+
+TensorView::TensorView(std::vector<ExprPtr> stride_, TensorLayout layout_, std::vector<ExprPtr> valid_shape_,
+                       PadValue pad_)
+    : stride(std::move(stride_)), layout(layout_), valid_shape(std::move(valid_shape_)), pad(pad_) {
+  ValidateTensorViewValues(*this);
+}
 
 TensorView::TensorView(const std::vector<int64_t>& stride_ints, TensorLayout layout_,
                        const std::vector<int64_t>& valid_shape_ints, PadValue pad_)
@@ -266,6 +353,20 @@ TensorView::TensorView(const std::vector<int64_t>& stride_ints, TensorLayout lay
   }
 }
 
+TileView::TileView(std::vector<ExprPtr> valid_shape_, std::vector<ExprPtr> stride_, ExprPtr start_offset_,
+                   TileLayout blayout_, TileLayout slayout_, uint64_t fractal_, PadValue pad_,
+                   CompactMode compact_)
+    : valid_shape(std::move(valid_shape_)),
+      stride(std::move(stride_)),
+      start_offset(std::move(start_offset_)),
+      blayout(blayout_),
+      slayout(slayout_),
+      fractal(fractal_),
+      pad(pad_),
+      compact(compact_) {
+  ValidateTileViewValues(*this);
+}
+
 TileView::TileView(const std::vector<int64_t>& valid_shape_ints, const std::vector<int64_t>& stride_ints,
                    ExprPtr start_offset_, TileLayout blayout_, TileLayout slayout_, uint64_t fractal_,
                    PadValue pad_, CompactMode compact_)
@@ -275,6 +376,7 @@ TileView::TileView(const std::vector<int64_t>& valid_shape_ints, const std::vect
       fractal(fractal_),
       pad(pad_),
       compact(compact_) {
+  detail::CheckValueOperand(start_offset, Span::unknown(), "TileView start_offset");
   for (int64_t v : valid_shape_ints) {
     valid_shape.push_back(std::make_shared<ConstInt>(v, DataType::INDEX, Span::unknown()));
   }
@@ -288,6 +390,7 @@ ShapedType::ShapedType(DataType dtype, std::vector<ExprPtr> shape, MemRefPtr mem
 
 ShapedType::ShapedType(DataType dtype, std::vector<ExprPtr> shape, std::optional<MemRefPtr> memref)
     : dtype_(dtype), shape_(std::move(shape)), memref_(std::move(memref)) {
+  detail::CheckValueOperands(shape_, Span::unknown(), "ShapedType dimension");
   ValidatePackedFp4Shape(dtype_, shape_);
 }
 

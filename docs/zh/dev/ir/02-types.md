@@ -21,6 +21,35 @@ float_type = ir.ScalarType(DataType.FP32)
 >
 > **注意：** `TASK_ID` 是一个不透明的 64-bit handle（类型代码 `0x50`），表示 runtime 的 `TaskId`。它**不是**数值类型——上面没有任何算术运算。`Scalar[TASK_ID]` 值由 `with pl.manual_scope():` 内的 `pl.submit(...)` 产生（它返回的二元组第二个元素命名 producer task）。Python 字面量 `None` 是 "暂无 producer" 的哨兵——它用作 TaskId 循环 iter_arg 的种子，也可作为 `deps=[None]` 条目；当 `None` 出现在 TaskId 位置时，会下沉为 [`system.task_invalid`](05-operators.md) builtin → `TaskId::invalid()`。TaskId 值通过 `pl.submit(...)` 的 `deps=[tid1, tid2]` kwarg 传入。codegen 把 `TASK_ID` 下沉为 `TaskId`。
 
+### 内部 Buffer 类型
+
+`BufferType` 描述最终设备 IR 中的可变片上缓冲区，直接继承 `Type`，
+不包含 `MemRef`、base pointer、地址或运行时表达式字段。
+存储身份由定义该缓冲区的 SSA 值表达，所有权由定义算子声明。
+
+```python
+buffer_type = ir.BufferType(
+    [32, 64], DataType.FP32, ir.Mem.Vec, valid_shape=[-1, 64]
+)
+multi_type = ir.MultiBufferType(buffer_type, slot_count=2)
+```
+
+物理维度目前必须是静态正整数。`valid_shape` 可以是零到物理维度之间的
+静态有效长度，也可以用 `-1` 标记由算子操作数提供的运行时有效长度；
+省略时使用完整物理形状。布局、以字节为单位的 fractal 大小、padding
+和 compact mode 都是显式描述符字段。`MultiBufferType` 描述一次
+多缓冲分配中的相同槽位，槽位数必须为正数。
+
+`VoidType` 表示确定没有 SSA 结果，与 `UnknownType` 不同。
+Void call 应放在 `EvalStmt` 中，不能绑定变量、用作操作数、放入 tuple，
+也不能作为值 yield 或 return。
+
+这些类型支持构造、结构比较和二进制序列化。Buffer 类型 dump 使用原生
+`pypto.ir.BufferType(...)` 构造表达式，并保留完整描述符。Buffer 算子、
+表示验证和 PTO 代码生成将分别集成。自动 tile-to-buffer lowering 尚未启用，
+公开 Tile DSL 和默认流水线仍使用 `TileType`。目前不支持通过 DSL parser
+重新解析完整的 buffer 程序 dump。
+
 ### TensorType
 
 带可选内存引用 (MemRef) 的多维张量 (Tensor)。
@@ -494,6 +523,9 @@ tile_type = ir.TileType(shape, DataType.FP16, memref, tile_view, ir.Mem.Left)
 | **ScalarType** | 0 | - | 单个值 |
 | **TensorType** | N（任意） | 可选 MemRef | 通用张量 |
 | **TileType** | N（任意）* | 可选 MemRef + TileView | 硬件优化 Tile |
+| **BufferType** | 静态物理维度 | 定义它的 SSA 句柄 | 显式设备存储 |
+| **MultiBufferType** | 元素 BufferType | 原生 slot 组 | 相同描述符的 buffer slots |
+| **VoidType** | - | - | 确定不存在 SSA 结果 |
 | **TupleType** | - | - | 多返回值 |
 | **PipeType** | - | - | 硬件同步 |
 | **UnknownType** | - | - | 类型推断占位符 |
