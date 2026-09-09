@@ -160,10 +160,6 @@ Its source is the markdown under [`docs/`](docs/), readable directly on GitHub:
 Chinese translations live in [`docs/zh/`](docs/zh/) and are selectable from the
 site's language menu.
 
-To build or preview locally, follow the
-[documentation site setup](docs/en/dev/index.md#documentation-site) to fetch the
-pinned shared theme and install the docs toolchain. A PyPTO build is not required.
-
 ## License
 
 This project is licensed under the **CANN Open Software License Agreement Version 2.0**.

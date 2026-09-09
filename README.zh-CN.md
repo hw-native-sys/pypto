@@ -157,9 +157,6 @@ python -m pytest tests/ut/core/test_error.py -n auto --maxprocesses 8 -v
 
 英文文档位于 [`docs/en/`](docs/en/)（以英文为准），可从站点的语言菜单切换。
 
-本地构建或预览请按照[文档站点配置说明](docs/zh/dev/index.md#文档站点)，
-获取固定版本的公共主题并安装文档工具链。无需编译 PyPTO。
-
 ## 许可证
 
 本项目基于 **CANN Open Software License Agreement Version 2.0** 许可。

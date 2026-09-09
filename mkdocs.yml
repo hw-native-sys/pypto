@@ -12,9 +12,6 @@
 # The markdown under `docs/` is the single source of truth and must stay readable
 # directly on GitHub; this file only describes how it is rendered. The built site
 # is never committed -- CI publishes it to GitHub Pages (see .github/workflows/docs.yml).
-#
-# Build locally: follow "Documentation site" in docs/en/dev/index.md to fetch
-# the pinned shared theme and install the docs toolchain before running MkDocs.
 
 INHERIT: .site-theme/docs-theme/base.yml
 

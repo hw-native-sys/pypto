@@ -4,8 +4,7 @@
 # `python/pypto` through griffe, which parses the source statically -- nothing is
 # imported, so neither a CANN toolkit nor a built extension is required.
 #
-# Fetch the shared theme first (see docs/en/dev/index.md). Both CI and local
-# builds use its tested MkDocs/Material versions through this constraints file.
+# The shared theme supplies the tested MkDocs/Material versions.
 -c ../.site-theme/docs-theme/constraints.txt
 
 mkdocs>=1.6
