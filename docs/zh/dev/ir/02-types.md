@@ -47,8 +47,10 @@ Void call 应放在 `EvalStmt` 中，不能绑定变量、用作操作数、放�
 这些类型是 Buffer IR 的初始基础设施，自动 tile-to-buffer lowering 尚未
 启用，公开 Tile DSL 和默认流水线仍使用 `TileType`。直接 PTO 代码生成支持
 显式构造的 buffer 程序：一维或二维、稠密 row-major Vec FP16/FP32
-描述符，标量参数与控制流，以及下文四个 buffer 算子。Buffer 参数 ABI、
-函数返回值、view、slot、helper 和其他物理布局尚未支持，会明确报错。
+描述符，标量参数与控制流，以及下文的 buffer 算子。普通 GM 参数另外支持
+物理形状静态、列数大于一的稠密 ND 二维 FP32 Tensor。规范化后的 Tensor
+返回值是这些参数的别名，原生内核仍返回 void。Buffer 参数 ABI、原生函数
+结果、view、slot、helper 和其他物理布局尚未支持，会明确报错。
 Buffer 类型 dump 使用原生 `pypto.ir.BufferType(...)` 构造表达式，
 二进制序列化保留完整描述符。目前尚不支持通过 DSL parser 重新解析
 完整的 buffer 程序 dump。
@@ -108,7 +110,7 @@ valid 维度均为动态的描述符（`valid_shape=[-1, -1]`）。固定的初�
 它组合 SSA、先定义后使用及赋值类型检查，建立表示层契约；存储生命周期、
 重叠和初始化证明属于后续验证。
 
-首批 `buffer.copy(src, dst)` 和 `buffer.mul(lhs, rhs, dst)` 写入显式
+`buffer.copy(src, dst)`、`buffer.mul(lhs, rhs, dst)` 和 `buffer.add(lhs, rhs, dst)` 写入显式
 destination 并返回 `VoidType`，目前要求所有参数的 Vec buffer 描述符
 相同。写效应并不表示所有字节都已初始化。允许输入和 destination 是同一
 句柄；构造调用前需要保证运行时 valid extent 一致，并完成部分重叠 view
@@ -120,7 +122,30 @@ destination 并返回 `VoidType`，目前要求所有参数的 Vec buffer 描述
 动态操作数保留在其词法作用域内，不重建逻辑 `TileType` 或 `MemRef`，
 也不运行隐式 tile 分配逻辑。默认 Tile 流水线尚未切换到 Buffer IR。
 
-初始 emitter 支持将无符号标量直接作为分配地址或 valid extent，扩展位宽时
+GM 传输将完整窗口表示为普通操作数：
+
+```text
+buffer.load(tensor, offsets_tuple, valid_extents_tuple, dst_buffer) : Void
+buffer.store(src_buffer, offsets_tuple, valid_extents_tuple, tensor) : Void
+```
+
+首批传输契约要求普通二维 FP32 Tensor/Vec Buffer 操作数。偏移量是非负的
+元素索引，两个 tuple 均包含两个整数或 `INDEX` 标量。传输长度必须等于
+buffer 当前的 valid extent；静态描述符维度必须使用完全相同的常量。
+常量长度和窗口会对照 buffer 容量及 GM 物理形状检查，动态值的一致性、
+非负性和边界则是 lowering/运行时前提。传输不修改 buffer valid 元数据，
+也不初始化未触及的数据。源操作数声明数据读/元数据读效应，目标声明
+数据写/元数据读效应；两个 tuple 都是非内存操作数。GM store 写入选定
+区域，不读取未触及的其余区域。
+
+直接发射目前要求 Tensor 操作数为函数参数，采用紧密 ND 步幅且无 padding。
+load 要求参数方向为 `In` 或 `InOut`，store 要求 `Out` 或 `InOut`。原生 ABI
+总是先排列 GM 指针参数、再排列标量，不受 IR 参数顺序影响。参数方向、
+Tensor 返回类型及规范化的输出参数返回值保留在 IR 中供编排使用；区域结果
+和 carry 仅支持标量。动态物理形状、非参数 GM view、缓存策略/atomic kwargs
+及其他传输布局需要后续发射规则，目前均明确拒绝。
+
+初始 emitter 支持将无符号标量直接作为分配地址、GM 偏移量或 valid extent，扩展位宽时
 保留其无符号数值。无符号算术以及除 index 到整数、同位宽整数转换之外的
 无符号转换，需要后续补充原生发射规则，目前会在发射前拒绝。For 循环要求
 归纳变量为 `INDEX`，边界为 `INDEX` 或有符号整数。这些是 emitter 的限制，

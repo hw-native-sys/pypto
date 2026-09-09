@@ -1292,7 +1292,7 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
     // outlined body does not reference: PTOAS cannot infer a non-ND layout for
     // such an unused view (notably the MX scale tensors on the AIV cast side).
     if (body_vars.var_uses.count(param.get()) == 0) continue;
-    if (param->name_hint_ == "__gm_pipe_buffer") continue;         // GM slot buffer is a raw pointer
+    if (!fs_.buffer_ir && param->name_hint_ == "__gm_pipe_buffer") continue;  // Legacy GM slot buffer
     if (fs_.ffts_workspace_vars.count(param.get()) > 0) continue;  // FFTS workspace stays a raw pointer
 
     // ptoas rejects a malformed view (bad strides / layout) on this line, so

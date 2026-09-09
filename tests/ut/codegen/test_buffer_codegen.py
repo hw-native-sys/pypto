@@ -79,6 +79,208 @@ def _compile_native(tmp_path, text, addressed):
     assert output_path.is_file()
 
 
+def _window(*values):
+    return ir.MakeTuple([_int(value) if isinstance(value, int) else value for value in values], SPAN)
+
+
+def _gm_program(addressed=False, source_name="input"):
+    tensor_type = ir.TensorType([32, 64], DataType.FP32)
+    source = ir.Var(source_name, tensor_type, SPAN)
+    other = ir.Var("other", tensor_type, SPAN)
+    output = ir.Var("output", tensor_type, SPAN)
+    condition = _scalar("condition", DataType.BOOL)
+    lhs, lhs_alloc = _alloc("lhs", address=_int(0) if addressed else None)
+    rhs, rhs_alloc = _alloc("rhs", address=_int(2048) if addressed else None)
+    dst, dst_alloc = _alloc("dst", address=_int(4096) if addressed else None)
+    branch = ir.IfStmt(
+        condition,
+        _eval("buffer.add", dst, rhs, dst),
+        _eval("buffer.copy", lhs, dst),
+        [],
+        SPAN,
+    )
+    body = ir.SeqStmts(
+        [
+            lhs_alloc,
+            rhs_alloc,
+            dst_alloc,
+            _eval("buffer.load", source, _window(8, 16), _window(16, 32), lhs),
+            _eval("buffer.load", other, _window(0, 0), _window(16, 32), rhs),
+            _eval("buffer.mul", lhs, rhs, dst),
+            branch,
+            _eval("buffer.store", dst, _window(4, 8), _window(16, 32), output),
+            ir.ReturnStmt([output], SPAN),
+        ],
+        SPAN,
+    )
+    # Deliberately interleave scalar and Tensor params. Native PTOParam places
+    # input, output, other pointers first and the condition last.
+    kernel = ir.Function(
+        "kernel",
+        [condition, source, (output, ir.ParamDirection.Out), other],
+        [tensor_type],
+        body,
+        SPAN,
+        type=ir.FunctionType.AIV,
+    )
+    return ir.Program([kernel], "BufferGM", SPAN)
+
+
+@pytest.mark.parametrize("addressed", [False, True])
+def test_native_gm_program_round_trip_preserves_abi_and_explicit_destinations(tmp_path, addressed):
+    program = _gm_program(addressed)
+    restored = ir.deserialize(ir.serialize(program))
+    assert isinstance(restored, ir.Program)
+    ir.assert_structural_equal(program, restored, enable_auto_mapping=True)
+    original_kernel = next(iter(program.functions.values()))
+    kernel = next(iter(restored.functions.values()))
+    assert kernel.param_directions == original_kernel.param_directions
+    assert len(kernel.return_types) == 1
+    text = _emit(restored, flag=not addressed)
+    signature = next(line for line in text.splitlines() if "func.func @kernel" in line)
+    assert "(%arg0: !pto.ptr<f32>, %arg1: !pto.ptr<f32>, %arg2: !pto.ptr<f32>, %arg3: i1)" in signature
+    assert "->" not in signature
+    assert "scf.if %arg3 {" in text
+    assert "scf.yield" not in text
+    allocations = _allocations(text)
+    assert len(allocations) == 3
+    lhs, rhs, dst = (allocation[0] for allocation in allocations)
+    assert text.count(" = pto.make_tensor_view ") == 3
+    assert text.count(" = pto.partition_view ") == 3
+    assert text.count("pto.tload ins(") == 2
+    assert text.count("pto.tstore ins(") == 1
+    assert f"pto.tmul ins({lhs}, {rhs} : " in text
+    assert f"pto.tadd ins({dst}, {rhs} : " in text
+    assert f"pto.tmov ins({lhs} : " in text
+    assert f"pto.tstore ins({dst} : " in text
+    assert text.count(f") outs({dst} : ") == 3
+    assert not re.search(r"= pto\.t(load|store|mul|add|mov)", text)
+    # ABI emission must not mutate the caller's IR signature or output aliases.
+    ir.assert_structural_equal(program, restored, enable_auto_mapping=True)
+    _compile_native(tmp_path, text, addressed)
+
+
+def test_native_gm_parameter_names_do_not_trigger_legacy_pipe_handling(tmp_path):
+    text = _emit(_gm_program(source_name="__gm_pipe_buffer"))
+    assert re.search(r"%\w+ = pto.make_tensor_view %arg0,", text)
+    _compile_native(tmp_path, text, addressed=False)
+
+
+def test_native_gm_runtime_windows_and_valid_casts_remain_inside_loop(tmp_path):
+    tensor_type = ir.TensorType([256, 64], DataType.FP32)
+    source = ir.Var("source", tensor_type, SPAN)
+    output = ir.Var("output", tensor_type, SPAN)
+    rows = _scalar("rows", DataType.UINT8)
+    index = _scalar("i")
+    column = _scalar("column")
+    buffer, allocation = _alloc("buffer", _type(shape=(256, 32), valid=(-1, -1)), [rows, _int(32)])
+    loop = ir.ForStmt(
+        index,
+        _int(0),
+        _int(2),
+        _int(1),
+        [],
+        ir.SeqStmts(
+            [
+                ir.AssignStmt(column, ir.Mul(index, _int(16), DataType.INDEX, SPAN), SPAN),
+                allocation,
+                _eval("buffer.set_validshape", buffer, _window(rows, 32)),
+                _eval("buffer.load", source, _window(0, column), _window(rows, 32), buffer),
+                _eval("buffer.store", buffer, _window(0, column), _window(rows, 32), output),
+            ],
+            SPAN,
+        ),
+        [],
+        SPAN,
+    )
+    kernel = ir.Function(
+        "kernel",
+        [rows, source, (output, ir.ParamDirection.Out)],
+        [tensor_type],
+        ir.SeqStmts([loop, ir.ReturnStmt([output], SPAN)], SPAN),
+        SPAN,
+        type=ir.FunctionType.AIV,
+    )
+    text = _emit(ir.Program([kernel], "RuntimeGMWindows", SPAN))
+    loop_position = text.index("scf.for")
+    assert text.index("pto.alloc_tile") > loop_position
+    partitions = re.findall(r"pto.partition_view [^\n]+", text)
+    assert len(partitions) == 2
+    assert text.index(partitions[0]) > loop_position
+    for partition in partitions:
+        extent = re.search(r"sizes = \[(%\w+),", partition)
+        assert extent is not None
+        cast = re.search(rf"{re.escape(extent[1])} = arith.index_cast (%\w+) : i64 to index", text)
+        assert cast is not None
+        widen = re.search(rf"{re.escape(cast[1])} = arith.extui (%\w+) : i8 to i64", text)
+        assert widen is not None
+        assert f"{widen[1]} = builtin.unrealized_conversion_cast %arg2 : ui8 to i8" in text
+        assert text.index(cast[0]) > loop_position
+    assert len(_allocations(text)) == 1
+    # This checks native syntax and unsigned dataflow, not numerical execution.
+    _compile_native(tmp_path, text, addressed=False)
+
+
+@pytest.mark.parametrize(
+    "name,direction", [("buffer.load", ir.ParamDirection.Out), ("buffer.store", ir.ParamDirection.In)]
+)
+def test_gm_transfers_reject_incompatible_parameter_directions(name, direction):
+    tensor = ir.Var("tensor", ir.TensorType([16, 32], DataType.FP32), SPAN)
+    buffer, allocation = _alloc("buffer")
+    source, destination = (tensor, buffer) if name == "buffer.load" else (buffer, tensor)
+    program = _program(
+        [allocation, _eval(name, source, _window(0, 0), _window(16, 32), destination)],
+        [(tensor, direction)],
+    )
+    with pytest.raises(ValueError, match="parameter direction"):
+        _emit(program)
+
+
+@pytest.mark.parametrize(
+    "tensor_type,message",
+    [
+        (ir.TensorType([16, 32], DataType.FP16), "rank-2 FP32"),
+        (ir.TensorType([16, 1], DataType.FP32), "columns > 1"),
+        (
+            ir.TensorType([16, 32], DataType.FP32, None, ir.TensorView([1, 16], ir.TensorLayout.DN)),
+            "ND layout",
+        ),
+        (
+            ir.TensorType([16, 32], DataType.FP32, None, ir.TensorView([64, 1], ir.TensorLayout.ND)),
+            "packed row-major",
+        ),
+        (ir.TensorType([_scalar("rows"), _int(32)], DataType.FP32), "static physical shapes"),
+    ],
+)
+def test_unsupported_gm_parameter_recipes_fail_before_emission(tensor_type, message):
+    tensor = ir.Var("tensor", tensor_type, SPAN)
+    _, allocation = _alloc("buffer")
+    with pytest.raises(ValueError, match=message):
+        _emit(_program([allocation], [tensor]))
+
+
+def test_gm_tensor_carries_cannot_enter_legacy_control_flow_emission():
+    tensor = ir.Var("tensor", ir.TensorType([16, 32], DataType.FP32), SPAN)
+    carry = ir.IterArg("carry", tensor.type, tensor, SPAN)
+    result = ir.Var("result", tensor.type, SPAN)
+    _, allocation = _alloc("buffer")
+    loop = ir.ForStmt(
+        _scalar("i"), _int(0), _int(2), _int(1), [carry], ir.YieldStmt([carry], SPAN), [result], SPAN
+    )
+    with pytest.raises(ValueError, match="only scalar region results and carries"):
+        _emit(_program([allocation, loop], [tensor]))
+
+
+def test_gm_return_must_be_a_normalized_parameter_alias():
+    tensor = ir.Var("tensor", ir.TensorType([16, 32], DataType.FP32), SPAN)
+    _, allocation = _alloc("buffer")
+    function = ir.Function(
+        "kernel", [tensor], [tensor.type], ir.SeqStmts([allocation], SPAN), SPAN, type=ir.FunctionType.InCore
+    )
+    with pytest.raises(ValueError, match="final normalized GM tensor return"):
+        _emit(ir.Program([function], "MissingReturn", SPAN))
+
+
 @pytest.mark.parametrize("flag", [False, True])
 @pytest.mark.parametrize("addressed", [False, True])
 def test_allocation_address_is_determined_only_by_the_ir(flag, addressed):
