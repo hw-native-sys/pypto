@@ -2716,7 +2716,8 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   auto new_body = SeqStmts::Flatten(std::move(new_stmts), span);
   auto new_func = std::make_shared<Function>(func->name_, new_params, new_param_directions, new_return_types,
                                              new_body, span, FunctionType::InCore, func->level_, func->role_,
-                                             EraseCachePolicyAttr(func->attrs_));
+                                             EraseCachePolicyAttr(func->attrs_),
+                                             func->requires_runtime_binding_, func->ir_stage_);
 
   return {new_func, num_added_outputs};
 }
@@ -2906,9 +2907,9 @@ WrapperTransformResult PropagateOutputsThroughWrapper(
   // wrapper return_types_ to match the inner callee can invalidate existing
   // TupleGetItem users at call-sites.
   std::vector<TypePtr> new_return_types = func->return_types_;
-  auto new_func =
-      std::make_shared<Function>(func->name_, new_params, new_dirs, new_return_types, new_body, func->span_,
-                                 func->func_type_, func->level_, func->role_, func->attrs_);
+  auto new_func = std::make_shared<Function>(func->name_, new_params, new_dirs, new_return_types, new_body,
+                                             func->span_, func->func_type_, func->level_, func->role_,
+                                             func->attrs_, func->requires_runtime_binding_, func->ir_stage_);
   return {new_func, num_added};
 }
 

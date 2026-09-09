@@ -64,6 +64,7 @@ class IRBuilder:
         role: ir.Role | None = None,
         attrs: dict[str, Any] | None = None,
         requires_runtime_binding: bool = False,
+        ir_stage: ir.FunctionIRStage = ir.FunctionIRStage.Functional,
     ) -> Iterator["FunctionBuilder"]:
         """Context manager for building functions.
 
@@ -76,6 +77,7 @@ class IRBuilder:
             attrs: Function-level attributes dict (default: None)
             requires_runtime_binding: True for abstract SubWorkers (``...`` body)
                 whose implementation is bound at runtime (default: False)
+            ir_stage: Function body representation (default: Functional)
 
         Yields:
             FunctionBuilder: Helper object for building the function
@@ -94,7 +96,7 @@ class IRBuilder:
         self._begin_spans[ctx_id] = begin_span
 
         self._builder.begin_function(
-            name, begin_span, type, level, role, attrs or {}, requires_runtime_binding
+            name, begin_span, type, level, role, attrs or {}, requires_runtime_binding, ir_stage
         )
         builder_obj = FunctionBuilder(self)
         try:

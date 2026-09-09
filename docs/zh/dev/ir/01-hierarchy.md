@@ -471,6 +471,7 @@ func_orch = ir.Function("orchestrator", params, return_types, body, span, ir.Fun
 | ---- | ---- | ---- |
 | `name_` | string | 函数名称 |
 | `func_type_` | FunctionType | 函数类型（见下方 FunctionType 表格） |
+| `ir_stage_` | FunctionIRStage | 函数体表示：`Functional`（默认）或 `Buffer` |
 | `params_` | list[VarPtr] | 参数变量 (DefField) |
 | `param_directions_` | list[ParamDirection] | 参数方向，与 params_ 长度相同 |
 | `return_types_` | list[TypePtr] | 返回类型 |
@@ -478,6 +479,30 @@ func_orch = ir.Function("orchestrator", params, return_types, body, span, ir.Fun
 | `level_` | optional[Level] | 层次级别（对 InCore/AIC/AIV/Group/Orchestration/Graph 自动派生，详见下文） |
 | `role_` | optional[Role] | 层次角色（对 InCore/AIC/AIV/Group/Orchestration/Graph 自动派生，详见下文） |
 | `attrs_` | list[(str, Any)] | 有序的自由形式元数据，以 `UsualField` 暴露（参与结构遍历） |
+
+### 函数体表示
+
+`FunctionIRStage` 是独立于 `FunctionType`、`level` 和 `role` 的强类型反射字段。
+Python 通过 `function.ir_stage` 读取；`ir.Function` 和 `IRBuilder.function`
+均接受 `ir_stage=ir.FunctionIRStage.Buffer`。
+
+- `Functional` 表示 Tensor/Tile 值语义，是现有构造器以及缺少该字段的旧序列化函数的默认值。
+- `Buffer` 标记最终的显式存储表示。即使设备 kernel 为空或仅含标量，
+  该标记也会选择 Buffer 校验和代码生成；带标记 kernel 中的逻辑 Tile 操作会被拒绝。
+- 最终 lowering 边界作用于 `InCore`、`AIC` 和 `AIV` 函数；编排函数与
+  `Group`/`Spmd` 包装函数保留函数式表示。设置标记本身不会执行 lowering，
+  也不保证函数体满足 Buffer IR 契约。
+
+阶段参与结构相等性、哈希和二进制序列化；序列化中已存在但无效的阶段值会被拒绝。
+通用 mutator 和同一函数的重建会将其与其他函数元数据一起保留，
+但这不意味着函数式优化 pass 可以在 Buffer 边界后执行。
+该标记不保存 Buffer 绑定或存储决策。
+
+Python 打印会增加诊断注释 `# ir_stage: Buffer`。它不是 DSL 装饰器选项，
+也不承诺文本往返解析保留阶段；阶段通过二进制序列化持久化。
+Functional 输出保持不变。分阶段迁移期间，未标记的手工 Buffer kernel
+仍可通过操作数检测进入 Buffer 路径以保持兼容。
+此 API 不会启用自动 Tile-to-Buffer 转换。
 
 ### 保留的 `attrs_` 键
 

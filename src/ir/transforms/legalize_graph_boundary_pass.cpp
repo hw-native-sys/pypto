@@ -807,7 +807,7 @@ class ExprSubstituter : public IRMutator {
   }
   return std::make_shared<Function>(func->name_, std::move(params), std::move(dirs), func->return_types_,
                                     new_body, func->span_, func->func_type_, func->level_, func->role_,
-                                    func->attrs_, func->requires_runtime_binding_);
+                                    func->attrs_, func->requires_runtime_binding_, func->ir_stage_);
 }
 
 // ---------------------------------------------------------------------------

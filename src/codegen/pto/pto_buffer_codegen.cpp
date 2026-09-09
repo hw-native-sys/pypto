@@ -381,6 +381,8 @@ class BufferEmissionPreflight : public ir::IRVisitor {
 }  // namespace
 
 bool PTOCodegen::UsesBufferIR(const ir::FunctionPtr& func) {
+  if (func->ir_stage_ == ir::FunctionIRStage::Buffer) return true;
+  // Transitional compatibility for manually constructed, unmarked Buffer IR.
   BufferFunctionDetector detector;
   detector.VisitFunction(func);
   return detector.found;

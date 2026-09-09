@@ -580,7 +580,8 @@ FunctionPtr RewriteCallee(const ProgramPtr& program, const FunctionPtr& func,
   }
 
   return std::make_shared<Function>(cloned_name, new_params, new_param_directions, new_return_types, new_body,
-                                    func->span_, func->func_type_, func->level_, func->role_, func->attrs_);
+                                    func->span_, func->func_type_, func->level_, func->role_, func->attrs_,
+                                    func->requires_runtime_binding_, func->ir_stage_);
 }
 }  // namespace window_externalization
 }  // namespace ir
