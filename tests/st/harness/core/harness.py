@@ -210,6 +210,7 @@ class PTOTestCase(ABC):
         strategy: OptimizationStrategy | None = None,
         memory_planner: MemoryPlanner | None = None,
         enable_pypto_l0c_double_buffer: bool | None = None,
+        enable_buffer_ir: bool = False,
     ):
         """Initialize test case.
 
@@ -229,12 +230,15 @@ class PTOTestCase(ABC):
                 (PYPTO/DSA_RP/PTOAS).
                 If None, falls back to ``get_memory_planner()`` (which returns
                 None, deferring to ir.compile's PYPTO default).
+            enable_buffer_ir: Use and verify the staged Buffer pipeline in
+                inline and precompiled runs. Defaults to false.
         """
         self.config = config or RunConfig()
         self._override_platform = platform
         self._override_strategy = strategy
         self._override_memory_planner = memory_planner
         self._override_enable_pypto_l0c_double_buffer = enable_pypto_l0c_double_buffer
+        self._enable_buffer_ir = enable_buffer_ir
         self._tensor_specs: list[TensorSpec] | None = None
         self._scalar_specs: list[ScalarSpec] | None = None
 
@@ -295,6 +299,10 @@ class PTOTestCase(ABC):
         under ``MemoryPlanner.PTOAS`` (which already emits dbC=2).
         """
         return self._override_enable_pypto_l0c_double_buffer
+
+    def get_enable_buffer_ir(self) -> bool:
+        """Whether this case requires the staged Buffer device representation."""
+        return self._enable_buffer_ir
 
     def get_platform(self) -> str | None:
         """Return the target platform string ("a2a3"/"a5"/"a2a3sim"/"a5sim").

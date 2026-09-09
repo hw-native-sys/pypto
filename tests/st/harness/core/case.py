@@ -63,6 +63,8 @@ class Case:
             parametrize variant (or the session ``--platform``) decide.
         strategy / memory_planner / enable_pypto_l0c_double_buffer: Compile
             knobs, applied identically whichever kernel source is used.
+        enable_buffer_ir: Compile through the staged Buffer pipeline and check
+            the actual device representation, including in precompile threads.
         rtol / atol: Comparison tolerance for the default elementwise check,
             applied in the parent after the device run persists its actual
             outputs. Ignored when *compare* is set.
@@ -87,6 +89,7 @@ class Case:
     rtol: float = 1e-5
     atol: float = 1e-5
     compare: Any | None = None
+    enable_buffer_ir: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.kernel, (JitKernel, ProgramKernel, IRKernel)):
@@ -145,6 +148,9 @@ class Case:
 
     def get_enable_pypto_l0c_double_buffer(self) -> bool | None:
         return self.enable_pypto_l0c_double_buffer
+
+    def get_enable_buffer_ir(self) -> bool:
+        return self.enable_buffer_ir
 
     def get_platform(self) -> str | None:
         return self.platform
@@ -274,6 +280,7 @@ def from_legacy(test_case: PTOTestCase) -> Case:
         strategy=test_case.get_strategy(),
         memory_planner=_legacy_memory_planner(test_case),
         enable_pypto_l0c_double_buffer=test_case.get_enable_pypto_l0c_double_buffer(),
+        enable_buffer_ir=test_case.get_enable_buffer_ir(),
         rtol=test_case.config.rtol,
         atol=test_case.config.atol,
     )
