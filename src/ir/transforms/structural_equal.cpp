@@ -340,6 +340,19 @@ class StructuralEqualImpl {
     return true;
   }
 
+  result_type VisitLeafField(const FunctionIRStage& lhs, const FunctionIRStage& rhs) {
+    if (lhs != rhs) {
+      if constexpr (AssertMode) {
+        std::ostringstream msg;
+        msg << "FunctionIRStage mismatch (" << FunctionIRStageToString(lhs)
+            << " != " << FunctionIRStageToString(rhs) << ")";
+        ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    return true;
+  }
+
   result_type VisitLeafField(const ForKind& lhs, const ForKind& rhs) {
     if (lhs != rhs) {
       if constexpr (AssertMode) {

@@ -451,7 +451,8 @@ Pass NormalizeReturnOrder() {
         if (new_body.get() != func->body_.get()) {
           final_functions.push_back(std::make_shared<Function>(
               func->name_, func->params_, func->param_directions_, func->return_types_, new_body, func->span_,
-              func->func_type_, func->level_, func->role_, func->attrs_));
+              func->func_type_, func->level_, func->role_, func->attrs_, func->requires_runtime_binding_,
+              func->ir_stage_));
         } else {
           final_functions.push_back(func);
         }

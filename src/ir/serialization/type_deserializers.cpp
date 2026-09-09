@@ -1169,6 +1169,18 @@ static IRNodePtr DeserializeFunction(const msgpack::object& fields_obj, msgpack:
     }
   }
 
+  // Old blobs predate the explicit representation boundary. A present field
+  // must be a valid enum; malformed data must not silently fall back.
+  FunctionIRStage ir_stage = FunctionIRStage::Functional;
+  if (ctx.HasField(fields_obj, "ir_stage")) {
+    const auto stage_obj = GET_FIELD_OBJ("ir_stage");
+    CHECK_SPAN(stage_obj.type == msgpack::type::POSITIVE_INTEGER &&
+                   stage_obj.via.u64 <= static_cast<uint64_t>(FunctionIRStage::Buffer),
+               span)
+        << "Invalid FunctionIRStage value: expected Functional (0) or Buffer (1)";
+    ir_stage = static_cast<FunctionIRStage>(stage_obj.via.u64);
+  }
+
   // Deserialize optional level
   std::optional<Level> level = std::nullopt;
   auto level_obj = GetOptionalFieldObj(fields_obj, "level", ctx);
@@ -1210,7 +1222,7 @@ static IRNodePtr DeserializeFunction(const msgpack::object& fields_obj, msgpack:
   auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
 
   return std::make_shared<Function>(name, params, param_directions, return_types, body, span, func_type,
-                                    level, role, std::move(attrs), requires_runtime_binding);
+                                    level, role, std::move(attrs), requires_runtime_binding, ir_stage);
 }
 
 // Deserialize Program

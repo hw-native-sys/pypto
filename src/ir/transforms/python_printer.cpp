@@ -2785,6 +2785,11 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
     }
   };
 
+  // Buffer dumps are diagnostic: the DSL parser does not construct this stage.
+  if (func->ir_stage_ != FunctionIRStage::Functional) {
+    stream_ << GetIndent() << "# ir_stage: " << FunctionIRStageToString(func->ir_stage_) << "\n";
+  }
+
   // Print decorator
   stream_ << GetIndent() << "@" << prefix_ << ".function";
   {

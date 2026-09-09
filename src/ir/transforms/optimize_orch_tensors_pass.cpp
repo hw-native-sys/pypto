@@ -716,7 +716,8 @@ class IterArgReuseOptimizer {
     auto new_body = mutator.VisitStmt(func->body_);
 
     return std::make_shared<Function>(func->name_, new_params, new_directions, func->return_types_, new_body,
-                                      func->span_, func->func_type_, func->level_, func->role_, func->attrs_);
+                                      func->span_, func->func_type_, func->level_, func->role_, func->attrs_,
+                                      func->requires_runtime_binding_, func->ir_stage_);
   }
 
   // -- Mutation: IRMutator that rewrites orch call sites ---------------------
@@ -1017,7 +1018,7 @@ class AssembleParentStridesOptimizer {
 
       func = std::make_shared<Function>(func->name_, new_params, func->param_directions_, func->return_types_,
                                         new_body, func->span_, func->func_type_, func->level_, func->role_,
-                                        func->attrs_);
+                                        func->attrs_, func->requires_runtime_binding_, func->ir_stage_);
     }
   }
 };
@@ -1401,7 +1402,8 @@ class AssembleLoopRewriter {
 
     return std::make_shared<Function>(func->name_, func->params_, func->param_directions_,
                                       func->return_types_, new_body, func->span_, func->func_type_,
-                                      func->level_, func->role_, func->attrs_);
+                                      func->level_, func->role_, func->attrs_,
+                                      func->requires_runtime_binding_, func->ir_stage_);
   }
 };
 
@@ -1583,7 +1585,7 @@ class SliceInputStridesOptimizer {
 
       func = std::make_shared<Function>(func->name_, new_params, func->param_directions_, func->return_types_,
                                         new_body, func->span_, func->func_type_, func->level_, func->role_,
-                                        func->attrs_);
+                                        func->attrs_, func->requires_runtime_binding_, func->ir_stage_);
     }
   }
 };
