@@ -827,7 +827,7 @@ def lower_tile_to_buffer() -> Pass:
 
     Runs last, after storage legalization, address placement and signature materialization.
     The initial recipe covers dense static rank-2 Vec FP32 allocations, GM transfers,
-    add/mul and copies in straight-line kernels and branches. Unsupported recipes fail explicitly.
+    add/mul and copies in straight-line kernels, branches and loops. Unsupported recipes fail explicitly.
     Verifies storage closure even when automatic verification is disabled, and verifies
     BufferIR after conversion.
     """

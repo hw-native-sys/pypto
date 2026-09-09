@@ -14,6 +14,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -118,6 +119,19 @@ class StorageIndex : public IRVisitor {
 
   std::unordered_map<const Var*, BufferStorage> roots;
 
+ protected:
+  // Initializers are visited once at their lexical binding. Body references
+  // must not expand the initializer chains of enclosing loops.
+  void VisitExpr_(const IterArgPtr& argument) override { VisitVarLike_(argument); }
+  void VisitStmt_(const ForStmtPtr& loop) override {
+    for (const auto& argument : loop->iter_args_) VisitExpr(argument->initValue_);
+    IRVisitor::VisitStmt_(loop);
+  }
+  void VisitStmt_(const WhileStmtPtr& loop) override {
+    for (const auto& argument : loop->iter_args_) VisitExpr(argument->initValue_);
+    IRVisitor::VisitStmt_(loop);
+  }
+
  private:
   bool addressed_;
   std::unordered_set<const TileType*> types_;
@@ -136,9 +150,14 @@ class TileToBufferMutator : public IRMutator {
   }
 
   ExprPtr VisitExpr_(const IterArgPtr& var) override {
-    CHECK_SPAN(!As<TileType>(var->GetType()), var->span_)
-        << "LowerTileToBuffer: Tile loop carries require the control-flow conversion recipe";
-    return IRMutator::VisitExpr_(var);
+    if (As<TileType>(var->GetType())) return Handle(var);
+    if (auto alias = tensor_aliases_.find(var.get()); alias != tensor_aliases_.end()) {
+      return alias->second;
+    }
+    auto found = var_remap_.find(var.get());
+    INTERNAL_CHECK_SPAN(found != var_remap_.end(), var->span_)
+        << "Internal error: Buffer conversion encountered an unbound scalar carry";
+    return found->second;
   }
 
   ExprPtr VisitExpr_(const CallPtr& call) override {
@@ -221,15 +240,8 @@ class TileToBufferMutator : public IRMutator {
     return std::make_shared<YieldStmt>(values, yield->span_, yield->leading_comments_);
   }
 
-  StmtPtr VisitStmt_(const ForStmtPtr& loop) override {
-    CHECK_SPAN(false, loop->span_) << "LowerTileToBuffer: loops require the control-flow conversion recipe";
-    return loop;
-  }
-
-  StmtPtr VisitStmt_(const WhileStmtPtr& loop) override {
-    CHECK_SPAN(false, loop->span_) << "LowerTileToBuffer: loops require the control-flow conversion recipe";
-    return loop;
-  }
+  StmtPtr VisitStmt_(const ForStmtPtr& loop) override { return LowerLoop(loop); }
+  StmtPtr VisitStmt_(const WhileStmtPtr& loop) override { return LowerLoop(loop); }
 
  private:
   struct YieldContext {
@@ -244,6 +256,58 @@ class TileToBufferMutator : public IRMutator {
     yield_context_ = &context;
     auto lowered = VisitStmt(body);
     yield_context_ = outer;
+    return lowered;
+  }
+
+  template <typename LoopPtr>
+  StmtPtr LowerLoop(const LoopPtr& loop) {
+    INTERNAL_CHECK_SPAN(loop->iter_args_.size() == loop->return_vars_.size(), loop->span_)
+        << "Internal error: device loop carry/result arity mismatch";
+    auto lowered = std::make_shared<std::remove_const_t<typename LoopPtr::element_type>>(*loop);
+    if constexpr (std::is_same_v<LoopPtr, ForStmtPtr>) {
+      lowered->start_ = VisitExpr(loop->start_);
+      lowered->stop_ = VisitExpr(loop->stop_);
+      lowered->step_ = VisitExpr(loop->step_);
+    }
+    lowered->iter_args_.clear();
+    lowered->return_vars_.clear();
+    std::vector<ExprPtr> initial_values(loop->iter_args_.size());
+    for (size_t i = 0; i < loop->iter_args_.size(); ++i) {
+      const auto& argument = loop->iter_args_[i];
+      const auto& result = loop->return_vars_[i];
+      auto initial = VisitExpr(argument->initValue_);
+      initial_values[i] = initial;
+      if (As<TileType>(argument->GetType())) {
+        INTERNAL_CHECK_SPAN(initial == Handle(argument) && initial == Handle(result), loop->span_)
+            << "Internal error: Tile storage legalization left an implicit loop entry transfer";
+      } else if (As<TensorType>(argument->GetType())) {
+        tensor_aliases_[argument.get()] = initial;
+      } else {
+        CHECK_SPAN(As<ScalarType>(argument->GetType()), argument->span_)
+            << "LowerTileToBuffer: loop carries require scalar, Tile, or normalized GM values";
+        auto scalar =
+            std::make_shared<IterArg>(argument->name_hint_, argument->GetType(), initial, argument->span_);
+        var_remap_[argument.get()] = scalar;
+        lowered->iter_args_.push_back(std::move(scalar));
+        lowered->return_vars_.push_back(result);
+      }
+    }
+    if constexpr (std::is_same_v<LoopPtr, WhileStmtPtr>) {
+      lowered->condition_ = VisitExpr(loop->condition_);
+    } else {
+      lowered->attrs_ = MutateScopeAttrs(loop->attrs_).first;
+    }
+    YieldContext context(loop->return_vars_);
+    lowered->body_ = LowerRegion(loop->body_, context);
+    for (size_t i = 0; i < loop->iter_args_.size(); ++i) {
+      const auto& argument = loop->iter_args_[i];
+      if (As<TensorType>(argument->GetType())) {
+        CHECK_SPAN(context.tensor_values[i] == initial_values[i], loop->span_)
+            << "LowerTileToBuffer: GM loop results must retain their initial parameter alias";
+        tensor_aliases_[loop->return_vars_[i].get()] = initial_values[i];
+      }
+      var_remap_.erase(argument.get());
+    }
     return lowered;
   }
 

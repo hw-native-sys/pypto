@@ -90,13 +90,38 @@ buffer.store(destination, (selected_offset, 0), (16, 32), Out)
 嵌套分支使用具有作用域的 yield 上下文；转换不会为修复区域而新增分配或复制。
 分支与 yield 的源码注释会保留。
 
+## 循环
+
+For 和 While 转换在确认 Tile 初始值、iter_args、结果和回边 yield 引用同一个合法化存储后，
+移除这些 Tile 循环状态。入口复制已经放在循环前，因此零次迭代仍保留初始值。
+交换与扇出所需的快照是循环体内普通的 Buffer 写入；最终转换不会新增临时存储或复制。
+
+原生控制流仅保留标量 iter_args，并保持它们原有的相对顺序。
+While 条件引用重写后的标量绑定。若 GM 初始值和回边都解析到同一个参数，GM 循环状态会被移除；
+变化的 GM 选择需要单独的转换支持，当前会显式报错。
+嵌套循环和分支分别使用独立的 yield 上下文；每个初始值仅在绑定处遍历一次，
+避免沿外层循环状态链重复遍历。
+二进制往返在解码 While 条件前恢复循环状态的定义，
+使条件和循环体中的共享引用都指向相同的循环状态。
+
+```text
+# Tile carries (left, row, right, column) become two scalar carries.
+(row_result, column_result) = for i in range(count), (row=0, column=0):
+    buffer.copy(right_buf, scratch_right)
+    buffer.copy(left_buf, scratch_left)
+    buffer.copy(scratch_right, left_buf)
+    buffer.copy(scratch_left, right_buf)
+    yield (row + 1, column + 2)
+buffer.store(left_buf, (row_result, column_result), (16, 32), Out)
+```
+
 ## 首批支持的转换
 
-当前转换支持直线程序和分支、静态二维稠密 Vec FP32 Tile、每个分配一个描述符、静态有效范围、
+当前转换支持直线程序、分支和循环、静态二维稠密 Vec FP32 Tile、每个分配一个描述符、静态有效范围、
 普通紧密排列的 ND GM Tensor 以及默认加载/存储策略。
 它转换分配、create、load、store、加法、乘法、move 及已经合法化的别名。
 
-循环、辅助函数调用、其他布局、动态元数据、多槽位和其他操作转换由后续迁移切片补齐。
+辅助函数调用、其他布局、动态元数据、多槽位和其他操作转换由后续迁移切片补齐。
 暂不支持的形式会显式报错。在完整转换与运行时验收矩阵通过前，迁移选项默认关闭。
 
 二进制序列化保留显式表示和函数阶段。当前 Python 诊断打印器不支持 Buffer DSL 解析往返。

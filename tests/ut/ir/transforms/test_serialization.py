@@ -618,6 +618,27 @@ class TestStatementSerialization:
         ir.assert_structural_equal(for_stmt, restored)
         assert len(restored_for_stmt.iter_args) == 0
 
+    def test_serialize_while_condition_refers_to_its_restored_carry(self):
+        span = ir.Span.unknown()
+        dtype = DataType.INDEX
+        initial = ir.ConstInt(0, dtype, span)
+        limit = ir.ConstInt(3, dtype, span)
+        carried = ir.IterArg("carried", ir.ScalarType(dtype), initial, span)
+        result = ir.Var("result", ir.ScalarType(dtype), span)
+        condition = ir.Lt(carried, limit, DataType.BOOL, span)
+        body = ir.YieldStmt([ir.Add(carried, ir.ConstInt(1, dtype, span), dtype, span)], span)
+        loop = ir.WhileStmt(condition, [carried], body, [result], span)
+
+        restored = ir.deserialize(ir.serialize(loop))
+        assert isinstance(restored, ir.WhileStmt)
+        ir.assert_structural_equal(loop, restored, enable_auto_mapping=True)
+        assert isinstance(restored.condition, ir.Lt)
+        assert restored.condition.left is restored.iter_args[0]
+        assert isinstance(restored.body, ir.YieldStmt)
+        increment = restored.body.value[0]
+        assert isinstance(increment, ir.Add)
+        assert increment.left is restored.iter_args[0]
+
     def test_serialize_yield_stmt(self):
         """Test serialization of YieldStmt."""
         x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())

@@ -835,8 +835,6 @@ static IRNodePtr DeserializeForStmt(const msgpack::object& fields_obj, msgpack::
 static IRNodePtr DeserializeWhileStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
                                       DeserializerContext& ctx) {
   auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
-  auto condition =
-      std::static_pointer_cast<const Expr>(ctx.DeserializeNode(GET_FIELD_OBJ("condition"), zone));
 
   std::vector<IterArgPtr> iter_args;
   auto iter_args_obj = GET_FIELD_OBJ("iter_args");
@@ -846,6 +844,11 @@ static IRNodePtr DeserializeWhileStmt(const msgpack::object& fields_obj, msgpack
           std::static_pointer_cast<const IterArg>(ctx.DeserializeNode(iter_args_obj.via.array.ptr[i], zone)));
     }
   }
+
+  // Reflection serializes carry definitions before condition uses. Register
+  // those definitions first so a condition can resolve its IterArg references.
+  auto condition =
+      std::static_pointer_cast<const Expr>(ctx.DeserializeNode(GET_FIELD_OBJ("condition"), zone));
 
   // Deserialize body as single StmtPtr
   auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
