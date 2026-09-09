@@ -100,6 +100,11 @@ bool IsPublishingWrite(const CallPtr& call) {
   if (IsOp(call, "pld.tile.remote_store") || IsOp(call, "pld.tile.put") || IsOp(call, "pld.tensor.put")) {
     return true;
   }
+  // An async remote write publishes too — its release markers are just deferred
+  // to the wait that drains it (see InsertCommFence's IsAsyncRemoteWrite).
+  if (IsOp(call, "pld.tile.put_async") || IsOp(call, "pld.tensor.put_async")) {
+    return true;
+  }
   // A local store whose destination tensor is window-bound: a peer can
   // remote_load it, so it carries the same data-before-signal obligation.
   if (IsOp(call, "tile.store") && call->args_.size() > 2 && call->args_[2] &&

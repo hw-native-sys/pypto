@@ -146,6 +146,7 @@ set(PYPTO_SOURCES
     src/ir/op/distributed/collective.cpp
     src/ir/op/distributed/get.cpp
     src/ir/op/distributed/put.cpp
+    src/ir/op/distributed/put_async.cpp
     src/ir/op/distributed/get_comm_ctx.cpp
     src/ir/op/distributed/system.cpp
     src/ir/op/distributed/allreduce.cpp

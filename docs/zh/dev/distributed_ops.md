@@ -314,6 +314,77 @@ full-slice `put` 要求 `dst` / `src` 形状一致；subregion `put` 允许完�
 **静态**维度上都**不超过**展平后的传输范围（可以更小 —— 即一个 chunk —— 但不能
 更大；动态维由 chunk 在运行时约束）。
 
+### `pld.tensor.put_async`（TPUT_ASYNC）+ `pld.system.async_session` / `wait_async_event`
+
+```text
+pld.system.async_session(*, sync_id: int = 0, block_bytes: int = 0) -> AsyncSession
+pld.tensor.put_async(dst, peer, src, session) -> AsyncEvent
+pld.tensor.put_async(dst, peer, src, session, dst_offsets, src_offsets, shape) -> AsyncEvent
+pld.system.wait_async_event(event, session) -> Scalar(BOOL)
+```
+
+`pld.tensor.put` 的异步对偶。`put` 会让 AIV 核阻塞在每次传输的流水线排空上，而
+`put_async` 在 **SDMA 引擎** 上发起写入并立即返回一个完成句柄，使本地计算得以与
+传输重叠：
+
+```python
+sess = pld.system.async_session()               # 每个 kernel 构建一次
+evt = pld.tensor.put_async(win, peer, chunk, sess)
+...                                             # 本地计算与传输重叠
+pld.system.wait_async_event(evt, sess)          # 排空 + acquire
+pld.system.notify(signal, peer=peer, ...)       # 必须在 wait 之后
+```
+
+**wait 不是可选项，也不仅仅是性能边界。** 两个 release 标记——peer 区域的
+`pto.cmo.cacheinvalid` 与 GM `system.fence`——都在 wait 处发出，而非在发起处，因为
+发起时数据尚未抵达对端。因此发布该数据的跨 rank `notify` 必须跟在 wait 之后。自
+PR #2591 起，PyPTO 在 `TNOTIFY` 前发出的 barrier 已被移除，而 PTOAS 自身的
+TNotify lowering 只排空 MTE2/MTE3（SDMA 传输两者都不走），显式 wait 就成为该传输与后续发布之间
+**唯一** 的定序机制。若某函数发起的 `put_async` 事件从未被 wait，codegen 会拒绝。
+
+**与 `pld.tensor.put` 的差异。** 三点差异均源自 PTOAS `pto.comm.tput_async` 只接受
+`(dst, src, session)`：
+
+| 方面 | `put` | `put_async` |
+| ---- | ----- | ----------- |
+| staging tile | VEC 中转缓冲，`buf(...)` 操作数 | 无——SDMA 直接 GM→GM |
+| `atomic` | `None_` / `Add` | **无法表达**（没有 atomicType 操作数） |
+| `chunk_rows` / `chunk_cols` / `pipeline` | 用于设置 staging tile 大小 | 不适用——没有 staging tile |
+| 区域形状 | 任意 rank，可为动态 | **静态、扁平连续、逻辑一维** |
+| 尾部排空 | `pto.barrier <PIPE_ALL>` | 由 event 取代 |
+| 前置 barrier | 为 `src` 之前的 TSTORE 定序 | **保留**——SDMA 读取同一 GM |
+
+**一维限制。** `dst` 与 `src` 区域必须完全静态且 *逻辑上* 一维——除最后一维外均为
+1，从而构成一段扁平连续的数据。这与 PTOAS 的
+`verifyAsyncFlatContiguous1DGMViewLike` 及 pto-isa 的
+`TPutAsyncIsFlatContiguous1D` 一致。二维窗口本身没问题，只要 *被搬运的* 区域是一维
+即可，因此子区域形式（`shape=[1, N]`）可覆盖按行推送。分散的多行推送 **不** 在覆盖
+范围内，需继续使用 `put`。
+
+**隐藏的 UB scratch，以及它为何要传到 wait。** `async_session` 会下降为
+`tile.create`（256 B INT8 Vec——即 pto-isa 的 `kUbAlignSize`）加
+`pld.tile.async_session(scratch)`，以便内存分配器在 PTO 发射前分配 UB 地址。pto-isa
+`BuildSdmaSession` 将 `session.tmpBufAddr` 指向该缓冲，`AsyncEvent::Wait` 又通过它读回
+完成字——也就是说硬件在 *每次* wait 都会访问该 scratch，而不只是在构建时。因此
+`ConvertTensorToTileOps` 会把同一个 scratch 传入
+`pld.tile.wait_async_event(event, session, scratch)`；若缺少该操作数，按 IR 使用点推导
+生命周期的 MemoryReuse 可能把该地址分配给发起与 wait 之间创建的计算 tile。
+
+**会话属性。** `sync_id` 取值须在 `[0, 7]`（SDMA 同步标志 id 为 3 bit），`block_bytes`
+为分块粒度。两者都在 IR 构建期校验，因为 `BuildSdmaSession` 返回的有效性布尔值被
+PTOAS 的算子丢弃，而 `__sdma_put_async` 也不检查——越界取值会以无效会话的形式抵达
+device，而不会报错。`block_bytes` 默认 1 MB；完全不带该属性会让 PTOAS 静默采用 32 KB。
+
+**每个 InCore 函数一个会话。** `pld.system.async_session` 只应调用一次并复用。第二次调用，
+或在同一函数中与 `pl.prefetch` 混用，会在同一 channel group 上构建两个会话；codegen 会拒绝。
+
+**层级说明。** 此处的 `_async` 后缀指 **InCore** 点对点算子。计划 80 将同一后缀用于
+**HOST** 层集合通信（`all_to_all_v_async`，返回 `CollectiveHandle`/TaskId）。两者不会
+出现在同一 kernel 层级。
+
+**平台。** 仅 a2a3。构建 SDMA 会话的产物会声明 `enable_sdma`，而该 workspace 仅在
+a2a3 实机上provision——仿真与 a5 会在 worker 注册阶段拒绝非空需求。
+
 ### `pld.tensor.get`（TGET）
 
 ```text
@@ -637,6 +708,15 @@ host_orch 函数体包裹进嵌套的 `CommDomainScopeStmt` 节点（按推断�
   `test_get_op.py`、`test_put_op.py`,以及
   `tests/ut/ir/test_distributed_ops.py` 中的 negative verifier 覆盖。
 - **Codegen**：`tests/ut/codegen/distributed/test_distributed_pto_codegen.py`。
+- **异步 put（`put_async`）**：算子契约见
+  `tests/ut/ir/operators/test_async_put_ops.py`；tensor→tile 下降与 scratch 绑定见
+  `tests/ut/ir/transforms/test_convert_tensor_to_tile_ops.py`；延后的 release 标记见
+  `test_distributed_pto_codegen.py`（其中包含真实的 `ptoas` 汇编往返测试——这正是
+  子串断言无法发现的属性 *类型* 缺陷的捕获手段）与
+  `tests/ut/ir/transforms/test_insert_comm_fence.py`。其 ST
+  `tests/st/distributed/test_l3_put_async.py` 已在 onboard a2a3 P=2 通过，
+  且仅限 a2a3——异步会话所需的 SDMA workspace 在其他平台会于
+  worker 注册阶段被拒绝，因此与本列表其余项不同，它没有仿真路径。
 - **端到端（ST）**：`tests/st/distributed/test_l3_allreduce.py`（mesh allreduce；
   动态秩维 ``NR = pl.dynamic("NR")``；默认 **P=2**，任意四卡跑 **P=4**，例如
   ``--device=0,1,2,3`` 或 ``--device=0-3``）、`test_l3_allgather.py`、

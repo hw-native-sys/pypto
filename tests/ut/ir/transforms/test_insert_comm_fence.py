@@ -173,6 +173,49 @@ def test_remote_store_gets_fence_only():
     ir.assert_structural_equal(_apply(Before), Expected)
 
 
+def test_async_put_defers_its_fence_to_the_wait():
+    """An async put gets no release marker at its issue; the GM fence follows the wait.
+
+    The synchronous `put` takes a `system.fence` immediately after the write
+    (`test_remote_store_gets_fence_only`). For `put_async` that would order memory
+    while the transfer is still in flight on the SDMA engine — precisely the bug
+    the event exists to prevent — so the fence moves to the drain point, which is
+    the first place the data is known to have reached the peer. The paired
+    peer-region cacheinvalid is deferred by codegen the same way (it is not
+    IR-expressible, so it does not appear here).
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            win: pld.DistributedTensor[[1, N], pl.FP32],
+            src: pld.DistributedTensor[[1, N], pl.FP32],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            sess = pld.system.async_session()
+            evt = pld.tensor.put_async(win, peer, src, sess)
+            pld.system.wait_async_event(evt, sess)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            win: pld.DistributedTensor[[1, N], pl.FP32],
+            src: pld.DistributedTensor[[1, N], pl.FP32],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            sess = pld.system.async_session()
+            evt = pld.tensor.put_async(win, peer, src, sess)
+            # No marker here: the data has not landed.
+            pld.system.wait_async_event(evt, sess)
+            pl.system.fence()
+
+    ir.assert_structural_equal(_apply(Before), Expected)
+
+
 def test_plain_tensor_store_no_markers():
     # A plain (non-window) store is not a publishing write; nothing is inserted.
     @pl.program

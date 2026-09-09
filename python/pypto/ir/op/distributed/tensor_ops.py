@@ -515,6 +515,55 @@ def all_to_all_v(
     return _ir_core.create_op_call("pld.tensor.all_to_all_v", _args, {"core_num": core_num}, actual_span)
 
 
+def put_async(
+    dst: Expr,
+    peer: int | Expr,
+    src: Expr,
+    session: Expr,
+    *,
+    dst_offsets: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
+    src_offsets: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
+    shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Build a ``pld.tensor.put_async(dst, peer, src, session)`` Call.
+
+    Cross-rank asynchronous put: issue an SDMA write of the local source ``src``
+    into ``peer``'s slice of the window-bound DistributedTensor ``dst``, returning
+    an ``AsyncEventType`` completion handle without blocking. Drain it with
+    :func:`pypto.ir.op.distributed.system_ops.wait_async_event`.
+
+    Unlike :func:`put` there is **no** staging tile and **no** ``atomic`` kwarg:
+    PTOAS ``pto.comm.tput_async`` takes only ``(dst, src, session)``, moves GM->GM
+    on the SDMA engine, and carries no atomicType operand at all.
+
+    Regions must be static, flat-contiguous and logically 1-D (every dimension
+    except the last is 1) — the constraint PTOAS's
+    ``verifyAsyncFlatContiguous1DGMViewLike`` and pto-isa's
+    ``TPutAsyncIsFlatContiguous1D`` both enforce. With no offsets/shape this
+    transfers the full slice; supplying ``dst_offsets``, ``src_offsets`` and
+    ``shape`` narrows it, and all three must be provided together.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    peer_expr = _normalize_expr(peer, actual_span, int_dtype=DataType.INT32)
+    args: list[Expr] = [dst, peer_expr, src, session]
+    has_region = dst_offsets is not None or src_offsets is not None or shape is not None
+    if has_region and (dst_offsets is None or src_offsets is None or shape is None):
+        raise ValueError("pld.tensor.put_async dst_offsets, src_offsets, and shape must be provided together")
+    if has_region:
+        assert dst_offsets is not None
+        assert src_offsets is not None
+        assert shape is not None
+        args.extend(
+            [
+                _to_make_tuple(dst_offsets, actual_span),
+                _to_make_tuple(src_offsets, actual_span),
+                _to_make_tuple(shape, actual_span),
+            ]
+        )
+    return _ir_core.create_op_call("pld.tensor.put_async", args, {}, actual_span)
+
+
 __all__ = [
     "all_to_all",
     "all_to_all_v",
@@ -525,6 +574,7 @@ __all__ = [
     "broadcast",
     "get",
     "put",
+    "put_async",
     "remote_store",
     "reduce_scatter",
     "window",

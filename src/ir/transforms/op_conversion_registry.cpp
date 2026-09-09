@@ -2721,6 +2721,53 @@ void OpConversionRegistry::RegisterDistributedOps() {
   RegisterSimple("pld.tensor.remote_store", "pld.tile.remote_store",
                  {{0, {BridgeSpaceOf({"pld.tile.remote_store"}, 0), std::nullopt}}});
 
+  // pld.tensor.put_async -> pld.tile.put_async: a pure rename. Unlike the
+  // synchronous put there is no staging tile to materialize — PTOAS
+  // `pto.comm.tput_async` moves GM->GM on the SDMA engine and takes no
+  // `buf(...)` operand group — so the tile-level form carries exactly the same
+  // operands. The rename still happens because backend codegen registers
+  // transfer emitters at the tile level (`reg("pld.tile.put")` / `"pld.tile.get"`).
+  RegisterSimple("pld.tensor.put_async", "pld.tile.put_async");
+
+  // pld.system.async_session -> tile.create(scratch) + pld.tile.async_session(scratch).
+  //
+  // The Vec(UB) scratch is a real allocation, not a formality: pto-isa
+  // `MakeTmpBufferFromTile` requires a Vec tile of at least 8 bytes, and
+  // `BuildSdmaSession` bounces descriptor and completion words through it on
+  // every issue AND every wait. 256 B matches `kUbAlignSize` and the shape both
+  // pto-isa's own a2a3 ST kernel and `PrefetchAsyncContext` declare.
+  //
+  // It is created here rather than in codegen for the same reason put's staging
+  // tile is: the memory allocator must assign its UB address before PTO emission
+  // (required at --pto-level=level3). `AsyncWaitScratchBinder`, which runs after
+  // the conversions in ConvertTensorToTileOps, then threads this same scratch Var
+  // into every `wait_async_event` on the session so its live range spans the whole
+  // async window — see that class for why that is a correctness requirement.
+  RegisterCustom(
+      "pld.system.async_session",
+      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+         const Span& span) -> ConversionResult {
+        INTERNAL_CHECK_SPAN(args.empty(), span)
+            << "pld.system.async_session conversion expects no positional args, got " << args.size();
+        auto& op_reg = OpRegistry::GetInstance();
+
+        constexpr int64_t kScratchRows = 1;
+        constexpr int64_t kScratchCols = 256;  // pto-isa kUbAlignSize
+        auto shape_tuple = std::make_shared<MakeTuple>(
+            std::vector<ExprPtr>{std::make_shared<ConstInt>(kScratchRows, DataType::INDEX, span),
+                                 std::make_shared<ConstInt>(kScratchCols, DataType::INDEX, span)},
+            span);
+        std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", DataType::INT8},
+                                                                       {"target_memory", MemorySpace::Vec}};
+        auto create_call = op_reg.Create("tile.create", {shape_tuple}, create_kwargs, span);
+        auto scratch = std::make_shared<Var>("sdma_session_scratch", create_call->GetType(), span);
+
+        std::vector<StmtPtr> prologue;
+        prologue.push_back(std::make_shared<AssignStmt>(scratch, create_call, span));
+        auto session_call = op_reg.Create("pld.tile.async_session", {scratch}, kwargs, span);
+        return ConversionResult{std::move(prologue), session_call};
+      });
+
   // pld.tensor.put -> tile.create(stage) + pld.tile.put(dst, peer, src, stage).
   // Stage shape is [rows, cols] with rows = product(leading dims), cols =
   // innermost dim: the 2-D-flattened transfer extent codegen previously

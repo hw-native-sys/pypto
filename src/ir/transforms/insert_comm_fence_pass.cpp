@@ -168,6 +168,29 @@ bool IsRemoteWrite(const CallPtr& call) {
   return IsOp(call, "pld.tile.remote_store") || IsOp(call, "pld.tile.put") || IsOp(call, "pld.tensor.put");
 }
 
+// True if `call` is an *asynchronous* remote publishing write. Unlike the
+// synchronous writes above, its data has not landed when the statement retires:
+// the transfer runs on the SDMA engine and completes at the matching
+// `wait_async_event`. So neither release marker belongs at the issue site — the
+// peer-region cacheinvalid is deferred by codegen (it parks the destination view
+// keyed by the event SSA and replays it after the drain), and the GM release
+// fence is inserted by this pass after the wait, not after the write.
+//
+// Emitting the fence here instead would order memory at a point where the data
+// is still in flight, which is precisely the bug the event exists to prevent.
+bool IsAsyncRemoteWrite(const CallPtr& call) {
+  if (!call || !call->op_) return false;
+  return IsOp(call, "pld.tile.put_async") || IsOp(call, "pld.tensor.put_async");
+}
+
+// True if `call` drains an async transfer. This is where an async remote write's
+// GM release fence lands, because it is the first point at which the data is
+// known to have reached the peer.
+bool IsAsyncWait(const CallPtr& call) {
+  if (!call || !call->op_) return false;
+  return IsOp(call, "pld.tile.wait_async_event") || IsOp(call, "pld.system.wait_async_event");
+}
+
 // A target tensor usable for cacheinvalid: a `Var`-like with a `TensorType`.
 VarPtr AsInvalidatableTarget(const ExprPtr& target) {
   if (!target) return nullptr;
@@ -304,13 +327,21 @@ class InsertCommMarkers : public IRMutator {
           out.push_back(MakeNoArgOp("system.fence", child->span_));
           changed = true;
         }
-      } else if (IsRemoteWrite(LeafCall(child))) {
-        // Remote write: codegen emits the peer-region cacheinvalid (peer offset is
-        // not IR-expressible yet); the pass inserts only the GM release fence.
+      } else if (IsRemoteWrite(LeafCall(child)) || IsAsyncWait(LeafCall(child))) {
+        // Sync remote write: codegen emits the peer-region cacheinvalid (peer
+        // offset is not IR-expressible yet); this pass inserts only the GM
+        // release fence. Async wait: the drain point, where the matching async
+        // write's GM release fence belongs (the issue itself is a no-op below).
         if (!(i + 1 < stmts.size() && IsLeafOp(stmts[i + 1], "system.fence"))) {
           out.push_back(MakeNoArgOp("system.fence", child->span_));
           changed = true;
         }
+      } else if (IsAsyncRemoteWrite(LeafCall(child))) {
+        // Async remote write: no release marker at the issue — the data is still
+        // in flight. Codegen defers the peer-region cacheinvalid to the wait, and
+        // the GM release fence is inserted after that wait (above). This arm is
+        // a deliberate no-op so the issue does not fall through to the opaque
+        // kWrite path below.
       } else if (eff == Effect::kWrite) {
         // Opaque publishing write with no single addressable region — a `Submit`
         // (async task launch) or a call to an unregistered/un-analysed op. Be

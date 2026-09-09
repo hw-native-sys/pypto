@@ -503,6 +503,26 @@ static std::string MakeNotifyCodegenPTO(const CallPtr& op, codegen::CodegenBase&
                       << op->args_[3]->GetType()->TypeName();
   value_ssa = codegen.EmitCastToI32(op->args_[3], value_ssa);
   std::string value_type = codegen.GetTypeString(DataType::INT32);
+  // Data-before-signal for async transfers: a notify published while an async
+  // remote write is still outstanding would release data that has not landed.
+  // Since #2591 there is no barrier before TNOTIFY, and PTOAS's TNotify lowering
+  // drains only MTE2/MTE3 — neither of which an SDMA transfer uses — so the
+  // explicit wait is the *only* thing ordering the two. `pending_peer_invalidates`
+  // already holds exactly the events issued and not yet drained, so this is the
+  // whole check.
+  if (auto outstanding = codegen.GetUndrainedAsyncEvents(); !outstanding.empty()) {
+    std::ostringstream names;
+    for (size_t i = 0; i < outstanding.size(); ++i) {
+      if (i > 0) names << ", ";
+      names << outstanding[i];
+    }
+    CHECK_SPAN(false, op->span_)
+        << "pld.system.notify would publish while an async remote put is still in flight (" << names.str()
+        << "). Drain it with pld.system.wait_async_event before the notify: the peer-region "
+           "cache invalidate and the GM release fence are emitted at that wait, so notifying "
+           "first releases data that has not reached the peer.";
+  }
+
   // A notify publishes completion to a peer. Pipeline synchronisation before
   // TNOTIFY is PTOAS's responsibility — its TNotify lowering drains what it
   // issued (MTE2/MTE3) and owns the ordering. Do NOT emit a pto.barrier here:
@@ -942,6 +962,191 @@ static std::string MakePutCodegenPTO(const CallPtr& op, codegen::CodegenBase& co
   return "";
 }
 
+// ---------------------------------------------------------------------------
+// Async remote put (TPUT_ASYNC).
+// ---------------------------------------------------------------------------
+
+// pld.tile.async_session(scratch) -> pto.comm.build_async_session.
+//
+// The workspace pointer is the runtime-owned hidden param PTOCodegen appends
+// when the function pre-scan sees this op (mirroring prefetch.make_context).
+// `sync_id` / `block_bytes` ride as attrs: PTOAS defaults block_bytes to 32 KB
+// when the attr is absent, which is an accident rather than a choice for the
+// chunk pushes this op targets, so the deducer supplies PyPTO's 1 MB default and
+// we always emit it.
+static std::string MakeAsyncSessionCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = AsPto(codegen_base);
+  INTERNAL_CHECK_SPAN(op->args_.size() == 1, op->span_)
+      << "pld.tile.async_session expects exactly 1 argument (scratch), got " << op->args_.size();
+
+  const std::string ws_ptr = codegen.GetSdmaWorkspaceArgSSA();
+  INTERNAL_CHECK_SPAN(!ws_ptr.empty(), op->span_)
+      << "Internal error: pld.tile.async_session was not detected by PTOCodegen's function pre-scan, "
+         "so no SDMA workspace parameter was appended";
+
+  const std::string scratch = codegen.GetExprAsCode(op->args_[0]);
+  const std::string scratch_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+  INTERNAL_CHECK_SPAN(!scratch_type.empty(), op->span_)
+      << "Internal error: pld.tile.async_session scratch " << scratch << " has no tile_buf type annotation";
+
+  const int sync_id = op->GetKwarg<int>("sync_id", 0);
+  // Omit means PyPTO's 1 MB default, not PTOAS's silent 32 KB. Always emit the
+  // attr: the IR builder drops a zero value, so a missing key is the default
+  // path (see pld.system.async_session).
+  constexpr int64_t kDefaultBlockBytes = int64_t{1024} * 1024;
+  const int64_t block_bytes =
+      static_cast<int64_t>(op->GetKwarg<int>("block_bytes", static_cast<int>(kDefaultBlockBytes)));
+
+  std::string session = codegen.GetCurrentResultTarget();
+  if (session.empty()) session = codegen.NewTemp();
+
+  // Attribute types are load-bearing: PTOAS declares `sync_id` as
+  // OptionalAttr<I32Attr> and `block_bytes` as OptionalAttr<I64Attr>. A bare
+  // integer literal in an MLIR attribute dictionary parses as i64, which would
+  // fail the i32 constraint on sync_id, so both carry an explicit type suffix.
+  std::ostringstream build;
+  build << session << " = pto.comm.build_async_session(" << scratch << ", " << ws_ptr << " : " << scratch_type
+        << ", !pto.ptr<i8>) {sync_id = " << sync_id << " : i32, block_bytes = " << block_bytes
+        << " : i64} -> !pto.async_session";
+  codegen.Emit(build.str());
+  codegen.SetCurrentExprValue(session);
+  return "";
+}
+
+// pld.tile.put_async(dst, peer, src, session[, dst_offsets, src_offsets, shape])
+// -> pto.comm.tput_async.
+//
+// Same peer-addressing math as the synchronous put — identical
+// ResolveDistTensorBinding / EmitCommRemoteView / partition_view chain — and it
+// differs in exactly three ways:
+//
+//   * no `buf(...)` staging operand: SDMA moves GM->GM directly;
+//   * no trailing `pto.barrier <PIPE_ALL>`: draining the DMA pipe is what the
+//     event is for, and skipping that stall is the whole point of the op. The
+//     *leading* barrier stays — it orders a preceding TSTORE into the source
+//     before the transfer reads it, which asynchrony does not change;
+//   * no inline `pto.cmo.cacheinvalid`: the data has not landed at the issue, so
+//     the peer marker is parked for the wait (see DeferPeerInvalidate).
+static std::string MakePutAsyncCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = AsPto(codegen_base);
+  const size_t n = op->args_.size();
+  INTERNAL_CHECK_SPAN(n == 4 || n == 7, op->span_)
+      << "pld.tile.put_async requires 4 (dst, peer, src, session) or 7 arguments "
+         "(+ dst_offsets, src_offsets, shape), got "
+      << n;
+  const bool has_region = (n == 7);
+
+  auto dst_binding = ResolveDistTensorBinding(op->args_[0], codegen, "pld.tile.put_async");
+
+  auto src_var = AsVarLike(op->args_[2]);
+  INTERNAL_CHECK_SPAN(src_var, op->span_) << "pld.tile.put_async src must be a Var-like expression";
+  auto src_tt = AsTensorTypeLike(src_var->GetType());
+  INTERNAL_CHECK_SPAN(src_tt, op->span_)
+      << "pld.tile.put_async src must be a Tensor or DistributedTensor, got "
+      << src_var->GetType()->TypeName();
+
+  const auto& shape = dst_binding.type->shape_;
+  const size_t rank = shape.size();
+  INTERNAL_CHECK_SPAN(rank >= 1, op->span_) << "pld.tile.put_async requires rank >= 1";
+  const std::string dtype_str = codegen.GetTypeString(dst_binding.type->dtype_);
+
+  std::vector<std::string> dst_offsets;
+  std::vector<std::string> src_offsets;
+  std::vector<std::string> size_ssa;
+  std::vector<ExprPtr> transfer_shape;
+
+  if (!has_region) {
+    std::string c0 = codegen.GetOrEmitConstant(static_cast<int64_t>(0), DataType::INDEX);
+    dst_offsets.assign(rank, c0);
+    src_offsets.assign(rank, c0);
+    transfer_shape = shape;
+    size_ssa = GetSizeCodes(transfer_shape, codegen);
+  } else {
+    auto dst_offsets_tuple = As<ir::MakeTuple>(op->args_[4]);
+    auto src_offsets_tuple = As<ir::MakeTuple>(op->args_[5]);
+    auto shape_tuple = As<ir::MakeTuple>(op->args_[6]);
+    INTERNAL_CHECK_SPAN(dst_offsets_tuple, op->span_) << "pld.tile.put_async dst_offsets must be MakeTuple";
+    INTERNAL_CHECK_SPAN(src_offsets_tuple, op->span_) << "pld.tile.put_async src_offsets must be MakeTuple";
+    INTERNAL_CHECK_SPAN(shape_tuple, op->span_) << "pld.tile.put_async shape must be MakeTuple";
+    INTERNAL_CHECK_SPAN(dst_offsets_tuple->elements_.size() == rank, op->span_)
+        << "pld.tile.put_async dst_offsets rank must match tensor rank";
+    INTERNAL_CHECK_SPAN(src_offsets_tuple->elements_.size() == rank, op->span_)
+        << "pld.tile.put_async src_offsets rank must match tensor rank";
+    INTERNAL_CHECK_SPAN(shape_tuple->elements_.size() == rank, op->span_)
+        << "pld.tile.put_async shape rank must match tensor rank";
+    dst_offsets = GetIndexOffsetCodes(dst_offsets_tuple->elements_, codegen);
+    src_offsets = GetIndexOffsetCodes(src_offsets_tuple->elements_, codegen);
+    transfer_shape = shape_tuple->elements_;
+    size_ssa = GetSizeCodes(transfer_shape, codegen);
+  }
+
+  const std::string partition_type = MakePartitionTensorViewType(GetDimStrings(transfer_shape), dtype_str);
+
+  auto dst_peer_view = EmitCommRemoteView(dst_binding, op->args_[1], codegen);
+  const std::string dst_pview =
+      EmitPartitionViewPTO(dst_binding.var->name_hint_ + "_peer", dst_peer_view.ssa,
+                           dst_peer_view.view_type_str, partition_type, dst_offsets, size_ssa, codegen);
+
+  const std::string src_local_view = codegen.GetOrCreateTensorView(src_var);
+  const std::string src_view_type = codegen.GetTensorViewTypeString(src_tt.get());
+  const std::string src_pview =
+      EmitPartitionViewPTO(src_var->name_hint_ + "_local", src_local_view, src_view_type, partition_type,
+                           src_offsets, size_ssa, codegen);
+
+  const std::string session = codegen.GetExprAsCode(op->args_[3]);
+
+  // Leading barrier, kept: TPUT_ASYNC reads the local source GM through the SDMA
+  // engine. If the caller populated that source via an immediately preceding
+  // TSTORE, the store must be ordered before the transfer reads it — asynchrony
+  // of the *transfer* does not make the *source* read safe. (The trailing drain
+  // the synchronous put emits is what the event replaces; it is absent here.)
+  codegen.Emit("pto.barrier <PIPE_ALL>");
+
+  std::string event = codegen.GetCurrentResultTarget();
+  if (event.empty()) event = codegen.NewTemp();
+  codegen.Emit(event + " = pto.comm.tput_async(" + dst_pview + ", " + src_pview + ", " + session + " : " +
+               partition_type + ", " + partition_type + ", !pto.async_session) -> !pto.async_event");
+
+  // Park the peer-region invalidate for the wait that drains this event.
+  codegen.DeferPeerInvalidate(event, {dst_pview, partition_type});
+  codegen.SetCurrentExprValue(event);
+  return "";
+}
+
+// pld.tile.wait_async_event(event, session, scratch) -> pto.comm.wait_async_event,
+// then the peer invalidate the matching put_async parked.
+//
+// The scratch operand is not emitted: it exists in the IR purely so the memory
+// allocator keeps the session's UB buffer live across the async window (pto-isa
+// reads the completion word back through session.tmpBufAddr, which points into
+// it). PTOAS's op takes only (event, session).
+static std::string MakeWaitAsyncEventCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = AsPto(codegen_base);
+  INTERNAL_CHECK_SPAN(op->args_.size() == 3, op->span_)
+      << "pld.tile.wait_async_event expects 3 arguments (event, session, scratch), got " << op->args_.size();
+
+  const std::string event = codegen.GetExprAsCode(op->args_[0]);
+  const std::string session = codegen.GetExprAsCode(op->args_[1]);
+  INTERNAL_CHECK_SPAN(!event.empty(), op->span_)
+      << "pld.tile.wait_async_event event has no SSA binding; the producing put_async must be "
+         "assigned to a named variable";
+  INTERNAL_CHECK_SPAN(!session.empty(), op->span_) << "pld.tile.wait_async_event session has no SSA binding";
+
+  std::string done = codegen.GetCurrentResultTarget();
+  if (done.empty()) done = codegen.NewTemp();
+  pto_ops_detail::EmitWaitAsyncEventPTO(codegen, done, event, session);
+
+  // Data-before-signal, deferred: the peer-region cacheinvalid the async put
+  // could not emit at its issue is emitted here, once the transfer has landed.
+  // The paired GM release fence is inserted by the InsertCommFence pass.
+  if (auto pending = codegen.TakeDeferredPeerInvalidate(event)) {
+    codegen.Emit("pto.cmo.cacheinvalid " + pending->partition_view +
+                 " single_cache_line : " + pending->partition_type);
+  }
+  codegen.SetCurrentExprValue(done);
+  return "";
+}
+
 static std::string MakeGetCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
   const size_t n = op->args_.size();
@@ -1169,6 +1374,15 @@ void RegisterDistributedOps(Backend& backend, const std::unordered_set<std::stri
       [](const ir::CallPtr& op, codegen::CodegenBase& codegen) { return MakeGetCodegenPTO(op, codegen); });
   reg("pld.tile.put",
       [](const ir::CallPtr& op, codegen::CodegenBase& codegen) { return MakePutCodegenPTO(op, codegen); });
+  reg("pld.tile.async_session", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeAsyncSessionCodegenPTO(op, codegen);
+  });
+  reg("pld.tile.put_async", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakePutAsyncCodegenPTO(op, codegen);
+  });
+  reg("pld.tile.wait_async_event", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeWaitAsyncEventCodegenPTO(op, codegen);
+  });
 }
 }  // namespace backend
 }  // namespace pypto

@@ -218,6 +218,8 @@ inline std::vector<ExprPtr> ValidateRegionArgs(const std::vector<ExprPtr>& args,
   CHECK(dst_offsets) << op_name << " dst_offsets must be a tuple";
   CHECK(src_offsets) << op_name << " src_offsets must be a tuple";
   CHECK(transfer_shape) << op_name << " shape must be a tuple";
+  CHECK(dst_shape.size() == src_shape.size())
+      << op_name << " dst rank (" << dst_shape.size() << ") must match src rank (" << src_shape.size() << ")";
   CHECK(dst_offsets->elements_.size() == dst_shape.size())
       << op_name << " dst_offsets rank must match dst rank";
   CHECK(src_offsets->elements_.size() == src_shape.size())
@@ -334,6 +336,55 @@ inline void ValidateAtomicAddDtype(int atomic_value, const DataType& dtype, cons
       << " with atomic=AtomicType.Add requires an fp32/bf16/fp16/int32/int16/int8 dtype (hardware "
          "atomic-add dtypes), but got "
       << dtype.ToString();
+}
+
+// ---------------------------------------------------------------------------
+// Async remote put (TPUT_ASYNC) contract.
+// ---------------------------------------------------------------------------
+
+// Reject an `atomic` kwarg on an async transfer. Unlike TPutOp, PTOAS's
+// `pto.comm.tput_async` takes only (dst, src, session): it carries no
+// atomicType operand at all, and pto-isa's own ST kernel records that
+// "TPUT_ASYNC does not support atomic operations". So this is not an
+// unvalidated path we could opt into later on the same op — it is
+// inexpressible, and the DSL says so rather than silently dropping the kwarg.
+inline void ValidateNoAtomic(const Kwargs& kwargs, const std::string& op_name) {
+  for (const auto& kv : kwargs) {
+    CHECK(kv.first != "atomic")
+        << op_name
+        << " does not accept an `atomic` kwarg: pto.comm.tput_async has no atomicType operand "
+           "(contrast pto.comm.tput), so async atomic-add is not expressible. Use pld.tensor.put "
+           "for an atomic combine.";
+  }
+}
+
+// Enforce the PTOAS `TPutAsyncOp` operand constraint on one side of the
+// transfer. Mirrors `verifyAsyncFlatContiguous1DGMViewLike` in PTOAS and
+// `TPutAsyncIsFlatContiguous1D` in pto-isa: the region must be fully static and
+// *logically* 1-D — every dimension except the last is 1 — so it is one flat
+// contiguous run. Rejecting it here fails at PyPTO IR construction with a
+// DSL-level message instead of surfacing much later as a PTOAS verification
+// error, exactly as prefetch's CheckFlatContiguous1DSource does for its source.
+inline void ValidateAsyncFlatContiguous1D(const std::vector<ExprPtr>& shape, const std::string& op_name,
+                                          const std::string& role) {
+  CHECK(!shape.empty()) << op_name << " requires at least one dimension on " << role;
+  for (size_t i = 0; i < shape.size(); ++i) {
+    auto dim = As<ConstInt>(shape[i]);
+    CHECK_SPAN(dim, shape[i]->span_)
+        << op_name << " requires a fully static " << role << " shape (dimension " << i
+        << " is dynamic): TPUT_ASYNC resolves its transfer size at issue time and has no chunking "
+           "path to bound a dynamic extent.";
+    CHECK_SPAN(dim->value_ > 0, shape[i]->span_)
+        << op_name << " " << role << " shape dimension " << i << " must be positive, got " << dim->value_;
+    if (i + 1 < shape.size()) {
+      CHECK_SPAN(dim->value_ == 1, shape[i]->span_)
+          << op_name << " requires a flat-contiguous logical-1D " << role
+          << " region: every dimension except the last must be 1, but dimension " << i << " is "
+          << dim->value_
+          << ". Reshape the region to [1, ..., N], or use the synchronous pld.tensor.put, which "
+             "2-D-slides the transfer through its staging tile.";
+    }
+  }
 }
 
 }  // namespace comm_op

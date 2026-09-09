@@ -249,10 +249,10 @@ for lowering/compiler plumbing, plus other dialects such as VPTO, VMI, and SIMT.
 | pto.print | cce::printf | internal | ✅ | — | — | — | — | internal/debugging helper; no standalone ST |
 | pto.trap | trap | internal | ✅ | — | — | — | — | internal/debugging helper; no standalone ST |
 | **Communication (14)** |  |  |  |  |  |  |  |  |
-| pto.comm.build_async_session | pto::comm::BuildAsyncSession | comm | ✅ | — | — | — | ❌ | distributed interface lacks same-name ST coverage |
-| pto.comm.tput_async | TPUT_ASYNC | comm | ✅ | — | — | — | ❌ | distributed interface lacks same-name ST coverage |
+| pto.comm.build_async_session | pto::comm::BuildAsyncSession | comm | ✅ | — | — | — | ✅ | DSL surface landed (`pld.system.async_session`); same-name ST `test_l3_put_async.py` passed onboard a2a3 P=2. SDMA workspace is a2a3-only; other platforms fail at worker registration |
+| pto.comm.tput_async | TPUT_ASYNC | comm | ✅ | — | — | — | ✅ | DSL surface landed (`pld.tensor.put_async`); same-name ST `test_l3_put_async.py` passed onboard a2a3 P=2 |
 | pto.comm.tget_async | TGET_ASYNC | comm | ✅ | — | — | — | ❌ | distributed interface lacks same-name ST coverage |
-| pto.comm.wait_async_event | AsyncEvent.Wait | comm | ✅ | — | — | — | ❌ | distributed interface lacks same-name ST coverage |
+| pto.comm.wait_async_event | AsyncEvent.Wait | comm | ✅ | — | — | — | ✅ | DSL surface landed (`pld.system.wait_async_event`); same-name ST `test_l3_put_async.py` passed onboard a2a3 P=2 |
 | pto.comm.test_async_event | AsyncEvent.Test | comm | ✅ | — | — | — | ❌ | distributed interface lacks same-name ST coverage |
 | pto.comm.tput | TPUT | comm | ✅ | — | — | — | ✅ | test_l3_put / remote_store |
 | pto.comm.tget | TGET | comm | ✅ | — | — | — | ✅ | test_l3_get |

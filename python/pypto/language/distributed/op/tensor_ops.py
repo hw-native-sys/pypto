@@ -44,7 +44,7 @@ from collections.abc import Sequence
 from typing import overload
 
 from pypto.ir.op.distributed import tensor_ops as _ir_tensor
-from pypto.language.typing import IntLike, Ptr
+from pypto.language.typing import AsyncEvent, AsyncSession, IntLike, Ptr
 from pypto.language.typing.tensor import Tensor
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir
@@ -484,6 +484,91 @@ def put(
         chunk_rows=chunk_rows,
         chunk_cols=chunk_cols,
         pipeline=pipeline,
+    )
+
+
+def put_async(
+    dst: DistributedTensor,
+    peer: IntLike,
+    src: DistributedTensor | Tensor,
+    session: AsyncSession,
+    dst_offsets: Sequence[IntLike] | None = None,
+    src_offsets: Sequence[IntLike] | None = None,
+    shape: Sequence[IntLike] | None = None,
+) -> AsyncEvent:
+    """Cross-rank asynchronous put: issue an SDMA write, keep computing, drain later.
+
+    Issues the transfer on the SDMA engine and returns immediately with a
+    completion handle, so local compute can overlap it::
+
+        sess = pld.system.async_session()
+        evt = pld.tensor.put_async(win, peer, chunk, sess)
+        ...                                    # overlaps the transfer
+        pld.system.wait_async_event(evt, sess)
+
+    Differences from the synchronous
+    [`put`][pypto.language.distributed.op.tensor_ops.put]:
+
+    * **No staging tile.** PTOAS ``pto.comm.tput_async`` moves GM->GM directly
+      and takes no ``buf(...)`` operand, so there is no VEC bounce buffer, and no
+      ``chunk_rows`` / ``chunk_cols`` / ``pipeline`` to size one.
+    * **No ``atomic``.** ``pto.comm.tput_async`` has no atomicType operand at all,
+      so an atomic combine is inexpressible — use ``put`` for that.
+    * **Static, flat-contiguous, logical-1D regions only** (every dimension except
+      the last is 1), mirroring PTOAS ``verifyAsyncFlatContiguous1DGMViewLike``.
+
+    The event **must** be drained by
+    [`wait_async_event`][pypto.language.distributed.op.system_ops.wait_async_event]
+    before the kernel ends and before any cross-rank ``notify`` that publishes
+    the transferred data: the release fence and the peer cache invalidate are
+    emitted after the wait, not after this issue.
+
+    Args:
+        dst: Window-bound :class:`pld.DistributedTensor` destination (the peer
+            rank's slice). A plain :class:`pl.Tensor` is rejected.
+        peer: Peer rank index.
+        src: Local source — a :class:`pld.DistributedTensor` or a plain
+            :class:`pl.Tensor` sharing ``dst``'s element type. Window membership
+            is not required on the source side.
+        session: The [`AsyncSession`][pypto.language.AsyncSession] from
+            [`pld.system.async_session`][pypto.language.distributed.op.system_ops.async_session].
+        dst_offsets: Optional offsets into the peer ``dst`` slice.
+        src_offsets: Optional offsets into the local ``src`` slice.
+        shape: Optional static transfer shape. Required when either offset
+            argument is provided, and must itself be logically 1-D.
+
+    Returns:
+        An [`AsyncEvent`][pypto.language.AsyncEvent] completion handle.
+    """
+    dst_expr = _unwrap(dst)
+    if not isinstance(dst_expr, Expr) or not isinstance(dst_expr.type, _ir.DistributedTensorType):
+        got = _ir.python_print_type(dst_expr.type) if isinstance(dst_expr, Expr) else type(dst_expr).__name__
+        raise TypeError(f"pld.tensor.put_async expects a DistributedTensor dst (window-bound); got {got}")
+    src_expr = _unwrap(src)
+    if not isinstance(src_expr, Expr) or not isinstance(
+        src_expr.type, (_ir.TensorType, _ir.DistributedTensorType)
+    ):
+        got = _ir.python_print_type(src_expr.type) if isinstance(src_expr, Expr) else type(src_expr).__name__
+        raise TypeError(f"pld.tensor.put_async expects a Tensor or DistributedTensor src; got {got}")
+    has_region = dst_offsets is not None or src_offsets is not None or shape is not None
+    if has_region and (dst_offsets is None or src_offsets is None or shape is None):
+        raise ValueError("pld.tensor.put_async dst_offsets, src_offsets, and shape must be provided together")
+
+    if not has_region:
+        return AsyncEvent(expr=_ir_tensor.put_async(dst_expr, _unwrap(peer), src_expr, _unwrap(session)))
+    assert dst_offsets is not None
+    assert src_offsets is not None
+    assert shape is not None
+    return AsyncEvent(
+        expr=_ir_tensor.put_async(
+            dst_expr,
+            _unwrap(peer),
+            src_expr,
+            _unwrap(session),
+            dst_offsets=_normalize_intlike(dst_offsets),
+            src_offsets=_normalize_intlike(src_offsets),
+            shape=_normalize_intlike(shape),
+        )
     )
 
 
@@ -1099,6 +1184,7 @@ __all__ = [
     "broadcast",
     "get",
     "put",
+    "put_async",
     "remote_store",
     "reduce_scatter",
     "window",

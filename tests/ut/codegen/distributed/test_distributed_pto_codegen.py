@@ -46,8 +46,9 @@ import pypto.language.distributed as pld
 import pytest
 from _pto_loc_common import strip_loc
 from pypto import DataType, backend, codegen, ir, passes
-from pypto.backend import BackendType
+from pypto.backend import BackendType, pto_backend
 from pypto.ir.builder import IRBuilder
+from pypto.ir.compile import compile as ir_compile
 from pypto.ir.instruments import make_roundtrip_instrument
 from pypto.ir.op.distributed import system_ops as dist_system
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
@@ -1600,6 +1601,381 @@ def test_put_emits_comm_tput_with_attr_and_staging_tile():
     assert "pto.addptr" in mlir
     assert "_peer_pview" in mlir
     assert "_local_pview" in mlir
+
+
+def test_put_async_emits_tput_async_without_stage_or_trailing_drain():
+    """The async put emits build_async_session + tput_async + wait_async_event.
+
+    Pins the three ways the emitted MLIR differs from the synchronous put, each
+    of which is the point of the op rather than an incidental detail:
+
+    * **no `buf(...)` staging operand** — PTOAS `TPutAsyncOp` takes only
+      `(dst, src, session)`; SDMA moves GM->GM without a UB bounce.
+    * **the leading `pto.barrier <PIPE_ALL>` survives, the trailing one does
+      not** — the leading barrier orders a preceding TSTORE before the transfer
+      reads the source, which asynchrony does not change; the trailing drain is
+      exactly the stall the event replaces.
+    * **`pto.cmo.cacheinvalid` lands after the wait, not after the issue** — at
+      the issue the data has not landed at the peer yet.
+    """
+
+    @pl.program
+    class PAsync:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[1, 64], pl.FP16],
+            src: pld.DistributedTensor[[1, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            sess = pld.system.async_session()
+            evt = pld.tensor.put_async(dst, peer, src, sess)
+            pld.system.wait_async_event(evt, sess)
+
+    mlir = _generate_mlir(PAsync)
+    lines = mlir.splitlines()
+
+    # Session build, against the runtime-owned hidden workspace pointer.
+    build_line = next(line for line in lines if "pto.comm.build_async_session" in line)
+    assert "!pto.ptr<i8>" in build_line, build_line
+    assert "!pto.async_session" in build_line, build_line
+    assert "!pto.tile_buf<loc=vec" in build_line, build_line
+    # Default path must emit PyPTO's 1 MB chunk size, not omit the attr (PTOAS
+    # would then silently apply 32 KB).
+    assert "block_bytes = 1048576 : i64" in build_line, build_line
+    assert "sync_id = 0 : i32" in build_line, build_line
+
+    # The transfer: no staging buffer group, and the same partition view type on
+    # both sides exactly as the synchronous put emits.
+    tput_line = next(line for line in lines if "pto.comm.tput_async(" in line)
+    assert "buf(" not in tput_line, tput_line
+    assert tput_line.count("!pto.partition_tensor_view<1x64xf16>") == 2, tput_line
+    assert "!pto.async_event" in tput_line, tput_line
+    assert "atomic_type" not in tput_line, tput_line
+
+    # Peer addressing is the synchronous put's, unchanged.
+    assert "pto.addptr" in mlir
+    assert "_peer_pview" in mlir
+    assert "_local_pview" in mlir
+
+    wait_idx = next(i for i, line in enumerate(lines) if "pto.comm.wait_async_event" in line)
+    tput_idx = next(i for i, line in enumerate(lines) if "pto.comm.tput_async(" in line)
+    invalidate_idx = next(i for i, line in enumerate(lines) if "pto.cmo.cacheinvalid" in line)
+
+    # The deferred release marker: after the drain, never at the issue.
+    assert tput_idx < wait_idx < invalidate_idx, (
+        f"cacheinvalid must follow the wait; got tput={tput_idx}, wait={wait_idx}, "
+        f"invalidate={invalidate_idx}"
+    )
+
+    # And the paired GM release fence (InsertCommFence's half) after that, so the
+    # full data-before-signal sequence sits behind the drain rather than the issue.
+    fence_idx = next(i for i, line in enumerate(lines) if "pto.fence.barrier_all" in line)
+    assert invalidate_idx < fence_idx, (
+        f"the GM release fence must follow the peer invalidate; got invalidate={invalidate_idx}, "
+        f"fence={fence_idx}"
+    )
+
+    # Barriers: one before the transfer, none between it and the wait.
+    barriers_before = [i for i, line in enumerate(lines) if "pto.barrier <PIPE_ALL>" in line and i < tput_idx]
+    barriers_between = [
+        i for i, line in enumerate(lines) if "pto.barrier <PIPE_ALL>" in line and tput_idx < i < wait_idx
+    ]
+    assert barriers_before, "the leading source-ordering barrier must be kept"
+    assert not barriers_between, (
+        f"no trailing drain belongs between the async issue and its wait; found at {barriers_between}"
+    )
+
+
+def test_put_async_emitted_pto_assembles(tmp_path, monkeypatch):
+    """The emitted async-put PTO carries typed attrs the assembler requires.
+
+    `sync_id` is `OptionalAttr<I32Attr>`; a bare `{sync_id = 0}` parses as i64
+    and is rejected. Stub `_compile_pto_module` the way the put_async artifact
+    tests do, and pin the MLIR that would have been assembled.
+    """
+
+    captured: dict[str, str] = {}
+
+    def _capture(pto_code, _module_name, _output_dir, _memory_planner=None):
+        captured["pto"] = pto_code
+        return 'extern "C" __global__ AICORE void test_func() {}\n'
+
+    monkeypatch.setattr(pto_backend, "_compile_pto_module", _capture)
+
+    @pl.program
+    class PAsm:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[1, 64], pl.FP16],
+            src: pld.DistributedTensor[[1, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            sess = pld.system.async_session()
+            evt = pld.tensor.put_async(dst, peer, src, sess)
+            pld.system.wait_async_event(evt, sess)
+
+    ir_compile(PAsm, skip_ptoas=False, platform="a2a3", output_dir=str(tmp_path / "gen"))
+
+    pto = captured["pto"]
+    build_line = next(line for line in pto.splitlines() if "pto.comm.build_async_session" in line)
+    assert "sync_id = 0 : i32" in build_line, build_line
+    assert "block_bytes = 1048576 : i64" in build_line, build_line
+
+
+def test_put_async_emits_explicit_block_bytes():
+    """A caller-supplied chunk size must survive tensor→tile conversion into the attr.
+
+    The default-path test above pins that omitting the attr still emits 1 MB.
+    This pins the other direction: an explicit value is not dropped or replaced
+    by that default (ConvertTensorToTileOps forwards the kwargs onto
+    ``pld.tile.async_session``).
+    """
+
+    @pl.program
+    class PExplicit:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[1, 64], pl.FP16],
+            src: pld.DistributedTensor[[1, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            sess = pld.system.async_session(block_bytes=65536)
+            evt = pld.tensor.put_async(dst, peer, src, sess)
+            pld.system.wait_async_event(evt, sess)
+
+    mlir = _generate_mlir(PExplicit)
+    build_line = next(line for line in mlir.splitlines() if "pto.comm.build_async_session" in line)
+    assert "block_bytes = 65536 : i64" in build_line, build_line
+    assert "sync_id = 0 : i32" in build_line, build_line
+
+
+def _generate_backend_artifact(program_cls, output_dir, monkeypatch) -> dict[str, str]:
+    """Run Default passes then PTO generate, stubbing ptoas the way prefetch does."""
+    optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program_cls)
+    monkeypatch.setattr(
+        pto_backend,
+        "_compile_pto_module",
+        lambda _pto_code, _module_name, _output_dir, _memory_planner=None: (
+            'extern "C" __global__ AICORE void test_func() {}\n'
+        ),
+    )
+    return pto_backend.generate(optimized, str(output_dir), skip_ptoas=False)
+
+
+def test_put_async_artifact_enables_sdma(tmp_path, monkeypatch):
+    """Building an async session must inject DMA_WORKSPACE_SDMA and set enable_sdma.
+
+    MLIR assertions cannot see this: the hidden workspace pointer and the
+    artifact flag live in the kernel wrapper / kernel_config.py, which is what
+    ChipWorker uses to provision the a2a3 SDMA workspace. Prefetch pins the same
+    contract; put_async shares the session/workspace plumbing and must too.
+    """
+
+    @pl.program
+    class PutAsyncArtifact:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[1, 64], pl.FP16],
+            src: pld.DistributedTensor[[1, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            sess = pld.system.async_session()
+            evt = pld.tensor.put_async(dst, peer, src, sess)
+            pld.system.wait_async_event(evt, sess)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def orchestrate(
+            self,
+            dst: pld.DistributedTensor[[1, 64], pl.FP16],
+            src: pld.DistributedTensor[[1, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            self.kernel(dst, src, peer)
+
+    result = _generate_backend_artifact(PutAsyncArtifact, tmp_path / "put_async", monkeypatch)
+    wrapper = next(
+        content for path, content in result.items() if path.startswith("kernels/") and path.endswith(".cpp")
+    )
+    assert "get_dma_workspace(args, DMA_WORKSPACE_SDMA)" in wrapper, wrapper
+    assert '"enable_sdma": True' in result["kernel_config.py"], result["kernel_config.py"]
+
+
+def test_sync_put_artifact_does_not_enable_sdma(tmp_path, monkeypatch):
+    """Synchronous put is MTE TLOAD/TSTORE — it must not flip the SDMA workspace flag."""
+
+    @pl.program
+    class SyncPutArtifact:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[1, 64], pl.FP16],
+            src: pld.DistributedTensor[[1, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            pld.tensor.put(dst, peer, src)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def orchestrate(
+            self,
+            dst: pld.DistributedTensor[[1, 64], pl.FP16],
+            src: pld.DistributedTensor[[1, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            self.kernel(dst, src, peer)
+
+    result = _generate_backend_artifact(SyncPutArtifact, tmp_path / "sync_put", monkeypatch)
+    wrapper = next(
+        content for path, content in result.items() if path.startswith("kernels/") and path.endswith(".cpp")
+    )
+    assert "get_dma_workspace" not in wrapper, wrapper
+    assert '"enable_sdma"' not in result["kernel_config.py"], result["kernel_config.py"]
+
+
+def test_put_async_without_a_wait_is_rejected():
+    """An async put whose event is never drained fails codegen rather than emitting.
+
+    Both release markers — the peer-region cacheinvalid and the GM fence — are
+    emitted at the wait. With no wait, neither is emitted, and the peer can read
+    stale data. Nothing downstream would notice: the CPU simulator copies
+    synchronously, and a single-rank test has no peer to observe the staleness.
+    """
+
+    @pl.program
+    class PNoWait:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[1, 64], pl.FP16],
+            src: pld.DistributedTensor[[1, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            sess = pld.system.async_session()
+            pld.tensor.put_async(dst, peer, src, sess)
+
+    with pytest.raises(ValueError, match="never.*waited|wait_async_event"):
+        _generate_mlir(PNoWait)
+
+
+def test_notify_while_an_async_put_is_in_flight_is_rejected():
+    """Publishing before the drain is rejected — the other half of the wait contract.
+
+    `test_put_async_without_a_wait_is_rejected` covers "never waited". This covers
+    "waited, but too late": a notify between the issue and the wait releases data
+    that has not reached the peer. Since #2591 removed the barrier PyPTO emitted
+    before TNOTIFY, and PTOAS's TNotify lowering drains only MTE2/MTE3 — neither
+    of which SDMA uses — the explicit wait is the only thing ordering the two.
+    """
+
+    @pl.program
+    class PNotifyEarly:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[1, 64], pl.FP16],
+            src: pld.DistributedTensor[[1, 64], pl.FP16],
+            signal: pld.DistributedTensor[[1, 1], pl.INT32],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            sess = pld.system.async_session()
+            evt = pld.tensor.put_async(dst, peer, src, sess)
+            # Publishes the transfer before it has landed.
+            pld.system.notify(signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
+            pld.system.wait_async_event(evt, sess)
+
+    with pytest.raises(ValueError, match="in flight|wait_async_event"):
+        _generate_mlir(PNotifyEarly)
+
+
+def test_notify_after_the_wait_is_accepted():
+    """The same kernel with the drain before the notify compiles — the guard is
+    ordering-sensitive, not a blanket ban on notify in an async kernel."""
+
+    @pl.program
+    class PNotifyLate:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[1, 64], pl.FP16],
+            src: pld.DistributedTensor[[1, 64], pl.FP16],
+            signal: pld.DistributedTensor[[1, 1], pl.INT32],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            sess = pld.system.async_session()
+            evt = pld.tensor.put_async(dst, peer, src, sess)
+            pld.system.wait_async_event(evt, sess)
+            pld.system.notify(signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
+
+    mlir = _generate_mlir(PNotifyLate)
+    lines = mlir.splitlines()
+    wait_idx = next(i for i, ln in enumerate(lines) if "pto.comm.wait_async_event" in ln)
+    notify_idx = next(i for i, ln in enumerate(lines) if "pto.comm.tnotify" in ln)
+    assert wait_idx < notify_idx, "the drain must precede the publish"
+
+
+def test_prefetch_and_async_session_in_one_kernel_is_rejected():
+    """Two SDMA sessions in one function collide, so the combination is refused.
+
+    Both builders default `channel_group_idx` to `get_block_idx()` and
+    `queue_num` to 1, and the session's GM state is keyed by (channel group,
+    queue) — `sync_id` separates neither. On one core they land on identical
+    state, and the later `InitializeRuntimeCtx` zeroes a post-done record the
+    earlier session's wait polls, while each caches its own `sqHead`/`sqTail`
+    so the second post reuses a claimed SQE slot.
+
+    The simulator would not catch this: it never builds a real session.
+    """
+
+    @pl.program
+    class PBoth:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[1, 64], pl.FP16],
+            src: pld.DistributedTensor[[1, 64], pl.FP16],
+            warm: pl.Tensor[[1, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            ctx = pl.prefetch.make_context()
+            pev = pl.prefetch.async_prefetch(warm, ctx)
+            pl.prefetch.wait(pev, pl.prefetch.session(ctx))
+
+            sess = pld.system.async_session()
+            evt = pld.tensor.put_async(dst, peer, src, sess)
+            pld.system.wait_async_event(evt, sess)
+
+    with pytest.raises(ValueError, match="two independent SDMA sessions|both pl.prefetch"):
+        _generate_mlir(PBoth)
+
+
+def test_two_async_sessions_in_one_kernel_is_rejected():
+    """Two put_async sessions collide the same way prefetch + put_async does.
+
+    Each `pld.tile.async_session` defaults to the same channel group and queue,
+    so a second build in the same function is refused even without prefetch.
+    """
+
+    @pl.program
+    class PTwo:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[1, 64], pl.FP16],
+            src: pld.DistributedTensor[[1, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            sess0 = pld.system.async_session()
+            evt0 = pld.tensor.put_async(dst, peer, src, sess0)
+            pld.system.wait_async_event(evt0, sess0)
+            sess1 = pld.system.async_session()
+            evt1 = pld.tensor.put_async(dst, peer, src, sess1)
+            pld.system.wait_async_event(evt1, sess1)
+
+    with pytest.raises(ValueError, match="more than one pld.system.async_session"):
+        _generate_mlir(PTwo)
 
 
 def test_put_chunk_shrinks_staging_tile_keeping_full_partition_view():

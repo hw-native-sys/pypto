@@ -16,7 +16,7 @@ matching IR builder in :mod:`pypto.ir.op.distributed.tile_ops`.
 from collections.abc import Sequence
 
 from pypto.ir.op.distributed import tile_ops as _ir_tile
-from pypto.language.typing import IntLike, Tile
+from pypto.language.typing import AsyncEvent, AsyncSession, IntLike, Scalar, Tile
 from pypto.language.typing.tensor import Tensor
 from pypto.pypto_core import ir as _ir
 from pypto.pypto_core.ir import AtomicType, Call, Expr
@@ -309,4 +309,65 @@ def get(
     return _ir_tile.get(dst_expr, _unwrap(peer), src_expr, stage_expr, stage2=stage2_expr)
 
 
-__all__ = ["get", "remote_load", "remote_store", "put"]
+def async_session(scratch: Tile, *, sync_id: int = 0, block_bytes: int = 0) -> AsyncSession:
+    """Tile-level form of :func:`pld.system.async_session` with an explicit UB scratch.
+
+    Emitted by ``ConvertTensorToTileOps``; defined here only so the printer's
+    output roundtrips through the parser. User code calls
+    :func:`pld.system.async_session`.
+    """
+    return AsyncSession(
+        expr=_ir_tile.async_session(_unwrap(scratch), sync_id=sync_id, block_bytes=block_bytes)
+    )
+
+
+def put_async(
+    dst: DistributedTensor,
+    peer: IntLike,
+    src: DistributedTensor | Tensor,
+    session: AsyncSession,
+    dst_offsets: Sequence[IntLike] | None = None,
+    src_offsets: Sequence[IntLike] | None = None,
+    shape: Sequence[IntLike] | None = None,
+) -> AsyncEvent:
+    """Tile-level form of :func:`pld.tensor.put_async`.
+
+    Emitted by ``ConvertTensorToTileOps``; defined here only so the printer's
+    output roundtrips through the parser. User code calls
+    :func:`pld.tensor.put_async`. Unlike :func:`put` there is no staging tile.
+    """
+    has_region = dst_offsets is not None or src_offsets is not None or shape is not None
+    if has_region and (dst_offsets is None or src_offsets is None or shape is None):
+        raise ValueError("pld.tile.put_async dst_offsets, src_offsets, and shape must be provided together")
+    if not has_region:
+        return AsyncEvent(
+            expr=_ir_tile.put_async(_unwrap(dst), _unwrap(peer), _unwrap(src), _unwrap(session))
+        )
+    assert dst_offsets is not None
+    assert src_offsets is not None
+    assert shape is not None
+    return AsyncEvent(
+        expr=_ir_tile.put_async(
+            _unwrap(dst),
+            _unwrap(peer),
+            _unwrap(src),
+            _unwrap(session),
+            dst_offsets=_normalize_intlike(dst_offsets),
+            src_offsets=_normalize_intlike(src_offsets),
+            shape=_normalize_intlike(shape),
+        )
+    )
+
+
+def wait_async_event(event: AsyncEvent, session: AsyncSession, scratch: Tile) -> Scalar:
+    """Tile-level form of :func:`pld.system.wait_async_event`, carrying the scratch.
+
+    Emitted by ``ConvertTensorToTileOps``, which threads in the session's Vec(UB)
+    scratch so its live range spans the whole async window. Defined here only so
+    the printer's output roundtrips through the parser; user code calls
+    :func:`pld.system.wait_async_event`.
+    """
+    return Scalar(expr=_ir_tile.wait_async_event(_unwrap(event), _unwrap(session), _unwrap(scratch)))
+
+
+__all__ = ["async_session", "get", "put", "put_async", "remote_load", "remote_store", "wait_async_event"]

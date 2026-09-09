@@ -103,6 +103,21 @@ void CheckSubviewTileCompat(const ir::TileType& source, const ir::TileType& resu
                             const std::string& op_name);
 std::string EmitIndexOperand(codegen::PTOCodegen& codegen, const ir::ExprPtr& expr, std::string_view context);
 
+/**
+ * @brief Emit `pto.comm.wait_async_event(event, session) -> i1` and return its SSA.
+ *
+ * One PTOAS op, one emission site. Two DSL surfaces reach it — `pl.prefetch.wait`
+ * and `pld.system.wait_async_event` — and they share the singleton
+ * `!pto.async_event` / `!pto.async_session` handle types, so the emitted line is
+ * identical for both. Anything that differs (the async put's deferred peer
+ * `cacheinvalid`, for instance) belongs in the caller, after this returns.
+ *
+ * `result_ssa` is the name to define the `i1` under; pass the assignment LHS when
+ * there is one, or a fresh temp for a bare statement.
+ */
+void EmitWaitAsyncEventPTO(codegen::PTOCodegen& codegen, const std::string& result_ssa,
+                           const std::string& event_ssa, const std::string& session_ssa);
+
 }  // namespace pto_ops_detail
 
 }  // namespace backend

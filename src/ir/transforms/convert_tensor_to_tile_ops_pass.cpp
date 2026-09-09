@@ -14,6 +14,7 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -2563,6 +2564,84 @@ struct IncoreTransformResult {
   size_t num_added_outputs;
 };
 
+/**
+ * @brief Thread each SDMA session's scratch buffer into the waits that drain it.
+ *
+ * Runs after the op conversions, on the converted body. The
+ * `pld.system.async_session` conversion emits
+ * `scratch = tile.create(...)` + `sess = pld.tile.async_session(scratch)`, and
+ * this rewrites every `pld.system.wait_async_event(event, sess)` into
+ * `pld.tile.wait_async_event(event, sess, scratch)`.
+ *
+ * **Why this is a correctness requirement, not bookkeeping.** pto-isa
+ * `BuildSdmaSession` stores `session.tmpBufAddr = tmpBuf.addr`, and
+ * `AsyncEvent::Wait -> SdmaWaitEvent` reads the completion word back through
+ * that same address. So the hardware touches the scratch at every wait, while
+ * the IR — without this rewrite — mentions it only at the session build.
+ * MemoryReuse computes lifetimes from IR uses (`var_raw_last_use_`), so it would
+ * end the scratch's live range at the build and be free to hand that UB address
+ * to a compute tile issued between the issue and the wait. The result is a
+ * corrupted completion word on hardware only, with no simulator signal.
+ *
+ * It lives here rather than in the conversion registry because a
+ * `ConversionFunc` is a pure `(args, kwargs, span)` function: it sees the
+ * session operand but cannot reach the defining `pld.tile.async_session` to find
+ * which scratch that session owns. Resolving that needs def-use, which this pass
+ * already has.
+ *
+ * Complexity: one traversal with map lookups, O(N log N).
+ */
+class AsyncWaitScratchBinder : public IRMutator {
+ public:
+  explicit AsyncWaitScratchBinder(OpRegistry& op_registry) : op_registry_(op_registry) {}
+
+  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+    // Record session -> scratch before descending, so a wait later in the same
+    // block resolves. A session is always assigned before it is used (SSA).
+    if (auto call = As<Call>(op->value_)) {
+      if (IsOp(call, "pld.tile.async_session") && !call->args_.empty()) {
+        if (auto scratch = AsVarLike(call->args_[0])) {
+          session_to_scratch_[op->var_.get()] = scratch;
+        }
+      }
+    }
+    return IRMutator::VisitStmt_(op);
+  }
+
+  ExprPtr VisitExpr_(const CallPtr& op) override {
+    auto visited = IRMutator::VisitExpr_(op);
+    auto call = As<Call>(visited);
+    if (!call || !IsOp(call, "pld.system.wait_async_event")) return visited;
+
+    INTERNAL_CHECK_SPAN(call->args_.size() == 2, call->span_)
+        << "Internal error: pld.system.wait_async_event should carry (event, session) at "
+           "conversion time, got "
+        << call->args_.size() << " args";
+    auto session = AsVarLike(call->args_[1]);
+    // A session that is not a Var-bound `pld.tile.async_session` result cannot be
+    // resolved to its scratch. The op deducer already requires an AsyncSession
+    // operand, so this means the session crossed a construct this pass does not
+    // model (a loop-carried arg or a branch join) -- reject rather than silently
+    // emit a wait whose scratch the allocator may recycle.
+    CHECK_SPAN(session, call->span_)
+        << "pld.system.wait_async_event session must be a variable bound directly to "
+           "pld.system.async_session in the same function; an async session cannot be "
+           "carried through a loop argument or branch join in v1";
+    auto it = session_to_scratch_.find(session.get());
+    CHECK_SPAN(it != session_to_scratch_.end(), call->span_)
+        << "pld.system.wait_async_event: no pld.system.async_session defines session '" << session->name_hint_
+        << "' in this function";
+
+    std::vector<ExprPtr> args = call->args_;
+    args.push_back(it->second);
+    return op_registry_.Create("pld.tile.wait_async_event", args, call->kwargs_, call->span_);
+  }
+
+ private:
+  OpRegistry& op_registry_;
+  std::map<const Var*, VarPtr> session_to_scratch_;
+};
+
 IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   auto& conv_registry = OpConversionRegistry::GetInstance();
   auto& op_registry = OpRegistry::GetInstance();
@@ -2632,6 +2711,10 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
 
   auto body_to_transform = SeqStmts::Flatten(std::move(non_return_stmts), span);
   auto mutated = mutator.VisitStmt(body_to_transform);
+  // Post-conversion: bind each SDMA session's scratch into the waits that drain
+  // it. Must follow the conversions, which are what create the scratch.
+  AsyncWaitScratchBinder scratch_binder(op_registry);
+  mutated = scratch_binder.VisitStmt(mutated);
   auto transformed = FlattenToStmts(mutated);
   new_stmts.insert(new_stmts.end(), transformed.begin(), transformed.end());
 

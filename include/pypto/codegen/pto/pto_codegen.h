@@ -553,6 +553,62 @@ class PTOCodegen : public CodegenBase {
   [[nodiscard]] std::string GetSdmaWorkspaceArgSSA() const { return fs_.sdma_workspace_arg_ssa; }
 
   /**
+   * @brief The peer-region cache invalidate an async remote write owes its wait.
+   *
+   * A synchronous `pld.tile.put` emits `pto.cmo.cacheinvalid <dst_pview>`
+   * inline, right after the transfer: the peer offset is not IR-expressible, so
+   * `InsertCommFence` deliberately leaves that marker to codegen and inserts only
+   * the GM release fence. An *async* put cannot do the same, because at its issue
+   * site the data has not landed yet — the invalidate belongs after the
+   * `wait_async_event` that drains the event.
+   *
+   * The wait's own operands are only `(event, session)`, so its emitter cannot
+   * reconstruct the destination view. `pld.tile.put_async` therefore parks the
+   * view here keyed by the event's SSA name, and the wait emitter takes it back
+   * out and emits the marker after the drain. The key is reliable because
+   * `GenerateFunction` pre-binds each assignment LHS, so producer and consumer
+   * resolve the same event to the same SSA name.
+   */
+  struct PendingPeerInvalidate {
+    std::string partition_view;  ///< dst partition-view SSA to invalidate
+    std::string partition_type;  ///< its MLIR partition_tensor_view type string
+  };
+
+  /// Park the peer invalidate `event_ssa`'s transfer owes, to be emitted after
+  /// the wait that drains it. Overwrites any entry for the same event: an event
+  /// SSA is single-assignment, so a second write means the first was consumed.
+  void DeferPeerInvalidate(const std::string& event_ssa, PendingPeerInvalidate pending) {
+    fs_.pending_peer_invalidates[event_ssa] = std::move(pending);
+  }
+
+  /// Take and erase the invalidate parked for `event_ssa`, or nullopt when the
+  /// event was not produced by an async remote write in this function (e.g. a
+  /// `pl.prefetch` event, which has no peer region to invalidate).
+  ///
+  /// The walk is syntactic: a wait inside one branch of an `if`, or inside a
+  /// loop that may run zero times, still clears the entry. A later notify on
+  /// the skipped path is then not rejected. v1 documents straight-line
+  /// issue / wait / notify; path-sensitive tracking is not implemented here.
+  [[nodiscard]] std::optional<PendingPeerInvalidate> TakeDeferredPeerInvalidate(
+      const std::string& event_ssa) {
+    auto it = fs_.pending_peer_invalidates.find(event_ssa);
+    if (it == fs_.pending_peer_invalidates.end()) return std::nullopt;
+    PendingPeerInvalidate pending = std::move(it->second);
+    fs_.pending_peer_invalidates.erase(it);
+    return pending;
+  }
+
+  /// Event SSAs whose peer invalidate is still parked — non-empty at the end of a
+  /// function means an async put was never drained, which would silently publish
+  /// stale data to the peer.
+  [[nodiscard]] std::vector<std::string> GetUndrainedAsyncEvents() const {
+    std::vector<std::string> names;
+    names.reserve(fs_.pending_peer_invalidates.size());
+    for (const auto& [ssa, _] : fs_.pending_peer_invalidates) names.push_back(ssa);
+    return names;
+  }
+
+  /**
    * @brief SSA name of the synthetic raw dispatch-args pointer parameter.
    *
    * Functions containing ``pld.system.defer_wait`` receive one hidden
@@ -1046,8 +1102,14 @@ class PTOCodegen : public CodegenBase {
     std::set<const ir::Var*> ffts_workspace_vars;
 
     /// SSA name of the synthetic runtime-owned SDMA workspace pointer param.
-    /// Empty when the current function does not use prefetch.make_context.
+    /// Empty when the current function does not use prefetch.make_context or
+    /// pld.tile.async_session.
     std::string sdma_workspace_arg_ssa;
+
+    /// Async-event SSA -> the peer-region cache invalidate its transfer owes.
+    /// Written by pld.tile.put_async, consumed by pld.tile.wait_async_event.
+    /// See DeferPeerInvalidate for why the marker cannot be emitted at the issue.
+    std::map<std::string, PendingPeerInvalidate> pending_peer_invalidates;
 
     /// Raw runtime dispatch-args pointer used by deferred completion adapters.
     std::string deferred_completion_raw_args_ssa;

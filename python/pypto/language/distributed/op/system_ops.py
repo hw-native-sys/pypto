@@ -37,7 +37,7 @@ Typical use sites for ``world_size``:
 from collections.abc import Sequence
 
 from pypto.ir.op.distributed import system_ops as _ir_system
-from pypto.language.typing import IntLike, Scalar
+from pypto.language.typing import AsyncEvent, AsyncSession, IntLike, Scalar
 from pypto.pypto_core.ir import Call, NotifyOp, WaitCmp
 
 from ..typing.comm_ctx import CommCtx
@@ -207,4 +207,60 @@ def defer_wait(
     return _ir_system.defer_wait(_unwrap(signal), _normalize_intlike(offsets), _unwrap(expected), cmp)
 
 
-__all__ = ["defer_wait", "get_comm_ctx", "notify", "nranks", "rank", "wait", "world_size"]
+def async_session(*, sync_id: int = 0, block_bytes: int = 0) -> AsyncSession:
+    """Build the SDMA session that ``pld.tensor.put_async`` issues transfers on.
+
+    Build one per InCore kernel, before the first ``put_async``, and pass the
+    same handle to every ``put_async`` and ``wait_async_event``. There is no user
+    operand: the runtime owns and injects the SDMA workspace through a hidden
+    codegen parameter, and the Vec(UB) scratch buffer the session needs is
+    materialized by ``ConvertTensorToTileOps``.
+
+    Args:
+        sync_id: SDMA sync-flag id, ``0``-``7`` (keyword-only). pto-isa
+            ``BuildSdmaSession`` rejects a larger id and returns an invalid
+            session that PTOAS's op silently discards, so the range is checked
+            at IR construction.
+        block_bytes: SDMA chunking granularity in bytes (keyword-only). ``0``
+            selects PyPTO's 1 MB default; leaving it to PTOAS would silently
+            apply 32 KB.
+
+    Returns:
+        An [`AsyncSession`][pypto.language.AsyncSession] handle.
+    """
+    return AsyncSession(expr=_ir_system.async_session(sync_id=sync_id, block_bytes=block_bytes))
+
+
+def wait_async_event(event: AsyncEvent, session: AsyncSession) -> Scalar:
+    """Block until an async transfer completes, and drain it.
+
+    This is the acquire half of
+    [`put_async`][pypto.language.distributed.op.tensor_ops.put_async]. The GM
+    release fence and the peer-region cache invalidate for the transfer are
+    emitted **after** this wait rather than after the issue, so a cross-rank
+    [`notify`][pypto.language.distributed.op.system_ops.notify] that publishes the
+    transferred data must follow it.
+
+    Args:
+        event: An [`AsyncEvent`][pypto.language.AsyncEvent] from
+            [`pld.tensor.put_async`][pypto.language.distributed.op.tensor_ops.put_async].
+        session: The matching [`AsyncSession`][pypto.language.AsyncSession] from
+            [`async_session`][pypto.language.distributed.op.system_ops.async_session].
+
+    Returns:
+        A ``BOOL`` [`Scalar`][pypto.language.Scalar] done flag.
+    """
+    return Scalar(expr=_ir_system.wait_async_event(_unwrap(event), _unwrap(session)))
+
+
+__all__ = [
+    "async_session",
+    "defer_wait",
+    "get_comm_ctx",
+    "notify",
+    "nranks",
+    "rank",
+    "wait",
+    "wait_async_event",
+    "world_size",
+]

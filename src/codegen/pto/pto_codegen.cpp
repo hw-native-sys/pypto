@@ -556,10 +556,17 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
     return memref_tile_types_;
   }
 
-  /// Returns true when the visited body invokes prefetch.make_context. Drives
-  /// PTOCodegen's decision to append the hidden runtime-owned SDMA workspace
-  /// pointer to the emitted func.func signature.
+  /// Returns true when the visited body invokes prefetch.make_context or
+  /// pld.tile.async_session. Drives PTOCodegen's decision to append the hidden
+  /// runtime-owned SDMA workspace pointer to the emitted func.func signature.
   [[nodiscard]] bool UsesSdmaWorkspace() const { return uses_sdma_workspace_; }
+
+  /// True when the body builds a prefetch async context, and separately when it
+  /// builds a `pld.system.async_session`. A function doing both, or building more
+  /// than one async-put session, is rejected: see GenerateFunction.
+  [[nodiscard]] bool UsesPrefetchContext() const { return uses_prefetch_context_; }
+  [[nodiscard]] bool UsesAsyncSession() const { return async_session_builds_ > 0; }
+  [[nodiscard]] int AsyncSessionBuildCount() const { return async_session_builds_; }
 
   /// Returns true when the visited body registers deferred task completion.
   /// Drives the hidden raw dispatch-args pointer shared with the kernel wrapper.
@@ -595,8 +602,19 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
 
   void VisitExpr_(const ir::CallPtr& op) override {
     if (op->op_) {
-      if (!uses_sdma_workspace_ && ir::IsOp(op, "prefetch.make_context")) {
+      // Both async-SDMA session builders drive the same hidden workspace param:
+      // prefetch owns its scratch inside PrefetchAsyncContext, while
+      // pld.tile.async_session carries an explicit one, but each needs the
+      // runtime-provisioned workspace pointer. They are tracked separately
+      // because a function using *both* is rejected -- see the check in
+      // GenerateFunction.
+      if (ir::IsOp(op, "prefetch.make_context")) {
         uses_sdma_workspace_ = true;
+        uses_prefetch_context_ = true;
+      }
+      if (ir::IsOp(op, "pld.tile.async_session")) {
+        uses_sdma_workspace_ = true;
+        ++async_session_builds_;
       }
       if (!uses_deferred_completion_ && ir::IsOp(op, "pld.system.defer_wait")) {
         uses_deferred_completion_ = true;
@@ -623,6 +641,8 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
   std::map<const ir::Var*, std::shared_ptr<const TileType>> memref_tile_types_;
   std::set<uint64_t> iter_arg_ids_;
   bool uses_sdma_workspace_ = false;
+  bool uses_prefetch_context_ = false;
+  int async_session_builds_ = 0;
   bool uses_deferred_completion_ = false;
   bool uses_spmd_block_ops_ = false;
   bool uses_subblock_op_ = false;
@@ -921,6 +941,32 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     collector.VisitStmt(func->body_);
   }
   const bool uses_sdma_workspace = collector.UsesSdmaWorkspace();
+  // One SDMA session per function. Both builders default `channel_group_idx` to
+  // `get_block_idx()` and `queue_num` to 1, so on one core they resolve to the
+  // *same* GM state -- `ResolvePostDoneBase` and the SQ channel array are keyed
+  // by (channel group, queue), and `sync_id` separates neither. Two sessions
+  // there corrupt each other three ways: the later `InitializeRuntimeCtx` zeroes
+  // a post-done record the earlier session's wait is polling, each caches its own
+  // `sqHead`/`sqTail` snapshot so the second post reuses a claimed SQE slot, and
+  // both drive the same pipe sync flag. Prefetch builds its session lazily on the
+  // first TPREFETCH_ASYNC, so the interleaving is not even lexically obvious.
+  //
+  // pto-isa already has the fix -- `PrefetchAsyncContextBase` accepts an
+  // `externalSession`, so both surfaces could share one -- but PTOAS's
+  // `pto.make_prefetch_async_context` takes only a workspace and cannot pass one
+  // through yet. Until it can, reject rather than emit a kernel that hangs on
+  // device and looks fine on the simulator (which never builds a real session).
+  CHECK_SPAN(!(collector.UsesPrefetchContext() && collector.UsesAsyncSession()), func->span_)
+      << "InCore function '" << func->name_
+      << "' uses both pl.prefetch and pld.system.async_session. They build two independent SDMA "
+         "sessions that resolve to the same channel group and corrupt each other's queue state. "
+         "Split them into separate kernels; sharing one session needs PTOAS support that does not "
+         "exist yet.";
+  CHECK_SPAN(collector.AsyncSessionBuildCount() <= 1, func->span_)
+      << "InCore function '" << func->name_
+      << "' builds more than one pld.system.async_session. Each session resolves to the same "
+         "channel group and they corrupt each other's queue state. Build one session per kernel "
+         "and pass it to every put_async and wait_async_event.";
   const bool uses_deferred_completion = collector.UsesDeferredCompletion();
   const bool uses_spmd_params = collector.UsesSpmdBlockOps();
   const bool uses_subblock_param = collector.UsesSubblockOp();
@@ -1211,6 +1257,25 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   }
 
   std::string body_content = stream_.str();
+
+  // Every async remote write parks its peer-region cacheinvalid for the
+  // `wait_async_event` that drains it. An entry still parked once the body is
+  // emitted means the transfer was never waited, so that marker was never
+  // emitted and the peer can read stale data — with no simulator signal and no
+  // single-rank test that would notice. Reject rather than emit the kernel.
+  if (auto undrained = GetUndrainedAsyncEvents(); !undrained.empty()) {
+    std::ostringstream names;
+    for (size_t i = 0; i < undrained.size(); ++i) {
+      if (i > 0) names << ", ";
+      names << undrained[i];
+    }
+    CHECK_SPAN(false, func->span_)
+        << "InCore function '" << func->name_ << "' issues an async remote put whose event is never "
+        << "waited: " << names.str()
+        << ". Drain it with pld.system.wait_async_event before the kernel ends — the peer-region "
+           "cache invalidate and the GM release fence are both emitted at that wait, so without it "
+           "the peer may observe stale data.";
+  }
 
   // Render the prologue before flushing constants so constants unique to a
   // shape/stride expression (e.g. the 2 in M * 2) are declared before use.

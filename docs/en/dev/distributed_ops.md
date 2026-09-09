@@ -355,6 +355,87 @@ requires the staging tile to **fit within** the flattened transfer in both
 **static** dims (it may be smaller — a chunk — but never larger; dynamic dims
 are bounded by the chunk at runtime).
 
+### `pld.tensor.put_async` (TPUT_ASYNC) + `pld.system.async_session` / `wait_async_event`
+
+```text
+pld.system.async_session(*, sync_id: int = 0, block_bytes: int = 0) -> AsyncSession
+pld.tensor.put_async(dst, peer, src, session) -> AsyncEvent
+pld.tensor.put_async(dst, peer, src, session, dst_offsets, src_offsets, shape) -> AsyncEvent
+pld.system.wait_async_event(event, session) -> Scalar(BOOL)
+```
+
+The asynchronous dual of `pld.tensor.put`. Where `put` stalls the AIV core
+behind a per-transfer pipe drain, `put_async` issues the write on the **SDMA
+engine** and returns a completion handle, so local compute can overlap the
+transfer:
+
+```python
+sess = pld.system.async_session()               # once per kernel
+evt = pld.tensor.put_async(win, peer, chunk, sess)
+...                                             # local compute overlaps the transfer
+pld.system.wait_async_event(evt, sess)          # drain + acquire
+pld.system.notify(signal, peer=peer, ...)       # MUST follow the wait
+```
+
+**The wait is not optional, and it is not just a performance boundary.** Both
+release markers — the peer-region `pto.cmo.cacheinvalid` and the GM
+`system.fence` — are emitted at the wait rather than at the issue, because at the
+issue the data has not reached the peer yet. A cross-rank `notify` that publishes
+this data must therefore follow the wait. Since #2591 removed the barrier PyPTO
+used to emit before `TNOTIFY`, and PTOAS's own TNotify lowering drains only
+MTE2/MTE3 — neither of which an SDMA transfer uses — the explicit wait is the
+*only* mechanism ordering the transfer against a later publish. Codegen rejects a
+function that issues a `put_async` whose event is never waited.
+
+**Differences from `pld.tensor.put`.** All three follow from PTOAS
+`pto.comm.tput_async` taking only `(dst, src, session)`:
+
+| Aspect | `put` | `put_async` |
+| ------ | ----- | ----------- |
+| staging tile | VEC bounce buffer, `buf(...)` operand | none — SDMA moves GM→GM |
+| `atomic` | `None_` / `Add` | **not expressible** (no atomicType operand) |
+| `chunk_rows` / `chunk_cols` / `pipeline` | size the staging tile | n/a — no staging tile |
+| region shape | any rank, may be dynamic | **static, flat-contiguous, logical-1D** |
+| trailing drain | `pto.barrier <PIPE_ALL>` | replaced by the event |
+| leading barrier | orders a preceding TSTORE into `src` | **kept** — SDMA reads the same GM |
+
+**The 1-D restriction.** `dst` and `src` regions must be fully static and
+*logically* 1-D — every dimension except the last is 1, so the region is one flat
+contiguous run. This mirrors PTOAS's `verifyAsyncFlatContiguous1DGMViewLike` and
+pto-isa's `TPutAsyncIsFlatContiguous1D`. A 2-D window is fine as long as the
+*moved* region is 1-D, so the subregion form (`shape=[1, N]`) covers row pushes.
+Scattered multi-row pushes are **not** covered and must stay on `put`.
+
+**The hidden UB scratch, and why it reaches the wait.** `async_session` lowers to
+`tile.create` (256 B INT8 Vec — pto-isa's `kUbAlignSize`) plus
+`pld.tile.async_session(scratch)`, so the allocator assigns a UB address before
+PTO emission. pto-isa `BuildSdmaSession` stores `session.tmpBufAddr` into that
+buffer and `AsyncEvent::Wait` reads the completion word back through it — so the
+hardware touches the scratch at *every* wait, not just at the build.
+`ConvertTensorToTileOps` therefore threads the same scratch into
+`pld.tile.wait_async_event(event, session, scratch)`; without that operand
+MemoryReuse, which derives lifetimes from IR uses, could hand the address to a
+compute tile issued between the issue and the wait.
+
+**Session attributes.** `sync_id` must be in `[0, 7]` (the SDMA sync-flag id is
+3 bits) and `block_bytes` is the chunking granularity. Both are validated at IR
+construction, because `BuildSdmaSession` returns a validity bool that PTOAS's op
+discards and `__sdma_put_async` never checks — an out-of-range value would reach
+the device as an invalid session rather than an error. `block_bytes` defaults to
+1 MB; leaving the attr off entirely would let PTOAS apply 32 KB silently.
+
+**One session per InCore function.** Call `pld.system.async_session` once and
+reuse it. A second call, or combining it with `pl.prefetch` in the same
+function, builds two sessions on the same channel group; codegen rejects both.
+
+**Tier note.** The `_async` suffix here is the **InCore** p2p op. Plan 80 reserves
+the same suffix for **HOST**-tier collectives (`all_to_all_v_async`, returning a
+`CollectiveHandle`/TaskId). The two never appear at the same kernel level.
+
+**Platform.** a2a3 only. An artifact that builds an SDMA session declares
+`enable_sdma`, and the runtime provisions that workspace only on a2a3 onboard —
+simulation and a5 reject non-empty requirements at worker registration.
+
 ### `pld.tensor.get` (TGET)
 
 ```text
@@ -730,6 +811,17 @@ dispatches before the final `Simplify`.
   `test_get_op.py`, `test_put_op.py`, plus the negative verifier coverage
   in `tests/ut/ir/test_distributed_ops.py`.
 - **Codegen**: `tests/ut/codegen/distributed/test_distributed_pto_codegen.py`.
+- **Async put (`put_async`)**: the op contract lives in
+  `tests/ut/ir/operators/test_async_put_ops.py`; the tensor→tile lowering and the
+  scratch binding in `tests/ut/ir/transforms/test_convert_tensor_to_tile_ops.py`;
+  the deferred release markers in `test_distributed_pto_codegen.py` (including a
+  real `ptoas` assembly round-trip, which is what catches attribute-*type*
+  defects that substring assertions cannot see) and
+  `tests/ut/ir/transforms/test_insert_comm_fence.py`. Its ST,
+  `tests/st/distributed/test_l3_put_async.py`, passed onboard a2a3 P=2
+  and is a2a3-only — the SDMA workspace an async session needs is
+  rejected at worker registration on every other platform, so unlike the rest of
+  this list it has no simulator path.
 - **End-to-end (ST)**: `tests/st/distributed/test_l3_allreduce.py` (mesh
   allreduce with dynamic rank dim `NR = pl.dynamic("NR")`; **P=2** default,
   **P=4** on any four devices (e.g. `--device=0,1,2,3` or `--device=0-3`)),
