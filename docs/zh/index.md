@@ -29,7 +29,7 @@ PyPTO 是**编译器与编程语言**。调度并执行其产物的**运行时**
 | ------ | ---- | -------- |
 | `pl.*` 语言、`ir.compile()`、IR 与 passes | PyPTO | 本站 |
 | `pypto.runtime` —— `ChipWorker`、`DeviceTensor`、`RunConfig`、`benchmark` | PyPTO（其自有 Python 层） | 本站 |
-| 调度器实现、graph building、message queue、tensormap 与 ring buffer | simpler | <https://hw-native-sys.github.io/simpler/> |
+| 调度器实现、graph building、message queue、tensormap 与 ring buffer | simpler | <https://www.pypto.ai/simpler/> |
 
 `pypto.runtime` 是 PyPTO 自己的 Python 封装层，不是 simpler 的 API —— 它写在本站；
 外链出去的是 simpler 的**内部机制**。

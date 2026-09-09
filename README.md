@@ -147,7 +147,7 @@ For system tests, see `tests/st/README.md`.
 
 ## Documentation
 
-The documentation site is published at **<https://hw-native-sys.github.io/pypto/>**.
+The documentation site is published at **<https://www.pypto.ai/pypto/>**.
 Its source is the markdown under [`docs/`](docs/), readable directly on GitHub:
 
 | Section | Contents |
@@ -155,20 +155,14 @@ Its source is the markdown under [`docs/`](docs/), readable directly on GitHub:
 | [User Manual](docs/en/user/index.md) | Getting started, the language guide, the operation reference, debugging |
 | [Reference](docs/en/reference/index.md) | PTO ISA — cluster architecture, TPUSH/TPOP, buffer management |
 | [Developer](docs/en/dev/index.md) | IR, passes, code generation, backend dispatch |
-| [Runtime](https://hw-native-sys.github.io/simpler/) | The `simpler` runtime that executes compiled programs |
+| [Runtime](https://www.pypto.ai/simpler/) | The `simpler` runtime that executes compiled programs |
 
 Chinese translations live in [`docs/zh/`](docs/zh/) and are selectable from the
 site's language menu.
 
-To build the site locally:
-
-```bash
-# Only the docs toolchain is needed -- the site does not require a built pypto
-pip install -r docs/requirements.txt
-
-mkdocs serve            # live preview at http://127.0.0.1:8000
-mkdocs build --strict   # what CI runs; broken links fail the build
-```
+To build or preview locally, follow the
+[documentation site setup](docs/en/dev/index.md#documentation-site) to fetch the
+pinned shared theme and install the docs toolchain. A PyPTO build is not required.
 
 ## License
 

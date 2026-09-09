@@ -4,9 +4,10 @@
 # `python/pypto` through griffe, which parses the source statically -- nothing is
 # imported, so neither a CANN toolkit nor a built extension is required.
 #
-# Kept alongside the docs rather than as a pyproject extra so CI installs it with
-# a plain `pip install -r`, matching the runtime's docs job
-# (hw-native-sys/simpler, docs/requirements.txt).
+# Fetch the shared theme first (see docs/en/dev/index.md). Both CI and local
+# builds use its tested MkDocs/Material versions through this constraints file.
+-c ../.site-theme/docs-theme/constraints.txt
+
 mkdocs>=1.6
 mkdocs-material>=9.5
 mkdocs-static-i18n>=1.2

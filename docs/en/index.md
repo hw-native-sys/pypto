@@ -31,7 +31,7 @@ The split decides what you will find where:
 | ------- | ----- | ------------- |
 | The `pl.*` language, `ir.compile()`, IR and passes | PyPTO | This site |
 | `pypto.runtime` — `ChipWorker`, `DeviceTensor`, `RunConfig`, `benchmark` | PyPTO (its own Python layer) | This site |
-| Scheduler internals, graph building, message queue, tensormap and ring buffers | simpler | <https://hw-native-sys.github.io/simpler/> |
+| Scheduler internals, graph building, message queue, tensormap and ring buffers | simpler | <https://www.pypto.ai/simpler/> |
 
 `pypto.runtime` is PyPTO's own Python wrapper, not a simpler API — it is documented
 here. What is linked out is simpler's *internals*.

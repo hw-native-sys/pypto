@@ -1,7 +1,7 @@
 name: Docs
 
 # Builds the documentation site from `docs/` and publishes it to GitHub Pages at
-# https://hw-native-sys.github.io/pypto/.
+# https://www.pypto.ai/pypto/.
 #
 # Pull requests build only -- `mkdocs build --strict` turns broken links, pages
 # missing from the nav, and every other warning into a failure, so a PR that
@@ -39,15 +39,38 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Read shared theme revision
+        id: theme
+        shell: bash
+        run: |
+          theme_revision=$(cat docs/theme-revision.txt)
+          if [[ ! "$theme_revision" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::docs/theme-revision.txt must contain a full Git commit SHA"
+            exit 1
+          fi
+          printf 'revision=%s\n' "$theme_revision" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout shared documentation theme
+        uses: actions/checkout@v4
+        with:
+          repository: hw-native-sys/hw-native-sys.github.io
+          ref: ${{ steps.theme.outputs.revision }}
+          path: .site-theme
+          persist-credentials: false
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
+          cache-dependency-path: |
+            docs/requirements.txt
+            .site-theme/docs-theme/constraints.txt
 
       # Deliberately not `pip install -e ".[docs]"`: that runs scikit-build-core
       # and builds the C++ extension. mkdocstrings reads `python/pypto` through
       # griffe, which parses statically, so the docs need neither a CANN toolkit
-      # nor the built nanobind extension.
+      # nor the built nanobind extension. The requirements file applies the
+      # shared theme's constraints, matching local builds.
       - name: Install docs toolchain
         run: pip install -r docs/requirements.txt
 

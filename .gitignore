@@ -196,6 +196,9 @@ ehthumbs.db
 Thumbs.db
 
 # Project specific (adjust as needed)
+# Shared documentation theme checked out at docs/theme-revision.txt.
+.site-theme/
+
 # Generated files
 generated/
 gen/

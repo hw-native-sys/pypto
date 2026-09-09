@@ -36,4 +36,44 @@ PyPTO 的构成：IR、pass 流水线、代码生成，以及围绕它们的基�
 ## 另请参阅
 
 - [PTO ISA 参考](../reference/index.md) —— 后端所面向的硬件模型。
-- [运行时文档](https://hw-native-sys.github.io/simpler/) —— 执行已编译程序的调度器。
+- [运行时文档](https://www.pypto.ai/simpler/) —— 执行已编译程序的调度器。
+
+## 文档站点
+
+<https://www.pypto.ai/pypto/> 从
+[`hw-native-sys.github.io`](https://github.com/hw-native-sys/hw-native-sys.github.io)
+继承布局、配色、项目切换和主题偏好。本仓库维护页面、导航、翻译及 API 插件。
+`docs/theme-revision.txt` 用完整 Git 提交 SHA 固定公共主题版本。
+CI 与本地构建使用同一版本；生成的站点包含自己的主题资源副本。
+
+### 本地预览
+
+在 PyPTO 仓库根目录运行以下命令，使用 Python 3.10 或更新版本。先获取主题，再安装文档依赖：
+
+```bash
+git init .site-theme
+git -C .site-theme fetch --depth 1 \
+  https://github.com/hw-native-sys/hw-native-sys.github.io.git \
+  "$(cat docs/theme-revision.txt)"
+git -C .site-theme checkout --detach FETCH_HEAD
+
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r docs/requirements.txt
+python tests/lint/check_docs_nav.py
+python tests/lint/check_docs_en_zh_parity.py
+mkdocs build --strict
+mkdocs serve
+```
+
+预览地址为 <http://127.0.0.1:8000/>。`.site-theme/` 和虚拟环境均由 Git 忽略。
+文档工具链静态解析 API 源码，无需编译 PyPTO，也无需 Ascend 设备。
+
+### 升级或回滚主题
+
+将 `docs/theme-revision.txt` 中的 SHA 替换为公共仓库的目标提交，然后重新运行上述获取、
+检出、依赖安装及检查命令。提交版本变更前，检查中英文页面、API 参考、窄屏导航和深浅色模式。
+
+`mkdocs.yml` 继承 `.site-theme/docs-theme/base.yml`；本地值覆盖公共值，列表会替换继承的列表。
+项目导航和插件保留在本仓库，共用外观在公共仓库修改。仅更新公共仓库不会改变已部署的本站：
+需要在本仓库合入主题版本变更才会发布。回滚时恢复之前的 SHA，再通过 Docs 工作流重新构建。

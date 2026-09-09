@@ -145,7 +145,7 @@ python -m pytest tests/ut/core/test_error.py -n auto --maxprocesses 8 -v
 
 ## 文档
 
-文档站点发布在 **<https://hw-native-sys.github.io/pypto/>**。
+文档站点发布在 **<https://www.pypto.ai/pypto/>**。
 其源文件是 [`docs/`](docs/) 下的 markdown，在 GitHub 上可直接阅读：
 
 | 章节 | 内容 |
@@ -153,19 +153,12 @@ python -m pytest tests/ut/core/test_error.py -n auto --maxprocesses 8 -v
 | [用户手册](docs/zh/user/index.md) | 入门、语言指南、操作参考、调试 |
 | [参考](docs/zh/reference/index.md) | PTO ISA —— 集群架构、TPUSH/TPOP、缓冲区管理 |
 | [开发者](docs/zh/dev/index.md) | IR、passes、代码生成、后端分派 |
-| [运行时](https://hw-native-sys.github.io/simpler/) | 执行已编译程序的 `simpler` 运行时 |
+| [运行时](https://www.pypto.ai/simpler/) | 执行已编译程序的 `simpler` 运行时 |
 
 英文文档位于 [`docs/en/`](docs/en/)（以英文为准），可从站点的语言菜单切换。
 
-本地构建站点：
-
-```bash
-# 只需文档工具链 —— 构建站点不需要已编译的 pypto
-pip install -r docs/requirements.txt
-
-mkdocs serve            # 在 http://127.0.0.1:8000 实时预览
-mkdocs build --strict   # 与 CI 一致；断链会导致构建失败
-```
+本地构建或预览请按照[文档站点配置说明](docs/zh/dev/index.md#文档站点)，
+获取固定版本的公共主题并安装文档工具链。无需编译 PyPTO。
 
 ## 许可证
 
