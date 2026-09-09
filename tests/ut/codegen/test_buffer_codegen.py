@@ -50,9 +50,15 @@ def _eval(name, *args):
     return ir.EvalStmt(_call(name, list(args)), SPAN)
 
 
-def _program(stmts, params=()):
+def _program(stmts, params=(), ir_stage=ir.FunctionIRStage.Functional):
     function = ir.Function(
-        "kernel", list(params), [], ir.SeqStmts(stmts, SPAN), SPAN, type=ir.FunctionType.InCore
+        "kernel",
+        list(params),
+        [],
+        ir.SeqStmts(stmts, SPAN),
+        SPAN,
+        type=ir.FunctionType.InCore,
+        ir_stage=ir_stage,
     )
     return ir.Program([function], "Buffers", SPAN)
 
@@ -83,7 +89,7 @@ def _window(*values):
     return ir.MakeTuple([_int(value) if isinstance(value, int) else value for value in values], SPAN)
 
 
-def _gm_program(addressed=False, source_name="input"):
+def _gm_program(addressed=False, source_name="input", ir_stage=ir.FunctionIRStage.Functional):
     tensor_type = ir.TensorType([32, 64], DataType.FP32)
     source = ir.Var(source_name, tensor_type, SPAN)
     other = ir.Var("other", tensor_type, SPAN)
@@ -122,18 +128,21 @@ def _gm_program(addressed=False, source_name="input"):
         body,
         SPAN,
         type=ir.FunctionType.AIV,
+        ir_stage=ir_stage,
     )
     return ir.Program([kernel], "BufferGM", SPAN)
 
 
 @pytest.mark.parametrize("addressed", [False, True])
-def test_native_gm_program_round_trip_preserves_abi_and_explicit_destinations(tmp_path, addressed):
-    program = _gm_program(addressed)
+@pytest.mark.parametrize("ir_stage", list(ir.FunctionIRStage))
+def test_native_gm_program_round_trip_preserves_abi_and_explicit_destinations(tmp_path, addressed, ir_stage):
+    program = _gm_program(addressed, ir_stage=ir_stage)
     restored = ir.deserialize(ir.serialize(program))
     assert isinstance(restored, ir.Program)
     ir.assert_structural_equal(program, restored, enable_auto_mapping=True)
     original_kernel = next(iter(program.functions.values()))
     kernel = next(iter(restored.functions.values()))
+    assert kernel.ir_stage == ir_stage
     assert kernel.param_directions == original_kernel.param_directions
     assert len(kernel.return_types) == 1
     text = _emit(restored, flag=not addressed)
@@ -715,3 +724,30 @@ def test_rank_one_dynamic_valid_operand_uses_native_column_axis(tmp_path):
     assert "valid_row = " not in text
     assert "valid_col = %arg0" in text
     _compile_native(tmp_path, text, addressed=False)
+
+
+@pytest.mark.parametrize("with_scalar_body", [False, True])
+def test_native_explicit_buffer_stage_handles_empty_and_scalar_only_kernels(tmp_path, with_scalar_body):
+    condition = _scalar("condition", DataType.BOOL)
+    value = _scalar("value")
+    body = (
+        [ir.IfStmt(condition, ir.AssignStmt(value, _int(2), SPAN), None, [], SPAN)]
+        if with_scalar_body
+        else []
+    )
+    program = _program(body, [condition], ir_stage=ir.FunctionIRStage.Buffer)
+    restored = ir.deserialize(ir.serialize(program))
+    assert isinstance(restored, ir.Program)
+    text = _emit(restored)
+    assert not _allocations(text)
+    assert "tile_buf" not in text
+    assert ("scf.if %arg0" in text) == with_scalar_body
+    _compile_native(tmp_path, text, addressed=False)
+
+
+def test_explicit_buffer_stage_rejects_logical_tile_calls_without_any_buffer_operand():
+    index = _scalar("index")
+    call = _call("tile.get_block_idx", [], ir.ScalarType(DataType.INDEX))
+    program = _program([ir.AssignStmt(index, call, SPAN)], ir_stage=ir.FunctionIRStage.Buffer)
+    with pytest.raises(ValueError, match="Logical tile operation 'tile.get_block_idx' remains in buffer IR"):
+        _emit(program)

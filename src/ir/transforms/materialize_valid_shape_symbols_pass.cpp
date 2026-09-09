@@ -204,7 +204,7 @@ void CollectShapeVars(const ExprPtr& expr, std::unordered_set<const Var*>* seen,
   dirs.insert(dirs.end(), func->param_directions_.begin(), func->param_directions_.end());
   return std::make_shared<Function>(func->name_, std::move(params), std::move(dirs), func->return_types_,
                                     func->body_, func->span_, func->func_type_, func->level_, func->role_,
-                                    func->attrs_, func->requires_runtime_binding_);
+                                    func->attrs_, func->requires_runtime_binding_, func->ir_stage_);
 }
 
 /// Mirror ExtendFunctionSignature's leading insertion on the call's directions.

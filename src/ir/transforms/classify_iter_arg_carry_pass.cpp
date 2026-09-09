@@ -453,9 +453,10 @@ Pass ClassifyIterArgCarry() {
       IterArgCarryStamper stamper(program);
       auto new_body = stamper.VisitStmt(func->body_);
       if (new_body.get() == func->body_.get()) continue;
-      func = std::make_shared<Function>(func->name_, func->params_, func->param_directions_,
-                                        func->return_types_, new_body, func->span_, func->func_type_,
-                                        func->level_, func->role_, func->attrs_);
+      func =
+          std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
+                                     new_body, func->span_, func->func_type_, func->level_, func->role_,
+                                     func->attrs_, func->requires_runtime_binding_, func->ir_stage_);
     }
     if (new_functions == program->functions_) return program;
     return std::make_shared<Program>(std::move(new_functions), program->name_, program->span_);

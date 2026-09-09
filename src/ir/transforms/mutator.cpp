@@ -189,7 +189,8 @@ FunctionPtr IRMutator::VisitFunction(const FunctionPtr& func) {
   // ``func->attrs_`` would deduce a const reference and silently copy instead.
   return std::make_shared<const Function>(func->name_, std::move(new_params), func->param_directions_,
                                           std::move(new_return_types), std::move(new_body), func->span_,
-                                          func->func_type_, func->level_, func->role_, std::move(new_attrs));
+                                          func->func_type_, func->level_, func->role_, std::move(new_attrs),
+                                          func->requires_runtime_binding_, func->ir_stage_);
 }
 
 ExprPtr IRMutator::VisitExpr(const ExprPtr& expr) { return ExprFunctor<ExprPtr>::VisitExpr(expr); }

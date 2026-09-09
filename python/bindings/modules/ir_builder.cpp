@@ -51,13 +51,13 @@ void BindIRBuilder(nb::module_& m) {
           "begin_function",
           [](IRBuilder& self, const std::string& name, const Span& span, FunctionType type,
              std::optional<Level> level, std::optional<Role> role, const nb::object& attrs_or_none,
-             bool requires_runtime_binding) {
+             bool requires_runtime_binding, FunctionIRStage ir_stage) {
             self.BeginFunction(name, span, type, level, role, ConvertAttrsFromPython(attrs_or_none),
-                               requires_runtime_binding);
+                               requires_runtime_binding, ir_stage);
           },
           nb::arg("name"), nb::arg("span"), nb::arg("type") = FunctionType::Opaque,
           nb::arg("level") = nb::none(), nb::arg("role") = nb::none(), nb::arg("attrs") = nb::none(),
-          nb::arg("requires_runtime_binding") = false,
+          nb::arg("requires_runtime_binding") = false, nb::arg("ir_stage") = FunctionIRStage::Functional,
           "Begin building a function.\n\n"
           "Creates a new function context. Must be closed with end_function().\n\n"
           "Args:\n"
@@ -67,7 +67,8 @@ void BindIRBuilder(nb::module_& m) {
           "    level: Hierarchy level (default: None)\n"
           "    role: Function role (default: None)\n"
           "    attrs: Function-level attributes dict (default: None)\n"
-          "    requires_runtime_binding: True for abstract SubWorkers bound at runtime (default: False)\n\n"
+          "    requires_runtime_binding: True for abstract SubWorkers bound at runtime (default: False)\n"
+          "    ir_stage: Function body representation (default: Functional)\n\n"
           "Raises:\n"
           "    RuntimeError: If already inside a function (nested functions not allowed)")
 
