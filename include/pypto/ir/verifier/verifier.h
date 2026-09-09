@@ -335,6 +335,17 @@ PropertyVerifierPtr CreateTileMemoryInferredPropertyVerifier();
 PropertyVerifierPtr CreateUseAfterDefPropertyVerifier();
 
 /**
+ * @brief Create the UseAfterDef check with strict lexical scopes for final SSA IR.
+ *
+ * Branch- and loop-local definitions never leak into their enclosing scope;
+ * only explicit return_vars become visible there. Uses indexed membership and
+ * scope undo records instead of copying the whole visible-definition set.
+ * Type-metadata uses are checked identically to the legacy UseAfterDef property.
+ * This is an internal composition helper, not a separate IR property or pass option.
+ */
+PropertyVerifierPtr CreateLexicalUseAfterDefPropertyVerifier();
+
+/**
  * @brief Factory function for creating StructuredCtrlFlow property verifier
  *
  * Verifies that no BreakStmt or ContinueStmt remains in InCore-type function
@@ -522,6 +533,14 @@ PropertyVerifierPtr CreateCallDirectionsResolvedPropertyVerifier();
  * @return Shared pointer to TileTypeCoherence PropertyVerifier
  */
 PropertyVerifierPtr CreateTileTypeCoherencePropertyVerifier();
+
+/**
+ * @brief Verify explicit buffer representation in InCore/AIC/AIV functions.
+ *
+ * Validates registered buffer calls and composes SSA, use-after-definition, and
+ * assignment-type checks. Does not prove storage lifetimes or initialized data.
+ */
+PropertyVerifierPtr CreateBufferIRPropertyVerifier();
 
 /**
  * @brief Factory function for creating OrchestrationReferencesResolved property verifier

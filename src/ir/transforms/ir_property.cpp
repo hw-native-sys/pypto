@@ -117,6 +117,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "NoScalarKernelReturn";
     case IRProperty::AivSplitLoweredValid:
       return "AivSplitLoweredValid";
+    case IRProperty::BufferIR:
+      return "BufferIR";
     default:
       return "Unknown";
   }

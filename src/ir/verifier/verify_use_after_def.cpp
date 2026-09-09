@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <cstddef>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -52,17 +53,25 @@ namespace {
  * - WhileStmt::iter_args_: in scope inside the loop body (including condition)
  * - WhileStmt::return_vars_: defined in the enclosing scope after the loop
  * - IfStmt::return_vars_: defined in the enclosing scope after the if
- * - IfStmt without return_vars_ ("leak" mode): definitions inside then/else branches are
+ * - Legacy IfStmt without return_vars_ ("leak" mode): definitions inside then/else branches are
  *   merged (unioned) back into the outer scope; otherwise, branch-local definitions
  *   do NOT propagate to the outer scope
+ *
+ * The final BufferIR boundary uses strict lexical scopes instead: every branch
+ * and loop restores only its newly introduced definitions. That mode performs
+ * one indexed lookup per use and adds/removes each definition once, independent
+ * of lexical depth. Legacy leak-mode set unions remain unchanged for existing
+ * users; their whole-set copies are never executed by the strict mode.
  */
 class UseAfterDefChecker : public IRVisitor {
  public:
-  UseAfterDefChecker(std::vector<Diagnostic>& diagnostics, std::string func_name)
-      : diagnostics_(diagnostics), func_name_(std::move(func_name)) {}
+  UseAfterDefChecker(std::vector<Diagnostic>& diagnostics, std::string func_name, bool lexical_scopes)
+      : diagnostics_(diagnostics), func_name_(std::move(func_name)), lexical_scopes_(lexical_scopes) {}
 
   void AddDefinition(const Var* var) {
-    if (var) in_scope_.insert(var);
+    if (!var) return;
+    const bool inserted = in_scope_.insert(var).second;
+    if (inserted && lexical_scopes_) introduced_definitions_.push_back(var);
   }
 
  protected:
@@ -91,7 +100,7 @@ class UseAfterDefChecker : public IRVisitor {
     if (!op) return;
     // Evaluate RHS first (use site), then define LHS.
     if (op->value_) VisitExpr(op->value_);
-    if (op->var_) in_scope_.insert(op->var_.get());
+    AddDefinition(op->var_.get());
   }
 
   void VisitStmt_(const ForStmtPtr& op) override {
@@ -107,6 +116,16 @@ class UseAfterDefChecker : public IRVisitor {
       if (iter_arg && iter_arg->initValue_) {
         VisitExpr(iter_arg->initValue_);
       }
+    }
+
+    if (lexical_scopes_) {
+      const size_t checkpoint = introduced_definitions_.size();
+      AddDefinition(op->loop_var_.get());
+      for (const auto& iter_arg : op->iter_args_) AddDefinition(iter_arg.get());
+      if (op->body_) VisitStmt(op->body_);
+      RestoreLexicalScope(checkpoint);
+      for (const auto& result : op->return_vars_) AddDefinition(result.get());
+      return;
     }
 
     auto saved_scope = in_scope_;
@@ -142,14 +161,24 @@ class UseAfterDefChecker : public IRVisitor {
   void VisitStmt_(const WhileStmtPtr& op) override {
     if (!op) return;
 
-    auto saved_scope = in_scope_;
-
     // IterArg initial values are evaluated in the outer scope.
     for (const auto& iter_arg : op->iter_args_) {
       if (iter_arg && iter_arg->initValue_) {
         VisitExpr(iter_arg->initValue_);
       }
     }
+
+    if (lexical_scopes_) {
+      const size_t checkpoint = introduced_definitions_.size();
+      for (const auto& iter_arg : op->iter_args_) AddDefinition(iter_arg.get());
+      if (op->condition_) VisitExpr(op->condition_);
+      if (op->body_) VisitStmt(op->body_);
+      RestoreLexicalScope(checkpoint);
+      for (const auto& result : op->return_vars_) AddDefinition(result.get());
+      return;
+    }
+
+    auto saved_scope = in_scope_;
 
     // iter_args are in scope for condition and body.
     for (const auto& iter_arg : op->iter_args_) {
@@ -178,6 +207,16 @@ class UseAfterDefChecker : public IRVisitor {
 
     if (op->condition_) VisitExpr(op->condition_);
 
+    if (lexical_scopes_) {
+      const size_t checkpoint = introduced_definitions_.size();
+      if (op->then_body_) VisitStmt(op->then_body_);
+      RestoreLexicalScope(checkpoint);
+      if (op->else_body_.has_value() && *op->else_body_) VisitStmt(*op->else_body_);
+      RestoreLexicalScope(checkpoint);
+      for (const auto& result : op->return_vars_) AddDefinition(result.get());
+      return;
+    }
+
     auto saved_scope = in_scope_;
 
     if (op->then_body_) VisitStmt(op->then_body_);
@@ -205,14 +244,27 @@ class UseAfterDefChecker : public IRVisitor {
   }
 
  private:
+  void RestoreLexicalScope(size_t checkpoint) {
+    // Existing outer bindings never enter this log, so removing a local
+    // redefinition cannot accidentally hide a parameter or enclosing binding.
+    while (introduced_definitions_.size() > checkpoint) {
+      in_scope_.erase(introduced_definitions_.back());
+      introduced_definitions_.pop_back();
+    }
+  }
+
   std::unordered_set<const Var*> in_scope_;
+  std::vector<const Var*> introduced_definitions_;
   std::vector<Diagnostic>& diagnostics_;
   std::string func_name_;
+  bool lexical_scopes_;
   bool visiting_type_ = false;
 };
 
 class UseAfterDefPropertyVerifierImpl : public PropertyVerifier {
  public:
+  explicit UseAfterDefPropertyVerifierImpl(bool lexical_scopes = false) : lexical_scopes_(lexical_scopes) {}
+
   [[nodiscard]] std::string GetName() const override { return "UseAfterDefCheck"; }
 
   void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
@@ -221,7 +273,7 @@ class UseAfterDefPropertyVerifierImpl : public PropertyVerifier {
     for (const auto& [global_var, func] : program->functions_) {
       if (!func) continue;
 
-      UseAfterDefChecker checker(diagnostics, func->name_);
+      UseAfterDefChecker checker(diagnostics, func->name_, lexical_scopes_);
 
       // Function parameters are definitions visible throughout the body.
       for (const auto& param : func->params_) {
@@ -256,12 +308,19 @@ class UseAfterDefPropertyVerifierImpl : public PropertyVerifier {
       if (func->body_) checker.VisitStmt(func->body_);
     }
   }
+
+ private:
+  bool lexical_scopes_;
 };
 
 }  // namespace
 
 PropertyVerifierPtr CreateUseAfterDefPropertyVerifier() {
   return std::make_shared<UseAfterDefPropertyVerifierImpl>();
+}
+
+PropertyVerifierPtr CreateLexicalUseAfterDefPropertyVerifier() {
+  return std::make_shared<UseAfterDefPropertyVerifierImpl>(/*lexical_scopes=*/true);
 }
 
 }  // namespace ir
