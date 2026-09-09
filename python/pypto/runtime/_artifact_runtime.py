@@ -28,7 +28,6 @@ class ArtifactRuntime:
     """
 
     def __init__(self, store: ArtifactStore, handle: ArtifactHandle, platform: str, run_directory: Path):
-        read_manifest(handle.directory, handle.key, handle.spec)
         if store.root != handle.cache_root:
             raise ValueError("Artifact handle and store have different cache roots")
         run_directory = run_directory.resolve()
@@ -41,6 +40,17 @@ class ArtifactRuntime:
         self.directory = handle.directory
         self._lock = threading.Lock()
         self._chips: dict[str, tuple[Any, str, dict[str, Any]]] | None = None
+        self._manifest: dict[str, Any] | None = None
+
+    def _validate(self) -> dict[str, Any]:
+        """Validate once on attachment (or first direct load), before reading code.
+
+        Published entries must remain immutable for this runtime's lifetime.
+        Promotion crosses a new trust boundary and receives a new inventory.
+        """
+        if self._manifest is None:
+            self._manifest = read_manifest(self.handle.directory, self.handle.key, self.handle.spec)
+        return self._manifest
 
     def load(self) -> dict[str, tuple[Any, str, dict[str, Any]]]:
         """Promote once if needed, then return reusable callables; never execute."""
@@ -48,7 +58,7 @@ class ArtifactRuntime:
             if self._chips is not None:
                 return self._chips
             handle = self.handle
-            read_manifest(handle.directory, handle.key, handle.spec)
+            manifest = self._validate()
             if handle.spec.state is ArtifactState.GENERATED:
                 spec = ready_spec(handle.directory, handle.spec)
 
@@ -62,14 +72,22 @@ class ArtifactRuntime:
                 result = self.store.get_or_build(handle.key, spec, build)
                 if result.handle is not None:
                     handle = result.handle
+                    manifest = read_manifest(handle.directory, handle.key, handle.spec)
                     self.handle = handle
                     self.directory = handle.directory
+                    self._manifest = manifest
                 else:
                     assert result.private_directory is not None
                     self.directory = result.private_directory
-            if self.directory == handle.directory:
-                read_manifest(handle.directory, handle.key, handle.spec)
-            chips = load_prebuilt(self.directory, self.platform, handle.spec.build_kind)
+                    manifest = None
+            files = (
+                {self.directory / entry["path"]: entry for entry in manifest["files"]}
+                if manifest is not None
+                else None
+            )
+            chips = load_prebuilt(
+                self.directory, self.platform, handle.spec.build_kind, _validated_files=files
+            )
             self._chips = chips
             return chips
 
@@ -84,24 +102,35 @@ def bind_artifact(compiled: Any, store: ArtifactStore, handle: ArtifactHandle, r
     from pypto.ir.compiled_program import CompiledProgram  # noqa: PLC0415
     from pypto.ir.distributed_compiled_program import DistributedCompiledProgram  # noqa: PLC0415
 
-    read_manifest(handle.directory, handle.key, handle.spec)
+    if not isinstance(compiled, CompiledProgram | DistributedCompiledProgram):
+        raise TypeError(f"Unsupported artifact-backed program: {type(compiled).__name__}")
+    runtime = ArtifactRuntime(store, handle, compiled.platform, run_directory)
+    runtime._validate()
+    cls = CompiledProgram if handle.spec.build_kind is BuildKind.SINGLE_CHIP else DistributedCompiledProgram
+    restored = cls.from_dir(handle.directory)
+    _attach(compiled, runtime, restored.platform)
+
+
+def _attach(compiled: Any, runtime: ArtifactRuntime, persisted_platform: str) -> None:
+    """Bind after the caller has validated the payload and restored its metadata."""
+    from pypto.ir.compiled_program import CompiledProgram  # noqa: PLC0415
+    from pypto.ir.distributed_compiled_program import DistributedCompiledProgram  # noqa: PLC0415
+
+    handle = runtime.handle
     if isinstance(compiled, DistributedCompiledProgram):
         expected = BuildKind.DISTRIBUTED
-        restored = DistributedCompiledProgram.from_dir(handle.directory)
     elif isinstance(compiled, CompiledProgram):
         if compiled.orchestration_names:
             raise ValueError("Persist individual single-chip builds instead of a multi-orchestration parent")
         if compiled._chip_callable is not None:
             raise ValueError("Attach an artifact before loading or registering the compiled program")
         expected = BuildKind.SINGLE_CHIP
-        restored = CompiledProgram.from_dir(handle.directory)
     else:
         raise TypeError(f"Unsupported artifact-backed program: {type(compiled).__name__}")
-    if handle.spec.build_kind is not expected or restored.platform != compiled.platform:
+    if handle.spec.build_kind is not expected or persisted_platform != compiled.platform:
         raise ValueError("Artifact build kind/platform does not match the compiled program")
     if vars(compiled).get("_artifact_runtime") is not None:
         raise ValueError("Compiled program already has an artifact runtime")
-    runtime = ArtifactRuntime(store, handle, compiled.platform, run_directory)
     # This is the only rebind. Later promotion retains this immutable source
     # directory and changes only the runtime's binary handle, never object hashes.
     compiled._output_dir = handle.directory
@@ -113,10 +142,12 @@ def restore_artifact(store: ArtifactStore, handle: ArtifactHandle, run_directory
     from pypto.ir.compiled_program import CompiledProgram  # noqa: PLC0415
     from pypto.ir.distributed_compiled_program import DistributedCompiledProgram  # noqa: PLC0415
 
-    read_manifest(handle.directory, handle.key, handle.spec)
+    manifest = read_manifest(handle.directory, handle.key, handle.spec)
     cls = CompiledProgram if handle.spec.build_kind is BuildKind.SINGLE_CHIP else DistributedCompiledProgram
     compiled = cls.from_dir(handle.directory)
-    bind_artifact(compiled, store, handle, run_directory)
+    runtime = ArtifactRuntime(store, handle, compiled.platform, run_directory)
+    runtime._manifest = manifest
+    _attach(compiled, runtime, compiled.platform)
     return compiled
 
 

@@ -10,17 +10,14 @@
 """Explicit packaging of generated configurations and supported extern sources."""
 
 import os
-import re
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 
 from pypto.jit._artifact_manifest import BuildKind, encode_manifest
 
+from ._extern_includes import UnsupportedArtifactInput, literal_includes
 from ._prebuilt import _encode_signature, _relative_file, chip_directories
-
-_INCLUDE = re.compile(r"^\s*#\s*include\s*(.*)$", re.MULTILINE)
-_LITERAL_INCLUDE = re.compile(r'([<"])([^>"]+)[>"](?:\s*(?://.*|/\*.*\*/))?\s*$')
 
 
 def read_kernel_config(path: Path) -> ModuleType:
@@ -33,11 +30,16 @@ def read_kernel_config(path: Path) -> ModuleType:
 
 def _external_path(path: Path) -> Path:
     """Reject links whose lexical include topology cannot be preserved by copying."""
-    normalized = Path(os.path.abspath(path))
-    resolved = path.resolve(strict=True)
-    if normalized != resolved:
-        raise ValueError(f"Symbolic links in extern inputs require private compilation: {path}")
-    return resolved
+    # Check before normalizing '..': link/../file can have different semantics
+    # from lexical parent traversal. Seed paths already have a canonical root.
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current /= part
+        if current.is_symlink():
+            raise UnsupportedArtifactInput(
+                f"Symbolic links in extern inputs require private compilation: {path}"
+            )
+    return path.resolve(strict=True)
 
 
 def _external_files(source: Path, include_dirs: tuple[Path, ...]) -> dict[Path, bytes]:
@@ -49,20 +51,20 @@ def _external_files(source: Path, include_dirs: tuple[Path, ...]) -> dict[Path, 
             return
         data = path.read_bytes()
         files[path] = data
-        for include in _INCLUDE.findall(data.decode("utf-8")):
-            match = _LITERAL_INCLUDE.fullmatch(include)
-            if match is None:
-                raise ValueError(f"Artifact extern includes must be literal: {path}: {include}")
-            delimiter, name = match.groups()
+        for delimiter, name in literal_includes(data):
+            if "\ufffd" in name:
+                raise UnsupportedArtifactInput(
+                    f"Non-UTF8 extern include name requires private compilation: {path}"
+                )
             if Path(name).is_absolute() or "\\" in name:
-                raise ValueError(f"Artifact extern includes must be relative: {path}: {name}")
+                raise UnsupportedArtifactInput(f"Artifact extern includes must be relative: {path}: {name}")
             candidates = (path.parent / name,) if delimiter == '"' else ()
             candidates += tuple(root / name for root in include_dirs)
             dependency = next((p for p in candidates if p.is_file()), None)
             if dependency is not None:
                 visit(dependency)
             elif delimiter == '"':
-                raise ValueError(f"Unresolved local extern include: {path}: {name}")
+                raise UnsupportedArtifactInput(f"Unresolved local extern include: {path}: {name}")
             # Unresolved angle includes belong to the separately identified SDK.
 
     visit(source)
@@ -70,8 +72,14 @@ def _external_files(source: Path, include_dirs: tuple[Path, ...]) -> dict[Path, 
 
 
 def _package_external(root: Path, kernel: dict[str, Any], index: int) -> None:
-    source = _external_path(Path(kernel["source"]))
-    includes = tuple(_external_path(Path(p)) for p in (kernel.get("extra_include_dirs") or ()))
+    source = Path(kernel["source"]).absolute()
+    includes = tuple(Path(p).absolute() for p in (kernel.get("extra_include_dirs") or ()))
+    # Resolve the shared packaging root once: workspace/home/automount aliases
+    # above it do not change topology. Links below it still require fallback.
+    lexical_root = Path(os.path.commonpath([source.parent, *includes]))
+    canonical_root = lexical_root.resolve(strict=True)
+    source = _external_path(canonical_root / source.relative_to(lexical_root))
+    includes = tuple(_external_path(canonical_root / p.relative_to(lexical_root)) for p in includes)
     files = _external_files(source, includes)
     common = Path(os.path.commonpath([str(p.parent) for p in files] + [str(p) for p in includes]))
     destination = root / "extern" / str(index)
@@ -99,8 +107,9 @@ def _local_source(root: Path, source: str) -> str:
 def package_generated_sources(directory: Path, kind: BuildKind) -> None:
     """Make a private generated tree self-contained before GENERATED publication.
 
-    Literal local extern include graphs are supported. Macro/absolute includes
-    and missing quoted dependencies fail closed. SDK angle includes remain
+    Literal local extern include graphs are supported. UnsupportedArtifactInput
+    identifies packaging limitations for caller-owned private fallback; other
+    failures propagate unchanged. SDK angle includes remain
     supplied by the explicitly identified toolchain. This mutates only the
     caller's private tree, never an ArtifactHandle's published directory.
     """

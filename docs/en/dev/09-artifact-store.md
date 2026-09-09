@@ -220,7 +220,12 @@ the parent without live IR. Persist supported individual children instead.
    Record the exact
    final kernel bytes handed to `CoreCallable.build` and orchestration bytes
    handed to `ChipCallable.build`. Compilation and assembly do not execute on a
-   device. Only after all children succeed may the store publish ready output.
+   device. After releasing each private compiler lock, remove its `cache/`
+   directory (including context stamps and locks) and generated source-adjacent
+   `.o`/`.so` outputs. Keep sources, configuration, extern inputs, binary manifests,
+   and one copy of each final binary under `prebuilt/`. Inherited cache/sidecar
+   files are excluded from the ready spec. Only after all children succeed may
+   the store publish ready output.
 4. Load the versioned `binary_manifest.json` and validate every child before
    constructing any callable. Records include relative binary paths, sizes,
    SHA-256 digests, platform, runtime configuration, function IDs, signatures,
@@ -232,7 +237,16 @@ the parent without live IR. Persist supported individual children instead.
 
 The enclosing store manifest remains authoritative for the full identity and
 payload inventory. A binary marker alone is insufficient to attach a handle.
-Missing or corrupt handles fail before execution. The adapter does not catch a
+Attachment/restoration hashes the complete payload once and reconstructs metadata
+once. Loading reuses that verified inventory to check the inner binary sizes and
+digests, without hashing the same bytes again. A directly constructed internal
+`ArtifactRuntime` validates on its first load. Promotion validates the generated
+copy and the new ready payload at their own boundaries; private fallback loading
+checks binary digests directly. Store lookup validation is separate from attachment.
+This validation is scoped to the attached object's lifetime, not a process-wide
+cache: published files must remain unchanged and present until all users release
+them. A new attachment validates again. Missing or corrupt handles fail at those
+boundaries before execution. The adapter does not catch a
 device execution error and retry the operation.
 
 Storage/publication failures retain a usable private directory and live callables
@@ -257,14 +271,28 @@ Python bytecode caching. Published artifacts must remain alive and unchanged
 while compiled objects or workers reference them.
 
 Extern packaging supports recursively resolved literal local includes, retaining
-relative include topology and ordered explicit include directories. It rejects
-macro includes, absolute includes, unresolved quoted includes, and symbolic
-links in extern input paths (dereferencing a link would change include topology).
+relative include topology and ordered explicit include directories. The common
+root of the source directory and explicit include directories is resolved once;
+symlinked workspace/home ancestors are supported. Symbolic links below that root,
+including links encountered before `..` traversal, require private compilation.
+The scanner removes comments, joins escaped newlines, and ignores branches proven
+inactive by literal `#if 0`/`#if 1` and their `#elif`/`#else` structure. Unknown
+conditions conservatively scan all possible branches; this is not a full C
+preprocessor. Active macro includes, absolute includes, and unresolved quoted
+includes require private compilation. Non-UTF8 source bytes are copied unchanged;
+replacement decoding is used only for include scanning.
 Unresolved angle includes are supplied by the separately identified SDK/toolchain. Empty
 include directories may disappear during publication; their missing `-I` paths
 remain valid, and `extra_include_dirs=None` is normalized to an empty list. Other
 file-bearing preprocessor or assembler constructs are not supported. The caller
 must establish complete input identity before publication; this packager does
 not discover a toolchain inventory or make an arbitrary C++ build hermetic.
-Unsupported inputs must use the ordinary private compilation path. Once ready,
+`UnsupportedArtifactInput`, available from `pypto.runtime._artifact_sources`, is
+a dedicated `ValueError` subclass for these packaging limitations. Adapters may
+catch only this exception to bypass persistent publication and compile the
+original input privately. Packaging mutates a private staging tree: discard that
+tree on fallback. Filesystem failures and malformed input/configuration errors
+remain distinct and propagate; do not treat every `ValueError` as a cache bypass.
+This explicit adapter does not automatically invoke the ordinary compiler on a
+packaging rejection. Once ready,
 the supported artifact can relocate and load without its original extern tree.

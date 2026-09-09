@@ -11,8 +11,10 @@
 
 import hashlib
 import json
+import shutil
 import stat
 from pathlib import Path, PurePosixPath
+from types import ModuleType
 from typing import Any
 
 from pypto.jit._artifact_manifest import (
@@ -126,11 +128,41 @@ def prepare_prebuilt(directory: Path, platform: str, kind: BuildKind) -> None:
     chips = chip_directories(directory, kind)
     for chip in chips.values():
         _compile_and_assemble(chip, platform, save_prebuilt=True)
+        # The compiler's lock has been released. READY only consumes prebuilt
+        # bytes; legacy caches, lock files and intermediate binaries are dead data.
+        _prune_build_outputs(chip)
     if kind is BuildKind.DISTRIBUTED:
         record = {"schema": _BINARY_SCHEMA, "platform": platform, "chips": list(chips)}
         (directory / BINARY_MANIFEST).write_bytes(encode_manifest(record))
     # Verify completeness before the caller is allowed to publish READY.
     read_prebuilt(directory, platform, kind)
+
+
+def _build_outputs(config: ModuleType) -> set[Path]:
+    """Identify compiler sidecars, preserving every configured source file."""
+    entries = [*config.KERNELS, config.ORCHESTRATION]
+    sources = {Path(entry["source"]) for entry in entries}
+    sidecars = {
+        Path(entry["source"]).with_suffix(suffix)
+        for entry in entries
+        if not entry.get("external", False)
+        for suffix in (".o", ".so")
+    }
+    return sidecars - sources
+
+
+def _prune_build_outputs(chip: Path) -> None:
+    """Remove only private compiler outputs, never arbitrary extern inputs."""
+    from ._artifact_sources import read_kernel_config  # noqa: PLC0415
+
+    outputs = _build_outputs(read_kernel_config(chip / "kernel_config.py"))
+    cache = chip / "cache"
+    if cache.exists():
+        shutil.rmtree(cache)
+    for path in outputs:
+        if not path.is_relative_to(chip):
+            raise ValueError(f"Compiler output is outside the private artifact: {path}")
+        path.unlink(missing_ok=True)
 
 
 def ready_spec(directory: Path, generated: ArtifactSpec) -> ArtifactSpec:
@@ -141,6 +173,11 @@ def ready_spec(directory: Path, generated: ArtifactSpec) -> ArtifactSpec:
     for chip in chip_directories(directory, generated.build_kind).values():
         prefix = chip.relative_to(directory)
         config = read_kernel_config(chip / "kernel_config.py")
+        # GENERATED may have inherited legacy outputs declared by its caller.
+        # They are not part of the READY loading contract.
+        sidecars = {str(path.relative_to(directory)) for path in _build_outputs(config)}
+        cache = prefix / "cache"
+        required = {p for p in required if p not in sidecars and not Path(p).is_relative_to(cache)}
         required.update(str(prefix / path) for path in (BINARY_MANIFEST, "prebuilt/orchestration.bin"))
         required.update(str(prefix / "prebuilt" / f"kernel_{i}.bin") for i in range(len(config.KERNELS)))
     return ArtifactSpec(ArtifactState.BINARY_READY, generated.build_kind, tuple(sorted(required)))
@@ -157,7 +194,7 @@ def _read_json(root: Path) -> dict[str, Any]:
     return record
 
 
-def _binary(root: Path, record: Any) -> bytes:
+def _binary(root: Path, record: Any, validated_files: dict[Path, dict[str, Any]] | None) -> bytes:
     if not isinstance(record, dict) or set(record) != {"path", "size", "sha256"}:
         raise ValueError(f"Invalid prebuilt binary record in {root}")
     if type(record["size"]) is not int or record["size"] <= 0:
@@ -166,12 +203,22 @@ def _binary(root: Path, record: Any) -> bytes:
     if path.stat().st_size != record["size"]:
         raise ValueError(f"Prebuilt binary size mismatch: {path}")
     data = path.read_bytes()
-    if hashlib.sha256(data).hexdigest() != record["sha256"]:
+    if len(data) != record["size"]:
+        raise ValueError(f"Prebuilt binary size mismatch: {path}")
+    # Attachment already hashed the immutable payload. Match the inner record
+    # against that verified inventory instead of hashing the same bytes again.
+    entry = validated_files.get(path) if validated_files is not None else None
+    if validated_files is not None and (entry is None or entry["size"] != len(data)):
+        raise ValueError(f"Prebuilt binary is absent from the validated inventory: {path}")
+    digest = entry["sha256"] if entry is not None else hashlib.sha256(data).hexdigest()
+    if digest != record["sha256"]:
         raise ValueError(f"Prebuilt binary digest mismatch: {path}")
     return data
 
 
-def _read_chip(root: Path, platform: str) -> dict[str, Any]:
+def _read_chip(
+    root: Path, platform: str, validated_files: dict[Path, dict[str, Any]] | None
+) -> dict[str, Any]:
     record = _read_json(root)
     if set(record) != {"schema", "platform", "runtime_name", "runtime_config", "orchestration", "kernels"}:
         raise ValueError(f"Invalid prebuilt chip fields: {root}")
@@ -192,7 +239,7 @@ def _read_chip(root: Path, platform: str) -> dict[str, Any]:
         if not isinstance(orch[name], str) or not orch[name] or "\x00" in orch[name]:
             raise ValueError(f"Invalid prebuilt orchestration {name}: {root}")
     _signature(orch["signature"])
-    orch["binary"] = _binary(root, orch["binary"])
+    orch["binary"] = _binary(root, orch["binary"], validated_files)
     if not isinstance(record["kernels"], list):
         raise ValueError(f"Invalid prebuilt kernel list: {root}")
     seen: set[int] = set()
@@ -206,11 +253,17 @@ def _read_chip(root: Path, platform: str) -> dict[str, Any]:
         if not isinstance(kernel["name"], str) or not kernel["name"]:
             raise ValueError(f"Invalid prebuilt kernel name: {root}")
         _signature(kernel["signature"])
-        kernel["binary"] = _binary(root, kernel["binary"])
+        kernel["binary"] = _binary(root, kernel["binary"], validated_files)
     return record
 
 
-def read_prebuilt(directory: Path, platform: str, kind: BuildKind) -> dict[str, dict[str, Any]]:
+def read_prebuilt(
+    directory: Path,
+    platform: str,
+    kind: BuildKind,
+    *,
+    _validated_files: dict[Path, dict[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
     """Read and validate every child before any callable can be assembled."""
     chips = chip_directories(directory, kind)
     if kind is BuildKind.DISTRIBUTED:
@@ -221,21 +274,26 @@ def read_prebuilt(directory: Path, platform: str, kind: BuildKind) -> dict[str, 
             or parent["chips"] != list(chips)
         ):
             raise ValueError(f"Prebuilt distributed manifest does not match all chip builds: {directory}")
-    result = {name: _read_chip(path, platform) for name, path in chips.items()}
+    result = {name: _read_chip(path, platform, _validated_files) for name, path in chips.items()}
     if len({record["runtime_name"] for record in result.values()}) != 1:
         raise ValueError(f"Prebuilt chip builds use inconsistent runtimes: {directory}")
     return result
 
 
 def load_prebuilt(
-    directory: Path, platform: str, kind: BuildKind
+    directory: Path,
+    platform: str,
+    kind: BuildKind,
+    *,
+    _validated_files: dict[Path, dict[str, Any]] | None = None,
 ) -> dict[str, tuple[Any, str, dict[str, Any]]]:
     """Assemble validated bytes without compiler resolution, locks, or filesystem writes.
 
     The artifact adapter must first validate the enclosing ArtifactHandle and
-    expected key. This internal helper also validates private fallback builds.
+    expected key. Its verified inventory can be reused for immutable published
+    files. Without it, this helper hashes binaries (including private fallback).
     """
-    records = read_prebuilt(directory, platform, kind)
+    records = read_prebuilt(directory, platform, kind, _validated_files=_validated_files)
     # Simpler's optional native interface has no static stubs (as in task_interface.py).
     from simpler.task_interface import ArgDirection  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
 

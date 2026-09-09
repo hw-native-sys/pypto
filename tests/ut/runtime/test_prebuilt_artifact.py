@@ -18,18 +18,23 @@ from enum import Enum
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 from pypto import ir
 from pypto._identity import ToolchainIdentity, digest_record
 from pypto.ir.compiled_program import _COMPILED_META_SCHEMA, CompiledProgram
-from pypto.ir.distributed_compiled_program import _META_SCHEMA
+from pypto.ir.distributed_compiled_program import _META_SCHEMA, DistributedCompiledProgram
+from pypto.jit import _artifact_manifest
 from pypto.jit._artifact_manifest import ArtifactKey, ArtifactSpec, ArtifactState, BuildKind
 from pypto.jit.artifact_cache import ArtifactStore, BuildDisposition, LookupStatus
 from pypto.runtime import _prebuilt
 from pypto.runtime._artifact_runtime import ArtifactRuntime, bind_artifact, restore_artifact
-from pypto.runtime._artifact_sources import package_generated_sources, read_kernel_config
+from pypto.runtime._artifact_sources import (
+    UnsupportedArtifactInput,
+    package_generated_sources,
+    read_kernel_config,
+)
 from pypto.runtime.distributed_runner import (
     _assemble_chip_callables,
     _load_generated_module,
@@ -351,7 +356,7 @@ def test_unsupported_extern_include_fails_closed(tmp_path, fake_runtime, include
     _write(tmp_path / "external.cpp", include)
     with (tmp_path / "kernel_config.py").open("a") as stream:
         stream.write(f"\nKERNELS[0].update(external=True, source={str(tmp_path / 'external.cpp')!r})\n")
-    with pytest.raises(ValueError):
+    with pytest.raises(UnsupportedArtifactInput):
         package_generated_sources(tmp_path, BuildKind.SINGLE_CHIP)
 
 
@@ -510,9 +515,165 @@ def test_extern_symlinks_fail_before_generated_publication(tmp_path, fake_runtim
         package_generated_sources(root, BuildKind.SINGLE_CHIP)
 
     store = ArtifactStore(tmp_path / "cache", private_root=tmp_path / "private")
-    with pytest.raises(ValueError, match="Symbolic links in extern inputs"):
+    with pytest.raises(UnsupportedArtifactInput, match="Symbolic links in extern inputs"):
         store.get_or_build(_key(), _spec(), generated)
     assert store.lookup(_key(), _spec()).status is LookupStatus.MISS
+
+
+@pytest.mark.parametrize("kind", list(BuildKind))
+@pytest.mark.parametrize("attach", ["restore", "bind"])
+def test_ready_attachment_hashes_each_payload_once(tmp_path, fake_runtime, kind, attach):
+    store, generated = _publish(tmp_path, kind)
+    runtime = ArtifactRuntime(store, generated, "a2a3sim", tmp_path / "run")
+    runtime.load()
+    handle = runtime.handle
+    cls = CompiledProgram if kind is BuildKind.SINGLE_CHIP else DistributedCompiledProgram
+    compiled = cls.from_dir(handle.directory) if attach == "bind" else None
+    with (
+        patch.object(_artifact_manifest, "_file_digest", wraps=_artifact_manifest._file_digest) as digest,
+        patch.object(cls, "from_dir", wraps=cls.from_dir) as from_dir,
+        patch.object(_prebuilt.hashlib, "sha256", wraps=_prebuilt.hashlib.sha256) as sha,
+    ):
+        if attach == "restore":
+            compiled = restore_artifact(store, handle, tmp_path / "restored-run")
+        else:
+            bind_artifact(compiled, store, handle, tmp_path / "bound-run")
+        assert compiled is not None and compiled._artifact_runtime is not None
+        payload_hashes = sha.call_count
+        compiled._artifact_runtime.load()
+        compiled._artifact_runtime.load()
+        paths = [call.args[0] for call in digest.call_args_list]
+        expected = {
+            p for p in handle.directory.rglob("*") if p.is_file() and p.name != "artifact_manifest.json"
+        }
+        assert set(paths) == expected and len(paths) == len(expected)
+        # No additional SHA pass over binaries while reconstructing callables.
+        assert sha.call_count == payload_hashes
+        from_dir.assert_called_once_with(handle.directory)
+
+
+@pytest.mark.parametrize("damage", ["payload", "inner_digest"])
+def test_ready_attachment_rejects_corruption_before_callables(tmp_path, fake_runtime, damage):
+    store, generated = _publish(tmp_path, BuildKind.SINGLE_CHIP)
+    runtime = ArtifactRuntime(store, generated, "a2a3sim", tmp_path / "run")
+    runtime.load()
+    handle = runtime.handle
+    if damage == "payload":
+        (handle.directory / "prebuilt/kernel_0.bin").write_bytes(b"wrong kernel")
+    else:
+        # Even an outer inventory certifying these bytes cannot override a
+        # contradictory digest in the binary loader's inner contract.
+        marker = handle.directory / _prebuilt.BINARY_MANIFEST
+        record = json.loads(marker.read_bytes())
+        record["kernels"][0]["binary"]["sha256"] = "0" * 64
+        marker.write_text(json.dumps(record))
+        outer = _artifact_manifest.make_manifest(handle.directory, handle.key, handle.spec)
+        (handle.directory / "artifact_manifest.json").write_bytes(_artifact_manifest.encode_manifest(outer))
+    fake_runtime.interface.CoreCallable.build.reset_mock()
+    fake_runtime.interface.ChipCallable.build.reset_mock()
+    with pytest.raises(ValueError):
+        restored = restore_artifact(store, handle, tmp_path / "restored-run")
+        restored.load()
+    fake_runtime.interface.CoreCallable.build.assert_not_called()
+    fake_runtime.interface.ChipCallable.build.assert_not_called()
+
+
+@pytest.mark.parametrize("with_includes", [False, True])
+def test_extern_workspace_ancestor_symlink_is_relocatable(tmp_path, fake_runtime, with_includes):
+    workspace = tmp_path / "workspace"
+    _write(workspace / "extern/src/kernel.cpp", '#include "../include/header.hpp"')
+    _write(workspace / "extern/include/header.hpp", "// header")
+    alias = tmp_path / "alias"
+    alias.symlink_to(workspace, target_is_directory=True)
+    root = tmp_path / "generated"
+    _chip(root)
+    source = alias / "extern/src/kernel.cpp"
+    includes = [str(alias / "extern/include")] if with_includes else []
+    with (root / "kernel_config.py").open("a") as stream:
+        stream.write(
+            f"\nKERNELS[0].update(external=True, source={str(source)!r}, extra_include_dirs={includes!r})\n"
+        )
+    package_generated_sources(root, BuildKind.SINGLE_CHIP)
+    shutil.rmtree(workspace)
+    config = read_kernel_config(root / "kernel_config.py")
+    packaged = Path(config.KERNELS[0]["source"])
+    assert (packaged.parent / "../include/header.hpp").read_bytes() == b"// header"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        b'/*\n#include MACRO\n*/\n#include "header.hpp"\n',
+        b'#if 0\n#include "gone.h"\n#endif\n#include "header.hpp"\n',
+        b'// caf\xe9\n#include "header.hpp"\n',
+    ],
+)
+def test_extern_scanning_preserves_original_bytes(tmp_path, fake_runtime, source):
+    root = tmp_path / "generated"
+    _chip(root)
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "kernel.cpp").write_bytes(source)
+    (external / "header.hpp").write_bytes(b"// caf\xe9")
+    with (root / "kernel_config.py").open("a") as stream:
+        stream.write(f"\nKERNELS[0].update(external=True, source={str(external / 'kernel.cpp')!r})\n")
+    package_generated_sources(root, BuildKind.SINGLE_CHIP)
+    shutil.rmtree(external)
+    packaged = Path(read_kernel_config(root / "kernel_config.py").KERNELS[0]["source"])
+    assert packaged.read_bytes() == source
+    assert (packaged.parent / "header.hpp").read_bytes() == b"// caf\xe9"
+
+
+@pytest.mark.parametrize("kind", list(BuildKind))
+def test_ready_publication_prunes_all_chip_caches_and_sidecars(tmp_path, fake_runtime, kind):
+    store, generated = _publish(tmp_path, kind)
+    compile_ = fake_runtime.runner._compile_and_assemble.side_effect
+
+    def with_legacy_outputs(root, platform, **kwargs):
+        compile_(root, platform, **kwargs)
+        _write(root / "cache/.binary_context.lock", "")
+        _write(root / "cache/binary_context.json", "{}")
+        _write(root / "cache/kernel.bin", "duplicate kernel")
+        _write(root / "kernels/kernel.o", "intermediate kernel")
+        _write(root / "kernels/kernel.so", "duplicate kernel")
+        _write(root / "orchestration/main.so", "duplicate orchestration")
+        _write(root / "extern/input.o", "extern input must survive")
+
+    fake_runtime.runner._compile_and_assemble.side_effect = with_legacy_outputs
+    runtime = ArtifactRuntime(store, generated, "a2a3sim", tmp_path / "run")
+    runtime.load()
+    for chip in _prebuilt.chip_directories(runtime.directory, kind).values():
+        assert not (chip / "cache").exists()
+        assert not (chip / "kernels/kernel.o").exists()
+        assert not (chip / "kernels/kernel.so").exists()
+        assert not (chip / "orchestration/main.so").exists()
+        assert (chip / "extern/input.o").read_text() == "extern input must survive"
+        assert (chip / "kernels/kernel.cpp").is_file()
+        assert (chip / "orchestration/main.cpp").is_file()
+    assert store.lookup(runtime.handle.key, runtime.handle.spec).status is LookupStatus.HIT
+
+
+def test_ready_spec_drops_declared_legacy_outputs_but_retains_sources(tmp_path, fake_runtime):
+    store = ArtifactStore(tmp_path / "cache", private_root=tmp_path / "private")
+    legacy = ("cache/binary_context.json", "kernels/kernel.o", "orchestration/main.so")
+    source = "kernels/kernel.cpp"
+    spec = ArtifactSpec(
+        ArtifactState.GENERATED, BuildKind.SINGLE_CHIP, (*_spec().required_files, *legacy, source)
+    )
+
+    def generated(root):
+        _generated(root, BuildKind.SINGLE_CHIP)
+        for name in legacy:
+            _write(root / name, "inherited output")
+
+    built = store.get_or_build(_key(), spec, generated)
+    assert built.handle is not None
+    runtime = ArtifactRuntime(store, built.handle, "a2a3sim", tmp_path / "run")
+    runtime.load()
+    assert not set(legacy).intersection(runtime.handle.spec.required_files)
+    assert source in runtime.handle.spec.required_files
+    assert (runtime.directory / source).is_file()
+    assert store.lookup(runtime.handle.key, runtime.handle.spec).status is LookupStatus.HIT
 
 
 if __name__ == "__main__":
