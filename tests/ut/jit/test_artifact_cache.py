@@ -228,6 +228,20 @@ def test_readonly_missing_root_is_never_created(tmp_path):
         ArtifactStore(store.root, private_root=store.root / "private")
 
 
+def test_missing_private_root_allows_hits_without_probing_temporary_directories(store, monkeypatch):
+    key, spec = _key(), _spec()
+    store.get_or_build(key, spec, _builder)
+
+    def forbidden_probe():
+        pytest.fail("Temporary-directory discovery can write into a cache-root candidate")
+
+    monkeypatch.setattr(artifact_cache.tempfile, "gettempdir", forbidden_probe)
+    readonly = ArtifactStore(store.root, readonly=True)
+    assert readonly.get_or_build(key, spec, _unexpected_builder).disposition is BuildDisposition.HIT
+    with pytest.raises(OSError, match="requires a private_root"):
+        readonly.get_or_build(_key("missing"), spec, _unexpected_builder)
+
+
 def test_orphan_staging_and_empty_final_slot_never_hit(store):
     key, spec = _key(), _spec()
     slot = store._slot(key, spec)

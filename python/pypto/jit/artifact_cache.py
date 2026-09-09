@@ -176,8 +176,8 @@ class ArtifactStore:
     Args:
         root: Trusted cache root; captured as a canonical absolute path.
         readonly: Never create locks, staging, or any other cache-root output.
-        private_root: Optional writable parent for retained private builds,
-            outside the cache root. Defaults to the system temporary directory.
+        private_root: Writable parent for retained private builds, outside the
+            cache root. Without one, hits work but requests needing a build fail.
 
     Writer support requires Linux no-replace rename, POSIX flock, and a
     filesystem honoring both. Concurrent cache mutation/deletion is unsupported.
@@ -248,7 +248,12 @@ class ArtifactStore:
     def _build_private(
         self, key: ArtifactKey, spec: ArtifactSpec, builder: Callable[[Path], T], reason: str | None
     ) -> ArtifactBuild[T]:
-        private_root = self.private_root or Path(tempfile.gettempdir()).resolve()
+        # tempfile.gettempdir() probes candidate directories by writing files.
+        # A candidate could be inside the read-only cache, so let the adapter
+        # explicitly select a private build root instead of probing implicitly.
+        private_root = self.private_root
+        if private_root is None:
+            raise OSError(errno.ENOENT, "Artifact build requires a private_root outside the cache root")
         self._check_private_root(private_root)
         _mkdir(private_root)
         directory = Path(tempfile.mkdtemp(prefix="pypto-build-", dir=private_root))

@@ -99,9 +99,11 @@ filesystems must establish those semantics before use.
 
 `ArtifactStore(..., readonly=True)` performs no cache-root writes, including
 locks, indexes, or staging. A hit only reads its manifest and payload. A miss or
-invalid entry builds in `private_root`, which must be outside the cache root;
-the default is the system temporary directory. If no private build location is
-writable, the filesystem error propagates. The store never imports or executes
+invalid entry builds in an explicitly supplied `private_root` outside the cache
+root. Without one, hits still work but requests needing a build raise `OSError`.
+The store does not probe temporary-directory candidates, which could themselves
+be inside the cache root. If the selected private location is not writable, the
+filesystem error propagates. The store never imports or executes
 cached Python files; future loaders must independently avoid bytecode writes.
 
 To promote generated output, a binary builder uses
