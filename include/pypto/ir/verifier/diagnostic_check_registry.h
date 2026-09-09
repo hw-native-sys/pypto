@@ -47,6 +47,10 @@ enum class DiagnosticCheck : uint32_t {
   /// A parameter declared `In` that its own function body writes (see
   /// CreateInParamWrittenWarningVerifier).
   InParamWritten = 5,
+  /// An InCore composite collective inside a `pl.spmd` scope, which duplicates
+  /// the transfer instead of partitioning it (see
+  /// CreateCompositeInSpmdScopeWarningVerifier).
+  CompositeInSpmdScope = 6,
   kCount
 };
 

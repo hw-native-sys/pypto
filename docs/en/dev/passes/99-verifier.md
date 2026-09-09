@@ -230,6 +230,60 @@ declared, and a cross-function writer is a user function with no `REGISTER_OP`
 block. A missing effect is the registry gap described above, which this check
 cannot see.
 
+### CompositeInSpmdScope
+
+**Warning**: `DiagnosticCheck::CompositeInSpmdScope` — an InCore composite
+collective (`pld.tensor.allreduce` / `allgather` / `reduce_scatter` /
+`broadcast` / `barrier` / `all_to_all` / `all_to_all_v`) sits inside a
+`pl.spmd` scope.
+
+A composite is a **rank-level** operation — one logical collective per rank.
+`pl.spmd(N)` is a **core-level** scope — N blocks within one rank. Nesting them
+only makes sense if the collective defines its own core decomposition, and the
+InCore rail has no such parameter for most of them: only `pld.tensor.allreduce`
+has a working multi-core knob (HOST-rail `core_num`); `pld.tensor.all_to_all_v`
+accepts `core_num` too, but only on the managed CHIP/L2 rail, and only
+`core_num=1` is implemented there.
+
+`LowerCompositeOps` never reads the block index, so the emitted body is not a
+function of the enclosing width. The push loop's bounds are `nranks` and its put
+offsets are `my_rank`, so every block issues the **same** transfers to the
+**same** peers — the traffic is duplicated N times, not divided N ways. The
+barrier is affected too: its expected credit is the compile-time constant `1`
+while N blocks each notify `+1`, so it releases once a peer's *first* block has
+notified rather than its last. Nested `pl.spmd` scopes compound: the effective
+multiplier is the product of every enclosing width, not just the innermost one.
+
+None of that fails a test. Every block writes byte-identical content, so an
+early reader still observes correct values, and the epilogue subtracts `-1` per
+block so the signal still returns to zero. Both properties are incidental to the
+current lowering — they would not survive a partitioned one — and until this
+check existed the only symptom was an N-fold traffic multiplier with no
+diagnostic anywhere.
+
+**How it runs.** Registered as `DiagnosticCheck::CompositeInSpmdScope`, a
+**warning** at **`PrePipeline`** — the composite `Call` must still exist, and
+`LowerCompositeOps` replaces it during the pipeline. `PrePipeline` is also
+before `InlineFunctions` (pass 01) splices an `Inline` function's body into its
+call sites, so this check descends into an `Inline` callee's body from the call
+site itself, under the caller's live enclosing-width stack — otherwise a
+composite reached only through such a call would be visited independently,
+with no enclosing `pl.spmd` in sight.
+
+```python
+checks = passes.DiagnosticCheckSet()
+checks.insert(passes.DiagnosticCheck.CompositeInSpmdScope)
+```
+
+**Why a warning and not an error.** A caller may guard the call so that only one
+block executes it (`if block_idx == 0: ...`). That is legitimate, and this check
+does not try to prove it. Erroring would forbid a valid pattern in order to
+catch an invalid one.
+
+**Fix**: issue the collective from a single-block scope, or guard it so one
+block executes it. `pld.tensor.allreduce` has a working multi-core alternative
+via HOST-rail `core_num`; the other composites have none yet.
+
 ### SSAVerify
 
 **Error types** (`ssa::ErrorType`):
