@@ -25,7 +25,13 @@ See https://www.mkdocs.org/user-guide/configuration/#hooks for the hook protocol
 import os
 import posixpath
 import re
+import subprocess
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+
+from mkdocs.plugins import event_priority
+from mkdocs.structure.files import File
 
 # Matches inline markdown links and images: `[label](target)` / `![alt](target)`,
 # with an optional `"title"` after the target. Group 3 is the target.
@@ -104,12 +110,17 @@ def on_page_markdown(markdown: str, page: Any, config: Any, files: Any) -> str:
 
     # Directory of this page relative to `docs/`, e.g. `en/dev/passes`.
     page_dir = posixpath.dirname(page.file.src_uri)
+    source_path = page.file.src_uri.partition(_PTOAS_PREFIX)[2]
+    if source_path:
+        page.edit_url = f"{_PTOAS_REPO}/blob/{_PTOAS.revision}/{source_path}"
     skip = _code_spans(markdown)
 
     def escaped_url(target: str) -> str | None:
         """Return the GitHub URL for a target that leaves `docs/`, else None."""
         if not _is_repo_relative(target):
             return None
+        if source_path:
+            return _ptoas_link(target, source_path)
         path, fragment = _split_fragment(target)
         if not path:
             return None
@@ -132,10 +143,10 @@ def on_page_markdown(markdown: str, page: Any, config: Any, files: Any) -> str:
         # image, so rewriting one would silently produce a broken image. Every
         # image in the docs lives under `docs/assets/`; if one ever points outside
         # `docs/`, `--strict` should surface it rather than this hook hiding it.
-        if bang:
+        if bang and not source_path:
             return match.group(0)
         url = escaped_url(target)
-        return match.group(0) if url is None else f"[{label}]({url}{title})"
+        return match.group(0) if url is None else f"{bang}[{label}]({url}{title})"
 
     def rewrite_ref_def(match: re.Match[str]) -> str:
         if any(start <= match.start() < end for start, end in skip):
@@ -147,3 +158,121 @@ def on_page_markdown(markdown: str, page: Any, config: Any, files: Any) -> str:
 
     markdown = _LINK.sub(rewrite_link, markdown)
     return _REF_DEF.sub(rewrite_ref_def, markdown)
+
+
+# Imported pages exist only in the build. GitCode remains authoritative and its
+# GitHub mirror supplies the snapshot; no copied manuals are committed to PyPTO.
+_PTOAS_REPO = "https://github.com/hw-native-sys/PTOAS"
+_PTOAS_PREFIX = "reference/ptoas/source/"
+_PTOAS_DESIGNS = {
+    "Event ID Synchronization": "docs/designs/ptoas-auto-sync-design.md",
+    "Buffer ID Synchronization (A5)": "docs/bufid_sync_a5_design.md",
+    "Memory Planning": "docs/designs/ptoas-largest-first-fit-four-gates-memplan-design.md",
+}
+
+
+@dataclass
+class _PtoasSnapshot:
+    revision: str = ""
+    files: dict[str, Path] = field(default_factory=dict)
+
+
+_PTOAS = _PtoasSnapshot()
+
+
+def _ptoas_link(target: str, source_path: str) -> str | None:
+    path, fragment = _split_fragment(target)
+    resolved = posixpath.normpath(posixpath.join(posixpath.dirname(source_path), path))
+    if resolved in _PTOAS.files:
+        return None  # The source tree layout is preserved inside the site.
+    if resolved.startswith("../"):
+        raise ValueError(f"PTOAS link escapes its repository: {source_path}: {target}")
+    kind = "tree" if path.endswith("/") else "blob"
+    return f"{_PTOAS_REPO}/{kind}/{_PTOAS.revision}/{resolved}{fragment}"
+
+
+def _manual_title(path: Path) -> str:
+    heading = re.search(r"^# (.+)$", path.read_text(encoding="utf-8"), re.MULTILINE)
+    return heading.group(1).strip().replace("`", "") if heading else path.stem
+
+
+@event_priority(100)
+def on_config(config: Any) -> Any:
+    """Discover the mirrored PTOAS manuals before locale navigation is built."""
+    root = Path(config.config_file_path).parent / ".cache/ptoas-docs"
+    if not (root / "docs/isa").is_dir():
+        raise ValueError(
+            f"PTOAS docs checkout missing. Run: git clone --depth 1 {_PTOAS_REPO}.git .cache/ptoas-docs"
+        )
+    _PTOAS.revision = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    ).stdout.strip()
+    paths = [root / "docs/PTO_IR_manual.md", *(root / path for path in _PTOAS_DESIGNS.values())]
+    for path in paths:
+        if not path.is_file():
+            raise ValueError(f"Required PTOAS documentation is missing: {path}")
+    paths.extend(sorted((root / "docs/isa/vmi-isa").rglob("*")))
+    _PTOAS.files = {}
+    for path in paths:
+        if path.is_file():
+            if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()):
+                raise ValueError(f"PTOAS documentation must stay inside the checkout: {path}")
+            _PTOAS.files[path.relative_to(root).as_posix()] = path
+    vmi_pages = [
+        {_manual_title(path): f"en/{_PTOAS_PREFIX}{source}"}
+        for source, path in _PTOAS.files.items()
+        if source.startswith("docs/isa/vmi-isa/") and source.endswith(".md")
+    ]
+    if not vmi_pages:
+        raise ValueError("PTOAS VMI instruction section is empty")
+    nav: list[Any] = [
+        "en/reference/ptoas/index.md",
+        {"PTO IR Manual": f"en/{_PTOAS_PREFIX}docs/PTO_IR_manual.md"},
+        {"VMI Instructions": vmi_pages},
+        {
+            "Pass Designs": [
+                {title: f"en/{_PTOAS_PREFIX}{source}"} for title, source in _PTOAS_DESIGNS.items()
+            ]
+        },
+    ]
+    for entry in config.nav:
+        if "PTOAS" in entry:
+            entry["PTOAS"] = nav
+    return config
+
+
+def _imported_file(source: str, path: Path, locale: str, config: Any) -> File:
+    uri = f"{locale}/{_PTOAS_PREFIX}{source}"
+    content = path.read_bytes()
+    if path.suffix == ".md":
+        note = (
+            f"> Source: [PTOAS `{_PTOAS.revision[:12]}`]"
+            f"({_PTOAS_REPO}/blob/{_PTOAS.revision}/{source}). "
+            "Shown in its original language.\n\n"
+        )
+        content = (note + content.decode("utf-8")).encode("utf-8")
+    generated: Any = File.generated(config, uri, content=content)
+    if locale == "en":
+        generated.dest_uri = generated.dest_uri.removeprefix("en/")
+        generated.url = generated.url.removeprefix("en/")
+    generated.locale = locale
+    generated.locale_alternate_of = locale
+    generated.localization = locale
+    generated.norm_src_uri = uri.removeprefix(f"{locale}/")
+    return generated
+
+
+@event_priority(-100)
+def on_files(files: Any, config: Any) -> Any:
+    """Add virtual pages after i18n, which requires physical files in its own hook."""
+    locale = config.plugins["i18n"].current_language
+    for source, path in _PTOAS.files.items():
+        alternates = {lang: _imported_file(source, path, lang, config) for lang in ("en", "zh")}
+        generated: Any = alternates[locale]
+        generated.alternates = alternates
+        files.append(generated)
+    return files

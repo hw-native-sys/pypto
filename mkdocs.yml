@@ -281,6 +281,7 @@ nav:
       - en/api/array.md
       - en/api/prefetch.md
       - en/api/optimizations.md
+  - PTOAS: en/reference/ptoas/index.md
   - Reference:
       - en/reference/index.md
       - PTO ISA:
@@ -305,6 +306,7 @@ nav:
       - en/dev/08-entry-points.md
       - en/dev/distributed_ops.md
       - en/dev/ptoas-op-status.md
+      - en/dev/ptoas-docs.md
       - IR:
           - en/dev/ir/index.md
           - en/dev/ir/00-overview.md
