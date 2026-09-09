@@ -117,6 +117,10 @@ std::string IRPropertyToString(IRProperty prop) {
       return "NoScalarKernelReturn";
     case IRProperty::BufferIR:
       return "BufferIR";
+    case IRProperty::TileStorageLegalized:
+      return "TileStorageLegalized";
+    case IRProperty::TileStorageAllocated:
+      return "TileStorageAllocated";
     default:
       return "Unknown";
   }

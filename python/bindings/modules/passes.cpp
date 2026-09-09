@@ -157,7 +157,11 @@ void BindPass(nb::module_& m) {
              "device-side scalar helper belongs in an Inline function")
       .value("BufferIR", IRProperty::BufferIR,
              "InCore/AIC/AIV use explicit buffer handles and valid registered buffer calls; "
-             "includes SSA, dominance, and assignment symmetry, not lifetime or initialization proofs");
+             "includes SSA, dominance, and assignment symmetry, not lifetime or initialization proofs")
+      .value("TileStorageLegalized", IRProperty::TileStorageLegalized,
+             "Device region boundaries use canonical, nonoverlapping allocation windows")
+      .value("TileStorageAllocated", IRProperty::TileStorageAllocated,
+             "Device region storage and transfers also have nonoverlapping effective address windows");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");
@@ -392,6 +396,9 @@ void BindPass(nb::module_& m) {
              "Propagates loop-carried iter_arg/initValue MemRefs down the yield/producer chain so\n"
              "accumulator producers write directly into the carried buffer. Split out of MemoryReuse\n"
              "so it can run without legacy opportunistic reuse (memory_planner=DSA_RP or PTOAS).");
+
+  passes.def("verify_tile_storage", &pass::VerifyTileStorage,
+             "Verify canonical device region storage before address placement");
 
   passes.def("memory_reuse", &pass::MemoryReuse,
              "Create a memory reuse pass\n\n"

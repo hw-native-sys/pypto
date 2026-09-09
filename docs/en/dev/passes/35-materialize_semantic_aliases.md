@@ -146,3 +146,7 @@ physical address for ptoas `PlanMemory`. See
   `tile.matmul_acc(..., init_cond=...)`. Peeled `matmul`/`matmul_acc` branches
   remain supported for existing hand-written kernels and are normalized by this
   pass.
+
+The staged pipeline runs `VerifyTileStorage` after shared and post-reuse storage
+reconciliation, before address placement. See the [storage property contracts](99-verifier.md#tile-storage-properties)
+for symbolic closure and the separate allocated-address overlap check.

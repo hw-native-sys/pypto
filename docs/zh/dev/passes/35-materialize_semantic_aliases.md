@@ -125,3 +125,6 @@ pipeline-slot 元数据）的变量渲染成同一个 `tile_buf` handle，因此
 - 新的 matmul accumulator 推荐使用单个
   `tile.matmul_acc(..., init_cond=...)`。为兼容已有手写 kernel，peeled
   `matmul`/`matmul_acc` 分支仍受支持，并由本 pass 规范化。
+
+开发阶段的流水线在共享及复用后存储协调完成后、地址分配之前运行 `VerifyTileStorage`。
+符号存储一致性及独立的实际地址重叠检查见[存储属性约束](99-verifier.md#tile-存储属性)。
