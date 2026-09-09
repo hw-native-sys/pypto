@@ -51,6 +51,7 @@ CI 与本地构建使用同一版本；生成的站点包含自己的主题资�
 在 PyPTO 仓库根目录运行以下命令，使用 Python 3.10 或更新版本。先获取主题，再安装文档依赖：
 
 ```bash
+set -euo pipefail
 git init .site-theme
 git -C .site-theme fetch --depth 1 \
   https://github.com/hw-native-sys/hw-native-sys.github.io.git \

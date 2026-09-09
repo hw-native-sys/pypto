@@ -56,6 +56,7 @@ Run from the PyPTO repository root with Python 3.10 or newer. Fetch the theme
 before installing the documentation dependencies:
 
 ```bash
+set -euo pipefail
 git init .site-theme
 git -C .site-theme fetch --depth 1 \
   https://github.com/hw-native-sys/hw-native-sys.github.io.git \
