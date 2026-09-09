@@ -14,6 +14,7 @@ that PyPTO's stable pointer API is translated to simpler's owner ``Buffer`` API.
 """
 
 import ctypes
+import importlib
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -36,13 +37,17 @@ def fake_tensor_arg_modules():
     """Keep DeviceTensor wire-conversion checks independent of Simpler."""
     from pypto.runtime import device_tensor as device_tensor_module  # noqa: PLC0415
 
+    # Other fixtures can restore sys.modules while leaving a stale package
+    # attribute. Patch the module that function-local imports actually use.
+    tensor_arg_module = importlib.import_module("pypto.runtime.tensor_arg")
     task_interface = SimpleNamespace(
         Tensor=type("Tensor", (), {}),
         torch_dtype_to_datatype=lambda dtype: dtype,
     )
     torch_interop = SimpleNamespace(make_tensor_arg=MagicMock(name="make_tensor_arg"))
-    with patch(
-        "pypto.runtime.tensor_arg._modules",
+    with patch.object(
+        tensor_arg_module,
+        "_modules",
         return_value=(task_interface, device_tensor_module, torch_interop),
     ):
         yield
