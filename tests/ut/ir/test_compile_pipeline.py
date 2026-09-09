@@ -10,6 +10,7 @@
 """Tests for the shared IR pass pipeline."""
 
 import json
+from contextlib import nullcontext
 
 import pytest
 from pypto import DataType, ir
@@ -50,6 +51,31 @@ def test_run_pass_pipeline_orders_outer_before_extra_instruments():
     for outer_event, extra_event in zip(seen[::2], seen[1::2], strict=True):
         assert outer_event[0] == "outer"
         assert extra_event == ("extra", outer_event[1])
+
+
+@pytest.mark.parametrize("mode", ["plain", "dump", "profiling", "dump_and_profiling"])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_buffer_ir_option_survives_nested_pipeline_contexts(tmp_path, mode, enabled):
+    """Compilation, dump and profiling wrappers inherit the same storage option."""
+    seen: list[bool] = []
+
+    def observe(_pass: passes.Pass, _program: ir.Program) -> None:
+        ctx = passes.PassContext.current()
+        assert ctx is not None
+        seen.append(ctx.get_enable_buffer_ir())
+
+    instrument = passes.CallbackInstrument(before_pass=observe, name="ObserveBufferIR")
+    profiling = CompileProfiler() if "profiling" in mode else nullcontext()
+    with passes.PassContext([instrument], enable_buffer_ir=enabled), profiling:
+        _run_pass_pipeline(
+            _scalar_program(),
+            operation="lower",
+            dump_passes="dump" in mode,
+            passes_dump_dir=str(tmp_path / "passes"),
+        )
+        ctx = passes.PassContext.current()
+        assert ctx is not None and ctx.get_enable_buffer_ir() == enabled
+    assert seen and all(value == enabled for value in seen)
 
 
 def test_run_pass_pipeline_names_diagnostic_conflict_for_lower():

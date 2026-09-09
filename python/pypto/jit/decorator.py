@@ -1780,6 +1780,12 @@ def _resolve_memory_planner(run_config: Any) -> _passes.MemoryPlanner:
     return _passes.MemoryPlanner.PYPTO
 
 
+def _resolve_enable_buffer_ir() -> bool:
+    """Resolve the staged Buffer IR option inherited by ``ir.compile()``."""
+    ctx = _passes.PassContext.current()
+    return ctx.get_enable_buffer_ir() if ctx is not None else False
+
+
 def _resolve_enable_pypto_l0c_double_buffer() -> bool:
     """Resolve the legacy-PYPTO chooser dbC=2 opt-in for the cache key.
 
@@ -2526,6 +2532,7 @@ class JITFunction:
             emit_source_loc=compile_kwargs["emit_source_loc"],
             memory_planner=compile_kwargs.get("memory_planner", _resolve_memory_planner(None)),
             enable_pypto_l0c_double_buffer=_resolve_enable_pypto_l0c_double_buffer(),
+            enable_buffer_ir=_resolve_enable_buffer_ir(),
             runtime=_resolve_runtime(),
         )
 
