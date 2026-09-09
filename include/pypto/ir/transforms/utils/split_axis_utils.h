@@ -393,6 +393,25 @@ std::vector<VarPtr> RepairIfReturnVars(const std::vector<VarPtr>& return_vars, c
                                        const ExprPtr& subblock_idx, const ExprPtr& lane_stride,
                                        const Span& span);
 
+/// The split the pass has already applied to one operand, or nullopt when it is not
+/// lane-local. THE single answer to "did the split partition this operand, and along
+/// which axis" -- every gate must go through it.
+///
+/// A bound operand is looked up in @p tile_vars; an INLINE tuple projection
+/// (`pl.tile.store(pair[0], ...)`, which the DSL emits verbatim because nothing hoists
+/// a projection into its own binding) is not a Var and never appears there, so its axis
+/// is read back off the halved tuple type. Matching only Var is a silent wrong answer:
+/// the operand is substituted for its halved replacement regardless, leaving the
+/// consuming node a full-width declared type over per-lane data.
+std::optional<TileInfo> OperandSplitInfo(const ExprPtr& arg,
+                                         const std::unordered_map<const Var*, TileInfo>& tile_vars,
+                                         const std::unordered_map<const Var*, VarPtr>& var_replacements);
+
+/// The halved replacement for one operand, or nullptr when nothing replaces it.
+/// An inline projection is rebuilt over the replaced tuple, which re-derives the
+/// element type from it.
+ExprPtr ReplacedOperand(const ExprPtr& arg, const std::unordered_map<const Var*, VarPtr>& var_replacements);
+
 /// Rebuild @p ret with every ``tile.store`` of a tracked tile moved to this lane's
 /// half of the destination, or nullptr when it carries no such store.
 ///

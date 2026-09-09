@@ -797,14 +797,22 @@ too. Every consumer goes through them — the generic path's tracked-input scan,
 `LocalizeStoreOffset`, and `GetFirstTileArgMemory` (which reads the operand's *type*, so
 a vector op is no longer misclassified SHARED and replicated onto both lanes).
 
-Everything that asks "was this operand partitioned" goes through `OperandSplitInfo`,
-including the two gates that do not halve anything themselves: the **absolute-index**
-check (a `tile.gather` whose table is an inline projection is partitioned, and nothing
-else catches it — `gather` takes its result shape from `indices`, so type consistency is
-satisfied whatever happens to the table) and the **view** path (`tile.reshape` /
-`tile.reinterpret_view` ask the same question to tell "lift a full tile, then slice per
-lane" from "the producer already partitioned this"; answering *full width* for a
-projection emits a slice on top of an operand that is about to be halved).
+Everything that asks "was this operand partitioned" goes through `OperandSplitInfo`.
+That question has more consumers than the halving itself, and each answered *no* for an
+inline projection with a different consequence:
+
+| Asks it | Wrong answer costs |
+| ------- | ------------------ |
+| the generic path's tracked-input scan | the result keeps a full-width type over per-lane operands |
+| `LocalizeStoreOffset` | both lanes store to the same rows |
+| `GetFirstTileArgMemory` | a vector op classifies SHARED and is replicated onto both lanes |
+| absolute-index gate | a halved `tile.gather` table under absolute indices — **no diagnostic**, since `gather` sizes its result from `indices` |
+| `tile.reshape` / `tile.reinterpret_view` | a full-width view plus a per-lane slice over an operand about to be halved |
+| `tile.slice` offset | `+ subblock_idx * half` added to an already lane-local offset, so lane 1 reads past the end |
+| the V→C boundary | a legal `tile.move(pair[0], target_memory=Mat)` refused as full width |
+
+The boundary also builds its `tile.aic_gather` from `ReplacedOperand`, which rebuilds an
+inline projection over the halved tuple so the gather doubles HALF → FULL either way.
 
 A tuple also crosses **merges and loop carries**, and neither reads its split from
 `tile_vars` — a tuple var is never in it. Both adopt the halved *type* instead, whose

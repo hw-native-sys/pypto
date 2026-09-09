@@ -2225,6 +2225,70 @@ def test_tuple_loop_carry_propagates_the_halved_type():
     assert "[1], [0, 0 + subblock_idx * 128], out_1__ssa_v0)" in printed
 
 
+def test_slice_of_an_inline_projection_is_not_offset_twice():
+    """An already-partitioned source must keep its lane-local offset.
+
+    ``tile.slice`` adds ``+ subblock_idx * half`` only for a source the split has NOT
+    partitioned; a partitioned one is already in lane-local coordinates. Matching only
+    ``Var`` answered *not partitioned* for an inline projection, so the offset was
+    added on top of a source that only holds this lane's half — lane 1 slicing from
+    column 128 of a 128-wide tile, i.e. straight past the end.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            t: pl.Tensor[[256, 128], pl.FP32],
+            tmp: pl.Tile[[256, 128], pl.FP32, pl.Mem.Vec],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_1: pl.Out[pl.Tensor[[1, 256], pl.INT32]],
+        ) -> pl.Tensor[[1, 256], pl.INT32]:
+            src = pl.tile.load(t, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            pair = pl.tile.gather_compare(src, pl.const(1.0, pl.FP32), tmp, cmp_mode="eq", out_cols=16)
+            seed = pl.tile.move(rhs, target_memory=pl.Mem.Mat)  # noqa: F841
+            sl = pl.tile.slice(pair[1], [1, 256], [0, 0])
+            return pl.tile.store(sl, [0, 0], out_1)
+
+    printed = _lower(Before).as_python()
+    # The slice reads its own half at offset 0 — the lane offset belongs to the store.
+    assert "pl.tile.slice(pair[1], [1, 128], [0, 0])" in printed
+    assert "pl.tile.store(sl, [0, 0 + subblock_idx * 128], out_1)" in printed
+
+
+def test_inline_projection_crossing_to_cube_is_gathered():
+    """The V->C boundary must see a projection as halved, like the bound spelling.
+
+    ``tile.move(pair[0], target_memory=pl.Mem.Mat)`` is the same value as
+    ``dst = pair[0]`` followed by the move, but only the bound form worked: the
+    boundary looked its operand up by ``Var``, found nothing, and refused it as a
+    full-width vector operand. It must instead gather the halved projection back to
+    the full tile the cube expects.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            t: pl.Tensor[[256, 128], pl.FP32],
+            tmp: pl.Tile[[256, 128], pl.FP32, pl.Mem.Vec],
+            rhs: pl.Tile[[16, 128], pl.INT32, pl.Mem.Right],
+            out_0: pl.Out[pl.Tensor[[256, 128], pl.INT32]],
+        ) -> pl.Tensor[[256, 128], pl.INT32]:
+            src = pl.tile.load(t, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            pair = pl.tile.gather_compare(src, pl.const(1.0, pl.FP32), tmp, cmp_mode="eq", out_cols=16)
+            mat = pl.tile.move(pair[0], target_memory=pl.Mem.Mat)
+            acc = pl.tile.matmul(mat, rhs)
+            back = pl.tile.move(acc, target_memory=pl.Mem.Vec)
+            return pl.tile.store(back, [0, 0], out_0)
+
+    printed = _lower(Before).as_python()
+    # The halved [128, 16] projection is reassembled to the full [256, 16] the cube wants,
+    # along dim 0 (split=1 is UP_DOWN), and the cube placement move rides on that.
+    assert "pl.tile.aic_gather(pair[0], split=1)" in printed
+    assert "mat_mat: pl.Tile[[256, 16], pl.INT32, pl.Mem.Mat]" in printed
+
+
 def test_tuple_result_op_refusing_the_halved_arguments_says_so():
     """A refused halving is diagnosed as a refusal, not as a stationary element.
 

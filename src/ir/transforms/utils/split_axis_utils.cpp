@@ -160,39 +160,6 @@ std::optional<TileInfo> SplitInfoFromHalvedType(const TypePtr& before_type, cons
   return std::nullopt;
 }
 
-// The split the pass has already applied to ONE OPERAND, whatever expression carries
-// it, or nullopt when the operand is not lane-local.
-//
-// This is the single answer to "did the split partition this operand, and along which
-// axis" and every consumer must go through it. A bound operand is looked up in
-// ``tile_vars``; an INLINE tuple projection -- `pl.tile.store(pair[0], ...)`,
-// `pl.tile.add(pair[1], pair[1])`, which the DSL emits verbatim because nothing hoists
-// a projection into its own binding -- is not a Var and never appears there, so its
-// axis is read back off the halved tuple type instead.
-//
-// Matching only Var here is a SILENT wrong answer, not a missed optimization: the
-// operand still gets substituted for its halved replacement afterwards, so the
-// consuming node keeps a full-width declared type over per-lane data.
-std::optional<TileInfo> OperandSplitInfo(const ExprPtr& arg,
-                                         const std::unordered_map<const Var*, TileInfo>& tile_vars,
-                                         const std::unordered_map<const Var*, VarPtr>& var_replacements) {
-  if (!arg) return std::nullopt;
-  if (auto arg_var = AsVarLike(arg)) {
-    auto it = tile_vars.find(arg_var.get());
-    return it != tile_vars.end() ? std::optional<TileInfo>{it->second} : std::nullopt;
-  }
-  if (auto get_item = std::dynamic_pointer_cast<const TupleGetItemExpr>(arg)) {
-    auto tuple_var = AsVarLike(get_item->tuple_);
-    auto it = tuple_var ? var_replacements.find(tuple_var.get()) : var_replacements.end();
-    if (it == var_replacements.end()) return std::nullopt;
-    auto halved = std::dynamic_pointer_cast<const TupleType>(it->second->GetType());
-    const auto index = static_cast<size_t>(get_item->index_);
-    if (!halved || get_item->index_ < 0 || index >= halved->types_.size()) return std::nullopt;
-    return SplitInfoFromHalvedType(get_item->GetType(), halved->types_[index]);
-  }
-  return std::nullopt;
-}
-
 // An absolutely-indexed operand -- tile.gather's source table or tile.scatter's
 // destination -- whose PRODUCER was partitioned, or an empty ``arg`` when there
 // is none.
@@ -455,25 +422,6 @@ std::string FullWidthOperandDiagnostic(const std::string& op_name, const FullWid
 // tuples already halved for the ops that describe their own shape) with each
 // tracked operand swapped for the halved replacement the trailing Substitute
 // installs.
-// The replacement for one operand, or nullptr when nothing replaces it.
-//
-// A bound operand is replaced directly. An INLINE tuple projection is not in the
-// map at all -- the tuple underneath it is -- so rebuild the projection over the
-// replacement, which re-derives the element type from the halved tuple.
-ExprPtr ReplacedOperand(const ExprPtr& arg, const std::unordered_map<const Var*, VarPtr>& var_replacements) {
-  if (auto arg_var = AsVarLike(arg)) {
-    auto it = var_replacements.find(arg_var.get());
-    return it != var_replacements.end() ? it->second : nullptr;
-  }
-  if (auto get_item = std::dynamic_pointer_cast<const TupleGetItemExpr>(arg)) {
-    auto tuple_var = AsVarLike(get_item->tuple_);
-    auto it = tuple_var ? var_replacements.find(tuple_var.get()) : var_replacements.end();
-    if (it == var_replacements.end()) return nullptr;
-    return std::make_shared<TupleGetItemExpr>(it->second, get_item->index_, get_item->span_);
-  }
-  return nullptr;
-}
-
 std::vector<ExprPtr> BuildHalvedCallArgs(const std::vector<ExprPtr>& new_args,
                                          const std::unordered_map<const Var*, VarPtr>& var_replacements) {
   std::vector<ExprPtr> probe_args;
@@ -1453,8 +1401,11 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
           // producer, so its offset is in lane-local coordinates and must be
           // left untouched; an unsplit (full-width) source needs
           // +subblock_idx*half so each lane reads its own half.
-          auto slice_src = AsVarLike(call->args_[0]);
-          bool slice_src_is_split = slice_src && tile_vars.count(slice_src.get()) != 0;
+          // Through OperandSplitInfo: an INLINE projection is already in lane-local
+          // coordinates, and adding the per-subblock base on top of it sends lane 1
+          // reading from the END of a source that only holds this lane's half.
+          const bool slice_src_is_split =
+              OperandSplitInfo(call->args_[0], tile_vars, var_replacements).has_value();
           if (!slice_src_is_split) {
             new_args[2] = AdjustOffsets(call->args_[2], slice_split_dim, lane_step, subblock_idx);
           }
@@ -2255,6 +2206,58 @@ StmtPtr LocalizeReturnStores(const std::shared_ptr<const ReturnStmt>& ret,
   }
   if (!changed) return nullptr;
   return std::make_shared<ReturnStmt>(std::move(new_values), ret->span_, ret->leading_comments_);
+}
+
+// The split the pass has already applied to ONE OPERAND, whatever expression carries
+// it, or nullopt when the operand is not lane-local.
+//
+// This is the single answer to "did the split partition this operand, and along which
+// axis" and every consumer must go through it. A bound operand is looked up in
+// ``tile_vars``; an INLINE tuple projection -- `pl.tile.store(pair[0], ...)`,
+// `pl.tile.add(pair[1], pair[1])`, which the DSL emits verbatim because nothing hoists
+// a projection into its own binding -- is not a Var and never appears there, so its
+// axis is read back off the halved tuple type instead.
+//
+// Matching only Var here is a SILENT wrong answer, not a missed optimization: the
+// operand still gets substituted for its halved replacement afterwards, so the
+// consuming node keeps a full-width declared type over per-lane data.
+std::optional<TileInfo> OperandSplitInfo(const ExprPtr& arg,
+                                         const std::unordered_map<const Var*, TileInfo>& tile_vars,
+                                         const std::unordered_map<const Var*, VarPtr>& var_replacements) {
+  if (!arg) return std::nullopt;
+  if (auto arg_var = AsVarLike(arg)) {
+    auto it = tile_vars.find(arg_var.get());
+    return it != tile_vars.end() ? std::optional<TileInfo>{it->second} : std::nullopt;
+  }
+  if (auto get_item = std::dynamic_pointer_cast<const TupleGetItemExpr>(arg)) {
+    auto tuple_var = AsVarLike(get_item->tuple_);
+    auto it = tuple_var ? var_replacements.find(tuple_var.get()) : var_replacements.end();
+    if (it == var_replacements.end()) return std::nullopt;
+    auto halved = std::dynamic_pointer_cast<const TupleType>(it->second->GetType());
+    const auto index = static_cast<size_t>(get_item->index_);
+    if (!halved || get_item->index_ < 0 || index >= halved->types_.size()) return std::nullopt;
+    return SplitInfoFromHalvedType(get_item->GetType(), halved->types_[index]);
+  }
+  return std::nullopt;
+}
+
+// The replacement for one operand, or nullptr when nothing replaces it.
+//
+// A bound operand is replaced directly. An INLINE tuple projection is not in the
+// map at all -- the tuple underneath it is -- so rebuild the projection over the
+// replacement, which re-derives the element type from the halved tuple.
+ExprPtr ReplacedOperand(const ExprPtr& arg, const std::unordered_map<const Var*, VarPtr>& var_replacements) {
+  if (auto arg_var = AsVarLike(arg)) {
+    auto it = var_replacements.find(arg_var.get());
+    return it != var_replacements.end() ? it->second : nullptr;
+  }
+  if (auto get_item = std::dynamic_pointer_cast<const TupleGetItemExpr>(arg)) {
+    auto tuple_var = AsVarLike(get_item->tuple_);
+    auto it = tuple_var ? var_replacements.find(tuple_var.get()) : var_replacements.end();
+    if (it == var_replacements.end()) return nullptr;
+    return std::make_shared<TupleGetItemExpr>(it->second, get_item->index_, get_item->span_);
+  }
+  return nullptr;
 }
 
 StmtPtr RetypeTupleProjection(const std::shared_ptr<const AssignStmt>& assign,

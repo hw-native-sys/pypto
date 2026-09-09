@@ -445,11 +445,14 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
           // using the original full-typed reference would over-double to 2x FULL.
           auto src = call->args_[0];
           auto src_var = AsVarLike(src);
-          auto tracked = src_var ? tile_vars.find(src_var.get()) : tile_vars.end();
+          // Through OperandSplitInfo, so an INLINE tuple projection counts as halved:
+          // `tile.move(pair[0], target_memory=pl.Mem.Mat)` is the same value as
+          // `dst = pair[0]` followed by the move, and only the bound spelling worked.
+          auto tracked_info = split_axis::OperandSplitInfo(src, tile_vars, var_replacements);
           // Precondition, not a guarantee: a Vec param moved straight to cube, or a
           // singleton split dim the affinity gate preserves, reaches here un-halved.
           // Reject rather than emit a doubled operand under a FULL-typed move.
-          CHECK_SPAN(tracked != tile_vars.end(), call->span_)
+          CHECK_SPAN(tracked_info.has_value(), call->span_)
               << "LowerAutoVectorSplit: the V->C boundary tile.move here carries a full-width "
               << "vector operand" << (src_var ? " '" + src_var->name_hint_ + "'" : "")
               << ". tile.aic_gather reassembles the two AIV lanes' per-lane halves into the full "
@@ -459,8 +462,10 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
               << "per-lane half first (load or slice the value inside the split function) and "
               << "move that to the cube side, or, if the split axis is a singleton that cannot "
               << "be halved, keep the value on the vector side.";
-          if (auto it = var_replacements.find(src_var.get()); it != var_replacements.end()) {
-            src = it->second;
+          // ReplacedOperand rebuilds an inline projection over the halved tuple, so the
+          // gather doubles HALF -> FULL either way.
+          if (auto replaced = split_axis::ReplacedOperand(src, var_replacements)) {
+            src = replaced;
           }
           // Gather along the OPERAND's own split axis, not the function/region mode:
           // a tile.reshape can migrate the split axis (the rms_norm [N,1]<->[1,N]
@@ -468,7 +473,7 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
           // tracks where it actually ended up. Doubling the function axis instead
           // would reassemble the wrong dimension — for a [1,8] operand under UP_DOWN
           // it yields [2,8] where the cube-placement move expects [1,16].
-          const int tracked_split_dim = tracked->second.split_dim;
+          const int tracked_split_dim = tracked_info->split_dim;
           CHECK_SPAN(tracked_split_dim == 0 || tracked_split_dim == 1, call->span_)
               << "LowerAutoVectorSplit: the V->C boundary operand"
               << (src_var ? " '" + src_var->name_hint_ + "'" : "") << " carries its split on dim "

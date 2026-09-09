@@ -673,11 +673,21 @@ lane 只拥有一半的操作数产生了全宽输出，于是两个 lane 都没
 以及 `GetFirstTileArgMemory`（它现在读操作数的**类型**，向量算子不会再被误判成 SHARED 并复制
 到两条 lane）。
 
-所有"这个操作数是否被拆分"的提问都走 `OperandSplitInfo`，包括两个本身不做折半的闸门：
-**绝对索引**检查（`tile.gather` 的表若是内联投影就是被拆分过的，而其他机制都抓不到它——
-`gather` 的结果形状取自 `indices`，无论表发生什么类型一致性都成立）；以及**视图**路径
-（`tile.reshape` / `tile.reinterpret_view` 靠同一个提问区分"取整块再逐 lane 切片"与
-"生产者已经拆过了"，对投影答"全宽"就会在一个即将被折半的操作数上再加一次切片）。
+所有"这个操作数是否被拆分"的提问都走 `OperandSplitInfo`。这个问题的消费者远不止折半本身，
+而每一处对内联投影答"否"的后果各不相同：
+
+| 提问方 | 答错的代价 |
+| ------ | ---------- |
+| 通用路径的被跟踪输入扫描 | 结果在逐 lane 操作数之上保留全宽类型 |
+| `LocalizeStoreOffset` | 两条 lane 写到同一批行 |
+| `GetFirstTileArgMemory` | 向量算子被判为 SHARED，复制到两条 lane |
+| 绝对索引闸门 | `tile.gather` 的表已减半而索引仍绝对——**无任何诊断**，因为 `gather` 的结果尺寸取自 `indices` |
+| `tile.reshape` / `tile.reinterpret_view` | 在一个即将被折半的操作数上生成全宽视图 + 逐 lane 切片 |
+| `tile.slice` 偏移 | 在已是 lane 局部的偏移上再加 `+ subblock_idx * half`，lane 1 读越界 |
+| V→C 边界 | 合法的 `tile.move(pair[0], target_memory=Mat)` 被当作全宽拒绝 |
+
+边界处的 `tile.aic_gather` 也改用 `ReplacedOperand` 构造——它在折半后的 tuple 之上重建投影，
+使 gather 无论哪种写法都是 HALF → FULL 的加倍。
 
 tuple 还会穿过**分支合并与循环携带**，两者都不从 `tile_vars` 读取拆分信息——tuple 变量从不
 在其中。两者改为直接采用折半后的**类型**，其元素本就带着逐元素拆分，没有单一的轴可记录：
