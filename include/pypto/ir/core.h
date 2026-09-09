@@ -107,6 +107,9 @@ enum class ObjectKind {
 
   // Type kinds
   UnknownType,
+  VoidType,
+  BufferType,
+  MultiBufferType,
   MemRefType,
   PtrType,
   ScalarType,

@@ -132,6 +132,16 @@ MemorySpace StringToMemorySpace(const std::string& str) {
   throw pypto::ValueError("Unknown MemorySpace: " + str);
 }
 
+namespace {
+
+void CheckMemRefValueOperands(const ExprPtr& byte_offset, const std::optional<ExprPtr>& slot_index,
+                              const Span& span) {
+  detail::CheckValueOperand(byte_offset, span, "MemRef byte_offset");
+  if (slot_index) detail::CheckValueOperand(*slot_index, span, "MemRef slot_index");
+}
+
+}  // namespace
+
 // MemRef implementation
 MemRef::MemRef(VarPtr base, ExprPtr byte_offset, uint64_t size, Span span, bool is_pinned,
                uint64_t slot_count, std::optional<ExprPtr> slot_index)
@@ -141,7 +151,9 @@ MemRef::MemRef(VarPtr base, ExprPtr byte_offset, uint64_t size, Span span, bool 
       size_(size),
       is_pinned_(is_pinned),
       slot_count_(slot_count),
-      slot_index_(std::move(slot_index)) {}
+      slot_index_(std::move(slot_index)) {
+  CheckMemRefValueOperands(byte_offset_, slot_index_, span_);
+}
 
 MemRef::MemRef(VarPtr base, int64_t byte_offset, uint64_t size, Span span, bool is_pinned,
                uint64_t slot_count, std::optional<ExprPtr> slot_index)
@@ -159,7 +171,9 @@ MemRef::MemRef(std::string name, VarPtr base, ExprPtr byte_offset, uint64_t size
       size_(size),
       is_pinned_(is_pinned),
       slot_count_(slot_count),
-      slot_index_(std::move(slot_index)) {}
+      slot_index_(std::move(slot_index)) {
+  CheckMemRefValueOperands(byte_offset_, slot_index_, span_);
+}
 
 bool MemRef::MayAlias(const MemRefPtr& a, const MemRefPtr& b) {
   if (a->base_.get() != b->base_.get()) return false;

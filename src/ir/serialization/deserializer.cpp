@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <fstream>
+#include <initializer_list>
 #include <ios>
 #include <iterator>
 #include <memory>
@@ -32,6 +33,7 @@
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
@@ -42,6 +44,45 @@
 namespace pypto {
 namespace ir {
 namespace serialization {
+
+namespace {
+
+using TypeFields = std::unordered_map<std::string, msgpack::object>;
+
+TypeFields ReadRequiredTypeFields(const msgpack::object& obj, const std::string& type_kind,
+                                  std::initializer_list<const char*> required_fields) {
+  TypeFields fields;
+  for (uint32_t i = 0; i < obj.via.map.size; ++i) {
+    const auto& entry = obj.via.map.ptr[i];
+    std::string key = entry.key.as<std::string>();
+    CHECK(fields.emplace(key, entry.val).second) << type_kind << " has duplicate field '" << key << "'";
+  }
+  for (const char* key : required_fields) {
+    CHECK(fields.count(key) != 0) << type_kind << " is missing required field '" << key << "'";
+  }
+  CHECK(fields.size() == required_fields.size())
+      << type_kind << " has unexpected fields; buffer types cannot contain storage identities or addresses";
+  return fields;
+}
+
+template <typename Integer>
+Integer ReadTypeInteger(const msgpack::object& obj, const std::string& field) {
+  CHECK(obj.type == msgpack::type::POSITIVE_INTEGER || obj.type == msgpack::type::NEGATIVE_INTEGER)
+      << "Buffer type field '" << field << "' must be an integer";
+  return obj.as<Integer>();
+}
+
+std::vector<int64_t> ReadBufferShape(const msgpack::object& obj, const std::string& field) {
+  CHECK(obj.type == msgpack::type::ARRAY) << "BufferType field '" << field << "' must be an integer array";
+  std::vector<int64_t> result;
+  result.reserve(obj.via.array.size);
+  for (uint32_t i = 0; i < obj.via.array.size; ++i) {
+    result.push_back(ReadTypeInteger<int64_t>(obj.via.array.ptr[i], field));
+  }
+  return result;
+}
+
+}  // namespace
 
 /**
  * @brief Implementation class for IRDeserializer
@@ -375,6 +416,46 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
     CHECK(obj.type == msgpack::type::MAP) << "Expected map for Type";
 
     std::string type_kind;
+    bool has_type_kind = false;
+    for (uint32_t i = 0; i < obj.via.map.size; ++i) {
+      const auto& entry = obj.via.map.ptr[i];
+      if (entry.key.as<std::string>() == "type_kind") {
+        CHECK(!has_type_kind) << "Type has duplicate field 'type_kind'";
+        entry.val.convert(type_kind);
+        has_type_kind = true;
+      }
+    }
+    // Decode final buffer descriptors before the legacy shape-expression path.
+    // Every descriptor field is required; malformed blobs must not acquire
+    // default dtypes, layouts, or storage identities during deserialization.
+    if (type_kind == "VoidType") {
+      ReadRequiredTypeFields(obj, type_kind, {"type_kind"});
+      return GetVoidType();
+    }
+    if (type_kind == "BufferType") {
+      const auto fields =
+          ReadRequiredTypeFields(obj, type_kind,
+                                 {"type_kind", "physical_shape", "dtype", "memory_space", "valid_shape",
+                                  "blayout", "slayout", "fractal", "pad", "compact"});
+      return std::make_shared<BufferType>(
+          ReadBufferShape(fields.at("physical_shape"), "physical_shape"),
+          DataType(ReadTypeInteger<uint8_t>(fields.at("dtype"), "dtype")),
+          static_cast<MemorySpace>(ReadTypeInteger<uint8_t>(fields.at("memory_space"), "memory_space")),
+          ReadBufferShape(fields.at("valid_shape"), "valid_shape"),
+          static_cast<TileLayout>(ReadTypeInteger<uint8_t>(fields.at("blayout"), "blayout")),
+          static_cast<TileLayout>(ReadTypeInteger<uint8_t>(fields.at("slayout"), "slayout")),
+          ReadTypeInteger<uint64_t>(fields.at("fractal"), "fractal"),
+          static_cast<PadValue>(ReadTypeInteger<uint8_t>(fields.at("pad"), "pad")),
+          static_cast<CompactMode>(ReadTypeInteger<uint8_t>(fields.at("compact"), "compact")));
+    }
+    if (type_kind == "MultiBufferType") {
+      const auto fields = ReadRequiredTypeFields(obj, type_kind, {"type_kind", "element_type", "slot_count"});
+      auto element_type = As<BufferType>(DeserializeType(fields.at("element_type"), zone));
+      CHECK(element_type) << "MultiBufferType element_type must be a BufferType";
+      return std::make_shared<MultiBufferType>(
+          element_type, ReadTypeInteger<int64_t>(fields.at("slot_count"), "slot_count"));
+    }
+
     uint8_t dtype_code = 0;
     std::vector<ExprPtr> shape;
     std::vector<TypePtr> types;

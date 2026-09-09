@@ -598,6 +598,25 @@ StructuralHasher::result_type StructuralHasher::HashType(const TypePtr& type) {
     } else {
       h = hash_combine(h, static_cast<result_type>(0));  // indicate absence
     }
+  } else if (auto buffer_type = As<BufferType>(type)) {
+    h = hash_combine(h, static_cast<result_type>(buffer_type->shape_.size()));
+    for (int64_t dim : buffer_type->shape_) {
+      h = hash_combine(h, static_cast<result_type>(std::hash<int64_t>{}(dim)));
+    }
+    h = hash_combine(h, static_cast<result_type>(buffer_type->dtype_.Code()));
+    h = hash_combine(h, static_cast<result_type>(buffer_type->memory_space_));
+    h = hash_combine(h, static_cast<result_type>(buffer_type->valid_shape_.size()));
+    for (int64_t dim : buffer_type->valid_shape_) {
+      h = hash_combine(h, static_cast<result_type>(std::hash<int64_t>{}(dim)));
+    }
+    h = hash_combine(h, static_cast<result_type>(buffer_type->blayout_));
+    h = hash_combine(h, static_cast<result_type>(buffer_type->slayout_));
+    h = hash_combine(h, static_cast<result_type>(buffer_type->fractal_));
+    h = hash_combine(h, static_cast<result_type>(buffer_type->pad_));
+    h = hash_combine(h, static_cast<result_type>(buffer_type->compact_));
+  } else if (auto multi_buffer_type = As<MultiBufferType>(type)) {
+    h = hash_combine(h, HashType(multi_buffer_type->element_type_));
+    h = hash_combine(h, static_cast<result_type>(std::hash<int64_t>{}(multi_buffer_type->slot_count_)));
   } else if (auto tuple_type = As<TupleType>(type)) {
     h = hash_combine(h, static_cast<result_type>(tuple_type->types_.size()));
     for (const auto& t : tuple_type->types_) {
@@ -610,7 +629,7 @@ StructuralHasher::result_type StructuralHasher::HashType(const TypePtr& type) {
     h = hash_combine(h, static_cast<result_type>(std::hash<uint8_t>{}(array_type->dtype_.Code())));
     INTERNAL_CHECK(array_type->extent()) << "structural_hash encountered null extent in ArrayType";
     h = hash_combine(h, HashNode(array_type->extent()));
-  } else if (IsA<MemRefType>(type) || IsA<UnknownType>(type) || IsA<PtrType>(type) ||
+  } else if (IsA<MemRefType>(type) || IsA<UnknownType>(type) || IsA<VoidType>(type) || IsA<PtrType>(type) ||
              IsA<WindowBufferType>(type) || IsA<CommCtxType>(type) || IsA<PrefetchAsyncContextType>(type) ||
              IsA<AsyncEventType>(type) || IsA<AsyncSessionType>(type)) {
     // Singleton marker types (no fields beyond the type name hashed above).

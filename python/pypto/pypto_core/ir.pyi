@@ -295,6 +295,16 @@ class UnknownType(Type):
             The singleton UnknownType instance
         """
 
+class VoidType(Type):
+    """Known absence of an SSA result, distinct from UnknownType."""
+
+    def __init__(self) -> None:
+        """Create a void type."""
+
+    @staticmethod
+    def get() -> VoidType:
+        """Get the singleton VoidType instance."""
+
 class ScalarType(Type):
     """Scalar type representation."""
 
@@ -813,6 +823,47 @@ class ArrayType(ShapedType):
     @property
     def extent(self) -> Expr:
         """Number of elements (always a ConstInt)."""
+
+class BufferType(Type):
+    """Physical descriptor for a final device buffer, without a MemRef or address.
+
+    Physical extents are static positive integers. ``valid_shape`` entries are
+    static nonnegative extents or -1 for a runtime valid extent carried by an op
+    operand. An empty valid shape is normalized to the physical shape.
+    """
+
+    shape: Final[Sequence[int]]
+    dtype: Final[DataType]
+    memory_space: Final[MemorySpace]
+    valid_shape: Final[Sequence[int]]
+    blayout: Final[TileLayout]
+    slayout: Final[TileLayout]
+    fractal: Final[int]
+    pad: Final[PadValue]
+    compact: Final[CompactMode]
+
+    def __init__(
+        self,
+        shape: Sequence[int],
+        dtype: DataType,
+        memory_space: MemorySpace,
+        valid_shape: Sequence[int] = (),
+        blayout: TileLayout = TileLayout.row_major,
+        slayout: TileLayout = TileLayout.none_box,
+        fractal: int = 512,
+        pad: PadValue = PadValue.null,
+        compact: CompactMode = CompactMode.null,
+    ) -> None:
+        """Create a static physical buffer descriptor with explicit memory space."""
+
+class MultiBufferType(Type):
+    """Descriptor for an explicit multi-slot allocation of identical buffers."""
+
+    element_type: Final[BufferType]
+    slot_count: Final[int]
+
+    def __init__(self, element_type: BufferType, slot_count: int) -> None:
+        """Create a multi-buffer descriptor with a positive slot count."""
 
 class TupleType(Type):
     """Tuple type representation (contains multiple types)."""

@@ -402,6 +402,11 @@ void BindIR(nb::module_& m) {
       "get", []() { return GetUnknownType(); }, "Get the singleton UnknownType instance");
   BindFields<UnknownType>(unknown_type_class);
 
+  auto void_type_class = nb::class_<VoidType, Type>(ir, "VoidType", "Known absence of an SSA result");
+  void_type_class.def(nb::init<>(), "Create a void type");
+  void_type_class.def_static("get", &GetVoidType, "Get the singleton VoidType instance");
+  BindFields<VoidType>(void_type_class);
+
   // ScalarType - const shared_ptr
   auto scalar_type_class = nb::class_<ScalarType, Type>(ir, "ScalarType", "Scalar type representation");
   scalar_type_class.def(nb::init<DataType>(), nb::arg("dtype"), "Create a scalar type");
@@ -743,6 +748,26 @@ void BindIR(nb::module_& m) {
   nb::enum_<CompactMode>(ir, "CompactMode", "Partial-tile compact mode enumeration")
       .value("null", CompactMode::null, "Ordinary non-compact layout")
       .value("normal", CompactMode::normal, "Compact valid-region layout");
+
+  // Final device buffer descriptors carry no MemRef or runtime expressions.
+  auto buffer_type_class = nb::class_<BufferType, Type>(
+      ir, "BufferType", "Physical descriptor for a mutable on-chip buffer handle");
+  buffer_type_class.def(
+      nb::init<std::vector<int64_t>, DataType, MemorySpace, std::vector<int64_t>, TileLayout, TileLayout,
+               uint64_t, PadValue, CompactMode>(),
+      nb::arg("shape"), nb::arg("dtype"), nb::arg("memory_space"),
+      nb::arg("valid_shape") = std::vector<int64_t>{}, nb::arg("blayout") = TileLayout::row_major,
+      nb::arg("slayout") = TileLayout::none_box, nb::arg("fractal") = 512, nb::arg("pad") = PadValue::null,
+      nb::arg("compact") = CompactMode::null,
+      "Create a static physical descriptor; -1 in valid_shape denotes a runtime valid extent");
+  BindFields<BufferType>(buffer_type_class);
+
+  auto multi_buffer_type_class = nb::class_<MultiBufferType, Type>(
+      ir, "MultiBufferType", "Descriptor for an explicit multi-slot buffer allocation");
+  multi_buffer_type_class.def(nb::init<BufferTypePtr, int64_t>(), nb::arg("element_type"),
+                              nb::arg("slot_count"),
+                              "Create a multi-buffer descriptor with positive slot count");
+  BindFields<MultiBufferType>(multi_buffer_type_class);
 
   // TileView - immutable struct for tile view information.
   //

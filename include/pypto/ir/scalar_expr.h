@@ -210,7 +210,10 @@ class BinaryExpr : public Expr {
   BinaryExpr(ExprPtr left, ExprPtr right, DataType dtype, Span span)
       : Expr(std::move(span), std::make_shared<ScalarType>(dtype)),
         left_(std::move(left)),
-        right_(std::move(right)) {}
+        right_(std::move(right)) {
+    detail::CheckValueOperand(left_, span_, "BinaryExpr left operand");
+    detail::CheckValueOperand(right_, span_, "BinaryExpr right operand");
+  }
 
   /**
    * @brief Get field descriptors for reflection-based visitation
@@ -278,7 +281,9 @@ class UnaryExpr : public Expr {
   ExprPtr operand_;  // Operand
 
   UnaryExpr(ExprPtr operand, DataType dtype, Span span)
-      : Expr(std::move(span), std::make_shared<ScalarType>(dtype)), operand_(std::move(operand)) {}
+      : Expr(std::move(span), std::make_shared<ScalarType>(dtype)), operand_(std::move(operand)) {
+    detail::CheckValueOperand(operand_, span_, "UnaryExpr operand");
+  }
 
   static constexpr auto GetFieldDescriptors() {
     return std::tuple_cat(Expr::GetFieldDescriptors(),

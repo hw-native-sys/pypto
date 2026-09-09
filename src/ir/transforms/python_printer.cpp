@@ -628,6 +628,49 @@ std::string IRPythonPrinter::Print(const IRNodePtr& node) {
 }
 
 std::string IRPythonPrinter::Print(const TypePtr& type) {
+  // Buffer IR is internal: print native constructors without adding DSL types.
+  if (As<VoidType>(type)) {
+    return "pypto.ir.VoidType()";
+  }
+  if (auto buffer = As<BufferType>(type)) {
+    std::ostringstream oss;
+    auto print_dims = [&oss](const std::vector<int64_t>& dims) {
+      oss << "[";
+      for (size_t i = 0; i < dims.size(); ++i) {
+        if (i > 0) oss << ", ";
+        oss << dims[i];
+      }
+      oss << "]";
+    };
+    oss << "pypto.ir.BufferType(";
+    print_dims(buffer->shape_);
+    oss << ", pypto.ir.DataType." << DataTypeToString(buffer->dtype_) << ", pypto.ir.MemorySpace."
+        << MemorySpaceToString(buffer->memory_space_) << ", valid_shape=";
+    print_dims(buffer->valid_shape_);
+    oss << ", blayout=pypto.ir.TileLayout." << TileLayoutToString(buffer->blayout_)
+        << ", slayout=pypto.ir.TileLayout." << TileLayoutToString(buffer->slayout_)
+        << ", fractal=" << buffer->fractal_ << ", pad=pypto.ir.PadValue.";
+    switch (buffer->pad_) {
+      case PadValue::null:
+        oss << "null";
+        break;
+      case PadValue::zero:
+        oss << "zero";
+        break;
+      case PadValue::max:
+        oss << "max";
+        break;
+      case PadValue::min:
+        oss << "min";
+        break;
+    }
+    oss << ", compact=pypto.ir.CompactMode." << CompactModeToString(buffer->compact_) << ")";
+    return oss.str();
+  }
+  if (auto multi_buffer = As<MultiBufferType>(type)) {
+    return "pypto.ir.MultiBufferType(" + Print(multi_buffer->element_type_) + ", " +
+           std::to_string(multi_buffer->slot_count_) + ")";
+  }
   if (auto scalar_type = As<ScalarType>(type)) {
     // Print as pl.Scalar[pl.INT64] for proper round-trip support
     return prefix_ + ".Scalar[" + prefix_ + "." + DataTypeToString(scalar_type->dtype_) + "]";
@@ -3234,6 +3277,9 @@ void IRPythonPrinter::VisitProgram(const ProgramPtr& program) {
   }
   if (body_str.find("pld.") != std::string::npos) {
     stream_ << "import pypto.language.distributed as pld\n";
+  }
+  if (body_str.find("pypto.ir.") != std::string::npos) {
+    stream_ << "import pypto\n";
   }
   stream_ << "\n" << body_str;
 }

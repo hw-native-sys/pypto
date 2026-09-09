@@ -483,6 +483,21 @@ class IRSerializer::Impl {
       if (tile_type->memory_space_.has_value()) {
         type_map["memory_space"] = msgpack::object(static_cast<uint8_t>(*tile_type->memory_space_), zone);
       }
+    } else if (auto buffer_type = As<BufferType>(type)) {
+      // A final buffer descriptor contains static numbers, not shape expressions
+      // or a reference to a second storage identity.
+      type_map["physical_shape"] = msgpack::object(buffer_type->shape_, zone);
+      type_map["dtype"] = msgpack::object(buffer_type->dtype_.Code(), zone);
+      type_map["memory_space"] = msgpack::object(static_cast<uint8_t>(buffer_type->memory_space_), zone);
+      type_map["valid_shape"] = msgpack::object(buffer_type->valid_shape_, zone);
+      type_map["blayout"] = msgpack::object(static_cast<uint8_t>(buffer_type->blayout_), zone);
+      type_map["slayout"] = msgpack::object(static_cast<uint8_t>(buffer_type->slayout_), zone);
+      type_map["fractal"] = msgpack::object(buffer_type->fractal_, zone);
+      type_map["pad"] = msgpack::object(static_cast<uint8_t>(buffer_type->pad_), zone);
+      type_map["compact"] = msgpack::object(static_cast<uint8_t>(buffer_type->compact_), zone);
+    } else if (auto multi_buffer_type = As<MultiBufferType>(type)) {
+      type_map["element_type"] = SerializeType(multi_buffer_type->element_type_, zone);
+      type_map["slot_count"] = msgpack::object(multi_buffer_type->slot_count_, zone);
     } else if (auto array_type = As<ArrayType>(type)) {
       type_map["dtype"] = msgpack::object(array_type->dtype_.Code(), zone);
       std::vector<msgpack::object> shape_vec;
@@ -494,7 +509,7 @@ class IRSerializer::Impl {
         types_vec.push_back(SerializeType(t, zone));
       }
       type_map["types"] = msgpack::object(types_vec, zone);
-    } else if (IsA<MemRefType>(type) || IsA<UnknownType>(type) || IsA<PtrType>(type) ||
+    } else if (IsA<MemRefType>(type) || IsA<UnknownType>(type) || IsA<VoidType>(type) || IsA<PtrType>(type) ||
                IsA<WindowBufferType>(type) || IsA<CommCtxType>(type) || IsA<PrefetchAsyncContextType>(type) ||
                IsA<AsyncEventType>(type) || IsA<AsyncSessionType>(type)) {
       // Singleton marker types (no extra fields beyond the type_kind key).
