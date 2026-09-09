@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -176,9 +177,48 @@ class TileToBufferMutator : public IRMutator {
   }
 
   StmtPtr VisitStmt_(const IfStmtPtr& branch) override {
-    CHECK_SPAN(false, branch->span_)
-        << "LowerTileToBuffer: branches require the control-flow conversion recipe";
-    return branch;
+    auto condition = VisitExpr(branch->condition_);
+    YieldContext then_context(branch->return_vars_);
+    auto then_body = LowerRegion(branch->then_body_, then_context);
+    YieldContext else_context(branch->return_vars_);
+    std::optional<StmtPtr> else_body;
+    if (branch->else_body_) else_body = LowerRegion(*branch->else_body_, else_context);
+    std::vector<VarPtr> results;
+    for (size_t i = 0; i < branch->return_vars_.size(); ++i) {
+      const auto& result = branch->return_vars_[i];
+      if (As<TileType>(result->GetType())) continue;
+      if (As<TensorType>(result->GetType())) {
+        CHECK_SPAN(
+            then_context.tensor_values[i] && then_context.tensor_values[i] == else_context.tensor_values[i],
+            branch->span_)
+            << "LowerTileToBuffer: GM branch results must alias the same parameter in both arms";
+        tensor_aliases_[result.get()] = then_context.tensor_values[i];
+      } else {
+        results.push_back(result);
+      }
+    }
+    return std::make_shared<IfStmt>(condition, then_body, else_body, results, branch->span_,
+                                    branch->leading_comments_);
+  }
+
+  StmtPtr VisitStmt_(const YieldStmtPtr& yield) override {
+    if (!yield_context_) return IRMutator::VisitStmt_(yield);
+    INTERNAL_CHECK_SPAN(yield->value_.size() == yield_context_->results.size(), yield->span_)
+        << "Internal error: device region yield/result arity mismatch";
+    std::vector<ExprPtr> values;
+    for (size_t i = 0; i < yield->value_.size(); ++i) {
+      const auto& result = yield_context_->results[i];
+      const auto& value = yield->value_[i];
+      if (As<TileType>(result->GetType())) {
+        INTERNAL_CHECK_SPAN(Handle(value) == Handle(result), yield->span_)
+            << "Internal error: Tile storage legalization left an implicit region transfer";
+      } else if (As<TensorType>(result->GetType())) {
+        yield_context_->tensor_values[i] = VisitExpr(value);
+      } else {
+        values.push_back(VisitExpr(value));
+      }
+    }
+    return std::make_shared<YieldStmt>(values, yield->span_, yield->leading_comments_);
   }
 
   StmtPtr VisitStmt_(const ForStmtPtr& loop) override {
@@ -192,6 +232,21 @@ class TileToBufferMutator : public IRMutator {
   }
 
  private:
+  struct YieldContext {
+    explicit YieldContext(const std::vector<VarPtr>& results)
+        : results(results), tensor_values(results.size()) {}
+    const std::vector<VarPtr>& results;
+    std::vector<ExprPtr> tensor_values;
+  };
+
+  StmtPtr LowerRegion(const StmtPtr& body, YieldContext& context) {
+    auto* outer = yield_context_;
+    yield_context_ = &context;
+    auto lowered = VisitStmt(body);
+    yield_context_ = outer;
+    return lowered;
+  }
+
   static StmtPtr Empty(const Span& span) { return std::make_shared<SeqStmts>(std::vector<StmtPtr>{}, span); }
 
   VarPtr Handle(const ExprPtr& value) const {
@@ -279,6 +334,9 @@ class TileToBufferMutator : public IRMutator {
 
   const StorageIndex& storage_;
   bool addressed_;
+  YieldContext* yield_context_ = nullptr;
+  // Input SSA uses distinct identities for branch-local definitions. Retaining
+  // their mappings is linear and avoids copying the outer map at each region.
   std::unordered_map<const Var*, ExprPtr> tensor_aliases_;
 };
 

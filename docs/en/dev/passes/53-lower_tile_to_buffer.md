@@ -74,14 +74,41 @@ Converted `InCore`, `AIC`, and `AIV` functions receive
 verifies its output and is idempotent. Failed conversion leaves the input
 program unchanged. No functional Tile pass should run after this boundary.
 
+## Branches
+
+Storage legalization has already selected one destination window for each Tile
+branch result and placed all required transfers in the arms. Final conversion
+removes those Tile results and yield operands. It preserves scalar results in
+their original relative order, so native `scf.if` carries only real scalar SSA.
+
+```text
+# Input: (chosen_tile, selected_offset) = if flag:
+#          then yield (product, 16); else yield (input_tile, 0)
+# Storage legalization gives chosen_tile a canonical destination.
+selected_offset = if flag:
+    buffer.mul(a_buf, b_buf, destination)
+    yield 16
+else:
+    buffer.copy(a_buf, destination)
+    yield 0
+buffer.store(destination, (selected_offset, 0), (16, 32), Out)
+```
+
+A branch result that aliases GM is removed when both arms resolve to the same
+existing parameter. The result's later uses then name that parameter directly.
+Different GM aliases require a separate dynamic-GM recipe and are diagnosed.
+Nested branches use scoped yield contexts; conversion adds no allocation or
+copy to repair a region. Branch and yield source comments are preserved.
+
 ## Initial supported recipes
 
-This slice supports straight-line, static rank-2 dense Vec FP32 tiles with one
+The current recipes support straight-line kernels and branches with static
+rank-2 dense Vec FP32 tiles with one
 descriptor per allocation, static valid extents, ordinary packed ND GM tensors,
 and default load/store policies. It converts allocation, create, load, store,
 add, multiply, move, and already legalized aliases.
 
-Branches, loops, helper calls, alternate layouts, dynamic metadata, slots, and
+Loops, helper calls, alternate layouts, dynamic metadata, slots, and
 other operation recipes are added in subsequent migration slices. Unsupported
 forms fail explicitly. The migration option defaults to false until the
 complete recipe and runtime acceptance matrix is ready.

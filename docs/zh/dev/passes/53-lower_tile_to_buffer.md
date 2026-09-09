@@ -66,13 +66,37 @@ PTOAS 省略 `buffer.alloc` 的第二个操作数。地址规划器只传入一�
 转换后的 `InCore`、`AIC`、`AIV` 函数标记为 `FunctionIRStage.Buffer`，编排函数保持原样。
 pass 验证输出并保持幂等；转换失败不会修改输入程序。此边界之后不应运行功能式 Tile pass。
 
+## 分支
+
+存储合法化已经为每个 Tile 分支结果选择规范目标窗口，并在各分支体内放置必要的传输。
+最终转换移除这些 Tile 结果和 yield 操作数，保留标量结果的相对顺序，
+因此原生 `scf.if` 只携带真实的标量 SSA 值。
+
+```text
+# Input: (chosen_tile, selected_offset) = if flag:
+#          then yield (product, 16); else yield (input_tile, 0)
+# Storage legalization gives chosen_tile a canonical destination.
+selected_offset = if flag:
+    buffer.mul(a_buf, b_buf, destination)
+    yield 16
+else:
+    buffer.copy(a_buf, destination)
+    yield 0
+buffer.store(destination, (selected_offset, 0), (16, 32), Out)
+```
+
+若两个分支体的 GM 结果都解析到同一个已有参数，该结果会被移除，后续使用直接引用该参数。
+不同 GM 别名需要单独的动态 GM 转换支持，当前会显式报错。
+嵌套分支使用具有作用域的 yield 上下文；转换不会为修复区域而新增分配或复制。
+分支与 yield 的源码注释会保留。
+
 ## 首批支持的转换
 
-本切片支持直线程序、静态二维稠密 Vec FP32 Tile、每个分配一个描述符、静态有效范围、
+当前转换支持直线程序和分支、静态二维稠密 Vec FP32 Tile、每个分配一个描述符、静态有效范围、
 普通紧密排列的 ND GM Tensor 以及默认加载/存储策略。
 它转换分配、create、load、store、加法、乘法、move 及已经合法化的别名。
 
-分支、循环、辅助函数调用、其他布局、动态元数据、多槽位和其他操作转换由后续迁移切片补齐。
+循环、辅助函数调用、其他布局、动态元数据、多槽位和其他操作转换由后续迁移切片补齐。
 暂不支持的形式会显式报错。在完整转换与运行时验收矩阵通过前，迁移选项默认关闭。
 
 二进制序列化保留显式表示和函数阶段。当前 Python 诊断打印器不支持 Buffer DSL 解析往返。
