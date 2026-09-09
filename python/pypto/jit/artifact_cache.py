@@ -41,6 +41,12 @@ from ._artifact_manifest import (
 T = TypeVar("T")
 
 
+def _check_private_path(path: Path, cache_root: Path) -> None:
+    """Keep private writes outside the entire canonical shared cache root."""
+    if path == cache_root or cache_root in path.parents:
+        raise ValueError(f"Artifact private directory must be outside the cache root: {path}")
+
+
 class LookupStatus(Enum):
     """Observable lookup outcomes without mutation or silent repair."""
 
@@ -65,16 +71,17 @@ class ArtifactHandle:
     directory: Path
     key: ArtifactKey
     spec: ArtifactSpec
+    cache_root: Path
 
     def materialize(self, destination: Path) -> None:
         """Copy validated payload to an empty private directory, without hardlinks.
 
         Use this when building BINARY_READY from GENERATED. The old completion
-        marker is excluded. On failure, the caller owns the partial destination.
+        marker is excluded. Copies are owner-writable and preserve execute bits.
+        On failure, the caller owns the partial destination.
         """
         destination = destination.resolve()
-        if destination == self.directory or self.directory in destination.parents:
-            raise ValueError(f"Artifact materialization must be outside the shared slot: {destination}")
+        _check_private_path(destination, self.cache_root)
         manifest = read_manifest(self.directory, self.key, self.spec)
         check_directory(destination)
         if any(destination.iterdir()):
@@ -125,7 +132,10 @@ def _copy_payload(source: Path, destination: Path, manifest: dict[str, Any]) -> 
         target = destination / entry["path"]
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source / entry["path"], target, follow_symlinks=False)
-        target.chmod(entry["mode"])
+        # Read/write policy may change when sealing a prewarmed cache. Only
+        # execute bits affect the artifact contract; private copies must remain
+        # writable for the next compilation stage.
+        target.chmod(0o600 | entry["execute_bits"])
 
 
 def _sync_directory(path: Path) -> None:
@@ -188,11 +198,7 @@ class ArtifactStore:
         self.readonly = readonly
         self.private_root = private_root.resolve() if private_root is not None else None
         if self.private_root is not None:
-            self._check_private_root(self.private_root)
-
-    def _check_private_root(self, path: Path) -> None:
-        if path == self.root or self.root in path.parents:
-            raise ValueError(f"Private build directory must be outside the cache root: {path}")
+            _check_private_path(self.private_root, self.root)
 
     def _slot(self, key: ArtifactKey, spec: ArtifactSpec) -> Path:
         return self.root / "artifacts" / str(key.environment.digest) / key.digest / spec.state.value
@@ -214,7 +220,7 @@ class ArtifactStore:
             return ArtifactLookup(LookupStatus.INVALID, reason=str(exc))
         except OSError as exc:
             return ArtifactLookup(LookupStatus.STORAGE_ERROR, reason=str(exc))
-        return ArtifactLookup(LookupStatus.HIT, ArtifactHandle(directory, key, spec))
+        return ArtifactLookup(LookupStatus.HIT, ArtifactHandle(directory, key, spec, self.root))
 
     def get_or_build(
         self, key: ArtifactKey, spec: ArtifactSpec, builder: Callable[[Path], T]
@@ -254,7 +260,7 @@ class ArtifactStore:
         private_root = self.private_root
         if private_root is None:
             raise OSError(errno.ENOENT, "Artifact build requires a private_root outside the cache root")
-        self._check_private_root(private_root)
+        _check_private_path(private_root, self.root)
         _mkdir(private_root)
         directory = Path(tempfile.mkdtemp(prefix="pypto-build-", dir=private_root))
         # Do not catch compiler failures or delete paths a returned object owns.
@@ -291,5 +297,8 @@ class ArtifactStore:
             if staging is not None:
                 shutil.rmtree(staging, ignore_errors=True)
         return ArtifactBuild(
-            BuildDisposition.PUBLISHED, ArtifactHandle(destination, key, spec), directory, built.value
+            BuildDisposition.PUBLISHED,
+            ArtifactHandle(destination, key, spec, self.root),
+            directory,
+            built.value,
         )

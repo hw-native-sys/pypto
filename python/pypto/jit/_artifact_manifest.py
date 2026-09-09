@@ -150,7 +150,12 @@ def inventory(directory: Path) -> list[dict[str, Any]]:
             elif stat.S_ISREG(mode):
                 size, digest = _file_digest(path)
                 files.append(
-                    {"path": _relative_path(relative), "size": size, "sha256": digest, "mode": mode & 0o777}
+                    {
+                        "path": _relative_path(relative),
+                        "size": size,
+                        "sha256": digest,
+                        "execute_bits": mode & 0o111,
+                    }
                 )
             else:
                 raise ValueError(f"Artifact payload is not a regular file or directory: {path}")

@@ -228,6 +228,62 @@ def test_readonly_missing_root_is_never_created(tmp_path):
         ArtifactStore(store.root, private_root=store.root / "private")
 
 
+@pytest.mark.parametrize("state", list(ArtifactState))
+def test_removing_write_permissions_preserves_cache_hits(store, state):
+    key, spec = _key(), _spec(state)
+    handle = store.get_or_build(key, spec, _builder).handle
+    paths = [store.root, *store.root.rglob("*")]
+    original_modes = {path: path.stat().st_mode & 0o777 for path in paths}
+    try:
+        for path in reversed(paths):
+            path.chmod(original_modes[path] & ~0o222)
+        sealed_modes = {path: path.stat().st_mode for path in paths}
+        readonly = ArtifactStore(store.root, readonly=True)
+        hit = readonly.get_or_build(key, spec, _unexpected_builder)
+        assert hit.disposition is BuildDisposition.HIT
+        assert hit.handle == handle
+        assert {path: path.stat().st_mode for path in paths} == sealed_modes
+    finally:
+        for path in paths:
+            path.chmod(original_modes[path])
+
+
+def test_readonly_payload_materializes_writable_private_files(store, tmp_path):
+    def build(directory):
+        value = _builder(directory)
+        value.chmod(0o444)
+        (directory / "kernel_config.py").chmod(0o555)
+        return value
+
+    result = store.get_or_build(_key(), _spec(), build)
+    destination = tmp_path / "promotion"
+    destination.mkdir()
+    result.handle.materialize(destination)
+    copied = destination / "kernel/source.pto"
+    assert copied.stat().st_mode & 0o200
+    assert (destination / "kernel_config.py").stat().st_mode & 0o111 == 0o111
+    copied.write_bytes(b"adapted source")
+    assert (result.handle.directory / "kernel/source.pto").read_bytes() == b"generated code"
+
+
+@pytest.mark.parametrize("destination_kind", ["sibling", "other_key", "symlink"])
+def test_materialization_rejects_all_shared_cache_destinations(store, tmp_path, destination_kind):
+    key, spec = _key(), _spec()
+    handle = store.get_or_build(key, spec, _builder).handle
+    shared = handle.directory.parent / "ready"
+    if destination_kind == "other_key":
+        shared = store._slot(_key("other"), spec)
+    shared.mkdir(parents=True)
+    destination = shared
+    if destination_kind == "symlink":
+        destination = tmp_path / "private-looking-link"
+        destination.symlink_to(shared, target_is_directory=True)
+    with pytest.raises(ValueError, match="outside the.*cache"):
+        handle.materialize(destination)
+    assert list(shared.iterdir()) == []
+    assert store.lookup(key, spec).status is LookupStatus.HIT
+
+
 def test_missing_private_root_allows_hits_without_probing_temporary_directories(store, monkeypatch):
     key, spec = _key(), _spec()
     store.get_or_build(key, spec, _builder)

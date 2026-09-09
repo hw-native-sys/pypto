@@ -51,7 +51,7 @@ value or private directory. Lookup reports `HIT`, `MISS`, `INVALID`, or
 Each published stage contains its payload beside `artifact_manifest.json`.
 The completion marker contains the schema, full key and components, state,
 build kind, required-file list, and a sorted inventory of every payload file's
-relative path, byte size, SHA-256 digest, and permission bits. It is bounded to
+relative path, byte size, SHA-256 digest, and execute permission bits. It is bounded to
 16 MiB. Readers verify the entire inventory against the exact request; no
 timestamps substitute for content hashes. Unexpected files, duplicate JSON
 fields, altered metadata, missing files, and malformed markers invalidate the
@@ -61,8 +61,10 @@ Manifest paths are never used to open files: validation enumerates the actual
 tree and compares its canonical record to the marker. Absolute, non-normalized,
 parent-traversing, and backslash paths are rejected. Payload links, special
 files, and symlinked cache descendants are rejected. The explicitly configured
-root is resolved once to its canonical path. Payload permission bits are copied;
-setuid/setgid/sticky bits are not propagated to published files.
+root is resolved once to its canonical path. Read/write permission changes do
+not invalidate unchanged payloads, allowing a prewarmed cache to be sealed with
+`chmod`. Payload copies are owner-readable and owner-writable and preserve
+execute bits; setuid/setgid/sticky bits are not propagated to published files.
 
 The root must have trusted writers: digests detect corruption, not malicious
 replacement of executable code and its matching manifest. Writers must not
@@ -108,8 +110,10 @@ cached Python files; future loaders must independently avoid bytecode writes.
 
 To promote generated output, a binary builder uses
 `generated_handle.materialize(private_directory)` to copy the validated payload
-into an empty private directory. It excludes the old marker and uses no
-hardlinks. Binary compilation can modify the private files freely; publication
+into an empty directory outside the entire shared cache root, including when
+the destination is reached through a symlink. It excludes the old marker and
+uses no hardlinks. Copies are owner-writable even when the cached payload is
+read-only. Binary compilation can modify the private files freely; publication
 creates a separate `ready/` slot and leaves `generated/` intact. The runtime
 adapter is responsible for path rebinding and complete binary/metadata coverage.
 
