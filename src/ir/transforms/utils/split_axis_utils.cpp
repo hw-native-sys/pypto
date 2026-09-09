@@ -1747,13 +1747,20 @@ namespace {
 // path registers BOTH the old and the new var in ``tile_vars`` -- so looking the
 // yielded value up there is what tells the two apart.
 std::optional<TileInfo> YieldedTileInfo(const YieldStmtPtr& yield, size_t index,
-                                        const std::unordered_map<const Var*, TileInfo>& tile_vars) {
+                                        const std::unordered_map<const Var*, TileInfo>& tile_vars,
+                                        const std::unordered_map<const Var*, VarPtr>& var_replacements) {
   if (!yield || index >= yield->value_.size()) return std::nullopt;
-  auto value_var = AsVarLike(yield->value_[index]);
-  if (!value_var) return std::nullopt;
-  auto it = tile_vars.find(value_var.get());
-  if (it == tile_vars.end()) return std::nullopt;
-  return it->second;
+  // Through OperandSplitInfo, so an INLINE tuple projection on the backedge is seen
+  // for what it is. Matching only Var got this wrong in BOTH directions: a full-width
+  // carry fed `pl.yield_(pair[1])` looked like "neither side is lane-local" and was
+  // waved through, putting a half-width value under a full-width declared type with no
+  // lane offset on the loop exit; and a legitimately halved carry fed the same
+  // projection was refused as a width disagreement that did not exist.
+  //
+  // An inline CALL (`pl.yield_(pl.tile.add(acc, acc))`) still answers nullopt, which is
+  // right: this pass halves statements, so a call inline in a Yield is never halved and
+  // the carry mismatch it produces must stay rejected.
+  return OperandSplitInfo(yield->value_[index], tile_vars, var_replacements);
 }
 
 // The halved TupleType a branch yields at @p index, or nullptr when that position is
@@ -1806,7 +1813,7 @@ void ValidateCarryBackedge(const StmtPtr& new_body, const std::vector<IterArgPtr
 
     auto carry_it = tile_vars.find(new_iter_args[i].get());
     const bool carry_is_lane_local = carry_it != tile_vars.end();
-    auto yielded = YieldedTileInfo(yield, i, tile_vars);
+    auto yielded = YieldedTileInfo(yield, i, tile_vars, var_replacements);
 
     if (!carry_is_lane_local && !yielded.has_value()) continue;
     if (carry_is_lane_local && yielded.has_value() && SameTileInfo(carry_it->second, *yielded)) continue;
@@ -1874,8 +1881,8 @@ std::vector<VarPtr> RepairIfReturnVars(const std::vector<VarPtr>& return_vars, c
       continue;
     }
 
-    auto then_info = YieldedTileInfo(then_yield, i, tile_vars);
-    auto else_info = YieldedTileInfo(else_yield, i, tile_vars);
+    auto then_info = YieldedTileInfo(then_yield, i, tile_vars, var_replacements);
+    auto else_info = YieldedTileInfo(else_yield, i, tile_vars, var_replacements);
 
     if (!then_info.has_value() && !else_info.has_value()) continue;
     CHECK_SPAN(then_info.has_value() && else_info.has_value() && SameTileInfo(*then_info, *else_info), span)

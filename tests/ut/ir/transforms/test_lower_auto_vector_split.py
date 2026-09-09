@@ -2327,6 +2327,69 @@ def test_loop_init_from_an_inline_projection_carries_the_split():
     assert "pl.tile.store(result, [0, 0 + subblock_idx * 128], out_1)" in printed
 
 
+def test_backedge_yielding_an_inline_projection_is_accepted():
+    """A per-lane backedge feeding a per-lane carry must lower.
+
+    ``YieldedTileInfo`` decides whether the value flowing back into a carry is
+    lane-local. Matching only ``Var`` answered *no* for an inline projection, so a
+    legitimately halved carry fed `pl.yield_(pair[1])` was refused as a width
+    disagreement that did not exist.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            t: pl.Tensor[[256, 128], pl.FP32],
+            tmp: pl.Tile[[256, 128], pl.FP32, pl.Mem.Vec],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_1: pl.Out[pl.Tensor[[1, 256], pl.INT32]],
+        ) -> pl.Tensor[[1, 256], pl.INT32]:
+            seed = pl.tile.move(rhs, target_memory=pl.Mem.Mat)  # noqa: F841
+            src = pl.tile.load(t, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            pair = pl.tile.gather_compare(src, pl.const(1.0, pl.FP32), tmp, cmp_mode="eq", out_cols=16)
+            for i, (acc,) in pl.range(2, init_values=(pair[1],)):  # noqa: B007
+                result = pl.yield_(pair[1])
+            return pl.tile.store(result, [0, 0], out_1)
+
+    printed = _lower(Before).as_python()
+    assert "result: pl.Tile[[1, 128], pl.INT32, pl.Mem.Vec] = pl.yield_(pair[1])" in printed
+    # `cdst` halves on dim 1, so the store off the loop exit offsets dim 1.
+    assert "pl.tile.store(result, [0, 0 + subblock_idx * 128], out_1)" in printed
+
+
+def test_backedge_yielding_an_inline_projection_into_a_full_carry_is_rejected():
+    """The same backedge under a FULL-width carry is the silent-wrong-answer half.
+
+    Both sides looked "not lane-local" to a ``Var``-only lookup, so the widths appeared
+    to agree and the loop was waved through: a ``[1, 128]`` value flowed into a carry
+    still declared ``[1, 256]``, and the store off the loop exit got no lane offset.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            t: pl.Tensor[[256, 128], pl.FP32],
+            tmp: pl.Tile[[256, 128], pl.FP32, pl.Mem.Vec],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            full_tile: pl.Tile[[1, 256], pl.INT32, pl.Mem.Vec],
+            out_1: pl.Out[pl.Tensor[[1, 256], pl.INT32]],
+        ) -> pl.Tensor[[1, 256], pl.INT32]:
+            seed = pl.tile.move(rhs, target_memory=pl.Mem.Mat)  # noqa: F841
+            src = pl.tile.load(t, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            pair = pl.tile.gather_compare(src, pl.const(1.0, pl.FP32), tmp, cmp_mode="eq", out_cols=16)
+            for i, (acc,) in pl.range(2, init_values=(full_tile,)):  # noqa: B007
+                result = pl.yield_(pair[1])
+            return pl.tile.store(result, [0, 0], out_1)
+
+    with pytest.raises(ValueError, match="yields") as exc_info:
+        _lower(Before)
+    message = str(exc_info.value)
+    assert "is full width" in message
+    assert "the split made lane-local" in message
+
+
 def test_tuple_result_op_refusing_the_halved_arguments_says_so():
     """A refused halving is diagnosed as a refusal, not as a stationary element.
 

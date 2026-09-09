@@ -685,6 +685,8 @@ lane 只拥有一半的操作数产生了全宽输出，于是两个 lane 都没
 | `tile.reshape` / `tile.reinterpret_view` | 在一个即将被折半的操作数上生成全宽视图 + 逐 lane 切片 |
 | `tile.slice` 偏移 | 在已是 lane 局部的偏移上再加 `+ subblock_idx * half`，lane 1 读越界 |
 | V→C 边界 | 合法的 `tile.move(pair[0], target_memory=Mat)` 被当作全宽拒绝 |
+| `RepairIterArgs`（循环初值） | 初值已折半，而携带值、出口及循环之后全部停留在全宽 |
+| `YieldedTileInfo`（回边 / 合并） | **两个方向都错**：全宽携带值被喂 `pl.yield_(pair[1])` 却放行，合法折半的反被拒绝 |
 
 边界处的 `tile.aic_gather` 也改用 `ReplacedOperand` 构造——它在折半后的 tuple 之上重建投影，
 使 gather 无论哪种写法都是 HALF → FULL 的加倍。

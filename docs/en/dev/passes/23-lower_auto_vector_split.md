@@ -810,6 +810,8 @@ inline projection with a different consequence:
 | `tile.reshape` / `tile.reinterpret_view` | a full-width view plus a per-lane slice over an operand about to be halved |
 | `tile.slice` offset | `+ subblock_idx * half` added to an already lane-local offset, so lane 1 reads past the end |
 | the V→C boundary | a legal `tile.move(pair[0], target_memory=Mat)` refused as full width |
+| `RepairIterArgs` (loop init) | the carry, the exit, and everything after the loop stay full width under a halved init |
+| `YieldedTileInfo` (backedge / merge) | **both** ways: a full-width carry fed `pl.yield_(pair[1])` waved through, and a legally halved one refused |
 
 The boundary also builds its `tile.aic_gather` from `ReplacedOperand`, which rebuilds an
 inline projection over the halved tuple so the gather doubles HALF → FULL either way.
