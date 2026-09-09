@@ -92,5 +92,23 @@ REGISTER_OP("buffer.mul")
       return DeduceVecBufferWrite(args, 3, "buffer.mul");
     });
 
+REGISTER_OP("buffer.add")
+    .set_description("Add active buffer data into an explicit destination with the same descriptor")
+    .set_op_category("BufferOp")
+    .set_ir_stage(OpIRStage::Buffer)
+    .set_internal_only()
+    .add_argument("lhs", "Left input buffer")
+    .add_argument("rhs", "Right input buffer")
+    .add_argument("dst", "Destination buffer")
+    .set_output_arity(0)
+    .set_buffer_arg_effect(0, BufferAccess::Read, BufferAccess::Read)
+    .set_buffer_arg_effect(1, BufferAccess::Read, BufferAccess::Read)
+    .set_buffer_arg_effect(2, BufferAccess::Write, BufferAccess::Read)
+    .set_buffer_result_behavior(BufferResultBehavior::None)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>&) {
+      return DeduceVecBufferWrite(args, 3, "buffer.add");
+    });
+
 }  // namespace ir
 }  // namespace pypto

@@ -27,7 +27,7 @@ def internal_call(name: str, args: Sequence[ir.Expr], **kwargs: Any) -> ir.Call:
     return _ir._create_internal_op_call(name, args, kwargs, ir.Span.unknown())
 
 
-@pytest.mark.parametrize("op_name,arg_count", [("buffer.copy", 2), ("buffer.mul", 3)])
+@pytest.mark.parametrize("op_name,arg_count", [("buffer.copy", 2), ("buffer.mul", 3), ("buffer.add", 3)])
 def test_buffer_write_has_explicit_destination_and_void_result(op_name, arg_count):
     args = [buffer_var(f"arg_{i}") for i in range(arg_count)]
     call = internal_call(op_name, args)
@@ -42,7 +42,7 @@ def test_buffer_write_has_explicit_destination_and_void_result(op_name, arg_coun
     assert not ir.op_arg_is_workspace(op_name, arg_count - 1)
 
 
-@pytest.mark.parametrize("op_name,arg_count", [("buffer.copy", 2), ("buffer.mul", 3)])
+@pytest.mark.parametrize("op_name,arg_count", [("buffer.copy", 2), ("buffer.mul", 3), ("buffer.add", 3)])
 def test_data_and_metadata_effects_are_explicit(op_name, arg_count):
     for index in range(arg_count):
         effect = ir.get_op_buffer_arg_effect(op_name, index)
@@ -56,21 +56,21 @@ def test_data_and_metadata_effects_are_explicit(op_name, arg_count):
     assert testing.get_execution_memory_access_evidence(op_name) == "unknown"
 
 
-@pytest.mark.parametrize("op_name,arg_count", [("buffer.copy", 2), ("buffer.mul", 3)])
+@pytest.mark.parametrize("op_name,arg_count", [("buffer.copy", 2), ("buffer.mul", 3), ("buffer.add", 3)])
 def test_buffer_ops_are_internal_only(op_name, arg_count):
     args = [buffer_var(f"arg_{i}") for i in range(arg_count)]
     with pytest.raises(ValueError, match="internal-only"):
         ir.create_op_call(op_name, args, ir.Span.unknown())
 
 
-@pytest.mark.parametrize("op_name,arg_count", [("buffer.copy", 2), ("buffer.mul", 3)])
+@pytest.mark.parametrize("op_name,arg_count", [("buffer.copy", 2), ("buffer.mul", 3), ("buffer.add", 3)])
 def test_exact_input_destination_alias_is_legal(op_name, arg_count):
     value = buffer_var("shared")
     call = internal_call(op_name, [value] * arg_count)
     assert isinstance(call.type, ir.VoidType)
 
 
-@pytest.mark.parametrize("op_name,arg_count", [("buffer.copy", 2), ("buffer.mul", 3)])
+@pytest.mark.parametrize("op_name,arg_count", [("buffer.copy", 2), ("buffer.mul", 3), ("buffer.add", 3)])
 def test_dynamic_valid_descriptor_is_preserved(op_name, arg_count):
     args = [buffer_var(f"arg_{i}", valid_shape=[-1, 32]) for i in range(arg_count)]
     call = internal_call(op_name, args)
@@ -93,41 +93,41 @@ def test_dynamic_valid_descriptor_is_preserved(op_name, arg_count):
         {"compact": ir.CompactMode.normal},
     ],
 )
-@pytest.mark.parametrize("op_name,arg_count", [("buffer.copy", 2), ("buffer.mul", 3)])
+@pytest.mark.parametrize("op_name,arg_count", [("buffer.copy", 2), ("buffer.mul", 3), ("buffer.add", 3)])
 def test_every_physical_descriptor_field_must_match(op_name, arg_count, difference):
     args = [buffer_var(f"arg_{i}") for i in range(arg_count - 1)] + [buffer_var("dst", **difference)]
     with pytest.raises(ValueError, match="identical physical descriptors"):
         internal_call(op_name, args)
 
 
-@pytest.mark.parametrize("op_name,arg_count", [("buffer.copy", 2), ("buffer.mul", 3)])
+@pytest.mark.parametrize("op_name,arg_count", [("buffer.copy", 2), ("buffer.mul", 3), ("buffer.add", 3)])
 def test_non_vector_buffer_is_rejected(op_name, arg_count):
     args = [buffer_var(f"arg_{i}", memory_space=ir.MemorySpace.Mat) for i in range(arg_count)]
     with pytest.raises(ValueError, match="must be in Vec memory"):
         internal_call(op_name, args)
 
 
-@pytest.mark.parametrize("op_name,arg_count", [("buffer.copy", 2), ("buffer.mul", 3)])
+@pytest.mark.parametrize("op_name,arg_count", [("buffer.copy", 2), ("buffer.mul", 3), ("buffer.add", 3)])
 def test_argument_arity_is_exact(op_name, arg_count):
     for count in (arg_count - 1, arg_count + 1):
         with pytest.raises(ValueError, match="buffer operands"):
             internal_call(op_name, [buffer_var(f"arg_{i}") for i in range(count)])
 
 
-@pytest.mark.parametrize("op_name,arg_count", [("buffer.copy", 2), ("buffer.mul", 3)])
+@pytest.mark.parametrize("op_name,arg_count", [("buffer.copy", 2), ("buffer.mul", 3), ("buffer.add", 3)])
 def test_logical_tiles_do_not_satisfy_buffer_schema(op_name, arg_count):
     tile = ir.Var("tile", ir.TileType([16, 32], DataType.FP32), ir.Span.unknown())
     with pytest.raises(ValueError, match="must have BufferType"):
         internal_call(op_name, [tile] * arg_count)
 
 
-@pytest.mark.parametrize("op_name,arg_count", [("buffer.copy", 2), ("buffer.mul", 3)])
+@pytest.mark.parametrize("op_name,arg_count", [("buffer.copy", 2), ("buffer.mul", 3), ("buffer.add", 3)])
 def test_unknown_kwargs_do_not_silently_change_buffer_semantics(op_name, arg_count):
     with pytest.raises(ValueError, match="Unknown kwarg 'transpose'"):
         internal_call(op_name, [buffer_var(f"arg_{i}") for i in range(arg_count)], transpose=True)
 
 
-@pytest.mark.parametrize("op_name,arg_count", [("buffer.copy", 2), ("buffer.mul", 3)])
+@pytest.mark.parametrize("op_name,arg_count", [("buffer.copy", 2), ("buffer.mul", 3), ("buffer.add", 3)])
 def test_buffer_statement_round_trip_preserves_destination_identity(op_name, arg_count):
     shared = buffer_var("shared")
     call = internal_call(op_name, [shared] * arg_count)
@@ -146,6 +146,94 @@ def valid_extents(*values: int | ir.Expr) -> ir.MakeTuple:
     return ir.MakeTuple(
         [ir.ConstInt(value, DataType.INDEX, span) if isinstance(value, int) else value for value in values],
         span,
+    )
+
+
+def transfer_args(name: str) -> list[ir.Expr]:
+    tensor = ir.Var("gm", ir.TensorType([32, 64], DataType.FP32), ir.Span.unknown())
+    buffer = buffer_var("buffer")
+    source, destination = (tensor, buffer) if name == "buffer.load" else (buffer, tensor)
+    return [source, valid_extents(8, 16), valid_extents(16, 32), destination]
+
+
+@pytest.mark.parametrize("name", ["buffer.load", "buffer.store"])
+def test_gm_transfer_contract_exposes_window_and_memory_effects(name):
+    args = transfer_args(name)
+    call = internal_call(name, args)
+    assert isinstance(call.type, ir.VoidType)
+    assert len(call.args) == 4
+    assert ir.get_op_ir_stage(name) == ir.OpIRStage.Buffer
+    assert ir.get_op_output_arity(name) == 0
+    assert ir.get_op_buffer_result_spec(name).behavior == ir.BufferResultBehavior.None_
+    for index, access in [(0, ir.BufferAccess.Read), (3, ir.BufferAccess.Write)]:
+        effect = ir.get_op_buffer_arg_effect(name, index)
+        assert effect.data == access
+        assert effect.metadata == ir.BufferAccess.Read
+        assert not effect.non_memory
+    for index in (1, 2):
+        assert ir.get_op_buffer_arg_effect(name, index).non_memory
+    assert testing.get_execution_memory_access_evidence(name) == "unknown"
+    with pytest.raises(ValueError, match="internal-only"):
+        ir.create_op_call(name, args, ir.Span.unknown())
+    with pytest.raises(ValueError, match="Unknown kwarg 'cache'"):
+        internal_call(name, args, cache=1)
+    restored = ir.deserialize(ir.serialize(call))
+    ir.assert_structural_equal(call, restored, enable_auto_mapping=True)
+
+
+@pytest.mark.parametrize("name", ["buffer.load", "buffer.store"])
+@pytest.mark.parametrize(
+    "field,value,message",
+    [
+        ("tensor", ir.TensorType([32], DataType.FP32), "rank-2"),
+        ("tensor", ir.TensorType([32, 64], DataType.FP16), "FP32"),
+        ("buffer", ir.BufferType([32], DataType.FP32, ir.Mem.Vec), "rank-2"),
+        ("buffer", ir.BufferType([16, 32], DataType.FP16, ir.Mem.Vec), "FP32"),
+        ("buffer", ir.BufferType([16, 32], DataType.FP32, ir.Mem.Mat), "Vec"),
+        ("offsets", valid_extents(0), "rank-2 MakeTuple"),
+        ("offsets", valid_extents(-1, 0), "nonnegative"),
+        ("offsets", valid_extents(17, 0), "exceeds GM"),
+        ("offsets", valid_extents(0, 33), "exceeds GM"),
+        ("valid", valid_extents(16), "rank-2 MakeTuple"),
+        ("valid", valid_extents(15, 32), "static valid dimension"),
+        ("valid", valid_extents(-1, 32), "between 0 and"),
+        ("valid", valid_extents(17, 32), "between 0 and"),
+        ("offsets", valid_extents(ir.ConstFloat(1.0, DataType.FP32, ir.Span.unknown()), 0), "integer"),
+    ],
+)
+def test_gm_transfer_rejects_invalid_types_and_windows(name, field, value, message):
+    args = transfer_args(name)
+    if field in ("tensor", "buffer"):
+        index = (
+            (0 if name == "buffer.load" else 3) if field == "tensor" else (3 if name == "buffer.load" else 0)
+        )
+        args[index] = ir.Var(field, value, ir.Span.unknown())
+    else:
+        args[1 if field == "offsets" else 2] = value
+    with pytest.raises(ValueError, match=message):
+        internal_call(name, args)
+
+
+@pytest.mark.parametrize("name", ["buffer.load", "buffer.store"])
+def test_gm_transfer_requires_exact_operand_count_and_tuple_windows(name):
+    args = transfer_args(name)
+    for malformed in (args[:-1], [*args, args[-1]], [args[0], args[0], *args[2:]]):
+        with pytest.raises(ValueError, match="requires"):
+            internal_call(name, malformed)
+
+
+@pytest.mark.parametrize("name", ["buffer.load", "buffer.store"])
+def test_gm_transfer_dynamic_valid_extents_are_visible_operands(name):
+    args = transfer_args(name)
+    rows = ir.Var("rows", ir.ScalarType(DataType.UINT8), ir.Span.unknown())
+    args[3 if name == "buffer.load" else 0] = buffer_var("buffer", valid_shape=[-1, 32])
+    args[2] = valid_extents(rows, 32)
+    call = internal_call(name, args)
+    assert isinstance(call.args[2], ir.MakeTuple)
+    assert call.args[2].elements[0].same_as(rows)
+    # No metadata mutation is hidden in either transfer.
+    assert (
+        ir.get_op_buffer_arg_effect(name, 3 if name == "buffer.load" else 0).metadata == ir.BufferAccess.Read
     )
 
 

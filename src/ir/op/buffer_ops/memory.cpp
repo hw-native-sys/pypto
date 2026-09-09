@@ -100,6 +100,44 @@ TypePtr DeduceSetValidShape(const std::vector<ExprPtr>& args) {
   return GetVoidType();
 }
 
+TypePtr DeduceBufferTransfer(const std::vector<ExprPtr>& args, bool load) {
+  const std::string name = load ? "buffer.load" : "buffer.store";
+  CHECK(args.size() == 4) << name << " requires tensor/buffer, offsets, valid extents, and destination";
+  for (const auto& arg : args) CHECK(arg) << name << " operands must not be null";
+  auto tensor = As<TensorType>(args[load ? 0 : 3]->GetType());
+  auto buffer = As<BufferType>(args[load ? 3 : 0]->GetType());
+  CHECK(tensor && buffer) << name << " requires an ordinary GM TensorType and a BufferType";
+  CHECK(tensor->shape_.size() == 2 && buffer->shape_.size() == 2)
+      << name << " requires rank-2 tensor and buffer operands";
+  CHECK(tensor->dtype_ == DataType::FP32 && buffer->dtype_ == DataType::FP32 &&
+        buffer->memory_space_ == MemorySpace::Vec)
+      << name << " currently requires FP32 GM tensors and Vec buffers";
+  auto offsets = As<MakeTuple>(args[1]);
+  auto valid = As<MakeTuple>(args[2]);
+  CHECK(offsets && offsets->elements_.size() == 2 && valid && valid->elements_.size() == 2)
+      << name << " requires rank-2 MakeTuple offsets and valid extents";
+  for (size_t axis = 0; axis < 2; ++axis) {
+    const auto& offset = offsets->elements_[axis];
+    const auto& extent = valid->elements_[axis];
+    CheckIntegerOperand(offset, name + " offset");
+    CheckValidExtent(extent, buffer->shape_[axis], axis, name);
+    auto constant_offset = As<ConstInt>(offset);
+    auto constant_extent = As<ConstInt>(extent);
+    if (constant_offset) CHECK(constant_offset->value_ >= 0) << name << " offsets must be nonnegative";
+    if (buffer->valid_shape_[axis] != -1) {
+      CHECK(constant_extent && constant_extent->value_ == buffer->valid_shape_[axis])
+          << name << " valid extent must equal the buffer's static valid dimension " << axis;
+    }
+    if (auto dimension = As<ConstInt>(tensor->shape_[axis]);
+        dimension && constant_offset && constant_extent) {
+      CHECK(constant_offset->value_ <= dimension->value_ &&
+            constant_extent->value_ <= dimension->value_ - constant_offset->value_)
+          << name << " transfer window exceeds GM tensor dimension " << axis;
+    }
+  }
+  return GetVoidType();
+}
+
 }  // namespace
 
 // The immutable physical descriptor is Call::type_, never a duplicate kwarg.
@@ -140,6 +178,50 @@ REGISTER_OP("buffer.set_validshape")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>&) {
       return DeduceSetValidShape(args);
+    });
+
+// Transfers expose their complete GM window and do not change valid metadata.
+// Dynamic extents must match the buffer's current metadata at execution time;
+// bounds not statically provable remain lowering/runtime preconditions. Like
+// other destination-passing operations, execution access evidence stays Unknown.
+REGISTER_OP("buffer.load")
+    .set_description("Load an explicit GM tensor window into a buffer destination")
+    .set_op_category("BufferOp")
+    .set_ir_stage(OpIRStage::Buffer)
+    .set_internal_only()
+    .add_argument("tensor", "Source GM tensor")
+    .add_argument("offsets", "Tuple of GM element offsets")
+    .add_argument("valid_extents", "Tuple of transfer extents matching current buffer valid metadata")
+    .add_argument("dst", "Destination buffer")
+    .set_output_arity(0)
+    .set_buffer_arg_effect(0, BufferAccess::Read, BufferAccess::Read)
+    .set_buffer_non_memory_arg(1)
+    .set_buffer_non_memory_arg(2)
+    .set_buffer_arg_effect(3, BufferAccess::Write, BufferAccess::Read)
+    .set_buffer_result_behavior(BufferResultBehavior::None)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>&) {
+      return DeduceBufferTransfer(args, true);
+    });
+
+REGISTER_OP("buffer.store")
+    .set_description("Store a buffer's active data into an explicit GM tensor window")
+    .set_op_category("BufferOp")
+    .set_ir_stage(OpIRStage::Buffer)
+    .set_internal_only()
+    .add_argument("src", "Source buffer")
+    .add_argument("offsets", "Tuple of GM element offsets")
+    .add_argument("valid_extents", "Tuple of transfer extents matching current buffer valid metadata")
+    .add_argument("tensor", "Destination GM tensor")
+    .set_output_arity(0)
+    .set_buffer_arg_effect(0, BufferAccess::Read, BufferAccess::Read)
+    .set_buffer_non_memory_arg(1)
+    .set_buffer_non_memory_arg(2)
+    .set_buffer_arg_effect(3, BufferAccess::Write, BufferAccess::Read)
+    .set_buffer_result_behavior(BufferResultBehavior::None)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>&) {
+      return DeduceBufferTransfer(args, false);
     });
 
 }  // namespace ir
