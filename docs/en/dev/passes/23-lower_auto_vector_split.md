@@ -812,6 +812,13 @@ inline projection with a different consequence:
 | the V→C boundary | a legal `tile.move(pair[0], target_memory=Mat)` refused as full width |
 | `RepairIterArgs` (loop init) | the carry, the exit, and everything after the loop stay full width under a halved init |
 | `YieldedTileInfo` (backedge / merge) | **both** ways: a full-width carry fed `pl.yield_(pair[1])` waved through, and a legally halved one refused |
+| `FindFullWidthOperand` (condition 2) | a partitioned projection reported as a full-width operand — a false rejection |
+
+The only `AsVarLike` lookups left in the pass are inside `OperandSplitInfo` /
+`ReplacedOperand` themselves, and the two places that deliberately identify a **whole
+tuple** by variable (`YieldedHalvedTupleType`, `RetypeTupleProjection`). Anything else
+asking about an operand's split belongs in the helper — that is what stops this class
+from recurring one call site at a time.
 
 The boundary also builds its `tile.aic_gather` from `ReplacedOperand`, which rebuilds an
 inline projection over the halved tuple so the gather doubles HALF → FULL either way.

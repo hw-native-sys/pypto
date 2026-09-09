@@ -294,6 +294,7 @@ bool DeducerPinsOperandExtent(const CallPtr& call, const HalvedCallProbe& probe,
 // then a wrong number in a message rather than a rejected program.
 FullWidthOperand FindFullWidthOperand(const CallPtr& call, int result_split_dim, int result_rank,
                                       const std::unordered_map<const Var*, TileInfo>& tile_vars,
+                                      const std::unordered_map<const Var*, VarPtr>& var_replacements,
                                       const HalvedCallProbe* probe = nullptr) {
   if (OperandsMayStayFullWidth(call)) return {};
   for (size_t i = 0; i < call->args_.size(); ++i) {
@@ -312,8 +313,11 @@ FullWidthOperand FindFullWidthOperand(const CallPtr& call, int result_split_dim,
     // A singleton split axis is replicated, not partitioned: both lanes read it
     // whole, so leaving it full width is correct.
     if (IsSingletonDim(arg_tt->shape_[arg_split_dim])) continue;
-    auto arg_var = AsVarLike(arg);
-    if (arg_var && tile_vars.count(arg_var.get()) != 0) continue;
+    // Through OperandSplitInfo: this gate is about operands that stayed FULL WIDTH, and
+    // an inline projection of a halved tuple did not. Matching only Var flagged one as
+    // full width -- a false rejection, safe but wrong, and the same Var-only assumption
+    // that produced the silent defects elsewhere.
+    if (OperandSplitInfo(arg, tile_vars, var_replacements)) continue;
     if (probe != nullptr && DeducerPinsOperandExtent(call, *probe, i, arg_split_dim)) continue;
     return {arg, i, arg_split_dim};
   }
@@ -1464,7 +1468,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
         const auto probe_args = BuildHalvedCallArgs(new_args, var_replacements);
         const HalvedCallProbe probe{&probe_args, std::dynamic_pointer_cast<const TileType>(new_result_type)};
         if (!HalvedCallStaysTypeConsistent(call, probe)) {
-          auto full = FindFullWidthOperand(call, result_split_dim, result_rank, tile_vars);
+          auto full = FindFullWidthOperand(call, result_split_dim, result_rank, tile_vars, var_replacements);
           CHECK_SPAN(false, call->span_)
               << (full.arg ? FullWidthOperandDiagnostic(op_name, full)
                            : "LowerAutoVectorSplit: halving '" + op_name +
@@ -1493,7 +1497,8 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
         // need a registry declaration purely to suppress a check that had no
         // business running -- which is how tile.rsqrt came to declare a scratch
         // its own deducer requires to match the input exactly.
-        if (auto blind = FindFullWidthOperand(call, result_split_dim, result_rank, tile_vars, &probe);
+        if (auto blind = FindFullWidthOperand(call, result_split_dim, result_rank, tile_vars,
+                                              var_replacements, &probe);
             blind.arg) {
           CHECK_SPAN(false, call->span_) << FullWidthOperandDiagnostic(op_name, blind);
         }

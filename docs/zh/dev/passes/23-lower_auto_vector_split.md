@@ -687,6 +687,11 @@ lane 只拥有一半的操作数产生了全宽输出，于是两个 lane 都没
 | V→C 边界 | 合法的 `tile.move(pair[0], target_memory=Mat)` 被当作全宽拒绝 |
 | `RepairIterArgs`（循环初值） | 初值已折半，而携带值、出口及循环之后全部停留在全宽 |
 | `YieldedTileInfo`（回边 / 合并） | **两个方向都错**：全宽携带值被喂 `pl.yield_(pair[1])` 却放行，合法折半的反被拒绝 |
+| `FindFullWidthOperand`（条件 2） | 已分区的投影被报成全宽操作数——误拒 |
+
+pass 里仅剩的 `AsVarLike` 查找只有两类：`OperandSplitInfo` / `ReplacedOperand` 自身的实现，
+以及刻意按变量身份识别**整个 tuple** 的两处（`YieldedHalvedTupleType`、`RetypeTupleProjection`）。
+除此之外任何询问操作数拆分状态的代码都应走该 helper——这才是阻止这类问题按调用点逐个复发的办法。
 
 边界处的 `tile.aic_gather` 也改用 `ReplacedOperand` 构造——它在折半后的 tuple 之上重建投影，
 使 gather 无论哪种写法都是 HALF → FULL 的加倍。
