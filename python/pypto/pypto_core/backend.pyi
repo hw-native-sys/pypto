@@ -108,6 +108,13 @@ class Backend:
     """Abstract backend base class."""
 
     def get_type_name(self) -> str: ...
+    def get_registered_op_names(self) -> list[str]:
+        """Return registered operator names in sorted order, including target exclusions.
+
+        Registration does not imply support for every operand type or layout.
+        Mutating the returned snapshot does not change the backend registry.
+        """
+
     def get_handler(self) -> BackendHandler: ...
     def export_to_file(self, path: str) -> None: ...
     @staticmethod

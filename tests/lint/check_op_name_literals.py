@@ -68,7 +68,15 @@ from pathlib import Path
 # Sites that legitimately compare a bare literal. Scoped to the exact class or function -- not the
 # whole file -- so an unrelated bare comparison added to one of these files later is still reported.
 # Each entry is "<repo-relative path>::<dotted qualname prefix>".
-ALLOWLIST: frozenset[str] = frozenset()
+ALLOWLIST: frozenset[str] = frozenset(
+    {
+        # This audit explicitly records historical backend callbacks with no IR
+        # registration. A getter would fail; runtime drift tests independently
+        # verify the names remain backend-only. This is inventory data, not an
+        # operator dispatch table or comparison against a Call node.
+        "tests/ut/backend/buffer_migration_inventory.py::<module>",
+    }
+)
 
 # Directories scanned, relative to the repo root.
 SCAN_ROOTS = ("tests", "python")

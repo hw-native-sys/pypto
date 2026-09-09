@@ -436,6 +436,16 @@ const Backend::BackendOpInfo* Backend::GetOpInfo(const std::string& op_name) con
   return nullptr;
 }
 
+std::vector<std::string> Backend::GetRegisteredOpNames() const {
+  std::vector<std::string> names;
+  names.reserve(backend_op_registry_.size());
+  for (const auto& entry : backend_op_registry_) {
+    names.push_back(entry.first);
+  }
+  std::sort(names.begin(), names.end());
+  return names;
+}
+
 const BackendTileLayoutSpec* Backend::GetTileLayoutSpec(const std::string& op_name) const {
   const auto* info = GetOpInfo(op_name);
   if (!info || !info->tile_layout_spec.has_value()) {

@@ -244,6 +244,14 @@ class Backend {
   [[nodiscard]] const BackendOpInfo* GetOpInfo(const std::string& op_name) const;
 
   /**
+   * @brief List the operators actually registered for this backend, sorted by name.
+   *
+   * The snapshot includes architecture-specific exclusions and overrides. It
+   * describes registration, not support for every possible operand descriptor.
+   */
+  [[nodiscard]] std::vector<std::string> GetRegisteredOpNames() const;
+
+  /**
    * @brief Get backend-specific tile layout constraints for an operator
    *
    * @param op_name Operator name
