@@ -852,6 +852,10 @@ void PTOCodegen::EmitDeferredCompletionAdapterDeclaration() {
 }
 
 void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
+  if (UsesBufferIR(func)) {
+    GenerateBufferFunction(func);
+    return;
+  }
   fs_.Reset();
   fs_.current_function = func;
 
@@ -2116,6 +2120,7 @@ void PTOCodegen::VisitStmt(const ir::StmtPtr& stmt) {
 
 void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   auto call = As<ir::Call>(op->value_);
+  if (fs_.buffer_ir && TryEmitBufferCall(call, op->var_)) return;
   const bool is_set_validshape = ir::IsOp(call, "tile.set_validshape");
   const bool alias_result_to_in_place_input = ShouldAliasResultToInPlaceInput(op);
   const bool alias_array_update_to_input = ShouldAliasArrayUpdateResultToInput(op);
@@ -2273,6 +2278,7 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
 // ========================================================================
 
 void PTOCodegen::VisitExpr_(const CallPtr& op) {
+  if (fs_.buffer_ir && TryEmitBufferCall(op)) return;
   const std::string& op_name = op->op_->name_;
 
   CHECK(backend_ != nullptr) << "Backend must not be null; use PTOCodegen(backend) or default backend";

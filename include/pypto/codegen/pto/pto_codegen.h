@@ -776,6 +776,13 @@ class PTOCodegen : public CodegenBase {
    */
   void GenerateFunction(const ir::FunctionPtr& func);
 
+  // Experimental direct emission for explicitly constructed Buffer IR. This
+  // path never enters Tile/MemRef allocation or handle discovery.
+  static bool UsesBufferIR(const ir::FunctionPtr& func);
+  void GenerateBufferFunction(const ir::FunctionPtr& func);
+  bool TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& result = nullptr);
+  std::string EmitBufferIntegerOperand(const ir::ExprPtr& expr, DataType target);
+
   /**
    * @brief Collect deterministic GM slot buffer byte offsets for frontend pipe ids in a module.
    */
@@ -949,6 +956,7 @@ class PTOCodegen : public CodegenBase {
 
   /// Per-function mutable state that is reset at the start of each GenerateFunction call.
   struct FunctionState {
+    bool buffer_ir = false;
     std::ostringstream constants_section;
     std::ostringstream body_section;
     std::string constants_indent;  ///< Fixed indent for constants_section (set once per function)
@@ -1059,6 +1067,7 @@ class PTOCodegen : public CodegenBase {
     std::vector<std::string> yield_buffer;
 
     void Reset() {
+      buffer_ir = false;
       constants_section.str("");
       constants_section.clear();
       body_section.str("");
