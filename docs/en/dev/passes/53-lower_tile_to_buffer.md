@@ -171,3 +171,27 @@ The precompile mode also checks the saved Buffer program and PTO source from the
 executed artifact. `--codegen-only` is useful for compilation checks but does not
 provide numerical evidence. Harness tests cover inline and pool-thread option
 propagation without requiring a device.
+
+`tests/st/runtime/control_flow/test_buffer_ir.py` adds branch, For, While,
+nested-loop and fanout numerical cases for each planner. Each compiled device
+kernel receives counts and flags read from an orchestration config tensor, so
+one artifact exercises multiple runtime paths. For and While cover counts
+0, 1, 2 and 3, both branch arms, odd/even swaps, interleaved scalar offsets and
+same-GM carries. Separate output bands retain unwritten sentinel values and
+the original input after the loop. An asymmetric final expression detects
+swaps that a commutative sum would hide. Nested cases include zero outer or
+inner iterations; fanout checks two destinations reading one source.
+
+On hosts with the task-submit device queue, run this bounded matrix with:
+
+```bash
+source .claude/skills/testing/load-env.sh
+python -m pytest tests/st/runtime/control_flow/test_buffer_ir.py --platform=a2a3 \
+    --precompile-workers "$PYPTO_TEST_JOBS" --execute-via-task-submit \
+    --execute-batch-size=4 --task-max-time=120 --save-kernels -v
+```
+
+The queue chooses an available device. On other hosts, omit the queue options
+and select an available device with `--device`. The saved-artifact checks also
+require scalar-only native loop results and the expected explicit operations;
+native compilation alone does not establish numerical correctness.
