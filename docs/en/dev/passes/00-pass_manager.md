@@ -551,6 +551,11 @@ so the call might have observable side effects. The DCE step recurses into
 `ForStmt`/`IfStmt`/`WhileStmt`/`ScopeStmt` bodies so nested dead scalars
 are cleaned up as well.
 
+With `enable_buffer_ir=True`, the final [LowerTileToBuffer](53-lower_tile_to_buffer.md)
+pass runs after `MaterializeValidShapeSymbols` and replaces planned device Tile
+storage with verified explicit Buffer operations. This migration option must
+remain unchanged between constructing and running the pass manager.
+
 ### Using PassPipeline Directly
 
 ```python

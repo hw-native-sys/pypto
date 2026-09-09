@@ -374,6 +374,7 @@ nav:
           - en/dev/passes/50-classify_iter_arg_carry.md
           - en/dev/passes/51-insert_comm_fence.md
           - en/dev/passes/52-materialize_valid_shape_symbols.md
+          - en/dev/passes/53-lower_tile_to_buffer.md
           - en/dev/passes/91-utility_passes.md
           - en/dev/passes/92-diagnostics.md
           - en/dev/passes/99-verifier.md

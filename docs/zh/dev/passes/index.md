@@ -67,6 +67,7 @@ pass；`91` 及以后保留给"在多个位置运行的 pass"以及"根本不是
 | 50 | [ClassifyIterArgCarry](50-classify_iter_arg_carry.md) | 把编排层 `ForStmt` 的每个 iter_arg 分类为平凡别名或需物化的重绑定携带 |
 | 51 | [InsertCommFence](51-insert_comm_fence.md) | 为每个发布性写入打标记（本地：region `system.cacheinvalid` + `system.fence`；远端写：仅 fence；opaque 写：whole-GM），并为每个 wait 插入 whole-GM `system.cacheinvalid`；notify 本身不加任何标记 |
 | 52 | [MaterializeValidShapeSymbols](52-materialize_valid_shape_symbols.md) | 将设备 kernel 中无法绑定的 `valid_shape` 符号转换为前置的 `Scalar[INDEX]` 参数，并传入调用方的实际有效范围 |
+| 53 | [LowerTileToBuffer](53-lower_tile_to_buffer.md) | 按迁移选项将完成规划的 Tile 存储最终转换为显式 Buffer 操作 |
 
 ## 默认流水线之外
 

@@ -386,6 +386,9 @@ class PassManager:
                 continue
             self._pipeline.add_pass(pass_obj)
 
+        if self._construction_buffer_ir:
+            self._pipeline.add_pass(passes.lower_tile_to_buffer())
+
     @property
     def passes(self) -> tuple[passes.Pass, ...]:
         """Get the pipeline's passes in execution order as an immutable snapshot."""
