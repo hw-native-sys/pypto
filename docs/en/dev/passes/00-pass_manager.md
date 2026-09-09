@@ -70,6 +70,7 @@ Framework for organizing and executing IR transformation passes on Programs with
 | `IterArgCarryClassified` | Every Orchestration ForStmt with iter_args carries its `iter_arg_rebind_<i>` carry plan, so codegen reads it instead of re-deriving it |
 | `AccToGmStoreValid` | Every `tile.store` from an Acc-resident tile targets a GM dtype the backend's fix-pipe can narrow into |
 | `AtomicAddDtypeValid` | Every atomic-add write into GM targets a destination dtype the backend's store pipe can combine |
+| `BufferIR` | InCore/AIC/AIV use explicit buffer handles and valid registered buffer calls; composes SSA, dominance, and assignment symmetry. Explicitly selected during buffer IR development; does not prove storage lifetimes or data initialization. |
 
 ### IRPropertySet
 

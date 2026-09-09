@@ -49,7 +49,8 @@ operands, packed into tuples, yielded, or returned as values.
 These types support construction, structural comparison, and binary serialization.
 Buffer type dumps use native `pypto.ir.BufferType(...)` constructors and preserve
 the complete descriptors. Internal buffer operators use the contracts below.
-Representation verification and PTO emission will be integrated separately.
+The `BufferIR` property verifies representation as described below. PTO emission
+will be integrated separately.
 Automatic tile-to-buffer lowering is not enabled; the public Tile DSL and default
 pipeline still use `TileType`. Reparsing complete buffer-program dumps through
 the DSL parser is not supported.
@@ -107,8 +108,12 @@ immutable type nor buffer identity. Lowering must select a dynamic descriptor
 in advance for any valid dimension that changes over a handle's lifetime.
 
 `OpRegistry::ValidateBufferCall` validates an existing call against the same
-schema as creation, including its original result type and kwargs. Storage
-lifetime, overlap, and initialization proofs belong to subsequent verification.
+schema as creation, including its original result type and kwargs. The
+`BufferIR` property applies this check in device functions and rejects logical
+tiles, implicit buffer aliases, and buffer-valued control-flow carries. It
+composes SSA, use-after-definition, and assignment-type checks. This establishes
+the representation contract; storage lifetime, overlap, and initialization
+proofs belong to subsequent verification.
 
 The initial `buffer.copy(src, dst)` and `buffer.mul(lhs, rhs, dst)` operations
 write their explicit destination and return `VoidType`. They currently require

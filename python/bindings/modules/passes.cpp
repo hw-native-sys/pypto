@@ -154,7 +154,10 @@ void BindPass(nb::module_& m) {
              "mean a dispatchable task, and the runtime passes scalars in by value while returning "
              "only tensors, so such a return has no carrier -- write the value into a [1] tensor "
              "output and read it back with pl.tensor.read. Scalar[TASK_ID] is exempt, and a "
-             "device-side scalar helper belongs in an Inline function");
+             "device-side scalar helper belongs in an Inline function")
+      .value("BufferIR", IRProperty::BufferIR,
+             "InCore/AIC/AIV use explicit buffer handles and valid registered buffer calls; "
+             "includes SSA, dominance, and assignment symmetry, not lifetime or initialization proofs");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");

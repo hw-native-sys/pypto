@@ -71,6 +71,7 @@ The `run_verifier()` utility creates a standalone `Pass` for ad-hoc use in custo
 | **SplitIncoreOrch** | SplitIncoreOrch | No `InCoreScopeStmt` nodes remain in Opaque functions |
 | **IncoreTileOps** | IncoreTileOps | InCore functions use tile ops (no tensor-level ops remain) |
 | **HasMemRefs** | HasMemRefs | All TileType variables have MemRef initialized |
+| **BufferIR** | BufferIR | Explicit device buffer representation and registered-call validity; composes SSA, dominance, and assignment symmetry, without lifetime or initialization proofs |
 | **AllocatedMemoryAddr** | AllocatedMemoryAddr | All MemRefs have valid addresses within buffer limits |
 | **OutParamNotShadowed** | OutParamNotShadowed | Out/InOut params not reassigned with tensor-creating ops |
 | **NoNestedInCore** | NoNestedInCore | No nested InCore scopes (`InCoreScopeStmt` inside `InCoreScopeStmt`) |
@@ -229,6 +230,50 @@ from this check — a builtin appears here only because its effect is already
 declared, and a cross-function writer is a user function with no `REGISTER_OP`
 block. A missing effect is the registry gap described above, which this check
 cannot see.
+
+### BufferIR
+
+`IRProperty.BufferIR` validates the final device representation in `InCore`,
+`AIC`, and `AIV` functions. It is explicitly selected with
+`PropertyVerifierRegistry.verify` or `run_verifier(properties=...)`; it is not
+part of the structural or default property sets while buffer lowering is under
+development. Orchestration functions are outside its scope.
+
+The verifier rejects logical `TileType` (including nested tuple elements),
+standalone `MemRef`/`Ptr` values, and `tile.*`/`pld.tile.*` calls. A GM tensor's
+embedded MemRef remains valid. Buffer handles originate in function parameters
+or registered buffer operations whose results declare allocation, alias, or
+borrow behavior. Tuple projections preserve those explicit result contracts;
+plain handle assignments and `MakeTuple` of existing handles are rejected.
+Incoming buffer parameters, including tuples containing handles, cannot be
+redefined by assignments. Writes through those handles remain valid.
+Buffer calls with results must be direct assignment values; zero-result buffer
+calls must be direct `EvalStmt` expressions. Nested buffer calls and discarded
+allocations are rejected.
+Buffers cannot escape through function returns or flow through `return_vars`,
+loop `iter_args`, or yields. Scalar control-flow results remain valid, and
+operations inside the region can write outer buffer operands directly.
+
+Every buffer call is validated against its registered stage, original operands,
+kwargs, and stored result type. Validation does not recreate a call with a
+deduced type, which would conceal malformed IR. Other scalar and GM calls may
+remain, but cannot consume or produce buffer handles. Buffer references in call,
+function, scope, or loop attributes are rejected, including references nested
+inside expression-valued attributes, because storage effects must name ordinary operands.
+The same restriction applies to expression-valued type metadata (shapes, views,
+and GM MemRef bases, offsets, and slot indices) and the SPMD core count.
+Scalar GM metadata and its ordinary pointer carrier remain valid.
+`Submit` cannot consume or produce device buffer handles either.
+
+The check composes the existing `SSAVerify`, `UseAfterDefCheck`, and
+`AssignTypeSymmetry` verifiers on device functions only. These diagnostics retain
+their existing rule names. Dominance uses strict lexical scopes: definitions
+inside a branch cannot escape through the legacy form without region results.
+Representation and registered-call errors use the
+`BufferIR` rule. This foundation does **not** prove borrow lifetimes, overlap
+safety, initialized read coverage, or ordering of asynchronous effects; those
+require subsequent storage analyses. A valid allocation alone does not imply
+initialized data.
 
 ### SSAVerify
 

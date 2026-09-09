@@ -115,6 +115,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "AccStorePhaseValid";
     case IRProperty::NoScalarKernelReturn:
       return "NoScalarKernelReturn";
+    case IRProperty::BufferIR:
+      return "BufferIR";
     default:
       return "Unknown";
   }

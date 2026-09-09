@@ -11,10 +11,10 @@
 
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -115,34 +115,46 @@ class SSAVerifier : public IRVisitor {
   mutable std::string cached_func_str_;
   std::unordered_map<const Var*, int> var_assignment_count_;
 
-  /// Scope stack: each entry is the set of Var pointers defined in that scope
-  std::vector<std::unordered_set<const Var*>> scope_stack_ = {{}};
+  struct ScopeDefinition {
+    const Var* var;
+    std::optional<size_t> previous_level;
+  };
+
+  // A use is one indexed lookup, independent of lexical depth. Each scope
+  // records only definitions it changes; exiting restores those entries once.
+  // Rebinding the same Var pointer in malformed IR still restores an outer
+  // definition, preserving the diagnostics of the original scope-set stack.
+  std::unordered_map<const Var*, size_t> active_definition_levels_;
+  std::vector<std::vector<ScopeDefinition>> scope_stack_ = {{}};
 
   /// Register Var references found in all shaped and tuple type metadata.
   void RegisterTypeVars(const TypePtr& type) {
     if (!type || scope_stack_.empty()) return;
     for (const auto* var : var_collectors::CollectTypeVars(type)) {
-      if (var) scope_stack_.back().insert(var);
+      DefineVarPointer(var);
     }
   }
 
   /**
    * @brief Define a variable in the current (innermost) scope
    */
-  void DefineVar(const VarPtr& var) {
+  void DefineVar(const VarPtr& var) { DefineVarPointer(var.get()); }
+
+  void DefineVarPointer(const Var* var) {
     if (!var || scope_stack_.empty()) return;
-    scope_stack_.back().insert(var.get());
+    const size_t level = scope_stack_.size() - 1;
+    auto found = active_definition_levels_.find(var);
+    if (found != active_definition_levels_.end() && found->second == level) return;
+    const std::optional<size_t> previous_level =
+        found == active_definition_levels_.end() ? std::nullopt : std::make_optional(found->second);
+    scope_stack_.back().push_back({var, previous_level});
+    active_definition_levels_[var] = level;
   }
 
   /**
    * @brief Check if a variable is visible in the current scope stack
    */
-  bool IsVarInScope(const Var* var_ptr) const {
-    for (auto it = scope_stack_.rbegin(); it != scope_stack_.rend(); ++it) {
-      if (it->count(var_ptr)) return true;
-    }
-    return false;
-  }
+  bool IsVarInScope(const Var* var_ptr) const { return active_definition_levels_.count(var_ptr) != 0; }
 
   /**
    * @brief Push a new scope
@@ -154,6 +166,13 @@ class SSAVerifier : public IRVisitor {
    */
   void ExitScope() {
     if (scope_stack_.size() > 1) {
+      for (auto it = scope_stack_.back().rbegin(); it != scope_stack_.back().rend(); ++it) {
+        if (it->previous_level.has_value()) {
+          active_definition_levels_[it->var] = *it->previous_level;
+        } else {
+          active_definition_levels_.erase(it->var);
+        }
+      }
       scope_stack_.pop_back();
     }
   }

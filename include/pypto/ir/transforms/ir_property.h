@@ -135,7 +135,9 @@ enum class IRProperty : uint64_t {
                          ///< written FunctionType::Inline and spliced away by InlineFunctions. Decidable
                          ///< on the user's own IR, so it is a structural property verified at every pass
                          ///< boundary
-  kCount                 ///< Sentinel (must be last)
+  BufferIR,              ///< InCore/AIC/AIV use explicit buffer handles and valid registered buffer calls;
+             ///< composes SSA, dominance, and assignment symmetry, not lifetime or initialization checks
+  kCount  ///< Sentinel (must be last)
 };
 
 static_assert(
