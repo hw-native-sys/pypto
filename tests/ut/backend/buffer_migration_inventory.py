@@ -59,6 +59,7 @@ MIGRATION_FAMILIES = (
             "tile.load",
             "tile.store",
         ),
+        restricted=frozenset({"tile.load", "tile.store"}),
     ),
     MigrationFamily(
         "G03: Binary vector operations",
@@ -77,7 +78,7 @@ MIGRATION_FAMILIES = (
             "tile.part_max",
             "tile.part_min",
         ),
-        restricted=frozenset({"tile.mul"}),
+        restricted=frozenset({"tile.add", "tile.mul"}),
     ),
     MigrationFamily(
         "G04: Scalar-vector operations",

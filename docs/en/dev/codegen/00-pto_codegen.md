@@ -43,6 +43,28 @@ declared in the constants block before its use.
 
 ## Architecture
 
+### Explicit Buffer input
+
+`GenerateBufferFunction` validates explicitly constructed Buffer IR before
+emission. Its GM path supports static, packed ND rank-2 FP32 Tensor parameters
+and normalized Tensor parameter returns. It shares the existing GM tensor-view
+prologue and native tensors-first/scalars-last ABI. Tensor returns remain in IR
+for orchestration aliasing; they do not create native return values.
+
+`buffer.load` and `buffer.store` each render an explicit window as
+`pto.partition_view` followed by `pto.tload` or `pto.tstore`. Their destination,
+offsets, and valid extents come from ordinary operands. `buffer.add`, `mul`, and
+`copy` render their explicit buffer destinations. Each `pto.alloc_tile` comes
+from a `buffer.alloc` in the same scope; an address is emitted exactly when its
+operand is present, independently of the legacy emission flag. GM transfers
+never create a buffer, infer valid-state updates, or reconstruct a logical Tile.
+
+This direct path does not enable automatic Tile-to-Buffer conversion or change
+the default pipeline. See [Buffer contracts](../ir/02-types.md#buffer-operator-contracts)
+for descriptor, direction, dynamic-window, and ABI limits. Native compilation
+tests establish syntax and operand dataflow; numerical execution is a separate
+integration requirement.
+
 ### Class Structure
 
 **Header**: `include/pypto/codegen/pto/pto_codegen.h`

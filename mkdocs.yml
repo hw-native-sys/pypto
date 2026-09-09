@@ -318,6 +318,7 @@ nav:
           - en/dev/ir/07-parser.md
           - en/dev/ir/08-param-directions.md
           - en/dev/ir/09-multi_output_ops.md
+          - en/dev/ir/10-operator-effects.md
       - Passes:
           - en/dev/passes/index.md
           - en/dev/passes/00-pass_manager.md

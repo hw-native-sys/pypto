@@ -41,6 +41,24 @@ stride 表达式里的常量 (例如复合参数维度 `M * 2` 中的 `2`) 也�
 
 ## 架构
 
+### 显式 Buffer 输入
+
+`GenerateBufferFunction` 在发射前验证显式构造的 Buffer IR。GM 路径支持
+物理形状静态、紧密 ND 布局的二维 FP32 Tensor 参数，以及规范化的 Tensor
+参数返回值。它复用现有 GM 张量视图前缀和原生“Tensor 在前、标量在后”的
+ABI。Tensor 返回值保留在 IR 中供编排处理别名，不产生原生返回值。
+
+`buffer.load` 和 `buffer.store` 将显式窗口发射为 `pto.partition_view`，
+随后发射 `pto.tload` 或 `pto.tstore`。目标、偏移和 valid extent 均来自
+普通操作数。`buffer.add`、`mul`、`copy` 直接使用显式 buffer 目标。
+每个 `pto.alloc_tile` 对应同一作用域内的 `buffer.alloc`；只有地址操作数
+存在时才发射地址，不受旧发射标志影响。GM 传输不创建 buffer、不推导
+valid 状态更新，也不重建逻辑 Tile。
+
+此直接路径不启用自动 Tile-to-Buffer 转换，也不修改默认流水线。
+描述符、方向、动态窗口和 ABI 限制见 [Buffer 契约](../ir/02-types.md#buffer-算子契约)。
+原生编译测试验证语法和操作数数据流；数值执行是单独的集成验收要求。
+
 ### 类结构
 
 **头文件**: `include/pypto/codegen/pto/pto_codegen.h`

@@ -15,6 +15,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -35,9 +36,11 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
+#include "src/backend/common/pto_ops_internal.h"
 
 namespace pypto {
 namespace codegen {
@@ -66,6 +69,29 @@ std::string BufferTypeString(const ir::BufferTypePtr& type, const ir::Span& span
   return FormatTileBufTypeString("vec", DataTypeToMLIR(type->dtype_), rows, cols, type->blayout_,
                                  type->slayout_, type->fractal_, type->pad_, type->compact_, valid_rows,
                                  valid_cols, valid_rows == -1, valid_cols == -1);
+}
+
+void CheckBufferTensorParameter(const ir::TensorTypePtr& tensor, const ir::Span& span) {
+  CHECK_SPAN(tensor->shape_.size() == 2 && tensor->dtype_ == DataType::FP32, span)
+      << "Direct Buffer IR GM parameters currently require rank-2 FP32 tensors";
+  auto rows = As<ir::ConstInt>(tensor->shape_[0]);
+  auto cols = As<ir::ConstInt>(tensor->shape_[1]);
+  CHECK_SPAN(rows && cols && rows->value_ > 0 && cols->value_ > 1, span)
+      << "Direct Buffer IR GM parameters currently require static physical shapes with columns > 1";
+  if (tensor->tensor_view_) {
+    const auto& view = *tensor->tensor_view_;
+    CHECK_SPAN(view.layout == ir::TensorLayout::ND && view.pad == ir::PadValue::null, span)
+        << "Direct Buffer IR GM parameters currently require unpadded ND layout";
+    if (!view.stride.empty()) {
+      CHECK_SPAN(view.stride.size() == 2, span)
+          << "Direct Buffer IR GM parameters require rank-2 packed strides";
+      auto row_stride = As<ir::ConstInt>(view.stride[0]);
+      auto col_stride = As<ir::ConstInt>(view.stride[1]);
+      CHECK_SPAN(row_stride && col_stride && row_stride->value_ == cols->value_ && col_stride->value_ == 1,
+                 span)
+          << "Direct Buffer IR GM parameters currently require packed row-major strides";
+    }
+  }
 }
 
 class BufferFunctionDetector : public ir::IRVisitor {
@@ -152,6 +178,24 @@ class BufferFunctionDetector : public ir::IRVisitor {
 // representation verifier separately owns SSA, dominance, and op contracts.
 class BufferEmissionPreflight : public ir::IRVisitor {
  public:
+  explicit BufferEmissionPreflight(ir::FunctionPtr function) : function_(std::move(function)) {
+    for (size_t i = 0; i < function_->params_.size(); ++i) {
+      if (auto tensor = As<ir::TensorType>(function_->params_[i]->GetType())) {
+        CheckBufferTensorParameter(tensor, function_->params_[i]->span_);
+        tensor_parameters_.emplace(function_->params_[i].get(), function_->param_directions_[i]);
+      }
+    }
+    for (const auto& result_type : function_->return_types_) {
+      CHECK_SPAN(As<ir::TensorType>(result_type), function_->span_)
+          << "Direct Buffer IR codegen supports only normalized GM tensor parameter returns";
+    }
+  }
+
+  void CheckReturns() const {
+    CHECK_SPAN(function_->return_types_.empty() || returned_, function_->span_)
+        << "Direct Buffer IR function results require a final normalized GM tensor return";
+  }
+
   void VisitExpr(const ir::ExprPtr& expr) override {
     if (!expr) return;
     // The inherited visitor has default traversal-only handlers as well as
@@ -216,8 +260,16 @@ class BufferEmissionPreflight : public ir::IRVisitor {
                stmt->span_)
         << "Statement '" << stmt->TypeName() << "' is not supported by direct Buffer IR codegen";
     if (auto ret = As<ir::ReturnStmt>(stmt)) {
-      CHECK_SPAN(depth_ == 0 && ret->value_.empty(), ret->span_)
-          << "Direct Buffer IR codegen supports only a final empty function return";
+      CHECK_SPAN(depth_ == 0, ret->span_) << "Direct Buffer IR codegen supports only a final function return";
+      CHECK_SPAN(ret->value_.size() == function_->return_types_.size(), ret->span_)
+          << "Direct Buffer IR return values must match the declared GM tensor results";
+      for (size_t i = 0; i < ret->value_.size(); ++i) {
+        auto value = ir::AsVarLike(ret->value_[i]);
+        CHECK_SPAN(value && tensor_parameters_.count(value.get()) != 0 &&
+                       ir::structural_equal(value->GetType(), function_->return_types_[i]),
+                   ret->span_)
+            << "Direct Buffer IR returns must be normalized GM tensor parameters";
+      }
       returned_ = true;
     }
     if (auto assign = As<ir::AssignStmt>(stmt)) {
@@ -225,7 +277,15 @@ class BufferEmissionPreflight : public ir::IRVisitor {
                  assign->span_)
           << "Direct Buffer IR codegen supports only scalar or buffer assignments";
     }
+    if (auto branch = As<ir::IfStmt>(stmt)) CheckScalarRegionValues(branch->return_vars_, stmt->span_);
+    if (auto loop = As<ir::WhileStmt>(stmt)) {
+      CheckScalarRegionValues(loop->iter_args_, stmt->span_);
+      CheckScalarRegionValues(loop->return_vars_, stmt->span_);
+    }
+    if (auto yield = As<ir::YieldStmt>(stmt)) CheckScalarRegionValues(yield->value_, stmt->span_);
     if (auto loop = As<ir::ForStmt>(stmt)) {
+      CheckScalarRegionValues(loop->iter_args_, stmt->span_);
+      CheckScalarRegionValues(loop->return_vars_, stmt->span_);
       CHECK_SPAN(ir::GetScalarDtype(loop->loop_var_) == DataType::INDEX, loop->span_)
           << "Direct Buffer IR codegen requires an INDEX for-loop induction variable";
       for (const auto& bound : {loop->start_, loop->stop_, loop->step_}) {
@@ -269,9 +329,22 @@ class BufferEmissionPreflight : public ir::IRVisitor {
 
   void VisitExpr_(const ir::CallPtr& call) override {
     CHECK_SPAN(ir::IsOp(call, "buffer.alloc") || ir::IsOp(call, "buffer.copy") ||
-                   ir::IsOp(call, "buffer.mul") || ir::IsOp(call, "buffer.set_validshape"),
+                   ir::IsOp(call, "buffer.mul") || ir::IsOp(call, "buffer.add") ||
+                   ir::IsOp(call, "buffer.load") || ir::IsOp(call, "buffer.store") ||
+                   ir::IsOp(call, "buffer.set_validshape"),
                call->span_)
         << "Operation '" << call->op_->name_ << "' is not supported by direct Buffer IR codegen";
+    if (ir::IsOp(call, "buffer.load") || ir::IsOp(call, "buffer.store")) {
+      const bool load = ir::IsOp(call, "buffer.load");
+      auto tensor = ir::AsVarLike(call->args_[load ? 0 : 3]);
+      auto parameter = tensor_parameters_.find(tensor.get());
+      CHECK_SPAN(parameter != tensor_parameters_.end(), call->span_)
+          << "Direct Buffer IR GM transfers currently require a tensor parameter operand";
+      CHECK_SPAN(
+          load ? parameter->second != ir::ParamDirection::Out : parameter->second != ir::ParamDirection::In,
+          call->span_)
+          << "Direct Buffer IR GM transfer conflicts with the tensor parameter direction";
+    }
     if (ir::IsOp(call, "buffer.set_validshape")) {
       const auto type = As<ir::BufferType>(call->args_[0]->GetType());
       // PTOAS mutates both native valid fields. A fixed field, including the
@@ -284,6 +357,14 @@ class BufferEmissionPreflight : public ir::IRVisitor {
   }
 
  private:
+  template <typename T>
+  static void CheckScalarRegionValues(const std::vector<T>& values, const ir::Span& span) {
+    for (const auto& value : values) {
+      CHECK_SPAN(As<ir::ScalarType>(value->GetType()), span)
+          << "Direct Buffer IR codegen currently supports only scalar region results and carries";
+    }
+  }
+
   static void CheckSignedArithmetic(const ir::ExprPtr& expr) {
     CHECK_SPAN(!ir::GetScalarDtype(expr).IsUnsignedInt(), expr->span_)
         << "Unsigned scalar arithmetic is not supported by direct Buffer IR codegen; "
@@ -292,6 +373,8 @@ class BufferEmissionPreflight : public ir::IRVisitor {
 
   bool returned_ = false;
   size_t depth_ = 0;
+  ir::FunctionPtr function_;
+  std::unordered_map<const ir::Var*, ir::ParamDirection> tensor_parameters_;
   std::unordered_set<const ir::BufferType*> descriptors_;
 };
 
@@ -312,26 +395,47 @@ void PTOCodegen::GenerateBufferFunction(const ir::FunctionPtr& func) {
     CHECK_SPAN(diagnostic.severity != DiagnosticSeverity::Error, diagnostic.span)
         << "Invalid Buffer IR (" << diagnostic.rule_name << "): " << diagnostic.message;
   }
-  CHECK_SPAN(func->return_types_.empty(), func->span_)
-      << "Direct Buffer IR codegen does not yet support function results";
   for (const auto& param : func->params_) {
-    CHECK_SPAN(As<ir::ScalarType>(param->GetType()), param->span_)
-        << "Direct Buffer IR codegen currently supports only scalar parameters; "
+    CHECK_SPAN(As<ir::ScalarType>(param->GetType()) || As<ir::TensorType>(param->GetType()), param->span_)
+        << "Direct Buffer IR codegen currently supports only scalar and ordinary GM tensor parameters; "
            "the device buffer-parameter ABI is not yet implemented";
   }
-  BufferEmissionPreflight preflight;
+  BufferEmissionPreflight preflight(func);
   preflight.VisitFunction(func);
+  preflight.CheckReturns();
 
   fs_.Reset();
   fs_.buffer_ir = true;
   fs_.current_function = func;
+  // Match PTOParam's existing GM ABI: tensor pointers precede scalar values,
+  // regardless of IR parameter order. The first GM recipe has static shapes,
+  // so it needs no implicit trailing dynamic-shape parameters.
+  std::vector<ir::VarPtr> parameters;
+  for (const auto& param : func->params_) {
+    if (As<ir::TensorType>(param->GetType())) parameters.push_back(param);
+  }
+  for (const auto& param : func->params_) {
+    if (As<ir::ScalarType>(param->GetType())) parameters.push_back(param);
+  }
   stream_ << "  func.func @" << func->name_ << "(";
-  for (size_t i = 0; i < func->params_.size(); ++i) {
+  for (size_t i = 0; i < parameters.size(); ++i) {
     const std::string name = "%arg" + std::to_string(i);
     fs_.used_ssa_names.insert(name.substr(1));
-    BindVarToMlir(func->params_[i], name);
+    BindVarToMlir(parameters[i], name);
     if (i != 0) stream_ << ", ";
-    stream_ << name << ": " << GetTypeString(As<ir::ScalarType>(func->params_[i]->GetType())->dtype_);
+    stream_ << name << ": ";
+    if (auto tensor = As<ir::TensorType>(parameters[i]->GetType())) {
+      stream_ << "!pto.ptr<" << GetTypeString(tensor->dtype_) << ">";
+      RegisterBasePtr(parameters[i], name);
+    } else {
+      stream_ << GetTypeString(As<ir::ScalarType>(parameters[i]->GetType())->dtype_);
+    }
+  }
+  // Reserve every ABI name before assigning view names.
+  for (const auto& param : parameters) {
+    if (As<ir::TensorType>(param->GetType())) {
+      BindTensorView(param, NewNamedTemp(param->name_hint_ + "_view"));
+    }
   }
   stream_ << ")";
   if (func->func_type_ == ir::FunctionType::AIC) {
@@ -344,6 +448,9 @@ void PTOCodegen::GenerateBufferFunction(const ir::FunctionPtr& func) {
   fs_.constants_indent = GetIndent();
   auto saved_stream = std::move(stream_);
   stream_ = std::move(fs_.body_section);
+  // This shared GM prologue renders tensor shape/stride metadata only. No
+  // legacy on-chip allocation or handle-discovery helper runs on this path.
+  EmitMakeTensorViews(func);
   if (func->body_) VisitStmt(func->body_);
   const std::string body = stream_.str();
   stream_ = std::move(saved_stream);
@@ -426,12 +533,41 @@ bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& re
     }
     Emit("pto.set_validshape " + GetExprAsCode(call->args_[0]) + ", " + dimensions[0] + ", " + dimensions[1] +
          " : " + GetExprTypeAnnotation(call->args_[0]));
+  } else if (ir::IsOp(call, "buffer.load") || ir::IsOp(call, "buffer.store")) {
+    const bool load = ir::IsOp(call, "buffer.load");
+    const auto tensor = ir::AsVarLike(call->args_[load ? 0 : 3]);
+    const auto buffer = call->args_[load ? 3 : 0];
+    const auto offsets = As<ir::MakeTuple>(call->args_[1]);
+    const auto extents = As<ir::MakeTuple>(call->args_[2]);
+    std::vector<std::string> offset_values;
+    std::vector<std::string> extent_values;
+    for (const auto& offset : offsets->elements_) {
+      offset_values.push_back(EmitBufferIntegerOperand(offset, DataType::INDEX));
+    }
+    for (const auto& extent : extents->elements_) {
+      extent_values.push_back(EmitBufferIntegerOperand(extent, DataType::INDEX));
+    }
+    const auto type = As<ir::TensorType>(tensor->GetType());
+    const std::string partition_type = backend::pto_ops_detail::MakePartitionTensorViewType(
+        backend::pto_ops_detail::GetDimStrings(extents->elements_), GetTypeString(type->dtype_));
+    const std::string partition = backend::pto_ops_detail::EmitPartitionViewPTO(
+        tensor->name_hint_, GetOrCreateTensorView(tensor), GetTensorViewTypeString(type.get()),
+        partition_type, offset_values, extent_values, *this);
+    const std::string buffer_operand = GetExprAsCode(buffer) + " : " + GetExprTypeAnnotation(buffer);
+    const std::string tensor_operand = partition + " : " + partition_type;
+    Emit(load ? "pto.tload ins(" + tensor_operand + ") outs(" + buffer_operand + ")"
+              : "pto.tstore ins(" + buffer_operand + ") outs(" + tensor_operand + ")");
   } else {
-    INTERNAL_CHECK_SPAN(ir::IsOp(call, "buffer.copy") || ir::IsOp(call, "buffer.mul"), call->span_)
+    INTERNAL_CHECK_SPAN(
+        ir::IsOp(call, "buffer.copy") || ir::IsOp(call, "buffer.mul") || ir::IsOp(call, "buffer.add"),
+        call->span_)
         << "Internal error: missing preflighted buffer emitter for " << call->op_->name_;
     const size_t input_count = call->args_.size() - 1;
     std::ostringstream line;
-    line << (ir::IsOp(call, "buffer.copy") ? "pto.tmov" : "pto.tmul") << " ins(";
+    std::string instruction = "pto.tmul";
+    if (ir::IsOp(call, "buffer.copy")) instruction = "pto.tmov";
+    if (ir::IsOp(call, "buffer.add")) instruction = "pto.tadd";
+    line << instruction << " ins(";
     for (size_t i = 0; i < input_count; ++i) {
       if (i != 0) line << ", ";
       line << GetExprAsCode(call->args_[i]);
