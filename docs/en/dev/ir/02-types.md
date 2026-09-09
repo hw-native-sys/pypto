@@ -46,14 +46,16 @@ one multi-buffer allocation; its slot count must be positive.
 Void calls belong in `EvalStmt`; they cannot be bound to variables, passed as
 operands, packed into tuples, yielded, or returned as values.
 
-These types support construction, structural comparison, and binary serialization.
-Buffer type dumps use native `pypto.ir.BufferType(...)` constructors and preserve
-the complete descriptors. Internal buffer operators use the contracts below.
-The `BufferIR` property verifies representation as described below. PTO emission
-will be integrated separately.
-Automatic tile-to-buffer lowering is not enabled; the public Tile DSL and default
-pipeline still use `TileType`. Reparsing complete buffer-program dumps through
-the DSL parser is not supported.
+These are initial buffer IR building blocks. Automatic tile-to-buffer lowering
+is not yet enabled; the public Tile DSL and default pipeline still use
+`TileType`. Direct PTO emission accepts explicitly constructed buffer programs
+with dense row-major Vec FP16/FP32 descriptors of rank one or two, scalar
+parameters and control flow, and the four buffer operations below. Buffer
+parameter ABI, function results, views, slots, helpers, and other physical
+layouts are not yet supported and produce explicit errors. Buffer type dumps use native
+`pypto.ir.BufferType(...)` constructors; binary serialization preserves their
+complete descriptors. Reparsing complete buffer-program dumps through the
+DSL parser is not yet supported.
 
 #### Buffer operator contracts
 
@@ -106,6 +108,11 @@ marked `-1` may change within their physical bounds; static valid dimensions
 must be supplied as matching constants. The operation changes neither the
 immutable type nor buffer identity. Lowering must select a dynamic descriptor
 in advance for any valid dimension that changes over a handle's lifetime.
+The initial PTO emitter additionally requires rank two and both native valid
+dimensions dynamic (`valid_shape=[-1, -1]`) for `set_validshape`, as required by
+the native instruction. A fixed initial extent can still be a constant operand
+of such a dynamic descriptor. Mixed static/dynamic descriptors remain supported
+for allocation, but cannot be silently promoted when emitting a metadata update.
 
 `OpRegistry::ValidateBufferCall` validates an existing call against the same
 schema as creation, including its original result type and kwargs. The
@@ -122,6 +129,21 @@ are initialized. Exact input/destination aliases are allowed; equality of
 runtime valid extents and legalization of partially overlapping views are
 preconditions for constructing these calls. Existing Functional-stage `ArgEffect` queries deliberately
 reject buffer operators; buffer consumers must use `GetBufferArgEffect`.
+Direct codegen validates `BufferIR` and emits allocation, destination writes,
+and valid-state updates directly from these calls and their `BufferType`.
+Address emission depends only on the allocation operand; the legacy
+`emit_tile_addr` flag cannot remove or invent a buffer address. Dynamic
+operands remain in their lexical scope. No logical `TileType` or `MemRef` is
+reconstructed, and no implicit tile allocation pass runs on this path. The
+default Tile pipeline has not switched to buffer IR.
+
+The initial emitter accepts unsigned scalar values directly as allocation
+addresses or valid extents, preserving their unsigned value when widening.
+Unsigned arithmetic and casts other than index-to-integer and same-width
+integer conversions require a future native recipe and are rejected before
+emission. For loops require an `INDEX` induction variable and `INDEX` or signed
+integer bounds. These are emitter limits, not restrictions on the Buffer IR
+representation itself.
 
 ### TensorType
 

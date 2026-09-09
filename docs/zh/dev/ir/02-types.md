@@ -44,11 +44,14 @@ multi_type = ir.MultiBufferType(buffer_type, slot_count=2)
 Void call 应放在 `EvalStmt` 中，不能绑定变量、用作操作数、放入 tuple，
 也不能作为值 yield 或 return。
 
-这些类型支持构造、结构比较和二进制序列化。Buffer 类型 dump 使用原生
-`pypto.ir.BufferType(...)` 构造表达式，并保留完整描述符。内部 buffer 算子
-使用下文契约，`BufferIR` 属性按下文规则验证表示。PTO 代码生成将单独集成。
-自动 tile-to-buffer lowering 尚未启用，公开 Tile DSL 和默认流水线仍使用 `TileType`。
-目前不支持通过 DSL parser 重新解析完整的 buffer 程序 dump。
+这些类型是 Buffer IR 的初始基础设施，自动 tile-to-buffer lowering 尚未
+启用，公开 Tile DSL 和默认流水线仍使用 `TileType`。直接 PTO 代码生成支持
+显式构造的 buffer 程序：一维或二维、稠密 row-major Vec FP16/FP32
+描述符，标量参数与控制流，以及下文四个 buffer 算子。Buffer 参数 ABI、
+函数返回值、view、slot、helper 和其他物理布局尚未支持，会明确报错。
+Buffer 类型 dump 使用原生 `pypto.ir.BufferType(...)` 构造表达式，
+二进制序列化保留完整描述符。目前尚不支持通过 DSL parser 重新解析
+完整的 buffer 程序 dump。
 
 #### Buffer 算子契约
 
@@ -94,6 +97,10 @@ extent 的边界及地址非负性属于构造调用的前置条件。
 变化；静态 valid 维度必须传入与描述符一致的常量。该操作不改变不可变类型
 或 buffer 身份。对于句柄生命周期内会变化的 valid 维度，lowering 必须提前
 选择动态描述符。
+初始 PTO emitter 还按原生指令要求，限定 `set_validshape` 使用二维且两个
+valid 维度均为动态的描述符（`valid_shape=[-1, -1]`）。固定的初始 extent
+仍可作为该动态描述符的常量操作数。分配支持混合静态/动态描述符，但发射
+元数据更新时不能隐式将静态维度改为动态。
 
 `OpRegistry::ValidateBufferCall` 按创建调用时的同一 schema 检查已有 call，
 包括其原始结果类型和 kwargs。`BufferIR` 属性在设备函数中应用此检查，并
@@ -107,7 +114,17 @@ destination 并返回 `VoidType`，目前要求所有参数的 Vec buffer 描述
 句柄；构造调用前需要保证运行时 valid extent 一致，并完成部分重叠 view
 的合法化。现有 Functional 阶段的
 `ArgEffect` 查询会显式拒绝 buffer 算子，buffer 消费方必须使用
-`GetBufferArgEffect`。
+`GetBufferArgEffect`。直接 codegen 验证 `BufferIR` 后，按这些调用及其
+`BufferType` 发射分配、destination 写入与 valid 状态更新。地址发射只取决于
+分配操作数；旧 `emit_tile_addr` 标志不能删除或补充 buffer 地址。
+动态操作数保留在其词法作用域内，不重建逻辑 `TileType` 或 `MemRef`，
+也不运行隐式 tile 分配逻辑。默认 Tile 流水线尚未切换到 Buffer IR。
+
+初始 emitter 支持将无符号标量直接作为分配地址或 valid extent，扩展位宽时
+保留其无符号数值。无符号算术以及除 index 到整数、同位宽整数转换之外的
+无符号转换，需要后续补充原生发射规则，目前会在发射前拒绝。For 循环要求
+归纳变量为 `INDEX`，边界为 `INDEX` 或有符号整数。这些是 emitter 的限制，
+并非 Buffer IR 表示本身的限制。
 
 ### TensorType
 
