@@ -360,6 +360,10 @@ class TestDeclaration:
         assert legacy.get_memory_planner() is None, "the planner rides on the config only"
         assert from_legacy(legacy).get_memory_planner() == MemoryPlanner.DSA_RP
 
+    def test_from_legacy_preserves_buffer_representation(self):
+        legacy = AbsLegacyCase(enable_buffer_ir=True)
+        assert from_legacy(legacy).get_enable_buffer_ir()
+
     def test_from_legacy_prefers_the_explicit_planner(self):
         """``get_memory_planner()`` still outranks the config's planner."""
         legacy = AbsLegacyCase(

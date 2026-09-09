@@ -150,3 +150,24 @@ The current Python diagnostic printer is not a Buffer DSL parser round trip.
 frontend through the full pipeline for all three planners, checks explicit
 allocations and destination writes, verifies immutable/idempotent conversion
 and binary persistence, and compiles the resulting PTO with native PTOAS.
+
+For numerical system tests, declare `st.case(..., enable_buffer_ir=True,
+memory_planner=...)` on the public `@pl.jit` entry. The harness applies the option
+inside both inline and precompile-worker compilations; an outer test-thread
+`PassContext` alone does not configure worker threads. Enabled cases have distinct
+cache keys. The harness checks the actual final device function stages and saves
+the transformed program as `buffer_ir.msgpack` beside the native artifacts.
+
+`tests/st/runtime/ops/test_buffer_ir.py` provides load/add/mul/store numerical
+cases with orchestration for all three planners. Run only this targeted file:
+
+```bash
+source .claude/skills/testing/load-env.sh
+python -m pytest tests/st/runtime/ops/test_buffer_ir.py --platform=a2a3 --device=0 \
+    --precompile-workers "$PYPTO_TEST_JOBS" --save-kernels -v
+```
+
+The precompile mode also checks the saved Buffer program and PTO source from the
+executed artifact. `--codegen-only` is useful for compilation checks but does not
+provide numerical evidence. Harness tests cover inline and pool-thread option
+propagation without requiring a device.

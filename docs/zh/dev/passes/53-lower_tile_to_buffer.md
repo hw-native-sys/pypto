@@ -130,3 +130,22 @@ buffer.store(left_buf, (row_result, column_result), (16, 32), Out)
 
 `tests/ut/ir/transforms/test_lower_tile_to_buffer.py` 通过公开前端运行三种规划器的完整流水线，
 检查显式分配和目标写入、转换的不可变性与幂等性、二进制持久化，并使用原生 PTOAS 编译输出。
+
+数值系统测试应在公开 `@pl.jit` 入口对应的 case 上声明
+`st.case(..., enable_buffer_ir=True, memory_planner=...)`。
+测试框架 (Harness) 会在内联及预编译工作线程内部应用该选项；仅在测试线程外层设置
+`PassContext` 不会配置工作线程。启用的 case 使用独立缓存键。框架检查编译产生的最终
+设备函数阶段，并将转换后程序保存为原生构件旁的 `buffer_ir.msgpack`。
+
+`tests/st/runtime/ops/test_buffer_ir.py` 为三种规划器提供带编排的
+load/add/mul/store 数值测试。只运行这个目标文件：
+
+```bash
+source .claude/skills/testing/load-env.sh
+python -m pytest tests/st/runtime/ops/test_buffer_ir.py --platform=a2a3 --device=0 \
+    --precompile-workers "$PYPTO_TEST_JOBS" --save-kernels -v
+```
+
+预编译模式还会检查实际执行构件所保存的 Buffer 程序和 PTO 源码。
+`--codegen-only` 可用于编译检查，但不构成数值验证证据。
+框架测试无需设备即可覆盖内联及工作线程中的选项传递。
