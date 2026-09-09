@@ -30,6 +30,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/span.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -41,6 +42,16 @@ namespace {
 ///
 /// Kept out of line so `Span::to_string()` is only paid on the error path.
 std::string LocationSuffix(const Span& span) { return span.is_valid() ? " at " + span.to_string() : ""; }
+
+bool IsBufferHandle(const TypePtr& type) { return As<BufferType>(type) || As<MultiBufferType>(type); }
+
+bool IsNonMemoryBufferOperand(const TypePtr& type) {
+  if (As<ScalarType>(type)) return true;
+  if (auto tuple = As<TupleType>(type)) {
+    return std::all_of(tuple->types_.begin(), tuple->types_.end(), IsNonMemoryBufferOperand);
+  }
+  return false;
+}
 
 /// Render an allowed-space list as "Acc" / "Vec or Acc" / "Vec, Mat or Acc".
 std::string FormatAllowedSpaces(const std::vector<MemorySpace>& allowed) {
@@ -147,6 +158,140 @@ void CheckOperandMemorySpaceReachable(const OpMemorySpaceSpec& spec, const std::
 
 }  // namespace
 
+OpRegistryEntry& OpRegistryEntry::set_buffer_arg_effect(size_t arg_index, BufferAccess data,
+                                                        BufferAccess metadata) {
+  CHECK(ir_stage_ == OpIRStage::Buffer)
+      << "Operator '" << name_ << "' must select Buffer stage before declaring buffer effects";
+  CHECK(buffer_arg_effects_.emplace(arg_index, BufferArgEffect{data, metadata, false}).second)
+      << "Operator '" << name_ << "' already classified buffer argument " << arg_index;
+  return *this;
+}
+
+OpRegistryEntry& OpRegistryEntry::set_buffer_non_memory_arg(size_t arg_index) {
+  set_buffer_arg_effect(arg_index, BufferAccess::None, BufferAccess::None);
+  buffer_arg_effects_.at(arg_index).non_memory = true;
+  return *this;
+}
+
+OpRegistryEntry& OpRegistryEntry::set_buffer_result_behavior(size_t result_index,
+                                                             BufferResultBehavior behavior,
+                                                             std::optional<size_t> alias_arg) {
+  CHECK(ir_stage_ == OpIRStage::Buffer)
+      << "Operator '" << name_ << "' must select Buffer stage before declaring buffer results";
+  CHECK(buffer_results_.emplace(result_index, BufferResultSpec{behavior, alias_arg}).second)
+      << "Operator '" << name_ << "' already classified result " << result_index;
+  return *this;
+}
+
+const BufferArgEffect& OpRegistryEntry::GetBufferArgEffect(size_t arg_index) const {
+  CHECK(ir_stage_ == OpIRStage::Buffer) << "Operator '" << name_ << "' is not a buffer operator";
+  auto it = buffer_arg_effects_.find(arg_index);
+  CHECK(it != buffer_arg_effects_.end())
+      << "Operator '" << name_ << "' has no buffer effect for argument " << arg_index;
+  return it->second;
+}
+
+const BufferResultSpec& OpRegistryEntry::GetBufferResultSpec(size_t result_index) const {
+  CHECK(ir_stage_ == OpIRStage::Buffer) << "Operator '" << name_ << "' is not a buffer operator";
+  auto it = buffer_results_.find(result_index);
+  CHECK(it != buffer_results_.end()) << "Operator '" << name_ << "' has no buffer result behavior for result "
+                                     << result_index;
+  return it->second;
+}
+
+void OpRegistryEntry::ValidateIRStage() const {
+  CHECK(!validate_explicit_type_.has_value() || (ir_stage_ == OpIRStage::Buffer && internal_only_))
+      << "Operator '" << name_ << "' explicit type validation requires an internal-only Buffer operator";
+  if (ir_stage_ == OpIRStage::Functional) {
+    CHECK(output_arity_ > 0) << "Functional operator '" << name_ << "' must produce at least one value";
+    CHECK(buffer_arg_effects_.empty() && buffer_results_.empty())
+        << "Functional operator '" << name_ << "' cannot carry buffer contracts";
+    return;
+  }
+  CHECK(internal_only_) << "Buffer operator '" << name_ << "' must be internal-only";
+  CHECK(output_arity_declared_) << "Buffer operator '" << name_ << "' must explicitly declare output arity";
+  CHECK(!arg_effects_.has_value()) << "Buffer operator '" << name_
+                                   << "' must use buffer data and metadata effects, not ArgEffect";
+  CHECK(arguments_.has_value()) << "Buffer operator '" << name_ << "' must declare its arguments";
+  for (size_t i = 0; i < GetArgumentCount(); ++i) {
+    CHECK(buffer_arg_effects_.count(i) > 0)
+        << "Buffer operator '" << name_ << "' has no buffer effect for argument " << i;
+  }
+  CHECK(buffer_arg_effects_.size() == GetArgumentCount())
+      << "Buffer operator '" << name_ << "' declares an effect for an argument outside its schema";
+  const size_t result_count = std::max(size_t{1}, output_arity_);
+  for (size_t i = 0; i < result_count; ++i) {
+    const auto& result = GetBufferResultSpec(i);
+    CHECK((result.behavior == BufferResultBehavior::None) == (output_arity_ == 0))
+        << "Buffer operator '" << name_ << "' must declare None behavior exactly for zero results";
+    const bool aliases =
+        result.behavior == BufferResultBehavior::Alias || result.behavior == BufferResultBehavior::Borrow;
+    CHECK(aliases == result.alias_arg.has_value())
+        << "Buffer operator '" << name_ << "' must name a source argument exactly for Alias/Borrow results";
+    if (result.alias_arg.has_value()) {
+      CHECK(*result.alias_arg < GetArgumentCount() && !GetBufferArgEffect(*result.alias_arg).non_memory)
+          << "Buffer operator '" << name_ << "' result " << i << " has no memory source argument";
+    }
+  }
+  CHECK(buffer_results_.size() == result_count)
+      << "Buffer operator '" << name_ << "' declares behavior for a result outside its output arity";
+}
+
+void OpRegistryEntry::ValidateCall(const std::vector<ExprPtr>& args, const TypePtr& result_type,
+                                   const Span& span) const {
+  INTERNAL_CHECK_SPAN(result_type, span) << "Type deduction failed for '" << name_ << "'";
+  auto tuple = As<TupleType>(result_type);
+  if (output_arity_ == 0) {
+    INTERNAL_CHECK_SPAN(ir_stage_ == OpIRStage::Buffer && As<VoidType>(result_type), span)
+        << "Operator '" << name_ << "' declares zero results but did not deduce VoidType";
+  } else {
+    INTERNAL_CHECK_SPAN(!As<VoidType>(result_type), span)
+        << "Operator '" << name_ << "' declares SSA results but deduced VoidType";
+    if (output_arity_ > 1) {
+      INTERNAL_CHECK_SPAN(tuple, span)
+          << "Operator '" << name_ << "' declares set_output_arity(" << output_arity_
+          << ") but deduced a non-tuple " << result_type->TypeName();
+      INTERNAL_CHECK_SPAN(tuple->types_.size() == output_arity_, span)
+          << "Operator '" << name_ << "' declares set_output_arity(" << output_arity_
+          << ") but deduced a TupleType with " << tuple->types_.size() << " elements";
+    } else {
+      INTERNAL_CHECK_SPAN(!tuple, span)
+          << "Operator '" << name_ << "' deduced a TupleType result without declaring set_output_arity("
+          << tuple->types_.size() << ")";
+    }
+  }
+  if (ir_stage_ != OpIRStage::Buffer) return;
+
+  CHECK(args.size() <= GetArgumentCount()) << "Buffer operator '" << name_ << "' received " << args.size()
+                                           << " arguments, but its schema has " << GetArgumentCount();
+  for (size_t i = 0; i < args.size(); ++i) {
+    CHECK(args[i]) << "Buffer operator '" << name_ << "' argument " << i << " is null";
+    const auto& type = args[i]->GetType();
+    const auto& effect = GetBufferArgEffect(i);
+    const bool memory = IsBufferHandle(type) || AsTensorTypeLike(type);
+    CHECK(effect.non_memory ? IsNonMemoryBufferOperand(type) : memory)
+        << "Buffer operator '" << name_ << "' argument " << i << " has type " << type->TypeName()
+        << " inconsistent with its " << (effect.non_memory ? "non-memory" : "memory") << " effect";
+  }
+  if (output_arity_ == 0) return;
+  for (size_t i = 0; i < output_arity_; ++i) {
+    const TypePtr& type = tuple ? tuple->types_[i] : result_type;
+    const auto& result = GetBufferResultSpec(i);
+    if (result.behavior == BufferResultBehavior::Value) {
+      INTERNAL_CHECK_SPAN(IsNonMemoryBufferOperand(type), span)
+          << "Buffer operator '" << name_ << "' Value result " << i << " must contain only scalar values";
+      continue;
+    }
+    INTERNAL_CHECK_SPAN(IsBufferHandle(type), span)
+        << "Buffer operator '" << name_ << "' storage result " << i << " must be a buffer handle";
+    if (result.alias_arg.has_value()) {
+      const size_t source = *result.alias_arg;
+      CHECK(source < args.size() && IsBufferHandle(args[source]->GetType()))
+          << "Buffer operator '" << name_ << "' result " << i << " must alias an actual buffer operand";
+    }
+  }
+}
+
 void ValidateKwargs(const std::vector<std::pair<std::string, std::any>>& kwargs,
                     const std::unordered_map<std::string, std::type_index>& allowed_kwargs,
                     const std::string& op_name) {
@@ -235,9 +380,65 @@ CallPtr OpRegistry::CreateInternal(const std::string& op_name, const std::vector
   return CreateImpl(op_name, args, kwargs, std::move(span), /*allow_internal=*/true);
 }
 
+CallPtr OpRegistry::CreateInternal(const std::string& op_name, const std::vector<ExprPtr>& args,
+                                   const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                   const TypePtr& result_type, Span span) const {
+  CHECK_SPAN(result_type, span) << "Operator '" << op_name << "' explicit result type must not be null";
+  return CreateImpl(op_name, args, kwargs, std::move(span), /*allow_internal=*/true, result_type);
+}
+
+TypePtr OpRegistry::ResolveAndValidateCallType(const OpRegistryEntry& entry, const std::vector<ExprPtr>& args,
+                                               const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                               const TypePtr& explicit_type, const Span& span) const {
+  const auto& op = entry.GetOp();  // Also validates the registration's stage and complete contracts.
+  const auto& op_name = entry.GetName();
+  TypePtr result_type;
+  try {
+    if (!kwargs.empty()) {
+      const auto& allowed_kwargs = op->GetAttrs();
+      if (!allowed_kwargs.empty() || entry.GetIRStage() == OpIRStage::Buffer) {
+        ValidateKwargs(kwargs, allowed_kwargs, op_name);
+      }
+    }
+
+    if (entry.validate_explicit_type_.has_value()) {
+      CHECK(explicit_type) << "Operator '" << op_name << "' requires an explicit result type";
+      (*entry.validate_explicit_type_)(args, kwargs, explicit_type);
+      result_type = explicit_type;
+    } else {
+      CHECK(!explicit_type) << "Operator '" << op_name
+                            << "' uses type deduction and does not accept an explicit result type";
+      result_type = entry.GetDeduceType()(args, kwargs);
+    }
+  } catch (const Error& e) {
+    // Preserve the original exception class and attach the source location.
+    e.RethrowWithMessage(std::string(e.what()) + LocationSuffix(span));
+  } catch (const std::exception& e) {
+    throw ValueError(std::string(e.what()) + LocationSuffix(span));
+  }
+  entry.ValidateCall(args, result_type, span);
+  return result_type;
+}
+
+void OpRegistry::ValidateBufferCall(const CallPtr& call) const {
+  CHECK(call) << "Cannot validate a null Buffer call";
+  CHECK_SPAN(call->op_, call->span_) << "Buffer call must name a registered operator";
+  CHECK_SPAN(!As<GlobalVar>(call->op_), call->span_)
+      << "A GlobalVar call cannot use a registered buffer operator contract";
+  const auto& entry = GetEntry(call->op_->name_);
+  CHECK_SPAN(entry.GetIRStage() == OpIRStage::Buffer, call->span_)
+      << "Operator '" << entry.GetName() << "' is not a buffer operator";
+  const auto& original_type = call->GetType();
+  CHECK_SPAN(original_type, call->span_) << "Buffer call must have a result type";
+  const TypePtr expected_type = ResolveAndValidateCallType(
+      entry, call->args_, call->kwargs_, entry.RequiresExplicitType() ? original_type : nullptr, call->span_);
+  CHECK_SPAN(structural_equal(original_type, expected_type), call->span_)
+      << "Buffer operator '" << entry.GetName() << "' stored result type does not match its deduced type";
+}
+
 CallPtr OpRegistry::CreateImpl(const std::string& op_name, const std::vector<ExprPtr>& args,
                                const std::vector<std::pair<std::string, std::any>>& kwargs, Span span,
-                               bool allow_internal) const {
+                               bool allow_internal, const TypePtr& explicit_type) const {
   // Look up operator in registry
   auto it = registry_.find(op_name);
   if (it == registry_.end()) {
@@ -256,57 +457,8 @@ CallPtr OpRegistry::CreateImpl(const std::string& op_name, const std::vector<Exp
                      "' is internal-only and cannot be created from user-facing op creation paths");
   }
 
-  // Get operator instance (shared definition)
-  OpPtr op = entry.GetOp();
-
-  // Validate kwargs against allowed attributes (stored in Op)
-  if (!kwargs.empty()) {
-    const auto& allowed_kwargs = op->GetAttrs();
-    if (!allowed_kwargs.empty()) {
-      ValidateKwargs(kwargs, allowed_kwargs, op_name);
-    }
-  }
-
-  const auto& deduce_type_fn = entry.GetDeduceType();
-
-  // Deduce result type (pass args and kwargs separately)
-  TypePtr result_type;
-  try {
-    result_type = deduce_type_fn(args, kwargs);
-  } catch (const Error& e) {
-    // Append the IR location but keep the concrete exception type and the stack trace
-    // captured at the original throw. Flattening every PyPTO exception to ValueError
-    // here erased the CHECK / INTERNAL_CHECK distinction for all op type deduction.
-    e.RethrowWithMessage(std::string(e.what()) + LocationSuffix(span));
-  } catch (const std::exception& e) {
-    // Non-PyPTO exceptions (e.g. std::bad_any_cast from a wrong-typed kwarg) stay
-    // ValueError: they are reachable from user input and carry no PyPTO trace to keep.
-    throw ValueError(std::string(e.what()) + LocationSuffix(span));
-  }
-  INTERNAL_CHECK_SPAN(result_type, span) << "Type deduction failed for '" + op_name + "'";
-
-  // The declared output arity and the deduced shape must agree. A mismatch means
-  // the registration and its f_deduce_type disagree about what the operator
-  // produces, which would surface much later as a null element var inside
-  // multi-output codegen. The reverse direction matters just as much: a tuple
-  // result nobody declared has no arity for codegen to read, so its elements
-  // would never be resolved.
-  const size_t declared_arity = entry.GetOutputArity();
-  auto deduced_tuple = As<TupleType>(result_type);
-  if (declared_arity > 1) {
-    INTERNAL_CHECK_SPAN(deduced_tuple, span)
-        << "Internal error: '" << op_name << "' declares set_output_arity(" << declared_arity
-        << ") but deduced a non-tuple " << result_type->TypeName();
-    INTERNAL_CHECK_SPAN(deduced_tuple->types_.size() == declared_arity, span)
-        << "Internal error: '" << op_name << "' declares set_output_arity(" << declared_arity
-        << ") but deduced a TupleType with " << deduced_tuple->types_.size() << " elements";
-  } else {
-    INTERNAL_CHECK_SPAN(!deduced_tuple, span)
-        << "Internal error: '" << op_name << "' deduced a TupleType result without declaring "
-        << "set_output_arity(" << deduced_tuple->types_.size()
-        << "); multi-output codegen reads the arity from the registry and would not "
-           "resolve this call's elements";
-  }
+  TypePtr result_type = ResolveAndValidateCallType(entry, args, kwargs, explicit_type, span);
+  OpPtr op = entry.op_;  // ResolveAndValidateCallType already validated the registration.
 
   // Apply OpMemorySpaceSpec to TileType results that lack memory_space.
   // This ensures the deduced type carries memory_space even when individual
@@ -414,6 +566,7 @@ void OpRegistry::ValidateArgEffects() const {
   std::vector<std::string> unclassified;
   std::vector<std::string> channel_without_write;
   for (const auto& [name, entry] : registry_) {
+    if (entry.GetIRStage() != OpIRStage::Functional) continue;
     // A write channel describes *how* an operator writes, so declaring one
     // while writing nothing is incoherent — and it is the shape that hides a
     // missing classification, since `set_write_channel()` creates the effect
@@ -465,6 +618,7 @@ void OpRegistry::ValidateMultiOutputOps() const {
   std::vector<std::string> workspace_never_written;
   std::vector<std::string> reuses_input;
   for (const auto& [name, entry] : registry_) {
+    if (entry.GetIRStage() != OpIRStage::Functional) continue;
     if (entry.GetOutputArity() <= 1) continue;
     const size_t arg_count = entry.GetArgumentCount();
     for (size_t i = 0; i < arg_count; ++i) {
@@ -546,6 +700,12 @@ void OpRegistry::ValidateMultiOutputOps() const {
         "results, \"the output reuses input N\" cannot say which one, and InitMemRef would "
         "bind the tuple temporary rather than an element. Drop the declaration:",
         std::move(reuses_input));
+  }
+}
+
+void OpRegistry::ValidateBufferOps() const {
+  for (const auto& [name, entry] : registry_) {
+    entry.ValidateIRStage();
   }
 }
 

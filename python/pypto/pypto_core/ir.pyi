@@ -3174,6 +3174,7 @@ def create_op_call(
         Exception: If operator is not registered, is internal-only, or type deduction fails
     """
 
+@overload
 def _create_internal_op_call(
     op_name: str,
     args: Sequence[Expr],
@@ -3203,6 +3204,20 @@ def _create_internal_op_call(
 
     Raises:
         Exception: If operator is not registered or type deduction fails
+    """
+
+@overload
+def _create_internal_op_call(
+    op_name: str,
+    args: Sequence[Expr],
+    kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace | PadValue],
+    type: Type,
+    span: Span,
+) -> Call:
+    """Create an internal Buffer call with a validated explicit result descriptor.
+
+    Only operators registered with explicit type validation accept this form.
+    The descriptor is stored in the result type; runtime values stay in args.
     """
 
 def set_call_attrs(call: Call, attrs: Mapping[str, object]) -> Call:
@@ -3302,6 +3317,61 @@ def get_op_memory_spec(op_name: str) -> dict[str, Any] | None:
           consumer demand (e.g. `tile.load`, `tile.create`).
         * ``None`` — no resolver registered for this op.
     """
+
+class OpIRStage(enum.Enum):
+    """Representation consumed and produced by an operator."""
+
+    Functional = ...
+    Buffer = ...
+
+class BufferAccess(enum.Enum):
+    """Access to buffer data or descriptor metadata; absence is explicit."""
+
+    None_ = ...
+    Read = ...
+    Write = ...
+    ReadWrite = ...
+
+class BufferResultBehavior(enum.Enum):
+    """Storage ownership of each actual SSA result."""
+
+    None_ = ...
+    Allocate = ...
+    Alias = ...
+    Borrow = ...
+    Value = ...
+
+class BufferArgEffect:
+    """Explicit data and metadata effects of one buffer-stage operand."""
+
+    @property
+    def data(self) -> BufferAccess:
+        """Access to lane data; Write does not imply full coverage."""
+    @property
+    def metadata(self) -> BufferAccess:
+        """Access to descriptor state, including dynamic valid extents."""
+    @property
+    def non_memory(self) -> bool:
+        """Whether the operand contains only non-memory scalar values."""
+
+class BufferResultSpec:
+    """Storage ownership and alias source of one actual SSA result."""
+
+    @property
+    def behavior(self) -> BufferResultBehavior:
+        """The declared ownership behavior."""
+    @property
+    def alias_arg(self) -> int | None:
+        """Source operand for Alias/Borrow, absent for other behaviors."""
+
+def get_op_ir_stage(op_name: str) -> OpIRStage:
+    """Get the operator's typed representation stage."""
+
+def get_op_buffer_arg_effect(op_name: str, arg_index: int) -> BufferArgEffect:
+    """Get declared buffer data/metadata effects; fail on missing classification."""
+
+def get_op_buffer_result_spec(op_name: str, result_index: int = 0) -> BufferResultSpec:
+    """Get one buffer result's ownership; zero-result ops declare None_ at index 0."""
 
 class ArgEffect(enum.Enum):
     """What executing an operator does to the buffer one argument names."""
@@ -3424,7 +3494,8 @@ def get_op_lane_invariant_arg(op_name: str, arg_index: int) -> LaneInvariantArg 
 def get_op_output_arity(op_name: str) -> int:
     """Number of values an operator produces.
 
-    1 for an ordinary operator; N > 1 for a multi-output operator, whose deduced
+    0 for a buffer operator returning ``VoidType``; 1 for an ordinary operator;
+    N > 1 for a multi-output operator, whose deduced
     result is a ``TupleType`` of exactly N elements. Codegen reads the arity from
     here rather than restating it per emitter.
 
@@ -3441,7 +3512,7 @@ def get_op_output_arity(op_name: str) -> int:
 def op_arg_is_workspace(op_name: str, arg_index: int) -> bool:
     """Whether an argument is compiler-supplied scratch rather than a result.
 
-    A multi-output operator may write through an argument only when that
+    A Functional-stage multi-output operator may write through an argument only when that
     argument is declared a workspace; an undeclared written argument is a
     destination tile leaked into the argument list.
 

@@ -24,7 +24,264 @@ from pathlib import Path
 import pypto
 import pytest
 from pypto import DataType, ir
+from pypto.pypto_core import ir as _ir
 from pypto.pypto_core import testing
+
+
+class TestExplicitBufferResultTyping:
+    """Explicit descriptors are validated at creation and again on existing IR."""
+
+    @staticmethod
+    def descriptor():
+        return ir.BufferType([16, 32], DataType.FP32, ir.MemorySpace.Vec)
+
+    @staticmethod
+    def alloc_args():
+        return [ir.MakeTuple([], ir.Span.unknown())]
+
+    @pytest.mark.parametrize("modes", [["deduced", "explicit"], ["explicit", "deduced"]])
+    def test_typing_modes_are_mutually_exclusive(self, modes):
+        with pytest.raises(ValueError, match="cannot combine type deduction with explicit type validation"):
+            testing.validate_op_type_registration(ir.OpIRStage.Buffer, True, modes)
+
+    def test_explicit_validator_cannot_be_registered_twice(self):
+        with pytest.raises(ValueError, match="explicit type validator is already set"):
+            testing.validate_op_type_registration(ir.OpIRStage.Buffer, True, ["explicit", "explicit"])
+
+    @pytest.mark.parametrize(
+        "stage,internal_only",
+        [(ir.OpIRStage.Functional, True), (ir.OpIRStage.Functional, False), (ir.OpIRStage.Buffer, False)],
+    )
+    def test_explicit_typing_requires_internal_buffer_stage(self, stage, internal_only):
+        with pytest.raises(ValueError, match="explicit type validation requires an internal-only Buffer"):
+            testing.validate_op_type_registration(stage, internal_only, ["explicit"])
+
+    def test_internal_buffer_explicit_typing_is_valid(self):
+        testing.validate_op_type_registration(ir.OpIRStage.Buffer, True, ["explicit"])
+
+    @pytest.mark.parametrize("op_name", ["buffer.mul", "tile.mul"])
+    def test_deduced_ops_reject_explicit_type_even_through_internal_api(self, op_name):
+        with pytest.raises(ValueError, match="does not accept an explicit result type"):
+            _ir._create_internal_op_call(op_name, [], {}, self.descriptor(), ir.Span.unknown())
+
+    def test_alloc_requires_explicit_result_descriptor(self):
+        with pytest.raises(ValueError, match="requires an explicit result type"):
+            _ir._create_internal_op_call("buffer.alloc", self.alloc_args(), {}, ir.Span.unknown())
+
+    def test_alloc_preserves_original_descriptor_and_operands(self):
+        descriptor = self.descriptor()
+        args = self.alloc_args()
+        call = _ir._create_internal_op_call("buffer.alloc", args, {}, descriptor, ir.Span.unknown())
+        testing.validate_buffer_call(call)
+        ir.assert_structural_equal(call.type, descriptor)
+        assert call.args[0].same_as(args[0])
+        assert not call.kwargs
+
+    def test_creation_runs_explicit_type_validator(self):
+        with pytest.raises(ValueError, match="BufferType"):
+            _ir._create_internal_op_call(
+                "buffer.alloc", self.alloc_args(), {}, ir.ScalarType(DataType.INT64), ir.Span.unknown()
+            )
+
+    def test_existing_call_runs_explicit_type_validator(self):
+        forged = ir.Call(
+            ir.get_op("buffer.alloc"),
+            self.alloc_args(),
+            {},
+            ir.ScalarType(DataType.INT64),
+            ir.Span.unknown(),
+        )
+        with pytest.raises(ValueError, match="BufferType"):
+            testing.validate_buffer_call(forged)
+
+    def test_existing_call_does_not_deduce_away_a_forged_result_type(self):
+        value = ir.Var("buffer", self.descriptor(), ir.Span.unknown())
+        forged = ir.Call(ir.get_op("buffer.mul"), [value] * 3, self.descriptor(), ir.Span.unknown())
+        with pytest.raises(ValueError, match="stored result type does not match its deduced type"):
+            testing.validate_buffer_call(forged)
+        assert isinstance(forged.type, ir.BufferType)
+
+    @pytest.mark.parametrize("op_name", ["buffer.alloc", "buffer.mul"])
+    def test_existing_call_checks_original_kwargs(self, op_name):
+        value = ir.Var("buffer", self.descriptor(), ir.Span.unknown())
+        is_alloc = op_name == ir.get_op("buffer.alloc").name
+        args = self.alloc_args() if is_alloc else [value] * 3
+        result_type = self.descriptor() if is_alloc else ir.VoidType()
+        forged = ir.Call(ir.get_op(op_name), args, {"bogus": 1}, result_type, ir.Span.unknown())
+        with pytest.raises(ValueError, match="Unknown kwarg 'bogus'"):
+            testing.validate_buffer_call(forged)
+
+    def test_existing_call_checks_operands_again(self):
+        tile = ir.Var("tile", ir.TileType([16, 32], DataType.FP32), ir.Span.unknown())
+        forged = ir.Call(ir.get_op("buffer.mul"), [tile] * 3, ir.VoidType(), ir.Span.unknown())
+        with pytest.raises(ValueError, match="must have BufferType"):
+            testing.validate_buffer_call(forged)
+
+    def test_function_call_cannot_impersonate_registered_buffer_operator(self):
+        value = ir.Var("buffer", self.descriptor(), ir.Span.unknown())
+        forged = ir.Call(ir.GlobalVar("buffer.copy"), [value, value], ir.VoidType(), ir.Span.unknown())
+        with pytest.raises(ValueError, match="GlobalVar call cannot use a registered buffer"):
+            testing.validate_buffer_call(forged)
+
+    def test_binary_round_trip_keeps_explicit_type_validation(self):
+        call = _ir._create_internal_op_call(
+            "buffer.alloc", self.alloc_args(), {}, self.descriptor(), ir.Span.unknown()
+        )
+        restored = ir.deserialize(ir.serialize(call))
+        assert isinstance(restored, ir.Call)
+        testing.validate_buffer_call(restored)
+        ir.assert_structural_equal(call, restored)
+
+
+class TestBufferRegistryContracts:
+    """Check registration failures without leaving poisoned singleton entries."""
+
+    @staticmethod
+    def check(
+        *,
+        stage=ir.OpIRStage.Buffer,
+        arity=0,
+        args=(),
+        result_type=None,
+        effects=(),
+        results=((0, ir.BufferResultBehavior.None_, None),),
+        internal_only=True,
+    ):
+        testing.validate_buffer_op_contract(
+            stage,
+            arity,
+            list(args),
+            ir.VoidType() if result_type is None else result_type,
+            list(effects),
+            list(results),
+            internal_only,
+        )
+
+    @staticmethod
+    def buffer_var(name="buffer"):
+        return ir.Var(name, ir.BufferType([16, 32], DataType.FP32, ir.MemorySpace.Vec), ir.Span.unknown())
+
+    def test_existing_ops_keep_functional_stage_and_arity(self):
+        assert ir.get_op_ir_stage("tile.mul") == ir.OpIRStage.Functional
+        assert ir.get_op_output_arity("tile.mul") == 1
+        assert ir.get_op_output_arity("tile.gather_compare") == 2
+        with pytest.raises(ValueError, match="not a buffer operator"):
+            ir.get_op_buffer_arg_effect("tile.mul", 0)
+
+    def test_functional_stage_cannot_produce_zero_results(self):
+        with pytest.raises(ValueError, match="functional operators produce at least one value"):
+            self.check(stage=ir.OpIRStage.Functional, results=())
+
+    @pytest.mark.parametrize(
+        "changes,message",
+        [
+            ({"arity": None}, "explicitly declare output arity"),
+            ({"internal_only": False}, "internal-only"),
+            ({"results": ()}, "no buffer result behavior"),
+            ({"results": ((0, ir.BufferResultBehavior.Allocate, None),)}, "None behavior"),
+        ],
+    )
+    def test_incomplete_buffer_registration_fails(self, changes, message):
+        with pytest.raises(ValueError, match=message):
+            self.check(**changes)
+
+    def test_zero_result_means_void_not_unknown(self):
+        self.check()
+        with pytest.raises(pypto.InternalError, match="did not deduce VoidType"):
+            self.check(result_type=ir.UnknownType())
+
+    def test_nonzero_result_cannot_be_void(self):
+        with pytest.raises(pypto.InternalError, match="declares SSA results but deduced VoidType"):
+            self.check(arity=1, results=((0, ir.BufferResultBehavior.Value, None),))
+
+    def test_every_argument_requires_effect_even_when_read_only(self):
+        with pytest.raises(ValueError, match="no buffer effect for argument 0"):
+            self.check(args=(self.buffer_var(),))
+
+    def test_effect_index_must_exist(self):
+        with pytest.raises(ValueError, match="outside its schema"):
+            self.check(effects=((0, False, ir.BufferAccess.Read, ir.BufferAccess.Read),))
+
+    def test_effect_cannot_be_declared_twice(self):
+        effect = (0, False, ir.BufferAccess.Read, ir.BufferAccess.Read)
+        with pytest.raises(ValueError, match="already classified buffer argument 0"):
+            self.check(args=(self.buffer_var(),), effects=(effect, effect))
+
+    def test_non_memory_classification_cannot_hide_buffer(self):
+        with pytest.raises(ValueError, match="inconsistent with its non-memory effect"):
+            self.check(
+                args=(self.buffer_var(),),
+                effects=((0, True, ir.BufferAccess.None_, ir.BufferAccess.None_),),
+            )
+
+    def test_scalar_argument_requires_non_memory_classification(self):
+        value = ir.ConstInt(0, DataType.INDEX, ir.Span.unknown())
+        with pytest.raises(ValueError, match="inconsistent with its memory effect"):
+            self.check(args=(value,), effects=((0, False, ir.BufferAccess.None_, ir.BufferAccess.None_),))
+        self.check(args=(value,), effects=((0, True, ir.BufferAccess.None_, ir.BufferAccess.None_),))
+
+    def test_logical_tile_cannot_be_a_buffer_operand(self):
+        tile = ir.Var("tile", ir.TileType([16, 32], DataType.FP32), ir.Span.unknown())
+        with pytest.raises(ValueError, match="inconsistent with its memory effect"):
+            self.check(args=(tile,), effects=((0, False, ir.BufferAccess.Read, ir.BufferAccess.Read),))
+
+    def test_metadata_write_is_independent_of_data_write(self):
+        self.check(
+            args=(self.buffer_var(),),
+            effects=((0, False, ir.BufferAccess.None_, ir.BufferAccess.Write),),
+        )
+
+    def test_allocation_does_not_imply_data_initialization(self):
+        self.check(
+            arity=1,
+            result_type=self.buffer_var().type,
+            results=((0, ir.BufferResultBehavior.Allocate, None),),
+        )
+
+    @pytest.mark.parametrize("behavior", [ir.BufferResultBehavior.Alias, ir.BufferResultBehavior.Borrow])
+    def test_alias_and_borrow_require_actual_buffer_operand(self, behavior):
+        with pytest.raises(ValueError, match="name a source argument"):
+            self.check(arity=1, result_type=self.buffer_var().type, results=((0, behavior, None),))
+        self.check(
+            arity=1,
+            args=(self.buffer_var(),),
+            result_type=self.buffer_var().type,
+            effects=((0, False, ir.BufferAccess.None_, ir.BufferAccess.Read),),
+            results=((0, behavior, 0),),
+        )
+        tensor = ir.Var("tensor", ir.TensorType([16, 32], DataType.FP32), ir.Span.unknown())
+        with pytest.raises(ValueError, match="alias an actual buffer operand"):
+            self.check(
+                arity=1,
+                args=(tensor,),
+                result_type=self.buffer_var().type,
+                effects=((0, False, ir.BufferAccess.None_, ir.BufferAccess.Read),),
+                results=((0, behavior, 0),),
+            )
+
+    def test_value_result_cannot_hide_buffer(self):
+        with pytest.raises(pypto.InternalError, match="must contain only scalar values"):
+            self.check(
+                arity=1,
+                result_type=self.buffer_var().type,
+                results=((0, ir.BufferResultBehavior.Value, None),),
+            )
+
+    def test_multi_result_contract_classifies_each_actual_result(self):
+        pair = ir.TupleType([ir.ScalarType(DataType.INDEX), self.buffer_var().type])
+        self.check(
+            arity=2,
+            result_type=pair,
+            results=((0, ir.BufferResultBehavior.Value, None), (1, ir.BufferResultBehavior.Allocate, None)),
+        )
+        with pytest.raises(ValueError, match="no buffer result behavior for result 1"):
+            self.check(arity=2, result_type=pair, results=((0, ir.BufferResultBehavior.Value, None),))
+        with pytest.raises(pypto.InternalError, match="TupleType with 2 elements"):
+            self.check(
+                arity=3,
+                result_type=pair,
+                results=tuple((i, ir.BufferResultBehavior.Value, None) for i in range(3)),
+            )
 
 
 def test_dynamic_dimension_constant():

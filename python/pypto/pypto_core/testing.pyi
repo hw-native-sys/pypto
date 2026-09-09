@@ -15,7 +15,31 @@ Internal testing utilities (do not use in production)
 
 from typing import Literal, NoReturn, TypedDict
 
-from .ir import Call, Function
+from .ir import BufferAccess, BufferResultBehavior, Call, Expr, Function, OpIRStage, Type
+
+def validate_buffer_op_contract(
+    stage: OpIRStage,
+    arity: int | None,
+    args: list[Expr],
+    result_type: Type,
+    effects: list[tuple[int, bool, BufferAccess, BufferAccess]],
+    results: list[tuple[int, BufferResultBehavior, int | None]],
+    internal_only: bool = True,
+) -> None:
+    """Check a local registration and call without mutating the global registry.
+
+    Effect entries give argument index, non-memory classification, data access,
+    and metadata access. Result entries give result index, ownership behavior,
+    and optional alias source argument. ``arity=None`` omits the declaration.
+    """
+
+def validate_op_type_registration(
+    stage: OpIRStage, internal_only: bool, typing_modes: list[Literal["deduced", "explicit"]]
+) -> None:
+    """Check ordered typing-mode declarations without changing the global registry."""
+
+def validate_buffer_call(call: Call) -> None:
+    """Validate a stored Buffer call without changing its arguments or result type."""
 
 class DsaReusePenaltyEdge(TypedDict):
     """One internal pre-solver DSA-RP recognizer result."""

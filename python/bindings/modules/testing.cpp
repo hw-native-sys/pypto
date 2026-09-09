@@ -18,12 +18,20 @@
  */
 
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/optional.h>
 #include <nanobind/stl/shared_ptr.h>  // NOLINT(misc-include-cleaner) -- registers shared_ptr casters
 #include <nanobind/stl/string.h>      // NOLINT(misc-include-cleaner) -- registers std::string casters
+#include <nanobind/stl/tuple.h>
+#include <nanobind/stl/vector.h>
 
+#include <any>
 #include <cassert>
+#include <cstddef>
+#include <optional>
 #include <string>
+#include <tuple>
 #include <utility>
+#include <vector>
 
 #include "../module.h"
 #include "pypto/backend/common/backend.h"
@@ -31,17 +39,72 @@
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/core_affinity_kind.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/transforms/dsa/allocation_plan.h"
 #include "pypto/ir/transforms/dsa/reuse_penalty_recognizer.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
+#include "pypto/ir/type.h"
 
 namespace nb = nanobind;
 
 namespace pypto {
 namespace python {
+
+/// Validate malformed registrations without installing them in the singleton.
+/// This exercises the exact checks used by registry creation and import.
+void ValidateBufferOpContractForTesting(
+    ir::OpIRStage stage, std::optional<size_t> arity, const std::vector<ir::ExprPtr>& args,
+    const ir::TypePtr& result_type,
+    const std::vector<std::tuple<size_t, bool, ir::BufferAccess, ir::BufferAccess>>& effects,
+    const std::vector<std::tuple<size_t, ir::BufferResultBehavior, std::optional<size_t>>>& results,
+    bool internal_only) {
+  ir::OpRegistryEntry entry;
+  entry.set_ir_stage(stage).set_internal_only(internal_only).no_argument();
+  if (arity.has_value()) entry.set_output_arity(*arity);
+  for (size_t i = 0; i < args.size(); ++i) entry.add_argument(std::to_string(i), "Test argument");
+  for (const auto& [index, non_memory, data, metadata] : effects) {
+    if (non_memory) {
+      CHECK(data == ir::BufferAccess::None && metadata == ir::BufferAccess::None)
+          << "A non-memory operand cannot declare memory effects";
+      entry.set_buffer_non_memory_arg(index);
+    } else {
+      entry.set_buffer_arg_effect(index, data, metadata);
+    }
+  }
+  for (const auto& [index, behavior, alias_arg] : results) {
+    entry.set_buffer_result_behavior(index, behavior, alias_arg);
+  }
+  entry.ValidateIRStage();
+  entry.ValidateCall(args, result_type, ir::Span::unknown());
+}
+
+/// Exercise typing-mode registration failures without modifying the singleton.
+void ValidateOpTypeRegistrationForTesting(ir::OpIRStage stage, bool internal_only,
+                                          const std::vector<std::string>& typing_modes) {
+  ir::OpRegistryEntry entry;
+  entry.set_ir_stage(stage).set_internal_only(internal_only).no_argument();
+  if (stage == ir::OpIRStage::Buffer) {
+    entry.set_output_arity(0).set_buffer_result_behavior(ir::BufferResultBehavior::None);
+  }
+  for (const auto& mode : typing_modes) {
+    if (mode == "deduced") {
+      entry.f_deduce_type(
+          [](const std::vector<ir::ExprPtr>&, const std::vector<std::pair<std::string, std::any>>&) {
+            return ir::GetVoidType();
+          });
+    } else if (mode == "explicit") {
+      entry.f_validate_explicit_type([](const std::vector<ir::ExprPtr>&,
+                                        const std::vector<std::pair<std::string, std::any>>&,
+                                        const ir::TypePtr&) {});
+    } else {
+      CHECK(false) << "Unknown test typing mode '" << mode << "'";
+    }
+  }
+  entry.ValidateIRStage();
+}
 
 // ============================================================================
 // Helper functions to demonstrate error raising from C++
@@ -261,6 +324,18 @@ void BindTesting(nb::module_& m) {
   // Create a protected submodule for testing utilities
   // This will be accessible as pypto.testing in Python
   nb::module_ testing = m.def_submodule("testing", "Internal testing utilities (do not use in production)");
+
+  testing.def("validate_buffer_op_contract", &ValidateBufferOpContractForTesting, nb::arg("stage"),
+              nb::arg("arity").none(), nb::arg("args"), nb::arg("result_type"), nb::arg("effects"),
+              nb::arg("results"), nb::arg("internal_only") = true,
+              "Validate a local operator contract without changing the global registry");
+  testing.def("validate_op_type_registration", &ValidateOpTypeRegistrationForTesting, nb::arg("stage"),
+              nb::arg("internal_only"), nb::arg("typing_modes"),
+              "Validate local operator typing modes without changing the global registry");
+  testing.def(
+      "validate_buffer_call",
+      [](const ir::CallPtr& call) { ir::OpRegistry::GetInstance().ValidateBufferCall(call); },
+      nb::arg("call"), "Validate a stored Buffer call against its registered schema");
 
   // Register error-raising helper functions
   testing.def("raise_value_error", &raise_value_error, nb::arg("message"),
