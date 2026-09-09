@@ -11,8 +11,8 @@
 
 import logging
 import os
+import tempfile
 from contextlib import AbstractContextManager, nullcontext
-from datetime import datetime
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from pypto.backend import BackendType
@@ -380,14 +380,22 @@ def compile(  # noqa: PLR0913
     _select_backend(backend_type=backend_type, platform=platform)
 
     if output_dir is None:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         # ``or`` (not get's default arg) so an empty-but-set env var
         # (``export PYPTO_PROG_BUILD_DIR=``) still falls back to build_output
         # rather than writing artifacts into the current working directory.
         base = os.environ.get("PYPTO_PROG_BUILD_DIR") or "build_output"
-        output_dir = os.path.join(base, f"{program.name}_{timestamp}")
-
-    os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(base, exist_ok=True)
+        # mkdtemp, not ``<name>_<timestamp>``: the timestamp had one-second
+        # resolution and the directory was created with ``exist_ok=True``, so two
+        # compiles of same-named programs within one second shared a directory
+        # and the second silently overwrote the first's kernels. A caller that
+        # compiles one program and runs it before compiling the next never saw
+        # it; one that compiles a batch up front and dispatches afterwards gets
+        # the wrong kernel with no error -- only a numeric assertion catches it.
+        # `@pl.jit` already resolves its own output directory this way.
+        output_dir = tempfile.mkdtemp(prefix=f"{program.name}_", dir=base)
+    else:
+        os.makedirs(output_dir, exist_ok=True)
 
     _validate_pass_context_conflicts(
         operation="compile",

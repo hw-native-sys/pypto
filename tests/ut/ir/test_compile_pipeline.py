@@ -10,6 +10,7 @@
 """Tests for the shared IR pass pipeline."""
 
 import json
+from pathlib import Path
 
 import pytest
 from pypto import DataType, ir
@@ -143,6 +144,28 @@ def test_compile_outer_profiler_retains_ownership(tmp_path):
     assert [stage["name"] for stage in stages] == ["passes", "codegen"]
     assert stages[0]["children"]
     assert not (output_dir / "report" / "pipeline_profile.json").exists()
+
+
+def test_default_output_dirs_are_unique_per_compile(tmp_path, monkeypatch):
+    """Two compiles of one program never share a directory.
+
+    The default used to be ``<program name>_<timestamp>`` at one-second
+    resolution, created with ``exist_ok=True``. Two same-named programs compiled
+    inside one second therefore landed in one directory and the second's kernels
+    overwrote the first's, silently: a caller that compiled a batch up front and
+    dispatched afterwards got the wrong kernel with no error, and only a numeric
+    assertion could catch it.
+
+    Asserted on distinctness rather than on the naming scheme, so it still holds
+    if the scheme changes again.
+    """
+    monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(tmp_path))
+
+    dirs = [ir.compile(_scalar_program(), dump_passes=False, skip_ptoas=True).output_dir for _ in range(3)]
+
+    assert len({str(d) for d in dirs}) == 3, f"compiles shared an output directory: {dirs}"
+    for d in dirs:
+        assert Path(d).is_dir()
 
 
 if __name__ == "__main__":
