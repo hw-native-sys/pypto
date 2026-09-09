@@ -1668,21 +1668,23 @@ std::vector<IterArgPtr> RepairIterArgs(const std::vector<IterArgPtr>& iter_args,
     bool has_tracked_tile = false;
     TileInfo tracked_info;
     if (ia->initValue_) {
-      if (auto init_var = AsVarLike(ia->initValue_)) {
-        auto it = tile_vars.find(init_var.get());
-        if (it != tile_vars.end()) {
-          has_tracked_tile = true;
-          tracked_info = it->second;
-          tile_vars[ia.get()] = it->second;
-          new_type = ApplyTrackedTileShape(ia->GetType(), it->second.split_dim, it->second.half_dim_size,
-                                           subblock_idx, lane_stride);
-        } else if (auto replaced = var_replacements.find(init_var.get());
-                   replaced != var_replacements.end()) {
-          // A TUPLE carry. Its init was halved, and the Substitute above already
-          // swapped it in, so leaving the carry's declared type alone would put a
-          // per-lane init under a full-width carry. Tuple vars are never in
-          // ``tile_vars`` -- they are not tiles -- so adopt the init's halved type,
-          // whose elements already carry the per-element split.
+      // Through OperandSplitInfo, so an init that is an INLINE tuple projection --
+      // `pl.range(2, init_values=(pair[1],))` -- is tracked like a bound one. Matching
+      // only Var left the carry, the loop exit, and every consumer after the loop at
+      // full width while Substitute halved the init underneath them.
+      if (auto info = OperandSplitInfo(ia->initValue_, tile_vars, var_replacements)) {
+        has_tracked_tile = true;
+        tracked_info = *info;
+        tile_vars[ia.get()] = *info;
+        new_type = ApplyTrackedTileShape(ia->GetType(), info->split_dim, info->half_dim_size, subblock_idx,
+                                         lane_stride);
+      } else if (auto init_var = AsVarLike(ia->initValue_)) {
+        // A whole-TUPLE carry. Its init was halved, and the Substitute above already
+        // swapped it in, so leaving the carry's declared type alone would put a
+        // per-lane init under a full-width carry. Tuple vars are never in
+        // ``tile_vars`` -- they are not tiles -- so adopt the init's halved type,
+        // whose elements already carry the per-element split.
+        if (auto replaced = var_replacements.find(init_var.get()); replaced != var_replacements.end()) {
           if (auto halved = std::dynamic_pointer_cast<const TupleType>(replaced->second->GetType())) {
             new_type = halved;
           }

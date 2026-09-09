@@ -2289,6 +2289,44 @@ def test_inline_projection_crossing_to_cube_is_gathered():
     assert "mat_mat: pl.Tile[[256, 16], pl.INT32, pl.Mem.Mat]" in printed
 
 
+def test_loop_init_from_an_inline_projection_carries_the_split():
+    """A loop init that is an inline projection tracks like a bound one.
+
+    ``RepairIterArgs`` propagates the init's split onto the carry, so operations in
+    the body and the loop exit see it. Matching only ``Var`` missed a projection: the
+    carry stayed ``[1, 256]`` and untracked while ``Substitute`` halved the init to
+    ``[1, 128]`` underneath it, so the exit stayed full width too and the store that
+    consumed it got no lane offset.
+
+    The earlier tuple fix covered a whole tuple as the init; this is one *element* of
+    it, which is an ordinary tile carry and takes the ``TileInfo`` path.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            t: pl.Tensor[[256, 128], pl.FP32],
+            tmp: pl.Tile[[256, 128], pl.FP32, pl.Mem.Vec],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_1: pl.Out[pl.Tensor[[1, 256], pl.INT32]],
+        ) -> pl.Tensor[[1, 256], pl.INT32]:
+            seed = pl.tile.move(rhs, target_memory=pl.Mem.Mat)  # noqa: F841
+            src = pl.tile.load(t, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+            pair = pl.tile.gather_compare(src, pl.const(1.0, pl.FP32), tmp, cmp_mode="eq", out_cols=16)
+            for i, (acc,) in pl.range(2, init_values=(pair[1],)):  # noqa: B007
+                doubled = pl.tile.add(acc, acc)
+                result = pl.yield_(doubled)
+            return pl.tile.store(result, [0, 0], out_1)
+
+    printed = _lower(Before).as_python()
+    # The body op, the backedge value and the loop exit all sit at the per-lane extent...
+    assert "doubled: pl.Tile[[1, 128], pl.INT32, pl.Mem.Vec]" in printed
+    assert "result: pl.Tile[[1, 128], pl.INT32, pl.Mem.Vec]" in printed
+    # ...and the store that consumes the exit offsets `cdst`'s own axis, dim 1.
+    assert "pl.tile.store(result, [0, 0 + subblock_idx * 128], out_1)" in printed
+
+
 def test_tuple_result_op_refusing_the_halved_arguments_says_so():
     """A refused halving is diagnosed as a refusal, not as a stationary element.
 
