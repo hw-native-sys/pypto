@@ -26,6 +26,65 @@ The internal Buffer-stage GM and addition operations have no public DSL wrappers
 These use separate data/metadata effects. See [Buffer contracts](02-types.md#buffer-operator-contracts)
 for shape, dtype, valid-state, and alias requirements.
 
+### Typed Buffer elementwise recipes
+
+`backend/common/buffer_elementwise_recipes` is the shared production table for
+logical-to-Buffer conversion, explicit operand contracts, and native mnemonics.
+`LowerTileToBuffer` selects a typed recipe and creates a real Buffer call. Direct
+PTO emission reads that same recipe; it does not reconstruct Tile IR, invoke
+legacy callbacks, or choose storage. The table is deliberately separate from
+legacy backend callback registration.
+
+| Logical operation | Buffer operation | Native instruction | Source buffers |
+| ----------------- | ---------------- | ------------------ | -------------- |
+| `tile.add` | `buffer.add` | `pto.tadd` | 2 |
+| `tile.mul` | `buffer.mul` | `pto.tmul` | 2 |
+| `tile.sub` | `buffer.sub` | `pto.tsub` | 2 |
+| `tile.div` | `buffer.div` | `pto.tdiv` | 2 |
+| `tile.maximum` | `buffer.maximum` | `pto.tmax` | 2 |
+| `tile.minimum` | `buffer.minimum` | `pto.tmin` | 2 |
+| `tile.abs` | `buffer.abs` | `pto.tabs` | 1 |
+| `tile.exp` | `buffer.exp` | `pto.texp` | 1 |
+| `tile.sqrt` | `buffer.sqrt` | `pto.tsqrt` | 1 |
+| `tile.neg` | `buffer.neg` | `pto.tneg` | 1 |
+| `tile.relu` | `buffer.relu` | `pto.trelu` | 1 |
+| `tile.log` | `buffer.log` | `pto.tlog` | 1 |
+| `tile.recip` | `buffer.recip` | `pto.trecip` | 1 |
+
+Every call has its destination as the final operand and returns `Void`. Sources
+read data and metadata; destinations write active data and read metadata. This
+is not a whole-allocation initialization guarantee. All operands need identical
+physical descriptors; broadcasting and partial-combine semantics are separate
+recipes. These operators are compiler-internal, not new public DSL functions.
+
+The eleven additions beyond `add` and `mul` require FP32, rank 1 or 2, static
+valid extents, dense row-major Vec storage, `none_box`, fractal 512, and no padding
+or compact mode. Their dtype contract does not inherit FP16 support from the
+native descriptor formatter. Existing `add`/`mul` descriptor validation and
+FP16/FP32 native emission remain available; automatic conversion currently uses
+static rank-2 FP32 descriptors. Both Ascend910B and Ascend950 use these recipes.
+
+`div`, `log`, and `recip` preserve the optional boolean `high_precision` kwarg.
+The recipe selects the corresponding native precision attribute; false uses
+the native default. No implicit workspace, copy, or allocation is introduced.
+`recip` requires source and destination storage to be disjoint. Construction
+rejects one handle used in both positions. `BufferIR` verification checks placed
+ranges across different handles for every table recipe: partial overlap is
+rejected, and equal complete windows are accepted only by exact-in-place recipes.
+Distinct addressless allocations are disjoint; unknown provenance or placement
+requires a later recipe. Constant scalar address definitions are evaluated with
+memoization and integer-width checks. Direct emission consumes this verified
+contract without performing allocation or alias analysis.
+
+Scalar operands, integer/bitwise operations, `rsqrt` and its optional workspace,
+partial combines, broadcasts, reductions, random generators, other layouts and
+dynamic valid-state recipes remain separate migration work. The public
+`backend.get_buffer_elementwise_recipe_names()` API returns a sorted independent
+snapshot from this actual table. A listed name denotes the restricted recipe
+above, not every form of that logical operator. Tests exercise public lowering,
+binary round trips, BufferIR verification, explicit destination identities, and
+native compilation; they do not substitute for numerical device acceptance.
+
 ## Type System
 
 ```cpp

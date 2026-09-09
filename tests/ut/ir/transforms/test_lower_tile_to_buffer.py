@@ -141,7 +141,7 @@ def test_default_pipeline_stays_functional_until_the_coordinated_switch(planner)
 @pytest.mark.parametrize("planner", _PLANNERS)
 def test_lowering_never_falls_back_to_legacy_codegen_for_an_unimplemented_recipe(planner):
     @pl.program
-    class Exponential:
+    class ReciprocalSquareRoot:
         @pl.function(type=pl.FunctionType.InCore)
         def kernel(
             self,
@@ -149,14 +149,14 @@ def test_lowering_never_falls_back_to_legacy_codegen_for_an_unimplemented_recipe
             output: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
         ) -> pl.Tensor[[16, 32], pl.FP32]:
             value: pl.Tile[[16, 32], pl.FP32] = pl.load(source, [0, 0], [16, 32])
-            result: pl.Tile[[16, 32], pl.FP32] = pl.exp(value)
+            result: pl.Tile[[16, 32], pl.FP32] = pl.rsqrt(value)
             out: pl.Tensor[[16, 32], pl.FP32] = pl.store(result, [0, 0], output)
             return out
 
     with passes.PassContext([], passes.VerificationLevel.NONE, memory_planner=planner, enable_buffer_ir=True):
         manager = PassManager.get_strategy(OptimizationStrategy.Default)
-        with pytest.raises(ValueError, match="no conversion recipe for 'tile.exp'"):
-            manager.run_passes(Exponential)
+        with pytest.raises(ValueError, match="no conversion recipe for 'tile.rsqrt'"):
+            manager.run_passes(ReciprocalSquareRoot)
 
 
 @pl.program

@@ -15,6 +15,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/buffer_elementwise_recipes.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
@@ -74,41 +75,32 @@ REGISTER_OP("buffer.copy")
       return DeduceVecBufferWrite(args, 2, "buffer.copy");
     });
 
-REGISTER_OP("buffer.mul")
-    .set_description("Multiply active buffer data into an explicit destination with the same descriptor")
-    .set_op_category("BufferOp")
-    .set_ir_stage(OpIRStage::Buffer)
-    .set_internal_only()
-    .add_argument("lhs", "Left input buffer")
-    .add_argument("rhs", "Right input buffer")
-    .add_argument("dst", "Destination buffer")
-    .set_output_arity(0)
-    .set_buffer_arg_effect(0, BufferAccess::Read, BufferAccess::Read)
-    .set_buffer_arg_effect(1, BufferAccess::Read, BufferAccess::Read)
-    .set_buffer_arg_effect(2, BufferAccess::Write, BufferAccess::Read)
-    .set_buffer_result_behavior(BufferResultBehavior::None)
-    .f_deduce_type([](const std::vector<ExprPtr>& args,
-                      const std::vector<std::pair<std::string, std::any>>&) {
-      return DeduceVecBufferWrite(args, 3, "buffer.mul");
-    });
-
-REGISTER_OP("buffer.add")
-    .set_description("Add active buffer data into an explicit destination with the same descriptor")
-    .set_op_category("BufferOp")
-    .set_ir_stage(OpIRStage::Buffer)
-    .set_internal_only()
-    .add_argument("lhs", "Left input buffer")
-    .add_argument("rhs", "Right input buffer")
-    .add_argument("dst", "Destination buffer")
-    .set_output_arity(0)
-    .set_buffer_arg_effect(0, BufferAccess::Read, BufferAccess::Read)
-    .set_buffer_arg_effect(1, BufferAccess::Read, BufferAccess::Read)
-    .set_buffer_arg_effect(2, BufferAccess::Write, BufferAccess::Read)
-    .set_buffer_result_behavior(BufferResultBehavior::None)
-    .f_deduce_type([](const std::vector<ExprPtr>& args,
-                      const std::vector<std::pair<std::string, std::any>>&) {
-      return DeduceVecBufferWrite(args, 3, "buffer.add");
-    });
+// The actual conversion and emitter table also defines explicit operand arity,
+// precision kwargs, physical restrictions, and destination-alias requirements.
+[[maybe_unused]] const bool kElementwiseRecipesRegistered = [] {
+  for (const auto& recipe : backend::GetBufferElementwiseRecipes()) {
+    auto& entry = OpRegistry::GetInstance().Register(recipe.buffer_op);
+    entry.set_description(std::string("Explicit destination recipe for ") + recipe.logical_op)
+        .set_op_category("BufferOp")
+        .set_ir_stage(OpIRStage::Buffer)
+        .set_internal_only()
+        .set_output_arity(0)
+        .set_buffer_result_behavior(BufferResultBehavior::None);
+    for (size_t i = 0; i < recipe.input_count; ++i) {
+      entry.add_argument("src" + std::to_string(i), "Source buffer")
+          .set_buffer_arg_effect(i, BufferAccess::Read, BufferAccess::Read);
+    }
+    entry.add_argument("dst", "Destination buffer")
+        .set_buffer_arg_effect(recipe.input_count, BufferAccess::Write, BufferAccess::Read);
+    if (recipe.precision != backend::BufferPrecisionKind::None) entry.set_attr<bool>("high_precision");
+    entry.f_deduce_type(
+        [recipe](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>&) {
+          backend::ValidateBufferElementwiseOperands(recipe, args);
+          return GetVoidType();
+        });
+  }
+  return true;
+}();
 
 }  // namespace ir
 }  // namespace pypto

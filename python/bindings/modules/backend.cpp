@@ -30,6 +30,7 @@
 #include "pypto/backend/950/backend_950.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
+#include "pypto/backend/common/buffer_elementwise_recipes.h"
 #include "pypto/backend/common/soc.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/pipe.h"
@@ -54,6 +55,10 @@ using pypto::ir::MemorySpace;
 
 void BindBackend(nb::module_& m) {
   nb::module_ backend_mod = m.def_submodule("backend", "PyPTO Backend module");
+
+  backend_mod.def("get_buffer_elementwise_recipe_names", &backend::GetBufferElementwiseRecipeNames,
+                  "Return a sorted snapshot of logical names with implemented Buffer elementwise recipes; "
+                  "each recipe still restricts physical forms");
 
   // ========== BackendType enum ==========
   nb::enum_<BackendType>(backend_mod, "BackendType",

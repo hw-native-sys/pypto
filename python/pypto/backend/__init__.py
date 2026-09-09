@@ -24,6 +24,7 @@ from pypto.pypto_core.backend import (
     # Backend configuration
     get_backend_instance,
     get_backend_type,
+    get_buffer_elementwise_recipe_names,
     get_input_tile_layout,
     is_backend_configured,
     reset_for_testing,
@@ -43,6 +44,7 @@ __all__ = [
     "set_backend_type",
     "get_backend_type",
     "get_backend_instance",
+    "get_buffer_elementwise_recipe_names",
     "get_input_tile_layout",
     "is_backend_configured",
     "reset_for_testing",

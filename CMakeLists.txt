@@ -365,6 +365,7 @@ set(PYPTO_SOURCES
     src/backend/common/backend.cpp
     src/backend/common/backend_config.cpp
     src/backend/common/backend_registry.cpp
+    src/backend/common/buffer_elementwise_recipes.cpp
     src/backend/common/pto_ops_common.cpp
     src/backend/common/pto_ops_shared.cpp
     src/backend/common/pto_ops_elementwise.cpp

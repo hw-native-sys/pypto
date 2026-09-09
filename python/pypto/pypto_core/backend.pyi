@@ -104,6 +104,15 @@ class BackendHandler:
     def get_l0c_m_alignment(self, accumulator_dtype: ir.DataType) -> int: ...
     def get_min_l0_tile_dim(self) -> int: ...
 
+def get_buffer_elementwise_recipe_names() -> list[str]:
+    """Return sorted logical names from the actual Buffer elementwise recipe table.
+
+    Names identify implemented conversion recipes, not every dtype, layout,
+    workspace, or precision form of the corresponding logical operator.
+    Mutating this snapshot does not change the recipes.
+    """
+    ...
+
 class Backend:
     """Abstract backend base class."""
 
