@@ -19,6 +19,8 @@ from pypto.backend.pto_backend import _run_ptoas
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import codegen
 
+from .buffer_test_utils import statements
+
 pytestmark = pytest.mark.usefixtures("ascend_backend")
 _PLANNERS = [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
 
@@ -64,10 +66,10 @@ class _BufferCalls(ir.IRVisitor):
         super().visit_assign_stmt(stmt)
 
 
-def _lower(planner, enabled=True):
+def _lower(planner, enabled=True, program=StraightLine):
     with passes.PassContext([], memory_planner=planner, enable_buffer_ir=enabled):
         manager = PassManager.get_strategy(OptimizationStrategy.Default)
-        result = manager.run_passes(StraightLine)
+        result = manager.run_passes(program)
     return result, manager.pass_names
 
 
@@ -155,6 +157,141 @@ def test_lowering_never_falls_back_to_legacy_codegen_for_an_unimplemented_recipe
         manager = PassManager.get_strategy(OptimizationStrategy.Default)
         with pytest.raises(ValueError, match="no conversion recipe for 'tile.exp'"):
             manager.run_passes(Exponential)
+
+
+@pl.program
+class MixedBranch:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[16, 32], pl.FP32],
+        b: pl.Tensor[[16, 32], pl.FP32],
+        output: pl.Out[pl.Tensor[[32, 64], pl.FP32]],
+        original: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
+        flag: pl.Scalar[pl.BOOL],
+    ) -> tuple[pl.Tensor[[32, 64], pl.FP32], pl.Tensor[[16, 32], pl.FP32]]:
+        lhs = pl.load(a, [0, 0], [16, 32])
+        rhs = pl.load(b, [0, 0], [16, 32])
+        if flag:
+            product = pl.mul(lhs, rhs)
+            selected, row, second, column = pl.yield_(product, 16, lhs, 0)
+        else:
+            selected, row, second, column = pl.yield_(lhs, 0, rhs, 32)
+        total = pl.add(selected, second)
+        stored = pl.store(total, [row, column], output)
+        saved = pl.store(lhs, [0, 0], original)
+        return stored, saved
+
+
+@pl.program
+class NestedBranch:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[16, 32], pl.FP32],
+        b: pl.Tensor[[16, 32], pl.FP32],
+        output: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
+        outer: pl.Scalar[pl.BOOL],
+        inner: pl.Scalar[pl.BOOL],
+    ) -> pl.Tensor[[16, 32], pl.FP32]:
+        lhs = pl.load(a, [0, 0], [16, 32])
+        rhs = pl.load(b, [0, 0], [16, 32])
+        if outer:
+            if inner:
+                selected = pl.yield_(lhs)
+            else:
+                selected = pl.yield_(rhs)
+            then_out = pl.store(selected, [0, 0], output)
+            result = pl.yield_(then_out)
+        else:
+            product = pl.mul(lhs, rhs)
+            else_out = pl.store(product, [0, 0], output)
+            result = pl.yield_(else_out)
+        return result
+
+
+class _Branches:
+    def __init__(self, program):
+        regions = list(statements(program))
+        self.branches = [region for region in regions if isinstance(region, ir.IfStmt)]
+        self.yields = [region for region in regions if isinstance(region, ir.YieldStmt)]
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("program", [MixedBranch, NestedBranch], ids=["mixed", "nested"])
+def test_branch_storage_becomes_explicit_writes_and_only_scalars_are_yielded(planner, program):
+    before = ir.serialize(program)
+    result, _ = _lower(planner, program=program)
+    _BufferCalls(result)
+    regions = _Branches(result)
+    assert len(regions.branches) == (1 if program is MixedBranch else 2)
+    for branch in regions.branches:
+        assert all(isinstance(value.type, ir.ScalarType) for value in branch.return_vars)
+    for statement in regions.yields:
+        assert all(isinstance(value.type, ir.ScalarType) for value in statement.value)
+    if program is MixedBranch:
+        assert len(regions.branches[0].return_vars) == 2
+        assert len(regions.yields) == 2
+        for statement, expected in zip(regions.yields, [(16, 0), (0, 32)], strict=True):
+            actual = []
+            for value in statement.value:
+                assert isinstance(value, ir.ConstInt)
+                actual.append(value.value)
+            assert tuple(actual) == expected
+    else:
+        assert not any(branch.return_vars for branch in regions.branches)
+    assert ir.serialize(program) == before
+    restored = ir.deserialize(ir.serialize(result))
+    ir.assert_structural_equal(restored, result, enable_auto_mapping=True)
+    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=True):
+        repeated = passes.lower_tile_to_buffer()(result)
+    ir.assert_structural_equal(repeated, result, enable_auto_mapping=True)
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("program", [MixedBranch, NestedBranch], ids=["mixed", "nested"])
+def test_public_branch_program_compiles_with_one_native_op_per_buffer_write(tmp_path, planner, program):
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    result, _ = _lower(planner, program=program)
+    calls = _BufferCalls(result)
+    counts = Counter(call.op.name for call in calls.calls)
+    text = codegen.PTOCodegen().generate(result, emit_source_loc=False)
+    assert text.count("scf.if ") == len(_Branches(result).branches)
+    assert text.count(" = pto.alloc_tile ") == len(calls.allocations)
+    assert text.count("pto.tmov ins(") == counts[ir.get_op("buffer.copy").name]
+    assert text.count("pto.tstore ins(") == counts[ir.get_op("buffer.store").name]
+    source, output = tmp_path / "branches.pto", tmp_path / "branches.cpp"
+    source.write_text(text)
+    level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
+    _run_ptoas(str(source), str(output), [f"--pto-level={level}", "--pto-arch=a2"])
+    assert output.is_file()
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+def test_distinct_gm_branch_aliases_require_a_separate_recipe(planner):
+    @pl.program
+    class SelectGM:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[16, 32], pl.FP32],
+            b: pl.Tensor[[16, 32], pl.FP32],
+            output: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
+            flag: pl.Scalar[pl.BOOL],
+        ) -> pl.Tensor[[16, 32], pl.FP32]:
+            if flag:
+                source = pl.yield_(a)
+            else:
+                source = pl.yield_(b)
+            value = pl.load(source, [0, 0], [16, 32])
+            stored = pl.store(value, [0, 0], output)
+            return stored
+
+    before = ir.serialize(SelectGM)
+    with pytest.raises(ValueError, match="GM branch results must alias the same parameter"):
+        _lower(planner, program=SelectGM)
+    assert ir.serialize(SelectGM) == before
 
 
 if __name__ == "__main__":
