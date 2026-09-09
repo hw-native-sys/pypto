@@ -71,7 +71,7 @@
 | **SplitIncoreOrch** | SplitIncoreOrch | Opaque 函数中不残留 `InCoreScopeStmt` 节点 |
 | **IncoreTileOps** | IncoreTileOps | InCore 函数使用 tile 操作（无张量级操作残留） |
 | **HasMemRefs** | HasMemRefs | 所有 TileType 变量已初始化 MemRef |
-| **BufferIR** | BufferIR | 显式设备 buffer 表示与注册调用契约验证；组合 SSA、定义支配关系及赋值类型对称性，不证明生命周期或初始化 |
+| **BufferIR** | BufferIR | 显式设备 buffer 表示、注册调用和逐元素配方窗口约束；组合 SSA、定义支配关系及赋值类型对称性 |
 | **TileStorageLegalized** | TileStorageLegalized | 设备区域边界使用统一的符号存储，同时存活的循环 carry 窗口互不重叠 |
 | **TileStorageAllocated** | TileStorageAllocated | 区域存储统一，并按实际地址检查同时存活的目标窗口及显式复制的重叠 |
 | **AllocatedMemoryAddr** | AllocatedMemoryAddr | 所有 MemRef 在缓冲区限制内具有有效地址 |
@@ -234,9 +234,18 @@ Buffer 句柄来自函数参数，或声明了分配、别名、借用结果行�
 该检查仅针对设备函数组合已有的 `SSAVerify`、`UseAfterDefCheck` 和
 `AssignTypeSymmetry` 验证器；这些诊断保留原有规则名称。定义支配检查采用严格
 的词法作用域：分支内定义不能通过无区域结果的旧式形式逃逸。表示和注册调用契约
-错误使用 `BufferIR` 规则。本阶段**不证明**借用生命周期、存储重叠安全性、
-读取数据的初始化覆盖范围或异步副作用的顺序；这些需要后续存储分析。
-合法分配本身不表示数据已初始化。
+错误使用 `BufferIR` 规则。
+
+对于[类型化逐元素配方](../ir/05-operators.md#类型化-buffer-逐元素配方)，一次带索引
+的分配遍历验证每组源/目标窗口关系。支持精确原地执行的配方接受同一句柄或
+完全相同的已分配窗口；`recip` 必须使用不重叠的存储。独立的无地址分配可接受；
+已分配的稠密窗口按完整物理字节范围检查并拒绝部分重叠。不同的借用/别名句柄、
+混合分配模式及无法证明的动态地址需要后续来源配方。常量标量 SSA 地址，以及
+经过检查的 Add/Sub/Mul 或无损 Cast 表达式通过记忆化求值；整数位宽溢出不能
+作为不重叠的证明。原生发射消费这些检查结果，不重建分配范围。
+
+该属性**不证明**通用别名/借用生命周期、读取初始化覆盖、上述配方之外的算子
+重叠安全或异步副作用顺序。合法分配本身不表示数据已初始化。
 
 ### Tile 存储属性
 

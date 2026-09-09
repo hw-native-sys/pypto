@@ -71,7 +71,7 @@ The `run_verifier()` utility creates a standalone `Pass` for ad-hoc use in custo
 | **SplitIncoreOrch** | SplitIncoreOrch | No `InCoreScopeStmt` nodes remain in Opaque functions |
 | **IncoreTileOps** | IncoreTileOps | InCore functions use tile ops (no tensor-level ops remain) |
 | **HasMemRefs** | HasMemRefs | All TileType variables have MemRef initialized |
-| **BufferIR** | BufferIR | Explicit device buffer representation and registered-call validity; composes SSA, dominance, and assignment symmetry, without lifetime or initialization proofs |
+| **BufferIR** | BufferIR | Explicit device buffer representation, registered calls, and elementwise recipe window constraints; composes SSA, dominance, and assignment symmetry |
 | **TileStorageLegalized** | TileStorageLegalized | Device region boundaries share canonical symbolic storage, with independent simultaneous carry windows |
 | **TileStorageAllocated** | TileStorageAllocated | Canonical region storage plus effective-address nonoverlap for simultaneous destinations and explicit moves |
 | **AllocatedMemoryAddr** | AllocatedMemoryAddr | All MemRefs have valid addresses within buffer limits |
@@ -272,10 +272,22 @@ The check composes the existing `SSAVerify`, `UseAfterDefCheck`, and
 their existing rule names. Dominance uses strict lexical scopes: definitions
 inside a branch cannot escape through the legacy form without region results.
 Representation and registered-call errors use the
-`BufferIR` rule. This foundation does **not** prove borrow lifetimes, overlap
-safety, initialized read coverage, or ordering of asynchronous effects; those
-require subsequent storage analyses. A valid allocation alone does not imply
-initialized data.
+`BufferIR` rule.
+
+For the [typed elementwise recipes](../ir/05-operators.md#typed-buffer-elementwise-recipes),
+one indexed allocation walk proves each source/destination window relation.
+Exact-in-place recipes accept the same handle or equal complete placed windows;
+`recip` requires disjoint storage. Independent addressless allocations are
+accepted; placed dense windows use their full physical byte extent and reject
+partial overlap. Distinct borrowed/alias handles, mixed placement, and unproven
+dynamic addresses need a subsequent provenance recipe. Constant scalar SSA
+addresses and checked Add/Sub/Mul or lossless Cast expressions are memoized;
+integer-width overflow is never a disjointness proof. Native emission consumes
+these checks without reconstructing allocation ranges.
+
+This property does **not** prove general alias/borrow lifetimes, initialized
+read coverage, overlap safety for operations outside those recipes, or ordering
+of asynchronous effects. A valid allocation alone does not imply initialized data.
 
 ### Tile storage properties
 

@@ -44,6 +44,12 @@ inventory omissions fail tests. Production conversion recipes and their
 conversion, native compilation, and numerical tests establish implementation
 coverage; the audit ledger does not drive lowering or enable the default switch.
 
+The guard also queries `backend.get_buffer_elementwise_recipe_names()`, the
+actual table used by logical conversion and native emission. Every reported
+recipe must have a live backend operation and a `RESTRICTED` audit classification.
+This keeps maturity declarations current without duplicating production
+instruction mappings or claiming complete form coverage.
+
 ## See Also
 
 - [Pass, PassContext, PassPipeline, and PassManager](../passes/00-pass_manager.md) — where the handler comes from.
