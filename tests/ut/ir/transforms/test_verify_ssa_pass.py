@@ -812,5 +812,64 @@ class TestCompositeShapeDimVerification:
         passes.run_verifier()(After)
 
 
+def _ssa_scope_diagnostics(body, params):
+    span = ir.Span.unknown()
+    function = ir.Function("scope_restore", params, [], body, span)
+    props = passes.IRPropertySet()
+    props.insert(passes.IRProperty.SSAForm)
+    return passes.PropertyVerifierRegistry.verify(props, ir.Program([function], "scopes", span))
+
+
+def test_ssa_indexed_scope_lookup_preserves_deep_outer_bindings():
+    span = ir.Span.unknown()
+    outer = ir.Var("outer", ir.ScalarType(DataType.INDEX), span)
+    body = ir.EvalStmt(outer, span)
+    for depth in range(80):
+        local = ir.Var(f"local_{depth}", outer.type, span)
+        body = ir.IfStmt(
+            ir.ConstBool(True, span),
+            ir.SeqStmts([ir.AssignStmt(local, outer, span), body, ir.EvalStmt(local, span)], span),
+            ir.EvalStmt(outer, span),
+            [],
+            span,
+        )
+    assert _ssa_scope_diagnostics(ir.SeqStmts([body, ir.EvalStmt(outer, span)], span), [outer]) == []
+
+
+def test_ssa_scope_exit_restores_existing_binding_for_same_var_pointer():
+    """Even a reused loop binding must not erase the pre-existing outer binding."""
+    span = ir.Span.unknown()
+    outer = ir.Var("outer", ir.ScalarType(DataType.INDEX), span)
+    loop = ir.ForStmt(
+        outer,
+        ir.ConstInt(0, DataType.INDEX, span),
+        ir.ConstInt(1, DataType.INDEX, span),
+        ir.ConstInt(1, DataType.INDEX, span),
+        [],
+        ir.EvalStmt(outer, span),
+        [],
+        span,
+    )
+    body = ir.SeqStmts([loop, ir.EvalStmt(outer, span)], span)
+    assert _ssa_scope_diagnostics(body, [outer]) == []
+
+
+def test_ssa_sibling_scopes_restore_visibility_despite_repeated_bad_definition():
+    span = ir.Span.unknown()
+    outer = ir.Var("outer", ir.ScalarType(DataType.INDEX), span)
+    local = ir.Var("local", outer.type, span)
+    branch = ir.IfStmt(
+        ir.ConstBool(True, span),
+        ir.AssignStmt(local, outer, span),
+        ir.SeqStmts([ir.EvalStmt(local, span), ir.AssignStmt(local, outer, span)], span),
+        [],
+        span,
+    )
+    body = ir.SeqStmts([branch, ir.EvalStmt(local, span), ir.EvalStmt(outer, span)], span)
+    diagnostics = _ssa_scope_diagnostics(body, [outer])
+    assert sum("'local' used outside its defining scope" in d.message for d in diagnostics) == 2
+    assert sum("assigned more than once" in d.message for d in diagnostics) == 1
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

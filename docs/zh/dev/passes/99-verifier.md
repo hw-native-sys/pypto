@@ -71,6 +71,7 @@
 | **SplitIncoreOrch** | SplitIncoreOrch | Opaque 函数中不残留 `InCoreScopeStmt` 节点 |
 | **IncoreTileOps** | IncoreTileOps | InCore 函数使用 tile 操作（无张量级操作残留） |
 | **HasMemRefs** | HasMemRefs | 所有 TileType 变量已初始化 MemRef |
+| **BufferIR** | BufferIR | 显式设备 buffer 表示与注册调用契约验证；组合 SSA、定义支配关系及赋值类型对称性，不证明生命周期或初始化 |
 | **AllocatedMemoryAddr** | AllocatedMemoryAddr | 所有 MemRef 在缓冲区限制内具有有效地址 |
 | **OutParamNotShadowed** | OutParamNotShadowed | Out/InOut 参数未被张量创建操作重新赋值 |
 | **NoNestedInCore** | NoNestedInCore | 无嵌套 InCore 作用域（`InCoreScopeStmt` 内含 `InCoreScopeStmt`） |
@@ -199,6 +200,42 @@ lineage **不**跨 phi（`return_vars_` / `iter_args_`）传递，因此分支�
 问题，补 `.set_arg_effect(...)` **不是**修复手段——builtin 能出现在这里正是因为它的效应
 已经声明，而跨函数写入方是用户函数，根本没有 `REGISTER_OP` 块。缺失效应属于上文所述的
 注册表缺口，本检查看不见它。
+
+### BufferIR
+
+`IRProperty.BufferIR` 验证 `InCore`、`AIC` 和 `AIV` 函数的最终设备表示。
+通过 `PropertyVerifierRegistry.verify` 或 `run_verifier(properties=...)`
+显式选择；buffer lowering 开发期间不加入结构性属性集或默认属性集。
+Orchestration 函数不在其检查范围内。
+
+该验证器拒绝逻辑 `TileType`（包括嵌套 tuple 元素）、独立的 `MemRef`/`Ptr`
+值，以及 `tile.*`/`pld.tile.*` 调用。GM tensor 类型中内嵌的 MemRef 仍然合法。
+Buffer 句柄来自函数参数，或声明了分配、别名、借用结果行为的已注册 buffer
+算子。Tuple 投影保留这些显式结果契约；普通句柄赋值和将已有句柄打包的
+`MakeTuple` 会被拒绝。Buffer 不能经函数返回逃逸，也不能经过 `return_vars`、
+循环 `iter_args` 或 yield 传递。标量控制流结果仍然合法，区域内算子可以通过
+显式 buffer 操作数直接写入外层存储。
+传入的 buffer 参数（包括含句柄的 tuple）不能通过赋值重新定义；通过这些句柄
+写入存储仍然合法。
+
+有结果的 buffer 调用必须直接位于赋值右侧，零结果 buffer 调用必须直接位于
+`EvalStmt` 中。嵌套的 buffer 调用和未绑定结果的分配会被拒绝。
+
+每个 buffer 调用都根据注册阶段、原始操作数、kwargs 和已存储的结果类型进行
+验证。验证不会重新创建一个推导了新类型的调用，以免掩盖原始 IR 的错误。
+其他标量或 GM 调用可以保留，但不能消费或产生 buffer 句柄。调用、函数、作用域
+或循环属性中的 buffer 引用也会被拒绝，包括表达式属性内部嵌套的引用，因为
+存储副作用必须对应普通操作数。
+表达式形式的类型元数据（shape、view 和 GM MemRef 的 base、偏移、槽位索引）
+及 SPMD 核数遵循相同限制；标量 GM 元数据及其普通指针载体仍然合法。
+`Submit` 同样不能消费或产生设备 buffer 句柄。
+
+该检查仅针对设备函数组合已有的 `SSAVerify`、`UseAfterDefCheck` 和
+`AssignTypeSymmetry` 验证器；这些诊断保留原有规则名称。定义支配检查采用严格
+的词法作用域：分支内定义不能通过无区域结果的旧式形式逃逸。表示和注册调用契约
+错误使用 `BufferIR` 规则。本阶段**不证明**借用生命周期、存储重叠安全性、
+读取数据的初始化覆盖范围或异步副作用的顺序；这些需要后续存储分析。
+合法分配本身不表示数据已初始化。
 
 ### SSAVerify
 

@@ -50,8 +50,8 @@ Void call 应放在 `EvalStmt` 中，不能绑定变量、用作操作数、放�
 
 这些类型支持构造、结构比较和二进制序列化。Buffer 类型 dump 使用原生
 `pypto.ir.BufferType(...)` 构造表达式，并保留完整描述符。内部 buffer 算子
-使用下文契约；表示验证和 PTO 代码生成将分别集成。自动 tile-to-buffer
-lowering 尚未启用，公开 Tile DSL 和默认流水线仍使用 `TileType`。
+使用下文契约，`BufferIR` 属性按下文规则验证表示。PTO 代码生成将单独集成。
+自动 tile-to-buffer lowering 尚未启用，公开 Tile DSL 和默认流水线仍使用 `TileType`。
 目前不支持通过 DSL parser 重新解析完整的 buffer 程序 dump。
 
 #### Buffer 算子契约
@@ -100,7 +100,10 @@ extent 的边界及地址非负性属于构造调用的前置条件。
 选择动态描述符。
 
 `OpRegistry::ValidateBufferCall` 按创建调用时的同一 schema 检查已有 call，
-包括其原始结果类型和 kwargs。存储生命周期、重叠和初始化证明属于后续验证。
+包括其原始结果类型和 kwargs。`BufferIR` 属性在设备函数中应用此检查，并
+拒绝逻辑 tile、隐式 buffer 别名以及携带 buffer 的控制流结果。
+它组合 SSA、先定义后使用及赋值类型检查，建立表示层契约；存储生命周期、
+重叠和初始化证明属于后续验证。
 
 首批 `buffer.copy(src, dst)` 和 `buffer.mul(lhs, rhs, dst)` 写入显式
 destination 并返回 `VoidType`，目前要求所有参数的 Vec buffer 描述符

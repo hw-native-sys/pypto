@@ -70,6 +70,7 @@
 | `IterArgCarryClassified` | Orchestration 中每个带 iter_args 的 ForStmt 都带有 `iter_arg_rebind_<i>` 携带方案，codegen 直接读取而不再重新推导 |
 | `AccToGmStoreValid` | 每个源 tile 位于 Acc 的 `tile.store` 所写 GM dtype 都能被后端 fix-pipe 收窄 |
 | `AtomicAddDtypeValid` | 每个写入 GM 的 atomic-add 的目标 dtype 都能被后端 store pipe 合并 |
+| `BufferIR` | InCore/AIC/AIV 使用显式 buffer 句柄和符合注册契约的 buffer 调用；组合检查 SSA、定义支配关系和赋值类型对称性。在 buffer IR 开发阶段显式选择，不证明存储生命周期或数据初始化。 |
 
 ### IRPropertySet
 

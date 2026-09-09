@@ -388,5 +388,119 @@ def test_static_function_attrs_are_ignored():
     assert len(_errors(passes.PropertyVerifierRegistry.verify(_use_after_def_props(), program))) == 0
 
 
+def _scope_mode_errors(body, params, *, lexical):
+    """Select final BufferIR's lexical mode or the unchanged legacy property."""
+    span = ir.Span.unknown()
+    function = ir.Function("scopes", params, [], body, span, type=ir.FunctionType.InCore)
+    props = passes.IRPropertySet()
+    props.insert(passes.IRProperty.BufferIR if lexical else passes.IRProperty.UseAfterDef)
+    diagnostics = passes.PropertyVerifierRegistry.verify(props, ir.Program([function], "scopes", span))
+    return [d for d in _errors(diagnostics) if d.rule_name == "UseAfterDefCheck"]
+
+
+@pytest.mark.parametrize("lexical", [False, True])
+@pytest.mark.parametrize("kind", ["if", "for", "while"])
+def test_lexical_mode_restores_body_definitions_without_changing_legacy_leaks(lexical, kind):
+    span = ir.Span.unknown()
+    type_ = ir.ScalarType(DataType.INDEX)
+    outer = ir.Var("outer", type_, span)
+    local = ir.Var("local", type_, span)
+    definition = ir.AssignStmt(local, outer, span)
+    if kind == "if":
+        scope = ir.IfStmt(ir.ConstBool(True, span), definition, None, [], span)
+    elif kind == "for":
+        scope = ir.ForStmt(
+            ir.Var("i", type_, span),
+            ir.ConstInt(0, DataType.INDEX, span),
+            ir.ConstInt(1, DataType.INDEX, span),
+            ir.ConstInt(1, DataType.INDEX, span),
+            [],
+            definition,
+            [],
+            span,
+        )
+    else:
+        scope = ir.WhileStmt(ir.ConstBool(True, span), [], definition, [], span)
+    body = ir.SeqStmts([scope, ir.EvalStmt(local, span), ir.EvalStmt(outer, span)], span)
+    errors = _scope_mode_errors(body, [outer], lexical=lexical)
+    assert len(errors) == int(lexical)
+    if lexical:
+        assert "'local' used before definition" in errors[0].message
+
+
+@pytest.mark.parametrize("lexical", [False, True])
+def test_sibling_branch_cannot_see_then_definition(lexical):
+    span = ir.Span.unknown()
+    outer = ir.Var("outer", ir.ScalarType(DataType.INDEX), span)
+    local = ir.Var("local", outer.type, span)
+    branch = ir.IfStmt(
+        ir.ConstBool(True, span),
+        ir.AssignStmt(local, outer, span),
+        ir.EvalStmt(local, span),
+        [],
+        span,
+    )
+    errors = _scope_mode_errors(branch, [outer], lexical=lexical)
+    assert len(errors) == 1
+    assert "'local' used before definition" in errors[0].message
+
+
+def test_lexical_mode_restores_deep_scopes_and_large_enclosing_environment():
+    """Outer definitions survive many nested/sibling scopes; locals remain local."""
+    span = ir.Span.unknown()
+    type_ = ir.ScalarType(DataType.INDEX)
+    params = [ir.Var(f"p{i}", type_, span) for i in range(128)]
+    local = ir.Var("deep_local", type_, span)
+    body = ir.SeqStmts([ir.AssignStmt(local, params[0], span), ir.EvalStmt(local, span)], span)
+    for depth in range(64):
+        sibling = ir.Var(f"sibling_{depth}", type_, span)
+        body = ir.IfStmt(
+            ir.ConstBool(True, span),
+            body,
+            ir.SeqStmts([ir.AssignStmt(sibling, params[depth], span), ir.EvalStmt(sibling, span)], span),
+            [],
+            span,
+        )
+    after = [ir.EvalStmt(param, span) for param in params]
+    after.append(ir.EvalStmt(local, span))
+    errors = _scope_mode_errors(ir.SeqStmts([body, *after], span), params, lexical=True)
+    assert len(errors) == 1
+    assert "'deep_local' used before definition" in errors[0].message
+
+
+def test_lexical_mode_preserves_while_carry_and_outer_bindings():
+    span = ir.Span.unknown()
+    type_ = ir.ScalarType(DataType.INDEX)
+    outer = ir.Var("outer", type_, span)
+    carry = ir.IterArg("carry", type_, outer, span)
+    result = ir.Var("result", type_, span)
+    loop = ir.WhileStmt(
+        ir.Gt(carry, ir.ConstInt(0, DataType.INDEX, span), DataType.BOOL, span),
+        [carry],
+        ir.SeqStmts([ir.EvalStmt(outer, span), ir.YieldStmt([carry], span)], span),
+        [result],
+        span,
+    )
+    body = ir.SeqStmts(
+        [loop, ir.EvalStmt(result, span), ir.EvalStmt(outer, span), ir.EvalStmt(carry, span)], span
+    )
+    errors = _scope_mode_errors(body, [outer], lexical=True)
+    assert len(errors) == 1
+    assert "'carry' used before definition" in errors[0].message
+
+
+def test_lexical_mode_still_checks_type_metadata_uses():
+    span = ir.Span.unknown()
+    extent = ir.Var("missing_extent", ir.ScalarType(DataType.INDEX), span)
+    plain_type = ir.TensorType([16, 32], DataType.FP32)
+    incoming = ir.Var("incoming", plain_type, span)
+    view = ir.TensorView([], ir.TensorLayout.ND, [extent, ir.ConstInt(32, DataType.INDEX, span)])
+    local = ir.Var("local", ir.TensorType([16, 32], DataType.FP32, None, view), span)
+    body = ir.SeqStmts([ir.AssignStmt(local, incoming, span), ir.EvalStmt(local, span)], span)
+    errors = _scope_mode_errors(body, [incoming], lexical=True)
+    assert len(errors) == 1
+    assert "'missing_extent' used before definition" in errors[0].message
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

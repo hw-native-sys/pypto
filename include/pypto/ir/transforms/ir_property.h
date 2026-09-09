@@ -136,7 +136,9 @@ enum class IRProperty : uint64_t {
                          ///< on the user's own IR, so it is a structural property verified at every pass
                          ///< boundary
   AivSplitLoweredValid,  ///< Lowered split regions or flat split bodies have valid cross-core boundaries
-  kCount                 ///< Sentinel (must be last)
+  BufferIR,              ///< InCore/AIC/AIV use explicit buffer handles and valid registered buffer calls;
+             ///< composes SSA, dominance, and assignment symmetry, not lifetime or initialization checks
+  kCount  ///< Sentinel (must be last)
 };
 
 static_assert(
