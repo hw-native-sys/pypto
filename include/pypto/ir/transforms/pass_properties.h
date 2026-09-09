@@ -86,6 +86,16 @@ inline const PassProperties kMaterializeDistTensorCtxProperties{
 //    Signature-and-call rewrite only; touches no structural property.
 inline const PassProperties kMaterializeValidShapeSymbolsProperties{};
 
+// Final device representation boundary. Addressed planners additionally prove
+// TileStorageAllocated inside the pass; PTOAS retains symbolic root identities.
+inline const PassProperties kLowerTileToBufferProperties{
+    .required = {IRProperty::SplitIncoreOrch, IRProperty::SSAForm, IRProperty::NoNestedCalls,
+                 IRProperty::ReturnParamsExplicit, IRProperty::TileStorageLegalized},
+    .produced = {IRProperty::BufferIR},
+    .invalidated = {IRProperty::HasMemRefs, IRProperty::IncoreTileOps, IRProperty::AllocatedMemoryAddr,
+                    IRProperty::TileOps2D, IRProperty::TileMemoryInferred, IRProperty::TileTypeCoherence,
+                    IRProperty::TileStorageLegalized, IRProperty::TileStorageAllocated}};
+
 // -- LegalizeGraphBoundary pass (runs after the final Simplify) ---------------
 //    Hoists every boundary scalar a Graph body derives out to its call sites and
 //    rejects the graphs the host_build_graph runtime could not record. Rewrites

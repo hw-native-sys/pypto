@@ -116,3 +116,7 @@ AIC 上的那份副本可能在 AIV 通路的 TPUT 尚未把该信号所释放�
 总执行次数的断言：在 `dual_aiv_dispatch` 下，AIV 函数体仍然会在两条 AIV sub-lane 上都
 运行，因此把算子挡在 cube 通路之外并不意味着它只执行一次。那一部分属于作者的职责，
 文档见[作用域 → pl.split_aiv](../../user/language/04-scopes.md)。
+
+对于 Buffer 阶段调用，共享的 `CallWriteTargets` 查询只投影已注册的数据效果。
+因此，最终降低之后，`InParamWritten` 仍能诊断对声明为 `In` 的 GM 或 Buffer 参数的数据写入。
+仅更新描述符的 `buffer.set_validshape` 不计为参数数据写入。

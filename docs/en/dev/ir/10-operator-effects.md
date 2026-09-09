@@ -144,3 +144,8 @@ AIV function body still runs on both AIV sub-lanes under `dual_aiv_dispatch`, so
 keeping an op off the cube lane does not make it happen once. That part is the
 author's, and is documented in
 [Scopes → pl.split_aiv](../../user/language/04-scopes.md).
+
+For Buffer-stage calls, the shared `CallWriteTargets` query projects only the
+registered data effects. `InParamWritten` therefore still diagnoses writes to
+GM or Buffer parameters declared `In` after final lowering. A descriptor-only
+`buffer.set_validshape` update does not count as a parameter data write.

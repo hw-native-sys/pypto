@@ -580,6 +580,10 @@ print(p.get_produced_properties())   # {SSAForm}
 - `tests/ut/ir/transforms/test_pass_manager.py` — PassManager 向后兼容性测试
 - `tests/ut/conftest.py` — 为所有测试启用 BEFORE_AND_AFTER 验证的 autouse fixture
 
+设置 `enable_buffer_ir=True` 时，最终的 [LowerTileToBuffer](53-lower_tile_to_buffer.md)
+位于 `MaterializeValidShapeSymbols` 之后，将完成规划的设备 Tile 存储转换为经过验证的显式 Buffer 操作。
+创建和运行 pass manager 时必须保持该迁移选项一致。
+
 ### AIV split 验证属性交接
 
 `LowerAutoVectorSplit` 要求 `AivSplitValid` 并产生 `AivSplitLoweredValid`。

@@ -45,6 +45,8 @@ struct CallWriteTarget {
 };
 
 /// Every variable @p call writes through one of its arguments.
+/// Buffer-stage calls project their explicit data effects; metadata-only writes
+/// do not appear in this data-write query.
 ///
 /// Which argument an operator writes is declared once on the registry
 /// (`set_arg_effect`), so a new write operator reaches the outliner's read

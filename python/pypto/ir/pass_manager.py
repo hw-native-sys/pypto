@@ -388,6 +388,9 @@ class PassManager:
             if self._construction_buffer_ir and pass_obj.get_name() == "AllocateMemoryAddr":
                 self._pipeline.add_pass(passes.verify_tile_storage(allocated=True))
 
+        if self._construction_buffer_ir:
+            self._pipeline.add_pass(passes.lower_tile_to_buffer())
+
     @property
     def passes(self) -> tuple[passes.Pass, ...]:
         """Get the pipeline's passes in execution order as an immutable snapshot."""

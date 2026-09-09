@@ -56,9 +56,20 @@ std::vector<CallWriteTarget> CallWriteTargets(const CallPtr& call) {
   std::vector<CallWriteTarget> targets;
   if (!call) return targets;
   const auto* entry = LookupOpEntry(call->op_);
-  if (!entry || !entry->WritesAnyArg()) return targets;
+  if (!entry) return targets;
+  const bool buffer_stage = entry->GetIRStage() == OpIRStage::Buffer;
+  if (!buffer_stage && !entry->WritesAnyArg()) return targets;
   for (size_t i = 0; i < call->args_.size(); ++i) {
-    auto effect = entry->GetArgEffect(i, call->kwargs_);
+    ArgEffect effect;
+    if (buffer_stage) {
+      // Direction inference and input-write diagnostics describe data writes.
+      // Mutating valid-shape metadata does not overwrite parameter data.
+      const auto data = entry->GetBufferArgEffect(i).data;
+      if (data != BufferAccess::Write && data != BufferAccess::ReadWrite) continue;
+      effect = data == BufferAccess::Write ? ArgEffect::Write : ArgEffect::ReadWrite;
+    } else {
+      effect = entry->GetArgEffect(i, call->kwargs_);
+    }
     if (!ArgEffectWrites(effect)) continue;
     if (auto var = AsVarLike(call->args_[i])) {
       targets.push_back(CallWriteTarget{var, i, effect});
