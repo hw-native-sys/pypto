@@ -294,5 +294,139 @@ def test_distinct_gm_branch_aliases_require_a_separate_recipe(planner):
     assert ir.serialize(SelectGM) == before
 
 
+def _loop_program(while_loop):
+    header = (
+        "for (left, row, right, column, gm) in pl.while_(init_values=(lhs, 0, rhs, 0, output)):\n"
+        "            pl.cond(row < count)"
+        if while_loop
+        else "for _i, (left, row, right, column, gm) in pl.range(0, count, "
+        "init_values=(lhs, 0, rhs, 0, output)):"
+    )
+    return pl.parse_program(f"""
+@pl.program
+class LoopTransfer:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, a: pl.Tensor[[16, 32], pl.FP32],
+               b: pl.Tensor[[16, 32], pl.FP32],
+               output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+               original: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
+               count: pl.Scalar[pl.INDEX], flag: pl.Scalar[pl.BOOL]
+               ) -> tuple[pl.Tensor[[64, 64], pl.FP32], pl.Tensor[[16, 32], pl.FP32]]:
+        lhs = pl.load(a, [0, 0], [16, 32])
+        rhs = pl.load(b, [0, 0], [16, 32])
+        {header}
+            if flag:
+                selected = pl.yield_(left)
+            else:
+                selected = pl.yield_(right)
+            stored = pl.store(selected, [row, column], gm)
+            next_row = row + 1
+            next_column = column + 2
+            final_left, final_row, final_right, final_column, final_gm = pl.yield_(
+                right, next_row, left, next_column, stored)
+        combined = pl.add(final_left, final_right)
+        result = pl.store(combined, [final_row, final_column], final_gm)
+        saved = pl.store(lhs, [0, 0], original)
+        return result, saved
+""")
+
+
+@pl.program
+class NestedLoops:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[16, 32], pl.FP32],
+        b: pl.Tensor[[16, 32], pl.FP32],
+        output: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
+        count: pl.Scalar[pl.INDEX],
+    ) -> pl.Tensor[[16, 32], pl.FP32]:
+        lhs = pl.load(a, [0, 0], [16, 32])
+        rhs = pl.load(b, [0, 0], [16, 32])
+        for _i, (outer,) in pl.range(0, count, init_values=(lhs,)):
+            for _j, (inner,) in pl.range(0, count, init_values=(outer,)):
+                total = pl.add(inner, rhs)
+                inner_result = pl.yield_(total)
+            outer_result = pl.yield_(inner_result)
+        stored = pl.store(outer_result, [0, 0], output)
+        return stored
+
+
+class _Loops:
+    def __init__(self, program):
+        self.loops = [
+            region for region in statements(program) if isinstance(region, (ir.ForStmt, ir.WhileStmt))
+        ]
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("kind", ["for", "while", "nested"])
+def test_loops_remove_storage_carries_and_compile_scalar_results(tmp_path, planner, kind):
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    program = NestedLoops if kind == "nested" else _loop_program(kind == "while")
+    original = ir.serialize(program)
+    result, _ = _lower(planner, program=program)
+    calls = _BufferCalls(result)
+    loops = _Loops(result).loops
+    assert len(loops) == (2 if kind == "nested" else 1)
+    for loop in loops:
+        assert len(loop.iter_args) == len(loop.return_vars) == (0 if kind == "nested" else 2)
+        assert all(isinstance(argument.type, ir.ScalarType) for argument in loop.iter_args)
+        tail = loop.body.stmts[-1] if isinstance(loop.body, ir.SeqStmts) else loop.body
+        assert isinstance(tail, ir.YieldStmt)
+        assert len(tail.value) == len(loop.iter_args)
+        assert all(isinstance(value.type, ir.ScalarType) for value in tail.value)
+    assert ir.serialize(program) == original
+    restored = ir.deserialize(ir.serialize(result))
+    ir.assert_structural_equal(restored, result, enable_auto_mapping=True)
+    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=True):
+        ir.assert_structural_equal(passes.lower_tile_to_buffer()(result), result)
+    counts = Counter(call.op.name for call in calls.calls)
+    text = codegen.PTOCodegen().generate(result, emit_source_loc=False)
+    assert text.count("pto.tmov ins(") == counts[ir.get_op("buffer.copy").name]
+    assert text.count("pto.tstore ins(") == counts[ir.get_op("buffer.store").name]
+    assert text.count(" = pto.alloc_tile ") == len(calls.allocations)
+    headers = [line for line in text.splitlines() if "scf.for " in line or "scf.while " in line]
+    assert len(headers) == len(loops)
+    assert all("tile_buf" not in header for header in headers)
+    assert text.index("pto.alloc_tile") < text.index(headers[0])
+    if kind != "nested":
+        assert all(isinstance(argument.initValue, ir.ConstInt) for argument in loops[0].iter_args)
+        assert "-> (index, index)" in headers[0]
+        # Both scalar results are consumed as store offsets after the loop.
+        assert counts[ir.get_op("buffer.store").name] == 3
+        assert counts[ir.get_op("buffer.copy").name] >= 2
+    source, output = tmp_path / "loops.pto", tmp_path / "loops.cpp"
+    source.write_text(text)
+    level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
+    _run_ptoas(str(source), str(output), [f"--pto-level={level}", "--pto-arch=a2"])
+    assert output.is_file()
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+def test_gm_loop_alias_changes_are_diagnosed(planner):
+    @pl.program
+    class ChangedGM:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[16, 32], pl.FP32],
+            b: pl.Tensor[[16, 32], pl.FP32],
+            output: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
+            count: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[16, 32], pl.FP32]:
+            for _i, (_gm,) in pl.range(0, count, init_values=(a,)):
+                chosen = pl.yield_(b)
+            value = pl.load(chosen, [0, 0], [16, 32])
+            stored = pl.store(value, [0, 0], output)
+            return stored
+
+    before = ir.serialize(ChangedGM)
+    with pytest.raises(ValueError, match="GM loop results must retain their initial parameter alias"):
+        _lower(planner, program=ChangedGM)
+    assert ir.serialize(ChangedGM) == before
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

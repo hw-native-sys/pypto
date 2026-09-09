@@ -100,15 +100,43 @@ Different GM aliases require a separate dynamic-GM recipe and are diagnosed.
 Nested branches use scoped yield contexts; conversion adds no allocation or
 copy to repair a region. Branch and yield source comments are preserved.
 
+## Loops
+
+For and While conversion removes Tile initializers, iter_args, results and
+backedge yields after verifying that they name the same legalized storage.
+Entry copies already run before the loop, so zero iterations preserve the
+initial value. Swap and fanout snapshots are ordinary Buffer writes in the
+body; final conversion creates no scratch or copy.
+
+Only scalar iter_args remain in native control flow, in their original relative
+order. While conditions use the rewritten scalar bindings. GM carries disappear
+when their initial value and backedge resolve to the same parameter; a changing
+GM selection requires a separate recipe and is diagnosed. Nested loops and
+branches use distinct yield contexts, and each initializer is traversed only
+at its binding to avoid repeated walks through enclosing carry chains.
+Binary round trips restore While carry definitions before decoding their
+condition, preserving shared references from both the condition and body.
+
+```text
+# Tile carries (left, row, right, column) become two scalar carries.
+(row_result, column_result) = for i in range(count), (row=0, column=0):
+    buffer.copy(right_buf, scratch_right)
+    buffer.copy(left_buf, scratch_left)
+    buffer.copy(scratch_right, left_buf)
+    buffer.copy(scratch_left, right_buf)
+    yield (row + 1, column + 2)
+buffer.store(left_buf, (row_result, column_result), (16, 32), Out)
+```
+
 ## Initial supported recipes
 
-The current recipes support straight-line kernels and branches with static
+The current recipes support straight-line kernels, branches and loops with static
 rank-2 dense Vec FP32 tiles with one
 descriptor per allocation, static valid extents, ordinary packed ND GM tensors,
 and default load/store policies. It converts allocation, create, load, store,
 add, multiply, move, and already legalized aliases.
 
-Loops, helper calls, alternate layouts, dynamic metadata, slots, and
+Helper calls, alternate layouts, dynamic metadata, slots, and
 other operation recipes are added in subsequent migration slices. Unsupported
 forms fail explicitly. The migration option defaults to false until the
 complete recipe and runtime acceptance matrix is ready.
