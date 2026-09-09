@@ -110,9 +110,9 @@ The added branch analysis uses fixed IR walks and indexed lookups, with
 O(N log N) work and O(N) storage. No persistent alias table is attached to IR.
 Accumulator branches still use the existing guarded coalescing; a remaining
 divergent `Acc` branch is rejected because Acc-to-Acc copying is unsupported.
-This slice does not establish a complete storage property: live incoming loop
-values, general parallel carry transfers, While carries, and post-reuse storage
-verification require the following migration slice.
+Loop-input isolation, parallel transfers, While carries, and post-reuse storage
+verification are described below. These establish canonical storage boundaries;
+complete initialization and asynchronous lifetime verification remain separate.
 
 ### Default pipeline
 
@@ -150,3 +150,29 @@ physical address for ptoas `PlanMemory`. See
 The staged pipeline runs `VerifyTileStorage` after shared and post-reuse storage
 reconciliation, before address placement. See the [storage property contracts](99-verifier.md#tile-storage-properties)
 for symbolic closure and the separate allocated-address overlap check.
+
+### Explicit loop and branch transfers
+
+With `enable_buffer_ir=True`, shared legalization first isolates loop inputs
+that remain independently observable. A read through the original input or a
+metadata alias can require an entry copy; the copy runs before a `ForStmt` or
+`WhileStmt`, preserving zero-iteration behavior. Overlapping initial carry
+windows receive independent storage. Metadata-only views do not read data.
+For nested loops, earlier data observations are conservatively included in the
+indexed liveness decision to protect the next enclosing-loop iteration. A
+top-level loop does not need isolation solely because its input was read earlier.
+
+For and While initializers, iter_args, results, and result views are aligned
+before producers are retargeted. Branch and loop yields use the same parallel
+transfer scheduler: every source that may overlap a destination is snapshotted
+before any destination write. This handles swaps, cycles, fanout, and partial
+source overlap with O(N log N) indexed queries; scratch allocations are explicit
+before placement. Post-reuse reconciliation repeats the same scheduling, and
+address placement cannot add new scratch or transfers.
+
+Storage requiring a same-space copy that the target cannot implement is rejected
+with an early diagnostic; in particular, a live Acc input cannot be preserved
+by an Acc-to-Acc move. The existing guarded accumulator producer coalescing
+remains available for compatible carries. Ambiguous view addresses and
+simultaneously overlapping destination windows must be resolved before final
+Buffer lowering. The default legacy path retains its previous behavior.
