@@ -1337,13 +1337,6 @@ def _get_ptoas_flags(
     flags = [
         "--enable-insert-sync",
         f"--pto-level={level}",
-        # TEMP DIAGNOSTIC (throwaway branch, do not merge). Conservatively fence
-        # every memory-effecting PTO pipe op with a PIPE_ALL barrier. If v0.61's
-        # generation corruption disappears under this, the defect is in its sync
-        # insertion -- which is the one area pypto's own ptoas flags actually
-        # reach (--enable-insert-sync), and which v0.61 touched by deleting the
-        # graph sync solver whose help text called it mutually exclusive with it.
-        "--enable-inject-barrier-all-sync",
     ]
     if passes_dump_dir is not None:
         flags.extend(
