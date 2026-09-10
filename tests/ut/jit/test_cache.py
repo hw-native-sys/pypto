@@ -26,6 +26,7 @@ from pypto.jit.cache import (
     make_cache_key,
 )
 from pypto.jit.decorator import (
+    _resolve_enable_buffer_ir,
     _resolve_enable_pypto_l0c_double_buffer,
     _resolve_memory_planner,
     _resolve_runtime,
@@ -81,6 +82,7 @@ class TestMakeCacheKey:
         tensor_layouts=None,
         dep_layouts=(),
         runtime=passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
+        enable_buffer_ir=False,
     ):
         return make_cache_key(
             source_hash=source_hash,
@@ -98,6 +100,7 @@ class TestMakeCacheKey:
             tensor_layouts=tensor_layouts,
             dep_layouts=dep_layouts,
             runtime=runtime,
+            enable_buffer_ir=enable_buffer_ir,
         )
 
     def test_basic_key_structure(self):
@@ -122,6 +125,7 @@ class TestMakeCacheKey:
             ("enable_pypto_l0c_double_buffer", False),
             ("dep_layouts", ()),
             ("runtime", "tensormap_and_ringbuffer"),
+            ("enable_buffer_ir", False),
         )
 
     def test_tensor_shape_in_key(self):
@@ -437,6 +441,12 @@ class TestMakeCacheKey:
         key_on = self._make_key(**kwargs, enable_pypto_l0c_double_buffer=True)
         assert key_off == key_on
 
+    @pytest.mark.parametrize("planner", [MemoryPlanner.PYPTO, MemoryPlanner.DSA_RP, MemoryPlanner.PTOAS])
+    def test_buffer_ir_splits_key_for_every_planner(self, planner):
+        assert self._make_key(memory_planner=planner) != self._make_key(
+            memory_planner=planner, enable_buffer_ir=True
+        )
+
     def test_runtime_splits_key(self):
         """The runtime is baked into the artifact's ``kernel_config.py`` and decides
         which worker can bind it, so a ``host_build_graph`` call must not reuse a
@@ -478,6 +488,16 @@ class TestResolveMemoryPlanner:
         with passes.PassContext([], memory_planner=planner):
             assert _resolve_memory_planner(None) == planner
         assert _resolve_memory_planner(None) == MemoryPlanner.PYPTO
+
+
+def test_buffer_ir_cache_option_follows_active_context():
+    assert _resolve_enable_buffer_ir() is False
+    with passes.PassContext([], enable_buffer_ir=True):
+        assert _resolve_enable_buffer_ir() is True
+        with passes.PassContext([]):
+            assert _resolve_enable_buffer_ir() is False
+        assert _resolve_enable_buffer_ir() is True
+    assert _resolve_enable_buffer_ir() is False
 
 
 class TestResolveEnablePyptoL0cDoubleBuffer:

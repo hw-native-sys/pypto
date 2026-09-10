@@ -499,6 +499,23 @@ class TopDownRetargeter {
     return std::move(rewrites_);
   }
 
+  /// Give divergent branch results independent destinations before planning.
+  /// Direct, unaliased branch-local producers may write these fresh destinations;
+  /// the shared YieldFixup materializes the remaining arm transfers afterwards.
+  std::map<VarPtr, TypePtr> CanonicalizeBranchStorage(const StmtPtr& func_body,
+                                                      std::vector<StmtPtr>* allocations) {
+    BuildAnalysis(func_body, /*index_branch_storage=*/true);
+    // InitMemRef clears MemRef::is_pinned_; the hoisted alloc then carries the
+    // authoritative declaration contract. Preserve those output bindings.
+    if (auto body = As<SeqStmts>(func_body)) {
+      for (const auto& stmt : body->stmts_) {
+        if (auto base = GetPinnedAllocBase(stmt)) pinned_branch_bases_.insert(base.get());
+      }
+    }
+    VisitBranchStorage(func_body, allocations);
+    return std::move(rewrites_);
+  }
+
  private:
   struct RewriteJournalEntry {
     VarPtr var;
@@ -541,8 +558,11 @@ class TopDownRetargeter {
   std::map<VarPtr, TypePtr> rewrites_;
   std::vector<RewriteJournalEntry> rewrite_journal_;
   std::set<VarPtr> visiting_;  // cycle guard
+  std::map<const Var*, size_t> storage_handle_counts_;
+  std::set<const Var*> pinned_branch_bases_;
+  uint64_t branch_storage_counter_ = 0;
 
-  void BuildAnalysis(const StmtPtr& func_body) {
+  void BuildAnalysis(const StmtPtr& func_body, bool index_branch_storage = false) {
     DefMapVisitor def_v;
     def_v.Run(func_body);
     defs_ = std::move(def_v.defs);
@@ -556,6 +576,108 @@ class TopDownRetargeter {
     reverse_stmt_end_order_ = std::move(reverse_v.stmt_end_order);
     BuildAliasFamilies();
     BuildAccessIndexes(def_v.reads, def_v.writes);
+    if (!index_branch_storage) return;
+
+    // Count distinct storage handles once, including incoming handles with no
+    // local definition. If-phi handles are consumers of branch storage rather
+    // than independently observable aliases. Other aliases conservatively block
+    // producer retargeting. This fixed walk avoids per-phi subtree/use scans.
+    std::set<VarPtr> counted;
+    auto count_storage = [&](const VarPtr& var) {
+      if (!counted.insert(var).second) return;
+      auto def = defs_.find(var);
+      if (def != defs_.end() && def->second.kind == VarDef::kIfReturn) return;
+      auto tile = GetTileTypeWithMemRef(var->GetType());
+      if (tile) ++storage_handle_counts_[GetDefinedMemRef(tile)->base_.get()];
+    };
+    for (const auto& [var, def] : defs_) {
+      (void)def;
+      count_storage(var);
+    }
+    for (const auto& [stmt, vars] : def_v.reads) {
+      (void)stmt;
+      for (const auto& var : vars) count_storage(var);
+    }
+  }
+
+  void RetargetBranchProducer(const VarPtr& var, const StmtPtr& branch, const MemRefPtr& target,
+                              std::optional<MemorySpace> memory) {
+    auto def = defs_.find(var);
+    if (def == defs_.end() || def->second.kind != VarDef::kAssign ||
+        !IsInside(def->second.definition_stmt, branch) || rewrites_.count(var) != 0) {
+      return;
+    }
+    auto tile = GetTileTypeWithMemRef(var->GetType());
+    if (!tile || pinned_branch_bases_.count(GetDefinedMemRef(tile)->base_.get()) != 0 ||
+        storage_handle_counts_[GetDefinedMemRef(tile)->base_.get()] != 1) {
+      return;
+    }
+    auto assign = As<AssignStmt>(def->second.assign_stmt);
+    auto call = assign ? As<Call>(assign->value_) : nullptr;
+    const auto& registry = OpRegistry::GetInstance();
+    if (!call || !call->op_ || !registry.IsRegistered(call->op_->name_)) return;
+    const auto& entry = registry.GetEntry(call->op_->name_);
+    // Reusing an input, including a metadata view, is an existing storage
+    // contract. Do not walk that producer chain onto a fresh phi allocation.
+    if (entry.OutputMemoryInheritsInput() ||
+        op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size()).has_value()) {
+      return;
+    }
+    // The target is freshly allocated and the producer is branch-local, so it
+    // has no pre-existing live contents. Retain every operation-legality check.
+    RetargetAssign(var, def->second, target, memory, /*check_liveness=*/false);
+  }
+
+  void VisitBranchStorage(const StmtPtr& stmt, std::vector<StmtPtr>* allocations) {
+    if (auto seq = As<SeqStmts>(stmt)) {
+      for (const auto& child : seq->stmts_) VisitBranchStorage(child, allocations);
+    } else if (auto loop = As<ForStmt>(stmt)) {
+      VisitBranchStorage(loop->body_, allocations);
+    } else if (auto loop = As<WhileStmt>(stmt)) {
+      VisitBranchStorage(loop->body_, allocations);
+    } else if (auto scope = As<ScopeStmt>(stmt)) {
+      VisitBranchStorage(scope->body_, allocations);
+    } else if (auto branch = As<IfStmt>(stmt)) {
+      VisitBranchStorage(branch->then_body_, allocations);
+      const auto else_body = branch->else_body_;
+      if (else_body) VisitBranchStorage(*else_body, allocations);
+      auto then_yield = FindYieldStmt(branch->then_body_);
+      auto else_yield = else_body ? FindYieldStmt(*else_body) : nullptr;
+      for (size_t i = 0; i < branch->return_vars_.size(); ++i) {
+        auto result = branch->return_vars_[i];
+        auto result_tile = CurrentTileType(result);
+        if (!result_tile) continue;
+        CHECK_SPAN(else_body.has_value() && then_yield && else_yield && i < then_yield->value_.size() &&
+                       i < else_yield->value_.size(),
+                   branch->span_)
+            << "Buffer IR storage legalization requires both arms to yield every tile result";
+        auto then_var = AsVarLike(then_yield->value_[i]);
+        auto else_var = AsVarLike(else_yield->value_[i]);
+        auto then_tile = then_var ? CurrentTileType(then_var) : nullptr;
+        auto else_tile = else_var ? CurrentTileType(else_var) : nullptr;
+        CHECK_SPAN(then_tile && else_tile, branch->span_)
+            << "Buffer IR storage legalization requires tile branch yields to be storage variables";
+        auto then_memref = GetDefinedMemRef(then_tile);
+        auto else_memref = GetDefinedMemRef(else_tile);
+        if (SamePhysicalWindow(then_memref, else_memref)) {
+          PlanRewrite(result, then_memref, then_tile->GetMemorySpace());
+          continue;
+        }
+        auto memory = result_tile->GetMemorySpace();
+        CHECK_SPAN(memory.has_value() && *memory != MemorySpace::Acc, branch->span_)
+            << "Buffer IR storage legalization requires divergent Acc branch results to be "
+               "coalesced; Acc-to-Acc transfers are unsupported";
+        auto base = std::make_shared<Var>("mem_branch_result_" + std::to_string(branch_storage_counter_++),
+                                          GetPtrType(), result->span_);
+        const auto size =
+            std::max({GetDefinedMemRef(result_tile)->size_, then_memref->size_, else_memref->size_});
+        auto target = std::make_shared<MemRef>(base, static_cast<int64_t>(0), size, result->span_);
+        allocations->push_back(CreateAllocStatement(target, *memory));
+        PlanRewrite(result, target, memory);
+        RetargetBranchProducer(then_var, branch->then_body_, target, memory);
+        RetargetBranchProducer(else_var, *else_body, target, memory);
+      }
+    }
   }
 
   static size_t FindSet(std::vector<size_t>& parent, size_t value) {
@@ -3565,7 +3687,8 @@ class YieldFixupMutator : public IRMutator {
   /// to re-point — a copy-free path that an IR-level `tile.move` would displace
   /// with an extra buffer plus a `pto.tmov`. Loop carries have no such codegen
   /// path, so they still need the move.
-  explicit YieldFixupMutator(bool fixup_if_stmts) : fixup_if_stmts_(fixup_if_stmts) {}
+  explicit YieldFixupMutator(bool fixup_if_stmts, bool canonical_branch_storage = false)
+      : fixup_if_stmts_(fixup_if_stmts), canonical_branch_storage_(canonical_branch_storage) {}
 
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
     // First recurse into nested control flow
@@ -3676,6 +3799,7 @@ class YieldFixupMutator : public IRMutator {
     if (!fixup_if_stmts_) return result;
     auto if_stmt = As<IfStmt>(result);
     if (!if_stmt || if_stmt->return_vars_.empty()) return result;
+    if (canonical_branch_storage_) return FixupCanonicalIf(if_stmt);
 
     // Find yield statements in each branch
     auto then_yield = FindYieldStmt(if_stmt->then_body_);
@@ -3775,6 +3899,49 @@ class YieldFixupMutator : public IRMutator {
 
  private:
   bool fixup_if_stmts_ = true;
+  bool canonical_branch_storage_ = false;
+
+  // The enabled pipeline establishes each phi's target before planning. Never
+  // choose a branch input as a new target here: it may remain independently live
+  // after the IfStmt. Both arms must explicitly write the declared destination.
+  StmtPtr FixupCanonicalIf(const IfStmtPtr& branch) {
+    auto fix_arm = [&](const StmtPtr& body) -> StmtPtr {
+      auto yield = FindYieldStmt(body);
+      std::vector<StmtPtr> moves;
+      std::vector<ExprPtr> values = yield ? yield->value_ : std::vector<ExprPtr>{};
+      for (size_t i = 0; i < branch->return_vars_.size(); ++i) {
+        auto target_tile = GetTileTypeWithMemRef(branch->return_vars_[i]->GetType());
+        if (!target_tile) continue;
+        CHECK_SPAN(yield && i < values.size(), branch->span_)
+            << "Buffer IR storage legalization requires both arms to yield every tile result";
+        auto source = AsVarLike(values[i]);
+        auto source_tile = source ? GetTileTypeWithMemRef(source->GetType()) : nullptr;
+        CHECK_SPAN(source_tile, branch->span_)
+            << "Buffer IR storage legalization requires tile branch yields to be storage variables";
+        auto target = GetDefinedMemRef(target_tile);
+        auto source_memref = GetDefinedMemRef(source_tile);
+        if (SamePhysicalWindow(source_memref, target)) continue;
+        CHECK_SPAN(CompareBaseAddress(source_memref, target) == AddressRelation::kDifferent, branch->span_)
+            << "Buffer IR storage legalization cannot reconcile unequal or ambiguous views of "
+               "one branch destination";
+        auto [moved, move] = CreateTileMove(source, target, target_tile->GetMemorySpace());
+        values[i] = moved;
+        moves.push_back(std::move(move));
+      }
+      if (moves.empty()) return body;
+      auto new_yield = MutableCopy(yield);
+      new_yield->value_ = std::move(values);
+      return InsertMovesAndReplaceYield(body, new_yield, moves);
+    };
+    auto then_body = fix_arm(branch->then_body_);
+    auto else_body = branch->else_body_;
+    if (else_body) else_body = fix_arm(*else_body);
+    if (then_body == branch->then_body_ && else_body == branch->else_body_) return branch;
+    auto result = MutableCopy(branch);
+    result->then_body_ = std::move(then_body);
+    result->else_body_ = std::move(else_body);
+    return result;
+  }
 
   /// One reconciling copy for one loop carry: `dst_memref <- source`.
   struct CarryCopy {
@@ -4517,7 +4684,26 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
   // materializes both IfStmt and ForStmt fixups and repairs bare-Var identity
   // copies before lifetime analysis and placement.
   const auto* ctx = PassContext::Current();
-  if (ctx != nullptr && ctx->GetMemoryPlanner() == MemoryPlanner::DsaRP) {
+  if (ctx != nullptr && ctx->GetEnableBufferIR()) {
+    // The Buffer path cannot rely on codegen to repair branch producers or
+    // invent copies. Establish independent phi destinations while storage can
+    // still be allocated, before any of the three planners sees the program.
+    std::vector<StmtPtr> allocations;
+    TopDownRetargeter branch_storage;
+    auto branch_rewrites = branch_storage.CanonicalizeBranchStorage(new_body, &allocations);
+    if (!branch_rewrites.empty()) {
+      RetypeApplier applier(std::move(branch_rewrites));
+      new_body = applier.VisitStmt(new_body);
+    }
+    new_body = InsertAllocsIntoBody(new_body, allocations);
+    YieldFixupMutator yield_fixup(/*fixup_if_stmts=*/true, /*canonical_branch_storage=*/true);
+    new_body = yield_fixup.VisitStmt(new_body);
+    new_body = InsertAllocsIntoBody(new_body, yield_fixup.TakePendingAllocs());
+    new_body = NormalizeIdentityCopyBuffersMutator().VisitStmt(new_body);
+    // Retargeted producers no longer use their original allocations. Removing
+    // those now is also necessary for PTOAS, which skips MemoryReuse entirely.
+    new_body = RemoveUnusedAllocStatements(new_body, memref_collectors::CollectUsedBasePtrs(new_body));
+  } else if (ctx != nullptr && ctx->GetMemoryPlanner() == MemoryPlanner::DsaRP) {
     // Identity-copy normalization brackets YieldFixup on both sides; see the
     // matching step in TransformMemoryReuse for why each side is needed.
     new_body = NormalizeIdentityCopyBuffersMutator().VisitStmt(new_body);
@@ -4649,7 +4835,9 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   new_body = NormalizeIdentityCopyBuffersMutator().VisitStmt(new_body);
 
   // Step 4: Fix ForStmt/IfStmt yield/return_var MemRef mismatches
-  YieldFixupMutator yield_fixup;
+  const auto* ctx = PassContext::Current();
+  YieldFixupMutator yield_fixup(/*fixup_if_stmts=*/true,
+                                /*canonical_branch_storage=*/ctx != nullptr && ctx->GetEnableBufferIR());
   new_body = yield_fixup.VisitStmt(new_body);
   // A carry-copy cycle needs a scratch buffer; its alloc belongs on the body head
   // like every other allocation, and Step 5 below keeps it because it is in use.
