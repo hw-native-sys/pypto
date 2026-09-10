@@ -1108,6 +1108,7 @@ def test_expansion_without_regions_reuses_the_body():
 def test_consumed_region_comments_survive_boundary_expansion():
     program = _WrapNotifyBody().visit_program(_PlacedNotifyBefore)
     function = next(iter(program.functions.values()))
+    assert isinstance(function.body, ir.SeqStmts)
     region = function.body.stmts[0]
     ir.attach_leading_comments(region, ["communication phase"])
     with passes.PassContext([]):

@@ -1756,7 +1756,7 @@ def test_lowered_boundary_checks_locally_defined_operands(in_region, binding):
         )
     else:
         carry = ir.IterArg("carry", source.type, source, span)
-        loop_body = [ir.YieldStmt([carry], span)]
+        loop_body: list[ir.Stmt] = [ir.YieldStmt([carry], span)]
         if binding == "loop_arg":
             call = T.aiv_shard(carry, split=1, span=span)
             loop_body.insert(0, ir.AssignStmt(ir.Var("inside", call.type, span), call, span))
