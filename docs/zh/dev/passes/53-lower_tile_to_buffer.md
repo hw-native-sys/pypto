@@ -149,3 +149,23 @@ python -m pytest tests/st/runtime/ops/test_buffer_ir.py --platform=a2a3 --device
 预编译模式还会检查实际执行构件所保存的 Buffer 程序和 PTO 源码。
 `--codegen-only` 可用于编译检查，但不构成数值验证证据。
 框架测试无需设备即可覆盖内联及工作线程中的选项传递。
+
+`tests/st/runtime/control_flow/test_buffer_ir.py` 为每种规划器增加分支、For、While、
+嵌套循环和扇出数值测试。编排层从配置 Tensor 读取计数和条件，传给已编译的设备内核，
+因此一个构件可执行多条运行时路径。For 和 While 覆盖 0、1、2、3 次迭代、两个分支方向、
+奇偶次数交换、交错标量偏移以及同一 GM 的循环状态。独立输出区间保留未写入的哨兵值，
+另一个输出保留循环后的原始输入。非对称最终表达式能够发现可交换求和掩盖的交换错误。
+嵌套用例包含外层或内层零次迭代；扇出用例检查两个目标读取同一来源。
+
+在提供 task-submit 设备队列的主机上，只运行该有限矩阵：
+
+```bash
+source .claude/skills/testing/load-env.sh
+python -m pytest tests/st/runtime/control_flow/test_buffer_ir.py --platform=a2a3 \
+    --precompile-workers "$PYPTO_TEST_JOBS" --execute-via-task-submit \
+    --execute-batch-size=4 --task-max-time=120 --save-kernels -v
+```
+
+队列选择可用设备。其他主机应省略队列选项，并通过 `--device` 选择可用设备。
+已保存构件的检查还要求原生循环结果仅包含标量，并包含预期的显式操作；
+仅通过原生编译并不能证明数值正确。
