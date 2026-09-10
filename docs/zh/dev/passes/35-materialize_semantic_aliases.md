@@ -65,6 +65,40 @@ program = passes.materialize_semantic_aliases()(program)
 
 ## 与 codegen 的关系
 
+### 分阶段启用的 Buffer IR 流水线
+
+`PassContext(enable_buffer_ir=True)` 启用 Buffer IR 迁移中的存储合法化部分。
+这个临时开发选项默认为 false；单独启用它不表示所有 Tile 算子和控制流形式都已
+支持降低到 Buffer IR。C++ 访问器为 `GetEnableBufferIR()`，Python 访问器为
+`get_enable_buffer_ir()`。编译、IR dump 和 profiling 保留当前选项，所有内存
+规划器的 JIT 缓存键都会区分该选项的值。
+
+启用后，`MaterializeSemanticAliases` 会在 `PYPTO`、`DSA_RP` 或 `PTOAS`
+规划内存之前建立显式分支目标：
+
+1. 如果两个分支已经 yield 同一物理窗口，则保留该窗口。
+2. 否则，为结果分配独立的规范目标（canonical destination）。从分支外传入并
+   yield 的输入保持原存储，因此 `IfStmt` 之后仍存活的输入不会被分支写回覆盖。
+3. 如果分支内的直接 producer 输出存储没有别名、没有固定分配，且注册的算子
+   契约允许，则将 producer 重定向到新目标。View 和必须与输入共享存储的算子
+   保留原来的存储关系。
+4. 在其余分支的 yield 前插入显式 `tile.move`，并移除 producer 重定向后不再
+   使用的分配。分支复制和已有的 For carry 修复会在三种规划器之前执行；
+   `PYPTO` 在复用后修复新增的不一致，同时保留已声明的 phi 目标。
+
+例如，`if flag: yield a; else: yield b` 的 `a` 和 `b` 在分支后仍然存活时，
+会新增一个结果分配，并在两个分支各复制一次。两个独立的分支内逐元素 producer
+则可以直接写入同一个结果分配，无需复制。PTOAS 因此收到显式分支传输，不需要
+由 codegen 再选择目标或补充复制。
+
+新增的分支分析采用固定次数的 IR 遍历和索引查找，时间复杂度为 O(N log N)，
+空间复杂度为 O(N)，不在 IR 上附加持久化别名表。累加器分支仍使用已有的受保护
+合并逻辑；剩余分歧 `Acc` 分支会报错，因为不支持 Acc 到 Acc 的复制。
+这一片尚不建立完整的存储属性：仍存活的循环初始值、一般的并行 carry 传输、
+While carry 以及复用后的存储验证由后续迁移片完成。
+
+### 默认流水线
+
 PTO codegen 把解析到*同一*物理 MemRef window（`base` + `byte_offset` + `size` +
 pipeline-slot 元数据）的变量渲染成同一个 `tile_buf` handle，因此本 pass 之后,
 循环累加器会发出原地的

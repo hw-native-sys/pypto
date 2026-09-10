@@ -551,6 +551,7 @@ class PassManager:
         mplan = ctx.get_memory_planner() if ctx else passes.MemoryPlanner.PYPTO
         dbc_flag = ctx.get_enable_pypto_l0c_double_buffer() if ctx else False
         runtime = ctx.get_runtime() if ctx else passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
+        buffer_ir = ctx.get_enable_buffer_ir() if ctx else False
         outer_phase = ctx.get_diagnostic_phase() if ctx else passes.get_default_diagnostic_phase()
         if outer_phase == passes.DiagnosticPhase.POST_PASS:
             inner_phase = passes.DiagnosticPhase.PRE_PIPELINE
@@ -558,7 +559,14 @@ class PassManager:
             inner_phase = outer_phase
 
         with passes.PassContext(
-            [*outer_instruments, *extra_instruments], level, inner_phase, disabled, mplan, dbc_flag, runtime
+            [*outer_instruments, *extra_instruments],
+            level,
+            inner_phase,
+            disabled,
+            mplan,
+            dbc_flag,
+            runtime,
+            buffer_ir,
         ):
             try:
                 return self._pipeline.run(input_ir)
@@ -596,6 +604,7 @@ class PassManager:
         mplan = ctx.get_memory_planner() if ctx else passes.MemoryPlanner.PYPTO
         dbc_flag = ctx.get_enable_pypto_l0c_double_buffer() if ctx else False
         runtime = ctx.get_runtime() if ctx else passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
+        buffer_ir = ctx.get_enable_buffer_ir() if ctx else False
         dphase = ctx.get_diagnostic_phase() if ctx else passes.get_default_diagnostic_phase()
         if ctx:
             disabled = ctx.get_disabled_diagnostics()
@@ -604,7 +613,14 @@ class PassManager:
             disabled.insert(passes.DiagnosticCheck.UnusedControlFlowResult)
 
         with passes.PassContext(
-            [*outer_instruments, timing_instrument], level, dphase, disabled, mplan, dbc_flag, runtime
+            [*outer_instruments, timing_instrument],
+            level,
+            dphase,
+            disabled,
+            mplan,
+            dbc_flag,
+            runtime,
+            buffer_ir,
         ):
             try:
                 return self._pipeline.run(input_ir)
