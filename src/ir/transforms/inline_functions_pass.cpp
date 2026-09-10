@@ -189,6 +189,33 @@ class NestedReturnCounter : public IRVisitor {
   }
 };
 
+// Counts call-like nodes whose *evaluation* is observable even when the value
+// they produce is thrown away: a cross-function Call can write through its
+// Out/InOut arguments, and a Submit launches a task. Builtin op Calls (OpExpr
+// callee) are deliberately not counted — they are value-producing, and the
+// observable write of an in-place op is the AssignStmt that rebinds a param
+// (`out = pl.tensor.assemble(out, ...)`), which lives in
+// SplicedInlineBody::stmts and is never dropped.
+class EffectfulCallCounter : public IRVisitor {
+ public:
+  int count = 0;
+  void VisitExpr_(const CallPtr& op) override {
+    if (op && As<GlobalVar>(op->op_)) ++count;
+    IRVisitor::VisitExpr_(op);
+  }
+  void VisitExpr_(const SubmitPtr& op) override {
+    if (op) ++count;
+    IRVisitor::VisitExpr_(op);
+  }
+};
+
+// Is `value` ITSELF an effectful call-like node, as opposed to merely wrapping
+// one? Only such a value can be re-emitted verbatim as an EvalStmt.
+bool IsEffectfulCallLike(const ExprPtr& value) {
+  if (auto call = As<Call>(value)) return As<GlobalVar>(call->op_) != nullptr;
+  return As<Submit>(value) != nullptr;
+}
+
 // Result of splicing an inline call's body without yet wiring up its return
 // values into a specific caller statement. The caller picks the wiring form
 // (assign / drop / return / ...) based on its own statement kind.
@@ -297,10 +324,42 @@ SplicedInlineBody CloneInlineBody(const FunctionPtr& callee, const std::vector<E
   return SplicedInlineBody{std::move(spliced), std::move(return_values), has_return};
 }
 
-// Splice an EvalStmt-shaped call (no LHS) — drop the return, return only
-// the pre-return statements.
+// Splice an EvalStmt-shaped call (no LHS) — the callee's trailing return VALUE
+// has no destination, but *evaluating* it can still be observable, so the value
+// may not simply be discarded along with the ReturnStmt that carried it.
+//
+// A discarded cross-function Call / Submit is re-emitted as an EvalStmt, in
+// return order. The fixpoint loop in InlineFunctions() picks that EvalStmt up on
+// the next iteration and expands it when the callee is itself Inline; a
+// non-Inline callee stays an ordinary dispatch, exactly as if the author had
+// written `self.inner(...)` at the call site. Without this, an ignored wrapper
+// whose body is `return self.inner(x, out)` silently lost `inner`'s write to
+// `out` (#2705) — the assign and return call-site forms never had the hole
+// because they re-emit the value into an AssignStmt / ReturnStmt.
+//
+// A value that is not itself call-like is dropped, as before: a Var, a constant
+// or a builtin op Call produces a value and nothing else. But such a value may
+// *wrap* a cross-function call (`return pl.add(self.inner(x), x)`), whose write
+// we can neither keep nor honestly discard — reject that loudly instead of
+// deleting it.
 std::vector<StmtPtr> SpliceInlineCallAsEval(const FunctionPtr& callee, const std::vector<ExprPtr>& args) {
   auto body = CloneInlineBody(callee, args);
+  for (const auto& value : body.return_values) {
+    if (!value) continue;
+    if (IsEffectfulCallLike(value)) {
+      body.stmts.push_back(std::make_shared<const EvalStmt>(value, value->span_));
+      continue;
+    }
+    EffectfulCallCounter counter;
+    counter.VisitExpr(value);
+    CHECK_SPAN(counter.count == 0, value->span_)
+        << "Inline function '" << callee->name_
+        << "' is called for its side effects only (its result is discarded), but its return "
+           "expression wraps a cross-function call whose writes cannot be preserved once the "
+           "value is dropped. Either return that call directly ('return self.inner(...)'), or "
+           "bind the result at the call site ('result = self."
+        << callee->name_ << "(...)').";
+  }
   return std::move(body.stmts);
 }
 
@@ -708,6 +767,10 @@ namespace pass {
  *  - `return inline_call(...)`: spliced via `SpliceInlineCallAsReturn` to the
  *    cloned pre-return body followed by a fresh ReturnStmt over the cloned
  *    trailing values (single or multi).
+ *  - `EvalStmt(inline_call(...))` discards the callee's trailing return value,
+ *    but not its evaluation: a discarded cross-function Call / Submit is
+ *    re-emitted as an EvalStmt (see `SpliceInlineCallAsEval`) so an ignored
+ *    wrapper ending in `return self.inner(...)` keeps `inner`'s writes.
  *  - Nested Call to inline (e.g. inside a binary expression) is left alone in
  *    v1; the verifier flags any surviving Calls to Inline functions.
  *  - Inline function with no callers is silently dropped in step (5) — that

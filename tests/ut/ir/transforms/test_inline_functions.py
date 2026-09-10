@@ -97,9 +97,12 @@ class TestInlineFunctionsCallSiteForms:
         """A bare ``self.writeout(...)`` (EvalStmt, no LHS) splices only the
         pre-return body and drops the trailing return value.
 
-        ``SpliceInlineCallAsEval`` (src lines 293-296) calls ``CloneInlineBody``
-        and returns ``body.stmts`` only — the trailing ``return out`` value is
-        discarded since there is no LHS to bind it to. The in-place rebinding
+        ``SpliceInlineCallAsEval`` calls ``CloneInlineBody`` and keeps
+        ``body.stmts``; the trailing ``return out`` value is discarded because
+        there is no LHS to bind it to *and* a bare ``Var`` produces a value and
+        nothing else — dropping it loses no side effect (contrast
+        ``test_eval_stmt_call_site_preserves_nested_write`` below, where the
+        discarded value is a cross-function Call). The in-place rebinding
         ``out = pl.assemble(out, x, ...)`` collapses to ``ext = pl.assemble(ext,
         a, ...)`` under the ``x→a``, ``out→ext`` param substitution. The caller
         deliberately does not read ``ext`` back (that would trip the
@@ -141,6 +144,163 @@ class TestInlineFunctionsCallSiteForms:
 
         After = passes.inline_functions()(Before)
         ir.assert_structural_equal(After, Expected)
+
+    def test_eval_stmt_call_site_preserves_nested_write(self):
+        """Regression test for #2705: an ignored wrapper whose body is
+        ``return self.writeout(x, out)`` must still perform ``writeout``'s write.
+
+        Dropping a return VALUE is not the same as dropping its EVALUATION.
+        ``CloneInlineBody`` strips the trailing ReturnStmt's expression into
+        ``return_values``, so before the fix ``SpliceInlineCallAsEval`` returned
+        an empty ``body.stmts`` for ``forward`` and the nested cross-function
+        Call — together with its write through the ``pl.Out`` arg — vanished
+        without a diagnostic. ``main`` collapsed to a bare ``return x``.
+
+        Now the discarded ``Call(writeout, x, out)`` is re-emitted as an
+        EvalStmt, which the fixpoint loop expands on the next iteration into
+        ``writeout``'s own spliced body — the assemble below."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def writeout(
+                self,
+                x: pl.Tensor[[4], pl.FP32],
+                out: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                out = pl.tensor.assemble(out, x, [0])
+                return out
+
+            @pl.function(type=pl.FunctionType.Inline)
+            def forward(
+                self,
+                x: pl.Tensor[[4], pl.FP32],
+                out: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                return self.writeout(x, out)
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[4], pl.FP32],
+                out: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                self.forward(x, out)  # EvalStmt call site — return value ignored
+                return x
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[4], pl.FP32],
+                out: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                out = pl.tensor.assemble(out, x, [0])
+                return x
+
+        After = passes.inline_functions()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_eval_stmt_call_site_keeps_non_inline_dispatch(self):
+        """Same shape as above, but the wrapper forwards to a NON-Inline
+        function: the re-emitted EvalStmt stays an ordinary cross-function
+        dispatch, exactly as if the author had written ``self.inner(...)`` at the
+        call site. Nothing in the fixpoint loop expands it (``inner`` is not
+        Inline), and nothing may delete it either — ``inner`` writes ``out``."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def inner(
+                self,
+                x: pl.Tensor[[4], pl.FP32],
+                out: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                out = pl.tensor.assemble(out, x, [0])
+                return out
+
+            @pl.function(type=pl.FunctionType.Inline)
+            def forward(
+                self,
+                x: pl.Tensor[[4], pl.FP32],
+                out: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                return self.inner(x, out)
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[4], pl.FP32],
+                out: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                self.forward(x, out)
+                return x
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def inner(
+                self,
+                x: pl.Tensor[[4], pl.FP32],
+                out: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                out = pl.tensor.assemble(out, x, [0])
+                return out
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[4], pl.FP32],
+                out: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                self.inner(x, out)
+                return x
+
+        After = passes.inline_functions()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_eval_stmt_call_site_wrapping_a_call_errors(self):
+        """A discarded return value that only *wraps* a cross-function call
+        cannot keep that call's write, so the pass raises instead of deleting it.
+
+        ``pl.add(self.inner(x, out), x)`` is a builtin op Call — a pure value,
+        which the EvalStmt call site is free to drop. But dropping it here would
+        also drop the nested ``Call(inner, x, out)`` and its write to ``out``,
+        with no verifier to catch it (``inner`` is not Inline, so
+        ``InlineFunctionsEliminated`` sees nothing wrong). Reject it loudly
+        instead; the message names both workarounds."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def inner(
+                self,
+                x: pl.Tensor[[4], pl.FP32],
+                out: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                out = pl.tensor.assemble(out, x, [0])
+                return out
+
+            @pl.function(type=pl.FunctionType.Inline)
+            def forward(
+                self,
+                x: pl.Tensor[[4], pl.FP32],
+                out: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                return pl.add(self.inner(x, out), x)
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[4], pl.FP32],
+                out: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                self.forward(x, out)
+                return x
+
+        with pytest.raises(ValueError, match="wraps a cross-function call"):
+            passes.inline_functions()(Before)
 
     def test_self_aliasing_assign_skips_redundant_copy(self):
         """``a = self.passthrough(a)`` where the inline returns its param

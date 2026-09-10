@@ -38,7 +38,7 @@ program_inlined = inline_pass(program)
      - 构建参数替换映射(形参 `Var` → 实参 `Expr`)。
      - 对内联体中每个本地绑定的 `Var` 做 alpha 重命名(`<orig>_inline<counter>`,并去掉 `<orig>` 末尾的 `_`),避免多个调用点之间冲突。
      - 在调用点之前插入重命名+替换后的函数体语句。
-     - 用 `LHS = renamed_return`(单返回值)或 `LHS = MakeTuple([renamed_returns...])`(多返回值)替换调用。当 `LHS` 与替换后的返回 `Var` 是同一个 `Var` 时,赋值被省略以避免冗余 SSA 拷贝。
+     - 按调用点形态接线被内联函数的尾部返回值:`LHS = renamed_return`(单返回值赋值;当 `LHS` 与替换后的返回 `Var` 是同一个 `Var` 时省略该赋值,以避免冗余 SSA 拷贝)、逐元素替换 `TupleGetItemExpr` 而不发出 `MakeTuple` 绑定(多返回值赋值)、新的 `ReturnStmt`(`return inline_call(...)`),或者当返回值被丢弃但其求值可观测时发出新的 `EvalStmt`(`EvalStmt` 调用点 — 参见[边界情况](#边界情况))。
 4. **删除**所有 Inline 函数。
 
 重命名后缀使用单下划线(`_inline`),因为 `__` 被 IR 自动命名约定保留(参见 `auto_name_utils.h`)。
@@ -120,8 +120,9 @@ scope 被原样保留,稍后由 `OutlineIncoreScopes` 提取为独立的 InCore 
 | 作为程序入口的 Inline 函数 | 此处不视为错误 — 但因为没有任何 Call 指向它,清理阶段会像任何无调用者函数那样移除。 |
 | Inline 调用 Inline(传递) | 迭代到不动点。 |
 | 递归 Inline(自递归或互相调用) | 在任何展开发生之前抛出 `pypto::ValueError`,消息中标明环路径(`a -> b -> a`)。 |
-| 多返回值 Inline | 在调用点发出 `LHS = MakeTuple([rets...])`。后续 `Simplify` 可能把 `TupleGetItemExpr(MakeTuple(...), i)` 折叠掉。 |
+| 多返回值 Inline | **不**发出 `LHS = MakeTuple([rets...])` — 编排层 codegen 无法 lower `MakeTuple`。改为把克隆后的返回值记录在 LHS `Var` 上,并把下游 `TupleGetItemExpr(LHS, i)` 的使用改写为第 `i` 个值,使该 LHS 绑定最终无人引用(参见 `SpliceInlineCallAsTupleSub`)。 |
 | 嵌套 Call 到 Inline(如 `pl.add(inline_fn(x), y)`) | v1 不处理 — 保持原样。`InlineFunctionsEliminated` verifier 会标记任何残留的 Call。 |
+| `EvalStmt(inline_call(...))` — 返回值被忽略 | 被丢弃的是返回**值**,不是它的**求值**。被丢弃的跨函数 `Call` / `Submit` 会重新发出为 `EvalStmt`(其被调用者同样是 Inline 时,由不动点循环继续展开),因此以 `return self.inner(x, out)` 结尾的被忽略 wrapper 仍会保留 `inner` 对 `out` 的写入。纯值(`Var`、常量、builtin op `Call`)照旧丢弃。若某个值只是**包裹**了跨函数调用,则抛出 `pypto::ValueError` 而不是静默删除该写入 — 请直接返回该调用,或在调用点绑定 wrapper 的结果。 |
 
 ## 验证
 

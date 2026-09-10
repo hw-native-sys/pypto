@@ -38,7 +38,7 @@ program_inlined = inline_pass(program)
      - Build the param-substitution map (formal `Var` → actual `Expr`).
      - Alpha-rename every locally-bound `Var` in the inlined body to a fresh name (`<orig>_inline<counter>`, with any trailing `_` trimmed off `<orig>`) to avoid collisions across multiple call sites.
      - Splice the renamed-and-substituted body's statements before the call site.
-     - Replace the call with: `LHS = renamed_return` (single-return) or `LHS = MakeTuple([renamed_returns...])` (multi-return). When `LHS` resolves to the same `Var` as the substituted return value, the assignment is omitted to avoid a redundant SSA copy.
+     - Wire up the callee's trailing return value according to the call-site form: `LHS = renamed_return` (single-return assign; omitted when `LHS` resolves to the same `Var` as the substituted value, to avoid a redundant SSA copy), per-element `TupleGetItemExpr` substitution instead of a `MakeTuple` binding (multi-return assign), a fresh `ReturnStmt` (`return inline_call(...)`), or a fresh `EvalStmt` when the value is discarded but its evaluation is observable (`EvalStmt` call site — see [Edge cases](#edge-cases)).
 4. **Drop** all Inline functions from the program.
 
 The pass uses a single underscore (`_inline`) in the rename suffix because `__` is reserved by the IR's auto-naming convention (see `auto_name_utils.h`).
@@ -120,8 +120,9 @@ The scope is preserved verbatim and gets outlined by `OutlineIncoreScopes` later
 | Inline function as program entry | Not detected as an error here — but no Call to it exists, so it is removed in the cleanup phase like any other no-caller function. |
 | Inline calls Inline (transitive) | Iteratively expanded to fixpoint. |
 | Recursive Inline (self or mutual) | `pypto::ValueError` raised before any splicing, with the cycle named (`a -> b -> a`). |
-| Multi-return inline | `LHS = MakeTuple([rets...])` emitted at the call site. Subsequent `Simplify` may fold `TupleGetItemExpr(MakeTuple(...), i)`. |
+| Multi-return inline | No `LHS = MakeTuple([rets...])` is emitted — orchestration codegen cannot lower `MakeTuple`. The cloned return values are recorded against the LHS `Var` and downstream `TupleGetItemExpr(LHS, i)` uses are rewritten to value `i`, leaving the LHS binding unreferenced (see `SpliceInlineCallAsTupleSub`). |
 | Nested call to Inline (e.g. `pl.add(inline_fn(x), y)`) | Not handled in v1 — left as-is. The `InlineFunctionsEliminated` verifier flags any surviving Call. |
+| `EvalStmt(inline_call(...))` — return value ignored | The value is discarded, its **evaluation** is not. A discarded cross-function `Call` / `Submit` is re-emitted as an `EvalStmt` (then expanded by the fixpoint loop when its callee is also Inline), so an ignored wrapper ending in `return self.inner(x, out)` keeps `inner`'s write to `out`. A pure value (`Var`, constant, builtin op `Call`) is dropped. A value that merely *wraps* a cross-function call raises `pypto::ValueError` rather than silently deleting the write — return that call directly, or bind the wrapper's result at the call site. |
 
 ## Verification
 
