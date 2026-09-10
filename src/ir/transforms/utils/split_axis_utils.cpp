@@ -3026,8 +3026,9 @@ void CopySplitFact(const VarPtr& target, const ExprPtr& value, SplitBodyAnalysis
   if (auto facts = TupleSplitFacts(value, scan, tuples)) tuples[target.get()] = std::move(facts);
 }
 
-// A merge is lane-local only on every incoming edge. For a loop, also check
-// equality: a carry used in the body must retain its entry fact on the backedge.
+// A merge is lane-local only on every incoming edge. For a loop, the backedge
+// must preserve any entry fact used to admit the body. A neutral entry may gain
+// a lane-local value, but the carry and exit stay neutral for zero iterations.
 void MergeSplitFacts(const VarPtr& target, const ExprPtr& lhs, const ExprPtr& rhs, SplitBodyAnalysis& scan,
                      TupleHalfFacts& tuples, bool loop_carry = false) {
   bool mismatch = false;
@@ -3039,14 +3040,14 @@ void MergeSplitFacts(const VarPtr& target, const ExprPtr& lhs, const ExprPtr& rh
     for (size_t i = 0; i < tuple->types_.size(); ++i) {
       const bool a = left && i < left->size() && (*left)[i];
       const bool b = right && i < right->size() && (*right)[i];
-      mismatch |= a != b;
+      mismatch |= a && !b;
       merged.push_back(a && b);
     }
     tuples[target.get()] = std::make_shared<const std::vector<bool>>(std::move(merged));
   } else {
     const bool a = IsHalfExpr(lhs, scan, tuples);
     const bool b = IsHalfExpr(rhs, scan, tuples);
-    mismatch = a != b;
+    mismatch = a && !b;
     if (a && b) scan.half_tiles.insert(target.get());
   }
   if (loop_carry && mismatch) {

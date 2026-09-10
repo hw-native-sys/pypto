@@ -5245,10 +5245,10 @@ def test_manual_tuple_merge_requires_both_branches_to_shard_the_element():
 
 
 @pytest.mark.parametrize("loop_kind", ["for", "while"])
-@pytest.mark.parametrize("initial_half", [False, True])
+@pytest.mark.parametrize("initial_half,consume_exit", [(True, False), (False, True), (False, False)])
 @pytest.mark.parametrize("tuple_carry", [False, True])
-def test_manual_loop_rejects_inconsistent_shard_carry(loop_kind, initial_half, tuple_carry):
-    """The initial value and backedge must both support the carry's shard fact."""
+def test_manual_loop_checks_shard_carry_uses(loop_kind, initial_half, consume_exit, tuple_carry):
+    """A backedge may gain a shard fact, but cannot prove a zero-iteration exit."""
     span = ir.Span.unknown()
 
     def body(span, stmts, aiv_id, qk_h, data):
@@ -5268,7 +5268,7 @@ def test_manual_loop_rejects_inconsistent_shard_carry(loop_kind, initial_half, t
         # occurs at the exit when zero iterations return that initial value.
         body_stmts: list[ir.Stmt] = [ir.AssignStmt(used, add, span)] if initial_half else []
         body_stmts.append(ir.YieldStmt([backedge], span))
-        loop_body = ir.SeqStmts(body_stmts, span)
+        loop_body = ir.SeqStmts(body_stmts, span) if initial_half else body_stmts[0]
         if loop_kind == "for":
             loop = ir.ForStmt(
                 ir.Var("i", _IDX, span),
@@ -5285,7 +5285,7 @@ def test_manual_loop_rejects_inconsistent_shard_carry(loop_kind, initial_half, t
                 ir.ConstInt(int(initial_half), DataType.BOOL, span), [carry], loop_body, [returned], span
             )
         stmts.append(loop)
-        if initial_half:
+        if initial_half or not consume_exit:
             return qk_h
         exited = ir.TupleGetItemExpr(returned, 0, span) if tuple_carry else returned
         result_call = T.add(exited, exited, span=span)
@@ -5293,8 +5293,14 @@ def test_manual_loop_rejects_inconsistent_shard_carry(loop_kind, initial_half, t
         stmts.append(ir.AssignStmt(result, result_call, span))
         return result
 
-    with pytest.raises(ValueError, match="full-width|loop-carried"):
-        _lower(_admission_program(span, body, wrap=True))
+    if initial_half or consume_exit:
+        with pytest.raises(ValueError, match="full-width|loop-carried"):
+            _lower(_admission_program(span, body, wrap=True))
+    else:
+        ir.assert_structural_equal(
+            _lower(_admission_program(span, body, wrap=True)),
+            _admission_program(span, body, wrap=False),
+        )
 
 
 def test_auto_region_keeps_notify_on_aiv_and_wait_on_both_lanes():
