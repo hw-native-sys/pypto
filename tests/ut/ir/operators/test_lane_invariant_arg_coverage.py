@@ -119,13 +119,17 @@ EXPECTED_BLIND_ARGS = {
     #   tile.col_argmax / col_argmin arg 1  -- gh#2615, the row forms' exact-shape tmp check
     #   tile.col_expand* arg 1              -- gh#2612, the documented [1, cols] contract
     #   tile.sort32 arg 1                   -- gh#2612, idx is shaped like src
+    #   tile.scatter_update args 1-2        -- gh#2612, the documented index/src relation
+    #
+    # What is left is not a backlog. `sel` / `sels` masks have a target-defined layout no
+    # shape rule can express; `gather_compare`'s src cols do not reach its result at all;
+    # and `mrgsort_format2`'s sources are real per-lane sorted runs whose only relation is
+    # to the workspace the deducer already reads.
     ("tile.gather_compare", 0),
     ("tile.mrgsort_format2", 0),
     ("tile.mrgsort_format2", 1),
     ("tile.mrgsort_format2", 2),
     ("tile.mrgsort_format2", 3),
-    ("tile.scatter_update", 1),
-    ("tile.scatter_update", 2),
     ("tile.sel", 0),
     ("tile.sels", 0),
 }

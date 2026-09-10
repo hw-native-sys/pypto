@@ -6421,6 +6421,71 @@ class TestTileScatterUpdateOps:
         assert isinstance(result_type, ir.TileType)
         assert result_type.tile_view is None
 
+    def test_tile_scatter_update_2d_src_rows_must_match_index_size(self):
+        """`index` names b*s rows and `src` supplies one payload each.
+
+        ``ConvertTensorToTileOps`` already enforces this on the way to ``pto.tscatter``,
+        but only as an INTERNAL_CHECK and only for the tensor path — so a directly
+        written `tile.scatter_update` carried the mismatch to codegen, and the operator's
+        own deduction stayed blind to both operands.
+        """
+        span = ir.Span.unknown()
+        input_type = ir.TileType(_const_dims(span, 16, 64), DataType.FP16)
+        index_type = ir.TileType(_const_dims(span, 2, 4), DataType.INT32)  # b*s = 8
+        bad_src = ir.TileType(_const_dims(span, 16, 64), DataType.FP16)  # 16 rows, not 8
+
+        with pytest.raises(ValueError, match=r"2D src must have b\*s rows"):
+            tile.scatter_update(
+                ir.Var("inp", input_type, span),
+                -2,
+                ir.Var("idx", index_type, span),
+                ir.Var("src", bad_src, span),
+            )
+
+    def test_tile_scatter_update_src_width_must_match_input(self):
+        span = ir.Span.unknown()
+        input_type = ir.TileType(_const_dims(span, 16, 64), DataType.FP16)
+        index_type = ir.TileType(_const_dims(span, 2, 4), DataType.INT32)
+        narrow_src = ir.TileType(_const_dims(span, 8, 32), DataType.FP16)  # d=32, not 64
+
+        with pytest.raises(ValueError, match="last dimension must match input"):
+            tile.scatter_update(
+                ir.Var("inp", input_type, span),
+                -2,
+                ir.Var("idx", index_type, span),
+                ir.Var("src", narrow_src, span),
+            )
+
+    def test_tile_scatter_update_4d_src_leading_dims_must_match_index(self):
+        span = ir.Span.unknown()
+        input_type = ir.TileType(_const_dims(span, 4, 4, 1, 64), DataType.BF16)
+        index_type = ir.TileType(_const_dims(span, 2, 4), DataType.INT32)
+        bad_src = ir.TileType(_const_dims(span, 3, 4, 1, 64), DataType.BF16)  # b=3, not 2
+
+        with pytest.raises(ValueError, match=r"leading dimensions must match index's \[b, s\]"):
+            tile.scatter_update(
+                ir.Var("inp", input_type, span),
+                -2,
+                ir.Var("idx", index_type, span),
+                ir.Var("src", bad_src, span),
+            )
+
+    def test_tile_scatter_update_symbolic_extent_is_not_rejected(self):
+        """An undecidable relation is left to the backend rather than refused here."""
+        span = ir.Span.unknown()
+        rows = ir.Var("rows", ir.ScalarType(DataType.INDEX), span)
+        d_a = ir.Var("d_a", ir.ScalarType(DataType.INDEX), span)
+        d_b = ir.Var("d_b", ir.ScalarType(DataType.INDEX), span)
+        one = ir.ConstInt(1, DataType.INDEX, span)
+
+        result = tile.scatter_update(
+            ir.Var("inp", ir.TileType([rows, d_a], DataType.FP16), span),
+            -2,
+            ir.Var("idx", ir.TileType([rows, one], DataType.INT32), span),
+            ir.Var("src", ir.TileType([rows, d_b], DataType.FP16), span),
+        ).type
+        assert isinstance(result, ir.TileType)
+
     @pytest.mark.parametrize(
         ("src_dtype", "dim", "match"),
         [

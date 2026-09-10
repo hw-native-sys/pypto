@@ -685,6 +685,17 @@ measures which operands are blind, fails on a declaration the deducer makes
 unreachable, and pins the blind set so a new operator or a loosened deducer has
 to be classified rather than silently falling through.
 
+**Blind is usually a symptom, and the deducer is usually the cure.** An operand
+lands in the blind set when the deducer never reads its extent — which is often
+just an under-validated contract rather than a genuinely free dimension. Then
+the fix is to *enforce the relation the operator already documents*, not to
+declare the operand lane-invariant: the check now rejects a mis-shaped operand
+for every caller, and the split pass gets a pinned answer for free.
+`tile.scatter_update`'s `index` and `src` were blind because deduction only
+copied the input's type; enforcing what the tensor path's lowering already
+asserts (`src` rows `== b * s`, matching widths) pinned both. A declaration
+would have suppressed the split check *and* left the shape bug in place.
+
 The test for a declaration is *positional correspondence*: does output element
 `i` read operand element `i`? Two kinds of operand answer no.
 

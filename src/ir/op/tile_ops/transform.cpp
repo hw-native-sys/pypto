@@ -873,6 +873,40 @@ TypePtr DeduceTileScatterUpdateType(const std::vector<ExprPtr>& args,
       << "tile.scatter_update: src dtype (" << src_type->dtype_.ToString() << ") must match input dtype ("
       << input_type->dtype_.ToString() << ")";
 
+  // The shape relation this op documents, enforced here rather than left to codegen.
+  // `index` names b*s rows and `src` supplies their payloads, so a src that does not
+  // cover them is a silent wrong answer -- and stating the relation in the type is what
+  // lets LowerAutoVectorSplit re-derive both operands' per-lane extents from the
+  // operator instead of falling back on a heuristic (gh#2612).
+  //
+  // Only a PROVABLE mismatch is an error; an undecidable symbolic relation is left to
+  // the backend, so dynamic extents keep working exactly as before.
+  const auto& idx_shape = index_type->shape_;
+  const auto& src_shape = src_type->shape_;
+  const auto& in_shape = input_type->shape_;
+  CHECK(ProveValidExtentEqual(src_shape.back(), in_shape.back()) != ProofResult::kFalse)
+      << "tile.scatter_update: src's last dimension must match input's (the row width d), but got src "
+      << FormatShape(src_shape) << " against input " << FormatShape(in_shape);
+  if (in_shape.size() == 2) {
+    // 2D: src is [b*s, d] -- one flat row per index entry.
+    auto b = As<ConstInt>(idx_shape[0]);
+    auto s_dim = As<ConstInt>(idx_shape[1]);
+    auto rows = As<ConstInt>(src_shape[0]);
+    if (b && s_dim && rows) {
+      CHECK(rows->value_ == b->value_ * s_dim->value_)
+          << "tile.scatter_update: 2D src must have b*s rows, one per index entry, but got src "
+          << FormatShape(src_shape) << " against index " << FormatShape(idx_shape)
+          << " (b*s = " << b->value_ * s_dim->value_ << ")";
+    }
+  } else {
+    // 4D: src is [b, s, 1, d] -- its leading two axes ARE the index shape.
+    for (size_t d = 0; d < 2; ++d) {
+      CHECK(ProveValidExtentEqual(src_shape[d], idx_shape[d]) != ProofResult::kFalse)
+          << "tile.scatter_update: 4D src's leading dimensions must match index's [b, s], but got src "
+          << FormatShape(src_shape) << " against index " << FormatShape(idx_shape);
+    }
+  }
+
   for (const auto& [key, val] : kwargs) {
     if (key == "dim") {
       int dim_val = AnyCast<int>(val, "kwarg key: dim");
