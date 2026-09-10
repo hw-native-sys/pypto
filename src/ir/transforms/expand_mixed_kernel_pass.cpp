@@ -90,6 +90,51 @@ const auto& FlattenBody = transform_utils::FlattenToStmts;
 
 using AivPlacement = std::unordered_set<const Call*>;
 
+class SplitRegionFinder : public IRVisitor {
+ public:
+  bool found = false;
+  void VisitStmt(const StmtPtr& stmt) override {
+    if (!found) IRVisitor::VisitStmt(stmt);
+  }
+  void VisitStmt_(const SplitAivScopeStmtPtr&) override { found = true; }
+};
+
+// Shallow-copy only the statement receiving an erased wrapper's comments.
+// Descendants and variable identities stay shared; input metadata stays intact.
+class StatementCommentPrepender : public IRMutator {
+ public:
+  explicit StatementCommentPrepender(std::vector<std::string> comments) : comments_(std::move(comments)) {}
+
+ protected:
+#define COPY_COMMENTED_STMT(Type)                                                                            \
+  StmtPtr VisitStmt_(const Type##Ptr& op) override {                                                         \
+    auto result = MutableCopy(op);                                                                           \
+    result->leading_comments_.insert(result->leading_comments_.begin(), comments_.begin(), comments_.end()); \
+    return result;                                                                                           \
+  }
+  COPY_COMMENTED_STMT(AssignStmt)
+  COPY_COMMENTED_STMT(IfStmt)
+  COPY_COMMENTED_STMT(YieldStmt)
+  COPY_COMMENTED_STMT(ReturnStmt)
+  COPY_COMMENTED_STMT(ForStmt)
+  COPY_COMMENTED_STMT(WhileStmt)
+  COPY_COMMENTED_STMT(InCoreScopeStmt)
+  COPY_COMMENTED_STMT(ClusterScopeStmt)
+  COPY_COMMENTED_STMT(GraphScopeStmt)
+  COPY_COMMENTED_STMT(HierarchyScopeStmt)
+  COPY_COMMENTED_STMT(SpmdScopeStmt)
+  COPY_COMMENTED_STMT(RuntimeScopeStmt)
+  COPY_COMMENTED_STMT(CommDomainScopeStmt)
+  COPY_COMMENTED_STMT(EvalStmt)
+  COPY_COMMENTED_STMT(BreakStmt)
+  COPY_COMMENTED_STMT(ContinueStmt)
+  COPY_COMMENTED_STMT(InlineStmt)
+#undef COPY_COMMENTED_STMT
+
+ private:
+  std::vector<std::string> comments_;
+};
+
 // Consume the lexical contract once. All later analyses use this same body and
 // placement map; neither is serialized or shared between pass invocations.
 class SplitRegionConsumer : public IRMutator {
@@ -116,7 +161,7 @@ class SplitRegionConsumer : public IRMutator {
     auto result = IRMutator::VisitExpr_(op);
     auto call = As<Call>(result);
     if (region_depth_ > 0 && call && !core_affinity::HasStatedLane(call) &&
-        core_affinity::ClassifyIntrinsicCallAffinity(call) == CoreAffinity::SHARED &&
+        core_affinity::ClassifyCallAffinity(call) == CoreAffinity::SHARED &&
         core_affinity::IsNoDuplicateCall(call)) {
       aiv_only_calls.insert(call.get());
     }
@@ -135,17 +180,24 @@ class SplitRegionConsumer : public IRMutator {
         CHECK_SPAN(!hazard.call, region->span_)
             << "ExpandMixedKernel: a pl.split_aiv region contains a transpose that swaps its split axis";
       }
+      pending_comments_.insert(pending_comments_.end(), region->leading_comments_.begin(),
+                               region->leading_comments_.end());
       ++region_depth_;
       AppendConsumed(region->body_, body);
       --region_depth_;
     } else if (auto seq = As<SeqStmts>(stmt)) {
       for (const auto& child : seq->stmts_) AppendConsumed(child, body);
     } else {
-      body.push_back(VisitStmt(stmt));
+      auto comments = std::move(pending_comments_);
+      pending_comments_.clear();
+      auto visited = VisitStmt(stmt);
+      if (!comments.empty()) visited = StatementCommentPrepender(std::move(comments)).VisitStmt(visited);
+      body.push_back(visited);
     }
   }
 
   int region_depth_ = 0;
+  std::vector<std::string> pending_comments_;
 };
 
 CoreAffinity ClassifyPlacedCall(const CallPtr& call, const AivPlacement& placement) {
@@ -501,7 +553,8 @@ std::optional<CoreAffinity> BoundaryResultLane(const CallPtr& call) {
 /// diagnostic.
 std::optional<CoreAffinity> OperandDefiningLane(
     const ExprPtr& operand, const std::unordered_map<const Var*, CoreAffinity>& var_affinity,
-    const std::unordered_map<const Var*, StmtPtr>& def_map, CallPtr* producer_call) {
+    const std::unordered_map<const Var*, StmtPtr>& def_map, const AivPlacement& placement,
+    CallPtr* producer_call) {
   // An operand written inline rather than bound to a name — `aiv_shard(full(...))`
   // — has no defining statement to filter out of a lane, so nothing dangles; it is
   // instead EMITTED inside the tpush, asking the pushing lane to run the op itself
@@ -510,7 +563,7 @@ std::optional<CoreAffinity> OperandDefiningLane(
   // (a nested crossing) and SHARED have no one producing lane here.
   if (auto call = transform_utils::AsCallOrSubmitView(operand)) {
     *producer_call = call;
-    const CoreAffinity affinity = ClassifyCallAffinity(call);
+    const CoreAffinity affinity = ClassifyPlacedCall(call, placement);
     if (affinity == CoreAffinity::CUBE || affinity == CoreAffinity::VECTOR) return affinity;
     return std::nullopt;
   }
@@ -572,13 +625,14 @@ std::optional<CoreAffinity> OperandDefiningLane(
 void CheckOpDrivenBoundaryOperands(const std::vector<StmtPtr>& stmts,
                                    const std::map<const Stmt*, CVBoundaryMove>& boundary_moves,
                                    const std::unordered_map<const Var*, CoreAffinity>& var_affinity,
-                                   const std::unordered_map<const Var*, StmtPtr>& def_map) {
+                                   const std::unordered_map<const Var*, StmtPtr>& def_map,
+                                   const AivPlacement& placement) {
   for (const auto& stmt : stmts) {
     if (auto bm_it = boundary_moves.find(stmt.get()); bm_it != boundary_moves.end()) {
       const auto& bm = bm_it->second;
       if (bm.op_driven) {
         CallPtr producer_call;
-        auto lane = OperandDefiningLane(bm.source_tile, var_affinity, def_map, &producer_call);
+        auto lane = OperandDefiningLane(bm.source_tile, var_affinity, def_map, placement, &producer_call);
         const bool cube_to_vector = (bm.direction == CVDirection::CUBE_TO_VECTOR);
         const CoreAffinity pushing = cube_to_vector ? CoreAffinity::CUBE : CoreAffinity::VECTOR;
         if (lane.has_value() && *lane != pushing) {
@@ -612,17 +666,20 @@ void CheckOpDrivenBoundaryOperands(const std::vector<StmtPtr>& stmts,
     }
 
     if (auto for_stmt = As<ForStmt>(stmt)) {
-      CheckOpDrivenBoundaryOperands(FlattenBody(for_stmt->body_), boundary_moves, var_affinity, def_map);
+      CheckOpDrivenBoundaryOperands(FlattenBody(for_stmt->body_), boundary_moves, var_affinity, def_map,
+                                    placement);
     } else if (auto if_stmt = As<IfStmt>(stmt)) {
-      CheckOpDrivenBoundaryOperands(FlattenBody(if_stmt->then_body_), boundary_moves, var_affinity, def_map);
+      CheckOpDrivenBoundaryOperands(FlattenBody(if_stmt->then_body_), boundary_moves, var_affinity, def_map,
+                                    placement);
       if (if_stmt->else_body_.has_value()) {
         CheckOpDrivenBoundaryOperands(FlattenBody(*if_stmt->else_body_), boundary_moves, var_affinity,
-                                      def_map);
+                                      def_map, placement);
       }
     } else if (auto while_stmt = As<WhileStmt>(stmt)) {
-      CheckOpDrivenBoundaryOperands(FlattenBody(while_stmt->body_), boundary_moves, var_affinity, def_map);
+      CheckOpDrivenBoundaryOperands(FlattenBody(while_stmt->body_), boundary_moves, var_affinity, def_map,
+                                    placement);
     } else if (auto seq = As<SeqStmts>(stmt)) {
-      CheckOpDrivenBoundaryOperands(seq->stmts_, boundary_moves, var_affinity, def_map);
+      CheckOpDrivenBoundaryOperands(seq->stmts_, boundary_moves, var_affinity, def_map, placement);
     }
   }
 }
@@ -1146,6 +1203,7 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
     // MIXED here, but we handle it specially before the generic MIXED arm below.
     auto bm_it = boundary_moves.find(stmt.get());
     if (bm_it != boundary_moves.end()) {
+      const size_t first_emitted = result.size();
       {
         const auto& bm = bm_it->second;
         // The cross-core transfer memory FOR THIS SIDE: AIC drains into Mat,
@@ -1302,6 +1360,10 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
                 bm.dest_var, CreateMove(tpop_var, *target_memory, bm.dest_var->GetType(), stmt->span_),
                 stmt->span_));
           }
+        }
+        if (!stmt->leading_comments_.empty() && result.size() > first_emitted) {
+          result[first_emitted] =
+              StatementCommentPrepender(stmt->leading_comments_).VisitStmt(result[first_emitted]);
         }
         continue;
       }
@@ -1627,7 +1689,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
   // produced, or the pushing lane's body would reference a value it never
   // defines. Checked before either body is built, so the failure names the
   // user's boundary op instead of surfacing in codegen.
-  CheckOpDrivenBoundaryOperands(stmts, boundary_moves, var_affinity, original_def_map);
+  CheckOpDrivenBoundaryOperands(stmts, boundary_moves, var_affinity, original_def_map, placement);
 
   // Boundary-generated tpops never reuse the source-tpop Var (CollectCVBoundaryMoves
   // skips moves whose source comes from a tpop), so no original-tpop statements need
@@ -2410,9 +2472,14 @@ Pass ExpandMixedKernel() {
       }
 
       SplitRegionConsumer consumer;
-      auto consumed = MutableCopy(func);
-      consumed->body_ = consumer.VisitStmt(func->body_);
-      func = consumed;
+      SplitRegionFinder finder;
+      finder.VisitStmt(func->body_);
+      if (finder.found) {
+        auto body = consumer.VisitStmt(func->body_);
+        auto consumed = MutableCopy(func);
+        consumed->body_ = std::move(body);
+        func = consumed;
+      }
       const auto& placement = consumer.aiv_only_calls;
 
       // Check if function is mixed (recursive analysis detects ops inside loops/conditionals)

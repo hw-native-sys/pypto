@@ -102,6 +102,7 @@ void CheckNoCubeTileHalved(const std::vector<StmtPtr>& stmts,
                            const std::unordered_map<const Var*, TileInfo>& halved, bool& cube_halved);
 void ValidateTransposeSplitHazard(const std::vector<StmtPtr>& stmts, int split_dim, const Span& region_span);
 void ValidateSplitBody(const std::vector<StmtPtr>& stmts, int split_dim, const Span& span,
+                       bool explicit_boundary,
                        const std::unordered_map<const Var*, TileInfo>& known_tiles = {},
                        const std::unordered_map<const Var*, VarPtr>& replacements = {});
 std::vector<StmtPtr> LowerExplicitRegions(const std::vector<StmtPtr>& stmts,
@@ -240,7 +241,7 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
       // region-scoped diagnostic. ExpandMixedKernel folds the explicit boundary
       // into tpush/tpop just as for a hand-authored split_aiv kernel.
       if (RegionBodyHasExplicitBoundary(reg->body_)) {
-        ValidateSplitBody(region_stmts, rdim, reg->span_);
+        ValidateSplitBody(region_stmts, rdim, reg->span_, /*explicit_boundary=*/true);
         ValidateTransposeSplitHazard(region_stmts, rdim, reg->span_);
         // The body is already half-width, but the boundary op's split-axis valid
         // extent is still the deducer's lane-agnostic ceil-div guess. This region
@@ -282,7 +283,7 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
           << "Internal error: LowerAutoVectorSplit halved a CUBE-affinity op inside a pl.split_aiv "
              "region — the vector-sub-region affinity gate leaked into a cube operand.";
 
-      ValidateSplitBody(lowered, rdim, reg->span_, r_tile_vars, r_var_repl);
+      ValidateSplitBody(lowered, rdim, reg->span_, /*explicit_boundary=*/false, r_tile_vars, r_var_repl);
       StmtPtr region_body =
           (lowered.size() == 1) ? lowered[0] : std::make_shared<SeqStmts>(lowered, reg->span_);
       if (!r_var_repl.empty()) {
@@ -637,9 +638,18 @@ std::string JoinDiagnosticNames(const std::vector<std::string>& names) {
 // loop-entry fact separately from an unlocalized vector op: the former needs a
 // consistent yield, while the latter needs per-lane operand/address dataflow.
 void ValidateSplitBody(const std::vector<StmtPtr>& stmts, int split_dim, const Span& region_span,
-                       const std::unordered_map<const Var*, TileInfo>& known_tiles,
+                       bool explicit_boundary, const std::unordered_map<const Var*, TileInfo>& known_tiles,
                        const std::unordered_map<const Var*, VarPtr>& replacements) {
   auto scan = split_axis::AnalyzeSplitBody(stmts, split_dim, known_tiles, replacements);
+  if (!explicit_boundary) {
+    INTERNAL_CHECK_SPAN(scan.carry_mismatches.empty(), region_span)
+        << "Internal error: LowerAutoVectorSplit produced inconsistent loop-carried value(s) ["
+        << JoinDiagnosticNames(scan.carry_mismatches) << "]: a lowered backedge lost an entry shard fact";
+    INTERNAL_CHECK_SPAN(scan.full_width_vec_ops.empty(), region_span)
+        << "Internal error: LowerAutoVectorSplit left unlocalized full-width vector op(s) ["
+        << JoinDiagnosticNames(scan.full_width_vec_ops) << "] in a transformed AIV split body";
+    return;
+  }
   CHECK_SPAN(scan.carry_mismatches.empty(), region_span)
       << "LowerAutoVectorSplit: inconsistent loop-carried value(s) ["
       << JoinDiagnosticNames(scan.carry_mismatches)
@@ -807,8 +817,7 @@ FunctionPtr LowerExplicitRegionFunction(const FunctionPtr& func) {
          "pl.split_aiv region out of the enclosing scope.";
 
   // Also reject a non-split scope nested inside a retained region.
-  auto scope_survivor = FindFirstScope(new_body);
-  CHECK_SPAN(!scope_survivor, scope_survivor->span_)
+  CHECK_SPAN(!enclosing_scope, enclosing_scope->span_)
       << "LowerAutoVectorSplit: a scope survives inside a pl.split_aiv region body. Region "
          "lowering does not cross a scope boundary, so the vector ops inside this scope would be "
          "emitted full-width and BOTH AIV lanes would compute the whole tile. Every scope must "
@@ -949,7 +958,8 @@ FunctionPtr LowerFunction(const FunctionPtr& func, SplitMode mode) {
       << "Internal error: LowerAutoVectorSplit halved a CUBE-affinity op in '" << func->name_
       << "' — the vector-sub-region affinity gate leaked into a cube operand.";
 
-  ValidateSplitBody(new_stmts, split_dim, func->span_, tile_vars, var_replacements);
+  ValidateSplitBody(new_stmts, split_dim, func->span_, /*explicit_boundary=*/false, tile_vars,
+                    var_replacements);
   StmtPtr new_body =
       (new_stmts.size() == 1) ? new_stmts[0] : std::make_shared<SeqStmts>(new_stmts, func->span_);
   if (!var_replacements.empty()) {

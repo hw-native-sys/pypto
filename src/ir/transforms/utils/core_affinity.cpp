@@ -96,7 +96,7 @@ bool HasStatedLane(const CallPtr& call) {
   return IsOp(call, "system.syncall") || IsOp(call, "system.sync_set") || IsOp(call, "system.sync_wait");
 }
 
-CoreAffinity ClassifyIntrinsicCallAffinity(const CallPtr& call) {
+CoreAffinity ClassifyCallAffinity(const CallPtr& call) {
   if (!call || !call->op_) return CoreAffinity::SHARED;
   if (std::dynamic_pointer_cast<const GlobalVar>(call->op_)) {
     return CoreAffinity::SHARED;
@@ -193,8 +193,6 @@ CoreAffinity ClassifyIntrinsicCallAffinity(const CallPtr& call) {
 
   return CoreAffinity::SHARED;
 }
-
-CoreAffinity ClassifyCallAffinity(const CallPtr& call) { return ClassifyIntrinsicCallAffinity(call); }
 
 }  // namespace core_affinity
 }  // namespace ir

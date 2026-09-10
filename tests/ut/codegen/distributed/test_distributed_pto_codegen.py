@@ -1998,9 +1998,9 @@ def test_split_aiv_region_keeps_notify_off_the_cube_lane():
     it splits. On the cube lane that is a real hazard: the AIC copy can publish
     the signal before the AIV lane's TPUT has landed the data the signal
     releases, so the peer reads stale bytes. Writing the comm phase inside a
-    ``pl.split_aiv`` region is what prevents it — LowerAutoVectorSplit stamps
-    the region's no-duplicate calls with ``core_placement="aiv"`` and
-    ClassifyCallAffinity resolves that to VECTOR.
+    ``pl.split_aiv`` region is what prevents it. LowerAutoVectorSplit retains
+    the region, and ExpandMixedKernel consumes its no-duplicate SHARED calls
+    into pass-local AIV placement.
 
     The kernel must be GENUINELY mixed at the InCore level for this to be under
     test at all: the ``pl.at(level=pl.Level.CORE_GROUP)`` block holds both the

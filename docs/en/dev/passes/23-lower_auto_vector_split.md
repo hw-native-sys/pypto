@@ -115,7 +115,7 @@ may stage a subsequent lane-local slice; they do not become half-width facts.
 
 At control-flow merges, shard facts are intersected per tuple element across both branches. A loop backedge must preserve any shard fact inherited from its initial value. A neutral initial value may become lane-local in the body, but the carry and exit remain neutral; a zero-iteration exit cannot be classified using only its yield.
 
-Admission diagnostics distinguish full-width operator names (`full_width_vec_ops`) from loop-carry names (`carry_mismatches`). A carry mismatch reports the lost entry shard fact and asks for a lane-local yield; an unlocalized operator reports its name and asks for lane-local operands or a localized read address. The messages apply to explicit-boundary regions, implicitly lowered regions, and AUTO bodies. Carry mismatches are reported first if both categories are present.
+Admission diagnostics distinguish full-width operator names (`full_width_vec_ops`) from loop-carry names (`carry_mismatches`). A carry mismatch reports the lost entry shard fact and asks for a lane-local yield; an unlocalized operator reports its name and asks for lane-local operands or a localized read address. Explicit-boundary admission failures use user-facing `CHECK_SPAN` diagnostics. Failures after implicit or AUTO halving are compiler postcondition violations and use `INTERNAL_CHECK_SPAN` without authoring advice. Carry mismatches are reported first if both categories are present.
 
 After lowering, AUTO wraps a single straight-line vector phase when the same
 structural verifier accepts its region boundaries. It preserves compute order and the lane variable identity. The lane binding moves

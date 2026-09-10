@@ -1732,5 +1732,51 @@ def test_lowered_flat_boundary_requires_explicit_split(op_name):
     assert any("requires an explicit split" in d.message for d in diagnostics)
 
 
+@pytest.mark.parametrize("in_region", [False, True])
+@pytest.mark.parametrize("binding", ["assign", "inline", "loop_arg", "loop_result", "if_result"])
+def test_lowered_boundary_checks_locally_defined_operands(in_region, binding):
+    """Only external values bypass the lowered boundary's operand-memory check."""
+    span = ir.Span.unknown()
+    source = ir.Var("source", _tile([32, 128], MS.Vec), span)
+    local = ir.Var("local", source.type, span)
+    stmts = []
+    if binding == "assign":
+        stmts.append(ir.AssignStmt(local, source, span))
+    elif binding == "inline":
+        local = T.add(source, source, span=span)
+    elif binding == "if_result":
+        stmts.append(
+            ir.IfStmt(
+                ir.ConstInt(1, DataType.BOOL, span),
+                ir.YieldStmt([source], span),
+                ir.YieldStmt([source], span),
+                [local],
+                span,
+            )
+        )
+    else:
+        carry = ir.IterArg("carry", source.type, source, span)
+        loop_body = [ir.YieldStmt([carry], span)]
+        if binding == "loop_arg":
+            call = T.aiv_shard(carry, split=1, span=span)
+            loop_body.insert(0, ir.AssignStmt(ir.Var("inside", call.type, span), call, span))
+        stmts.append(
+            ir.WhileStmt(
+                ir.ConstInt(1, DataType.BOOL, span), [carry], ir.SeqStmts(loop_body, span), [local], span
+            )
+        )
+    if binding != "loop_arg":
+        call = T.aiv_shard(local, split=1, span=span)
+        stmts.append(ir.AssignStmt(ir.Var("half", call.type, span), call, span))
+    body = _region(ir.SplitMode.UP_DOWN, stmts) if in_region else ir.SeqStmts(stmts, span)
+    func = ir.Function(
+        "kernel", [(source, _IN)], [], body, span, ir.FunctionType.InCore, attrs={"split_aiv": True}
+    )
+    props = passes.IRPropertySet()
+    props.insert(passes.IRProperty.AivSplitLoweredValid)
+    diagnostics = passes.PropertyVerifierRegistry.verify(props, ir.Program([func], "local_operand", span))
+    assert any("operand is in Vec" in d.message for d in diagnostics)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

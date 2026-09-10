@@ -35,8 +35,8 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 20 | `20-infer_tile_memory_space.md` | 20th pass |
 | 21 | `21-insert_mx_scale_addr.md` | Inserts `tile.tget_scale_addr` before MX matmul consumers after InferTileMemorySpace resolves their memory spaces |
 | 22 | `22-resolve_backend_op_layouts.md` | 22nd pass |
-| 23 | `23-lower_auto_vector_split.md` | Live auto-split lowering path; converts AUTO `pl.split` mixed InCore functions into the explicit `split_aiv` form (aiv_shard/aic_gather + halved vector sub-region). ALSO the sole consumer of the first-class `SplitAivScopeStmt` region node (`pl.split_aiv`, nestable/multi-mode): lowers each region in place (region-scoped halving; explicit-boundary bodies passed through unchanged) and erases the scope wrapper. Runs immediately before `ExpandMixedKernel` |
-| 24 | `24-expand_mixed_kernel.md` | 24th pass (no `SplitAivScopeStmt` survives to here; its single-func-mode transpose check is skipped for functions stamped `split_aiv_region_validated` by pass 23) |
+| 23 | `23-lower_auto_vector_split.md` | Lowers each `SplitAivScopeStmt` body and retains its wrapper; synthesizes regions for eligible AUTO phases and produces `AivSplitLoweredValid` |
+| 24 | `24-expand_mixed_kernel.md` | Consumes the retained/synthesized region wrappers, validates transpose hazards per region mode, and uses pass-local placement for lane assignment |
 | 25 | `25-inject_gm_pipe_buffer.md` | Runs immediately after `ExpandMixedKernel` (backend-gated, Ascend910B) |
 | 26 | `26-split_vector_kernel.md` | 26th pass (after the convergence refactor: only stamps attrs for split_aiv functions + handles the no-split dual-AIV path; the per-op halving driver was deleted — moved to LowerAutoVectorSplit + split_axis_utils. Single-func-mode assertion relaxed for multi-mode `split_aiv` functions: stamps the mode-agnostic `dual_aiv_dispatch` and trusts the per-op `split` ints from pass 23) |
 | 27 | `27-stamp_tfree_split.md` | 27th pass (copies each cross-core tpop's split/pipe-id onto its matching tfree op; runs right after SplitVectorKernel finalizes split, before SkewCrossCorePipeline clones tpop/tfree pairs) |

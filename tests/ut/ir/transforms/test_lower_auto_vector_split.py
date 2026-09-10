@@ -66,7 +66,7 @@ becomes ``pl.tile.aiv_shard(cube_seed, split=<mode>)``.
 
 import pypto.language as pl
 import pytest
-from pypto import DataType, ir, passes
+from pypto import DataType, InternalError, ir, passes
 from pypto import backend as _backend
 from pypto.ir.instruments import make_roundtrip_instrument
 from pypto.ir.op import tile_ops as T
@@ -3295,8 +3295,8 @@ def test_explicit_region_survives_lowering_and_is_consumed_by_expansion():
 
 
 def test_explicit_region_body_is_lowered():
-    """Pass 23 consumes the region: no SplitAivScopeStmt survives, and the func is
-    stamped split_aiv + split_aiv_region_validated. The region body keeps its own
+    """Pass 23 lowers and retains the region, and stamps the function split_aiv.
+    The _lower helper removes wrappers for this body-only golden comparison. The region body keeps its own
     ``aiv_id`` and gains the injected ``subblock_idx`` + halved load (Expected)."""
     span = ir.Span.unknown()
     data = ir.Var("data", _tensor([128, 128]), span)
@@ -3322,9 +3322,8 @@ def test_explicit_region_body_is_lowered():
 def test_none_region_keeps_tiles_full_and_binds_aiv_id():
     """A task-parallel (NONE) region is passed through FULL-width: the load is NOT
     halved, offsets are NOT localized, NO internal subblock_idx is injected, the
-    author's aiv_id binding survives, the scope wrapper is dropped, and the
-    function is stamped split_aiv + split_aiv_region_validated (same as the
-    data-parallel region path)."""
+    author's aiv_id binding survives, and the function is stamped split_aiv.
+    The wrapper is retained until expansion; _lower removes it for comparison."""
     span = ir.Span.unknown()
     data = ir.Var("data", _tensor([128, 128]), span)
     out_0 = ir.Var("out_0", _tensor([128, 128]), span)
@@ -3591,8 +3590,8 @@ def test_explicit_aiv_shard_region_passed_through_not_double_sharded():
     )
 
     # The body is spliced through unchanged (NO re-halving): the user's single
-    # aiv_shard (Acc) + single aiv_id binding survive; only the scope wrapper is
-    # dropped and the function is stamped split_aiv + split_aiv_region_validated.
+    # aiv_shard (Acc) + single aiv_id binding survive. The function is stamped
+    # split_aiv; _lower removes the retained wrapper for this body-only golden.
     e_a = ir.Var("a_left", _tile([128, 128], mem=MS.Left), span)
     e_b = ir.Var("b_right", _tile([128, 128], mem=MS.Right), span)
     e_out = ir.Var("out_0", _tensor([128, 128]), span)
@@ -3652,9 +3651,8 @@ def test_while_nested_region_lowered_and_erased():
 
 def test_empty_region_is_noop():
     """An empty region (e.g. body emptied by DCE) is a no-op: the scope wrapper is
-    dropped with nothing spliced in (no crash from the per-lane index injection),
-    while out-of-region full-width compute is preserved and the function is still
-    stamped split_aiv + split_aiv_region_validated."""
+    retained without injecting a lane index. The _lower helper removes its wrapper
+    for comparison; out-of-region compute survives and the function is stamped split_aiv."""
     span = ir.Span.unknown()
     data = ir.Var("data", _tensor([128, 128]), span)
     out_0 = ir.Var("out_0", _tensor([128, 128]), span)
@@ -3794,9 +3792,8 @@ def test_auto_path_unchanged():
     """An AUTO ``pl.split`` function must NOT take the explicit-region branch.
 
     The full AUTO lowering is pinned by the Before/Expected tests at the top of
-    this file. What is asserted here is the one fact those do not isolate: the
-    region path's ``split_aiv_region_validated`` marker is absent, so a function
-    with no ``SplitAivScopeStmt`` provably went through the whole-function arm.
+    this file. This fixture starts without a region and checks that whole-function
+    lowering sets split_aiv without reintroducing the removed validation attribute.
     """
 
     @pl.program
@@ -4002,8 +3999,8 @@ def test_mixed_explicit_implicit_region_in_while_rejected():
 # are still per-lane by construction. Two classes are admitted — pure generators
 # (tile.full/create/ci/random) and address-carrying ops (tile.load/slice/extract)
 # whose args reference the region's lane index. The rationale for each, and for
-# why a generator is NOT added to half_tiles, lives at ScanRegionHalfWidth in
-# src/ir/transforms/lower_auto_vector_split_pass.cpp — keep it in one place.
+# why a generator is NOT added to half_tiles, lives at ScanSplitBody in
+# src/ir/transforms/utils/split_axis_utils.cpp — keep it in one place.
 #
 # The explicit path splices the region body through UNCHANGED, so a positive
 # test's Expected is literally its Before minus the scope wrapper. That identity
@@ -4407,8 +4404,7 @@ def test_region_rejects_lane_reference_on_non_addressing_op():
 # Region lowering walks for / while / if / seq but deliberately NOT ScopeStmt: a
 # scope carries outlining and name-visibility semantics that region-local
 # halving must not reach through. A region behind a scope therefore cannot be
-# lowered, and the pass must say so instead of stamping
-# ``split_aiv_region_validated`` on a function whose region guards never ran.
+# lowered, and the pass must reject it before claiming AivSplitLoweredValid.
 #
 # These are the only tests here authored in the ``@pl.program`` DSL, because the
 # DSL is what produces the shape: an author-written ``with pl.at(...)`` inside a
@@ -4484,9 +4480,8 @@ def test_scope_nested_region_guards_not_bypassed():
 def test_scope_inside_region_body_is_rejected():
     """The mirror case: a scope nested INSIDE a region body, not around it.
 
-    The region itself is consumed here, so the surviving-region guard passes —
-    but the inner walks (``LowerStmts`` / ``CheckNoCubeTileHalved`` /
-    ``ScanRegionHalfWidth``) step over a ``ScopeStmt`` rather than entering it,
+    The region wrapper is retained, but the inner walks (``LowerStmts`` / ``CheckNoCubeTileHalved`` /
+    ``ScanSplitBody``) step over a ``ScopeStmt`` rather than entering it,
     and the vector ops inside would be spliced out FULL-WIDTH with both AIV lanes
     computing the whole tile, silently. Hand-built because the DSL cannot reach
     it: ``OutlineIncoreScopes`` lifts a ``with pl.at(...)`` inside a region into
@@ -5384,6 +5379,34 @@ def test_nested_none_region_owns_its_transpose_mode():
         expanded = passes.expand_mixed_kernel()(program)
     assert _split_region_count(expanded) == 0
     assert len(_placements(expanded, ir.get_op("tile.transpose").name)) == 1
+
+
+@pytest.mark.parametrize("in_region", [False, True])
+def test_transformed_body_admission_failure_is_internal(in_region):
+    """A discarded tile load exposes a missing halving fact in transformed IR."""
+    span = ir.Span.unknown()
+    source = ir.Var("source", _tensor([16, 16]), span)
+    load = T.load(source, [0, 0], [16, 16], target_memory=MS.Vec, span=span)
+    body = ir.EvalStmt(load, span)
+    params = [(source, _IN)]
+    if not in_region:
+        left = ir.Var("left", _tile([16, 16], mem=MS.Left), span)
+        right = ir.Var("right", _tile([16, 16], mem=MS.Right), span)
+        params.extend([(left, _IN), (right, _IN)])
+        body = ir.SeqStmts([ir.EvalStmt(T.matmul(left, right, span=span), span), body], span)
+    if in_region:
+        body = ir.SplitAivScopeStmt(split=ir.SplitMode.UP_DOWN, body=body, span=span)
+    func = ir.Function(
+        "broken_lowering",
+        params,
+        [],
+        body,
+        span,
+        ir.FunctionType.InCore,
+        attrs={"split": ir.SplitMode.UP_DOWN},
+    )
+    with passes.PassContext([]), pytest.raises(InternalError, match="Internal error: LowerAutoVectorSplit"):
+        passes.lower_auto_vector_split()(ir.Program([func], "broken_lowering", span))
 
 
 if __name__ == "__main__":

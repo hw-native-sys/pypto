@@ -243,6 +243,8 @@ struct FunctionSplitFacts {
   /// param, an IterArg or a loop return var has no defining call, and a check
   /// that cannot see how a value was produced must stay silent about it.
   std::unordered_map<const Var*, ValueDef> defs;
+  /// All local bindings, including loop carries and control-flow results.
+  std::unordered_set<const Var*> local_defs;
   /// The first boundary op of each transport class, for check (k). Only the
   /// first of each is kept: the check is "are both classes present", and one
   /// diagnostic naming one representative of each is the report — one per
@@ -270,7 +272,24 @@ class FunctionSplitFactScanner : public IRVisitor {
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (op->var_) {
       facts_.defs[op->var_.get()] = ValueDef{std::dynamic_pointer_cast<const Call>(op->value_), cur_region_};
+      facts_.local_defs.insert(op->var_.get());
     }
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const ForStmtPtr& op) override {
+    facts_.local_defs.insert(op->loop_var_.get());
+    RecordLoopDefs(op);
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    RecordLoopDefs(op);
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const IfStmtPtr& op) override {
+    for (const auto& var : op->return_vars_) facts_.local_defs.insert(var.get());
     IRVisitor::VisitStmt_(op);
   }
 
@@ -282,6 +301,12 @@ class FunctionSplitFactScanner : public IRVisitor {
   [[nodiscard]] const FunctionSplitFacts& facts() const { return facts_; }
 
  private:
+  template <typename T>
+  void RecordLoopDefs(const std::shared_ptr<const T>& op) {
+    for (const auto& var : op->iter_args_) facts_.local_defs.insert(var.get());
+    for (const auto& var : op->return_vars_) facts_.local_defs.insert(var.get());
+  }
+
   /// Classify one boundary op into its transport class, for check (k).
   ///
   /// Keyed on the op's OWN ``split`` kwarg rather than on the enclosing
@@ -870,7 +895,9 @@ class SplitAivStructuralVerifier : public IRVisitor {
     // the AIV half while the producer stays behind, leaving the cube half
     // referencing a value it never defines (which surfaces much later as an orphan
     // Mem.Vec allocation and an internal codegen error).
-    if (!lowered_ && !op->args_.empty()) {
+    auto operand_var = op->args_.empty() ? nullptr : AsVarLike(op->args_[0]);
+    const bool shared_external = lowered_ && operand_var && !facts_.local_defs.count(operand_var.get());
+    if (!shared_external && !op->args_.empty()) {
       if (auto operand_ms = ResolvedTileMemory(op->args_[0]);
           operand_ms.has_value() && *operand_ms != contract->operand) {
         Err(op->span_, "'" + op->op_->name_ + "' operand is in " + MemorySpaceToString(*operand_ms) +

@@ -77,10 +77,10 @@ non-`ConstInt` extent is treated as non-singleton and flagged conservatively).
 own split axis, erases the wrapper, and records placement on the same consumed
 body used by both mixed-function classification and expansion. Pure-AIV functions
 also consume their regions here. Functions with no regions retain the existing
-whole-function transpose check.
+whole-function transpose check and skip region consumption without rebuilding their bodies. Erased-region comments are prepended to the first emitted statement without mutating input metadata, including when a boundary expands into transport operations.
 
 The pass requires `AivSplitLoweredValid`. Source boundaries use strict operand
-memory rules; lowered transport checks operand availability on the producing
+memory rules; lowered verification retains those checks for locally defined operands. Expansion checks operand availability, using lexical placement for inline calls as well as bound values, on the producing
 lane, so parameters shared by both lanes remain valid regardless of their memory
 annotation. Boundary result memory still describes the consuming lane.
 

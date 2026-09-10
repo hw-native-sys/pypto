@@ -53,14 +53,12 @@ CVDirection ClassifyMoveDirection(const CallPtr& call);
 bool HasStatedLane(const CallPtr& call);
 
 /// Intrinsic lane from the operator, kwargs and operand/result memory spaces.
-CoreAffinity ClassifyIntrinsicCallAffinity(const CallPtr& call);
+CoreAffinity ClassifyCallAffinity(const CallPtr& call);
 
 /// True when this call's operator declares `set_no_duplicate()`, i.e. running
 /// it on a second core would change what the program means. False for a
 /// GlobalVar callee (not an operator) and for unregistered names.
 bool IsNoDuplicateCall(const CallPtr& call);
-
-CoreAffinity ClassifyCallAffinity(const CallPtr& call);
 
 struct CVBoundaryMove {
   CVDirection direction;
