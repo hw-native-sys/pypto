@@ -58,7 +58,10 @@ class CacheStats:
     ready_hits: int = 0
     generated_hits: int = 0
     misses: int = 0
+    disabled_requests: int = 0
+    forced_rebuilds: int = 0
     bypasses: int = 0
+    last_bypass_reason: str | None = None
     invalid_entries: int = 0
     storage_errors: int = 0
     generation_builds: int = 0
@@ -97,6 +100,13 @@ def record_stats(**increments: int) -> None:
     with _lock:
         for name, value in increments.items():
             _totals[name] += value
+
+
+def record_bypass(reason: str) -> None:
+    """Record an enabled-cache fallback and its latest diagnostic atomically."""
+    with _lock:
+        _totals["bypasses"] += 1
+        _totals["last_bypass_reason"] = reason
 
 
 @contextmanager

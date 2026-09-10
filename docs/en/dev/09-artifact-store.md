@@ -32,7 +32,10 @@ value and must finish writing files before returning. Compiler exceptions,
 including `OSError`, and missing/invalid build outputs propagate. Builders must
 not recursively acquire the same key's lock.
 
-`ArtifactBuild` reports `HIT`, `PUBLISHED`, or `PRIVATE`. Fresh builds retain both
+`ArtifactBuild` reports `HIT`, `PUBLISHED`, or `PRIVATE`. Its optional `failure` is a
+`BuildFailure` (`INVALID`, `STORAGE`, `LOCK`, or `PUBLICATION`), independent
+of diagnostic wording. A read-only miss has no failure.
+ Fresh builds retain both
 the builder's value and `private_directory`, including after successful
 publication: the value may still reference private files. The adapter owns
 rebinding and eventual cleanup. Hits return an `ArtifactHandle` with no builder

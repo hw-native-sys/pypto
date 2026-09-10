@@ -2511,6 +2511,8 @@ class JITFunction:
         compile_kwargs, bypass_cache = _resolve_compile_request(run_config)
         cache_config = capture_cache_config(getattr(run_config, "cache_config", None))
         record_stats(requests=1)
+        if not cache_config.enabled:
+            record_stats(disabled_requests=1)
         ordered_args = [
             specialization.arguments[n] for n in specialization.param_names if n in specialization.arguments
         ]
@@ -2528,7 +2530,7 @@ class JITFunction:
                 )
 
         if bypass_cache:
-            record_stats(bypasses=1)
+            record_stats(forced_rebuilds=1)
             return build(), ordered_args, run_config
 
         key = make_cache_key(
@@ -2570,7 +2572,6 @@ class JITFunction:
                 record_stats(object_hits=1)
                 compiled = self._cache[key]
             else:
-                record_stats(bypasses=1)
                 compiled = self._cache[key] = build()
         return compiled, ordered_args, run_config
 

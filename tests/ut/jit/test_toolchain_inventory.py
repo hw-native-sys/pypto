@@ -90,13 +90,13 @@ def test_implicit_include_roots_are_resolved_and_required(tmp_path):
 def test_persistent_specialization_preserves_scalar_types(left, right):
     from pypto._identity import digest_record  # noqa: PLC0415
     from pypto.jit._persistent import _record, _typed_specialization  # noqa: PLC0415
-    from pypto.jit.cache import ScalarCacheInfo  # noqa: PLC0415
+    from pypto.jit.cache import CacheKey, ScalarCacheInfo  # noqa: PLC0415
 
     assert digest_record(_record(ScalarCacheInfo("value", left))) != digest_record(
         _record(ScalarCacheInfo("value", right))
     )
-    left_key = (None, None, None, None, (ScalarCacheInfo("value", left),))
-    right_key = (None, None, None, None, (ScalarCacheInfo("value", right),))
+    left_key = CacheKey("source", None, None, (), (ScalarCacheInfo("value", left),), None, None)
+    right_key = CacheKey("source", None, None, (), (ScalarCacheInfo("value", right),), None, None)
     assert _typed_specialization(left_key) != _typed_specialization(right_key)
 
 
@@ -125,6 +125,78 @@ def test_linker_scripts_follow_sysroot_and_ignore_comment_paths(tmp_path):
     library.unlink()
     with pytest.raises(FileNotFoundError):
         _toolchain._linker_script_inputs({script}, sysroot)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "GROUP ( libdependency.a )",
+        "INPUT ( -ldependency )",
+        "GROUP ( AS_NEEDED ( -l:libdependency.a ) )",
+        'INPUT ( "relative path/libdependency.a" )',
+        "GROUP ( ../elsewhere/libdependency.a )",
+        "INPUT ( =/lib/libdependency.a )",
+        "INPUT ( $SYSROOT/lib/libdependency.a )",
+    ],
+)
+def test_linker_search_dependent_inputs_disable_identity(tmp_path, monkeypatch, command):
+    script = tmp_path / "libwrapper.so"
+    script.write_text(command)
+    # Even an existing local candidate is not proof of linker search resolution.
+    dependency = tmp_path / "libdependency.a"
+    dependency.write_bytes(b"!<arch>\nold")
+    monkeypatch.chdir(tmp_path)
+    for contents in (b"!<arch>\nold", b"!<arch>\nnew"):
+        dependency.write_bytes(contents)
+        with pytest.raises(ValueError, match="requires search-path resolution"):
+            _toolchain._linker_script_inputs({script}, None)
+
+
+def test_nested_absolute_linker_dependency_changes_fresh_identity(tmp_path):
+    script = tmp_path / "installation/libwrapper.so"
+    script.parent.mkdir()
+    nested = tmp_path / "outside/nested script.ld"
+    nested.parent.mkdir()
+    dependency = nested.parent / "libdependency.a"
+    dependency.write_bytes(b"!<arch>\nold")
+    nested.write_text(f'INPUT ( "{dependency}" )')
+    script.write_text(
+        '/* GROUP ( -lignored ) */\nOUTPUT_FORMAT("elf64-littleaarch64")\n'
+        f'OUTPUT_ARCH(aarch64) GROUP ( AS_NEEDED ( "{nested}" ) );'
+    )
+
+    def capture():
+        paths = _toolchain._linker_script_inputs({script}, None)
+        assert paths == {script, nested, dependency}
+        component = _toolchain._component(paths)
+        inputs = _toolchain.ToolchainInputs(component, component, component, component, component)
+        return _toolchain.InstallationIdentityCache().capture(inputs)
+
+    before = capture()
+    dependency.write_bytes(b"!<arch>\nnew")
+    after = capture()
+    assert before.usable and after.usable and before.digest != after.digest
+    nested.write_text("INPUT ( -ldependency )")
+    with pytest.raises(ValueError, match="requires search-path resolution"):
+        capture()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'SEARCH_DIR("/untracked") GROUP ( -ldependency )',
+        'INCLUDE "another.ld"',
+        "STARTUP ( /untracked.o )",
+        'INPUT ( "/unterminated )',
+        "GROUP ( /* unterminated )",
+        "GROUP ( AS_NEEDED ( /missing )",
+    ],
+)
+def test_unknown_or_malformed_linker_scripts_are_unavailable(tmp_path, command):
+    script = tmp_path / "script.ld"
+    script.write_text(command)
+    with pytest.raises(ValueError, match="linker script"):
+        _toolchain._linker_script_inputs({script}, None)
 
 
 def test_gcc_link_plan_selects_actual_inputs_only(tmp_path, monkeypatch):
@@ -215,6 +287,67 @@ def test_python_optimization_splits_persistent_identity(monkeypatch):
     ordinary = _semantic_environment()
     monkeypatch.setenv("PYTHONOPTIMIZE", "1")
     assert _semantic_environment() != ordinary
+
+
+@pytest.fixture
+def compiler_metadata(monkeypatch):
+    """Keep discovery tests independent of optional runtime installations."""
+    monkeypatch.setitem(sys.modules, "simpler_setup", None)
+    monkeypatch.setitem(sys.modules, "simpler", None)
+    monkeypatch.setitem(
+        sys.modules,
+        "pypto.runtime.kernel_compiler",
+        SimpleNamespace(KernelCompiler=SimpleNamespace(_sanitizers=None)),
+    )
+
+
+@pytest.mark.usefixtures("compiler_metadata")
+@pytest.mark.parametrize("error_type", [AttributeError, KeyError])
+def test_adapter_drift_returns_unavailable_evidence(monkeypatch, error_type):
+    def fail(*args):
+        raise error_type("changed compiler inventory")
+
+    monkeypatch.setattr(_toolchain, "_compiler", fail)
+    result = _toolchain.capture_toolchain("a2a3", "tensormap_and_ringbuffer")
+    assert not result.usable and result.digest is None
+    assert "changed compiler inventory" in result.failures[0].reason
+
+
+@pytest.mark.usefixtures("compiler_metadata")
+def test_chdir_rediscovers_but_reuses_identical_component_digests(tmp_path, monkeypatch):
+    import pypto._identity as identity_module  # noqa: PLC0415
+
+    payload = tmp_path / "toolchain"
+    payload.write_bytes(b"compiler resources")
+    component = _toolchain._component({payload})
+    inputs = _toolchain.ToolchainInputs(component, component, component, component, component)
+    compiler = SimpleNamespace(project_root=tmp_path, _sanitizers=None)
+    monkeypatch.setattr(_toolchain, "_compiler", lambda *args: compiler)
+    monkeypatch.setattr(_toolchain, "find_ptoas_binary", lambda: payload)
+    monkeypatch.setattr(_toolchain, "_identities", {})
+    monkeypatch.setattr(_toolchain, "_identity_cache", _toolchain.InstallationIdentityCache())
+    discoveries, reads = [], []
+    fingerprint = identity_module.fingerprint_content
+
+    def discover(*args):
+        discoveries.append(Path.cwd())
+        return inputs
+
+    def read(roots):
+        reads.append(roots)
+        return fingerprint(roots)
+
+    monkeypatch.setattr(_toolchain, "_discover", discover)
+    monkeypatch.setattr(identity_module, "fingerprint_content", read)
+    monkeypatch.chdir(tmp_path)
+    first = _toolchain.capture_toolchain("a2a3", "tensormap_and_ringbuffer")
+    other = tmp_path / "other"
+    other.mkdir()
+    monkeypatch.chdir(other)
+    second = _toolchain.capture_toolchain("a2a3", "tensormap_and_ringbuffer")
+    assert first.usable and second == first
+    assert discoveries == [tmp_path, other]
+    assert len(reads) == 1
 
 
 if __name__ == "__main__":

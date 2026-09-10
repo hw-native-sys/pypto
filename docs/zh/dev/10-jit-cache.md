@@ -75,6 +75,11 @@ with_ir = decode.compile(config=RunConfig(cache_config=pypto.CacheConfig(enabled
 共享发布成功。运行目录及私有构建树随编译对象保持有效；没有在线清理或淘汰 API。
 离线删除缓存条目或锁文件前须停止所有消费者。
 
+缓存策略由 JIT 在选择编译对象前消费，不传入编译器选项或逐次启动选项。私有输出通常
+位于工作目录的 `build_output`；若它位于缓存根内，则使用不可预测、权限为 0700 的临时
+父目录隔离私有构建和运行输出，不对 `TMPDIR` 执行写探测。此回退父目录可能在缓存命中
+时创建，并随编译对象保留，不自动清理。
+
 ## 工具链支持与开销
 
 首个适配器支持 Linux ELF GCC 工具链、CANN BiSheng 布局、独立 ELF PTOAS，以及
@@ -83,24 +88,44 @@ wheel 清单覆盖实际虚拟环境与解释器、全部安装包资源、启�
 标识覆盖安装内容、编译器子程序与资源、隐式包含
 目录、链接输入、Python/native 运行时文件以及 ELF 动态依赖。未知启动脚本、在线构建的
 PTOAS 扩展、不支持的编译器布局、sanitizer 构建，以及 `CPATH`、`LD_PRELOAD` 等隐式
-依赖覆盖会旁路持久缓存。旁路原因由 `pypto.jit._persistent` 以 INFO 级别记录。
+依赖覆盖会旁路持久缓存。最新原因可通过 `cache_stats().last_bypass_reason` 获取，
+无需开启 INFO 日志。每次旁路也由 `pypto.jit._persistent` 以 INFO 级别记录。
 
-成功的安装标识按工具选择记忆化（memoization）。进程存活期间安装文件须保持不变，替换
+隐式链接脚本支持绝对路径的 `INPUT`/`GROUP` 依赖、嵌套 `AS_NEEDED` 以及
+`OUTPUT_FORMAT`/`OUTPUT_ARCH` 声明，按选定的 sysroot 递归追踪依赖。
+相对路径、`-l` 名称、`SEARCH_DIR`、`INCLUDE` 和未知语法需要完整的链接器搜索上下文，
+当前会旁路持久缓存，继续普通私有编译。
+
+成功的安装标识在每个进程内按工具选择和解析后的组件清单记忆化（memoization）。
+工作目录变化会重新发现工具，因为相对搜索路径可能选择不同工具；清单未变的组件直接
+复用内容摘要。进程存活期间安装文件须保持不变，替换
 后重启进程。额外应用源码每次请求重新读取。当前路径也参与标识，移动安装可能未命中。
 
 首次内容清单读取较保守，可能耗时较长。一套本地 CANN/PTOAS 安装的首次清单约需
-12 秒；该测量不代表通用性能结论。统计包含标识计算和校验时间。没有可验证本地工具链的
+12 秒；该测量不代表通用性能结论。当前每个独立新进程都需要支付这项成本。仅依赖路径、
+大小、mtime 和 inode 的磁盘记忆不能证明内容未变，因此不采用。统计包含标识计算和
+校验时间。没有可验证本地工具链的
 部署需要另一套协议，本 API 尚不支持。
 
 ## 统计与 CLI
 
 `cache_stats()` 返回不可变、线程安全的进程内快照，不扫描磁盘、不清零。
-字段为 `requests`、`object_hits`、`ready_hits`、`generated_hits`、`misses`、
-`bypasses`、`invalid_entries`、`storage_errors`、`generation_builds`、`binary_builds`、
-`lookup_ns`、`build_ns`。初始查找结果每请求计数一次，锁内复查不增加请求数。
-未命中后遇到不支持的打包输入，还会增加一次旁路计数。
-无效条目与存储错误为额外事件。构建计数反映实际阶段，耗时不包含设备执行。
-可比较前后快照获取区间统计。
+计数包括 `requests`、`object_hits`、`ready_hits`、`generated_hits`、`misses`、
+`invalid_entries`、`storage_errors`、`generation_builds`、`binary_builds`，
+耗时累计为 `lookup_ns` 和 `build_ns`。以下字段区分未使用持久缓存的原因：
+
+| 字段 | 含义 |
+| ---- | ---- |
+| `disabled_requests` | 未开启持久缓存的请求，包括私有对象命中。 |
+| `forced_rebuilds` | 诊断或显式输出要求强制编译的请求，与是否开启持久缓存无关。 |
+| `bypasses` | 已开启持久缓存，但标识或打包不可用、源码变化导致的回退。 |
+| `last_bypass_reason` | 最近一次已开启缓存的旁路原因；尚未发生时为 `None`。 |
+
+未开启缓存和强制重编不增加 `bypasses`。这些计数并非互斥：未开启持久缓存的诊断请求
+同时增加 `disabled_requests` 和 `forced_rebuilds`。初始查找每请求计数一次，锁内复查
+不增加请求数。未命中后遇到不支持的打包输入，还会增加一次旁路计数。无效条目与存储
+错误为额外事件；存储错误根据结构化状态统计，不依赖诊断文字。构建计数反映实际阶段，
+耗时不包含设备执行。比较数值字段的快照差值得到区间统计；`last_bypass_reason` 是累计上下文。
 
 ```bash
 python -m pypto.jit warm --module my_kernels --config warmup.json

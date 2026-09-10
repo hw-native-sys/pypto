@@ -598,7 +598,6 @@ class RunConfig:
     def run_options(self) -> "RunOptions":
         """Return the dispatch-side half as a :class:`RunOptions`."""
         return RunOptions(
-            cache_config=self.cache_config,
             platform=self.platform,
             device_id=self.device_id,
             aicpu_thread_num=self.aicpu_thread_num,
@@ -835,9 +834,7 @@ class DfxOptions:
 class RunOptions:
     """What a dispatch reads: where it runs, how big its rings are, what it collects.
 
-    Everything here is per-launch. Cache policy selects artifact reuse before
-    JIT dispatch; the remaining fields control execution. These fields do not
-    change generated code.
+    Everything here is per-launch. Nothing here reaches compilation.
 
     ``platform`` appears in both halves because it is genuinely two decisions
     that must agree: the target codegen builds for, and the device the worker
@@ -853,7 +850,6 @@ class RunOptions:
     """
 
     platform: str = "a2a3sim"
-    cache_config: CacheConfig | None = None
     device_id: int = 0
     aicpu_thread_num: int | None = None
     # Scalar (broadcast to every scope-depth ring) or a list of ``_RING_DEPTH``

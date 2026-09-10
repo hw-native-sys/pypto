@@ -88,6 +88,11 @@ with_ir = decode.compile(config=RunConfig(cache_config=pypto.CacheConfig(enabled
 
 Repeat application identity inputs when changing storage policy. A read-only
 miss can build privately, so successful warmup alone does not prove publication.
+Cache policy is consumed by JIT before object selection; it is not forwarded
+to compiler or per-launch options. Private output normally uses `build_output`
+in the working directory. If that is inside the cache, an unpredictable 0700
+temporary parent isolates both private builds and runtime output, without probing
+`TMPDIR` for writability. The fallback parent may be created on a cache hit.
 Runtime directories and private build trees remain alive with compiled objects;
 there is no online cleanup or eviction API. Stop all consumers before offline
 removal of cache entries or lock files.
@@ -103,29 +108,55 @@ installation content, compiler subprograms/resources, implicit include roots,
 link inputs, Python/native runtime files and resolved ELF dependencies. Unknown
 launchers, online-built PTOAS extensions, unsupported compiler layouts, sanitizer
 builds and implicit dependency overrides such as `CPATH` or `LD_PRELOAD` bypass
-persistence. The bypass reason is logged by `pypto.jit._persistent` at INFO.
+persistence. The latest bypass reason is available in
+`cache_stats().last_bypass_reason`, even when INFO logging is disabled. Every
+bypass is also logged by `pypto.jit._persistent` at INFO.
 
-Successful installation identities are memoized by tool selection. Installed
+Implicit linker scripts support absolute `INPUT`/`GROUP` dependencies, nested
+`AS_NEEDED`, and `OUTPUT_FORMAT`/`OUTPUT_ARCH` declarations. Dependencies are
+followed recursively with the selected sysroot. Relative inputs, `-l` names,
+`SEARCH_DIR`, `INCLUDE`, and unknown syntax bypass persistence until the complete
+linker search context can be modeled; ordinary private compilation still works.
+
+Successful installation identities are memoized within each process by tool
+selection and resolved component inventory. A working-directory change reruns
+discovery because relative search roots can select different tools; components
+with unchanged inventories reuse their existing content digests. Installed
 files must remain immutable for the process lifetime; restart after replacing
 them. Additional application sources are refreshed each request. Paths currently
 participate in identity, so moving an installation may cause a miss.
 
 Cold inventory reads are deliberately conservative and can be expensive. One
 local CANN/PTOAS installation took approximately 12 seconds for its first content
-inventory; that measurement is not a general performance claim. Statistics
+inventory; that measurement is not a general performance claim. Each new
+independent process currently pays this cost. A disk memo based only on path,
+size, mtime and inode cannot prove unchanged contents and is not used. Statistics
 include identity and validation time. Deployment without a verifiable local
 toolchain is a separate protocol and is not enabled by this API.
 
 ## Statistics and CLI
 
 `cache_stats()` returns an immutable, thread-safe, process-local snapshot. It
-never scans disk or resets counters. Fields are `requests`, `object_hits`,
-`ready_hits`, `generated_hits`, `misses`, `bypasses`, `invalid_entries`,
-`storage_errors`, `generation_builds`, `binary_builds`, `lookup_ns`, and `build_ns`.
-Initial lookups count once per request; lock rechecks do not add requests.
-A miss that later encounters unsupported packaging also records a bypass.
-Invalid/storage events are additional counters. Build counts record actual
-stages, and timings exclude device execution. Compare snapshots for intervals.
+never scans disk or resets counters. Counters include `requests`, `object_hits`,
+`ready_hits`, `generated_hits`, `misses`, `invalid_entries`, `storage_errors`,
+`generation_builds`, and `binary_builds`; time totals are `lookup_ns` and `build_ns`.
+The following fields distinguish why persistence was not used:
+
+| Field | Meaning |
+| ----- | ------- |
+| `disabled_requests` | Requests with persistence disabled, including private object hits. |
+| `forced_rebuilds` | Diagnostic or explicit-output requests that force compilation, regardless of policy. |
+| `bypasses` | Enabled requests that fall back because identity or packaging is unavailable or sources changed. |
+| `last_bypass_reason` | Latest enabled-cache bypass diagnostic, or `None` before any bypass. |
+
+Disabled requests and forced rebuilds do not increment `bypasses`. These counters
+are not mutually exclusive: a disabled diagnostic request increments both
+`disabled_requests` and `forced_rebuilds`. Initial lookups count once per request;
+lock rechecks do not add requests. A miss that later encounters unsupported
+packaging also records a bypass. Invalid/storage events are additional counters;
+storage failures use typed results independently of diagnostic wording. Build
+counts record actual stages, and timings exclude device execution. Compare numeric
+fields between snapshots for intervals; `last_bypass_reason` is cumulative context.
 
 ```bash
 python -m pypto.jit warm --module my_kernels --config warmup.json

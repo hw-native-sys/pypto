@@ -17,7 +17,7 @@ extents do not create unnecessary specializations.
 import dataclasses
 import hashlib
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core.passes import MemoryPlanner, RuntimeKind, runtime_kind_to_name
@@ -69,18 +69,16 @@ class ScalarCacheInfo:
     value: int | float | bool
 
 
-# A cache key is a tuple of
-# (source_hash, platform, strategy, tensor_infos, scalar_infos, dist_config, compile_opts).
-# Using a plain tuple keeps it hashable without a custom __hash__.
-CacheKey = tuple[
-    str,
-    str | None,
-    "OptimizationStrategy | None",
-    tuple[TensorCacheInfo, ...],
-    tuple[ScalarCacheInfo, ...],
-    tuple[Any, ...] | None,
-    tuple[Any, ...] | None,
-]
+class CacheKey(NamedTuple):
+    """Named specialization components, retaining tuple equality and hashing."""
+
+    source_hash: str
+    platform: str | None
+    strategy: "OptimizationStrategy | None"
+    tensor_infos: tuple[TensorCacheInfo, ...]
+    scalar_infos: tuple[ScalarCacheInfo, ...]
+    dist_config: tuple[Any, ...] | None
+    compile_opts: tuple[Any, ...] | None
 
 
 def _freeze(value: Any) -> Any:
@@ -240,7 +238,7 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
         ("dep_layouts", dep_layouts),
         ("runtime", runtime_kind_to_name(runtime)),
     )
-    return (
+    return CacheKey(
         source_hash,
         platform,
         strategy,

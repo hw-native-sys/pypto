@@ -66,6 +66,15 @@ class BuildDisposition(Enum):
     PRIVATE = "private"
 
 
+class BuildFailure(Enum):
+    """Typed cache failure retaining a private build; independent of diagnostics."""
+
+    INVALID = "invalid"
+    STORAGE = "storage"
+    LOCK = "lock"
+    PUBLICATION = "publication"
+
+
 @dataclass(frozen=True)
 class ArtifactHandle:
     """A validated shared directory; consumers must treat its contents as immutable."""
@@ -116,9 +125,18 @@ class ArtifactBuild(Generic[T]):
     private_directory: Path | None = None
     value: T | None = None
     reason: str | None = None
+    failure: BuildFailure | None = None
 
 
 _BuildRequest = tuple[Path, Path | None, bool, str, str]
+
+
+def _lookup_failure(lookup: ArtifactLookup) -> BuildFailure | None:
+    if lookup.status is LookupStatus.INVALID:
+        return BuildFailure.INVALID
+    if lookup.status is LookupStatus.STORAGE_ERROR:
+        return BuildFailure.STORAGE
+    return None
 
 
 @dataclass(frozen=True)
@@ -309,24 +327,33 @@ class ArtifactStore:
         if lookup.status is LookupStatus.HIT:
             return ArtifactBuild(BuildDisposition.HIT, handle=lookup.handle)
         if self.readonly:
-            return self._build_private(key, spec, builder, lookup.reason or "Artifact cache is read-only")
+            return self._build_private(
+                key, spec, builder, lookup.reason or "Artifact cache is read-only", _lookup_failure(lookup)
+            )
         with ExitStack() as stack:
             try:
                 lock_directory = self.root / "locks"
                 _mkdir(lock_directory)
                 stack.enter_context(file_lock(lock_directory / f"{key.digest}.lock"))
             except (OSError, ValueError) as exc:
-                return self._build_private(key, spec, builder, f"Artifact lock unavailable: {exc}")
+                return self._build_private(
+                    key, spec, builder, f"Artifact lock unavailable: {exc}", BuildFailure.LOCK
+                )
             lookup = self.lookup(key, spec)
             if lookup.status is LookupStatus.HIT:
                 return ArtifactBuild(BuildDisposition.HIT, handle=lookup.handle)
             if lookup.status is not LookupStatus.MISS:
-                return self._build_private(key, spec, builder, lookup.reason)
+                return self._build_private(key, spec, builder, lookup.reason, _lookup_failure(lookup))
             built = self._build_private(key, spec, builder, None)
             return self._publish(key, spec, built)
 
     def _build_private(
-        self, key: ArtifactKey, spec: ArtifactSpec, builder: Callable[[Path], T], reason: str | None
+        self,
+        key: ArtifactKey,
+        spec: ArtifactSpec,
+        builder: Callable[[Path], T],
+        reason: str | None,
+        failure: BuildFailure | None = None,
     ) -> ArtifactBuild[T]:
         # tempfile.gettempdir() probes candidate directories by writing files.
         # A candidate could be inside the read-only cache, so let the adapter
@@ -341,7 +368,7 @@ class ArtifactStore:
         value = builder(directory)
         make_manifest(directory, key, spec)
         return ArtifactBuild(
-            BuildDisposition.PRIVATE, private_directory=directory, value=value, reason=reason
+            BuildDisposition.PRIVATE, private_directory=directory, value=value, reason=reason, failure=failure
         )
 
     def _publish(self, key: ArtifactKey, spec: ArtifactSpec, built: ArtifactBuild[T]) -> ArtifactBuild[T]:
@@ -366,6 +393,7 @@ class ArtifactStore:
                 private_directory=directory,
                 value=built.value,
                 reason=f"Artifact publication unavailable: {exc}",
+                failure=BuildFailure.PUBLICATION,
             )
         finally:
             if staging is not None:

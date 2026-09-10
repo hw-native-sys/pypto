@@ -873,5 +873,180 @@ def test_automatic_jit_changing_source_during_build_stays_private(tmp_path, auto
         assert published._artifact_runtime is not None and len(builds) == 2
 
 
+def test_cache_statistics_distinguish_disabled_forced_and_unavailable(
+    tmp_path, automatic_jit_case, monkeypatch
+):
+    kernel, builds = automatic_jit_case
+    disabled = RunConfig(cache_config=CacheConfig(enabled=False))
+    before = cache_stats()
+    with passes.PassContext([]):
+        first = kernel.compile(config=disabled)
+        assert kernel.compile(config=disabled) is first
+        after = cache_stats()
+        assert after.disabled_requests - before.disabled_requests == 2
+        assert after.bypasses == before.bypasses
+        assert after.forced_rebuilds == before.forced_rebuilds
+        assert after.object_hits - before.object_hits == 1
+        assert after.generation_builds - before.generation_builds == 1
+        forced = RunConfig(
+            cache_config=CacheConfig(enabled=True), save_kernels_dir=str(tmp_path / "diagnostics")
+        )
+        kernel.compile(config=forced)
+        diagnostic = cache_stats()
+        assert diagnostic.forced_rebuilds - after.forced_rebuilds == 1
+        assert diagnostic.bypasses == after.bypasses
+        assert diagnostic.disabled_requests == after.disabled_requests
+        # A future hashable specialization component is valid for private JIT,
+        # but unsupported by the persistent record encoder.
+        from pypto.jit import decorator  # noqa: PLC0415
+
+        make_key = decorator.make_cache_key
+        monkeypatch.setattr(
+            decorator,
+            "make_cache_key",
+            lambda **kwargs: make_key(**kwargs)._replace(compile_opts=(object(),)),
+        )
+        cache_root = tmp_path / "cache"
+        config = RunConfig(cache_config=CacheConfig(enabled=True, root=cache_root))
+        private = kernel.compile(config=config)
+        assert private.program is not None and private._artifact_runtime is None
+        unavailable = cache_stats()
+        assert unavailable.bypasses - diagnostic.bypasses == 1
+        assert "Unsupported specialization identity type: object" in unavailable.last_bypass_reason
+        assert unavailable.disabled_requests == diagnostic.disabled_requests
+        assert unavailable.forced_rebuilds == diagnostic.forced_rebuilds
+        assert len(builds) == 3 and not cache_root.exists()
+        # The fallback compiler is outside the catch boundary and runs once.
+        calls = []
+
+        def fail(*args, **kwargs):
+            calls.append(None)
+            raise TypeError("actual compiler failure")
+
+        monkeypatch.setattr(kernel, "_compile", fail)
+        with pytest.raises(TypeError, match="actual compiler failure"):
+            kernel.compile(config=config)
+        assert len(calls) == 1
+
+
+def test_private_fallback_parent_is_secure_for_builds_and_restored_runtime(
+    tmp_path, automatic_jit_case, monkeypatch
+):
+    import os  # noqa: PLC0415
+    import stat  # noqa: PLC0415
+
+    from pypto.jit import _persistent  # noqa: PLC0415
+
+    kernel, _ = automatic_jit_case
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    monkeypatch.chdir(cache_root)
+    temporary = tmp_path / "temporary"
+    temporary.mkdir()
+    attacker = tmp_path / "attacker"
+    attacker.mkdir()
+    (temporary / "pypto-jit-private").symlink_to(attacker, target_is_directory=True)
+    mkdtemp = _persistent.tempfile.mkdtemp
+    parents = []
+
+    def allocate(*, prefix, dir):
+        # Redirect only the explicit OS temp parent to the fixture's temp tree.
+        if dir == Path("/tmp"):
+            directory = mkdtemp(prefix=prefix, dir=temporary)
+            parents.append(Path(directory))
+            return directory
+        return mkdtemp(prefix=prefix, dir=dir)
+
+    monkeypatch.setattr(_persistent.tempfile, "mkdtemp", allocate)
+    monkeypatch.setenv("TMPDIR", str(cache_root))
+    config = RunConfig(cache_config=CacheConfig(enabled=True, root=cache_root))
+    with passes.PassContext([]):
+        kernel.compile(config=config)
+        kernel._artifact_objects.clear()
+        restored = kernel.compile(config=config)
+        assert restored.program is None
+    assert len(parents) == 1
+    parent = parents[0]
+    assert parent.stat().st_uid == os.getuid()
+    assert stat.S_IMODE(parent.stat().st_mode) == 0o700
+    assert list(parent.glob("pypto-build-*"))
+    assert not list(attacker.iterdir())
+    assert not (cache_root / "build_output").exists()
+    # Runtime output is also rooted in the protected parent.
+    assert parent in restored._artifact_runtime.run_directory.parents
+
+
+@pytest.mark.parametrize("binary", [False, True])
+@pytest.mark.parametrize("failure", ["lock", "publication"])
+def test_storage_statistics_use_typed_failure_despite_changed_message(
+    tmp_path, automatic_jit_case, monkeypatch, binary, failure
+):
+    from dataclasses import replace  # noqa: PLC0415
+
+    from pypto.jit import artifact_cache  # noqa: PLC0415
+
+    kernel, _ = automatic_jit_case
+    config = RunConfig(cache_config=CacheConfig(enabled=True, root=tmp_path / "cache"))
+    with passes.PassContext([]):
+        if binary:
+            kernel.compile(config=config)
+        transact = artifact_cache.ArtifactStore._get_or_build
+
+        def changed_message(self, *args):
+            return replace(transact(self, *args), reason="Completely different diagnostic wording")
+
+        def fail(*args):
+            raise OSError("injected failure")
+
+        monkeypatch.setattr(artifact_cache.ArtifactStore, "_get_or_build", changed_message)
+        monkeypatch.setattr(artifact_cache, "file_lock" if failure == "lock" else "_rename_noreplace", fail)
+        before = cache_stats()
+        if binary:
+            kernel.warmup(config=config)
+        else:
+            kernel.compile(config=config)
+        assert cache_stats().storage_errors - before.storage_errors == 1
+
+
+@pytest.mark.parametrize("command", ["GROUP ( libdependency.a )", "INPUT ( -ldependency )"])
+def test_unresolved_linker_dependency_compiles_privately(tmp_path, automatic_jit_case, monkeypatch, command):
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from pypto.jit import _persistent, _toolchain  # noqa: PLC0415
+
+    kernel, builds = automatic_jit_case
+    script = tmp_path / "wrapper.so"
+    script.write_text(command)
+    monkeypatch.setattr(_persistent, "capture_toolchain", _toolchain.capture_toolchain)
+    monkeypatch.setitem(
+        sys.modules,
+        "pypto.runtime.kernel_compiler",
+        SimpleNamespace(KernelCompiler=SimpleNamespace(_sanitizers=None)),
+    )
+    monkeypatch.setattr(
+        _toolchain, "_compiler", lambda *args: SimpleNamespace(project_root=tmp_path, _sanitizers=None)
+    )
+    monkeypatch.setattr(_toolchain, "find_ptoas_binary", lambda: script)
+
+    def discover(*args):
+        _toolchain._linker_script_inputs({script}, None)
+        pytest.fail("Unresolved linker inputs must not produce a toolchain identity")
+
+    monkeypatch.setattr(_toolchain, "_discover", discover)
+    root = tmp_path / "cache"
+    config = RunConfig(cache_config=CacheConfig(enabled=True, root=root))
+    before = cache_stats()
+    with passes.PassContext([]):
+        for contents in (b"!<arch>\nold", b"!<arch>\nnew"):
+            (tmp_path / "libdependency.a").write_bytes(contents)
+            monkeypatch.setattr(_toolchain, "_identities", {})
+            monkeypatch.setattr(_toolchain, "_identity_cache", _toolchain.InstallationIdentityCache())
+            private = kernel.compile(config=config)
+            assert private.program is not None and private._artifact_runtime is None
+            assert "requires search-path resolution" in cache_stats().last_bypass_reason
+    assert len(builds) == 2 and not root.exists()
+    assert cache_stats().bypasses - before.bypasses == 2
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

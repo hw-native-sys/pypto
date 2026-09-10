@@ -23,7 +23,13 @@ from pypto._fslock import file_lock
 from pypto._identity import ToolchainIdentity, digest_record
 from pypto.jit import artifact_cache
 from pypto.jit._artifact_manifest import MANIFEST_NAME, ArtifactKey, ArtifactSpec, ArtifactState, BuildKind
-from pypto.jit.artifact_cache import ArtifactLookup, ArtifactStore, BuildDisposition, LookupStatus
+from pypto.jit.artifact_cache import (
+    ArtifactLookup,
+    ArtifactStore,
+    BuildDisposition,
+    BuildFailure,
+    LookupStatus,
+)
 
 
 def _key(source="source"):
@@ -573,6 +579,16 @@ def test_private_builds_coalesce_across_store_instances(store, monkeypatch, fail
     assert len(calls) == 1
     assert all(result is results[0] for result in results)
     assert results[0].disposition is BuildDisposition.PRIVATE
+    assert (
+        results[0].failure
+        is {
+            "invalid": BuildFailure.INVALID,
+            "storage_error": BuildFailure.STORAGE,
+            "readonly": None,
+            "lock": BuildFailure.LOCK,
+            "publication": BuildFailure.PUBLICATION,
+        }[failure]
+    )
     assert results[0].value is not None
     assert results[0].value.read_bytes() == b"generated code"
     assert not artifact_cache._build_flights.pending

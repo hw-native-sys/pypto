@@ -231,3 +231,6 @@ include 由单独标识的 SDK/工具链提供。空 include 目录可以在发�
 缓存旁路信号。当前显式适配器不会在拒绝打包后自动调用普通编译器。
 受支持产物一旦 ready，即可迁移并
 在原始 extern 源码目录不存在时加载。
+
+`ArtifactBuild.failure` 提供独立于诊断文字的结构化失败状态：`BuildFailure.INVALID`、
+`STORAGE`、`LOCK` 或 `PUBLICATION`。只读未命中时该字段为 `None`。

@@ -854,6 +854,8 @@ class TestOptionObjects:
         "execution_mode": "platform",
     }
     _HARNESS_ONLY = {"rtol", "atol", "golden_data_dir", "save_kernels", "codegen_only"}
+    # Consumed by JIT before choosing a compiled object, not by compiler or launcher.
+    _JIT_POLICY_ONLY = {"cache_config"}
 
     def test_every_run_config_field_is_claimed_by_exactly_one_concern(self):
         """The split must stay total: a new field lands in a view, or in the harness set.
@@ -873,7 +875,7 @@ class TestOptionObjects:
             if renamed in compile_fields or name in dispatch_fields:
                 claimed.add(name)
 
-        assert run_config_fields - claimed == self._HARNESS_ONLY
+        assert run_config_fields - claimed == self._HARNESS_ONLY | self._JIT_POLICY_ONLY
 
     def test_compile_kwargs_is_the_compile_options_view(self):
         """``compile_kwargs()`` must be exactly what the typed object produces."""

@@ -174,11 +174,60 @@ def _gcc_link_inputs(executable: Path) -> set[Path]:
     return _linker_script_inputs(paths, sysroot)
 
 
+def _linker_script_names(text: str, script: Path) -> list[str]:
+    """Read the supported implicit-script grammar, rejecting untracked inputs.
+
+    Only absolute INPUT/GROUP dependencies (including AS_NEEDED) and format
+    declarations are supported. Relative names, -l, SEARCH_DIR, INCLUDE, and
+    other commands need the linker's complete search state, so fail closed.
+    """
+    tokens = re.findall(r'/\*.*?\*/|\#[^\n]*|"[^"\\]*"|[(),;]|[^\s(),;"]+|\S', text, re.DOTALL)
+    if any(token.startswith("/*") and not token.endswith("*/") for token in tokens):
+        raise ValueError(f"Unterminated linker script comment: {script}")
+    tokens = [token for token in tokens if not token.startswith(("/*", "#"))]
+    names: list[str] = []
+    position = 0
+
+    def arguments(dependencies: bool) -> None:
+        nonlocal position
+        if position >= len(tokens) or tokens[position] != "(":
+            raise ValueError(f"Unsupported linker script syntax: {script}")
+        position += 1
+        while position < len(tokens) and tokens[position] != ")":
+            token = tokens[position]
+            position += 1
+            if token == ",":
+                continue
+            if dependencies and token == "AS_NEEDED":
+                arguments(True)
+                continue
+            name = token.removeprefix('"').removesuffix('"')
+            if token in ("(", ";", '"') or any(char in name for char in ('"', "\\", "#", "*")):
+                raise ValueError(f"Unsupported linker script token {token!r}: {script}")
+            if dependencies:
+                if not Path(name).is_absolute():
+                    raise ValueError(
+                        f"Linker script input requires search-path resolution: {token!r} in {script}"
+                    )
+                names.append(name)
+        if position >= len(tokens):
+            raise ValueError(f"Unterminated linker script command: {script}")
+        position += 1
+
+    while position < len(tokens):
+        command = tokens[position]
+        position += 1
+        if command == ";":
+            continue
+        if command not in ("INPUT", "GROUP", "OUTPUT_FORMAT", "OUTPUT_ARCH"):
+            raise ValueError(f"Unsupported linker script command {command!r}: {script}")
+        arguments(command in ("INPUT", "GROUP"))
+    return names
+
+
 def _linker_script_inputs(paths: set[Path], sysroot: Path | None) -> set[Path]:
-    """Expand linker scripts with the selected compiler's sysroot semantics."""
+    """Expand supported scripts; never accept dependencies we cannot resolve."""
     paths = set(paths)
-    # Linker scripts can name absolute inputs outside the driver's search
-    # directories. Follow those references instead of hashing only the script.
     pending = [p for p in paths if p.is_file()]
     seen = set(pending)
     while pending:
@@ -192,15 +241,15 @@ def _linker_script_inputs(paths: set[Path], sysroot: Path | None) -> set[Path]:
             text = content.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ValueError(f"Unsupported linker input format: {script}") from exc
-        text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
-        text = re.sub(r"#[^\n]*", "", text)
-        for name in re.findall(r"(?<![\w.:/])(/[^\s()\";]+)", text):
+        for name in _linker_script_names(text, script):
             dependency = Path(name)
             if sysroot is not None and sysroot in script.resolve().parents:
                 dependency = sysroot / name.lstrip("/")
             dependency = dependency.resolve(strict=True)
+            if not dependency.is_file():
+                raise ValueError(f"Expected a linker input file: {dependency} in {script}")
             paths.add(dependency)
-            if dependency.is_file() and dependency not in seen:
+            if dependency not in seen:
                 seen.add(dependency)
                 pending.append(dependency)
     return paths
@@ -544,6 +593,8 @@ def capture_toolchain(platform: str, runtime_name: str) -> ToolchainIdentity:
                 if identity.usable:
                     _identities[selected] = identity
             return identity
-    except (OSError, ValueError, RuntimeError, ImportError, subprocess.SubprocessError) as exc:
+    except Exception as exc:
+        # Discovery is optional cache evidence, including adapter/schema drift.
+        # Actual compilation runs outside this boundary and still propagates errors.
         missing = ComponentInputs(unavailable_reason=str(exc))
         return _identity_cache.capture(ToolchainInputs(missing, missing, missing, missing, missing))

@@ -93,9 +93,11 @@ def test_disabled_policy_does_not_probe_filesystem(monkeypatch):
     assert not capture_cache_config(pypto.CacheConfig(root=Path("unused"))).enabled
 
 
-def test_run_options_preserve_cache_policy():
-    policy = pypto.CacheConfig(enabled=True)
-    assert RunConfig(cache_config=policy).run_options().cache_config is policy
+def test_cache_policy_does_not_change_compiler_or_launcher_options():
+    ordinary = RunConfig()
+    cached = RunConfig(cache_config=pypto.CacheConfig(enabled=True))
+    assert cached.compile_options() == ordinary.compile_options()
+    assert cached.run_options() == ordinary.run_options()
 
 
 if __name__ == "__main__":

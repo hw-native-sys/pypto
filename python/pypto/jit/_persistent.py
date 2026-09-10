@@ -12,23 +12,25 @@
 import logging
 import os
 import struct
+import tempfile
 import uuid
 from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import fields, is_dataclass
 from enum import Enum
-from functools import lru_cache
+from functools import cache, lru_cache
 from pathlib import Path
 from time import perf_counter_ns
 from typing import Any
 
-from pypto._cache_config import CacheConfig, record_stats, time_stage
+from pypto._cache_config import CacheConfig, record_bypass, record_stats, time_stage
 from pypto._identity import digest_record, fingerprint_extra_sources
 from pypto.pypto_core import DataType
 
 from ._artifact_manifest import ArtifactKey, ArtifactSpec, ArtifactState, BuildKind
 from ._toolchain import capture_toolchain
-from .artifact_cache import ArtifactLookup, ArtifactStore, LookupStatus
+from .artifact_cache import ArtifactLookup, ArtifactStore, BuildFailure, LookupStatus
+from .cache import CacheKey
 
 logger = logging.getLogger(__name__)
 _count_initial_lookup: ContextVar[bool] = ContextVar("jit_count_initial_lookup", default=False)
@@ -60,7 +62,7 @@ def _record(value: Any) -> Any:
         return (type(value).__module__, type(value).__qualname__, value.name)
     if is_dataclass(value) and not isinstance(value, type):
         return (type(value).__qualname__, {f.name: _record(getattr(value, f.name)) for f in fields(value)})
-    if type(value) in (list, tuple):
+    if type(value) in (list, tuple, CacheKey):
         return tuple(_record(item) for item in value)
     # nanobind enum types do not derive from Python's enum.Enum.
     if type(value).__module__.startswith("pypto.pypto_core") and isinstance(
@@ -76,10 +78,10 @@ def _specialization_digest(key: Any, scalar_tags: tuple[Any, ...]) -> str:
     return digest_record(_record(key))
 
 
-def _typed_specialization(key: Any) -> str:
+def _typed_specialization(key: CacheKey) -> str:
     tags = tuple(
         (s.name, type(s.value).__name__, struct.pack(">d", s.value) if type(s.value) is float else s.value)
-        for s in key[4]
+        for s in key.scalar_infos
     )
     return _specialization_digest(key, tags)
 
@@ -114,13 +116,7 @@ class JITArtifactStore(ArtifactStore):
         start = perf_counter_ns()
         try:
             result = super().get_or_build(key, spec, measured)
-            if (
-                binary
-                and result.reason
-                and result.reason.startswith(
-                    ("Artifact publication unavailable", "Artifact lock unavailable")
-                )
-            ):
+            if binary and result.failure in (BuildFailure.LOCK, BuildFailure.PUBLICATION):
                 record_stats(storage_errors=1)
             return result
         finally:
@@ -136,8 +132,22 @@ def _event(status: LookupStatus) -> None:
 
 
 def _bypass(reason: str) -> None:
-    record_stats(bypasses=1)
+    record_bypass(reason)
     logger.info(f"Persistent JIT cache bypass: {reason}")
+
+
+@cache
+def _fallback_private_root(cache_root: Path, process_id: int) -> Path:
+    """Allocate a retained, unpredictable 0700 parent without TMPDIR probes.
+
+    Include the PID in memoization so forked children allocate their own parent.
+    The build and runtime objects own these paths; there is no online cleanup.
+    """
+    for candidate in (Path("/tmp"), Path("/var/tmp")):
+        parent = candidate.resolve()
+        if parent != cache_root and cache_root not in parent.parents:
+            return Path(tempfile.mkdtemp(prefix=f"pypto-jit-{os.getuid()}-", dir=parent))
+    raise OSError("No private temporary directory outside the artifact cache root")
 
 
 def resolve_persistent(
@@ -167,7 +177,16 @@ def resolve_persistent(
     with time_stage("lookup_ns"):
         kind = BuildKind.DISTRIBUTED if distributed else BuildKind.SINGLE_CHIP
         source_before = source()
-        specialization = _typed_specialization(object_key)
+        try:
+            specialization = _typed_specialization(object_key)
+        except Exception as exc:
+            identity_failure = f"Specialization identity unavailable: {exc}"
+        else:
+            identity_failure = None
+    if identity_failure is not None:
+        _bypass(identity_failure)
+        return build()
+    with time_stage("lookup_ns"):
         semantic = _semantic_environment()
         compatible = (
             identity,
@@ -189,11 +208,12 @@ def resolve_persistent(
             digest_record((specialization, kind.value, semantic)),
         )
         assert config.root is not None
-        # Explicit private root avoids tempfile's write probes under a readonly
-        # TMPDIR. It is never created on a ready hit.
+        # Avoid tempfile's write probes under a readonly TMPDIR. The usual
+        # build_output parent is created lazily; the exceptional temporary
+        # parent is allocated securely before any runtime output can use it.
         private_root = Path.cwd() / "build_output"
         if private_root == config.root or config.root in private_root.parents:
-            private_root = Path("/tmp") / "pypto-jit-private"
+            private_root = _fallback_private_root(config.root, os.getpid())
         store = JITArtifactStore(config.root, readonly=config.readonly, private_root=private_root)
         spec = ArtifactSpec(
             ArtifactState.GENERATED,
@@ -236,7 +256,9 @@ def resolve_persistent(
         return exc.compiled
     with time_stage("lookup_ns"):
         if result.handle is None:
-            if result.reason and not config.readonly and initial.status is LookupStatus.MISS:
+            if result.failure in (BuildFailure.LOCK, BuildFailure.PUBLICATION) or (
+                result.failure is BuildFailure.STORAGE and initial.status is not LookupStatus.STORAGE_ERROR
+            ):
                 record_stats(storage_errors=1)
                 logger.info(f"Persistent JIT publication unavailable: {result.reason}")
             compiled = result.value
