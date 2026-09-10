@@ -2044,6 +2044,34 @@ jobs:
             --timeout 2400 --max-time 3600 \
             --run "source $GITHUB_WORKSPACE/serving-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-serving && TASK_DEVICE=\$TASK_DEVICE PYTHONPATH=$GITHUB_WORKSPACE/pypto-serving PYPTO_DSV4_DSPARK_MODEL_DIR=$PYPTO_DSV4_DSPARK_MODEL_DIR PYPTO_RUNTIME_LOG=$PYPTO_RUNTIME_LOG python -m pytest tests/test_deepseek_dspark_accuracy.py -q -s"
 
+      - name: Upload the .pto serving compiled
+        # TEMP DIAGNOSTIC (throwaway branch, do not merge). pypto emits the .pto
+        # and ptoas turns it into device code, so two runs of the same pypto emit
+        # byte-identical .pto and the whole v0.60/v0.61 difference lives inside
+        # ptoas. Getting these files off the runner makes that A/B reproducible
+        # on any box with both assemblers -- no card, no model weights.
+        if: always()
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -uo pipefail
+          out=pto-dump
+          mkdir -p "$out"
+          found=$(find pypto-serving/build_output -name '*.pto' 2>/dev/null | wc -l)
+          echo "collected $found .pto file(s)"
+          if [ "$found" -gt 0 ]; then
+            find pypto-serving/build_output -name '*.pto' \
+              -exec cp --parents {} "$out"/ \;
+          fi
+
+      - name: Publish the .pto dump
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: serving-pto-dump
+          path: pto-dump
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Kill orphaned task-submit tasks
         if: always()
         uses: ./.github/actions/kill-orphaned-tasks
