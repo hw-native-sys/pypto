@@ -20,6 +20,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/buffer_elementwise_recipes.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -378,11 +379,17 @@ class TileToBufferMutator : public IRMutator {
                        {Handle(call->args_[0]), VisitExpr(call->args_[1]), Valid(call->args_[0]), output},
                        call->span_);
     }
-    if (IsOp(call, "tile.add") || IsOp(call, "tile.mul")) {
-      INTERNAL_CHECK_SPAN(result && call->args_.size() == 2, call->span_)
-          << "Internal error: binary Tile operation requires two operands and a result";
-      return Operation(IsOp(call, "tile.add") ? "buffer.add" : "buffer.mul",
-                       {Handle(call->args_[0]), Handle(call->args_[1]), Handle(result)}, call->span_);
+    if (const auto* recipe = As<GlobalVar>(call->op_)
+                                 ? nullptr
+                                 : backend::FindLogicalBufferElementwiseRecipe(call->op_->name_)) {
+      INTERNAL_CHECK_SPAN(result && call->args_.size() == recipe->input_count, call->span_)
+          << "Internal error: malformed Tile elementwise recipe operands or result";
+      std::vector<ExprPtr> args;
+      for (const auto& input : call->args_) args.push_back(Handle(input));
+      args.push_back(Handle(result));
+      auto lowered =
+          OpRegistry::GetInstance().CreateInternal(recipe->buffer_op, args, call->kwargs_, call->span_);
+      return std::make_shared<EvalStmt>(lowered, call->span_);
     }
     if (IsOp(call, "tile.move")) {
       INTERNAL_CHECK_SPAN(result && !call->args_.empty(), call->span_)

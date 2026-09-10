@@ -11,14 +11,19 @@
 
 #include <any>
 #include <cstdint>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/buffer_elementwise_recipes.h"
+#include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
+#include "pypto/ir/arith/const_fold.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -113,6 +118,11 @@ class BufferIRVisitor : public IRVisitor {
     statement_assigns_result_ = true;
     IRVisitor::VisitStmt_(op);
     statement_call_ = nullptr;
+    if (auto call = As<Call>(op->value_); IsOp(call, "buffer.alloc") && valid_calls_.count(call.get())) {
+      allocations_[op->var_.get()] = Allocation{
+          call->args_.size() == 1, call->args_.size() == 2 ? ConstantAddress(call->args_[1]) : nullptr};
+    }
+    if (As<ScalarType>(op->var_->GetType())) constants_[op->var_.get()] = ConstantAddress(op->value_);
   }
 
   void VisitStmt_(const EvalStmtPtr& op) override {
@@ -148,6 +158,8 @@ class BufferIRVisitor : public IRVisitor {
         // Validate the original result and operands, not a newly deduced Call:
         // recreating it would hide malformed result types from the verifier.
         registry.ValidateBufferCall(op);
+        valid_calls_.insert(op.get());
+        if (const auto* recipe = backend::FindBufferElementwiseRecipe(name)) CheckRecipeWindows(op, *recipe);
       } catch (const pypto::Error& error) {
         Error("Invalid buffer call '" + name + "': " + error.what(), op->span_);
       }
@@ -226,6 +238,107 @@ class BufferIRVisitor : public IRVisitor {
   }
 
  private:
+  struct Allocation {
+    bool symbolic;
+    ConstIntPtr address;  // Null with !symbolic means placement is unproven.
+  };
+
+  // Follow scalar SSA definitions once, without expanding IterArg initializers.
+  // Existing checked arithmetic folds Add/Sub/Mul; a result outside the actual
+  // integer width is deliberately unproven rather than treated as an address.
+  ConstIntPtr ConstantAddress(const ExprPtr& expr) {
+    if (!expr) return nullptr;
+    if (auto cached = constants_.find(expr.get()); cached != constants_.end()) {
+      return cached->second;
+    }
+    constants_[expr.get()] = nullptr;
+    const auto scalar = As<ScalarType>(expr->GetType());
+    if (!scalar) return nullptr;
+    const auto dtype = scalar->dtype_;
+    if (dtype != DataType::INDEX && !dtype.IsInt()) return nullptr;
+    auto result = As<ConstInt>(expr);
+    if (auto binary = As<BinaryExpr>(expr); binary && (As<Add>(expr) || As<Sub>(expr) || As<Mul>(expr))) {
+      auto lhs = ConstantAddress(binary->left_);
+      auto rhs = ConstantAddress(binary->right_);
+      if (lhs && rhs) result = As<ConstInt>(arith::TryConstFoldBinary(expr->GetKind(), lhs, rhs));
+    } else if (auto cast = As<Cast>(expr)) {
+      result = ConstantAddress(cast->operand_);
+    }
+    if (result) {
+      const auto bits = dtype.GetBit();
+      if ((dtype.IsUnsignedInt() && result->value_ < 0) ||
+          (bits < 64 && (result->value_ < (dtype.IsUnsignedInt() ? 0 : -(int64_t{1} << (bits - 1))) ||
+                         result->value_ > ((int64_t{1} << (bits - (dtype.IsUnsignedInt() ? 0 : 1))) - 1)))) {
+        result = nullptr;
+      }
+    }
+    constants_[expr.get()] = result;
+    return result;
+  }
+
+  std::optional<uint64_t> DenseBytes(const BufferTypePtr& type) {
+    if (auto cached = byte_sizes_.find(type.get()); cached != byte_sizes_.end()) {
+      return cached->second;
+    }
+    byte_sizes_[type.get()] = std::nullopt;
+    if ((type->shape_.size() != 1 && type->shape_.size() != 2) || type->blayout_ != TileLayout::row_major ||
+        type->slayout_ != TileLayout::none_box || type->fractal_ != 512 || type->pad_ != PadValue::null ||
+        type->compact_ != CompactMode::null || type->dtype_.GetBit() % 8 != 0)
+      return std::nullopt;
+    uint64_t bytes = type->dtype_.GetBit() / 8;
+    for (const auto extent : type->shape_) {
+      if (static_cast<uint64_t>(extent) > std::numeric_limits<uint64_t>::max() / bytes) return std::nullopt;
+      bytes *= static_cast<uint64_t>(extent);
+    }
+    byte_sizes_[type.get()] = bytes;
+    return bytes;
+  }
+
+  void CheckRecipeWindows(const CallPtr& call, const backend::BufferElementwiseRecipe& recipe) {
+    const auto destination = AsVarLike(call->args_.back());
+    const auto dst = allocations_.find(destination.get());
+    const bool exact_allowed =
+        recipe.destination_alias == backend::BufferDestinationAliasPolicy::ExactOrDisjoint;
+    for (size_t i = 0; i < recipe.input_count; ++i) {
+      const auto source = AsVarLike(call->args_[i]);
+      if (source && source == destination && exact_allowed) continue;
+      const auto src = allocations_.find(source.get());
+      if (src == allocations_.end() || dst == allocations_.end()) {
+        Error(std::string(recipe.buffer_op) + " requires proven allocation provenance for distinct operands",
+              call->span_);
+        continue;
+      }
+      if (src->second.symbolic && dst->second.symbolic && source != destination) continue;
+      const auto& src_address = src->second.address;
+      const auto& dst_address = dst->second.address;
+      if (!src_address || !dst_address) {
+        Error(std::string(recipe.buffer_op) +
+                  " requires provably disjoint constant addresses or addressless allocations",
+              call->span_);
+        continue;
+      }
+      if (src_address->value_ < 0 || dst_address->value_ < 0) {
+        Error(std::string(recipe.buffer_op) + " requires nonnegative placed addresses", call->span_);
+        continue;
+      }
+      if (src_address->value_ == dst_address->value_ && exact_allowed) continue;
+      const auto bytes = DenseBytes(As<BufferType>(destination->GetType()));
+      if (!bytes) {
+        Error(std::string(recipe.buffer_op) + " requires a supported dense byte-window contract",
+              call->span_);
+        continue;
+      }
+      const auto source_end = static_cast<__int128>(src_address->value_) + *bytes;
+      const auto destination_end = static_cast<__int128>(dst_address->value_) + *bytes;
+      if (source_end > dst_address->value_ && destination_end > src_address->value_) {
+        Error(std::string(recipe.buffer_op) +
+                  (exact_allowed ? " rejects partially overlapping placed source and destination ranges"
+                                 : " requires disjoint placed source and destination ranges"),
+              call->span_);
+      }
+    }
+  }
+
   enum TypeFlags : uint8_t { kNone = 0, kTile = 1, kRawStorage = 2, kBuffer = 4 };
 
   template <typename T>
@@ -334,6 +447,10 @@ class BufferIRVisitor : public IRVisitor {
   std::unordered_set<const Type*> checked_metadata_types_;
   std::unordered_set<const MemRef*> checked_gm_memrefs_;
   std::unordered_set<const Var*> buffer_parameters_;
+  std::unordered_map<const Var*, Allocation> allocations_;
+  std::unordered_map<const Expr*, ConstIntPtr> constants_;
+  std::unordered_map<const BufferType*, std::optional<uint64_t>> byte_sizes_;
+  std::unordered_set<const Call*> valid_calls_;
   const Call* statement_call_ = nullptr;
   bool statement_assigns_result_ = false;
   std::string attribute_context_;

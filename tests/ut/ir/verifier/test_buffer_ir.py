@@ -491,5 +491,74 @@ def test_property_is_explicitly_selected():
     assert "BufferIR" in str(passes.IRProperty.BufferIR)
 
 
+def _placed_recipe_program(suffix, source_address, destination_address, prefix=(), params=()):
+    source, destination = _var("source"), _var("destination")
+    statements = list(prefix)
+    for value, address in [(source, source_address), (destination, destination_address)]:
+        args: list[ir.Expr] = [ir.MakeTuple([], SPAN)]
+        if address is not None:
+            args.append(_int(address) if isinstance(address, int) else address)
+        statements.append(ir.AssignStmt(value, _call("buffer.alloc", args, value.type), SPAN))
+    inputs = [source, source] if suffix == "add" else [source]
+    statements.append(ir.EvalStmt(_call(f"buffer.{suffix}", [*inputs, destination]), SPAN))
+    return _program(ir.SeqStmts(statements, SPAN), params=params)
+
+
+@pytest.mark.parametrize("suffix", ["add", "exp", "recip"])
+@pytest.mark.parametrize("offset", [32, 1024, 2016])
+def test_elementwise_recipe_partial_overlap_is_rejected_by_buffer_verification(suffix, offset):
+    program = _placed_recipe_program(suffix, 0, offset)
+    _assert_error(program, "placed source and destination ranges")
+
+
+@pytest.mark.parametrize("suffix", ["add", "exp"])
+def test_elementwise_recipe_accepts_equal_complete_placed_windows(suffix):
+    assert _verify(_placed_recipe_program(suffix, 0, 0)) == []
+
+
+def test_reciprocal_rejects_equal_addresses_even_with_distinct_handles():
+    _assert_error(_placed_recipe_program("recip", 0, 0), "requires disjoint placed")
+
+
+@pytest.mark.parametrize("suffix", ["add", "exp", "recip"])
+@pytest.mark.parametrize("addresses", [(None, None), (0, 2048), (2048, 0)])
+def test_elementwise_recipe_accepts_proven_disjoint_allocations(suffix, addresses):
+    assert _verify(_placed_recipe_program(suffix, *addresses)) == []
+
+
+def test_constant_scalar_address_definition_is_proved_without_mutating_ir():
+    address = _var("address", ir.ScalarType(DataType.INT32))
+    expression = ir.Add(
+        ir.ConstInt(2048, DataType.INT32, SPAN), ir.ConstInt(4096, DataType.INT32, SPAN), DataType.INT32, SPAN
+    )
+    program = _placed_recipe_program("recip", address, 8192, [ir.AssignStmt(address, expression, SPAN)])
+    before = ir.serialize(program)
+    assert _verify(program) == []
+    assert ir.serialize(program) == before
+
+
+def test_overflowing_narrow_address_arithmetic_is_not_a_disjointness_proof():
+    address = _var("address", ir.ScalarType(DataType.INT32))
+    expression = ir.Add(
+        ir.ConstInt(2**31 - 1, DataType.INT32, SPAN),
+        ir.ConstInt(32, DataType.INT32, SPAN),
+        DataType.INT32,
+        SPAN,
+    )
+    program = _placed_recipe_program("recip", address, 8192, [ir.AssignStmt(address, expression, SPAN)])
+    _assert_error(program, "requires provably disjoint constant addresses")
+
+
+def test_unknown_address_and_distinct_borrowed_operands_need_a_future_provenance_contract():
+    address = _var("address", ir.ScalarType(DataType.INDEX))
+    _assert_error(
+        _placed_recipe_program("exp", address, 4096, params=[address]),
+        "requires provably disjoint constant addresses",
+    )
+    source, destination = _var("source"), _var("destination")
+    program = _program(ir.EvalStmt(_call("buffer.exp", [source, destination]), SPAN), [source, destination])
+    _assert_error(program, "requires proven allocation provenance")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

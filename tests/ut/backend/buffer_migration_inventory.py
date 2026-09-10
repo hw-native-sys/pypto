@@ -78,7 +78,7 @@ MIGRATION_FAMILIES = (
             "tile.part_max",
             "tile.part_min",
         ),
-        restricted=frozenset({"tile.add", "tile.mul"}),
+        restricted=frozenset({"tile.add", "tile.sub", "tile.mul", "tile.maximum", "tile.minimum"}),
     ),
     MigrationFamily(
         "G04: Scalar-vector operations",
@@ -109,6 +109,18 @@ MIGRATION_FAMILIES = (
             "tile.recip",
             "tile.div",
             "tile.rsqrt",
+        ),
+        restricted=frozenset(
+            {
+                "tile.abs",
+                "tile.exp",
+                "tile.sqrt",
+                "tile.neg",
+                "tile.relu",
+                "tile.log",
+                "tile.recip",
+                "tile.div",
+            }
         ),
     ),
     MigrationFamily(

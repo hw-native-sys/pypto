@@ -38,6 +38,10 @@ names = target.get_registered_op_names()
 该检查让清单遗漏触发测试失败；实际实现覆盖范围仍由生产转换规则（conversion recipes）
 及其转换、原生编译和数值测试确认。审核清单不参与降低过程，也不会启用默认切换。
 
+该检查还查询 `backend.get_buffer_elementwise_recipe_names()`，其来源是逻辑转换和原生发射
+实际使用的规则表。每条返回的规则必须对应有效的后端算子及 `RESTRICTED` 审核分类。
+这样既能保持成熟度声明同步，也无需重复生产指令映射，更不会宣称所有形式都已覆盖。
+
 ## 另请参阅
 
 - [Pass、PassContext、PassPipeline 与 PassManager](../passes/00-pass_manager.md) —— handler 的来源。

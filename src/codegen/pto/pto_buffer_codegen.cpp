@@ -20,6 +20,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/buffer_elementwise_recipes.h"
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
 #include "pypto/core/error.h"
@@ -328,8 +329,8 @@ class BufferEmissionPreflight : public ir::IRVisitor {
   }
 
   void VisitExpr_(const ir::CallPtr& call) override {
-    CHECK_SPAN(ir::IsOp(call, "buffer.alloc") || ir::IsOp(call, "buffer.copy") ||
-                   ir::IsOp(call, "buffer.mul") || ir::IsOp(call, "buffer.add") ||
+    const auto* recipe = backend::FindBufferElementwiseRecipe(call->op_->name_);
+    CHECK_SPAN(recipe || ir::IsOp(call, "buffer.alloc") || ir::IsOp(call, "buffer.copy") ||
                    ir::IsOp(call, "buffer.load") || ir::IsOp(call, "buffer.store") ||
                    ir::IsOp(call, "buffer.set_validshape"),
                call->span_)
@@ -560,16 +561,12 @@ bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& re
     Emit(load ? "pto.tload ins(" + tensor_operand + ") outs(" + buffer_operand + ")"
               : "pto.tstore ins(" + buffer_operand + ") outs(" + tensor_operand + ")");
   } else {
-    INTERNAL_CHECK_SPAN(
-        ir::IsOp(call, "buffer.copy") || ir::IsOp(call, "buffer.mul") || ir::IsOp(call, "buffer.add"),
-        call->span_)
+    const auto* recipe = backend::FindBufferElementwiseRecipe(call->op_->name_);
+    INTERNAL_CHECK_SPAN(recipe || ir::IsOp(call, "buffer.copy"), call->span_)
         << "Internal error: missing preflighted buffer emitter for " << call->op_->name_;
-    const size_t input_count = call->args_.size() - 1;
+    const size_t input_count = recipe ? recipe->input_count : 1;
     std::ostringstream line;
-    std::string instruction = "pto.tmul";
-    if (ir::IsOp(call, "buffer.copy")) instruction = "pto.tmov";
-    if (ir::IsOp(call, "buffer.add")) instruction = "pto.tadd";
-    line << instruction << " ins(";
+    line << (recipe ? recipe->native_op : "pto.tmov") << " ins(";
     for (size_t i = 0; i < input_count; ++i) {
       if (i != 0) line << ", ";
       line << GetExprAsCode(call->args_[i]);
@@ -581,6 +578,11 @@ bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& re
     }
     line << ") outs(" << GetExprAsCode(call->args_.back()) << " : "
          << GetExprTypeAnnotation(call->args_.back()) << ")";
+    if (recipe && recipe->precision != backend::BufferPrecisionKind::None &&
+        call->GetKwarg<bool>("high_precision", false)) {
+      line << " {precisionType = #pto<" << backend::BufferPrecisionAttributeName(recipe->precision)
+           << " high_precision>}";
+    }
     Emit(line.str());
   }
   fs_.current_expr_value.clear();

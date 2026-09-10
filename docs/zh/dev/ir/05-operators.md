@@ -26,6 +26,55 @@
 这些算子分别声明数据/元数据效应。形状、dtype、valid 状态和别名要求见
 [Buffer 契约](02-types.md#buffer-算子契约)。
 
+### 类型化 Buffer 逐元素配方
+
+`backend/common/buffer_elementwise_recipes` 是逻辑到 Buffer 转换、显式操作数约束及
+原生助记符共用的生产表。`LowerTileToBuffer` 选择类型化配方 (typed recipe) 并创建
+实际的 Buffer 调用。直接 PTO 发射读取同一张表，不重建 Tile IR、不调用旧回调，
+也不选择存储位置。此表独立于旧后端回调注册。
+
+| 逻辑算子 | Buffer 算子 | 原生指令 | 源 buffer 数量 |
+| -------- | ----------- | -------- | -------------- |
+| `tile.add` | `buffer.add` | `pto.tadd` | 2 |
+| `tile.mul` | `buffer.mul` | `pto.tmul` | 2 |
+| `tile.sub` | `buffer.sub` | `pto.tsub` | 2 |
+| `tile.div` | `buffer.div` | `pto.tdiv` | 2 |
+| `tile.maximum` | `buffer.maximum` | `pto.tmax` | 2 |
+| `tile.minimum` | `buffer.minimum` | `pto.tmin` | 2 |
+| `tile.abs` | `buffer.abs` | `pto.tabs` | 1 |
+| `tile.exp` | `buffer.exp` | `pto.texp` | 1 |
+| `tile.sqrt` | `buffer.sqrt` | `pto.tsqrt` | 1 |
+| `tile.neg` | `buffer.neg` | `pto.tneg` | 1 |
+| `tile.relu` | `buffer.relu` | `pto.trelu` | 1 |
+| `tile.log` | `buffer.log` | `pto.tlog` | 1 |
+| `tile.recip` | `buffer.recip` | `pto.trecip` | 1 |
+
+每个调用以最终操作数表示目标，并返回 `Void`。源读取数据和元数据；目标写入
+有效数据区域并读取元数据。这不保证整个分配已初始化。所有操作数必须具有
+相同的物理描述符；广播和部分合并语义由独立配方处理。这些算子仅供编译器内部
+使用，不新增公开 DSL 函数。
+
+除 `add`、`mul` 外的十一项新增配方要求 FP32、1 或 2 维、静态 valid 范围、
+稠密行主序 Vec 存储、`none_box`、fractal 512，并且没有 padding 或 compact 模式。
+其 dtype 约束不会继承原生描述符格式化器的 FP16 支持。现有 `add`/`mul` 的
+描述符验证及 FP16/FP32 原生发射保持可用；自动转换目前使用静态二维 FP32
+描述符。Ascend910B 与 Ascend950 都使用这些配方。
+
+`div`、`log`、`recip` 保留可选布尔 kwarg `high_precision`。配方选择相应的原生
+精度属性，false 使用原生默认值，不隐式引入 workspace、复制或分配。`recip`
+要求源与目标存储不重叠，构造时拒绝两个位置使用同一句柄。`BufferIR` 验证对
+表中每个配方检查不同句柄的已分配范围：拒绝部分重叠，仅支持精确原地执行的
+配方可接受完全相同的窗口。独立的无地址分配不重叠；未知存储来源或位置需要
+后续配方。常量标量地址定义通过记忆化及整数位宽检查求值。直接发射消费此已
+验证约束，不执行分配或别名分析。
+
+标量操作数、整数/位运算、`rsqrt` 及其可选 workspace、部分合并、广播、归约、
+随机生成、其他布局和动态 valid 状态仍属于独立迁移工作。公开 API
+`backend.get_buffer_elementwise_recipe_names()` 从实际生产表返回排序的独立快照。
+列出的名称仅代表上述受限配方，不代表逻辑算子的全部形式。测试覆盖公开流水线
+转换、二进制往返、BufferIR 验证、显式目标身份和原生编译；这些验证不替代设备
+数值验收。
+
 ## 类型系统
 
 ```cpp

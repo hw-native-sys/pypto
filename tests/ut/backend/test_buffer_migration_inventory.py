@@ -16,7 +16,12 @@ from dataclasses import replace
 import pytest
 from pypto import backend, ir
 
-from .buffer_migration_inventory import HISTORICAL_CALLBACKS, MIGRATION_FAMILIES, MigrationFamily
+from .buffer_migration_inventory import (
+    HISTORICAL_CALLBACKS,
+    MIGRATION_FAMILIES,
+    MigrationFamily,
+    MigrationStatus,
+)
 
 _TARGETS = tuple(backend.BackendType.__members__.values())
 
@@ -74,6 +79,50 @@ def registry_snapshots():
     return {
         target: set(backend.get_backend_instance(target).get_registered_op_names()) for target in _TARGETS
     }
+
+
+def _elementwise_recipe_issues(
+    recipes: list[str],
+    snapshots: dict[backend.BackendType, set[str]],
+    families: tuple[MigrationFamily, ...] = MIGRATION_FAMILIES,
+) -> list[str]:
+    classifications = {name: family for family in families for name in family.operations}
+    live_backend = {name for names in snapshots.values() for name in names if ir.is_op_registered(name)}
+    issues = []
+    for name in recipes:
+        if name not in live_backend:
+            issues.append(f"Production recipe has no live backend operation: {name}")
+        if name not in classifications:
+            issues.append(f"Production recipe has no migration classification: {name}")
+        elif classifications[name].declared_status(name) != MigrationStatus.RESTRICTED:
+            issues.append(f"Production recipe is still declared planned: {name}")
+    return issues
+
+
+def test_actual_elementwise_recipes_have_live_restricted_classifications(registry_snapshots):
+    # This list comes from the table used by conversion and native emission.
+    # Do not duplicate its logical/native mapping in the audit ledger.
+    recipes = backend.get_buffer_elementwise_recipe_names()
+    assert recipes
+    issues = _elementwise_recipe_issues(recipes, registry_snapshots)
+    assert not issues, "\n".join(issues)
+
+
+def test_production_recipe_without_a_live_classification_is_detected(registry_snapshots):
+    recipes = [*backend.get_buffer_elementwise_recipe_names(), "tile.new_conversion_recipe"]
+    issues = _elementwise_recipe_issues(recipes, registry_snapshots)
+    assert "Production recipe has no live backend operation: tile.new_conversion_recipe" in issues
+    assert "Production recipe has no migration classification: tile.new_conversion_recipe" in issues
+
+
+def test_stale_planned_status_of_an_actual_recipe_is_detected(registry_snapshots):
+    recipes = backend.get_buffer_elementwise_recipe_names()
+    operation = recipes[0]
+    changed = tuple(
+        replace(family, restricted=family.restricted - {operation}) for family in MIGRATION_FAMILIES
+    )
+    issues = _elementwise_recipe_issues(recipes, registry_snapshots, changed)
+    assert issues == [f"Production recipe is still declared planned: {operation}"]
 
 
 def test_every_backend_entry_has_one_current_migration_classification(registry_snapshots):
